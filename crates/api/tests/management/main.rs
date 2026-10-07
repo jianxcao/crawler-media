@@ -87,6 +87,7 @@ mod site_credentials_review;
 mod sites;
 mod strict_path_contracts;
 mod strm;
+mod strm_directory_deletion;
 mod strm_grace;
 mod subscribe_atomicity;
 mod subscribe_schedule_sync;

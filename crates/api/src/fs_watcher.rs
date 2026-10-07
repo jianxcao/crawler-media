@@ -136,11 +136,28 @@ pub fn spawn_fs_watcher(state: ApiState) {
                 let now = crate::job_loop::unix_now();
                 let expired = sweep_tracker.sweep_expired(now, 45);
                 if !expired.is_empty() {
+                    let mut affected_media_ids = HashSet::new();
                     let store = sweep_state.store.lock();
                     for path in expired {
                         let path_str = path.display().to_string();
+                        if let Ok(Some(row)) = store.ledger_by_path(&path_str) {
+                            affected_media_ids.insert(row.media_id);
+                        }
                         tracing::info!(path = %path_str, "STRM 宽限期已过，永久删除台账记录");
                         let _ = store.delete_ledger_path(&path_str);
+                    }
+                    for media_id in affected_media_ids {
+                        let remaining = store
+                            .ledger_for_media(media_id)
+                            .map(|rows| rows.len())
+                            .unwrap_or(0);
+                        if remaining == 0 {
+                            let _ = store.delete_imported_pending_for_media(media_id);
+                            let _ = store.delete_media_markers_for_media(media_id);
+                            let _ = store.delete_playback_for_media(media_id);
+                            let _ = store.delete_collection_items_for_media(&media_id.to_string());
+                            let _ = store.delete_media(media_id);
+                        }
                     }
                 }
             }
@@ -260,7 +277,7 @@ pub(crate) fn entry_scan_target_dir(root: &Path, file_path: &Path) -> PathBuf {
     root.to_path_buf()
 }
 
-fn handle_fs_events(
+pub fn handle_fs_events(
     state: &ApiState,
     tracker: &Arc<StrmGraceTracker>,
     events: Vec<DebouncedEvent>,
@@ -292,8 +309,44 @@ fn handle_fs_events(
         }
 
         if !path.exists() {
-            // 文件已被移除
-            if is_strm {
+            // 文件或目录已被移除：
+            // 如果 path 是单个 strm，通知 tracker 进行防抖；
+            // 与此同时，检查 ledger 中是否存在该 path 或以此 path 为目录前缀的记录（整目录删除）。
+            let store = state.store.lock();
+            if let Ok(ledger_rows) = store.list_ledger() {
+                let path_str = path.display().to_string();
+                let mut matched_rows = Vec::new();
+                for r in ledger_rows {
+                    if r.path == path_str || Path::new(&r.path).starts_with(&path) {
+                        matched_rows.push(r);
+                    }
+                }
+                drop(store);
+
+                if !matched_rows.is_empty() {
+                    let mut affected_media_ids = HashSet::new();
+                    let store = state.store.lock();
+                    for r in matched_rows {
+                        affected_media_ids.insert(r.media_id);
+                        let _ = store.delete_ledger_path(&r.path);
+                    }
+                    for media_id in affected_media_ids {
+                        let remaining = store
+                            .ledger_for_media(media_id)
+                            .map(|rows| rows.len())
+                            .unwrap_or(0);
+                        if remaining == 0 {
+                            let _ = store.delete_imported_pending_for_media(media_id);
+                            let _ = store.delete_media_markers_for_media(media_id);
+                            let _ = store.delete_playback_for_media(media_id);
+                            let _ = store.delete_collection_items_for_media(&media_id.to_string());
+                            let _ = store.delete_media(media_id);
+                        }
+                    }
+                } else if is_strm {
+                    tracker.mark_deleted(path, None, now);
+                }
+            } else if is_strm {
                 tracker.mark_deleted(path, None, now);
             }
         } else {

@@ -1,0 +1,100 @@
+use api::fs_watcher::StrmGraceTracker;
+use notify_debouncer_mini::DebouncedEvent;
+use std::sync::Arc;
+
+struct EmptyFetcher;
+
+impl indexer::Fetcher for EmptyFetcher {
+    fn fetch(&self, _request: &indexer::FetchRequest) -> Result<String, indexer::IndexerError> {
+        Err(indexer::IndexerError::Fetch("unexpected request".into()))
+    }
+}
+
+#[tokio::test]
+async fn test_directory_deletion_removes_nested_strm_and_cleans_up_media() {
+    let temp = tempfile::tempdir().unwrap();
+    let library_root = temp.path().join("media/movie/china");
+    let movie_dir = library_root.join("“骗骗”喜欢你 (2024)");
+    std::fs::create_dir_all(&movie_dir).unwrap();
+
+    let strm_file = movie_dir.join("“骗骗”喜欢你 (2024) - 2160p.strm");
+    std::fs::write(&strm_file, "https://example.com/video.mkv").unwrap();
+
+    let store = api::Store::open(temp.path().join("data")).unwrap();
+    store
+        .set_library_root(domain::MediaKind::Movie, library_root.to_str().unwrap())
+        .unwrap();
+
+    let state = api::management::ApiState::new(
+        store,
+        "test-token".into(),
+        indexer::ProfileSet::load(None).unwrap(),
+        Arc::new(EmptyFetcher),
+        Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
+        temp.path().join("library"),
+    )
+    .unwrap();
+
+    // 1. 入账并关联媒体
+    let media = domain::Media {
+        id: domain::MediaId::new(),
+        kind: domain::MediaKind::Movie,
+        title: "“骗骗”喜欢你".into(),
+        year: Some(2024),
+        original_title: None,
+        tmdb_id: Some("12345".into()),
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    state.store().lock().insert_media(&media).unwrap();
+
+    let row = domain::LedgerRow {
+        id: domain::LedgerId::new(),
+        media_id: media.id,
+        path: strm_file.display().to_string(),
+        season: None,
+        episode: None,
+        resolution: Some("2160p".into()),
+        codec: None,
+        hdr: None,
+        quality_source: domain::QualitySource::Release,
+        confidence: domain::Confidence::High,
+        filter_score: None,
+    };
+    state.store().lock().insert_ledger(&row).unwrap();
+
+    // 校验入账成功
+    let rows = state.store().lock().list_ledger().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].path, strm_file.display().to_string());
+
+    // 2. 模拟用户直接删除了整部剧/电影目录（包含 strm）
+    std::fs::remove_dir_all(&movie_dir).unwrap();
+
+    // 3. 文件系统监控捕获到 movie_dir 的删除事件
+    let tracker = Arc::new(StrmGraceTracker::new());
+    let events = vec![DebouncedEvent {
+        path: movie_dir.clone(),
+        kind: notify_debouncer_mini::DebouncedEventKind::Any,
+    }];
+
+    // 调用事件处理
+    api::fs_watcher::handle_fs_events(&state, &tracker, events);
+
+    // 4. 验证 ledger 中的该文件记录已被自动清除
+    let remaining_rows = state.store().lock().list_ledger().unwrap();
+    assert!(
+        remaining_rows.is_empty(),
+        "整目录删除后，该目录下的 strm 台账记录应被自动清除，但实际仍存在: {:?}",
+        remaining_rows
+    );
+
+    // 5. 验证 media 记录以及关联的播放/标记也被妥善清理（没有剩余 ledger 的媒体）
+    let remaining_media = state.store().lock().get_media(media.id).unwrap();
+    assert!(
+        remaining_media.is_none(),
+        "台账全清后，无关联文件的孤立媒体记录也应被清理"
+    );
+}

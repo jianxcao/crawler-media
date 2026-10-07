@@ -210,4 +210,12 @@ impl Store {
             Ok(())
         }
     }
+
+    pub fn delete_media(&self, id: MediaId) -> Result<(), StoreError> {
+        self.app.execute(
+            "DELETE FROM media WHERE id = ?1",
+            params![id.to_string()],
+        )?;
+        Ok(())
+    }
 }
