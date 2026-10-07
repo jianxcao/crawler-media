@@ -11,8 +11,8 @@ pub type AudioFingerprint = Vec<u32>;
 
 pub const MIN_MATCH_DURATION_SECS: f32 = 15.0;
 pub const MAX_MATCH_DURATION_SECS: f32 = 240.0;
-const MAX_REMOTE_TRUNCATION_ATTEMPTS: u8 = 4;
-const REMOTE_TRUNCATION_RETRY_INITIAL_DELAY_MS: u64 = 500;
+const MAX_REMOTE_SAMPLE_ATTEMPTS: u8 = 4;
+const REMOTE_SAMPLE_RETRY_INITIAL_DELAY_MS: u64 = 500;
 
 /// Replaceable boundary for audio fingerprint extraction and matching.
 pub trait FingerprintEngine: Send + Sync {
@@ -88,27 +88,24 @@ pub fn extract_audio_fingerprint_at_with(
     let result = loop {
         let attempt_started = Instant::now();
         let result = engine.extract_at(path, start_secs, duration_secs);
-        let retryable_truncation = matches!(
-            &result,
-            Err(error) if error.contains("File ended prematurely")
-        );
-        if source != "remote" || !retryable_truncation || attempt >= MAX_REMOTE_TRUNCATION_ATTEMPTS
-        {
+        let retryable_read_error =
+            matches!(&result, Err(error) if is_retryable_remote_read_error(error));
+        if source != "remote" || !retryable_read_error || attempt >= MAX_REMOTE_SAMPLE_ATTEMPTS {
             break result;
         }
         if let Err(error) = &result {
             let retry_delay_ms =
-                REMOTE_TRUNCATION_RETRY_INITIAL_DELAY_MS * 2u64.pow(u32::from(attempt - 1));
+                REMOTE_SAMPLE_RETRY_INITIAL_DELAY_MS * 2u64.pow(u32::from(attempt - 1));
             tracing::warn!(
                 path = %path.display(),
                 source,
                 attempt,
                 next_attempt = attempt + 1,
-                max_attempts = MAX_REMOTE_TRUNCATION_ATTEMPTS,
+                max_attempts = MAX_REMOTE_SAMPLE_ATTEMPTS,
                 attempt_elapsed_ms = attempt_started.elapsed().as_millis(),
                 retry_delay_ms,
                 error = %error,
-                "【声纹】远端音频样本读取不完整，等待后重试"
+                "【声纹】远端音频样本读取异常，等待后重试"
             );
             std::thread::sleep(std::time::Duration::from_millis(retry_delay_ms));
         }
@@ -128,6 +125,10 @@ pub fn extract_audio_fingerprint_at_with(
         ),
     }
     result
+}
+
+fn is_retryable_remote_read_error(error: &str) -> bool {
+    error.contains("File ended prematurely") || error.contains("Read error")
 }
 
 pub fn find_common_segment(

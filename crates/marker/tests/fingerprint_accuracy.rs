@@ -160,11 +160,12 @@ fn remote_truncated_fingerprint_sample_is_retried_once() {
     assert_eq!(engine.attempts.load(Ordering::SeqCst), 2);
 }
 
-struct TruncatedRemoteStreamTwice {
+struct TransientRemoteStreamTwice {
     attempts: AtomicUsize,
+    error: &'static str,
 }
 
-impl FingerprintEngine for TruncatedRemoteStreamTwice {
+impl FingerprintEngine for TransientRemoteStreamTwice {
     fn extract_at(
         &self,
         _path: &Path,
@@ -172,7 +173,7 @@ impl FingerprintEngine for TruncatedRemoteStreamTwice {
         _duration_secs: u32,
     ) -> Result<AudioFingerprint, String> {
         if self.attempts.fetch_add(1, Ordering::SeqCst) < 2 {
-            Err("Empty fingerprint extracted: File ended prematurely".into())
+            Err(self.error.into())
         } else {
             Ok(vec![17, 19, 23])
         }
@@ -194,12 +195,30 @@ fn remote_truncated_fingerprint_retries_after_repeated_transient_failures() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("episode.strm");
     std::fs::write(&path, "https://media.example/episode.mkv\n").unwrap();
-    let engine = TruncatedRemoteStreamTwice {
+    let engine = TransientRemoteStreamTwice {
         attempts: AtomicUsize::new(0),
+        error: "Empty fingerprint extracted: File ended prematurely",
     };
 
     let fingerprint = extract_audio_fingerprint_at_with(&engine, &path, 2398, 180)
         .expect("retries should recover after repeated temporary truncation");
+
+    assert_eq!(fingerprint, vec![17, 19, 23]);
+    assert_eq!(engine.attempts.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn remote_read_errors_are_retried_after_transient_truncated_streams() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("episode.strm");
+    std::fs::write(&path, "https://media.example/episode.mkv\n").unwrap();
+    let engine = TransientRemoteStreamTwice {
+        attempts: AtomicUsize::new(0),
+        error: "Empty fingerprint extracted: Read error",
+    };
+
+    let fingerprint = extract_audio_fingerprint_at_with(&engine, &path, 2398, 180)
+        .expect("remote read errors should retry and recover");
 
     assert_eq!(fingerprint, vec![17, 19, 23]);
     assert_eq!(engine.attempts.load(Ordering::SeqCst), 3);
