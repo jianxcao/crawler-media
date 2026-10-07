@@ -212,7 +212,7 @@ export function MetadataSettingsSection() {
           </span>
           <div>
             <h2 className="text-title-sm font-semibold text-[var(--text)]">封面自动策略</h2>
-            <p className="mt-1 max-w-xl text-sub leading-6 text-[var(--text-muted)]">
+            <p className="mt-1 text-sub leading-6 text-[var(--text-muted)]">
               默认优先使用 TMDB 海报；若图片服务不可达或条目无元数据，系统从最新已入库的剧集/电影提取画面作为封面。
               在条目详情里可以手动选择或上传自定义海报，手动图片不会被自动刷新覆盖。
             </p>

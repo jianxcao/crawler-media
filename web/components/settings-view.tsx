@@ -131,14 +131,20 @@ export function SettingsPanel({ active }: SettingsPanelProps) {
     // 背景透明，让蒙版透上来。沉浸式深色底，不再有圆角/描边/透出雪原的大卡片。
     // 头部与内容同列（同一 max-w 容器内），避免「标题贴左上、内容居中」的割裂感。
     <div className="scroll-thin scroll-safe h-full overflow-y-auto">
-      {/* 分区按信息密度给宽度：资源站点一行要放名称 + 状态 + 刷流读数 +
-          操作，展开后还有成排统计，2xl 太挤（3xl）；下载器展开后是地址/目录长值 +
-          路径映射对照表，同给 3xl；其余表单类分区维持 2xl 的舒适阅读宽度 */}
+      {/* 分区按信息与操作密度自适应容器宽度：
+          - 极高密度分区（日志、站点、下载器、全链路体检概览）：在平板及桌面宽屏从 max-w-4xl / 5xl 扩展至 max-w-7xl (1280px)，彻底解决大屏小气、信息挤压问题；
+          - 表单与偏好类分区（外观、元数据、刮削设置、规则组、成员）：从 max-w-2xl 升级为 max-w-4xl / 2xl:max-w-5xl，宽屏下大方舒展，内部网格从 1 列变 2 列，滑块与字段不再拥挤；
+          - 窄屏/移动端 (max-md)：维持 px-4 pb-12 pt-6，不受任何大屏扩展影响，WAP 移动端体验保持原汁原味 */}
       <div
         className={`mx-auto w-full px-6 pb-20 pt-12 max-md:px-4 max-md:pb-12 max-md:pt-6 ${
-          section.id === "sites" || section.id === "downloaders" || section.id === "logs"
-            ? "max-w-4xl"
-            : "max-w-2xl"
+          section.id === "sites" ||
+          section.id === "downloaders" ||
+          section.id === "logs" ||
+          section.id === "overview"
+            ? "max-w-6xl xl:max-w-7xl"
+            : section.id === "scrape" || section.id === "subscription" || section.id === "metadata" || section.id === "members"
+            ? "max-w-4xl 2xl:max-w-5xl"
+            : "max-w-3xl 2xl:max-w-4xl"
         }`}
       >
         {/* Netflix 移动端：分区名已由页顶的 NetflixSettingsNav（返回键 + 分区
@@ -212,7 +218,7 @@ function AppearanceSection() {
         <p className="mb-3 text-sub leading-6 text-[var(--text-muted)]">
           主题会保存到你的账号，并在此设备和其他设备间同步。
         </p>
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {THEMES.map((theme) => {
             const selected = prefs.theme === theme.id;
             return (
