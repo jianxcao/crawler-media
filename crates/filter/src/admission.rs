@@ -86,30 +86,63 @@ fn codec_matches(got: &str, want: &str) -> bool {
 }
 
 fn score_one(torrent: &Torrent, parsed: &Release, filter: &Filter) -> i32 {
-    // A blacklist-only group admits every surviving candidate. Wash policy
-    // atoms describe comparisons, not positive admission requirements.
-    if !filter.atoms.iter().any(|atom| {
+    // 检查是否存在正向 site 规则（站点优先级配置）
+    let has_positive_site_rules = filter
+        .atoms
+        .iter()
+        .any(|atom| !atom.exclude && matches!(atom.rule, AtomRule::Site(_)));
+
+    // 检查是否存在其他正向规则（画质、来源、编码、体积、做种数等）
+    let has_other_positive_rules = filter.atoms.iter().any(|atom| {
         !atom.exclude
             && !matches!(
                 atom.rule,
-                AtomRule::WashTarget(_) | AtomRule::UpgradeLadder(_)
+                AtomRule::Site(_) | AtomRule::WashTarget(_) | AtomRule::UpgradeLadder(_)
             )
-    }) {
+    });
+
+    // 1. 如果既没有正向画质规则，也没有正向 site 规则（例如仅黑名单），保底准入 100 分
+    if !has_positive_site_rules && !has_other_positive_rules {
         return 100;
     }
+
+    // 2. 匹配正向规则
     let matched_atoms = filter
         .atoms
         .iter()
         .filter(|atom| !atom.exclude && matches_atom(torrent, parsed, &atom.rule))
         .collect::<Vec<_>>();
 
-    if matched_atoms.is_empty() {
-        return 0;
-    }
+    // 3. 计算基础质量分 (Quality Score)
+    // 如果没有配置任何其他正向规则，基础质量分默认保底 100（只要不被 exclude 排除）；
+    // 如果配置了其他正向规则，则要求至少命中一项其他正向规则，得分取命中的最大 priority（保底 1）。
+    let base_quality_score = if has_other_positive_rules {
+        match matched_atoms
+            .iter()
+            .filter(|a| !matches!(a.rule, AtomRule::Site(_)))
+            .map(|a| a.priority)
+            .max()
+        {
+            Some(priority) => priority.max(1),
+            None => return 0,
+        }
+    } else {
+        100
+    };
 
-    // 只要有任一非排除规则命中，基础保底分至少为 1（若配置 priority 均为 0 也算准入）
-    let max_p = matched_atoms.iter().map(|a| a.priority).max().unwrap_or(0);
-    max_p.max(1)
+    // 4. 计算站点优先级增益 (Site Priority Tier)
+    // 如果规则中配置了站点优先级：
+    // - 命中的站点：增加站点阶梯分，保证高于未配置/未命中的站点。
+    //   tier_bonus = matched_site_priority * 1000（保证阶梯优先级严格高于画质分，同时在同站点内由画质分决胜）
+    // - 未命中指定站点的普通站点：保留匹配到的基础质量分作为回退候选。
+    let site_bonus = matched_atoms
+        .iter()
+        .filter(|a| matches!(a.rule, AtomRule::Site(_)))
+        .map(|a| a.priority)
+        .max()
+        .map_or(0, |p| p.max(1) * 1000);
+
+    site_bonus + base_quality_score
 }
 
 fn matches_atom(torrent: &Torrent, parsed: &Release, rule: &AtomRule) -> bool {

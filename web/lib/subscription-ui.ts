@@ -14,7 +14,12 @@ import type {
  */
 export function ruleSetSpecFromAtoms(atoms: RuleSetAtom[]): RuleSetSpec {
   const spec: RuleSetSpec = {};
-  const ordered = [...atoms].sort((a, b) => a.priority - b.priority);
+  const ordered = [...atoms].sort((a, b) => {
+    if (a.kind === "site" && b.kind === "site") return b.priority - a.priority;
+    if (a.kind === "site") return 1;
+    if (b.kind === "site") return -1;
+    return a.priority - b.priority;
+  });
   const resolutions: string[] = [];
   const mediaSources: string[] = [];
   const videoCodecs: string[] = [];

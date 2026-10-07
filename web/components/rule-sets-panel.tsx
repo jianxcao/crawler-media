@@ -14,6 +14,7 @@ import {
   type RuleSet,
   type RuleSetSpec,
 } from "@/lib/api/subscriptions";
+import { type ConfiguredSite, listConfiguredSites } from "@/lib/api/sites";
 import { PLATFORM_OPTIONS, platformLabel } from "@/lib/platforms";
 import { ruleSetSpecFromAtoms } from "@/lib/subscription-ui";
 import { ruleSetEditAtoms } from "@/lib/rule-set-edit";
@@ -337,6 +338,7 @@ export function specSummary(
   { withoutUpgrade = false }: { withoutUpgrade?: boolean } = {},
 ): string[] {
   const chips: string[] = [];
+  if (spec.sites?.length) chips.push(`首选站点 ${spec.sites.join(" > ")}`);
   if (spec.resolutions?.length) chips.push(spec.resolutions.join(" > "));
   if (spec.media_sources?.length) {
     chips.push(spec.media_sources.map(mediaSourceLabel).join(" > "));
@@ -440,6 +442,19 @@ export function RuleSetEditorDialog({
     (spec.platforms_block ?? []).filter((v) => PLATFORM_OPTIONS.includes(v)),
   );
   const [mediaSources, setMediaSources] = useState<string[]>(spec.media_sources ?? []);
+  const [configuredSites, setConfiguredSites] = useState<ConfiguredSite[]>([]);
+  const [preferredSites, setPreferredSites] = useState<string[]>(spec.sites ?? []);
+  useEffect(() => {
+    listConfiguredSites().then(setConfiguredSites).catch(() => setConfiguredSites([]));
+  }, []);
+  const movePreferredSite = (index: number, delta: -1 | 1) =>
+    setPreferredSites((current) => {
+      const nextIndex = index + delta;
+      if (nextIndex < 0 || nextIndex >= current.length) return current;
+      const next = [...current];
+      [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+      return next;
+    });
   const [upgradeLadder, setUpgradeLadder] = useState<string[]>(
     () => spec.upgrade_ladder ?? [...DEFAULT_LADDER],
   );
@@ -679,8 +694,7 @@ export function RuleSetEditorDialog({
       }
       if (upgradeKeepOld) next.upgrade_keep_old = true;
     }
-    // API 写入的预留字段（站点白名单）编辑时原样保留，不因 UI 保存而丢失
-    if (spec.sites?.length) next.sites = spec.sites;
+    if (preferredSites.length) next.sites = preferredSites;
     return { spec: next, error: null };
   }, [
     resolutions,
@@ -706,7 +720,7 @@ export function RuleSetEditorDialog({
     groupsBlock,
     cutoffResolution,
     upgradeKeepOld,
-    spec.sites,
+    preferredSites,
   ]);
 
   // Compare against the initial editor projection, including codec-family and
@@ -807,6 +821,58 @@ export function RuleSetEditorDialog({
           {/* 片源与分辨率是用户谈论"版本好坏"时实际用的两个主轴（§2.2），也是
               仅有的两个偏好序参与候选选优的维度，因此并排放在最外层；它还必须
               排在洗版之前——洗版终点档只能从这个白名单里挑 */}
+          <Field
+            label="首选站点"
+            hint="首选站点有符合质量条件的资源时优先下载；使用上下按钮调整顺序，未命中时仍可回退其他站点"
+          >
+            <div className="space-y-2">
+              {preferredSites.map((siteId, index) => {
+                const site = configuredSites.find((candidate) => candidate.id === siteId);
+                return (
+                  <div key={siteId} className="flex items-center gap-2 text-sm text-white">
+                    <span className="w-6 text-[var(--text-muted)]">{index + 1}.</span>
+                    <span className="flex-1">{site?.name ?? siteId}</span>
+                    <button
+                      type="button"
+                      disabled={index === 0}
+                      onClick={() => movePreferredSite(index, -1)}
+                      aria-label="优先级上移"
+                    >
+                      ↑
+                    </button>
+                    <button
+                      type="button"
+                      disabled={index === preferredSites.length - 1}
+                      onClick={() => movePreferredSite(index, 1)}
+                      aria-label="优先级下移"
+                    >
+                      ↓
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPreferredSites((current) => current.filter((id) => id !== siteId))}
+                    >
+                      移除
+                    </button>
+                  </div>
+                );
+              })}
+              <select
+                className="w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-white"
+                value=""
+                onChange={(event) => {
+                  const value = event.target.value;
+                  if (value && !preferredSites.includes(value)) setPreferredSites((current) => [...current, value]);
+                }}
+              >
+                <option value="">添加已配置站点…</option>
+                {configuredSites.filter((site) => site.enabled && !preferredSites.includes(site.id)).map((site) => (
+                  <option key={site.id} value={site.id}>{site.name}</option>
+                ))}
+              </select>
+            </div>
+          </Field>
+
           <Field
             label="片源"
             hint="点击依次选择，先选的优先（选中顺序 = 下载偏好）；不选 = 不限。Rip 类 = WEBRip/BDRip，电视录制类 = HDTV/DVD。限定片源后，无法从种子名识别出片源的资源也会被排除，可用「手动选种」兜底"
