@@ -97,4 +97,27 @@ async fn test_directory_deletion_removes_nested_strm_and_cleans_up_media() {
         remaining_media.is_none(),
         "台账全清后，无关联文件的孤立媒体记录也应被清理"
     );
+
+    // 6. 模拟从回收站还原该目录（重新创建目录与 strm 文件）
+    std::fs::create_dir_all(&movie_dir).unwrap();
+    std::fs::write(&strm_file, "https://example.com/video.mkv").unwrap();
+
+    // 监控捕获到 movie_dir 的还原事件
+    let restore_events = vec![DebouncedEvent {
+        path: movie_dir.clone(),
+        kind: notify_debouncer_mini::DebouncedEventKind::Any,
+    }];
+    api::fs_watcher::handle_fs_events(&state, &tracker, restore_events);
+
+    // 等待异步 spawn_blocking 的扫描完成
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // 7. 验证还原后重新入账
+    let restored_rows = state.store().lock().list_ledger().unwrap();
+    assert_eq!(
+        restored_rows.len(),
+        1,
+        "目录还原后应重新扫描入账，但未找到记录"
+    );
+    assert_eq!(restored_rows[0].path, strm_file.display().to_string());
 }

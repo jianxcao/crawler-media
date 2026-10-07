@@ -258,8 +258,8 @@ fn realtime_library_root_for_path(state: &ApiState, path: &Path) -> Option<PathB
         .filter(|library| library.realtime_watch)
         .flat_map(|library| library.root_paths)
         .filter(|root| {
-            let resolved_root = std::fs::canonicalize(root).unwrap_or(root.clone());
-            resolved_path.starts_with(&resolved_root)
+            let resolved_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+            resolved_path.starts_with(&resolved_root) || path.starts_with(root)
         })
         .max_by_key(|root| root.components().count())
 }
@@ -272,13 +272,17 @@ fn realtime_library_root_for_path(state: &ApiState, path: &Path) -> Option<PathB
 pub(crate) fn entry_scan_target_dir(root: &Path, file_path: &Path) -> PathBuf {
     let resolved_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let resolved_path = std::fs::canonicalize(file_path).unwrap_or_else(|_| file_path.to_path_buf());
-    if let Ok(rel) = resolved_path.strip_prefix(&resolved_root) {
+    let rel_opt = resolved_path
+        .strip_prefix(&resolved_root)
+        .ok()
+        .or_else(|| file_path.strip_prefix(root).ok());
+    if let Some(rel) = rel_opt {
         let mut components = rel.components();
         if let Some(first) = components.next() {
             let first_path = root.join(first.as_os_str());
-            // 如果只有一级（如 root/movie.strm），则目标为 root；
-            // 如果有多级且第一级是目录（如 root/Show/Season 1/ep.strm），目标为 root/Show。
-            if components.next().is_some() {
+            // 如果只有一级且是文件（如 root/movie.strm），则目标为 root；
+            // 如果有多级（如 root/Show/Season 1/ep.strm 或 root/Movie/movie.strm），目标为 root/Show 或 root/Movie。
+            if components.next().is_some() || first_path.is_dir() {
                 return first_path;
             }
         }
@@ -370,8 +374,16 @@ pub fn handle_fs_events(
                 tracker.mark_deleted(path, None, now);
             }
         } else {
-            // 文件新建或修改
-            if is_strm {
+            // 文件或目录新建或修改
+            tracing::info!(path = %path.display(), is_dir = path.is_dir(), is_strm, "检测到文件或目录新建或修改");
+            if path.is_dir() {
+                // 如果是新增/移入的目录，查找其所属的实时媒体库
+                if let Some(root) = realtime_library_root_for_path(state, &path) {
+                    let target_dir = entry_scan_target_dir(&root, &path);
+                    tracing::info!(root = %root.display(), target_dir = %target_dir.display(), "目录新增/还原，加入扫描目标");
+                    library_scan_targets.insert((root, target_dir));
+                }
+            } else if is_strm {
                 let current_url = library::read_strm_url(&path);
                 let should_refresh = tracker.on_created_or_modified(&path, current_url.as_deref());
                 if should_refresh {
@@ -381,6 +393,7 @@ pub fn handle_fs_events(
                     has_scrape_needed = true;
                     if let Some(root) = realtime_library_root_for_path(state, &path) {
                         let target_dir = entry_scan_target_dir(&root, &path);
+                        tracing::info!(root = %root.display(), target_dir = %target_dir.display(), "STRM 新增/修改，加入扫描目标");
                         library_scan_targets.insert((root, target_dir));
                     }
                 }
@@ -392,6 +405,10 @@ pub fn handle_fs_events(
                     .to_lowercase();
                 if matches!(ext.as_str(), "mkv" | "mp4" | "ts" | "mov" | "avi" | "iso") {
                     has_intake_or_download_change = true;
+                    if let Some(root) = realtime_library_root_for_path(state, &path) {
+                        let target_dir = entry_scan_target_dir(&root, &path);
+                        library_scan_targets.insert((root, target_dir));
+                    }
                 }
             }
         }
