@@ -33,7 +33,7 @@ pub use subtitles::{
 };
 pub use tracks::{
     AudioTrack, SubtitleTrack, Tracks, VideoTrack, classify_resolution, external_subtitle_tracks,
-    probe_tracks,
+    probe_tracks, probe_tracks_and_duration,
 };
 pub use watch::{
     FileError, TransferredFile, Unidentified, WatchJob, WatchKind, WatchOutcome, scan_watch,

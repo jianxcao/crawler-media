@@ -43,10 +43,13 @@ pub(super) async fn probe_one(mgr: &ProbeManager, unit: &ProbeUnit) -> bool {
 async fn probe_one_inner(mgr: &ProbeManager, unit: &ProbeUnit) -> bool {
     let ledger_id = unit.row.id.to_string();
     let path = PathBuf::from(&unit.row.path);
-    if !probe_tracks_and_store(mgr, unit).await {
-        mgr.mark_failed(&ledger_id);
-        return false;
-    }
+    let media_duration_ms = match probe_tracks_and_store(mgr, unit).await {
+        Ok(duration_ms) => duration_ms,
+        Err(()) => {
+            mgr.mark_failed(&ledger_id);
+            return false;
+        }
+    };
     if unit.kind != MediaKind::Tv {
         return true;
     }
@@ -65,6 +68,7 @@ async fn probe_one_inner(mgr: &ProbeManager, unit: &ProbeUnit) -> bool {
         unit,
         path,
         duration_secs,
+        media_duration_ms,
         mgr.fingerprint_engine.clone(),
         unit.marker_refresh_id.is_some(),
     )
@@ -87,7 +91,7 @@ async fn probe_one_inner(mgr: &ProbeManager, unit: &ProbeUnit) -> bool {
     true
 }
 
-async fn probe_tracks_and_store(mgr: &ProbeManager, unit: &ProbeUnit) -> bool {
+async fn probe_tracks_and_store(mgr: &ProbeManager, unit: &ProbeUnit) -> Result<Option<i64>, ()> {
     let ledger_id = unit.row.id.to_string();
     let path = PathBuf::from(&unit.row.path);
     let started_at = Instant::now();
@@ -108,71 +112,73 @@ async fn probe_tracks_and_store(mgr: &ProbeManager, unit: &ProbeUnit) -> bool {
     let probe_ledger_id = ledger_id.clone();
     let probe_started_at = started_at;
     let tracks_result =
-        tokio::task::spawn_blocking(move || match library::probe_tracks(&tracks_path) {
-            Ok(tracks) => {
-                let has_streams = tracks.video.is_some()
-                    || !tracks.audio.is_empty()
-                    || !tracks.subtitles.is_empty();
-                if has_streams {
-                    if let Err(error) = library::write_streamdetails_into_nfo(
-                        &nfo_path,
-                        tracks.video.as_ref(),
-                        &tracks.audio,
-                        &tracks.subtitles,
-                    ) {
+        tokio::task::spawn_blocking(move || {
+            match library::probe_tracks_and_duration(&tracks_path) {
+                Ok((tracks, duration_ms)) => {
+                    let has_streams = tracks.video.is_some()
+                        || !tracks.audio.is_empty()
+                        || !tracks.subtitles.is_empty();
+                    if has_streams {
+                        if let Err(error) = library::write_streamdetails_into_nfo(
+                            &nfo_path,
+                            tracks.video.as_ref(),
+                            &tracks.audio,
+                            &tracks.subtitles,
+                        ) {
+                            tracing::warn!(
+                                media_id = %media_id,
+                                season,
+                                episode,
+                                ledger_id = %probe_ledger_id,
+                                path = %tracks_path.display(),
+                                nfo_path = %nfo_path.display(),
+                                error = %error,
+                                elapsed_ms = probe_started_at.elapsed().as_millis() as u64,
+                                "【媒体信息】写入 NFO 流信息失败"
+                            );
+                        } else {
+                            tracing::debug!(
+                                media_id = %media_id,
+                                season,
+                                episode,
+                                ledger_id = %probe_ledger_id,
+                                nfo_path = %nfo_path.display(),
+                                elapsed_ms = probe_started_at.elapsed().as_millis() as u64,
+                                "【媒体信息】NFO 流信息写入完成或无需更新"
+                            );
+                        }
+                    } else {
                         tracing::warn!(
                             media_id = %media_id,
                             season,
                             episode,
                             ledger_id = %probe_ledger_id,
                             path = %tracks_path.display(),
-                            nfo_path = %nfo_path.display(),
-                            error = %error,
                             elapsed_ms = probe_started_at.elapsed().as_millis() as u64,
-                            "【媒体信息】写入 NFO 流信息失败"
-                        );
-                    } else {
-                        tracing::debug!(
-                            media_id = %media_id,
-                            season,
-                            episode,
-                            ledger_id = %probe_ledger_id,
-                            nfo_path = %nfo_path.display(),
-                            elapsed_ms = probe_started_at.elapsed().as_millis() as u64,
-                            "【媒体信息】NFO 流信息写入完成或无需更新"
+                            "【媒体信息】探测成功但没有发现视频、音轨或字幕流"
                         );
                     }
-                } else {
+                    Some((tracks, duration_ms))
+                }
+                Err(error) => {
                     tracing::warn!(
                         media_id = %media_id,
                         season,
                         episode,
                         ledger_id = %probe_ledger_id,
                         path = %tracks_path.display(),
+                        error = %error,
                         elapsed_ms = probe_started_at.elapsed().as_millis() as u64,
-                        "【媒体信息】探测成功但没有发现视频、音轨或字幕流"
+                        "【媒体探测】探测失败（文件不可达 / 远程超时），稍后重试"
                     );
+                    None
                 }
-                Some(tracks)
-            }
-            Err(error) => {
-                tracing::warn!(
-                    media_id = %media_id,
-                    season,
-                    episode,
-                    ledger_id = %probe_ledger_id,
-                    path = %tracks_path.display(),
-                    error = %error,
-                    elapsed_ms = probe_started_at.elapsed().as_millis() as u64,
-                    "【媒体探测】探测失败（文件不可达 / 远程超时），稍后重试"
-                );
-                None
             }
         })
         .await;
     let tracks = match tracks_result {
-        Ok(Some(tracks)) => tracks,
-        Ok(None) => return false,
+        Ok(Some(tracks_and_duration)) => tracks_and_duration,
+        Ok(None) => return Err(()),
         Err(error) => {
             tracing::error!(
                 %error,
@@ -184,9 +190,10 @@ async fn probe_tracks_and_store(mgr: &ProbeManager, unit: &ProbeUnit) -> bool {
                 elapsed_ms = started_at.elapsed().as_millis() as u64,
                 "【媒体信息】流信息探测任务异常退出"
             );
-            return false;
+            return Err(());
         }
     };
+    let (tracks, duration_ms) = tracks;
     if let Err(error) = mgr.store.lock().put_file_meta(&ledger_id, &tracks) {
         tracing::error!(
             %error,
@@ -197,7 +204,7 @@ async fn probe_tracks_and_store(mgr: &ProbeManager, unit: &ProbeUnit) -> bool {
             elapsed_ms = started_at.elapsed().as_millis() as u64,
             "【媒体信息】流信息缓存写入失败"
         );
-        return false;
+        return Err(());
     }
     // 探测得到真实主视频流后，顺带回写更新 ledger 行的 resolution, codec, hdr，保证台账与缓存一致
     if let Some(video) = tracks.video.as_ref() {
@@ -223,10 +230,11 @@ async fn probe_tracks_and_store(mgr: &ProbeManager, unit: &ProbeUnit) -> bool {
         video = tracks.video.is_some(),
         audio_tracks = tracks.audio.len(),
         subtitle_tracks = tracks.subtitles.len(),
+        format_duration_ms = ?duration_ms,
         elapsed_ms = started_at.elapsed().as_millis() as u64,
         "【媒体信息】流信息探测与缓存完成"
     );
-    true
+    Ok(duration_ms)
 }
 
 pub(super) fn fingerprint_duration(
@@ -256,6 +264,7 @@ async fn probe_fingerprint_and_store(
     unit: &ProbeUnit,
     fp_path: PathBuf,
     duration_secs: u32,
+    media_duration_ms: Option<i64>,
     fingerprint_engine: Arc<dyn FingerprintEngine>,
     require_complete_markers: bool,
 ) -> bool {
@@ -343,21 +352,9 @@ async fn probe_fingerprint_and_store(
         "【声纹】片头声纹生成成功"
     );
 
-    // 探测视频总时长，并提取倒数 duration_secs 的片尾音频指纹。
-    let duration_started = Instant::now();
-    tracing::info!(
-        media_id = %unit.row.media_id,
-        season = unit.row.season.unwrap_or(1),
-        episode = unit.row.episode.unwrap_or(1),
-        ledger_id,
-        path = %fp_path.display(),
-        "【声纹】开始探测媒体总时长以定位片尾采样窗口"
-    );
-    let duration_path = fp_path.clone();
-    let duration_result =
-        tokio::task::spawn_blocking(move || library::probe_duration(&duration_path)).await;
-    let duration_ms = match duration_result {
-        Ok(Some(duration)) if duration > 0 => {
+    // Reuse format duration returned by the stream probe instead of opening a STRM a second time.
+    let duration_ms = match media_duration_ms.filter(|duration| *duration > 0) {
+        Some(duration) => {
             tracing::info!(
                 media_id = %unit.row.media_id,
                 season = unit.row.season.unwrap_or(1),
@@ -365,33 +362,22 @@ async fn probe_fingerprint_and_store(
                 ledger_id,
                 duration_ms = duration,
                 duration_secs = duration as f64 / 1000.0,
-                elapsed_ms = duration_started.elapsed().as_millis() as u64,
-                "【声纹】媒体总时长探测成功"
+                source = "stream_probe",
+                elapsed_ms = 0_u64,
+                "【声纹】复用媒体流信息探测得到的总时长"
             );
             Some(duration)
         }
-        Ok(duration) => {
+        None => {
             tracing::warn!(
                 media_id = %unit.row.media_id,
                 season = unit.row.season.unwrap_or(1),
                 episode = unit.row.episode.unwrap_or(1),
                 ledger_id,
-                duration_ms = ?duration,
-                elapsed_ms = duration_started.elapsed().as_millis() as u64,
-                "【声纹】媒体总时长无效，无法定位片尾采样窗口"
-            );
-            None
-        }
-        Err(error) => {
-            tracing::error!(
-                %error,
-                media_id = %unit.row.media_id,
-                season = unit.row.season.unwrap_or(1),
-                episode = unit.row.episode.unwrap_or(1),
-                ledger_id,
                 path = %fp_path.display(),
-                elapsed_ms = duration_started.elapsed().as_millis() as u64,
-                "【声纹】媒体总时长探测任务异常退出"
+                source = "stream_probe",
+                elapsed_ms = 0_u64,
+                "【声纹】流信息探测未返回有效总时长，无法定位片尾采样窗口"
             );
             None
         }
