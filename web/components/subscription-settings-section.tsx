@@ -8,6 +8,7 @@ import type { MediaSearchItem } from "@/lib/api/discover";
 import { searchTitles } from "@/lib/api/search";
 import { BrandLoader } from "@/components/brand-loader";
 import { RuleSetsPanel } from "@/components/rule-sets-panel";
+import { libraryPipelineIdentity } from "@/lib/subscription-pipeline";
 import {
   checkSubscriptionAutomationReadiness,
   previewSubscriptionDownloadRouting,
@@ -425,6 +426,7 @@ function LibraryPipelineCard({
   hiddenKeys: Set<string>;
 }) {
   const [showAll, setShowAll] = useState(false);
+  const identity = libraryPipelineIdentity(pipeline);
 
   const byKey = (keys: string[]) => pipeline.checks.filter((c) => keys.includes(c.key));
   const dispatchChecks = byKey(["dispatch_dir", "mapping"]);
@@ -478,19 +480,23 @@ function LibraryPipelineCard({
   return (
     <div className="rounded-xl border border-white/[0.08] bg-white/[0.04] px-4 py-3">
       <div className="flex items-center gap-3">
-        <span className="w-24 shrink-0 max-md:hidden">
+        <span className="w-44 shrink-0 max-md:hidden">
           <span className="block truncate text-ui font-medium text-white/90">
-            {pipeline.library_name}
+            {identity.name}
           </span>
           <span className="block text-caption text-[var(--text-faint)]">
-            {pipeline.kind === "movie" ? "电影" : "剧集"}
-            {pipeline.is_default ? " · 默认" : ""}
+            {identity.kindLabel}
+            {identity.isDefault ? " · 默认" : ""}
           </span>
         </span>
         <div className="min-w-0 flex-1">
-          <p className="mb-1.5 text-sub font-medium text-white/90 md:hidden">
-            {pipeline.library_name}
-          </p>
+          <div className="mb-1.5 md:hidden">
+            <p className="truncate text-sub font-medium text-white/90">{identity.name}</p>
+            <p className="text-caption text-[var(--text-faint)]">
+              {identity.kindLabel}
+              {identity.isDefault ? " · 默认" : ""}
+            </p>
+          </div>
           <FlowStepper nodes={nodes} />
           {/* 正向叙事：订阅命中本库会发生什么——全绿时的可预期，不用去玩模拟一单 */}
           {pipeline.narrative && (

@@ -416,7 +416,9 @@ export interface PipelineCheck {
 /** 一个库的完整入库链路结论。 */
 export interface LibraryPipeline {
   library_id: number;
-  library_name: string;
+  /** 新版响应字段；旧的 automation-readiness 响应使用 name。 */
+  library_name?: string;
+  name?: string;
   kind: "movie" | "tv";
   is_default: boolean;
   /** watch=投监听目录 / inplace=直下库根 / downloader_default=下载器默认目录 */
