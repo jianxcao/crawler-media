@@ -23,23 +23,16 @@ use items::resolve_fallback_item;
 use user_marks::{persist_unplayed_override, resolve_mark_unit, write_favorite_mark};
 
 pub(crate) fn default_library_cover(kind: MediaKind) -> Result<Vec<u8>, String> {
-    use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
-    use std::io::Cursor;
+    const DEFAULT_MOVIE_COVER: &[u8] = include_bytes!("../assets/covers/movie.jpg");
+    const DEFAULT_TV_COVER: &[u8] = include_bytes!("../assets/covers/tv.jpg");
+    const DEFAULT_VIDEO_COVER: &[u8] = include_bytes!("../assets/covers/video.jpg");
 
-    let color = match kind {
-        MediaKind::Movie => [22, 42, 74],
-        MediaKind::Tv => [53, 35, 82],
-        MediaKind::Video => [26, 67, 61],
+    let bytes = match kind {
+        MediaKind::Movie => DEFAULT_MOVIE_COVER,
+        MediaKind::Tv => DEFAULT_TV_COVER,
+        MediaKind::Video => DEFAULT_VIDEO_COVER,
     };
-    let mut image = RgbImage::new(640, 360);
-    for pixel in image.pixels_mut() {
-        *pixel = Rgb(color);
-    }
-    let mut bytes = Cursor::new(Vec::new());
-    DynamicImage::ImageRgb8(image)
-        .write_to(&mut bytes, ImageFormat::Jpeg)
-        .map_err(|error| format!("failed to encode default library cover: {error}"))?;
-    Ok(bytes.into_inner())
+    Ok(bytes.to_vec())
 }
 
 fn is_series_item_id(id: &str, media_id: domain::MediaId) -> bool {
