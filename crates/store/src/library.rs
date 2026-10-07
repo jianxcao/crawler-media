@@ -553,6 +553,7 @@ mod marker_replacement_tests {
             end_ms: 300_000,
             title: Some("原章节".into()),
             marker_type: None,
+            synthetic: false,
         }];
         for season in [1, 2] {
             store
@@ -608,6 +609,7 @@ mod marker_replacement_tests {
                         end_ms: 171_000,
                         title: Some("新片头".into()),
                         marker_type: Some(library::MarkerType::IntroStart),
+                        synthetic: false,
                     }],
                 )],
             },

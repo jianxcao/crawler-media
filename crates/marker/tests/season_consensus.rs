@@ -76,7 +76,7 @@ fn season_consensus_rejects_an_isolated_long_match_in_favor_of_the_recurring_int
 }
 
 #[test]
-fn season_consensus_rejects_a_short_two_pair_fragment_against_a_season_wide_intro() {
+fn season_consensus_keeps_a_two_pair_intro_variant_supported_by_three_episodes() {
     let mut matches = HashMap::new();
     for first in 2..=15 {
         for second in first + 1..=15 {
@@ -113,8 +113,13 @@ fn season_consensus_rejects_a_short_two_pair_fragment_against_a_season_wide_intr
 
     let detected = match_episodes_fingerprints_with(&engine, &episodes, 15.0, 240.0);
 
-    assert_eq!(detected.len(), 14);
-    assert!(detected.iter().all(|marker| marker.episode != 1));
+    assert_eq!(detected.len(), 15);
+    let first_episode = detected
+        .iter()
+        .find(|marker| marker.episode == 1)
+        .expect("the two independent matches support episode one");
+    assert_eq!(first_episode.intro_start_ms, 12_000);
+    assert_eq!(first_episode.intro_end_ms, 35_000);
 }
 
 #[test]

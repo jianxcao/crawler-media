@@ -243,3 +243,35 @@ fn test_build_complete_timeline_chapters() {
     assert_eq!(segs2[3].end_ms, 2700_000);
     assert_eq!(segs2[3].marker_type, Some(MarkerType::CreditsStart));
 }
+
+#[test]
+fn rebuilding_a_generated_timeline_drops_old_prelude_and_feature_chapters() {
+    use marker::build_complete_timeline_chapters;
+
+    let previous = build_complete_timeline_chapters(
+        &[],
+        Some((11_885, 34_976)),
+        Some((2_438_948, 2_590_058)),
+        Some(2_592_763),
+    )
+    .into_iter()
+    .map(|mut chapter| {
+        chapter.synthetic = false;
+        chapter
+    })
+    .collect::<Vec<_>>();
+
+    let rebuilt = build_complete_timeline_chapters(
+        &previous,
+        None,
+        Some((2_438_948, 2_590_058)),
+        Some(2_592_763),
+    );
+
+    assert_eq!(rebuilt.len(), 2);
+    assert_eq!(rebuilt[0].title.as_deref(), Some("正片"));
+    assert_eq!(rebuilt[0].start_ms, 0);
+    assert_eq!(rebuilt[0].end_ms, 2_438_948);
+    assert_eq!(rebuilt[1].title.as_deref(), Some("片尾"));
+    assert_eq!(rebuilt[1].marker_type, Some(MarkerType::CreditsStart));
+}

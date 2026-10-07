@@ -238,6 +238,7 @@ async fn borrowed_marker_clears_outro_and_does_not_cache_permanently() {
                 end_ms: 10_000,
                 title: Some("Intro".into()),
                 marker_type: Some(marker::MarkerType::IntroStart),
+                synthetic: false,
             }],
         )
         .unwrap();
