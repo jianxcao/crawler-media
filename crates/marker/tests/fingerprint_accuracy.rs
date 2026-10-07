@@ -260,7 +260,7 @@ fn chromaprint_engine_logs_extraction_phase_timings() {
     let ffmpeg = bin_dir.join("ffmpeg");
     std::fs::write(
         &ffmpeg,
-        "#!/bin/sh\nexec /bin/cat \"$MARKER_TIMING_TEST_PCM_PATH\"\n",
+        "#!/bin/sh\nprintf '%s\\n' 'bench: utime=1.250s stime=0.250s rtime=18.750s maxrss=8192kB' >&2\nexec /bin/cat \"$MARKER_TIMING_TEST_PCM_PATH\"\n",
     )
     .expect("fake ffmpeg should be written");
     let mut permissions = std::fs::metadata(&ffmpeg)
@@ -293,9 +293,100 @@ fn chromaprint_engine_logs_extraction_phase_timings() {
         "chromaprint_consume_us=",
         "chromaprint_finish_ms=",
         "ffmpeg_wait_ms=",
+        "ffmpeg_user_cpu_ms=Some(1250)",
+        "ffmpeg_system_cpu_ms=Some(250)",
+        "ffmpeg_real_ms=Some(18750)",
+        "ffmpeg_maxrss_kb=Some(8192)",
         "pcm_bytes=",
         "sample_count=",
     ] {
         assert!(logs.contains(field), "missing {field} in logs: {logs}");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn chromaprint_engine_logs_sanitized_ffmpeg_diagnostics_when_no_pcm_is_produced() {
+    const CHILD_FLAG: &str = "MARKER_EMPTY_PCM_DIAGNOSTIC_TEST_CHILD";
+
+    if std::env::var_os(CHILD_FLAG).is_some() {
+        let _ = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .try_init();
+        let temp = std::env::var_os("MARKER_EMPTY_PCM_STRM_PATH")
+            .expect("test STRM path should be provided");
+        let result = ChromaprintEngine.extract_at(Path::new(&temp), 0, 30);
+        assert!(result.is_err(), "empty FFmpeg output must fail extraction");
+        return;
+    }
+
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("temporary directory should be created");
+    let strm_path = temp.path().join("episode.strm");
+    std::fs::write(&strm_path, "https://media.example/episode.mkv\n")
+        .expect("STRM fixture should be written");
+    let bin_dir = temp.path().join("bin");
+    std::fs::create_dir(&bin_dir).expect("fake ffmpeg directory should be created");
+    let ffmpeg = bin_dir.join("ffmpeg");
+    std::fs::write(
+        &ffmpeg,
+        "#!/bin/sh\nprintf '%s\\n' '[http] HTTP error 503 for https://user:secret@media.example/stream?token=secret' '[http] Authorization: Bearer topsecret' '[http] Cookie: session=secret-cookie' '[http] request: GET /stream?token=relative-secret HTTP/1.1' >&2\nexit 0\n",
+    )
+    .expect("fake ffmpeg should be written");
+    let mut permissions = std::fs::metadata(&ffmpeg)
+        .expect("fake ffmpeg metadata should be readable")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&ffmpeg, permissions).expect("fake ffmpeg should be executable");
+
+    let output = Command::new(std::env::current_exe().expect("test executable path should exist"))
+        .args([
+            "--exact",
+            "chromaprint_engine_logs_sanitized_ffmpeg_diagnostics_when_no_pcm_is_produced",
+            "--nocapture",
+        ])
+        .env(CHILD_FLAG, "1")
+        .env("MARKER_EMPTY_PCM_STRM_PATH", &strm_path)
+        .env("PATH", &bin_dir)
+        .output()
+        .expect("child test process should run");
+    let logs = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(output.status.success(), "child test failed: {logs}");
+    assert!(
+        logs.contains("HTTP error 503"),
+        "missing FFmpeg diagnostic: {logs}"
+    );
+    assert!(
+        logs.contains("ffmpeg_exit_code=Some(0)"),
+        "missing exit status: {logs}"
+    );
+    assert!(
+        logs.contains("<remote-url>"),
+        "URL should be replaced in diagnostics: {logs}"
+    );
+    assert!(
+        logs.contains("[http] Authorization: <redacted>"),
+        "authorization header should be redacted: {logs}"
+    );
+    assert!(
+        logs.contains("[http] Cookie: <redacted>"),
+        "cookie header should be redacted: {logs}"
+    );
+    assert!(
+        logs.contains("token=<redacted>"),
+        "query parameter should be redacted: {logs}"
+    );
+    assert!(
+        !logs.contains("secret")
+            && !logs.contains("topsecret")
+            && !logs.contains("relative-secret"),
+        "diagnostic must not leak URL credentials or headers: {logs}"
+    );
 }

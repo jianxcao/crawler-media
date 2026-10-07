@@ -130,7 +130,8 @@ start_backend() {
   log "启动后端 (端口 $BACKEND_PORT)..."
   printf '\n=== [START BACKEND %s] ===\n' "$(date)" >>"$BACKEND_LOG"
   launch backend env \
-    RUST_LOG="${RUST_LOG:-info,api=debug,crawler_media=debug,domain=debug,indexer=debug,media=debug,downloader=debug,library=debug,subscribe=debug,filter=debug,release=debug,hooks=debug,jobs=debug,playback=debug,html5ever=off,selectors=warn}" \
+    RUST_LOG="${RUST_LOG:-info,api=debug,crawler_media=debug,domain=debug,indexer=debug,media=debug,downloader=debug,library=debug,subscribe=debug,filter=debug,release=debug,hooks=debug,jobs=debug,playback=debug,marker=debug,html5ever=off,selectors=warn}" \
+    CRAWLER_MEDIA_FFMPEG_LOG_LEVEL="${CRAWLER_MEDIA_FFMPEG_LOG_LEVEL:-verbose}" \
     CRAWLER_MEDIA_DATA="$ROOT_DIR/$DATA_DIR" \
     CRAWLER_MEDIA_TOKEN="$TOKEN" \
     CRAWLER_MEDIA_ADMIN_PASSWORD="${ADMIN_PASSWORD:-test-admin-secret-password}" \
