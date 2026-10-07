@@ -149,6 +149,7 @@ export function LibraryItemDetailView({
   const [chaptersBusy, setChaptersBusy] = useState(false);
   const [chapterError, setChapterError] = useState<string | null>(null);
   const chapterRefreshTimer = useRef<number | null>(null);
+  const chapterRefreshToken = useRef(0);
   const [similar, setSimilar] = useState<MediaItem[]>([]);
   const [reidentifyDirty, setReidentifyDirty] = useState(false);
   // 元数据刷新的失败提示（原先与重识别共用一条横幅）
@@ -307,8 +308,10 @@ export function LibraryItemDetailView({
   }, [reload]);
 
   useEffect(() => () => {
+    chapterRefreshToken.current += 1;
     if (chapterRefreshTimer.current != null) {
       window.clearTimeout(chapterRefreshTimer.current);
+      chapterRefreshTimer.current = null;
     }
   }, []);
 
@@ -630,19 +633,21 @@ export function LibraryItemDetailView({
   };
 
   const forceRefreshChaptersAndMarkers = async () => {
+    if (chapterRefreshTimer.current != null) {
+      window.clearTimeout(chapterRefreshTimer.current);
+      chapterRefreshTimer.current = null;
+    }
+    const refreshToken = ++chapterRefreshToken.current;
     setChaptersBusy(true);
     try {
       const target = !isMovie && selectedSeriesEpisode
         ? { season: selectedSeriesEpisode.seasonNumber, episode: selectedSeriesEpisode.episode.episode_number }
         : undefined;
       const refreshed = await refreshItemChapters(libraryId, detail.media_item_id, target);
+      if (chapterRefreshToken.current !== refreshToken) return;
       setChapterError(null);
       if (refreshed.fingerprint_refresh_error) {
         throw new Error(refreshed.fingerprint_refresh_error);
-      }
-      if (chapterRefreshTimer.current != null) {
-        window.clearTimeout(chapterRefreshTimer.current);
-        chapterRefreshTimer.current = null;
       }
       if (refreshed.fingerprint_refresh_already_running && !refreshed.fingerprint_refresh_queued) {
         setChapters((current) => current.length > 0 ? current : refreshed.chapters);
@@ -652,45 +657,50 @@ export function LibraryItemDetailView({
         toast.info(refreshed.fingerprint_refresh_already_running
           ? "该剧该季的片头片尾正在生成中"
           : "已提交片头片尾生成任务，当前结果会在完成后更新");
-        const poll = async (attempt: number) => {
-          if (attempt >= 60) {
-            chapterRefreshTimer.current = null;
-            toast.info("片头片尾任务仍在运行，完成后重新打开条目即可查看结果");
-            return;
-          }
+      }
+      if (refreshed.fingerprint_refresh_queued || refreshed.fingerprint_refresh_already_running) {
+        const poll = (attempt: number) => {
+          if (chapterRefreshToken.current !== refreshToken) return;
+          const delay = Math.min(5_000 * 2 ** Math.min(attempt, 3), 30_000);
           chapterRefreshTimer.current = window.setTimeout(async () => {
+            if (chapterRefreshToken.current !== refreshToken) return;
             try {
               const latest = await fetchItemProbeStatus(
                 libraryId,
                 detail.media_item_id,
                 target?.season ?? refreshed.fingerprint_refresh_job?.season ?? 1,
               );
+              if (chapterRefreshToken.current !== refreshToken) return;
               if (latest.active) {
                 void poll(attempt + 1);
                 return;
               }
               if (latest.job?.status === "succeeded") {
-                setChapters(await fetchItemChapters(libraryId, detail.media_item_id, target));
+                const updated = await fetchItemChapters(libraryId, detail.media_item_id, target);
+                if (chapterRefreshToken.current !== refreshToken) return;
+                setChapters(updated);
                 chapterRefreshTimer.current = null;
                 toast.success("片头片尾任务已完成，章节结果已更新");
                 return;
               }
               if (latest.job?.status === "failed") {
-                setChapters(await fetchItemChapters(libraryId, detail.media_item_id, target));
+                const updated = await fetchItemChapters(libraryId, detail.media_item_id, target);
+                if (chapterRefreshToken.current !== refreshToken) return;
+                setChapters(updated);
                 chapterRefreshTimer.current = null;
                 toast.error(latest.job.error
                   ? `片头片尾生成失败：${latest.job.error}`
                   : "片头片尾生成失败，原有章节结果已保留");
                 return;
               }
-              void poll(attempt + 1);
+              poll(attempt + 1);
             } catch {
-              chapterRefreshTimer.current = null;
+              poll(attempt + 1);
             }
-          }, 5000);
+          }, delay);
         };
-        void poll(0);
-      } else {
+        poll(0);
+      } else if (!refreshed.fingerprint_refresh_already_running) {
         setChapters(refreshed.chapters);
         toast.success("章节已刷新");
       }
