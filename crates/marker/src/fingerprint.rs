@@ -11,7 +11,8 @@ pub type AudioFingerprint = Vec<u32>;
 
 pub const MIN_MATCH_DURATION_SECS: f32 = 15.0;
 pub const MAX_MATCH_DURATION_SECS: f32 = 240.0;
-const MAX_REMOTE_TRUNCATION_ATTEMPTS: u8 = 2;
+const MAX_REMOTE_TRUNCATION_ATTEMPTS: u8 = 4;
+const REMOTE_TRUNCATION_RETRY_INITIAL_DELAY_MS: u64 = 500;
 
 /// Replaceable boundary for audio fingerprint extraction and matching.
 pub trait FingerprintEngine: Send + Sync {
@@ -85,6 +86,7 @@ pub fn extract_audio_fingerprint_at_with(
 
     let mut attempt = 1;
     let result = loop {
+        let attempt_started = Instant::now();
         let result = engine.extract_at(path, start_secs, duration_secs);
         let retryable_truncation = matches!(
             &result,
@@ -95,29 +97,33 @@ pub fn extract_audio_fingerprint_at_with(
             break result;
         }
         if let Err(error) = &result {
+            let retry_delay_ms =
+                REMOTE_TRUNCATION_RETRY_INITIAL_DELAY_MS * 2u64.pow(u32::from(attempt - 1));
             tracing::warn!(
                 path = %path.display(),
                 source,
                 attempt,
                 next_attempt = attempt + 1,
                 max_attempts = MAX_REMOTE_TRUNCATION_ATTEMPTS,
+                attempt_elapsed_ms = attempt_started.elapsed().as_millis(),
+                retry_delay_ms,
                 error = %error,
-                "【声纹】远端音频样本读取不完整，准备重试"
+                "【声纹】远端音频样本读取不完整，等待后重试"
             );
+            std::thread::sleep(std::time::Duration::from_millis(retry_delay_ms));
         }
         attempt += 1;
-        std::thread::sleep(std::time::Duration::from_millis(250));
     };
     let elapsed_ms = started.elapsed().as_millis();
     match &result {
         Ok(fingerprint) => tracing::info!(
             path = %path.display(), source, start_secs, duration_secs,
-            fingerprint_items = fingerprint.len(), elapsed_ms,
+            attempts = attempt, fingerprint_items = fingerprint.len(), elapsed_ms,
             "【声纹】音频指纹生成成功"
         ),
         Err(error) => tracing::error!(
             path = %path.display(), source, start_secs, duration_secs,
-            elapsed_ms, error = %error,
+            attempts = attempt, elapsed_ms, error = %error,
             "【声纹】音频指纹生成失败"
         ),
     }

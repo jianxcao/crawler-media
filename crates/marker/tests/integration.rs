@@ -127,6 +127,21 @@ fn test_probe_target_ffmpeg_command_args() {
         timeout_idx,
         input_idx
     );
+    for (option, value) in [
+        ("-reconnect_at_eof", "1"),
+        ("-reconnect_on_http_error", "429,5xx"),
+        ("-reconnect_max_retries", "3"),
+        ("-reconnect_delay_total_max", "15"),
+    ] {
+        let option_idx = args.iter().position(|arg| arg == option);
+        assert!(
+            option_idx.is_some(),
+            "{option} must be configured for remote STRM"
+        );
+        let option_idx = option_idx.unwrap();
+        assert_eq!(args.get(option_idx + 1).map(String::as_str), Some(value));
+        assert!(option_idx < input_idx.unwrap(), "{option} must precede -i");
+    }
 }
 
 #[test]
