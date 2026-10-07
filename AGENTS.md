@@ -4,27 +4,22 @@ Primary instruction set for agents in this repository. Local docs beat training 
 
 ## How we develop
 
-One GitHub issue at a time as the unit of work. A session MAY continue to the next unblocked ticket after the current one is committed, commented, and closed. Do not hunt for skills unless this file tells you to.
+During the project's initial phase, the user's request is the unit of work. Do not create, require, assign, comment on, or close GitHub issues unless the user explicitly asks to track work there. Do not hunt for skills unless this file tells you to.
 
-1. Pick the frontier ticket: open, `ready-for-agent`, no open GitHub **blocked-by**. Start at the lowest number if several are unblocked.
-2. Read **only**: the issue body, `CONTEXT.md`, ADRs named by the issue, this file, `docs/agents/roadmap.md` if the issue cites it. Vocabulary in `CONTEXT.md` is mandatory (`_Avoid_` means do not use that word).
-3. Implement **that issue only** until it is green. Do not start a blocked child. Do not mix two issues in one commit.
-4. Tests first at the issue’s seams (red → green). See **Testing**.
-5. `cargo test -p <crate>` for every crate you touched, then `cargo test --workspace` once at the end of that issue.
-6. Comment on the issue with what landed, close it, commit on the current branch. Do not close parent `#1` unless the user accepts the slice.
-7. **Wrap-up before the next ticket**: say what landed (commit, tests, user-visible change) and what the new frontier is. Then pick the next unblocked lowest number.
-8. **Subagents**: use them for parallel research, file splits, or independent slices inside one ticket. The parent still owns the issue, the commit, and the wrap-up.
-
-`#1` is the spec, not a build ticket. Wave 1 (`#2`–`#7`) is the download loop. Wave 2 (`#8`–`#19`) is the rest. Native blocked-by on GitHub is the gate.
-
-Do not start a second issue until the current one is pushed and closed.
+1. Implement the user's current request only. Do not expand it into unrelated work.
+2. Read **only** the relevant parts of `CONTEXT.md`, ADRs that apply to the request, this file, and `docs/agents/roadmap.md` if the request cites it. If the user explicitly provides an issue, also read that issue body and its comments. Vocabulary in `CONTEXT.md` is mandatory (`_Avoid_` means do not use that word).
+3. Tests first at the behavior's public seam (red → green). See **Testing**.
+4. Run `cargo test -p <crate>` for every crate touched, then `cargo test --workspace` once at the end of the request.
+5. Commit on the current branch after the change is green. Do not include unrelated user changes in the commit.
+6. Wrap up with what changed, the user-visible effect, and verification results.
+7. **Subagents**: use them for parallel research, file splits, or independent slices when appropriate. The parent still owns the request, the commit, and the wrap-up.
 
 ### Skills (only when stuck)
 
-You do not need to search the skill catalog. This file is enough for ticket work.
+You do not need to search the skill catalog. This file is enough for task work.
 
 - `/tdd` — what a good test is (behavior at a public seam, not internals).
-- `/code-review` — after the ticket is green, before you push, if the diff is large.
+- `/code-review` — after the requested change is green, before commit, if the diff is large.
 - `/domain-modeling` — only when you must add or change a glossary term or ADR.
 
 ## Testing
@@ -61,7 +56,7 @@ Count `wc -l`. Generated code and fixture bytes in tests are exempt; test **logi
 - Split by responsibility, not merely to reduce line counts. A function with multiple independent responsibilities should be split even below the hard limit; avoid helpers that only forward large parameter lists.
 - Size compliance and functional correctness are separate acceptance criteria. Meeting these limits does not establish deletion safety, state compatibility, or retry correctness.
 
-Already over the hard limit (split when you next touch them, or file a follow-up on that crate’s issue — do not ignore):
+Already over the hard limit (split when you next touch them — do not ignore):
 
 - `crates/subscribe/tests/run.rs`
 
@@ -70,7 +65,7 @@ Already over the hard limit (split when you next touch them, or file a follow-up
 - One module, one reason to change. Prefer `media/src/tmdb/{search.rs,details.rs,cache.rs,client.rs}` over a single `tmdb.rs`.
 - Public API stays small: structs and traits a sibling crate actually calls. Keep parse/SQL/HTTP mapping private.
 - `thiserror` for crate errors. No `unwrap` / `expect` on IO or parse paths except tests.
-- No `unsafe` without an issue comment explaining why.
+- No `unsafe` without a nearby code comment explaining why.
 - Edition and versions: inherit `workspace.package` / `workspace.dependencies`.
 
 ### Naming
@@ -99,6 +94,6 @@ Do not write silent code. All critical paths must emit structured tracing logs:
 - API conventions (envelope + core DTOs, **not** the live route table): `docs/api-contracts/self.md`
 - Live HTTP surface: `crates/api/src/http/mod.rs` (`/api/v1`) and `web/lib/api/*`
 - Stage archive (not an API spec): `docs/agents/roadmap.md`
-- Spec / current state for ticket work: issue `#1` plus the issue body
+- Spec / current state: the user's request and `CONTEXT.md`; read an issue only when the user explicitly asks to use GitHub issue tracking
 - ADRs: `docs/adr/`
 - Tracker: `docs/agents/issue-tracker.md`

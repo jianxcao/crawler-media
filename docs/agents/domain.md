@@ -7,7 +7,7 @@
 - 仓库根的 **`CONTEXT.md`**
 - **`docs/adr/`** —— 阅读与你将工作的区域相关的 ADR
 - **`docs/agents/roadmap.md`** —— 当前状态与历史（grilling 时代的 `docs/spec.md` 已作为过时移除）
-- **`AGENTS.md`** —— ticket 如何工作、测试 seam、Rust 体积限制
+- **`AGENTS.md`** —— 用户请求如何工作、测试 seam、Rust 体积限制
 
 若这些文件中有任何不存在，**静默继续**。不要标记其缺失；不要主动建议创建它们。`/domain-modeling` skill（经 `/grill-with-docs` 与 `/improve-codebase-architecture` 触达）在术语或决策实际被解析时才惰性创建它们。
 

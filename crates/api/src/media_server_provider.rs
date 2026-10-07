@@ -22,6 +22,11 @@ mod user_marks;
 use items::resolve_fallback_item;
 use user_marks::{persist_unplayed_override, resolve_mark_unit, write_favorite_mark};
 
+fn is_series_item_id(id: &str, media_id: domain::MediaId) -> bool {
+    id.parse::<domain::MediaId>()
+        .is_ok_and(|requested_media_id| requested_media_id == media_id)
+}
+
 fn catalog_episode_still_url(path: &str) -> Option<String> {
     if path.starts_with("https://image.tmdb.org/") || path.starts_with("http://image.tmdb.org/") {
         Some(path.to_string())
@@ -252,10 +257,14 @@ impl MediaServerProvider for ApiServerProvider {
         let store = self.state.store.lock();
         if let Some(row) = crate::http::media_visibility::resolve_visible_row(&store, id, user_id) {
             let media = store.get_media(row.media_id).ok().flatten();
-            let path = media
-                .as_ref()
-                .and_then(|media| local_primary_image(&row, media))
-                .or_else(|| crate::http::library::poster_path(&row));
+            let path = if is_series_item_id(id, row.media_id) {
+                crate::http::library::poster_path(&row)
+            } else {
+                media
+                    .as_ref()
+                    .and_then(|media| local_primary_image(&row, media))
+                    .or_else(|| crate::http::library::poster_path(&row))
+            };
             if let Some(path) = path {
                 drop(store);
                 return std::fs::read(path).map(Some).map_err(|e| e.to_string());
@@ -278,7 +287,7 @@ impl MediaServerProvider for ApiServerProvider {
             let Some(media) = store.get_media(row.media_id).ok().flatten() else {
                 return Ok(None);
             };
-            if media.kind != MediaKind::Tv {
+            if media.kind != MediaKind::Tv || is_series_item_id(id, row.media_id) {
                 return Ok(None);
             }
             let Some((season, episode)) = row.season.zip(row.episode) else {

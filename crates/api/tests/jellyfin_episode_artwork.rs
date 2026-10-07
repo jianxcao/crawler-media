@@ -86,6 +86,89 @@ fn episode_row(media_id: MediaId, path: &Path, episode: u32) -> LedgerRow {
 }
 
 #[tokio::test]
+async fn jellyfin_series_primary_image_uses_series_poster_and_episode_uses_still() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let library_root = tmp.path().join("library/tv");
+    let show_dir = library_root.join("Pantheon");
+    let episode_dir = show_dir.join("Season 1");
+    std::fs::create_dir_all(&episode_dir).unwrap();
+    let library_root_string = library_root.display().to_string();
+    store
+        .create_library(
+            MediaKind::Tv,
+            "TV",
+            &[library_root_string.as_str()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+
+    let show = Media {
+        id: MediaId::new(),
+        kind: MediaKind::Tv,
+        title: "Pantheon".into(),
+        year: Some(2022),
+        original_title: None,
+        tmdb_id: Some("195339".into()),
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&show).unwrap();
+    let video = episode_dir.join("Pantheon S01E01.strm");
+    std::fs::write(&video, "https://media.example/episode-1").unwrap();
+    std::fs::write(show_dir.join("poster.jpg"), b"series-poster").unwrap();
+    std::fs::write(
+        episode_dir.join("Pantheon S01E01-still.jpg"),
+        b"episode-still",
+    )
+    .unwrap();
+    let row = episode_row(show.id, &video, 1);
+    store.insert_ledger(&row).unwrap();
+
+    let app = router(app_state(tmp.path(), store).with_catalog(Arc::new(EpisodeCatalog)));
+    let series_id = show.id.to_string().replace('-', "");
+    let episode_id = row.id.to_string().replace('-', "");
+    let series_item = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/Items/{series_id}"))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let series_item = response_json(series_item).await;
+    assert_eq!(series_item["Type"], "Series");
+    assert_eq!(series_item["ImageTags"]["Primary"], "poster");
+
+    for (item_id, expected) in [
+        (&series_id, &b"series-poster"[..]),
+        (&episode_id, &b"episode-still"[..]),
+    ] {
+        let image = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/Items/{item_id}/Images/Primary"))
+                    .header("authorization", "Bearer admin-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(image.status(), StatusCode::OK);
+        let image = to_bytes(image.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&image[..], expected);
+    }
+}
+
+#[tokio::test]
 async fn jellyfin_uses_unique_episode_stills_before_the_season_poster() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
