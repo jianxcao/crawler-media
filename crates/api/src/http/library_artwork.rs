@@ -461,7 +461,7 @@ pub(crate) async fn library_cover(
     Path(id): Path<String>,
 ) -> Response {
     let user_id = extract_user_id(&state.store, user_id, &headers);
-    let (store_lock, cover_path) = {
+    let (store_lock, cover_path, kind) = {
         let store = state.store.lock();
         let Some(library) = store.get_library(&id).ok().flatten() else {
             return err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在");
@@ -470,11 +470,22 @@ pub(crate) async fn library_cover(
             return err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在");
         }
         let cover = crate::http::library::library_cover_path(&store, &library);
-        (drop(store), cover)
+        let kind = library.kind;
+        (drop(store), cover, kind)
     };
     let _ = store_lock;
     let Some(cover) = cover_path else {
-        return err(StatusCode::NOT_FOUND, "cover.missing", "媒体库无封面");
+        return match crate::media_server_provider::default_library_cover(kind) {
+            Ok(bytes) => (
+                [(axum::http::header::CONTENT_TYPE, image_content_type(&bytes))],
+                bytes,
+            )
+                .into_response(),
+            Err(error) => {
+                tracing::error!(%error, library_id = %id, "failed to generate default library cover");
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        };
     };
     jpeg_response(cover, "cover.missing", "封面读取失败").await
 }

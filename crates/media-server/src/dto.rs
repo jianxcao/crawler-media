@@ -25,9 +25,9 @@ pub fn library_view_json(lib: &ServerLibrary, server_id: &str) -> Value {
         "IsFolder": true,
         "ServerId": server_id,
     });
-    if lib.cover_path.is_some() {
-        val["ImageTags"] = json!({ "Primary": "cover" });
-    }
+    // Jellyfin clients use ImageTags to decide whether to request the library artwork.
+    // The image route supplies a generated kind-specific fallback when no custom cover exists.
+    val["ImageTags"] = json!({ "Primary": "cover" });
     val
 }
 

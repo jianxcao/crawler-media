@@ -51,7 +51,11 @@ async fn create_movie_library_and_assert_empty_cover(
         ))
         .await
         .unwrap();
-    assert_eq!(cover_res.status(), StatusCode::NOT_FOUND);
+    assert_eq!(cover_res.status(), StatusCode::OK);
+    let default_cover = axum::body::to_bytes(cover_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(default_cover.starts_with(b"\xff\xd8\xff"));
 
     let film_dir = movie_root.join("The Matrix (1999)");
     std::fs::create_dir_all(&film_dir).unwrap();
@@ -82,9 +86,13 @@ async fn create_movie_library_and_assert_empty_cover(
         .unwrap();
     assert_eq!(
         cover_res2.status(),
-        StatusCode::NOT_FOUND,
-        "只有纵版海报时严禁填充为媒体库封面"
+        StatusCode::OK,
+        "单独的纵版海报不自动填充封面，但默认图仍应可用"
     );
+    let fallback = axum::body::to_bytes(cover_res2.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(fallback.starts_with(b"\xff\xd8\xff"));
     (lib_id, film_dir)
 }
 
@@ -181,7 +189,11 @@ async fn assert_cover_crud(app: &axum::Router, lib_id: &str, cover_file: &std::p
         ))
         .await
         .unwrap();
-    assert_eq!(cover_res4.status(), StatusCode::NOT_FOUND);
+    assert_eq!(cover_res4.status(), StatusCode::OK);
+    let fallback_after_delete = axum::body::to_bytes(cover_res4.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(fallback_after_delete.starts_with(b"\xff\xd8\xff"));
 }
 
 #[tokio::test]

@@ -35,6 +35,18 @@ fn app(root: &Path) -> (axum::Router, String) {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
+    let library_root = root.join("library");
+    std::fs::create_dir_all(&library_root).unwrap();
+    store
+        .create_library(
+            MediaKind::Movie,
+            "Movies",
+            &[library_root.to_str().unwrap()],
+            "selected",
+            true,
+            &[],
+        )
+        .unwrap();
     let file = root.join("matrix.mkv");
     std::fs::write(&file, b"0123456789abcdef").unwrap();
     let row = LedgerRow {
@@ -73,21 +85,41 @@ async fn bytes(response: axum::response::Response) -> (StatusCode, Vec<u8>) {
 }
 
 #[tokio::test]
-async fn primary_image_is_404_without_poster() {
+async fn primary_image_returns_generated_cover_when_library_has_no_cover() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, compact) = app(tmp.path());
-    let response = app
+    let (app, _compact) = app(tmp.path());
+    let views = app
+        .clone()
         .oneshot(
             Request::builder()
-                .method("GET")
-                .uri(format!("/Items/{compact}/Images/Primary"))
+                .uri("/UserViews")
                 .header("authorization", "Bearer admin-token")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let views: Value =
+        serde_json::from_slice(&to_bytes(views.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let library_id = views["Items"][0]["Id"].as_str().unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/Items/{library_id}/Images/Primary"))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, body) = bytes(response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.starts_with(b"\xff\xd8\xff"), "fallback must be JPEG");
+    assert!(
+        body.len() > 100,
+        "fallback should be a real image, not a signature stub"
+    );
 }
 
 #[tokio::test]
@@ -112,6 +144,39 @@ async fn primary_image_returns_poster_jpeg_and_items_tag() {
     let body: Value =
         serde_json::from_slice(&to_bytes(listed.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(body["Items"][0]["ImageTags"]["Primary"], "poster");
+
+    let views = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/UserViews")
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let views_body: Value =
+        serde_json::from_slice(&to_bytes(views.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(views_body["Items"][0]["ImageTags"]["Primary"], "cover");
+
+    let library_id = views_body["Items"][0]["Id"].as_str().unwrap();
+    let library_image = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/Items/{library_id}/Images/Primary"))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(library_image.status(), StatusCode::OK);
+    let image_body = to_bytes(library_image.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(image_body.starts_with(b"\xff\xd8\xff"));
 
     let response = app
         .oneshot(

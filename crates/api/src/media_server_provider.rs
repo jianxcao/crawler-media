@@ -22,6 +22,26 @@ mod user_marks;
 use items::resolve_fallback_item;
 use user_marks::{persist_unplayed_override, resolve_mark_unit, write_favorite_mark};
 
+pub(crate) fn default_library_cover(kind: MediaKind) -> Result<Vec<u8>, String> {
+    use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
+    use std::io::Cursor;
+
+    let color = match kind {
+        MediaKind::Movie => [22, 42, 74],
+        MediaKind::Tv => [53, 35, 82],
+        MediaKind::Video => [26, 67, 61],
+    };
+    let mut image = RgbImage::new(640, 360);
+    for pixel in image.pixels_mut() {
+        *pixel = Rgb(color);
+    }
+    let mut bytes = Cursor::new(Vec::new());
+    DynamicImage::ImageRgb8(image)
+        .write_to(&mut bytes, ImageFormat::Jpeg)
+        .map_err(|error| format!("failed to encode default library cover: {error}"))?;
+    Ok(bytes.into_inner())
+}
+
 fn is_series_item_id(id: &str, media_id: domain::MediaId) -> bool {
     id.parse::<domain::MediaId>()
         .is_ok_and(|requested_media_id| requested_media_id == media_id)
@@ -244,6 +264,9 @@ impl MediaServerProvider for ApiServerProvider {
                     drop(store);
                     return std::fs::read(cover).map(Some).map_err(|e| e.to_string());
                 }
+                let kind = lib.kind;
+                drop(store);
+                return default_library_cover(kind).map(Some);
             }
         }
         Ok(None)

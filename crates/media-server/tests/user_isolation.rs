@@ -364,6 +364,7 @@ async fn media_server_strictly_enforces_user_isolation_between_accounts() {
         .unwrap();
     let json_a_views: Value = serde_json::from_slice(&bytes_a).unwrap();
     assert_eq!(json_a_views["Items"][0]["Name"], "User A Library");
+    assert_eq!(json_a_views["Items"][0]["ImageTags"]["Primary"], "cover");
 
     let req_a_items = Request::builder()
         .uri("/Items")
