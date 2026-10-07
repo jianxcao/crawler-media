@@ -541,10 +541,15 @@ pub(crate) async fn upload_library_cover(
         );
     }
 
-    let _ = state
-        .store
-        .lock()
-        .set_library_cover_path(&library_id, Some(&cover_target.display().to_string()));
+    {
+        let store = state.store.lock();
+        if let Err(error) =
+            store.set_library_cover_path(&library_id, Some(&cover_target.display().to_string()))
+        {
+            tracing::warn!(%error, library_id, "failed to persist uploaded library cover path");
+        }
+        crate::http::library::mark_library_cover_manual(&store, &library_id);
+    }
     ok(json!({ "bytes": bytes.len(), "path": cover_target.display().to_string() })).into_response()
 }
 
@@ -721,10 +726,13 @@ pub(crate) async fn generate_library_cover(
     }
 
     if let Some(target) = write_target {
-        let _ = state
-            .store
-            .lock()
-            .set_library_cover_path(&library.id, Some(&target.display().to_string()));
+        let store = state.store.lock();
+        if let Err(error) =
+            store.set_library_cover_path(&library.id, Some(&target.display().to_string()))
+        {
+            tracing::warn!(%error, library_id = %library.id, "failed to persist generated library cover path");
+        }
+        crate::http::library::mark_library_cover_manual(&store, &library.id);
     }
 
     ok(json!({

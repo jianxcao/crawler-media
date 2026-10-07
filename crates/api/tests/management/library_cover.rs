@@ -105,8 +105,25 @@ async fn setup_movie_library_with_fanart(
 
     let (lib_id, film_dir) = create_movie_library_and_assert_empty_cover(app, &movie_root).await;
 
-    // 出现横版 fanart.jpg 后自动填充
-    std::fs::write(film_dir.join("fanart.jpg"), b"fake fanart bytes 12345").unwrap();
+    let first_poster = image::RgbImage::from_pixel(300, 450, image::Rgb([30, 90, 160]));
+    first_poster.save(film_dir.join("poster.jpg")).unwrap();
+    let second_dir = movie_root.join("Arrival (2016)");
+    std::fs::create_dir_all(&second_dir).unwrap();
+    let second_poster = image::RgbImage::from_pixel(300, 450, image::Rgb([160, 90, 30]));
+    second_poster.save(second_dir.join("poster.jpg")).unwrap();
+    std::fs::write(second_dir.join("Arrival (2016).mkv"), b"video dummy").unwrap();
+
+    // 即使库内存在横版 fanart，也应从多部作品海报生成库封面。
+    let fanart = film_dir.join("fanart.jpg");
+    std::fs::write(&fanart, b"fake fanart bytes 12345").unwrap();
+    let cover_file = tmp
+        .path()
+        .join("data")
+        .join("library")
+        .join("covers")
+        .join(format!("library-{lib_id}.jpg"));
+    std::fs::create_dir_all(cover_file.parent().unwrap()).unwrap();
+    std::fs::copy(&fanart, &cover_file).unwrap();
     let scan_res2 = app
         .clone()
         .oneshot(request(
@@ -134,14 +151,10 @@ async fn setup_movie_library_with_fanart(
         cover_res3.headers().get("content-type").unwrap(),
         "image/jpeg"
     );
-    let cover_file = tmp
-        .path()
-        .join("data")
-        .join("library")
-        .join("covers")
-        .join(format!("library-{lib_id}.jpg"));
     assert!(cover_file.is_file(), "自动拷贝生成了 cover.jpg");
-    assert_eq!(
+    let generated = image::load_from_memory(&std::fs::read(&cover_file).unwrap()).unwrap();
+    assert_eq!((generated.width(), generated.height()), (1920, 1080));
+    assert_ne!(
         std::fs::read(&cover_file).unwrap(),
         b"fake fanart bytes 12345"
     );

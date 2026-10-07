@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use domain::{MediaKind, UserId};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -33,6 +34,20 @@ pub(crate) fn default_library_cover(kind: MediaKind) -> Result<Vec<u8>, String> 
         MediaKind::Video => DEFAULT_VIDEO_COVER,
     };
     Ok(bytes.to_vec())
+}
+
+fn library_cover_tag(cover_path: Option<&std::path::Path>, kind: MediaKind) -> String {
+    let bytes = match cover_path {
+        Some(path) => match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(%error, cover_path = %path.display(), "failed to read library cover for cache tag");
+                default_library_cover(kind).unwrap_or_default()
+            }
+        },
+        None => default_library_cover(kind).unwrap_or_default(),
+    };
+    format!("cover-{:x}", Sha256::digest(bytes))
 }
 
 fn is_series_item_id(id: &str, media_id: domain::MediaId) -> bool {
@@ -143,15 +158,16 @@ impl MediaServerProvider for ApiServerProvider {
             if !crate::http::library::library_visible(&store, &lib, Some(user_id)) {
                 continue;
             }
-            let cover_path = crate::http::library::library_cover_path(&store, &lib)
-                .map(|p| p.display().to_string());
+            let cover_path = crate::http::library::library_cover_path(&store, &lib);
+            let cover_tag = library_cover_tag(cover_path.as_deref(), lib.kind);
             list.push(ServerLibrary {
                 id: lib.id,
                 name: lib.name,
                 kind: lib.kind,
                 exclude_from_home: lib.exclude_from_home,
                 root_paths: lib.root_paths,
-                cover_path,
+                cover_path: cover_path.map(|path| path.display().to_string()),
+                cover_tag,
             });
         }
         Ok(list)

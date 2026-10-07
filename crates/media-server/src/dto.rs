@@ -25,9 +25,9 @@ pub fn library_view_json(lib: &ServerLibrary, server_id: &str) -> Value {
         "IsFolder": true,
         "ServerId": server_id,
     });
-    // Jellyfin clients use ImageTags to decide whether to request the library artwork.
-    // The image route supplies a generated kind-specific fallback when no custom cover exists.
-    val["ImageTags"] = json!({ "Primary": "cover" });
+    // Jellyfin clients cache images by ImageTags. Use a content-derived tag so
+    // replacing a generated or uploaded cover invalidates VidHub's cached image.
+    val["ImageTags"] = json!({ "Primary": lib.cover_tag });
     val
 }
 

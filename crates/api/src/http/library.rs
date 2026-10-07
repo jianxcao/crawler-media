@@ -23,8 +23,10 @@ use crate::management::ApiState;
 use crate::store::Library;
 
 mod assets;
+mod cover;
 pub(crate) mod selection;
 pub(crate) use assets::{library_json, poster_path, preferred_row, rows_in_library};
+pub(crate) use cover::generate_library_cover;
 
 /// Resolve one ledger row to exactly one Library. The longest matching root
 /// wins, so a nested Library does not leak through a broader parent root. Two
@@ -122,12 +124,8 @@ pub(crate) fn backdrop_path(row: &domain::LedgerRow) -> Option<PathBuf> {
     None
 }
 
-/// 解析媒体库封面：
-/// 1. 若配置了 cover_path 且文件存在，直接使用；
-/// 2. 若系统数据目录 data/library/covers/library-{id}.jpg 已存在，直接使用；
-/// 3. 若无封面，触发**自动填充**：从库内作品中**仅查找横版 fanart.jpg**，
-///    找到后拷贝到系统数据目录 data/library/covers/library-{id}.jpg 并持久化；
-/// 4. 严禁使用纵版海报（poster.jpg），若库内无横图则返回 None。
+/// 解析媒体库封面：优先使用用户封面或已生成文件；否则从不同作品的
+/// `poster.jpg` 生成多海报封面。无可用海报时返回 None，由图片端点提供默认图。
 pub(crate) fn library_cover_path(store: &crate::Store, library: &Library) -> Option<PathBuf> {
     let covers_dir = store.library_covers_dir();
     let default_cover = covers_dir.join(format!("library-{}.jpg", library.id));
@@ -141,67 +139,149 @@ pub(crate) fn library_cover_path(store: &crate::Store, library: &Library) -> Opt
     if let Some(ref cp) = library.cover_path {
         let path = PathBuf::from(cp);
         if path.is_file() {
+            if let Some(upgraded) =
+                upgrade_legacy_library_cover(store, library, &path, &default_cover)
+            {
+                return Some(upgraded);
+            }
             return Some(path);
         }
     }
 
     // 2. 检查系统目录下的封面文件是否已存在
     if default_cover.is_file() {
+        if let Some(upgraded) =
+            upgrade_legacy_library_cover(store, library, &default_cover, &default_cover)
+        {
+            return Some(upgraded);
+        }
         let _ =
             store.set_library_cover_path(&library.id, Some(&default_cover.display().to_string()));
         return Some(default_cover);
     }
 
-    // 3. 自动填充逻辑：仅从横版 fanart.jpg 中选取第一张
-    let all_ledger = store.list_ledger().unwrap_or_default();
-    let mut candidate_fanart = None;
+    if library_cover_retry_pending(store, &library.id) {
+        return None;
+    }
 
-    // 先从已建立台账的文件旁查找
-    for row in &all_ledger {
-        let is_in_lib = library
-            .root_paths
-            .iter()
-            .any(|root| std::path::Path::new(&row.path).starts_with(root));
-        if is_in_lib {
-            if let Some(art) = backdrop_path(row) {
-                candidate_fanart = Some(art);
-                break;
+    // 3. Generate a multi-poster cover instead of copying one work's fanart.
+    match generate_library_cover(store, library, &default_cover) {
+        Ok(Some(path)) => {
+            if let Err(error) =
+                store.set_library_cover_path(&library.id, Some(&path.display().to_string()))
+            {
+                tracing::warn!(%error, library_id = %library.id, "failed to persist generated library cover path");
             }
+            mark_library_cover_checked(store, &library.id);
+            return Some(path);
+        }
+        Ok(None) => mark_library_cover_for_scan(store, &library.id),
+        Err(error) => {
+            tracing::warn!(%error, library_id = %library.id, "failed to generate library cover");
         }
     }
 
-    // 若台账未建立或台账中未命中，直接遍历根目录下一至二层子目录寻找 fanart.jpg
-    if candidate_fanart.is_none() {
-        for root in &library.root_paths {
-            if let Ok(entries) = std::fs::read_dir(root) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        let direct = path.join("fanart.jpg");
-                        if direct.is_file() {
-                            candidate_fanart = Some(direct);
-                            break;
-                        }
-                    }
-                }
-            }
-            if candidate_fanart.is_some() {
-                break;
-            }
-        }
-    }
-
-    if let Some(fanart) = candidate_fanart {
-        let _ = std::fs::create_dir_all(&covers_dir);
-        if let Ok(_) = std::fs::copy(&fanart, &default_cover) {
-            let _ = store
-                .set_library_cover_path(&library.id, Some(&default_cover.display().to_string()));
-            return Some(default_cover);
-        }
-    }
-
-    // 4. 若无横版背景图，严禁回退到竖图 poster.jpg，直接保持无图
+    // 4. Without readable local posters, the image endpoint returns default art.
     None
+}
+
+fn upgrade_legacy_library_cover(
+    store: &crate::Store,
+    library: &Library,
+    current: &FsPath,
+    generated_target: &FsPath,
+) -> Option<PathBuf> {
+    if current != generated_target || library_cover_checked(store, &library.id) {
+        return None;
+    }
+    let rows = rows_in_library(store, library);
+    if rows.is_empty() {
+        mark_library_cover_for_scan(store, &library.id);
+        return None;
+    }
+    if !cover::is_legacy_fanart_copy(&rows, current) {
+        mark_library_cover_checked(store, &library.id);
+        return None;
+    }
+    match cover::generate_library_cover_from_rows(library, generated_target, &rows) {
+        Ok(Some(path)) => {
+            if let Err(error) =
+                store.set_library_cover_path(&library.id, Some(&path.display().to_string()))
+            {
+                tracing::warn!(%error, library_id = %library.id, "failed to persist upgraded library cover path");
+            }
+            mark_library_cover_checked(store, &library.id);
+            Some(path)
+        }
+        Ok(None) => {
+            mark_library_cover_for_scan(store, &library.id);
+            None
+        }
+        Err(error) => {
+            tracing::warn!(%error, library_id = %library.id, "failed to upgrade legacy automatic library cover");
+            mark_library_cover_for_scan(store, &library.id);
+            None
+        }
+    }
+}
+
+fn library_cover_checked_key(library_id: &str) -> String {
+    format!("library_cover_checked.{library_id}")
+}
+
+fn library_cover_checked(store: &crate::Store, library_id: &str) -> bool {
+    match store.get_setting(&library_cover_checked_key(library_id)) {
+        Ok(Some(value)) => value.ends_with("-v2"),
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(%error, library_id, "failed to read library cover check marker");
+            false
+        }
+    }
+}
+
+fn library_cover_retry_pending(store: &crate::Store, library_id: &str) -> bool {
+    match store.get_setting(&library_cover_checked_key(library_id)) {
+        Ok(Some(value)) => value == "auto-v2",
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(%error, library_id, "failed to read library cover retry marker");
+            false
+        }
+    }
+}
+
+pub(crate) fn mark_library_cover_checked(store: &crate::Store, library_id: &str) {
+    set_library_cover_marker(store, library_id, "checked-v2");
+}
+
+pub(crate) fn mark_library_cover_manual(store: &crate::Store, library_id: &str) {
+    set_library_cover_marker(store, library_id, "manual-v2");
+}
+
+fn mark_library_cover_for_scan(store: &crate::Store, library_id: &str) {
+    set_library_cover_marker(store, library_id, "auto-v2");
+}
+
+fn set_library_cover_marker(store: &crate::Store, library_id: &str, value: &str) {
+    if let Err(error) = store.put_setting(&library_cover_checked_key(library_id), value) {
+        tracing::warn!(%error, library_id, "failed to mark library cover as checked");
+    }
+}
+
+pub(crate) fn clear_library_cover_checked(store: &crate::Store, library_id: &str) {
+    let key = library_cover_checked_key(library_id);
+    match store.get_setting(&key) {
+        Ok(Some(value)) if value == "auto-v2" => {
+            if let Err(error) = store.delete_setting(&key) {
+                tracing::warn!(%error, library_id, "failed to clear library cover check marker");
+            }
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%error, library_id, "failed to read library cover check marker");
+        }
+    }
 }
 
 /// GET /libraries?kind= — one entry per Library entity, defaults first;

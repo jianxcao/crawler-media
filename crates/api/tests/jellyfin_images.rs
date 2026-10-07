@@ -78,6 +78,62 @@ fn app(root: &Path) -> (axum::Router, String) {
     (router, compact)
 }
 
+fn empty_library_app(root: &Path) -> axum::Router {
+    let store = Store::open(root.join("data")).unwrap();
+    let library_root = root.join("empty-library");
+    std::fs::create_dir_all(&library_root).unwrap();
+    store
+        .create_library(
+            MediaKind::Movie,
+            "Empty Movies",
+            &[library_root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    router(
+        ApiState::new(
+            store,
+            "admin-token".into(),
+            ProfileSet::load(None).unwrap(),
+            Arc::new(NoFetch),
+            Arc::new(MemoryDownloader::new(root.join("stage"))),
+            library_root,
+        )
+        .unwrap(),
+    )
+}
+
+async fn empty_library_id_and_cover_tag(app: &axum::Router) -> (String, String) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/UserViews")
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let library = body["Items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["Name"] == "Empty Movies")
+        .expect("the test library should be visible");
+    (
+        library["Id"].as_str().unwrap().to_string(),
+        library["ImageTags"]["Primary"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+    )
+}
+
 async fn bytes(response: axum::response::Response) -> (StatusCode, Vec<u8>) {
     let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
@@ -123,6 +179,60 @@ async fn primary_image_returns_generated_cover_when_library_has_no_cover() {
 }
 
 #[tokio::test]
+async fn empty_library_primary_image_uses_default_art_and_changes_cache_tag_with_cover() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = empty_library_app(tmp.path());
+    let (library_id, initial_tag) = empty_library_id_and_cover_tag(&app).await;
+
+    let image = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/Items/{library_id}/Images/Primary"))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, image_bytes) = bytes(image).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(image_bytes.starts_with(b"\xff\xd8\xff"));
+    assert!(
+        image_bytes.len() > 100,
+        "empty library should receive the default artwork"
+    );
+    assert_eq!(
+        image_bytes.as_slice(),
+        include_bytes!("../assets/covers/movie.jpg"),
+        "VidHub should receive the current illustrated default cover"
+    );
+
+    let uploaded = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/libraries/{library_id}/cover"))
+                .header("authorization", "Bearer admin-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"data_url":"data:image/jpeg;base64,aGVsbG8="}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(uploaded.status(), StatusCode::OK);
+
+    let (_, updated_tag) = empty_library_id_and_cover_tag(&app).await;
+    assert_ne!(
+        initial_tag, updated_tag,
+        "VidHub must see cover changes through ImageTags"
+    );
+}
+
+#[tokio::test]
 async fn primary_image_returns_poster_jpeg_and_items_tag() {
     let tmp = tempfile::tempdir().unwrap();
     let jpeg = b"\xff\xd8\xff\xdb";
@@ -158,7 +268,9 @@ async fn primary_image_returns_poster_jpeg_and_items_tag() {
         .unwrap();
     let views_body: Value =
         serde_json::from_slice(&to_bytes(views.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(views_body["Items"][0]["ImageTags"]["Primary"], "cover");
+    assert!(views_body["Items"][0]["ImageTags"]["Primary"]
+        .as_str()
+        .is_some_and(|tag| tag.starts_with("cover-")));
 
     let library_id = views_body["Items"][0]["Id"].as_str().unwrap();
     let library_image = app

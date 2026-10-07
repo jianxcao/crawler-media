@@ -10,6 +10,7 @@ pub struct ServerLibrary {
     pub exclude_from_home: bool,
     pub root_paths: Vec<PathBuf>,
     pub cover_path: Option<String>,
+    pub cover_tag: String,
 }
 
 #[derive(Clone, Debug)]

@@ -36,7 +36,7 @@ pub(crate) async fn scan_library(
 }
 
 pub(crate) fn scan_library_root(state: &ApiState, root: &std::path::Path) -> Result<(), String> {
-    let (kind, scrape) = {
+    let (library_id, kind, scrape) = {
         let store = state.store.lock();
         let library = store
             .list_libraries()
@@ -52,7 +52,7 @@ pub(crate) fn scan_library_root(state: &ApiState, root: &std::path::Path) -> Res
             .map_err(|error| error.to_string())?
             .effective
             .mirror_nfo;
-        (library.kind, scrape)
+        (library.id, library.kind, scrape)
     };
     if !root.is_dir() {
         return Ok(());
@@ -106,6 +106,13 @@ pub(crate) fn scan_library_root(state: &ApiState, root: &std::path::Path) -> Res
         }
     }
     crate::http::library::enqueue_probes_for_paths(state, paths);
+    {
+        let store = state.store.lock();
+        if let Ok(Some(library)) = store.get_library(&library_id) {
+            crate::http::library::clear_library_cover_checked(&store, &library.id);
+            let _ = crate::http::library::library_cover_path(&store, &library);
+        }
+    }
     Ok(())
 }
 
@@ -237,10 +244,12 @@ fn scan_library_sync(state: ApiState, id: String) -> Response {
     let probe_paths: Vec<PathBuf> = transferred.into_iter().map(|f| f.path).collect();
     crate::http::library::enqueue_probes_for_paths(&state, probe_paths);
 
-    // 若库尚未设置封面，触发自动填充（仅选用横向 fanart.jpg）
+    // Recheck after a scan because a legacy auto-cover may have lacked posters
+    // before this Library's rows or artwork were refreshed.
     {
         let store = state.store.lock();
         if let Ok(Some(lib)) = store.get_library(&id) {
+            crate::http::library::clear_library_cover_checked(&store, &lib.id);
             let _ = crate::http::library::library_cover_path(&store, &lib);
         }
     }
