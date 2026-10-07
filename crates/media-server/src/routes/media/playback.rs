@@ -93,19 +93,37 @@ async fn subtitle_stream(
         .ok_or(StatusCode::NOT_FOUND)?;
     let tracks = &snapshot.metadata.tracks;
     let wants_vtt = _codec.eq_ignore_ascii_case("vtt");
-    match library::deliver_subtitle(tracks, index, wants_vtt) {
+    let cache_dir = std::env::temp_dir()
+        .join("crawler-media-subtitles")
+        .join(snapshot.row.id.to_string());
+    let source_path = std::path::Path::new(&snapshot.row.path);
+    match library::deliver_subtitle_with_source(
+        tracks,
+        index,
+        wants_vtt,
+        Some(source_path),
+        Some(&cache_dir),
+    ) {
         Ok(payload) => Ok((
             [(axum::http::header::CONTENT_TYPE, payload.content_type)],
             payload.bytes,
         )
             .into_response()),
         Err(error) => {
-            tracing::error!(item_id = %id, index, %error, "Jellyfin 交付字幕失败");
+            tracing::error!(
+                media = %snapshot.media.title,
+                path = %snapshot.row.path,
+                item_id = %id,
+                index,
+                %error,
+                "Jellyfin 交付字幕失败"
+            );
             match error {
                 library::DeliveryError::TrackNotFound => Err(StatusCode::NOT_FOUND),
                 library::DeliveryError::FileMissing | library::DeliveryError::Io(_) => {
                     Err(StatusCode::NOT_FOUND)
                 }
+                library::DeliveryError::Extraction(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
             }
         }
     }
