@@ -55,9 +55,9 @@ fn insert_episode(store: &Store, root: &Path, media_id: MediaId, season: u32, ep
         .unwrap();
 }
 
-/// 加一部全新的、没看过的电影。Latest 的用例都靠"库里既有看过的、也有没看过的"
-/// 来分辨「严格筛」与「未看优先」。
-fn insert_unplayed_movie(store: &Store, root: &Path, title: &str) -> MediaId {
+/// 加一部全新的、没看过的电影，返回它的条目 id（`/UserPlayedItems/{id}` 用的是它）。
+/// Latest 的用例都靠"库里既有看过的、也有没看过的"来分辨「严格筛」与「只排不筛」。
+fn insert_unplayed_movie(store: &Store, root: &Path, title: &str) -> String {
     let media = Media {
         id: MediaId::new(),
         kind: MediaKind::Movie,
@@ -73,22 +73,22 @@ fn insert_unplayed_movie(store: &Store, root: &Path, title: &str) -> MediaId {
     store.insert_media(&media).unwrap();
     let path = root.join(format!("{}.mkv", title.replace(' ', "-").to_lowercase()));
     std::fs::write(&path, b"copy").unwrap();
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
-            media_id: media.id,
-            path: path.display().to_string(),
-            season: None,
-            episode: None,
-            resolution: None,
-            codec: None,
-            hdr: None,
-            quality_source: QualitySource::Probe,
-            confidence: Confidence::High,
-            filter_score: None,
-        })
-        .unwrap();
-    media.id
+    let row = LedgerRow {
+        id: LedgerId::new(),
+        media_id: media.id,
+        path: path.display().to_string(),
+        season: None,
+        episode: None,
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Probe,
+        confidence: Confidence::High,
+        filter_score: None,
+    };
+    let compact = row.id.to_string().replace('-', "");
+    store.insert_ledger(&row).unwrap();
+    compact
 }
 
 #[tokio::test]
@@ -239,27 +239,30 @@ async fn latest_items_honors_is_played_filter() {
     assert_eq!(played_items[0]["UserData"]["Played"], true);
 }
 
-/// 客户端不传 `IsPlayed`（Jellyfin 的 web/客户端就是这么调的）：按「未观看优先」——
-/// 有没看过的只回没看过的。
+/// 客户端不传 `IsPlayed`（Jellyfin 的 web/客户端就是这么调的）：**只排不筛**——
+/// 已看完的还在名单里，只是沉底；刚入库但看完了的那部不会顶在没看过的前面。
 #[tokio::test]
-async fn latest_items_prefers_unwatched_when_is_played_is_omitted() {
+async fn latest_items_lists_unwatched_first_when_is_played_is_omitted() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, _, played_item_id) = app(tmp.path());
+    let (app, _, matrix_id) = app(tmp.path());
     let store = Store::open(tmp.path().join("data")).unwrap();
-    insert_unplayed_movie(&store, tmp.path(), "Not Watched");
-    mark_played(&app, &played_item_id).await;
+    // 新加一部（比 The Matrix 新）并把它标成已看完：纯按入库时间它该排第一
+    let alpha_id = insert_unplayed_movie(&store, tmp.path(), "Alpha");
+    mark_played(&app, &alpha_id).await;
 
     let latest = get_json(&app, "/Users/Me/Items/Latest").await;
     let items = latest.as_array().unwrap();
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0]["Name"], "Not Watched");
+    assert_eq!(items.len(), 2, "缺省只排不筛：已看完的也留着");
+    assert_eq!(items[0]["Id"], matrix_id, "没看完的在前");
     assert_eq!(items[0]["UserData"]["Played"], false);
+    assert_eq!(items[1]["Id"], alpha_id, "刚入库但已看完的沉底");
+    assert_eq!(items[1]["UserData"]["Played"], true);
 }
 
-/// 整个库都看过了：Latest 回退到全部，而不是像 Jellyfin 那样回空列表——
-/// 「看完了的库」在客户端首页也得有入口。
+/// 整个库都看过了：缺省照样回全部（都在"已看完"那一档，段内还是入库时间倒序），
+/// 而不是像 Jellyfin 那样回空列表——「看完了的库」在客户端首页也得有入口。
 #[tokio::test]
-async fn latest_items_falls_back_to_all_when_everything_is_played() {
+async fn latest_items_stays_populated_when_everything_is_played() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, _, played_item_id) = app(tmp.path());
     mark_played(&app, &played_item_id).await;
@@ -269,7 +272,7 @@ async fn latest_items_falls_back_to_all_when_everything_is_played() {
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["Id"], played_item_id);
 
-    // 显式 IsPlayed=false 仍是严格筛：回退只发生在"客户端没指定"的时候
+    // 显式 IsPlayed=false 仍是严格筛：只排不筛只发生在"客户端没指定"的时候
     let strict = get_json(&app, "/Users/Me/Items/Latest?IsPlayed=false").await;
     assert!(strict.as_array().unwrap().is_empty());
 }

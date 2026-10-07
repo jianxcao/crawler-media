@@ -404,16 +404,16 @@ async fn latest_items(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     // 「最近入库」的播放状态口径（见 library::latest）：
-    // 客户端显式给了 IsPlayed 就按它严格筛（协议语义原样保留）；没给时按
-    // 「未观看优先」——有没看过的只回没看过的，整段都看过才回全部。
-    // Jellyfin 在同样的位置会因为 HidePlayedInLatest 直接回空列表，于是"全看完了"
-    // 的库在客户端首页彻底没有入口；这一步是有意多走的。
+    // 显式给了 IsPlayed 就按它严格筛（协议语义原样保留）；没给时**只排不筛**——
+    // 没看完的在前、已看完的沉底，段内仍是入库时间倒序。
+    // Jellyfin 在缺省位置会因为 HidePlayedInLatest 直接把已看完的藏掉，全看过的库
+    // 更是连入口都没有；我们改成排到最后，客户端那一行于是永远有内容。
     let rows = item_filters::filter_items_except_played(rows, &query);
+    let rows = item_filters::sort_items(rows, "DateCreated,SortName", "Descending");
     let rows = match query.is_played {
         Some(played) => rows.into_iter().filter(|item| item.played == played).collect(),
-        None => library::prefer_unwatched(rows, |item| !item.played),
+        None => library::played_last(rows, |item| item.played),
     };
-    let rows = item_filters::sort_items(rows, "DateCreated,SortName", "Descending");
     let start_index = query.start_index.unwrap_or(0);
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let listed: Vec<Value> = rows

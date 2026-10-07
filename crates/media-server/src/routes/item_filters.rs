@@ -16,7 +16,7 @@ pub(super) fn filter_items(
 }
 
 /// 除播放状态以外的全部过滤条件。`Items/Latest` 要自己决定播放状态那一档
-/// （未指定 `IsPlayed` 时按「未观看优先」取，见 `library::prefer_unwatched`），
+/// （显式 `IsPlayed` 才筛，未指定时只把已看完的沉底，见 `library::played_last`），
 /// 所以它先走这一个，再自己收口；其余路由用上面的 `filter_items` 即可。
 pub(super) fn filter_items_except_played(
     rows: Vec<MediaItemSnapshot>,

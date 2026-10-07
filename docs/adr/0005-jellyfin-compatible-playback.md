@@ -33,14 +33,10 @@ Authorization: MediaBrowser Client="VidHub", Device="iPhone", DeviceId="device-i
 
 ## 「最近入库」的播放状态口径
 
-**Jellyfin 客户端表面**（`Items/Latest`）的 `IsPlayed` 按协议的两条语义实现：**给了就严格筛**（`true` / `false` 各只要那一半），**没给**时按服务端的默认策略走。Jellyfin 的默认策略来自用户配置 `HidePlayedInLatest`（出厂 `true`）：它把 `isPlayed` 置为 `false`，全看过的库于是返回**空列表**——客户端首页上那个库连入口都没有。
+`Items/Latest` 的 `IsPlayed` 只保留协议里最硬的那条：**显式**传了 `true`/`false` 就严格筛（客户端要什么给什么，`latest_items_honors_is_played_filter` 盯着）。**没传**时按服务端的默认策略走。Jellyfin 的默认策略来自用户配置 `HidePlayedInLatest`（出厂 `true`）：它把 `isPlayed` 置为 `false`，把看过的藏掉，全看过的库更是直接返回**空列表**——客户端首页上那个库连入口都没有。
 
-我们的默认策略比它多走一步：「未观看优先」——有没看过的就只回没看过的，一部没看过的都没有时才回全部（实现见 `crates/library/src/latest.rs` 的 `prefer_unwatched`）。理由：一个"全看完了"的媒体库在首页应该有内容（最新入库），而不是像什么都坏了那样整段消失；客户端只是**多**看到几条已经看过的（`UserData.Played` 为真，客户端自己会标记）。这条偏差是有意的，显式传 `IsPlayed` 的客户端不受影响。
+我们缺省**只排不筛**：没看完的排前面、已看完的沉底，段内仍是入库时间倒序（实现见 `crates/library/src/latest.rs` 的 `played_last`）。自有 API 那边是同一条思路、更细的分级（`WatchTier`：未看 → 在看 → 已看完），由首页库行与「我的收藏」行传 `unwatched_first=true` 打开；墙上用户手选的「未观看」（`w=unwatched`）始终是严格筛，不受影响。
 
-**自有 API**（`/api/v1`，我们的 Web UI）不走上面那条，而是 `unwatched_first=true`：观看分级**参与排序**（`WatchTier`：未看 → 在看 → 已看完），**只排不筛**。首页的库行与「我的收藏」行都用它。两条口径不同是有意的：
+理由：一个只有 3 部剧、其中 2 部看过的小库，筛完只剩 1 张卡，看起来像坏了；而"最近入库"这个名字描述的就是入库时间，把看过的藏起来反而名不副实。Jellyfin Web 的「最近添加」不传 `isPlayed`（`src/components/homesections/sections/recentlyAdded.ts` 只传 `userId/limit/fields/parentId`），所以它也会看到已看完的排在行尾。
 
-- 协议那边是客户端契约：`IsPlayed=false` 必须只回没看过的，所以只能筛，回退仅限"整段都看过、否则会空"。
-- 我们自己的 UI 要的是"这一行有什么新内容"：一个只有 3 部剧、其中 2 部看过的小库，筛完只剩 1 张卡，看起来像坏了；把已看完的沉到行尾既保留了信息，也仍然让没看过的排在最前。
-- 墙上用户手选的「未观看」（`w=unwatched`）始终是严格筛，不受 `unwatched_first` 影响。
-
-还没有实现的部分：Jellyfin 客户端的用户设置开关（`UserConfiguration.HidePlayedInLatest` 与 `POST /Users/{id}/Configuration`）尚未落地，`/Users/Me` 也不返回 `Configuration` 块；客户端目前无法把默认策略改成"混排已看与未看"。要在客户端里真正关掉「隐藏已看」，需要补这套用户配置表面。
+代价（有意的）：客户端再没有开关能把已看完的藏掉——只有**显式**传 `IsPlayed=false` 才严格，而多数客户端不传。要做到"用户自己决定藏不藏"，得补用户配置表面（`UserConfiguration.HidePlayedInLatest` 与 `GET/POST /Users/{id}/Configuration`；Jellyfin Web 本来就读 `user.Configuration`），落地后可以按这个开关在"严格筛"与"只排不筛"之间切。这套表面目前**尚未实现**，`/Users/Me` 也不返回 `Configuration` 块。
