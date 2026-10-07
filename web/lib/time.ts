@@ -1,0 +1,130 @@
+/**
+ * 全产品统一的时间处理入口。
+ *
+ * 约定：所有需要展示时间的地方都走这里，不要在组件里散落 `new Date().toLocaleString()`
+ * 之类的裸写法。好处：
+ *   1. 解析口径统一 —— 后端时间统一为**带时区标记**的 ISO 串（naive UTC 序列化时补 +00:00，
+ *      见后端时间序列化规范），dayjs 会正确按 UTC 解析后转成
+ *      浏览器本地时区展示，避免"刚验证完却显示 8 小时前"这类时区错位。
+ *   2. 中文文案统一 —— relativeTime 插件配 zh-cn locale，产出"几秒前 / 几分钟前 / 几天前"。
+ *
+ * dayjs 选型：~2KB，仅按需加载 relativeTime 插件与 zh-cn 语言包，不引入完整 moment。
+ */
+import dayjs from "dayjs";
+import relativeTime from "dayjs/plugin/relativeTime.js";
+import "dayjs/locale/zh-cn.js";
+
+dayjs.extend(relativeTime);
+
+/** 时间展示的唯一地区化配置；未来切换语言或格式只改这里。 */
+const TIME_DISPLAY_CONFIG = {
+  locale: "zh-cn",
+  dateTimeFormat: "YYYY/MM/DD HH:mm",
+  clockTimeFormat: "HH:mm",
+  timelineDateFormat: "MM/DD",
+  historyDayFormat: "M月D日",
+  historyDayFullFormat: "YYYY年M月D日",
+  neverLabel: "从未",
+  emptyLabel: "—",
+} as const;
+
+dayjs.locale(TIME_DISPLAY_CONFIG.locale);
+
+/** Jobs historically emit unix seconds; auth timestamps are ISO. Accept both. */
+function parseTime(value: string | number | null | undefined): dayjs.Dayjs | null {
+  if (value == null || value === "") return null;
+  if (typeof value === "number" || /^[0-9]+$/.test(String(value))) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return null;
+    return n > 1e12 ? dayjs(n) : dayjs.unix(n);
+  }
+  const parsed = dayjs(value);
+  return parsed.isValid() ? parsed : null;
+}
+
+/**
+ * ISO 时间 → 中文相对时间，如「刚刚 / 3 分钟前 / 2 天前」。
+ * 用于"上次检查""最近验证"这类关注"多久之前"的场景。
+ * 传入 null/空 表示从未发生，返回「从未」。
+ */
+export function formatRelativeTime(iso: string | number | null | undefined): string {
+  const parsed = parseTime(iso);
+  if (!parsed) return TIME_DISPLAY_CONFIG.neverLabel;
+  return parsed.fromNow();
+}
+
+/**
+ * ISO 时间 → 本地绝对时间，如「2026/07/09 18:00」。
+ * 用于"令牌生成于""创建于"这类关注"具体是哪一刻"的场景。
+ */
+export function formatDateTime(iso: string | number | null | undefined): string {
+  const parsed = parseTime(iso);
+  if (!parsed) return TIME_DISPLAY_CONFIG.emptyLabel;
+  return parsed.format(TIME_DISPLAY_CONFIG.dateTimeFormat);
+}
+
+/** 时间线的紧凑本地时间；完整日期仍通过卡片提示中的 formatDateTime 提供。 */
+export function formatClockTime(iso: string | number | null | undefined): string {
+  const parsed = parseTime(iso);
+  if (!parsed) return TIME_DISPLAY_CONFIG.emptyLabel;
+  return parsed.format(TIME_DISPLAY_CONFIG.clockTimeFormat);
+}
+
+/**
+ * Feed 时间轴的紧凑时间：当天记录显示时分，跨天记录显示月日。调用方仍可在
+ * 卡片悬停信息里提供完整绝对时间，避免长历史把不同日期误看成同一天。
+ */
+export function formatTimelineTime(
+  iso: string | number | null | undefined,
+  referenceIso?: string,
+): string {
+  const value = parseTime(iso);
+  if (!value) return TIME_DISPLAY_CONFIG.emptyLabel;
+  return value.isSame(referenceIso ? dayjs(referenceIso) : dayjs(), "day")
+    ? value.format(TIME_DISPLAY_CONFIG.clockTimeFormat)
+    : value.format(TIME_DISPLAY_CONFIG.timelineDateFormat);
+}
+
+/** Feed 历史分组键使用浏览器本地日期，避免 UTC 日期把午夜附近的记录分错组。 */
+export function timelineDayKey(iso: string | number): string {
+  return (parseTime(iso) ?? dayjs()).format("YYYY-MM-DD");
+}
+
+/** 历史分组标题：今天、昨天优先使用自然语言，更早记录才显示具体日期。 */
+export function formatTimelineDayLabel(iso: string | number, referenceIso?: string): string {
+  const value = parseTime(iso) ?? dayjs();
+  const reference = referenceIso ? dayjs(referenceIso) : dayjs();
+  if (value.isSame(reference, "day")) return "今天早些时候";
+  if (value.isSame(reference.subtract(1, "day"), "day")) return "昨天";
+  return value.isSame(reference, "year")
+    ? value.format(TIME_DISPLAY_CONFIG.historyDayFormat)
+    : value.format(TIME_DISPLAY_CONFIG.historyDayFullFormat);
+}
+
+/**
+ * 下次运行时间的友好展示：
+ * - 今天：14:26 下次运行
+ * - 明天：明天 14:26 下次运行
+ * - 后天或更晚（当年）：09/25 14:26 下次运行
+ * - 跨年：2027/09/25 14:26 下次运行
+ */
+export function formatNextRunTime(
+  iso: string | number | null | undefined,
+  referenceIso?: string,
+): string {
+  const value = parseTime(iso);
+  if (!value) return TIME_DISPLAY_CONFIG.emptyLabel;
+  const reference = referenceIso ? dayjs(referenceIso) : dayjs();
+  const time = value.format(TIME_DISPLAY_CONFIG.clockTimeFormat);
+  if (value.isSame(reference, "day")) return time;
+  if (value.isSame(reference.add(1, "day"), "day")) return `明天 ${time}`;
+  if (value.isSame(reference.add(2, "day"), "day")) return `后天 ${time}`;
+  if (value.isSame(reference, "year")) return `${value.format(TIME_DISPLAY_CONFIG.timelineDateFormat)} ${time}`;
+  return `${value.format(TIME_DISPLAY_CONFIG.dateTimeFormat)}`;
+}
+
+/** Unix 秒时间戳 → 本地绝对时间，避免组件绕开统一地区化配置。 */
+export function formatUnixDateTime(seconds: number | null | undefined): string {
+  if (seconds == null) return TIME_DISPLAY_CONFIG.emptyLabel;
+  return dayjs.unix(seconds).format(TIME_DISPLAY_CONFIG.dateTimeFormat);
+}

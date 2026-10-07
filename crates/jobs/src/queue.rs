@@ -1,0 +1,242 @@
+use std::path::Path;
+
+use domain::{JobDefId, JobId};
+use rusqlite::Connection;
+
+use crate::kinds::{JobKind, Schedule};
+use crate::store;
+use crate::types::{Job, JobDef, JobError, JobStatus};
+
+pub struct NewDef {
+    pub kind: JobKind,
+    pub name: String,
+    pub enabled: bool,
+    pub schedule: Option<Schedule>,
+    pub payload: String,
+    pub timeout_secs: Option<u32>,
+    pub concurrency_key: Option<String>,
+}
+
+pub trait Runner {
+    fn run(&self, job: &Job) -> Result<(), String>;
+}
+
+pub struct Queue {
+    conn: Connection,
+}
+
+impl Queue {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, JobError> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let conn = Connection::open(path)?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        store::migrate(&conn)?;
+        Ok(Self { conn })
+    }
+
+    pub fn enqueue(&self, kind: JobKind, payload: &str, run_after: i64) -> Result<Job, JobError> {
+        self.enqueue_with_key(kind, payload, run_after, None)
+    }
+
+    pub fn enqueue_with_key(
+        &self,
+        kind: JobKind,
+        payload: &str,
+        run_after: i64,
+        concurrency_key: Option<&str>,
+    ) -> Result<Job, JobError> {
+        tracing::debug!(kind = kind.as_str(), run_after, concurrency_key, "任务入队");
+        store::insert_job(
+            &self.conn,
+            None,
+            kind,
+            payload,
+            run_after,
+            concurrency_key,
+            None,
+        )
+    }
+
+    pub fn upsert_def(&self, def: NewDef) -> Result<JobDef, JobError> {
+        store::upsert_def(&self.conn, def)
+    }
+
+    pub fn ensure_def(&self, def: NewDef) -> Result<JobDef, JobError> {
+        store::ensure_def(&self.conn, def)
+    }
+
+    pub fn list_defs(&self) -> Result<Vec<JobDef>, JobError> {
+        crate::schedule::list_defs(&self.conn)
+    }
+
+    pub fn def(&self, id: JobDefId) -> Result<Option<JobDef>, JobError> {
+        crate::schedule::get_def(&self.conn, id)
+    }
+
+    pub fn def_name(&self, id: JobDefId) -> Result<Option<String>, JobError> {
+        Ok(self.def(id)?.map(|def| def.name))
+    }
+
+    pub fn claim(&self, now: i64, limit: usize) -> Result<Vec<Job>, JobError> {
+        let jobs = store::claim(&self.conn, now, limit)?;
+        if !jobs.is_empty() {
+            tracing::info!(count = jobs.len(), "已领取待执行任务");
+        }
+        Ok(jobs)
+    }
+
+    pub fn succeed(&self, id: JobId, now: i64) -> Result<Job, JobError> {
+        let job = store::finish(&self.conn, id, now, JobStatus::Succeeded, None)?;
+        tracing::info!(job_id = %job.id, kind = job.kind.as_str(), "任务执行成功");
+        Ok(job)
+    }
+
+    /// Commit only if this is still the execution that claimed the Job.
+    pub fn succeed_claimed(&self, claimed: &Job, now: i64) -> Result<Option<Job>, JobError> {
+        store::finish_claimed(&self.conn, claimed, now, JobStatus::Succeeded)
+    }
+
+    pub fn fail_claimed(
+        &self,
+        claimed: &Job,
+        now: i64,
+        error: &str,
+    ) -> Result<Option<Job>, JobError> {
+        store::fail_claimed(&self.conn, claimed, now, error)
+    }
+
+    pub fn fail(&self, id: JobId, now: i64, error: &str) -> Result<Job, JobError> {
+        store::fail(&self.conn, id, now, error)
+    }
+
+    pub fn recover(&self, now: i64) -> Result<Vec<Job>, JobError> {
+        let recovered = store::recover(&self.conn, now)?;
+        if !recovered.is_empty() {
+            tracing::warn!(count = recovered.len(), "恢复超时任务");
+        }
+        Ok(recovered)
+    }
+
+    /// Recover timed-out jobs except attempts known to still be executing in
+    /// this process. This preserves their running state and concurrency keys;
+    /// ordinary recovery remains available after a process restart.
+    pub fn recover_except(&self, now: i64, active: &[Job]) -> Result<Vec<Job>, JobError> {
+        let recovered = store::recover_except(&self.conn, now, active)?;
+        if !recovered.is_empty() {
+            tracing::warn!(count = recovered.len(), "恢复超时任务");
+        }
+        Ok(recovered)
+    }
+
+    pub fn ensure_scheduled(&self, now: i64) -> Result<Vec<Job>, JobError> {
+        let created = crate::schedule::ensure_scheduled(&self.conn, now)?;
+        if !created.is_empty() {
+            tracing::debug!(count = created.len(), "按计划生成新任务");
+        }
+        Ok(created)
+    }
+
+    /// 只调度/提前一个 def（按 id），不碰其他 def。见 schedule::ensure_scheduled_def。
+    pub fn ensure_scheduled_for(&self, now: i64, def_id: JobDefId) -> Result<Vec<Job>, JobError> {
+        let Some(def) = crate::schedule::get_def(&self.conn, def_id)? else {
+            return Ok(Vec::new());
+        };
+        crate::schedule::ensure_scheduled_def(&self.conn, now, &def)
+    }
+
+    /// 只调度/提前 payload 匹配的 def（订阅搜索 / 目录刷新种子用）。
+    pub fn ensure_scheduled_for_payload(
+        &self,
+        now: i64,
+        payload: &str,
+    ) -> Result<Vec<Job>, JobError> {
+        let mut created = Vec::new();
+        for def in crate::schedule::defs_for_payload(&self.conn, payload)? {
+            created.extend(crate::schedule::ensure_scheduled_def(
+                &self.conn, now, &def,
+            )?);
+        }
+        Ok(created)
+    }
+
+    pub fn get(&self, id: JobId) -> Result<Option<Job>, JobError> {
+        store::get_job(&self.conn, id)
+    }
+
+    /// Delete defs whose payload exactly matches, plus their child jobs.
+    pub fn delete_defs_for_payload(&self, payload: &str) -> Result<usize, JobError> {
+        store::delete_defs_for_payload(&self.conn, payload)
+    }
+
+    pub fn set_def_enabled_by_id(
+        &self,
+        def_id: JobDefId,
+        enabled: bool,
+    ) -> Result<usize, JobError> {
+        store::set_def_enabled_by_id(&self.conn, def_id, enabled)
+    }
+
+    /// Enable or disable defs whose payload matches. Disabled defs are not scheduled.
+    pub fn set_def_enabled(&self, payload: &str, enabled: bool) -> Result<usize, JobError> {
+        store::set_def_enabled(&self.conn, payload, enabled)
+    }
+
+    pub fn set_def_schedule(&self, payload: &str, schedule: Schedule) -> Result<usize, JobError> {
+        store::set_def_schedule(&self.conn, payload, &schedule)
+    }
+
+    pub fn set_def_schedule_by_id(
+        &self,
+        def_id: JobDefId,
+        schedule: Option<Schedule>,
+    ) -> Result<usize, JobError> {
+        store::set_def_schedule_by_id(&self.conn, def_id, schedule.as_ref())
+    }
+
+    pub fn defs_for_payload(&self, payload: &str) -> Result<Vec<JobDef>, JobError> {
+        crate::schedule::defs_for_payload(&self.conn, payload)
+    }
+
+    /// Recent child jobs (any status) whose payload matches, newest first.
+    pub fn jobs_for_payload(&self, payload: &str, limit: usize) -> Vec<Job> {
+        store::jobs_for_payload(&self.conn, payload, limit).unwrap_or_default()
+    }
+
+    /// Cancel queued children of a def; running external work is allowed to finish.
+    pub fn cancel_def_children(&self, def_id: JobDefId) -> Result<usize, JobError> {
+        store::cancel_def_children(&self.conn, def_id)
+    }
+
+    /// Count jobs finished after `since` (used by the /jobs/stream watcher).
+    pub fn count_finished_since(&self, since: i64) -> Result<i64, JobError> {
+        store::count_finished_since(&self.conn, since)
+    }
+
+    pub fn get_live_child(&self, def_id: JobDefId) -> Result<Option<Job>, JobError> {
+        crate::schedule::get_live_child(&self.conn, def_id)
+    }
+
+    pub fn get_last_child(&self, def_id: JobDefId) -> Result<Option<Job>, JobError> {
+        crate::schedule::get_last_child(&self.conn, def_id)
+    }
+
+    pub fn tick(&self, now: i64, runner: &dyn Runner) -> Result<Vec<Job>, JobError> {
+        self.recover(now)?;
+        self.ensure_scheduled(now)?;
+        let claimed = self.claim(now, 2)?;
+        let mut finished = Vec::new();
+        for job in claimed {
+            let persisted = match runner.run(&job) {
+                Ok(()) => self.succeed_claimed(&job, now)?,
+                Err(error) => self.fail_claimed(&job, now, &error)?,
+            };
+            if let Some(job) = persisted {
+                finished.push(job);
+            }
+        }
+        Ok(finished)
+    }
+}

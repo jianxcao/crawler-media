@@ -1,0 +1,33 @@
+{
+  "subject_collection_items": [
+    {
+      "id": "36576514",
+      "title": "深渊无间",
+      "year": "2026",
+      "card_subtitle": "2026 / 中国大陆 / 剧情 悬疑 犯罪 / 刘海波 / 任嘉伦 秦俊杰",
+      "pic": {
+        "large": "https://img9.doubanio.com/view/photo/m_ratio_poster/public/p2931762705.jpg",
+        "normal": "https://img9.doubanio.com/view/photo/s_ratio_poster/public/p2931762705.jpg"
+      },
+      "rating": {
+        "count": 45536,
+        "max": 10,
+        "star_count": 3.5,
+        "value": 7.2
+      },
+      "description": "深渊推理故事。"
+    },
+    {
+      "id": "36449295",
+      "title": "兰香如故",
+      "year": null,
+      "card_subtitle": "2026 / 中国大陆 / 剧情 爱情 古装 / 黄颖湘 陈丹 / 谭松韵 刘学义",
+      "cover": {
+        "url": "https://img9.doubanio.com/view/photo/m_ratio_poster/public/p2933527614.jpg"
+      },
+      "rating": {
+        "value": 0.0
+      }
+    }
+  ]
+}

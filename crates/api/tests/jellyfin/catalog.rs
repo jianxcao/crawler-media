@@ -1,0 +1,738 @@
+use super::*;
+
+async fn get_json(app: &axum::Router, uri: &str) -> Value {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    json(response).await
+}
+
+fn new_media(kind: MediaKind, title: &str) -> Media {
+    Media {
+        id: MediaId::new(),
+        kind,
+        title: title.into(),
+        year: None,
+        original_title: None,
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    }
+}
+
+fn insert_episode(
+    store: &Store,
+    root: &Path,
+    media_id: MediaId,
+    season: u32,
+    episode: u32,
+) -> LedgerId {
+    let path = root.join(format!("Show S{season:02}E{episode:02}.mkv"));
+    std::fs::write(&path, b"episode").unwrap();
+    let row = LedgerRow {
+        id: LedgerId::new(),
+        media_id,
+        path: path.display().to_string(),
+        season: Some(season),
+        episode: Some(episode),
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Probe,
+        confidence: Confidence::High,
+        filter_score: None,
+    };
+    store.insert_ledger(&row).unwrap();
+    row.id
+}
+
+#[tokio::test]
+async fn tv_season_filter_resume_and_show_played_marks_work() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, _, _) = app(tmp.path());
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let root = tmp.path().join("tv");
+    std::fs::create_dir_all(&root).unwrap();
+    store
+        .create_library(
+            MediaKind::Tv,
+            "Shows",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let show = new_media(MediaKind::Tv, "Show");
+    store.insert_media(&show).unwrap();
+    let first_id = insert_episode(&store, &root, show.id, 1, 1);
+    let second_id = insert_episode(&store, &root, show.id, 1, 2);
+    let third_id = insert_episode(&store, &root, show.id, 2, 1);
+    let fourth_id = insert_episode(&store, &root, show.id, 2, 2);
+    let series_id = show.id.to_string().replace('-', "");
+
+    let seasons = get_json(&app, &format!("/Shows/{series_id}/Seasons")).await;
+    let season_one_id = seasons["Items"][0]["Id"].as_str().unwrap();
+    let season_two_id = seasons["Items"][1]["Id"].as_str().unwrap();
+    let all_episodes = get_json(&app, &format!("/Shows/{series_id}/Episodes")).await;
+    assert_eq!(all_episodes["TotalRecordCount"], 4);
+    assert_eq!(
+        all_episodes["Items"][0]["Id"],
+        first_id.to_string().replace('-', "")
+    );
+    assert_eq!(
+        all_episodes["Items"][1]["Id"],
+        second_id.to_string().replace('-', "")
+    );
+    assert_eq!(
+        all_episodes["Items"][2]["Id"],
+        third_id.to_string().replace('-', "")
+    );
+    assert_eq!(
+        all_episodes["Items"][3]["Id"],
+        fourth_id.to_string().replace('-', "")
+    );
+
+    let season_episodes = get_json(
+        &app,
+        &format!("/Shows/{series_id}/Episodes?SeasonId={season_one_id}"),
+    )
+    .await;
+    assert_eq!(season_episodes["TotalRecordCount"], 2);
+    assert_eq!(season_episodes["Items"].as_array().unwrap().len(), 2);
+    assert_eq!(season_episodes["Items"][0]["IndexNumber"], 1);
+    assert_eq!(season_episodes["Items"][1]["IndexNumber"], 2);
+    let invalid_season = get_json(
+        &app,
+        &format!("/Shows/{series_id}/Episodes?SeasonId=another-season"),
+    )
+    .await;
+    assert!(invalid_season["Items"].as_array().unwrap().is_empty());
+
+    let progress = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/Sessions/Playing/Progress")
+                .header("authorization", "Bearer admin-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "ItemId": second_id.to_string().replace('-', ""),
+                        "PositionTicks": 75_000_000
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(progress.status(), StatusCode::NO_CONTENT);
+    let resumed = get_json(
+        &app,
+        "/Users/00000000-0000-0000-0000-000000000001/Items/Resume",
+    )
+    .await;
+    let resumed_item = resumed["Items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["Id"] == second_id.to_string().replace('-', ""))
+        .unwrap();
+    assert_eq!(resumed_item["Type"], "Episode");
+    assert_eq!(
+        resumed_item["UserData"]["PlaybackPositionTicks"],
+        75_000_000
+    );
+
+    let mark_episode = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/UserPlayedItems/{}",
+                    first_id.to_string().replace('-', "")
+                ))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mark_episode.status(), StatusCode::OK);
+    let next_up = get_json(&app, "/Shows/NextUp").await;
+    assert_eq!(
+        next_up["Items"][0]["Id"],
+        second_id.to_string().replace('-', "")
+    );
+
+    let favorite_show = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/UserFavoriteItems/{series_id}"))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(favorite_show.status(), StatusCode::OK);
+    assert_eq!(
+        get_json(&app, "/Shows/NextUp").await["Items"][0]["Id"],
+        second_id.to_string().replace('-', "")
+    );
+
+    let mark_season = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/UserPlayedItems/{season_one_id}"))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mark_season.status(), StatusCode::OK);
+    let next_up_after_season = get_json(&app, "/Shows/NextUp").await;
+    assert_eq!(
+        next_up_after_season["Items"][0]["Id"],
+        third_id.to_string().replace('-', "")
+    );
+    let resume_after_season = get_json(
+        &app,
+        "/Users/00000000-0000-0000-0000-000000000001/Items/Resume",
+    )
+    .await;
+    assert!(resume_after_season["Items"].as_array().unwrap().is_empty());
+
+    let unmark_second = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/UserPlayedItems/{}",
+                    second_id.to_string().replace('-', "")
+                ))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unmark_second.status(), StatusCode::OK);
+    assert_eq!(
+        get_json(&app, "/Shows/NextUp").await["Items"][0]["Id"],
+        second_id.to_string().replace('-', "")
+    );
+    let favorite_season = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/UserFavoriteItems/{season_one_id}"))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(favorite_season.status(), StatusCode::OK);
+    assert_eq!(
+        get_json(&app, "/Shows/NextUp").await["Items"][0]["Id"],
+        second_id.to_string().replace('-', "")
+    );
+    let resume_after_favorite = get_json(
+        &app,
+        "/Users/00000000-0000-0000-0000-000000000001/Items/Resume",
+    )
+    .await;
+    assert!(
+        resume_after_favorite["Items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["Id"] == second_id.to_string().replace('-', ""))
+    );
+
+    let mark_show = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/UserPlayedItems/{series_id}"))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mark_show.status(), StatusCode::OK);
+    let next_up_after_show = get_json(&app, "/Shows/NextUp").await;
+    assert!(next_up_after_show["Items"].as_array().unwrap().is_empty());
+    let resume_after_show = get_json(
+        &app,
+        "/Users/00000000-0000-0000-0000-000000000001/Items/Resume",
+    )
+    .await;
+    assert!(resume_after_show["Items"].as_array().unwrap().is_empty());
+
+    let favorite_unmarked_season = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/UserFavoriteItems/{season_two_id}"))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(favorite_unmarked_season.status(), StatusCode::OK);
+    assert!(
+        get_json(&app, "/Shows/NextUp").await["Items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    let favorite_episode = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/UserFavoriteItems/{}",
+                    fourth_id.to_string().replace('-', "")
+                ))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(favorite_episode.status(), StatusCode::OK);
+    assert!(
+        get_json(&app, "/Shows/NextUp").await["Items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let favorited_unplayed_unit = Store::open(tmp.path().join("data"))
+        .unwrap()
+        .unit_state(
+            domain::UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap(),
+            show.id,
+            2,
+            2,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(favorited_unplayed_unit.played);
+
+    let unmark_episode = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/UserPlayedItems/{}",
+                    third_id.to_string().replace('-', "")
+                ))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unmark_episode.status(), StatusCode::OK);
+    let next_up_after_unmark = get_json(&app, "/Shows/NextUp").await;
+    assert_eq!(
+        next_up_after_unmark["Items"][0]["Id"],
+        third_id.to_string().replace('-', "")
+    );
+    let unplayed_override = Store::open(tmp.path().join("data"))
+        .unwrap()
+        .unit_state(
+            domain::UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap(),
+            show.id,
+            2,
+            1,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(!unplayed_override.played);
+}
+
+#[tokio::test]
+async fn movie_marks_by_item_id_use_the_whole_media_unit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, _, _) = app(tmp.path());
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let root = tmp.path().join("films");
+    std::fs::create_dir_all(&root).unwrap();
+    store
+        .create_library(
+            MediaKind::Movie,
+            "Films",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let movie = new_media(MediaKind::Movie, "Film");
+    store.insert_media(&movie).unwrap();
+    let path = root.join("Film.mkv");
+    std::fs::write(&path, b"film").unwrap();
+    let row = LedgerRow {
+        id: LedgerId::new(),
+        media_id: movie.id,
+        path: path.display().to_string(),
+        season: None,
+        episode: None,
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Probe,
+        confidence: Confidence::High,
+        filter_score: None,
+    };
+    store.insert_ledger(&row).unwrap();
+    let item_id = row.id.to_string().replace('-', "");
+    for (route, expected) in [
+        (format!("/UserPlayedItems/{item_id}"), "Played"),
+        (format!("/UserFavoriteItems/{item_id}"), "Favorite"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(route)
+                    .header("authorization", "Bearer admin-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{expected}");
+    }
+    let state = Store::open(tmp.path().join("data"))
+        .unwrap()
+        .unit_state(
+            domain::UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap(),
+            movie.id,
+            -1,
+            -1,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(state.played);
+    assert!(state.favorite);
+}
+
+#[tokio::test]
+async fn resume_lists_only_the_latest_in_progress_episode_per_series() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, _, _) = app(tmp.path());
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let root = tmp.path().join("tv");
+    std::fs::create_dir_all(&root).unwrap();
+    store
+        .create_library(
+            MediaKind::Tv,
+            "Shows",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let show = new_media(MediaKind::Tv, "Show");
+    store.insert_media(&show).unwrap();
+    let user_id = domain::UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap();
+    for episode in 1..=4 {
+        insert_episode(&store, &root, show.id, 1, episode);
+        store
+            .upsert_unit(
+                user_id,
+                show.id,
+                1,
+                episode as i32,
+                10_000 * episode as i64,
+                Some(false),
+                None,
+                None,
+                None,
+                None,
+                false,
+                episode as i64 + 100,
+            )
+            .unwrap();
+    }
+
+    let resumed = get_json(
+        &app,
+        "/Users/00000000-0000-0000-0000-000000000001/Items/Resume",
+    )
+    .await;
+    assert_eq!(resumed["TotalRecordCount"], 1);
+    assert_eq!(resumed["Items"].as_array().unwrap().len(), 1);
+    assert_eq!(resumed["Items"][0]["IndexNumber"], 4);
+}
+
+#[tokio::test]
+async fn tv_items_include_nfo_artwork_metadata_and_cached_playback_streams() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, _, _) = app(tmp.path());
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let root = tmp.path().join("tv");
+    let show_dir = root.join("Show");
+    let season_dir = show_dir.join("Season 1");
+    std::fs::create_dir_all(&season_dir).unwrap();
+    store
+        .create_library(
+            MediaKind::Tv,
+            "Shows",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let show = new_media(MediaKind::Tv, "Show");
+    store.insert_media(&show).unwrap();
+    std::fs::write(
+        show_dir.join("tvshow.nfo"),
+        "<tvshow><title>Show</title><year>2024</year><plot>Series synopsis</plot><rating>8.7</rating><genre>Drama</genre><actor><name>Series Actor</name><role>Lead</role><tmdbid>101</tmdbid><thumb>/actor.jpg</thumb></actor></tvshow>",
+    )
+    .unwrap();
+    std::fs::write(show_dir.join("poster.jpg"), b"poster").unwrap();
+    std::fs::write(show_dir.join("fanart.jpg"), b"fanart").unwrap();
+    let episode_path = season_dir.join("Show S01E01.mkv");
+    std::fs::write(&episode_path, b"episode").unwrap();
+    std::fs::write(
+        season_dir.join("Show S01E01.nfo"),
+        "<episodedetails><title>Pilot</title><season>1</season><episode>1</episode><plot>Episode synopsis</plot><thumb>https://image.tmdb.org/t/p/w300/still.jpg</thumb></episodedetails>",
+    )
+    .unwrap();
+    let row = LedgerRow {
+        id: LedgerId::new(),
+        media_id: show.id,
+        path: episode_path.display().to_string(),
+        season: Some(1),
+        episode: Some(1),
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Probe,
+        confidence: Confidence::High,
+        filter_score: None,
+    };
+    store.insert_ledger(&row).unwrap();
+    store
+        .put_file_meta(
+            &row.id.to_string(),
+            &library::Tracks {
+                video: Some(library::VideoTrack {
+                    codec: Some("h264".into()),
+                    width: Some(1920),
+                    height: Some(1080),
+                    frame_rate: Some(24.0),
+                    bit_rate: Some(4_000_000),
+                    duration_secs: Some(600.0),
+                    ..Default::default()
+                }),
+                audio: vec![library::AudioTrack {
+                    codec: Some("aac".into()),
+                    channels: Some(2),
+                    language: Some("ja".into()),
+                    sample_rate: Some("48000".into()),
+                    is_default: true,
+                    ..Default::default()
+                }],
+                subtitles: vec![library::SubtitleTrack {
+                    codec: Some("subrip".into()),
+                    language: Some("zh".into()),
+                    is_default: true,
+                    forced: false,
+                    ..Default::default()
+                }],
+            },
+        )
+        .unwrap();
+    store
+        .put_cached_chapters(
+            &row.id.to_string(),
+            &[library::ChapterMarker {
+                start_ms: 30_000,
+                end_ms: 60_000,
+                title: Some("Previously cached chapter".into()),
+                marker_type: None,
+            }],
+        )
+        .unwrap();
+    store
+        .put_media_marker(&api::store::StoredMediaMarker {
+            media_id: show.id,
+            season: 1,
+            episode: 1,
+            intro_start_ms: Some(111_000),
+            intro_end_ms: Some(222_000),
+            outro_start_ms: Some(540_000),
+            outro_end_ms: Some(600_000),
+            source: "test".into(),
+            locked: false,
+            updated_at: 1,
+        })
+        .unwrap();
+
+    let series_id = show.id.to_string().replace('-', "");
+    let series_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/Items/{series_id}"))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let series = json(series_response).await;
+    assert_eq!(series["Overview"], "Series synopsis");
+    assert_eq!(series["CommunityRating"], 8.7);
+    assert_eq!(series["Genres"][0], "Drama");
+    assert_eq!(series["ProductionYear"], 2024);
+    assert_eq!(series["Path"], show_dir.display().to_string());
+    assert!(series["MediaStreams"].is_null());
+    assert_eq!(series["ChildCount"], 1);
+    assert_eq!(series["ImageTags"]["Primary"], "poster");
+    assert_eq!(series["BackdropImageTags"][0], "fanart");
+
+    for route in [
+        format!("/UserFavoriteItems/{series_id}"),
+        format!("/UserPlayedItems/{series_id}"),
+    ] {
+        let marked = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(route)
+                    .header("authorization", "Bearer admin-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(marked.status(), StatusCode::OK);
+    }
+    let marked_series = get_json(&app, &format!("/Items/{series_id}")).await;
+    assert_eq!(marked_series["UserData"]["IsFavorite"], true);
+    assert_eq!(marked_series["UserData"]["Played"], true);
+
+    let episode_id = row.id.to_string().replace('-', "");
+    let episode_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/Items/{episode_id}"))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let episode = json(episode_response).await;
+    assert_eq!(episode["Name"], "Pilot");
+    assert_eq!(episode["Overview"], "Episode synopsis");
+    assert_eq!(episode["IndexNumber"], 1);
+    assert_eq!(episode["ParentId"], series_id);
+    assert_eq!(episode["SeriesName"], "Show");
+    assert_eq!(episode["People"][0]["Name"], "Series Actor");
+    assert_eq!(episode["People"][0]["Role"], "Lead");
+
+    let playback_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/Items/{episode_id}/PlaybackInfo"))
+                .header("authorization", "Bearer admin-token")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let playback = json(playback_response).await;
+    assert_eq!(playback["Chapters"].as_array().unwrap().len(), 3);
+    assert_eq!(playback["Chapters"][0]["Name"], "Previously cached chapter");
+    assert_eq!(playback["Chapters"][1]["MarkerType"], "IntroStart");
+    assert_eq!(playback["Chapters"][2]["MarkerType"], "CreditsStart");
+    let playback = playback["MediaSources"][0].clone();
+    assert_eq!(playback["RunTimeTicks"], 6_000_000_000i64);
+    assert_eq!(playback["MediaStreams"][0]["Type"], "Video");
+    assert_eq!(playback["MediaStreams"][0]["Codec"], "h264");
+    assert_eq!(playback["MediaStreams"][1]["Type"], "Audio");
+    assert_eq!(playback["MediaStreams"][1]["Channels"], 2);
+    assert_eq!(playback["MediaStreams"][2]["Type"], "Subtitle");
+
+    let backdrop = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/Items/{series_id}/Images/Backdrop/0"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(backdrop.status(), StatusCode::OK);
+    assert_eq!(
+        &to_bytes(backdrop.into_body(), 32).await.unwrap()[..],
+        b"fanart"
+    );
+
+    let episode_image = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/Items/{episode_id}/Images/Primary"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(episode_image.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(
+        episode_image.headers()["location"],
+        "https://image.tmdb.org/t/p/w300/still.jpg"
+    );
+}
+
+#[path = "marks.rs"]
+mod marks;

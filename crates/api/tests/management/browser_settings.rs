@@ -1,0 +1,148 @@
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use downloader::MemoryDownloader;
+use parking_lot::Mutex;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tempfile::tempdir;
+use tower::ServiceExt;
+
+use crate::common::{Fixtures, state};
+use api::router;
+
+#[tokio::test]
+async fn test_browser_settings_crud_and_cdp_disabled_guard() {
+    let tmp = tempdir().unwrap();
+    let fetcher = Arc::new(Fixtures {
+        requests: Mutex::new(Vec::new()),
+        bodies: HashMap::new(),
+    });
+    let downloader = Arc::new(MemoryDownloader::new(tmp.path().join("dl")));
+    let state = state(tmp.path(), fetcher, downloader);
+    let app = router(state);
+
+    // 1. Initial GET /api/v1/settings/browser should have disabled defaults
+    let req = Request::builder()
+        .uri("/api/v1/settings/browser")
+        .header("Authorization", "Bearer management-secret")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 2. Sync CDP when disabled should return 400 Bad Request
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/settings/browser/sync-cdp")
+        .header("Authorization", "Bearer management-secret")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // 3. PUT to update settings
+    let update_body = serde_json::json!({
+        "cdp": {
+            "enabled": true,
+            "url": "http://127.0.0.1:9999"
+        },
+        "obscura": {
+            "enabled": true,
+            "url": "http://127.0.0.1:9998"
+        }
+    });
+    let req = Request::builder()
+        .method("PUT")
+        .uri("/api/v1/settings/browser")
+        .header("Authorization", "Bearer management-secret")
+        .header("Content-Type", "application/json")
+        .body(Body::from(update_body.to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+async fn create_and_login_member(app: &axum::Router, username: &str, password: &str) -> String {
+    let create_res = app
+        .clone()
+        .oneshot(crate::common::request(
+            "POST",
+            "/api/v1/users",
+            Some("management-secret"),
+            serde_json::json!({
+                "login": username,
+                "password": password,
+                "role": "member",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(create_res.status(), StatusCode::CREATED);
+
+    let login_res = app
+        .clone()
+        .oneshot(crate::common::request(
+            "POST",
+            "/api/v1/auth/login",
+            None,
+            serde_json::json!({
+                "username": username,
+                "password": password,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(login_res.status(), StatusCode::OK);
+    crate::common::json_body(login_res).await["data"]["token"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn member_cannot_modify_browser_settings_or_sync_cdp() {
+    let tmp = tempdir().unwrap();
+    let fetcher = Arc::new(Fixtures {
+        requests: Mutex::new(Vec::new()),
+        bodies: HashMap::new(),
+    });
+    let downloader = Arc::new(MemoryDownloader::new(tmp.path().join("dl")));
+    let state = state(tmp.path(), fetcher, downloader);
+    let app = router(state);
+
+    let member_token = create_and_login_member(&app, "alice", "alice-password").await;
+
+    // 2. 普通成员尝试 PUT /api/v1/settings/browser：必须返回 403 Forbidden
+    let req = Request::builder()
+        .method("PUT")
+        .uri("/api/v1/settings/browser")
+        .header("Authorization", format!("Bearer {member_token}"))
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "user_agent": "HackedUA/1.0"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "普通成员禁止修改全局浏览器配置"
+    );
+
+    // 3. 普通成员尝试 POST /api/v1/settings/browser/sync-cdp：必须返回 403 Forbidden
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/settings/browser/sync-cdp")
+        .header("Authorization", format!("Bearer {member_token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "普通成员禁止触发全局 CDP 同步"
+    );
+}

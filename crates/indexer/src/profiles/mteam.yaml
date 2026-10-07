@@ -1,0 +1,18 @@
+id: mteam
+framework: api
+base_url: https://api.m-team.cc
+web_base_url: https://tp.m-team.cc
+render: false
+search:
+  path: /api/torrent/search
+  query_param: keyword
+  page_size: 100
+download:
+  path: /api/torrent/genDlToken
+  method: post_form
+  id_param: id
+categories:
+  movie: [401, 419, 420, 421, 439]
+  tv: [403, 402, 435, 438, 407]
+  documentary: [404]
+  anime: [405]

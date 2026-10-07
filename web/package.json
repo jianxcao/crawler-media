@@ -1,0 +1,65 @@
+{
+  "name": "web",
+  "private": true,
+  "version": "0.1.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "predev": "node scripts/copy-jassub.mjs",
+    "dev": "vite",
+    "prebuild": "node scripts/copy-jassub.mjs",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@floating-ui/react": "^0.27.20",
+    "@lexical/react": "^0.49.0",
+    "@microsoft/fetch-event-source": "^2.0.1",
+    "@radix-ui/react-dropdown-menu": "^2.1.20",
+    "@shikijs/langs": "^4.3.1",
+    "@shikijs/themes": "^4.3.1",
+    "@tanstack/react-virtual": "^3.14.6",
+    "dayjs": "^1.11.21",
+    "hls.js": "^1.7.1",
+    "jassub": "^2.5.14",
+    "lexical": "^0.49.0",
+    "libbitsub": "^1.11.0",
+    "media-chrome": "^4.19.2",
+    "nanoid": "^6.0.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "react-markdown": "^10.1.0",
+    "react-router-dom": "^7.9.1",
+    "remark-gfm": "^4.0.1",
+    "shiki": "^4.3.1"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3.3.1",
+    "@eslint/js": "^9.34.0",
+    "@tailwindcss/postcss": "^4.1.12",
+    "@types/node": "^24.3.0",
+    "@types/react": "^19.1.11",
+    "@types/react-dom": "^19.1.7",
+    "@typescript-eslint/eslint-plugin": "^8.46.2",
+    "@typescript-eslint/parser": "^8.46.2",
+    "@vitejs/plugin-react": "^5.0.0",
+    "eslint": "^9.34.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.20",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^4.1.12",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.46.2",
+    "vite": "^7.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "lfa-ponyfill"
+    ]
+  }
+}

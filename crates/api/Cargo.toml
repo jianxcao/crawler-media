@@ -1,0 +1,58 @@
+[package]
+name = "api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait = "0.1"
+axum = "0.8"
+domain.workspace = true
+store.workspace = true
+downloader.workspace = true
+filter.workspace = true
+jobs.workspace = true
+hooks.workspace = true
+indexer.workspace = true
+library.workspace = true
+marker.workspace = true
+media.workspace = true
+media-server.workspace = true
+cover-generator.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+parking_lot.workspace = true
+base64.workspace = true
+playback.workspace = true
+rusqlite.workspace = true
+release.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+subscribe.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "fs", "io-util", "time", "sync"] }
+futures-core = "0.3"
+flate2.workspace = true
+tar.workspace = true
+notify.workspace = true
+notify-debouncer-mini.workspace = true
+tokio-stream.workspace = true
+tokio-util = { version = "0.7", features = ["io"] }
+tower-http = { version = "0.6", features = ["fs", "cors"] }
+tower = { version = "0.5", features = ["util"] }
+ureq = { version = "3", features = ["socks-proxy"] }
+url = "2"
+uuid.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bin]]
+name = "crawler-media"
+path = "src/main.rs"
+
+[[bin]]
+name = "live-loop"
+path = "src/bin/live_loop/main.rs"

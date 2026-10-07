@@ -1,0 +1,12 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "tvdb_id": "169",
+      "name": "The Matrix",
+      "year": "1999",
+      "image_url": "https://artworks.thetvdb.com/banners/movies/169/posters/5f8.jpg",
+      "type": "movie"
+    }
+  ]
+}

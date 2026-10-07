@@ -1,0 +1,215 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+
+import { HScroller } from "@/components/h-scroller";
+import { PlayIcon } from "@/components/icons";
+import { PosterImage } from "@/components/poster-image";
+import { ZoomLightbox, type ZoomLightboxSlide } from "@/components/zoom-lightbox";
+import type { LibraryChapter } from "@/lib/api/libraries";
+import { imageUrl } from "@/lib/image-proxy";
+import { formatClock } from "@/lib/player/timeline";
+
+/**
+ * 条目详情页的「章节」横排（docs/design/video-chapters.md §1.1）：每个章节一张
+ * 16:9 章节图 + 时间戳角标 + 标题；点图进灯箱看大图，从灯箱或 hover 出现的
+ * 播放键从那一帧起播。
+ *
+ * 用户可见文案统一叫「章节」（用户决策 2026-09-06）：与菜单「生成章节」、
+ * Jellyfin 输出的「第 N 章」同一个词；不叫「场景」（Jellyfin 的叫法，与菜单
+ * 对不上），也不叫「片段」（项目里指花絮/预告这类独立短片，会让人以为是
+ * 几个可以单独播的小视频）。合成章节与内嵌章节在文案上不区分。
+ *
+ * 看图优先，播放键不常驻（用户决策 2026-09-06）：桌面 hover 才浮出中央播放键；
+ * 触摸屏没有 hover，直接点卡片进灯箱，灯箱顶栏有「从此处播放」——大图与
+ * 播放键都在灯箱里，小卡片上什么都不盖。
+ *
+ * 灯箱与媒体库墙上的那个是同一个内核（ZoomLightbox）：同一张章节图，从库页的
+ * 图床模式点开、还是从这里点开，缩放 / 捏合 / 滑动翻页 / 控件自动收起的习惯
+ * 完全一样，不该因为入口不同而变成两套操作。
+ *
+ * 章节可能还没有图（后台正在抓 / 库关了开关 / ffmpeg 缺失）：卡片是深色占位 +
+ * 时间戳，仍可点击跳播——章节列表本身就有用，图是附属物。
+ */
+export function ChapterStrip({
+  chapters,
+  pending,
+  resumeMs,
+  onPlay,
+}: {
+  chapters: LibraryChapter[];
+  /** 场景图正在后台生成：右上角给个提示，占位卡不算"没有图" */
+  pending: boolean;
+  /** 当前观看者上次看到的位置（毫秒）；落在哪一章就在那张卡标「上次看到这里」 */
+  resumeMs: number | null;
+  /** 从章节起播；起播时间用图上那一帧的真实时间，无图时退回章节起点 */
+  onPlay: (chapter: LibraryChapter) => void;
+}) {
+  const [lightbox, setLightbox] = useState<number | null>(null);
+  const sectionRef = useRef<HTMLElement>(null);
+  const resumeScrolled = useRef(false);
+
+  // 上次看到的位置落在哪一章：start ≤ pos < end（末章无 end 视为到片尾）
+  const resumeIndex = useMemo(() => {
+    if (resumeMs == null || resumeMs <= 0) return -1;
+    return chapters.findIndex(
+      (c) => resumeMs >= c.start_ms && (c.end_ms == null || resumeMs < c.end_ms),
+    );
+  }, [chapters, resumeMs]);
+
+  // 首次知道续播章节时把它横滚到中间；用户之后自己滑不再抢位置
+  useEffect(() => {
+    if (resumeScrolled.current || resumeIndex < 0) return;
+    const frame = window.requestAnimationFrame(() => {
+      sectionRef.current
+        ?.querySelector<HTMLElement>(`[data-chapter-index="${resumeIndex}"]`)
+        ?.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
+      resumeScrolled.current = true;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [resumeIndex]);
+
+  if (chapters.length === 0) return null;
+
+  // 灯箱只放有图的章节；下标映射回章节
+  const withImages = chapters.filter((c) => c.image_url);
+  // 章节图统一 16:9（抓帧本身就是画面比例），缩略条按它排宽度
+  const slides: ZoomLightboxSlide[] = withImages.map((c) => ({
+    key: c.index,
+    title: chapterCaption(c),
+    thumbUrl: imageUrl(c.image_url, "landscape-card"),
+    screenUrl: imageUrl(c.image_url),
+    aspect: 16 / 9,
+  }));
+
+  const openLightbox = (chapter: LibraryChapter) => {
+    const i = withImages.indexOf(chapter);
+    if (i >= 0) setLightbox(i);
+  };
+
+  return (
+    <section ref={sectionRef} aria-label="章节">
+      <div className="mb-3 flex items-center gap-3">
+        <h2 className="text-on-image text-body-lg font-semibold tracking-[-0.01em] text-[var(--text)]">
+          章节
+        </h2>
+        <span className="tnum text-sub text-[var(--text-faint)]">{chapters.length} 个章节</span>
+        {pending && (
+          <span className="ml-auto flex items-center gap-2 text-caption text-[var(--text-muted)]">
+            <span className="size-3 shrink-0 animate-spin rounded-full border-[1.5px] border-white/20 border-t-white/70" />
+            正在生成章节
+          </span>
+        )}
+      </div>
+
+      <HScroller className="-mx-1 gap-3 px-1 pb-1 pt-1">
+        {chapters.map((chapter) => (
+          <ChapterCard
+            key={chapter.index}
+            chapter={chapter}
+            resumeHere={chapter.index === resumeIndex}
+            onOpen={() => (chapter.image_url ? openLightbox(chapter) : onPlay(chapter))}
+            onPlay={() => onPlay(chapter)}
+          />
+        ))}
+      </HScroller>
+
+      {lightbox != null && slides[lightbox] && (
+        <ZoomLightbox
+          label={`查看章节图：${slides[lightbox].title}`}
+          slides={slides}
+          index={lightbox}
+          hasMore={false}
+          onIndexChange={setLightbox}
+          // 章节是一次性拿全的，没有下一页可要
+          onReachEnd={() => {}}
+          onClose={() => setLightbox(null)}
+          actions={
+            <button
+              type="button"
+              title="从此处播放"
+              aria-label="从此处播放"
+              onClick={() => {
+                const target = withImages[lightbox];
+                if (target) onPlay(target);
+              }}
+              className="rounded-full p-2 text-white/70 transition-colors hover:bg-white/[0.12] hover:text-white"
+            >
+              <PlayIcon className="size-[18px]" />
+            </button>
+          }
+        />
+      )}
+    </section>
+  );
+}
+
+/** 灯箱顶栏与卡片标题共用的章节说明："标题 · 12:30"，无标题只给时间。 */
+function chapterCaption(chapter: LibraryChapter): string {
+  const clock = formatClock(chapter.frame_ms ?? chapter.start_ms);
+  return chapter.title ? `${chapter.title} · ${clock}` : clock;
+}
+
+function ChapterCard({
+  chapter,
+  resumeHere,
+  onOpen,
+  onPlay,
+}: {
+  chapter: LibraryChapter;
+  resumeHere: boolean;
+  onOpen: () => void;
+  onPlay: () => void;
+}) {
+  const clock = formatClock(chapter.frame_ms ?? chapter.start_ms);
+  const label = chapter.title ?? `第 ${chapter.index + 1} 章`;
+  return (
+    <div className="group/chapter w-[168px] shrink-0 max-md:w-[144px]" data-chapter-index={chapter.index}>
+      {/* 画面区单独一个相对定位盒：精致小巧，不占过多视觉空间 */}
+      <div className="relative aspect-video transition duration-200 group-hover/chapter:-translate-y-0.5">
+        <button
+          type="button"
+          onClick={onPlay}
+          aria-label={`从 ${clock} 播放：${label}`}
+          className="relative block size-full overflow-hidden rounded-lg bg-[#141824] text-left outline-none ring-1 ring-white/[0.08] transition duration-200 hover:ring-white/35 focus-visible:ring-2 focus-visible:ring-white/70"
+        >
+          <PosterImage
+            src={imageUrl(chapter.image_url, "landscape-card")}
+            alt={`${label} 章节图`}
+            className="size-full object-cover"
+            fallback={
+              <span className="tnum flex size-full items-center justify-center text-[15px] font-bold text-white/20">
+                {clock}
+              </span>
+            }
+          />
+          {/* 左下角时间戳：任何画面上都要能读，压一层暗底 */}
+          <span className="tnum text-on-image pointer-events-none absolute bottom-1 left-1 rounded bg-black/60 px-1 py-0.5 text-micro font-medium text-white/90">
+            {clock}
+          </span>
+          {resumeHere && (
+            <span className="pointer-events-none absolute right-1 top-1 rounded bg-[var(--accent-2)] px-1 py-0.5 text-micro font-medium text-white shadow-md">
+              上次看到这里
+            </span>
+          )}
+        </button>
+
+        {/* 中央播放键：桌面 hover 才出现 */}
+        {chapter.image_url && (
+          <button
+            type="button"
+            aria-label={`从 ${clock} 播放`}
+            onClick={onPlay}
+            className="absolute left-1/2 top-1/2 flex size-8 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-white/80 bg-black/40 text-white opacity-0 shadow-[0_1px_8px_rgba(0,0,0,0.45)] transition duration-200 hover:scale-[1.08] hover:border-white hover:bg-black/60 focus-visible:opacity-100 focus-visible:outline-none group-hover/chapter:opacity-100 [@media(hover:none)]:hidden"
+          >
+            <PlayIcon className="size-5 drop-shadow-[0_1px_2px_rgba(0,0,0,0.55)]" />
+          </button>
+        )}
+      </div>
+
+      <p className="mt-1.5 truncate text-caption font-medium text-[var(--text-muted)] group-hover/chapter:text-[var(--text)] transition-colors" title={label}>
+        {label}
+      </p>
+    </div>
+  );
+}

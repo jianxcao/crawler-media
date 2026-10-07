@@ -1,0 +1,213 @@
+use domain::{Media, MediaId};
+use rusqlite::{OptionalExtension, params};
+
+use super::maps::map_media;
+use super::schema::MEDIA_COLS;
+use super::{Store, StoreError};
+
+impl Store {
+    pub fn insert_media(&self, media: &Media) -> Result<(), StoreError> {
+        self.app.execute(
+            "INSERT INTO media (id, kind, title, year, original_title, tmdb_id, douban_id, tvdb_id, bangumi_id, anilist_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                media.id.to_string(),
+                media.kind.as_str(),
+                media.title,
+                media.year.map(i64::from),
+                media.original_title,
+                media.tmdb_id,
+                media.douban_id,
+                media.tvdb_id,
+                media.bangumi_id,
+                media.anilist_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_media(&self, id: MediaId) -> Result<Option<Media>, StoreError> {
+        self.app
+            .query_row(
+                &format!("SELECT {MEDIA_COLS} FROM media WHERE id = ?1"),
+                params![id.to_string()],
+                map_media,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn get_media_by_title(&self, title: &str) -> Result<Option<Media>, StoreError> {
+        self.app
+            .query_row(
+                &format!("SELECT {MEDIA_COLS} FROM media WHERE title = ?1"),
+                params![title],
+                map_media,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn get_media_by_title_kind_year(
+        &self,
+        title: &str,
+        kind: domain::MediaKind,
+        year: Option<u16>,
+    ) -> Result<Option<Media>, StoreError> {
+        let year_i64 = year.map(i64::from);
+        // year 有值：精确匹配年份。
+        if year_i64.is_some() {
+            return self
+                .app
+                .query_row(
+                    &format!(
+                        "SELECT {MEDIA_COLS} FROM media
+                         WHERE title = ?1 AND kind = ?2 AND year IS ?3 LIMIT 1"
+                    ),
+                    params![title, kind.as_str(), year_i64],
+                    map_media,
+                )
+                .optional()
+                .map_err(Into::into);
+        }
+        // year 为 None（文件名未带年份）：
+        // 1) 优先匹配同样「未知年份」的行（year IS NULL）；
+        // 2) 否则仅当恰好一个「已知年份」候选时挂它（同名不同年份并存时
+        //    无法区分，返回 None 不任取，避免把无年份文件挂错作品）。
+        if let Some(media) = self
+            .app
+            .query_row(
+                &format!(
+                    "SELECT {MEDIA_COLS} FROM media
+                     WHERE title = ?1 AND kind = ?2 AND year IS NULL LIMIT 1"
+                ),
+                params![title, kind.as_str()],
+                map_media,
+            )
+            .optional()?
+        {
+            return Ok(Some(media));
+        }
+        let mut stmt = self.app.prepare(&format!(
+            "SELECT {MEDIA_COLS} FROM media WHERE title = ?1 AND kind = ?2 AND year IS NOT NULL"
+        ))?;
+        let rows = stmt
+            .query_map(params![title, kind.as_str()], map_media)?
+            .collect::<Result<Vec<_>, _>>()?;
+        if rows.len() == 1 {
+            Ok(rows.into_iter().next())
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_media_by_tmdb(&self, tmdb_id: &str) -> Result<Option<Media>, StoreError> {
+        self.get_media_by_alias("tmdb_id", tmdb_id)
+    }
+
+    pub fn get_media_by_alias(&self, column: &str, id: &str) -> Result<Option<Media>, StoreError> {
+        self.get_media_by_alias_kind(column, id, None)
+    }
+
+    /// 按别名 + kind 查找（ensure_media 用）：相同数字的 TMDB movie/TV id
+    /// 不会被合并成同一个内部 Media。
+    pub fn get_media_by_alias_kind(
+        &self,
+        column: &str,
+        id: &str,
+        kind: Option<domain::MediaKind>,
+    ) -> Result<Option<Media>, StoreError> {
+        if !matches!(
+            column,
+            "tmdb_id" | "douban_id" | "tvdb_id" | "bangumi_id" | "anilist_id"
+        ) {
+            return Ok(None);
+        }
+        let sql = match kind {
+            Some(_kind) => {
+                format!("SELECT {MEDIA_COLS} FROM media WHERE {column} = ?1 AND kind = ?2")
+            }
+            None => format!("SELECT {MEDIA_COLS} FROM media WHERE {column} = ?1"),
+        };
+        let row = match kind {
+            Some(kind) => self
+                .app
+                .query_row(&sql, params![id, kind.as_str()], map_media)
+                .optional()?,
+            None => self
+                .app
+                .query_row(&sql, params![id], map_media)
+                .optional()?,
+        };
+        Ok(row)
+    }
+
+    pub fn update_media(&self, media: &Media) -> Result<(), StoreError> {
+        self.app.execute(
+            "UPDATE media SET title = ?2, year = ?3, original_title = ?4, tmdb_id = ?5,
+                    douban_id = ?6, tvdb_id = ?7, bangumi_id = ?8, anilist_id = ?9 WHERE id = ?1",
+            params![
+                media.id.to_string(),
+                media.title,
+                media.year.map(i64::from),
+                media.original_title,
+                media.tmdb_id,
+                media.douban_id,
+                media.tvdb_id,
+                media.bangumi_id,
+                media.anilist_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn ensure_media(&self, incoming: Media) -> Result<Media, StoreError> {
+        self.ensure_media_with_previous(incoming)
+            .map(|(media, _)| media)
+    }
+
+    /// Return the original row so a multi-database Subscribe creation can undo
+    /// both a new Media and an alias merge if a later write fails.
+    pub fn ensure_media_with_previous(
+        &self,
+        incoming: Media,
+    ) -> Result<(Media, Option<Media>), StoreError> {
+        let aliases = [
+            ("tmdb_id", incoming.tmdb_id.clone()),
+            ("douban_id", incoming.douban_id.clone()),
+            ("tvdb_id", incoming.tvdb_id.clone()),
+            ("bangumi_id", incoming.bangumi_id.clone()),
+            ("anilist_id", incoming.anilist_id.clone()),
+        ];
+        for (column, id) in aliases {
+            let Some(id) = id else { continue };
+            // 别名查找必须带上 kind：TMDB 的 movie/tv 共用数字 id 空间，
+            // 不带 kind 会把电影和剧集合并成同一个内部 Media。
+            if let Some(existing) =
+                self.get_media_by_alias_kind(column, &id, Some(incoming.kind))?
+            {
+                let merged = ::media::merge(existing.clone(), incoming);
+                self.update_media(&merged)?;
+                return Ok((merged, Some(existing)));
+            }
+        }
+        self.insert_media(&incoming)?;
+        Ok((incoming, None))
+    }
+
+    pub fn undo_ensured_media(
+        &self,
+        media: &Media,
+        previous: Option<&Media>,
+    ) -> Result<(), StoreError> {
+        if let Some(previous) = previous {
+            self.update_media(previous)
+        } else {
+            self.app.execute(
+                "DELETE FROM media WHERE id = ?1",
+                params![media.id.to_string()],
+            )?;
+            Ok(())
+        }
+    }
+}

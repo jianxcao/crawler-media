@@ -1,0 +1,438 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use domain::{Confidence, LedgerId, LedgerRow, QualitySource, Release};
+use downloader::Downloader;
+use filter::ScoredTorrent;
+use hooks::{HookEvent, Step};
+use library::{MediaProbe, resolve_mode, scrape_beside, transfer_file};
+
+use crate::add::Added;
+use crate::choose::{covered_slots, is_complete};
+use crate::facts::{QualityFact, SubscribeFacts};
+use crate::{LedgerSource, RunOutcome, SubscribeError};
+
+pub fn collect_completed<D: Downloader + ?Sized>(
+    added: Added<'_, D>,
+    probe: &dyn MediaProbe,
+) -> Result<RunOutcome, SubscribeError> {
+    collect_completed_with_destinations(added, probe, &[])
+}
+
+pub fn collect_completed_with_destinations<D: Downloader + ?Sized>(
+    mut added: Added<'_, D>,
+    probe: &dyn MediaProbe,
+    existing: &[crate::collection_destinations::DestinationMapping],
+) -> Result<RunOutcome, SubscribeError> {
+    let mut ledger = Vec::new();
+    let mut ledger_sources = Vec::new();
+    let mut removed_paths = Vec::new();
+    let mut transferred_enclosures = Vec::new();
+    let mut collection_errors = Vec::new();
+
+    // 先依据现有已确认的目标映射刷新/协调 facts，确保即便 Downloader 在 Move 模式下不再列出视频，
+    // 本地持久化的映射依然能驱动并修复 facts
+    for mapping in existing {
+        if mapping.destination_path.is_file() {
+            reconcile_mapping_facts(&mut added.input.facts, added.input.subscribe, mapping, 0);
+        }
+    }
+
+    let chosen = std::mem::take(&mut added.chosen);
+    for scored in chosen {
+        collect_scored_torrent(
+            &mut added,
+            probe,
+            existing,
+            &scored,
+            &mut ledger,
+            &mut ledger_sources,
+            &mut removed_paths,
+            &mut transferred_enclosures,
+            &mut collection_errors,
+        );
+    }
+    Ok(RunOutcome {
+        completed: is_complete(added.input.subscribe, &added.input.facts),
+        facts: added.input.facts,
+        ledger,
+        ledger_sources,
+        removed_paths,
+        transferred_enclosures,
+        collection_errors,
+        submission_errors: added.add_errors,
+        torrents_added: added.outcome.torrents_added,
+    })
+}
+
+fn collect_scored_torrent<D: Downloader + ?Sized>(
+    added: &mut Added<'_, D>,
+    probe: &dyn MediaProbe,
+    existing: &[crate::collection_destinations::DestinationMapping],
+    scored: &ScoredTorrent,
+    ledger: &mut Vec<LedgerRow>,
+    ledger_sources: &mut Vec<LedgerSource>,
+    removed_paths: &mut Vec<String>,
+    transferred_enclosures: &mut Vec<String>,
+    collection_errors: &mut Vec<String>,
+) {
+    let errors_before_torrent = collection_errors.len();
+    let completed_files = match added.input.downloader.completed_files(&scored.torrent) {
+        Ok(files) => files,
+        Err(error) => {
+            tracing::error!(torrent = %scored.torrent.title, error = %error, "读取已完成下载文件失败");
+            collection_errors.push(format!("{}: {error}", scored.torrent.title));
+            return;
+        }
+    };
+    let (videos, others): (Vec<_>, Vec<_>) = completed_files
+        .into_iter()
+        .partition(|path| crate::sidecars::is_video(path));
+    let (subs, _junk): (Vec<_>, Vec<_>) = others
+        .into_iter()
+        .partition(|path| crate::sidecars::is_subtitle(path));
+    let single_file = videos.len() == 1;
+    let reported_any = !videos.is_empty() || !subs.is_empty();
+    let mut torrent_destinations = Vec::new();
+    for src in videos {
+        let source_path = src.display().to_string();
+        if let Some(mapping) = existing.iter().find(|m| m.source_path == source_path) {
+            if mapping.destination_path.is_file() {
+                torrent_destinations.push(mapping.clone());
+                reconcile_mapping_facts(
+                    &mut added.input.facts,
+                    added.input.subscribe,
+                    mapping,
+                    scored.score,
+                );
+            } else {
+                tracing::error!(source = %source_path, destination = %mapping.destination_path.display(), "已拥有的视频目标缺失，不自动恢复用户删除的文件");
+                collection_errors.push(format!(
+                    "missing owned destination: {}",
+                    mapping.destination_path.display()
+                ));
+            }
+            continue;
+        }
+        match collect_one(
+            added,
+            probe,
+            scored,
+            src,
+            single_file,
+            ledger,
+            ledger_sources,
+            removed_paths,
+        ) {
+            Ok(Some(dest)) => torrent_destinations.push(
+                crate::collection_destinations::DestinationMapping::new(source_path, dest),
+            ),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(torrent = %scored.torrent.title, source = %source_path, error = %error, "收集视频文件失败");
+                collection_errors.push(format!(
+                    "{} ({}): {error}",
+                    scored.torrent.title, source_path
+                ));
+            }
+        }
+    }
+    let mut sidecar_destinations = torrent_destinations.clone();
+    for mapping in existing {
+        if mapping.destination_path.is_file()
+            && !sidecar_destinations
+                .iter()
+                .any(|known| known.source_path == mapping.source_path)
+        {
+            sidecar_destinations.push(mapping.clone());
+        }
+    }
+    let subs_count = subs.len();
+    for src in subs {
+        match crate::sidecars::place_mapped_subtitle(
+            &src,
+            &sidecar_destinations,
+            added.input.transfer_mode,
+        ) {
+            Ok(()) => {}
+            Err(error) => {
+                tracing::error!(source = %src.display(), error = %error, "摆放字幕失败");
+                collection_errors.push(format!("subtitle {}: {error}", src.display()));
+            }
+        }
+    }
+    let has_work = !torrent_destinations.is_empty() || subs_count > 0;
+    if reported_any && has_work && collection_errors.len() == errors_before_torrent {
+        transferred_enclosures.push(scored.torrent.enclosure.clone());
+    }
+}
+
+fn reconcile_mapping_facts(
+    facts: &mut SubscribeFacts,
+    subscribe: &domain::Subscribe,
+    mapping: &crate::collection_destinations::DestinationMapping,
+    score: i32,
+) {
+    let dest_str = mapping.destination_path.display().to_string();
+    let file_release = mapping.quality.clone().unwrap_or_else(|| {
+        release::parse(
+            mapping
+                .destination_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default(),
+        )
+    });
+    if facts.quality(&dest_str).is_none() {
+        facts.set_quality(dest_str.clone(), file_release.clone());
+    }
+    let slots = if !mapping.slots.is_empty() {
+        mapping.slots.clone()
+    } else {
+        covered_slots(subscribe, &file_release)
+    };
+    for (s, e) in slots {
+        let existing_fact = facts.get(s, e);
+        let is_stale = existing_fact
+            .as_ref()
+            .and_then(|f| f.path.as_deref())
+            .map_or(false, |p| !std::path::Path::new(p).exists());
+        if existing_fact.is_none() || is_stale {
+            facts.replace(
+                s,
+                e,
+                QualityFact {
+                    score,
+                    path: Some(dest_str.clone()),
+                },
+            );
+        } else if existing_fact.as_ref().and_then(|f| f.path.as_deref()) == Some(dest_str.as_str()) {
+            facts.upsert(
+                s,
+                e,
+                QualityFact {
+                    score,
+                    path: Some(dest_str.clone()),
+                },
+            );
+        }
+    }
+}
+
+fn collect_one<D: Downloader + ?Sized>(
+    added: &mut Added<'_, D>,
+    probe: &dyn MediaProbe,
+    scored: &ScoredTorrent,
+    src: PathBuf,
+    single_file: bool,
+    ledger: &mut Vec<LedgerRow>,
+    ledger_sources: &mut Vec<LedgerSource>,
+    removed_paths: &mut Vec<String>,
+) -> Result<Option<PathBuf>, SubscribeError> {
+    let file_release = release::parse(
+        src.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default(),
+    );
+    let release = match crate::file_identity::resolve_file_release(
+        added.input.subscribe,
+        added.input.media,
+        &src,
+        &file_release,
+        &scored.release,
+        single_file,
+    ) {
+        Some(release) => release,
+        None => return Ok(None),
+    };
+    let dest = dest_path(
+        added.input.library_root,
+        added.input.media,
+        &release,
+        &src,
+        added.input.naming,
+    )?;
+    // Already owned at this exact path (same episode slot recorded in facts):
+    // skip rather than minting a `{stem}-{src_stem}` collision copy. The
+    // facts path is the canonical record; a different file name here means
+    // this torrent was already transferred on a previous tick.
+    //
+    // 注意：只要 facts 指向该路径就跳过——即便磁盘文件已被删除也不自动恢复。
+    // 用户删库文件就是真的想删（整剧/单集），要重新下载请用订阅「立即搜索」
+    // 或手动重新投递（会让 pending 回到 active 再转存一次）。
+    // 覆盖的槽位与「是否批准替换」在写入前判定：pending 增量保留后会有
+    // 低分任务晚完成的情况——若槽位已有事实（更高分版本在位）且本次未被
+    // chooser 批准（wash-cut/ladder 判定不该换），直接跳过，既不写入新文件
+    // 也不删除旧文件（P1：低分迟到任务不得删除高分版本）。
+    let slots = covered_slots(added.input.subscribe, &release);
+    let approved = crate::slot_replacement::is_replacement_approved(
+        added.input.subscribe,
+        added.input.wash_filter,
+        &added.input.facts,
+        scored,
+        &slots,
+    );
+    let has_existing = slots
+        .iter()
+        .any(|(season, episode)| added.input.facts.get(*season, *episode).is_some());
+    // 仅 wash-cut 下拦截：非洗版订阅的额外文件是并列版本（{stem}-{src_stem}
+    // 命名共存），不该被拦。洗版时未批准的迟到任务绝不覆盖/删除在位版本。
+    if added.input.subscribe.wash_cut && has_existing && !approved {
+        return Ok(None);
+    }
+    if added.input.facts.entries().any(|(_, f)| {
+        f.path
+            .as_deref()
+            .is_some_and(|p| p == dest.to_string_lossy())
+    }) {
+        return Ok(None);
+    }
+    let mode = resolve_mode(&src, added.input.library_root, added.input.transfer_mode);
+    tracing::info!(
+        src = %src.display(),
+        dest = %dest.display(),
+        mode = ?mode,
+        "将已完成的媒体文件转入媒体库"
+    );
+    emit(added.input.hooks, Step::Rename)?;
+    emit(added.input.hooks, Step::Transfer)?;
+    transfer_file(&src, &dest, mode).map_err(|e| {
+        tracing::error!(src = %src.display(), dest = %dest.display(), error = %e, "文件转移失败");
+        SubscribeError::Library(e)
+    })?;
+    emit(added.input.hooks, Step::Scrape)?;
+    if let Err(e) = scrape_beside(&dest, added.input.media, added.input.scrape, None) {
+        tracing::warn!(dest = %dest.display(), error = %e, "刮削写入元数据失败，但媒体文件已就位，继续入账");
+    }
+    let (quality, source, confidence) = quality_for(probe, &dest, &scored.release);
+    commit_video_facts(added, &slots, scored.score, &dest, approved, removed_paths)?;
+    let ledger_path = dest.display().to_string();
+    let mut owned_quality = scored.release.clone();
+    owned_quality.resolution = quality.resolution.clone();
+    owned_quality.codec = quality.codec.clone();
+    owned_quality.hdr = quality.hdr.clone();
+    added
+        .input
+        .facts
+        .set_quality(ledger_path.clone(), owned_quality);
+    ledger_sources.push(LedgerSource {
+        ledger_path: ledger_path.clone(),
+        source_path: src.display().to_string(),
+    });
+    ledger.push(LedgerRow {
+        id: LedgerId::new(),
+        media_id: added.input.media.id,
+        path: ledger_path,
+        season: release.season,
+        episode: release.episode,
+        resolution: quality.resolution,
+        codec: quality.codec,
+        hdr: quality.hdr,
+        quality_source: source,
+        confidence,
+        filter_score: Some(scored.score),
+    });
+    Ok(Some(dest))
+}
+
+fn commit_video_facts<D: Downloader + ?Sized>(
+    added: &mut Added<'_, D>,
+    slots: &[(Option<u32>, Option<u32>)],
+    score: i32,
+    dest: &Path,
+    approved: bool,
+    removed_paths: &mut Vec<String>,
+) -> Result<(), SubscribeError> {
+    let previous: Vec<_> = slots
+        .iter()
+        .filter_map(|(s, e)| added.input.facts.get(*s, *e).and_then(|f| f.path.clone()))
+        .collect();
+    for (s, e) in slots {
+        let fact = QualityFact {
+            score,
+            path: Some(dest.display().to_string()),
+        };
+        if approved {
+            added.input.facts.replace(*s, *e, fact);
+        } else {
+            added.input.facts.upsert(*s, *e, fact);
+        }
+    }
+    if approved && added.input.subscribe.wash_cut && !added.input.subscribe.keep_old_versions {
+        for path in previous {
+            let still_referenced = added
+                .input
+                .facts
+                .entries()
+                .any(|(_, fact)| fact.path.as_deref() == Some(path.as_str()));
+            if still_referenced {
+                continue;
+            }
+            if Path::new(&path) != dest {
+                if !added.input.preserve_removed {
+                    // Best effort here, but never silent: a failure to unlink is
+                    // logged and the path is still handed to the caller, whose
+                    // commit step retries the delete together with the ledger row.
+                    // Returning early would persist facts pointing at `dest` while
+                    // no ledger row exists for it, leaving the task silently active.
+                    match fs::remove_file(&path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            tracing::debug!(path = %path, "被替换的 Library 文件已不存在，仍清理台账");
+                        }
+                        Err(error) => {
+                            tracing::error!(path = %path, %error, "删除被替换 Library 文件失败，交由提交阶段重试");
+                        }
+                    }
+                }
+                removed_paths.push(path);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn dest_path(
+    root: &Path,
+    media: &domain::Media,
+    release: &Release,
+    src: &Path,
+    naming: Option<&str>,
+) -> Result<PathBuf, SubscribeError> {
+    let pattern = naming.unwrap_or_else(|| library::default_pattern(media.kind));
+    let dest = library::render_path(root, pattern, media, release, src)?;
+    if !dest.exists() {
+        return Ok(dest);
+    }
+    let stem = dest.file_stem().and_then(|s| s.to_str()).unwrap_or("media");
+    let src_stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("alt");
+    let ext = dest.extension().and_then(|s| s.to_str()).unwrap_or("bin");
+    Ok(dest.with_file_name(format!("{stem}-{src_stem}.{ext}")))
+}
+
+fn quality_for(
+    probe: &dyn MediaProbe,
+    src: &Path,
+    release: &Release,
+) -> (library::FileQuality, QualitySource, Confidence) {
+    if let Ok(quality) = probe.probe(src) {
+        (quality, QualitySource::Probe, Confidence::High)
+    } else {
+        (
+            library::FileQuality {
+                resolution: release.resolution.clone(),
+                codec: release.codec.clone(),
+                hdr: release.hdr.clone(),
+            },
+            QualitySource::Release,
+            Confidence::Low,
+        )
+    }
+}
+
+fn emit(bus: Option<&hooks::Bus>, step: Step) -> Result<(), SubscribeError> {
+    if let Some(bus) = bus {
+        bus.emit(&HookEvent { step })?;
+    }
+    Ok(())
+}

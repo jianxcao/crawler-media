@@ -1,0 +1,15 @@
+{
+  "results": 1,
+  "list": [
+    {
+      "id": 253,
+      "type": 2,
+      "name": "Cowboy Bebop",
+      "name_cn": "星际牛仔",
+      "air_date": "1998-10-23",
+      "images": {
+        "large": "https://lain.bgm.tv/pic/cover/l/bebop.jpg"
+      }
+    }
+  ]
+}

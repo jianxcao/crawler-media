@@ -1,0 +1,375 @@
+use rusqlite::{OptionalExtension, params};
+
+use super::{Store, StoreError};
+
+#[derive(Clone, Debug)]
+pub struct ProbeJob {
+    pub id: String,
+    pub kind: String,
+    pub media_id: String,
+    pub season: Option<u32>,
+    pub status: String,
+    pub total: usize,
+    pub completed: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub error: Option<String>,
+    pub created_at_ms: i64,
+    pub started_at_ms: Option<i64>,
+    pub finished_at_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProbeJobUnit {
+    pub job_id: String,
+    pub ledger_id: String,
+    pub kind: String,
+    pub force_fingerprint: bool,
+    pub overwrite_markers: bool,
+    pub status: String,
+    pub error: Option<String>,
+}
+
+pub struct ProbeJobUnitSpec<'a> {
+    pub ledger_id: &'a str,
+    pub kind: &'a str,
+    pub force_fingerprint: bool,
+    pub overwrite_markers: bool,
+}
+
+impl ProbeJob {
+    pub fn is_active(&self) -> bool {
+        self.status == "queued" || self.status == "running"
+    }
+
+    pub fn elapsed_ms(&self, now_ms: i64) -> u64 {
+        let end = self.finished_at_ms.unwrap_or(now_ms);
+        let start = self.started_at_ms.unwrap_or(self.created_at_ms);
+        end.saturating_sub(start).max(0) as u64
+    }
+}
+
+impl Store {
+    pub fn create_probe_job(
+        &self,
+        id: &str,
+        kind: &str,
+        media_id: &str,
+        season: Option<u32>,
+        scope_key: &str,
+        units: &[ProbeJobUnitSpec<'_>],
+    ) -> Result<bool, StoreError> {
+        if units.is_empty() {
+            return Ok(false);
+        }
+        let tx = self.library.unchecked_transaction()?;
+        let inserted = tx.execute(
+            "INSERT INTO probe_jobs (
+                 id, kind, media_id, season, scope_key, status, total, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7)",
+            params![
+                id,
+                kind,
+                media_id,
+                season.map(i64::from),
+                scope_key,
+                units.len(),
+                now_ms()
+            ],
+        );
+        if let Err(error) = inserted {
+            if is_constraint(&error) {
+                return Ok(false);
+            }
+            return Err(error.into());
+        }
+        for unit in units {
+            if let Err(error) = tx.execute(
+                "INSERT INTO probe_job_units (
+                     job_id, ledger_id, kind, force_fingerprint, overwrite_markers, status
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued')",
+                params![
+                    id,
+                    unit.ledger_id,
+                    unit.kind,
+                    unit.force_fingerprint,
+                    unit.overwrite_markers
+                ],
+            ) {
+                if is_constraint(&error) {
+                    return Ok(false);
+                }
+                return Err(error.into());
+            }
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn recover_probe_jobs(&self) -> Result<Vec<(ProbeJob, Vec<ProbeJobUnit>)>, StoreError> {
+        let tx = self.library.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE probe_job_units SET status = 'queued'
+             WHERE status = 'running' AND job_id IN (
+                 SELECT id FROM probe_jobs WHERE status IN ('queued', 'running')
+             )",
+            [],
+        )?;
+        tx.execute(
+            "UPDATE probe_jobs SET status = 'queued'
+             WHERE status = 'running' AND EXISTS (
+                 SELECT 1 FROM probe_job_units
+                 WHERE job_id = probe_jobs.id AND status = 'queued'
+             )",
+            [],
+        )?;
+        tx.commit()?;
+
+        let mut statement = self.library.prepare(
+            "SELECT id, kind, media_id, season, status, total, completed, succeeded,
+                    failed, error, created_at_ms, started_at_ms, finished_at_ms
+             FROM probe_jobs WHERE status IN ('queued', 'running')
+             ORDER BY created_at_ms, id",
+        )?;
+        let jobs = statement
+            .query_map([], map_probe_job)?
+            .collect::<Result<Vec<_>, _>>()?;
+        jobs.into_iter()
+            .map(|job| {
+                let units = self.probe_job_units(&job.id)?;
+                Ok((job, units))
+            })
+            .collect()
+    }
+
+    pub fn probe_job_units(&self, job_id: &str) -> Result<Vec<ProbeJobUnit>, StoreError> {
+        let mut statement = self.library.prepare(
+            "SELECT job_id, ledger_id, kind, force_fingerprint, overwrite_markers, status, error
+             FROM probe_job_units WHERE job_id = ?1 ORDER BY rowid",
+        )?;
+        let rows = statement.query_map([job_id], |row| {
+            Ok(ProbeJobUnit {
+                job_id: row.get(0)?,
+                ledger_id: row.get(1)?,
+                kind: row.get(2)?,
+                force_fingerprint: row.get(3)?,
+                overwrite_markers: row.get(4)?,
+                status: row.get(5)?,
+                error: row.get(6)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn start_probe_unit(&self, job_id: &str, ledger_id: &str) -> Result<bool, StoreError> {
+        let tx = self.library.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE probe_job_units SET status = 'running'
+             WHERE job_id = ?1 AND ledger_id = ?2 AND status = 'queued'",
+            params![job_id, ledger_id],
+        )?;
+        if changed > 0 {
+            tx.execute(
+                "UPDATE probe_jobs SET status = 'running',
+                     started_at_ms = COALESCE(started_at_ms, ?2)
+                 WHERE id = ?1 AND status IN ('queued', 'running')",
+                params![job_id, now_ms()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(changed > 0)
+    }
+
+    pub fn finish_probe_unit(
+        &self,
+        job_id: &str,
+        ledger_id: &str,
+        succeeded: bool,
+        error: Option<&str>,
+    ) -> Result<(ProbeJob, bool, bool), StoreError> {
+        let tx = self.library.unchecked_transaction()?;
+        let status = if succeeded { "succeeded" } else { "failed" };
+        let changed = tx.execute(
+            "UPDATE probe_job_units SET status = ?3, error = ?4
+             WHERE job_id = ?1 AND ledger_id = ?2 AND status IN ('queued', 'running')",
+            params![job_id, ledger_id, status, error],
+        )?;
+        tx.execute(
+            "UPDATE probe_jobs SET
+                 completed = (SELECT COUNT(*) FROM probe_job_units
+                              WHERE job_id = ?1 AND status IN ('succeeded', 'failed')),
+                 succeeded = (SELECT COUNT(*) FROM probe_job_units
+                              WHERE job_id = ?1 AND status = 'succeeded'),
+                 failed = (SELECT COUNT(*) FROM probe_job_units
+                           WHERE job_id = ?1 AND status = 'failed'),
+                 error = COALESCE((SELECT error FROM probe_job_units
+                                   WHERE job_id = ?1 AND error IS NOT NULL LIMIT 1), error)
+             WHERE id = ?1",
+            [job_id],
+        )?;
+        tx.commit()?;
+        let job = self
+            .get_probe_job(job_id)?
+            .ok_or_else(|| StoreError::Missing(format!("probe job {job_id}")))?;
+        Ok((job.clone(), changed > 0, job.completed >= job.total))
+    }
+
+    pub fn finish_probe_job(
+        &self,
+        job_id: &str,
+        succeeded: bool,
+        error: Option<&str>,
+    ) -> Result<(), StoreError> {
+        self.library.execute(
+            "UPDATE probe_jobs SET status = ?2, error = COALESCE(?3, error), finished_at_ms = ?4
+             WHERE id = ?1 AND status IN ('queued', 'running')",
+            params![
+                job_id,
+                if succeeded { "succeeded" } else { "failed" },
+                error,
+                now_ms()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Terminalize a fully completed job when startup cannot read its refreshed state.
+    /// The completion predicate prevents this recovery fallback from failing pending work.
+    pub fn fail_completed_probe_job(&self, job_id: &str, error: &str) -> Result<bool, StoreError> {
+        let changed = self.library.execute(
+            "UPDATE probe_jobs SET status = 'failed', error = COALESCE(error, ?2),
+                    finished_at_ms = ?3
+             WHERE id = ?1 AND status IN ('queued', 'running') AND completed = total",
+            params![job_id, error, now_ms()],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn get_probe_job(&self, id: &str) -> Result<Option<ProbeJob>, StoreError> {
+        self.library
+            .query_row(
+                "SELECT id, kind, media_id, season, status, total, completed, succeeded,
+                        failed, error, created_at_ms, started_at_ms, finished_at_ms
+                 FROM probe_jobs WHERE id = ?1",
+                [id],
+                map_probe_job,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn latest_probe_job_for_scope(
+        &self,
+        scope_key: &str,
+    ) -> Result<Option<ProbeJob>, StoreError> {
+        self.library
+            .query_row(
+                "SELECT id, kind, media_id, season, status, total, completed, succeeded,
+                        failed, error, created_at_ms, started_at_ms, finished_at_ms
+                 FROM probe_jobs WHERE scope_key = ?1 ORDER BY created_at_ms DESC, rowid DESC LIMIT 1",
+                [scope_key],
+                map_probe_job,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn latest_marker_refresh_for_season(
+        &self,
+        media_id: &str,
+        season: u32,
+    ) -> Result<Option<ProbeJob>, StoreError> {
+        self.library
+            .query_row(
+                "SELECT id, kind, media_id, season, status, total, completed, succeeded,
+                        failed, error, created_at_ms, started_at_ms, finished_at_ms
+                 FROM probe_jobs
+                 WHERE kind = 'marker_refresh' AND media_id = ?1
+                   AND (season = ?2 OR season IS NULL)
+                 ORDER BY created_at_ms DESC, rowid DESC LIMIT 1",
+                params![media_id, season],
+                map_probe_job,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn active_probe_job_for_scope(
+        &self,
+        scope_key: &str,
+    ) -> Result<Option<ProbeJob>, StoreError> {
+        let Some(job) = self.latest_probe_job_for_scope(scope_key)? else {
+            return Ok(None);
+        };
+        Ok(job.is_active().then_some(job))
+    }
+
+    pub fn is_probe_queued(&self, ledger_id: &str) -> Result<bool, StoreError> {
+        let active = self.library.query_row(
+            "SELECT EXISTS(SELECT 1 FROM probe_job_units
+             WHERE ledger_id = ?1 AND status IN ('queued', 'running'))",
+            [ledger_id],
+            |row| row.get(0),
+        )?;
+        Ok(active)
+    }
+
+    pub fn active_probe_unit_for_ledger(
+        &self,
+        ledger_id: &str,
+    ) -> Result<Option<ProbeJobUnit>, StoreError> {
+        self.library
+            .query_row(
+                "SELECT job_id, ledger_id, kind, force_fingerprint, overwrite_markers, status, error
+                 FROM probe_job_units WHERE ledger_id = ?1 AND status IN ('queued', 'running')
+                 ORDER BY rowid DESC LIMIT 1",
+                [ledger_id],
+                |row| {
+                    Ok(ProbeJobUnit {
+                        job_id: row.get(0)?,
+                        ledger_id: row.get(1)?,
+                        kind: row.get(2)?,
+                        force_fingerprint: row.get(3)?,
+                        overwrite_markers: row.get(4)?,
+                        status: row.get(5)?,
+                        error: row.get(6)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+}
+
+fn map_probe_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProbeJob> {
+    Ok(ProbeJob {
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        media_id: row.get(2)?,
+        season: row.get::<_, Option<i64>>(3)?.map(|v| v as u32),
+        status: row.get(4)?,
+        total: row.get::<_, i64>(5)? as usize,
+        completed: row.get::<_, i64>(6)? as usize,
+        succeeded: row.get::<_, i64>(7)? as usize,
+        failed: row.get::<_, i64>(8)? as usize,
+        error: row.get(9)?,
+        created_at_ms: row.get(10)?,
+        started_at_ms: row.get(11)?,
+        finished_at_ms: row.get(12)?,
+    })
+}
+
+fn is_constraint(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, _)
+            if code.code == rusqlite::ErrorCode::ConstraintViolation
+    )
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or_default()
+}

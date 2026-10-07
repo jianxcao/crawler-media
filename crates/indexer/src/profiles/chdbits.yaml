@@ -1,0 +1,62 @@
+# 彩虹岛 CHDBits（移植自上游项目 sites/configs/chdbits.yaml）
+id: chdbits
+framework: nexusphp
+render: false
+search:
+  path: /torrents.php
+  query_param: search
+list:
+  item: "table.torrents > tbody > tr, table.torrents > tr"
+fields:
+  title:
+    selector: "a[href*='details.php']"
+  enclosure:
+    selector: "a[href*='download.php']"
+    attr: href
+  detail:
+    selector: "a[href*='details.php']"
+    attr: href
+  size:
+    selector: "td:nth-child(5)"
+  seeders:
+    selector: "td:nth-child(6)"
+  leechers:
+    selector: "td:nth-child(7)"
+  snatched:
+    selector: "td:nth-child(8)"
+  upload_time:
+    selector: "td:nth-child(4) > span"
+    attr: title
+  category:
+    selector: "a[href^='?cat=']"
+    attr: href
+  free:
+    selector: "img.pro_free, img.pro_free2up"
+  hr:
+    selector: "img.hitandrun"
+rss:
+  item: item
+  title:
+    selector: title
+  enclosure:
+    selector: enclosure
+    attr: url
+  id:
+    selector: guid
+  size:
+    selector: enclosure
+    attr: length
+  seeders:
+    selector: seeders
+  leechers:
+    selector: leechers
+  snatched:
+    selector: snatched
+  upload_time:
+    selector: pubDate
+  category:
+    selector: category
+  free:
+    selector: free
+  hr:
+    selector: hr

@@ -1,0 +1,172 @@
+use std::time::Duration;
+use std::{collections::HashMap, sync::Arc};
+
+use jobs::{Job, JobError, Runner};
+use parking_lot::Mutex;
+use tokio::task::JoinHandle;
+
+use crate::management::ApiState;
+use crate::worker::StateRunner;
+
+pub fn spawn_job_loop(state: ApiState) -> JoinHandle<()> {
+    spawn_job_loop_with(state, Duration::from_secs(1), unix_now)
+}
+
+pub fn spawn_job_loop_with(
+    state: ApiState,
+    interval: Duration,
+    clock: impl Fn() -> i64 + Send + 'static,
+) -> JoinHandle<()> {
+    let clock: Arc<Mutex<Box<dyn Fn() -> i64 + Send>>> = Arc::new(Mutex::new(Box::new(clock)));
+    tokio::spawn(async move {
+        loop {
+            let now = read_clock(&clock);
+            // tick 内 runner 会同步执行 worker（订阅搜索 → Indexer 抓 PT 站点，
+            // 同步 ureq 阻塞 1-8s）。直接在 async 任务里跑会占满 tokio 工作
+            // 线程，导致所有 HTTP 请求（含无锁的 /health）排队超时——
+            // 表现就是「正在连接服务…」+ me 不返回。挪到 spawn_blocking 池。
+            let state_clone = state.clone();
+            let completion_clock = Arc::clone(&clock);
+            tokio::task::spawn_blocking(move || {
+                if let Err(error) =
+                    run_pending_jobs_with_clock(&state_clone, now, || read_clock(&completion_clock))
+                {
+                    tracing::error!(%error, now, "后台任务轮询失败");
+                }
+                // 播放会话心跳超时回收：停止上报的会话落成播放记录。
+                let _ = state_clone
+                    .store
+                    .lock()
+                    .sweep_stale_sessions(now, crate::http::playback::session_timeout_secs());
+            });
+            tokio::time::sleep(interval).await;
+        }
+    })
+}
+
+/// Claim work while holding the queue lock, execute it without the lock, then
+/// briefly reacquire the queue to persist each outcome. Network-bound runners
+/// must never make `/jobs` readers wait for the full Job duration.
+pub(crate) fn run_pending_jobs_with_clock(
+    state: &ApiState,
+    now: i64,
+    completion_clock: impl Fn() -> i64,
+) -> Result<Vec<Job>, JobError> {
+    let claimed = claim_pending_jobs(state, now)?;
+    let runner = StateRunner {
+        state: state.clone(),
+    };
+    let mut finished = Vec::with_capacity(claimed.len());
+    let active_guards = claimed
+        .iter()
+        .map(|job| ActiveAttemptGuard::new(Arc::clone(&state.active_job_attempts), job.clone()))
+        .collect::<Vec<_>>();
+    for (job, mut active_guard) in claimed.into_iter().zip(active_guards) {
+        let job_name = job
+            .def_id
+            .and_then(|def_id| state.jobs.lock().def_name(def_id).ok().flatten())
+            .unwrap_or_else(|| job.kind.as_str().to_owned());
+        tracing::info!(job_id = %job.id, job_name = %job_name, kind = ?job.kind, "后台任务开始执行");
+        let result = runner.run(&job);
+        let persisted =
+            persist_job_result(state, &job, result, completion_clock(), &mut active_guard)?;
+        if let Some(persisted) = persisted {
+            finished.push(persisted);
+        } else {
+            tracing::warn!(job_id = %job.id, attempt = job.attempt, "忽略超时后旧执行实例的完成结果");
+        }
+    }
+    Ok(finished)
+}
+
+fn claim_pending_jobs(state: &ApiState, now: i64) -> Result<Vec<Job>, JobError> {
+    let mut active = state.active_job_attempts.lock();
+    let queue = state.jobs.lock();
+    let active_attempts: Vec<_> = active.values().cloned().collect();
+    queue.recover_except(now, &active_attempts)?;
+    queue.ensure_scheduled(now)?;
+    let claimed = queue.claim(now, 2)?;
+    for job in &claimed {
+        active.insert(job.id, job.clone());
+    }
+    Ok(claimed)
+}
+
+fn persist_job_result(
+    state: &ApiState,
+    job: &Job,
+    result: Result<(), String>,
+    finished_at: i64,
+    active_guard: &mut ActiveAttemptGuard,
+) -> Result<Option<Job>, JobError> {
+    // Keep the marker through the DB write; claiming uses the same lock order.
+    let mut active = state.active_job_attempts.lock();
+    let queue = state.jobs.lock();
+    let persisted = match result {
+        Ok(()) => {
+            tracing::info!(job_id = %job.id, kind = ?job.kind, "后台任务执行成功");
+            queue.succeed_claimed(job, finished_at)?
+        }
+        Err(error) => {
+            tracing::error!(job_id = %job.id, kind = ?job.kind, error = %error, "后台任务执行失败");
+            queue.fail_claimed(job, finished_at, &error)?
+        }
+    };
+    if active
+        .get(&job.id)
+        .is_some_and(|attempt| same_attempt(attempt, job))
+    {
+        active.remove(&job.id);
+    }
+    active_guard.disarm();
+    Ok(persisted)
+}
+
+type ActiveJobMap = HashMap<domain::JobId, Job>;
+
+struct ActiveAttemptGuard {
+    active: Arc<Mutex<ActiveJobMap>>,
+    job: Job,
+    armed: bool,
+}
+
+impl ActiveAttemptGuard {
+    fn new(active: Arc<Mutex<ActiveJobMap>>, job: Job) -> Self {
+        Self {
+            active,
+            job,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ActiveAttemptGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut active = self.active.lock();
+        if active
+            .get(&self.job.id)
+            .is_some_and(|attempt| same_attempt(attempt, &self.job))
+        {
+            active.remove(&self.job.id);
+        }
+    }
+}
+
+fn same_attempt(left: &Job, right: &Job) -> bool {
+    left.id == right.id && left.attempt == right.attempt && left.started_at == right.started_at
+}
+
+fn read_clock(clock: &Arc<Mutex<Box<dyn Fn() -> i64 + Send>>>) -> i64 {
+    (clock.lock())()
+}
+
+pub fn unix_now() -> i64 {
+    crate::store::unix_now()
+}

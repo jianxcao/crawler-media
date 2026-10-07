@@ -1,0 +1,25 @@
+{
+  "id": 3572,
+  "episodes": [
+    {
+      "episode_number": 1,
+      "name": "Pilot",
+      "overview": "A teacher receives a diagnosis.",
+      "air_date": "2008-01-20",
+      "runtime": 58,
+      "vote_average": 8.9,
+      "vote_count": 9800,
+      "still_path": "/pilot.jpg"
+    },
+    {
+      "episode_number": 2,
+      "name": "Cat's in the Bag...",
+      "overview": "",
+      "air_date": "2008-01-27",
+      "runtime": 48,
+      "vote_average": 8.2,
+      "vote_count": 7600,
+      "still_path": null
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>demo</title>
+    <item>
+      <title>Arrival.2016.1080p.BluRay.x264-GROUP</title>
+      <guid>https://pt.example/details.php?id=8</guid>
+      <enclosure url="https://pt.example/download.php?id=8" length="8589934592" type="application/x-bittorrent"/>
+      <seeders>11</seeders>
+      <leechers>3</leechers>
+      <snatched>95</snatched>
+      <pubDate>2024-02-01 12:00</pubDate>
+      <category>Movies</category>
+      <free>yes</free>
+      <hr>yes</hr>
+    </item>
+  </channel>
+</rss>

@@ -1,0 +1,67 @@
+<svg width="160" height="160" viewBox="0 0 160 160" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- 深邃暗曜背景渐变 -->
+    <linearGradient id="cm-bg" x1="16" y1="12" x2="144" y2="148" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#181B26"/>
+      <stop offset="100%" stop-color="#08090E"/>
+    </linearGradient>
+
+    <!-- 棱角微光轮廓 -->
+    <linearGradient id="cm-border" x1="20" y1="14" x2="140" y2="146" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="rgba(255,255,255,0.22)"/>
+      <stop offset="50%" stop-color="rgba(255,255,255,0.05)"/>
+      <stop offset="100%" stop-color="rgba(255,255,255,0.02)"/>
+    </linearGradient>
+
+    <!-- 电影胶片暗紫深渊 -->
+    <linearGradient id="cm-film" x1="26" y1="28" x2="74" y2="132" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#242838"/>
+      <stop offset="100%" stop-color="#12141D"/>
+    </linearGradient>
+
+    <!-- 播放与灵动光谱渐变（蓝紫 -> 电光品红 -> 珊瑚橙） -->
+    <linearGradient id="cm-play-grad" x1="56" y1="36" x2="134" y2="108" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#6366F1"/>
+      <stop offset="48%" stop-color="#EC4899"/>
+      <stop offset="100%" stop-color="#FF5722"/>
+    </linearGradient>
+
+    <!-- 灵动扫描弧光（青蓝） -->
+    <linearGradient id="cm-glow" x1="32" y1="80" x2="128" y2="80" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#818CF8"/>
+    </linearGradient>
+
+    <filter id="cm-shadow" x="38" y="24" width="104" height="112" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="2" dy="6" stdDeviation="7" flood-color="#EC4899" flood-opacity="0.32"/>
+    </filter>
+  </defs>
+
+  <!-- 外轮廓底色卡片 -->
+  <rect x="8" y="8" width="144" height="144" rx="36" fill="url(#cm-bg)"/>
+  <rect x="8.5" y="8.5" width="143" height="143" rx="35.5" stroke="url(#cm-border)" stroke-width="1"/>
+
+  <!-- 左侧：立式胶片条（媒体、电影胶卷） -->
+  <g opacity="0.95">
+    <rect x="28" y="32" width="40" height="96" rx="9" fill="url(#cm-film)"/>
+    <rect x="28.5" y="32.5" width="39" height="95" rx="8.5" stroke="rgba(255,255,255,0.08)" stroke-width="1"/>
+    
+    <!-- 齿孔 1 -->
+    <rect x="34" y="42" width="9" height="14" rx="3" fill="#08090E" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+    <!-- 齿孔 2 -->
+    <rect x="34" y="65" width="9" height="14" rx="3" fill="#08090E" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+    <!-- 齿孔 3 -->
+    <rect x="34" y="88" width="9" height="14" rx="3" fill="#08090E" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+    <!-- 齿孔 4 -->
+    <rect x="34" y="104" width="9" height="14" rx="3" fill="#08090E" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+  </g>
+
+  <!-- 中右侧：先锋媒体播放三角（流线型微曲面，透光跃升） -->
+  <path filter="url(#cm-shadow)" d="M60 41.5 C60 38.2 63.8 36.3 66.5 38.1 L124.8 76.6 C127.2 78.2 127.2 81.8 124.8 83.4 L66.5 121.9 C63.8 123.7 60 121.8 60 118.5 Z" fill="url(#cm-play-grad)"/>
+
+  <!-- 内部光感切角弧线（Crawler 雷达抓取/脉冲透镜感） -->
+  <path d="M72 58 C79 66 84 74 84 80 C84 86 79 94 72 102" stroke="rgba(255,255,255,0.45)" stroke-width="4.5" stroke-linecap="round" fill="none"/>
+  
+  <!-- 晶钻光芒核心 -->
+  <circle cx="102" cy="80" r="4.5" fill="#FFFFFF" opacity="0.9"/>
+</svg>

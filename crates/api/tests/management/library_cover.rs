@@ -1,0 +1,193 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use api::router;
+use axum::http::StatusCode;
+use downloader::MemoryDownloader;
+use parking_lot::Mutex;
+use serde_json::{Value, json};
+use tower::ServiceExt;
+
+use super::common::*;
+
+fn app(tmp: &tempfile::TempDir) -> axum::Router {
+    let fetcher = Arc::new(Fixtures {
+        requests: Mutex::new(Vec::new()),
+        bodies: HashMap::new(),
+    });
+    let downloader = Arc::new(MemoryDownloader::new(tmp.path().join("stage")));
+    router(state(tmp.path(), fetcher, downloader))
+}
+
+async fn create_movie_library_and_assert_empty_cover(
+    app: &axum::Router,
+    movie_root: &std::path::Path,
+) -> (String, std::path::PathBuf) {
+    let movie_lib = json_body(
+        app.clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/libraries",
+                Some("management-secret"),
+                json!({
+                    "name": "测试电影库",
+                    "kind": "movie",
+                    "root_paths": [movie_root.display().to_string()],
+                }),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let lib_id = movie_lib["data"]["id"].as_str().unwrap().to_string();
+
+    let cover_res = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("/api/v1/libraries/{lib_id}/cover"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cover_res.status(), StatusCode::NOT_FOUND);
+
+    let film_dir = movie_root.join("The Matrix (1999)");
+    std::fs::create_dir_all(&film_dir).unwrap();
+    std::fs::write(film_dir.join("poster.jpg"), b"fake poster bytes").unwrap();
+    std::fs::write(film_dir.join("matrix.mp4"), b"fake video").unwrap();
+
+    let scan_res = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            &format!("/api/v1/libraries/{lib_id}/scan"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(scan_res.status(), StatusCode::OK);
+
+    let cover_res2 = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("/api/v1/libraries/{lib_id}/cover"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        cover_res2.status(),
+        StatusCode::NOT_FOUND,
+        "只有纵版海报时严禁填充为媒体库封面"
+    );
+    (lib_id, film_dir)
+}
+
+async fn setup_movie_library_with_fanart(
+    app: &axum::Router,
+    tmp: &tempfile::TempDir,
+) -> (String, std::path::PathBuf) {
+    let movie_root = tmp.path().join("movies");
+    std::fs::create_dir_all(&movie_root).unwrap();
+
+    let (lib_id, film_dir) = create_movie_library_and_assert_empty_cover(app, &movie_root).await;
+
+    // 出现横版 fanart.jpg 后自动填充
+    std::fs::write(film_dir.join("fanart.jpg"), b"fake fanart bytes 12345").unwrap();
+    let scan_res2 = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            &format!("/api/v1/libraries/{lib_id}/scan"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(scan_res2.status(), StatusCode::OK);
+
+    let cover_res3 = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("/api/v1/libraries/{lib_id}/cover"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cover_res3.status(), StatusCode::OK);
+    assert_eq!(
+        cover_res3.headers().get("content-type").unwrap(),
+        "image/jpeg"
+    );
+    let cover_file = tmp
+        .path()
+        .join("data")
+        .join("library")
+        .join("covers")
+        .join(format!("library-{lib_id}.jpg"));
+    assert!(cover_file.is_file(), "自动拷贝生成了 cover.jpg");
+    assert_eq!(
+        std::fs::read(&cover_file).unwrap(),
+        b"fake fanart bytes 12345"
+    );
+    (lib_id, cover_file)
+}
+
+async fn assert_cover_crud(app: &axum::Router, lib_id: &str, cover_file: &std::path::Path) {
+    // 4. 用户主动上传/更换封面 (POST /cover)
+    let upload_res = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            &format!("/api/v1/libraries/{lib_id}/cover"),
+            Some("management-secret"),
+            json!({
+                "data_url": "data:image/jpeg;base64,aGVsbG8gY3VzdG9tIGNvdmVy"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(upload_res.status(), StatusCode::OK);
+    assert_eq!(std::fs::read(cover_file).unwrap(), b"hello custom cover");
+
+    // 5. 用户删除封面 (DELETE /cover)
+    let delete_res = app
+        .clone()
+        .oneshot(request(
+            "DELETE",
+            &format!("/api/v1/libraries/{lib_id}/cover"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(delete_res.status(), StatusCode::OK);
+    assert!(!cover_file.is_file(), "cover.jpg 文件已被删除");
+
+    let cover_res4 = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("/api/v1/libraries/{lib_id}/cover"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cover_res4.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn library_cover_auto_fill_only_uses_fanart_and_supports_crud() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+    let (lib_id, cover_file) = setup_movie_library_with_fanart(&app, &tmp).await;
+    assert_cover_crud(&app, &lib_id, &cover_file).await;
+}

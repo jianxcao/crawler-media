@@ -1,0 +1,62 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/domain",
+    "crates/store",
+    "crates/indexer",
+    "crates/media",
+    "crates/downloader",
+    "crates/library",
+    "crates/subscribe",
+    "crates/filter",
+    "crates/release",
+    "crates/hooks",
+    "crates/jobs",
+    "crates/api",
+    "crates/playback",
+    "crates/marker",
+    "crates/media-server",
+    "crates/cover-generator",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+domain = { path = "crates/domain" }
+store = { path = "crates/store" }
+indexer = { path = "crates/indexer" }
+media = { path = "crates/media" }
+downloader = { path = "crates/downloader" }
+library = { path = "crates/library" }
+subscribe = { path = "crates/subscribe" }
+filter = { path = "crates/filter" }
+release = { path = "crates/release" }
+hooks = { path = "crates/hooks" }
+playback = { path = "crates/playback" }
+jobs = { path = "crates/jobs" }
+marker = { path = "crates/marker" }
+media-server = { path = "crates/media-server" }
+cover-generator = { path = "crates/cover-generator" }
+rusqlite = { version = "0.37", features = ["bundled"] }
+uuid = { version = "1", features = ["v4", "v5"] }
+thiserror = "2"
+tempfile = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
+ureq = { version = "3.0", default-features = false, features = ["json"] }
+parking_lot = "0.12"
+base64 = "0.22"
+tokio-stream = { version = "0.1", features = ["sync"] }
+notify-debouncer-mini = "0.5"
+notify = "7.0"
+flate2 = "1.0"
+tar = "0.4"
+tracing = "0.1"
+roxmltree = "0.21"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
+tracing-appender = "0.2"
+sha2 = "0.10"

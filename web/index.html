@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0a0b10" />
+    <meta name="description" content="Crawler Media 控制台 —— 液态玻璃风格的影视追踪工作台。" />
+    <meta name="format-detection" content="telephone=no" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="crawler-media" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/logo-mark.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <title>crawler-media console</title>
+  </head>
+  <body>
+    <!--
+      防背景闪烁(FOUC)与主题防闪烁(FOUC)脚本,与 Next 版 layout.tsx 一致:
+      必须是 body 最前的同步内联脚本,解析即执行,赶在首帧绘制之前。
+    -->
+    <script>
+      try{if(location.pathname.indexOf("/sessions/")===0){document.documentElement.classList.add("immersive-route")}else{var u=localStorage.getItem("crawler-media.backdrop");if(u&&u.charAt(0)==="/")document.documentElement.style.setProperty("--backdrop-image",'url("'+u+'")')}}catch(e){}
+    </script>
+    <script>
+      try{var p=JSON.parse(localStorage.getItem("crawler-media.ui-prefs")||"null");var t=p&&p.theme;if(t==="paper"||t==="netflix"){document.documentElement.setAttribute("data-theme",t);var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute("content",t==="paper"?"#eef1f6":"#000000")}}catch(e){}
+    </script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

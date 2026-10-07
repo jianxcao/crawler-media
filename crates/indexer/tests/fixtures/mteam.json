@@ -1,0 +1,21 @@
+{
+  "code": "0",
+  "data": {
+    "data": [
+      {
+        "id": "99",
+        "name": "Dune.Part.Two.2024.1080p.BluRay.x264",
+        "size": "21474836480",
+        "createdDate": "2024-03-01 12:00:00",
+        "imageList": ["https://img.m-team.cc/poster99.jpg"],
+        "status": {
+          "seeders": "7",
+          "leechers": "2",
+          "snatched": "60",
+          "discount": "FREE",
+          "hr": true
+        }
+      }
+    ]
+  }
+}

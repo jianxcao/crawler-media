@@ -1,0 +1,72 @@
+# NAS / Docker 部署：crawler-media 单服务编排。
+#
+# 凭据与密钥配置说明 (优先级: 环境变量 > _FILE 密钥文件 > 默认回退):
+#   1. Web 管理员密码: CRAWLER_MEDIA_ADMIN_PASSWORD (或 _FILE 变量)
+#      用于网页登录 (admin 账号)。生产部署请务必设置强密码！
+#   2. CLI Bearer Token: CRAWLER_MEDIA_TOKEN (或 _FILE 变量)
+#      用于命令行工具与自动化脚本认证 (默认 changeme)。
+#   3. 第三方服务凭据: qBittorrent 密码、TMDB Key、网络代理等。
+#
+# 快速启动：
+#   CRAWLER_MEDIA_TOKEN=myclitoken CRAWLER_MEDIA_ADMIN_PASSWORD=myadminpassword docker compose up -d --build
+#
+# qBittorrent 可选：需要搜种入库时，把下载目录挂到同一 NAS 存储，
+# 并在 crawler-media 里填 qB 地址（http://<nas-ip>:8080）+ 账号密码。
+# 参考 qB 服务（取消注释启用）：
+#   qbittorrent:
+#     image: lscr.io/linuxserver/qbittorrent:latest
+#     container_name: crawler-media-qb
+#     environment:
+#       PUID: "1024"
+#       PGID: "100"
+#       TZ: Asia/Shanghai
+#       WEBUI_PORT: "8080"
+#       WEBUI_PASSWORD: ${QB_PASS:-adminadmin}
+#     ports: ["8080:8080", "16881:16881", "16881:16881/udp"]
+#     volumes:
+#       - qb-config:/config
+#       - ${DOWNLOAD_DIR:-/volume1/media/downloads}:/downloads
+#     restart: unless-stopped
+services:
+  crawler-media:
+    build: .
+    container_name: crawler-media
+    ports:
+      - "18765:18765"
+    environment:
+      CRAWLER_MEDIA_TOKEN: ${CRAWLER_MEDIA_TOKEN:-}
+      CRAWLER_MEDIA_TOKEN_FILE: ${CRAWLER_MEDIA_TOKEN_FILE:-}
+      CRAWLER_MEDIA_ADMIN_PASSWORD: ${CRAWLER_MEDIA_ADMIN_PASSWORD:-}
+      CRAWLER_MEDIA_ADMIN_PASSWORD_FILE: ${CRAWLER_MEDIA_ADMIN_PASSWORD_FILE:-}
+      # 数据目录（SQLite/缓存/图片）——挂 NAS 持久卷。
+      CRAWLER_MEDIA_DATA: /data
+      CRAWLER_MEDIA_LISTEN: 0.0.0.0:18765
+      CRAWLER_MEDIA_UI: /usr/share/crawler-media/ui
+      # 浏览器直连时的 CORS 白名单（反向代理同域时可留空）。
+      CRAWLER_MEDIA_CORS_ORIGINS: ${CRAWLER_MEDIA_CORS_ORIGINS:-}
+      # 可选：qBittorrent（不配则后端用内存下载器，启动不依赖）。
+      CRAWLER_MEDIA_QB_URL: ${CRAWLER_MEDIA_QB_URL:-}
+      CRAWLER_MEDIA_QB_USER: ${CRAWLER_MEDIA_QB_USER:-}
+      CRAWLER_MEDIA_QB_PASS: ${CRAWLER_MEDIA_QB_PASS:-}
+      CRAWLER_MEDIA_QB_PATH_MAP: ${CRAWLER_MEDIA_QB_PATH_MAP:-/downloads=/downloads}
+      # 可选：TMDB API Key（界面 设置→元数据源 也能填，重启生效）。
+      CRAWLER_MEDIA_TMDB_KEY: ${CRAWLER_MEDIA_TMDB_KEY:-}
+      # 可选：元数据专属网络代理（界面 设置→元数据源 也能填，支持 http:// 与 socks5://）。
+      CRAWLER_MEDIA_METADATA_PROXY: ${CRAWLER_MEDIA_METADATA_PROXY:-}
+      # 密钥文件模式（可选，Docker Swarm / K8s Secret 卷场景）：
+      # 保密变量都支持 `_FILE` 变体，值为「存放密钥的文件路径」，优先级低于同名直接变量：
+      #   CRAWLER_MEDIA_TOKEN_FILE: /run/secrets/cm_token
+      #   CRAWLER_MEDIA_ADMIN_PASSWORD_FILE: /run/secrets/cm_admin_password
+      #   CRAWLER_MEDIA_QB_PASS_FILE: /run/secrets/qb_pass
+      #   CRAWLER_MEDIA_TMDB_KEY_FILE: /run/secrets/tmdb_key
+      #   CRAWLER_MEDIA_TVDB_KEY_FILE: /run/secrets/tvdb_key
+    volumes:
+      - crawler-data:/data
+      # 下载目录与 qB 共享（可选；qB 容器同样挂载此路径）。
+      - ${DOWNLOAD_DIR:-/volume1/media/downloads}:/downloads
+      # 用密钥文件时把 secret 卷挂进来，例如：
+      # - ./secrets:/run/secrets:ro
+    restart: unless-stopped
+
+volumes:
+  crawler-data:

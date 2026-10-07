@@ -1,0 +1,363 @@
+//! Test auto-resolving TMDB metadata during library scan.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use api::router;
+use axum::http::StatusCode;
+use downloader::MemoryDownloader;
+use parking_lot::Mutex;
+use serde_json::Value;
+use tower::ServiceExt;
+
+use super::common::*;
+
+struct WrongYearCatalog;
+
+struct StillCatalog;
+struct StillBytes;
+
+impl api::PosterFetch for StillBytes {
+    fn get(&self, url: &str) -> Result<Vec<u8>, String> {
+        Ok(if url.contains("/ep1.jpg") {
+            b"one".to_vec()
+        } else {
+            b"two".to_vec()
+        })
+    }
+}
+
+impl api::catalog::Catalog for StillCatalog {
+    fn search_movie(&self, _query: &str) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn search_tv(&self, _query: &str) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn popular_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn popular_tv(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn details(
+        &self,
+        _kind: domain::MediaKind,
+        _id: &str,
+    ) -> Result<Option<domain::Media>, String> {
+        Ok(None)
+    }
+    fn episode_stills(&self, _id: &str, _season: u32, episode: u32) -> Result<Vec<String>, String> {
+        Ok(vec![format!("/ep{episode}.jpg")])
+    }
+}
+
+impl api::catalog::Catalog for WrongYearCatalog {
+    fn search_movie(&self, _query: &str) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(vec![media::CatalogHit {
+            media: domain::Media {
+                id: domain::MediaId::new(),
+                kind: domain::MediaKind::Movie,
+                title: "Arrival".into(),
+                year: Some(2016),
+                original_title: None,
+                tmdb_id: Some("329865".into()),
+                douban_id: None,
+                tvdb_id: None,
+                bangumi_id: None,
+                anilist_id: None,
+            },
+            poster_path: None,
+            backdrop_path: None,
+            rating: None,
+            overview: None,
+        }])
+    }
+    fn search_tv(&self, _query: &str) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn popular_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn popular_tv(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn details(
+        &self,
+        _kind: domain::MediaKind,
+        _id: &str,
+    ) -> Result<Option<domain::Media>, String> {
+        Ok(None)
+    }
+}
+
+#[test]
+fn auto_resolve_rejects_catalog_hit_for_different_year() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = state(
+        tmp.path(),
+        Arc::new(Fixtures {
+            requests: Mutex::new(Vec::new()),
+            bodies: HashMap::new(),
+        }),
+        Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
+    )
+    .with_catalog(Arc::new(WrongYearCatalog));
+    let wanted = domain::Media {
+        id: domain::MediaId::new(),
+        kind: domain::MediaKind::Movie,
+        title: "Arrival".into(),
+        year: Some(1996),
+        original_title: None,
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    let store = api::Store::open(tmp.path().join("data")).unwrap();
+    store.insert_media(&wanted).unwrap();
+    let actual = api::auto_resolve::auto_resolve_media(
+        &state,
+        &wanted,
+        &tmp.path().join("Arrival.1996.mkv"),
+    );
+    assert!(actual.is_none());
+    assert!(
+        store
+            .get_media(wanted.id)
+            .unwrap()
+            .unwrap()
+            .tmdb_id
+            .is_none()
+    );
+}
+
+fn app(tmp: &tempfile::TempDir) -> (axum::Router, api::Store) {
+    let fetcher = Arc::new(Fixtures {
+        requests: Mutex::new(Vec::new()),
+        bodies: HashMap::new(),
+    });
+    let downloader = Arc::new(MemoryDownloader::new(tmp.path().join("stage")));
+    let store = api::Store::open(tmp.path().join("data")).unwrap();
+    let st = state(tmp.path(), fetcher, downloader);
+    (router(st), store)
+}
+
+#[tokio::test]
+async fn library_scan_auto_resolves_tmdb_metadata() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, store) = app(&tmp);
+
+    let tv_dir = tmp.path().join("data/library/tv/Frieren");
+    std::fs::create_dir_all(&tv_dir).unwrap();
+
+    let strm_file = tv_dir.join("葬送的芙莉莲 - S01E01.strm");
+    std::fs::write(&strm_file, "https://cdn.example.com/ep01.mkv\n").unwrap();
+
+    // Query libraries to get TV library id
+    let libs = json_body(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                "/api/v1/libraries",
+                Some("management-secret"),
+                Value::Null,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let tv_lib_id = libs["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["kind"] == "tv")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+
+    // Trigger scan
+    let scan_res = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            &format!("/api/v1/libraries/{tv_lib_id}/scan"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(scan_res.status(), StatusCode::OK);
+
+    // Verify media was auto-recorded in ledger
+    let ledger = store.list_ledger().unwrap();
+    assert_eq!(ledger.len(), 1);
+    let row = &ledger[0];
+    assert_eq!(row.season, Some(1));
+    assert_eq!(row.episode, Some(1));
+
+    let media = store.get_media(row.media_id).unwrap().unwrap();
+    assert_eq!(media.title, "葬送的芙莉莲");
+}
+
+#[tokio::test]
+async fn scan_keeps_same_title_different_years_and_kinds_separate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, store) = app(&tmp);
+    let movie_dir = tmp.path().join("data/library/movies");
+    let tv_dir = tmp.path().join("data/library/tv");
+    std::fs::create_dir_all(&movie_dir).unwrap();
+    std::fs::create_dir_all(&tv_dir).unwrap();
+    let paths = [
+        movie_dir.join("Arrival.1996.1080p.mkv"),
+        movie_dir.join("Arrival.2016.1080p.mkv"),
+        tv_dir.join("Arrival.2016.S01E01.mkv"),
+    ];
+    for path in &paths {
+        std::fs::write(path, b"video").unwrap();
+    }
+    let libs = json_body(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                "/api/v1/libraries",
+                Some("management-secret"),
+                Value::Null,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    for kind in ["movie", "tv"] {
+        let id = libs["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["kind"] == kind)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap();
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                &format!("/api/v1/libraries/{id}/scan"),
+                Some("management-secret"),
+                Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let rows = store.list_ledger().unwrap();
+    assert_eq!(rows.len(), 3);
+    let media: Vec<_> = rows
+        .iter()
+        .map(|row| store.get_media(row.media_id).unwrap().unwrap())
+        .collect();
+    assert_eq!(
+        media
+            .iter()
+            .map(|m| m.id)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3
+    );
+    assert!(
+        media
+            .iter()
+            .any(|m| m.year == Some(1996) && m.kind == domain::MediaKind::Movie)
+    );
+    assert!(
+        media
+            .iter()
+            .any(|m| m.year == Some(2016) && m.kind == domain::MediaKind::Movie)
+    );
+    assert!(
+        media
+            .iter()
+            .any(|m| m.year == Some(2016) && m.kind == domain::MediaKind::Tv)
+    );
+}
+
+#[tokio::test]
+async fn metadata_refresh_writes_each_episode_still_in_shared_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let st = state(
+        tmp.path(),
+        Arc::new(Fixtures {
+            requests: Mutex::new(Vec::new()),
+            bodies: HashMap::new(),
+        }),
+        Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
+    )
+    .with_catalog(Arc::new(StillCatalog))
+    .with_poster_fetch(Arc::new(StillBytes));
+    let app = router(st);
+    let store = api::Store::open(tmp.path().join("data")).unwrap();
+    let dir = tmp.path().join("data/library/tv");
+    std::fs::create_dir_all(&dir).unwrap();
+    for episode in 1..=2 {
+        std::fs::write(
+            dir.join(format!("Orbit.S01E{episode:02}.strm")),
+            "https://example.com/video.mkv",
+        )
+        .unwrap();
+    }
+    let libs = json_body(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                "/api/v1/libraries",
+                Some("management-secret"),
+                Value::Null,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let id = libs["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["kind"] == "tv")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let scan = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            &format!("/api/v1/libraries/{id}/scan"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(scan.status(), StatusCode::OK);
+    let rows = store.list_ledger().unwrap();
+    assert_eq!(rows.len(), 2);
+    let mut item = store.get_media(rows[0].media_id).unwrap().unwrap();
+    item.tmdb_id = Some("123".into());
+    store.update_media(&item).unwrap();
+    let refresh = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            &format!("/api/v1/libraries/{id}/metadata/refresh"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(refresh.status(), StatusCode::OK);
+    assert_eq!(
+        std::fs::read(dir.join("Orbit.S01E01-still.jpg")).unwrap(),
+        b"one"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("Orbit.S01E02-still.jpg")).unwrap(),
+        b"two"
+    );
+}

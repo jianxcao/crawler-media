@@ -1,0 +1,41 @@
+{
+  "id": 1396,
+  "name": "Breaking Bad",
+  "first_air_date": "2008-01-20",
+  "last_air_date": "2013-09-29",
+  "overview": "",
+  "tagline": "",
+  "original_language": "en",
+  "status": "Ended",
+  "vote_average": 9.5,
+  "vote_count": 15000,
+  "episode_run_time": [47, 48],
+  "number_of_seasons": 5,
+  "number_of_episodes": 62,
+  "origin_country": ["US"],
+  "genres": [{"id": 18, "name": "剧情"}],
+  "networks": [{"name": "AMC"}, {"name": "Sony Pictures Television"}],
+  "content_ratings": {
+    "results": [
+      {"iso_3166_1": "US", "rating": "TV-14"},
+      {"iso_3166_1": "GB", "rating": "15"}
+    ]
+  },
+  "created_by": [{"id": 66633, "name": "Vince Gilligan"}],
+  "aggregate_credits": {
+    "cast": [
+      {"id": 17419, "name": "Bryan Cranston", "roles": [{"character": "Walter White"}], "order": 0, "profile_path": "/bryan.jpg"},
+      {"id": 17420, "name": "Aaron Paul", "roles": [{"character": "Jesse Pinkman"}], "order": 1}
+    ]
+  },
+  "seasons": [
+    {"season_number": 1, "name": "Season 1", "episode_count": 7, "air_date": "2008-01-20", "overview": "The first season.", "poster_path": "/season-1.jpg"},
+    {"season_number": 2, "name": "Season 2", "episode_count": 13, "air_date": "2009-03-08", "overview": "The second season.", "poster_path": "/season-2.jpg"}
+  ],
+  "translations": {
+    "translations": [
+      {"iso_639_1": "zh", "iso_3166_1": "CN", "data": {"overview": "化学老师走上犯罪之路。", "tagline": "记住我的名字。"}},
+      {"iso_639_1": "fr", "iso_3166_1": "FR", "data": {"overview": "Un professeur de chimie devient criminel.", "tagline": ""}}
+    ]
+  }
+}

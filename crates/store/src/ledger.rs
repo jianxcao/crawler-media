@@ -1,0 +1,253 @@
+use std::path::Path;
+
+use domain::LedgerRow;
+use rusqlite::{OptionalExtension, params};
+
+use super::maps::map_ledger;
+use super::{Store, StoreError};
+
+impl Store {
+    pub fn ledger_source_paths(
+        &self,
+        media_id: domain::MediaId,
+    ) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self.library.prepare(
+            "SELECT source_path FROM ledger WHERE media_id = ?1 AND source_path IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([media_id.to_string()], |row| row.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn insert_ledger(&self, row: &LedgerRow) -> Result<(), StoreError> {
+        self.insert_ledger_with_optional_source(row, None)
+    }
+
+    /// Save the original completed download path alongside an imported row.
+    /// The source is retained for an explicit administrator-triggered
+    /// retransfer when the Library copy later goes missing.
+    pub fn insert_ledger_with_source(
+        &self,
+        row: &LedgerRow,
+        source: &Path,
+    ) -> Result<(), StoreError> {
+        self.insert_ledger_with_optional_source(row, source.to_str())
+    }
+
+    fn insert_ledger_with_optional_source(
+        &self,
+        row: &LedgerRow,
+        source_path: Option<&str>,
+    ) -> Result<(), StoreError> {
+        self.library.execute(
+            "INSERT INTO ledger (
+                id, media_id, path, season, episode, resolution, codec, hdr,
+                quality_source, confidence, filter_score, transfer_mode, source_path
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(path) DO UPDATE SET
+                media_id = excluded.media_id,
+                season = excluded.season,
+                episode = excluded.episode,
+                resolution = excluded.resolution,
+                codec = excluded.codec,
+                hdr = excluded.hdr,
+                quality_source = excluded.quality_source,
+                confidence = excluded.confidence,
+                filter_score = excluded.filter_score,
+                transfer_mode = COALESCE(excluded.transfer_mode, ledger.transfer_mode),
+                source_path = COALESCE(excluded.source_path, ledger.source_path)",
+            params![
+                row.id.to_string(),
+                row.media_id.to_string(),
+                row.path,
+                row.season.map(i64::from),
+                row.episode.map(i64::from),
+                row.resolution,
+                row.codec,
+                row.hdr,
+                row.quality_source.as_str(),
+                row.confidence.as_str(),
+                row.filter_score,
+                self.transfer_mode_for_path(&row.path),
+                source_path,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn transfer_mode_for_path(&self, path: &str) -> String {
+        let p = std::path::Path::new(path);
+        if p.extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"))
+        {
+            return "strm".to_string();
+        }
+
+        let is_hardlink = std::fs::metadata(path)
+            .map(|meta| {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    meta.nlink() > 1
+                }
+                #[cfg(not(unix))]
+                {
+                    false
+                }
+            })
+            .unwrap_or(false);
+        if is_hardlink {
+            "hardlink".to_string()
+        } else {
+            self.transfer_mode().unwrap_or_else(|_| "copy".into())
+        }
+    }
+
+    pub fn delete_ledger_path(&self, path: &str) -> Result<(), StoreError> {
+        if let Ok(Some(row)) = self.ledger_by_path(path) {
+            let _ = self.delete_file_meta_by_ledger_id(&row.id.to_string());
+        }
+        self.library
+            .execute("DELETE FROM ledger WHERE path = ?1", params![path])?;
+        Ok(())
+    }
+
+    /// 按路径取已有台账行（扫描入库时判断「已记录」用）。
+    pub fn ledger_by_path(&self, path: &str) -> Result<Option<LedgerRow>, StoreError> {
+        self.library
+            .query_row(
+                "SELECT id, media_id, path, season, episode, resolution, codec, hdr,
+                        quality_source, confidence, filter_score
+                 FROM ledger WHERE path = ?1",
+                params![path],
+                map_ledger,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Rename a ledger row's path (整理后落名一致；path 唯一约束保持）。
+    pub fn rename_ledger_path(&self, from: &str, to: &str) -> Result<bool, StoreError> {
+        let n = self.library.execute(
+            "UPDATE ledger SET path = ?2 WHERE path = ?1",
+            params![from, to],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Update media stream facts (resolution, codec, hdr) in ledger row once probed.
+    pub fn update_ledger_probe_quality(
+        &self,
+        ledger_id: &str,
+        resolution: Option<&str>,
+        codec: Option<&str>,
+        hdr: Option<&str>,
+    ) -> Result<bool, StoreError> {
+        let n = self.library.execute(
+            "UPDATE ledger
+             SET resolution = COALESCE(?2, resolution),
+                 codec = COALESCE(?3, codec),
+                 hdr = COALESCE(?4, hdr)
+             WHERE id = ?1",
+            params![ledger_id, resolution, codec, hdr],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Rewrite every fact path equal to `from` into `to` for a media's
+    /// subscribes（整理后 wash-cut 的事实路径仍指向新文件）。
+    pub fn rewrite_fact_paths(
+        &self,
+        media_id: domain::MediaId,
+        from: &str,
+        to: &str,
+    ) -> Result<(), StoreError> {
+        for subscribe in self.list_all_subscribes()? {
+            if subscribe.media_id != media_id {
+                continue;
+            }
+            let mut facts = self.load_subscribe_facts(subscribe.id)?;
+            let mut changed = false;
+            for entry in facts.entries_mut() {
+                let fact = entry.1;
+                if fact.path.as_deref() == Some(from) {
+                    fact.path = Some(to.to_string());
+                    changed = true;
+                }
+            }
+            if changed {
+                self.save_subscribe_facts(subscribe.id, &facts)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn ledger_for_media(
+        &self,
+        media_id: domain::MediaId,
+    ) -> Result<Vec<LedgerRow>, StoreError> {
+        let mut stmt = self.library.prepare(
+            "SELECT id, media_id, path, season, episode, resolution, codec, hdr,
+                    quality_source, confidence, filter_score
+             FROM ledger WHERE media_id = ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![media_id.to_string()], map_ledger)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn delete_ledger_for_media(&self, media_id: domain::MediaId) -> Result<usize, StoreError> {
+        let changed = self.library.execute(
+            "DELETE FROM ledger WHERE media_id = ?1",
+            params![media_id.to_string()],
+        )?;
+        Ok(changed)
+    }
+
+    pub fn list_ledger(&self) -> Result<Vec<LedgerRow>, StoreError> {
+        Ok(self
+            .list_ledger_with_mode()?
+            .into_iter()
+            .map(|(row, _, _)| row)
+            .collect())
+    }
+
+    pub fn list_ledger_with_mode(
+        &self,
+    ) -> Result<Vec<(LedgerRow, Option<String>, Option<String>)>, StoreError> {
+        let mut stmt = self.library.prepare(
+            "SELECT id, media_id, path, season, episode, resolution, codec, hdr,
+                    quality_source, confidence, filter_score, transfer_mode, source_path
+             FROM ledger",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let ledger = map_ledger(row)?;
+            let mode: Option<String> = row.get(11).ok();
+            let source_path: Option<String> = row.get(12).ok();
+            Ok((ledger, mode, source_path))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn get_ledger(&self, compact_id: &str) -> Result<Option<LedgerRow>, StoreError> {
+        // compact_id is a UUID without hyphens; try to reconstruct the
+        // hyphenated form and query directly instead of a full-table scan.
+        if let Ok(uuid) = uuid::Uuid::parse_str(compact_id) {
+            return self
+                .library
+                .query_row(
+                    "SELECT id, media_id, path, season, episode, resolution, codec, hdr,
+                            quality_source, confidence, filter_score
+                     FROM ledger WHERE id = ?1",
+                    params![uuid.to_string()],
+                    map_ledger,
+                )
+                .optional()
+                .map_err(Into::into);
+        }
+        // Fallback for non-standard compact ids: scan.
+        Ok(self
+            .list_ledger()?
+            .into_iter()
+            .find(|row| row.id.to_string().replace('-', "") == compact_id))
+    }
+}

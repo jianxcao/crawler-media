@@ -1,0 +1,23 @@
+[package]
+name = "store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+domain.workspace = true
+downloader.workspace = true
+library.workspace = true
+media.workspace = true
+subscribe.workspace = true
+rusqlite.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+argon2 = { version = "0.5", features = ["std"] }
+password-hash = { version = "0.5", features = ["rand_core"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

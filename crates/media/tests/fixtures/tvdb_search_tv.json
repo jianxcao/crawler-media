@@ -1,0 +1,12 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "tvdb_id": "81189",
+      "name": "Breaking Bad",
+      "year": "2008",
+      "image_url": "https://artworks.thetvdb.com/banners/posters/81189-1.jpg",
+      "type": "series"
+    }
+  ]
+}

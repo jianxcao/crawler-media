@@ -1,0 +1,278 @@
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use indexer::{PageSession, cdp_page::open_cdp_session};
+use serde_json::{Value, json};
+use tungstenite::Message;
+
+struct Fixture {
+    url: String,
+    stop: Arc<AtomicBool>,
+    requests: Arc<Mutex<Vec<String>>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Fixture {
+    fn start(mode: &'static str) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let url = format!("http://{address}");
+        let stop = Arc::new(AtomicBool::new(false));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let thread_stop = stop.clone();
+        let log = requests.clone();
+        let thread = thread::spawn(move || {
+            let mut workers = Vec::new();
+            while !thread_stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let log = log.clone();
+                        workers.push(thread::spawn(move || serve(stream, address, mode, log)));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("fixture accept: {error}"),
+                }
+            }
+            for worker in workers {
+                worker.join().unwrap();
+            }
+        });
+        Self {
+            url,
+            stop,
+            requests,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.thread.take().unwrap().join().unwrap();
+    }
+}
+
+fn serve(
+    mut stream: TcpStream,
+    address: std::net::SocketAddr,
+    mode: &str,
+    log: Arc<Mutex<Vec<String>>>,
+) {
+    stream.set_nonblocking(false).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    let mut peek = [0; 2048];
+    let length = loop {
+        let length = stream.peek(&mut peek).unwrap();
+        if peek[..length].windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+            break length;
+        }
+        thread::sleep(Duration::from_millis(1));
+    };
+    let request = String::from_utf8_lossy(&peek[..length]);
+    if request.starts_with("GET /ws") {
+        if mode == "handshake" {
+            let mut bytes = [0; 2048];
+            while stream.read(&mut bytes).unwrap_or(0) > 0 {}
+            return;
+        }
+        serve_ws(stream, mode, log);
+        return;
+    }
+    let mut bytes = [0; 2048];
+    let length = stream.read(&mut bytes).unwrap();
+    let request = String::from_utf8_lossy(&bytes[..length]);
+    log.lock()
+        .unwrap()
+        .push(request.lines().next().unwrap().into());
+    let body = if request.contains("/json/new") {
+        json!({"id":"fixture", "webSocketDebuggerUrl":format!("ws://{address}/ws")}).to_string()
+    } else {
+        "true".into()
+    };
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+}
+
+fn serve_ws(stream: TcpStream, mode: &str, log: Arc<Mutex<Vec<String>>>) {
+    let mut socket = tungstenite::accept(stream).unwrap();
+    let mut cookie = false;
+    let mut network = false;
+    let mut navigated = false;
+    let mut polls = 0;
+    while let Ok(message) = socket.read() {
+        let Message::Text(text) = message else {
+            continue;
+        };
+        let command: Value = serde_json::from_str(&text).unwrap();
+        let method = command["method"].as_str().unwrap();
+        log.lock().unwrap().push(method.into());
+        if mode == "silent" && method == "Runtime.evaluate" {
+            continue;
+        }
+        if method == "Network.enable" {
+            network = true;
+        }
+        if method == "Network.setExtraHTTPHeaders" {
+            cookie = command["params"]["headers"]["Cookie"] == "session=secret";
+        }
+        if method == "Page.navigate" {
+            navigated = cookie && network;
+        }
+        let result = if method == "Runtime.evaluate" && mode == "success" && !navigated {
+            json!({"id":command["id"], "result":{"result":{"type":"string","value":"<html>unauthenticated</html>"}}})
+        } else {
+            response(&command, mode, cookie && network, &mut polls)
+        };
+        // Events and unrelated replies must not be mistaken for this command's response.
+        for event in [
+            json!({"method":"Page.lifecycleEvent","params":{"name":"load","frameId":"iframe","loaderId":"iframe-loader"}}),
+            json!({"method":"Page.lifecycleEvent","params":{"name":"load","frameId":"frame","loaderId":if polls >= 3 {"loader"} else {"stale-loader"}}}),
+            json!({"id":99999,"result":{}}),
+            result,
+        ] {
+            if let Err(error) = socket.send(Message::Text(event.to_string().into())) {
+                eprintln!("fixture send: {error}");
+                return;
+            }
+        }
+    }
+}
+
+fn response(command: &Value, mode: &str, authenticated: bool, polls: &mut usize) -> Value {
+    let method = command["method"].as_str().unwrap();
+    let result = match method {
+        "Page.navigate" if !authenticated || mode == "navigation" => {
+            json!({"errorText":"navigation rejected"})
+        }
+        "Page.navigate" => json!({"frameId":"frame", "loaderId":"loader"}),
+        "Runtime.evaluate" if mode == "evaluation" => {
+            json!({"exceptionDetails":{"text":"script failed"}})
+        }
+        "Runtime.evaluate" if command["params"]["expression"] == "document.readyState" => {
+            *polls += 1;
+            let state = if mode == "loading" || (mode != "success" && *polls < 3) {
+                "loading"
+            } else {
+                "complete"
+            };
+            json!({"result":{"type":"string","value":state}})
+        }
+        "Runtime.evaluate" if mode == "missing_html" => json!({"result":{"type":"undefined"}}),
+        "Runtime.evaluate" => {
+            json!({"result":{"type":"string","value":"<html>authenticated</html>"}})
+        }
+        _ => json!({}),
+    };
+    if mode == "protocol" && method == "Network.enable" {
+        json!({"id":command["id"],"error":{"code":-1,"message":"disabled"}})
+    } else {
+        json!({"id":command["id"],"result":result})
+    }
+}
+
+#[test]
+fn cookie_navigation_and_content_share_authenticated_connection() {
+    let fixture = Fixture::start("success");
+    let page = open_cdp_session(&fixture.url).unwrap();
+    page.set_cookie_header("session=secret").unwrap();
+    page.goto("https://site.invalid/search").unwrap();
+    assert_eq!(page.content().unwrap(), "<html>authenticated</html>");
+    drop(page);
+    let requests = fixture.requests.lock().unwrap();
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.contains("/json/close/fixture"))
+    );
+    assert!(
+        requests
+            .iter()
+            .filter(|request| *request == "Runtime.evaluate")
+            .count()
+            >= 4
+    );
+}
+
+#[test]
+fn navigation_and_evaluation_failures_are_not_success() {
+    for mode in ["navigation", "evaluation", "missing_html"] {
+        let fixture = Fixture::start(mode);
+        let page = open_cdp_session(&fixture.url).unwrap();
+        page.set_cookie_header("session=secret").unwrap();
+        let result = if mode == "missing_html" {
+            page.content().map(|_| ())
+        } else {
+            page.goto("https://site.invalid/search")
+        };
+        assert!(result.is_err(), "{mode} must fail");
+    }
+}
+
+#[test]
+fn initialization_failure_cleans_up_created_target() {
+    let fixture = Fixture::start("protocol");
+    assert!(open_cdp_session(&fixture.url).is_err());
+    assert!(
+        fixture
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.contains("/json/close/fixture"))
+    );
+}
+
+#[test]
+fn document_readiness_has_a_finite_deadline() {
+    let fixture = Fixture::start("loading");
+    let page = open_cdp_session(&fixture.url).unwrap();
+    page.set_cookie_header("session=secret").unwrap();
+    let start = Instant::now();
+    assert!(page.goto("https://site.invalid/search").is_err());
+    assert!(start.elapsed() >= Duration::from_secs(4));
+    assert!(start.elapsed() < Duration::from_secs(7));
+}
+
+#[test]
+fn handshake_timeout_cleans_up_created_target() {
+    let fixture = Fixture::start("handshake");
+    let start = Instant::now();
+    assert!(open_cdp_session(&fixture.url).is_err());
+    assert!(start.elapsed() < Duration::from_secs(7));
+    assert!(
+        fixture
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.contains("/json/close/fixture"))
+    );
+}
+
+#[test]
+fn missing_command_response_times_out_and_invalidates_connection() {
+    let fixture = Fixture::start("silent");
+    let page = open_cdp_session(&fixture.url).unwrap();
+    let start = Instant::now();
+    assert!(page.content().is_err());
+    assert!(start.elapsed() < Duration::from_secs(7));
+    let start = Instant::now();
+    assert!(page.content().is_err());
+    assert!(start.elapsed() < Duration::from_secs(1));
+}

@@ -1,0 +1,25 @@
+/target/
+**/*.rs.bk
+.idea/
+.vscode/
+.DS_Store
+data/
+node_modules/
+dist/
+.quasar/
+.env
+.env.*
+!.env.example
+
+# Vite 前端（新架构）
+web/node_modules/
+web/dist/
+web/public/jassub/
+web/tsconfig.tsbuildinfo
+
+# start-test.sh runtime
+.test-logs/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

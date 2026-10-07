@@ -1,0 +1,20 @@
+[package]
+name = "library"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+domain.workspace = true
+release.workspace = true
+marker.workspace = true
+thiserror.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+tracing.workspace = true
+roxmltree.workspace = true
+
+[dev-dependencies]
+marker.workspace = true
+tempfile.workspace = true
+rusty-chromaprint = "0.3"

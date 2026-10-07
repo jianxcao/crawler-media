@@ -1,0 +1,18 @@
+[package]
+name = "subscribe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+domain.workspace = true
+downloader.workspace = true
+filter.workspace = true
+hooks.workspace = true
+library.workspace = true
+release.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

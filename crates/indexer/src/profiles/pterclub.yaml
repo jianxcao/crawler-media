@@ -1,0 +1,31 @@
+id: pterclub
+framework: nexusphp
+render: false
+login_success_css: "a[data-url*='logout.php'], a[href*='logout.php'], #logout-confirm"
+search:
+  path: /torrents.php
+  query_param: search
+list:
+  item: "table.torrents > tbody > tr, table.torrents > tr"
+fields:
+  title:
+    selector: "a[href*='details.php'][title]"
+    attr: title
+  enclosure:
+    selector: "a[href*='download.php']"
+    attr: href
+  size:
+    selector: "td.rowfollow:nth-child(5)"
+  seeders:
+    selector: "td.rowfollow:nth-child(6) a, td.rowfollow:nth-child(6)"
+  free:
+    selector: "img.pro_free, img.pro_free2up, font.free"
+  hr:
+    selector: "img.hitandrun, img[alt='H&R']"
+rss:
+  item: item
+  title:
+    selector: title
+  enclosure:
+    selector: enclosure
+    attr: url

@@ -1,0 +1,20 @@
+[package]
+name = "downloader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+domain.workspace = true
+release.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true
+ureq = { version = "3", features = ["multipart"] }
+tracing.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+parking_lot.workspace = true

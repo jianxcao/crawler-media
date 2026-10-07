@@ -1,0 +1,62 @@
+# Hhanclub（移植自上游项目 sites/configs/hhanclub.yaml）
+id: hhanclub
+framework: nexusphp
+render: false
+search:
+  path: /torrents.php
+  query_param: search
+list:
+  item: "div.torrent-table-sub-info"
+fields:
+  title:
+    selector: "div.torrent-title a.torrent-info-text-name"
+  enclosure:
+    selector: "div.torrent-manage a[href*='download.php']"
+    attr: href
+  detail:
+    selector: "a[href*='details.php']"
+    attr: href
+  size:
+    selector: "div.torrent-info-text-size"
+  seeders:
+    selector: "div.torrent-info-text-seeders"
+  leechers:
+    selector: "div.torrent-info-text-leechers"
+  snatched:
+    selector: "div.torrent-info-text-finished"
+  upload_time:
+    selector: "div.torrent-info-text-added > span"
+    attr: title
+  category:
+    selector: "div.torrent-cat a"
+    attr: href
+  free:
+    selector: "img.pro_free, img.pro_free2up"
+  hr:
+    selector: "div.torrent-info-hr"
+rss:
+  item: item
+  title:
+    selector: title
+  enclosure:
+    selector: enclosure
+    attr: url
+  id:
+    selector: guid
+  size:
+    selector: enclosure
+    attr: length
+  seeders:
+    selector: seeders
+  leechers:
+    selector: leechers
+  snatched:
+    selector: snatched
+  upload_time:
+    selector: pubDate
+  category:
+    selector: category
+  free:
+    selector: free
+  hr:
+    selector: hr

@@ -1,0 +1,21 @@
+{
+  "data": {
+    "Page": {
+      "media": [
+        {
+          "id": 437,
+          "title": {
+            "romaji": "The Matrix",
+            "english": "The Matrix",
+            "native": "マトリックス"
+          },
+          "format": "MOVIE",
+          "seasonYear": 1999,
+          "coverImage": {
+            "large": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/medium/matrix.jpg"
+          }
+        }
+      ]
+    }
+  }
+}

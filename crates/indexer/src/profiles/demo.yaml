@@ -1,0 +1,60 @@
+id: demo
+framework: nexusphp
+render: false
+search:
+  path: /torrents.php
+  query_param: search
+list:
+  item: "tr.torrent"
+fields:
+  title:
+    selector: "a.name"
+    attr: title
+  enclosure:
+    selector: "a.download"
+    attr: href
+  detail:
+    selector: "a.name"
+    attr: href
+  size:
+    selector: "td.size"
+  seeders:
+    selector: "td.seeders"
+  leechers:
+    selector: "td.leechers"
+  snatched:
+    selector: "td.snatched"
+  upload_time:
+    selector: "td.upload_time"
+  category:
+    selector: "td.category"
+  free:
+    selector: "img.pro_free"
+  hr:
+    selector: "img.hitandrun"
+rss:
+  item: item
+  title:
+    selector: title
+  enclosure:
+    selector: enclosure
+    attr: url
+  id:
+    selector: guid
+  size:
+    selector: enclosure
+    attr: length
+  seeders:
+    selector: seeders
+  leechers:
+    selector: leechers
+  snatched:
+    selector: snatched
+  upload_time:
+    selector: pubDate
+  category:
+    selector: category
+  free:
+    selector: free
+  hr:
+    selector: hr
