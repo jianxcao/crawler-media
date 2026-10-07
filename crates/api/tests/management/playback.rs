@@ -604,8 +604,8 @@ async fn playback_decide_and_subtitle_delivery_returns_tracks_and_content() {
     let tmp = tempfile::tempdir().unwrap();
     let app = app(&tmp);
 
-    let movie_file = tmp.path().join("data/library/movies/TestFilm.mkv");
-    let srt_file = tmp.path().join("data/library/movies/TestFilm.zh.srt");
+    let movie_file = tmp.path().join("library/movies/TestFilm.mkv");
+    let srt_file = tmp.path().join("library/movies/TestFilm.zh.srt");
     std::fs::create_dir_all(movie_file.parent().unwrap()).unwrap();
     std::fs::write(&movie_file, b"video-data").unwrap();
     std::fs::write(

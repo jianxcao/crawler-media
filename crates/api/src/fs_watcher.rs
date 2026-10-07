@@ -238,6 +238,28 @@ fn realtime_library_root_for_path(state: &ApiState, path: &Path) -> Option<PathB
         .max_by_key(|root| root.components().count())
 }
 
+/// 计算变动文件在媒体库中的条目/扫描目标目录。
+///
+/// 若文件位于媒体库根目录直属子目录下（如 `<root>/Show Title/Season 1/ep.strm`
+/// 或 `<root>/Movie Title/movie.strm`），返回条目根目录 `<root>/Show Title`；
+/// 若直接平铺在 `<root>` 下，则返回 `<root>` 本身。
+pub(crate) fn entry_scan_target_dir(root: &Path, file_path: &Path) -> PathBuf {
+    let resolved_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let resolved_path = std::fs::canonicalize(file_path).unwrap_or_else(|_| file_path.to_path_buf());
+    if let Ok(rel) = resolved_path.strip_prefix(&resolved_root) {
+        let mut components = rel.components();
+        if let Some(first) = components.next() {
+            let first_path = root.join(first.as_os_str());
+            // 如果只有一级（如 root/movie.strm），则目标为 root；
+            // 如果有多级且第一级是目录（如 root/Show/Season 1/ep.strm），目标为 root/Show。
+            if components.next().is_some() {
+                return first_path;
+            }
+        }
+    }
+    root.to_path_buf()
+}
+
 fn handle_fs_events(
     state: &ApiState,
     tracker: &Arc<StrmGraceTracker>,
@@ -246,7 +268,7 @@ fn handle_fs_events(
     let now = crate::job_loop::unix_now();
     let mut has_intake_or_download_change = false;
     let mut has_scrape_needed = false;
-    let mut library_strm_paths = HashSet::new();
+    let mut library_scan_targets = HashSet::new();
 
     for event in events {
         let path = event.path;
@@ -285,7 +307,8 @@ fn handle_fs_events(
                     invalidate_strm_caches(state, &path);
                     has_scrape_needed = true;
                     if let Some(root) = realtime_library_root_for_path(state, &path) {
-                        library_strm_paths.insert(root);
+                        let target_dir = entry_scan_target_dir(&root, &path);
+                        library_scan_targets.insert((root, target_dir));
                     }
                 }
             } else {
@@ -301,15 +324,25 @@ fn handle_fs_events(
         }
     }
 
-    // 新增 STRM 在 Library 根目录中需要执行 in-place scan 来写入台账；Scrape
+    // 新增 STRM 在 Library 目录中需要执行 in-place scan 来写入台账；Scrape
     // 只负责侧车/元数据，不能替代 Library ledger ingestion。
-    for root in library_strm_paths {
-        tracing::info!(root = %root.display(), "媒体库内 STRM 变动，触发媒体库扫描入账");
+    // 按变动的具体剧集/条目子目录进行增量扫描，避免遍历整个媒体库根目录。
+    for (root, target_dir) in library_scan_targets {
+        tracing::info!(
+            root = %root.display(),
+            target_dir = %target_dir.display(),
+            "媒体库内 STRM 变动，触发增量子目录扫描入账"
+        );
         let state = state.clone();
         tokio::task::spawn_blocking(move || {
-            let result = crate::http::library_scan::scan_library_root(&state, &root);
+            let result = crate::http::library_scan::scan_library_subdir(&state, &root, &target_dir);
             if let Err(error) = result {
-                tracing::error!(root = %root.display(), %error, "媒体库 STRM 变动扫描入账失败");
+                tracing::error!(
+                    root = %root.display(),
+                    target_dir = %target_dir.display(),
+                    %error,
+                    "媒体库 STRM 变动增量扫描入账失败"
+                );
             }
         });
     }
@@ -534,13 +567,41 @@ mod tests {
             realtime_library_root_for_path(&state, &episode),
             Some(root.clone())
         );
-        crate::http::library_scan::scan_library_root(&state, &root).unwrap();
+        let show_dir = root.join("喜剧之王 (2026)");
+        assert_eq!(entry_scan_target_dir(&root, &episode), show_dir);
+
+        crate::http::library_scan::scan_library_subdir(&state, &root, &show_dir).unwrap();
         let rows = state.store.lock().list_ledger().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].path, episode.display().to_string());
         assert_eq!(rows[0].season, Some(1));
         assert_eq!(rows[0].episode, Some(1));
         assert!(state.probe.is_queued(&rows[0].id.to_string()));
+    }
+
+    #[test]
+    fn test_entry_scan_target_dir_scenarios() {
+        let root = Path::new("/media/tv/china");
+        // 1. 剧集嵌套季目录
+        let ep1 = Path::new("/media/tv/china/喜剧之王 (2026)/Season 1/S01E01.strm");
+        assert_eq!(
+            entry_scan_target_dir(root, ep1),
+            PathBuf::from("/media/tv/china/喜剧之王 (2026)")
+        );
+
+        // 2. 剧集平铺
+        let ep2 = Path::new("/media/tv/china/喜剧之王 (2026)/S01E01.strm");
+        assert_eq!(
+            entry_scan_target_dir(root, ep2),
+            PathBuf::from("/media/tv/china/喜剧之王 (2026)")
+        );
+
+        // 3. 根目录平铺文件
+        let flat = Path::new("/media/tv/china/S01E01.strm");
+        assert_eq!(
+            entry_scan_target_dir(root, flat),
+            PathBuf::from("/media/tv/china")
+        );
     }
 
     #[test]

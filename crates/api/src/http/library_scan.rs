@@ -35,7 +35,16 @@ pub(crate) async fn scan_library(
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn scan_library_root(state: &ApiState, root: &std::path::Path) -> Result<(), String> {
+    scan_library_subdir(state, root, root)
+}
+
+pub(crate) fn scan_library_subdir(
+    state: &ApiState,
+    root: &std::path::Path,
+    target_dir: &std::path::Path,
+) -> Result<(), String> {
     let (library_id, kind, scrape) = {
         let store = state.store.lock();
         let library = store
@@ -54,7 +63,7 @@ pub(crate) fn scan_library_root(state: &ApiState, root: &std::path::Path) -> Res
             .mirror_nfo;
         (library.id, library.kind, scrape)
     };
-    if !root.is_dir() {
+    if !target_dir.is_dir() {
         return Ok(());
     }
     let probe = domain::Media {
@@ -73,7 +82,7 @@ pub(crate) fn scan_library_root(state: &ApiState, root: &std::path::Path) -> Res
         kind: library::WatchKind::InPlace,
         library_root: root.to_path_buf(),
         tv_library_root: None,
-        path: root.to_path_buf(),
+        path: target_dir.to_path_buf(),
         scrape,
     };
     let outcome = library::scan_watch(&job, &probe).map_err(|error| error.to_string())?;
