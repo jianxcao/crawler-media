@@ -77,15 +77,34 @@ pub(crate) fn scan_library_root(state: &ApiState, root: &std::path::Path) -> Res
         scrape,
     };
     let outcome = library::scan_watch(&job, &probe).map_err(|error| error.to_string())?;
-    {
+    let (scan_media, paths) = {
         let store = state.store.lock();
         crate::watch_ledger::record_paths(&store, outcome.transferred.clone())?;
+        let mut scan_media = HashMap::new();
+        let paths: Vec<PathBuf> = outcome
+            .transferred
+            .into_iter()
+            .map(|file| {
+                if let Ok(Some(row)) = store.ledger_by_path(&file.path.display().to_string())
+                    && let Ok(Some(media)) = store.get_media(row.media_id)
+                    && media.kind != domain::MediaKind::Video
+                {
+                    scan_media.entry(media.id).or_insert((media, PathBuf::from(row.path)));
+                }
+                file.path
+            })
+            .collect();
+        (scan_media, paths)
+    };
+    for (_, (media, path)) in scan_media {
+        if media.tmdb_id.is_some() || media.douban_id.is_some() {
+            continue;
+        }
+        match crate::auto_resolve::auto_resolve_media(state, &media, &path) {
+            Some(resolved) => tracing::info!(title = %resolved.title, path = %path.display(), "实时扫描自动匹配媒体元数据成功"),
+            None => tracing::warn!(title = %media.title, path = %path.display(), "实时扫描未能自动匹配媒体元数据"),
+        }
     }
-    let paths: Vec<PathBuf> = outcome
-        .transferred
-        .into_iter()
-        .map(|file| file.path)
-        .collect();
     crate::http::library::enqueue_probes_for_paths(state, paths);
     Ok(())
 }
