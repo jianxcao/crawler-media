@@ -95,7 +95,7 @@ export type HomeRow =
       sort: HomeRowSort;
       /** 是否反转了这一档的自然方向（random 没有方向，恒为 false） */
       reversed: boolean;
-      /** 未看优先：先只要没看过的；整库都看过时首页换回退的那份（见 lib/home-row-items.ts） */
+      /** 未看优先：观看分级参与排序（未看 → 在看 → 已看完），只排不筛；规则见 lib/home-row-items.ts */
       unwatched: boolean;
       /** 用户起的名字；空 = 跟随推荐（rowTitle 会按排序算） */
       name: string;
@@ -508,8 +508,8 @@ function libraryRow(
     reversed,
     // 「最近观看」只要播过的，与「未看优先」互斥：两者同时为真会得到一行按 id
     // 排的没播过的片；以排序为准，开关作废
-    // 未看优先只负责**筛**：整库都看过时筛空的那一份由首页换回退（同一档不筛）顶上，
-    // 规则与取数键见 lib/home-row-items.ts
+    // 未看优先只改**顺序**（未看 → 在看 → 已看完），不筛掉任何条目；
+    // 口径与取数键见 lib/home-row-items.ts
     unwatched: pref.unwatched !== false && sort !== "last_played",
     name: (pref.name ?? "").trim(),
     library,

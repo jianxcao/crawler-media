@@ -96,34 +96,81 @@ pub(crate) fn select(
         // only read it when the request actually depends on it.
         if filter.needs_watch_state() {
             if let Some(user) = user {
-                watch_state(store, user, &mut item).map_err(|message| {
-                    tracing::error!(%message, "Library watch state read failed");
-                    err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &message)
-                })?;
+                let state = watch_state_for(store, user, &item.media, &item.rows).map_err(
+                    |message| {
+                        tracing::error!(%message, "Library watch state read failed");
+                        err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &message)
+                    },
+                )?;
+                item.favorite = state.favorite;
+                item.played = state.played;
+                item.seen = state.seen;
+                item.last_played_at = state.last_played_at;
             }
         }
-        if filter.matches_ignoring_watch(&item) {
+        if filter.matches(&item) {
             items.push(item);
         }
     }
-    // 观看状态这一档：
-    //   - 没给 `w`：原样保留；
-    //   - 给了 `w` 但没带 `w_fallback`：严格筛（墙上用户手选的「未观看」不该被
-    //     回退塞回看过的）；
-    //   - 给了 `w` 且带 `w_fallback`：未看优先——有没看过的只留没看过的，全看过
-    //     就全留，与 Jellyfin 的 `Items/Latest` 同一条规则（library::prefer_unwatched）。
-    let mut items = if filter.prefers_unwatched() {
-        library::prefer_unwatched(items, |item| filter.matches_watch(item))
-    } else if filter.has_watch_filter() {
-        items
-            .into_iter()
-            .filter(|item| filter.matches_watch(item))
-            .collect()
-    } else {
-        items
-    };
     items.sort_by(|a, b| filter.compare(a, b));
     Ok(items)
+}
+
+/// 一部作品的观看状态。首页库行/收藏行的「未看优先」分级、筛选条的「未观看 / 在看 /
+/// 已看完」三档，都读这一份，避免同一部作品在两个地方被分成不同的档。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WatchState {
+    pub favorite: bool,
+    pub played: bool,
+    pub seen: bool,
+    pub last_played_at: Option<i64>,
+}
+
+/// `played` ＝作品级的"已看完"标记；`seen` ＝动过（整剧级或任一集有进度/次数/看完）。
+pub(crate) fn watch_state_for<'a>(
+    store: &Store,
+    user: UserId,
+    media: &Media,
+    rows: impl IntoIterator<Item = &'a LedgerRow>,
+) -> Result<WatchState, String> {
+    let mut state = WatchState::default();
+    let mut latest = 0i64;
+    let whole = store
+        .unit_state(user, media.id, crate::store::UNIT_WHOLE, crate::store::UNIT_WHOLE)
+        .map_err(|e| e.to_string())?;
+    state.favorite = whole.as_ref().is_some_and(|u| u.favorite);
+    state.played = whole.as_ref().is_some_and(|u| u.played);
+    state.seen = whole
+        .as_ref()
+        .is_some_and(|u| u.played || u.position_ms > 0 || u.play_count > 0);
+    if let Some(unit) = &whole {
+        latest = latest.max(unit.updated_at);
+    }
+    for row in rows {
+        if let (Some(season), Some(episode)) = (row.season, row.episode) {
+            let unit = store
+                .unit_state(user, media.id, season as i32, episode as i32)
+                .map_err(|e| e.to_string())?;
+            state.seen |= unit
+                .as_ref()
+                .is_some_and(|u| u.played || u.position_ms > 0 || u.play_count > 0);
+            if let Some(unit) = &unit {
+                state.favorite |= unit.favorite;
+                latest = latest.max(unit.updated_at);
+            }
+        }
+    }
+    if media.kind == domain::MediaKind::Movie && !state.favorite {
+        if let Ok(Some(legacy_unit)) = store.unit_state(user, media.id, 0, 0) {
+            state.favorite |= legacy_unit.favorite;
+            state.played |= legacy_unit.played;
+            state.seen |=
+                legacy_unit.played || legacy_unit.position_ms > 0 || legacy_unit.play_count > 0;
+            latest = latest.max(legacy_unit.updated_at);
+        }
+    }
+    state.last_played_at = (latest > 0).then_some(latest);
+    Ok(state)
 }
 
 fn total_size(rows: &[LedgerRow]) -> Option<u64> {
@@ -154,51 +201,6 @@ fn added_at(rows: &[LedgerRow]) -> Option<SystemTime> {
             None
         }
     }).min()
-}
-
-fn watch_state(store: &Store, user: UserId, item: &mut LibrarySelection) -> Result<(), String> {
-    let mut latest = 0i64;
-    let whole = store
-        .unit_state(
-            user,
-            item.media.id,
-            crate::store::UNIT_WHOLE,
-            crate::store::UNIT_WHOLE,
-        )
-        .map_err(|e| e.to_string())?;
-    item.favorite = whole.as_ref().is_some_and(|u| u.favorite);
-    item.played = whole.as_ref().is_some_and(|u| u.played);
-    item.seen = whole
-        .as_ref()
-        .is_some_and(|u| u.played || u.position_ms > 0 || u.play_count > 0);
-    if let Some(unit) = &whole {
-        latest = latest.max(unit.updated_at);
-    }
-    for row in &item.rows {
-        if let (Some(season), Some(episode)) = (row.season, row.episode) {
-            let unit = store
-                .unit_state(user, item.media.id, season as i32, episode as i32)
-                .map_err(|e| e.to_string())?;
-            item.seen |= unit
-                .as_ref()
-                .is_some_and(|u| u.played || u.position_ms > 0 || u.play_count > 0);
-            if let Some(unit) = &unit {
-                item.favorite |= unit.favorite;
-                latest = latest.max(unit.updated_at);
-            }
-        }
-    }
-    if item.media.kind == domain::MediaKind::Movie && !item.favorite {
-        if let Ok(Some(legacy_unit)) = store.unit_state(user, item.media.id, 0, 0) {
-            item.favorite |= legacy_unit.favorite;
-            item.played |= legacy_unit.played;
-            item.seen |=
-                legacy_unit.played || legacy_unit.position_ms > 0 || legacy_unit.play_count > 0;
-            latest = latest.max(legacy_unit.updated_at);
-        }
-    }
-    item.last_played_at = (latest > 0).then_some(latest);
-    Ok(())
 }
 
 pub(crate) fn resolution_rank(value: &str) -> u32 {

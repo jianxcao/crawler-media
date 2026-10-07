@@ -8,7 +8,6 @@ import {
   filterToRules,
   isFilterEmpty,
   rulesToFilter,
-  watchFallbackQuery,
 } from "../lib/library-filter.ts";
 import { wallRecallScope } from "../lib/library-wall-recall.ts";
 
@@ -21,18 +20,12 @@ test("筛选条件序列化成三个接口共用的查询串", () => {
   assert.equal(query.get("w"), "unwatched");
 });
 
-test("未看优先的回退开关只由首页库行带上，墙上手选的「未观看」不带", () => {
-  const row = new URLSearchParams();
-  filterQuery({ watch: "unwatched" }, row);
-  watchFallbackQuery(true, row);
-  assert.equal(row.get("w"), "unwatched");
-  assert.equal(row.get("w_fallback"), "true");
-
-  const wall = new URLSearchParams();
-  filterQuery({ watch: "unwatched" }, wall);
-  watchFallbackQuery(undefined, wall);
-  assert.equal(wall.get("w_fallback"), null);
-  assert.equal(wall.size, 1);
+test("墙上手选的「未观看」是严格筛：查询串里只有 w，没有未看优先那个开关", () => {
+  const query = new URLSearchParams();
+  filterQuery({ watch: "unwatched" }, query);
+  assert.equal(query.get("w"), "unwatched");
+  assert.equal(query.get("unwatched_first"), null);
+  assert.equal(query.size, 1);
 });
 
 test("空维度不写进查询串——未筛选的请求与改造前逐字相同", () => {

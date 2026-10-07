@@ -33,10 +33,14 @@ Authorization: MediaBrowser Client="VidHub", Device="iPhone", DeviceId="device-i
 
 ## 「最近入库」的播放状态口径
 
-`Items/Latest` 的 `IsPlayed` 按 Jellyfin 的两条语义实现：**给了就严格筛**（`true` / `false` 各只要那一半），**没给**时按服务端的默认策略走。Jellyfin 的默认策略来自用户配置 `HidePlayedInLatest`（出厂 `true`）：它把 `isPlayed` 置为 `false`，全看过的库于是返回**空列表**——客户端首页上那个库连入口都没有。
+**Jellyfin 客户端表面**（`Items/Latest`）的 `IsPlayed` 按协议的两条语义实现：**给了就严格筛**（`true` / `false` 各只要那一半），**没给**时按服务端的默认策略走。Jellyfin 的默认策略来自用户配置 `HidePlayedInLatest`（出厂 `true`）：它把 `isPlayed` 置为 `false`，全看过的库于是返回**空列表**——客户端首页上那个库连入口都没有。
 
-我们的默认策略比它多走一步，口径是「未观看优先」：有没看过的就只回没看过的，一部没看过的都没有时才回全部（实现见 `crates/library/src/latest.rs` 的 `prefer_unwatched`）。同一个函数也被自有 API 复用：`GET /api/v1/libraries/{id}/items?w=unwatched&w_fallback=true` 是首页库行的取数，墙上用户手选的「未观看」不带 `w_fallback`，因此仍是严格筛。
+我们的默认策略比它多走一步：「未观看优先」——有没看过的就只回没看过的，一部没看过的都没有时才回全部（实现见 `crates/library/src/latest.rs` 的 `prefer_unwatched`）。理由：一个"全看完了"的媒体库在首页应该有内容（最新入库），而不是像什么都坏了那样整段消失；客户端只是**多**看到几条已经看过的（`UserData.Played` 为真，客户端自己会标记）。这条偏差是有意的，显式传 `IsPlayed` 的客户端不受影响。
 
-理由：一个"全看完了"的媒体库在首页应该有内容（最新入库），而不是像什么都坏了那样整段消失；客户端只是**多**看到几条已经看过的（`UserData.Played` 为真，客户端自己会标记）。这条偏差是有意的，显式传 `IsPlayed` 的客户端不受影响。
+**自有 API**（`/api/v1`，我们的 Web UI）不走上面那条，而是 `unwatched_first=true`：观看分级**参与排序**（`WatchTier`：未看 → 在看 → 已看完），**只排不筛**。首页的库行与「我的收藏」行都用它。两条口径不同是有意的：
+
+- 协议那边是客户端契约：`IsPlayed=false` 必须只回没看过的，所以只能筛，回退仅限"整段都看过、否则会空"。
+- 我们自己的 UI 要的是"这一行有什么新内容"：一个只有 3 部剧、其中 2 部看过的小库，筛完只剩 1 张卡，看起来像坏了；把已看完的沉到行尾既保留了信息，也仍然让没看过的排在最前。
+- 墙上用户手选的「未观看」（`w=unwatched`）始终是严格筛，不受 `unwatched_first` 影响。
 
 还没有实现的部分：Jellyfin 客户端的用户设置开关（`UserConfiguration.HidePlayedInLatest` 与 `POST /Users/{id}/Configuration`）尚未落地，`/Users/Me` 也不返回 `Configuration` 块；客户端目前无法把默认策略改成"混排已看与未看"。要在客户端里真正关掉「隐藏已看」，需要补这套用户配置表面。

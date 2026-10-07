@@ -849,7 +849,6 @@ import {
   filterKey,
   filterQuery,
   isFilterEmpty,
-  watchFallbackQuery,
 } from "@/lib/library-filter";
 
 export {
@@ -859,7 +858,6 @@ export {
   filterKey,
   filterQuery,
   isFilterEmpty,
-  watchFallbackQuery,
 };
 
 // ---------------------------------------------------------------------------
@@ -1100,8 +1098,8 @@ export function listLibraryItems(
     offset?: number;
     identity?: LibraryItemIdentity;
     filter?: LibraryFilter;
-    /** 「未看优先」：`w` 筛空时服务端改用不筛的那份（只有首页库行会开） */
-    watchFallback?: boolean;
+    /** 未看优先：观看分级参与排序（只排不筛，口径见 library::latest） */
+    unwatchedFirst?: boolean;
   },
 ): Promise<LibraryItem[]> {
   const query = new URLSearchParams();
@@ -1111,7 +1109,8 @@ export function listLibraryItems(
   if (params?.limit !== undefined) query.set("limit", String(params.limit));
   if (params?.offset) query.set("offset", String(params.offset));
   filterQuery(params?.filter, query);
-  watchFallbackQuery(params?.watchFallback, query);
+  // 与 /playback/favorites 同一个参数名：两处的「未看优先」是同一条规则
+  if (params?.unwatchedFirst) query.set("unwatched_first", "true");
   const suffix = query.size > 0 ? `?${query}` : "";
   return unwrap(request<ApiEnvelope<unknown[]>>(`/libraries/${id}/items${suffix}`)).then((raw) =>
     (Array.isArray(raw) ? raw : []).map(itemFrom),

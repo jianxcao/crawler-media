@@ -710,7 +710,7 @@ function RowItem({
               {showUnwatched && row.kind === "library" ? (
                 <label
                   className="flex items-center gap-2 text-sub text-[var(--text-muted)]"
-                  title="有没看过的就只显示没看过的；这个库全看过了，就按这一行的排序显示全部"
+                  title="没看过的排最前，在看的其次，已经看完的沉到这一行最后；这一档只改顺序，不会藏掉任何条目"
                 >
                   <input
                     type="checkbox"

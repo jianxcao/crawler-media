@@ -56,21 +56,6 @@ export function filterQuery(filter: LibraryFilter | undefined, query: URLSearchP
   if (filter.stock?.length) query.set("stock", filter.stock.join(","));
 }
 
-/**
- * 「未看优先」的回退开关：`w` 筛完一个都不剩时，服务端改用不筛的那份
- * （`library::prefer_unwatched`——有没看过的只给没看过的，全看过才给全部）。
- *
- * **只有首页的库行会开**：那一行的意图是"这个库有什么值得看的"，全看完了也该有
- * 一行最近入库，而不是整行消失。墙上用户手选的「未观看」是严格筛，永远不带它
- * （筛选条里的条件由 `filterQuery` 拼，与这里无关）。
- */
-export function watchFallbackQuery(
-  enabled: boolean | undefined,
-  query: URLSearchParams,
-): void {
-  if (enabled) query.set("w_fallback", "true");
-}
-
 /** 筛选是否为空——为空时一切按"未筛选"走（不改 URL、不加指纹、不显示条件行）。 */
 export function isFilterEmpty(filter: LibraryFilter | undefined): boolean {
   if (!filter) return true;

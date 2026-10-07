@@ -17,7 +17,7 @@ use serde::Deserialize;
 
 pub use file_transfer::transfer_file;
 pub use fingerprint::{CommonSegment, extract_audio_fingerprint, find_common_segment};
-pub use latest::prefer_unwatched;
+pub use latest::{WatchTier, prefer_unwatched};
 pub use marker::{
     Chapter, ChapterMarker, MarkerType, annotate_chapters, classify_chapter_title, probe_chapters,
 };

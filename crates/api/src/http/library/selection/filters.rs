@@ -1,12 +1,14 @@
 use super::{LibrarySelection, best_resolution, resolution_rank};
+use library::WatchTier;
 use std::{cmp::Ordering, collections::HashMap};
 
 pub(crate) struct LibraryFilter {
     lists: HashMap<String, Vec<String>>,
     watch: Option<String>,
-    /// `w` 筛完一个都不剩时改用不筛的那份（首页库行的「未看优先」口径，默认关）。
-    /// 墙上用户手选的「未观看」是严格筛，不带这个开关。
-    watch_fallback: bool,
+    /// 未看优先：观看分级（未看 → 在看 → 已看完）参与排序，**不筛掉任何条目**
+    /// （首页库行与「我的收藏」行的口径，默认关）。墙上用户手选的「未观看」是严格筛，
+    /// 不带这个开关。
+    unwatched_first: bool,
     hdr: Option<bool>,
     rating: Option<f64>,
     identity: Option<String>,
@@ -62,11 +64,11 @@ impl LibraryFilter {
         }) {
             return Err("invalid watch filter".into());
         }
-        let watch_fallback = query
-            .get("w_fallback")
+        let unwatched_first = query
+            .get("unwatched_first")
             .map(|s| s.parse::<bool>())
             .transpose()
-            .map_err(|_| "w_fallback must be true or false")?
+            .map_err(|_| "unwatched_first must be true or false")?
             .unwrap_or(false);
         let requested = query.get("sort").cloned().unwrap_or_else(|| "title".into());
         // Every key the wall can ask for must stay reachable; an unrecognised one
@@ -99,7 +101,7 @@ impl LibraryFilter {
             hdr,
             rating,
             watch,
-            watch_fallback,
+            unwatched_first,
             sort,
             identity: query.get("identity").cloned(),
             desc,
@@ -110,8 +112,8 @@ impl LibraryFilter {
         self.lists[key].is_empty() || self.lists[key].iter().any(|value| predicate(value))
     }
 
-    /// 观看状态那一档单独拿得出来：`w_fallback` 要在「除它以外都通过」的名单上
-    /// 再决定是严格筛还是未看优先（见 `select`）。两者合起来才是完整的筛选。
+    /// 观看状态那一档：筛选条里的「未观看 / 在看 / 已看完」三档由它回答，
+    /// 与 [`LibraryFilter::compare`] 里的「未看优先」分级用的是同一套判定。
     pub fn matches_watch(&self, item: &LibrarySelection) -> bool {
         match self.watch.as_deref() {
             Some("favorite") => item.favorite,
@@ -123,18 +125,11 @@ impl LibraryFilter {
         }
     }
 
-    /// 请求里带没带观看状态那一档。
-    pub fn has_watch_filter(&self) -> bool {
-        self.watch.is_some()
+    pub fn matches(&self, item: &LibrarySelection) -> bool {
+        self.matches_ignoring_watch(item) && self.matches_watch(item)
     }
 
-    /// 未看优先：`w` 一项都没留下时改用不筛的那份（`w_fallback=true`；
-    /// 没给 `w` 时这个开关没有意义，恒 false）。
-    pub fn prefers_unwatched(&self) -> bool {
-        self.watch.is_some() && self.watch_fallback
-    }
-
-    pub fn matches_ignoring_watch(&self, item: &LibrarySelection) -> bool {
+    fn matches_ignoring_watch(&self, item: &LibrarySelection) -> bool {
         let meta = &item.metadata;
         let provisional = item.media.tmdb_id.is_none()
             && item.media.douban_id.is_none()
@@ -198,10 +193,17 @@ impl LibraryFilter {
     /// Watch state is a per-unit store read; only requests that depend on it pay
     /// that cost, so ordinary wall browsing keeps its previous profile.
     pub fn needs_watch_state(&self) -> bool {
-        self.watch.is_some() || self.sort == "last_played"
+        self.watch.is_some() || self.sort == "last_played" || self.unwatched_first
     }
 
     pub fn compare(&self, a: &LibrarySelection, b: &LibrarySelection) -> Ordering {
+        // 未看优先：分级在前，段内仍是这一档自己的排序（「最近添加」就是入库时间倒序）。
+        // 只排不筛——筛完只剩一张卡的小库看起来像坏了（见 library::latest 的说明）。
+        let tier = if self.unwatched_first {
+            WatchTier::of(a.seen, a.played).cmp(&WatchTier::of(b.seen, b.played))
+        } else {
+            Ordering::Equal
+        };
         let primary = match self.sort.as_str() {
             "added_at" => a.added_at.cmp(&b.added_at),
             "release_date" | "release_date_asc" => release_date(a).cmp(&release_date(b)),
@@ -231,7 +233,8 @@ impl LibraryFilter {
         } else {
             primary
         };
-        primary.then_with(|| a.media.id.to_string().cmp(&b.media.id.to_string()))
+        tier.then(primary)
+            .then_with(|| a.media.id.to_string().cmp(&b.media.id.to_string()))
     }
 }
 

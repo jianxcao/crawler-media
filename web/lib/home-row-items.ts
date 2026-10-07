@@ -3,16 +3,16 @@
  *
  * 行 → 请求的映射收在这一处，因为两件事都很容易悄悄错：
  *
- * 1. **「未看优先」的口径在后端**（`library::prefer_unwatched`）。首页库行带
- *    `w=unwatched` 时同时带 `w_fallback=true`：服务端就有没看过的只给没看过的，
- *    整个库都看过了才退回全部——首页因此不会因为"这个库我看完了"而整行消失
- *    （Jellyfin 的 `Items/Latest` 在同样的位置上会因为 HidePlayedInLatest 直接
- *    返回空列表）。墙上用户手选的「未观看」不带这个开关，是严格筛。
+ * 1. **「未看优先」的口径在后端**（`library::WatchTier`）。库行带
+ *    `unwatched_first=true`：服务端把观看分级排进顺序——没开始看过的在前、在看其次、
+ *    已看完沉底，**段内仍是这一行自己的排序**（默认档就是最近入库倒序）。它只排不筛：
+ *    一个只有 3 部剧、其中 2 部看过的小库，筛完只剩 1 张卡，看起来像坏了。
+ *    「我的收藏」行用同一个开关、同一条规则。
  * 2. **取数键的形状**：库卡片封面（`coverFetchKey`）与默认库行（`rowFetchKey`）
  *    必须算出同一个键，否则同一份「最近入库」要打两次请求。
  *
  * 「最近观看」行是例外：它要的就是播过的片（`w=seen`），没播过就该是空的，
- * 不回退——与 home-rows.ts 里「以排序为准，开关作废」同一条规矩。
+ * 也不参与未看优先——与 home-rows.ts 里「以排序为准，开关作废」同一条规矩。
  *
  * 本模块保持零 `@/` 依赖、纯函数：node --test 直接测（test/home-row-items.test.mjs）。
  */
@@ -41,9 +41,9 @@ export interface RowItemQuery {
   /** 方向；与自然方向一致就不带（服务端按自然方向排） */
   order?: "asc" | "desc";
   limit: number;
-  filter?: { watch: "unwatched" | "seen" };
-  /** 未看优先：`w` 筛空时改用不筛的那份（口径在后端） */
-  watchFallback?: boolean;
+  filter?: { watch: "seen" };
+  /** 未看优先：观看分级参与排序（口径在后端），只排不筛 */
+  unwatchedFirst?: boolean;
 }
 
 /**
@@ -53,14 +53,13 @@ export interface RowItemQuery {
  * 排完就轮到没播过的，首页这一行不能这样（`w=seen`）。
  */
 export function rowItemQuery(row: LibraryRow, limit: number): RowItemQuery {
-  const watch =
-    row.sort === "last_played" ? "seen" : row.unwatched ? "unwatched" : undefined;
   const query: RowItemQuery = {
     sort: row.sort,
     order: orderParamFor(SORT_PRESETS[row.sort].direction, row.reversed),
     limit,
-    filter: watch ? { watch } : undefined,
+    filter: row.sort === "last_played" ? { watch: "seen" } : undefined,
   };
-  if (watch === "unwatched") query.watchFallback = true;
+  // 未看优先只管浏览档：要播过的片的那一行不参与（它自己就是"看过"的意思）
+  if (row.unwatched && row.sort !== "last_played") query.unwatchedFirst = true;
   return query;
 }

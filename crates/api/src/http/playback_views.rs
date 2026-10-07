@@ -388,6 +388,17 @@ fn millis(unix_secs: i64) -> String {
     (unix_secs as i128 * 1000).to_string()
 }
 
+/// 收藏行的一条：作品 + 收藏所在的层级（最近一次收藏动作的单元）。
+struct FavoriteEntry {
+    media_id: domain::MediaId,
+    /// 最近一次收藏动作的时间（默认档按它排）
+    updated_at: i64,
+    season: i32,
+    episode: i32,
+    /// 未看优先才填：未看 → 在看 → 已看完
+    tier: Option<library::WatchTier>,
+}
+
 /// GET /playback/favorites?limit&offset&unwatched_first&sort&order
 /// — distinct favorited media from `playback_units`, level = most recent unit.
 pub(crate) async fn favorites(
@@ -404,13 +415,46 @@ pub(crate) async fn favorites(
         .get("offset")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+    let sort_key = query
+        .get("sort")
+        .map(String::as_str)
+        .unwrap_or("updated_at");
+    // 当前端指定按 title 排序且未传 order 时，默认按 A->Z 升序排列；其他排序默认按倒序
+    let is_desc = query
+        .get("order")
+        .map(|o| o == "desc")
+        .unwrap_or_else(|| sort_key != "title");
+    // 未看优先：观看分级参与排序，但不筛掉任何收藏（见 library::latest 的说明）
+    let unwatched_first = query
+        .get("unwatched_first")
+        .is_some_and(|v| v == "true" || v == "1");
     let store = state.store.lock();
     let all_rows = store.list_ledger().unwrap_or_default();
+    let mut list = favorite_entries(&store, user_id, &all_rows, unwatched_first);
+    sort_favorite_entries(&store, &mut list, sort_key, is_desc, unwatched_first);
+    let total = list.len();
+    let page: Vec<Value> = list
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .filter_map(|entry| favorite_item_json(&store, &all_rows, &entry, user_id))
+        .collect();
+    ok(json!({ "items": page, "total": total })).into_response()
+}
+
+/// 当前身份可见的收藏作品；`with_tier` 决定要不要顺带算未看优先用的观看分级
+/// （那一趟是逐单元的存储读取，只有开了未看优先才付这份钱）。
+fn favorite_entries(
+    store: &crate::Store,
+    user_id: domain::UserId,
+    all_rows: &[domain::LedgerRow],
+    with_tier: bool,
+) -> Vec<FavoriteEntry> {
     let media_ids: HashSet<domain::MediaId> = all_rows
         .iter()
         .filter_map(|row| {
             let media = store.get_media(row.media_id).ok().flatten()?;
-            crate::http::library::row_visible_to_user(&store, row, &media, Some(user_id))
+            crate::http::library::row_visible_to_user(store, row, &media, Some(user_id))
                 .then_some(row.media_id)
         })
         .collect();
@@ -428,107 +472,127 @@ pub(crate) async fn favorites(
             }
         }
     }
-    let sort_key = query
-        .get("sort")
-        .map(String::as_str)
-        .unwrap_or("updated_at");
-    // 当前端指定按 title 排序且未传 order 时，默认按 A->Z 升序排列；其他排序默认按倒序
-    let is_desc = query
-        .get("order")
-        .map(|o| o == "desc")
-        .unwrap_or_else(|| sort_key != "title");
-    let mut list: Vec<(domain::MediaId, i64, i32, i32)> = by_media
+    by_media
         .into_iter()
-        .map(|(media_id, (updated, season, episode))| (media_id, updated, season, episode))
-        .collect();
-    if sort_key == "title" {
-        list.sort_by(|(a_id, _, _, _), (b_id, _, _, _)| {
-            let a_title = store
-                .get_media(*a_id)
-                .ok()
-                .flatten()
-                .map(|m| m.title)
-                .unwrap_or_default();
-            let b_title = store
-                .get_media(*b_id)
-                .ok()
-                .flatten()
-                .map(|m| m.title)
-                .unwrap_or_default();
-            let ord = if is_desc {
-                b_title.cmp(&a_title)
-            } else {
-                a_title.cmp(&b_title)
-            };
-            ord.then_with(|| a_id.to_string().cmp(&b_id.to_string()))
-        });
-    } else if sort_key == "release_date" || sort_key == "year" {
-        list.sort_by(|(a_id, _, _, _), (b_id, _, _, _)| {
-            let a_year = store.get_media(*a_id).ok().flatten().and_then(|m| m.year);
-            let b_year = store.get_media(*b_id).ok().flatten().and_then(|m| m.year);
-            let ord = if is_desc {
-                b_year.cmp(&a_year)
-            } else {
-                a_year.cmp(&b_year)
-            };
-            ord.then_with(|| a_id.to_string().cmp(&b_id.to_string()))
-        });
-    } else {
-        list.sort_by(|(a_id, a_up, _, _), (b_id, b_up, _, _)| {
-            let ord = if is_desc {
-                b_up.cmp(a_up)
-            } else {
-                a_up.cmp(b_up)
-            };
-            ord.then_with(|| a_id.to_string().cmp(&b_id.to_string()))
-        });
-    }
-    let total = list.len();
-    let page: Vec<Value> = list
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .filter_map(|(media_id, _, season, episode)| {
-            let media = store.get_media(media_id).ok().flatten()?;
-            let owned: Vec<domain::LedgerRow> = all_rows
-                .iter()
-                .filter(|r| r.media_id == media_id)
-                .filter(|r| {
-                    crate::http::library::row_visible_to_user(&store, r, &media, Some(user_id))
-                })
-                .cloned()
-                .collect();
-            if owned.is_empty() {
-                return None;
-            }
-            let refs: Vec<&domain::LedgerRow> = owned.iter().collect();
-            let library_id = refs
-                .first()
-                .and_then(|row| crate::http::library::library_for_row(&store, row, &media))
-                .map(|library| library.id)
-                .unwrap_or_default();
-            let poster = crate::http::library::preferred_row(&refs)
-                .and_then(poster_path)
-                .map(|_| {
-                    let row = crate::http::library::preferred_row(&refs).expect("checked");
-                    crate::http::library::artwork_url("posters", row.id)
-                });
-            Some(json!({
-                "media_item_id": media.id.to_string(),
-                "kind": media.kind.as_str(),
-                "library_id": library_id,
-                "title": media.title,
-                "year": media.year,
-                "poster_url": poster,
-                "file_count": owned.len(),
-                "seasons": owned.iter().filter_map(|r| r.season).collect::<std::collections::BTreeSet<_>>(),
-                "episode_count": owned.iter().filter(|r| r.episode.is_some()).count() as i64,
-                "favorite_season_number": (season >= 0).then_some(season),
-                "favorite_episode_number": (episode >= 0).then_some(episode),
-            }))
+        .map(|(media_id, (updated_at, season, episode))| FavoriteEntry {
+            media_id,
+            updated_at,
+            season,
+            episode,
+            tier: with_tier.then(|| favorite_tier(store, user_id, all_rows, media_id)),
         })
+        .collect()
+}
+
+/// 一部作品的观看分级。与库行、筛选条共用 `selection::watch_state_for`：同一部作品
+/// 不该在两处被分到不同的档（比如这里"在看"、筛选条里"未观看"）。
+fn favorite_tier(
+    store: &crate::Store,
+    user_id: domain::UserId,
+    all_rows: &[domain::LedgerRow],
+    media_id: domain::MediaId,
+) -> library::WatchTier {
+    let Some(media) = store.get_media(media_id).ok().flatten() else {
+        return library::WatchTier::default();
+    };
+    let rows = all_rows.iter().filter(|row| row.media_id == media_id);
+    match crate::http::library::selection::watch_state_for(store, user_id, &media, rows) {
+        Ok(state) => library::WatchTier::of(state.seen, state.played),
+        Err(error) => {
+            tracing::warn!(%error, %media_id, "收藏行的观看状态读取失败，未看优先按未看处理");
+            library::WatchTier::default()
+        }
+    }
+}
+
+/// 排序。`unwatched_first` 开着时先按观看分级（未看 → 在看 → 已看完），段内仍是这一档
+/// 自己的排序；关掉时与加这个开关之前逐字相同。末位一律用 id 兜底，保证翻页不重不漏。
+fn sort_favorite_entries(
+    store: &crate::Store,
+    list: &mut [FavoriteEntry],
+    sort_key: &str,
+    is_desc: bool,
+    unwatched_first: bool,
+) {
+    let title = |id: &domain::MediaId| {
+        store
+            .get_media(*id)
+            .ok()
+            .flatten()
+            .map(|media| media.title)
+            .unwrap_or_default()
+    };
+    let year = |id: &domain::MediaId| {
+        store
+            .get_media(*id)
+            .ok()
+            .flatten()
+            .and_then(|media| media.year)
+    };
+    list.sort_by(|a, b| {
+        let tier = if unwatched_first {
+            a.tier
+                .unwrap_or_default()
+                .cmp(&b.tier.unwrap_or_default())
+        } else {
+            std::cmp::Ordering::Equal
+        };
+        let primary = match sort_key {
+            "title" if is_desc => title(&b.media_id).cmp(&title(&a.media_id)),
+            "title" => title(&a.media_id).cmp(&title(&b.media_id)),
+            "release_date" | "year" if is_desc => year(&b.media_id).cmp(&year(&a.media_id)),
+            "release_date" | "year" => year(&a.media_id).cmp(&year(&b.media_id)),
+            _ if is_desc => b.updated_at.cmp(&a.updated_at),
+            _ => a.updated_at.cmp(&b.updated_at),
+        };
+        tier.then(primary)
+            .then_with(|| a.media_id.to_string().cmp(&b.media_id.to_string()))
+    });
+}
+
+/// 一格收藏卡：与单库页库存格同形，另加「收藏在哪一层」。
+fn favorite_item_json(
+    store: &crate::Store,
+    all_rows: &[domain::LedgerRow],
+    entry: &FavoriteEntry,
+    user_id: domain::UserId,
+) -> Option<Value> {
+    let media_id = entry.media_id;
+    let media = store.get_media(media_id).ok().flatten()?;
+    let owned: Vec<domain::LedgerRow> = all_rows
+        .iter()
+        .filter(|r| r.media_id == media_id)
+        .filter(|r| crate::http::library::row_visible_to_user(store, r, &media, Some(user_id)))
+        .cloned()
         .collect();
-    ok(json!({ "items": page, "total": total })).into_response()
+    if owned.is_empty() {
+        return None;
+    }
+    let refs: Vec<&domain::LedgerRow> = owned.iter().collect();
+    let library_id = refs
+        .first()
+        .and_then(|row| crate::http::library::library_for_row(store, row, &media))
+        .map(|library| library.id)
+        .unwrap_or_default();
+    let poster = crate::http::library::preferred_row(&refs)
+        .and_then(poster_path)
+        .map(|_| {
+            let row = crate::http::library::preferred_row(&refs).expect("checked");
+            crate::http::library::artwork_url("posters", row.id)
+        });
+    Some(json!({
+        "media_item_id": media.id.to_string(),
+        "kind": media.kind.as_str(),
+        "library_id": library_id,
+        "title": media.title,
+        "year": media.year,
+        "poster_url": poster,
+        "file_count": owned.len(),
+        "seasons": owned.iter().filter_map(|r| r.season).collect::<std::collections::BTreeSet<_>>(),
+        "episode_count": owned.iter().filter(|r| r.episode.is_some()).count() as i64,
+        "favorite_season_number": (entry.season >= 0).then_some(entry.season),
+        "favorite_episode_number": (entry.episode >= 0).then_some(entry.episode),
+    }))
 }
 
 /// GET /playback/favorites/gallery — 收藏图廊：每部作品的海报/背景/剧照，
