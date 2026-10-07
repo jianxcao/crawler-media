@@ -269,19 +269,9 @@ fn build_marker_replacement(
                 _ => None,
             }
         });
-        let mut existing = store
+        let existing = store
             .get_cached_chapters(&row.id.to_string())?
             .unwrap_or_default();
-        existing.retain(|chapter| {
-            !matches!(
-                chapter.marker_type,
-                Some(
-                    marker::MarkerType::IntroStart
-                        | marker::MarkerType::IntroEnd
-                        | marker::MarkerType::CreditsStart
-                )
-            )
-        });
         let complete = marker::build_complete_timeline_chapters(&existing, intro, outro, None);
         chapter_updates.push((row.id.to_string(), complete));
     }

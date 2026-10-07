@@ -59,6 +59,7 @@ pub fn annotate_chapters(chapters: &[Chapter]) -> Vec<ChapterMarker> {
                 end_ms: ch.end_ms,
                 title: ch.title.clone(),
                 marker_type: marker,
+                synthetic: false,
             }
         })
         .collect()
@@ -144,34 +145,63 @@ pub fn build_complete_timeline_chapters(
     outro: Option<(i64, i64)>,
     duration_ms: Option<i64>,
 ) -> Vec<ChapterMarker> {
-    // 如果已经存在丰富的内嵌章节（大于 1 个非片头片尾的普通章节），优先保留并融合 marker
-    let regular_chapters_count = existing.iter().filter(|c| c.marker_type.is_none()).count();
-
-    if regular_chapters_count > 1 {
-        let mut merged = existing.to_vec();
-        if let Some((start_ms, end_ms)) = intro {
-            merged.retain(|c| c.marker_type != Some(MarkerType::IntroStart));
-            merged.push(ChapterMarker {
-                start_ms,
-                end_ms,
-                title: Some("片头".into()),
-                marker_type: Some(MarkerType::IntroStart),
-            });
-        }
-        if let Some((start_ms, end_ms)) = outro {
-            merged.retain(|c| c.marker_type != Some(MarkerType::CreditsStart));
-            merged.push(ChapterMarker {
-                start_ms,
-                end_ms,
-                title: Some("片尾".into()),
-                marker_type: Some(MarkerType::CreditsStart),
-            });
-        }
-        merged.sort_by_key(|c| c.start_ms);
-        return merged;
+    let source_chapters = source_chapters(existing);
+    // 如果已经存在多段真实内嵌章节，优先保留并融合本轮 marker。
+    if source_chapters.len() > 1 {
+        return merge_detected_markers(source_chapters, intro, outro);
     }
 
-    // 否则根据片头/片尾与总时长自动生成完整的段落章节
+    generated_timeline(source_chapters, intro, outro, duration_ms)
+}
+
+fn source_chapters(existing: &[ChapterMarker]) -> Vec<ChapterMarker> {
+    if is_legacy_generated_timeline(existing) {
+        return Vec::new();
+    }
+    existing
+        .iter()
+        .filter(|chapter| {
+            !chapter.synthetic
+                && !matches!(
+                    chapter.marker_type,
+                    Some(MarkerType::IntroStart | MarkerType::IntroEnd | MarkerType::CreditsStart)
+                )
+        })
+        .cloned()
+        .collect()
+}
+
+fn merge_detected_markers(
+    mut chapters: Vec<ChapterMarker>,
+    intro: Option<(i64, i64)>,
+    outro: Option<(i64, i64)>,
+) -> Vec<ChapterMarker> {
+    if let Some((start_ms, end_ms)) = intro {
+        chapters.push(synthetic_marker(
+            start_ms,
+            end_ms,
+            "片头",
+            MarkerType::IntroStart,
+        ));
+    }
+    if let Some((start_ms, end_ms)) = outro {
+        chapters.push(synthetic_marker(
+            start_ms,
+            end_ms,
+            "片尾",
+            MarkerType::CreditsStart,
+        ));
+    }
+    chapters.sort_by_key(|chapter| chapter.start_ms);
+    chapters
+}
+
+fn generated_timeline(
+    source_chapters: Vec<ChapterMarker>,
+    intro: Option<(i64, i64)>,
+    outro: Option<(i64, i64)>,
+    duration_ms: Option<i64>,
+) -> Vec<ChapterMarker> {
     let mut segments = Vec::new();
     let total_ms = duration_ms.unwrap_or(0);
 
@@ -184,19 +214,9 @@ pub fn build_complete_timeline_chapters(
     if let (Some(s), Some(e)) = (intro_start, intro_end) {
         if s >= 3000 {
             // 前置超过 3 秒，切分为序幕/前情
-            segments.push(ChapterMarker {
-                start_ms: 0,
-                end_ms: s,
-                title: Some("序幕".into()),
-                marker_type: None,
-            });
+            segments.push(synthetic_chapter(0, s, "序幕", None));
         }
-        segments.push(ChapterMarker {
-            start_ms: s,
-            end_ms: e,
-            title: Some("片头".into()),
-            marker_type: Some(MarkerType::IntroStart),
-        });
+        segments.push(synthetic_marker(s, e, "片头", MarkerType::IntroStart));
     }
 
     // 确定正片起点
@@ -212,33 +232,68 @@ pub fn build_complete_timeline_chapters(
     // 3. 插入正片
     let feature_end = outro_start.unwrap_or(total_ms);
     if feature_end > feature_start || total_ms == 0 {
-        segments.push(ChapterMarker {
-            start_ms: feature_start,
-            end_ms: if feature_end > feature_start {
-                feature_end
-            } else {
-                feature_start + 1_800_000
-            },
-            title: Some("正片".into()),
-            marker_type: None,
-        });
+        let end_ms = if feature_end > feature_start {
+            feature_end
+        } else {
+            feature_start + 1_800_000
+        };
+        segments.push(synthetic_chapter(feature_start, end_ms, "正片", None));
     }
 
     // 4. 插入片尾
     if let (Some(s), Some(e)) = (outro_start, outro_end) {
-        segments.push(ChapterMarker {
-            start_ms: s,
-            end_ms: e,
-            title: Some("片尾".into()),
-            marker_type: Some(MarkerType::CreditsStart),
-        });
+        segments.push(synthetic_marker(s, e, "片尾", MarkerType::CreditsStart));
     }
 
     // 若依然为空且有已有章节，回退到已有章节
     if segments.is_empty() {
-        return existing.to_vec();
+        return source_chapters;
     }
 
     segments.sort_by_key(|c| c.start_ms);
     segments
+}
+
+fn synthetic_chapter(
+    start_ms: i64,
+    end_ms: i64,
+    title: &str,
+    marker_type: Option<MarkerType>,
+) -> ChapterMarker {
+    ChapterMarker {
+        start_ms,
+        end_ms,
+        title: Some(title.into()),
+        marker_type,
+        synthetic: true,
+    }
+}
+
+fn synthetic_marker(
+    start_ms: i64,
+    end_ms: i64,
+    title: &str,
+    marker_type: MarkerType,
+) -> ChapterMarker {
+    synthetic_chapter(start_ms, end_ms, title, Some(marker_type))
+}
+
+fn is_legacy_generated_timeline(chapters: &[ChapterMarker]) -> bool {
+    if chapters.len() < 2 || chapters.first().is_none_or(|chapter| chapter.start_ms != 0) {
+        return false;
+    }
+    let mut has_feature = false;
+    let mut has_marker = false;
+    for chapter in chapters {
+        match (chapter.title.as_deref(), chapter.marker_type) {
+            (Some("序幕"), None) | (Some("正片"), None) => {
+                has_feature |= chapter.title.as_deref() == Some("正片");
+            }
+            (Some("片头"), Some(MarkerType::IntroStart))
+            | (Some("片头"), Some(MarkerType::IntroEnd))
+            | (Some("片尾"), Some(MarkerType::CreditsStart)) => has_marker = true,
+            _ => return false,
+        }
+    }
+    has_feature && has_marker
 }

@@ -21,6 +21,8 @@ pub struct ChapterMarker {
     pub end_ms: i64,
     pub title: Option<String>,
     pub marker_type: Option<MarkerType>,
+    #[serde(default)]
+    pub synthetic: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

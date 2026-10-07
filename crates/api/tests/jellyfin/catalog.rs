@@ -588,6 +588,7 @@ async fn tv_items_include_nfo_artwork_metadata_and_cached_playback_streams() {
                 end_ms: 60_000,
                 title: Some("Previously cached chapter".into()),
                 marker_type: None,
+                synthetic: false,
             }],
         )
         .unwrap();

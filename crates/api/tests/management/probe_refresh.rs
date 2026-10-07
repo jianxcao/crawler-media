@@ -70,6 +70,7 @@ async fn manual_probe_refreshes_every_library_holding_the_media() {
                     end_ms: 30_000,
                     title: Some("Existing chapter".into()),
                     marker_type: None,
+                    synthetic: false,
                 }],
             )
             .unwrap();
@@ -158,6 +159,7 @@ async fn playback_session_returns_cached_chapters_without_reprobing_file() {
                 end_ms: 20_000,
                 title: Some("Opening".into()),
                 marker_type: None,
+                synthetic: false,
             }],
         )
         .unwrap();
