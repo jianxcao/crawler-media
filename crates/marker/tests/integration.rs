@@ -129,7 +129,7 @@ fn test_probe_target_ffmpeg_command_args() {
     );
     for (option, value) in [
         ("-reconnect_at_eof", "1"),
-        ("-reconnect_on_http_error", "429,5xx"),
+        ("-reconnect_on_http_error", "403,429,5xx"),
         ("-reconnect_max_retries", "3"),
         ("-reconnect_delay_total_max", "15"),
     ] {

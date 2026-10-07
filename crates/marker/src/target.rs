@@ -102,7 +102,7 @@ impl ProbeTarget {
                     "-reconnect_at_eof",
                     "1",
                     "-reconnect_on_http_error",
-                    "429,5xx",
+                    "403,429,5xx",
                     "-reconnect_max_retries",
                     "3",
                     "-reconnect_delay_max",
