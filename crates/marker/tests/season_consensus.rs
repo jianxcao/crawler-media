@@ -76,6 +76,84 @@ fn season_consensus_rejects_an_isolated_long_match_in_favor_of_the_recurring_int
 }
 
 #[test]
+fn season_consensus_rejects_a_short_two_pair_fragment_against_a_season_wide_intro() {
+    let mut matches = HashMap::new();
+    for first in 2..=15 {
+        for second in first + 1..=15 {
+            matches.insert(
+                (first, second),
+                CommonSegment {
+                    start1_sec: 0.0,
+                    end1_sec: 100.0,
+                    start2_sec: 0.0,
+                    end2_sec: 100.0,
+                    duration_sec: 100.0,
+                    score: 0.5,
+                },
+            );
+        }
+    }
+    for second in [2, 3] {
+        matches.insert(
+            (1, second),
+            CommonSegment {
+                start1_sec: 12.0,
+                end1_sec: 35.0,
+                start2_sec: 102.0,
+                end2_sec: 125.0,
+                duration_sec: 23.0,
+                score: 2.5,
+            },
+        );
+    }
+    let engine = PairwiseEngine { matches };
+    let episodes = (1..=15)
+        .map(|episode| (episode, vec![episode]))
+        .collect::<Vec<_>>();
+
+    let detected = match_episodes_fingerprints_with(&engine, &episodes, 15.0, 240.0);
+
+    assert_eq!(detected.len(), 14);
+    assert!(detected.iter().all(|marker| marker.episode != 1));
+}
+
+#[test]
+fn season_consensus_keeps_a_three_pair_intro_variant_in_a_large_season() {
+    let mut matches = HashMap::new();
+    for (first, second, start1, start2) in [
+        (1, 2, 12.0, 102.0),
+        (1, 3, 12.0, 102.0),
+        (2, 3, 102.0, 102.0),
+    ] {
+        matches.insert(
+            (first, second),
+            CommonSegment {
+                start1_sec: start1,
+                end1_sec: start1 + 23.0,
+                start2_sec: start2,
+                end2_sec: start2 + 23.0,
+                duration_sec: 23.0,
+                score: 0.5,
+            },
+        );
+    }
+    let engine = PairwiseEngine { matches };
+    let episodes = (1..=15)
+        .map(|episode| (episode, vec![episode]))
+        .collect::<Vec<_>>();
+
+    let detected = match_episodes_fingerprints_with(&engine, &episodes, 15.0, 240.0);
+
+    assert_eq!(
+        detected
+            .iter()
+            .map(|marker| marker.episode)
+            .collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+}
+
+#[test]
 fn season_consensus_keeps_two_recurring_intro_variants() {
     let mut matches = HashMap::new();
     for group in [1..=5, 6..=10] {
