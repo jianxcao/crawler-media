@@ -447,14 +447,21 @@ export function RuleSetEditorDialog({
   useEffect(() => {
     listConfiguredSites().then(setConfiguredSites).catch(() => setConfiguredSites([]));
   }, []);
-  const movePreferredSite = (index: number, delta: -1 | 1) =>
+  const reorderPreferredSite = (sourceIndex: number, targetIndex: number) =>
     setPreferredSites((current) => {
-      const nextIndex = index + delta;
-      if (nextIndex < 0 || nextIndex >= current.length) return current;
+      if (
+        targetIndex < 0 ||
+        targetIndex >= current.length ||
+        sourceIndex < 0 ||
+        sourceIndex >= current.length ||
+        sourceIndex === targetIndex
+      ) return current;
       const next = [...current];
-      [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+      const [moved] = next.splice(sourceIndex, 1);
+      next.splice(targetIndex, 0, moved);
       return next;
     });
+  const [draggingPreferredSite, setDraggingPreferredSite] = useState<number | null>(null);
   const [upgradeLadder, setUpgradeLadder] = useState<string[]>(
     () => spec.upgrade_ladder ?? [...DEFAULT_LADDER],
   );
@@ -823,31 +830,36 @@ export function RuleSetEditorDialog({
               排在洗版之前——洗版终点档只能从这个白名单里挑 */}
           <Field
             label="首选站点"
-            hint="首选站点有符合质量条件的资源时优先下载；使用上下按钮调整顺序，未命中时仍可回退其他站点"
+            hint="首选站点有符合质量条件的资源时优先下载；拖动站点行可调整顺序，未命中时仍可回退其他站点"
           >
             <div className="space-y-2">
               {preferredSites.map((siteId, index) => {
                 const site = configuredSites.find((candidate) => candidate.id === siteId);
                 return (
-                  <div key={siteId} className="flex items-center gap-2 text-sm text-white">
+                  <div
+                    key={siteId}
+                    draggable
+                    onDragStart={(event) => {
+                      setDraggingPreferredSite(index);
+                      event.dataTransfer.effectAllowed = "move";
+                      event.dataTransfer.setData("text/plain", String(index));
+                    }}
+                    onDragOver={(event) => {
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = "move";
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      const sourceIndex = Number(event.dataTransfer.getData("text/plain"));
+                      if (Number.isInteger(sourceIndex)) reorderPreferredSite(sourceIndex, index);
+                      setDraggingPreferredSite(null);
+                    }}
+                    onDragEnd={() => setDraggingPreferredSite(null)}
+                    className={`flex cursor-grab items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-sm text-white active:cursor-grabbing ${draggingPreferredSite === index ? "opacity-50" : ""}`}
+                  >
+                    <span aria-hidden="true" className="text-[var(--text-muted)]">⠿</span>
                     <span className="w-6 text-[var(--text-muted)]">{index + 1}.</span>
                     <span className="flex-1">{site?.name ?? siteId}</span>
-                    <button
-                      type="button"
-                      disabled={index === 0}
-                      onClick={() => movePreferredSite(index, -1)}
-                      aria-label="优先级上移"
-                    >
-                      ↑
-                    </button>
-                    <button
-                      type="button"
-                      disabled={index === preferredSites.length - 1}
-                      onClick={() => movePreferredSite(index, 1)}
-                      aria-label="优先级下移"
-                    >
-                      ↓
-                    </button>
                     <button
                       type="button"
                       onClick={() => setPreferredSites((current) => current.filter((id) => id !== siteId))}
