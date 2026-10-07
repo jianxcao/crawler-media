@@ -185,6 +185,10 @@ pub fn spawn_fs_watcher(state: ApiState) {
         let mut watcher_state = FsWatcherState::new();
         match current_dirs_to_watch(&state) {
             Ok(desired) => {
+                tracing::info!(
+                    dirs = ?desired.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                    "fs_watcher 初始化监听目录列表"
+                );
                 watcher_state.reconcile(&mut debouncer, &desired);
             }
             Err(error) => {
@@ -207,6 +211,11 @@ pub fn spawn_fs_watcher(state: ApiState) {
                     }
                 }
                 Some(events) = rx.recv() => {
+                    tracing::info!(
+                        event_count = events.len(),
+                        paths = ?events.iter().map(|e| e.path.display().to_string()).collect::<Vec<_>>(),
+                        "fs_watcher 接收到底层文件系统事件"
+                    );
                     handle_fs_events(&state, &tracker, events);
                 }
             }
@@ -287,8 +296,11 @@ pub fn handle_fs_events(
     let mut has_scrape_needed = false;
     let mut library_scan_targets = HashSet::new();
 
+    tracing::debug!(event_count = events.len(), "fs_watcher 收到文件系统变动事件批次");
+
     for event in events {
         let path = event.path;
+        tracing::debug!(path = %path.display(), exists = path.exists(), "处理文件系统事件路径");
         let is_strm = path
             .extension()
             .and_then(|ext| ext.to_str())
@@ -312,6 +324,7 @@ pub fn handle_fs_events(
             // 文件或目录已被移除：
             // 如果 path 是单个 strm，通知 tracker 进行防抖；
             // 与此同时，检查 ledger 中是否存在该 path 或以此 path 为目录前缀的记录（整目录删除）。
+            tracing::info!(path = %path.display(), "检测到文件或目录被删除，检查关联台账记录");
             let store = state.store.lock();
             if let Ok(ledger_rows) = store.list_ledger() {
                 let path_str = path.display().to_string();
@@ -324,10 +337,16 @@ pub fn handle_fs_events(
                 drop(store);
 
                 if !matched_rows.is_empty() {
+                    tracing::info!(
+                        path = %path.display(),
+                        matched_count = matched_rows.len(),
+                        "发现删除路径匹配的台账记录，执行级联删除"
+                    );
                     let mut affected_media_ids = HashSet::new();
                     let store = state.store.lock();
                     for r in matched_rows {
                         affected_media_ids.insert(r.media_id);
+                        tracing::info!(row_path = %r.path, media_id = %r.media_id, "删除台账行");
                         let _ = store.delete_ledger_path(&r.path);
                     }
                     for media_id in affected_media_ids {
@@ -336,6 +355,7 @@ pub fn handle_fs_events(
                             .map(|rows| rows.len())
                             .unwrap_or(0);
                         if remaining == 0 {
+                            tracing::info!(media_id = %media_id, "条目下所有文件已全被删除，清理媒体及关联数据");
                             let _ = store.delete_imported_pending_for_media(media_id);
                             let _ = store.delete_media_markers_for_media(media_id);
                             let _ = store.delete_playback_for_media(media_id);
