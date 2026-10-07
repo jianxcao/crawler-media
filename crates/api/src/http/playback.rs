@@ -687,25 +687,43 @@ pub(crate) async fn get_subtitle_file(
     axum::extract::Path((ledger_id, index)): axum::extract::Path<(String, u32)>,
     axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    let store = state.store.lock();
-    // G07: 先校验该 ledger 行对当前用户可见，防止普通成员跨 Library 读取字幕。
-    if crate::http::media_visibility::resolve_visible_row(&store, &ledger_id, Some(user_id))
-        .is_none()
-    {
-        return err(StatusCode::NOT_FOUND, "subtitle.not_found", "字幕未找到");
-    }
-    let Ok(Some(tracks)) = store.get_file_meta(&ledger_id) else {
-        return err(StatusCode::NOT_FOUND, "subtitle.not_found", "字幕未找到");
+    let (row, media_title, tracks) = {
+        let store = state.store.lock();
+        // G07: 先校验该 ledger 行对当前用户可见，防止普通成员跨 Library 读取字幕。
+        let Some(row) = crate::http::media_visibility::resolve_visible_row(&store, &ledger_id, Some(user_id)) else {
+            return err(StatusCode::NOT_FOUND, "subtitle.not_found", "字幕未找到");
+        };
+        let media_title = store.get_media(row.media_id).ok().flatten().map(|m| m.title).unwrap_or_default();
+        let Ok(Some(tracks)) = store.get_file_meta(&ledger_id) else {
+            return err(StatusCode::NOT_FOUND, "subtitle.not_found", "字幕未找到");
+        };
+        (row, media_title, tracks)
     };
     let wants_vtt = query.get("format").map(|f| f.eq_ignore_ascii_case("vtt")).unwrap_or(false);
-    match library::deliver_subtitle(&tracks, index, wants_vtt) {
+    let cache_dir = std::env::temp_dir().join("crawler-media-subtitles").join(&ledger_id);
+    let source_path = std::path::Path::new(&row.path);
+
+    match library::deliver_subtitle_with_source(
+        &tracks,
+        index,
+        wants_vtt,
+        Some(source_path),
+        Some(&cache_dir),
+    ) {
         Ok(payload) => (
             [(axum::http::header::CONTENT_TYPE, payload.content_type)],
             payload.bytes,
         )
             .into_response(),
         Err(error) => {
-            tracing::error!(ledger_id = %ledger_id, index, %error, "交付字幕文件失败");
+            tracing::error!(
+                media = %media_title,
+                path = %row.path,
+                ledger_id = %ledger_id,
+                index,
+                %error,
+                "交付字幕文件失败"
+            );
             match error {
                 library::DeliveryError::TrackNotFound => {
                     err(StatusCode::NOT_FOUND, "subtitle.not_found", "字幕轨不存在")
@@ -715,6 +733,13 @@ pub(crate) async fn get_subtitle_file(
                         StatusCode::NOT_FOUND,
                         "subtitle.file_missing",
                         "字幕文件不存在",
+                    )
+                }
+                library::DeliveryError::Extraction(msg) => {
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "subtitle.extraction_failed",
+                        &format!("提取内封字幕失败: {msg}"),
                     )
                 }
             }

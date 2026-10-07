@@ -59,3 +59,41 @@ fn subtitle_index_allocates_stable_unique_indexes() {
     let found2 = find_subtitle_by_index(&tracks, 4).unwrap();
     assert_eq!(found2.path.as_deref(), Some("/path/to/sub2.ass"));
 }
+
+#[test]
+fn deliver_subtitle_with_source_extracts_embedded_subtitle_with_cache() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cache_dir = tmp.path().join("cache");
+    let media = tmp.path().join("movie.mkv");
+    std::fs::write(&media, b"fake video bytes").unwrap();
+
+    let tracks = Tracks {
+        subtitles: vec![SubtitleTrack {
+            stream_index: Some(2),
+            codec: Some("subrip".into()),
+            is_external: false,
+            path: None,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    // 预先在缓存目录中写入提取好的文件，验证命中缓存逻辑
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    std::fs::write(cache_dir.join("sub_2.vtt"), b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nCached Sub").unwrap();
+
+    let payload = library::deliver_subtitle_with_source(
+        &tracks,
+        2,
+        true,
+        Some(&media),
+        Some(&cache_dir),
+    )
+    .unwrap();
+
+    assert_eq!(payload.content_type, "text/vtt; charset=utf-8");
+    assert_eq!(
+        String::from_utf8(payload.bytes).unwrap(),
+        "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nCached Sub"
+    );
+}

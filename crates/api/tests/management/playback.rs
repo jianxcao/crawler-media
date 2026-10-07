@@ -733,4 +733,58 @@ async fn playback_decide_and_subtitle_delivery_returns_tracks_and_content() {
         text.contains("Hello Subtitle"),
         "必须成功返回字幕文件内容 (G07)"
     );
+
+    // 3. 验证内封字幕轨交付与缓存命中 (无 external 路径时走内封提取或缓存)
+    let cache_dir = std::env::temp_dir().join("crawler-media-subtitles").join(row.id.to_string());
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    std::fs::write(cache_dir.join("sub_3.vtt"), b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nEmbedded Subtitle Cached").unwrap();
+
+    let store = api::Store::open(tmp.path().join("data")).unwrap();
+    store
+        .put_file_meta(
+            &row.id.to_string(),
+            &library::Tracks {
+                video: Some(library::VideoTrack {
+                    stream_index: Some(0),
+                    codec: Some("h264".into()),
+                    ..Default::default()
+                }),
+                audio: vec![],
+                subtitles: vec![library::SubtitleTrack {
+                    stream_index: Some(3),
+                    codec: Some("subrip".into()),
+                    profile: None,
+                    language: Some("eng".into()),
+                    title: Some("English Subtitle".into()),
+                    bit_rate: None,
+                    is_default: false,
+                    forced: false,
+                    is_external: false,
+                    path: None,
+                }],
+            },
+        )
+        .unwrap();
+    drop(store);
+
+    let embedded_sub_url = format!("/api/v1/playback/subtitles/{}/3?format=vtt", row.id);
+    let embedded_res = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            &embedded_sub_url,
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(embedded_res.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(embedded_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body_bytes.to_vec()).unwrap();
+    assert!(
+        text.contains("Embedded Subtitle Cached"),
+        "必须成功交付内封字幕 (G07)"
+    );
 }
