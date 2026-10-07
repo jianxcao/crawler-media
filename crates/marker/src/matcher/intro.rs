@@ -38,7 +38,10 @@ pub fn match_episodes_fingerprints_with(
             episodes = episodes.len(),
             pairs_checked = consensus.pairs_checked,
             candidate_pairs = consensus.candidate_pairs,
+            rejected_episode_support_clusters = consensus.rejected_episode_support_clusters,
+            rejected_pair_support_clusters = consensus.rejected_pair_support_clusters,
             minimum_support = consensus.minimum_support,
+            minimum_pair_support = consensus.minimum_pair_support,
             elapsed_ms = started.elapsed().as_millis() as u64,
             "【片头片尾】片头候选未达到整季一致性门槛"
         );
@@ -66,10 +69,13 @@ pub fn match_episodes_fingerprints_with(
         applied = results.len(),
         pairs_checked = consensus.pairs_checked,
         candidate_pairs = consensus.candidate_pairs,
+        rejected_episode_support_clusters = consensus.rejected_episode_support_clusters,
+        rejected_pair_support_clusters = consensus.rejected_pair_support_clusters,
         consensus_clusters = consensus.consensus_clusters,
         supporting_episodes = consensus.supporting_episodes,
         supporting_pairs = consensus.supporting_pairs,
         minimum_support = consensus.minimum_support,
+        minimum_pair_support = consensus.minimum_pair_support,
         median_duration_secs = consensus.median_duration_secs,
         elapsed_ms = started.elapsed().as_millis(),
         "【片头片尾】整季片头声纹比对完成"
