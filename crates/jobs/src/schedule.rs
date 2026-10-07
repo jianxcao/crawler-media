@@ -35,7 +35,7 @@ pub fn ensure_scheduled_def(
     def: &JobDef,
 ) -> Result<Vec<Job>, JobError> {
     let mut created = Vec::new();
-    if def.schedule.is_none() && now != 0 {
+    if !def.enabled || (def.schedule.is_none() && now != 0) {
         return Ok(created);
     }
     // now == 0 means an explicit manual trigger for this one definition.

@@ -299,6 +299,36 @@ fn disabling_definition_cancels_already_queued_child() {
 }
 
 #[test]
+fn manually_triggering_disabled_definition_does_not_reactivate_queued_child() {
+    let (_dir, q) = queue();
+    let payload = r#"{}"#;
+    let def = q
+        .upsert_def(NewDef {
+            kind: JobKind::Scrape,
+            name: "Scrape".into(),
+            enabled: true,
+            schedule: Some(Schedule::Interval { secs: 30 }),
+            payload: payload.into(),
+            timeout_secs: Some(120),
+            concurrency_key: Some("scrape".into()),
+        })
+        .unwrap();
+    let queued = q.ensure_scheduled(1_000).unwrap().remove(0);
+    q.set_def_enabled_by_id(def.id, false).unwrap();
+    let cancelled = q.get_last_child(def.id).unwrap().unwrap();
+    assert_eq!(cancelled.id, queued.id);
+    assert_eq!(cancelled.status, JobStatus::Cancelled);
+
+    q.ensure_scheduled_for(0, def.id).unwrap();
+
+    assert!(q.get_live_child(def.id).unwrap().is_none());
+    assert_eq!(
+        q.get_last_child(def.id).unwrap().unwrap().status,
+        JobStatus::Cancelled
+    );
+}
+
+#[test]
 fn disabled_def_is_not_scheduled() {
     let (_dir, q) = queue();
     let payload = r#"{"subscribe_id":"paused"}"#;
