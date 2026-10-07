@@ -148,7 +148,7 @@ export function ScrapeSettingsSection() {
       </div>
 
       {tab === "metadata" && (
-        <div className="space-y-5">
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
           <Group label="元数据语言优先级">
             <p className="mb-3 text-caption leading-5 text-white/45">
               首位 = 请求 TMDB 的语言；下一位在首位缺失时兜底。默认 {effective?.language_priority.join(" → ")}。
@@ -266,31 +266,33 @@ export function ScrapeSettingsSection() {
 
       {tab === "mirror" && (
         <div className="space-y-5">
-          <Group label="媒体目录写入">
-            <ToggleRow
-              label="写入图片（poster / fanart）"
-              hint="自动选择的封面与背景图写进媒体目录（mirror_images）"
-              value={draft.mirror_images}
-              onChange={(v) => set("mirror_images", v)}
-            />
-            <ToggleRow
-              label="写入 NFO"
-              hint="标题 / 年份 / 别名写进 NFO（mirror_nfo）"
-              value={draft.mirror_nfo}
-              onChange={(v) => set("mirror_nfo", v)}
-            />
-            <ToggleRow
-              label="分集剧照镜像"
-              hint="单集剧照写入对应集目录（mirror_episode_thumbs）"
-              value={draft.mirror_episode_thumbs}
-              onChange={(v) => set("mirror_episode_thumbs", v)}
-            />
-          </Group>
+          <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+            <Group label="媒体目录写入">
+              <ToggleRow
+                label="写入图片（poster / fanart）"
+                hint="自动选择的封面与背景图写进媒体目录（mirror_images）"
+                value={draft.mirror_images}
+                onChange={(v) => set("mirror_images", v)}
+              />
+              <ToggleRow
+                label="写入 NFO"
+                hint="标题 / 年份 / 别名写进 NFO（mirror_nfo）"
+                value={draft.mirror_nfo}
+                onChange={(v) => set("mirror_nfo", v)}
+              />
+              <ToggleRow
+                label="分集剧照镜像"
+                hint="单集剧照写入对应集目录（mirror_episode_thumbs）"
+                value={draft.mirror_episode_thumbs}
+                onChange={(v) => set("mirror_episode_thumbs", v)}
+              />
+            </Group>
+          </div>
         </div>
       )}
 
       {tab === "markers" && (
-        <div className="space-y-5">
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
           <Group label="TheIntroDB 云端片头片尾库">
             <ToggleRow
               label="启用 TheIntroDB"
