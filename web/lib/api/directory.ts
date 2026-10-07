@@ -35,3 +35,9 @@ export async function setTransferMode(mode: TransferMode): Promise<DirectorySett
   const current = await getDirectory();
   return putDirectory({ ...current, transfer_mode: mode });
 }
+
+export async function setWatchIntake(path: string | null): Promise<DirectorySettings> {
+  const current = await getDirectory();
+  const trimmed = path?.trim();
+  return putDirectory({ ...current, watch_intake: trimmed ? trimmed : null });
+}

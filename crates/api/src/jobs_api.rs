@@ -33,7 +33,7 @@ pub fn seed_instance_defs(queue: &Queue) -> Result<(), jobs::JobError> {
         kind: JobKind::Scrape,
         name: "Scrape".into(),
         enabled: true,
-        schedule: Some(Schedule::Interval { secs: 30 }),
+        schedule: Some(Schedule::Interval { secs: 600 }),
         payload: "{}".into(),
         timeout_secs: Some(120),
         concurrency_key: Some("scrape".into()),
