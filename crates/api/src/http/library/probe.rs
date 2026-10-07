@@ -10,9 +10,8 @@ use crate::management::ApiState;
 
 use super::{library_for_row, require_visible_library};
 
-/// Queue metadata extraction and, when applicable, fingerprint extraction.
-/// Ingested TV episodes force voiceprint work whenever intro/outro detection is enabled.
-fn enqueue_probe(state: &ApiState, row: &domain::LedgerRow, ingest: bool) -> bool {
+/// Queue metadata extraction and enabled TV fingerprint extraction.
+fn enqueue_probe(state: &ApiState, row: &domain::LedgerRow) -> bool {
     let key = row.id.to_string();
     let store = state.store.lock();
     let meta_cached = store.get_file_meta(&key).ok().flatten().is_some();
@@ -23,28 +22,20 @@ fn enqueue_probe(state: &ApiState, row: &domain::LedgerRow, ingest: bool) -> boo
         .map(|m| m.kind)
         .unwrap_or(domain::MediaKind::Movie);
 
-    let (intros_on, fingerprint_enabled) = if kind == domain::MediaKind::Tv {
+    let fingerprint_enabled = if kind == domain::MediaKind::Tv {
         let path = PathBuf::from(&row.path);
         store
             .library_for_path(&path, kind)
             .ok()
             .flatten()
-            .map(|lib| {
-                (
-                    lib.detect_intros,
-                    lib.detect_intros && lib.enable_fingerprint,
-                )
-            })
-            .unwrap_or((false, false))
+            .is_some_and(|library| library.enable_fingerprint)
     } else {
-        (false, false)
+        false
     };
     let fingerprint_missing =
         kind == domain::MediaKind::Tv && store.get_fingerprint(&key).ok().flatten().is_none();
-    let force_fingerprint = kind == domain::MediaKind::Tv
-        && intros_on
-        && fingerprint_missing
-        && (ingest || fingerprint_enabled);
+    let force_fingerprint =
+        kind == domain::MediaKind::Tv && fingerprint_missing && fingerprint_enabled;
     drop(store);
 
     if meta_cached && !force_fingerprint {
@@ -56,7 +47,7 @@ fn enqueue_probe(state: &ApiState, row: &domain::LedgerRow, ingest: bool) -> boo
     state.probe.enqueue(crate::probe_manager::ProbeUnit {
         row: row.clone(),
         kind,
-        force_fingerprint: ingest && force_fingerprint,
+        force_fingerprint,
         overwrite_markers: false,
         marker_refresh_id: None,
         job_id: None,
@@ -64,14 +55,12 @@ fn enqueue_probe(state: &ApiState, row: &domain::LedgerRow, ingest: bool) -> boo
 }
 
 pub(crate) fn ensure_probe_enqueued(state: &ApiState, row: &domain::LedgerRow) -> bool {
-    enqueue_probe(state, row, false)
+    enqueue_probe(state, row)
 }
 
 /// Start metadata and voiceprint work as soon as new ledger rows enter a library.
 pub(crate) fn enqueue_probes_for_rows(state: &ApiState, rows: &[domain::LedgerRow]) -> usize {
-    rows.iter()
-        .filter(|row| enqueue_probe(state, row, true))
-        .count()
+    rows.iter().filter(|row| enqueue_probe(state, row)).count()
 }
 
 pub(crate) fn enqueue_probes_for_paths(

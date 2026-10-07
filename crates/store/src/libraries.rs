@@ -26,9 +26,9 @@ pub struct Library {
     pub admin_visible: bool,
     /// Member ids allowed when access_mode = "selected".
     pub member_ids: Vec<domain::UserId>,
-    /// Whether to detect and mark intros/outros.
+    /// Whether to detect intros/outros from TheIntroDB and embedded chapters.
     pub detect_intros: bool,
-    /// Whether to enable deep audio fingerprint matching for episodes without chapters.
+    /// Whether to independently run audio fingerprint matching for TV episodes.
     pub enable_fingerprint: bool,
     /// Custom or auto-filled library cover image path.
     pub cover_path: Option<String>,

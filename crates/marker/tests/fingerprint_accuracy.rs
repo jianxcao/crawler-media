@@ -4,6 +4,7 @@ use marker::{
     match_episodes_fingerprints_with, match_episodes_outros,
 };
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn word(hash: u32, payload: u32) -> u32 {
     (hash << 20) | (payload & 0x000f_ffff)
@@ -112,4 +113,49 @@ fn a_different_fingerprint_engine_can_be_injected_without_ffmpeg() {
     assert_eq!(matched.len(), 2);
     assert_eq!(matched[0].intro_start_ms, 2_000);
     assert_eq!(matched[1].intro_start_ms, 5_000);
+}
+
+struct TruncatedRemoteStreamOnce {
+    attempts: AtomicUsize,
+}
+
+impl FingerprintEngine for TruncatedRemoteStreamOnce {
+    fn extract_at(
+        &self,
+        _path: &Path,
+        _start_secs: u32,
+        _duration_secs: u32,
+    ) -> Result<AudioFingerprint, String> {
+        if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err("Empty fingerprint extracted: File ended prematurely".into())
+        } else {
+            Ok(vec![7, 11, 13])
+        }
+    }
+
+    fn find_common_segment(
+        &self,
+        _first: &[u32],
+        _second: &[u32],
+        _min_duration_secs: f32,
+        _max_duration_secs: f32,
+    ) -> Option<CommonSegment> {
+        None
+    }
+}
+
+#[test]
+fn remote_truncated_fingerprint_sample_is_retried_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("episode.strm");
+    std::fs::write(&path, "https://media.example/episode.mkv\n").unwrap();
+    let engine = TruncatedRemoteStreamOnce {
+        attempts: AtomicUsize::new(0),
+    };
+
+    let fingerprint =
+        extract_audio_fingerprint_at_with(&engine, &path, 2398, 180).expect("retry should recover");
+
+    assert_eq!(fingerprint, vec![7, 11, 13]);
+    assert_eq!(engine.attempts.load(Ordering::SeqCst), 2);
 }

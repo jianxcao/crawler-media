@@ -11,6 +11,7 @@ pub type AudioFingerprint = Vec<u32>;
 
 pub const MIN_MATCH_DURATION_SECS: f32 = 15.0;
 pub const MAX_MATCH_DURATION_SECS: f32 = 240.0;
+const MAX_REMOTE_TRUNCATION_ATTEMPTS: u8 = 2;
 
 /// Replaceable boundary for audio fingerprint extraction and matching.
 pub trait FingerprintEngine: Send + Sync {
@@ -82,7 +83,31 @@ pub fn extract_audio_fingerprint_at_with(
         "【声纹】音频指纹生成开始"
     );
 
-    let result = engine.extract_at(path, start_secs, duration_secs);
+    let mut attempt = 1;
+    let result = loop {
+        let result = engine.extract_at(path, start_secs, duration_secs);
+        let retryable_truncation = matches!(
+            &result,
+            Err(error) if error.contains("File ended prematurely")
+        );
+        if source != "remote" || !retryable_truncation || attempt >= MAX_REMOTE_TRUNCATION_ATTEMPTS
+        {
+            break result;
+        }
+        if let Err(error) = &result {
+            tracing::warn!(
+                path = %path.display(),
+                source,
+                attempt,
+                next_attempt = attempt + 1,
+                max_attempts = MAX_REMOTE_TRUNCATION_ATTEMPTS,
+                error = %error,
+                "【声纹】远端音频样本读取不完整，准备重试"
+            );
+        }
+        attempt += 1;
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    };
     let elapsed_ms = started.elapsed().as_millis();
     match &result {
         Ok(fingerprint) => tracing::info!(

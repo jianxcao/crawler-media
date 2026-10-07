@@ -1233,7 +1233,7 @@ function EditLibraryDialog({
               title="识别片头片尾 (TheIntroDB / 章节)"
               checked={detectIntros}
               onChange={setDetectIntros}
-              detail="开启后优先从 TheIntroDB 云端或视频内嵌章节识别片头曲与片尾演职员表，并在 Infuse 等播放器提供跳过按钮。极速且对 STRM 无额外流量。"
+              detail="控制 TheIntroDB 云端和视频内嵌章节识别；与下方声纹开关独立。只想关闭 TheIntroDB 云端库时，请在刮削设置中关闭 TheIntroDB。"
             />
           )}
           {playable && library.kind === "tv" && (
@@ -1241,7 +1241,7 @@ function EditLibraryDialog({
               title="无章节剧集音频声纹比对 (Chromaprint)"
               checked={enableFingerprint}
               onChange={setEnableFingerprint}
-              detail="当 TheIntroDB 与内嵌章节均未命中时，提取同季前 10 分钟音频进行声纹滑动交叉比对。STRM 视频会拉取音频流，请根据网络与云盘情况按需开启。"
+              detail="独立提取每集配置时长的音频样本，并与同季剧集比对片头片尾；不受 TheIntroDB / 内嵌章节开关影响。STRM 视频会拉取音频流，请根据网络与云盘情况按需开启。"
             />
           )}
           <SwitchRow

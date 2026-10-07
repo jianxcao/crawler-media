@@ -240,7 +240,7 @@ pub(super) fn fingerprint_duration(
         .library_for_path(path, kind)
         .ok()
         .flatten()
-        .is_some_and(|lib| lib.detect_intros && lib.enable_fingerprint);
+        .is_some_and(|library| library.enable_fingerprint);
     let enabled = kind == MediaKind::Tv && (force_fingerprint || configured);
     enabled.then(|| {
         store

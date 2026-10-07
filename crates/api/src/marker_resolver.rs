@@ -52,8 +52,9 @@ pub async fn force_refresh_item_chapters(
     resolve_item_chapters(state, row, media, theintrodb).await
 }
 
-/// Return persisted markers even when detection is disabled, but do not run any
-/// embedded chapter, TheIntroDB, or fingerprint detection in that mode.
+/// Return persisted markers when source detection is disabled, but do not run
+/// embedded chapter or TheIntroDB lookup in this synchronous resolver. Audio
+/// fingerprint extraction runs independently in the background probe queue.
 pub async fn resolve_item_chapters(
     state: &ApiState,
     row: &LedgerRow,

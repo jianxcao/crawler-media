@@ -121,7 +121,7 @@ mod tests {
     }
 
     #[test]
-    fn newly_added_tv_episode_queues_voiceprint_even_when_fingerprint_toggle_is_off() {
+    fn newly_added_tv_episode_queues_metadata_without_voiceprint_when_voiceprint_is_off() {
         let tmp = tempfile::tempdir().unwrap();
         let store = crate::Store::open(tmp.path().join("data")).unwrap();
         let state = ApiState::new(
@@ -180,6 +180,78 @@ mod tests {
         );
         let queued = state.probe.take_queued_for_test().unwrap();
         assert_eq!(queued.kind, MediaKind::Tv);
+        assert!(
+            !queued.force_fingerprint,
+            "metadata ingestion should not override the library voiceprint toggle"
+        );
+    }
+
+    #[test]
+    fn newly_added_tv_episode_runs_voiceprint_when_chapter_detection_is_off() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::Store::open(tmp.path().join("data")).unwrap();
+        let state = ApiState::new(
+            store,
+            "test-token".into(),
+            ProfileSet::load(None).unwrap(),
+            Arc::new(EmptyFetcher),
+            Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
+            tmp.path().join("library"),
+        )
+        .unwrap();
+        let tv_library = state
+            .store
+            .lock()
+            .default_library(MediaKind::Tv)
+            .unwrap()
+            .unwrap();
+        state
+            .store
+            .lock()
+            .set_library_intro_settings(&tv_library.id, false, true)
+            .unwrap();
+        let episode_path = tv_library.root_paths[0]
+            .join("Pantheon")
+            .join("Pantheon.S01E01.mkv");
+        std::fs::create_dir_all(episode_path.parent().unwrap()).unwrap();
+        std::fs::write(&episode_path, b"media fixture").unwrap();
+
+        let media = state
+            .store
+            .lock()
+            .ensure_media(Media {
+                id: MediaId::new(),
+                kind: MediaKind::Tv,
+                title: "万神殿".into(),
+                year: Some(2022),
+                original_title: Some("Pantheon".into()),
+                tmdb_id: None,
+                douban_id: None,
+                tvdb_id: None,
+                bangumi_id: None,
+                anilist_id: None,
+            })
+            .unwrap();
+        let row = domain::LedgerRow {
+            id: domain::LedgerId::new(),
+            media_id: media.id,
+            path: episode_path.display().to_string(),
+            season: Some(1),
+            episode: Some(1),
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: domain::QualitySource::Release,
+            confidence: domain::Confidence::High,
+            filter_score: None,
+        };
+        state.store.lock().insert_ledger(&row).unwrap();
+
+        assert_eq!(
+            crate::http::library::enqueue_probes_for_rows(&state, &[row]),
+            1
+        );
+        let queued = state.probe.take_queued_for_test().unwrap();
         assert!(queued.force_fingerprint);
     }
 }
