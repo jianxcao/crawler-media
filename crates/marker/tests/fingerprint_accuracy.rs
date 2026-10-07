@@ -1,9 +1,10 @@
 use marker::{
-    AudioFingerprint, CommonSegment, FingerprintEngine, MarkerType,
+    AudioFingerprint, ChromaprintEngine, CommonSegment, FingerprintEngine, MarkerType,
     build_complete_timeline_chapters, extract_audio_fingerprint_at_with, find_common_segment,
     match_episodes_fingerprints_with, match_episodes_outros,
 };
 use std::path::Path;
+use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn word(hash: u32, payload: u32) -> u32 {
@@ -222,4 +223,79 @@ fn remote_read_errors_are_retried_after_transient_truncated_streams() {
 
     assert_eq!(fingerprint, vec![17, 19, 23]);
     assert_eq!(engine.attempts.load(Ordering::SeqCst), 3);
+}
+
+#[cfg(unix)]
+#[test]
+fn chromaprint_engine_logs_extraction_phase_timings() {
+    const CHILD_FLAG: &str = "MARKER_TIMING_TEST_CHILD";
+    const PCM_PATH: &str = "MARKER_TIMING_TEST_PCM_PATH";
+
+    if std::env::var_os(CHILD_FLAG).is_some() {
+        let _ = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .try_init();
+        let fingerprint = ChromaprintEngine
+            .extract_at(Path::new("ignored.mkv"), 0, 30)
+            .expect("fake ffmpeg should return decodable PCM");
+        assert!(!fingerprint.is_empty());
+        return;
+    }
+
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("temporary directory should be created");
+    let pcm_path = temp.path().join("audio.pcm");
+    let mut pcm = Vec::with_capacity(30 * 16_000 * 2);
+    for sample_index in 0..(30 * 16_000) {
+        let sample = (f32::sin(2.0 * std::f32::consts::PI * 440.0 * sample_index as f32 / 16_000.0)
+            * 10_000.0) as i16;
+        pcm.extend_from_slice(&sample.to_le_bytes());
+    }
+    std::fs::write(&pcm_path, pcm).expect("PCM fixture should be written");
+
+    let bin_dir = temp.path().join("bin");
+    std::fs::create_dir(&bin_dir).expect("fake ffmpeg directory should be created");
+    let ffmpeg = bin_dir.join("ffmpeg");
+    std::fs::write(
+        &ffmpeg,
+        "#!/bin/sh\nexec /bin/cat \"$MARKER_TIMING_TEST_PCM_PATH\"\n",
+    )
+    .expect("fake ffmpeg should be written");
+    let mut permissions = std::fs::metadata(&ffmpeg)
+        .expect("fake ffmpeg metadata should be readable")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&ffmpeg, permissions).expect("fake ffmpeg should be executable");
+
+    let output = Command::new(std::env::current_exe().expect("test executable path should exist"))
+        .args([
+            "--exact",
+            "chromaprint_engine_logs_extraction_phase_timings",
+            "--nocapture",
+        ])
+        .env(CHILD_FLAG, "1")
+        .env(PCM_PATH, &pcm_path)
+        .env("PATH", &bin_dir)
+        .output()
+        .expect("child test process should run");
+    let logs = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "child test failed: {logs}");
+    for field in [
+        "ffmpeg_spawn_ms=",
+        "time_to_first_pcm_ms=",
+        "pcm_read_wait_us=",
+        "chromaprint_consume_us=",
+        "chromaprint_finish_ms=",
+        "ffmpeg_wait_ms=",
+        "pcm_bytes=",
+        "sample_count=",
+    ] {
+        assert!(logs.contains(field), "missing {field} in logs: {logs}");
+    }
 }
