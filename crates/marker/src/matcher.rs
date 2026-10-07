@@ -1,4 +1,4 @@
-mod common;
+mod consensus;
 mod intro;
 mod outro;
 
