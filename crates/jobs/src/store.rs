@@ -243,21 +243,39 @@ pub fn set_def_enabled_by_id(
     def_id: JobDefId,
     enabled: bool,
 ) -> Result<usize, JobError> {
-    conn.execute(
+    let changed = conn.execute(
         "UPDATE job_defs SET enabled = ?1 WHERE id = ?2",
         params![enabled as i64, def_id.to_string()],
-    )
-    .map_err(Into::into)
+    )?;
+    if !enabled {
+        cancel_def_children(conn, def_id)?;
+    }
+    Ok(changed)
 }
 
 /// Enable or disable every def whose payload matches exactly.
-/// Disabled defs are skipped by `ensure_scheduled` and do not spawn follow-ups.
+/// Disabled defs are skipped by `ensure_scheduled`, do not spawn follow-ups,
+/// and cancel any queued children.
 pub fn set_def_enabled(conn: &Connection, payload: &str, enabled: bool) -> Result<usize, JobError> {
-    conn.execute(
+    let changed = conn.execute(
         "UPDATE job_defs SET enabled = ?1 WHERE payload = ?2",
         params![enabled as i64, payload],
-    )
-    .map_err(Into::into)
+    )?;
+    if !enabled {
+        cancel_queued_children_for_payload(conn, payload)?;
+    }
+    Ok(changed)
+}
+
+fn cancel_queued_children_for_payload(conn: &Connection, payload: &str) -> Result<(), JobError> {
+    conn.execute(
+        "UPDATE jobs SET status = 'cancelled', finished_at = strftime('%s','now')
+         WHERE status = 'queued' AND def_id IN (
+             SELECT id FROM job_defs WHERE payload = ?1
+         )",
+        params![payload],
+    )?;
+    Ok(())
 }
 
 pub fn set_def_schedule(

@@ -179,7 +179,8 @@ impl Queue {
         store::set_def_enabled_by_id(&self.conn, def_id, enabled)
     }
 
-    /// Enable or disable defs whose payload matches. Disabled defs are not scheduled.
+    /// Enable or disable defs whose payload matches. Disabled defs are not scheduled,
+    /// and queued children are cancelled by the store layer.
     pub fn set_def_enabled(&self, payload: &str, enabled: bool) -> Result<usize, JobError> {
         store::set_def_enabled(&self.conn, payload, enabled)
     }

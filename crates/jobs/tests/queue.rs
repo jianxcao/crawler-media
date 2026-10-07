@@ -268,6 +268,37 @@ fn stale_execution_cannot_finish_or_fail_a_reclaimed_job() {
 }
 
 #[test]
+fn disabling_definition_cancels_already_queued_child() {
+    let (_dir, q) = queue();
+    let payload = r#"{"subscribe_id":"paused"}"#;
+    let def = q
+        .upsert_def(NewDef {
+            kind: JobKind::SubscribeSearch,
+            name: "search".into(),
+            enabled: true,
+            schedule: Some(Schedule::Interval { secs: 30 }),
+            payload: payload.into(),
+            timeout_secs: Some(60),
+            concurrency_key: Some("subscribe:paused".into()),
+        })
+        .unwrap();
+    let queued = q.ensure_scheduled(1_000).unwrap().remove(0);
+    assert_eq!(queued.status, JobStatus::Queued);
+
+    q.set_def_enabled_by_id(def.id, false).unwrap();
+
+    let live = q.get_live_child(def.id).unwrap();
+    assert!(
+        live.is_none(),
+        "disabled definition must not retain a live queued child"
+    );
+    let last = q.get_last_child(def.id).unwrap().unwrap();
+    assert_eq!(last.id, queued.id);
+    assert_eq!(last.status, JobStatus::Cancelled);
+    assert!(last.finished_at.is_some());
+}
+
+#[test]
 fn disabled_def_is_not_scheduled() {
     let (_dir, q) = queue();
     let payload = r#"{"subscribe_id":"paused"}"#;
