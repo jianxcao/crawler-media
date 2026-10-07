@@ -380,7 +380,7 @@ fn subtitle_and_audio_language_atoms_match_normalized_languages() {
 }
 
 #[test]
-fn site_atom_restricts_to_named_site() {
+fn site_atom_prioritizes_the_named_site_but_keeps_other_sites_as_fallback() {
     let target = SiteId::new();
     let filter = filter_with(vec![FilterAtom {
         priority: 100,
@@ -392,8 +392,9 @@ fn site_atom_restricts_to_named_site() {
     let mut b = torrent("Other.2024.1080p.WEB-DL", Some(800), Some(20));
     b.site_id = SiteId::new();
     let outcome = filter::admit(vec![a, b], &filter);
-    assert_eq!(outcome.admitted.len(), 1);
+    assert_eq!(outcome.admitted.len(), 2);
     assert_eq!(outcome.admitted[0].torrent.site_id, target);
+    assert!(outcome.admitted[0].score > outcome.admitted[1].score);
 }
 
 #[test]

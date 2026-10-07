@@ -283,7 +283,7 @@ export interface RuleSetSpec {
   upgrade_keep_old?: boolean;
   /** 参与洗版比较的维度及优先级（顺序即位次）；缺省 ["resolution","source"] */
   upgrade_ladder?: string[];
-  /** [预留] 站点白名单；空=全部启用站点 */
+  /** 按优先级排列的首选站点；首选站点资源优先，同站点内仍按质量评分。 */
   sites?: string[];
 }
 
@@ -1114,9 +1114,11 @@ export function specToAtoms(spec: RuleSetSpec): RuleSetAtom[] {
   for (const lang of spec.audio_languages_require ?? []) {
     atoms.push({ kind: "audio_language", value: lang, priority: 50 });
   }
-  for (const site of spec.sites ?? []) {
-    atoms.push({ kind: "site", value: site, priority: 50 });
-  }
+  const preferredSites = spec.sites ?? [];
+  preferredSites.forEach((site, index) => {
+    // Atom priority encodes the tier: earlier sites must strictly outrank later ones.
+    atoms.push({ kind: "site", value: site, priority: (preferredSites.length - index) * 50 });
+  });
   // 洗版目标档位（规则面板「洗到哪一档」）：cutoff_resolution + upgrade_source → wash_target
   const upgradeParts: string[] = [];
   if (spec.cutoff_resolution) upgradeParts.push(spec.cutoff_resolution);
