@@ -142,11 +142,17 @@ pub fn item_dto_json(snapshot: MediaItemSnapshot) -> Value {
         }
     }
     if snapshot.metadata.has_primary_image {
+        let fallback_tag = if (snapshot.media.kind == domain::MediaKind::Tv
+            && !snapshot.is_series
+            && snapshot.row.episode.is_some())
+            || snapshot.metadata.primary_image_url.is_some()
+        {
+            "episode"
+        } else {
+            "poster"
+        };
         value["ImageTags"] = json!({
-            "Primary": if (snapshot.media.kind == domain::MediaKind::Tv
-                && !snapshot.is_series
-                && snapshot.row.episode.is_some())
-                || snapshot.metadata.primary_image_url.is_some() { "episode" } else { "poster" }
+            "Primary": snapshot.metadata.primary_image_tag.as_deref().unwrap_or(fallback_tag)
         });
     }
     if !snapshot.is_series {

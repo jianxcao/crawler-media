@@ -146,6 +146,7 @@ pub struct MediaItemMetadata {
     pub season_count: Option<usize>,
     pub has_primary_image: bool,
     pub has_backdrop_image: bool,
+    pub primary_image_tag: Option<String>,
     pub primary_image_url: Option<String>,
     pub tracks: library::Tracks,
 }

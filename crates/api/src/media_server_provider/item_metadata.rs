@@ -8,8 +8,8 @@ mod artwork;
 mod nfo;
 mod people;
 
-use artwork::primary_image_metadata;
 pub(super) use artwork::{backdrop_path, local_primary_image, primary_image_url};
+use artwork::{primary_image_metadata, series_primary_image_tag};
 use nfo::row_nfo_metadata;
 pub(super) use people::{catalog_person_image_url, person_image_url, person_tmdb_id};
 use people::{merge_people, people_from_nfo};
@@ -62,6 +62,7 @@ pub(super) fn item_metadata(
 ) -> MediaItemMetadata {
     let nfo = row_nfo_metadata(row, media, is_series);
     let (has_primary_image, primary_image_url) = primary_image_metadata(row, media, is_series);
+    let primary_image_tag = series_primary_image_tag(row, media, is_series);
     let resume_state = row.season.zip(row.episode).and_then(|(season, episode)| {
         store
             .unit_state(user_id, row.media_id, season as i32, episode as i32)
@@ -178,6 +179,7 @@ pub(super) fn item_metadata(
         season_count,
         has_primary_image,
         has_backdrop_image: backdrop_path(row, is_series).is_some(),
+        primary_image_tag,
         primary_image_url,
         tracks,
     }

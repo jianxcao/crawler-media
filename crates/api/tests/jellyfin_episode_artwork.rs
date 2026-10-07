@@ -145,7 +145,10 @@ async fn jellyfin_series_primary_image_uses_series_poster_and_episode_uses_still
         .unwrap();
     let series_item = response_json(series_item).await;
     assert_eq!(series_item["Type"], "Series");
-    assert_eq!(series_item["ImageTags"]["Primary"], "poster");
+    let original_tag = series_item["ImageTags"]["Primary"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     for (item_id, expected) in [
         (&series_id, &b"series-poster"[..]),
@@ -166,6 +169,26 @@ async fn jellyfin_series_primary_image_uses_series_poster_and_episode_uses_still
         let image = to_bytes(image.into_body(), usize::MAX).await.unwrap();
         assert_eq!(&image[..], expected);
     }
+
+    std::fs::write(show_dir.join("poster.jpg"), b"updated-series-poster").unwrap();
+    let updated_item = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/Items/{series_id}"))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let updated_tag = response_json(updated_item).await["ImageTags"]["Primary"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(
+        original_tag, updated_tag,
+        "updated artwork must bust client caches"
+    );
 }
 
 #[tokio::test]

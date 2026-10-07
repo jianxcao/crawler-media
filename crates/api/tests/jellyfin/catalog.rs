@@ -627,7 +627,11 @@ async fn tv_items_include_nfo_artwork_metadata_and_cached_playback_streams() {
     assert_eq!(series["Path"], show_dir.display().to_string());
     assert!(series["MediaStreams"].is_null());
     assert_eq!(series["ChildCount"], 1);
-    assert_eq!(series["ImageTags"]["Primary"], "poster");
+    assert!(
+        series["ImageTags"]["Primary"]
+            .as_str()
+            .is_some_and(|tag| tag.starts_with("poster-"))
+    );
     assert_eq!(series["BackdropImageTags"][0], "fanart");
 
     for route in [

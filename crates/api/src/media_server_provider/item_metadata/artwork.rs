@@ -1,6 +1,11 @@
 use super::nfo::row_nfo_path;
 use domain::{Media, MediaKind};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    path::{Path, PathBuf},
+    time::UNIX_EPOCH,
+};
 
 fn remote_episode_thumb(thumb: &str) -> Option<String> {
     if thumb.starts_with("https://image.tmdb.org/") {
@@ -98,4 +103,27 @@ pub fn local_primary_image(row: &domain::LedgerRow, media: &Media) -> Option<Pat
                 .and_then(|thumb| local_episode_thumb(row, Some(thumb)))
         })
         .or_else(|| crate::http::library::poster_path(row))
+}
+
+pub fn series_primary_image_tag(
+    row: &domain::LedgerRow,
+    media: &Media,
+    is_series: bool,
+) -> Option<String> {
+    if !is_series || media.kind != MediaKind::Tv {
+        return None;
+    }
+    let path = crate::http::library::poster_path(row)?;
+    let metadata = std::fs::metadata(&path).ok()?;
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    metadata.len().hash(&mut hasher);
+    if let Ok(modified) = metadata.modified() {
+        modified
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .hash(&mut hasher);
+    }
+    Some(format!("poster-{:016x}", hasher.finish()))
 }
