@@ -29,6 +29,8 @@ pub struct ProbeJobUnit {
     pub overwrite_markers: bool,
     pub status: String,
     pub error: Option<String>,
+    pub sampling_plan_json: Option<String>,
+    pub detection_outcome_json: Option<String>,
 }
 
 pub struct ProbeJobUnitSpec<'a> {
@@ -149,7 +151,8 @@ impl Store {
     pub fn probe_job_units(&self, job_id: &str) -> Result<Vec<ProbeJobUnit>, StoreError> {
         let mut statement = self.library.prepare(
             "SELECT job_id, ledger_id, kind, force_fingerprint,
-                    reuse_fingerprint_cache, overwrite_markers, status, error
+                    reuse_fingerprint_cache, overwrite_markers, status, error,
+                    sampling_plan_json, detection_outcome_json
              FROM probe_job_units WHERE job_id = ?1 ORDER BY rowid",
         )?;
         let rows = statement.query_map([job_id], |row| {
@@ -162,6 +165,8 @@ impl Store {
                 overwrite_markers: row.get(5)?,
                 status: row.get(6)?,
                 error: row.get(7)?,
+                sampling_plan_json: row.get(8)?,
+                detection_outcome_json: row.get(9)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -183,6 +188,34 @@ impl Store {
             )?;
         }
         tx.commit()?;
+        Ok(changed > 0)
+    }
+
+    pub fn put_probe_sampling_plan(
+        &self,
+        job_id: &str,
+        ledger_id: &str,
+        sampling_plan_json: &str,
+    ) -> Result<bool, StoreError> {
+        let changed = self.library.execute(
+            "UPDATE probe_job_units SET sampling_plan_json = ?3
+             WHERE job_id = ?1 AND ledger_id = ?2",
+            params![job_id, ledger_id, sampling_plan_json],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn put_probe_detection_outcome(
+        &self,
+        job_id: &str,
+        ledger_id: &str,
+        detection_outcome_json: &str,
+    ) -> Result<bool, StoreError> {
+        let changed = self.library.execute(
+            "UPDATE probe_job_units SET detection_outcome_json = ?3
+             WHERE job_id = ?1 AND ledger_id = ?2",
+            params![job_id, ledger_id, detection_outcome_json],
+        )?;
         Ok(changed > 0)
     }
 
@@ -327,7 +360,8 @@ impl Store {
         self.library
             .query_row(
                 "SELECT job_id, ledger_id, kind, force_fingerprint,
-                        reuse_fingerprint_cache, overwrite_markers, status, error
+                        reuse_fingerprint_cache, overwrite_markers, status, error,
+                        sampling_plan_json, detection_outcome_json
                  FROM probe_job_units WHERE ledger_id = ?1 AND status IN ('queued', 'running')
                  ORDER BY rowid DESC LIMIT 1",
                 [ledger_id],
@@ -341,6 +375,8 @@ impl Store {
                         overwrite_markers: row.get(5)?,
                         status: row.get(6)?,
                         error: row.get(7)?,
+                        sampling_plan_json: row.get(8)?,
+                        detection_outcome_json: row.get(9)?,
                     })
                 },
             )

@@ -4,7 +4,10 @@
 mod catalog;
 mod collections;
 mod downloaders;
+mod fingerprint_attempts;
 mod fingerprint_cache;
+mod fingerprint_models;
+mod fingerprint_samples;
 mod ledger;
 mod legacy_recycle;
 mod libraries;
@@ -28,7 +31,10 @@ pub mod password;
 
 pub use catalog::CatalogCacheRow;
 pub use downloaders::DownloaderRow;
+pub use fingerprint_attempts::StoredFingerprintAttempt;
 pub use fingerprint_cache::{FingerprintCacheEntry, MediaInfoCacheVersion};
+pub use fingerprint_models::{StoredFingerprintModel, StoredFingerprintModelMember};
+pub use fingerprint_samples::{FingerprintSampleQuery, StoredFingerprintSample};
 pub use libraries::Library;
 pub use library::{MarkerResultReplacement, StoredMediaMarker};
 pub use playback::{PlayLogRow, SessionRow, UNIT_WHOLE, UnitRow, UnitState};

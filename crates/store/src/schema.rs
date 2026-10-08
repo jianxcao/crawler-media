@@ -2,11 +2,13 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use super::StoreError;
 
+mod fingerprint;
+
 /// Schema version constants. Bump when adding new migrations.
 /// The version is stored via `PRAGMA user_version` on each database file.
 pub const APP_SCHEMA_VERSION: i64 = 3;
 pub const CATALOG_SCHEMA_VERSION: i64 = 1;
-pub const LIBRARY_SCHEMA_VERSION: i64 = 4;
+pub const LIBRARY_SCHEMA_VERSION: i64 = 5;
 pub const SUBSCRIBE_SCHEMA_VERSION: i64 = 2;
 
 /// Read the current schema version from a database file.
@@ -398,6 +400,7 @@ pub fn migrate_library(conn: &Connection) -> Result<(), StoreError> {
         "reuse_fingerprint_cache",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+    fingerprint::migrate_library_fingerprint(conn)?;
     set_schema_version(conn, LIBRARY_SCHEMA_VERSION)?;
     Ok(())
 }
