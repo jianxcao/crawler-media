@@ -38,6 +38,7 @@ mod transfer_isolation;
 mod transfer_retry;
 mod webapi;
 
+mod adaptive_marker_status;
 mod auto_resolve_scan;
 mod chapter_refresh;
 mod coverage_validation;

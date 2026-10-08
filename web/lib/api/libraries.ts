@@ -1841,6 +1841,11 @@ export interface RefreshedItemChapters {
   fingerprint_refresh_job?: ProbeJobStatus | null;
 }
 
+export interface ProbeJobMetrics {
+  input_bytes: number | null;
+  measurement_complete?: boolean;
+}
+
 export interface ProbeJobStatus {
   id: string;
   kind: string;
@@ -1852,6 +1857,11 @@ export interface ProbeJobStatus {
   failed: number;
   error: string | null;
   elapsed_ms: number;
+  phase?: string | null;
+  sampling_mode?: string | null;
+  queue_wait_ms?: number | null;
+  priority_wait_ms?: number | null;
+  metrics?: ProbeJobMetrics | null;
 }
 
 export interface ItemProbeStatus {

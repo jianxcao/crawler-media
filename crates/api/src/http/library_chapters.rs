@@ -426,6 +426,14 @@ fn probe_job_json(job: &crate::store::ProbeJob) -> Value {
         "failed": job.failed,
         "error": job.error,
         "elapsed_ms": job.elapsed_ms(now_ms),
+        "phase": Value::Null,
+        "sampling_mode": Value::Null,
+        "queue_wait_ms": Value::Null,
+        "priority_wait_ms": Value::Null,
+        "metrics": {
+            "input_bytes": Value::Null,
+            "measurement_complete": false,
+        },
     })
 }
 
