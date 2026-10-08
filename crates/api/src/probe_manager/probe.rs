@@ -167,7 +167,7 @@ async fn probe_tracks_and_store(
         refresh_id = ?unit.marker_refresh_id,
         "【媒体信息】流信息探测开始"
     );
-    if unit.reuse_fingerprint_cache {
+    if unit.reuse_media_info_cache {
         let cached = {
             let store = mgr.store.lock();
             let cached_version = store.get_media_info_cache_version(&ledger_id);

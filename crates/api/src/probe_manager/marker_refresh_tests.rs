@@ -94,6 +94,7 @@ fn season_refresh_keeps_old_markers_until_success_then_clears_empty_result() {
             force_fingerprint: true,
             reuse_fingerprint_cache: false,
             overwrite_markers: true,
+            reuse_media_info_cache: true,
             marker_refresh_id: None,
             job_id: None,
         })

@@ -21,6 +21,7 @@ fn force_probe_during_existing_probe_is_rejected_until_terminal() {
         force_fingerprint: false,
         reuse_fingerprint_cache: false,
         overwrite_markers: false,
+        reuse_media_info_cache: true,
         marker_refresh_id: None,
         job_id: None,
     };
@@ -72,6 +73,7 @@ fn stale_queue_message_cannot_start_or_finish_a_later_retry() {
         force_fingerprint: false,
         reuse_fingerprint_cache: false,
         overwrite_markers: false,
+        reuse_media_info_cache: true,
         marker_refresh_id: None,
         job_id: None,
     };
@@ -124,6 +126,7 @@ fn queued_probe_is_recovered_after_manager_restart() {
         force_fingerprint: false,
         reuse_fingerprint_cache: false,
         overwrite_markers: false,
+        reuse_media_info_cache: true,
         marker_refresh_id: None,
         job_id: None,
     };
@@ -178,6 +181,7 @@ fn intake_probe_waits_in_metadata_queue_before_voiceprint_queue() {
         force_fingerprint: true,
         reuse_fingerprint_cache: false,
         overwrite_markers: false,
+        reuse_media_info_cache: true,
         marker_refresh_id: None,
         job_id: None,
     };
@@ -211,6 +215,7 @@ async fn voiceprint_worker_yields_until_metadata_backlog_is_done() {
         force_fingerprint: true,
         reuse_fingerprint_cache: false,
         overwrite_markers: false,
+        reuse_media_info_cache: true,
         marker_refresh_id: None,
         job_id: None,
     };
@@ -254,6 +259,7 @@ fn metadata_job_finishes_before_a_separate_voiceprint_job_is_queued() {
         force_fingerprint: true,
         reuse_fingerprint_cache: true,
         overwrite_markers: false,
+        reuse_media_info_cache: true,
         marker_refresh_id: None,
         job_id: None,
     };
@@ -345,6 +351,7 @@ fn completed_marker_refresh_with_missing_ledger_becomes_failed_on_recovery() {
         force_fingerprint: true,
         reuse_fingerprint_cache: false,
         overwrite_markers: true,
+        reuse_media_info_cache: true,
     }];
     store
         .lock()
@@ -407,6 +414,7 @@ fn failed_probe_is_persisted_and_can_be_retried() {
         force_fingerprint: false,
         reuse_fingerprint_cache: false,
         overwrite_markers: false,
+        reuse_media_info_cache: true,
         marker_refresh_id: None,
         job_id: None,
     };
@@ -465,6 +473,7 @@ fn active_season_marker_refresh_rejects_a_duplicate_batch() {
                 force_fingerprint: true,
                 reuse_fingerprint_cache: false,
                 overwrite_markers: true,
+                reuse_media_info_cache: true,
                 marker_refresh_id: None,
                 job_id: None,
             })
@@ -488,7 +497,7 @@ fn active_season_marker_refresh_rejects_a_duplicate_batch() {
             .probe_job_units(&active.id)
             .unwrap()
             .iter()
-            .all(|unit| unit.reuse_fingerprint_cache)
+            .all(|unit| !unit.reuse_fingerprint_cache)
     );
     assert_eq!(
         second.enqueue_marker_refresh(units()),
@@ -525,6 +534,7 @@ fn forced_item_refresh_reserves_all_episodes_or_none() {
         force_fingerprint: false,
         reuse_fingerprint_cache: false,
         overwrite_markers: false,
+        reuse_media_info_cache: true,
         marker_refresh_id: None,
         job_id: None,
     };
@@ -538,6 +548,7 @@ fn forced_item_refresh_reserves_all_episodes_or_none() {
             force_fingerprint: false,
             reuse_fingerprint_cache: false,
             overwrite_markers: false,
+            reuse_media_info_cache: true,
             marker_refresh_id: None,
             job_id: None,
         })

@@ -279,6 +279,7 @@ pub(crate) async fn refresh_item_chapters(
                 force_fingerprint: true,
                 reuse_fingerprint_cache: false,
                 overwrite_markers: true,
+                reuse_media_info_cache: true,
                 marker_refresh_id: None,
                 job_id: None,
             })

@@ -100,6 +100,7 @@ fn put_and_read_probe_sampling_plan_and_outcome() {
         force_fingerprint: true,
         reuse_fingerprint_cache: false,
         overwrite_markers: true,
+        reuse_media_info_cache: true,
     };
     store
         .create_probe_job("job-plan", "marker_refresh", "media-1", Some(1), "scope-1", &[unit])

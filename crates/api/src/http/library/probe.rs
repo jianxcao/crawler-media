@@ -92,6 +92,7 @@ fn enqueue_probe(state: &ApiState, row: &domain::LedgerRow) -> bool {
         force_fingerprint,
         reuse_fingerprint_cache: false,
         overwrite_markers: false,
+        reuse_media_info_cache: true,
         marker_refresh_id: None,
         job_id: None,
     })
@@ -178,6 +179,7 @@ pub(crate) async fn probe_item(
             force_fingerprint: false,
             reuse_fingerprint_cache: false,
             overwrite_markers: false,
+            reuse_media_info_cache: false,
             marker_refresh_id: None,
             job_id: None,
         })

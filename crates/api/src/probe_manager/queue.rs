@@ -90,7 +90,7 @@ impl ProbeManager {
         }
     }
 
-    pub(super) fn metadata_stage_finished(&self) {
+    pub fn metadata_stage_finished(&self) {
         match self
             .metadata_pending
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {

@@ -31,6 +31,7 @@ pub struct ProbeJobUnit {
     pub error: Option<String>,
     pub sampling_plan_json: Option<String>,
     pub detection_outcome_json: Option<String>,
+    pub reuse_media_info_cache: bool,
 }
 
 pub struct ProbeJobUnitSpec<'a> {
@@ -39,6 +40,7 @@ pub struct ProbeJobUnitSpec<'a> {
     pub force_fingerprint: bool,
     pub reuse_fingerprint_cache: bool,
     pub overwrite_markers: bool,
+    pub reuse_media_info_cache: bool,
 }
 
 impl ProbeJob {
@@ -91,15 +93,17 @@ impl Store {
             if let Err(error) = tx.execute(
                 "INSERT INTO probe_job_units (
                      job_id, ledger_id, kind, force_fingerprint,
-                     reuse_fingerprint_cache, overwrite_markers, status
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued')",
+                     reuse_fingerprint_cache, overwrite_markers, status,
+                     reuse_media_info_cache
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7)",
                 params![
                     id,
                     unit.ledger_id,
                     unit.kind,
                     unit.force_fingerprint,
                     unit.reuse_fingerprint_cache,
-                    unit.overwrite_markers
+                    unit.overwrite_markers,
+                    unit.reuse_media_info_cache,
                 ],
             ) {
                 if is_constraint(&error) {
@@ -152,7 +156,7 @@ impl Store {
         let mut statement = self.library.prepare(
             "SELECT job_id, ledger_id, kind, force_fingerprint,
                     reuse_fingerprint_cache, overwrite_markers, status, error,
-                    sampling_plan_json, detection_outcome_json
+                    sampling_plan_json, detection_outcome_json, reuse_media_info_cache
              FROM probe_job_units WHERE job_id = ?1 ORDER BY rowid",
         )?;
         let rows = statement.query_map([job_id], |row| {
@@ -167,6 +171,7 @@ impl Store {
                 error: row.get(7)?,
                 sampling_plan_json: row.get(8)?,
                 detection_outcome_json: row.get(9)?,
+                reuse_media_info_cache: row.get::<_, i64>(10).unwrap_or(0) != 0,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -361,7 +366,7 @@ impl Store {
             .query_row(
                 "SELECT job_id, ledger_id, kind, force_fingerprint,
                         reuse_fingerprint_cache, overwrite_markers, status, error,
-                        sampling_plan_json, detection_outcome_json
+                        sampling_plan_json, detection_outcome_json, reuse_media_info_cache
                  FROM probe_job_units WHERE ledger_id = ?1 AND status IN ('queued', 'running')
                  ORDER BY rowid DESC LIMIT 1",
                 [ledger_id],
@@ -377,6 +382,7 @@ impl Store {
                         error: row.get(7)?,
                         sampling_plan_json: row.get(8)?,
                         detection_outcome_json: row.get(9)?,
+                        reuse_media_info_cache: row.get::<_, i64>(10).unwrap_or(0) != 0,
                     })
                 },
             )

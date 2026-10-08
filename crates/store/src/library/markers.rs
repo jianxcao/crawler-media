@@ -278,6 +278,7 @@ mod marker_replacement_tests {
                 force_fingerprint: true,
                 reuse_fingerprint_cache: false,
                 overwrite_markers: true,
+                reuse_media_info_cache: true,
             },
             ProbeJobUnitSpec {
                 ledger_id: "ledger-s2",
@@ -285,6 +286,7 @@ mod marker_replacement_tests {
                 force_fingerprint: true,
                 reuse_fingerprint_cache: false,
                 overwrite_markers: true,
+                reuse_media_info_cache: true,
             },
         ];
         assert!(

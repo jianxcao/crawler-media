@@ -13,6 +13,7 @@ use domain::{LedgerRow, MediaId, MediaKind};
 use parking_lot::Mutex;
 use tokio::sync::{Notify, mpsc};
 
+use marker::fingerprint::capture_types::FingerprintCaptureEngine;
 use marker::{ChromaprintEngine, FingerprintEngine};
 
 use crate::Store;
@@ -20,7 +21,10 @@ use crate::Store;
 mod marker_jobs;
 mod markers;
 mod probe;
+pub mod progress;
 mod queue;
+pub mod recovery;
+pub mod season;
 mod timings;
 mod worker;
 
@@ -32,10 +36,11 @@ pub struct ProbeUnit {
     pub force_fingerprint: bool,
     pub reuse_fingerprint_cache: bool,
     pub overwrite_markers: bool,
-    pub(crate) marker_refresh_id: Option<u64>,
+    pub reuse_media_info_cache: bool,
+    pub marker_refresh_id: Option<u64>,
     /// Persisted task identity carried with the queue message. This prevents
     /// stale messages from attaching to a later retry for the same ledger row.
-    pub(crate) job_id: Option<String>,
+    pub job_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -47,6 +52,7 @@ pub(crate) enum ProbeEnqueueError {
 pub struct ProbeManager {
     store: Arc<Mutex<Store>>,
     fingerprint_engine: Arc<dyn FingerprintEngine>,
+    capture_engine: Arc<dyn FingerprintCaptureEngine>,
     metadata_tx: mpsc::UnboundedSender<ProbeUnit>,
     fingerprint_tx: mpsc::UnboundedSender<probe::FingerprintWork>,
     /// 幂等去重：正在排队或执行中的 ledger_id。
@@ -63,18 +69,27 @@ pub struct ProbeManager {
 
 impl ProbeManager {
     pub fn new(store: Arc<Mutex<Store>>) -> Self {
-        Self::with_fingerprint_engine(store, Arc::new(ChromaprintEngine))
+        Self::with_engines(store, Arc::new(ChromaprintEngine), Arc::new(ChromaprintEngine))
     }
 
     pub fn with_fingerprint_engine(
         store: Arc<Mutex<Store>>,
         fingerprint_engine: Arc<dyn FingerprintEngine>,
     ) -> Self {
+        Self::with_engines(store, fingerprint_engine, Arc::new(ChromaprintEngine))
+    }
+
+    pub fn with_engines(
+        store: Arc<Mutex<Store>>,
+        fingerprint_engine: Arc<dyn FingerprintEngine>,
+        capture_engine: Arc<dyn FingerprintCaptureEngine>,
+    ) -> Self {
         let (metadata_tx, metadata_rx) = mpsc::unbounded_channel();
         let (fingerprint_tx, fingerprint_rx) = mpsc::unbounded_channel();
         let manager = Self {
             store,
             fingerprint_engine,
+            capture_engine,
             metadata_tx,
             fingerprint_tx,
             seen: Mutex::new(HashSet::new()),
@@ -93,6 +108,7 @@ impl ProbeManager {
     /// 入队探测（幂等：已在队列/执行中的跳过）。
     pub fn enqueue(&self, mut unit: ProbeUnit) -> bool {
         unit.reuse_fingerprint_cache = true;
+        unit.reuse_media_info_cache = true;
         let ledger_id = unit.row.id.to_string();
         let mut seen = self.seen.lock();
         if !seen.insert(ledger_id.clone()) {
@@ -130,6 +146,7 @@ impl ProbeManager {
     /// 强制探测：同一文件已有任务时拒绝重复排队；终态后用户可重试。
     pub fn enqueue_force(&self, mut unit: ProbeUnit) -> bool {
         unit.reuse_fingerprint_cache = false;
+        unit.reuse_media_info_cache = false;
         let ledger_id = unit.row.id.to_string();
         let mut seen = self.seen.lock();
         self.last_failure.lock().remove(&ledger_id);
@@ -184,8 +201,9 @@ impl ProbeManager {
                 ledger_id,
                 kind: unit.kind.as_str(),
                 force_fingerprint: true,
-                reuse_fingerprint_cache: true,
+                reuse_fingerprint_cache: false,
                 overwrite_markers: true,
+                reuse_media_info_cache: true,
             })
             .collect::<Vec<_>>();
         match self.store.lock().create_probe_job(
@@ -210,7 +228,8 @@ impl ProbeManager {
         let mut queued = 0;
         for unit in &mut units {
             unit.force_fingerprint = true;
-            unit.reuse_fingerprint_cache = true;
+            unit.reuse_fingerprint_cache = false;
+            unit.reuse_media_info_cache = true;
             unit.overwrite_markers = true;
             unit.marker_refresh_id = Some(id);
             unit.job_id = Some(job_id.clone());
@@ -276,6 +295,7 @@ impl ProbeManager {
                 force_fingerprint: is_tv,
                 reuse_fingerprint_cache: false,
                 overwrite_markers: is_tv,
+                reuse_media_info_cache: false,
             })
             .collect::<Vec<_>>();
         let created = self.store.lock().create_probe_job(
@@ -314,6 +334,7 @@ impl ProbeManager {
         for unit in &mut units {
             unit.force_fingerprint = is_tv;
             unit.reuse_fingerprint_cache = false;
+            unit.reuse_media_info_cache = false;
             unit.overwrite_markers = is_tv;
             unit.marker_refresh_id = refresh_id;
             unit.job_id = Some(job_id.clone());
@@ -474,6 +495,7 @@ impl ProbeManager {
             force_fingerprint: unit.force_fingerprint,
             reuse_fingerprint_cache: unit.reuse_fingerprint_cache,
             overwrite_markers: unit.overwrite_markers,
+            reuse_media_info_cache: unit.reuse_media_info_cache,
         };
         match self.store.lock().create_probe_job(
             &job_id,
@@ -490,176 +512,6 @@ impl ProbeManager {
                 None
             }
         }
-    }
-
-    fn recover_pending_jobs(&self) {
-        let jobs = match self.store.lock().recover_probe_jobs() {
-            Ok(jobs) => jobs,
-            Err(error) => {
-                tracing::error!(%error, "读取待恢复媒体探测任务失败");
-                return;
-            }
-        };
-        for (job, units) in jobs {
-            tracing::info!(
-                job_id = %job.id,
-                media_id = %job.media_id,
-                status = %job.status,
-                pending = units.iter().filter(|unit| unit.status == "queued").count(),
-                completed = job.completed,
-                total = job.total,
-                "【探测任务】从数据库恢复未完成任务"
-            );
-            for persisted in units.iter().filter(|unit| unit.status == "queued") {
-                let row = self
-                    .store
-                    .lock()
-                    .get_ledger(&persisted.ledger_id.replace('-', ""));
-                let row = match row {
-                    Ok(Some(row)) => row,
-                    Ok(None) => {
-                        let _ = self.store.lock().finish_probe_unit(
-                            &job.id,
-                            &persisted.ledger_id,
-                            false,
-                            Some("媒体台账不存在，无法恢复探测"),
-                        );
-                        continue;
-                    }
-                    Err(error) => {
-                        tracing::error!(%error, job_id = %job.id, ledger_id = %persisted.ledger_id, "恢复探测任务读取台账失败");
-                        if let Err(finish_error) = self.store.lock().finish_probe_unit(
-                            &job.id,
-                            &persisted.ledger_id,
-                            false,
-                            Some("恢复任务时读取媒体台账失败"),
-                        ) {
-                            tracing::error!(%finish_error, job_id = %job.id, ledger_id = %persisted.ledger_id, "持久化恢复失败的任务单元失败");
-                        }
-                        continue;
-                    }
-                };
-                let kind = match persisted.kind.parse::<MediaKind>() {
-                    Ok(kind) => kind,
-                    Err(kind) => {
-                        tracing::error!(job_id = %job.id, ledger_id = %persisted.ledger_id, %kind, "恢复探测任务媒体类型无效");
-                        let _ = self.store.lock().finish_probe_unit(
-                            &job.id,
-                            &persisted.ledger_id,
-                            false,
-                            Some("恢复任务时媒体类型无效"),
-                        );
-                        continue;
-                    }
-                };
-                self.seen.lock().insert(persisted.ledger_id.clone());
-                let unit = ProbeUnit {
-                    row,
-                    kind,
-                    force_fingerprint: persisted.force_fingerprint,
-                    reuse_fingerprint_cache: persisted.reuse_fingerprint_cache,
-                    overwrite_markers: persisted.overwrite_markers,
-                    marker_refresh_id: (job.kind == "marker_refresh")
-                        .then(|| self.next_marker_refresh_id.fetch_add(1, Ordering::Relaxed)),
-                    job_id: Some(job.id.clone()),
-                };
-                if self.queue_metadata(unit).is_err() {
-                    self.seen.lock().remove(&persisted.ledger_id);
-                    tracing::error!(job_id = %job.id, ledger_id = %persisted.ledger_id, "恢复探测任务加入队列失败");
-                    let _ = self.store.lock().finish_probe_unit(
-                        &job.id,
-                        &persisted.ledger_id,
-                        false,
-                        Some("恢复任务加入内存队列失败"),
-                    );
-                }
-            }
-            let refreshed = self.store.lock().get_probe_job(&job.id);
-            let refreshed = match refreshed {
-                Ok(Some(refreshed)) => refreshed,
-                Ok(None) => {
-                    tracing::error!(job_id = %job.id, "恢复探测任务后数据库中找不到任务记录");
-                    continue;
-                }
-                Err(error) => {
-                    tracing::error!(%error, job_id = %job.id, "恢复探测任务后读取任务状态失败");
-                    match self
-                        .store
-                        .lock()
-                        .fail_completed_probe_job(&job.id, "重启恢复时无法读取已完成任务状态")
-                    {
-                        Ok(true) => {
-                            tracing::error!(job_id = %job.id, "已将无法确认状态的完成任务标记失败并释放任务范围")
-                        }
-                        Ok(false) => {
-                            tracing::warn!(job_id = %job.id, "未终止探测任务：任务可能仍有待处理单元或已被其他流程终止")
-                        }
-                        Err(finish_error) => {
-                            tracing::error!(%finish_error, job_id = %job.id, "读取任务状态失败后持久化失败状态也失败")
-                        }
-                    }
-                    continue;
-                }
-            };
-            if refreshed.completed >= refreshed.total && refreshed.is_active() {
-                if refreshed.failed > 0 {
-                    if let Err(error) = self.store.lock().finish_probe_job(
-                        &job.id,
-                        false,
-                        refreshed.error.as_deref(),
-                    ) {
-                        tracing::error!(%error, job_id = %job.id, "持久化恢复任务的失败状态失败");
-                    }
-                } else if refreshed.kind == "marker_refresh" {
-                    match self.recovered_marker_refresh_unit(&refreshed) {
-                        Ok(unit) => {
-                            marker_jobs::apply_marker_refresh(self, &refreshed, &unit);
-                            timings::log_terminal_job(&self.store, &self.timings, &refreshed);
-                        }
-                        Err(error) => {
-                            if let Err(finish_error) = self.store.lock().finish_probe_job(
-                                &job.id,
-                                false,
-                                Some("重启恢复时无法读取任务台账"),
-                            ) {
-                                tracing::error!(%finish_error, job_id = %job.id, "持久化无法恢复的片头片尾任务失败状态失败");
-                            }
-                            tracing::error!(%error, job_id = %job.id, "完成的片头片尾任务无法恢复，已标记失败并释放任务范围");
-                        }
-                    }
-                } else if let Err(error) = self.store.lock().finish_probe_job(&job.id, true, None) {
-                    tracing::error!(%error, job_id = %job.id, "持久化恢复任务的成功状态失败");
-                }
-            }
-        }
-    }
-
-    fn recovered_marker_refresh_unit(
-        &self,
-        job: &crate::store::ProbeJob,
-    ) -> Result<ProbeUnit, crate::store::StoreError> {
-        let store = self.store.lock();
-        let persisted = store
-            .probe_job_units(&job.id)?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                crate::store::StoreError::Missing(format!("units for job {}", job.id))
-            })?;
-        let row = store
-            .get_ledger(&persisted.ledger_id.replace('-', ""))?
-            .ok_or_else(|| {
-                crate::store::StoreError::Missing(format!("ledger {}", persisted.ledger_id))
-            })?;
-        Ok(ProbeUnit {
-            row,
-            kind: MediaKind::Tv,
-            force_fingerprint: true,
-            reuse_fingerprint_cache: persisted.reuse_fingerprint_cache,
-            overwrite_markers: true,
-            marker_refresh_id: Some(self.next_marker_refresh_id.fetch_add(1, Ordering::Relaxed)),
-            job_id: Some(job.id.clone()),
-        })
     }
 
     fn mark_failed(&self, ledger_id: &str) {
