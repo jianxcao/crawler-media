@@ -43,7 +43,8 @@ pub(super) async fn probe_one(mgr: &ProbeManager, unit: &ProbeUnit) -> bool {
 async fn probe_one_inner(mgr: &ProbeManager, unit: &ProbeUnit) -> bool {
     let ledger_id = unit.row.id.to_string();
     let path = PathBuf::from(&unit.row.path);
-    let media_duration_ms = match probe_tracks_and_store(mgr, unit).await {
+    let source_version = crate::fingerprint_job::current_source_version(&path);
+    let media_duration_ms = match probe_tracks_and_store(mgr, unit, &source_version).await {
         Ok(duration_ms) => duration_ms,
         Err(()) => {
             mgr.mark_failed(&ledger_id);
@@ -69,8 +70,10 @@ async fn probe_one_inner(mgr: &ProbeManager, unit: &ProbeUnit) -> bool {
         path,
         duration_secs,
         media_duration_ms,
+        source_version,
         mgr.fingerprint_engine.clone(),
         unit.marker_refresh_id.is_some(),
+        unit.reuse_fingerprint_cache,
     )
     .await
     {
@@ -91,7 +94,11 @@ async fn probe_one_inner(mgr: &ProbeManager, unit: &ProbeUnit) -> bool {
     true
 }
 
-async fn probe_tracks_and_store(mgr: &ProbeManager, unit: &ProbeUnit) -> Result<Option<i64>, ()> {
+async fn probe_tracks_and_store(
+    mgr: &ProbeManager,
+    unit: &ProbeUnit,
+    source_version: &str,
+) -> Result<Option<i64>, ()> {
     let ledger_id = unit.row.id.to_string();
     let path = PathBuf::from(&unit.row.path);
     let started_at = Instant::now();
@@ -104,6 +111,43 @@ async fn probe_tracks_and_store(mgr: &ProbeManager, unit: &ProbeUnit) -> Result<
         refresh_id = ?unit.marker_refresh_id,
         "【媒体信息】流信息探测开始"
     );
+    if unit.reuse_fingerprint_cache {
+        let cached = {
+            let store = mgr.store.lock();
+            let cached_version = store.get_media_info_cache_version(&ledger_id);
+            let cached_tracks = store.get_file_meta(&ledger_id);
+            match (cached_version, cached_tracks) {
+                (Ok(Some(version)), Ok(Some(_)))
+                    if version.source_version == source_version
+                        && version
+                            .format_duration_ms
+                            .is_some_and(|duration| duration > 0) =>
+                {
+                    Some(version.format_duration_ms)
+                }
+                (Err(error), _) | (_, Err(error)) => {
+                    tracing::warn!(%error, ledger_id, "【媒体信息】读取版本缓存失败，回退到重新探测");
+                    None
+                }
+                _ => None,
+            }
+        };
+        if let Some(duration_ms) = cached {
+            mgr.timings
+                .record_media_info(unit.job_id.as_deref(), 0, true);
+            tracing::info!(
+                media_id = %unit.row.media_id,
+                season = unit.row.season.unwrap_or(1),
+                episode = unit.row.episode.unwrap_or(1),
+                ledger_id,
+                source_version,
+                format_duration_ms = ?duration_ms,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "【媒体信息】版本未变化，复用已缓存流信息和媒体时长"
+            );
+            return Ok(duration_ms);
+        }
+    }
     let tracks_path = path.clone();
     let nfo_path = path.with_extension("nfo");
     let media_id = unit.row.media_id;
@@ -178,7 +222,14 @@ async fn probe_tracks_and_store(mgr: &ProbeManager, unit: &ProbeUnit) -> Result<
         .await;
     let tracks = match tracks_result {
         Ok(Some(tracks_and_duration)) => tracks_and_duration,
-        Ok(None) => return Err(()),
+        Ok(None) => {
+            mgr.timings.record_media_info(
+                unit.job_id.as_deref(),
+                started_at.elapsed().as_millis() as u64,
+                false,
+            );
+            return Err(());
+        }
         Err(error) => {
             tracing::error!(
                 %error,
@@ -190,11 +241,21 @@ async fn probe_tracks_and_store(mgr: &ProbeManager, unit: &ProbeUnit) -> Result<
                 elapsed_ms = started_at.elapsed().as_millis() as u64,
                 "【媒体信息】流信息探测任务异常退出"
             );
+            mgr.timings.record_media_info(
+                unit.job_id.as_deref(),
+                started_at.elapsed().as_millis() as u64,
+                false,
+            );
             return Err(());
         }
     };
     let (tracks, duration_ms) = tracks;
-    if let Err(error) = mgr.store.lock().put_file_meta(&ledger_id, &tracks) {
+    if let Err(error) = mgr.store.lock().put_file_meta_versioned(
+        &ledger_id,
+        &tracks,
+        Some(source_version),
+        duration_ms,
+    ) {
         tracing::error!(
             %error,
             media_id = %unit.row.media_id,
@@ -230,9 +291,15 @@ async fn probe_tracks_and_store(mgr: &ProbeManager, unit: &ProbeUnit) -> Result<
         video = tracks.video.is_some(),
         audio_tracks = tracks.audio.len(),
         subtitle_tracks = tracks.subtitles.len(),
+        source_version,
         format_duration_ms = ?duration_ms,
         elapsed_ms = started_at.elapsed().as_millis() as u64,
         "【媒体信息】流信息探测与缓存完成"
+    );
+    mgr.timings.record_media_info(
+        unit.job_id.as_deref(),
+        started_at.elapsed().as_millis() as u64,
+        false,
     );
     Ok(duration_ms)
 }
@@ -265,43 +332,32 @@ async fn probe_fingerprint_and_store(
     fp_path: PathBuf,
     duration_secs: u32,
     media_duration_ms: Option<i64>,
+    source_version: String,
     fingerprint_engine: Arc<dyn FingerprintEngine>,
     require_complete_markers: bool,
+    allow_cache_reuse: bool,
 ) -> bool {
     let ledger_id = unit.row.id.to_string();
     let started = Instant::now();
-    tracing::info!(
-        media_id = %unit.row.media_id,
-        season = unit.row.season.unwrap_or(1),
-        episode = unit.row.episode.unwrap_or(1),
-        ledger_id,
-        path = %fp_path.display(),
-        refresh_id = ?unit.marker_refresh_id,
-        sample_duration_secs = duration_secs,
-        marker_refresh = require_complete_markers,
-        "【声纹】开始生成片头声纹"
-    );
-    let path_clone = fp_path.clone();
-    let engine = fingerprint_engine.clone();
-    let fingerprint = tokio::task::spawn_blocking(move || {
-        marker::extract_audio_fingerprint_at_with(engine.as_ref(), &path_clone, 0, duration_secs)
-    })
-    .await;
-    let fp = match fingerprint {
-        Ok(Ok(fingerprint)) => fingerprint,
-        Ok(Err(error)) => {
-            tracing::error!(
-                %error,
-                ledger_id,
-                media_id = %unit.row.media_id,
-                season = unit.row.season.unwrap_or(1),
-                episode = unit.row.episode.unwrap_or(1),
-                path = %fp_path.display(),
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "【声纹】片头声纹生成失败"
-            );
-            return false;
+    let cached = match mgr.store.lock().get_fingerprint_cache(&ledger_id) {
+        Ok(cache) => cache,
+        Err(error) => {
+            tracing::error!(%error, ledger_id, "【声纹】读取指纹缓存失败，回退到重新采集");
+            None
         }
+    };
+    let outcome = match crate::fingerprint_job::capture_or_reuse_fingerprints(
+        &fp_path,
+        &source_version,
+        duration_secs,
+        media_duration_ms,
+        cached,
+        allow_cache_reuse,
+        fingerprint_engine,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
         Err(error) => {
             tracing::error!(
                 %error,
@@ -311,34 +367,17 @@ async fn probe_fingerprint_and_store(
                 episode = unit.row.episode.unwrap_or(1),
                 path = %fp_path.display(),
                 elapsed_ms = started.elapsed().as_millis() as u64,
-                "【声纹】片头声纹生成任务异常退出"
+                "【声纹】音频指纹采集失败"
             );
             return false;
         }
     };
-    if fp.is_empty() {
-        tracing::error!(
-            ledger_id,
-            media_id = %unit.row.media_id,
-            season = unit.row.season.unwrap_or(1),
-            episode = unit.row.episode.unwrap_or(1),
-            path = %fp_path.display(),
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "【声纹】片头声纹为空，拒绝写入"
-        );
-        return false;
-    }
-    if let Err(error) = mgr.store.lock().put_fingerprint(&ledger_id, Some(&fp)) {
-        tracing::error!(
-            %error,
-            ledger_id,
-            media_id = %unit.row.media_id,
-            season = unit.row.season.unwrap_or(1),
-            episode = unit.row.episode.unwrap_or(1),
-            path = %fp_path.display(),
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "【声纹】片头声纹缓存写入失败"
-        );
+    if let Err(error) = mgr
+        .store
+        .lock()
+        .put_fingerprint_cache(&ledger_id, &outcome.cache)
+    {
+        tracing::error!(%error, ledger_id, "【声纹】版本化指纹缓存持久化失败");
         return false;
     }
     tracing::info!(
@@ -347,194 +386,37 @@ async fn probe_fingerprint_and_store(
         season = unit.row.season.unwrap_or(1),
         episode = unit.row.episode.unwrap_or(1),
         path = %fp_path.display(),
-        fingerprint_words = fp.len(),
-        elapsed_ms = started.elapsed().as_millis() as u64,
-        "【声纹】片头声纹生成成功"
-    );
-
-    // Reuse format duration returned by the stream probe instead of opening a STRM a second time.
-    let duration_ms = match media_duration_ms.filter(|duration| *duration > 0) {
-        Some(duration) => {
-            tracing::info!(
-                media_id = %unit.row.media_id,
-                season = unit.row.season.unwrap_or(1),
-                episode = unit.row.episode.unwrap_or(1),
-                ledger_id,
-                duration_ms = duration,
-                duration_secs = duration as f64 / 1000.0,
-                source = "stream_probe",
-                elapsed_ms = 0_u64,
-                "【声纹】复用媒体流信息探测得到的总时长"
-            );
-            Some(duration)
-        }
-        None => {
-            tracing::warn!(
-                media_id = %unit.row.media_id,
-                season = unit.row.season.unwrap_or(1),
-                episode = unit.row.episode.unwrap_or(1),
-                ledger_id,
-                path = %fp_path.display(),
-                source = "stream_probe",
-                elapsed_ms = 0_u64,
-                "【声纹】流信息探测未返回有效总时长，无法定位片尾采样窗口"
-            );
-            None
-        }
-    };
-    let Some(total_ms) = duration_ms else {
-        tracing::info!(
-            media_id = %unit.row.media_id,
-            season = unit.row.season.unwrap_or(1),
-            episode = unit.row.episode.unwrap_or(1),
-            ledger_id,
-            intro_words = fp.len(),
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            complete = false,
-            "【声纹】本集声纹采集结束：片头已缓存，片尾因缺少媒体时长未采集"
-        );
-        return !require_complete_markers;
-    };
-
-    let total_secs = (total_ms / 1000) as u32;
-    let required_secs = duration_secs.saturating_add(30);
-    let outro_succeeded = if total_secs > required_secs {
-        let outro_start_secs = total_secs.saturating_sub(duration_secs);
-        let outro_started = Instant::now();
-        tracing::info!(
-            media_id = %unit.row.media_id,
-            season = unit.row.season.unwrap_or(1),
-            episode = unit.row.episode.unwrap_or(1),
-            ledger_id,
-            path = %fp_path.display(),
-            total_duration_ms = total_ms,
-            sample_start_secs = outro_start_secs,
-            sample_duration_secs = duration_secs,
-            "【声纹】开始生成片尾声纹"
-        );
-        let engine = fingerprint_engine.clone();
-        let path_for_outro = fp_path.clone();
-        let outro_result = tokio::task::spawn_blocking(move || {
-            marker::extract_audio_fingerprint_at_with(
-                engine.as_ref(),
-                &path_for_outro,
-                outro_start_secs,
-                duration_secs,
-            )
-        })
-        .await;
-        match outro_result {
-            Ok(Ok(outro_fp)) if !outro_fp.is_empty() => {
-                if let Err(error) = mgr
-                    .store
-                    .lock()
-                    .put_outro_fingerprint(&ledger_id, Some(&outro_fp))
-                {
-                    tracing::error!(
-                        %error,
-                        media_id = %unit.row.media_id,
-                        season = unit.row.season.unwrap_or(1),
-                        episode = unit.row.episode.unwrap_or(1),
-                        ledger_id,
-                        elapsed_ms = outro_started.elapsed().as_millis() as u64,
-                        "【声纹】片尾声纹缓存写入失败"
-                    );
-                    false
-                } else {
-                    tracing::info!(
-                        media_id = %unit.row.media_id,
-                        season = unit.row.season.unwrap_or(1),
-                        episode = unit.row.episode.unwrap_or(1),
-                        ledger_id,
-                        path = %fp_path.display(),
-                        sample_start_secs = outro_start_secs,
-                        sample_duration_secs = duration_secs,
-                        fingerprint_words = outro_fp.len(),
-                        elapsed_ms = outro_started.elapsed().as_millis() as u64,
-                        "【声纹】片尾声纹生成并缓存成功"
-                    );
-                    true
-                }
-            }
-            Ok(Ok(_)) => {
-                tracing::error!(
-                    media_id = %unit.row.media_id,
-                    season = unit.row.season.unwrap_or(1),
-                    episode = unit.row.episode.unwrap_or(1),
-                    ledger_id,
-                    elapsed_ms = outro_started.elapsed().as_millis() as u64,
-                    "【声纹】片尾声纹为空，拒绝写入"
-                );
-                false
-            }
-            Ok(Err(error)) => {
-                tracing::error!(
-                    %error,
-                    media_id = %unit.row.media_id,
-                    season = unit.row.season.unwrap_or(1),
-                    episode = unit.row.episode.unwrap_or(1),
-                    ledger_id,
-                    path = %fp_path.display(),
-                    sample_start_secs = outro_start_secs,
-                    sample_duration_secs = duration_secs,
-                    elapsed_ms = outro_started.elapsed().as_millis() as u64,
-                    "【声纹】片尾声纹生成失败"
-                );
-                false
-            }
-            Err(error) => {
-                tracing::error!(
-                    %error,
-                    media_id = %unit.row.media_id,
-                    season = unit.row.season.unwrap_or(1),
-                    episode = unit.row.episode.unwrap_or(1),
-                    ledger_id,
-                    path = %fp_path.display(),
-                    elapsed_ms = outro_started.elapsed().as_millis() as u64,
-                    "【声纹】片尾声纹生成任务异常退出"
-                );
-                false
-            }
-        }
-    } else {
-        if let Err(error) = mgr.store.lock().put_outro_fingerprint(&ledger_id, None) {
-            tracing::error!(
-                %error,
-                media_id = %unit.row.media_id,
-                season = unit.row.season.unwrap_or(1),
-                episode = unit.row.episode.unwrap_or(1),
-                ledger_id,
-                total_secs,
-                required_secs,
-                "【声纹】短视频清除旧片尾声纹缓存失败"
-            );
-            return false;
-        }
-        tracing::info!(
-            media_id = %unit.row.media_id,
-            season = unit.row.season.unwrap_or(1),
-            episode = unit.row.episode.unwrap_or(1),
-            ledger_id,
-            total_secs,
-            required_secs,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "【声纹】视频短于独立片尾采样条件，已清除旧片尾指纹"
-        );
-        true
-    };
-
-    tracing::info!(
-        media_id = %unit.row.media_id,
-        season = unit.row.season.unwrap_or(1),
-        episode = unit.row.episode.unwrap_or(1),
-        ledger_id,
-        total_duration_ms = total_ms,
-        intro_words = fp.len(),
-        outro_succeeded,
-        marker_refresh = require_complete_markers,
+        source_version,
+        cache_key = outcome.cache.cache_key,
+        intro_cache_hit = outcome.intro_cache_hit,
+        outro_cache_hit = outcome.outro_cache_hit,
+        intro_words = outcome.cache.intro.len(),
+        outro_words = outcome.cache.outro.as_ref().map(Vec::len).unwrap_or_default(),
+        intro_elapsed_ms = outcome.intro_elapsed_ms,
+        outro_elapsed_ms = outcome.outro_elapsed_ms,
+        media_duration_ms = ?outcome.cache.media_duration_ms,
         refresh_id = ?unit.marker_refresh_id,
         elapsed_ms = started.elapsed().as_millis() as u64,
-        "【声纹】单集片头片尾声纹采集结束"
+        "【声纹】版本化指纹缓存已持久化"
     );
-    outro_succeeded || !require_complete_markers
+    mgr.timings.record_fingerprint(
+        unit.job_id.as_deref(),
+        outcome.intro_cache_hit,
+        outcome.outro_cache_hit,
+        outcome.intro_elapsed_ms,
+        outcome.outro_elapsed_ms,
+    );
+    if let Some(error) = outcome.outro_error {
+        tracing::warn!(
+            %error,
+            ledger_id,
+            media_id = %unit.row.media_id,
+            season = unit.row.season.unwrap_or(1),
+            episode = unit.row.episode.unwrap_or(1),
+            require_complete_markers,
+            "【声纹】片尾指纹暂不可用，保留片头缓存并允许下次只重试片尾"
+        );
+        return !require_complete_markers;
+    }
+    true
 }

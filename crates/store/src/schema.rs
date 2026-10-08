@@ -311,7 +311,19 @@ pub fn migrate_library(conn: &Connection) -> Result<(), StoreError> {
             ledger_id TEXT PRIMARY KEY,
             audio_json TEXT NOT NULL,
             subtitle_json TEXT NOT NULL,
-            tracks_version INTEGER NOT NULL DEFAULT 0
+            tracks_version INTEGER NOT NULL DEFAULT 0,
+            source_version TEXT,
+            format_duration_ms INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS fingerprint_cache (
+            ledger_id TEXT PRIMARY KEY,
+            cache_key TEXT NOT NULL,
+            algorithm_version INTEGER NOT NULL,
+            sample_duration_secs INTEGER NOT NULL,
+            media_duration_ms INTEGER,
+            intro_json TEXT NOT NULL,
+            outro_json TEXT,
+            captured_at_ms INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS media_markers (
             media_id TEXT NOT NULL,
@@ -347,6 +359,7 @@ pub fn migrate_library(conn: &Connection) -> Result<(), StoreError> {
             ledger_id TEXT NOT NULL,
             kind TEXT NOT NULL,
             force_fingerprint INTEGER NOT NULL DEFAULT 0,
+            reuse_fingerprint_cache INTEGER NOT NULL DEFAULT 0,
             overwrite_markers INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL,
             error TEXT,
@@ -377,6 +390,14 @@ pub fn migrate_library(conn: &Connection) -> Result<(), StoreError> {
     )?;
     ensure_column(conn, "file_meta", "fingerprint_json", "TEXT")?;
     ensure_column(conn, "file_meta", "outro_fingerprint_json", "TEXT")?;
+    ensure_column(conn, "file_meta", "source_version", "TEXT")?;
+    ensure_column(conn, "file_meta", "format_duration_ms", "INTEGER")?;
+    ensure_column(
+        conn,
+        "probe_job_units",
+        "reuse_fingerprint_cache",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     set_schema_version(conn, LIBRARY_SCHEMA_VERSION)?;
     Ok(())
 }

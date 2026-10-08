@@ -122,13 +122,16 @@ pub(super) fn ranges_for_cluster(
     episode_count: usize,
 ) -> Vec<ConsensusRange> {
     let mut intervals = vec![Vec::new(); episode_count];
+    let mut supporting_pairs = vec![std::collections::HashSet::new(); episode_count];
     for index in cluster {
         let matched = &matches[*index];
         if let Some(interval) = interval_for(matched, matched.first) {
             intervals[matched.first].push(interval);
+            supporting_pairs[matched.first].insert(matched.second);
         }
         if let Some(interval) = interval_for(matched, matched.second) {
             intervals[matched.second].push(interval);
+            supporting_pairs[matched.second].insert(matched.first);
         }
     }
     intervals
@@ -141,6 +144,7 @@ pub(super) fn ranges_for_cluster(
                 episode_index,
                 start_secs: median_sorted(starts)?,
                 end_secs: median_sorted(ends)?,
+                supporting_pairs: supporting_pairs[episode_index].len(),
             })
         })
         .collect()

@@ -4,6 +4,7 @@
 mod catalog;
 mod collections;
 mod downloaders;
+mod fingerprint_cache;
 mod ledger;
 mod legacy_recycle;
 mod libraries;
@@ -27,6 +28,7 @@ pub mod password;
 
 pub use catalog::CatalogCacheRow;
 pub use downloaders::DownloaderRow;
+pub use fingerprint_cache::{FingerprintCacheEntry, MediaInfoCacheVersion};
 pub use libraries::Library;
 pub use library::{MarkerResultReplacement, StoredMediaMarker};
 pub use playback::{PlayLogRow, SessionRow, UNIT_WHOLE, UnitRow, UnitState};

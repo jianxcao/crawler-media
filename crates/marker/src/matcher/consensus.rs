@@ -20,12 +20,14 @@ pub(super) struct ConsensusRange {
     pub episode_index: usize,
     pub start_secs: f32,
     pub end_secs: f32,
+    pub supporting_pairs: usize,
 }
 
 pub(super) struct SeasonConsensus {
     pub ranges: Vec<ConsensusRange>,
     pub pairs_checked: usize,
     pub candidate_pairs: usize,
+    pub candidate_segments: usize,
     pub rejected_episode_support_clusters: usize,
     pub supporting_episodes: usize,
     pub supporting_pairs: usize,
@@ -34,16 +36,36 @@ pub(super) struct SeasonConsensus {
     pub consensus_clusters: usize,
 }
 
-pub(super) fn find_season_consensus(
-    episode_count: usize,
-    mut compare: impl FnMut(usize, usize) -> Option<CommonSegment>,
-) -> SeasonConsensus {
+pub(super) fn find_season_consensus<F, C>(episode_count: usize, mut compare: F) -> SeasonConsensus
+where
+    F: FnMut(usize, usize) -> C,
+    C: IntoIterator<Item = CommonSegment>,
+{
     let mut matches = Vec::new();
     let mut pairs_checked = 0;
+    let mut candidate_pairs = 0;
     for first in 0..episode_count {
         for second in first + 1..episode_count {
             pairs_checked += 1;
-            if let Some(segment) = compare(first, second) {
+            let pair_started = std::time::Instant::now();
+            let candidates = compare(first, second).into_iter().collect::<Vec<_>>();
+            candidate_pairs += usize::from(!candidates.is_empty());
+            tracing::debug!(
+                first_episode_index = first,
+                second_episode_index = second,
+                candidates = candidates.len(),
+                intervals = ?candidates.iter().map(|segment| (
+                    segment.start1_sec,
+                    segment.end1_sec,
+                    segment.start2_sec,
+                    segment.end2_sec,
+                    segment.duration_sec,
+                    segment.score,
+                )).collect::<Vec<_>>(),
+                elapsed_ms = pair_started.elapsed().as_millis() as u64,
+                "【片头片尾】单集对比候选明细"
+            );
+            for segment in candidates {
                 matches.push(PairMatch {
                     first,
                     second,
@@ -54,7 +76,7 @@ pub(super) fn find_season_consensus(
     }
 
     let minimum_support = minimum_support(episode_count);
-    let candidate_pairs = matches.len();
+    let candidate_segments = matches.len();
     let clusters = match_clusters(&matches);
     let mut rejected_episode_support_clusters = 0;
     let mut summaries = Vec::new();
@@ -73,6 +95,7 @@ pub(super) fn find_season_consensus(
             ranges: Vec::new(),
             pairs_checked,
             candidate_pairs,
+            candidate_segments,
             rejected_episode_support_clusters,
             supporting_episodes: 0,
             supporting_pairs: 0,
@@ -91,10 +114,16 @@ pub(super) fn find_season_consensus(
                 |(current_index, current_range)| {
                     let candidate_duration = range.end_secs - range.start_secs;
                     let current_duration = current_range.end_secs - current_range.start_secs;
-                    candidate_duration.total_cmp(&current_duration) == Ordering::Greater
-                        || (candidate_duration == current_duration
-                            && compare_cluster_summaries(summary, &summaries[*current_index])
-                                == Ordering::Greater)
+                    range.supporting_pairs > current_range.supporting_pairs
+                        || (range.supporting_pairs == current_range.supporting_pairs
+                            && (compare_cluster_summaries(summary, &summaries[*current_index])
+                                == Ordering::Greater
+                                || (compare_cluster_summaries(
+                                    summary,
+                                    &summaries[*current_index],
+                                ) == Ordering::Equal
+                                    && candidate_duration.total_cmp(&current_duration)
+                                        == Ordering::Greater)))
                 },
             );
             if replace {
@@ -119,8 +148,10 @@ pub(super) fn find_season_consensus(
     let median_duration_secs = median(&selected_durations).unwrap_or_default();
     let supporting_pairs = selected_clusters
         .iter()
-        .map(|index| summaries[*index].matches.len())
-        .sum();
+        .flat_map(|index| summaries[*index].matches.iter())
+        .map(|index| (matches[*index].first, matches[*index].second))
+        .collect::<std::collections::HashSet<_>>()
+        .len();
     SeasonConsensus {
         supporting_episodes: ranges.len(),
         supporting_pairs,
@@ -129,6 +160,7 @@ pub(super) fn find_season_consensus(
         ranges,
         pairs_checked,
         candidate_pairs,
+        candidate_segments,
         rejected_episode_support_clusters,
         minimum_support,
     }

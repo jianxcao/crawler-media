@@ -19,6 +19,7 @@ fn force_probe_during_existing_probe_is_rejected_until_terminal() {
         },
         kind: MediaKind::Movie,
         force_fingerprint: false,
+        reuse_fingerprint_cache: false,
         overwrite_markers: false,
         marker_refresh_id: None,
         job_id: None,
@@ -69,6 +70,7 @@ fn stale_queue_message_cannot_start_or_finish_a_later_retry() {
         },
         kind: MediaKind::Movie,
         force_fingerprint: false,
+        reuse_fingerprint_cache: false,
         overwrite_markers: false,
         marker_refresh_id: None,
         job_id: None,
@@ -120,6 +122,7 @@ fn queued_probe_is_recovered_after_manager_restart() {
         },
         kind: MediaKind::Tv,
         force_fingerprint: false,
+        reuse_fingerprint_cache: false,
         overwrite_markers: false,
         marker_refresh_id: None,
         job_id: None,
@@ -162,6 +165,7 @@ fn completed_marker_refresh_with_missing_ledger_becomes_failed_on_recovery() {
         ledger_id: "removed-ledger-row",
         kind: "tv",
         force_fingerprint: true,
+        reuse_fingerprint_cache: false,
         overwrite_markers: true,
     }];
     store
@@ -223,6 +227,7 @@ fn failed_probe_is_persisted_and_can_be_retried() {
         },
         kind: MediaKind::Tv,
         force_fingerprint: false,
+        reuse_fingerprint_cache: false,
         overwrite_markers: false,
         marker_refresh_id: None,
         job_id: None,
@@ -280,6 +285,7 @@ fn active_season_marker_refresh_rejects_a_duplicate_batch() {
                 row: row.clone(),
                 kind: MediaKind::Tv,
                 force_fingerprint: true,
+                reuse_fingerprint_cache: false,
                 overwrite_markers: true,
                 marker_refresh_id: None,
                 job_id: None,
@@ -298,6 +304,14 @@ fn active_season_marker_refresh_rejects_a_duplicate_batch() {
         .unwrap();
     assert_eq!(active.total, 2);
     assert_eq!(active.completed, 0);
+    assert!(
+        store
+            .lock()
+            .probe_job_units(&active.id)
+            .unwrap()
+            .iter()
+            .all(|unit| unit.reuse_fingerprint_cache)
+    );
     assert_eq!(
         second.enqueue_marker_refresh(units()),
         0,
@@ -331,6 +345,7 @@ fn forced_item_refresh_reserves_all_episodes_or_none() {
         row: rows[1].clone(),
         kind: MediaKind::Tv,
         force_fingerprint: false,
+        reuse_fingerprint_cache: false,
         overwrite_markers: false,
         marker_refresh_id: None,
         job_id: None,
@@ -343,6 +358,7 @@ fn forced_item_refresh_reserves_all_episodes_or_none() {
             row: row.clone(),
             kind: MediaKind::Tv,
             force_fingerprint: false,
+            reuse_fingerprint_cache: false,
             overwrite_markers: false,
             marker_refresh_id: None,
             job_id: None,

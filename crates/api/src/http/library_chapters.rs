@@ -267,6 +267,7 @@ pub(crate) async fn refresh_item_chapters(
                 row: candidate_row.clone(),
                 kind: media.kind,
                 force_fingerprint: true,
+                reuse_fingerprint_cache: false,
                 overwrite_markers: true,
                 marker_refresh_id: None,
                 job_id: None,

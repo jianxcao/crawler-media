@@ -2,9 +2,11 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use domain::LedgerRow;
+use marker::FINGERPRINT_ALGORITHM_VERSION;
 
 use super::{ProbeManager, ProbeUnit};
 use crate::Store;
+use crate::fingerprint_job::{fingerprint_cache_key, media_source_version};
 use crate::scrape_store::ScrapeStoreExt;
 use crate::store::{MarkerResultReplacement, StoredMediaMarker};
 
@@ -117,6 +119,10 @@ fn compare_season_fingerprints(
     } else {
         Vec::new()
     };
+    mgr.timings.record_comparison(
+        unit.job_id.as_deref(),
+        compare_started_at.elapsed().as_millis() as u64,
+    );
     log_comparison_counts(unit, &samples, &markers, compare_started_at);
     log_match_details(unit, &samples.all_rows, &markers);
     Ok(MarkerComparison {
@@ -153,19 +159,46 @@ fn load_season_samples(
     let mut outros = Vec::new();
     for row in &season_rows {
         let key = row.id.to_string();
-        if let Ok(Some(fingerprint)) = store.get_fingerprint(&key) {
-            intros.push((row.clone(), fingerprint));
-        }
-        if let Ok(Some(fingerprint)) = store.get_outro_fingerprint(&key) {
-            let duration_ms = store
-                .get_file_meta(&key)
-                .ok()
-                .flatten()
-                .and_then(|meta| meta.video.and_then(|video| video.duration_secs))
-                .map(|duration| (duration * 1000.0) as i64)
-                .unwrap_or(0);
-            let offset_ms = (duration_ms - duration_secs * 1000).max(0);
-            outros.push((row.clone(), fingerprint, offset_ms));
+        match store.get_fingerprint_cache(&key) {
+            Ok(Some(cache)) => {
+                let source_version = media_source_version(std::path::Path::new(&row.path));
+                let expected_key = fingerprint_cache_key(
+                    &source_version,
+                    cache.sample_duration_secs,
+                    cache.media_duration_ms,
+                );
+                if cache.cache_key != expected_key
+                    || cache.algorithm_version != FINGERPRINT_ALGORITHM_VERSION
+                    || i64::from(cache.sample_duration_secs) != duration_secs
+                {
+                    tracing::warn!(
+                        ledger_id = %key,
+                        episode = row.episode.unwrap_or(1),
+                        cached_algorithm = cache.algorithm_version,
+                        expected_algorithm = FINGERPRINT_ALGORITHM_VERSION,
+                        cached_sample_duration_secs = cache.sample_duration_secs,
+                        expected_sample_duration_secs = duration_secs,
+                        "【片头片尾】跳过过期声纹缓存，需重新采集"
+                    );
+                    continue;
+                }
+                if !cache.intro.is_empty() {
+                    intros.push((row.clone(), cache.intro));
+                }
+                if let (Some(fingerprint), Some(duration_ms)) =
+                    (cache.outro, cache.media_duration_ms)
+                {
+                    let offset_ms =
+                        (duration_ms - i64::from(cache.sample_duration_secs) * 1000).max(0);
+                    outros.push((row.clone(), fingerprint, offset_ms));
+                }
+            }
+            Ok(None) => {}
+            Err(error) => tracing::error!(
+                %error,
+                ledger_id = %key,
+                "【片头片尾】读取单集声纹缓存失败"
+            ),
         }
     }
     Ok(SeasonFingerprintSamples {

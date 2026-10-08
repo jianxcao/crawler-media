@@ -10,8 +10,21 @@ pub(super) fn find_common_segment(
     min_duration_secs: f32,
     max_duration_secs: f32,
 ) -> Option<CommonSegment> {
+    find_common_segments(first, second, min_duration_secs, max_duration_secs)
+        .into_iter()
+        .next()
+}
+
+pub(super) fn find_common_segments(
+    first: &[u32],
+    second: &[u32],
+    min_duration_secs: f32,
+    max_duration_secs: f32,
+) -> Vec<CommonSegment> {
     let config = Configuration::preset_test2();
-    let segments = match_fingerprints(first, second, &config).ok()?;
+    let Ok(segments) = match_fingerprints(first, second, &config) else {
+        return Vec::new();
+    };
     let merged = merge_adjacent_segments(segments);
     let mut candidates = merged
         .into_iter()
@@ -40,7 +53,36 @@ pub(super) fn find_common_segment(
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
     });
-    candidates.into_iter().next()
+    deduplicate_candidates(candidates)
+}
+
+fn deduplicate_candidates(candidates: Vec<CommonSegment>) -> Vec<CommonSegment> {
+    let mut unique: Vec<CommonSegment> = Vec::with_capacity(candidates.len());
+    'candidate: for candidate in candidates {
+        for existing in &unique {
+            if same_occurrence(
+                (candidate.start1_sec, candidate.end1_sec),
+                (existing.start1_sec, existing.end1_sec),
+            ) && same_occurrence(
+                (candidate.start2_sec, candidate.end2_sec),
+                (existing.start2_sec, existing.end2_sec),
+            ) {
+                continue 'candidate;
+            }
+        }
+        unique.push(candidate);
+    }
+    unique
+}
+
+fn same_occurrence(left: (f32, f32), right: (f32, f32)) -> bool {
+    let shorter = (left.1 - left.0).min(right.1 - right.0);
+    let longer = (left.1 - left.0).max(right.1 - right.0);
+    if shorter <= 0.0 || longer <= 0.0 || shorter / longer < 0.9 {
+        return false;
+    }
+    let overlap = (left.1.min(right.1) - left.0.max(right.0)).max(0.0);
+    overlap / shorter >= 0.9
 }
 
 fn merge_adjacent_segments(mut segments: Vec<Segment>) -> Vec<Segment> {

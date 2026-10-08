@@ -7,6 +7,8 @@ use std::str::FromStr;
 
 use crate::http::{err, ok};
 use crate::management::ApiState;
+use crate::scrape_store::ScrapeStoreExt;
+use marker::FINGERPRINT_ALGORITHM_VERSION;
 
 use super::{library_for_row, require_visible_library};
 
@@ -32,8 +34,48 @@ fn enqueue_probe(state: &ApiState, row: &domain::LedgerRow) -> bool {
     } else {
         false
     };
-    let fingerprint_missing =
-        kind == domain::MediaKind::Tv && store.get_fingerprint(&key).ok().flatten().is_none();
+    let fingerprint_missing = if kind == domain::MediaKind::Tv {
+        let sample_duration_secs = store
+            .get_scrape_config()
+            .ok()
+            .map(|config| config.effective.fingerprint_duration_secs)
+            .unwrap_or(180);
+        let path = PathBuf::from(&row.path);
+        let source_version = crate::fingerprint_job::current_source_version(&path);
+        let media_duration_ms = store
+            .get_media_info_cache_version(&key)
+            .ok()
+            .flatten()
+            .filter(|version| version.source_version == source_version)
+            .and_then(|version| version.format_duration_ms);
+        let expected_cache_key = crate::fingerprint_job::fingerprint_cache_key(
+            &source_version,
+            sample_duration_secs,
+            media_duration_ms,
+        );
+        store
+            .get_fingerprint_cache(&key)
+            .ok()
+            .flatten()
+            .is_none_or(|cache| {
+                cache.cache_key != expected_cache_key
+                    || cache.algorithm_version != FINGERPRINT_ALGORITHM_VERSION
+                    || cache.sample_duration_secs != sample_duration_secs
+                    || cache.intro.is_empty()
+                    || match media_duration_ms {
+                        Some(duration)
+                            if duration
+                                > i64::from(sample_duration_secs.saturating_add(30)) * 1000 =>
+                        {
+                            cache.outro.as_ref().is_none_or(Vec::is_empty)
+                        }
+                        Some(_) => false,
+                        None => cache.media_duration_ms.is_some(),
+                    }
+            })
+    } else {
+        false
+    };
     let force_fingerprint =
         kind == domain::MediaKind::Tv && fingerprint_missing && fingerprint_enabled;
     drop(store);
@@ -48,6 +90,7 @@ fn enqueue_probe(state: &ApiState, row: &domain::LedgerRow) -> bool {
         row: row.clone(),
         kind,
         force_fingerprint,
+        reuse_fingerprint_cache: false,
         overwrite_markers: false,
         marker_refresh_id: None,
         job_id: None,
@@ -133,6 +176,7 @@ pub(crate) async fn probe_item(
             row,
             kind: media_kind,
             force_fingerprint: false,
+            reuse_fingerprint_cache: false,
             overwrite_markers: false,
             marker_refresh_id: None,
             job_id: None,

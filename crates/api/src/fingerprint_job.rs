@@ -11,6 +11,11 @@ use marker::{
 
 use crate::store::StoredMediaMarker;
 
+mod cache;
+mod cache_key;
+pub use cache::{FingerprintCaptureOutcome, capture_or_reuse_fingerprints, current_source_version};
+pub use cache_key::{fingerprint_cache_key, media_source_version};
+
 /// 从已采集的指纹集合中识别片头片尾：
 /// `known_intro`: 各集的片头指纹 `(row, fp)`
 /// `known_outro`: 各集的片尾指纹 `(row, fp, base_offset_ms)`

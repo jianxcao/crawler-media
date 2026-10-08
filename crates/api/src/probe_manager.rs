@@ -22,6 +22,7 @@ use crate::Store;
 mod marker_jobs;
 mod markers;
 mod probe;
+mod timings;
 
 /// 一个待探测单元（对应一条 ledger 行）。
 #[derive(Clone)]
@@ -29,6 +30,7 @@ pub struct ProbeUnit {
     pub row: LedgerRow,
     pub kind: MediaKind,
     pub force_fingerprint: bool,
+    pub reuse_fingerprint_cache: bool,
     pub overwrite_markers: bool,
     pub(crate) marker_refresh_id: Option<u64>,
     /// Persisted task identity carried with the queue message. This prevents
@@ -50,6 +52,7 @@ pub struct ProbeManager {
     seen: Mutex<HashSet<String>>,
     last_failure: Mutex<HashMap<String, Instant>>,
     next_marker_refresh_id: AtomicU64,
+    timings: timings::ProbeTimingLedger,
     /// 多 worker 共享的任务流（tokio Mutex 的 guard 可安全跨 await）。
     rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<ProbeUnit>>>,
 }
@@ -71,6 +74,7 @@ impl ProbeManager {
             seen: Mutex::new(HashSet::new()),
             last_failure: Mutex::new(HashMap::new()),
             next_marker_refresh_id: AtomicU64::new(1),
+            timings: timings::ProbeTimingLedger::default(),
             rx: Arc::new(tokio::sync::Mutex::new(rx)),
         };
         manager.recover_pending_jobs();
@@ -79,6 +83,7 @@ impl ProbeManager {
 
     /// 入队探测（幂等：已在队列/执行中的跳过）。
     pub fn enqueue(&self, mut unit: ProbeUnit) -> bool {
+        unit.reuse_fingerprint_cache = true;
         let ledger_id = unit.row.id.to_string();
         let mut seen = self.seen.lock();
         if !seen.insert(ledger_id.clone()) {
@@ -115,6 +120,7 @@ impl ProbeManager {
 
     /// 强制探测：同一文件已有任务时拒绝重复排队；终态后用户可重试。
     pub fn enqueue_force(&self, mut unit: ProbeUnit) -> bool {
+        unit.reuse_fingerprint_cache = false;
         let ledger_id = unit.row.id.to_string();
         let mut seen = self.seen.lock();
         self.last_failure.lock().remove(&ledger_id);
@@ -169,6 +175,7 @@ impl ProbeManager {
                 ledger_id,
                 kind: unit.kind.as_str(),
                 force_fingerprint: true,
+                reuse_fingerprint_cache: true,
                 overwrite_markers: true,
             })
             .collect::<Vec<_>>();
@@ -194,6 +201,7 @@ impl ProbeManager {
         let mut queued = 0;
         for unit in &mut units {
             unit.force_fingerprint = true;
+            unit.reuse_fingerprint_cache = true;
             unit.overwrite_markers = true;
             unit.marker_refresh_id = Some(id);
             unit.job_id = Some(job_id.clone());
@@ -257,6 +265,7 @@ impl ProbeManager {
                 ledger_id,
                 kind: unit.kind.as_str(),
                 force_fingerprint: is_tv,
+                reuse_fingerprint_cache: false,
                 overwrite_markers: is_tv,
             })
             .collect::<Vec<_>>();
@@ -295,6 +304,7 @@ impl ProbeManager {
         let mut queued = 0;
         for unit in &mut units {
             unit.force_fingerprint = is_tv;
+            unit.reuse_fingerprint_cache = false;
             unit.overwrite_markers = is_tv;
             unit.marker_refresh_id = refresh_id;
             unit.job_id = Some(job_id.clone());
@@ -409,8 +419,10 @@ impl ProbeManager {
                 elapsed_ms = job.elapsed_ms(now_ms()),
                 "【探测任务】部分单元失败，保留现有片头片尾结果"
             );
+            timings::log_terminal_job(&self.store, &self.timings, &job);
         } else if job.kind == "marker_refresh" {
             marker_jobs::apply_marker_refresh(self, &job, unit);
+            timings::log_terminal_job(&self.store, &self.timings, &job);
         } else {
             match self.store.lock().finish_probe_job(&job.id, true, None) {
                 Ok(()) => tracing::info!(
@@ -425,6 +437,7 @@ impl ProbeManager {
                     tracing::error!(%error, job_id = %job.id, "持久化探测任务成功状态失败")
                 }
             }
+            timings::log_terminal_job(&self.store, &self.timings, &job);
         }
     }
 
@@ -436,6 +449,7 @@ impl ProbeManager {
             ledger_id: &ledger_id,
             kind: unit.kind.as_str(),
             force_fingerprint: unit.force_fingerprint,
+            reuse_fingerprint_cache: unit.reuse_fingerprint_cache,
             overwrite_markers: unit.overwrite_markers,
         };
         match self.store.lock().create_probe_job(
@@ -520,6 +534,7 @@ impl ProbeManager {
                     row,
                     kind,
                     force_fingerprint: persisted.force_fingerprint,
+                    reuse_fingerprint_cache: persisted.reuse_fingerprint_cache,
                     overwrite_markers: persisted.overwrite_markers,
                     marker_refresh_id: (job.kind == "marker_refresh")
                         .then(|| self.next_marker_refresh_id.fetch_add(1, Ordering::Relaxed)),
@@ -576,6 +591,7 @@ impl ProbeManager {
                     match self.recovered_marker_refresh_unit(&refreshed) {
                         Ok(unit) => {
                             marker_jobs::apply_marker_refresh(self, &refreshed, &unit);
+                            timings::log_terminal_job(&self.store, &self.timings, &refreshed);
                         }
                         Err(error) => {
                             if let Err(finish_error) = self.store.lock().finish_probe_job(
@@ -616,6 +632,7 @@ impl ProbeManager {
             row,
             kind: MediaKind::Tv,
             force_fingerprint: true,
+            reuse_fingerprint_cache: persisted.reuse_fingerprint_cache,
             overwrite_markers: true,
             marker_refresh_id: Some(self.next_marker_refresh_id.fetch_add(1, Ordering::Relaxed)),
             job_id: Some(job.id.clone()),

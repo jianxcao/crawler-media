@@ -26,7 +26,7 @@ pub fn match_episodes_fingerprints_with(
 ) -> Vec<DetectedIntro> {
     let started = Instant::now();
     let consensus = find_season_consensus(episodes.len(), |first, second| {
-        engine.find_common_segment(
+        engine.find_common_segments(
             &episodes[first].1,
             &episodes[second].1,
             min_duration_secs,
@@ -38,6 +38,7 @@ pub fn match_episodes_fingerprints_with(
             episodes = episodes.len(),
             pairs_checked = consensus.pairs_checked,
             candidate_pairs = consensus.candidate_pairs,
+            candidate_segments = consensus.candidate_segments,
             rejected_episode_support_clusters = consensus.rejected_episode_support_clusters,
             minimum_support = consensus.minimum_support,
             elapsed_ms = started.elapsed().as_millis() as u64,
@@ -67,6 +68,7 @@ pub fn match_episodes_fingerprints_with(
         applied = results.len(),
         pairs_checked = consensus.pairs_checked,
         candidate_pairs = consensus.candidate_pairs,
+        candidate_segments = consensus.candidate_segments,
         rejected_episode_support_clusters = consensus.rejected_episode_support_clusters,
         consensus_clusters = consensus.consensus_clusters,
         supporting_episodes = consensus.supporting_episodes,
