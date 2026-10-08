@@ -3,28 +3,28 @@ use std::time::{Duration, Instant};
 
 use super::diagnostics::{FfmpegBenchmark, sanitized_excerpt};
 
-#[derive(Default)]
-pub(super) struct ExtractionTimings {
-    pub(super) command_setup_ms: u128,
-    pub(super) ffmpeg_spawn_ms: u128,
-    pub(super) time_to_first_pcm_ms: Option<u128>,
-    pub(super) pcm_read_wait: Duration,
-    pub(super) chromaprint_consume: Duration,
-    pub(super) pcm_stream_elapsed_ms: u128,
-    pub(super) chromaprint_finish_ms: u128,
-    pub(super) ffmpeg_wait_ms: u128,
-    pub(super) stderr_collect_ms: u128,
-    pub(super) pcm_bytes: u64,
-    pub(super) sample_count: u64,
-    pub(super) ffmpeg_log_level: String,
-    pub(super) ffmpeg_exit_code: Option<i32>,
-    pub(super) ffmpeg_stderr_tail: String,
-    pub(super) ffmpeg_stderr_bytes: u64,
-    pub(super) ffmpeg_stderr_truncated: bool,
-    pub(super) ffmpeg_benchmark: Option<FfmpegBenchmark>,
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ExtractionTimings {
+    pub(crate) command_setup_ms: u128,
+    pub(crate) ffmpeg_spawn_ms: u128,
+    pub(crate) time_to_first_pcm_ms: Option<u128>,
+    pub(crate) pcm_read_wait: Duration,
+    pub(crate) chromaprint_consume: Duration,
+    pub(crate) pcm_stream_elapsed_ms: u128,
+    pub(crate) chromaprint_finish_ms: u128,
+    pub(crate) ffmpeg_wait_ms: u128,
+    pub(crate) stderr_collect_ms: u128,
+    pub(crate) pcm_bytes: u64,
+    pub(crate) sample_count: u64,
+    pub(crate) ffmpeg_log_level: String,
+    pub(crate) ffmpeg_exit_code: Option<i32>,
+    pub(crate) ffmpeg_stderr_tail: String,
+    pub(crate) ffmpeg_stderr_bytes: u64,
+    pub(crate) ffmpeg_stderr_truncated: bool,
+    pub(crate) ffmpeg_benchmark: Option<FfmpegBenchmark>,
 }
 
-pub(super) fn log_extraction_timings(
+pub(crate) fn log_extraction_timings(
     path: &Path,
     source: &str,
     start_secs: u32,

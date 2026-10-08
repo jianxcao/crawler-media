@@ -5,7 +5,7 @@ use rusty_chromaprint::Fingerprinter;
 
 use super::timing::ExtractionTimings;
 
-pub(super) fn consume_pcm(
+pub(crate) fn consume_pcm(
     mut stdout: impl Read,
     fingerprinter: &mut Fingerprinter,
     process_started: Instant,

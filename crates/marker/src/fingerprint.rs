@@ -1,5 +1,13 @@
+pub mod capture;
+pub mod capture_types;
 mod chromaprint;
 mod segments;
+
+pub use capture_types::{
+    CaptureFailure, CaptureFailureKind, CaptureMetrics, CaptureRequest, CapturedFingerprint,
+    FingerprintCaptureEngine, InputBytesSource, SampleWindow,
+};
+pub use chromaprint::diagnostics::sanitized_excerpt as sanitize_stderr;
 
 use std::path::Path;
 use std::time::Instant;
@@ -48,6 +56,15 @@ pub trait FingerprintEngine: Send + Sync {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ChromaprintEngine;
+
+impl FingerprintCaptureEngine for ChromaprintEngine {
+    fn capture_window(
+        &self,
+        request: &CaptureRequest,
+    ) -> Result<CapturedFingerprint, CaptureFailure> {
+        capture::capture_window_chromaprint(request)
+    }
+}
 
 impl FingerprintEngine for ChromaprintEngine {
     fn extract_at(

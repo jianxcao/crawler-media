@@ -76,10 +76,25 @@ impl ProbeTarget {
 
     /// Apply this target as an ffmpeg input with fast input seeking.
     pub fn apply_ffmpeg_input_with_seek(&self, cmd: &mut Command, start_secs: u32) {
+        self.apply_ffmpeg_input_with_seek_ms(cmd, (start_secs as i64) * 1000);
+    }
+
+    /// Apply this target as an ffmpeg input with decimal seek in milliseconds.
+    pub fn apply_ffmpeg_input_with_seek_ms(&self, cmd: &mut Command, start_ms: i64) {
+        let seek_str = if start_ms > 0 {
+            if start_ms % 1000 == 0 {
+                format!("{}", start_ms / 1000)
+            } else {
+                format!("{:.3}", start_ms as f64 / 1000.0)
+            }
+        } else {
+            String::new()
+        };
+
         match self {
             Self::Local(path) => {
-                if start_secs > 0 {
-                    cmd.args(["-ss", &start_secs.to_string()]);
+                if start_ms > 0 {
+                    cmd.args(["-ss", &seek_str]);
                 }
                 cmd.arg("-i").arg(path);
             }
@@ -114,8 +129,8 @@ impl ProbeTarget {
                     "-probesize",
                     "10000000",
                 ]);
-                if start_secs > 0 {
-                    cmd.args(["-ss", &start_secs.to_string()]);
+                if start_ms > 0 {
+                    cmd.args(["-ss", &seek_str]);
                 }
                 cmd.args(["-i", url]);
             }

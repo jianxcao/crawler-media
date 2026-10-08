@@ -3,21 +3,21 @@ use std::io::Read;
 const MAX_STDERR_TAIL_BYTES: usize = 16 * 1024;
 const MAX_LOG_EXCERPT_CHARS: usize = 2_000;
 
-#[derive(Default)]
-pub(super) struct FfmpegBenchmark {
-    pub(super) user_cpu_ms: Option<u128>,
-    pub(super) system_cpu_ms: Option<u128>,
-    pub(super) real_ms: Option<u128>,
-    pub(super) max_rss_kb: Option<u64>,
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FfmpegBenchmark {
+    pub(crate) user_cpu_ms: Option<u128>,
+    pub(crate) system_cpu_ms: Option<u128>,
+    pub(crate) real_ms: Option<u128>,
+    pub(crate) max_rss_kb: Option<u64>,
 }
 
-pub(super) struct CapturedStderr {
-    pub(super) text: String,
-    pub(super) total_bytes: u64,
-    pub(super) truncated: bool,
+pub(crate) struct CapturedStderr {
+    pub(crate) text: String,
+    pub(crate) total_bytes: u64,
+    pub(crate) truncated: bool,
 }
 
-pub(super) fn read_stderr_tail(mut stderr: impl Read) -> Result<CapturedStderr, String> {
+pub(crate) fn read_stderr_tail(mut stderr: impl Read) -> Result<CapturedStderr, String> {
     let mut tail = Vec::with_capacity(MAX_STDERR_TAIL_BYTES);
     let mut buffer = [0u8; 4096];
     let mut total_bytes = 0u64;
@@ -41,7 +41,7 @@ pub(super) fn read_stderr_tail(mut stderr: impl Read) -> Result<CapturedStderr, 
     })
 }
 
-pub(super) fn parse_benchmark(stderr: &str) -> Option<FfmpegBenchmark> {
+pub(crate) fn parse_benchmark(stderr: &str) -> Option<FfmpegBenchmark> {
     let line = stderr
         .lines()
         .rev()
@@ -64,7 +64,7 @@ pub(super) fn parse_benchmark(stderr: &str) -> Option<FfmpegBenchmark> {
     Some(benchmark)
 }
 
-pub(super) fn sanitized_excerpt(stderr: &str) -> String {
+pub fn sanitized_excerpt(stderr: &str) -> String {
     let headers_redacted = redact_sensitive_headers(stderr);
     let urls_redacted = redact_urls(headers_redacted.trim());
     let sanitized = redact_sensitive_parameters(&urls_redacted);

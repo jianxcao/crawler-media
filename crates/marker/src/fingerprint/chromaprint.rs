@@ -6,13 +6,13 @@ use rusty_chromaprint::{Configuration, Fingerprinter};
 
 use crate::target::ProbeTarget;
 
-mod diagnostics;
-mod pcm;
-mod timing;
+pub(crate) mod diagnostics;
+pub(crate) mod pcm;
+pub(crate) mod timing;
 
-use diagnostics::{CapturedStderr, parse_benchmark, read_stderr_tail, sanitized_excerpt};
-use pcm::consume_pcm;
-use timing::{ExtractionTimings, log_extraction_timings};
+pub(crate) use diagnostics::{CapturedStderr, parse_benchmark, read_stderr_tail, sanitized_excerpt};
+pub(crate) use pcm::consume_pcm;
+pub(crate) use timing::{ExtractionTimings, log_extraction_timings};
 
 pub(super) fn extract(
     path: &Path,
@@ -63,7 +63,7 @@ fn extract_fingerprint(
     Ok(fingerprint)
 }
 
-fn start_fingerprinter() -> Result<Fingerprinter, String> {
+pub(crate) fn start_fingerprinter() -> Result<Fingerprinter, String> {
     let config = Configuration::preset_test2();
     let mut fingerprinter = Fingerprinter::new(&config);
     fingerprinter
@@ -160,7 +160,7 @@ fn collect_stderr(
     Ok(stderr)
 }
 
-fn ffmpeg_exit_error(status: std::process::ExitStatus, stderr: &str) -> String {
+pub(crate) fn ffmpeg_exit_error(status: std::process::ExitStatus, stderr: &str) -> String {
     let detail = sanitized_excerpt(stderr);
     if detail.is_empty() {
         format!("ffmpeg exited with {status}")
@@ -169,7 +169,7 @@ fn ffmpeg_exit_error(status: std::process::ExitStatus, stderr: &str) -> String {
     }
 }
 
-fn ffmpeg_log_level() -> &'static str {
+pub(crate) fn ffmpeg_log_level() -> &'static str {
     match std::env::var("CRAWLER_MEDIA_FFMPEG_LOG_LEVEL")
         .unwrap_or_default()
         .to_ascii_lowercase()
