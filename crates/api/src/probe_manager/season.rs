@@ -162,6 +162,11 @@ pub async fn run_adaptive_season_pipeline(
         if is_seed && collected_evidences.len() >= 2 {
             let models = build_season_models(mgr.fingerprint_engine.as_ref(), &collected_evidences, &policy);
             for model in &models {
+                for r in &model.references {
+                    if let Some(ev) = collected_evidences.iter().find(|e| e.sample_id == r.sample_id) {
+                        templates.references.insert(r.sample_id.clone(), ev.clone());
+                    }
+                }
                 let model_json = serde_json::to_string(model).unwrap_or_else(|_| "{}".to_string());
                 let stored_model = StoredFingerprintModel {
                     model_id: model.model_id.clone(),
@@ -234,23 +239,11 @@ pub async fn run_adaptive_season_pipeline(
         }
     }
 
-    // 在最终构建标记前，对所有仍未匹配的单元进行回填
+    // 模板形成后，仅通过标准验证逻辑 verify_template_window 重新分析之前的单元，
+    // 严格禁止绕过验证直接回填，确保截断或不合规的音频绝不会被误写入标记。
     for det in detections.iter_mut() {
         if det.intro_match.is_none() {
-            if let Some(matching_ref) = templates
-                .models
-                .iter()
-                .filter(|m| m.kind == SegmentKind::Intro)
-                .find_map(|m| m.references.iter().find(|r| r.episode == det.episode))
-            {
-                det.intro_match = Some(marker::adaptive::VerifiedInterval {
-                    start_ms: matching_ref.match_interval_ms.0,
-                    end_ms: matching_ref.match_interval_ms.1,
-                    supporting_episodes: 2,
-                    score: 0.0,
-                    coverage: 1.0,
-                });
-            } else if let Some(ref ev) = det.intro_evidence {
+            if let Some(ref ev) = det.intro_evidence {
                 if let marker::adaptive::VerificationOutcome::Verified(v) =
                     marker::adaptive::verify_template_window(
                         mgr.fingerprint_engine.as_ref(),
@@ -264,20 +257,7 @@ pub async fn run_adaptive_season_pipeline(
             }
         }
         if det.outro_match.is_none() {
-            if let Some(matching_ref) = templates
-                .models
-                .iter()
-                .filter(|m| m.kind == SegmentKind::Outro)
-                .find_map(|m| m.references.iter().find(|r| r.episode == det.episode))
-            {
-                det.outro_match = Some(marker::adaptive::VerifiedInterval {
-                    start_ms: matching_ref.match_interval_ms.0,
-                    end_ms: matching_ref.match_interval_ms.1,
-                    supporting_episodes: 2,
-                    score: 0.0,
-                    coverage: 1.0,
-                });
-            } else if let Some(ref ev) = det.outro_evidence {
+            if let Some(ref ev) = det.outro_evidence {
                 if let marker::adaptive::VerificationOutcome::Verified(v) =
                     marker::adaptive::verify_template_window(
                         mgr.fingerprint_engine.as_ref(),
@@ -331,6 +311,39 @@ pub async fn run_adaptive_season_pipeline(
             chapter_updates.push((u.row.id.to_string(), complete));
         }
     }
+
+    // Collect timing metrics across all detections for job timing summary
+    let mut total_intro_elapsed: u64 = 0;
+    let mut total_outro_elapsed: u64 = 0;
+    let mut intro_cache_hits = 0;
+    let mut outro_cache_hits = 0;
+
+    for det in &detections {
+        if let Some(ref ev) = det.intro_evidence {
+            let elapsed = ev.capture.metrics.elapsed_ms;
+            if elapsed > 0 {
+                total_intro_elapsed += elapsed;
+            } else {
+                intro_cache_hits += 1;
+            }
+        }
+        if let Some(ref ev) = det.outro_evidence {
+            let elapsed = ev.capture.metrics.elapsed_ms;
+            if elapsed > 0 {
+                total_outro_elapsed += elapsed;
+            } else {
+                outro_cache_hits += 1;
+            }
+        }
+    }
+
+    mgr.timings.record_fingerprint(
+        Some(job_id),
+        intro_cache_hits > 0 && total_intro_elapsed == 0,
+        outro_cache_hits > 0 && total_outro_elapsed == 0,
+        total_intro_elapsed,
+        total_outro_elapsed,
+    );
 
     let replacement = MarkerResultReplacement {
         media_id,

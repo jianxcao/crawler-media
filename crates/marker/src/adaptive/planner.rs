@@ -137,10 +137,18 @@ pub fn default_full_window(
             },
         },
         SegmentKind::Outro => {
-            let dur = episode.duration_ms.max(window_ms);
-            SampleWindow {
-                start_ms: (dur - window_ms).max(0),
-                end_ms: dur,
+            let dur = episode.duration_ms;
+            if dur > 0 && dur < window_ms {
+                SampleWindow {
+                    start_ms: 0,
+                    end_ms: dur,
+                }
+            } else {
+                let actual_dur = dur.max(window_ms);
+                SampleWindow {
+                    start_ms: (actual_dur - window_ms).max(0),
+                    end_ms: actual_dur,
+                }
             }
         }
     }

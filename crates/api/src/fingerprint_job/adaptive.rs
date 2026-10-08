@@ -96,7 +96,16 @@ async fn process_segment(
             let outcome = analyze_and_verify_segment(ctx.matcher.as_ref(), request, &ev);
             let verified = match outcome {
                 VerificationOutcome::Verified(v) => Some(v),
-                _ => None,
+                VerificationOutcome::NeedsFullWindow { ref reason } => {
+                    if request.templates.models.is_empty() {
+                        None
+                    } else {
+                        return Err(format!("Full window verification failed: {reason}"));
+                    }
+                }
+                VerificationOutcome::NoMatch { ref reason } | VerificationOutcome::SamplingLimit { ref reason } => {
+                    return Err(format!("Verification failed: {reason}"));
+                }
             };
             Ok((Some(ev), verified))
         }
@@ -112,7 +121,12 @@ async fn process_segment(
                     let outcome = analyze_and_verify_segment(ctx.matcher.as_ref(), request, &fb_ev);
                     let verified = match outcome {
                         VerificationOutcome::Verified(v) => Some(v),
-                        _ => None,
+                        VerificationOutcome::NeedsFullWindow { reason } => {
+                            return Err(format!("Fallback full window verification failed: {reason}"));
+                        }
+                        VerificationOutcome::NoMatch { reason } | VerificationOutcome::SamplingLimit { reason } => {
+                            return Err(format!("Fallback verification failed: {reason}"));
+                        }
                     };
                     return Ok((Some(fb_ev), verified));
                 }
@@ -128,12 +142,17 @@ async fn process_segment(
                     let outcome2 = analyze_and_verify_segment(ctx.matcher.as_ref(), request, &fb_ev);
                     let verified2 = match outcome2 {
                         VerificationOutcome::Verified(v) => Some(v),
-                        _ => None,
+                        VerificationOutcome::NeedsFullWindow { reason } => {
+                            return Err(format!("Fallback full window verification failed: {reason}"));
+                        }
+                        VerificationOutcome::NoMatch { reason } | VerificationOutcome::SamplingLimit { reason } => {
+                            return Err(format!("Fallback verification failed: {reason}"));
+                        }
                     };
                     Ok((Some(fb_ev), verified2))
                 }
-                VerificationOutcome::NoMatch { .. } | VerificationOutcome::SamplingLimit { .. } => {
-                    Ok((Some(verify_ev), None))
+                VerificationOutcome::NoMatch { reason } | VerificationOutcome::SamplingLimit { reason } => {
+                    Err(format!("Verification failed: {reason}"))
                 }
             }
         }
@@ -183,10 +202,20 @@ async fn capture_with_retries(
 fn full_window_for_kind(duration_ms: i64, full_secs: u32, kind: SegmentKind) -> SampleWindow {
     let full_ms = (full_secs as i64) * 1000;
     match kind {
-        SegmentKind::Intro => SampleWindow::new(0, full_ms.max(1000)),
+        SegmentKind::Intro => {
+            if duration_ms > 0 {
+                SampleWindow::new(0, duration_ms.min(full_ms).max(1000))
+            } else {
+                SampleWindow::new(0, full_ms.max(1000))
+            }
+        }
         SegmentKind::Outro => {
-            let start = (duration_ms - full_ms).max(0);
-            SampleWindow::new(start, duration_ms.max(start + 1000))
+            if duration_ms > 0 && duration_ms < full_ms {
+                SampleWindow::new(0, duration_ms.max(1000))
+            } else {
+                let start = (duration_ms - full_ms).max(0);
+                SampleWindow::new(start, duration_ms.max(start + 1000))
+            }
         }
     }
 }

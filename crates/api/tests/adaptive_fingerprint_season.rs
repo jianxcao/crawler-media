@@ -258,6 +258,18 @@ async fn seed_episodes_retain_markers_after_season_template_built() {
                 None
             }
         }
+
+        fn find_common_segments(
+            &self,
+            first: &[u32],
+            second: &[u32],
+            min_duration_secs: f32,
+            max_duration_secs: f32,
+        ) -> Vec<marker::CommonSegment> {
+            self.find_common_segment(first, second, min_duration_secs, max_duration_secs)
+                .into_iter()
+                .collect()
+        }
     }
 
     let shared_engine = Arc::new(SharedMatchEngine);

@@ -100,7 +100,18 @@ pub fn build_season_models(
     for &kind in &[SegmentKind::Intro, SegmentKind::Outro] {
         let kind_evidence: Vec<&EpisodeEvidence> = evidence
             .iter()
-            .filter(|e| e.kind == kind && !is_constant_or_silent(&e.capture.words))
+            .filter(|e| {
+                if e.kind != kind || is_constant_or_silent(&e.capture.words) {
+                    return false;
+                }
+                // Disallow truncated audio captures that did not decode sufficient audio for the requested window
+                if let Some(pcm_ms) = e.capture.pcm_duration_ms {
+                    if pcm_ms < e.capture.window.duration_ms().min(policy.min_match_duration_ms + policy.min_guard_evidence_ms) {
+                        return false;
+                    }
+                }
+                true
+            })
             .collect();
 
         if kind_evidence.len() < 2 {

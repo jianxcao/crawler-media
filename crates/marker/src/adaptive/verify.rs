@@ -104,7 +104,10 @@ fn verify_against_model(
         }
     }
 
-    if ref_matches.len() < 2 {
+    let is_target_model_ref = model.references.iter().any(|r| r.episode == target.episode);
+    let min_required_matches = if is_target_model_ref { 1 } else { 2 };
+
+    if ref_matches.len() < min_required_matches {
         return Err("insufficient_reference_matches".to_string());
     }
 
@@ -132,7 +135,7 @@ fn verify_against_model(
         .collect();
 
     // Group candidates into consensus clusters where all members agree within max_reference_boundary_delta_ms.
-    // Order-independent: find the cluster with the largest support (and tie-break by lowest avg score).
+    // Order-independent: find the cluster with the largest support (and tie-break deterministically).
     let mut best_cluster: Vec<&MatchedCandidate> = Vec::new();
     for i in 0..candidates.len() {
         let mut cluster = vec![&candidates[i]];
@@ -149,18 +152,31 @@ fn verify_against_model(
                 cluster.push(&candidates[j]);
             }
         }
+        // Sort cluster elements deterministically by sample_id to remove any reference order dependency
+        cluster.sort_by(|a, b| a.sample_id.cmp(&b.sample_id));
+
         if cluster.len() > best_cluster.len() {
             best_cluster = cluster;
         } else if cluster.len() == best_cluster.len() && !cluster.is_empty() {
             let avg1: f64 = cluster.iter().map(|c| c.score).sum::<f64>() / cluster.len() as f64;
             let avg2: f64 = best_cluster.iter().map(|c| c.score).sum::<f64>() / best_cluster.len() as f64;
-            if avg1 < avg2 {
-                best_cluster = cluster;
+            let score_diff = (avg1 - avg2).abs();
+            if score_diff > 1e-6 {
+                if avg1 < avg2 {
+                    best_cluster = cluster;
+                }
+            } else {
+                // Deterministic tie-breaker: compare sorted sample_id sequences
+                let ids1: Vec<&str> = cluster.iter().map(|c| c.sample_id.as_str()).collect();
+                let ids2: Vec<&str> = best_cluster.iter().map(|c| c.sample_id.as_str()).collect();
+                if ids1 < ids2 {
+                    best_cluster = cluster;
+                }
             }
         }
     }
 
-    if best_cluster.len() < 2 {
+    if best_cluster.len() < min_required_matches {
         return Err("insufficient_consensus_reference_matches".to_string());
     }
 
@@ -197,7 +213,13 @@ fn verify_against_model(
         return Err("window_edge_left_boundary_clipped".to_string());
     }
 
-    if right_guard < policy.min_guard_evidence_ms {
+    let is_outro_media_end = target.kind == SegmentKind::Outro
+        && target
+            .duration_ms
+            .map(|dur| (dur - target_end).abs() <= policy.max_reference_boundary_delta_ms)
+            .unwrap_or(false);
+
+    if !is_outro_media_end && right_guard < policy.min_guard_evidence_ms {
         return Err("window_edge_right_boundary_clipped".to_string());
     }
 
