@@ -112,6 +112,62 @@ async fn chapters_endpoints_respond_without_embedded_chapters() {
         StatusCode::BAD_REQUEST,
         "no chapters → 400"
     );
+    let error_body = json_body(generate).await;
+    assert_eq!(
+        error_body["error"]["code"],
+        "chapters.none",
+        "error code should be chapters.none"
+    );
+}
+
+#[tokio::test]
+async fn chapters_generate_with_voiceprint_markers() {
+    use std::str::FromStr;
+    let tmp = tempfile::tempdir().unwrap();
+    let fetcher = Arc::new(Fixtures {
+        requests: Mutex::new(Vec::new()),
+        bodies: HashMap::new(),
+    });
+    let downloader = Arc::new(MemoryDownloader::new(tmp.path().join("stage")));
+    let api_state = state(tmp.path(), fetcher, downloader);
+    let app = router(api_state.clone());
+    let (movie_id, media_id) = seed(&tmp, &app).await;
+
+    // 预置片头片尾标记
+    let m_id = domain::MediaId::from_str(&media_id).unwrap();
+    {
+        let store_arc = api_state.store();
+        let store = store_arc.lock();
+        store.put_media_marker(&api::store::StoredMediaMarker {
+            media_id: m_id,
+            season: 1,
+            episode: 1,
+            intro_start_ms: Some(10_000),
+            intro_end_ms: Some(90_000),
+            outro_start_ms: Some(1_200_000),
+            outro_end_ms: Some(1_300_000),
+            source: "voiceprint".into(),
+            locked: false,
+            updated_at: 1,
+        }).unwrap();
+    }
+
+    let generate = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            &format!("/api/v1/libraries/{movie_id}/items/{media_id}/chapters/generate"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+
+    // 伪造文件无真实视频流，ffmpeg 提取帧会失败，但能证明不再报 chapters.none 400
+    let res = json_body(generate).await;
+    assert_eq!(res["ok"], true);
+    // marker::build_complete_timeline_chapters 拆分成4段（序幕、片头、正片、片尾）
+    assert_eq!(res["data"]["total"], 4);
 }
 
 #[tokio::test]

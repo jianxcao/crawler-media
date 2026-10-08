@@ -49,23 +49,33 @@ pub(crate) fn auto_generate_chapters(state: &ApiState, path: &std::path::Path) {
     let _ = generate_chapter_frames(path);
 }
 
-fn generate_chapter_frames(path: &std::path::Path) -> Option<(usize, usize)> {
-    let Some(chapters) = library::probe_chapters(path) else {
-        return None;
-    };
+fn generate_chapter_frames_for_targets(
+    path: &std::path::Path,
+    targets: &[(i64, i64)],
+) -> (usize, usize) {
     let mut generated = 0usize;
-    for (index, chapter) in chapters.iter().enumerate() {
+    for (index, &(start_ms, end_ms)) in targets.iter().enumerate() {
         let out = chapter_image_path(path, index);
         if out.is_file() {
             generated += 1;
             continue;
         }
-        let midpoint = chapter.start_ms + (chapter.end_ms - chapter.start_ms) / 2;
+        let midpoint = if end_ms > start_ms {
+            start_ms + (end_ms - start_ms) / 2
+        } else {
+            start_ms
+        };
         if library::extract_frame(path, midpoint, &out).is_ok() {
             generated += 1;
         }
     }
-    Some((generated, chapters.len()))
+    (generated, targets.len())
+}
+
+fn generate_chapter_frames(path: &std::path::Path) -> Option<(usize, usize)> {
+    let chapters = library::probe_chapters(path)?;
+    let targets: Vec<(i64, i64)> = chapters.iter().map(|c| (c.start_ms, c.end_ms)).collect();
+    Some(generate_chapter_frames_for_targets(path, &targets))
 }
 
 fn chapter_image_path(video: &std::path::Path, index: usize) -> std::path::PathBuf {
@@ -429,7 +439,7 @@ pub(crate) async fn generate_chapters(
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
     };
-    let row = {
+    let (row, media) = {
         let store = state.store.lock();
         let Some(library) = store.get_library(&id).ok().flatten() else {
             return err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在");
@@ -453,20 +463,50 @@ pub(crate) async fn generate_chapters(
                 "条目没有在位文件",
             );
         };
-        row
+        (row, media)
     };
-    let path = std::path::PathBuf::from(row.path);
-    let generated = tokio::task::spawn_blocking(move || generate_chapter_frames(&path))
-        .await
-        .ok()
-        .flatten();
-    let Some((generated, total)) = generated else {
+    let path = std::path::PathBuf::from(row.path.clone());
+    let mut targets: Vec<(i64, i64)> = match tokio::task::spawn_blocking({
+        let path = path.clone();
+        move || library::probe_chapters(&path)
+    })
+    .await
+    .ok()
+    .flatten()
+    {
+        Some(chapters) => chapters.iter().map(|c| (c.start_ms, c.end_ms)).collect(),
+        None => Vec::new(),
+    };
+
+    if targets.is_empty() {
+        let theintrodb_client = {
+            let store = state.store.lock();
+            let cfg = store.get_scrape_config().ok();
+            let eff = cfg.as_ref().map(|config| &config.effective);
+            let enabled = eff.map(|config| config.theintrodb_enabled).unwrap_or(true);
+            let key = eff.and_then(|config| config.theintrodb_api_key.clone());
+            (enabled && key.is_some()).then(|| crate::theintrodb::TheIntroDbClient::new(key))
+        };
+        let resolved =
+            crate::marker_resolver::resolve_item_chapters(&state, &row, &media, theintrodb_client)
+                .await;
+        targets = resolved.iter().map(|c| (c.start_ms, c.end_ms)).collect();
+    }
+
+    if targets.is_empty() {
         return err(
             StatusCode::BAD_REQUEST,
             "chapters.none",
-            "该文件没有内嵌章节",
+            "该文件没有内嵌章节且无可用片头片尾标记",
         );
-    };
+    }
+
+    let (generated, total) = tokio::task::spawn_blocking(move || {
+        generate_chapter_frames_for_targets(&path, &targets)
+    })
+    .await
+    .unwrap_or((0, 0));
+
     ok(json!({ "generated": generated, "total": total })).into_response()
 }
 
