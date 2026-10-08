@@ -90,9 +90,15 @@ pub(crate) fn trigger_scene_frames_for_chapter_updates(
             .flatten()
             .map(|r| std::path::PathBuf::from(r.path));
         if let Some(path) = row_path {
-            tokio::task::spawn_blocking(move || {
-                generate_chapter_frames_for_targets(&path, &targets);
-            });
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn_blocking(move || {
+                    generate_chapter_frames_for_targets(&path, &targets);
+                });
+            } else {
+                std::thread::spawn(move || {
+                    generate_chapter_frames_for_targets(&path, &targets);
+                });
+            }
         }
     }
 }
