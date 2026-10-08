@@ -34,13 +34,19 @@ pub fn find_reusable_sample(
         s.window_start_ms <= window.start_ms && s.window_end_ms >= window.end_ms
     })?;
 
-    Some(stored_sample_to_evidence(&matched, request.row.episode.unwrap_or(1), kind))
+    Some(stored_sample_to_evidence(
+        &matched,
+        request.row.episode.unwrap_or(1),
+        kind,
+        request.media_duration_ms,
+    ))
 }
 
 pub fn stored_sample_to_evidence(
     stored: &StoredFingerprintSample,
     episode: u32,
     kind: SegmentKind,
+    duration_ms: Option<i64>,
 ) -> EpisodeEvidence {
     let metrics: CaptureMetrics = serde_json::from_str(&stored.metrics_json).unwrap_or_default();
     EpisodeEvidence {
@@ -59,6 +65,6 @@ pub fn stored_sample_to_evidence(
             pcm_duration_ms: stored.pcm_duration_ms,
             metrics,
         },
-        duration_ms: None,
+        duration_ms,
     }
 }

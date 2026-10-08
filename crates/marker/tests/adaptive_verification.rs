@@ -638,3 +638,113 @@ fn multiple_template_models_tries_second_model_when_first_fails() {
         outcome
     );
 }
+
+#[test]
+fn conflicting_third_reference_excluded_from_support_and_order_independent() {
+    let mut engine = MockVerificationEngine::default();
+    let policy = SamplingPolicy::default();
+
+    let mut templates = TemplateContext::default();
+    let model = TemplateModel {
+        model_id: "tpl-1".to_string(),
+        version: 1,
+        kind: SegmentKind::Intro,
+        expected_duration_ms: 90_000,
+        is_stable: true,
+        references: vec![
+            TemplateReference {
+                sample_id: "ref-s1".to_string(),
+                ledger_id: "led-1".to_string(),
+                episode: 1,
+                source_version: "v1".to_string(),
+                match_interval_ms: (5_000, 95_000),
+                match_from_end_ms: None,
+            },
+            TemplateReference {
+                sample_id: "ref-s2".to_string(),
+                ledger_id: "led-2".to_string(),
+                episode: 2,
+                source_version: "v1".to_string(),
+                match_interval_ms: (5_000, 95_000),
+                match_from_end_ms: None,
+            },
+            TemplateReference {
+                sample_id: "ref-s3".to_string(),
+                ledger_id: "led-3".to_string(),
+                episode: 3,
+                source_version: "v1".to_string(),
+                match_interval_ms: (5_000, 95_000),
+                match_from_end_ms: None,
+            },
+        ],
+    };
+    templates.models.push(model);
+    templates.references.insert(
+        "ref-s1".to_string(),
+        make_target_evidence("ref-s1", 1, SegmentKind::Intro, 1000, 0, 180_000),
+    );
+    templates.references.insert(
+        "ref-s2".to_string(),
+        make_target_evidence("ref-s2", 2, SegmentKind::Intro, 2000, 0, 180_000),
+    );
+    templates.references.insert(
+        "ref-s3".to_string(),
+        make_target_evidence("ref-s3", 3, SegmentKind::Intro, 3000, 0, 180_000),
+    );
+
+    let target = make_target_evidence("target-s", 4, SegmentKind::Intro, 4000, 0, 180_000);
+
+    // Ref 1 agrees with Ref 2: target [5.0s, 95.0s]
+    let seg1 = CommonSegment {
+        start1_sec: 5.0,
+        end1_sec: 95.0,
+        start2_sec: 5.0,
+        end2_sec: 95.0,
+        duration_sec: 90.0,
+        score: 1.0,
+    };
+    let seg2 = CommonSegment {
+        start1_sec: 5.0,
+        end1_sec: 95.0,
+        start2_sec: 5.0,
+        end2_sec: 95.0,
+        duration_sec: 90.0,
+        score: 1.0,
+    };
+    // Ref 3 is conflicting on target: target [40.0s, 130.0s] (outside tolerance delta)
+    let seg3 = CommonSegment {
+        start1_sec: 40.0,
+        end1_sec: 130.0,
+        start2_sec: 5.0,
+        end2_sec: 95.0,
+        duration_sec: 90.0,
+        score: 1.0,
+    };
+
+    engine.returns.insert((4000, 1000), vec![seg1]);
+    engine.returns.insert((4000, 2000), vec![seg2]);
+    engine.returns.insert((4000, 3000), vec![seg3]);
+
+    let outcome = verify_template_window(&engine, &target, &templates, &policy);
+    match outcome {
+        VerificationOutcome::Verified(v) => {
+            // Ref 3 was conflicting, so supporting_episodes must be 2, NOT 3!
+            assert_eq!(v.supporting_episodes, 2, "Conflicting reference should not be counted");
+            assert_eq!(v.start_ms, 5_000);
+            assert_eq!(v.end_ms, 95_000);
+        }
+        other => panic!("Expected verified with 2 supporting episodes, got: {:?}", other),
+    }
+
+    // Now reverse the model references order so the conflicting one is first
+    templates.models[0].references.reverse();
+    let outcome_reversed = verify_template_window(&engine, &target, &templates, &policy);
+    match outcome_reversed {
+        VerificationOutcome::Verified(v) => {
+            assert_eq!(v.supporting_episodes, 2, "Order must not affect consensus outcome");
+            assert_eq!(v.start_ms, 5_000);
+            assert_eq!(v.end_ms, 95_000);
+        }
+        other => panic!("Expected verified regardless of order, got: {:?}", other),
+    }
+}

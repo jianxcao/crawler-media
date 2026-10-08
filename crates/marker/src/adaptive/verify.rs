@@ -108,26 +108,64 @@ fn verify_against_model(
         return Err("insufficient_reference_matches".to_string());
     }
 
-    // Check boundary agreement between references
-    let first = &ref_matches[0].1;
-    let second = &ref_matches[1].1;
-
-    let target_start1 = target.capture.window.start_ms + (first.start1_sec * 1000.0).round() as i64;
-    let target_end1 = target.capture.window.start_ms + (first.end1_sec * 1000.0).round() as i64;
-    let target_start2 = target.capture.window.start_ms + (second.start1_sec * 1000.0).round() as i64;
-    let target_end2 = target.capture.window.start_ms + (second.end1_sec * 1000.0).round() as i64;
-
-    let start_delta = (target_start1 - target_start2).abs();
-    let end_delta = (target_end1 - target_end2).abs();
-
-    if start_delta > policy.max_reference_boundary_delta_ms
-        || end_delta > policy.max_reference_boundary_delta_ms
-    {
-        return Err("conflicting_references_boundary_delta".to_string());
+    // Find candidate target intervals for all matched references
+    #[allow(dead_code)]
+    struct MatchedCandidate {
+        sample_id: String,
+        target_start: i64,
+        target_end: i64,
+        score: f64,
     }
 
-    let target_start = target_start1.min(target_start2);
-    let target_end = target_end1.max(target_end2);
+    let candidates: Vec<MatchedCandidate> = ref_matches
+        .into_iter()
+        .map(|(sid, s)| {
+            let s_start = target.capture.window.start_ms + (s.start1_sec * 1000.0).round() as i64;
+            let s_end = target.capture.window.start_ms + (s.end1_sec * 1000.0).round() as i64;
+            MatchedCandidate {
+                sample_id: sid,
+                target_start: s_start,
+                target_end: s_end,
+                score: s.score,
+            }
+        })
+        .collect();
+
+    // Group candidates into consensus clusters where all members agree within max_reference_boundary_delta_ms.
+    // Order-independent: find the cluster with the largest support (and tie-break by lowest avg score).
+    let mut best_cluster: Vec<&MatchedCandidate> = Vec::new();
+    for i in 0..candidates.len() {
+        let mut cluster = vec![&candidates[i]];
+        for j in 0..candidates.len() {
+            if i == j {
+                continue;
+            }
+            // Candidate j joins the cluster if it agrees with all existing members of the cluster
+            let matches_all = cluster.iter().all(|c| {
+                (c.target_start - candidates[j].target_start).abs() <= policy.max_reference_boundary_delta_ms
+                    && (c.target_end - candidates[j].target_end).abs() <= policy.max_reference_boundary_delta_ms
+            });
+            if matches_all {
+                cluster.push(&candidates[j]);
+            }
+        }
+        if cluster.len() > best_cluster.len() {
+            best_cluster = cluster;
+        } else if cluster.len() == best_cluster.len() && !cluster.is_empty() {
+            let avg1: f64 = cluster.iter().map(|c| c.score).sum::<f64>() / cluster.len() as f64;
+            let avg2: f64 = best_cluster.iter().map(|c| c.score).sum::<f64>() / best_cluster.len() as f64;
+            if avg1 < avg2 {
+                best_cluster = cluster;
+            }
+        }
+    }
+
+    if best_cluster.len() < 2 {
+        return Err("insufficient_consensus_reference_matches".to_string());
+    }
+
+    let target_start = best_cluster.iter().map(|c| c.target_start).min().unwrap();
+    let target_end = best_cluster.iter().map(|c| c.target_end).max().unwrap();
     let matched_duration = target_end - target_start;
 
     // Check coverage against model expected duration
@@ -163,12 +201,12 @@ fn verify_against_model(
         return Err("window_edge_right_boundary_clipped".to_string());
     }
 
-    let avg_score = (first.score + second.score) as f64 / 2.0;
+    let avg_score = best_cluster.iter().map(|c| c.score).sum::<f64>() / best_cluster.len() as f64;
 
     Ok(VerifiedInterval {
         start_ms: target_start,
         end_ms: target_end,
-        supporting_episodes: ref_matches.len(),
+        supporting_episodes: best_cluster.len(),
         score: avg_score,
         coverage,
     })

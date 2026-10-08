@@ -130,12 +130,19 @@ pub fn default_full_window(
     match kind {
         SegmentKind::Intro => SampleWindow {
             start_ms: 0,
-            end_ms: episode.duration_ms.min(window_ms),
+            end_ms: if episode.duration_ms > 0 {
+                episode.duration_ms.min(window_ms)
+            } else {
+                window_ms
+            },
         },
-        SegmentKind::Outro => SampleWindow {
-            start_ms: (episode.duration_ms - window_ms).max(0),
-            end_ms: episode.duration_ms,
-        },
+        SegmentKind::Outro => {
+            let dur = episode.duration_ms.max(window_ms);
+            SampleWindow {
+                start_ms: (dur - window_ms).max(0),
+                end_ms: dur,
+            }
+        }
     }
 }
 

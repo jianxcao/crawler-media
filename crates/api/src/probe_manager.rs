@@ -59,8 +59,8 @@ pub struct ProbeManager {
     seen: Mutex<HashSet<String>>,
     last_failure: Mutex<HashMap<String, Instant>>,
     next_marker_refresh_id: AtomicU64,
-    metadata_pending: AtomicUsize,
-    metadata_idle: Notify,
+    pub(crate) metadata_pending: Arc<AtomicUsize>,
+    pub(crate) metadata_idle: Arc<Notify>,
     timings: timings::ProbeTimingLedger,
     /// Metadata workers share the high-priority queue; voiceprint has its own worker.
     metadata_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<ProbeUnit>>>,
@@ -95,14 +95,18 @@ impl ProbeManager {
             seen: Mutex::new(HashSet::new()),
             last_failure: Mutex::new(HashMap::new()),
             next_marker_refresh_id: AtomicU64::new(1),
-            metadata_pending: AtomicUsize::new(0),
-            metadata_idle: Notify::new(),
+            metadata_pending: Arc::new(AtomicUsize::new(0)),
+            metadata_idle: Arc::new(Notify::new()),
             timings: timings::ProbeTimingLedger::default(),
             metadata_rx: Arc::new(tokio::sync::Mutex::new(metadata_rx)),
             fingerprint_rx: Arc::new(tokio::sync::Mutex::new(fingerprint_rx)),
         };
         manager.recover_pending_jobs();
         manager
+    }
+
+    pub fn priority_gate(&self) -> Arc<dyn crate::fingerprint_job::CaptureGate> {
+        Arc::new(progress::MetadataPriorityGate::from_manager(self))
     }
 
     /// 入队探测（幂等：已在队列/执行中的跳过）。

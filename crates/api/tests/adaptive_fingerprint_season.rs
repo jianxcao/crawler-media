@@ -154,3 +154,162 @@ fn database_failure_rolls_back_markers_chapters_and_job_terminal() {
         .unwrap();
     assert_eq!(visible_marker.intro_end_ms, Some(104_000));
 }
+
+#[tokio::test]
+async fn seed_episodes_retain_markers_after_season_template_built() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let media_id = MediaId::new();
+    store
+        .lock()
+        .insert_media(&domain::Media {
+            id: media_id,
+            kind: MediaKind::Tv,
+            title: "Test Retain".into(),
+            year: None,
+            original_title: None,
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+
+    let row1 = domain::LedgerRow {
+        id: LedgerId::new(),
+        media_id,
+        path: "Test.Retain.S01E01.mkv".into(),
+        season: Some(1),
+        episode: Some(1),
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: None,
+    };
+    let row2 = domain::LedgerRow {
+        id: LedgerId::new(),
+        media_id,
+        path: "Test.Retain.S01E02.mkv".into(),
+        season: Some(1),
+        episode: Some(2),
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: None,
+    };
+    store.lock().insert_ledger(&row1).unwrap();
+    store.lock().insert_ledger(&row2).unwrap();
+
+    struct SharedMatchEngine;
+    impl marker::fingerprint::capture_types::FingerprintCaptureEngine for SharedMatchEngine {
+        fn capture_window(
+            &self,
+            request: &marker::fingerprint::capture_types::CaptureRequest,
+        ) -> Result<marker::fingerprint::capture_types::CapturedFingerprint, marker::fingerprint::capture_types::CaptureFailure> {
+            let dur_ms = request.window.duration_ms();
+            // Generate identical fingerprint pattern so both seeds match each other
+            let num_words = (dur_ms / 128).max(1) as usize;
+            let words = (0..num_words).map(|i| (i as u32) + 42).collect();
+            Ok(marker::fingerprint::capture_types::CapturedFingerprint {
+                window: request.window.clone(),
+                words,
+                pcm_duration_ms: Some(dur_ms),
+                metrics: marker::fingerprint::capture_types::CaptureMetrics {
+                    elapsed_ms: 10,
+                    pcm_bytes: (num_words * 4) as u64,
+                    ..Default::default()
+                },
+            })
+        }
+    }
+
+    impl marker::FingerprintEngine for SharedMatchEngine {
+        fn extract_at(
+            &self,
+            _path: &std::path::Path,
+            _start_secs: u32,
+            _duration_secs: u32,
+        ) -> Result<marker::AudioFingerprint, String> {
+            Ok(vec![42; 100])
+        }
+
+        fn find_common_segment(
+            &self,
+            first: &[u32],
+            second: &[u32],
+            _min_duration_secs: f32,
+            _max_duration_secs: f32,
+        ) -> Option<marker::CommonSegment> {
+            if !first.is_empty() && !second.is_empty() {
+                Some(marker::CommonSegment {
+                    start1_sec: 10.0,
+                    end1_sec: 90.0,
+                    start2_sec: 10.0,
+                    end2_sec: 90.0,
+                    duration_sec: 80.0,
+                    score: 0.95,
+                })
+            } else {
+                None
+            }
+        }
+    }
+
+    let shared_engine = Arc::new(SharedMatchEngine);
+    let mgr = ProbeManager::with_engines(store.clone(), shared_engine.clone(), shared_engine);
+
+    let unit1 = ProbeUnit {
+        row: row1.clone(),
+        kind: MediaKind::Tv,
+        force_fingerprint: true,
+        reuse_fingerprint_cache: false,
+        overwrite_markers: true,
+        reuse_media_info_cache: true,
+        marker_refresh_id: None,
+        job_id: None,
+    };
+    let unit2 = ProbeUnit {
+        row: row2.clone(),
+        kind: MediaKind::Tv,
+        force_fingerprint: true,
+        reuse_fingerprint_cache: false,
+        overwrite_markers: true,
+        reuse_media_info_cache: true,
+        marker_refresh_id: None,
+        job_id: None,
+    };
+
+    let units = vec![unit1, unit2];
+    let res = api::probe_manager::season::run_adaptive_season_pipeline(
+        &mgr,
+        "test-season-retain",
+        media_id,
+        1,
+        &units,
+    )
+    .await;
+
+    assert!(res.is_ok(), "adaptive season pipeline should succeed: {:?}", res.err());
+    let replacement = res.unwrap();
+
+    // Verify both episode 1 and episode 2 markers exist and intro is populated!
+    let ep1_marker = replacement.markers.iter().find(|m| m.episode == 1);
+    let ep2_marker = replacement.markers.iter().find(|m| m.episode == 2);
+
+    assert!(ep1_marker.is_some(), "Episode 1 (seed) marker must not be missing!");
+    assert!(ep2_marker.is_some(), "Episode 2 (seed) marker must not be missing!");
+
+    let ep1 = ep1_marker.unwrap();
+    let ep2 = ep2_marker.unwrap();
+
+    assert!(ep1.intro_start_ms.is_some(), "Episode 1 intro start must be populated!");
+    assert!(ep1.intro_end_ms.is_some(), "Episode 1 intro end must be populated!");
+    assert!(ep2.intro_start_ms.is_some(), "Episode 2 intro start must be populated!");
+    assert!(ep2.intro_end_ms.is_some(), "Episode 2 intro end must be populated!");
+}
+

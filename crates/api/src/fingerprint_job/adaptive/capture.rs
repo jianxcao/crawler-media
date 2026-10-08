@@ -87,7 +87,14 @@ pub async fn capture_or_reuse_segment_sample(
         process_deadline_ms: request.policy.process_deadline_ms,
     };
 
-    let capture_res = ctx.capture.capture_window(&capture_req);
+    let capture = ctx.capture.clone();
+    let capture_res = if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::task::spawn_blocking(move || capture.capture_window(&capture_req))
+            .await
+            .map_err(|e| format!("Capture task panicked or failed: {e}"))?
+    } else {
+        capture.capture_window(&capture_req)
+    };
     let finished_at_ms = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -144,6 +151,7 @@ pub async fn capture_or_reuse_segment_sample(
                 &sample,
                 request.row.episode.unwrap_or(1),
                 kind,
+                request.media_duration_ms,
             ))
         }
         Err(err) => {

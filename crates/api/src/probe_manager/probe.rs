@@ -115,7 +115,19 @@ pub(super) async fn probe_fingerprint(mgr: &ProbeManager, work: &FingerprintWork
             .unwrap_or_else(|| "full_window".to_string())
     };
 
-    if sampling_mode == "adaptive" && unit.kind == domain::MediaKind::Tv && unit.marker_refresh_id.is_none() {
+    if sampling_mode == "adaptive" && unit.kind == domain::MediaKind::Tv {
+        if unit.marker_refresh_id.is_some() {
+            tracing::info!(
+                job_id = ?job_id,
+                media_id = %unit.row.media_id,
+                season = unit.row.season.unwrap_or(1),
+                episode = unit.row.episode.unwrap_or(1),
+                ledger_id = %unit.row.id,
+                "【自适应声纹】刷新任务由整季管道统一执行，单集单元跳过重复的旧全量采集"
+            );
+            return true;
+        }
+
         let season = unit.row.season.unwrap_or(1);
         let season_units: Vec<ProbeUnit> = {
             let store = mgr.store.lock();

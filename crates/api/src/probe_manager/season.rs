@@ -29,7 +29,7 @@ pub struct SeasonSamplingPlan {
     pub seed_ledger_ids: Vec<String>,
 }
 
-pub(crate) async fn run_adaptive_season_pipeline(
+pub async fn run_adaptive_season_pipeline(
     mgr: &ProbeManager,
     job_id: &str,
     media_id: MediaId,
@@ -86,7 +86,7 @@ pub(crate) async fn run_adaptive_season_pipeline(
         seed_ledger_ids: seed_ids.clone(),
     };
 
-    let gate = Arc::new(crate::fingerprint_job::adaptive::NoopGate);
+    let gate = mgr.priority_gate();
     let ctx = AdaptiveCaptureContext {
         store: mgr.store.clone(),
         matcher: mgr.fingerprint_engine.clone(),
@@ -199,6 +199,96 @@ pub(crate) async fn run_adaptive_season_pipeline(
                 templates.references.insert(ev.sample_id.clone(), ev.clone());
             }
             templates.models = models;
+
+            // 模板形成后，立即重新分析之前的建模集，回填匹配区间，避免建模集的标记丢失
+            for det in detections.iter_mut() {
+                if det.intro_match.is_none() {
+                    if let Some(ref ev) = det.intro_evidence {
+                        if let marker::adaptive::VerificationOutcome::Verified(v) =
+                            marker::adaptive::verify_template_window(
+                                mgr.fingerprint_engine.as_ref(),
+                                ev,
+                                &templates,
+                                &policy,
+                            )
+                        {
+                            det.intro_match = Some(v);
+                        }
+                    }
+                }
+                if det.outro_match.is_none() {
+                    if let Some(ref ev) = det.outro_evidence {
+                        if let marker::adaptive::VerificationOutcome::Verified(v) =
+                            marker::adaptive::verify_template_window(
+                                mgr.fingerprint_engine.as_ref(),
+                                ev,
+                                &templates,
+                                &policy,
+                            )
+                        {
+                            det.outro_match = Some(v);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 在最终构建标记前，对所有仍未匹配的单元进行回填
+    for det in detections.iter_mut() {
+        if det.intro_match.is_none() {
+            if let Some(matching_ref) = templates
+                .models
+                .iter()
+                .filter(|m| m.kind == SegmentKind::Intro)
+                .find_map(|m| m.references.iter().find(|r| r.episode == det.episode))
+            {
+                det.intro_match = Some(marker::adaptive::VerifiedInterval {
+                    start_ms: matching_ref.match_interval_ms.0,
+                    end_ms: matching_ref.match_interval_ms.1,
+                    supporting_episodes: 2,
+                    score: 0.0,
+                    coverage: 1.0,
+                });
+            } else if let Some(ref ev) = det.intro_evidence {
+                if let marker::adaptive::VerificationOutcome::Verified(v) =
+                    marker::adaptive::verify_template_window(
+                        mgr.fingerprint_engine.as_ref(),
+                        ev,
+                        &templates,
+                        &policy,
+                    )
+                {
+                    det.intro_match = Some(v);
+                }
+            }
+        }
+        if det.outro_match.is_none() {
+            if let Some(matching_ref) = templates
+                .models
+                .iter()
+                .filter(|m| m.kind == SegmentKind::Outro)
+                .find_map(|m| m.references.iter().find(|r| r.episode == det.episode))
+            {
+                det.outro_match = Some(marker::adaptive::VerifiedInterval {
+                    start_ms: matching_ref.match_interval_ms.0,
+                    end_ms: matching_ref.match_interval_ms.1,
+                    supporting_episodes: 2,
+                    score: 0.0,
+                    coverage: 1.0,
+                });
+            } else if let Some(ref ev) = det.outro_evidence {
+                if let marker::adaptive::VerificationOutcome::Verified(v) =
+                    marker::adaptive::verify_template_window(
+                        mgr.fingerprint_engine.as_ref(),
+                        ev,
+                        &templates,
+                        &policy,
+                    )
+                {
+                    det.outro_match = Some(v);
+                }
+            }
         }
     }
 
