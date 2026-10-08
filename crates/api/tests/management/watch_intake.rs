@@ -154,3 +154,37 @@ async fn watch_intake_partial_success_records_non_conflicting_files() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["media_title"], "The Matrix");
 }
+
+#[tokio::test]
+async fn watch_intake_transfers_nested_tv_show_subdirectories() {
+    let tmp = tempfile::tempdir().unwrap();
+    let intake = tmp.path().join("intake");
+    let show_dir = intake.join("法医秦明之龙番往事");
+    std::fs::create_dir_all(&show_dir).unwrap();
+    std::fs::write(show_dir.join("法医秦明之龙番往事.S01E01.1080p.mkv"), b"tv-data-ep1").unwrap();
+    std::fs::write(show_dir.join("法医秦明之龙番往事.S01E02.1080p.mkv"), b"tv-data-ep2").unwrap();
+
+    let app = app(&tmp);
+    put_intake(&app, &tmp, &intake).await;
+    tick(&app, 1).await;
+
+    let listed = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/api/v1/ledger",
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    let rows = json_data(listed).await;
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    // 电视剧应当转移到了 tv 媒体库目录下且保留子目录结构
+    for row in rows {
+        let p = row["path"].as_str().unwrap();
+        assert!(p.contains("tv/法医秦明之龙番往事/"));
+        assert!(std::path::Path::new(p).is_file());
+    }
+}

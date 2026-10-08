@@ -58,8 +58,56 @@ pub fn run(state: &ApiState) -> Result<(), String> {
         }
         crate::watch_ledger::record_paths(&store, transferred.clone())?;
     }
-    let probe_paths: Vec<PathBuf> = transferred.into_iter().map(|t| t.path).collect();
+
+    // 为没有 TMDB ID 的影视条目自动匹配 TMDB 元数据与海报
+    let unresolved_media = {
+        let store = state.store.lock();
+        let mut map = std::collections::HashMap::new();
+        for dest in &transferred {
+            if let Ok(Some(row)) = store.ledger_by_path(&dest.path.display().to_string()) {
+                if let Ok(Some(m)) = store.get_media(row.media_id) {
+                    if m.tmdb_id.is_none() && m.kind != domain::MediaKind::Video {
+                        map.entry(m.id).or_insert((m, dest.path.clone()));
+                    }
+                }
+            }
+        }
+        map
+    };
+    for (_, (media, dest)) in unresolved_media {
+        let _ = crate::auto_resolve::auto_resolve_media(state, &media, &dest);
+    }
+
+    let probe_paths: Vec<PathBuf> = transferred.iter().map(|t| t.path.clone()).collect();
     crate::http::library::enqueue_probes_for_paths(state, probe_paths);
+
+    // 自动补封面：目标媒体库目录下缺 poster.jpg 的文件从 TMDB 拉海报 + 背板
+    let targets: Vec<(domain::MediaId, PathBuf)> = {
+        let store = state.store.lock();
+        transferred
+            .iter()
+            .filter_map(|t| {
+                let row = store.ledger_by_path(&t.path.display().to_string()).ok().flatten()?;
+                let missing_poster = t
+                    .path
+                    .parent()
+                    .map(|dir| !dir.join("poster.jpg").is_file())
+                    .unwrap_or(false);
+                if missing_poster {
+                    Some((row.media_id, t.path.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+    for (media_id, row_path) in targets {
+        let Some(real) = state.store.lock().get_media(media_id).ok().flatten() else {
+            continue;
+        };
+        let _ = crate::poster_fetch::attach_poster(state, &real, &row_path);
+        let _ = crate::poster_fetch::attach_backdrop(state, &real, &row_path);
+    }
     if !outcome.errors.is_empty() {
         let err_msgs: Vec<String> = outcome
             .errors

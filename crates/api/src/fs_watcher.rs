@@ -247,6 +247,19 @@ fn current_dirs_to_watch(state: &ApiState) -> Result<HashSet<PathBuf>, store::St
     Ok(dirs)
 }
 
+fn is_path_in_watch_intake(state: &ApiState, path: &Path) -> bool {
+    let Ok(Some(intake)) = state.store.lock().watch_intake() else {
+        return false;
+    };
+    if intake.is_empty() {
+        return false;
+    }
+    let intake_buf = PathBuf::from(&intake);
+    let resolved_intake = std::fs::canonicalize(&intake_buf).unwrap_or(intake_buf);
+    let resolved_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    resolved_path.starts_with(&resolved_intake) || path.starts_with(&intake)
+}
+
 fn realtime_library_root_for_path(state: &ApiState, path: &Path) -> Option<PathBuf> {
     let resolved_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     state
@@ -376,6 +389,10 @@ pub fn handle_fs_events(
         } else {
             // 文件或目录新建或修改
             tracing::info!(path = %path.display(), is_dir = path.is_dir(), is_strm, "检测到文件或目录新建或修改");
+            if is_path_in_watch_intake(state, &path) {
+                // 如果变动路径位于 watch_intake 监控目录内（无论是新增文件夹还是视频文件），立即标记触发 intake
+                has_intake_or_download_change = true;
+            }
             if path.is_dir() {
                 // 如果是新增/移入的目录，查找其所属的实时媒体库
                 if let Some(root) = realtime_library_root_for_path(state, &path) {

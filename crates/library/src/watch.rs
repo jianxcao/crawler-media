@@ -195,16 +195,75 @@ fn walk_in_place(
 
 fn intake(job: &WatchJob, media: &Media) -> Result<WatchOutcome, LibraryError> {
     let mut outcome = WatchOutcome::default();
-    for entry in fs::read_dir(&job.path)? {
+    walk_intake(&job.path, job, media, &mut outcome)?;
+    Ok(outcome)
+}
+
+fn walk_intake(
+    current_dir: &std::path::Path,
+    job: &WatchJob,
+    media: &Media,
+    outcome: &mut WatchOutcome,
+) -> Result<(), LibraryError> {
+    for entry in fs::read_dir(current_dir)? {
         let path = entry?.path();
-        if !path.is_file() || !is_video_file(&path) {
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(_) => continue,
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
+            walk_intake(&path, job, media, outcome)?;
+            continue;
+        }
+        if !meta.is_file() || !is_video_file(&path) {
             continue;
         }
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
-        let parsed = release::parse(name);
+        let mut parsed = release::parse(name);
+        if parsed.confidence == Confidence::Low {
+            if let Some(parent) = path.parent() {
+                let nfo_cand = path.with_extension("nfo");
+                let nfo_file = if nfo_cand.is_file() {
+                    Some(nfo_cand)
+                } else {
+                    fs::read_dir(parent).ok().and_then(|entries| {
+                        entries.filter_map(Result::ok).find_map(|e| {
+                            let p = e.path();
+                            (p.extension().and_then(|s| s.to_str()) == Some("nfo")).then_some(p)
+                        })
+                    })
+                };
+                if let Some(nfo_p) = nfo_file {
+                    if let Ok(content) = fs::read_to_string(&nfo_p) {
+                        if let Some(meta) = crate::nfo::parse_nfo(&content) {
+                            if let Some(title) = meta.title {
+                                if !title.trim().is_empty() {
+                                    parsed.title = title;
+                                    parsed.year = meta.year.and_then(|y| y.parse::<u16>().ok());
+                                    parsed.confidence = Confidence::High;
+                                }
+                            }
+                        }
+                    }
+                }
+                if parsed.confidence == Confidence::Low {
+                    if let Some(parent_name) = parent.file_name().and_then(|n| n.to_str()) {
+                        let parent_parsed = release::parse(parent_name);
+                        if parent_parsed.confidence != Confidence::Low {
+                            parsed.title = parent_parsed.title;
+                            parsed.year = parent_parsed.year;
+                            parsed.confidence = parent_parsed.confidence;
+                        }
+                    }
+                }
+            }
+        }
         if parsed.confidence == Confidence::Low {
             outcome.unidentified.push(Unidentified {
                 path,
@@ -218,7 +277,12 @@ fn intake(job: &WatchJob, media: &Media) -> Result<WatchOutcome, LibraryError> {
         } else {
             &job.library_root
         };
-        let dest = target_root.join(name);
+
+        // 如果文件位于子目录中（例如 watch/Show Title/S01E01.mp4 或 watch/Show Title/Season 1/S01E01.mp4），
+        // 在目标库中保持相同的相对层级结构，避免把各集直接平铺到电视剧库根目录下
+        let rel_path = path.strip_prefix(&job.path).unwrap_or(&path);
+        let dest = target_root.join(rel_path);
+
         if dest.exists() {
             // B07: hardlink 模式源文件仍留存，下次轮询会再次遇到同一个目标。
             // 若源和目标是同一个实体（dev+ino 相同，已成功 hardlink），把它视为幂等成功；
@@ -247,7 +311,7 @@ fn intake(job: &WatchJob, media: &Media) -> Result<WatchOutcome, LibraryError> {
                 );
                 outcome.transferred.push(TransferredFile {
                     path: dest,
-                    identified_release: None,
+                    identified_release: Some(parsed),
                 });
                 continue;
             } else {
@@ -291,8 +355,8 @@ fn intake(job: &WatchJob, media: &Media) -> Result<WatchOutcome, LibraryError> {
         }
         outcome.transferred.push(TransferredFile {
             path: dest,
-            identified_release: None,
+            identified_release: Some(parsed),
         });
     }
-    Ok(outcome)
+    Ok(())
 }
