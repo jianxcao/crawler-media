@@ -1,5 +1,5 @@
 use marker::{
-    EpisodeDescriptor, SampleWindow, SamplingPolicy, SegmentKind, SourceCostSummary,
+    EpisodeDescriptor, SamplingPolicy, SegmentKind, SourceCostSummary,
     TemplateContext, TemplateModel, TemplateReference, WindowDecision, plan_episode_window,
 };
 

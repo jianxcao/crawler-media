@@ -136,6 +136,38 @@ impl Store {
         Ok(())
     }
 
+    pub fn list_fingerprint_attempts_for_job(
+        &self,
+        job_id: &str,
+    ) -> Result<Vec<StoredFingerprintAttempt>, StoreError> {
+        let mut stmt = self.library.prepare(
+            "SELECT attempt_id, job_id, ledger_id, kind, window_start_ms,
+                    window_end_ms, phase, started_at_ms, finished_at_ms,
+                    status, error_kind, metrics_json
+             FROM fingerprint_attempts WHERE job_id = ?1
+             ORDER BY started_at_ms ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![job_id], |row| {
+                Ok(StoredFingerprintAttempt {
+                    attempt_id: row.get(0)?,
+                    job_id: row.get(1)?,
+                    ledger_id: row.get(2)?,
+                    kind: row.get(3)?,
+                    window_start_ms: row.get(4)?,
+                    window_end_ms: row.get(5)?,
+                    phase: row.get(6)?,
+                    started_at_ms: row.get(7)?,
+                    finished_at_ms: row.get(8)?,
+                    status: row.get(9)?,
+                    error_kind: row.get(10)?,
+                    metrics_json: row.get(11)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn get_fingerprint_attempt(
         &self,
         attempt_id: &str,

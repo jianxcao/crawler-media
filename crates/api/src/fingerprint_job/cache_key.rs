@@ -48,6 +48,70 @@ pub fn fingerprint_cache_key(
     digest_hex(digest.finalize())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FingerprintCaptureProfile {
+    pub algorithm_version: u32,
+    pub preset: String,
+    pub pcm_sample_rate: u32,
+    pub pcm_channels: u32,
+    pub pcm_format: String,
+    pub audio_stream_index: Option<u32>,
+    pub audio_selection_version: u32,
+    pub time_mapping_version: u32,
+}
+
+impl Default for FingerprintCaptureProfile {
+    fn default() -> Self {
+        Self {
+            algorithm_version: marker::FINGERPRINT_ALGORITHM_VERSION,
+            preset: "chromaprint_default".into(),
+            pcm_sample_rate: 16000,
+            pcm_channels: 1,
+            pcm_format: "s16le".into(),
+            audio_stream_index: None,
+            audio_selection_version: 1,
+            time_mapping_version: 1,
+        }
+    }
+}
+
+pub fn capture_profile_key(profile: &FingerprintCaptureProfile) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"crawler-media-capture-profile-v1\0");
+    digest.update(profile.algorithm_version.to_le_bytes());
+    digest.update(profile.preset.as_bytes());
+    digest.update(profile.pcm_sample_rate.to_le_bytes());
+    digest.update(profile.pcm_channels.to_le_bytes());
+    digest.update(profile.pcm_format.as_bytes());
+    digest.update(profile.audio_stream_index.unwrap_or(u32::MAX).to_le_bytes());
+    digest.update(profile.audio_selection_version.to_le_bytes());
+    digest.update(profile.time_mapping_version.to_le_bytes());
+    digest_hex(digest.finalize())
+}
+
+pub fn analysis_policy_key(policy: &marker::adaptive::SamplingPolicy) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"crawler-media-analysis-policy-v1\0");
+    digest.update(policy.seed_count.to_le_bytes());
+    digest.update(policy.max_seed_count.to_le_bytes());
+    digest.update(policy.max_templates_per_kind.to_le_bytes());
+    digest.update(policy.context_margin_ms.to_le_bytes());
+    digest.update(policy.min_window_saving_ratio.to_le_bytes());
+    digest.update(policy.min_match_duration_ms.to_le_bytes());
+    digest.update(policy.max_match_duration_ms.to_le_bytes());
+    digest.update(policy.max_score.to_le_bytes());
+    digest.update(policy.min_reference_coverage.to_le_bytes());
+    digest.update(policy.max_internal_gap_ms.to_le_bytes());
+    digest.update(policy.max_reference_boundary_delta_ms.to_le_bytes());
+    digest.update(policy.min_guard_evidence_ms.to_le_bytes());
+    digest.update(policy.template_edge_anchor_ms.to_le_bytes());
+    digest.update(policy.max_windows_per_kind.to_le_bytes());
+    digest.update(policy.max_attempts_per_kind.to_le_bytes());
+    digest.update(policy.process_deadline_ms.to_le_bytes());
+    digest.update(policy.full_window_duration_secs.to_le_bytes());
+    digest_hex(digest.finalize())
+}
+
 fn digest_hex(digest: impl AsRef<[u8]>) -> String {
     digest
         .as_ref()

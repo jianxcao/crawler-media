@@ -28,9 +28,11 @@ impl Store {
     pub fn delete_media_marker(
         &self,
         media_id: domain::MediaId,
-        season: u32,
-        episode: u32,
+        season: impl Into<Option<u32>>,
+        episode: impl Into<Option<u32>>,
     ) -> Result<(), StoreError> {
+        let season = season.into().unwrap_or(1);
+        let episode = episode.into().unwrap_or(1);
         self.library.execute(
             "DELETE FROM media_markers WHERE media_id = ?1 AND season = ?2 AND episode = ?3",
             params![media_id.to_string(), season, episode],

@@ -54,6 +54,9 @@ pub struct ScrapeConfigSetting {
     /// 空 = 跟随默认 180（3 分钟）。STRM 挂载越小越省流量。
     #[serde(default)]
     pub fingerprint_duration_secs: Option<u32>,
+    /// 声纹采样模式："full_window" | "adaptive"。空 = 跟随默认 "full_window"。
+    #[serde(default)]
+    pub fingerprint_sampling_mode: Option<String>,
 }
 
 /// Effective configuration after merging defaults (what consumers read).
@@ -86,6 +89,7 @@ pub struct EffectiveScrapeConfig {
     pub theintrodb_enabled: bool,
     pub theintrodb_api_key: Option<String>,
     pub fingerprint_duration_secs: u32,
+    pub fingerprint_sampling_mode: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -245,6 +249,13 @@ pub fn effective_of(setting: &ScrapeConfigSetting) -> EffectiveScrapeConfig {
             .fingerprint_duration_secs
             .filter(|v| *v > 0)
             .unwrap_or(180),
+        fingerprint_sampling_mode: setting
+            .fingerprint_sampling_mode
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| *s == "adaptive" || *s == "full_window")
+            .unwrap_or("full_window")
+            .to_string(),
     }
 }
 

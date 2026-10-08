@@ -42,6 +42,12 @@ fn validate(setting: &ScrapeConfigSetting) -> Result<(), String> {
             return Err("声纹采样时长需要在 30~3600 秒之间".into());
         }
     }
+    if let Some(mode) = &setting.fingerprint_sampling_mode {
+        let trimmed = mode.trim();
+        if !trimmed.is_empty() && trimmed != "full_window" && trimmed != "adaptive" {
+            return Err("声纹采样模式必须是 full_window 或 adaptive".into());
+        }
+    }
     for (key, min) in [
         ("poster_min_width", setting.poster_min_width),
         ("backdrop_min_width", setting.backdrop_min_width),
