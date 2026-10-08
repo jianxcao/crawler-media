@@ -62,13 +62,25 @@ struct Disposition {
 
 /// Best-effort track list via ffprobe; a failure is reported to the caller.
 pub fn probe_tracks(path: &Path) -> Result<Tracks, LibraryError> {
-    probe_tracks_with_program(path, "ffprobe")
+    probe_tracks_and_duration(path).map(|(tracks, _)| tracks)
+}
+
+/// Probe stream facts and container duration in one ffprobe request.
+pub fn probe_tracks_and_duration(path: &Path) -> Result<(Tracks, Option<i64>), LibraryError> {
+    probe_tracks_and_duration_with_program(path, "ffprobe")
 }
 
 fn probe_tracks_with_program(
     path: &Path,
     program: impl AsRef<std::ffi::OsStr>,
 ) -> Result<Tracks, LibraryError> {
+    probe_tracks_and_duration_with_program(path, program).map(|(tracks, _)| tracks)
+}
+
+fn probe_tracks_and_duration_with_program(
+    path: &Path,
+    program: impl AsRef<std::ffi::OsStr>,
+) -> Result<(Tracks, Option<i64>), LibraryError> {
     let target = crate::ProbeTarget::from_path(path);
     let mut command = Command::new(program);
     command.args([
@@ -88,9 +100,10 @@ fn probe_tracks_with_program(
     }
     let parsed: ProbeOut = serde_json::from_slice(&output.stdout)
         .map_err(|error| LibraryError::Probe(error.to_string()))?;
+    let duration_ms = parse_duration_ms(parsed.format.duration.as_deref());
     let mut tracks = tracks_from_probe(parsed);
     tracks.subtitles.extend(external_subtitle_tracks(path)?);
-    Ok(tracks)
+    Ok((tracks, duration_ms))
 }
 
 /// Sidecar subtitles whose basename belongs to this media file.
@@ -285,6 +298,11 @@ fn parse_u64(value: Option<&str>) -> Option<u64> {
 
 fn parse_f64(value: Option<&str>) -> Option<f64> {
     value.and_then(|value| value.parse().ok())
+}
+
+fn parse_duration_ms(value: Option<&str>) -> Option<i64> {
+    let seconds = parse_f64(value)?;
+    seconds.is_finite().then_some((seconds * 1000.0) as i64)
 }
 
 fn parse_frame_rate(raw: &str) -> Option<f64> {

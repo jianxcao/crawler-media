@@ -1,6 +1,8 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use super::diagnostics::{FfmpegBenchmark, sanitized_excerpt};
+
 #[derive(Default)]
 pub(super) struct ExtractionTimings {
     pub(super) command_setup_ms: u128,
@@ -14,6 +16,12 @@ pub(super) struct ExtractionTimings {
     pub(super) stderr_collect_ms: u128,
     pub(super) pcm_bytes: u64,
     pub(super) sample_count: u64,
+    pub(super) ffmpeg_log_level: String,
+    pub(super) ffmpeg_exit_code: Option<i32>,
+    pub(super) ffmpeg_stderr_tail: String,
+    pub(super) ffmpeg_stderr_bytes: u64,
+    pub(super) ffmpeg_stderr_truncated: bool,
+    pub(super) ffmpeg_benchmark: Option<FfmpegBenchmark>,
 }
 
 pub(super) fn log_extraction_timings(
@@ -37,6 +45,14 @@ pub(super) fn log_extraction_timings(
             chromaprint_finish_ms = timings.chromaprint_finish_ms,
             ffmpeg_wait_ms = timings.ffmpeg_wait_ms,
             stderr_collect_ms = timings.stderr_collect_ms,
+            ffmpeg_log_level = %timings.ffmpeg_log_level,
+            ffmpeg_exit_code = ?timings.ffmpeg_exit_code,
+            ffmpeg_stderr_bytes = timings.ffmpeg_stderr_bytes,
+            ffmpeg_stderr_truncated = timings.ffmpeg_stderr_truncated,
+            ffmpeg_user_cpu_ms = ?timings.ffmpeg_benchmark.as_ref().and_then(|bench| bench.user_cpu_ms),
+            ffmpeg_system_cpu_ms = ?timings.ffmpeg_benchmark.as_ref().and_then(|bench| bench.system_cpu_ms),
+            ffmpeg_real_ms = ?timings.ffmpeg_benchmark.as_ref().and_then(|bench| bench.real_ms),
+            ffmpeg_maxrss_kb = ?timings.ffmpeg_benchmark.as_ref().and_then(|bench| bench.max_rss_kb),
             pcm_bytes = timings.pcm_bytes,
             sample_count = timings.sample_count,
             fingerprint_items = fingerprint.len(),
@@ -54,10 +70,35 @@ pub(super) fn log_extraction_timings(
             chromaprint_finish_ms = timings.chromaprint_finish_ms,
             ffmpeg_wait_ms = timings.ffmpeg_wait_ms,
             stderr_collect_ms = timings.stderr_collect_ms,
+            ffmpeg_log_level = %timings.ffmpeg_log_level,
+            ffmpeg_exit_code = ?timings.ffmpeg_exit_code,
+            ffmpeg_stderr_bytes = timings.ffmpeg_stderr_bytes,
+            ffmpeg_stderr_truncated = timings.ffmpeg_stderr_truncated,
+            ffmpeg_stderr_excerpt = %sanitized_excerpt(&timings.ffmpeg_stderr_tail),
+            ffmpeg_user_cpu_ms = ?timings.ffmpeg_benchmark.as_ref().and_then(|bench| bench.user_cpu_ms),
+            ffmpeg_system_cpu_ms = ?timings.ffmpeg_benchmark.as_ref().and_then(|bench| bench.system_cpu_ms),
+            ffmpeg_real_ms = ?timings.ffmpeg_benchmark.as_ref().and_then(|bench| bench.real_ms),
+            ffmpeg_maxrss_kb = ?timings.ffmpeg_benchmark.as_ref().and_then(|bench| bench.max_rss_kb),
             pcm_bytes = timings.pcm_bytes,
             sample_count = timings.sample_count,
             total_elapsed_ms = started.elapsed().as_millis(),
             "【声纹】FFmpeg 与 Chromaprint 阶段失败及耗时拆分"
         ),
+    }
+
+    if result.is_ok() && timings.pcm_stream_elapsed_ms >= 10_000 {
+        tracing::debug!(
+            path = %path.display(), source, start_secs, duration_secs,
+            ffmpeg_log_level = %timings.ffmpeg_log_level,
+            ffmpeg_exit_code = ?timings.ffmpeg_exit_code,
+            ffmpeg_stderr_bytes = timings.ffmpeg_stderr_bytes,
+            ffmpeg_stderr_truncated = timings.ffmpeg_stderr_truncated,
+            ffmpeg_stderr_excerpt = %sanitized_excerpt(&timings.ffmpeg_stderr_tail),
+            pcm_stream_elapsed_ms = timings.pcm_stream_elapsed_ms,
+            ffmpeg_user_cpu_ms = ?timings.ffmpeg_benchmark.as_ref().and_then(|bench| bench.user_cpu_ms),
+            ffmpeg_system_cpu_ms = ?timings.ffmpeg_benchmark.as_ref().and_then(|bench| bench.system_cpu_ms),
+            ffmpeg_real_ms = ?timings.ffmpeg_benchmark.as_ref().and_then(|bench| bench.real_ms),
+            "【声纹】较慢样本的 FFmpeg 诊断信息"
+        );
     }
 }

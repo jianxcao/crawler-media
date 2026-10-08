@@ -25,6 +25,7 @@ pub struct ProbeJobUnit {
     pub ledger_id: String,
     pub kind: String,
     pub force_fingerprint: bool,
+    pub reuse_fingerprint_cache: bool,
     pub overwrite_markers: bool,
     pub status: String,
     pub error: Option<String>,
@@ -34,6 +35,7 @@ pub struct ProbeJobUnitSpec<'a> {
     pub ledger_id: &'a str,
     pub kind: &'a str,
     pub force_fingerprint: bool,
+    pub reuse_fingerprint_cache: bool,
     pub overwrite_markers: bool,
 }
 
@@ -86,13 +88,15 @@ impl Store {
         for unit in units {
             if let Err(error) = tx.execute(
                 "INSERT INTO probe_job_units (
-                     job_id, ledger_id, kind, force_fingerprint, overwrite_markers, status
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued')",
+                     job_id, ledger_id, kind, force_fingerprint,
+                     reuse_fingerprint_cache, overwrite_markers, status
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued')",
                 params![
                     id,
                     unit.ledger_id,
                     unit.kind,
                     unit.force_fingerprint,
+                    unit.reuse_fingerprint_cache,
                     unit.overwrite_markers
                 ],
             ) {
@@ -144,7 +148,8 @@ impl Store {
 
     pub fn probe_job_units(&self, job_id: &str) -> Result<Vec<ProbeJobUnit>, StoreError> {
         let mut statement = self.library.prepare(
-            "SELECT job_id, ledger_id, kind, force_fingerprint, overwrite_markers, status, error
+            "SELECT job_id, ledger_id, kind, force_fingerprint,
+                    reuse_fingerprint_cache, overwrite_markers, status, error
              FROM probe_job_units WHERE job_id = ?1 ORDER BY rowid",
         )?;
         let rows = statement.query_map([job_id], |row| {
@@ -153,9 +158,10 @@ impl Store {
                 ledger_id: row.get(1)?,
                 kind: row.get(2)?,
                 force_fingerprint: row.get(3)?,
-                overwrite_markers: row.get(4)?,
-                status: row.get(5)?,
-                error: row.get(6)?,
+                reuse_fingerprint_cache: row.get(4)?,
+                overwrite_markers: row.get(5)?,
+                status: row.get(6)?,
+                error: row.get(7)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -320,7 +326,8 @@ impl Store {
     ) -> Result<Option<ProbeJobUnit>, StoreError> {
         self.library
             .query_row(
-                "SELECT job_id, ledger_id, kind, force_fingerprint, overwrite_markers, status, error
+                "SELECT job_id, ledger_id, kind, force_fingerprint,
+                        reuse_fingerprint_cache, overwrite_markers, status, error
                  FROM probe_job_units WHERE ledger_id = ?1 AND status IN ('queued', 'running')
                  ORDER BY rowid DESC LIMIT 1",
                 [ledger_id],
@@ -330,9 +337,10 @@ impl Store {
                         ledger_id: row.get(1)?,
                         kind: row.get(2)?,
                         force_fingerprint: row.get(3)?,
-                        overwrite_markers: row.get(4)?,
-                        status: row.get(5)?,
-                        error: row.get(6)?,
+                        reuse_fingerprint_cache: row.get(4)?,
+                        overwrite_markers: row.get(5)?,
+                        status: row.get(6)?,
+                        error: row.get(7)?,
                     })
                 },
             )

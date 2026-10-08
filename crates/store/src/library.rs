@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use domain::{Confidence, MediaKind};
 use rusqlite::{OptionalExtension, params};
 
-const CURRENT_TRACKS_VERSION: i64 = 1;
+pub(super) const CURRENT_TRACKS_VERSION: i64 = 1;
 const SETTING_TRANSFER_MODE: &str = "transfer_mode";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -156,20 +156,39 @@ impl Store {
         ledger_id: &str,
         tracks: &library::Tracks,
     ) -> Result<(), StoreError> {
+        self.put_file_meta_versioned(ledger_id, tracks, None, None)
+    }
+
+    pub fn put_file_meta_versioned(
+        &self,
+        ledger_id: &str,
+        tracks: &library::Tracks,
+        source_version: Option<&str>,
+        format_duration_ms: Option<i64>,
+    ) -> Result<(), StoreError> {
         self.library.execute(
-            "INSERT INTO file_meta (ledger_id, audio_json, subtitle_json, video_json, tracks_version)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO file_meta (
+                 ledger_id, audio_json, subtitle_json, video_json, tracks_version,
+                 source_version, format_duration_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(ledger_id) DO UPDATE SET
                audio_json = excluded.audio_json,
                subtitle_json = excluded.subtitle_json,
                video_json = excluded.video_json,
-               tracks_version = excluded.tracks_version",
+               tracks_version = excluded.tracks_version,
+               source_version = excluded.source_version,
+               format_duration_ms = excluded.format_duration_ms",
             params![
                 ledger_id,
                 serde_json::to_string(&tracks.audio)?,
                 serde_json::to_string(&tracks.subtitles)?,
-                tracks.video.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default()),
+                tracks
+                    .video
+                    .as_ref()
+                    .map(|v| serde_json::to_string(v).unwrap_or_default()),
                 CURRENT_TRACKS_VERSION,
+                source_version,
+                format_duration_ms,
             ],
         )?;
         Ok(())
@@ -419,6 +438,7 @@ impl Store {
             "DELETE FROM file_meta WHERE ledger_id = ?1",
             params![ledger_id],
         )?;
+        self.delete_fingerprint_cache(ledger_id)?;
         Ok(())
     }
 
@@ -568,12 +588,14 @@ mod marker_replacement_tests {
                 ledger_id: "ledger-s1",
                 kind: "tv",
                 force_fingerprint: true,
+                reuse_fingerprint_cache: false,
                 overwrite_markers: true,
             },
             super::super::probe_tasks::ProbeJobUnitSpec {
                 ledger_id: "ledger-s2",
                 kind: "tv",
                 force_fingerprint: true,
+                reuse_fingerprint_cache: false,
                 overwrite_markers: true,
             },
         ];

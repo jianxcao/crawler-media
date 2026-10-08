@@ -4,7 +4,7 @@ mod probe;
 
 use serde::{Deserialize, Serialize};
 
-pub use probe::{external_subtitle_tracks, probe_tracks};
+pub use probe::{external_subtitle_tracks, probe_tracks, probe_tracks_and_duration};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]

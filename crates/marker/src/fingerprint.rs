@@ -30,6 +30,20 @@ pub trait FingerprintEngine: Send + Sync {
         min_duration_secs: f32,
         max_duration_secs: f32,
     ) -> Option<CommonSegment>;
+
+    /// Return every distinct matching interval so season consensus can prefer
+    /// repeated episode-wide evidence over one long accidental pair match.
+    fn find_common_segments(
+        &self,
+        first: &[u32],
+        second: &[u32],
+        min_duration_secs: f32,
+        max_duration_secs: f32,
+    ) -> Vec<CommonSegment> {
+        self.find_common_segment(first, second, min_duration_secs, max_duration_secs)
+            .into_iter()
+            .collect()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -54,7 +68,20 @@ impl FingerprintEngine for ChromaprintEngine {
     ) -> Option<CommonSegment> {
         segments::find_common_segment(first, second, min_duration_secs, max_duration_secs)
     }
+
+    fn find_common_segments(
+        &self,
+        first: &[u32],
+        second: &[u32],
+        min_duration_secs: f32,
+        max_duration_secs: f32,
+    ) -> Vec<CommonSegment> {
+        segments::find_common_segments(first, second, min_duration_secs, max_duration_secs)
+    }
 }
+
+/// Increment when the fingerprint sampling or Chromaprint profile changes.
+pub const FINGERPRINT_ALGORITHM_VERSION: u32 = 1;
 
 pub fn extract_audio_fingerprint(path: &Path, max_duration_secs: u32) -> Result<Vec<u32>, String> {
     extract_audio_fingerprint_at(path, 0, max_duration_secs)

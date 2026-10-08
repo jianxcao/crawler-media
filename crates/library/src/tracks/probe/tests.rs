@@ -2,6 +2,42 @@ use super::probe_tracks_with_program;
 
 #[cfg(unix)]
 #[test]
+fn probe_tracks_and_duration_returns_format_duration_in_the_same_probe() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let program = tmp.path().join("ffprobe-fixture");
+    std::fs::write(
+        &program,
+        r##"#!/bin/sh
+echo called >> "$0.calls"
+cat <<'JSON'
+{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","width":1920,"height":1080} ],"format":{"duration":"5400.125"}}
+JSON
+"##,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&program, permissions).unwrap();
+    let media = tmp.path().join("episode.mkv");
+    std::fs::write(&media, b"fixture").unwrap();
+
+    let (tracks, duration_ms) = super::probe_tracks_and_duration_with_program(&media, &program)
+        .expect("ffprobe fixture should return tracks and duration");
+
+    assert!(tracks.video.is_some());
+    assert_eq!(duration_ms, Some(5_400_125));
+    let calls = std::fs::read_to_string(program.with_extension("calls")).unwrap();
+    assert_eq!(
+        calls.lines().count(),
+        1,
+        "duration must reuse the tracks probe"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn ffprobe_keeps_detailed_video_audio_and_subtitle_facts() {
     use std::os::unix::fs::PermissionsExt;
 

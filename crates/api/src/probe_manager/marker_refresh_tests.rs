@@ -92,6 +92,7 @@ fn season_refresh_keeps_old_markers_until_success_then_clears_empty_result() {
             row: row.clone(),
             kind: MediaKind::Tv,
             force_fingerprint: true,
+            reuse_fingerprint_cache: false,
             overwrite_markers: true,
             marker_refresh_id: None,
             job_id: None,
