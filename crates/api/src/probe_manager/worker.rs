@@ -1,0 +1,117 @@
+use std::sync::Arc;
+
+use super::{ProbeManager, ProbeUnit, probe};
+
+pub(super) fn try_start(manager: &Arc<ProbeManager>) -> bool {
+    if tokio::runtime::Handle::try_current().is_err() {
+        tracing::warn!("【媒体探测】当前不在 Tokio runtime 上下文，探测 worker 未启动");
+        return false;
+    }
+    let metadata_workers = manager
+        .store
+        .lock()
+        .get_setting(crate::settings_keys::PROBE_CONCURRENCY)
+        .ok()
+        .flatten()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(1)
+        .min(8);
+    for _ in 0..metadata_workers {
+        tokio::spawn(run_metadata_worker(manager.clone()));
+    }
+    tokio::spawn(run_fingerprint_worker(manager.clone()));
+    tracing::info!(
+        metadata_workers,
+        fingerprint_workers = 1,
+        "【媒体探测】高优先级媒体信息队列与低优先级声纹队列已启动"
+    );
+    true
+}
+
+async fn run_metadata_worker(manager: Arc<ProbeManager>) {
+    loop {
+        let unit = {
+            let mut rx = manager.metadata_rx.lock().await;
+            rx.recv().await
+        };
+        let Some(unit) = unit else { break };
+        let pending = MetadataStageGuard(manager.clone());
+        if !start_persisted_unit(&manager, &unit) {
+            continue;
+        }
+        let outcome = probe::probe_metadata(&manager, &unit).await;
+        drop(pending);
+        match outcome {
+            probe::MetadataOutcome::Complete => manager.finish(&unit, true),
+            probe::MetadataOutcome::Failed => manager.finish(&unit, false),
+            probe::MetadataOutcome::Fingerprint(work) => {
+                manager.enqueue_fingerprint_after_metadata(work);
+            }
+        }
+    }
+}
+
+struct MetadataStageGuard(Arc<ProbeManager>);
+
+impl Drop for MetadataStageGuard {
+    fn drop(&mut self) {
+        self.0.metadata_stage_finished();
+    }
+}
+
+async fn run_fingerprint_worker(manager: Arc<ProbeManager>) {
+    loop {
+        let work = {
+            let mut rx = manager.fingerprint_rx.lock().await;
+            rx.recv().await
+        };
+        let Some(work) = work else { break };
+        wait_for_metadata_idle(&manager).await;
+        if work.start_job && !start_persisted_unit(&manager, &work.unit) {
+            continue;
+        }
+        let succeeded = probe::probe_fingerprint(&manager, &work).await;
+        manager.finish(&work.unit, succeeded);
+    }
+}
+
+pub(super) async fn wait_for_metadata_idle(manager: &ProbeManager) {
+    loop {
+        let notified = manager.metadata_idle.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if manager
+            .metadata_pending
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
+        {
+            return;
+        }
+        notified.await;
+    }
+}
+
+fn start_persisted_unit(manager: &ProbeManager, unit: &ProbeUnit) -> bool {
+    let ledger_id = unit.row.id.to_string();
+    let started = match unit.job_id.as_deref() {
+        Some(job_id) => manager.store.lock().start_probe_unit(job_id, &ledger_id),
+        None => {
+            tracing::error!(ledger_id, "队列单元缺少任务 ID，无法启动持久化任务");
+            return false;
+        }
+    };
+    match started {
+        Ok(true) => true,
+        Ok(false) => {
+            tracing::warn!(ledger_id, "队列单元已被处理或数据库状态缺失，跳过重复执行");
+            manager.seen.lock().remove(&ledger_id);
+            false
+        }
+        Err(error) => {
+            tracing::error!(%error, ledger_id, job_id = ?unit.job_id, "探测任务开始状态写入失败");
+            manager.finish(unit, false);
+            false
+        }
+    }
+}

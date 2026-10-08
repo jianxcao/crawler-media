@@ -27,7 +27,7 @@ fn force_probe_during_existing_probe_is_rejected_until_terminal() {
     let id = unit.row.id.to_string();
     assert!(manager.enqueue(unit.clone()));
     assert!(!manager.enqueue_force(unit.clone()));
-    let mut rx = manager.rx.try_lock().unwrap();
+    let mut rx = manager.metadata_rx.try_lock().unwrap();
     let queued = rx.try_recv().unwrap();
     assert_eq!(queued.row.id, unit.row.id);
     assert!(rx.try_recv().is_err());
@@ -152,6 +152,184 @@ fn queued_probe_is_recovered_after_manager_restart() {
         restarted.take_queued_for_test().unwrap().row.id,
         unit.row.id,
         "a running database unit must be requeued after a process restart"
+    );
+}
+
+#[test]
+fn intake_probe_waits_in_metadata_queue_before_voiceprint_queue() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let manager = ProbeManager::new(store);
+    let unit = ProbeUnit {
+        row: LedgerRow {
+            id: LedgerId::new(),
+            media_id: MediaId::new(),
+            path: "episode.mkv".into(),
+            season: Some(1),
+            episode: Some(1),
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: QualitySource::Release,
+            confidence: Confidence::High,
+            filter_score: None,
+        },
+        kind: MediaKind::Tv,
+        force_fingerprint: true,
+        reuse_fingerprint_cache: false,
+        overwrite_markers: false,
+        marker_refresh_id: None,
+        job_id: None,
+    };
+
+    assert!(manager.enqueue(unit.clone()));
+    let metadata_unit = manager.take_queued_for_test().unwrap();
+    assert_eq!(metadata_unit.row.id, unit.row.id);
+    assert!(!manager.has_fingerprint_queued_for_test());
+}
+
+#[tokio::test]
+async fn voiceprint_worker_yields_until_metadata_backlog_is_done() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let manager = Arc::new(ProbeManager::new(store));
+    let unit = ProbeUnit {
+        row: LedgerRow {
+            id: LedgerId::new(),
+            media_id: MediaId::new(),
+            path: "episode.mkv".into(),
+            season: Some(1),
+            episode: Some(1),
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: QualitySource::Release,
+            confidence: Confidence::High,
+            filter_score: None,
+        },
+        kind: MediaKind::Tv,
+        force_fingerprint: true,
+        reuse_fingerprint_cache: false,
+        overwrite_markers: false,
+        marker_refresh_id: None,
+        job_id: None,
+    };
+
+    assert!(manager.enqueue(unit));
+    let _metadata_unit = manager.take_queued_for_test().unwrap();
+    let waiter_manager = manager.clone();
+    let waiter = tokio::spawn(async move {
+        super::super::worker::wait_for_metadata_idle(&waiter_manager).await;
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !waiter.is_finished(),
+        "voiceprint must wait while metadata is pending"
+    );
+
+    manager.metadata_stage_finished();
+    waiter.await.unwrap();
+}
+
+#[test]
+fn metadata_job_finishes_before_a_separate_voiceprint_job_is_queued() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let manager = ProbeManager::new(store.clone());
+    let unit = ProbeUnit {
+        row: LedgerRow {
+            id: LedgerId::new(),
+            media_id: MediaId::new(),
+            path: "episode.mkv".into(),
+            season: Some(1),
+            episode: Some(1),
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: QualitySource::Release,
+            confidence: Confidence::High,
+            filter_score: None,
+        },
+        kind: MediaKind::Tv,
+        force_fingerprint: true,
+        reuse_fingerprint_cache: true,
+        overwrite_markers: false,
+        marker_refresh_id: None,
+        job_id: None,
+    };
+    store.lock().insert_ledger(&unit.row).unwrap();
+
+    assert!(manager.enqueue(unit));
+    let metadata_unit = manager.take_queued_for_test().unwrap();
+    let metadata_job_id = metadata_unit.job_id.clone().unwrap();
+    let ledger_id = metadata_unit.row.id.to_string();
+    assert!(
+        store
+            .lock()
+            .start_probe_unit(&metadata_job_id, &ledger_id)
+            .unwrap()
+    );
+    manager.metadata_stage_finished();
+    assert!(
+        manager.enqueue_fingerprint_after_metadata(super::super::probe::FingerprintWork {
+            unit: metadata_unit,
+            media_duration_ms: Some(3_000_000),
+            source_version: "source-v1".into(),
+            duration_secs: 180,
+            start_job: false,
+        })
+    );
+
+    let metadata_job = store
+        .lock()
+        .get_probe_job(&metadata_job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(metadata_job.kind, "media_probe");
+    assert_eq!(metadata_job.status, "succeeded");
+    let active_voiceprint = store
+        .lock()
+        .active_probe_unit_for_ledger(&ledger_id)
+        .unwrap();
+    let active_voiceprint = active_voiceprint.unwrap();
+    assert_eq!(active_voiceprint.status, "queued");
+    let voiceprint_job = store
+        .lock()
+        .get_probe_job(&active_voiceprint.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(voiceprint_job.kind, "fingerprint_probe");
+    assert_eq!(voiceprint_job.status, "queued");
+    let voiceprint_job_id = voiceprint_job.id;
+
+    drop(manager);
+    let restarted = ProbeManager::new(store.clone());
+    assert!(restarted.is_queued(&ledger_id));
+    let recovered = restarted.take_queued_for_test().unwrap();
+    assert_eq!(
+        recovered.job_id.as_deref(),
+        Some(voiceprint_job_id.as_str())
+    );
+    assert!(!restarted.has_fingerprint_queued_for_test());
+    restarted.finish(&recovered, false);
+    assert_eq!(
+        store
+            .lock()
+            .get_probe_job(&metadata_job_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "succeeded",
+        "a failed optional voiceprint must not undo completed media information"
+    );
+    assert_eq!(
+        store
+            .lock()
+            .get_probe_job(&voiceprint_job_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "failed"
     );
 }
 

@@ -1,19 +1,17 @@
 //! 异步媒体探测队列（ProbeManager）。
 //!
 //! 详情页 / Jellyfin 请求**绝不等待探测**：未缓存的文件立即入队，由后台
-//! worker 串行探测（默认并发 1，兼容 115 等一次只放一个请求的网盘），结果
-//! 写 file_meta / NFO / 片头片尾标记，前端轮询即可看到。一次探测任务同时
-//! 产出 streamdetails（视频/音轨/字幕 → file_meta + NFO）与单集声纹指纹
-//! （→ 指纹缓存，同季 ≥2 集后自动比对识别片头）。
+//! worker 先提取并持久化媒体流信息，再将可选的片头片尾声纹投递到后台队列。
+//! 详情页 / Jellyfin 请求不等待探测，结果写入数据库供前端轮询。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use domain::{LedgerRow, MediaId, MediaKind};
 use parking_lot::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
 use marker::{ChromaprintEngine, FingerprintEngine};
 
@@ -22,7 +20,9 @@ use crate::Store;
 mod marker_jobs;
 mod markers;
 mod probe;
+mod queue;
 mod timings;
+mod worker;
 
 /// 一个待探测单元（对应一条 ledger 行）。
 #[derive(Clone)]
@@ -47,14 +47,18 @@ pub(crate) enum ProbeEnqueueError {
 pub struct ProbeManager {
     store: Arc<Mutex<Store>>,
     fingerprint_engine: Arc<dyn FingerprintEngine>,
-    tx: mpsc::UnboundedSender<ProbeUnit>,
+    metadata_tx: mpsc::UnboundedSender<ProbeUnit>,
+    fingerprint_tx: mpsc::UnboundedSender<probe::FingerprintWork>,
     /// 幂等去重：正在排队或执行中的 ledger_id。
     seen: Mutex<HashSet<String>>,
     last_failure: Mutex<HashMap<String, Instant>>,
     next_marker_refresh_id: AtomicU64,
+    metadata_pending: AtomicUsize,
+    metadata_idle: Notify,
     timings: timings::ProbeTimingLedger,
-    /// 多 worker 共享的任务流（tokio Mutex 的 guard 可安全跨 await）。
-    rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<ProbeUnit>>>,
+    /// Metadata workers share the high-priority queue; voiceprint has its own worker.
+    metadata_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<ProbeUnit>>>,
+    fingerprint_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<probe::FingerprintWork>>>,
 }
 
 impl ProbeManager {
@@ -66,16 +70,21 @@ impl ProbeManager {
         store: Arc<Mutex<Store>>,
         fingerprint_engine: Arc<dyn FingerprintEngine>,
     ) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (metadata_tx, metadata_rx) = mpsc::unbounded_channel();
+        let (fingerprint_tx, fingerprint_rx) = mpsc::unbounded_channel();
         let manager = Self {
             store,
             fingerprint_engine,
-            tx,
+            metadata_tx,
+            fingerprint_tx,
             seen: Mutex::new(HashSet::new()),
             last_failure: Mutex::new(HashMap::new()),
             next_marker_refresh_id: AtomicU64::new(1),
+            metadata_pending: AtomicUsize::new(0),
+            metadata_idle: Notify::new(),
             timings: timings::ProbeTimingLedger::default(),
-            rx: Arc::new(tokio::sync::Mutex::new(rx)),
+            metadata_rx: Arc::new(tokio::sync::Mutex::new(metadata_rx)),
+            fingerprint_rx: Arc::new(tokio::sync::Mutex::new(fingerprint_rx)),
         };
         manager.recover_pending_jobs();
         manager
@@ -107,9 +116,9 @@ impl ProbeManager {
         tracing::info!(
             path = %unit.row.path,
             job_id,
-            "【媒体探测】已入队后台探测（streamdetails + 声纹指纹）"
+            "【媒体信息】已进入高优先级探测队列；声纹将在媒体信息写入后另行排队"
         );
-        if self.tx.send(unit.clone()).is_err() {
+        if self.queue_metadata(unit.clone()).is_err() {
             seen.remove(&ledger_id);
             drop(seen);
             self.finish(&unit, false);
@@ -133,7 +142,7 @@ impl ProbeManager {
             return false;
         };
         unit.job_id = Some(job_id.clone());
-        if self.tx.send(unit.clone()).is_err() {
+        if self.queue_metadata(unit.clone()).is_err() {
             seen.remove(&ledger_id);
             drop(seen);
             self.finish(&unit, false);
@@ -206,7 +215,7 @@ impl ProbeManager {
             unit.marker_refresh_id = Some(id);
             unit.job_id = Some(job_id.clone());
             self.seen.lock().insert(unit.row.id.to_string());
-            if self.tx.send(unit.clone()).is_ok() {
+            if self.queue_metadata(unit.clone()).is_ok() {
                 queued += 1;
             } else {
                 self.finish(unit, false);
@@ -309,7 +318,7 @@ impl ProbeManager {
             unit.marker_refresh_id = refresh_id;
             unit.job_id = Some(job_id.clone());
             self.seen.lock().insert(unit.row.id.to_string());
-            if self.tx.send(unit.clone()).is_ok() {
+            if self.queue_metadata(unit.clone()).is_ok() {
                 queued += 1;
             } else {
                 self.finish(unit, false);
@@ -355,7 +364,21 @@ impl ProbeManager {
 
     #[cfg(test)]
     pub(crate) fn take_queued_for_test(&self) -> Option<ProbeUnit> {
-        self.rx.try_lock().ok()?.try_recv().ok()
+        self.metadata_rx.try_lock().ok()?.try_recv().ok()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_fingerprint_queued_for_test(&self) -> bool {
+        let Ok(mut rx) = self.fingerprint_rx.try_lock() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok(work) => {
+                drop(rx);
+                self.fingerprint_tx.send(work).is_ok()
+            }
+            Err(_) => false,
+        }
     }
 
     fn finish(&self, unit: &ProbeUnit, succeeded: bool) {
@@ -540,7 +563,7 @@ impl ProbeManager {
                         .then(|| self.next_marker_refresh_id.fetch_add(1, Ordering::Relaxed)),
                     job_id: Some(job.id.clone()),
                 };
-                if self.tx.send(unit).is_err() {
+                if self.queue_metadata(unit).is_err() {
                     self.seen.lock().remove(&persisted.ledger_id);
                     tracing::error!(job_id = %job.id, ledger_id = %persisted.ledger_id, "恢复探测任务加入队列失败");
                     let _ = self.store.lock().finish_probe_unit(
@@ -645,72 +668,8 @@ impl ProbeManager {
         failures.insert(ledger_id.to_string(), Instant::now());
     }
 
-    /// 启动 N 个 worker（N = `probe.concurrency`，默认 1，上限 8）。
-    /// 只在 Tokio runtime 上下文生效（生产入口在 Tokio main 内调用）；
-    /// 测试/非 runtime 路径仅创建队列，worker 不启动、探测不入队执行。
     pub fn try_start_workers(self: &Arc<Self>) -> bool {
-        if tokio::runtime::Handle::try_current().is_err() {
-            tracing::warn!(
-                "【媒体探测】当前不在 Tokio runtime 上下文，探测 worker 未启动（测试/非生产路径）"
-            );
-            return false;
-        }
-        let concurrency: usize = self
-            .store
-            .lock()
-            .get_setting(crate::settings_keys::PROBE_CONCURRENCY)
-            .ok()
-            .flatten()
-            .and_then(|v| v.parse().ok())
-            .filter(|v| *v > 0)
-            .unwrap_or(1)
-            .min(8);
-        for _ in 0..concurrency {
-            let mgr = self.clone();
-            tokio::spawn(async move {
-                loop {
-                    let unit = {
-                        let mut rx = mgr.rx.lock().await;
-                        rx.recv().await
-                    };
-                    let Some(unit) = unit else {
-                        break;
-                    };
-                    let ledger_id = unit.row.id.to_string();
-                    let start = unit
-                        .job_id
-                        .as_deref()
-                        .map(|job_id| mgr.store.lock().start_probe_unit(job_id, &ledger_id));
-                    let started = match start {
-                        Some(Ok(started)) => started,
-                        Some(Err(error)) => {
-                            tracing::error!(%error, ledger_id, job_id = ?unit.job_id, "探测任务开始状态写入失败");
-                            mgr.finish(&unit, false);
-                            false
-                        }
-                        None => {
-                            tracing::error!(ledger_id, "队列单元缺少任务 ID，无法启动持久化任务");
-                            false
-                        }
-                    };
-                    if !started {
-                        tracing::warn!(
-                            ledger_id,
-                            "队列单元已被其他 worker 处理或数据库状态缺失，跳过重复执行"
-                        );
-                        mgr.seen.lock().remove(&ledger_id);
-                        continue;
-                    }
-                    let succeeded = probe::probe_one(&mgr, &unit).await;
-                    mgr.finish(&unit, succeeded);
-                }
-            });
-        }
-        tracing::info!(
-            concurrency,
-            "【媒体探测】异步探测队列已启动（worker={concurrency}）"
-        );
-        true
+        worker::try_start(self)
     }
 }
 

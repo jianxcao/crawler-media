@@ -36,7 +36,7 @@ pub const CDP_URL: &str = "cdp.url";
 pub const OBSCURA_ENABLED: &str = "obscura.enabled";
 /// Obscura CDP / endpoint URL (e.g. "ws://127.0.0.1:9223" or "http://127.0.0.1:9223").
 pub const OBSCURA_URL: &str = "obscura.url";
-/// 媒体探测并发数（STRM 网盘如 115 一次只允许一个请求，默认 1；上限 8）。
+/// 媒体信息探测 worker 并发数（默认 1；上限 8）。声纹使用独立的单 worker 队列。
 pub const PROBE_CONCURRENCY: &str = "probe.concurrency";
 /// 系统全局统一 User-Agent（默认 crawler-media/0.1.0）。
 pub const GLOBAL_USER_AGENT: &str = "network.user_agent";

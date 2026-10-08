@@ -8,8 +8,22 @@ use marker::FingerprintEngine;
 use super::{ProbeManager, ProbeUnit};
 use crate::scrape_store::ScrapeStoreExt;
 
-/// 执行一次完整探测：streamdetails + 声纹指纹 + 同季片头比对。
-pub(super) async fn probe_one(mgr: &ProbeManager, unit: &ProbeUnit) -> bool {
+pub(super) struct FingerprintWork {
+    pub(super) unit: ProbeUnit,
+    pub(super) media_duration_ms: Option<i64>,
+    pub(super) source_version: String,
+    pub(super) duration_secs: u32,
+    pub(super) start_job: bool,
+}
+
+pub(super) enum MetadataOutcome {
+    Complete,
+    Fingerprint(FingerprintWork),
+    Failed,
+}
+
+/// Finish mandatory media information before scheduling optional fingerprint work.
+pub(super) async fn probe_metadata(mgr: &ProbeManager, unit: &ProbeUnit) -> MetadataOutcome {
     let started_at = Instant::now();
     let job_id = mgr.active_probe_job_id(&unit.row.id.to_string());
     tracing::info!(
@@ -19,12 +33,9 @@ pub(super) async fn probe_one(mgr: &ProbeManager, unit: &ProbeUnit) -> bool {
         episode = unit.row.episode.unwrap_or(1),
         ledger_id = %unit.row.id,
         path = %unit.row.path,
-        forced = unit.force_fingerprint,
-        marker_refresh = unit.marker_refresh_id.is_some(),
-        refresh_id = ?unit.marker_refresh_id,
-        "【媒体探测】单集探测开始"
+        "【媒体信息】高优先级探测开始"
     );
-    let succeeded = probe_one_inner(mgr, unit).await;
+    let outcome = probe_metadata_inner(mgr, unit).await;
     tracing::info!(
         job_id = ?job_id,
         media_id = %unit.row.media_id,
@@ -32,27 +43,26 @@ pub(super) async fn probe_one(mgr: &ProbeManager, unit: &ProbeUnit) -> bool {
         episode = unit.row.episode.unwrap_or(1),
         ledger_id = %unit.row.id,
         path = %unit.row.path,
-        refresh_id = ?unit.marker_refresh_id,
-        succeeded,
+        result = match &outcome {
+            MetadataOutcome::Complete => "complete",
+            MetadataOutcome::Fingerprint(_) => "fingerprint_ready",
+            MetadataOutcome::Failed => "failed",
+        },
         elapsed_ms = started_at.elapsed().as_millis() as u64,
-        "【媒体探测】单集探测完成"
+        "【媒体信息】高优先级探测结束"
     );
-    succeeded
+    outcome
 }
 
-async fn probe_one_inner(mgr: &ProbeManager, unit: &ProbeUnit) -> bool {
-    let ledger_id = unit.row.id.to_string();
+async fn probe_metadata_inner(mgr: &ProbeManager, unit: &ProbeUnit) -> MetadataOutcome {
     let path = PathBuf::from(&unit.row.path);
     let source_version = crate::fingerprint_job::current_source_version(&path);
     let media_duration_ms = match probe_tracks_and_store(mgr, unit, &source_version).await {
         Ok(duration_ms) => duration_ms,
-        Err(()) => {
-            mgr.mark_failed(&ledger_id);
-            return false;
-        }
+        Err(()) => return MetadataOutcome::Failed,
     };
     if unit.kind != MediaKind::Tv {
-        return true;
+        return MetadataOutcome::Complete;
     }
     let Some(duration_secs) = fingerprint_duration(mgr, &path, unit.kind, unit.force_fingerprint)
     else {
@@ -62,22 +72,61 @@ async fn probe_one_inner(mgr: &ProbeManager, unit: &ProbeUnit) -> bool {
             forced = unit.force_fingerprint,
             "【声纹】媒体库未启用声纹比对或文件不属于可识别媒体库，跳过声纹生成"
         );
-        return !unit.force_fingerprint;
+        return if unit.force_fingerprint {
+            MetadataOutcome::Failed
+        } else {
+            MetadataOutcome::Complete
+        };
     };
+    MetadataOutcome::Fingerprint(FingerprintWork {
+        unit: ProbeUnit {
+            force_fingerprint: true,
+            ..unit.clone()
+        },
+        media_duration_ms,
+        source_version,
+        duration_secs,
+        start_job: false,
+    })
+}
+
+/// Run optional voiceprint extraction and season comparison on its own worker.
+pub(super) async fn probe_fingerprint(mgr: &ProbeManager, work: &FingerprintWork) -> bool {
+    let unit = &work.unit;
+    let started_at = Instant::now();
+    let job_id = unit.job_id.clone();
+    tracing::info!(
+        job_id = ?job_id,
+        media_id = %unit.row.media_id,
+        season = unit.row.season.unwrap_or(1),
+        episode = unit.row.episode.unwrap_or(1),
+        ledger_id = %unit.row.id,
+        path = %unit.row.path,
+        marker_refresh = unit.marker_refresh_id.is_some(),
+        refresh_id = ?unit.marker_refresh_id,
+        "【声纹】媒体信息已写库，进入低优先级声纹队列"
+    );
+    let path = PathBuf::from(&unit.row.path);
     if !probe_fingerprint_and_store(
         mgr,
         unit,
         path,
-        duration_secs,
-        media_duration_ms,
-        source_version,
+        work.duration_secs,
+        work.media_duration_ms,
+        work.source_version.clone(),
         mgr.fingerprint_engine.clone(),
         unit.marker_refresh_id.is_some(),
         unit.reuse_fingerprint_cache,
     )
     .await
     {
-        mgr.mark_failed(&ledger_id);
+        tracing::info!(
+            job_id = ?job_id,
+            media_id = %unit.row.media_id,
+            ledger_id = %unit.row.id,
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            "【声纹】后台声纹处理失败；已提取的媒体信息仍保留"
+        );
         return false;
     }
     if unit.marker_refresh_id.is_none() {
@@ -85,12 +134,19 @@ async fn probe_one_inner(mgr: &ProbeManager, unit: &ProbeUnit) -> bool {
             tracing::error!(
                 %error,
                 media_id = %unit.row.media_id,
-                ledger_id,
+                ledger_id = %unit.row.id,
                 "【片头片尾】写入识别结果失败"
             );
             return false;
         }
     }
+    tracing::info!(
+        job_id = ?job_id,
+        media_id = %unit.row.media_id,
+        ledger_id = %unit.row.id,
+        elapsed_ms = started_at.elapsed().as_millis() as u64,
+        "【声纹】低优先级声纹处理完成"
+    );
     true
 }
 

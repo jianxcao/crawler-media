@@ -99,7 +99,7 @@ fn season_refresh_keeps_old_markers_until_success_then_clears_empty_result() {
         })
         .collect();
     assert_eq!(manager.enqueue_forced_item_refresh(units).unwrap(), 2);
-    let mut rx = manager.rx.try_lock().unwrap();
+    let mut rx = manager.metadata_rx.try_lock().unwrap();
     let first = rx.try_recv().unwrap();
     let second = rx.try_recv().unwrap();
     manager.finish(&first, true);
