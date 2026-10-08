@@ -384,6 +384,8 @@ fn build_metrics(
         ffmpeg_real_ms: timings.ffmpeg_benchmark.as_ref().and_then(|b| b.real_ms).map(|v| v as u64),
         ffmpeg_maxrss_kb: timings.ffmpeg_benchmark.as_ref().and_then(|b| b.max_rss_kb),
         ffmpeg_stderr_bytes: Some(timings.ffmpeg_stderr_bytes),
-        ffmpeg_stderr_tail: Some(timings.ffmpeg_stderr_tail.clone()),
+        ffmpeg_stderr_tail: Some(super::chromaprint::diagnostics::sanitized_excerpt(
+            &timings.ffmpeg_stderr_tail,
+        )),
     }
 }

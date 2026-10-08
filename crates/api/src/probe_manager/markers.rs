@@ -47,15 +47,23 @@ pub(super) fn compare_and_store_markers(
     if unit.overwrite_markers {
         let replacement = build_marker_replacement(mgr, unit, &comparison)?;
         let chapter_count = replacement.chapter_updates.len();
+        let chapter_updates_clone = replacement.chapter_updates.clone();
         mgr.store
             .lock()
             .replace_marker_results_batch(&[replacement])?;
+        {
+            let store = mgr.store.lock();
+            crate::http::library_chapters::trigger_scene_frames_for_chapter_updates(
+                &chapter_updates_clone,
+                &store,
+            );
+        }
         tracing::info!(
             media_id = %unit.row.media_id,
             season,
             replaced_markers = comparison.markers.len(),
             updated_chapter_caches = chapter_count,
-            "【片头片尾】已原子替换旧标记和章节缓存"
+            "【片头片尾】已原子替换旧标记和章节缓存，并触发场景帧后台提取"
         );
     } else {
         let store = mgr.store.lock();

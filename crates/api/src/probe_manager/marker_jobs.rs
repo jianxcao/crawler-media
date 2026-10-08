@@ -56,6 +56,15 @@ pub(super) fn apply_marker_refresh(
         tracing::error!(%error, job_id = %job.id, %media_id, seasons = ?seasons, "【片头片尾】多季原子写入失败，旧标记保持可见");
         return;
     }
+    {
+        let store = mgr.store.lock();
+        for rep in &replacements {
+            crate::http::library_chapters::trigger_scene_frames_for_chapter_updates(
+                &rep.chapter_updates,
+                &store,
+            );
+        }
+    }
     log_marker_refresh_success(job, media_id, &seasons);
 }
 
@@ -102,6 +111,14 @@ fn prepare_season_replacements(
     seasons: &[u32],
     all_rows: &[domain::LedgerRow],
 ) -> Result<Vec<crate::store::MarkerResultReplacement>, (u32, crate::store::StoreError)> {
+    let sampling_mode = {
+        let store = mgr.store.lock();
+        crate::scrape_store::ScrapeStoreExt::get_scrape_config(&*store)
+            .ok()
+            .map(|c| c.effective.fingerprint_sampling_mode)
+            .unwrap_or_else(|| "full_window".to_string())
+    };
+
     let mut replacements = Vec::with_capacity(seasons.len());
     for season in seasons {
         let row = all_rows
@@ -114,13 +131,48 @@ fn prepare_season_replacements(
                     crate::store::StoreError::Missing(format!("season {season} ledger row")),
                 )
             })?;
-        let mut anchor_unit = unit.clone();
-        anchor_unit.row = row;
-        anchor_unit.kind = MediaKind::Tv;
-        anchor_unit.force_fingerprint = true;
-        anchor_unit.overwrite_markers = true;
-        let replacement = markers::prepare_marker_replacement(mgr, &anchor_unit)
-            .map_err(|error| (*season, error))?;
+
+        let replacement = if sampling_mode == "adaptive" && tokio::runtime::Handle::try_current().is_ok() {
+            let season_units: Vec<ProbeUnit> = all_rows
+                .iter()
+                .filter(|r| r.media_id == media_id && r.season.unwrap_or(1) == *season)
+                .map(|r| {
+                    let mut u = unit.clone();
+                    u.row = r.clone();
+                    u.kind = MediaKind::Tv;
+                    u.force_fingerprint = true;
+                    u.overwrite_markers = true;
+                    u
+                })
+                .collect();
+
+            let handle = tokio::runtime::Handle::current();
+            let job_id = job.id.clone();
+            let season_val = *season;
+
+            tokio::task::block_in_place(|| {
+                handle.block_on(async {
+                    super::season::run_adaptive_season_pipeline(
+                        mgr,
+                        &job_id,
+                        media_id,
+                        season_val,
+                        &season_units,
+                    )
+                    .await
+                })
+            })
+            .map_err(|e| (*season, crate::store::StoreError::Missing(e)))?
+        } else {
+            let mut anchor_unit = unit.clone();
+            anchor_unit.row = row;
+            anchor_unit.kind = MediaKind::Tv;
+            anchor_unit.force_fingerprint = true;
+            anchor_unit.overwrite_markers = true;
+            markers::prepare_marker_replacement(mgr, &anchor_unit)
+                .map_err(|error| (*season, error))?
+        };
+
         tracing::info!(
             job_id = %job.id,
             %media_id,

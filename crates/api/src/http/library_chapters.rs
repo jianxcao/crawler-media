@@ -49,7 +49,7 @@ pub(crate) fn auto_generate_chapters(state: &ApiState, path: &std::path::Path) {
     let _ = generate_chapter_frames(path);
 }
 
-fn generate_chapter_frames_for_targets(
+pub(crate) fn generate_chapter_frames_for_targets(
     path: &std::path::Path,
     targets: &[(i64, i64)],
 ) -> (usize, usize) {
@@ -70,6 +70,31 @@ fn generate_chapter_frames_for_targets(
         }
     }
     (generated, targets.len())
+}
+
+pub(crate) fn trigger_scene_frames_for_chapter_updates(
+    updates: &[(String, Vec<library::ChapterMarker>)],
+    store: &crate::Store,
+) {
+    for (ledger_id, chapters) in updates {
+        if chapters.is_empty() {
+            continue;
+        }
+        let targets: Vec<(i64, i64)> = chapters.iter().map(|c| (c.start_ms, c.end_ms)).collect();
+        if targets.is_empty() {
+            continue;
+        }
+        let row_path = store
+            .get_ledger(&ledger_id.replace('-', ""))
+            .ok()
+            .flatten()
+            .map(|r| std::path::PathBuf::from(r.path));
+        if let Some(path) = row_path {
+            tokio::task::spawn_blocking(move || {
+                generate_chapter_frames_for_targets(&path, &targets);
+            });
+        }
+    }
 }
 
 fn generate_chapter_frames(path: &std::path::Path) -> Option<(usize, usize)> {

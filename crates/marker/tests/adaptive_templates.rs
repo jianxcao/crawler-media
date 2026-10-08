@@ -123,6 +123,7 @@ fn make_evidence(
                 ffmpeg_stderr_tail: None,
             },
         },
+        duration_ms: Some(180_000),
     }
 }
 

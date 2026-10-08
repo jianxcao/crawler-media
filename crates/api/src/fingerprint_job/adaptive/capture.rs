@@ -96,7 +96,11 @@ pub async fn capture_or_reuse_segment_sample(
     match capture_res {
         Ok(captured) => {
             let sample_id = format!("samp-{}", Uuid::new_v4());
-            let metrics_json = serde_json::to_string(&captured.metrics).unwrap_or_else(|_| "{}".into());
+            let mut sanitized_metrics = captured.metrics.clone();
+            if let Some(ref tail) = sanitized_metrics.ffmpeg_stderr_tail {
+                sanitized_metrics.ffmpeg_stderr_tail = Some(marker::fingerprint::sanitize_stderr(tail));
+            }
+            let metrics_json = serde_json::to_string(&sanitized_metrics).unwrap_or_else(|_| "{}".into());
 
             let sample = StoredFingerprintSample {
                 sample_id: sample_id.clone(),

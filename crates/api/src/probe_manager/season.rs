@@ -6,6 +6,7 @@ use marker::adaptive::{
     build_season_models, select_seed_episodes, EpisodeDescriptor, EpisodeEvidence,
     SamplingPolicy, SourceCostSummary, TemplateContext,
 };
+use marker::SegmentKind;
 use serde::{Deserialize, Serialize};
 
 use crate::fingerprint_job::{
@@ -13,9 +14,9 @@ use crate::fingerprint_job::{
     EpisodeCaptureRequest, EpisodeDetection, FingerprintCaptureProfile,
 };
 use crate::scrape_store::ScrapeStoreExt;
-use crate::store::MarkerResultReplacement;
-use super::markers::prepare_marker_replacement;
-use super::progress::MetadataPriorityGate;
+use crate::store::{
+    MarkerResultReplacement, StoredFingerprintModel, StoredFingerprintModelMember, StoredMediaMarker,
+};
 use super::{ProbeManager, ProbeUnit};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -29,7 +30,7 @@ pub struct SeasonSamplingPlan {
 }
 
 pub(crate) async fn run_adaptive_season_pipeline(
-    mgr: &Arc<ProbeManager>,
+    mgr: &ProbeManager,
     job_id: &str,
     media_id: MediaId,
     season: u32,
@@ -85,7 +86,7 @@ pub(crate) async fn run_adaptive_season_pipeline(
         seed_ledger_ids: seed_ids.clone(),
     };
 
-    let gate = Arc::new(MetadataPriorityGate::new(mgr.clone()));
+    let gate = Arc::new(crate::fingerprint_job::adaptive::NoopGate);
     let ctx = AdaptiveCaptureContext {
         store: mgr.store.clone(),
         matcher: mgr.fingerprint_engine.clone(),
@@ -157,9 +158,43 @@ pub(crate) async fn run_adaptive_season_pipeline(
 
         detections.push(detection);
 
-        // If we finished processing all seeds, build template models!
+        // If we finished processing all seeds, build template models and persist them!
         if is_seed && collected_evidences.len() >= 2 {
             let models = build_season_models(mgr.fingerprint_engine.as_ref(), &collected_evidences, &policy);
+            for model in &models {
+                let model_json = serde_json::to_string(model).unwrap_or_else(|_| "{}".to_string());
+                let stored_model = StoredFingerprintModel {
+                    model_id: model.model_id.clone(),
+                    media_id: media_id.to_string(),
+                    season,
+                    kind: match model.kind {
+                        SegmentKind::Intro => "intro".to_string(),
+                        SegmentKind::Outro => "outro".to_string(),
+                    },
+                    model_version: 1,
+                    membership_key: format!("{}:{}", media_id, season),
+                    policy_key: "default".to_string(),
+                    model_json,
+                    created_at_ms: std::time::SystemTime::now()
+                        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0),
+                };
+                let members: Vec<StoredFingerprintModelMember> = model.references.iter().map(|r| {
+                    StoredFingerprintModelMember {
+                        model_id: model.model_id.clone(),
+                        sample_id: r.sample_id.clone(),
+                        ledger_id: r.ledger_id.clone(),
+                        source_version: r.source_version.clone(),
+                    }
+                }).collect();
+
+                let store = mgr.store.lock();
+                if let Err(e) = store.put_fingerprint_model(&stored_model, &members) {
+                    tracing::warn!(error = %e, "failed to persist fingerprint season model");
+                }
+            }
+
             for ev in &collected_evidences {
                 templates.references.insert(ev.sample_id.clone(), ev.clone());
             }
@@ -167,9 +202,52 @@ pub(crate) async fn run_adaptive_season_pipeline(
         }
     }
 
-    let first_unit = units.first().ok_or("No units to process")?;
-    let replacement = prepare_marker_replacement(mgr, first_unit)
-        .map_err(|e| format!("Prepare marker replacement error: {e}"))?;
+    let mut markers = Vec::new();
+    let mut chapter_updates = Vec::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    {
+        let store = mgr.store.lock();
+        for u in units {
+            let ep = u.row.episode.unwrap_or(1);
+            let detection = detections.iter().find(|d| d.ledger_id == u.row.id.to_string() || d.episode == ep);
+            let intro_range = detection.and_then(|d| d.intro_match.as_ref()).map(|v| (v.start_ms, v.end_ms));
+            let outro_range = detection.and_then(|d| d.outro_match.as_ref()).map(|v| (v.start_ms, v.end_ms));
+
+            if intro_range.is_some() || outro_range.is_some() {
+                markers.push(StoredMediaMarker {
+                    media_id,
+                    season,
+                    episode: ep,
+                    intro_start_ms: intro_range.map(|r| r.0),
+                    intro_end_ms: intro_range.map(|r| r.1),
+                    outro_start_ms: outro_range.map(|r| r.0),
+                    outro_end_ms: outro_range.map(|r| r.1),
+                    source: "fingerprint_adaptive".to_string(),
+                    locked: false,
+                    updated_at: now,
+                });
+            }
+
+            let existing = store
+                .get_cached_chapters(&u.row.id.to_string())
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let complete = marker::build_complete_timeline_chapters(&existing, intro_range, outro_range, None);
+            chapter_updates.push((u.row.id.to_string(), complete));
+        }
+    }
+
+    let replacement = MarkerResultReplacement {
+        media_id,
+        season,
+        markers,
+        chapter_updates,
+    };
 
     Ok(replacement)
 }

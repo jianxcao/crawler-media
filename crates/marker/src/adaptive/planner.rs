@@ -21,17 +21,17 @@ pub fn plan_episode_window(
         };
     }
 
-    // Filter relevant models for this kind
+    // Filter relevant models for this kind (must be stable model)
     let models: Vec<_> = templates
         .models
         .iter()
-        .filter(|m| m.kind == kind && !m.references.is_empty())
+        .filter(|m| m.kind == kind && m.is_stable && !m.references.is_empty())
         .collect();
 
     if models.is_empty() {
         return WindowDecision::Full {
             window: full_window,
-            reason: "no_template_models".to_string(),
+            reason: "no_stable_template_models".to_string(),
         };
     }
 
@@ -162,9 +162,11 @@ fn predict_interval_for_episode(
             let mut offsets_end = Vec::new();
 
             for r in &model.references {
-                if let Some((from_end_start, from_end_end)) = r.match_from_end_ms {
-                    offsets_start.push(from_end_start);
-                    offsets_end.push(from_end_end);
+                if let Some((d1, d2)) = r.match_from_end_ms {
+                    let d_start = d1.max(d2);
+                    let d_end = d1.min(d2);
+                    offsets_start.push(d_start);
+                    offsets_end.push(d_end);
                 } else {
                     // Approximate if not stored directly
                     let length = r.match_interval_ms.1 - r.match_interval_ms.0;

@@ -59,5 +59,6 @@ pub fn stored_sample_to_evidence(
             pcm_duration_ms: stored.pcm_duration_ms,
             metrics,
         },
+        duration_ms: None,
     }
 }

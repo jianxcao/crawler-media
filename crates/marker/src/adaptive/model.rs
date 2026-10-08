@@ -183,13 +183,24 @@ fn build_models_for_kind(
 
             durations.push((m.segment.duration_sec * 1000.0) as i64);
 
+            let from_end1 = if kind == SegmentKind::Outro {
+                ev1.duration_ms.map(|d| (d - end1_ms, d - start1_ms))
+            } else {
+                None
+            };
+            let from_end2 = if kind == SegmentKind::Outro {
+                ev2.duration_ms.map(|d| (d - end2_ms, d - start2_ms))
+            } else {
+                None
+            };
+
             ep_refs.entry(ev1.episode).or_insert_with(|| TemplateReference {
                 sample_id: ev1.sample_id.clone(),
                 ledger_id: ev1.ledger_id.clone(),
                 episode: ev1.episode,
                 source_version: ev1.source_version.clone(),
                 match_interval_ms: (start1_ms, end1_ms),
-                match_from_end_ms: None,
+                match_from_end_ms: from_end1,
             });
 
             ep_refs.entry(ev2.episode).or_insert_with(|| TemplateReference {
@@ -198,7 +209,7 @@ fn build_models_for_kind(
                 episode: ev2.episode,
                 source_version: ev2.source_version.clone(),
                 match_interval_ms: (start2_ms, end2_ms),
-                match_from_end_ms: None,
+                match_from_end_ms: from_end2,
             });
         }
 

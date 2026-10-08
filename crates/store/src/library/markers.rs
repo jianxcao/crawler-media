@@ -104,10 +104,20 @@ impl Store {
         let tx = self.library.unchecked_transaction()?;
         for replacement in replacements {
             tx.execute(
-                "DELETE FROM media_markers WHERE media_id = ?1 AND season = ?2",
+                "DELETE FROM media_markers WHERE media_id = ?1 AND season = ?2 AND locked = 0",
                 params![replacement.media_id.to_string(), replacement.season],
             )?;
             for marker in &replacement.markers {
+                let is_locked: bool = tx
+                    .query_row(
+                        "SELECT locked FROM media_markers WHERE media_id = ?1 AND season = ?2 AND episode = ?3",
+                        params![marker.media_id.to_string(), marker.season, marker.episode],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+                if is_locked {
+                    continue;
+                }
                 tx.execute(
                     "INSERT INTO media_markers (
                          media_id, season, episode, intro_start_ms, intro_end_ms,

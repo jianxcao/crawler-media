@@ -84,6 +84,8 @@ pub struct EpisodeEvidence {
     pub capture_profile_key: String,
     pub kind: SegmentKind,
     pub capture: CapturedFingerprint,
+    #[serde(default)]
+    pub duration_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

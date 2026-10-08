@@ -106,6 +106,79 @@ pub(super) async fn probe_fingerprint(mgr: &ProbeManager, work: &FingerprintWork
         refresh_id = ?unit.marker_refresh_id,
         "【声纹】媒体信息已写库，进入低优先级声纹队列"
     );
+    // Check if adaptive sampling mode is enabled for TV episodes
+    let sampling_mode = {
+        let store = mgr.store.lock();
+        crate::scrape_store::ScrapeStoreExt::get_scrape_config(&*store)
+            .ok()
+            .map(|c| c.effective.fingerprint_sampling_mode)
+            .unwrap_or_else(|| "full_window".to_string())
+    };
+
+    if sampling_mode == "adaptive" && unit.kind == domain::MediaKind::Tv && unit.marker_refresh_id.is_none() {
+        let season = unit.row.season.unwrap_or(1);
+        let season_units: Vec<ProbeUnit> = {
+            let store = mgr.store.lock();
+            let rows = store.list_ledger().unwrap_or_default();
+            rows.into_iter()
+                .filter(|r| r.media_id == unit.row.media_id && r.season.unwrap_or(1) == season)
+                .map(|r| {
+                    let mut u = unit.clone();
+                    u.row = r;
+                    u
+                })
+                .collect()
+        };
+
+        if season_units.len() >= 2 {
+            let job_id_str = job_id.clone().unwrap_or_else(|| "adaptive-live".to_string());
+            tracing::info!(
+                job_id = ?job_id,
+                media_id = %unit.row.media_id,
+                season,
+                units = season_units.len(),
+                "【自适应声纹】检测到多集剧集，启动整季自适应采样流程"
+            );
+            match super::season::run_adaptive_season_pipeline(
+                mgr,
+                &job_id_str,
+                unit.row.media_id,
+                season,
+                &season_units,
+            )
+            .await
+            {
+                Ok(replacement) => {
+                    let chapter_updates_clone = replacement.chapter_updates.clone();
+                    let markers_len = replacement.markers.len();
+                    if let Err(e) = mgr.store.lock().replace_marker_results_batch(&[replacement]) {
+                        tracing::error!(error = %e, "自适应整季标记替换失败");
+                    } else {
+                        {
+                            let store = mgr.store.lock();
+                            crate::http::library_chapters::trigger_scene_frames_for_chapter_updates(
+                                &chapter_updates_clone,
+                                &store,
+                            );
+                        }
+                        tracing::info!(
+                            job_id = ?job_id,
+                            media_id = %unit.row.media_id,
+                            season,
+                            markers = markers_len,
+                            elapsed_ms = started_at.elapsed().as_millis() as u64,
+                            "【自适应声纹】整季自适应处理完成，标记和章节已原子替换并触发场景帧生成"
+                        );
+                        return true;
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "自适应整季处理失败，回退到普通全窗口采集");
+                }
+            }
+        }
+    }
+
     let path = PathBuf::from(&unit.row.path);
     if !probe_fingerprint_and_store(
         mgr,
