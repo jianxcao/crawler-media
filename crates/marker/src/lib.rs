@@ -1,8 +1,16 @@
+pub mod adaptive;
 pub mod chapter;
 pub mod fingerprint;
 pub mod matcher;
 pub mod target;
 pub mod types;
+
+pub use adaptive::{
+    EpisodeDescriptor, EpisodeEvidence, SamplingMode, SamplingPolicy, SegmentKind,
+    SourceCostSummary, TemplateContext, TemplateModel, TemplateReference, VerificationOutcome,
+    VerifiedInterval, WindowDecision, build_season_models, plan_episode_window,
+    select_seed_episodes, verify_template_window,
+};
 
 pub use chapter::{
     annotate_chapters, build_complete_timeline_chapters, classify_chapter_title, probe_chapters,
