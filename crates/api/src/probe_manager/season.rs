@@ -92,8 +92,11 @@ pub async fn run_adaptive_season_pipeline(
         run_season_unit(&pipeline, unit, is_seed, &mut state).await?;
     }
 
-    // 模板形成后，仅通过标准验证逻辑 verify_template_window 重新分析之前的单元，
-    // 严格禁止绕过验证直接回填，确保截断或不合规的音频绝不会被误写入标记。
+    // 在所有单元采集完成后，使用全季收集的全部有效证据重新建模，
+    // 发现可能存在的第二种变体或在种子阶段未识别出的模板，并重新验证所有单元。
+    if state.collected_evidences.len() >= 2 {
+        build_and_persist_templates(&pipeline, &state.collected_evidences, &mut state.templates);
+    }
     reverify_detections(&pipeline, &state.templates, &mut state.detections);
 
     let (markers, chapter_updates) =
@@ -339,7 +342,8 @@ fn build_marker_replacement(
     units: &[ProbeUnit],
     detections: &[EpisodeDetection],
 ) -> (Vec<StoredMediaMarker>, Vec<(String, Vec<marker::ChapterMarker>)>) {
-    let mut markers = Vec::new();
+    let mut marker_map: std::collections::BTreeMap<u32, StoredMediaMarker> =
+        std::collections::BTreeMap::new();
     let mut chapter_updates = Vec::new();
     let updated_at = now_secs();
     let store = pipeline.mgr.store.lock();
@@ -351,12 +355,25 @@ fn build_marker_replacement(
         let intro_range = detection
             .and_then(|d| d.intro_match.as_ref())
             .map(|v| (v.start_ms, v.end_ms));
-        let outro_range = detection
+        let mut outro_range = detection
             .and_then(|d| d.outro_match.as_ref())
             .map(|v| (v.start_ms, v.end_ms));
 
+        let sampled_outro = detection.map(|d| d.outro_evidence.is_some()).unwrap_or(false);
+        if !sampled_outro && outro_range.is_none() {
+            if let Some(existing) = store
+                .get_media_marker(pipeline.media_id, Some(pipeline.season), Some(episode))
+                .ok()
+                .flatten()
+            {
+                if let (Some(start), Some(end)) = (existing.outro_start_ms, existing.outro_end_ms) {
+                    outro_range = Some((start, end));
+                }
+            }
+        }
+
         if intro_range.is_some() || outro_range.is_some() {
-            markers.push(StoredMediaMarker {
+            let candidate_marker = StoredMediaMarker {
                 media_id: pipeline.media_id,
                 season: pipeline.season,
                 episode,
@@ -367,7 +384,24 @@ fn build_marker_replacement(
                 source: "fingerprint_adaptive".to_string(),
                 locked: false,
                 updated_at,
-            });
+            };
+
+            match marker_map.entry(episode) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(candidate_marker);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let existing = entry.get_mut();
+                    // Prefer marker with more detected segments (both intro and outro vs one)
+                    let existing_count = existing.intro_start_ms.is_some() as usize
+                        + existing.outro_start_ms.is_some() as usize;
+                    let candidate_count = candidate_marker.intro_start_ms.is_some() as usize
+                        + candidate_marker.outro_start_ms.is_some() as usize;
+                    if candidate_count > existing_count {
+                        *existing = candidate_marker;
+                    }
+                }
+            }
         }
 
         let existing = store
@@ -375,11 +409,13 @@ fn build_marker_replacement(
             .ok()
             .flatten()
             .unwrap_or_default();
+        let duration_ms = known_media_duration(&store, &ledger_id);
         let complete =
-            marker::build_complete_timeline_chapters(&existing, intro_range, outro_range, None);
+            marker::build_complete_timeline_chapters(&existing, intro_range, outro_range, duration_ms);
         chapter_updates.push((ledger_id, complete));
     }
 
+    let markers = marker_map.into_values().collect();
     (markers, chapter_updates)
 }
 
@@ -411,7 +447,8 @@ fn has_truncated_unmatched(
 ) -> bool {
     units.iter().any(|unit| {
         let episode = unit.row.episode.unwrap_or(1);
-        let detection = find_detection(detections, &unit.row.id.to_string(), episode);
+        let ledger_id = unit.row.id.to_string();
+        let detection = find_detection(detections, &ledger_id, episode);
         let has_detection = match kind {
             SegmentKind::Intro => detection.and_then(|d| d.intro_match.as_ref()).is_some(),
             SegmentKind::Outro => detection.and_then(|d| d.outro_match.as_ref()).is_some(),
@@ -439,7 +476,12 @@ fn find_detection<'a>(
 ) -> Option<&'a EpisodeDetection> {
     detections
         .iter()
-        .find(|detection| detection.ledger_id == ledger_id || detection.episode == episode)
+        .find(|detection| detection.ledger_id == ledger_id)
+        .or_else(|| {
+            detections
+                .iter()
+                .find(|detection| detection.episode == episode)
+        })
 }
 
 fn now_ms() -> i64 {
