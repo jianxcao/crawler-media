@@ -48,8 +48,15 @@ pub fn verify_template_window(
         }
     }
 
-    VerificationOutcome::NeedsFullWindow {
-        reason: last_failure_reason,
+    // If no candidate matches at all, return NoMatch
+    if last_failure_reason == "no_reference_matches" {
+        VerificationOutcome::NoMatch {
+            reason: last_failure_reason,
+        }
+    } else {
+        VerificationOutcome::NeedsFullWindow {
+            reason: last_failure_reason,
+        }
     }
 }
 
@@ -138,16 +145,14 @@ fn verify_against_model(
         })
         .collect();
 
-    // Group candidates into consensus clusters where all members agree within max_reference_boundary_delta_ms.
-    // Order-independent: find the cluster with the largest support (and tie-break deterministically).
-    let mut best_cluster: Vec<&MatchedCandidate> = Vec::new();
+    // Build all maximal consensus clusters
+    let mut clusters: Vec<Vec<&MatchedCandidate>> = Vec::new();
     for i in 0..candidates.len() {
         let mut cluster = vec![&candidates[i]];
         for j in 0..candidates.len() {
             if i == j {
                 continue;
             }
-            // Candidate j joins the cluster if it agrees with all existing members of the cluster
             let matches_all = cluster.iter().all(|c| {
                 (c.target_start - candidates[j].target_start).abs() <= policy.max_reference_boundary_delta_ms
                     && (c.target_end - candidates[j].target_end).abs() <= policy.max_reference_boundary_delta_ms
@@ -156,37 +161,48 @@ fn verify_against_model(
                 cluster.push(&candidates[j]);
             }
         }
-        // Sort cluster elements deterministically by sample_id to remove any reference order dependency
         cluster.sort_by(|a, b| a.sample_id.cmp(&b.sample_id));
-
-        if cluster.len() > best_cluster.len() {
-            best_cluster = cluster;
-        } else if cluster.len() == best_cluster.len() && !cluster.is_empty() {
-            let avg1: f64 = cluster.iter().map(|c| c.score).sum::<f64>() / cluster.len() as f64;
-            let avg2: f64 = best_cluster.iter().map(|c| c.score).sum::<f64>() / best_cluster.len() as f64;
-            let score_diff = (avg1 - avg2).abs();
-            if score_diff > 1e-6 {
-                if avg1 < avg2 {
-                    best_cluster = cluster;
-                }
-            } else {
-                // If two distinct clusters have equal support and equal score but disagree on intervals,
-                // it is an ambiguous match that cannot be resolved arbitrarily.
-                let start1 = cluster.iter().map(|c| c.target_start).min().unwrap();
-                let end1 = cluster.iter().map(|c| c.target_end).max().unwrap();
-                let start2 = best_cluster.iter().map(|c| c.target_start).min().unwrap();
-                let end2 = best_cluster.iter().map(|c| c.target_end).max().unwrap();
-                if (start1 - start2).abs() > policy.max_reference_boundary_delta_ms
-                    || (end1 - end2).abs() > policy.max_reference_boundary_delta_ms
-                {
-                    return Err("ambiguous_consensus_clusters_tie".to_string());
-                }
-            }
-        }
+        clusters.push(cluster);
     }
 
+    if clusters.is_empty() {
+        return Err("insufficient_consensus_reference_matches".to_string());
+    }
+
+    // Sort clusters: first by size (descending), then by average score (ascending)
+    clusters.sort_by(|c1, c2| {
+        let len_cmp = c2.len().cmp(&c1.len());
+        if len_cmp != std::cmp::Ordering::Equal {
+            return len_cmp;
+        }
+        let avg1: f64 = c1.iter().map(|c| c.score).sum::<f64>() / c1.len() as f64;
+        let avg2: f64 = c2.iter().map(|c| c.score).sum::<f64>() / c2.len() as f64;
+        avg1.partial_cmp(&avg2).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let best_cluster = &clusters[0];
     if best_cluster.len() < min_required_matches {
         return Err("insufficient_consensus_reference_matches".to_string());
+    }
+
+    // Now check if there is an ambiguous tie with another cluster having equal size and equal score
+    let best_avg: f64 = best_cluster.iter().map(|c| c.score).sum::<f64>() / best_cluster.len() as f64;
+    for other in &clusters[1..] {
+        if other.len() != best_cluster.len() {
+            break;
+        }
+        let other_avg: f64 = other.iter().map(|c| c.score).sum::<f64>() / other.len() as f64;
+        if (best_avg - other_avg).abs() <= 1e-6 {
+            let start1 = best_cluster.iter().map(|c| c.target_start).min().unwrap();
+            let end1 = best_cluster.iter().map(|c| c.target_end).max().unwrap();
+            let start2 = other.iter().map(|c| c.target_start).min().unwrap();
+            let end2 = other.iter().map(|c| c.target_end).max().unwrap();
+            if (start1 - start2).abs() > policy.max_reference_boundary_delta_ms
+                || (end1 - end2).abs() > policy.max_reference_boundary_delta_ms
+            {
+                return Err("ambiguous_consensus_clusters_tie".to_string());
+            }
+        }
     }
 
     let target_start = best_cluster.iter().map(|c| c.target_start).min().unwrap();
@@ -209,10 +225,11 @@ fn verify_against_model(
     }
 
     // Guard evidence checks:
-    // Check actual decoded PCM boundaries instead of requested window end to prevent truncated audio attacks
+    // Check actual decoded PCM boundaries instead of requested window end to prevent truncated audio attacks.
+    // If PCM coverage is unknown (None), guard evidence cannot be reliably verified.
     let actual_decoded_end_ms = match target.capture.pcm_duration_ms {
         Some(pcm_ms) => target.capture.window.start_ms + pcm_ms,
-        None => target.capture.window.end_ms,
+        None => return Err("pcm_coverage_unknown".to_string()),
     };
     let left_guard = target_start - target.capture.window.start_ms;
     let right_guard = actual_decoded_end_ms - target_end;

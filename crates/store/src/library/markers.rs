@@ -139,6 +139,23 @@ impl Store {
             }
         }
         for (_media_id, _season, ledger_id, chapters_json) in serialized {
+            // Check if this ledger row has a locked marker; if so, do not overwrite cached chapters
+            let is_locked: bool = tx
+                .query_row(
+                    "SELECT m.locked
+                     FROM ledger l
+                     JOIN media_markers m ON m.media_id = l.media_id
+                        AND m.season = COALESCE(l.season, 1)
+                        AND m.episode = COALESCE(l.episode, 1)
+                     WHERE l.id = ?1",
+                    params![ledger_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if is_locked {
+                continue;
+            }
+
             tx.execute(
                 "INSERT INTO file_meta (ledger_id, audio_json, subtitle_json, chapters_json)
                  VALUES (?1, '[]', '[]', ?2)

@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use domain::MediaId;
 use marker::adaptive::{
@@ -312,45 +311,73 @@ pub async fn run_adaptive_season_pipeline(
         }
     }
 
-    if markers.is_empty() && templates.models.is_empty() {
-        // 检查是否存在由于音频截断或覆盖不全被拒绝的证据
-        let has_truncated_evidence = collected_evidences.iter().any(|ev| {
-            if let Some(pcm_ms) = ev.capture.pcm_duration_ms {
-                let req_ms = ev.capture.window.duration_ms();
-                pcm_ms + 1000 < req_ms
-            } else {
-                false
+    // 检查是否存在由于音频截断或覆盖不全被拒绝的证据：
+    // 按 kind 独立检查，不能因为一个 kind（如 Intro）有标记就忽略另一个 kind（如 Outro）的音频截断失败。
+    // 如果某个 kind 未能产出标记或模型，但该 kind 的采样证据中存在截断，必须报错退出，避免旧标记被清空。
+    let has_intro_markers = markers.iter().any(|m| m.intro_start_ms.is_some());
+    let has_intro_models = templates.models.iter().any(|m| m.kind == SegmentKind::Intro);
+    let has_outro_markers = markers.iter().any(|m| m.outro_start_ms.is_some());
+    let has_outro_models = templates.models.iter().any(|m| m.kind == SegmentKind::Outro);
+
+    for (kind, has_m, has_tpl) in [
+        (SegmentKind::Intro, has_intro_markers, has_intro_models),
+        (SegmentKind::Outro, has_outro_markers, has_outro_models),
+    ] {
+        if !has_m && !has_tpl {
+            let has_truncated = collected_evidences.iter().any(|ev| {
+                if ev.kind != kind {
+                    return false;
+                }
+                match ev.capture.pcm_duration_ms {
+                    Some(pcm_ms) => {
+                        let req_ms = ev.capture.window.duration_ms();
+                        pcm_ms + 1000 < req_ms
+                    }
+                    None => true, // 未知 PCM 覆盖同样视为不完整
+                }
+            });
+            if has_truncated {
+                let kind_name = match kind {
+                    SegmentKind::Intro => "片头",
+                    SegmentKind::Outro => "片尾",
+                };
+                return Err(format!("{kind_name}采集音频数据不完整或被截断，未能形成有效模板，保留现有标记"));
             }
-        });
-        if has_truncated_evidence {
-            return Err("采集音频数据不完整或被截断，未能形成有效模板，保留现有标记".to_string());
         }
     }
 
-    // Collect timing metrics across all detections for job timing summary
-    let mut total_intro_elapsed: u64 = 0;
-    let mut total_outro_elapsed: u64 = 0;
-    let mut intro_cache_hits = 0;
-    let mut outro_cache_hits = 0;
-
-    for det in &detections {
-        if let Some(ref ev) = det.intro_evidence {
-            let elapsed = ev.capture.metrics.elapsed_ms;
-            if elapsed > 0 {
-                total_intro_elapsed += elapsed;
-            } else {
-                intro_cache_hits += 1;
+    // Collect timing metrics across all attempts recorded for this job in fingerprint_attempts table
+    let (total_intro_elapsed, total_outro_elapsed, intro_cache_hits, outro_cache_hits) = {
+        let attempts = mgr
+            .store
+            .lock()
+            .list_fingerprint_attempts_for_job(job_id)
+            .unwrap_or_default();
+        let mut intro_ms = 0u64;
+        let mut outro_ms = 0u64;
+        let mut intro_hits = 0;
+        let mut outro_hits = 0;
+        for att in attempts {
+            let dur = att
+                .finished_at_ms
+                .map(|fin| fin.saturating_sub(att.started_at_ms).max(0) as u64)
+                .unwrap_or(0);
+            if att.kind == "intro" {
+                if att.phase == "cache_hit" || dur == 0 {
+                    intro_hits += 1;
+                } else {
+                    intro_ms += dur;
+                }
+            } else if att.kind == "outro" {
+                if att.phase == "cache_hit" || dur == 0 {
+                    outro_hits += 1;
+                } else {
+                    outro_ms += dur;
+                }
             }
         }
-        if let Some(ref ev) = det.outro_evidence {
-            let elapsed = ev.capture.metrics.elapsed_ms;
-            if elapsed > 0 {
-                total_outro_elapsed += elapsed;
-            } else {
-                outro_cache_hits += 1;
-            }
-        }
-    }
+        (intro_ms, outro_ms, intro_hits, outro_hits)
+    };
 
     mgr.timings.record_fingerprint(
         Some(job_id),

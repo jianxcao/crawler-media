@@ -107,11 +107,15 @@ pub fn build_season_models(
                 // Disallow truncated audio captures that did not decode sufficient audio for the requested window.
                 // A modeling sample must have decoded substantially the entire requested sample window
                 // (allowing at most 1 sec delta for EOF/padding) to prevent incomplete captures from being mistaken for stable templates.
-                if let Some(pcm_ms) = e.capture.pcm_duration_ms {
-                    let req_ms = e.capture.window.duration_ms();
-                    if pcm_ms + 1000 < req_ms {
-                        return false;
+                // If PCM coverage is unknown (None), it cannot be trusted for template modeling.
+                match e.capture.pcm_duration_ms {
+                    Some(pcm_ms) => {
+                        let req_ms = e.capture.window.duration_ms();
+                        if pcm_ms + 1000 < req_ms {
+                            return false;
+                        }
                     }
+                    None => return false,
                 }
                 true
             })
