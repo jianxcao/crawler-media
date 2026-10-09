@@ -104,9 +104,12 @@ pub fn build_season_models(
                 if e.kind != kind || is_constant_or_silent(&e.capture.words) {
                     return false;
                 }
-                // Disallow truncated audio captures that did not decode sufficient audio for the requested window
+                // Disallow truncated audio captures that did not decode sufficient audio for the requested window.
+                // A modeling sample must have decoded substantially the entire requested sample window
+                // (allowing at most 1 sec delta for EOF/padding) to prevent incomplete captures from being mistaken for stable templates.
                 if let Some(pcm_ms) = e.capture.pcm_duration_ms {
-                    if pcm_ms < e.capture.window.duration_ms().min(policy.min_match_duration_ms + policy.min_guard_evidence_ms) {
+                    let req_ms = e.capture.window.duration_ms();
+                    if pcm_ms + 1000 < req_ms {
                         return false;
                     }
                 }

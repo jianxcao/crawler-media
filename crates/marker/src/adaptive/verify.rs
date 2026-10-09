@@ -104,7 +104,11 @@ fn verify_against_model(
         }
     }
 
-    let is_target_model_ref = model.references.iter().any(|r| r.episode == target.episode);
+    let is_target_model_ref = model.references.iter().any(|r| {
+        r.ledger_id == target.ledger_id
+            && r.sample_id == target.sample_id
+            && r.source_version == target.source_version
+    });
     let min_required_matches = if is_target_model_ref { 1 } else { 2 };
 
     if ref_matches.len() < min_required_matches {
@@ -166,11 +170,16 @@ fn verify_against_model(
                     best_cluster = cluster;
                 }
             } else {
-                // Deterministic tie-breaker: compare sorted sample_id sequences
-                let ids1: Vec<&str> = cluster.iter().map(|c| c.sample_id.as_str()).collect();
-                let ids2: Vec<&str> = best_cluster.iter().map(|c| c.sample_id.as_str()).collect();
-                if ids1 < ids2 {
-                    best_cluster = cluster;
+                // If two distinct clusters have equal support and equal score but disagree on intervals,
+                // it is an ambiguous match that cannot be resolved arbitrarily.
+                let start1 = cluster.iter().map(|c| c.target_start).min().unwrap();
+                let end1 = cluster.iter().map(|c| c.target_end).max().unwrap();
+                let start2 = best_cluster.iter().map(|c| c.target_start).min().unwrap();
+                let end2 = best_cluster.iter().map(|c| c.target_end).max().unwrap();
+                if (start1 - start2).abs() > policy.max_reference_boundary_delta_ms
+                    || (end1 - end2).abs() > policy.max_reference_boundary_delta_ms
+                {
+                    return Err("ambiguous_consensus_clusters_tie".to_string());
                 }
             }
         }

@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 use domain::MediaKind;
 
-use super::{ProbeManager, ProbeUnit, marker_jobs, timings};
+use super::{ProbeManager, ProbeUnit};
 
 impl ProbeManager {
     pub(crate) fn recover_pending_jobs(&self) {
@@ -126,8 +126,11 @@ impl ProbeManager {
                 } else if refreshed.kind == "marker_refresh" {
                     match self.recovered_marker_refresh_unit(&refreshed) {
                         Ok(unit) => {
-                            marker_jobs::apply_marker_refresh(self, &refreshed, &unit);
-                            timings::log_terminal_job(&self.store, &self.timings, &refreshed);
+                            // 不在构造期间同步执行整季计算，避免等待尚未启动的 worker 导致死锁。
+                            // 暂存到 recovered_marker_refreshes，在 try_start_workers 启动 worker 后异步处理。
+                            self.recovered_marker_refreshes
+                                .lock()
+                                .push((refreshed, unit));
                         }
                         Err(error) => {
                             if let Err(finish_error) = self.store.lock().finish_probe_job(

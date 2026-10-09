@@ -89,6 +89,8 @@ async fn process_segment(
 
     let max_budget = request.policy.max_attempts_per_kind as usize;
 
+    let has_models_for_kind = request.templates.models.iter().any(|m| m.kind == kind);
+
     match decision {
         WindowDecision::Full { window, .. } => {
             let ev = capture_with_retries(ctx, request, kind, &window, "full_window", attempts, max_budget)
@@ -97,13 +99,23 @@ async fn process_segment(
             let verified = match outcome {
                 VerificationOutcome::Verified(v) => Some(v),
                 VerificationOutcome::NeedsFullWindow { ref reason } => {
-                    if request.templates.models.is_empty() {
+                    if !has_models_for_kind {
                         None
                     } else {
                         return Err(format!("Full window verification failed: {reason}"));
                     }
                 }
-                VerificationOutcome::NoMatch { ref reason } | VerificationOutcome::SamplingLimit { ref reason } => {
+                VerificationOutcome::NoMatch { ref reason } => {
+                    if !has_models_for_kind {
+                        None
+                    } else {
+                        // 模板存在但该集全量窗口经充分比对无匹配，属于合法的整集无片头/片尾（如特殊集或缺少对应片尾）
+                        // 正常返回 None，而不是让整个任务报错崩溃中断整季
+                        tracing::info!(kind = ?kind, reason = %reason, "full window evaluated to legitimate no match for template");
+                        None
+                    }
+                }
+                VerificationOutcome::SamplingLimit { ref reason } => {
                     return Err(format!("Verification failed: {reason}"));
                 }
             };
@@ -124,7 +136,15 @@ async fn process_segment(
                         VerificationOutcome::NeedsFullWindow { reason } => {
                             return Err(format!("Fallback full window verification failed: {reason}"));
                         }
-                        VerificationOutcome::NoMatch { reason } | VerificationOutcome::SamplingLimit { reason } => {
+                        VerificationOutcome::NoMatch { ref reason } => {
+                            if !has_models_for_kind {
+                                None
+                            } else {
+                                tracing::info!(kind = ?kind, reason = %reason, "fallback full window evaluated to legitimate no match for template");
+                                None
+                            }
+                        }
+                        VerificationOutcome::SamplingLimit { reason } => {
                             return Err(format!("Fallback verification failed: {reason}"));
                         }
                     };
@@ -145,13 +165,46 @@ async fn process_segment(
                         VerificationOutcome::NeedsFullWindow { reason } => {
                             return Err(format!("Fallback full window verification failed: {reason}"));
                         }
-                        VerificationOutcome::NoMatch { reason } | VerificationOutcome::SamplingLimit { reason } => {
+                        VerificationOutcome::NoMatch { ref reason } => {
+                            if !has_models_for_kind {
+                                None
+                            } else {
+                                tracing::info!(kind = ?kind, reason = %reason, "fallback full window evaluated to legitimate no match for template");
+                                None
+                            }
+                        }
+                        VerificationOutcome::SamplingLimit { reason } => {
                             return Err(format!("Fallback verification failed: {reason}"));
                         }
                     };
                     Ok((Some(fb_ev), verified2))
                 }
-                VerificationOutcome::NoMatch { reason } | VerificationOutcome::SamplingLimit { reason } => {
+                VerificationOutcome::NoMatch { ref reason } => {
+                    // Fast window 无匹配时，尝试全量窗口回退
+                    tracing::info!(reason = %reason, "fast verification returned no match, trying full window fallback");
+                    let fallback_win = full_window_for_kind(descriptor.duration_ms, request.policy.full_window_duration_secs, kind);
+                    let fb_ev = capture_with_retries(ctx, request, kind, &fallback_win, "fallback_full_window", attempts, max_budget).await?;
+                    let outcome2 = analyze_and_verify_segment(ctx.matcher.as_ref(), request, &fb_ev);
+                    let verified2 = match outcome2 {
+                        VerificationOutcome::Verified(v) => Some(v),
+                        VerificationOutcome::NeedsFullWindow { reason } => {
+                            return Err(format!("Fallback full window verification failed: {reason}"));
+                        }
+                        VerificationOutcome::NoMatch { ref reason } => {
+                            if !has_models_for_kind {
+                                None
+                            } else {
+                                tracing::info!(kind = ?kind, reason = %reason, "fallback full window evaluated to legitimate no match for template");
+                                None
+                            }
+                        }
+                        VerificationOutcome::SamplingLimit { reason } => {
+                            return Err(format!("Fallback verification failed: {reason}"));
+                        }
+                    };
+                    Ok((Some(fb_ev), verified2))
+                }
+                VerificationOutcome::SamplingLimit { reason } => {
                     Err(format!("Verification failed: {reason}"))
                 }
             }

@@ -97,7 +97,7 @@ impl Store {
                     .chapter_updates
                     .iter()
                     .map(|(ledger_id, chapters)| {
-                        Ok((ledger_id.clone(), serde_json::to_string(chapters)?))
+                        Ok((replacement.media_id, replacement.season, ledger_id.clone(), serde_json::to_string(chapters)?))
                     })
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
@@ -138,7 +138,7 @@ impl Store {
                 )?;
             }
         }
-        for (ledger_id, chapters_json) in serialized {
+        for (_media_id, _season, ledger_id, chapters_json) in serialized {
             tx.execute(
                 "INSERT INTO file_meta (ledger_id, audio_json, subtitle_json, chapters_json)
                  VALUES (?1, '[]', '[]', ?2)

@@ -65,6 +65,7 @@ pub struct ProbeManager {
     /// Metadata workers share the high-priority queue; voiceprint has its own worker.
     metadata_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<ProbeUnit>>>,
     fingerprint_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<probe::FingerprintWork>>>,
+    pub(crate) recovered_marker_refreshes: Mutex<Vec<(crate::store::ProbeJob, ProbeUnit)>>,
 }
 
 impl ProbeManager {
@@ -100,6 +101,7 @@ impl ProbeManager {
             timings: timings::ProbeTimingLedger::default(),
             metadata_rx: Arc::new(tokio::sync::Mutex::new(metadata_rx)),
             fingerprint_rx: Arc::new(tokio::sync::Mutex::new(fingerprint_rx)),
+            recovered_marker_refreshes: Mutex::new(Vec::new()),
         };
         manager.recover_pending_jobs();
         manager

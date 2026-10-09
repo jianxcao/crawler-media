@@ -312,6 +312,21 @@ pub async fn run_adaptive_season_pipeline(
         }
     }
 
+    if markers.is_empty() && templates.models.is_empty() {
+        // 检查是否存在由于音频截断或覆盖不全被拒绝的证据
+        let has_truncated_evidence = collected_evidences.iter().any(|ev| {
+            if let Some(pcm_ms) = ev.capture.pcm_duration_ms {
+                let req_ms = ev.capture.window.duration_ms();
+                pcm_ms + 1000 < req_ms
+            } else {
+                false
+            }
+        });
+        if has_truncated_evidence {
+            return Err("采集音频数据不完整或被截断，未能形成有效模板，保留现有标记".to_string());
+        }
+    }
+
     // Collect timing metrics across all detections for job timing summary
     let mut total_intro_elapsed: u64 = 0;
     let mut total_outro_elapsed: u64 = 0;

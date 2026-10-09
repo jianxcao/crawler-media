@@ -21,6 +21,19 @@ pub(super) fn try_start(manager: &Arc<ProbeManager>) -> bool {
         tokio::spawn(run_metadata_worker(manager.clone()));
     }
     tokio::spawn(run_fingerprint_worker(manager.clone()));
+    let recovered_refreshes: Vec<_> = {
+        let mut recovered = manager.recovered_marker_refreshes.lock();
+        std::mem::take(&mut *recovered)
+    };
+    if !recovered_refreshes.is_empty() {
+        let mgr = manager.clone();
+        tokio::spawn(async move {
+            for (refreshed, unit) in recovered_refreshes {
+                super::marker_jobs::apply_marker_refresh(&mgr, &refreshed, &unit);
+                super::timings::log_terminal_job(&mgr.store, &mgr.timings, &refreshed);
+            }
+        });
+    }
     tracing::info!(
         metadata_workers,
         fingerprint_workers = 1,
