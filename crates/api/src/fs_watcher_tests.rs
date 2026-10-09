@@ -120,10 +120,22 @@ fn rescanning_a_show_queues_only_the_new_episode() {
     let first = state.store.lock().list_ledger().unwrap();
     let first_id = first[0].id.to_string();
     while state.probe.take_queued_for_test().is_some() {}
+    let job_id = state
+        .store
+        .lock()
+        .active_probe_unit_for_ledger(&first_id)
+        .unwrap()
+        .unwrap()
+        .job_id;
     state
         .store
         .lock()
-        .finish_probe_units_for_ledger(&first_id)
+        .finish_probe_unit(&job_id, &first_id, true, None)
+        .unwrap();
+    state
+        .store
+        .lock()
+        .finish_probe_job(&job_id, true, None)
         .unwrap();
     assert!(!state.probe.is_queued(&first_id));
 
