@@ -138,22 +138,48 @@ impl Store {
                 )?;
             }
         }
-        for (_media_id, _season, ledger_id, chapters_json) in serialized {
-            // Check if this ledger row has a locked marker; if so, do not overwrite cached chapters
-            let is_locked: bool = tx
+        for (_media_id, _season, ledger_id, mut chapters_json) in serialized {
+            // Check if this ledger row has a locked marker
+            let locked_marker: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> = tx
                 .query_row(
-                    "SELECT m.locked
+                    "SELECT m.intro_start_ms, m.intro_end_ms, m.outro_start_ms, m.outro_end_ms
                      FROM ledger l
                      JOIN media_markers m ON m.media_id = l.media_id
                         AND m.season = COALESCE(l.season, 1)
                         AND m.episode = COALESCE(l.episode, 1)
-                     WHERE l.id = ?1",
+                     WHERE l.id = ?1 AND m.locked = 1",
                     params![ledger_id],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
-                .unwrap_or(false);
-            if is_locked {
-                continue;
+                .optional()
+                .unwrap_or(None);
+
+            if let Some((intro_s, intro_e, outro_s, outro_e)) = locked_marker {
+                let intro = match (intro_s, intro_e) {
+                    (Some(s), Some(e)) if s < e => Some((s, e)),
+                    _ => None,
+                };
+                let outro = match (outro_s, outro_e) {
+                    (Some(s), Some(e)) if s < e => Some((s, e)),
+                    _ => None,
+                };
+                let existing_chapters: Vec<library::ChapterMarker> = tx
+                    .query_row(
+                        "SELECT chapters_json FROM file_meta WHERE ledger_id = ?1",
+                        params![ledger_id],
+                        |row| {
+                            let json: String = row.get(0)?;
+                            Ok(serde_json::from_str(&json).unwrap_or_default())
+                        },
+                    )
+                    .unwrap_or_default();
+                let timeline = library::build_complete_timeline_chapters(
+                    &existing_chapters,
+                    intro,
+                    outro,
+                    None,
+                );
+                chapters_json = serde_json::to_string(&timeline)?;
             }
 
             tx.execute(
@@ -416,6 +442,124 @@ mod marker_replacement_tests {
                     .unwrap()
                     .source,
                 expected_source
+            );
+        }
+    }
+
+    #[test]
+    fn locked_marker_preserves_and_syncs_chapters_across_ledger_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let media_id = domain::MediaId::new();
+        let rows: Vec<_> = (0..3)
+            .map(|v| domain::LedgerRow {
+                id: domain::LedgerId::new(),
+                media_id,
+                path: format!("{}/version-{v}.mkv", dir.path().display()),
+                season: Some(1),
+                episode: Some(1),
+                resolution: None,
+                codec: None,
+                hdr: None,
+                quality_source: domain::QualitySource::Release,
+                confidence: domain::Confidence::High,
+                filter_score: None,
+            })
+            .collect();
+        for r in &rows {
+            store.insert_ledger(r).unwrap();
+        }
+        let locked_marker = StoredMediaMarker {
+            media_id,
+            season: 1,
+            episode: 1,
+            intro_start_ms: Some(10_000),
+            intro_end_ms: Some(70_000),
+            outro_start_ms: None,
+            outro_end_ms: None,
+            source: "fixture".into(),
+            locked: true,
+            updated_at: 1,
+        };
+        store.put_media_marker(&locked_marker).unwrap();
+        store
+            .put_cached_chapters(
+                &rows[0].id.to_string(),
+                &library::build_complete_timeline_chapters(&[], Some((10_000, 70_000)), None, None),
+            )
+            .unwrap();
+        store
+            .put_cached_chapters(
+                &rows[1].id.to_string(),
+                &library::build_complete_timeline_chapters(&[], Some((20_000, 80_000)), None, None),
+            )
+            .unwrap();
+        store.put_cached_chapters(&rows[2].id.to_string(), &[]).unwrap();
+
+        let intro_from_cache = |id: &str| -> Option<Vec<(i64, i64)>> {
+            store.get_cached_chapters(id).unwrap().map(|c| {
+                c.into_iter()
+                    .filter(|c| c.marker_type == Some(library::MarkerType::IntroStart))
+                    .map(|c| (c.start_ms, c.end_ms))
+                    .collect()
+            })
+        };
+
+        // When detected replacement arrives with 40s..100s, locked marker is preserved
+        // and all versions are synchronized to locked marker (10s..70s).
+        let detected_marker = StoredMediaMarker {
+            media_id,
+            season: 1,
+            episode: 1,
+            intro_start_ms: Some(40_000),
+            intro_end_ms: Some(100_000),
+            outro_start_ms: None,
+            outro_end_ms: None,
+            source: "voiceprint".into(),
+            locked: false,
+            updated_at: 2,
+        };
+        let updates: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.id.to_string(),
+                    library::build_complete_timeline_chapters(
+                        &[],
+                        Some((40_000, 100_000)),
+                        None,
+                        None,
+                    ),
+                )
+            })
+            .collect();
+        store
+            .replace_marker_results(media_id, 1, &[detected_marker], &updates)
+            .unwrap();
+
+        let cur_marker = store.get_media_marker(media_id, Some(1), Some(1)).unwrap().unwrap();
+        assert_eq!(cur_marker.intro_start_ms, Some(10_000));
+        assert_eq!(cur_marker.intro_end_ms, Some(70_000));
+        for r in &rows {
+            assert_eq!(
+                intro_from_cache(&r.id.to_string()),
+                Some(vec![(10_000, 70_000)])
+            );
+        }
+
+        // When empty replacements arrive, locked marker and chapters still remain 10s..70s.
+        let empty_updates: Vec<_> = rows.iter().map(|r| (r.id.to_string(), Vec::new())).collect();
+        store
+            .replace_marker_results(media_id, 1, &[], &empty_updates)
+            .unwrap();
+
+        let cur_marker = store.get_media_marker(media_id, Some(1), Some(1)).unwrap().unwrap();
+        assert_eq!(cur_marker.intro_start_ms, Some(10_000));
+        assert_eq!(cur_marker.intro_end_ms, Some(70_000));
+        for r in &rows {
+            assert_eq!(
+                intro_from_cache(&r.id.to_string()),
+                Some(vec![(10_000, 70_000)])
             );
         }
     }

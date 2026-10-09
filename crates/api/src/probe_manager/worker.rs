@@ -21,19 +21,6 @@ pub(super) fn try_start(manager: &Arc<ProbeManager>) -> bool {
         tokio::spawn(run_metadata_worker(manager.clone()));
     }
     tokio::spawn(run_fingerprint_worker(manager.clone()));
-    let recovered_refreshes: Vec<_> = {
-        let mut recovered = manager.recovered_marker_refreshes.lock();
-        std::mem::take(&mut *recovered)
-    };
-    if !recovered_refreshes.is_empty() {
-        let mgr = manager.clone();
-        tokio::spawn(async move {
-            for (refreshed, unit) in recovered_refreshes {
-                super::marker_jobs::apply_marker_refresh(&mgr, &refreshed, &unit);
-                super::timings::log_terminal_job(&mgr.store, &mgr.timings, &refreshed);
-            }
-        });
-    }
     tracing::info!(
         metadata_workers,
         fingerprint_workers = 1,
@@ -75,6 +62,21 @@ impl Drop for MetadataStageGuard {
 
 async fn run_fingerprint_worker(manager: Arc<ProbeManager>) {
     loop {
+        let recovered = {
+            let mut list = manager.recovered_marker_refreshes.lock();
+            if !list.is_empty() {
+                Some(list.remove(0))
+            } else {
+                None
+            }
+        };
+        if let Some((refreshed, unit)) = recovered {
+            wait_for_metadata_idle(&manager).await;
+            super::marker_jobs::apply_marker_refresh(&manager, &refreshed, &unit);
+            super::timings::log_terminal_job(&manager.store, &manager.timings, &refreshed);
+            continue;
+        }
+
         let work = {
             let mut rx = manager.fingerprint_rx.lock().await;
             rx.recv().await

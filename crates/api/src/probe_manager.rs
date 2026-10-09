@@ -25,7 +25,7 @@ pub mod progress;
 mod queue;
 pub mod recovery;
 pub mod season;
-mod timings;
+pub(crate) mod timings;
 mod worker;
 
 /// 一个待探测单元（对应一条 ledger 行）。
@@ -61,7 +61,7 @@ pub struct ProbeManager {
     next_marker_refresh_id: AtomicU64,
     pub(crate) metadata_pending: Arc<AtomicUsize>,
     pub(crate) metadata_idle: Arc<Notify>,
-    timings: timings::ProbeTimingLedger,
+    pub(crate) timings: timings::ProbeTimingLedger,
     /// Metadata workers share the high-priority queue; voiceprint has its own worker.
     metadata_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<ProbeUnit>>>,
     fingerprint_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<probe::FingerprintWork>>>,

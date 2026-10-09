@@ -137,6 +137,7 @@ async fn reuse_valid_does_not_read_media() {
         matcher: engine.clone(),
         capture: engine.clone(),
         gate: Arc::new(NoopGate),
+        timings: None,
     };
 
     let profile = default_profile();
@@ -175,6 +176,7 @@ async fn recapture_requires_new_job_evidence() {
         matcher: engine.clone(),
         capture: engine.clone(),
         gate: Arc::new(NoopGate),
+        timings: None,
     };
 
     let profile = default_profile();
@@ -218,6 +220,7 @@ async fn retries_and_fallback_share_four_attempt_budget() {
         matcher: engine.clone(),
         capture: engine.clone(),
         gate: Arc::new(NoopGate),
+        timings: None,
     };
 
     let profile = default_profile();

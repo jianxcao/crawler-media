@@ -27,6 +27,7 @@ pub struct AdaptiveCaptureContext {
     pub matcher: Arc<dyn FingerprintEngine>,
     pub capture: Arc<dyn FingerprintCaptureEngine>,
     pub gate: Arc<dyn CaptureGate>,
+    pub timings: Option<crate::probe_manager::timings::ProbeTimingLedger>,
 }
 
 #[derive(Clone, Debug)]

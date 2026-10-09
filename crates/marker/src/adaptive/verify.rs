@@ -48,8 +48,20 @@ pub fn verify_template_window(
         }
     }
 
-    // If no candidate matches at all, return NoMatch
-    if last_failure_reason == "no_reference_matches" {
+    let full_window_ms = (policy.full_window_duration_secs as i64) * 1000;
+    let is_full_window = target.capture.window.duration_ms() >= full_window_ms
+        || target
+            .duration_ms
+            .map(|dur| dur > 0 && target.capture.window.duration_ms() >= dur)
+            .unwrap_or(false);
+
+    let is_complete_pcm = match target.capture.pcm_duration_ms {
+        Some(pcm_ms) => pcm_ms + 1000 >= target.capture.window.duration_ms(),
+        None => false,
+    };
+
+    // If no raw candidate matches at all on a complete PCM full window, return NoMatch
+    if last_failure_reason == "zero_engine_segments" && is_full_window && is_complete_pcm {
         VerificationOutcome::NoMatch {
             reason: last_failure_reason,
         }
@@ -69,6 +81,7 @@ fn verify_against_model(
 ) -> Result<VerifiedInterval, String> {
     // We need matches against at least two independent reference episodes
     let mut ref_matches: Vec<(String, CommonSegment)> = Vec::new();
+    let mut raw_segments_found = 0;
 
     for r in &model.references {
         if r.episode == target.episode {
@@ -84,6 +97,8 @@ fn verify_against_model(
             (policy.min_match_duration_ms as f32) / 1000.0,
             (policy.max_match_duration_ms as f32) / 1000.0,
         );
+
+        raw_segments_found += segs.len();
 
         let (tpl_start, tpl_end) = r.match_interval_ms;
         for s in segs {
@@ -111,12 +126,20 @@ fn verify_against_model(
         }
     }
 
+    if raw_segments_found == 0 {
+        return Err("zero_engine_segments".to_string());
+    }
+
     let is_target_model_ref = model.references.iter().any(|r| {
         r.ledger_id == target.ledger_id
             && r.sample_id == target.sample_id
             && r.source_version == target.source_version
     });
     let min_required_matches = if is_target_model_ref { 1 } else { 2 };
+
+    if ref_matches.is_empty() {
+        return Err("no_aligned_reference_matches".to_string());
+    }
 
     if ref_matches.len() < min_required_matches {
         return Err("insufficient_reference_matches".to_string());
@@ -145,24 +168,48 @@ fn verify_against_model(
         })
         .collect();
 
-    // Build all maximal consensus clusters
+    // Build all maximal consensus clusters.
+    // Rather than greedy sequential inclusion which depends on candidate ordering,
+    // examine all compatible cliques. For candidates.len() <= 12, we can enumerate
+    // the power set of candidate indices to guarantee finding the optimal consensus subset.
     let mut clusters: Vec<Vec<&MatchedCandidate>> = Vec::new();
-    for i in 0..candidates.len() {
-        let mut cluster = vec![&candidates[i]];
-        for j in 0..candidates.len() {
-            if i == j {
-                continue;
-            }
-            let matches_all = cluster.iter().all(|c| {
-                (c.target_start - candidates[j].target_start).abs() <= policy.max_reference_boundary_delta_ms
-                    && (c.target_end - candidates[j].target_end).abs() <= policy.max_reference_boundary_delta_ms
-            });
-            if matches_all {
-                cluster.push(&candidates[j]);
+    let n = candidates.len();
+    if n <= 12 {
+        for mask in 1..(1usize << n) {
+            let subset: Vec<&MatchedCandidate> = (0..n)
+                .filter(|k| (mask & (1 << k)) != 0)
+                .map(|k| &candidates[k])
+                .collect();
+            let min_start = subset.iter().map(|c| c.target_start).min().unwrap();
+            let max_start = subset.iter().map(|c| c.target_start).max().unwrap();
+            let min_end = subset.iter().map(|c| c.target_end).min().unwrap();
+            let max_end = subset.iter().map(|c| c.target_end).max().unwrap();
+            if max_start - min_start <= policy.max_reference_boundary_delta_ms
+                && max_end - min_end <= policy.max_reference_boundary_delta_ms
+            {
+                let mut sorted_sub = subset;
+                sorted_sub.sort_by(|a, b| a.sample_id.cmp(&b.sample_id));
+                clusters.push(sorted_sub);
             }
         }
-        cluster.sort_by(|a, b| a.sample_id.cmp(&b.sample_id));
-        clusters.push(cluster);
+    } else {
+        for i in 0..candidates.len() {
+            let mut cluster = vec![&candidates[i]];
+            for j in 0..candidates.len() {
+                if i == j {
+                    continue;
+                }
+                let matches_all = cluster.iter().all(|c| {
+                    (c.target_start - candidates[j].target_start).abs() <= policy.max_reference_boundary_delta_ms
+                        && (c.target_end - candidates[j].target_end).abs() <= policy.max_reference_boundary_delta_ms
+                });
+                if matches_all {
+                    cluster.push(&candidates[j]);
+                }
+            }
+            cluster.sort_by(|a, b| a.sample_id.cmp(&b.sample_id));
+            clusters.push(cluster);
+        }
     }
 
     if clusters.is_empty() {

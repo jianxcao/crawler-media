@@ -9,6 +9,7 @@ pub fn analyze_and_verify_segment(
     matcher: &dyn FingerprintEngine,
     request: &EpisodeCaptureRequest,
     evidence: &EpisodeEvidence,
+    timings: Option<&crate::probe_manager::timings::ProbeTimingLedger>,
 ) -> VerificationOutcome {
     if request.templates.models.is_empty() {
         return VerificationOutcome::NeedsFullWindow {
@@ -16,5 +17,10 @@ pub fn analyze_and_verify_segment(
         };
     }
 
-    verify_template_window(matcher, evidence, &request.templates, &request.policy)
+    let start = std::time::Instant::now();
+    let outcome = verify_template_window(matcher, evidence, &request.templates, &request.policy);
+    if let Some(timings) = timings {
+        timings.record_comparison(Some(&request.job_id), start.elapsed().as_millis() as u64);
+    }
+    outcome
 }

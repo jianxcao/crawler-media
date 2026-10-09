@@ -24,6 +24,12 @@ pub async fn capture_or_reuse_segment_sample(
     {
         let store = ctx.store.lock();
         if let Some(cached) = find_reusable_sample(&store, request, kind, window) {
+            if let Some(timings) = &ctx.timings {
+                match kind {
+                    SegmentKind::Intro => timings.record_intro_cache_hit(Some(&request.job_id)),
+                    SegmentKind::Outro => timings.record_outro_cache_hit(Some(&request.job_id)),
+                }
+            }
             tracing::info!(
                 ledger_id = %request.row.id,
                 kind = ?kind,

@@ -6,8 +6,8 @@ use parking_lot::Mutex;
 use crate::Store;
 use crate::store::ProbeJob;
 
-#[derive(Default)]
-pub(super) struct ProbeTimingLedger(Mutex<HashMap<String, ProbeTimingSummary>>);
+#[derive(Clone, Default)]
+pub struct ProbeTimingLedger(Arc<Mutex<HashMap<String, ProbeTimingSummary>>>);
 
 #[derive(Default)]
 struct ProbeTimingSummary {
@@ -36,6 +36,18 @@ impl ProbeTimingLedger {
         });
     }
 
+    pub(crate) fn record_intro_cache_hit(&self, job_id: Option<&str>) {
+        self.update(job_id, |summary| {
+            summary.intro_cache_hits += 1;
+        });
+    }
+
+    pub(crate) fn record_outro_cache_hit(&self, job_id: Option<&str>) {
+        self.update(job_id, |summary| {
+            summary.outro_cache_hits += 1;
+        });
+    }
+
     pub(super) fn record_fingerprint(
         &self,
         job_id: Option<&str>,
@@ -60,7 +72,7 @@ impl ProbeTimingLedger {
         });
     }
 
-    pub(super) fn record_comparison(&self, job_id: Option<&str>, elapsed_ms: u64) {
+    pub(crate) fn record_comparison(&self, job_id: Option<&str>, elapsed_ms: u64) {
         self.update(job_id, |summary| {
             summary.comparisons += 1;
             summary.comparison_elapsed_ms += elapsed_ms;
@@ -88,7 +100,31 @@ pub(super) fn log_terminal_job(
         .ok()
         .flatten()
         .unwrap_or_else(|| fallback.clone());
-    let summary = timings.take(&job.id);
+    let mut summary = timings.take(&job.id);
+    let attempts = store
+        .lock()
+        .list_fingerprint_attempts_for_job(&job.id)
+        .unwrap_or_default();
+    if !attempts.is_empty() {
+        summary.intro_reads = 0;
+        summary.intro_elapsed_ms = 0;
+        summary.outro_reads = 0;
+        summary.outro_elapsed_ms = 0;
+        for att in attempts {
+            let dur = att
+                .finished_at_ms
+                .unwrap_or(att.started_at_ms)
+                .saturating_sub(att.started_at_ms)
+                .max(0) as u64;
+            if att.kind == "intro" {
+                summary.intro_reads += 1;
+                summary.intro_elapsed_ms += dur;
+            } else if att.kind == "outro" {
+                summary.outro_reads += 1;
+                summary.outro_elapsed_ms += dur;
+            }
+        }
+    }
     let now = now_ms();
     let started = job.started_at_ms.unwrap_or(job.created_at_ms);
     let queue_wait_ms = started.saturating_sub(job.created_at_ms).max(0) as u64;

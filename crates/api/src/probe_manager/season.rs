@@ -91,6 +91,7 @@ pub async fn run_adaptive_season_pipeline(
         matcher: mgr.fingerprint_engine.clone(),
         capture: mgr.capture_engine.clone(),
         gate,
+        timings: Some(mgr.timings.clone()),
     };
 
     // 1. Process seed units first
@@ -159,7 +160,9 @@ pub async fn run_adaptive_season_pipeline(
 
         // If we finished processing all seeds, build template models and persist them!
         if is_seed && collected_evidences.len() >= 2 {
+            let comp_start = std::time::Instant::now();
             let models = build_season_models(mgr.fingerprint_engine.as_ref(), &collected_evidences, &policy);
+            mgr.timings.record_comparison(Some(job_id), comp_start.elapsed().as_millis() as u64);
             for model in &models {
                 for r in &model.references {
                     if let Some(ev) = collected_evidences.iter().find(|e| e.sample_id == r.sample_id) {
@@ -208,6 +211,7 @@ pub async fn run_adaptive_season_pipeline(
             for det in detections.iter_mut() {
                 if det.intro_match.is_none() {
                     if let Some(ref ev) = det.intro_evidence {
+                        let comp_start = std::time::Instant::now();
                         if let marker::adaptive::VerificationOutcome::Verified(v) =
                             marker::adaptive::verify_template_window(
                                 mgr.fingerprint_engine.as_ref(),
@@ -218,10 +222,12 @@ pub async fn run_adaptive_season_pipeline(
                         {
                             det.intro_match = Some(v);
                         }
+                        mgr.timings.record_comparison(Some(job_id), comp_start.elapsed().as_millis() as u64);
                     }
                 }
                 if det.outro_match.is_none() {
                     if let Some(ref ev) = det.outro_evidence {
+                        let comp_start = std::time::Instant::now();
                         if let marker::adaptive::VerificationOutcome::Verified(v) =
                             marker::adaptive::verify_template_window(
                                 mgr.fingerprint_engine.as_ref(),
@@ -232,6 +238,7 @@ pub async fn run_adaptive_season_pipeline(
                         {
                             det.outro_match = Some(v);
                         }
+                        mgr.timings.record_comparison(Some(job_id), comp_start.elapsed().as_millis() as u64);
                     }
                 }
             }
@@ -243,6 +250,7 @@ pub async fn run_adaptive_season_pipeline(
     for det in detections.iter_mut() {
         if det.intro_match.is_none() {
             if let Some(ref ev) = det.intro_evidence {
+                let comp_start = std::time::Instant::now();
                 if let marker::adaptive::VerificationOutcome::Verified(v) =
                     marker::adaptive::verify_template_window(
                         mgr.fingerprint_engine.as_ref(),
@@ -253,10 +261,12 @@ pub async fn run_adaptive_season_pipeline(
                 {
                     det.intro_match = Some(v);
                 }
+                mgr.timings.record_comparison(Some(job_id), comp_start.elapsed().as_millis() as u64);
             }
         }
         if det.outro_match.is_none() {
             if let Some(ref ev) = det.outro_evidence {
+                let comp_start = std::time::Instant::now();
                 if let marker::adaptive::VerificationOutcome::Verified(v) =
                     marker::adaptive::verify_template_window(
                         mgr.fingerprint_engine.as_ref(),
@@ -267,6 +277,7 @@ pub async fn run_adaptive_season_pipeline(
                 {
                     det.outro_match = Some(v);
                 }
+                mgr.timings.record_comparison(Some(job_id), comp_start.elapsed().as_millis() as u64);
             }
         }
     }
@@ -314,78 +325,39 @@ pub async fn run_adaptive_season_pipeline(
     // 检查是否存在由于音频截断或覆盖不全被拒绝的证据：
     // 按 kind 独立检查，不能因为一个 kind（如 Intro）有标记就忽略另一个 kind（如 Outro）的音频截断失败。
     // 如果某个 kind 未能产出标记或模型，但该 kind 的采样证据中存在截断，必须报错退出，避免旧标记被清空。
-    let has_intro_markers = markers.iter().any(|m| m.intro_start_ms.is_some());
-    let has_intro_models = templates.models.iter().any(|m| m.kind == SegmentKind::Intro);
-    let has_outro_markers = markers.iter().any(|m| m.outro_start_ms.is_some());
-    let has_outro_models = templates.models.iter().any(|m| m.kind == SegmentKind::Outro);
-
-    for (kind, has_m, has_tpl) in [
-        (SegmentKind::Intro, has_intro_markers, has_intro_models),
-        (SegmentKind::Outro, has_outro_markers, has_outro_models),
-    ] {
-        if !has_m && !has_tpl {
-            let has_truncated = collected_evidences.iter().any(|ev| {
-                if ev.kind != kind {
+    for kind in [SegmentKind::Intro, SegmentKind::Outro] {
+        let has_truncated_unmatched = units.iter().any(|u| {
+            let ep = u.row.episode.unwrap_or(1);
+            let detection = detections.iter().find(|d| d.ledger_id == u.row.id.to_string() || d.episode == ep);
+            let has_detection = match kind {
+                SegmentKind::Intro => detection.and_then(|d| d.intro_match.as_ref()).is_some(),
+                SegmentKind::Outro => detection.and_then(|d| d.outro_match.as_ref()).is_some(),
+            };
+            if has_detection {
+                return false;
+            }
+            // Episode has no detection for this kind. Check if it had a truncated or unknown PCM evidence.
+            collected_evidences.iter().any(|ev| {
+                if ev.episode != ep || ev.kind != kind {
                     return false;
                 }
                 match ev.capture.pcm_duration_ms {
-                    Some(pcm_ms) => {
-                        let req_ms = ev.capture.window.duration_ms();
-                        pcm_ms + 1000 < req_ms
-                    }
-                    None => true, // 未知 PCM 覆盖同样视为不完整
+                    Some(pcm_ms) => pcm_ms + 1000 < ev.capture.window.duration_ms(),
+                    None => true,
                 }
-            });
-            if has_truncated {
-                let kind_name = match kind {
-                    SegmentKind::Intro => "片头",
-                    SegmentKind::Outro => "片尾",
-                };
-                return Err(format!("{kind_name}采集音频数据不完整或被截断，未能形成有效模板，保留现有标记"));
-            }
+            })
+        });
+
+        if has_truncated_unmatched {
+            let kind_name = match kind {
+                SegmentKind::Intro => "片头",
+                SegmentKind::Outro => "片尾",
+            };
+            return Err(format!(
+                "{kind_name}采集音频数据不完整或被截断，未能为全部剧集形成有效标记，保留现有标记"
+            ));
         }
     }
-
-    // Collect timing metrics across all attempts recorded for this job in fingerprint_attempts table
-    let (total_intro_elapsed, total_outro_elapsed, intro_cache_hits, outro_cache_hits) = {
-        let attempts = mgr
-            .store
-            .lock()
-            .list_fingerprint_attempts_for_job(job_id)
-            .unwrap_or_default();
-        let mut intro_ms = 0u64;
-        let mut outro_ms = 0u64;
-        let mut intro_hits = 0;
-        let mut outro_hits = 0;
-        for att in attempts {
-            let dur = att
-                .finished_at_ms
-                .map(|fin| fin.saturating_sub(att.started_at_ms).max(0) as u64)
-                .unwrap_or(0);
-            if att.kind == "intro" {
-                if att.phase == "cache_hit" || dur == 0 {
-                    intro_hits += 1;
-                } else {
-                    intro_ms += dur;
-                }
-            } else if att.kind == "outro" {
-                if att.phase == "cache_hit" || dur == 0 {
-                    outro_hits += 1;
-                } else {
-                    outro_ms += dur;
-                }
-            }
-        }
-        (intro_ms, outro_ms, intro_hits, outro_hits)
-    };
-
-    mgr.timings.record_fingerprint(
-        Some(job_id),
-        intro_cache_hits > 0 && total_intro_elapsed == 0,
-        outro_cache_hits > 0 && total_outro_elapsed == 0,
-        total_intro_elapsed,
-        total_outro_elapsed,
-    );
 
     let replacement = MarkerResultReplacement {
         media_id,

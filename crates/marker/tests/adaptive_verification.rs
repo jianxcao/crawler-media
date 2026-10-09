@@ -748,3 +748,111 @@ fn conflicting_third_reference_excluded_from_support_and_order_independent() {
         other => panic!("Expected verified regardless of order, got: {:?}", other),
     }
 }
+
+#[test]
+fn review_greedy_clusters_cannot_hide_best_valid_five_reference_consensus() {
+    let mut engine = MockVerificationEngine::default();
+    let policy = SamplingPolicy::default();
+
+    let mut references = Vec::new();
+    let mut templates = TemplateContext::default();
+    for ep in 1..=5 {
+        let sid = format!("review-ref-{ep}");
+        templates.references.insert(
+            sid.clone(),
+            make_target_evidence(&sid, ep, SegmentKind::Intro, ep * 1000, 0, 180_000),
+        );
+        references.push(TemplateReference {
+            sample_id: sid,
+            ledger_id: format!("ledger-{ep}"),
+            episode: ep,
+            source_version: "v1".to_string(),
+            match_interval_ms: (10_000, 100_000),
+            match_from_end_ms: None,
+        });
+    }
+
+    let model = TemplateModel {
+        model_id: "intro-5ref".to_string(),
+        version: 1,
+        kind: SegmentKind::Intro,
+        references,
+        expected_duration_ms: 90_000,
+        is_stable: true,
+    };
+    templates.models.push(model);
+
+    let target = make_target_evidence("target", 9, SegmentKind::Intro, 9000, 0, 110_000);
+
+    for (tag, start, score) in [
+        (1000, 3.1, 1.0),
+        (2000, 3.3, 1.0),
+        (3000, 3.9, 1.0),
+        (4000, 2.6, 4.0),
+        (5000, 4.3, 4.0),
+    ] {
+        let seg = CommonSegment {
+            start1_sec: start,
+            end1_sec: start + 90.0,
+            start2_sec: 10.0,
+            end2_sec: 100.0,
+            duration_sec: 90.0,
+            score,
+        };
+        engine.returns.insert((9000, tag), vec![seg]);
+    }
+
+    templates.models[0].references.rotate_right(2);
+    let high_score_first = verify_template_window(&engine, &target, &templates, &policy);
+    templates.models[0].references.rotate_left(2);
+    let low_score_first = verify_template_window(&engine, &target, &templates, &policy);
+
+    assert!(matches!(high_score_first, VerificationOutcome::Verified(ref v) if v.start_ms == 3100 && v.end_ms == 93900 && v.supporting_episodes == 3 && (v.score - 1.0).abs() < 1e-6));
+    assert!(matches!(low_score_first, VerificationOutcome::Verified(ref v) if v.start_ms == 3100 && v.end_ms == 93900 && v.supporting_episodes == 3 && (v.score - 1.0).abs() < 1e-6));
+}
+
+#[test]
+fn review_known_complete_full_window_zero_candidates_reports_no_match() {
+    let engine = MockVerificationEngine::default();
+    let policy = SamplingPolicy::default();
+
+    let mut templates = TemplateContext::default();
+    let template = TemplateModel {
+        model_id: "intro-nomatch".to_string(),
+        version: 1,
+        kind: SegmentKind::Intro,
+        references: vec![
+            TemplateReference {
+                sample_id: "ref-1".to_string(),
+                ledger_id: "l-1".to_string(),
+                episode: 1,
+                source_version: "v1".to_string(),
+                match_interval_ms: (10_000, 100_000),
+                match_from_end_ms: None,
+            },
+            TemplateReference {
+                sample_id: "ref-2".to_string(),
+                ledger_id: "l-2".to_string(),
+                episode: 2,
+                source_version: "v1".to_string(),
+                match_interval_ms: (10_000, 100_000),
+                match_from_end_ms: None,
+            },
+        ],
+        expected_duration_ms: 90_000,
+        is_stable: true,
+    };
+    templates.models.push(template);
+    templates.references.insert(
+        "ref-1".to_string(),
+        make_target_evidence("ref-1", 1, SegmentKind::Intro, 1000, 0, 180_000),
+    );
+    templates.references.insert(
+        "ref-2".to_string(),
+        make_target_evidence("ref-2", 2, SegmentKind::Intro, 2000, 0, 180_000),
+    );
+
+    let target = make_target_evidence("target", 9, SegmentKind::Intro, 9000, 0, 180_000);
+    let outcome = verify_template_window(&engine, &target, &templates, &policy);
+    assert!(matches!(outcome, VerificationOutcome::NoMatch { .. }));
+}
