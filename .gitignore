@@ -17,6 +17,9 @@ web/dist/
 web/public/jassub/
 web/tsconfig.tsbuildinfo
 
+# git worktree 工作区（本地临时分支用）
+.worktrees/
+
 # start-test.sh runtime
 .test-logs/
 *.db
