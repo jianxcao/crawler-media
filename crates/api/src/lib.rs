@@ -49,6 +49,8 @@ pub mod cli;
 pub mod config;
 pub mod douban_http;
 pub mod fs_watcher;
+#[cfg(test)]
+mod fs_watcher_tests;
 pub mod http_agent;
 pub mod obscura_manager;
 pub mod probe_manager;
