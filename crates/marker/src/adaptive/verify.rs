@@ -5,6 +5,16 @@ use super::types::{
 use crate::fingerprint::FingerprintEngine;
 use crate::types::CommonSegment;
 
+/// Whether one template's failure is a *completed* comparison that found no candidate at all.
+///
+/// Only an empty engine result counts as a confirmed no-match. Comparisons that found segments
+/// but could not align, score or support them stay inconclusive: they must fall back to the
+/// full window instead of clearing existing markers, and their outcome must survive the
+/// aggregation below even when another template reports an empty engine result.
+fn template_confirms_no_match(reason: &str) -> bool {
+    reason == "zero_engine_segments"
+}
+
 pub fn verify_template_window(
     engine: &dyn FingerprintEngine,
     target: &EpisodeEvidence,
@@ -36,17 +46,24 @@ pub fn verify_template_window(
         };
     }
 
-    let mut last_failure_reason = "no_template_matched".to_string();
+    // Try matching against each template model, keeping every model's outcome so that one
+    // template without candidates cannot overwrite another template's inconclusive result.
+    let mut failure_reasons: Vec<String> = Vec::new();
+    let mut all_templates_confirm_no_match = true;
 
-    // Try matching against each template model
     for model in matching_models {
         match verify_against_model(engine, target, model, templates, policy) {
             Ok(verified) => return VerificationOutcome::Verified(verified),
             Err(reason) => {
-                last_failure_reason = reason;
+                if !template_confirms_no_match(&reason) {
+                    all_templates_confirm_no_match = false;
+                }
+                failure_reasons.push(reason);
             }
         }
     }
+
+    let reason = aggregate_failure_reasons(all_templates_confirm_no_match, &failure_reasons);
 
     let full_window_ms = (policy.full_window_duration_secs as i64) * 1000;
     let is_full_window = target.capture.window.duration_ms() >= full_window_ms
@@ -60,16 +77,33 @@ pub fn verify_template_window(
         None => false,
     };
 
-    // If no raw candidate matches at all on a complete PCM full window, return NoMatch
-    if last_failure_reason == "zero_engine_segments" && is_full_window && is_complete_pcm {
-        VerificationOutcome::NoMatch {
-            reason: last_failure_reason,
-        }
+    // "Successfully no match" may only be concluded when every applicable template completed
+    // its comparison without candidates on a complete PCM full window.
+    if all_templates_confirm_no_match && is_full_window && is_complete_pcm {
+        VerificationOutcome::NoMatch { reason }
     } else {
-        VerificationOutcome::NeedsFullWindow {
-            reason: last_failure_reason,
+        VerificationOutcome::NeedsFullWindow { reason }
+    }
+}
+
+/// Combine per-template failure reasons without discarding any template's outcome.
+fn aggregate_failure_reasons(all_confirm_no_match: bool, reasons: &[String]) -> String {
+    let Some(first) = reasons.first() else {
+        return "no_template_matched".to_string();
+    };
+
+    if all_confirm_no_match {
+        // Every template confirmed no match, so every reason is the same empty-engine result.
+        return first.clone();
+    }
+
+    let mut unique: Vec<&str> = Vec::new();
+    for reason in reasons {
+        if !unique.contains(&reason.as_str()) {
+            unique.push(reason.as_str());
         }
     }
+    format!("template_results_disagree: {}", unique.join("; "))
 }
 
 fn verify_against_model(
@@ -80,6 +114,71 @@ fn verify_against_model(
     policy: &SamplingPolicy,
 ) -> Result<VerifiedInterval, String> {
     // We need matches against at least two independent reference episodes
+    let (raw_segments_found, ref_matches) =
+        collect_reference_matches(engine, target, model, templates, policy);
+
+    if raw_segments_found == 0 {
+        return Err("zero_engine_segments".to_string());
+    }
+
+    let min_required_matches = min_required_matches(model, target);
+
+    if ref_matches.is_empty() {
+        return Err("no_aligned_reference_matches".to_string());
+    }
+
+    if ref_matches.len() < min_required_matches {
+        return Err("insufficient_reference_matches".to_string());
+    }
+
+    // Find candidate target intervals for all matched references
+    let candidates = build_candidates(target, ref_matches);
+
+    // Build all maximal consensus clusters. Rather than greedy sequential inclusion which
+    // depends on candidate ordering, examine all compatible cliques. For small candidate
+    // counts we can enumerate the power set to guarantee finding the optimal consensus subset.
+    let mut clusters = build_clusters(&candidates, policy);
+
+    if clusters.is_empty() {
+        return Err("insufficient_consensus_reference_matches".to_string());
+    }
+
+    sort_clusters_by_consensus(&mut clusters);
+
+    let best_cluster = &clusters[0];
+    if best_cluster.len() < min_required_matches {
+        return Err("insufficient_consensus_reference_matches".to_string());
+    }
+
+    ensure_cluster_consensus_is_unambiguous(&clusters, best_cluster, policy)?;
+
+    let target_start = best_cluster.iter().map(|c| c.target_start).min().unwrap();
+    let target_end = best_cluster.iter().map(|c| c.target_end).max().unwrap();
+    let matched_duration = target_end - target_start;
+
+    // Check coverage against model expected duration
+    let coverage = matched_duration as f64 / model.expected_duration_ms as f64;
+
+    validate_interval_evidence(target, model, policy, target_start, target_end, coverage)?;
+
+    Ok(VerifiedInterval {
+        start_ms: target_start,
+        end_ms: target_end,
+        supporting_episodes: best_cluster.len(),
+        score: average_score(best_cluster),
+        coverage,
+    })
+}
+
+/// Compare the target against every reference of one model and keep only the segments whose
+/// coordinates in the reference episode align with this model's template interval.
+fn collect_reference_matches(
+    engine: &dyn FingerprintEngine,
+    target: &EpisodeEvidence,
+    model: &TemplateModel,
+    templates: &TemplateContext,
+    policy: &SamplingPolicy,
+) -> (usize, Vec<(String, CommonSegment)>) {
     let mut ref_matches: Vec<(String, CommonSegment)> = Vec::new();
     let mut raw_segments_found = 0;
 
@@ -126,35 +225,34 @@ fn verify_against_model(
         }
     }
 
-    if raw_segments_found == 0 {
-        return Err("zero_engine_segments".to_string());
-    }
+    (raw_segments_found, ref_matches)
+}
 
+fn min_required_matches(model: &TemplateModel, target: &EpisodeEvidence) -> usize {
     let is_target_model_ref = model.references.iter().any(|r| {
         r.ledger_id == target.ledger_id
             && r.sample_id == target.sample_id
             && r.source_version == target.source_version
     });
-    let min_required_matches = if is_target_model_ref { 1 } else { 2 };
-
-    if ref_matches.is_empty() {
-        return Err("no_aligned_reference_matches".to_string());
+    if is_target_model_ref {
+        1
+    } else {
+        2
     }
+}
 
-    if ref_matches.len() < min_required_matches {
-        return Err("insufficient_reference_matches".to_string());
-    }
+struct MatchedCandidate {
+    sample_id: String,
+    target_start: i64,
+    target_end: i64,
+    score: f64,
+}
 
-    // Find candidate target intervals for all matched references
-    #[allow(dead_code)]
-    struct MatchedCandidate {
-        sample_id: String,
-        target_start: i64,
-        target_end: i64,
-        score: f64,
-    }
-
-    let candidates: Vec<MatchedCandidate> = ref_matches
+fn build_candidates(
+    target: &EpisodeEvidence,
+    ref_matches: Vec<(String, CommonSegment)>,
+) -> Vec<MatchedCandidate> {
+    ref_matches
         .into_iter()
         .map(|(sid, s)| {
             let s_start = target.capture.window.start_ms + (s.start1_sec * 1000.0).round() as i64;
@@ -166,14 +264,16 @@ fn verify_against_model(
                 score: s.score,
             }
         })
-        .collect();
+        .collect()
+}
 
-    // Build all maximal consensus clusters.
-    // Rather than greedy sequential inclusion which depends on candidate ordering,
-    // examine all compatible cliques. For candidates.len() <= 12, we can enumerate
-    // the power set of candidate indices to guarantee finding the optimal consensus subset.
+fn build_clusters<'a>(
+    candidates: &'a [MatchedCandidate],
+    policy: &SamplingPolicy,
+) -> Vec<Vec<&'a MatchedCandidate>> {
     let mut clusters: Vec<Vec<&MatchedCandidate>> = Vec::new();
     let n = candidates.len();
+
     if n <= 12 {
         for mask in 1..(1usize << n) {
             let subset: Vec<&MatchedCandidate> = (0..n)
@@ -200,8 +300,10 @@ fn verify_against_model(
                     continue;
                 }
                 let matches_all = cluster.iter().all(|c| {
-                    (c.target_start - candidates[j].target_start).abs() <= policy.max_reference_boundary_delta_ms
-                        && (c.target_end - candidates[j].target_end).abs() <= policy.max_reference_boundary_delta_ms
+                    (c.target_start - candidates[j].target_start).abs()
+                        <= policy.max_reference_boundary_delta_ms
+                        && (c.target_end - candidates[j].target_end).abs()
+                            <= policy.max_reference_boundary_delta_ms
                 });
                 if matches_all {
                     cluster.push(&candidates[j]);
@@ -212,52 +314,67 @@ fn verify_against_model(
         }
     }
 
-    if clusters.is_empty() {
-        return Err("insufficient_consensus_reference_matches".to_string());
-    }
+    clusters
+}
 
-    // Sort clusters: first by size (descending), then by average score (ascending)
+/// Sort clusters: first by size (descending), then by average score (ascending).
+fn sort_clusters_by_consensus(clusters: &mut [Vec<&MatchedCandidate>]) {
     clusters.sort_by(|c1, c2| {
         let len_cmp = c2.len().cmp(&c1.len());
         if len_cmp != std::cmp::Ordering::Equal {
             return len_cmp;
         }
-        let avg1: f64 = c1.iter().map(|c| c.score).sum::<f64>() / c1.len() as f64;
-        let avg2: f64 = c2.iter().map(|c| c.score).sum::<f64>() / c2.len() as f64;
-        avg1.partial_cmp(&avg2).unwrap_or(std::cmp::Ordering::Equal)
+        average_score(c1)
+            .partial_cmp(&average_score(c2))
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
+}
 
-    let best_cluster = &clusters[0];
-    if best_cluster.len() < min_required_matches {
-        return Err("insufficient_consensus_reference_matches".to_string());
-    }
-
-    // Now check if there is an ambiguous tie with another cluster having equal size and equal score
-    let best_avg: f64 = best_cluster.iter().map(|c| c.score).sum::<f64>() / best_cluster.len() as f64;
+/// Reject an ambiguous tie between equally sized, equally scored clusters that disagree on
+/// the matched interval.
+fn ensure_cluster_consensus_is_unambiguous(
+    clusters: &[Vec<&MatchedCandidate>],
+    best_cluster: &[&MatchedCandidate],
+    policy: &SamplingPolicy,
+) -> Result<(), String> {
+    let best_avg = average_score(best_cluster);
     for other in &clusters[1..] {
         if other.len() != best_cluster.len() {
             break;
         }
-        let other_avg: f64 = other.iter().map(|c| c.score).sum::<f64>() / other.len() as f64;
-        if (best_avg - other_avg).abs() <= 1e-6 {
-            let start1 = best_cluster.iter().map(|c| c.target_start).min().unwrap();
-            let end1 = best_cluster.iter().map(|c| c.target_end).max().unwrap();
-            let start2 = other.iter().map(|c| c.target_start).min().unwrap();
-            let end2 = other.iter().map(|c| c.target_end).max().unwrap();
-            if (start1 - start2).abs() > policy.max_reference_boundary_delta_ms
-                || (end1 - end2).abs() > policy.max_reference_boundary_delta_ms
-            {
-                return Err("ambiguous_consensus_clusters_tie".to_string());
-            }
+        if (best_avg - average_score(other)).abs() > 1e-6 {
+            continue;
+        }
+        let start1 = best_cluster.iter().map(|c| c.target_start).min().unwrap();
+        let end1 = best_cluster.iter().map(|c| c.target_end).max().unwrap();
+        let start2 = other.iter().map(|c| c.target_start).min().unwrap();
+        let end2 = other.iter().map(|c| c.target_end).max().unwrap();
+        if (start1 - start2).abs() > policy.max_reference_boundary_delta_ms
+            || (end1 - end2).abs() > policy.max_reference_boundary_delta_ms
+        {
+            return Err("ambiguous_consensus_clusters_tie".to_string());
         }
     }
+    Ok(())
+}
 
-    let target_start = best_cluster.iter().map(|c| c.target_start).min().unwrap();
-    let target_end = best_cluster.iter().map(|c| c.target_end).max().unwrap();
-    let matched_duration = target_end - target_start;
+fn average_score(cluster: &[&MatchedCandidate]) -> f64 {
+    cluster.iter().map(|c| c.score).sum::<f64>() / cluster.len() as f64
+}
 
-    // Check coverage against model expected duration
-    let coverage = matched_duration as f64 / model.expected_duration_ms as f64;
+/// Check coverage, template edge anchors and guard evidence around the matched interval.
+///
+/// Guard evidence uses the actual decoded PCM boundaries instead of the requested window end
+/// to prevent truncated audio attacks. If PCM coverage is unknown (None), guard evidence
+/// cannot be reliably verified.
+fn validate_interval_evidence(
+    target: &EpisodeEvidence,
+    model: &TemplateModel,
+    policy: &SamplingPolicy,
+    target_start: i64,
+    target_end: i64,
+    coverage: f64,
+) -> Result<(), String> {
     if coverage < policy.min_reference_coverage {
         return Err(format!(
             "coverage_below_threshold: {coverage:.2} < {:.2}",
@@ -265,15 +382,14 @@ fn verify_against_model(
         ));
     }
 
+    let matched_duration = target_end - target_start;
+
     // Check template edge anchors
     let anchor_ms = policy.template_edge_anchor_ms.min(model.expected_duration_ms / 2);
     if matched_duration < anchor_ms * 2 {
         return Err("matched_duration_shorter_than_edge_anchors".to_string());
     }
 
-    // Guard evidence checks:
-    // Check actual decoded PCM boundaries instead of requested window end to prevent truncated audio attacks.
-    // If PCM coverage is unknown (None), guard evidence cannot be reliably verified.
     let actual_decoded_end_ms = match target.capture.pcm_duration_ms {
         Some(pcm_ms) => target.capture.window.start_ms + pcm_ms,
         None => return Err("pcm_coverage_unknown".to_string()),
@@ -296,13 +412,5 @@ fn verify_against_model(
         return Err("window_edge_right_boundary_clipped".to_string());
     }
 
-    let avg_score = best_cluster.iter().map(|c| c.score).sum::<f64>() / best_cluster.len() as f64;
-
-    Ok(VerifiedInterval {
-        start_ms: target_start,
-        end_ms: target_end,
-        supporting_episodes: best_cluster.len(),
-        score: avg_score,
-        coverage,
-    })
+    Ok(())
 }

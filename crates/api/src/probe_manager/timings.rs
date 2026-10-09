@@ -100,31 +100,7 @@ pub(super) fn log_terminal_job(
         .ok()
         .flatten()
         .unwrap_or_else(|| fallback.clone());
-    let mut summary = timings.take(&job.id);
-    let attempts = store
-        .lock()
-        .list_fingerprint_attempts_for_job(&job.id)
-        .unwrap_or_default();
-    if !attempts.is_empty() {
-        summary.intro_reads = 0;
-        summary.intro_elapsed_ms = 0;
-        summary.outro_reads = 0;
-        summary.outro_elapsed_ms = 0;
-        for att in attempts {
-            let dur = att
-                .finished_at_ms
-                .unwrap_or(att.started_at_ms)
-                .saturating_sub(att.started_at_ms)
-                .max(0) as u64;
-            if att.kind == "intro" {
-                summary.intro_reads += 1;
-                summary.intro_elapsed_ms += dur;
-            } else if att.kind == "outro" {
-                summary.outro_reads += 1;
-                summary.outro_elapsed_ms += dur;
-            }
-        }
-    }
+    let summary = terminal_timing_summary(store, timings, &job.id);
     let now = now_ms();
     let started = job.started_at_ms.unwrap_or(job.created_at_ms);
     let queue_wait_ms = started.saturating_sub(job.created_at_ms).max(0) as u64;
@@ -164,4 +140,105 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or_default()
+}
+
+/// Merge the in-memory counters with the adaptive attempts persisted for the job.
+///
+/// Adaptive captures are recorded as fingerprint attempts instead of going through
+/// [`ProbeTimingLedger::record_fingerprint`], while the ordinary full-window fallback keeps
+/// using the in-memory counters. Both describe real capture work, so they are summed rather
+/// than one set replacing the other.
+fn terminal_timing_summary(
+    store: &Arc<Mutex<Store>>,
+    timings: &ProbeTimingLedger,
+    job_id: &str,
+) -> ProbeTimingSummary {
+    let mut summary = timings.take(job_id);
+    let attempts = store
+        .lock()
+        .list_fingerprint_attempts_for_job(job_id)
+        .unwrap_or_default();
+    for attempt in &attempts {
+        let elapsed_ms = attempt
+            .finished_at_ms
+            .unwrap_or(attempt.started_at_ms)
+            .saturating_sub(attempt.started_at_ms)
+            .max(0) as u64;
+        match attempt.kind.as_str() {
+            "intro" => {
+                summary.intro_reads += 1;
+                summary.intro_elapsed_ms += elapsed_ms;
+            }
+            "outro" => {
+                summary.outro_reads += 1;
+                summary.outro_elapsed_ms += elapsed_ms;
+            }
+            _ => {}
+        }
+    }
+    summary
+}
+
+#[cfg(test)]
+mod terminal_timing_tests {
+    use super::{ProbeTimingLedger, terminal_timing_summary};
+    use crate::Store;
+    use crate::store::StoredFingerprintAttempt;
+    use parking_lot::Mutex;
+    use std::sync::Arc;
+
+    fn finished_attempt(
+        attempt_id: &str,
+        job_id: &str,
+        kind: &str,
+        started_at_ms: i64,
+        elapsed_ms: i64,
+    ) -> StoredFingerprintAttempt {
+        StoredFingerprintAttempt {
+            attempt_id: attempt_id.into(),
+            job_id: job_id.into(),
+            ledger_id: "ledger-1".into(),
+            kind: kind.into(),
+            window_start_ms: 0,
+            window_end_ms: 60_000,
+            phase: "fast_verify".into(),
+            started_at_ms,
+            finished_at_ms: Some(started_at_ms + elapsed_ms),
+            status: "failed".into(),
+            error_kind: Some("io".into()),
+            metrics_json: "{}".into(),
+        }
+    }
+
+    #[test]
+    fn fallback_full_window_reads_are_added_to_adaptive_attempt_counts() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(Store::open(temp.path()).unwrap()));
+        let timings = ProbeTimingLedger::default();
+        let job_id = "adaptive-fallback-job";
+
+        // Adaptive sampling burned four intro attempts, all failing on IO.
+        for index in 0..4 {
+            store
+                .lock()
+                .begin_fingerprint_attempt(&finished_attempt(
+                    &format!("att-{index}"),
+                    job_id,
+                    "intro",
+                    1_000 + index * 100,
+                    10,
+                ))
+                .unwrap();
+        }
+        // The ordinary full-window fallback never writes attempts; it reports through the
+        // in-memory counters for both the intro and the outro capture.
+        timings.record_fingerprint(Some(job_id), false, false, 25, 24);
+
+        let summary = terminal_timing_summary(&store, &timings, job_id);
+
+        assert_eq!(summary.intro_reads, 5);
+        assert_eq!(summary.intro_elapsed_ms, 4 * 10 + 25);
+        assert_eq!(summary.outro_reads, 1);
+        assert_eq!(summary.outro_elapsed_ms, 24);
+    }
 }

@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use domain::MediaId;
 use marker::adaptive::{
-    build_season_models, select_seed_episodes, EpisodeDescriptor, EpisodeEvidence,
-    SamplingPolicy, SourceCostSummary, TemplateContext,
+    build_season_models, select_seed_episodes, EpisodeDescriptor, EpisodeEvidence, SamplingPolicy,
+    SourceCostSummary, TemplateContext, TemplateModel,
 };
 use marker::SegmentKind;
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,26 @@ pub struct SeasonSamplingPlan {
     pub seed_ledger_ids: Vec<String>,
 }
 
+/// Fixed collaborators of one season pipeline run, grouped to keep the steps readable.
+struct SeasonPipeline<'a> {
+    mgr: &'a ProbeManager,
+    job_id: &'a str,
+    media_id: MediaId,
+    season: u32,
+    profile_key: &'a str,
+    policy: &'a SamplingPolicy,
+    ctx: &'a AdaptiveCaptureContext,
+    cost_summary: SourceCostSummary,
+}
+
+/// Results accumulated while the season units are captured one by one.
+#[derive(Default)]
+struct SeasonPipelineState {
+    collected_evidences: Vec<EpisodeEvidence>,
+    detections: Vec<EpisodeDetection>,
+    templates: TemplateContext,
+}
+
 pub async fn run_adaptive_season_pipeline(
     mgr: &ProbeManager,
     job_id: &str,
@@ -35,44 +55,12 @@ pub async fn run_adaptive_season_pipeline(
     season: u32,
     units: &[ProbeUnit],
 ) -> Result<MarkerResultReplacement, String> {
-    let sampling_mode = {
-        let store = mgr.store.lock();
-        store
-            .get_scrape_config()
-            .ok()
-            .map(|c| c.effective.fingerprint_sampling_mode)
-            .unwrap_or_else(|| "full_window".to_string())
-    };
-
-    let profile = FingerprintCaptureProfile::default();
-    let profile_key = capture_profile_key(&profile);
+    let sampling_mode = effective_sampling_mode(mgr);
+    let profile_key = capture_profile_key(&FingerprintCaptureProfile::default());
     let policy = SamplingPolicy::default();
 
     // Collect descriptors
-    let mut descriptors = Vec::new();
-    for u in units {
-        let path = std::path::Path::new(&u.row.path);
-        let src_ver = crate::fingerprint_job::current_source_version(path);
-        descriptors.push(EpisodeDescriptor {
-            ledger_id: u.row.id.to_string(),
-            episode: u.row.episode.unwrap_or(1),
-            source_version: src_ver,
-            duration_ms: 0, // will be updated from store cache
-        });
-    }
-
-    // Update duration_ms from store
-    {
-        let store = mgr.store.lock();
-        for d in &mut descriptors {
-            if let Ok(Some(cached)) = store.get_media_info_cache_version(&d.ledger_id) {
-                if let Some(dur) = cached.format_duration_ms {
-                    d.duration_ms = dur;
-                }
-            }
-        }
-    }
-
+    let descriptors = collect_episode_descriptors(mgr, units);
     let seed_ids = select_seed_episodes(&descriptors, &policy);
     let seed_set: HashSet<String> = seed_ids.iter().cloned().collect();
 
@@ -80,275 +68,328 @@ pub async fn run_adaptive_season_pipeline(
         job_id: job_id.to_string(),
         media_id: media_id.to_string(),
         season,
-        sampling_mode: sampling_mode.clone(),
+        sampling_mode,
         analysis_policy_key: "default".to_string(),
-        seed_ledger_ids: seed_ids.clone(),
+        seed_ledger_ids: seed_ids,
     };
 
-    let gate = mgr.priority_gate();
-    let ctx = AdaptiveCaptureContext {
-        store: mgr.store.clone(),
-        matcher: mgr.fingerprint_engine.clone(),
-        capture: mgr.capture_engine.clone(),
-        gate,
-        timings: Some(mgr.timings.clone()),
+    let ctx = adaptive_capture_context(mgr);
+    let pipeline = SeasonPipeline {
+        mgr,
+        job_id,
+        media_id,
+        season,
+        profile_key: &profile_key,
+        policy: &policy,
+        ctx: &ctx,
+        cost_summary: SourceCostSummary::default(),
     };
 
-    // 1. Process seed units first
-    let mut collected_evidences: Vec<EpisodeEvidence> = Vec::new();
-    let mut detections: Vec<EpisodeDetection> = Vec::new();
-    let cost_summary = SourceCostSummary::default();
-
-    // Order units: seeds first, then non-seeds
-    let mut ordered_units = Vec::new();
-    for u in units {
-        if seed_set.contains(&u.row.id.to_string()) {
-            ordered_units.push(u);
-        }
-    }
-    for u in units {
-        if !seed_set.contains(&u.row.id.to_string()) {
-            ordered_units.push(u);
-        }
-    }
-
-    let mut templates = TemplateContext::default();
-
-    for u in ordered_units {
-        let is_seed = seed_set.contains(&u.row.id.to_string());
-        let path = std::path::Path::new(&u.row.path);
-        let src_ver = crate::fingerprint_job::current_source_version(path);
-        let duration_ms = {
-            let store = mgr.store.lock();
-            store
-                .get_media_info_cache_version(&u.row.id.to_string())
-                .ok()
-                .flatten()
-                .and_then(|v| v.format_duration_ms)
-        };
-
-        let capture_policy = if u.reuse_fingerprint_cache {
-            CapturePolicy::ReuseValid
-        } else {
-            CapturePolicy::Recapture
-        };
-
-        let req = EpisodeCaptureRequest {
-            job_id: job_id.to_string(),
-            row: u.row.clone(),
-            source_version: src_ver,
-            media_duration_ms: duration_ms,
-            audio_stream_index: None,
-            capture_profile_key: profile_key.clone(),
-            policy: policy.clone(),
-            capture_policy,
-            templates: templates.clone(),
-            cost_summary: cost_summary.clone(),
-        };
-
-        let detection = capture_episode_adaptive(&ctx, &req).await?;
-
-        // Update cost summary if fallback occurred
-        if let Some(ref ev) = detection.intro_evidence {
-            collected_evidences.push(ev.clone());
-        }
-        if let Some(ref ev) = detection.outro_evidence {
-            collected_evidences.push(ev.clone());
-        }
-
-        detections.push(detection);
-
-        // If we finished processing all seeds, build template models and persist them!
-        if is_seed && collected_evidences.len() >= 2 {
-            let comp_start = std::time::Instant::now();
-            let models = build_season_models(mgr.fingerprint_engine.as_ref(), &collected_evidences, &policy);
-            mgr.timings.record_comparison(Some(job_id), comp_start.elapsed().as_millis() as u64);
-            for model in &models {
-                for r in &model.references {
-                    if let Some(ev) = collected_evidences.iter().find(|e| e.sample_id == r.sample_id) {
-                        templates.references.insert(r.sample_id.clone(), ev.clone());
-                    }
-                }
-                let model_json = serde_json::to_string(model).unwrap_or_else(|_| "{}".to_string());
-                let stored_model = StoredFingerprintModel {
-                    model_id: model.model_id.clone(),
-                    media_id: media_id.to_string(),
-                    season,
-                    kind: match model.kind {
-                        SegmentKind::Intro => "intro".to_string(),
-                        SegmentKind::Outro => "outro".to_string(),
-                    },
-                    model_version: 1,
-                    membership_key: format!("{}:{}", media_id, season),
-                    policy_key: "default".to_string(),
-                    model_json,
-                    created_at_ms: std::time::SystemTime::now()
-                        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as i64)
-                        .unwrap_or(0),
-                };
-                let members: Vec<StoredFingerprintModelMember> = model.references.iter().map(|r| {
-                    StoredFingerprintModelMember {
-                        model_id: model.model_id.clone(),
-                        sample_id: r.sample_id.clone(),
-                        ledger_id: r.ledger_id.clone(),
-                        source_version: r.source_version.clone(),
-                    }
-                }).collect();
-
-                let store = mgr.store.lock();
-                if let Err(e) = store.put_fingerprint_model(&stored_model, &members) {
-                    tracing::warn!(error = %e, "failed to persist fingerprint season model");
-                }
-            }
-
-            for ev in &collected_evidences {
-                templates.references.insert(ev.sample_id.clone(), ev.clone());
-            }
-            templates.models = models;
-
-            // 模板形成后，立即重新分析之前的建模集，回填匹配区间，避免建模集的标记丢失
-            for det in detections.iter_mut() {
-                if det.intro_match.is_none() {
-                    if let Some(ref ev) = det.intro_evidence {
-                        let comp_start = std::time::Instant::now();
-                        if let marker::adaptive::VerificationOutcome::Verified(v) =
-                            marker::adaptive::verify_template_window(
-                                mgr.fingerprint_engine.as_ref(),
-                                ev,
-                                &templates,
-                                &policy,
-                            )
-                        {
-                            det.intro_match = Some(v);
-                        }
-                        mgr.timings.record_comparison(Some(job_id), comp_start.elapsed().as_millis() as u64);
-                    }
-                }
-                if det.outro_match.is_none() {
-                    if let Some(ref ev) = det.outro_evidence {
-                        let comp_start = std::time::Instant::now();
-                        if let marker::adaptive::VerificationOutcome::Verified(v) =
-                            marker::adaptive::verify_template_window(
-                                mgr.fingerprint_engine.as_ref(),
-                                ev,
-                                &templates,
-                                &policy,
-                            )
-                        {
-                            det.outro_match = Some(v);
-                        }
-                        mgr.timings.record_comparison(Some(job_id), comp_start.elapsed().as_millis() as u64);
-                    }
-                }
-            }
-        }
+    // 1. 种子单元优先处理，边采集边建模；2. 其余单元用已有模板验证。
+    let mut state = SeasonPipelineState::default();
+    for unit in order_seed_units_first(units, &seed_set) {
+        let is_seed = seed_set.contains(&unit.row.id.to_string());
+        run_season_unit(&pipeline, unit, is_seed, &mut state).await?;
     }
 
     // 模板形成后，仅通过标准验证逻辑 verify_template_window 重新分析之前的单元，
     // 严格禁止绕过验证直接回填，确保截断或不合规的音频绝不会被误写入标记。
-    for det in detections.iter_mut() {
-        if det.intro_match.is_none() {
-            if let Some(ref ev) = det.intro_evidence {
-                let comp_start = std::time::Instant::now();
-                if let marker::adaptive::VerificationOutcome::Verified(v) =
-                    marker::adaptive::verify_template_window(
-                        mgr.fingerprint_engine.as_ref(),
-                        ev,
-                        &templates,
-                        &policy,
-                    )
-                {
-                    det.intro_match = Some(v);
-                }
-                mgr.timings.record_comparison(Some(job_id), comp_start.elapsed().as_millis() as u64);
-            }
-        }
-        if det.outro_match.is_none() {
-            if let Some(ref ev) = det.outro_evidence {
-                let comp_start = std::time::Instant::now();
-                if let marker::adaptive::VerificationOutcome::Verified(v) =
-                    marker::adaptive::verify_template_window(
-                        mgr.fingerprint_engine.as_ref(),
-                        ev,
-                        &templates,
-                        &policy,
-                    )
-                {
-                    det.outro_match = Some(v);
-                }
-                mgr.timings.record_comparison(Some(job_id), comp_start.elapsed().as_millis() as u64);
-            }
-        }
-    }
+    reverify_detections(&pipeline, &state.templates, &mut state.detections);
 
-    let mut markers = Vec::new();
-    let mut chapter_updates = Vec::new();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    {
-        let store = mgr.store.lock();
-        for u in units {
-            let ep = u.row.episode.unwrap_or(1);
-            let detection = detections.iter().find(|d| d.ledger_id == u.row.id.to_string() || d.episode == ep);
-            let intro_range = detection.and_then(|d| d.intro_match.as_ref()).map(|v| (v.start_ms, v.end_ms));
-            let outro_range = detection.and_then(|d| d.outro_match.as_ref()).map(|v| (v.start_ms, v.end_ms));
-
-            if intro_range.is_some() || outro_range.is_some() {
-                markers.push(StoredMediaMarker {
-                    media_id,
-                    season,
-                    episode: ep,
-                    intro_start_ms: intro_range.map(|r| r.0),
-                    intro_end_ms: intro_range.map(|r| r.1),
-                    outro_start_ms: outro_range.map(|r| r.0),
-                    outro_end_ms: outro_range.map(|r| r.1),
-                    source: "fingerprint_adaptive".to_string(),
-                    locked: false,
-                    updated_at: now,
-                });
-            }
-
-            let existing = store
-                .get_cached_chapters(&u.row.id.to_string())
-                .ok()
-                .flatten()
-                .unwrap_or_default();
-            let complete = marker::build_complete_timeline_chapters(&existing, intro_range, outro_range, None);
-            chapter_updates.push((u.row.id.to_string(), complete));
-        }
-    }
+    let (markers, chapter_updates) =
+        build_marker_replacement(&pipeline, units, &state.detections);
 
     // 检查是否存在由于音频截断或覆盖不全被拒绝的证据：
     // 按 kind 独立检查，不能因为一个 kind（如 Intro）有标记就忽略另一个 kind（如 Outro）的音频截断失败。
     // 如果某个 kind 未能产出标记或模型，但该 kind 的采样证据中存在截断，必须报错退出，避免旧标记被清空。
-    for kind in [SegmentKind::Intro, SegmentKind::Outro] {
-        let has_truncated_unmatched = units.iter().any(|u| {
-            let ep = u.row.episode.unwrap_or(1);
-            let detection = detections.iter().find(|d| d.ledger_id == u.row.id.to_string() || d.episode == ep);
-            let has_detection = match kind {
-                SegmentKind::Intro => detection.and_then(|d| d.intro_match.as_ref()).is_some(),
-                SegmentKind::Outro => detection.and_then(|d| d.outro_match.as_ref()).is_some(),
-            };
-            if has_detection {
-                return false;
-            }
-            // Episode has no detection for this kind. Check if it had a truncated or unknown PCM evidence.
-            collected_evidences.iter().any(|ev| {
-                if ev.episode != ep || ev.kind != kind {
-                    return false;
-                }
-                match ev.capture.pcm_duration_ms {
-                    Some(pcm_ms) => pcm_ms + 1000 < ev.capture.window.duration_ms(),
-                    None => true,
-                }
-            })
-        });
+    ensure_no_truncated_unmatched(units, &state.detections, &state.collected_evidences)?;
 
-        if has_truncated_unmatched {
+    Ok(MarkerResultReplacement {
+        media_id,
+        season,
+        markers,
+        chapter_updates,
+    })
+}
+
+fn effective_sampling_mode(mgr: &ProbeManager) -> String {
+    let store = mgr.store.lock();
+    store
+        .get_scrape_config()
+        .ok()
+        .map(|c| c.effective.fingerprint_sampling_mode)
+        .unwrap_or_else(|| "full_window".to_string())
+}
+
+fn collect_episode_descriptors(mgr: &ProbeManager, units: &[ProbeUnit]) -> Vec<EpisodeDescriptor> {
+    let store = mgr.store.lock();
+    units
+        .iter()
+        .map(|unit| {
+            let ledger_id = unit.row.id.to_string();
+            let path = std::path::Path::new(&unit.row.path);
+            EpisodeDescriptor {
+                ledger_id: ledger_id.clone(),
+                episode: unit.row.episode.unwrap_or(1),
+                source_version: crate::fingerprint_job::current_source_version(path),
+                duration_ms: known_media_duration(&store, &ledger_id).unwrap_or(0),
+            }
+        })
+        .collect()
+}
+
+fn known_media_duration(store: &crate::Store, ledger_id: &str) -> Option<i64> {
+    store
+        .get_media_info_cache_version(ledger_id)
+        .ok()
+        .flatten()
+        .and_then(|cached| cached.format_duration_ms)
+}
+
+fn adaptive_capture_context(mgr: &ProbeManager) -> AdaptiveCaptureContext {
+    AdaptiveCaptureContext {
+        store: mgr.store.clone(),
+        matcher: mgr.fingerprint_engine.clone(),
+        capture: mgr.capture_engine.clone(),
+        gate: mgr.priority_gate(),
+        timings: Some(mgr.timings.clone()),
+    }
+}
+
+fn order_seed_units_first<'a>(
+    units: &'a [ProbeUnit],
+    seed_set: &HashSet<String>,
+) -> Vec<&'a ProbeUnit> {
+    let is_seed = |unit: &ProbeUnit| seed_set.contains(&unit.row.id.to_string());
+    units
+        .iter()
+        .filter(|unit| is_seed(unit))
+        .chain(units.iter().filter(|unit| !is_seed(unit)))
+        .collect()
+}
+
+async fn run_season_unit(
+    pipeline: &SeasonPipeline<'_>,
+    unit: &ProbeUnit,
+    is_seed: bool,
+    state: &mut SeasonPipelineState,
+) -> Result<(), String> {
+    let ledger_id = unit.row.id.to_string();
+    let path = std::path::Path::new(&unit.row.path);
+    let capture_policy = if unit.reuse_fingerprint_cache {
+        CapturePolicy::ReuseValid
+    } else {
+        CapturePolicy::Recapture
+    };
+
+    let req = EpisodeCaptureRequest {
+        job_id: pipeline.job_id.to_string(),
+        row: unit.row.clone(),
+        source_version: crate::fingerprint_job::current_source_version(path),
+        media_duration_ms: known_media_duration(&pipeline.mgr.store.lock(), &ledger_id),
+        audio_stream_index: None,
+        capture_profile_key: pipeline.profile_key.to_string(),
+        policy: pipeline.policy.clone(),
+        capture_policy,
+        templates: state.templates.clone(),
+        cost_summary: pipeline.cost_summary.clone(),
+    };
+
+    let detection = capture_episode_adaptive(pipeline.ctx, &req).await?;
+
+    if let Some(evidence) = detection.intro_evidence.clone() {
+        state.collected_evidences.push(evidence);
+    }
+    if let Some(evidence) = detection.outro_evidence.clone() {
+        state.collected_evidences.push(evidence);
+    }
+    state.detections.push(detection);
+
+    // 种子阶段收集到足够证据后立即建模，并回填已经产生的检测结果。
+    if is_seed && state.collected_evidences.len() >= 2 {
+        build_and_persist_templates(pipeline, &state.collected_evidences, &mut state.templates);
+        reverify_detections(pipeline, &state.templates, &mut state.detections);
+    }
+    Ok(())
+}
+
+fn build_and_persist_templates(
+    pipeline: &SeasonPipeline<'_>,
+    collected_evidences: &[EpisodeEvidence],
+    templates: &mut TemplateContext,
+) {
+    let comparison_start = std::time::Instant::now();
+    let models = build_season_models(
+        pipeline.mgr.fingerprint_engine.as_ref(),
+        collected_evidences,
+        pipeline.policy,
+    );
+    pipeline
+        .mgr
+        .timings
+        .record_comparison(Some(pipeline.job_id), comparison_start.elapsed().as_millis() as u64);
+
+    for model in &models {
+        for reference in &model.references {
+            if let Some(evidence) = collected_evidences
+                .iter()
+                .find(|e| e.sample_id == reference.sample_id)
+            {
+                templates
+                    .references
+                    .insert(reference.sample_id.clone(), evidence.clone());
+            }
+        }
+        persist_season_model(pipeline, model);
+    }
+
+    for evidence in collected_evidences {
+        templates
+            .references
+            .insert(evidence.sample_id.clone(), evidence.clone());
+    }
+    templates.models = models;
+}
+
+fn persist_season_model(pipeline: &SeasonPipeline<'_>, model: &TemplateModel) {
+    let model_json = serde_json::to_string(model).unwrap_or_else(|_| "{}".to_string());
+    let stored_model = StoredFingerprintModel {
+        model_id: model.model_id.clone(),
+        media_id: pipeline.media_id.to_string(),
+        season: pipeline.season,
+        kind: match model.kind {
+            SegmentKind::Intro => "intro".to_string(),
+            SegmentKind::Outro => "outro".to_string(),
+        },
+        model_version: 1,
+        membership_key: format!("{}:{}", pipeline.media_id, pipeline.season),
+        policy_key: "default".to_string(),
+        model_json,
+        created_at_ms: now_ms(),
+    };
+    let members: Vec<StoredFingerprintModelMember> = model
+        .references
+        .iter()
+        .map(|reference| StoredFingerprintModelMember {
+            model_id: model.model_id.clone(),
+            sample_id: reference.sample_id.clone(),
+            ledger_id: reference.ledger_id.clone(),
+            source_version: reference.source_version.clone(),
+        })
+        .collect();
+
+    let store = pipeline.mgr.store.lock();
+    if let Err(error) = store.put_fingerprint_model(&stored_model, &members) {
+        tracing::warn!(error = %error, "failed to persist fingerprint season model");
+    }
+}
+
+fn reverify_detections(
+    pipeline: &SeasonPipeline<'_>,
+    templates: &TemplateContext,
+    detections: &mut [EpisodeDetection],
+) {
+    for detection in detections.iter_mut() {
+        verify_detection_kind(
+            pipeline,
+            templates,
+            &detection.intro_evidence,
+            &mut detection.intro_match,
+        );
+        verify_detection_kind(
+            pipeline,
+            templates,
+            &detection.outro_evidence,
+            &mut detection.outro_match,
+        );
+    }
+}
+
+/// 仅当标准验证返回 `Verified` 时才回填匹配区间，其余结果一律保持未匹配。
+fn verify_detection_kind(
+    pipeline: &SeasonPipeline<'_>,
+    templates: &TemplateContext,
+    evidence: &Option<EpisodeEvidence>,
+    matched: &mut Option<marker::adaptive::VerifiedInterval>,
+) {
+    if matched.is_some() {
+        return;
+    }
+    let Some(evidence) = evidence else { return };
+
+    let comparison_start = std::time::Instant::now();
+    if let marker::adaptive::VerificationOutcome::Verified(verified) =
+        marker::adaptive::verify_template_window(
+            pipeline.mgr.fingerprint_engine.as_ref(),
+            evidence,
+            templates,
+            pipeline.policy,
+        )
+    {
+        *matched = Some(verified);
+    }
+    pipeline
+        .mgr
+        .timings
+        .record_comparison(Some(pipeline.job_id), comparison_start.elapsed().as_millis() as u64);
+}
+
+fn build_marker_replacement(
+    pipeline: &SeasonPipeline<'_>,
+    units: &[ProbeUnit],
+    detections: &[EpisodeDetection],
+) -> (Vec<StoredMediaMarker>, Vec<(String, Vec<marker::ChapterMarker>)>) {
+    let mut markers = Vec::new();
+    let mut chapter_updates = Vec::new();
+    let updated_at = now_secs();
+    let store = pipeline.mgr.store.lock();
+
+    for unit in units {
+        let ledger_id = unit.row.id.to_string();
+        let episode = unit.row.episode.unwrap_or(1);
+        let detection = find_detection(detections, &ledger_id, episode);
+        let intro_range = detection
+            .and_then(|d| d.intro_match.as_ref())
+            .map(|v| (v.start_ms, v.end_ms));
+        let outro_range = detection
+            .and_then(|d| d.outro_match.as_ref())
+            .map(|v| (v.start_ms, v.end_ms));
+
+        if intro_range.is_some() || outro_range.is_some() {
+            markers.push(StoredMediaMarker {
+                media_id: pipeline.media_id,
+                season: pipeline.season,
+                episode,
+                intro_start_ms: intro_range.map(|range| range.0),
+                intro_end_ms: intro_range.map(|range| range.1),
+                outro_start_ms: outro_range.map(|range| range.0),
+                outro_end_ms: outro_range.map(|range| range.1),
+                source: "fingerprint_adaptive".to_string(),
+                locked: false,
+                updated_at,
+            });
+        }
+
+        let existing = store
+            .get_cached_chapters(&ledger_id)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let complete =
+            marker::build_complete_timeline_chapters(&existing, intro_range, outro_range, None);
+        chapter_updates.push((ledger_id, complete));
+    }
+
+    (markers, chapter_updates)
+}
+
+fn ensure_no_truncated_unmatched(
+    units: &[ProbeUnit],
+    detections: &[EpisodeDetection],
+    collected_evidences: &[EpisodeEvidence],
+) -> Result<(), String> {
+    for kind in [SegmentKind::Intro, SegmentKind::Outro] {
+        if has_truncated_unmatched(units, detections, collected_evidences, kind) {
             let kind_name = match kind {
                 SegmentKind::Intro => "片头",
                 SegmentKind::Outro => "片尾",
@@ -358,13 +399,59 @@ pub async fn run_adaptive_season_pipeline(
             ));
         }
     }
+    Ok(())
+}
 
-    let replacement = MarkerResultReplacement {
-        media_id,
-        season,
-        markers,
-        chapter_updates,
-    };
+/// 某集该 kind 没有标记，但该集同 kind 的采样证据被截断或时长未知时为 true。
+fn has_truncated_unmatched(
+    units: &[ProbeUnit],
+    detections: &[EpisodeDetection],
+    collected_evidences: &[EpisodeEvidence],
+    kind: SegmentKind,
+) -> bool {
+    units.iter().any(|unit| {
+        let episode = unit.row.episode.unwrap_or(1);
+        let detection = find_detection(detections, &unit.row.id.to_string(), episode);
+        let has_detection = match kind {
+            SegmentKind::Intro => detection.and_then(|d| d.intro_match.as_ref()).is_some(),
+            SegmentKind::Outro => detection.and_then(|d| d.outro_match.as_ref()).is_some(),
+        };
+        if has_detection {
+            return false;
+        }
+        // Episode has no detection for this kind. Check if it had a truncated or unknown PCM evidence.
+        collected_evidences.iter().any(|evidence| {
+            if evidence.episode != episode || evidence.kind != kind {
+                return false;
+            }
+            match evidence.capture.pcm_duration_ms {
+                Some(pcm_ms) => pcm_ms + 1000 < evidence.capture.window.duration_ms(),
+                None => true,
+            }
+        })
+    })
+}
 
-    Ok(replacement)
+fn find_detection<'a>(
+    detections: &'a [EpisodeDetection],
+    ledger_id: &str,
+    episode: u32,
+) -> Option<&'a EpisodeDetection> {
+    detections
+        .iter()
+        .find(|detection| detection.ledger_id == ledger_id || detection.episode == episode)
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
 }
