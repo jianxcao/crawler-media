@@ -221,8 +221,8 @@ fn insert_marker_row(
 ) -> Result<(), StoreError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as i64)
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .as_secs() as i64;
     tx.execute(
         "INSERT INTO media_markers (
              media_id, season, episode, intro_start_ms, intro_end_ms,
@@ -714,6 +714,37 @@ mod marker_replacement_tests {
             feature_end(&store),
             Some(1_000_000),
             "locked rebuild must keep the feature chapter inside the known media duration"
+        );
+    }
+
+    #[test]
+    fn batch_replacement_stores_updated_at_in_unix_seconds() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let media_id = domain::MediaId::new();
+
+        let mut detected = marker(media_id, 1, "voiceprint", 10_000);
+        detected.updated_at = 0;
+        let before_write = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        store
+            .replace_marker_results(media_id, 1, &[detected], &[])
+            .unwrap();
+        let after_write = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let stored = store
+            .get_media_marker(media_id, Some(1), Some(1))
+            .unwrap()
+            .unwrap();
+        assert!(
+            (before_write..=after_write).contains(&stored.updated_at),
+            "batch replacement must write the current Unix timestamp in seconds"
         );
     }
 }
