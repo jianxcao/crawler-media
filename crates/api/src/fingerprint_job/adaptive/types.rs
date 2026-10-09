@@ -52,4 +52,8 @@ pub struct EpisodeDetection {
     pub outro_evidence: Option<EpisodeEvidence>,
     pub intro_match: Option<VerifiedInterval>,
     pub outro_match: Option<VerifiedInterval>,
+    #[serde(default)]
+    pub intro_outcome: Option<marker::adaptive::VerificationOutcome>,
+    #[serde(default)]
+    pub outro_outcome: Option<marker::adaptive::VerificationOutcome>,
 }

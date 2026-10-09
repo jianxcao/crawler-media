@@ -69,6 +69,8 @@ pub async fn capture_episode_adaptive(
         outro_evidence,
         intro_match,
         outro_match,
+        intro_outcome: None,
+        outro_outcome: None,
     })
 }
 

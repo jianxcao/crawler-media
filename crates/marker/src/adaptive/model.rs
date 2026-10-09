@@ -185,7 +185,7 @@ fn build_models_for_kind(
     let mut template_models = Vec::new();
     for (idx, cluster) in clusters.into_iter().enumerate() {
         // Collect references for this cluster
-        let mut ep_refs: HashMap<u32, TemplateReference> = HashMap::new();
+        let mut ep_refs: HashMap<String, TemplateReference> = HashMap::new();
         let mut durations = Vec::new();
 
         for m_idx in &cluster {
@@ -212,7 +212,7 @@ fn build_models_for_kind(
                 None
             };
 
-            ep_refs.entry(ev1.episode).or_insert_with(|| TemplateReference {
+            ep_refs.entry(ev1.sample_id.clone()).or_insert_with(|| TemplateReference {
                 sample_id: ev1.sample_id.clone(),
                 ledger_id: ev1.ledger_id.clone(),
                 episode: ev1.episode,
@@ -221,7 +221,7 @@ fn build_models_for_kind(
                 match_from_end_ms: from_end1,
             });
 
-            ep_refs.entry(ev2.episode).or_insert_with(|| TemplateReference {
+            ep_refs.entry(ev2.sample_id.clone()).or_insert_with(|| TemplateReference {
                 sample_id: ev2.sample_id.clone(),
                 ledger_id: ev2.ledger_id.clone(),
                 episode: ev2.episode,
@@ -232,7 +232,11 @@ fn build_models_for_kind(
         }
 
         let references: Vec<TemplateReference> = ep_refs.into_values().collect();
-        let unique_episodes = references.len();
+        let unique_episodes = references
+            .iter()
+            .map(|r| r.episode)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
         if unique_episodes < 2 {
             continue;
         }
@@ -296,7 +300,7 @@ fn are_candidates_consistent(
     b: &PairCandidate,
     evidence: &[&EpisodeEvidence],
 ) -> bool {
-    // Check if they share an episode and have overlapping matching intervals
+    // Check if they share the exact same evidence (ledger/sample) and have overlapping matching intervals
     for &(ep_a_idx, start_a, end_a) in &[
         (a.first_idx, a.segment.start1_sec, a.segment.end1_sec),
         (a.second_idx, a.segment.start2_sec, a.segment.end2_sec),
@@ -305,7 +309,9 @@ fn are_candidates_consistent(
             (b.first_idx, b.segment.start1_sec, b.segment.end1_sec),
             (b.second_idx, b.segment.start2_sec, b.segment.end2_sec),
         ] {
-            if evidence[ep_a_idx].episode == evidence[ep_b_idx].episode {
+            if evidence[ep_a_idx].sample_id == evidence[ep_b_idx].sample_id
+                || evidence[ep_a_idx].ledger_id == evidence[ep_b_idx].ledger_id
+            {
                 let overlap = (end_a.min(end_b) - start_a.max(start_b)).max(0.0);
                 let shorter = (end_a - start_a).min(end_b - start_b);
                 if shorter > 0.0 && overlap / shorter >= 0.8 {

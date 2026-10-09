@@ -100,7 +100,7 @@ pub async fn run_adaptive_season_pipeline(
     reverify_detections(&pipeline, &state.templates, &mut state.detections);
 
     let (markers, chapter_updates) =
-        build_marker_replacement(&pipeline, units, &state.detections);
+        build_marker_replacement(&pipeline, units, &state.detections)?;
 
     // 检查是否存在由于音频截断或覆盖不全被拒绝的证据：
     // 按 kind 独立检查，不能因为一个 kind（如 Intro）有标记就忽略另一个 kind（如 Outro）的音频截断失败。
@@ -298,39 +298,39 @@ fn reverify_detections(
             templates,
             &detection.intro_evidence,
             &mut detection.intro_match,
+            &mut detection.intro_outcome,
         );
         verify_detection_kind(
             pipeline,
             templates,
             &detection.outro_evidence,
             &mut detection.outro_match,
+            &mut detection.outro_outcome,
         );
     }
 }
 
-/// 仅当标准验证返回 `Verified` 时才回填匹配区间，其余结果一律保持未匹配。
+/// 当标准验证返回 `Verified` 时回填匹配区间，并记录最新验证结果 outcome。
 fn verify_detection_kind(
     pipeline: &SeasonPipeline<'_>,
     templates: &TemplateContext,
     evidence: &Option<EpisodeEvidence>,
     matched: &mut Option<marker::adaptive::VerifiedInterval>,
+    outcome_dest: &mut Option<marker::adaptive::VerificationOutcome>,
 ) {
-    if matched.is_some() {
-        return;
-    }
     let Some(evidence) = evidence else { return };
 
     let comparison_start = std::time::Instant::now();
-    if let marker::adaptive::VerificationOutcome::Verified(verified) =
-        marker::adaptive::verify_template_window(
-            pipeline.mgr.fingerprint_engine.as_ref(),
-            evidence,
-            templates,
-            pipeline.policy,
-        )
-    {
-        *matched = Some(verified);
+    let outcome = marker::adaptive::verify_template_window(
+        pipeline.mgr.fingerprint_engine.as_ref(),
+        evidence,
+        templates,
+        pipeline.policy,
+    );
+    if let marker::adaptive::VerificationOutcome::Verified(ref verified) = outcome {
+        *matched = Some(verified.clone());
     }
+    *outcome_dest = Some(outcome);
     pipeline
         .mgr
         .timings
@@ -341,7 +341,7 @@ fn build_marker_replacement(
     pipeline: &SeasonPipeline<'_>,
     units: &[ProbeUnit],
     detections: &[EpisodeDetection],
-) -> (Vec<StoredMediaMarker>, Vec<(String, Vec<marker::ChapterMarker>)>) {
+) -> Result<(Vec<StoredMediaMarker>, Vec<(String, Vec<marker::ChapterMarker>)>), String> {
     let mut marker_map: std::collections::BTreeMap<u32, StoredMediaMarker> =
         std::collections::BTreeMap::new();
     let mut chapter_updates = Vec::new();
@@ -352,35 +352,37 @@ fn build_marker_replacement(
         let ledger_id = unit.row.id.to_string();
         let episode = unit.row.episode.unwrap_or(1);
         let detection = find_detection(detections, &ledger_id, episode);
-        let intro_range = detection
-            .and_then(|d| d.intro_match.as_ref())
-            .map(|v| (v.start_ms, v.end_ms));
-        let mut outro_range = detection
-            .and_then(|d| d.outro_match.as_ref())
-            .map(|v| (v.start_ms, v.end_ms));
+        let previous = store
+            .get_media_marker(pipeline.media_id, Some(pipeline.season), Some(episode))
+            .ok()
+            .flatten();
 
-        let sampled_outro = detection.map(|d| d.outro_evidence.is_some()).unwrap_or(false);
-        if !sampled_outro && outro_range.is_none() {
-            if let Some(existing) = store
-                .get_media_marker(pipeline.media_id, Some(pipeline.season), Some(episode))
-                .ok()
-                .flatten()
-            {
-                if let (Some(start), Some(end)) = (existing.outro_start_ms, existing.outro_end_ms) {
-                    outro_range = Some((start, end));
-                }
-            }
-        }
+        let (intro_start_ms, intro_end_ms) = resolve_segment_range(
+            detection
+                .and_then(|d| d.intro_match.as_ref())
+                .map(|v| (v.start_ms, v.end_ms)),
+            detection.map(|d| d.intro_evidence.is_some()).unwrap_or(false),
+            detection.and_then(|d| d.intro_outcome.as_ref()),
+            previous.as_ref().map(|m| (m.intro_start_ms, m.intro_end_ms)),
+        );
+        let (outro_start_ms, outro_end_ms) = resolve_segment_range(
+            detection
+                .and_then(|d| d.outro_match.as_ref())
+                .map(|v| (v.start_ms, v.end_ms)),
+            detection.map(|d| d.outro_evidence.is_some()).unwrap_or(false),
+            detection.and_then(|d| d.outro_outcome.as_ref()),
+            previous.as_ref().map(|m| (m.outro_start_ms, m.outro_end_ms)),
+        );
 
-        if intro_range.is_some() || outro_range.is_some() {
+        if intro_start_ms.is_some() || outro_start_ms.is_some() {
             let candidate_marker = StoredMediaMarker {
                 media_id: pipeline.media_id,
                 season: pipeline.season,
                 episode,
-                intro_start_ms: intro_range.map(|range| range.0),
-                intro_end_ms: intro_range.map(|range| range.1),
-                outro_start_ms: outro_range.map(|range| range.0),
-                outro_end_ms: outro_range.map(|range| range.1),
+                intro_start_ms,
+                intro_end_ms,
+                outro_start_ms,
+                outro_end_ms,
                 source: "fingerprint_adaptive".to_string(),
                 locked: false,
                 updated_at,
@@ -392,6 +394,29 @@ fn build_marker_replacement(
                 }
                 std::collections::btree_map::Entry::Occupied(mut entry) => {
                     let existing = entry.get_mut();
+                    // If both versions have boundaries for intro or outro, verify they do not conflict
+                    // (boundary difference must not exceed 1000 ms).
+                    if let (Some(e_start), Some(c_start)) = (existing.intro_start_ms, candidate_marker.intro_start_ms) {
+                        let e_end = existing.intro_end_ms.unwrap_or(e_start);
+                        let c_end = candidate_marker.intro_end_ms.unwrap_or(c_start);
+                        if (e_start - c_start).abs() > 1000 || (e_end - c_end).abs() > 1000 {
+                            return Err(format!(
+                                "episode_version_conflict: episode {} has conflicting intro boundaries ({}..{} vs {}..{})",
+                                episode, e_start, e_end, c_start, c_end
+                            ));
+                        }
+                    }
+                    if let (Some(e_start), Some(c_start)) = (existing.outro_start_ms, candidate_marker.outro_start_ms) {
+                        let e_end = existing.outro_end_ms.unwrap_or(e_start);
+                        let c_end = candidate_marker.outro_end_ms.unwrap_or(c_start);
+                        if (e_start - c_start).abs() > 1000 || (e_end - c_end).abs() > 1000 {
+                            return Err(format!(
+                                "episode_version_conflict: episode {} has conflicting outro boundaries ({}..{} vs {}..{})",
+                                episode, e_start, e_end, c_start, c_end
+                            ));
+                        }
+                    }
+
                     // Prefer marker with more detected segments (both intro and outro vs one)
                     let existing_count = existing.intro_start_ms.is_some() as usize
                         + existing.outro_start_ms.is_some() as usize;
@@ -410,13 +435,54 @@ fn build_marker_replacement(
             .flatten()
             .unwrap_or_default();
         let duration_ms = known_media_duration(&store, &ledger_id);
-        let complete =
-            marker::build_complete_timeline_chapters(&existing, intro_range, outro_range, duration_ms);
+        let complete = marker::build_complete_timeline_chapters(
+            &existing,
+            intro_start_ms.zip(intro_end_ms),
+            display_outro_range(outro_start_ms, outro_end_ms),
+            duration_ms,
+        );
         chapter_updates.push((ledger_id, complete));
     }
 
     let markers = marker_map.into_values().collect();
-    (markers, chapter_updates)
+    Ok((markers, chapter_updates))
+}
+
+/// 结合标准验证结果决定某个 kind 最终应当写入标记的时间区间。
+///
+/// - 标准验证返回 `Verified`：采用本轮识别到的新区间。
+/// - 标准验证在完整窗口上明确返回 `NoMatch`：确认该剧集没有此片段，允许清空旧值。
+/// - 其余情况（未采样、需要完整窗口、采样受限）都属于"无法判定"：
+///   必须保留数据库中已有的旧值（可能只有起始时间），
+///   绝不能把"无法判定"当成"确认无此片段"发布，从而误删旧标记。
+fn resolve_segment_range(
+    matched: Option<(i64, i64)>,
+    sampled: bool,
+    outcome: Option<&marker::adaptive::VerificationOutcome>,
+    previous: Option<(Option<i64>, Option<i64>)>,
+) -> (Option<i64>, Option<i64>) {
+    if let Some((start_ms, end_ms)) = matched {
+        return (Some(start_ms), Some(end_ms));
+    }
+    let confirmed_absent = sampled
+        && matches!(
+            outcome,
+            Some(marker::adaptive::VerificationOutcome::NoMatch { .. })
+        );
+    if confirmed_absent {
+        return (None, None);
+    }
+    previous.unwrap_or((None, None))
+}
+
+/// 章节展示需要一个结束时间；标记本身允许只有片尾起始时间，
+/// 因此这里为章节补一个仅供展示的兜底结束时间，不写回标记事实。
+fn display_outro_range(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<(i64, i64)> {
+    match (start_ms, end_ms) {
+        (Some(start), Some(end)) if end > start => Some((start, end)),
+        (Some(start), None) => Some((start, start + 60_000)),
+        _ => None,
+    }
 }
 
 fn ensure_no_truncated_unmatched(
