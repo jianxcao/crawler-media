@@ -7,7 +7,8 @@ use crate::Store;
 pub fn record_paths(
     store: &Store,
     paths: impl IntoIterator<Item = library::TransferredFile>,
-) -> Result<(), String> {
+) -> Result<Vec<PathBuf>, String> {
+    let mut inserted = Vec::new();
     for file in paths {
         let dest = file.path;
         let path_str = dest.display().to_string();
@@ -52,8 +53,9 @@ pub fn record_paths(
                 filter_score: None,
             })
             .map_err(|e| e.to_string())?;
+        inserted.push(dest);
     }
-    Ok(())
+    Ok(inserted)
 }
 
 /// 「其他」库扫描：每个视频文件一个 Media（kind=video，标题 = 文件名主干，
@@ -61,7 +63,8 @@ pub fn record_paths(
 pub fn record_video_paths(
     store: &Store,
     paths: impl IntoIterator<Item = PathBuf>,
-) -> Result<(), String> {
+) -> Result<Vec<PathBuf>, String> {
+    let mut inserted = Vec::new();
     for dest in paths {
         let path_str = dest.display().to_string();
         // 已有台账行：复用既有 Media ID（播放进度/收藏挂在它上面），
@@ -107,8 +110,9 @@ pub fn record_video_paths(
                 filter_score: None,
             })
             .map_err(|e| e.to_string())?;
+        inserted.push(dest);
     }
-    Ok(())
+    Ok(inserted)
 }
 
 fn media_from_release(parsed: &Release) -> Media {

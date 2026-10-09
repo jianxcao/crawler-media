@@ -68,7 +68,8 @@ fn scrape_dir(state: &ApiState, path: PathBuf, nfo: bool) -> Result<(), String> 
             "已记录目录中新增刮削的媒体路径"
         );
     }
-    crate::watch_ledger::record_paths(&state.store.lock(), outcome.transferred.clone())?;
+    let inserted =
+        crate::watch_ledger::record_paths(&state.store.lock(), outcome.transferred.clone())?;
 
     // MovieClaw / MoviePilot 模式：扫描入库后，为没有 TMDB ID 的影视条目自动匹配 TMDB 元数据与海报
     let unresolved_media = {
@@ -88,8 +89,7 @@ fn scrape_dir(state: &ApiState, path: PathBuf, nfo: bool) -> Result<(), String> 
     for (_, (media, dest)) in unresolved_media {
         let _ = crate::auto_resolve::auto_resolve_media(state, &media, &dest);
     }
-    let paths: Vec<PathBuf> = outcome.transferred.iter().map(|f| f.path.clone()).collect();
-    crate::http::library::enqueue_probes_for_paths(state, paths);
+    crate::http::library::enqueue_probes_for_paths(state, inserted);
 
     // 自动补封面：目录内缺 poster.jpg 的文件从 TMDB 拉海报 + 背板
     // （Emby/Jellyfin 式「没封面自动设置」；已有封面跳过，手动选过的不会被覆盖）。

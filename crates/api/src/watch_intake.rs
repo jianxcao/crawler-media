@@ -56,8 +56,11 @@ pub fn run(state: &ApiState) -> Result<(), String> {
                 .insert_unidentified(parked.path.display().to_string(), parked.confidence)
                 .map_err(|e| e.to_string())?;
         }
-        crate::watch_ledger::record_paths(&store, transferred.clone())?;
     }
+    let inserted = {
+        let store = state.store.lock();
+        crate::watch_ledger::record_paths(&store, transferred.clone())?
+    };
 
     // 为没有 TMDB ID 的影视条目自动匹配 TMDB 元数据与海报
     let unresolved_media = {
@@ -78,8 +81,7 @@ pub fn run(state: &ApiState) -> Result<(), String> {
         let _ = crate::auto_resolve::auto_resolve_media(state, &media, &dest);
     }
 
-    let probe_paths: Vec<PathBuf> = transferred.iter().map(|t| t.path.clone()).collect();
-    crate::http::library::enqueue_probes_for_paths(state, probe_paths);
+    crate::http::library::enqueue_probes_for_paths(state, inserted);
 
     // 自动补封面：目标媒体库目录下缺 poster.jpg 的文件从 TMDB 拉海报 + 背板
     let targets: Vec<(domain::MediaId, PathBuf)> = {

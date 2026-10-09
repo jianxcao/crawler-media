@@ -48,6 +48,7 @@ tracing-appender.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
+store = { workspace = true, features = ["test-utils"] }
 tempfile.workspace = true
 
 [[bin]]

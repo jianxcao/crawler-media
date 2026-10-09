@@ -19,5 +19,8 @@ argon2 = { version = "0.5", features = ["std"] }
 password-hash = { version = "0.5", features = ["rand_core"] }
 tracing.workspace = true
 
+[features]
+test-utils = []
+
 [dev-dependencies]
 tempfile.workspace = true

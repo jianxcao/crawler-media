@@ -94,6 +94,51 @@ fn realtime_library_root_matches_nested_strm_path() {
 }
 
 #[test]
+fn rescanning_a_show_queues_only_the_new_episode() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("tv");
+    let episode_dir = root.join("喜剧之王 (2026)/Season 1");
+    std::fs::create_dir_all(&episode_dir).unwrap();
+    let episode_one = episode_dir.join("喜剧之王 - S01E01 - 第 1 集.strm");
+    std::fs::write(&episode_one, "https://example.test/e01.mkv").unwrap();
+
+    let store = crate::Store::open(temp.path().join("data")).unwrap();
+    store
+        .set_library_root(domain::MediaKind::Tv, root.to_str().unwrap())
+        .unwrap();
+    let state = crate::management::ApiState::new(
+        store,
+        "test-token".into(),
+        indexer::ProfileSet::load(None).unwrap(),
+        Arc::new(EmptyFetcher),
+        Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
+        temp.path().join("library"),
+    )
+    .unwrap();
+    let show_dir = root.join("喜剧之王 (2026)");
+    crate::http::library_scan::scan_library_subdir(&state, &root, &show_dir).unwrap();
+    let first = state.store.lock().list_ledger().unwrap();
+    let first_id = first[0].id.to_string();
+    while state.probe.take_queued_for_test().is_some() {}
+    state
+        .store
+        .lock()
+        .finish_probe_units_for_ledger(&first_id)
+        .unwrap();
+    assert!(!state.probe.is_queued(&first_id));
+
+    let episode_two = episode_dir.join("喜剧之王 - S01E02 - 第 2 集.strm");
+    std::fs::write(&episode_two, "https://example.test/e02.mkv").unwrap();
+    crate::http::library_scan::scan_library_subdir(&state, &root, &show_dir).unwrap();
+
+    let rows = state.store.lock().list_ledger().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(!state.probe.is_queued(&first_id), "已有 E01 不能再次入队");
+    let second = rows.iter().find(|row| row.episode == Some(2)).unwrap();
+    assert!(state.probe.is_queued(&second.id.to_string()));
+}
+
+#[test]
 fn test_entry_scan_target_dir_scenarios() {
     let root = Path::new("/media/tv/china");
     // 1. 剧集嵌套季目录

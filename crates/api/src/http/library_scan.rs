@@ -86,24 +86,21 @@ pub(crate) fn scan_library_subdir(
         scrape,
     };
     let outcome = library::scan_watch(&job, &probe).map_err(|error| error.to_string())?;
-    let (scan_media, paths) = {
+    let (scan_media, inserted) = {
         let store = state.store.lock();
-        crate::watch_ledger::record_paths(&store, outcome.transferred.clone())?;
+        let inserted = crate::watch_ledger::record_paths(&store, outcome.transferred.clone())?;
         let mut scan_media = HashMap::new();
-        let paths: Vec<PathBuf> = outcome
-            .transferred
-            .into_iter()
-            .map(|file| {
-                if let Ok(Some(row)) = store.ledger_by_path(&file.path.display().to_string())
-                    && let Ok(Some(media)) = store.get_media(row.media_id)
-                    && media.kind != domain::MediaKind::Video
-                {
-                    scan_media.entry(media.id).or_insert((media, PathBuf::from(row.path)));
-                }
-                file.path
-            })
-            .collect();
-        (scan_media, paths)
+        for file in &outcome.transferred {
+            if let Ok(Some(row)) = store.ledger_by_path(&file.path.display().to_string())
+                && let Ok(Some(media)) = store.get_media(row.media_id)
+                && media.kind != domain::MediaKind::Video
+            {
+                scan_media
+                    .entry(media.id)
+                    .or_insert((media, PathBuf::from(row.path)));
+            }
+        }
+        (scan_media, inserted)
     };
     for (_, (media, path)) in scan_media {
         if media.tmdb_id.is_some() || media.douban_id.is_some() {
@@ -114,7 +111,7 @@ pub(crate) fn scan_library_subdir(
             None => tracing::warn!(title = %media.title, path = %path.display(), "实时扫描未能自动匹配媒体元数据"),
         }
     }
-    crate::http::library::enqueue_probes_for_paths(state, paths);
+    crate::http::library::enqueue_probes_for_paths(state, inserted);
     {
         let store = state.store.lock();
         if let Ok(Some(library)) = store.get_library(&library_id) {
@@ -154,11 +151,12 @@ fn scan_library_sync(state: ApiState, id: String) -> Response {
             walk_video_files(root, &mut files);
         }
         let store = state.store.lock();
-        if let Err(error) = crate::watch_ledger::record_video_paths(&store, files.clone()) {
-            return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error);
-        }
+        let inserted = match crate::watch_ledger::record_video_paths(&store, files.clone()) {
+            Ok(inserted) => inserted,
+            Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error),
+        };
         drop(store);
-        crate::http::library::enqueue_probes_for_paths(&state, files.clone());
+        crate::http::library::enqueue_probes_for_paths(&state, inserted);
         for file in files {
             let media = domain::Media {
                 id: domain::MediaId::new(),
@@ -205,9 +203,10 @@ fn scan_library_sync(state: ApiState, id: String) -> Response {
         }
     }
     let store = state.store.lock();
-    if let Err(error) = crate::watch_ledger::record_paths(&store, transferred.clone()) {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error);
-    }
+    let inserted = match crate::watch_ledger::record_paths(&store, transferred.clone()) {
+        Ok(inserted) => inserted,
+        Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error),
+    };
 
     // Resolve scanned media once per title; when NFO mirroring is enabled, write
     // the same full metadata used by explicit refresh into the movie/show NFOs.
@@ -250,8 +249,7 @@ fn scan_library_sync(state: ApiState, id: String) -> Response {
         }
     }
 
-    let probe_paths: Vec<PathBuf> = transferred.into_iter().map(|f| f.path).collect();
-    crate::http::library::enqueue_probes_for_paths(&state, probe_paths);
+    crate::http::library::enqueue_probes_for_paths(&state, inserted);
 
     // Recheck after a scan because a legacy auto-cover may have lacked posters
     // before this Library's rows or artwork were refreshed.

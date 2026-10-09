@@ -348,6 +348,20 @@ impl Store {
         Ok(job.is_active().then_some(job))
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn finish_probe_units_for_ledger(&self, ledger_id: &str) -> Result<(), StoreError> {
+        self.library.execute(
+            "UPDATE probe_job_units SET status = 'succeeded' WHERE ledger_id = ?1",
+            [ledger_id],
+        )?;
+        self.library.execute(
+            "UPDATE probe_jobs SET status = 'succeeded'
+             WHERE id IN (SELECT job_id FROM probe_job_units WHERE ledger_id = ?1)",
+            [ledger_id],
+        )?;
+        Ok(())
+    }
+
     pub fn is_probe_queued(&self, ledger_id: &str) -> Result<bool, StoreError> {
         let active = self.library.query_row(
             "SELECT EXISTS(SELECT 1 FROM probe_job_units
