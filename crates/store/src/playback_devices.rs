@@ -25,6 +25,10 @@ impl Store {
         if !list.iter().any(|id| id == &key) {
             list.push(key);
         }
+        // DeviceId 由客户端自报，只拉黑这个字符串挡不住换号。撤销必须同时
+        // 作废该用户的播放会话凭据；系统 CLI token 由 delete_session_tokens 保留。
+        let tokens = self.tokens_for_user(user_id)?;
+        self.delete_session_tokens(&tokens)?;
         self.put_setting("playback.revoked_devices", &serde_json::to_string(&list)?)
     }
 

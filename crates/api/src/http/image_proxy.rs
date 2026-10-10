@@ -20,6 +20,8 @@ pub(crate) struct ProxyQuery {
 }
 
 const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+/// 公开图片代理的磁盘预算。超限时丢掉最旧的缓存，避免任意 URL 把数据目录写满。
+const IMAGE_CACHE_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
 
 /// 图床白名单：**解析后的主机名**精确匹配（或该域的子域）。
 /// 不用 URL 子串判断——`http://127.0.0.1:9999/private?x=bgm.tv/` 这类
@@ -86,12 +88,43 @@ fn cached_fetch(url: &str) -> Result<(String, Vec<u8>), String> {
             std::fs::File::create(&cache_file).and_then(|mut file| file.write_all(&payload))
         {
             eprintln!("[image_proxy] cache write: {error}");
+        } else if let Err(error) = trim_image_cache(&root, IMAGE_CACHE_BUDGET_BYTES) {
+            eprintln!("[image_proxy] cache trim: {error}");
         }
     }
     Ok((content_type, bytes))
 }
 
 /// SipHash hex of the URL: fine for a disk-cache filename (not security).
+fn trim_image_cache(root: &std::path::Path, budget: u64) -> std::io::Result<()> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let meta = entry.metadata()?;
+        if meta.is_file() {
+            files.push((
+                meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                meta.len(),
+                entry.path(),
+            ));
+        }
+    }
+    let mut total: u64 = files.iter().map(|(_, len, _)| *len).sum();
+    if total <= budget {
+        return Ok(());
+    }
+    files.sort_by_key(|(modified, _, _)| *modified);
+    for (_, len, path) in files {
+        if total <= budget {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total = total.saturating_sub(len);
+        }
+    }
+    Ok(())
+}
+
 fn cache_key(url: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};

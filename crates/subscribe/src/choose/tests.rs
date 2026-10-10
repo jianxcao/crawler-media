@@ -200,6 +200,42 @@ fn scored(title: &str, from: u32, to: u32, score: i32) -> ScoredTorrent {
 }
 
 #[test]
+fn h264_and_h265_aliases_rank_with_x264_and_hevc() {
+    let mut owned = release("owned");
+    owned.codec = Some("h264".into());
+    let mut target = release("target");
+    target.codec = Some("x264".into());
+    assert!(target_reached(&owned, &target));
+    owned.codec = Some("h265".into());
+    target.codec = Some("hevc".into());
+    assert!(target_reached(&owned, &target));
+}
+
+#[test]
+fn pack_outside_the_window_does_not_download_with_the_in_window_winner() {
+    let mut subscribe = tv_subscribe(domain::MediaId::new());
+    subscribe.coverage = Coverage::Tv {
+        season: 1,
+        episode_from: 2,
+        episode_to: Some(2),
+    };
+    let pack = scored("Show.S01E01-E02", 1, 2, 10);
+    let single = scored("Show.S01E02", 2, 2, 20);
+    let chosen = choose(
+        &subscribe,
+        None,
+        &[pack, single],
+        &SubscribeFacts::default(),
+    );
+    assert_eq!(
+        chosen.len(),
+        1,
+        "窗口外的集数不能再拉来一份种子: {chosen:?}"
+    );
+    assert!(chosen[0].torrent.title.contains("S01E02"));
+}
+
+#[test]
 fn huge_release_range_does_not_allocate_unbounded_choose_slots() {
     let media_id = domain::MediaId::new();
     let subscribe = tv_subscribe(media_id);

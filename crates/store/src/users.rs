@@ -282,6 +282,14 @@ impl Store {
         Ok(tokens.iter().any(|tok| tok == proposed))
     }
 
+    pub fn tokens_for_user(&self, user_id: UserId) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self
+            .app
+            .prepare("SELECT token FROM user_tokens WHERE user_id = ?1")?;
+        let rows = stmt.query_map(params![user_id.to_string()], |row| row.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// 校验管理员当前密码是否与已知系统 CLI token（包含当前传入值、历史 marker 及现有 user_tokens）相同。
     /// 用于升级自检：防止运维同时修改 CLI token 和密码时旧的 token 密码逃过升级迁移。
     pub fn legacy_admin_password_matches_known_token(

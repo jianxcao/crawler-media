@@ -340,7 +340,10 @@ pub(crate) async fn claim_unidentified(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> Response {
-    let path = body["path"].as_str().unwrap_or_default();
+    let path = body["path"].as_str().unwrap_or_default().trim();
+    if path.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "library.invalid", "path 必填");
+    }
     let media_id = match MediaId::from_str(&id) {
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "media id 无效"),
@@ -353,6 +356,20 @@ pub(crate) async fn claim_unidentified(
             "影视条目不存在",
         );
     };
+    // 只登记确实在某个 Library 根下的文件。任意路径写成台账后，订阅删除
+    // 会把它当成库内文件物理删掉。
+    if store
+        .library_for_path_strict(std::path::Path::new(path), media.kind)
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "library.path_outside",
+            "只能认领媒体库根目录内的文件",
+        );
+    }
     let row = domain::LedgerRow {
         id: domain::LedgerId::new(),
         media_id,

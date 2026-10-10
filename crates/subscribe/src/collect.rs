@@ -206,7 +206,8 @@ fn reconcile_mapping_facts(
                     path: Some(dest_str.clone()),
                 },
             );
-        } else if existing_fact.as_ref().and_then(|f| f.path.as_deref()) == Some(dest_str.as_str()) {
+        } else if existing_fact.as_ref().and_then(|f| f.path.as_deref()) == Some(dest_str.as_str())
+        {
             facts.upsert(
                 s,
                 e,
@@ -305,6 +306,17 @@ fn collect_one<D: Downloader + ?Sized>(
         tracing::warn!(dest = %dest.display(), error = %e, "刮削写入元数据失败，但媒体文件已就位，继续入账");
     }
     let (quality, source, confidence) = quality_for(probe, &dest, &scored.release);
+    // 标题里的质量只决定要不要下载。真正删除旧版本之前，必须用 probe 到的
+    // 文件质量再判一次：标称 2160p、实际 720p 不能替换在位的 1080p。
+    let approved = replacement_survives_probe(added, scored, &slots, approved, &quality);
+    if added.input.subscribe.wash_cut && has_existing && !approved {
+        tracing::warn!(
+            dest = %dest.display(),
+            resolution = ?quality.resolution,
+            codec = ?quality.codec,
+            "probe 后的实际质量不构成升级，保留已转入的新文件，不删除在位版本"
+        );
+    }
     commit_video_facts(added, &slots, scored.score, &dest, approved, removed_paths)?;
     let ledger_path = dest.display().to_string();
     let mut owned_quality = scored.release.clone();
@@ -408,6 +420,46 @@ fn dest_path(
     let src_stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("alt");
     let ext = dest.extension().and_then(|s| s.to_str()).unwrap_or("bin");
     Ok(dest.with_file_name(format!("{stem}-{src_stem}.{ext}")))
+}
+
+fn replacement_survives_probe<D: Downloader + ?Sized>(
+    added: &Added<'_, D>,
+    scored: &ScoredTorrent,
+    slots: &[(Option<u32>, Option<u32>)],
+    approved: bool,
+    quality: &library::FileQuality,
+) -> bool {
+    if !approved || !added.input.subscribe.wash_cut {
+        return approved;
+    }
+    let mut probed = scored.clone();
+    probed.release.resolution = quality.resolution.clone();
+    probed.release.codec = quality.codec.clone();
+    probed.release.hdr = quality.hdr.clone();
+    // 没有升级阶梯时替换看标题分数。probe 出的分辨率更低时，不能继续用这个
+    // 更高的标题分删掉在位文件；分辨率没变差才保留原分。
+    let probed_rank = quality
+        .resolution
+        .as_deref()
+        .map(crate::choose::resolution_rank);
+    let titled_rank = scored
+        .release
+        .resolution
+        .as_deref()
+        .map(crate::choose::resolution_rank);
+    if probed_rank
+        .zip(titled_rank)
+        .is_some_and(|(got, claimed)| got < claimed)
+    {
+        probed.score = probed_rank.unwrap_or(0).saturating_mul(10);
+    }
+    crate::slot_replacement::is_replacement_approved(
+        added.input.subscribe,
+        added.input.wash_filter,
+        &added.input.facts,
+        &probed,
+        slots,
+    )
 }
 
 fn quality_for(

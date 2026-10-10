@@ -18,7 +18,6 @@ pub(crate) mod jobs;
 pub(crate) mod library;
 pub(crate) mod library_admin;
 pub(crate) mod library_artwork;
-pub(crate) mod media_posters;
 pub(crate) mod library_chapters;
 pub(crate) mod library_config;
 pub(crate) mod library_delete;
@@ -28,6 +27,7 @@ pub(crate) mod library_housekeeping;
 pub(crate) mod library_organize;
 pub(crate) mod library_scan;
 pub(crate) mod media;
+pub(crate) mod media_posters;
 pub(crate) mod media_visibility;
 pub(crate) mod notify;
 pub(crate) mod playback;
@@ -632,11 +632,31 @@ fn admin_ops_routes() -> Router<ApiState> {
         .route("/system/logs/export", get(system_logs::export_logs))
 }
 
+fn redact_query(query: &str) -> String {
+    query
+        .split('&')
+        .map(|pair| {
+            let Some((key, _)) = pair.split_once('=') else {
+                return pair.to_string();
+            };
+            if matches!(
+                key.to_ascii_lowercase().as_str(),
+                "api_key" | "apikey" | "token" | "access_token"
+            ) {
+                format!("{key}=[redacted]")
+            } else {
+                pair.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
 async fn request_logger(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let method = request.method().clone();
     let uri = request.uri().clone();
     let path = uri.path().to_string();
-    let query = uri.query().map(|q| q.to_string()).filter(|q| !q.is_empty());
+    let query = uri.query().map(redact_query).filter(|q| !q.is_empty());
     let user_agent = request
         .headers()
         .get(axum::http::header::USER_AGENT)

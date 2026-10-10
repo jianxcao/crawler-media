@@ -93,29 +93,39 @@ pub async fn claim_unidentified(
     };
     let dest = library::render_path(&root, &naming, &media, &release, &src)
         .map_err(|err| ApiError::invalid("unidentified.invalid", err.to_string()))?;
+    // 没进台账不等于可以覆盖：未扫描、识别失败，或上次提交失败留下的视频
+    // 都还在磁盘上。源和目标是同一文件（原地认领）才允许继续。
     if dest.exists() && dest != src {
-        let store = state.store.lock();
-        if store
-            .ledger_by_path(&dest.display().to_string())
-            .ok()
-            .flatten()
-            .is_some()
-        {
-            return Err(ApiError::with(
-                StatusCode::CONFLICT,
-                "unidentified.destination_exists",
-                "媒体库中已存在相同目标文件，禁止覆盖已有文件".to_string(),
-            ));
-        }
+        return Err(ApiError::with(
+            StatusCode::CONFLICT,
+            "unidentified.destination_exists",
+            "媒体库中已存在相同目标文件，禁止覆盖已有文件".to_string(),
+        ));
     }
-    let mode = library::resolve_mode(&src, dest.parent().unwrap_or(Path::new(".")), mode);
-    library::transfer_file(&src, &dest, mode)
+    let requested = library::resolve_mode(&src, dest.parent().unwrap_or(Path::new(".")), mode);
+    // Move 先复制、库记录成功后再删源。中途失败时源还在，同一请求可以重试。
+    let staged = if requested == library::TransferMode::Move {
+        library::TransferMode::Copy
+    } else {
+        requested
+    };
+    library::transfer_file(&src, &dest, staged)
         .map_err(|err| ApiError::invalid("unidentified.invalid", err.to_string()))?;
+    let rollback_dest =
+        (requested == library::TransferMode::Move && dest != src).then(|| dest.clone());
     let _ = library::scrape_beside(&dest, &media, nfo, None);
     if scrape {
         crate::poster_fetch::attach_poster(&state, &media, &dest);
     }
-    let media = state.store.lock().ensure_media(media)?;
+    let media = match state.store.lock().ensure_media(media) {
+        Ok(media) => media,
+        Err(error) => {
+            if let Some(path) = &rollback_dest {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(error.into());
+        }
+    };
     let row = LedgerRow {
         id: LedgerId::new(),
         media_id: media.id,
@@ -131,8 +141,20 @@ pub async fn claim_unidentified(
     };
     {
         let store = state.store.lock();
-        store.insert_ledger(&row)?;
-        store.delete_unidentified(&body.path)?;
+        if let Err(error) = store.insert_ledger(&row) {
+            if let Some(path) = &rollback_dest {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(error.into());
+        }
+        if let Err(error) = store.delete_unidentified(&body.path) {
+            tracing::warn!(path = %body.path, %error, "认领已入账，但未识别记录清理失败");
+        }
+    }
+    if requested == library::TransferMode::Move && dest != src {
+        if let Err(error) = std::fs::remove_file(&src) {
+            tracing::warn!(src = %src.display(), %error, "认领已入账，但 Move 源文件清理失败");
+        }
     }
     crate::http::library::enqueue_probes_for_rows(&state, std::slice::from_ref(&row));
     Ok(Json(json!({

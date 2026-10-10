@@ -1,7 +1,7 @@
 import { publicEnv } from "@/lib/env";
 import { getPlayerDeviceId } from "@/lib/player/device";
 import type { TrickplayIndex } from "@/lib/player/trickplay";
-import { HttpError, request, resolveRequestUrl } from "@/lib/http";
+import { HttpError, getAuthToken, request, resolveRequestUrl } from "@/lib/http";
 import type {
   LibraryEpisode,
   LibraryGalleryGroup,
@@ -1025,9 +1025,27 @@ export function reportPlaybackProgressOnUnload(
   scope: PlaybackApiScope = DEFAULT_PLAYBACK_SCOPE,
 ): void {
   if (scope.progress === "local") writeLocalProgress(scope.localKey ?? "", body, body);
+  const payload = JSON.stringify(withDevice(body));
+  const url = resolveRequestUrl(`${scope.base}/progress`);
+  const token = getAuthToken();
+  // 跨域且只靠 Bearer 时 sendBeacon 带不上 Authorization，最终进度会被 401。
+  // keepalive fetch 能带上 token，并且在页面卸载后继续发出。
+  if (typeof fetch !== "undefined" && token) {
+    void fetch(url, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: payload,
+      keepalive: true,
+      credentials: "same-origin",
+    }).catch(() => undefined);
+    return;
+  }
   if (typeof navigator === "undefined" || !navigator.sendBeacon) return;
-  const blob = new Blob([JSON.stringify(withDevice(body))], { type: "application/json" });
-  navigator.sendBeacon(resolveRequestUrl(`${scope.base}/progress`), blob);
+  navigator.sendBeacon(url, new Blob([payload], { type: "application/json" }));
 }
 
 /** 播放策略。数字上限（并发/高度/缓存配额）由服务端按机器规格自动推导，

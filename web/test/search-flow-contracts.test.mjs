@@ -18,6 +18,7 @@ test("manual download submission preserves selected destination and route identi
   ]);
 
   assert.match(dialog, /save_path: option\.savePath/);
+  assert.match(dialog, /option\.kind === "smart" && identity && option\.savePath/);
   assert.match(dialog, /auto_route: true/);
   assert.match(api, /save_path: payload\.save_path/);
   assert.match(api, /payload\.auto_route \? \{ auto_route: true \}/);

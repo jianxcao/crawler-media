@@ -328,6 +328,72 @@ async fn claim_rejects_overwriting_existing_ledger_file() {
     assert_eq!(std::fs::read(&existing_path).unwrap(), b"original-bytes");
 }
 
+#[tokio::test]
+async fn claim_refuses_to_overwrite_an_unledgered_existing_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = router(state(
+        tmp.path(),
+        Arc::new(Fixtures {
+            requests: Mutex::new(Vec::new()),
+            bodies: HashMap::new(),
+        }),
+        Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
+    ));
+    let unknown_file = tmp.path().join("stage/other.mkv");
+    std::fs::create_dir_all(unknown_file.parent().unwrap()).unwrap();
+    std::fs::write(&unknown_file, b"new-bytes").unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let media = store
+        .ensure_media(domain::Media {
+            id: domain::MediaId::new(),
+            kind: domain::MediaKind::Movie,
+            title: "The Matrix".into(),
+            year: Some(1999),
+            original_title: None,
+            tmdb_id: Some("603".into()),
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+    let naming = store.naming_pattern(domain::MediaKind::Movie).unwrap();
+    let root = store.library_root(domain::MediaKind::Movie).unwrap();
+    let release = domain::Release {
+        title: "The Matrix".into(),
+        year: Some(1999),
+        ..release::parse("other.mkv")
+    };
+    let existing_path =
+        library::render_path(&root, &naming, &media, &release, &unknown_file).unwrap();
+    std::fs::create_dir_all(existing_path.parent().unwrap()).unwrap();
+    std::fs::write(&existing_path, b"original-bytes").unwrap();
+    store
+        .insert_unidentified(unknown_file.display().to_string(), Confidence::Low)
+        .unwrap();
+    drop(store);
+
+    let res = app
+        .oneshot(request(
+            "POST",
+            "/api/v1/unidentified/claim",
+            Some("management-secret"),
+            json!({
+                "path": unknown_file.display().to_string(),
+                "title": "The Matrix",
+                "kind": "movie",
+                "year": 1999,
+                "tmdb_id": "603"
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    assert_eq!(std::fs::read(&existing_path).unwrap(), b"original-bytes");
+    assert_eq!(std::fs::read(&unknown_file).unwrap(), b"new-bytes");
+}
+
 pub struct StaticPoster;
 
 impl api::PosterFetch for StaticPoster {

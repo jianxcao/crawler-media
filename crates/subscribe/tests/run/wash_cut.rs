@@ -56,6 +56,86 @@ fn wash_cut_replaces_only_when_score_strictly_greater() {
     assert!(seed.exists());
 }
 
+struct FileProbe;
+
+fn tagged(text: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\":\"");
+    let start = text.find(&needle)? + needle.len();
+    let rest = text.get(start..)?;
+    let end = rest.find('"')?;
+    let value = &rest[..end];
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+impl library::MediaProbe for FileProbe {
+    fn probe(&self, path: &std::path::Path) -> Result<library::FileQuality, library::LibraryError> {
+        let text = fs::read_to_string(path).map_err(library::LibraryError::Io)?;
+        Ok(library::FileQuality {
+            resolution: tagged(&text, "resolution"),
+            codec: tagged(&text, "codec"),
+            hdr: tagged(&text, "hdr"),
+        })
+    }
+}
+
+#[test]
+fn probed_lower_quality_does_not_delete_the_owned_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let media = media_movie();
+    let filter = movie_filter();
+    let sub = movie_sub(&media, &filter, true);
+    let old_lib = tmp.path().join("lib/old.mkv");
+    fs::create_dir_all(old_lib.parent().unwrap()).unwrap();
+    write_probed(&old_lib, "1080p", "h264", "");
+    let mut facts = SubscribeFacts::default();
+    facts.upsert(
+        None,
+        None,
+        QualityFact {
+            score: 50,
+            path: Some(old_lib.display().to_string()),
+        },
+    );
+    facts.set_quality(
+        old_lib.display().to_string(),
+        release::parse("The.Matrix.1999.1080p.BluRay.x264"),
+    );
+    let labeled_better = torrent(
+        "The.Matrix.1999.2160p.BluRay.x265-FAKE",
+        "https://pt.example/dl/fake",
+    );
+    let src = tmp.path().join("fake.mkv");
+    write_probed(&src, "720p", "h264", "");
+    let dl = MemoryDownloader::new(tmp.path().join("stage"));
+    map_file(&dl, &labeled_better, src);
+    let library = tmp.path().join("lib");
+    let mut input = run_input(
+        &sub,
+        &media,
+        &filter,
+        vec![labeled_better],
+        facts,
+        &dl,
+        &library,
+    );
+    input.wash_filter = Some(&filter);
+
+    let outcome = subscribe::run_with_probe(input, &FileProbe).unwrap();
+
+    assert!(
+        old_lib.exists(),
+        "标称更高、probe 更低的新文件不能删除在位版本"
+    );
+    assert!(
+        !outcome
+            .removed_paths
+            .iter()
+            .any(|path| path == &old_lib.display().to_string()),
+        "旧文件不能进入删除清单: {:?}",
+        outcome.removed_paths
+    );
+}
+
 #[test]
 fn unknown_quality_keeps_old_file_and_never_submits_replacement() {
     let tmp = tempfile::tempdir().unwrap();

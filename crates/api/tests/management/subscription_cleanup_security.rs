@@ -105,10 +105,11 @@ async fn failed_file_cleanup_keeps_subscription_for_retry() {
     let created = create_subscription(&app, "management-secret", "Retry Me").await;
     let id = created["id"].as_str().unwrap();
     let media_id: MediaId = created["media"]["id"].as_str().unwrap().parse().unwrap();
-    let blocked = tmp.path().join("directory-cannot-be-removed-as-file");
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let root = store.library_root(domain::MediaKind::Movie).unwrap();
+    let blocked = root.join("directory-cannot-be-removed-as-file");
     std::fs::create_dir_all(&blocked).unwrap();
-    Store::open(tmp.path().join("data"))
-        .unwrap()
+    store
         .insert_ledger(&LedgerRow {
             id: LedgerId::new(),
             media_id,
@@ -145,4 +146,44 @@ async fn failed_file_cleanup_keeps_subscription_for_retry() {
         .await
         .unwrap();
     assert_eq!(retained.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn cleanup_does_not_delete_a_file_outside_every_library_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+    let created = create_subscription(&app, "management-secret", "Outside").await;
+    let id = created["id"].as_str().unwrap();
+    let media_id: MediaId = created["media"]["id"].as_str().unwrap().parse().unwrap();
+    let outside = tmp.path().join("not-a-library/secret.mkv");
+    std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+    std::fs::write(&outside, b"keep-me").unwrap();
+    Store::open(tmp.path().join("data"))
+        .unwrap()
+        .insert_ledger(&LedgerRow {
+            id: LedgerId::new(),
+            media_id,
+            path: outside.display().to_string(),
+            season: None,
+            episode: None,
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: QualitySource::Probe,
+            confidence: Confidence::High,
+            filter_score: None,
+        })
+        .unwrap();
+
+    let deleted = app
+        .oneshot(request(
+            "DELETE",
+            &format!("/api/v1/subscriptions/{id}?delete_library_files=true"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::OK);
+    assert_eq!(std::fs::read(&outside).unwrap(), b"keep-me");
 }

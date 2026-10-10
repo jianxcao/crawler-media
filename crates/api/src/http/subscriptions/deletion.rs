@@ -322,7 +322,14 @@ fn row_owned_by_subscribe(
     {
         return false;
     }
-    let Some(owner) = crate::http::library::library_for_row(store, row, media) else {
+    // 物理删除不能走「不在任何根下就回退默认库」的展示归属。库外路径
+    // （手工 claim、根目录变更后的旧行）一律不删。
+    let Some(owner) = crate::http::library::library_for_row_strict(store, row, media) else {
+        tracing::warn!(
+            path = %row.path,
+            subscribe_id = %subscribe.id,
+            "订阅删除跳过不属于任何媒体库根的文件"
+        );
         return false;
     };
     match subscribe.library_id {

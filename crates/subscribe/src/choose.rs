@@ -40,7 +40,12 @@ pub fn choose(
                 .iter()
                 .filter(|c| should_take(subscribe, wash_filter, facts, c))
             {
-                for (season, ep) in candidate.release.covered_episodes() {
+                // 只竞争订阅窗口里这个候选真正能填的槽。范围包在窗口外的集数
+                // 不能让它和窗口内的更高分单集一起被下载。
+                for (season, ep) in covered_slots(subscribe, &candidate.release) {
+                    let (Some(season), Some(ep)) = (season, ep) else {
+                        continue;
+                    };
                     best_by_ep
                         .entry((season, ep))
                         .and_modify(|current| {
@@ -297,11 +302,15 @@ fn source_level(value: &str) -> i32 {
     }
 }
 
+pub(crate) fn resolution_rank(value: &str) -> i32 {
+    resolution_level(value)
+}
+
 fn codec_level(value: &str) -> i32 {
     match value.to_ascii_lowercase().as_str() {
         "av1" => 4,
-        "hevc" | "x265" | "h.265" => 3,
-        "x264" | "h.264" | "avc" => 2,
+        "hevc" | "x265" | "h.265" | "h265" => 3,
+        "x264" | "h.264" | "h264" | "avc" => 2,
         _ => 0,
     }
 }

@@ -269,6 +269,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
   const unitKey = unitKeyOf(unit);
   // 接口作用域放 ref：各回调 / effect 的依赖数组一律不变，作用域在组件生命周期内是常量
   const apiRef = useRef(api);
+  const startConsumedRef = useRef(false);
   apiRef.current = api;
 
   const [state, dispatch] = useReducer(playerReducer, initialPlayerState);
@@ -860,9 +861,15 @@ export function VideoPlayer(props: VideoPlayerProps) {
   /** 服务端正在烧录进画面的字幕轨（Emby 语义「字幕压制」）；null = 没烧。 */
   const burnedSubtitle = state.session?.decision.video?.burn_subtitle ?? null;
 
-  /** 音轨菜单项。少于两条时为空数组，控制条据此把整个按钮藏掉。 */
+  /**
+   * 音轨菜单项。直出（档 0）整份文件交给浏览器，只能放容器默认轨；
+   * 这时不展示菜单，避免点选后重启却仍听到原来的声音。
+   */
   const audioOptions = useMemo(
-    () => planAudioOptions(state.session?.decision.audio_tracks),
+    () =>
+      state.session?.decision.tier === 0
+        ? []
+        : planAudioOptions(state.session?.decision.audio_tracks),
     [state.session],
   );
 
@@ -937,8 +944,9 @@ export function VideoPlayer(props: VideoPlayerProps) {
     setAutoplay(null);
     dispatch({ type: "reset" });
 
-    // `?t=` 覆盖起播点：无论是否首次进入，只要带有显式的 startMsOverride，一律以其为准。
-    const override = startMsOverride;
+    // `?t=` 只覆盖进入播放页的第一集。切到下一集后回到各自的续播点。
+    const override = startConsumedRef.current ? undefined : startMsOverride;
+    if (startMsOverride !== undefined) startConsumedRef.current = true;
     if (override !== undefined) {
       setPositionMs(override);
       pendingFileMsRef.current = override;

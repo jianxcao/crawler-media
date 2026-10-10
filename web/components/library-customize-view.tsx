@@ -118,13 +118,28 @@ export function LibraryCustomizeView() {
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
 
+  const pendingRows = useRef<HomeRow[] | null>(null);
+  const flushPending = useCallback(() => {
+    const next = pendingRows.current;
+    if (!next) return;
+    pendingRows.current = null;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    const seq = editSeq.current;
+    void savePrefs({ ...prefsRef.current, home: { rows: rowsToPrefs(next) } })
+      .then(() => {
+        if (editSeq.current === seq) setDraft(null);
+      })
+      .catch(() => undefined);
+  }, [savePrefs]);
   const commit = useCallback(
     (next: HomeRow[]) => {
       const seq = ++editSeq.current;
+      pendingRows.current = next;
       setDraft(next);
       setSaveError(null);
       if (saveTimer.current) clearTimeout(saveTimer.current);
       saveTimer.current = setTimeout(() => {
+        pendingRows.current = null;
         savePrefs({ ...prefsRef.current, home: { rows: rowsToPrefs(next) } })
           .then(() => {
             // 期间没有新的改动才让草稿让位，否则会把用户刚改的那一下吞掉
@@ -141,9 +156,9 @@ export function LibraryCustomizeView() {
   );
   useEffect(
     () => () => {
-      if (saveTimer.current) clearTimeout(saveTimer.current);
+      flushPending();
     },
-    [],
+    [flushPending],
   );
 
   const update = (id: string, patch: (row: HomeRow) => HomeRow) =>

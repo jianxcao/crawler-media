@@ -349,7 +349,9 @@ fn direct_decision(
         "container": container,
         "video": { "action": "copy", "codec": row.codec, "height": null, "tone_map": false, "burn_subtitle": null },
         "audio": { "action": "copy", "track_ref": null, "codec": null, "channels": null, "downmix": false },
-        "audio_tracks": audio_tracks,
+        // 直出整份文件时浏览器只放容器默认音轨，请求里的 audio_track 不会生效。
+        // 不把探测到的多条轨交给菜单，避免用户点了之后白重启、仍听到默认轨。
+        "audio_tracks": if audio_tracks.len() < 2 { audio_tracks } else { Vec::<Value>::new() },
         "subtitles": subtitles,
         "degraded_from": null,
         "cost_hint": null,

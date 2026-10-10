@@ -74,7 +74,10 @@ pub(crate) fn scan_library_subdir(
             inserted = inserted.len(), "实时 Video Library 扫描完成，不进行 Movie/TV 识别");
         crate::http::library::enqueue_probes_for_paths(state, inserted);
         let store = state.store.lock();
-        if let Some(library) = store.get_library(&library_id).map_err(|error| error.to_string())? {
+        if let Some(library) = store
+            .get_library(&library_id)
+            .map_err(|error| error.to_string())?
+        {
             crate::http::library::clear_library_cover_checked(&store, &library.id);
             let _ = crate::http::library::library_cover_path(&store, &library);
         }
@@ -121,8 +124,12 @@ pub(crate) fn scan_library_subdir(
             continue;
         }
         match crate::auto_resolve::auto_resolve_media(state, &media, &path) {
-            Some(resolved) => tracing::info!(title = %resolved.title, path = %path.display(), "实时扫描自动匹配媒体元数据成功"),
-            None => tracing::warn!(title = %media.title, path = %path.display(), "实时扫描未能自动匹配媒体元数据"),
+            Some(resolved) => {
+                tracing::info!(title = %resolved.title, path = %path.display(), "实时扫描自动匹配媒体元数据成功")
+            }
+            None => {
+                tracing::warn!(title = %media.title, path = %path.display(), "实时扫描未能自动匹配媒体元数据")
+            }
         }
     }
     tracing::info!(
@@ -258,7 +265,8 @@ fn scan_video_library(state: &ApiState, roots: &[PathBuf]) -> Response {
     for root in roots {
         walk_video_files(root, &mut files);
     }
-    let inserted = match crate::watch_ledger::record_video_paths(&state.store.lock(), files.clone()) {
+    let inserted = match crate::watch_ledger::record_video_paths(&state.store.lock(), files.clone())
+    {
         Ok(inserted) => inserted,
         Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error),
     };
@@ -267,7 +275,11 @@ fn scan_video_library(state: &ApiState, roots: &[PathBuf]) -> Response {
         let media = domain::Media {
             id: domain::MediaId::new(),
             kind: domain::MediaKind::Video,
-            title: file.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string(),
+            title: file
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_string(),
             year: None,
             original_title: None,
             tmdb_id: None,
@@ -292,12 +304,22 @@ fn walk_video_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        // 与 Movie/TV 扫描一致：不跟随软链接。根内目录链接指向根外时，
+        // 不能把外部视频登记进 Library。
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            tracing::debug!(path = %path.display(), "Video 扫描跳过软链接");
+            continue;
+        }
+        if meta.is_dir() {
             walk_video_files(&path, out);
-        } else if path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| VIDEO_EXTS.iter().any(|known| e.eq_ignore_ascii_case(known)))
+        } else if meta.is_file()
+            && path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| VIDEO_EXTS.iter().any(|known| e.eq_ignore_ascii_case(known)))
         {
             out.push(path);
         }

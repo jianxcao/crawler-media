@@ -449,11 +449,11 @@ function DialogContent({
       torrent_id: request.torrent_id,
       // 只有勾了「记住本次选择」才带分类：后端拿不到分类就不写记忆
       ...(remember ? { category: request.category } : {}),
-      ...(option.kind === "smart" && identity && manualTarget?.tmdb_id != null
+      ...(option.kind === "smart" && identity && option.savePath
         ? {
             auto_route: true,
             media_kind: identity.kind,
-            tmdb_id: manualTarget.tmdb_id,
+            ...(manualTarget?.tmdb_id != null ? { tmdb_id: manualTarget.tmdb_id } : {}),
             title: identity.title,
             year: identity.year,
             subtitle: request.subtitle,
