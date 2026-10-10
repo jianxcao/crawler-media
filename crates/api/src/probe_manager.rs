@@ -19,9 +19,11 @@ use marker::{ChromaprintEngine, FingerprintEngine};
 use crate::scrape_store::ScrapeStoreExt;
 use crate::Store;
 
+pub mod clock;
 mod marker_jobs;
 mod markers;
 pub mod policy;
+mod retry;
 mod probe;
 pub mod progress;
 mod queue;
@@ -69,6 +71,8 @@ pub struct ProbeManager {
     metadata_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<ProbeUnit>>>,
     fingerprint_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<probe::FingerprintWork>>>,
     pub(crate) recovered_marker_refreshes: Mutex<Vec<(crate::store::ProbeJob, ProbeUnit)>>,
+    clock: Mutex<Arc<dyn clock::ProbeClock>>,
+    pub comparison_runs: std::sync::atomic::AtomicUsize,
 }
 
 impl ProbeManager {
@@ -109,6 +113,8 @@ impl ProbeManager {
             metadata_rx: Arc::new(tokio::sync::Mutex::new(metadata_rx)),
             fingerprint_rx: Arc::new(tokio::sync::Mutex::new(fingerprint_rx)),
             recovered_marker_refreshes: Mutex::new(Vec::new()),
+            clock: Mutex::new(Arc::new(clock::SystemClock)),
+            comparison_runs: std::sync::atomic::AtomicUsize::new(0),
         };
         manager.recover_pending_jobs();
         manager
@@ -123,117 +129,41 @@ impl ProbeManager {
         row: &domain::LedgerRow,
         origin: policy::ProbeRequestOrigin,
     ) -> Result<policy::ProbeRequestResult, store::StoreError> {
-        let store = self.store.lock();
-        let ledger_id = row.id.to_string();
-        let kind = store
-            .get_media(row.media_id)
-            .ok()
-            .flatten()
-            .map(|m| m.kind)
-            .unwrap_or(domain::MediaKind::Movie);
-
-        let path = std::path::Path::new(&row.path);
-        let fp_enabled = policy::is_fingerprint_enabled_for_path(&store, path, kind);
-        let marker_enabled = policy::is_marker_detection_enabled_for_path(&store, path, kind);
-
-        if !marker_enabled && kind == domain::MediaKind::Tv && origin != policy::ProbeRequestOrigin::ManualRefresh {
-            return Ok(policy::ProbeRequestResult::Disabled);
+        let now_ms = self.clock.lock().now_ms();
+        let need = policy::assess_probe_need(&self.store.lock(), row, origin, now_ms);
+        if !matches!(need.retry, policy::ProbeRequestResult::Complete) {
+            return Ok(need.retry);
         }
-
-        let source_version = crate::fingerprint_job::current_source_version(path);
-        let sample_duration_secs = store
-            .get_scrape_config()
-            .ok()
-            .map(|c| c.effective.fingerprint_duration_secs)
-            .unwrap_or(180);
-
-        let cached_meta_ver = store.get_media_info_cache_version(&ledger_id).ok().flatten();
-        let meta_valid = cached_meta_ver
-            .as_ref()
-            .is_some_and(|v| v.source_version == source_version && v.format_duration_ms.is_some_and(|d| d > 0));
-
-        let media_duration_ms = cached_meta_ver.and_then(|v| v.format_duration_ms);
-        let outro_expected = media_duration_ms
-            .filter(|d| *d > 0)
-            .is_some_and(|d| d / 1000 > i64::from(sample_duration_secs.saturating_add(30)));
-
-        let expected_fp_key = crate::fingerprint_job::fingerprint_cache_key(
-            &source_version,
-            sample_duration_secs,
-            media_duration_ms,
-        );
-
-        let cached_fp = store.get_fingerprint_cache(&ledger_id).ok().flatten();
-        let intro_missing = fp_enabled && cached_fp.as_ref().map_or(true, |c| {
-            c.cache_key != expected_fp_key || c.intro.is_empty()
-        });
-        let outro_missing = fp_enabled && outro_expected && cached_fp.as_ref().map_or(true, |c| {
-            c.cache_key != expected_fp_key || c.outro.as_ref().map_or(true, |o| o.is_empty())
-        });
-
-        // Check if there are active probe jobs for this ledger
-        if let Ok(Some(_active_unit)) = store.active_probe_unit_for_ledger(&ledger_id) {
-            return Ok(policy::ProbeRequestResult::AlreadyRunning);
-        }
-
-        // Check stage state retries if not manual
-        let now_ms = now_ms();
-        if origin != policy::ProbeRequestOrigin::ManualRetry && origin != policy::ProbeRequestOrigin::ManualRefresh {
-            if fp_enabled && outro_missing && !intro_missing {
-                let outro_key = store::ProbeStageKey {
-                    ledger_id: ledger_id.clone(),
-                    context_key: expected_fp_key.clone(),
-                    stage: store::ProbeStage::Outro,
-                };
-                if let Ok(Some(stage_state)) = store.get_probe_stage(&outro_key) {
-                    if stage_state.status == store::ProbeStageStatus::Failed {
-                        if stage_state.failure_count >= 5 {
-                            return Ok(policy::ProbeRequestResult::Exhausted);
-                        }
-                        if let Some(next_retry) = stage_state.next_retry_at_ms {
-                            if next_retry > now_ms {
-                                return Ok(policy::ProbeRequestResult::Waiting {
-                                    next_retry_at_ms: next_retry,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        drop(store);
-
-        if meta_valid && !intro_missing && !outro_missing {
+        if need.metadata_valid && !need.intro_missing && !need.outro_missing {
             return Ok(policy::ProbeRequestResult::Complete);
         }
-
         let unit = ProbeUnit {
             row: row.clone(),
-            kind,
-            force_fingerprint: fp_enabled,
+            kind: need.kind,
+            force_fingerprint: need.fingerprint_enabled,
             reuse_fingerprint_cache: true,
             overwrite_markers: false,
             reuse_media_info_cache: true,
             marker_refresh_id: None,
             job_id: None,
         };
-
-        if meta_valid && fp_enabled && (intro_missing || outro_missing) {
-            // Directly queue fingerprint probe without media probe!
-            if let Some(job_id) = self.enqueue_direct_fingerprint(unit, media_duration_ms, source_version, sample_duration_secs) {
-                return Ok(policy::ProbeRequestResult::Queued { job_id });
-            } else {
-                return Ok(policy::ProbeRequestResult::AlreadyRunning);
-            }
+        if need.metadata_valid && need.fingerprint_enabled && (need.intro_missing || need.outro_missing)
+        {
+            return Ok(match self.enqueue_direct_fingerprint(
+                unit,
+                need.media_duration_ms,
+                need.source_version,
+                need.sample_duration_secs,
+            ) {
+                Some(job_id) => policy::ProbeRequestResult::Queued { job_id },
+                None => policy::ProbeRequestResult::AlreadyRunning,
+            });
         }
-
         let ledger_id = unit.row.id.to_string();
         if self.enqueue(unit) {
-            let job_id = self
-                .active_probe_job_id(&ledger_id)
-                .unwrap_or_default();
-            Ok(policy::ProbeRequestResult::Queued { job_id })
+            Ok(policy::ProbeRequestResult::Queued {
+                job_id: self.active_probe_job_id(&ledger_id).unwrap_or_default(),
+            })
         } else {
             Ok(policy::ProbeRequestResult::AlreadyRunning)
         }
@@ -760,6 +690,10 @@ impl ProbeManager {
     pub fn try_start_workers(self: &Arc<Self>) -> bool {
         worker::try_start(self)
     }
+
+    pub fn set_clock(&self, clock: Arc<dyn clock::ProbeClock>) {
+        *self.clock.lock() = clock;
+    }
 }
 
 pub(crate) fn marker_refresh_scope(media_id: MediaId, season: u32) -> String {
@@ -767,11 +701,10 @@ pub(crate) fn marker_refresh_scope(media_id: MediaId, season: u32) -> String {
 }
 
 fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as i64)
-        .unwrap_or_default()
+    clock::ProbeClock::now_ms(&clock::SystemClock)
 }
+
+
 
 #[cfg(test)]
 mod tests {

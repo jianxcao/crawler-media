@@ -262,6 +262,41 @@ impl Store {
         Ok(rows)
     }
 
+    pub fn season_comparison_digest(
+        &self,
+        media_id: &str,
+        season: u32,
+    ) -> Result<Option<String>, StoreError> {
+        self.library
+            .query_row(
+                "SELECT comparison_digest FROM probe_season_comparison_history
+                 WHERE media_id = ?1 AND season = ?2",
+                params![media_id, season],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn save_season_comparison_digest(
+        &self,
+        media_id: &str,
+        season: u32,
+        digest: &str,
+        published_at_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.library.execute(
+            "INSERT INTO probe_season_comparison_history (
+                 media_id, season, comparison_digest, published_at_ms
+             ) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(media_id, season) DO UPDATE SET
+               comparison_digest = excluded.comparison_digest,
+               published_at_ms = excluded.published_at_ms",
+            params![media_id, season, digest, published_at_ms],
+        )?;
+        Ok(())
+    }
+
     pub fn reset_probe_stage_failure(
         &self,
         key: &ProbeStageKey,

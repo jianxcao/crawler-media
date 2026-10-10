@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use api::probe_manager::clock::ProbeClock;
 use api::probe_manager::policy::{ProbeRequestOrigin, ProbeRequestResult};
 use api::probe_manager::ProbeManager;
 use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
@@ -13,9 +15,9 @@ pub struct FakeFingerprintEngine {
     pub intro_words: Vec<u32>,
     pub outro_words: Vec<u32>,
     pub outro_error: Mutex<Option<String>>,
-    pub metadata_calls: Mutex<usize>,
-    pub intro_calls: Mutex<usize>,
-    pub outro_calls: Mutex<usize>,
+    pub metadata_calls: Mutex<HashMap<u32, usize>>,
+    pub intro_calls: Mutex<HashMap<u32, usize>>,
+    pub outro_calls: Mutex<HashMap<u32, usize>>,
 }
 
 impl FakeFingerprintEngine {
@@ -24,9 +26,9 @@ impl FakeFingerprintEngine {
             intro_words: vec![1, 2, 3, 4],
             outro_words: vec![5, 6, 7, 8],
             outro_error: Mutex::new(None),
-            metadata_calls: Mutex::new(0),
-            intro_calls: Mutex::new(0),
-            outro_calls: Mutex::new(0),
+            metadata_calls: Mutex::new(HashMap::new()),
+            intro_calls: Mutex::new(HashMap::new()),
+            outro_calls: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -38,11 +40,12 @@ impl FingerprintEngine for FakeFingerprintEngine {
         start_secs: u32,
         _duration_secs: u32,
     ) -> Result<marker::AudioFingerprint, String> {
+        let episode = episode_number(_path);
         if start_secs == 0 {
-            *self.intro_calls.lock() += 1;
+            *self.intro_calls.lock().entry(episode).or_insert(0) += 1;
             Ok(self.intro_words.clone())
         } else {
-            *self.outro_calls.lock() += 1;
+            *self.outro_calls.lock().entry(episode).or_insert(0) += 1;
             if let Some(err) = self.outro_error.lock().clone() {
                 Err(err)
             } else {
@@ -62,11 +65,19 @@ impl FingerprintEngine for FakeFingerprintEngine {
     }
 }
 
+fn episode_number(path: &Path) -> u32 {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.trim_start_matches("S01E0").trim_end_matches(".strm").parse().ok())
+        .unwrap_or(0)
+}
+
 pub struct ProbeScenario {
     pub tmp: tempfile::TempDir,
     pub store: Arc<Mutex<Store>>,
     pub manager: Arc<ProbeManager>,
     pub engine: Arc<FakeFingerprintEngine>,
+    pub clock: Arc<api::probe_manager::clock::FakeClock>,
     pub media_id: MediaId,
     pub ledgers: Vec<LedgerRow>,
 }
@@ -76,10 +87,12 @@ impl ProbeScenario {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
         let engine = Arc::new(FakeFingerprintEngine::new());
+        let clock = Arc::new(api::probe_manager::clock::FakeClock::new(1_000_000));
         let manager = Arc::new(ProbeManager::with_fingerprint_engine(
             store.clone(),
             engine.clone(),
         ));
+        manager.set_clock(clock.clone());
         manager.try_start_workers();
 
         let media_id = MediaId::new();
@@ -170,9 +183,32 @@ impl ProbeScenario {
             store,
             manager,
             engine,
+            clock,
             media_id,
             ledgers,
         }
+    }
+
+    pub fn set_time_ms(&self, now_ms: i64) {
+        self.clock.set(now_ms);
+    }
+
+    pub fn dispatch_due(&self) -> usize {
+        self.manager
+            .dispatch_due(self.clock.now_ms(), 32)
+            .unwrap()
+    }
+
+    pub fn reopen(&mut self) {
+        drop(std::mem::replace(
+            &mut self.manager,
+            Arc::new(ProbeManager::with_fingerprint_engine(
+                self.store.clone(),
+                self.engine.clone(),
+            )),
+        ));
+        self.manager.set_clock(self.clock.clone());
+        self.manager.try_start_workers();
     }
 
     pub fn missing_outro(&mut self, episode: u32) {
@@ -202,16 +238,34 @@ impl ProbeScenario {
         }
     }
 
-    pub fn metadata_reads(&self, _episode: u32) -> usize {
-        *self.engine.metadata_calls.lock()
+    pub fn metadata_reads(&self, episode: u32) -> usize {
+        self.engine.metadata_calls.lock().get(&episode).copied().unwrap_or(0)
     }
 
-    pub fn intro_reads(&self, _episode: u32) -> usize {
-        *self.engine.intro_calls.lock()
+    pub fn intro_reads(&self, episode: u32) -> usize {
+        self.engine.intro_calls.lock().get(&episode).copied().unwrap_or(0)
     }
 
-    pub fn outro_reads(&self, _episode: u32) -> usize {
-        *self.engine.outro_calls.lock()
+    pub fn outro_reads(&self, episode: u32) -> usize {
+        self.engine.outro_calls.lock().get(&episode).copied().unwrap_or(0)
+    }
+
+    pub fn set_intro_settings(&self, detect_intros: bool, enable_fingerprint: bool) {
+        let row = &self.ledgers[0];
+        let store = self.store.lock();
+        let library = store
+            .library_for_path(std::path::Path::new(&row.path), MediaKind::Tv)
+            .unwrap()
+            .unwrap();
+        store
+            .set_library_intro_settings(&library.id, detect_intros, enable_fingerprint)
+            .unwrap();
+    }
+
+    pub fn comparison_runs(&self) -> usize {
+        self.manager
+            .comparison_runs
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn fingerprint_job_status(&self, episode: u32) -> String {

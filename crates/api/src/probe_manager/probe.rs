@@ -727,7 +727,7 @@ pub(super) async fn probe_fingerprint_and_store_detailed(
         &job_id,
         &outcome.cache.cache_key,
         outcome.outro_error.as_deref(),
-        now_ms(),
+        mgr.clock.lock().now_ms(),
     );
     match outcome.outro_error {
         Some(error) => {

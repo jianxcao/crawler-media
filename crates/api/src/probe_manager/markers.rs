@@ -31,7 +31,16 @@ pub(super) fn compare_and_store_markers(
     mgr: &ProbeManager,
     unit: &ProbeUnit,
 ) -> Result<(), crate::store::StoreError> {
+    if !unit.overwrite_markers && season_input_unchanged(mgr, unit)? {
+        tracing::debug!(
+            media_id = %unit.row.media_id,
+            season = unit.row.season.unwrap_or(1),
+            "【片头片尾】声纹输入未变化，跳过整季比对"
+        );
+        return Ok(());
+    }
     let comparison = compare_season_fingerprints(mgr, unit)?;
+    let _ = remember_season_digest(mgr, unit);
     let season = unit.row.season.unwrap_or(1);
     if comparison.markers.is_empty() && !unit.overwrite_markers {
         tracing::warn!(
@@ -92,6 +101,44 @@ pub(super) fn compare_and_store_markers(
     Ok(())
 }
 
+fn season_input_unchanged(
+    mgr: &ProbeManager,
+    unit: &ProbeUnit,
+) -> Result<bool, crate::store::StoreError> {
+    let digest = season_digest(mgr, unit)?;
+    let stored = mgr.store.lock().season_comparison_digest(
+        &unit.row.media_id.to_string(),
+        unit.row.season.unwrap_or(1),
+    )?;
+    Ok(stored.as_deref() == Some(digest.as_str()))
+}
+
+fn remember_season_digest(
+    mgr: &ProbeManager,
+    unit: &ProbeUnit,
+) -> Result<(), crate::store::StoreError> {
+    let digest = season_digest(mgr, unit)?;
+    mgr.store.lock().save_season_comparison_digest(
+        &unit.row.media_id.to_string(),
+        unit.row.season.unwrap_or(1),
+        &digest,
+        mgr.clock.lock().now_ms(),
+    )
+}
+
+fn season_digest(mgr: &ProbeManager, unit: &ProbeUnit) -> Result<String, crate::store::StoreError> {
+    let samples = load_season_samples(mgr, unit)?;
+    let mut parts = Vec::new();
+    for (row, words) in &samples.intros {
+        parts.push(format!("i:{}:{}", row.id, words.len()));
+    }
+    for (row, words, offset) in &samples.outros {
+        parts.push(format!("o:{}:{}:{}", row.id, words.len(), offset));
+    }
+    parts.sort();
+    Ok(parts.join("|"))
+}
+
 pub(super) fn prepare_marker_replacement(
     mgr: &ProbeManager,
     unit: &ProbeUnit,
@@ -130,6 +177,8 @@ fn compare_season_fingerprints(
         .map(|(row, _, _)| row.episode.unwrap_or(1))
         .collect();
     let compare_started_at = Instant::now();
+    mgr.comparison_runs
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let markers = if samples.intros.len() >= 2 || samples.outros.len() >= 2 {
         crate::fingerprint_job::analyze_fingerprints_with_outro_engine(
             mgr.fingerprint_engine.as_ref(),

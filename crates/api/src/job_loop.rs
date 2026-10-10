@@ -21,6 +21,9 @@ pub fn spawn_job_loop_with(
     tokio::spawn(async move {
         loop {
             let now = read_clock(&clock);
+            if let Err(error) = state.probe.dispatch_due(now.saturating_mul(1000), 32) {
+                tracing::error!(%error, now, "【媒体探测】派发到期阶段失败");
+            }
             // tick 内 runner 会同步执行 worker（订阅搜索 → Indexer 抓 PT 站点，
             // 同步 ureq 阻塞 1-8s）。直接在 async 任务里跑会占满 tokio 工作
             // 线程，导致所有 HTTP 请求（含无锁的 /health）排队超时——
