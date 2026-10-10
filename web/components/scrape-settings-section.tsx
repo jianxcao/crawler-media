@@ -297,7 +297,7 @@ export function ScrapeSettingsSection() {
             <ToggleRow
               label="启用 TheIntroDB"
               hint="优先通过社区开源数据库匹配高精度片头与片尾起止时间（无需本地下载与计算，对 STRM 极佳）"
-              value={draft.theintrodb_enabled ?? true}
+              value={draft.theintrodb_enabled ?? false}
               onChange={(v) => set("theintrodb_enabled", v)}
             />
             <div className="mt-4 space-y-2">

@@ -516,6 +516,8 @@ function CreateLibraryDialog({
       generate_thumbnails: true,
       extract_chapter_images: true,
       exclude_from_home: kindExcludedFromHome(kind),
+      detect_intros: false,
+      enable_fingerprint: false,
       scrape_overrides: {},
       access_mode: accessMode,
       admin_visible: adminVisible,
@@ -1079,7 +1081,7 @@ function EditLibraryDialog({
   const [accessMode, setAccessMode] = useState<LibraryAccessMode>("everyone");
   const [adminVisible, setAdminVisible] = useState(true);
   const [memberIds, setMemberIds] = useState<string[]>([]);
-  const [detectIntros, setDetectIntros] = useState(library.detect_intros ?? true);
+  const [detectIntros, setDetectIntros] = useState(library.detect_intros ?? false);
   const [enableFingerprint, setEnableFingerprint] = useState(library.enable_fingerprint ?? false);
   const [defaultFilterId, setDefaultFilterId] = useState<string>(library.default_filter_id ?? "");
   const [ruleSets, setRuleSets] = useState<RuleSet[]>([]);

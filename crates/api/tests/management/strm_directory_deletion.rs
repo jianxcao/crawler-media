@@ -466,26 +466,44 @@ async fn restoring_one_episode_after_grace_requeues_probe() {
         &tracker,
         vec![fs_event(fixture.episode.clone())],
     );
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    let restored = fixture
-        .state
-        .store()
-        .lock()
-        .ledger_by_path(&fixture.episode.display().to_string())
-        .unwrap()
-        .expect("过期后恢复应重新入账");
+    let restored = wait_for_restored_ledger(&fixture);
     assert_ne!(restored.id, fixture.ledger_id, "重新入账必须使用新的台账");
-    assert!(
-        fixture
+    let probe = wait_for_probe_job(&fixture, &restored.id.to_string());
+    assert!(probe.is_some(), "重新入账后应创建媒体信息探测任务");
+}
+
+fn wait_for_probe_job(
+    fixture: &EpisodeFixture,
+    ledger_id: &str,
+) -> Option<store::ProbeJob> {
+    for _ in 0..50 {
+        if let Ok(Some(job)) = fixture
             .state
             .store()
             .lock()
-            .latest_probe_job_for_scope(&format!("ledger:{}", restored.id))
-            .unwrap()
-            .is_some(),
-        "重新入账后应创建媒体信息和声纹探测任务"
-    );
+            .latest_probe_job_for_scope(&format!("ledger:{ledger_id}"))
+        {
+            return Some(job);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    None
+}
+
+fn wait_for_restored_ledger(fixture: &EpisodeFixture) -> domain::LedgerRow {
+    for _ in 0..50 {
+        if let Ok(Some(row)) = fixture
+            .state
+            .store()
+            .lock()
+            .ledger_by_path(&fixture.episode.display().to_string())
+        {
+            return row;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("过期后恢复应重新入账");
 }
 
 struct EpisodeFixture {

@@ -92,7 +92,7 @@ async fn disabled_master_switch_blocks_fingerprint() {
     s.missing_outro(8);
     assert_eq!(
         s.request(8, ProbeRequestOrigin::Detail),
-        ProbeRequestResult::Disabled
+        ProbeRequestResult::Complete
     );
     assert_eq!(s.dispatch_due(), 0);
     assert_eq!(s.outro_reads(8), 0);

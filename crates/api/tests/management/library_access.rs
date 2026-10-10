@@ -99,7 +99,7 @@ async fn member_only_sees_visible_libraries() {
     assert_eq!(patched.status(), StatusCode::OK);
     let patched = json_body(patched).await;
     assert_eq!(patched["data"]["access_mode"], "selected");
-    assert_eq!(patched["data"]["detect_intros"], true);
+    assert_eq!(patched["data"]["detect_intros"], false);
     assert_eq!(patched["data"]["enable_fingerprint"], true);
     assert_eq!(patched["data"]["realtime_watch"], false);
     assert_eq!(patched["data"]["exclude_from_home"], true);

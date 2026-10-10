@@ -74,6 +74,11 @@ fn first_video_library_becomes_default_and_survives_reopen() {
         "首个 Video 库必须自动成为该类型的默认库"
     );
     assert_eq!(default_video.unwrap().id, video_lib.id);
+    assert!(
+        !video_lib.detect_intros,
+        "新建库默认关闭片头片尾识别"
+    );
+    assert!(!video_lib.enable_fingerprint, "新建库默认关闭声纹");
 
     // 重启 Store 必须成功
     drop(store);

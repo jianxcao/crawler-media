@@ -68,10 +68,6 @@ pub(super) fn assess_probe_need(
         .unwrap_or(MediaKind::Movie);
     let path = Path::new(&row.path);
     let fingerprint_enabled = is_fingerprint_enabled_for_path(store, path, kind);
-    let marker_enabled = is_marker_detection_enabled_for_path(store, path, kind);
-    if !marker_enabled && kind == MediaKind::Tv && origin != ProbeRequestOrigin::ManualRefresh {
-        return disabled(kind);
-    }
     let source_version = crate::fingerprint_job::current_source_version(path);
     let sample_duration_secs = store
         .get_scrape_config()
@@ -122,20 +118,6 @@ pub(super) fn assess_probe_need(
         source_version,
         sample_duration_secs,
         retry,
-    }
-}
-
-fn disabled(kind: MediaKind) -> ProbeNeed {
-    ProbeNeed {
-        kind,
-        fingerprint_enabled: false,
-        metadata_valid: false,
-        intro_missing: false,
-        outro_missing: false,
-        media_duration_ms: None,
-        source_version: String::new(),
-        sample_duration_secs: 0,
-        retry: ProbeRequestResult::Disabled,
     }
 }
 

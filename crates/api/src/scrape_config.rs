@@ -243,7 +243,7 @@ pub fn effective_of(setting: &ScrapeConfigSetting) -> EffectiveScrapeConfig {
         mirror_images: setting.mirror_images.unwrap_or(true),
         mirror_nfo: setting.mirror_nfo.unwrap_or(true),
         mirror_episode_thumbs: setting.mirror_episode_thumbs.unwrap_or(true),
-        theintrodb_enabled: setting.theintrodb_enabled.unwrap_or(true),
+        theintrodb_enabled: setting.theintrodb_enabled.unwrap_or(false),
         theintrodb_api_key: setting.theintrodb_api_key.clone(),
         fingerprint_duration_secs: setting
             .fingerprint_duration_secs

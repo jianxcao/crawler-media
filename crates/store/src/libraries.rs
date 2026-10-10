@@ -54,7 +54,7 @@ impl Store {
         let mut stmt = self.app.prepare(
             "SELECT id, kind, name, is_default, sort_order, access_mode,
                     admin_visible, member_ids_json,
-                    COALESCE(detect_intros, 1), COALESCE(enable_fingerprint, 0),
+                    COALESCE(detect_intros, 0), COALESCE(enable_fingerprint, 0),
                     cover_path, COALESCE(match_rules_json, '[]'), default_filter_id,
                     COALESCE(realtime_watch, 1), COALESCE(generate_thumbnails, 1),
                     COALESCE(extract_chapter_images, 1), COALESCE(exclude_from_home, 0),

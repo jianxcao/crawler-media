@@ -926,7 +926,7 @@ function libraryFrom(raw: unknown): MediaLibrary {
     member_ids: Array.isArray(r.member_ids) ? (r.member_ids as string[]) : [],
     match_rules: Array.isArray(r.match_rules) ? (r.match_rules as MatchRule[]) : [],
     default_filter_id: r.default_filter_id != null ? str(r.default_filter_id) : null,
-    detect_intros: r.detect_intros == null ? true : bool(r.detect_intros),
+    detect_intros: r.detect_intros == null ? false : bool(r.detect_intros),
     enable_fingerprint: r.enable_fingerprint == null ? false : bool(r.enable_fingerprint),
     realtime_watch: r.realtime_watch == null ? true : bool(r.realtime_watch),
     generate_thumbnails: r.generate_thumbnails == null ? true : bool(r.generate_thumbnails),

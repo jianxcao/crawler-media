@@ -189,7 +189,7 @@ mod tests {
             .default_library(MediaKind::Tv)
             .unwrap()
             .unwrap();
-        assert!(tv_library.detect_intros);
+        assert!(!tv_library.detect_intros);
         assert!(!tv_library.enable_fingerprint);
         let root = tv_library.root_paths.first().unwrap();
         let episode_path = root.join("Pantheon").join("Pantheon.S01E01.mkv");
@@ -258,7 +258,7 @@ mod tests {
         state
             .store
             .lock()
-            .set_library_intro_settings(&tv_library.id, false, true)
+            .set_library_intro_settings(&tv_library.id, true, true)
             .unwrap();
         let episode_path = tv_library.root_paths[0]
             .join("Pantheon")

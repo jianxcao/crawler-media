@@ -546,3 +546,45 @@ async fn delete_missing_rows_scoped_by_media_item_id() {
     let items_final = get(&app, &format!("/api/v1/libraries/{lib_id}/items")).await;
     assert_eq!(items_final["data"].as_array().unwrap().len(), 0);
 }
+
+#[tokio::test]
+async fn created_library_keeps_intro_and_fingerprint_off_until_edited() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+    let root = tmp.path().join("kids");
+    std::fs::create_dir_all(&root).unwrap();
+    let created = json_body(
+        app.clone()
+            .oneshot(request(
+                "POST",
+                "/api/v1/libraries",
+                Some("management-secret"),
+                json!({
+                    "name": "儿童剧",
+                    "kind": "tv",
+                    "root_paths": [root.display().to_string()],
+                }),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(created["data"]["detect_intros"], false);
+    assert_eq!(created["data"]["enable_fingerprint"], false);
+
+    let id = created["data"]["id"].as_str().unwrap();
+    let patched = json_body(
+        app.clone()
+            .oneshot(request(
+                "PATCH",
+                &format!("/api/v1/libraries/{id}"),
+                Some("management-secret"),
+                json!({ "detect_intros": true, "enable_fingerprint": true }),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(patched["data"]["detect_intros"], true);
+    assert_eq!(patched["data"]["enable_fingerprint"], true);
+}

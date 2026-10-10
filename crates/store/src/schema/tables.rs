@@ -83,7 +83,7 @@ pub(super) const APP_TABLES: &str = r#"
             access_mode TEXT NOT NULL DEFAULT 'everyone',
             admin_visible INTEGER NOT NULL DEFAULT 1,
             member_ids_json TEXT NOT NULL DEFAULT '[]',
-            detect_intros INTEGER NOT NULL DEFAULT 1,
+            detect_intros INTEGER NOT NULL DEFAULT 0,
             enable_fingerprint INTEGER NOT NULL DEFAULT 0,
             cover_path TEXT,
             match_rules_json TEXT NOT NULL DEFAULT '[]',

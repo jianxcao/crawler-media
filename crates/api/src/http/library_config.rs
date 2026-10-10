@@ -92,6 +92,11 @@ pub(crate) async fn create_library(
         Ok(library) => {
             let lib_id = library.id.clone();
             let _json_resp = library_json(&store, &library);
+            if let Err(error) =
+                store.set_library_intro_settings(&library.id, false, false)
+            {
+                tracing::warn!(%error, "保存新建媒体库片头片尾开关失败");
+            }
             if let Err(error) = store.set_library_switch_settings(
                 &library.id,
                 body.get("realtime_watch").and_then(|v| v.as_bool()),

@@ -232,7 +232,7 @@ pub(crate) async fn chapters(
         let store = state.store.lock();
         let cfg = store.get_scrape_config().ok();
         let eff = cfg.as_ref().map(|config| &config.effective);
-        let enabled = eff.map(|config| config.theintrodb_enabled).unwrap_or(true);
+        let enabled = eff.map(|config| config.theintrodb_enabled).unwrap_or(false);
         let key = eff.and_then(|config| config.theintrodb_api_key.clone());
         (enabled && key.is_some()).then(|| crate::theintrodb::TheIntroDbClient::new(key))
     };
@@ -314,7 +314,7 @@ pub(crate) async fn refresh_item_chapters(
         let store = state.store.lock();
         let cfg = store.get_scrape_config().ok();
         let eff = cfg.as_ref().map(|config| &config.effective);
-        let enabled = eff.map(|config| config.theintrodb_enabled).unwrap_or(true);
+        let enabled = eff.map(|config| config.theintrodb_enabled).unwrap_or(false);
         let key = eff.and_then(|config| config.theintrodb_api_key.clone());
         (enabled && key.is_some()).then(|| crate::theintrodb::TheIntroDbClient::new(key))
     };
@@ -557,7 +557,7 @@ pub(crate) async fn generate_chapters(
             let store = state.store.lock();
             let cfg = store.get_scrape_config().ok();
             let eff = cfg.as_ref().map(|config| &config.effective);
-            let enabled = eff.map(|config| config.theintrodb_enabled).unwrap_or(true);
+            let enabled = eff.map(|config| config.theintrodb_enabled).unwrap_or(false);
             let key = eff.and_then(|config| config.theintrodb_api_key.clone());
             (enabled && key.is_some()).then(|| crate::theintrodb::TheIntroDbClient::new(key))
         };
