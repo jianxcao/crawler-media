@@ -340,7 +340,96 @@ fn metadata_job_finishes_before_a_separate_voiceprint_job_is_queued() {
 }
 
 #[test]
-fn completed_marker_refresh_with_missing_ledger_becomes_failed_on_recovery() {
+fn interrupted_refresh_cancellation_is_completed_during_recovery() {
+    for has_pending_unit in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+        let media_id = MediaId::new();
+        let row = LedgerRow {
+            id: LedgerId::new(),
+            media_id,
+            path: tmp
+                .path()
+                .join("episode.mkv")
+                .to_string_lossy()
+                .into_owned(),
+            season: Some(1),
+            episode: Some(1),
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: QualitySource::Release,
+            confidence: Confidence::High,
+            filter_score: None,
+        };
+        std::fs::write(&row.path, b"dummy").unwrap();
+        store.lock().insert_ledger(&row).unwrap();
+        let ledger_id = row.id.to_string();
+        let mut specs = vec![crate::store::ProbeJobUnitSpec {
+            ledger_id: &ledger_id,
+            kind: "tv",
+            force_fingerprint: true,
+            reuse_fingerprint_cache: false,
+            overwrite_markers: true,
+            reuse_media_info_cache: true,
+        }];
+        if has_pending_unit {
+            specs.push(crate::store::ProbeJobUnitSpec {
+                ledger_id: "pending-ledger",
+                kind: "tv",
+                force_fingerprint: true,
+                reuse_fingerprint_cache: false,
+                overwrite_markers: true,
+                reuse_media_info_cache: true,
+            });
+        }
+        store
+            .lock()
+            .create_probe_job(
+                "interrupted-cancel",
+                "marker_refresh",
+                &media_id.to_string(),
+                Some(1),
+                "interrupted-cancel-scope",
+                &specs,
+            )
+            .unwrap();
+        store
+            .lock()
+            .cancel_probe_unit("interrupted-cancel", &ledger_id, "file_deleted")
+            .unwrap();
+
+        let manager = ProbeManager::new(store.clone());
+
+        let job = store
+            .lock()
+            .get_probe_job("interrupted-cancel")
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.status, "cancelled");
+        assert_eq!(job.completed, job.total);
+        assert_eq!(job.failed, 0);
+        assert!(!manager.is_queued(&ledger_id));
+        assert!(
+            store
+                .lock()
+                .active_probe_job_for_scope("interrupted-cancel-scope")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .lock()
+                .probe_job_units(&job.id)
+                .unwrap()
+                .iter()
+                .all(|unit| unit.status == "cancelled")
+        );
+    }
+}
+
+#[test]
+fn completed_marker_refresh_with_missing_ledger_is_cancelled_on_recovery() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
     let media_id = MediaId::new();
@@ -379,7 +468,8 @@ fn completed_marker_refresh_with_missing_ledger_becomes_failed_on_recovery() {
 
     let _restarted = ProbeManager::new(store.clone());
     let recovered = store.lock().get_probe_job(job_id).unwrap().unwrap();
-    assert_eq!(recovered.status, "failed");
+    assert_eq!(recovered.status, "cancelled");
+    assert_eq!(recovered.error.as_deref(), Some("file_deleted"));
     assert_eq!(recovered.completed, recovered.total);
     assert!(recovered.error.is_some());
     assert!(

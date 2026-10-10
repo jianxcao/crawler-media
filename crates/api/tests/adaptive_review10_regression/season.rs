@@ -1,170 +1,4 @@
-use api::probe_manager::{ProbeManager, ProbeUnit};
-use api::{ScrapeStoreExt, Store};
-use domain::{Confidence, LedgerId, LedgerRow, MediaId, MediaKind, QualitySource};
-use marker::fingerprint::{
-    CaptureFailure, CaptureMetrics, CaptureRequest, CapturedFingerprint, FingerprintCaptureEngine,
-};
-use marker::{CommonSegment, FingerprintEngine};
-use parking_lot::Mutex;
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
-
-struct FixtureEngine {
-    case: &'static str,
-    reads: Arc<AtomicUsize>,
-}
-
-fn intro_tag(case: &str, episode: u32) -> u32 {
-    if case == "blind-seeds" && [2, 4, 7].contains(&episode) {
-        1000 + episode
-    } else if case == "other-variant" && [2, 4, 7].contains(&episode) {
-        1000
-    } else {
-        100
-    }
-}
-
-impl FingerprintEngine for FixtureEngine {
-    fn extract_at(&self, _: &std::path::Path, _: u32, _: u32) -> Result<Vec<u32>, String> {
-        panic!("this reproduction must not use legacy media extraction")
-    }
-    fn find_common_segment(
-        &self,
-        first: &[u32],
-        second: &[u32],
-        _: f32,
-        _: f32,
-    ) -> Option<CommonSegment> {
-        if first.first() != second.first() {
-            return None;
-        }
-        Some(CommonSegment {
-            start1_sec: 10.0,
-            end1_sec: 70.0,
-            start2_sec: 10.0,
-            end2_sec: 70.0,
-            duration_sec: 60.0,
-            score: 1.0,
-        })
-    }
-    fn find_common_segments(
-        &self,
-        first: &[u32],
-        second: &[u32],
-        min: f32,
-        max: f32,
-    ) -> Vec<CommonSegment> {
-        self.find_common_segment(first, second, min, max)
-            .into_iter()
-            .collect()
-    }
-}
-
-impl FingerprintCaptureEngine for FixtureEngine {
-    fn capture_window(
-        &self,
-        request: &CaptureRequest,
-    ) -> Result<CapturedFingerprint, CaptureFailure> {
-        self.reads.fetch_add(1, Ordering::Relaxed);
-        let stem = request.path.file_stem().unwrap().to_str().unwrap();
-        let episode: u32 = stem.split('-').nth(1).unwrap().parse().unwrap();
-        let tag = if request.window.start_ms == 0 {
-            intro_tag(self.case, episode)
-        } else if self.case == "no-outro" && episode == 1 {
-            6000
-        } else {
-            5000
-        };
-        Ok(CapturedFingerprint {
-            window: request.window.clone(),
-            words: (tag..tag + 200).collect(),
-            pcm_duration_ms: Some(request.window.duration_ms()),
-            metrics: CaptureMetrics::default(),
-        })
-    }
-}
-
-struct Fixture {
-    _tmp: tempfile::TempDir,
-    store: Arc<Mutex<Store>>,
-    manager: ProbeManager,
-    media_id: MediaId,
-    units: Vec<ProbeUnit>,
-    engine: Arc<FixtureEngine>,
-}
-
-fn setup(case: &'static str, episodes: &[u32]) -> Fixture {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
-    let media_id = MediaId::new();
-    let engine = Arc::new(FixtureEngine {
-        case,
-        reads: Arc::new(AtomicUsize::new(0)),
-    });
-    let manager = ProbeManager::with_engines(store.clone(), engine.clone(), engine.clone());
-    let rows: Vec<_> = episodes
-        .iter()
-        .enumerate()
-        .map(|(index, &episode)| LedgerRow {
-            id: LedgerId::new(),
-            media_id,
-            path: tmp
-                .path()
-                .join(format!("episode-{episode}-version-{index}.mkv"))
-                .to_string_lossy()
-                .to_string(),
-            season: Some(1),
-            episode: Some(episode),
-            resolution: None,
-            codec: None,
-            hdr: None,
-            quality_source: QualitySource::Release,
-            confidence: Confidence::High,
-            filter_score: None,
-        })
-        .collect();
-    seed_store(&store, media_id, &rows);
-    let units = rows
-        .into_iter()
-        .map(|row| ProbeUnit {
-            row,
-            kind: MediaKind::Tv,
-            force_fingerprint: true,
-            reuse_fingerprint_cache: false,
-            overwrite_markers: true,
-            reuse_media_info_cache: true,
-            marker_refresh_id: Some(1),
-            job_id: Some("review9-job".into()),
-        })
-        .collect();
-    Fixture {
-        _tmp: tmp,
-        store,
-        manager,
-        media_id,
-        units,
-        engine,
-    }
-}
-
-fn try_run(f: &Fixture) -> Result<api::store::MarkerResultReplacement, String> {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(api::probe_manager::season::run_adaptive_season_pipeline(
-            &f.manager,
-            "review9-job",
-            f.media_id,
-            1,
-            &f.units,
-        ))
-}
-fn run(f: &Fixture) -> api::store::MarkerResultReplacement {
-    try_run(f).expect("the actual pipeline must succeed")
-}
+use super::*;
 
 #[test]
 fn control_uniform_season_publishes_all_markers() {
@@ -329,7 +163,10 @@ fn missing_duration_does_not_publish_a_successful_outro_deletion() {
         previous.outro_end_ms = Some(990_000);
         st.put_media_marker(&previous).unwrap();
     }
-    assert!(try_run(&f).is_err());
+    assert!(
+        try_run(&f).is_err(),
+        "unsampled outro must reject forced refresh"
+    );
     let after = f
         .store
         .lock()
@@ -414,78 +251,145 @@ fn another_common_variant_is_discovered_after_full_fallbacks() {
     );
 }
 
-fn seed_store(store: &Arc<Mutex<Store>>, media_id: MediaId, rows: &[LedgerRow]) {
-    let st = store.lock();
-    let mut config = st.get_scrape_config().unwrap().setting;
-    config.fingerprint_sampling_mode = Some("adaptive".into());
-    st.save_scrape_config(&config).unwrap();
-    st.insert_media(&domain::Media {
-        id: media_id,
-        kind: MediaKind::Tv,
-        title: "Review fixture".into(),
-        year: None,
-        original_title: None,
-        tmdb_id: None,
-        douban_id: None,
-        tvdb_id: None,
-        bangumi_id: None,
-        anilist_id: None,
-    })
-    .unwrap();
-    for row in rows {
-        std::fs::write(&row.path, b"dummy").unwrap();
-        st.insert_ledger(row).unwrap();
+#[test]
+fn new_variant_with_inconclusive_boundary_does_not_clear_old_intro() {
+    let f = setup("edge-variant", &[1, 2, 3, 4, 5, 6, 7, 8]);
+    assert!(try_run(&f).is_err());
+    let old = f
+        .store
+        .lock()
+        .get_media_marker(f.media_id, Some(1), Some(1))
+        .unwrap()
+        .unwrap();
+    assert_eq!(old.intro_start_ms, Some(10_000));
+    assert_eq!(old.source, "old");
+}
+
+#[test]
+fn two_versions_of_one_episode_do_not_merge_distinct_intro_models() {
+    let f = setup("mixed-versions", &[1, 2, 3, 1, 4]);
+    let replacement = run(&f);
+    println!(
+        "mixed versions markers={:?}",
+        replacement
+            .markers
+            .iter()
+            .map(|m| (m.episode, m.intro_start_ms))
+            .collect::<Vec<_>>()
+    );
+    let result = replacement.markers.iter().find(|m| m.episode == 4).unwrap();
+    assert_eq!(
+        result.intro_start_ms,
+        Some(10_000),
+        "E4 matches E1's second version and should have an independently supported model"
+    );
+}
+
+#[test]
+fn missing_duration_preserves_start_only_outro_marker() {
+    let f = setup("uniform", &[1, 2, 3]);
+    let first = &f.units[0].row;
+    {
+        let st = f.store.lock();
         st.put_file_meta_versioned(
-            &row.id.to_string(),
+            &first.id.to_string(),
             &library::Tracks {
                 video: Some(library::VideoTrack::default()),
                 audio: vec![],
                 subtitles: vec![],
             },
             Some(&api::fingerprint_job::current_source_version(
-                std::path::Path::new(&row.path),
+                std::path::Path::new(&first.path),
             )),
-            Some(1_000_000),
+            None,
         )
         .unwrap();
-        st.put_media_marker(&api::store::StoredMediaMarker {
-            media_id,
-            season: 1,
-            episode: row.episode.unwrap(),
-            intro_start_ms: Some(10_000),
-            intro_end_ms: Some(70_000),
-            outro_start_ms: None,
-            outro_end_ms: None,
-            source: "old".into(),
-            locked: false,
-            updated_at: 0,
-        })
-        .unwrap();
-    }
-    let keys: Vec<_> = rows.iter().map(|row| row.id.to_string()).collect();
-    let specs: Vec<_> = keys
-        .iter()
-        .map(|key| api::store::ProbeJobUnitSpec {
-            ledger_id: key,
-            kind: "tv",
-            force_fingerprint: true,
-            reuse_fingerprint_cache: false,
-            overwrite_markers: true,
-            reuse_media_info_cache: true,
-        })
-        .collect();
-    st.create_probe_job(
-        "review9-job",
-        "marker_refresh",
-        &media_id.to_string(),
-        Some(1),
-        "review9",
-        &specs,
-    )
-    .unwrap();
-    for key in &keys {
-        st.start_probe_unit("review9-job", key).unwrap();
-        st.finish_probe_unit("review9-job", key, true, None)
+        let mut previous = st
+            .get_media_marker(f.media_id, Some(1), Some(1))
+            .unwrap()
             .unwrap();
+        previous.outro_start_ms = Some(930_000);
+        previous.outro_end_ms = None;
+        st.put_media_marker(&previous).unwrap();
     }
+    assert!(
+        try_run(&f).is_err(),
+        "unsampled outro must reject forced refresh"
+    );
+    let after = f
+        .store
+        .lock()
+        .get_media_marker(f.media_id, Some(1), Some(1))
+        .unwrap()
+        .unwrap();
+    println!(
+        "unknown duration + start-only outro={:?}/{:?}",
+        after.outro_start_ms, after.outro_end_ms
+    );
+    assert_eq!(
+        after.outro_start_ms,
+        Some(930_000),
+        "unsampled valid credits start must be preserved"
+    );
+}
+
+#[test]
+fn conflicting_version_boundaries_do_not_publish_one_versions_range_for_both() {
+    let f = setup("version-conflict", &[1, 2, 3, 1]);
+    let result = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(api::probe_manager::season::run_adaptive_season_pipeline(
+            &f.manager,
+            "review9-job",
+            f.media_id,
+            1,
+            &f.units,
+        ));
+    let is_conflict = result
+        .as_ref()
+        .err()
+        .map(|e| e.contains("episode_version_conflict"))
+        .unwrap_or(false);
+    if let Ok(replacement) = result {
+        let ranges: Vec<_> = replacement
+            .chapter_updates
+            .iter()
+            .map(|(id, chs)| {
+                (
+                    id.clone(),
+                    chs.iter()
+                        .find(|c| c.marker_type == Some(marker::MarkerType::IntroStart))
+                        .map(|c| (c.start_ms, c.end_ms)),
+                )
+            })
+            .collect();
+        println!("conflicting ledger chapter intros={ranges:?}");
+        f.store
+            .lock()
+            .complete_marker_refresh("review9-job", &[replacement])
+            .unwrap();
+        let canonical = f
+            .store
+            .lock()
+            .get_media_marker(f.media_id, Some(1), Some(1))
+            .unwrap()
+            .unwrap();
+        println!(
+            "canonical E1 intro {:?}..{:?} job={}",
+            canonical.intro_start_ms,
+            canonical.intro_end_ms,
+            f.store
+                .lock()
+                .get_probe_job("review9-job")
+                .unwrap()
+                .unwrap()
+                .status
+        );
+    }
+    assert!(
+        is_conflict,
+        "different boundaries for one logical episode must fail atomically with episode_version_conflict"
+    );
 }

@@ -11,9 +11,10 @@ use marker::{
 
 use crate::store::StoredMediaMarker;
 
+pub mod adaptive;
 mod cache;
 mod cache_key;
-pub mod adaptive;
+pub(crate) mod source;
 
 pub use adaptive::{
     AdaptiveCaptureContext, CaptureGate, CapturePolicy, EpisodeCaptureRequest, EpisodeDetection,

@@ -104,11 +104,20 @@ impl Store {
     }
 
     pub fn delete_ledger_path(&self, path: &str) -> Result<(), StoreError> {
-        if let Ok(Some(row)) = self.ledger_by_path(path) {
-            let _ = self.delete_file_meta_by_ledger_id(&row.id.to_string());
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.library,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let ledger_id: Option<String> = tx
+            .query_row("SELECT id FROM ledger WHERE path = ?1", [path], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        if let Some(id) = ledger_id {
+            super::library::delete_file_meta_for_ledger(&tx, &id)?;
         }
-        self.library
-            .execute("DELETE FROM ledger WHERE path = ?1", params![path])?;
+        tx.execute("DELETE FROM ledger WHERE path = ?1", [path])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -196,10 +205,22 @@ impl Store {
     }
 
     pub fn delete_ledger_for_media(&self, media_id: domain::MediaId) -> Result<usize, StoreError> {
-        let changed = self.library.execute(
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.library,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let ids = tx
+            .prepare("SELECT id FROM ledger WHERE media_id = ?1")?
+            .query_map([media_id.to_string()], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for id in ids {
+            super::library::delete_file_meta_for_ledger(&tx, &id)?;
+        }
+        let changed = tx.execute(
             "DELETE FROM ledger WHERE media_id = ?1",
             params![media_id.to_string()],
         )?;
+        tx.commit()?;
         Ok(changed)
     }
 

@@ -1850,7 +1850,7 @@ export interface ProbeJobStatus {
   id: string;
   kind: string;
   season: number | null;
-  status: "queued" | "running" | "succeeded" | "failed";
+  status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
   total: number;
   completed: number;
   succeeded: number;

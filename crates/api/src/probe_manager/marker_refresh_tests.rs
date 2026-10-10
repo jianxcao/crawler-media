@@ -21,7 +21,11 @@ fn season_refresh_keeps_old_markers_until_success_then_clears_empty_result() {
     let make_row = |episode| LedgerRow {
         id: LedgerId::new(),
         media_id,
-        path: format!("Pantheon.S01E{episode:02}.mkv"),
+        path: tmp
+            .path()
+            .join(format!("Pantheon.S01E{episode:02}.mkv"))
+            .to_string_lossy()
+            .into_owned(),
         season: Some(1),
         episode: Some(episode),
         resolution: None,
@@ -33,57 +37,10 @@ fn season_refresh_keeps_old_markers_until_success_then_clears_empty_result() {
     };
     let rows = [make_row(1), make_row(2)];
     for row in &rows {
+        std::fs::write(&row.path, b"dummy").unwrap();
         store.lock().insert_ledger(row).unwrap();
     }
-    store
-        .lock()
-        .put_media_marker(&crate::store::StoredMediaMarker {
-            media_id,
-            season: 1,
-            episode: 1,
-            intro_start_ms: Some(111_000),
-            intro_end_ms: Some(222_000),
-            outro_start_ms: Some(1_000_000),
-            outro_end_ms: Some(1_050_000),
-            source: "old-result".into(),
-            locked: false,
-            updated_at: 0,
-        })
-        .unwrap();
-    let cached = vec![
-        marker::ChapterMarker {
-            start_ms: 0,
-            end_ms: 300_000,
-            title: Some("第一章".into()),
-            marker_type: None,
-            synthetic: false,
-        },
-        marker::ChapterMarker {
-            start_ms: 300_000,
-            end_ms: 600_000,
-            title: Some("第二章".into()),
-            marker_type: None,
-            synthetic: false,
-        },
-        marker::ChapterMarker {
-            start_ms: 111_000,
-            end_ms: 222_000,
-            title: Some("片头".into()),
-            marker_type: Some(marker::MarkerType::IntroStart),
-            synthetic: false,
-        },
-        marker::ChapterMarker {
-            start_ms: 1_000_000,
-            end_ms: 1_050_000,
-            title: Some("片尾".into()),
-            marker_type: Some(marker::MarkerType::CreditsStart),
-            synthetic: false,
-        },
-    ];
-    store
-        .lock()
-        .put_cached_chapters(&rows[0].id.to_string(), &cached)
-        .unwrap();
+    let cached = seed_old_refresh_result(&store.lock(), media_id, &rows[0].id.to_string());
 
     let manager = ProbeManager::new(store.clone());
     let units = rows
@@ -144,4 +101,58 @@ fn season_refresh_keeps_old_markers_until_success_then_clears_empty_result() {
             .status,
         "succeeded"
     );
+}
+
+fn seed_old_refresh_result(
+    store: &Store,
+    media_id: MediaId,
+    ledger_id: &str,
+) -> Vec<marker::ChapterMarker> {
+    store
+        .put_media_marker(&crate::store::StoredMediaMarker {
+            media_id,
+            season: 1,
+            episode: 1,
+            intro_start_ms: Some(111_000),
+            intro_end_ms: Some(222_000),
+            outro_start_ms: Some(1_000_000),
+            outro_end_ms: Some(1_050_000),
+            source: "old-result".into(),
+            locked: false,
+            updated_at: 0,
+        })
+        .unwrap();
+    let cached = vec![
+        marker::ChapterMarker {
+            start_ms: 0,
+            end_ms: 300_000,
+            title: Some("第一章".into()),
+            marker_type: None,
+            synthetic: false,
+        },
+        marker::ChapterMarker {
+            start_ms: 300_000,
+            end_ms: 600_000,
+            title: Some("第二章".into()),
+            marker_type: None,
+            synthetic: false,
+        },
+        marker::ChapterMarker {
+            start_ms: 111_000,
+            end_ms: 222_000,
+            title: Some("片头".into()),
+            marker_type: Some(marker::MarkerType::IntroStart),
+            synthetic: false,
+        },
+        marker::ChapterMarker {
+            start_ms: 1_000_000,
+            end_ms: 1_050_000,
+            title: Some("片尾".into()),
+            marker_type: Some(marker::MarkerType::CreditsStart),
+            synthetic: false,
+        },
+    ];
+    store.put_cached_chapters(ledger_id, &cached).unwrap();
+
+    cached
 }

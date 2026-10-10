@@ -283,12 +283,9 @@ impl Store {
     }
 
     pub fn delete_file_meta_by_ledger_id(&self, ledger_id: &str) -> Result<(), StoreError> {
-        self.library.execute(
-            "DELETE FROM file_meta WHERE ledger_id = ?1",
-            params![ledger_id],
-        )?;
-        self.delete_fingerprint_cache(ledger_id)?;
-        self.delete_fingerprint_samples_for_ledger(ledger_id)?;
+        let tx = self.library.unchecked_transaction()?;
+        delete_file_meta_for_ledger(&tx, ledger_id)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -433,4 +430,17 @@ impl Store {
         )?;
         Ok(())
     }
+}
+
+/// Remove all caches in the same transaction as ledger deletion when applicable.
+pub(crate) fn delete_file_meta_for_ledger(
+    tx: &rusqlite::Transaction<'_>,
+    ledger_id: &str,
+) -> Result<(), StoreError> {
+    tx.execute("DELETE FROM file_meta WHERE ledger_id = ?1", [ledger_id])?;
+    tx.execute(
+        "DELETE FROM fingerprint_cache WHERE ledger_id = ?1",
+        [ledger_id],
+    )?;
+    super::fingerprint_samples::delete_samples_for_ledger(tx, ledger_id)
 }

@@ -37,11 +37,14 @@ async fn run_metadata_worker(manager: Arc<ProbeManager>) {
         };
         let Some(unit) = unit else { break };
         let pending = MetadataStageGuard(manager.clone());
-        if !start_persisted_unit(&manager, &unit) {
+        if !source_ready(&manager, &unit) || !start_persisted_unit(&manager, &unit) {
             continue;
         }
         let outcome = probe::probe_metadata(&manager, &unit).await;
         drop(pending);
+        if !source_ready(&manager, &unit) {
+            continue;
+        }
         match outcome {
             probe::MetadataOutcome::Complete => manager.finish(&unit, true),
             probe::MetadataOutcome::Failed => manager.finish(&unit, false),
@@ -84,14 +87,7 @@ async fn run_fingerprint_worker(manager: Arc<ProbeManager>) {
         let Some(work) = work else { break };
         wait_for_metadata_idle(&manager).await;
 
-        let ledger_exists = manager
-            .store
-            .lock()
-            .get_ledger(&work.unit.row.id.to_string())
-            .map(|opt| opt.is_some())
-            .unwrap_or(true);
-        if !ledger_exists {
-            manager.cancel_unit(&work.unit, "file_deleted");
+        if !source_ready(&manager, &work.unit) {
             continue;
         }
 
@@ -99,7 +95,39 @@ async fn run_fingerprint_worker(manager: Arc<ProbeManager>) {
             continue;
         }
         let succeeded = probe::probe_fingerprint(&manager, &work).await;
-        manager.finish(&work.unit, succeeded);
+        if source_ready(&manager, &work.unit) {
+            manager.finish(&work.unit, succeeded);
+        }
+    }
+}
+
+fn source_ready(manager: &ProbeManager, unit: &ProbeUnit) -> bool {
+    if let Some(id) = &unit.job_id {
+        if manager
+            .store
+            .lock()
+            .get_probe_job(id)
+            .ok()
+            .flatten()
+            .is_some_and(|job| !job.is_active())
+        {
+            manager.seen.lock().remove(&unit.row.id.to_string());
+            return false;
+        }
+    }
+    let availability =
+        crate::fingerprint_job::source::ensure_source_available(&manager.store.lock(), &unit.row);
+    match availability {
+        Ok(()) => true,
+        Err(error) if crate::fingerprint_job::source::is_file_deleted(&error) => {
+            manager.cancel_unit(unit, "file_deleted");
+            false
+        }
+        Err(error) => {
+            tracing::error!(%error, ledger_id = %unit.row.id, "检查探测源文件失败");
+            manager.finish(unit, false);
+            false
+        }
     }
 }
 

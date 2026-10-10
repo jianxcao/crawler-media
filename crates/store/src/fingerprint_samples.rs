@@ -112,24 +112,30 @@ impl Store {
         Ok(rows)
     }
 
-    pub fn delete_fingerprint_samples_for_ledger(
-        &self,
-        ledger_id: &str,
-    ) -> Result<(), StoreError> {
+    pub fn delete_fingerprint_samples_for_ledger(&self, ledger_id: &str) -> Result<(), StoreError> {
         let tx = self.library.unchecked_transaction()?;
-        // First delete models that reference samples belonging to this ledger
-        tx.execute(
-            "DELETE FROM fingerprint_season_models
-             WHERE model_id IN (
-                 SELECT model_id FROM fingerprint_model_members WHERE ledger_id = ?1
-             )",
-            params![ledger_id],
-        )?;
-        tx.execute(
-            "DELETE FROM fingerprint_samples WHERE ledger_id = ?1",
-            params![ledger_id],
-        )?;
+        delete_samples_for_ledger(&tx, ledger_id)?;
         tx.commit()?;
         Ok(())
     }
+}
+
+// Also used inside the transaction that removes a ledger and its other caches.
+pub(crate) fn delete_samples_for_ledger(
+    tx: &rusqlite::Transaction<'_>,
+    ledger_id: &str,
+) -> Result<(), StoreError> {
+    // First delete models that reference samples belonging to this ledger
+    tx.execute(
+        "DELETE FROM fingerprint_season_models
+             WHERE model_id IN (
+                 SELECT model_id FROM fingerprint_model_members WHERE ledger_id = ?1
+             )",
+        params![ledger_id],
+    )?;
+    tx.execute(
+        "DELETE FROM fingerprint_samples WHERE ledger_id = ?1",
+        params![ledger_id],
+    )?;
+    Ok(())
 }

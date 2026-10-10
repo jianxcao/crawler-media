@@ -248,11 +248,7 @@ fn min_required_matches(model: &TemplateModel, target: &EpisodeEvidence) -> usiz
             && r.sample_id == target.sample_id
             && r.source_version == target.source_version
     });
-    if is_target_model_ref {
-        1
-    } else {
-        2
-    }
+    if is_target_model_ref { 1 } else { 2 }
 }
 
 struct MatchedCandidate {
@@ -267,18 +263,21 @@ fn build_candidates(
     target: &EpisodeEvidence,
     ref_matches: Vec<(String, u32, CommonSegment)>,
 ) -> Vec<MatchedCandidate> {
+    // Repeated file versions cannot affect cluster enumeration or its size cutoff.
+    let mut seen = std::collections::BTreeSet::new();
     ref_matches
         .into_iter()
-        .map(|(sid, ep, s)| {
+        .filter_map(|(sid, ep, s)| {
             let s_start = target.capture.window.start_ms + (s.start1_sec * 1000.0).round() as i64;
             let s_end = target.capture.window.start_ms + (s.end1_sec * 1000.0).round() as i64;
-            MatchedCandidate {
-                sample_id: sid,
-                episode: ep,
-                target_start: s_start,
-                target_end: s_end,
-                score: s.score,
-            }
+            seen.insert((ep, s_start, s_end, s.score.to_bits()))
+                .then_some(MatchedCandidate {
+                    sample_id: sid,
+                    episode: ep,
+                    target_start: s_start,
+                    target_end: s_end,
+                    score: s.score,
+                })
         })
         .collect()
 }
@@ -378,7 +377,14 @@ fn ensure_cluster_consensus_is_unambiguous(
 }
 
 fn average_score(cluster: &[&MatchedCandidate]) -> f64 {
-    cluster.iter().map(|c| c.score).sum::<f64>() / cluster.len() as f64
+    let mut scores = std::collections::BTreeMap::<u32, f64>::new();
+    for candidate in cluster {
+        scores
+            .entry(candidate.episode)
+            .and_modify(|score| *score = score.min(candidate.score))
+            .or_insert(candidate.score);
+    }
+    scores.values().sum::<f64>() / scores.len() as f64
 }
 
 /// Check coverage, template edge anchors and guard evidence around the matched interval.
@@ -404,7 +410,9 @@ fn validate_interval_evidence(
     let matched_duration = target_end - target_start;
 
     // Check template edge anchors
-    let anchor_ms = policy.template_edge_anchor_ms.min(model.expected_duration_ms / 2);
+    let anchor_ms = policy
+        .template_edge_anchor_ms
+        .min(model.expected_duration_ms / 2);
     if matched_duration < anchor_ms * 2 {
         return Err("matched_duration_shorter_than_edge_anchors".to_string());
     }

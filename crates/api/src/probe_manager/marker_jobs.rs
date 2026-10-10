@@ -23,6 +23,12 @@ pub(super) fn apply_marker_refresh(
             fail_job(mgr, job, "刷新任务中没有有效季信息");
             return;
         }
+        Err(crate::store::StoreError::Missing(reason))
+            if crate::fingerprint_job::source::is_file_deleted(&reason) =>
+        {
+            mgr.cancel_unit(unit, "file_deleted");
+            return;
+        }
         Err(error) => {
             fail_job(mgr, job, "读取刷新任务季信息失败");
             tracing::error!(%error, job_id = %job.id, "读取声纹刷新任务季信息失败");
@@ -42,16 +48,26 @@ pub(super) fn apply_marker_refresh(
     ) {
         Ok(replacements) => replacements,
         Err((season, error)) => {
+            if matches!(&error, crate::store::StoreError::Missing(reason) if crate::fingerprint_job::source::is_file_deleted(reason))
+            {
+                mgr.cancel_unit(unit, "file_deleted");
+                return;
+            }
             fail_job(mgr, job, "片头片尾标记准备失败");
             tracing::error!(%error, job_id = %job.id, %media_id, season, "【片头片尾】准备整条目刷新结果失败，旧标记保持可见");
             return;
         }
     };
-    if let Err(error) = mgr
+    let publication = mgr
         .store
         .lock()
-        .complete_marker_refresh(&job.id, &replacements)
-    {
+        .complete_marker_refresh_checked(&job.id, &replacements);
+    if let Err(error) = publication {
+        if matches!(&error, crate::store::StoreError::Missing(reason) if crate::fingerprint_job::source::is_file_deleted(reason))
+        {
+            mgr.cancel_unit(unit, "file_deleted");
+            return;
+        }
         fail_job(mgr, job, "片头片尾标记写入失败");
         tracing::error!(%error, job_id = %job.id, %media_id, seasons = ?seasons, "【片头片尾】多季原子写入失败，旧标记保持可见");
         return;
@@ -84,9 +100,6 @@ fn marker_refresh_seasons(
     mgr: &ProbeManager,
     job: &crate::store::ProbeJob,
 ) -> Result<Vec<u32>, crate::store::StoreError> {
-    if let Some(season) = job.season {
-        return Ok(vec![season]);
-    }
     let store = mgr.store.lock();
     let units = store.probe_job_units(&job.id)?;
     let mut seasons = HashSet::new();
@@ -94,8 +107,13 @@ fn marker_refresh_seasons(
         let row = store
             .get_ledger(&unit.ledger_id.replace('-', ""))?
             .ok_or_else(|| {
-                crate::store::StoreError::Missing(format!("ledger {}", unit.ledger_id))
+                crate::store::StoreError::Missing(format!(
+                    "file_deleted: ledger {}",
+                    unit.ledger_id
+                ))
             })?;
+        crate::fingerprint_job::source::ensure_source_available(&store, &row)
+            .map_err(crate::store::StoreError::Missing)?;
         seasons.insert(row.season.unwrap_or(1));
     }
     let mut seasons = seasons.into_iter().collect::<Vec<_>>();
@@ -132,46 +150,47 @@ fn prepare_season_replacements(
                 )
             })?;
 
-        let replacement = if sampling_mode == "adaptive" && tokio::runtime::Handle::try_current().is_ok() {
-            let season_units: Vec<ProbeUnit> = all_rows
-                .iter()
-                .filter(|r| r.media_id == media_id && r.season.unwrap_or(1) == *season)
-                .map(|r| {
-                    let mut u = unit.clone();
-                    u.row = r.clone();
-                    u.kind = MediaKind::Tv;
-                    u.force_fingerprint = true;
-                    u.overwrite_markers = true;
-                    u
-                })
-                .collect();
+        let replacement =
+            if sampling_mode == "adaptive" && tokio::runtime::Handle::try_current().is_ok() {
+                let season_units: Vec<ProbeUnit> = all_rows
+                    .iter()
+                    .filter(|r| r.media_id == media_id && r.season.unwrap_or(1) == *season)
+                    .map(|r| {
+                        let mut u = unit.clone();
+                        u.row = r.clone();
+                        u.kind = MediaKind::Tv;
+                        u.force_fingerprint = true;
+                        u.overwrite_markers = true;
+                        u
+                    })
+                    .collect();
 
-            let handle = tokio::runtime::Handle::current();
-            let job_id = job.id.clone();
-            let season_val = *season;
+                let handle = tokio::runtime::Handle::current();
+                let job_id = job.id.clone();
+                let season_val = *season;
 
-            tokio::task::block_in_place(|| {
-                handle.block_on(async {
-                    super::season::run_adaptive_season_pipeline(
-                        mgr,
-                        &job_id,
-                        media_id,
-                        season_val,
-                        &season_units,
-                    )
-                    .await
+                tokio::task::block_in_place(|| {
+                    handle.block_on(async {
+                        super::season::run_adaptive_season_pipeline(
+                            mgr,
+                            &job_id,
+                            media_id,
+                            season_val,
+                            &season_units,
+                        )
+                        .await
+                    })
                 })
-            })
-            .map_err(|e| (*season, crate::store::StoreError::Missing(e)))?
-        } else {
-            let mut anchor_unit = unit.clone();
-            anchor_unit.row = row;
-            anchor_unit.kind = MediaKind::Tv;
-            anchor_unit.force_fingerprint = true;
-            anchor_unit.overwrite_markers = true;
-            markers::prepare_marker_replacement(mgr, &anchor_unit)
-                .map_err(|error| (*season, error))?
-        };
+                .map_err(|e| (*season, crate::store::StoreError::Missing(e)))?
+            } else {
+                let mut anchor_unit = unit.clone();
+                anchor_unit.row = row;
+                anchor_unit.kind = MediaKind::Tv;
+                anchor_unit.force_fingerprint = true;
+                anchor_unit.overwrite_markers = true;
+                markers::prepare_marker_replacement(mgr, &anchor_unit)
+                    .map_err(|error| (*season, error))?
+            };
 
         tracing::info!(
             job_id = %job.id,

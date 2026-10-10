@@ -115,79 +115,9 @@ pub(super) async fn probe_fingerprint(mgr: &ProbeManager, work: &FingerprintWork
             .unwrap_or_else(|| "full_window".to_string())
     };
 
-    if sampling_mode == "adaptive" && unit.kind == domain::MediaKind::Tv {
-        if unit.marker_refresh_id.is_some() {
-            tracing::info!(
-                job_id = ?job_id,
-                media_id = %unit.row.media_id,
-                season = unit.row.season.unwrap_or(1),
-                episode = unit.row.episode.unwrap_or(1),
-                ledger_id = %unit.row.id,
-                "【自适应声纹】刷新任务由整季管道统一执行，单集单元跳过重复的旧全量采集"
-            );
-            return true;
-        }
-
-        let season = unit.row.season.unwrap_or(1);
-        let season_units: Vec<ProbeUnit> = {
-            let store = mgr.store.lock();
-            let rows = store.list_ledger().unwrap_or_default();
-            rows.into_iter()
-                .filter(|r| r.media_id == unit.row.media_id && r.season.unwrap_or(1) == season)
-                .map(|r| {
-                    let mut u = unit.clone();
-                    u.row = r;
-                    u
-                })
-                .collect()
-        };
-
-        if season_units.len() >= 2 {
-            let job_id_str = job_id.clone().unwrap_or_else(|| "adaptive-live".to_string());
-            tracing::info!(
-                job_id = ?job_id,
-                media_id = %unit.row.media_id,
-                season,
-                units = season_units.len(),
-                "【自适应声纹】检测到多集剧集，启动整季自适应采样流程"
-            );
-            match super::season::run_adaptive_season_pipeline(
-                mgr,
-                &job_id_str,
-                unit.row.media_id,
-                season,
-                &season_units,
-            )
-            .await
-            {
-                Ok(replacement) => {
-                    let chapter_updates_clone = replacement.chapter_updates.clone();
-                    let markers_len = replacement.markers.len();
-                    if let Err(e) = mgr.store.lock().replace_marker_results_batch(&[replacement]) {
-                        tracing::error!(error = %e, "自适应整季标记替换失败");
-                    } else {
-                        {
-                            let store = mgr.store.lock();
-                            crate::http::library_chapters::trigger_scene_frames_for_chapter_updates(
-                                &chapter_updates_clone,
-                                &store,
-                            );
-                        }
-                        tracing::info!(
-                            job_id = ?job_id,
-                            media_id = %unit.row.media_id,
-                            season,
-                            markers = markers_len,
-                            elapsed_ms = started_at.elapsed().as_millis() as u64,
-                            "【自适应声纹】整季自适应处理完成，标记和章节已原子替换并触发场景帧生成"
-                        );
-                        return true;
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!(error = %err, "自适应整季处理失败，回退到普通全窗口采集");
-                }
-            }
+    if sampling_mode == "adaptive" && unit.kind == MediaKind::Tv {
+        if let Some(result) = probe_adaptive_season(mgr, unit, started_at).await {
+            return result;
         }
     }
 
@@ -235,6 +165,128 @@ pub(super) async fn probe_fingerprint(mgr: &ProbeManager, work: &FingerprintWork
     true
 }
 
+async fn probe_adaptive_season(
+    mgr: &ProbeManager,
+    unit: &ProbeUnit,
+    started_at: Instant,
+) -> Option<bool> {
+    let job_id = unit.job_id.clone();
+    if unit.marker_refresh_id.is_some() {
+        tracing::info!(
+            job_id = ?job_id,
+            media_id = %unit.row.media_id,
+            season = unit.row.season.unwrap_or(1),
+            episode = unit.row.episode.unwrap_or(1),
+            ledger_id = %unit.row.id,
+            "【自适应声纹】刷新任务由整季管道统一执行，单集单元跳过重复的旧全量采集"
+        );
+        return Some(true);
+    }
+
+    let season = unit.row.season.unwrap_or(1);
+    let season_units: Vec<ProbeUnit> = {
+        let store = mgr.store.lock();
+        let rows = store.list_ledger().unwrap_or_default();
+        rows.into_iter()
+            .filter(|r| r.media_id == unit.row.media_id && r.season.unwrap_or(1) == season)
+            .map(|r| {
+                let mut u = unit.clone();
+                u.row = r;
+                u
+            })
+            .collect()
+    };
+
+    if season_units.len() >= 2 {
+        let job_id_str = job_id
+            .clone()
+            .unwrap_or_else(|| "adaptive-live".to_string());
+        tracing::info!(
+            job_id = ?job_id,
+            media_id = %unit.row.media_id,
+            season,
+            units = season_units.len(),
+            "【自适应声纹】检测到多集剧集，启动整季自适应采样流程"
+        );
+        match super::season::run_adaptive_season_pipeline(
+            mgr,
+            &job_id_str,
+            unit.row.media_id,
+            season,
+            &season_units,
+        )
+        .await
+        {
+            Ok(replacement) => {
+                let chapter_updates_clone = replacement.chapter_updates.clone();
+                let markers_len = replacement.markers.len();
+                let publication = mgr
+                    .store
+                    .lock()
+                    .replace_marker_results_batch_checked(&[replacement]);
+                if let Err(e) = publication {
+                    if matches!(&e, crate::store::StoreError::Missing(reason) if crate::fingerprint_job::source::is_file_deleted(reason))
+                    {
+                        mgr.cancel_unit(unit, "file_deleted");
+                        return Some(false);
+                    }
+                    tracing::error!(error = %e, "自适应整季标记替换失败");
+                } else {
+                    {
+                        let store = mgr.store.lock();
+                        crate::http::library_chapters::trigger_scene_frames_for_chapter_updates(
+                            &chapter_updates_clone,
+                            &store,
+                        );
+                    }
+                    tracing::info!(
+                        job_id = ?job_id,
+                        media_id = %unit.row.media_id,
+                        season,
+                        markers = markers_len,
+                        elapsed_ms = started_at.elapsed().as_millis() as u64,
+                        "【自适应声纹】整季自适应处理完成，标记和章节已原子替换并触发场景帧生成"
+                    );
+                    return Some(true);
+                }
+            }
+            Err(err) => {
+                if crate::fingerprint_job::source::is_file_deleted(&err) {
+                    mgr.cancel_unit(unit, "file_deleted");
+                    return Some(false);
+                }
+                tracing::warn!(error = %err, "自适应整季处理失败，回退到普通全窗口采集");
+            }
+        }
+    }
+    None
+}
+
+fn reusable_media_duration(
+    mgr: &ProbeManager,
+    ledger_id: &str,
+    source_version: &str,
+) -> Option<i64> {
+    let store = mgr.store.lock();
+    let cached_version = store.get_media_info_cache_version(&ledger_id);
+    let cached_tracks = store.get_file_meta(&ledger_id);
+    match (cached_version, cached_tracks) {
+        (Ok(Some(version)), Ok(Some(_)))
+            if version.source_version == source_version
+                && version
+                    .format_duration_ms
+                    .is_some_and(|duration| duration > 0) =>
+        {
+            version.format_duration_ms
+        }
+        (Err(error), _) | (_, Err(error)) => {
+            tracing::warn!(%error, ledger_id, "【媒体信息】读取版本缓存失败，回退到重新探测");
+            None
+        }
+        _ => None,
+    }
+}
+
 async fn probe_tracks_and_store(
     mgr: &ProbeManager,
     unit: &ProbeUnit,
@@ -253,26 +305,7 @@ async fn probe_tracks_and_store(
         "【媒体信息】流信息探测开始"
     );
     if unit.reuse_media_info_cache {
-        let cached = {
-            let store = mgr.store.lock();
-            let cached_version = store.get_media_info_cache_version(&ledger_id);
-            let cached_tracks = store.get_file_meta(&ledger_id);
-            match (cached_version, cached_tracks) {
-                (Ok(Some(version)), Ok(Some(_)))
-                    if version.source_version == source_version
-                        && version
-                            .format_duration_ms
-                            .is_some_and(|duration| duration > 0) =>
-                {
-                    Some(version.format_duration_ms)
-                }
-                (Err(error), _) | (_, Err(error)) => {
-                    tracing::warn!(%error, ledger_id, "【媒体信息】读取版本缓存失败，回退到重新探测");
-                    None
-                }
-                _ => None,
-            }
-        };
+        let cached = reusable_media_duration(mgr, &ledger_id, source_version);
         if let Some(duration_ms) = cached {
             mgr.timings
                 .record_media_info(unit.job_id.as_deref(), 0, true);
@@ -286,81 +319,12 @@ async fn probe_tracks_and_store(
                 elapsed_ms = started_at.elapsed().as_millis() as u64,
                 "【媒体信息】版本未变化，复用已缓存流信息和媒体时长"
             );
-            return Ok(duration_ms);
+            return Ok(Some(duration_ms));
         }
     }
-    let tracks_path = path.clone();
-    let nfo_path = path.with_extension("nfo");
-    let media_id = unit.row.media_id;
-    let season = unit.row.season.unwrap_or(1);
-    let episode = unit.row.episode.unwrap_or(1);
-    let probe_ledger_id = ledger_id.clone();
-    let probe_started_at = started_at;
+    let probe_unit = unit.clone();
     let tracks_result =
-        tokio::task::spawn_blocking(move || {
-            match library::probe_tracks_and_duration(&tracks_path) {
-                Ok((tracks, duration_ms)) => {
-                    let has_streams = tracks.video.is_some()
-                        || !tracks.audio.is_empty()
-                        || !tracks.subtitles.is_empty();
-                    if has_streams {
-                        if let Err(error) = library::write_streamdetails_into_nfo(
-                            &nfo_path,
-                            tracks.video.as_ref(),
-                            &tracks.audio,
-                            &tracks.subtitles,
-                        ) {
-                            tracing::warn!(
-                                media_id = %media_id,
-                                season,
-                                episode,
-                                ledger_id = %probe_ledger_id,
-                                path = %tracks_path.display(),
-                                nfo_path = %nfo_path.display(),
-                                error = %error,
-                                elapsed_ms = probe_started_at.elapsed().as_millis() as u64,
-                                "【媒体信息】写入 NFO 流信息失败"
-                            );
-                        } else {
-                            tracing::debug!(
-                                media_id = %media_id,
-                                season,
-                                episode,
-                                ledger_id = %probe_ledger_id,
-                                nfo_path = %nfo_path.display(),
-                                elapsed_ms = probe_started_at.elapsed().as_millis() as u64,
-                                "【媒体信息】NFO 流信息写入完成或无需更新"
-                            );
-                        }
-                    } else {
-                        tracing::warn!(
-                            media_id = %media_id,
-                            season,
-                            episode,
-                            ledger_id = %probe_ledger_id,
-                            path = %tracks_path.display(),
-                            elapsed_ms = probe_started_at.elapsed().as_millis() as u64,
-                            "【媒体信息】探测成功但没有发现视频、音轨或字幕流"
-                        );
-                    }
-                    Some((tracks, duration_ms))
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        media_id = %media_id,
-                        season,
-                        episode,
-                        ledger_id = %probe_ledger_id,
-                        path = %tracks_path.display(),
-                        error = %error,
-                        elapsed_ms = probe_started_at.elapsed().as_millis() as u64,
-                        "【媒体探测】探测失败（文件不可达 / 远程超时），稍后重试"
-                    );
-                    None
-                }
-            }
-        })
-        .await;
+        tokio::task::spawn_blocking(move || read_tracks_with_nfo(&probe_unit, started_at)).await;
     let tracks = match tracks_result {
         Ok(Some(tracks_and_duration)) => tracks_and_duration,
         Ok(None) => {
@@ -408,21 +372,7 @@ async fn probe_tracks_and_store(
         );
         return Err(());
     }
-    // 探测得到真实主视频流后，顺带回写更新 ledger 行的 resolution, codec, hdr，保证台账与缓存一致
-    if let Some(video) = tracks.video.as_ref() {
-        let probed_res = video.resolution();
-        let probed_codec = video.codec.as_deref();
-        let probed_hdr = video.hdr();
-        if probed_res.is_some() || probed_codec.is_some() || probed_hdr.is_some() {
-            let store = mgr.store.lock();
-            let _ = store.update_ledger_probe_quality(
-                &ledger_id,
-                probed_res.as_deref(),
-                probed_codec,
-                probed_hdr.as_deref(),
-            );
-        }
-    }
+    update_ledger_quality(mgr, &ledger_id, &tracks);
     tracing::info!(
         media_id = %unit.row.media_id,
         season = unit.row.season.unwrap_or(1),
@@ -443,6 +393,78 @@ async fn probe_tracks_and_store(
         false,
     );
     Ok(duration_ms)
+}
+
+fn read_tracks_with_nfo(
+    unit: &ProbeUnit,
+    probe_started_at: Instant,
+) -> Option<(library::Tracks, Option<i64>)> {
+    let tracks_path = PathBuf::from(&unit.row.path);
+    let nfo_path = tracks_path.with_extension("nfo");
+    let media_id = unit.row.media_id;
+    let season = unit.row.season.unwrap_or(1);
+    let episode = unit.row.episode.unwrap_or(1);
+    let probe_ledger_id = unit.row.id.to_string();
+    match library::probe_tracks_and_duration(&tracks_path) {
+        Ok((tracks, duration_ms)) => {
+            let has_streams =
+                tracks.video.is_some() || !tracks.audio.is_empty() || !tracks.subtitles.is_empty();
+            if has_streams {
+                if let Err(error) = library::write_streamdetails_into_nfo(
+                    &nfo_path,
+                    tracks.video.as_ref(),
+                    &tracks.audio,
+                    &tracks.subtitles,
+                ) {
+                    tracing::warn!(
+                        media_id = %media_id,
+                        season,
+                        episode,
+                        ledger_id = %probe_ledger_id,
+                        path = %tracks_path.display(),
+                        nfo_path = %nfo_path.display(),
+                        error = %error,
+                        elapsed_ms = probe_started_at.elapsed().as_millis() as u64,
+                        "【媒体信息】写入 NFO 流信息失败"
+                    );
+                } else {
+                    tracing::debug!(
+                        media_id = %media_id,
+                        season,
+                        episode,
+                        ledger_id = %probe_ledger_id,
+                        nfo_path = %nfo_path.display(),
+                        elapsed_ms = probe_started_at.elapsed().as_millis() as u64,
+                        "【媒体信息】NFO 流信息写入完成或无需更新"
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    media_id = %media_id,
+                    season,
+                    episode,
+                    ledger_id = %probe_ledger_id,
+                    path = %tracks_path.display(),
+                    elapsed_ms = probe_started_at.elapsed().as_millis() as u64,
+                    "【媒体信息】探测成功但没有发现视频、音轨或字幕流"
+                );
+            }
+            Some((tracks, duration_ms))
+        }
+        Err(error) => {
+            tracing::warn!(
+                media_id = %media_id,
+                season,
+                episode,
+                ledger_id = %probe_ledger_id,
+                path = %tracks_path.display(),
+                error = %error,
+                elapsed_ms = probe_started_at.elapsed().as_millis() as u64,
+                "【媒体探测】探测失败（文件不可达 / 远程超时），稍后重试"
+            );
+            None
+        }
+    }
 }
 
 pub(super) fn fingerprint_duration(
@@ -560,4 +582,22 @@ async fn probe_fingerprint_and_store(
         return !require_complete_markers;
     }
     true
+}
+
+fn update_ledger_quality(mgr: &ProbeManager, ledger_id: &str, tracks: &library::Tracks) {
+    // 探测得到真实主视频流后，顺带回写更新 ledger 行的 resolution, codec, hdr，保证台账与缓存一致
+    if let Some(video) = tracks.video.as_ref() {
+        let probed_res = video.resolution();
+        let probed_codec = video.codec.as_deref();
+        let probed_hdr = video.hdr();
+        if probed_res.is_some() || probed_codec.is_some() || probed_hdr.is_some() {
+            let store = mgr.store.lock();
+            let _ = store.update_ledger_probe_quality(
+                &ledger_id,
+                probed_res.as_deref(),
+                probed_codec,
+                probed_hdr.as_deref(),
+            );
+        }
+    }
 }

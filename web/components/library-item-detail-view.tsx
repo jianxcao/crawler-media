@@ -351,7 +351,7 @@ export function LibraryItemDetailView({
           const wasActive = observedActive.delete(season);
           const selected = selectedSeriesEpisode;
           if (
-            (wasActive || status.job?.status === "succeeded" || status.job?.status === "failed")
+            (wasActive || status.job?.status === "succeeded" || status.job?.status === "failed" || status.job?.status === "cancelled")
             && selected?.seasonNumber === season
           ) {
             const target = {
@@ -681,6 +681,11 @@ export function LibraryItemDetailView({
                 setChapters(updated);
                 chapterRefreshTimer.current = null;
                 toast.success("片头片尾任务已完成，章节结果已更新");
+                return;
+              }
+              if (latest.job?.status === "cancelled") {
+                chapterRefreshTimer.current = null;
+                toast.info("源文件已删除，片头片尾任务已取消，原有结果已保留");
                 return;
               }
               if (latest.job?.status === "failed") {

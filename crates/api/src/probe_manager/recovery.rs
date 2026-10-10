@@ -1,5 +1,5 @@
-use std::sync::atomic::Ordering;
 use domain::MediaKind;
+use std::sync::atomic::Ordering;
 
 use super::{ProbeManager, ProbeUnit};
 
@@ -22,71 +22,23 @@ impl ProbeManager {
                 total = job.total,
                 "【探测任务】从数据库恢复未完成任务"
             );
-            for persisted in units.iter().filter(|unit| unit.status == "queued") {
-                let row = self
-                    .store
-                    .lock()
-                    .get_ledger(&persisted.ledger_id.replace('-', ""));
-                let row = match row {
-                    Ok(Some(row)) => row,
-                    Ok(None) => {
-                        let _ = self.store.lock().finish_probe_unit(
-                            &job.id,
-                            &persisted.ledger_id,
-                            false,
-                            Some("媒体台账不存在，无法恢复探测"),
-                        );
-                        continue;
-                    }
-                    Err(error) => {
-                        tracing::error!(%error, job_id = %job.id, ledger_id = %persisted.ledger_id, "恢复探测任务读取台账失败");
-                        if let Err(finish_error) = self.store.lock().finish_probe_unit(
-                            &job.id,
-                            &persisted.ledger_id,
-                            false,
-                            Some("恢复任务时读取媒体台账失败"),
-                        ) {
-                            tracing::error!(%finish_error, job_id = %job.id, ledger_id = %persisted.ledger_id, "持久化恢复失败的任务单元失败");
-                        }
-                        continue;
-                    }
-                };
-                let kind = match persisted.kind.parse::<MediaKind>() {
-                    Ok(kind) => kind,
-                    Err(kind) => {
-                        tracing::error!(job_id = %job.id, ledger_id = %persisted.ledger_id, %kind, "恢复探测任务媒体类型无效");
-                        let _ = self.store.lock().finish_probe_unit(
-                            &job.id,
-                            &persisted.ledger_id,
-                            false,
-                            Some("恢复任务时媒体类型无效"),
-                        );
-                        continue;
-                    }
-                };
-                self.seen.lock().insert(persisted.ledger_id.clone());
-                let unit = ProbeUnit {
-                    row,
-                    kind,
-                    force_fingerprint: persisted.force_fingerprint,
-                    reuse_fingerprint_cache: persisted.reuse_fingerprint_cache,
-                    overwrite_markers: persisted.overwrite_markers,
-                    reuse_media_info_cache: persisted.reuse_media_info_cache,
-                    marker_refresh_id: (job.kind == "marker_refresh")
-                        .then(|| self.next_marker_refresh_id.fetch_add(1, Ordering::Relaxed)),
-                    job_id: Some(job.id.clone()),
-                };
-                if self.queue_metadata(unit).is_err() {
-                    self.seen.lock().remove(&persisted.ledger_id);
-                    tracing::error!(job_id = %job.id, ledger_id = %persisted.ledger_id, "恢复探测任务加入队列失败");
-                    let _ = self.store.lock().finish_probe_unit(
-                        &job.id,
-                        &persisted.ledger_id,
-                        false,
-                        Some("恢复任务加入内存队列失败"),
-                    );
+            // A crash may occur after the unit cancellation commits and before the
+            // parent job cancellation. An atomic refresh must never resume that batch.
+            if job.kind == "marker_refresh" && units.iter().any(|unit| unit.status == "cancelled") {
+                let reason = units
+                    .iter()
+                    .find(|unit| unit.status == "cancelled")
+                    .and_then(|unit| unit.error.as_deref())
+                    .unwrap_or("file_deleted");
+                match self.store.lock().cancel_probe_job(&job.id, reason) {
+                    Ok(()) => tracing::info!(job_id = %job.id, reason,
+                        "恢复已中止的原子刷新，释放任务范围"),
+                    Err(error) => tracing::error!(%error, job_id = %job.id,
+                        "恢复原子刷新取消状态失败"),
                 }
+                continue;
             }
+            self.recover_job_units(&job, &units);
             let refreshed = self.store.lock().get_probe_job(&job.id);
             let refreshed = match refreshed {
                 Ok(Some(refreshed)) => refreshed,
@@ -132,6 +84,17 @@ impl ProbeManager {
                                 .lock()
                                 .push((refreshed, unit));
                         }
+                        Err(crate::store::StoreError::Missing(reason))
+                            if crate::fingerprint_job::source::is_file_deleted(&reason) =>
+                        {
+                            if let Err(error) =
+                                self.store.lock().cancel_probe_job(&job.id, "file_deleted")
+                            {
+                                tracing::error!(%error, job_id = %job.id, "恢复时持久化任务取消状态失败");
+                            } else {
+                                tracing::info!(job_id = %job.id, reason = "file_deleted", "源文件已删除，取消待发布的刷新任务");
+                            }
+                        }
                         Err(error) => {
                             if let Err(finish_error) = self.store.lock().finish_probe_job(
                                 &job.id,
@@ -146,6 +109,96 @@ impl ProbeManager {
                 } else if let Err(error) = self.store.lock().finish_probe_job(&job.id, true, None) {
                     tracing::error!(%error, job_id = %job.id, "持久化恢复任务的成功状态失败");
                 }
+            }
+        }
+    }
+
+    fn recover_job_units(
+        &self,
+        job: &crate::store::ProbeJob,
+        units: &[crate::store::ProbeJobUnit],
+    ) {
+        for persisted in units.iter().filter(|unit| unit.status == "queued") {
+            if self
+                .store
+                .lock()
+                .get_probe_job(&job.id)
+                .ok()
+                .flatten()
+                .is_some_and(|job| !job.is_active())
+            {
+                break;
+            }
+            let row = self
+                .store
+                .lock()
+                .get_ledger(&persisted.ledger_id.replace('-', ""));
+            let row = match row {
+                Ok(Some(row)) => row,
+                Ok(None) => {
+                    let result = {
+                        let store = self.store.lock();
+                        store
+                            .cancel_probe_unit(&job.id, &persisted.ledger_id, "file_deleted")
+                            .and_then(|(_, _, all_done)| {
+                                if job.kind == "marker_refresh" || all_done {
+                                    store.cancel_probe_job(&job.id, "file_deleted")?;
+                                }
+                                Ok(())
+                            })
+                    };
+                    if let Err(error) = result {
+                        tracing::error!(%error, job_id = %job.id, "恢复时取消已删除文件任务失败");
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    tracing::error!(%error, job_id = %job.id, ledger_id = %persisted.ledger_id, "恢复探测任务读取台账失败");
+                    if let Err(finish_error) = self.store.lock().finish_probe_unit(
+                        &job.id,
+                        &persisted.ledger_id,
+                        false,
+                        Some("恢复任务时读取媒体台账失败"),
+                    ) {
+                        tracing::error!(%finish_error, job_id = %job.id, ledger_id = %persisted.ledger_id, "持久化恢复失败的任务单元失败");
+                    }
+                    continue;
+                }
+            };
+            let kind = match persisted.kind.parse::<MediaKind>() {
+                Ok(kind) => kind,
+                Err(kind) => {
+                    tracing::error!(job_id = %job.id, ledger_id = %persisted.ledger_id, %kind, "恢复探测任务媒体类型无效");
+                    let _ = self.store.lock().finish_probe_unit(
+                        &job.id,
+                        &persisted.ledger_id,
+                        false,
+                        Some("恢复任务时媒体类型无效"),
+                    );
+                    continue;
+                }
+            };
+            self.seen.lock().insert(persisted.ledger_id.clone());
+            let unit = ProbeUnit {
+                row,
+                kind,
+                force_fingerprint: persisted.force_fingerprint,
+                reuse_fingerprint_cache: persisted.reuse_fingerprint_cache,
+                overwrite_markers: persisted.overwrite_markers,
+                reuse_media_info_cache: persisted.reuse_media_info_cache,
+                marker_refresh_id: (job.kind == "marker_refresh")
+                    .then(|| self.next_marker_refresh_id.fetch_add(1, Ordering::Relaxed)),
+                job_id: Some(job.id.clone()),
+            };
+            if self.queue_metadata(unit).is_err() {
+                self.seen.lock().remove(&persisted.ledger_id);
+                tracing::error!(job_id = %job.id, ledger_id = %persisted.ledger_id, "恢复探测任务加入队列失败");
+                let _ = self.store.lock().finish_probe_unit(
+                    &job.id,
+                    &persisted.ledger_id,
+                    false,
+                    Some("恢复任务加入内存队列失败"),
+                );
             }
         }
     }
@@ -165,7 +218,10 @@ impl ProbeManager {
         let row = store
             .get_ledger(&persisted.ledger_id.replace('-', ""))?
             .ok_or_else(|| {
-                crate::store::StoreError::Missing(format!("ledger {}", persisted.ledger_id))
+                crate::store::StoreError::Missing(format!(
+                    "file_deleted: ledger {}",
+                    persisted.ledger_id
+                ))
             })?;
         let kind = persisted
             .kind
@@ -178,9 +234,8 @@ impl ProbeManager {
             reuse_fingerprint_cache: persisted.reuse_fingerprint_cache,
             overwrite_markers: persisted.overwrite_markers,
             reuse_media_info_cache: persisted.reuse_media_info_cache,
-            marker_refresh_id: None,
+            marker_refresh_id: Some(self.next_marker_refresh_id.fetch_add(1, Ordering::Relaxed)),
             job_id: Some(job.id.clone()),
         })
     }
 }
-

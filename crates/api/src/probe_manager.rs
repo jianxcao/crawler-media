@@ -70,7 +70,11 @@ pub struct ProbeManager {
 
 impl ProbeManager {
     pub fn new(store: Arc<Mutex<Store>>) -> Self {
-        Self::with_engines(store, Arc::new(ChromaprintEngine), Arc::new(ChromaprintEngine))
+        Self::with_engines(
+            store,
+            Arc::new(ChromaprintEngine),
+            Arc::new(ChromaprintEngine),
+        )
     }
 
     pub fn with_fingerprint_engine(
@@ -410,6 +414,15 @@ impl ProbeManager {
 
     fn finish(&self, unit: &ProbeUnit, succeeded: bool) {
         let ledger_id = unit.row.id.to_string();
+        let cancelled = unit
+            .job_id
+            .as_deref()
+            .and_then(|id| self.store.lock().get_probe_job(id).ok().flatten())
+            .is_some_and(|job| job.status == "cancelled");
+        if cancelled {
+            self.seen.lock().remove(&ledger_id);
+            return;
+        }
         self.finish_persisted_unit(unit, succeeded);
         self.seen.lock().remove(&ledger_id);
         if !succeeded {
@@ -419,37 +432,38 @@ impl ProbeManager {
 
     pub(crate) fn cancel_unit(&self, unit: &ProbeUnit, reason: &str) {
         let ledger_id = unit.row.id.to_string();
-        let Some(job_id) = unit.job_id.as_deref() else {
-            self.seen.lock().remove(&ledger_id);
-            return;
-        };
-        let result = self.store.lock().cancel_probe_unit(job_id, &ledger_id, reason);
         self.seen.lock().remove(&ledger_id);
-        let (job, accepted, all_done) = match result {
-            Ok(result) => result,
-            Err(error) => {
-                tracing::error!(%error, ledger_id, job_id, "持久化探测任务取消状态失败");
-                return;
-            }
-        };
-        if !accepted {
+        let Some(job_id) = unit.job_id.as_deref() else {
             return;
-        }
-        tracing::info!(
-            job_id = %job.id,
-            media_id = %job.media_id,
-            season = job.season.unwrap_or(1),
-            episode = unit.row.episode.unwrap_or(1),
-            reason,
-            "【媒体探测】任务单元已取消"
-        );
-        if all_done {
-            let succeeded = job.failed == 0;
-            let _ = self.store.lock().finish_probe_job(
-                &job.id,
-                succeeded,
-                if succeeded { None } else { job.error.as_deref().or(Some("一个或多个探测单元失败")) },
-            );
+        };
+        let result = {
+            let store = self.store.lock();
+            store
+                .cancel_probe_unit(job_id, &ledger_id, reason)
+                .and_then(|(job, _, all_done)| {
+                    // A refresh is published atomically; membership changes cancel the entire batch.
+                    if job.kind == "marker_refresh" || all_done {
+                        store.cancel_probe_job(job_id, reason)?;
+                    }
+                    store.get_probe_job(job_id)
+                })
+        };
+        match result {
+            Ok(Some(job)) => {
+                if !job.is_active() {
+                    if let Ok(units) = self.store.lock().probe_job_units(job_id) {
+                        let mut seen = self.seen.lock();
+                        for pending in units {
+                            seen.remove(&pending.ledger_id);
+                        }
+                    }
+                    timings::log_terminal_job(&self.store, &self.timings, &job);
+                }
+                tracing::info!(job_id, ledger_id, reason, status = %job.status,
+                    elapsed_ms = job.elapsed_ms(now_ms()), "【媒体探测】任务已取消");
+            }
+            Ok(None) => tracing::error!(job_id, ledger_id, "取消时探测任务不存在"),
+            Err(error) => tracing::error!(%error, job_id, ledger_id, "持久化探测任务取消状态失败"),
         }
     }
 

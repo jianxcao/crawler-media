@@ -64,7 +64,41 @@ impl Store {
         attempt: &StoredFingerprintAttempt,
         sample: Option<&StoredFingerprintSample>,
     ) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        self.complete_fingerprint_attempt_inner(attempt, sample, None)
+            .map(|_| ())
+    }
+
+    /// The ledger check and sample write share the transaction with all deletion writers.
+    pub fn complete_fingerprint_attempt_for_source(
+        &self,
+        attempt: &StoredFingerprintAttempt,
+        sample: &StoredFingerprintSample,
+        expected_path: &str,
+    ) -> Result<bool, StoreError> {
+        self.complete_fingerprint_attempt_inner(attempt, Some(sample), Some(expected_path))
+    }
+
+    fn complete_fingerprint_attempt_inner(
+        &self,
+        attempt: &StoredFingerprintAttempt,
+        sample: Option<&StoredFingerprintSample>,
+        expected_path: Option<&str>,
+    ) -> Result<bool, StoreError> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.library,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+
+        if let Some(path) = expected_path {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM ledger WHERE id = ?1 AND path = ?2)",
+                params![attempt.ledger_id, path],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Ok(false);
+            }
+        }
 
         tx.execute(
             "INSERT INTO fingerprint_attempts (
@@ -133,7 +167,7 @@ impl Store {
         }
 
         tx.commit()?;
-        Ok(())
+        Ok(true)
     }
 
     pub fn list_fingerprint_attempts_for_job(

@@ -181,7 +181,8 @@ impl Store {
         let tx = self.library.unchecked_transaction()?;
         let changed = tx.execute(
             "UPDATE probe_job_units SET status = 'running'
-             WHERE job_id = ?1 AND ledger_id = ?2 AND status = 'queued'",
+             WHERE job_id = ?1 AND ledger_id = ?2 AND status = 'queued'
+             AND EXISTS (SELECT 1 FROM probe_jobs WHERE id = ?1 AND status IN ('queued', 'running'))",
             params![job_id, ledger_id],
         )?;
         if changed > 0 {
@@ -242,6 +243,27 @@ impl Store {
         reason: &str,
     ) -> Result<(ProbeJob, bool, bool), StoreError> {
         self.finish_probe_unit_with_status(job_id, ledger_id, "cancelled", Some(reason))
+    }
+
+    /// Cancel an atomic refresh, terminalizing pending units and releasing the scope together.
+    pub fn cancel_probe_job(&self, job_id: &str, reason: &str) -> Result<(), StoreError> {
+        let tx = self.library.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE probe_job_units SET status = 'cancelled', error = ?2
+             WHERE job_id = ?1 AND status IN ('queued', 'running')
+             AND EXISTS (SELECT 1 FROM probe_jobs WHERE id = ?1 AND status IN ('queued', 'running'))",
+            params![job_id, reason],
+        )?;
+        tx.execute(
+            "UPDATE probe_jobs SET status = 'cancelled', error = ?2, finished_at_ms = ?3,
+               completed = (SELECT COUNT(*) FROM probe_job_units WHERE job_id = ?1 AND status IN ('succeeded', 'failed', 'cancelled')),
+               succeeded = (SELECT COUNT(*) FROM probe_job_units WHERE job_id = ?1 AND status = 'succeeded'),
+               failed = (SELECT COUNT(*) FROM probe_job_units WHERE job_id = ?1 AND status = 'failed')
+             WHERE id = ?1 AND status IN ('queued', 'running')",
+            params![job_id, reason, now_ms()],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     fn finish_probe_unit_with_status(
