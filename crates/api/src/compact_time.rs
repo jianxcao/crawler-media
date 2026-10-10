@@ -1,4 +1,4 @@
-//! 紧凑时间格式：`2026-09-23 07:12:48`（UTC，秒级）。
+//! 紧凑时间格式：`2026-09-23 07:12:48`（支持本地时区 / 容器 TZ 环境变量，秒级）。
 //! 默认 `SystemTime` 计时器输出 RFC3339 微秒级 `...48.755985Z`，
 //! 日志不需要那么精确，这里只保留到秒，便于人读。
 
@@ -17,9 +17,7 @@ impl FormatTime for CompactTime {
             .unwrap_or_default()
             .as_secs() as i64;
 
-        let (year, month, day) = civil_date(secs.div_euclid(86_400));
-        let rem = secs.rem_euclid(86_400);
-        let (hour, min, sec) = (rem / 3600, rem % 3600 / 60, rem % 60);
+        let (year, month, day, hour, min, sec) = format_local_parts(secs);
 
         write!(
             w,
@@ -40,6 +38,57 @@ pub(crate) fn format_rfc3339_utc(value: SystemTime) -> Option<String> {
     ))
 }
 
+#[cfg(unix)]
+#[repr(C)]
+struct Tm {
+    tm_sec: std::ffi::c_int,
+    tm_min: std::ffi::c_int,
+    tm_hour: std::ffi::c_int,
+    tm_mday: std::ffi::c_int,
+    tm_mon: std::ffi::c_int,
+    tm_year: std::ffi::c_int,
+    tm_wday: std::ffi::c_int,
+    tm_yday: std::ffi::c_int,
+    tm_isdst: std::ffi::c_int,
+    tm_gmtoff: std::ffi::c_long,
+    tm_zone: *const std::ffi::c_char,
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn localtime_r(timep: *const i64, result: *mut Tm) -> *mut Tm;
+}
+
+/// 获取当地时间的各个分量 (year, month, day, hour, min, sec)。
+///
+/// 通过 C 库 localtime_r 解析当地时间，自动遵循系统当前时区以及 `TZ` 环境变量设置。
+/// 若在非 Unix 平台或转换失败，回退到 UTC 时间计算。
+fn format_local_parts(secs: i64) -> (i64, i64, i64, i64, i64, i64) {
+    #[cfg(unix)]
+    {
+        use std::mem::MaybeUninit;
+        let mut out = MaybeUninit::<Tm>::uninit();
+        // SAFETY: localtime_r 是 POSIX 线程安全函数，传入有效的指针
+        let ptr = unsafe { localtime_r(&secs, out.as_mut_ptr()) };
+        if !ptr.is_null() {
+            let tm = unsafe { out.assume_init() };
+            return (
+                (tm.tm_year as i64) + 1900,
+                (tm.tm_mon as i64) + 1,
+                tm.tm_mday as i64,
+                tm.tm_hour as i64,
+                tm.tm_min as i64,
+                tm.tm_sec as i64,
+            );
+        }
+    }
+
+    let (year, month, day) = civil_date(secs.div_euclid(86_400));
+    let rem = secs.rem_euclid(86_400);
+    let (hour, min, sec) = (rem / 3600, rem % 3600 / 60, rem % 60);
+    (year, month, day, hour, min, sec)
+}
+
 fn civil_date(days: i64) -> (i64, i64, i64) {
     // 公历日历推算（Howard Hinnant civil_from_days 算法），UTC。
     let z = days + 719_468;
@@ -57,7 +106,7 @@ fn civil_date(days: i64) -> (i64, i64, i64) {
 
 #[cfg(test)]
 mod tests {
-    use super::format_rfc3339_utc;
+    use super::*;
     use std::time::{Duration, UNIX_EPOCH};
 
     #[test]
@@ -66,5 +115,16 @@ mod tests {
             format_rfc3339_utc(UNIX_EPOCH + Duration::from_millis(1_700_000_000_123)),
             Some("2023-11-14T22:13:20.123Z".into())
         );
+    }
+
+    #[test]
+    fn test_format_local_parts_returns_valid_datetime() {
+        let (y, m, d, h, min, s) = format_local_parts(1_700_000_000);
+        assert_eq!(y, 2023);
+        assert_eq!(m, 11);
+        assert!((14..=15).contains(&d));
+        assert!((0..24).contains(&h));
+        assert!((0..60).contains(&min));
+        assert!((0..60).contains(&s));
     }
 }

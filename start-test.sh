@@ -3,12 +3,17 @@
 # crawler-media 一键测试环境脚本
 #
 # 用法:
-#   ./start-test.sh start          启动全部服务（后端 / 前端 / mock 站点）
-#   ./start-test.sh restart        仅重启并构建后端（前端与 qB 保持常驻运行）
-#   ./start-test.sh restart-all    全量重启（后端、前端、mock 站点）
+#   ./start-test.sh start          启动全部服务（后端 / 前端 / mock 站点，默认清空旧日志）
+#   ./start-test.sh restart        仅重启并构建后端（清空后端日志，前端与 qB 保持常驻运行）
+#   ./start-test.sh restart-all    全量重启（后端、前端、mock 站点，清空所有日志）
 #   ./start-test.sh stop           停止全部服务
 #   ./start-test.sh status         查看各服务状态
 #   ./start-test.sh logs           跟随查看后端日志（终端实时输出）
+#   ./start-test.sh clean-logs     清空全部测试日志（.test-logs/*.log）
+#
+# 选项:
+#   --clean / --clean-logs         显式指定清除日志（start/restart 已默认自动清理）
+#   --no-clean                     启动/重启时不清除旧日志
 #
 # 启动后访问:  http://127.0.0.1:3334   账号 admin / 密码 test-admin-secret-password
 # =============================================================================
@@ -43,6 +48,36 @@ mkdir -p "$LOG_DIR"
 BACKEND_LOG="$LOG_DIR/backend.log"
 FRONTEND_LOG="$LOG_DIR/frontend.log"
 MOCK_LOG="$LOG_DIR/mock.log"
+
+clean_logs() {
+  local target="${1:-all}"
+  case "$target" in
+    backend)
+      if [[ -f "$BACKEND_LOG" ]]; then
+        : > "$BACKEND_LOG"
+        log "已清空后端日志: $BACKEND_LOG"
+      fi
+      ;;
+    frontend)
+      if [[ -f "$FRONTEND_LOG" ]]; then
+        : > "$FRONTEND_LOG"
+        log "已清空前端日志: $FRONTEND_LOG"
+      fi
+      ;;
+    mock)
+      if [[ -f "$MOCK_LOG" ]]; then
+        : > "$MOCK_LOG"
+        log "已清空 mock 站点日志: $MOCK_LOG"
+      fi
+      ;;
+    all|*)
+      for f in "$BACKEND_LOG" "$FRONTEND_LOG" "$MOCK_LOG"; do
+        [[ -f "$f" ]] && : > "$f"
+      done
+      log "已清空所有测试日志 (.test-logs/*.log)"
+      ;;
+  esac
+}
 
 # ------------------------------- 工具函数 -----------------------------------
 log()  { printf '\033[1;36m[test-env]\033[0m %s\n' "$*"; }
@@ -300,8 +335,26 @@ status_all() {
 }
 
 # -------------------------------- 主入口 ------------------------------------
-case "${1:-}" in
+ACTION="${1:-}"
+CLEAN_MODE="${CLEAN_LOGS:-auto}"
+
+# 解析后续可能传入的标志，例如: ./start-test.sh start --no-clean 或 ./start-test.sh restart --clean
+for arg in "${@:2}"; do
+  case "$arg" in
+    --clean|--clean-logs)
+      CLEAN_MODE="true"
+      ;;
+    --no-clean|--keep-logs)
+      CLEAN_MODE="false"
+      ;;
+  esac
+done
+
+case "$ACTION" in
   start)
+    if [[ "$CLEAN_MODE" != "false" ]]; then
+      clean_logs all
+    fi
     start_qb
     start_backend
     start_frontend
@@ -324,13 +377,22 @@ case "${1:-}" in
     # 快速重启：仅重启并重构后端，前端 Vite 与 qB 保持常驻运行
     log "正在仅重启后端..."
     stop_service backend
+    if [[ "$CLEAN_MODE" != "false" ]]; then
+      clean_logs backend
+    fi
     start_backend true
     status_all
     ;;
   restart-all)
     stop_all
     sleep 2
-    exec "$0" start
+    if [[ "$CLEAN_MODE" != "false" ]]; then
+      clean_logs all
+    fi
+    exec "$0" start --no-clean
+    ;;
+  clean-logs)
+    clean_logs "${2:-all}"
     ;;
   status)
     status_all
@@ -339,7 +401,7 @@ case "${1:-}" in
     tail -f "$BACKEND_LOG"
     ;;
   *)
-    sed -n '2,14p' "$0"
+    sed -n '2,19p' "$0"
     exit 1
     ;;
 esac

@@ -140,6 +140,70 @@ fn episode_row(media_id: domain::MediaId, path: &std::path::Path, episode: u32) 
     }
 }
 
+#[tokio::test]
+async fn hidden_finder_metadata_does_not_reprobe_existing_episodes() {
+    let temp = tempfile::tempdir().unwrap();
+    let library_root = temp.path().join("media/tv/china");
+    let show_dir = library_root.join("喜剧之王 (2026)");
+    let season_dir = show_dir.join("Season 1");
+    std::fs::create_dir_all(&season_dir).unwrap();
+    let episode = season_dir.join("喜剧之王 - S01E01 - 第 1 集.strm");
+    std::fs::write(&episode, "https://example.com/e01.mkv").unwrap();
+    let finder_metadata = show_dir.join(".DS_Store");
+    std::fs::write(&finder_metadata, "finder metadata").unwrap();
+
+    let store = api::Store::open(temp.path().join("data")).unwrap();
+    store
+        .create_library(
+            domain::MediaKind::Tv,
+            "电视剧",
+            &[library_root.to_str().unwrap()],
+            "all",
+            true,
+            &[],
+        )
+        .unwrap();
+    let state = api::management::ApiState::new(
+        store,
+        "test-token".into(),
+        indexer::ProfileSet::load(None).unwrap(),
+        Arc::new(EmptyFetcher),
+        Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
+        temp.path().join("library"),
+    )
+    .unwrap();
+    let media = domain::Media {
+        id: domain::MediaId::new(),
+        kind: domain::MediaKind::Tv,
+        title: "喜剧之王".into(),
+        year: Some(2026),
+        original_title: None,
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    state.store().lock().insert_media(&media).unwrap();
+    let row = episode_row(media.id, &episode, 1);
+    let ledger_id = row.id;
+    state.store().lock().insert_ledger(&row).unwrap();
+
+    let tracker = Arc::new(StrmGraceTracker::new());
+    api::fs_watcher::handle_fs_events(&state, &tracker, vec![fs_event(finder_metadata)]);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    assert!(
+        state
+            .store()
+            .lock()
+            .latest_probe_job_for_scope(&format!("ledger:{ledger_id}"))
+            .unwrap()
+            .is_none(),
+        ".DS_Store 变动不能让已有剧集重新探测或提取声纹"
+    );
+}
+
 fn fs_event(path: std::path::PathBuf) -> DebouncedEvent {
     DebouncedEvent {
         path,

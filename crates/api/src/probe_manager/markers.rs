@@ -182,11 +182,14 @@ fn load_season_samples(
                     tracing::warn!(
                         ledger_id = %key,
                         episode = row.episode.unwrap_or(1),
+                        cache_key = %cache.cache_key,
+                        expected_cache_key = %expected_key,
+                        source_version = %source_version,
                         cached_algorithm = cache.algorithm_version,
                         expected_algorithm = FINGERPRINT_ALGORITHM_VERSION,
                         cached_sample_duration_secs = cache.sample_duration_secs,
                         expected_sample_duration_secs = duration_secs,
-                        "【片头片尾】跳过过期声纹缓存，需重新采集"
+                        "【片头片尾】跳过身份不匹配的声纹缓存，需重新采集"
                     );
                     continue;
                 }
