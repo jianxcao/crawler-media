@@ -119,6 +119,7 @@ pub(crate) async fn get_scrape_settings(
         Ok(mut config) => {
             if !is_admin {
                 config.setting.theintrodb_api_key = None;
+                config.setting.fanart_api_key = None;
             }
             ok(scrape_json(&config)).into_response()
         }
@@ -214,6 +215,7 @@ fn scrape_json(config: &crate::scrape_config::ScrapeConfig) -> Value {
             "mirror_nfo": e.mirror_nfo,
             "mirror_episode_thumbs": e.mirror_episode_thumbs,
             "theintrodb_enabled": e.theintrodb_enabled,
+            "fanart_configured": e.fanart_api_key.is_some(),
             "fingerprint_duration_secs": e.fingerprint_duration_secs,
         },
     })

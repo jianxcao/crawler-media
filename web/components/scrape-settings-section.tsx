@@ -287,6 +287,21 @@ export function ScrapeSettingsSection() {
                 onChange={(v) => set("mirror_episode_thumbs", v)}
               />
             </Group>
+            <Group label="Fanart.tv 扩展艺术图">
+              <div className="space-y-2">
+                <label className="text-sub font-medium text-white/80">Fanart.tv API Key</label>
+                <input
+                  type="password"
+                  className={INPUT_CLASS}
+                  placeholder="例如 fanart_xxxxxxxxxxxxxxxxxxxx"
+                  value={draft.fanart_api_key ?? ""}
+                  onChange={(e) => set("fanart_api_key", e.target.value)}
+                />
+                <p className="text-caption text-white/40">
+                  电视剧用 TVDB id，电影用 TMDB id。留空则不下载 logo / thumb / banner / 季图。
+                </p>
+              </div>
+            </Group>
           </div>
         </div>
       )}

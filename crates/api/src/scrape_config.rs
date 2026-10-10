@@ -50,6 +50,10 @@ pub struct ScrapeConfigSetting {
     pub theintrodb_enabled: Option<bool>,
     #[serde(default)]
     pub theintrodb_api_key: Option<String>,
+    #[serde(default)]
+    pub fanart_api_key: Option<String>,
+    #[serde(default)]
+    pub fanart_language: Vec<String>,
     /// 声纹识别单集采样时长（秒）：从每集开头取多长音频做 Chromaprint 指纹。
     /// 空 = 跟随默认 180（3 分钟）。STRM 挂载越小越省流量。
     #[serde(default)]
@@ -88,6 +92,8 @@ pub struct EffectiveScrapeConfig {
     pub mirror_episode_thumbs: bool,
     pub theintrodb_enabled: bool,
     pub theintrodb_api_key: Option<String>,
+    pub fanart_api_key: Option<String>,
+    pub fanart_language: Vec<String>,
     pub fingerprint_duration_secs: u32,
     pub fingerprint_sampling_mode: String,
 }
@@ -245,6 +251,17 @@ pub fn effective_of(setting: &ScrapeConfigSetting) -> EffectiveScrapeConfig {
         mirror_episode_thumbs: setting.mirror_episode_thumbs.unwrap_or(true),
         theintrodb_enabled: setting.theintrodb_enabled.unwrap_or(false),
         theintrodb_api_key: setting.theintrodb_api_key.clone(),
+        fanart_api_key: setting
+            .fanart_api_key
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        fanart_language: if setting.fanart_language.is_empty() {
+            vec!["zh".into(), "en".into()]
+        } else {
+            setting.fanart_language.clone()
+        },
         fingerprint_duration_secs: setting
             .fingerprint_duration_secs
             .filter(|v| *v > 0)

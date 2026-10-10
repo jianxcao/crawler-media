@@ -209,7 +209,9 @@ async fn member_reading_scrape_settings_redacts_theintrodb_api_key() {
         json!({
             "setting": {
                 "theintrodb_enabled": true,
-                "theintrodb_api_key": "secret-intro-key-12345"
+                "theintrodb_api_key": "secret-intro-key-12345",
+                "fanart_api_key": "fanart-secret",
+                "fanart_language": ["zh"]
             }
         }),
     )
@@ -220,6 +222,14 @@ async fn member_reading_scrape_settings_redacts_theintrodb_api_key() {
     assert_eq!(
         admin_read["data"]["setting"]["theintrodb_api_key"],
         "secret-intro-key-12345"
+    );
+    assert_eq!(
+        admin_read["data"]["setting"]["fanart_api_key"],
+        "fanart-secret"
+    );
+    assert_eq!(
+        admin_read["data"]["effective"]["fanart_configured"],
+        true
     );
 
     // 2. 创建一个普通成员用户
@@ -276,5 +286,14 @@ async fn member_reading_scrape_settings_redacts_theintrodb_api_key() {
         member_read["data"]["setting"]["theintrodb_api_key"],
         Value::Null,
         "普通成员读取 scrape settings 时必须脱敏 API key"
+    );
+    assert_eq!(
+        member_read["data"]["setting"]["fanart_api_key"],
+        Value::Null,
+        "普通成员读取 scrape settings 时必须脱敏 Fanart API key"
+    );
+    assert_eq!(
+        member_read["data"]["effective"]["fanart_configured"],
+        true
     );
 }

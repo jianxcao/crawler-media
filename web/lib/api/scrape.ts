@@ -26,6 +26,8 @@ export interface ScrapeSetting {
   mirror_episode_thumbs: boolean | null;
   theintrodb_enabled?: boolean | null;
   theintrodb_api_key?: string | null;
+  fanart_api_key?: string | null;
+  fanart_language?: string[];
   /** 声纹识别单集采样时长（秒），空 = 跟随默认 180（3 分钟）。 */
   fingerprint_duration_secs?: number | null;
 }
@@ -50,6 +52,7 @@ export interface EffectiveScrapeConfig {
   mirror_episode_thumbs: boolean;
   theintrodb_enabled: boolean;
   theintrodb_api_key: string | null;
+  fanart_configured: boolean;
   fingerprint_duration_secs: number;
 }
 
@@ -84,6 +87,8 @@ export const SCRAPE_DEFAULTS: ScrapeSetting = {
   mirror_images: null,
   mirror_nfo: null,
   mirror_episode_thumbs: null,
+  fanart_api_key: null,
+  fanart_language: [],
   fingerprint_duration_secs: null,
 };
 
