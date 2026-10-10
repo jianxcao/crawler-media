@@ -91,6 +91,122 @@ impl api::catalog::Catalog for WrongYearCatalog {
     }
 }
 
+struct AliasYearCatalog {
+    queries: Mutex<Vec<String>>,
+}
+
+impl api::catalog::Catalog for AliasYearCatalog {
+    fn search_movie(&self, _query: &str) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn search_tv(&self, query: &str) -> Result<Vec<media::CatalogHit>, String> {
+        self.search_tv_year(query, None)
+    }
+    fn search_tv_year(
+        &self,
+        query: &str,
+        year: Option<u16>,
+    ) -> Result<Vec<media::CatalogHit>, String> {
+        self.queries
+            .lock()
+            .push(format!("{query}|{}", year.map(|y| y.to_string()).unwrap_or_default()));
+        if query == "动灵守护者" && year == Some(2022) {
+            return Ok(vec![media::CatalogHit {
+                media: domain::Media {
+                    id: domain::MediaId::new(),
+                    kind: domain::MediaKind::Tv,
+                    title: "动灵守护者".into(),
+                    year: Some(2022),
+                    original_title: Some("Spirit Rangers".into()),
+                    tmdb_id: Some("207890".into()),
+                    douban_id: None,
+                    tvdb_id: None,
+                    bangumi_id: None,
+                    anilist_id: None,
+                },
+                poster_path: None,
+                backdrop_path: None,
+                rating: None,
+                overview: None,
+            }]);
+        }
+        Ok(vec![media::CatalogHit {
+            media: domain::Media {
+                id: domain::MediaId::new(),
+                kind: domain::MediaKind::Tv,
+                title: "Spirit Rangers: The Movie".into(),
+                year: Some(2024),
+                original_title: None,
+                tmdb_id: Some("999".into()),
+                douban_id: None,
+                tvdb_id: None,
+                bangumi_id: None,
+                anilist_id: None,
+            },
+            poster_path: None,
+            backdrop_path: None,
+            rating: None,
+            overview: None,
+        }])
+    }
+    fn popular_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn popular_tv(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn details(
+        &self,
+        _kind: domain::MediaKind,
+        _id: &str,
+    ) -> Result<Option<domain::Media>, String> {
+        Ok(None)
+    }
+}
+
+#[test]
+fn auto_resolve_uses_ancestor_alias_when_filename_title_misses() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = Arc::new(AliasYearCatalog {
+        queries: Mutex::new(Vec::new()),
+    });
+    let state = state(
+        tmp.path(),
+        Arc::new(Fixtures {
+            requests: Mutex::new(Vec::new()),
+            bodies: HashMap::new(),
+        }),
+        Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
+    )
+    .with_catalog(catalog.clone());
+    let show = tmp
+        .path()
+        .join("children/动灵守护者 (2022)/Spirit.Rangers.S01");
+    std::fs::create_dir_all(&show).unwrap();
+    let episode = show.join("Spirit.Rangers.S01E01.1080p.strm");
+    std::fs::write(&episode, b"https://cdn.example/ep.mkv").unwrap();
+    let wanted = domain::Media {
+        id: domain::MediaId::new(),
+        kind: domain::MediaKind::Tv,
+        title: "Spirit Rangers".into(),
+        year: Some(2022),
+        original_title: None,
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    let store = api::Store::open(tmp.path().join("data")).unwrap();
+    store.insert_media(&wanted).unwrap();
+    let actual = api::auto_resolve::auto_resolve_media(&state, &wanted, &episode).unwrap();
+    assert_eq!(actual.tmdb_id.as_deref(), Some("207890"));
+    assert_eq!(actual.year, Some(2022));
+    let queries = catalog.queries.lock().clone();
+    assert!(queries.iter().any(|query| query == "Spirit Rangers|2022"));
+    assert!(queries.iter().any(|query| query == "动灵守护者|2022"));
+}
+
 #[test]
 fn auto_resolve_rejects_catalog_hit_for_different_year() {
     let tmp = tempfile::tempdir().unwrap();

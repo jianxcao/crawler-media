@@ -55,6 +55,11 @@ pub trait Catalog: Send + Sync {
     }
     fn search_movie(&self, query: &str) -> Result<Vec<CatalogHit>, String>;
     fn search_tv(&self, query: &str) -> Result<Vec<CatalogHit>, String>;
+    /// TV search with an optional first-air year. Sources that ignore the year
+    /// fall back to the unconstrained search.
+    fn search_tv_year(&self, query: &str, _year: Option<u16>) -> Result<Vec<CatalogHit>, String> {
+        self.search_tv(query)
+    }
     fn popular_movie(&self) -> Result<Vec<CatalogHit>, String>;
     fn popular_tv(&self) -> Result<Vec<CatalogHit>, String>;
     fn top_rated_movie(&self) -> Result<Vec<CatalogHit>, String> {
@@ -243,7 +248,12 @@ impl<H: media::CatalogGet + Send + Sync> Catalog for TmdbCatalog<H> {
             .map_err(|err| err.to_string())
     }
     fn search_tv(&self, query: &str) -> Result<Vec<CatalogHit>, String> {
-        self.inner.search_tv(query).map_err(|err| err.to_string())
+        self.search_tv_year(query, None)
+    }
+    fn search_tv_year(&self, query: &str, year: Option<u16>) -> Result<Vec<CatalogHit>, String> {
+        self.inner
+            .search_tv_year(query, year)
+            .map_err(|err| err.to_string())
     }
     fn popular_movie(&self) -> Result<Vec<CatalogHit>, String> {
         self.inner.popular_movie().map_err(|err| err.to_string())

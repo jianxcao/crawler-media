@@ -301,3 +301,70 @@ async fn sibling_episodes_serve_their_own_stills() {
         );
     }
 }
+
+#[tokio::test]
+async fn episode_without_artwork_does_not_advertise_missing_fanart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+    let tv = tmp.path().join("data/library/tv");
+    std::fs::create_dir_all(&tv).unwrap();
+    std::fs::write(tv.join("Spirit.Rangers.S01E01.1080p.strm"), b"https://cdn.example/ep.mkv")
+        .unwrap();
+    let libs = json_body(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                "/api/v1/libraries",
+                Some("management-secret"),
+                Value::Null,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let id = libs["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["kind"] == "tv")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let scan = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            &format!("/api/v1/libraries/{id}/scan"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(scan.status(), StatusCode::OK);
+    let ledger = json_body(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                "/api/v1/ledger",
+                Some("management-secret"),
+                Value::Null,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let media_id = ledger["data"][0]["media_id"].as_str().unwrap();
+    let episodes = json_body(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                &format!("/api/v1/libraries/{id}/items/{media_id}/episodes"),
+                Some("management-secret"),
+                Value::Null,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(episodes["data"][0]["still_url"].is_null());
+}

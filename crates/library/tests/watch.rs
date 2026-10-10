@@ -251,3 +251,34 @@ fn intake_ignores_non_video_files_like_subtitles() {
 fn watch_kind_is_two_jobs_not_one_switch() {
     assert_ne!(WatchKind::Intake, WatchKind::InPlace);
 }
+
+#[test]
+fn high_confidence_episode_keeps_filename_title_and_inherits_ancestor_year() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp
+        .path()
+        .join("children/动灵守护者 (2022)/Spirit.Rangers.S01");
+    fs::create_dir_all(&dir).unwrap();
+    let episode = dir.join(
+        "Spirit.Rangers.S01E01.Thunder.Mountain.1080p.NF.WEB-DL.strm",
+    );
+    fs::write(&episode, b"https://cdn.example/ep.mkv").unwrap();
+    let job = WatchJob {
+        kind: WatchKind::InPlace,
+        scrape: false,
+        path: tmp.path().to_path_buf(),
+        library_root: tmp.path().to_path_buf(),
+        tv_library_root: None,
+    };
+    let outcome = scan_watch(&job, &movie()).unwrap();
+    let found = outcome
+        .transferred
+        .iter()
+        .find(|file| file.path == episode)
+        .unwrap();
+    let parsed = found.identified_release.as_ref().unwrap();
+    assert_eq!(parsed.title, "Spirit Rangers");
+    assert_eq!(parsed.year, Some(2022));
+    assert_eq!(parsed.season, Some(1));
+    assert_eq!(parsed.episode, Some(1));
+}

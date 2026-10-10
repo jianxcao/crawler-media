@@ -83,7 +83,11 @@ pub fn aggregate_visible_episodes(
 
         let local_still =
             crate::episode_still::existing(file_path).map(|_| artwork_url("stills", row.id));
-        let backdrop = if row.season.is_some() {
+        // 只有磁盘上真有 fanart 才给地址。没有剧照时卡片用集号占位，
+        // 不再对每一集打出必定 404 的 /fanart/{id}。
+        let backdrop = if row.season.is_some()
+            && crate::http::library::backdrop_path(row).is_some()
+        {
             Some(artwork_url("fanart", row.id))
         } else {
             None

@@ -86,6 +86,72 @@ pub fn scan_watch(job: &WatchJob, media: &Media) -> Result<WatchOutcome, Library
     }
 }
 
+/// 文件名已经能确定剧名时，仍从上层目录补年份和别名。
+/// 文件名本身是 Low 时，才用 NFO 或父目录标题替换。
+fn enrich_from_ancestors(parsed: &mut Release, start: &std::path::Path) {
+    let mut current = Some(start);
+    let mut depth = 0;
+    while let Some(dir) = current {
+        if depth >= 4 {
+            break;
+        }
+        depth += 1;
+        if parsed.confidence == Confidence::Low {
+            if let Some(nfo) = sibling_nfo(start, dir) {
+                if apply_nfo(parsed, &nfo) {
+                    return;
+                }
+            }
+        }
+        if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
+            let parent_parsed = release::parse(name);
+            if parsed.confidence == Confidence::Low && parent_parsed.confidence != Confidence::Low
+            {
+                let year = parsed.year.or(parent_parsed.year);
+                *parsed = parent_parsed;
+                parsed.year = year;
+                return;
+            }
+            if parsed.year.is_none() {
+                parsed.year = parent_parsed.year;
+            }
+        }
+        current = dir.parent();
+    }
+}
+
+fn sibling_nfo(file: &std::path::Path, dir: &std::path::Path) -> Option<PathBuf> {
+    if dir != file.parent()? {
+        return None;
+    }
+    let beside = file.with_extension("nfo");
+    if beside.is_file() {
+        return Some(beside);
+    }
+    fs::read_dir(dir).ok().and_then(|entries| {
+        entries.filter_map(Result::ok).find_map(|entry| {
+            let path = entry.path();
+            (path.extension().and_then(|ext| ext.to_str()) == Some("nfo")).then_some(path)
+        })
+    })
+}
+
+fn apply_nfo(parsed: &mut Release, path: &std::path::Path) -> bool {
+    let Ok(content) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Some(meta) = crate::nfo::parse_nfo(&content) else {
+        return false;
+    };
+    let Some(title) = meta.title.filter(|title| !title.trim().is_empty()) else {
+        return false;
+    };
+    parsed.title = title;
+    parsed.year = meta.year.and_then(|year| year.parse::<u16>().ok());
+    parsed.confidence = Confidence::High;
+    true
+}
+
 fn in_place(job: &WatchJob) -> Result<WatchOutcome, LibraryError> {
     let mut outcome = WatchOutcome::default();
     walk_in_place(&job.path, job.scrape, &mut outcome)?;
@@ -121,43 +187,8 @@ fn walk_in_place(
             .and_then(|n| n.to_str())
             .unwrap_or_default();
         let mut parsed = release::parse(name);
-        if parsed.confidence == Confidence::Low {
-            if let Some(parent) = path.parent() {
-                let nfo_cand = path.with_extension("nfo");
-                let nfo_file = if nfo_cand.is_file() {
-                    Some(nfo_cand)
-                } else {
-                    fs::read_dir(parent).ok().and_then(|entries| {
-                        entries.filter_map(Result::ok).find_map(|e| {
-                            let p = e.path();
-                            (p.extension().and_then(|s| s.to_str()) == Some("nfo")).then_some(p)
-                        })
-                    })
-                };
-                if let Some(nfo_p) = nfo_file {
-                    if let Ok(content) = fs::read_to_string(&nfo_p) {
-                        if let Some(meta) = crate::nfo::parse_nfo(&content) {
-                            if let Some(title) = meta.title {
-                                if !title.trim().is_empty() {
-                                    parsed.title = title;
-                                    parsed.year = meta.year.and_then(|y| y.parse::<u16>().ok());
-                                    parsed.confidence = Confidence::High;
-                                }
-                            }
-                        }
-                    }
-                }
-                if parsed.confidence == Confidence::Low {
-                    if let Some(parent_name) = parent.file_name().and_then(|n| n.to_str()) {
-                        let parent_parsed = release::parse(parent_name);
-                        if parent_parsed.confidence != Confidence::Low {
-                            parsed.title = parent_parsed.title;
-                            parsed.year = parent_parsed.year;
-                            parsed.confidence = parent_parsed.confidence;
-                        }
-                    }
-                }
-            }
+        if let Some(parent) = path.parent() {
+            enrich_from_ancestors(&mut parsed, parent);
         }
         if parsed.confidence == Confidence::Low {
             continue;
@@ -226,43 +257,8 @@ fn walk_intake(
             .and_then(|n| n.to_str())
             .unwrap_or_default();
         let mut parsed = release::parse(name);
-        if parsed.confidence == Confidence::Low {
-            if let Some(parent) = path.parent() {
-                let nfo_cand = path.with_extension("nfo");
-                let nfo_file = if nfo_cand.is_file() {
-                    Some(nfo_cand)
-                } else {
-                    fs::read_dir(parent).ok().and_then(|entries| {
-                        entries.filter_map(Result::ok).find_map(|e| {
-                            let p = e.path();
-                            (p.extension().and_then(|s| s.to_str()) == Some("nfo")).then_some(p)
-                        })
-                    })
-                };
-                if let Some(nfo_p) = nfo_file {
-                    if let Ok(content) = fs::read_to_string(&nfo_p) {
-                        if let Some(meta) = crate::nfo::parse_nfo(&content) {
-                            if let Some(title) = meta.title {
-                                if !title.trim().is_empty() {
-                                    parsed.title = title;
-                                    parsed.year = meta.year.and_then(|y| y.parse::<u16>().ok());
-                                    parsed.confidence = Confidence::High;
-                                }
-                            }
-                        }
-                    }
-                }
-                if parsed.confidence == Confidence::Low {
-                    if let Some(parent_name) = parent.file_name().and_then(|n| n.to_str()) {
-                        let parent_parsed = release::parse(parent_name);
-                        if parent_parsed.confidence != Confidence::Low {
-                            parsed.title = parent_parsed.title;
-                            parsed.year = parent_parsed.year;
-                            parsed.confidence = parent_parsed.confidence;
-                        }
-                    }
-                }
-            }
+        if let Some(parent) = path.parent() {
+            enrich_from_ancestors(&mut parsed, parent);
         }
         if parsed.confidence == Confidence::Low {
             outcome.unidentified.push(Unidentified {

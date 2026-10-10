@@ -246,7 +246,14 @@ impl Catalog for FanoutCatalog {
         merge(self.sources.iter().map(|source| source.search_movie(query)))
     }
     fn search_tv(&self, query: &str) -> Result<Vec<CatalogHit>, String> {
-        merge(self.sources.iter().map(|source| source.search_tv(query)))
+        self.search_tv_year(query, None)
+    }
+    fn search_tv_year(&self, query: &str, year: Option<u16>) -> Result<Vec<CatalogHit>, String> {
+        merge(
+            self.sources
+                .iter()
+                .map(|source| source.search_tv_year(query, year)),
+        )
     }
     fn popular_movie(&self) -> Result<Vec<CatalogHit>, String> {
         merge(self.sources.iter().map(|source| source.popular_movie()))

@@ -28,14 +28,25 @@ pub fn auto_resolve_media(
         "扫描时自动解析媒体元数据（TMDB/目录）"
     );
 
-    let hits = match media.kind {
-        MediaKind::Movie => state.catalog.search_movie(title).ok(),
-        MediaKind::Tv => state.catalog.search_tv(title).ok(),
-        MediaKind::Video => None,
-    }?;
-
-    let Some(best_hit) = find_best_catalog_match(title, media.year, &hits) else {
-        tracing::debug!(title = %title, "扫描时未找到可靠的 TMDB 匹配");
+    let queries = search_queries(title, sample_path);
+    let mut best_hit = None;
+    for query in &queries {
+        let hits = match media.kind {
+            MediaKind::Movie => state.catalog.search_movie(query).ok(),
+            MediaKind::Tv => state.catalog.search_tv_year(query, media.year).ok(),
+            MediaKind::Video => None,
+        };
+        let Some(hits) = hits else { continue };
+        if let Some(hit) = find_best_catalog_match(query, media.year, &hits) {
+            best_hit = Some(hit.clone());
+            break;
+        }
+    }
+    let Some(best_hit) = best_hit else {
+        tracing::debug!(title = %title, year = ?media.year, "扫描时未找到可靠的 TMDB 匹配");
+        if media.kind == MediaKind::Tv {
+            attach_episode_frames(state, media, sample_path);
+        }
         return None;
     };
 
@@ -75,6 +86,39 @@ pub fn auto_resolve_media(
     let _ = crate::poster_fetch::attach_backdrop(state, &updated, sample_path);
 
     Some(updated)
+}
+
+/// 目录对不上时，给同一部剧还没有剧照的分集各截一帧。
+/// STRM 走里面的远程地址，和流探测同一套输入，不把 `.strm` 文本当视频。
+fn attach_episode_frames(state: &ApiState, media: &Media, sample_path: &std::path::Path) {
+    let Some(dir) = sample_path.parent() else {
+        return;
+    };
+    let paths = {
+        let store = state.store.lock();
+        store
+            .list_ledger()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|row| row.media_id == media.id)
+            .map(|row| std::path::PathBuf::from(row.path))
+            .filter(|path| path.parent() == Some(dir))
+            .collect::<Vec<_>>()
+    };
+    let targets = if paths.is_empty() {
+        vec![sample_path.to_path_buf()]
+    } else {
+        paths
+    };
+    for path in targets {
+        let still = crate::episode_still::path(&path);
+        if still.is_file() {
+            continue;
+        }
+        if library::extract_frame(&path, 60_000, &still).is_err() {
+            tracing::warn!(path = %path.display(), "匹配失败后分集抓帧失败");
+        }
+    }
 }
 
 fn find_best_catalog_match<'a>(
@@ -119,6 +163,34 @@ fn find_best_catalog_match<'a>(
     }
 
     None
+}
+
+/// 文件名标题优先；上层目录里和它不同的标题（常见是中文别名）作为后续搜索词。
+fn search_queries(title: &str, sample_path: &std::path::Path) -> Vec<String> {
+    let mut queries = vec![title.to_string()];
+    let mut current = sample_path.parent();
+    let mut depth = 0;
+    while let Some(dir) = current {
+        if depth >= 4 {
+            break;
+        }
+        depth += 1;
+        if let Some(name) = dir.file_name().and_then(|name| name.to_str()) {
+            let parsed = release::parse(name);
+            let candidate = parsed.title.trim();
+            if parsed.confidence != domain::Confidence::Low
+                && !candidate.is_empty()
+                && normalize_title(candidate) != normalize_title(title)
+                && !queries
+                    .iter()
+                    .any(|query| normalize_title(query) == normalize_title(candidate))
+            {
+                queries.push(candidate.to_string());
+            }
+        }
+        current = dir.parent();
+    }
+    queries
 }
 
 fn normalize_title(t: &str) -> String {

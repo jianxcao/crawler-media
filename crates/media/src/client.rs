@@ -72,7 +72,19 @@ impl<H: CatalogGet> Tmdb<H> {
     }
 
     pub fn search_tv(&self, query: &str) -> Result<Vec<CatalogHit>, TmdbError> {
-        let path = format!("/search/tv?query={}", form_encode(query));
+        self.search_tv_year(query, None)
+    }
+
+    /// TV search constrained by first-air year when the library path has one.
+    pub fn search_tv_year(
+        &self,
+        query: &str,
+        year: Option<u16>,
+    ) -> Result<Vec<CatalogHit>, TmdbError> {
+        let mut path = format!("/search/tv?query={}", form_encode(query));
+        if let Some(year) = year {
+            path.push_str(&format!("&first_air_date_year={year}"));
+        }
         self.cached_search(MediaKind::Tv, &path)
     }
 
