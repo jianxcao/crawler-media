@@ -231,8 +231,27 @@ impl Store {
         succeeded: bool,
         error: Option<&str>,
     ) -> Result<(ProbeJob, bool, bool), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
         let status = if succeeded { "succeeded" } else { "failed" };
+        self.finish_probe_unit_with_status(job_id, ledger_id, status, error)
+    }
+
+    pub fn cancel_probe_unit(
+        &self,
+        job_id: &str,
+        ledger_id: &str,
+        reason: &str,
+    ) -> Result<(ProbeJob, bool, bool), StoreError> {
+        self.finish_probe_unit_with_status(job_id, ledger_id, "cancelled", Some(reason))
+    }
+
+    fn finish_probe_unit_with_status(
+        &self,
+        job_id: &str,
+        ledger_id: &str,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<(ProbeJob, bool, bool), StoreError> {
+        let tx = self.library.unchecked_transaction()?;
         let changed = tx.execute(
             "UPDATE probe_job_units SET status = ?3, error = ?4
              WHERE job_id = ?1 AND ledger_id = ?2 AND status IN ('queued', 'running')",
@@ -241,7 +260,7 @@ impl Store {
         tx.execute(
             "UPDATE probe_jobs SET
                  completed = (SELECT COUNT(*) FROM probe_job_units
-                              WHERE job_id = ?1 AND status IN ('succeeded', 'failed')),
+                              WHERE job_id = ?1 AND status IN ('succeeded', 'failed', 'cancelled')),
                  succeeded = (SELECT COUNT(*) FROM probe_job_units
                               WHERE job_id = ?1 AND status = 'succeeded'),
                  failed = (SELECT COUNT(*) FROM probe_job_units

@@ -83,6 +83,18 @@ async fn run_fingerprint_worker(manager: Arc<ProbeManager>) {
         };
         let Some(work) = work else { break };
         wait_for_metadata_idle(&manager).await;
+
+        let ledger_exists = manager
+            .store
+            .lock()
+            .get_ledger(&work.unit.row.id.to_string())
+            .map(|opt| opt.is_some())
+            .unwrap_or(true);
+        if !ledger_exists {
+            manager.cancel_unit(&work.unit, "file_deleted");
+            continue;
+        }
+
         if work.start_job && !start_persisted_unit(&manager, &work.unit) {
             continue;
         }

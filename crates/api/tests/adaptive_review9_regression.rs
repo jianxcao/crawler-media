@@ -69,6 +69,7 @@ fn setup(case: &'static str, episodes: &[u32]) -> Fixture {
             year: None, original_title: None, tmdb_id: None, douban_id: None, tvdb_id: None,
             bangumi_id: None, anilist_id: None }).unwrap();
         for row in &rows {
+            std::fs::write(&row.path, b"dummy").unwrap();
             st.insert_ledger(row).unwrap();
             st.put_file_meta_versioned(&row.id.to_string(),
                 &library::Tracks { video: Some(library::VideoTrack::default()), audio: vec![], subtitles: vec![] },

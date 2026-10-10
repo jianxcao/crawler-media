@@ -417,6 +417,42 @@ impl ProbeManager {
         }
     }
 
+    pub(crate) fn cancel_unit(&self, unit: &ProbeUnit, reason: &str) {
+        let ledger_id = unit.row.id.to_string();
+        let Some(job_id) = unit.job_id.as_deref() else {
+            self.seen.lock().remove(&ledger_id);
+            return;
+        };
+        let result = self.store.lock().cancel_probe_unit(job_id, &ledger_id, reason);
+        self.seen.lock().remove(&ledger_id);
+        let (job, accepted, all_done) = match result {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::error!(%error, ledger_id, job_id, "持久化探测任务取消状态失败");
+                return;
+            }
+        };
+        if !accepted {
+            return;
+        }
+        tracing::info!(
+            job_id = %job.id,
+            media_id = %job.media_id,
+            season = job.season.unwrap_or(1),
+            episode = unit.row.episode.unwrap_or(1),
+            reason,
+            "【媒体探测】任务单元已取消"
+        );
+        if all_done {
+            let succeeded = job.failed == 0;
+            let _ = self.store.lock().finish_probe_job(
+                &job.id,
+                succeeded,
+                if succeeded { None } else { job.error.as_deref().or(Some("一个或多个探测单元失败")) },
+            );
+        }
+    }
+
     fn finish_persisted_unit(&self, unit: &ProbeUnit, succeeded: bool) {
         let ledger_id = unit.row.id.to_string();
         let Some(job_id) = unit.job_id.as_deref() else {

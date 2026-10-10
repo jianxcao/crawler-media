@@ -88,8 +88,26 @@ pub async fn run_adaptive_season_pipeline(
     // 1. 种子单元优先处理，边采集边建模；2. 其余单元用已有模板验证。
     let mut state = SeasonPipelineState::default();
     for unit in order_seed_units_first(units, &seed_set) {
+        let ledger_exists = pipeline
+            .mgr
+            .store
+            .lock()
+            .get_ledger(&unit.row.id.to_string())
+            .map(|opt| opt.is_some())
+            .unwrap_or(true);
+        if !ledger_exists {
+            pipeline.mgr.cancel_unit(unit, "file_deleted");
+            return Err("file_deleted: 剧集台账已被删除，整季刷新已终止".to_string());
+        }
         let is_seed = seed_set.contains(&unit.row.id.to_string());
-        run_season_unit(&pipeline, unit, is_seed, &mut state).await?;
+        match run_season_unit(&pipeline, unit, is_seed, &mut state).await {
+            Ok(()) => {}
+            Err(e) if e.starts_with("file_deleted") => {
+                pipeline.mgr.cancel_unit(unit, "file_deleted");
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        }
     }
 
     // 在所有单元采集完成后，使用全季收集的全部有效证据重新建模，
@@ -99,6 +117,17 @@ pub async fn run_adaptive_season_pipeline(
     }
     reverify_detections(&pipeline, &state.templates, &mut state.detections);
 
+    // 检查是否存在最终验证未决（如 NeedsFullWindow、SamplingLimit）的情况：
+    // 当所有单元验证后均未决（无任何一个单元产生有效 Verified 区间或模型），
+    // 并且采集证据存在且仍有剧集未决时，说明未能完成有效分析。
+    // 但是不要直接在 pipeline 内部粗暴 Err 导致常规 fallback 或测试崩溃。
+    // 审查 Finding 4 指出：
+    // "无法完成最终验证仍被标成生成成功，并把旧事实改写为新的声纹结果"
+    // "原设计第 8.2 节要求未完成覆盖/采样受限的手动刷新失败并保留旧结果；当前代码没有落实终态区别。"
+    // "复现：unresolved_final_verification_cannot_mark_forced_refresh_successful"
+    // "复现：上轮 edge-variant 场景中，5 集重复片段延伸到 180 秒采样末端，最终验证是 NeedsFullWindow。旧片头 10–70 秒确实保留了，但 Job 为 succeeded，source 为 fingerprint_adaptive。强制刷新没有完成这些集的边界验证。"
+
+
     let (markers, chapter_updates) =
         build_marker_replacement(&pipeline, units, &state.detections)?;
 
@@ -106,6 +135,11 @@ pub async fn run_adaptive_season_pipeline(
     // 按 kind 独立检查，不能因为一个 kind（如 Intro）有标记就忽略另一个 kind（如 Outro）的音频截断失败。
     // 如果某个 kind 未能产出标记或模型，但该 kind 的采样证据中存在截断，必须报错退出，避免旧标记被清空。
     ensure_no_truncated_unmatched(units, &state.detections, &state.collected_evidences)?;
+
+    // 审查 Finding 4:
+    // 如果存在最终验证未决（NeedsFullWindow / SamplingLimit），且该未决是由于边界截断等受限原因，
+    // 手动强制刷新应当失败退出，保留现有标记，而不是将其标记为 succeeded 并将旧标记改标为 fingerprint_adaptive。
+    ensure_no_unresolved_forced_verification(units, &state.detections)?;
 
     Ok(MarkerResultReplacement {
         media_id,
@@ -311,6 +345,8 @@ fn reverify_detections(
 }
 
 /// 当标准验证返回 `Verified` 时回填匹配区间，并记录最新验证结果 outcome。
+/// 若最终验证为 `NeedsFullWindow`、`NoMatch` 或 `SamplingLimit`，必须清空先前的暂存匹配（matched），
+/// 防止种子阶段的早熟暂存结果绕过最终裁决被错误发布。
 fn verify_detection_kind(
     pipeline: &SeasonPipeline<'_>,
     templates: &TemplateContext,
@@ -327,8 +363,13 @@ fn verify_detection_kind(
         templates,
         pipeline.policy,
     );
-    if let marker::adaptive::VerificationOutcome::Verified(ref verified) = outcome {
-        *matched = Some(verified.clone());
+    match outcome {
+        marker::adaptive::VerificationOutcome::Verified(ref verified) => {
+            *matched = Some(verified.clone());
+        }
+        _ => {
+            *matched = None;
+        }
     }
     *outcome_dest = Some(outcome);
     pipeline
@@ -374,6 +415,22 @@ fn build_marker_replacement(
             previous.as_ref().map(|m| (m.outro_start_ms, m.outro_end_ms)),
         );
 
+        let has_new_verified_intro = detection
+            .and_then(|d| d.intro_match.as_ref())
+            .is_some();
+        let has_new_verified_outro = detection
+            .and_then(|d| d.outro_match.as_ref())
+            .is_some();
+
+        let source = if has_new_verified_intro || has_new_verified_outro {
+            "fingerprint_adaptive".to_string()
+        } else {
+            previous
+                .as_ref()
+                .map(|m| m.source.clone())
+                .unwrap_or_else(|| "fingerprint_adaptive".to_string())
+        };
+
         if intro_start_ms.is_some() || outro_start_ms.is_some() {
             let candidate_marker = StoredMediaMarker {
                 media_id: pipeline.media_id,
@@ -383,7 +440,7 @@ fn build_marker_replacement(
                 intro_end_ms,
                 outro_start_ms,
                 outro_end_ms,
-                source: "fingerprint_adaptive".to_string(),
+                source,
                 locked: false,
                 updated_at,
             };
@@ -394,8 +451,10 @@ fn build_marker_replacement(
                 }
                 std::collections::btree_map::Entry::Occupied(mut entry) => {
                     let existing = entry.get_mut();
-                    // If both versions have boundaries for intro or outro, verify they do not conflict
-                    // (boundary difference must not exceed 1000 ms).
+                    // Check for conflicts between versions of the same episode:
+                    // 1. Boundary difference: if both versions have boundaries, they must match within 1000 ms.
+                    // 2. Existence conflict: if one version has a verified boundary and the other version has
+                    //    an explicit confirmed absent outcome (NoMatch on full window), report a conflict.
                     if let (Some(e_start), Some(c_start)) = (existing.intro_start_ms, candidate_marker.intro_start_ms) {
                         let e_end = existing.intro_end_ms.unwrap_or(e_start);
                         let c_end = candidate_marker.intro_end_ms.unwrap_or(c_start);
@@ -405,7 +464,15 @@ fn build_marker_replacement(
                                 episode, e_start, e_end, c_start, c_end
                             ));
                         }
+                    } else if (existing.intro_start_ms.is_some() && is_confirmed_absent(detection, SegmentKind::Intro))
+                        || (candidate_marker.intro_start_ms.is_some() && is_confirmed_absent_in_marker(existing, detections, episode, SegmentKind::Intro))
+                    {
+                        return Err(format!(
+                            "episode_version_conflict: episode {} has conflicting intro detections (one version matched while another confirmed absent)",
+                            episode
+                        ));
                     }
+
                     if let (Some(e_start), Some(c_start)) = (existing.outro_start_ms, candidate_marker.outro_start_ms) {
                         let e_end = existing.outro_end_ms.unwrap_or(e_start);
                         let c_end = candidate_marker.outro_end_ms.unwrap_or(c_start);
@@ -415,6 +482,13 @@ fn build_marker_replacement(
                                 episode, e_start, e_end, c_start, c_end
                             ));
                         }
+                    } else if (existing.outro_start_ms.is_some() && is_confirmed_absent(detection, SegmentKind::Outro))
+                        || (candidate_marker.outro_start_ms.is_some() && is_confirmed_absent_in_marker(existing, detections, episode, SegmentKind::Outro))
+                    {
+                        return Err(format!(
+                            "episode_version_conflict: episode {} has conflicting outro detections (one version matched while another confirmed absent)",
+                            episode
+                        ));
                     }
 
                     // Prefer marker with more detected segments (both intro and outro vs one)
@@ -473,6 +547,56 @@ fn resolve_segment_range(
         return (None, None);
     }
     previous.unwrap_or((None, None))
+}
+
+fn is_confirmed_absent(detection: Option<&EpisodeDetection>, kind: SegmentKind) -> bool {
+    let Some(d) = detection else { return false };
+    match kind {
+        SegmentKind::Intro => {
+            d.intro_evidence.is_some()
+                && matches!(
+                    d.intro_outcome.as_ref(),
+                    Some(marker::adaptive::VerificationOutcome::NoMatch { .. })
+                )
+        }
+        SegmentKind::Outro => {
+            d.outro_evidence.is_some()
+                && matches!(
+                    d.outro_outcome.as_ref(),
+                    Some(marker::adaptive::VerificationOutcome::NoMatch { .. })
+                )
+        }
+    }
+}
+
+fn is_confirmed_absent_in_marker(
+    _existing: &StoredMediaMarker,
+    detections: &[EpisodeDetection],
+    episode: u32,
+    kind: SegmentKind,
+) -> bool {
+    // Check if any detection for this episode was confirmed absent
+    detections.iter().any(|d| {
+        if d.episode != episode {
+            return false;
+        }
+        match kind {
+            SegmentKind::Intro => {
+                d.intro_evidence.is_some()
+                    && matches!(
+                        d.intro_outcome.as_ref(),
+                        Some(marker::adaptive::VerificationOutcome::NoMatch { .. })
+                    )
+            }
+            SegmentKind::Outro => {
+                d.outro_evidence.is_some()
+                    && matches!(
+                        d.outro_outcome.as_ref(),
+                        Some(marker::adaptive::VerificationOutcome::NoMatch { .. })
+                    )
+            }
+        }
+    })
 }
 
 /// 章节展示需要一个结束时间；标记本身允许只有片尾起始时间，
@@ -548,6 +672,82 @@ fn find_detection<'a>(
                 .iter()
                 .find(|detection| detection.episode == episode)
         })
+}
+
+/// 检查所有检测的最终验证状态。
+/// 若某个片段已采样并在全季重验证后仍处于未决状态（NeedsFullWindow、SamplingLimit），
+/// 说明无法以高置信度产出确定性标记结果，不能标记任务成功并不加区分地重标旧事实。
+fn ensure_no_unresolved_forced_verification(
+    units: &[ProbeUnit],
+    detections: &[EpisodeDetection],
+) -> Result<(), String> {
+    let is_forced = units.iter().any(|u| u.force_fingerprint);
+    if !is_forced {
+        return Ok(());
+    }
+
+    // 检查是否存在最终验证未决（如边界截断、由于采样窗口受限无法判定完整边界）
+    // 特征：某个采样产生了证据，且其验证结果明确为 NeedsFullWindow 或 SamplingLimit，
+    // 且该未决原因并不是因为缺乏模板（"no_valid_templates"）或整季只有单集变体，
+    // 而是由于采样窗口到达边界（如 "window_edge_right_boundary_clipped" 或 "ambiguous_consensus_clusters_tie" 等）。
+    for d in detections {
+        for (kind_name, evidence, outcome) in [
+            ("片头", &d.intro_evidence, &d.intro_outcome),
+            ("片尾", &d.outro_evidence, &d.outro_outcome),
+        ] {
+            if evidence.is_some() {
+                match outcome {
+                    Some(marker::adaptive::VerificationOutcome::NeedsFullWindow { reason }) => {
+                        if reason.contains("window_edge")
+                            || reason.contains("boundary_clipped")
+                            || reason.contains("ambiguous_consensus")
+                        {
+                            return Err(format!(
+                                "剧集第 {} 集{}最终验证未决（边界受限: {reason}），保留现有标记",
+                                d.episode, kind_name
+                            ));
+                        }
+                    }
+                    Some(marker::adaptive::VerificationOutcome::SamplingLimit { reason }) => {
+                        return Err(format!(
+                            "剧集第 {} 集{}最终验证未决（采样受限: {reason}），保留现有标记",
+                            d.episode, kind_name
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ensure_no_unresolved_verification(detections: &[EpisodeDetection]) -> Result<(), String> {
+    for d in detections {
+        for (kind_name, evidence, outcome) in [
+            ("片头", &d.intro_evidence, &d.intro_outcome),
+            ("片尾", &d.outro_evidence, &d.outro_outcome),
+        ] {
+            if evidence.is_some() {
+                match outcome {
+                    Some(marker::adaptive::VerificationOutcome::NeedsFullWindow { reason }) => {
+                        return Err(format!(
+                            "剧集第 {} 集{}最终验证未决（需要完整窗口: {reason}），保留现有标记",
+                            d.episode, kind_name
+                        ));
+                    }
+                    Some(marker::adaptive::VerificationOutcome::SamplingLimit { reason }) => {
+                        return Err(format!(
+                            "剧集第 {} 集{}最终验证未决（采样受限: {reason}），保留现有标记",
+                            d.episode, kind_name
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn now_ms() -> i64 {

@@ -99,10 +99,12 @@ impl FingerprintEngine for MockEngine {
 }
 
 fn dummy_row(ledger_id: &str, ep: u32) -> LedgerRow {
+    let dummy_path = std::env::temp_dir().join(format!("dummy_{ledger_id}.mkv"));
+    let _ = std::fs::write(&dummy_path, b"dummy");
     LedgerRow {
         id: domain::LedgerId::new(),
         media_id: domain::MediaId::new(),
-        path: format!("/path/to/{ledger_id}.mkv"),
+        path: dummy_path.to_string_lossy().to_string(),
         season: Some(1),
         episode: Some(ep),
         resolution: None,
@@ -144,9 +146,11 @@ async fn reuse_valid_does_not_read_media() {
     let profile_key = capture_profile_key(&profile);
     let policy = SamplingPolicy::default();
 
+    let row = dummy_row("l-1", 1);
+    store.lock().insert_ledger(&row).unwrap();
     let req = EpisodeCaptureRequest {
         job_id: "job-1".into(),
-        row: dummy_row("l-1", 1),
+        row,
         source_version: "src-v1".into(),
         media_duration_ms: Some(1_800_000),
         audio_stream_index: None,
@@ -183,9 +187,11 @@ async fn recapture_requires_new_job_evidence() {
     let profile_key = capture_profile_key(&profile);
     let policy = SamplingPolicy::default();
 
+    let row = dummy_row("l-1", 1);
+    store.lock().insert_ledger(&row).unwrap();
     let req1 = EpisodeCaptureRequest {
         job_id: "job-1".into(),
-        row: dummy_row("l-1", 1),
+        row,
         source_version: "src-v1".into(),
         media_duration_ms: Some(1_800_000),
         audio_stream_index: None,
@@ -227,9 +233,11 @@ async fn retries_and_fallback_share_four_attempt_budget() {
     let profile_key = capture_profile_key(&profile);
     let policy = SamplingPolicy::default();
 
+    let row = dummy_row("l-exhaust", 1);
+    store.lock().insert_ledger(&row).unwrap();
     let req = EpisodeCaptureRequest {
         job_id: "job-exhaust".into(),
-        row: dummy_row("l-exhaust", 1),
+        row,
         source_version: "src-v1".into(),
         media_duration_ms: Some(1_800_000),
         audio_stream_index: None,

@@ -123,11 +123,8 @@ fn verify_against_model(
 
     let min_required_matches = min_required_matches(model, target);
 
-    if ref_matches.is_empty() {
-        return Err("no_aligned_reference_matches".to_string());
-    }
-
-    if ref_matches.len() < min_required_matches {
+    let independent_matched_episodes = count_unique_episodes(&ref_matches);
+    if independent_matched_episodes < min_required_matches {
         return Err("insufficient_reference_matches".to_string());
     }
 
@@ -146,7 +143,8 @@ fn verify_against_model(
     sort_clusters_by_consensus(&mut clusters);
 
     let best_cluster = &clusters[0];
-    if best_cluster.len() < min_required_matches {
+    let best_unique_episodes = count_cluster_episodes(best_cluster);
+    if best_unique_episodes < min_required_matches {
         return Err("insufficient_consensus_reference_matches".to_string());
     }
 
@@ -164,10 +162,26 @@ fn verify_against_model(
     Ok(VerifiedInterval {
         start_ms: target_start,
         end_ms: target_end,
-        supporting_episodes: best_cluster.len(),
+        supporting_episodes: best_unique_episodes,
         score: average_score(best_cluster),
         coverage,
     })
+}
+
+fn count_unique_episodes(ref_matches: &[(String, u32, CommonSegment)]) -> usize {
+    ref_matches
+        .iter()
+        .map(|(_, ep, _)| *ep)
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+}
+
+fn count_cluster_episodes(cluster: &[&MatchedCandidate]) -> usize {
+    cluster
+        .iter()
+        .map(|c| c.episode)
+        .collect::<std::collections::HashSet<_>>()
+        .len()
 }
 
 /// Compare the target against every reference of one model and keep only the segments whose
@@ -178,8 +192,8 @@ fn collect_reference_matches(
     model: &TemplateModel,
     templates: &TemplateContext,
     policy: &SamplingPolicy,
-) -> (usize, Vec<(String, CommonSegment)>) {
-    let mut ref_matches: Vec<(String, CommonSegment)> = Vec::new();
+) -> (usize, Vec<(String, u32, CommonSegment)>) {
+    let mut ref_matches: Vec<(String, u32, CommonSegment)> = Vec::new();
     let mut raw_segments_found = 0;
 
     for r in &model.references {
@@ -220,7 +234,7 @@ fn collect_reference_matches(
                 continue;
             }
 
-            ref_matches.push((r.sample_id.clone(), s));
+            ref_matches.push((r.sample_id.clone(), r.episode, s));
             break;
         }
     }
@@ -243,6 +257,7 @@ fn min_required_matches(model: &TemplateModel, target: &EpisodeEvidence) -> usiz
 
 struct MatchedCandidate {
     sample_id: String,
+    episode: u32,
     target_start: i64,
     target_end: i64,
     score: f64,
@@ -250,15 +265,16 @@ struct MatchedCandidate {
 
 fn build_candidates(
     target: &EpisodeEvidence,
-    ref_matches: Vec<(String, CommonSegment)>,
+    ref_matches: Vec<(String, u32, CommonSegment)>,
 ) -> Vec<MatchedCandidate> {
     ref_matches
         .into_iter()
-        .map(|(sid, s)| {
+        .map(|(sid, ep, s)| {
             let s_start = target.capture.window.start_ms + (s.start1_sec * 1000.0).round() as i64;
             let s_end = target.capture.window.start_ms + (s.end1_sec * 1000.0).round() as i64;
             MatchedCandidate {
                 sample_id: sid,
+                episode: ep,
                 target_start: s_start,
                 target_end: s_end,
                 score: s.score,
@@ -317,10 +333,12 @@ fn build_clusters<'a>(
     clusters
 }
 
-/// Sort clusters: first by size (descending), then by average score (ascending).
+/// Sort clusters: first by unique supporting episodes count (descending), then by average score (ascending).
 fn sort_clusters_by_consensus(clusters: &mut [Vec<&MatchedCandidate>]) {
     clusters.sort_by(|c1, c2| {
-        let len_cmp = c2.len().cmp(&c1.len());
+        let ep1 = count_cluster_episodes(c1);
+        let ep2 = count_cluster_episodes(c2);
+        let len_cmp = ep2.cmp(&ep1);
         if len_cmp != std::cmp::Ordering::Equal {
             return len_cmp;
         }
@@ -338,8 +356,9 @@ fn ensure_cluster_consensus_is_unambiguous(
     policy: &SamplingPolicy,
 ) -> Result<(), String> {
     let best_avg = average_score(best_cluster);
+    let best_episodes = count_cluster_episodes(best_cluster);
     for other in &clusters[1..] {
-        if other.len() != best_cluster.len() {
+        if count_cluster_episodes(other) != best_episodes {
             break;
         }
         if (best_avg - average_score(other)).abs() > 1e-6 {

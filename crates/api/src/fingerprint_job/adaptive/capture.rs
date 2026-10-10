@@ -86,6 +86,58 @@ pub async fn capture_or_reuse_segment_sample(
     // Rate gate
     ctx.gate.wait_before_capture().await;
 
+    // Check if the underlying file or ledger was deleted while waiting in queue / rate gate.
+    // If the file was deleted or ledger removed while waiting in queue / gate,
+    // cancel the capture immediately without calling FFmpeg or recording a failure.
+    let path_obj = std::path::Path::new(&request.row.path);
+    let is_strm = request.row.path.to_ascii_lowercase().ends_with(".strm");
+    let file_exists = path_obj.exists();
+    let ledger_exists = ctx
+        .store
+        .lock()
+        .get_ledger(&request.row.id.to_string())
+        .map(|opt| opt.is_some())
+        .unwrap_or(true);
+
+    let is_deleted = if is_strm {
+        !file_exists && !ledger_exists
+    } else {
+        !file_exists || !ledger_exists
+    };
+
+    if is_deleted {
+        let finished_at_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let cancelled_attempt = StoredFingerprintAttempt {
+            attempt_id,
+            job_id: request.job_id.clone(),
+            ledger_id: request.row.id.to_string(),
+            kind: kind_str.to_string(),
+            window_start_ms: window.start_ms,
+            window_end_ms: window.end_ms,
+            phase: phase.to_string(),
+            started_at_ms,
+            finished_at_ms: Some(finished_at_ms),
+            status: "cancelled".to_string(),
+            error_kind: Some("file_deleted".to_string()),
+            metrics_json: "{}".to_string(),
+        };
+        {
+            let store = ctx.store.lock();
+            let _ = store.complete_fingerprint_attempt(&cancelled_attempt, None);
+        }
+        tracing::info!(
+            job_id = %request.job_id,
+            ledger_id = %request.row.id,
+            path = %request.row.path,
+            stage = %phase,
+            "文件已被删除，取消声纹采集任务"
+        );
+        return Err("file_deleted: 文件已被删除，任务已取消".to_string());
+    }
+
     let capture_req = CaptureRequest {
         path: PathBuf::from(&request.row.path),
         window: window.clone(),

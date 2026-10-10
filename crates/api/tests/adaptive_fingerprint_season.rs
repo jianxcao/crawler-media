@@ -202,6 +202,8 @@ async fn seed_episodes_retain_markers_after_season_template_built() {
         confidence: Confidence::High,
         filter_score: None,
     };
+    std::fs::write("Test.Retain.S01E01.mkv", b"dummy").unwrap();
+    std::fs::write("Test.Retain.S01E02.mkv", b"dummy").unwrap();
     store.lock().insert_ledger(&row1).unwrap();
     store.lock().insert_ledger(&row2).unwrap();
 
@@ -305,6 +307,9 @@ async fn seed_episodes_retain_markers_after_season_template_built() {
         &units,
     )
     .await;
+
+    let _ = std::fs::remove_file("Test.Retain.S01E01.mkv");
+    let _ = std::fs::remove_file("Test.Retain.S01E02.mkv");
 
     assert!(res.is_ok(), "adaptive season pipeline should succeed: {:?}", res.err());
     let replacement = res.unwrap();

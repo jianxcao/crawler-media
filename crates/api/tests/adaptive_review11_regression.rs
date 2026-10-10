@@ -49,13 +49,13 @@ impl FingerprintCaptureEngine for FixtureEngine {
         let episode: u32 = stem.split('-').nth(1).unwrap().parse().unwrap();
         let version: usize = stem.rsplit('-').next().unwrap().parse().unwrap();
         let tag = if request.window.start_ms == 0 {
-            if ["vote-duplication", "ambiguous-final"].contains(&self.case) { 100 + episode }
+            if ["vote-duplication","ambiguous-final"].contains(&self.case) { 100+episode }
             else if (self.case == "version-conflict" || self.case == "version-missing") && episode == 1 && version == 3 { 1200 }
             else if self.case == "mixed-versions" {
                 if episode == 4 || (episode == 1 && version == 3) { 200 } else { 100 }
             } else { intro_tag(self.case, episode) }
         } else { 5000 };
-        Ok(CapturedFingerprint { window: request.window.clone(), words: (tag..tag + if ["vote-duplication", "ambiguous-final"].contains(&self.case) { (request.window.duration_ms()/1000) as u32 } else { 200 }).collect(),
+        Ok(CapturedFingerprint { window: request.window.clone(), words: (tag..tag + if ["vote-duplication","ambiguous-final"].contains(&self.case) { (request.window.duration_ms()/1000) as u32 } else { 200 }).collect(),
             pcm_duration_ms: Some(request.window.duration_ms()), metrics: CaptureMetrics::default() })
     }
 }
@@ -104,7 +104,6 @@ fn setup(case: &'static str, episodes: &[u32]) -> Fixture {
             st.put_media_marker(&api::store::StoredMediaMarker { media_id, season: 1, episode: row.episode.unwrap(),
                 intro_start_ms: Some(10_000), intro_end_ms: Some(70_000), outro_start_ms: None,
                 outro_end_ms: None, source: "old".into(), locked: false, updated_at: 0 }).unwrap();
-            std::fs::write(&row.path, b"dummy").unwrap();
         }
         let keys: Vec<_> = rows.iter().map(|row| row.id.to_string()).collect();
         let specs: Vec<_> = keys.iter().map(|key| api::store::ProbeJobUnitSpec { ledger_id: key, kind: "tv",
@@ -128,7 +127,9 @@ fn run(f: &Fixture) -> api::store::MarkerResultReplacement {
     debug_final_models(f);
     match result {
         Ok(replacement) => replacement,
-        Err(_err) => {
+        Err(err) => {
+            // If the season pipeline rejected publishing due to unverified boundaries,
+            // fall back to reading existing markers and chapters to construct replacement with preserved facts.
             let st = f.store.lock();
             let mut markers = Vec::new();
             let mut chapter_updates = Vec::new();
@@ -307,79 +308,6 @@ fn conflicting_version_boundaries_do_not_publish_one_versions_range_for_both() {
     assert!(is_conflict, "different boundaries for one logical episode must fail atomically with episode_version_conflict");
 }
 
-#[test]
-fn adding_versions_of_one_reference_must_not_change_independent_consensus() {
-    let control = setup("vote-duplication", &[1, 2, 3, 4]);
-    let correct = run(&control).markers.into_iter().find(|m| m.episode == 4).unwrap();
-    assert_eq!((correct.intro_start_ms, correct.intro_end_ms), (Some(100_000), Some(160_000)));
-    let f = setup("vote-duplication", &[1, 2, 3, 4, 1, 1]);
-    let replacement = run(&f);
-    let target = replacement.markers.iter().find(|m| m.episode == 4).unwrap();
-    println!("E4 control={:?}..{:?}; three versions of E1={:?}..{:?}",
-        correct.intro_start_ms, correct.intro_end_ms, target.intro_start_ms, target.intro_end_ms);
-    assert_eq!((target.intro_start_ms, target.intro_end_ms), (correct.intro_start_ms, correct.intro_end_ms),
-        "repeating one episode must not outvote two independent reference episodes");
-}
-
-#[test]
-fn ambiguous_final_verification_does_not_publish_an_earlier_provisional_match() {
-    let f = setup("ambiguous-final", &[1, 2, 3, 4, 5]);
-    let replacement = run(&f);
-    let target = replacement.markers.iter().find(|m| m.episode == 4).unwrap();
-    let outcome = final_intro_outcome(&f, 4);
-    println!("E4 final_verdict={outcome:?} old_db=10000..70000 published={:?}..{:?}", target.intro_start_ms, target.intro_end_ms);
-    assert!(matches!(outcome, marker::adaptive::VerificationOutcome::NeedsFullWindow { .. }));
-    assert_eq!((target.intro_start_ms, target.intro_end_ms), (Some(10_000), Some(70_000)),
-        "a final inconclusive verdict must invalidate a provisional in-memory match before fallback to old database facts");
-}
-
-#[test]
-fn explicit_no_match_in_one_version_conflicts_with_detected_intro_in_another() {
-    let f = setup("version-missing", &[1, 2, 3, 1]);
-    let result = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(
-        api::probe_manager::season::run_adaptive_season_pipeline(&f.manager, "review9-job", f.media_id, 1, &f.units));
-    let conflict = result.as_ref().err().map(|e| e.contains("episode_version_conflict")).unwrap_or(false);
-    if let Ok(replacement) = result {
-        let ledger_b = &f.units[3].row;
-        let has_intro = replacement.chapter_updates.iter().find(|(id, _)| id == &ledger_b.id.to_string()).unwrap().1.iter().any(|c| c.marker_type == Some(marker::MarkerType::IntroStart));
-        let canonical = replacement.markers.iter().find(|m| m.episode == 1).unwrap();
-        println!("E1 version B intro chapter={has_intro}; shared E1 intro={:?}..{:?}; B verdict={:?}", canonical.intro_start_ms, canonical.intro_end_ms, final_intro_outcome(&f, 1));
-    }
-    assert!(conflict, "one version explicitly has no intro while the other has one; a shared episode marker cannot represent both");
-}
-
-#[test]
-fn unresolved_final_verification_cannot_mark_forced_refresh_successful() {
-    let f = setup("edge-variant", &[1, 2, 3, 4, 5, 6, 7, 8]);
-    let result = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(
-        api::probe_manager::season::run_adaptive_season_pipeline(&f.manager, "review9-job", f.media_id, 1, &f.units));
-    let rejected = result.is_err();
-    if let Ok(replacement) = result {
-        f.store.lock().complete_marker_refresh("review9-job", &[replacement]).unwrap();
-        let marker = f.store.lock().get_media_marker(f.media_id, Some(1), Some(1)).unwrap().unwrap();
-        println!("unresolved E1 job={} source={} intro={:?}..{:?}", f.store.lock().get_probe_job("review9-job").unwrap().unwrap().status, marker.source, marker.intro_start_ms, marker.intro_end_ms);
-    }
-    assert!(rejected, "a forced refresh with a final NeedsFullWindow must fail and retain old result instead of relabeling it as freshly generated success");
-}
-
-fn final_intro_outcome(f: &Fixture, episode: u32) -> marker::adaptive::VerificationOutcome {
-    use marker::adaptive::{SamplingPolicy, SegmentKind, TemplateContext, TemplateModel};
-    let profile = api::fingerprint_job::capture_profile_key(&api::fingerprint_job::FingerprintCaptureProfile::default());
-    let st = f.store.lock();
-    let models: Vec<TemplateModel> = st.list_fingerprint_models(&f.media_id.to_string(), 1).unwrap().into_iter().filter(|m| m.kind == "intro").map(|m| serde_json::from_str(&m.model_json).unwrap()).collect();
-    let mut evidence = Vec::new();
-    for unit in &f.units {
-        let samples = st.find_covering_fingerprint_samples(&api::store::FingerprintSampleQuery {
-            ledger_id: unit.row.id.to_string(), source_version: api::fingerprint_job::current_source_version(std::path::Path::new(&unit.row.path)), capture_profile_key: profile.clone(), kind: "intro".into(), window_start_ms: 0, window_end_ms: 1, captured_job_id: Some("review9-job".into()) }).unwrap();
-        if let Some(sample) = samples.iter().max_by_key(|s| s.window_end_ms - s.window_start_ms) {
-            evidence.push(api::fingerprint_job::adaptive::stored_sample_to_evidence(sample, unit.row.episode.unwrap(), SegmentKind::Intro, Some(1_000_000)));
-        }
-    }
-    let ctx = TemplateContext { models, references: evidence.iter().map(|e| (e.sample_id.clone(), e.clone())).collect() };
-    let target = evidence.iter().rev().find(|e| e.episode == episode).unwrap();
-    marker::adaptive::verify_template_window(f.engine.as_ref(), target, &ctx, &SamplingPolicy::default())
-}
-
 
 fn debug_final_models(f: &Fixture) {
     use marker::adaptive::{SamplingPolicy, SegmentKind, TemplateContext, TemplateModel};
@@ -412,4 +340,75 @@ fn debug_final_models(f: &Fixture) {
         let independent=TemplateContext { models, references:variant.iter().map(|e|(e.sample_id.clone(),e.clone())).collect() };
         println!("isolated B variant E4 verification={:?}",marker::adaptive::verify_template_window(f.engine.as_ref(),target,&independent,&SamplingPolicy::default()));
     }
+}
+
+
+#[test]
+fn adding_versions_of_one_reference_must_not_change_independent_consensus() {
+    let control=setup("vote-duplication", &[1,2,3,4]);
+    let correct=run(&control).markers.into_iter().find(|m|m.episode==4).unwrap();
+    assert_eq!((correct.intro_start_ms,correct.intro_end_ms),(Some(100_000),Some(160_000)));
+    let f=setup("vote-duplication", &[1,2,3,4,1,1]);
+    let replacement=run(&f);
+    let target=replacement.markers.iter().find(|m|m.episode==4).unwrap();
+    println!("E4 control={:?}..{:?}; three versions of E1={:?}..{:?}",correct.intro_start_ms,correct.intro_end_ms,target.intro_start_ms,target.intro_end_ms);
+    assert_eq!((target.intro_start_ms,target.intro_end_ms),(correct.intro_start_ms,correct.intro_end_ms),"repeating one episode must not outvote two independent reference episodes");
+}
+
+#[test]
+fn ambiguous_final_verification_does_not_publish_an_earlier_provisional_match() {
+    let f=setup("ambiguous-final", &[1,2,3,4,5]);
+    let replacement=run(&f);
+    let target=replacement.markers.iter().find(|m|m.episode==4).unwrap();
+    let outcome=final_intro_outcome(&f,4);
+    println!("E4 final_verdict={outcome:?} old_db=10000..70000 published={:?}..{:?}",target.intro_start_ms,target.intro_end_ms);
+    assert!(matches!(outcome,marker::adaptive::VerificationOutcome::NeedsFullWindow {..}));
+    assert_eq!((target.intro_start_ms,target.intro_end_ms),(Some(10_000),Some(70_000)),"a final inconclusive verdict must invalidate a provisional in-memory match before fallback to old database facts");
+}
+
+#[test]
+fn explicit_no_match_in_one_version_conflicts_with_detected_intro_in_another() {
+    let f=setup("version-missing", &[1,2,3,1]);
+    let result=tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(
+        api::probe_manager::season::run_adaptive_season_pipeline(&f.manager,"review9-job",f.media_id,1,&f.units));
+    let conflict=result.as_ref().err().map(|e|e.contains("episode_version_conflict")).unwrap_or(false);
+    if let Ok(replacement)=result {
+        let ledger_b=&f.units[3].row;
+        let has_intro=replacement.chapter_updates.iter().find(|(id,_)|id==&ledger_b.id.to_string()).unwrap().1.iter().any(|c|c.marker_type==Some(marker::MarkerType::IntroStart));
+        let canonical=replacement.markers.iter().find(|m|m.episode==1).unwrap();
+        println!("E1 version B intro chapter={has_intro}; shared E1 intro={:?}..{:?}; B verdict={:?}",canonical.intro_start_ms,canonical.intro_end_ms,final_intro_outcome(&f,1));
+    }
+    assert!(conflict,"one version explicitly has no intro while the other has one; a shared episode marker cannot represent both");
+}
+
+#[test]
+fn unresolved_final_verification_cannot_mark_forced_refresh_successful() {
+    let f=setup("edge-variant", &[1,2,3,4,5,6,7,8]);
+    let result=tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(
+        api::probe_manager::season::run_adaptive_season_pipeline(&f.manager,"review9-job",f.media_id,1,&f.units));
+    let rejected=result.is_err();
+    if let Ok(replacement)=result {
+        f.store.lock().complete_marker_refresh("review9-job",&[replacement]).unwrap();
+        let marker=f.store.lock().get_media_marker(f.media_id,Some(1),Some(1)).unwrap().unwrap();
+        println!("unresolved E1 job={} source={} intro={:?}..{:?}", f.store.lock().get_probe_job("review9-job").unwrap().unwrap().status, marker.source, marker.intro_start_ms,marker.intro_end_ms);
+    }
+    assert!(rejected,"a forced refresh with a final NeedsFullWindow must fail and retain old result instead of relabeling it as freshly generated success");
+}
+
+fn final_intro_outcome(f:&Fixture,episode:u32)->marker::adaptive::VerificationOutcome {
+    use marker::adaptive::{SamplingPolicy,SegmentKind,TemplateContext,TemplateModel};
+    let profile=api::fingerprint_job::capture_profile_key(&api::fingerprint_job::FingerprintCaptureProfile::default());
+    let st=f.store.lock();
+    let models:Vec<TemplateModel>=st.list_fingerprint_models(&f.media_id.to_string(),1).unwrap().into_iter().filter(|m|m.kind=="intro").map(|m|serde_json::from_str(&m.model_json).unwrap()).collect();
+    let mut evidence=Vec::new();
+    for unit in &f.units {
+        let samples=st.find_covering_fingerprint_samples(&api::store::FingerprintSampleQuery {
+            ledger_id:unit.row.id.to_string(),source_version:api::fingerprint_job::current_source_version(std::path::Path::new(&unit.row.path)),capture_profile_key:profile.clone(),kind:"intro".into(),window_start_ms:0,window_end_ms:1,captured_job_id:Some("review9-job".into())}).unwrap();
+        if let Some(sample)=samples.iter().max_by_key(|s|s.window_end_ms-s.window_start_ms) {
+            evidence.push(api::fingerprint_job::adaptive::stored_sample_to_evidence(sample,unit.row.episode.unwrap(),SegmentKind::Intro,Some(1_000_000)));
+        }
+    }
+    let ctx=TemplateContext {models,references:evidence.iter().map(|e|(e.sample_id.clone(),e.clone())).collect()};
+    let target=evidence.iter().rev().find(|e|e.episode==episode).unwrap();
+    marker::adaptive::verify_template_window(f.engine.as_ref(),target,&ctx,&SamplingPolicy::default())
 }

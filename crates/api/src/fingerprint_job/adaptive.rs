@@ -129,6 +129,9 @@ async fn process_segment(
             let verify_ev = match capture_with_retries(ctx, request, kind, &window, "fast_verify", attempts, verify_budget).await {
                 Ok(ev) => ev,
                 Err(err) => {
+                    if err.starts_with("file_deleted") {
+                        return Err(err);
+                    }
                     tracing::warn!(error = %err, "fast verify capture failed, trying full window fallback");
                     let fallback_win = full_window_for_kind(descriptor.duration_ms, request.policy.full_window_duration_secs, kind);
                     let fb_ev = capture_with_retries(ctx, request, kind, &fallback_win, "fallback_full_window", attempts, max_budget).await?;
@@ -242,6 +245,9 @@ async fn capture_with_retries(
         {
             Ok(ev) => return Ok(ev),
             Err(e) => {
+                if e.starts_with("file_deleted") {
+                    return Err(e);
+                }
                 last_err = e;
             }
         }
