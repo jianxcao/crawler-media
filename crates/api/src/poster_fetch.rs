@@ -38,11 +38,15 @@ pub fn attach_poster(state: &ApiState, media: &Media, video: &Path) -> Option<Ve
         .map(|config| config.effective.mirror_images)
         .unwrap_or(true);
     if !mirror_images {
+        tracing::info!(media = %media.title, "镜像图片已关闭，跳过海报");
         return None;
     }
-    let dir = video.parent()?;
+    let Some(dir) = video.parent() else {
+        tracing::warn!(media = %media.title, video = %video.display(), "海报落盘失败：视频没有父目录");
+        return None;
+    };
     let target = dir.join("poster.jpg");
-    tracing::debug!(media = %media.title, video = %video.display(), "为媒体文件补充海报");
+    tracing::debug!(media = %media.title, video = %video.display(), target = %target.display(), "为媒体文件补充海报");
 
     // A user-selected or uploaded cover is authoritative. Metadata refreshes
     // and future imports must not overwrite it (Emby-style artwork lock).
@@ -56,7 +60,14 @@ pub fn attach_poster(state: &ApiState, media: &Media, video: &Path) -> Option<Ve
         .and_then(|value| value["poster_locked"].as_bool())
         .unwrap_or(false);
     if locked && target.is_file() {
-        return std::fs::read(&target).ok();
+        tracing::debug!(media = %media.title, path = %target.display(), "海报已锁定，保留现有文件");
+        return match std::fs::read(&target) {
+            Ok(bytes) => Some(bytes),
+            Err(error) => {
+                tracing::warn!(%error, media = %media.title, path = %target.display(), "读取已锁定海报失败");
+                None
+            }
+        };
     }
 
     // Channel 1: catalog artwork. poster_mode=language picks per the language
@@ -68,37 +79,58 @@ pub fn attach_poster(state: &ApiState, media: &Media, video: &Path) -> Option<Ve
             .as_ref()
             .map(|c| c.effective.poster_size.as_str())
             .unwrap_or("w780");
-        let picked: Option<Vec<u8>> =
-            match config.as_ref().map(|c| c.effective.poster_mode.as_str()) {
-                Some("language") => {
-                    let candidates = state.catalog.image_candidates(media.kind, tmdb_id).ok();
-                    if let Some(candidates) = candidates {
-                        let effective = config.as_ref().map(|c| &c.effective);
-                        let meta = effective.map(|e| e.primary_language()).unwrap_or("zh-CN");
-                        let priority = effective
-                            .map(|e| e.poster_language_priority.as_slice())
-                            .unwrap_or_default();
-                        let min = effective.map(|e| e.poster_min_width).unwrap_or(500);
-                        let size = effective.map(|e| e.poster_size.as_str()).unwrap_or("w780");
-                        pick_candidate(&candidates.posters, priority, meta, min)
-                            .and_then(|c| state.poster_fetch.get(&c.url(size)).ok())
-                            .filter(|bytes| !bytes.is_empty())
-                    } else {
-                        None
+        let mode = config
+            .as_ref()
+            .map(|c| c.effective.poster_mode.as_str())
+            .unwrap_or("default");
+        let picked: Option<Vec<u8>> = if mode == "language" {
+            match state.catalog.image_candidates(media.kind, tmdb_id) {
+                Ok(candidates) => {
+                    let effective = config.as_ref().map(|c| &c.effective);
+                    let meta = effective.map(|e| e.primary_language()).unwrap_or("zh-CN");
+                    let priority = effective
+                        .map(|e| e.poster_language_priority.as_slice())
+                        .unwrap_or_default();
+                    let min = effective.map(|e| e.poster_min_width).unwrap_or(500);
+                    let size = effective.map(|e| e.poster_size.as_str()).unwrap_or("w780");
+                    match pick_candidate(&candidates.posters, priority, meta, min) {
+                        Some(candidate) => {
+                            fetch_artwork(state, media, "海报", &candidate.url(size))
+                        }
+                        None => {
+                            tracing::warn!(
+                                media = %media.title,
+                                tmdb_id,
+                                posters = candidates.posters.len(),
+                                min_width = min,
+                                "没有符合语言和宽度的海报候选"
+                            );
+                            None
+                        }
                     }
                 }
-                _ => state
-                    .catalog
-                    .poster_url(media.kind, tmdb_id)
-                    .ok()
-                    .flatten()
-                    .map(|url| poster_url_at_size(&url, size))
-                    .and_then(|url| state.poster_fetch.get(&url).ok())
-                    .filter(|bytes| !bytes.is_empty()),
-            };
+                Err(error) => {
+                    tracing::warn!(%error, media = %media.title, tmdb_id, "拉取海报候选失败");
+                    None
+                }
+            }
+        } else {
+            match state.catalog.poster_url(media.kind, tmdb_id) {
+                Ok(Some(url)) => {
+                    fetch_artwork(state, media, "海报", &poster_url_at_size(&url, size))
+                }
+                Ok(None) => {
+                    tracing::warn!(media = %media.title, tmdb_id, "目录没有海报地址");
+                    None
+                }
+                Err(error) => {
+                    tracing::warn!(%error, media = %media.title, tmdb_id, "查询海报地址失败");
+                    None
+                }
+            }
+        };
         if let Some(bytes) = picked {
-            std::fs::write(&target, &bytes).ok()?;
-            return Some(bytes);
+            return write_artwork(media, &target, "海报", &bytes);
         }
     }
 
@@ -131,15 +163,58 @@ pub fn attach_poster(state: &ApiState, media: &Media, video: &Path) -> Option<Ve
             }
         };
         if generate_allowed {
-            if let Ok(bytes) = frame_poster(video) {
-                if !bytes.is_empty() {
-                    std::fs::write(&target, &bytes).ok()?;
-                    return Some(bytes);
+            match frame_poster(video) {
+                Ok(bytes) if !bytes.is_empty() => {
+                    return write_artwork(media, &target, "海报", &bytes);
+                }
+                Ok(_) => {
+                    tracing::warn!(media = %media.title, video = %video.display(), "视频截帧海报为空");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, media = %media.title, video = %video.display(), "视频截帧海报失败");
                 }
             }
         }
     }
+    tracing::warn!(
+        media = %media.title,
+        video = %video.display(),
+        target = %target.display(),
+        "海报未写入"
+    );
     None
+}
+
+fn fetch_artwork(state: &ApiState, media: &Media, kind: &str, url: &str) -> Option<Vec<u8>> {
+    match state.poster_fetch.get(url) {
+        Ok(bytes) if !bytes.is_empty() => Some(bytes),
+        Ok(_) => {
+            tracing::warn!(media = %media.title, url, "{kind}下载结果为空");
+            None
+        }
+        Err(error) => {
+            tracing::warn!(%error, media = %media.title, url, "{kind}下载失败");
+            None
+        }
+    }
+}
+
+fn write_artwork(media: &Media, target: &Path, kind: &str, bytes: &[u8]) -> Option<Vec<u8>> {
+    match std::fs::write(target, bytes) {
+        Ok(()) => {
+            tracing::info!(
+                media = %media.title,
+                path = %target.display(),
+                bytes = bytes.len(),
+                "{kind}已写入"
+            );
+            Some(bytes.to_vec())
+        }
+        Err(error) => {
+            tracing::warn!(%error, media = %media.title, path = %target.display(), "{kind}写入失败");
+            None
+        }
+    }
 }
 
 fn poster_url_at_size(url: &str, size: &str) -> String {
@@ -231,11 +306,18 @@ fn attach_backdrop_opts(
     video: &Path,
     force: bool,
 ) -> Option<Vec<u8>> {
-    let config = state.store.lock().get_scrape_config().ok()?;
+    let Some(config) = state.store.lock().get_scrape_config().ok() else {
+        tracing::warn!(media = %media.title, "读取刮削配置失败，跳过背景图");
+        return None;
+    };
     if !config.effective.mirror_images {
+        tracing::info!(media = %media.title, "镜像图片已关闭，跳过背景图");
         return None;
     }
-    let dir = video.parent()?;
+    let Some(dir) = video.parent() else {
+        tracing::warn!(media = %media.title, video = %video.display(), "背景图落盘失败：视频没有父目录");
+        return None;
+    };
     let show_dir = if dir
         .file_name()
         .and_then(|n| n.to_str())
@@ -247,28 +329,50 @@ fn attach_backdrop_opts(
     };
     let target = show_dir.join("fanart.jpg");
     if !force && target.is_file() {
-        return std::fs::read(&target).ok();
+        tracing::debug!(media = %media.title, path = %target.display(), "背景图已存在，跳过下载");
+        return match std::fs::read(&target) {
+            Ok(bytes) => Some(bytes),
+            Err(error) => {
+                tracing::warn!(%error, media = %media.title, path = %target.display(), "读取已有背景图失败");
+                None
+            }
+        };
     }
-    let tmdb_id = media.tmdb_id.as_deref()?;
-    let candidates = state.catalog.image_candidates(media.kind, tmdb_id).ok()?;
+    let Some(tmdb_id) = media.tmdb_id.as_deref() else {
+        tracing::warn!(media = %media.title, "没有 TMDB ID，跳过背景图");
+        return None;
+    };
+    let candidates = match state.catalog.image_candidates(media.kind, tmdb_id) {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            tracing::warn!(%error, media = %media.title, tmdb_id, "拉取背景图候选失败");
+            return None;
+        }
+    };
     if candidates.backdrops.is_empty() {
+        tracing::warn!(media = %media.title, tmdb_id, "目录没有背景图候选");
         return None;
     }
-    let picked = pick_candidate(
+    let Some(picked) = pick_candidate(
         &candidates.backdrops,
         &config.effective.backdrop_language_priority,
         config.effective.primary_language(),
         config.effective.backdrop_min_width,
-    )?;
-    let bytes = state
-        .poster_fetch
-        .get(&picked.url(&config.effective.backdrop_size))
-        .ok()?;
-    if bytes.is_empty() {
+    ) else {
+        tracing::warn!(
+            media = %media.title,
+            tmdb_id,
+            backdrops = candidates.backdrops.len(),
+            min_width = config.effective.backdrop_min_width,
+            "没有符合语言和宽度的背景图候选"
+        );
         return None;
-    }
-    std::fs::write(&target, &bytes).ok()?;
-    Some(bytes)
+    };
+    let url = picked.url(&config.effective.backdrop_size);
+    let Some(bytes) = fetch_artwork(state, media, "背景图", &url) else {
+        return None;
+    };
+    write_artwork(media, &target, "背景图", &bytes)
 }
 
 fn lang_subtag(language: &str) -> String {
