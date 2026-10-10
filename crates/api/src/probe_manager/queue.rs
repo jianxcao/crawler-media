@@ -21,7 +21,9 @@ impl ProbeManager {
             self.seen.lock().remove(&ledger_id);
             return false;
         };
-        let current_job = match self.store.lock().get_probe_job(&current_job_id) {
+        // Error handling calls finish(), which locks Store again.
+        let current_job = self.store.lock().get_probe_job(&current_job_id);
+        let current_job = match current_job {
             Ok(Some(job)) => job,
             Ok(None) => {
                 tracing::error!(

@@ -35,7 +35,8 @@ pub(super) fn apply_marker_refresh(
             return;
         }
     };
-    let all_rows = match mgr.store.lock().list_ledger() {
+    let all_rows = mgr.store.lock().list_ledger();
+    let all_rows = match all_rows {
         Ok(rows) => rows,
         Err(error) => {
             fail_job(mgr, job, "读取媒体台账失败");

@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::plugins::PluginError;
 
@@ -37,7 +37,7 @@ impl Hook {
 
 #[derive(Default)]
 pub struct Bus {
-    hooks: Mutex<Vec<Hook>>,
+    hooks: Mutex<Vec<Arc<Hook>>>,
 }
 
 impl Bus {
@@ -47,11 +47,13 @@ impl Bus {
 
     pub fn register(&self, hook: Hook) {
         tracing::debug!(step = ?hook.step, "注册钩子");
-        self.hooks.lock().expect("hook bus").push(hook);
+        self.hooks.lock().expect("hook bus").push(Arc::new(hook));
     }
 
     pub fn emit(&self, event: &HookEvent) -> Result<(), PluginError> {
-        let hooks = self.hooks.lock().expect("hook bus");
+        // Callbacks may register or emit Hooks. Snapshot the registry so no
+        // registry lock is retained across user code; new Hooks apply next emit.
+        let hooks = self.hooks.lock().expect("hook bus").clone();
         let mut fired = 0usize;
         for hook in hooks.iter() {
             if hook.step == event.step {

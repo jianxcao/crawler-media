@@ -33,6 +33,9 @@ pub mod stages;
 pub(crate) mod timings;
 mod worker;
 
+#[cfg(test)]
+mod locking_tests;
+
 /// 一个待探测单元（对应一条 ledger 行）。
 #[derive(Clone)]
 pub struct ProbeUnit {
@@ -453,10 +456,8 @@ impl ProbeManager {
 
     /// 是否已在排队/执行（前端「探测中」状态用）。
     pub fn is_queued(&self, ledger_id: &str) -> bool {
-        self.store
-            .lock()
-            .is_probe_queued(ledger_id)
-            .unwrap_or_else(|_| self.seen.lock().contains(ledger_id))
+        let queued = self.store.lock().is_probe_queued(ledger_id);
+        queued.unwrap_or_else(|_| self.seen.lock().contains(ledger_id))
     }
 
     pub(crate) fn marker_refresh_job(
@@ -547,7 +548,10 @@ impl ProbeManager {
         match result {
             Ok(Some(job)) => {
                 if !job.is_active() {
-                    if let Ok(units) = self.store.lock().probe_job_units(job_id) {
+                    // Enqueue holds seen before Store. Never retain the Store
+                    // temporary guard while acquiring seen (including in if let).
+                    let units = self.store.lock().probe_job_units(job_id);
+                    if let Ok(units) = units {
                         let mut seen = self.seen.lock();
                         for pending in units {
                             seen.remove(&pending.ledger_id);
