@@ -45,12 +45,16 @@ fn downloader_json_with_store(row: &crate::store::DownloaderRow, store: &crate::
         .get_setting(&format!("downloader.{}.verified", row.id))
         .ok()
         .flatten();
+    let last_error = store
+        .get_setting(&format!("downloader.{}.last_error", row.id))
+        .ok()
+        .flatten();
     let status = if !row.enabled {
         "disabled"
     } else if verified.as_deref() == Some("true") {
         "active"
     } else if verified.as_deref() == Some("false") {
-        "error"
+        "failed"
     } else {
         "pending"
     };
@@ -65,7 +69,7 @@ fn downloader_json_with_store(row: &crate::store::DownloaderRow, store: &crate::
         "is_default": row.is_default,
         "enabled": row.enabled,
         "status": status,
-        "last_error": null,
+        "last_error": last_error,
     })
 }
 
@@ -265,6 +269,9 @@ pub(crate) async fn patch_downloader(
             &error.to_string(),
         );
     }
+    // Updating configuration invalidates previous verification state
+    let _ = store.delete_setting(&format!("downloader.{}.verified", row.id));
+    let _ = store.delete_setting(&format!("downloader.{}.last_error", row.id));
     if make_default {
         if let Err(error) = store.set_default_downloader(row.id) {
             return err(
@@ -292,6 +299,8 @@ pub(crate) async fn delete_downloader(
         }
     };
     let store = state.store.lock();
+    let _ = store.delete_setting(&format!("downloader.{id}.verified"));
+    let _ = store.delete_setting(&format!("downloader.{id}.last_error"));
     match store.delete_downloader(id) {
         Ok(true) => ok(json!({ "deleted": true })).into_response(),
         _ => err(StatusCode::NOT_FOUND, "downloader.missing", "下载器不存在"),
@@ -359,27 +368,25 @@ pub(crate) async fn verify_downloader(
     let result = task.await;
     match result {
         Ok(Ok(_)) => {
-            let _ = state
-                .store
-                .lock()
-                .put_setting(&format!("downloader.{id}.verified"), "true");
+            let store = state.store.lock();
+            let _ = store.put_setting(&format!("downloader.{id}.verified"), "true");
+            let _ = store.delete_setting(&format!("downloader.{id}.last_error"));
             ok(json!({ "ok": true, "error": null })).into_response()
         }
         Ok(Err(error)) => {
-            let _ = state
-                .store
-                .lock()
-                .put_setting(&format!("downloader.{id}.verified"), "false");
+            let store = state.store.lock();
+            let _ = store.put_setting(&format!("downloader.{id}.verified"), "false");
+            let _ = store.put_setting(&format!("downloader.{id}.last_error"), &error);
             tracing::error!(id = %id, error = %error, "下载器验证连接失败");
             ok(json!({ "ok": false, "error": error })).into_response()
         }
         Err(join_err) => {
-            let _ = state
-                .store
-                .lock()
-                .put_setting(&format!("downloader.{id}.verified"), "false");
+            let err_msg = join_err.to_string();
+            let store = state.store.lock();
+            let _ = store.put_setting(&format!("downloader.{id}.verified"), "false");
+            let _ = store.put_setting(&format!("downloader.{id}.last_error"), &err_msg);
             tracing::error!(id = %id, error = %join_err, "下载器验证连接任务异常中止");
-            ok(json!({ "ok": false, "error": join_err.to_string() })).into_response()
+            ok(json!({ "ok": false, "error": err_msg })).into_response()
         }
     }
 }

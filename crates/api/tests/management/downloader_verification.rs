@@ -82,4 +82,26 @@ async fn verify_downloader_fails_on_unreachable_endpoint() {
     let verify_data = json_data(verify_resp).await;
     assert_eq!(verify_data["ok"], false);
     assert!(verify_data["error"].as_str().is_some());
+
+    // 4. Listing after failed verify reflects "failed" and populates last_error
+    let list_resp2 = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/api/v1/downloaders",
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(list_resp2.status(), StatusCode::OK);
+    let list2 = json_data(list_resp2).await;
+    let found2 = list2
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == dl_id)
+        .unwrap();
+    assert_eq!(found2["status"], "failed");
+    assert!(found2["last_error"].as_str().is_some());
 }
