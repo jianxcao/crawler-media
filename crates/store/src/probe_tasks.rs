@@ -233,7 +233,7 @@ impl Store {
         error: Option<&str>,
     ) -> Result<(ProbeJob, bool, bool), StoreError> {
         let status = if succeeded { "succeeded" } else { "failed" };
-        self.finish_probe_unit_with_status(job_id, ledger_id, status, error)
+        self.finish_probe_unit_with_status(job_id, ledger_id, status, None, error)
     }
 
     pub fn cancel_probe_unit(
@@ -242,7 +242,7 @@ impl Store {
         ledger_id: &str,
         reason: &str,
     ) -> Result<(ProbeJob, bool, bool), StoreError> {
-        self.finish_probe_unit_with_status(job_id, ledger_id, "cancelled", Some(reason))
+        self.finish_probe_unit_with_status(job_id, ledger_id, "cancelled", Some("cancelled"), Some(reason))
     }
 
     /// Cancel an atomic refresh, terminalizing pending units and releasing the scope together.
@@ -266,11 +266,12 @@ impl Store {
         Ok(())
     }
 
-    fn finish_probe_unit_with_status(
+    pub fn finish_probe_unit_with_status(
         &self,
         job_id: &str,
         ledger_id: &str,
         status: &str,
+        _error_kind: Option<&str>,
         error: Option<&str>,
     ) -> Result<(ProbeJob, bool, bool), StoreError> {
         let tx = self.library.unchecked_transaction()?;
@@ -279,24 +280,83 @@ impl Store {
              WHERE job_id = ?1 AND ledger_id = ?2 AND status IN ('queued', 'running')",
             params![job_id, ledger_id, status, error],
         )?;
+        let total: usize = tx.query_row(
+            "SELECT total FROM probe_jobs WHERE id = ?1",
+            [job_id],
+            |r| r.get(0),
+        )?;
+        let completed: usize = tx.query_row(
+            "SELECT COUNT(*) FROM probe_job_units
+             WHERE job_id = ?1 AND status IN ('succeeded', 'failed', 'cancelled', 'partial')",
+            [job_id],
+            |r| r.get(0),
+        )?;
+        let succeeded: usize = tx.query_row(
+            "SELECT COUNT(*) FROM probe_job_units WHERE job_id = ?1 AND status = 'succeeded'",
+            [job_id],
+            |r| r.get(0),
+        )?;
+        let failed: usize = tx.query_row(
+            "SELECT COUNT(*) FROM probe_job_units WHERE job_id = ?1 AND status = 'failed'",
+            [job_id],
+            |r| r.get(0),
+        )?;
+        let partial: usize = tx.query_row(
+            "SELECT COUNT(*) FROM probe_job_units WHERE job_id = ?1 AND status = 'partial'",
+            [job_id],
+            |r| r.get(0),
+        )?;
+
+        let kind: String = tx.query_row(
+            "SELECT kind FROM probe_jobs WHERE id = ?1",
+            [job_id],
+            |r| r.get(0),
+        )?;
+
+        // marker_refresh remains "running" until complete_marker_refresh atomically finishes it
+        let all_done = completed >= total;
+        let job_status = if kind == "marker_refresh" {
+            if all_done && failed > 0 {
+                "failed"
+            } else {
+                "running"
+            }
+        } else if all_done {
+            if failed > 0 {
+                "failed"
+            } else if partial > 0 {
+                "partial"
+            } else {
+                "succeeded"
+            }
+        } else {
+            "running"
+        };
+        let finished_at = if all_done && kind != "marker_refresh" {
+            Some(now_ms())
+        } else if all_done && failed > 0 {
+            Some(now_ms())
+        } else {
+            None
+        };
+
         tx.execute(
             "UPDATE probe_jobs SET
-                 completed = (SELECT COUNT(*) FROM probe_job_units
-                              WHERE job_id = ?1 AND status IN ('succeeded', 'failed', 'cancelled')),
-                 succeeded = (SELECT COUNT(*) FROM probe_job_units
-                              WHERE job_id = ?1 AND status = 'succeeded'),
-                 failed = (SELECT COUNT(*) FROM probe_job_units
-                           WHERE job_id = ?1 AND status = 'failed'),
+                 completed = ?2,
+                 succeeded = ?3,
+                 failed = ?4,
+                 status = ?5,
+                 finished_at_ms = COALESCE(?6, finished_at_ms),
                  error = COALESCE((SELECT error FROM probe_job_units
                                    WHERE job_id = ?1 AND error IS NOT NULL LIMIT 1), error)
              WHERE id = ?1",
-            [job_id],
+            params![job_id, completed, succeeded, failed, job_status, finished_at],
         )?;
         tx.commit()?;
         let job = self
             .get_probe_job(job_id)?
             .ok_or_else(|| StoreError::Missing(format!("probe job {job_id}")))?;
-        Ok((job.clone(), changed > 0, job.completed >= job.total))
+        Ok((job.clone(), changed > 0, all_done))
     }
 
     pub fn finish_probe_job(

@@ -30,6 +30,7 @@ mod subscribes;
 mod users;
 
 pub mod password;
+pub mod probe_state;
 
 pub use catalog::CatalogCacheRow;
 pub use downloaders::DownloaderRow;
@@ -40,6 +41,9 @@ pub use fingerprint_samples::{FingerprintSampleQuery, StoredFingerprintSample};
 pub use libraries::Library;
 pub use library::{MarkerResultReplacement, StoredMediaMarker};
 pub use playback::{PlayLogRow, SessionRow, UNIT_WHOLE, UnitRow, UnitState};
+pub use probe_state::{
+    retry_delay_ms, ProbeStage, ProbeStageCompletion, ProbeStageKey, ProbeStageState, ProbeStageStatus,
+};
 pub use probe_tasks::{ProbeJob, ProbeJobUnit, ProbeJobUnitSpec};
 pub use roots::LibraryRoot;
 pub use subscribe_wanted::WantedHistory;
