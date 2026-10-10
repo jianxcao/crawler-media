@@ -191,13 +191,14 @@ async fn standard_authorization_isolates_devices() {
 async fn stopped_device_retains_revocable_identity() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, _, id) = app(tmp.path());
+    Store::open(tmp.path().join("data")).unwrap().set_user_token(admin(), "device-token").unwrap();
     for route in ["/Sessions/Playing", "/Sessions/Playing/Stopped"] {
         assert_eq!(
             send(
                 &app,
                 "POST",
                 route,
-                "Bearer admin-token",
+                "Bearer device-token",
                 json!({"ItemId":id,"PositionTicks":10000000}),
                 Some("actual-device")
             )
@@ -239,13 +240,13 @@ async fn stopped_device_retains_revocable_identity() {
             &app,
             "GET",
             &stream,
-            "Bearer admin-token",
+            "Bearer device-token",
             json!({}),
             Some("actual-device")
         )
         .await
         .status(),
-        StatusCode::FORBIDDEN
+        StatusCode::UNAUTHORIZED
     );
     assert_eq!(
         send(
@@ -541,3 +542,5 @@ async fn jellyfin_preserves_legacy_movie_marks() {
 mod failures;
 #[path = "playback_regression/protocol.rs"]
 mod protocol;
+#[path = "playback_regression/credentials.rs"]
+mod credentials;

@@ -2,9 +2,14 @@
 //! Fetched bytes are cached on disk under `{CRAWLER_MEDIA_DATA}/cache/images`
 //! so a second visit never re-fetches the upstream image.
 
-use std::io::Write;
 use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+
+mod cache;
+
+const IMAGE_RESPONSE_LIMIT: u64 = 8 * 1024 * 1024;
+const IMAGE_CONCURRENCY: usize = 8;
 
 use axum::extract::Query;
 use axum::http::{StatusCode, header};
@@ -37,11 +42,38 @@ const ALLOWED_HOSTS: &[&str] = &[
     "s4.anilist.co",
 ];
 
-pub(crate) async fn proxy_image(Query(query): Query<ProxyQuery>) -> Response {
+pub(crate) async fn proxy_image(query: Query<ProxyQuery>) -> Response {
+    static GATE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    proxy_with_gate(
+        query.0,
+        GATE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(IMAGE_CONCURRENCY)))
+            .clone(),
+    )
+    .await
+}
+
+async fn proxy_with_gate(query: ProxyQuery, gate: Arc<tokio::sync::Semaphore>) -> Response {
     if !allowed_url(&query.url) {
         return err(StatusCode::BAD_REQUEST, "image.invalid", "不允许的图床");
     }
-    match tokio::task::spawn_blocking(move || cached_fetch(&query.url)).await {
+    let permit = match gate.try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            tracing::warn!("Image proxy concurrency limit reached");
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "image.busy",
+                "图片代理繁忙，请稍后重试",
+            );
+        }
+    };
+    match tokio::task::spawn_blocking(move || {
+        // Keep the permit in the blocking task, including after request cancellation.
+        let _permit = permit;
+        cached_fetch(&query.url)
+    })
+    .await
+    {
         Ok(Ok((content_type, bytes))) => (
             StatusCode::OK,
             [
@@ -51,12 +83,18 @@ pub(crate) async fn proxy_image(Query(query): Query<ProxyQuery>) -> Response {
             bytes,
         )
             .into_response(),
-        Ok(Err(error)) => err(StatusCode::BAD_GATEWAY, "image.fetch", &error),
-        Err(error) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "image.fetch",
-            &error.to_string(),
-        ),
+        Ok(Err(error)) => {
+            tracing::error!(%error, "Image proxy failed");
+            err(StatusCode::BAD_GATEWAY, "image.fetch", &error)
+        }
+        Err(error) => {
+            tracing::error!(%error, "Image proxy worker failed");
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "image.fetch",
+                &error.to_string(),
+            )
+        }
     }
 }
 
@@ -67,84 +105,21 @@ fn cache_root() -> PathBuf {
 }
 
 fn cached_fetch(url: &str) -> Result<(String, Vec<u8>), String> {
-    let key = cache_key(url);
-    let root = cache_root();
-    let cache_file = root.join(format!("{key}.img"));
-    if let Ok(bytes) = std::fs::read(&cache_file) {
-        if let Some((content_type, _)) = split_meta(&bytes) {
-            return Ok((content_type, strip_meta(bytes)));
-        }
-    }
-    let (content_type, bytes) = fetch_image(url)?;
-    // Best-effort write: cache miss must not fail the request.
-    if let Err(error) = std::fs::create_dir_all(&root) {
-        eprintln!("[image_proxy] cache dir: {error}");
-    } else {
-        let mut meta = content_type.clone().into_bytes();
-        meta.push(b'\n');
-        let mut payload = meta;
-        payload.extend_from_slice(&bytes);
-        if let Err(error) =
-            std::fs::File::create(&cache_file).and_then(|mut file| file.write_all(&payload))
-        {
-            eprintln!("[image_proxy] cache write: {error}");
-        } else if let Err(error) = trim_image_cache(&root, IMAGE_CACHE_BUDGET_BYTES) {
-            eprintln!("[image_proxy] cache trim: {error}");
-        }
-    }
-    Ok((content_type, bytes))
+    static CACHE: OnceLock<cache::ImageCache> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            cache::ImageCache::new(cache_root(), IMAGE_CACHE_BUDGET_BYTES, IMAGE_RESPONSE_LIMIT)
+        })
+        .get(url, || fetch_image(url))
 }
 
-/// SipHash hex of the URL: fine for a disk-cache filename (not security).
-fn trim_image_cache(root: &std::path::Path, budget: u64) -> std::io::Result<()> {
-    let mut files = Vec::new();
-    for entry in std::fs::read_dir(root)? {
-        let entry = entry?;
-        let meta = entry.metadata()?;
-        if meta.is_file() {
-            files.push((
-                meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
-                meta.len(),
-                entry.path(),
-            ));
-        }
-    }
-    let mut total: u64 = files.iter().map(|(_, len, _)| *len).sum();
-    if total <= budget {
-        return Ok(());
-    }
-    files.sort_by_key(|(modified, _, _)| *modified);
-    for (_, len, path) in files {
-        if total <= budget {
-            break;
-        }
-        if std::fs::remove_file(&path).is_ok() {
-            total = total.saturating_sub(len);
-        }
-    }
-    Ok(())
-}
-
+/// SipHash hex of the URL: a disk-cache filename, not a security primitive.
 fn cache_key(url: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
     url.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
-}
-
-/// Cache layout: `content-type\n` followed by image bytes.
-fn split_meta(payload: &[u8]) -> Option<(String, &[u8])> {
-    let split = payload.iter().position(|byte| *byte == b'\n')?;
-    let content_type = String::from_utf8(payload[..split].to_vec()).ok()?;
-    Some((content_type, &payload[split + 1..]))
-}
-
-fn strip_meta(payload: Vec<u8>) -> Vec<u8> {
-    match payload.iter().position(|byte| *byte == b'\n') {
-        Some(split) => payload[split + 1..].to_vec(),
-        None => payload,
-    }
 }
 
 /// 白名单校验：解析 URL，取**主机名**（不是子串）做精确/子域匹配；
@@ -254,14 +229,34 @@ fn fetch_image(url: &str) -> Result<(String, Vec<u8>), String> {
         if !content_type.starts_with("image/") {
             return Err(format!("上游不是图片: {content_type}"));
         }
-        let bytes = response
-            .into_body()
-            .read_to_vec()
-            .map_err(|err| err.to_string())?;
+        let bytes = read_image_body(response.into_body(), IMAGE_RESPONSE_LIMIT)?;
         return Ok((content_type, bytes));
     }
     Err("重定向过多".into())
 }
+
+fn read_image_body(body: ureq::Body, limit: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    // ureq's body limit caps wire bytes before decompression. Also cap decoded bytes,
+    // so a small compressed response cannot allocate an unbounded image buffer.
+    let mut reader = body
+        .into_with_config()
+        .limit(limit + 1)
+        .reader()
+        .take(limit + 1);
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > limit {
+        return Err(format!("Image response exceeds {limit} bytes"));
+    }
+    Ok(bytes)
+}
+
+#[cfg(test)]
+#[path = "image_proxy/tests.rs"]
+mod cache_tests;
 
 #[cfg(test)]
 mod tests {

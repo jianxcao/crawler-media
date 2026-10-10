@@ -3,7 +3,7 @@ use media_server::provider::MediaServerProvider;
 
 fn standard_auth(device: &str) -> String {
     format!(
-        "MediaBrowser Token=\"admin-token\", DeviceId=\"{device}\", Client=\"Infuse\", Device=\"Same Name\", Version=\"7.1\""
+        "MediaBrowser Token=\"{device}-token\", DeviceId=\"{device}\", Client=\"Infuse\", Device=\"Same Name\", Version=\"7.1\""
     )
 }
 
@@ -11,7 +11,9 @@ fn standard_auth(device: &str) -> String {
 async fn standard_identity_metadata_and_stop_are_independent() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, _, id) = app(tmp.path());
+    let store = Store::open(tmp.path().join("data")).unwrap();
     for device in ["bedroom", "living-room"] {
+        store.set_user_token(admin(), &format!("{device}-token")).unwrap();
         assert_eq!(
             send(
                 &app,
@@ -89,7 +91,7 @@ async fn standard_identity_metadata_and_stop_are_independent() {
         )
         .await
         .status(),
-        StatusCode::FORBIDDEN
+        StatusCode::UNAUTHORIZED
     );
     assert_eq!(
         send(
@@ -115,7 +117,7 @@ async fn standard_identity_metadata_and_stop_are_independent() {
         )
         .await
         .status(),
-        StatusCode::FORBIDDEN
+        StatusCode::UNAUTHORIZED
     );
 }
 

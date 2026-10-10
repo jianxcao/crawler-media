@@ -23,6 +23,7 @@ import {
   sortPresetsFor,
 } from "@/lib/home-rows";
 import { useUiPrefs } from "@/lib/ui-prefs";
+import { createDraftSaver } from "@/lib/draft-saver";
 
 /** 改动到落库的去抖：松手落一次位是一次改动；名字逐字键入也不会一字一请求。 */
 const SAVE_DELAY_MS = 400;
@@ -89,8 +90,10 @@ export function LibraryCustomizeView() {
   const [saveError, setSaveError] = useState<string | null>(null);
   // 本地草稿：null = 跟随已存偏好。改动先进草稿立即呈现，去抖后整体 PUT
   const [draft, setDraft] = useState<HomeRow[] | null>(null);
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const editSeq = useRef(0);
+  const savePrefsRef = useRef(savePrefs);
+  savePrefsRef.current = savePrefs;
+  const mountedRef = useRef(false);
   // savePrefs 闭包里的 prefs 会过期：PUT 的是整个界面偏好，得基于**最新**的其他分组
   const prefsRef = useRef(prefs);
   prefsRef.current = prefs;
@@ -118,48 +121,41 @@ export function LibraryCustomizeView() {
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
 
-  const pendingRows = useRef<HomeRow[] | null>(null);
-  const flushPending = useCallback(() => {
-    const next = pendingRows.current;
-    if (!next) return;
-    pendingRows.current = null;
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    const seq = editSeq.current;
-    void savePrefs({ ...prefsRef.current, home: { rows: rowsToPrefs(next) } })
-      .then(() => {
-        if (editSeq.current === seq) setDraft(null);
-      })
-      .catch(() => undefined);
-  }, [savePrefs]);
+  const saverRef = useRef<ReturnType<typeof createDraftSaver<{ rows: HomeRow[]; seq: number }>> | null>(null);
+  if (saverRef.current === null) {
+    saverRef.current = createDraftSaver({
+      delayMs: SAVE_DELAY_MS,
+      save: async ({ rows: next, seq }) => {
+        await savePrefsRef.current({ ...prefsRef.current, home: { rows: rowsToPrefs(next) } });
+        if (mountedRef.current && editSeq.current === seq) setDraft(null);
+      },
+      onError: (error) => {
+        console.error("首页布局保存失败", error);
+        if (mountedRef.current) {
+          setSaveError(error instanceof Error ? error.message : "保存失败，请稍后再试");
+        }
+      },
+    });
+  }
+  const saver = saverRef.current;
   const commit = useCallback(
     (next: HomeRow[]) => {
       const seq = ++editSeq.current;
-      pendingRows.current = next;
       setDraft(next);
       setSaveError(null);
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(() => {
-        pendingRows.current = null;
-        savePrefs({ ...prefsRef.current, home: { rows: rowsToPrefs(next) } })
-          .then(() => {
-            // 期间没有新的改动才让草稿让位，否则会把用户刚改的那一下吞掉
-            if (editSeq.current === seq) setDraft(null);
-          })
-          .catch((err: unknown) => {
-            setSaveError(
-              err instanceof Error ? err.message : "保存失败，请稍后再试",
-            );
-          });
-      }, SAVE_DELAY_MS);
+      saver.schedule({ rows: next, seq });
     },
-    [savePrefs],
+    [saver],
   );
-  useEffect(
-    () => () => {
-      flushPending();
-    },
-    [flushPending],
-  );
+  // The saver is lifetime-stable. Provider callback changes must not run cleanup
+  // and flush a draft during an ordinary rerender.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      void saver.flush().catch((error: unknown) => console.error("离开页面时保存首页布局失败", error));
+    };
+  }, [saver]);
 
   const update = (id: string, patch: (row: HomeRow) => HomeRow) =>
     commit(rowsRef.current.map((row) => (row.id === id ? patch(row) : row)));
@@ -174,12 +170,13 @@ export function LibraryCustomizeView() {
   };
   const restoreDefaults = () => {
     if (!window.confirm("恢复默认布局？你自己加的行会被移除。")) return;
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    editSeq.current += 1;
+    const seq = ++editSeq.current;
     setExpanded(null);
     setDraft(null);
-    // 空清单 = 出厂布局，与侧栏导航同一约定
-    savePrefs({ ...prefsRef.current, home: { rows: [] } }).catch(
+    setSaveError(null);
+    // Clear the pending draft and queue defaults after any in-flight save.
+    // Cleanup can never resurrect the layout that the user just discarded.
+    saver.reset({ rows: [], seq }).catch(
       (err: unknown) => {
         setSaveError(
           err instanceof Error ? err.message : "保存失败，请稍后再试",

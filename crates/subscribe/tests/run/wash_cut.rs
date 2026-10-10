@@ -80,6 +80,20 @@ impl library::MediaProbe for FileProbe {
 
 #[test]
 fn probed_lower_quality_does_not_delete_the_owned_file() {
+    assert_rejected_probe_preserves_owned(50, "720p", "h264");
+}
+
+#[test]
+fn probed_lower_quality_cannot_delete_a_low_scoring_owned_file() {
+    assert_rejected_probe_preserves_owned(10, "720p", "h264");
+}
+
+#[test]
+fn probed_codec_downgrade_cannot_use_the_title_score_to_replace() {
+    assert_rejected_probe_preserves_owned(10, "1080p", "mpeg2video");
+}
+
+fn assert_rejected_probe_preserves_owned(old_score: i32, resolution: &str, codec: &str) {
     let tmp = tempfile::tempdir().unwrap();
     let media = media_movie();
     let filter = movie_filter();
@@ -92,7 +106,7 @@ fn probed_lower_quality_does_not_delete_the_owned_file() {
         None,
         None,
         QualityFact {
-            score: 50,
+            score: old_score,
             path: Some(old_lib.display().to_string()),
         },
     );
@@ -105,7 +119,7 @@ fn probed_lower_quality_does_not_delete_the_owned_file() {
         "https://pt.example/dl/fake",
     );
     let src = tmp.path().join("fake.mkv");
-    write_probed(&src, "720p", "h264", "");
+    write_probed(&src, resolution, codec, "");
     let dl = MemoryDownloader::new(tmp.path().join("stage"));
     map_file(&dl, &labeled_better, src);
     let library = tmp.path().join("lib");
@@ -122,6 +136,16 @@ fn probed_lower_quality_does_not_delete_the_owned_file() {
 
     let outcome = subscribe::run_with_probe(input, &FileProbe).unwrap();
 
+    assert_eq!(
+        outcome.facts.movie().unwrap().path.as_deref(),
+        old_lib.to_str()
+    );
+    assert_eq!(outcome.facts.movie().unwrap().score, old_score);
+    assert_eq!(
+        outcome.ledger[0].filter_score,
+        Some(0),
+        "rejected alternate cannot outrank owned facts after reload"
+    );
     assert!(
         old_lib.exists(),
         "标称更高、probe 更低的新文件不能删除在位版本"

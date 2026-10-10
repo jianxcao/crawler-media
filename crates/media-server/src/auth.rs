@@ -32,6 +32,15 @@ pub async fn authenticate(
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     let device_id = request_device_id(&request);
+    if let Some(device_id) = device_id.as_deref() {
+        provider
+            .bind_playback_credential(user_id, device_id, &token)
+            .await
+            .map_err(|error| {
+                tracing::error!(%user_id, device_id, %error, "Playback credential binding failed");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+    }
     request.extensions_mut().insert(user_id);
     request.extensions_mut().insert(AuthUser {
         id: user_id,

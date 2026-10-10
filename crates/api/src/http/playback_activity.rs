@@ -205,7 +205,7 @@ pub(crate) async fn devices(
                 "client": session.client,
                 "device_name": session.device_name,
                 "client_version": session.client_version,
-                "revocable": session.revocable(),
+                "revocable": session.revocable() && store.device_is_revocable(session.user_id, &session.device_id).unwrap_or(false),
                 "active_sessions": 0,
                 "last_seen_at": iso(session.last_report_at),
             })
@@ -226,7 +226,7 @@ pub(crate) async fn devices(
                 "client": log.client,
                 "device_name": log.device_name,
                 "client_version": null,
-                "revocable": log.revocable(),
+                "revocable": log.revocable() && store.device_is_revocable(log.user_id, &device_id).unwrap_or(false),
                 "active_sessions": 0,
                 "last_seen_at": iso(log.ended_at),
             })
@@ -259,7 +259,7 @@ pub(crate) async fn revoke_device(
             return err(
                 StatusCode::BAD_REQUEST,
                 "playback.unsupported",
-                "该设备不支持凭据注销，仅可结束当前播放",
+                "该设备仅使用系统 CLI 凭据或尚无已绑定的会话凭据，不能安全注销，仅可结束当前播放",
             );
         }
         Err(error) => {

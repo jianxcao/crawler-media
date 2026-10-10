@@ -137,6 +137,19 @@ impl MediaServerProvider for ApiServerProvider {
         store.user_id_by_token(token).map_err(|e| e.to_string())
     }
 
+    async fn bind_playback_credential(
+        &self,
+        user_id: UserId,
+        device_id: &str,
+        token: &str,
+    ) -> Result<(), String> {
+        self.state
+            .store
+            .lock()
+            .bind_playback_credential(user_id, device_id, token)
+            .map_err(|error| error.to_string())
+    }
+
     async fn get_user(&self, user_id: UserId) -> Result<Option<ServerUser>, String> {
         let store = self.state.store.lock();
         let Some(user) = store.get_user(user_id).map_err(|e| e.to_string())? else {

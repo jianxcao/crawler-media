@@ -174,6 +174,17 @@ pub trait MediaServerProvider: Send + Sync + 'static {
 
     async fn user_id_by_token(&self, token: &str) -> Result<Option<UserId>, String>;
 
+    /// Persist credentials observed on authenticated protocol requests. Mock providers
+    /// may omit persistence; production uses this binding for secure device revocation.
+    async fn bind_playback_credential(
+        &self,
+        _user_id: UserId,
+        _device_id: &str,
+        _token: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     async fn get_user(&self, user_id: UserId) -> Result<Option<ServerUser>, String>;
 
     /// Lists libraries visible specifically to this user

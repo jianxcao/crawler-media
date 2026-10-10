@@ -302,8 +302,46 @@ fn source_level(value: &str) -> i32 {
     }
 }
 
-pub(crate) fn resolution_rank(value: &str) -> i32 {
-    resolution_level(value)
+/// Without an explicit ladder, title/site score cannot authorize a physical
+/// downgrade. Unknown probed dimensions are not evidence for deleting a known file.
+pub(crate) fn collected_quality_is_safe(
+    filter: &domain::Filter,
+    facts: &SubscribeFacts,
+    candidate: &Release,
+    slots: &[(Option<u32>, Option<u32>)],
+) -> bool {
+    if ladder_for(Some(filter)).is_some() {
+        return true; // explicit dimension ordering is enforced by should_replace_slots
+    }
+    slots.iter().all(|(s, e)| {
+        let Some(existing) = facts.get(*s, *e) else {
+            return true;
+        };
+        let Some(old) = existing
+            .path
+            .as_deref()
+            .and_then(|p| owned_quality(facts, p))
+        else {
+            return false;
+        };
+        [
+            (
+                old.resolution.as_deref(),
+                candidate.resolution.as_deref(),
+                resolution_level as fn(&str) -> i32,
+            ),
+            (
+                old.codec.as_deref(),
+                candidate.codec.as_deref(),
+                codec_level,
+            ),
+            (old.hdr.as_deref(), candidate.hdr.as_deref(), hdr_level),
+        ]
+        .into_iter()
+        .all(|(owned, incoming, rank)| {
+            owned.is_none_or(|owned| incoming.is_some_and(|incoming| rank(incoming) >= rank(owned)))
+        })
+    })
 }
 
 fn codec_level(value: &str) -> i32 {

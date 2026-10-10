@@ -41,6 +41,12 @@ pub(super) const APP_TABLES: &str = r#"
             user_id TEXT NOT NULL,
             created_at INTEGER NOT NULL DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS playback_device_credentials (
+            user_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            token TEXT NOT NULL,
+            PRIMARY KEY (user_id, device_id, token)
+        );
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL

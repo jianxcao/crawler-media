@@ -61,6 +61,7 @@ import {
   screenOrientation,
 } from "@/lib/player/orientation";
 import { planAudioOptions } from "@/lib/player/audio-tracks";
+import { createInitialUnitStart } from "@/lib/player/initial-unit-start";
 import { chromeMustStayVisible, shouldHideOnPointerLeave } from "@/lib/player/chrome";
 import { createFrameDropTracker } from "@/lib/player/framedrop";
 import {
@@ -269,7 +270,10 @@ export function VideoPlayer(props: VideoPlayerProps) {
   const unitKey = unitKeyOf(unit);
   // 接口作用域放 ref：各回调 / effect 的依赖数组一律不变，作用域在组件生命周期内是常量
   const apiRef = useRef(api);
-  const startConsumedRef = useRef(false);
+  const initialUnitStartRef = useRef<ReturnType<typeof createInitialUnitStart> | null>(null);
+  if (initialUnitStartRef.current === null) {
+    initialUnitStartRef.current = createInitialUnitStart(unitKey);
+  }
   apiRef.current = api;
 
   const [state, dispatch] = useReducer(playerReducer, initialPlayerState);
@@ -945,8 +949,9 @@ export function VideoPlayer(props: VideoPlayerProps) {
     dispatch({ type: "reset" });
 
     // `?t=` 只覆盖进入播放页的第一集。切到下一集后回到各自的续播点。
-    const override = startConsumedRef.current ? undefined : startMsOverride;
-    if (startMsOverride !== undefined) startConsumedRef.current = true;
+    // Effect replay for the same initial unit must keep the same timestamp.
+    // Once navigation leaves that unit, even returning to it uses its resume point.
+    const override = initialUnitStartRef.current?.(unitKey, startMsOverride);
     if (override !== undefined) {
       setPositionMs(override);
       pendingFileMsRef.current = override;

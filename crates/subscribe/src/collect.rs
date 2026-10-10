@@ -253,18 +253,8 @@ fn collect_one<D: Downloader + ?Sized>(
         &src,
         added.input.naming,
     )?;
-    // Already owned at this exact path (same episode slot recorded in facts):
-    // skip rather than minting a `{stem}-{src_stem}` collision copy. The
-    // facts path is the canonical record; a different file name here means
-    // this torrent was already transferred on a previous tick.
-    //
-    // 注意：只要 facts 指向该路径就跳过——即便磁盘文件已被删除也不自动恢复。
-    // 用户删库文件就是真的想删（整剧/单集），要重新下载请用订阅「立即搜索」
-    // 或手动重新投递（会让 pending 回到 active 再转存一次）。
-    // 覆盖的槽位与「是否批准替换」在写入前判定：pending 增量保留后会有
-    // 低分任务晚完成的情况——若槽位已有事实（更高分版本在位）且本次未被
-    // chooser 批准（wash-cut/ladder 判定不该换），直接跳过，既不写入新文件
-    // 也不删除旧文件（P1：低分迟到任务不得删除高分版本）。
+    // Facts paths are canonical: retries must not create collision copies or
+    // restore user-deleted files. Unapproved Wash-cut arrivals never replace owned slots.
     let slots = covered_slots(added.input.subscribe, &release);
     let approved = crate::slot_replacement::is_replacement_approved(
         added.input.subscribe,
@@ -276,8 +266,7 @@ fn collect_one<D: Downloader + ?Sized>(
     let has_existing = slots
         .iter()
         .any(|(season, episode)| added.input.facts.get(*season, *episode).is_some());
-    // 仅 wash-cut 下拦截：非洗版订阅的额外文件是并列版本（{stem}-{src_stem}
-    // 命名共存），不该被拦。洗版时未批准的迟到任务绝不覆盖/删除在位版本。
+    // Only unapproved Wash-cut arrivals are blocked; ordinary extra versions coexist.
     if added.input.subscribe.wash_cut && has_existing && !approved {
         return Ok(None);
     }
@@ -288,27 +277,17 @@ fn collect_one<D: Downloader + ?Sized>(
     }) {
         return Ok(None);
     }
-    let mode = resolve_mode(&src, added.input.library_root, added.input.transfer_mode);
-    tracing::info!(
-        src = %src.display(),
-        dest = %dest.display(),
-        mode = ?mode,
-        "将已完成的媒体文件转入媒体库"
-    );
-    emit(added.input.hooks, Step::Rename)?;
-    emit(added.input.hooks, Step::Transfer)?;
-    transfer_file(&src, &dest, mode).map_err(|e| {
-        tracing::error!(src = %src.display(), dest = %dest.display(), error = %e, "文件转移失败");
-        SubscribeError::Library(e)
-    })?;
-    emit(added.input.hooks, Step::Scrape)?;
-    if let Err(e) = scrape_beside(&dest, added.input.media, added.input.scrape, None) {
-        tracing::warn!(dest = %dest.display(), error = %e, "刮削写入元数据失败，但媒体文件已就位，继续入账");
-    }
+    publish_video(added, &src, &dest)?;
     let (quality, source, confidence) = quality_for(probe, &dest, &scored.release);
-    // 标题里的质量只决定要不要下载。真正删除旧版本之前，必须用 probe 到的
-    // 文件质量再判一次：标称 2160p、实际 720p 不能替换在位的 1080p。
-    let approved = replacement_survives_probe(added, scored, &slots, approved, &quality);
+    // Final deletion approval uses actual quality, not the download title.
+    let (approved, actual_score) = replacement_survives_probe(
+        added,
+        scored,
+        &slots,
+        approved,
+        &quality,
+        source == QualitySource::Probe,
+    );
     if added.input.subscribe.wash_cut && has_existing && !approved {
         tracing::warn!(
             dest = %dest.display(),
@@ -317,7 +296,22 @@ fn collect_one<D: Downloader + ?Sized>(
             "probe 后的实际质量不构成升级，保留已转入的新文件，不删除在位版本"
         );
     }
-    commit_video_facts(added, &slots, scored.score, &dest, approved, removed_paths)?;
+    // 拒绝的 Wash-cut 只能登记并列文件，不能借标题高分改写已有槽位。
+    let committed_slots: Vec<_> = slots
+        .iter()
+        .copied()
+        .filter(|(s, e)| {
+            !added.input.subscribe.wash_cut || approved || added.input.facts.get(*s, *e).is_none()
+        })
+        .collect();
+    commit_video_facts(
+        added,
+        &committed_slots,
+        actual_score,
+        &dest,
+        approved,
+        removed_paths,
+    )?;
     let ledger_path = dest.display().to_string();
     let mut owned_quality = scored.release.clone();
     owned_quality.resolution = quality.resolution.clone();
@@ -342,9 +336,29 @@ fn collect_one<D: Downloader + ?Sized>(
         hdr: quality.hdr,
         quality_source: source,
         confidence,
-        filter_score: Some(scored.score),
+        filter_score: Some(actual_score),
     });
     Ok(Some(dest))
+}
+
+fn publish_video<D: Downloader + ?Sized>(
+    added: &Added<'_, D>,
+    src: &Path,
+    dest: &Path,
+) -> Result<(), SubscribeError> {
+    let mode = resolve_mode(src, added.input.library_root, added.input.transfer_mode);
+    tracing::info!(src = %src.display(), dest = %dest.display(), ?mode, "将已完成的媒体文件转入媒体库");
+    emit(added.input.hooks, Step::Rename)?;
+    emit(added.input.hooks, Step::Transfer)?;
+    transfer_file(src, dest, mode).map_err(|e| {
+        tracing::error!(src = %src.display(), dest = %dest.display(), error = %e, "文件转移失败");
+        SubscribeError::Library(e)
+    })?;
+    emit(added.input.hooks, Step::Scrape)?;
+    if let Err(e) = scrape_beside(dest, added.input.media, added.input.scrape, None) {
+        tracing::warn!(dest = %dest.display(), error = %e, "刮削写入元数据失败，但媒体文件已就位，继续入账");
+    }
+    Ok(())
 }
 
 fn commit_video_facts<D: Downloader + ?Sized>(
@@ -428,37 +442,53 @@ fn replacement_survives_probe<D: Downloader + ?Sized>(
     slots: &[(Option<u32>, Option<u32>)],
     approved: bool,
     quality: &library::FileQuality,
-) -> bool {
-    if !approved || !added.input.subscribe.wash_cut {
-        return approved;
+    was_probed: bool,
+) -> (bool, i32) {
+    if !added.input.subscribe.wash_cut {
+        return (approved, scored.score);
     }
-    let mut probed = scored.clone();
-    probed.release.resolution = quality.resolution.clone();
-    probed.release.codec = quality.codec.clone();
-    probed.release.hdr = quality.hdr.clone();
-    // 没有升级阶梯时替换看标题分数。probe 出的分辨率更低时，不能继续用这个
-    // 更高的标题分删掉在位文件；分辨率没变差才保留原分。
-    let probed_rank = quality
-        .resolution
-        .as_deref()
-        .map(crate::choose::resolution_rank);
-    let titled_rank = scored
-        .release
-        .resolution
-        .as_deref()
-        .map(crate::choose::resolution_rank);
-    if probed_rank
-        .zip(titled_rank)
-        .is_some_and(|(got, claimed)| got < claimed)
-    {
-        probed.score = probed_rank.unwrap_or(0).saturating_mul(10);
-    }
-    crate::slot_replacement::is_replacement_approved(
-        added.input.subscribe,
-        added.input.wash_filter,
-        &added.input.facts,
-        &probed,
-        slots,
+    let mut release = scored.release.clone();
+    release.resolution = quality.resolution.clone();
+    release.codec = quality.codec.clone();
+    release.hdr = quality.hdr.clone();
+    let effective_filter = added.input.wash_filter.unwrap_or(added.input.filter);
+    let admission = filter::admit_scored(
+        vec![(scored.torrent.clone(), Some(release))],
+        effective_filter,
+    );
+    let Some(probed) = admission.admitted.first() else {
+        return (false, 0);
+    };
+    // Score must remain on the Filter's scale. Also reject physical downgrades
+    // when no explicit ladder is configured, regardless of site/title scores.
+    let safe_quality = !was_probed
+        || crate::choose::collected_quality_is_safe(
+            effective_filter,
+            &added.input.facts,
+            &probed.release,
+            slots,
+        );
+    let replacement = approved
+        && safe_quality
+        && crate::slot_replacement::is_replacement_approved(
+            added.input.subscribe,
+            Some(effective_filter),
+            &added.input.facts,
+            probed,
+            slots,
+        );
+    // Alternate rejected versions must not outrank owned facts when the ledger
+    // is reloaded after restart. Fresh fill slots still keep their actual score.
+    let owns_any = slots
+        .iter()
+        .any(|(s, e)| added.input.facts.get(*s, *e).is_some());
+    (
+        replacement,
+        if owns_any && !replacement {
+            0
+        } else {
+            probed.score
+        },
     )
 }
 
