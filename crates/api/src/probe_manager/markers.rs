@@ -66,10 +66,24 @@ pub(super) fn compare_and_store_markers(
             "【片头片尾】已原子替换旧标记和章节缓存，并触发场景帧后台提取"
         );
     } else {
-        let store = mgr.store.lock();
-        for marker in comparison.markers.iter().cloned() {
-            persist_marker(&store, &comparison.samples.all_rows, marker, false)?;
-        }
+        let updates = {
+            let store = mgr.store.lock();
+            let mut updates = Vec::new();
+            for marker in comparison.markers.iter().cloned() {
+                updates.extend(persist_marker(
+                    &store,
+                    &comparison.samples.all_rows,
+                    marker,
+                    false,
+                )?);
+            }
+            updates
+        };
+        // 锁已放下再查媒体库开关并抓帧：抓帧会再次读取 Store，持锁调用会自死锁。
+        crate::http::library_chapters::trigger_scene_frames_for_chapter_updates(
+            &updates,
+            &mgr.store.lock(),
+        );
     }
     if unit.overwrite_markers {
         log_unmatched_episodes(unit, &comparison);
@@ -380,7 +394,8 @@ pub(super) fn persist_marker(
     rows: &[LedgerRow],
     mut marker: crate::store::StoredMediaMarker,
     overwrite_markers: bool,
-) -> Result<(), crate::store::StoreError> {
+) -> Result<Vec<(String, Vec<library::ChapterMarker>)>, crate::store::StoreError> {
+    let mut chapter_updates = Vec::new();
     let started_at = Instant::now();
     if let Some(existing) =
         store.get_media_marker(marker.media_id, Some(marker.season), Some(marker.episode))?
@@ -422,6 +437,9 @@ pub(super) fn persist_marker(
         let complete =
             marker::build_complete_timeline_chapters(&existing_chapters, intro, outro, None);
         store.put_cached_chapters(&row.id.to_string(), &complete)?;
+        // 返回给调用方在放下 Store 锁之后抓帧。这里若直接抓，会在持锁时
+        // 再次读取媒体库开关，和普通声纹入库的外层锁自死锁。
+        chapter_updates.push((row.id.to_string(), complete.clone()));
         tracing::debug!(
             media_id = %marker.media_id,
             season = marker.season,
@@ -435,5 +453,5 @@ pub(super) fn persist_marker(
             "【片头片尾】单集章节缓存写入结束"
         );
     }
-    Ok(())
+    Ok(chapter_updates)
 }

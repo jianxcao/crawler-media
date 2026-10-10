@@ -155,8 +155,18 @@ struct ProbeSideData {
 
 /// Extract a frame at `ms` into `out` (JPEG, 960px wide) via ffmpeg.
 pub fn extract_frame(path: &std::path::Path, ms: i64, out: &std::path::Path) -> Result<(), String> {
+    extract_frame_with_ffmpeg(path, ms, out, "ffmpeg")
+}
+
+/// 同 `extract_frame`，但 ffmpeg 程序路径可替换。测试传入假程序，避免依赖 PATH。
+pub fn extract_frame_with_ffmpeg(
+    path: &std::path::Path,
+    ms: i64,
+    out: &std::path::Path,
+    ffmpeg: &str,
+) -> Result<(), String> {
     let target = ProbeTarget::from_path(path);
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = Command::new(ffmpeg);
     cmd.args(["-y", "-ss", &format!("{:.3}", ms as f64 / 1000.0)]);
     target.apply_ffmpeg_input(&mut cmd);
     cmd.args([

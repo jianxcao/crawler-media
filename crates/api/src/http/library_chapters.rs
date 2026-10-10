@@ -18,29 +18,7 @@ use std::str::FromStr;
 pub(crate) fn auto_generate_chapters(state: &ApiState, path: &std::path::Path) {
     let enabled = {
         let store = state.store.lock();
-        let _ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or_default()
-            .to_lowercase();
-        // 查找所属媒体库的 extract_chapter_images 配置
-        if let Ok(libraries) = store.list_libraries() {
-            libraries
-                .into_iter()
-                .filter(|lib| lib.root_paths.iter().any(|r| path.starts_with(r)))
-                .max_by_key(|lib| {
-                    lib.root_paths
-                        .iter()
-                        .filter(|r| path.starts_with(r))
-                        .map(|r| r.components().count())
-                        .max()
-                        .unwrap_or(0)
-                })
-                .map(|lib| lib.extract_chapter_images)
-                .unwrap_or(true)
-        } else {
-            true
-        }
+        chapter_images_enabled(&store, path)
     };
     if !enabled {
         tracing::debug!(path = %path.display(), "媒体库已关闭章节场景图提取，跳过自动抓帧");
@@ -49,7 +27,38 @@ pub(crate) fn auto_generate_chapters(state: &ApiState, path: &std::path::Path) {
     let _ = generate_chapter_frames(path);
 }
 
+/// 最长根目录前缀所属媒体库的「生成章节」开关。路径不落在任何库时默认开启，
+/// 与入库自动抓帧的历史行为一致。
+pub(crate) fn chapter_images_enabled(store: &crate::Store, path: &std::path::Path) -> bool {
+    store
+        .list_libraries()
+        .ok()
+        .and_then(|libraries| {
+            libraries
+                .into_iter()
+                .filter(|lib| lib.root_paths.iter().any(|root| path.starts_with(root)))
+                .max_by_key(|lib| {
+                    lib.root_paths
+                        .iter()
+                        .filter(|root| path.starts_with(root))
+                        .map(|root| root.components().count())
+                        .max()
+                        .unwrap_or(0)
+                })
+                .map(|lib| lib.extract_chapter_images)
+        })
+        .unwrap_or(true)
+}
+
 pub(crate) fn generate_chapter_frames_for_targets(
+    path: &std::path::Path,
+    targets: &[(i64, i64)],
+) -> (usize, usize) {
+    generate_chapter_frames_for_targets_with(&scene_frame_ffmpeg(), path, targets)
+}
+
+fn generate_chapter_frames_for_targets_with(
+    ffmpeg: &str,
     path: &std::path::Path,
     targets: &[(i64, i64)],
 ) -> (usize, usize) {
@@ -65,7 +74,7 @@ pub(crate) fn generate_chapter_frames_for_targets(
         } else {
             start_ms
         };
-        if library::extract_frame(path, midpoint, &out).is_ok() {
+        if library::extract_frame_with_ffmpeg(path, midpoint, &out, ffmpeg).is_ok() {
             generated += 1;
         }
     }
@@ -90,23 +99,48 @@ pub(crate) fn trigger_scene_frames_for_chapter_updates(
             .flatten()
             .map(|r| std::path::PathBuf::from(r.path));
         if let Some(path) = row_path {
+            if !chapter_images_enabled(store, &path) {
+                tracing::debug!(path = %path.display(), "媒体库已关闭章节场景图提取，跳过声纹章节抓帧");
+                continue;
+            }
+            let ffmpeg = scene_frame_ffmpeg();
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn_blocking(move || {
-                    generate_chapter_frames_for_targets(&path, &targets);
+                    generate_chapter_frames_for_targets_with(&ffmpeg, &path, &targets);
                 });
             } else {
                 std::thread::spawn(move || {
-                    generate_chapter_frames_for_targets(&path, &targets);
+                    generate_chapter_frames_for_targets_with(&ffmpeg, &path, &targets);
                 });
             }
         }
     }
 }
 
+thread_local! {
+    static SCENE_FRAME_FFMPEG: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+fn scene_frame_ffmpeg() -> String {
+    SCENE_FRAME_FFMPEG
+        .with(|ffmpeg| ffmpeg.get().map(str::to_string))
+        .unwrap_or_else(|| "ffmpeg".into())
+}
+
+/// 仅测试使用：让当前线程触发的场景图抓帧走指定 ffmpeg，不碰进程环境。
+#[cfg(test)]
+pub(crate) fn set_scene_frame_ffmpeg_for_test(ffmpeg: &'static str) {
+    SCENE_FRAME_FFMPEG.with(|slot| slot.set(Some(ffmpeg)));
+}
+
 fn generate_chapter_frames(path: &std::path::Path) -> Option<(usize, usize)> {
     let chapters = library::probe_chapters(path)?;
     let targets: Vec<(i64, i64)> = chapters.iter().map(|c| (c.start_ms, c.end_ms)).collect();
-    Some(generate_chapter_frames_for_targets(path, &targets))
+    Some(generate_chapter_frames_for_targets_with(
+        &scene_frame_ffmpeg(),
+        path,
+        &targets,
+    ))
 }
 
 fn chapter_image_path(video: &std::path::Path, index: usize) -> std::path::PathBuf {
