@@ -7,6 +7,17 @@ pub fn media_source_version(path: &Path) -> String {
     let mut digest = Sha256::new();
     digest.update(b"crawler-media-source-v1\0");
     digest.update(path.to_string_lossy().as_bytes());
+    if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("strm"))
+        && let Ok(contents) = std::fs::read(path)
+    {
+        // strm 没有本地媒体字节。URL 文本不变就视为同一文件，
+        // 同步或目录操作改掉 mtime/inode 不能让已有媒体信息和声纹失效。
+        digest.update(b"\0strm-target\0");
+        digest.update(contents);
+        return digest_hex(digest.finalize());
+    }
     if let Ok(metadata) = std::fs::metadata(path) {
         digest.update(metadata.len().to_le_bytes());
         if let Ok(modified) = metadata.modified()
@@ -20,14 +31,6 @@ pub fn media_source_version(path: &Path) -> String {
             digest.update(metadata.dev().to_le_bytes());
             digest.update(metadata.ino().to_le_bytes());
         }
-    }
-    if path
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("strm"))
-        && let Ok(contents) = std::fs::read(path)
-    {
-        digest.update(b"\0strm-target\0");
-        digest.update(contents);
     }
     digest_hex(digest.finalize())
 }
@@ -125,6 +128,24 @@ mod tests {
     use super::{fingerprint_cache_key, media_source_version};
     use std::path::Path;
 
+    fn set_mtime_later(path: &Path) {
+        let touched =
+            path.metadata().unwrap().modified().unwrap() + std::time::Duration::from_secs(5);
+        let secs = touched
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let bytes = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        let mut times = [secs, 0, secs, 0];
+        let result = unsafe { libc_utimes(bytes.as_ptr(), times.as_mut_ptr()) };
+        assert_eq!(result, 0, "设置测试文件修改时间失败");
+    }
+
+    unsafe extern "C" {
+        #[link_name = "utimes"]
+        fn libc_utimes(path: *const i8, times: *mut i64) -> i32;
+    }
+
     #[test]
     fn fingerprint_cache_key_changes_with_profile_duration_and_strm_target() {
         let temp = tempfile::tempdir().unwrap();
@@ -141,6 +162,14 @@ mod tests {
             first,
             fingerprint_cache_key(&first_source, 180, Some(2_701_000))
         );
+        std::fs::write(&stream, "https://cdn.example/episode-a.mkv?token=hidden\n").unwrap();
+        set_mtime_later(&stream);
+        assert_eq!(
+            first_source,
+            media_source_version(&stream),
+            "strm URL 未变时，修改时间不能让缓存版本变化"
+        );
+
         std::fs::write(&stream, "https://cdn.example/episode-b.mkv?token=hidden\n").unwrap();
         let second_source = media_source_version(&stream);
         assert_ne!(first_source, second_source);
@@ -152,6 +181,16 @@ mod tests {
         assert_ne!(
             media_source_version(Path::new("https://cdn.example/episode.mkv")),
             ""
+        );
+
+        let video = temp.path().join("episode.mp4");
+        std::fs::write(&video, b"video-bytes").unwrap();
+        let video_source = media_source_version(&video);
+        set_mtime_later(&video);
+        assert_ne!(
+            video_source,
+            media_source_version(&video),
+            "真实视频文件仍按修改时间判断内容是否变化"
         );
     }
 }
