@@ -61,8 +61,8 @@ pub(super) fn primary_image_metadata(
         .then(|| local_episode_thumb(row, thumb))
         .flatten();
     let local_still = (!is_series && media.kind == MediaKind::Tv && row.episode.is_some())
-        .then(|| crate::episode_still::path(Path::new(&row.path)))
-        .filter(|path| path.is_file());
+        .then(|| crate::episode_still::existing(Path::new(&row.path)))
+        .flatten();
     let remote = (!is_series && media.kind == MediaKind::Tv)
         .then(|| thumb.and_then(remote_episode_thumb))
         .flatten();
@@ -87,8 +87,8 @@ pub fn primary_image_url(row: &domain::LedgerRow, media: &Media) -> Option<Strin
 
 pub fn local_primary_image(row: &domain::LedgerRow, media: &Media) -> Option<PathBuf> {
     let episode_still = (media.kind == MediaKind::Tv && row.episode.is_some())
-        .then(|| crate::episode_still::path(Path::new(&row.path)))
-        .filter(|path| path.is_file());
+        .then(|| crate::episode_still::existing(Path::new(&row.path)))
+        .flatten();
     let nfo_thumb = if media.kind == MediaKind::Tv && row.episode.is_some() {
         row_nfo_path(row, media, false)
             .and_then(|path| library::read_nfo(&path))

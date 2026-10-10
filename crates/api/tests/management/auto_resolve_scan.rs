@@ -693,11 +693,11 @@ async fn metadata_refresh_writes_each_episode_still_in_shared_directory() {
         .unwrap();
     assert_eq!(refresh.status(), StatusCode::OK);
     assert_eq!(
-        std::fs::read(dir.join("Orbit.S01E01-still.jpg")).unwrap(),
+        std::fs::read(dir.join("Orbit.S01E01-thumb.jpg")).unwrap(),
         b"one"
     );
     assert_eq!(
-        std::fs::read(dir.join("Orbit.S01E02-still.jpg")).unwrap(),
+        std::fs::read(dir.join("Orbit.S01E02-thumb.jpg")).unwrap(),
         b"two"
     );
 }

@@ -339,7 +339,7 @@ impl MediaServerProvider for ApiServerProvider {
                 return Ok(None);
             };
             let nfo_url = primary_image_url(&row, &media);
-            let local_still = crate::episode_still::path(std::path::Path::new(&row.path)).is_file();
+            let local_still = crate::episode_still::existing(std::path::Path::new(&row.path)).is_some();
             let tmdb_episode = media
                 .tmdb_id
                 .filter(|_| !local_still && nfo_url.is_none())

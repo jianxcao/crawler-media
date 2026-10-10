@@ -311,8 +311,8 @@ pub(crate) fn scrape_tv_sidecars(
                 &still_size,
             );
             if !ok && is_allowed(&ep_path) {
-                let still_dest = crate::episode_still::path(&ep_path);
-                if !still_dest.is_file() {
+                if crate::episode_still::existing(&ep_path).is_none() {
+                    let still_dest = crate::episode_still::path(&ep_path);
                     if let Err(err) = library::extract_frame(&ep_path, 60_000, &still_dest) {
                         tracing::warn!(error = %err, path = %ep_path.display(), "ffmpeg 抽取剧照失败");
                     }

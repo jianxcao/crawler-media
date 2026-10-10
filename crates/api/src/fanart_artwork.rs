@@ -92,7 +92,7 @@ pub(crate) fn mirror_episode_still(
     size: &str,
 ) -> bool {
     let still_dest = crate::episode_still::path(video);
-    if still_dest.is_file() {
+    if crate::episode_still::existing(video).is_some() {
         return true;
     }
     let Some(file_path) = still_file_path else {
@@ -252,6 +252,7 @@ pub(crate) fn save_fanart_files(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use media::fanart::FanartImage;
 
     struct MapFetch {
         bodies: HashMap<String, Vec<u8>>,
