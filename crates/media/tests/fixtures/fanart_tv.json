@@ -1,0 +1,28 @@
+{
+  "name": "Spirit Rangers",
+  "thetvdb_id": "425039",
+  "hdtvlogo": [
+    {"id": "1", "url": "https://assets.fanart.tv/logo-en.png", "lang": "en", "likes": "3"},
+    {"id": "2", "url": "https://assets.fanart.tv/logo-zh.png", "lang": "zh", "likes": "1"}
+  ],
+  "tvthumb": [
+    {"id": "3", "url": "https://assets.fanart.tv/thumb-en.jpg", "lang": "en", "likes": "9"}
+  ],
+  "tvbanner": [
+    {"id": "4", "url": "https://assets.fanart.tv/banner-en.jpg", "lang": "en", "likes": "2"},
+    {"id": "5", "url": "https://assets.fanart.tv/banner-blank.jpg", "lang": "", "likes": "8"}
+  ],
+  "showbackground": [
+    {"id": "6", "url": "https://assets.fanart.tv/background.jpg", "lang": "", "likes": "20"}
+  ],
+  "seasonposter": [
+    {"id": "7", "url": "https://assets.fanart.tv/s1-en.jpg", "lang": "en", "likes": "4", "season": "1"},
+    {"id": "8", "url": "https://assets.fanart.tv/s1-zh.jpg", "lang": "zh", "likes": "1", "season": "1"}
+  ],
+  "seasonthumb": [
+    {"id": "9", "url": "https://assets.fanart.tv/s1-thumb.jpg", "lang": "en", "likes": "2", "season": "1"}
+  ],
+  "seasonbanner": [
+    {"id": "10", "url": "https://assets.fanart.tv/specials-banner.jpg", "lang": "en", "likes": "1", "season": "0"}
+  ]
+}

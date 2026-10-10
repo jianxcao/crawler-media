@@ -5,6 +5,7 @@ mod cache;
 mod client;
 mod contracts;
 mod douban;
+pub mod fanart;
 mod metadata;
 mod parse;
 mod person;
