@@ -23,6 +23,23 @@ impl Store {
         if library.kind != kind {
             return Err(StoreError::Protected("target Library kind does not match Media".into()));
         }
+        let outside: Vec<_> = facts.entries().filter_map(|(key, fact)| {
+            let path = Path::new(fact.path.as_deref()?);
+            if !path.is_file() {
+                return None;
+            }
+            let owned_elsewhere = self.library_for_path_strict(path, kind)
+                .ok()
+                .flatten()
+                .is_some_and(|owner| owner.id != library.id);
+            owned_elsewhere.then_some(key)
+        }).collect();
+        for (season, episode) in outside {
+            tracing::info!(subscribe_id = %subscribe.id, library_id = %library.id, season, episode,
+                "已保存事实不属于目标 Library，本次不把它当作已拥有内容");
+            facts.replace(season, episode, QualityFact { score: 0, path: None });
+        }
+        facts.retain_owned();
         for row in self.ledger_for_media(subscribe.media_id)? {
             let path = Path::new(&row.path);
             if !library.root_paths.iter().any(|root| path.starts_with(root)) || !path.is_file() {

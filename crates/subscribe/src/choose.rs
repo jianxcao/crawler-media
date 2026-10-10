@@ -126,30 +126,32 @@ pub(crate) fn should_replace_slots(
                     }
                     // 无法确定现有质量时继续尝试升级
                 }
-                // 配置了 UpgradeLadder → 按维度逐项比较新老版本；否则分数更高才换。
+                // 旧质量未知不能授权删除。有阶梯时只比较已知维度；
+                // 没有阶梯时，分数只能比较两个已知质量。
                 match ladder_for(wash_filter) {
                     Some(ladder) => {
                         let old_quality = existing.path.as_deref().and_then(|path| {
-                            facts.quality(path).cloned().or_else(|| {
-                                std::path::Path::new(path)
-                                    .file_name()
-                                    .and_then(|name| name.to_str())
-                                    .map(release::parse)
-                                    .filter(|r| {
-                                        r.resolution.is_some()
-                                            || r.source.is_some()
-                                            || r.codec.is_some()
-                                            || r.hdr.is_some()
-                                    })
-                            })
-                        });
-                        match old_quality {
-                            Some(old) => {
-                                ladder_compare(&candidate.release, &old, &ladder)
-                                    == std::cmp::Ordering::Greater
+                            let stored = facts.quality(path).cloned();
+                            let parsed = std::path::Path::new(path)
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .map(release::parse)
+                                .filter(|release| quality_known(release));
+                            match (stored, parsed) {
+                                (Some(mut stored), Some(parsed)) => {
+                                    stored.resolution = stored.resolution.or(parsed.resolution);
+                                    stored.source = stored.source.or(parsed.source);
+                                    stored.codec = stored.codec.or(parsed.codec);
+                                    stored.hdr = stored.hdr.or(parsed.hdr);
+                                    Some(stored)
+                                }
+                                (stored, parsed) => stored.or(parsed),
                             }
-                            None => candidate.score > existing.score,
-                        }
+                        });
+                        old_quality.is_some_and(|old| {
+                            ladder_compare(&candidate.release, &old, &ladder)
+                                == Some(std::cmp::Ordering::Greater)
+                        })
                     }
                     None => candidate.score > existing.score,
                 }
@@ -241,34 +243,42 @@ fn ladder_for(wash_filter: Option<&domain::Filter>) -> Option<Vec<String>> {
 }
 
 /// 按维度顺序比较新老版本：第一个分出胜负的维度决定结果，全部相等 → Equal。
-fn ladder_compare(new: &Release, old: &Release, ladder: &[String]) -> std::cmp::Ordering {
-    if ladder.iter().any(|dim| dim == "source") && old.source.is_none() {
-        tracing::warn!("已有来源质量未知，不能据此批准 Wash-cut 替换");
-        return std::cmp::Ordering::Equal;
-    }
-    for dim in ladder {
-        let ordering = match dim.as_str() {
-            "resolution" => cmp_level(&new.resolution, &old.resolution, |v| resolution_level(v)),
-            "source" => cmp_level(&new.source, &old.source, |v| source_level(v)),
-            "codec" => cmp_level(&new.codec, &old.codec, |v| codec_level(v)),
-            "hdr" => cmp_level(&new.hdr, &old.hdr, |v| hdr_level(v)),
-            _ => std::cmp::Ordering::Equal,
-        };
-        if ordering != std::cmp::Ordering::Equal {
-            return ordering;
-        }
-    }
-    std::cmp::Ordering::Equal
+fn quality_known(release: &Release) -> bool {
+    release.resolution.is_some()
+        || release.source.is_some()
+        || release.codec.is_some()
+        || release.hdr.is_some()
 }
 
-fn cmp_level(
-    new: &Option<String>,
-    old: &Option<String>,
-    level: impl Fn(&str) -> i32,
-) -> std::cmp::Ordering {
-    let new_level = new.as_deref().map(&level).unwrap_or(0);
-    let old_level = old.as_deref().map(&level).unwrap_or(0);
-    new_level.cmp(&old_level)
+fn ladder_compare(
+    new: &Release,
+    old: &Release,
+    ladder: &[String],
+) -> Option<std::cmp::Ordering> {
+    let mut result = std::cmp::Ordering::Equal;
+    for dim in ladder {
+        let (new_value, old_value, level): (_, _, fn(&str) -> i32) = match dim.as_str() {
+            "resolution" => (&new.resolution, &old.resolution, resolution_level),
+            "source" => (&new.source, &old.source, source_level),
+            "codec" => (&new.codec, &old.codec, codec_level),
+            "hdr" => (&new.hdr, &old.hdr, hdr_level),
+            _ => continue,
+        };
+        match (new_value.as_deref(), old_value.as_deref()) {
+            (Some(new_value), Some(old_value)) => {
+                let ordering = level(new_value).cmp(&level(old_value));
+                if result == std::cmp::Ordering::Equal {
+                    result = ordering;
+                }
+            }
+            (None, None) => {}
+            _ => {
+                tracing::warn!(dimension = %dim, "Wash-cut 维度质量未知，不能据此批准替换");
+                return None;
+            }
+        }
+    }
+    Some(result)
 }
 
 fn resolution_level(value: &str) -> i32 {

@@ -94,7 +94,15 @@ impl SiteResponsePolicy for NexusPhpPolicy {
             "Check-in successful",
         ];
         let confirmed = |markers: &[&str]| {
-            text.iter().any(|text| markers.iter().any(|marker| text.contains(marker)))
+            text.iter().any(|text| {
+                let normalized = text.split_whitespace().collect::<String>();
+                markers.iter().any(|marker| {
+                    normalized.strip_prefix(marker).is_some_and(|suffix| {
+                        suffix.is_empty()
+                            || suffix.starts_with(['！', '!', '，', ',', '。', '.', '：', ':'])
+                    })
+                })
+            })
         };
         if confirmed(&already) {
             Ok(CheckInOutcome::AlreadyCompleted)

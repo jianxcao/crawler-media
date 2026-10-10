@@ -281,6 +281,30 @@ fn unknown_source_blocks_resolution_first_destructive_wash_cut() {
 }
 
 #[test]
+fn unknown_quality_does_not_authorize_destructive_wash_cut() {
+    let mut subscribe = tv_subscribe(domain::MediaId::new());
+    subscribe.wash_cut = true;
+    subscribe.keep_old_versions = false;
+    let mut facts = SubscribeFacts::default();
+    facts.replace(Some(1), Some(1), crate::QualityFact {
+        score: 10, path: Some("/library/Show.S01E01.mkv".into()),
+    });
+    let mut candidate = scored("Show.S01E01.720p.HDTV", 1, 1, 80);
+    candidate.release.resolution = Some("720p".into());
+    candidate.release.source = Some("hdtv".into());
+    candidate.release.codec = Some("x264".into());
+    let ladder = |raw: &str| domain::Filter::new(domain::FilterId::new(), "ladder", vec![
+        domain::FilterAtom { priority: 1, rule: domain::AtomRule::UpgradeLadder(raw.into()), exclude: false },
+    ]);
+    for raw in ["resolution", "codec", "hdr"] {
+        assert!(
+            choose(&subscribe, Some(&ladder(raw)), std::slice::from_ref(&candidate), &facts).is_empty(),
+            "{raw} 未知时不能批准破坏性替换"
+        );
+    }
+}
+
+#[test]
 fn highest_scoring_candidate_not_matching_ladder_allows_eligible_candidate() {
     let mut subscribe = tv_subscribe(domain::MediaId::new());
     subscribe.wash_cut = true;

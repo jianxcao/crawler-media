@@ -84,6 +84,7 @@ fn visible_success_with_reward_text_is_confirmed() {
     assert!(CheckInPlugin::http(&Bus::new(), &store, &reply).check_in(id).is_ok());
 }
 
+#[test]
 fn check_in_requires_verified_success_not_transport_success_or_cookie_rotation() {
     for &body in BAD_PAGES {
         let store = credentials(Some("uid=valid; pass=secret"));

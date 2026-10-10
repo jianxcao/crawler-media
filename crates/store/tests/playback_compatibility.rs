@@ -54,6 +54,7 @@ fn failed_movie_mark_does_not_hide_legacy_progress() {
     assert!(reopened.unit_state(user, media, -1, -1).unwrap().is_none());
 }
 
+#[test]
 fn old_library_gains_nullable_release_quality_idempotently() {
     let tmp = tempfile::tempdir().unwrap();
     drop(Store::open(tmp.path()).unwrap());
@@ -186,4 +187,47 @@ fn critical_unit_mark_cascade_failure_is_propagated_and_atomic() {
                 .favorite
         );
     }
+}
+
+#[test]
+fn retargeted_subscribe_does_not_treat_previous_library_as_owned() {
+    use domain::{Confidence, LedgerId, Media, MediaKind, QualitySource};
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let media = domain::MediaId::new();
+    store.insert_media(&Media {
+        id: media, kind: MediaKind::Movie, title: "Shared".into(), year: None,
+        original_title: None, tmdb_id: None, douban_id: None, tvdb_id: None,
+        bangumi_id: None, anilist_id: None,
+    }).unwrap();
+    let a_root = tmp.path().join("library-a");
+    let b_root = tmp.path().join("library-b");
+    std::fs::create_dir_all(&a_root).unwrap();
+    std::fs::create_dir_all(&b_root).unwrap();
+    let a = store.create_library(MediaKind::Movie, "A", &[a_root.to_str().unwrap()], "everyone", true, &[]).unwrap();
+    let b = store.create_library(MediaKind::Movie, "B", &[b_root.to_str().unwrap()], "everyone", true, &[]).unwrap();
+    store.set_default_library(&a.id).unwrap();
+    let path = a_root.join("Shared.mkv");
+    std::fs::write(&path, b"owned").unwrap();
+    store.insert_ledger(&domain::LedgerRow {
+        id: LedgerId::new(), media_id: media, path: path.display().to_string(),
+        season: None, episode: None, resolution: Some("2160p".into()), codec: None, hdr: None,
+        quality_source: QualitySource::Probe, confidence: Confidence::High, filter_score: Some(100),
+    }).unwrap();
+    let mut subscribe = domain::Subscribe {
+        id: domain::SubscribeId::new(), user_id: domain::UserId::new(), media_id: media,
+        coverage: domain::Coverage::Movie, fetch_mode: domain::FetchMode::Search,
+        filter_id: domain::FilterId::new(), wash_cut: false, wash_cut_filter_id: None,
+        keep_old_versions: false, full_season_pack: false, downloader_id: None,
+        library_id: Some(domain::LibraryId::from_str(&a.id).unwrap()),
+        tracking_state: "active".into(), follow_future: false, search_interval_secs: 1800,
+    };
+    let mut facts = subscribe::SubscribeFacts::default();
+    facts.replace(None, None, subscribe::QualityFact { score: 100, path: Some(path.display().to_string()) });
+    store.save_subscribe_facts(subscribe.id, &facts).unwrap();
+    subscribe.library_id = Some(domain::LibraryId::from_str(&b.id).unwrap());
+    store.update_subscribe(&subscribe).unwrap();
+    let loaded = store.load_library_subscribe_facts(&subscribe, MediaKind::Movie).unwrap();
+    assert!(loaded.movie().is_none(), "Library A 的文件不能算作空 Library B 的已拥有内容");
+    assert!(path.is_file(), "切换目标不得删除原 Library 文件");
 }

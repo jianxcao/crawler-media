@@ -289,6 +289,7 @@ async fn zero_playback_limits_return_a_bounded_page() {
     }
 }
 
+#[tokio::test]
 async fn zero_history_limit_is_safe() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, _, id) = app(tmp.path());
