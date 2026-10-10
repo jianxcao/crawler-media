@@ -141,6 +141,77 @@ fn episode_row(media_id: domain::MediaId, path: &std::path::Path, episode: u32) 
 }
 
 #[tokio::test]
+async fn finder_and_recycle_metadata_events_are_ignored_before_handling() {
+    let temp = tempfile::tempdir().unwrap();
+    let library_root = temp.path().join("media/tv/china");
+    let show_dir = library_root.join("喜剧之王 (2026)");
+    let season_dir = show_dir.join("Season 1");
+    std::fs::create_dir_all(&season_dir).unwrap();
+    let episode = season_dir.join("喜剧之王 - S01E01 - 第 1 集.strm");
+    std::fs::write(&episode, "https://example.com/e01.mkv").unwrap();
+    let finder_metadata = season_dir.join(".DS_Store");
+    let recycle_file = show_dir.join("#recycle/喜剧之王 - S01E01.strm");
+    std::fs::create_dir_all(recycle_file.parent().unwrap()).unwrap();
+    std::fs::write(&finder_metadata, "finder metadata").unwrap();
+    std::fs::write(&recycle_file, "https://example.com/recycle.mkv").unwrap();
+
+    let store = api::Store::open(temp.path().join("data")).unwrap();
+    store
+        .create_library(
+            domain::MediaKind::Tv,
+            "电视剧",
+            &[library_root.to_str().unwrap()],
+            "all",
+            true,
+            &[],
+        )
+        .unwrap();
+    let state = api::management::ApiState::new(
+        store,
+        "test-token".into(),
+        indexer::ProfileSet::load(None).unwrap(),
+        Arc::new(EmptyFetcher),
+        Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
+        temp.path().join("library"),
+    )
+    .unwrap();
+    let media = domain::Media {
+        id: domain::MediaId::new(),
+        kind: domain::MediaKind::Tv,
+        title: "喜剧之王".into(),
+        year: Some(2026),
+        original_title: None,
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    state.store().lock().insert_media(&media).unwrap();
+    let row = episode_row(media.id, &episode, 1);
+    let ledger_id = row.id;
+    state.store().lock().insert_ledger(&row).unwrap();
+
+    let tracker = Arc::new(StrmGraceTracker::new());
+    let events = vec![fs_event(finder_metadata), fs_event(recycle_file)];
+    assert!(
+        api::fs_watcher::relevant_fs_events(&events).is_empty(),
+        ".DS_Store 和回收站事件必须在处理前过滤"
+    );
+    api::fs_watcher::handle_fs_events(&state, &tracker, events);
+
+    assert!(
+        state
+            .store()
+            .lock()
+            .latest_probe_job_for_scope(&format!("ledger:{ledger_id}"))
+            .unwrap()
+            .is_none(),
+        "被忽略的元数据变动不能让已有剧集重新探测"
+    );
+}
+
+#[tokio::test]
 async fn hidden_finder_metadata_does_not_reprobe_existing_episodes() {
     let temp = tempfile::tempdir().unwrap();
     let library_root = temp.path().join("media/tv/china");

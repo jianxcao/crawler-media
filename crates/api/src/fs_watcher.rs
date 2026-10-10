@@ -213,6 +213,10 @@ pub fn spawn_fs_watcher(state: ApiState) {
                     }
                 }
                 Some(events) = rx.recv() => {
+                    let events = relevant_fs_events(&events);
+                    if events.is_empty() {
+                        continue;
+                    }
                     tracing::info!(
                         event_count = events.len(),
                         paths = ?events.iter().map(|e| e.path.display().to_string()).collect::<Vec<_>>(),
@@ -303,6 +307,41 @@ pub(crate) fn entry_scan_target_dir(root: &Path, file_path: &Path) -> PathBuf {
         }
     }
     root.to_path_buf()
+}
+
+pub fn relevant_fs_events(events: &[DebouncedEvent]) -> Vec<DebouncedEvent> {
+    events
+        .iter()
+        .filter(|event| !is_ignored_filesystem_metadata(&event.path))
+        .cloned()
+        .collect()
+}
+
+fn is_ignored_filesystem_metadata(path: &Path) -> bool {
+    path.components().any(|component| {
+        let name = component.as_os_str().to_string_lossy();
+        matches!(
+            name.as_ref(),
+            ".DS_Store"
+                | "._.DS_Store"
+                | ".AppleDouble"
+                | ".AppleDB"
+                | ".Spotlight-V100"
+                | ".Trashes"
+                | ".TemporaryItems"
+                | ".fseventsd"
+                | "#recycle"
+                | "#Recycle"
+                | "@Recycle"
+                | "@recycle"
+                | "$RECYCLE.BIN"
+                | "Recycle.Bin"
+                | "recycle_bin"
+                | ".recycle"
+        ) || name.starts_with("._")
+            || name.eq_ignore_ascii_case("thumbs.db")
+            || name.eq_ignore_ascii_case("desktop.ini")
+    })
 }
 
 pub fn handle_fs_events(
