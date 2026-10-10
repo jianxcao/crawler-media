@@ -8,6 +8,7 @@ import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Link } from "react-router-dom";
 import { useNavigate } from "react-router-dom";
 
+import { shouldPollProbeDetails } from "@/lib/probe-status";
 import { ArtworkPickerDialog } from "@/components/artwork-picker-dialog";
 import { BrandLoader } from "@/components/brand-loader";
 import { CastRow, type CastRowPerson } from "@/components/cast-row";
@@ -319,7 +320,17 @@ export function LibraryItemDetailView({
   // 这样媒体流信息和声纹结果会在任务完成后及时显示。
   useEffect(() => {
     if (!detail || detail.files.length === 0) return;
-    if (detail.files.every((f) => !f.probe_queued)) return;
+    const stages = detail.files.flatMap((file) =>
+      file.probe_stages
+        ? [file.probe_stages.metadata, file.probe_stages.intro, file.probe_stages.outro].filter(
+            (stage): stage is NonNullable<typeof stage> => stage != null,
+          )
+        : [],
+    );
+    const active = stages.length > 0
+      ? shouldPollProbeDetails(stages)
+      : detail.files.some((file) => file.probe_queued);
+    if (!active) return;
     const timer = window.setInterval(() => {
       reload();
     }, 5000);

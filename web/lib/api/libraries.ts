@@ -106,6 +106,25 @@ export interface LibraryItemFile {
   probed?: boolean;
   /** 后台仍在排队或探测，包括流信息完成后的声纹阶段。 */
   probe_queued?: boolean;
+  probe_stages?: {
+    metadata?: ProbeStageView | null;
+    intro?: ProbeStageView | null;
+    outro?: ProbeStageView | null;
+  } | null;
+}
+
+export interface ProbeStageView {
+  status:
+    | "pending"
+    | "queued"
+    | "running"
+    | "succeeded"
+    | "failed"
+    | "not_applicable"
+    | "cancelled";
+  failure_count: number;
+  next_retry_at_ms: number | null;
+  error_kind: string | null;
 }
 
 /** 条目详情：基本信息 + 逐文件真实介质规格。 */
