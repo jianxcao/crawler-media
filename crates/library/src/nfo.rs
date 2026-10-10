@@ -74,7 +74,7 @@ pub fn parse_nfo(body: &str) -> Option<NfoMeta> {
         content_rating: child_text(root, &["mpaa", "contentrating", "certification"]),
         original_language: child_text(root, &["original_language", "originallanguage"]),
         status: child_text(root, &["status"]),
-        season: child_u32(root, &["season"]),
+        season: child_u32(root, &["season", "seasonnumber"]),
         episode: child_u32(root, &["episode"]),
         aired: child_text(root, &["aired"]),
         number_of_seasons: child_u32(

@@ -4,6 +4,7 @@ pub mod latest;
 pub mod markers;
 mod naming;
 mod nfo;
+mod nfo_season;
 mod probe_target;
 mod scrape;
 pub mod subtitles;
@@ -24,6 +25,7 @@ pub use marker::{
 };
 pub use naming::{default_pattern, render_path, validate_pattern};
 pub use nfo::{CastMember, NfoMeta, parse_nfo, read_nfo, write_nfo, write_streamdetails_into_nfo};
+pub use nfo_season::write_season_nfo;
 pub use probe_target::{
     DEFAULT_PROBE_UA, ProbeTarget, active_probe_ua, read_strm_url, set_custom_probe_ua,
 };
