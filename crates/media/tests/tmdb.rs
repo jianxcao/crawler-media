@@ -237,3 +237,23 @@ fn tmdb_new_at_returns_err_when_cache_cannot_open() {
     );
     assert!(result.is_err());
 }
+
+#[test]
+fn tv_external_ids_return_the_tvdb_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut map = bodies();
+    map.insert(
+        "/tv/119847/external_ids".into(),
+        r#"{"id":119847,"tvdb_id":425039,"imdb_id":"tt13351446"}"#.into(),
+    );
+    let tmdb = Tmdb::new(
+        FakeTmdb {
+            bodies: map,
+            hits: Arc::new(Mutex::new(Vec::new())),
+        },
+        &dir.path().join("catalog.db"),
+    )
+    .unwrap();
+    let tvdb_id = tmdb.tvdb_id("119847").unwrap();
+    assert_eq!(tvdb_id.as_deref(), Some("425039"));
+}

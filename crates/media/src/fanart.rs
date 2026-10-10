@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use serde_json::Value;
+use sha2::Digest;
 
 use crate::client::TmdbError;
 
@@ -157,4 +158,80 @@ pub fn parse_fanart(body: &str, languages: &[&str]) -> Result<FanartSet, TmdbErr
         season_thumbs,
         season_banners,
     })
+}
+
+pub(crate) fn cache_key(media_type: &str, id: &str, api_key: &str) -> String {
+    let mut hasher = sha2::Sha256::new();
+    sha2::Digest::update(&mut hasher, api_key.as_bytes());
+    let hash = sha2::Digest::finalize(hasher);
+    let hex = format!("{:x}", hash);
+    let prefix = &hex[..16.min(hex.len())];
+    format!("fanart/{media_type}/{id}/{prefix}")
+}
+
+struct DirectGet<'a, H> {
+    inner: &'a H,
+    url: &'a str,
+}
+
+impl<H: crate::client::CatalogGet> crate::client::CatalogGet for DirectGet<'_, H> {
+    fn get(&self, _cache_key: &str) -> Result<String, TmdbError> {
+        self.inner.get(self.url)
+    }
+}
+
+pub struct FanartClient<H> {
+    http: H,
+    cache: crate::cache::CatalogCache,
+    api_key: String,
+}
+
+impl<H: crate::client::CatalogGet> FanartClient<H> {
+    pub fn new(http: H, catalog_db: &std::path::Path, api_key: &str) -> Result<Self, TmdbError> {
+        Ok(Self {
+            http,
+            cache: crate::cache::CatalogCache::open_source(catalog_db, 0, "fanart")?,
+            api_key: api_key.to_string(),
+        })
+    }
+
+    pub fn tv(&self, tvdb_id: &str, languages: &[&str]) -> Result<FanartSet, TmdbError> {
+        let url = format!(
+            "https://webservice.fanart.tv/v3/tv/{tvdb_id}?api_key={}",
+            self.api_key
+        );
+        let key = cache_key("tv", tvdb_id, &self.api_key);
+        let direct = DirectGet {
+            inner: &self.http,
+            url: &url,
+        };
+        self.cache.get_or_fetch(&direct, &key, |body| parse_fanart(body, languages))
+    }
+
+    pub fn movie(&self, tmdb_id: &str, languages: &[&str]) -> Result<FanartSet, TmdbError> {
+        let url = format!(
+            "https://webservice.fanart.tv/v3/movies/{tmdb_id}?api_key={}",
+            self.api_key
+        );
+        let key = cache_key("movie", tmdb_id, &self.api_key);
+        let direct = DirectGet {
+            inner: &self.http,
+            url: &url,
+        };
+        self.cache.get_or_fetch(&direct, &key, |body| parse_fanart(body, languages))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_key_uses_a_hash_prefix_instead_of_the_raw_key() {
+        let key = cache_key("tv", "425039", "secret");
+        assert!(key.starts_with("fanart/tv/425039/"));
+        assert!(!key.contains("secret"));
+        assert_eq!(key, cache_key("tv", "425039", "secret"));
+        assert_ne!(key, cache_key("tv", "425039", "other"));
+    }
 }

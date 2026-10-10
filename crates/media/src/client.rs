@@ -234,6 +234,19 @@ impl<H: CatalogGet> Tmdb<H> {
         })
     }
 
+    pub fn tvdb_id(&self, tmdb_id: &str) -> Result<Option<String>, TmdbError> {
+        let path = format!("/tv/{tmdb_id}/external_ids");
+        self.fetch(&path, |body| {
+            let value: serde_json::Value = serde_json::from_str(body)?;
+            let id = match value.get("tvdb_id") {
+                Some(serde_json::Value::Number(number)) => Some(number.to_string()),
+                Some(serde_json::Value::String(text)) if !text.is_empty() => Some(text.clone()),
+                _ => None,
+            };
+            Ok(id)
+        })
+    }
+
     /// Details + rich metadata using the client's language, then English fallback,
     /// and the default CN → US → first available certification preference.
     pub fn details_with_meta(
