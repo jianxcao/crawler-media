@@ -61,10 +61,13 @@ pub(crate) fn nfo_candidates(
 
 pub(crate) fn show_root(path: &Path, row: &LedgerRow) -> PathBuf {
     let directory = path.parent().unwrap_or(path);
-    let is_season_directory = directory
+    let dir_name = directory
         .file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name.to_ascii_lowercase().starts_with("season"));
+        .map(|name| name.to_ascii_lowercase())
+        .unwrap_or_default();
+    let is_season_directory = dir_name.starts_with("season")
+        || (dir_name.contains(".s0") || dir_name.contains(".s1") || dir_name.contains(".s2"));
     if row.season.is_some() && is_season_directory {
         directory.parent().unwrap_or(directory).to_path_buf()
     } else {

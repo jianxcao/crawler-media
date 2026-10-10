@@ -107,9 +107,10 @@ impl api::catalog::Catalog for AliasYearCatalog {
         query: &str,
         year: Option<u16>,
     ) -> Result<Vec<media::CatalogHit>, String> {
-        self.queries
-            .lock()
-            .push(format!("{query}|{}", year.map(|y| y.to_string()).unwrap_or_default()));
+        self.queries.lock().push(format!(
+            "{query}|{}",
+            year.map(|y| y.to_string()).unwrap_or_default()
+        ));
         if query == "动灵守护者" && year == Some(2022) {
             return Ok(vec![media::CatalogHit {
                 media: domain::Media {
@@ -162,6 +163,48 @@ impl api::catalog::Catalog for AliasYearCatalog {
     ) -> Result<Option<domain::Media>, String> {
         Ok(None)
     }
+    fn metadata_with_preferences(
+        &self,
+        _kind: domain::MediaKind,
+        _id: &str,
+        _lang_pref: &[String],
+        _country_pref: &[String],
+    ) -> Result<Option<media::ItemMeta>, String> {
+        Ok(Some(media::ItemMeta {
+            overview: Some("Spirit Rangers overview".into()),
+            rating: Some("8.5".into()),
+            runtime_minutes: Some("25".into()),
+            tagline: None,
+            release_date: Some("2022-10-10".into()),
+            last_air_date: None,
+            content_rating: None,
+            vote_count: Some(100),
+            origin_countries: vec!["US".into()],
+            original_language: Some("en".into()),
+            studios: vec!["Netflix".into()],
+            status: Some("Ended".into()),
+            number_of_seasons: Some(1),
+            number_of_episodes: Some(10),
+            directors: Vec::new(),
+            creators: Vec::new(),
+            genres: vec!["Animation".into()],
+            genre_ids: vec![16],
+            episode_run_time: vec![25],
+            cast: Vec::new(),
+        }))
+    }
+    fn season_details(&self, _id: &str, _season: u32) -> Result<Vec<media::EpisodeMeta>, String> {
+        Ok(vec![media::EpisodeMeta {
+            episode_number: 1,
+            name: Some("Thunder Mountain".into()),
+            overview: Some("Episode 1 overview".into()),
+            air_date: Some("2022-10-10".into()),
+            rating: Some("8.0".into()),
+            vote_count: Some(50),
+            runtime_minutes: Some(25),
+            still_path: None,
+        }])
+    }
 }
 
 #[test]
@@ -205,6 +248,18 @@ fn auto_resolve_uses_ancestor_alias_when_filename_title_misses() {
     let queries = catalog.queries.lock().clone();
     assert!(queries.iter().any(|query| query == "Spirit Rangers|2022"));
     assert!(queries.iter().any(|query| query == "动灵守护者|2022"));
+
+    // Verify auto_resolve writes tvshow.nfo and episode nfo
+    let tvshow_nfo = tmp.path().join("children/动灵守护者 (2022)/tvshow.nfo");
+    assert!(
+        tvshow_nfo.is_file(),
+        "auto_resolve should write tvshow.nfo at show root"
+    );
+    let episode_nfo = show.join("Spirit.Rangers.S01E01.1080p.nfo");
+    assert!(
+        episode_nfo.is_file(),
+        "auto_resolve should write episode nfo beside video"
+    );
 }
 
 #[test]

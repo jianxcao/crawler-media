@@ -2,6 +2,7 @@
 //! Inspired by MovieClaw & MoviePilot two-stage identification.
 
 use crate::management::ApiState;
+use crate::scrape_store::ScrapeStoreExt;
 use domain::{Media, MediaKind};
 
 /// Automatically look up TMDB metadata for a media item if it lacks external IDs.
@@ -85,7 +86,81 @@ pub fn auto_resolve_media(
     let _ = crate::poster_fetch::attach_poster(state, &updated, sample_path);
     let _ = crate::poster_fetch::attach_backdrop(state, &updated, sample_path);
 
+    // Write NFO metadata beside video files and series root
+    let nfo_enabled = state
+        .store
+        .lock()
+        .get_scrape_config()
+        .ok()
+        .map(|config| config.effective.mirror_nfo)
+        .unwrap_or(true);
+    if nfo_enabled {
+        write_auto_resolved_nfo(state, &updated, sample_path);
+    }
+
     Some(updated)
+}
+
+fn write_auto_resolved_nfo(state: &ApiState, media: &Media, sample_path: &std::path::Path) {
+    let Some(tmdb_id) = media.tmdb_id.as_deref() else {
+        return;
+    };
+    let Ok(Some(metadata)) =
+        crate::scrape_metadata::fetch_tmdb_metadata(state, media.kind, tmdb_id)
+    else {
+        return;
+    };
+    let nfo = crate::scrape_metadata::nfo_from_tmdb(media, &metadata);
+    if media.kind == MediaKind::Tv {
+        let (rows, sample_row) = {
+            let store = state.store.lock();
+            let all = store.ledger_for_media(media.id).unwrap_or_default();
+            let sample_path_str = sample_path.display().to_string();
+            let sample = all.iter().find(|r| r.path == sample_path_str).cloned();
+            (all, sample)
+        };
+        let sample_row = sample_row.unwrap_or_else(|| {
+            let (season, episode) = sample_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|name| {
+                    let parsed = release::parse(name);
+                    (parsed.season, parsed.episode)
+                })
+                .unwrap_or((None, None));
+            domain::LedgerRow {
+                id: domain::LedgerId::new(),
+                media_id: media.id,
+                path: sample_path.display().to_string(),
+                season,
+                episode,
+                resolution: None,
+                codec: None,
+                hdr: None,
+                quality_source: domain::QualitySource::Release,
+                confidence: domain::Confidence::High,
+                filter_score: None,
+            }
+        });
+        let show_root = crate::scrape_metadata::show_root(sample_path, &sample_row);
+        let rows_to_write = if rows.is_empty() {
+            vec![sample_row]
+        } else {
+            rows
+        };
+        crate::scrape_metadata::write_series_nfos(
+            state.catalog.as_ref(),
+            media,
+            tmdb_id,
+            &show_root,
+            &rows_to_write,
+            &nfo,
+            &crate::scrape_metadata::preferred_language(state),
+        );
+    } else if let Some(stem) = sample_path.file_stem().and_then(|value| value.to_str()) {
+        let target = sample_path.with_file_name(format!("{stem}.nfo"));
+        crate::scrape_metadata::write_nfo(&target, media, &nfo);
+    }
 }
 
 /// 目录对不上时，给同一部剧还没有剧照的分集各截一帧。

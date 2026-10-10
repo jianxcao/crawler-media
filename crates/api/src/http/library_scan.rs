@@ -120,15 +120,33 @@ pub(crate) fn scan_library_subdir(
         (scan_media, inserted)
     };
     for (_, (media, path)) in scan_media {
-        if media.tmdb_id.is_some() || media.douban_id.is_some() {
-            continue;
-        }
-        match crate::auto_resolve::auto_resolve_media(state, &media, &path) {
-            Some(resolved) => {
-                tracing::info!(title = %resolved.title, path = %path.display(), "实时扫描自动匹配媒体元数据成功")
+        let resolved = if media.tmdb_id.is_some() || media.douban_id.is_some() {
+            Some(media.clone())
+        } else {
+            match crate::auto_resolve::auto_resolve_media(state, &media, &path) {
+                Some(resolved) => {
+                    tracing::info!(title = %resolved.title, path = %path.display(), "实时扫描自动匹配媒体元数据成功");
+                    Some(resolved)
+                }
+                None => {
+                    tracing::warn!(title = %media.title, path = %path.display(), "实时扫描未能自动匹配媒体元数据");
+                    None
+                }
             }
-            None => {
-                tracing::warn!(title = %media.title, path = %path.display(), "实时扫描未能自动匹配媒体元数据")
+        };
+
+        if scrape && let Some(resolved_media) = resolved {
+            let (target_row, all_rows) = {
+                let store = state.store.lock();
+                let rows = store
+                    .ledger_for_media(resolved_media.id)
+                    .unwrap_or_default();
+                let path_str = path.display().to_string();
+                let row = rows.iter().find(|r| r.path == path_str).cloned();
+                (row, rows)
+            };
+            if let Some(row) = target_row {
+                scrape_library_metadata(state, &resolved_media, &row, &path, &all_rows);
             }
         }
     }
