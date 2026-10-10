@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,6 +23,8 @@ pub struct StrmGraceTracker {
     /// path -> PendingStrmDeletion
     pending: Arc<Mutex<HashMap<PathBuf, PendingStrmDeletion>>>,
     known_urls: Arc<Mutex<HashMap<PathBuf, String>>>,
+    /// 测试注入的当前时间。0 表示使用系统时间。
+    now_override: AtomicI64,
 }
 
 impl StrmGraceTracker {
@@ -29,6 +32,19 @@ impl StrmGraceTracker {
         Self {
             pending: Arc::new(Mutex::new(HashMap::new())),
             known_urls: Arc::new(Mutex::new(HashMap::new())),
+            now_override: AtomicI64::new(0),
+        }
+    }
+
+    /// 测试用：固定宽限期计算使用的当前时间。
+    pub fn set_now(&self, now: i64) {
+        self.now_override.store(now, Ordering::Relaxed);
+    }
+
+    pub fn current_now(&self) -> i64 {
+        match self.now_override.load(Ordering::Relaxed) {
+            0 => crate::job_loop::unix_now(),
+            now => now,
         }
     }
 
@@ -91,6 +107,14 @@ impl StrmGraceTracker {
     }
 
     /// 清理已超时的待删除条目（超时仍未重建，执行真实台账删除）
+    pub fn forget(&self, path: &Path) {
+        self.known_urls.lock().remove(path);
+    }
+
+    pub fn expire_ready(&self, grace_secs: i64) -> Vec<PathBuf> {
+        self.sweep_expired(self.current_now(), grace_secs)
+    }
+
     pub fn sweep_expired(&self, now: i64, grace_secs: i64) -> Vec<PathBuf> {
         let mut map = self.pending.lock();
         let mut expired = Vec::new();
@@ -133,32 +157,10 @@ pub fn spawn_fs_watcher(state: ApiState) {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(5)).await;
-                let now = crate::job_loop::unix_now();
-                let expired = sweep_tracker.sweep_expired(now, 45);
-                if !expired.is_empty() {
-                    let mut affected_media_ids = HashSet::new();
-                    let store = sweep_state.store.lock();
-                    for path in expired {
-                        let path_str = path.display().to_string();
-                        if let Ok(Some(row)) = store.ledger_by_path(&path_str) {
-                            affected_media_ids.insert(row.media_id);
-                        }
-                        tracing::info!(path = %path_str, "STRM 宽限期已过，永久删除台账记录");
-                        let _ = store.delete_ledger_path(&path_str);
-                    }
-                    for media_id in affected_media_ids {
-                        let remaining = store
-                            .ledger_for_media(media_id)
-                            .map(|rows| rows.len())
-                            .unwrap_or(0);
-                        if remaining == 0 {
-                            let _ = store.delete_imported_pending_for_media(media_id);
-                            let _ = store.delete_media_markers_for_media(media_id);
-                            let _ = store.delete_playback_for_media(media_id);
-                            let _ = store.delete_collection_items_for_media(&media_id.to_string());
-                            let _ = store.delete_media(media_id);
-                        }
-                    }
+                for path in sweep_tracker.expire_ready(45) {
+                    tracing::info!(path = %path.display(), "STRM 宽限期已过，永久删除这一集");
+                    sweep_tracker.forget(&path);
+                    delete_ledger_row(&sweep_state, &path.display().to_string());
                 }
             }
         });
@@ -308,7 +310,7 @@ pub fn handle_fs_events(
     tracker: &Arc<StrmGraceTracker>,
     events: Vec<DebouncedEvent>,
 ) {
-    let now = crate::job_loop::unix_now();
+    let now = tracker.current_now();
     let mut has_intake_or_download_change = false;
     let mut has_scrape_needed = false;
     let mut library_scan_targets = HashSet::new();
@@ -338,47 +340,34 @@ pub fn handle_fs_events(
         }
 
         if !path.exists() {
-            // 文件或目录已被移除：
-            // 如果 path 是单个 strm，通知 tracker 进行防抖；
-            // 与此同时，检查 ledger 中是否存在该 path 或以此 path 为目录前缀的记录（整目录删除）。
-            tracing::info!(path = %path.display(), "检测到文件或目录被删除，检查关联台账记录");
-            let store = state.store.lock();
-            if let Ok(ledger_rows) = store.list_ledger() {
-                let matched_rows: Vec<_> = ledger_rows
-                    .into_iter()
-                    .filter(|row| ledger_path_is_gone(&path, &row.path))
-                    .collect();
-                drop(store);
-
-                if !matched_rows.is_empty() {
-                    tracing::info!(
-                        path = %path.display(),
-                        matched_count = matched_rows.len(),
-                        "发现删除路径匹配的台账记录，执行级联删除"
-                    );
-                    let mut affected_media_ids = HashSet::new();
-                    let store = state.store.lock();
-                    for r in matched_rows {
-                        affected_media_ids.insert(r.media_id);
-                        tracing::info!(row_path = %r.path, media_id = %r.media_id, "删除台账行");
-                        let _ = store.delete_ledger_path(&r.path);
+            // 文件或目录已被移除：先进入 45 秒宽限期。
+            // 相同 URL 在宽限期内回来时保留台账、媒体信息和声纹；到期仍不存在才删除。
+            tracing::info!(path = %path.display(), "检测到文件或目录被删除，进入宽限期");
+            let matched_rows = {
+                let store = state.store.lock();
+                store.list_ledger().ok().map(|rows| {
+                    rows.into_iter()
+                        .filter(|row| ledger_path_is_gone(&path, &row.path))
+                        .collect::<Vec<_>>()
+                })
+            };
+            if let Some(rows) = matched_rows {
+                for row in rows {
+                    let row_path = PathBuf::from(&row.path);
+                    if row_path
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"))
+                    {
+                        tracing::info!(
+                            row_path = %row.path,
+                            media_id = %row.media_id,
+                            "台账 strm 已不在磁盘上，进入删除宽限期"
+                        );
+                        tracker.mark_deleted(row_path, None, now);
+                    } else {
+                        delete_ledger_row(state, &row.path);
                     }
-                    for media_id in affected_media_ids {
-                        let remaining = store
-                            .ledger_for_media(media_id)
-                            .map(|rows| rows.len())
-                            .unwrap_or(0);
-                        if remaining == 0 {
-                            tracing::info!(media_id = %media_id, "条目下所有文件已全被删除，清理媒体及关联数据");
-                            let _ = store.delete_imported_pending_for_media(media_id);
-                            let _ = store.delete_media_markers_for_media(media_id);
-                            let _ = store.delete_playback_for_media(media_id);
-                            let _ = store.delete_collection_items_for_media(&media_id.to_string());
-                            let _ = store.delete_media(media_id);
-                        }
-                    }
-                } else if is_strm {
-                    tracker.mark_deleted(path, None, now);
                 }
             } else if is_strm {
                 tracker.mark_deleted(path, None, now);
@@ -428,6 +417,12 @@ pub fn handle_fs_events(
         }
     }
 
+    for path in tracker.expire_ready(45) {
+        tracing::info!(path = %path.display(), "STRM 宽限期已过，永久删除这一集");
+        tracker.forget(&path);
+        delete_ledger_row(state, &path.display().to_string());
+    }
+
     // 新增 STRM 在 Library 目录中需要执行 in-place scan 来写入台账；Scrape
     // 只负责侧车/元数据，不能替代 Library ledger ingestion。
     // 按变动的具体剧集/条目子目录进行增量扫描，避免遍历整个媒体库根目录。
@@ -474,6 +469,30 @@ pub fn handle_fs_events(
                 }
             }
         }
+    }
+}
+
+/// 删除一条已经不在磁盘上的台账，并清掉挂在它上面的探测数据。
+/// 剧集还有其他文件时保留剧目和播放进度；最后一个文件也删除时，才清理整部剧。
+fn delete_ledger_row(state: &ApiState, path: &str) {
+    let store = state.store.lock();
+    let Ok(Some(row)) = store.ledger_by_path(path) else {
+        return;
+    };
+    tracing::info!(row_path = %row.path, media_id = %row.media_id, "删除台账行及其媒体信息、声纹");
+    let _ = store.delete_media_marker(row.media_id, row.season, row.episode);
+    let _ = store.delete_ledger_path(&row.path);
+    let remaining = store
+        .ledger_for_media(row.media_id)
+        .map(|rows| rows.len())
+        .unwrap_or(0);
+    if remaining == 0 {
+        tracing::info!(media_id = %row.media_id, "条目下所有文件已全被删除，清理媒体及关联数据");
+        let _ = store.delete_imported_pending_for_media(row.media_id);
+        let _ = store.delete_media_markers_for_media(row.media_id);
+        let _ = store.delete_playback_for_media(row.media_id);
+        let _ = store.delete_collection_items_for_media(&row.media_id.to_string());
+        let _ = store.delete_media(row.media_id);
     }
 }
 
