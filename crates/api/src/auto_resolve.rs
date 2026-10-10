@@ -86,17 +86,8 @@ pub fn auto_resolve_media(
     let _ = crate::poster_fetch::attach_poster(state, &updated, sample_path);
     let _ = crate::poster_fetch::attach_backdrop(state, &updated, sample_path);
 
-    // Write NFO metadata beside video files and series root
-    let nfo_enabled = state
-        .store
-        .lock()
-        .get_scrape_config()
-        .ok()
-        .map(|config| config.effective.mirror_nfo)
-        .unwrap_or(true);
-    if nfo_enabled {
-        write_auto_resolved_nfo(state, &updated, sample_path);
-    }
+    // Write sidecars (NFOs, stills, Fanart) beside video files and series root
+    write_auto_resolved_nfo(state, &updated, sample_path);
 
     Some(updated)
 }
@@ -105,12 +96,6 @@ fn write_auto_resolved_nfo(state: &ApiState, media: &Media, sample_path: &std::p
     let Some(tmdb_id) = media.tmdb_id.as_deref() else {
         return;
     };
-    let Ok(Some(metadata)) =
-        crate::scrape_metadata::fetch_tmdb_metadata(state, media.kind, tmdb_id)
-    else {
-        return;
-    };
-    let nfo = crate::scrape_metadata::nfo_from_tmdb(media, &metadata);
     if media.kind == MediaKind::Tv {
         let (rows, sample_row) = {
             let store = state.store.lock();
@@ -148,18 +133,31 @@ fn write_auto_resolved_nfo(state: &ApiState, media: &Media, sample_path: &std::p
         } else {
             rows
         };
-        crate::scrape_metadata::write_series_nfos(
-            state.catalog.as_ref(),
+        crate::scrape_metadata::scrape_tv_sidecars(
+            state,
             media,
-            tmdb_id,
             &show_root,
             &rows_to_write,
-            &nfo,
-            &crate::scrape_metadata::preferred_language(state),
         );
-    } else if let Some(stem) = sample_path.file_stem().and_then(|value| value.to_str()) {
-        let target = sample_path.with_file_name(format!("{stem}.nfo"));
-        crate::scrape_metadata::write_nfo(&target, media, &nfo);
+    } else {
+        let nfo_enabled = state
+            .store
+            .lock()
+            .get_scrape_config()
+            .ok()
+            .map(|config| config.effective.mirror_nfo)
+            .unwrap_or(true);
+        if nfo_enabled {
+            if let Ok(Some(metadata)) =
+                crate::scrape_metadata::fetch_tmdb_metadata(state, media.kind, tmdb_id)
+            {
+                let nfo = crate::scrape_metadata::nfo_from_tmdb(media, &metadata);
+                if let Some(stem) = sample_path.file_stem().and_then(|value| value.to_str()) {
+                    let target = sample_path.with_file_name(format!("{stem}.nfo"));
+                    crate::scrape_metadata::write_nfo(&target, media, &nfo);
+                }
+            }
+        }
     }
 }
 

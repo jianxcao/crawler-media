@@ -93,8 +93,9 @@ pub(crate) fn write_series_nfos(
     rows: &[LedgerRow],
     show_metadata: &library::NfoMeta,
     language: &str,
-) {
+) -> Vec<(PathBuf, Option<String>)> {
     write_nfo(&show_root.join("tvshow.nfo"), media, show_metadata);
+    let mut matched_episodes = Vec::new();
     let seasons = rows
         .iter()
         .filter_map(|row| row.season)
@@ -126,9 +127,12 @@ pub(crate) fn write_series_nfos(
                 continue;
             };
             let path = Path::new(&row.path).with_extension("nfo");
+            let still_path = episode.still_path.clone();
             write_nfo(&path, media, &nfo_from_episode(row, episode));
+            matched_episodes.push((PathBuf::from(&row.path), still_path));
         }
     }
+    matched_episodes
 }
 
 pub(crate) fn nfo_from_tmdb(media: &Media, metadata: &media::ItemMeta) -> library::NfoMeta {
@@ -180,5 +184,187 @@ pub(crate) fn nfo_from_episode(row: &LedgerRow, episode: media::EpisodeMeta) -> 
             .still_path
             .map(|path| format!("https://image.tmdb.org/t/p/w300{path}")),
         ..Default::default()
+    }
+}
+
+struct PosterFetchCatalogGet<'a> {
+    fetch: &'a dyn crate::poster_fetch::PosterFetch,
+}
+
+impl media::CatalogGet for PosterFetchCatalogGet<'_> {
+    fn get(&self, path: &str) -> Result<String, media::TmdbError> {
+        let bytes = self
+            .fetch
+            .get(path)
+            .map_err(media::TmdbError::Http)?;
+        String::from_utf8(bytes).map_err(|e| media::TmdbError::Parse(e.to_string()))
+    }
+}
+
+pub(crate) fn scrape_tv_sidecars(
+    state: &crate::management::ApiState,
+    media: &Media,
+    show_root: &Path,
+    rows: &[LedgerRow],
+) {
+    let Some(tmdb_id) = media.tmdb_id.as_deref() else {
+        return;
+    };
+    let scrape_config = state.store.lock().get_scrape_config().ok();
+    let (mirror_nfo, mirror_thumbs, mirror_images, still_size, fanart_api_key, fanart_lang) =
+        match scrape_config {
+            Some(ref c) => (
+                c.effective.mirror_nfo,
+                c.effective.mirror_episode_thumbs,
+                c.effective.mirror_images,
+                c.effective.still_size.clone(),
+                c.effective.fanart_api_key.clone(),
+                c.effective.fanart_language.clone(),
+            ),
+            None => (true, true, true, "w300".to_string(), None, vec!["zh".into(), "en".into()]),
+        };
+
+    let tmdb_meta = fetch_tmdb_metadata(state, media.kind, tmdb_id).ok().flatten();
+    let show_nfo = tmdb_meta.as_ref().map(|meta| nfo_from_tmdb(media, meta)).unwrap_or_default();
+    let preferred_lang = preferred_language(state);
+
+    let tv_seasons = match state.catalog.tv_seasons(tmdb_id) {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::warn!(tmdb_id, error = %err, "获取 TV 季列表失败");
+            Vec::new()
+        }
+    };
+
+    let owned_seasons: std::collections::HashSet<u32> = rows.iter().filter_map(|r| r.season).collect();
+    let season_artworks: Vec<crate::fanart_artwork::SeasonArtwork> = tv_seasons
+        .into_iter()
+        .filter(|s| owned_seasons.contains(&(s.season_number as u32)))
+        .map(|s| crate::fanart_artwork::SeasonArtwork {
+            number: s.season_number as u32,
+            name: Some(s.name),
+            overview: s.overview,
+            air_date: s.air_date,
+            poster_url: s
+                .poster_path
+                .as_deref()
+                .filter(|p| p.starts_with('/'))
+                .map(|p| format!("https://image.tmdb.org/t/p/w780{p}")),
+        })
+        .collect();
+
+    let matched_episodes = if mirror_nfo {
+        let ep_matches = write_series_nfos(
+            state.catalog.as_ref(),
+            media,
+            tmdb_id,
+            show_root,
+            rows,
+            &show_nfo,
+            &preferred_lang,
+        );
+        crate::fanart_artwork::write_season_nfos(show_root, rows, &season_artworks);
+        ep_matches
+    } else {
+        let mut ep_matches = Vec::new();
+        for season in &owned_seasons {
+            if let Ok(episodes) = state.catalog.season_details(tmdb_id, *season) {
+                for row in rows.iter().filter(|r| r.season == Some(*season)) {
+                    if let Some(ep_num) = row.episode {
+                        if let Some(ep) = episodes.iter().find(|e| e.episode_number == ep_num) {
+                            ep_matches.push((PathBuf::from(&row.path), ep.still_path.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        ep_matches
+    };
+
+    if mirror_thumbs {
+        let is_allowed = |path: &Path| -> bool {
+            let store = state.store.lock();
+            if let Ok(libraries) = store.list_libraries() {
+                libraries
+                    .into_iter()
+                    .filter(|lib| lib.root_paths.iter().any(|r| path.starts_with(r)))
+                    .max_by_key(|lib| {
+                        lib.root_paths
+                            .iter()
+                            .filter(|r| path.starts_with(r))
+                            .map(|r| r.components().count())
+                            .max()
+                            .unwrap_or(0)
+                    })
+                    .map(|lib| lib.generate_thumbnails)
+                    .unwrap_or(true)
+            } else {
+                true
+            }
+        };
+
+        for (ep_path, still_path) in matched_episodes {
+            let ok = crate::fanart_artwork::mirror_episode_still(
+                state.poster_fetch.as_ref(),
+                &ep_path,
+                still_path.as_deref(),
+                &still_size,
+            );
+            if !ok && is_allowed(&ep_path) {
+                let still_dest = crate::episode_still::path(&ep_path);
+                if !still_dest.is_file() {
+                    if let Err(err) = library::extract_frame(&ep_path, 60_000, &still_dest) {
+                        tracing::warn!(error = %err, path = %ep_path.display(), "ffmpeg 抽取剧照失败");
+                    }
+                }
+            }
+        }
+    }
+
+    if mirror_images {
+        if let Some(ref api_key) = fanart_api_key {
+            let tvdb_id = match media.tvdb_id.clone() {
+                Some(id) if !id.is_empty() => Some(id),
+                _ => match state.catalog.tvdb_id(tmdb_id) {
+                    Ok(Some(id)) if !id.is_empty() => {
+                        let mut updated = media.clone();
+                        updated.tvdb_id = Some(id.clone());
+                        let _ = state.store.lock().update_media(&updated);
+                        Some(id)
+                    }
+                    _ => None,
+                },
+            };
+
+            if let Some(tvdb_id) = tvdb_id {
+                let getter = PosterFetchCatalogGet {
+                    fetch: state.poster_fetch.as_ref(),
+                };
+                let fanart_db = state.store.lock().data_dir().join("fanart.db");
+                match media::fanart::FanartClient::new(getter, &fanart_db, api_key) {
+                    Ok(client) => {
+                        let lang_refs: Vec<&str> = fanart_lang.iter().map(|s| s.as_str()).collect();
+                        match client.tv(&tvdb_id, &lang_refs) {
+                            Ok(set) => {
+                                crate::fanart_artwork::save_fanart_files(
+                                    state.poster_fetch.as_ref(),
+                                    show_root,
+                                    rows,
+                                    &set,
+                                );
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, %tvdb_id, "请求 Fanart.tv 失败");
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "初始化 FanartClient 失败");
+                    }
+                }
+            } else {
+                tracing::info!(media = %media.title, "缺少 tvdb_id，跳过 Fanart.tv 抓取");
+            }
+        }
     }
 }

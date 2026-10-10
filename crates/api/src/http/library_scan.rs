@@ -436,14 +436,11 @@ fn scrape_library_metadata(
                     .filter(|episode| episode.media_id == media.id)
                     .cloned()
                     .collect::<Vec<_>>();
-                crate::scrape_metadata::write_series_nfos(
-                    state.catalog.as_ref(),
+                crate::scrape_metadata::scrape_tv_sidecars(
+                    state,
                     media,
-                    tmdb_id,
                     &show_root,
                     &episodes,
-                    &nfo,
-                    &crate::scrape_metadata::preferred_language(state),
                 );
             } else if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
                 let target = path.with_file_name(format!("{stem}.nfo"));

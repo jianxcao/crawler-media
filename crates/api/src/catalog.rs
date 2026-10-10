@@ -203,6 +203,10 @@ pub trait Catalog: Send + Sync {
     ) -> Result<Vec<media::SeasonEpisode>, String> {
         Ok(Vec::new())
     }
+    /// TVDB id for an already-matched TMDB TV show.
+    fn tvdb_id(&self, _tmdb_id: &str) -> Result<Option<String>, String> {
+        Ok(None)
+    }
 }
 
 pub struct EmptyCatalog;
@@ -414,6 +418,9 @@ impl<H: media::CatalogGet + Send + Sync> Catalog for TmdbCatalog<H> {
         self.inner
             .season_episodes(tmdb_id, season)
             .map_err(|err| err.to_string())
+    }
+    fn tvdb_id(&self, tmdb_id: &str) -> Result<Option<String>, String> {
+        self.inner.tvdb_id(tmdb_id).map_err(|err| err.to_string())
     }
     fn image_candidates(
         &self,

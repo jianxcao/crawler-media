@@ -273,14 +273,11 @@ pub(crate) async fn refresh_item_metadata(
             Ok(Some(meta)) => {
                 let nfo = crate::scrape_metadata::nfo_from_tmdb(&media, &meta);
                 if media.kind == domain::MediaKind::Tv {
-                    crate::scrape_metadata::write_series_nfos(
-                        state.catalog.as_ref(),
+                    crate::scrape_metadata::scrape_tv_sidecars(
+                        &state,
                         &media,
-                        tmdb_id,
                         &show_root,
                         &rows,
-                        &nfo,
-                        &crate::scrape_metadata::preferred_language(&state),
                     );
                 } else if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
                     let target = path.with_file_name(format!("{stem}.nfo"));

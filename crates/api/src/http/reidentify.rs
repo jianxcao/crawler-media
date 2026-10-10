@@ -159,14 +159,11 @@ pub(crate) async fn reidentify(State(state): State<ApiState>, Json(body): Json<V
                         Ok(Some(meta)) => {
                             let nfo = crate::scrape_metadata::nfo_from_tmdb(&target, &meta);
                             if target.kind == MediaKind::Tv {
-                                crate::scrape_metadata::write_series_nfos(
-                                    state.catalog.as_ref(),
+                                crate::scrape_metadata::scrape_tv_sidecars(
+                                    &state,
                                     &target,
-                                    &tmdb_id,
                                     &crate::scrape_metadata::show_root(&path, row),
                                     &rows,
-                                    &nfo,
-                                    &crate::scrape_metadata::preferred_language(&state),
                                 );
                             } else if let Some(stem) =
                                 path.file_stem().and_then(|value| value.to_str())

@@ -426,6 +426,12 @@ impl Catalog for FanoutCatalog {
         }
         Ok(Vec::new())
     }
+    fn tvdb_id(&self, tmdb_id: &str) -> Result<Option<String>, String> {
+        if let Some(tmdb) = self.source("tmdb") {
+            return tmdb.tvdb_id(tmdb_id);
+        }
+        Ok(None)
+    }
     fn poster_url(&self, kind: MediaKind, tmdb_id: &str) -> Result<Option<String>, String> {
         if let Some(tmdb) = self.source("tmdb") {
             return tmdb.poster_url(kind, tmdb_id);
