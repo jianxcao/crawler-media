@@ -94,9 +94,22 @@ async fn run_fingerprint_worker(manager: Arc<ProbeManager>) {
         if work.start_job && !start_persisted_unit(&manager, &work.unit) {
             continue;
         }
-        let succeeded = probe::probe_fingerprint(&manager, &work).await;
+        let outcome = probe::probe_fingerprint_detailed(&manager, &work).await;
         if source_ready(&manager, &work.unit) {
-            manager.finish(&work.unit, succeeded);
+            match outcome {
+                super::stages::FingerprintRunOutcome::Complete => {
+                    manager.finish_with_status(&work.unit, "succeeded", None, None);
+                }
+                super::stages::FingerprintRunOutcome::Partial { error_kind, error } => {
+                    manager.finish_with_status(&work.unit, "partial", Some(&error_kind), Some(&error));
+                }
+                super::stages::FingerprintRunOutcome::Failed { error_kind, error } => {
+                    manager.finish_with_status(&work.unit, "failed", Some(&error_kind), Some(&error));
+                }
+                super::stages::FingerprintRunOutcome::Cancelled { reason } => {
+                    manager.cancel_unit(&work.unit, &reason);
+                }
+            }
         }
     }
 }

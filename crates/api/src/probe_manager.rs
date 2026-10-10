@@ -16,15 +16,18 @@ use tokio::sync::{Notify, mpsc};
 use marker::fingerprint::capture_types::FingerprintCaptureEngine;
 use marker::{ChromaprintEngine, FingerprintEngine};
 
+use crate::scrape_store::ScrapeStoreExt;
 use crate::Store;
 
 mod marker_jobs;
 mod markers;
+pub mod policy;
 mod probe;
 pub mod progress;
 mod queue;
 pub mod recovery;
 pub mod season;
+pub mod stages;
 pub(crate) mod timings;
 mod worker;
 
@@ -113,6 +116,158 @@ impl ProbeManager {
 
     pub fn priority_gate(&self) -> Arc<dyn crate::fingerprint_job::CaptureGate> {
         Arc::new(progress::MetadataPriorityGate::from_manager(self))
+    }
+
+    pub fn request_probe(
+        &self,
+        row: &domain::LedgerRow,
+        origin: policy::ProbeRequestOrigin,
+    ) -> Result<policy::ProbeRequestResult, store::StoreError> {
+        let store = self.store.lock();
+        let ledger_id = row.id.to_string();
+        let kind = store
+            .get_media(row.media_id)
+            .ok()
+            .flatten()
+            .map(|m| m.kind)
+            .unwrap_or(domain::MediaKind::Movie);
+
+        let path = std::path::Path::new(&row.path);
+        let fp_enabled = policy::is_fingerprint_enabled_for_path(&store, path, kind);
+        let marker_enabled = policy::is_marker_detection_enabled_for_path(&store, path, kind);
+
+        if !marker_enabled && kind == domain::MediaKind::Tv && origin != policy::ProbeRequestOrigin::ManualRefresh {
+            return Ok(policy::ProbeRequestResult::Disabled);
+        }
+
+        let source_version = crate::fingerprint_job::current_source_version(path);
+        let sample_duration_secs = store
+            .get_scrape_config()
+            .ok()
+            .map(|c| c.effective.fingerprint_duration_secs)
+            .unwrap_or(180);
+
+        let cached_meta_ver = store.get_media_info_cache_version(&ledger_id).ok().flatten();
+        let meta_valid = cached_meta_ver
+            .as_ref()
+            .is_some_and(|v| v.source_version == source_version && v.format_duration_ms.is_some_and(|d| d > 0));
+
+        let media_duration_ms = cached_meta_ver.and_then(|v| v.format_duration_ms);
+        let outro_expected = media_duration_ms
+            .filter(|d| *d > 0)
+            .is_some_and(|d| d / 1000 > i64::from(sample_duration_secs.saturating_add(30)));
+
+        let expected_fp_key = crate::fingerprint_job::fingerprint_cache_key(
+            &source_version,
+            sample_duration_secs,
+            media_duration_ms,
+        );
+
+        let cached_fp = store.get_fingerprint_cache(&ledger_id).ok().flatten();
+        let intro_missing = fp_enabled && cached_fp.as_ref().map_or(true, |c| {
+            c.cache_key != expected_fp_key || c.intro.is_empty()
+        });
+        let outro_missing = fp_enabled && outro_expected && cached_fp.as_ref().map_or(true, |c| {
+            c.cache_key != expected_fp_key || c.outro.as_ref().map_or(true, |o| o.is_empty())
+        });
+
+        // Check if there are active probe jobs for this ledger
+        if let Ok(Some(_active_unit)) = store.active_probe_unit_for_ledger(&ledger_id) {
+            return Ok(policy::ProbeRequestResult::AlreadyRunning);
+        }
+
+        // Check stage state retries if not manual
+        let now_ms = now_ms();
+        if origin != policy::ProbeRequestOrigin::ManualRetry && origin != policy::ProbeRequestOrigin::ManualRefresh {
+            if fp_enabled && outro_missing && !intro_missing {
+                let outro_key = store::ProbeStageKey {
+                    ledger_id: ledger_id.clone(),
+                    context_key: expected_fp_key.clone(),
+                    stage: store::ProbeStage::Outro,
+                };
+                if let Ok(Some(stage_state)) = store.get_probe_stage(&outro_key) {
+                    if stage_state.status == store::ProbeStageStatus::Failed {
+                        if stage_state.failure_count >= 5 {
+                            return Ok(policy::ProbeRequestResult::Exhausted);
+                        }
+                        if let Some(next_retry) = stage_state.next_retry_at_ms {
+                            if next_retry > now_ms {
+                                return Ok(policy::ProbeRequestResult::Waiting {
+                                    next_retry_at_ms: next_retry,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        drop(store);
+
+        if meta_valid && !intro_missing && !outro_missing {
+            return Ok(policy::ProbeRequestResult::Complete);
+        }
+
+        let unit = ProbeUnit {
+            row: row.clone(),
+            kind,
+            force_fingerprint: fp_enabled,
+            reuse_fingerprint_cache: true,
+            overwrite_markers: false,
+            reuse_media_info_cache: true,
+            marker_refresh_id: None,
+            job_id: None,
+        };
+
+        if meta_valid && fp_enabled && (intro_missing || outro_missing) {
+            // Directly queue fingerprint probe without media probe!
+            if let Some(job_id) = self.enqueue_direct_fingerprint(unit, media_duration_ms, source_version, sample_duration_secs) {
+                return Ok(policy::ProbeRequestResult::Queued { job_id });
+            } else {
+                return Ok(policy::ProbeRequestResult::AlreadyRunning);
+            }
+        }
+
+        let ledger_id = unit.row.id.to_string();
+        if self.enqueue(unit) {
+            let job_id = self
+                .active_probe_job_id(&ledger_id)
+                .unwrap_or_default();
+            Ok(policy::ProbeRequestResult::Queued { job_id })
+        } else {
+            Ok(policy::ProbeRequestResult::AlreadyRunning)
+        }
+    }
+
+    pub fn enqueue_direct_fingerprint(
+        &self,
+        mut unit: ProbeUnit,
+        media_duration_ms: Option<i64>,
+        source_version: String,
+        duration_secs: u32,
+    ) -> Option<String> {
+        let ledger_id = unit.row.id.to_string();
+        let mut seen = self.seen.lock();
+        if !seen.insert(ledger_id.clone()) {
+            return None;
+        }
+        let job_id = self.persist_single_unit(&unit, "fingerprint_probe")?;
+        unit.job_id = Some(job_id.clone());
+
+        let work = probe::FingerprintWork {
+            unit: unit.clone(),
+            media_duration_ms,
+            source_version,
+            duration_secs,
+            start_job: true,
+        };
+
+        if self.fingerprint_tx.send(work).is_err() {
+            seen.remove(&ledger_id);
+            self.finish(&unit, false);
+            return None;
+        }
+        Some(job_id)
     }
 
     /// 入队探测（幂等：已在队列/执行中的跳过）。
@@ -413,6 +568,17 @@ impl ProbeManager {
     }
 
     fn finish(&self, unit: &ProbeUnit, succeeded: bool) {
+        let status = if succeeded { "succeeded" } else { "failed" };
+        self.finish_with_status(unit, status, None, (!succeeded).then_some("探测单元执行失败"));
+    }
+
+    pub(crate) fn finish_with_status(
+        &self,
+        unit: &ProbeUnit,
+        status: &str,
+        error_kind: Option<&str>,
+        error: Option<&str>,
+    ) {
         let ledger_id = unit.row.id.to_string();
         let cancelled = unit
             .job_id
@@ -423,9 +589,9 @@ impl ProbeManager {
             self.seen.lock().remove(&ledger_id);
             return;
         }
-        self.finish_persisted_unit(unit, succeeded);
+        self.finish_persisted_unit_with_status(unit, status, error_kind, error);
         self.seen.lock().remove(&ledger_id);
-        if !succeeded {
+        if status == "failed" {
             self.mark_failed(&ledger_id);
         }
     }
@@ -468,16 +634,28 @@ impl ProbeManager {
     }
 
     fn finish_persisted_unit(&self, unit: &ProbeUnit, succeeded: bool) {
+        let status = if succeeded { "succeeded" } else { "failed" };
+        self.finish_persisted_unit_with_status(unit, status, None, (!succeeded).then_some("探测单元执行失败"));
+    }
+
+    pub(crate) fn finish_persisted_unit_with_status(
+        &self,
+        unit: &ProbeUnit,
+        status: &str,
+        error_kind: Option<&str>,
+        error: Option<&str>,
+    ) {
         let ledger_id = unit.row.id.to_string();
         let Some(job_id) = unit.job_id.as_deref() else {
             tracing::error!(ledger_id, "探测队列项缺少持久化任务 ID，拒绝写入结果");
             return;
         };
-        let result = self.store.lock().finish_probe_unit(
+        let result = self.store.lock().finish_probe_unit_with_status(
             job_id,
             &ledger_id,
-            succeeded,
-            (!succeeded).then_some("探测单元执行失败"),
+            status,
+            error_kind,
+            error,
         );
         let (job, accepted, all_done) = match result {
             Ok(result) => result,
@@ -497,7 +675,7 @@ impl ProbeManager {
             episode = unit.row.episode.unwrap_or(1),
             completed = job.completed,
             total = job.total,
-            succeeded,
+            status,
             "【媒体探测】任务单元结果已写入数据库"
         );
         if !all_done {
@@ -524,14 +702,17 @@ impl ProbeManager {
             marker_jobs::apply_marker_refresh(self, &job, unit);
             timings::log_terminal_job(&self.store, &self.timings, &job);
         } else {
-            match self.store.lock().finish_probe_job(&job.id, true, None) {
+            let final_succeeded = job.status == "succeeded";
+            let job_final_status = job.status.clone();
+            match self.store.lock().finish_probe_job(&job.id, final_succeeded, job.error.as_deref()) {
                 Ok(()) => tracing::info!(
                     job_id = %job.id,
                     media_id = %job.media_id,
                     completed = job.completed,
                     total = job.total,
+                    status = %job_final_status,
                     elapsed_ms = job.elapsed_ms(now_ms()),
-                    "【媒体探测】持久化任务成功完成"
+                    "【媒体探测】持久化任务完成"
                 ),
                 Err(error) => {
                     tracing::error!(%error, job_id = %job.id, "持久化探测任务成功状态失败")

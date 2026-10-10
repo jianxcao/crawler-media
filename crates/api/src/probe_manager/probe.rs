@@ -8,6 +8,13 @@ use marker::FingerprintEngine;
 use super::{ProbeManager, ProbeUnit};
 use crate::scrape_store::ScrapeStoreExt;
 
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or_default()
+}
+
 pub(super) struct FingerprintWork {
     pub(super) unit: ProbeUnit,
     pub(super) media_duration_ms: Option<i64>,
@@ -92,6 +99,16 @@ async fn probe_metadata_inner(mgr: &ProbeManager, unit: &ProbeUnit) -> MetadataO
 
 /// Run optional voiceprint extraction and season comparison on its own worker.
 pub(super) async fn probe_fingerprint(mgr: &ProbeManager, work: &FingerprintWork) -> bool {
+    matches!(
+        probe_fingerprint_detailed(mgr, work).await,
+        super::stages::FingerprintRunOutcome::Complete
+    )
+}
+
+pub(super) async fn probe_fingerprint_detailed(
+    mgr: &ProbeManager,
+    work: &FingerprintWork,
+) -> super::stages::FingerprintRunOutcome {
     let unit = &work.unit;
     let started_at = Instant::now();
     let job_id = unit.job_id.clone();
@@ -117,12 +134,19 @@ pub(super) async fn probe_fingerprint(mgr: &ProbeManager, work: &FingerprintWork
 
     if sampling_mode == "adaptive" && unit.kind == MediaKind::Tv {
         if let Some(result) = probe_adaptive_season(mgr, unit, started_at).await {
-            return result;
+            return if result {
+                super::stages::FingerprintRunOutcome::Complete
+            } else {
+                super::stages::FingerprintRunOutcome::Failed {
+                    error_kind: "adaptive_failure".into(),
+                    error: "Adaptive season failed".into(),
+                }
+            };
         }
     }
 
     let path = PathBuf::from(&unit.row.path);
-    if !probe_fingerprint_and_store(
+    let outcome = probe_fingerprint_and_store_detailed(
         mgr,
         unit,
         path,
@@ -133,36 +157,54 @@ pub(super) async fn probe_fingerprint(mgr: &ProbeManager, work: &FingerprintWork
         unit.marker_refresh_id.is_some(),
         unit.reuse_fingerprint_cache,
     )
-    .await
-    {
-        tracing::info!(
-            job_id = ?job_id,
-            media_id = %unit.row.media_id,
-            ledger_id = %unit.row.id,
-            elapsed_ms = started_at.elapsed().as_millis() as u64,
-            "【声纹】后台声纹处理失败；已提取的媒体信息仍保留"
-        );
-        return false;
-    }
-    if unit.marker_refresh_id.is_none() {
-        if let Err(error) = super::markers::compare_and_store_markers(mgr, unit) {
-            tracing::error!(
-                %error,
+    .await;
+
+    match &outcome {
+        super::stages::FingerprintRunOutcome::Complete => {
+            if unit.marker_refresh_id.is_none() {
+                let _ = super::markers::compare_and_store_markers(mgr, unit);
+            }
+            tracing::info!(
+                job_id = ?job_id,
                 media_id = %unit.row.media_id,
                 ledger_id = %unit.row.id,
-                "【片头片尾】写入识别结果失败"
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "【声纹】低优先级声纹处理完成"
             );
-            return false;
+        }
+        super::stages::FingerprintRunOutcome::Partial { .. } => {
+            if unit.marker_refresh_id.is_none() {
+                let _ = super::markers::compare_and_store_markers(mgr, unit);
+            }
+            tracing::info!(
+                job_id = ?job_id,
+                media_id = %unit.row.media_id,
+                ledger_id = %unit.row.id,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "【声纹】低优先级声纹部分处理完成（片头就绪，片尾待重试）"
+            );
+        }
+        super::stages::FingerprintRunOutcome::Failed { error, .. } => {
+            tracing::info!(
+                job_id = ?job_id,
+                media_id = %unit.row.media_id,
+                ledger_id = %unit.row.id,
+                error = %error,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "【声纹】后台声纹处理失败；已提取的媒体信息仍保留"
+            );
+        }
+        super::stages::FingerprintRunOutcome::Cancelled { reason } => {
+            tracing::info!(
+                job_id = ?job_id,
+                media_id = %unit.row.media_id,
+                ledger_id = %unit.row.id,
+                reason = %reason,
+                "【声纹】声纹处理已取消"
+            );
         }
     }
-    tracing::info!(
-        job_id = ?job_id,
-        media_id = %unit.row.media_id,
-        ledger_id = %unit.row.id,
-        elapsed_ms = started_at.elapsed().as_millis() as u64,
-        "【声纹】低优先级声纹处理完成"
-    );
-    true
+    outcome
 }
 
 async fn probe_adaptive_season(
@@ -582,6 +624,131 @@ async fn probe_fingerprint_and_store(
         return !require_complete_markers;
     }
     true
+}
+
+pub(super) async fn probe_fingerprint_and_store_detailed(
+    mgr: &ProbeManager,
+    unit: &ProbeUnit,
+    fp_path: PathBuf,
+    duration_secs: u32,
+    media_duration_ms: Option<i64>,
+    source_version: String,
+    fingerprint_engine: Arc<dyn FingerprintEngine>,
+    require_complete_markers: bool,
+    allow_cache_reuse: bool,
+) -> super::stages::FingerprintRunOutcome {
+    let ledger_id = unit.row.id.to_string();
+    let started = Instant::now();
+    let cached = match mgr.store.lock().get_fingerprint_cache(&ledger_id) {
+        Ok(cache) => cache,
+        Err(error) => {
+            tracing::error!(%error, ledger_id, "【声纹】读取指纹缓存失败，回退到重新采集");
+            None
+        }
+    };
+    let outcome = match crate::fingerprint_job::capture_or_reuse_fingerprints(
+        &fp_path,
+        &source_version,
+        duration_secs,
+        media_duration_ms,
+        cached,
+        allow_cache_reuse,
+        fingerprint_engine,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            tracing::error!(
+                %error,
+                ledger_id,
+                media_id = %unit.row.media_id,
+                season = unit.row.season.unwrap_or(1),
+                episode = unit.row.episode.unwrap_or(1),
+                path = %fp_path.display(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "【声纹】音频指纹采集失败"
+            );
+            let error_kind = if error.contains("403") {
+                "http_403"
+            } else if error.contains("404") {
+                "http_404"
+            } else {
+                "fingerprint_error"
+            };
+            return super::stages::FingerprintRunOutcome::Failed {
+                error_kind: error_kind.into(),
+                error,
+            };
+        }
+    };
+    if let Err(error) = mgr
+        .store
+        .lock()
+        .put_fingerprint_cache(&ledger_id, &outcome.cache)
+    {
+        tracing::error!(%error, ledger_id, "【声纹】版本化指纹缓存持久化失败");
+        return super::stages::FingerprintRunOutcome::Failed {
+            error_kind: "store_error".into(),
+            error: error.to_string(),
+        };
+    }
+    tracing::info!(
+        ledger_id,
+        media_id = %unit.row.media_id,
+        season = unit.row.season.unwrap_or(1),
+        episode = unit.row.episode.unwrap_or(1),
+        path = %fp_path.display(),
+        source_version,
+        cache_key = outcome.cache.cache_key,
+        intro_cache_hit = outcome.intro_cache_hit,
+        outro_cache_hit = outcome.outro_cache_hit,
+        intro_words = outcome.cache.intro.len(),
+        outro_words = outcome.cache.outro.as_ref().map(Vec::len).unwrap_or_default(),
+        intro_elapsed_ms = outcome.intro_elapsed_ms,
+        outro_elapsed_ms = outcome.outro_elapsed_ms,
+        media_duration_ms = ?outcome.cache.media_duration_ms,
+        refresh_id = ?unit.marker_refresh_id,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "【声纹】版本化指纹缓存已持久化"
+    );
+    mgr.timings.record_fingerprint(
+        unit.job_id.as_deref(),
+        outcome.intro_cache_hit,
+        outcome.outro_cache_hit,
+        outcome.intro_elapsed_ms,
+        outcome.outro_elapsed_ms,
+    );
+
+    let job_id = unit.job_id.clone().unwrap_or_else(|| "direct".to_string());
+    super::stages::record_fingerprint_stages(
+        mgr,
+        &ledger_id,
+        &job_id,
+        &outcome.cache.cache_key,
+        outcome.outro_error.as_deref(),
+        now_ms(),
+    );
+    match outcome.outro_error {
+        Some(error) => {
+            tracing::warn!(
+                %error,
+                ledger_id,
+                media_id = %unit.row.media_id,
+                season = unit.row.season.unwrap_or(1),
+                episode = unit.row.episode.unwrap_or(1),
+                require_complete_markers,
+                "【声纹】片尾指纹暂不可用，保留片头缓存并允许下次只重试片尾"
+            );
+            let error_kind = super::stages::classify_fingerprint_error(&error).to_string();
+            if require_complete_markers {
+                super::stages::FingerprintRunOutcome::Failed { error_kind, error }
+            } else {
+                super::stages::FingerprintRunOutcome::Partial { error_kind, error }
+            }
+        }
+        None => super::stages::FingerprintRunOutcome::Complete,
+    }
 }
 
 fn update_ledger_quality(mgr: &ProbeManager, ledger_id: &str, tracks: &library::Tracks) {
