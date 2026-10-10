@@ -89,7 +89,7 @@ fn load_search_context(
     let (facts, wash_filter) = {
         let store = state.store.lock();
         let facts = store
-            .load_subscribe_facts(subscribe.id)
+            .load_library_subscribe_facts(subscribe, media.kind)
             .map_err(|error| error.to_string())?;
         let wash_filter = subscribe
             .wash_cut_filter_id
@@ -98,7 +98,10 @@ fn load_search_context(
         (facts, wash_filter)
     };
     let (library_root, transfer_mode, scrape) =
-        crate::directory::transfer_plan(&state.store.lock(), media.kind)
+        crate::directory::transfer_plan_for_library(
+            &state.store.lock(), media.kind,
+            subscribe.library_id.as_ref().map(|id| id.to_string()).as_deref(),
+        )
             .map_err(|error| error.to_string())?;
     let naming = state
         .store

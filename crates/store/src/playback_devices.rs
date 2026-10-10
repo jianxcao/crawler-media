@@ -27,4 +27,24 @@ impl Store {
         }
         self.put_setting("playback.revoked_devices", &serde_json::to_string(&list)?)
     }
+
+    /// Only actual Jellyfin identities have a device-level credential contract.
+    /// Web activity and legacy logs without an identity support ending only.
+    pub fn device_is_revocable(
+        &self,
+        user_id: UserId,
+        device_id: &str,
+    ) -> Result<bool, StoreError> {
+        if device_id.is_empty()
+            || device_id == "jellyfin-client"
+            || device_id.starts_with("unidentified:")
+        {
+            return Ok(false);
+        }
+        Ok(self.subscribe.query_row(
+            "SELECT EXISTS(SELECT 1 FROM playback_sessions WHERE user_id=?1 AND device_id=?2 AND play_method='DirectPlay')
+             OR EXISTS(SELECT 1 FROM playback_logs WHERE user_id=?1 AND device_id=?2 AND play_method='DirectPlay')",
+            rusqlite::params![user_id.to_string(),device_id], |row| row.get(0),
+        )?)
+    }
 }

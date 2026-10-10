@@ -63,11 +63,8 @@ fn env_overrides_saved_downloader() {
 }
 
 #[test]
-fn memory_when_neither_settings_nor_env() {
+fn missing_downloader_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    assert!(matches!(
-        choose_downloader(&store, &empty_env()).unwrap(),
-        ChosenDownloader::Memory
-    ));
+    assert!(choose_downloader(&store, &empty_env()).is_err());
 }

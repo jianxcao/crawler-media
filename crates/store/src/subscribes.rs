@@ -591,14 +591,16 @@ impl Store {
         subscribe_id: SubscribeId,
         facts: &SubscribeFacts,
     ) -> Result<(), StoreError> {
-        let mut statement = self.subscribe.prepare(
+        self.persist_owned_quality(facts)?;
+        let tx = self.subscribe.unchecked_transaction()?;
+        let mut statement = tx.prepare(
             "INSERT INTO subscribe_facts (subscribe_id, season, episode, score, path)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(subscribe_id, season, episode) DO UPDATE SET
                score = excluded.score,
                path = excluded.path",
         )?;
-        for ((season, episode), fact) in facts.entries() {
+        for ((season, episode), fact) in facts.entries().filter(|(_, fact)| fact.path.is_some()) {
             statement.execute(params![
                 subscribe_id.to_string(),
                 season.map_or(-1i64, |s| s as i64),
@@ -607,6 +609,10 @@ impl Store {
                 fact.path,
             ])?;
         }
+        drop(statement);
+        tx.execute("DELETE FROM subscribe_facts WHERE subscribe_id = ?1 AND path IS NULL",
+            [subscribe_id.to_string()])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -616,7 +622,7 @@ impl Store {
     ) -> Result<SubscribeFacts, StoreError> {
         let mut statement = self.subscribe.prepare(
             "SELECT season, episode, score, path
-             FROM subscribe_facts WHERE subscribe_id = ?1",
+             FROM subscribe_facts WHERE subscribe_id = ?1 AND path IS NOT NULL",
         )?;
         let rows = statement.query_map(params![subscribe_id.to_string()], |row| {
             let season: i64 = row.get(0)?;
@@ -635,22 +641,7 @@ impl Store {
             let (season, episode, fact) = row?;
             if let Some(path) = fact.path.as_deref() {
                 if let Some(ledger) = self.ledger_by_path(path)? {
-                    let quality = Release {
-                        title: String::new(),
-                        year: None,
-                        season: ledger.season,
-                        episode: ledger.episode,
-                        episode_to: None,
-                        resolution: ledger.resolution,
-                        source: None,
-                        codec: ledger.codec,
-                        hdr: ledger.hdr,
-                        subtitle_language: None,
-                        audio_language: None,
-                        group: None,
-                        confidence: ledger.confidence,
-                    };
-                    facts.set_quality(path.to_string(), quality);
+                    facts.set_quality(path.to_string(), self.owned_quality(&ledger)?);
                 }
             }
             facts.upsert(season, episode, fact);

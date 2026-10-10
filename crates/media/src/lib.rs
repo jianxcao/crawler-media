@@ -3,6 +3,7 @@ mod anilist;
 mod bangumi;
 mod cache;
 mod client;
+mod contracts;
 mod douban;
 mod metadata;
 mod parse;

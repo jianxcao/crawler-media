@@ -1,5 +1,5 @@
 use domain::{Site, SiteId};
-use hooks::{Bus, HttpPost, PluginError, SiteCredentials, keep_site_alive};
+use hooks::{Bus, CheckInPlugin, HttpPost, NexusPhpPolicy, PluginError, SiteCredentials};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
@@ -30,7 +30,12 @@ pub fn run(state: &ApiState) -> Result<(), String> {
         }
 
         tracing::info!(site = %site.name, site_id = %site.id, "【站点签到】正在执行站点签到/保活请求");
-        match keep_site_alive(&bus, &creds, &http, site.id) {
+        let result = site_policy(state, &site).and_then(|policy| {
+            CheckInPlugin::http(&bus, &creds, &http)
+                .with_policy(&policy)
+                .check_in(site.id)
+        });
+        match result {
             Ok(_) => {
                 tracing::info!(site = %site.name, site_id = %site.id, "【站点签到】签到/保活成功");
             }
@@ -107,47 +112,98 @@ impl HttpPost for AttendanceHttp {
         cookie: Option<&str>,
         proxy: Option<&str>,
     ) -> Result<String, PluginError> {
-        if url.contains("example") {
-            return Ok(String::new());
-        }
-        let mut config_builder = ureq::config::Config::builder()
-            .timeout_global(Some(std::time::Duration::from_secs(10)));
-        if let Some(proxy_url) = proxy.filter(|p| !p.trim().is_empty()) {
-            if let Ok(proxy_cfg) = ureq::Proxy::new(proxy_url) {
-                config_builder = config_builder.proxy(Some(proxy_cfg));
-            }
-        }
-        let agent = ureq::Agent::new_with_config(config_builder.build());
-        let mut builder = agent.post(url)
-            .header(
-                "User-Agent",
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            )
-            .header("Content-Type", "application/x-www-form-urlencoded");
-        if let Some(cookie) = cookie {
-            builder = builder.header("Cookie", cookie);
-        }
-        let response = match builder.send(body) {
-            Ok(resp) => resp,
-            Err(e) => {
-                tracing::warn!(url = %url, error = %e, "【站点签到】HTTP 请求发送失败");
-                return Err(PluginError::Fetch(e.to_string()));
-            }
-        };
-        let set_cookie = response
-            .headers()
-            .get("set-cookie")
-            .and_then(|value| value.to_str().ok())
-            .map(|value| format!("Set-Cookie: {value}"));
-        let text = response
-            .into_body()
-            .read_to_string()
-            .map_err(|e| PluginError::Fetch(e.to_string()))?;
-        Ok(match set_cookie {
-            Some(cookie) => format!("{cookie}\n{text}"),
-            None => text,
-        })
+        attendance_request(url, Some(body), cookie, proxy)
     }
+
+    fn get(
+        &self,
+        url: &str,
+        cookie: Option<&str>,
+        proxy: Option<&str>,
+    ) -> Result<String, PluginError> {
+        attendance_request(url, None, cookie, proxy)
+    }
+}
+
+pub(crate) fn site_policy(state: &ApiState, site: &Site) -> Result<NexusPhpPolicy, PluginError> {
+    let profile = state.indexer.profile(&site.profile_id)
+        .ok_or_else(|| {
+            tracing::error!(site_id = %site.id, profile_id = %site.profile_id, "Site maintenance profile unavailable");
+            PluginError::Fetch("Site profile 不可用；请选择支持认证验证的模板".into())
+        })?;
+    if profile.framework != indexer::Framework::Nexusphp {
+        tracing::error!(site_id = %site.id, profile_id = %site.profile_id, "Site page maintenance unsupported for API profile");
+        return Err(PluginError::Fetch(
+            "API Site 不支持页面 Login/Check-in；请配置有效 API key".into(),
+        ));
+    }
+    Ok(NexusPhpPolicy::new(profile.login_success_css.clone()))
+}
+
+fn attendance_request(
+    url: &str,
+    body: Option<&str>,
+    cookie: Option<&str>,
+    proxy: Option<&str>,
+) -> Result<String, PluginError> {
+    let parsed = url::Url::parse(url).map_err(|error| PluginError::Fetch(error.to_string()))?;
+    let host = parsed.host_str().unwrap_or_default();
+    if host.ends_with(".example")
+        || host.ends_with(".invalid")
+        || host.ends_with(".test")
+        || ["example.com", "example.org", "example.net"].contains(&host)
+    {
+        tracing::error!(
+            site_host = host,
+            "Site maintenance rejected placeholder URL"
+        );
+        return Err(PluginError::Fetch(
+            "Site URL 是占位地址；请配置实际站点地址与有效 Cookie".into(),
+        ));
+    }
+    let mut config =
+        ureq::config::Config::builder().timeout_global(Some(std::time::Duration::from_secs(10)));
+    if let Some(proxy) = proxy.filter(|proxy| !proxy.trim().is_empty()) {
+        let proxy = ureq::Proxy::new(proxy)
+            .map_err(|error| PluginError::Fetch(format!("invalid Site proxy: {error}")))?;
+        config = config.proxy(Some(proxy));
+    }
+    let method = if body.is_some() { "POST" } else { "GET" };
+    let mut request = ureq::http::Request::builder().method(method).uri(url)
+        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+    if body.is_some() {
+        request = request.header("Content-Type", "application/x-www-form-urlencoded");
+    }
+    if let Some(cookie) = cookie {
+        request = request.header("Cookie", cookie);
+    }
+    let request = request
+        .body(body.unwrap_or_default())
+        .map_err(|error| PluginError::Fetch(error.to_string()))?;
+    let started = std::time::Instant::now();
+    let response = ureq::Agent::new_with_config(config.build()).run(request).map_err(|error| {
+        tracing::error!(site_host = host, method, %error, "Site maintenance HTTP request failed");
+        PluginError::Fetch(error.to_string())
+    })?;
+    tracing::debug!(
+        site_host = host,
+        method,
+        elapsed_ms = started.elapsed().as_millis(),
+        status = response.status().as_u16(),
+        "Site maintenance page fetched; business outcome still requires validation"
+    );
+    let cookies: Vec<String> = response
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(|value| format!("Set-Cookie: {value}\n"))
+        .collect();
+    let text = response.into_body().read_to_string().map_err(|error| {
+        tracing::error!(site_host = host, method, %error, "Site maintenance response read failed");
+        PluginError::Fetch(error.to_string())
+    })?;
+    Ok(format!("{}{text}", cookies.concat()))
 }
 
 pub(crate) struct StoreSites<'a>(&'a Mutex<Store>);

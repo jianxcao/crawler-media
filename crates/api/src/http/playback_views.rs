@@ -37,7 +37,7 @@ pub(crate) async fn up_next(
         .get("limit")
         .and_then(|v| v.parse().ok())
         .unwrap_or(20)
-        .min(100);
+        .clamp(1, 100);
     // 阶段一：锁内只做快 DB 读，收集每条的 (media_id, season, next_episode)。
     let mut plans: Vec<UpNextPlan> = Vec::new();
     let mut seen_media: HashSet<domain::MediaId> = HashSet::new();
@@ -410,7 +410,7 @@ pub(crate) async fn favorites(
         .get("limit")
         .and_then(|v| v.parse().ok())
         .unwrap_or(20)
-        .min(200);
+        .clamp(1, 200);
     let offset = query
         .get("offset")
         .and_then(|v| v.parse().ok())
@@ -606,7 +606,7 @@ pub(crate) async fn favorites_gallery(
         .get("limit")
         .and_then(|v| v.parse().ok())
         .unwrap_or(20)
-        .min(200);
+        .clamp(1, 200);
     let offset = query
         .get("offset")
         .and_then(|v| v.parse().ok())

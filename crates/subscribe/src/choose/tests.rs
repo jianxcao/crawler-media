@@ -259,6 +259,28 @@ fn ladder_uses_probed_quality_not_renamed_filename() {
 }
 
 #[test]
+fn unknown_source_blocks_resolution_first_destructive_wash_cut() {
+    let mut subscribe = tv_subscribe(domain::MediaId::new());
+    subscribe.wash_cut = true;
+    subscribe.keep_old_versions = false;
+    let mut facts = SubscribeFacts::default();
+    let owned_path = "/library/Test.Show.S01E01.1080p.mkv";
+    facts.replace(Some(1), Some(1), crate::QualityFact { score: 40, path: Some(owned_path.into()) });
+    let mut owned = release("Test.Show.S01E01.1080p");
+    owned.resolution = Some("1080p".into());
+    owned.source = None;
+    facts.set_quality(owned_path.into(), owned);
+    let wash = domain::Filter::new(domain::FilterId::new(), "ladder", vec![domain::FilterAtom {
+        priority: 1, rule: domain::AtomRule::UpgradeLadder("resolution,source".into()), exclude: false,
+    }]);
+    let mut candidate = scored("Test.Show.S01E01.2160p.BluRay", 1, 1, 40);
+    candidate.release.resolution = Some("2160p".into());
+    candidate.release.source = Some("bluray".into());
+    assert!(!should_replace_slots(&subscribe, Some(&wash), &facts, &candidate, &[(Some(1), Some(1))]),
+        "已有来源未知时，更高分辨率不能单独批准删除旧文件");
+}
+
+#[test]
 fn highest_scoring_candidate_not_matching_ladder_allows_eligible_candidate() {
     let mut subscribe = tv_subscribe(domain::MediaId::new());
     subscribe.wash_cut = true;

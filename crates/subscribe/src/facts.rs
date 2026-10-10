@@ -41,6 +41,11 @@ impl SubscribeFacts {
         self.qualities.get(path)
     }
 
+    /// Remove temporary in-flight coverage before reporting or persisting owned facts.
+    pub fn retain_owned(&mut self) {
+        self.slots.retain(|_, fact| fact.path.is_some());
+    }
+
     pub fn movie(&self) -> Option<&QualityFact> {
         self.get(None, None)
     }

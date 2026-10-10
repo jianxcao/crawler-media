@@ -58,7 +58,10 @@ impl DownloaderEnv {
 pub enum ChosenDownloader {
     Qbittorrent(QbitConfig),
     Transmission(TransmissionConfig),
+    /// Test-only explicit injection. Production selection never returns this.
     Memory,
+    /// A configured or missing production Downloader cannot be used.
+    Unavailable,
 }
 
 pub fn choose_downloader(
@@ -80,7 +83,8 @@ pub fn choose_downloader(
         return Ok(from_row(row, env));
     }
     let Some(raw) = store.get_setting("downloader")? else {
-        return Ok(ChosenDownloader::Memory);
+        tracing::error!("生产环境没有可用的默认 Downloader，拒绝内存假下载");
+        return Err(StoreError::Missing("default Downloader".into()));
     };
     let saved: SavedDownloader = serde_json::from_str(&raw)?;
     Ok(from_saved(saved, env))
@@ -98,7 +102,8 @@ fn from_row(row: crate::store::DownloaderRow, env: &DownloaderEnv) -> ChosenDown
             let username = row.username.unwrap_or_default();
             let password = row.password.unwrap_or_default();
             if row.url.is_empty() || username.is_empty() || password.is_empty() {
-                return ChosenDownloader::Memory;
+                tracing::error!(id = %row.id, "qBittorrent 配置不完整，拒绝内存假下载");
+                return ChosenDownloader::Unavailable;
             }
             // Env path_maps override DB path_maps (if env is set).
             let path_maps = if env.qb_path_maps.is_empty() {
@@ -116,7 +121,8 @@ fn from_row(row: crate::store::DownloaderRow, env: &DownloaderEnv) -> ChosenDown
         }
         "transmission" => {
             if row.url.is_empty() {
-                return ChosenDownloader::Memory;
+                tracing::error!(id = %row.id, "Transmission 配置不完整，拒绝内存假下载");
+                return ChosenDownloader::Unavailable;
             }
             let path_maps = if env.tr_path_maps.is_empty() {
                 row.path_maps
@@ -130,7 +136,10 @@ fn from_row(row: crate::store::DownloaderRow, env: &DownloaderEnv) -> ChosenDown
                 path_maps,
             })
         }
-        _ => ChosenDownloader::Memory,
+        _ => {
+            tracing::error!(kind = %row.kind, "未知 Downloader 类型，拒绝内存假下载");
+            ChosenDownloader::Unavailable
+        }
     }
 }
 
@@ -140,7 +149,8 @@ fn from_saved(saved: SavedDownloader, env: &DownloaderEnv) -> ChosenDownloader {
             let username = saved.username.unwrap_or_default();
             let password = saved.password.unwrap_or_default();
             if saved.url.is_empty() || username.is_empty() || password.is_empty() {
-                return ChosenDownloader::Memory;
+                tracing::error!("旧 Downloader 设置不完整，拒绝内存假下载");
+                return ChosenDownloader::Unavailable;
             }
             ChosenDownloader::Qbittorrent(QbitConfig {
                 url: saved.url,
@@ -152,7 +162,8 @@ fn from_saved(saved: SavedDownloader, env: &DownloaderEnv) -> ChosenDownloader {
         }
         "transmission" => {
             if saved.url.is_empty() {
-                return ChosenDownloader::Memory;
+                tracing::error!("旧 Transmission 设置不完整，拒绝内存假下载");
+                return ChosenDownloader::Unavailable;
             }
             ChosenDownloader::Transmission(TransmissionConfig {
                 url: saved.url,
@@ -161,7 +172,10 @@ fn from_saved(saved: SavedDownloader, env: &DownloaderEnv) -> ChosenDownloader {
                 path_maps: env.tr_path_maps.clone(),
             })
         }
-        _ => ChosenDownloader::Memory,
+        _ => {
+            tracing::error!(kind = %saved.kind, "旧 Downloader 设置类型未知，拒绝内存假下载");
+            ChosenDownloader::Unavailable
+        }
     }
 }
 

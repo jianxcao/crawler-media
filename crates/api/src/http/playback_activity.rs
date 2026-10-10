@@ -25,7 +25,7 @@ fn session_json(store: &crate::Store, session: &SessionRow, member_name: &str) -
     json!({
         "user_id": session.user_id.to_string(),
         "device_id": session.device_id,
-        "revocable": session.client.is_some(),
+        "revocable": session.revocable(),
         "member_name": member_name,
         "client": session.client,
         "device_name": session.device_name,
@@ -205,7 +205,7 @@ pub(crate) async fn devices(
                 "client": session.client,
                 "device_name": session.device_name,
                 "client_version": session.client_version,
-                "revocable": session.client.is_some(),
+                "revocable": session.revocable(),
                 "active_sessions": 0,
                 "last_seen_at": iso(session.last_report_at),
             })
@@ -213,7 +213,10 @@ pub(crate) async fn devices(
         entry["active_sessions"] = json!(entry["active_sessions"].as_i64().unwrap_or(0) + 1);
     }
     for log in logs {
-        let device_id = format!("jf-{}", log.device_name.clone().unwrap_or_default());
+        let device_id = log
+            .device_id
+            .clone()
+            .unwrap_or_else(|| format!("legacy-log:{}", log.id));
         let key = format!("{}:{device_id}", log.user_id);
         seen.entry(key).or_insert_with(|| {
             json!({
@@ -223,7 +226,7 @@ pub(crate) async fn devices(
                 "client": log.client,
                 "device_name": log.device_name,
                 "client_version": null,
-                "revocable": true,
+                "revocable": log.revocable(),
                 "active_sessions": 0,
                 "last_seen_at": iso(log.ended_at),
             })
@@ -236,7 +239,7 @@ pub(crate) async fn devices(
 }
 
 /// DELETE /playback/devices/{device_id}?user_id=... — revoke one user's device:
-/// end its session and block future progress.
+/// end its session and block protocol events/streams. Web supports ending only.
 pub(crate) async fn revoke_device(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
@@ -249,6 +252,25 @@ pub(crate) async fn revoke_device(
         Ok(target_user) => target_user,
         Err(response) => return response,
     };
+    match store.device_is_revocable(target_user, &device_id) {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::error!(%target_user, device_id, "Playback device credential revocation unsupported");
+            return err(
+                StatusCode::BAD_REQUEST,
+                "playback.unsupported",
+                "该设备不支持凭据注销，仅可结束当前播放",
+            );
+        }
+        Err(error) => {
+            tracing::error!(%error, %target_user, device_id, "Playback device identity lookup failed");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                "查询设备状态失败",
+            );
+        }
+    }
     if let Err(error) = store.end_device_session(target_user, &device_id, now) {
         return err(
             StatusCode::INTERNAL_SERVER_ERROR,

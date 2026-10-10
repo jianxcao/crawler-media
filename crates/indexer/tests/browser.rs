@@ -134,7 +134,7 @@ fn render_search_uses_browser_html_and_same_selectors() {
         ProfileSet::load(Some(overlay.path())).unwrap(),
         Arc::new(fetcher),
     );
-    let site = site_with_profile("demo", Some("ws://127.0.0.1:9222"));
+    let site = site_with_profile("demo", Some("http://127.0.0.1:9222"));
 
     let outcome = indexer.search(&[site.clone()], "matrix");
 
@@ -154,7 +154,7 @@ fn render_search_uses_browser_html_and_same_selectors() {
     );
     assert_eq!(
         opened.lock().unwrap().as_slice(),
-        &[Some("ws://127.0.0.1:9222".into())]
+        &[Some("http://127.0.0.1:9222".into())]
     );
 }
 
@@ -190,12 +190,8 @@ fn default_browser_config_has_no_chromium_and_is_headless_when_enabled() {
     assert!(!off.chromium_present());
     assert!(off.headless);
 
-    let on = BrowserConfig::enable_in(data.path()).unwrap();
-    assert!(on.enabled);
-    assert!(on.headless);
-    assert!(on.chromium_present());
-    assert!(on.chromium_path().starts_with(data.path()));
-    assert!(!data.path().join("chromium").as_os_str().is_empty());
+    assert!(BrowserConfig::enable_in(data.path()).is_err());
+    assert!(!data.path().join("chromium").exists());
 }
 
 #[test]
@@ -221,27 +217,24 @@ fn recording_fetcher_never_launches_chromium_for_injected_html() {
 }
 
 #[test]
-fn browser_with_external_cdp_attempts_real_target_connection() {
-    let browser = Browser::new(BrowserConfig::disabled());
+fn browser_with_external_cdp_propagates_injected_connection_failure() {
+    let browser = Browser::with_opener(BrowserConfig::disabled(), |endpoint| {
+        assert_eq!(endpoint, Some("http://fixture.invalid:9222"));
+        Err(IndexerError::Fetch("fixture CDP connection failed".into()))
+    });
     let req = FetchRequest {
         key: "test".into(),
-        url: "https://example.com".into(),
+        url: "https://fixture.invalid/document".into(),
         method: indexer::FetchMethod::Get,
         body: None,
         cookie: None,
         api_key: None,
         proxy: None,
         render: true,
-        cdp_url: Some("http://127.0.0.1:54322".into()),
+        cdp_url: Some("http://fixture.invalid:9222".into()),
     };
-    let err = browser.fetch_html(&req).unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        !msg.contains("no PageSession opener is configured"),
-        "生产路径已接通真实 CDP 会话创建，不应再报告缺少测试 opener: {msg}"
-    );
-    assert!(
-        msg.contains("无法连接外部 CDP 端点"),
-        "端点不可达时应返回明确的网络连接错误: {msg}"
+    assert_eq!(
+        browser.fetch_html(&req).unwrap_err().to_string(),
+        "fixture CDP connection failed"
     );
 }

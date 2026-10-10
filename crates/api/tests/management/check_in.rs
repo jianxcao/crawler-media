@@ -133,7 +133,10 @@ async fn failed_site_check_in_fails_the_scheduled_job() {
         )
         .unwrap();
     assert_eq!(status, "queued");
-    assert!(error.contains("Connection refused"), "{error}");
+    assert!(
+        error.contains("请人工登录并配置有效 Cookie"),
+        "缺 Cookie 必须给出可操作失败，而不是假装连接远端: {error}"
+    );
 }
 
 #[tokio::test]
@@ -157,9 +160,13 @@ async fn site_check_in_endpoint_runs_plugin() {
         ))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = json_body(response).await;
-    assert_eq!(body["ok"], true);
+    assert_eq!(body["ok"], false);
+    assert!(
+        body["error"]["message"].as_str().unwrap_or_default().contains("Cookie"),
+        "占位站点不得报告签到成功: {body}"
+    );
 }
 
 #[tokio::test]
@@ -183,8 +190,13 @@ async fn site_login_endpoint_runs_plugin() {
         ))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(json_body(response).await["ok"], true);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert_eq!(body["ok"], false);
+    assert!(
+        body["error"]["message"].as_str().unwrap_or_default().contains("Cookie"),
+        "空登录请求不得伪造会话: {body}"
+    );
 }
 
 #[tokio::test]

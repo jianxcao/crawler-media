@@ -340,80 +340,17 @@ pub fn handle_fs_events(
         }
 
         if !path.exists() {
-            // 文件或目录已被移除：先进入 45 秒宽限期。
-            // 相同 URL 在宽限期内回来时保留台账、媒体信息和声纹；到期仍不存在才删除。
-            tracing::info!(path = %path.display(), "检测到文件或目录被删除，进入宽限期");
-            let matched_rows = {
-                let store = state.store.lock();
-                store.list_ledger().ok().map(|rows| {
-                    rows.into_iter()
-                        .filter(|row| ledger_path_is_gone(&path, &row.path))
-                        .collect::<Vec<_>>()
-                })
-            };
-            if let Some(rows) = matched_rows {
-                for row in rows {
-                    let row_path = PathBuf::from(&row.path);
-                    if row_path
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"))
-                    {
-                        tracing::info!(
-                            row_path = %row.path,
-                            media_id = %row.media_id,
-                            "台账 strm 已不在磁盘上，进入删除宽限期"
-                        );
-                        tracker.mark_deleted(row_path, None, now);
-                    } else {
-                        delete_ledger_row(state, &row.path);
-                    }
-                }
-            } else if is_strm {
-                tracker.mark_deleted(path, None, now);
-            }
+            note_removed_path(state, tracker, &path, is_strm, now);
         } else {
-            // 文件或目录新建或修改
-            tracing::info!(path = %path.display(), is_dir = path.is_dir(), is_strm, "检测到文件或目录新建或修改");
-            if is_path_in_watch_intake(state, &path) {
-                // 如果变动路径位于 watch_intake 监控目录内（无论是新增文件夹还是视频文件），立即标记触发 intake
-                has_intake_or_download_change = true;
-            }
-            if path.is_dir() {
-                // 如果是新增/移入的目录，查找其所属的实时媒体库
-                if let Some(root) = realtime_library_root_for_path(state, &path) {
-                    let target_dir = entry_scan_target_dir(&root, &path);
-                    tracing::info!(root = %root.display(), target_dir = %target_dir.display(), "目录新增/还原，加入扫描目标");
-                    library_scan_targets.insert((root, target_dir));
-                }
-            } else if is_strm {
-                let current_url = library::read_strm_url(&path);
-                let should_refresh = tracker.on_created_or_modified(&path, current_url.as_deref());
-                if should_refresh {
-                    // strm 内容（指向的远程 URL）可能已变：旧 URL 的流信息缓存、
-                    // 章节缓存与片头片尾标记全部失效，下次访问按新 URL 重新探测。
-                    invalidate_strm_caches(state, &path);
-                    has_scrape_needed = true;
-                    if let Some(root) = realtime_library_root_for_path(state, &path) {
-                        let target_dir = entry_scan_target_dir(&root, &path);
-                        tracing::info!(root = %root.display(), target_dir = %target_dir.display(), "STRM 新增/修改，加入扫描目标");
-                        library_scan_targets.insert((root, target_dir));
-                    }
-                }
-            } else {
-                let ext = path
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .unwrap_or_default()
-                    .to_lowercase();
-                if matches!(ext.as_str(), "mkv" | "mp4" | "ts" | "mov" | "avi" | "iso") {
-                    has_intake_or_download_change = true;
-                    if let Some(root) = realtime_library_root_for_path(state, &path) {
-                        let target_dir = entry_scan_target_dir(&root, &path);
-                        library_scan_targets.insert((root, target_dir));
-                    }
-                }
-            }
+            note_present_path(
+                state,
+                tracker,
+                &path,
+                is_strm,
+                &mut has_intake_or_download_change,
+                &mut has_scrape_needed,
+                &mut library_scan_targets,
+            );
         }
     }
 
@@ -472,28 +409,115 @@ pub fn handle_fs_events(
     }
 }
 
-/// 删除一条已经不在磁盘上的台账，并清掉挂在它上面的探测数据。
-/// 剧集还有其他文件时保留剧目和播放进度；最后一个文件也删除时，才清理整部剧。
-fn delete_ledger_row(state: &ApiState, path: &str) {
-    let store = state.store.lock();
-    let Ok(Some(row)) = store.ledger_by_path(path) else {
-        return;
+fn note_removed_path(
+    state: &ApiState,
+    tracker: &StrmGraceTracker,
+    path: &Path,
+    is_strm: bool,
+    now: i64,
+) {
+    tracing::info!(path = %path.display(), "检测到文件或目录被删除，进入宽限期");
+    let matched_rows = {
+        let store = state.store.lock();
+        store.list_ledger().ok().map(|rows| {
+            rows.into_iter()
+                .filter(|row| ledger_path_is_gone(path, &row.path))
+                .collect::<Vec<_>>()
+        })
     };
-    tracing::info!(row_path = %row.path, media_id = %row.media_id, "删除台账行及其媒体信息、声纹");
-    let _ = store.delete_media_marker(row.media_id, row.season, row.episode);
-    let _ = store.delete_ledger_path(&row.path);
-    let remaining = store
-        .ledger_for_media(row.media_id)
-        .map(|rows| rows.len())
-        .unwrap_or(0);
-    if remaining == 0 {
-        tracing::info!(media_id = %row.media_id, "条目下所有文件已全被删除，清理媒体及关联数据");
-        let _ = store.delete_imported_pending_for_media(row.media_id);
-        let _ = store.delete_media_markers_for_media(row.media_id);
-        let _ = store.delete_playback_for_media(row.media_id);
-        let _ = store.delete_collection_items_for_media(&row.media_id.to_string());
-        let _ = store.delete_media(row.media_id);
+    if let Some(rows) = matched_rows {
+        for row in rows {
+            let row_path = PathBuf::from(&row.path);
+            if row_path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("strm")) {
+                tracing::info!(row_path = %row.path, media_id = %row.media_id, "台账 strm 已不在磁盘上，进入删除宽限期");
+                tracker.mark_deleted(row_path, None, now);
+            } else {
+                delete_ledger_row(state, &row.path);
+            }
+        }
+    } else if is_strm {
+        tracker.mark_deleted(path.to_path_buf(), None, now);
     }
+}
+
+fn note_present_path(
+    state: &ApiState,
+    tracker: &StrmGraceTracker,
+    path: &Path,
+    is_strm: bool,
+    intake_changed: &mut bool,
+    scrape_needed: &mut bool,
+    scan_targets: &mut HashSet<(PathBuf, PathBuf)>,
+) {
+    tracing::info!(path = %path.display(), is_dir = path.is_dir(), is_strm, "检测到文件或目录新建或修改");
+    if is_path_in_watch_intake(state, path) {
+        *intake_changed = true;
+    }
+    if path.is_dir() {
+        if let Some(root) = realtime_library_root_for_path(state, path) {
+            let target_dir = entry_scan_target_dir(&root, path);
+            tracing::info!(root = %root.display(), target_dir = %target_dir.display(), "目录新增/还原，加入扫描目标");
+            scan_targets.insert((root, target_dir));
+        }
+        return;
+    }
+    if is_strm {
+        let current_url = library::read_strm_url(path);
+        if tracker.on_created_or_modified(path, current_url.as_deref()) {
+            invalidate_strm_caches(state, path);
+            *scrape_needed = true;
+            if let Some(root) = realtime_library_root_for_path(state, path) {
+                let target_dir = entry_scan_target_dir(&root, path);
+                tracing::info!(root = %root.display(), target_dir = %target_dir.display(), "STRM 新增/修改，加入扫描目标");
+                scan_targets.insert((root, target_dir));
+            }
+        }
+        return;
+    }
+    let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or_default().to_lowercase();
+    if matches!(ext.as_str(), "mkv" | "mp4" | "ts" | "mov" | "avi" | "iso") {
+        *intake_changed = true;
+        if let Some(root) = realtime_library_root_for_path(state, path) {
+            let target_dir = entry_scan_target_dir(&root, path);
+            scan_targets.insert((root, target_dir));
+        }
+    }
+}
+
+/// Remove a missing file's derived facts without confusing file ownership
+/// with Media identity or shared episode markers.
+fn delete_ledger_row(state: &ApiState, path: &str) {
+    if let Err(error) = cleanup_deleted_ledger(&state.store.lock(), path) {
+        tracing::error!(path, %error, "删除文件派生事实失败，保留尚未清理的身份与共享事实");
+    }
+}
+
+fn cleanup_deleted_ledger(store: &crate::Store, path: &str) -> Result<(), store::StoreError> {
+    let Some(row) = store.ledger_by_path(path)? else { return Ok(()); };
+    store.delete_ledger_path(&row.path)?;
+    let remaining = store.ledger_for_media(row.media_id)?;
+    let referenced = store.list_all_subscribes()?.iter().any(|sub| sub.media_id == row.media_id);
+    let other_version = remaining.iter().any(|other| {
+        other.season == row.season && other.episode == row.episode
+    });
+    if !other_version {
+        let locked = store.get_media_marker(row.media_id, row.season, row.episode)?
+            .is_some_and(|marker| marker.locked);
+        if !locked {
+            store.delete_media_marker(row.media_id, row.season, row.episode)?;
+        }
+    }
+    tracing::info!(row_path = %row.path, media_id = %row.media_id,
+        remaining = remaining.len(), referenced, "清理已删除 Library 文件的派生事实");
+    if remaining.is_empty() && !referenced {
+        store.delete_imported_pending_for_media(row.media_id)?;
+        store.delete_media_markers_for_media(row.media_id)?;
+        store.delete_playback_for_media(row.media_id)?;
+        store.delete_collection_items_for_media(&row.media_id.to_string())?;
+        store.delete_media(row.media_id)?;
+        tracing::info!(media_id = %row.media_id, "清理没有文件且无 Subscribe 引用的 Media");
+    }
+    Ok(())
 }
 
 /// 事件路径不存在时，只删除同样已经不在磁盘上的台账行。

@@ -2,6 +2,7 @@ use domain::{Site, SiteId};
 use indexer::Browser;
 
 use crate::bus::{Bus, HookEvent, Step};
+use crate::site_policy::{NexusPhpPolicy, SiteResponsePolicy, reject_challenge};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PluginError {
@@ -26,12 +27,22 @@ pub trait HttpPost {
         cookie: Option<&str>,
         proxy: Option<&str>,
     ) -> Result<String, PluginError>;
+
+    /// Read an authenticated page. Login has no username/password submission contract.
+    fn get(&self, _: &str, _: Option<&str>, _: Option<&str>) -> Result<String, PluginError> {
+        Err(PluginError::Fetch(
+            "HTTP 登录状态验证不可用；请更新 Cookie 或配置支持认证验证的 HTTP transport".into(),
+        ))
+    }
 }
+
+static DEFAULT_POLICY: NexusPhpPolicy = NexusPhpPolicy::new(None);
 
 pub struct LoginPlugin<'a> {
     bus: &'a Bus,
     store: &'a dyn SiteCredentials,
     via: LoginVia<'a>,
+    policy: &'a dyn SiteResponsePolicy,
 }
 
 enum LoginVia<'a> {
@@ -45,6 +56,7 @@ impl<'a> LoginPlugin<'a> {
             bus,
             store,
             via: LoginVia::Http(http),
+            policy: &DEFAULT_POLICY,
         }
     }
 
@@ -53,7 +65,13 @@ impl<'a> LoginPlugin<'a> {
             bus,
             store,
             via: LoginVia::Browser(browser),
+            policy: &DEFAULT_POLICY,
         }
+    }
+
+    pub fn with_policy(mut self, policy: &'a dyn SiteResponsePolicy) -> Self {
+        self.policy = policy;
+        self
     }
 
     pub fn login(&self, id: SiteId) -> Result<(), PluginError> {
@@ -61,11 +79,13 @@ impl<'a> LoginPlugin<'a> {
             LoginVia::Http(_) => "http",
             LoginVia::Browser(_) => "browser",
         };
-        tracing::info!(site_id = %id, via, "站点登录开始");
+        tracing::info!(site_id = %id, via, "Site authentication verification started");
         let result = self.login_inner(id);
         match &result {
-            Ok(_) => tracing::info!(site_id = %id, "站点登录成功"),
-            Err(error) => tracing::error!(site_id = %id, error = %error, "站点登录失败"),
+            Ok(_) => tracing::info!(site_id = %id, "Site authentication verified"),
+            Err(error) => {
+                tracing::error!(site_id = %id, %error, "Site authentication verification failed")
+            }
         }
         result
     }
@@ -73,26 +93,27 @@ impl<'a> LoginPlugin<'a> {
     fn login_inner(&self, id: SiteId) -> Result<(), PluginError> {
         self.bus.emit(&HookEvent { step: Step::Login })?;
         let mut site = self.store.load(id)?;
-        match self.via {
+        require_cookie(&site)?;
+        // No credentials can be submitted: verify the supplied session, not an empty login form.
+        let url = format!("{}index.php", site_base(&site));
+        let response = match self.via {
             LoginVia::Http(http) => {
-                let url = format!("{}login.php", site_base(&site));
-                let response =
-                    http.post(&url, "", site.cookie.as_deref(), site.proxy.as_deref())?;
-                if let Some(cookie) = cookie_from_response(&response) {
-                    site.cookie = Some(merge_cookie_string(site.cookie.as_deref(), &cookie));
-                }
+                http.get(&url, site.cookie.as_deref(), site.proxy.as_deref())?
             }
-            LoginVia::Browser(browser) => {
-                let url = format!("{}login.php", site_base(&site));
-                let html_cookie = browser_login(browser, &site, &url)?;
-                site.cookie = Some(html_cookie);
-            }
+            LoginVia::Browser(browser) => browser_page(browser, &site, &url)?,
+        };
+        let body = response_body(&response);
+        reject_challenge(body)?;
+        self.policy.authenticated(&site, body)?;
+        if let Some(cookie) = cookies_from_response(&response) {
+            site.cookie = Some(merge_cookie_string(site.cookie.as_deref(), &cookie));
+            self.store.save(&site)?;
         }
-        self.store.save(&site)
+        Ok(())
     }
 }
 
-fn browser_login(browser: &Browser, site: &Site, url: &str) -> Result<String, PluginError> {
+fn browser_page(browser: &Browser, site: &Site, url: &str) -> Result<String, PluginError> {
     let request = indexer::FetchRequest {
         key: format!("login:{}", site.id),
         url: url.to_string(),
@@ -104,10 +125,25 @@ fn browser_login(browser: &Browser, site: &Site, url: &str) -> Result<String, Pl
         render: true,
         cdp_url: site.cdp_url.clone(),
     };
-    let _html = browser
+    // Fetching HTML does not expose Browser cookies; never synthesize a session credential.
+    browser
         .fetch_html(&request)
-        .map_err(|err| PluginError::Fetch(err.to_string()))?;
-    Ok("session=browser".into())
+        .map_err(|err| PluginError::Fetch(err.to_string()))
+}
+
+fn require_cookie(site: &Site) -> Result<(), PluginError> {
+    if site
+        .cookie
+        .as_deref()
+        .is_some_and(|cookie| !cookie.trim().is_empty())
+    {
+        Ok(())
+    } else {
+        tracing::error!(site_id = %site.id, capability = "credential_submission", "Site maintenance requires an existing Cookie; automatic login is unsupported");
+        Err(PluginError::Fetch(
+            "自动登录不支持提交凭据；请人工登录并配置有效 Cookie 后重试".into(),
+        ))
+    }
 }
 
 fn site_base(site: &Site) -> String {
@@ -118,39 +154,53 @@ fn site_base(site: &Site) -> String {
     base
 }
 
-fn cookie_from_response(response: &str) -> Option<String> {
+fn response_body(mut response: &str) -> &str {
+    while response.starts_with("Set-Cookie: ") {
+        response = response
+            .split_once('\n')
+            .map(|(_, body)| body)
+            .unwrap_or("");
+    }
     response
+}
+
+fn cookies_from_response(response: &str) -> Option<String> {
+    let cookies: Vec<&str> = response
         .lines()
-        .find_map(|line| line.strip_prefix("Set-Cookie: "))
-        .map(|value| value.split(';').next().unwrap_or(value).to_string())
+        .take_while(|line| line.starts_with("Set-Cookie: "))
+        .filter_map(|line| line.strip_prefix("Set-Cookie: "))
+        .filter_map(|value| value.split(';').next())
+        .filter(|value| {
+            value
+                .split_once('=')
+                .is_some_and(|(key, _)| !key.trim().is_empty())
+        })
+        .collect();
+    (!cookies.is_empty()).then(|| cookies.join("; "))
 }
 
 fn merge_cookie_string(old_cookie: Option<&str>, new_cookie: &str) -> String {
-    use std::collections::HashMap;
-    let mut map: HashMap<&str, &str> = HashMap::new();
-    if let Some(old) = old_cookie {
-        for part in old.split(';') {
-            let trimmed = part.trim();
-            if let Some((k, v)) = trimmed.split_once('=') {
-                map.insert(k.trim(), v.trim());
-            }
+    let mut map = std::collections::BTreeMap::new();
+    for part in old_cookie
+        .unwrap_or_default()
+        .split(';')
+        .chain(new_cookie.split(';'))
+    {
+        if let Some((key, value)) = part.trim().split_once('=') {
+            map.insert(key.trim(), value.trim());
         }
     }
-    for part in new_cookie.split(';') {
-        let trimmed = part.trim();
-        if let Some((k, v)) = trimmed.split_once('=') {
-            map.insert(k.trim(), v.trim());
-        }
-    }
-    let mut pairs: Vec<String> = map.iter().map(|(k, v)| format!("{k}={v}")).collect();
-    pairs.sort();
-    pairs.join("; ")
+    map.iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 pub struct CheckInPlugin<'a> {
     bus: &'a Bus,
     store: &'a dyn SiteCredentials,
     http: Option<&'a dyn HttpPost>,
+    policy: &'a dyn SiteResponsePolicy,
 }
 
 impl<'a> CheckInPlugin<'a> {
@@ -159,6 +209,7 @@ impl<'a> CheckInPlugin<'a> {
             bus,
             store,
             http: None,
+            policy: &DEFAULT_POLICY,
         }
     }
 
@@ -167,15 +218,21 @@ impl<'a> CheckInPlugin<'a> {
             bus,
             store,
             http: Some(http),
+            policy: &DEFAULT_POLICY,
         }
     }
 
+    pub fn with_policy(mut self, policy: &'a dyn SiteResponsePolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
     pub fn check_in(&self, id: SiteId) -> Result<(), PluginError> {
-        tracing::debug!(site_id = %id, "站点签到开始");
+        tracing::info!(site_id = %id, "Site Check-in started");
         let result = self.check_in_inner(id);
         match &result {
-            Ok(_) => tracing::info!(site_id = %id, "站点签到成功"),
-            Err(error) => tracing::error!(site_id = %id, error = %error, "站点签到失败"),
+            Ok(_) => tracing::info!(site_id = %id, "Site Check-in verified"),
+            Err(error) => tracing::error!(site_id = %id, %error, "Site Check-in failed"),
         }
         result
     }
@@ -185,13 +242,17 @@ impl<'a> CheckInPlugin<'a> {
         self.bus.emit(&HookEvent {
             step: Step::CheckIn,
         })?;
-        let Some(http) = self.http else {
-            return Ok(());
-        };
+        let http = self.http.ok_or_else(|| {
+            PluginError::Fetch("Check-in 不支持仅分发 Hook；请配置 HTTP transport".into())
+        })?;
+        require_cookie(&site)?;
         let url = format!("{}attendance.php", site_base(&site));
         let response = http.post(&url, "", site.cookie.as_deref(), site.proxy.as_deref())?;
-        if let Some(cookie) = cookie_from_response(&response) {
-            // 合并而不是覆盖：保留原有 c_secure_uid / c_secure_pass，仅更新 PHPSESSID 等动态会话项
+        let body = response_body(&response);
+        reject_challenge(body)?;
+        let outcome = self.policy.check_in(&site, body)?;
+        tracing::debug!(site_id = %id, ?outcome, "Site attendance business outcome verified");
+        if let Some(cookie) = cookies_from_response(&response) {
             site.cookie = Some(merge_cookie_string(site.cookie.as_deref(), &cookie));
             self.store.save(&site)?;
         }
@@ -210,8 +271,6 @@ pub fn keep_site_alive(
     id: SiteId,
 ) -> Result<(), PluginError> {
     let site = store.load(id)?;
-    if site.cookie.as_deref().unwrap_or("").is_empty() {
-        LoginPlugin::http(bus, store, http).login(id)?;
-    }
+    require_cookie(&site)?;
     CheckInPlugin::http(bus, store, http).check_in(id)
 }

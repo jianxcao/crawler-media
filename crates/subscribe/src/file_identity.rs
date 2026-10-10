@@ -14,9 +14,16 @@ fn is_generic_episode_stem(title: &str) -> bool {
     let token = stem.split('.').next().unwrap_or(stem);
     let token = token.split(' ').next().unwrap_or(token);
     let token = token.split('-').next().unwrap_or(token);
+    if let Some(rest) = token.strip_prefix('s') {
+        if let Some((season, episode)) = rest.split_once('e') {
+            return !season.is_empty() && !episode.is_empty()
+                && season.chars().all(|c| c.is_ascii_digit())
+                && episode.chars().all(|c| c.is_ascii_digit());
+        }
+    }
     let s = token
-        .strip_prefix('e')
-        .or_else(|| token.strip_prefix("ep"))
+        .strip_prefix("ep")
+        .or_else(|| token.strip_prefix('e'))
         .unwrap_or(token);
     !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())
 }

@@ -46,25 +46,11 @@ impl<H: CatalogGet> Tvdb<H> {
     }
 
     fn cached_search(&self, kind: MediaKind, query: &str) -> Result<Vec<CatalogHit>, TmdbError> {
-        parse_search(kind, &self.body(&search_path(kind, query))?)
-    }
-
-    fn body(&self, path: &str) -> Result<String, TmdbError> {
-        if let Some(cached) = self.cache.get_fresh(path)? {
-            return Ok(cached);
-        }
-        match self.http.get(path) {
-            Ok(body) => {
-                self.cache.put(path, &body)?;
-                Ok(body)
-            }
-            Err(error) => {
-                if let Some(stale) = self.cache.get_stale(path)? {
-                    return Ok(stale);
-                }
-                Err(error)
-            }
-        }
+        self.cache
+            .get_or_fetch(&self.http, &search_path(kind, query), |body| {
+                crate::contracts::json(body)?;
+                parse_search(kind, body)
+            })
     }
 }
 

@@ -97,7 +97,7 @@ Serving **Library** files to clients. External apps (Infuse, Fileball, and simil
 _Avoid_: 媒体服务器 (too broad), 转码服务 (a later, separate capability)
 
 **Browser**:
-A CDP session used to fetch JS-rendered pages and to drive login / **Check-in**. Default is: no Chromium in the image. Enabling **Browser** downloads a managed Chromium (or connects to a **Site** `cdp_url` / a user-opened headed Chrome). Headless is the default once present. This is a fetch/automation channel, not a Windows remote desktop.
+A CDP session used to fetch JS-rendered pages and to drive login / **Check-in**. Default is: no Chromium in the image. Current runtime is **external-CDP-only**: connect to an already-running HTTP(S) CDP discovery endpoint, with explicit **Site** `cdp_url` taking precedence over enabled Obscura and then enabled global CDP. Managed Chromium/Obscura download and launch are not supported; enabling legacy managed Chromium is rejected rather than creating a placeholder directory. Saving an enabled endpoint config is not proof of running/usable rendering. This is a fetch/automation channel, not a Windows remote desktop.
 _Avoid_: RDP, 无头模块, Playwright (implementation)
 
 **Check-in**:

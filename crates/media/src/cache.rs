@@ -90,6 +90,54 @@ impl CatalogCache {
         Ok(())
     }
 
+    /// Decode at the public endpoint's contract before replacing durable bytes.
+    pub(crate) fn get_or_fetch<T>(
+        &self,
+        http: &impl crate::client::CatalogGet,
+        key: &str,
+        decode: impl Fn(&str) -> Result<T, TmdbError>,
+    ) -> Result<T, TmdbError> {
+        if let Some(body) = self.get_fresh(key)? {
+            match decode(&body) {
+                Ok(value) => {
+                    tracing::debug!(source = self.source, path = key, "Metadata cache hit");
+                    return Ok(value);
+                }
+                Err(error) => {
+                    tracing::warn!(source = self.source, path = key, %error, "Malformed fresh Metadata cache; refetching");
+                }
+            }
+        }
+        let fetched = http.get(key).and_then(|body| {
+            let value = decode(&body)?;
+            self.put(key, &body)?;
+            Ok(value)
+        });
+        match fetched {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                tracing::warn!(source = self.source, path = key, %error, "Metadata refresh failed; trying valid stale cache");
+                if let Some(body) = self.get_stale(key)? {
+                    match decode(&body) {
+                        Ok(value) => {
+                            tracing::info!(
+                                source = self.source,
+                                path = key,
+                                "Using valid stale Metadata cache"
+                            );
+                            return Ok(value);
+                        }
+                        Err(stale_error) => {
+                            tracing::warn!(source = self.source, path = key, %stale_error, "Rejected malformed stale Metadata cache");
+                        }
+                    }
+                }
+                tracing::error!(source = self.source, path = key, %error, "Metadata unavailable without valid cache");
+                Err(error)
+            }
+        }
+    }
+
     fn load(&self, key: &str, allow_stale: bool) -> Result<Option<String>, TmdbError> {
         let now = self.now_secs();
         let conn = self.conn.lock();

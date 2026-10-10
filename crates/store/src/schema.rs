@@ -3,13 +3,14 @@ use rusqlite::{Connection, OptionalExtension, params};
 use super::StoreError;
 
 mod fingerprint;
+mod tables;
 
 /// Schema version constants. Bump when adding new migrations.
 /// The version is stored via `PRAGMA user_version` on each database file.
 pub const APP_SCHEMA_VERSION: i64 = 3;
 pub const CATALOG_SCHEMA_VERSION: i64 = 1;
-pub const LIBRARY_SCHEMA_VERSION: i64 = 5;
-pub const SUBSCRIBE_SCHEMA_VERSION: i64 = 2;
+pub const LIBRARY_SCHEMA_VERSION: i64 = 6;
+pub const SUBSCRIBE_SCHEMA_VERSION: i64 = 3;
 
 /// Read the current schema version from a database file.
 fn schema_version(conn: &Connection) -> i64 {
@@ -25,105 +26,7 @@ fn set_schema_version(conn: &Connection, version: i64) -> Result<(), StoreError>
 
 pub fn migrate_app(conn: &Connection) -> Result<(), StoreError> {
     let _current = schema_version(conn);
-    conn.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS users (
-            id TEXT PRIMARY KEY,
-            login TEXT NOT NULL UNIQUE,
-            enabled INTEGER NOT NULL DEFAULT 1
-        );
-        CREATE TABLE IF NOT EXISTS media (
-            id TEXT PRIMARY KEY,
-            kind TEXT NOT NULL,
-            title TEXT NOT NULL,
-            year INTEGER,
-            original_title TEXT,
-            tmdb_id TEXT,
-            douban_id TEXT,
-            tvdb_id TEXT,
-            bangumi_id TEXT,
-            anilist_id TEXT
-        );
-        CREATE TABLE IF NOT EXISTS sites (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            url TEXT NOT NULL,
-            profile_id TEXT NOT NULL,
-            cookie TEXT,
-            api_key TEXT,
-            rss_url TEXT,
-            proxy TEXT,
-            rate_limit_per_minute INTEGER,
-            cdp_url TEXT,
-            downloader_id TEXT,
-            enabled INTEGER NOT NULL DEFAULT 1
-        );
-        CREATE TABLE IF NOT EXISTS filters (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            atoms_json TEXT NOT NULL,
-            keep_old_versions INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS user_tokens (
-            token TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            created_at INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS search_snapshots (
-            id TEXT PRIMARY KEY,
-            vertical TEXT NOT NULL,
-            query TEXT NOT NULL,
-            payload TEXT NOT NULL,
-            created_at INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS downloaders (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            url TEXT NOT NULL,
-            username TEXT,
-            password TEXT,
-            category TEXT,
-            is_default INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS library_roots (
-            id TEXT PRIMARY KEY,
-            kind TEXT NOT NULL,
-            path TEXT NOT NULL,
-            is_default INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS libraries (
-            id TEXT PRIMARY KEY,
-            kind TEXT NOT NULL,
-            name TEXT NOT NULL,
-            is_default INTEGER NOT NULL DEFAULT 0,
-            sort_order INTEGER NOT NULL DEFAULT 0,
-            access_mode TEXT NOT NULL DEFAULT 'everyone',
-            admin_visible INTEGER NOT NULL DEFAULT 1,
-            member_ids_json TEXT NOT NULL DEFAULT '[]',
-            detect_intros INTEGER NOT NULL DEFAULT 1,
-            enable_fingerprint INTEGER NOT NULL DEFAULT 0,
-            cover_path TEXT,
-            match_rules_json TEXT NOT NULL DEFAULT '[]',
-            default_filter_id TEXT,
-            realtime_watch INTEGER NOT NULL DEFAULT 1,
-            generate_thumbnails INTEGER NOT NULL DEFAULT 1,
-            extract_chapter_images INTEGER NOT NULL DEFAULT 1,
-            exclude_from_home INTEGER NOT NULL DEFAULT 0,
-            auto_series_collections INTEGER NOT NULL DEFAULT 1
-        );
-        CREATE TABLE IF NOT EXISTS naming_templates (
-            kind TEXT PRIMARY KEY,
-            pattern TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS sites_enabled_idx ON sites(enabled);
-        CREATE INDEX IF NOT EXISTS user_tokens_user_idx ON user_tokens(user_id);
-        "#,
-    )?;
+    conn.execute_batch(tables::APP_TABLES)?;
     ensure_column(conn, "downloaders", "path_maps", "TEXT")?;
     // downloaders.enabled：停用的下载器不参与自动投递（手动提交仍可用）。
     ensure_column(conn, "downloaders", "enabled", "INTEGER NOT NULL DEFAULT 1")?;
@@ -144,6 +47,40 @@ pub fn migrate_app(conn: &Connection) -> Result<(), StoreError> {
         "keep_old_versions",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+    migrate_app_library_columns(conn)?;
+    // 会话 token 时效：老库补 created_at 列，并把存量 token 视为刚刚签发，
+    // 升级后获得一个完整的 30 天窗口（Session TTL）而不是立即被过期掉。
+    ensure_column(
+        conn,
+        "user_tokens",
+        "created_at",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    conn.execute(
+        "UPDATE user_tokens SET created_at = strftime('%s','now') WHERE created_at = 0",
+        [],
+    )?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS collections (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS collection_items (
+            collection_id TEXT NOT NULL,
+            media_item_id TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            added_at TEXT NOT NULL,
+            PRIMARY KEY (collection_id, media_item_id)
+        );",
+    )?;
+    set_schema_version(conn, APP_SCHEMA_VERSION)?;
+    Ok(())
+}
+
+fn migrate_app_library_columns(conn: &Connection) -> Result<(), StoreError> {
     ensure_column(conn, "library_roots", "library_id", "TEXT")?;
     ensure_column(
         conn,
@@ -191,18 +128,6 @@ pub fn migrate_app(conn: &Connection) -> Result<(), StoreError> {
         "auto_series_collections",
         "INTEGER NOT NULL DEFAULT 1",
     )?;
-    // 会话 token 时效：老库补 created_at 列，并把存量 token 视为刚刚签发，
-    // 升级后获得一个完整的 30 天窗口（Session TTL）而不是立即被过期掉。
-    ensure_column(
-        conn,
-        "user_tokens",
-        "created_at",
-        "INTEGER NOT NULL DEFAULT 0",
-    )?;
-    conn.execute(
-        "UPDATE user_tokens SET created_at = strftime('%s','now') WHERE created_at = 0",
-        [],
-    )?;
     // libraries 可见性列（老库需逐列补齐，否则 SELECT 报 no such column）。
     ensure_column(
         conn,
@@ -222,23 +147,6 @@ pub fn migrate_app(conn: &Connection) -> Result<(), StoreError> {
         "member_ids_json",
         "TEXT NOT NULL DEFAULT '[]'",
     )?;
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS collections (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            name TEXT NOT NULL,
-            sort_order INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS collection_items (
-            collection_id TEXT NOT NULL,
-            media_item_id TEXT NOT NULL,
-            sort_order INTEGER NOT NULL DEFAULT 0,
-            added_at TEXT NOT NULL,
-            PRIMARY KEY (collection_id, media_item_id)
-        );",
-    )?;
-    set_schema_version(conn, APP_SCHEMA_VERSION)?;
     Ok(())
 }
 
@@ -280,108 +188,12 @@ pub fn migrate_catalog(conn: &Connection) -> Result<(), StoreError> {
 
 pub fn migrate_library(conn: &Connection) -> Result<(), StoreError> {
     let _current = schema_version(conn);
-    conn.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS ledger (
-            id TEXT PRIMARY KEY,
-            media_id TEXT NOT NULL,
-            root_id TEXT,
-            path TEXT NOT NULL UNIQUE,
-            season INTEGER,
-            episode INTEGER,
-            resolution TEXT,
-            codec TEXT,
-            hdr TEXT,
-            quality_source TEXT NOT NULL,
-            confidence TEXT NOT NULL,
-            filter_score INTEGER,
-            transfer_mode TEXT
-        );
-        CREATE INDEX IF NOT EXISTS ledger_path_idx ON ledger(path);
-        CREATE INDEX IF NOT EXISTS ledger_media_id_idx ON ledger(media_id);
-        CREATE TABLE IF NOT EXISTS scrape_sidecars (
-            ledger_id TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            path TEXT NOT NULL,
-            PRIMARY KEY (ledger_id, kind)
-        );
-        CREATE TABLE IF NOT EXISTS unidentified (
-            path TEXT PRIMARY KEY,
-            confidence TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS file_meta (
-            ledger_id TEXT PRIMARY KEY,
-            audio_json TEXT NOT NULL,
-            subtitle_json TEXT NOT NULL,
-            tracks_version INTEGER NOT NULL DEFAULT 0,
-            source_version TEXT,
-            format_duration_ms INTEGER
-        );
-        CREATE TABLE IF NOT EXISTS fingerprint_cache (
-            ledger_id TEXT PRIMARY KEY,
-            cache_key TEXT NOT NULL,
-            algorithm_version INTEGER NOT NULL,
-            sample_duration_secs INTEGER NOT NULL,
-            media_duration_ms INTEGER,
-            intro_json TEXT NOT NULL,
-            outro_json TEXT,
-            captured_at_ms INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS media_markers (
-            media_id TEXT NOT NULL,
-            season INTEGER NOT NULL,
-            episode INTEGER NOT NULL,
-            intro_start_ms INTEGER,
-            intro_end_ms INTEGER,
-            outro_start_ms INTEGER,
-            outro_end_ms INTEGER,
-            source TEXT NOT NULL,
-            locked INTEGER NOT NULL DEFAULT 0,
-            updated_at INTEGER NOT NULL,
-            PRIMARY KEY (media_id, season, episode)
-        );
-        CREATE TABLE IF NOT EXISTS probe_jobs (
-            id TEXT PRIMARY KEY,
-            kind TEXT NOT NULL,
-            media_id TEXT NOT NULL,
-            season INTEGER,
-            scope_key TEXT NOT NULL,
-            status TEXT NOT NULL,
-            total INTEGER NOT NULL,
-            completed INTEGER NOT NULL DEFAULT 0,
-            succeeded INTEGER NOT NULL DEFAULT 0,
-            failed INTEGER NOT NULL DEFAULT 0,
-            error TEXT,
-            created_at_ms INTEGER NOT NULL,
-            started_at_ms INTEGER,
-            finished_at_ms INTEGER
-        );
-        CREATE TABLE IF NOT EXISTS probe_job_units (
-            job_id TEXT NOT NULL,
-            ledger_id TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            force_fingerprint INTEGER NOT NULL DEFAULT 0,
-            reuse_fingerprint_cache INTEGER NOT NULL DEFAULT 0,
-            overwrite_markers INTEGER NOT NULL DEFAULT 0,
-            status TEXT NOT NULL,
-            error TEXT,
-            PRIMARY KEY (job_id, ledger_id),
-            FOREIGN KEY (job_id) REFERENCES probe_jobs(id) ON DELETE CASCADE
-        );
-        CREATE UNIQUE INDEX IF NOT EXISTS probe_jobs_active_scope_idx
-            ON probe_jobs(scope_key) WHERE status IN ('queued', 'running');
-        CREATE UNIQUE INDEX IF NOT EXISTS probe_job_units_active_ledger_idx
-            ON probe_job_units(ledger_id) WHERE status IN ('queued', 'running');
-        CREATE INDEX IF NOT EXISTS probe_jobs_media_created_idx
-            ON probe_jobs(media_id, created_at_ms DESC);
-        CREATE INDEX IF NOT EXISTS probe_job_units_job_status_idx
-            ON probe_job_units(job_id, status);
-        "#,
-    )?;
+    conn.execute_batch(tables::LIBRARY_TABLES)?;
     // ledger.missing_at：文件核验标记（老库补列，幂等）。
     ensure_column(conn, "ledger", "missing_at", "INTEGER")?;
     ensure_column(conn, "ledger", "transfer_mode", "TEXT")?;
     ensure_column(conn, "ledger", "source_path", "TEXT")?;
+    ensure_column(conn, "ledger", "release_quality", "TEXT")?;
     ensure_column(conn, "file_meta", "chapters_json", "TEXT")?;
     ensure_column(conn, "file_meta", "video_json", "TEXT")?;
     ensure_column(
@@ -407,134 +219,10 @@ pub fn migrate_library(conn: &Connection) -> Result<(), StoreError> {
 
 pub fn migrate_subscribe(conn: &Connection) -> Result<(), StoreError> {
     let _current = schema_version(conn);
-    conn.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS subscribes (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            media_id TEXT NOT NULL,
-            coverage_kind TEXT NOT NULL,
-            season INTEGER,
-            episode_from INTEGER,
-            episode_to INTEGER,
-            fetch_mode TEXT NOT NULL,
-            filter_id TEXT NOT NULL,
-            wash_cut INTEGER NOT NULL DEFAULT 0,
-            wash_cut_filter_id TEXT,
-            full_season_pack INTEGER NOT NULL DEFAULT 0,
-            downloader_id TEXT,
-            tracking_state TEXT NOT NULL DEFAULT 'active',
-            follow_future INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS subscribe_facts (
-            subscribe_id TEXT NOT NULL,
-            season INTEGER NOT NULL DEFAULT -1,
-            episode INTEGER NOT NULL DEFAULT -1,
-            score INTEGER NOT NULL,
-            path TEXT,
-            PRIMARY KEY (subscribe_id, season, episode)
-        );
-        CREATE TABLE IF NOT EXISTS subscribe_wanted (
-            subscribe_id TEXT NOT NULL,
-            season INTEGER NOT NULL DEFAULT -1,
-            episode INTEGER NOT NULL DEFAULT -1,
-            search_attempts INTEGER NOT NULL DEFAULT 0,
-            last_search_at INTEGER,
-            grabbed_at INTEGER,
-            imported_at INTEGER,
-            grab_title TEXT,
-            last_reject_reason TEXT,
-            PRIMARY KEY (subscribe_id, season, episode)
-        );
-        CREATE TABLE IF NOT EXISTS pending_downloads (
-            subscribe_id TEXT NOT NULL,
-            enclosure TEXT NOT NULL,
-            title TEXT NOT NULL,
-            score INTEGER NOT NULL,
-            torrent_json TEXT NOT NULL,
-            PRIMARY KEY (subscribe_id, enclosure)
-        );
-        CREATE TABLE IF NOT EXISTS playback_sessions (
-            user_id TEXT NOT NULL,
-            device_id TEXT NOT NULL,
-            media_id TEXT NOT NULL,
-            season INTEGER,
-            episode INTEGER,
-            client TEXT,
-            device_name TEXT,
-            client_version TEXT,
-            play_method TEXT NOT NULL DEFAULT 'local',
-            position_ms INTEGER NOT NULL DEFAULT 0,
-            start_position_ms INTEGER NOT NULL DEFAULT 0,
-            duration_ms INTEGER,
-            paused INTEGER NOT NULL DEFAULT 0,
-            watched_ms INTEGER NOT NULL DEFAULT 0,
-            rate_bps INTEGER NOT NULL DEFAULT 0,
-            bytes_sent INTEGER NOT NULL DEFAULT 0,
-            connections INTEGER NOT NULL DEFAULT 0,
-            admin_ended INTEGER NOT NULL DEFAULT 0,
-            started_at INTEGER NOT NULL,
-            last_report_at INTEGER NOT NULL,
-            PRIMARY KEY (user_id, device_id)
-        );
-        CREATE TABLE IF NOT EXISTS playback_logs (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            media_id TEXT NOT NULL,
-            season INTEGER,
-            episode INTEGER,
-            client TEXT,
-            device_name TEXT,
-            play_method TEXT NOT NULL DEFAULT 'local',
-            started_at INTEGER NOT NULL,
-            ended_at INTEGER NOT NULL,
-            watched_ms INTEGER NOT NULL DEFAULT 0,
-            start_position_ms INTEGER NOT NULL DEFAULT 0,
-            end_position_ms INTEGER NOT NULL DEFAULT 0,
-            duration_ms INTEGER,
-            completed INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS playback_metrics (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            media_id TEXT NOT NULL,
-            tier INTEGER NOT NULL DEFAULT 0,
-            engine TEXT,
-            ttff_ms INTEGER,
-            rebuffer_ms INTEGER NOT NULL DEFAULT 0,
-            rebuffer_count INTEGER NOT NULL DEFAULT 0,
-            seek_count INTEGER NOT NULL DEFAULT 0,
-            dropped_frames INTEGER,
-            total_frames INTEGER,
-            watched_ms INTEGER NOT NULL DEFAULT 0,
-            recorded_at INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS playback_units (
-            user_id TEXT NOT NULL,
-            media_id TEXT NOT NULL,
-            season INTEGER NOT NULL DEFAULT -1,
-            episode INTEGER NOT NULL DEFAULT -1,
-            position_ms INTEGER NOT NULL DEFAULT 0,
-            played INTEGER NOT NULL DEFAULT 0,
-            favorite INTEGER NOT NULL DEFAULT 0,
-            duration_ms INTEGER,
-            audio_track TEXT,
-            subtitle_track TEXT,
-            play_count INTEGER NOT NULL DEFAULT 0,
-            updated_at INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (user_id, media_id, season, episode)
-        );
-        CREATE INDEX IF NOT EXISTS subscribes_user_idx ON subscribes(user_id);
-        CREATE INDEX IF NOT EXISTS subscribes_media_idx ON subscribes(media_id);
-        CREATE INDEX IF NOT EXISTS subscribe_facts_sub_idx ON subscribe_facts(subscribe_id);
-        CREATE INDEX IF NOT EXISTS subscribe_wanted_sub_idx ON subscribe_wanted(subscribe_id);
-        CREATE INDEX IF NOT EXISTS playback_units_user_media_idx ON playback_units(user_id, media_id);
-        CREATE INDEX IF NOT EXISTS playback_sessions_user_idx ON playback_sessions(user_id);
-        CREATE INDEX IF NOT EXISTS playback_logs_user_started_idx ON playback_logs(user_id, started_at);
-        CREATE INDEX IF NOT EXISTS playback_logs_started_idx ON playback_logs(started_at DESC, id DESC);
-        "#,
-    )?;
+    conn.execute_batch(tables::SUBSCRIBE_TABLES)?;
     migrate_playback_session_key(conn)?;
+    // Old logs have no trustworthy device identity and remain nonrevocable.
+    ensure_column(conn, "playback_logs", "device_id", "TEXT")?;
     ensure_column(
         conn,
         "subscribes",

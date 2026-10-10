@@ -1,0 +1,227 @@
+use std::sync::{Arc, Mutex};
+
+use domain::{Site, SiteId};
+use hooks::{Bus, CheckInPlugin, HttpPost, LoginPlugin, PluginError, SiteCredentials};
+use indexer::{Browser, BrowserConfig, IndexerError, PageSession};
+
+struct Credentials(Mutex<Site>);
+impl SiteCredentials for Credentials {
+    fn load(&self, _: SiteId) -> Result<Site, PluginError> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+    fn save(&self, site: &Site) -> Result<(), PluginError> {
+        *self.0.lock().unwrap() = site.clone();
+        Ok(())
+    }
+}
+
+fn credentials(cookie: Option<&str>) -> Credentials {
+    Credentials(Mutex::new(Site {
+        id: SiteId::new(),
+        name: "fixture".into(),
+        url: "https://pt.invalid".into(),
+        profile_id: "demo".into(),
+        cookie: cookie.map(str::to_string),
+        api_key: None,
+        rss_url: None,
+        proxy: None,
+        rate_limit_per_minute: None,
+        cdp_url: Some("http://fixture.invalid".into()),
+        downloader_id: None,
+        enabled: true,
+    }))
+}
+
+struct Reply(&'static str);
+impl HttpPost for Reply {
+    fn get(&self, _: &str, _: Option<&str>, _: Option<&str>) -> Result<String, PluginError> {
+        Ok(self.0.into())
+    }
+    fn post(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<String, PluginError> {
+        Ok(self.0.into())
+    }
+}
+
+const BAD_PAGES: &[&str] = &[
+    "<html><form action='takelogin.php'><input name='password'/></form></html>",
+    "<html><form><input name='captcha'/></form></html>",
+    "<html>unknown response</html>",
+    "Set-Cookie: uid=unverified\n<html>unknown response</html>",
+    "<html><form action='takelogin.php'><input name='password'/></form>签到成功</html>",
+    "<html><script>var message = '签到成功';</script></html>",
+    "<html>如果签到成功，会看到奖励。</html>",
+    "<html>未签到成功</html>",
+    "<html><input name='CAPTCHA'>签到成功</html>",
+    "<html><div>签到失败</div><div>签到成功</div></html>",
+];
+
+#[test]
+fn fetched_login_form_challenge_and_unknown_page_never_authenticate() {
+    for &body in BAD_PAGES {
+        let store = credentials(Some("uid=valid; pass=secret"));
+        let before = store.0.lock().unwrap().clone();
+        assert!(
+            LoginPlugin::http(&Bus::new(), &store, &Reply(body))
+                .login(before.id)
+                .is_err(),
+            "{body}"
+        );
+        assert_eq!(store.0.lock().unwrap().cookie, before.cookie);
+    }
+}
+
+#[test]
+fn visible_success_with_reward_text_is_confirmed() {
+    let store = credentials(Some("uid=valid"));
+    let id = store.0.lock().unwrap().id;
+    let reply = Reply("<html><div>签到成功！获得 10 魔力</div></html>");
+    assert!(CheckInPlugin::http(&Bus::new(), &store, &reply).check_in(id).is_ok());
+}
+
+fn check_in_requires_verified_success_not_transport_success_or_cookie_rotation() {
+    for &body in BAD_PAGES {
+        let store = credentials(Some("uid=valid; pass=secret"));
+        let before = store.0.lock().unwrap().clone();
+        assert!(
+            CheckInPlugin::http(&Bus::new(), &store, &Reply(body))
+                .check_in(before.id)
+                .is_err(),
+            "{body}"
+        );
+        assert_eq!(store.0.lock().unwrap().cookie, before.cookie);
+    }
+}
+
+#[test]
+fn conflicting_check_in_confirmation_is_not_success() {
+    let store = credentials(Some("uid=valid"));
+    let id = store.0.lock().unwrap().id;
+    let reply = Reply("<html><div>签到失败</div><div>签到成功</div></html>");
+    assert!(
+        CheckInPlugin::http(&Bus::new(), &store, &reply)
+            .check_in(id)
+            .is_err()
+    );
+}
+
+#[test]
+fn missing_login_credentials_are_actionable_not_empty_submission() {
+    let store = credentials(None);
+    let id = store.0.lock().unwrap().id;
+    let result =
+        LoginPlugin::http(&Bus::new(), &store, &Reply("Set-Cookie: uid=fabricated")).login(id);
+    assert!(result.is_err());
+    assert!(store.0.lock().unwrap().cookie.is_none());
+}
+
+struct Page(&'static str);
+impl PageSession for Page {
+    fn goto(&self, _: &str) -> Result<(), IndexerError> {
+        Ok(())
+    }
+    fn set_cookie_header(&self, _: &str) -> Result<(), IndexerError> {
+        Ok(())
+    }
+    fn content(&self) -> Result<String, IndexerError> {
+        Ok(self.0.into())
+    }
+}
+
+#[test]
+fn browser_login_never_fabricates_cookie_from_an_unverified_page() {
+    for &body in BAD_PAGES {
+        let store = credentials(Some("uid=valid; pass=secret"));
+        let before = store.0.lock().unwrap().clone();
+        let browser = Browser::with_opener(BrowserConfig::disabled(), move |_| {
+            Ok(Arc::new(Page(body)) as Arc<dyn PageSession>)
+        });
+        assert!(
+            LoginPlugin::browser(&Bus::new(), &store, &browser)
+                .login(before.id)
+                .is_err()
+        );
+        assert_eq!(store.0.lock().unwrap().cookie, before.cookie);
+    }
+}
+
+#[test]
+fn hook_dispatch_without_a_transport_is_not_a_completed_check_in() {
+    let store = credentials(Some("uid=valid"));
+    let id = store.0.lock().unwrap().id;
+    assert!(
+        CheckInPlugin::new(&Bus::new(), &store)
+            .check_in(id)
+            .is_err()
+    );
+}
+
+#[test]
+fn profile_specific_authentication_evidence_can_be_injected() {
+    let store = credentials(Some("uid=valid"));
+    let id = store.0.lock().unwrap().id;
+    let policy = hooks::NexusPhpPolicy::new(Some("#profile-auth".into()));
+    let bus = Bus::new();
+    let reply = Reply("<html><div id='profile-auth'>Authenticated</div></html>");
+    assert!(
+        LoginPlugin::http(&bus, &store, &reply)
+            .with_policy(&policy)
+            .login(id)
+            .is_ok()
+    );
+    assert!(LoginPlugin::http(&bus, &store, &reply).login(id).is_err());
+}
+
+struct AttendancePolicy;
+impl hooks::SiteResponsePolicy for AttendancePolicy {
+    fn authenticated(&self, _: &Site, _: &str) -> Result<(), PluginError> {
+        Err(PluginError::Fetch("not an authentication contract".into()))
+    }
+    fn check_in(&self, _: &Site, body: &str) -> Result<hooks::CheckInOutcome, PluginError> {
+        match body {
+            "profile-complete" => Ok(hooks::CheckInOutcome::Completed),
+            "profile-already-complete" => Ok(hooks::CheckInOutcome::AlreadyCompleted),
+            _ => Err(PluginError::Fetch("unverified profile outcome".into())),
+        }
+    }
+}
+
+#[test]
+fn profile_specific_completed_and_already_completed_contracts_can_be_injected() {
+    let store = credentials(Some("uid=valid"));
+    let id = store.0.lock().unwrap().id;
+    let bus = Bus::new();
+    for body in ["profile-complete", "profile-already-complete"] {
+        let reply = Reply(body);
+        assert!(
+            CheckInPlugin::http(&bus, &store, &reply)
+                .with_policy(&AttendancePolicy)
+                .check_in(id)
+                .is_ok()
+        );
+    }
+    assert!(
+        CheckInPlugin::http(&bus, &store, &Reply("unknown"))
+            .with_policy(&AttendancePolicy)
+            .check_in(id)
+            .is_err()
+    );
+}
+
+#[test]
+fn confirmed_success_and_already_checked_in_are_both_valid_outcomes() {
+    for body in ["<html>签到成功</html>", "<html>您今天已经签到过了</html>"] {
+        let store = credentials(Some("uid=valid"));
+        let id = store.0.lock().unwrap().id;
+        assert!(
+            CheckInPlugin::http(&Bus::new(), &store, &Reply(body))
+                .check_in(id)
+                .is_ok()
+        );
+    }
+}

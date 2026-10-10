@@ -152,13 +152,14 @@ impl<H: CatalogGet> Tmdb<H> {
             MediaKind::Movie | MediaKind::Video => "/genre/movie/list",
             MediaKind::Tv => "/genre/tv/list",
         };
-        let body = self.body(path)?;
-        let parsed: GenreList = serde_json::from_str(&body)?;
-        Ok(parsed
-            .genres
-            .into_iter()
-            .map(|genre| (genre.id, genre.name))
-            .collect())
+        self.fetch(path, |body| {
+            let parsed: GenreList = serde_json::from_str(body)?;
+            Ok(parsed
+                .genres
+                .into_iter()
+                .map(|genre| (genre.id, genre.name))
+                .collect())
+        })
     }
 
     pub fn details_poster(
@@ -170,7 +171,10 @@ impl<H: CatalogGet> Tmdb<H> {
             MediaKind::Movie | MediaKind::Video => format!("/movie/{tmdb_id}"),
             MediaKind::Tv => format!("/tv/{tmdb_id}"),
         };
-        parse::details_poster_path(&self.body(&path)?)
+        self.fetch(&path, |body| {
+            crate::contracts::object(body, &["poster_path", "id", "title", "name"])?;
+            parse::details_poster_path(body)
+        })
     }
 
     pub fn movie_details(&self, tmdb_id: &str) -> Result<Media, TmdbError> {
@@ -192,24 +196,15 @@ impl<H: CatalogGet> Tmdb<H> {
     /// Season overviews from the `/tv/{id}` details body (shares its cache key).
     pub fn tv_seasons(&self, tmdb_id: &str) -> Result<Vec<parse::TvSeason>, TmdbError> {
         let path1 = format!("/tv/{tmdb_id}?append_to_response=translations,alternative_titles");
-        match self.body(&path1) {
-            Ok(body) => match parse::tv_seasons(&body) {
-                Ok(seasons) if !seasons.is_empty() => Ok(seasons),
-                Ok(_) => {
-                    tracing::warn!(tmdb_id = %tmdb_id, "从 path1 解析出的 seasons 为空");
-                    let path2 = format!("/tv/{tmdb_id}");
-                    parse::tv_seasons(&self.body(&path2)?)
-                }
-                Err(e) => {
-                    tracing::error!(tmdb_id = %tmdb_id, error = ?e, "从 path1 parse::tv_seasons 报错");
-                    let path2 = format!("/tv/{tmdb_id}");
-                    parse::tv_seasons(&self.body(&path2)?)
-                }
-            },
-            Err(e) => {
-                tracing::error!(tmdb_id = %tmdb_id, error = ?e, "获取 path1 body 报错");
-                let path2 = format!("/tv/{tmdb_id}");
-                parse::tv_seasons(&self.body(&path2)?)
+        let decode = |body: &str| {
+            crate::contracts::object(body, &["seasons", "id", "name"])?;
+            parse::tv_seasons(body)
+        };
+        match self.fetch(&path1, decode) {
+            Ok(seasons) if !seasons.is_empty() => Ok(seasons),
+            result => {
+                tracing::warn!(tmdb_id, error = ?result.err(), "TMDB seasons unavailable; trying basic details");
+                self.fetch(&format!("/tv/{tmdb_id}"), decode)
             }
         }
     }
@@ -221,7 +216,10 @@ impl<H: CatalogGet> Tmdb<H> {
         season: u32,
     ) -> Result<Vec<parse::SeasonEpisode>, TmdbError> {
         let path = format!("/tv/{tmdb_id}/season/{season}");
-        parse::season_episodes(&self.body(&path)?)
+        self.fetch(&path, |body| {
+            crate::contracts::object(body, &["episodes", "id", "name", "season_number"])?;
+            parse::season_episodes(body)
+        })
     }
 
     /// Details + rich metadata using the client's language, then English fallback,
@@ -273,21 +271,20 @@ impl<H: CatalogGet> Tmdb<H> {
                 "/tv/{tmdb_id}?append_to_response=aggregate_credits,content_ratings,translations"
             ),
         };
-        parse::details_meta_for(
-            &self.body_with_language(&path, request_language)?,
-            languages,
-            countries,
-        )
+        self.fetch_with_language(&path, request_language, |body| {
+            crate::contracts::metadata(body)?;
+            parse::details_meta_for(body, languages, countries)
+        })
     }
 
     /// TMDB configuration countries (cached via the normal body cache).
     pub fn configuration_countries(&self) -> Result<Vec<parse::CountryRow>, TmdbError> {
-        parse::configuration_countries(&self.body("/configuration/countries")?)
+        self.fetch("/configuration/countries", parse::configuration_countries)
     }
 
     /// TMDB configuration languages (cached via the normal body cache).
     pub fn configuration_languages(&self) -> Result<Vec<parse::LanguageRow>, TmdbError> {
-        parse::configuration_languages(&self.body("/configuration/languages")?)
+        self.fetch("/configuration/languages", parse::configuration_languages)
     }
 
     /// Similar titles (`/movie|tv/{id}/similar`), same hit shape as search.
@@ -300,7 +297,7 @@ impl<H: CatalogGet> Tmdb<H> {
             MediaKind::Movie | MediaKind::Video => format!("/movie/{tmdb_id}/similar"),
             MediaKind::Tv => format!("/tv/{tmdb_id}/similar"),
         };
-        parse::search_results(kind, &self.body(&path)?)
+        self.fetch(&path, |body| parse::search_results(kind, body))
     }
 
     /// Whole-season episode details (names/overviews/stills) — one request
@@ -323,7 +320,10 @@ impl<H: CatalogGet> Tmdb<H> {
     ) -> Result<Vec<parse::EpisodeMeta>, TmdbError> {
         let path = format!("/tv/{tmdb_id}/season/{season}");
         let language = lang.unwrap_or(self.language.as_str());
-        parse::season_details(&self.body_with_language(&path, language)?)
+        self.fetch_with_language(&path, language, |body| {
+            crate::contracts::object(body, &["episodes", "id", "name", "season_number"])?;
+            parse::season_details(body)
+        })
     }
 
     /// TMDB episode still file paths (`/tv/{id}/season/{s}/episode/{e}/images`).
@@ -334,7 +334,10 @@ impl<H: CatalogGet> Tmdb<H> {
         episode: u32,
     ) -> Result<Vec<String>, TmdbError> {
         let path = format!("/tv/{tmdb_id}/season/{season}/episode/{episode}/images");
-        parse::episode_stills(&self.body_no_language(&path)?)
+        self.fetch_with_language(&path, "", |body| {
+            crate::contracts::object(body, &["stills", "id"])?;
+            parse::episode_stills(body)
+        })
     }
 
     /// Raw poster/backdrop candidate rows for an item (`/images`).
@@ -343,7 +346,10 @@ impl<H: CatalogGet> Tmdb<H> {
             MediaKind::Movie | MediaKind::Video => format!("/movie/{tmdb_id}/images"),
             MediaKind::Tv => format!("/tv/{tmdb_id}/images"),
         };
-        parse::images(&self.body_no_language(&path)?)
+        self.fetch_with_language(&path, "", |body| {
+            crate::contracts::object(body, &["posters", "backdrops", "id"])?;
+            parse::images(body)
+        })
     }
 
     /// Person + combined credits (`/person/{id}?append_to_response=combined_credits`).
@@ -352,10 +358,13 @@ impl<H: CatalogGet> Tmdb<H> {
         tmdb_person_id: &str,
     ) -> Result<crate::person::PersonDetails, TmdbError> {
         let path = format!("/person/{tmdb_person_id}?append_to_response=combined_credits");
-        crate::person::person_details(&self.body(&path)?)
+        self.fetch(&path, |body| {
+            crate::contracts::object(body, &["name", "profile_path", "combined_credits", "id"])?;
+            crate::person::person_details(body)
+        })
     }
     fn cached_search(&self, kind: MediaKind, path: &str) -> Result<Vec<CatalogHit>, TmdbError> {
-        parse::search_results(kind, &self.body(path)?)
+        self.fetch(path, |body| parse::search_results(kind, body))
     }
 
     fn paged_search(
@@ -363,53 +372,41 @@ impl<H: CatalogGet> Tmdb<H> {
         kind: MediaKind,
         path: &str,
     ) -> Result<(Vec<CatalogHit>, i64, i64, i64), TmdbError> {
-        parse::paged_search_results(kind, &self.body(path)?)
+        self.fetch(path, |body| {
+            crate::contracts::paged(body)?;
+            parse::paged_search_results(kind, body)
+        })
     }
 
     fn cached_details(&self, kind: MediaKind, path: &str) -> Result<Media, TmdbError> {
-        parse::details(kind, &self.body(path)?)
+        self.fetch(path, |body| parse::details(kind, body))
     }
 
-    fn body(&self, path: &str) -> Result<String, TmdbError> {
-        self.body_with_language(path, &self.language)
+    fn fetch<T>(
+        &self,
+        path: &str,
+        decode: impl Fn(&str) -> Result<T, TmdbError>,
+    ) -> Result<T, TmdbError> {
+        self.fetch_with_language(path, &self.language, decode)
     }
 
-    /// Fetch without `language=` — `/images` returns *all* images (any
-    /// language) when unqualified; `language=zh-CN` collapses the set to
-    /// Chinese-tagged rows only.
-    fn body_no_language(&self, path: &str) -> Result<String, TmdbError> {
-        self.body_with_language(path, "")
-    }
-
-    fn body_with_language(&self, path: &str, language: &str) -> Result<String, TmdbError> {
-        // language goes into the cache key, not just the upstream URL, so a
-        // locale change misses instead of serving another language's rows.
+    // An empty language preserves the all-languages contract of image endpoints.
+    fn fetch_with_language<T>(
+        &self,
+        path: &str,
+        language: &str,
+        decode: impl Fn(&str) -> Result<T, TmdbError>,
+    ) -> Result<T, TmdbError> {
         let join = if path.contains('?') { '&' } else { '?' };
         let full = if language.is_empty() {
             path.to_string()
         } else {
             format!("{path}{join}language={language}")
         };
-        if let Some(cached) = self.cache.get_fresh(&full)? {
-            tracing::debug!(path = %full, "TMDB 缓存命中（新鲜）");
-            return Ok(cached);
-        }
-        tracing::debug!(path = %full, "正在从 TMDB API 拉取元数据");
-        match self.http.get(&full) {
-            Ok(body) => {
-                self.cache.put(&full, &body)?;
-                Ok(body)
-            }
-            Err(error) => {
-                tracing::warn!(path = %full, error = ?error, "TMDB API 请求失败，尝试过期缓存");
-                if let Some(stale) = self.cache.get_stale(&full)? {
-                    tracing::info!(path = %full, "回退到过期的元数据缓存");
-                    return Ok(stale);
-                }
-                tracing::error!(path = %full, error = ?error, "TMDB 元数据拉取彻底失败");
-                Err(error)
-            }
-        }
+        self.cache.get_or_fetch(&self.http, &full, |body| {
+            crate::contracts::json(body)?;
+            decode(body)
+        })
     }
 }
 

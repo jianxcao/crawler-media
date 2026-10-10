@@ -112,7 +112,7 @@ pub(crate) async fn history(
         .get("limit")
         .and_then(|v| v.parse().ok())
         .unwrap_or(30)
-        .min(200);
+        .clamp(1, 200);
     let before = query
         .get("before")
         .and_then(|v| v.parse::<i128>().ok())
@@ -156,11 +156,9 @@ pub(crate) async fn history(
     let last = logs.last();
     // Composite cursor: encode both started_at (ms) and id to avoid
     // skipping same-second records at the page boundary.
-    let next_cursor = has_more.then(|| {
-        let log = last.expect("has_more 只在有日志时成立");
-        (log.started_at as i128 * 1000).to_string()
-    });
-    let next_cursor_id = has_more.then(|| last.expect("has_more").id.clone());
+    let cursor_log = last.filter(|_| has_more);
+    let next_cursor = cursor_log.map(|log| (log.started_at as i128 * 1000).to_string());
+    let next_cursor_id = cursor_log.map(|log| log.id.clone());
     ok(json!({
         "entries": entries,
         "hidden_count": hidden_count,
@@ -256,15 +254,22 @@ pub(crate) async fn clear_history(
         Ok(ids) => ids,
         Err(resp) => return resp,
     };
-    let deleted_states = store
-        .clear_units(user_id, media_ids.as_deref(), since)
-        .unwrap_or(0)
-        + store
-            .delete_logs(user_id, media_ids.as_deref(), since)
-            .unwrap_or(0);
-    let deleted_metrics = store
-        .delete_metrics(user_id, media_ids.as_deref(), since)
-        .unwrap_or(0);
+    let (deleted_states, deleted_metrics) = match store.playback_write(|store| {
+        let states = store.clear_units(user_id, media_ids.as_deref(), since)?
+            + store.delete_logs(user_id, media_ids.as_deref(), since)?;
+        let metrics = store.delete_metrics(user_id, media_ids.as_deref(), since)?;
+        Ok((states, metrics))
+    }) {
+        Ok(counts) => counts,
+        Err(error) => {
+            tracing::error!(%error, %user_id, scope, "Playback history clear failed");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                "清除观看记录失败",
+            );
+        }
+    };
     ok(json!({
         "deleted_states": deleted_states,
         "deleted_metrics": deleted_metrics,

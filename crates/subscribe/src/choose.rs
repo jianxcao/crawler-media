@@ -242,6 +242,10 @@ fn ladder_for(wash_filter: Option<&domain::Filter>) -> Option<Vec<String>> {
 
 /// 按维度顺序比较新老版本：第一个分出胜负的维度决定结果，全部相等 → Equal。
 fn ladder_compare(new: &Release, old: &Release, ladder: &[String]) -> std::cmp::Ordering {
+    if ladder.iter().any(|dim| dim == "source") && old.source.is_none() {
+        tracing::warn!("已有来源质量未知，不能据此批准 Wash-cut 替换");
+        return std::cmp::Ordering::Equal;
+    }
     for dim in ladder {
         let ordering = match dim.as_str() {
             "resolution" => cmp_level(&new.resolution, &old.resolution, |v| resolution_level(v)),
@@ -415,7 +419,7 @@ fn is_pack(release: &Release, subscribe: &Subscribe) -> bool {
         || (release.episode.is_none() && release.episode_to.is_none())
 }
 
-pub(crate) fn is_complete(subscribe: &Subscribe, facts: &SubscribeFacts) -> bool {
+pub fn is_complete(subscribe: &Subscribe, facts: &SubscribeFacts) -> bool {
     if subscribe.wash_cut {
         return false;
     }

@@ -1303,11 +1303,7 @@ function CdpBrowserSection() {
   const [obscuraEnabled, setObscuraEnabled] = useState(false);
   const [obscuraUrl, setObscuraUrl] = useState("http://127.0.0.1:9223");
   const [userAgent, setUserAgent] = useState("crawler-media/0.1.0");
-  const [obscuraStatus, setObscuraStatus] = useState<{ installed: boolean; running: boolean; downloading: boolean }>({
-    installed: false,
-    running: false,
-    downloading: false,
-  });
+  const [obscuraConfigured, setObscuraConfigured] = useState(false);
 
   const [syncResult, setSyncResult] = useState<any>(null);
 
@@ -1324,11 +1320,7 @@ function CdpBrowserSection() {
           setObscuraEnabled(data.data.obscura?.enabled ?? false);
           setObscuraUrl(data.data.obscura?.url ?? "http://127.0.0.1:9223");
           setUserAgent(data.data.user_agent ?? "crawler-media/0.1.0");
-          setObscuraStatus({
-            installed: data.data.obscura?.installed ?? false,
-            running: data.data.obscura?.running ?? false,
-            downloading: data.data.obscura?.downloading ?? false,
-          });
+          setObscuraConfigured(data.data.obscura?.configured ?? false);
         }
       })
       .catch((e) => setMsg({ tone: "error", text: `加载配置失败: ${e.message}` }))
@@ -1354,13 +1346,9 @@ function CdpBrowserSection() {
       });
       const data = await res.json();
       if (data.ok) {
-        setMsg({ tone: "success", text: "浏览器与网络 User-Agent 设置已保存" });
+        setMsg({ tone: "success", text: "配置已保存并即时用于后续请求；外部 CDP 连通性尚未验证" });
         if (data.data?.obscura) {
-          setObscuraStatus({
-            installed: data.data.obscura.installed ?? false,
-            running: data.data.obscura.running ?? false,
-            downloading: data.data.obscura.downloading ?? false,
-          });
+          setObscuraConfigured(data.data.obscura.configured ?? false);
         }
         if (data.data?.user_agent) setUserAgent(data.data.user_agent);
       } else {
@@ -1418,13 +1406,19 @@ function CdpBrowserSection() {
         </div>
       )}
 
+      <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 text-sub text-[var(--text-muted)]">
+        当前 Browser 仅支持外部 HTTP(S) CDP discovery，不下载或启动受管 Chromium/Obscura，不接受 ws/wss 地址。
+        渲染路由优先级为 Site 专属 CDP → 已启用的 Obscura → 已启用的全局 CDP。保存即时生效，无需重启。
+        “已启用”仅代表配置意图；首次实际请求才验证连接，未验证端点不会显示为可用。
+      </div>
+
       {/* CDP Cookie Sync 开关与设置 */}
       <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-5">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h3 className="text-ui font-semibold text-[var(--text)]">Chrome CDP 凭据自动提取</h3>
+            <h3 className="text-ui font-semibold text-[var(--text)]">全局外部 CDP 与凭据提取</h3>
             <p className="mt-1 text-sub text-[var(--text-muted)]">
-              开启后，系统可通过 Chrome 远程调试协议直接读取浏览器中已登录 PT 站点的完整 Cookie，完全无需安装任何第三方插件。
+              开启后，此地址作为 JS 渲染请求的全局 CDP 备用端点，也用于提取已登录 Site 的 Cookie。仅 render Profile 使用 Browser，普通 HTTP 请求不自动切换。
             </p>
           </div>
           <label className="relative inline-flex cursor-pointer items-center">
@@ -1493,7 +1487,7 @@ function CdpBrowserSection() {
           <div>
             <h3 className="text-ui font-semibold text-[var(--text)]">Obscura 防检测浏览器集成</h3>
             <p className="mt-1 text-sub text-[var(--text-muted)]">
-              集成纯 Rust 轻量级抗检测无头浏览器引擎（内存仅 30MB），当站点遇到 Cloudflare 人机质询或需 JS 动态渲染时调用。
+              连接您已运行且兼容 HTTP CDP discovery 的 Obscura 服务，用于 render Profile。不会自动处理 Cloudflare 质询，也不保证第三方服务的渲染能力。
             </p>
           </div>
           <label className="relative inline-flex cursor-pointer items-center">
@@ -1509,32 +1503,19 @@ function CdpBrowserSection() {
 
         {obscuraEnabled && (
           <div className="mt-4 space-y-3 border-t border-white/[0.06] pt-4">
-            <div className="flex items-center gap-3">
-              <span className="text-micro font-medium text-[var(--text-faint)]">运行状态:</span>
-              {obscuraStatus.running ? (
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-xs font-medium text-emerald-400 border border-emerald-500/20">
-                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  已托管运行 (端口 9223)
-                </span>
-              ) : obscuraStatus.downloading ? (
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-sky-500/10 px-2.5 py-0.5 text-xs font-medium text-sky-400 border border-sky-500/20">
-                  <span className="h-1.5 w-1.5 rounded-full bg-sky-400 animate-pulse" />
-                  正在自动下载并安装引擎...
-                </span>
-              ) : obscuraStatus.installed ? (
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/10 px-2.5 py-0.5 text-xs font-medium text-amber-400 border border-amber-500/20">
-                  <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
-                  已就绪，保存后自动拉起
-                </span>
-              ) : (
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-white/5 px-2.5 py-0.5 text-xs font-medium text-white/50 border border-white/10">
-                  开启后将自动下载至 data/bin 目录
-                </span>
-              )}
-            </div>
-
+            <label className="text-micro font-medium text-[var(--text-faint)]">
+              Obscura HTTP(S) CDP discovery 地址
+              <input
+                type="text"
+                value={obscuraUrl}
+                onChange={(e) => setObscuraUrl(e.target.value)}
+                placeholder="http://127.0.0.1:9223"
+                className="mt-1.5 w-full rounded-xl border border-white/[0.08] bg-white/[0.04] px-3.5 py-2 text-ui text-[var(--text)] outline-none focus:border-[var(--accent)]"
+              />
+            </label>
             <p className="text-micro text-[var(--text-faint)]">
-              开启本功能后，系统会自动从官方 GitHub Releases 获取对应系统的无头浏览器二进制程序（data/bin/obscura），并在后台全自动启动守护进程，无需手动干预。
+              {obscuraConfigured ? "已保存端点配置，运行状态与 CDP 可用性未验证。" : "尚未保存有效端点。"}
+              保存不会下载、安装或启动 Obscura；服务必须由您自行运行。进程或端口存活不代表渲染可用。
             </p>
           </div>
         )}

@@ -1,0 +1,335 @@
+use domain::{MediaId, UserId};
+use rusqlite::{OptionalExtension, params};
+use std::str::FromStr;
+
+use super::{Store, StoreError};
+use super::{UNIT_WHOLE, UnitRow, UnitState};
+
+impl Store {
+    pub fn unit_state(
+        &self,
+        user_id: UserId,
+        media_id: MediaId,
+        season: i32,
+        episode: i32,
+    ) -> Result<Option<UnitState>, StoreError> {
+        self.subscribe
+            .query_row(
+                "SELECT position_ms, played, favorite, duration_ms, audio_track,
+                        subtitle_track, play_count, updated_at
+                 FROM playback_units
+                 WHERE user_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4",
+                params![user_id.to_string(), media_id.to_string(), season, episode],
+                |row| {
+                    Ok(UnitState {
+                        position_ms: row.get(0)?,
+                        played: row.get::<_, i64>(1)? != 0,
+                        favorite: row.get::<_, i64>(2)? != 0,
+                        duration_ms: row.get(3)?,
+                        audio_track: row.get(4)?,
+                        subtitle_track: row.get(5)?,
+                        play_count: row.get(6)?,
+                        updated_at: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_unit(
+        &self,
+        user_id: UserId,
+        media_id: MediaId,
+        season: i32,
+        episode: i32,
+        position_ms: i64,
+        played: Option<bool>,
+        favorite: Option<bool>,
+        duration_ms: Option<i64>,
+        audio_track: Option<&str>,
+        subtitle_track: Option<&str>,
+        increment_play_count: bool,
+        now: i64,
+    ) -> Result<UnitState, StoreError> {
+        let existing = self.unit_state(user_id, media_id, season, episode)?;
+        let played = played.unwrap_or(existing.as_ref().map(|u| u.played).unwrap_or(false));
+        let favorite = favorite.unwrap_or(existing.as_ref().map(|u| u.favorite).unwrap_or(false));
+        let duration_ms = duration_ms.or(existing.as_ref().and_then(|u| u.duration_ms));
+        let play_count = existing.as_ref().map(|u| u.play_count).unwrap_or(0)
+            + if increment_play_count { 1 } else { 0 };
+        let audio_track = audio_track
+            .map(str::to_string)
+            .or_else(|| existing.as_ref().and_then(|u| u.audio_track.clone()));
+        let subtitle_track = subtitle_track
+            .map(str::to_string)
+            .or_else(|| existing.as_ref().and_then(|u| u.subtitle_track.clone()));
+        self.subscribe.execute(
+            "INSERT INTO playback_units
+                (user_id, media_id, season, episode, position_ms, played, favorite,
+                 duration_ms, audio_track, subtitle_track, play_count, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(user_id, media_id, season, episode) DO UPDATE SET
+                position_ms = excluded.position_ms,
+                played = excluded.played,
+                favorite = excluded.favorite,
+                duration_ms = excluded.duration_ms,
+                audio_track = excluded.audio_track,
+                subtitle_track = excluded.subtitle_track,
+                play_count = excluded.play_count,
+                updated_at = excluded.updated_at",
+            params![
+                user_id.to_string(),
+                media_id.to_string(),
+                season,
+                episode,
+                position_ms,
+                played as i64,
+                favorite as i64,
+                duration_ms,
+                audio_track,
+                subtitle_track,
+                play_count,
+                now,
+            ],
+        )?;
+        self.unit_state(user_id, media_id, season, episode)?
+            .ok_or_else(|| StoreError::Missing("unit just written".into()))
+    }
+
+    /// Copy a legacy `(0, 0)` watch unit onto the canonical `(-1, -1)` unit for
+    /// whole-file media; TV keeps `(0, 0)` as a real season/episode pair.
+    pub fn copy_legacy_movie_unit_if_missing(
+        &self,
+        user_id: UserId,
+        media_id: MediaId,
+    ) -> Result<(), StoreError> {
+        match self.get_media(media_id)? {
+            Some(media) if media.kind != domain::MediaKind::Tv => {}
+            _ => return Ok(()),
+        }
+        self.subscribe.execute(
+            "INSERT OR IGNORE INTO playback_units
+                (user_id, media_id, season, episode, position_ms, played, favorite,
+                 duration_ms, audio_track, subtitle_track, play_count, updated_at)
+             SELECT user_id, media_id, -1, -1, position_ms, played, favorite,
+                    duration_ms, audio_track, subtitle_track, play_count, updated_at
+             FROM playback_units
+             WHERE user_id = ?1 AND media_id = ?2 AND season = 0 AND episode = 0",
+            params![user_id.to_string(), media_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// All distinct media ids and their most recent activity timestamp for a user.
+    pub fn user_active_media_ids(
+        &self,
+        user_id: UserId,
+    ) -> Result<Vec<(MediaId, i64)>, StoreError> {
+        let mut stmt = self.subscribe.prepare(
+            "SELECT media_id, MAX(updated_at) AS last_act
+             FROM playback_units
+             WHERE user_id = ?1 AND (position_ms > 0 OR played != 0 OR play_count > 0)
+             GROUP BY media_id
+             ORDER BY last_act DESC",
+        )?;
+        let rows = stmt.query_map(params![user_id.to_string()], |row| {
+            let id_str: String = row.get(0)?;
+            let updated: i64 = row.get(1)?;
+            Ok((id_str, updated))
+        })?;
+        let mut result = Vec::new();
+        for r in rows {
+            let (id_str, updated) = r?;
+            if let Ok(id) = MediaId::from_str(&id_str) {
+                result.push((id, updated));
+            }
+        }
+        Ok(result)
+    }
+
+    /// All unit rows of a media (for marks aggregation / cascade).
+    pub fn unit_rows(
+        &self,
+        user_id: UserId,
+        media_id: MediaId,
+    ) -> Result<Vec<UnitRow>, StoreError> {
+        let mut stmt = self.subscribe.prepare(
+            "SELECT season, episode, played, favorite, updated_at
+             FROM playback_units WHERE user_id = ?1 AND media_id = ?2",
+        )?;
+        let rows = stmt.query_map(params![user_id.to_string(), media_id.to_string()], |row| {
+            Ok(UnitRow {
+                season: row.get(0)?,
+                episode: row.get(1)?,
+                played: row.get::<_, i64>(2)? != 0,
+                favorite: row.get::<_, i64>(3)? != 0,
+                updated_at: row.get(4)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Set played marks with cascade (whole/season marks every unit below);
+    /// favorite is stored on exactly the target unit (favorite level = the
+    /// most recent favorited unit).
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_unit_marks(
+        &self,
+        user_id: UserId,
+        media_id: MediaId,
+        season: i32,
+        episode: i32,
+        played: Option<bool>,
+        favorite: Option<bool>,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        self.playback_write(|store| {
+            if (season, episode) == (-1, -1) {
+                store.copy_legacy_movie_unit_if_missing(user_id, media_id)?;
+            }
+            store.set_unit_marks_inner(user_id, media_id, season, episode, played, favorite, now)
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn set_unit_marks_inner(
+        &self,
+        user_id: UserId,
+        media_id: MediaId,
+        season: i32,
+        episode: i32,
+        played: Option<bool>,
+        favorite: Option<bool>,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        if let Some(favorite) = favorite {
+            let existing = self.unit_state(user_id, media_id, season, episode)?;
+            let played = played
+                .or(existing.as_ref().map(|u| u.played))
+                .unwrap_or(false);
+            self.upsert_unit(
+                user_id,
+                media_id,
+                season,
+                episode,
+                existing.as_ref().map(|u| u.position_ms).unwrap_or(0),
+                Some(played),
+                Some(favorite),
+                existing.as_ref().and_then(|u| u.duration_ms),
+                existing.as_ref().and_then(|u| u.audio_track.as_deref()),
+                existing.as_ref().and_then(|u| u.subtitle_track.as_deref()),
+                false,
+                now,
+            )?;
+            // 当取消整剧收藏（season=-1, episode=-1）时，级联将名下所有的单集/单季收藏一并置为 false，
+            // 避免出现整剧已取消收藏但列表中依然因为某集残留而被判定为已收藏。
+            if !favorite && season == UNIT_WHOLE && episode == UNIT_WHOLE {
+                self.subscribe.execute(
+                    "UPDATE playback_units SET favorite = 0, updated_at = ?3
+                     WHERE user_id = ?1 AND media_id = ?2",
+                    params![user_id.to_string(), media_id.to_string(), now],
+                )?;
+            }
+        }
+        if let Some(played) = played {
+            let (s_from, e_from) = match (season, episode) {
+                (UNIT_WHOLE, _) => (UNIT_WHOLE, UNIT_WHOLE),
+                (s, UNIT_WHOLE) => (s, UNIT_WHOLE),
+                (s, e) => (s, e),
+            };
+            let mut stmt = self.subscribe.prepare(
+                "UPDATE playback_units SET played = ?3, updated_at = ?4
+                 WHERE user_id = ?1 AND media_id = ?2
+                   AND season >= ?5 AND episode >= ?6
+                   AND (?5 = -1 OR season = ?5)
+                   AND (?6 = -1 OR episode = ?6)",
+            )?;
+            let _ = stmt.execute(params![
+                user_id.to_string(),
+                media_id.to_string(),
+                played as i64,
+                now,
+                s_from,
+                e_from,
+            ])?;
+            drop(stmt);
+            // Ensure the target unit exists so unplayed_count is well-defined.
+            if played {
+                let existing = self.unit_state(user_id, media_id, season, episode)?;
+                if existing.is_none() {
+                    self.upsert_unit(
+                        user_id,
+                        media_id,
+                        season,
+                        episode,
+                        0,
+                        Some(true),
+                        favorite,
+                        None,
+                        None,
+                        None,
+                        false,
+                        now,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Clear viewing facts, retaining favorites, duration and track preferences.
+    pub fn clear_units(
+        &self,
+        user_id: UserId,
+        media_ids: Option<&[MediaId]>,
+        since_ms: Option<i64>,
+    ) -> Result<usize, StoreError> {
+        let mut sql = String::from(
+            "UPDATE playback_units SET position_ms = 0, played = 0, play_count = 0, updated_at = 0 WHERE user_id = ?",
+        );
+        let mut values: Vec<rusqlite::types::Value> =
+            vec![rusqlite::types::Value::Text(user_id.to_string())];
+        if let Some(since) = since_ms {
+            sql.push_str(" AND updated_at >= ?");
+            values.push(rusqlite::types::Value::Integer(since));
+        }
+        if let Some(ids) = media_ids {
+            if ids.is_empty() {
+                return Ok(0);
+            }
+            let marks = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            sql.push_str(&format!(" AND media_id IN ({marks})"));
+            values.extend(
+                ids.iter()
+                    .map(|id| rusqlite::types::Value::Text(id.to_string())),
+            );
+        }
+        let changed = self
+            .subscribe
+            .execute(&sql, rusqlite::params_from_iter(values))?;
+        Ok(changed)
+    }
+
+    pub fn delete_playback_for_media(&self, media_id: domain::MediaId) -> Result<(), StoreError> {
+        let id_str = media_id.to_string();
+        self.subscribe.execute(
+            "DELETE FROM playback_units WHERE media_id = ?1",
+            params![&id_str],
+        )?;
+        self.subscribe.execute(
+            "DELETE FROM playback_sessions WHERE media_id = ?1",
+            params![&id_str],
+        )?;
+        self.subscribe.execute(
+            "DELETE FROM playback_logs WHERE media_id = ?1",
+            params![&id_str],
+        )?;
+        self.subscribe.execute(
+            "DELETE FROM playback_metrics WHERE media_id = ?1",
+            params![&id_str],
+        )?;
+        Ok(())
+    }
+}

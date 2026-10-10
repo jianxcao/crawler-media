@@ -66,6 +66,20 @@ pub(crate) fn scan_library_subdir(
     if !target_dir.is_dir() {
         return Ok(());
     }
+    if kind == domain::MediaKind::Video {
+        let mut files = Vec::new();
+        walk_video_files(target_dir, &mut files);
+        let inserted = crate::watch_ledger::record_video_paths(&state.store.lock(), files)?;
+        tracing::info!(root = %root.display(), target_dir = %target_dir.display(),
+            inserted = inserted.len(), "实时 Video Library 扫描完成，不进行 Movie/TV 识别");
+        crate::http::library::enqueue_probes_for_paths(state, inserted);
+        let store = state.store.lock();
+        if let Some(library) = store.get_library(&library_id).map_err(|error| error.to_string())? {
+            crate::http::library::clear_library_cover_checked(&store, &library.id);
+            let _ = crate::http::library::library_cover_path(&store, &library);
+        }
+        return Ok(());
+    }
     let probe = domain::Media {
         id: domain::MediaId::new(),
         kind,
@@ -111,6 +125,13 @@ pub(crate) fn scan_library_subdir(
             None => tracing::warn!(title = %media.title, path = %path.display(), "实时扫描未能自动匹配媒体元数据"),
         }
     }
+    tracing::info!(
+        root = %root.display(),
+        target_dir = %target_dir.display(),
+        scanned = outcome.transferred.len(),
+        inserted = inserted.len(),
+        "实时目录扫描完成，仅新增台账进入探测队列"
+    );
     crate::http::library::enqueue_probes_for_paths(state, inserted);
     {
         let store = state.store.lock();
@@ -144,40 +165,8 @@ fn scan_library_sync(state: ApiState, id: String) -> Response {
         bangumi_id: None,
         anilist_id: None,
     };
-    // 「其他」库：不识别不刮削，每个视频文件一个条目（文件名即标题）。
     if kind == domain::MediaKind::Video {
-        let mut files = Vec::new();
-        for root in &roots {
-            walk_video_files(root, &mut files);
-        }
-        let store = state.store.lock();
-        let inserted = match crate::watch_ledger::record_video_paths(&store, files.clone()) {
-            Ok(inserted) => inserted,
-            Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error),
-        };
-        drop(store);
-        crate::http::library::enqueue_probes_for_paths(&state, inserted);
-        for file in files {
-            let media = domain::Media {
-                id: domain::MediaId::new(),
-                kind: domain::MediaKind::Video,
-                title: file
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                year: None,
-                original_title: None,
-                tmdb_id: None,
-                douban_id: None,
-                tvdb_id: None,
-                bangumi_id: None,
-                anilist_id: None,
-            };
-            let _ = crate::poster_fetch::attach_poster(&state, &media, &file);
-            let _ = crate::poster_fetch::attach_backdrop(&state, &media, &file);
-        }
-        return ok(json!({ "queued": true, "transferred": true })).into_response();
+        return scan_video_library(&state, &roots);
     }
     let mut transferred = Vec::new();
     for root in roots {
@@ -261,6 +250,35 @@ fn scan_library_sync(state: ApiState, id: String) -> Response {
         }
     }
 
+    ok(json!({ "queued": true, "transferred": true })).into_response()
+}
+
+fn scan_video_library(state: &ApiState, roots: &[PathBuf]) -> Response {
+    let mut files = Vec::new();
+    for root in roots {
+        walk_video_files(root, &mut files);
+    }
+    let inserted = match crate::watch_ledger::record_video_paths(&state.store.lock(), files.clone()) {
+        Ok(inserted) => inserted,
+        Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error),
+    };
+    crate::http::library::enqueue_probes_for_paths(state, inserted);
+    for file in files {
+        let media = domain::Media {
+            id: domain::MediaId::new(),
+            kind: domain::MediaKind::Video,
+            title: file.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string(),
+            year: None,
+            original_title: None,
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        };
+        let _ = crate::poster_fetch::attach_poster(state, &media, &file);
+        let _ = crate::poster_fetch::attach_backdrop(state, &media, &file);
+    }
     ok(json!({ "queued": true, "transferred": true })).into_response()
 }
 

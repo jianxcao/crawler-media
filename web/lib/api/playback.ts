@@ -1102,7 +1102,10 @@ export async function fetchTrickplay(subtitleOrStreamUrl: string): Promise<Trick
 
 
 export interface PlaybackMetricPayload {
-  library_file_id: number | null;
+  /** Canonical Media identity; a UUID string, not a numeric UI index. */
+  media_item_id: string;
+  /** Visible Library ledger identity, including UUID-backed direct play. */
+  library_file_id: number | string | null;
   tier: number;
   degraded_from: number | null;
   engine: string;

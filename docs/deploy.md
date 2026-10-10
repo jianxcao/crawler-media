@@ -39,7 +39,7 @@ docker compose up --build
 
 镜像内单进程（`crawler-media`）监听 18765：静态 UI（`web/dist` 拷入
 `/usr/share/crawler-media/ui`）+ API + Jellyfin 兼容，浏览器和播放器都打这一个端口。
-镜像内默认 **无 Chromium**。仅当 JS 渲染的 Site 需要时才设 `CRAWLER_MEDIA_BROWSER=1`（managed Chromium 下载进数据卷）。
+镜像内默认 **无 Chromium**。当前 Browser 仅支持外部 HTTP(S) CDP discovery；JS 渲染 Site 可配置专属 `cdp_url`，或在 Browser 设置中启用 Obscura/全局 CDP 地址。自行运行外部 Browser，保存配置不会安装或启动进程。`CRAWLER_MEDIA_BROWSER=1` 请求不支持的 managed 能力，会在启动时明确报错。渲染路由为 Site CDP → 启用的 Obscura → 启用的全局 CDP；保存即时生效，端点配置不等于可用性验证。
 
 ## 下载器
 
@@ -60,7 +60,7 @@ qBittorrent / Transmission 通过 `/api/v1/downloaders` 配置（持久化到 SQ
 | `CRAWLER_MEDIA_LISTEN` | `127.0.0.1:18765` | 监听地址 |
 | `CRAWLER_MEDIA_UI` | 空 | 前端静态产物目录 |
 | `CRAWLER_MEDIA_CORS_ORIGINS` | 空 | CORS 白名单（逗号分隔） |
-| `CRAWLER_MEDIA_BROWSER` | 关 | `1`/`true`/`yes` 启用托管 Chromium |
+| `CRAWLER_MEDIA_BROWSER` | 关 | 旧 managed 开关；`1`/`true`/`yes` 现因能力不支持而拒绝启动，请配置外部 CDP |
 | `CRAWLER_MEDIA_TMDB_KEY` | 空 | TMDB API Key（同时可写入设置 UI） |
 | `CRAWLER_MEDIA_TVDB_KEY` | 空 | TVDB API Key |
 | `CRAWLER_MEDIA_QB_URL` / `_USER` / `_PASS` / `_CATEGORY` | 空 | qBittorrent 覆盖 |

@@ -50,10 +50,11 @@ pub fn verify_template_window(
     // template without candidates cannot overwrite another template's inconclusive result.
     let mut failure_reasons: Vec<String> = Vec::new();
     let mut all_templates_confirm_no_match = true;
+    let mut verified_models = Vec::new();
 
     for model in matching_models {
         match verify_against_model(engine, target, model, templates, policy) {
-            Ok(verified) => return VerificationOutcome::Verified(verified),
+            Ok(verified) => verified_models.push(verified),
             Err(reason) => {
                 if !template_confirms_no_match(&reason) {
                     all_templates_confirm_no_match = false;
@@ -63,6 +64,9 @@ pub fn verify_template_window(
         }
     }
 
+    if !verified_models.is_empty() {
+        return resolve_verified_models(verified_models, policy);
+    }
     let reason = aggregate_failure_reasons(all_templates_confirm_no_match, &failure_reasons);
 
     let full_window_ms = (policy.full_window_duration_secs as i64) * 1000;
@@ -83,6 +87,36 @@ pub fn verify_template_window(
         VerificationOutcome::NoMatch { reason }
     } else {
         VerificationOutcome::NeedsFullWindow { reason }
+    }
+}
+
+fn resolve_verified_models(
+    mut outcomes: Vec<VerifiedInterval>,
+    policy: &SamplingPolicy,
+) -> VerificationOutcome {
+    let tolerance = policy.max_reference_boundary_delta_ms.max(0) as u64;
+    for (index, interval) in outcomes.iter().enumerate() {
+        if outcomes[index + 1..].iter().any(|other| {
+            interval.start_ms.abs_diff(other.start_ms) > tolerance
+                || interval.end_ms.abs_diff(other.end_ms) > tolerance
+        }) {
+            tracing::warn!(models = outcomes.len(), "有效片头片尾模型区间冲突，保持未决");
+            return VerificationOutcome::NeedsFullWindow {
+                reason: "conflicting_verified_templates".into(),
+            };
+        }
+    }
+    outcomes.sort_by(|a, b| {
+        b.supporting_episodes.cmp(&a.supporting_episodes)
+            .then(a.score.total_cmp(&b.score))
+            .then(b.coverage.total_cmp(&a.coverage))
+            .then(a.start_ms.cmp(&b.start_ms))
+            .then(a.end_ms.cmp(&b.end_ms))
+    });
+    // Called only for a nonempty list; avoid an unchecked unwrap nevertheless.
+    match outcomes.into_iter().next() {
+        Some(interval) => VerificationOutcome::Verified(interval),
+        None => VerificationOutcome::NeedsFullWindow { reason: "no_verified_templates".into() },
     }
 }
 

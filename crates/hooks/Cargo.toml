@@ -7,5 +7,6 @@ license.workspace = true
 [dependencies]
 domain.workspace = true
 indexer.workspace = true
+scraper = "0.24"
 thiserror.workspace = true
 tracing.workspace = true

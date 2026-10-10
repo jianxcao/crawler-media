@@ -14,7 +14,7 @@ use api::{
     cli, router, spawn_job_loop,
 };
 use downloader::Downloader;
-use indexer::{Browser, BrowserConfig, ProfileSet, RoutedFetcher};
+use indexer::{ProfileSet, RoutedFetcher};
 
 #[tokio::main]
 async fn main() {
@@ -161,32 +161,13 @@ fn load_catalog_sources(
     sources
 }
 
-fn spawn_background_services(
-    state: &ApiState,
-    address: SocketAddr,
-    store: &parking_lot::Mutex<Store>,
-) {
+fn spawn_background_services(state: &ApiState, address: SocketAddr) {
     tokio::spawn(api::ssdp::run(
         address.port(),
         state.jellyfin_server_id().to_string(),
     ));
     let _jobs = spawn_job_loop(state.clone());
     api::spawn_fs_watcher(state.clone());
-
-    if store
-        .lock()
-        .get_setting(api::settings_keys::OBSCURA_ENABLED)
-        .ok()
-        .flatten()
-        .is_some_and(|v| v == "1" || v == "true")
-    {
-        let obscura = state.obscura.clone();
-        tokio::task::spawn_blocking(move || {
-            if let Err(err) = obscura.start() {
-                tracing::error!(error = %err, "【Obscura】开机自启拉起失败");
-            }
-        });
-    }
 }
 
 fn create_api_state(
@@ -202,11 +183,7 @@ fn create_api_state(
         DownloaderEnv::from_server_config(config),
         data_dir,
     ));
-    let browser = if config.browser_enabled {
-        Browser::new(BrowserConfig::enable_in(data_dir)?)
-    } else {
-        Browser::new(BrowserConfig::disabled())
-    };
+    let browser = api::runtime_browser::production_browser(store.clone(), config.browser_enabled)?;
     let mut state = ApiState::new_arc_with_admin_bootstrap(
         store.clone(),
         ProfileSet::load(Some(overlay_dir))?,
@@ -277,7 +254,7 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(address).await?;
     println!("crawler-media 已监听 http://{address}");
 
-    spawn_background_services(&state, address, &store);
+    spawn_background_services(&state, address);
 
     let app = api::ui::attach_ui(router(state), config.ui_dir.clone());
     axum::serve(listener, app).await?;

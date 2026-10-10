@@ -429,20 +429,26 @@ pub(crate) async fn site_login(State(state): State<ApiState>, Path(id): Path<Str
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "site.invalid", "站点 id 无效"),
     };
-    if state
-        .store
-        .lock()
-        .get_site(site_id)
-        .ok()
-        .flatten()
-        .is_none()
-    {
+    let Some(site) = state.store.lock().get_site(site_id).ok().flatten() else {
         return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在");
-    }
+    };
+    let policy = match crate::check_in::site_policy(&state, &site) {
+        Ok(policy) => policy,
+        Err(error) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "site.maintenance_unsupported",
+                &error.to_string(),
+            );
+        }
+    };
     let bus = hooks::Bus::new();
     let creds = crate::check_in::store_sites(&state.store);
     let http = crate::check_in::attendance_http();
-    match hooks::LoginPlugin::http(&bus, &creds, &http).login(site_id) {
+    match hooks::LoginPlugin::http(&bus, &creds, &http)
+        .with_policy(&policy)
+        .login(site_id)
+    {
         Ok(_) => ok(json!({ "ok": true })).into_response(),
         Err(error) => err(
             StatusCode::BAD_REQUEST,
@@ -460,20 +466,26 @@ pub(crate) async fn site_check_in(
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "site.invalid", "站点 id 无效"),
     };
-    if state
-        .store
-        .lock()
-        .get_site(site_id)
-        .ok()
-        .flatten()
-        .is_none()
-    {
+    let Some(site) = state.store.lock().get_site(site_id).ok().flatten() else {
         return err(StatusCode::NOT_FOUND, "site.missing", "站点不存在");
-    }
+    };
+    let policy = match crate::check_in::site_policy(&state, &site) {
+        Ok(policy) => policy,
+        Err(error) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "site.maintenance_unsupported",
+                &error.to_string(),
+            );
+        }
+    };
     let bus = hooks::Bus::new();
     let creds = crate::check_in::store_sites(&state.store);
     let http = crate::check_in::attendance_http();
-    match hooks::CheckInPlugin::http(&bus, &creds, &http).check_in(site_id) {
+    match hooks::CheckInPlugin::http(&bus, &creds, &http)
+        .with_policy(&policy)
+        .check_in(site_id)
+    {
         Ok(_) => ok(json!({ "ok": true })).into_response(),
         Err(error) => err(
             StatusCode::BAD_REQUEST,

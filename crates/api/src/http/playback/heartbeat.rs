@@ -7,8 +7,8 @@ use axum::{
 };
 use serde_json::Value;
 
-use super::{row_for, watch_state_json};
-use crate::store::{SessionRow, UNIT_WHOLE, UnitState};
+use super::{movie_compatible_state, row_for, watch_state_json};
+use crate::store::{SessionRow, StoreError, UNIT_WHOLE, UnitState};
 use crate::{
     http::{err, ok},
     job_loop::unix_now,
@@ -43,17 +43,15 @@ pub(crate) async fn progress(
         match store.is_device_revoked(user_id, device_id) {
             Ok(true) => return err(StatusCode::FORBIDDEN, "playback.revoked", "该设备已被注销"),
             Ok(false) => {}
-            Err(e) => {
-                tracing::error!(%user_id, device_id, error = %e, "查询设备注销状态失败");
-                return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", "查询设备状态失败");
-            }
+            Err(error) => return persistence_error(&error, user_id, device_id),
         }
         let Some((row, media, season, episode)) = row_for(&store, &body, Some(user_id)) else {
             return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
         };
-        let reported_duration = body["duration_ms"].as_i64().filter(|d| *d > 0);
-        let duration =
-            reported_duration.or_else(|| unit_duration(&store, user_id, &row, season, episode));
+        let duration = match unit_duration(&store, user_id, &row, season, episode) {
+            Ok(duration) => body["duration_ms"].as_i64().filter(|d| *d > 0).or(duration),
+            Err(error) => return persistence_error(&error, user_id, device_id),
+        };
         (row, media, season, episode, duration)
     };
     if duration_ms.is_none() {
@@ -71,62 +69,49 @@ pub(crate) async fn progress(
     apply_heartbeat(&state.store.lock(), &heartbeat, device_id)
 }
 
+fn persistence_error(error: &StoreError, user_id: domain::UserId, device_id: &str) -> Response {
+    tracing::error!(%error, %user_id, device_id, "Playback persistence failed");
+    err(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "store.error",
+        "保存播放状态失败",
+    )
+}
+
 fn unit_duration(
     store: &crate::Store,
     user: domain::UserId,
     row: &domain::LedgerRow,
     season: i32,
     episode: i32,
-) -> Option<i64> {
-    store
-        .unit_state(user, row.media_id, season, episode)
-        .ok()
-        .flatten()
+) -> Result<Option<i64>, StoreError> {
+    if let Some(duration) = movie_compatible_state(store, user, row.media_id, season, episode)?
         .and_then(|unit| unit.duration_ms)
-        .or_else(|| {
-            store
-                .get_file_meta(&row.id.to_string())
-                .ok()
-                .flatten()
-                .and_then(|tracks| tracks.video.and_then(|video| video.duration_secs))
-                .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
-                .map(|seconds| (seconds * 1000.0) as i64)
-        })
+    {
+        return Ok(Some(duration));
+    }
+    Ok(store
+        .get_file_meta(&row.id.to_string())?
+        .and_then(|tracks| tracks.video.and_then(|video| video.duration_secs))
+        .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+        .map(|seconds| (seconds * 1000.0) as i64))
 }
 
-fn update_unit(store: &crate::Store, heartbeat: &Heartbeat<'_>, event: &str) -> UnitState {
+fn update_unit(
+    store: &crate::Store,
+    heartbeat: &Heartbeat<'_>,
+    event: &str,
+) -> Result<UnitState, StoreError> {
     if (heartbeat.season, heartbeat.episode) == (UNIT_WHOLE, UNIT_WHOLE) {
-        if let Err(error) =
-            store.copy_legacy_movie_unit_if_missing(heartbeat.user_id, heartbeat.media_id)
-        {
-            // Without the copy a fresh canonical row would shadow the legacy
-            // state, so skip this write instead of losing watch history.
-            tracing::error!(%error, media_id = %heartbeat.media_id, "迁移历史电影播放单元失败，跳过本次规范写入");
-            let position = heartbeat.body["position_ms"].as_i64().unwrap_or(0);
-            return UnitState {
-                position_ms: position,
-                played: false,
-                favorite: false,
-                duration_ms: heartbeat.duration_ms,
-                audio_track: heartbeat.body["audio_track"].as_str().map(str::to_string),
-                subtitle_track: heartbeat.body["subtitle_track"]
-                    .as_str()
-                    .map(str::to_string),
-                play_count: 0,
-                updated_at: heartbeat.now,
-            };
-        }
+        store.copy_legacy_movie_unit_if_missing(heartbeat.user_id, heartbeat.media_id)?;
     }
-    let existing = store
-        .unit_state(
-            heartbeat.user_id,
-            heartbeat.media_id,
-            heartbeat.season,
-            heartbeat.episode,
-        )
-        .ok()
-        .flatten();
-    // start 事件如果未带 position_ms（如前端起播阶段汇报），保留数据库已存进度，避免被 0 覆盖
+    let existing = store.unit_state(
+        heartbeat.user_id,
+        heartbeat.media_id,
+        heartbeat.season,
+        heartbeat.episode,
+    )?;
+    // A start with no position preserves the saved resume point.
     let position = heartbeat.body["position_ms"]
         .as_i64()
         .or_else(|| {
@@ -134,56 +119,37 @@ fn update_unit(store: &crate::Store, heartbeat: &Heartbeat<'_>, event: &str) -> 
                 .then(|| existing.as_ref().map(|u| u.position_ms))
                 .flatten()
         })
-        .unwrap_or(0);
-    let audio = heartbeat.body["audio_track"].as_str();
-    let subtitle = heartbeat.body["subtitle_track"].as_str();
-    // 播完（进度达到 90% 或离结尾不足 30 秒）时自动置 played=true，未达阈值时保留既有 played 状态
-    let completed = heartbeat
+        .unwrap_or(0)
+        .max(0);
+    let duration = heartbeat
         .duration_ms
-        .is_some_and(|d| d > 0 && (position >= d * 9 / 10 || d - position <= 30_000));
-    let played_update = if completed {
-        Some(true)
-    } else {
-        existing.as_ref().and_then(|u| u.played.then_some(true))
-    };
-    store
-        .upsert_unit(
-            heartbeat.user_id,
-            heartbeat.media_id,
-            heartbeat.season,
-            heartbeat.episode,
-            position,
-            played_update,
-            None,
-            heartbeat.duration_ms,
-            audio,
-            subtitle,
-            event == "start",
-            heartbeat.now,
-        )
-        .unwrap_or_else(|error| {
-            tracing::error!(%error, media_id = %heartbeat.media_id, "Playback watch update failed");
-            UnitState {
-                position_ms: position,
-                played: false,
-                favorite: false,
-                duration_ms: heartbeat.duration_ms,
-                audio_track: audio.map(str::to_string),
-                subtitle_track: subtitle.map(str::to_string),
-                play_count: 0,
-                updated_at: heartbeat.now,
-            }
-        })
+        .or(existing.as_ref().and_then(|u| u.duration_ms));
+    let completed = UnitState::playback_completed(position, duration);
+    store.upsert_unit(
+        heartbeat.user_id,
+        heartbeat.media_id,
+        heartbeat.season,
+        heartbeat.episode,
+        position,
+        completed.then_some(true),
+        None,
+        duration,
+        heartbeat.body["audio_track"].as_str(),
+        heartbeat.body["subtitle_track"].as_str(),
+        event == "start",
+        heartbeat.now,
+    )
 }
 
 fn next_session(
     heartbeat: &Heartbeat<'_>,
+    unit: &UnitState,
     device: &str,
     previous: Option<&SessionRow>,
     start: bool,
 ) -> SessionRow {
     let body = heartbeat.body;
-    let position_ms = body["position_ms"].as_i64().unwrap_or(0);
+    let position_ms = unit.position_ms;
     let paused = body["paused"].as_bool().unwrap_or(false);
     let previous = previous.filter(|_| !start);
     let delta = (position_ms - previous.map(|s| s.position_ms).unwrap_or(position_ms)).max(0);
@@ -199,7 +165,7 @@ fn next_session(
         play_method: "local".into(),
         position_ms,
         start_position_ms: previous.map(|s| s.start_position_ms).unwrap_or(position_ms),
-        duration_ms: heartbeat.duration_ms,
+        duration_ms: unit.duration_ms,
         paused,
         watched_ms: previous.map(|s| s.watched_ms).unwrap_or(0) + if paused { 0 } else { delta },
         rate_bps: 0,
@@ -211,36 +177,45 @@ fn next_session(
     }
 }
 
-fn apply_heartbeat(store: &crate::Store, heartbeat: &Heartbeat<'_>, device: &str) -> Response {
+fn persist_heartbeat(
+    store: &crate::Store,
+    heartbeat: &Heartbeat<'_>,
+    device: &str,
+) -> Result<(UnitState, bool), StoreError> {
     let event = heartbeat.body["event"].as_str().unwrap_or("progress");
-    let previous = store.get_session(heartbeat.user_id, device).ok().flatten();
-    let unit = update_unit(store, heartbeat, event);
+    let previous = store.get_session(heartbeat.user_id, device)?;
+    let unit = update_unit(store, heartbeat, event)?;
     if previous.is_none() && event != "start" {
-        // 会话已被结束（如管理员踢出或已关闭），拒绝隐式复活！
-        return ok(watch_state_json(&unit, true)).into_response();
+        // An ended session must not be implicitly resurrected by a heartbeat.
+        return Ok((unit, true));
     }
-    let next = next_session(heartbeat, device, previous.as_ref(), event == "start");
+    let next = next_session(
+        heartbeat,
+        &unit,
+        device,
+        previous.as_ref(),
+        event == "start",
+    );
     let admin_ended = next.admin_ended && event != "stop";
-    let update = if event == "stop" {
-        previous.map(|mut closing| {
+    if event == "stop" {
+        if let Some(mut closing) = previous {
             closing.watched_ms = next.watched_ms;
             closing.position_ms = next.position_ms;
-            closing
-        })
-    } else if admin_ended {
-        None
-    } else {
-        Some(next)
-    };
-    if let Some(update) = update {
-        if let Err(error) = store.upsert_session(&update) {
-            tracing::error!(%error, device_id = device, "Playback session update failed");
+            closing.duration_ms = next.duration_ms;
+            store.upsert_session(&closing)?;
         }
+    } else if !admin_ended {
+        store.upsert_session(&next)?;
     }
     if event == "stop" || admin_ended {
-        if let Err(error) = store.close_session(heartbeat.user_id, device, heartbeat.now) {
-            tracing::error!(%error, device_id = device, "Playback session close failed");
-        }
+        store.close_session(heartbeat.user_id, device, heartbeat.now)?;
     }
-    ok(watch_state_json(&unit, admin_ended)).into_response()
+    Ok((unit, admin_ended))
+}
+
+fn apply_heartbeat(store: &crate::Store, heartbeat: &Heartbeat<'_>, device: &str) -> Response {
+    match store.playback_write(|store| persist_heartbeat(store, heartbeat, device)) {
+        Ok((unit, ended)) => ok(watch_state_json(&unit, ended)).into_response(),
+        Err(error) => persistence_error(&error, heartbeat.user_id, device),
+    }
 }

@@ -9,6 +9,7 @@ mod fingerprint_cache;
 mod fingerprint_models;
 mod fingerprint_samples;
 mod ledger;
+mod ledger_quality;
 mod legacy_recycle;
 mod libraries;
 mod library;
@@ -24,6 +25,7 @@ mod roots;
 mod schema;
 mod sites;
 mod subscribe_wanted;
+mod subscribe_library;
 mod subscribes;
 mod users;
 

@@ -16,7 +16,7 @@ fn site() -> Site {
         rss_url: None,
         proxy: None,
         rate_limit_per_minute: None,
-        cdp_url: Some("ws://127.0.0.1:9222".into()),
+        cdp_url: Some("http://127.0.0.1:9222".into()),
         downloader_id: None,
         enabled: true,
     }
@@ -57,7 +57,7 @@ impl PageSession for FakePage {
     }
 
     fn content(&self) -> Result<String, IndexerError> {
-        Ok(r#"<html><body>ok</body></html>"#.into())
+        Ok(r#"<html><body><a href="logout.php">Logout</a></body></html>"#.into())
     }
 }
 
@@ -68,6 +68,12 @@ struct RecordingHttp {
 }
 
 impl hooks::HttpPost for RecordingHttp {
+    fn get(&self, url: &str, _: Option<&str>, proxy: Option<&str>) -> Result<String, PluginError> {
+        self.posts.lock().unwrap().push(url.to_string());
+        self.proxies.lock().unwrap().push(proxy.map(str::to_string));
+        Ok("Set-Cookie: uid=fresh\n<html><a href='logout.php'>Logout</a></html>".into())
+    }
+
     fn post(
         &self,
         url: &str,
@@ -77,7 +83,7 @@ impl hooks::HttpPost for RecordingHttp {
     ) -> Result<String, PluginError> {
         self.posts.lock().unwrap().push(url.to_string());
         self.proxies.lock().unwrap().push(proxy.map(str::to_string));
-        Ok("Set-Cookie: uid=fresh".into())
+        Ok("Set-Cookie: uid=fresh\n<html>签到成功</html>".into())
     }
 }
 
@@ -99,7 +105,7 @@ fn login_plugin_refreshes_cookie_via_http_and_persists() {
     );
     assert_eq!(
         http.posts.lock().unwrap().as_slice(),
-        &["https://pt.example/login.php".to_string()]
+        &["https://pt.example/index.php".to_string()]
     );
 }
 
@@ -123,11 +129,11 @@ fn login_plugin_can_use_browser_session() {
 
     assert_eq!(
         *page.navigated.lock().unwrap(),
-        vec!["https://pt.example/login.php".to_string()]
+        vec!["https://pt.example/index.php".to_string()]
     );
     assert_eq!(
         store.site.lock().unwrap().cookie.as_deref(),
-        Some("session=browser")
+        Some("expired=1")
     );
 }
 
@@ -143,7 +149,8 @@ fn check_in_plugin_runs_on_schedule_without_searching() {
         *flag.lock().unwrap() = false;
         Ok(())
     }));
-    let plugin = CheckInPlugin::new(&bus, &store);
+    let http = RecordingHttp::default();
+    let plugin = CheckInPlugin::http(&bus, &store, &http);
     let id = store.site.lock().unwrap().id;
 
     plugin.check_in(id).unwrap();
@@ -217,7 +224,7 @@ fn veto_hook_prevents_login_side_effect() {
 }
 
 #[test]
-fn keep_site_alive_logs_in_when_cookie_missing() {
+fn keep_site_alive_requires_cookie_when_login_credentials_are_unavailable() {
     let mut row = site();
     row.cookie = None;
     let store = MemoryStore {
@@ -226,14 +233,10 @@ fn keep_site_alive_logs_in_when_cookie_missing() {
     let http = RecordingHttp::default();
     let bus = Bus::new();
     let id = store.site.lock().unwrap().id;
-    hooks::keep_site_alive(&bus, &store, &http, id).unwrap();
-    assert_eq!(
-        http.posts.lock().unwrap().as_slice(),
-        &[
-            "https://pt.example/login.php".to_string(),
-            "https://pt.example/attendance.php".to_string()
-        ]
-    );
+    let error = hooks::keep_site_alive(&bus, &store, &http, id).unwrap_err();
+    assert!(error.to_string().contains("Cookie"));
+    assert!(http.posts.lock().unwrap().is_empty());
+    assert!(store.site.lock().unwrap().cookie.is_none());
 }
 
 #[test]

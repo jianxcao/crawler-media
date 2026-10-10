@@ -84,7 +84,7 @@ fn load_transfer_context(
         .map_err(|e| e.to_string())?
         .ok_or("Filter not found")?;
     let facts = store
-        .load_subscribe_facts(subscribe.id)
+        .load_library_subscribe_facts(subscribe, media.kind)
         .map_err(|e| e.to_string())?;
     let wash_filter = subscribe
         .wash_cut_filter_id

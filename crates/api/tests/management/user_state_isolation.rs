@@ -115,33 +115,35 @@ fn seed_movie(tmp: &tempfile::TempDir, users: &[domain::UserId]) -> MediaId {
     media.id
 }
 
+async fn send_playback(
+    app: &axum::Router,
+    token: &str,
+    media_id: MediaId,
+    event: &str,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/playback/progress",
+            Some(token),
+            json!({"media_item_id":media_id.to_string(),"event":event,"device_id":"shared-device"}),
+        ))
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
-async fn same_device_id_is_scoped_per_user() {
+async fn same_web_device_id_is_scoped_per_user_and_revoke_is_unsupported() {
     let tmp = tempfile::tempdir().unwrap();
     let app = app(&tmp);
     let (alice_id, alice) = create_member(&app, "device-alice").await;
     let (bob_id, bob) = create_member(&app, "device-bob").await;
     let media_id = seed_movie(&tmp, &[alice_id, bob_id]);
-
-    for token in [&alice, &bob] {
-        let started = app
-            .clone()
-            .oneshot(request(
-                "POST",
-                "/api/v1/playback/progress",
-                Some(token),
-                json!({
-                    "media_item_id": media_id.to_string(),
-                    "event": "start",
-                    "device_id": "shared-device"
-                }),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(started.status(), StatusCode::OK);
-    }
-
-    for token in [&alice, &bob] {
+    for (id, token) in [(alice_id, &alice), (bob_id, &bob)] {
+        assert_eq!(
+            send_playback(&app, token, media_id, "start").await.status(),
+            StatusCode::OK
+        );
         let activity = app
             .clone()
             .oneshot(request(
@@ -152,16 +154,10 @@ async fn same_device_id_is_scoped_per_user() {
             ))
             .await
             .unwrap();
-        assert_eq!(
-            json_body(activity).await["data"]["sessions"][0]["user_id"],
-            if token == &alice {
-                json!(alice_id.to_string())
-            } else {
-                json!(bob_id.to_string())
-            }
-        );
+        let body = json_body(activity).await;
+        assert_eq!(body["data"]["sessions"][0]["user_id"], id.to_string());
+        assert_eq!(body["data"]["sessions"][0]["revocable"], false);
     }
-
     let ambiguous = app
         .clone()
         .oneshot(request(
@@ -173,7 +169,6 @@ async fn same_device_id_is_scoped_per_user() {
         .await
         .unwrap();
     assert_eq!(ambiguous.status(), StatusCode::CONFLICT);
-
     let ended = app
         .clone()
         .oneshot(request(
@@ -185,24 +180,6 @@ async fn same_device_id_is_scoped_per_user() {
         .await
         .unwrap();
     assert_eq!(ended.status(), StatusCode::OK);
-    let bob_activity = app
-        .clone()
-        .oneshot(request(
-            "GET",
-            "/api/v1/playback/activity",
-            Some(&bob),
-            Value::Null,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(
-        json_body(bob_activity).await["data"]["sessions"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-
     let revoked = app
         .clone()
         .oneshot(request(
@@ -213,36 +190,20 @@ async fn same_device_id_is_scoped_per_user() {
         ))
         .await
         .unwrap();
-    assert_eq!(revoked.status(), StatusCode::OK);
-    let alice_blocked = app
-        .clone()
-        .oneshot(request(
-            "POST",
-            "/api/v1/playback/progress",
-            Some(&alice),
-            json!({
-                "media_item_id": media_id.to_string(),
-                "event": "progress",
-                "device_id": "shared-device"
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(alice_blocked.status(), StatusCode::FORBIDDEN);
-    let bob_continues = app
-        .oneshot(request(
-            "POST",
-            "/api/v1/playback/progress",
-            Some(&bob),
-            json!({
-                "media_item_id": media_id.to_string(),
-                "event": "progress",
-                "device_id": "shared-device"
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(bob_continues.status(), StatusCode::OK);
+    assert_eq!(revoked.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        json_body(revoked).await["error"]["code"],
+        "playback.unsupported"
+    );
+    let alice_report = send_playback(&app, &alice, media_id, "progress").await;
+    assert_eq!(alice_report.status(), StatusCode::OK);
+    assert_eq!(
+        json_body(alice_report).await["data"]["ended_by_admin"],
+        true
+    );
+    let bob_report = send_playback(&app, &bob, media_id, "progress").await;
+    assert_eq!(bob_report.status(), StatusCode::OK);
+    assert_eq!(json_body(bob_report).await["data"]["ended_by_admin"], false);
 }
 
 #[tokio::test]

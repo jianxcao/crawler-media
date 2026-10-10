@@ -280,10 +280,7 @@ fn disabled_default_downloader_is_not_selected() {
         store.default_downloader().unwrap().is_none(),
         "a disabled default must not be auto-selected"
     );
-    assert!(matches!(
-        choose_downloader(&store, &empty_env()).unwrap(),
-        ChosenDownloader::Memory
-    ));
+    assert!(choose_downloader(&store, &empty_env()).is_err());
 }
 
 #[test]

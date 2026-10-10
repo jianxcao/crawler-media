@@ -132,14 +132,21 @@ impl<H: CatalogGet> Douban<H> {
     }
 
     fn cached_suggest(&self, kind: MediaKind, query: &str) -> Result<Vec<CatalogHit>, TmdbError> {
-        parse_suggest(
-            kind,
-            &self.body(&format!("/j/subject_suggest?q={}", encode(query)))?,
+        self.cache.get_or_fetch(
+            &self.http,
+            &format!("/j/subject_suggest?q={}", encode(query)),
+            |body| {
+                crate::contracts::json(body)?;
+                parse_suggest(kind, body)
+            },
         )
     }
 
     fn cached_popular(&self, kind: MediaKind, path: &str) -> Result<Vec<CatalogHit>, TmdbError> {
-        parse_popular(kind, &self.body(path)?)
+        self.cache.get_or_fetch(&self.http, path, |body| {
+            crate::contracts::json(body)?;
+            parse_popular(kind, body)
+        })
     }
 
     fn cached_subject_collection(
@@ -147,16 +154,25 @@ impl<H: CatalogGet> Douban<H> {
         kind: MediaKind,
         path: &str,
     ) -> Result<Vec<CatalogHit>, TmdbError> {
-        parse_subject_collection(kind, &self.body(path)?)
+        self.cache.get_or_fetch(&self.http, path, |body| {
+            crate::contracts::object(body, &["subject_collection_items"])?;
+            parse_subject_collection(kind, body)
+        })
     }
 
     /// 豆瓣 subject 详情：抓 `/subject/{id}/` 解析标题/年份/类型。
     /// 详情页对 kind 无参数，类型从页面「集数」字段自判（剧集 → Tv）。
     pub fn detail(&self, id: &str) -> Result<Option<Media>, TmdbError> {
-        let body = self.body(&format!("/subject/{id}/"))?;
-        let Some((title, year, is_tv)) = parse_detail(&body) else {
-            return Ok(None);
-        };
+        let (title, year, is_tv) =
+            self.cache
+                .get_or_fetch(&self.http, &format!("/subject/{id}/"), |body| {
+                    parse_detail(body).ok_or_else(|| {
+                        TmdbError::Parse(
+                            "missing Douban subject details; response may require authentication"
+                                .into(),
+                        )
+                    })
+                })?;
         Ok(Some(Media {
             id: MediaId::new(),
             kind: if is_tv {
@@ -173,24 +189,6 @@ impl<H: CatalogGet> Douban<H> {
             bangumi_id: None,
             anilist_id: None,
         }))
-    }
-
-    fn body(&self, path: &str) -> Result<String, TmdbError> {
-        if let Some(cached) = self.cache.get_fresh(path)? {
-            return Ok(cached);
-        }
-        match self.http.get(path) {
-            Ok(body) => {
-                self.cache.put(path, &body)?;
-                Ok(body)
-            }
-            Err(error) => {
-                if let Some(stale) = self.cache.get_stale(path)? {
-                    return Ok(stale);
-                }
-                Err(error)
-            }
-        }
     }
 }
 

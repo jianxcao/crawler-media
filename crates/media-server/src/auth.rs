@@ -1,8 +1,10 @@
+use crate::provider::PlaybackClientInfo;
 use axum::extract::Request;
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::Response;
 use domain::UserId;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::provider::MediaServerProvider;
@@ -31,57 +33,79 @@ pub async fn authenticate(
 
     let device_id = request_device_id(&request);
     request.extensions_mut().insert(user_id);
-    request
-        .extensions_mut()
-        .insert(AuthUser { id: user_id, token, device_id });
+    request.extensions_mut().insert(AuthUser {
+        id: user_id,
+        token,
+        device_id,
+    });
     Ok(next.run(request).await)
 }
 
 fn request_device_id(request: &Request) -> Option<String> {
-    if let Some(val) = request.headers().get("X-Emby-Device-Id") {
-        if let Ok(s) = val.to_str() {
-            let trimmed = s.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-    if let Some(val) = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .or_else(|| request.headers().get("x-emby-authorization"))
-        .and_then(|v| v.to_str().ok())
-    {
-        if let Some(device) = device_from_authorization(val) {
-            return Some(device.to_string());
-        }
-    }
-    if let Some(query) = request.uri().query() {
-        for pair in query.split('&') {
-            if let Some((k, v)) = pair.split_once('=') {
-                if k.eq_ignore_ascii_case("DeviceId") || k.eq_ignore_ascii_case("device_id") {
-                    let trimmed = v.trim();
-                    if !trimmed.is_empty() {
-                        return Some(trimmed.to_string());
-                    }
-                }
-            }
-        }
-    }
-    None
+    protocol_value(request.headers(), "X-Emby-Device-Id", "DeviceId").or_else(|| {
+        request.uri().query()?.split('&').find_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            ((key.eq_ignore_ascii_case("DeviceId") || key.eq_ignore_ascii_case("device_id"))
+                && !value.trim().is_empty())
+            .then(|| value.trim().to_string())
+        })
+    })
 }
 
-fn device_from_authorization(value: &str) -> Option<&str> {
-    let (scheme, credentials) = value.split_once(' ')?;
-    if !scheme.eq_ignore_ascii_case("MediaBrowser") && !scheme.eq_ignore_ascii_case("Emby") {
-        return None;
+fn protocol_value(headers: &HeaderMap, header_name: &str, key_name: &str) -> Option<String> {
+    let clean = |value: &str| {
+        let value = value.trim().trim_matches('"');
+        (!value.is_empty()).then(|| value.to_string())
+    };
+    headers
+        .get(header_name)
+        .and_then(|value| value.to_str().ok())
+        .and_then(clean)
+        .or_else(|| {
+            ["authorization", "x-emby-authorization"]
+                .into_iter()
+                .find_map(|header| {
+                    let value = headers.get(header)?.to_str().ok()?;
+                    let (scheme, credentials) = value.split_once(' ')?;
+                    if !scheme.eq_ignore_ascii_case("MediaBrowser")
+                        && !scheme.eq_ignore_ascii_case("Emby")
+                    {
+                        return None;
+                    }
+                    credentials.split(',').find_map(|part| {
+                        let (key, value) = part.trim().split_once('=')?;
+                        if key.trim().eq_ignore_ascii_case(key_name) {
+                            clean(value)
+                        } else {
+                            None
+                        }
+                    })
+                })
+        })
+}
+
+impl AuthUser {
+    pub(crate) fn playback_client(&self, headers: &HeaderMap) -> PlaybackClientInfo {
+        let client = protocol_value(headers, "X-Emby-Client", "Client");
+        let device_name = protocol_value(headers, "X-Emby-Device-Name", "Device");
+        let client_version = protocol_value(headers, "X-Emby-Client-Version", "Version");
+        let device_id = self.device_id.clone().unwrap_or_else(|| {
+            // No stable protocol identity: correlate this credential/metadata, but
+            // never advertise it as a device credential that can be revoked.
+            let mut fingerprint = std::collections::hash_map::DefaultHasher::new();
+            (&self.token, &client, &device_name, &client_version,
+                headers.get(header::USER_AGENT)).hash(&mut fingerprint);
+            let fallback = format!("unidentified:{:016x}", fingerprint.finish());
+            tracing::warn!(user_id = %self.id, device_id = fallback, "Jellyfin client did not provide DeviceId");
+            fallback
+        });
+        PlaybackClientInfo {
+            device_id,
+            client,
+            device_name,
+            client_version,
+        }
     }
-    credentials.split(',').find_map(|part| {
-        let (key, value) = part.trim().split_once('=')?;
-        key.trim()
-            .eq_ignore_ascii_case("DeviceId")
-            .then(|| value.trim().trim_matches('"'))
-    })
 }
 
 pub async fn authenticate_optional(

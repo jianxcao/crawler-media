@@ -71,45 +71,19 @@ pub async fn resolve_item_chapters(
             return cached;
         }
         let store = state.store.lock();
-        // 优先读取本集已有 marker；若本集未单独比对出 marker（例如单集网络超时），
-        // 尝试借用同季其他集的公共片头 marker（同季剧集共享相同的片头曲时间范围）
-        let own_marker = store
+        // A read may reconstruct chapters from this episode's verified marker,
+        // but cannot promote a neighboring episode's candidate into target facts.
+        let marker_candidate = store
             .get_media_marker(media.id, row.season, row.episode)
             .ok()
             .flatten();
-        let (marker_candidate, is_borrowed) = match own_marker {
-            Some(m) => (Some(m), false),
-            None => {
-                let season = row.season.unwrap_or(1);
-                let borrowed = store.list_ledger().ok().and_then(|rows| {
-                    rows.into_iter()
-                        .filter(|r| r.media_id == media.id && r.season.unwrap_or(1) == season)
-                        .find_map(|r| {
-                            store
-                                .get_media_marker(media.id, r.season, r.episode)
-                                .ok()
-                                .flatten()
-                        })
-                });
-                (
-                    borrowed.map(|mut m| {
-                        m.outro_start_ms = None;
-                        m.outro_end_ms = None;
-                        m
-                    }),
-                    true,
-                )
-            }
-        };
 
         if let Some(latest) = marker_candidate {
             let mut chapters = Vec::new();
             append_marker_chapters(&mut chapters, Some(&latest));
             if !chapters.is_empty() {
                 chapters.sort_by_key(|c| c.start_ms);
-                if !is_borrowed {
-                    let _ = store.put_cached_chapters(&row.id.to_string(), &chapters);
-                }
+                let _ = store.put_cached_chapters(&row.id.to_string(), &chapters);
                 return chapters;
             }
         }

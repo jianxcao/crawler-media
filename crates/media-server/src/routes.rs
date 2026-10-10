@@ -1,5 +1,5 @@
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -10,13 +10,15 @@ use tokio::sync::broadcast;
 
 use crate::auth::{AuthUser, authenticate};
 use crate::dto::{item_dto_json, library_view_json, user_profile_json};
-use crate::provider::{MediaServerProvider, PlaybackClientInfo, PlaybackEvent};
+use crate::provider::MediaServerProvider;
 mod item_filters;
 mod media;
 mod people;
+mod sessions;
 mod websocket;
 use item_filters::filter_items;
 use media::playback_info;
+use sessions::{session_playing, session_progress, session_stopped};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -411,7 +413,10 @@ async fn latest_items(
     let rows = item_filters::filter_items_except_played(rows, &query);
     let rows = item_filters::sort_items(rows, "DateCreated,SortName", "Descending");
     let rows = match query.is_played {
-        Some(played) => rows.into_iter().filter(|item| item.played == played).collect(),
+        Some(played) => rows
+            .into_iter()
+            .filter(|item| item.played == played)
+            .collect(),
         None => library::played_last(rows, |item| item.played),
     };
     let start_index = query.start_index.unwrap_or(0);
@@ -690,93 +695,4 @@ async fn display_preferences(Path(id): Path<String>) -> Json<Value> {
 
 async fn update_display_preferences() -> Response {
     StatusCode::NO_CONTENT.into_response()
-}
-
-#[derive(Deserialize)]
-struct ProgressBody {
-    #[serde(default, rename = "ItemId")]
-    item_id: Option<String>,
-    #[serde(default, rename = "PositionTicks")]
-    position_ticks: Option<i64>,
-    #[serde(default, rename = "IsPaused")]
-    is_paused: Option<bool>,
-}
-
-fn client_info(headers: &HeaderMap, _body: &ProgressBody) -> PlaybackClientInfo {
-    let header_value = |name: &str| {
-        headers
-            .get(name)
-            .and_then(|value| value.to_str().ok())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    };
-    let device_id = header_value("X-Emby-Device-Id").unwrap_or_else(|| "jellyfin-client".into());
-    PlaybackClientInfo {
-        device_id,
-        client: header_value("X-Emby-Client"),
-        device_name: header_value("X-Emby-Device-Name"),
-        client_version: header_value("X-Emby-Client-Version"),
-    }
-}
-
-async fn report_session_event(
-    state: AppState,
-    user: AuthUser,
-    body: ProgressBody,
-    headers: HeaderMap,
-    event: PlaybackEvent,
-    paused: bool,
-) -> StatusCode {
-    let (Some(item_id), Some(position_ticks)) = (body.item_id.as_deref(), body.position_ticks)
-    else {
-        return StatusCode::NO_CONTENT;
-    };
-    let position_ms = (position_ticks / 10_000).max(0);
-    let client = client_info(&headers, &body);
-    match state
-        .provider
-        .report_playback_event(user.id, item_id, position_ms, paused, client, event)
-        .await
-    {
-        Ok(()) => StatusCode::NO_CONTENT,
-        Err(error) => {
-            tracing::error!(
-                %error,
-                user_id = %user.id,
-                item_id,
-                ?event,
-                "failed to persist Jellyfin playback event"
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
-}
-
-async fn session_playing(
-    State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
-    headers: HeaderMap,
-    Json(body): Json<ProgressBody>,
-) -> StatusCode {
-    report_session_event(state, user, body, headers, PlaybackEvent::Playing, false).await
-}
-
-async fn session_progress(
-    State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
-    headers: HeaderMap,
-    Json(body): Json<ProgressBody>,
-) -> StatusCode {
-    let paused = body.is_paused.unwrap_or(false);
-    report_session_event(state, user, body, headers, PlaybackEvent::Progress, paused).await
-}
-
-async fn session_stopped(
-    State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
-    headers: HeaderMap,
-    Json(body): Json<ProgressBody>,
-) -> StatusCode {
-    report_session_event(state, user, body, headers, PlaybackEvent::Stopped, true).await
 }

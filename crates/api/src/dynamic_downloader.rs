@@ -63,6 +63,9 @@ pub fn connect_chosen(
         ChosenDownloader::Transmission(config) => TransmissionDownloader::connect(config.clone())
             .map(|client| Arc::new(client) as Arc<dyn Downloader>),
         ChosenDownloader::Memory => Ok(memory),
+        ChosenDownloader::Unavailable => Err(DownloaderError::Message(
+            "Downloader 配置不可用，未接受下载".into(),
+        )),
     }
 }
 
@@ -187,12 +190,12 @@ mod tests {
             poster_url: None,
         };
 
-        dynamic
-            .add_with_options(&t, &t.enclosure, Some("/custom/path"))
-            .unwrap();
-        assert_eq!(
-            dynamic.memory.destinations(),
-            vec![Some("/custom/path".into())]
+        assert!(
+            dynamic
+                .add_with_options(&t, &t.enclosure, Some("/custom/path"))
+                .is_err(),
+            "未配置生产 Downloader 时不得写入内存暂存"
         );
+        assert!(dynamic.memory.destinations().is_empty());
     }
 }

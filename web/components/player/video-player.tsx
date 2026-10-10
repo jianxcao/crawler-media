@@ -1444,9 +1444,8 @@ export function VideoPlayer(props: VideoPlayerProps) {
   trackRefsRef.current = trackRefs;
 
   /**
-   * 管理员在活动页结束了本次播放：退出播放器并说明原因。服务端同时进入
-   * 拒绝窗口（取流与开会话都会被拒），所以这里绝不能走「会话没了就重开」
-   * 那条路，直接退出才是对的。
+   * 管理员在活动页结束了本次播放：退出播放器并说明原因。Web 仅结束
+   * 本次播放，不注销登录凭据；这里不走「会话没了就重开」那条路。
    */
   const onEndedByAdmin = useCallback(() => {
     if (endedByAdminRef.current) return;
@@ -1531,6 +1530,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
     const decision = state.session?.decision;
     if (!decision || decision.tier == null) return null;
     return {
+      media_item_id: String(unit.media_item_id),
       library_file_id: decision.file_id ?? null,
       tier: decision.tier,
       degraded_from: decision.degraded_from ?? null,
@@ -1538,7 +1538,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
       hw_backend: state.session?.hw_backend ?? "",
       ...summary,
     };
-  }, [state.session]);
+  }, [state.session, unit.media_item_id]);
 
   useEffect(() => {
     qoeSnapshotRef.current = qoeSnapshot;

@@ -52,7 +52,7 @@ pub(super) fn movie_compatible_unit(
     }
 }
 
-pub(super) fn movie_compatible_state(
+pub(crate) fn movie_compatible_state(
     store: &crate::Store,
     user_id: domain::UserId,
     media_id: domain::MediaId,
@@ -535,26 +535,52 @@ pub(crate) async fn metrics(
 ) -> Response {
     let now = unix_now();
     let store = state.store.lock();
-    let media_id = body["media_item_id"]
-        .as_str()
-        .and_then(|raw| domain::MediaId::from_str(raw).ok());
-    if let Some(media_id) = media_id {
-        let _ = store.insert_metric(
-            user_id,
-            media_id,
-            body["tier"].as_i64().unwrap_or(0) as i32,
-            body["engine"].as_str(),
-            body["ttff_ms"].as_i64(),
-            body["rebuffer_ms"].as_i64().unwrap_or(0),
-            body["rebuffer_count"].as_i64().unwrap_or(0),
-            body["seek_count"].as_i64().unwrap_or(0),
-            body["dropped_frames"].as_i64(),
-            body["total_frames"].as_i64(),
-            body["watched_ms"].as_i64().unwrap_or(0),
-            now,
-        );
+    let media_id = metric_media_id(&store, user_id, &body);
+    match media_id {
+        Some(media_id) => {
+            if let Err(error) = store.insert_metric(
+                user_id,
+                media_id,
+                body["tier"].as_i64().unwrap_or(0) as i32,
+                body["engine"].as_str(),
+                body["ttff_ms"].as_i64(),
+                body["rebuffer_ms"].as_i64().unwrap_or(0),
+                body["rebuffer_count"].as_i64().unwrap_or(0),
+                body["seek_count"].as_i64().unwrap_or(0),
+                body["dropped_frames"].as_i64(),
+                body["total_frames"].as_i64(),
+                body["watched_ms"].as_i64().unwrap_or(0),
+                now,
+            ) {
+                tracing::warn!(%error, %user_id, %media_id, "Playback quality metric persistence failed");
+            }
+        }
+        None => tracing::warn!(%user_id, library_file_id = ?body.get("library_file_id"),
+            media_item_id = ?body.get("media_item_id"), "Playback quality metric identity is invalid or not visible"),
     }
     ok(json!({ "ok": true })).into_response()
+}
+
+fn metric_media_id(
+    store: &crate::Store,
+    user_id: domain::UserId,
+    body: &Value,
+) -> Option<domain::MediaId> {
+    let explicit = body["media_item_id"].as_str().and_then(resolve_media_id);
+    if let Some(file) = body.get("library_file_id").filter(|file| !file.is_null()) {
+        let row = crate::http::media_visibility::resolve_visible_row(
+            store,
+            file.as_str()?,
+            Some(user_id),
+        )?;
+        return explicit
+            .is_none_or(|id| id == row.media_id)
+            .then_some(row.media_id);
+    }
+    let id = explicit?;
+    let media = store.get_media(id).ok().flatten()?;
+    let rows = store.list_ledger().ok()?;
+    (!visible_rows_for_media(store, &media, &rows, Some(user_id)).is_empty()).then_some(id)
 }
 
 /// GET/PUT /playback/policy — direct-play only; transcode flags persist in KV.
@@ -690,17 +716,29 @@ pub(crate) async fn get_subtitle_file(
     let (row, media_title, tracks) = {
         let store = state.store.lock();
         // G07: 先校验该 ledger 行对当前用户可见，防止普通成员跨 Library 读取字幕。
-        let Some(row) = crate::http::media_visibility::resolve_visible_row(&store, &ledger_id, Some(user_id)) else {
+        let Some(row) =
+            crate::http::media_visibility::resolve_visible_row(&store, &ledger_id, Some(user_id))
+        else {
             return err(StatusCode::NOT_FOUND, "subtitle.not_found", "字幕未找到");
         };
-        let media_title = store.get_media(row.media_id).ok().flatten().map(|m| m.title).unwrap_or_default();
+        let media_title = store
+            .get_media(row.media_id)
+            .ok()
+            .flatten()
+            .map(|m| m.title)
+            .unwrap_or_default();
         let Ok(Some(tracks)) = store.get_file_meta(&ledger_id) else {
             return err(StatusCode::NOT_FOUND, "subtitle.not_found", "字幕未找到");
         };
         (row, media_title, tracks)
     };
-    let wants_vtt = query.get("format").map(|f| f.eq_ignore_ascii_case("vtt")).unwrap_or(false);
-    let cache_dir = std::env::temp_dir().join("crawler-media-subtitles").join(&ledger_id);
+    let wants_vtt = query
+        .get("format")
+        .map(|f| f.eq_ignore_ascii_case("vtt"))
+        .unwrap_or(false);
+    let cache_dir = std::env::temp_dir()
+        .join("crawler-media-subtitles")
+        .join(&ledger_id);
     let source_path = std::path::Path::new(&row.path);
 
     match library::deliver_subtitle_with_source(
@@ -728,20 +766,16 @@ pub(crate) async fn get_subtitle_file(
                 library::DeliveryError::TrackNotFound => {
                     err(StatusCode::NOT_FOUND, "subtitle.not_found", "字幕轨不存在")
                 }
-                library::DeliveryError::FileMissing | library::DeliveryError::Io(_) => {
-                    err(
-                        StatusCode::NOT_FOUND,
-                        "subtitle.file_missing",
-                        "字幕文件不存在",
-                    )
-                }
-                library::DeliveryError::Extraction(msg) => {
-                    err(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "subtitle.extraction_failed",
-                        &format!("提取内封字幕失败: {msg}"),
-                    )
-                }
+                library::DeliveryError::FileMissing | library::DeliveryError::Io(_) => err(
+                    StatusCode::NOT_FOUND,
+                    "subtitle.file_missing",
+                    "字幕文件不存在",
+                ),
+                library::DeliveryError::Extraction(msg) => err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "subtitle.extraction_failed",
+                    &format!("提取内封字幕失败: {msg}"),
+                ),
             }
         }
     }

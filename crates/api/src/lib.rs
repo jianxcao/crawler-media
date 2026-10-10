@@ -37,6 +37,7 @@ pub mod media_posters;
 pub mod media_server_provider;
 mod poster;
 mod poster_fetch;
+pub mod runtime_browser;
 mod runtime_downloader;
 pub mod settings_keys;
 pub mod store;

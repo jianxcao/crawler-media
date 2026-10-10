@@ -19,9 +19,8 @@ impl PathMap {
     }
 
     pub fn remap(&self, path: &Path) -> Option<PathBuf> {
-        let raw = path.to_string_lossy();
-        let rest = raw.strip_prefix(&self.from)?;
-        Some(self.to.join(rest.trim_start_matches('/')))
+        let rest = path.strip_prefix(Path::new(&self.from)).ok()?;
+        Some(self.to.join(rest))
     }
 
     /// Convert a host-visible path back to the downloader's path namespace.

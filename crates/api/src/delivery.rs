@@ -79,7 +79,9 @@ pub(crate) fn client_for_id(
         }
         ChosenDownloader::Transmission(config) => TransmissionDownloader::connect(config)
             .map(|client| Arc::new(client) as Arc<dyn Downloader>),
-        ChosenDownloader::Memory => Err(error(format!("Downloader {id} is incomplete"))),
+        ChosenDownloader::Memory | ChosenDownloader::Unavailable => {
+            Err(error(format!("Downloader {id} is incomplete")))
+        }
     }
 }
 

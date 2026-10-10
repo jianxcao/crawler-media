@@ -158,16 +158,6 @@ pub(crate) async fn set_marks(
     let episode = body["episode_number"].as_i64().unwrap_or(-1) as i32;
     let store = state.store.lock();
     let (season, episode) = super::selection::watch_unit(&store, media_id, season, episode);
-    if (season, episode) == (UNIT_WHOLE, UNIT_WHOLE) {
-        if let Err(error) = store.copy_legacy_movie_unit_if_missing(user_id, media_id) {
-            tracing::error!(%error, %media_id, %user_id, "迁移历史电影标记单元失败");
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            );
-        }
-    }
     let played = body["played"].as_bool();
     let favorite = body["favorite"].as_bool();
     if let Err(error) = store.set_unit_marks(

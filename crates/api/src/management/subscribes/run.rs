@@ -222,7 +222,8 @@ fn execute(
 ) -> Result<(subscribe::RunOutcome, bool), ApiError> {
     exclude_pending(state, id, &mut torrents)?;
     let existing = state.store.lock().load_pending(id)?;
-    let mut facts = state.store.lock().load_subscribe_facts(id)?;
+    let mut facts = state.store.lock()
+        .load_library_subscribe_facts(&context.subscribe, context.media.kind)?;
     for (_, pending) in &existing {
         let release = pending
             .release_override
@@ -273,7 +274,7 @@ fn execute(
     let destinations = routed
         .imported_destinations()
         .map_err(|error| ApiError::internal(error.to_string()))?;
-    let outcome = subscribe::run_with_destinations(
+    let mut outcome = subscribe::run_with_destinations(
         RunInput {
             subscribe: &context.subscribe,
             media: &context.media,
@@ -288,11 +289,13 @@ fn execute(
             scrape: nfo,
             hooks: None,
             naming: Some(&naming),
-            preserve_removed: false,
+            preserve_removed: true,
         },
         &library::Ffprobe::default(),
         &destinations,
     )?;
+    outcome.facts.retain_owned();
+    outcome.completed = subscribe::is_complete(&context.subscribe, &outcome.facts);
     Ok((outcome, scrape))
 }
 
@@ -379,9 +382,6 @@ fn persist(
     routed: &RoutedDownloader<'_>,
 ) -> Result<(), ApiError> {
     let store = state.store.lock();
-    for path in &outcome.removed_paths {
-        store.delete_ledger_path(path)?;
-    }
     for row in &outcome.ledger {
         let source_path = outcome
             .ledger_sources
@@ -416,6 +416,10 @@ fn persist(
     store.record_pending_submissions(id, &pending_items)?;
     store.mark_pending_imported(id, &transferred)?;
     store.save_subscribe_facts(id, &outcome.facts)?;
+    for path in &outcome.removed_paths {
+        crate::http::file_delete::remove_file_and_ledger(&store, path)
+            .map_err(ApiError::internal)?;
+    }
     drop(store);
     crate::http::library::enqueue_probes_for_rows(state, &outcome.ledger);
     Ok(())
