@@ -97,6 +97,7 @@ pub(crate) fn should_replace_slots(
                 if !subscribe.wash_cut {
                     return false;
                 }
+                let old_quality = existing.path.as_deref().and_then(|path| owned_quality(facts, path));
                 // T5: cutoff 与 ladder 排序分离：
                 // 只有 target 显式声明的维度全部满足时才算已达标停止升级；
                 // UpgradeLadder 仅用于比对候选优劣，不替代达标判断。
@@ -109,17 +110,8 @@ pub(crate) fn should_replace_slots(
                     {
                         tracing::error!(target_value = %target_value, "WashTarget 配置非法或无法解析有效维度");
                     } else {
-                        let existing_quality = existing.path.as_deref().and_then(|path| {
-                            facts.quality(path).cloned().or_else(|| {
-                                std::path::Path::new(path)
-                                    .file_name()
-                                    .and_then(|name| name.to_str())
-                                    .map(release::parse)
-                                    .filter(|r| r.resolution.is_some() || r.source.is_some())
-                            })
-                        });
-                        if let Some(existing_q) = existing_quality {
-                            if target_reached(&existing_q, &target_release) {
+                        if let Some(existing_q) = old_quality.as_ref() {
+                            if target_reached(existing_q, &target_release) {
                                 return false;
                             }
                         }
@@ -130,30 +122,18 @@ pub(crate) fn should_replace_slots(
                 // 没有阶梯时，分数只能比较两个已知质量。
                 match ladder_for(wash_filter) {
                     Some(ladder) => {
-                        let old_quality = existing.path.as_deref().and_then(|path| {
-                            let stored = facts.quality(path).cloned();
-                            let parsed = std::path::Path::new(path)
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .map(release::parse)
-                                .filter(|release| quality_known(release));
-                            match (stored, parsed) {
-                                (Some(mut stored), Some(parsed)) => {
-                                    stored.resolution = stored.resolution.or(parsed.resolution);
-                                    stored.source = stored.source.or(parsed.source);
-                                    stored.codec = stored.codec.or(parsed.codec);
-                                    stored.hdr = stored.hdr.or(parsed.hdr);
-                                    Some(stored)
-                                }
-                                (stored, parsed) => stored.or(parsed),
-                            }
-                        });
                         old_quality.is_some_and(|old| {
                             ladder_compare(&candidate.release, &old, &ladder)
                                 == Some(std::cmp::Ordering::Greater)
                         })
                     }
-                    None => candidate.score > existing.score,
+                    None => {
+                        if !old_quality.as_ref().is_some_and(quality_known) {
+                            tracing::warn!(path = ?existing.path, "已有质量未知，拒绝按分数批准 Wash-cut");
+                            return false;
+                        }
+                        candidate.score > existing.score
+                    }
                 }
             }
         })
@@ -242,7 +222,26 @@ fn ladder_for(wash_filter: Option<&domain::Filter>) -> Option<Vec<String>> {
     })
 }
 
-/// 按维度顺序比较新老版本：第一个分出胜负的维度决定结果，全部相等 → Equal。
+/// Probe/persisted dimensions win; a filename only fills absent dimensions.
+fn owned_quality(facts: &SubscribeFacts, path: &str) -> Option<Release> {
+    let stored = facts.quality(path).cloned();
+    let parsed = std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(release::parse)
+        .filter(quality_known);
+    match (stored, parsed) {
+        (Some(mut stored), Some(parsed)) => {
+            stored.resolution = stored.resolution.or(parsed.resolution);
+            stored.source = stored.source.or(parsed.source);
+            stored.codec = stored.codec.or(parsed.codec);
+            stored.hdr = stored.hdr.or(parsed.hdr);
+            Some(stored)
+        }
+        (stored, parsed) => stored.or(parsed),
+    }
+}
+
 fn quality_known(release: &Release) -> bool {
     release.resolution.is_some()
         || release.source.is_some()
@@ -250,11 +249,7 @@ fn quality_known(release: &Release) -> bool {
         || release.hdr.is_some()
 }
 
-fn ladder_compare(
-    new: &Release,
-    old: &Release,
-    ladder: &[String],
-) -> Option<std::cmp::Ordering> {
+fn ladder_compare(new: &Release, old: &Release, ladder: &[String]) -> Option<std::cmp::Ordering> {
     let mut result = std::cmp::Ordering::Equal;
     for dim in ladder {
         let (new_value, old_value, level): (_, _, fn(&str) -> i32) = match dim.as_str() {
@@ -271,7 +266,6 @@ fn ladder_compare(
                     result = ordering;
                 }
             }
-            (None, None) => {}
             _ => {
                 tracing::warn!(dimension = %dim, "Wash-cut 维度质量未知，不能据此批准替换");
                 return None;

@@ -104,7 +104,11 @@ fn tv_candidate_must_match_the_subscribed_episode_window() {
         id: domain::SubscribeId::new(),
         user_id: domain::UserId::new(),
         media_id: m.id,
-        coverage: Coverage::Tv { season: 1, episode_from: 2, episode_to: Some(3) },
+        coverage: Coverage::Tv {
+            season: 1,
+            episode_from: 2,
+            episode_to: Some(3),
+        },
         fetch_mode: domain::FetchMode::Search,
         filter_id: domain::FilterId::new(),
         wash_cut: false,
@@ -138,7 +142,11 @@ fn tv_subscribe(media_id: domain::MediaId) -> Subscribe {
         id: domain::SubscribeId::new(),
         user_id: domain::UserId::new(),
         media_id,
-        coverage: Coverage::Tv { season: 1, episode_from: 1, episode_to: Some(2) },
+        coverage: Coverage::Tv {
+            season: 1,
+            episode_from: 1,
+            episode_to: Some(2),
+        },
         fetch_mode: domain::FetchMode::Search,
         filter_id: domain::FilterId::new(),
         wash_cut: false,
@@ -265,19 +273,40 @@ fn unknown_source_blocks_resolution_first_destructive_wash_cut() {
     subscribe.keep_old_versions = false;
     let mut facts = SubscribeFacts::default();
     let owned_path = "/library/Test.Show.S01E01.1080p.mkv";
-    facts.replace(Some(1), Some(1), crate::QualityFact { score: 40, path: Some(owned_path.into()) });
+    facts.replace(
+        Some(1),
+        Some(1),
+        crate::QualityFact {
+            score: 40,
+            path: Some(owned_path.into()),
+        },
+    );
     let mut owned = release("Test.Show.S01E01.1080p");
     owned.resolution = Some("1080p".into());
     owned.source = None;
     facts.set_quality(owned_path.into(), owned);
-    let wash = domain::Filter::new(domain::FilterId::new(), "ladder", vec![domain::FilterAtom {
-        priority: 1, rule: domain::AtomRule::UpgradeLadder("resolution,source".into()), exclude: false,
-    }]);
+    let wash = domain::Filter::new(
+        domain::FilterId::new(),
+        "ladder",
+        vec![domain::FilterAtom {
+            priority: 1,
+            rule: domain::AtomRule::UpgradeLadder("resolution,source".into()),
+            exclude: false,
+        }],
+    );
     let mut candidate = scored("Test.Show.S01E01.2160p.BluRay", 1, 1, 40);
     candidate.release.resolution = Some("2160p".into());
     candidate.release.source = Some("bluray".into());
-    assert!(!should_replace_slots(&subscribe, Some(&wash), &facts, &candidate, &[(Some(1), Some(1))]),
-        "已有来源未知时，更高分辨率不能单独批准删除旧文件");
+    assert!(
+        !should_replace_slots(
+            &subscribe,
+            Some(&wash),
+            &facts,
+            &candidate,
+            &[(Some(1), Some(1))]
+        ),
+        "已有来源未知时，更高分辨率不能单独批准删除旧文件"
+    );
 }
 
 #[test]
@@ -286,22 +315,133 @@ fn unknown_quality_does_not_authorize_destructive_wash_cut() {
     subscribe.wash_cut = true;
     subscribe.keep_old_versions = false;
     let mut facts = SubscribeFacts::default();
-    facts.replace(Some(1), Some(1), crate::QualityFact {
-        score: 10, path: Some("/library/Show.S01E01.mkv".into()),
-    });
+    facts.replace(
+        Some(1),
+        Some(1),
+        crate::QualityFact {
+            score: 10,
+            path: Some("/library/Show.S01E01.mkv".into()),
+        },
+    );
     let mut candidate = scored("Show.S01E01.720p.HDTV", 1, 1, 80);
     candidate.release.resolution = Some("720p".into());
     candidate.release.source = Some("hdtv".into());
     candidate.release.codec = Some("x264".into());
-    let ladder = |raw: &str| domain::Filter::new(domain::FilterId::new(), "ladder", vec![
-        domain::FilterAtom { priority: 1, rule: domain::AtomRule::UpgradeLadder(raw.into()), exclude: false },
-    ]);
+    let ladder = |raw: &str| {
+        domain::Filter::new(
+            domain::FilterId::new(),
+            "ladder",
+            vec![domain::FilterAtom {
+                priority: 1,
+                rule: domain::AtomRule::UpgradeLadder(raw.into()),
+                exclude: false,
+            }],
+        )
+    };
     for raw in ["resolution", "codec", "hdr"] {
         assert!(
-            choose(&subscribe, Some(&ladder(raw)), std::slice::from_ref(&candidate), &facts).is_empty(),
+            choose(
+                &subscribe,
+                Some(&ladder(raw)),
+                std::slice::from_ref(&candidate),
+                &facts
+            )
+            .is_empty(),
             "{raw} 未知时不能批准破坏性替换"
         );
     }
+    assert!(
+        choose(&subscribe, None, std::slice::from_ref(&candidate), &facts).is_empty(),
+        "没有阶梯也不能用默认分数批准未知质量的删除"
+    );
+}
+
+#[test]
+fn both_unknown_ladder_dimension_blocks_later_resolution_upgrade() {
+    let mut subscribe = tv_subscribe(domain::MediaId::new());
+    subscribe.wash_cut = true;
+    let mut facts = SubscribeFacts::default();
+    let path = "/library/Show.S01E01.mkv";
+    facts.replace(
+        Some(1),
+        Some(1),
+        crate::QualityFact {
+            score: 10,
+            path: Some(path.into()),
+        },
+    );
+    let mut old = release("Show");
+    old.resolution = Some("720p".into());
+    facts.set_quality(path.into(), old);
+    let mut candidate = scored("Show.S01E01.1080p", 1, 1, 80);
+    candidate.release.resolution = Some("1080p".into());
+    let wash = domain::Filter::new(
+        domain::FilterId::new(),
+        "source first",
+        vec![domain::FilterAtom {
+            priority: 1,
+            rule: domain::AtomRule::UpgradeLadder("source,resolution".into()),
+            exclude: false,
+        }],
+    );
+    assert!(choose(&subscribe, Some(&wash), &[candidate], &facts).is_empty());
+}
+
+#[test]
+fn known_quality_score_upgrade_still_works_without_ladder() {
+    let mut subscribe = tv_subscribe(domain::MediaId::new());
+    subscribe.wash_cut = true;
+    let mut facts = SubscribeFacts::default();
+    let path = "/library/Show.S01E01.mkv";
+    facts.replace(
+        Some(1),
+        Some(1),
+        crate::QualityFact {
+            score: 10,
+            path: Some(path.into()),
+        },
+    );
+    let mut old = release("Show");
+    old.resolution = Some("720p".into());
+    facts.set_quality(path.into(), old);
+    let mut candidate = scored("Show.S01E01.1080p", 1, 1, 80);
+    candidate.release.resolution = Some("1080p".into());
+    assert_eq!(choose(&subscribe, None, &[candidate], &facts).len(), 1);
+}
+
+#[test]
+fn cutoff_and_ladder_share_filename_fallback_without_overwriting_probe() {
+    let mut subscribe = tv_subscribe(domain::MediaId::new());
+    subscribe.wash_cut = true;
+    let path = "/library/Show.S01E01.1080p.Remux.mkv";
+    let mut facts = SubscribeFacts::default();
+    facts.replace(
+        Some(1),
+        Some(1),
+        crate::QualityFact {
+            score: 10,
+            path: Some(path.into()),
+        },
+    );
+    let mut old = release("Show");
+    old.resolution = Some("2160p".into());
+    facts.set_quality(path.into(), old);
+    let mut candidate = scored("Show.S01E01.2160p.Remux", 1, 1, 80);
+    candidate.release.resolution = Some("2160p".into());
+    candidate.release.source = Some("remux".into());
+    let wash = domain::Filter::new(
+        domain::FilterId::new(),
+        "cutoff",
+        vec![domain::FilterAtom {
+            priority: 1,
+            rule: domain::AtomRule::WashTarget("2160p remux".into()),
+            exclude: false,
+        }],
+    );
+    assert!(
+        choose(&subscribe, Some(&wash), &[candidate], &facts).is_empty(),
+        "来源由文件名补全，探测分辨率优先；已达截止线不能按分数继续升级"
+    );
 }
 
 #[test]

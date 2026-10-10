@@ -18,6 +18,10 @@ fn wash_cut_replaces_only_when_score_strictly_greater() {
             path: Some(old_lib.display().to_string()),
         },
     );
+    facts.set_quality(
+        old_lib.display().to_string(),
+        release::parse("The.Matrix.1999.1080p.BluRay.x264"),
+    );
 
     let worse = torrent(
         "The.Matrix.1999.1080p.BluRay.x264-OLD",
@@ -53,6 +57,45 @@ fn wash_cut_replaces_only_when_score_strictly_greater() {
 }
 
 #[test]
+fn unknown_quality_keeps_old_file_and_never_submits_replacement() {
+    let tmp = tempfile::tempdir().unwrap();
+    let media = media_movie();
+    let filter = movie_filter();
+    let sub = movie_sub(&media, &filter, true);
+    let old = tmp.path().join("lib/unknown.mkv");
+    fs::create_dir_all(old.parent().unwrap()).unwrap();
+    fs::write(&old, b"owned bytes").unwrap();
+    let mut facts = SubscribeFacts::default();
+    facts.replace(
+        None,
+        None,
+        QualityFact {
+            score: 0,
+            path: Some(old.display().to_string()),
+        },
+    );
+    let candidate = torrent(
+        "The.Matrix.1999.2160p.BluRay.x265",
+        "https://pt.example/new",
+    );
+    let dl = MemoryDownloader::new(tmp.path().join("stage"));
+    let outcome = run(run_input(
+        &sub,
+        &media,
+        &filter,
+        vec![candidate],
+        facts,
+        &dl,
+        &tmp.path().join("lib"),
+    ))
+    .unwrap();
+    assert!(dl.added().is_empty());
+    assert_eq!(fs::read(&old).unwrap(), b"owned bytes");
+    assert!(outcome.removed_paths.is_empty());
+    assert_eq!(outcome.facts.movie().unwrap().path.as_deref(), old.to_str());
+}
+
+#[test]
 fn wash_cut_preserve_removed_keeps_old_file() {
     let tmp = tempfile::tempdir().unwrap();
     let media = media_movie();
@@ -69,6 +112,10 @@ fn wash_cut_preserve_removed_keeps_old_file() {
             score: 50,
             path: Some(old_lib.display().to_string()),
         },
+    );
+    facts.set_quality(
+        old_lib.display().to_string(),
+        release::parse("The.Matrix.1999.1080p.BluRay.x264"),
     );
     let better = torrent(
         "The.Matrix.1999.2160p.BluRay.x265-NEW",
@@ -181,6 +228,10 @@ fn wash_cut_keep_old_versions_keeps_both_files() {
             score: 50,
             path: Some(old_lib.display().to_string()),
         },
+    );
+    facts.set_quality(
+        old_lib.display().to_string(),
+        release::parse("The.Matrix.1999.1080p.BluRay.x264"),
     );
     let better = torrent(
         "The.Matrix.1999.2160p.BluRay.x265-NEW",

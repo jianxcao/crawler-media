@@ -135,7 +135,9 @@ async fn legacy_wash_cut_keeps_old_file_if_replacement_ledger_write_fails() {
     let created = json_data(response).await;
     let id: SubscribeId = created["id"].as_str().unwrap().parse().unwrap();
     let media_id: MediaId = created["media"]["id"].as_str().unwrap().parse().unwrap();
-    let old = tmp.path().join("old.mkv");
+    let root = state.store().lock().default_library(MediaKind::Movie).unwrap().unwrap().root_paths[0].clone();
+    std::fs::create_dir_all(&root).unwrap();
+    let old = root.join("old.mkv");
     std::fs::write(&old, b"owned old version").unwrap();
     let mut row = owned_row(media_id, &old);
     row.resolution = Some("720p".into());

@@ -77,11 +77,84 @@ fn fetched_login_form_challenge_and_unknown_page_never_authenticate() {
 }
 
 #[test]
+fn english_completed_and_already_completed_accept_normalized_whitespace() {
+    for body in [
+        "<div>Attendance successful</div>",
+        "<div>Check-in \n successful!</div>",
+        "<div>You have\t already attended.</div>",
+        "<div>Attendance <strong>successful</strong>!</div>",
+    ] {
+        let store = credentials(Some("uid=valid"));
+        let id = store.0.lock().unwrap().id;
+        let result = CheckInPlugin::http(&Bus::new(), &store, &Reply(body)).check_in(id);
+        assert!(result.is_ok(), "{body}: {result:?}");
+    }
+}
+
+#[test]
+fn split_negative_conditional_and_help_never_confirm_or_save_cookies() {
+    for body in [
+        "Set-Cookie: uid=unverified\n<div>未<span>签到成功</span></div>",
+        "<div>如果<span>签到成功</span>，会看到奖励。</div>",
+        "<div>如果<div>签到成功</div>会看到奖励。</div>",
+        "<div>签到成功后会显示奖励</div>",
+        "<div>签到成功！如果未获得奖励，请重试。</div>",
+        "<div>签到成功！表示您可以领取奖励。</div>",
+        "<div>签到成功！<span>这是帮助示例。</span></div>",
+        "<aside class='help'><div>签到成功</div></aside>",
+        "<div>帮助：<div>签到成功</div></div>",
+        "<div>If <span>Attendance successful</span>, a reward will show.</div>",
+        "<div>If <div>Attendance successful</div>, refresh this page.</div>",
+        "<div class='instructions'><p>You have already attended</p></div>",
+        "<div hidden>签到成功</div>",
+        "<div aria-hidden='true'><span>签到成功</span></div>",
+        "<div style='display: none'>签到成功</div>",
+        "<div style='visibility: hidden'>签到成功</div>",
+        "<style>签到成功</style><noscript>签到成功</noscript>",
+        "Set-Cookie: uid=unverified\n<div>签到<span>失败</span></div><div>签到成功</div>",
+        "<div>签到<div>失败</div></div><div>签到成功</div>",
+        "<span class='help'>签到成功</span>",
+        "<div>如果<span>签到成功</span>，获得 10 魔力</div>",
+        "<div>签到成功！<span>获得 10 魔力</span>，请阅读说明。</div>",
+        "<div>Check-in <span>failed</span></div><div>签到成功</div>",
+        "<div>签到成功！获得奖励请查看帮助。</div>",
+    ] {
+        let store = credentials(Some("uid=valid"));
+        let before = store.0.lock().unwrap().clone();
+        let result = CheckInPlugin::http(&Bus::new(), &store, &Reply(body)).check_in(before.id);
+        assert!(result.is_err(), "{body}");
+        assert_eq!(store.0.lock().unwrap().cookie, before.cookie, "{body}");
+    }
+}
+
+#[test]
+fn split_reward_confirmation_still_passes() {
+    for body in [
+        "<div>签到<span>成功</span>！获得 <b>10</b> 魔力</div>",
+        "<div>您今天已经<span>签到过了</span>！</div>",
+        "<div hidden>帮助：签到成功</div><div>签到成功！获得 10 魔力</div>",
+        "<main><div>签到成功！获得 10 魔力</div></main><footer><a>帮助</a></footer>",
+        "<main><div>Attendance successful</div></main><footer><a>Help</a></footer>",
+        "<main><div>签到成功</div><span>帮助</span></main>",
+        "<main><div>签到成功</div><a href='/help'>帮助</a></main>",
+    ] {
+        let store = credentials(Some("uid=valid"));
+        let id = store.0.lock().unwrap().id;
+        let result = CheckInPlugin::http(&Bus::new(), &store, &Reply(body)).check_in(id);
+        assert!(result.is_ok(), "{body}: {result:?}");
+    }
+}
+
+#[test]
 fn visible_success_with_reward_text_is_confirmed() {
     let store = credentials(Some("uid=valid"));
     let id = store.0.lock().unwrap().id;
     let reply = Reply("<html><div>签到成功！获得 10 魔力</div></html>");
-    assert!(CheckInPlugin::http(&Bus::new(), &store, &reply).check_in(id).is_ok());
+    assert!(
+        CheckInPlugin::http(&Bus::new(), &store, &reply)
+            .check_in(id)
+            .is_ok()
+    );
 }
 
 #[test]

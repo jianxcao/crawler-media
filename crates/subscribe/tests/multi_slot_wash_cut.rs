@@ -105,7 +105,7 @@ fn create_test_media_and_filter() -> (domain::Media, domain::Filter) {
             exclude: false,
         }],
         keep_old_versions: false,
-};
+    };
     (media, filter)
 }
 
@@ -184,6 +184,12 @@ fn wash_cut_does_not_delete_merged_file_still_referenced_by_other_slots() {
             },
         );
     }
+    // This test exercises a legitimate known-quality upgrade, not approval
+    // based on a default/unknown owned quality score.
+    facts.set_quality(
+        merged.display().to_string(),
+        release::parse("Test.Show.S01E01-E02.720p"),
+    );
     let e1 = domain::Torrent {
         id: None,
         site_id: domain::SiteId::new(),

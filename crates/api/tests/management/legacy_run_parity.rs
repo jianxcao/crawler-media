@@ -41,7 +41,7 @@ async fn legacy_run_uses_shared_keywords_and_wash_cut_ladder() {
             exclude: false,
         }],
         keep_old_versions: false,
-};
+    };
     store.insert_filter(&ladder).unwrap();
     let created = app
         .clone()
@@ -68,16 +68,7 @@ async fn legacy_run_uses_shared_keywords_and_wash_cut_ladder() {
     let created = json_body(created).await;
     let id = created["data"]["id"].as_str().unwrap();
     let subscribe_id = SubscribeId::from_str(id).unwrap();
-    let mut facts = subscribe::SubscribeFacts::default();
-    facts.upsert(
-        None,
-        None,
-        QualityFact {
-            score: 1,
-            path: Some("The.Matrix.1999.2160p.BluRay.x265-GROUP.mkv".into()),
-        },
-    );
-    store.save_subscribe_facts(subscribe_id, &facts).unwrap();
+    seed_owned_matrix(&store, subscribe_id);
 
     let run = app
         .oneshot(request(
@@ -107,6 +98,46 @@ async fn legacy_run_uses_shared_keywords_and_wash_cut_ladder() {
         downloader.added().is_empty(),
         "an equal quality release must not replace the existing file"
     );
+}
+
+fn seed_owned_matrix(store: &Store, id: SubscribeId) {
+    let library = store
+        .default_library(domain::MediaKind::Movie)
+        .unwrap()
+        .unwrap();
+    let path = library.root_paths[0].join("The.Matrix.1999.2160p.BluRay.x265-GROUP.mkv");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"owned").unwrap();
+    let subscribe = store.get_subscribe(id).unwrap().unwrap();
+    store
+        .insert_ledger(&domain::LedgerRow {
+            id: domain::LedgerId::new(),
+            media_id: subscribe.media_id,
+            path: path.display().to_string(),
+            season: None,
+            episode: None,
+            resolution: Some("2160p".into()),
+            codec: Some("hevc".into()),
+            hdr: None,
+            quality_source: domain::QualitySource::Probe,
+            confidence: domain::Confidence::High,
+            filter_score: Some(1),
+        })
+        .unwrap();
+    let mut facts = subscribe::SubscribeFacts::default();
+    facts.replace(
+        None,
+        None,
+        QualityFact {
+            score: 1,
+            path: Some(path.display().to_string()),
+        },
+    );
+    facts.set_quality(
+        path.display().to_string(),
+        release::parse("The.Matrix.1999.2160p.BluRay.x265"),
+    );
+    store.save_subscribe_facts(id, &facts).unwrap();
 }
 
 struct UrlRecorder(Arc<Mutex<Vec<String>>>);
