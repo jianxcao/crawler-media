@@ -289,16 +289,27 @@ export function ScrapeSettingsSection() {
             </Group>
             <Group label="Fanart.tv 扩展艺术图">
               <div className="space-y-2">
-                <label className="text-sub font-medium text-white/80">Fanart.tv API Key</label>
+                <div className="flex items-center justify-between">
+                  <label className="text-sub font-medium text-white/80">Fanart.tv API Key</label>
+                  {draft.fanart_api_key?.trim() ? (
+                    <span className="inline-flex items-center gap-1 rounded-full border border-sky-400/20 bg-sky-400/10 px-2 py-0.5 text-micro font-medium text-sky-400">
+                      使用自定义 Key
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2 py-0.5 text-micro font-medium text-emerald-400">
+                      系统内置 Key 就绪
+                    </span>
+                  )}
+                </div>
                 <input
                   type="password"
                   className={INPUT_CLASS}
-                  placeholder="例如 fanart_xxxxxxxxxxxxxxxxxxxx"
+                  placeholder="留空默认使用系统内置 Key（可填入专属 Key 覆盖）"
                   value={draft.fanart_api_key ?? ""}
                   onChange={(e) => set("fanart_api_key", e.target.value)}
                 />
                 <p className="text-caption text-white/40">
-                  电视剧用 TVDB id，电影用 TMDB id。留空则不下载 logo / thumb / banner / 季图。
+                  用于下载高清 logo / clearlogo / thumb / banner / 季海报等。电视剧使用 TVDB ID，电影使用 TMDB ID。留空自动使用系统内置公共 Key。
                 </p>
               </div>
             </Group>
