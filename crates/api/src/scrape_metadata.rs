@@ -227,7 +227,14 @@ pub(crate) fn scrape_tv_sidecars(
                 c.effective.fanart_api_key.clone(),
                 c.effective.fanart_language.clone(),
             ),
-            None => (true, true, true, "w300".to_string(), None, vec!["zh".into(), "en".into()]),
+            None => (
+                true,
+                true,
+                true,
+                "w300".to_string(),
+                Some(crate::scrape_config::DEFAULT_FANART_API_KEY.to_string()),
+                vec!["zh".into(), "en".into()],
+            ),
         };
 
     let matched_episodes = scrape_tv_episodes_and_nfos(
@@ -451,7 +458,11 @@ pub(crate) fn scrape_movie_fanart(
             c.effective.fanart_api_key.clone(),
             c.effective.fanart_language.clone(),
         ),
-        None => (true, None, vec!["zh".into(), "en".into()]),
+        None => (
+            true,
+            Some(crate::scrape_config::DEFAULT_FANART_API_KEY.to_string()),
+            vec!["zh".into(), "en".into()],
+        ),
     };
     if !mirror_images {
         return;

@@ -196,6 +196,8 @@ pub fn non_empty<'a>(value: &'a str, fallback: &'static str) -> &'a str {
     }
 }
 
+pub const DEFAULT_FANART_API_KEY: &str = "d2d31f9ecabea050fc7d68aa3146015f";
+
 /// Merge stored settings with defaults (empty = default).
 pub fn effective_of(setting: &ScrapeConfigSetting) -> EffectiveScrapeConfig {
     let language_priority = if setting.language_priority.is_empty() {
@@ -256,7 +258,8 @@ pub fn effective_of(setting: &ScrapeConfigSetting) -> EffectiveScrapeConfig {
             .as_deref()
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
-            .map(|s| s.to_string()),
+            .map(|s| s.to_string())
+            .or_else(|| Some(DEFAULT_FANART_API_KEY.to_string())),
         fanart_language: if setting.fanart_language.is_empty() {
             vec!["zh".into(), "en".into()]
         } else {
