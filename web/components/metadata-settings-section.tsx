@@ -17,6 +17,12 @@ import {
   type ProxySettings,
   type ProxyDomainDiagnostic,
 } from "@/lib/api/metadata";
+import {
+  getScrapeConfig,
+  saveScrapeConfig,
+  SCRAPE_DEFAULTS,
+  type ScrapeConfig,
+} from "@/lib/api/scrape";
 
 /**
  * 元数据源配置：TMDB Key 存 SQLite settings KV，保存后 catalog 客户端立即读取，
@@ -38,11 +44,17 @@ export function MetadataSettingsSection() {
   const [proxyTesting, setProxyTesting] = useState(false);
   const [diagnostics, setDiagnostics] = useState<ProxyDomainDiagnostic[] | null>(null);
   const [diagnosing, setDiagnosing] = useState(false);
+  const [scrapeConfig, setScrapeConfig] = useState<ScrapeConfig | null>(null);
+  const [fanartKeyInput, setFanartKeyInput] = useState("");
+  const [fanartBusy, setFanartBusy] = useState(false);
 
   const reload = useCallback(() => {
     void getMetadataSettings()
       .then(setSettings)
       .catch((error) => toast.error(`读取元数据设置失败：${(error as Error).message}`));
+    void getScrapeConfig()
+      .then(setScrapeConfig)
+      .catch((error) => toast.error(`读取刮削配置失败：${(error as Error).message}`));
     void getProxySettings()
       .then((res) => {
         setProxySettings(res);
@@ -194,6 +206,46 @@ export function MetadataSettingsSection() {
     }
   };
 
+  const saveFanartKey = async () => {
+    setFanartBusy(true);
+    try {
+      const current = scrapeConfig?.setting ?? SCRAPE_DEFAULTS;
+      const next = await saveScrapeConfig({
+        ...current,
+        fanart_api_key: fanartKeyInput.trim() ? fanartKeyInput.trim() : null,
+      });
+      setScrapeConfig(next);
+      setFanartKeyInput("");
+      toast.success(
+        fanartKeyInput.trim()
+          ? "Fanart.tv 自定义 Key 已保存并生效"
+          : "已切换为系统内置默认 Key",
+      );
+    } catch (error) {
+      toast.error(`保存 Fanart Key 失败：${(error as Error).message}`);
+    } finally {
+      setFanartBusy(false);
+    }
+  };
+
+  const clearFanartKey = async () => {
+    setFanartBusy(true);
+    try {
+      const current = scrapeConfig?.setting ?? SCRAPE_DEFAULTS;
+      const next = await saveScrapeConfig({
+        ...current,
+        fanart_api_key: null,
+      });
+      setScrapeConfig(next);
+      setFanartKeyInput("");
+      toast.success("已清除自定义 Key，恢复系统内置默认 Key");
+    } catch (error) {
+      toast.error(`清除 Fanart Key 失败：${(error as Error).message}`);
+    } finally {
+      setFanartBusy(false);
+    }
+  };
+
   if (!settings) {
     return (
       <div className="flex items-center justify-center gap-2 py-14 text-ui text-[var(--text-muted)]">
@@ -269,6 +321,74 @@ export function MetadataSettingsSection() {
             {settings.tmdb.configured && (
               <button type="button" disabled={busy} onClick={() => void clear()} className="btn-glass px-4 py-2 text-ui font-medium text-[#ffaaaa] disabled:opacity-50">
                 清除 Key
+              </button>
+            )}
+          </div>
+        </div>
+      </section>
+
+      <section id="fanart">
+        <h3 className="group-label mb-2.5 px-1">Fanart.tv 扩展艺术图</h3>
+        <div className="css-glass rounded-2xl p-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-body font-semibold">Fanart.tv API Key</p>
+              <p className="mt-1 text-sub text-[var(--text-muted)]">
+                {scrapeConfig?.setting.fanart_api_key?.trim()
+                  ? "使用自定义 Key（已生效）"
+                  : "使用系统内置默认公共 Key（开箱即用）"}
+              </p>
+            </div>
+            <span
+              className={`rounded-full px-2.5 py-1 text-caption font-semibold ${
+                scrapeConfig?.setting.fanart_api_key?.trim()
+                  ? "bg-sky-400/15 text-sky-400"
+                  : "bg-[var(--ok)]/15 text-[var(--ok)]"
+              }`}
+            >
+              {scrapeConfig?.setting.fanart_api_key?.trim() ? "自定义 Key" : "系统内置就绪"}
+            </span>
+          </div>
+
+          <label className="mt-5 block">
+            <span className="mb-1.5 flex items-center gap-1.5 text-sub font-medium text-[var(--text-muted)]">
+              <GearIcon className="size-3.5" />
+              API Key
+            </span>
+            <input
+              type="password"
+              value={fanartKeyInput}
+              onChange={(e) => setFanartKeyInput(e.target.value)}
+              placeholder={
+                scrapeConfig?.setting.fanart_api_key?.trim()
+                  ? "填写新 Key 以替换当前配置"
+                  : "留空使用系统内置 Key，亦可填入专属 Key 覆盖"
+              }
+              autoComplete="off"
+              className="glass-input w-full px-3 py-2.5 font-mono text-ui"
+            />
+          </label>
+          <p className="mt-2 text-caption text-[var(--text-muted)]">
+            用于下载高清 Logo、ClearLogo、Banner、Thumb 和季海报等。电视剧使用 TVDB ID，电影使用 TMDB ID。
+          </p>
+
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={fanartBusy || !fanartKeyInput.trim()}
+              onClick={() => void saveFanartKey()}
+              className="btn-accent px-4 py-2 text-ui font-semibold disabled:opacity-50"
+            >
+              {fanartBusy ? "保存中…" : "保存 Key"}
+            </button>
+            {scrapeConfig?.setting.fanart_api_key?.trim() && (
+              <button
+                type="button"
+                disabled={fanartBusy}
+                onClick={() => void clearFanartKey()}
+                className="btn-glass px-4 py-2 text-ui font-medium text-[#ffaaaa] disabled:opacity-50"
+              >
+                恢复系统内置 Key
               </button>
             )}
           </div>
