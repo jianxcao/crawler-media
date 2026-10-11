@@ -3,13 +3,7 @@ use std::io::{self, Error, ErrorKind};
 use std::path::Path;
 use tracing::info;
 
-use crate::nfo::NfoMeta;
-
-fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
+use crate::nfo::{NfoMeta, xml_escape};
 
 pub fn write_season_nfo(path: &Path, meta: &NfoMeta) -> io::Result<()> {
     if path.is_file() {
@@ -28,19 +22,19 @@ pub fn write_season_nfo(path: &Path, meta: &NfoMeta) -> io::Result<()> {
 
     if let Some(ref title) = meta.title {
         if !title.is_empty() {
-            body.push_str(&format!("  <title>{}</title>\n", escape_xml(title)));
+            body.push_str(&format!("  <title>{}</title>\n", xml_escape(title)));
         }
     }
 
     if let Some(ref plot) = meta.plot {
         if !plot.is_empty() {
-            body.push_str(&format!("  <plot>{}</plot>\n", escape_xml(plot)));
+            body.push_str(&format!("  <plot>{}</plot>\n", xml_escape(plot)));
         }
     }
 
     if let Some(ref premiered) = meta.premiered {
         if !premiered.is_empty() {
-            body.push_str(&format!("  <premiered>{}</premiered>\n", escape_xml(premiered)));
+            body.push_str(&format!("  <premiered>{}</premiered>\n", xml_escape(premiered)));
             if premiered.len() >= 4 {
                 if let Ok(year) = premiered[0..4].parse::<u16>() {
                     body.push_str(&format!("  <year>{}</year>\n", year));
@@ -55,7 +49,7 @@ pub fn write_season_nfo(path: &Path, meta: &NfoMeta) -> io::Result<()> {
 
     if let Some(ref thumb) = meta.thumb {
         if !thumb.is_empty() {
-            body.push_str(&format!("  <thumb>{}</thumb>\n", escape_xml(thumb)));
+            body.push_str(&format!("  <thumb>{}</thumb>\n", xml_escape(thumb)));
         }
     }
 

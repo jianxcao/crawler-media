@@ -127,7 +127,12 @@ pub(crate) fn write_series_nfos(
                 continue;
             };
             let path = Path::new(&row.path).with_extension("nfo");
-            let still_path = episode.still_path.clone();
+            let mut still_path = episode.still_path.clone();
+            if still_path.is_none() {
+                if let Ok(stills) = catalog.episode_stills(tmdb_id, season, episode_number) {
+                    still_path = stills.into_iter().next();
+                }
+            }
             write_nfo(&path, media, &nfo_from_episode(row, episode));
             matched_episodes.push((PathBuf::from(&row.path), still_path));
         }
@@ -210,6 +215,7 @@ pub(crate) fn scrape_tv_sidecars(
     let Some(tmdb_id) = media.tmdb_id.as_deref() else {
         return;
     };
+    tracing::info!(media = %media.title, "开始电视剧刮削与附属文件处理");
     let scrape_config = state.store.lock().get_scrape_config().ok();
     let (mirror_nfo, mirror_thumbs, mirror_images, still_size, fanart_api_key, fanart_lang) =
         match scrape_config {
@@ -224,6 +230,35 @@ pub(crate) fn scrape_tv_sidecars(
             None => (true, true, true, "w300".to_string(), None, vec!["zh".into(), "en".into()]),
         };
 
+    let matched_episodes = scrape_tv_episodes_and_nfos(
+        state,
+        media,
+        tmdb_id,
+        show_root,
+        rows,
+        mirror_nfo,
+    );
+
+    if mirror_thumbs {
+        scrape_tv_stills(state, matched_episodes, &still_size);
+    }
+
+    if mirror_images {
+        if let Some(ref api_key) = fanart_api_key {
+            scrape_tv_fanart(state, media, show_root, rows, api_key, &fanart_lang);
+        }
+    }
+    tracing::info!(media = %media.title, "完成电视剧刮削与附属文件处理");
+}
+
+fn scrape_tv_episodes_and_nfos(
+    state: &crate::management::ApiState,
+    media: &Media,
+    tmdb_id: &str,
+    show_root: &Path,
+    rows: &[LedgerRow],
+    mirror_nfo: bool,
+) -> Vec<(PathBuf, Option<String>)> {
     let tmdb_meta = fetch_tmdb_metadata(state, media.kind, tmdb_id).ok().flatten();
     let show_nfo = tmdb_meta.as_ref().map(|meta| nfo_from_tmdb(media, meta)).unwrap_or_default();
     let preferred_lang = preferred_language(state);
@@ -253,8 +288,8 @@ pub(crate) fn scrape_tv_sidecars(
         })
         .collect();
 
-    let matched_episodes = if mirror_nfo {
-        let ep_matches = write_series_nfos(
+    if mirror_nfo {
+        let mut ep_matches = write_series_nfos(
             state.catalog.as_ref(),
             media,
             tmdb_id,
@@ -264,107 +299,190 @@ pub(crate) fn scrape_tv_sidecars(
             &preferred_lang,
         );
         crate::fanart_artwork::write_season_nfos(show_root, rows, &season_artworks);
+        for row in rows {
+            let row_path = PathBuf::from(&row.path);
+            if !ep_matches.iter().any(|(p, _)| p == &row_path) {
+                let still_path = row.season.zip(row.episode).and_then(|(s, e)| {
+                    state
+                        .catalog
+                        .episode_stills(tmdb_id, s, e)
+                        .ok()
+                        .and_then(|mut v| v.drain(..).next())
+                });
+                ep_matches.push((row_path, still_path));
+            }
+        }
         ep_matches
     } else {
         let mut ep_matches = Vec::new();
         for season in &owned_seasons {
-            if let Ok(episodes) = state.catalog.season_details(tmdb_id, *season) {
-                for row in rows.iter().filter(|r| r.season == Some(*season)) {
-                    if let Some(ep_num) = row.episode {
-                        if let Some(ep) = episodes.iter().find(|e| e.episode_number == ep_num) {
-                            ep_matches.push((PathBuf::from(&row.path), ep.still_path.clone()));
+            let episodes = state.catalog.season_details(tmdb_id, *season).unwrap_or_default();
+            for row in rows.iter().filter(|r| r.season == Some(*season)) {
+                if let Some(ep_num) = row.episode {
+                    let mut still_path = episodes
+                        .iter()
+                        .find(|e| e.episode_number == ep_num)
+                        .and_then(|ep| ep.still_path.clone());
+                    if still_path.is_none() {
+                        if let Ok(stills) = state.catalog.episode_stills(tmdb_id, *season, ep_num) {
+                            still_path = stills.into_iter().next();
                         }
                     }
+                    ep_matches.push((PathBuf::from(&row.path), still_path));
                 }
             }
         }
         ep_matches
+    }
+}
+
+fn scrape_tv_stills(
+    state: &crate::management::ApiState,
+    matched_episodes: Vec<(PathBuf, Option<String>)>,
+    still_size: &str,
+) {
+    let is_allowed = |path: &Path| -> bool {
+        let store = state.store.lock();
+        if let Ok(libraries) = store.list_libraries() {
+            libraries
+                .into_iter()
+                .filter(|lib| lib.root_paths.iter().any(|r| path.starts_with(r)))
+                .max_by_key(|lib| {
+                    lib.root_paths
+                        .iter()
+                        .filter(|r| path.starts_with(r))
+                        .map(|r| r.components().count())
+                        .max()
+                        .unwrap_or(0)
+                })
+                .map(|lib| lib.generate_thumbnails)
+                .unwrap_or(true)
+        } else {
+            true
+        }
     };
 
-    if mirror_thumbs {
-        let is_allowed = |path: &Path| -> bool {
-            let store = state.store.lock();
-            if let Ok(libraries) = store.list_libraries() {
-                libraries
-                    .into_iter()
-                    .filter(|lib| lib.root_paths.iter().any(|r| path.starts_with(r)))
-                    .max_by_key(|lib| {
-                        lib.root_paths
-                            .iter()
-                            .filter(|r| path.starts_with(r))
-                            .map(|r| r.components().count())
-                            .max()
-                            .unwrap_or(0)
-                    })
-                    .map(|lib| lib.generate_thumbnails)
-                    .unwrap_or(true)
-            } else {
-                true
-            }
-        };
-
-        for (ep_path, still_path) in matched_episodes {
-            let ok = crate::fanart_artwork::mirror_episode_still(
-                state.poster_fetch.as_ref(),
-                &ep_path,
-                still_path.as_deref(),
-                &still_size,
-            );
-            if !ok && is_allowed(&ep_path) {
-                if crate::episode_still::existing(&ep_path).is_none() {
-                    let still_dest = crate::episode_still::path(&ep_path);
-                    if let Err(err) = library::extract_frame(&ep_path, 60_000, &still_dest) {
-                        tracing::warn!(error = %err, path = %ep_path.display(), "ffmpeg 抽取剧照失败");
-                    }
+    for (ep_path, still_path) in matched_episodes {
+        let ok = crate::fanart_artwork::mirror_episode_still(
+            state.poster_fetch.as_ref(),
+            &ep_path,
+            still_path.as_deref(),
+            still_size,
+        );
+        if !ok && is_allowed(&ep_path) {
+            if crate::episode_still::existing(&ep_path).is_none() {
+                let still_dest = crate::episode_still::path(&ep_path);
+                if let Err(err) = library::extract_frame(&ep_path, 60_000, &still_dest) {
+                    tracing::warn!(error = %err, path = %ep_path.display(), "ffmpeg 抽取剧照失败");
                 }
             }
         }
     }
+}
 
-    if mirror_images {
-        if let Some(ref api_key) = fanart_api_key {
-            let tvdb_id = match media.tvdb_id.clone() {
-                Some(id) if !id.is_empty() => Some(id),
-                _ => match state.catalog.tvdb_id(tmdb_id) {
-                    Ok(Some(id)) if !id.is_empty() => {
-                        let mut updated = media.clone();
-                        updated.tvdb_id = Some(id.clone());
-                        let _ = state.store.lock().update_media(&updated);
-                        Some(id)
-                    }
-                    _ => None,
-                },
-            };
-
-            if let Some(tvdb_id) = tvdb_id {
-                let getter = PosterFetchCatalogGet {
-                    fetch: state.poster_fetch.as_ref(),
-                };
-                let fanart_db = state.store.lock().data_dir().join("fanart.db");
-                match media::fanart::FanartClient::new(getter, &fanart_db, api_key) {
-                    Ok(client) => {
-                        let lang_refs: Vec<&str> = fanart_lang.iter().map(|s| s.as_str()).collect();
-                        match client.tv(&tvdb_id, &lang_refs) {
-                            Ok(set) => {
-                                crate::fanart_artwork::save_fanart_files(
-                                    state.poster_fetch.as_ref(),
-                                    show_root,
-                                    rows,
-                                    &set,
-                                );
-                            }
-                            Err(error) => {
-                                tracing::warn!(%error, %tvdb_id, "请求 Fanart.tv 失败");
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "初始化 FanartClient 失败");
-                    }
-                }
-            } else {
-                tracing::info!(media = %media.title, "缺少 tvdb_id，跳过 Fanart.tv 抓取");
+fn scrape_tv_fanart(
+    state: &crate::management::ApiState,
+    media: &Media,
+    show_root: &Path,
+    rows: &[LedgerRow],
+    api_key: &str,
+    fanart_lang: &[String],
+) {
+    let Some(tmdb_id) = media.tmdb_id.as_deref() else {
+        return;
+    };
+    let tvdb_id = match media.tvdb_id.clone() {
+        Some(id) if !id.is_empty() => Some(id),
+        _ => match state.catalog.tvdb_id(tmdb_id) {
+            Ok(Some(id)) if !id.is_empty() => {
+                let mut updated = media.clone();
+                updated.tvdb_id = Some(id.clone());
+                let _ = state.store.lock().update_media(&updated);
+                Some(id)
             }
+            _ => None,
+        },
+    };
+
+    let Some(tvdb_id) = tvdb_id else {
+        tracing::info!(media = %media.title, "缺少 tvdb_id，跳过 Fanart.tv 抓取");
+        return;
+    };
+
+    let getter = PosterFetchCatalogGet {
+        fetch: state.poster_fetch.as_ref(),
+    };
+    let fanart_db = state.store.lock().data_dir().join("fanart.db");
+    match media::fanart::FanartClient::new(getter, &fanart_db, api_key) {
+        Ok(client) => {
+            let lang_refs: Vec<&str> = fanart_lang.iter().map(|s| s.as_str()).collect();
+            match client.tv(&tvdb_id, &lang_refs) {
+                Ok(set) => {
+                    crate::fanart_artwork::save_fanart_files(
+                        state.poster_fetch.as_ref(),
+                        show_root,
+                        rows,
+                        &set,
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(%error, %tvdb_id, "请求 Fanart.tv 失败");
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "初始化 FanartClient 失败");
+        }
+    }
+}
+
+pub(crate) fn scrape_movie_fanart(
+    state: &crate::management::ApiState,
+    media: &Media,
+    movie_root: &Path,
+) {
+    let Some(tmdb_id) = media.tmdb_id.as_deref() else {
+        return;
+    };
+    let scrape_config = state.store.lock().get_scrape_config().ok();
+    let (mirror_images, fanart_api_key, fanart_lang) = match scrape_config {
+        Some(ref c) => (
+            c.effective.mirror_images,
+            c.effective.fanart_api_key.clone(),
+            c.effective.fanart_language.clone(),
+        ),
+        None => (true, None, vec!["zh".into(), "en".into()]),
+    };
+    if !mirror_images {
+        return;
+    }
+    let Some(api_key) = fanart_api_key else {
+        return;
+    };
+
+    let getter = PosterFetchCatalogGet {
+        fetch: state.poster_fetch.as_ref(),
+    };
+    let fanart_db = state.store.lock().data_dir().join("fanart.db");
+    match media::fanart::FanartClient::new(getter, &fanart_db, &api_key) {
+        Ok(client) => {
+            let lang_refs: Vec<&str> = fanart_lang.iter().map(|s| s.as_str()).collect();
+            match client.movie(tmdb_id, &lang_refs) {
+                Ok(set) => {
+                    crate::fanart_artwork::save_fanart_files(
+                        state.poster_fetch.as_ref(),
+                        movie_root,
+                        &[],
+                        &set,
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(%error, %tmdb_id, "请求电影 Fanart.tv 失败");
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "初始化 FanartClient 失败");
         }
     }
 }

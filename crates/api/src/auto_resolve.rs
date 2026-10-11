@@ -158,6 +158,8 @@ fn write_auto_resolved_nfo(state: &ApiState, media: &Media, sample_path: &std::p
                 }
             }
         }
+        let movie_root = sample_path.parent().unwrap_or(sample_path);
+        crate::scrape_metadata::scrape_movie_fanart(state, media, movie_root);
     }
 }
 

@@ -282,6 +282,8 @@ pub(crate) async fn refresh_item_metadata(
                 } else if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
                     let target = path.with_file_name(format!("{stem}.nfo"));
                     crate::scrape_metadata::write_nfo(&target, &media, &nfo);
+                    let movie_root = path.parent().unwrap_or(&path);
+                    crate::scrape_metadata::scrape_movie_fanart(&state, &media, movie_root);
                 }
             }
             Ok(None) => {

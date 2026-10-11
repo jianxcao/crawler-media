@@ -369,43 +369,12 @@ pub(crate) async fn refresh_metadata(
             work.push((media, row.clone()));
         }
     }
-    let still_mirror = {
-        let config = store.get_scrape_config().ok();
-        config
-            .as_ref()
-            .map(|c| c.effective.mirror_episode_thumbs)
-            .unwrap_or(true)
-    };
     drop(store);
     let mut refreshed = 0u32;
     for (media, row) in work {
         let path = PathBuf::from(&row.path);
         if crate::poster_fetch::attach_poster(&state, &media, &path).is_some() {
             refreshed += 1;
-        }
-        // 分集剧照按视频文件命名，同一目录的多集不会共用图片。
-        if media.kind == domain::MediaKind::Tv && still_mirror {
-            if let Some(tmdb_id) = media.tmdb_id.clone() {
-                for row in owned_rows.iter().filter(|r| r.media_id == media.id) {
-                    let Some(season) = row.season else { continue };
-                    let Some(episode) = row.episode else { continue };
-                    let still_path = crate::episode_still::path(std::path::Path::new(&row.path));
-                    if still_path.is_file() {
-                        continue;
-                    }
-                    if let Ok(paths) = state.catalog.episode_stills(&tmdb_id, season, episode) {
-                        if let Some(file_path) = paths.first() {
-                            let size = still_size(&state, &still_mirror);
-                            let url = format!("https://image.tmdb.org/t/p/{size}{file_path}");
-                            if let Ok(bytes) = state.poster_fetch.get(&url) {
-                                if !bytes.is_empty() {
-                                    let _ = std::fs::write(&still_path, &bytes);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
         }
         let _ = crate::poster_fetch::force_attach_backdrop(&state, &media, &path);
         // TMDB 详情 + 演职员写入 NFO（无 NFO 时也补一份），供条目详情页读取。
@@ -426,25 +395,29 @@ fn scrape_library_metadata(
     let Some(tmdb_id) = media.tmdb_id.as_deref() else {
         return;
     };
+    if media.kind == domain::MediaKind::Tv {
+        let show_root = crate::scrape_metadata::show_root(path, row);
+        let episodes = owned_rows
+            .iter()
+            .filter(|episode| episode.media_id == media.id)
+            .cloned()
+            .collect::<Vec<_>>();
+        crate::scrape_metadata::scrape_tv_sidecars(
+            state,
+            media,
+            &show_root,
+            &episodes,
+        );
+        return;
+    }
     match crate::scrape_metadata::fetch_tmdb_metadata(state, media.kind, tmdb_id) {
         Ok(Some(metadata)) => {
             let nfo = crate::scrape_metadata::nfo_from_tmdb(media, &metadata);
-            if media.kind == domain::MediaKind::Tv {
-                let show_root = crate::scrape_metadata::show_root(path, row);
-                let episodes = owned_rows
-                    .iter()
-                    .filter(|episode| episode.media_id == media.id)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                crate::scrape_metadata::scrape_tv_sidecars(
-                    state,
-                    media,
-                    &show_root,
-                    &episodes,
-                );
-            } else if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
+            if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
                 let target = path.with_file_name(format!("{stem}.nfo"));
                 crate::scrape_metadata::write_nfo(&target, media, &nfo);
+                let movie_root = path.parent().unwrap_or(path);
+                crate::scrape_metadata::scrape_movie_fanart(state, media, movie_root);
             }
         }
         Ok(None) => {
@@ -452,17 +425,6 @@ fn scrape_library_metadata(
         }
         Err(error) => tracing::warn!(%error, %tmdb_id, "failed to scrape library metadata"),
     }
-}
-
-fn still_size(state: &ApiState, _mirror: &bool) -> String {
-    state
-        .store
-        .lock()
-        .get_scrape_config()
-        .ok()
-        .map(|c| c.effective.still_size)
-        .filter(|size| !size.is_empty())
-        .unwrap_or_else(|| "w300".into())
 }
 
 /// GET /libraries/{id}/missing — missing files in this library on disk.

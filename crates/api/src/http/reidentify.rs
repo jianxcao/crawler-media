@@ -170,6 +170,8 @@ pub(crate) async fn reidentify(State(state): State<ApiState>, Json(body): Json<V
                             {
                                 let nfo_path = path.with_file_name(format!("{stem}.nfo"));
                                 crate::scrape_metadata::write_nfo(&nfo_path, &target, &nfo);
+                                let movie_root = path.parent().unwrap_or(&path);
+                                crate::scrape_metadata::scrape_movie_fanart(&state, &target, movie_root);
                             }
                         }
                         Ok(None) => {
