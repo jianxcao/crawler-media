@@ -1,5 +1,6 @@
 use super::fs_watcher::{
-    entry_scan_target_dir, realtime_library_root_for_path, FsWatcherSession, FsWatcherState,
+    entry_scan_target_dir, is_relevant_media_entry, realtime_library_root_for_path,
+    FsWatcherSession, FsWatcherState,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -286,4 +287,67 @@ fn test_config_error_preserves_active_set() {
         "配置查询失败时已有监听集合必须完整保留"
     );
     assert_eq!(watcher.unwatch_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn is_relevant_media_entry_whitelists_only_videos_strm_and_directories() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("Season 1");
+    std::fs::create_dir(&dir).unwrap();
+    assert!(is_relevant_media_entry(&dir));
+
+    let video_strm = tmp.path().join("episode.strm");
+    std::fs::write(&video_strm, b"https://cdn.example/video").unwrap();
+    assert!(is_relevant_media_entry(&video_strm));
+
+    let video_mkv = tmp.path().join("movie.mkv");
+    std::fs::write(&video_mkv, b"video").unwrap();
+    assert!(is_relevant_media_entry(&video_mkv));
+
+    let video_mp4 = tmp.path().join("movie.mp4");
+    std::fs::write(&video_mp4, b"video").unwrap();
+    assert!(is_relevant_media_entry(&video_mp4));
+
+    let video_ts = tmp.path().join("stream.ts");
+    std::fs::write(&video_ts, b"video").unwrap();
+    assert!(is_relevant_media_entry(&video_ts));
+
+    // Non-video files must be rejected:
+    for non_video in [
+        "movie.nfo",
+        "season.nfo",
+        "fanart.jpg",
+        "poster.png",
+        "still.webp",
+        "README.txt",
+        "subtitles.srt",
+        "subtitles.ass",
+        "metadata.xml",
+        "info.json",
+        "download.torrent",
+        "temp.part",
+        "file.tmp",
+    ] {
+        let path = tmp.path().join(non_video);
+        std::fs::write(&path, b"data").unwrap();
+        assert!(
+            !is_relevant_media_entry(&path),
+            "{non_video} 必须被非媒体白名单过滤掉"
+        );
+    }
+
+    // For non-existent (deleted) paths:
+    // Video / STRM files are recognized as relevant for deletion cleanup:
+    assert!(is_relevant_media_entry(&tmp.path().join("deleted.strm")));
+    assert!(is_relevant_media_entry(&tmp.path().join("deleted.mkv")));
+    assert!(is_relevant_media_entry(&tmp.path().join("deleted.mp4")));
+
+    // Directory without extension is recognized:
+    assert!(is_relevant_media_entry(&tmp.path().join("DeletedFolder")));
+
+    // Non-video sidecars that are deleted are safely skipped without ledger traversal:
+    assert!(!is_relevant_media_entry(&tmp.path().join("deleted.jpg")));
+    assert!(!is_relevant_media_entry(&tmp.path().join("deleted.nfo")));
+    assert!(!is_relevant_media_entry(&tmp.path().join("deleted.txt")));
+    assert!(!is_relevant_media_entry(&tmp.path().join("deleted.srt")));
 }

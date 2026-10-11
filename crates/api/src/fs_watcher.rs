@@ -344,6 +344,18 @@ fn is_ignored_filesystem_metadata(path: &Path) -> bool {
     })
 }
 
+/// 检查文件系统变动路径是否为媒体库关注的目标（视频文件、STRM 或目录）。
+/// 仅允许视频/STRM格式或目录变动向下传递，彻底屏蔽图片、NFO、字幕、文本、临时文件等非媒体侧车变动，
+/// 防止刮削与元数据写入引发死循环，并统一使用完整的视频格式白名单。
+pub(crate) fn is_relevant_media_entry(path: &Path) -> bool {
+    if path.exists() {
+        path.is_dir() || library::is_video_file(path)
+    } else {
+        // 对于已删除条目：无扩展名可能是目录；若有扩展名则必须是受支持的视频/STRM格式
+        path.extension().is_none() || library::is_video_file(path)
+    }
+}
+
 pub fn handle_fs_events(
     state: &ApiState,
     tracker: &Arc<StrmGraceTracker>,
@@ -358,25 +370,15 @@ pub fn handle_fs_events(
 
     for event in events {
         let path = event.path;
+        if !is_relevant_media_entry(&path) {
+            continue;
+        }
         tracing::debug!(path = %path.display(), exists = path.exists(), "处理文件系统事件路径");
         let is_strm = path
             .extension()
             .and_then(|ext| ext.to_str())
             .map(|ext| ext.eq_ignore_ascii_case("strm"))
             .unwrap_or(false);
-
-        // 忽略 sidecars 侧车文件的写入变动（.nfo, .jpg, .png, .nfo.xml 等），防止刮削自激死循环
-        let ext = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or_default()
-            .to_lowercase();
-        if matches!(
-            ext.as_str(),
-            "nfo" | "jpg" | "jpeg" | "png" | "webp" | "xml" | "txt" | "srt" | "ass"
-        ) {
-            continue;
-        }
 
         if !path.exists() {
             note_removed_path(state, tracker, &path, is_strm, now);
@@ -513,8 +515,7 @@ fn note_present_path(
         }
         return;
     }
-    let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or_default().to_lowercase();
-    if matches!(ext.as_str(), "mkv" | "mp4" | "ts" | "mov" | "avi" | "iso") {
+    if library::is_video_file(path) {
         *intake_changed = true;
         if let Some(root) = realtime_library_root_for_path(state, path) {
             let target_dir = entry_scan_target_dir(&root, path);

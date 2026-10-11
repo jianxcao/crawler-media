@@ -39,7 +39,8 @@ pub use tracks::{
     probe_tracks, probe_tracks_and_duration,
 };
 pub use watch::{
-    FileError, TransferredFile, Unidentified, WatchJob, WatchKind, WatchOutcome, scan_watch,
+    FileError, TransferredFile, Unidentified, VIDEO_EXTENSIONS, WatchJob, WatchKind, WatchOutcome,
+    is_video_file, scan_watch,
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransferMode {
