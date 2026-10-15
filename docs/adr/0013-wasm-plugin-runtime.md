@@ -27,3 +27,9 @@ WASM 站点适配器仅用于 YAML 无法表达的站点。
 
 后果：新增 plugin-api / plugin-host crate 与 wasmtime 依赖（编译体积/时间增加）；
 Bus::emit 失败语义变更；v1 不支持 wasm 线程与 memory64。
+r3 补充：同步调用约束以正向 thread-local 标记判定（不使用 Handle::try_current），release 构建同样检查；
+PluginHost 按 provider/hook/task/notify 分池、有界队列满即 busy，禁止插件经宿主导入重入插件。
+出站网络统一经 net-guard：解析即校验即连接（防 DNS rebinding）、拒绝私网/回环/链路本地/元数据
+（含 IPv4-mapped/NAT64/6to4）、逐跳重定向校验；私网仅能由 Admin 在具体站点/下载器实例上授权；
+插件提供的 .torrent URL 由宿主下载后以文件提交下载器，通知图片由宿主拉取（防二级 SSRF）。
+现有 image_proxy 迁移到 net-guard。
