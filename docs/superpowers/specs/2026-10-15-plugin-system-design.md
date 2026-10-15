@@ -1,6 +1,6 @@
 # crawler-media 插件系统设计（草案）
 
-> 状态：草案 r4（在 r3 基础上按第三轮审核 `plugin-design-review-r3.md` 修订，见 §17.2）｜基线：`d6ae414`，ureq 锁定 `3.4.1`｜基线：`main`｜参考：MoviePilot 插件体系
+> 状态：草案 r5（在 r4 基础上按第五轮审核 `plugin-design-review-r5.md` @ `f330765` 修订，见 §17.3）｜基线：`d6ae414`，ureq 锁定 `3.4.1`｜基线：`main`｜参考：MoviePilot 插件体系
 > 目标：在不破坏 ADR-0002 "Hook 是工作流扩展点" 原则的前提下，引入可由第三方编写、分发的**隔离插件运行时**。
 
 ## 0. 现状（基于实际代码）
@@ -97,7 +97,7 @@ api                    插件管理 HTTP API、配置表单 Schema、AppState �
 | `subscribe.search` | Gate | `management/subscribes/run.rs` 每次订阅搜索开始 | 订阅、facts | skip 本轮 |
 | `subscribe.score` | Filter | `subscribe/src/add.rs::admit_and_add` 中 `filter::admit` 之后、`choose` 之前 | `ScoredTorrent` 视图 | rescore/drop |
 | `subscribe.select` | Filter+Gate | `add.rs` 现 `emit(Step::ChooseTorrent)` 处（`choose` 之后） | chosen 列表 | 替换/删除选择、deny |
-| `download.before` | Gate+Filter | `add.rs` 现 `emit(Step::AddDownload)` 处 | 单个种子、目标下载器、标签/目录 | deny、patch(标签/分类/保存路径子目录/暂停) |
+| `download.before` | Gate+Filter | **仅** `DownloadService::submit_blocking`（`api` crate，实现 `downloader::DownloadSubmitter`）；订阅 `add.rs`、手动 `submission.rs`、`admit.rs` 三条路径都经它，Gate 只触发一次（P5-H1） | 单个种子、目标下载器、标签/目录 | deny、patch(标签/分类/保存路径子目录/暂停) |
 | `download.after` | Notify | `downloader.add` 成功/失败后 | 种子、结果 | — |
 | `transfer.intercept` / `transfer.rename`（原名 `import.before`，已废弃） | Gate / Filter | `collect.rs:376` `Rename/Transfer` 前 | 文件列表、目标路径 | deny、patch(命名模板变量)；详见 §13A M-4 |
 | `transfer.completed`（原名 `import.after`，已废弃） | Notify | `collect.rs:383` Scrape 后 / `RunOutcome.completed` | ledger 行、`transferred_enclosures` | — |
@@ -168,7 +168,7 @@ world channel-plugin { include hook-plugin; export notify-channel; }
 
 **权限**：唯一权威列表见 §6.1（本节旧列表已删除）；出站网络规则见 §6.2。
 
-**固定 world + 拒绝桩**：组件模型要求所有 import 被满足，"不链接"会导致实例化失败，因此：① WIT world 固定（`crawler:plugin/plugin@1`）；② **安装时静态检查**组件实际 imports（`Component::component_type().imports()`）⊆ 已授权导入集合 ∪ 标准允许集（`wasi:random`、`wasi:cli/environment` 空环境等），出现 `wasi:http`/`wasi:filesystem`/`wasi:sockets` 直接拒绝安装；③ **运行时**对 world 中已声明但未授权的导入链接"拒绝桩"，统一返回 `permission-denied` 错误（并计数，不 trap）。HTTP allowlist 与 §6.2 网络策略在宿主 `fetch` 实现中逐请求、逐跳检查。权限扩大的升级需重新确认。
+**固定 world + 拒绝桩**：组件模型要求所有 import 被满足，"不链接"会导致实例化失败，因此：① WIT 为**固定的 world 集合**（`crawler:plugin@1.0.0` 下的 `hook-plugin`/`indexer-plugin`/`list-plugin`/`channel-plugin`，见 §6 骨架），宿主按组件实际导出识别其类型；② **安装时静态检查**组件实际 imports（`Component::component_type().imports()`）⊆ 已授权导入集合 ∪ 标准允许集（`wasi:random`、`wasi:cli/environment` 空环境等），出现 `wasi:http`/`wasi:filesystem`/`wasi:sockets` 直接拒绝安装；③ **运行时**对 world 中已声明但未授权的导入链接"拒绝桩"，统一返回 `permission-denied` 错误（并计数，不 trap）。HTTP allowlist 与 §6.2 网络策略在宿主 `fetch` 实现中逐请求、逐跳检查。权限扩大的升级需重新确认。
 
 ### 6.1 统一权限表（单一来源；★ = 敏感，需管理员单独确认，可单独撤销）
 
@@ -237,18 +237,21 @@ world channel-plugin { include hook-plugin; export notify-channel; }
 
 **8. 二级 SSRF（插件提供的 URL 交给其他组件抓取）**
 - **下载器（R3-H1，经代码核实）**：现有代码有两条旁路——`crates/downloader/src/qbit.rs:133-160` 对 http(s) URL 自行调用 `download_torrent_bytes`（`:370`，`http_agent().get(enclosure)`，无 SSRF 校验），失败时 `fallback_url = true` 把 URL 原样交给 qBittorrent（`:155-160`，`form.text("urls", …)`）；`crates/downloader/src/transmission.rs:237` 以 `{"filename": download_url}` 提交，由 Transmission 自己抓 URL。因此：
-  1. `download_torrent_bytes` 与 `agent_for_url` 改用 `GuardedAgent`（按该站点实例的 `NetPolicy`，大小上限 10 MiB、校验 bencode）；
+  1. **插件来源的 .torrent 一律由宿主 `DownloadService` 用 `GuardedAgent` 抓取**（按该站点实例的 `NetPolicy`，大小上限 10 MiB、校验 bencode），再以 `AddSource::File` 提交——这是插件来源的唯一路径（P5-M5）。downloader crate 内的 `download_torrent_bytes` 只服务内置 YAML 站点，同样改走 `GuardedAgent`（由宿主注入一个 `TorrentFetcher` trait 对象，downloader 自身拿不到站点上下文）；
+  1b. `downloader/src/http.rs::agent_for_url` 访问的是**下载器自身 API**（常在私网），走"下载器实例"策略：只允许该实例配置的 `host:port`，保留现有 `is_local_endpoint` 代理绕过逻辑，不套插件地址判定；
+  1c. `AddOptions` 增加 `origin: Origin { Builtin, Plugin(id) }`；`origin = Plugin` 时 downloader 拒绝 `AddSource::{Url, ResolvedUrl}`（返回错误，不 fallback），只接受 `File`/`Magnet`；
+  1d. **种子内地址（r4 R4-M5）**：宿主对插件来源的 .torrent / magnet 解析 `announce`/`announce-list`/`url-list`(webseed)/magnet `tr=`/`ws=`，按地址判定（§6.2 第 2 点）拒绝内网地址（下载器会去连这些地址）；违规即拒绝提交。
   2. `AddSource::file(bytes)`：qB 用 multipart 内存 part（现 `Part::file` 写临时文件，改为 `Part` 内存体），Transmission 用 `metainfo`（base64）字段而非 `filename`；
   3. 来源为插件的提交（`origin ∈ {plugin}` 或 provider 为 `plugin:`）**禁止 URL fallback**：下载失败即失败，`magnet:` 例外（无 HTTP 抓取，直接提交）；内置 YAML 站点的现有 fallback 行为保持不变（但抓取本身已走 net-guard）；
   4. 文件提交前从 bencode 计算 info-hash，写入 `downloader_added`（§13D）。
 - **通知渠道**：`notify.send` 的 `image-url`/`link`：`image-url` 由宿主经 `GuardedAgent` 拉取（公网 + 图片 MIME + 5 MiB），以附件/内联形式交给渠道；`link` 只允许 `https` 公网主机，渠道不抓取（仅文本）；插件 `notify-channel` 自身出站同样受其 allowlist + 拒绝表约束。
-- **图片代理/前端**：插件返回的 `poster-url`（榜单/探索）、`ui.widgets` 中的图片一律改写为 `/api/image-proxy?url=…`，经统一后的 image_proxy（见第 9 点）抓取。
+- **图片代理/前端**：插件返回的 `poster-url`（榜单/探索）、`ui.widgets` 中的图片一律改写为现有图片代理路由 `/api/v1/images/proxy?url=…`（`http/mod.rs:137`，public 路由），经统一后的 image_proxy（见第 9 点）抓取。
 - **插件 HTTP 端点**返回的重定向 `Location` 仅允许站内相对路径。
 
 **9. 统一现有 `image_proxy::allowed_url`**
 - 现状（`crates/api/src/http/image_proxy.rs:127-150`）：`ALLOWED_HOSTS` 后缀匹配 + 拒绝 IP 字面量/`localhost`，**不校验解析后 IP**；`no_redirect_agent`（`:152`，`max_redirects(0)`）+ 调用方逐跳（`:209`）。
 - 迁移：`fetch_image` 改用 `GuardedAgent`（保留 douban bypass 头逻辑），获得连接时 IP 校验；`crates/api/src/media_posters/http.rs:20` 的 `max_redirects(2)` 同样迁移。M1a 完成，作为 net-guard 的第一个使用者（无需等待插件）。
-- **插件图片主机不并入全局 `ALLOWED_HOSTS`（R3-M3）**：插件返回的图片 URL 改写为 `/api/image-proxy?url=…&src=plugin:<id>&sig=HMAC`（HMAC 密钥仅宿主持有，签名覆盖 url+src+过期时间），`image_proxy` 按 `src` 插件的 allowlist 校验后抓取；一个插件的声明不影响其他调用者。
+- **插件图片主机不并入全局 `ALLOWED_HOSTS`（R3-M3）**：插件返回的图片 URL 改写为 `/api/v1/images/proxy?url=…&src=plugin:<id>&exp=…&sig=HMAC`（签名参数**仅对插件来源强制**；内置来源保持现有参数）（HMAC 密钥仅宿主持有，签名覆盖 url+src+过期时间），`image_proxy` 按 `src` 插件的 allowlist 校验后抓取；一个插件的声明不影响其他调用者。
 
 **10. 测试套件（`crates/net-guard/tests`，M1a 验收）**
 - 解析层：自定义测试 resolver 模拟 rebinding（首次公网、第二次 `127.0.0.1`）→ 连接使用首次校验 IP 或拒绝；AAAA 返回 `::ffff:127.0.0.1`、`::ffff:169.254.169.254`、`64:ff9b::a9fe:a9fe`、6to4 嵌入私网 → 拒绝。
@@ -279,6 +282,7 @@ world channel-plugin { include hook-plugin; export notify-channel; }
 - **有界提交、不阻塞调用方**：队列满或插件信号量耗尽时**立即**返回 `busy`：hook 视为 abstain，provider 视为该站 `SiteFailure{busy}`（不计入插件熔断），task 推迟到下次调度。调用方永不在"等待池空位"上阻塞。
 - **禁止重入（N1）**：池线程入口设置 thread-local `IN_PLUGIN = Some(plugin_id)`。宿主导入若会再次进入插件（如 `indexer-read.search/rss` 指向插件站点、`subscribe-write` 触发同步 Gate），规则为：`indexer-read` **只允许 YAML 站点**（`plugin:` 前缀站点返回 `unsupported`）；`subscribe-write` 等写操作在插件线程中执行时，其触发的 Gate 链**内联在当前线程执行**（R3-M4）：不包括发起插件本身、深度上限 1；被内联插件的每插件信号量用 **`try_acquire`**（拿不到即 abstain，不阻塞，避免两插件互相写订阅时互等）；内联调用使用独立 `Store` 与独立 epoch deadline，并计入发起方的剩余预算；`PluginHost::invoke` 检测到 `IN_PLUGIN` 时拒绝向任何池提交（返回 `reentrancy-denied`）——从结构上消除"池内线程等待同池空位"的死锁。
 - **超时后线程占用（N1）**：epoch 只能中断 guest 代码，无法中断阻塞在宿主导入中的 `ureq`。因此每个宿主导入的阻塞超时取 `min(导入自身超时, 调用剩余总预算)`（ureq 每请求 `timeout_global` 动态设置；SQLite 用 `busy_timeout` 同理），保证 `recv_timeout` 返回后池线程最多再被占用"剩余预算"量级即释放。宿主维护每池"卡住线程"计数（调用方已超时但线程未返回）；卡住数计入池容量（不额外扩容），超过池大小的 50% 时该池对新提交返回 `busy` 并告警，同时对相应插件计一次插件错误（参与熔断）。
+- **`crates/exec-ctx`（P5-H2，M0a 落地，不依赖 wasmtime）**：提供 `BlockingGuard`、`InPluginGuard`（RAII）、`is_blocking_ok()`、`in_plugin()`、`spawn_blocking_marked(f)`（包装 `tokio::task::spawn_blocking`）。`api`/`jobs`/`hooks` 只依赖这个小 crate；`plugin-host`（M1a）复用而不重新定义。`hooks` 定义 `trait PluginInvoker`，由 `plugin-host` 实现并在运行时注入，`hooks` 不依赖 wasmtime。
 - **阻塞上下文判定（N2）**：不使用 `Handle::try_current()`（在 `spawn_blocking`/`blocking_budget::run` 线程中同样返回 Ok，会误报）。改为**正向 thread-local 标记** `BLOCKING_OK`：在 `PluginHost` 池线程、`state.search_work`（`crates/api/src/blocking_budget.rs`）worker 入口、job worker 线程入口、以及宿主封装的 `plugin_host::spawn_blocking(…)`（包装 `tokio::task::spawn_blocking`，在闭包内先设标记）中设置。tokio blocking 线程会被复用，标记必须用 **RAII guard** 在闭包结束（含 panic）时复位，避免同线程上的后续任务继承标记（R3-L2）。`PluginHost::invoke` 在 **release 构建同样检查**：未设标记 → 不 panic，返回 `PluginError::WrongContext` 并计数告警（hook 视为 abstain）。ADR-0013 写明该约束。
 - **三重预算**：
   1. **CPU 预算**（epoch deadline，计时线程 10ms 粒度）：hook 默认 200ms，任务 5s；
@@ -527,6 +531,14 @@ interface indexer-provider {
 ## 13D. 一等能力二：下载干预
 
 ### download.before（Filter + Gate）
+**端口定义（P5-H1）**：`subscribe` 只依赖 `downloader`/`hooks`，不能依赖 `api`。因此在 `downloader` crate 新增
+```rust
+pub trait DownloadSubmitter: Send + Sync {
+    fn submit(&self, plan: DownloadPlan, origin: Origin) -> Result<SubmitOutcome, SubmitError>;
+}
+```
+（`DownloadPlan`/`SubmitOutcome`/`Origin` 同在 `downloader`）。`admit_and_add` 由 `D: Downloader` 改为依赖 `&dyn DownloadSubmitter`；`api::DownloadService` 实现它，并且**只在 `submit_blocking` 内**触发 `download.before/after`。订阅 crate 不再 emit `download.*`。
+
 落点与统一（M0b）：现状三条路径各自提交——`subscribe/src/add.rs::admit_and_add` 对每个 `chosen` 同步调用 `input.downloader.add(&scored.torrent)`（**未用** `add_with_options`；需 `resolve_torrent_download` 的站点走 `add_resolved` 的短时 URL）、手动下载 `api/src/http/downloaders/submission.rs:246` 的 `async fn submit`、`api/src/admit.rs`。M0b 新建 `DownloadService`：**同步核心** `submit_blocking(plan) -> Result<SubmitOutcome>`（订阅路径直接调用）+ **async 外壳**（`spawn_blocking` 包装，供 `submission.rs` 使用）；`Downloader::add` 与 `add_resolved` 都改为经它提交，保证 `download.before/after` 必然触发。
 
 `Downloader` trait 扩展：新增 `AddOptions { save_path, category, tags, paused, upload_limit, download_limit, sequential, first_last_piece }` 结构体与 `add_with(torrent, source: AddSource /* url|resolved-url|file */, opts: &AddOptions)`，旧 `add`/`add_with_options(save_path)`/`add_resolved` 保留为默认实现转调；qB/Tr 各自实现 tags/category/paused/limits；新增 `set_tags`/`set_category`。
@@ -556,7 +568,7 @@ download-before: func(plan: download-plan) -> download-decision;
 - **"本系统添加"判定**：`Downloader::owned_identity(&Torrent)` 以 `Torrent` 为入参、`delete_task(&str, bool)` 无归属检查，二者语义不同，不足以判定。宿主新增 `downloader_added(downloader_id, ownership_tag, info_hash NULL, source, plugin_id?, state, added_at)` 表（R3-H4，经代码核实：`domain::Torrent` 无 info-hash 字段，只有 `enclosure`；qB `torrents/add` 不返回 hash；URL 提交前根本不知道 hash，故 info-hash **不能**做主键）。主键为 `(downloader_id, ownership_tag)`，复用现有 `downloader::ownership_tag(&torrent.enclosure)`（`owned.rs`，qB 写入 tags `qbit.rs:118-122`、Transmission 写入 labels `transmission.rs:240-243`，`remove_owned` 已基于它）。
 - 两阶段（N9：下载器添加是外部副作用，无法与 SQLite 事务原子化）：先写 `state=submitting` → 调用下载器 → 成功标记 `added`，失败删除该行。
 - 对账（启动时及每小时）：按 tag/label 在下载器任务中查得后**回填 `info_hash`**；文件提交路径（R3-H1）在提交前从 bencode 计算 info-hash 一并写入。`submitting` 超过 10 分钟且下载器中查不到该 tag → 删除；对账前 `submitting` 行在护栏中视为"非本系统"（偏安全）。
-- Transmission `labels_supported=false` 的旧版本无法打标签，降级为按 `names_match`/`size_matches` 匹配，匹配不到即视为 foreign。
+- Transmission `labels_supported=false` 的旧版本无法打标签：**不**按名称+大小匹配（与 `downloader/src/lib.rs` 中"破坏性清理必须证明精确身份"的约束一致）。改用 `torrent-add` 返回的 `hashString`（`transmission.rs:250-258` 已写入 `identities`）在提交成功时写入 `info_hash`，按 hash 对账；没有 hash 的记录视为 foreign（P5-M4）。
 - 历史任务（插件系统上线前添加的）默认视为 foreign，Admin 可在 UI 一次性"认领"（按 pending/ledger 匹配给出建议列表）。插件删除请求先查此表，命中走 `remove_owned` 路径。
 - **删除护栏**：默认只允许操作 `downloader_added` 中的任务，操作外部任务需 ★`downloader:foreign`（默认关闭）；`delete-files` 需 ★权限，且**默认进回收站**（与 ADR-0012 库删除一致：先移入回收目录，保留期后清理）；批量上限 20 个/次、200 个/日（可配），超出转 UI 待办由用户确认；删除前若对应 ledger/库文件为硬链接以外的源文件则拒绝删文件（与 `library` 移除语义、ADR-0012 一致）。
 - **H&R 保护**：宿主暴露站点 H&R 元数据（`torrent-raw.hr`、`user-stats`）与 `task-snapshot.seeding_time/ratio`；内置一个"受保护"标记：插件可 `protect(hash, until)`，其他插件的删除请求在保护期内被宿主拒绝。
@@ -652,6 +664,7 @@ PluginHost 按 provider/hook/task/notify 分池、有界队列满即 busy，禁�
 r4 补充：net-guard 覆盖 downloader crate（.torrent 抓取经校验，插件来源禁止 URL fallback，Transmission 用 metainfo）；
 地址判定为"仅允许全局单播"；经代理的插件请求 v1 仅限 Admin 确认的站点主机（ureq 内置代理无法 CONNECT 已校验 IP）；
 私网授权固定解析结果；WIT 按插件类型拆分 world。
+r5 补充：exec-ctx 小 crate 提供阻塞上下文标记（M0a，无 wasmtime）；download.before/after 仅在实现 downloader::DownloadSubmitter 的 DownloadService 中触发一次；外部进程插件无网络沙箱，需 Admin 显式信任。
 ```
 
 ## 15. 分阶段实施（r2：按审核拆分 M0/M1；三大一等能力仍在 M1–M2 落地）
@@ -668,7 +681,7 @@ r4 补充：net-guard 覆盖 downloader crate（.torrent 抓取经校验，插�
 | **M4 分发与媒体** | 远程仓库索引、升级/回滚/吊销同步、权限 diff；媒体识别链；媒体服务器事件（★read:user-scoped）+ library.refresh | 远端安装/升级/回滚 |
 | **M5 外部服务与交互** | gRPC/HTTP 外部插件；Bot 命令；COULD 项 | OCR 验证码、Telegram 命令插件 |
 
-**解锁情况（r4）**：M0a 可立即开工；M0b 可开工（R3-H3/H4 已在本版定稿，无需再等设计）；M1a 可开工（第三方网络在 net-guard 验收前全局关闭，仅开发者模式侧载；验收含 R3-H1/H2）；M1b 与 M1c 在 M1a net-guard 验收（含下载器禁 URL fallback 与代理方案 A）通过后解锁；对外发布 SDK / 第三方分发的进入条件 = M1a 全部验收 + M1b 凭据用例通过。
+**解锁情况（r5）**：M0a 可立即开工（含 `exec-ctx`）；M0b 可开工（`DownloadSubmitter` 端口与 Transmission hash 对账已定稿）；M1a 开工前 §18 片段以附录式最小样例为准，并作为 M1a-3 的验收样例；M1a 可开工（第三方网络在 net-guard 验收前全局关闭，仅开发者模式侧载；验收含 R3-H1/H2）；M1b 与 M1c 在 M1a net-guard 验收（含下载器禁 URL fallback 与代理方案 A）通过后解锁；对外发布 SDK / 第三方分发的进入条件 = M1a 全部验收 + M1b 凭据用例通过。
 
 基准（M1a 起持续跟踪）：100 条 `torrent-view` 经 5 个插件 Filter 链的 p99；单站点插件 provider 搜索额外开销；**池饱和下的手动搜索 p99**；插件 provider 重入用例。
 
@@ -788,6 +801,29 @@ r3 已完成设计，见 §6.2（原"延后"状态撤销）。
 | 里程碑 | M0b 标注 H3/H4 已定稿；M1a 验收含 H1/H2；解锁情况更新为 r4 | §15 |
 
 
+### 17.3 r5 变更（对照 `plugin-design-review-r5.md`）
+
+| 复审项 | 处理 | 位置 |
+|---|---|---|
+| P5-H1 download.* 挂载矛盾 | `downloader::DownloadSubmitter` 端口；`admit_and_add` 依赖它；Gate 只在 `DownloadService::submit_blocking` 触发一次；订阅 crate 不 emit `download.*`；M0a-5 删去 download 埋点，移至 M0b-4 | §4、§13D、计划 M0a-5/M0b-4 |
+| P5-H2 BLOCKING_OK 依赖倒置 | 新增 `crates/exec-ctx`（M0a-0，无 wasmtime）；`hooks::PluginInvoker` 反向注入；M0a 接入 `blocking_budget`、job worker、`submission.rs` | §7.1、计划 M0a-0 |
+| P5-M1 WIT 校验失败 | §18.3 改为最小完整包（补 torrent-patch/torrent-raw/search-context/hook-error/http-error 与 lifecycle/log/kv/config/clocks），注明为 §6 摘录；`wit/deps` vendor WASI；CI 从 md 抽取校验 | §18.3、计划 M1a-3 |
+| P5-M2 宿主代码不可编译 | 按 wasmtime 31 生成 API 重写：`HookPluginPre::instantiate` + `call_search_after`、嵌套 Result、`Arc`/`String` 捕获、`impl http::Host/HostResponse for State`、`with:` 映射、`ResourceTableError` 转换、epoch/StoreLimits、按耗时扣 I/O；写明每调用新建实例 | §18.4 |
+| P5-M3 插件代码不可编译 | `exports::…::hooks::Guest` + `lifecycle::Guest` + `export!`；SDK `hook_plugin!` 宏内置 WIT；delta 使用 `rescore_cap` | §18.5 |
+| P5-M4 Transmission 名称+大小降级 | 删除；改用 `hashString` 写 info_hash 对账，无 hash 即 foreign | §13D、计划 M0b-5 |
+| P5-M5 origin / agent_for_url | 插件来源唯一路径 = 宿主 GuardedAgent 抓取 + `AddSource::File`；`AddOptions.origin`；`agent_for_url` 走下载器实例策略并保留 `is_local_endpoint`；种子内 announce/webseed/magnet tr 校验 | §6.2 第 8 点、计划 M1a-2 |
+| P5-M6 前端路由 | `settings/plugins?tab=` + `settings/plugins/:id`；榜单用 `/subscriptions?tab=lists` + `/list-subscriptions/:id`；保留字禁止；放「系统」组与 logs 并列；删除顶层入口 | §19.1 |
+| P5-M7 榜单/widget 权限 | 全部 admin 路由；`accessiblePathFor` 限定；widget 仅 Admin | §19.4 |
+| P5-M8 M5 回环代理 | 写明外部插件无网络沙箱、需 Admin 信任；代理仅便利（token/Unix socket）；首选 JSON-RPC over HTTP，gRPC 需 `block_on` | §18.6 |
+| P5-L1 world 名冲突 | 改为"世界集合 + 按导出识别" | §6 |
+| P5-L2 图片代理路径 | 统一 `/api/v1/images/proxy`，签名仅插件来源强制 | §6.2 |
+| P5-L3 插件端点前缀 | `/api/v1/plugins/:id/endpoints/…`，不走信封 | §19.4、计划 M3-2 |
+| P5-L4 信封形状 | 新客户端按 `{ok,data}` 定义 | §19.3 |
+| P5-L5 敏感权限清单 | 由后端 `sensitive` 标记生成 | §19.4 |
+| P5-L6 裸 wasm 侧载 | 仅 `.cmplugin` | §19.2、计划 FE1a |
+| P5-L7 端点缺口 | 计划补齐 tasks/run、upgrade、rollback、plugin-repos、widgets；`PATCH /plugins/:id` | 计划 M1a-7/M3-4/M4-1 |
+| P5-L8 golden 测试与版本锁 | M0b-1 补 `indexer/tests/goldens.rs:279`、`settings.rs:262-267` 用一次 snapshot；M1a-3 锁 `wasmtime`/`wit-bindgen` 精确版本 + `rust-toolchain.toml` | 计划 M0b-1/M1a-3 |
+
 ## 18. 插件与主程序通信
 
 本章说明宿主（Rust 主进程）与 guest（WASM 组件）之间如何调用、传数据、做权限与超时控制，以及 M5 外部进程插件如何映射到同一契约。实现细节以 §6–§7、§13C–E 为准；此处给出可对照的序列图与端到端代码片段。
@@ -843,49 +879,49 @@ sequenceDiagram
 
 超时路径：epoch 中断 guest CPU；导入内 `ureq` 超时取剩余预算；调用方 `recv_timeout` 返回后池线程最多再占用「剩余预算」量级即释放，卡住计数告警。
 
-### 18.3 WIT 片段（`search.after` + `http.fetch`）
+### 18.3 WIT 片段（最小完整包，可独立校验）
 
-完整 `.wit` 以 `crates/plugin-api/wit/` 为准（M1a 产出）。骨架：
+以下为**摘录**，world 定义与 §6 骨架一致（完整版含 blob/notify/schedule/`wasi:random` 与 ui/tasks 导出，见 `crates/plugin-api/wit/`，`wasi:*` 依赖随仓库 vendor 到 `wit/deps/`）。此片段本身可用 `wasm-tools component wit` 独立校验（review r5 附录 A 已在 wasm-tools 1.258.3 下验证同构样例），M1a-3 的 CI 从本文抽取该代码块校验。
 
 ```wit
 package crawler:plugin@1.0.0;
 
 interface types {
-  record torrent-view {
-    id: string, site-id: string, title: string,
-    size: u64, seeders: option<u32>, score: option<s32>,
-  }
+  record torrent-view { id: string, site-id: string, title: string, size: u64, seeders: option<u32>, score: option<s32> }
+  record torrent-patch { title: option<string>, tags: option<list<string>> }
+  record torrent-raw { title: string, size: u64, download-ref: string }
+  variant search-context { manual, subscribe(string) }
   variant result-op {
-    drop(string),                          // torrent id
-    rescore(tuple<string, s32>),           // id, delta（受 rescore-cap 截断）
+    drop(string),
+    rescore(tuple<string, s32>),
     set-order(list<string>),
-    patch(tuple<string, torrent-patch>),   // 白名单字段
-    add(torrent-raw),                      // 仅允许来自本插件 indexer
+    patch(tuple<string, torrent-patch>),
+    add(torrent-raw),
   }
-  record search-after-input {
-    query: string,
-    views: list<torrent-view>,
-    rescore-cap: u32,                      // 宿主下发
-    context: search-context,               // manual | subscribe(id)
-  }
+  record search-after-input { query: string, views: list<torrent-view>, rescore-cap: u32, context: search-context }
+  variant hook-error { unsupported, failed(string) }
 }
 
 interface http {
-  resource response { /* §6 */ }
-  record request {
-    method: string, url: string,
-    headers: list<tuple<string, string>>,
-    body: option<list<u8>>,
-    auth: option<auth>,                    // site(site-id) | none
+  variant http-error { permission-denied, budget-exhausted, blocked-address, network(string) }
+  resource response {
+    status: func() -> u16;
+    body-text: func(max-bytes: u32) -> result<string, http-error>;
   }
   variant auth { none, site(string) }
+  record request { method: string, url: string, headers: list<tuple<string, string>>, body: option<list<u8>>, auth: option<auth> }
   fetch: func(req: request) -> result<response, http-error>;
 }
 
+interface log       { enum level { debug, info, warn, error } log: func(level: level, msg: string); }
+interface kv        { get: func(key: string) -> option<list<u8>>; set: func(key: string, v: list<u8>) -> result<_, string>; }
+interface config    { get: func() -> string; }
+interface clocks    { now-ms: func() -> s64; }
+interface lifecycle { init: func() -> result<_, string>; }
+
 interface hooks {
-  use types.{search-after-input, result-op};
+  use types.{search-after-input, result-op, hook-error};
   search-after: func(input: search-after-input) -> result<list<result-op>, hook-error>;
-  // … 其它 hook 按需声明；未实现的由 SDK 默认返回 unsupported
 }
 
 world hook-plugin {
@@ -895,85 +931,125 @@ world hook-plugin {
 }
 ```
 
-### 18.4 宿主侧片段（Rust，示意）
+### 18.4 宿主侧片段（wasmtime 31 `bindgen!`，示意但按生成 API 书写）
+
+实例策略：**每次调用从 `InstancePre` 新建实例**（pooling allocator，微秒级），guest 内存不跨调用保留，状态只能放 KV；每次调用新建 `Store`，设置 `StoreLimits` 与 epoch deadline。
 
 ```rust
-// crates/plugin-host/src/invoke.rs（示意，非最终 API）
+// crates/plugin-host/src/bindings.rs
+wasmtime::component::bindgen!({
+    path: "../plugin-api/wit",
+    world: "hook-plugin",
+    with: { "crawler:plugin/http/response": crate::imports::http::HostResp },
+});
+use crawler::plugin::types::{SearchAfterInput, ResultOp, HookError};
+
+// crates/plugin-host/src/invoke.rs
 pub fn invoke_search_after(
-    host: &PluginHost,
-    plugin_id: &str,
+    host: Arc<PluginHost>,
+    plugin_id: String,
     input: SearchAfterInput,
     budget: Budget,
-) -> Result<Vec<ResultOp>, InvokeOutcome> {
-    host.require_blocking_ok()?;                    // BLOCKING_OK thread-local
-    host.forbid_reentrancy()?;                      // IN_PLUGIN
-    let job = host.pools.hook.submit(plugin_id, budget, move |store| {
-        let bindings = Hooks::new(store, &host.pre[plugin_id])?;
-        // Canonical ABI：input 自动 lower 进 guest
-        match bindings.search_after(store, &input.into()) {
-            Ok(ops) => Ok(validate_ops(plugin_id, ops, input.rescore_cap)?),
-            Err(trap) => Err(InvokeOutcome::Trap(trap)),
-        }
-    })?;
-    match job.recv_timeout(budget.wall) {
-        Ok(Ok(ops)) => Ok(ops),
-        Ok(Err(o)) | Err(_) => Err(InvokeOutcome::Abstain), // 超时/trap → abstain
+) -> InvokeOutcome<Vec<ResultOp>> {
+    if !exec_ctx::is_blocking_ok() { return InvokeOutcome::WrongContext; }
+    if exec_ctx::in_plugin() { return InvokeOutcome::ReentrancyDenied; }
+    let cap = input.rescore_cap;                         // 先取出，避免 move 后再读
+    let h = host.clone();
+    let pid = plugin_id.clone();
+    let rx = match host.pools.hook.try_submit(&plugin_id, move || {
+        let _g = exec_ctx::InPluginGuard::enter(&pid);
+        let mut store = h.new_store(&pid, budget);       // StoreLimits + set_epoch_deadline
+        let pre: &HookPluginPre<State> = h.pre(&pid)?;
+        let bindings = pre.instantiate(&mut store)?;     // wasmtime::Result
+        // 外层 Result = trap；内层 = guest 业务错误
+        let r: Result<Vec<ResultOp>, HookError> =
+            bindings.crawler_plugin_hooks().call_search_after(&mut store, &input)?;
+        Ok(r)
+    }) {
+        Ok(rx) => rx,
+        Err(Busy) => return InvokeOutcome::Busy,          // 视为 abstain
+    };
+    match rx.recv_timeout(budget.wall) {
+        Ok(Ok(Ok(ops))) => match validate_ops(&plugin_id, ops, cap) {
+            Ok(ops) => InvokeOutcome::Ok(ops),
+            Err(e) => InvokeOutcome::Invalid(e),          // abstain + 计插件错误
+        },
+        Ok(Ok(Err(hook_err))) => InvokeOutcome::GuestError(hook_err), // abstain
+        Ok(Err(trap)) => InvokeOutcome::Trap(trap),       // abstain + 计插件错误
+        Err(_timeout) => InvokeOutcome::Timeout,          // abstain；池线程由预算释放
     }
 }
 
 // crates/plugin-host/src/imports/http.rs
-fn fetch(store: &mut Store, req: Request) -> Result<Resource<Response>, HttpError> {
-    let cap = store.data().caps();
-    if !cap.http_allowed(&req.url) { return Err(HttpError::PermissionDenied); }
-    let left = store.data().budget.remaining();
-    if left.is_zero() { return Err(HttpError::BudgetExhausted); }
-    let mut headers = req.headers;
-    if let Some(Auth::Site(id)) = req.auth {
-        inject_credential_slots(&mut req.url, &mut headers, &id)?; // §13C
+pub struct HostResp { status: u16, body: Arc<[u8]> }     // 已脱敏副本
+
+impl crawler::plugin::http::Host for State {
+    fn fetch(&mut self, mut req: Request) -> Result<Resource<HostResp>, HttpError> {
+        if !self.caps.http_allowed(&req.url) { return Err(HttpError::PermissionDenied); }
+        let left = self.budget.io_remaining();
+        if left.is_zero() { return Err(HttpError::BudgetExhausted); }
+        let site = match &req.auth { Some(Auth::Site(id)) => Some(id.clone()), _ => None };
+        if let Some(id) = &site {
+            inject_credential_slots(&self.sites, id, &mut req.url, &mut req.headers)
+                .map_err(|_| HttpError::PermissionDenied)?;          // §13C 规则 1–3
+        }
+        let policy = NetPolicy::for_plugin(&self.caps, site.as_deref());
+        let started = Instant::now();
+        let res = GuardedAgent::fetch(&req.method, &req.url, &req.headers, req.body.as_deref(),
+                                      &policy, left.min(self.caps.io_timeout));
+        self.budget.charge_io(started.elapsed());                     // 按实际耗时扣减
+        let (status, bytes) = res.map_err(HttpError::from)?;
+        let body = match &site { Some(id) => redact_credentials(&self.sites, id, &bytes), None => bytes };
+        self.table.push(HostResp { status, body: body.into() })
+            .map_err(|e| HttpError::Network(e.to_string()))
     }
-    let policy = NetPolicy::for_plugin(cap, req.auth.as_ref());
-    let bytes = GuardedAgent::fetch(&req, &policy, left.min(cap.io_timeout))?;
-    let redacted = redact_credentials(&bytes, &id);               // §13C 规则 4
-    Ok(store.data_mut().table.push(Response::from_bytes(redacted))?)
 }
+
+impl crawler::plugin::http::HostResponse for State {
+    fn status(&mut self, r: Resource<HostResp>) -> u16 { self.table.get(&r).map(|x| x.status).unwrap_or(0) }
+    fn body_text(&mut self, r: Resource<HostResp>, max: u32) -> Result<String, HttpError> { /* 截断到 min(max, 5 MiB) */ todo!() }
+    fn drop(&mut self, r: Resource<HostResp>) -> wasmtime::Result<()> { self.table.delete(r)?; Ok(()) }
+}
+impl crawler::plugin::types::Host for State {}
 ```
 
 ### 18.5 插件侧片段（Rust SDK）
 
+SDK `crawler-plugin-sdk` 内置 WIT 与 `hook_plugin!` 宏（封装 `wit_bindgen::generate!`、`export!` 与未实现导出的默认 `unsupported`），插件作者不需要自己持有 WIT 文件。宏展开后等价于（wit-bindgen 0.46，review r5 附录 A 已验证同构写法）：
+
 ```rust
-// 插件 crate，依赖 crawler-plugin-sdk
-wit_bindgen::generate!({ world: "hook-plugin", path: "wit" });
+wit_bindgen::generate!({ world: "hook-plugin", path: "wit" });   // SDK 内部
+use crawler::plugin::types::{SearchAfterInput, ResultOp, HookError};
 
 struct Plugin;
-impl Guest for Plugin {
+
+impl exports::crawler::plugin::hooks::Guest for Plugin {
     fn search_after(input: SearchAfterInput) -> Result<Vec<ResultOp>, HookError> {
-        // 可选：查外部评分（经宿主 http，受 allowlist + net-guard）
-        // let _ = crawler::plugin::http::fetch(&Request { url: "...", auth: None, .. })?;
-        let mut ops = Vec::new();
-        for v in &input.views {
-            if v.seeders.unwrap_or(0) == 0 {
-                ops.push(ResultOp::Drop(v.id.clone()));
-            } else if let Some(s) = v.score {
-                // delta 超出 rescore-cap 会被宿主截断
-                ops.push(ResultOp::Rescore((v.id.clone(), 5)));
-                let _ = s;
-            }
-        }
+        let delta = 5i32.min(input.rescore_cap as i32);           // 尊重宿主下发的封顶
+        let ops = input.views.iter().map(|v| {
+            if v.seeders.unwrap_or(0) == 0 { ResultOp::Drop(v.id.clone()) }
+            else { ResultOp::Rescore((v.id.clone(), delta)) }
+        }).collect();
         Ok(ops)
     }
 }
+
+impl exports::crawler::plugin::lifecycle::Guest for Plugin {
+    fn init() -> Result<(), String> { Ok(()) }
+}
+
+export!(Plugin);
+// 使用 SDK 时只需：crawler_plugin_sdk::hook_plugin!(Plugin);
 ```
 
-### 18.6 M5 gRPC 变体映射
+### 18.6 M5 外部进程变体映射
 
 | WASM | 外部进程 |
 |---|---|
-| `export hooks.search-after` | gRPC `Hooks.SearchAfter(SearchAfterRequest) returns (SearchAfterResponse)` |
-| `import http.fetch` | 不暴露：外部进程自带网络，但**仍须**经宿主代理出站（宿主开 localhost 回环代理端口，仅该插件进程可连），或要求其声明 `runtime=external` 且 Admin 信任（UI 标红，无沙箱） |
-| Canonical ABI | protobuf / JSON；resource 句柄改为宿主发放的 opaque id（HTTP 拉取 body） |
-| 超时 / 熔断 / 权限 | 同一 `PluginHost` 调度层；传输改为 tonic channel，`recv_timeout` 不变 |
-
-v1 不实现 M5；契约与错误码保持一致，便于日后替换传输。
+| `export hooks.search-after` | JSON-RPC over HTTP `POST /rpc {method:"hooks.search_after"}`（**首选**，复用同步 ureq）；或 gRPC `Hooks.SearchAfter`（tonic 为异步，需在池线程上 `Handle::block_on`） |
+| `import http.fetch` | 外部进程拥有完整网络栈，**宿主无法强制其经代理出站**。**外部插件 = 无网络沙箱，需 Admin 显式信任**（UI 标红）。宿主可提供每插件独立 token（`Proxy-Authorization`）或 Unix socket 的出站代理作为便利功能，**不作为安全边界**；真正隔离需 Admin 自行放入独立 network namespace / 容器 |
+| Canonical ABI | JSON / protobuf；resource 句柄改为宿主发放的 opaque id |
+| 超时 / 熔断 / 权限 | 同一 `PluginHost` 调度层；传输替换，`recv_timeout` 不变 |
 
 ## 19. 前端设计（`web/`）
 
@@ -981,22 +1057,24 @@ v1 不实现 M5；契约与错误码保持一致，便于日后替换传输。
 
 ### 19.1 信息架构与路由
 
-在现有设置分区（`lib/mock-data.ts` → `settingsSections`：`sites` / `downloaders` / `subscription` / `logs` …）旁新增，并保留独立顶层入口便于市场浏览：
+沿用现有约定：设置页只有 `settings` 与 `settings/:section` 两条路由（`web/src/main.tsx`），`app/(app)/settings/[section]/page.tsx` 以 `settingsSections` 校验 id，子页面用 `?tab=`（`use-tab-param`）。因此：
 
 | 路由 | 页面 | 说明 |
 |---|---|---|
-| `/settings/plugins` | 已安装列表 | 设置分区「插件」；启停、版本、熔断徽章、敏感权限角标 |
-| `/settings/plugins/:id` | 插件详情 | Tab：概览 / 配置 / 权限 / 任务 / 日志与审计 / 指标 |
-| `/settings/plugins/repos` | 仓库与市场 | 添加仓库、TOFU 钉扎公钥、浏览/安装/升级 |
-| `/settings/plugins/developer` | 开发者模式 | 全局开关（需重新输入密码）、侧载上传 |
+| `/settings/plugins?tab=installed` | 已安装列表（默认 tab） | 启停、版本、熔断徽章、敏感权限角标 |
+| `/settings/plugins?tab=repos` | 仓库与市场 | 添加仓库、TOFU 钉扎公钥、浏览/安装/升级 |
+| `/settings/plugins?tab=developer` | 开发者模式 | 全局开关（需重新输入密码）、侧载上传 |
+| `/settings/plugins/:id` | 插件详情 | `main.tsx` 显式新增 `settings/plugins/:id`（比 `settings/:section` 更具体）；Tab：概览 / 配置 / 权限 / 任务 / 日志与审计 / 指标 |
 | `/settings/sites`（扩展） | 资源站点 | 目录增加「插件索引器」分组；添加站点可选 `plugin:<id>/<indexer>`；私网授权勾选 |
 | `/subscriptions`（扩展） | 订阅列表 | 来源列显示 `plugin:` / `list:`；筛选 |
-| `/subscriptions/lists` | 榜单订阅 | CRUD、规则、待确认队列 |
-| `/subscriptions/lists/:id` | 榜单详情 | 同步历史、`list_sync_items`、忽略/重新允许 |
+| `/subscriptions?tab=lists` | 榜单订阅（Admin） | CRUD、规则、待确认队列；用 tab 而非 `/subscriptions/lists`，避免与 `/subscriptions/:id` 混淆 |
+| `/list-subscriptions/:id` | 榜单详情（Admin） | 同步历史、`list_sync_items`、忽略/重新允许 |
 | `/activity`（扩展） | 活动 / 下载 | 拒绝/延后原因、H&R `protect` 标记 |
-| `/` 首页行（扩展） | 仪表盘 widget | 声明式组件，无插件 JS |
+| `/` 首页行（扩展，仅 Admin 渲染） | 仪表盘 widget | 声明式组件，无插件 JS |
 
-`src/main.tsx` 增路由；`settingsSectionGroups` 增 `{ id: "plugins", label: "插件", … }`，挂到「系统」组（与 `logs`/`members` 同级）。
+- 不设独立顶层入口（删除旧表述）。
+- 插件 id 命名规则禁止保留字（`repos`、`developer`、`installed`、`new`），manifest 校验时拒绝。
+- `settingsSectionGroups` 在「系统」组中与 `logs` 并列新增 `{ id: "plugins", label: "插件", … }`（`members` 在单独的「成员」组，不变）。
 
 ### 19.2 页面与组件
 
@@ -1009,7 +1087,7 @@ v1 不实现 M5；契约与错误码保持一致，便于日后替换传输。
 | `components/plugins/plugin-audit-log.tsx` | 调用/审计/熔断 | 风格对齐 `system-logs-section` |
 | `components/plugins/plugin-metrics-panel.tsx` | p50/p99、预算、错误分类 | |
 | `components/plugins/repos-section.tsx` | 仓库列表、钉扎、浏览 | |
-| `components/plugins/sideload-dialog.tsx` | `.cmplugin` / `.wasm` 上传 | 仅开发者模式 |
+| `components/plugins/sideload-dialog.tsx` | 仅 `.cmplugin` 上传（含 manifest，裸 `.wasm` 无法声明权限，不支持） | 仅开发者模式 |
 | `components/plugins/list-subscriptions-view.tsx` | 榜单订阅 CRUD | |
 | `components/plugins/list-pending-queue.tsx` | 待确认条目 → 一键订阅/忽略 | |
 | `components/plugins/plugin-widget-host.tsx` | 渲染 `ui.widgets`（stat/table/chart/list/progress） | 固定组件映射表 |
@@ -1019,7 +1097,7 @@ v1 不实现 M5；契约与错误码保持一致，便于日后替换传输。
 
 ### 19.3 API 客户端（`web/lib/api/plugins.ts` 等）
 
-统一走 `lib/http.ts` → `/api/v1` 信封（`ApiEnvelope`）。建议端点（后端 M1a+ 提供）：
+统一走 `lib/http.ts` → `/api/v1`。新 `lib/api/plugins.ts` 按后端实际信封 `{ ok: true, data } | { ok: false, error }`（`http/mod.rs`）定义类型，**不复制** `lib/api/sites.ts` 中旧的 `{success,code,message,data}` 声明。全部端点挂在 `require_admin` 路由组（`http/mod.rs:112-160`）。建议端点（后端任务对应见计划 M1a-7 / M3-4 / M4-1）：
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
@@ -1049,10 +1127,10 @@ v1 不实现 M5；契约与错误码保持一致，便于日后替换传输。
 ### 19.4 状态、权限、文案
 
 - 数据获取：沿用现有 `request` + 组件内 `useState`/`useEffect`（无 Redux）；列表页用 `use-visible-polling` 拉熔断/任务状态。
-- 权限：所有写操作前检查 Admin；非 Admin 隐藏「插件」分区（`settingsSectionGroupsFor` 已按角色过滤的模式）。
-- 敏感权限 UI：安装确认对话框列出 `★` 项（`site:credentials`、`downloader:delete-files`、`downloader:foreign`、`subscribe:delete`、`site:write-session`、`read:user-scoped`），默认折叠详情，需逐项勾选才可继续。
+- 权限（P5-M7）：v1 插件管理、`/list-subscriptions*`、`/plugins/*/widgets` **全部为 Admin 路由**；非 Admin 隐藏「插件」分区（`settingsSectionGroupsFor` 模式）；`web/lib/permissions.ts::accessiblePathFor` 中把 `/subscriptions?tab=lists` 与 `/list-subscriptions/*` 限定为 admin（成员即使有 `allow_subscribe` 也不可见）；首页 widget 只对 Admin 渲染。日后开放成员需新增 `allow_list_subscribe` 能力。
+- 敏感权限 UI：安装确认对话框的 `★` 项**由后端按 §6.1 权限表返回的 `sensitive: true` 标记生成**（不在前端手写清单，避免遗漏如 `indexer:override:<id>`），默认折叠详情，需逐项勾选才可继续。
 - 开发者模式：关闭时侧载入口隐藏，未签名插件显示「已停用」；开启需密码（复用登录接口或 `POST …/developer/enable`）。
-- **不执行插件前端代码**：无 iframe、无远程脚本；自定义页仅 `ui.widgets` / `ui.status` 声明式数据。插件 HTTP 端点（`/api/plugins/:id/…`）供外部 webhook，不在 Web UI 内嵌。
+- **不执行插件前端代码**：无 iframe、无远程脚本；自定义页仅 `ui.widgets` / `ui.status` 声明式数据。插件 HTTP 端点为 `/api/v1/plugins/:id/endpoints/…`（对外 webhook，返回插件自定义响应，**不走** `{ok,data}` 信封），不在 Web UI 内嵌。
 - 通知渠道：`/settings` 通知配置（现有 `notify` API）增加「渠道」多选，列表含插件渠道（`notify-channel`），标「插件」徽章。
 - 文案：中文硬编码，关键术语与设计文档一致（插件 / 熔断 / 榜单订阅 / 开发者模式 / 私网授权）。
 

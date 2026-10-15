@@ -36,3 +36,4 @@ PluginHost 按 provider/hook/task/notify 分池、有界队列满即 busy，禁�
 r4 补充：net-guard 覆盖 downloader crate（.torrent 抓取经校验，插件来源禁止 URL fallback，Transmission 用 metainfo）；
 地址判定为"仅允许全局单播"；经代理的插件请求 v1 仅限 Admin 确认的站点主机（ureq 内置代理无法 CONNECT 已校验 IP）；
 私网授权固定解析结果；WIT 按插件类型拆分 world。
+r5 补充：exec-ctx 小 crate 提供阻塞上下文标记（M0a，无 wasmtime）；download.before/after 仅在实现 downloader::DownloadSubmitter 的 DownloadService 中触发一次；外部进程插件无网络沙箱，需 Admin 显式信任。
