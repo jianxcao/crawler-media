@@ -1,7 +1,7 @@
 # 插件系统 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-> 使用当前环境可用的等价执行技能；不安装不存在的技能。本文是待 review 计划，**全部实现未开始**。修订：r5（对照 `plugin-design-review-r5.md`，见文末「r5 修订记录」）。
+> 使用当前环境可用的等价执行技能；不安装不存在的技能。本文是待 review 计划，**全部实现未开始**。修订：r6（对照 `plugin-design-review-r6.md`，见文末「r5/r6 修订记录」）。
 
 **Goal:** 按 [插件系统设计](<../specs/2026-10-15-plugin-system-design.md>)（r4）与 [ADR-0013](<../../adr/0013-wasm-plugin-runtime.md>) 分阶段交付 WASM 组件插件：Hook 总线、自定义索引器、下载干预、榜单订阅、站点/订阅写 API、分发与前端。
 
@@ -63,7 +63,13 @@
 - 新 crate，无 wasmtime / tokio 以外依赖：`BlockingGuard::enter()`、`InPluginGuard::enter(id)`（RAII，drop 与 panic 均复位）、`is_blocking_ok()`、`in_plugin()`、`spawn_blocking_marked(f)`
 - 接入：`crates/api/src/blocking_budget.rs:53/74`（`run`/`run_to_completion` 闭包入口）、`api/src/job_loop.rs:113`（job worker）、`http/downloaders/submission.rs:290`（`spawn_blocking` 处）
 - `hooks` 定义 `trait PluginInvoker`（运行时注入，M1a 由 `plugin-host` 实现），`hooks` 不依赖 wasmtime
-- 测试：复用线程后标记不泄漏；panic 后复位；`HookPipeline` 在未标记线程上返回 `WrongContext`
+- 新类型：`ChainBudget`（`Copy`，供 `DownloadPlan` 跨 crate 传递）
+- 测试：复用线程后标记不泄漏；panic 后复位；未标记线程上的 **Filter/Gate 插件调用**返回 `WrongContext`；同一线程上 `emit_notify` 与内置原生钩子正常（R6-M2）
+
+### Task M0a-0b：盘点并替换到达 `HookPipeline` 的 `spawn_blocking` 入口（S）
+- `rg "spawn_blocking" crates/api/src` 全量列出（当前约 30 处），标注哪些会到达插件 Filter/Gate（至少：`blocking_budget.rs:53/74`、`job_loop.rs:113`、`http/downloaders/submission.rs:290`、`cli/actions.rs::admit_torrent` 路径、`http/sites.rs:481/525` 的验证/签到工作闭包），将它们统一换成 `exec_ctx::spawn_blocking_marked`；不到达插件的（图片、文件、库扫描等）保持原样并在清单中注明
+- 产出：`docs/superpowers/plans/` 附录清单或代码注释；测试：每个标注入口一条"可调用 Filter 插件"的单测
+- 依赖：M0a-0
 - 依赖：无
 
 ### Task M0a-1：`HookPipeline` 类型与合并语义（M）
@@ -106,7 +112,7 @@
 - 迁移：`plugin_audit(id, plugin_id, action, target, detail_json, at)`
 - 文件：`crates/store/src/schema/plugin_audit.rs`
 
-**M0a 验收**：`exec-ctx` 已接入三处 `spawn_blocking` 入口，未标记线程调用 `HookPipeline` 返回 `WrongContext`；`cargo test -p hooks -p subscribe -p api` 绿；panic/超时 hook 不影响订阅；事件仅提交后发出。
+**M0a 验收**：`exec-ctx` 已接入 M0a-0b 清单中的全部入口；未标记线程上的 Filter/Gate 插件调用返回 `WrongContext`，Notify 正常入队；`cargo test -p hooks -p subscribe -p api` 绿；panic/超时 hook 不影响订阅；事件仅提交后发出。
 
 ---
 
@@ -136,8 +142,10 @@
 ### Task M0b-4：`DownloadService`（同步核心 + async 外壳）（M）
 - 端口：`crates/downloader/src/submit.rs`（新）定义 `trait DownloadSubmitter { fn submit(&self, plan: DownloadPlan, origin: Origin) -> Result<SubmitOutcome, SubmitError> }`
 - 文件：`crates/api/src/download_service.rs`（新，`impl DownloadSubmitter`）；`subscribe/src/add.rs` 的 `admit_and_add` 由 `D: Downloader` 改为依赖 `&dyn DownloadSubmitter`（`RunInput` 增字段）；`http/downloaders/submission.rs:246`、`admit.rs` 改调用 service
+- 结果：`SubmitOutcome{Submitted{ownership_tag,info_hash},Rejected{plugin,reason},Deferred{plugin,until}}`；`SubmitError` 仅下载器/网络/抓取失败；`admit_and_add`：Submitted→submitted、Rejected→wanted 拒绝原因（不失败、不计 add_errors）、Deferred→M0b-6 defer 字段、Err→add_errors（R6-M1）
+- `DownloadPlan.chain_budget: Option<ChainBudget>`：订阅路径传入本次运行剩余 30s 预算，手动提交为 None（默认 5s）（R6-L4）
 - `submit_blocking(plan, origin)`：**唯一**触发 `download.before`（Gate+Filter）与 `download.after`（Notify）的位置；`submit_async` = `exec_ctx::spawn_blocking_marked`
-- 测试：三条路径都经过 service（计数 fake）；订阅路径 `download.before` 只触发一次；手动提交被 deny 时不提交
+- 测试：三条路径都经过 service（计数 fake）；订阅路径 `download.before` 只触发一次；手动提交被 deny 时不提交；reject 不让订阅运行失败；defer 写入 wanted；链路预算耗尽时 download.before abstain
 
 ### Task M0b-5：`downloader_added` 两阶段 + 对账（M）
 - 迁移：`downloader_added(downloader_id, ownership_tag, info_hash NULL, source, plugin_id NULL, state, added_at, PRIMARY KEY(downloader_id, ownership_tag))`
@@ -173,7 +181,7 @@
 ### Task M1a-3：`crates/plugin-api` WIT（M）
 - `wit/{types,log,kv,blob,config,clocks,http,hooks,lifecycle,…}.wit`；worlds `hook-plugin`/`indexer-plugin`/`list-plugin`/`channel-plugin`
 - `wit/deps/` vendor `wasi:random@0.2.0` 等依赖（`wit-deps` 锁定）
-- 版本锁：`wasmtime = "=31.x"`、`wit-bindgen = "=0.46.x"`（具体补丁号实施时定），新增 `rust-toolchain.toml`
+- 版本锁：`wasmtime = "=31.0.0"`、`wit-bindgen = "=0.46.0"`（实施时如需补丁升级，改为对应精确版本），新增 `rust-toolchain.toml`；guest SDK（wit-bindgen 0.46）放在**独立 workspace**（如 `sdk/` 自带 `Cargo.toml [workspace]`），不并入宿主工作区，避免与宿主 `Cargo.lock` 中间接依赖 `wit-bindgen 0.57.1` 冲突（R6-L3）
 - CI：`wasm-tools component wit` 校验 `wit/` 与**从设计 §18.3 抽取的代码块**
 - 测试：用设计 §18.3–18.5（同 review r5 附录 A）最小样例，host 端 `bindgen!` 与 guest 端 `generate!` 均 `cargo check` 通过
 
@@ -181,9 +189,11 @@
 - `Engine`（同步、epoch、pooling）、`InstancePre` 缓存、`Module::serialize` 缓存
 - 池：provider/hook/task/notify，有界队列，busy 语义；复用 `exec-ctx` 的 `InPluginGuard`/`BlockingGuard`（不重新定义）；实现 `hooks::PluginInvoker`；每调用从 `InstancePre` 新建实例；卡住线程计数
 - 三重预算；`StoreLimits` 按运行时
+- `recv_timeout` 区分 `Timeout` 与 `Disconnected`（池线程 panic → `Panicked`，计插件错误）（R6-L1）
 - 测试：死循环 200ms 终止；队列满 busy；重入拒绝；非阻塞上下文 `WrongContext`（release）；卡住线程计数
 
 ### Task M1a-5：导入实现 + 拒绝桩（M）
+- 用宏为 world 中**每个** import 生成 Host 实现：已授权 → 转发真实实现；未授权 → 返回 `permission-denied` 的拒绝桩（避免漏实现 log/kv/config/clocks 等，R6-L2）
 - log（限速+脱敏）、kv/blob（`plugin_kv`、`plugin_blob`、`plugin_quota` 迁移）、config、clocks、http（allowlist + net-guard + response 资源）、notify.send
 - 安装时 imports 静态比对；禁 `wasi:http/filesystem/sockets`
 - 测试：未授权导入 → permission-denied；配额并发不超
@@ -204,7 +214,7 @@
 - 测试：cron 注册/注销；`max_tasks`
 
 ### Task M1a-9：Rust SDK + 示例（M）
-- `sdk/crawler-plugin-sdk`（工作区内，暂不发布）；示例 `examples/plugins/keyword-blocklist`
+- `sdk/crawler-plugin-sdk`（独立 workspace，暂不发布）；示例 `examples/plugins/keyword-blocklist`
 - 测试：示例插件端到端 `search.after`
 
 ### Task FE0 / FE1a / FE1b：见「前端」节
@@ -338,11 +348,11 @@
 
 | 任务 | 内容 | 文件 | 依赖 | 规模 |
 |---|---|---|---|---|
-| FE0 | 设置分区「插件」（「系统」组与 logs 并列）、`?tab=installed\|repos\|developer`、`main.tsx` 新增 `settings/plugins/:id`、Admin 门闸、`accessiblePathFor` 限定榜单路由 | `src/main.tsx`、`lib/mock-data.ts`、`lib/permissions.ts`、`components/plugins/plugins-section.tsx` | — | S |
+| FE0 | 设置分区「插件」（「系统」组与 logs 并列）、`?tab=installed\|repos\|developer`、`main.tsx` 新增 `settings/plugins/:id`、Admin 门闸、`accessiblePathFor` 仅拦 pathname `/list-subscriptions/*`（`auth-gate.tsx:68/100` 不含 query） | `src/main.tsx`、`lib/mock-data.ts`、`lib/permissions.ts`、`components/plugins/plugins-section.tsx` | — | S |
 | FE1a | 已安装列表、详情壳、启停、开发者模式（重新鉴权）、侧载上传（仅 `.cmplugin`）；`lib/api/plugins.ts` 按 `{ok,data}` 定义 | `lib/api/plugins.ts`、`components/plugins/*` | M1a-7 | M |
 | FE1b | JSON Schema + x-ui 表单、权限确认（★高亮逐项勾选）、审计/指标、熔断徽章 | `plugin-config-form.tsx`、`permission-consent-dialog.tsx`、`plugin-audit-log.tsx`、`plugin-metrics-panel.tsx` | M1a-7 | M |
 | FE1c | 站点目录插件分组 + 私网授权；下载活动拒绝/延后/protect | `site-config-section.tsx`、`lib/api/sites.ts`、`download-tasks.tsx`、`lib/download-attention.ts` | M1b-3、M1c | M |
-| FE2 | 榜单订阅（`/subscriptions?tab=lists` + `/list-subscriptions/:id`，仅 Admin）与待确认队列、订阅 `source` 列、仓库市场与升级 diff | `list-subscriptions-view.tsx`、`list-pending-queue.tsx`、`subscriptions-view.tsx`、`repos-section.tsx` | M2-9、M4-1 | L |
+| FE2 | 订阅页新增 tab 机制（`use-tab-param`，现 `subscriptions-page.tsx`/`subscriptions-view.tsx` 未使用）；`tab=lists` 组件内按 `isAdmin` 门闸、非 Admin 回退默认 tab；榜单订阅（`/subscriptions?tab=lists` + `/list-subscriptions/:id`，仅 Admin）与待确认队列、订阅 `source` 列、仓库市场与升级 diff | `list-subscriptions-view.tsx`、`list-pending-queue.tsx`、`subscriptions-view.tsx`、`repos-section.tsx` | M2-9、M4-1 | L |
 | FE3 | 通知渠道多选、仪表盘 widget、任务立即运行 | `plugin-widget-host.tsx`、通知设置 | M3 | M |
 | FE4 | 钉扎/吊销提示、用户级播放事件授权 | — | M4 | S |
 
@@ -365,3 +375,15 @@
 | P5-M5 | M0b-3 增 `origin`；M1a-2 唯一路径 + `agent_for_url` 下载器实例策略 + 种子内地址校验 |
 | P5-M6/M7 | FE0/FE2 路由与 admin 限定；M2-9 admin 路由 |
 | P5-L3/L6/L7/L8 | M3-2 前缀；FE1a 仅 `.cmplugin`；M1a-7/M3-4/M4-1 补端点；M0b-1 goldens 与 settings 快照、Tech Stack 版本锁 |
+
+## r6 修订记录
+
+| 复审项 | 计划中的处理 |
+|---|---|
+| R6-M1 | M0b-4 定义 `SubmitOutcome` 三态与 `SubmitError` 范围、`admit_and_add` 分支处理与测试 |
+| R6-M2 | M0a-0 测试改为仅约束同步 Filter/Gate 插件调用；新增 M0a-0b 盘点 `spawn_blocking` 入口；M0a 验收同步 |
+| R6-M3 | FE0 `accessiblePathFor` 仅 pathname；FE2 新增订阅页 tab 机制与组件内 Admin 门闸 |
+| R6-L1 | M1a-4 区分 Timeout / Panicked |
+| R6-L2 | M1a-5 宏生成每个 import 的实现/拒绝桩 |
+| R6-L3 | M1a-3 精确版本 `=31.0.0`/`=0.46.0`；M1a-9 SDK 独立 workspace |
+| R6-L4 | M0b-4 `DownloadPlan.chain_budget`；M0a-0 `ChainBudget: Copy` |

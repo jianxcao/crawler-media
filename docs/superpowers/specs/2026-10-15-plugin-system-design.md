@@ -1,6 +1,6 @@
 # crawler-media 插件系统设计（草案）
 
-> 状态：草案 r5（在 r4 基础上按第五轮审核 `plugin-design-review-r5.md` @ `f330765` 修订，见 §17.3）｜基线：`d6ae414`，ureq 锁定 `3.4.1`｜基线：`main`｜参考：MoviePilot 插件体系
+> 状态：草案 r6（在 r5 基础上按第六轮审核 `plugin-design-review-r6.md` @ `702c790` 修订，见 §17.4）｜基线：`d6ae414`，ureq 锁定 `3.4.1`｜基线：`main`｜参考：MoviePilot 插件体系
 > 目标：在不破坏 ADR-0002 "Hook 是工作流扩展点" 原则的前提下，引入可由第三方编写、分发的**隔离插件运行时**。
 
 ## 0. 现状（基于实际代码）
@@ -283,6 +283,7 @@ world channel-plugin { include hook-plugin; export notify-channel; }
 - **禁止重入（N1）**：池线程入口设置 thread-local `IN_PLUGIN = Some(plugin_id)`。宿主导入若会再次进入插件（如 `indexer-read.search/rss` 指向插件站点、`subscribe-write` 触发同步 Gate），规则为：`indexer-read` **只允许 YAML 站点**（`plugin:` 前缀站点返回 `unsupported`）；`subscribe-write` 等写操作在插件线程中执行时，其触发的 Gate 链**内联在当前线程执行**（R3-M4）：不包括发起插件本身、深度上限 1；被内联插件的每插件信号量用 **`try_acquire`**（拿不到即 abstain，不阻塞，避免两插件互相写订阅时互等）；内联调用使用独立 `Store` 与独立 epoch deadline，并计入发起方的剩余预算；`PluginHost::invoke` 检测到 `IN_PLUGIN` 时拒绝向任何池提交（返回 `reentrancy-denied`）——从结构上消除"池内线程等待同池空位"的死锁。
 - **超时后线程占用（N1）**：epoch 只能中断 guest 代码，无法中断阻塞在宿主导入中的 `ureq`。因此每个宿主导入的阻塞超时取 `min(导入自身超时, 调用剩余总预算)`（ureq 每请求 `timeout_global` 动态设置；SQLite 用 `busy_timeout` 同理），保证 `recv_timeout` 返回后池线程最多再被占用"剩余预算"量级即释放。宿主维护每池"卡住线程"计数（调用方已超时但线程未返回）；卡住数计入池容量（不额外扩容），超过池大小的 50% 时该池对新提交返回 `busy` 并告警，同时对相应插件计一次插件错误（参与熔断）。
 - **`crates/exec-ctx`（P5-H2，M0a 落地，不依赖 wasmtime）**：提供 `BlockingGuard`、`InPluginGuard`（RAII）、`is_blocking_ok()`、`in_plugin()`、`spawn_blocking_marked(f)`（包装 `tokio::task::spawn_blocking`）。`api`/`jobs`/`hooks` 只依赖这个小 crate；`plugin-host`（M1a）复用而不重新定义。`hooks` 定义 `trait PluginInvoker`，由 `plugin-host` 实现并在运行时注入，`hooks` 不依赖 wasmtime。
+- **`WrongContext` 作用范围（R6-M2）**：只在 `PluginInvoker` 发起**同步插件调用**（Filter/Gate 链中的 WASM 调用）时检查 `BLOCKING_OK`。`emit_notify`（只入有界队列，不阻塞）与内置原生钩子（Login/CheckIn 等 Rust 闭包）可在任何线程调用，包括 async handler 中事务提交后发出的领域事件。
 - **阻塞上下文判定（N2）**：不使用 `Handle::try_current()`（在 `spawn_blocking`/`blocking_budget::run` 线程中同样返回 Ok，会误报）。改为**正向 thread-local 标记** `BLOCKING_OK`：在 `PluginHost` 池线程、`state.search_work`（`crates/api/src/blocking_budget.rs`）worker 入口、job worker 线程入口、以及宿主封装的 `plugin_host::spawn_blocking(…)`（包装 `tokio::task::spawn_blocking`，在闭包内先设标记）中设置。tokio blocking 线程会被复用，标记必须用 **RAII guard** 在闭包结束（含 panic）时复位，避免同线程上的后续任务继承标记（R3-L2）。`PluginHost::invoke` 在 **release 构建同样检查**：未设标记 → 不 panic，返回 `PluginError::WrongContext` 并计数告警（hook 视为 abstain）。ADR-0013 写明该约束。
 - **三重预算**：
   1. **CPU 预算**（epoch deadline，计时线程 10ms 粒度）：hook 默认 200ms，任务 5s；
@@ -537,9 +538,22 @@ pub trait DownloadSubmitter: Send + Sync {
     fn submit(&self, plan: DownloadPlan, origin: Origin) -> Result<SubmitOutcome, SubmitError>;
 }
 ```
-（`DownloadPlan`/`SubmitOutcome`/`Origin` 同在 `downloader`）。`admit_and_add` 由 `D: Downloader` 改为依赖 `&dyn DownloadSubmitter`；`api::DownloadService` 实现它，并且**只在 `submit_blocking` 内**触发 `download.before/after`。订阅 crate 不再 emit `download.*`。
+（`DownloadPlan`/`SubmitOutcome`/`Origin` 同在 `downloader`）。
 
-落点与统一（M0b）：现状三条路径各自提交——`subscribe/src/add.rs::admit_and_add` 对每个 `chosen` 同步调用 `input.downloader.add(&scored.torrent)`（**未用** `add_with_options`；需 `resolve_torrent_download` 的站点走 `add_resolved` 的短时 URL）、手动下载 `api/src/http/downloaders/submission.rs:246` 的 `async fn submit`、`api/src/admit.rs`。M0b 新建 `DownloadService`：**同步核心** `submit_blocking(plan) -> Result<SubmitOutcome>`（订阅路径直接调用）+ **async 外壳**（`spawn_blocking` 包装，供 `submission.rs` 使用）；`Downloader::add` 与 `add_resolved` 都改为经它提交，保证 `download.before/after` 必然触发。
+**结果语义（R6-M1）**：
+```rust
+pub enum SubmitOutcome {
+    Submitted { ownership_tag: String, info_hash: Option<String> },
+    Rejected  { plugin: String, reason: String },        // download.before reject
+    Deferred  { plugin: String, until: SystemTime },      // download.before defer
+}
+pub enum SubmitError { Downloader(DownloaderError), Network(String), Fetch(String) } // 仅下载器/网络/抓取失败
+```
+`admit_and_add` 的处理：`Submitted` → 进入 `submitted`；`Rejected` → 写入 wanted 的拒绝原因（与现有被规则组拒绝的候选同处展示），**不**让订阅失败、不计入 `submission_errors`；`Deferred` → 由 M0b-6 写 `deferred_until/defer_count`，不算已提交；`Err(SubmitError)` → 沿用现有 `add_errors`（`add.rs:70-79`）。`SubscribeError::Denied` **只**用于会否决整次运行的 Gate（如 `subscribe.select`、`subscribe.created`），不用于单种子的下载 Gate。
+
+**链路预算传递（R6-L4）**：`DownloadPlan` 携带 `chain_budget: Option<ChainBudget>`（`ChainBudget` 定义在 `exec-ctx`，可 `Copy`）；订阅路径把本次运行剩余的 30s 链路预算传入，`download.before` 与同一次运行的其他 Filter/Gate 共用；手动提交传 `None`，使用手动默认（5s）。`admit_and_add` 由 `D: Downloader` 改为依赖 `&dyn DownloadSubmitter`；`api::DownloadService` 实现它，并且**只在 `submit_blocking` 内**触发 `download.before/after`。订阅 crate 不再 emit `download.*`。
+
+落点与统一（M0b）：现状三条路径各自提交——`subscribe/src/add.rs::admit_and_add` 对每个 `chosen` 同步调用 `input.downloader.add(&scored.torrent)`（**未用** `add_with_options`；需 `resolve_torrent_download` 的站点走 `add_resolved` 的短时 URL）、手动下载 `api/src/http/downloaders/submission.rs:246` 的 `async fn submit`、`api/src/admit.rs`。M0b 新建 `DownloadService`：**同步核心** `submit_blocking(plan, origin) -> Result<SubmitOutcome, SubmitError>`（订阅路径直接调用）+ **async 外壳**（`spawn_blocking` 包装，供 `submission.rs` 使用）；`Downloader::add` 与 `add_resolved` 都改为经它提交，保证 `download.before/after` 必然触发。
 
 `Downloader` trait 扩展：新增 `AddOptions { save_path, category, tags, paused, upload_limit, download_limit, sequential, first_last_piece }` 结构体与 `add_with(torrent, source: AddSource /* url|resolved-url|file */, opts: &AddOptions)`，旧 `add`/`add_with_options(save_path)`/`add_resolved` 保留为默认实现转调；qB/Tr 各自实现 tags/category/paused/limits；新增 `set_tags`/`set_category`。
 
@@ -552,7 +566,7 @@ record download-plan {
 variant download-decision { abstain, modify(download-plan-patch), reject(string), defer(u32 /*秒*/) }
 download-before: func(plan: download-plan) -> download-decision;
 ```
-- 链式：按优先级依次看到上一个插件修改后的 plan；任一 `reject` 即终止（记入 `submission_errors`，wanted 记录原因）；`defer` 让订阅在下次轮询再试（如等待免费时段）。
+- 链式：按优先级依次看到上一个插件修改后的 plan；任一 `reject` 即终止，返回 `SubmitOutcome::Rejected`（wanted 记录拒绝原因，不计入 `submission_errors`、不让订阅失败）；`defer` 让订阅在下次轮询再试（如等待免费时段）。
 - 宿主校验：`downloader-id` 必须是已配置实例（`http/downloaders/instances.rs`）；`save-path` 必须位于该下载器配置的允许根目录之下（防任意路径）；标签/分类长度与字符集限制。
 - 修改后经 `DownloadService` → `Downloader::add_with(…, &AddOptions)` 提交。
 - `defer` 需持久化：wanted 记录（`store/src/subscribe_wanted.rs`）加 `deferred_until`、`defer_count`；单种 ≤ 72h 且 ≤ 10 次，超限转 reject 并记录原因。
@@ -665,13 +679,14 @@ r4 补充：net-guard 覆盖 downloader crate（.torrent 抓取经校验，插�
 地址判定为"仅允许全局单播"；经代理的插件请求 v1 仅限 Admin 确认的站点主机（ureq 内置代理无法 CONNECT 已校验 IP）；
 私网授权固定解析结果；WIT 按插件类型拆分 world。
 r5 补充：exec-ctx 小 crate 提供阻塞上下文标记（M0a，无 wasmtime）；download.before/after 仅在实现 downloader::DownloadSubmitter 的 DownloadService 中触发一次；外部进程插件无网络沙箱，需 Admin 显式信任。
+r6 补充：DownloadSubmitter 结果分 Submitted/Rejected/Deferred，单种子 Gate 不让订阅失败；WrongContext 仅约束同步插件调用。
 ```
 
 ## 15. 分阶段实施（r2：按审核拆分 M0/M1；三大一等能力仍在 M1–M2 落地）
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| **M0a 总线** | `HookPipeline`（载荷、Filter/Gate/Notify、优先级、链路预算、失败=abstain、熔断半开）；§4 全部埋点；应用服务层事件（提交后发出）；共享 `PluginHost` 替换 `api/src/check_in.rs:19`、`http/sites.rs:481/525` 的临时 `Bus::new()`；`SubscribeError::Denied`；`plugin_audit` | 现有 hooks/订阅测试全绿；panic/超时 hook 不影响订阅；事件仅在提交后发出的测试 |
+| **M0a 总线** | `HookPipeline`（载荷、Filter/Gate/Notify、优先级、链路预算、失败=abstain、熔断半开）；§4 中除 `download.*` 以外的埋点（`download.before/after` 随 `DownloadService` 在 M0b 落地）；`exec-ctx`；应用服务层事件（提交后发出）；共享 `PluginHost` 替换 `api/src/check_in.rs:19`、`http/sites.rs:481/525` 的临时 `Bus::new()`；`SubscribeError::Denied`；`plugin_audit` | 现有 hooks/订阅测试全绿；panic/超时 hook 不影响订阅；事件仅在提交后发出的测试 |
 | **M0b 宿主抽象** | `trait IndexerProvider` + `YamlProvider`，`profile_id` `plugin:` 前缀分派骨架，`ProfileSet::extend`；`ArcSwap<ProfileSet>` + `ArcSwap<ProviderRegistry>`，`profile()` 改返回 `Option<Arc<Profile>>` + `snapshot()`，6 处调用方与 fan-out 快照（R3-H3）；`Indexer::capabilities` 替换 `check_in.rs`/`http/sites.rs`/`settings.rs`/`catalog.rs` 的 `Framework` 直接分支；`DownloadService`（同步核心 + async 外壳），`AddOptions`/`add_with`，`add.rs`/`add_resolved`/`submission.rs`/`admit.rs` 统一，`AddSource::file`；`downloader_added`（主键 `(downloader_id, ownership_tag)`，submitting→added，对账回填 info-hash，R3-H4）| YAML 站点经 Provider 分派行为不变；三条下载路径均经 `DownloadService` |
 | **M1a 运行时与安全网** | 同步 wasmtime、**分类有界线程池 + 禁重入 + `BLOCKING_OK` 标记**、可校验的 `.wit`（`crates/plugin-api/wit`）、**`crates/net-guard`（§6.2 全部 1–11 点，含 R3-H1 下载器抓取与禁 URL fallback、R3-H2 代理方案 A、允许集判定、私网授权解析固定、image proxy 签名来源）+ image_proxy/media_posters 迁移**、开发者模式开关、epoch + I/O + 链路预算、StoreLimits（按运行时）；固定 world + 拒绝桩 + 安装时 imports 比对；log(脱敏)/kv/blob/config/clocks/notify.send/http（allowlist、响应资源）；**包签名校验 + 本地信任库**、zip 防护；第三方网络全局开关；`JobKind::PluginTask`；侧载 + 热重载；管理 UI（仅 Admin）；Rust SDK | 死循环插件 200ms 被终止；I/O 超预算返回错误；未授权导入返回 permission-denied；未签名包需确认；zip-slip 包被拒；**§6.2 第 10 点测试全过（含 qB 不 fallback、Transmission `metainfo`、代理仅确认主机）**；池饱和返回 busy 不阻塞调用方；重入被拒；超时后卡住线程计数与释放；非阻塞上下文调用返回 WrongContext（release 构建）；net-guard 未通过时第三方 `http` 被禁用 |
 | **M1b 自定义索引器**（进入条件：M1a 的 net-guard 验收通过） | `WasmProvider`、凭据槽位注入、Aho-Corasick 响应脱敏、私网授权 UI、跨主机重定向禁用、Torznab 实例类型模式表；search.*/subscribe.* hook；`add` 输出约束；示例 torznab-bridge、public-bt、rss-only | Jackett/Prowlarr 站点参与订阅搜索全流程；**凭据回显用例**（占位符放 path/body、echo 端点、响应含 passkey 的 URL 编码/HTML 实体/JSON 转义形式）全部被拦截/脱敏；Prowlarr `/{n}/api`、Jackett `/dl/` 用例通过；内网 Jackett 经私网授权可用 |
@@ -813,7 +828,7 @@ r3 已完成设计，见 §6.2（原"延后"状态撤销）。
 | P5-M4 Transmission 名称+大小降级 | 删除；改用 `hashString` 写 info_hash 对账，无 hash 即 foreign | §13D、计划 M0b-5 |
 | P5-M5 origin / agent_for_url | 插件来源唯一路径 = 宿主 GuardedAgent 抓取 + `AddSource::File`；`AddOptions.origin`；`agent_for_url` 走下载器实例策略并保留 `is_local_endpoint`；种子内 announce/webseed/magnet tr 校验 | §6.2 第 8 点、计划 M1a-2 |
 | P5-M6 前端路由 | `settings/plugins?tab=` + `settings/plugins/:id`；榜单用 `/subscriptions?tab=lists` + `/list-subscriptions/:id`；保留字禁止；放「系统」组与 logs 并列；删除顶层入口 | §19.1 |
-| P5-M7 榜单/widget 权限 | 全部 admin 路由；`accessiblePathFor` 限定；widget 仅 Admin | §19.4 |
+| P5-M7 榜单/widget 权限 | 全部 admin 路由；`accessiblePathFor` 限定（r6 修正：仅 pathname，tab 在组件内门闸，见 §17.4）；widget 仅 Admin | §19.4 |
 | P5-M8 M5 回环代理 | 写明外部插件无网络沙箱、需 Admin 信任；代理仅便利（token/Unix socket）；首选 JSON-RPC over HTTP，gRPC 需 `block_on` | §18.6 |
 | P5-L1 world 名冲突 | 改为"世界集合 + 按导出识别" | §6 |
 | P5-L2 图片代理路径 | 统一 `/api/v1/images/proxy`，签名仅插件来源强制 | §6.2 |
@@ -823,6 +838,18 @@ r3 已完成设计，见 §6.2（原"延后"状态撤销）。
 | P5-L6 裸 wasm 侧载 | 仅 `.cmplugin` | §19.2、计划 FE1a |
 | P5-L7 端点缺口 | 计划补齐 tasks/run、upgrade、rollback、plugin-repos、widgets；`PATCH /plugins/:id` | 计划 M1a-7/M3-4/M4-1 |
 | P5-L8 golden 测试与版本锁 | M0b-1 补 `indexer/tests/goldens.rs:279`、`settings.rs:262-267` 用一次 snapshot；M1a-3 锁 `wasmtime`/`wit-bindgen` 精确版本 + `rust-toolchain.toml` | 计划 M0b-1/M1a-3 |
+
+### 17.4 r6 变更（对照 `plugin-design-review-r6.md`）
+
+| 复审项 | 处理 | 位置 |
+|---|---|---|
+| R6-M1 SubmitOutcome 语义 | `Submitted/Rejected/Deferred`；`SubmitError` 仅下载器/网络/抓取失败；`admit_and_add` 分别处理；`SubscribeError::Denied` 仅限运行级 Gate；修正 `submit_blocking(plan, origin)` 签名；§15 M0a 去掉"§4 全部埋点"说法；§18.1 错误口径同步 | §13D、§15、§18.1、计划 M0b-4 |
+| R6-M2 WrongContext 范围 | 只作用于同步 Filter/Gate 插件调用；Notify 与内置钩子任何线程可用；计划新增盘点所有 `spawn_blocking` 入口任务 | §7.1、计划 M0a-0/M0a-0b |
+| R6-M3 `?tab=lists` 门闸 | `accessiblePathFor` 只拦 `/list-subscriptions/*`；tab 在组件内按 `isAdmin` 门闸并回退；FE2 为订阅页新增 tab 机制 | §19.4、计划 FE0/FE2 |
+| R6-L1 片段前提 / panic | 注明 `Budget: Copy`、`Busy` 作用域；`Disconnected` → `Panicked`（计插件错误） | §18.4 |
+| R6-L2 其余 import 实现 | 宏为 world 中每个 import 生成实现（授权转发 / 拒绝桩） | §18.4、计划 M1a-5 |
+| R6-L3 版本写法 / 双 wit-bindgen | 精确版本 `wasmtime = "=31.0.0"`、`wit-bindgen = "=0.46.0"`；guest SDK 放独立 workspace，不并入宿主工作区（宿主 lock 中间接 `wit-bindgen 0.57.1` 不受影响） | 计划 M1a-3/M1a-9 |
+| R6-L4 链路预算传递 | `DownloadPlan.chain_budget`（`ChainBudget` 在 exec-ctx，`Copy`）；订阅路径共用 30s，手动用 5s | §13D、计划 M0b-4 |
 
 ## 18. 插件与主程序通信
 
@@ -835,7 +862,7 @@ r3 已完成设计，见 §6.2（原"延后"状态撤销）。
 | 宿主 → guest | 调用组件 **export**（hook / provider / lifecycle / endpoints） | `PluginHost` 分类池（provider/hook/task/notify） | 调用前查 manifest 是否声明该 export；三重预算（§7.1） |
 | guest → 宿主 | 调用组件 **import**（`http.fetch`、`kv`、`downloader`…） | 仍在当前池线程内同步执行（阻塞 `ureq`/SQLite） | 拒绝桩（未授权）→ `permission-denied`；`auth=site` 走凭据槽位；出站经 net-guard（§6.2） |
 | 数据 | Canonical ABI lift/lower；大对象用 **resource** 句柄（`response`/`document`） | — | 序列化开销对策见 §2.1；脱敏在构造 `response` 前完成 |
-| 错误 | guest trap / 超时 / 非法输出 → abstain；显式 Gate deny → `SubscribeError::Denied` | 导入超时取 `min(自身, 剩余预算)` | 卡住线程计数计入池容量（§7.1） |
+| 错误 | guest trap / 超时 / 池线程 panic / 非法输出 → abstain；运行级 Gate（`subscribe.select`/`subscribe.created`）deny → `SubscribeError::Denied`；单种子 `download.before` reject/defer → `SubmitOutcome::Rejected/Deferred`（不失败整次运行） | 导入超时取 `min(自身, 剩余预算)` | 卡住线程计数计入池容量（§7.1） |
 
 M5 外部进程插件：同一 WIT 世界生成 gRPC/protobuf（或 JSON-RPC over HTTP），宿主作为客户端调用；调度 / 熔断 / 权限 / net-guard 与 WASM 共用，仅传输层替换。
 
@@ -953,6 +980,7 @@ pub fn invoke_search_after(
 ) -> InvokeOutcome<Vec<ResultOp>> {
     if !exec_ctx::is_blocking_ok() { return InvokeOutcome::WrongContext; }
     if exec_ctx::in_plugin() { return InvokeOutcome::ReentrancyDenied; }
+    // 前提（R6-L1）：`Budget: Copy`（闭包 move 后仍读 budget.wall）；`Busy` 是作用域内的单元结构体
     let cap = input.rescore_cap;                         // 先取出，避免 move 后再读
     let h = host.clone();
     let pid = plugin_id.clone();
@@ -976,7 +1004,8 @@ pub fn invoke_search_after(
         },
         Ok(Ok(Err(hook_err))) => InvokeOutcome::GuestError(hook_err), // abstain
         Ok(Err(trap)) => InvokeOutcome::Trap(trap),       // abstain + 计插件错误
-        Err(_timeout) => InvokeOutcome::Timeout,          // abstain；池线程由预算释放
+        Err(RecvTimeoutError::Timeout) => InvokeOutcome::Timeout,       // abstain；池线程由预算释放
+        Err(RecvTimeoutError::Disconnected) => InvokeOutcome::Panicked, // 池线程 panic：abstain + 计插件错误
     }
 }
 
@@ -1011,6 +1040,8 @@ impl crawler::plugin::http::HostResponse for State {
     fn drop(&mut self, r: Resource<HostResp>) -> wasmtime::Result<()> { self.table.delete(r)?; Ok(()) }
 }
 impl crawler::plugin::types::Host for State {}
+// world 中其余 import（log/kv/config/clocks…）的 Host 实现由宏统一生成：已授权者转发到真实实现，
+// 未授权者生成返回 permission-denied 的拒绝桩（R6-L2），见计划 M1a-5。
 ```
 
 ### 18.5 插件侧片段（Rust SDK）
@@ -1127,7 +1158,7 @@ export!(Plugin);
 ### 19.4 状态、权限、文案
 
 - 数据获取：沿用现有 `request` + 组件内 `useState`/`useEffect`（无 Redux）；列表页用 `use-visible-polling` 拉熔断/任务状态。
-- 权限（P5-M7）：v1 插件管理、`/list-subscriptions*`、`/plugins/*/widgets` **全部为 Admin 路由**；非 Admin 隐藏「插件」分区（`settingsSectionGroupsFor` 模式）；`web/lib/permissions.ts::accessiblePathFor` 中把 `/subscriptions?tab=lists` 与 `/list-subscriptions/*` 限定为 admin（成员即使有 `allow_subscribe` 也不可见）；首页 widget 只对 Admin 渲染。日后开放成员需新增 `allow_list_subscribe` 能力。
+- 权限（P5-M7）：v1 插件管理、`/list-subscriptions*`、`/plugins/*/widgets` **全部为 Admin 路由**；非 Admin 隐藏「插件」分区（`settingsSectionGroupsFor` 模式）；`web/lib/permissions.ts::accessiblePathFor` 只拦截 pathname `/list-subscriptions/*`（`web/components/auth-gate.tsx:68/100` 传入的只是 `pathname`，不含 query，**无法**拦截 `?tab=lists`，R6-M3）；`/subscriptions?tab=lists` 在组件内按 `isAdmin` 门闸：非 Admin 不渲染该 tab，访问时回退到默认 tab；现有订阅页（`subscriptions-page.tsx`/`subscriptions-view.tsx`）未使用 `use-tab-param`，FE2 需新增 tab 机制；首页 widget 只对 Admin 渲染。日后开放成员需新增 `allow_list_subscribe` 能力。
 - 敏感权限 UI：安装确认对话框的 `★` 项**由后端按 §6.1 权限表返回的 `sensitive: true` 标记生成**（不在前端手写清单，避免遗漏如 `indexer:override:<id>`），默认折叠详情，需逐项勾选才可继续。
 - 开发者模式：关闭时侧载入口隐藏，未签名插件显示「已停用」；开启需密码（复用登录接口或 `POST …/developer/enable`）。
 - **不执行插件前端代码**：无 iframe、无远程脚本；自定义页仅 `ui.widgets` / `ui.status` 声明式数据。插件 HTTP 端点为 `/api/v1/plugins/:id/endpoints/…`（对外 webhook，返回插件自定义响应，**不走** `{ok,data}` 信封），不在 Web UI 内嵌。
