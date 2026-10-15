@@ -786,3 +786,285 @@ r3 已完成设计，见 §6.2（原"延后"状态撤销）。
 | N12 补充 | 分值区间为 0 时 rescore 封顶取最小值 10 | §7.2 |
 | Torznab `/bh/*` | 从允许列表删除（不再以"禁用"形式出现） | §13C 规则 5 |
 | 里程碑 | M0b 标注 H3/H4 已定稿；M1a 验收含 H1/H2；解锁情况更新为 r4 | §15 |
+
+
+## 18. 插件与主程序通信
+
+本章说明宿主（Rust 主进程）与 guest（WASM 组件）之间如何调用、传数据、做权限与超时控制，以及 M5 外部进程插件如何映射到同一契约。实现细节以 §6–§7、§13C–E 为准；此处给出可对照的序列图与端到端代码片段。
+
+### 18.1 总览
+
+| 方向 | 机制 | 线程 | 权限 / 预算 |
+|---|---|---|---|
+| 宿主 → guest | 调用组件 **export**（hook / provider / lifecycle / endpoints） | `PluginHost` 分类池（provider/hook/task/notify） | 调用前查 manifest 是否声明该 export；三重预算（§7.1） |
+| guest → 宿主 | 调用组件 **import**（`http.fetch`、`kv`、`downloader`…） | 仍在当前池线程内同步执行（阻塞 `ureq`/SQLite） | 拒绝桩（未授权）→ `permission-denied`；`auth=site` 走凭据槽位；出站经 net-guard（§6.2） |
+| 数据 | Canonical ABI lift/lower；大对象用 **resource** 句柄（`response`/`document`） | — | 序列化开销对策见 §2.1；脱敏在构造 `response` 前完成 |
+| 错误 | guest trap / 超时 / 非法输出 → abstain；显式 Gate deny → `SubscribeError::Denied` | 导入超时取 `min(自身, 剩余预算)` | 卡住线程计数计入池容量（§7.1） |
+
+M5 外部进程插件：同一 WIT 世界生成 gRPC/protobuf（或 JSON-RPC over HTTP），宿主作为客户端调用；调度 / 熔断 / 权限 / net-guard 与 WASM 共用，仅传输层替换。
+
+### 18.2 序列图（`search.after` + `http.fetch`）
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant API as api (fanout / subscribe)
+  participant Host as PluginHost (hook pool)
+  participant Guest as WASM guest
+  participant Imp as Host imports<br/>(http / kv / …)
+  participant Net as net-guard + ureq
+
+  API->>Host: invoke("search.after", torrent-views)<br/>recv_timeout(链路剩余预算)
+  Host->>Host: 检查 BLOCKING_OK / IN_PLUGIN<br/>按优先级取插件列表
+  Host->>Host: 提交到 hook 池（队列满 → busy=abstain）
+  Host->>Guest: export hooks.search-after(views)<br/>StoreLimits + epoch deadline
+  Note over Guest: Canonical ABI lift<br/>精简 torrent-view 列表
+  Guest->>Imp: import http.fetch(req)<br/>（可选，需查外部评分等）
+  Imp->>Imp: 权限桩？auth=site？剩余预算？
+  alt 未授权 / 预算耗尽
+    Imp-->>Guest: Err(permission-denied / budget-exhausted)
+  else 放行
+    Imp->>Imp: 凭据槽位注入（仅 base 主机）
+    Imp->>Net: GuardedAgent.fetch(policy, budget)
+    Net->>Net: 解析→允许集→连接校验 IP<br/>逐跳重定向 / 代理方案 A
+    Net-->>Imp: bytes
+    Imp->>Imp: 脱敏 → 构造 response 资源
+    Imp-->>Guest: Ok(response handle)
+  end
+  Guest->>Guest: 计算 result-op 列表<br/>（drop / rescore / set-order …）
+  Guest-->>Host: Ok(ops) 或 trap
+  alt trap / 超时 / 非法输出
+    Host-->>API: abstain（记录审计）
+  else 合法 ops
+    Host->>Host: 校验字段白名单 / rescore-cap<br/>应用到 SearchOutcome
+    Host-->>API: 修改后的结果
+  end
+```
+
+超时路径：epoch 中断 guest CPU；导入内 `ureq` 超时取剩余预算；调用方 `recv_timeout` 返回后池线程最多再占用「剩余预算」量级即释放，卡住计数告警。
+
+### 18.3 WIT 片段（`search.after` + `http.fetch`）
+
+完整 `.wit` 以 `crates/plugin-api/wit/` 为准（M1a 产出）。骨架：
+
+```wit
+package crawler:plugin@1.0.0;
+
+interface types {
+  record torrent-view {
+    id: string, site-id: string, title: string,
+    size: u64, seeders: option<u32>, score: option<s32>,
+  }
+  variant result-op {
+    drop(string),                          // torrent id
+    rescore(tuple<string, s32>),           // id, delta（受 rescore-cap 截断）
+    set-order(list<string>),
+    patch(tuple<string, torrent-patch>),   // 白名单字段
+    add(torrent-raw),                      // 仅允许来自本插件 indexer
+  }
+  record search-after-input {
+    query: string,
+    views: list<torrent-view>,
+    rescore-cap: u32,                      // 宿主下发
+    context: search-context,               // manual | subscribe(id)
+  }
+}
+
+interface http {
+  resource response { /* §6 */ }
+  record request {
+    method: string, url: string,
+    headers: list<tuple<string, string>>,
+    body: option<list<u8>>,
+    auth: option<auth>,                    // site(site-id) | none
+  }
+  variant auth { none, site(string) }
+  fetch: func(req: request) -> result<response, http-error>;
+}
+
+interface hooks {
+  use types.{search-after-input, result-op};
+  search-after: func(input: search-after-input) -> result<list<result-op>, hook-error>;
+  // … 其它 hook 按需声明；未实现的由 SDK 默认返回 unsupported
+}
+
+world hook-plugin {
+  import http; import log; import kv; import config; import clocks;
+  export lifecycle;
+  export hooks;
+}
+```
+
+### 18.4 宿主侧片段（Rust，示意）
+
+```rust
+// crates/plugin-host/src/invoke.rs（示意，非最终 API）
+pub fn invoke_search_after(
+    host: &PluginHost,
+    plugin_id: &str,
+    input: SearchAfterInput,
+    budget: Budget,
+) -> Result<Vec<ResultOp>, InvokeOutcome> {
+    host.require_blocking_ok()?;                    // BLOCKING_OK thread-local
+    host.forbid_reentrancy()?;                      // IN_PLUGIN
+    let job = host.pools.hook.submit(plugin_id, budget, move |store| {
+        let bindings = Hooks::new(store, &host.pre[plugin_id])?;
+        // Canonical ABI：input 自动 lower 进 guest
+        match bindings.search_after(store, &input.into()) {
+            Ok(ops) => Ok(validate_ops(plugin_id, ops, input.rescore_cap)?),
+            Err(trap) => Err(InvokeOutcome::Trap(trap)),
+        }
+    })?;
+    match job.recv_timeout(budget.wall) {
+        Ok(Ok(ops)) => Ok(ops),
+        Ok(Err(o)) | Err(_) => Err(InvokeOutcome::Abstain), // 超时/trap → abstain
+    }
+}
+
+// crates/plugin-host/src/imports/http.rs
+fn fetch(store: &mut Store, req: Request) -> Result<Resource<Response>, HttpError> {
+    let cap = store.data().caps();
+    if !cap.http_allowed(&req.url) { return Err(HttpError::PermissionDenied); }
+    let left = store.data().budget.remaining();
+    if left.is_zero() { return Err(HttpError::BudgetExhausted); }
+    let mut headers = req.headers;
+    if let Some(Auth::Site(id)) = req.auth {
+        inject_credential_slots(&mut req.url, &mut headers, &id)?; // §13C
+    }
+    let policy = NetPolicy::for_plugin(cap, req.auth.as_ref());
+    let bytes = GuardedAgent::fetch(&req, &policy, left.min(cap.io_timeout))?;
+    let redacted = redact_credentials(&bytes, &id);               // §13C 规则 4
+    Ok(store.data_mut().table.push(Response::from_bytes(redacted))?)
+}
+```
+
+### 18.5 插件侧片段（Rust SDK）
+
+```rust
+// 插件 crate，依赖 crawler-plugin-sdk
+wit_bindgen::generate!({ world: "hook-plugin", path: "wit" });
+
+struct Plugin;
+impl Guest for Plugin {
+    fn search_after(input: SearchAfterInput) -> Result<Vec<ResultOp>, HookError> {
+        // 可选：查外部评分（经宿主 http，受 allowlist + net-guard）
+        // let _ = crawler::plugin::http::fetch(&Request { url: "...", auth: None, .. })?;
+        let mut ops = Vec::new();
+        for v in &input.views {
+            if v.seeders.unwrap_or(0) == 0 {
+                ops.push(ResultOp::Drop(v.id.clone()));
+            } else if let Some(s) = v.score {
+                // delta 超出 rescore-cap 会被宿主截断
+                ops.push(ResultOp::Rescore((v.id.clone(), 5)));
+                let _ = s;
+            }
+        }
+        Ok(ops)
+    }
+}
+```
+
+### 18.6 M5 gRPC 变体映射
+
+| WASM | 外部进程 |
+|---|---|
+| `export hooks.search-after` | gRPC `Hooks.SearchAfter(SearchAfterRequest) returns (SearchAfterResponse)` |
+| `import http.fetch` | 不暴露：外部进程自带网络，但**仍须**经宿主代理出站（宿主开 localhost 回环代理端口，仅该插件进程可连），或要求其声明 `runtime=external` 且 Admin 信任（UI 标红，无沙箱） |
+| Canonical ABI | protobuf / JSON；resource 句柄改为宿主发放的 opaque id（HTTP 拉取 body） |
+| 超时 / 熔断 / 权限 | 同一 `PluginHost` 调度层；传输改为 tonic channel，`recv_timeout` 不变 |
+
+v1 不实现 M5；契约与错误码保持一致，便于日后替换传输。
+
+## 19. 前端设计（`web/`）
+
+> 基线：Vite 7 + React 19 + react-router 7（`web/src/main.tsx` 路由表、`web/app/(app)/…` 页面、`web/components/*`、`web/lib/api/*` + `lib/http.ts` 的 `/api/v1` 信封）。无独立 i18n 库，文案以中文硬编码为主（与现有设置页一致）；后续若引入 i18n，插件 UI 字符串走同一套。插件管理**仅 Admin**（对照 `lib/session` / `lib/permissions`）。
+
+### 19.1 信息架构与路由
+
+在现有设置分区（`lib/mock-data.ts` → `settingsSections`：`sites` / `downloaders` / `subscription` / `logs` …）旁新增，并保留独立顶层入口便于市场浏览：
+
+| 路由 | 页面 | 说明 |
+|---|---|---|
+| `/settings/plugins` | 已安装列表 | 设置分区「插件」；启停、版本、熔断徽章、敏感权限角标 |
+| `/settings/plugins/:id` | 插件详情 | Tab：概览 / 配置 / 权限 / 任务 / 日志与审计 / 指标 |
+| `/settings/plugins/repos` | 仓库与市场 | 添加仓库、TOFU 钉扎公钥、浏览/安装/升级 |
+| `/settings/plugins/developer` | 开发者模式 | 全局开关（需重新输入密码）、侧载上传 |
+| `/settings/sites`（扩展） | 资源站点 | 目录增加「插件索引器」分组；添加站点可选 `plugin:<id>/<indexer>`；私网授权勾选 |
+| `/subscriptions`（扩展） | 订阅列表 | 来源列显示 `plugin:` / `list:`；筛选 |
+| `/subscriptions/lists` | 榜单订阅 | CRUD、规则、待确认队列 |
+| `/subscriptions/lists/:id` | 榜单详情 | 同步历史、`list_sync_items`、忽略/重新允许 |
+| `/activity`（扩展） | 活动 / 下载 | 拒绝/延后原因、H&R `protect` 标记 |
+| `/` 首页行（扩展） | 仪表盘 widget | 声明式组件，无插件 JS |
+
+`src/main.tsx` 增路由；`settingsSectionGroups` 增 `{ id: "plugins", label: "插件", … }`，挂到「系统」组（与 `logs`/`members` 同级）。
+
+### 19.2 页面与组件
+
+| 组件（建议路径） | 职责 | 复用 |
+|---|---|---|
+| `components/plugins/plugins-section.tsx` | 已安装列表、批量启停 | `GlassPanel`、列表密度同 `site-config-section` |
+| `components/plugins/plugin-detail-view.tsx` | 详情 Tab 壳 | `use-tab-param` |
+| `components/plugins/plugin-config-form.tsx` | JSON Schema + `x-ui` 渲染 | 自研轻量渲染（string/number/boolean/enum/array + `format: password\|url\|cron` + `x-ui:widget: select-site\|select-subscription\|select-downloader`）；**不**引入插件 JS / iframe |
+| `components/plugins/permission-consent-dialog.tsx` | 安装/升级权限确认 | 敏感权限（★）红标 + 二次勾选；对照 `useConfirm` |
+| `components/plugins/plugin-audit-log.tsx` | 调用/审计/熔断 | 风格对齐 `system-logs-section` |
+| `components/plugins/plugin-metrics-panel.tsx` | p50/p99、预算、错误分类 | |
+| `components/plugins/repos-section.tsx` | 仓库列表、钉扎、浏览 | |
+| `components/plugins/sideload-dialog.tsx` | `.cmplugin` / `.wasm` 上传 | 仅开发者模式 |
+| `components/plugins/list-subscriptions-view.tsx` | 榜单订阅 CRUD | |
+| `components/plugins/list-pending-queue.tsx` | 待确认条目 → 一键订阅/忽略 | |
+| `components/plugins/plugin-widget-host.tsx` | 渲染 `ui.widgets`（stat/table/chart/list/progress） | 固定组件映射表 |
+| `components/site-config-section.tsx`（改） | 目录分组、私网授权、插件站点徽章 | 现有站点表单 |
+| `components/download-tasks.tsx` / activity（改） | 展示 `reject`/`defer` 原因、`protect` 徽章 | `lib/download-attention.ts` |
+| `components/subscriptions-view.tsx`（改） | `source` 列 | |
+
+### 19.3 API 客户端（`web/lib/api/plugins.ts` 等）
+
+统一走 `lib/http.ts` → `/api/v1` 信封（`ApiEnvelope`）。建议端点（后端 M1a+ 提供）：
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/plugins` | 已安装列表（状态、版本、熔断、权限摘要） |
+| GET/PATCH | `/plugins/:id` | 详情；启停、配置更新（校验后） |
+| GET | `/plugins/:id/config-schema` | JSON Schema + x-ui |
+| GET | `/plugins/:id/audit` | 审计分页 |
+| GET | `/plugins/:id/metrics` | 指标快照 |
+| POST | `/plugins/:id/tasks/:taskId/run` | 立即运行 |
+| POST | `/plugins/install` | 从仓库或上传安装（multipart） |
+| POST | `/plugins/:id/upgrade` | 升级（返回权限 diff） |
+| POST | `/plugins/:id/rollback` | 回滚 |
+| DELETE | `/plugins/:id` | 卸载（可选删除 KV；订阅保留对话框） |
+| GET/POST | `/plugin-repos` | 仓库 CRUD；钉扎公钥 |
+| GET | `/plugin-repos/:id/index` | 浏览远程索引 |
+| GET/PATCH | `/settings/plugins` | 开发者模式、第三方网络开关 |
+| POST | `/settings/plugins/developer/enable` | 重新鉴权后开启 |
+| GET/POST/PATCH/DELETE | `/list-subscriptions` | 榜单订阅 |
+| GET | `/list-subscriptions/:id/pending` | 待确认 |
+| POST | `/list-subscriptions/:id/pending/:item/accept\|ignore` | 确认/忽略 |
+| GET | `/plugins/:id/widgets` | 仪表盘卡片 |
+
+站点相关扩展现有 `lib/api/sites.ts`：`CatalogItem` 增加 `source: "builtin" \| "plugin"`、`plugin_id?`；创建 payload 支持 `profile_id: "plugin:…"`、`allow_private?: { host, port }`。
+
+下载/订阅扩展：任务 DTO 增加 `reject_reason?`、`deferred_until?`、`protected_until?`、`source?`。
+
+### 19.4 状态、权限、文案
+
+- 数据获取：沿用现有 `request` + 组件内 `useState`/`useEffect`（无 Redux）；列表页用 `use-visible-polling` 拉熔断/任务状态。
+- 权限：所有写操作前检查 Admin；非 Admin 隐藏「插件」分区（`settingsSectionGroupsFor` 已按角色过滤的模式）。
+- 敏感权限 UI：安装确认对话框列出 `★` 项（`site:credentials`、`downloader:delete-files`、`downloader:foreign`、`subscribe:delete`、`site:write-session`、`read:user-scoped`），默认折叠详情，需逐项勾选才可继续。
+- 开发者模式：关闭时侧载入口隐藏，未签名插件显示「已停用」；开启需密码（复用登录接口或 `POST …/developer/enable`）。
+- **不执行插件前端代码**：无 iframe、无远程脚本；自定义页仅 `ui.widgets` / `ui.status` 声明式数据。插件 HTTP 端点（`/api/plugins/:id/…`）供外部 webhook，不在 Web UI 内嵌。
+- 通知渠道：`/settings` 通知配置（现有 `notify` API）增加「渠道」多选，列表含插件渠道（`notify-channel`），标「插件」徽章。
+- 文案：中文硬编码，关键术语与设计文档一致（插件 / 熔断 / 榜单订阅 / 开发者模式 / 私网授权）。
+
+### 19.5 前端里程碑（并入计划文档）
+
+| 阶段 | 前端交付 | 依赖后端 |
+|---|---|---|
+| FE0 | 路由壳、设置分区、空状态、Admin 门闸 | 无 |
+| FE1a | 已安装列表 / 详情壳 / 开发者模式开关 / 侧载上传 / 启停 | M1a 插件管理 API |
+| FE1b | Schema 配置表单、权限确认对话框、审计/指标只读、熔断徽章 | M1a |
+| FE1c | 站点目录插件分组、私网授权勾选、下载活动拒绝/延后/protect 展示 | M1b/M1c |
+| FE2 | 仓库市场、升级权限 diff、榜单订阅 + 待确认队列、订阅 `source` 列 | M2 / M4（市场） |
+| FE3 | 通知渠道多选、仪表盘 widget、插件任务「立即运行」 | M3 |
+| FE4 | 远程仓库钉扎/吊销同步提示、播放事件开关（用户级） | M4 |
+
