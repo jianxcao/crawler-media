@@ -33,3 +33,6 @@ PluginHost 按 provider/hook/task/notify 分池、有界队列满即 busy，禁�
 （含 IPv4-mapped/NAT64/6to4）、逐跳重定向校验；私网仅能由 Admin 在具体站点/下载器实例上授权；
 插件提供的 .torrent URL 由宿主下载后以文件提交下载器，通知图片由宿主拉取（防二级 SSRF）。
 现有 image_proxy 迁移到 net-guard。
+r4 补充：net-guard 覆盖 downloader crate（.torrent 抓取经校验，插件来源禁止 URL fallback，Transmission 用 metainfo）；
+地址判定为"仅允许全局单播"；经代理的插件请求 v1 仅限 Admin 确认的站点主机（ureq 内置代理无法 CONNECT 已校验 IP）；
+私网授权固定解析结果；WIT 按插件类型拆分 world。
