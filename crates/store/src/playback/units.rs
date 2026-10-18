@@ -141,11 +141,47 @@ impl Store {
         let subtitle_track = subtitle_track
             .map(str::to_string)
             .or_else(|| existing.as_ref().and_then(|u| u.subtitle_track.clone()));
+        // R01-A & R01-B: Check assertion fields & resume binding constraints
+        let has_played_assertion = if played { 1 } else { 0 };
+        let played_changed_at = if played { Some(now) } else { None };
+
+        let (bound_file_id, bound_rev, bound_src_ver, bound_timeline, bound_tracks_ver, pos_val, dur_val, aud_val, sub_val) =
+            if position_ms > 0 || duration_ms.is_some() || audio_track.is_some() || subtitle_track.is_some() {
+                // Try finding an available file to bind
+                let file_binding: Option<(String, i64, String, i64)> = self.library
+                    .query_row(
+                        "SELECT f.file_id, f.file_revision, f.source_version, f.tracks_version
+                         FROM library_files f
+                         JOIN library_file_units u ON f.file_id = u.file_id
+                         WHERE u.media_id = ?1 AND u.season = ?2 AND u.episode = ?3
+                           AND f.presence_state = 'present' AND f.publication_state = 'published'
+                         ORDER BY f.file_revision DESC, f.file_id ASC
+                         LIMIT 1",
+                        params![media_id.to_string(), season, episode],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    )
+                    .optional()?;
+
+                match file_binding {
+                    Some((fid, rev, sver, tver)) => {
+                        (Some(fid), Some(rev), Some(sver), Some("full_file"), Some(tver), position_ms, duration_ms, audio_track.clone(), subtitle_track.clone())
+                    }
+                    None => {
+                        // No file available: clamp to 0 and NULL all resume fields to satisfy schema
+                        (None, None, None, None, None, 0, None, None, None)
+                    }
+                }
+            } else {
+                (None, None, None, None, None, 0, None, None, None)
+            };
+
         self.library.execute(
             "INSERT INTO playback_units
                 (user_id, media_id, season, episode, position_ms, played, favorite,
-                 duration_ms, audio_track, subtitle_track, play_count, watch_activity_at, favorite_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 duration_ms, audio_track, subtitle_track, play_count, watch_activity_at, favorite_at,
+                 has_played_assertion, played_changed_at_ms, resume_file_id, resume_file_revision,
+                 resume_source_version, timeline_mode, tracks_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
              ON CONFLICT(user_id, media_id, season, episode) DO UPDATE SET
                 position_ms = excluded.position_ms,
                 played = excluded.played,
@@ -155,21 +191,35 @@ impl Store {
                 subtitle_track = excluded.subtitle_track,
                 play_count = excluded.play_count,
                 watch_activity_at = excluded.watch_activity_at,
-                favorite_at = excluded.favorite_at",
+                favorite_at = excluded.favorite_at,
+                has_played_assertion = excluded.has_played_assertion,
+                played_changed_at_ms = excluded.played_changed_at_ms,
+                resume_file_id = excluded.resume_file_id,
+                resume_file_revision = excluded.resume_file_revision,
+                resume_source_version = excluded.resume_source_version,
+                timeline_mode = excluded.timeline_mode,
+                tracks_version = excluded.tracks_version",
             params![
                 user_id.to_string(),
                 media_id.to_string(),
                 season,
                 episode,
-                position_ms,
-                played as i64,
-                favorite as i64,
-                duration_ms,
-                audio_track,
-                subtitle_track,
+                pos_val,
+                if played { 1 } else { 0 },
+                if favorite { 1 } else { 0 },
+                dur_val,
+                aud_val,
+                sub_val,
                 play_count,
                 now,
                 favorite_at,
+                has_played_assertion,
+                played_changed_at,
+                bound_file_id,
+                bound_rev,
+                bound_src_ver,
+                bound_timeline,
+                bound_tracks_ver,
             ],
         )?;
         self.unit_state(user_id, media_id, season, episode)?
@@ -440,7 +490,11 @@ impl Store {
                 (s, e) => (s, e),
             };
             let mut stmt = self.library.prepare(
-                "UPDATE playback_units SET played = ?3, watch_activity_at = ?4
+                "UPDATE playback_units
+                 SET played = ?3,
+                     has_played_assertion = CASE WHEN ?3 = 1 THEN 1 ELSE has_played_assertion END,
+                     played_changed_at_ms = CASE WHEN ?3 = 1 THEN ?4 ELSE played_changed_at_ms END,
+                     watch_activity_at = ?4
                  WHERE user_id = ?1 AND media_id = ?2
                    AND season >= ?5 AND episode >= ?6
                    AND (?5 = -1 OR season = ?5)
@@ -449,7 +503,7 @@ impl Store {
             let _ = stmt.execute(params![
                 user_id.to_string(),
                 media_id.to_string(),
-                played as i64,
+                if played { 1 } else { 0 },
                 now,
                 s_from,
                 e_from,
