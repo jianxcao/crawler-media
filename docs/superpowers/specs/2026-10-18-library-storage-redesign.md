@@ -1,6 +1,6 @@
 # Media / Library 存储重设计：单表浏览与独立响应缓存
 
-状态：**Sol 审核修订版，供用户审阅，未实施**。本设计补充并取代旧缓存计划中“保留浏览投影失效链”的决定。允许舍弃全部旧数据库数据，但不允许以“重建数据库”为理由删减现有业务功能。本文的新表和新路径都是提案，不代表当前代码已经如此运行。本轮按审核 F1–F5 修订身份、NFO 与一致性合同，并补充 Library 查询/写入成本边界；不代表修订已通过独立复审。
+状态：**Sol 第二轮复审修订版，供用户审阅，未实施**。本设计取代旧缓存计划中“保留浏览投影失效链”的决定。允许舍弃旧数据库数据，但不得删减现有业务功能。第一轮F1–F5已修订；第二轮确认F3/F4/F5在设计层面闭合，F1/F2仍有延伸缺口并发现季级范围遗漏。本轮补充R1跨源恢复、R2同来源合并与刷新目标、R3季级状态作用域；这些新增规则尚未经过独立复审，不代表运行时代码已实现。
 
 ## 1. 决策摘要
 
@@ -48,8 +48,8 @@
 | 表 / 主键 | 主要字段 | 规则 |
 |---|---|---|
 | `media` / `media_id TEXT` | kind、title、original_title、year、identity_state、aliases_display_json、metadata_revision | 内部 UUID，kind=movie/tv/video；无文件的 Subscribe 也可先创建 Media；不以路径或 TMDB ID 当身份 |
-| `media_aliases` / `(source,kind,external_id)` | media_id | 同来源同 kind 外部别名唯一归属；相同数字 movie/TV 不冲突；反向索引(media_id,source)；不同别名指向竞争身份时报冲突，不静默合并 |
-| `media_metadata_sources` / `(media_id,entity_scope,season,episode,source,locale)` | normalized_json、present_fields_json、fetched_at、source_revision | 已采用来源当前快照；work/season/episode坐标与人工覆盖一致，不等于HTTP缓存或每次请求历史；刷新失败不清空 |
+| `media_aliases` / `(source,kind,external_id)` | media_id、is_refresh_target | 别名唯一归属；同一Media/source/kind仅一条刷新目标（部分唯一索引），新识别首条别名为目标、后续添别名不暗中切换；不同外部实体合并须明确选择 |
+| `media_metadata_sources` / `(media_id,entity_scope,season,episode,source,locale)` | provider_entity_id、normalized_json、present_fields_json、fetched_at、source_revision | 当前来源快照；实体坐标同人工覆盖，后续刷新使用固定目标并校验季集归属，合并按R2确定决胜 |
 | `media_metadata` / `(media_id,locale)` | title/year、overview、release_date、rating、runtime_minutes、language、genres/countries JSON、poster_url/backdrop_url、cast/details JSON、field_origins_json、revision | 来源政策合成后的本地元数据；长简介/演职员等冷字段不复制进每个文件或卡片 |
 | `media_metadata_overrides` / `(media_id,entity_scope,season,episode,locale)` | 显式字段值/清空标志、revision | 全局人工字段锁；work坐标(-1,-1)、season坐标(s,-1)、episode坐标(s,e)，CHECK约束合法组合；来源刷新不覆盖 |
 
@@ -64,6 +64,8 @@ TV 的季/分集详情单独保存 `media_seasons(media_id,season,locale)` 与 `
 NFO提供明确语言时采用该语言，否则**导入时绑定Library当时的显示locale并持久化**，不随以后语言切换重新解释。详情顺序为请求locale→Library默认locale→实例默认locale，每一步都按对应实体采用；返回实际locale/来源。人工override只作用于同实体locale；Library语言切换按持久operation重算，不把旧NFO当成新语言翻译。
 
 **自产NFO反馈（F4）：** Scrape成功写文件时，在同库摄取记录中保存export_id、实体/locale、导出文件digest及各字段的导出值/原始来源。再次扫描内容相同的输出仅确认sidecar存在，不生成高权威覆盖；外部实际改变字段后，只把改变/显式删除的字段作为该NFO的本地覆盖，未变字段保留原来源。无法解析的新NFO不覆盖最后有效输入；外部删除文件解除其覆盖。文件已替换但导出登记前崩溃，通过Scrape持久意图中的digest/export_id恢复识别，不能误当人工修改。
+
+NFO读取入口必须返回可区分的状态：确认不存在、权限/根不可达等unknown IO、无效XML、有效输入；字段级再区分缺失/显式空/有值。只有确认删除或显式解除才移除本地覆盖，unknown IO保留最后有效输入，不能继续用Option<字段>把上述情况全压成None。该入口改造及两协议消费者列入实施计划，不能只改存储表。
 
 新库离线导入没有任何导出登记的NFO视为外部本地输入，优先于来源，这与“原实例自产文件有记录”不同；明确刷新来源默认不覆盖外部修改/人工锁，只有显式解除本地字段覆盖或重写动作才替换。清cache不改变以上来源判断。不增加另一套逐文件完整有效元数据投影，候选最多保留当前输入/最后有效值与必要导出来源，不保存每次扫描历史。
 
@@ -105,12 +107,14 @@ Collection 定义/成员随Media迁入library.db，绑定canonical media_id，�
 
 ### 4.4 User Playback 单元与摘要
 
-- 将 `playback_units` 移入 library.db，主键 `(user_id,media_id,season,episode)`，保持 position/played/favorite/track preference/play_count/时间语义。保留 Media 身份而不是 file_id/path 作为进度身份。
+- 将 `playback_units` 移入library.db，主键 `(user_id,media_id,season,episode)`；逻辑事实played/favorite/play_count与物理恢复包分离。恢复包同列保存position_ms、duration_ms、resume_file_id、resume_file_revision、resume_source_version、timeline_mode、tracks_version及轨道引用；一次有效上报成套提交，不拼接不同源的位置/时长。file_id仅作来源证据，不声明删除文件会级联删除观看事实的FK；文件移除后保留最后恢复包供解释，是否可用在选源时判断。无需增加每用户每版本进度表。
 - `user_library_items` 主键 `(user_id,library_id,media_id)`，保存 seen/played/favorite/last_played_at 与继续观看所需当前单元摘要；只为有相关状态的用户/Media 创建，不预建全用户×全 Library×全 Media 笛卡尔积。
 - 一行缺失的默认状态是未看/未收藏。**未看查询必须包含缺失行**；不能只查摘要存在的行，也不能分页后排除已看条目。
-- 用户心跳只更新**当前 user_id、当前 media_id**的单元/会话与确实包含该单元的 Library 用户摘要；whole 操作才影响该 Media 的所有现有 Library。不得读取其他用户单元、重算公共 items/terms 或检查磁盘。只有覆盖增删、身份变化等会改变其他用户归约的动作才按受影响 Media 定向处理那些用户。
+- 用户写入只处理**当前user_id、当前media_id**。影响范围有三种：episode按Media+season+episode精确定位；season `(s,-1)`按Media+season去重Library；whole `(-1,-1)`按Media定位所有现有items。从本地覆盖事实枚举影响范围，不能从已有用户摘要枚举（它可能尚不存在）；仅有其他季的Library不受season操作影响。不得读写其他用户、重算公共items/terms或检查磁盘。覆盖/身份变化才处理受影响的其他用户归约。
 - 区分 Library 浏览既有 whole/episode favorite 与 seen 规则、播放页分集完成规则。不能把“某集看过”改成“整部看完”。取消 movie 旧 `(0,0)` 兼容分支，全新数据一律写规范 whole；TV S00E00 仍保留。
 - `playback_sessions`、`playback_session_ids`、`playback_logs`、`playback_metrics`及非认证设备状态随单元一起移入library.db，保留现有字段/索引/保留窗口。会话generation/EventSequence校验、进度更新、摘要更新与终态历史提交使用同一事务；终态按稳定session标识幂等，旧Progress/Stop不能影响新会话，重复Stop不能增加播放次数。设备token/认证凭证仍在app.db，不因日志搬库而改变授权协议。
+
+**季级已看/撤销（R3）：** playback_units允许TV `(s,-1)`保存季级逻辑标记，但library_units只保存真实拥有的分集，不制造季级物理覆盖。分集完成状态继承episode/season/whole中的最近有效played断言，同时间按episode优先于season优先于whole；显式false也是断言，favorite-only/单纯轨道编辑不是played断言。played断言使用独立played_changed_at_ms/has_played_assertion，收藏时间不得推进它；消费层沿用既有“浏览seen/played”与“分集有效完成”各自口径，不能拿一个OR结果取代全部协议归约。季级写入同事务更新当前用户受影响Library的完成数、NextUp及需要的浏览摘要，无已有分集用户行也必须生效；撤销重新计算继承结果，不删除更晚的分集断言。没有真实观看不推进watch_activity_at、不伪造position/duration。
 
 ### 4.5 逻辑播放项目、物理源与多集文件（F1）
 
@@ -119,6 +123,14 @@ Collection 定义/成员随Media迁入library.db，绑定canonical media_id，�
 - `library_file_units`记录覆盖关系，不推断时间分段。首版直连多集文件使用 **full_file时间轴**：E01/E02可分别指向同一完整文件，进度按选中的逻辑目标独立保存，position/duration都是完整文件坐标。UI/协议明确这是合并文件，不伪报分集时长或自动跳到E02起点；停止/完成只作用于选中的分集，不自动标记其他覆盖分集已看。
 - 未知分集起止时间不从文件时长均分，也不把普通chapter当作集边界。不增加裁剪/转码服务；有可靠集段映射的未来分段播放需独立设计时间转换和协议合同，本次不宣称支持。覆盖可使Subscribe判为已拥有，但不等于观看完成。
 - 播放选版本：先按逻辑单元和授权Library读取覆盖索引，再选可发布且可访问的源，最后按file_id点查当前源版本。两个Library共用Media的观看事实可以共享，但被隐藏Library的文件不能成为播放源。文件被替换后旧会话不得写入新源；历史保留其原绑定信息，不依赖文件行仍存在。
+
+**跨源恢复兼容政策（R1）：** Web恢复、Jellyfin PlaybackInfo/PositionTicks、NextUp预览和自动起播共用一个源感知解析器。逻辑身份相同不意味着时间轴相同；默认仅当resume_file_id、file_revision、source_version及timeline_mode全部与当前物理源匹配时复用position/duration。轨道编号还必须匹配tracks_version并在当前探测列表有效；否则清除本次物理轨道选择，按语言/默认偏好重新选择，不复用旧编号。仅时长相同、路径相同、外部ID相同或分辨率不同均不构成兼容证据；首版不自动按百分比、时间偏移或内容相似度转换。
+
+自动继续观看优先选仍授权/可用的精确原源，即使它不是默认最高质量版本；用户显式选其他版本则尊重选择。原源不存在/无权/已换版本时选择正常可用源，但本次start_position=0，duration只取当前源有效探测值（未知则NULL），轨道按当前源重选。Web明确返回resume_status=source_changed与原因；Jellyfin在该源的播放信息/项目位置中返回0及当前源信息，不暗中塞入旧位置。无可用源返回不可播放，不以隐藏Library原源兜底；不能因played/favorite逻辑状态保留而强行判新源已播到片尾。
+
+源不兼容的解析本身是只读，不抹去旧恢复包或观看事实；新源开始并收到有效进度时，才用新源绑定成套替换该逻辑单元恢复包。用户明确start_ms属于对本次选源的显式定位，按当前源校验，可覆盖默认0，但不是自动恢复转换；自动完成阈值仅用当前会话有效duration/position。逻辑played/favorite不因源变化自动清空；已看单元默认重新播放从0开始。
+
+验收（R1）：90分钟合并文件E02在60分钟暂停→改选45分钟独立E02时起点0且不沿用90分钟duration；原源仍可访问时自动继续使用原源60分钟；不同剪辑/同路径替换不可自动迁移位置；轨道顺序变化不复用编号；未启动只做解析不丢旧进度，两个协议均保留收藏/已看，NextUp不返回对选定源无效的恢复位置。
 - 验收：同文件覆盖E01/E02，两个ItemId分别解析到同一源且进度独立；E02开始后E01迟到事件不改变E02；重复Stop不重复计数；完成E01不标E02已看；物理字节仅累计一次；TV S00E00与whole无冲突。
 
 ### 4.6 文件重新识别与 canonical Media 合并（F2）
@@ -128,10 +140,18 @@ Collection 定义/成员随Media迁入library.db，绑定canonical media_id，�
 **身份合并**仅用于经明确确认A/B为同一作品且kind一致的动作，选定唯一survivor ID；它不是修正一个文件的默认行为。规则如下：
 
 1. 同用户同单元：favorite/played/seen按既有事实OR归并；position、duration与轨道选择采用最近有效观看活动的成套状态（不得拿favorite时间覆盖观看进度），同时间以survivor优先；没有有效源身份/时长依据的不猜测转换。play_count取两者max而非相加，避免未知重复来源双计；历史保留独立事件，只按稳定session/event标识去重，界面不再由历史条数反推这一计数。
-2. 别名唯一性保留；不同来源别名可汇入，任一外部别名已属于第三个身份则中止待人工处理。人工锁定字段值冲突则在预检返回明确冲突，不自动丢弃；非锁定候选汇入后按固定来源/locale规则重算。Collection同owner重复成员合为一项，保留最早排序位置；Subscribe只改media_id引用，不擅自合并两条策略。
+2. 别名唯一性保留；不同来源别名可汇入，任一外部别名已属于第三个身份则中止待人工处理。人工锁冲突在预检返回明确冲突；同来源快照碰撞及后续刷新按下述R2规则，不依赖SQL处理顺序。Collection同owner重复成员合为一项，保留最早排序位置；Subscribe只改media_id引用，不擅自合并两条策略。
 3. 持久operation以唯一operation_id保存survivor/loser及预检版本。顺序：冻结两个身份的新引用/写入→排空相关工作和会话→library.db事务合并事实及摘要→分批收敛Subscribe/Job中显式Media引用→校验无可写loser引用→完成/解除survivor冻结。每一步有持久阶段和幂等键；失败/重启保持冻结并可重试，不伪称跨库事务。
 4. 创建Subscribe、Job调度、文件发布、Playback写入等入口必须校验身份状态，冻结后不能新增旧引用；已运行跨库发布者由租约/版本屏障排空。loser保留最小retired墓碑用于拒绝旧ID（明确错误和survivor信息），不是可继续写入的兼容实体或自动HTTP跳转。用户重新选择survivor；历史审计中的原ID可保留。
 5. 验收：不同作品A/B只改挂一个文件时，A另一库文件、原始进度/收藏/Collection/Subscribe不变；确认同作品合并后冲突规则确定、重试不增加计数；在每个阶段退出重启均可继续，冻结/退役ID不能再产生新引用。
+
+**同来源候选合并与刷新目标（R2）：** 每条来源快照还记录provider_entity_id（对应source/scope的外部实体）、规范化payload与字段存在性摘要，不能只记录source名。合并预检先解析“同一个外部实体”再比较版本：
+
+- 同source/scope/locale且provider_entity_id相同，选择整份已校验快照：fetched_at较新者胜；相同时间固定survivor原行优先，不依赖遍历顺序，不比较不同身份的本地source_revision大小。胜出快照的缺失字段保持缺失、显式空保持显式空，不从落选快照拼补后伪称一次来源响应；按原字段采用政策再合成有效元数据。失败响应从来不是可选快照。
+- 同source却provider_entity_id不同，时间新旧不能证明是同一外部条目。预检必须由合并请求为每个冲突source明确选择refresh_target_external_id；缺失选择返回冲突且不进入冻结/写入阶段。选择必须属于已确认合并的别名并匹配kind；所有非冲突别名可保留用于身份识别，但每个Media/source/kind仅一条别名标记is_refresh_target（部分唯一约束），来源刷新只能使用该目标，不随机选第一条别名。
+- 当前单快照表不扩展为无限候选历史：不同外部实体只保留选定目标对应的当前快照，若只有另一目标的快照则不冒用，标为该来源待刷新；既有本地有效值按既有fallback规则保留并标明原来源，直到明确采用选定目标成功返回。work目标确定后季/集只采用其验证归属的provider实体，不因季集数字相同拼接不同作品；无法验证或坐标冲突则预检拒绝待处理。
+- 预检把冲突选择、每个键的胜出来源/版本与有效候选清单固定在持久合并operation中。冻结后事务再次校验预检版本；已变化则回到预检，不沿用旧决议。一次成功事务对冲突键UPSERT一次，重启不按新读取顺序重新决胜；后续刷新只更新固定目标。人工锁仍高于该选择，不因合并自动解除。
+- 验收：同实体同locale新旧/同时间/缺失与显式空快照交换输入顺序，胜出整份内容一致；不同外部实体无明确选择时拒绝，有选择时后续请求固定目标；合并阶段重启/重试不产生唯一键错误或改变胜出结果，季集不能串作品。
 
 ### 4.7 Library 表关系与成本地图
 
@@ -165,7 +185,7 @@ flowchart TD
 | 普通播放心跳 | 当前session+unit+受影响用户摘要，按当前用户/Media/单元索引 | 不碰公共items/terms、不读其他用户、不执行整库重建 |
 | 新文件或覆盖删除 | 文件/coverage、受影响units、对应item/terms及相关用户摘要，同事务 | 增加局部写成本换取读速度；不重写整个Library |
 
-索引职责补充：`library_items(media_id,library_id)`供单Media扇出；心跳优先用去重units索引 `(media_id,season,episode,library_id)` 定位Library，coverage `(library_id,media_id,season,episode,file_id)`只用于选物理版本，避免每个心跳遍历同集所有版本；user摘要主键 `(user_id,library_id,media_id)`，另按 `(library_id,media_id,user_id)`支持覆盖变化，最近活动排序用 `(user_id,library_id,last_played_at DESC,media_id)`；用户单元采用明确的watch_activity_at，索引 `(user_id,media_id,watch_activity_at DESC,season,episode)`，favorite更新不得推进该列/冒充观看。其他索引必须对应真实查询，不能凭字段一律加索引。
+索引职责补充：items反向 `(media_id,library_id)` 用于whole扇出；units索引 `(media_id,season,episode,library_id)` 用于episode精确定位，**season用该索引的Media+season前缀去重Library**，不能查不存在的 `(s,-1)` 覆盖；只拥有其他季的库不入选。coverage `(library_id,media_id,season,episode,file_id)`只选物理版本，心跳不遍历同集所有版本。用户摘要主键 `(user_id,library_id,media_id)`、反向 `(library_id,media_id,user_id)`用于覆盖变化，活动排序 `(user_id,library_id,last_played_at DESC,media_id)`；用户单元 `(user_id,media_id,watch_activity_at DESC,season,episode)`用于观看活动回退，played断言/favorite时间单独保存不冒充观看。scope枚举和这些查询分别验收，不能从现有稀疏用户行推断应受影响Library。
 
 **成本用数据范围判断：** 列表seek约为索引定位+返回页，详情按一个Media/一季范围，单元选源按该集版本数；exact facets、稀疏条件或跨库去重可能按本库items/terms增长。文件变更按受影响Media文件/覆盖/用户数增长。表数量本身既不是成本指标，也不是无限拆表的理由：冷数据独立避免热页读大对象，coverage独立是多对多事实，三个摘要须以热查询消费者和写成本证明价值，不能再叠加泛化全文件投影。
 
@@ -186,7 +206,7 @@ Store 提供按用例的事务入口，而不是允许任何模块任意写事�
 
 索引：文件 `(library_id,media_id,file_id)`、`(media_id,library_id,file_id)`、`(root_id,path_key)`；单元按 `(library_id,media_id,season,episode,file_id)` 与 `(media_id,season,episode,library_id)`；用户单元反向 `(media_id,user_id,season,episode)`。质量/版本变化后首选文件重新选择时，SQL/Rust 可读取**该 Media 范围**，不是全 Library。
 
-文件/覆盖/元数据变更可在受影响Media范围重算公共汇总，扫描以**最多100个文件**为提交窗口、合并重复Media更新；该上限仅限制输入数量，不保证归约耗时。Playback禁止复用这个全用户重算入口：普通位置/时间心跳只写当前会话/单元及当前用户受影响摘要的时间/继续观看字段；seen/played/favorite或排序领先者改变、撤销时，才按当前用户+Media+相关Library覆盖重算必要归约。其他用户状态只在覆盖增删/身份操作时处理。对超长TV的撤销/移除领先单元可能读取该用户该作品多行，要单独测；不得声称所有写入O(1)。网络/大blob解析在事务外，已解析冷数据入库本身仍计入写成本。
+文件/覆盖/元数据变更可在受影响Media范围重算公共汇总，扫描以**最多100个文件**为提交窗口、合并重复Media更新；该上限只限输入，不保证归约耗时。Playback不复用全用户重算入口：普通心跳只写当前会话/单元及当前用户受影响摘要；有效played/seen/favorite或领先者变化才按episode/season/whole的明确scope更新归约。season标记/撤销可能遍历该季真实分集，whole可能遍历本作品已有覆盖，不能缩成精确集或预先分页再归约；不读写其他用户。10000集作品的标记/撤销应测锁时长，不能为提速打破原子可见。网络/大blob解析在事务外，冷数据写入仍计成本。
 
 元数据全局刷新按单Media事务发布；根编辑/显示语言等确实涉及整库的大操作必须有持久operation与生命周期屏障：标记reindexing、阻止旧scope工作发布，分批更新期间普通读返回明确operation状态而非混合新旧归属/语言，完成并校验后恢复ready。重启恢复该operation，不用通用浏览journal；不能长持一个覆盖百万文件的写事务。
 
@@ -257,6 +277,10 @@ ACL 先从配置得出授权 Library 集，再将授权条件带入列表/count/
 8. 每个触及crate独立 `cargo test -p <crate>`，稳定树workspace一次；前端typecheck/test/build。现有无关失败报告实际证据；NAS设备/真实来源未运行必须写Not run。
 
 本轮新增可观察验收：F1多集独立ItemId/会话/迟到事件及full_file时间轴；F2文件改挂隔离与canonical合并每阶段重启/冲突计数；F3实体/locale隔离；F4自产NFO反馈及人工修改；F5事实驱动查漏与修复。性能专项在10k分集、多Library、多用户同Media下，固定当前用户与覆盖，增长其他用户状态时，心跳的读取/写入集合不能增长；增加不包含该单元的Library不得更新其用户摘要。并发扫描+心跳至少记录p95、写锁等待、最大事务时长、busy失败和扫描吞吐；未实现测量前不写毫秒承诺。
+
+第二轮复审新增验收（R1–R3）：跨源解析覆盖合并→独立分集/剪辑变化/同路径替换/音轨重排，两个协议的源感知位置、duration和轨道输出一致；同来源快照交换读取顺序/相同时间/重启仍确定，外部实体冲突无选择拒绝、选择后刷新只打选中目标；S01E01在A、S01E02在B、S02在C且无初始用户行时，当前用户标记S01已看/撤销须同事务更新A/B的NextUp与分集完成，C及其他用户保持不变，收藏不得改变played断言优先级。
+
+R1–R3本轮设计烟测：临时Python SQLite 3.51.0验证episode/season/whole三个作用域、无初始用户摘要的季标记/撤销仅更新A/B；season查询走Media+season覆盖索引，DISTINCT使用临时B-tree，故不宣称按Library去重是常数工作。同来源整行候选在交换输入顺序后仍按fetched_at/固定survivor决胜，缺失与显式空不混合；部分唯一索引拒绝两个刷新目标。独立策略原型验证原源恢复/新源归零/轨道重排/未知时长/显式seek且不修改旧恢复包。以上仅验证SQL形态和设计决策表，非完整DDL、真实Web/Jellyfin实现、并发性能或独立Sol复审；本轮不运行Cargo测试，因为未修改运行时代码。
 
 设计阶段已做独立SQL烟测：Python SQLite 3.51.0内存库100k卡片，复合title cursor返回第50001起精确50条，EXPLAIN显示覆盖索引复合SEARCH；未看NOT EXISTS用User/Library/Media主键SEARCH，缺失用户状态行正确入选、过滤在LIMIT前。仅证明该SQL形态可执行及这组语义，不是Rust bundled SQLite、真实应用或NAS性能验收，后者均未运行。
 
