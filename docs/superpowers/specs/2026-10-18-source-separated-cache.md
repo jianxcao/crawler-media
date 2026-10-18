@@ -56,4 +56,4 @@ CREATE INDEX tmdb_cache_retention_idx ON tmdb_cache(fetched_at ASC, entry_id ASC
 
 全部旧DB可在实施最后停服后一次性重建，只删除明确实例SQLite文件与WAL/SHM，不动视频、字幕、NFO、图片、下载目录、Indexer YAML或编译缓存；正常启动不自动清库。旧数据可丢，不代表可以交付无法扫描、Transfer、Scrape、浏览或播放的新schema。
 
-原 [缓存拆表实施计划](../plans/2026-10-18-source-separated-cache.md) 已被整体重设计取代，**不得继续按旧步骤实施**。整体设计审阅后再生成配套的新实施计划。
+开发入口：[Media / Library 详细开发计划](../plans/2026-10-18-library-storage-redesign.md)，配套包含完整DDL、事务接口和T1–T12验收。旧缓存拆表计划已按用户要求删除，历史仅在Git保留，不得依据旧步骤创建浏览journal。
