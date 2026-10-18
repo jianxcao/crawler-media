@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use domain::{Filter, LedgerRow, Media, Subscribe, Torrent};
+use domain::{FileCoverage, FileSource, Filter, LedgerRow, LibraryId, Media, Subscribe, Torrent};
 use downloader::Downloader;
 use hooks::{Bus, PluginError};
 use library::TransferMode;
@@ -33,6 +33,9 @@ pub struct RunInput<'a, D: Downloader + ?Sized> {
     pub facts: SubscribeFacts,
     pub downloader: &'a D,
     pub library_root: &'a Path,
+    pub library_id: Option<LibraryId>,
+    pub root_id: Option<String>,
+    pub config_revision: Option<i64>,
     pub transfer_mode: Option<TransferMode>,
     pub scrape: bool,
     pub hooks: Option<&'a Bus>,
@@ -48,10 +51,9 @@ pub struct RunInput<'a, D: Downloader + ?Sized> {
 
 pub struct RunOutcome {
     pub facts: SubscribeFacts,
+    pub files: Vec<FileCoverage>,
+    pub file_sources: Vec<FileSource>,
     pub ledger: Vec<LedgerRow>,
-    /// Original completed file for each ledger path written during this run.
-    /// The API persists it so an administrator can explicitly retransfer a
-    /// missing Library file without re-running the subscription workflow.
     pub ledger_sources: Vec<LedgerSource>,
     pub removed_paths: Vec<String>,
     pub completed: bool,

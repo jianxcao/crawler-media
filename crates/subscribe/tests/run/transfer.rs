@@ -1,19 +1,19 @@
 use super::*;
 
-struct ReservationRecorder(std::cell::RefCell<Option<domain::LedgerRow>>);
+struct ReservationRecorder(std::cell::RefCell<Option<domain::FileCoverage>>);
 
 impl subscribe::TransferRecorder for ReservationRecorder {
-    fn prepare(&self, row: &domain::LedgerRow, _: &Path, _: TransferMode)
-        -> Result<domain::LedgerRow, subscribe::SubscribeError>
+    fn prepare(&self, candidate: &domain::FileCoverage, _: &Path, _: TransferMode)
+        -> Result<domain::FileCoverage, subscribe::SubscribeError>
     {
-        assert!(!Path::new(&row.path).exists(), "reservation must precede publication");
-        *self.0.borrow_mut() = Some(row.clone());
-        Ok(row.clone())
+        assert!(!candidate.file.path.exists(), "reservation must precede publication");
+        *self.0.borrow_mut() = Some(candidate.clone());
+        Ok(candidate.clone())
     }
 
-    fn published(&self, row: &domain::LedgerRow) -> Result<(), subscribe::SubscribeError> {
-        assert!(Path::new(&row.path).is_file());
-        assert_eq!(self.0.borrow().as_ref().unwrap().id, row.id);
+    fn published(&self, candidate: &domain::FileCoverage) -> Result<(), subscribe::SubscribeError> {
+        assert!(candidate.file.path.is_file());
+        assert_eq!(self.0.borrow().as_ref().unwrap().file.file_id, candidate.file.file_id);
         Ok(())
     }
 }
@@ -36,7 +36,8 @@ fn recorded_collection_reserves_intended_path_before_publication() {
     let outcome = subscribe::collect_completed_recorded(added, &FixedProbe, &[],
         &library::WorkControl::default(), Some(&recorder)).unwrap();
     assert_eq!(outcome.ledger.len(), 1);
-    assert_eq!(outcome.ledger[0].path, recorder.0.borrow().as_ref().unwrap().path);
+    assert_eq!(outcome.files.len(), 1);
+    assert_eq!(outcome.files[0].file.path, recorder.0.borrow().as_ref().unwrap().file.path);
     assert!(outcome.collection_errors.is_empty());
 }
 

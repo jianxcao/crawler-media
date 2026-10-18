@@ -21,7 +21,8 @@ impl RetryFixture {
         let input = RunInput {
             subscribe: &self.sub, media: &self.media, filter: &self.filter, wash_filter: None,
             torrents: vec![], facts, search_keywords: vec![], downloader: &dl,
-            library_root: &self.root, transfer_mode: Some(library::TransferMode::Copy),
+            library_root: &self.root, library_id: None, root_id: None, config_revision: None,
+            transfer_mode: Some(library::TransferMode::Copy),
             scrape: false, hooks: None, naming: Some(&self.naming), preserve_removed: true,
             overlap: Default::default(),
             absolute: None,

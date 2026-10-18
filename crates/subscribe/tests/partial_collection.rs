@@ -111,6 +111,9 @@ fn one_failed_file_does_not_discard_successful_files_from_same_torrent() {
             facts: SubscribeFacts::default(),
             downloader: &downloader,
             library_root: &tmp.path().join("library"),
+            library_id: None,
+            root_id: None,
+            config_revision: None,
             transfer_mode: Some(TransferMode::Copy),
             scrape: false,
             hooks: None,
@@ -143,6 +146,8 @@ fn one_failed_file_does_not_discard_successful_files_from_same_torrent() {
         rejected: vec![],
         outcome: RunOutcome {
             facts: SubscribeFacts::default(),
+            files: vec![],
+            file_sources: vec![],
             ledger: vec![],
             ledger_sources: vec![],
             removed_paths: vec![],

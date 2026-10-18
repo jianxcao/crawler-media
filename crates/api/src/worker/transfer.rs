@@ -254,6 +254,8 @@ fn build_added_input<'a>(
         rejected: Vec::new(),
         outcome: subscribe::RunOutcome {
             facts: Default::default(),
+            files: Vec::new(),
+            file_sources: Vec::new(),
             ledger: Vec::new(),
             ledger_sources: Vec::new(),
             removed_paths: Vec::new(),
@@ -343,10 +345,10 @@ pub(crate) struct PublicationRecorder<'a> {
 
 impl PublicationRecorder<'_> {
     fn prepare_with_plan(
-        &self, row: &LedgerRow, source: &std::path::Path, mode: library::TransferMode,
+        &self, candidate: &domain::FileCoverage, source: &std::path::Path, mode: library::TransferMode,
         plan: Option<&TransferPlan>,
-    ) -> Result<LedgerRow, subscribe::SubscribeError> {
-        let result = (|| -> Result<LedgerRow, String> {
+    ) -> Result<domain::FileCoverage, subscribe::SubscribeError> {
+        let result = (|| -> Result<domain::FileCoverage, String> {
             let store = self.state.store.lock();
             // This lock spans validation and reservation, never filesystem work.
             if let Some(plan) = plan {
@@ -360,30 +362,57 @@ impl PublicationRecorder<'_> {
                     return Err("Transfer source or Library configuration changed".into());
                 }
             }
+            let row = domain::LedgerRow {
+                id: candidate.file.file_id,
+                media_id: candidate.file.media_id,
+                path: candidate.file.path.to_string_lossy().to_string(),
+                season: candidate.units.first().map(|u| u.season as u32),
+                episode: candidate.units.first().map(|u| u.episode as u32),
+                resolution: candidate.file.resolution.clone(),
+                codec: candidate.file.codec.clone(),
+                hdr: candidate.file.hdr.clone(),
+                quality_source: candidate.file.quality_source,
+                confidence: candidate.file.confidence,
+                filter_score: candidate.file.filter_score,
+            };
             let mode = match mode {
                 library::TransferMode::Copy => "copy",
                 library::TransferMode::Move => "move",
                 library::TransferMode::Hardlink => "hardlink",
             };
-            store.prepare_transfer(row, mode, &source.display().to_string()).map_err(|e| e.to_string())
+            store.prepare_transfer(&row, mode, &source.display().to_string()).map_err(|e| e.to_string())?;
+            Ok(candidate.clone())
         })();
         result.map_err(|error| {
-            tracing::error!(path = %row.path, %error, "Transfer publication reservation failed");
+            tracing::error!(path = %candidate.file.path.display(), %error, "Transfer publication reservation failed");
             subscribe::SubscribeError::Downloader(downloader::DownloaderError::Message(error))
         })
     }
 }
 
 impl subscribe::TransferRecorder for PublicationRecorder<'_> {
-    fn prepare(&self, row: &LedgerRow, source: &std::path::Path, mode: library::TransferMode)
-        -> Result<LedgerRow, subscribe::SubscribeError>
+    fn prepare(&self, candidate: &domain::FileCoverage, source: &std::path::Path, mode: library::TransferMode)
+        -> Result<domain::FileCoverage, subscribe::SubscribeError>
     {
-        self.prepare_with_plan(row, source, mode, None)
+        self.prepare_with_plan(candidate, source, mode, None)
     }
 
-    fn published(&self, row: &LedgerRow) -> Result<(), subscribe::SubscribeError> {
-        self.state.store.lock().complete_transfer_publication(row).map_err(|error| {
-            tracing::error!(path = %row.path, %error, "Transfer publication completion failed");
+    fn published(&self, candidate: &domain::FileCoverage) -> Result<(), subscribe::SubscribeError> {
+        let row = domain::LedgerRow {
+            id: candidate.file.file_id,
+            media_id: candidate.file.media_id,
+            path: candidate.file.path.to_string_lossy().to_string(),
+            season: candidate.units.first().map(|u| u.season as u32),
+            episode: candidate.units.first().map(|u| u.episode as u32),
+            resolution: candidate.file.resolution.clone(),
+            codec: candidate.file.codec.clone(),
+            hdr: candidate.file.hdr.clone(),
+            quality_source: candidate.file.quality_source,
+            confidence: candidate.file.confidence,
+            filter_score: candidate.file.filter_score,
+        };
+        self.state.store.lock().complete_transfer_publication(&row).map_err(|error| {
+            tracing::error!(path = %candidate.file.path.display(), %error, "Transfer publication completion failed");
             subscribe::SubscribeError::Downloader(downloader::DownloaderError::Message(error.to_string()))
         })
     }
@@ -395,17 +424,16 @@ pub(crate) struct PlannedPublicationRecorder<'a> {
 }
 
 impl subscribe::TransferRecorder for PlannedPublicationRecorder<'_> {
-    fn prepare(&self, row: &LedgerRow, source: &std::path::Path, mode: library::TransferMode)
-        -> Result<LedgerRow, subscribe::SubscribeError>
+    fn prepare(&self, candidate: &domain::FileCoverage, source: &std::path::Path, mode: library::TransferMode)
+        -> Result<domain::FileCoverage, subscribe::SubscribeError>
     {
-        self.recorder.prepare_with_plan(row, source, mode, Some(self.plan))
+        self.recorder.prepare_with_plan(candidate, source, mode, Some(self.plan))
     }
 
-    fn published(&self, row: &LedgerRow) -> Result<(), subscribe::SubscribeError> {
-        self.recorder.published(row)
+    fn published(&self, candidate: &domain::FileCoverage) -> Result<(), subscribe::SubscribeError> {
+        self.recorder.published(candidate)
     }
 }
-
 /// Join existing Library work before observing facts or acquiring our own lease.
 /// In particular, a first scan must not claim a just-published Transfer file while
 /// probing is still running and before its authoritative ledger row is committed.
@@ -492,6 +520,9 @@ pub fn transfer_one(state: &ApiState, subscribe_id: SubscribeId) -> Result<(), S
             search_keywords: Vec::new(),
             downloader: &routed,
             library_root: &plan.root,
+            library_id: plan.library_id.parse().ok(),
+            root_id: None,
+            config_revision: Some(plan.revisions.app),
             transfer_mode: plan.mode,
             scrape: plan.nfo,
             hooks: None,
@@ -691,14 +722,38 @@ mod tests {
         (tmp, state, media, subscribe)
     }
 
-    fn candidate(media: &Media, plan: &TransferPlan) -> LedgerRow {
-        LedgerRow {
-            id: domain::LedgerId::new(), media_id: media.id,
-            path: plan.root.join("The Matrix.mkv").display().to_string(),
-            season: None, episode: None, resolution: None, codec: None, hdr: None,
+    fn candidate(media: &Media, plan: &TransferPlan) -> domain::FileCoverage {
+        let file = domain::LibraryFile {
+            file_id: domain::LedgerId::new(),
+            library_id: plan.library_id.parse().unwrap(),
+            root_id: "root1".into(),
+            media_id: media.id,
+            kind: media.kind,
+            path: plan.root.join("The Matrix.mkv"),
+            version: domain::FileVersion { revision: 1, source_version: "v1".into() },
+            presence: domain::FilePresence::Present,
+            publication: domain::FilePublication::Pending,
+            size_bytes: Some(1024),
+            stat_known: true,
+            created_ns: None,
+            modified_ns: None,
+            source_digest: None,
+            source_path: None,
+            transfer_mode: None,
+            resolution: None,
+            codec: None,
+            hdr: None,
             quality_source: domain::QualitySource::Release,
-            confidence: domain::Confidence::High, filter_score: Some(100),
-        }
+            confidence: domain::Confidence::High,
+            filter_score: Some(100),
+            release_quality: None,
+            duration_ms: None,
+            tracks_version: 0,
+            poster_path: None,
+            backdrop_path: None,
+            still_path: None,
+        };
+        domain::FileCoverage { file, units: vec![domain::UnitKey::WHOLE] }
     }
 
     #[test]
@@ -713,13 +768,13 @@ mod tests {
             recorder: PublicationRecorder { state: &state, subscribe: &subscribe, lease: &lease, revisions },
             plan: &plan,
         };
-        let row = candidate(&media, &plan);
+        let candidate_cov = candidate(&media, &plan);
         let result = subscribe::TransferRecorder::prepare(
-            &recorder, &row, &tmp.path().join("source.mkv"), library::TransferMode::Copy,
+            &recorder, &candidate_cov, &tmp.path().join("source.mkv"), library::TransferMode::Copy,
         );
         assert!(result.is_err(), "obsolete root must not be reserved: {result:?}");
         assert!(state.store.lock().list_ledger().unwrap().is_empty());
-        assert!(!std::path::Path::new(&row.path).exists());
+        assert!(!candidate_cov.file.path.exists());
     }
 
     #[test]
@@ -735,12 +790,12 @@ mod tests {
             recorder: PublicationRecorder { state: &state, subscribe: &subscribe, lease: &lease, revisions },
             plan: &plan,
         };
-        let row = candidate(&media, &plan);
+        let candidate_cov = candidate(&media, &plan);
         let result = subscribe::TransferRecorder::prepare(
-            &recorder, &row, &tmp.path().join("source.mkv"), library::TransferMode::Copy,
+            &recorder, &candidate_cov, &tmp.path().join("source.mkv"), library::TransferMode::Copy,
         );
         assert!(result.is_err(), "obsolete mode must not be reserved: {result:?}");
         assert!(state.store.lock().list_ledger().unwrap().is_empty());
-        assert!(!std::path::Path::new(&row.path).exists());
+        assert!(!candidate_cov.file.path.exists());
     }
 }

@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use domain::{Confidence, LedgerId, LedgerRow, QualitySource, Release};
+use domain::{Confidence, FileCoverage, FileSource, LedgerId, LedgerRow, QualitySource, Release, UnitKey};
 use downloader::Downloader;
 use filter::ScoredTorrent;
 use hooks::{HookEvent, Step};
@@ -15,9 +15,9 @@ use crate::{LedgerSource, RunOutcome, SubscribeError};
 /// Durable final-path reservation around filesystem publication. Implementations
 /// must not perform filesystem work while recording or completing a row.
 pub trait TransferRecorder {
-    fn prepare(&self, row: &LedgerRow, source: &Path, mode: library::TransferMode)
-        -> Result<LedgerRow, SubscribeError>;
-    fn published(&self, row: &LedgerRow) -> Result<(), SubscribeError>;
+    fn prepare(&self, candidate: &FileCoverage, source: &Path, mode: library::TransferMode)
+        -> Result<FileCoverage, SubscribeError>;
+    fn published(&self, candidate: &FileCoverage) -> Result<(), SubscribeError>;
 }
 
 pub fn collect_completed<D: Downloader + ?Sized>(
@@ -52,6 +52,8 @@ pub fn collect_completed_recorded<D: Downloader + ?Sized>(
     recorder: Option<&dyn TransferRecorder>,
 ) -> Result<RunOutcome, SubscribeError> {
     control.check()?;
+    let mut files: Vec<FileCoverage> = Vec::new();
+    let mut file_sources: Vec<FileSource> = Vec::new();
     let mut ledger = Vec::new();
     let mut ledger_sources = Vec::new();
     let mut removed_paths = Vec::new();
@@ -76,6 +78,8 @@ pub fn collect_completed_recorded<D: Downloader + ?Sized>(
             probe,
             existing,
             &scored,
+            &mut files,
+            &mut file_sources,
             &mut ledger,
             &mut ledger_sources,
             &mut removed_paths,
@@ -91,6 +95,8 @@ pub fn collect_completed_recorded<D: Downloader + ?Sized>(
     Ok(RunOutcome {
         completed: is_complete(added.input.subscribe, &added.input.facts),
         facts: added.input.facts,
+        files,
+        file_sources,
         ledger,
         ledger_sources,
         removed_paths,
@@ -108,6 +114,8 @@ fn collect_scored_torrent<D: Downloader + ?Sized>(
     probe: &dyn MediaProbe,
     existing: &[crate::collection_destinations::DestinationMapping],
     scored: &ScoredTorrent,
+    files: &mut Vec<FileCoverage>,
+    file_sources: &mut Vec<FileSource>,
     ledger: &mut Vec<LedgerRow>,
     ledger_sources: &mut Vec<LedgerSource>,
     removed_paths: &mut Vec<String>,
@@ -136,6 +144,8 @@ fn collect_scored_torrent<D: Downloader + ?Sized>(
         probe,
         existing,
         scored,
+        files,
+        file_sources,
         ledger,
         ledger_sources,
         removed_paths,
@@ -155,6 +165,8 @@ fn collect_scored_torrent_inner<D: Downloader + ?Sized>(
     probe: &dyn MediaProbe,
     existing: &[crate::collection_destinations::DestinationMapping],
     scored: &ScoredTorrent,
+    files: &mut Vec<FileCoverage>,
+    file_sources: &mut Vec<FileSource>,
     ledger: &mut Vec<LedgerRow>,
     ledger_sources: &mut Vec<LedgerSource>,
     removed_paths: &mut Vec<String>,
@@ -230,6 +242,8 @@ fn collect_scored_torrent_inner<D: Downloader + ?Sized>(
             scored,
             src,
             single_file,
+            files,
+            file_sources,
             ledger,
             ledger_sources,
             removed_paths,
@@ -367,6 +381,8 @@ fn collect_one<D: Downloader + ?Sized>(
     scored: &ScoredTorrent,
     src: PathBuf,
     single_file: bool,
+    files: &mut Vec<FileCoverage>,
+    file_sources: &mut Vec<FileSource>,
     ledger: &mut Vec<LedgerRow>,
     ledger_sources: &mut Vec<LedgerSource>,
     removed_paths: &mut Vec<String>,
@@ -462,13 +478,13 @@ fn collect_one<D: Downloader + ?Sized>(
     // Otherwise a name can be taken between choosing it and publishing it
     // (another worker, the user): publication never overwrites (D-H3), so pick
     // the next free name and retry a few times (M8).
-    let (dest, mut row) = match pending {
+    let (dest, mut candidate) = match pending {
         Some(mapping) => {
             let dest = mapping.destination_path.clone();
-            let row = reserve_and_publish(
+            let candidate = reserve_and_publish(
                 added, scored, &release, &src, &dest, true, control, recorder,
             )?;
-            (dest, row)
+            (dest, candidate)
         }
         None => {
             let mut attempts = 0;
@@ -579,13 +595,31 @@ fn collect_one<D: Downloader + ?Sized>(
         ledger_path: ledger_path.clone(),
         source_path: src.display().to_string(),
     });
-    row.resolution = quality.resolution;
-    row.codec = quality.codec;
-    row.hdr = quality.hdr;
-    row.quality_source = source;
-    row.confidence = confidence;
-    row.filter_score = Some(actual_score);
-    ledger.push(row);
+    file_sources.push(FileSource {
+        file_id: candidate.file.file_id,
+        destination: dest.clone(),
+        source: src.clone(),
+    });
+    candidate.file.resolution = quality.resolution.clone();
+    candidate.file.codec = quality.codec.clone();
+    candidate.file.hdr = quality.hdr.clone();
+    candidate.file.quality_source = source;
+    candidate.file.confidence = confidence;
+    candidate.file.filter_score = Some(actual_score);
+    files.push(candidate.clone());
+    ledger.push(LedgerRow {
+        id: candidate.file.file_id,
+        media_id: candidate.file.media_id,
+        path: candidate.file.path.to_string_lossy().to_string(),
+        season: release.season,
+        episode: release.episode,
+        resolution: candidate.file.resolution,
+        codec: candidate.file.codec,
+        hdr: candidate.file.hdr,
+        quality_source: candidate.file.quality_source,
+        confidence: candidate.file.confidence,
+        filter_score: candidate.file.filter_score,
+    });
     Ok(Some(dest))
 }
 
@@ -593,25 +627,65 @@ fn reserve_and_publish<D: Downloader + ?Sized>(
     added: &Added<'_, D>, scored: &ScoredTorrent, release: &Release,
     src: &Path, dest: &Path, pending: bool, control: &library::WorkControl,
     recorder: Option<&dyn TransferRecorder>,
-) -> Result<LedgerRow, SubscribeError> {
-    let mut row = LedgerRow {
-        id: LedgerId::new(), media_id: added.input.media.id,
-        path: dest.display().to_string(), season: release.season, episode: release.episode,
-        resolution: release.resolution.clone(), codec: release.codec.clone(), hdr: release.hdr.clone(),
-        quality_source: QualitySource::Release, confidence: release.confidence,
-        filter_score: Some(scored.score),
+) -> Result<FileCoverage, SubscribeError> {
+    let library_id = added.input.library_id.unwrap_or_else(|| {
+        added.input.subscribe.library_id.unwrap_or_else(domain::LibraryId::new)
+    });
+    let root_id = added.input.root_id.clone().unwrap_or_else(|| "default_root".into());
+    let file_id = LedgerId::new();
+    let units: Vec<UnitKey> = if added.input.media.kind == domain::MediaKind::Movie {
+        vec![UnitKey::WHOLE]
+    } else {
+        let span = release.episode_span();
+        match (release.season, span) {
+            (Some(s), Some((from, to))) => (from..=to).map(|e| UnitKey::new(s as i32, e as i32)).collect(),
+            (Some(s), None) => vec![UnitKey::new(s as i32, release.episode.unwrap_or(1) as i32)],
+            _ => vec![UnitKey::WHOLE],
+        }
     };
+    let file = domain::LibraryFile {
+        file_id,
+        library_id,
+        root_id,
+        media_id: added.input.media.id,
+        kind: added.input.media.kind,
+        path: dest.to_path_buf(),
+        version: domain::FileVersion { revision: 1, source_version: "v1".into() },
+        presence: domain::FilePresence::Present,
+        publication: domain::FilePublication::Pending,
+        size_bytes: std::fs::metadata(src).ok().map(|m| m.len()),
+        stat_known: true,
+        created_ns: None,
+        modified_ns: None,
+        source_digest: None,
+        source_path: Some(src.to_path_buf()),
+        transfer_mode: None,
+        resolution: release.resolution.clone(),
+        codec: release.codec.clone(),
+        hdr: release.hdr.clone(),
+        quality_source: QualitySource::Release,
+        confidence: release.confidence,
+        filter_score: Some(scored.score),
+        release_quality: None,
+        duration_ms: None,
+        tracks_version: 0,
+        poster_path: None,
+        backdrop_path: None,
+        still_path: None,
+    };
+    let mut candidate = FileCoverage { file, units };
     if let Some(recorder) = recorder {
-        row = recorder.prepare(&row, src,
+        candidate = recorder.prepare(&candidate, src,
             resolve_mode(src, added.input.library_root, added.input.transfer_mode))?;
     }
     if !pending || !dest.is_file() {
         publish_video(added, src, dest, control)?;
     }
+    candidate.file.publication = domain::FilePublication::Published;
     if let Some(recorder) = recorder {
-        recorder.published(&row)?;
+        recorder.published(&candidate)?;
     }
-    Ok(row)
+    Ok(candidate)
 }
 
 fn publish_video<D: Downloader + ?Sized>(

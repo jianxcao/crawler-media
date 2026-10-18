@@ -98,6 +98,9 @@ fn transfer_once(
         facts,
         downloader: dl,
         library_root,
+        library_id: None,
+        root_id: None,
+        config_revision: None,
         transfer_mode: Some(TransferMode::Hardlink),
         scrape: false,
         hooks: None,
@@ -117,6 +120,8 @@ fn transfer_once(
         rejected: vec![],
         outcome: RunOutcome {
             facts: SubscribeFacts::default(),
+            files: vec![],
+            file_sources: vec![],
             ledger: vec![],
             ledger_sources: vec![],
             removed_paths: vec![],
