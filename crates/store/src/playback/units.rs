@@ -124,8 +124,9 @@ impl Store {
         increment_play_count: bool,
         now: i64,
     ) -> Result<UnitState, StoreError> {
+        let played_input = played;
         let existing = self.unit_state(user_id, media_id, season, episode)?;
-        let played = played.unwrap_or(existing.as_ref().map(|u| u.played).unwrap_or(false));
+        let played = played_input.unwrap_or(existing.as_ref().map(|u| u.played).unwrap_or(false));
         let favorite_at = match favorite {
             Some(true) => now,
             Some(false) => 0,
@@ -141,13 +142,52 @@ impl Store {
         let subtitle_track = subtitle_track
             .map(str::to_string)
             .or_else(|| existing.as_ref().and_then(|u| u.subtitle_track.clone()));
-        // R01-A & R01-B: Check assertion fields & resume binding constraints
-        let has_played_assertion = if played { 1 } else { 0 };
-        let played_changed_at = if played { Some(now) } else { None };
+
+        // R04-A: Retain original Option<bool> for explicit played assertions.
+        let (has_played_assertion, played_changed_at) = match played_input {
+            Some(_) => (1, Some(now)),
+            None => {
+                let existing_assertion: Option<(i64, Option<i64>)> = self.library
+                    .query_row(
+                        "SELECT has_played_assertion, played_changed_at_ms FROM playback_units
+                         WHERE user_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4",
+                        params![user_id.to_string(), media_id.to_string(), season, episode],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                match existing_assertion {
+                    Some((h, t)) => (h, t),
+                    None => (0, None),
+                }
+            }
+        };
+
+        // R04-B & R04-C: Check existing resume package first before overwriting
+        let existing_resume: Option<(Option<String>, Option<i64>, Option<String>, Option<String>, Option<i64>, i64, Option<i64>, Option<String>, Option<String>)> = self.library
+            .query_row(
+                "SELECT resume_file_id, resume_file_revision, resume_source_version, timeline_mode, tracks_version,
+                        position_ms, duration_ms, audio_track, subtitle_track
+                 FROM playback_units
+                 WHERE user_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4",
+                params![user_id.to_string(), media_id.to_string(), season, episode],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)),
+            )
+            .optional()?;
 
         let (bound_file_id, bound_rev, bound_src_ver, bound_timeline, bound_tracks_ver, pos_val, dur_val, aud_val, sub_val) =
-            if position_ms > 0 || duration_ms.is_some() || audio_track.is_some() || subtitle_track.is_some() {
-                // Try finding an available file to bind
+            if position_ms == 0 && duration_ms.is_none() && audio_track.is_none() && subtitle_track.is_none() {
+                // If caller is NOT updating position/tracks (e.g. only updating marks/favorite):
+                // Preserve existing resume package if it already has one!
+                if let Some((Some(fid), Some(rev), Some(sver), Some(tmode), tracks_ver, p, d, a, s)) = existing_resume {
+                    (Some(fid), Some(rev), Some(sver), Some(tmode), tracks_ver, p, d, a, s)
+                } else {
+                    (None, None, None, None, None, 0, None, None, None)
+                }
+            } else if let Some((Some(fid), Some(rev), Some(sver), Some(tmode), tracks_ver, _, _, _, _)) = existing_resume {
+                // Existing row already has a bound source: preserve its binding while updating position/tracks!
+                (Some(fid), Some(rev), Some(sver), Some(tmode), tracks_ver.or(Some(1)), position_ms, duration_ms, audio_track.clone(), subtitle_track.clone())
+            } else {
+                // New position on unbounded row: bind to current published file
                 let file_binding: Option<(String, i64, String, i64)> = self.library
                     .query_row(
                         "SELECT f.file_id, f.file_revision, f.source_version, f.tracks_version
@@ -164,15 +204,13 @@ impl Store {
 
                 match file_binding {
                     Some((fid, rev, sver, tver)) => {
-                        (Some(fid), Some(rev), Some(sver), Some("full_file"), Some(tver), position_ms, duration_ms, audio_track.clone(), subtitle_track.clone())
+                        (Some(fid), Some(rev), Some(sver), Some("full_file".into()), Some(tver), position_ms, duration_ms, audio_track.clone(), subtitle_track.clone())
                     }
                     None => {
                         // No file available: clamp to 0 and NULL all resume fields to satisfy schema
                         (None, None, None, None, None, 0, None, None, None)
                     }
                 }
-            } else {
-                (None, None, None, None, None, 0, None, None, None)
             };
 
         self.library.execute(
@@ -492,8 +530,8 @@ impl Store {
             let mut stmt = self.library.prepare(
                 "UPDATE playback_units
                  SET played = ?3,
-                     has_played_assertion = CASE WHEN ?3 = 1 THEN 1 ELSE has_played_assertion END,
-                     played_changed_at_ms = CASE WHEN ?3 = 1 THEN ?4 ELSE played_changed_at_ms END,
+                     has_played_assertion = 1,
+                     played_changed_at_ms = ?4,
                      watch_activity_at = ?4
                  WHERE user_id = ?1 AND media_id = ?2
                    AND season >= ?5 AND episode >= ?6
