@@ -124,7 +124,40 @@ impl Store {
         increment_play_count: bool,
         now: i64,
     ) -> Result<UnitState, StoreError> {
+        self.upsert_unit_internal(
+            user_id,
+            media_id,
+            season,
+            episode,
+            Some(position_ms),
+            played,
+            favorite,
+            duration_ms,
+            audio_track,
+            subtitle_track,
+            increment_play_count,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn upsert_unit_internal(
+        &self,
+        user_id: UserId,
+        media_id: MediaId,
+        season: i32,
+        episode: i32,
+        position_input: Option<i64>,
+        played: Option<bool>,
+        favorite: Option<bool>,
+        duration_ms: Option<i64>,
+        audio_track: Option<&str>,
+        subtitle_track: Option<&str>,
+        increment_play_count: bool,
+        now: i64,
+    ) -> Result<UnitState, StoreError> {
         let played_input = played;
+        let position_ms = position_input.unwrap_or(0);
         let existing = self.unit_state(user_id, media_id, season, episode)?;
         let played = played_input.unwrap_or(existing.as_ref().map(|u| u.played).unwrap_or(false));
         let favorite_at = match favorite {
@@ -174,21 +207,19 @@ impl Store {
             )
             .optional()?;
 
+        let is_mark_only = position_input.is_none();
         let (bound_file_id, bound_rev, bound_src_ver, bound_timeline, bound_tracks_ver, pos_val, dur_val, aud_val, sub_val) =
             if let Some((Some(fid), Some(rev), Some(sver), Some(tmode), tracks_ver, p, d, a, s)) = existing_resume {
-                // R05-B: If existing row already has a bound source, preserve tracks_ver verbatim!
-                // R05-A: If caller passed position_ms > 0 or explicit tracks, use caller's values; otherwise preserve existing package!
-                let (final_pos, final_dur, final_aud, final_sub) = if position_ms > 0 || audio_track.is_some() || subtitle_track.is_some() {
-                    (position_ms, duration_ms.or(d), audio_track.clone().or(a), subtitle_track.clone().or(s))
-                } else if duration_ms.is_none() && audio_track.is_none() && subtitle_track.is_none() && played_input.is_some() {
-                    // Mark-only update: preserve existing saved position and duration/tracks!
+                // If existing row already has a bound source:
+                // R05-B: Preserve tracks_ver verbatim.
+                // R05-A: If mark-only, preserve existing position, duration, and tracks!
+                let (final_pos, final_dur, final_aud, final_sub) = if is_mark_only {
                     (p, d, a, s)
                 } else {
-                    // Explicit progress update (even position 0):
                     (position_ms, duration_ms.or(d), audio_track.clone().or(a), subtitle_track.clone().or(s))
                 };
                 (Some(fid), Some(rev), Some(sver), Some(tmode), tracks_ver, final_pos, final_dur, final_aud, final_sub)
-            } else if position_ms > 0 || duration_ms.is_some() || audio_track.is_some() || subtitle_track.is_some() {
+            } else if !is_mark_only && (position_ms > 0 || duration_ms.is_some() || audio_track.is_some() || subtitle_track.is_some()) {
                 // New position on unbounded row: bind to current published file
                 let file_binding: Option<(String, i64, String, i64)> = self.library
                     .query_row(
@@ -554,12 +585,12 @@ impl Store {
             // R05-C: Ensure target unit exists so unplayed/played assertion is persisted even if row was absent
             let existing = self.unit_state(user_id, media_id, season, episode)?;
             if existing.is_none() {
-                self.upsert_unit(
+                self.upsert_unit_internal(
                     user_id,
                     media_id,
                     season,
                     episode,
-                    0,
+                    None, // Mark-only
                     Some(played),
                     favorite,
                     None,
