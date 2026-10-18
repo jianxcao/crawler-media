@@ -113,6 +113,7 @@ impl Store {
             size_bytes: summary.size_bytes,
             preferred_file_id: summary.preferred_file_id,
             has_still: false,
+            rating: None,
         };
 
         // Fetch effective metadata or default

@@ -249,14 +249,13 @@ impl Store {
         if clauses.is_empty() {
             return Ok((Vec::new(), 0));
         }
-        let sql = format!(
-            "SELECT id, media_id, path, season, episode, resolution, codec, hdr,
-                    quality_source, confidence, filter_score
-             FROM ledger WHERE {}",
-            clauses.join(" OR ")
-        );
-        let mut stmt = self.library.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(values), map_ledger)?;
+        let sql = "SELECT f.file_id, f.media_id, f.display_path, u.season, u.episode, f.resolution, f.codec, f.hdr,
+                          f.quality_source, f.confidence, f.filter_score
+                   FROM library_files f
+                   LEFT JOIN library_file_units u ON f.file_id = u.file_id
+                   WHERE f.library_id = ?1";
+        let mut stmt = self.library.prepare(sql)?;
+        let rows = stmt.query_map([library_id], map_ledger)?;
         let collected = rows.collect::<Result<Vec<_>, _>>()?;
         let vm_steps = i64::from(stmt.get_status(rusqlite::StatementStatus::VmStep));
         Ok((collected, vm_steps))
@@ -298,11 +297,14 @@ impl Store {
         for chunk in unique.chunks(MEDIA_BATCH_CHUNK) {
             let placeholders = vec!["?"; chunk.len()].join(", ");
             let sql = format!(
-                "SELECT path FROM ledger
-                 WHERE missing_at IS NOT NULL AND path IN ({placeholders})"
+                "SELECT display_path FROM library_files
+                 WHERE missing_at IS NOT NULL AND (display_path IN ({placeholders}) OR path_key IN ({placeholders}))"
             );
             let mut stmt = self.library.prepare(&sql)?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter().copied()), |row| {
+            let mut query_params: Vec<&str> = Vec::new();
+            query_params.extend(chunk.iter().copied());
+            query_params.extend(chunk.iter().copied());
+            let rows = stmt.query_map(rusqlite::params_from_iter(query_params), |row| {
                 row.get::<_, String>(0)
             })?;
             for row in rows {

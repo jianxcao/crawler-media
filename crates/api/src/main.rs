@@ -137,7 +137,8 @@ fn load_catalog_sources(
         .get_setting(api::settings_keys::METADATA_LANGUAGE)
         .ok()
         .flatten()
-        .unwrap_or_default();
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "zh-CN".to_string());
     match media::Tmdb::new(TmdbHttp::new(store.clone()), catalog_db) {
         Ok(tmdb) => sources.push(TmdbCatalog::new(tmdb.with_language(&metadata_language))),
         Err(error) => tracing::error!(%error, "跳过 TMDB：无法打开 catalog 缓存"),

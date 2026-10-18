@@ -323,6 +323,9 @@ pub(crate) async fn refresh_metadata(
     drop(store);
     let mut refreshed = 0u32;
     for (media, row) in work {
+        if lease.control().is_cancelled() || !state.store.lock().library_accepts_work(&id).unwrap_or(false) {
+            return err(StatusCode::CONFLICT, "library.deleting", "Library 正在删除或已冻结");
+        }
         let path = PathBuf::from(&row.path);
         if crate::poster_fetch::attach_poster(&state, &media, &path).is_some() {
             refreshed += 1;

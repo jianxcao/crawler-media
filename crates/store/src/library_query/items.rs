@@ -46,12 +46,11 @@ impl Store {
             BrowsePage::Offset { start, limit } => (start, limit),
             BrowsePage::Cursor { .. } => (0, 50),
         };
-
         let sql = format!(
             "SELECT library_id, media_id, kind, title, title_sort, year, file_count,
                     available_file_count, missing_file_count, unknown_file_count,
                     distinct_episode_count, distinct_season_count, size_bytes,
-                    preferred_file_id, has_still
+                    preferred_file_id, has_still, rating_sort
              FROM library_items
              WHERE {where_sql}
              ORDER BY {order_col} {dir}, media_id ASC
@@ -76,6 +75,8 @@ impl Store {
             let pref_str: Option<String> = r.get(13)?;
             let pref_id = pref_str.and_then(|s| s.parse::<LedgerId>().ok());
             let still_i: i64 = r.get(14)?;
+            let rating_f: f64 = r.get(15)?;
+            let rating_opt = if rating_f >= 0.0 { Some(rating_f) } else { None };
 
             Ok(LibraryItem {
                 library_id: lib_id,
@@ -93,6 +94,7 @@ impl Store {
                 size_bytes: size_i.map(|s| s as u64),
                 preferred_file_id: pref_id,
                 has_still: still_i != 0,
+                rating: rating_opt,
             })
         })?;
 

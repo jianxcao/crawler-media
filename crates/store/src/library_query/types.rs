@@ -73,6 +73,7 @@ pub struct LibraryItem {
     pub size_bytes: Option<u64>,
     pub preferred_file_id: Option<domain::LedgerId>,
     pub has_still: bool,
+    pub rating: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

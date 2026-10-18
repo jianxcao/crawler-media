@@ -960,6 +960,8 @@ function itemFrom(raw: unknown): LibraryItem {
     library_id: str(r.library_id),
     title: str(r.title),
     year: r.year == null ? null : num(r.year),
+    rating: r.rating == null ? null : num(r.rating),
+    studios: Array.isArray(r.studios) ? r.studios.map(String) : [],
     poster_url: r.poster_url == null ? null : str(r.poster_url),
     backdrop_url: r.backdrop_url == null ? null : str(r.backdrop_url),
     file_count: num(r.file_count),
