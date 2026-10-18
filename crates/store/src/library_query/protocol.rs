@@ -25,27 +25,7 @@ impl Store {
         }
 
         // F02: Determine user's authorized libraries
-        let user_id_str = request.user_id.to_string();
-        let mut auth_stmt = self.library.prepare(
-            "SELECT library_id, access_mode, member_ids_json
-             FROM libraries WHERE lifecycle_state = 'ready'",
-        )?;
-        let mut allowed_libraries: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut auth_rows = auth_stmt.query([])?;
-        while let Some(r) = auth_rows.next()? {
-            let lid: String = r.get(0)?;
-            let mode: String = r.get(1)?;
-            let members_json: String = r.get(2)?;
-            let is_allowed = if mode == "everyone" {
-                true
-            } else {
-                let members: Vec<String> = serde_json::from_str(&members_json).unwrap_or_default();
-                members.contains(&user_id_str)
-            };
-            if is_allowed {
-                allowed_libraries.insert(lid);
-            }
-        }
+        let allowed_libraries = self.authorized_library_ids(request.user_id)?;
 
         // If explicitly scoped to a library, verify user has access to it
         if let Some(target_lib) = &lib_scope {

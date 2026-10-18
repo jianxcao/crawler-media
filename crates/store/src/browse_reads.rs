@@ -8,8 +8,8 @@ use domain::{LedgerRow, Media, MediaId, UserId};
 use rusqlite::params;
 
 use super::maps::{map_ledger, map_media, parse_id};
+use super::media::MEDIA_SELECT;
 use super::playback::UnitState;
-use super::schema::MEDIA_COLS;
 use super::{LibraryOwnership, Store, StoreError};
 
 /// One playback unit with its media id and full per-unit state.
@@ -41,8 +41,8 @@ impl Store {
         let mut found = HashMap::new();
         for chunk in ids.chunks(MEDIA_BATCH_CHUNK) {
             let placeholders = vec!["?"; chunk.len()].join(", ");
-            let sql = format!("SELECT {MEDIA_COLS} FROM media WHERE id IN ({placeholders})");
-            let mut stmt = self.app.prepare(&sql)?;
+            let sql = format!("{MEDIA_SELECT} WHERE m.media_id IN ({placeholders})");
+            let mut stmt = self.library.prepare(&sql)?;
             let rows = stmt.query_map(
                 rusqlite::params_from_iter(chunk.iter().map(MediaId::to_string)),
                 map_media,
@@ -62,10 +62,10 @@ impl Store {
         &self,
         user: UserId,
     ) -> Result<Vec<PlaybackUnitSnapshot>, StoreError> {
-        let mut stmt = self.subscribe.prepare(
+        let mut stmt = self.library.prepare(
             "SELECT media_id, season, episode,
                     position_ms, played, favorite, duration_ms, audio_track,
-                    subtitle_track, play_count, updated_at, favorite_at
+                    subtitle_track, play_count, watch_activity_at, favorite_at
              FROM playback_units WHERE user_id = ?1
              ORDER BY media_id, season, episode",
         )?;
@@ -109,12 +109,12 @@ impl Store {
             let sql = format!(
                 "SELECT media_id, season, episode,
                         position_ms, played, favorite, duration_ms, audio_track,
-                        subtitle_track, play_count, updated_at, favorite_at
+                        subtitle_track, play_count, watch_activity_at, favorite_at
                  FROM playback_units
                  WHERE user_id = ?1 AND media_id IN ({placeholders})
                  ORDER BY media_id, season, episode"
             );
-            let mut stmt = self.subscribe.prepare(&sql)?;
+            let mut stmt = self.library.prepare(&sql)?;
             let mut params_vec = Vec::with_capacity(1 + chunk.len());
             params_vec.push(rusqlite::types::Value::from(user.to_string()));
             for id in chunk {

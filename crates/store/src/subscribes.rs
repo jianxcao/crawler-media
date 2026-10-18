@@ -476,7 +476,7 @@ impl Store {
         let s: i32 = season.map(|v| v as i32).unwrap_or(-1);
         let e: i32 = episode.map(|v| v as i32).unwrap_or(-1);
         let pos = self
-            .subscribe
+            .library
             .query_row(
                 "SELECT position_ms FROM playback_units
                  WHERE user_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4",
@@ -495,7 +495,7 @@ impl Store {
         media_id: MediaId,
     ) -> Result<Option<i64>, StoreError> {
         let max = self
-            .subscribe
+            .library
             .query_row(
                 "SELECT MAX(position_ms) FROM playback_units
                  WHERE user_id = ?1 AND media_id = ?2",
@@ -509,7 +509,7 @@ impl Store {
 
     /// All playback progress rows `(user_id, media_id, position_ms)`.
     pub fn list_playback_progress(&self) -> Result<Vec<(UserId, MediaId, i64)>, StoreError> {
-        let mut stmt = self.subscribe.prepare(
+        let mut stmt = self.library.prepare(
             "SELECT user_id, media_id, MAX(position_ms) FROM playback_units
              GROUP BY user_id, media_id ORDER BY MAX(position_ms) DESC",
         )?;

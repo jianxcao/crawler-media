@@ -154,6 +154,37 @@ impl Store {
         let blocked = self.blocked_library_ids()?;
         Ok(LibraryOwnership::from_parts(libraries, blocked))
     }
+    /// Determine authorized libraries for a user according to their role and library access settings.
+    pub fn authorized_library_ids(&self, user_id: domain::UserId) -> Result<HashSet<String>, StoreError> {
+        let user_id_str = user_id.to_string();
+        let role = self.user_role(user_id)?;
+        let is_admin = role == "admin";
+
+        let mut auth_stmt = self.library.prepare(
+            "SELECT library_id, access_mode, admin_visible, member_ids_json
+             FROM libraries WHERE lifecycle_state = 'ready'",
+        )?;
+        let mut allowed_libraries: HashSet<String> = HashSet::new();
+        let mut auth_rows = auth_stmt.query([])?;
+        while let Some(r) = auth_rows.next()? {
+            let lid: String = r.get(0)?;
+            let mode: String = r.get(1)?;
+            let admin_visible: bool = r.get::<_, i64>(2)? != 0;
+            let members_json: String = r.get(3)?;
+            let is_allowed = if is_admin {
+                admin_visible
+            } else if mode == "everyone" {
+                true
+            } else {
+                let members: Vec<String> = serde_json::from_str(&members_json).unwrap_or_default();
+                members.contains(&user_id_str)
+            };
+            if is_allowed {
+                allowed_libraries.insert(lid);
+            }
+        }
+        Ok(allowed_libraries)
+    }
 
     /// Libraries with their roots attached, via one batch roots query instead
     /// of one query per library.

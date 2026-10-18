@@ -16,7 +16,7 @@ impl Store {
         self.library
             .query_row(
                 "SELECT position_ms, played, favorite, duration_ms, audio_track,
-                        subtitle_track, play_count, updated_at, favorite_at
+                        subtitle_track, play_count, watch_activity_at, favorite_at
                  FROM playback_units
                  WHERE user_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4",
                 params![user_id.to_string(), media_id.to_string(), season, episode],
@@ -77,7 +77,7 @@ impl Store {
         };
         // A missing unit is favourite-only. Do not insert an empty canonical
         // row first: that would block the legacy whole-file copy above.
-        let changed = self.subscribe.execute(
+        let changed = self.library.execute(
             "UPDATE playback_units SET favorite = ?5, favorite_at = ?6
              WHERE user_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4",
             params![
@@ -90,10 +90,10 @@ impl Store {
             ],
         )?;
         if changed == 0 {
-            self.subscribe.execute(
+            self.library.execute(
                 "INSERT INTO playback_units
                     (user_id, media_id, season, episode, position_ms, played, favorite,
-                     duration_ms, audio_track, subtitle_track, play_count, updated_at, favorite_at)
+                     duration_ms, audio_track, subtitle_track, play_count, watch_activity_at, favorite_at)
                  VALUES (?1, ?2, ?3, ?4, 0, 0, ?5, NULL, NULL, NULL, 0, 0, ?6)",
                 params![
                     user_id.to_string(),
@@ -141,10 +141,10 @@ impl Store {
         let subtitle_track = subtitle_track
             .map(str::to_string)
             .or_else(|| existing.as_ref().and_then(|u| u.subtitle_track.clone()));
-        self.subscribe.execute(
+        self.library.execute(
             "INSERT INTO playback_units
                 (user_id, media_id, season, episode, position_ms, played, favorite,
-                 duration_ms, audio_track, subtitle_track, play_count, updated_at, favorite_at)
+                 duration_ms, audio_track, subtitle_track, play_count, watch_activity_at, favorite_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(user_id, media_id, season, episode) DO UPDATE SET
                 position_ms = excluded.position_ms,
@@ -154,7 +154,7 @@ impl Store {
                 audio_track = excluded.audio_track,
                 subtitle_track = excluded.subtitle_track,
                 play_count = excluded.play_count,
-                updated_at = excluded.updated_at,
+                watch_activity_at = excluded.watch_activity_at,
                 favorite_at = excluded.favorite_at",
             params![
                 user_id.to_string(),
@@ -193,12 +193,12 @@ impl Store {
         }
         let user = user_id.to_string();
         let media = media_id.to_string();
-        self.subscribe.execute(
+        self.library.execute(
             "INSERT OR IGNORE INTO playback_units
                 (user_id, media_id, season, episode, position_ms, played, favorite,
-                 duration_ms, audio_track, subtitle_track, play_count, updated_at, favorite_at)
+                 duration_ms, audio_track, subtitle_track, play_count, watch_activity_at, favorite_at)
              SELECT user_id, media_id, -1, -1, position_ms, played, favorite,
-                    duration_ms, audio_track, subtitle_track, play_count, updated_at, favorite_at
+                    duration_ms, audio_track, subtitle_track, play_count, watch_activity_at, favorite_at
              FROM playback_units
              WHERE user_id = ?1 AND media_id = ?2 AND season = 0 AND episode = 0",
             params![user, media],
@@ -206,7 +206,7 @@ impl Store {
         // Favourite-only canonical rows carry no playback facts. Fill those
         // fields from the legacy row without replacing an independently
         // recorded favourite or its clock.
-        self.subscribe.execute(
+        self.library.execute(
             "UPDATE playback_units AS canonical
              SET position_ms = legacy.position_ms,
                  played = legacy.played,
@@ -214,7 +214,7 @@ impl Store {
                  audio_track = legacy.audio_track,
                  subtitle_track = legacy.subtitle_track,
                  play_count = legacy.play_count,
-                 updated_at = legacy.updated_at
+                 watch_activity_at = legacy.watch_activity_at
              FROM playback_units AS legacy
              WHERE canonical.user_id = ?1 AND canonical.media_id = ?2
                AND canonical.season = -1 AND canonical.episode = -1
@@ -222,20 +222,20 @@ impl Store {
                AND legacy.media_id = canonical.media_id
                AND legacy.season = 0 AND legacy.episode = 0
                AND canonical.position_ms = 0 AND canonical.played = 0
-               AND canonical.play_count = 0 AND canonical.updated_at = 0
+               AND canonical.play_count = 0 AND canonical.watch_activity_at = 0
                AND canonical.duration_ms IS NULL
                AND canonical.audio_track IS NULL
                AND canonical.subtitle_track IS NULL
                AND (
                    legacy.position_ms != 0 OR legacy.played != 0
-                   OR legacy.play_count != 0 OR legacy.updated_at != 0
+                   OR legacy.play_count != 0 OR legacy.watch_activity_at != 0
                    OR legacy.duration_ms IS NOT NULL
                    OR legacy.audio_track IS NOT NULL
                    OR legacy.subtitle_track IS NOT NULL
                )",
             params![user, media],
         )?;
-        self.subscribe.execute(
+        self.library.execute(
             "DELETE FROM playback_units
              WHERE user_id = ?1 AND media_id = ?2 AND season = 0 AND episode = 0
                AND EXISTS (
@@ -245,13 +245,13 @@ impl Store {
                      AND canonical.season = -1 AND canonical.episode = -1
                      AND (
                          canonical.position_ms != 0 OR canonical.played != 0
-                         OR canonical.play_count != 0 OR canonical.updated_at != 0
+                         OR canonical.play_count != 0 OR canonical.watch_activity_at != 0
                          OR canonical.duration_ms IS NOT NULL
                          OR canonical.audio_track IS NOT NULL
                          OR canonical.subtitle_track IS NOT NULL
                          OR (
                              playback_units.position_ms = 0 AND playback_units.played = 0
-                             AND playback_units.play_count = 0 AND playback_units.updated_at = 0
+                             AND playback_units.play_count = 0 AND playback_units.watch_activity_at = 0
                              AND playback_units.duration_ms IS NULL
                              AND playback_units.audio_track IS NULL
                              AND playback_units.subtitle_track IS NULL
@@ -268,8 +268,8 @@ impl Store {
         &self,
         user_id: UserId,
     ) -> Result<Vec<(MediaId, i64)>, StoreError> {
-        let mut stmt = self.subscribe.prepare(
-            "SELECT media_id, MAX(updated_at) AS last_act
+        let mut stmt = self.library.prepare(
+            "SELECT media_id, MAX(watch_activity_at) AS last_act
              FROM playback_units
              WHERE user_id = ?1 AND (position_ms > 0 OR played != 0 OR play_count > 0)
              GROUP BY media_id
@@ -300,11 +300,11 @@ impl Store {
         &self,
         user_id: UserId,
     ) -> Result<Vec<(MediaId, i32, i32, i64, i64)>, StoreError> {
-        let mut stmt = self.subscribe.prepare(
-            "SELECT media_id, season, episode, position_ms, updated_at
+        let mut stmt = self.library.prepare(
+            "SELECT media_id, season, episode, position_ms, watch_activity_at
              FROM playback_units
              WHERE user_id = ?1 AND position_ms > 0 AND played = 0
-             ORDER BY updated_at DESC",
+             ORDER BY watch_activity_at DESC",
         )?;
         let rows = stmt.query_map(params![user_id.to_string()], |row| {
             let media_str: String = row.get(0)?;
@@ -328,7 +328,7 @@ impl Store {
     /// `favorite_at = 0` is an unknown historical time and sorts last; readers
     /// must not substitute the still-changing playback clock.
     pub fn favorite_rows(&self, user_id: UserId) -> Result<Vec<(MediaId, i64, i32, i32)>, StoreError> {
-        let mut stmt = self.subscribe.prepare(
+        let mut stmt = self.library.prepare(
             "SELECT media_id, season, episode, favorite_at
              FROM playback_units
              WHERE user_id = ?1 AND favorite != 0
@@ -353,8 +353,8 @@ impl Store {
         user_id: UserId,
         media_id: MediaId,
     ) -> Result<Vec<UnitRow>, StoreError> {
-        let mut stmt = self.subscribe.prepare(
-            "SELECT season, episode, played, favorite, updated_at, favorite_at
+        let mut stmt = self.library.prepare(
+            "SELECT season, episode, played, favorite, watch_activity_at, favorite_at
              FROM playback_units WHERE user_id = ?1 AND media_id = ?2",
         )?;
         let rows = stmt.query_map(params![user_id.to_string(), media_id.to_string()], |row| {
@@ -426,7 +426,7 @@ impl Store {
                 )?;
             }
             if !favorite && season == UNIT_WHOLE && episode == UNIT_WHOLE {
-                self.subscribe.execute(
+                self.library.execute(
                     "UPDATE playback_units SET favorite = 0, favorite_at = 0
                      WHERE user_id = ?1 AND media_id = ?2",
                     params![user_id.to_string(), media_id.to_string()],
@@ -439,8 +439,8 @@ impl Store {
                 (s, UNIT_WHOLE) => (s, UNIT_WHOLE),
                 (s, e) => (s, e),
             };
-            let mut stmt = self.subscribe.prepare(
-                "UPDATE playback_units SET played = ?3, updated_at = ?4
+            let mut stmt = self.library.prepare(
+                "UPDATE playback_units SET played = ?3, watch_activity_at = ?4
                  WHERE user_id = ?1 AND media_id = ?2
                    AND season >= ?5 AND episode >= ?6
                    AND (?5 = -1 OR season = ?5)
@@ -487,12 +487,12 @@ impl Store {
         since_ms: Option<i64>,
     ) -> Result<usize, StoreError> {
         let mut sql = String::from(
-            "UPDATE playback_units SET position_ms = 0, played = 0, play_count = 0, updated_at = 0 WHERE user_id = ?",
+            "UPDATE playback_units SET position_ms = 0, played = 0, play_count = 0, watch_activity_at = 0 WHERE user_id = ?",
         );
         let mut values: Vec<rusqlite::types::Value> =
             vec![rusqlite::types::Value::Text(user_id.to_string())];
         if let Some(since) = since_ms {
-            sql.push_str(" AND updated_at >= ?");
+            sql.push_str(" AND watch_activity_at >= ?");
             values.push(rusqlite::types::Value::Integer(since));
         }
         if let Some(ids) = media_ids {
@@ -507,7 +507,7 @@ impl Store {
             );
         }
         let changed = self
-            .subscribe
+            .library
             .execute(&sql, rusqlite::params_from_iter(values))?;
         Ok(changed)
     }

@@ -26,21 +26,33 @@ impl Store {
         };
 
         let media_id_str = media_id.to_string();
+        let allowed_libraries = self.authorized_library_ids(user)?;
+        if allowed_libraries.is_empty() {
+            return Err(StoreError::Missing(format!("no authorized libraries for unit {unit_key:?}")));
+        }
+        let lib_in_clause = allowed_libraries
+            .iter()
+            .map(|l| format!("'{l}'"))
+            .collect::<Vec<_>>()
+            .join(",");
 
         // Find preferred file or active file for this unit, validating presence, publication, and revision
         let file_row = match preferred_source {
             Some(src) => {
-                let sql = "SELECT f.file_id, f.library_id, f.root_id, f.media_id, f.kind, f.path_key,
-                                  f.file_revision, f.source_version, f.presence_state, f.publication_state,
-                                  f.duration_ms
-                           FROM library_files f
-                           JOIN library_file_units u ON f.file_id = u.file_id
-                           WHERE f.file_id = ?1 AND f.file_revision = ?2
-                             AND u.media_id = ?3 AND u.season = ?4 AND u.episode = ?5
-                             AND f.presence_state = 'present' AND f.publication_state = 'published'";
+                let sql = format!(
+                    "SELECT f.file_id, f.library_id, f.root_id, f.media_id, f.kind, f.path_key,
+                            f.file_revision, f.source_version, f.presence_state, f.publication_state,
+                            f.duration_ms
+                     FROM library_files f
+                     JOIN library_file_units u ON f.file_id = u.file_id
+                     WHERE f.file_id = ?1 AND f.file_revision = ?2
+                       AND u.media_id = ?3 AND u.season = ?4 AND u.episode = ?5
+                       AND f.presence_state = 'present' AND f.publication_state = 'published'
+                       AND f.library_id IN ({lib_in_clause})"
+                );
                 self.library
                     .query_row(
-                        sql,
+                        &sql,
                         params![
                             src.file_id.to_string(),
                             src.revision,
@@ -101,18 +113,21 @@ impl Store {
         let file = match file_row {
             Some(f) => f,
             None => {
-                let sql = "SELECT f.file_id, f.library_id, f.root_id, f.media_id, f.kind, f.path_key,
-                                  f.file_revision, f.source_version, f.presence_state, f.publication_state,
-                                  f.duration_ms
-                           FROM library_files f
-                           JOIN library_file_units u ON f.file_id = u.file_id
-                           WHERE u.media_id = ?1 AND u.season = ?2 AND u.episode = ?3
-                             AND f.presence_state = 'present' AND f.publication_state = 'published'
-                           ORDER BY f.file_revision DESC, f.file_id ASC
-                           LIMIT 1";
+                let sql = format!(
+                    "SELECT f.file_id, f.library_id, f.root_id, f.media_id, f.kind, f.path_key,
+                            f.file_revision, f.source_version, f.presence_state, f.publication_state,
+                            f.duration_ms
+                     FROM library_files f
+                     JOIN library_file_units u ON f.file_id = u.file_id
+                     WHERE u.media_id = ?1 AND u.season = ?2 AND u.episode = ?3
+                       AND f.presence_state = 'present' AND f.publication_state = 'published'
+                       AND f.library_id IN ({lib_in_clause})
+                     ORDER BY f.file_revision DESC, f.file_id ASC
+                     LIMIT 1"
+                );
                 self.library
                     .query_row(
-                        sql,
+                        &sql,
                         params![media_id_str, unit_key.season, unit_key.episode],
                         |r| {
                             let fid: LedgerId = r.get::<_, String>(0)?.parse().unwrap();

@@ -152,10 +152,10 @@ impl Store {
         &self,
         operation: impl FnOnce(&Self) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
-        if !self.subscribe.is_autocommit() {
+        if !self.library.is_autocommit() {
             return operation(self);
         }
-        let transaction = self.subscribe.unchecked_transaction()?;
+        let transaction = self.library.unchecked_transaction()?;
         let result = operation(self)?;
         transaction.commit()?;
         Ok(result)
