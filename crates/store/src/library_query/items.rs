@@ -7,18 +7,27 @@ use super::super::{Store, StoreError};
 impl Store {
     pub fn library_item_page(&self, query: &LibraryQuery) -> Result<ItemPage, StoreError> {
         let lib_id_str = query.library_id.to_string();
+        let mut where_clauses = vec!["library_id = ?1".to_string()];
+        let mut params_vec: Vec<rusqlite::types::Value> = vec![lib_id_str.into()];
+
+        if let Some(identity) = &query.filter.identity {
+            params_vec.push(identity.clone().into());
+            where_clauses.push(format!("identity_state = ?{}", params_vec.len()));
+        }
+
+        let where_sql = where_clauses.join(" AND ");
 
         // 1. Calculate total if requested
         let total = if query.include_total {
-            let count_sql = "SELECT COUNT(*) FROM library_items WHERE library_id = ?1";
-            let c: i64 = self.library.query_row(count_sql, params![lib_id_str], |r| r.get(0))?;
+            let count_sql = format!("SELECT COUNT(*) FROM library_items WHERE {where_sql}");
+            let c: i64 = self.library.query_row(&count_sql, rusqlite::params_from_iter(params_vec.iter().cloned()), |r| r.get(0))?;
             Some(c as u64)
         } else {
             None
         };
 
         // 2. Build ORDER BY
-        let (order_col, default_desc) = match query.order {
+        let (order_col, _default_desc) = match query.order {
             BrowseOrder::Title => ("title_sort", false),
             BrowseOrder::AddedAt => ("added_at_sort", true),
             BrowseOrder::ReleaseDate => ("release_date_sort", true),
@@ -44,13 +53,21 @@ impl Store {
                     distinct_episode_count, distinct_season_count, size_bytes,
                     preferred_file_id, has_still
              FROM library_items
-             WHERE library_id = ?1
+             WHERE {where_sql}
              ORDER BY {order_col} {dir}, media_id ASC
-             LIMIT ?2 OFFSET ?3"
+             LIMIT ?{} OFFSET ?{}",
+            params_vec.len() + 1,
+            params_vec.len() + 2
         );
 
+        let mut query_params = params_vec;
+        let limit_val = i64::try_from(limit).unwrap_or(i64::MAX);
+        let offset_val = i64::try_from(offset).unwrap_or(0);
+        query_params.push(limit_val.into());
+        query_params.push(offset_val.into());
+
         let mut stmt = self.library.prepare(&sql)?;
-        let rows = stmt.query_map(params![lib_id_str, limit as i64, offset as i64], |r| {
+        let rows = stmt.query_map(rusqlite::params_from_iter(query_params), |r| {
             let lib_id: LibraryId = r.get::<_, String>(0)?.parse().unwrap();
             let media_id: MediaId = r.get::<_, String>(1)?.parse().unwrap();
             let kind: MediaKind = r.get::<_, String>(2)?.parse().unwrap_or(MediaKind::Movie);

@@ -92,10 +92,10 @@ export function LibraryFilterBar({
   const toggle = useCallback(
     (dim: "genres" | "countries" | "decades", value: string) => {
       const current = (filter[dim] ?? []) as (string | number)[];
-      const typed = value;
-      const next = current.includes(typed)
-        ? current.filter((v) => v !== typed)
-        : [...current, typed];
+      const exists = current.some((v) => String(v) === String(value));
+      const next = exists
+        ? current.filter((v) => String(v) !== String(value))
+        : [...current, value];
       onFilterChange({ ...filter, [dim]: next });
     },
     [filter, onFilterChange],
@@ -332,8 +332,7 @@ function ConditionRow({
     }
     const key = dim as MultiDim;
     const current = (filter[key] ?? []) as (string | number)[];
-    const typed = value;
-    onFilterChange({ ...filter, [key]: current.filter((v) => v !== typed) });
+    onFilterChange({ ...filter, [key]: current.filter((v) => String(v) !== String(value)) });
   };
 
   const groups = DIMS.map(({ key, label }) => {
@@ -565,10 +564,8 @@ export function FilterEmptyState({
       onFilterChange({ ...filter, [dim === "rating_gte" ? "ratingGte" : dim]: null });
       return;
     }
-    const key = dim as MultiDim;
     const current = (filter[key] ?? []) as (string | number)[];
-    const typed = value;
-    onFilterChange({ ...filter, [key]: current.filter((v) => v !== typed) });
+    onFilterChange({ ...filter, [key]: current.filter((v) => String(v) !== String(value)) });
   };
 
   const suggestions = relax?.suggestions ?? [];

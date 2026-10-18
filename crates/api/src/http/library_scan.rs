@@ -544,16 +544,7 @@ pub(crate) async fn facets(
     let (snapshot, _artwork) =
         match selection::load_browse_snapshot_or_projection(&state, &library, user_id).await {
             Ok(loaded) => loaded,
-            Err(_) => {
-                // If projection is unavailable in clean v1 layout, return empty groups cleanly
-                return ok(json!({
-                    "total": 0,
-                    "groups": {
-                        "genres": [], "countries": [], "decades": [], "watch": [],
-                        "rating_gte": [], "runtimes": [], "languages": [], "resolutions": [], "hdr": [], "stock": []
-                    }
-                })).into_response();
-            }
+            Err(response) => return response,
         };
     let files = state.browse_files.clone();
     let work = state

@@ -276,6 +276,14 @@ pub(crate) async fn list_items(
     Path(id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
+    // F01: Restore library visibility and existence check before querying inventory
+    let library = {
+        let store = state.store.lock();
+        match require_visible_library(&store, &id, user_id) {
+            Ok(library) => library,
+            Err(response) => return response,
+        }
+    };
     let lib_id = match id.parse::<domain::LibraryId>() {
         Ok(lid) => lid,
         Err(_) => return missing_library(),
@@ -294,30 +302,46 @@ pub(crate) async fn list_items(
     };
     let descending = query.get("order").map(|o| o.eq_ignore_ascii_case("desc")).unwrap_or(false);
 
+    // F03: Parse page window properly with validation; omitted limit returns all
     let offset = query.get("offset").and_then(|o| o.parse::<usize>().ok()).unwrap_or(0);
-    let limit = query.get("limit").and_then(|l| l.parse::<usize>().ok()).unwrap_or(50);
+    let limit = query.get("limit").and_then(|l| l.parse::<usize>().ok()).unwrap_or(usize::MAX / 2);
+
+    // F02: Parse identity and real filter parameters
+    let identity = query.get("identity").cloned();
+    let filter = store::library_query::BrowseFilter {
+        identity,
+        ..store::library_query::BrowseFilter::default()
+    };
 
     let lib_q = store::library_query::LibraryQuery {
         library_id: lib_id,
         user_id,
-        filter: store::library_query::BrowseFilter::default(),
+        filter,
         order,
         descending,
         page: store::library_query::BrowsePage::Offset { start: offset, limit },
         include_total: true,
     };
 
-    let paged = {
+    let (paged, file_details_map) = {
         let store = state.store.lock();
-        match store.library_item_page(&lib_q) {
+        let p = match store.library_item_page(&lib_q) {
             Ok(p) => p,
             Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &e.to_string()),
+        };
+        // F13: Query genuine resolution and actual seasons for items
+        let mut map = HashMap::new();
+        for item in &p.items {
+            let details = store.item_resolution_and_seasons(item.library_id, item.media_id, item.preferred_file_id);
+            map.insert(item.media_id, details);
         }
+        (p, map)
     };
 
     let items_json: Vec<Value> = paged.items.into_iter().map(|item| {
         let poster_url = item.preferred_file_id.map(|fid| artwork_url("posters", fid));
         let backdrop_url = item.preferred_file_id.map(|fid| artwork_url("fanart", fid));
+        let (max_res, actual_seasons) = file_details_map.get(&item.media_id).cloned().unwrap_or_else(|| ("1080p".into(), vec![]));
         json!({
             "media_item_id": item.media_id.to_string(),
             "kind": item.kind.as_str(),
@@ -327,9 +351,9 @@ pub(crate) async fn list_items(
             "poster_url": poster_url,
             "backdrop_url": backdrop_url,
             "file_count": item.file_count,
-            "seasons": (1..=item.distinct_season_count).collect::<Vec<_>>(),
+            "seasons": actual_seasons,
             "episode_count": item.distinct_episode_count,
-            "max_resolution": "1080p",
+            "max_resolution": max_res,
             "missing": item.missing_file_count > 0,
         })
     }).collect();

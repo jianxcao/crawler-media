@@ -1419,13 +1419,13 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
       <>
       {/* —— 库存海报墙 —— */}
       {items.length === 0 && provisional.length === 0 && filtering ? (
-        // 筛空了不给空墙——给一条真能救回内容的出路（铁律 2）。库本身就是空的
-        // 是另一回事，走下面那个分支
-        <FilterEmptyState
-          libraryId={libraryId}
-          filter={filter}
-          onFilterChange={applyFilter}
-        />
+        failed ? null : (
+          <FilterEmptyState
+            libraryId={libraryId}
+            filter={filter}
+            onFilterChange={applyFilter}
+          />
+        )
       ) : items.length === 0 && provisional.length === 0 ? (
         failed ? null : (
           <p className="mt-16 text-center text-ui leading-7 text-[var(--text-muted)]">

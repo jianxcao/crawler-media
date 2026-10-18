@@ -403,21 +403,10 @@ impl ChapterFrameService {
         let compact = task.ledger_id.to_string().replace('-', "");
         let (path, library_id) = {
             let store = self.store.lock();
-            let Some(row) = store.get_ledger(&compact).map_err(|error| error.to_string())? else {
-                return Err("file_deleted: ledger row missing".into());
+            let Some((path, lid)) = store.get_file_path_and_library(task.ledger_id).map_err(|e| e.to_string())? else {
+                return Err("file_deleted: library_file row missing".into());
             };
-            let path = PathBuf::from(&row.path);
-            let library_id = store
-                .get_media(row.media_id)
-                .map_err(|error| error.to_string())?
-                .and_then(|media| {
-                    store
-                        .library_for_path_strict(&path, media.kind)
-                        .ok()
-                        .flatten()
-                })
-                .map(|library| library.id);
-            (path, library_id)
+            (path, Some(lid))
         };
         let lease = match library_id {
             Some(library_id) => Some(Arc::new(

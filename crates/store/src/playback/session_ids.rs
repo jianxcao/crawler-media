@@ -85,11 +85,46 @@ impl Store {
             .flatten();
         let generation = max_gen.unwrap_or(0) + 1;
 
+        // Query target file binding from library_files and library_file_units
+        let file_info: Option<(String, String, i32, i32, i64, String, String)> = tx.query_row(
+            "SELECT f.media_id, f.library_id, COALESCE(u.season, -1), COALESCE(u.episode, -1),
+                    f.file_revision, f.source_version, f.file_id
+             FROM library_files f
+             LEFT JOIN library_file_units u ON f.file_id = u.file_id
+             WHERE f.file_id = ?1 LIMIT 1",
+            params![item_id_str],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+        ).optional()?;
+
+        let (mid, lid, s, ep, rev, s_ver, fid) = match file_info {
+            Some(info) => info,
+            None => {
+                // If not in library_files, treat item_id as file_id with default revision
+                (item_id_str.clone(), "".into(), -1, -1, 1, "v1".into(), item_id_str.clone())
+            }
+        };
+
         tx.execute(
             "INSERT INTO playback_session_ids
-                (user_id, device_id, play_session_id, item_id, issued_at, generation, state)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending')",
-            params![user_str, device_id, play_session_id, item_id_str, now, generation],
+                (user_id, device_id, play_session_id, item_id, media_id, season, episode,
+                 file_id, file_revision, source_version, library_id, config_revision, timeline_mode,
+                 issued_at, generation, state)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, 'full_file', ?12, ?13, 'pending')",
+            params![
+                user_str,
+                device_id,
+                play_session_id,
+                item_id_str,
+                mid,
+                s,
+                ep,
+                fid,
+                rev,
+                s_ver,
+                lid,
+                now,
+                generation,
+            ],
         )?;
 
         tx.commit()?;

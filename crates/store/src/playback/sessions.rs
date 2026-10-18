@@ -6,15 +6,19 @@ use super::{Store, StoreError};
 
 impl Store {
     pub fn upsert_session(&self, session: &SessionRow) -> Result<(), StoreError> {
+        // Align with schema/v1/library.sql:221-230
+        let file_id = session.ledger_id.clone().unwrap_or_else(|| "".into());
         self.library.execute(
             "INSERT OR REPLACE INTO playback_sessions
                 (device_id, user_id, media_id, season, episode, client, device_name,
                  client_version, play_method, position_ms, start_position_ms, duration_ms,
                  paused, watched_ms, rate_bps, bytes_sent, connections, admin_ended,
-                 started_at, last_report_at, ledger_id, play_session_id, last_report_at_ms,
-                 last_event_sequence)
+                 started_at, last_report_at, file_id, file_revision, source_version,
+                 library_id, config_revision, timeline_mode, play_session_id, generation,
+                 last_report_at_ms, last_event_sequence)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+                     ?16, ?17, ?18, ?19, ?20, ?21, 1, 'v1', '', 0, 'full_file',
+                     ?22, 1, ?23, ?24)",
             params![
                 session.device_id,
                 session.user_id.to_string(),

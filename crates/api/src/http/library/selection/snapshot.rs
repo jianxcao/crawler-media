@@ -63,10 +63,11 @@ pub(crate) fn load_browse_snapshot(
     user: Option<UserId>,
 ) -> Result<BrowseSnapshot, Response> {
     let ownership = store.library_ownership().map_err(super::store_error)?;
-    let missing = store.missing_at_by_path().unwrap_or_default();
-    let cache = store.list_catalog_cache().unwrap_or_default();
+    let missing = store.missing_paths_for_library(&library.id).map_err(super::store_error)?;
+
+    let cache = store.list_catalog_cache().map_err(super::store_error)?;
     let mut owned_by_media: HashMap<MediaId, Vec<LedgerRow>> = HashMap::new();
-    let rows = store.list_ledger().unwrap_or_default();
+    let rows = store.list_ledger().map_err(super::store_error)?;
     for row in rows {
         let owner = ownership.owner(std::path::Path::new(&row.path), library.kind);
         if owner.is_some_and(|owner| owner.id == library.id) {
