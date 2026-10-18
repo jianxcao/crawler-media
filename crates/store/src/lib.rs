@@ -60,7 +60,7 @@ mod probe_tasks;
 mod probe_dispatch;
 pub use probe_dispatch::{ProbeDispatchId, ProbeDispatchSnapshot, ProbeDispatchStage};
 mod roots;
-mod schema;
+pub mod schema;
 mod scanned_ledger;
 mod scan_probe_obligations;
 mod scan_operations;
@@ -200,9 +200,18 @@ pub struct Store {
     pub(crate) role_lookups: std::sync::atomic::AtomicUsize,
     app_path: PathBuf,
     pub(crate) app: Connection,
-    pub(crate) catalog: Connection,
+    pub(crate) cache: Connection,
     pub(crate) library: Connection,
     pub(crate) subscribe: Connection,
+}
+
+impl std::fmt::Debug for Store {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Store")
+            .field("data_dir", &self.data_dir)
+            .field("app_path", &self.app_path)
+            .finish()
+    }
 }
 
 impl Store {
@@ -232,5 +241,9 @@ impl Store {
 
     pub fn reset_role_lookups(&self) {
         self.role_lookups.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn cache_db_path(&self) -> PathBuf {
+        self.data_dir.join("cache.db")
     }
 }

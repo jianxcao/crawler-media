@@ -59,7 +59,7 @@ impl Store {
         let conn = match source {
             BrowseChangeSource::App => &self.app,
             BrowseChangeSource::Library => &self.library,
-            BrowseChangeSource::Catalog => &self.catalog,
+            BrowseChangeSource::Catalog => &self.cache,
         };
 
         let mut stmt = conn.prepare(
@@ -157,7 +157,7 @@ impl Store {
         let source_conn = match source {
             BrowseChangeSource::App => &self.app,
             BrowseChangeSource::Library => &self.library,
-            BrowseChangeSource::Catalog => &self.catalog,
+            BrowseChangeSource::Catalog => &self.cache,
         };
         loop {
             let deleted = source_conn.execute(

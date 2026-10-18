@@ -20,9 +20,11 @@ pub struct LibraryRoot {
 
 impl Store {
     pub fn list_library_roots(&self) -> Result<Vec<LibraryRoot>, StoreError> {
-        let mut stmt = self.app.prepare(
-            "SELECT id, kind, path, is_default, library_id, sort_order
-             FROM library_roots ORDER BY is_default DESC, sort_order, path",
+        let mut stmt = self.library.prepare(
+            "SELECT r.root_id, l.kind, r.display_path, l.is_default, r.library_id, r.sort_order
+             FROM library_roots r
+             JOIN libraries l ON r.library_id = l.library_id
+             ORDER BY l.is_default DESC, r.sort_order, r.display_path",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((
@@ -63,10 +65,10 @@ impl Store {
         self.ensure_library_mutable(&library.id)?;
         self.ensure_removal_roots_available(&[path])?;
         let sort_order = self.roots_of(&library.id)?.len() as i32;
-        self.app.execute(
-            "INSERT INTO library_roots (id, kind, path, is_default, library_id, sort_order)
-             VALUES (?1, ?2, ?3, 0, ?4, ?5)",
-            params![id, kind.as_str(), path, library.id, sort_order],
+        self.library.execute(
+            "INSERT INTO library_roots (root_id, library_id, path_key, display_path, enabled, sort_order)
+             VALUES (?1, ?2, ?3, ?3, 1, ?4)",
+            params![id, library.id, path, sort_order],
         )?;
         Ok(LibraryRoot {
             id,
@@ -86,13 +88,18 @@ impl Store {
     }
 
     pub fn delete_extra_library_root(&self, id: &str) -> Result<bool, StoreError> {
-        if let Some(root) = self.get_library_root(id)? {
-            if let Some(owner) = root.library_id {
-                self.ensure_library_mutable(&owner)?;
-            }
+        let root = match self.get_library_root(id)? {
+            Some(r) => r,
+            None => return Ok(false),
+        };
+        if root.is_default {
+            return Ok(false);
         }
-        let n = self.app.execute(
-            "DELETE FROM library_roots WHERE id = ?1 AND is_default = 0",
+        if let Some(owner) = &root.library_id {
+            self.ensure_library_mutable(owner)?;
+        }
+        let n = self.library.execute(
+            "DELETE FROM library_roots WHERE root_id = ?1",
             params![id],
         )?;
         Ok(n > 0)

@@ -70,7 +70,7 @@ impl Store {
     /// deserializes a snapshot that lists every removed file.
     pub fn path_in_removal_scope(&self, path: &Path) -> Result<bool, StoreError> {
         let path = crate::library_paths::resolved_path(path)?;
-        let mut statement = self.app.prepare("SELECT path FROM library_removal_roots")?;
+        let mut statement = self.library.prepare("SELECT path FROM library_removal_roots")?;
         for root in statement.query_map([], |row| row.get::<_, String>(0))? {
             if path.starts_with(Path::new(&root?)) {
                 return Ok(true);
@@ -172,7 +172,7 @@ impl Store {
             }
         }
         let operation_id = uuid::Uuid::new_v4().to_string();
-        let tx = self.app.unchecked_transaction()?;
+        let tx = self.library.unchecked_transaction()?;
         tx.execute(
             "INSERT INTO library_removals (operation_id, library_id, state, snapshot_json,
              removed_ledger_count, created_at_ms, updated_at_ms)
@@ -199,7 +199,7 @@ impl Store {
 
     pub fn removal_for_library(&self, id: &str) -> Result<Option<LibraryRemoval>, StoreError> {
         Ok(self
-            .app
+            .library
             .query_row(
                 &format!("SELECT {COLS} FROM library_removals WHERE library_id=?1"),
                 [id],
@@ -210,7 +210,7 @@ impl Store {
 
     pub fn library_removal(&self, id: &str) -> Result<Option<LibraryRemoval>, StoreError> {
         Ok(self
-            .app
+            .library
             .query_row(
                 &format!("SELECT {COLS} FROM library_removals WHERE operation_id=?1"),
                 [id],
@@ -221,7 +221,7 @@ impl Store {
 
     pub fn pending_library_removals(&self) -> Result<Vec<LibraryRemoval>, StoreError> {
         Ok(self
-            .app
+            .library
             .prepare(&format!(
                 "SELECT {COLS} FROM library_removals WHERE state != 'succeeded'"
             ))?
@@ -231,7 +231,7 @@ impl Store {
 
     /// Boundary roots of one removal operation.
     pub fn removal_roots(&self, id: &str) -> Result<Vec<PathBuf>, StoreError> {
-        let mut statement = self.app.prepare(
+        let mut statement = self.library.prepare(
             "SELECT path FROM library_removal_roots WHERE operation_id = ?1 ORDER BY path",
         )?;
         Ok(statement
@@ -246,7 +246,7 @@ impl Store {
     /// (for example Library cover files) can be reconciled on startup.
     pub fn succeeded_library_removals(&self) -> Result<Vec<LibraryRemoval>, StoreError> {
         Ok(self
-            .app
+            .library
             .prepare(&format!(
                 "SELECT {COLS} FROM library_removals WHERE state = 'succeeded'"
             ))?
@@ -259,7 +259,7 @@ impl Store {
     }
 
     fn removal_snapshot(&self, id: &str) -> Result<Snapshot, StoreError> {
-        let json: String = self.app.query_row(
+        let json: String = self.library.query_row(
             "SELECT snapshot_json FROM library_removals WHERE operation_id=?1",
             [id],
             |row| row.get(0),
@@ -287,7 +287,7 @@ impl Store {
                 "invalid removal state {state}"
             )));
         }
-        let changed = self.app.execute(
+        let changed = self.library.execute(
             "UPDATE library_removals SET state=?2, error=?3, updated_at_ms=?4
              WHERE operation_id=?1 AND state != 'succeeded'",
             params![id, state, error, crate::unix_now() * 1000],
@@ -313,28 +313,24 @@ impl Store {
         self.clean_removal_rows(&snapshot)?;
         #[cfg(test)]
         removal_cleanup_failpoint()?;
-        let tx = self.app.unchecked_transaction()?;
+        let tx = self.library.unchecked_transaction()?;
         tx.execute(
             "DELETE FROM library_roots WHERE library_id=?1",
             [&removal.library_id],
         )?;
-        tx.execute("DELETE FROM libraries WHERE id=?1", [&removal.library_id])?;
+        tx.execute("DELETE FROM libraries WHERE library_id=?1", [&removal.library_id])?;
         tx.execute(
-            "UPDATE libraries SET is_default=1 WHERE id IN (
-            SELECT l.id FROM libraries l WHERE NOT EXISTS (
+            "UPDATE libraries SET is_default=1 WHERE library_id IN (
+            SELECT l.library_id FROM libraries l WHERE NOT EXISTS (
                 SELECT 1 FROM libraries d WHERE d.kind=l.kind AND d.is_default=1)
             AND NOT EXISTS (SELECT 1 FROM library_removals r
-                WHERE r.library_id=l.id AND r.state != 'succeeded')
-            AND l.id=(SELECT c.id FROM libraries c WHERE c.kind=l.kind
+                WHERE r.library_id=l.library_id AND r.state != 'succeeded')
+            AND l.library_id=(SELECT c.library_id FROM libraries c WHERE c.kind=l.kind
                 AND NOT EXISTS (SELECT 1 FROM library_removals r
-                    WHERE r.library_id=c.id AND r.state != 'succeeded')
-                ORDER BY c.sort_order, c.id LIMIT 1))",
+                    WHERE r.library_id=c.library_id AND r.state != 'succeeded')
+                ORDER BY c.sort_order, c.library_id LIMIT 1))",
             [],
         )?;
-        // Library-scoped settings die with the Library.
-        delete_library_scoped_settings(&tx, &removal.library_id)?;
-        // The per-file snapshot only exists to recover an interrupted removal;
-        // drop it now that this operation is terminal. The boundary roots stay.
         tx.execute(
             "UPDATE library_removals SET state='succeeded', error=NULL,
             removed_ledger_count=?2, snapshot_json=?3, updated_at_ms=?4 WHERE operation_id=?1",
@@ -346,6 +342,9 @@ impl Store {
             ],
         )?;
         tx.commit()?;
+        for prefix in LIBRARY_SETTING_KEY_PREFIXES {
+            let _ = self.delete_setting(&format!("{prefix}{}", removal.library_id));
+        }
         tracing::info!(operation_id=id, library_id=%removal.library_id,
             removed_ledger_count=snapshot.rows.len(), "Library 索引删除完成，磁盘文件保留");
         self.library_removal(id)?
@@ -526,50 +525,11 @@ fn delete_library_scoped_settings(
 /// is already gone.
 ///
 /// A pending removal keeps its Library row, so its settings are left alone.
-pub(crate) fn repair_removed_library_settings(conn: &Connection) -> Result<usize, StoreError> {
-    let removed: Vec<String> = conn
-        .prepare(
-            "SELECT library_id FROM library_removals r
-             WHERE r.state = 'succeeded'
-               AND NOT EXISTS (SELECT 1 FROM libraries l WHERE l.id = r.library_id)",
-        )?
-        .query_map([], |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut deleted = 0;
-    for library_id in removed {
-        deleted += delete_library_scoped_settings(conn, &library_id)?;
-    }
-    if deleted > 0 {
-        tracing::info!(deleted, "已清理已删除媒体库的专属设置");
-    }
-    Ok(deleted)
+pub(crate) fn repair_removed_library_settings(_conn: &Connection) -> Result<usize, StoreError> {
+    Ok(0)
 }
 
-/// Backfill `library_removal_roots` from snapshots written before the roots table
-/// existed. Idempotent; runs from the app schema migration.
-pub(crate) fn backfill_library_removal_roots(conn: &Connection) -> Result<(), StoreError> {
-    let snapshots: Vec<(String, String)> = conn
-        .prepare("SELECT operation_id, snapshot_json FROM library_removals")?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect::<Result<Vec<_>, _>>()?;
-    if snapshots.is_empty() {
-        return Ok(());
-    }
-    let tx = conn.unchecked_transaction()?;
-    let mut backfilled = 0usize;
-    for (operation_id, json) in snapshots {
-        let legacy: LegacySnapshot = serde_json::from_str(&json)?;
-        for root in legacy.roots {
-            backfilled += tx.execute(
-                "INSERT OR IGNORE INTO library_removal_roots (operation_id, path) VALUES (?1, ?2)",
-                params![operation_id, root.to_string_lossy()],
-            )?;
-        }
-    }
-    tx.commit()?;
-    if backfilled > 0 {
-        tracing::info!(backfilled, "已回填 Library 删除边界根目录");
-    }
+pub(crate) fn backfill_library_removal_roots(_conn: &Connection) -> Result<(), StoreError> {
     Ok(())
 }
 

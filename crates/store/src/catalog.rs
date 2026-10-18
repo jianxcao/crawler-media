@@ -11,6 +11,18 @@ pub struct CatalogCacheRow {
     pub expires_at: Option<i64>,
 }
 
+fn cache_table(source: &str) -> Result<&'static str, StoreError> {
+    match source {
+        "tmdb" => Ok("tmdb_cache"),
+        "douban" => Ok("douban_cache"),
+        "tvdb" => Ok("tvdb_cache"),
+        "bangumi" => Ok("bangumi_cache"),
+        "anilist" => Ok("anilist_cache"),
+        "fanart" => Ok("fanart_cache"),
+        other => Err(StoreError::Invalid(format!("unknown cache source: {other}"))),
+    }
+}
+
 impl Store {
     pub fn put_catalog_cache(
         &self,
@@ -20,11 +32,16 @@ impl Store {
         fetched_at: i64,
         expires_at: Option<i64>,
     ) -> Result<(), StoreError> {
-        self.catalog.execute(
-            "INSERT OR REPLACE INTO catalog_cache (source, cache_key, body, fetched_at, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![source, cache_key, body, fetched_at, expires_at],
-        )?;
+        let table = cache_table(source)?;
+        let sql = format!(
+            "INSERT INTO {table} (cache_key, body, fetched_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(cache_key) DO UPDATE SET
+                 body = excluded.body,
+                 fetched_at = excluded.fetched_at,
+                 expires_at = excluded.expires_at"
+        );
+        self.cache.execute(&sql, params![cache_key, body, fetched_at, expires_at])?;
         Ok(())
     }
 
@@ -33,10 +50,10 @@ impl Store {
         source: &str,
         cache_key: &str,
     ) -> Result<Option<String>, StoreError> {
-        let mut stmt = self
-            .catalog
-            .prepare("SELECT body FROM catalog_cache WHERE source = ?1 AND cache_key = ?2")?;
-        let mut rows = stmt.query(params![source, cache_key])?;
+        let table = cache_table(source)?;
+        let sql = format!("SELECT body FROM {table} WHERE cache_key = ?1");
+        let mut stmt = self.cache.prepare(&sql)?;
+        let mut rows = stmt.query(params![cache_key])?;
         if let Some(row) = rows.next()? {
             Ok(Some(row.get(0)?))
         } else {
@@ -44,19 +61,22 @@ impl Store {
         }
     }
 
-    /// All catalog cache rows, newest first.
-    ///
-    /// `rowid ASC` is the stable tie-break for equal `fetched_at` (e.g. two
-    /// languages of one detail fetched in the same second): the first-inserted
-    /// row wins, which is also what the targeted
-    /// [`Store::catalog_details_for_prefixes`] read returns. The two paths must
-    /// agree because the browse fallback and the projection builder both keep
-    /// the first row per cache-key base.
     pub fn list_catalog_cache(&self) -> Result<Vec<CatalogCacheRow>, StoreError> {
-        let mut stmt = self.catalog.prepare(
-            "SELECT source, cache_key, body, fetched_at, expires_at FROM catalog_cache
-             ORDER BY fetched_at DESC, rowid ASC",
-        )?;
+        let sql = "
+            SELECT 'tmdb' AS source, cache_key, body, fetched_at, expires_at, entry_id FROM tmdb_cache
+            UNION ALL
+            SELECT 'douban' AS source, cache_key, body, fetched_at, expires_at, entry_id FROM douban_cache
+            UNION ALL
+            SELECT 'tvdb' AS source, cache_key, body, fetched_at, expires_at, entry_id FROM tvdb_cache
+            UNION ALL
+            SELECT 'bangumi' AS source, cache_key, body, fetched_at, expires_at, entry_id FROM bangumi_cache
+            UNION ALL
+            SELECT 'anilist' AS source, cache_key, body, fetched_at, expires_at, entry_id FROM anilist_cache
+            UNION ALL
+            SELECT 'fanart' AS source, cache_key, body, fetched_at, expires_at, entry_id FROM fanart_cache
+            ORDER BY fetched_at DESC, entry_id ASC
+        ";
+        let mut stmt = self.cache.prepare(sql)?;
         let rows = stmt.query_map([], |row| {
             Ok(CatalogCacheRow {
                 source: row.get(0)?,
@@ -70,10 +90,9 @@ impl Store {
     }
 
     pub fn delete_catalog_cache(&self, source: &str, cache_key: &str) -> Result<bool, StoreError> {
-        let n = self.catalog.execute(
-            "DELETE FROM catalog_cache WHERE source = ?1 AND cache_key = ?2",
-            params![source, cache_key],
-        )?;
+        let table = cache_table(source)?;
+        let sql = format!("DELETE FROM {table} WHERE cache_key = ?1");
+        let n = self.cache.execute(&sql, params![cache_key])?;
         Ok(n > 0)
     }
 }

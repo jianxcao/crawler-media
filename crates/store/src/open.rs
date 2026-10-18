@@ -28,21 +28,45 @@ impl Store {
         if let Some(parent) = app_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let cache_path = data_dir.join("cache.db");
+        let library_path = data_dir.join("library.db");
+        let subscribe_path = data_dir.join("subscribe.db");
+
+        // Read-only preflight check
+        schema::layout::preflight_check_existing_file(
+            "app",
+            &app_path,
+            schema::layout::APP_APPLICATION_ID,
+            schema::layout::V1_USER_VERSION,
+        )?;
+        schema::layout::preflight_check_existing_file(
+            "cache",
+            &cache_path,
+            schema::layout::CACHE_APPLICATION_ID,
+            schema::layout::V1_USER_VERSION,
+        )?;
+        schema::layout::preflight_check_existing_file(
+            "library",
+            &library_path,
+            schema::layout::LIBRARY_APPLICATION_ID,
+            schema::layout::V1_USER_VERSION,
+        )?;
+        schema::layout::preflight_check_existing_file(
+            "subscribe",
+            &subscribe_path,
+            schema::layout::SUBSCRIBE_APPLICATION_ID,
+            schema::layout::V1_USER_VERSION,
+        )?;
+
         let app = Connection::open(&app_path)?;
-        let catalog = Connection::open(data_dir.join("catalog.db"))?;
-        let library = Connection::open(data_dir.join("library.db"))?;
-        let subscribe = Connection::open(data_dir.join("subscribe.db"))?;
-        // 降级保护：在任何迁移 / seed / 连接模式改动之前先做只读预检。
-        schema::ensure_supported_versions(&[
-            ("app", &app, schema::APP_SCHEMA_VERSION),
-            ("catalog", &catalog, schema::CATALOG_SCHEMA_VERSION),
-            ("library", &library, schema::LIBRARY_SCHEMA_VERSION),
-            ("subscribe", &subscribe, schema::SUBSCRIBE_SCHEMA_VERSION),
-        ])?;
-        // Enable WAL mode and set busy timeout for all connections.
-        for conn in [&app, &catalog, &library, &subscribe] {
+        let cache = Connection::open(&cache_path)?;
+        let library = Connection::open(&library_path)?;
+        let subscribe = Connection::open(&subscribe_path)?;
+
+        for conn in [&app, &cache, &library, &subscribe] {
             apply_connection_policy(conn)?;
         }
+
         let store = Self {
             data_dir,
             root_ledger_scans: std::sync::atomic::AtomicUsize::new(0),
@@ -50,7 +74,7 @@ impl Store {
             role_lookups: std::sync::atomic::AtomicUsize::new(0),
             app_path: app_path.clone(),
             app,
-            catalog,
+            cache,
             library,
             subscribe,
         };
@@ -78,37 +102,60 @@ impl Store {
     }
 
     pub fn db_paths(&self) -> Vec<PathBuf> {
-        ["app.db", "catalog.db", "library.db", "subscribe.db"]
-            .into_iter()
-            .map(|name| self.data_dir.join(name))
-            .collect()
+        vec![
+            self.app_path.clone(),
+            self.data_dir.join("cache.db"),
+            self.data_dir.join("library.db"),
+            self.data_dir.join("subscribe.db"),
+        ]
     }
 
     /// Schema versions for each database file (app, catalog, library, subscribe).
     pub fn schema_versions(&self) -> Vec<(&'static str, i64)> {
         [
             ("app", &self.app),
-            ("catalog", &self.catalog),
+            ("cache", &self.cache),
             ("library", &self.library),
             ("subscribe", &self.subscribe),
         ]
         .into_iter()
         .map(|(name, conn)| {
-            // 诊断用途的只读访问器：读取失败时报告 0。打开时的降级保护走
-            // `schema::ensure_supported_versions`，读取失败会直接返回错误。
-            let version = schema::read_schema_version(conn).unwrap_or(0);
+            let version = schema::layout::read_user_version(conn).unwrap_or(0);
             (name, version)
         })
         .collect()
     }
 
     fn migrate(&self) -> Result<(), StoreError> {
-        schema::migrate_app(&self.app)?;
-        schema::migrate_catalog(&self.catalog)?;
-        schema::migrate_library(&self.library)?;
-        super::legacy_recycle::restore_recycle_bin(&self.library)?;
-        schema::migrate_subscribe(&self.subscribe)?;
-        schema::seed_defaults(&self.app, &self.data_dir)?;
+        schema::layout::initialize_or_validate(
+            "app",
+            &self.app,
+            schema::layout::APP_DDL,
+            schema::layout::APP_APPLICATION_ID,
+            schema::layout::V1_USER_VERSION,
+        )?;
+        schema::layout::initialize_or_validate(
+            "cache",
+            &self.cache,
+            schema::layout::CACHE_DDL,
+            schema::layout::CACHE_APPLICATION_ID,
+            schema::layout::V1_USER_VERSION,
+        )?;
+        schema::layout::initialize_or_validate(
+            "library",
+            &self.library,
+            schema::layout::LIBRARY_DDL,
+            schema::layout::LIBRARY_APPLICATION_ID,
+            schema::layout::V1_USER_VERSION,
+        )?;
+        schema::layout::initialize_or_validate(
+            "subscribe",
+            &self.subscribe,
+            schema::layout::SUBSCRIBE_DDL,
+            schema::layout::SUBSCRIBE_APPLICATION_ID,
+            schema::layout::V1_USER_VERSION,
+        )?;
+        schema::seed_defaults(&self.app, &self.library, &self.data_dir)?;
         Ok(())
     }
 

@@ -2,8 +2,18 @@ use domain::{Media, MediaId};
 use rusqlite::{OptionalExtension, params};
 
 use super::maps::{aliases_json, map_media};
-use super::schema::MEDIA_COLS;
 use super::{Store, StoreError};
+
+pub const MEDIA_SELECT: &str = "
+    SELECT m.media_id, m.kind, m.title, m.year, m.original_title,
+           (SELECT external_id FROM media_aliases WHERE media_id = m.media_id AND source = 'tmdb' AND kind = m.kind LIMIT 1),
+           (SELECT external_id FROM media_aliases WHERE media_id = m.media_id AND source = 'douban' AND kind = m.kind LIMIT 1),
+           (SELECT external_id FROM media_aliases WHERE media_id = m.media_id AND source = 'tvdb' AND kind = m.kind LIMIT 1),
+           (SELECT external_id FROM media_aliases WHERE media_id = m.media_id AND source = 'bangumi' AND kind = m.kind LIMIT 1),
+           (SELECT external_id FROM media_aliases WHERE media_id = m.media_id AND source = 'anilist' AND kind = m.kind LIMIT 1),
+           m.aliases_display_json
+    FROM media m
+";
 
 fn aliases(media: &Media) -> [Option<&str>; 5] {
     [
@@ -29,34 +39,82 @@ fn identity_conflict(incoming: &Media) -> StoreError {
 
 impl Store {
     pub fn insert_media(&self, media: &Media) -> Result<(), StoreError> {
-        self.app.execute(
-            "INSERT INTO media (id, kind, title, year, original_title, tmdb_id, douban_id, tvdb_id, bangumi_id, anilist_id, aliases_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        let tx = self.library.unchecked_transaction()?;
+        let has_external = media.tmdb_id.is_some()
+            || media.douban_id.is_some()
+            || media.tvdb_id.is_some()
+            || media.bangumi_id.is_some()
+            || media.anilist_id.is_some();
+        let identity_state = if has_external { "confirmed" } else { "provisional" };
+
+        // Pre-check for conflicting aliases belonging to different media
+        for (source, ext_id) in [
+            ("tmdb", media.tmdb_id.as_deref()),
+            ("douban", media.douban_id.as_deref()),
+            ("tvdb", media.tvdb_id.as_deref()),
+            ("bangumi", media.bangumi_id.as_deref()),
+            ("anilist", media.anilist_id.as_deref()),
+        ] {
+            if let Some(id) = ext_id {
+                let existing: Option<String> = tx
+                    .query_row(
+                        "SELECT media_id FROM media_aliases WHERE source = ?1 AND kind = ?2 AND external_id = ?3",
+                        params![source, media.kind.as_str(), id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if let Some(existing_id) = existing {
+                    if existing_id != media.id.to_string() {
+                        return Err(StoreError::Protected(format!(
+                            "Alias {source}:{id} already registered to media {existing_id}"
+                        )));
+                    }
+                }
+            }
+        }
+
+        tx.execute(
+            "INSERT INTO media (media_id, kind, title, year, original_title, identity_state, aliases_display_json, metadata_revision)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
             params![
                 media.id.to_string(),
                 media.kind.as_str(),
                 media.title,
                 media.year.map(i64::from),
                 media.original_title,
-                media.tmdb_id,
-                media.douban_id,
-                media.tvdb_id,
-                media.bangumi_id,
-                media.anilist_id,
+                identity_state,
                 aliases_json(&media.aliases),
             ],
         )?;
+
+        for (source, external_id) in [
+            ("tmdb", media.tmdb_id.as_deref()),
+            ("douban", media.douban_id.as_deref()),
+            ("tvdb", media.tvdb_id.as_deref()),
+            ("bangumi", media.bangumi_id.as_deref()),
+            ("anilist", media.anilist_id.as_deref()),
+        ] {
+            if let Some(ext_id) = external_id {
+                tx.execute(
+                    "INSERT INTO media_aliases (source, kind, external_id, media_id, is_refresh_target)
+                     VALUES (?1, ?2, ?3, ?4, 1)",
+                    params![source, media.kind.as_str(), ext_id, media.id.to_string()],
+                )?;
+            }
+        }
+
+        tx.commit()?;
         Ok(())
     }
 
-    /// Safely undo a newly inserted media if it matches expected and is completely unreferenced by subscribes or ledgers.
+    /// Safely undo a newly inserted media if it matches expected and is completely unreferenced by subscribes or files.
     pub fn undo_ensured_media_if_unreferenced(
         &self,
         media_id: MediaId,
         expected: &Media,
     ) -> Result<bool, StoreError> {
         let tx = rusqlite::Transaction::new_unchecked(
-            &self.app,
+            &self.library,
             rusqlite::TransactionBehavior::Immediate,
         )?;
 
@@ -64,23 +122,15 @@ impl Store {
         let matches_expected: bool = tx.query_row(
             "SELECT EXISTS(
                  SELECT 1 FROM media
-                 WHERE id = ?1 AND title = ?2 AND kind = ?3
+                 WHERE media_id = ?1 AND title = ?2 AND kind = ?3
                    AND year IS ?4 AND original_title IS ?5
-                   AND tmdb_id IS ?6 AND douban_id IS ?7
-                   AND tvdb_id IS ?8 AND bangumi_id IS ?9
-                   AND anilist_id IS ?10
              )",
             params![
                 id_str,
                 expected.title,
                 expected.kind.as_str(),
-                expected.year,
+                expected.year.map(i64::from),
                 expected.original_title,
-                expected.tmdb_id,
-                expected.douban_id,
-                expected.tvdb_id,
-                expected.bangumi_id,
-                expected.anilist_id,
             ],
             |r| r.get(0),
         )?;
@@ -97,38 +147,33 @@ impl Store {
             return Ok(false);
         }
 
-        let has_ledger: bool = self.library.query_row(
-            "SELECT EXISTS(SELECT 1 FROM ledger WHERE media_id = ?1)",
+        let has_files: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM library_files WHERE media_id = ?1)",
             [&id_str],
             |r| r.get(0),
         )?;
-        if has_ledger {
+        if has_files {
             return Ok(false);
         }
 
-        let changed = tx.execute("DELETE FROM media WHERE id = ?1", [&id_str])?;
+        tx.execute("DELETE FROM media_aliases WHERE media_id = ?1", [&id_str])?;
+        let changed = tx.execute("DELETE FROM media WHERE media_id = ?1", [&id_str])?;
         tx.commit()?;
         Ok(changed > 0)
     }
 
     pub fn get_media(&self, id: MediaId) -> Result<Option<Media>, StoreError> {
-        self.app
-            .query_row(
-                &format!("SELECT {MEDIA_COLS} FROM media WHERE id = ?1"),
-                params![id.to_string()],
-                map_media,
-            )
+        let sql = format!("{MEDIA_SELECT} WHERE m.media_id = ?1");
+        self.library
+            .query_row(&sql, params![id.to_string()], map_media)
             .optional()
             .map_err(Into::into)
     }
 
     pub fn get_media_by_title(&self, title: &str) -> Result<Option<Media>, StoreError> {
-        self.app
-            .query_row(
-                &format!("SELECT {MEDIA_COLS} FROM media WHERE title = ?1"),
-                params![title],
-                map_media,
-            )
+        let sql = format!("{MEDIA_SELECT} WHERE m.title = ?1");
+        self.library
+            .query_row(&sql, params![title], map_media)
             .optional()
             .map_err(Into::into)
     }
@@ -140,42 +185,30 @@ impl Store {
         year: Option<u16>,
     ) -> Result<Option<Media>, StoreError> {
         let year_i64 = year.map(i64::from);
-        // year 有值：精确匹配年份。
         if year_i64.is_some() {
+            let sql = format!("{MEDIA_SELECT} WHERE m.title = ?1 AND m.kind = ?2 AND m.year IS ?3 LIMIT 1");
             return self
-                .app
+                .library
                 .query_row(
-                    &format!(
-                        "SELECT {MEDIA_COLS} FROM media
-                         WHERE title = ?1 AND kind = ?2 AND year IS ?3 LIMIT 1"
-                    ),
+                    &sql,
                     params![title, kind.as_str(), year_i64],
                     map_media,
                 )
                 .optional()
                 .map_err(Into::into);
         }
-        // year 为 None（文件名未带年份）：
-        // 1) 优先匹配同样「未知年份」的行（year IS NULL）；
-        // 2) 否则仅当恰好一个「已知年份」候选时挂它（同名不同年份并存时
-        //    无法区分，返回 None 不任取，避免把无年份文件挂错作品）。
+
+        let sql_null = format!("{MEDIA_SELECT} WHERE m.title = ?1 AND m.kind = ?2 AND m.year IS NULL LIMIT 1");
         if let Some(media) = self
-            .app
-            .query_row(
-                &format!(
-                    "SELECT {MEDIA_COLS} FROM media
-                     WHERE title = ?1 AND kind = ?2 AND year IS NULL LIMIT 1"
-                ),
-                params![title, kind.as_str()],
-                map_media,
-            )
+            .library
+            .query_row(&sql_null, params![title, kind.as_str()], map_media)
             .optional()?
         {
             return Ok(Some(media));
         }
-        let mut stmt = self.app.prepare(&format!(
-            "SELECT {MEDIA_COLS} FROM media WHERE title = ?1 AND kind = ?2 AND year IS NOT NULL"
-        ))?;
+
+        let sql_not_null = format!("{MEDIA_SELECT} WHERE m.title = ?1 AND m.kind = ?2 AND m.year IS NOT NULL");
+        let mut stmt = self.library.prepare(&sql_not_null)?;
         let rows = stmt
             .query_map(params![title, kind.as_str()], map_media)?
             .collect::<Result<Vec<_>, _>>()?;
@@ -194,102 +227,111 @@ impl Store {
         self.get_media_by_alias_kind(column, id, None)
     }
 
-    /// 按别名 + kind 查找（ensure_media 用）：相同数字的 TMDB movie/TV id
-    /// 不会被合并成同一个内部 Media。
     pub fn get_media_by_alias_kind(
         &self,
         column: &str,
         id: &str,
         kind: Option<domain::MediaKind>,
     ) -> Result<Option<Media>, StoreError> {
-        if !matches!(
-            column,
-            "tmdb_id" | "douban_id" | "tvdb_id" | "bangumi_id" | "anilist_id"
-        ) {
-            return Ok(None);
-        }
+        let source = match column {
+            "tmdb" | "tmdb_id" => "tmdb",
+            "douban" | "douban_id" => "douban",
+            "tvdb" | "tvdb_id" => "tvdb",
+            "bangumi" | "bangumi_id" => "bangumi",
+            "anilist" | "anilist_id" => "anilist",
+            _ => return Ok(None),
+        };
         let sql = match kind {
-            Some(_kind) => {
-                format!("SELECT {MEDIA_COLS} FROM media WHERE {column} = ?1 AND kind = ?2")
-            }
-            None => format!("SELECT {MEDIA_COLS} FROM media WHERE {column} = ?1"),
+            Some(_) => format!(
+                "{MEDIA_SELECT} WHERE m.media_id = (SELECT media_id FROM media_aliases WHERE source = ?1 AND external_id = ?2 AND kind = ?3 LIMIT 1)"
+            ),
+            None => format!(
+                "{MEDIA_SELECT} WHERE m.media_id = (SELECT media_id FROM media_aliases WHERE source = ?1 AND external_id = ?2 LIMIT 1)"
+            ),
         };
-        let row = match kind {
-            Some(kind) => self
-                .app
-                .query_row(&sql, params![id, kind.as_str()], map_media)
-                .optional()?,
-            None => self
-                .app
-                .query_row(&sql, params![id], map_media)
-                .optional()?,
+        let mut stmt = self.library.prepare(&sql)?;
+        let mut rows = match kind {
+            Some(k) => stmt.query(params![source, id, k.as_str()])?,
+            None => stmt.query(params![source, id])?,
         };
-        Ok(row)
+        if let Some(row) = rows.next()? {
+            Ok(Some(map_media(row)?))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn update_media(&self, media: &Media) -> Result<(), StoreError> {
-        self.app.execute(
-            "UPDATE media SET title = ?2, year = ?3, original_title = ?4, tmdb_id = ?5,
-                    douban_id = ?6, tvdb_id = ?7, bangumi_id = ?8, anilist_id = ?9, aliases_json = ?10 WHERE id = ?1",
+        let tx = self.library.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE media SET title = ?2, year = ?3, original_title = ?4, aliases_display_json = ?5 WHERE media_id = ?1",
             params![
                 media.id.to_string(),
                 media.title,
                 media.year.map(i64::from),
                 media.original_title,
-                media.tmdb_id,
-                media.douban_id,
-                media.tvdb_id,
-                media.bangumi_id,
-                media.anilist_id,
                 aliases_json(&media.aliases),
             ],
         )?;
+
+        tx.execute("DELETE FROM media_aliases WHERE media_id = ?1", params![media.id.to_string()])?;
+        for (source, external_id) in [
+            ("tmdb", media.tmdb_id.as_deref()),
+            ("douban", media.douban_id.as_deref()),
+            ("tvdb", media.tvdb_id.as_deref()),
+            ("bangumi", media.bangumi_id.as_deref()),
+            ("anilist", media.anilist_id.as_deref()),
+        ] {
+            if let Some(ext_id) = external_id {
+                tx.execute(
+                    "INSERT INTO media_aliases (source, kind, external_id, media_id, is_refresh_target)
+                     VALUES (?1, ?2, ?3, ?4, 1)",
+                    params![source, media.kind.as_str(), ext_id, media.id.to_string()],
+                )?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
     /// Recover canonical identity without selecting the first alias or ambiguous title.
     pub fn resolve_scanned_media(&self, incoming: Media) -> Result<Media, StoreError> {
-        let mut stmt = self.app.prepare(&format!(
-            "SELECT {MEDIA_COLS} FROM media WHERE kind = ?1 AND
-             (title = ?2 OR tmdb_id = ?3 OR douban_id = ?4 OR tvdb_id = ?5
-              OR bangumi_id = ?6 OR anilist_id = ?7)"
-        ))?;
-        let candidates = stmt
-            .query_map(
-                params![
-                    incoming.kind.as_str(),
-                    incoming.title,
-                    incoming.tmdb_id,
-                    incoming.douban_id,
-                    incoming.tvdb_id,
-                    incoming.bangumi_id,
-                    incoming.anilist_id
-                ],
-                map_media,
-            )?
-            .collect::<Result<Vec<_>, _>>()?;
-        let external: Vec<_> = candidates
-            .iter()
-            .filter(|existing| {
-                aliases(existing)
-                    .into_iter()
-                    .zip(aliases(&incoming))
-                    .any(|(a, b)| a.zip(b).is_some_and(|(a, b)| a == b))
-            })
-            .collect();
-        let has_incoming_alias = aliases(&incoming).iter().any(Option::is_some);
-        let existing = if external.len() > 1 {
+        let mut matched_media_ids: std::collections::HashSet<MediaId> = std::collections::HashSet::new();
+        for (source, ext_id) in [
+            ("tmdb", incoming.tmdb_id.as_deref()),
+            ("douban", incoming.douban_id.as_deref()),
+            ("tvdb", incoming.tvdb_id.as_deref()),
+            ("bangumi", incoming.bangumi_id.as_deref()),
+            ("anilist", incoming.anilist_id.as_deref()),
+        ] {
+            if let Some(id) = ext_id {
+                if let Some(m) = self.get_media_by_alias_kind(source, id, Some(incoming.kind))? {
+                    matched_media_ids.insert(m.id);
+                }
+            }
+        }
+
+        if matched_media_ids.len() > 1 {
             return Err(identity_conflict(&incoming));
-        } else if let Some(existing) = external.first() {
-            if aliases_conflict(existing, &incoming) {
+        }
+
+        let has_incoming_alias = aliases(&incoming).iter().any(Option::is_some);
+        let existing = if let Some(first_id) = matched_media_ids.into_iter().next() {
+            let existing = self
+                .get_media(first_id)?
+                .ok_or_else(|| StoreError::Missing(format!("media {first_id}")))?;
+            if aliases_conflict(&existing, &incoming) {
                 return Err(identity_conflict(&incoming));
             }
-            Some(*existing)
-        } else if let Some(same_id) = candidates.iter().find(|existing| existing.id == incoming.id) {
-            Some(same_id)
+            Some(existing)
         } else if !has_incoming_alias {
-            let titles: Vec<_> = candidates
-                .iter()
+            let sql = format!("{MEDIA_SELECT} WHERE m.title = ?1 AND m.kind = ?2");
+            let mut stmt = self.library.prepare(&sql)?;
+            let candidates: Vec<Media> = stmt
+                .query_map(params![incoming.title, incoming.kind.as_str()], map_media)?
+                .collect::<Result<Vec<_>, _>>()?;
+            let titles: Vec<Media> = candidates
+                .into_iter()
                 .filter(|existing| {
                     existing.title == incoming.title
                         && incoming.year == existing.year
@@ -299,10 +341,11 @@ impl Store {
             if titles.len() > 1 {
                 return Err(identity_conflict(&incoming));
             }
-            titles.first().copied()
+            titles.into_iter().next()
         } else {
             None
         };
+
         if let Some(existing) = existing {
             let mut canonical = existing.clone();
             canonical.year = canonical.year.or(incoming.year);
@@ -316,6 +359,7 @@ impl Store {
             tracing::debug!(media_id = %canonical.id, "Recovered canonical scanned Media identity");
             return Ok(canonical);
         }
+
         self.insert_media(&incoming)?;
         Ok(incoming)
     }
@@ -340,8 +384,6 @@ impl Store {
         ];
         for (column, id) in aliases {
             let Some(id) = id else { continue };
-            // 别名查找必须带上 kind：TMDB 的 movie/tv 共用数字 id 空间，
-            // 不带 kind 会把电影和剧集合并成同一个内部 Media。
             if let Some(existing) =
                 self.get_media_by_alias_kind(column, &id, Some(incoming.kind))?
             {
@@ -360,54 +402,7 @@ impl Store {
         previous: Option<&Media>,
     ) -> Result<bool, StoreError> {
         if let Some(previous) = previous {
-            let tx = rusqlite::Transaction::new_unchecked(
-                &self.app,
-                rusqlite::TransactionBehavior::Immediate,
-            )?;
-            let current_matches: bool = tx.query_row(
-                "SELECT EXISTS(
-                     SELECT 1 FROM media
-                     WHERE id = ?1 AND title = ?2 AND kind = ?3
-                       AND year IS ?4 AND original_title IS ?5
-                       AND tmdb_id IS ?6 AND douban_id IS ?7
-                       AND tvdb_id IS ?8 AND bangumi_id IS ?9
-                       AND anilist_id IS ?10
-                 )",
-                params![
-                    media.id.to_string(),
-                    media.title,
-                    media.kind.as_str(),
-                    media.year,
-                    media.original_title,
-                    media.tmdb_id,
-                    media.douban_id,
-                    media.tvdb_id,
-                    media.bangumi_id,
-                    media.anilist_id,
-                ],
-                |r| r.get(0),
-            )?;
-            if !current_matches {
-                return Ok(false);
-            }
-            tx.execute(
-                "UPDATE media SET title = ?2, year = ?3, original_title = ?4, tmdb_id = ?5,
-                 douban_id = ?6, tvdb_id = ?7, bangumi_id = ?8, anilist_id = ?9, aliases_json = ?10
-                 WHERE id = ?1",
-                params![
-                    previous.id.to_string(),
-                    previous.title,
-                    previous.year,
-                    previous.original_title,
-                    previous.tmdb_id,
-                    previous.douban_id,
-                    previous.tvdb_id,
-                    previous.bangumi_id,
-                    previous.anilist_id,
-                    aliases_json(&previous.aliases),
-                ],
-            )?;
-            tx.commit()?;
+            self.update_media(previous)?;
             Ok(true)
         } else {
             self.undo_ensured_media_if_unreferenced(media.id, media)
@@ -415,8 +410,17 @@ impl Store {
     }
 
     pub fn delete_media(&self, id: MediaId) -> Result<(), StoreError> {
-        self.app
-            .execute("DELETE FROM media WHERE id = ?1", params![id.to_string()])?;
+        let tx = self.library.unchecked_transaction()?;
+        tx.execute("DELETE FROM media_aliases WHERE media_id = ?1", params![id.to_string()])?;
+        tx.execute("DELETE FROM media WHERE media_id = ?1", params![id.to_string()])?;
+        tx.commit()?;
         Ok(())
+    }
+
+    pub fn list_media(&self) -> Result<Vec<Media>, StoreError> {
+        let sql = format!("{MEDIA_SELECT} ORDER BY m.title, m.media_id");
+        let mut stmt = self.library.prepare(&sql)?;
+        let rows = stmt.query_map([], map_media)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 }

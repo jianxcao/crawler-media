@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::StoreError;
-
+pub mod layout;
 mod chapter_frame_tasks;
 mod fingerprint;
 mod library_deletion;
@@ -564,7 +564,11 @@ fn migrate_playback_session_key(conn: &Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
-pub fn seed_defaults(app: &Connection, data_dir: &std::path::Path) -> Result<(), StoreError> {
+pub fn seed_defaults(
+    app: &Connection,
+    library: &Connection,
+    data_dir: &std::path::Path,
+) -> Result<(), StoreError> {
     let movie_root = data_dir.join("library/movies");
     let tv_root = data_dir.join("library/tv");
     std::fs::create_dir_all(&movie_root)?;
@@ -583,18 +587,6 @@ pub fn seed_defaults(app: &Connection, data_dir: &std::path::Path) -> Result<(),
             "{title} ({year})/Season {season}/{title} - {season_episode}{part}{ext}"
         ],
     )?;
-    let movie_id = uuid::Uuid::new_v4().to_string();
-    let tv_id = uuid::Uuid::new_v4().to_string();
-    app.execute(
-        "INSERT OR IGNORE INTO library_roots (id, kind, path, is_default)
-         SELECT ?1, 'movie', ?2, 1 WHERE NOT EXISTS (SELECT 1 FROM library_roots WHERE kind='movie')",
-        params![movie_id, movie_root.display().to_string()],
-    )?;
-    app.execute(
-        "INSERT OR IGNORE INTO library_roots (id, kind, path, is_default)
-         SELECT ?1, 'tv', ?2, 1 WHERE NOT EXISTS (SELECT 1 FROM library_roots WHERE kind='tv')",
-        params![tv_id, tv_root.display().to_string()],
-    )?;
     let filter_id = uuid::Uuid::new_v4().to_string();
     // JSON atom form (see maps::serialize_atoms); the legacy DSL is still read.
     let atoms = r#"[{"priority":100,"rule":"resolution","exclude":false,"value":"2160p"},{"priority":50,"rule":"resolution","exclude":false,"value":"1080p"}]"#;
@@ -607,41 +599,60 @@ pub fn seed_defaults(app: &Connection, data_dir: &std::path::Path) -> Result<(),
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('default_filter_id', ?1)",
         params![filter_id],
     )?;
-    seed_libraries(app)?;
+    seed_libraries_and_roots(library, &movie_root, &tv_root)?;
     Ok(())
 }
 
-/// Backfill the `libraries` entity from `library_roots`: one default library per
-/// kind, roots attached in current order (first root = primary). Idempotent —
-/// existing libraries are left untouched, orphaned roots (library_id NULL) are
-/// re-attached to their kind's default library.
-fn seed_libraries(app: &Connection) -> Result<(), StoreError> {
-    let kinds: Vec<String> = app
-        .prepare("SELECT DISTINCT kind FROM library_roots")?
-        .query_map([], |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    for kind in kinds {
-        let has_library: bool = app
-            .prepare("SELECT 1 FROM libraries WHERE kind = ?1 LIMIT 1")?
-            .query_row(params![kind], |_| Ok(()))
+fn seed_libraries_and_roots(
+    library: &Connection,
+    movie_root: &std::path::Path,
+    tv_root: &std::path::Path,
+) -> Result<(), StoreError> {
+    for (kind, name, root_path) in [
+        ("movie", "电影库", movie_root),
+        ("tv", "剧集库", tv_root),
+    ] {
+        let existing: Option<String> = library
+            .query_row(
+                "SELECT library_id FROM libraries WHERE kind = ?1 LIMIT 1",
+                params![kind],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let lib_id = match existing {
+            Some(id) => id,
+            None => {
+                let id = uuid::Uuid::new_v4().to_string();
+                library.execute(
+                    "INSERT INTO libraries (library_id, kind, name, is_default, sort_order)
+                     VALUES (?1, ?2, ?3, 1, 0)",
+                    params![id, kind, name],
+                )?;
+                id
+            }
+        };
+
+        let root_str = root_path.display().to_string();
+        let has_root: bool = library
+            .query_row(
+                "SELECT 1 FROM library_roots WHERE path_key = ?1",
+                params![root_str],
+                |_| Ok(()),
+            )
             .optional()?
             .is_some();
-        if !has_library {
-            let name = if kind == "tv" {
-                "剧集库"
-            } else {
-                "电影库"
-            };
-            app.execute(
-                "INSERT INTO libraries (id, kind, name, is_default, sort_order)
-                 VALUES (?1, ?2, ?3, 1, 0)",
-                params![uuid::Uuid::new_v4().to_string(), kind, name],
+
+        if !has_root {
+            let root_id = uuid::Uuid::new_v4().to_string();
+            library.execute(
+                "INSERT INTO library_roots (root_id, library_id, path_key, display_path, enabled, sort_order)
+                 VALUES (?1, ?2, ?3, ?3, 1, 0)",
+                params![root_id, lib_id, root_str],
             )?;
         }
     }
-    crate::library_defaults::ensure_library_defaults(app)?;
     Ok(())
 }
-
 pub const MEDIA_COLS: &str =
     "id, kind, title, year, original_title, tmdb_id, douban_id, tvdb_id, bangumi_id, anilist_id, aliases_json";

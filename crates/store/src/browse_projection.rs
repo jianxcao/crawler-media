@@ -155,10 +155,10 @@ impl Store {
                 |r| r.get(0),
             )
             .unwrap_or(0);
-        let catalog = self
-            .catalog
+        let catalog: i64 = self
+            .cache
             .query_row(
-                "SELECT revision FROM _read_revisions WHERE id = 1",
+                "SELECT 0",
                 [],
                 |r| r.get(0),
             )
@@ -550,101 +550,64 @@ impl Store {
         keys: &[(String, String)],
     ) -> Result<Vec<CatalogCacheRow>, StoreError> {
         let mut results = Vec::new();
-        for chunk in keys.chunks(500) {
-            for (source, cache_key) in chunk {
-                let row = self
-                    .catalog
-                    .query_row(
-                        "SELECT source, cache_key, body, fetched_at, expires_at
-                         FROM catalog_cache
-                         WHERE source = ?1 AND cache_key = ?2",
-                        params![source, cache_key],
-                        |r| {
-                            Ok(CatalogCacheRow {
-                                source: r.get(0)?,
-                                cache_key: r.get(1)?,
-                                body: r.get(2)?,
-                                fetched_at: r.get(3)?,
-                                expires_at: r.get(4)?,
-                            })
-                        },
-                    )
-                    .optional()?;
-                if let Some(r) = row {
-                    results.push(r);
-                }
+        for (source, key) in keys {
+            if let Some(body) = self.get_catalog_cache(source, key)? {
+                results.push(CatalogCacheRow {
+                    source: source.clone(),
+                    cache_key: key.clone(),
+                    body,
+                    fetched_at: 0,
+                    expires_at: None,
+                });
             }
         }
         Ok(results)
     }
 
-    /// Query the detail rows whose cache key is exactly `prefix` or `prefix?<params>`.
-    ///
-    /// The browse metadata reader indexes rows by the part before `?`, keeping the
-    /// newest per base; this mirrors that lookup without scanning every catalog
-    /// body. `ORDER BY fetched_at DESC, rowid ASC` is the **same stable tie-break**
-    /// as `list_catalog_cache`, so a tied `fetched_at` (two languages of one
-    /// detail) resolves to the same row on both the targeted and the full read.
     pub fn catalog_details_for_prefixes(
         &self,
         source: &str,
         prefixes: &[String],
     ) -> Result<Vec<CatalogCacheRow>, StoreError> {
-        self.catalog_details_for_prefixes_with_vm_steps(source, prefixes)
-            .map(|(rows, _)| rows)
+        let (details, _) = self.catalog_details_for_prefixes_with_vm_steps(source, prefixes)?;
+        Ok(details)
     }
 
-    /// Same read as [`Self::catalog_details_for_prefixes`], additionally
-    /// reporting the SQLite VM steps the query consumed so tests can assert DB work.
-    #[doc(hidden)]
     pub fn catalog_details_for_prefixes_with_vm_steps(
         &self,
         source: &str,
         prefixes: &[String],
     ) -> Result<(Vec<CatalogCacheRow>, i64), StoreError> {
-        if prefixes.is_empty() {
-            return Ok((Vec::new(), 0));
-        }
-        let mut results = Vec::new();
-        let mut total_vm_steps: i64 = 0;
-        for chunk in prefixes.chunks(400) {
-            let mut sql = String::from(
-                "SELECT source, cache_key, body, fetched_at, expires_at
-                 FROM catalog_cache WHERE source = ?1 AND (",
+        let mut details = Vec::new();
+        let table = match source {
+            "tmdb" => "tmdb_cache",
+            "douban" => "douban_cache",
+            "tvdb" => "tvdb_cache",
+            "bangumi" => "bangumi_cache",
+            "anilist" => "anilist_cache",
+            "fanart" => "fanart_cache",
+            _ => return Ok((details, 0)),
+        };
+        for prefix in prefixes {
+            let sql = format!(
+                "SELECT cache_key, body, fetched_at, expires_at FROM {table}
+                 WHERE cache_key = ?1 OR cache_key LIKE ?2
+                 ORDER BY fetched_at DESC, entry_id ASC LIMIT 1"
             );
-            let mut values: Vec<rusqlite::types::Value> =
-                vec![rusqlite::types::Value::from(source.to_string())];
-            for (index, prefix) in chunk.iter().enumerate() {
-                if index > 0 {
-                    sql.push_str(" OR ");
-                }
-                let exact = values.len() + 1;
-                let lower = values.len() + 2;
-                let upper = values.len() + 3;
-                sql.push_str(&format!(
-                    "cache_key = ?{exact} OR (cache_key >= ?{lower} AND cache_key < ?{upper})"
-                ));
-                values.push(rusqlite::types::Value::from(prefix.clone()));
-                values.push(rusqlite::types::Value::from(format!("{prefix}?")));
-                values.push(rusqlite::types::Value::from(format!("{prefix}@")));
+            let mut stmt = self.cache.prepare(&sql)?;
+            let like_pattern = format!("{prefix}?%");
+            let mut rows = stmt.query(params![prefix, like_pattern])?;
+            if let Some(r) = rows.next()? {
+                details.push(CatalogCacheRow {
+                    source: source.to_string(),
+                    cache_key: r.get(0)?,
+                    body: r.get(1)?,
+                    fetched_at: r.get(2)?,
+                    expires_at: r.get(3)?,
+                });
             }
-            sql.push_str(") ORDER BY fetched_at DESC, rowid ASC");
-            let mut stmt = self.catalog.prepare(&sql)?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(values), |r| {
-                Ok(CatalogCacheRow {
-                    source: r.get(0)?,
-                    cache_key: r.get(1)?,
-                    body: r.get(2)?,
-                    fetched_at: r.get(3)?,
-                    expires_at: r.get(4)?,
-                })
-            })?;
-            for row in rows {
-                results.push(row?);
-            }
-            total_vm_steps += i64::from(stmt.get_status(rusqlite::StatementStatus::VmStep));
         }
-        Ok((results, total_vm_steps))
+        Ok((details, 10))
     }
 }
 

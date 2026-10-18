@@ -366,9 +366,10 @@ impl Store {
         &self,
     ) -> Result<Vec<(LedgerRow, Option<String>, Option<String>)>, StoreError> {
         let mut stmt = self.library.prepare(
-            "SELECT id, media_id, path, season, episode, resolution, codec, hdr,
-                    quality_source, confidence, filter_score, transfer_mode, source_path
-             FROM ledger",
+            "SELECT f.file_id, f.media_id, f.display_path, u.season, u.episode, f.resolution, f.codec, f.hdr,
+                    f.quality_source, f.confidence, f.filter_score, f.transfer_mode, f.source_path
+             FROM library_files f
+             LEFT JOIN library_file_units u ON f.file_id = u.file_id",
         )?;
         let rows = stmt.query_map([], |row| {
             let ledger = map_ledger(row)?;

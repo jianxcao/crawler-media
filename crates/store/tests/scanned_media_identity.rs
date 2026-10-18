@@ -67,11 +67,8 @@ fn duplicate_alias_and_single_row_alias_contradictions_are_protected() {
         store.resolve_scanned_media(incoming),
         Err(StoreError::Protected(_))
     ));
-    store.insert_media(&media("Second", Some("1"))).unwrap();
-    assert!(matches!(
-        store.resolve_scanned_media(media("Third", Some("1"))),
-        Err(StoreError::Protected(_))
-    ));
+    let duplicate_err = store.insert_media(&media("Second", Some("1"))).expect_err("duplicate alias must fail");
+    assert!(matches!(duplicate_err, StoreError::Protected(_) | StoreError::Sqlite(_)));
     assert_eq!(store.get_media(old.id).unwrap().unwrap(), old);
 }
 

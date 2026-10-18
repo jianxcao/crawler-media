@@ -9,7 +9,7 @@ fn all_store_databases_use_wal_journal() {
     let tmp = tempfile::tempdir().unwrap();
     drop(store::Store::open(tmp.path()).unwrap());
 
-    for name in ["app.db", "catalog.db", "library.db", "subscribe.db"] {
+    for name in ["app.db", "cache.db", "library.db", "subscribe.db"] {
         let conn = rusqlite::Connection::open(tmp.path().join(name)).unwrap();
         let mode: String = conn
             .pragma_query_value(None, "journal_mode", |row| row.get(0))

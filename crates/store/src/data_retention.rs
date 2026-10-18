@@ -236,8 +236,8 @@ fn prune_transient_catalog(
         None => None,
     };
 
-    let tx = store.catalog.unchecked_transaction()?;
-    let mut rows = Vec::with_capacity(limit.saturating_add(1));
+    let tx = store.cache.unchecked_transaction()?;
+    let mut rows: Vec<(i64, String, i64)> = Vec::with_capacity(limit.saturating_add(1));
     {
         let mut stmt = tx.prepare(
             "SELECT rowid, cache_key, fetched_at FROM catalog_cache

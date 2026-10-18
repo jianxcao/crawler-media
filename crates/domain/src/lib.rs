@@ -1,12 +1,49 @@
 use std::fmt;
 use std::str::FromStr;
 
+pub mod library_storage;
+pub mod metadata_fields;
+
+pub use library_storage::*;
+pub use metadata_fields::*;
 use uuid::Uuid;
 
 macro_rules! entity_id {
     ($name:ident) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         pub struct $name(Uuid);
+
+        impl serde::Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                serializer.serialize_str(&self.0.to_string())
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct IdVisitor;
+                impl<'de> serde::de::Visitor<'de> for IdVisitor {
+                    type Value = Uuid;
+                    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        formatter.write_str("a valid UUID string")
+                    }
+                    fn visit_str<E>(self, value: &str) -> Result<Uuid, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        Uuid::parse_str(value).map_err(serde::de::Error::custom)
+                    }
+                }
+                let uuid = deserializer.deserialize_str(IdVisitor)?;
+                Ok(Self(uuid))
+            }
+        }
 
         impl $name {
             pub fn new() -> Self {
@@ -50,7 +87,7 @@ entity_id!(JobDefId);
 entity_id!(CollectionId);
 entity_id!(LibraryId);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum MediaKind {
     Movie,
     Tv,
@@ -524,7 +561,7 @@ pub enum AtomRule {
     UpgradeLadder(String),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum QualitySource {
     Probe,
     Release,
@@ -539,7 +576,7 @@ impl QualitySource {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Confidence {
     High,
     Low,
