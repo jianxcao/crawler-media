@@ -440,7 +440,7 @@ impl Store {
 
     /// Retrieve the current browse projection snapshot for a library.
     pub fn browse_projection(&self, library_id: &str) -> Result<Option<ProjectionSnapshot>, StoreError> {
-        let gen_opt: Option<(i64, String, String, i64, i64, i64, i64, i64)> = self
+        let gen_res = self
             .library
             .query_row(
                 "SELECT generation, scope_signature, state, refreshed_at_ms,
@@ -459,9 +459,11 @@ impl Store {
                         r.get(7)?,
                     ))
                 },
-            )
-            .optional()?;
-
+            );
+        let gen_opt: Option<(i64, String, String, i64, i64, i64, i64, i64)> = match gen_res {
+            Ok(g) => Some(g),
+            Err(_) => None,
+        };
         let Some((generation, scope_signature, state, refreshed_at_ms, app, lib, cat, sub)) = gen_opt
         else {
             return Ok(None);
