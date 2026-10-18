@@ -307,3 +307,91 @@ fn library_item_detail_hydrates_item_metadata_and_bounded_files() {
     assert_eq!(detail.files.len(), 1);
     assert_eq!(detail.metadata.overview.value().unwrap(), "Dream within a dream");
 }
+
+#[test]
+fn protocol_item_page_pagination_and_wire_ids() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let (lib, root_id) = create_library(&store, "Protocol Movies", MediaKind::Movie, "/media/movies");
+    let scope = WriteScope {
+        library_id: lib.id.parse().unwrap(),
+        config_revision: 0,
+    };
+
+    let media_id1 = "00000000-0000-0000-0000-000000000001";
+    let media_id2 = "00000000-0000-0000-0000-000000000002";
+    create_media(&store, media_id1, "Alien", MediaKind::Movie, 1979);
+    create_media(&store, media_id2, "Blade Runner", MediaKind::Movie, 1982);
+
+    let file1 = make_file("00000000-0000-0000-0000-000000000011", &lib.id, &root_id, media_id1, "Alien.mkv", MediaKind::Movie, 100);
+    let file2 = make_file("00000000-0000-0000-0000-000000000012", &lib.id, &root_id, media_id2, "Blade Runner.mkv", MediaKind::Movie, 200);
+
+    store.publish_files(&scope, &[
+        StorePublication {
+            file: &file1,
+            units: &[UnitKey::WHOLE],
+            expected_version: None,
+            probe_required: false,
+        },
+        StorePublication {
+            file: &file2,
+            units: &[UnitKey::WHOLE],
+            expected_version: None,
+            probe_required: false,
+        },
+    ], 1000).unwrap();
+
+    let user_id = UserId::new();
+    let query = domain::ProtocolItemQuery {
+        user_id,
+        parent: domain::ProtocolParent::Library(scope.library_id),
+        series_id: None,
+        season: None,
+        person_ids: vec![],
+        studio_ids: vec![],
+        search_term: None,
+        genres: vec![],
+        genre_ids: vec![],
+        filters: vec![],
+        is_favorite: None,
+        is_played: None,
+        include_types: vec![domain::ProtocolItemType::Movie],
+        recursive: true,
+        is_folder: None,
+        sort: vec![domain::ProtocolSort {
+            key: domain::ProtocolSortKey::Name,
+            descending: false,
+        }],
+        offset: 0,
+        limit: 1,
+    };
+
+    let page = store.protocol_item_page(&query).unwrap();
+    assert_eq!(page.total, 2);
+    assert_eq!(page.items.len(), 1);
+    let first = &page.items[0];
+    assert_eq!(first.item, domain::TypedItemId::Work(media_id1.parse().unwrap()));
+    let wire_item = first.item.to_wire_string();
+    assert!(wire_item.starts_with("w1_"));
+    assert_eq!(domain::TypedItemId::from_wire_string(&wire_item), Some(first.item.clone()));
+
+    let pref_src = first.preferred_source.as_ref().unwrap();
+    let wire_src = pref_src.to_wire_string();
+    assert!(wire_src.starts_with("f1_"));
+    assert_eq!(domain::PhysicalSourceId::from_wire_string(&wire_src), Some(pref_src.clone()));
+
+    // Page 2
+    let mut query2 = query.clone();
+    query2.offset = 1;
+    let page2 = store.protocol_item_page(&query2).unwrap();
+    assert_eq!(page2.total, 2);
+    assert_eq!(page2.items.len(), 1);
+    assert_eq!(page2.items[0].item, domain::TypedItemId::Work(media_id2.parse().unwrap()));
+
+    // Unknown parent returns empty
+    let mut query_unknown = query.clone();
+    query_unknown.parent = domain::ProtocolParent::Unknown;
+    let page_unknown = store.protocol_item_page(&query_unknown).unwrap();
+    assert_eq!(page_unknown.total, 0);
+    assert!(page_unknown.items.is_empty());
+}

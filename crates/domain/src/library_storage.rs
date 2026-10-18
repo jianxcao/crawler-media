@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
-use crate::{Confidence, LedgerId, LibraryId, MediaId, MediaKind, QualitySource};
+use crate::{Confidence, LedgerId, LibraryId, MediaId, MediaKind, QualitySource, UserId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct UnitKey {
@@ -292,6 +292,87 @@ impl PhysicalSourceId {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolParent {
+    Root,
+    Library(LibraryId),
+    Series(MediaId),
+    Season(MediaId, u32),
+    Folder { root_id: String },
+    Genre(String),
+    Studio(String),
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolItemType {
+    Movie,
+    Series,
+    Season,
+    Episode,
+    Video,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolMarkFilter {
+    Favorite,
+    Played,
+    Unplayed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolSortKey {
+    Name,
+    DateCreated,
+    SeasonNumber,
+    EpisodeNumber,
+    Noop,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProtocolSort {
+    pub key: ProtocolSortKey,
+    pub descending: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProtocolItemRef {
+    pub library_id: LibraryId,
+    pub item: TypedItemId,
+    pub preferred_source: Option<PhysicalSourceId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProtocolItemPage {
+    pub items: Vec<ProtocolItemRef>,
+    pub total: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProtocolItemQuery {
+    pub user_id: UserId,
+    pub parent: ProtocolParent,
+    pub series_id: Option<MediaId>,
+    pub season: Option<(MediaId, u32)>,
+    pub person_ids: Vec<String>,
+    pub studio_ids: Vec<String>,
+    pub search_term: Option<String>,
+    pub genres: Vec<String>,
+    pub genre_ids: Vec<String>,
+    pub filters: Vec<ProtocolMarkFilter>,
+    pub is_favorite: Option<bool>,
+    pub is_played: Option<bool>,
+    pub include_types: Vec<ProtocolItemType>,
+    pub recursive: bool,
+    pub is_folder: Option<bool>,
+    pub sort: Vec<ProtocolSort>,
+    pub offset: usize,
+    pub limit: usize,
+}
 #[cfg(test)]
 mod tests {
     use super::*;

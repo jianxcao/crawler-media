@@ -1,6 +1,10 @@
 use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
+pub use domain::{
+    ProtocolItemPage, ProtocolItemQuery, ProtocolItemRef, ProtocolItemType, ProtocolMarkFilter,
+    ProtocolParent, ProtocolSort, ProtocolSortKey,
+};
 use domain::{LibraryFile, LibraryId, MediaId, MediaKind, UnitKey, UserId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
