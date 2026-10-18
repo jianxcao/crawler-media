@@ -306,13 +306,34 @@ pub(crate) async fn list_items(
     let offset = query.get("offset").and_then(|o| o.parse::<usize>().ok()).unwrap_or(0);
     let limit = query.get("limit").and_then(|l| l.parse::<usize>().ok()).unwrap_or(usize::MAX / 2);
 
-    // F02: Parse identity and real filter parameters
     let identity = query.get("identity").cloned();
-    let filter = store::library_query::BrowseFilter {
-        identity,
-        ..store::library_query::BrowseFilter::default()
-    };
+    let genres = query.get("genres").or_else(|| query.get("g")).map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_default();
+    let countries = query.get("countries").or_else(|| query.get("c")).map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_default();
+    let decades = query.get("decades").or_else(|| query.get("d")).map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_default();
+    let runtimes = query.get("runtimes").or_else(|| query.get("rt")).map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_default();
+    let languages = query.get("languages").or_else(|| query.get("lang")).map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_default();
+    let resolutions = query.get("resolutions").or_else(|| query.get("res")).map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_default();
+    let stock = query.get("stock").map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_default();
+    let hdr = query.get("hdr").and_then(|h| h.parse::<bool>().ok());
+    let min_rating = query.get("rating_gte").and_then(|r| r.parse::<f64>().ok());
+    let watch = query.get("watch").or_else(|| query.get("w")).cloned();
+    let unwatched_first = query.get("unwatched_first").is_some_and(|u| u == "true" || u == "1");
 
+    let filter = store::library_query::BrowseFilter {
+        genres,
+        countries,
+        decades,
+        runtimes,
+        languages,
+        resolutions,
+        stock,
+        hdr,
+        min_rating,
+        identity,
+        watch,
+        unwatched_first,
+        require_image: false,
+    };
     let lib_q = store::library_query::LibraryQuery {
         library_id: lib_id,
         user_id,

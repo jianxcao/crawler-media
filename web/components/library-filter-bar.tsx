@@ -564,6 +564,7 @@ export function FilterEmptyState({
       onFilterChange({ ...filter, [dim === "rating_gte" ? "ratingGte" : dim]: null });
       return;
     }
+    const key = dim as MultiDim;
     const current = (filter[key] ?? []) as (string | number)[];
     onFilterChange({ ...filter, [key]: current.filter((v) => String(v) !== String(value)) });
   };

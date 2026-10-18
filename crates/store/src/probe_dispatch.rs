@@ -104,13 +104,13 @@ impl Store {
         let unit = self
             .library
             .query_row(
-                "SELECT u.job_id, u.ledger_id, u.kind, u.force_fingerprint,
+                "SELECT u.job_id, u.file_id, u.kind, u.force_fingerprint,
                         u.reuse_fingerprint_cache, u.overwrite_markers, u.status, u.error,
                         u.sampling_plan_json, u.detection_outcome_json,
                         u.reuse_media_info_cache, u.stage
                  FROM probe_job_units u
                  JOIN probe_jobs j ON j.id = u.job_id
-                 WHERE u.job_id = ?1 AND u.ledger_id = ?2",
+                 WHERE u.job_id = ?1 AND u.file_id = ?2",
                 params![id.job_id, id.ledger_id],
                 |row| {
                     Ok(ProbeJobUnit {

@@ -214,7 +214,7 @@ impl Store {
             return Ok(Vec::new());
         }
         let mut statement = self.library.prepare(
-            "SELECT u.job_id, u.ledger_id
+            "SELECT u.job_id, u.file_id
              FROM probe_job_units u
              JOIN probe_jobs j ON j.id = u.job_id
              WHERE u.status = 'queued' AND j.status IN ('queued', 'running')
