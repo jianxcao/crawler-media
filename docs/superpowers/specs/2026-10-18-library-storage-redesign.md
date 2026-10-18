@@ -1,6 +1,6 @@
 # Media / Library 存储重设计：单表浏览与独立响应缓存
 
-状态：**Sol 第二轮复审修订版，供用户审阅，未实施**。本设计取代旧缓存计划中“保留浏览投影失效链”的决定。允许舍弃旧数据库数据，但不得删减现有业务功能。第一轮F1–F5已修订；第二轮确认F3/F4/F5在设计层面闭合，F1/F2仍有延伸缺口并发现季级范围遗漏。本轮补充R1跨源恢复、R2同来源合并与刷新目标、R3季级状态作用域；这些新增规则尚未经过独立复审，不代表运行时代码已实现。
+状态：**可进入详细实施计划，未实施**。本设计取代旧缓存计划中“保留浏览投影失效链”的决定，允许舍弃旧数据库数据但不得删减功能。历轮审核已补齐F1–F5、R1–R3主体合同；最后两项played断言三元组和目标无快照fallback已修订，并经GPT-6.1 Sol限定范围复核，结论ready_for_implementation_plan。该结论不是完整DDL、运行时实现、恢复/协议或性能验收，也不提供无缺陷保证；详见第8节。
 
 ## 1. 决策摘要
 
@@ -139,19 +139,31 @@ Collection 定义/成员随Media迁入library.db，绑定canonical media_id，�
 
 **身份合并**仅用于经明确确认A/B为同一作品且kind一致的动作，选定唯一survivor ID；它不是修正一个文件的默认行为。规则如下：
 
-1. 同用户同单元：favorite/played/seen按既有事实OR归并；position、duration与轨道选择采用最近有效观看活动的成套状态（不得拿favorite时间覆盖观看进度），同时间以survivor优先；没有有效源身份/时长依据的不猜测转换。play_count取两者max而非相加，避免未知重复来源双计；历史保留独立事件，只按稳定session/event标识去重，界面不再由历史条数反推这一计数。
+1. 同用户同单元：favorite做OR；played按下述完整断言三元组归并，不直接OR无效字段；seen保留既有真实观看证据，再由各消费者按覆盖范围与有效断言重算，不把旧Library摘要作为原始事实迁移。恢复包按最近有效watch_activity_at整包选择（file/revision/source/timeline/tracks版本、position/duration/轨道），同时间survivor优先，不从另一行补物理字段；没有兼容源证据不转换位置。play_count取两者max不相加；独立历史仅按稳定session/event标识去重，不从历史条数反推该计数。
 2. 别名唯一性保留；不同来源别名可汇入，任一外部别名已属于第三个身份则中止待人工处理。人工锁冲突在预检返回明确冲突；同来源快照碰撞及后续刷新按下述R2规则，不依赖SQL处理顺序。Collection同owner重复成员合为一项，保留最早排序位置；Subscribe只改media_id引用，不擅自合并两条策略。
 3. 持久operation以唯一operation_id保存survivor/loser及预检版本。顺序：冻结两个身份的新引用/写入→排空相关工作和会话→library.db事务合并事实及摘要→分批收敛Subscribe/Job中显式Media引用→校验无可写loser引用→完成/解除survivor冻结。每一步有持久阶段和幂等键；失败/重启保持冻结并可重试，不伪称跨库事务。
 4. 创建Subscribe、Job调度、文件发布、Playback写入等入口必须校验身份状态，冻结后不能新增旧引用；已运行跨库发布者由租约/版本屏障排空。loser保留最小retired墓碑用于拒绝旧ID（明确错误和survivor信息），不是可继续写入的兼容实体或自动HTTP跳转。用户重新选择survivor；历史审计中的原ID可保留。
 5. 验收：不同作品A/B只改挂一个文件时，A另一库文件、原始进度/收藏/Collection/Subscribe不变；确认同作品合并后冲突规则确定、重试不增加计数；在每个阶段退出重启均可继续，冻结/退役ID不能再产生新引用。
 
+**合并played断言三元组（定向复审F-01）：** 对每个user与相同逻辑坐标，输入仅取has_played_assertion=true的行；输出has为是否存在有效输入，played为有效输入played的OR，played_changed_at_ms为有效输入时钟的max。两者都无断言时规范输出 `(false,false,NULL)`；favorite-only行即使其他字段存在也不得充当断言。这是明确的**合并归约政策**，不是声称最新false仍获胜：一方true@10、另一方false@30，合并生成true@30；若同季false@20则该集有效true。分别对episode/season/whole归并完三元组，再统一按时间及specificity计算继承；不能先计算各身份的有效完成状态后做OR。合并不使用当前时间、不推进watch_activity/favorite时间，保持交换输入/改变survivor/重复合并的断言结果一致；后续正常mark/unmark继续按第4.4节最新断言规则覆盖。
+
+验收：true@10与false@30合并为有效true@30，季false@20不得反转；无断言/两个false/同时间及episode-season-whole交叉冲突均有固定结果。交换输入、改变survivor、提交后重启和幂等重试不改变断言三元组；详情、季完成数和NextUp使用同一有效完成归约，不伪造观看活动，恢复包仍按独立源绑定政策处理。
+
 **同来源候选合并与刷新目标（R2）：** 每条来源快照还记录provider_entity_id（对应source/scope的外部实体）、规范化payload与字段存在性摘要，不能只记录source名。合并预检先解析“同一个外部实体”再比较版本：
 
 - 同source/scope/locale且provider_entity_id相同，选择整份已校验快照：fetched_at较新者胜；相同时间固定survivor原行优先，不依赖遍历顺序，不比较不同身份的本地source_revision大小。胜出快照的缺失字段保持缺失、显式空保持显式空，不从落选快照拼补后伪称一次来源响应；按原字段采用政策再合成有效元数据。失败响应从来不是可选快照。
 - 同source却provider_entity_id不同，时间新旧不能证明是同一外部条目。预检必须由合并请求为每个冲突source明确选择refresh_target_external_id；缺失选择返回冲突且不进入冻结/写入阶段。选择必须属于已确认合并的别名并匹配kind；所有非冲突别名可保留用于身份识别，但每个Media/source/kind仅一条别名标记is_refresh_target（部分唯一约束），来源刷新只能使用该目标，不随机选第一条别名。
-- 当前单快照表不扩展为无限候选历史：不同外部实体只保留选定目标对应的当前快照，若只有另一目标的快照则不冒用，标为该来源待刷新；既有本地有效值按既有fallback规则保留并标明原来源，直到明确采用选定目标成功返回。work目标确定后季/集只采用其验证归属的provider实体，不因季集数字相同拼接不同作品；无法验证或坐标冲突则预检拒绝待处理。
+- 当前单快照表不扩展为候选历史：不同外部实体只保留选定目标对应的当前快照；目标无快照则标为该来源待刷新，既有采用值严格按下述字段fallback规则决胜，不冒充目标响应。work目标确定后季/集只采用其验证归属的provider实体；仅因坐标数字相同不得拼接作品，无法验证或坐标冲突则预检拒绝。
 - 预检把冲突选择、每个键的胜出来源/版本与有效候选清单固定在持久合并operation中。冻结后事务再次校验预检版本；已变化则回到预检，不沿用旧决议。一次成功事务对冲突键UPSERT一次，重启不按新读取顺序重新决胜；后续刷新只更新固定目标。人工锁仍高于该选择，不因合并自动解除。
 - 验收：同实体同locale新旧/同时间/缺失与显式空快照交换输入顺序，胜出整份内容一致；不同外部实体无明确选择时拒绝，有选择时后续请求固定目标；合并阶段重启/重试不产生唯一键错误或改变胜出结果，季集不能串作品。
+
+**目标无快照时的采用值fallback（定向复审F-02）：** 在相同entity_scope/season/episode/locale及字段上，先处理人工锁冲突和各Library的独立NFO；这些高优先级输入不被全局fallback覆盖。需要保留旧全局采用字段时，固定先取survivor的有效已采用字段，只有该字段**缺失/无效**才取loser，二者都无值则缺失；显式空/清空是有定义的值，不能当缺失补上另一方。不同locale不相互拼补，详情仍遵循既定locale回退。survivor在合并请求中固定，因此允许明确换survivor改变fallback，但同一请求绝不随读取/事务执行顺序改变。
+
+胜出字段与其真实source、provider_entity_id、原snapshot版本/来源身份、presence状态一并保存在有效元数据的field_origins中，标记pending_target_fallback，并由operation固定每字段决议/值。它不是选定目标的media_metadata_sources行；校验/局部重算在目标尚未成功刷新时必须保留这个已记录fallback，不因落选快照删除而遗失。失败刷新、清cache或重启均不改决议；不新增fallback历史表，不把Library的NFO复制成全局候选。
+
+选定目标对该实体/locale的响应完整校验并成功采用后，原pending字段在该次事务中退出fallback；显式空按正常规则采用，响应缺失字段按其他有效来源/基础值政策回退，不再从这份退役目标fallback暗中补回。人工锁与有效本地NFO仍优先。刷新必须打选定目标，不能因请求失败又改用旧别名；展示仍可保留失败前fallback并显示真实来源/待刷新状态。
+
+验收：A(survivor)采用p1简介X、B采用p2简介Y，明确刷新目标p3但无快照时固定为X且来源仍p1；A字段缺失才用Y，A显式空则保持空。交换输入、事务前后重启、失败刷新、清cache、checker重算均不改变；p3校验成功后按新字段替换并退出pending，缺失/显式空/不同locale分别覆盖，不请求p1/p2。无快照目标冲突选择与每字段fallback决议均由同一operation持久化。
 
 ### 4.7 Library 表关系与成本地图
 
@@ -279,6 +291,10 @@ ACL 先从配置得出授权 Library 集，再将授权条件带入列表/count/
 本轮新增可观察验收：F1多集独立ItemId/会话/迟到事件及full_file时间轴；F2文件改挂隔离与canonical合并每阶段重启/冲突计数；F3实体/locale隔离；F4自产NFO反馈及人工修改；F5事实驱动查漏与修复。性能专项在10k分集、多Library、多用户同Media下，固定当前用户与覆盖，增长其他用户状态时，心跳的读取/写入集合不能增长；增加不包含该单元的Library不得更新其用户摘要。并发扫描+心跳至少记录p95、写锁等待、最大事务时长、busy失败和扫描吞吐；未实现测量前不写毫秒承诺。
 
 第二轮复审新增验收（R1–R3）：跨源解析覆盖合并→独立分集/剪辑变化/同路径替换/音轨重排，两个协议的源感知位置、duration和轨道输出一致；同来源快照交换读取顺序/相同时间/重启仍确定，外部实体冲突无选择拒绝、选择后刷新只打选中目标；S01E01在A、S01E02在B、S02在C且无初始用户行时，当前用户标记S01已看/撤销须同事务更新A/B的NextUp与分集完成，C及其他用户保持不变，收藏不得改变played断言优先级。
+
+最近定向复审新增验收：played合并三元组的有效性/OR值/max时钟与统一继承的交互，以及目标无快照时survivor优先、缺失再补、显式空不补的字段fallback；断言决胜对survivor对称，metadata fallback则按合并请求固定survivor。必须分别验证输入乱序/重启/幂等、真实provenance和刷新成功后的pending解除，不将两种不同政策混为同一通用合并函数。
+
+最终定向复核：GPT-6.1 Sol只读核查4.4–4.6、8节及必要元数据/checker交叉合同，认定F-01完整played三元组与F-02逐字段fallback/provenance/pending退出两项已闭合，无该限定范围内剩余设计阻断项，结论 `ready_for_implementation_plan`。不再因这两项重复整架构审核；详细实施计划须携带上列冲突矩阵、重启/幂等、恢复包独立性、locales及人工锁/NFO优先级测试。父任务临时决策表验证三元组交换/幂等/结合性及继承例子、固定survivor字段fallback/显式空；双方均未验证实际Web/Jellyfin实现或性能，本轮没有修改运行时代码。
 
 R1–R3本轮设计烟测：临时Python SQLite 3.51.0验证episode/season/whole三个作用域、无初始用户摘要的季标记/撤销仅更新A/B；season查询走Media+season覆盖索引，DISTINCT使用临时B-tree，故不宣称按Library去重是常数工作。同来源整行候选在交换输入顺序后仍按fetched_at/固定survivor决胜，缺失与显式空不混合；部分唯一索引拒绝两个刷新目标。独立策略原型验证原源恢复/新源归零/轨道重排/未知时长/显式seek且不修改旧恢复包。以上仅验证SQL形态和设计决策表，非完整DDL、真实Web/Jellyfin实现、并发性能或独立Sol复审；本轮不运行Cargo测试，因为未修改运行时代码。
 
