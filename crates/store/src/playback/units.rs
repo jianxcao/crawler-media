@@ -175,18 +175,20 @@ impl Store {
             .optional()?;
 
         let (bound_file_id, bound_rev, bound_src_ver, bound_timeline, bound_tracks_ver, pos_val, dur_val, aud_val, sub_val) =
-            if position_ms == 0 && duration_ms.is_none() && audio_track.is_none() && subtitle_track.is_none() {
-                // If caller is NOT updating position/tracks (e.g. only updating marks/favorite):
-                // Preserve existing resume package if it already has one!
-                if let Some((Some(fid), Some(rev), Some(sver), Some(tmode), tracks_ver, p, d, a, s)) = existing_resume {
-                    (Some(fid), Some(rev), Some(sver), Some(tmode), tracks_ver, p, d, a, s)
+            if let Some((Some(fid), Some(rev), Some(sver), Some(tmode), tracks_ver, p, d, a, s)) = existing_resume {
+                // R05-B: If existing row already has a bound source, preserve tracks_ver verbatim!
+                // R05-A: If caller passed position_ms > 0 or explicit tracks, use caller's values; otherwise preserve existing package!
+                let (final_pos, final_dur, final_aud, final_sub) = if position_ms > 0 || audio_track.is_some() || subtitle_track.is_some() {
+                    (position_ms, duration_ms.or(d), audio_track.clone().or(a), subtitle_track.clone().or(s))
+                } else if duration_ms.is_none() && audio_track.is_none() && subtitle_track.is_none() && played_input.is_some() {
+                    // Mark-only update: preserve existing saved position and duration/tracks!
+                    (p, d, a, s)
                 } else {
-                    (None, None, None, None, None, 0, None, None, None)
-                }
-            } else if let Some((Some(fid), Some(rev), Some(sver), Some(tmode), tracks_ver, _, _, _, _)) = existing_resume {
-                // Existing row already has a bound source: preserve its binding while updating position/tracks!
-                (Some(fid), Some(rev), Some(sver), Some(tmode), tracks_ver.or(Some(1)), position_ms, duration_ms, audio_track.clone(), subtitle_track.clone())
-            } else {
+                    // Explicit progress update (even position 0):
+                    (position_ms, duration_ms.or(d), audio_track.clone().or(a), subtitle_track.clone().or(s))
+                };
+                (Some(fid), Some(rev), Some(sver), Some(tmode), tracks_ver, final_pos, final_dur, final_aud, final_sub)
+            } else if position_ms > 0 || duration_ms.is_some() || audio_track.is_some() || subtitle_track.is_some() {
                 // New position on unbounded row: bind to current published file
                 let file_binding: Option<(String, i64, String, i64)> = self.library
                     .query_row(
@@ -211,6 +213,8 @@ impl Store {
                         (None, None, None, None, None, 0, None, None, None)
                     }
                 }
+            } else {
+                (None, None, None, None, None, 0, None, None, None)
             };
 
         self.library.execute(
@@ -547,25 +551,23 @@ impl Store {
                 e_from,
             ])?;
             drop(stmt);
-            // Ensure the target unit exists so unplayed_count is well-defined.
-            if played {
-                let existing = self.unit_state(user_id, media_id, season, episode)?;
-                if existing.is_none() {
-                    self.upsert_unit(
-                        user_id,
-                        media_id,
-                        season,
-                        episode,
-                        0,
-                        Some(true),
-                        favorite,
-                        None,
-                        None,
-                        None,
-                        false,
-                        now,
-                    )?;
-                }
+            // R05-C: Ensure target unit exists so unplayed/played assertion is persisted even if row was absent
+            let existing = self.unit_state(user_id, media_id, season, episode)?;
+            if existing.is_none() {
+                self.upsert_unit(
+                    user_id,
+                    media_id,
+                    season,
+                    episode,
+                    0,
+                    Some(played),
+                    favorite,
+                    None,
+                    None,
+                    None,
+                    false,
+                    now,
+                )?;
             }
         }
         Ok(())
