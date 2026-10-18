@@ -10,7 +10,7 @@ mod metadata;
 mod parse;
 mod person;
 mod tvdb;
-
+pub mod response_cache;
 pub use alias::{Source, attach, merge};
 pub use anilist::Anilist;
 pub use bangumi::Bangumi;

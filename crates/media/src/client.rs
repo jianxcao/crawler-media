@@ -29,6 +29,8 @@ pub enum TmdbError {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
+    #[error(transparent)]
+    CacheDb(#[from] crate::response_cache::CacheDbError),
 }
 
 pub trait CatalogGet {
