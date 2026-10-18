@@ -8,6 +8,8 @@ mod douban;
 pub mod fanart;
 mod metadata;
 mod parse;
+pub mod normalized;
+pub use normalized::normalize_metadata;
 mod person;
 mod tvdb;
 pub mod response_cache;

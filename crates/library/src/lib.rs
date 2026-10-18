@@ -5,7 +5,7 @@ pub mod fingerprint;
 pub mod latest;
 pub mod markers;
 mod naming;
-mod nfo;
+pub mod nfo;
 mod nfo_season;
 mod nfo_identity;
 mod watch_identity;

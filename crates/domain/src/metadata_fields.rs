@@ -137,6 +137,20 @@ pub struct NormalizedMetadata {
     pub field_origins: BTreeMap<String, SourceFieldOrigin>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MetadataAdoption {
+    pub media_id: crate::MediaId,
+    pub scope: crate::EntityScope,
+    pub locale: String,
+    pub source: String,
+    pub provider_entity_id: String,
+    pub provider_work_id: String,
+    pub fetched_at: i64,
+    pub normalized: NormalizedMetadata,
+    pub expected_revision: Option<i64>,
+    pub preferences: MetadataPreferences,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MediaAlias {
     pub source: String,

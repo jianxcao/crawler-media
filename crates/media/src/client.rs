@@ -215,7 +215,7 @@ impl<H: CatalogGet> Tmdb<H> {
             parse::tv_seasons(body)
         };
         match self.fetch(&path1, decode) {
-            Ok(seasons) if !seasons.is_empty() => Ok(seasons),
+            Ok(seasons) if !seasons.is_empty() => Ok(seasons as Vec<parse::TvSeason>),
             result => {
                 tracing::warn!(tmdb_id, error = ?result.err(), "TMDB seasons unavailable; trying basic details");
                 self.fetch(&format!("/tv/{tmdb_id}"), decode)

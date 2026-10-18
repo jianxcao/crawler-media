@@ -5,6 +5,8 @@ use std::path::Path;
 
 use domain::Media;
 
+pub mod fields;
+pub use fields::{NfoInput, NfoReadOutcome, parse_nfo_fields};
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NfoMeta {
     pub title: Option<String>,

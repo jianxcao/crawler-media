@@ -55,6 +55,7 @@ mod subscribe_library;
 pub use subscribe_library::evaluate_subscribe_facts_pure;
 mod maps;
 mod media;
+pub mod metadata;
 mod open;
 mod playback;
 mod playback_devices;
