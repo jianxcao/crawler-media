@@ -6,7 +6,7 @@ use super::{Store, StoreError};
 
 impl Store {
     pub fn upsert_session(&self, session: &SessionRow) -> Result<(), StoreError> {
-        self.subscribe.execute(
+        self.library.execute(
             "INSERT OR REPLACE INTO playback_sessions
                 (device_id, user_id, media_id, season, episode, client, device_name,
                  client_version, play_method, position_ms, start_position_ms, duration_ms,
@@ -50,7 +50,7 @@ impl Store {
         user_id: UserId,
         device_id: &str,
     ) -> Result<Option<SessionRow>, StoreError> {
-        self.subscribe
+        self.library
             .query_row(
                 "SELECT device_id, user_id, media_id, season, episode, client, device_name,
                         client_version, play_method, position_ms, start_position_ms,
@@ -66,7 +66,7 @@ impl Store {
     }
 
     pub fn sessions_for_device(&self, device_id: &str) -> Result<Vec<SessionRow>, StoreError> {
-        let mut stmt = self.subscribe.prepare(
+        let mut stmt = self.library.prepare(
             "SELECT device_id, user_id, media_id, season, episode, client, device_name,
                     client_version, play_method, position_ms, start_position_ms,
                     duration_ms, paused, watched_ms, rate_bps, bytes_sent, connections,
@@ -84,7 +84,7 @@ impl Store {
         timeout_secs: i64,
     ) -> Result<Vec<SessionRow>, StoreError> {
         let cutoff = now - timeout_secs;
-        let mut stmt = self.subscribe.prepare(
+        let mut stmt = self.library.prepare(
             "SELECT device_id, user_id, media_id, season, episode, client, device_name,
                     client_version, play_method, position_ms, start_position_ms,
                     duration_ms, paused, watched_ms, rate_bps, bytes_sent, connections,
@@ -116,7 +116,7 @@ impl Store {
         let Some(session) = self.get_session(user_id, device_id)? else {
             return Ok(None);
         };
-        self.subscribe.execute(
+        self.library.execute(
             "DELETE FROM playback_sessions WHERE user_id = ?1 AND device_id = ?2",
             params![user_id.to_string(), device_id],
         )?;
@@ -139,7 +139,7 @@ impl Store {
             duration_ms: session.duration_ms,
             completed,
         };
-        self.subscribe.execute(
+        self.library.execute(
             "INSERT INTO playback_logs
                 (id, user_id, media_id, season, episode, client, device_name, play_method,
                  started_at, ended_at, watched_ms, start_position_ms, end_position_ms,
@@ -169,7 +169,7 @@ impl Store {
     }
 
     pub fn delete_session(&self, user_id: UserId, device_id: &str) -> Result<bool, StoreError> {
-        let n = self.subscribe.execute(
+        let n = self.library.execute(
             "DELETE FROM playback_sessions WHERE user_id = ?1 AND device_id = ?2",
             params![user_id.to_string(), device_id],
         )?;
@@ -194,7 +194,7 @@ impl Store {
         window_secs: i64,
     ) -> Result<bool, StoreError> {
         let cutoff = now - window_secs;
-        let exists: bool = self.subscribe.query_row(
+        let exists: bool = self.library.query_row(
             "SELECT EXISTS(
                  SELECT 1 FROM playback_logs
                  WHERE user_id = ?1 AND device_id = ?2 AND ended_at >= ?3 AND admin_ended != 0
@@ -209,7 +209,7 @@ impl Store {
     pub fn sweep_stale_sessions(&self, now: i64, timeout_secs: i64) -> Result<usize, StoreError> {
         let cutoff = now - timeout_secs;
         let session_keys: Vec<(UserId, String)> = {
-            let mut stmt = self.subscribe.prepare(
+            let mut stmt = self.library.prepare(
                 "SELECT user_id, device_id FROM playback_sessions WHERE last_report_at < ?1",
             )?;
             let rows = stmt.query_map(params![cutoff], |row| {

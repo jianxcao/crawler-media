@@ -236,7 +236,7 @@ fn create_api_state(
 
     let sources = load_catalog_sources(
         &store,
-        &data_dir.join("catalog.db"),
+        &data_dir.join("cache.db"),
         config.tvdb_key.as_deref(),
     );
     if !sources.is_empty() {

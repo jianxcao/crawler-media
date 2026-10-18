@@ -74,9 +74,9 @@ impl Store {
     ) -> Result<(Vec<ScanProbeObligation>, i64), StoreError> {
         let limit = limit.clamp(1, 100);
         let mut stmt = self.library.prepare(
-            "SELECT ledger_id, created_at_ms, reason
-             FROM ledger_probe_obligations
-             ORDER BY created_at_ms ASC, ledger_id ASC
+            "SELECT file_id, created_at_ms, reason
+             FROM file_probe_obligations
+             ORDER BY created_at_ms ASC, file_id ASC
              LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit], |row| {
@@ -99,7 +99,7 @@ impl Store {
     /// Acknowledge / remove a fulfilled probe obligation.
     pub fn ack_scan_probe_obligation(&self, ledger_id: LedgerId) -> Result<(), StoreError> {
         self.library.execute(
-            "DELETE FROM ledger_probe_obligations WHERE ledger_id = ?1",
+            "DELETE FROM file_probe_obligations WHERE file_id = ?1",
             params![ledger_id.to_string()],
         )?;
         Ok(())

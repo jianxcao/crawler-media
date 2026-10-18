@@ -100,7 +100,7 @@ impl Store {
         let mut stmt = self.library.prepare(
             "SELECT status, failure_count, next_retry_at_ms, error_kind, error, active_job_id
              FROM probe_stage_state
-             WHERE ledger_id = ?1 AND context_key = ?2 AND stage = ?3"
+             WHERE file_id = ?1 AND context_key = ?2 AND stage = ?3"
         )?;
         let row = stmt.query_row(
             params![key.ledger_id, key.context_key, key.stage.as_str()],
@@ -155,7 +155,7 @@ impl Store {
             ProbeStageCompletion::Cancelled { reason } => (ProbeStageStatus::Cancelled, Some("cancelled".to_string()), Some(reason.clone()), None, false),
             ProbeStageCompletion::Failed { error_kind, error } => {
                 let current_fail: u32 = tx.query_row(
-                    "SELECT failure_count FROM probe_stage_state WHERE ledger_id = ?1 AND context_key = ?2 AND stage = ?3",
+                    "SELECT failure_count FROM probe_stage_state WHERE file_id = ?1 AND context_key = ?2 AND stage = ?3",
                     params![key.ledger_id, key.context_key, key.stage.as_str()],
                     |r| r.get(0),
                 ).optional()?.unwrap_or(0);
@@ -176,7 +176,7 @@ impl Store {
                      error = ?7,
                      active_job_id = NULL,
                      updated_at_ms = ?8
-                 WHERE ledger_id = ?1 AND context_key = ?2 AND stage = ?3 AND active_job_id = ?9",
+                 WHERE file_id = ?1 AND context_key = ?2 AND stage = ?3 AND active_job_id = ?9",
                 params![
                     key.ledger_id,
                     key.context_key,
@@ -198,7 +198,7 @@ impl Store {
                      error = ?7,
                      active_job_id = NULL,
                      updated_at_ms = ?8
-                 WHERE ledger_id = ?1 AND context_key = ?2 AND stage = ?3 AND active_job_id = ?9",
+                 WHERE file_id = ?1 AND context_key = ?2 AND stage = ?3 AND active_job_id = ?9",
                 params![
                     key.ledger_id,
                     key.context_key,
@@ -227,7 +227,7 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<ProbeStageState>, StoreError> {
         let mut stmt = self.library.prepare(
-            "SELECT ledger_id, context_key, stage, status, failure_count, next_retry_at_ms, error_kind, error, active_job_id
+            "SELECT file_id, context_key, stage, status, failure_count, next_retry_at_ms, error_kind, error, active_job_id
              FROM probe_stage_state
              WHERE status = 'failed' AND next_retry_at_ms IS NOT NULL AND next_retry_at_ms <= ?1 AND active_job_id IS NULL
              ORDER BY next_retry_at_ms ASC
@@ -305,13 +305,12 @@ impl Store {
         let count = self.library.execute(
             "UPDATE probe_stage_state
              SET status = 'pending', failure_count = 0, next_retry_at_ms = NULL, error = NULL, error_kind = NULL, updated_at_ms = ?4
-             WHERE ledger_id = ?1 AND context_key = ?2 AND stage = ?3 AND active_job_id IS NULL",
+             WHERE file_id = ?1 AND context_key = ?2 AND stage = ?3 AND active_job_id IS NULL",
             params![key.ledger_id, key.context_key, key.stage.as_str(), now_ms],
         )?;
         Ok(count > 0)
     }
 }
-
 pub(crate) fn claim_probe_stage_tx(
     tx: &Transaction<'_>,
     key: &ProbeStageKey,
@@ -320,11 +319,10 @@ pub(crate) fn claim_probe_stage_tx(
 ) -> Result<bool, StoreError> {
     let existing: Option<(String, Option<String>, Option<i64>)> = tx.query_row(
         "SELECT status, active_job_id, next_retry_at_ms FROM probe_stage_state
-         WHERE ledger_id = ?1 AND context_key = ?2 AND stage = ?3",
+         WHERE file_id = ?1 AND context_key = ?2 AND stage = ?3",
         params![key.ledger_id, key.context_key, key.stage.as_str()],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     ).optional()?;
-
     match existing {
         Some((status, active_job, next_retry)) => {
             if active_job.is_some() || status == "running" {
@@ -340,7 +338,7 @@ pub(crate) fn claim_probe_stage_tx(
             let updated = tx.execute(
                 "UPDATE probe_stage_state
                  SET status = 'running', active_job_id = ?4, updated_at_ms = ?5
-                 WHERE ledger_id = ?1 AND context_key = ?2 AND stage = ?3 AND active_job_id IS NULL",
+                 WHERE file_id = ?1 AND context_key = ?2 AND stage = ?3 AND active_job_id IS NULL",
                 params![key.ledger_id, key.context_key, key.stage.as_str(), job_id, now_ms],
             )?;
             Ok(updated > 0)
@@ -348,7 +346,7 @@ pub(crate) fn claim_probe_stage_tx(
         None => {
             let inserted = tx.execute(
                 "INSERT INTO probe_stage_state (
-                     ledger_id, context_key, stage, status, failure_count, active_job_id, updated_at_ms
+                     file_id, context_key, stage, status, failure_count, active_job_id, updated_at_ms
                  ) VALUES (?1, ?2, ?3, 'running', 0, ?4, ?5)",
                 params![key.ledger_id, key.context_key, key.stage.as_str(), job_id, now_ms],
             )?;
@@ -362,7 +360,7 @@ pub(crate) fn delete_probe_stages_for_ledger(
     ledger_id: &str,
 ) -> Result<(), StoreError> {
     tx.execute(
-        "DELETE FROM probe_stage_state WHERE ledger_id = ?1",
+        "DELETE FROM probe_stage_state WHERE file_id = ?1",
         params![ledger_id],
     )?;
     Ok(())

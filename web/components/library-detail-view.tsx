@@ -194,9 +194,7 @@ function readFilterFromUrl(): LibraryFilter {
   const rating = params.get("rating_gte");
   const hdr = params.get("hdr");
   return {
-    genres: list("g")
-      .map(Number)
-      .filter((n) => Number.isFinite(n)),
+    genres: list("g"),
     countries: list("c"),
     decades: list("d"),
     watch: watch ? (watch as WatchFilter) : null,
@@ -1429,13 +1427,15 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
           onFilterChange={applyFilter}
         />
       ) : items.length === 0 && provisional.length === 0 ? (
-        <p className="mt-16 text-center text-ui leading-7 text-[var(--text-muted)]">
-          这个库还没有内容。
-          <br />
-          {canManageLibraries
-            ? "点右上角菜单里的「扫描库」把已有影片识别入库；订阅内容下载完成后也会自动进来。"
-            : "订阅内容下载并入库后会显示在这里。"}
-        </p>
+        failed ? null : (
+          <p className="mt-16 text-center text-ui leading-7 text-[var(--text-muted)]">
+            这个库还没有内容。
+            <br />
+            {canManageLibraries
+              ? "点右上角菜单里的「扫描库」把已有影片识别入库；订阅内容下载完成后也会自动进来。"
+              : "订阅内容下载并入库后会显示在这里。"}
+          </p>
+        )
       ) : (
         <>
           {/* 筛选条：静止态只有一个「筛选」按钮，点开才有四个维度；

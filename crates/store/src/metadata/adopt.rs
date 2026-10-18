@@ -154,7 +154,50 @@ impl Store {
 
                 rev
             }
-            _ => 1,
+            EntityScope::Season(s) => {
+                let title = input.normalized.fields.title.value().cloned();
+                let overview = input.normalized.fields.overview.value().cloned();
+                let air_date = input.normalized.fields.air_date.value().cloned();
+                let poster_url = input.normalized.fields.poster_url.value().cloned();
+                tx.execute(
+                    "INSERT INTO media_seasons
+                        (media_id, season, locale, title, overview, air_date, poster_url, details_json, field_origins_json, revision)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '{}', ?8, 1)
+                     ON CONFLICT(media_id, season, locale) DO UPDATE SET
+                         title = excluded.title,
+                         overview = excluded.overview,
+                         air_date = excluded.air_date,
+                         poster_url = excluded.poster_url,
+                         field_origins_json = excluded.field_origins_json,
+                         revision = media_seasons.revision + 1",
+                    params![media_id_str, s as i64, input.locale, title, overview, air_date, poster_url, selection_origins_json],
+                )?;
+                1
+            }
+            EntityScope::Episode { season: s, episode: ep } => {
+                let title = input.normalized.fields.title.value().cloned();
+                let overview = input.normalized.fields.overview.value().cloned();
+                let air_date = input.normalized.fields.air_date.value().cloned();
+                let runtime = input.normalized.fields.runtime_minutes.value().copied().map(|r| r as i64);
+                let rating = input.normalized.fields.rating.value().copied();
+                let still_url = input.normalized.fields.still_url.value().cloned();
+                tx.execute(
+                    "INSERT INTO media_episodes
+                        (media_id, season, episode, locale, title, overview, air_date, runtime_minutes, rating, still_url, details_json, field_origins_json, revision)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, '{}', ?11, 1)
+                     ON CONFLICT(media_id, season, episode, locale) DO UPDATE SET
+                         title = excluded.title,
+                         overview = excluded.overview,
+                         air_date = excluded.air_date,
+                         runtime_minutes = excluded.runtime_minutes,
+                         rating = excluded.rating,
+                         still_url = excluded.still_url,
+                         field_origins_json = excluded.field_origins_json,
+                         revision = media_episodes.revision + 1",
+                    params![media_id_str, s as i64, ep as i64, input.locale, title, overview, air_date, runtime, rating, still_url, selection_origins_json],
+                )?;
+                1
+            }
         };
 
         tx.commit()?;

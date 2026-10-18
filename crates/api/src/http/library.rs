@@ -276,41 +276,65 @@ pub(crate) async fn list_items(
     Path(id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    // 显式分页参数先校验：越界直接 400，不静默 clamp；省略 limit 仍是"返回全部"。
-    if let Err(message) = page::PageWindow::parse(&query) {
-        return err(StatusCode::BAD_REQUEST, "library.invalid", &message);
-    }
-    // 授权从当前配置判定；热页只读投影 head 并按选中 Media 读本页 facts（零文件 IO），
-    // 投影未就绪/不可解析或省略 limit 时回退旧的全量读取（已在 helper 内 warn）。
-    let library = {
+    let lib_id = match id.parse::<domain::LibraryId>() {
+        Ok(lid) => lid,
+        Err(_) => return missing_library(),
+    };
+
+    let order = match query.get("sort").map(String::as_str) {
+        Some("title") => store::library_query::BrowseOrder::Title,
+        Some("added_at") => store::library_query::BrowseOrder::AddedAt,
+        Some("release_date") => store::library_query::BrowseOrder::ReleaseDate,
+        Some("rating") => store::library_query::BrowseOrder::Rating,
+        Some("runtime") => store::library_query::BrowseOrder::Runtime,
+        Some("size") => store::library_query::BrowseOrder::Size,
+        Some("resolution") => store::library_query::BrowseOrder::Resolution,
+        Some("random") => store::library_query::BrowseOrder::Random,
+        _ => store::library_query::BrowseOrder::Title,
+    };
+    let descending = query.get("order").map(|o| o.eq_ignore_ascii_case("desc")).unwrap_or(false);
+
+    let offset = query.get("offset").and_then(|o| o.parse::<usize>().ok()).unwrap_or(0);
+    let limit = query.get("limit").and_then(|l| l.parse::<usize>().ok()).unwrap_or(50);
+
+    let lib_q = store::library_query::LibraryQuery {
+        library_id: lib_id,
+        user_id,
+        filter: store::library_query::BrowseFilter::default(),
+        order,
+        descending,
+        page: store::library_query::BrowsePage::Offset { start: offset, limit },
+        include_total: true,
+    };
+
+    let paged = {
         let store = state.store.lock();
-        match require_visible_library(&store, &id, user_id) {
-            Ok(library) => library,
-            Err(response) => return response,
+        match store.library_item_page(&lib_q) {
+            Ok(p) => p,
+            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &e.to_string()),
         }
     };
-    let (items, artwork) = match selection::load_browse_page(&state, &library, user_id, &query).await
-    {
-        Ok(loaded) => loaded,
-        Err(response) => return response,
-    };
-    let files = state.browse_files.clone();
-    let library_id = library.id.clone();
-    let work = state
-        .http_work
-        .run(selection::BROWSE_DEADLINE, move || {
-            let art = selection::BrowseArtwork::new(Some(&artwork), files.as_ref());
-            let paged: Vec<_> = items
-                .iter()
-                .map(|item| wall_item_json(&library_id, item, &art))
-                .collect();
-            ok_list(paged).into_response()
+
+    let items_json: Vec<Value> = paged.items.into_iter().map(|item| {
+        let poster_url = item.preferred_file_id.map(|fid| artwork_url("posters", fid));
+        let backdrop_url = item.preferred_file_id.map(|fid| artwork_url("fanart", fid));
+        json!({
+            "media_item_id": item.media_id.to_string(),
+            "kind": item.kind.as_str(),
+            "library_id": item.library_id.to_string(),
+            "title": item.title,
+            "year": item.year,
+            "poster_url": poster_url,
+            "backdrop_url": backdrop_url,
+            "file_count": item.file_count,
+            "seasons": (1..=item.distinct_season_count).collect::<Vec<_>>(),
+            "episode_count": item.distinct_episode_count,
+            "max_resolution": "1080p",
+            "missing": item.missing_file_count > 0,
         })
-        .await;
-    match work {
-        Ok(response) => response,
-        Err(error) => selection::browse_work_error(error),
-    }
+    }).collect();
+
+    ok_list(items_json).into_response()
 }
 
 fn wall_item_json(

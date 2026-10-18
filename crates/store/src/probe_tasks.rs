@@ -97,7 +97,7 @@ impl Store {
         for unit in units {
             if let Err(error) = tx.execute(
                 "INSERT INTO probe_job_units (
-                     job_id, ledger_id, kind, force_fingerprint,
+                     job_id, file_id, kind, force_fingerprint,
                      reuse_fingerprint_cache, overwrite_markers, status,
                      reuse_media_info_cache, stage
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7, ?8)",

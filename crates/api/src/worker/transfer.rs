@@ -362,25 +362,20 @@ impl PublicationRecorder<'_> {
                     return Err("Transfer source or Library configuration changed".into());
                 }
             }
-            let row = domain::LedgerRow {
-                id: candidate.file.file_id,
-                media_id: candidate.file.media_id,
-                path: candidate.file.path.to_string_lossy().to_string(),
-                season: candidate.units.first().map(|u| u.season as u32),
-                episode: candidate.units.first().map(|u| u.episode as u32),
-                resolution: candidate.file.resolution.clone(),
-                codec: candidate.file.codec.clone(),
-                hdr: candidate.file.hdr.clone(),
-                quality_source: candidate.file.quality_source,
-                confidence: candidate.file.confidence,
-                filter_score: candidate.file.filter_score,
+            // Route reservation to Store publish_files (Pending state)
+            let mut pending_file = candidate.file.clone();
+            pending_file.publication = domain::FilePublication::Pending;
+            let pub_item = store::library_write::FilePublication {
+                file: &pending_file,
+                units: &candidate.units,
+                expected_version: None,
+                probe_required: false,
             };
-            let mode = match mode {
-                library::TransferMode::Copy => "copy",
-                library::TransferMode::Move => "move",
-                library::TransferMode::Hardlink => "hardlink",
+            let scope = store::library_write::WriteScope {
+                library_id: candidate.file.library_id,
+                config_revision: 0,
             };
-            store.prepare_transfer(&row, mode, &source.display().to_string()).map_err(|e| e.to_string())?;
+            store.publish_files(&scope, &[pub_item], 0).map_err(|e| e.to_string())?;
             Ok(candidate.clone())
         })();
         result.map_err(|error| {
@@ -398,23 +393,21 @@ impl subscribe::TransferRecorder for PublicationRecorder<'_> {
     }
 
     fn published(&self, candidate: &domain::FileCoverage) -> Result<(), subscribe::SubscribeError> {
-        let row = domain::LedgerRow {
-            id: candidate.file.file_id,
-            media_id: candidate.file.media_id,
-            path: candidate.file.path.to_string_lossy().to_string(),
-            season: candidate.units.first().map(|u| u.season as u32),
-            episode: candidate.units.first().map(|u| u.episode as u32),
-            resolution: candidate.file.resolution.clone(),
-            codec: candidate.file.codec.clone(),
-            hdr: candidate.file.hdr.clone(),
-            quality_source: candidate.file.quality_source,
-            confidence: candidate.file.confidence,
-            filter_score: candidate.file.filter_score,
+        let pub_item = store::library_write::FilePublication {
+            file: &candidate.file,
+            units: &candidate.units,
+            expected_version: None,
+            probe_required: true,
         };
-        self.state.store.lock().complete_transfer_publication(&row).map_err(|error| {
+        let scope = store::library_write::WriteScope {
+            library_id: candidate.file.library_id,
+            config_revision: 0,
+        };
+        self.state.store.lock().publish_files(&scope, &[pub_item], 0).map_err(|error| {
             tracing::error!(path = %candidate.file.path.display(), %error, "Transfer publication completion failed");
             subscribe::SubscribeError::Downloader(downloader::DownloaderError::Message(error.to_string()))
-        })
+        })?;
+        Ok(())
     }
 }
 

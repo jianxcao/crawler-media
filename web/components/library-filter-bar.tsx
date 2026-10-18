@@ -92,7 +92,7 @@ export function LibraryFilterBar({
   const toggle = useCallback(
     (dim: "genres" | "countries" | "decades", value: string) => {
       const current = (filter[dim] ?? []) as (string | number)[];
-      const typed = dim === "genres" ? Number(value) : value;
+      const typed = value;
       const next = current.includes(typed)
         ? current.filter((v) => v !== typed)
         : [...current, typed];
@@ -332,7 +332,7 @@ function ConditionRow({
     }
     const key = dim as MultiDim;
     const current = (filter[key] ?? []) as (string | number)[];
-    const typed = dim === "genres" ? Number(value) : value;
+    const typed = value;
     onFilterChange({ ...filter, [key]: current.filter((v) => v !== typed) });
   };
 
@@ -567,7 +567,7 @@ export function FilterEmptyState({
     }
     const key = dim as MultiDim;
     const current = (filter[key] ?? []) as (string | number)[];
-    const typed = dim === "genres" ? Number(value) : value;
+    const typed = value;
     onFilterChange({ ...filter, [key]: current.filter((v) => v !== typed) });
   };
 

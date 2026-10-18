@@ -91,7 +91,10 @@ pub(crate) async fn create_library(
     ) {
         Ok(library) => {
             let lib_id = library.id.clone();
-            let _json_resp = library_json(&store, &library);
+            let _json_resp = match library_json(&store, &library) {
+                Ok(j) => j,
+                Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &e.to_string()),
+            };
             if let Err(error) =
                 store.set_library_intro_settings(&library.id, false, false)
             {
@@ -113,7 +116,10 @@ pub(crate) async fn create_library(
                 .ok()
                 .flatten()
                 .unwrap_or(library);
-            let json_resp = library_json(&store, &updated);
+            let json_resp = match library_json(&store, &updated) {
+                Ok(j) => j,
+                Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &e.to_string()),
+            };
             drop(store);
 
             // 自动调度首次扫描，建库后不用手动去点扫描
@@ -240,7 +246,10 @@ pub(crate) async fn patch_library(
         match_rules.as_deref(),
         default_filter_id_update,
     ) {
-        Ok(library) => ok(library_json(&store, &library)).into_response(),
+        Ok(library) => match library_json(&store, &library) {
+            Ok(j) => ok(j).into_response(),
+            Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &e.to_string()),
+        },
         Err(StoreError::Missing(_)) => missing_library(),
         Err(StoreError::Protected(message)) => {
             err(StatusCode::BAD_REQUEST, "library.protected", &message)
@@ -279,7 +288,10 @@ pub(crate) async fn set_default_library(
 ) -> Response {
     let store = state.store.lock();
     match store.set_default_library(&id) {
-        Ok(library) => ok(library_json(&store, &library)).into_response(),
+        Ok(library) => match library_json(&store, &library) {
+            Ok(j) => ok(j).into_response(),
+            Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &e.to_string()),
+        },
         Err(StoreError::Missing(_)) => missing_library(),
         Err(error) => err(
             StatusCode::INTERNAL_SERVER_ERROR,

@@ -124,9 +124,9 @@ pub(crate) fn library_json_from_facts(
 
 /// 同步版本：库配置的写路径仍在锁内直接渲染（不在本次改动范围内），统计用
 /// [`crate::library_statistics::statistics_for`] 的同一套口径同步算一次，不构建。
-pub(crate) fn library_json(store: &crate::Store, library: &Library) -> Value {
-    let stats = crate::library_statistics::statistics_for(store, library);
-    library_json_from_facts(&library_facts(store, library), Some(stats))
+pub(crate) fn library_json(store: &crate::Store, library: &Library) -> Result<Value, store::StoreError> {
+    let stats = crate::library_statistics::statistics_for(store, library)?;
+    Ok(library_json_from_facts(&library_facts(store, library), Some(stats)))
 }
 
 /// Emby-style current cover source: latest TV episode wins; movies use their

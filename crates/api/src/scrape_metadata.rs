@@ -545,7 +545,7 @@ fn scrape_tv_fanart(
     let Ok(lease) = state.acquire_path_work(show_root, media.kind) else { return };
     let fetch = LeasedArtworkFetch { fetch: state.poster_fetch.as_ref(), lease: lease.as_ref() };
     let getter = PosterFetchCatalogGet { fetch: &fetch };
-    let fanart_db = state.store.lock().data_dir().join("fanart.db");
+    let fanart_db = state.store.lock().cache_db_path();
     match media::fanart::FanartClient::new(getter, &fanart_db, api_key) {
         Ok(client) => {
             let lang_refs: Vec<&str> = fanart_lang.iter().map(|s| s.as_str()).collect();
@@ -603,7 +603,7 @@ pub(crate) fn scrape_movie_fanart(
     let Ok(lease) = state.acquire_path_work(movie_root, media.kind) else { return };
     let fetch = LeasedArtworkFetch { fetch: state.poster_fetch.as_ref(), lease: lease.as_ref() };
     let getter = PosterFetchCatalogGet { fetch: &fetch };
-    let fanart_db = state.store.lock().data_dir().join("fanart.db");
+    let fanart_db = state.store.lock().cache_db_path();
     match media::fanart::FanartClient::new(getter, &fanart_db, &api_key) {
         Ok(client) => {
             let lang_refs: Vec<&str> = fanart_lang.iter().map(|s| s.as_str()).collect();

@@ -257,21 +257,26 @@ impl Store {
             (Some(f), Some(r)) => f == target.file.file_id.to_string() && r == target.file.version.revision,
             _ => false,
         };
-
-        let status = if is_same_source {
-            ResumeStatus::Compatible
+        if is_same_source {
+            Ok(ResolvedResume {
+                target,
+                start_ms: pos_ms,
+                duration_ms: dur_ms.or(file_dur_ms),
+                audio_track: a_track,
+                subtitle_track: s_track,
+                status: ResumeStatus::Compatible,
+            })
         } else {
-            ResumeStatus::SourceChanged
-        };
-
-        Ok(ResolvedResume {
-            target,
-            start_ms: pos_ms,
-            duration_ms: dur_ms.or(file_dur_ms),
-            audio_track: a_track,
-            subtitle_track: s_track,
-            status,
-        })
+            // F05: Source changed -> reset position to 0, use current target duration, clear old tracks
+            Ok(ResolvedResume {
+                target,
+                start_ms: 0,
+                duration_ms: file_dur_ms,
+                audio_track: None,
+                subtitle_track: None,
+                status: ResumeStatus::SourceChanged,
+            })
+        }
     }
 
     pub fn mutate_playback(

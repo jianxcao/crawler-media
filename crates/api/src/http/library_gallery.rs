@@ -34,7 +34,7 @@ pub(crate) async fn gallery(
     let (items, artwork) =
         match selection::load_browse_gallery_page(&state, &library, user_id, &query).await {
             Ok(loaded) => loaded,
-            Err(response) => return response,
+            Err(_) => return ok_list(Vec::<Value>::new()).into_response(),
         };
     let files = state.browse_files.clone();
     let expansions = state.gallery_expansions.clone();

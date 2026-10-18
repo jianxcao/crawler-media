@@ -16,18 +16,17 @@ pub struct LibraryStatistics {
     pub stale: bool,
 }
 
-pub(crate) fn statistics_for(store: &store::Store, library: &Library) -> LibraryStatistics {
-    let stats = store.library_roster_stats(&library.id).unwrap_or_default();
-    LibraryStatistics {
+pub(crate) fn statistics_for(store: &store::Store, library: &Library) -> Result<LibraryStatistics, store::StoreError> {
+    let stats = store.library_roster_stats(&library.id)?;
+    Ok(LibraryStatistics {
         item_count: stats.item_count,
         file_count: stats.file_count,
         total_size_bytes: stats.total_size_bytes,
         strm_file_count: stats.strm_file_count,
         refreshed_at_ms: 0,
         stale: false,
-    }
+    })
 }
-
 pub(crate) async fn collect_statistics_for_roster(
     state: ApiState,
     _user_id: Option<UserId>,

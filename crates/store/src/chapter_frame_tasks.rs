@@ -45,10 +45,10 @@ impl Store {
         let targets_json = serde_json::to_string(&task.targets)?;
         let changed = self.library.execute(
             "INSERT INTO chapter_frame_tasks (
-                 id, ledger_id, source_version, targets_json, targets_hash,
+                 id, file_id, source_version, targets_json, targets_hash,
                  status, created_at_ms
              ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6)
-             ON CONFLICT(ledger_id, source_version, targets_hash) DO NOTHING",
+             ON CONFLICT(file_id, source_version, targets_hash) DO NOTHING",
             params![
                 task.id,
                 compact_ledger_id(task.ledger_id),
@@ -69,7 +69,7 @@ impl Store {
     ) -> Result<Vec<ChapterFrameTask>, StoreError> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let mut statement = self.library.prepare(
-            "SELECT id, ledger_id, source_version, targets_json, targets_hash
+            "SELECT id, file_id, source_version, targets_json, targets_hash
              FROM chapter_frame_tasks
              WHERE status = 'queued'
              ORDER BY created_at_ms, id
@@ -147,7 +147,7 @@ impl Store {
         let task = self
             .library
             .query_row(
-                "SELECT id, ledger_id, source_version, targets_json, targets_hash
+                "SELECT id, file_id, source_version, targets_json, targets_hash
                  FROM chapter_frame_tasks WHERE id = ?1",
                 [id],
                 map_task,

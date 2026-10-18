@@ -222,5 +222,5 @@ fn playback_source_change_detection() {
     // Resolve specifying the preferred source file2 -> Status must detect SourceChanged!
     let res = store.resolve_playback(user_id, &item_id, Some(&PhysicalSourceId { file_id: file2.file_id, revision: 2 }), None).unwrap();
     assert_eq!(res.status, ResumeStatus::SourceChanged);
-    assert_eq!(res.start_ms, 500_000);
+    assert_eq!(res.start_ms, 0, "Source changed must reset start_ms to 0");
 }

@@ -56,7 +56,7 @@ impl Store {
         let item_id_str = ledger_id.to_string();
 
         let tx = rusqlite::Transaction::new_unchecked(
-            &self.subscribe,
+            &self.library,
             rusqlite::TransactionBehavior::Immediate,
         )?;
 
@@ -103,7 +103,7 @@ impl Store {
         device_id: &str,
         play_session_id: &str,
     ) -> Result<Option<PlaySessionBinding>, StoreError> {
-        self.subscribe
+        self.library
             .query_row(
                 "SELECT item_id, issued_at, generation, state
                  FROM playback_session_ids
@@ -142,16 +142,16 @@ impl Store {
         device_id: &str,
         play_session_id: &str,
     ) -> Result<bool, StoreError> {
-        if !self.subscribe.is_autocommit() {
+        if !self.library.is_autocommit() {
             return self.activate_play_session_conn(
-                &self.subscribe,
+                &self.library,
                 user_id,
                 device_id,
                 play_session_id,
             );
         }
         let tx = rusqlite::Transaction::new_unchecked(
-            &self.subscribe,
+            &self.library,
             rusqlite::TransactionBehavior::Immediate,
         )?;
         let res = self.activate_play_session_conn(&tx, user_id, device_id, play_session_id)?;
@@ -231,7 +231,7 @@ impl Store {
         device_id: &str,
         play_session_id: &str,
     ) -> Result<(), StoreError> {
-        self.subscribe.execute(
+        self.library.execute(
             "UPDATE playback_session_ids SET state = 'closed'
              WHERE user_id = ?1 AND device_id = ?2 AND play_session_id = ?3",
             params![user_id.to_string(), device_id, play_session_id],

@@ -97,6 +97,31 @@ pub fn open(path: impl AsRef<Path>) -> Result<Connection, CacheDbError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+
+    // Preflight check existing database read-only before modifying or setting WAL policy
+    if path.exists() && std::fs::metadata(path)?.len() > 0 {
+        let ro = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let app_id: u32 = ro.query_row("PRAGMA application_id", [], |r| r.get(0))?;
+        let user_ver: u32 = ro.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        let has_tables: bool = ro.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%')",
+            [],
+            |r| r.get(0),
+        )?;
+
+        if app_id != CACHE_APPLICATION_ID || user_ver != CACHE_USER_VERSION {
+            if has_tables || (app_id != 0 && app_id != CACHE_APPLICATION_ID) || (user_ver != 0 && user_ver != CACHE_USER_VERSION) {
+                return Err(CacheDbError::LegacyFormat(format!(
+                    "invalid cache layout at {}: app_id={}, user_version={}, has_tables={}",
+                    path.display(), app_id, user_ver, has_tables
+                )));
+            }
+        }
+    }
+
     let conn = Connection::open(path)?;
     apply_connection_policy(&conn)?;
     initialize(&conn)?;
@@ -119,10 +144,13 @@ pub fn initialize(conn: &Connection) -> Result<(), CacheDbError> {
         });
     }
 
-    conn.execute_batch(CACHE_SCHEMA_SQL)?;
+    // Run schema initialization and pragmas atomically
     conn.execute_batch(&format!(
-        "PRAGMA application_id = {CACHE_APPLICATION_ID};
-         PRAGMA user_version = {CACHE_USER_VERSION};"
+        "BEGIN IMMEDIATE;
+         {CACHE_SCHEMA_SQL}
+         PRAGMA application_id = {CACHE_APPLICATION_ID};
+         PRAGMA user_version = {CACHE_USER_VERSION};
+         COMMIT;"
     ))?;
     Ok(())
 }
