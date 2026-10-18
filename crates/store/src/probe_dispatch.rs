@@ -146,7 +146,7 @@ impl Store {
         let source_version = self
             .library
             .query_row(
-                "SELECT source_version FROM file_meta WHERE ledger_id = ?1",
+                "SELECT source_version FROM file_details WHERE file_id = ?1",
                 params![id.ledger_id],
                 |row| row.get::<_, Option<String>>(0),
             )
@@ -173,7 +173,7 @@ impl Store {
     ) -> Result<bool, StoreError> {
         let changed = self.library.execute(
             "UPDATE probe_job_units SET status = 'queued', stage = 'fingerprint'
-             WHERE job_id = ?1 AND ledger_id = ?2
+             WHERE job_id = ?1 AND file_id = ?2
                AND status IN ('running', 'queued') AND stage = 'metadata'",
             params![job_id, ledger_id],
         )?;

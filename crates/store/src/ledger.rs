@@ -218,16 +218,15 @@ impl Store {
 
     /// 按路径取已有台账行（扫描入库时判断「已记录」用）。
     pub fn ledger_by_path(&self, path: &str) -> Result<Option<LedgerRow>, StoreError> {
-        self.library
-            .query_row(
-                "SELECT id, media_id, path, season, episode, resolution, codec, hdr,
-                        quality_source, confidence, filter_score
-                 FROM ledger WHERE path = ?1",
-                params![path],
-                map_ledger,
-            )
-            .optional()
-            .map_err(Into::into)
+        let mut stmt = self.library.prepare(
+            "SELECT f.file_id, f.media_id, f.display_path, u.season, u.episode, f.resolution, f.codec, f.hdr,
+                    f.quality_source, f.confidence, f.filter_score
+             FROM library_files f
+             LEFT JOIN library_file_units u ON f.file_id = u.file_id
+             WHERE f.path_key = ?1 OR f.display_path = ?1
+             LIMIT 1",
+        )?;
+        stmt.query_row(params![path], map_ledger).optional().map_err(Into::into)
     }
 
     /// Rename a ledger row's path (整理后落名一致；path 唯一约束保持）。
@@ -292,9 +291,11 @@ impl Store {
     ) -> Result<Vec<LedgerRow>, StoreError> {
         self.media_ledger_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut stmt = self.library.prepare(
-            "SELECT id, media_id, path, season, episode, resolution, codec, hdr,
-                    quality_source, confidence, filter_score
-             FROM ledger WHERE media_id = ?1",
+            "SELECT f.file_id, f.media_id, f.display_path, u.season, u.episode, f.resolution, f.codec, f.hdr,
+                    f.quality_source, f.confidence, f.filter_score
+             FROM library_files f
+             LEFT JOIN library_file_units u ON f.file_id = u.file_id
+             WHERE f.media_id = ?1",
         )?;
         let rows = stmt.query_map(rusqlite::params![media_id.to_string()], map_ledger)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -386,26 +387,16 @@ impl Store {
     }
 
     pub fn get_ledger(&self, compact_id: &str) -> Result<Option<LedgerRow>, StoreError> {
-        // compact_id is a UUID without hyphens; try to reconstruct the
-        // hyphenated form and query directly instead of a full-table scan.
-        if let Ok(uuid) = uuid::Uuid::parse_str(compact_id) {
-            return self
-                .library
-                .query_row(
-                    "SELECT id, media_id, path, season, episode, resolution, codec, hdr,
-                            quality_source, confidence, filter_score
-                     FROM ledger WHERE id = ?1",
-                    params![uuid.to_string()],
-                    map_ledger,
-                )
-                .optional()
-                .map_err(Into::into);
-        }
-        // Fallback for non-standard compact ids: scan.
-        Ok(self
-            .list_ledger()?
-            .into_iter()
-            .find(|row| row.id.to_string().replace('-', "") == compact_id))
+        let id_str = compact_id.to_string();
+        let mut stmt = self.library.prepare(
+            "SELECT f.file_id, f.media_id, f.display_path, u.season, u.episode, f.resolution, f.codec, f.hdr,
+                    f.quality_source, f.confidence, f.filter_score
+             FROM library_files f
+             LEFT JOIN library_file_units u ON f.file_id = u.file_id
+             WHERE f.file_id = ?1 OR REPLACE(f.file_id, '-', '') = ?1
+             LIMIT 1",
+        )?;
+        stmt.query_row(params![id_str], map_ledger).optional().map_err(Into::into)
     }
 }
 

@@ -59,7 +59,7 @@ impl Store {
         let changed = {
             let mut statement = tx.prepare(
                 "UPDATE probe_job_units SET status = ?3, error = ?4
-                 WHERE job_id = ?1 AND ledger_id = ?2 AND status IN ('queued', 'running')",
+                 WHERE job_id = ?1 AND file_id = ?2 AND status IN ('queued', 'running')",
             )?;
             let changed = statement.execute(params![job_id, ledger_id, status, error])?;
             vm_steps += i64::from(statement.get_status(rusqlite::StatementStatus::VmStep));

@@ -108,7 +108,7 @@ impl Store {
     pub fn get_file_meta(&self, ledger_id: &str) -> Result<Option<library::Tracks>, StoreError> {
         self.library
             .query_row(
-                "SELECT audio_json, subtitle_json, video_json, tracks_version FROM file_meta WHERE ledger_id = ?1",
+                "SELECT audio_json, subtitle_json, video_json, tracks_version FROM file_details WHERE file_id = ?1",
                 params![ledger_id],
                 |row| {
                     let video_raw: Option<String> = row.get(2).ok().flatten();
@@ -185,7 +185,7 @@ impl Store {
     ) -> Result<Option<Vec<library::ChapterMarker>>, StoreError> {
         self.library
             .query_row(
-                "SELECT chapters_json FROM file_meta WHERE ledger_id = ?1",
+                "SELECT chapters_json FROM file_details WHERE file_id = ?1",
                 params![ledger_id],
                 |row| {
                     let json_str: Option<String> = row.get(0)?;
@@ -224,7 +224,7 @@ impl Store {
     pub fn get_fingerprint(&self, ledger_id: &str) -> Result<Option<Vec<u32>>, StoreError> {
         self.library
             .query_row(
-                "SELECT fingerprint_json FROM file_meta WHERE ledger_id = ?1",
+                "SELECT fingerprint_json FROM file_details WHERE file_id = ?1",
                 params![ledger_id],
                 |row| {
                     let raw: Option<String> = row.get(0).ok().flatten();
@@ -257,7 +257,7 @@ impl Store {
     pub fn get_outro_fingerprint(&self, ledger_id: &str) -> Result<Option<Vec<u32>>, StoreError> {
         self.library
             .query_row(
-                "SELECT outro_fingerprint_json FROM file_meta WHERE ledger_id = ?1",
+                "SELECT outro_fingerprint_json FROM file_details WHERE file_id = ?1",
                 params![ledger_id],
                 |row| {
                     let raw: Option<String> = row.get(0).ok().flatten();
@@ -441,9 +441,9 @@ pub(crate) fn delete_file_meta_for_ledger(
     tx: &rusqlite::Transaction<'_>,
     ledger_id: &str,
 ) -> Result<(), StoreError> {
-    tx.execute("DELETE FROM file_meta WHERE ledger_id = ?1", [ledger_id])?;
+    tx.execute("DELETE FROM file_details WHERE file_id = ?1", [ledger_id])?;
     tx.execute(
-        "DELETE FROM fingerprint_cache WHERE ledger_id = ?1",
+        "DELETE FROM fingerprint_cache WHERE file_id = ?1",
         [ledger_id],
     )?;
     tx.execute(

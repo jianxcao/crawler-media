@@ -294,7 +294,7 @@ impl Store {
         let tx = self.library.unchecked_transaction()?;
         let changed = tx.execute(
             "UPDATE probe_job_units SET status = 'running'
-             WHERE job_id = ?1 AND ledger_id = ?2 AND status = 'queued'
+             WHERE job_id = ?1 AND file_id = ?2 AND status = 'queued'
              AND EXISTS (SELECT 1 FROM probe_jobs WHERE id = ?1 AND status IN ('queued', 'running'))",
             params![job_id, ledger_id],
         )?;

@@ -1,11 +1,8 @@
-//! Scanned ledger insertion with atomic probe obligations and dispatching.
-
 use std::str::FromStr;
-
+use rusqlite::{OptionalExtension, params};
 use domain::{LedgerId, LedgerRow};
-use rusqlite::params;
-
 use super::{Store, StoreError};
+
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScanProbeObligation {
@@ -27,18 +24,45 @@ impl Store {
             rusqlite::TransactionBehavior::Immediate,
         )?;
 
-        // Insert ledger row (if path exists, ignore / fail per contract)
+        // Find library and root for row.path
+        let lib_info: Option<(String, String, String)> = tx.query_row(
+            "SELECT r.library_id, r.root_id, l.kind
+             FROM library_roots r
+             JOIN libraries l ON r.library_id = l.library_id
+             WHERE ?1 LIKE (r.display_path || '%') OR ?1 LIKE (r.path_key || '%')
+             ORDER BY LENGTH(r.display_path) DESC LIMIT 1",
+            params![row.path],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).optional()?;
+
+        let (lib_id, root_id, kind) = match lib_info {
+            Some(info) => info,
+            None => {
+                // Fallback to first library if path outside roots
+                let first: Option<(String, String, String)> = tx.query_row(
+                    "SELECT r.library_id, r.root_id, l.kind FROM library_roots r JOIN libraries l ON r.library_id = l.library_id LIMIT 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                ).optional()?;
+                first.unwrap_or_else(|| ("".into(), "".into(), "movie".into()))
+            }
+        };
+
+        // Insert into library_files table
         tx.execute(
-            "INSERT INTO ledger (
-                 id, media_id, path, season, episode, resolution, codec, hdr,
-                 quality_source, confidence, filter_score
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO library_files (
+                 file_id, library_id, root_id, media_id, kind, path_key, display_path,
+                 presence_state, publication_state, file_revision, source_version,
+                 resolution, codec, hdr, quality_source, confidence, filter_score
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, 'present', 'published', 1, 'v1', ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(file_id) DO NOTHING",
             params![
                 row.id.to_string(),
+                lib_id,
+                root_id,
                 row.media_id.to_string(),
+                kind,
                 row.path,
-                row.season,
-                row.episode,
                 row.resolution,
                 row.codec,
                 row.hdr,
@@ -48,12 +72,28 @@ impl Store {
             ],
         )?;
 
-        // Insert probe obligation
+        // Insert unit mapping
+        let season_num = row.season.map(|s| s as i32).unwrap_or(-1);
+        let episode_num = row.episode.map(|e| e as i32).unwrap_or(-1);
         tx.execute(
-            "INSERT INTO ledger_probe_obligations (ledger_id, created_at_ms, reason)
-             VALUES (?1, ?2, 'scan')",
+            "INSERT INTO library_file_units (file_id, library_id, media_id, season, episode)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(file_id, season, episode) DO NOTHING",
+            params![row.id.to_string(), lib_id, row.media_id.to_string(), season_num, episode_num],
+        )?;
+
+        // Insert probe obligation into file_probe_obligations
+        tx.execute(
+            "INSERT INTO file_probe_obligations (file_id, created_at_ms, reason)
+             VALUES (?1, ?2, 'scan')
+             ON CONFLICT(file_id) DO NOTHING",
             params![row.id.to_string(), now_ms],
         )?;
+
+        // Maintain library_items via reduce_library_media
+        if let Ok(lid) = lib_id.parse::<domain::LibraryId>() {
+            crate::library_write::reduce_library_media(&tx, lid, row.media_id)?;
+        }
 
         tx.commit()?;
         Ok(())

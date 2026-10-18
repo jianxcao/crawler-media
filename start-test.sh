@@ -168,6 +168,7 @@ start_backend() {
     RUST_LOG="${RUST_LOG:-info,api=debug,crawler_media=debug,domain=debug,indexer=debug,media=debug,downloader=debug,library=debug,subscribe=debug,filter=debug,release=debug,hooks=debug,jobs=debug,playback=debug,marker=debug,html5ever=off,selectors=warn}" \
     CRAWLER_MEDIA_FFMPEG_LOG_LEVEL="${CRAWLER_MEDIA_FFMPEG_LOG_LEVEL:-verbose}" \
     CRAWLER_MEDIA_DATA="$ROOT_DIR/$DATA_DIR" \
+    CRAWLER_MEDIA_ALLOW_MULTI_INSTANCE="1" \
     CRAWLER_MEDIA_TOKEN="$TOKEN" \
     CRAWLER_MEDIA_ADMIN_PASSWORD="${ADMIN_PASSWORD:-test-admin-secret-password}" \
     CRAWLER_MEDIA_QB_URL="http://localhost:$QB_PORT" \
