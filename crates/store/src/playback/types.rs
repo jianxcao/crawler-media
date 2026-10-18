@@ -75,3 +75,21 @@ pub enum EventOutcome {
     Applied,
     IgnoredStale,
 }
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MediaMergeRequest {
+    pub request_id: String,
+    pub survivor: MediaId,
+    pub loser: MediaId,
+    pub survivor_revision: i64,
+    pub loser_revision: i64,
+    pub refresh_targets: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OperationStatus {
+    pub operation_id: String,
+    pub phase: String,
+    pub state: String,
+    pub error: Option<String>,
+}

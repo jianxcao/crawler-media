@@ -292,4 +292,96 @@ impl Store {
         tx.commit()?;
         Ok(EventOutcome::Applied)
     }
+
+    pub fn begin_media_merge(
+        &self,
+        request: &super::types::MediaMergeRequest,
+        now_ms: i64,
+    ) -> Result<String, StoreError> {
+        let tx = self.library.unchecked_transaction()?;
+        let plan_json = serde_json::to_string(request)?;
+
+        // Idempotency: check if an operation already exists for this request_id
+        let existing_op: Option<String> = tx
+            .query_row(
+                "SELECT operation_id FROM media_operations WHERE json_extract(plan_json, '$.request_id') = ?1",
+                params![request.request_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        if let Some(op_id) = existing_op {
+            return Ok(op_id);
+        }
+
+        let op_id = format!("op_merge_{}", uuid::Uuid::new_v4().simple());
+        tx.execute(
+            "INSERT INTO media_operations
+                (operation_id, kind, state, survivor_id, loser_id, plan_json, phase_cursor, error, created_at_ms, updated_at_ms)
+             VALUES
+                (?1, 'merge', 'planned', ?2, ?3, ?4, 'init', NULL, ?5, ?5)",
+            params![
+                op_id,
+                request.survivor.to_string(),
+                request.loser.to_string(),
+                plan_json,
+                now_ms,
+            ],
+        )?;
+
+        tx.commit()?;
+        Ok(op_id)
+    }
+
+    pub fn advance_media_merge(
+        &self,
+        operation_id: &str,
+        now_ms: i64,
+    ) -> Result<super::types::OperationStatus, StoreError> {
+        let tx = self.library.unchecked_transaction()?;
+        let (state, survivor_str, loser_str): (String, String, Option<String>) = tx.query_row(
+            "SELECT state, survivor_id, loser_id FROM media_operations WHERE operation_id = ?1",
+            params![operation_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+
+        if state == "succeeded" {
+            return Ok(super::types::OperationStatus {
+                operation_id: operation_id.to_string(),
+                phase: "complete".into(),
+                state: "succeeded".into(),
+                error: None,
+            });
+        }
+
+        if let Some(loser) = loser_str {
+            // Reassign loser's files to survivor
+            tx.execute(
+                "UPDATE library_files SET media_id = ?1 WHERE media_id = ?2",
+                params![survivor_str, loser],
+            )?;
+            tx.execute(
+                "UPDATE library_file_units SET media_id = ?1 WHERE media_id = ?2",
+                params![survivor_str, loser],
+            )?;
+            // Mark loser as retired pointing to survivor
+            tx.execute(
+                "UPDATE media SET identity_state = 'retired', survivor_id = ?1 WHERE media_id = ?2",
+                params![survivor_str, loser],
+            )?;
+        }
+
+        tx.execute(
+            "UPDATE media_operations SET state = 'succeeded', phase_cursor = 'complete', updated_at_ms = ?1 WHERE operation_id = ?2",
+            params![now_ms, operation_id],
+        )?;
+
+        tx.commit()?;
+        Ok(super::types::OperationStatus {
+            operation_id: operation_id.to_string(),
+            phase: "complete".into(),
+            state: "succeeded".into(),
+            error: None,
+        })
+    }
 }
