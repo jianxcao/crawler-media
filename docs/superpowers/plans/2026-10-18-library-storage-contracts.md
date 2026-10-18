@@ -106,6 +106,7 @@ pub struct MetadataAdoption {
     pub media_id: MediaId, pub scope: EntityScope, pub locale: String, pub source: String,
     pub provider_entity_id: String, pub provider_work_id: String, pub fetched_at: i64,
     pub fields: MetadataFields, pub expected_revision: Option<i64>,
+    pub preferences: MetadataPreferences,
 }
 pub struct NfoInput {
     pub scope: EntityScope, pub locale: Option<String>, pub fields: MetadataFields,
@@ -118,17 +119,37 @@ impl Store {
 }
 ```
 
-MetadataFields/FieldValue放domain/src/metadata_fields.rs，serde继承workspace，media/library/store共同消费；不新增反向依赖。每字段为FieldValue<T>：String字段title/original_title/overview/tagline/release_date/end_date/content_rating/language/status/air_date/poster_url/backdrop_url/still_url；year:u16、rating:f64、vote_count:u64；runtime_minutes/number_of_seasons/number_of_episodes:u32；genres/countries/studios/directors/creators:Vec<String>；episode_run_time:Vec<u32>；cast:Vec<MetadataCast>。`MetadataCast { name:String, role:Option<String>, tmdb_id:Option<String>, thumb:Option<String>, order:Option<u32> }`，缺order用来源数组位置。MediaAlias=source/kind/external_id，episode ID不当work身份。
+MetadataFields/FieldValue放domain/src/metadata_fields.rs，serde继承workspace，media/library/store共同消费；不新增反向依赖。每字段为FieldValue<T>：String字段title/original_title/overview/tagline/release_date/end_date/content_rating/language/status/air_date/poster_url/backdrop_url/still_url；year:u16、rating:f64、vote_count:u64；runtime_minutes/number_of_seasons/number_of_episodes:u32；countries/studios/directors/creators:Vec<String>；**genres:Vec<MetadataGenre>**；episode_run_time:Vec<u32>；cast:Vec<MetadataCast>。`MetadataCast { name:String, role:Option<String>, tmdb_id:Option<String>, thumb:Option<String>, order:Option<u32> }`，缺order用来源数组位置。MediaAlias=source/kind/external_id，episode ID不当work身份。
 
 details_json version=1，冷键tagline/end_date/content_rating/status/vote_count/studios/directors/creators/number_of_seasons/number_of_episodes/episode_run_time/cast，每键独立presence/provenance，不能把整个details当一个覆盖值。热字段存对应metadata列，season/episode的其他冷字段也用该对象；episode air_date/still_url映射专列。Empty与Missing分离，nullable列不丢field_origins中presence。
 
 映射：NFO plot→overview、premiered→work.release_date、aired→episode.air_date、thumb→episode.still_url或work/season.poster_url（按scope）、actor→cast、studio/director/creator→对应集合、content_rating/end_date/status/vote_count/counts→同名字段；season/episode为坐标不改work名。TMDB last_air_date→end_date、original_language→language、companies/networks→studios、credits→cast/directors/creators、episode.name/still_path→title/still_url。API原info、Jellyfin Overview/PremiereDate/OfficialRating/Studios/People/SeriesStatus、NFO导出从这些采用字段映射，不在HTTP补读原NFO/cache。
 
-**presence不得先丢后补**：T3新增media/src/normalized.rs入口 `normalize_metadata(source: &str, scope: EntityScope, body: &str) -> Result<MetadataFields, TmdbError>`，原始JSON键不存在→Missing、null/空文本/空数组→Empty、合法类型→Value、非法值→本次响应错误不覆盖旧值。来源明定null为缺失的字段只在该适配器显式例外并有fixture。ItemMeta/EpisodeMeta可以继续供发现页使用，但采用链不得从其Option/unwrap_or_default逆推presence。NFO同理保留字段出现性。缺失genres与genres:[]、缺失简介与空简介必须真实fixture→normalize→Store逐步断言。
+**presence不得先丢后补**：T3新增media/src/normalized.rs入口 `normalize_metadata(source: &str, scope: EntityScope, body: &str, preferences: &MetadataPreferences) -> Result<MetadataFields, TmdbError>`，原始JSON键不存在→Missing、null/空文本/空数组→Empty、合法类型→Value、非法值→本次响应错误不覆盖旧值。来源明定null为缺失的字段只在该适配器显式例外并有fixture。ItemMeta/EpisodeMeta可供发现页，但采用链不得从其Option/unwrap_or_default逆推presence。NFO同理；缺失genres与genres:[]、缺失简介与空简介须fixture→normalize→Store逐步断言。
 
 上面FieldValue/MetadataFields/EntityScope/TypedItemId等共享声明只在domain定义一次，store/library/media通过use引用，不各复制同名类型。NfoReadOutcome/NfoInput定义在library的NFO模块，用domain MetadataFields/EntityScope；Store已有library依赖可直接消费。normalize_metadata引用同一domain类型，不引入media→library/store依赖。
 
 Scrape导出先写library_operations(kind=scrape)意图（原文件版本、输出digest、字段源和export_id），原子文件替换后同事务确认输入/导出记录并更新摘要，再完成意图；恢复确认digest再ACK。Unknown/Invalid保留最后有效字段，不解除锁；确认删除移除该输入；自产未改输出不升级权威。refresh只改被明确采用的本地数据，直接cache.put不触发采用。
+
+### 显式采用偏好（集成复审F02）
+
+domain定义 `MetadataPreferences { language_priority: Vec<String>, cert_country_priority: Vec<String> }`，API metadata_service从本次已校验的Scrape配置快照生成并显式传入normalize与MetadataAdoption；不得从纯解析器隐式读全局配置。locale是该采用行的实际显示语言，language_priority是此次来源翻译选择/回退顺序，地区认证优先级独立于locale，不能从zh-CN猜成只能用CN认证。默认列表复用现有scrape_config默认值，不新建第二套默认。
+
+TMDB内容评级按当前selected_content_rating合同：电影先按响应国家/发布顺序取各国首个非空certification，TV用content_ratings的非空rating；按cert_country_priority找首个可用，再以响应中首个可用兜底。translations的overview/tagline按language_priority的地区精确→同语言顺序补缺；这是来源内部明确fallback，不与跨来源Missing/Empty合成混淆。原字段存在且最终无可用内容时为Empty，字段及替代结构均未出现为Missing；选中值记录实际语言/国家来源，不能把fallback翻译标成请求原文。
+
+来源快照添加preferences_json（version1、两列表）并在content_rating/翻译字段origins保存选中地区/实际locale；显式刷新用当前偏好重新解析原始响应并原子替换对应scope/source/locale快照及有效字段，不因同cache_key有旧JSON而沿用上次偏好。修改偏好本身不后台重解释全部已采用记录；需要用户明确刷新，未刷新行保持旧偏好及来源可解释。清cache/重启不改变已采用评级；人工锁/NFO规则仍优先。原始响应不存在时先走正常fetch，不能从有损ItemMeta倒推国家候选。
+
+验收：同一真实fixture按默认与[GB,US,CN]分别得到既有默认评级和15；同一language优先列表得到现有法语overview/中文tagline回退。将结果采用→清cache→重启，本地详情/NFO/Jellyfin OfficialRating一致；缺结构、空结构、显式null分别验证presence，失败刷新不覆盖旧记录。
+
+### Genre身份、规范筛选键与展示（集成复审F03）
+
+domain定义 `MetadataGenre { source: String, source_id: Option<String>, name: String, filter_key: String }`；genres整体仍为FieldValue<Vec<MetadataGenre>>，ID和名称作为一份值一同选择/覆盖/provenance，不能把ID从TMDB、名称从另一来源拼成假对应。metadata.genres_json存version1对象数组，JSON值里保留上述四字段；有效字段origins记录采用locale/source，详情按name输出，NFO输出name，Jellyfin Genres输出name并保留原名称UUID GenreIds协议。
+
+TMDB有效genre数字ID直接成为十进制filter_key，例如source_id=28/name=Acción→filter_key="28"；不同语言名称不影响该键。NFO无ID及其他来源先用现有中英文genre映射表找规范TMDB键（Action/动作→28）；不得将其他来源自己的数字ID冒充TMDB数字。无法映射时 `filter_key="name:"+规范Unicode小写名称`，source_id保留原来源值或None，name保原展示文本，不猜未知西语名为28。若原始响应含明确TMDB ID则优先用ID，不能丢ID再靠名称猜。
+
+library_item_terms.term_kind=genre用filter_key，facets.value为同一键、label取本Library采用name；同key多个展示别名只计该Media一次。Web library-filter-bar及web/lib/api/libraries的genre选择改为规范字符串键（数字输入统一转十进制字符串），移除Number(value)以支持name:未知项；已存在g=28仍匹配，不把name:转NaN。公开详情原来输出名称数组处由adapter从对象映射name，不直接泄露结构改变旧DTO；数字GenreIds/名称生成UUID各走明确适配，与Library filter_key区分。
+
+T3负责JSON/parser/NFO映射、T4负责terms归约、T7负责facets值/label去重、T8负责前端string与Jellyfin名称/UUID。验收：28的Action/Acción均命中g=28，label/详情/NFO保持相应语言；无ID Action/动作映射28，未知名称可按name:键筛选且前端不NaN；Missing/Empty/Value覆盖不分裂ID/name，不新增表。
 
 ## 5. 查询合同
 
@@ -171,6 +192,20 @@ page/count/facets同一短读事务；权限在分页/计数前用当前Library�
 分面保留排除自身维：total施加全部filter；维D候选来自授权Library全集（含count0），count为除D外条件满足且含D值的distinct Media数；primary=genre/country/decade/watch、all十维，years输出空数组。Genre28+CountryJP时total1，US仍按不施加country条件计数，T7沿facets_regression验收。
 
 续页由T4提供file索引读、T7暴露library_file_page：ORDER BY file_id ASC，after含version/Library/Media/末file_id并验证scope，limit1..100，detail首批50；files_library_media索引只读published，missing仍展示。51文件回归必须完整唯一，旧HTTP adapter逐页取齐不截断；单个完整HTTP枚举用同短读快照或明确版本冲突重试，不能拼两代结果。跨独立请求不保证冻结快照。
+
+### 协议查询完整输入与 SQL 执行（集成复审F01）
+
+不能把Jellyfin筛选压成只有海报墙字段的BrowseFilter。T7在domain定义协议无关的typed请求、Store在 `library_query/protocol.rs` 实现，T8把现有ServerItemQuery逐字段映射，media-server不依赖Store。具体接口：`Store::protocol_item_page(&self, request: &ProtocolItemQuery) -> Result<ProtocolItemPage, StoreError>`。
+
+`ProtocolItemQuery { user_id: UserId, parent: ProtocolParent, series_id: Option<MediaId>, season: Option<(MediaId,u32)>, person_ids: Vec<String>, studio_ids: Vec<String>, search_term: Option<String>, genres: Vec<String>, genre_ids: Vec<String>, filters: Vec<ProtocolMarkFilter>, is_favorite: Option<bool>, is_played: Option<bool>, include_types: Vec<ProtocolItemType>, recursive: bool, is_folder: Option<bool>, sort: Vec<ProtocolSort>, offset: usize, limit: usize }`；`ProtocolParent = Root | Library(LibraryId) | Series(MediaId) | Season(MediaId,u32) | Folder { root_id:String } | Genre(String) | Studio(String) | Unknown`；ItemType=Movie/Series/Season/Episode/Video；MarkFilter=Favorite/Played/Unplayed，未知filter沿原行为无附加谓词，不新增Resumable能力。`ProtocolSort { key: ProtocolSortKey, descending: bool }`，Key=Name/DateCreated/SeasonNumber/EpisodeNumber/Noop。`ProtocolItemPage { items: Vec<ProtocolItemRef>, total:u64 }`，`ProtocolItemRef { library_id:LibraryId, item:TypedItemId, preferred_source:Option<PhysicalSourceId> }`；只对选中页补详情，不再过滤改变total。
+
+映射和范围：parent先在当前授权Library/根范围解析，未知parent返回空，不退化全库；SeriesId/SeasonId解析typed身份，限制该作品/季的真实拥有单元。IncludeItemTypes与recursive沿当前ServerItemQuery/ParentScope规则决定作品卡或分集展开，IsFolder判断series/folder而非文件是否存在；folder_id仍按既有root编码解析为root_id。Folder内同Media只从该根文件/覆盖归约child count、季数及完成状态，不拿整个Library摘要代替；逻辑分集多版本去重、跨库去重及授权全部发生在分页前。Root/混合类型结果用SQL UNION分支形成统一逻辑项目集合，不能分别取一页再拼。
+
+SearchTerm保持trim后Unicode lowercase包含匹配title/original_title/overview；分集/季按其已采用字段及允许的work共享回退，不只搜卡片名。PersonIds支持既有People公开ID（忽略UUID连字符）或TMDB person ID，actor/director/creator均按现有role身份生成规则；StudioIds保留既有大小写不敏感名称及已发出的studio父ID解析。Genres/GenreIds同时支持来源展示名、既有名称生成UUID/prefixed ID和规范genre筛选键（见F03），不能把这三种ID混成一类。所有现行ServerItemQuery输入必须有映射；未知sort key沿原实现无比较权重，已知多键按请求顺序和各方向，缺方向沿最后方向/既有缺省，稳定尾键MediaId再逻辑坐标，保证分集不因同Media平手乱序。
+
+SQL实现：普通库墙仍items单表；协议复杂条件允许关联同Library/Media及locale的本地采用metadata、NFO有效输入和季/集行，用SQL谓词及JSON成员EXISTS在LIMIT/count前完成。T3的字段合成纯函数可注册为确定性SQLite scalar函数（rusqlite启用functions特性，domain/library纯函数无IO）来保持local NFO/locale优先级；Unicode lowercase/person及studio名称ID也用统一纯函数，不以SQLite ASCII lower/NOCASE偷换语义。禁止先把整库JSON解码到Rust集合过滤；SQL内部按当前授权范围扫描/解析冷字段是明确允许的必要关联成本，需计量，不承诺person/包含搜索索引seek。首版不新增people/studio倒排表、不将长简介复制进items；后续索引优化要有测量证据。
+
+SortName/Name保持协议Unicode lowercase排序，与Web title字节排序分开；DateCreated沿当前文件created/mtime归约，SeasonNumber/IndexNumber用逻辑坐标。选择、去重、排序、filtered total在同一读快照，协议默认限制/clamp保持；冷字段关联失败返回错误，不能当人物未出现。T7负责SQL和全部字段语义，T8负责Parent/ID/协议解析和快照水合。验收：人物/studio/仅简介命中的项目排在未筛选第51位时，Limit=1仍正确返回且TotalRecordCount=1；同时覆盖Series/Season/Folder/IsFolder、复合排序、局部root计数、Unicode和Unknown parent。
 
 ## 6. Playback、逻辑ID与合并接口
 

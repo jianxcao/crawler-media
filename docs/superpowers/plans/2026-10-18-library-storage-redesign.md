@@ -6,11 +6,11 @@
 
 **Architecture:** media提供六来源cache.db；Store在library.db同事务维护事实/覆盖/卡片/用户摘要，读取优先单表索引，必要多值/观看关联在分页前完成。Media/Library/Collection/Playback由app/subscribe迁入library；不搬旧数据、不建兼容视图、不保留旧投影和journal。控制面app、Subscribe、Jobs独立，跨文件操作显式恢复。
 
-**Tech Stack:** Rust 2024 workspace、rusqlite 0.37 bundled SQLite、现有Axum/serde/thiserror/tracing、Vite React 19/TypeScript/pnpm；不增加crate或连接池/消息系统。
+**Tech Stack:** Rust 2024 workspace、rusqlite 0.37 bundled SQLite（T7启用functions特性供纯Unicode/元数据SQL函数）、现有Axum/serde/thiserror/tracing、Vite React 19/TypeScript/pnpm；不新增crate或连接池/消息系统。
 
 **Spec:** [整体设计](../specs/2026-10-18-library-storage-redesign.md)、[来源缓存设计](../specs/2026-10-18-source-separated-cache.md)。详细[开发合同](2026-10-18-library-storage-contracts.md)、[library DDL](2026-10-18-library-storage-schema.sql)、[app/subscribe/cache DDL](2026-10-18-storage-partitions.sql)是本计划不可分的附录，执行者不能只读任务标题。
 
-状态：**详细开发文档已编写，尚未执行任何步骤**。Sol可执行性审查的F01–F07已逐项修订并获限定复核clean：阶段门、facets、文件续页、原始presence、Subscribe覆盖传输、Playback DTO、冷字段均闭合。SQL另经只读审阅和临时SQLite校验，见文末边界。旧缓存计划已删除，历史仅在Git；文档审查不代表代码实现/性能验收。
+状态：**详细开发文档已编写，尚未实施**。此前Sol可执行性F01–F07已定向复核clean；后续集成审查另提出协议完整查询、采用偏好、genre身份/名称三项P2。本轮按合同§4/5补齐并同步DDL/测试责任；这三项修订未再次独立复核，不能沿用旧clean结论覆盖新增内容。旧缓存计划已删除，文档校验不代表实现/性能通过。
 
 ## Global Constraints
 
@@ -115,12 +115,12 @@ flowchart LR
 
 ## T3：已采用元数据、NFO实体/locale与来源合成
 
-**Files:** metadata组；Create store/tests/metadata_adoption.rs、library/tests/nfo_fields.rs、media/src/normalized.rs及media/tests/normalized_metadata.rs；原始来源解析和字段映射按合同§4，非仅修改旧ItemMeta显示类型。
+**Files:** metadata组；Create store/tests/metadata_adoption.rs、library/tests/nfo_fields.rs、media/src/normalized.rs、media/tests/normalized_metadata.rs；domain/src/metadata_fields.rs定义MetadataPreferences/MetadataGenre，schema来源快照preferences_json及genre对象编码按合同§4。
 
-**Interfaces:** 合同§4完整MetadataFields/FieldValue/NfoReadOutcome及normalize_metadata→MetadataAdoption→Store采用；原始presence保留到domain DTO，不能沿用已丢Missing/Empty的ItemMeta/EpisodeMeta逆推。实体坐标/refresh_target共享T1，归约消费T4。
+**Interfaces:** normalize_metadata(source,scope,body,&MetadataPreferences)→MetadataFields→MetadataAdoption携相同偏好快照；API从Scrape配置显式传语言/认证地区顺序，采用字段保留选中地区/语言来源。genres为Vec<MetadataGenre>而非只有名称的Vec<String>；原始presence不能从有损ItemMeta逆推，实体/refresh_target共享T1、归约消费T4。
 
 - [ ] **1 RED**：同work两来源/两个locale、work/season/episode独立；Empty不从另一方补，Missing可补；人工锁不可被普通刷新覆盖；unknown/invalid保最后值、确认删除解除本地输入；tvshow身份不从episode ID推导；不同Library NFO不串用。断网和清cache后本地字段不变。
-  必加真实JSON fixture链路：省略genres与genres:[]、省略overview与空/null，经normalize后分别Missing/Empty并验证合成；NFO aired/thumb/studio/director/certification/cast及TV counts采用后清cache，本地详情字段仍正确。冷字段逐成员presence映射见合同，不以opaque details逃避验收。
+  fixture链路增加：同一评级响应默认[CN,US]与[GB,US,CN]产生不同正确评级、法语/中文翻译回退；采用后清cache/重启后详情/NFO/OfficialRating一致。TMDB id28/name=Action或Acción都保留filter_key28和原名；无ID中英文映射/未知name键、Missing/Empty与逐字段provenance均独立断言。preferences变更只在明确刷新时影响采用，不自动改旧行。
 - [ ] **2 Run**：`cargo test -p store --test metadata_adoption`；`cargo test -p library --test nfo_fields`。
 - [ ] **3 Implement**：NFO reader返回状态和字段presence，拆nfo.rs但保留原导出/identity公共功能并迁完调用。采用在同库事务写candidate/effective、按Media+Library更新items/terms；全局人工锁与本地输入分层，不复制逐文件有效projection。refreshed_at/revision不充当来源可信优先级。
 - [ ] **4 GREEN**：上述targets；现有`nfo nfo_metadata nfo_identity nfo_identity_bounds episode_nfo nfo_escape`、`cargo test -p library`、`cargo test -p media`、`cargo test -p store`。T5接真写出路径验证自产反馈，不以本任务的纯字段测试替代。
@@ -164,23 +164,25 @@ flowchart LR
 
 ## T7：单表浏览、详情、分面与跨库查询
 
-**Files:** 新library_query组，现有API selection与library_statistics；Create store/tests/library_query_v1.rs、api/tests/library_query_runtime.rs。
+**Files:** 新library_query/{items,units,facets,details,protocol}.rs及typed请求；API selection/library_statistics；Create store/tests/library_query_v1.rs、api/tests/library_query_runtime.rs，扩展既有jellyfin_paged_metadata/paged.rs行为。
 
-**Interfaces:** 合同§5的LibraryQuery/FacetRequest/library_file_page；facets携filter/tier、返回filtered total，逐维排除自身条件并保留0候选。详情首批50且可续页，51文件旧HTTP仍完整；参数/响应能力不变，本地数据不读cache。
+**Interfaces:** LibraryQuery/FacetRequest/library_file_page及完整ProtocolItemQuery→protocol_item_page。T7实现PersonIds/StudioIds/SearchTerm、授权parent/series/season/folder/类型及协议复合排序在SQL分页/total前处理，必要本地冷字段关联和纯SQL UDF允许且计成本；T8只适配协议/ID及选中页水合。Web facet genre为规范字符串键、label保采用名；仍有51文件续页与排除自身维合同。
 
 - [ ] **1 RED**：各种scalar/multi-value/watch/galleries、NULL/tie、缺省与显式方向、Unicode、random稳定；先过滤再分页不漏第51项；无User行计未看；私有collection不泄漏；跨库同Media去重在LIMIT前、count一致；同响应page/count读同快照；存储错误非空成功。
+  协议回归必须让人物/studio/仅简介匹配项处在未筛选第51位，Limit1仍返回正确项目和filtered total1；Unicode包含与lowercase Name不同于Web title字节排序；Unknown parent空、Folder只按当前根计算子集/季数/完成、Series/Season混合类型去重均在分页前。不得保留整库Rust filter fallback。
 - [ ] **2 Run**：`cargo test -p store --test library_query_v1`；`cargo test -p api --test library_query_runtime --test facets_regression --test library_paging_validation`。
-- [ ] **3 Implement**：items热页、terms索引筛选、用户稀疏关联、精确facets聚合、单位/详情按Media/season定向读。offset排序保旧tie，cursor绑定User/Library/filter/方向；旧协议完整响应分批水合且如实计成本。移除snapshot的整库cache/ledger读与HTTP NFO/stat，根不再读时fallback。
+- [ ] **3 Implement**：items普通页单表，terms/稀疏用户关联和完整facets SQL；protocol.rs关联本地metadata/NFO scope/locale与units/files再筛选/count/排序，纯UDF注册启用functions且绝不访问网络/磁盘/重入SQL。name搜索/冷JSON允许扫授权域窄记录并报告，不能冒充seek；错误向上传播。移除HTTP全库cache/ledger/facts和stat/NFO回退。文件续页/offset/cursor能力保持。
 - [ ] **4 GREEN/Smoke**：`browse_semantic_parity browse_page_work_bounds view_io_isolation library_statistics_scale facets_regression library_paging_validation`；旧测试若只钉projection内部则移植行为后删旧target。页面列表/筛选/gallery/详情用临时实例实际请求；`cargo test -p store`、`cargo test -p api`。
 - [ ] **5 Commit**：`git commit -m "refactor(browse): query local indexed library summaries without projection rebuilds"`。
 
 ## T8：Web、CLI、Jellyfin与公开ID全切换
 
-**Files:** 协议/前端组含crates/playback/src/{dto,lib}.rs与tests/jellyfin.rs；Create api/tests/storage_protocol_runtime.rs；更新Jellyfin/Web调用，集成者持router/state。
+**Files:** 协议/前端组含playback/src/{dto,lib}.rs/tests、media-server/src/provider/query.rs、api/media_server_provider/selection/*；web/components/library-filter-bar.tsx、web/lib/api/libraries.ts/types；Create api/tests/storage_protocol_runtime.rs。
 
-**Interfaces:** TypedItemId/MediaSourceId wire格式见合同§6；Web本地item_id/episode_id与source_id显式不同，库卡仍Media身份；R1解析器对Web/Jellyfin/NextUp共用。现有token头格式/Range/字幕/静态图片公开路由不变。
+**Interfaces:** TypedItemId/MediaSourceId及ProtocolItemQuery逐字段映射；T8解析ServerItemQuery到T7查询，不在分页后补筛。Genres/GenreIds名称/协议UUID与Library规范filter_key分开，前端去Number(value)统一字符串键（旧g=28仍可用）；详情/NFO/Jellyfin保原语言genre名称。其余会话/恢复/鉴权合同不变。
 
 - [ ] **1 RED**：单文件多集两个逻辑ItemId同物理源、独立进度与NextUp；源换版本两个协议起点0；E01迟到事件不改E02；season marks更新计数；无权库源不参与选择；anonymous静态海报200、无token视频401、合法协议头+Range206；CLI库列表/详情与API一致。
+  同时跑jellyfin_paged_metadata的分页前人物回归、评级优先级采用后的OfficialRating、genre28不同语言与未知name键前端选择；API输出旧名称数组由adapter生成，不把完整genre对象意外塞入原DTO。
 - [ ] **2 Run**：`cargo test -p api --test storage_protocol_runtime --test jellyfin --test playback_event_identity --test media_artwork_urls`；`cargo test -p media-server`。
 - [ ] **3 Implement**：media-server provider与独立playback DTO都改logical target+physical source，构造器按合同§6，不从LedgerRow派生episode。删除from_ledger与file-ID-as-ItemID，两个逻辑集可共享相同MediaSource。迁marks/session/resume/chapters/subtitles/NextUp/favorites/history/stats；Web/CLI显式选源与source_changed提示同批，公开DTO及全部生产者消费者同步。
 - [ ] **4 GREEN/Visual**：`jellyfin jellyfin_images jellyfin_read_scale jellyfin_paged_metadata playback_event_identity playback_watch_time up_next_local_first subtitle_runtime`；`pnpm -C web test`、`pnpm -C web typecheck`、`pnpm -C web build`；浏览器实际打开库→筛选→详情→播放/续播→收藏→季标记，检查图片和source_changed提示，再关闭tab。`cargo test -p media-server`、`cargo test -p playback`、`cargo test -p api`。
@@ -257,3 +259,5 @@ flowchart LR
 - Python SQLite 3.51.0空内存连接执行DDL：library45表、app10表、subscribe4表、cache6表；FK/integrity检查通过；实际验证alias/kind/root、played断言、缺失resume版本、错误scope/state、首选覆盖删除拒绝。不是Rust bundled SQLite/性能验收，实施T1需在实际crate复验。
 - 文档本地链接/围栏、T1–T12唯一编号、DAG无环、明确新建与既有Cargo target名称已检查；旧计划文件及引用删除。两个早期scout因连接失败未产出证据，清单由父任务直接查源码并经Sol定向核对，不声称研究代理成功。
 - 本轮仅文档，没有执行T1–T12、Cargo测试、UI/应用烟测或删除实例数据库。SQL实施时拆入生产模块，最终字典从生产DDL生成，避免长期双份schema。
+- 本次集成复审修订：协议typed查询补齐冷字段和parent/排序，T7/T8共同负责；T3显式偏好与来源快照preferences_json；genre ID/name/filter_key对象与字符串前端筛选。无新表/索引扩张，复杂人物/简介查询可在SQLite授权域内解析本地冷JSON，属于需要实测的例外，不声称恒定成本。新增文档未获独立复核。
+- 本轮临时验证：Python SQLite 3.51.0执行新增preferences_json后的45表DDL，FK/integrity通过；独立候选SQL证明人物/studio/Unicode简介条件能命中未筛选第51项且Limit1/total1一致；真实rich_tv_details.json按[CN,US]得TV-14、[GB,US,CN]得15；genre决策原型验证28的不同语言名仍用28、未知来源数字不冒充TMDB。仅为SQL形态/字段决策校验，不是完整ProtocolItemQuery reducer、应用实现或性能证明。
