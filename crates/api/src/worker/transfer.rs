@@ -786,10 +786,7 @@ mod tests {
         state.store.lock().set_transfer_mode("move").unwrap();
         let revisions = state.store.lock().read_revisions().unwrap();
         assert_eq!(revisions.app, plan.revisions.app, "settings evade the app guard");
-        let recorder = PlannedPublicationRecorder {
-            recorder: PublicationRecorder { state: &state, subscribe: &subscribe, lease: &lease, revisions },
-            plan: &plan,
-        };
+        let recorder = PlannedPublicationRecorder { recorder: PublicationRecorder { state: &state, subscribe: &subscribe, lease: &lease, revisions }, plan: &plan };
         let candidate_cov = candidate(&media, &plan);
         let result = subscribe::TransferRecorder::prepare(
             &recorder, &candidate_cov, &tmp.path().join("source.mkv"), library::TransferMode::Copy,

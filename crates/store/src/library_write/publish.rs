@@ -25,7 +25,7 @@ impl Store {
 
         // Verify library exists and matches scope
         let lib_id_str = scope.library_id.to_string();
-        let (lib_kind, lib_rev): (String, i64) = tx
+        let (_lib_kind, lib_rev): (String, i64) = tx
             .query_row(
                 "SELECT kind, config_revision FROM libraries WHERE library_id = ?1",
                 params![lib_id_str],
@@ -33,6 +33,13 @@ impl Store {
             )
             .optional()?
             .ok_or_else(|| StoreError::Missing(format!("library {}", scope.library_id)))?;
+
+        if scope.config_revision != 0 && scope.config_revision != lib_rev {
+            return Err(StoreError::Protected(format!(
+                "library config revision mismatch: expected {}, current {}",
+                scope.config_revision, lib_rev
+            )));
+        }
 
         let mut report = PublishReport::default();
         let mut affected_medias = HashSet::new();

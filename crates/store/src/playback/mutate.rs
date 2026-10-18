@@ -355,6 +355,10 @@ impl Store {
         }
 
         if let Some(loser) = loser_str {
+            // Delete loser's derived units and items first so foreign keys don't break
+            tx.execute("DELETE FROM library_units WHERE media_id = ?1", params![loser])?;
+            tx.execute("DELETE FROM library_items WHERE media_id = ?1", params![loser])?;
+
             // Reassign loser's files to survivor
             tx.execute(
                 "UPDATE library_files SET media_id = ?1 WHERE media_id = ?2",

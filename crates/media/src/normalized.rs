@@ -245,7 +245,7 @@ fn check_translations(
                         );
                     }
                 }
-                if origins.contains_key("overview") {
+                if origins.contains_key("overview") && origins.contains_key("tagline") {
                     return;
                 }
             }

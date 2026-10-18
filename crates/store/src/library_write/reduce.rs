@@ -90,6 +90,17 @@ pub fn reduce_library_media(
     }
 
     // 2. Reduce library_units from library_file_units
+    // First delete any units for this (library, media) that have no units in library_file_units
+    tx.execute(
+        "DELETE FROM library_units
+         WHERE library_id = ?1 AND media_id = ?2
+           AND (season, episode) NOT IN (
+               SELECT season, episode FROM library_file_units
+               WHERE library_id = ?1 AND media_id = ?2
+           )",
+        params![lib_id_str, media_id_str],
+    )?;
+
     let mut unit_stmt = tx.prepare(
         "SELECT season, episode, COUNT(DISTINCT file_id)
          FROM library_file_units
@@ -101,7 +112,6 @@ pub fn reduce_library_media(
             Ok((r.get::<_, i32>(0)?, r.get::<_, i32>(1)?, r.get::<_, usize>(2)?))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-
     let mut distinct_seasons = std::collections::HashSet::new();
     let mut distinct_episodes = std::collections::HashSet::new();
 
