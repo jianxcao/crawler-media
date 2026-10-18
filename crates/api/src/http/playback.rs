@@ -382,8 +382,8 @@ fn direct_decision(
             "can_self_enable": false,
             "setting_namespace": null,
             "setting_key": null,
-            "reason": "设备不支持直接播放该视频编码，当前服务未配置实时转码",
-            "suggestion": "请更换支持相应格式的播放器",
+            "reason": "当前浏览器或设备不支持直接解码该视频格式（流媒体 STRM 资源建议直接串流或使用支持该编码的播放客户端）",
+            "suggestion": "建议使用 Infuse / VidHub / 外部播放器播放该 STRM 直链，或在设置中配置转码服务",
             "capability": body["capability"],
         });
     }

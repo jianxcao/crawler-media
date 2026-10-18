@@ -108,8 +108,8 @@ impl Store {
     ) -> Result<Option<MediaInfoCacheVersion>, StoreError> {
         self.library
             .query_row(
-                "SELECT source_version, format_duration_ms FROM file_meta
-                 WHERE ledger_id = ?1 AND tracks_version >= ?2 AND video_json IS NOT NULL
+                "SELECT source_version, format_duration_ms FROM file_details
+                 WHERE file_id = ?1 AND tracks_version >= ?2 AND video_json IS NOT NULL
                    AND source_version IS NOT NULL",
                 params![ledger_id, super::library::CURRENT_TRACKS_VERSION],
                 |row| {

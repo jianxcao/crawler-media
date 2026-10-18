@@ -389,7 +389,7 @@ fn cached_chapters_and_duration(
 ) -> Result<(Vec<library::ChapterMarker>, Option<i64>), StoreError> {
     let cached: Option<(Option<String>, Option<i64>)> = tx
         .query_row(
-            "SELECT chapters_json, format_duration_ms FROM file_meta WHERE ledger_id = ?1",
+            "SELECT chapters_json, format_duration_ms FROM file_details WHERE file_id = ?1",
             params![ledger_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
