@@ -1,0 +1,295 @@
+use domain::{
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, LibraryId,
+    MediaId, MediaKind, PhysicalSourceId, QualitySource, TimelineMode, TypedItemId, UnitKey,
+    UnitScope, UserId,
+};
+use rusqlite::{Connection, OptionalExtension, params};
+
+use super::types::{
+    BoundPlaybackEvent, EventOutcome, PlaybackEventType, PlaybackMutation, PlaybackTarget,
+    ResolvedResume, ResumeStatus,
+};
+use super::super::{Store, StoreError};
+
+impl Store {
+    pub fn resolve_playback(
+        &self,
+        user: UserId,
+        item: &TypedItemId,
+        preferred_source: Option<&PhysicalSourceId>,
+        explicit_start_ms: Option<i64>,
+    ) -> Result<ResolvedResume, StoreError> {
+        let (media_id, unit_key) = match item {
+            TypedItemId::Work(m) => (*m, UnitKey::WHOLE),
+            TypedItemId::Season { media, season } => (*media, UnitKey::new(*season as i32, 1)),
+            TypedItemId::Unit { media, key } => (*media, *key),
+        };
+
+        let media_id_str = media_id.to_string();
+
+        // Find preferred file or active file for this unit
+        let file_id_str: String = match preferred_source {
+            Some(src) => src.file_id.to_string(),
+            None => {
+                let sql = "SELECT file_id FROM library_file_units
+                           WHERE media_id = ?1 AND season = ?2 AND episode = ?3
+                           LIMIT 1";
+                let f: Option<String> = self.library
+                    .query_row(sql, params![media_id_str, unit_key.season, unit_key.episode], |r| r.get(0))
+                    .optional()?;
+                f.ok_or_else(|| StoreError::Missing(format!("playable file for unit {unit_key:?}")))?
+            }
+        };
+
+        // Fetch file facts
+        let file_sql = "SELECT file_id, library_id, root_id, media_id, kind, path_key,
+                               file_revision, source_version, presence_state, publication_state,
+                               duration_ms
+                        FROM library_files WHERE file_id = ?1";
+        let file = self.library.query_row(file_sql, params![file_id_str], |r| {
+            let fid: LedgerId = r.get::<_, String>(0)?.parse().unwrap();
+            let lid: LibraryId = r.get::<_, String>(1)?.parse().unwrap();
+            let mid: MediaId = r.get::<_, String>(3)?.parse().unwrap();
+            let kind: MediaKind = r.get::<_, String>(4)?.parse().unwrap_or(MediaKind::Movie);
+            let path_str: String = r.get(5)?;
+            let dur: Option<i64> = r.get(10)?;
+
+            Ok(LibraryFile {
+                file_id: fid,
+                library_id: lid,
+                root_id: r.get(2)?,
+                media_id: mid,
+                kind,
+                path: path_str.into(),
+                version: FileVersion {
+                    revision: r.get(6)?,
+                    source_version: r.get(7)?,
+                },
+                presence: FilePresence::Present,
+                publication: FilePublication::Published,
+                size_bytes: None,
+                stat_known: true,
+                created_ns: None,
+                modified_ns: None,
+                source_digest: None,
+                source_path: None,
+                transfer_mode: None,
+                resolution: None,
+                codec: None,
+                hdr: None,
+                quality_source: QualitySource::Probe,
+                confidence: Confidence::High,
+                filter_score: None,
+                release_quality: None,
+                duration_ms: dur,
+                tracks_version: 1,
+                poster_path: None,
+                backdrop_path: None,
+                still_path: None,
+            })
+        })?;
+
+        let target = PlaybackTarget {
+            media_id,
+            unit: unit_key,
+            file,
+            config_revision: 0,
+            timeline: TimelineMode::FullFile,
+        };
+        let file_dur_ms = target.file.duration_ms;
+        if let Some(start) = explicit_start_ms {
+            return Ok(ResolvedResume {
+                target,
+                start_ms: start,
+                duration_ms: file_dur_ms,
+                audio_track: None,
+                subtitle_track: None,
+                status: ResumeStatus::Compatible,
+            });
+        }
+
+        // Check playback_units table
+        let p_sql = "SELECT played, position_ms, duration_ms, resume_file_id, resume_file_revision,
+                            audio_track, subtitle_track
+                     FROM playback_units
+                     WHERE user_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4";
+        let user_id_str = user.to_string();
+        let row_opt = self.library.query_row(
+            p_sql,
+            params![user_id_str, media_id_str, unit_key.season, unit_key.episode],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)? != 0,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<i64>>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                ))
+            },
+        ).optional()?;
+
+        let Some((played, pos_ms, dur_ms, res_fid, res_rev, a_track, s_track)) = row_opt else {
+            return Ok(ResolvedResume {
+                target,
+                start_ms: 0,
+                duration_ms: file_dur_ms,
+                audio_track: None,
+                subtitle_track: None,
+                status: ResumeStatus::NoProgress,
+            });
+        };
+
+        if played {
+            return Ok(ResolvedResume {
+                target,
+                start_ms: 0,
+                duration_ms: dur_ms.or(file_dur_ms),
+                audio_track: a_track,
+                subtitle_track: s_track,
+                status: ResumeStatus::AlreadyPlayed,
+            });
+        }
+
+        if pos_ms == 0 {
+            return Ok(ResolvedResume {
+                target,
+                start_ms: 0,
+                duration_ms: dur_ms.or(file_dur_ms),
+                audio_track: a_track,
+                subtitle_track: s_track,
+                status: ResumeStatus::NoProgress,
+            });
+        }
+
+        let is_same_source = match (res_fid, res_rev) {
+            (Some(f), Some(r)) => f == target.file.file_id.to_string() && r == target.file.version.revision,
+            _ => false,
+        };
+
+        let status = if is_same_source {
+            ResumeStatus::Compatible
+        } else {
+            ResumeStatus::SourceChanged
+        };
+
+        Ok(ResolvedResume {
+            target,
+            start_ms: pos_ms,
+            duration_ms: dur_ms.or(file_dur_ms),
+            audio_track: a_track,
+            subtitle_track: s_track,
+            status,
+        })
+    }
+
+    pub fn mutate_playback(
+        &self,
+        media: MediaId,
+        change: &PlaybackMutation,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        let tx = self.library.unchecked_transaction()?;
+        let (season, episode) = match change.scope {
+            UnitScope::Whole => (-1, -1),
+            UnitScope::Season(s) => (s as i32, -1),
+            UnitScope::Episode { season, episode } => (season as i32, episode as i32),
+        };
+
+        let user_id_str = change.user_id.to_string();
+        let media_id_str = media.to_string();
+
+        let played_val = change.played.map(|p| if p { 1 } else { 0 });
+        let fav_val = change.favorite.map(|f| if f { 1 } else { 0 });
+
+        let sql = "INSERT INTO playback_units
+                    (user_id, media_id, season, episode, played, has_played_assertion,
+                     played_changed_at_ms, favorite, favorite_at, watch_activity_at)
+                   VALUES
+                    (?1, ?2, ?3, ?4, COALESCE(?5, 0), CASE WHEN ?5 IS NOT NULL THEN 1 ELSE 0 END,
+                     CASE WHEN ?5 IS NOT NULL THEN ?6 ELSE NULL END, COALESCE(?7, 0),
+                     CASE WHEN ?7 = 1 THEN ?6 ELSE 0 END, ?6)
+                   ON CONFLICT(user_id, media_id, season, episode) DO UPDATE SET
+                     played = COALESCE(?5, playback_units.played),
+                     has_played_assertion = CASE WHEN ?5 IS NOT NULL THEN 1 ELSE playback_units.has_played_assertion END,
+                     played_changed_at_ms = CASE WHEN ?5 IS NOT NULL THEN ?6 ELSE playback_units.played_changed_at_ms END,
+                     favorite = COALESCE(?7, playback_units.favorite),
+                     favorite_at = CASE WHEN ?7 = 1 THEN ?6 ELSE playback_units.favorite_at END,
+                     watch_activity_at = ?6";
+
+        tx.execute(sql, params![
+            user_id_str,
+            media_id_str,
+            season,
+            episode,
+            played_val,
+            now_ms,
+            fav_val,
+        ])?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn commit_playback_event(
+        &self,
+        event: &BoundPlaybackEvent,
+        now_ms: i64,
+    ) -> Result<EventOutcome, StoreError> {
+        let tx = self.library.unchecked_transaction()?;
+        let (media_id, unit_key) = match &event.item {
+            TypedItemId::Work(m) => (*m, UnitKey::WHOLE),
+            TypedItemId::Season { media, season } => (*media, UnitKey::new(*season as i32, 1)),
+            TypedItemId::Unit { media, key } => (*media, *key),
+        };
+
+        let user_id_str = event.user_id.to_string();
+        let media_id_str = media_id.to_string();
+        let file_id_str = event.source_id.file_id.to_string();
+
+        let played_threshold = event.duration_ms.map(|d| (d as f64 * 0.9) as i64).unwrap_or(i64::MAX);
+        let reached_played = event.position_ms >= played_threshold;
+
+        let sql = "INSERT INTO playback_units
+                    (user_id, media_id, season, episode, played, has_played_assertion,
+                     played_changed_at_ms, position_ms, duration_ms, resume_file_id,
+                     resume_file_revision, resume_source_version, timeline_mode,
+                     watch_activity_at, audio_track, subtitle_track)
+                   VALUES
+                    (?1, ?2, ?3, ?4, ?5, ?5, CASE WHEN ?5 = 1 THEN ?6 ELSE NULL END,
+                     ?7, ?8, ?9, ?10, ?11, 'full_file', ?6, ?12, ?13)
+                   ON CONFLICT(user_id, media_id, season, episode) DO UPDATE SET
+                     played = CASE WHEN ?5 = 1 THEN 1 ELSE playback_units.played END,
+                     has_played_assertion = CASE WHEN ?5 = 1 THEN 1 ELSE playback_units.has_played_assertion END,
+                     played_changed_at_ms = CASE WHEN ?5 = 1 THEN ?6 ELSE playback_units.played_changed_at_ms END,
+                     position_ms = ?7,
+                     duration_ms = ?8,
+                     resume_file_id = ?9,
+                     resume_file_revision = ?10,
+                     resume_source_version = ?11,
+                     timeline_mode = 'full_file',
+                     watch_activity_at = ?6,
+                     audio_track = ?12,
+                     subtitle_track = ?13";
+
+        tx.execute(sql, params![
+            user_id_str,
+            media_id_str,
+            unit_key.season,
+            unit_key.episode,
+            if reached_played { 1 } else { 0 },
+            now_ms,
+            event.position_ms,
+            event.duration_ms,
+            file_id_str,
+            event.source_id.revision,
+            event.source_version,
+            event.audio_track,
+            event.subtitle_track,
+        ])?;
+
+        tx.commit()?;
+        Ok(EventOutcome::Applied)
+    }
+}

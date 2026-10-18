@@ -10,6 +10,9 @@ use super::{Store, StoreError};
 
 pub mod session_ids;
 pub use session_ids::{PlaySessionBinding, PlaySessionIdState};
+pub mod mutate;
+pub mod types;
+pub use types::*;
 pub const UNIT_WHOLE: i32 = -1;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
