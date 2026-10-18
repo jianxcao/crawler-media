@@ -101,11 +101,20 @@ Recorder签名：`prepare(&self, candidate: &FileCoverage, source: &Path, mode: 
 
 ```rust
 pub enum FieldValue<T> { Missing, Empty, Value(T) }
+pub struct NormalizedMetadata {
+    pub fields: MetadataFields,
+    pub field_origins: std::collections::BTreeMap<String, SourceFieldOrigin>,
+}
+pub enum SourceSelection { Direct, Translation, Certification, Empty }
+pub struct SourceFieldOrigin {
+    pub selection: SourceSelection, pub response_pointer: String,
+    pub actual_locale: Option<String>, pub certification_country: Option<String>,
+}
 pub enum NfoReadOutcome { Missing, Unknown { message: String }, Invalid { message: String }, Valid(NfoInput) }
 pub struct MetadataAdoption {
     pub media_id: MediaId, pub scope: EntityScope, pub locale: String, pub source: String,
     pub provider_entity_id: String, pub provider_work_id: String, pub fetched_at: i64,
-    pub fields: MetadataFields, pub expected_revision: Option<i64>,
+    pub normalized: NormalizedMetadata, pub expected_revision: Option<i64>,
     pub preferences: MetadataPreferences,
 }
 pub struct NfoInput {
@@ -125,7 +134,7 @@ details_json version=1，冷键tagline/end_date/content_rating/status/vote_count
 
 映射：NFO plot→overview、premiered→work.release_date、aired→episode.air_date、thumb→episode.still_url或work/season.poster_url（按scope）、actor→cast、studio/director/creator→对应集合、content_rating/end_date/status/vote_count/counts→同名字段；season/episode为坐标不改work名。TMDB last_air_date→end_date、original_language→language、companies/networks→studios、credits→cast/directors/creators、episode.name/still_path→title/still_url。API原info、Jellyfin Overview/PremiereDate/OfficialRating/Studios/People/SeriesStatus、NFO导出从这些采用字段映射，不在HTTP补读原NFO/cache。
 
-**presence不得先丢后补**：T3新增media/src/normalized.rs入口 `normalize_metadata(source: &str, scope: EntityScope, body: &str, preferences: &MetadataPreferences) -> Result<MetadataFields, TmdbError>`，原始JSON键不存在→Missing、null/空文本/空数组→Empty、合法类型→Value、非法值→本次响应错误不覆盖旧值。来源明定null为缺失的字段只在该适配器显式例外并有fixture。ItemMeta/EpisodeMeta可供发现页，但采用链不得从其Option/unwrap_or_default逆推presence。NFO同理；缺失genres与genres:[]、缺失简介与空简介须fixture→normalize→Store逐步断言。
+**presence与选择来源不得先丢后补**：T3新增media/src/normalized.rs入口 `normalize_metadata(source: &str, scope: EntityScope, body: &str, preferences: &MetadataPreferences) -> Result<NormalizedMetadata, TmdbError>`，一次返回字段与逐字段选择证据。原始键不存在→Missing、null/空文本/空数组→Empty、合法类型→Value、非法值→本次响应错误不覆盖旧值；来源明确null为Missing的例外有fixture。采用链不得从有损ItemMeta/EpisodeMeta逆推presence或来源；NFO保留出现性，自己的path/locale来源由NFO摄取合同处理。
 
 上面FieldValue/MetadataFields/EntityScope/TypedItemId等共享声明只在domain定义一次，store/library/media通过use引用，不各复制同名类型。NfoReadOutcome/NfoInput定义在library的NFO模块，用domain MetadataFields/EntityScope；Store已有library依赖可直接消费。normalize_metadata引用同一domain类型，不引入media→library/store依赖。
 
@@ -137,9 +146,19 @@ domain定义 `MetadataPreferences { language_priority: Vec<String>, cert_country
 
 TMDB内容评级按当前selected_content_rating合同：电影先按响应国家/发布顺序取各国首个非空certification，TV用content_ratings的非空rating；按cert_country_priority找首个可用，再以响应中首个可用兜底。translations的overview/tagline按language_priority的地区精确→同语言顺序补缺；这是来源内部明确fallback，不与跨来源Missing/Empty合成混淆。原字段存在且最终无可用内容时为Empty，字段及替代结构均未出现为Missing；选中值记录实际语言/国家来源，不能把fallback翻译标成请求原文。
 
-来源快照添加preferences_json（version1、两列表）并在content_rating/翻译字段origins保存选中地区/实际locale；显式刷新用当前偏好重新解析原始响应并原子替换对应scope/source/locale快照及有效字段，不因同cache_key有旧JSON而沿用上次偏好。修改偏好本身不后台重解释全部已采用记录；需要用户明确刷新，未刷新行保持旧偏好及来源可解释。清cache/重启不改变已采用评级；人工锁/NFO规则仍优先。原始响应不存在时先走正常fetch，不能从有损ItemMeta倒推国家候选。
+来源快照保存preferences_json（两优先列表）及selection_origins_json（NormalizedMetadata.field_origins），再与normalized_json/present_fields_json、source_revision同事务提交。有效元数据field_origins_json在选中字段的原SourceFieldOrigin上加source/provider_entity_id/source_revision等身份，不丢掉实际locale/国家；采用失败时值与来源一并回滚。修改偏好不自动重解释旧记录，明确刷新重新解析原始响应并采用；清cache/重启不改旧值及来源，人工锁/NFO仍优先，不能从有损ItemMeta或偏好列表猜实际选择。
 
 验收：同一真实fixture按默认与[GB,US,CN]分别得到既有默认评级和15；同一language优先列表得到现有法语overview/中文tagline回退。将结果采用→清cache→重启，本地详情/NFO/Jellyfin OfficialRating一致；缺结构、空结构、显式null分别验证presence，失败刷新不覆盖旧记录。
+
+#### 逐字段来源传输与编码（F02-R1）
+
+`NormalizedMetadata`、SourceFieldOrigin、SourceSelection在domain的metadata_fields模块定义一次。Map键严格使用MetadataFields已声明的字段名；Value/Empty各须恰有一个origin，Missing不得有origin，未知键/缺证据在采用边界返回Invalid并整次回滚。`response_pointer`是实际选中原始JSON节点的JSON Pointer（含数组下标），不是整份响应body；Translation记录所选条目的iso_639_1/iso_3166_1实际locale，Certification记录所选条目的实际国家。不选择任何值的Empty指向显式空字段/空候选容器，国家与locale为None，不伪造偏好第一项。
+
+Direct字段若响应没有可靠语言标识则actual_locale=None，表示未声明，不能把original_language、请求locale或偏好顺序冒充字段语言。翻译候选具有语言/地区时保留实际值；同语言无地区信息只记语言，不补成请求地区。整行MetadataAdoption.locale仍是存储/展示槽位，不代表所有字段来源语言相同；一个overview与tagline来自不同语言的行必须能分别解释。选择规则执行时就创建证据，API以input.normalized整包传Store，不取出fields再重建丢origin的对象。
+
+selection_origins_json编码为 `{"version":1,"fields":{"content_rating":{"selection":"certification","response_pointer":"/content_ratings/results/0/rating","actual_locale":null,"certification_country":"US"}}}`；normalized_json仍存标准化字段，preferences_json仅是输入偏好，不能代替选择结果。effective field_origins_json对应字段保存同一selection对象（加provider/source版本与原身份）；metadata合并、pending fallback、checker重算、Scrape导出来源登记必须复制这份证据，不因显示值未变省略来源更新。源快照字段值相同但origin不同仍推进source_revision及其派生来源；只在同值同源时允许no-op。
+
+验收：同偏好[GB,US,CN]，仅US=15与仅GB=15的两响应都显示15，但持久snapshot/effective origins分别US/GB；fr-FR请求同一文本仅fr-CA可用时记fr-CA而非fr-FR；相同文本在两个翻译条目中按优先选择后pointer/locale不同。Value/Empty/Missing覆盖源Map一致性，来源缺失/未知字段拒绝；采用→清cache→重启→checker/合并/导出后来源不丢，失败刷新保旧值及旧origin。T3负责parser/采用/SQL编码，T5负责导出，T9负责合并/checker原样搬运；不新增表。
 
 ### Genre身份、规范筛选键与展示（集成复审F03）
 

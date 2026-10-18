@@ -10,7 +10,7 @@
 
 **Spec:** [整体设计](../specs/2026-10-18-library-storage-redesign.md)、[来源缓存设计](../specs/2026-10-18-source-separated-cache.md)。详细[开发合同](2026-10-18-library-storage-contracts.md)、[library DDL](2026-10-18-library-storage-schema.sql)、[app/subscribe/cache DDL](2026-10-18-storage-partitions.sql)是本计划不可分的附录，执行者不能只读任务标题。
 
-状态：**详细开发文档已编写，尚未实施**。此前Sol可执行性F01–F07已定向复核clean；后续集成审查另提出协议完整查询、采用偏好、genre身份/名称三项P2。本轮按合同§4/5补齐并同步DDL/测试责任；这三项修订未再次独立复核，不能沿用旧clean结论覆盖新增内容。旧缓存计划已删除，文档校验不代表实现/性能通过。
+状态：**详细开发文档已编写，尚未实施**。此前可执行性F01–F07已复核clean；最近Sol定向复核确认完整协议查询/genre修订闭合，采用偏好剩下逐字段选择来源未穿过接口的F02-R1。本轮补NormalizedMetadata完整值/来源返回、采用整包输入、source selection_origins_json及持久验收；该补充尚未独立复核，不代表整份计划或运行时已获通过。旧计划已删除。
 
 ## Global Constraints
 
@@ -115,12 +115,13 @@ flowchart LR
 
 ## T3：已采用元数据、NFO实体/locale与来源合成
 
-**Files:** metadata组；Create store/tests/metadata_adoption.rs、library/tests/nfo_fields.rs、media/src/normalized.rs、media/tests/normalized_metadata.rs；domain/src/metadata_fields.rs定义MetadataPreferences/MetadataGenre，schema来源快照preferences_json及genre对象编码按合同§4。
+**Files:** metadata组；Create store/tests/metadata_adoption.rs、library/tests/nfo_fields.rs、media/src/normalized.rs、media/tests/normalized_metadata.rs；domain/src/metadata_fields.rs统一MetadataPreferences/MetadataGenre/NormalizedMetadata/SourceFieldOrigin；来源schema保存preferences_json与selection_origins_json。
 
-**Interfaces:** normalize_metadata(source,scope,body,&MetadataPreferences)→MetadataFields→MetadataAdoption携相同偏好快照；API从Scrape配置显式传语言/认证地区顺序，采用字段保留选中地区/语言来源。genres为Vec<MetadataGenre>而非只有名称的Vec<String>；原始presence不能从有损ItemMeta逆推，实体/refresh_target共享T1、归约消费T4。
+**Interfaces:** normalize_metadata(source,scope,body,&MetadataPreferences)→NormalizedMetadata(fields+field_origins)→MetadataAdoption.normalized整包→Store原子写source/effective来源。parser记录实际选中JSON Pointer/locale/认证国家，不能靠偏好列表、original_language或采用行locale猜。MetadataGenre维持ID/名称/键，NFO沿自己的路径来源合同，归约消费T4。
 
 - [ ] **1 RED**：同work两来源/两个locale、work/season/episode独立；Empty不从另一方补，Missing可补；人工锁不可被普通刷新覆盖；unknown/invalid保最后值、确认删除解除本地输入；tvshow身份不从episode ID推导；不同Library NFO不串用。断网和清cache后本地字段不变。
   fixture链路增加：同一评级响应默认[CN,US]与[GB,US,CN]产生不同正确评级、法语/中文翻译回退；采用后清cache/重启后详情/NFO/OfficialRating一致。TMDB id28/name=Action或Acción都保留filter_key28和原名；无ID中英文映射/未知name键、Missing/Empty与逐字段provenance均独立断言。preferences变更只在明确刷新时影响采用，不自动改旧行。
+  F02-R1必加同值异源fixture：仅US=15与仅GB=15，在相同偏好下字段值一致但snapshot/effective origins不同；请求fr-FR仅fr-CA存在相同文本，记录实际fr-CA。Missing不得带origin、Value/Empty必须完整带origin，未知字段/缺证据拒绝；值相同而来源改变也原子更新revision/派生provenance。清cache/重启/失败刷新与T5导出、T9合并/checker不得丢或重猜来源。
 - [ ] **2 Run**：`cargo test -p store --test metadata_adoption`；`cargo test -p library --test nfo_fields`。
 - [ ] **3 Implement**：NFO reader返回状态和字段presence，拆nfo.rs但保留原导出/identity公共功能并迁完调用。采用在同库事务写candidate/effective、按Media+Library更新items/terms；全局人工锁与本地输入分层，不复制逐文件有效projection。refreshed_at/revision不充当来源可信优先级。
 - [ ] **4 GREEN**：上述targets；现有`nfo nfo_metadata nfo_identity nfo_identity_bounds episode_nfo nfo_escape`、`cargo test -p library`、`cargo test -p media`、`cargo test -p store`。T5接真写出路径验证自产反馈，不以本任务的纯字段测试替代。
@@ -261,3 +262,5 @@ flowchart LR
 - 本轮仅文档，没有执行T1–T12、Cargo测试、UI/应用烟测或删除实例数据库。SQL实施时拆入生产模块，最终字典从生产DDL生成，避免长期双份schema。
 - 本次集成复审修订：协议typed查询补齐冷字段和parent/排序，T7/T8共同负责；T3显式偏好与来源快照preferences_json；genre ID/name/filter_key对象与字符串前端筛选。无新表/索引扩张，复杂人物/简介查询可在SQLite授权域内解析本地冷JSON，属于需要实测的例外，不声称恒定成本。新增文档未获独立复核。
 - 本轮临时验证：Python SQLite 3.51.0执行新增preferences_json后的45表DDL，FK/integrity通过；独立候选SQL证明人物/studio/Unicode简介条件能命中未筛选第51项且Limit1/total1一致；真实rich_tv_details.json按[CN,US]得TV-14、[GB,US,CN]得15；genre决策原型验证28的不同语言名仍用28、未知来源数字不冒充TMDB。仅为SQL形态/字段决策校验，不是完整ProtocolItemQuery reducer、应用实现或性能证明。
+- F02-R1修订补充：最近Sol复核确认F01协议查询和F03 genre合同闭合，F02剩下选择来源传输缺口；本轮用NormalizedMetadata与SourceFieldOrigin、采用整包输入、selection_origins_json和逐字段有效来源编码补齐；不新增表。新增内容尚未独立复核，旧clean仅限原审阅范围。
+- F02-R1临时校验：Python SQLite 3.51.0执行新增selection_origins_json后的DDL；同值15、来源US/GB两条snapshot/effective元数据在关闭重开后仍保留不同国家，注入事务异常后旧值/来源/revision共同保留，FK/integrity通过；fr-FR行可保留字段实际fr-CA选择证据。临时DB已移除。只是接口/持久编码原型，不是生产parser、清cache API、checker或完整应用验收，也不算Sol复核。

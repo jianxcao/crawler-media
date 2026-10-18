@@ -28,6 +28,7 @@ CREATE TABLE media_metadata_sources (
  normalized_json TEXT NOT NULL CHECK(json_valid(normalized_json)),
  present_fields_json TEXT NOT NULL CHECK(json_valid(present_fields_json)),
  preferences_json TEXT NOT NULL CHECK(json_valid(preferences_json)),
+ selection_origins_json TEXT NOT NULL CHECK(json_valid(selection_origins_json)),
  fetched_at INTEGER NOT NULL, source_revision INTEGER NOT NULL CHECK(source_revision>=0),
  PRIMARY KEY(media_id,entity_scope,season,episode,source,locale),
  CHECK((entity_scope='work' AND season=-1 AND episode=-1) OR
