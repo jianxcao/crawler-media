@@ -38,6 +38,8 @@ pub use ledger_presence::{
 mod legacy_recycle;
 mod libraries;
 mod library;
+pub mod files;
+pub mod library_write;
 mod library_covers;
 mod library_deletion;
 pub use library_deletion::LibraryRemoval;

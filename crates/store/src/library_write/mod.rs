@@ -1,0 +1,30 @@
+use std::path::PathBuf;
+use domain::{FileVersion, LedgerId, LibraryFile, LibraryId, UnitKey};
+
+pub mod publish;
+pub mod reduce;
+pub mod presence;
+
+pub use publish::*;
+pub use reduce::*;
+pub use presence::*;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WriteScope {
+    pub library_id: LibraryId,
+    pub config_revision: i64,
+}
+
+pub struct FilePublication<'a> {
+    pub file: &'a LibraryFile,
+    pub units: &'a [UnitKey],
+    pub expected_version: Option<&'a FileVersion>,
+    pub probe_required: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PublishReport {
+    pub inserted: usize,
+    pub updated: usize,
+    pub unchanged: usize,
+}
