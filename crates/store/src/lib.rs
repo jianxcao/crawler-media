@@ -37,6 +37,8 @@ pub use ledger_presence::{
 };
 mod legacy_recycle;
 mod libraries;
+mod library_stats;
+pub use library_stats::LibraryRosterStats;
 mod library;
 pub mod files;
 pub mod library_write;

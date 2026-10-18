@@ -204,7 +204,6 @@ impl Store {
         match row {
             Ok(head) => Ok(Some(head)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(rusqlite::Error::SqliteFailure(err, Some(msg))) if msg.contains("no such table") => Ok(None),
             Err(e) => Err(StoreError::Sqlite(e)),
         }
     }

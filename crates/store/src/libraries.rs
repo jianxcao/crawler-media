@@ -12,7 +12,6 @@ use rusqlite::params;
 
 use super::library_ownership::{LibraryOwnership, owner_with_default};
 use super::{Store, StoreError};
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Library {
     pub id: String,

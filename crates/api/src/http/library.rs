@@ -246,7 +246,7 @@ pub(crate) async fn list_libraries(
     .await
     {
         Ok(stats) => stats,
-        Err(error) => return error.into_response(),
+        Err(res) => return res,
     };
     match state
         .http_work
