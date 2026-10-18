@@ -152,11 +152,11 @@ impl Store {
         format_duration_ms: Option<i64>,
     ) -> Result<(), StoreError> {
         self.library.execute(
-            "INSERT INTO file_meta (
-                 ledger_id, audio_json, subtitle_json, video_json, tracks_version,
-                 source_version, format_duration_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(ledger_id) DO UPDATE SET
+            "INSERT INTO file_details (
+                 file_id, audio_json, subtitle_json, video_json, tracks_version,
+                 source_revision, source_version, format_duration_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 1, COALESCE(?6, 'v1'), ?7)
+             ON CONFLICT(file_id) DO UPDATE SET
                audio_json = excluded.audio_json,
                subtitle_json = excluded.subtitle_json,
                video_json = excluded.video_json,

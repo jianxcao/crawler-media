@@ -262,7 +262,7 @@ impl Store {
 
     pub fn probe_job_units(&self, job_id: &str) -> Result<Vec<ProbeJobUnit>, StoreError> {
         let mut statement = self.library.prepare(
-            "SELECT job_id, ledger_id, kind, force_fingerprint,
+            "SELECT job_id, file_id, kind, force_fingerprint,
                     reuse_fingerprint_cache, overwrite_markers, status, error,
                     sampling_plan_json, detection_outcome_json, reuse_media_info_cache, stage
              FROM probe_job_units WHERE job_id = ?1 ORDER BY rowid",
@@ -525,10 +525,10 @@ impl Store {
     ) -> Result<Option<ProbeJobUnit>, StoreError> {
         self.library
             .query_row(
-                "SELECT job_id, ledger_id, kind, force_fingerprint,
+                "SELECT job_id, file_id, kind, force_fingerprint,
                         reuse_fingerprint_cache, overwrite_markers, status, error,
                         sampling_plan_json, detection_outcome_json, reuse_media_info_cache, stage
-                 FROM probe_job_units WHERE ledger_id = ?1 AND status IN ('queued', 'running')
+                 FROM probe_job_units WHERE file_id = ?1 AND status IN ('queued', 'running')
                  ORDER BY rowid DESC LIMIT 1",
                 [ledger_id],
                 |row| {

@@ -75,10 +75,10 @@ impl Store {
             )?;
             // 只有已登记的台账行才有 durable 源版本；没有台账行的路径这里是空操作。
             tx.execute(
-                "UPDATE ledger
-                    SET source_version_ms = ?2, source_version_size = ?3,
-                        source_version_digest = ?4
-                  WHERE path = ?1",
+                "UPDATE library_files
+                    SET mtime_ns = ?2 * 1000000, size_bytes = ?3,
+                        source_digest = ?4
+                  WHERE path_key = ?1 OR display_path = ?1",
                 params![path, mtime_ms, file_size, content_digest],
             )?;
         }
@@ -104,8 +104,8 @@ impl Store {
         for chunk in paths.chunks(500) {
             let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
             let sql = format!(
-                "SELECT path, source_version_ms, source_version_size, source_version_digest
-                 FROM ledger WHERE path IN ({})",
+                "SELECT path_key, COALESCE(mtime_ns / 1000000, 0), COALESCE(size_bytes, 0), source_digest
+                 FROM library_files WHERE path_key IN ({})",
                 placeholders.join(",")
             );
             let mut stmt = self.library.prepare(&sql)?;
@@ -139,8 +139,8 @@ impl Store {
         let placeholders: Vec<String> = (2..=paths.len() + 1).map(|i| format!("?{i}")).collect();
         let sql = format!(
             "SELECT s.path, s.mtime_ms, s.file_size, s.content_digest,
-                    EXISTS(SELECT 1 FROM ledger l WHERE l.path = s.path) AS ledger_exists,
-                    (SELECT l.missing_at FROM ledger l WHERE l.path = s.path LIMIT 1) AS missing_at
+                    EXISTS(SELECT 1 FROM library_files f WHERE f.path_key = s.path OR f.display_path = s.path) AS ledger_exists,
+                    (SELECT f.missing_at FROM library_files f WHERE f.path_key = s.path OR f.display_path = s.path LIMIT 1) AS missing_at
              FROM scan_seen s
              WHERE s.operation_id = ?1 AND s.path IN ({})",
             placeholders.join(",")
