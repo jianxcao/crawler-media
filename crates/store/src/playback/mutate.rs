@@ -27,67 +27,142 @@ impl Store {
 
         let media_id_str = media_id.to_string();
 
-        // Find preferred file or active file for this unit
-        let file_id_str: String = match preferred_source {
-            Some(src) => src.file_id.to_string(),
-            None => {
-                let sql = "SELECT file_id FROM library_file_units
-                           WHERE media_id = ?1 AND season = ?2 AND episode = ?3
-                           LIMIT 1";
-                let f: Option<String> = self.library
-                    .query_row(sql, params![media_id_str, unit_key.season, unit_key.episode], |r| r.get(0))
-                    .optional()?;
-                f.ok_or_else(|| StoreError::Missing(format!("playable file for unit {unit_key:?}")))?
+        // Find preferred file or active file for this unit, validating presence, publication, and revision
+        let file_row = match preferred_source {
+            Some(src) => {
+                let sql = "SELECT f.file_id, f.library_id, f.root_id, f.media_id, f.kind, f.path_key,
+                                  f.file_revision, f.source_version, f.presence_state, f.publication_state,
+                                  f.duration_ms
+                           FROM library_files f
+                           JOIN library_file_units u ON f.file_id = u.file_id
+                           WHERE f.file_id = ?1 AND f.file_revision = ?2
+                             AND u.media_id = ?3 AND u.season = ?4 AND u.episode = ?5
+                             AND f.presence_state = 'present' AND f.publication_state = 'published'";
+                self.library
+                    .query_row(
+                        sql,
+                        params![
+                            src.file_id.to_string(),
+                            src.revision,
+                            media_id_str,
+                            unit_key.season,
+                            unit_key.episode,
+                        ],
+                        |r| {
+                            let fid: LedgerId = r.get::<_, String>(0)?.parse().unwrap();
+                            let lid: LibraryId = r.get::<_, String>(1)?.parse().unwrap();
+                            let mid: MediaId = r.get::<_, String>(3)?.parse().unwrap();
+                            let kind: MediaKind = r.get::<_, String>(4)?.parse().unwrap_or(MediaKind::Movie);
+                            let path_str: String = r.get(5)?;
+                            let pres_str: String = r.get(8)?;
+                            let pub_str: String = r.get(9)?;
+                            let dur: Option<i64> = r.get(10)?;
+
+                            Ok(LibraryFile {
+                                file_id: fid,
+                                library_id: lid,
+                                root_id: r.get(2)?,
+                                media_id: mid,
+                                kind,
+                                path: path_str.into(),
+                                version: FileVersion {
+                                    revision: r.get(6)?,
+                                    source_version: r.get(7)?,
+                                },
+                                presence: FilePresence::from_str(&pres_str).unwrap_or(FilePresence::Present),
+                                publication: FilePublication::from_str(&pub_str).unwrap_or(FilePublication::Published),
+                                size_bytes: None,
+                                stat_known: true,
+                                created_ns: None,
+                                modified_ns: None,
+                                source_digest: None,
+                                source_path: None,
+                                transfer_mode: None,
+                                resolution: None,
+                                codec: None,
+                                hdr: None,
+                                quality_source: QualitySource::Probe,
+                                confidence: Confidence::High,
+                                filter_score: None,
+                                release_quality: None,
+                                duration_ms: dur,
+                                tracks_version: 1,
+                                poster_path: None,
+                                backdrop_path: None,
+                                still_path: None,
+                            })
+                        },
+                    )
+                    .optional()?
             }
+            None => None,
         };
 
-        // Fetch file facts
-        let file_sql = "SELECT file_id, library_id, root_id, media_id, kind, path_key,
-                               file_revision, source_version, presence_state, publication_state,
-                               duration_ms
-                        FROM library_files WHERE file_id = ?1";
-        let file = self.library.query_row(file_sql, params![file_id_str], |r| {
-            let fid: LedgerId = r.get::<_, String>(0)?.parse().unwrap();
-            let lid: LibraryId = r.get::<_, String>(1)?.parse().unwrap();
-            let mid: MediaId = r.get::<_, String>(3)?.parse().unwrap();
-            let kind: MediaKind = r.get::<_, String>(4)?.parse().unwrap_or(MediaKind::Movie);
-            let path_str: String = r.get(5)?;
-            let dur: Option<i64> = r.get(10)?;
+        let file = match file_row {
+            Some(f) => f,
+            None => {
+                let sql = "SELECT f.file_id, f.library_id, f.root_id, f.media_id, f.kind, f.path_key,
+                                  f.file_revision, f.source_version, f.presence_state, f.publication_state,
+                                  f.duration_ms
+                           FROM library_files f
+                           JOIN library_file_units u ON f.file_id = u.file_id
+                           WHERE u.media_id = ?1 AND u.season = ?2 AND u.episode = ?3
+                             AND f.presence_state = 'present' AND f.publication_state = 'published'
+                           ORDER BY f.file_revision DESC, f.file_id ASC
+                           LIMIT 1";
+                self.library
+                    .query_row(
+                        sql,
+                        params![media_id_str, unit_key.season, unit_key.episode],
+                        |r| {
+                            let fid: LedgerId = r.get::<_, String>(0)?.parse().unwrap();
+                            let lid: LibraryId = r.get::<_, String>(1)?.parse().unwrap();
+                            let mid: MediaId = r.get::<_, String>(3)?.parse().unwrap();
+                            let kind: MediaKind = r.get::<_, String>(4)?.parse().unwrap_or(MediaKind::Movie);
+                            let path_str: String = r.get(5)?;
+                            let pres_str: String = r.get(8)?;
+                            let pub_str: String = r.get(9)?;
+                            let dur: Option<i64> = r.get(10)?;
 
-            Ok(LibraryFile {
-                file_id: fid,
-                library_id: lid,
-                root_id: r.get(2)?,
-                media_id: mid,
-                kind,
-                path: path_str.into(),
-                version: FileVersion {
-                    revision: r.get(6)?,
-                    source_version: r.get(7)?,
-                },
-                presence: FilePresence::Present,
-                publication: FilePublication::Published,
-                size_bytes: None,
-                stat_known: true,
-                created_ns: None,
-                modified_ns: None,
-                source_digest: None,
-                source_path: None,
-                transfer_mode: None,
-                resolution: None,
-                codec: None,
-                hdr: None,
-                quality_source: QualitySource::Probe,
-                confidence: Confidence::High,
-                filter_score: None,
-                release_quality: None,
-                duration_ms: dur,
-                tracks_version: 1,
-                poster_path: None,
-                backdrop_path: None,
-                still_path: None,
-            })
-        })?;
+                            Ok(LibraryFile {
+                                file_id: fid,
+                                library_id: lid,
+                                root_id: r.get(2)?,
+                                media_id: mid,
+                                kind,
+                                path: path_str.into(),
+                                version: FileVersion {
+                                    revision: r.get(6)?,
+                                    source_version: r.get(7)?,
+                                },
+                                presence: FilePresence::from_str(&pres_str).unwrap_or(FilePresence::Present),
+                                publication: FilePublication::from_str(&pub_str).unwrap_or(FilePublication::Published),
+                                size_bytes: None,
+                                stat_known: true,
+                                created_ns: None,
+                                modified_ns: None,
+                                source_digest: None,
+                                source_path: None,
+                                transfer_mode: None,
+                                resolution: None,
+                                codec: None,
+                                hdr: None,
+                                quality_source: QualitySource::Probe,
+                                confidence: Confidence::High,
+                                filter_score: None,
+                                release_quality: None,
+                                duration_ms: dur,
+                                tracks_version: 1,
+                                poster_path: None,
+                                backdrop_path: None,
+                                still_path: None,
+                            })
+                        },
+                    )
+                    .optional()?
+                    .ok_or_else(|| StoreError::Missing(format!("playable file for unit {unit_key:?}")))?
+            }
+        };
 
         let target = PlaybackTarget {
             media_id,

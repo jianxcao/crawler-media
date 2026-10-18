@@ -24,6 +24,46 @@ impl Store {
             });
         }
 
+        // F02: Determine user's authorized libraries
+        let user_id_str = request.user_id.to_string();
+        let mut auth_stmt = self.library.prepare(
+            "SELECT library_id, access_mode, member_ids_json
+             FROM libraries WHERE lifecycle_state = 'ready'",
+        )?;
+        let mut allowed_libraries: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut auth_rows = auth_stmt.query([])?;
+        while let Some(r) = auth_rows.next()? {
+            let lid: String = r.get(0)?;
+            let mode: String = r.get(1)?;
+            let members_json: String = r.get(2)?;
+            let is_allowed = if mode == "everyone" {
+                true
+            } else {
+                let members: Vec<String> = serde_json::from_str(&members_json).unwrap_or_default();
+                members.contains(&user_id_str)
+            };
+            if is_allowed {
+                allowed_libraries.insert(lid);
+            }
+        }
+
+        // If explicitly scoped to a library, verify user has access to it
+        if let Some(target_lib) = &lib_scope {
+            if !allowed_libraries.contains(target_lib) {
+                return Ok(ProtocolItemPage {
+                    items: Vec::new(),
+                    total: 0,
+                });
+            }
+        }
+
+        if allowed_libraries.is_empty() {
+            return Ok(ProtocolItemPage {
+                items: Vec::new(),
+                total: 0,
+            });
+        }
+
         // Check if querying for specific series/season/episodes
         let wants_episodes = request.include_types.contains(&ProtocolItemType::Episode)
             || request.series_id.is_some()
@@ -40,44 +80,62 @@ impl Store {
 
             let media_id_str = target_media_id.to_string();
 
-            // Query units table directly
+            // Query units table directly, filtered by authorized library
+            let allowed_in_clause = format!(
+                "u.library_id IN ({})",
+                allowed_libraries.iter().map(|l| format!("'{l}'")).collect::<Vec<_>>().join(",")
+            );
+            let lib_filter = match &lib_scope {
+                Some(l) => format!("u.library_id = '{l}'"),
+                None => allowed_in_clause,
+            };
+
             let (count_sql, select_sql) = match target_season {
                 Some(s) => (
-                    "SELECT COUNT(*) FROM library_units WHERE media_id = ?1 AND season = ?2 AND season >= 0 AND episode >= 0",
-                    "SELECT u.library_id, u.media_id, u.season, u.episode, u.preferred_file_id, f.file_revision
-                     FROM library_units u
-                     LEFT JOIN library_files f ON f.file_id = u.preferred_file_id
-                     WHERE u.media_id = ?1 AND u.season = ?2 AND u.season >= 0 AND u.episode >= 0
-                     ORDER BY u.season ASC, u.episode ASC
-                     LIMIT ?3 OFFSET ?4"
+                    format!(
+                        "SELECT COUNT(*) FROM library_units u
+                         WHERE u.media_id = ?1 AND u.season = ?2 AND u.season >= 0 AND u.episode >= 0 AND {lib_filter}"
+                    ),
+                    format!(
+                        "SELECT u.library_id, u.media_id, u.season, u.episode, u.preferred_file_id, f.file_revision
+                         FROM library_units u
+                         LEFT JOIN library_files f ON f.file_id = u.preferred_file_id
+                         WHERE u.media_id = ?1 AND u.season = ?2 AND u.season >= 0 AND u.episode >= 0 AND {lib_filter}
+                         ORDER BY u.season ASC, u.episode ASC
+                         LIMIT ?3 OFFSET ?4"
+                    ),
                 ),
                 None => (
-                    "SELECT COUNT(*) FROM library_units WHERE media_id = ?1 AND season >= 0 AND episode >= 0",
-                    "SELECT u.library_id, u.media_id, u.season, u.episode, u.preferred_file_id, f.file_revision
-                     FROM library_units u
-                     LEFT JOIN library_files f ON f.file_id = u.preferred_file_id
-                     WHERE u.media_id = ?1 AND u.season >= 0 AND u.episode >= 0
-                     ORDER BY u.season ASC, u.episode ASC
-                     LIMIT ?2 OFFSET ?3"
+                    format!(
+                        "SELECT COUNT(*) FROM library_units u
+                         WHERE u.media_id = ?1 AND u.season >= 0 AND u.episode >= 0 AND {lib_filter}"
+                    ),
+                    format!(
+                        "SELECT u.library_id, u.media_id, u.season, u.episode, u.preferred_file_id, f.file_revision
+                         FROM library_units u
+                         LEFT JOIN library_files f ON f.file_id = u.preferred_file_id
+                         WHERE u.media_id = ?1 AND u.season >= 0 AND u.episode >= 0 AND {lib_filter}
+                         ORDER BY u.season ASC, u.episode ASC
+                         LIMIT ?2 OFFSET ?3"
+                    ),
                 ),
             };
 
             let total: i64 = match target_season {
                 Some(s) => self.library.query_row(
-                    count_sql,
+                    &count_sql,
                     params![media_id_str, s as i64],
                     |r| r.get(0),
                 )?,
                 None => self.library.query_row(
-                    count_sql,
+                    &count_sql,
                     params![media_id_str],
                     |r| r.get(0),
                 )?,
             };
-
             let mut items = Vec::new();
             if total > 0 && request.limit > 0 {
-                let mut stmt = self.library.prepare(select_sql)?;
+                let mut stmt = self.library.prepare(&select_sql)?;
                 let rows_res: Result<Vec<_>, _> = match target_season {
                     Some(s) => stmt.query_map(
                         params![media_id_str, s as i64, request.limit as i64, request.offset as i64],
@@ -139,10 +197,13 @@ impl Store {
 
         let mut conditions = Vec::new();
         let mut query_params: Vec<rusqlite::types::Value> = Vec::new();
-        // Base items query from library_items table
+        // Base items query from library_items table scoped to authorized libraries
         if let Some(lib_str) = &lib_scope {
             query_params.push(lib_str.clone().into());
             conditions.push(format!("i.library_id = ?{}", query_params.len()));
+        } else {
+            let allowed_in = allowed_libraries.iter().map(|l| format!("'{l}'")).collect::<Vec<_>>().join(",");
+            conditions.push(format!("i.library_id IN ({allowed_in})"));
         }
 
         if let Some(search) = &request.search_term {

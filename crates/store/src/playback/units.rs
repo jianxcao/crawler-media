@@ -13,7 +13,7 @@ impl Store {
         season: i32,
         episode: i32,
     ) -> Result<Option<UnitState>, StoreError> {
-        self.subscribe
+        self.library
             .query_row(
                 "SELECT position_ms, played, favorite, duration_ms, audio_track,
                         subtitle_track, play_count, updated_at, favorite_at
@@ -514,19 +514,19 @@ impl Store {
 
     pub fn delete_playback_for_media(&self, media_id: domain::MediaId) -> Result<(), StoreError> {
         let id_str = media_id.to_string();
-        self.subscribe.execute(
+        self.library.execute(
             "DELETE FROM playback_units WHERE media_id = ?1",
             params![&id_str],
         )?;
-        self.subscribe.execute(
+        self.library.execute(
             "DELETE FROM playback_sessions WHERE media_id = ?1",
             params![&id_str],
         )?;
-        self.subscribe.execute(
+        self.library.execute(
             "DELETE FROM playback_logs WHERE media_id = ?1",
             params![&id_str],
         )?;
-        self.subscribe.execute(
+        self.library.execute(
             "DELETE FROM playback_metrics WHERE media_id = ?1",
             params![&id_str],
         )?;

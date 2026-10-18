@@ -75,31 +75,37 @@ impl Store {
                         }
                     }
 
+                    // Only increment file_revision if source_version actually changed,
+                    // preventing normal metadata/presence refreshes from invalidating resume bindings.
+                    let bump_rev = cur_source_ver != f.version.source_version;
+                    let new_rev = if bump_rev { cur_rev + 1 } else { cur_rev };
+
                     // Update existing
                     tx.execute(
                         "UPDATE library_files SET
                             presence_state = ?1,
                             publication_state = ?2,
-                            file_revision = file_revision + 1,
-                            source_version = ?3,
-                            size_bytes = ?4,
-                            stat_known = ?5,
-                            mtime_ns = ?6,
-                            created_ns = ?7,
-                            source_digest = ?8,
-                            resolution = ?9,
-                            codec = ?10,
-                            hdr = ?11,
-                            quality_source = ?12,
-                            confidence = ?13,
-                            filter_score = ?14,
-                            release_quality = ?15,
-                            duration_ms = ?16,
-                            tracks_version = ?17
-                         WHERE file_id = ?18",
+                            file_revision = ?3,
+                            source_version = ?4,
+                            size_bytes = ?5,
+                            stat_known = ?6,
+                            mtime_ns = ?7,
+                            created_ns = ?8,
+                            source_digest = ?9,
+                            resolution = ?10,
+                            codec = ?11,
+                            hdr = ?12,
+                            quality_source = ?13,
+                            confidence = ?14,
+                            filter_score = ?15,
+                            release_quality = ?16,
+                            duration_ms = ?17,
+                            tracks_version = ?18
+                         WHERE file_id = ?19",
                         params![
                             f.presence.as_str(),
                             f.publication.as_str(),
+                            new_rev,
                             f.version.source_version,
                             f.size_bytes.map(|s| s as i64),
                             if f.stat_known { 1 } else { 0 },
@@ -261,21 +267,29 @@ impl Store {
 
         for obs in observations {
             let file_id_str = obs.file_id.to_string();
-            let existing: Option<(String, String, i64, String)> = tx
+            let existing: Option<(String, String, i64, String, String)> = tx
                 .query_row(
-                    "SELECT media_id, presence_state, file_revision, source_version
+                    "SELECT media_id, presence_state, file_revision, source_version, path_key
                      FROM library_files
                      WHERE file_id = ?1 AND library_id = ?2",
                     params![file_id_str, scope.library_id.to_string()],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                 )
                 .optional()?;
 
-            let Some((media_id_str, current_state, _rev, _src_ver)) = existing else {
+            let Some((media_id_str, current_state, cur_rev, cur_src_ver, cur_path)) = existing else {
                 report.skipped += 1;
                 continue;
             };
 
+            // Verify that the observation applies to the current version & path (F04 stale check)
+            if obs.observed_version.revision != cur_rev
+                || obs.observed_version.source_version != cur_src_ver
+                || obs.observed_path.to_string_lossy() != cur_path
+            {
+                report.skipped += 1;
+                continue;
+            }
             let media_id = media_id_str.parse::<MediaId>().unwrap();
             match mode {
                 super::PresenceMode::Verify => {
@@ -287,7 +301,7 @@ impl Store {
                         };
                         tx.execute(
                             "UPDATE library_files
-                             SET presence_state = ?1, missing_at = ?2, file_revision = file_revision + 1
+                             SET presence_state = ?1, missing_at = ?2
                              WHERE file_id = ?3",
                             params![obs.presence.as_str(), missing_at, file_id_str],
                         )?;
