@@ -63,6 +63,7 @@ pub struct ItemMeta {
     pub last_air_date: Option<String>,
     /// Production companies for movies, broadcast networks for TV series.
     pub studios: Vec<String>,
+    pub studio_logo: Option<String>,
     /// Certification selected in CN → US → first available order.
     pub content_rating: Option<String>,
     pub original_language: Option<String>,
@@ -164,6 +165,7 @@ struct TranslationData {
 #[derive(Deserialize)]
 struct NameRow {
     name: Option<String>,
+    logo_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -264,13 +266,15 @@ pub fn details_meta_for(
         .filter(|credit| credit.job.as_deref() == Some("Director"))
         .filter_map(|credit| credit.name.clone().filter(|name| !name.is_empty()))
         .collect();
-    let studios = if parsed.networks.is_empty() {
-        parsed.production_companies.iter()
+    let (studios, studio_logo) = if parsed.networks.is_empty() {
+        let logo = parsed.production_companies.iter().find_map(|r| r.logo_path.clone());
+        let names = parsed.production_companies.iter().filter_map(|row| row.name.clone().filter(|name| !name.is_empty())).collect();
+        (names, logo)
     } else {
-        parsed.networks.iter()
-    }
-    .filter_map(|row| row.name.clone().filter(|name| !name.is_empty()))
-    .collect();
+        let logo = parsed.networks.iter().find_map(|r| r.logo_path.clone());
+        let names = parsed.networks.iter().filter_map(|row| row.name.clone().filter(|name| !name.is_empty())).collect();
+        (names, logo)
+    };
     let episode_run_time: Vec<u32> = parsed
         .episode_run_time
         .iter()
@@ -308,6 +312,7 @@ pub fn details_meta_for(
             .filter(|date| !date.is_empty()),
         last_air_date: parsed.last_air_date.filter(|date| !date.is_empty()),
         studios,
+        studio_logo,
         content_rating,
         original_language: parsed
             .original_language

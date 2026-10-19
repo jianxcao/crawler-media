@@ -115,6 +115,7 @@ impl Store {
             has_still: false,
             rating: None,
             studio: None,
+            studio_logo: None,
         };
 
         // Fetch effective metadata or default

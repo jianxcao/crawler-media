@@ -75,6 +75,7 @@ pub struct LibraryItem {
     pub has_still: bool,
     pub rating: Option<f64>,
     pub studio: Option<String>,
+    pub studio_logo: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -78,11 +78,15 @@ impl Store {
             let rating_f: f64 = r.get(15)?;
             let rating_opt = if rating_f >= 0.0 { Some(rating_f) } else { None };
             let aliases_raw: Option<String> = r.get(16)?;
-            let studio = aliases_raw
+            let aliases_val = aliases_raw
                 .as_deref()
-                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+            let studio = aliases_val
+                .as_ref()
                 .and_then(|val| val.get("studio").and_then(|s| s.as_str()).map(str::to_string));
-
+            let studio_logo = aliases_val
+                .as_ref()
+                .and_then(|val| val.get("studio_logo").and_then(|s| s.as_str()).map(str::to_string));
             Ok(LibraryItem {
                 library_id: lib_id,
                 media_id,
@@ -101,6 +105,7 @@ impl Store {
                 has_still: still_i != 0,
                 rating: rating_opt,
                 studio,
+                studio_logo,
             })
         })?;
 

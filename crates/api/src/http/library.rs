@@ -371,6 +371,7 @@ pub(crate) async fn list_items(
             "year": item.year,
             "rating": item.rating,
             "studio": item.studio,
+            "studio_logo": item.studio_logo.map(|path| format!("https://image.tmdb.org/t/p/w92{path}")),
             "poster_url": poster_url,
             "backdrop_url": backdrop_url,
             "file_count": item.file_count,

@@ -85,6 +85,7 @@ export interface LibraryItem {
   year: number | null;
   rating?: number | null;
   studio?: string | null;
+  studio_logo?: string | null;
   poster_url: string | null;
   backdrop_url?: string | null;
   file_count: number;
@@ -965,6 +966,7 @@ function itemFrom(raw: unknown): LibraryItem {
     year: r.year == null ? null : num(r.year),
     rating: r.rating == null ? null : num(r.rating),
     studio: r.studio == null ? null : str(r.studio),
+    studio_logo: r.studio_logo == null ? null : str(r.studio_logo),
     poster_url: r.poster_url == null ? null : str(r.poster_url),
     backdrop_url: r.backdrop_url == null ? null : str(r.backdrop_url),
     file_count: num(r.file_count),

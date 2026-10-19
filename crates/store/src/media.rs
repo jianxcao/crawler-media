@@ -306,20 +306,25 @@ impl Store {
         Ok(())
     }
 
-    /// Update rating, release_date and studio/network on library_items for a media when scraped
+    /// Update rating, release_date, studio and studio_logo on library_items for a media when scraped
     pub fn update_library_items_metadata_sort(
         &self,
         media_id: MediaId,
         rating: Option<f64>,
         release_date: Option<&str>,
         studio: Option<&str>,
+        studio_logo: Option<&str>,
     ) -> Result<(), StoreError> {
         let rating_val = rating.unwrap_or(-1.0);
         let rel_val = release_date.unwrap_or("");
-        let aliases_json = match studio.filter(|s| !s.trim().is_empty()) {
-            Some(s) => serde_json::json!({ "studio": s }).to_string(),
-            None => "{}".to_string(),
-        };
+        let mut obj = serde_json::Map::new();
+        if let Some(s) = studio.filter(|s| !s.trim().is_empty()) {
+            obj.insert("studio".into(), s.into());
+        }
+        if let Some(logo) = studio_logo.filter(|s| !s.trim().is_empty()) {
+            obj.insert("studio_logo".into(), logo.into());
+        }
+        let aliases_json = serde_json::Value::Object(obj).to_string();
         self.library.execute(
             "UPDATE library_items SET rating_sort = ?2, release_date_sort = ?3, aliases_json = ?4 WHERE media_id = ?1",
             params![media_id.to_string(), rating_val, rel_val, aliases_json],
