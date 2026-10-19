@@ -207,6 +207,14 @@ pub(super) fn invalidate_changed_facts(
             failed_paths.insert(path_str);
             continue;
         }
+        // 登记写下的 stat 事实不是「已处理过这份内容」的版本证据：窗口内变化的路径
+        // 必须回到版本未知，否则下一轮会按 durable 版本把它当成已完成而跳过。
+        // 只在失效成功后清：失效失败时旧版本连同旧派生事实一起保留，下一轮才会重试。
+        if let Err(error) = store.clear_source_version(&ledger_id) {
+            tracing::error!(%error, %ledger_id, %path_str, "变化文件的 durable 源版本清除失败");
+            failed_paths.insert(path_str);
+            continue;
+        }
         affected.push(path.clone());
     }
     Ok((affected, failed_paths))

@@ -86,6 +86,25 @@ impl Store {
         Ok(())
     }
 
+    /// 清除一条台账行的 durable 源版本，回到「版本未知」（P2-3）。
+    ///
+    /// 路径在扫描窗口内发生变化时，台账上由登记写下的 stat 事实描述的是**观察时**的
+    /// 内容，不能当作「已处理过这份内容」的版本证据。清掉 `mtime_ns`/`size_bytes`/
+    /// `source_digest`（以及 `created_ns`/`stat_known` 这组 stat 事实）后，
+    /// [`Self::ledger_source_versions`] 对该行返回 `0/0/NULL`，下一轮必定重新处理。
+    ///
+    /// 纯 DB 写，不触碰文件系统，调用方持 Store 锁即可。
+    pub fn clear_source_version(&self, ledger_id: &str) -> Result<(), StoreError> {
+        self.library.execute(
+            "UPDATE library_files
+                SET mtime_ns = NULL, size_bytes = NULL, source_digest = NULL,
+                    created_ns = NULL, stat_known = 0
+              WHERE file_id = ?1",
+            params![ledger_id],
+        )?;
+        Ok(())
+    }
+
     /// 读 durable 每台账源版本：`path -> (mtime_ms, file_size, content_digest)`（P2-3）。
     ///
     /// 返回的是「上次处理该路径时的文件版本」，跨 operation 有效。台账行存在但从未
