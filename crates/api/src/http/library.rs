@@ -99,9 +99,14 @@ pub(crate) fn browse_filter_from_query(
         min_rating: rating,
         identity: query.get("identity").cloned(),
         watch: query.get("watch").or_else(|| query.get("w")).cloned(),
-        unwatched_first: query
-            .get("unwatched_first")
-            .is_some_and(|raw| raw == "true" || raw == "1"),
+        unwatched_first: match query.get("unwatched_first") {
+            None => false,
+            Some(raw) if raw == "true" || raw == "1" => true,
+            Some(raw) if raw == "false" || raw == "0" => false,
+            Some(raw) => {
+                return Err(format!("unwatched_first must be true or false, got {raw}"));
+            }
+        },
         require_image: false,
     })
 }
@@ -767,7 +772,10 @@ pub(crate) async fn item_episodes(
 
 /// A still reference is either a full URL or a TMDB path.
 fn still_url(reference: &str) -> String {
-    if reference.starts_with("http://") || reference.starts_with("https://") {
+    if reference.starts_with("http://")
+        || reference.starts_with("https://")
+        || reference.starts_with('/')
+    {
         reference.to_string()
     } else {
         format!("https://image.tmdb.org/t/p/w300{reference}")

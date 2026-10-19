@@ -13,9 +13,9 @@ pub(super) fn collect_server_read(
             let rows = store.ledger_candidates_for_library(&ownership, library_id).map_err(|error| error.to_string())?;
             match parent_id {
                 Some(parent_id) if ownership.library(parent_id).is_none() => {
-                    match parent_id.parse::<domain::MediaId>() {
-                        Ok(media_id) => rows.into_iter().filter(|row| row.media_id == media_id).collect(),
-                        Err(_) => Vec::new(),
+                    match domain::TypedItemId::protocol_media_id(parent_id) {
+                        Some(media_id) => rows.into_iter().filter(|row| row.media_id == media_id).collect(),
+                        None => Vec::new(),
                     }
                 }
                 _ => rows,

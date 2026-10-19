@@ -47,6 +47,59 @@ fn identity_conflict(incoming: &Media) -> StoreError {
     StoreError::Protected("Ambiguous or conflicting scanned Media identity".into())
 }
 
+/// Read one complete Media row, including every external id and the display
+/// aliases, so callers can compare the whole identity.
+fn media_row(conn: &rusqlite::Connection, id: MediaId) -> Result<Option<Media>, StoreError> {
+    let sql = format!("{MEDIA_SELECT} WHERE m.media_id = ?1");
+    conn.query_row(&sql, params![id.to_string()], map_media)
+        .optional()
+        .map_err(Into::into)
+}
+
+/// Write the complete identity of `media` on an already-open transaction.
+fn write_media(conn: &rusqlite::Connection, media: &Media) -> Result<(), StoreError> {
+    let has_external = media.tmdb_id.is_some()
+        || media.douban_id.is_some()
+        || media.tvdb_id.is_some()
+        || media.bangumi_id.is_some()
+        || media.anilist_id.is_some();
+    let identity_state = if has_external { "confirmed" } else { "provisional" };
+    conn.execute(
+        "UPDATE media SET title = ?2, year = ?3, original_title = ?4, aliases_display_json = ?5, identity_state = ?6 WHERE media_id = ?1",
+        params![
+            media.id.to_string(),
+            media.title,
+            media.year.map(i64::from),
+            media.original_title,
+            aliases_json(&media.aliases),
+            identity_state,
+        ],
+    )?;
+    // Keep library_items identity_state synchronized with media identity_state
+    conn.execute(
+        "UPDATE library_items SET identity_state = ?2 WHERE media_id = ?1",
+        params![media.id.to_string(), identity_state],
+    )?;
+
+    conn.execute("DELETE FROM media_aliases WHERE media_id = ?1", params![media.id.to_string()])?;
+    for (source, external_id) in [
+        ("tmdb", media.tmdb_id.as_deref()),
+        ("douban", media.douban_id.as_deref()),
+        ("tvdb", media.tvdb_id.as_deref()),
+        ("bangumi", media.bangumi_id.as_deref()),
+        ("anilist", media.anilist_id.as_deref()),
+    ] {
+        if let Some(ext_id) = external_id {
+            conn.execute(
+                "INSERT INTO media_aliases (source, kind, external_id, media_id, is_refresh_target)
+                 VALUES (?1, ?2, ?3, ?4, 1)",
+                params![source, media.kind.as_str(), ext_id, media.id.to_string()],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 impl Store {
     pub fn insert_media(&self, media: &Media) -> Result<(), StoreError> {
         let tx = self.library.unchecked_transaction()?;
@@ -129,22 +182,10 @@ impl Store {
         )?;
 
         let id_str = media_id.to_string();
-        let matches_expected: bool = tx.query_row(
-            "SELECT EXISTS(
-                 SELECT 1 FROM media
-                 WHERE media_id = ?1 AND title = ?2 AND kind = ?3
-                   AND year IS ?4 AND original_title IS ?5
-             )",
-            params![
-                id_str,
-                expected.title,
-                expected.kind.as_str(),
-                expected.year.map(i64::from),
-                expected.original_title,
-            ],
-            |r| r.get(0),
-        )?;
-        if !matches_expected {
+        // Full identity CAS: only delete the row the caller itself wrote.
+        let current = media_row(&tx, media_id)?;
+        if current.as_ref() != Some(expected) {
+            tracing::debug!(%media_id, "Media changed since it was inserted; skipping delete");
             return Ok(false);
         }
 
@@ -273,47 +314,32 @@ impl Store {
 
     pub fn update_media(&self, media: &Media) -> Result<(), StoreError> {
         let tx = self.library.unchecked_transaction()?;
-        let has_external = media.tmdb_id.is_some()
-            || media.douban_id.is_some()
-            || media.tvdb_id.is_some()
-            || media.bangumi_id.is_some()
-            || media.anilist_id.is_some();
-        let identity_state = if has_external { "confirmed" } else { "provisional" };
-        tx.execute(
-            "UPDATE media SET title = ?2, year = ?3, original_title = ?4, aliases_display_json = ?5, identity_state = ?6 WHERE media_id = ?1",
-            params![
-                media.id.to_string(),
-                media.title,
-                media.year.map(i64::from),
-                media.original_title,
-                aliases_json(&media.aliases),
-                identity_state,
-            ],
-        )?;
-        // Keep library_items identity_state synchronized with media identity_state
-        tx.execute(
-            "UPDATE library_items SET identity_state = ?2 WHERE media_id = ?1",
-            params![media.id.to_string(), identity_state],
-        )?;
-
-        tx.execute("DELETE FROM media_aliases WHERE media_id = ?1", params![media.id.to_string()])?;
-        for (source, external_id) in [
-            ("tmdb", media.tmdb_id.as_deref()),
-            ("douban", media.douban_id.as_deref()),
-            ("tvdb", media.tvdb_id.as_deref()),
-            ("bangumi", media.bangumi_id.as_deref()),
-            ("anilist", media.anilist_id.as_deref()),
-        ] {
-            if let Some(ext_id) = external_id {
-                tx.execute(
-                    "INSERT INTO media_aliases (source, kind, external_id, media_id, is_refresh_target)
-                     VALUES (?1, ?2, ?3, ?4, 1)",
-                    params![source, media.kind.as_str(), ext_id, media.id.to_string()],
-                )?;
-            }
-        }
+        write_media(&tx, media)?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Compare-and-set: apply `replacement` only while the stored row still
+    /// equals `expected`. The full identity is compared (kind, title, year,
+    /// original title, aliases and every external id), so a concurrent edit is
+    /// never overwritten. Returns whether the write was applied.
+    pub fn update_media_if_matches(
+        &self,
+        expected: &Media,
+        replacement: &Media,
+    ) -> Result<bool, StoreError> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.library,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let current = media_row(&tx, expected.id)?;
+        if current.as_ref() != Some(expected) {
+            tracing::debug!(media_id = %expected.id, "Media changed since it was written; skipping revert");
+            return Ok(false);
+        }
+        write_media(&tx, replacement)?;
+        tx.commit()?;
+        Ok(true)
     }
 
 
@@ -453,8 +479,9 @@ impl Store {
         previous: Option<&Media>,
     ) -> Result<bool, StoreError> {
         if let Some(previous) = previous {
-            self.update_media(previous)?;
-            Ok(true)
+            // CAS: revert only if the row still holds the identity this caller
+            // wrote. A concurrent writer's row must survive.
+            self.update_media_if_matches(media, previous)
         } else {
             self.undo_ensured_media_if_unreferenced(media.id, media)
         }

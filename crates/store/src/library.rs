@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use domain::{Confidence, MediaKind};
 use rusqlite::{OptionalExtension, params};
@@ -37,25 +37,43 @@ impl Store {
 
     /// Replace the primary root of the kind's default library.
     pub fn set_library_root(&self, kind: MediaKind, path: &str) -> Result<(), StoreError> {
-        if let Some(library) = self.default_library(kind)? {
-            self.ensure_library_mutable(&library.id)?;
+        self.set_library_roots(&[(kind, path)])
+    }
+
+    /// Replace the primary roots of several default libraries in one transaction.
+    ///
+    /// A directory edit writes Movie and TV together; a failure on the second
+    /// root must not leave the first one replaced.
+    pub fn set_library_roots(&self, roots: &[(MediaKind, &str)]) -> Result<(), StoreError> {
+        if roots.is_empty() {
+            return Ok(());
         }
-        self.ensure_removal_roots_available(&[path])?;
-        let root_id: String = self.library.query_row(
-            "SELECT r.root_id FROM library_roots r
-             JOIN libraries l ON l.library_id = r.library_id
-             WHERE l.kind = ?1 AND l.is_default = 1
-             ORDER BY r.sort_order, r.display_path LIMIT 1",
-            params![kind.as_str()],
-            |row| row.get(0),
-        )?;
-        let changed = self.library.execute(
-            "UPDATE library_roots SET path_key = ?2, display_path = ?2 WHERE root_id = ?1",
-            params![root_id, path],
-        )?;
-        if changed == 0 {
-            return Err(StoreError::Missing(format!("library root {root_id}")));
+        let paths: Vec<&str> = roots.iter().map(|(_, path)| *path).collect();
+        for (kind, _) in roots {
+            if let Some(library) = self.default_library(*kind)? {
+                self.ensure_library_mutable(&library.id)?;
+            }
         }
+        self.ensure_removal_roots_available(&paths)?;
+        let tx = self.library.unchecked_transaction()?;
+        for (kind, path) in roots {
+            let root_id: String = tx.query_row(
+                "SELECT r.root_id FROM library_roots r
+                 JOIN libraries l ON l.library_id = r.library_id
+                 WHERE l.kind = ?1 AND l.is_default = 1
+                 ORDER BY r.sort_order, r.display_path LIMIT 1",
+                params![kind.as_str()],
+                |row| row.get(0),
+            )?;
+            let changed = tx.execute(
+                "UPDATE library_roots SET path_key = ?2, display_path = ?2 WHERE root_id = ?1",
+                params![root_id, path],
+            )?;
+            if changed == 0 {
+                return Err(StoreError::Missing(format!("library root {root_id}")));
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -258,18 +276,53 @@ impl Store {
         path: String,
         confidence: Confidence,
     ) -> Result<(), StoreError> {
+        // v1 scopes the parked row to a Library root. Files parked by intake may
+        // still sit outside every root, so fall back to the default Movie root:
+        // that is the Library they would be claimed into.
+        let (library_id, root_id) = self.unidentified_scope(&path)?;
         self.library.execute(
-            "INSERT INTO unidentified (path, confidence) VALUES (?1, ?2)
-             ON CONFLICT(path) DO UPDATE SET confidence = excluded.confidence",
-            params![path, confidence.as_str()],
+            "INSERT INTO unidentified (library_id, root_id, path, confidence)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(library_id, path) DO UPDATE SET
+                 root_id = excluded.root_id,
+                 confidence = excluded.confidence",
+            params![library_id, root_id, path, confidence.as_str()],
         )?;
         Ok(())
+    }
+
+    fn unidentified_scope(&self, path: &str) -> Result<(String, String), StoreError> {
+        let resolved = crate::library_paths::resolved_path(Path::new(path))?;
+        let roots = self.list_library_roots()?;
+        let best = roots
+            .iter()
+            .filter_map(|root| {
+                let root_path = crate::library_paths::resolved_path(&root.path).ok()?;
+                let library_id = root.library_id.clone()?;
+                resolved
+                    .starts_with(&root_path)
+                    .then_some((root_path.components().count(), library_id, root.id.clone()))
+            })
+            .max_by_key(|(depth, _, _)| *depth);
+        if let Some((_, library_id, root_id)) = best {
+            return Ok((library_id, root_id));
+        }
+        let default_root = roots
+            .iter()
+            .find(|root| root.is_default && root.kind == domain::MediaKind::Movie)
+            .and_then(|root| root.library_id.clone().map(|id| (id, root.id.clone())))
+            .ok_or_else(|| {
+                StoreError::Missing(format!(
+                    "no Movie Library root to park unidentified path {path}"
+                ))
+            })?;
+        Ok(default_root)
     }
 
     pub fn list_unidentified(&self) -> Result<Vec<(String, String)>, StoreError> {
         let mut stmt = self
             .library
-            .prepare("SELECT path, confidence FROM unidentified ORDER BY path")?;
+            .prepare("SELECT path, confidence FROM unidentified ORDER BY path, library_id")?;
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }

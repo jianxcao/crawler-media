@@ -111,6 +111,7 @@ pub fn item_dto_json(snapshot: MediaItemSnapshot) -> Value {
     if snapshot.media.kind == domain::MediaKind::Tv && !snapshot.is_series {
         let season_num = snapshot.row.season.unwrap_or(1);
         value["SeriesId"] = json!(series_id);
+        value["SeriesName"] = json!(snapshot.media.title);
         value["SeasonId"] = json!(domain::TypedItemId::Season {
             media: snapshot.media.id,
             season: season_num,

@@ -235,10 +235,7 @@ pub fn parse_season_id(series_id: &str, season_id: &str) -> Option<u32> {
 
 /// The work a `SeriesId` names: its typed work id, or its media id.
 pub fn series_media_id(series_id: &str) -> Option<domain::MediaId> {
-    match TypedItemId::from_wire_string(series_id) {
-        Some(TypedItemId::Work(media)) => Some(media),
-        _ => series_id.parse().ok(),
-    }
+    domain::TypedItemId::protocol_media_id(series_id)
 }
 
 /// Whether `requested` names this item's work.

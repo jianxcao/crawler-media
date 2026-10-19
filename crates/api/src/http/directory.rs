@@ -84,26 +84,71 @@ pub(crate) async fn put_directory(
         );
     }
     let store = state.store.lock();
-    let applied = store.app_write(|s| {
-        // Compose one final setting: Movie first, then TV — the shared
-        // `naming_entry_dir` follows the existing "TV overrides" rule.
-        let mut setting = s.get_scrape_config()?.setting;
-        apply_legacy_naming(&mut setting, MediaKind::Movie, body.movie_naming.trim());
-        apply_legacy_naming(&mut setting, MediaKind::Tv, body.tv_naming.trim());
-        s.set_library_root(MediaKind::Movie, body.movie_root.trim())?;
-        s.set_library_root(MediaKind::Tv, body.tv_root.trim())?;
-        s.set_transfer_mode(&body.transfer_mode)?;
-        s.set_scrape_enabled(body.scrape)?;
-        if let Some(path) = body.watch_intake.as_deref() {
-            s.set_watch_intake(path)?;
+    // There is no cross-database transaction: app.db settings and library.db
+    // roots are separate files. Commit the settings first (one app.db
+    // transaction), then replace both roots in one library.db transaction. If
+    // the roots fail, restore the previous settings so the request leaves no
+    // partial configuration behind. A crash between the two commits can still
+    // leave settings ahead of roots; the next directory edit repairs it, and a
+    // half-updated *root set* is impossible because both roots commit together.
+    let previous = {
+        let prepared = (|| -> Result<_, store::StoreError> {
+            let previous = (
+                store.get_scrape_config()?.setting,
+                store.transfer_mode()?,
+                store.scrape_enabled()?,
+                store.watch_intake()?,
+                store.watch_inplace()?,
+            );
+            // Compose one final setting: Movie first, then TV — the shared
+            // `naming_entry_dir` follows the existing "TV overrides" rule.
+            let mut setting = previous.0.clone();
+            apply_legacy_naming(&mut setting, MediaKind::Movie, body.movie_naming.trim());
+            apply_legacy_naming(&mut setting, MediaKind::Tv, body.tv_naming.trim());
+            store.app_write(|s| {
+                s.set_transfer_mode(&body.transfer_mode)?;
+                s.set_scrape_enabled(body.scrape)?;
+                if let Some(path) = body.watch_intake.as_deref() {
+                    s.set_watch_intake(path)?;
+                }
+                if let Some(path) = body.watch_inplace.as_deref() {
+                    s.set_watch_inplace(path)?;
+                }
+                s.save_scrape_config(&setting)?;
+                Ok(())
+            })?;
+            Ok(previous)
+        })();
+        match prepared {
+            Ok(previous) => previous,
+            Err(error) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                );
+            }
         }
-        if let Some(path) = body.watch_inplace.as_deref() {
-            s.set_watch_inplace(path)?;
+    };
+    if let Err(error) = store.set_library_roots(&[
+        (MediaKind::Movie, body.movie_root.trim()),
+        (MediaKind::Tv, body.tv_root.trim()),
+    ]) {
+        let (scrape, mode, enabled, intake, inplace) = previous;
+        if let Err(restore) = store.app_write(|s| {
+            s.set_transfer_mode(&mode)?;
+            s.set_scrape_enabled(enabled)?;
+            s.set_watch_intake(intake.as_deref().unwrap_or(""))?;
+            s.set_watch_inplace(inplace.as_deref().unwrap_or(""))?;
+            s.save_scrape_config(&scrape)?;
+            Ok(())
+        }) {
+            tracing::error!(
+                %error,
+                restore = %restore,
+                "目录根写入失败，且设置回滚失败"
+            );
         }
-        s.save_scrape_config(&setting)?;
-        Ok(())
-    });
-    if let Err(error) = applied {
         return err(
             StatusCode::INTERNAL_SERVER_ERROR,
             "store.error",

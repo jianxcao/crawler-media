@@ -19,6 +19,15 @@ pub(crate) async fn start_session(
     axum::Extension(token): axum::Extension<String>,
     Json(body): Json<Value>,
 ) -> Response {
+    if let Some(value) = body.get("start_ms") {
+        if !value.as_i64().is_some_and(|start| start >= 0) {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "playback.invalid",
+                "start_ms 必须是非负整数",
+            );
+        }
+    }
     let (row, media, resolved, tracks) = {
         let store = state.store.lock();
         let Some((row, media, resolved)) = resolve_playback_for(&store, &body, user_id) else {

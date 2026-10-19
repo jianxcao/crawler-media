@@ -263,6 +263,18 @@ impl TypedItemId {
             Self::Unit { media, .. } => *media,
         }
     }
+
+    /// Resolve the work a protocol-spelled id names.
+    ///
+    /// Accepts the same spellings everywhere a client-supplied id is read:
+    /// typed wire ids (`w1_…`, `s1_…`, `u1_…`), hyphenated uuids and compact
+    /// undashed uuids. This is the single spelling set for protocol ids.
+    pub fn protocol_media_id(s: &str) -> Option<MediaId> {
+        match Self::from_wire_string(s) {
+            Some(item) => Some(item.media_id()),
+            None => s.parse().ok(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

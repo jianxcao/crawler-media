@@ -86,6 +86,17 @@ fn dedup(ids: &[MediaId]) -> Vec<MediaId> {
     out
 }
 
+/// A stored coordinate is the canonical `-1` whole-media unit or a real
+/// season/episode number. The API contract reports a whole-media target with
+/// null coordinates; a missing coordinate keeps the historical `0`.
+fn target_coordinate(number: Option<i32>) -> Value {
+    match number {
+        Some(-1) => Value::Null,
+        Some(number) => json!(number),
+        None => json!(0),
+    }
+}
+
 /// 纯函数：与旧 `media_target_json` 输出逐字一致，不再查库。
 pub(crate) fn media_target(
     read: &PlaybackRead,
@@ -112,8 +123,8 @@ pub(crate) fn media_target(
         "title": media.title,
         "year": media.year,
         "poster_url": poster_url,
-        "season_number": season.unwrap_or(0),
-        "episode_number": episode.unwrap_or(0),
+        "season_number": target_coordinate(season),
+        "episode_number": target_coordinate(episode),
         "episode_title": null,
     })
 }

@@ -76,6 +76,14 @@ impl Store {
             ensure_library_writable(&tx, &library_id)?;
             ensure_media_writable(&tx, row.media_id)?;
             let artwork = crate::files::DiscoveredArtwork::discover(Path::new(&row.path));
+            // The scan is the only observer of the bytes; record the stat facts here
+            // so Library stats and size sorting do not stay at zero.
+            let metadata = std::fs::metadata(&row.path).ok();
+            let ns = |time: std::io::Result<std::time::SystemTime>| {
+                time.ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|elapsed| elapsed.as_nanos() as i64)
+            };
             let file = domain::LibraryFile {
                 file_id: row.id,
                 library_id: library_id.parse::<LibraryId>()?,
@@ -89,10 +97,10 @@ impl Store {
                 },
                 presence: domain::FilePresence::Present,
                 publication: domain::FilePublication::Published,
-                size_bytes: None,
-                stat_known: false,
-                created_ns: None,
-                modified_ns: None,
+                size_bytes: metadata.as_ref().map(|m| m.len()),
+                stat_known: metadata.is_some(),
+                created_ns: metadata.as_ref().and_then(|m| ns(m.created())),
+                modified_ns: metadata.as_ref().and_then(|m| ns(m.modified())),
                 source_digest: None,
                 source_path: None,
                 transfer_mode: None,
@@ -115,6 +123,11 @@ impl Store {
                 row.episode.map(|e| e as i32).unwrap_or(-1),
             )];
             sync_coverage(&tx, &file, &units)?;
+            if file.publication == domain::FilePublication::Published {
+                // The scan is a publication source: record the NFO sidecar here so
+                // detail/card metadata sees the same inputs as a Transfer publish.
+                crate::metadata::nfo_input::record_nfo_input(&tx, &file)?;
+            }
             enqueue_probe(&tx, file.file_id, now_ms)?;
             let change = affected
                 .entry((library_id, row.media_id))

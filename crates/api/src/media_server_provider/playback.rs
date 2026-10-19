@@ -135,18 +135,43 @@ pub(super) fn report_event(
         target_ledger_id,
         event_kind,
     );
+    if decision == crate::playback_events::EventDecision::Ignore {
+        return Ok(());
+    }
+    // Legacy clients omit `PlaySessionId`. Keep their historical semantics for
+    // classification (the no-id branch above), but persist through a real
+    // issued id: reuse the active session for this target, else issue one.
+    // Clients that do send an id are never rewritten here, so an unknown id is
+    // still rejected by classification.
+    let session_id = match identity.play_session_id {
+        Some(sid) => Some(sid),
+        None => {
+            let reused = prior
+                .as_ref()
+                .filter(|session| same_target(session, &target))
+                .and_then(|session| session.play_session_id.clone());
+            match reused {
+                Some(sid) => Some(sid),
+                None => Some(
+                    store
+                        .issue_play_session(user_id, &client.device_id, target_ledger_id, now)
+                        .map_err(|error| error.to_string())?,
+                ),
+            }
+        }
+    };
 
     store
         .playback_write(|store| {
             match decision {
                 crate::playback_events::EventDecision::Ignore => return Ok(()),
                 crate::playback_events::EventDecision::Start => {
-                    if let Some(ref sid) = identity.play_session_id {
+                    if let Some(sid) = &session_id {
                         store.activate_play_session(user_id, &client.device_id, sid)?;
                     }
                 }
                 crate::playback_events::EventDecision::Stop => {
-                    if let Some(ref sid) = identity.play_session_id {
+                    if let Some(sid) = &session_id {
                         store.close_play_session_id(user_id, &client.device_id, sid)?;
                     }
                 }
@@ -161,7 +186,7 @@ pub(super) fn report_event(
                 paused,
                 &client,
                 event,
-                identity.play_session_id.as_deref(),
+                session_id.as_deref(),
                 identity.event_sequence,
                 now,
                 now_ms,
@@ -288,8 +313,8 @@ fn current_session(
 
 fn same_target(session: &SessionRow, target: &PlaybackTarget) -> bool {
     session.media_id == target.media.id
-        && session.season == unit_value(target.season)
-        && session.episode == unit_value(target.episode)
+        && session.season.unwrap_or(UNIT_WHOLE) == unit_value(target.season).unwrap_or(UNIT_WHOLE)
+        && session.episode.unwrap_or(UNIT_WHOLE) == unit_value(target.episode).unwrap_or(UNIT_WHOLE)
 }
 
 fn persist_event_position(

@@ -60,8 +60,9 @@ pub(crate) fn retry_queued_deletions(
     store: &parking_lot::Mutex<Store>,
 ) -> Result<(), store::StoreError> {
     let now = crate::job_loop::unix_now();
-    // Review M-3: only rows whose backoff expired.
-    let queued = store.lock().list_due_file_deletions(now)?;
+    // Review M-3: only rows whose backoff expired. The Store lock is released
+    // at the end of this statement, before any filesystem work below.
+    let queued = { store.lock().list_due_file_deletions(now)? };
     for entry in queued {
         let path = entry.path.as_str();
         match queued_path_was_reused(store, &entry) {

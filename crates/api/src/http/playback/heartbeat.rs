@@ -215,6 +215,12 @@ fn next_session(
     }
 }
 
+fn session_matches_heartbeat(session: &SessionRow, heartbeat: &Heartbeat<'_>) -> bool {
+    session.media_id == heartbeat.media_id
+        && session.season.unwrap_or(UNIT_WHOLE) == heartbeat.season
+        && session.episode.unwrap_or(UNIT_WHOLE) == heartbeat.episode
+}
+
 fn heartbeat_matches_row(heartbeat: &Heartbeat<'_>, row: &domain::LedgerRow) -> bool {
     row.media_id == heartbeat.media_id
         && row.season.map(|value| value as i32) == (heartbeat.season != UNIT_WHOLE).then_some(heartbeat.season)
@@ -225,6 +231,7 @@ fn persist_heartbeat(
     store: &crate::Store,
     heartbeat: &Heartbeat<'_>,
     device: &str,
+    resolved_session_id: Option<&str>,
 ) -> Result<(UnitState, bool), StoreError> {
     // The row may have been canonically rebound after initial selection. Never
     // persist an event against the stale Media/unit captured by that selection.
@@ -312,13 +319,23 @@ fn persist_heartbeat(
                 admin_ended,
             ));
         }
+        _ => {}
+    }
+    // Legacy clients omit `play_session_id`: classify with the no-id semantics
+    // above, but persist through a real issued id resolved outside this write
+    // transaction (issuing opens its own immediate transaction). A supplied
+    // unknown id was already rejected by classification.
+    let supplied_session_id = play_session_id.is_some();
+    let session_id = play_session_id.or_else(|| resolved_session_id.map(str::to_string));
+    match decision {
+        crate::playback_events::EventDecision::Ignore => {}
         crate::playback_events::EventDecision::Start => {
-            if let Some(ref sid) = play_session_id {
+            if let Some(sid) = &session_id {
                 store.activate_play_session(heartbeat.user_id, device, sid)?;
             }
         }
         crate::playback_events::EventDecision::Stop => {
-            if let Some(ref sid) = play_session_id {
+            if let Some(sid) = &session_id {
                 store.close_play_session_id(heartbeat.user_id, device, sid)?;
             }
         }
@@ -340,12 +357,13 @@ fn persist_heartbeat(
             closing.watched_ms = next.watched_ms;
             closing.position_ms = next.position_ms;
             closing.duration_ms = next.duration_ms;
+            closing.play_session_id = session_id;
             store.upsert_session(&closing)?;
         }
     } else if !admin_ended {
         let mut to_save = next;
-        if play_session_id.is_some() {
-            to_save.play_session_id = play_session_id;
+        to_save.play_session_id = session_id;
+        if supplied_session_id {
             to_save.last_event_sequence = event_sequence;
         }
         store.upsert_session(&to_save)?;
@@ -357,7 +375,33 @@ fn persist_heartbeat(
 }
 
 fn apply_heartbeat(store: &crate::Store, heartbeat: &Heartbeat<'_>, device: &str) -> Response {
-    match store.playback_write(|store| persist_heartbeat(store, heartbeat, device)) {
+    // Resolve a session id for legacy clients before opening the playback write
+    // transaction: issuing opens its own immediate transaction and must not nest.
+    let resolved_session_id = if heartbeat.body["play_session_id"].as_str().is_some() {
+        None
+    } else {
+        let reusable = store
+            .get_session(heartbeat.user_id, device)
+            .ok()
+            .flatten()
+            .filter(|session| session_matches_heartbeat(session, heartbeat))
+            .and_then(|session| session.play_session_id);
+        match reusable {
+            Some(sid) => Some(sid),
+            None => heartbeat
+                .ledger_id
+                .parse::<domain::LedgerId>()
+                .ok()
+                .and_then(|ledger_id| {
+                    store
+                        .issue_play_session(heartbeat.user_id, device, ledger_id, heartbeat.now)
+                        .ok()
+                }),
+        }
+    };
+    match store.playback_write(|store| {
+        persist_heartbeat(store, heartbeat, device, resolved_session_id.as_deref())
+    }) {
         Ok((unit, ended)) => ok(watch_state_json(&unit, ended)).into_response(),
         Err(error) => persistence_error(&error, heartbeat.user_id, device),
     }
@@ -393,7 +437,7 @@ mod tests {
             kind: domain::MediaKind::Movie, ledger_id: ledger.id.to_string(),
             season: UNIT_WHOLE, episode: UNIT_WHOLE, duration_ms: Some(1000), now: 10, now_ms: 10_000 };
 
-        let (_, ended) = persist_heartbeat(&store, &heartbeat, "race").unwrap();
+        let (_, ended) = persist_heartbeat(&store, &heartbeat, "race", None).unwrap();
 
         assert!(ended);
         assert!(store.unit_state(user_id, provisional.id, UNIT_WHOLE, UNIT_WHOLE).unwrap().is_none());

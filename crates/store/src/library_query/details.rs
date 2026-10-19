@@ -281,7 +281,9 @@ impl Store {
                 episodes.insert((row.season, row.episode), row);
             }
         }
-        for (key, file_ids) in self.episode_files(library_id, media_id, season)? {
+        for (key, (file_ids, display_path, still_path)) in
+            self.episode_files(library_id, media_id, season)?
+        {
             let entry = episodes.entry(key).or_insert_with(|| LibraryEpisode {
                 season: key.0,
                 episode: key.1,
@@ -295,6 +297,19 @@ impl Store {
                 file_ids: Vec::new(),
             });
             entry.owned = true;
+            // Without catalog/NFO metadata the episode name falls back to the file name.
+            if entry.title.is_none() {
+                entry.title = std::path::Path::new(&display_path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string);
+            }
+            if entry.still_url.is_none()
+                && still_path.is_some()
+                && let Some(file_id) = entry.file_ids.first().or_else(|| file_ids.first())
+            {
+                entry.still_url = Some(format!("/stills/{file_id}"));
+            }
             entry.file_ids.extend(file_ids);
         }
         Ok(episodes.into_values().collect())
@@ -341,7 +356,7 @@ impl Store {
         library_id: LibraryId,
         media_id: MediaId,
         season: Option<u32>,
-    ) -> Result<BTreeMap<(u32, u32), Vec<LedgerId>>, StoreError> {
+    ) -> Result<BTreeMap<(u32, u32), (Vec<LedgerId>, String, Option<String>)>, StoreError> {
         let mut bindings = Bindings::new();
         let library = bindings.push(library_id.to_string().into());
         let media = bindings.push(media_id.to_string().into());
@@ -351,7 +366,7 @@ impl Store {
             filter = format!(" AND u.season = {season_ph}");
         }
         let sql = format!(
-            "SELECT u.season, u.episode, f.file_id FROM library_file_units u JOIN library_files f ON f.file_id = u.file_id AND f.library_id = u.library_id WHERE f.library_id = {library} AND f.media_id = {media} AND f.publication_state = 'published' AND u.season >= 0 AND u.episode >= 0{filter} ORDER BY u.season, u.episode, f.file_id"
+            "SELECT u.season, u.episode, f.file_id, f.display_path, f.still_path FROM library_file_units u JOIN library_files f ON f.file_id = u.file_id AND f.library_id = u.library_id WHERE f.library_id = {library} AND f.media_id = {media} AND f.publication_state = 'published' AND u.season >= 0 AND u.episode >= 0{filter} ORDER BY u.season, u.episode, f.file_id"
         );
         let mut statement = self.library.prepare(&sql)?;
         let rows = statement.query_map(params_from_iter(bindings.values()), |row| {
@@ -359,18 +374,24 @@ impl Store {
                 row.get::<_, i64>(0)?,
                 row.get::<_, i64>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         })?;
-        let mut by_unit: BTreeMap<(u32, u32), Vec<LedgerId>> = BTreeMap::new();
+        let mut by_unit: BTreeMap<(u32, u32), (Vec<LedgerId>, String, Option<String>)> =
+            BTreeMap::new();
         for row in rows {
-            let (season, episode, file_id) = row?;
+            let (season, episode, file_id, display_path, still_path) = row?;
             let Ok(file_id) = LedgerId::from_str(&file_id) else {
                 continue;
             };
-            by_unit
+            let entry = by_unit
                 .entry((season.max(0) as u32, episode.max(0) as u32))
-                .or_default()
-                .push(file_id);
+                .or_insert_with(|| (Vec::new(), display_path, still_path.clone()));
+            if entry.2.is_none() {
+                entry.2 = still_path;
+            }
+            entry.0.push(file_id);
         }
         Ok(by_unit)
     }

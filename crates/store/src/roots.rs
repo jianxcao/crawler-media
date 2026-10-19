@@ -23,8 +23,9 @@ pub struct LibraryRoot {
 impl Store {
     pub fn list_library_roots(&self) -> Result<Vec<LibraryRoot>, StoreError> {
         let mut stmt = self.library.prepare(
-            "SELECT r.root_id, l.kind, r.display_path, l.is_default, r.library_id, r.sort_order,
-                    r.enabled
+            "SELECT r.root_id, l.kind, r.display_path,
+                    (l.is_default = 1 AND r.sort_order = 0) AS primary_root,
+                    r.library_id, r.sort_order, r.enabled
              FROM library_roots r
              JOIN libraries l ON r.library_id = l.library_id
              ORDER BY l.is_default DESC, r.sort_order, r.display_path",

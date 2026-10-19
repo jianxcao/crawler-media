@@ -366,11 +366,18 @@ impl Store {
                      WHERE f.file_id = ?1 LIMIT 1",
                     [&row.ledger_id],
                     |record| {
+                        // `library_file_units` stores the canonical whole-media unit as
+                        // `(-1, -1)`, while `LedgerRow` expresses it as `None`. Normalise
+                        // through `u32` so both representations compare equal.
                         Ok((
                             record.get::<_, String>(0)?,
                             record.get::<_, String>(1)?,
-                            record.get::<_, Option<u32>>(2)?,
-                            record.get::<_, Option<u32>>(3)?,
+                            record
+                                .get::<_, Option<i64>>(2)?
+                                .and_then(|value| u32::try_from(value).ok()),
+                            record
+                                .get::<_, Option<i64>>(3)?
+                                .and_then(|value| u32::try_from(value).ok()),
                         ))
                     },
                 )
@@ -602,6 +609,77 @@ mod tests {
         };
         store.insert_ledger(&row).unwrap();
         (library, row)
+    }
+
+    #[test]
+    fn movie_library_removal_accepts_the_whole_media_unit() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("data")).unwrap();
+        let root = temp.path().join("movies");
+        std::fs::create_dir_all(&root).unwrap();
+        let library = store
+            .create_library(
+                MediaKind::Movie,
+                "Movies",
+                &[root.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+        let media = Media {
+            id: MediaId::new(),
+            kind: MediaKind::Movie,
+            title: "Whole".into(),
+            year: None,
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        };
+        store.insert_media(&media).unwrap();
+        let row = LedgerRow {
+            id: LedgerId::new(),
+            media_id: media.id,
+            path: root.join("Whole.mkv").display().to_string(),
+            season: None,
+            episode: None,
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: QualitySource::Release,
+            confidence: Confidence::High,
+            filter_score: None,
+        };
+        // A movie publishes the canonical whole-media unit, stored as (-1, -1).
+        store.insert_ledger(&row).unwrap();
+        let user = UserId::new();
+        store
+            .upsert_unit(user, media.id, -1, -1, 1_000, None, None, None, None, None, false, 1)
+            .unwrap();
+
+        let removal = store.begin_library_removal(&library.id).unwrap();
+        store
+            .set_removal_state(&removal.operation_id, "cleaning", None)
+            .unwrap();
+        let done = store.clean_library_removal(&removal.operation_id).unwrap();
+
+        assert_eq!(done.state, "succeeded");
+        assert_eq!(done.removed_ledger_count, 1);
+        assert!(store.get_library(&library.id).unwrap().is_none());
+        assert!(store.ledger_by_path(&row.path).unwrap().is_none());
+        assert!(store.get_media(media.id).unwrap().is_some());
+        assert_eq!(
+            store
+                .unit_state(user, media.id, -1, -1)
+                .unwrap()
+                .expect("playback facts outlive the Library")
+                .position_ms,
+            1_000
+        );
     }
 
     #[test]

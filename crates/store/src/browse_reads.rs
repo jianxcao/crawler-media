@@ -260,9 +260,9 @@ impl Store {
     ) -> Result<Vec<LedgerRow>, StoreError> {
         match parent_id {
             Some(id) if ownership.library(id).is_some() => self.ledger_candidates_for_library(ownership, id),
-            Some(id) => match id.parse::<MediaId>() {
-                Ok(media_id) => self.ledger_for_media(media_id),
-                Err(_) => Ok(Vec::new()),
+            Some(id) => match domain::TypedItemId::protocol_media_id(id) {
+                Some(media_id) => self.ledger_for_media(media_id),
+                None => Ok(Vec::new()),
             },
             None => self.list_ledger(),
         }

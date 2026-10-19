@@ -297,12 +297,12 @@ fn execute(
             &store, &context.subscribe, &library_lease, &plan.fingerprint, &plan,
         ).map_err(ApiError::internal)?;
     }
-    let recorder = crate::worker::transfer::PlannedPublicationRecorder {
-        recorder: crate::worker::transfer::PublicationRecorder {
+    let recorder = crate::worker::transfer::PlannedPublicationRecorder::new(
+        crate::worker::transfer::PublicationRecorder {
             state, subscribe: &context.subscribe, lease: &library_lease, fingerprint: plan.fingerprint.clone(),
         },
-        plan: &plan,
-    };
+        &plan,
+    );
     let overlap = crate::worker::finish_search::overlap_policy(state);
     let absolute = crate::season_check::absolute_map(
         state,
@@ -344,9 +344,12 @@ fn execute(
     }
     library_lease.control().check().map_err(|e| ApiError::internal(e.to_string()))?;
     {
+        // The transfer above published this round's file rows, so the scoped file
+        // fingerprint legitimately moved. Re-check only the parts publication does
+        // not touch (Library lifecycle, roots, transfer settings, Subscribe).
         let store = state.store.lock();
-        crate::worker::transfer::validate_transfer_plan(
-            &store, &context.subscribe, &library_lease, &plan.fingerprint, &plan,
+        crate::worker::transfer::validate_committed_transfer_plan(
+            &store, &context.subscribe, &library_lease, &plan,
         ).map_err(ApiError::internal)?;
     }
     outcome.facts.retain_owned();
@@ -516,9 +519,11 @@ fn persist(
             "目标 Library 正在删除或已不存在",
         ));
     }
-    crate::worker::transfer::validate_transfer_plan(
+    // The transfer above published this round's file rows; the scoped file
+    // fingerprint legitimately moved. Only publication-independent facts remain.
+    crate::worker::transfer::validate_committed_transfer_plan(
         &store, &store.get_subscribe(id)?.ok_or_else(|| ApiError::internal("Subscribe not found".into()))?,
-        lease, &plan.fingerprint, plan,
+        lease, plan,
     ).map_err(ApiError::internal)?;
     for (row, mode) in outcome.ledger.iter().zip(modes.iter()) {
         let source_path = outcome.ledger_sources.iter()
