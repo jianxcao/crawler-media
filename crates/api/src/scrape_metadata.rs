@@ -317,10 +317,7 @@ fn scrape_tv_episodes_and_nfos(
 ) -> Vec<(PathBuf, Option<String>)> {
     let tmdb_meta = fetch_tmdb_metadata(state, media.kind, tmdb_id).ok().flatten();
     if let Some(meta) = &tmdb_meta {
-        let rating_val = meta.vote_count.filter(|&c| c >= 5).and_then(|_| meta.rating.as_ref().and_then(|r| r.parse::<f64>().ok()));
-        let studio_name = meta.studios.first().map(String::as_str);
-        let studio_logo = meta.studio_logo.as_deref();
-        let _ = state.store.lock().update_library_items_metadata_sort(media.id, rating_val, meta.release_date.as_deref(), studio_name, studio_logo);
+        record_scraped_display(state, media.id, meta);
     }
     let show_nfo = tmdb_meta.as_ref().map(|meta| nfo_from_tmdb(media, meta)).unwrap_or_default();
     let preferred_lang = preferred_language(state);
@@ -461,6 +458,7 @@ fn scrape_tv_stills_with(
                 }
             }
         }
+        crate::poster_fetch::record_discovered_artwork(state, &ep_path);
     }
 }
 
@@ -630,5 +628,77 @@ pub(crate) fn scrape_movie_fanart(
         Err(error) => {
             tracing::warn!(%error, "初始化 FanartClient 失败");
         }
+    }
+}
+
+/// Persist the display facts a Scrape observed (rating, release date, studio, logo).
+///
+/// They are written with the adopted metadata and the affected cards are reduced in the
+/// same transaction, so the poster wall and the detail view read one source of truth.
+pub(crate) fn record_scraped_display(
+    state: &crate::management::ApiState,
+    media_id: domain::MediaId,
+    meta: &media::ItemMeta,
+) {
+    let rating = meta
+        .vote_count
+        .filter(|&count| count >= 5)
+        .and_then(|_| meta.rating.as_ref().and_then(|raw| raw.parse::<f64>().ok()));
+    let locale = metadata_locale(state);
+    let display = ::store::metadata::ScrapedDisplay {
+        rating,
+        release_date: meta.release_date.as_deref(),
+        studio: meta.studios.first().map(String::as_str),
+        studio_logo: meta.studio_logo.as_deref(),
+    };
+    if let Err(error) = state
+        .store
+        .lock()
+        .record_scraped_display(media_id, &locale, display)
+    {
+        tracing::error!(%error, %media_id, "记录刮削展示字段失败");
+    }
+}
+
+/// Locale the instance displays metadata in (`settings.metadata.language`).
+pub(crate) fn metadata_locale(state: &crate::management::ApiState) -> String {
+    state
+        .store
+        .lock()
+        .get_setting(crate::settings_keys::METADATA_LANGUAGE)
+        .ok()
+        .flatten()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "zh-CN".to_string())
+}
+
+/// Same as [`record_scraped_display`] but reading the values the NFO writer uses.
+///
+/// The scan path may have rewritten the display facts through the NFO-shaped struct
+/// (`premiered`/`studios`/`rating` from the NFO meta), so the card must use those exact
+/// values instead of re-deriving them.
+pub(crate) fn record_scraped_display_meta(
+    state: &crate::management::ApiState,
+    media_id: domain::MediaId,
+    meta: &media::ItemMeta,
+    nfo: &library::NfoMeta,
+) {
+    let rating = meta
+        .vote_count
+        .filter(|&count| count >= 5)
+        .and_then(|_| nfo.rating.as_ref().and_then(|raw| raw.parse::<f64>().ok()));
+    let locale = metadata_locale(state);
+    let display = ::store::metadata::ScrapedDisplay {
+        rating,
+        release_date: nfo.premiered.as_deref(),
+        studio: nfo.studios.first().map(String::as_str),
+        studio_logo: nfo.studio_logo.as_deref(),
+    };
+    if let Err(error) = state
+        .store
+        .lock()
+        .record_scraped_display(media_id, &locale, display)
+    {
+        tracing::error!(%error, %media_id, "记录刮削展示字段失败");
     }
 }

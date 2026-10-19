@@ -1,4 +1,4 @@
-use domain::{LedgerRow, Media, MediaKind, UserId};
+use domain::{Media, UserId};
 use media_server::provider::{PlaybackClientInfo, PlaybackEvent};
 
 use crate::store::{SessionRow, Store, StoreError, UNIT_WHOLE, UnitState};
@@ -18,45 +18,34 @@ pub(super) fn resolve_target(
     user_id: UserId,
     id: &str,
 ) -> Result<Option<PlaybackTarget>, String> {
-    let store = provider.state.store.lock();
-    let Some(row) = crate::http::media_visibility::resolve_visible_row(&store, id, Some(user_id))
-    else {
+    let entry = {
+        let store = provider.state.store.lock();
+        super::items::resolve_entry(&store, Some(user_id), id)?
+    };
+    let Some(entry) = entry else {
         return Ok(None);
     };
-    let media = store
-        .get_media(row.media_id)
+    let (season, episode) = (entry.unit.0, entry.unit.1);
+    let duration_ms = {
+        let store = provider.state.store.lock();
+        crate::http::playback::movie_compatible_state(
+            &store,
+            user_id,
+            entry.media.id,
+            season,
+            episode,
+        )
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("media {} is missing", row.media_id))?;
-    let (season, episode) = playback_unit(&media, &row);
-    let duration_ms =
-        crate::http::playback::movie_compatible_state(&store, user_id, media.id, season, episode)
-            .map_err(|error| error.to_string())?
-            .and_then(|unit| unit.duration_ms)
-            .or_else(|| {
-                store
-                    .get_file_meta(&row.id.to_string())
-                    .ok()
-                    .flatten()
-                    .and_then(|tracks| tracks.video.and_then(|video| video.duration_secs))
-                    .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
-                    .map(|seconds| (seconds * 1000.0) as i64)
-            });
+        .and_then(|unit| unit.duration_ms)
+        .or(entry.file.duration_ms)
+    };
     Ok(Some(PlaybackTarget {
-        media,
-        ledger_id: row.id.to_string(),
+        media: entry.media,
+        ledger_id: entry.file.file_id.to_string(),
         season,
         episode,
         duration_ms,
     }))
-}
-
-fn playback_unit(media: &Media, row: &LedgerRow) -> (i32, i32) {
-    if media.kind == MediaKind::Tv {
-        if let (Some(season), Some(episode)) = (row.season, row.episode) {
-            return (season as i32, episode as i32);
-        }
-    }
-    (UNIT_WHOLE, UNIT_WHOLE)
 }
 
 fn persist_position(

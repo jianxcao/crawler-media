@@ -292,6 +292,7 @@ fn heavy_snapshot(
         whole_unit,
     } = item;
     let MediaItemSnapshot {
+        file,
         row,
         media,
         ticks,
@@ -333,6 +334,7 @@ fn heavy_snapshot(
     let date_created =
         date_created.or_else(|| paths_date_created(browse, is_series, &stat_paths));
     Ok(MediaItemSnapshot {
+        file,
         row,
         media,
         ticks,

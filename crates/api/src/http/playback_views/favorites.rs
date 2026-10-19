@@ -218,14 +218,26 @@ fn favorite_tier(
     let Some(media) = store.get_media(media_id).ok().flatten() else {
         return WatchTier::default();
     };
-    let rows = all_rows.iter().filter(|row| row.media_id == media_id);
-    match crate::http::library::selection::watch_state_for(store, user_id, &media, rows) {
-        Ok(state) => WatchTier::of(state.seen, state.played),
-        Err(error) => {
-            tracing::warn!(%error, %media_id, "收藏行的观看状态读取失败，未看优先按未看处理");
-            WatchTier::default()
+    let mut seen = false;
+    let mut played = false;
+    if let Ok(Some(whole)) = store.unit_state(user_id, media.id, crate::store::UNIT_WHOLE, crate::store::UNIT_WHOLE) {
+        played |= whole.played;
+        seen |= whole.played || whole.position_ms > 0 || whole.play_count > 0;
+    }
+    for row in all_rows.iter().filter(|row| row.media_id == media_id) {
+        if let (Some(season), Some(episode)) = (row.season, row.episode) {
+            if let Ok(Some(unit)) = store.unit_state(user_id, media.id, season as i32, episode as i32) {
+                seen |= unit.played || unit.position_ms > 0 || unit.play_count > 0;
+            }
         }
     }
+    if media.kind == domain::MediaKind::Movie && !played {
+        if let Ok(Some(legacy)) = store.unit_state(user_id, media.id, 0, 0) {
+            played |= legacy.played;
+            seen |= legacy.played || legacy.position_ms > 0 || legacy.play_count > 0;
+        }
+    }
+    WatchTier::of(seen, played)
 }
 
 /// 排序。`unwatched_first` 开着时先按观看分级（未看 → 在看 → 已看完），段内仍是这一档

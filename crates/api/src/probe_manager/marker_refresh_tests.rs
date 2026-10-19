@@ -2,6 +2,17 @@
 fn season_refresh_keeps_old_markers_until_success_then_clears_empty_result() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    store
+        .lock()
+        .create_library(
+            MediaKind::Tv,
+            "Fixture",
+            &[tmp.path().to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
     let media_id = MediaId::new();
     store
         .lock()

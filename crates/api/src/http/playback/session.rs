@@ -9,8 +9,8 @@ use serde_json::{Value, json};
 use crate::http::{err, ok};
 use crate::management::ApiState;
 
-use super::selection::{row_for, start_position};
-use super::{direct_decision, movie_compatible_unit};
+use super::selection::resolve_playback_for;
+use super::direct_decision;
 
 /// POST /playback/sessions — direct decision with session_id null (tier 0).
 pub(crate) async fn start_session(
@@ -19,14 +19,13 @@ pub(crate) async fn start_session(
     axum::Extension(token): axum::Extension<String>,
     Json(body): Json<Value>,
 ) -> Response {
-    let (row, media, watch, tracks) = {
+    let (row, media, resolved, tracks) = {
         let store = state.store.lock();
-        let Some((row, media, season, episode)) = row_for(&store, &body, Some(user_id)) else {
+        let Some((row, media, resolved)) = resolve_playback_for(&store, &body, user_id) else {
             return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
         };
-        let watch = movie_compatible_unit(&store, user_id, media.id, season, episode);
         let tracks = store.get_file_meta(&row.id.to_string()).ok().flatten();
-        (row, media, watch, tracks)
+        (row, media, resolved, tracks)
     };
     let decision = direct_decision(&row, &body, tracks.as_ref());
     if decision["outcome"].as_str() == Some("rejected") {
@@ -36,13 +35,7 @@ pub(crate) async fn start_session(
             "设备不支持直接播放该视频编码，当前服务未配置实时转码",
         );
     }
-    let start_ms = match start_position(&body, &watch) {
-        Ok(position) => position,
-        Err(message) => {
-            tracing::error!(%message, start_ms = ?body.get("start_ms"), "Playback start rejected");
-            return err(StatusCode::BAD_REQUEST, "playback.invalid", message);
-        }
-    };
+    let start_ms = resolved.start_ms;
     let _ = crate::http::library::ensure_probe_enqueued(&state, &row);
     let device_id = body.get("device_id").and_then(|v| v.as_str()).unwrap_or("web-player");
     // 播放域时间一律走注入时钟。`issue_play_session` 的 `issued_at` 是**秒**
@@ -77,12 +70,26 @@ pub(crate) async fn start_session(
                 .collect()
         })
         .unwrap_or_default();
+    let resume_status = match resolved.status {
+        crate::store::ResumeStatus::Compatible => "compatible",
+        crate::store::ResumeStatus::SourceChanged => "source_changed",
+        crate::store::ResumeStatus::NoProgress => "no_progress",
+        crate::store::ResumeStatus::AlreadyPlayed => "already_played",
+    };
+    let watch = json!({
+        "position_ms": resolved.start_ms,
+        "played": resolved.status == crate::store::ResumeStatus::AlreadyPlayed,
+        "duration_ms": resolved.duration_ms,
+        "audio_track": resolved.audio_track,
+        "subtitle_track": resolved.subtitle_track,
+    });
     ok(json!({
         "decision": decision,
         "session_id": null,
         "play_session_id": play_session_id,
         "stream_url": stream_url,
         "start_ms": start_ms,
+        "resume_status": resume_status,
         "subtitle_urls": subtitle_urls,
         "hw_backend": null,
         "chapters": chapters,

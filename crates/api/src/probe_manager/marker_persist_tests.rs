@@ -2,6 +2,16 @@
 fn fresh_fingerprint_replaces_stale_unlocked_intro_marker() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
+    store
+        .create_library(
+            MediaKind::Tv,
+            "Fixture",
+            &[tmp.path().to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
     let media_id = domain::MediaId::new();
     store
         .insert_media(&domain::Media {
@@ -91,8 +101,21 @@ fn fingerprint_marker(media_id: domain::MediaId) -> crate::store::StoredMediaMar
     }
 }
 
-fn tv_episode(tmp: &tempfile::TempDir) -> (Store, domain::MediaId, LedgerRow) {
+fn tv_episode(
+    tmp: &tempfile::TempDir,
+) -> (Store, domain::MediaId, LedgerRow, crate::store::Library) {
     let store = Store::open(tmp.path()).unwrap();
+    // `library_files` 只能登记在某个 Library 的根之下；文件放在 tmp 根，库也以它生根。
+    let library = store
+        .create_library(
+            MediaKind::Tv,
+            "Fixture",
+            &[tmp.path().to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
     let media_id = domain::MediaId::new();
     store
         .insert_media(&domain::Media {
@@ -125,7 +148,7 @@ fn tv_episode(tmp: &tempfile::TempDir) -> (Store, domain::MediaId, LedgerRow) {
         filter_score: None,
     };
     store.insert_ledger(&row).unwrap();
-    (store, media_id, row)
+    (store, media_id, row, library)
 }
 
 /// 假 ffmpeg：把参数记到固定文件并写出一张空图。路径写死在脚本里，
@@ -180,11 +203,7 @@ fn chapter_service(
 #[tokio::test]
 async fn fingerprint_marker_extracts_scene_frames_when_library_enables_them() {
     let tmp = tempfile::tempdir().unwrap();
-    let (store, media_id, row) = tv_episode(&tmp);
-    let root = tmp.path().to_str().unwrap().to_string();
-    let library = store
-        .create_library(MediaKind::Tv, "国语剧", &[&root], "everyone", true, &[])
-        .unwrap();
+    let (store, media_id, row, library) = tv_episode(&tmp);
     store
         .set_library_switch_settings(&library.id, None, None, Some(true), None, None)
         .unwrap();
@@ -221,11 +240,7 @@ async fn fingerprint_marker_extracts_scene_frames_when_library_enables_them() {
 #[test]
 fn fingerprint_marker_skips_scene_frames_when_library_disables_them() {
     let tmp = tempfile::tempdir().unwrap();
-    let (store, media_id, row) = tv_episode(&tmp);
-    let root = tmp.path().to_str().unwrap().to_string();
-    let library = store
-        .create_library(MediaKind::Tv, "国语剧", &[&root], "everyone", true, &[])
-        .unwrap();
+    let (store, media_id, row, library) = tv_episode(&tmp);
     store
         .set_library_switch_settings(&library.id, None, None, Some(false), None, None)
         .unwrap();
@@ -252,11 +267,7 @@ fn fingerprint_marker_skips_scene_frames_when_library_disables_them() {
 #[tokio::test]
 async fn cancelling_detached_chapter_frames_reaps_child_and_preserves_sidecars() {
     let tmp = tempfile::tempdir().unwrap();
-    let (store, media_id, row) = tv_episode(&tmp);
-    let root = tmp.path().to_str().unwrap().to_string();
-    let owner = store
-        .create_library(MediaKind::Tv, "Extra", &[&root], "everyone", true, &[])
-        .unwrap();
+    let (store, media_id, row, owner) = tv_episode(&tmp);
     store
         .set_library_switch_settings(&owner.id, None, None, Some(true), None, None)
         .unwrap();
@@ -313,7 +324,7 @@ async fn cancelling_detached_chapter_frames_reaps_child_and_preserves_sidecars()
 #[test]
 fn stale_marker_snapshot_does_not_resurrect_deleted_episode() {
     let tmp = tempfile::tempdir().unwrap();
-    let (store, media_id, row) = tv_episode(&tmp);
+    let (store, media_id, row, _library) = tv_episode(&tmp);
     store.delete_ledger_path(&row.path).unwrap();
     let updates = persist_marker(&store, &[row.clone()], fingerprint_marker(media_id), false).unwrap();
     assert!(updates.is_empty());
@@ -324,7 +335,7 @@ fn stale_marker_snapshot_does_not_resurrect_deleted_episode() {
 #[test]
 fn marker_snapshot_cannot_follow_reimported_path_to_a_new_ledger_id() {
     let tmp = tempfile::tempdir().unwrap();
-    let (store, media_id, row) = tv_episode(&tmp);
+    let (store, media_id, row, _library) = tv_episode(&tmp);
     store.delete_ledger_path(&row.path).unwrap();
     let mut reimported = row.clone();
     reimported.id = LedgerId::new();
@@ -338,10 +349,7 @@ fn marker_snapshot_cannot_follow_reimported_path_to_a_new_ledger_id() {
 #[test]
 fn frozen_marker_snapshot_does_not_publish_any_result() {
     let tmp = tempfile::tempdir().unwrap();
-    let (store, media_id, row) = tv_episode(&tmp);
-    let owner = store.create_library(
-        MediaKind::Tv, "Frozen", &[tmp.path().to_str().unwrap()], "everyone", true, &[],
-    ).unwrap();
+    let (store, media_id, row, owner) = tv_episode(&tmp);
     store.begin_library_removal(&owner.id).unwrap();
     let updates = persist_marker(&store, &[row.clone()], fingerprint_marker(media_id), false).unwrap();
     assert!(updates.is_empty());
@@ -353,10 +361,7 @@ fn frozen_marker_snapshot_does_not_publish_any_result() {
 #[test]
 fn marker_publication_skips_frozen_library_but_updates_live_copy() {
     let tmp = tempfile::tempdir().unwrap();
-    let (store, media_id, row) = tv_episode(&tmp);
-    let frozen = store.create_library(
-        MediaKind::Tv, "Frozen", &[tmp.path().to_str().unwrap()], "everyone", true, &[],
-    ).unwrap();
+    let (store, media_id, row, frozen) = tv_episode(&tmp);
     let other = tempfile::tempdir().unwrap();
     store.create_library(
         MediaKind::Tv, "Live", &[other.path().to_str().unwrap()], "everyone", true, &[],

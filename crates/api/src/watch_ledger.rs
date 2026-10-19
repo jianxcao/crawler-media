@@ -9,6 +9,8 @@ pub fn record_paths(
     paths: impl IntoIterator<Item = library::TransferredFile>,
 ) -> Result<Vec<PathBuf>, String> {
     let mut inserted = Vec::new();
+    let mut rows = Vec::new();
+    let now_ms = crate::job_loop::unix_now() * 1000;
     for file in paths {
         let dest = file.path;
         let path_str = dest.display().to_string();
@@ -56,24 +58,22 @@ pub fn record_paths(
         let media = store
             .resolve_scanned_media(incoming)
             .map_err(|e| e.to_string())?;
-        let now_ms = crate::job_loop::unix_now() * 1000;
-        store
-            .insert_scanned_ledger(&LedgerRow {
-                id: LedgerId::new(),
-                media_id: media.id,
-                path: path_str,
-                season: parsed.season,
-                episode: parsed.episode,
-                resolution: parsed.resolution,
-                codec: parsed.codec,
-                hdr: parsed.hdr,
-                quality_source: QualitySource::Release,
-                confidence: parsed.confidence,
-                filter_score: None,
-            }, now_ms)
-            .map_err(|e| e.to_string())?;
+        rows.push(LedgerRow {
+            id: LedgerId::new(),
+            media_id: media.id,
+            path: path_str,
+            season: parsed.season,
+            episode: parsed.episode,
+            resolution: parsed.resolution,
+            codec: parsed.codec,
+            hdr: parsed.hdr,
+            quality_source: QualitySource::Release,
+            confidence: parsed.confidence,
+            filter_score: None,
+        });
         inserted.push(dest);
     }
+    publish_scanned_rows(store, &rows, now_ms)?;
     Ok(inserted)
 }
 
@@ -84,6 +84,8 @@ pub fn record_video_paths(
     paths: impl IntoIterator<Item = PathBuf>,
 ) -> Result<Vec<PathBuf>, String> {
     let mut inserted = Vec::new();
+    let mut rows = Vec::new();
+    let now_ms = crate::job_loop::unix_now() * 1000;
     for dest in paths {
         let path_str = dest.display().to_string();
         // 已有台账行：复用既有 Media ID（播放进度/收藏挂在它上面），
@@ -126,25 +128,35 @@ pub fn record_video_paths(
                 anilist_id: None,
             })
             .map_err(|e| e.to_string())?;
-        let now_ms = crate::job_loop::unix_now() * 1000;
-        store
-            .insert_scanned_ledger(&LedgerRow {
-                id: LedgerId::new(),
-                media_id: media.id,
-                path: dest.display().to_string(),
-                season: None,
-                episode: None,
-                resolution: None,
-                codec: None,
-                hdr: None,
-                quality_source: QualitySource::Release,
-                confidence: Confidence::High,
-                filter_score: None,
-            }, now_ms)
-            .map_err(|e| e.to_string())?;
+        rows.push(LedgerRow {
+            id: LedgerId::new(),
+            media_id: media.id,
+            path: dest.display().to_string(),
+            season: None,
+            episode: None,
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: QualitySource::Release,
+            confidence: Confidence::High,
+            filter_score: None,
+        });
         inserted.push(dest);
     }
+    publish_scanned_rows(store, &rows, now_ms)?;
     Ok(inserted)
+}
+
+/// Commit scanned ledger rows in the scan commit window: at most
+/// [`store::MAX_SCAN_BATCH`] files per transaction, so one media is reduced once per
+/// window instead of once per file.
+fn publish_scanned_rows(store: &Store, rows: &[LedgerRow], now_ms: i64) -> Result<(), String> {
+    for batch in rows.chunks(store::MAX_SCAN_BATCH) {
+        store
+            .insert_scanned_ledgers(batch, now_ms)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn media_from_release(parsed: &Release) -> Media {

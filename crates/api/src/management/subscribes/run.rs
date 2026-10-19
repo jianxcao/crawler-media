@@ -294,12 +294,12 @@ fn execute(
         let store = state.store.lock();
         validate_facts_observation(&store, context, &facts)?;
         crate::worker::transfer::validate_transfer_plan(
-            &store, &context.subscribe, &library_lease, &plan.revisions, &plan,
+            &store, &context.subscribe, &library_lease, &plan.fingerprint, &plan,
         ).map_err(ApiError::internal)?;
     }
     let recorder = crate::worker::transfer::PlannedPublicationRecorder {
         recorder: crate::worker::transfer::PublicationRecorder {
-            state, subscribe: &context.subscribe, lease: &library_lease, revisions: plan.revisions.clone(),
+            state, subscribe: &context.subscribe, lease: &library_lease, fingerprint: plan.fingerprint.clone(),
         },
         plan: &plan,
     };
@@ -322,8 +322,8 @@ fn execute(
             downloader: routed,
             library_root: &plan.root,
             library_id: plan.library_id.parse().ok(),
-            root_id: None,
-            config_revision: Some(plan.revisions.app),
+            root_id: Some(plan.root_id.clone()),
+            config_revision: Some(plan.config_revision),
             transfer_mode: plan.mode,
             scrape: plan.nfo,
             hooks: None,
@@ -346,7 +346,7 @@ fn execute(
     {
         let store = state.store.lock();
         crate::worker::transfer::validate_transfer_plan(
-            &store, &context.subscribe, &library_lease, &plan.revisions, &plan,
+            &store, &context.subscribe, &library_lease, &plan.fingerprint, &plan,
         ).map_err(ApiError::internal)?;
     }
     outcome.facts.retain_owned();
@@ -518,7 +518,7 @@ fn persist(
     }
     crate::worker::transfer::validate_transfer_plan(
         &store, &store.get_subscribe(id)?.ok_or_else(|| ApiError::internal("Subscribe not found".into()))?,
-        lease, &plan.revisions, plan,
+        lease, &plan.fingerprint, plan,
     ).map_err(ApiError::internal)?;
     for (row, mode) in outcome.ledger.iter().zip(modes.iter()) {
         let source_path = outcome.ledger_sources.iter()
@@ -584,7 +584,7 @@ fn persist(
         store.enqueue_file_deletion(path, "wash_replaced")?;
     }
     drop(store);
-    crate::http::file_delete::retry_queued_deletions(&state.store);
+    crate::http::file_delete::retry_queued_deletions(&state.store)?;
     crate::http::library::enqueue_probes_for_rows(state, &outcome.ledger);
     Ok(())
 }

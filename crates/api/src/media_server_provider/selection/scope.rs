@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use domain::{LedgerRow, Media, MediaId, MediaKind, UserId};
+use domain::{LedgerId, LedgerRow, LibraryFile, Media, MediaId, MediaKind, UserId};
 use media_server::provider::query::folder_id_for_root;
 use media_server::provider::ServerItemQuery;
 
@@ -36,6 +36,7 @@ pub(super) struct ScopedRead {
     pub(super) media: HashMap<MediaId, Media>,
     pub(super) rows: Vec<LedgerRow>,
     pub(super) units: Vec<crate::store::PlaybackUnitSnapshot>,
+    pub(super) files: HashMap<LedgerId, LibraryFile>,
     pub(super) requested_library: Option<String>,
     pub(super) folder_root: Option<PathBuf>,
     pub(super) media_scoped: bool,
@@ -124,13 +125,18 @@ pub(super) fn read_scope(
         tracing::warn!(rows_read, error = %error, "Jellyfin 作用域台账已读完，播放单元读取失败");
         ScopeError { rows_read, message: error.to_string() }
     })?;
+    let file_ids: Vec<LedgerId> = rows.iter().map(|row| row.id).collect();
+    let files = store.published_files(&file_ids).map_err(|error| {
+        tracing::warn!(rows_read, error = %error, "Jellyfin 作用域台账已读完，文件批量读取失败");
+        ScopeError { rows_read, message: error.to_string() }
+    })?;
     let unknown_parent = parent.is_some() && library.is_none() && !is_folder_id && media_target.is_none();
-    Ok(ScopedRead { ownership, is_admin, user_id, media, rows, units, requested_library, folder_root, media_scoped: media_scope.is_some(), unresolved: false, unknown_parent, rows_read })
+    Ok(ScopedRead { ownership, is_admin, user_id, media, rows, units, files, requested_library, folder_root, media_scoped: media_scope.is_some(), unresolved: false, unknown_parent, rows_read })
 }
 
 
 pub(super) fn unresolved_scope(ownership: store::LibraryOwnership, is_admin: bool, user_id: UserId) -> ScopedRead {
-    ScopedRead { ownership, is_admin, user_id, media: HashMap::new(), rows: Vec::new(), units: Vec::new(), requested_library: None, folder_root: None, media_scoped: false, unresolved: true, unknown_parent: false, rows_read: 0 }
+    ScopedRead { ownership, is_admin, user_id, media: HashMap::new(), rows: Vec::new(), units: Vec::new(), files: HashMap::new(), requested_library: None, folder_root: None, media_scoped: false, unresolved: true, unknown_parent: false, rows_read: 0 }
 }
 
 fn visible_libraries(

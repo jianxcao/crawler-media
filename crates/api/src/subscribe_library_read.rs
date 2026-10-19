@@ -130,11 +130,12 @@ pub fn evaluate_subscribe_facts_out_of_lock_with(
     Ok(scoped)
 }
 
-/// An observed Subscribe facts result alongside the DB revisions at the time of observation.
+/// An observed Subscribe facts result alongside the scoped read fingerprint
+/// captured when the observation was taken.
 #[derive(Clone, Debug)]
 pub struct SubscribeLibraryObservation {
     pub facts: SubscribeFacts,
-    pub revisions: store::ReadRevisions,
+    pub fingerprint: store::ReadFingerprint,
     pub library_id: String,
     pub library_root: std::path::PathBuf,
     pub ownership: store::LibraryOwnership,
@@ -178,7 +179,7 @@ pub fn observe_subscribe_library_facts(
 
     Ok(SubscribeLibraryObservation {
         facts,
-        revisions: snapshot.revisions,
+        fingerprint: snapshot.fingerprint,
         library_id: target_library_id,
         library_root,
         ownership: snapshot.ownership,

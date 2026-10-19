@@ -95,36 +95,27 @@ pub(super) fn resolve_mark_unit(
     store: &crate::Store,
     user_id: UserId,
     id: &str,
-) -> Option<(domain::MediaId, i32, i32)> {
-    let season_target =
-        crate::http::media_visibility::resolve_visible_season(store, id, Some(user_id));
-    let (row, season) = match season_target {
-        Some((row, season)) => (row, Some(season)),
-        None => (
-            crate::http::media_visibility::resolve_visible_row(store, id, Some(user_id))?,
-            None,
-        ),
+) -> Result<Option<(domain::MediaId, i32, i32)>, String> {
+    let Some(item) = domain::TypedItemId::from_wire_string(id) else {
+        return Ok(None);
     };
-    let unit = if let Some(season) = season {
-        (season as i32, crate::store::UNIT_WHOLE)
-    } else {
-        let compact_id = id.replace('-', "");
-        let is_media_id =
-            compact_id.eq_ignore_ascii_case(&row.media_id.to_string().replace('-', ""));
-        if is_media_id || (row.season.is_none() && row.episode.is_none()) {
-            (crate::store::UNIT_WHOLE, crate::store::UNIT_WHOLE)
-        } else {
-            (
-                row.season
-                    .map(|value| value as i32)
-                    .unwrap_or(crate::store::UNIT_WHOLE),
-                row.episode
-                    .map(|value| value as i32)
-                    .unwrap_or(crate::store::UNIT_WHOLE),
-            )
+    // Marks are writes: the named item must still be visible content for this
+    // user, so a removed library, pending file or unknown id resolves to None.
+    let visible = store
+        .playable_sources(user_id, &item)
+        .map_err(|error| error.to_string())?;
+    if visible.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(match item {
+        domain::TypedItemId::Work(media) => {
+            (media, crate::store::UNIT_WHOLE, crate::store::UNIT_WHOLE)
         }
-    };
-    Some((row.media_id, unit.0, unit.1))
+        domain::TypedItemId::Season { media, season } => {
+            (media, season as i32, crate::store::UNIT_WHOLE)
+        }
+        domain::TypedItemId::Unit { media, key } => (media, key.season, key.episode),
+    }))
 }
 
 pub(super) fn write_favorite_mark(

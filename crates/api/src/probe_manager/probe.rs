@@ -146,7 +146,7 @@ pub(super) async fn probe_fingerprint_detailed(
     }
 
     let path = PathBuf::from(&unit.row.path);
-    let outcome = probe_fingerprint_and_store_detailed(
+    let mut outcome = probe_fingerprint_and_store_detailed(
         mgr,
         unit,
         path,
@@ -159,11 +159,30 @@ pub(super) async fn probe_fingerprint_detailed(
     )
     .await;
 
+    // Marker publication is part of this probe: a store failure is reported, never dropped.
+    if unit.marker_refresh_id.is_none()
+        && matches!(
+            &outcome,
+            super::stages::FingerprintRunOutcome::Complete
+                | super::stages::FingerprintRunOutcome::Partial { .. }
+        )
+        && let Err(error) = super::markers::compare_and_store_markers(mgr, unit)
+    {
+        tracing::error!(
+            %error,
+            job_id = ?job_id,
+            media_id = %unit.row.media_id,
+            ledger_id = %unit.row.id,
+            "【片头片尾】标记发布失败"
+        );
+        outcome = super::stages::FingerprintRunOutcome::Failed {
+            error_kind: "marker_store_error".into(),
+            error: error.to_string(),
+        };
+    }
+
     match &outcome {
         super::stages::FingerprintRunOutcome::Complete => {
-            if unit.marker_refresh_id.is_none() {
-                let _ = super::markers::compare_and_store_markers(mgr, unit);
-            }
             tracing::info!(
                 job_id = ?job_id,
                 media_id = %unit.row.media_id,
@@ -173,9 +192,6 @@ pub(super) async fn probe_fingerprint_detailed(
             );
         }
         super::stages::FingerprintRunOutcome::Partial { .. } => {
-            if unit.marker_refresh_id.is_none() {
-                let _ = super::markers::compare_and_store_markers(mgr, unit);
-            }
             tracing::info!(
                 job_id = ?job_id,
                 media_id = %unit.row.media_id,
@@ -409,21 +425,33 @@ async fn probe_tracks_and_store(
         if crate::fingerprint_job::source::ensure_source_available(&store, &unit.row).is_err() {
             return Err(());
         }
-        store
-            .put_file_meta_versioned(&ledger_id, &tracks, Some(source_version), duration_ms)
-            .map(|()| update_ledger_quality(&store, &ledger_id, &tracks))
+        publish_probe_tracks(&store, unit, &source_version, &tracks, duration_ms)
     };
-    if let Err(error) = published {
-        tracing::error!(
-            %error,
-            media_id = %unit.row.media_id,
-            season = unit.row.season.unwrap_or(1),
-            episode = unit.row.episode.unwrap_or(1),
-            ledger_id,
-            elapsed_ms = started_at.elapsed().as_millis() as u64,
-            "【媒体信息】流信息缓存写入失败"
-        );
-        return Err(());
+    match published {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!(
+                media_id = %unit.row.media_id,
+                season = unit.row.season.unwrap_or(1),
+                episode = unit.row.episode.unwrap_or(1),
+                ledger_id,
+                source_version,
+                "【媒体信息】探测结果属于已被替换的文件版本，丢弃不发布"
+            );
+            return Err(());
+        }
+        Err(error) => {
+            tracing::error!(
+                %error,
+                media_id = %unit.row.media_id,
+                season = unit.row.season.unwrap_or(1),
+                episode = unit.row.episode.unwrap_or(1),
+                ledger_id,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "【媒体信息】流信息缓存写入失败"
+            );
+            return Err(());
+        }
     }
     tracing::info!(
         media_id = %unit.row.media_id,
@@ -706,19 +734,54 @@ fn log_fingerprint_publication(
     );
 }
 
-fn update_ledger_quality(store: &crate::Store, ledger_id: &str, tracks: &library::Tracks) {
-    // 探测得到真实主视频流后，顺带回写更新 ledger 行的 resolution, codec, hdr，保证台账与缓存一致
-    if let Some(video) = tracks.video.as_ref() {
-        let probed_res = video.resolution();
-        let probed_codec = video.codec.as_deref();
-        let probed_hdr = video.hdr();
-        if probed_res.is_some() || probed_codec.is_some() || probed_hdr.is_some() {
-            let _ = store.update_ledger_probe_quality(
-                &ledger_id,
-                probed_res.as_deref(),
-                probed_codec,
-                probed_hdr.as_deref(),
-            );
-        }
+/// Publish the probed stream facts for one file.
+///
+/// `Ok(false)` means the file row no longer carries the version this worker probed (a rescan
+/// replaced the file while it was being probed), so the result describes bytes that are gone.
+fn publish_probe_tracks(
+    store: &crate::Store,
+    unit: &ProbeUnit,
+    source_version: &str,
+    tracks: &library::Tracks,
+    duration_ms: Option<i64>,
+) -> Result<bool, crate::store::StoreError> {
+    let Some(expected) = store.get_file_version(unit.row.id)? else {
+        return Ok(false);
+    };
+    if expected.source_version != source_version {
+        return Ok(false);
     }
+    let (resolution, codec, hdr) = match tracks.video.as_ref() {
+        Some(video) => (
+            video.resolution(),
+            video.codec.clone(),
+            video.hdr(),
+        ),
+        None => (None, None, None),
+    };
+    let details = store::files::FileDetails {
+        source_revision: expected.revision,
+        source_version: expected.source_version.clone(),
+        tracks_version: store::library_write::probe::CURRENT_TRACKS_VERSION,
+        video_json: tracks
+            .video
+            .as_ref()
+            .and_then(|video| serde_json::to_string(video).ok()),
+        audio_json: serde_json::to_string(&tracks.audio)?,
+        subtitle_json: serde_json::to_string(&tracks.subtitles)?,
+        chapters_json: None,
+        fingerprint_json: None,
+        outro_fingerprint_json: None,
+        format_duration_ms: duration_ms,
+    };
+    let publication = store::library_write::probe::ProbePublication {
+        expected: &expected,
+        tracks_version: store::library_write::probe::CURRENT_TRACKS_VERSION,
+        resolution: resolution.as_deref(),
+        codec: codec.as_deref(),
+        hdr: hdr.as_deref(),
+        duration_ms,
+        details: Some(&details),
+    };
+    store.publish_probe_result(unit.row.id, &publication, now_ms())
 }

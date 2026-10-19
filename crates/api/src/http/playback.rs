@@ -22,7 +22,7 @@ mod heartbeat;
 mod selection;
 mod session;
 pub(crate) use heartbeat::progress;
-use selection::{row_for, start_position};
+use selection::row_for;
 pub(crate) use session::start_session;
 mod watch_state;
 pub(crate) use chapter_cache::cached_chapters;
@@ -559,14 +559,11 @@ fn metric_media_id(
 ) -> Option<domain::MediaId> {
     let explicit = body["media_item_id"].as_str().and_then(resolve_media_id);
     if let Some(file) = body.get("library_file_id").filter(|file| !file.is_null()) {
-        let row = crate::http::media_visibility::resolve_visible_row(
-            store,
-            file.as_str()?,
-            Some(user_id),
-        )?;
+        let file_id = file.as_str()?.parse::<domain::LedgerId>().ok()?;
+        let file = store.visible_file(user_id, file_id).ok().flatten()?;
         return explicit
-            .is_none_or(|id| id == row.media_id)
-            .then_some(row.media_id);
+            .is_none_or(|id| id == file.media_id)
+            .then_some(file.media_id);
     }
     let id = explicit?;
     let media = store.get_media(id).ok().flatten()?;
@@ -706,19 +703,21 @@ pub(crate) async fn get_subtitle_file(
 ) -> Response {
     let (row, media_title, media_kind, tracks) = {
         let store = state.store.lock();
-        // G07: 先校验该 ledger 行对当前用户可见，防止普通成员跨 Library 读取字幕。
-        let Some(row) =
-            crate::http::media_visibility::resolve_visible_row(&store, &ledger_id, Some(user_id))
-        else {
+        let file_id = match ledger_id.parse::<domain::LedgerId>() {
+            Ok(id) => id,
+            Err(_) => return err(StatusCode::NOT_FOUND, "subtitle.not_found", "字幕未找到"),
+        };
+        // G07: 先校验该文件对当前用户可见，防止普通成员跨 Library 读取字幕。
+        let Some(file) = store.visible_file(user_id, file_id).ok().flatten() else {
             return err(StatusCode::NOT_FOUND, "subtitle.not_found", "字幕未找到");
         };
-        let Some(media) = store.get_media(row.media_id).ok().flatten() else {
+        let Some(media) = store.get_media(file.media_id).ok().flatten() else {
             return err(StatusCode::NOT_FOUND, "subtitle.not_found", "字幕未找到");
         };
-        // canonical ledger row id（不是 URL 原文）才是 cache 维度与 file_meta key。
-        let Ok(Some(tracks)) = store.get_file_meta(&row.id.to_string()) else {
+        let Ok(Some(tracks)) = store.get_file_meta(&file.file_id.to_string()) else {
             return err(StatusCode::NOT_FOUND, "subtitle.not_found", "字幕未找到");
         };
+        let row = crate::media_server_provider::items::row_view(&file, (crate::store::UNIT_WHOLE, crate::store::UNIT_WHOLE));
         (row, media.title, media.kind, tracks)
     };
     let wants_vtt = query

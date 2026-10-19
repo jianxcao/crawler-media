@@ -114,10 +114,6 @@ pub async fn delete_catalog_cache(
         let store = state.store.lock();
         store.delete_catalog_cache(&query.source, &key)?
     };
-    if deleted {
-        // catalog body 影响所有 Library 的补充字段：保守失效全部已访问投影。
-        state.projection.mark_all_dirty();
-    }
     Ok(Json(json!({ "ok": true, "data": { "deleted": deleted } })))
 }
 

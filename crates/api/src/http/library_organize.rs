@@ -170,9 +170,6 @@ fn organize_inner(state: &ApiState, id: &str, body: &Value) -> Response {
         .publish(|| Ok(apply_organize(&store, &library, renames)))
     {
         Ok(response) => {
-            drop(store);
-            // 重命名/移动会改写 ledger path 与 NFO：该 Library 的投影必须重建。
-            state.projection.mark_dirty(id);
             response
         }
         Err(error) => err(StatusCode::CONFLICT, "library.frozen", &error),
@@ -261,24 +258,24 @@ fn apply_organize(store: &crate::Store, library: &store::Library, renames: &[Val
         }
         // 重命名后重写分集 NFO（新 stem）：扫描只给新文件写 NFO，已入台账的
         // 文件整理后必须跟着换名，否则 .nfo 变成孤儿。
-        if let Ok(Some(ledger_row)) = store.ledger_by_path(to) {
-            if let Ok(Some(media_row)) = store.get_media(ledger_row.media_id) {
-                if let Some(new_stem) = FsPath::new(to).file_stem().and_then(|n| n.to_str()) {
-                    let nfo_path = FsPath::new(to).with_file_name(format!("{new_stem}.nfo"));
-                    if !nfo_path.is_file() {
-                        let _ = library::write_nfo(&nfo_path, &media_row, None);
+        match store.ledger_by_path(to) {
+            Ok(Some(ledger_row)) => {
+                if let Ok(Some(media_row)) = store.get_media(ledger_row.media_id) {
+                    if let Some(new_stem) = FsPath::new(to).file_stem().and_then(|n| n.to_str()) {
+                        let nfo_path = FsPath::new(to).with_file_name(format!("{new_stem}.nfo"));
+                        if !nfo_path.is_file() {
+                            let _ = library::write_nfo(&nfo_path, &media_row, None);
+                        }
                     }
                 }
+                // 归属订阅的事实路径同步（洗版替换仍能找到旧文件的位置）。
+                let _ = store.rewrite_fact_paths(ledger_row.media_id, from, to);
             }
-        }
-        // 归属订阅的事实路径同步（洗版替换仍能找到旧文件的位置）。
-        if let Some(row) = store
-            .list_ledger()
-            .unwrap_or_default()
-            .into_iter()
-            .find(|row| row.path == to)
-        {
-            let _ = store.rewrite_fact_paths(row.media_id, from, to);
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(from, to, %error, "整理后读取文件记录失败");
+                errors.push(format!("{to}: 读取文件记录失败: {error}"));
+            }
         }
         applied += 1;
     }
@@ -390,8 +387,6 @@ fn refresh_item_metadata_inner(state: &ApiState, id: &str, item_id: &str) -> Res
             }
         }
     }
-    // 条目级 NFO/海报/背景已重写：文件事实变化，标脏。
-    state.projection.mark_dirty(&id);
     ok(json!({ "refreshed": refreshed })).into_response()
 }
 
@@ -528,9 +523,18 @@ fn similar_inner(
     let Some(media) = store.get_media(media_id).ok().flatten() else {
         return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
     };
-    let belongs_to_library = store.list_ledger().unwrap_or_default().iter().any(|row| {
-        row.media_id == media_id
-            && library_for_row(&store, row, &media).is_some_and(|owner| owner.id == library.id)
+    let rows = match store.ledger_for_media(media_id) {
+        Ok(rows) => rows,
+        Err(error) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
+    };
+    let belongs_to_library = rows.iter().any(|row| {
+        library_for_row(&store, row, &media).is_some_and(|owner| owner.id == library.id)
     });
     if !belongs_to_library {
         return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");

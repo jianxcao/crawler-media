@@ -55,10 +55,10 @@ pub(super) fn finish_search(
         {
             return Err("目标 Library 正在删除或已不存在".into());
         }
-        let current_revisions = store.read_revisions().map_err(|e| e.to_string())?;
-        if current_revisions.library != context.observation_revisions.library
-            || current_revisions.app != context.observation_revisions.app
-        {
+        let current = store
+            .read_fingerprint(&context.library_id, media.id)
+            .map_err(|e| e.to_string())?;
+        if current != context.observation_fingerprint {
             return Err("Library 配置或台账在观察期间已变更，放弃本轮提交".into());
         }
     }
@@ -109,7 +109,7 @@ struct SearchContext {
     transfer_mode: Option<library::TransferMode>,
     scrape: bool,
     naming: String,
-    observation_revisions: store::ReadRevisions,
+    observation_fingerprint: store::ReadFingerprint,
 }
 
 fn load_search_context(
@@ -124,7 +124,7 @@ fn load_search_context(
     )?;
     let facts = obs.facts;
     let library_id = obs.library_id;
-    let observation_revisions = obs.revisions;
+    let observation_fingerprint = obs.fingerprint;
     let wash_filter = {
         let store = state.store.lock();
         subscribe
@@ -161,7 +161,7 @@ fn load_search_context(
         transfer_mode,
         scrape,
         naming,
-        observation_revisions,
+        observation_fingerprint,
     })
 }
 

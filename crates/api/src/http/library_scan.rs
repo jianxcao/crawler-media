@@ -22,8 +22,10 @@ pub(crate) use runner::scan_library_leased_resumable;
 pub(crate) use runner::checkpoint_fresh;
 use scope::{ScanScope, walk_video_files};
 use super::library::{
-    facets, missing_library, preferred_row, require_visible_library, rows_in_library, selection,
+    browse_filter_from_query, browse_order_from_query, browse_store_error, missing_library,
+    preferred_row, require_visible_library, rows_in_library,
 };
+use crate::store::library_query;
 
 /// POST /libraries/{id}/scan — walk every root of the library and ledger
 /// high-confidence video files in place.
@@ -33,9 +35,6 @@ pub(crate) async fn scan_library(
 ) -> Response {
     match state.scan_coordinator.enqueue(&state, &id, vec![]) {
         Ok(op) => {
-            // 扫描会写 ledger（library revision 也会递增）；这里再显式标脏，保证
-            // 不依赖 revision 的调用方（如周期刷新）也能看到失效。
-            state.projection.mark_dirty(&id);
             (
                 StatusCode::ACCEPTED,
                 axum::Json(serde_json::json!({
@@ -187,8 +186,6 @@ pub(crate) fn scan_library_subdir(
             let _ = crate::http::library::library_cover_path(&store, &library);
         }
     }
-    // ledger 与 NFO/图片都可能已变化：显式标脏，不依赖 revision 触发。
-    state.projection.mark_dirty(&library_id);
     Ok(())
 }
 
@@ -340,8 +337,6 @@ pub(crate) async fn refresh_metadata(
         // 章节场景图自动生成（有内嵌章节且无帧时）。
         crate::http::library_chapters::auto_generate_chapters(&state, &path);
     }
-    // NFO / 海报 / 背景已写入：文件事实变了但 revision 不会动。
-    state.projection.mark_dirty(&id);
     ok(json!({ "queued": true, "refreshed": refreshed })).into_response()
 }
 
@@ -378,10 +373,7 @@ fn scrape_library_metadata(
                 return;
             }
             let nfo = crate::scrape_metadata::nfo_from_tmdb(media, &metadata);
-            let rating_val = metadata.vote_count.filter(|&c| c >= 5).and_then(|_| nfo.rating.as_ref().and_then(|r| r.parse::<f64>().ok()));
-            let studio_name = nfo.studios.first().map(String::as_str);
-            let studio_logo = nfo.studio_logo.as_deref();
-            let _ = state.store.lock().update_library_items_metadata_sort(media.id, rating_val, nfo.premiered.as_deref(), studio_name, studio_logo);
+            crate::scrape_metadata::record_scraped_display_meta(state, media.id, &metadata, &nfo);
             if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
                 let target = path.with_file_name(format!("{stem}.nfo"));
                 let write = || {
@@ -448,62 +440,57 @@ pub(crate) async fn missing(
 }
 
 /// GET /libraries/{id}/item-index — first-letter index buckets of owned items.
+///
+/// The buckets are a run-length encoding of the browse order, so they come from the same
+/// SQL ordering the item page uses: one query, no in-memory selection.
 pub(crate) async fn item_index(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
     Path(id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    // 授权从当前配置判定；浏览事实优先取目标 Library 的 ready 投影（零文件 IO），
-    // 投影不可用时回退到旧的全量读取（已在 helper 内 warn）。
-    let library = {
+    let lib_id = match id.parse::<domain::LibraryId>() {
+        Ok(lib_id) => lib_id,
+        Err(_) => return missing_library(),
+    };
+    {
         let store = state.store.lock();
-        match require_visible_library(&store, &id, user_id) {
-            Ok(library) => library,
-            Err(response) => return response,
+        if let Err(response) = require_visible_library(&store, &id, user_id) {
+            return response;
+        }
+    }
+    let filter = match browse_filter_from_query(&query) {
+        Ok(filter) => filter,
+        Err(message) => return err(StatusCode::BAD_REQUEST, "library.invalid", &message),
+    };
+    let (order, descending) = browse_order_from_query(&query);
+    let lib_q = library_query::LibraryQuery {
+        library_id: lib_id,
+        user_id,
+        filter,
+        order,
+        descending,
+        page: library_query::BrowsePage::Offset { start: 0, limit: 0 },
+        include_total: false,
+    };
+    let titles = {
+        let store = state.store.lock();
+        match store.library_item_titles(&lib_q) {
+            Ok(titles) => titles,
+            Err(error) => return browse_store_error(error),
         }
     };
-    let (snapshot, _artwork) =
-        match selection::load_browse_snapshot_or_projection(&state, &library, user_id).await {
-            Ok(loaded) => loaded,
-            Err(response) => return response,
-        };
-    let files = state.browse_files.clone();
-    let work = state
-        .http_work
-        .run(selection::BROWSE_DEADLINE, move || {
-            let selected = match selection::select_snapshot(snapshot, &query, files.as_ref()) {
-                Ok(items) => items,
-                Err(response) => return response,
-            };
-            let mut buckets: Vec<Value> = Vec::new();
-            let mut current_initial = String::new();
-            let mut current_offset = 0usize;
-            let mut current_count = 0usize;
-
-            for (i, item) in selected.iter().enumerate() {
-                let initial = item
-                    .media
-                    .title
-                    .chars()
-                    .next()
-                    .map(|c| c.to_uppercase().to_string())
-                    .unwrap_or_else(|| "#".into());
-                if initial != current_initial {
-                    if current_count > 0 {
-                        buckets.push(json!({
-                            "initial": current_initial,
-                            "count": current_count,
-                            "offset": current_offset,
-                        }));
-                    }
-                    current_initial = initial;
-                    current_offset = i;
-                    current_count = 1;
-                } else {
-                    current_count += 1;
-                }
-            }
+    let mut buckets: Vec<Value> = Vec::new();
+    let mut current_initial = String::new();
+    let mut current_offset = 0usize;
+    let mut current_count = 0usize;
+    for (index, title) in titles.iter().enumerate() {
+        let initial = title
+            .chars()
+            .next()
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_else(|| "#".into());
+        if initial != current_initial {
             if current_count > 0 {
                 buckets.push(json!({
                     "initial": current_initial,
@@ -511,26 +498,37 @@ pub(crate) async fn item_index(
                     "offset": current_offset,
                 }));
             }
-            ok_list(buckets).into_response()
-        })
-        .await;
-    match work {
-        Ok(response) => response,
-        Err(error) => selection::browse_work_error(error),
+            current_initial = initial;
+            current_offset = index;
+            current_count = 1;
+        } else {
+            current_count += 1;
+        }
     }
+    if current_count > 0 {
+        buckets.push(json!({
+            "initial": current_initial,
+            "count": current_count,
+            "offset": current_offset,
+        }));
+    }
+    ok_list(buckets).into_response()
 }
 
 /// GET /libraries/{id}/facets — 十维筛选候选与「排除自身维」计数。
+///
+/// Dimension keys and labels are the frontend contract; counts come from the same predicate
+/// builder the item page uses, with the dimension's own condition removed.
 pub(crate) async fn facets(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
     Path(id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    // tier：缺失/空串按 all（向后兼容旧调用方仍能拿到 resolutions）；其余非法值 400。
+    // tier：缺失/空串按 all（旧调用方仍能拿到 resolutions）；其余非法值 400。
     let tier = match query.get("tier").map(String::as_str) {
-        None | Some("") | Some("all") => "all",
-        Some("primary") => "primary",
+        None | Some("") | Some("all") => library_query::FacetTier::All,
+        Some("primary") => library_query::FacetTier::Primary,
         Some(_) => {
             return err(
                 StatusCode::BAD_REQUEST,
@@ -539,47 +537,60 @@ pub(crate) async fn facets(
             );
         }
     };
-    // 授权从当前配置判定；候选事实优先取目标 Library 的 ready 投影（零文件 IO），
-    // 投影不可用时回退到旧的全量读取（已在 helper 内 warn）。
-    let library = {
+    let lib_id = match id.parse::<domain::LibraryId>() {
+        Ok(lib_id) => lib_id,
+        Err(_) => return missing_library(),
+    };
+    {
         let store = state.store.lock();
-        match require_visible_library(&store, &id, user_id) {
-            Ok(library) => library,
-            Err(response) => return response,
+        if let Err(response) = require_visible_library(&store, &id, user_id) {
+            return response;
+        }
+    }
+    let filter = match browse_filter_from_query(&query) {
+        Ok(filter) => filter,
+        Err(message) => return err(StatusCode::BAD_REQUEST, "library.invalid", &message),
+    };
+    let request = library_query::FacetRequest {
+        library_id: lib_id,
+        user_id,
+        filter,
+        tier,
+    };
+    let facets = {
+        let store = state.store.lock();
+        match store.library_facets(&request) {
+            Ok(facets) => facets,
+            Err(error) => return browse_store_error(error),
         }
     };
-    let (snapshot, _artwork) =
-        match selection::load_browse_snapshot_or_projection(&state, &library, user_id).await {
-            Ok(loaded) => loaded,
-            Err(response) => return response,
-        };
-    let files = state.browse_files.clone();
-    let work = state
-        .http_work
-        .run(selection::BROWSE_DEADLINE, move || {
-            let items = selection::select_all_for_facets(snapshot, files.as_ref());
-            let facets = match facets::build_facets(&items, &query, tier) {
-                Ok(facets) => facets,
-                Err(message) => {
-                    tracing::error!(%message, "Library facets query rejected");
-                    return err(StatusCode::BAD_REQUEST, "library.invalid", &message);
-                }
-            };
-            match serde_json::to_value(&facets) {
-                Ok(value) => ok(value).into_response(),
-                Err(error) => {
-                    tracing::error!(%error, "failed to serialize library facets");
-                    err(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "store.error",
-                        &error.to_string(),
-                    )
-                }
+    let mut body = serde_json::Map::new();
+    body.insert("total".into(), json!(facets.total));
+    for key in [
+        "genres",
+        "countries",
+        "decades",
+        "watch",
+        "ratings",
+        "runtimes",
+        "languages",
+        "resolutions",
+        "hdr",
+        "stock",
+    ] {
+        let counts = facets.groups.get(key).cloned().unwrap_or_default();
+        match serde_json::to_value(counts) {
+            Ok(value) => body.insert(key.into(), value),
+            Err(error) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                );
             }
-        })
-        .await;
-    match work {
-        Ok(response) => response,
-        Err(error) => selection::browse_work_error(error),
+        };
     }
+    // 兼容键：响应里一直有 `years`，保持空数组。
+    body.insert("years".into(), json!([]));
+    ok(Value::Object(body)).into_response()
 }

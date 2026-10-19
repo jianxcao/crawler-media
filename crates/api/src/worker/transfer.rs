@@ -16,16 +16,13 @@ fn attach_metadata_and_chapters(state: &ApiState, media: &Media, rows: &[LedgerR
     }
 }
 
+/// The transfer mode a placed file actually ended up with: a file that shares an
+/// inode with its download source came in as a hardlink, everything else kept the
+/// configured mode. `library_files.transfer_mode` only accepts the three real
+/// transfer modes, so the observation never invents a fourth one.
 pub(crate) fn observe_transfer_modes(rows: &[LedgerRow], default_mode: &str) -> Vec<String> {
     rows.iter()
         .map(|row| {
-            let p = std::path::Path::new(&row.path);
-            if p.extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"))
-            {
-                return "strm".to_string();
-            }
             let is_hardlink = std::fs::metadata(&row.path)
                 .map(|meta| {
                     #[cfg(unix)]
@@ -53,7 +50,7 @@ fn commit_transfer_outcome(
     subscribe: &Subscribe,
     outcome: &RunOutcome,
     lease: &crate::library_lifecycle::LibraryWorkLease,
-    observation_revisions: &store::ReadRevisions,
+    observation_fingerprint: &store::ReadFingerprint,
     plan: &TransferPlan,
 ) -> Result<(), String> {
     let default_transfer_mode = {
@@ -67,7 +64,7 @@ fn commit_transfer_outcome(
     // Commit replacement ledger/source mapping and facts in a short Store section
     {
         let store = state.store.lock();
-        validate_transfer_plan(&store, subscribe, lease, observation_revisions, plan)?;
+        validate_transfer_plan(&store, subscribe, lease, observation_fingerprint, plan)?;
         for (row, mode) in outcome.ledger.iter().zip(observed_modes.iter()) {
             let source_path = outcome.ledger_sources.iter()
                 .find(|source| source.ledger_path == row.path)
@@ -132,10 +129,7 @@ fn commit_transfer_outcome(
             .mark_pending_rejected(subscribe.id, &exhausted)
             .map_err(|e| e.to_string())?;
     }
-    crate::http::file_delete::retry_queued_deletions(&state.store);
-    let library_id = lease.library_id().to_string();
-    // Transfer 写入新 ledger 行并可能删除旧文件：该 Library 的投影必须重建。
-    state.projection.mark_dirty(&library_id);
+    crate::http::file_delete::retry_queued_deletions(&state.store).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -148,7 +142,7 @@ fn load_transfer_context(
         domain::Filter,
         SubscribeFacts,
         Option<domain::Filter>,
-        store::ReadRevisions,
+        store::ReadFingerprint,
     ),
     String,
 > {
@@ -176,18 +170,74 @@ fn load_transfer_context(
         subscribe,
         media.kind,
     )?;
-    Ok((media, filter, obs.facts, wash_filter, obs.revisions))
+    Ok((media, filter, obs.facts, wash_filter, obs.fingerprint))
 }
 
 pub(crate) struct TransferPlan {
     pub(crate) library_id: String,
     library: store::Library,
-    pub(crate) revisions: store::ReadRevisions,
+    pub(crate) fingerprint: store::ReadFingerprint,
     pub(crate) root: std::path::PathBuf,
+    /// Root of `library_id` that owns `root`: the destination identity every
+    /// publication of this plan must carry.
+    pub(crate) root_id: String,
+    /// `libraries.config_revision` when the plan was built.
+    pub(crate) config_revision: i64,
     pub(crate) mode: Option<library::TransferMode>,
     pub(crate) naming: String,
     pub(crate) scrape: bool,
     pub(crate) nfo: bool,
+}
+
+/// The enabled root of `library_id` that contains `destination`.
+///
+/// The deepest containing root wins so a nested root is never shadowed by its
+/// parent. A destination no enabled root contains, or one two equally deep
+/// roots contain, is an error: publishing a file under a root the Library does
+/// not declare would record a file row nobody owns.
+fn destination_root_id(
+    store: &crate::Store,
+    library_id: &str,
+    destination: &std::path::Path,
+) -> Result<String, String> {
+    let mut best: Option<(usize, String)> = None;
+    let mut ambiguous = false;
+    for root in store.list_library_roots().map_err(|error| error.to_string())? {
+        if root.library_id.as_deref() != Some(library_id) || !root.enabled {
+            continue;
+        }
+        if destination.strip_prefix(&root.path).is_err() {
+            continue;
+        }
+        let depth = root.path.components().count();
+        match &best {
+            Some((best_depth, _)) if *best_depth > depth => {}
+            Some((best_depth, _)) if *best_depth == depth => ambiguous = true,
+            _ => {
+                ambiguous = false;
+                best = Some((depth, root.id));
+            }
+        }
+    }
+    match (best, ambiguous) {
+        (Some((_, id)), false) => Ok(id),
+        (_, true) => {
+            let error = format!(
+                "Library {library_id} 有多个根目录包含 {}（无法确定目标根目录）",
+                destination.display()
+            );
+            tracing::error!(library_id, destination = %destination.display(), "{error}");
+            Err(error)
+        }
+        (None, _) => {
+            let error = format!(
+                "Library {library_id} 没有包含 {} 的启用根目录",
+                destination.display()
+            );
+            tracing::error!(library_id, destination = %destination.display(), "{error}");
+            Err(error)
+        }
+    }
 }
 
 /// D-M3: hand persisted info hashes back to the (possibly fresh) clients so
@@ -286,14 +336,23 @@ pub(crate) fn resolve_transfer_plan(
     let (root, mode, scrape) =
         crate::directory::transfer_plan_for_library(&store, media.kind, Some(&library.id))
             .map_err(|e| e.to_string())?;
+    let root_id = destination_root_id(&store, &library.id, &root)?;
+    let config_revision = store.library_config_revision(&library.id).map_err(|error| {
+        tracing::error!(library_id = %library.id, %error, "读取 Library 配置版本失败");
+        error.to_string()
+    })?;
     let naming = store.naming_pattern(media.kind).map_err(|e| e.to_string())?;
     let cfg = store.get_scrape_config().map_err(|e| e.to_string())?;
-    let revisions = store.read_revisions().map_err(|e| e.to_string())?;
+    let fingerprint = store
+        .read_fingerprint(&library.id, media.id)
+        .map_err(|e| e.to_string())?;
     Ok(TransferPlan {
         library_id: library.id.clone(),
         library,
-        revisions,
+        fingerprint,
         root,
+        root_id,
+        config_revision,
         mode,
         naming,
         scrape,
@@ -305,27 +364,33 @@ pub(crate) fn validate_transfer_plan(
     store: &crate::Store,
     subscribe: &Subscribe,
     lease: &crate::library_lifecycle::LibraryWorkLease,
-    revisions: &store::ReadRevisions,
+    fingerprint: &store::ReadFingerprint,
     plan: &TransferPlan,
 ) -> Result<(), String> {
     lease.control().check().map_err(|e| e.to_string())?;
     if !store.library_accepts_work(lease.library_id()).map_err(|e| e.to_string())? {
         return Err("目标 Library 正在删除或已不存在".into());
     }
-    let current_revisions = store.read_revisions().map_err(|e| e.to_string())?;
+    let current_fingerprint = store
+        .read_fingerprint(&plan.library_id, plan.fingerprint.media_id)
+        .map_err(|e| e.to_string())?;
     let library = store.get_library(&plan.library_id).map_err(|e| e.to_string())?;
     let (root, mode, scrape) = crate::directory::transfer_plan_for_library(
         store, plan.library.kind, Some(&plan.library_id),
     ).map_err(|e| e.to_string())?;
+    let root_id = destination_root_id(store, &plan.library_id, &root)?;
+    let config_revision = store.library_config_revision(&plan.library_id).map_err(|e| e.to_string())?;
     let naming = store.naming_pattern(plan.library.kind).map_err(|e| e.to_string())?;
     let cfg = store.get_scrape_config().map_err(|e| e.to_string())?;
-    // Roots and global settings are not all covered by the app revision. Compare
-    // the actual plan as well, including changes before the facts snapshot.
-    if current_revisions.app != revisions.app
-        || current_revisions.app != plan.revisions.app
+    // Roots and global settings are not all covered by the scoped fingerprint.
+    // Compare the actual plan as well, including changes before the facts snapshot.
+    if current_fingerprint != *fingerprint
+        || current_fingerprint != plan.fingerprint
         || lease.library_id() != plan.library_id
         || library.as_ref() != Some(&plan.library)
-        || root != plan.root || mode != plan.mode || scrape != plan.scrape
+        || root != plan.root || root_id != plan.root_id
+        || config_revision != plan.config_revision
+        || mode != plan.mode || scrape != plan.scrape
         || naming != plan.naming || (scrape && cfg.effective.mirror_nfo) != plan.nfo
         || store.get_subscribe(subscribe.id).map_err(|e| e.to_string())?.as_ref() != Some(subscribe)
     {
@@ -340,7 +405,7 @@ pub(crate) struct PublicationRecorder<'a> {
     pub state: &'a ApiState,
     pub subscribe: &'a Subscribe,
     pub lease: &'a crate::library_lifecycle::LibraryWorkLease,
-    pub revisions: store::ReadRevisions,
+    pub fingerprint: store::ReadFingerprint,
 }
 
 impl PublicationRecorder<'_> {
@@ -352,11 +417,14 @@ impl PublicationRecorder<'_> {
             let store = self.state.store.lock();
             // This lock spans validation and reservation, never filesystem work.
             if let Some(plan) = plan {
-                validate_transfer_plan(&store, self.subscribe, self.lease, &self.revisions, plan)?;
+                validate_transfer_plan(&store, self.subscribe, self.lease, &self.fingerprint, plan)?;
             } else {
                 self.lease.control().check().map_err(|error| error.to_string())?;
                 if !store.library_accepts_work(self.lease.library_id()).map_err(|e| e.to_string())?
-                    || store.read_revisions().map_err(|e| e.to_string())?.app != self.revisions.app
+                    || store
+                        .read_fingerprint(self.lease.library_id(), self.subscribe.media_id)
+                        .map_err(|e| e.to_string())?
+                        != self.fingerprint
                     || store.get_subscribe(self.subscribe.id).map_err(|e| e.to_string())?.as_ref() != Some(self.subscribe)
                 {
                     return Err("Transfer source or Library configuration changed".into());
@@ -373,15 +441,46 @@ impl PublicationRecorder<'_> {
             };
             let scope = store::library_write::WriteScope {
                 library_id: candidate.file.library_id,
-                config_revision: 0,
+                config_revision: plan.map_or(0, |plan| plan.config_revision),
             };
-            store.publish_files(&scope, &[pub_item], 0).map_err(|e| e.to_string())?;
+            store
+                .publish_files(&scope, &[pub_item], crate::job_loop::unix_now() * 1000)
+                .map_err(|e| e.to_string())?;
             Ok(candidate.clone())
         })();
         result.map_err(|error| {
             tracing::error!(path = %candidate.file.path.display(), %error, "Transfer publication reservation failed");
             subscribe::SubscribeError::Downloader(downloader::DownloaderError::Message(error))
         })
+    }
+
+    /// Complete the publication of the reserved file. The reservation and this
+    /// call carry the same `file_id`, so the row keeps its root, source path and
+    /// transfer mode (see `Store::publish_files` COALESCE semantics).
+    fn published_with_plan(
+        &self,
+        candidate: &domain::FileCoverage,
+        plan: Option<&TransferPlan>,
+    ) -> Result<(), subscribe::SubscribeError> {
+        let pub_item = store::library_write::FilePublication {
+            file: &candidate.file,
+            units: &candidate.units,
+            expected_version: None,
+            probe_required: true,
+        };
+        let scope = store::library_write::WriteScope {
+            library_id: candidate.file.library_id,
+            config_revision: plan.map_or(0, |plan| plan.config_revision),
+        };
+        self.state
+            .store
+            .lock()
+            .publish_files(&scope, &[pub_item], crate::job_loop::unix_now() * 1000)
+            .map_err(|error| {
+                tracing::error!(path = %candidate.file.path.display(), %error, "Transfer publication completion failed");
+                subscribe::SubscribeError::Downloader(downloader::DownloaderError::Message(error.to_string()))
+            })?;
+        Ok(())
     }
 }
 
@@ -393,21 +492,7 @@ impl subscribe::TransferRecorder for PublicationRecorder<'_> {
     }
 
     fn published(&self, candidate: &domain::FileCoverage) -> Result<(), subscribe::SubscribeError> {
-        let pub_item = store::library_write::FilePublication {
-            file: &candidate.file,
-            units: &candidate.units,
-            expected_version: None,
-            probe_required: true,
-        };
-        let scope = store::library_write::WriteScope {
-            library_id: candidate.file.library_id,
-            config_revision: 0,
-        };
-        self.state.store.lock().publish_files(&scope, &[pub_item], 0).map_err(|error| {
-            tracing::error!(path = %candidate.file.path.display(), %error, "Transfer publication completion failed");
-            subscribe::SubscribeError::Downloader(downloader::DownloaderError::Message(error.to_string()))
-        })?;
-        Ok(())
+        self.published_with_plan(candidate, None)
     }
 }
 
@@ -424,9 +509,10 @@ impl subscribe::TransferRecorder for PlannedPublicationRecorder<'_> {
     }
 
     fn published(&self, candidate: &domain::FileCoverage) -> Result<(), subscribe::SubscribeError> {
-        self.recorder.published(candidate)
+        self.recorder.published_with_plan(candidate, Some(self.plan))
     }
 }
+
 /// Join existing Library work before observing facts or acquiring our own lease.
 /// In particular, a first scan must not claim a just-published Transfer file while
 /// probing is still running and before its authoritative ledger row is committed.
@@ -457,7 +543,7 @@ pub fn transfer_one(state: &ApiState, subscribe_id: SubscribeId) -> Result<(), S
         tracing::info!(subscribe_id = %subscribe_id, "订阅正在删除中，跳过 Transfer");
         return Ok(());
     }
-    crate::http::file_delete::retry_queued_deletions(&state.store);
+    crate::http::file_delete::retry_queued_deletions(&state.store).map_err(|e| e.to_string())?;
 
     let subscribe = match state.store.lock().get_subscribe(subscribe_id) {
         Ok(Some(s)) => s,
@@ -488,7 +574,7 @@ pub fn transfer_one(state: &ApiState, subscribe_id: SubscribeId) -> Result<(), S
     if !wait_for_transfer_library(state, &plan.library_id)? {
         return Ok(());
     }
-    let (media, filter, facts, wash_filter, observation_revisions) = load_transfer_context(state, &subscribe)?;
+    let (media, filter, facts, wash_filter, observation_fingerprint) = load_transfer_context(state, &subscribe)?;
     let routed = crate::delivery::RoutedDownloader::with_pending(state, &subscribe, &pending);
     restore_identities(state, &subscribe, &routed, &pending);
     let absolute = crate::season_check::absolute_map(
@@ -501,6 +587,9 @@ pub fn transfer_one(state: &ApiState, subscribe_id: SubscribeId) -> Result<(), S
     let library_lease = state.acquire_library_work(&plan.library_id)?;
     library_lease.control().check().map_err(|e| e.to_string())?;
     tracing::info!(%subscribe_id, pending_count = chosen.len(), "Transfer 开始");
+    let destination_library: domain::LibraryId = plan.library_id.parse().map_err(|error| {
+        format!("Library id {} 无法作为目标身份: {error}", plan.library_id)
+    })?;
 
     let added = build_added_input(
         RunInput {
@@ -513,9 +602,9 @@ pub fn transfer_one(state: &ApiState, subscribe_id: SubscribeId) -> Result<(), S
             search_keywords: Vec::new(),
             downloader: &routed,
             library_root: &plan.root,
-            library_id: plan.library_id.parse().ok(),
-            root_id: None,
-            config_revision: Some(plan.revisions.app),
+            library_id: Some(destination_library),
+            root_id: Some(plan.root_id.clone()),
+            config_revision: Some(plan.config_revision),
             transfer_mode: plan.mode,
             scrape: plan.nfo,
             hooks: None,
@@ -549,7 +638,7 @@ pub fn transfer_one(state: &ApiState, subscribe_id: SubscribeId) -> Result<(), S
     let fallbacks_before = library::hardlink_fallback_count();
     let recorder = PlannedPublicationRecorder {
         recorder: PublicationRecorder { state, subscribe: &subscribe,
-            lease: &library_lease, revisions: observation_revisions },
+            lease: &library_lease, fingerprint: observation_fingerprint.clone() },
         plan: &plan,
     };
     let outcome = collect_completed_recorded(
@@ -576,7 +665,7 @@ pub fn transfer_one(state: &ApiState, subscribe_id: SubscribeId) -> Result<(), S
 
     library_lease.control().check().map_err(|e| e.to_string())?;
     let ledger_count = outcome.ledger.len();
-    commit_transfer_outcome(state, &subscribe, &outcome, &library_lease, &observation_revisions, &plan)?;
+    commit_transfer_outcome(state, &subscribe, &outcome, &library_lease, &observation_fingerprint, &plan)?;
 
     crate::http::library::enqueue_probes_for_rows(state, &outcome.ledger);
     let fallbacks = library::hardlink_fallback_count().saturating_sub(fallbacks_before);
@@ -715,11 +804,18 @@ mod tests {
         (tmp, state, media, subscribe)
     }
 
-    fn candidate(media: &Media, plan: &TransferPlan) -> domain::FileCoverage {
+    /// The `FileCoverage` a collected Transfer file carries: the plan's real
+    /// destination identity plus the source path and mode of this round.
+    fn candidate(
+        media: &Media,
+        plan: &TransferPlan,
+        source: &std::path::Path,
+        mode: library::TransferMode,
+    ) -> domain::FileCoverage {
         let file = domain::LibraryFile {
             file_id: domain::LedgerId::new(),
             library_id: plan.library_id.parse().unwrap(),
-            root_id: "root1".into(),
+            root_id: plan.root_id.clone(),
             media_id: media.id,
             kind: media.kind,
             path: plan.root.join("The Matrix.mkv"),
@@ -731,8 +827,8 @@ mod tests {
             created_ns: None,
             modified_ns: None,
             source_digest: None,
-            source_path: None,
-            transfer_mode: None,
+            source_path: Some(source.to_path_buf()),
+            transfer_mode: Some(mode.as_str().to_string()),
             resolution: None,
             codec: None,
             hdr: None,
@@ -749,21 +845,39 @@ mod tests {
         domain::FileCoverage { file, units: vec![domain::UnitKey::WHOLE] }
     }
 
+    fn recorder<'a>(
+        state: &'a ApiState,
+        subscribe: &'a Subscribe,
+        lease: &'a crate::library_lifecycle::LibraryWorkLease,
+        plan: &'a TransferPlan,
+    ) -> PlannedPublicationRecorder<'a> {
+        PlannedPublicationRecorder {
+            recorder: PublicationRecorder {
+                state,
+                subscribe,
+                lease,
+                fingerprint: state.store.lock().read_fingerprint(&plan.library_id, subscribe.media_id).unwrap(),
+            },
+            plan,
+        }
+    }
+
     #[test]
     fn changed_root_is_rejected_before_reservation_even_with_a_new_facts_snapshot() {
         let (tmp, state, media, subscribe) = fixture();
         let plan = resolve_transfer_plan(&state, &media, &subscribe).unwrap();
         let lease = state.acquire_library_work(&plan.library_id).unwrap();
         state.store.lock().set_library_root(media.kind, tmp.path().join("new-root").to_str().unwrap()).unwrap();
-        let revisions = state.store.lock().read_revisions().unwrap();
-        assert_eq!(revisions.app, plan.revisions.app, "root writes evade the app guard");
+        let fingerprint = state.store.lock().read_fingerprint(&plan.library_id, media.id).unwrap();
+        assert_eq!(fingerprint, plan.fingerprint, "root writes evade the scoped fingerprint");
         let recorder = PlannedPublicationRecorder {
-            recorder: PublicationRecorder { state: &state, subscribe: &subscribe, lease: &lease, revisions },
+            recorder: PublicationRecorder { state: &state, subscribe: &subscribe, lease: &lease, fingerprint },
             plan: &plan,
         };
-        let candidate_cov = candidate(&media, &plan);
+        let source = tmp.path().join("source.mkv");
+        let candidate_cov = candidate(&media, &plan, &source, library::TransferMode::Copy);
         let result = subscribe::TransferRecorder::prepare(
-            &recorder, &candidate_cov, &tmp.path().join("source.mkv"), library::TransferMode::Copy,
+            &recorder, &candidate_cov, &source, library::TransferMode::Copy,
         );
         assert!(result.is_err(), "obsolete root must not be reserved: {result:?}");
         assert!(state.store.lock().list_ledger().unwrap().is_empty());
@@ -777,15 +891,79 @@ mod tests {
         let plan = resolve_transfer_plan(&state, &media, &subscribe).unwrap();
         let lease = state.acquire_library_work(&plan.library_id).unwrap();
         state.store.lock().set_transfer_mode("move").unwrap();
-        let revisions = state.store.lock().read_revisions().unwrap();
-        assert_eq!(revisions.app, plan.revisions.app, "settings evade the app guard");
-        let recorder = PlannedPublicationRecorder { recorder: PublicationRecorder { state: &state, subscribe: &subscribe, lease: &lease, revisions }, plan: &plan };
-        let candidate_cov = candidate(&media, &plan);
+        let fingerprint = state.store.lock().read_fingerprint(&plan.library_id, media.id).unwrap();
+        assert_eq!(fingerprint, plan.fingerprint, "settings evade the scoped fingerprint");
+        let recorder = PlannedPublicationRecorder { recorder: PublicationRecorder { state: &state, subscribe: &subscribe, lease: &lease, fingerprint }, plan: &plan };
+        let source = tmp.path().join("source.mkv");
+        let candidate_cov = candidate(&media, &plan, &source, library::TransferMode::Copy);
         let result = subscribe::TransferRecorder::prepare(
-            &recorder, &candidate_cov, &tmp.path().join("source.mkv"), library::TransferMode::Copy,
+            &recorder, &candidate_cov, &source, library::TransferMode::Copy,
         );
         assert!(result.is_err(), "obsolete mode must not be reserved: {result:?}");
         assert!(state.store.lock().list_ledger().unwrap().is_empty());
         assert!(!candidate_cov.file.path.exists());
+    }
+
+    #[test]
+    fn reservation_and_publication_keep_the_destination_identity() {
+        let (tmp, state, media, subscribe) = fixture();
+        let plan = resolve_transfer_plan(&state, &media, &subscribe).unwrap();
+        let lease = state.acquire_library_work(&plan.library_id).unwrap();
+        let recorder = recorder(&state, &subscribe, &lease, &plan);
+        let source = tmp.path().join("downloads/The Matrix.mkv");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"matrix").unwrap();
+
+        let reserved = subscribe::TransferRecorder::prepare(
+            &recorder,
+            &candidate(&media, &plan, &source, library::TransferMode::Copy),
+            &source,
+            library::TransferMode::Copy,
+        )
+        .unwrap();
+        let destination = reserved.file.path.clone();
+        assert!(
+            state
+                .store
+                .lock()
+                .transfer_pending(&destination.display().to_string())
+                .unwrap(),
+            "the reservation is a pending row at the destination"
+        );
+
+        std::fs::write(&destination, b"matrix").unwrap();
+        let mut published = reserved.clone();
+        published.file.publication = domain::FilePublication::Published;
+        subscribe::TransferRecorder::published(&recorder, &published).unwrap();
+
+        let library_path = state
+            .store
+            .lock()
+            .db_paths()
+            .into_iter()
+            .find(|path| path.ends_with("library.db"))
+            .unwrap();
+        let conn = rusqlite::Connection::open(library_path).unwrap();
+        let (root_id, source_path, transfer_mode, publication): (
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT root_id, source_path, transfer_mode, publication_state
+                 FROM library_files WHERE file_id = ?1",
+                [published.file.file_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(root_id, plan.root_id, "the real destination root is persisted");
+        assert_eq!(source_path.as_deref(), source.to_str());
+        assert_eq!(
+            transfer_mode.as_deref(),
+            Some("copy"),
+            "the reservation's transfer mode survives publication"
+        );
+        assert_eq!(publication, "published");
     }
 }

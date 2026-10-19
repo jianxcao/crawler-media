@@ -40,7 +40,14 @@ pub(super) fn compare_and_store_markers(
         return Ok(());
     }
     let comparison = compare_season_fingerprints(mgr, unit)?;
-    let _ = remember_season_digest(mgr, unit);
+    if let Err(error) = remember_season_digest(mgr, unit) {
+        tracing::warn!(
+            %error,
+            media_id = %unit.row.media_id,
+            season = unit.row.season.unwrap_or(1),
+            "【片头片尾】比对摘要写入失败，本轮结果仍继续发布"
+        );
+    }
     let season = unit.row.season.unwrap_or(1);
     if comparison.markers.is_empty() && !unit.overwrite_markers {
         tracing::warn!(

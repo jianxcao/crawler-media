@@ -224,7 +224,9 @@ fn checkpoint_fault_fixture() -> CheckpointFaultFixture {
 
     let media = domain::Media {
         id: domain::MediaId::new(),
-        kind: MediaKind::Movie,
+        // `library_files` 的 (media_id, kind) 外键要求文件 kind 与所属库 kind 一致；
+        // `video_fixture` 建的是 Video 库。
+        kind: MediaKind::Video,
         title: "Test Movie".into(),
         year: Some(2024),
         original_title: None,
@@ -274,20 +276,20 @@ fn set_scan_seen_disabled(db_path: &std::path::Path, disabled: bool) {
     }
 }
 
-/// 只让 durable 源版本查询失败：重命名 `ledger.source_version_ms`。
-/// `scan_seen_checkpoints` 不读该列，因此断点查询仍然成功——这是真实 SQL 故障，
-/// 不需要在生产代码里留测试钩子（也不会有跨测试的全局状态）。
+/// 只让 durable 源版本查询失败：重命名 `library_files.source_digest`。
+/// `scan_seen_checkpoints` 只读 `scan_seen`，不读该列，因此断点查询仍然成功——
+/// 这是真实 SQL 故障，不需要在生产代码里留测试钩子（也不会有跨测试的全局状态）。
 fn set_durable_disabled(db_path: &std::path::Path, disabled: bool) {
     let conn = rusqlite::Connection::open(db_path).unwrap();
     if disabled {
         conn.execute(
-            "ALTER TABLE ledger RENAME COLUMN source_version_ms TO source_version_ms_disabled",
+            "ALTER TABLE library_files RENAME COLUMN source_digest TO source_digest_disabled",
             [],
         )
         .unwrap();
     } else {
         conn.execute(
-            "ALTER TABLE ledger RENAME COLUMN source_version_ms_disabled TO source_version_ms",
+            "ALTER TABLE library_files RENAME COLUMN source_digest_disabled TO source_digest",
             [],
         )
         .unwrap();

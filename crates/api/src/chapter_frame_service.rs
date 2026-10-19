@@ -33,7 +33,7 @@ const POLL: Duration = Duration::from_millis(25);
 
 #[derive(Clone, Debug)]
 pub struct ChapterFrameRequest {
-    pub ledger_id: domain::LedgerId,
+    pub file_id: domain::LedgerId,
     pub video: PathBuf,
     pub source_version: String,
     pub targets: Vec<(i64, i64)>,
@@ -135,34 +135,34 @@ impl ChapterFrameService {
         self.notify.notify_waiters();
     }
 
-    /// Persist one obligation for a ledger and wake the workers.
+    /// Persist one obligation for a file and wake the workers.
     pub fn enqueue_ledger(
         &self,
-        ledger_id: &str,
+        file_id: &str,
         targets: Vec<(i64, i64)>,
     ) -> Result<bool, String> {
         if targets.is_empty() {
             return Ok(false);
         }
-        let compact = ledger_id.replace('-', "");
+        let file_id = file_id_from_str(file_id)?;
         let (path, enabled) = {
             let store = self.store.lock();
-            let Some(row) = store.get_ledger(&compact).map_err(|error| error.to_string())? else {
+            let Some((path, _library_id)) = store
+                .get_file_path_and_library(file_id)
+                .map_err(|error| error.to_string())?
+            else {
                 return Ok(false);
             };
-            let path = PathBuf::from(&row.path);
-            (
-                path.clone(),
-                crate::http::library_chapters::chapter_images_enabled(&store, &path),
-            )
+            let enabled = crate::http::library_chapters::chapter_images_enabled(&store, &path);
+            (path, enabled)
         };
         if !enabled {
             return Ok(false);
         }
-        self.enqueue_path_inner(&compact, &path, targets)
+        self.enqueue_path_inner(file_id, &path, targets)
     }
 
-    /// Persist one obligation resolved from a ledger path.
+    /// Persist one obligation resolved from a file path.
     pub fn enqueue_path(
         &self,
         path: &Path,
@@ -171,30 +171,32 @@ impl ChapterFrameService {
         if targets.is_empty() {
             return Ok(false);
         }
-        let ledger_id = {
+        let file_id = {
             let store = self.store.lock();
             store
-                .ledger_by_path(&path.to_string_lossy())
+                .file_id_at_path(&path.to_string_lossy())
                 .map_err(|error| error.to_string())?
-                .map(|row| row.id.to_string())
         };
-        match ledger_id {
-            Some(ledger_id) => self.enqueue_ledger(&ledger_id, targets),
+        match file_id {
+            Some(file_id) => self.enqueue_path_inner(
+                file_id_from_str(&file_id)?,
+                path,
+                targets,
+            ),
             None => Ok(false),
         }
     }
 
     fn enqueue_path_inner(
         &self,
-        ledger_id: &str,
+        file_id: domain::LedgerId,
         path: &Path,
         targets: Vec<(i64, i64)>,
     ) -> Result<bool, String> {
         let source_version = crate::fingerprint_job::current_source_version(path);
         let task = ChapterFrameTask {
             id: uuid::Uuid::new_v4().to_string(),
-            ledger_id: domain::LedgerId::from_str(ledger_id)
-                .map_err(|error| format!("invalid ledger id: {error}"))?,
+            file_id,
             source_version,
             targets_hash: targets_hash(&targets),
             targets,
@@ -341,7 +343,7 @@ impl ChapterFrameService {
             }
         };
         let request = ChapterFrameRequest {
-            ledger_id: task.ledger_id,
+            file_id: task.file_id,
             video: video.clone(),
             source_version: task.source_version.clone(),
             targets: task.targets.clone(),
@@ -400,11 +402,13 @@ impl ChapterFrameService {
         &self,
         task: &ChapterFrameTask,
     ) -> Result<(PathBuf, Option<Arc<LibraryWorkLease>>), String> {
-        let compact = task.ledger_id.to_string().replace('-', "");
         let (path, library_id) = {
             let store = self.store.lock();
-            let Some((path, lid)) = store.get_file_path_and_library(task.ledger_id).map_err(|e| e.to_string())? else {
-                return Err("file_deleted: library_file row missing".into());
+            let Some((path, lid)) = store
+                .get_file_path_and_library(task.file_id)
+                .map_err(|e| e.to_string())?
+            else {
+                return Err("file_deleted: library file row missing".into());
             };
             (path, Some(lid))
         };
@@ -437,4 +441,10 @@ fn targets_hash(targets: &[(i64, i64)]) -> String {
         digest.update(end.to_le_bytes());
     }
     format!("{:x}", digest.finalize())
+}
+
+/// A chapter obligation is keyed by the file id (`library_files.file_id`).
+fn file_id_from_str(value: &str) -> Result<domain::LedgerId, String> {
+    domain::LedgerId::from_str(&value.replace('-', ""))
+        .map_err(|error| format!("invalid file id: {error}"))
 }

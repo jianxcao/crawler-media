@@ -1,3 +1,33 @@
+/// 在 `tmp` 下建一个 `kind` 库并登记 `media_id`：`library_files` 的
+/// (media_id, kind) 外键和路径归属都要求两者先存在，且文件路径必须落在库根内。
+fn seed_probe_library(store: &Store, tmp: &tempfile::TempDir, media_id: MediaId, kind: MediaKind) {
+    store
+        .create_library(
+            kind,
+            "Fixture",
+            &[tmp.path().to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    store
+        .insert_media(&domain::Media {
+            id: media_id,
+            kind,
+            title: "Fixture".into(),
+            year: None,
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+}
+
 #[test]
 fn force_probe_during_existing_probe_is_rejected_until_terminal() {
     let tmp = tempfile::tempdir().unwrap();
@@ -58,7 +88,7 @@ fn stale_queue_message_cannot_start_or_finish_a_later_retry() {
         row: LedgerRow {
             id: LedgerId::new(),
             media_id: MediaId::new(),
-            path: "retry.mkv".into(),
+            path: tmp.path().join("retry.mkv").display().to_string(),
             season: None,
             episode: None,
             resolution: None,
@@ -76,6 +106,7 @@ fn stale_queue_message_cannot_start_or_finish_a_later_retry() {
         marker_refresh_id: None,
         job_id: None,
     };
+    seed_probe_library(&store.lock(), &tmp, unit.row.media_id, MediaKind::Movie);
     store.lock().insert_ledger(&unit.row).unwrap();
 
     assert!(manager.enqueue(unit.clone()));
@@ -111,7 +142,7 @@ fn queued_probe_is_recovered_after_manager_restart() {
         row: LedgerRow {
             id: LedgerId::new(),
             media_id: MediaId::new(),
-            path: "episode.mkv".into(),
+            path: tmp.path().join("episode.mkv").display().to_string(),
             season: Some(1),
             episode: Some(1),
             resolution: None,
@@ -130,6 +161,7 @@ fn queued_probe_is_recovered_after_manager_restart() {
         job_id: None,
     };
     let ledger_id = unit.row.id.to_string();
+    seed_probe_library(&store.lock(), &tmp, unit.row.media_id, MediaKind::Tv);
     store.lock().insert_ledger(&unit.row).unwrap();
     let manager = ProbeManager::new(store.clone());
 
@@ -244,7 +276,7 @@ fn metadata_job_finishes_before_a_separate_voiceprint_job_is_queued() {
         row: LedgerRow {
             id: LedgerId::new(),
             media_id: MediaId::new(),
-            path: "episode.mkv".into(),
+            path: tmp.path().join("episode.mkv").display().to_string(),
             season: Some(1),
             episode: Some(1),
             resolution: None,
@@ -262,6 +294,7 @@ fn metadata_job_finishes_before_a_separate_voiceprint_job_is_queued() {
         marker_refresh_id: None,
         job_id: None,
     };
+    seed_probe_library(&store.lock(), &tmp, unit.row.media_id, MediaKind::Tv);
     store.lock().insert_ledger(&unit.row).unwrap();
 
     assert!(manager.enqueue(unit));
@@ -362,6 +395,7 @@ fn interrupted_refresh_cancellation_is_completed_during_recovery() {
             filter_score: None,
         };
         std::fs::write(&row.path, b"dummy").unwrap();
+        seed_probe_library(&store.lock(), &tmp, media_id, MediaKind::Tv);
         store.lock().insert_ledger(&row).unwrap();
         let ledger_id = row.id.to_string();
         let mut specs = vec![crate::store::ProbeJobUnitSpec {
@@ -489,7 +523,7 @@ fn failed_probe_is_persisted_and_can_be_retried() {
         row: LedgerRow {
             id: LedgerId::new(),
             media_id: MediaId::new(),
-            path: "failed-episode.mkv".into(),
+            path: tmp.path().join("failed-episode.mkv").display().to_string(),
             season: Some(1),
             episode: Some(1),
             resolution: None,
@@ -508,6 +542,7 @@ fn failed_probe_is_persisted_and_can_be_retried() {
         job_id: None,
     };
     let ledger_id = unit.row.id.to_string();
+    seed_probe_library(&store.lock(), &tmp, unit.row.media_id, MediaKind::Tv);
     store.lock().insert_ledger(&unit.row).unwrap();
 
     assert!(manager.enqueue(unit.clone()));
@@ -541,7 +576,11 @@ fn active_season_marker_refresh_rejects_a_duplicate_batch() {
     let rows = [1, 2].map(|episode| LedgerRow {
         id: LedgerId::new(),
         media_id,
-        path: format!("episode-{episode}.mkv"),
+        path: tmp
+            .path()
+            .join(format!("episode-{episode}.mkv"))
+            .display()
+            .to_string(),
         season: Some(1),
         episode: Some(episode),
         resolution: None,
@@ -551,6 +590,7 @@ fn active_season_marker_refresh_rejects_a_duplicate_batch() {
         confidence: Confidence::High,
         filter_score: None,
     });
+    seed_probe_library(&store.lock(), &tmp, media_id, MediaKind::Tv);
     for row in &rows {
         store.lock().insert_ledger(row).unwrap();
     }
@@ -603,7 +643,11 @@ fn forced_item_refresh_reserves_all_episodes_or_none() {
     let rows = [1, 2].map(|episode| LedgerRow {
         id: LedgerId::new(),
         media_id,
-        path: format!("episode-{episode}.mkv"),
+        path: tmp
+            .path()
+            .join(format!("episode-{episode}.mkv"))
+            .display()
+            .to_string(),
         season: Some(1),
         episode: Some(episode),
         resolution: None,
@@ -613,6 +657,7 @@ fn forced_item_refresh_reserves_all_episodes_or_none() {
         confidence: Confidence::High,
         filter_score: None,
     });
+    seed_probe_library(&store.lock(), &tmp, media_id, MediaKind::Tv);
     for row in &rows {
         store.lock().insert_ledger(row).unwrap();
     }

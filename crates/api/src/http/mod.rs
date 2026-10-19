@@ -32,7 +32,6 @@ pub(crate) mod library_presence;
 pub(crate) mod library_scan;
 pub(crate) mod media;
 pub(crate) mod media_posters;
-pub(crate) mod media_visibility;
 pub(crate) mod notify;
 pub(crate) mod playback;
 pub(crate) mod playback_activity;

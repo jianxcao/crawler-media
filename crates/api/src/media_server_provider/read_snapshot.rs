@@ -24,9 +24,15 @@ pub(super) fn collect_server_read(
         None => store.jellyfin_ledger_candidates(&ownership, parent_id).map_err(|error| error.to_string())?,
     };
     let ids: Vec<_> = rows.iter().map(|row| row.media_id).collect();
+    // Published, present file facts for the candidate rows: a pending or
+    // missing file is not library content and never becomes an item.
+    let file_ids: Vec<_> = rows.iter().map(|row| row.id).collect();
+    let files = store
+        .published_files(&file_ids)
+        .map_err(|error| error.to_string())?;
     let media = store.media_batch(&ids).map_err(|error| error.to_string())?;
     let units = store
         .playback_units_for_media(user_id, &ids)
         .map_err(|error| error.to_string())?;
-    Ok(ServerReadSnapshot { ownership, is_admin, media, rows, units })
+    Ok(ServerReadSnapshot { ownership, is_admin, media, rows, units, files })
 }

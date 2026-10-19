@@ -24,7 +24,16 @@ pub(crate) async fn list_ledger(State(state): State<ApiState>) -> Response {
             );
         }
     };
-    let global_transfer_mode = store.transfer_mode().unwrap_or_else(|_| "hardlink".into());
+    let global_transfer_mode = match store.transfer_mode() {
+        Ok(mode) => mode,
+        Err(error) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
+    };
     let items: Vec<Value> = rows_with_mode
         .into_iter()
         .map(|(row, saved_mode, source_path)| {
@@ -86,7 +95,7 @@ pub(crate) struct DeleteLedgerQuery {
     delete_file: Option<bool>,
 }
 
-/// DELETE /ledger/{id} — delete a ledger row and optionally remove the file on disk.
+/// DELETE /ledger/{id} — delete a file row and optionally remove the bytes on disk.
 pub(crate) async fn delete_ledger_row(
     State(state): State<ApiState>,
     Path(id): Path<String>,
@@ -96,60 +105,75 @@ pub(crate) async fn delete_ledger_row(
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "ledger.invalid", "ledger id 无效"),
     };
-    let store = state.store.lock();
-    let rows = match store.list_ledger() {
-        Ok(rows) => rows,
-        Err(error) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            );
-        }
-    };
-    let Some(target) = rows.into_iter().find(|r| r.id == ledger_id) else {
-        return err(StatusCode::NOT_FOUND, "ledger.missing", "整理记录不存在");
-    };
-    if let Some(media) = store.get_media(target.media_id).ok().flatten() {
-        if crate::http::library::library_for_row_strict(&store, &target, &media)
-            .is_some_and(|owner| !store.library_accepts_work(&owner.id).unwrap_or(false)) {
-            return err(StatusCode::CONFLICT, "library.deleting", "Library 正在删除");
-        }
-    }
     let delete_file = query.delete_file.unwrap_or(false);
-    if delete_file {
-        let owned = store
-            .get_media(target.media_id)
-            .ok()
-            .flatten()
-            .and_then(|media| {
-                crate::http::library::library_for_row_strict(&store, &target, &media)
-            });
-        if owned.is_none() {
+    let target = {
+        let store = state.store.lock();
+        let target = match store.get_ledger(&ledger_id.to_string()) {
+            Ok(Some(target)) => target,
+            Ok(None) => return err(StatusCode::NOT_FOUND, "ledger.missing", "整理记录不存在"),
+            Err(error) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                );
+            }
+        };
+        if let Some(media) = store.get_media(target.media_id).ok().flatten() {
+            let owner = crate::http::library::library_for_row_strict(&store, &target, &media);
+            match owner {
+                Some(owner) => match store.library_accepts_work(&owner.id) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return err(StatusCode::CONFLICT, "library.deleting", "Library 正在删除");
+                    }
+                    Err(error) => {
+                        return err(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "store.error",
+                            &error.to_string(),
+                        );
+                    }
+                },
+                None if delete_file => {
+                    return err(
+                        StatusCode::FORBIDDEN,
+                        "library.outside_root",
+                        "文件已不在任何媒体库根目录内，拒绝物理删除",
+                    );
+                }
+                None => {}
+            }
+        } else if delete_file {
             return err(
                 StatusCode::FORBIDDEN,
                 "library.outside_root",
                 "文件已不在任何媒体库根目录内，拒绝物理删除",
             );
         }
-    }
-    if delete_file {
-        if let Err(e) = std::fs::remove_file(&target.path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "file.delete_failed",
-                    &e.to_string(),
-                );
-            }
+        if delete_file
+            && let Err(error) = store.enqueue_file_deletion(&target.path, "admin_delete")
+        {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
         }
-    }
-    if let Err(error) = store.delete_ledger_path(&target.path) {
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        );
+        if let Err(error) = store.delete_ledger_path(&target.path) {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
+        target
+    };
+    // 物理删除只走 durable 队列：进程中断后仍会重试。
+    if delete_file
+        && let Err(error) = crate::http::file_delete::retry_queued_deletions(&state.store)
+    {
+        tracing::error!(path = %target.path, %error, "管理删除物理文件失败，保留在待删除队列");
     }
     ok(json!({ "deleted": true, "path": target.path, "file_deleted": delete_file })).into_response()
 }

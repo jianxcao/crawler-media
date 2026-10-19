@@ -1,11 +1,10 @@
-//! Library browse: Library listing and ledger-grouped item views.
-//! Entity CRUD lives in `library_config`, scans/refresh in `library_scan`,
+//! Library browse: Library listing and item views rendered from the `library_items`
+//! summaries. Entity CRUD lives in `library_config`, scans/refresh in `library_scan`,
 //! artwork in `library_artwork`, admin views in `library_admin`.
 
 mod probe;
 pub(crate) use probe::{
-    enqueue_probes_for_paths, enqueue_probes_for_rows, ensure_probe_enqueued, file_tracks,
-    probe_item,
+    enqueue_probes_for_paths, enqueue_probes_for_rows, ensure_probe_enqueued, probe_item,
 };
 
 use axum::extract::{Path, Query, State};
@@ -17,19 +16,141 @@ use std::collections::HashMap;
 use std::path::{Path as FsPath, PathBuf};
 use std::str::FromStr;
 
-use crate::catalog::Catalog;
 use crate::http::{err, ok, ok_list};
 use crate::management::ApiState;
-use crate::store::Library;
+use crate::store::{library_query, Library};
 
 mod assets;
 mod cover;
-pub(crate) mod facets;
 pub(crate) mod page;
-pub(crate) mod selection;
 pub(crate) use assets::{library_json, poster_path, poster_path_with, preferred_row, rows_in_library};
 pub(crate) use cover::{default_cover_options, is_legacy_fanart_copy, render_cover_jpeg};
 
+pub(crate) const BROWSE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+pub(crate) fn browse_work_error(error: crate::blocking_budget::BlockingError) -> Response {
+    use crate::blocking_budget::BlockingError;
+    match error {
+        BlockingError::Busy => err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "runtime.busy",
+            "服务繁忙，请重试",
+        ),
+        BlockingError::Timeout => err(
+            StatusCode::GATEWAY_TIMEOUT,
+            "library.timeout",
+            "浏览请求超时",
+        ),
+        error => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "runtime.worker",
+            &error.to_string(),
+        ),
+    }
+}
+/// HTTP query parameters → the store browse filter. A value the filter cannot express is an
+/// error the handler turns into 400: a bogus filter must never silently return everything.
+/// Shared by the item page, the first-letter index, gallery and facets so one request shape
+/// cannot mean different things on different endpoints.
+pub(crate) fn browse_filter_from_query(
+    query: &HashMap<String, String>,
+) -> Result<library_query::BrowseFilter, String> {
+    let list = |keys: &[&str]| -> Vec<String> {
+        keys.iter()
+            .find_map(|key| query.get(*key))
+            .map(|raw| {
+                raw.split(',')
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let flag = |key: &str| -> Result<Option<bool>, String> {
+        match query.get(key) {
+            Some(raw) => raw
+                .parse::<bool>()
+                .map(Some)
+                .map_err(|_| format!("{key} must be true or false")),
+            None => Ok(None),
+        }
+    };
+    let rating = match query.get("rating_gte") {
+        Some(raw) => {
+            let value = raw
+                .parse::<f64>()
+                .map_err(|_| "rating_gte must be numeric".to_string())?;
+            if !value.is_finite() || !(0.0..=10.0).contains(&value) {
+                return Err("rating_gte must be between 0 and 10".into());
+            }
+            Some(value)
+        }
+        None => None,
+    };
+    Ok(library_query::BrowseFilter {
+        genres: list(&["genres", "g"]),
+        countries: list(&["countries", "c"]),
+        decades: list(&["decades", "d"]),
+        runtimes: list(&["runtimes", "rt"]),
+        languages: list(&["languages", "lang"]),
+        resolutions: list(&["resolutions", "res"]),
+        stock: list(&["stock"]),
+        hdr: flag("hdr")?,
+        min_rating: rating,
+        identity: query.get("identity").cloned(),
+        watch: query.get("watch").or_else(|| query.get("w")).cloned(),
+        unwatched_first: query
+            .get("unwatched_first")
+            .is_some_and(|raw| raw == "true" || raw == "1"),
+        require_image: false,
+    })
+}
+
+/// The page/sort half of a browse request, shared by items, index and gallery.
+pub(crate) fn browse_order_from_query(
+    query: &HashMap<String, String>,
+) -> (library_query::BrowseOrder, bool) {
+    let order = match query.get("sort").map(String::as_str) {
+        Some("title") => library_query::BrowseOrder::Title,
+        Some("added_at") => library_query::BrowseOrder::AddedAt,
+        Some("release_date" | "release_date_asc") => library_query::BrowseOrder::ReleaseDate,
+        Some("rating") => library_query::BrowseOrder::Rating,
+        Some("runtime") => library_query::BrowseOrder::Runtime,
+        Some("size") => library_query::BrowseOrder::Size,
+        Some("resolution") => library_query::BrowseOrder::Resolution,
+        Some("last_played") => library_query::BrowseOrder::LastPlayed,
+        Some("random") => library_query::BrowseOrder::Random,
+        _ => library_query::BrowseOrder::Title,
+    };
+    let descending = match query.get("order").map(|value| value.as_str()) {
+        Some("desc") => true,
+        Some("asc") => false,
+        // Same defaults the wall has always used; `release_date_asc` is the explicit
+        // ascending spelling of the release-date sort.
+        _ => {
+            query.get("sort").map(String::as_str) != Some("release_date_asc")
+                && matches!(
+                    order,
+                    library_query::BrowseOrder::AddedAt
+                        | library_query::BrowseOrder::ReleaseDate
+                        | library_query::BrowseOrder::Rating
+                        | library_query::BrowseOrder::Size
+                        | library_query::BrowseOrder::LastPlayed
+                )
+        }
+    };
+    (order, descending)
+}
+
+/// Map a store failure of a browse read to a response, keeping filter rejections a 400.
+pub(crate) fn browse_store_error(error: store::StoreError) -> Response {
+    match error {
+        store::StoreError::Invalid(message) => {
+            err(StatusCode::BAD_REQUEST, "library.invalid", &message)
+        }
+        error => err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error.to_string()),
+    }
+}
 /// Resolve one ledger row to exactly one Library. The longest matching root
 /// wins, so a nested Library does not leak through a broader parent root. Two
 /// Libraries with equally-specific roots are ambiguous and therefore own
@@ -250,7 +371,7 @@ pub(crate) async fn list_libraries(
     };
     match state
         .http_work
-        .run(selection::BROWSE_DEADLINE, move || {
+        .run(BROWSE_DEADLINE, move || {
             facts
                 .iter()
                 .map(|facts| {
@@ -264,150 +385,105 @@ pub(crate) async fn list_libraries(
         Ok(items) => ok_list(items).into_response(),
         Err(error) => {
             tracing::error!(%error, "媒体库列表的文件观察任务失败");
-            selection::browse_work_error(error)
+            browse_work_error(error)
         }
     }
 }
 
-/// GET /libraries/{id}/items — one item per Media owned under this library's roots.
+/// GET /libraries/{id}/items — one card per Media owned under this library's roots.
+///
+/// Filters, ordering and paging are all SQL over `library_items`; the card extras (seasons,
+/// studio) are read once for the page's media ids, so a page costs a fixed number of queries
+/// and never one per card.
 pub(crate) async fn list_items(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
     Path(id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    // F01: Restore library visibility and existence check before querying inventory
-    let library = {
-        let store = state.store.lock();
-        match require_visible_library(&store, &id, user_id) {
-            Ok(library) => library,
-            Err(response) => return response,
-        }
-    };
     let lib_id = match id.parse::<domain::LibraryId>() {
-        Ok(lid) => lid,
+        Ok(lib_id) => lib_id,
         Err(_) => return missing_library(),
     };
-
-    let order = match query.get("sort").map(String::as_str) {
-        Some("title") => store::library_query::BrowseOrder::Title,
-        Some("added_at") => store::library_query::BrowseOrder::AddedAt,
-        Some("release_date") => store::library_query::BrowseOrder::ReleaseDate,
-        Some("rating") => store::library_query::BrowseOrder::Rating,
-        Some("runtime") => store::library_query::BrowseOrder::Runtime,
-        Some("size") => store::library_query::BrowseOrder::Size,
-        Some("resolution") => store::library_query::BrowseOrder::Resolution,
-        Some("random") => store::library_query::BrowseOrder::Random,
-        _ => store::library_query::BrowseOrder::Title,
+    {
+        let store = state.store.lock();
+        if let Err(response) = require_visible_library(&store, &id, user_id) {
+            return response;
+        }
+    }
+    let filter = match browse_filter_from_query(&query) {
+        Ok(filter) => filter,
+        Err(message) => return err(StatusCode::BAD_REQUEST, "library.invalid", &message),
     };
-    let descending = query.get("order").map(|o| o.eq_ignore_ascii_case("desc")).unwrap_or(false);
-
-    // F03: Parse page window properly with validation; omitted limit returns all
-    let offset = query.get("offset").and_then(|o| o.parse::<usize>().ok()).unwrap_or(0);
-    let limit = query.get("limit").and_then(|l| l.parse::<usize>().ok()).unwrap_or(usize::MAX / 2);
-
-    let identity = query.get("identity").cloned();
-    let genres = query.get("genres").or_else(|| query.get("g")).map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_default();
-    let countries = query.get("countries").or_else(|| query.get("c")).map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_default();
-    let decades = query.get("decades").or_else(|| query.get("d")).map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_default();
-    let runtimes = query.get("runtimes").or_else(|| query.get("rt")).map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_default();
-    let languages = query.get("languages").or_else(|| query.get("lang")).map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_default();
-    let resolutions = query.get("resolutions").or_else(|| query.get("res")).map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_default();
-    let stock = query.get("stock").map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_default();
-    let hdr = query.get("hdr").and_then(|h| h.parse::<bool>().ok());
-    let min_rating = query.get("rating_gte").and_then(|r| r.parse::<f64>().ok());
-    let watch = query.get("watch").or_else(|| query.get("w")).cloned();
-    let unwatched_first = query.get("unwatched_first").is_some_and(|u| u == "true" || u == "1");
-
-    let filter = store::library_query::BrowseFilter {
-        genres,
-        countries,
-        decades,
-        runtimes,
-        languages,
-        resolutions,
-        stock,
-        hdr,
-        min_rating,
-        identity,
-        watch,
-        unwatched_first,
-        require_image: false,
+    let (order, descending) = browse_order_from_query(&query);
+    // 显式分页参数先校验：越界直接 400；省略 limit 仍是"返回全部"。
+    let window = match crate::http::library::page::PageWindow::parse(&query) {
+        Ok(window) => window,
+        Err(message) => return err(StatusCode::BAD_REQUEST, "library.invalid", &message),
     };
-    let lib_q = store::library_query::LibraryQuery {
+    let lib_q = library_query::LibraryQuery {
         library_id: lib_id,
         user_id,
         filter,
         order,
         descending,
-        page: store::library_query::BrowsePage::Offset { start: offset, limit },
+        page: library_query::BrowsePage::Offset {
+            start: window.offset,
+            limit: window.limit.unwrap_or(usize::MAX / 2),
+        },
         include_total: true,
     };
-
-    let (paged, file_details_map) = {
+    let (page, facts) = {
         let store = state.store.lock();
-        let p = match store.library_item_page(&lib_q) {
-            Ok(p) => p,
-            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &e.to_string()),
+        let page = match store.library_item_page(&lib_q) {
+            Ok(page) => page,
+            Err(error) => return browse_store_error(error),
         };
-        // F13: Query genuine resolution and actual seasons for items
-        let mut map = HashMap::new();
-        for item in &p.items {
-            let details = store.item_resolution_and_seasons(item.library_id, item.media_id, item.preferred_file_id);
-            map.insert(item.media_id, details);
+        let media_ids: Vec<MediaId> = page.items.iter().map(|item| item.media_id).collect();
+        match store.library_item_facts(lib_id, &media_ids, user_id) {
+            Ok(facts) => (page, facts),
+            Err(error) => return browse_store_error(error),
         }
-        (p, map)
     };
-
-    let items_json: Vec<Value> = paged.items.into_iter().map(|item| {
-        let poster_url = item.preferred_file_id.map(|fid| artwork_url("posters", fid));
-        let backdrop_url = item.preferred_file_id.map(|fid| artwork_url("fanart", fid));
-        let (max_res, actual_seasons) = file_details_map.get(&item.media_id).cloned().unwrap_or_else(|| ("1080p".into(), vec![]));
-        json!({
-            "media_item_id": item.media_id.to_string(),
-            "kind": item.kind.as_str(),
-            "library_id": item.library_id.to_string(),
-            "title": item.title,
-            "year": item.year,
-            "rating": item.rating,
-            "studio": item.studio,
-            "studio_logo": item.studio_logo.map(|path| format!("https://image.tmdb.org/t/p/w92{path}")),
-            "poster_url": poster_url,
-            "backdrop_url": backdrop_url,
-            "file_count": item.file_count,
-            "seasons": actual_seasons,
-            "episode_count": item.distinct_episode_count,
-            "max_resolution": max_res,
-            "missing": item.missing_file_count > 0,
+    let items: Vec<Value> = page
+        .items
+        .iter()
+        .map(|item| {
+            let facts = facts.get(&item.media_id).cloned().unwrap_or_default();
+            // The artwork routes (`/posters/{file_id}`, `/fanart/{file_id}`) serve the image
+            // beside the file and answer 404 when it is absent. Cards historically always
+            // carried a URL built from the preferred file; keep that contract when no file
+            // recorded artwork, so a card never loses the image it had before.
+            let poster_ref = item.poster_ref.or(item.preferred_file_id);
+            let backdrop_ref = item.backdrop_ref.or(item.preferred_file_id);
+            json!({
+                "media_item_id": item.media_id.to_string(),
+                "kind": item.kind.as_str(),
+                "library_id": item.library_id.to_string(),
+                "title": item.title,
+                "year": item.year,
+                "rating": item.rating,
+                "studio": facts.studio,
+                "studio_logo": facts
+                    .studio_logo
+                    .map(|path| format!("https://image.tmdb.org/t/p/w92{path}")),
+                "poster_url": poster_ref.map(|file_id| artwork_url("posters", file_id)),
+                "backdrop_url": backdrop_ref.map(|file_id| artwork_url("fanart", file_id)),
+                "file_count": item.file_count,
+                "seasons": facts.seasons,
+                "episode_count": item.distinct_episode_count,
+                "max_resolution": item.max_resolution(),
+                "missing": item.missing,
+                "has_poster": item.has_poster(),
+                "has_backdrop": item.has_backdrop(),
+            })
         })
-    }).collect();
-
-    ok_list(items_json).into_response()
+        .collect();
+    ok_list(items).into_response()
 }
 
-fn wall_item_json(
-    library_id: &str,
-    item: &selection::LibrarySelection,
-    art: &selection::BrowseArtwork<'_>,
-) -> Value {
-    let row = preferred_row(&item.rows);
-    let facts = art.media(item.media.id, &item.rows);
-    json!({
-        "media_item_id": item.media.id.to_string(),
-        "kind": item.media.kind.as_str(),
-        "library_id": library_id,
-        "title": item.media.title,
-        "year": item.media.year,
-        "poster_url": row.filter(|_| facts.has_poster).map(|r| artwork_url("posters", r.id)),
-        "backdrop_url": row.filter(|_| facts.has_backdrop).map(|r| artwork_url("fanart", r.id)),
-        "file_count": item.rows.len(),
-        "seasons": item.rows.iter().filter_map(|r| r.season).collect::<std::collections::BTreeSet<_>>(),
-        "episode_count": item.rows.iter().filter_map(|r| r.season.zip(r.episode)).collect::<std::collections::HashSet<_>>().len(),
-        "max_resolution": selection::best_resolution(&item.rows),
-        "missing": item.missing,
-    })
-}
-
+/// GET /libraries/{id}/items/{item_id} — adopted metadata plus the file list. Nothing here
+/// observes a file: art and metadata are stored facts.
 pub(crate) async fn item_detail(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
@@ -417,92 +493,139 @@ pub(crate) async fn item_detail(
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
     };
-    let (media, rows) = {
-        let store = state.store.lock();
-        match load_owned_rows(&store, &id, media_id, user_id) {
-            Ok(loaded) => loaded,
-            Err(response) => return response,
-        }
+    let lib_id = match id.parse::<domain::LibraryId>() {
+        Ok(lib_id) => lib_id,
+        Err(_) => return missing_library(),
     };
-    let files = item_files_json(&state, &rows).await;
-    let nfo = item_nfo(&media, &rows);
-    let cast = item_cast_json(nfo.as_ref());
-    let backdrop_url = item_backdrop_url(&rows);
-    ok(item_detail_json(
-        &media,
-        &rows,
-        nfo.as_ref(),
-        cast,
-        backdrop_url,
-        files,
-    ))
+    let (detail, media, details) = {
+        let store = state.store.lock();
+        if let Err(response) = require_visible_library(&store, &id, user_id) {
+            return response;
+        }
+        let detail = match store.library_item_detail(lib_id, media_id, "") {
+            Ok(Some(detail)) => detail,
+            Ok(None) => return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在"),
+            Err(error) => return browse_store_error(error),
+        };
+        let media = match store.get_media(media_id) {
+            Ok(media) => media,
+            Err(error) => return browse_store_error(error),
+        };
+        let file_ids: Vec<domain::LedgerId> =
+            detail.files.iter().map(|file| file.file_id).collect();
+        let details = match store.file_details_batch(&file_ids) {
+            Ok(details) => details,
+            Err(error) => return browse_store_error(error),
+        };
+        (detail, media, details)
+    };
+    let mut files = Vec::with_capacity(detail.files.len());
+    for file in &detail.files {
+        let units = detail
+            .file_units
+            .iter()
+            .find(|(file_id, _)| *file_id == file.file_id)
+            .map(|(_, units)| units.as_slice())
+            .unwrap_or_default();
+        let tracks = match details.get(&file.file_id) {
+            Some(details) => match tracks_from_details(details) {
+                Ok(tracks) => tracks,
+                Err(error) => return browse_store_error(error),
+            },
+            None => library::Tracks::default(),
+        };
+        files.push(item_file_json(&state, file, units, &tracks));
+    }
+    let metadata = &detail.metadata;
+    let cast: Vec<Value> = metadata
+        .cast
+        .value()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .map(|member| {
+            let avatar_url = member.thumb.as_ref().map(|thumb| {
+                if thumb.starts_with("http://") || thumb.starts_with("https://") {
+                    thumb.clone()
+                } else {
+                    format!("https://image.tmdb.org/t/p/w185{thumb}")
+                }
+            });
+            json!({
+                "name": member.name,
+                "role": member.role,
+                "tmdb_person_id": member.tmdb_id.as_deref().and_then(|id| id.parse::<i64>().ok()),
+                "avatar_url": avatar_url,
+                "order": member.order,
+            })
+        })
+        .collect();
+    let item = &detail.item;
+    let (original_title, tmdb_id) = match media {
+        Some(media) => (media.original_title.clone(), media.tmdb_id.clone()),
+        None => (None, None),
+    };
+    ok(json!({
+        "media_item_id": item.media_id.to_string(),
+        "kind": item.kind.as_str(),
+        "title": item.title,
+        "year": item.year,
+        "original_title": metadata.original_title.value().cloned().or(original_title),
+        "tmdb_id": tmdb_id,
+        "overview": metadata.overview.value(),
+        "rating": metadata.rating.value().map(f64::to_string),
+        "vote_count": metadata.vote_count.value(),
+        "runtime_minutes": metadata.runtime_minutes.value().map(u32::to_string),
+        "tagline": metadata.tagline.value(),
+        "premiered": metadata.release_date.value(),
+        "end_date": metadata.end_date.value(),
+        "content_rating": metadata.content_rating.value(),
+        "original_language": metadata.language.value(),
+        "status": metadata.status.value(),
+        "number_of_seasons": metadata.number_of_seasons.value(),
+        "number_of_episodes": metadata.number_of_episodes.value(),
+        "genres": metadata
+            .genres
+            .value()
+            .map(|genres| genres.iter().map(|genre| genre.name.clone()).collect::<Vec<_>>())
+            .unwrap_or_default(),
+        "countries": metadata.countries.value().cloned().unwrap_or_default(),
+        "studios": metadata.studios.value().cloned().unwrap_or_default(),
+        "directors": metadata.directors.value().cloned().unwrap_or_default(),
+        "creators": metadata.creators.value().cloned().unwrap_or_default(),
+        "cast": cast,
+        "poster_url": item.poster_ref.map(|file_id| artwork_url("posters", file_id)),
+        "backdrop_url": item.backdrop_ref.map(|file_id| artwork_url("fanart", file_id)),
+        "files": files,
+    }))
     .into_response()
 }
 
-/// Resolve the Media and its Library-owned ledger rows for the item detail view.
-fn load_owned_rows(
-    store: &crate::Store,
-    id: &str,
-    media_id: MediaId,
-    user_id: Option<domain::UserId>,
-) -> Result<(domain::Media, Vec<domain::LedgerRow>), Response> {
-    let Some(library) = store.get_library(id).ok().flatten() else {
-        return Err(missing_library());
-    };
-    if !library_visible(store, &library, user_id) {
-        return Err(missing_library());
-    }
-    let Some(media) = store.get_media(media_id).ok().flatten() else {
-        return Err(err(
-            StatusCode::NOT_FOUND,
-            "library.item_missing",
-            "条目不存在",
-        ));
-    };
-    // 已知 MediaId 时走定向读取，不再全表扫 ledger 后过滤。
-    let rows: Vec<domain::LedgerRow> = store
-        .ledger_for_media(media_id)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|row| {
-            library_for_row(store, row, &media).is_some_and(|owner| owner.id == library.id)
-        })
-        .collect();
-    if rows.is_empty() {
-        return Err(err(
-            StatusCode::NOT_FOUND,
-            "library.item_missing",
-            "条目不存在",
-        ));
-    }
-    Ok((media, rows))
-}
+/// One file of the detail view: stored quality facts plus whatever the probe has cached.
+fn item_file_json(
+    state: &ApiState,
+    file: &domain::LibraryFile,
+    units: &[domain::UnitKey],
+    tracks: &library::Tracks,
+) -> Value {
+    let unit = units
+        .iter()
+        .find(|unit| !unit.is_whole())
+        .or_else(|| units.first());
 
-/// file_tracks 已是异步非阻塞：缓存命中即回，未命中入队后台探测并返回空，
-/// 详情页绝不会因远程探测等待（并发/超时包装不再需要）。
-async fn item_files_json(state: &ApiState, rows: &[domain::LedgerRow]) -> Vec<Value> {
-    let mut files = Vec::with_capacity(rows.len());
-    for row in rows {
-        let tracks = file_tracks(state, row).await;
-        files.push(file_json(state, row, &tracks));
-    }
-    files
-}
-
-fn file_json(state: &ApiState, row: &domain::LedgerRow, tracks: &library::Tracks) -> Value {
     json!({
-        "file_id": row.id.to_string(),
-        "path": row.path,
-        "season": row.season,
-        "episode": row.episode,
-        "resolution": row.resolution,
-        "codec": row.codec,
-        "hdr": row.hdr,
-        "quality_source": row.quality_source.as_str(),
+        "file_id": file.file_id.to_string(),
+        "path": file.path.to_string_lossy(),
+        "season": unit.map(|unit| unit.season).filter(|season| *season >= 0),
+        "episode": unit.map(|unit| unit.episode).filter(|episode| *episode >= 0),
+        "resolution": file.resolution,
+        "codec": file.codec,
+        "hdr": file.hdr,
+        "quality_source": file.quality_source.as_str(),
         "probed": tracks.video.is_some()
             || !tracks.audio.is_empty()
             || !tracks.subtitles.is_empty(),
-        "probe_queued": state.probe.is_queued(&row.id.to_string()),
+        "probe_queued": state.probe.is_queued(&file.file_id.to_string()),
         "video_track": tracks.video.as_ref().map(|v| json!({
             "codec": v.codec, "width": v.width, "height": v.height,
             "frame_rate": v.frame_rate, "bit_rate": v.bit_rate,
@@ -517,94 +640,37 @@ fn file_json(state: &ApiState, row: &domain::LedgerRow, tracks: &library::Tracks
         "subtitle_tracks": tracks.subtitles.iter().map(|t| json!({
             "codec": t.codec, "language": t.language, "title": null,
             "forced": t.forced, "default": t.is_default,
-            "external": false, "file_name": null,
+            "external": t.is_external, "file_name": null,
         })).collect::<Vec<_>>(),
     })
 }
 
-/// 条目级元数据：优先读条目目录的 NFO（Emby/TMM 刮削产物），封面/背景取
-/// 本地图片；无 NFO 时字段为空（Block 2 的 TMDB 补充在 metadata/refresh 写入）。
-fn item_nfo(media: &domain::Media, rows: &[domain::LedgerRow]) -> Option<library::NfoMeta> {
-    let row = preferred_row(rows)?;
-    crate::scrape_metadata::nfo_candidates(FsPath::new(&row.path), row, media.kind)
-        .into_iter()
-        .find(|candidate| candidate.is_file())
-        .and_then(|path| library::read_nfo(&path))
-}
-
-fn item_backdrop_url(rows: &[domain::LedgerRow]) -> Option<String> {
-    let row = preferred_row(rows)?;
-    let has_fanart = FsPath::new(&row.path)
-        .parent()
-        .map(|dir| dir.join("fanart.jpg"))
-        .is_some_and(|art| art.is_file());
-    has_fanart.then(|| artwork_url("fanart", row.id))
-}
-
-fn item_cast_json(nfo: Option<&library::NfoMeta>) -> Vec<Value> {
-    nfo.map(|nfo| {
-        nfo.cast
-            .iter()
-            .map(|member| {
-                let avatar_url = member.thumb.as_ref().map(|thumb| {
-                    if thumb.starts_with("http://") || thumb.starts_with("https://") {
-                        thumb.clone()
-                    } else {
-                        format!("https://image.tmdb.org/t/p/w185{thumb}")
-                    }
-                });
-                json!({
-                    "name": member.name,
-                    "role": member.role,
-                    "tmdb_person_id": member.tmdb_id.as_deref().and_then(|id| id.parse::<i64>().ok()),
-                    "avatar_url": avatar_url,
-                    "order": member.order,
-                })
-            })
-            .collect()
-    })
-    .unwrap_or_default()
-}
-
-fn item_detail_json(
-    media: &domain::Media,
-    rows: &[domain::LedgerRow],
-    nfo: Option<&library::NfoMeta>,
-    cast: Vec<Value>,
-    backdrop_url: Option<String>,
-    files: Vec<Value>,
-) -> Value {
-    json!({
-        "media_item_id": media.id.to_string(),
-        "kind": media.kind.as_str(),
-        "title": media.title,
-        "year": media.year,
-        "original_title": media.original_title,
-        "tmdb_id": media.tmdb_id,
-        "overview": nfo.and_then(|n| n.plot.clone()),
-        "rating": nfo.and_then(|n| n.rating.clone()),
-        "vote_count": nfo.and_then(|n| n.vote_count),
-        "runtime_minutes": nfo.and_then(|n| n.runtime_minutes.clone()),
-        "tagline": nfo.and_then(|n| n.tagline.clone()),
-        "premiered": nfo.and_then(|n| n.premiered.clone()),
-        "end_date": nfo.and_then(|n| n.end_date.clone()),
-        "content_rating": nfo.and_then(|n| n.content_rating.clone()),
-        "original_language": nfo.and_then(|n| n.original_language.clone()),
-        "status": nfo.and_then(|n| n.status.clone()),
-        "number_of_seasons": nfo.and_then(|n| n.number_of_seasons),
-        "number_of_episodes": nfo.and_then(|n| n.number_of_episodes),
-        "genres": nfo.map(|n| n.genres.clone()).unwrap_or_default(),
-        "countries": nfo.map(|n| n.countries.clone()).unwrap_or_default(),
-        "studios": nfo.map(|n| n.studios.clone()).unwrap_or_default(),
-        "directors": nfo.map(|n| n.directors.clone()).unwrap_or_default(),
-        "creators": nfo.map(|n| n.creators.clone()).unwrap_or_default(),
-        "cast": cast,
-        "poster_url": preferred_row(rows).filter(|row| poster_path(row).is_some()).map(|row| artwork_url("posters", row.id)),
-        "backdrop_url": backdrop_url,
-        "files": files,
+/// Tracks of one file from the probe cache. Malformed cache JSON is an error, never a silent
+/// empty track list: the detail page must not claim "not probed" for a corrupt row.
+fn tracks_from_details(
+    details: &store::files::FileDetails,
+) -> Result<library::Tracks, store::StoreError> {
+    let video = match details.video_json.as_deref() {
+        Some(raw) => Some(
+            serde_json::from_str::<library::VideoTrack>(raw).map_err(|error| {
+                store::StoreError::Invalid(format!("file details video: {error}"))
+            })?,
+        ),
+        None => None,
+    };
+    let audio = serde_json::from_str::<Vec<library::AudioTrack>>(&details.audio_json)
+        .map_err(|error| store::StoreError::Invalid(format!("file details audio: {error}")))?;
+    let subtitles = serde_json::from_str::<Vec<library::SubtitleTrack>>(&details.subtitle_json)
+        .map_err(|error| store::StoreError::Invalid(format!("file details subtitles: {error}")))?;
+    Ok(library::Tracks {
+        video,
+        audio,
+        subtitles,
     })
 }
 
+/// GET /libraries/{id}/items/{item_id}/episodes?season= — the episode list from adopted
+/// catalog rows plus ownership from the published file facts, for the current viewer.
 pub(crate) async fn item_episodes(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
@@ -615,142 +681,96 @@ pub(crate) async fn item_episodes(
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
     };
-    // 锁内只做快 DB 读；TMDB 季详情（同步网络）在锁外 spawn_blocking 跑，
-    // 否则冷缓存时 store 锁被长持，me/health 等一切要锁的请求全部超时。
-    let season_param = match query.get("season") {
-        Some(s) => match s.parse::<u32>() {
-            Ok(v) => Some(v),
+    let season = match query.get("season") {
+        Some(raw) => match raw.parse::<u32>() {
+            Ok(value) => Some(value),
             Err(error) => {
-                tracing::error!(library_id = %id, media_id = %media_id, season = %s, error = %error, "媒体库分集请求季号无效");
+                tracing::error!(library_id = %id, media_id = %media_id, season = %raw, error = %error, "媒体库分集请求季号无效");
                 return err(StatusCode::BAD_REQUEST, "library.invalid", "季号参数无效");
             }
         },
         None => None,
     };
-    let tmdb_id = {
-        let store = state.store.lock();
-        let Some(library) = store.get_library(&id).ok().flatten() else {
-            return missing_library();
-        };
-        if !library_visible(&store, &library, user_id) {
-            return missing_library();
-        }
-        let Some(media) = store.get_media(media_id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
-        };
-        let owned = store
-            .list_ledger()
-            .unwrap_or_default()
-            .into_iter()
-            .any(|row| {
-                row.media_id == media_id
-                    && library_for_row(&store, &row, &media)
-                        .is_some_and(|owner| owner.id == library.id)
-            });
-        if !owned {
-            return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
-        }
-        media.tmdb_id
+    let lib_id = match id.parse::<domain::LibraryId>() {
+        Ok(lib_id) => lib_id,
+        Err(_) => return missing_library(),
     };
-    // TMDB 整季详情（真实剧名/简介/剧照），fake 测试下为空表 → 退回文件名。
-    let mut season_meta: HashMap<u32, media::EpisodeMeta> = HashMap::new();
-    if let Some(tmdb_id) = tmdb_id {
-        let state_clone = state.clone();
-        let tmdb_clone = tmdb_id.clone();
-        let seasons: Vec<u32> = season_param.into_iter().collect();
-        let fetched = tokio::task::spawn_blocking(move || {
-            let catalog: &dyn Catalog = state_clone.catalog.as_ref();
-            let mut out: HashMap<u32, Vec<media::EpisodeMeta>> = HashMap::new();
-            for season in &seasons {
-                let episodes = catalog
-                    .season_details(&tmdb_clone, *season)
-                    .unwrap_or_default();
-                out.insert(*season, episodes);
-            }
-            out
-        })
-        .await
-        .unwrap_or_default();
-        for (_season, metas) in fetched {
-            for meta in metas {
-                season_meta.insert(meta.episode_number, meta);
-            }
-        }
-    }
-    let (library_rows, unit_states) = {
+    let (episodes, progress) = {
         let store = state.store.lock();
-        let Some(library) = store.get_library(&id).ok().flatten() else {
-            return missing_library();
+        if let Err(response) = require_visible_library(&store, &id, user_id) {
+            return response;
+        }
+        match store.get_library_item(lib_id, media_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在"),
+            Err(error) => return browse_store_error(error),
+        }
+        let episodes = match store.library_episodes(lib_id, media_id, season, "") {
+            Ok(episodes) => episodes,
+            Err(error) => return browse_store_error(error),
         };
-        let Some(media) = store.get_media(media_id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
+        let progress = match user_id {
+            Some(user_id) => match store.playback_units_for_media(user_id, &[media_id]) {
+                Ok(rows) => rows,
+                Err(error) => return browse_store_error(error),
+            },
+            None => Vec::new(),
         };
-        let all_rows = store.list_ledger().unwrap_or_default();
-        let library_rows: Vec<domain::LedgerRow> = all_rows
-            .into_iter()
-            .filter(|row| row.media_id == media_id)
-            .filter(|row| {
-                library_for_row(&store, row, &media).is_some_and(|owner| owner.id == library.id)
-            })
-            .collect();
-
-        let mut unit_states = HashMap::new();
-        if let Some(uid) = user_id {
-            for row in &library_rows {
-                let Some(e) = row.episode else { continue };
-                let s = row.season.unwrap_or(1);
-                if let Ok(st) = store.unit_state(uid, media.id, s as i32, e as i32) {
-                    unit_states.insert((s, e), st);
+        (episodes, progress)
+    };
+    let rows: Vec<Value> = episodes
+        .iter()
+        .map(|episode| {
+            let unit_state = progress
+                .iter()
+                .find(|unit| {
+                    unit.season >= 0
+                        && unit.episode >= 0
+                        && unit.season as u32 == episode.season
+                        && unit.episode as u32 == episode.episode
+                })
+                .map(|unit| &unit.state);
+            let (position_ms, played, progress_percent) = match unit_state {
+                Some(state) => {
+                    let percent = (!state.played)
+                        .then(|| state.duration_ms.filter(|duration| *duration > 0))
+                        .flatten()
+                        .map(|duration| ((state.position_ms * 100) / duration).clamp(0, 100));
+                    (state.position_ms, state.played, percent)
                 }
-            }
-        }
-        (library_rows, unit_states)
-    };
-
-    let mut season_metas_grouped: HashMap<u32, HashMap<u32, media::EpisodeMeta>> = HashMap::new();
-    if let Some(target_season) = season_param {
-        season_metas_grouped.insert(target_season, season_meta);
-    }
-
-    let files = state.browse_files.clone();
-    let rows_res = state
-        .http_work
-        .run(std::time::Duration::from_secs(30), move || {
-            crate::http::playback::episodes::aggregate_visible_episodes_owned(
-                &library_rows,
-                season_param,
-                &unit_states,
-                &season_metas_grouped,
-                files.as_ref(),
-            )
+                None => (0, false, None),
+            };
+            json!({
+                "episode_number": episode.episode,
+                "name": episode
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| format!("第 {} 集", episode.episode)),
+                "overview": episode.overview,
+                "air_date": episode.air_date,
+                "still_url": episode.still_url.as_deref().map(still_url),
+                "owned": episode.owned,
+                "file_ids": episode.file_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+                "position_ms": position_ms,
+                "played": played,
+                "watched": played,
+                "progress_percent": progress_percent,
+                "media_item_id": item_id,
+                "season_number": episode.season,
+                "runtime_minutes": episode.runtime_minutes,
+                "rating": episode.rating,
+            })
         })
-        .await;
-
-    let episode_rows = match rows_res {
-        Ok(rows) => rows,
-        Err(crate::blocking_budget::BlockingError::Busy) => {
-            return err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "runtime.busy",
-                "服务繁忙，请重试",
-            );
-        }
-        Err(crate::blocking_budget::BlockingError::Timeout) => {
-            return err(
-                StatusCode::GATEWAY_TIMEOUT,
-                "library.timeout",
-                "加载集列表超时",
-            );
-        }
-        Err(crate::blocking_budget::BlockingError::Worker(msg)) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "library.worker",
-                &msg,
-            );
-        }
-    };
-    let rows = crate::http::playback::episodes::format_episodes_json(&episode_rows, &item_id);
+        .collect();
     ok_list(rows).into_response()
+}
+
+/// A still reference is either a full URL or a TMDB path.
+fn still_url(reference: &str) -> String {
+    if reference.starts_with("http://") || reference.starts_with("https://") {
+        reference.to_string()
+    } else {
+        format!("https://image.tmdb.org/t/p/w300{reference}")
+    }
 }
 

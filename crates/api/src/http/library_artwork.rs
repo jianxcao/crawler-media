@@ -272,8 +272,6 @@ pub(crate) async fn select_artwork(
                     let _ = crate::poster_fetch::attach_poster(&state, &media, &preferred_path);
                 }
             }
-            // 恢复自动图片：文件事实变化，标脏。
-            state.projection.mark_dirty(&id);
             ok(json!({ "locked": false, "automatic": true })).into_response()
         }
         Some(source) => {
@@ -300,14 +298,15 @@ pub(crate) async fn select_artwork(
             {
                 return err(StatusCode::CONFLICT, "library.deleting", &error);
             }
+            if let Some(path) = preferred_path.as_deref() {
+                crate::poster_fetch::record_discovered_artwork(&state, path);
+            }
             let store = state.store.lock();
             let _ = store.put_setting(
                 &artwork_key(media_id),
                 &json!({ "poster_locked": true, "source": source }).to_string(),
             );
             drop(store);
-            // 选定图片落盘：该 Library 的图片存在性事实变了。
-            state.projection.mark_dirty(&id);
             ok(json!({ "locked": true, "automatic": false })).into_response()
         }
     }
@@ -346,12 +345,22 @@ pub(crate) async fn upload_artwork(
         }
         Err(_) => return err(StatusCode::BAD_REQUEST, "artwork.upload", "图片编码无效"),
     };
-    let target = {
+    let (target, preferred_path) = {
         let store = state.store.lock();
-        match artwork_target(&store, media_id, Some(&id), is_backdrop) {
+        let target = match artwork_target(&store, media_id, Some(&id), is_backdrop) {
             Ok(target) => target,
             Err(response) => return response,
-        }
+        };
+        let preferred = preferred_row(
+            &store
+                .list_ledger()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|row| row.media_id == media_id)
+                .collect::<Vec<_>>(),
+        )
+        .map(|row| std::path::PathBuf::from(&row.path));
+        (target, preferred)
     };
     let write_target = target.clone();
     let write_bytes = bytes.clone();
@@ -362,12 +371,13 @@ pub(crate) async fn upload_artwork(
     if let Err(error) = write.unwrap_or_else(|error| Err(error.to_string())) {
         return err(StatusCode::CONFLICT, "library.deleting", &error);
     }
+    if let Some(path) = preferred_path.as_deref() {
+        crate::poster_fetch::record_discovered_artwork(&state, path);
+    }
     let _ = state.store.lock().put_setting(
         &artwork_key(media_id),
         &json!({ "poster_locked": true, "source": "upload" }).to_string(),
     );
-    // 自定义图片落盘：该 Library 的图片存在性事实变了。
-    state.projection.mark_dirty(&id);
     ok(json!({ "locked": true, "bytes": bytes.len() })).into_response()
 }
 

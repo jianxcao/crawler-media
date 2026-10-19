@@ -2,26 +2,94 @@ use super::user_marks::{item_is_played, unit_play_count};
 use super::*;
 use std::time::SystemTime;
 
-pub(super) fn resolve_fallback_item(
+/// A public protocol id resolved to the entry it names.
+pub(super) struct ResolvedEntry {
+    pub file: domain::LibraryFile,
+    pub row: domain::LedgerRow,
+    pub media: domain::Media,
+    pub unit: (i32, i32),
+    pub is_series: bool,
+}
+
+/// The row view the artwork/NFO helpers consume, built from the selected source
+/// file and the watch unit it covers. The file facts stay authoritative; this
+/// only reshapes them for the helpers that still take a row.
+pub(crate) fn row_view(file: &domain::LibraryFile, unit: (i32, i32)) -> domain::LedgerRow {
+    let coordinate = |value: i32| u32::try_from(value).ok();
+    domain::LedgerRow {
+        id: file.file_id,
+        media_id: file.media_id,
+        path: file.path.display().to_string(),
+        season: coordinate(unit.0),
+        episode: coordinate(unit.1),
+        resolution: file.resolution.clone(),
+        codec: file.codec.clone(),
+        hdr: file.hdr.clone(),
+        quality_source: file.quality_source,
+        confidence: file.confidence,
+        filter_score: file.filter_score,
+    }
+}
+
+/// Resolve a public item id (`w1_…` work, `s1_…` season, `u1_…` unit) inside the
+/// caller's authorized libraries. A pending, missing or unknown source never
+/// resolves, and a physical file id is not an item id.
+pub(super) fn resolve_entry(
+    store: &crate::Store,
+    user_id: Option<UserId>,
+    id: &str,
+) -> Result<Option<ResolvedEntry>, String> {
+    let Some(item) = domain::TypedItemId::from_wire_string(id) else {
+        return Ok(None);
+    };
+    let selected = match user_id {
+        Some(user_id) => store.playable_entries(user_id, &item),
+        // Public artwork routes resolve an item id before any user is known.
+        None => store.published_entries_for_item(&item),
+    }
+    .map_err(|error| error.to_string())?;
+    let Some(source) = selected.into_iter().next() else {
+        return Ok(None);
+    };
+    let Some(media) = store
+        .get_media(source.file.media_id)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    let is_series =
+        media.kind == MediaKind::Tv && matches!(item, domain::TypedItemId::Work(_));
+    let unit = (source.unit.season, source.unit.episode);
+    let row = row_view(&source.file, unit);
+    Ok(Some(ResolvedEntry {
+        file: source.file,
+        row,
+        media,
+        unit,
+        is_series,
+    }))
+}
+
+/// Falls back to a full snapshot for the caller-resolved entry; `None` when the
+/// entry is not a published, present source.
+pub(super) fn entry_snapshot(
     state: &ApiState,
     user_id: UserId,
     id: &str,
-    compact_id: &str,
-) -> Option<MediaItemSnapshot> {
-    let store = state.store.lock();
-    let row = crate::http::media_visibility::resolve_visible_row(&store, id, Some(user_id))?;
-    let row_id = row.id.to_string().replace('-', "");
-    if row_id != compact_id && row.id.to_string() != id {
-        return None;
-    }
-    let media = store.get_media(row.media_id).ok().flatten()?;
-    drop(store);
-    Some(fallback_snapshot(state, user_id, row, media, false))
+) -> Result<Option<MediaItemSnapshot>, String> {
+    let entry = {
+        let store = state.store.lock();
+        resolve_entry(&store, Some(user_id), id)?
+    };
+    Ok(entry.map(|entry| {
+        snapshot_from_entry(state, user_id, entry.file, entry.row, entry.media, entry.is_series)
+    }))
 }
 
-pub(super) fn fallback_snapshot(
+pub(super) fn snapshot_from_entry(
     state: &ApiState,
     user_id: UserId,
+    file: domain::LibraryFile,
     row: domain::LedgerRow,
     media: domain::Media,
     is_series: bool,
@@ -41,10 +109,10 @@ pub(super) fn fallback_snapshot(
         let ticks = playback_ticks(&store, user_id, &row, &media);
         let is_episode = media.kind == MediaKind::Tv && row.season.is_some() && row.episode.is_some();
         let parent_id = if is_episode {
-            media.id.to_string().replace('-', "")
+            domain::TypedItemId::Work(media.id).to_wire_string()
         } else {
             crate::http::playback::library_id_for(&store, &media, &[&row])
-                .unwrap_or_else(|| media.id.to_string().replace('-', ""))
+                .unwrap_or_else(|| domain::TypedItemId::Work(media.id).to_wire_string())
         };
         let (played, play_count, series_counts) = if is_series {
             let (played, unplayed, child_counts) = direct_series_rollup(&store, user_id, media.id);
@@ -77,6 +145,7 @@ pub(super) fn fallback_snapshot(
         file_date_created(state.browse_files.as_ref(), &row.path),
     );
     MediaItemSnapshot {
+        file,
         played,
         play_count,
         unplayed_item_count: series_counts.map(|(unplayed, _)| unplayed),
@@ -240,7 +309,7 @@ fn collect_pending(
     library_scope: Option<&str>,
 ) -> Result<(Vec<PendingSnapshot>, Vec<(domain::MediaId, String)>), String> {
     let snapshot = super::read_snapshot::collect_server_read(store, user_id, parent_id, library_scope)?;
-    let ServerReadSnapshot { ownership, is_admin, media, rows: ledger_rows, units, .. } = snapshot;
+    let ServerReadSnapshot { ownership, is_admin, media, rows: ledger_rows, units, files } = snapshot;
     let requested_library = library_scope.or_else(|| {
         parent_id.and_then(|id| ownership.library(id)).map(|library| library.id.as_str())
     });
@@ -269,11 +338,15 @@ fn collect_pending(
     let mut seen_series = HashSet::new();
     let mut pending = Vec::new();
     for row in ledger_rows {
+        // Published, present sources only: a pending or missing file is not
+        // library content.
+        let Some(file) = files.get(&row.id).cloned() else { continue };
         let Some(media) = media.get(&row.media_id).cloned() else { continue };
         let Some(owner) = ownership.owner(std::path::Path::new(&row.path), media.kind) else { continue };
         if !row_visible(&row) { continue; }
-        let series_id = media.id.to_string().replace('-', "");
-        let requested_series = media.kind == MediaKind::Tv && parent_id.is_some_and(|id| id == series_id || id == media.id.to_string());
+        let series_id = domain::TypedItemId::Work(media.id).to_wire_string();
+        let requested_series = media.kind == MediaKind::Tv
+            && parent_id.is_some_and(|id| media_server::provider::query::series_media_id(id) == Some(media.id));
         let is_series = media.kind == MediaKind::Tv && !requested_series;
         if is_series && !seen_series.insert(media.id) { continue; }
         let marker = store.get_media_marker(row.media_id, row.season, row.episode).map_err(|error| error.to_string())?;
@@ -291,7 +364,7 @@ fn collect_pending(
             parent_id: if requested_series { series_id } else { owner.id.clone() }, ticks,
             intro_start_ms: marker.as_ref().and_then(|item| item.intro_start_ms), intro_end_ms: marker.as_ref().and_then(|item| item.intro_end_ms),
             outro_start_ms: marker.as_ref().and_then(|item| item.outro_start_ms), outro_end_ms: marker.as_ref().and_then(|item| item.outro_end_ms),
-            row, media, is_series, play_count, played, unplayed_item_count, chapters, facts, child_counts, stat_path,
+            file, row, media, is_series, play_count, played, unplayed_item_count, chapters, facts, child_counts, stat_path,
         });
     }
     Ok((pending, ingest_paths))
@@ -301,6 +374,7 @@ fn collect_pending(
 
 /// 锁内收集的 owned DB 事实；文件 IO 全部留到锁外。
 struct PendingSnapshot {
+    file: domain::LibraryFile,
     row: domain::LedgerRow,
     media: domain::Media,
     is_series: bool,
@@ -328,6 +402,7 @@ impl PendingSnapshot {
         date_created: Option<SystemTime>,
     ) -> MediaItemSnapshot {
         let Self {
+            file,
             row,
             media,
             is_series,
@@ -350,6 +425,7 @@ impl PendingSnapshot {
             date_created,
         );
         MediaItemSnapshot {
+            file,
             row,
             media,
             ticks,

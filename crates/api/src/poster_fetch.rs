@@ -227,6 +227,7 @@ fn attach_poster_with(
 
     match check_existing_poster(state, media, &target, force) {
         ExistingPoster::Locked | ExistingPoster::Present => {
+            record_discovered_artwork(state, video);
             return ArtworkOutcome::AlreadyPresent;
         }
         ExistingPoster::Missing => {}
@@ -234,6 +235,7 @@ fn attach_poster_with(
 
     // Channel 1: catalog artwork.
     if attach_poster_catalog(state, media, video, &target, lease.as_ref()).is_some() {
+        record_discovered_artwork(state, video);
         return ArtworkOutcome::Written;
     }
     if !crate::scrape_metadata::targets::video_present(video) {
@@ -242,7 +244,15 @@ fn attach_poster_with(
 
     // Channel 2: local video frame → 2:3 poster (no network needed).
     match write_frame_poster(state, media, video, &target, lease.as_ref(), frame) {
-        Some(outcome) => return outcome,
+        Some(outcome) => {
+            if matches!(
+                outcome,
+                ArtworkOutcome::Written | ArtworkOutcome::AlreadyPresent
+            ) {
+                record_discovered_artwork(state, video);
+            }
+            return outcome;
+        }
         None => {}
     }
     tracing::warn!(
@@ -406,6 +416,32 @@ fn poster_url_at_size(url: &str, size: &str) -> String {
     url.replace("/t/p/w342/", &format!("/t/p/{size}/"))
 }
 
+/// Persist the artwork that now exists beside `video` on its file row.
+///
+/// Discovery runs after the write, so only files that really carry artwork get a
+/// reference. The version check keeps a late worker from attaching artwork to a file
+/// that was replaced while the download ran.
+pub(crate) fn record_discovered_artwork(state: &ApiState, video: &Path) {
+    let store = state.store.lock();
+    let Ok(Some((file_id, version))) = store.file_version_for_path(&video.to_string_lossy())
+    else {
+        return;
+    };
+    let discovered = store::files::DiscoveredArtwork::discover(video);
+    let artwork = store::library_write::FileArtwork {
+        poster: discovered.poster.as_deref(),
+        backdrop: discovered.backdrop.as_deref(),
+        still: discovered.still.as_deref(),
+    };
+    if let Err(error) = store.record_file_artwork(file_id, &version, &artwork) {
+        tracing::warn!(
+            %error,
+            video = %video.display(),
+            "记录文件封面失败：封面不会出现在卡片上"
+        );
+    }
+}
+
 /// Extract a 2:3 poster (342x513) from a video frame via ffmpeg.
 pub fn frame_poster(video: &Path) -> Result<Vec<u8>, String> {
     frame_poster_controlled(video, &library::WorkControl::default())
@@ -548,6 +584,7 @@ fn attach_backdrop_outcome_opts(
     };
     if !force && target.is_file() {
         tracing::debug!(media = %media.title, path = %target.display(), "背景图已存在，跳过下载");
+        record_discovered_artwork(state, video);
         return ArtworkOutcome::AlreadyPresent;
     }
     let Some(tmdb_id) = media.tmdb_id.as_deref() else {
@@ -588,6 +625,7 @@ fn attach_backdrop_outcome_opts(
         return ArtworkOutcome::Skipped;
     }
     if publish_artwork(lease.as_ref(), media, &target, "背景图", &bytes).is_some() {
+        record_discovered_artwork(state, video);
         ArtworkOutcome::Written
     } else {
         ArtworkOutcome::Failed

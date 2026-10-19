@@ -36,8 +36,6 @@ pub struct ApiState {
     /// 播放时钟 seam（生产为真实系统毫秒时钟；测试可注入假时钟）。
     pub(crate) playback_clock: Arc<dyn crate::playback_events::PlaybackClock>,
     /// 进程内共享的任务计数 watcher（所有 SSE 连接共用一个 poller）。
-    /// 浏览投影服务（单飞构建与失效管理）。
-    pub projection: Arc<crate::browse_projection::ProjectionService>,
     /// 扫描操作协调器（持久单飞与并发控制）。
     pub scan_coordinator: Arc<crate::scan_operations::ScanCoordinator>,
     pub job_updates: Arc<crate::job_updates::JobUpdates>,
@@ -75,9 +73,6 @@ pub struct ApiState {
     pub probe: Arc<crate::probe_manager::ProbeManager>,
     /// 持久章节帧义务的有界派发服务（2 进程 / 64 ID 窗口）。
     pub(crate) chapter_frames: Arc<crate::chapter_frame_service::ChapterFrameService>,
-    /// 测试 seam：gallery 实际展开图片 JSON 的组数（生产只读计数，无副作用）。
-    /// 用来证明「先按图片存在性剔除空组、再分页」后只渲染本页图片集合。
-    pub(crate) gallery_expansions: Arc<std::sync::atomic::AtomicUsize>,
     /// Jellyfin 选择的候选条数（每次选择每行记一次）：证明一次请求只做一遍
     /// 候选遍历，而不是每个 series 重读整库。
     pub(crate) jellyfin_candidates: Arc<std::sync::atomic::AtomicUsize>,
@@ -266,7 +261,6 @@ impl ApiState {
             playback_clock: Arc::new(crate::playback_events::SystemPlaybackClock),
             job_updates: Arc::new(crate::job_updates::JobUpdates::new()),
             cover_service: Arc::new(crate::library_cover_service::LibraryCoverService::local()),
-            projection: Arc::new(crate::browse_projection::ProjectionService::new()),
             scan_coordinator: Arc::new(crate::scan_operations::ScanCoordinator::new()),
             library_work,
             jobs: Arc::new(Mutex::new(jobs)),
@@ -292,7 +286,6 @@ impl ApiState {
             browser: Arc::new(startup_browser.0),
             probe,
             chapter_frames,
-            gallery_expansions: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             jellyfin_candidates: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             jellyfin_heavy_items: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             browse_page_decoded_files: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -392,20 +385,6 @@ impl ApiState {
         self
     }
 
-    /// 替换 gallery 展开计数 seam（测试注入自有计数器以观察只渲染本页）。
-    pub fn with_gallery_expansions(
-        mut self,
-        counter: Arc<std::sync::atomic::AtomicUsize>,
-    ) -> Self {
-        self.gallery_expansions = counter;
-        self
-    }
-
-    /// gallery 展开计数（每次为一组图片构建 JSON 记 1）。
-    pub fn gallery_expansions(&self) -> Arc<std::sync::atomic::AtomicUsize> {
-        self.gallery_expansions.clone()
-    }
-
     /// 替换 Jellyfin 选择计数 seam（测试注入自有计数器以观察候选/重元数据条数）。
     pub fn with_jellyfin_work_counters(
         mut self,
@@ -489,14 +468,6 @@ impl ApiState {
         self
     }
 
-    /// 替换浏览投影服务（测试注入 `ProjectionService::disabled()` 验证回退等价性）。
-    pub fn with_projection_service(
-        mut self,
-        projection: Arc<crate::browse_projection::ProjectionService>,
-    ) -> Self {
-        self.projection = projection;
-        self
-    }
 
     /// 替换字幕交付服务（测试注入 FakeRunner 与并发上限）。
     pub fn with_subtitle_delivery(

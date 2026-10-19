@@ -148,17 +148,10 @@ fn scope_signature_does_not_collide_on_commas_in_roots() {
         "逗号拼接会让不同根配置碰撞: {}",
         scan_scope_signature(&a)
     );
-    // kind 也必须参与编码。
-    let tv = store
-        .create_library(
-            MediaKind::Tv,
-            "TV",
-            &["/x/a,/x/b", "/x/c"],
-            "everyone",
-            true,
-            &[],
-        )
-        .unwrap();
+    // kind 也必须参与编码。根路径在全库范围内唯一（`library_roots.path_key`），
+    // 第二个库无法复用同一组根，因此直接改写同一份配置的 kind。
+    let mut tv = a.clone();
+    tv.kind = MediaKind::Tv;
     assert_ne!(scan_scope_signature(&a), scan_scope_signature(&tv));
 }
 
@@ -723,7 +716,7 @@ async fn invalidation_failure_does_not_advance_durable_source_version() {
     assert_eq!(done1.status, ScanOperationStatus::Completed);
 
     let row = fix.state.store().lock().ledger_by_path(&file.display().to_string()).unwrap().unwrap();
-    // 写入派生事实（例如 file_meta）
+    // 写入派生事实（file_details）
     let tracks = library::Tracks {
         video: Some(library::VideoTrack {
             duration_secs: Some(100.0),
@@ -738,14 +731,14 @@ async fn invalidation_failure_does_not_advance_durable_source_version() {
     // 修改文件内容和 mtime
     std::fs::write(&file, b"modified-content").unwrap();
 
-    // 注入 failure: 在 library.db 上建触发器阻止删除 file_meta
+    // 注入 failure: 在 library.db 上建触发器阻止删除 file_details
     let db_path = fix._dir.path().join("data").join("library.db");
     {
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         conn.execute(
-            "CREATE TRIGGER fail_meta_del BEFORE DELETE ON file_meta
+            "CREATE TRIGGER fail_meta_del BEFORE DELETE ON file_details
              BEGIN
-                 SELECT RAISE(ABORT, 'injected delete file_meta failure');
+                 SELECT RAISE(ABORT, 'injected delete file_details failure');
              END;",
             [],
         ).unwrap();

@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::SystemTime;
 
-use domain::{LedgerRow, Media, MediaId, MediaKind};
+use domain::{LedgerRow, LibraryFile, Media, MediaId, MediaKind};
 use media_server::provider::{MediaItemMetadata, MediaItemSnapshot, ServerItemQuery};
 
 use super::super::items::{
@@ -40,6 +40,9 @@ pub(super) fn build_light_items(scope: &ScopedRead, query: &ServerItemQuery) -> 
         let Some(media) = scope.media.get(&row.media_id) else {
             continue;
         };
+        if !scope.files.contains_key(&row.id) {
+            continue;
+        }
         if media.kind != MediaKind::Tv || !row_visible(scope, row) || !in_scope_folder(scope, row) {
             continue;
         }
@@ -56,6 +59,9 @@ pub(super) fn build_light_items(scope: &ScopedRead, query: &ServerItemQuery) -> 
     let mut order: Vec<MediaId> = Vec::new();
     let mut groups: HashMap<MediaId, Vec<&LedgerRow>> = HashMap::new();
     for row in &scope.rows {
+        if !scope.files.contains_key(&row.id) {
+            continue;
+        }
         if !row_visible(scope, row) || !in_scope_folder(scope, row) {
             continue;
         }
@@ -84,10 +90,14 @@ pub(super) fn build_light_items(scope: &ScopedRead, query: &ServerItemQuery) -> 
         if scope.media_scoped {
             // 读已经收敛到单个 Media：一行一条，不折叠（旧 `requested_series` 语义）。
             for row in rows {
+                let Some(file) = scope.files.get(&row.id).cloned() else {
+                    continue;
+                };
                 items.push(light_item(
                     &units,
                     &show_episodes,
                     row,
+                    file,
                     &media,
                     false,
                     None,
@@ -98,10 +108,14 @@ pub(super) fn build_light_items(scope: &ScopedRead, query: &ServerItemQuery) -> 
         }
         if media.kind != MediaKind::Tv {
             for row in rows {
+                let Some(file) = scope.files.get(&row.id).cloned() else {
+                    continue;
+                };
                 items.push(light_item(
                     &units,
                     &show_episodes,
                     row,
+                    file,
                     &media,
                     false,
                     None,
@@ -112,10 +126,14 @@ pub(super) fn build_light_items(scope: &ScopedRead, query: &ServerItemQuery) -> 
         }
         if wants_episodes {
             for row in rows {
+                let Some(file) = scope.files.get(&row.id).cloned() else {
+                    continue;
+                };
                 items.push(light_item(
                     &units,
                     &show_episodes,
                     row,
+                    file,
                     &media,
                     false,
                     None,
@@ -124,6 +142,9 @@ pub(super) fn build_light_items(scope: &ScopedRead, query: &ServerItemQuery) -> 
             }
         }
         if wants_series {
+            let Some(file) = scope.files.get(&first.id).cloned() else {
+                continue;
+            };
             let counts = (
                 show_episodes.get(&media_id).map(HashSet::len).unwrap_or(0),
                 show_seasons.get(&media_id).map(HashSet::len).unwrap_or(0),
@@ -132,6 +153,7 @@ pub(super) fn build_light_items(scope: &ScopedRead, query: &ServerItemQuery) -> 
                 &units,
                 &show_episodes,
                 first,
+                file,
                 &media,
                 true,
                 Some(counts),
@@ -150,6 +172,7 @@ pub(super) fn light_item(
     units: &UnitIndex<'_>,
     show_episodes: &HashMap<MediaId, HashSet<(u32, u32)>>,
     row: &LedgerRow,
+    file: LibraryFile,
     media: &Media,
     is_series: bool,
     child_counts: Option<(usize, usize)>,
@@ -178,6 +201,7 @@ pub(super) fn light_item(
     let favorite_unit = if is_series { whole_unit.as_ref() } else { unit.as_ref() };
     LightItem {
         snapshot: MediaItemSnapshot {
+            file,
             row: row.clone(),
             media: media.clone(),
             ticks: if is_series {
