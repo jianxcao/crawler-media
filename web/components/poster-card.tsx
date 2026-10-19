@@ -356,14 +356,7 @@ function PosterCardContent({
           />
         )}
 
-        {/* 左上：资源最高清晰度徽章（无资源信息时不渲染）。
-            徽章不用 backdrop-blur：海报墙每张卡 2~3 个模糊合成层会显著放大
-            滚动时的 GPU 压力（几百张卡叠加），加实底色观感几乎无差 */}
-        {badges[0] && (
-          <span className="absolute left-2 top-2 rounded-md bg-black/70 px-1.5 py-0.5 text-micro font-bold tracking-wide text-[var(--accent)]">
-            {badges[0]}
-          </span>
-        )}
+        {/* 左上角清晰度徽章按需求移除，保持海报纯净 */}
         {/* 作品状态用紧凑左上斜标，宽度随海报缩放且不遮评分；其余调用方
             沿用右侧规格。无状态不渲染，避免海报墙过吵。 */}
         {ribbon && (
@@ -495,9 +488,19 @@ function PosterCardContent({
         {/* 始终保留一行元信息，避免缺失年份让同一海报墙的卡片高低跳动。
             在库与否不在这里表达——它已由海报左上角的「已入库」斜标承担。 */}
         <p className="text-on-image tnum mt-0.5 flex min-h-4 items-center gap-1.5 truncate text-caption text-[var(--text-muted)]">
+          {item.rating > 0 && (
+            <span className="flex items-center gap-0.5 font-semibold text-[var(--warn)]">
+              ★ {item.rating.toFixed(1)}
+            </span>
+          )}
+          {item.rating > 0 && !!item.year && <span>·</span>}
           {!!item.year && <span>{item.year}</span>}
-          {!!item.year && item.extent && <span>·</span>}
-          {item.extent && <span>{item.extent}</span>}
+          {(item.rating > 0 || !!item.year) && item.extent && <span>·</span>}
+          {item.extent && (
+            <span className="rounded bg-white/10 px-1 py-0.2 text-[10px] font-medium text-white/90">
+              {item.extent}
+            </span>
+          )}
         </p>
       </div>
     </>

@@ -83,6 +83,8 @@ export interface LibraryItem {
   library_id: string;
   title: string;
   year: number | null;
+  rating?: number | null;
+  studio?: string | null;
   poster_url: string | null;
   backdrop_url?: string | null;
   file_count: number;
@@ -962,7 +964,7 @@ function itemFrom(raw: unknown): LibraryItem {
     title: str(r.title),
     year: r.year == null ? null : num(r.year),
     rating: r.rating == null ? null : num(r.rating),
-    studios: Array.isArray(r.studios) ? r.studios.map(String) : [],
+    studio: r.studio == null ? null : str(r.studio),
     poster_url: r.poster_url == null ? null : str(r.poster_url),
     backdrop_url: r.backdrop_url == null ? null : str(r.backdrop_url),
     file_count: num(r.file_count),

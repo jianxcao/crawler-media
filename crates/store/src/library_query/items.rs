@@ -50,7 +50,7 @@ impl Store {
             "SELECT library_id, media_id, kind, title, title_sort, year, file_count,
                     available_file_count, missing_file_count, unknown_file_count,
                     distinct_episode_count, distinct_season_count, size_bytes,
-                    preferred_file_id, has_still, rating_sort
+                    preferred_file_id, has_still, rating_sort, aliases_json
              FROM library_items
              WHERE {where_sql}
              ORDER BY {order_col} {dir}, media_id ASC
@@ -77,6 +77,11 @@ impl Store {
             let still_i: i64 = r.get(14)?;
             let rating_f: f64 = r.get(15)?;
             let rating_opt = if rating_f >= 0.0 { Some(rating_f) } else { None };
+            let aliases_raw: Option<String> = r.get(16)?;
+            let studio = aliases_raw
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .and_then(|val| val.get("studio").and_then(|s| s.as_str()).map(str::to_string));
 
             Ok(LibraryItem {
                 library_id: lib_id,
@@ -95,6 +100,7 @@ impl Store {
                 preferred_file_id: pref_id,
                 has_still: still_i != 0,
                 rating: rating_opt,
+                studio,
             })
         })?;
 

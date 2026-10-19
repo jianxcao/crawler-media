@@ -74,6 +74,7 @@ pub struct LibraryItem {
     pub preferred_file_id: Option<domain::LedgerId>,
     pub has_still: bool,
     pub rating: Option<f64>,
+    pub studio: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

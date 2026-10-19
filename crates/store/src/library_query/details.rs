@@ -114,6 +114,7 @@ impl Store {
             preferred_file_id: summary.preferred_file_id,
             has_still: false,
             rating: None,
+            studio: None,
         };
 
         // Fetch effective metadata or default

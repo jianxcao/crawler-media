@@ -136,10 +136,12 @@ fn resolve_media(
     if let Some(tmdb_id) = &updated.tmdb_id {
         if let Ok(Some(meta)) = crate::scrape_metadata::fetch_tmdb_metadata(state, updated.kind, tmdb_id) {
             let rating_f = meta.rating.as_ref().and_then(|r| r.parse::<f64>().ok());
+            let studio_name = meta.studios.first().map(String::as_str);
             let _ = state.store.lock().update_library_items_metadata_sort(
                 updated.id,
                 rating_f,
                 meta.release_date.as_deref(),
+                studio_name,
             );
         }
     }

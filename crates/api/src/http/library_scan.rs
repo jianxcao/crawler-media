@@ -379,7 +379,8 @@ fn scrape_library_metadata(
             }
             let nfo = crate::scrape_metadata::nfo_from_tmdb(media, &metadata);
             if let Some(r) = nfo.rating.as_ref().and_then(|r| r.parse::<f64>().ok()) {
-                let _ = state.store.lock().update_library_items_metadata_sort(media.id, Some(r), nfo.premiered.as_deref());
+                let studio_name = nfo.studios.first().map(String::as_str);
+                let _ = state.store.lock().update_library_items_metadata_sort(media.id, Some(r), nfo.premiered.as_deref(), studio_name);
             }
             if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
                 let target = path.with_file_name(format!("{stem}.nfo"));
