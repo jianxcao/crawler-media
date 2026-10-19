@@ -482,7 +482,7 @@ export function LibraryItemDetailView({
       : undefined;
     void fetchItemChapters(libraryId, detail.media_item_id, target)
       .then((list) => {
-        if (!cancelled && list.length > 0) setChapters(list);
+        if (!cancelled) setChapters(list);
       })
       .catch(() => undefined);
     return () => {
