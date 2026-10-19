@@ -166,6 +166,13 @@ pub fn reduce_library_media(
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
 
+    // Fetch rating and release_date from media_metadata if available
+    let (rating_sort, release_date_sort): (f64, String) = tx.query_row(
+        "SELECT COALESCE(rating, -1.0), COALESCE(release_date, '') FROM media_metadata WHERE media_id = ?1",
+        params![media_id_str],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap_or((-1.0, String::new()));
+
     let missing_flag = if missing_file_count > 0 { 1 } else { 0 };
     let stable_shuffle_key = format!("{media_id_str}");
 
@@ -179,8 +186,8 @@ pub fn reduce_library_media(
              distinct_episode_count, distinct_season_count, preferred_file_id, has_still)
          VALUES
             (?1, ?2, ?3, ?4, ?4, ?5, ?6,
-             '[]', 0, 1, '',
-             -1.0, 0, 0, ?7, ?7,
+             '[]', 0, 1, ?18,
+             ?19, 0, 0, ?7, ?7,
              0, 0, 0, 0, ?8, ?9,
              ?10, ?11, ?12, ?13,
              ?14, ?15, ?16, ?17)
@@ -196,6 +203,8 @@ pub fn reduce_library_media(
              size_sort = excluded.size_sort,
              missing = excluded.missing,
              has_still = excluded.has_still,
+             rating_sort = excluded.rating_sort,
+             release_date_sort = excluded.release_date_sort,
              item_revision = library_items.item_revision + 1",
         params![
             lib_id_str,
@@ -215,6 +224,8 @@ pub fn reduce_library_media(
             distinct_seasons.len(),
             preferred_file_id,
             if has_still { 1 } else { 0 },
+            release_date_sort,
+            rating_sort,
         ],
     )?;
 

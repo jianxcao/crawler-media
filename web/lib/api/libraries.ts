@@ -155,6 +155,7 @@ export interface LibraryItemDetail {
   /** 条目目录 NFO 刮削产物（overview/评分/片长/类型/演职员），缺失为 null/空 */
   overview: string | null;
   rating: string | null;
+  content_rating?: string | null;
   runtime_minutes: string | null;
   genres: string[];
   cast: LibraryItemCastMember[];

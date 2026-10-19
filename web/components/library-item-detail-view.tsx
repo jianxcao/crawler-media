@@ -600,6 +600,7 @@ export function LibraryItemDetailView({
   const itemFacts = [
     detail.year ? String(detail.year) : null,
     detail.rating ? `评分 ${detail.rating}` : null,
+    detail.content_rating ? `分级 ${detail.content_rating}` : null,
     detail.runtime_minutes ? `${detail.runtime_minutes} 分钟` : null,
   ].filter((fact): fact is string => Boolean(fact));
   const itemPlot =

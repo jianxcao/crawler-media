@@ -11,10 +11,16 @@ impl Store {
         ledger_id: LedgerId,
         media_id: MediaId,
     ) -> Result<(), StoreError> {
-        self.library.execute(
-            "UPDATE ledger SET media_id = ?1 WHERE id = ?2",
+        let tx = self.library.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE library_files SET media_id = ?1 WHERE file_id = ?2",
             params![media_id.to_string(), ledger_id.to_string()],
         )?;
+        tx.execute(
+            "UPDATE library_file_units SET media_id = ?1 WHERE file_id = ?2",
+            params![media_id.to_string(), ledger_id.to_string()],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 }

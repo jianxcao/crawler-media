@@ -263,15 +263,27 @@ impl Store {
 
     pub fn update_media(&self, media: &Media) -> Result<(), StoreError> {
         let tx = self.library.unchecked_transaction()?;
+        let has_external = media.tmdb_id.is_some()
+            || media.douban_id.is_some()
+            || media.tvdb_id.is_some()
+            || media.bangumi_id.is_some()
+            || media.anilist_id.is_some();
+        let identity_state = if has_external { "confirmed" } else { "provisional" };
         tx.execute(
-            "UPDATE media SET title = ?2, year = ?3, original_title = ?4, aliases_display_json = ?5 WHERE media_id = ?1",
+            "UPDATE media SET title = ?2, year = ?3, original_title = ?4, aliases_display_json = ?5, identity_state = ?6 WHERE media_id = ?1",
             params![
                 media.id.to_string(),
                 media.title,
                 media.year.map(i64::from),
                 media.original_title,
                 aliases_json(&media.aliases),
+                identity_state,
             ],
+        )?;
+        // Keep library_items identity_state synchronized with media identity_state
+        tx.execute(
+            "UPDATE library_items SET identity_state = ?2 WHERE media_id = ?1",
+            params![media.id.to_string(), identity_state],
         )?;
 
         tx.execute("DELETE FROM media_aliases WHERE media_id = ?1", params![media.id.to_string()])?;
