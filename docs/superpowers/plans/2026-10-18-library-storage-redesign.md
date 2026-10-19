@@ -10,7 +10,17 @@
 
 **Spec:** [整体设计](../specs/2026-10-18-library-storage-redesign.md)、[来源缓存设计](../specs/2026-10-18-source-separated-cache.md)。详细[开发合同](2026-10-18-library-storage-contracts.md)、[library DDL](2026-10-18-library-storage-schema.sql)、[app/subscribe/cache DDL](2026-10-18-storage-partitions.sql)是本计划不可分的附录，执行者不能只读任务标题。
 
-状态：**详细开发文档已编写，尚未实施**。此前可执行性F01–F07已复核clean；最近Sol定向复核确认完整协议查询/genre修订闭合，采用偏好剩下逐字段选择来源未穿过接口的F02-R1。本轮补NormalizedMetadata完整值/来源返回、采用整包输入、source selection_origins_json及持久验收；该补充尚未独立复核，不代表整份计划或运行时已获通过。旧计划已删除。
+状态（2026-10-19，`a3dab1b`）：**原计划已部分执行，生产干净切换与整批验收未完成**。五文件布局、新表、部分 Store 写入/查询已实现；本页保留最初T1–T12步骤与未勾选框作为原始验收合同，不追认每步已执行或全部通过。当前字段与分区见[数据库文档](../../database/README.md)，实际检查/烟测见[证据报告](../../benchmarks/2026-10-18-library-storage.md)；后续以[切换修复计划](2026-10-19-storage-cutover-remediation.md)为执行入口，不重写历史或降低原目标。
+
+| 原计划范围 | 当前证据边界 / 剩余阻断 |
+|---|---|
+| T1/T2：布局与响应缓存 | 生产DDL与五文件分区已建立；表存在不是全部消费者已切换的证明 |
+| T3–T5：采用与生产写链 | `adopt_metadata` 尚未接入 API 生产消费者；`LedgerRow` 有损适配与单集 Transfer 仍在，NFO/来源采用问题已有前次烟测证据 |
+| T6–T8：观看与协议 | movie `(0,0)` 兼容未删除；`protocol_item_page`、`commit_playback_event` 未接生产消费者；前次实际请求暴露播放404与观看分面漏项 |
+| T9/T10：操作与清理 | 前次烟测暴露 self-merge 失败前删除事实、重导入用户摘要缺失、多集文件删除 Protected；不能据局部 Store 测试宣称安全闭合 |
+| T11/T12：删旧与最终门 | 旧浏览投影链已移除，但旧模型适配仍在；完整空库产品链及100k Media / 1M文件规模未验收 |
+
+上述运行结果属于 `0a046e0` 的前次审查；当前 `a3dab1b` 已有用户的 checkpoint 失效修复但尚未重跑。前次 workspace 的三项扫描 TOCTOU 失败既不是当前已证实失败，也不是已验证修复/全绿。原计划的设计可执行性审阅只针对文档合同，不能替代生产代码或运行验收。
 
 ## Global Constraints
 
@@ -252,9 +262,9 @@ flowchart LR
 |完整产品功能/CLI/web/Jellyfin/维护|T8/T10/T12|协议鉴权/Range/页面真实运行|
 |大表少关联且不隐藏成本|T7/T12|EXPLAIN/VmStep/解码集合/并发写报告|
 
-无未分配的Review Focus。详细schema/接口是新开发合同，遇到与现有行为硬冲突必须在实施前更新对应任务与消费者映射，不能静默缩小范围。本次交付仅文档及可执行DDL附录的临时SQL校验；没有执行T1–T12、没有删除数据库。请先审阅这份新计划再按既定代理实施方式执行。
+原计划中的Review Focus均已分配任务，但分配不等于实现或验收。详细schema/接口仍为开发合同，遇到与既有行为硬冲突必须明确更新任务与消费者映射，不能静默缩小范围。下节保留2026-10-18编写计划时的文档/SQL原型记录；它不是当前实现状态。当前部分实施与未闭合项见页首及[切换修复计划](2026-10-19-storage-cutover-remediation.md)。
 
-## 本次文档交付验证记录
+## 2026-10-18 原始文档交付验证记录（历史）
 
 - GPT-6.1 Sol计划可执行性审查及F01–F07定向复核：clean，无该复核范围剩余阻断；不是完整新DDL/协议代码审查。另一个只读schema审阅的有效建议已落实：scan scope枚举、可用卡片首选文件非空、session版本/状态约束；“负owned计数能穿过BETWEEN 0 AND owned”经实际SQL证伪，未按错误建议修改。父任务补resume_revision NULL保护与历史source/timeline字段。
 - Python SQLite 3.51.0空内存连接执行DDL：library45表、app10表、subscribe4表、cache6表；FK/integrity检查通过；实际验证alias/kind/root、played断言、缺失resume版本、错误scope/state、首选覆盖删除拒绝。不是Rust bundled SQLite/性能验收，实施T1需在实际crate复验。

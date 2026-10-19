@@ -2,9 +2,11 @@
 
 [返回数据库总览](README.md)
 
-当前基线：`main@2c3a5c7`。jobs::Queue；PRAGMA user_version 实测为 0，使用幂等 migrate；0 不表示没有表或未初始化。
+当前源码基线：`feat/storage-redesign@a3dab1b`。初始化入口是 [jobs::Queue::open](../../crates/jobs/src/queue.rs)，调用 [store::migrate](../../crates/jobs/src/store.rs)，并继续调用 [change_state.rs](../../crates/jobs/src/change_state.rs) 与 [retention_cursor.rs](../../crates/jobs/src/retention_cursor.rs) 的初始化函数。下列字典逐项核对这些源码 DDL；不是本次真实 Queue 初始化后的 schema 提取。
 
-共 **4** 张代码创建的表；字段、类型、默认值、主键、唯一约束、外键和索引来自当前初始化代码在全新临时目录中执行迁移后的实际 schema。
+共 **4 张业务表、29 个字段、9 个显式命名索引、6 个触发器**。当前初始化代码不设置 `application_id` 或 `user_version`；新 SQLite 文件默认两者为 0，这不是本次运行实测，也不表示没有表或未初始化。这里仍使用幂等 `CREATE ... IF NOT EXISTS`，不属于 Store 的 v1 SQL 文件与文件身份校验链路；不能套用 Store 的版本号。
+
+本库没有声明外键。下表 NOT NULL 指显式声明：`job_defs.id`、`jobs.id` 与 `retention_cursors.def_id` 的 `TEXT PRIMARY KEY` 没有另写 NOT NULL，不能误报成显式非空。主键自动索引不计入命名索引。Job 状态枚举、payload JSON、enabled 的 0/1 都是业务约定，不是 DDL CHECK。
 
 ## 表目录
 
@@ -23,7 +25,7 @@ Job 更新流用的单例修订/终态计数，避免每次订阅更新都全表
 |---|---|---:|---|---|---|
 | `id` | `INTEGER` | 1 | 否 | 无 | 单例主键，固定为 1（CHECK id = 1）。 |
 | `revision` | `INTEGER` | — | 是 | `0` | 单例单调修订号；不是跨 DB 全局事务序号。 |
-| `finished_count` | `INTEGER` | — | 是 | `0` | 满足终态时间判定的 jobs 行数，由 INSERT/UPDATE/DELETE 触发器增减；不是只增不减的累计完成量。 |
+| `finished_count` | `INTEGER` | — | 是 | `0` | 满足 `finished_at IS NOT NULL AND finished_at > 0` 的 jobs 行数；触发器不按 status 判定，不是只增不减的累计完成量。 |
 
 **键与约束**
 
@@ -35,7 +37,7 @@ Job 更新流用的单例修订/终态计数，避免每次订阅更新都全表
 
 无额外命名索引；主键/UNIQUE 的 SQLite 自动索引不重复列出。
 
-**使用注意**：单例 id=1（CHECK）。revision 同时由 jobs 和 job_defs 变化推进；finished_count 随 Job 删除回减，并非历史上总共完成过多少次。
+**使用注意**：单例 id=1（CHECK）。首次初始化从 jobs 的 `finished_at IS NOT NULL AND finished_at > 0` 行数建立计数。revision 同时由 jobs 和 job_defs 的 INSERT/UPDATE/DELETE 推进，即使 UPDATE 未改变业务值也会增加；finished_count 随删除回减。它不是按终态 status 聚合，也不等于历史累计完成次数。retention_cursors 变化不推进该修订号。
 
 ## job_defs
 
@@ -63,7 +65,7 @@ Job 定义：调度周期、启用状态、payload 与并发/超时策略；用�
 
 无额外命名索引；主键/UNIQUE 的 SQLite 自动索引不重复列出。
 
-**关联触发器**：`trg_job_defs_change_del`、`trg_job_defs_change_ins`、`trg_job_defs_change_upd`。触发器负责的 journal/revision 逻辑见总览；不等于声明 FK。
+**关联触发器**：`trg_job_defs_change_del`、`trg_job_defs_change_ins`、`trg_job_defs_change_upd`，每次对应行事件只推进 `job_change_state.revision`；不写浏览 journal，也不改变 finished_count。
 
 **使用注意**：schedule 当前为 interval:<secs> 或 NULL；payload 是按 JobKind 解码的 JSON 文本，维护策略/启用状态属于用户配置，不是可弃缓存。
 
@@ -82,7 +84,7 @@ Job 定义：调度周期、启用状态、payload 与并发/超时策略；用�
 | `status` | `TEXT` | — | 是 | 无 | 通用 Job 状态：queued/running/succeeded/failed/cancelled。 |
 | `attempt` | `INTEGER` | — | 是 | `0` | 已记录的失败尝试次数（含失败/超时恢复路径）；领取和成功完成不递增，不是执行总次数。 |
 | `run_after` | `INTEGER` | — | 是 | 无 | Job 最早可运行时刻，Unix 秒。 |
-| `started_at` | `INTEGER` | — | 否 | 无 | 通用 Job/Playback 开始时间，Unix 秒。 |
+| `started_at` | `INTEGER` | — | 否 | 无 | 本次 Job 开始时间，Unix 秒。 |
 | `finished_at` | `INTEGER` | — | 否 | 无 | 通用 Job 结束时间，Unix 秒。 |
 | `error` | `TEXT` | — | 否 | 无 | 可选错误说明；不是错误状态的唯一判据。 |
 | `progress` | `TEXT` | — | 否 | 无 | Job 进度/报告的序列化文本。 |
@@ -117,7 +119,7 @@ CREATE INDEX jobs_status_run_after_idx
             ON jobs(status, run_after) WHERE status = 'queued';
 ```
 
-**关联触发器**：`trg_jobs_change_del`、`trg_jobs_change_ins`、`trg_jobs_change_upd`。触发器负责的 journal/revision 逻辑见总览；不等于声明 FK。
+**关联触发器**：`trg_jobs_change_del`、`trg_jobs_change_ins`、`trg_jobs_change_upd`。每次对应行事件推进 `job_change_state.revision`；INSERT 加上新行的 finished_at 判定值，DELETE 减去旧行判定值，UPDATE 先减旧值再加新值。判定严格为 `finished_at IS NOT NULL AND finished_at > 0`，不是 status 检查；无浏览 journal。
 
 **使用注意**：queued/running/succeeded/failed/cancelled；def_id 可空。两个部分唯一索引分别约束每定义的 queued 和 running 实例，允许一个 running 加一个 queued；并非 def_id 在全表唯一。concurrency_key 的运行互斥另由领取逻辑检查。
 

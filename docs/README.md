@@ -2,6 +2,8 @@
 
 更新：2026-10-16。ADR-0007 的 Browser 能力边界随 2026-10-16 决策更新（单一 CDP 开关、受管 Obscura、失败回退 HTTP），下表 0007 行与 [deploy](<deploy.md>)、[CONTEXT](<../CONTEXT.md>) 同步；其余内容与清理记录仍为 2026-10-15。本次盘点按“已完成计划不再留在工作树”的原则清理了 `docs/`：删除 51 份已实施／已替代的逐轮计划、设计与复现附件（详见文末）。**旧文档的日期、unchecked 框或历史绿测都不表示当前功能未实现或已验收。**
 
+2026-10-19 数据库文档更新：当前存储以 [五文件数据库字典](database/README.md)、[存储重设计合同](superpowers/specs/2026-10-18-library-storage-redesign.md) 和 [切换修复与后续优化计划](superpowers/plans/2026-10-19-storage-cutover-remediation.md) 为准。下面的 10-13/10-15 审计与计划是各自版本的证据，不能当作本次重构验收结果。
+
 ## 当前先读
 
 1. 术语与用户请求：[CONTEXT](<../CONTEXT.md>)；工程约束：[AGENTS](<../AGENTS.md>)。
@@ -11,7 +13,7 @@
 5. API 约定：[self](<api-contracts/self.md>)；完整现行路由读 [后端](<../crates/api/src/http/mod.rs>) 与前端 API 模块，文档不复制动态路由表。
 6. 部署与默认清理警告：[deploy](<deploy.md>)；UI／设备验收清单：[system regression](<testing/system-regression-cases.md>)，**清单不是执行结果**。
 7. 最近一轮三批优化的验收结果：[batched performance acceptance](<audits/2026-10-13-batched-performance/acceptance.md>)。
-8. **当前数据库全量字典：** [数据库设计与查询关系总览](<database/README.md>)，下分 6 个 DB 的全部表、字段、约束、索引；明确区分真实 JOIN、跨文件应用拼接与待评审设计。
+8. **当前数据库全量字典：** [数据库设计与查询关系总览](<database/README.md>)，覆盖 app/library/subscribe/cache/jobs 五文件；区分实际 schema、生产接线缺口与目标合同。来源缓存统一见 [cache.db](database/cache.md)，不再维护 catalog.db/fanart.db 两份现行字典。
 
 ## 文档保留规则
 
@@ -31,7 +33,7 @@
 | [0005 Jellyfin](<adr/0005-jellyfin-compatible-playback.md>) | 实际客户端协议子集；未实现 UserConfiguration 明确保留 |
 | [0006 Indexer](<adr/0006-indexer-in-first-slice.md>) | 架构 rationale，不是当前外网验收结果 |
 | [0007 Browser](<adr/0007-cdp-browser-opt-in.md>) | Browser 仅用于登录/签到；导航前回退 HTTP；受管 Obscura；每会话独立 BrowserContext；存量库增量升级（r9） |
-| [0008 SQLite](<adr/0008-sqlite-system-of-record.md>) | 四 Store 生命周期分区＋jobs/fanart；root_id／路径与历史背景已更正 |
+| [0008 SQLite](<adr/0008-sqlite-system-of-record.md>) | 历史拆库决策＋当前五文件布局；schema 已建立但无兼容生产切换尚未完成 |
 | [0009 Job](<adr/0009-job-queue.md>) | Interval／queued-running 约束／状态事实；不宣称专用单写线程或全局 2 runner 上限 |
 | [0010 Password](<adr/0010-password-hashing.md>) | Argon2id；其他独立 credential 生命周期历史计划不得机械重跑 |
 | [0011 Probe retry](<adr/0011-probe-stage-retry.md>) | 持久化阶段／重试决定 |

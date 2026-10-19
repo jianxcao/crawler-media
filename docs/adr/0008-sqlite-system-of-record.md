@@ -1,5 +1,7 @@
 # SQLite 是系统记录，按生命周期拆分
 
+> 本文保留原拆库决策及后续历史记录；第“四个文件”至2026-10-12后记中的文件、表名与迁移行为均是当时方案/实现，不是当前操作指南。当前布局与尚未完成的生产切换见文末2026-10-19后记及[数据库文档](../database/README.md)。
+
 行存 SQLite。字节（视频、NFO、图、Indexer YAML、Chromium）留在磁盘。行中的路径指向这些字节。**Users**、**Sites**、**Filters**、**Subscribes**、**Media**、**Library** ledger、**Naming templates**、**Metadata source** 负载不存在 ad-hoc 文件的第二事实来源。
 
 **历史背景（拆库决策时，不是当前实现）：** 当时 `data/crawler-media.db` 持有 users、media（仅标题 + 别名）、sites、filters、subscribes、facts、ledger、tokens、playback，以及一个 key/value `settings` 袋。TMDB 响应放在 `data/tmdb/` 下，作为无 TTL 的文件。**Transfer** 用 `Media.title` 命名目录并保留 Downloader 文件名。Library 根是 `data/library`，不是一行记录。这就是为什么 live 运行产生 `The Long Watch - S01E01/<release-name>.mkv`，清缓存是 `rm -rf tmdb/` 而不是 SQL。
@@ -78,7 +80,7 @@ TMDB 客户端读写这张表，替代 `{data}/tmdb/` 文件。默认 TTL 7 天�
 
 ## 原始 Schema 增量提案（历史，不是现行 DDL）
 
-此节记录当时拆库方向；实际表／迁移以 [Store schema](<../../crates/store/src/schema.rs>) 与 [tables](<../../crates/store/src/schema/tables.rs>) 为准。尤其 `ledger.root_id` 提案未等于完成backfill，不能据此直接跨文件JOIN或删除归属判断。
+此节记录当时拆库方向；这里列出的旧 schema 文件与 `ledger.root_id` 提案不再是当前 DDL。现行结构见 [Store 布局入口](../../crates/store/src/schema/layout.rs) 与 [数据库字典](../database/README.md)；创建新表不等于完成所有运行时调用方切换。
 
 `app.db`
 
@@ -118,26 +120,27 @@ Jinja 模板：MoviePilot 的能力。v1 否决——封闭占位符集合对两
 
 跨文件仍然没有外键，也没有跨文件事务：这一点对这两个库同样成立。
 
-## 后记：存储重设计已落地（2026-10-19，替换上面的四文件归属）
+## 后记：新布局已建立，生产干净切换未完成（2026-10-19）
 
-上面的四文件划分与 `ledger`/`file_meta`/浏览投影链已被
-[存储重设计](../superpowers/specs/2026-10-18-library-storage-redesign.md)取代，实现见
-`crates/store/src/schema/v1/`。当前事实：
+本节替代上面的历史文件归属。`a3dab1b` 的生产 DDL 位于
+[`crates/store/src/schema/v1/`](../../crates/store/src/schema/v1/)，目标合同见
+[存储重设计](../superpowers/specs/2026-10-18-library-storage-redesign.md)。**五文件布局已经实现，不代表生产读写、协议与删除恢复已端到端验收。**
 
-| 文件 | 保存内容 | 可清空？ |
+| 文件 | 当前布局职责 | 可清空？ |
 |---|---|---|
 | `app.db` | User／token、Site、Downloader、Filter、Naming template、实例设置、搜索快照 | 否 |
-| `library.db` | Media 身份与已采用元数据、Library／根、文件台账与覆盖、浏览摘要与倒排、Collection、Playback 单元／会话／历史／日志/指标、Probe 与 Scan 的持久工作 | 否（这就是馆藏索引） |
+| `library.db` | Media 身份与采用元数据、Library／根、文件与覆盖、浏览摘要与倒排、Collection、Playback、Probe 与 Scan 持久工作 | 否 |
 | `subscribe.db` | Subscribe 策略、逐槽事实、待下载队列 | 否 |
-| `jobs.db` | Job 定义与执行／重试记录 | 否（按保护规则清理终态历史） |
-| `cache.db` | 六来源外部响应缓存（每来源一张表） | 是 |
+| `jobs.db` | Job 定义、执行／重试及保留游标 | 否（终态历史按保护规则清理） |
+| `cache.db` | 六来源外部响应缓存（每来源一表） | 是（受控清理，不 unlink 活跃 WAL 文件） |
 
-与本文原决策的三处实质差异：
+相对原决策，Media 与 Playback 已迁入 `library.db`；旧浏览投影表/重建链已移除，新摘要为 `library_items`、`library_units`、`library_item_terms`；`catalog.db`/`fanart.db` 由按来源分表的 `cache.db` 取代。Store 布局入口校验 `application_id` 与 `user_version`，没有旧数据库导入器或兼容视图；跨文件仍没有外键或原子事务。
 
-1. **Media 与 Playback 从 app/subscribe 移入 library.db**：一个文件的发布要同时写文件台账、覆盖、浏览摘要与受影响用户摘要，这些必须在一个事务内完成，不能跨库。
-2. **浏览投影链被删除**：`_read_revisions`、`_browse_changes`、`browse_change_cursors`、`browse_generations`、`browse_media`、`browse_files` 以及重建服务都不再存在。浏览读 `library_items`/`library_units`/`library_item_terms`，在写事实的同一事务内更新。
-3. **`cache.db` 按来源分表**，`catalog.db`/`fanart.db` 不再单独存在；清缓存不影响任何本地事实。
+**未完成的干净切换是缺陷，不是支持的兼容合同：**
 
-仍然成立的约束：跨文件没有外键、没有跨文件事务；文件所属 root/Library/Media 在写入时确定并持久化，不在读路径按字符串或路径归属推断；`pending` 文件不是馆藏内容，只进管理／恢复视图。
+- movie 的旧 whole `(0,0)` 复制/回退分支仍存在于 Store 与 API；必须统一为 `(-1,-1)`，同时保留 TV S00E00 的真实分集语义。
+- `LedgerRow` 及其写入适配器仍被生产调用；单集形状不能无损表达多集覆盖、源版本与显式归属。新文件表有这些列，不证明每个调用方已传递完整事实。
+- `protocol_item_page`、`adopt_metadata`、`commit_playback_event` 虽有 Store 实现，但 API 生产消费者尚未接入，不能据此宣称协议分页、字段采用或会话/历史原子提交已完成。
+- 前次真实 API/Store 烟测已暴露播放、分面、重导入用户摘要、多集 Transfer、无效 NFO、来源优先级、合并原子性及删除保护问题。历史复现不自动证明新提交仍失败；也不能被表创建或局部测试通过抵消。
 
-没有旧数据导入器、兼容视图或双读双写。未知或较新的库布局拒绝打开（各文件 `application_id` + `user_version`），升级只做前向 schema 版本变更。
+当前数据库字段、键与索引以[数据库文档](../database/README.md)为准；历史验证及查询工作量见[证据报告](../benchmarks/2026-10-18-library-storage.md)。`a3dab1b` 已有用户的扫描 checkpoint 失效修复，尚未重跑相关门禁；既不能沿用旧失败当当前结论，也不能标全绿。后续修复与完整验收按[切换修复计划](../superpowers/plans/2026-10-19-storage-cutover-remediation.md)执行，不恢复双读双写或旧模型兼容层。
