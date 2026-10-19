@@ -6,8 +6,13 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserId};
-use media_server::provider::query::{folder_id_for_root, legacy_next_up, legacy_select};
+use domain::{
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LedgerRow, LibraryFile,
+    LibraryId, Media, MediaId, MediaKind, QualitySource, TypedItemId, UserId,
+};
+use media_server::provider::query::{
+    folder_id_for_root, legacy_next_up, legacy_select, series_media_id,
+};
 use media_server::provider::{
     AuthenticateError, MediaItemMetadata, MediaItemSnapshot, MediaServerProvider, ServerItemQuery,
     ServerLibrary, ServerUser,
@@ -50,9 +55,58 @@ fn row(media_id: MediaId, path: &str, season: Option<u32>, episode: Option<u32>)
         filter_score: None,
     }
 }
+fn fake_file(
+    file_id: LedgerId,
+    root_id: &str,
+    media_id: MediaId,
+    kind: MediaKind,
+    path: &str,
+) -> LibraryFile {
+    LibraryFile {
+        file_id,
+        library_id: LibraryId::from_str("00000000-0000-0000-0000-0000000000f1").unwrap(),
+        root_id: root_id.to_string(),
+        media_id,
+        kind,
+        path: PathBuf::from(path),
+        version: FileVersion {
+            revision: 1,
+            source_version: "v1".to_string(),
+        },
+        presence: FilePresence::Present,
+        publication: FilePublication::Published,
+        size_bytes: Some(1_000_000),
+        stat_known: true,
+        created_ns: Some(100),
+        modified_ns: Some(200),
+        source_digest: Some("hash".to_string()),
+        source_path: None,
+        transfer_mode: None,
+        resolution: Some("1080p".to_string()),
+        codec: Some("h264".to_string()),
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: None,
+        release_quality: None,
+        duration_ms: Some(2_400_000),
+        tracks_version: 1,
+        poster_path: None,
+        backdrop_path: None,
+        still_path: None,
+    }
+}
 
 fn snapshot(item_media: Media, item_row: LedgerRow, is_series: bool) -> MediaItemSnapshot {
+    let file = fake_file(
+        item_row.id,
+        "root",
+        item_media.id,
+        item_media.kind,
+        &item_row.path,
+    );
     MediaItemSnapshot {
+        file,
         parent_id: "lib".into(),
         row: item_row,
         media: item_media,
@@ -157,17 +211,13 @@ impl MediaServerProvider for SplitRootProvider {
         _: UserId,
         parent_id: Option<&str>,
     ) -> Result<Vec<MediaItemSnapshot>, String> {
-        let series_id = self.show.id.to_string().replace('-', "");
-        if parent_id.is_some_and(|id| id.replace('-', "") == series_id) {
+        if parent_id.is_some_and(|id| series_media_id(id) == Some(self.show.id)) {
             return Ok(vec![self.episode_a.clone(), self.episode_b.clone()]);
         }
-        if parent_id.is_some_and(|id| id.replace('-', "") == self.movie.media.id.to_string().replace('-', ""))
-        {
+        if parent_id.is_some_and(|id| series_media_id(id) == Some(self.movie.media.id)) {
             return Ok(vec![self.movie.clone()]);
         }
-        if parent_id.is_some_and(|id| {
-            id.replace('-', "") == self.collapsed_b.media.id.to_string().replace('-', "")
-        }) {
+        if parent_id.is_some_and(|id| series_media_id(id) == Some(self.collapsed_b.media.id)) {
             return Ok(vec![snapshot(
                 self.collapsed_b.media.clone(),
                 row(
@@ -192,13 +242,12 @@ impl MediaServerProvider for SplitRootProvider {
         _: UserId,
         id: &str,
     ) -> Result<Option<MediaItemSnapshot>, String> {
-        let compact = id.replace('-', "");
-        if compact == self.show.id.to_string().replace('-', "") {
+        if series_media_id(id) == Some(self.show.id) {
             let mut series = self.episode_a.clone();
             series.is_series = true;
             return Ok(Some(series));
         }
-        if compact == self.movie.media.id.to_string().replace('-', "") {
+        if series_media_id(id) == Some(self.movie.media.id) {
             return Ok(Some(self.movie.clone()));
         }
         Ok(None)
@@ -306,7 +355,7 @@ async fn legacy_folder_series_only_expands_membership_and_rebuilds_aggregates() 
 #[tokio::test]
 async fn legacy_next_up_returns_explicit_movie_and_expands_collapsed_media() {
     let provider = SplitRootProvider::new();
-    let movie_id = provider.movie.media.id.to_string();
+    let movie_id = TypedItemId::Work(provider.movie.media.id).to_wire_string();
     let movie = legacy_next_up(&provider, user(), Some(&movie_id), 0, 20)
         .await
         .expect("explicit movie");

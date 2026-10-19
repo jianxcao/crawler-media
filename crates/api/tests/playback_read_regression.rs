@@ -383,13 +383,17 @@ async fn activity_media_target_fields_unchanged() {
         let guard = store.lock();
         let media = seed_media(&guard, "Watching", Some(2023));
         add_ledger(&guard, media, &library, "Watching");
+        let started = now_secs();
+        let play_session_id = guard
+            .issue_play_session(member, "dev-1", domain::LedgerId::new(), started)
+            .unwrap();
         guard
             .upsert_session(&api::store::SessionRow {
                 device_id: "dev-1".into(),
                 user_id: member,
                 media_id: media,
-                season: None,
-                episode: None,
+                season: Some(-1),
+                episode: Some(-1),
                 client: Some("test".into()),
                 device_name: Some("test".into()),
                 client_version: None,
@@ -403,11 +407,11 @@ async fn activity_media_target_fields_unchanged() {
                 bytes_sent: 0,
                 connections: 1,
                 admin_ended: false,
-                started_at: now_secs(),
-                last_report_at: now_secs(),
-                last_report_at_ms: now_secs() * 1000,
+                started_at: started,
+                last_report_at: started,
+                last_report_at_ms: started * 1000,
                 ledger_id: None,
-                play_session_id: None,
+                play_session_id: Some(play_session_id),
                 last_event_sequence: None,
             })
             .unwrap();
@@ -454,13 +458,17 @@ async fn media_in_two_libraries_reports_null_library_id() {
         let media = seed_media(&guard, "Shared", Some(2020));
         add_ledger(&guard, media, &first, "Shared-A");
         add_ledger(&guard, media, &second, "Shared-B");
+        let started = now_secs();
+        let play_session_id = guard
+            .issue_play_session(member, "dev-2", domain::LedgerId::new(), started)
+            .unwrap();
         guard
             .upsert_session(&api::store::SessionRow {
                 device_id: "dev-2".into(),
                 user_id: member,
                 media_id: media,
-                season: None,
-                episode: None,
+                season: Some(-1),
+                episode: Some(-1),
                 client: None,
                 device_name: None,
                 client_version: None,
@@ -474,11 +482,11 @@ async fn media_in_two_libraries_reports_null_library_id() {
                 bytes_sent: 0,
                 connections: 1,
                 admin_ended: false,
-                started_at: now_secs(),
-                last_report_at: now_secs(),
-                last_report_at_ms: now_secs() * 1000,
+                started_at: started,
+                last_report_at: started,
+                last_report_at_ms: started * 1000,
                 ledger_id: None,
-                play_session_id: None,
+                play_session_id: Some(play_session_id),
                 last_event_sequence: None,
             })
             .unwrap();

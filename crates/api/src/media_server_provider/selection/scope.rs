@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use domain::{LedgerId, LedgerRow, LibraryFile, Media, MediaId, MediaKind, UserId};
-use media_server::provider::query::folder_id_for_root;
+use media_server::provider::query::{folder_id_for_root, series_media_id as protocol_series_media_id};
 use media_server::provider::ServerItemQuery;
 
 /// 作用域读失败时已经完成的台账行数。`rows_read` 原先只活在成功的
@@ -78,7 +78,7 @@ pub(super) fn read_scope(
     } else {
         series_parent.map(|_| parent.unwrap_or_default().to_string())
     };
-    let media_scope = media_target.as_deref().and_then(|id| id.parse::<MediaId>().ok());
+    let media_scope = media_target.as_deref().and_then(protocol_series_media_id);
     if media_target.is_some() && media_scope.is_none() {
         return Ok(unresolved_scope(ownership, is_admin, user_id));
     }
@@ -171,12 +171,9 @@ fn folder_root_in(parent: &str, libraries: &[crate::store::Library]) -> Option<P
 }
 
 fn series_media_id(store: &crate::Store, user_id: UserId, id: &str, ownership: &store::LibraryOwnership, is_admin: bool) -> Result<(Option<MediaId>, Option<Vec<LedgerRow>>), String> {
-    let Some(media_id) = id.parse::<MediaId>().ok() else { return Ok((None, None)); };
+    let Some(media_id) = protocol_series_media_id(id) else { return Ok((None, None)); };
     let Some(media) = store.get_media(media_id).map_err(|error| error.to_string())? else { return Ok((None, None)); };
     if media.kind != MediaKind::Tv { return Ok((None, None)); }
-    let compact = id.replace('-', "");
-    let media_compact = media.id.to_string().replace('-', "");
-    if compact != media_compact && id != media.id.to_string() { return Ok((None, None)); }
     let rows = store.ledger_for_media(media.id).map_err(|error| error.to_string())?;
     let visible = rows.iter().any(|row| {
         let Some(owner) = ownership.owner(Path::new(&row.path), media.kind) else { return false; };

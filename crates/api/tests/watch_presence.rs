@@ -97,15 +97,23 @@ async fn same_url_restore_clears_missing_and_preserves_probe_cache() {
     let fix = PresenceFixture::new();
     let (_media_id, row) = fix.insert_media_and_ledger("video.strm");
 
-    // Populate file_meta
-    let lib_conn = rusqlite::Connection::open(fix.dir.path().join("data/library.db")).unwrap();
-    lib_conn
-        .execute(
-            "INSERT INTO file_meta (ledger_id, audio_json, subtitle_json, video_json, tracks_version, format_duration_ms)
-             VALUES (?1, '[]', '[]', '{}', 2, 80000)",
-            [&row.id.to_string()],
-        )
-        .unwrap();
+    // Populate the probe cache through the public writer: the fixture is a probed file.
+    {
+        let store_arc = fix.state.store();
+        let guard = store_arc.lock();
+        guard
+            .put_file_meta_versioned(
+                &row.id.to_string(),
+                &library::Tracks {
+                    video: Some(library::VideoTrack::default()),
+                    audio: Vec::new(),
+                    subtitles: Vec::new(),
+                },
+                None,
+                Some(80_000),
+            )
+            .unwrap();
+    }
 
     // Mark missing
     let path = PathBuf::from(&row.path);
@@ -145,7 +153,7 @@ async fn same_url_restore_clears_missing_and_preserves_probe_cache() {
             .contains_key(&row.path)
     );
 
-    // file_meta is preserved
+    // probe cache is preserved
     assert!(
         store_arc
             .lock()

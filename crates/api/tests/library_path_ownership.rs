@@ -2,27 +2,17 @@ use api::Store;
 use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
 
 #[test]
-fn more_specific_root_wins_even_after_ambiguous_parent_roots() {
+fn nested_root_wins_over_parent_library_root() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let parent = tmp.path().join("media");
     let child = parent.join("tv");
     let parent_path = parent.to_str().unwrap();
     let child_path = child.to_str().unwrap();
-    store
+    let parent_library = store
         .create_library(
             MediaKind::Tv,
-            "parent-a",
-            &[parent_path],
-            "everyone",
-            true,
-            &[],
-        )
-        .unwrap();
-    store
-        .create_library(
-            MediaKind::Tv,
-            "parent-b",
+            "parent",
             &[parent_path],
             "everyone",
             true,
@@ -38,6 +28,45 @@ fn more_specific_root_wins_even_after_ambiguous_parent_roots() {
         .unwrap()
         .unwrap();
     assert_eq!(owner.id, expected.id);
+    assert_ne!(owner.id, parent_library.id);
+
+    let parent_owner = store
+        .library_for_path(&parent.join("film.mkv"), MediaKind::Tv)
+        .unwrap()
+        .unwrap();
+    assert_eq!(parent_owner.id, parent_library.id);
+}
+
+#[test]
+fn root_path_is_globally_unique_across_libraries() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let shared = tmp.path().join("media");
+    let shared_path = shared.to_str().unwrap();
+    let owner = store
+        .create_library(MediaKind::Tv, "owner", &[shared_path], "everyone", true, &[])
+        .unwrap();
+
+    // `library_roots.path_key TEXT NOT NULL UNIQUE`: a root belongs to exactly
+    // one Library, so a second Library cannot claim the same path.
+    let duplicate = store.create_library(
+        MediaKind::Tv,
+        "duplicate",
+        &[shared_path],
+        "everyone",
+        true,
+        &[],
+    );
+    assert!(
+        matches!(duplicate, Err(api::store::StoreError::Sqlite(_))),
+        "two Libraries must not share a root path"
+    );
+
+    let resolved = store
+        .library_for_path(&shared.join("episode.mkv"), MediaKind::Tv)
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved.id, owner.id);
 }
 
 #[test]
@@ -133,7 +162,21 @@ async fn deleting_library_with_owned_ledger_is_blocked_with_conflict() {
         )
         .unwrap();
 
-    let media_id = domain::MediaId::new();
+    let media = Media {
+        id: MediaId::new(),
+        kind: MediaKind::Movie,
+        title: "Restricted".into(),
+        year: None,
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&media).unwrap();
+    let media_id = media.id;
     let path = restricted_root.join("secret.mkv");
     store
         .insert_ledger(&LedgerRow {

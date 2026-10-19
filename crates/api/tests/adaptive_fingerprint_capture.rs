@@ -98,12 +98,31 @@ impl FingerprintEngine for MockEngine {
     }
 }
 
-fn dummy_row(ledger_id: &str, ep: u32) -> LedgerRow {
-    let dummy_path = std::env::temp_dir().join(format!("dummy_{ledger_id}.mkv"));
-    let _ = std::fs::write(&dummy_path, b"dummy");
+fn dummy_row(store: &Store, ledger_id: &str, ep: u32) -> LedgerRow {
+    let media_id = domain::MediaId::new();
+    store
+        .insert_media(&domain::Media {
+            id: media_id,
+            kind: domain::MediaKind::Tv,
+            title: format!("Fixture {ledger_id}"),
+            year: None,
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+    let dummy_path = store
+        .library_root(domain::MediaKind::Tv)
+        .unwrap()
+        .join(format!("dummy_{ledger_id}.mkv"));
+    std::fs::write(&dummy_path, b"dummy").unwrap();
     LedgerRow {
         id: domain::LedgerId::new(),
-        media_id: domain::MediaId::new(),
+        media_id,
         path: dummy_path.to_string_lossy().to_string(),
         season: Some(1),
         episode: Some(ep),
@@ -146,7 +165,7 @@ async fn reuse_valid_does_not_read_media() {
     let profile_key = capture_profile_key(&profile);
     let policy = SamplingPolicy::default();
 
-    let row = dummy_row("l-1", 1);
+    let row = dummy_row(&store.lock(), "l-1", 1);
     store.lock().insert_ledger(&row).unwrap();
     let req = EpisodeCaptureRequest {
         job_id: "job-1".into(),
@@ -187,7 +206,7 @@ async fn recapture_requires_new_job_evidence() {
     let profile_key = capture_profile_key(&profile);
     let policy = SamplingPolicy::default();
 
-    let row = dummy_row("l-1", 1);
+    let row = dummy_row(&store.lock(), "l-1", 1);
     store.lock().insert_ledger(&row).unwrap();
     let req1 = EpisodeCaptureRequest {
         job_id: "job-1".into(),
@@ -233,7 +252,7 @@ async fn retries_and_fallback_share_four_attempt_budget() {
     let profile_key = capture_profile_key(&profile);
     let policy = SamplingPolicy::default();
 
-    let row = dummy_row("l-exhaust", 1);
+    let row = dummy_row(&store.lock(), "l-exhaust", 1);
     store.lock().insert_ledger(&row).unwrap();
     let req = EpisodeCaptureRequest {
         job_id: "job-exhaust".into(),

@@ -93,7 +93,7 @@ async fn series_parent_does_not_scan_the_root_ledger() {
                 .id
         };
         conn.execute(
-            "UPDATE ledger SET quality_source = 'not-a-source' WHERE id = ?1",
+            "UPDATE library_files SET filter_score = 'not-a-score' WHERE file_id = ?1",
             [foreign.to_string()],
         )
         .unwrap();
@@ -204,7 +204,7 @@ async fn heavy_counter_records_a_completed_snapshot_before_a_later_failure() {
         let db = fixture.dir.path().join("data/library.db");
         move || {
             let conn = rusqlite::Connection::open(&db).unwrap();
-            conn.execute_batch("DROP TABLE file_meta").unwrap();
+            conn.execute_batch("DROP TABLE file_details").unwrap();
         }
     }));
     let (status, _) = get(
@@ -278,8 +278,11 @@ async fn off_page_blob_chapters_fail_only_when_that_row_is_selected() {
     };
     let conn = rusqlite::Connection::open(fixture.dir.path().join("data/library.db")).unwrap();
     conn.execute(
-        "INSERT INTO file_meta (ledger_id, audio_json, subtitle_json, chapters_json)
-         VALUES (?1, '[]', '[]', x'0102')",
+        "INSERT INTO file_details
+             (file_id, source_revision, source_version, tracks_version,
+              audio_json, subtitle_json, chapters_json)
+         SELECT file_id, file_revision, source_version, 0, '[]', '[]', x'5b5d'
+         FROM library_files WHERE file_id = ?1",
         [failing.to_string()],
     )
     .unwrap();

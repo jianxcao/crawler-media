@@ -161,13 +161,17 @@ fn log_play(
     started_at: i64,
     device: &str,
 ) {
+    let ledger = domain::LedgerId::new();
+    let play_session_id = store
+        .issue_play_session(user_id, device, ledger, started_at)
+        .unwrap();
     store
         .upsert_session(&api::store::SessionRow {
             device_id: device.into(),
             user_id,
             media_id,
-            season: None,
-            episode: None,
+            season: Some(-1),
+            episode: Some(-1),
             client: Some("test".into()),
             device_name: Some("test".into()),
             client_version: None,
@@ -184,8 +188,8 @@ fn log_play(
             started_at,
             last_report_at: started_at,
             last_report_at_ms: started_at * 1000,
-            ledger_id: None,
-            play_session_id: None,
+            ledger_id: Some(ledger.to_string()),
+            play_session_id: Some(play_session_id),
             last_event_sequence: None,
         })
         .unwrap();

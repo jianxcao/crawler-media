@@ -51,20 +51,26 @@ async fn corrupted_heavy_facts_outside_the_page_do_not_fail_the_page() {
     let out_of_page = {
         let store = fixture.state.store();
         let store = store.lock();
-        let row = store
+        let rows: Vec<_> = store
             .list_ledger()
             .unwrap()
             .into_iter()
-            .find(|row| row.path.contains("Show000"))
-            .expect("Show000 row");
+            .filter(|row| row.path.contains("Show000"))
+            .collect();
+        assert!(!rows.is_empty(), "Show000 rows");
         let conn = rusqlite::Connection::open(fixture.dir.path().join("data/library.db")).unwrap();
-        conn.execute(
-            "INSERT INTO file_meta (ledger_id, audio_json, subtitle_json, chapters_json)
-             VALUES (?1, '[]', '[]', x'0102')",
-            [row.id.to_string()],
-        )
-        .unwrap();
-        row.id
+        for row in &rows {
+            conn.execute(
+                "INSERT INTO file_details
+                     (file_id, source_revision, source_version, tracks_version,
+                      audio_json, subtitle_json, chapters_json)
+                 SELECT file_id, file_revision, source_version, 0, '[]', '[]', x'5b5d'
+                 FROM library_files WHERE file_id = ?1",
+                [row.id.to_string()],
+            )
+            .unwrap();
+        }
+        rows[0].id
     };
     assert!(!out_of_page.to_string().is_empty());
     let listing = get_json(
@@ -166,7 +172,7 @@ async fn episode_expansion_stays_inside_the_folder() {
     let root_b = dir.path().join("folder-b");
     std::fs::create_dir_all(&root_a).unwrap();
     std::fs::create_dir_all(&root_b).unwrap();
-    let (episode_a, episode_b, show_media) = {
+    let show_media = {
         let store = state.store();
         let store = store.lock();
         store
@@ -180,11 +186,9 @@ async fn episode_expansion_stays_inside_the_folder() {
             )
             .unwrap();
         let media_id = new_media(&store, "Folder show");
-        (
-            insert_episode(&store, &root_a, media_id, 1, 1),
-            insert_episode(&store, &root_b, media_id, 1, 2),
-            media_id,
-        )
+        insert_episode(&store, &root_a, media_id, 1, 1);
+        insert_episode(&store, &root_b, media_id, 1, 2);
+        media_id
     };
     let app = router(state);
     let listing = get_json(
@@ -196,11 +200,11 @@ async fn episode_expansion_stays_inside_the_folder() {
     )
     .await;
     assert_eq!(listing["TotalRecordCount"], 1, "{listing}");
-    assert_eq!(items(&listing)[0]["Id"], episode_b.to_string().replace('-', ""));
+    assert_eq!(items(&listing)[0]["Id"], unit_wire_id(show_media, 1, 2));
 
     let whole = get_json(&app, "/Items?Recursive=true&IncludeItemTypes=Episode").await;
     assert_eq!(whole["TotalRecordCount"], 2);
-    assert!(items(&whole).iter().any(|item| item["Id"] == episode_a.to_string().replace('-', "")));
+    assert!(items(&whole).iter().any(|item| item["Id"] == unit_wire_id(show_media, 1, 1)));
 
     // 剧 parent（不给 IncludeItemTypes）就是「列这部剧的分集」：一行一条，不折叠成剧。
     let by_show = get_json(
@@ -273,7 +277,7 @@ async fn latest_items_keeps_played_last_by_default_and_filters_when_asked() {
     assert_eq!(unique, ids.len(), "最新列表不得重复：{ids:?}");
     assert_eq!(
         listed.last().unwrap()["Id"],
-        first_show.to_string().replace('-', ""),
+        work_wire_id(first_show),
         "缺省：已看完沉底"
     );
     let played = get_json(&app, "/Users/me/Items/Latest?IsPlayed=true").await;
@@ -381,7 +385,7 @@ async fn name_ties_keep_a_stable_order() {
                 confidence: Confidence::High,
                 filter_score: None,
             }).unwrap();
-            expected.push(media_id.to_string().replace('-', ""));
+            expected.push(work_wire_id(media_id));
         }
         expected.sort();
         (library.id, expected)

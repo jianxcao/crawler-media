@@ -411,12 +411,17 @@ fn playback_retention_dry_run_keeps_logs_then_prunes_only_logs() {
             )
             .unwrap();
         for index in 0..2 {
+            let device = format!("old{index}");
+            let ledger = domain::LedgerId::new();
+            let play_session_id = guard
+                .issue_play_session(user, &device, ledger, cutoff - 10 * DAY)
+                .unwrap();
             let session = SessionRow {
-                device_id: format!("old{index}"),
+                device_id: device,
                 user_id: user,
                 media_id: media,
-                season: None,
-                episode: None,
+                season: Some(-1),
+                episode: Some(-1),
                 client: Some("fixture".into()),
                 device_name: None,
                 client_version: None,
@@ -433,8 +438,8 @@ fn playback_retention_dry_run_keeps_logs_then_prunes_only_logs() {
                 started_at: cutoff - 10 * DAY,
                 last_report_at: cutoff - 10 * DAY,
                 last_report_at_ms: (cutoff - 10 * DAY) * 1000,
-                ledger_id: None,
-                play_session_id: None,
+                ledger_id: Some(ledger.to_string()),
+                play_session_id: Some(play_session_id),
                 last_event_sequence: None,
             };
             guard.upsert_session(&session).unwrap();

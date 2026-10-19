@@ -176,13 +176,16 @@ fn user_changes_survive_a_restart() {
     );
 }
 
-fn session(user: UserId, media: MediaId, device: &str, started: i64) -> SessionRow {
+fn session(store: &Store, user: UserId, media: MediaId, device: &str, started: i64) -> SessionRow {
+    let play_session_id = store
+        .issue_play_session(user, device, domain::LedgerId::new(), started)
+        .unwrap();
     SessionRow {
         device_id: device.into(),
         user_id: user,
         media_id: media,
-        season: None,
-        episode: None,
+        season: Some(-1),
+        episode: Some(-1),
         client: Some("acceptance".into()),
         device_name: None,
         client_version: None,
@@ -200,7 +203,7 @@ fn session(user: UserId, media: MediaId, device: &str, started: i64) -> SessionR
         last_report_at: started,
         last_report_at_ms: started * 1000,
         ledger_id: None,
-        play_session_id: None,
+        play_session_id: Some(play_session_id),
         last_event_sequence: None,
     }
 }
@@ -219,14 +222,14 @@ fn playback_retention_prunes_only_logs_and_keeps_playback_state() {
         // 两条超龄历史 + 一条近期历史。
         for (index, started) in [(0, now - 40 * DAY), (1, now - 30 * DAY), (2, now - 60)].iter() {
             store
-                .upsert_session(&session(user, media, &format!("device-{index}"), *started))
+                .upsert_session(&session(&store, user, media, &format!("device-{index}"), *started))
                 .unwrap();
             store
                 .close_session(user, &format!("device-{index}"), *started + 60)
                 .unwrap();
         }
         // 一条活跃会话 + 进度/收藏：清理不得碰它们。
-        let mut live = session(user, media, "live-device", now - 30);
+        let mut live = session(&store, user, media, "live-device", now - 30);
         live.position_ms = 12_345;
         store.upsert_session(&live).unwrap();
         store

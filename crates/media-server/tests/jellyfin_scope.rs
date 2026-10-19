@@ -8,7 +8,11 @@ use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserId};
+use domain::{
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LedgerRow, LibraryFile,
+    LibraryId, Media, MediaId, MediaKind, QualitySource, TypedItemId, UserId,
+};
+use media_server::provider::query::series_media_id;
 use media_server::provider::{
     AuthenticateError, MediaItemMetadata, MediaItemSnapshot, MediaServerProvider, ServerLibrary,
     ServerUser,
@@ -21,6 +25,20 @@ const USER_B: &str = "00000000-0000-0000-0000-0000000000b2";
 const SERIES: &str = "00000000-0000-0000-0000-0000000000c3";
 const MOVIE_ROOT: &str = "/media/movies";
 const TV_ROOT: &str = "/media/tv";
+const MOVIES_LIBRARY: &str = "00000000-0000-0000-0000-0000000000f1";
+const TV_LIBRARY: &str = "00000000-0000-0000-0000-0000000000f2";
+
+fn library(raw: &str) -> LibraryId {
+    LibraryId::from_str(raw).unwrap()
+}
+
+fn series_media() -> MediaId {
+    MediaId::from_str(SERIES).unwrap()
+}
+
+fn series_wire() -> String {
+    TypedItemId::Work(series_media()).to_wire_string()
+}
 
 fn user(raw: &str) -> UserId {
     UserId::from_str(raw).unwrap()
@@ -58,10 +76,56 @@ fn media(raw_id: &str, kind: MediaKind, title: &str) -> Media {
     }
 }
 
+fn fake_file(
+    file_id: LedgerId,
+    library_id: LibraryId,
+    root_id: &str,
+    media_id: MediaId,
+    kind: MediaKind,
+    path: &str,
+) -> LibraryFile {
+    LibraryFile {
+        file_id,
+        library_id,
+        root_id: root_id.to_string(),
+        media_id,
+        kind,
+        path: PathBuf::from(path),
+        version: FileVersion {
+            revision: 1,
+            source_version: "v1".to_string(),
+        },
+        presence: FilePresence::Present,
+        publication: FilePublication::Published,
+        size_bytes: Some(1_000_000),
+        stat_known: true,
+        created_ns: Some(100),
+        modified_ns: Some(200),
+        source_digest: Some("hash".to_string()),
+        source_path: None,
+        transfer_mode: None,
+        resolution: Some("1080p".to_string()),
+        codec: Some("h264".to_string()),
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: None,
+        release_quality: None,
+        duration_ms: Some(7_200_000),
+        tracks_version: 1,
+        poster_path: None,
+        backdrop_path: None,
+        still_path: None,
+    }
+}
+
 fn movie(title: &str, path: &str, genres: &[&str], studios: &[&str]) -> MediaItemSnapshot {
     let media = media(&MediaId::new().to_string(), MediaKind::Movie, title);
+    let row = ledger(media.id, path);
+    let file = fake_file(row.id, library(MOVIES_LIBRARY), "root-movies", media.id, MediaKind::Movie, path);
     MediaItemSnapshot {
-        row: ledger(media.id, path),
+        file,
+        row,
         media,
         ticks: 0,
         play_count: 0,
@@ -84,8 +148,11 @@ fn movie(title: &str, path: &str, genres: &[&str], studios: &[&str]) -> MediaIte
 
 fn series(title: &str, path: &str) -> MediaItemSnapshot {
     let media = media(SERIES, MediaKind::Tv, title);
+    let row = ledger(media.id, path);
+    let file = fake_file(row.id, library(TV_LIBRARY), "root-tv", media.id, MediaKind::Tv, path);
     MediaItemSnapshot {
-        row: ledger(media.id, path),
+        file,
+        row,
         media,
         ticks: 0,
         play_count: 0,
@@ -196,7 +263,7 @@ impl MediaServerProvider for FakeProvider {
                 .filter(|item| !item.is_series)
                 .cloned()
                 .collect(),
-            Some(id) if id.replace('-', "") == SERIES.replace('-', "") => self
+            Some(id) if series_media_id(id) == Some(series_media()) => self
                 .items
                 .iter()
                 .filter(|item| item.is_series)
@@ -212,7 +279,7 @@ impl MediaServerProvider for FakeProvider {
         id: &str,
     ) -> Result<Option<MediaItemSnapshot>, String> {
         Ok(self.items.iter().find(|item| {
-            item.is_series && item.media.id.to_string().replace('-', "") == id.replace('-', "")
+            item.is_series && series_media_id(id) == Some(item.media.id)
         }).cloned())
     }
 
@@ -322,7 +389,7 @@ async fn library_parent_keeps_its_items() {
 
 #[tokio::test]
 async fn series_parent_keeps_its_episodes() {
-    let (status, body) = get(&app(false), &format!("/Items?ParentId={SERIES}"), "token-a").await;
+    let (status, body) = get(&app(false), &format!("/Items?ParentId={}", series_wire()), "token-a").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(item_count(&body), 1, "body={body}");
     assert_eq!(body["Items"][0]["Name"], "Beta");

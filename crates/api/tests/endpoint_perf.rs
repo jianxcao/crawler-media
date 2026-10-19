@@ -165,13 +165,16 @@ fn seed_media(
 
     let device = format!("dev-{index}");
     let started = now - (index as i64 % 30) * 86_400 - 60;
+    let play_session_id = store
+        .issue_play_session(admin, &device, domain::LedgerId::new(), started)
+        .unwrap();
     store
         .upsert_session(&SessionRow {
             device_id: device.clone(),
             user_id: admin,
             media_id: media.id,
-            season: tv.then_some(1),
-            episode: tv.then_some(1),
+            season: Some(if tv { 1 } else { -1 }),
+            episode: Some(if tv { 1 } else { -1 }),
             client: Some("perf-client".into()),
             device_name: None,
             client_version: None,
@@ -188,7 +191,7 @@ fn seed_media(
             started_at: started,
             last_report_at: started,
             ledger_id: None,
-            play_session_id: None,
+            play_session_id: Some(play_session_id),
             last_report_at_ms: started * 1000,
             last_event_sequence: None,
         })

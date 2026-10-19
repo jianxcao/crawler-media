@@ -168,7 +168,7 @@ fn deletion_between_analysis_and_publication_keeps_old_results() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queued_deletion_cancels_refresh_and_releases_scope_for_retry() {
-    let f = setup("uniform", &[1, 2, 3]);
+    let f = setup_with_digest_versions("uniform", &[1, 2, 3]);
     let units = f.units.clone();
     let manager = Arc::new(f.manager);
     assert_eq!(manager.enqueue_marker_refresh(units.clone()), 3);

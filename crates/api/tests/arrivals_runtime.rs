@@ -23,7 +23,6 @@ use tower::ServiceExt;
 const TOKEN: &str = "management-secret";
 const MEMBER_TOKEN: &str = "member-token";
 const ARRIVALS: &str = "/api/v1/subscriptions/today-arrivals";
-const SEASON_ONE_KEY: &str = "/tv/100/season/1?language=zh-CN";
 
 struct NoFetch;
 impl Fetcher for NoFetch {
@@ -95,6 +94,33 @@ impl CatalogGet for NeverGet {
     fn get(&self, _path: &str) -> Result<String, TmdbError> {
         Err(TmdbError::Http("offline: no network in tests".into()))
     }
+}
+
+/// 只用于把响应写进 Tmdb 自己的响应缓存，之后用 `NeverGet` 验证离线命中。
+struct StaticGet {
+    body: String,
+}
+
+impl CatalogGet for StaticGet {
+    fn get(&self, _path: &str) -> Result<String, TmdbError> {
+        Ok(self.body.clone())
+    }
+}
+
+/// 用 Tmdb 客户端的公开路径写入它自己的响应缓存。
+///
+/// `now` 为 0 时使用实时时钟（新鲜）；非 0 时钉住写入时刻，用来制造已过期条目。
+fn seed_tmdb_cache(path: &Path, body: &str, now: i64) {
+    let get = StaticGet {
+        body: body.to_string(),
+    };
+    let tmdb = if now == 0 {
+        Tmdb::new(get, path).unwrap()
+    } else {
+        Tmdb::new_at(get, path, now).unwrap()
+    };
+    tmdb.season_episodes("100", 1)
+        .expect("seeding the Tmdb cache must succeed");
 }
 
 /// 按路径选择性成功：用于验证部分源失败不影响其余 items。
@@ -193,8 +219,7 @@ impl Drop for ReleaseOnDrop {
     }
 }
 
-fn insert_tv_subscribe(store: &Store, user_id: UserId, title: &str, tmdb_id: &str) -> SubscribeId {
-    let filter_id = store.list_filters().unwrap()[0].id;
+fn insert_tv_media(store: &Store, title: &str, tmdb_id: &str) -> MediaId {
     let media_id = MediaId::new();
     store
         .insert_media(&Media {
@@ -211,6 +236,11 @@ fn insert_tv_subscribe(store: &Store, user_id: UserId, title: &str, tmdb_id: &st
             anilist_id: None,
         })
         .unwrap();
+    media_id
+}
+
+fn insert_tv_subscribe_for_media(store: &Store, user_id: UserId, media_id: MediaId) -> SubscribeId {
+    let filter_id = store.list_filters().unwrap()[0].id;
     let subscribe_id = SubscribeId::new();
     store
         .insert_subscribe(&Subscribe {
@@ -238,14 +268,29 @@ fn insert_tv_subscribe(store: &Store, user_id: UserId, title: &str, tmdb_id: &st
     subscribe_id
 }
 
+fn insert_tv_subscribe(store: &Store, user_id: UserId, title: &str, tmdb_id: &str) -> SubscribeId {
+    let media_id = insert_tv_media(store, title, tmdb_id);
+    insert_tv_subscribe_for_media(store, user_id, media_id)
+}
+
 fn seed_admin_tv(state: &ApiState, title: &str, tmdb_id: &str) -> SubscribeId {
+    seed_admin_tv_with_media(state, title, tmdb_id).0
+}
+
+fn seed_admin_tv_with_media(
+    state: &ApiState,
+    title: &str,
+    tmdb_id: &str,
+) -> (SubscribeId, MediaId) {
     let store = state.store();
     let guard = store.lock();
     let user_id = guard.user_id_by_token(TOKEN).unwrap().unwrap();
     guard
         .put_setting("tmdb.api_key", "offline-never-sent")
         .unwrap();
-    insert_tv_subscribe(&guard, user_id, title, tmdb_id)
+    let media_id = insert_tv_media(&guard, title, tmdb_id);
+    let subscribe_id = insert_tv_subscribe_for_media(&guard, user_id, media_id);
+    (subscribe_id, media_id)
 }
 
 fn seed_member_tv(state: &ApiState, title: &str, tmdb_id: &str) -> SubscribeId {
@@ -318,18 +363,11 @@ async fn arrivals_fresh_cache_returns_forecast_without_network() {
     let tmp = tempfile::tempdir().unwrap();
     let state = make_state(tmp.path());
     let subscribe = seed_admin_tv(&state, "Warm Show", "100");
-    let now = store::unix_now();
-    state
-        .store()
-        .lock()
-        .put_catalog_cache(
-            "tmdb",
-            SEASON_ONE_KEY,
-            &season_payload(&today()),
-            now,
-            Some(now + 3600),
-        )
-        .unwrap();
+    seed_tmdb_cache(
+        &tmp.path().join("data/catalog.db"),
+        &season_payload(&today()),
+        0,
+    );
     let tmdb = Tmdb::new(NeverGet, &tmp.path().join("data/catalog.db")).unwrap();
     let app = router(state.with_catalog(api::catalog::TmdbCatalog::new(tmdb)));
 
@@ -347,18 +385,11 @@ async fn arrivals_expired_cache_falls_back_to_stale_on_network_failure() {
     let tmp = tempfile::tempdir().unwrap();
     let state = make_state(tmp.path());
     let subscribe = seed_admin_tv(&state, "Stale Show", "100");
-    let now = store::unix_now();
-    state
-        .store()
-        .lock()
-        .put_catalog_cache(
-            "tmdb",
-            SEASON_ONE_KEY,
-            &season_payload(&today()),
-            now - 7200,
-            Some(now - 60),
-        )
-        .unwrap();
+    seed_tmdb_cache(
+        &tmp.path().join("data/catalog.db"),
+        &season_payload(&today()),
+        store::unix_now() - 8 * 86_400,
+    );
     let tmdb = Tmdb::new(NeverGet, &tmp.path().join("data/catalog.db")).unwrap();
     let app = router(state.with_catalog(api::catalog::TmdbCatalog::new(tmdb)));
 
@@ -376,7 +407,7 @@ async fn arrivals_isolate_users() {
     let tmp = tempfile::tempdir().unwrap();
     let state = make_state(tmp.path());
     let admin_subscribe = seed_admin_tv(&state, "Admin Show", "100");
-    let member_subscribe = seed_member_tv(&state, "Member Show", "100");
+    let member_subscribe = seed_member_tv(&state, "Member Show", "200");
     let get = LockAwareGet {
         store: state.store(),
         body: season_payload(&today()),
@@ -435,8 +466,13 @@ async fn arrivals_partial_source_failure_keeps_other_items() {
 async fn arrivals_query_each_season_once_per_request() {
     let tmp = tempfile::tempdir().unwrap();
     let state = make_state(tmp.path());
-    let first = seed_admin_tv(&state, "Show A", "100");
-    let second = seed_admin_tv(&state, "Show B", "100");
+    let (first, media_id) = seed_admin_tv_with_media(&state, "Show A", "100");
+    let second = {
+        let store = state.store();
+        let guard = store.lock();
+        let user_id = guard.user_id_by_token(TOKEN).unwrap().unwrap();
+        insert_tv_subscribe_for_media(&guard, user_id, media_id)
+    };
     let calls = Arc::new(AtomicUsize::new(0));
     let get = CountingGet {
         store: state.store(),

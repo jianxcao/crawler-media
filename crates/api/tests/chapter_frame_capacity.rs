@@ -87,7 +87,7 @@ impl ChapterFrameRunner for FakeRunner {
             let target = chapter_frame_path(&request.video, index);
             let staged_path = request.video.with_file_name(format!(
                 ".chapter-fake-{}-{index}.jpg",
-                request.ledger_id
+                request.file_id
             ));
             std::fs::write(&staged_path, b"frame").unwrap();
             staged.push(ChapterFrameStaged {

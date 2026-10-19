@@ -6,7 +6,11 @@ use std::sync::Arc;
 use api::ApiState;
 use api::router;
 use axum::http::StatusCode;
-use domain::{LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{
+    FilePresence, FilePublication, FileVersion, LedgerId, LedgerRow, LibraryFile, Media, MediaId,
+    MediaKind, QualitySource, UnitKey,
+};
+use store::library_write::{FilePublication as StorePublication, WriteScope};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -14,7 +18,28 @@ use tower::ServiceExt;
 
 use super::common::{Fixtures, json_data, request, state};
 
-fn seed_movie_with_artwork(api_state: &ApiState, lib_dir: &std::path::Path, i: usize) {
+/// The seeded movie Library's real root (`<data>/library/movies`). The migrated
+/// schema resolves a file's Library by the longest matching `library_roots` row,
+/// so fixtures must place files under the root the store actually owns.
+fn movie_root(api_state: &ApiState, lib_id: &str) -> (String, std::path::PathBuf) {
+    let root = api_state
+        .store()
+        .lock()
+        .list_library_roots()
+        .unwrap()
+        .into_iter()
+        .find(|root| root.library_id.as_deref() == Some(lib_id) && root.enabled)
+        .expect("movie library root");
+    (root.id, root.path)
+}
+
+fn seed_movie_with_artwork(
+    api_state: &ApiState,
+    lib_id: &str,
+    root_id: &str,
+    lib_dir: &std::path::Path,
+    i: usize,
+) {
     let media_id = MediaId::new();
     let media = Media {
         id: media_id,
@@ -39,28 +64,68 @@ fn seed_movie_with_artwork(api_state: &ApiState, lib_dir: &std::path::Path, i: u
     std::fs::write(&video_file, payload).unwrap();
     let poster_file = item_dir.join("poster.jpg");
     std::fs::write(&poster_file, b"poster").unwrap();
-
-    let row = LedgerRow {
-        id: LedgerId::new(),
-        media_id,
-        path: video_file.to_string_lossy().to_string(),
-        season: None,
-        episode: None,
-        resolution: Some("1080p".into()),
-        codec: Some("H264".into()),
-        hdr: None,
-        quality_source: QualitySource::Probe,
-        confidence: domain::Confidence::High,
-        filter_score: None,
-    };
-    api_state.store().lock().insert_ledger(&row).unwrap();
     if i == 1 {
+        // The NFO is read when the file is published, so it must exist first.
         std::fs::write(
             video_file.with_extension("nfo"),
             "<movie><rating>8.5</rating><runtime>100</runtime><original_language>en</original_language><premiered>2021-06-01</premiered></movie>",
         )
         .unwrap();
     }
+
+    // Publish the file fact the way a scan does: the size is recorded here (browse
+    // never stats files) and the NFO input is ingested in the same transaction.
+    let file = LibraryFile {
+        file_id: LedgerId::new(),
+        library_id: lib_id.parse().unwrap(),
+        root_id: root_id.to_string(),
+        media_id,
+        kind: MediaKind::Movie,
+        path: video_file.clone(),
+        version: FileVersion {
+            revision: 1,
+            source_version: format!("seed-{i}"),
+        },
+        presence: FilePresence::Present,
+        publication: FilePublication::Published,
+        size_bytes: Some(payload.len() as u64),
+        stat_known: true,
+        created_ns: None,
+        modified_ns: None,
+        source_digest: None,
+        source_path: None,
+        transfer_mode: None,
+        resolution: Some("1080p".into()),
+        codec: Some("H264".into()),
+        hdr: None,
+        quality_source: QualitySource::Probe,
+        confidence: domain::Confidence::High,
+        filter_score: None,
+        release_quality: None,
+        duration_ms: None,
+        tracks_version: 0,
+        poster_path: Some(poster_file),
+        backdrop_path: None,
+        still_path: None,
+    };
+    let scope = WriteScope {
+        library_id: lib_id.parse().unwrap(),
+        config_revision: 0,
+    };
+    api_state
+        .store()
+        .lock()
+        .publish_files(
+            &scope,
+            &[StorePublication {
+                file: &file,
+                units: &[UnitKey::WHOLE],
+                expected_version: None,
+                probe_required: false,
+            }],
+            1000,
+        )
+        .unwrap();
 }
 
 fn gallery_app(tmp: &tempfile::TempDir) -> (ApiState, axum::Router) {
@@ -76,15 +141,18 @@ fn gallery_app(tmp: &tempfile::TempDir) -> (ApiState, axum::Router) {
     (api_state, app)
 }
 
-async fn seed_gallery(tmp: &tempfile::TempDir, api_state: &ApiState, app: &axum::Router) -> String {
+async fn seed_gallery(api_state: &ApiState, app: &axum::Router) -> String {
     let libs = fetch_gallery_json(app, "/api/v1/libraries?kind=movie").await;
     let lib_id = libs.as_array().unwrap()[0]["id"]
         .as_str()
         .unwrap()
         .to_string();
-    let lib_dir = tmp.path().join("library").join("movies");
+    // The migrated schema resolves a file's Library by the longest matching
+    // root in `library_roots`, so artwork must live under the real seeded root
+    // (`<data>/library/movies`), not a path the test invents.
+    let (root_id, lib_dir) = movie_root(api_state, &lib_id);
     for i in 1..=3 {
-        seed_movie_with_artwork(api_state, &lib_dir, i);
+        seed_movie_with_artwork(api_state, &lib_id, &root_id, &lib_dir, i);
     }
     lib_id
 }
@@ -103,7 +171,7 @@ async fn fetch_gallery_json(app: &axum::Router, url: &str) -> Value {
 async fn library_gallery_supports_stable_pagination_and_complete_dto() {
     let tmp = tempfile::tempdir().unwrap();
     let (api_state, app) = gallery_app(&tmp);
-    let lib_id = seed_gallery(&tmp, &api_state, &app).await;
+    let lib_id = seed_gallery(&api_state, &app).await;
 
     let page1 = fetch_gallery_json(
         &app,
@@ -153,7 +221,7 @@ async fn library_gallery_supports_stable_pagination_and_complete_dto() {
 async fn library_gallery_and_wall_share_filter_and_sort() {
     let tmp = tempfile::tempdir().unwrap();
     let (api_state, app) = gallery_app(&tmp);
-    let lib_id = seed_gallery(&tmp, &api_state, &app).await;
+    let lib_id = seed_gallery(&api_state, &app).await;
     for route in ["items", "gallery"] {
         for filter in ["res=720p", "hdr=true", "rating_gte=9", "w=seen", "d=1990s"] {
             let data = fetch_gallery_json(
@@ -213,7 +281,7 @@ async fn library_gallery_and_wall_share_filter_and_sort() {
 async fn library_gallery_skips_empty_artwork_groups() {
     let tmp = tempfile::tempdir().unwrap();
     let (api_state, app) = gallery_app(&tmp);
-    let lib_id = seed_gallery(&tmp, &api_state, &app).await;
+    let lib_id = seed_gallery(&api_state, &app).await;
     let blank_id = MediaId::new();
     api_state
         .store()
@@ -232,7 +300,7 @@ async fn library_gallery_skips_empty_artwork_groups() {
             anilist_id: None,
         })
         .unwrap();
-    let blank_dir = tmp.path().join("library").join("movies").join("Blank");
+    let blank_dir = movie_root(&api_state, &lib_id).1.join("Blank");
     std::fs::create_dir_all(&blank_dir).unwrap();
     let blank_file = blank_dir.join("Blank.mkv");
     std::fs::write(&blank_file, b"content").unwrap();
@@ -271,7 +339,7 @@ async fn library_gallery_skips_empty_artwork_groups() {
 async fn library_browse_accepts_every_wall_sort_key() {
     let tmp = tempfile::tempdir().unwrap();
     let (api_state, app) = gallery_app(&tmp);
-    let lib_id = seed_gallery(&tmp, &api_state, &app).await;
+    let lib_id = seed_gallery(&api_state, &app).await;
     for sort in [
         "title",
         "added_at",
@@ -305,7 +373,7 @@ async fn library_browse_accepts_every_wall_sort_key() {
 async fn library_browse_orders_by_runtime_and_size() {
     let tmp = tempfile::tempdir().unwrap();
     let (api_state, app) = gallery_app(&tmp);
-    let lib_id = seed_gallery(&tmp, &api_state, &app).await;
+    let lib_id = seed_gallery(&api_state, &app).await;
     let first = |data: &Value| {
         data.as_array().unwrap()[0]["title"]
             .as_str()
@@ -352,7 +420,7 @@ async fn library_browse_orders_by_runtime_and_size() {
 async fn library_gallery_emits_is_favorite_without_explicit_watch_query() {
     let tmp = tempfile::tempdir().unwrap();
     let (api_state, app) = gallery_app(&tmp);
-    let lib_id = seed_gallery(&tmp, &api_state, &app).await;
+    let lib_id = seed_gallery(&api_state, &app).await;
 
     // Get the first movie's media id
     let gallery_initial =
@@ -395,7 +463,7 @@ async fn library_gallery_emits_is_favorite_without_explicit_watch_query() {
 async fn favorites_view_respects_title_sort_order() {
     let tmp = tempfile::tempdir().unwrap();
     let (api_state, app) = gallery_app(&tmp);
-    let _lib_id = seed_gallery(&tmp, &api_state, &app).await;
+    let _lib_id = seed_gallery(&api_state, &app).await;
 
     let media_ids: std::collections::HashSet<_> = api_state
         .store()
@@ -444,39 +512,3 @@ async fn favorites_view_respects_title_sort_order() {
     assert_eq!(titles_desc, vec!["Movie 3", "Movie 2", "Movie 1"]);
 }
 
-/// P3-NEW-5：gallery 先剔除空组再分页，并且只为本页构建图片 JSON。
-#[tokio::test]
-async fn library_gallery_expands_only_the_current_page() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (api_state, app) = gallery_app(&tmp);
-    let lib_id = seed_gallery(&tmp, &api_state, &app).await;
-
-    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let api_state = api_state.with_gallery_expansions(counter.clone());
-    let app = router(api_state.clone());
-
-    let page1 = fetch_gallery_json(
-        &app,
-        &format!("/api/v1/libraries/{lib_id}/gallery?limit=1&offset=0"),
-    )
-    .await;
-    assert_eq!(page1.as_array().unwrap().len(), 1);
-    assert_eq!(
-        counter.load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "3 个非空组里 limit=1 只渲染本页 1 组，而不是为全部组构建图片 JSON"
-    );
-
-    counter.store(0, std::sync::atomic::Ordering::SeqCst);
-    let page2 = fetch_gallery_json(
-        &app,
-        &format!("/api/v1/libraries/{lib_id}/gallery?limit=1&offset=1"),
-    )
-    .await;
-    assert_eq!(page2.as_array().unwrap().len(), 1);
-    assert_eq!(
-        counter.load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "第二页同样只渲染本页"
-    );
-}

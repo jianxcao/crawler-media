@@ -184,6 +184,20 @@ struct Fixture {
 }
 
 fn setup(case: &'static str, episodes: &[u32]) -> Fixture {
+    setup_with_versions(case, episodes, false)
+}
+
+/// Publish rows whose stored source version is the digest the probe recomputes from the
+/// file, so media-info cache reuse and probe publication accept them.
+fn setup_with_digest_versions(case: &'static str, episodes: &[u32]) -> Fixture {
+    setup_with_versions(case, episodes, true)
+}
+
+fn setup_with_versions(
+    case: &'static str,
+    episodes: &[u32],
+    digest_versions: bool,
+) -> Fixture {
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
     let media_id = MediaId::new();
@@ -192,14 +206,14 @@ fn setup(case: &'static str, episodes: &[u32]) -> Fixture {
         reads: Arc::new(AtomicUsize::new(0)),
     });
     let manager = ProbeManager::with_engines(store.clone(), engine.clone(), engine.clone());
+    let tv_root = store.lock().library_root(MediaKind::Tv).unwrap();
     let mut rows: Vec<_> = episodes
         .iter()
         .enumerate()
         .map(|(index, &episode)| LedgerRow {
             id: LedgerId::new(),
             media_id,
-            path: tmp
-                .path()
+            path: tv_root
                 .join(format!("episode-{episode}-version-{index}.mkv"))
                 .to_string_lossy()
                 .to_string(),
@@ -220,7 +234,7 @@ fn setup(case: &'static str, episodes: &[u32]) -> Fixture {
         rows[0].id = rows[3].id;
         rows[3].id = original;
     }
-    seed_store(&store, media_id, &rows);
+    seed_store(&store, media_id, &rows, digest_versions);
     let units = rows
         .into_iter()
         .map(|row| ProbeUnit {
@@ -258,7 +272,132 @@ fn raw_season(f: &Fixture) -> Result<api::store::MarkerResultReplacement, String
         ))
 }
 
-fn seed_store(store: &Arc<Mutex<Store>>, media_id: MediaId, rows: &[LedgerRow]) {
+fn seed_probe(store: &Store, row: &LedgerRow, duration_ms: Option<i64>) {
+    let expected = store
+        .get_file_version(row.id)
+        .unwrap()
+        .expect("published row must carry a file version");
+    let tracks = library::Tracks {
+        video: Some(library::VideoTrack::default()),
+        audio: vec![],
+        subtitles: vec![],
+    };
+    let (resolution, codec, hdr) = match tracks.video.as_ref() {
+        Some(video) => (video.resolution(), video.codec.clone(), video.hdr()),
+        None => (None, None, None),
+    };
+    let details = api::store::files::FileDetails {
+        source_revision: expected.revision,
+        source_version: expected.source_version.clone(),
+        tracks_version: api::store::library_write::probe::CURRENT_TRACKS_VERSION,
+        video_json: tracks
+            .video
+            .as_ref()
+            .and_then(|video| serde_json::to_string(video).ok()),
+        audio_json: serde_json::to_string(&tracks.audio).unwrap(),
+        subtitle_json: serde_json::to_string(&tracks.subtitles).unwrap(),
+        chapters_json: None,
+        fingerprint_json: None,
+        outro_fingerprint_json: None,
+        format_duration_ms: duration_ms,
+    };
+    let publication = api::store::library_write::probe::ProbePublication {
+        expected: &expected,
+        tracks_version: api::store::library_write::probe::CURRENT_TRACKS_VERSION,
+        resolution: resolution.as_deref(),
+        codec: codec.as_deref(),
+        hdr: hdr.as_deref(),
+        duration_ms,
+        details: Some(&details),
+    };
+    assert!(
+        store.publish_probe_result(row.id, &publication, 0).unwrap(),
+        "probe publication must be accepted for a freshly published row"
+    );
+}
+
+/// Publish one fixture row with an explicit source version, exactly as a scan does.
+fn publish_row_with_version(store: &Store, row: &LedgerRow, source_version: &str) {
+    let media = store
+        .get_media(row.media_id)
+        .unwrap()
+        .expect("fixture media must exist");
+    let path = std::path::Path::new(&row.path);
+    let library = store
+        .library_for_path_strict(path, media.kind)
+        .unwrap()
+        .expect("fixture path must belong to a Library");
+    let root = store
+        .list_library_roots()
+        .unwrap()
+        .into_iter()
+        .filter(|root| root.library_id.as_deref() == Some(library.id.as_str()))
+        .filter(|root| path.starts_with(&root.path))
+        .max_by_key(|root| root.path.components().count())
+        .expect("fixture path must sit inside a Library root");
+    let file = domain::LibraryFile {
+        file_id: row.id,
+        library_id: library.id.parse().unwrap(),
+        root_id: root.id,
+        media_id: row.media_id,
+        kind: media.kind,
+        path: path.to_path_buf(),
+        version: domain::FileVersion {
+            revision: 1,
+            source_version: source_version.into(),
+        },
+        presence: domain::FilePresence::Present,
+        publication: domain::FilePublication::Published,
+        size_bytes: None,
+        stat_known: false,
+        created_ns: None,
+        modified_ns: None,
+        source_digest: None,
+        source_path: None,
+        transfer_mode: None,
+        resolution: row.resolution.clone(),
+        codec: row.codec.clone(),
+        hdr: row.hdr.clone(),
+        quality_source: row.quality_source,
+        confidence: row.confidence,
+        filter_score: row.filter_score,
+        release_quality: None,
+        duration_ms: None,
+        tracks_version: 0,
+        poster_path: None,
+        backdrop_path: None,
+        still_path: None,
+    };
+    let units = match (row.season, row.episode) {
+        (Some(season), Some(episode)) => {
+            vec![domain::UnitKey::new(season as i32, episode as i32)]
+        }
+        _ => vec![domain::UnitKey::WHOLE],
+    };
+    let publication = store::library_write::FilePublication {
+        file: &file,
+        units: &units,
+        expected_version: None,
+        probe_required: false,
+    };
+    store
+        .publish_files(
+            &store::library_write::WriteScope {
+                library_id: file.library_id,
+                config_revision: 0,
+            },
+            &[publication],
+            1000,
+        )
+        .unwrap();
+}
+
+fn seed_store(
+    store: &Arc<Mutex<Store>>,
+    media_id: MediaId,
+    rows: &[LedgerRow],
+    digest_versions: bool,
+) {
     let st = store.lock();
     let mut config = st.get_scrape_config().unwrap().setting;
     config.fingerprint_sampling_mode = Some("adaptive".into());
@@ -279,20 +418,14 @@ fn seed_store(store: &Arc<Mutex<Store>>, media_id: MediaId, rows: &[LedgerRow]) 
     .unwrap();
     for row in rows {
         std::fs::write(&row.path, b"dummy").unwrap();
-        st.insert_ledger(row).unwrap();
-        st.put_file_meta_versioned(
-            &row.id.to_string(),
-            &library::Tracks {
-                video: Some(library::VideoTrack::default()),
-                audio: vec![],
-                subtitles: vec![],
-            },
-            Some(&api::fingerprint_job::current_source_version(
-                std::path::Path::new(&row.path),
-            )),
-            Some(1_000_000),
-        )
-        .unwrap();
+        if digest_versions {
+            let source_version =
+                api::fingerprint_job::current_source_version(std::path::Path::new(&row.path));
+            publish_row_with_version(&st, row, &source_version);
+        } else {
+            st.insert_ledger(row).unwrap();
+        }
+        seed_probe(&st, row, Some(1_000_000));
         st.put_media_marker(&api::store::StoredMediaMarker {
             media_id,
             season: 1,

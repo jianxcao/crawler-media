@@ -190,14 +190,14 @@ fn setup(case: &'static str, episodes: &[u32]) -> Fixture {
         reads: Arc::new(AtomicUsize::new(0)),
     });
     let manager = ProbeManager::with_engines(store.clone(), engine.clone(), engine.clone());
+    let tv_root = store.lock().library_root(MediaKind::Tv).unwrap();
     let mut rows: Vec<_> = episodes
         .iter()
         .enumerate()
         .map(|(index, &episode)| LedgerRow {
             id: LedgerId::new(),
             media_id,
-            path: tmp
-                .path()
+            path: tv_root
                 .join(format!("episode-{episode}-version-{index}.mkv"))
                 .to_string_lossy()
                 .to_string(),
@@ -320,6 +320,50 @@ fn final_intro_outcome(f: &Fixture, episode: u32) -> marker::adaptive::Verificat
     )
 }
 
+fn seed_probe(store: &Store, row: &LedgerRow, duration_ms: Option<i64>) {
+    let expected = store
+        .get_file_version(row.id)
+        .unwrap()
+        .expect("published row must carry a file version");
+    let tracks = library::Tracks {
+        video: Some(library::VideoTrack::default()),
+        audio: vec![],
+        subtitles: vec![],
+    };
+    let (resolution, codec, hdr) = match tracks.video.as_ref() {
+        Some(video) => (video.resolution(), video.codec.clone(), video.hdr()),
+        None => (None, None, None),
+    };
+    let details = api::store::files::FileDetails {
+        source_revision: expected.revision,
+        source_version: expected.source_version.clone(),
+        tracks_version: api::store::library_write::probe::CURRENT_TRACKS_VERSION,
+        video_json: tracks
+            .video
+            .as_ref()
+            .and_then(|video| serde_json::to_string(video).ok()),
+        audio_json: serde_json::to_string(&tracks.audio).unwrap(),
+        subtitle_json: serde_json::to_string(&tracks.subtitles).unwrap(),
+        chapters_json: None,
+        fingerprint_json: None,
+        outro_fingerprint_json: None,
+        format_duration_ms: duration_ms,
+    };
+    let publication = api::store::library_write::probe::ProbePublication {
+        expected: &expected,
+        tracks_version: api::store::library_write::probe::CURRENT_TRACKS_VERSION,
+        resolution: resolution.as_deref(),
+        codec: codec.as_deref(),
+        hdr: hdr.as_deref(),
+        duration_ms,
+        details: Some(&details),
+    };
+    assert!(
+        store.publish_probe_result(row.id, &publication, 0).unwrap(),
+        "probe publication must be accepted for a freshly published row"
+    );
+}
+
 fn seed_store(store: &Arc<Mutex<Store>>, media_id: MediaId, rows: &[LedgerRow]) {
     let st = store.lock();
     let mut config = st.get_scrape_config().unwrap().setting;
@@ -342,19 +386,7 @@ fn seed_store(store: &Arc<Mutex<Store>>, media_id: MediaId, rows: &[LedgerRow]) 
     for row in rows {
         std::fs::write(&row.path, b"dummy").unwrap();
         st.insert_ledger(row).unwrap();
-        st.put_file_meta_versioned(
-            &row.id.to_string(),
-            &library::Tracks {
-                video: Some(library::VideoTrack::default()),
-                audio: vec![],
-                subtitles: vec![],
-            },
-            Some(&api::fingerprint_job::current_source_version(
-                std::path::Path::new(&row.path),
-            )),
-            Some(1_000_000),
-        )
-        .unwrap();
+        seed_probe(&st, row, Some(1_000_000));
         st.put_media_marker(&api::store::StoredMediaMarker {
             media_id,
             season: 1,

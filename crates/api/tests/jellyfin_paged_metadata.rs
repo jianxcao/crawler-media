@@ -192,7 +192,7 @@ fn tv_fixture(shows: usize, episodes: usize) -> Fixture {
 }
 
 /// 按标题找 Media（测试 fixture 里标题唯一）。
-fn media_id_for_title(state: &ApiState, title: &str) -> String {
+fn media_for_title(state: &ApiState, title: &str) -> MediaId {
     let store = state.store();
     let store = store.lock();
     for row in store.list_ledger().unwrap() {
@@ -200,10 +200,37 @@ fn media_id_for_title(state: &ApiState, title: &str) -> String {
             continue;
         };
         if media.title == title {
-            return media.id.to_string().replace('-', "");
+            return media.id;
         }
     }
     panic!("media {title} not found");
+}
+
+/// 媒体 id 的紧凑拼写：`ParentId` 的既有内部写法。
+fn media_id_for_title(state: &ApiState, title: &str) -> String {
+    media_for_title(state, title).to_string().replace('-', "")
+}
+
+/// 公开的作品 id（`w1_…`）：Series 条目与 `SeriesId` 用的就是它。
+fn work_wire_id(media: MediaId) -> String {
+    domain::TypedItemId::Work(media).to_wire_string()
+}
+
+/// 公开的分集 id（`u1_<media>_<season>_<episode>`）。
+fn unit_wire_id(media: MediaId, season: u32, episode: u32) -> String {
+    domain::TypedItemId::Unit {
+        media,
+        key: domain::UnitKey {
+            season: season as i32,
+            episode: episode as i32,
+        },
+    }
+    .to_wire_string()
+}
+
+/// 按标题找这部剧的公开 `w1_…` id（`SeriesId` 期望的拼写）。
+fn series_wire_id_for_title(state: &ApiState, title: &str) -> String {
+    work_wire_id(media_for_title(state, title))
 }
 
 fn folder_id(root: &Path) -> String {

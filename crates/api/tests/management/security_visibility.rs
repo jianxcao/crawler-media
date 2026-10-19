@@ -70,9 +70,10 @@ fn seed_nested_hidden_movie(store: &Store, child_root: &std::path::Path, member_
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
+    let file_id = LedgerId::new();
     store
         .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+            id: file_id,
             media_id: media.id,
             path: child_root.join("Secret.Movie.mkv").display().to_string(),
             season: None,
@@ -89,13 +90,16 @@ fn seed_nested_hidden_movie(store: &Store, child_root: &std::path::Path, member_
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
+    let play_session_id = store
+        .issue_play_session(member_id, "legacy-hidden", file_id, now)
+        .unwrap();
     store
         .upsert_session(&api::store::SessionRow {
             device_id: "legacy-hidden".into(),
             user_id: member_id,
             media_id: media.id,
-            season: None,
-            episode: None,
+            season: Some(-1),
+            episode: Some(-1),
             client: Some("test".into()),
             device_name: Some("test".into()),
             client_version: None,
@@ -112,8 +116,8 @@ fn seed_nested_hidden_movie(store: &Store, child_root: &std::path::Path, member_
             started_at: now,
             last_report_at: now,
             last_report_at_ms: now * 1000,
-            ledger_id: None,
-            play_session_id: None,
+            ledger_id: Some(file_id.to_string()),
+            play_session_id: Some(play_session_id),
             last_event_sequence: None,
         })
         .unwrap();
@@ -272,9 +276,10 @@ async fn hidden_tv_library_history_does_not_fall_back_to_visible_movie_library()
     store.insert_media(&tv_media).unwrap();
     let tv_file = tv_root.join("show.s01e01.mkv");
     std::fs::write(&tv_file, b"video").unwrap();
+    let tv_file_id = LedgerId::new();
     store
         .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+            id: tv_file_id,
             media_id: tv_media.id,
             path: tv_file.display().to_string(),
             season: Some(1),
@@ -288,6 +293,9 @@ async fn hidden_tv_library_history_does_not_fall_back_to_visible_movie_library()
         })
         .unwrap();
 
+    let play_session_id = store
+        .issue_play_session(member_id, "dev-tv", tv_file_id, 1000)
+        .unwrap();
     store
         .upsert_session(&api::store::SessionRow {
             device_id: "dev-tv".into(),
@@ -311,8 +319,8 @@ async fn hidden_tv_library_history_does_not_fall_back_to_visible_movie_library()
             started_at: 1000,
             last_report_at: 1000,
             last_report_at_ms: 1_000_000,
-            ledger_id: None,
-            play_session_id: None,
+            ledger_id: Some(tv_file_id.to_string()),
+            play_session_id: Some(play_session_id),
             last_event_sequence: None,
         })
         .unwrap();

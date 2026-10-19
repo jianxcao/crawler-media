@@ -242,8 +242,11 @@ pub fn series_media_id(series_id: &str) -> Option<domain::MediaId> {
 }
 
 /// Whether `requested` names this item's work.
+///
+/// Shares [`series_media_id`]'s spelling set: typed wire ids (`w1_…`), hyphenated
+/// uuids and compact undashed uuids all name the same work.
 pub fn work_matches(requested: &str, media: domain::MediaId) -> bool {
-    requested == TypedItemId::Work(media).to_wire_string() || requested == media.to_string()
+    series_media_id(requested) == Some(media)
 }
 
 /// 过滤 + 排序 + 计数 + 取页（旧式全量快照语义）。

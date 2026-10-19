@@ -142,6 +142,11 @@ fn missing_duration_does_not_publish_a_successful_outro_deletion() {
     let first = &f.units[0].row;
     {
         let st = f.store.lock();
+        let version = st
+            .get_file_version(first.id)
+            .unwrap()
+            .expect("published row must carry a file version")
+            .source_version;
         st.put_file_meta_versioned(
             &first.id.to_string(),
             &library::Tracks {
@@ -149,9 +154,7 @@ fn missing_duration_does_not_publish_a_successful_outro_deletion() {
                 audio: vec![],
                 subtitles: vec![],
             },
-            Some(&api::fingerprint_job::current_source_version(
-                std::path::Path::new(&first.path),
-            )),
+            Some(&version),
             None,
         )
         .unwrap();
@@ -291,6 +294,11 @@ fn missing_duration_preserves_start_only_outro_marker() {
     let first = &f.units[0].row;
     {
         let st = f.store.lock();
+        let version = st
+            .get_file_version(first.id)
+            .unwrap()
+            .expect("published row must carry a file version")
+            .source_version;
         st.put_file_meta_versioned(
             &first.id.to_string(),
             &library::Tracks {
@@ -298,9 +306,7 @@ fn missing_duration_preserves_start_only_outro_marker() {
                 audio: vec![],
                 subtitles: vec![],
             },
-            Some(&api::fingerprint_job::current_source_version(
-                std::path::Path::new(&first.path),
-            )),
+            Some(&version),
             None,
         )
         .unwrap();

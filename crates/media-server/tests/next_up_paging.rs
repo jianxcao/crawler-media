@@ -15,7 +15,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserId};
+use domain::{
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LedgerRow, LibraryFile,
+    LibraryId, Media, MediaId, MediaKind, QualitySource, TypedItemId, UserId,
+};
 use media_server::provider::{
     AuthenticateError, MediaItemMetadata, MediaItemSnapshot, MediaServerProvider, ServerLibrary,
     ServerUser,
@@ -33,6 +36,10 @@ fn user_id() -> UserId {
 
 fn series_media_id(index: usize) -> MediaId {
     MediaId::from_str(&format!("00000000-0000-0000-0000-{:012}", index + 1)).unwrap()
+}
+
+fn wire_series(index: usize) -> String {
+    TypedItemId::Work(series_media_id(index)).to_wire_string()
 }
 
 fn episode_snapshot(series: usize, episode: u32, played: bool) -> MediaItemSnapshot {
@@ -62,14 +69,49 @@ fn episode_snapshot(series: usize, episode: u32, played: bool) -> MediaItemSnaps
         confidence: Confidence::High,
         filter_score: None,
     };
+    let series_wire = TypedItemId::Work(media.id).to_wire_string();
+    let file = LibraryFile {
+        file_id: row.id,
+        library_id: LibraryId::from_str("00000000-0000-0000-0000-0000000000f1").unwrap(),
+        root_id: "root-tv".to_string(),
+        media_id: media.id,
+        kind: MediaKind::Tv,
+        path: PathBuf::from(&row.path),
+        version: FileVersion {
+            revision: 1,
+            source_version: "v1".to_string(),
+        },
+        presence: FilePresence::Present,
+        publication: FilePublication::Published,
+        size_bytes: Some(1_000_000),
+        stat_known: true,
+        created_ns: Some(100),
+        modified_ns: Some(200),
+        source_digest: Some("hash".to_string()),
+        source_path: None,
+        transfer_mode: None,
+        resolution: Some("1080p".to_string()),
+        codec: Some("h264".to_string()),
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: None,
+        release_quality: None,
+        duration_ms: Some(2_400_000),
+        tracks_version: 1,
+        poster_path: None,
+        backdrop_path: None,
+        still_path: None,
+    };
     MediaItemSnapshot {
+        file,
         row,
         media,
         ticks: 0,
         play_count: 0,
         played,
         unplayed_item_count: None,
-        parent_id: series_media_id(series).to_string().replace('-', ""),
+        parent_id: series_wire,
         is_series: false,
         chapters: Vec::new(),
         intro_start_ms: None,
@@ -178,17 +220,17 @@ impl MediaServerProvider for EpisodeListProvider {
                     ..item.clone()
                 })
                 .collect(),
-            Some(parent) => {
-                let compact = parent.replace('-', "");
-                self.items
-                    .iter()
-                    .filter(|item| item.media.id.to_string().replace('-', "") == compact)
-                    .map(|item| MediaItemSnapshot {
-                        played: self.is_played(item),
-                        ..item.clone()
-                    })
-                    .collect()
-            }
+            Some(parent) => self
+                .items
+                .iter()
+                .filter(|item| {
+                    media_server::provider::query::series_media_id(parent) == Some(item.media.id)
+                })
+                .map(|item| MediaItemSnapshot {
+                    played: self.is_played(item),
+                    ..item.clone()
+                })
+                .collect()
         })
     }
 
@@ -269,7 +311,7 @@ async fn next_up_does_not_rescan_for_each_series() {
     assert_eq!(body["Items"].as_array().map(Vec::len), Some(1));
     assert_eq!(
         body["Items"][0]["ParentId"],
-        series_media_id(0).to_string().replace('-', ""),
+        wire_series(0),
         "Limit=1 必须是聚合后的第一条，而不是任意一条"
     );
     assert_eq!(body["Items"][0]["IndexNumber"], 1);
@@ -292,11 +334,11 @@ async fn next_up_picks_the_first_unwatched_episode_per_series() {
     assert_eq!(body["TotalRecordCount"], SERIES - 1, "整部看完的剧不出条目");
     let items = body["Items"].as_array().unwrap();
     let first = &items[0];
-    assert_eq!(first["ParentId"], series_media_id(0).to_string().replace('-', ""));
+    assert_eq!(first["ParentId"], wire_series(0));
     assert_eq!(first["IndexNumber"], 2, "第 1 集已看完时取下一集");
     let seventh = items
         .iter()
-        .find(|item| item["ParentId"] == series_media_id(7).to_string().replace('-', ""))
+        .find(|item| item["ParentId"] == wire_series(7))
         .expect("series 7 entry");
     assert_eq!(seventh["IndexNumber"], 2);
     assert_eq!(provider.list_calls(), 1);
@@ -311,11 +353,11 @@ async fn next_up_pages_after_aggregating_every_series() {
     assert_eq!(body["Items"].as_array().map(Vec::len), Some(2));
     assert_eq!(
         body["Items"][0]["ParentId"],
-        series_media_id(48).to_string().replace('-', "")
+        wire_series(48)
     );
     assert_eq!(
         body["Items"][1]["ParentId"],
-        series_media_id(49).to_string().replace('-', "")
+        wire_series(49)
     );
     let (status, beyond) = get(provider.clone(), "/Shows/NextUp?StartIndex=500").await;
     assert_eq!(status, StatusCode::OK);
@@ -327,13 +369,13 @@ async fn next_up_pages_after_aggregating_every_series() {
 #[tokio::test]
 async fn next_up_with_series_id_reads_only_that_series() {
     let provider = Arc::new(EpisodeListProvider::new());
-    let series = series_media_id(11).to_string().replace('-', "");
+    let series = wire_series(11);
     let (status, body) = get(provider.clone(), &format!("/Shows/NextUp?SeriesId={series}")).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["TotalRecordCount"], 1);
     assert_eq!(
         body["Items"][0]["ParentId"],
-        series_media_id(11).to_string().replace('-', "")
+        wire_series(11)
     );
     assert_eq!(body["Items"][0]["IndexNumber"], 1);
     assert_eq!(provider.list_calls(), 1);

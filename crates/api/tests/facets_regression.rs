@@ -354,9 +354,20 @@ async fn unknown_year_does_not_produce_a_2020s_candidate() {
     )
     .await;
     let decades = values_of(&values, "decades");
-    assert_eq!(decades, vec!["1990s".to_string()], "{values}");
-    assert!(
-        !decades.contains(&"2020s".to_string()),
+    for bucket in ["earlier", "1990s", "2000s", "2010s", "2020s"] {
+        assert!(
+            decades.contains(&bucket.to_string()),
+            "closed decade bucket {bucket} missing: {values}"
+        );
+    }
+    assert_eq!(
+        find(&values, "decades", "1990s").unwrap()["count"],
+        1,
+        "{values}"
+    );
+    assert_eq!(
+        find(&values, "decades", "2020s").unwrap()["count"],
+        0,
         "未知年份不得伪归 2020s：{values}"
     );
 }

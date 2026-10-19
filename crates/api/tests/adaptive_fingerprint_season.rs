@@ -26,10 +26,16 @@ fn season_refresh_does_not_overwrite_recapture_policy() {
         })
         .unwrap();
 
+    let tv_root = tmp.path().join("tv");
+    std::fs::create_dir_all(&tv_root).unwrap();
+    store
+        .lock()
+        .set_library_root(MediaKind::Tv, tv_root.to_str().unwrap())
+        .unwrap();
     let row = domain::LedgerRow {
         id: LedgerId::new(),
         media_id,
-        path: "Test.S01E01.mkv".into(),
+        path: tv_root.join("Test.S01E01.mkv").to_string_lossy().to_string(),
         season: Some(1),
         episode: Some(1),
         resolution: None,
@@ -95,10 +101,19 @@ fn database_failure_rolls_back_markers_chapters_and_job_terminal() {
         })
         .unwrap();
 
+    let tv_root = tmp.path().join("tv");
+    std::fs::create_dir_all(&tv_root).unwrap();
+    store
+        .lock()
+        .set_library_root(MediaKind::Tv, tv_root.to_str().unwrap())
+        .unwrap();
     let row = domain::LedgerRow {
         id: LedgerId::new(),
         media_id,
-        path: "Test.Rollback.S01E01.mkv".into(),
+        path: tv_root
+            .join("Test.Rollback.S01E01.mkv")
+            .to_string_lossy()
+            .to_string(),
         season: Some(1),
         episode: Some(1),
         resolution: None,
@@ -179,10 +194,18 @@ async fn seed_episodes_retain_markers_after_season_template_built() {
         })
         .unwrap();
 
+    let tv_root = tmp.path().join("tv");
+    std::fs::create_dir_all(&tv_root).unwrap();
+    store
+        .lock()
+        .set_library_root(MediaKind::Tv, tv_root.to_str().unwrap())
+        .unwrap();
+    let ep1_path = tv_root.join("Test.Retain.S01E01.mkv");
+    let ep2_path = tv_root.join("Test.Retain.S01E02.mkv");
     let row1 = domain::LedgerRow {
         id: LedgerId::new(),
         media_id,
-        path: "Test.Retain.S01E01.mkv".into(),
+        path: ep1_path.to_string_lossy().to_string(),
         season: Some(1),
         episode: Some(1),
         resolution: None,
@@ -195,7 +218,7 @@ async fn seed_episodes_retain_markers_after_season_template_built() {
     let row2 = domain::LedgerRow {
         id: LedgerId::new(),
         media_id,
-        path: "Test.Retain.S01E02.mkv".into(),
+        path: ep2_path.to_string_lossy().to_string(),
         season: Some(1),
         episode: Some(2),
         resolution: None,
@@ -205,8 +228,8 @@ async fn seed_episodes_retain_markers_after_season_template_built() {
         confidence: Confidence::High,
         filter_score: None,
     };
-    std::fs::write("Test.Retain.S01E01.mkv", b"dummy").unwrap();
-    std::fs::write("Test.Retain.S01E02.mkv", b"dummy").unwrap();
+    std::fs::write(&ep1_path, b"dummy").unwrap();
+    std::fs::write(&ep2_path, b"dummy").unwrap();
     store.lock().insert_ledger(&row1).unwrap();
     store.lock().insert_ledger(&row2).unwrap();
 
@@ -311,8 +334,8 @@ async fn seed_episodes_retain_markers_after_season_template_built() {
     )
     .await;
 
-    let _ = std::fs::remove_file("Test.Retain.S01E01.mkv");
-    let _ = std::fs::remove_file("Test.Retain.S01E02.mkv");
+    let _ = std::fs::remove_file(&ep1_path);
+    let _ = std::fs::remove_file(&ep2_path);
 
     assert!(res.is_ok(), "adaptive season pipeline should succeed: {:?}", res.err());
     let replacement = res.unwrap();
