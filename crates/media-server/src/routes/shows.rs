@@ -42,10 +42,10 @@ pub(super) async fn show_seasons(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let compact_id = item.media.id.to_string().replace('-', "");
+    let series_id = domain::TypedItemId::Work(item.media.id).to_wire_string();
     let episodes = state
         .provider
-        .list_visible_items(user.id, Some(&compact_id))
+        .list_visible_items(user.id, Some(&series_id))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let mut season_numbers: std::collections::BTreeSet<u32> = episodes
@@ -58,7 +58,11 @@ pub(super) async fn show_seasons(
     let server_id = state.provider.server_id();
     let mut seasons_json: Vec<Value> = Vec::new();
     for season_num in season_numbers {
-        let season_id = format!("{compact_id}{season_num:02}");
+        let season_id = domain::TypedItemId::Season {
+            media: item.media.id,
+            season: season_num,
+        }
+        .to_wire_string();
         let season_episodes: Vec<&crate::provider::MediaItemSnapshot> = episodes.iter().filter(|e| e.row.season == Some(season_num)).collect();
         let played_count = season_episodes.iter().filter(|e| e.played).count();
         let season_total = season_episodes.len();
@@ -75,7 +79,7 @@ pub(super) async fn show_seasons(
         seasons_json.push(json!({
             "Id": season_id,
             "Name": format!("第 {} 季", season_num),
-            "SeriesId": compact_id,
+            "SeriesId": series_id,
             "SeriesName": item.media.title,
             "IndexNumber": season_num,
             "Type": "Season",
@@ -99,16 +103,15 @@ pub(super) async fn show_episodes(
     Path(id): Path<String>,
     Query(query): Query<ItemsQuery>,
 ) -> Result<Json<Value>, StatusCode> {
-    let compact_id = id.replace('-', "");
     let rows = state
         .provider
-        .list_visible_items(user.id, Some(&compact_id))
+        .list_visible_items(user.id, Some(&id))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let season_number = query
         .season_id
         .as_deref()
-        .and_then(|season_id| parse_season_id(&compact_id, season_id));
+        .and_then(|season_id| parse_season_id(&id, season_id));
     let limit = query.limit.unwrap_or(200);
     let mut rows: Vec<_> = rows
         .into_iter()

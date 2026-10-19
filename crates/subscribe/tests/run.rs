@@ -182,8 +182,9 @@ fn run_input<'a>(
         facts,
         downloader,
         library_root,
-        library_id: None,
-        root_id: None,
+        // Files that are published need the Library/root they land in.
+        library_id: Some(domain::LibraryId::new()),
+        root_id: Some("test-root".into()),
         config_revision: None,
         transfer_mode: Some(TransferMode::Copy),
         scrape: false,

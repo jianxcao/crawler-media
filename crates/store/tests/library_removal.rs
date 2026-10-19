@@ -133,6 +133,12 @@ fn removal_closes_playback_sessions_for_removed_files_and_preserves_other_librar
     let user_b = domain::UserId::new();
     let device_a = "device-a";
     let device_b = "device-b";
+    let play_session_a = store
+        .issue_play_session(user_a, device_a, a_row.id, 200)
+        .unwrap();
+    let play_session_b = store
+        .issue_play_session(user_b, device_b, b_row.id, 200)
+        .unwrap();
     let session_a = store::SessionRow {
         device_id: device_a.into(),
         user_id: user_a,
@@ -155,7 +161,7 @@ fn removal_closes_playback_sessions_for_removed_files_and_preserves_other_librar
         started_at: 100,
         last_report_at: 200,
         ledger_id: Some(a_row.id.to_string()),
-        play_session_id: None,
+        play_session_id: Some(play_session_a),
         last_report_at_ms: 200_000,
         last_event_sequence: None,
     };
@@ -181,7 +187,7 @@ fn removal_closes_playback_sessions_for_removed_files_and_preserves_other_librar
         started_at: 100,
         last_report_at: 200,
         ledger_id: Some(b_row.id.to_string()),
-        play_session_id: None,
+        play_session_id: Some(play_session_b),
         last_report_at_ms: 200_000,
         last_event_sequence: None,
     };

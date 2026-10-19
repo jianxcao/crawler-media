@@ -21,7 +21,8 @@ impl Store {
             "SELECT COUNT(*),
                     COUNT(CASE WHEN path_key LIKE '%.strm' THEN 1 END)
              FROM library_files
-             WHERE library_id = ?1 AND presence_state = 'present'",
+             WHERE library_id = ?1 AND presence_state = 'present'
+               AND publication_state = 'published'",
             params![library_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;

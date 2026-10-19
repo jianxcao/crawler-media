@@ -310,7 +310,7 @@ impl Store {
         }
         let snapshot = self.removal_snapshot(id)?;
         self.validate_removal_rows(&snapshot, &removal.library_id)?;
-        self.clean_removal_rows(&snapshot)?;
+        self.clean_removal_rows(&snapshot, &removal.library_id)?;
         #[cfg(test)]
         removal_cleanup_failpoint()?;
         let tx = self.library.unchecked_transaction()?;
@@ -360,7 +360,10 @@ impl Store {
             let current = self
                 .library
                 .query_row(
-                    "SELECT path, media_id, season, episode FROM ledger WHERE id=?1",
+                    "SELECT f.display_path, f.media_id, u.season, u.episode
+                     FROM library_files f
+                     LEFT JOIN library_file_units u ON u.file_id = f.file_id
+                     WHERE f.file_id = ?1 LIMIT 1",
                     [&row.ledger_id],
                     |record| {
                         Ok((
@@ -399,11 +402,25 @@ impl Store {
         Ok(())
     }
 
-    fn clean_removal_rows(&self, snapshot: &Snapshot) -> Result<(), StoreError> {
+    fn clean_removal_rows(&self, snapshot: &Snapshot, library_id: &str) -> Result<(), StoreError> {
+        let library_id: domain::LibraryId = library_id
+            .parse()
+            .map_err(|_| StoreError::Protected("删除快照 Library 身份无效".into()))?;
+        let file_ids = snapshot
+            .rows
+            .iter()
+            .map(|row| row.ledger_id.parse::<domain::LedgerId>())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| StoreError::Protected("删除快照台账身份无效".into()))?;
+        tracing::info!(library_id = %library_id, files = file_ids.len(), "开始清理 Library 台账行");
+        // Removing a file must go through the summary-maintaining path: the deferred
+        // `preferred_file_id` composite foreign keys from `library_units`/`library_items`
+        // point at `library_files` rows, so a bare row delete would abort the commit.
+        // Everything stays in this one transaction, so any failure rolls back the
+        // whole cleanup instead of leaving a partially reduced Library.
         let tx = self.library.unchecked_transaction()?;
-        for row in &snapshot.rows {
-            crate::ledger_cleanup::delete_ledger_by_id_str_in_tx(&tx, &row.ledger_id)?;
-        }
+        let removed =
+            crate::library_write::delete::delete_files_in_tx(&tx, library_id, &file_ids)?;
         for row in &snapshot.rows {
             // Locked markers are user intent and outlive the files, exactly like
             // `fs_watcher` keeps them when an STRM changes. Only unlocked markers
@@ -412,18 +429,23 @@ impl Store {
             tx.execute(
                 "DELETE FROM media_markers WHERE media_id=?1 AND season IS ?2 AND episode IS ?3
                  AND locked=0
-                 AND NOT EXISTS (SELECT 1 FROM ledger WHERE media_id=?1 AND season IS ?2 AND episode IS ?3)",
-                params![row.media_id, row.season, row.episode],
+                 AND NOT EXISTS (
+                     SELECT 1 FROM library_file_units u JOIN library_files f ON f.file_id = u.file_id
+                     WHERE u.media_id=?1 AND u.season IS ?2 AND u.episode IS ?3)",
+                params![&row.media_id, row.season, row.episode],
             )?;
             if let Some(season) = row.season {
                 tx.execute(
                     "DELETE FROM probe_season_comparison_history WHERE media_id=?1 AND season=?2
-                     AND NOT EXISTS (SELECT 1 FROM ledger WHERE media_id=?1 AND season=?2)",
-                    params![row.media_id, season],
+                     AND NOT EXISTS (
+                         SELECT 1 FROM library_file_units u JOIN library_files f ON f.file_id = u.file_id
+                         WHERE u.media_id=?1 AND u.season=?2)",
+                    params![&row.media_id, season],
                 )?;
             }
         }
         tx.commit()?;
+        tracing::info!(library_id = %library_id, removed, "Library 台账行清理完成");
         Ok(())
     }
 
@@ -437,8 +459,8 @@ impl Store {
         let removal_ledger_ids: std::collections::HashSet<&str> =
             snapshot.rows.iter().map(|r| r.ledger_id.as_str()).collect();
 
-        let mut session_stmt = self.subscribe.prepare(
-            "SELECT user_id, device_id, media_id, season, episode, ledger_id FROM playback_sessions",
+        let mut session_stmt = self.library.prepare(
+            "SELECT user_id, device_id, media_id, season, episode, file_id FROM playback_sessions",
         )?;
         let sessions = session_stmt
             .query_map([], |row| {
@@ -468,7 +490,9 @@ impl Store {
                     false
                 } else {
                     let mut ledger_stmt = self.library.prepare(
-                        "SELECT id FROM ledger WHERE media_id=?1 AND season IS ?2 AND episode IS ?3",
+                        "SELECT u.file_id FROM library_file_units u
+                         JOIN library_files f ON f.file_id = u.file_id
+                         WHERE u.media_id=?1 AND u.season IS ?2 AND u.episode IS ?3",
                     )?;
                     let mut rows_cursor = ledger_stmt.query(params![media_id, season, episode])?;
                     let mut other_exists = false;
@@ -514,25 +538,6 @@ fn delete_library_scoped_settings(
     Ok(deleted)
 }
 
-/// Drop the settings of Libraries whose removal already succeeded.
-///
-/// Databases written before removal deleted Library-scoped settings keep
-/// `library_cover_checked.{id}` forever, and the setting is only read through
-/// `get_library`, so nothing else would ever drop it. Runs on every open rather
-/// than behind the schema-version gate: the version was never bumped for this
-/// repair, so a database already at the current version would otherwise never
-/// run it. Idempotent by construction — it only deletes keys whose Library row
-/// is already gone.
-///
-/// A pending removal keeps its Library row, so its settings are left alone.
-pub(crate) fn repair_removed_library_settings(_conn: &Connection) -> Result<usize, StoreError> {
-    Ok(0)
-}
-
-pub(crate) fn backfill_library_removal_roots(_conn: &Connection) -> Result<(), StoreError> {
-    Ok(())
-}
-
 // Thread-local, unit-test-only injection: never exposed through production configuration.
 #[cfg(test)]
 std::thread_local! {
@@ -552,9 +557,12 @@ fn removal_cleanup_failpoint() -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+    use domain::{
+        Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserId,
+    };
 
     fn fixture(store: &Store, root: &Path) -> (crate::Library, LedgerRow) {
+        std::fs::create_dir_all(root).unwrap();
         let library = store
             .create_library(
                 MediaKind::Tv,
@@ -639,14 +647,21 @@ mod tests {
         store
             .set_removal_state(&removal.operation_id, "cleaning", None)
             .unwrap();
-        // Simulate a stale writer bypassing the Store freeze barrier.
-        store
-            .library
-            .execute(
-                "UPDATE ledger SET episode=2 WHERE id=?1",
-                [row.id.to_string()],
-            )
-            .unwrap();
+        // Simulate a stale writer bypassing the Store freeze barrier. It moves the
+        // coverage row and the summary that points at it, so the deferred composite
+        // foreign keys stay satisfied and only the snapshot identity goes stale.
+        let tx = store.library.unchecked_transaction().unwrap();
+        tx.execute(
+            "UPDATE library_file_units SET episode=2 WHERE file_id=?1",
+            [row.id.to_string()],
+        )
+        .unwrap();
+        tx.execute(
+            "UPDATE library_units SET episode=2 WHERE library_id=?1 AND media_id=?2",
+            params![&library.id, row.media_id.to_string()],
+        )
+        .unwrap();
+        tx.commit().unwrap();
         assert!(matches!(
             store.clean_library_removal(&removal.operation_id),
             Err(StoreError::Protected(_))
@@ -656,73 +671,82 @@ mod tests {
     }
 
     #[test]
-    fn opening_a_pre_fix_database_backfills_removal_boundary_roots() {
+    fn removal_reduces_preferred_file_summaries_and_keeps_media_and_playback() {
         let temp = tempfile::tempdir().unwrap();
-        let data = temp.path().join("data");
-        let store = Store::open(&data).unwrap();
-        let (library, _row) = fixture(&store, &temp.path().join("tv"));
-        let removal = store.begin_library_removal(&library.id).unwrap();
-        let roots = store.removal_roots(&removal.operation_id).unwrap();
-        assert_eq!(roots.len(), 1);
-        // Rewrite the row into the pre-migration layout: roots live only inside
-        // snapshot_json and library_removal_roots is empty.
-        let legacy = serde_json::json!({
-            "roots": roots.iter().map(|r| r.to_string_lossy()).collect::<Vec<_>>(),
-            "rows": [],
-        });
+        let store = Store::open(temp.path().join("data")).unwrap();
+        let (library, row) = fixture(&store, &temp.path().join("tv"));
+        let library_id = library.id.parse::<domain::LibraryId>().unwrap();
+        let card = store
+            .get_library_item(library_id, row.media_id)
+            .unwrap()
+            .expect("a published file creates a card");
+        assert_eq!(card.preferred_file_id, Some(row.id));
+        assert_eq!(summary_rows(&store, &library.id, row.media_id), (1, 1));
+
+        let user = UserId::new();
         store
-            .app
-            .execute(
-                "UPDATE library_removals SET snapshot_json=?1 WHERE operation_id=?2",
-                params![legacy.to_string(), &removal.operation_id],
+            .upsert_unit(
+                user,
+                row.media_id,
+                1,
+                1,
+                120_000,
+                Some(false),
+                Some(true),
+                Some(600_000),
+                None,
+                None,
+                true,
+                crate::unix_now(),
             )
             .unwrap();
-        store
-            .app
-            .execute("DELETE FROM library_removal_roots", [])
-            .unwrap();
-        store.app.pragma_update(None, "user_version", 6).unwrap();
-        crate::schema::migrate_app(&store.app).unwrap();
-        assert!(store
-            .path_in_removal_scope(&roots[0].join("E01.strm"))
-            .unwrap());
-        assert_eq!(
-            store.removal_roots(&removal.operation_id).unwrap(),
-            roots
-        );
-    }
 
-    #[test]
-    fn opening_a_pre_fix_database_cleans_settings_of_removed_libraries() {
-        let temp = tempfile::tempdir().unwrap();
-        let data = temp.path().join("data");
-        let store = Store::open(&data).unwrap();
-        let (library, _row) = fixture(&store, &temp.path().join("tv"));
-        let kept = store
-            .list_libraries()
-            .unwrap()
-            .iter()
-            .find(|l| l.kind == MediaKind::Tv && l.id != library.id)
-            .unwrap()
-            .id
-            .clone();
-        let removed_key = format!("library_cover_checked.{}", library.id);
-        let kept_key = format!("library_cover_checked.{kept}");
         let removal = store.begin_library_removal(&library.id).unwrap();
         store
             .set_removal_state(&removal.operation_id, "cleaning", None)
             .unwrap();
-        store.clean_library_removal(&removal.operation_id).unwrap();
-        // Pre-fix residue: the removal succeeded but the Library's setting stayed.
-        store.put_setting(&removed_key, "checked-v2").unwrap();
-        store.put_setting(&kept_key, "checked-v2").unwrap();
-        store.app.pragma_update(None, "user_version", 6).unwrap();
-        crate::schema::migrate_app(&store.app).unwrap();
-
-        assert!(store.get_setting(&removed_key).unwrap().is_none());
-        assert_eq!(
-            store.get_setting(&kept_key).unwrap().as_deref(),
-            Some("checked-v2")
+        let done = store.clean_library_removal(&removal.operation_id).unwrap();
+        assert_eq!(done.state, "succeeded");
+        assert_eq!(done.removed_ledger_count, 1);
+        assert!(store.get_library(&library.id).unwrap().is_none());
+        assert!(
+            store
+                .get_library_item(library_id, row.media_id)
+                .unwrap()
+                .is_none()
         );
+        assert_eq!(summary_rows(&store, &library.id, row.media_id), (0, 0));
+
+        // Media identity and user playback facts have their own lifetimes.
+        assert!(store.get_media(row.media_id).unwrap().is_some());
+        let unit = store
+            .unit_state(user, row.media_id, 1, 1)
+            .unwrap()
+            .expect("playback facts outlive the Library");
+        assert_eq!(unit.position_ms, 120_000);
+        assert_eq!(unit.duration_ms, Some(600_000));
+        assert!(unit.favorite);
+        assert_eq!(unit.play_count, 1);
+
+        // A retried removal reports the same succeeded operation.
+        assert_eq!(
+            store.clean_library_removal(&removal.operation_id).unwrap(),
+            done
+        );
+    }
+
+    /// `(library_items, library_units)` row counts for one media in one library.
+    fn summary_rows(store: &Store, library_id: &str, media_id: MediaId) -> (i64, i64) {
+        let count = |table: &str| {
+            store
+                .library
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE library_id=?1 AND media_id=?2"),
+                    params![library_id, media_id.to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        (count("library_items"), count("library_units"))
     }
 }

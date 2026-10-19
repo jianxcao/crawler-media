@@ -4,7 +4,8 @@
 use domain::{MediaId, UserId};
 use store::{PlaybackLogScope, PlayLogRow, SessionRow, Store};
 
-/// 没有公开 insert_log：用 upsert_session + close_session 造一条 playback_logs。
+/// 没有公开 insert_log：用 issue_play_session 绑定 + upsert_session + close_session
+/// 造一条 playback_logs。
 fn log_fixture(
     store: &Store,
     user: UserId,
@@ -13,13 +14,17 @@ fn log_fixture(
     started: i64,
     watched: i64,
 ) -> PlayLogRow {
+    let ledger = domain::LedgerId::new();
+    let play_session_id = store
+        .issue_play_session(user, device, ledger, started)
+        .unwrap();
     store
         .upsert_session(&SessionRow {
             device_id: device.into(),
             user_id: user,
             media_id: media,
-            season: None,
-            episode: None,
+            season: Some(-1),
+            episode: Some(-1),
             client: Some("fixture".into()),
             device_name: None,
             client_version: None,
@@ -35,8 +40,8 @@ fn log_fixture(
             admin_ended: false,
             started_at: started,
             last_report_at: started,
-            ledger_id: None,
-            play_session_id: None,
+            ledger_id: Some(ledger.to_string()),
+            play_session_id: Some(play_session_id),
             last_report_at_ms: started * 1000,
             last_event_sequence: None,
         })

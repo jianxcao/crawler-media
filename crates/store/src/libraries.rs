@@ -250,6 +250,20 @@ impl Store {
         Ok(Some(row.into_library(root_paths)?))
     }
 
+    /// Current configuration revision of one Library. Writers pin it in their
+    /// `WriteScope` so a reconfiguration between plan and write is refused.
+    pub fn library_config_revision(&self, id: &str) -> Result<i64, StoreError> {
+        let revision: Option<i64> = self
+            .library
+            .query_row(
+                "SELECT config_revision FROM libraries WHERE library_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        revision.ok_or_else(|| StoreError::Missing(format!("library {id}")))
+    }
+
     pub fn default_library(&self, kind: MediaKind) -> Result<Option<Library>, StoreError> {
         let row = self
             .library
@@ -398,7 +412,13 @@ impl Store {
             .optional()?
             .is_some();
         let is_default = if has_default { 0 } else { 1 };
-        self.library.execute(
+        let member_ids_json =
+            serde_json::to_string(&member_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>())?;
+        let match_rules_json = serde_json::to_string(match_rules)?;
+        // The library row and its roots commit together: a rejected root must
+        // not leave behind a Library the caller never successfully created.
+        let tx = self.library.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO libraries
                 (library_id, kind, name, is_default, sort_order, access_mode, admin_visible, member_ids_json, match_rules_json, default_filter_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -410,14 +430,13 @@ impl Store {
                 sort_order,
                 access_mode,
                 admin_visible as i64,
-                serde_json::to_string(
-                    &member_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>()
-                )?,
-                serde_json::to_string(match_rules)?,
+                member_ids_json,
+                match_rules_json,
                 default_filter_id,
             ],
         )?;
-        self.replace_roots(&id, kind, root_paths)?;
+        Self::replace_roots(&tx, &id, kind, root_paths)?;
+        tx.commit()?;
         Ok(self
             .get_library(&id)?
             .ok_or_else(|| StoreError::Missing(format!("library {id}")))?)
@@ -551,19 +570,22 @@ impl Store {
                 }
             }
         }
+        // One transaction for the row updates and the root replacement, so a
+        // rejected root cannot leave a partially updated Library behind.
+        let tx = self.library.unchecked_transaction()?;
         if let Some(name) = name {
             if !name.trim().is_empty() {
-                self.library.execute(
+                tx.execute(
                     "UPDATE libraries SET name = ?1 WHERE library_id = ?2",
                     params![name.trim(), id],
                 )?;
             }
         }
         if let Some(root_paths) = root_paths {
-            self.replace_roots(id, library.kind, root_paths)?;
+            Self::replace_roots(&tx, id, library.kind, root_paths)?;
         }
         if let Some((access_mode, admin_visible, member_ids)) = access {
-            self.library.execute(
+            tx.execute(
                 "UPDATE libraries SET access_mode = ?1, admin_visible = ?2, member_ids_json = ?3
                  WHERE library_id = ?4",
                 params![
@@ -580,17 +602,18 @@ impl Store {
             )?;
         }
         if let Some(match_rules) = match_rules {
-            self.library.execute(
+            tx.execute(
                 "UPDATE libraries SET match_rules_json = ?1 WHERE library_id = ?2",
                 params![serde_json::to_string(match_rules)?, id],
             )?;
         }
         if let Some(filter_id) = default_filter_id {
-            self.library.execute(
+            tx.execute(
                 "UPDATE libraries SET default_filter_id = ?1 WHERE library_id = ?2",
                 params![filter_id, id],
             )?;
         }
+        tx.commit()?;
         Ok(self
             .get_library(id)?
             .ok_or_else(|| StoreError::Missing(format!("library {id}")))?)
@@ -640,14 +663,12 @@ impl Store {
     }
 
     fn replace_roots(
-        &self,
+        conn: &rusqlite::Connection,
         library_id: &str,
         _kind: MediaKind,
         root_paths: &[&str],
     ) -> Result<(), StoreError> {
-        let mut stmt = self
-            .library
-            .prepare("SELECT root_id, display_path FROM library_roots WHERE library_id = ?1")?;
+        let mut stmt = conn.prepare("SELECT root_id, display_path FROM library_roots WHERE library_id = ?1")?;
         let existing = stmt
             .query_map(params![library_id], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -659,12 +680,12 @@ impl Store {
                 continue;
             }
             if let Some((root_id, _)) = existing.iter().find(|(_, p)| p == path) {
-                self.library.execute(
+                conn.execute(
                     "UPDATE library_roots SET sort_order = ?1 WHERE root_id = ?2",
                     params![index as i32, root_id],
                 )?;
             } else {
-                self.library.execute(
+                conn.execute(
                     "INSERT INTO library_roots (root_id, library_id, path_key, display_path, enabled, sort_order)
                      VALUES (?1, ?2, ?3, ?3, 1, ?4)",
                     params![
@@ -678,8 +699,7 @@ impl Store {
         }
         for (root_id, path) in existing {
             if !root_paths.iter().any(|p| p.trim() == path) {
-                self.library
-                    .execute("DELETE FROM library_roots WHERE root_id = ?1", params![root_id])?;
+                conn.execute("DELETE FROM library_roots WHERE root_id = ?1", params![root_id])?;
             }
         }
         Ok(())
@@ -692,5 +712,56 @@ impl Store {
                     row.get(0)
                 })?;
         Ok(max.map(|v| v + 1).unwrap_or(0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejected_root_leaves_no_library_row() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("data")).unwrap();
+        let first_root = temp.path().join("first-root");
+        let second_root = temp.path().join("second-root");
+        store
+            .create_library_full(
+                MediaKind::Movie,
+                "First",
+                &[first_root.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+                &[],
+                None,
+            )
+            .unwrap();
+        let before = store.list_libraries().unwrap().len();
+
+        let result = store.create_library_full(
+            MediaKind::Movie,
+            "Rejected",
+            &[second_root.to_str().unwrap(), first_root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+            &[],
+            None,
+        );
+
+        assert!(
+            matches!(result, Err(StoreError::Sqlite(_))),
+            "duplicate root path_key must be rejected: {result:?}"
+        );
+        let libraries = store.list_libraries().unwrap();
+        assert_eq!(libraries.len(), before, "no orphan library row remains");
+        assert!(libraries.iter().all(|library| library.name != "Rejected"));
+        assert!(
+            libraries
+                .iter()
+                .all(|library| !library.root_paths.contains(&second_root)),
+            "the partially inserted root must be rolled back"
+        );
     }
 }

@@ -1,95 +1,58 @@
-//! Transactional cleanup of file-derived rows in library.db for a ledger item.
+//! Transactional cleanup of file-derived rows in library.db for one Library file.
 //!
-//! Deletes file_meta, fingerprint caches/attempts/samples/stages, scrape_sidecars
-//! associations, probe work items, and the ledger entry itself in a single
-//! transaction.
-//! Does NOT delete Media, Playback, Collections, Markers or disk bytes.
+//! Removes probe work items, probe/cache bookkeeping and the `library_files` row
+//! itself in a single transaction. Cascades cover coverage (`library_file_units`),
+//! details (`file_details`), sidecars (`scrape_sidecars`) and obligations
+//! (`file_probe_obligations`); the tables without a file foreign key are handled
+//! explicitly below.
+//!
+//! Does NOT delete Media, Playback, Collections, Markers or disk bytes, and does not
+//! reduce summaries: callers use [`crate::library_write::delete_files`] (or
+//! [`crate::library_write::delete_files_in_tx`]) when summaries must follow.
 
-use domain::LedgerId;
-use rusqlite::Transaction;
+use rusqlite::Connection;
 
 use crate::StoreError;
 
 mod probe_unit_retirement;
 pub(crate) use probe_unit_retirement::repair_orphan_probe_units;
 
-/// Delete all file-derived facts and the ledger row itself for `id` within `tx`.
+/// Delete every file-derived row and the file row itself for `file_id` within `conn`.
 ///
-/// Returns `Ok(true)` if a ledger row was deleted, `Ok(false)` if no such row existed.
-pub(crate) fn delete_ledger_in_tx(
-    tx: &Transaction<'_>,
-    id: LedgerId,
-) -> Result<bool, StoreError> {
-    let id_str = id.to_string();
-    delete_ledger_by_id_str_in_tx(tx, &id_str)
+/// Returns `Ok(true)` when a `library_files` row was removed, `Ok(false)` when the
+/// file was already gone.
+pub(crate) fn delete_file_in_tx(conn: &Connection, file_id: &str) -> Result<bool, StoreError> {
+    // Retire queued probe work first: a unit whose file is gone can never run again,
+    // and the jobs that derived their counters from it must be resynced.
+    probe_unit_retirement::retire_probe_units_for_file(conn, file_id)?;
+
+    conn.execute("DELETE FROM probe_stage_state WHERE file_id = ?1", [file_id])?;
+    conn.execute("DELETE FROM chapter_frame_tasks WHERE file_id = ?1", [file_id])?;
+    conn.execute("DELETE FROM fingerprint_cache WHERE file_id = ?1", [file_id])?;
+    conn.execute("DELETE FROM fingerprint_attempts WHERE file_id = ?1", [file_id])?;
+    delete_fingerprint_samples(conn, file_id)?;
+
+    // Cascade-backed rows, deleted explicitly so the cleanup never depends on
+    // when the foreign-key action runs.
+    conn.execute("DELETE FROM file_details WHERE file_id = ?1", [file_id])?;
+    conn.execute("DELETE FROM scrape_sidecars WHERE file_id = ?1", [file_id])?;
+    conn.execute("DELETE FROM file_probe_obligations WHERE file_id = ?1", [file_id])?;
+
+    let changed = conn.execute("DELETE FROM library_files WHERE file_id = ?1", [file_id])?;
+    Ok(changed > 0)
 }
 
-/// Helper taking string id representation.
-pub(crate) fn delete_ledger_by_id_str_in_tx(
-    tx: &Transaction<'_>,
-    id_str: &str,
-) -> Result<bool, StoreError> {
-    // Look up media_id and library_ids associated with this ledger row
-    let media_id_opt: Option<String> = match tx.query_row(
-        "SELECT media_id FROM ledger WHERE id = ?1",
-        [id_str],
-        |r| r.get(0),
-    ) {
-        Ok(media_id) => Some(media_id),
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(error) => {
-            tracing::warn!(%error, ledger_id = id_str, "读取台账行 media_id 失败，跳过孤儿 browse_media 清理");
-            None
-        }
-    };
-
-    // Mark affected browse generations dirty
-    if let Err(error) = tx.execute(
-        "UPDATE browse_generations SET state = 'dirty'
-         WHERE library_id IN (SELECT library_id FROM browse_files WHERE ledger_id = ?1)",
-        [id_str],
-    ) {
-        tracing::error!(
-            %error,
-            ledger_id = id_str,
-            "标记 browse_generations 为 dirty 失败：投影可能保留已删除的台账 id"
-        );
-    }
-
-    // Delete probe obligations in library.db
-    tx.execute(
-        "DELETE FROM ledger_probe_obligations WHERE ledger_id = ?1",
-        [id_str],
+/// Drop the fingerprint samples of one file and every season model built from them.
+fn delete_fingerprint_samples(conn: &Connection, file_id: &str) -> Result<(), StoreError> {
+    conn.execute(
+        "DELETE FROM fingerprint_season_models
+         WHERE model_id IN (SELECT model_id FROM fingerprint_model_members WHERE file_id = ?1)",
+        [file_id],
     )?;
-    // Delete browse_files in library.db
-    tx.execute(
-        "DELETE FROM browse_files WHERE ledger_id = ?1",
-        [id_str],
+    conn.execute(
+        "DELETE FROM fingerprint_model_members WHERE file_id = ?1",
+        [file_id],
     )?;
-    // Delete file-derived caches and metadata
-    crate::library::delete_file_meta_for_ledger(tx, id_str)?;
-
-    // Delete scrape_sidecars association in library.db
-    tx.execute(
-        "DELETE FROM scrape_sidecars WHERE ledger_id = ?1",
-        [id_str],
-    )?;
-
-    // Retire probe work items that reference this ledger, and resync the jobs
-    // that derived their counters from those units.
-    probe_unit_retirement::retire_probe_units_for_ledger(tx, id_str)?;
-
-    // Delete the ledger row itself
-    let changed = tx.execute("DELETE FROM ledger WHERE id = ?1", [id_str])?;
-
-    // Invalidate/delete orphan browse_media if no ledger rows remain for this media
-    if let Some(ref mid) = media_id_opt {
-        tx.execute(
-            "DELETE FROM browse_media
-             WHERE media_id = ?1 AND NOT EXISTS (SELECT 1 FROM ledger WHERE media_id = ?1)",
-            [mid],
-        )?;
-    }
-
-    Ok(changed > 0)
+    conn.execute("DELETE FROM fingerprint_samples WHERE file_id = ?1", [file_id])?;
+    Ok(())
 }

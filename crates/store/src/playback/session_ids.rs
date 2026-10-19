@@ -43,7 +43,7 @@ impl Store {
     /// Issue a new play session ID for a (user, device, ledger) combination.
     ///
     /// Generates a UUID v4 ID, determines the next generation atomically in the
-    /// subscribe.db immediate transaction, cleans expired IDs (up to 500), and records the pending ID.
+    /// library.db immediate transaction, cleans expired IDs (up to 500), and records the pending ID.
     pub fn issue_play_session(
         &self,
         user_id: UserId,

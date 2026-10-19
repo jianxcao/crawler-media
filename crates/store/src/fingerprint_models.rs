@@ -66,7 +66,7 @@ impl Store {
         for m in members {
             tx.execute(
                 "INSERT INTO fingerprint_model_members (
-                     model_id, sample_id, ledger_id, source_version
+                     model_id, sample_id, file_id, source_version
                  ) VALUES (?1, ?2, ?3, ?4)",
                 params![m.model_id, m.sample_id, m.ledger_id, m.source_version],
             )?;

@@ -32,6 +32,23 @@ fn create_test_media_and_ledger(store: &Store, path_suffix: &str) -> (Media, Led
         confidence: Confidence::High,
         filter_score: None,
     };
+    if !store
+        .list_library_roots()
+        .unwrap()
+        .iter()
+        .any(|root| root.path == std::path::Path::new("/path/to"))
+    {
+        store
+            .create_library(
+                domain::MediaKind::Tv,
+                "probe-stage",
+                &["/path/to"],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+    }
     store.insert_ledger(&row).unwrap();
     (media, row)
 }

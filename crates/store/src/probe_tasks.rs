@@ -318,7 +318,7 @@ impl Store {
     ) -> Result<bool, StoreError> {
         let changed = self.library.execute(
             "UPDATE probe_job_units SET sampling_plan_json = ?3
-             WHERE job_id = ?1 AND ledger_id = ?2",
+             WHERE job_id = ?1 AND file_id = ?2",
             params![job_id, ledger_id, sampling_plan_json],
         )?;
         Ok(changed > 0)
@@ -332,7 +332,7 @@ impl Store {
     ) -> Result<bool, StoreError> {
         let changed = self.library.execute(
             "UPDATE probe_job_units SET detection_outcome_json = ?3
-             WHERE job_id = ?1 AND ledger_id = ?2",
+             WHERE job_id = ?1 AND file_id = ?2",
             params![job_id, ledger_id, detection_outcome_json],
         )?;
         Ok(changed > 0)
@@ -498,7 +498,7 @@ impl Store {
     pub fn is_probe_queued(&self, ledger_id: &str) -> Result<bool, StoreError> {
         let active = self.library.query_row(
             "SELECT EXISTS(SELECT 1 FROM probe_job_units
-             WHERE ledger_id = ?1 AND status IN ('queued', 'running'))",
+             WHERE file_id = ?1 AND status IN ('queued', 'running'))",
             [ledger_id],
             |row| row.get(0),
         )?;
@@ -512,7 +512,7 @@ impl Store {
     /// 时序当成业务结果。
     pub fn probe_unit_recorded_for_ledger(&self, ledger_id: &str) -> Result<bool, StoreError> {
         let recorded = self.library.query_row(
-            "SELECT EXISTS(SELECT 1 FROM probe_job_units WHERE ledger_id = ?1)",
+            "SELECT EXISTS(SELECT 1 FROM probe_job_units WHERE file_id = ?1)",
             [ledger_id],
             |row| row.get(0),
         )?;

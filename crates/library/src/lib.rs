@@ -64,6 +64,17 @@ pub enum TransferMode {
     Move,
 }
 
+impl TransferMode {
+    /// Storage form used by the Library ledger's `transfer_mode` column.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Hardlink => "hardlink",
+            Self::Copy => "copy",
+            Self::Move => "move",
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum LibraryError {
     #[error("Library work cancelled")]

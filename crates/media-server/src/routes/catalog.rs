@@ -296,11 +296,7 @@ pub(super) async fn search_hints(
         let title_match = it.media.title.to_lowercase().contains(&term);
         let orig_match = it.metadata.original_title.as_deref().map(|s| s.to_lowercase().contains(&term)).unwrap_or(false);
         if title_match || orig_match {
-            let id = if it.is_series {
-                it.media.id.to_string().replace('-', "")
-            } else {
-                it.row.id.to_string().replace('-', "")
-            };
+            let id = it.protocol_id();
             let item_type = if it.is_series {
                 "Series"
             } else if it.media.kind == domain::MediaKind::Tv {

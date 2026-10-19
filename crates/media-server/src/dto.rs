@@ -46,8 +46,8 @@ pub fn user_profile_json(user: &ServerUser, server_id: &str) -> Value {
 }
 
 pub fn item_dto_json(snapshot: MediaItemSnapshot) -> Value {
-    let item = Item::from_ledger(&snapshot.media.title, &snapshot.row);
-    let series_id = snapshot.media.id.to_string().replace('-', "");
+    let item = Item::from_target(&snapshot.item_identity(), &snapshot.media.title, &snapshot.file);
+    let series_id = domain::TypedItemId::Work(snapshot.media.id).to_wire_string();
     let item_id = if snapshot.is_series {
         series_id.clone()
     } else {
@@ -111,8 +111,11 @@ pub fn item_dto_json(snapshot: MediaItemSnapshot) -> Value {
     if snapshot.media.kind == domain::MediaKind::Tv && !snapshot.is_series {
         let season_num = snapshot.row.season.unwrap_or(1);
         value["SeriesId"] = json!(series_id);
-        value["SeriesName"] = json!(snapshot.media.title);
-        value["SeasonId"] = json!(format!("{series_id}{season_num:02}"));
+        value["SeasonId"] = json!(domain::TypedItemId::Season {
+            media: snapshot.media.id,
+            season: season_num,
+        }
+        .to_wire_string());
         value["IndexNumber"] = json!(snapshot.row.episode);
         value["ParentIndexNumber"] = json!(snapshot.row.season);
         value["SeasonName"] = json!(format!("第 {} 季", season_num));

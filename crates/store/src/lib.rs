@@ -5,18 +5,6 @@ mod app_write;
 mod instance_lock;
 mod pending_file_deletions;
 mod pending_progress;
-mod browse_projection;
-pub use browse_projection::{
-    BrowseFileFacts, BrowseMediaFacts, ProjectionBuild, ProjectionSnapshot, ReadRevisions,
-    library_scope_signature,
-};
-mod browse_changes;
-pub use browse_changes::{BrowseChange, BrowseChangeSource, ProjectionHead};
-mod browse_pages;
-pub use browse_pages::{
-    BROWSE_CANDIDATE_VERSION, BrowseFileDependency, BrowseMediaCandidate, BrowsePageOrder,
-    BrowsePageRequest,
-};
 mod browse_reads;
 mod catalog;
 mod chapter_frame_tasks;
@@ -35,7 +23,6 @@ mod ledger_presence;
 pub use ledger_presence::{
     FilePresence, LedgerPresenceMode, LedgerPresenceObservation, LedgerPresenceResult,
 };
-mod legacy_recycle;
 mod libraries;
 mod library_stats;
 pub use library_stats::LibraryRosterStats;
@@ -46,7 +33,6 @@ pub mod library_query;
 mod library_covers;
 mod library_deletion;
 pub use library_deletion::LibraryRemoval;
-pub mod library_defaults;
 mod library_ownership;
 mod library_paths;
 mod library_scope;
@@ -72,7 +58,7 @@ mod scan_probe_obligations;
 mod scan_operations;
 mod scan_seen;
 pub use scan_operations::{ScanOperation, ScanOperationStatus};
-pub use scan_probe_obligations::ScanProbeObligation;
+pub use scan_probe_obligations::{MAX_SCAN_BATCH, ScanProbeObligation};
 mod search_history;
 pub use search_history::{HistoryDeleteOutcome, HistoryDeletePlan};
 mod sites;
@@ -83,7 +69,9 @@ mod users;
 pub mod password;
 pub mod probe_state;
 
-pub use browse_reads::{BrowseFileTotals, PlaybackUnitSnapshot};
+pub use browse_reads::PlaybackUnitSnapshot;
+mod read_freshness;
+pub use read_freshness::{FileReadRevision, ReadFingerprint};
 pub use catalog::CatalogCacheRow;
 pub use data_retention::{DataRetentionBatch, DataRetentionCursor, RetentionClass};
 pub use downloaders::DownloaderRow;
@@ -96,8 +84,9 @@ pub use library::{MarkerResultReplacement, StoredMediaMarker};
 pub use library_ownership::LibraryOwnership;
 pub use playback::{
     PlayLogRow, PlaySessionBinding, PlaySessionIdState, PlaybackLogPage, PlaybackLogScope,
-    PlaybackRetentionBatch, PlaybackRetentionPreview, SessionRow, UNIT_WHOLE, UnitRow, UnitState,
-    WatchClient, WatchDay, WatchMedia, WatchMember, WatchReport, WatchTotals, WatchWindow,
+    PlaybackRetentionBatch, PlaybackRetentionPreview, ResumeStatus, ResolvedResume, SessionRow,
+    UNIT_WHOLE, UnitRow, UnitState, WatchClient, WatchDay, WatchMedia, WatchMember, WatchReport,
+    WatchTotals, WatchWindow,
 };
 pub use probe_state::{
     retry_delay_ms, ProbeStage, ProbeStageCompletion, ProbeStageKey, ProbeStageState, ProbeStageStatus,
@@ -196,8 +185,9 @@ pub enum StoreError {
 
 pub struct Store {
     data_dir: PathBuf,
-    /// Times this store's `list_ledger` executed its unfiltered `FROM ledger`
-    /// statement. Per-instance so concurrent tests never share the diagnostic.
+    /// Times this store's `list_ledger` executed its unfiltered
+    /// `FROM library_files f LEFT JOIN library_file_units u` statement.
+    /// Per-instance so concurrent tests never share the diagnostic.
     pub(crate) root_ledger_scans: std::sync::atomic::AtomicUsize,
     /// Calls to `ledger_for_media` on this store. Selection can load the same
     /// media twice; the logical candidate count does not show that second read.
@@ -221,7 +211,8 @@ impl std::fmt::Debug for Store {
 }
 
 impl Store {
-    /// Times `list_ledger` executed its unfiltered `FROM ledger` statement.
+    /// Times `list_ledger` executed its unfiltered
+    /// `FROM library_files f LEFT JOIN library_file_units u` statement.
     ///
     /// Incremented beside that statement, so filtering the returned rows cannot
     /// hide the scan. `ledger_for_media` does not increment it.

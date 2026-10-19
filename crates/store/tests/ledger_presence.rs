@@ -1,23 +1,16 @@
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
-use store::{
-    FilePresence, LedgerPresenceMode, LedgerPresenceObservation, LedgerPresenceResult, Store,
-};
+//! Presence writes: verification marks/clears `missing_at`, pruning removes already
+//! missing files, and a stale observation never touches a replacement file.
 
-fn sample_ledger(path: &str, media_id: MediaId) -> LedgerRow {
-    LedgerRow {
-        id: LedgerId::new(),
-        media_id,
-        path: path.to_string(),
-        season: None,
-        episode: None,
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    }
-}
+use std::path::Path;
+
+use domain::{
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, Media, MediaId,
+    MediaKind, QualitySource, UnitKey,
+};
+use store::library_write::{FilePublication as StorePublication, WriteScope};
+use store::{
+    FilePresence as ObservedPresence, LedgerPresenceMode, LedgerPresenceObservation, Store,
+};
 
 fn sample_media(id: MediaId) -> Media {
     Media {
@@ -35,132 +28,243 @@ fn sample_media(id: MediaId) -> Media {
     }
 }
 
-#[test]
-fn unpublished_transfer_survives_presence_and_present_publication_clears_pending() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Store::open(tmp.path()).unwrap();
-    let row = sample_ledger("/movies/pending.mkv", MediaId::new());
-    store.insert_ledger(&row).unwrap();
-    let db = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
-    db.execute("UPDATE ledger SET transfer_pending = 1 WHERE id = ?1", [row.id.to_string()]).unwrap();
-    for mode in [LedgerPresenceMode::Verify, LedgerPresenceMode::Prune] {
-        let result = store.apply_ledger_presence(&[LedgerPresenceObservation {
-            row: row.clone(), missing_at: None, presence: FilePresence::Missing,
-        }], mode, 100).unwrap();
-        assert_eq!(result.skipped, 1);
-        assert!(store.ledger_by_path(&row.path).unwrap().is_some());
-        assert!(store.missing_at_by_path().unwrap().is_empty());
-    }
-    store.apply_ledger_presence(&[LedgerPresenceObservation {
-        row: row.clone(), missing_at: None, presence: FilePresence::Present,
-    }], LedgerPresenceMode::Verify, 200).unwrap();
-    let pending: bool = db.query_row("SELECT transfer_pending FROM ledger WHERE id = ?1",
-        [row.id.to_string()], |r| r.get(0)).unwrap();
-    assert!(!pending);
+fn create_library(store: &Store, root: &Path) -> (store::Library, String) {
+    let library = store
+        .create_library(
+            MediaKind::Movie,
+            "Movies",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let root_id = store
+        .list_library_roots()
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.library_id.as_deref() == Some(library.id.as_str()))
+        .unwrap()
+        .id;
+    (library, root_id)
 }
 
-#[test]
-fn pending_publication_migrates_idempotently_without_marking_existing_rows() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Store::open(tmp.path()).unwrap();
-    let row = sample_ledger("/movies/existing.mkv", MediaId::new());
-    store.insert_ledger(&row).unwrap();
-    drop(store);
-    let db = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
-    db.execute_batch("ALTER TABLE ledger DROP COLUMN transfer_pending; PRAGMA user_version=12;").unwrap();
-    for _ in 0..2 {
-        let store = Store::open(tmp.path()).unwrap();
-        assert!(!store.transfer_pending(&row.path).unwrap());
-        assert_eq!(store.ledger_by_path(&row.path).unwrap().unwrap().id, row.id);
-    }
-}
-
-#[test]
-fn stale_observation_does_not_delete_replacement_ledger() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Store::open(tmp.path().join("data")).unwrap();
-
-    let media_id = MediaId::new();
-    store.insert_media(&sample_media(media_id)).unwrap();
-
-    let old_row = sample_ledger("/movies/one.mkv", media_id);
-    store.insert_ledger(&old_row).unwrap();
-    // Simulate it being marked missing
-    let obs_missing = LedgerPresenceObservation {
-        row: old_row.clone(),
-        missing_at: None,
-        presence: FilePresence::Missing,
+fn publish_file(
+    store: &Store,
+    library: &store::Library,
+    root_id: &str,
+    media: MediaId,
+    path: &str,
+    publication: FilePublication,
+    file_id: LedgerId,
+) -> LibraryFile {
+    let file = LibraryFile {
+        file_id,
+        library_id: library.id.parse().unwrap(),
+        root_id: root_id.to_string(),
+        media_id: media,
+        kind: MediaKind::Movie,
+        path: path.into(),
+        version: FileVersion {
+            revision: 1,
+            source_version: "v1".to_string(),
+        },
+        presence: domain::FilePresence::Present,
+        publication,
+        size_bytes: Some(1_000),
+        stat_known: true,
+        created_ns: Some(10),
+        modified_ns: Some(20),
+        source_digest: None,
+        source_path: None,
+        transfer_mode: None,
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: None,
+        release_quality: None,
+        duration_ms: None,
+        tracks_version: 0,
+        poster_path: None,
+        backdrop_path: None,
+        still_path: None,
     };
     store
-        .apply_ledger_presence(&[obs_missing], LedgerPresenceMode::Verify, 1000)
+        .publish_files(
+            &WriteScope {
+                library_id: library.id.parse().unwrap(),
+                config_revision: 0,
+            },
+            &[StorePublication {
+                file: &file,
+                units: &[UnitKey::WHOLE],
+                expected_version: None,
+                probe_required: false,
+            }],
+            1_000,
+        )
         .unwrap();
+    file
+}
 
-    // Now imagine the old row was replaced by a new row at the same path!
-    store.delete_ledger_path(&old_row.path).unwrap();
-    let new_row = sample_ledger("/movies/one.mkv", media_id);
-    store.insert_ledger(&new_row).unwrap();
+fn observation(row: domain::LedgerRow, missing_at: Option<i64>, presence: FilePresence) -> LedgerPresenceObservation {
+    LedgerPresenceObservation {
+        row,
+        missing_at,
+        presence,
+    }
+}
 
-    // A stale prune observation holding old_row
-    let stale_prune_obs = LedgerPresenceObservation {
-        row: old_row,
-        missing_at: Some(1000),
-        presence: FilePresence::Missing,
-    };
+#[test]
+fn unpublished_transfer_survives_presence_and_present_publication_publishes_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let media_id = MediaId::new();
+    store.insert_media(&sample_media(media_id)).unwrap();
+    let (library, root_id) = create_library(&store, tmp.path());
+    let path = tmp.path().join("pending.mkv").display().to_string();
+    let file = publish_file(
+        &store,
+        &library,
+        &root_id,
+        media_id,
+        &path,
+        FilePublication::Pending,
+        LedgerId::new(),
+    );
+    let row = store
+        .ledger_by_path(&path)
+        .unwrap()
+        .expect("pending file row");
+    assert!(store.transfer_pending(&path).unwrap());
+
+    for mode in [LedgerPresenceMode::Verify, LedgerPresenceMode::Prune] {
+        let result = store
+            .apply_ledger_presence(
+                &[observation(row.clone(), None, ObservedPresence::Missing)],
+                mode,
+                100,
+            )
+            .unwrap();
+        assert_eq!(result.skipped, 1);
+        assert!(store.ledger_by_path(&path).unwrap().is_some());
+        assert!(store.missing_at_by_path().unwrap().is_empty());
+    }
 
     let result = store
-        .apply_ledger_presence(&[stale_prune_obs], LedgerPresenceMode::Prune, 1050)
+        .apply_ledger_presence(
+            &[observation(row.clone(), None, ObservedPresence::Present)],
+            LedgerPresenceMode::Verify,
+            200,
+        )
         .unwrap();
+    assert_eq!(result.restored, 0);
+    assert!(!store.transfer_pending(&path).unwrap());
+    assert_eq!(file.file_id, row.id);
+    assert!(
+        store
+            .get_library_item(library.id.parse().unwrap(), media_id)
+            .unwrap()
+            .is_some(),
+        "a recovered publication becomes library content"
+    );
+}
 
+#[test]
+fn stale_observation_does_not_delete_replacement_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let media_id = MediaId::new();
+    store.insert_media(&sample_media(media_id)).unwrap();
+    let (library, root_id) = create_library(&store, tmp.path());
+    let path = tmp.path().join("one.mkv").display().to_string();
+    let old = publish_file(
+        &store,
+        &library,
+        &root_id,
+        media_id,
+        &path,
+        FilePublication::Published,
+        LedgerId::new(),
+    );
+    let old_row = store.ledger_by_path(&path).unwrap().unwrap();
+
+    // The file disappears and a replacement lands on the same path.
+    store.delete_ledger_path(&path).unwrap();
+    let replacement = publish_file(
+        &store,
+        &library,
+        &root_id,
+        media_id,
+        &path,
+        FilePublication::Published,
+        LedgerId::new(),
+    );
+    assert_ne!(replacement.file_id, old.file_id);
+
+    // A stale prune observation still holding the old identity.
+    let stale = observation(old_row, Some(1000), ObservedPresence::Missing);
+    let result = store
+        .apply_ledger_presence(&[stale], LedgerPresenceMode::Prune, 1050)
+        .unwrap();
     assert_eq!(result.deleted, 0);
     assert_eq!(result.skipped, 1);
-    // New ledger must still exist
-    assert!(store.get_ledger(&new_row.id.to_string()).unwrap().is_some());
+    assert!(
+        store
+            .get_ledger(&replacement.file_id.to_string())
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
 fn restored_file_clears_flag_without_replacing_identity() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
-
     let media_id = MediaId::new();
     store.insert_media(&sample_media(media_id)).unwrap();
-    let row = sample_ledger("/movies/two.mkv", media_id);
-    store.insert_ledger(&row).unwrap();
+    let (library, root_id) = create_library(&store, tmp.path());
+    let path = tmp.path().join("two.mkv").display().to_string();
+    let file = publish_file(
+        &store,
+        &library,
+        &root_id,
+        media_id,
+        &path,
+        FilePublication::Published,
+        LedgerId::new(),
+    );
+    let row = store.ledger_by_path(&path).unwrap().unwrap();
 
-    // Verify missing
-    let obs_missing = LedgerPresenceObservation {
-        row: row.clone(),
-        missing_at: None,
-        presence: FilePresence::Missing,
-    };
     store
-        .apply_ledger_presence(&[obs_missing], LedgerPresenceMode::Verify, 1000)
+        .apply_ledger_presence(
+            &[observation(row.clone(), None, ObservedPresence::Missing)],
+            LedgerPresenceMode::Verify,
+            1000,
+        )
         .unwrap();
     assert_eq!(
         store.missing_at_by_path().unwrap().get(&row.path).copied(),
         Some(1000)
     );
 
-    // Now file is restored (Present)
-    let obs_present = LedgerPresenceObservation {
-        row: row.clone(),
-        missing_at: Some(1000),
-        presence: FilePresence::Present,
-    };
-    let res = store
-        .apply_ledger_presence(&[obs_present], LedgerPresenceMode::Verify, 2000)
+    let result = store
+        .apply_ledger_presence(
+            &[observation(row.clone(), Some(1000), ObservedPresence::Present)],
+            LedgerPresenceMode::Verify,
+            2000,
+        )
         .unwrap();
-    assert_eq!(res.restored, 1);
-    assert_eq!(res.missing, 0);
-
-    // missing_at is cleared
+    assert_eq!(result.restored, 1);
+    assert_eq!(result.missing, 0);
     assert_eq!(
         store.missing_at_by_path().unwrap().get(&row.path).copied(),
         None
     );
-    // Row identity and all fields unchanged
-    let fetched = store.get_ledger(&row.id.to_string()).unwrap().unwrap();
-    assert_eq!(fetched.id, row.id);
+    let fetched = store.get_ledger(&file.file_id.to_string()).unwrap().unwrap();
+    assert_eq!(fetched.id, file.file_id);
     assert_eq!(fetched.path, row.path);
     assert_eq!(fetched.media_id, row.media_id);
 }
@@ -169,36 +273,40 @@ fn restored_file_clears_flag_without_replacing_identity() {
 fn unknown_observation_preserves_prior_state() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
-
     let media_id = MediaId::new();
     store.insert_media(&sample_media(media_id)).unwrap();
-    let row = sample_ledger("/movies/three.mkv", media_id);
-    store.insert_ledger(&row).unwrap();
+    let (library, root_id) = create_library(&store, tmp.path());
+    let path = tmp.path().join("three.mkv").display().to_string();
+    publish_file(
+        &store,
+        &library,
+        &root_id,
+        media_id,
+        &path,
+        FilePublication::Published,
+        LedgerId::new(),
+    );
+    let row = store.ledger_by_path(&path).unwrap().unwrap();
 
-    // Verify missing first
-    let obs_missing = LedgerPresenceObservation {
-        row: row.clone(),
-        missing_at: None,
-        presence: FilePresence::Missing,
-    };
     store
-        .apply_ledger_presence(&[obs_missing], LedgerPresenceMode::Verify, 1000)
+        .apply_ledger_presence(
+            &[observation(row.clone(), None, ObservedPresence::Missing)],
+            LedgerPresenceMode::Verify,
+            1000,
+        )
         .unwrap();
 
-    // Now an Unknown observation (e.g. PermissionDenied)
-    let obs_unknown = LedgerPresenceObservation {
-        row: row.clone(),
-        missing_at: Some(1000),
-        presence: FilePresence::Unknown,
-    };
-    let res = store
-        .apply_ledger_presence(&[obs_unknown], LedgerPresenceMode::Verify, 2000)
+    // A permission/IO error is reported as Unknown and must not change state.
+    let result = store
+        .apply_ledger_presence(
+            &[observation(row.clone(), Some(1000), ObservedPresence::Unknown)],
+            LedgerPresenceMode::Verify,
+            2000,
+        )
         .unwrap();
-    assert_eq!(res.skipped, 1);
-    assert_eq!(res.missing, 0);
-    assert_eq!(res.restored, 0);
-
-    // Prior missing_at is preserved
+    assert_eq!(result.skipped, 1);
+    assert_eq!(result.missing, 0);
+    assert_eq!(result.restored, 0);
     assert_eq!(
         store.missing_at_by_path().unwrap().get(&row.path).copied(),
         Some(1000)
@@ -210,61 +318,61 @@ fn prune_rolls_back_whole_batch_on_derived_error() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().join("data");
     let store = Store::open(&data_dir).unwrap();
-
     let media_id = MediaId::new();
     store.insert_media(&sample_media(media_id)).unwrap();
-    let row1 = sample_ledger("/movies/p1.mkv", media_id);
-    let row2 = sample_ledger("/movies/p2.mkv", media_id);
-    store.insert_ledger(&row1).unwrap();
-    store.insert_ledger(&row2).unwrap();
+    let (library, root_id) = create_library(&store, tmp.path());
+    let first_path = tmp.path().join("p1.mkv").display().to_string();
+    let second_path = tmp.path().join("p2.mkv").display().to_string();
+    let first = publish_file(
+        &store,
+        &library,
+        &root_id,
+        media_id,
+        &first_path,
+        FilePublication::Published,
+        LedgerId::new(),
+    );
+    let second = publish_file(
+        &store,
+        &library,
+        &root_id,
+        media_id,
+        &second_path,
+        FilePublication::Published,
+        LedgerId::new(),
+    );
+    let first_row = store.ledger_by_path(&first_path).unwrap().unwrap();
+    let second_row = store.ledger_by_path(&second_path).unwrap().unwrap();
 
-    // Mark both missing
-    let obs = vec![
-        LedgerPresenceObservation {
-            row: row1.clone(),
-            missing_at: None,
-            presence: FilePresence::Missing,
-        },
-        LedgerPresenceObservation {
-            row: row2.clone(),
-            missing_at: None,
-            presence: FilePresence::Missing,
-        },
+    let mark_missing = vec![
+        observation(first_row.clone(), None, ObservedPresence::Missing),
+        observation(second_row.clone(), None, ObservedPresence::Missing),
     ];
     store
-        .apply_ledger_presence(&obs, LedgerPresenceMode::Verify, 1000)
+        .apply_ledger_presence(&mark_missing, LedgerPresenceMode::Verify, 1000)
         .unwrap();
 
-    // Trigger on library.db that fails on row2 deletion
     let lib_conn = rusqlite::Connection::open(data_dir.join("library.db")).unwrap();
+    // SQLite forbids bound parameters inside a trigger body, so the fixture path
+    // is inlined as an SQL string literal.
+    let second_path_literal = second_path.replace('\'', "''");
     lib_conn
-        .execute(
-            "CREATE TRIGGER fail_row2_del BEFORE DELETE ON ledger
-             FOR EACH ROW WHEN OLD.path = '/movies/p2.mkv'
+        .execute_batch(&format!(
+            "CREATE TRIGGER fail_row2_del BEFORE DELETE ON library_files
+             FOR EACH ROW WHEN OLD.display_path = '{second_path_literal}'
              BEGIN
                  SELECT RAISE(ABORT, 'forced trigger abort on row2');
-             END;",
-            [],
-        )
+             END;"
+        ))
         .unwrap();
 
-    let prune_obs = vec![
-        LedgerPresenceObservation {
-            row: row1.clone(),
-            missing_at: Some(1000),
-            presence: FilePresence::Missing,
-        },
-        LedgerPresenceObservation {
-            row: row2.clone(),
-            missing_at: Some(1000),
-            presence: FilePresence::Missing,
-        },
+    let prune = vec![
+        observation(first_row.clone(), Some(1000), ObservedPresence::Missing),
+        observation(second_row.clone(), Some(1000), ObservedPresence::Missing),
     ];
+    let result = store.apply_ledger_presence(&prune, LedgerPresenceMode::Prune, 2000);
+    assert!(result.is_err(), "batch prune must fail due to trigger");
 
-    let res = store.apply_ledger_presence(&prune_obs, LedgerPresenceMode::Prune, 2000);
-    assert!(res.is_err(), "batch prune must fail due to trigger");
-
-    // Both row1 and row2 must be preserved due to transaction rollback
-    assert!(store.get_ledger(&row1.id.to_string()).unwrap().is_some());
-    assert!(store.get_ledger(&row2.id.to_string()).unwrap().is_some());
+    assert!(store.get_ledger(&first.file_id.to_string()).unwrap().is_some());
+    assert!(store.get_ledger(&second.file_id.to_string()).unwrap().is_some());
 }

@@ -139,7 +139,30 @@ fn legacy_root_configuration_respects_frozen_owner_and_snapshot_overlap() {
     store.begin_library_removal(&a.id).unwrap();
     protected(store.set_library_root(MediaKind::Tv, "/changed"));
     protected(store.insert_library_root(MediaKind::Tv, "/new-root"));
-    protected(store.delete_extra_library_root(&root.id));
+
+    // An extra root of a frozen non-default Library is owned by that Library, so
+    // the removal freeze protects it.
+    let owned = temp.path().join("owned");
+    let extra = owned.join("extra");
+    let frozen = store
+        .create_library(
+            MediaKind::Movie,
+            "C",
+            &[owned.to_str().unwrap(), extra.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let frozen_extra = store
+        .list_library_roots()
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.path == extra)
+        .unwrap();
+    store.begin_library_removal(&frozen.id).unwrap();
+    protected(store.delete_extra_library_root(&frozen_extra.id));
+
     for path in &a.root_paths {
         protected(store.set_library_root(MediaKind::Movie, path.to_str().unwrap()));
         protected(store.insert_library_root(MediaKind::Movie, path.to_str().unwrap()));

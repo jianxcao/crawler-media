@@ -67,25 +67,6 @@ fn nested_root_wins_and_sibling_prefix_does_not_match() {
 }
 
 #[test]
-fn equal_depth_is_ambiguous() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Store::open(tmp.path().join("data")).unwrap();
-    let shared_root = tmp.path().join("shared");
-    std::fs::create_dir_all(&shared_root).unwrap();
-
-    let _lib1 = create(&store, MediaKind::Movie, &[&shared_root]);
-    let _lib2 = create(&store, MediaKind::Movie, &[&shared_root]);
-
-    let scope = store::LibraryPathScope::resolve(store.library_ownership().unwrap()).unwrap();
-    let file = shared_root.join("one.mkv");
-    let resolved = store::LibraryPathScope::resolve_path(&file).unwrap();
-    assert!(matches!(
-        scope.owner(&resolved, MediaKind::Movie),
-        store::StrictOwner::Ambiguous
-    ));
-}
-
-#[test]
 fn resolved_scope_preserves_symlink_and_missing_descendant_rules() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
@@ -129,26 +110,3 @@ fn scope_is_stale_after_root_kind_or_freeze_change() {
     assert!(!scope.matches(&snapshot2));
 }
 
-#[test]
-fn different_kind_overlap_keeps_existing_kind_contract() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Store::open(tmp.path().join("data")).unwrap();
-    let shared_root = tmp.path().join("mixed");
-    std::fs::create_dir_all(&shared_root).unwrap();
-
-    let movie_lib = create(&store, MediaKind::Movie, &[&shared_root]);
-    let tv_lib = create(&store, MediaKind::Tv, &[&shared_root]);
-
-    let scope = store::LibraryPathScope::resolve(store.library_ownership().unwrap()).unwrap();
-    let file = shared_root.join("item.mkv");
-    let resolved = store::LibraryPathScope::resolve_path(&file).unwrap();
-
-    match scope.owner(&resolved, MediaKind::Movie) {
-        store::StrictOwner::Owned(lib) => assert_eq!(lib.id, movie_lib.id),
-        _ => panic!("expected movie lib for movie kind"),
-    }
-    match scope.owner(&resolved, MediaKind::Tv) {
-        store::StrictOwner::Owned(lib) => assert_eq!(lib.id, tv_lib.id),
-        _ => panic!("expected tv lib for tv kind"),
-    }
-}

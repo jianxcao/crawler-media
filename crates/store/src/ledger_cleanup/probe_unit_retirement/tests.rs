@@ -2,6 +2,7 @@ use crate::Store;
 use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
 
 fn fixture(store: &Store, root: &std::path::Path) -> (Media, LedgerRow, LedgerRow) {
+    std::fs::create_dir_all(root).unwrap();
     let library = store
         .create_library(
             MediaKind::Tv,
@@ -163,44 +164,6 @@ fn a_late_unit_finish_does_not_resurrect_a_retired_job() {
     );
 }
 
-#[test]
-fn opening_a_pre_fix_database_repairs_orphan_probe_units() {
-    let temp = tempfile::tempdir().unwrap();
-    let data = temp.path().join("data");
-    let store = Store::open(&data).unwrap();
-    let (media, first, _second) = fixture(&store, &temp.path().join("tv"));
-    let first_id = first.id.to_string();
-    let units = [unit(&first_id)];
-    store
-        .create_probe_job(
-            "job-3",
-            "media_probe",
-            &media.id.to_string(),
-            Some(1),
-            "ledger:legacy",
-            &units,
-        )
-        .unwrap();
-    store.start_probe_unit("job-3", &first_id).unwrap();
-    // Simulate a database written by the previous release: the ledger row is
-    // gone but its probe unit survived, and the schema version predates the
-    // repair migration.
-    store
-        .library
-        .execute("DELETE FROM ledger WHERE id = ?1", [&first_id])
-        .unwrap();
-    store
-        .library
-        .pragma_update(None, "user_version", 9)
-        .unwrap();
-    drop(store);
-
-    let reopened = Store::open(&data).unwrap();
-    assert!(reopened.probe_job_units("job-3").unwrap().is_empty());
-    let job = reopened.get_probe_job("job-3").unwrap().unwrap();
-    assert_eq!(job.status, "cancelled");
-    assert_eq!(job.total, 0);
-}
 
 /// Two-unit job whose first unit is already terminal while the second is still
 /// outstanding, so a later deletion of the second ledger retires the last

@@ -1,8 +1,24 @@
+use std::collections::HashMap;
+use std::path::Path;
 use std::str::FromStr;
+
+use domain::{LedgerId, LedgerRow, LibraryId, MediaId, MediaKind};
 use rusqlite::{OptionalExtension, params};
-use domain::{LedgerId, LedgerRow};
+
+use super::library_write::reduce_incremental::{
+    ChangedFile, read_file_summary_facts, reduce_library_media_incremental,
+};
+use super::library_write::{
+    ensure_library_writable, ensure_media_writable, enqueue_probe, insert_file_row,
+    reduce_library_media, sync_coverage,
+};
 use super::{Store, StoreError};
 
+/// Maximum number of scanned files committed by one [`Store::insert_scanned_ledgers`] call.
+///
+/// This is the scan commit window: every affected media is reduced once per window instead
+/// of once per file.
+pub const MAX_SCAN_BATCH: usize = 100;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScanProbeObligation {
@@ -11,90 +27,133 @@ pub struct ScanProbeObligation {
     pub reason: String,
 }
 
+/// How many files one batch published for a single media, keeping the file id and units
+/// only while the media is still at exactly one changed file.
+#[derive(Default)]
+struct BatchChange {
+    count: usize,
+    file_id: Option<String>,
+    units: Vec<(i32, i32)>,
+}
+
 impl Store {
-    /// Atomically insert a scanned ledger row and record its probe obligation
-    /// in a single Immediate transaction in library.db.
+    /// Record one scanned file and its probe obligation in a single transaction.
+    ///
+    /// Ownership is resolved from the path components against the enabled Library roots:
+    /// the longest root wins, an ambiguous or unmatched path is rejected instead of being
+    /// silently attached to some Library.
     pub fn insert_scanned_ledger(
         &self,
         row: &LedgerRow,
         now_ms: i64,
     ) -> Result<(), StoreError> {
-        let tx = rusqlite::Transaction::new_unchecked(
-            &self.library,
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
+        self.insert_scanned_ledgers(std::slice::from_ref(row), now_ms)
+    }
 
-        // Find library and root for row.path
-        let lib_info: Option<(String, String, String)> = tx.query_row(
-            "SELECT r.library_id, r.root_id, l.kind
-             FROM library_roots r
-             JOIN libraries l ON r.library_id = l.library_id
-             WHERE ?1 LIKE (r.display_path || '%') OR ?1 LIKE (r.path_key || '%')
-             ORDER BY LENGTH(r.display_path) DESC LIMIT 1",
-            params![row.path],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        ).optional()?;
-
-        let (lib_id, root_id, kind) = match lib_info {
-            Some(info) => info,
-            None => {
-                // Fallback to first library if path outside roots
-                let first: Option<(String, String, String)> = tx.query_row(
-                    "SELECT r.library_id, r.root_id, l.kind FROM library_roots r JOIN libraries l ON r.library_id = l.library_id LIMIT 1",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                ).optional()?;
-                first.unwrap_or_else(|| ("".into(), "".into(), "movie".into()))
-            }
-        };
-
-        // Insert into library_files table
-        tx.execute(
-            "INSERT INTO library_files (
-                 file_id, library_id, root_id, media_id, kind, path_key, display_path,
-                 presence_state, publication_state, file_revision, source_version,
-                 resolution, codec, hdr, quality_source, confidence, filter_score
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, 'present', 'published', 1, 'v1', ?7, ?8, ?9, ?10, ?11, ?12)
-             ON CONFLICT(file_id) DO NOTHING",
-            params![
-                row.id.to_string(),
-                lib_id,
-                root_id,
-                row.media_id.to_string(),
-                kind,
-                row.path,
-                row.resolution,
-                row.codec,
-                row.hdr,
-                row.quality_source.as_str(),
-                row.confidence.as_str(),
-                row.filter_score,
-            ],
-        )?;
-
-        // Insert unit mapping
-        let season_num = row.season.map(|s| s as i32).unwrap_or(-1);
-        let episode_num = row.episode.map(|e| e as i32).unwrap_or(-1);
-        tx.execute(
-            "INSERT INTO library_file_units (file_id, library_id, media_id, season, episode)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(file_id, season, episode) DO NOTHING",
-            params![row.id.to_string(), lib_id, row.media_id.to_string(), season_num, episode_num],
-        )?;
-
-        // Insert probe obligation into file_probe_obligations
-        tx.execute(
-            "INSERT INTO file_probe_obligations (file_id, created_at_ms, reason)
-             VALUES (?1, ?2, 'scan')
-             ON CONFLICT(file_id) DO NOTHING",
-            params![row.id.to_string(), now_ms],
-        )?;
-
-        // Maintain library_items via reduce_library_media
-        if let Ok(lid) = lib_id.parse::<domain::LibraryId>() {
-            crate::library_write::reduce_library_media(&tx, lid, row.media_id)?;
+    /// Record up to [`MAX_SCAN_BATCH`] scanned files in one transaction.
+    ///
+    /// A media that gained exactly one file is reduced incrementally; a media that gained
+    /// several is reduced once with the full recompute, so the batch never pays one full
+    /// card rebuild per file.
+    pub fn insert_scanned_ledgers(
+        &self,
+        rows: &[LedgerRow],
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        if rows.is_empty() {
+            return Ok(());
         }
-
+        if rows.len() > MAX_SCAN_BATCH {
+            return Err(StoreError::Invalid(format!(
+                "exceeded {MAX_SCAN_BATCH} files per scan batch"
+            )));
+        }
+        let tx = self.library.unchecked_transaction()?;
+        let mut affected: HashMap<(String, MediaId), BatchChange> = HashMap::new();
+        for row in rows {
+            let kind = media_kind(&tx, row.media_id)?;
+            let (library_id, root_id) = resolve_owned_root(&tx, Path::new(&row.path), kind)?;
+            ensure_library_writable(&tx, &library_id)?;
+            ensure_media_writable(&tx, row.media_id)?;
+            let artwork = crate::files::DiscoveredArtwork::discover(Path::new(&row.path));
+            let file = domain::LibraryFile {
+                file_id: row.id,
+                library_id: library_id.parse::<LibraryId>()?,
+                root_id,
+                media_id: row.media_id,
+                kind,
+                path: Path::new(&row.path).to_path_buf(),
+                version: domain::FileVersion {
+                    revision: 1,
+                    source_version: "v1".into(),
+                },
+                presence: domain::FilePresence::Present,
+                publication: domain::FilePublication::Published,
+                size_bytes: None,
+                stat_known: false,
+                created_ns: None,
+                modified_ns: None,
+                source_digest: None,
+                source_path: None,
+                transfer_mode: None,
+                resolution: row.resolution.clone(),
+                codec: row.codec.clone(),
+                hdr: row.hdr.clone(),
+                quality_source: row.quality_source,
+                confidence: row.confidence,
+                filter_score: row.filter_score,
+                release_quality: None,
+                duration_ms: None,
+                tracks_version: 0,
+                poster_path: artwork.poster,
+                backdrop_path: artwork.backdrop,
+                still_path: artwork.still,
+            };
+            insert_file_row(&tx, &file)?;
+            let units = [domain::UnitKey::new(
+                row.season.map(|s| s as i32).unwrap_or(-1),
+                row.episode.map(|e| e as i32).unwrap_or(-1),
+            )];
+            sync_coverage(&tx, &file, &units)?;
+            enqueue_probe(&tx, file.file_id, now_ms)?;
+            let change = affected
+                .entry((library_id, row.media_id))
+                .or_default();
+            change.count += 1;
+            if change.count == 1 {
+                change.file_id = Some(file.file_id.to_string());
+                change.units = units
+                    .iter()
+                    .map(|unit| (unit.season, unit.episode))
+                    .collect();
+            } else {
+                change.file_id = None;
+                change.units.clear();
+            }
+        }
+        for ((library_id, media_id), change) in affected {
+            let library_id = library_id.parse::<LibraryId>()?;
+            match change.file_id {
+                Some(file_id) => {
+                    let after = read_file_summary_facts(&tx, &file_id)?
+                        .ok_or_else(|| StoreError::Missing(format!("file {file_id}")))?;
+                    reduce_library_media_incremental(
+                        &tx,
+                        library_id,
+                        media_id,
+                        &ChangedFile {
+                            before: None,
+                            before_units: &[],
+                            after: &after,
+                            after_units: &change.units,
+                        },
+                    )?;
+                }
+                None => {
+                    reduce_library_media(&tx, library_id, media_id)?;
+                }
+            }
+        }
         tx.commit()?;
         Ok(())
     }
@@ -144,4 +203,76 @@ impl Store {
         )?;
         Ok(())
     }
+}
+
+fn media_kind(tx: &rusqlite::Connection, media_id: domain::MediaId) -> Result<MediaKind, StoreError> {
+    let kind: String = tx
+        .query_row(
+            "SELECT kind FROM media WHERE media_id = ?1",
+            params![media_id.to_string()],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| StoreError::Missing(format!("media {media_id}")))?;
+    kind.parse::<MediaKind>().map_err(StoreError::MediaKind)
+}
+
+/// Longest enabled root that component-wise contains `path` for this kind of Library.
+///
+/// Equal-depth candidates are ambiguous and therefore rejected; a path outside every
+/// root is rejected too. Never falls back to an arbitrary Library.
+fn resolve_owned_root(
+    tx: &rusqlite::Connection,
+    path: &Path,
+    kind: MediaKind,
+) -> Result<(String, String), StoreError> {
+    let mut stmt = tx.prepare(
+        "SELECT r.root_id, r.library_id, r.display_path
+         FROM library_roots r
+         JOIN libraries l ON l.library_id = r.library_id
+         WHERE l.kind = ?1 AND l.lifecycle_state = 'ready'
+           AND NOT EXISTS (SELECT 1 FROM library_removals m
+                           WHERE m.library_id = r.library_id AND m.state <> 'succeeded')",
+    )?;
+    let rows = stmt
+        .query_map(params![kind.as_str()], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut best: Option<(usize, String, String)> = None;
+    let mut ambiguous = false;
+    for (root_id, library_id, display) in rows {
+        let root = Path::new(&display);
+        if !path.starts_with(root) {
+            continue;
+        }
+        let depth = root.components().count();
+        match &best {
+            Some((best_depth, _, _)) if *best_depth > depth => {}
+            Some((best_depth, _, _)) if *best_depth == depth => ambiguous = true,
+            _ => {
+                best = Some((depth, root_id, library_id));
+                ambiguous = false;
+            }
+        }
+    }
+    if ambiguous {
+        return Err(StoreError::Protected(format!(
+            "path {} has ambiguous library ownership",
+            path.display()
+        )));
+    }
+    best.map(|(_, root_id, library_id)| (library_id, root_id))
+        .ok_or_else(|| {
+            StoreError::Protected(format!(
+                "path {} is outside every {} library root",
+                path.display(),
+                kind.as_str()
+            ))
+        })
 }

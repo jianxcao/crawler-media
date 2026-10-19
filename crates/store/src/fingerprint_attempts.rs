@@ -25,13 +25,13 @@ impl Store {
     ) -> Result<(), StoreError> {
         self.library.execute(
             "INSERT INTO fingerprint_attempts (
-                 attempt_id, job_id, ledger_id, kind, window_start_ms,
+                 attempt_id, job_id, file_id, kind, window_start_ms,
                  window_end_ms, phase, started_at_ms, finished_at_ms,
                  status, error_kind, metrics_json
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(attempt_id) DO UPDATE SET
                  job_id = excluded.job_id,
-                 ledger_id = excluded.ledger_id,
+                 file_id = excluded.file_id,
                  kind = excluded.kind,
                  window_start_ms = excluded.window_start_ms,
                  window_end_ms = excluded.window_end_ms,
@@ -91,7 +91,10 @@ impl Store {
 
         if let Some(path) = expected_path {
             let exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM ledger WHERE id = ?1 AND path = ?2)",
+                "SELECT EXISTS(
+                     SELECT 1 FROM library_files
+                     WHERE file_id = ?1 AND (path_key = ?2 OR display_path = ?2)
+                 )",
                 params![attempt.ledger_id, path],
                 |row| row.get(0),
             )?;
@@ -102,13 +105,13 @@ impl Store {
 
         tx.execute(
             "INSERT INTO fingerprint_attempts (
-                 attempt_id, job_id, ledger_id, kind, window_start_ms,
+                 attempt_id, job_id, file_id, kind, window_start_ms,
                  window_end_ms, phase, started_at_ms, finished_at_ms,
                  status, error_kind, metrics_json
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(attempt_id) DO UPDATE SET
                  job_id = excluded.job_id,
-                 ledger_id = excluded.ledger_id,
+                 file_id = excluded.file_id,
                  kind = excluded.kind,
                  window_start_ms = excluded.window_start_ms,
                  window_end_ms = excluded.window_end_ms,
@@ -137,11 +140,11 @@ impl Store {
         if let Some(s) = sample {
             tx.execute(
                 "INSERT INTO fingerprint_samples (
-                     sample_id, ledger_id, source_version, capture_profile_key,
+                     sample_id, file_id, source_version, capture_profile_key,
                      kind, window_start_ms, window_end_ms, pcm_duration_ms,
                      fingerprint_json, captured_job_id, captured_at_ms, metrics_json
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-                 ON CONFLICT(ledger_id, source_version, capture_profile_key, kind, window_start_ms, window_end_ms)
+                 ON CONFLICT(file_id, source_version, capture_profile_key, kind, window_start_ms, window_end_ms)
                  DO UPDATE SET
                      sample_id = excluded.sample_id,
                      pcm_duration_ms = excluded.pcm_duration_ms,
@@ -175,7 +178,7 @@ impl Store {
         job_id: &str,
     ) -> Result<Vec<StoredFingerprintAttempt>, StoreError> {
         let mut stmt = self.library.prepare(
-            "SELECT attempt_id, job_id, ledger_id, kind, window_start_ms,
+            "SELECT attempt_id, job_id, file_id, kind, window_start_ms,
                     window_end_ms, phase, started_at_ms, finished_at_ms,
                     status, error_kind, metrics_json
              FROM fingerprint_attempts WHERE job_id = ?1
@@ -208,7 +211,7 @@ impl Store {
     ) -> Result<Option<StoredFingerprintAttempt>, StoreError> {
         self.library
             .query_row(
-                "SELECT attempt_id, job_id, ledger_id, kind, window_start_ms,
+                "SELECT attempt_id, job_id, file_id, kind, window_start_ms,
                         window_end_ms, phase, started_at_ms, finished_at_ms,
                         status, error_kind, metrics_json
                  FROM fingerprint_attempts WHERE attempt_id = ?1",

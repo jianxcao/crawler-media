@@ -7,18 +7,36 @@
 
 use std::path::Path;
 
-use domain::{MediaId, UserId};
+use domain::{LedgerId, MediaId, UserId};
 use store::{PlaybackLogScope, SessionRow, Store};
 
 const DAY: i64 = 86_400;
+
+fn insert_movie(store: &Store, id: MediaId) {
+    store
+        .insert_media(&domain::Media {
+            id,
+            kind: domain::MediaKind::Movie,
+            title: format!("Fixture {id}"),
+            year: None,
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+}
 
 fn session(user: UserId, media: MediaId, device: &str, started: i64) -> SessionRow {
     SessionRow {
         device_id: device.into(),
         user_id: user,
         media_id: media,
-        season: None,
-        episode: None,
+        season: Some(-1),
+        episode: Some(-1),
         client: Some("fixture".into()),
         device_name: None,
         client_version: None,
@@ -41,7 +59,8 @@ fn session(user: UserId, media: MediaId, device: &str, started: i64) -> SessionR
     }
 }
 
-/// 公开 seam 造一条历史：`upsert_session` + `close_session`（`now` 即 ended_at）。
+/// 公开 seam 造一条历史：`issue_play_session` 提供绑定，`upsert_session` +
+/// `close_session`（`ended` 即 ended_at）写日志。
 fn log_fixture(
     store: &Store,
     user: UserId,
@@ -50,9 +69,15 @@ fn log_fixture(
     started: i64,
     ended: i64,
 ) -> String {
-    store
-        .upsert_session(&session(user, media, device, started))
-        .unwrap();
+    let mut row = session(user, media, device, started);
+    let ledger = LedgerId::new();
+    row.ledger_id = Some(ledger.to_string());
+    row.play_session_id = Some(
+        store
+            .issue_play_session(user, device, ledger, started)
+            .unwrap(),
+    );
+    store.upsert_session(&row).unwrap();
     store
         .close_session(user, device, ended)
         .unwrap()
@@ -60,9 +85,29 @@ fn log_fixture(
         .id
 }
 
+/// 一条仍在进行的会话（未关闭），同样带 `playback_session_ids` 绑定。
+fn live_session(
+    store: &Store,
+    user: UserId,
+    media: MediaId,
+    device: &str,
+    started: i64,
+) -> SessionRow {
+    let mut row = session(user, media, device, started);
+    let ledger = LedgerId::new();
+    row.ledger_id = Some(ledger.to_string());
+    row.play_session_id = Some(
+        store
+            .issue_play_session(user, device, ledger, started)
+            .unwrap(),
+    );
+    store.upsert_session(&row).unwrap();
+    row
+}
+
 /// test-only：单事务原始 SQL 批量造历史（断言仍走公开 seam）。
 fn raw_logs(data_dir: &Path, user: UserId, media: MediaId, ended_at: &[i64]) {
-    let mut conn = rusqlite::Connection::open(data_dir.join("subscribe.db")).unwrap();
+    let mut conn = rusqlite::Connection::open(data_dir.join("library.db")).unwrap();
     let tx = conn.transaction().unwrap();
     {
         let mut stmt = tx
@@ -70,8 +115,11 @@ fn raw_logs(data_dir: &Path, user: UserId, media: MediaId, ended_at: &[i64]) {
                 "INSERT INTO playback_logs
                     (id, user_id, media_id, season, episode, client, device_name,
                      play_method, started_at, ended_at, watched_ms, start_position_ms,
-                     end_position_ms, duration_ms, completed, device_id)
-                 VALUES (?1, ?2, ?3, NULL, NULL, NULL, NULL, 'local', ?4, ?5, 10, 0, 0, NULL, 0, NULL)",
+                     end_position_ms, duration_ms, completed, device_id,
+                     play_session_id, generation, file_id, file_revision,
+                     source_version, timeline_mode)
+                 VALUES (?1, ?2, ?3, NULL, NULL, NULL, NULL, 'local', ?4, ?5, 10, 0, 0, NULL, 0, ?6,
+                         ?7, 1, ?8, 1, 'v1', 'full_file')",
             )
             .unwrap();
         for (index, ended) in ended_at.iter().enumerate() {
@@ -81,6 +129,9 @@ fn raw_logs(data_dir: &Path, user: UserId, media: MediaId, ended_at: &[i64]) {
                 media.to_string(),
                 ended - 1,
                 ended,
+                format!("raw-dev-{index}"),
+                format!("raw-session-{index}"),
+                format!("raw-file-{index}"),
             ])
             .unwrap();
         }
@@ -90,7 +141,7 @@ fn raw_logs(data_dir: &Path, user: UserId, media: MediaId, ended_at: &[i64]) {
 
 /// test-only 只读计数：store 没有公开的 `playback_metrics` 读取接口。
 fn metric_count(data_dir: &Path, user: UserId) -> i64 {
-    let conn = rusqlite::Connection::open(data_dir.join("subscribe.db")).unwrap();
+    let conn = rusqlite::Connection::open(data_dir.join("library.db")).unwrap();
     conn.query_row(
         "SELECT COUNT(*) FROM playback_metrics WHERE user_id = ?1",
         [user.to_string()],
@@ -171,12 +222,12 @@ fn prune_keeps_progress_favorites_sessions_and_metrics() {
     let user = UserId::new();
     let media = MediaId::new();
     let cutoff = 1_700_000_000i64;
+    insert_movie(&store, media);
     store
         .upsert_unit(user, media, -1, -1, 42_000, Some(false), Some(true), Some(100_000), None, None, false, 100)
         .unwrap();
     let progress = store.unit_state(user, media, -1, -1).unwrap().unwrap();
-    let live = session(user, media, "live", cutoff);
-    store.upsert_session(&live).unwrap();
+    let live = live_session(&store, user, media, "live", cutoff);
     store
         .insert_metric(user, media, 0, Some("web"), Some(120), 5, 1, 0, None, None, 1_000, cutoff)
         .unwrap();
@@ -306,7 +357,7 @@ fn delete_failure_rolls_back_the_whole_batch() {
         }
     }
     {
-        let conn = rusqlite::Connection::open(tmp.path().join("subscribe.db")).unwrap();
+        let conn = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
         conn.execute_batch(
             "CREATE TRIGGER reject_playback_log_delete BEFORE DELETE ON playback_logs
              BEGIN SELECT RAISE(ABORT, 'injected delete failure'); END;",

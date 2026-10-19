@@ -42,7 +42,7 @@ impl Store {
         }
         sql.push_str(" ORDER BY started_at DESC, id DESC LIMIT ?");
         args.push(rusqlite::types::Value::Integer(limit as i64));
-        let mut stmt = self.subscribe.prepare(&sql)?;
+        let mut stmt = self.library.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(args), map_log)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -70,7 +70,7 @@ impl Store {
             args.push(rusqlite::types::Value::Text(user_id.to_string()));
         }
         sql.push_str(" LIMIT 1");
-        let mut stmt = self.subscribe.prepare(&sql)?;
+        let mut stmt = self.library.prepare(&sql)?;
         Ok(stmt
             .query_row(rusqlite::params_from_iter(args), |_| Ok(()))
             .optional()?
@@ -102,7 +102,7 @@ impl Store {
             );
         }
         let changed = self
-            .subscribe
+            .library
             .execute(&sql, rusqlite::params_from_iter(values))?;
         Ok(changed)
     }
@@ -132,7 +132,7 @@ impl Store {
             );
         }
         let changed = self
-            .subscribe
+            .library
             .execute(&sql, rusqlite::params_from_iter(values))?;
         Ok(changed)
     }
@@ -153,7 +153,7 @@ impl Store {
         watched_ms: i64,
         now: i64,
     ) -> Result<(), StoreError> {
-        self.subscribe.execute(
+        self.library.execute(
             "INSERT INTO playback_metrics
                 (id, user_id, media_id, tier, engine, ttff_ms, rebuffer_ms,
                  rebuffer_count, seek_count, dropped_frames, total_frames,

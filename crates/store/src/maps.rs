@@ -67,8 +67,10 @@ pub(super) fn map_ledger(row: &rusqlite::Row<'_>) -> rusqlite::Result<LedgerRow>
         id: parse_id(row.get(0)?, 0)?,
         media_id: parse_id(row.get(1)?, 1)?,
         path: row.get(2)?,
-        season: row.get::<_, Option<i64>>(3)?.map(|v| v as u32),
-        episode: row.get::<_, Option<i64>>(4)?.map(|v| v as u32),
+        // `library_file_units` stores the whole-media unit as (-1, -1); only real
+        // season/episode coordinates are exposed, so a whole-file row reads as None.
+        season: whole_or_coordinate(row.get(3)?),
+        episode: whole_or_coordinate(row.get(4)?),
         resolution: row.get(5)?,
         codec: row.get(6)?,
         hdr: row.get(7)?,
@@ -82,6 +84,11 @@ pub(super) fn map_ledger(row: &rusqlite::Row<'_>) -> rusqlite::Result<LedgerRow>
         },
         filter_score: row.get(10)?,
     })
+}
+
+/// Unit coordinates are `-1` for the whole-media unit; anything else negative is invalid.
+fn whole_or_coordinate(raw: Option<i64>) -> Option<u32> {
+    raw.and_then(|value| u32::try_from(value).ok())
 }
 
 pub(super) fn map_subscribe(row: &rusqlite::Row<'_>) -> rusqlite::Result<Subscribe> {

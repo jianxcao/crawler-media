@@ -17,6 +17,10 @@ pub enum SubscribeError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Hook(#[from] PluginError),
+    /// A file reached publication without the destination identity that makes a
+    /// row meaningful (the owning Library or its root).
+    #[error("publication needs a real {0}: the Transfer has no destination identity")]
+    MissingPublicationTarget(&'static str),
 }
 
 pub struct RunInput<'a, D: Downloader + ?Sized> {

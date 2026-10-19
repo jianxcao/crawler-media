@@ -10,7 +10,11 @@ use super::{Store, StoreError};
 
 pub mod session_ids;
 pub use session_ids::{PlaySessionBinding, PlaySessionIdState};
+pub mod merge;
+mod merge_facts;
 pub mod mutate;
+pub mod source;
+pub use source::PlaybackSource;
 pub mod types;
 pub use types::*;
 pub const UNIT_WHOLE: i32 = -1;
@@ -106,6 +110,7 @@ mod logs;
 mod retention;
 mod sessions;
 mod units;
+mod user_summary;
 mod watch_aggregate;
 
 pub use log_scope::{PlaybackLogPage, PlaybackLogScope};

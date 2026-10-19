@@ -18,6 +18,24 @@ fn insert_ledger_row(store: &Store, path: &std::path::Path) {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
+    let root = path.parent().unwrap();
+    if !store
+        .list_library_roots()
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate.path == root)
+    {
+        store
+            .create_library(
+                MediaKind::Movie,
+                &format!("scan-{}", root.display()),
+                &[root.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+    }
     store
         .insert_ledger(&LedgerRow {
             id: LedgerId::new(),

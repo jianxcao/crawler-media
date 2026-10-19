@@ -5,6 +5,16 @@ use domain::{EntityScope, MediaId, MetadataAdoption};
 use super::types::EffectiveMetadata;
 use super::super::{Store, StoreError};
 
+/// Display facts a **Scrape** observed for one **Media**; they are written with the
+/// adopted metadata so the card and the detail view read one source of truth.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScrapedDisplay<'a> {
+    pub rating: Option<f64>,
+    pub release_date: Option<&'a str>,
+    pub studio: Option<&'a str>,
+    pub studio_logo: Option<&'a str>,
+}
+
 impl Store {
     pub fn adopt_metadata(
         &self,
@@ -98,13 +108,21 @@ impl Store {
                 let genres_json = serde_json::to_string(genres_ref)?;
                 let poster_url = input.normalized.fields.poster_url.value().cloned();
                 let backdrop_url = input.normalized.fields.backdrop_url.value().cloned();
+                let countries_json = match input.normalized.fields.countries.value() {
+                    Some(list) => serde_json::to_string(list)?,
+                    None => "[]".to_string(),
+                };
+                let details_json = serde_json::to_string(&serde_json::json!({
+                    "version": 1,
+                    "fields": input.normalized.fields,
+                }))?;
                 tx.execute(
                     "INSERT INTO media_metadata
                         (media_id, locale, title, original_title, year, overview, release_date,
                          rating, runtime_minutes, language, genres_json, countries_json, poster_url,
                          backdrop_url, details_json, field_origins_json, revision)
                      VALUES
-                        (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, '[]', ?12, ?13, '{}', ?14, ?15)
+                        (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?16, ?12, ?13, ?17, ?14, ?15)
                      ON CONFLICT(media_id, locale) DO UPDATE SET
                          title = excluded.title,
                          original_title = excluded.original_title,
@@ -115,7 +133,9 @@ impl Store {
                          runtime_minutes = excluded.runtime_minutes,
                          language = excluded.language,
                          genres_json = excluded.genres_json,
-                         poster_url = excluded.poster_url,
+                        countries_json = excluded.countries_json,
+                        poster_url = excluded.poster_url,
+                        details_json = excluded.details_json,
                          backdrop_url = excluded.backdrop_url,
                          field_origins_json = excluded.field_origins_json,
                          revision = excluded.revision",
@@ -135,6 +155,8 @@ impl Store {
                         backdrop_url,
                         selection_origins_json,
                         rev,
+                        countries_json,
+                        details_json,
                     ],
                 )?;
 
@@ -200,6 +222,8 @@ impl Store {
             }
         };
 
+        // The card is derived from the facts just written; refresh it in the same transaction.
+        crate::library_write::reduce::reduce_media_everywhere(&tx, input.media_id)?;
         tx.commit()?;
         Ok(next_eff_rev)
     }
@@ -240,5 +264,87 @@ impl Store {
             })
             .optional()?;
         Ok(row)
+    }
+
+    /// Record display facts observed by a Scrape (rating, release date, studio, logo).
+    ///
+    /// They belong to the adopted metadata, never inside `library_items.aliases_json`
+    /// (which holds only the five external ids), and the affected cards are reduced in
+    /// the same transaction.
+    pub fn record_scraped_display(
+        &self,
+        media_id: MediaId,
+        locale: &str,
+        display: ScrapedDisplay<'_>,
+    ) -> Result<(), StoreError> {
+        let rating = display.rating.filter(|value| (0.0..=10.0).contains(value));
+        let release_date = display.release_date.filter(|value| !value.trim().is_empty());
+        let studio = display.studio.filter(|value| !value.trim().is_empty());
+        let studio_logo = display.studio_logo.filter(|value| !value.trim().is_empty());
+        if rating.is_none() && release_date.is_none() && studio.is_none() && studio_logo.is_none() {
+            return Ok(());
+        }
+        let tx = self.library.unchecked_transaction()?;
+        let media = media_id.to_string();
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT details_json FROM media_metadata WHERE media_id = ?1 AND locale = ?2",
+                params![media, locale],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let mut payload = existing
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        payload.insert("version".into(), serde_json::Value::from(1));
+        let fields = payload
+            .entry("fields")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if let Some(object) = fields.as_object_mut() {
+            if let Some(name) = studio {
+                object.insert(
+                    "studios".into(),
+                    serde_json::Value::Array(vec![serde_json::Value::String(name.to_string())]),
+                );
+            }
+            if let Some(logo) = studio_logo {
+                object.insert(
+                    "studio_logo".into(),
+                    serde_json::Value::String(logo.to_string()),
+                );
+            }
+        }
+        let details_json = serde_json::Value::Object(payload).to_string();
+        match existing {
+            Some(_) => {
+                tx.execute(
+                    "UPDATE media_metadata SET
+                         rating = COALESCE(?3, rating),
+                         release_date = COALESCE(?4, release_date),
+                         details_json = ?5
+                     WHERE media_id = ?1 AND locale = ?2",
+                    params![media, locale, rating, release_date, details_json],
+                )?;
+            }
+            None => {
+                let title: String = tx.query_row(
+                    "SELECT title FROM media WHERE media_id = ?1",
+                    params![media],
+                    |r| r.get(0),
+                )?;
+                tx.execute(
+                    "INSERT INTO media_metadata
+                        (media_id, locale, title, rating, release_date, genres_json, countries_json,
+                         details_json, field_origins_json, revision)
+                     VALUES (?1, ?2, ?3, ?4, ?5, '[]', '[]', ?6, '{}', 0)",
+                    params![media, locale, title, rating, release_date, details_json],
+                )?;
+            }
+        }
+        crate::library_write::reduce::reduce_media_everywhere(&tx, media_id)?;
+        tx.commit()?;
+        Ok(())
     }
 }

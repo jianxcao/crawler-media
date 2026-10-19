@@ -28,7 +28,7 @@ impl Store {
             let Some(path) = fact.path.as_deref() else { continue };
             let Some(quality) = facts.quality(path) else { continue };
             tx.execute(
-                "UPDATE ledger SET release_quality = ?2 WHERE path = ?1",
+                "UPDATE library_files SET release_quality = ?2 WHERE path_key = ?1 OR display_path = ?1",
                 params![path, serde_json::to_string(&StoredQuality::from(quality))?],
             )?;
         }
@@ -39,7 +39,9 @@ impl Store {
     /// Load stable Release facts and overlay the latest stream probe fields.
     pub(crate) fn owned_quality(&self, row: &LedgerRow) -> Result<Release, StoreError> {
         let json: Option<String> = self.library.query_row(
-            "SELECT release_quality FROM ledger WHERE path = ?1", [&row.path], |r| r.get(0),
+            "SELECT release_quality FROM library_files WHERE path_key = ?1 OR display_path = ?1",
+            [&row.path],
+            |r| r.get(0),
         ).optional()?.flatten();
         let mut quality = match json {
             Some(json) => {

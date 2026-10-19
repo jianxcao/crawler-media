@@ -3,6 +3,7 @@ use rusqlite::{OptionalExtension, params};
 use std::str::FromStr;
 
 use super::{Store, StoreError};
+use super::user_summary::SummaryScope;
 use super::{UNIT_WHOLE, UnitRow, UnitState};
 
 impl Store {
@@ -51,7 +52,12 @@ impl Store {
             if (season, episode) == (UNIT_WHOLE, UNIT_WHOLE) {
                 store.copy_legacy_movie_unit_if_missing(user_id, media_id)?;
             }
-            store.set_unit_favorite_inner(user_id, media_id, season, episode, favorite, now)
+            store.set_unit_favorite_inner(user_id, media_id, season, episode, favorite, now)?;
+            store.refresh_user_library_summary(
+                user_id,
+                media_id,
+                SummaryScope::for_unit(season, episode),
+            )
         })
     }
 
@@ -124,20 +130,28 @@ impl Store {
         increment_play_count: bool,
         now: i64,
     ) -> Result<UnitState, StoreError> {
-        self.upsert_unit_internal(
-            user_id,
-            media_id,
-            season,
-            episode,
-            Some(position_ms),
-            played,
-            favorite,
-            duration_ms,
-            audio_track,
-            subtitle_track,
-            increment_play_count,
-            now,
-        )
+        self.playback_write(|store| {
+            let state = store.upsert_unit_internal(
+                user_id,
+                media_id,
+                season,
+                episode,
+                Some(position_ms),
+                played,
+                favorite,
+                duration_ms,
+                audio_track,
+                subtitle_track,
+                increment_play_count,
+                now,
+            )?;
+            store.refresh_user_library_summary(
+                user_id,
+                media_id,
+                SummaryScope::for_unit(season, episode),
+            )?;
+            Ok(state)
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -223,9 +237,10 @@ impl Store {
                 // New position on unbounded row: bind to current published file
                 let file_binding: Option<(String, i64, String, i64)> = self.library
                     .query_row(
-                        "SELECT f.file_id, f.file_revision, f.source_version, f.tracks_version
+                        "SELECT f.file_id, f.file_revision, f.source_version, COALESCE(d.tracks_version, f.tracks_version)
                          FROM library_files f
                          JOIN library_file_units u ON f.file_id = u.file_id
+                         LEFT JOIN file_details d ON d.file_id = f.file_id
                          WHERE u.media_id = ?1 AND u.season = ?2 AND u.episode = ?3
                            AND f.presence_state = 'present' AND f.publication_state = 'published'
                          ORDER BY f.file_revision DESC, f.file_id ASC
@@ -319,9 +334,13 @@ impl Store {
         self.library.execute(
             "INSERT OR IGNORE INTO playback_units
                 (user_id, media_id, season, episode, position_ms, played, favorite,
-                 duration_ms, audio_track, subtitle_track, play_count, watch_activity_at, favorite_at)
+                 duration_ms, audio_track, subtitle_track, play_count, watch_activity_at, favorite_at,
+                 resume_file_id, resume_file_revision, resume_source_version, timeline_mode, tracks_version,
+                 has_played_assertion, played_changed_at_ms)
              SELECT user_id, media_id, -1, -1, position_ms, played, favorite,
-                    duration_ms, audio_track, subtitle_track, play_count, watch_activity_at, favorite_at
+                    duration_ms, audio_track, subtitle_track, play_count, watch_activity_at, favorite_at,
+                    resume_file_id, resume_file_revision, resume_source_version, timeline_mode, tracks_version,
+                    has_played_assertion, played_changed_at_ms
              FROM playback_units
              WHERE user_id = ?1 AND media_id = ?2 AND season = 0 AND episode = 0",
             params![user, media],
@@ -337,7 +356,14 @@ impl Store {
                  audio_track = legacy.audio_track,
                  subtitle_track = legacy.subtitle_track,
                  play_count = legacy.play_count,
-                 watch_activity_at = legacy.watch_activity_at
+                 watch_activity_at = legacy.watch_activity_at,
+                 resume_file_id = legacy.resume_file_id,
+                 resume_file_revision = legacy.resume_file_revision,
+                 resume_source_version = legacy.resume_source_version,
+                 timeline_mode = legacy.timeline_mode,
+                 tracks_version = legacy.tracks_version,
+                 has_played_assertion = legacy.has_played_assertion,
+                 played_changed_at_ms = legacy.played_changed_at_ms
              FROM playback_units AS legacy
              WHERE canonical.user_id = ?1 AND canonical.media_id = ?2
                AND canonical.season = -1 AND canonical.episode = -1
@@ -511,7 +537,12 @@ impl Store {
             if (season, episode) == (-1, -1) {
                 store.copy_legacy_movie_unit_if_missing(user_id, media_id)?;
             }
-            store.set_unit_marks_inner(user_id, media_id, season, episode, played, favorite, now)
+            store.set_unit_marks_inner(user_id, media_id, season, episode, played, favorite, now)?;
+            store.refresh_user_library_summary(
+                user_id,
+                media_id,
+                SummaryScope::for_unit(season, episode),
+            )
         })
     }
 
@@ -533,12 +564,12 @@ impl Store {
                 self.set_unit_favorite_inner(user_id, media_id, season, episode, favorite, now)?;
             } else {
                 let existing = self.unit_state(user_id, media_id, season, episode)?;
-                self.upsert_unit(
+                self.upsert_unit_internal(
                     user_id,
                     media_id,
                     season,
                     episode,
-                    existing.as_ref().map(|unit| unit.position_ms).unwrap_or(0),
+                    Some(existing.as_ref().map(|unit| unit.position_ms).unwrap_or(0)),
                     played,
                     Some(favorite),
                     existing.as_ref().and_then(|unit| unit.duration_ms),
@@ -611,50 +642,99 @@ impl Store {
         media_ids: Option<&[MediaId]>,
         since_ms: Option<i64>,
     ) -> Result<usize, StoreError> {
-        let mut sql = String::from(
-            "UPDATE playback_units SET position_ms = 0, played = 0, play_count = 0, watch_activity_at = 0 WHERE user_id = ?",
-        );
+        if media_ids.is_some_and(|ids| ids.is_empty()) {
+            return Ok(0);
+        }
+        self.playback_write(|store| {
+            // Resolve the affected media before the update resets the activity clock.
+            let affected = match media_ids {
+                Some(ids) => ids.to_vec(),
+                None => store.user_playback_media_ids(user_id, since_ms)?,
+            };
+            let mut sql = String::from(
+                "UPDATE playback_units SET position_ms = 0, played = 0, play_count = 0, watch_activity_at = 0 WHERE user_id = ?",
+            );
+            let mut values: Vec<rusqlite::types::Value> =
+                vec![rusqlite::types::Value::Text(user_id.to_string())];
+            if let Some(since) = since_ms {
+                sql.push_str(" AND watch_activity_at >= ?");
+                values.push(rusqlite::types::Value::Integer(since));
+            }
+            if let Some(ids) = media_ids {
+                let marks = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                sql.push_str(&format!(" AND media_id IN ({marks})"));
+                values.extend(
+                    ids.iter()
+                        .map(|id| rusqlite::types::Value::Text(id.to_string())),
+                );
+            }
+            let changed = store
+                .library
+                .execute(&sql, rusqlite::params_from_iter(values))?;
+            for media_id in affected {
+                store.refresh_user_library_summary(user_id, media_id, SummaryScope::Whole)?;
+            }
+            Ok(changed)
+        })
+    }
+
+    /// Media this user has playback facts for, optionally limited to activity
+    /// at or after `since_ms`. One user's rows, never every user.
+    fn user_playback_media_ids(
+        &self,
+        user_id: UserId,
+        since_ms: Option<i64>,
+    ) -> Result<Vec<MediaId>, StoreError> {
+        let sql = if since_ms.is_some() {
+            "SELECT DISTINCT media_id FROM playback_units
+             WHERE user_id = ?1 AND watch_activity_at >= ?2"
+        } else {
+            "SELECT DISTINCT media_id FROM playback_units WHERE user_id = ?1"
+        };
         let mut values: Vec<rusqlite::types::Value> =
             vec![rusqlite::types::Value::Text(user_id.to_string())];
         if let Some(since) = since_ms {
-            sql.push_str(" AND watch_activity_at >= ?");
             values.push(rusqlite::types::Value::Integer(since));
         }
-        if let Some(ids) = media_ids {
-            if ids.is_empty() {
-                return Ok(0);
+        let mut statement = self.library.prepare(sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(values), |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut media = Vec::new();
+        for row in rows {
+            if let Ok(id) = row?.parse() {
+                media.push(id);
             }
-            let marks = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            sql.push_str(&format!(" AND media_id IN ({marks})"));
-            values.extend(
-                ids.iter()
-                    .map(|id| rusqlite::types::Value::Text(id.to_string())),
-            );
         }
-        let changed = self
-            .library
-            .execute(&sql, rusqlite::params_from_iter(values))?;
-        Ok(changed)
+        Ok(media)
     }
 
     pub fn delete_playback_for_media(&self, media_id: domain::MediaId) -> Result<(), StoreError> {
-        let id_str = media_id.to_string();
-        self.library.execute(
-            "DELETE FROM playback_units WHERE media_id = ?1",
-            params![&id_str],
-        )?;
-        self.library.execute(
-            "DELETE FROM playback_sessions WHERE media_id = ?1",
-            params![&id_str],
-        )?;
-        self.library.execute(
-            "DELETE FROM playback_logs WHERE media_id = ?1",
-            params![&id_str],
-        )?;
-        self.library.execute(
-            "DELETE FROM playback_metrics WHERE media_id = ?1",
-            params![&id_str],
-        )?;
-        Ok(())
+        self.playback_write(|store| {
+            let id_str = media_id.to_string();
+            store.library.execute(
+                "DELETE FROM playback_units WHERE media_id = ?1",
+                params![&id_str],
+            )?;
+            store.library.execute(
+                "DELETE FROM playback_sessions WHERE media_id = ?1",
+                params![&id_str],
+            )?;
+            store.library.execute(
+                "DELETE FROM playback_logs WHERE media_id = ?1",
+                params![&id_str],
+            )?;
+            store.library.execute(
+                "DELETE FROM playback_metrics WHERE media_id = ?1",
+                params![&id_str],
+            )?;
+            // Every user's facts for this media are gone, so their summaries are
+            // empty by definition. Scoped by media, not by user.
+            store.library.execute(
+                "DELETE FROM user_library_items WHERE media_id = ?1",
+                params![&id_str],
+            )?;
+            Ok(())
+        })
     }
 }

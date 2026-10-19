@@ -30,7 +30,10 @@ pub(super) fn validate_members(
             .map(|(id, _)| id.clone())
             .collect();
         let mut statement = tx.prepare(
-            "SELECT id, path FROM ledger WHERE media_id = ?1 AND COALESCE(season, 1) = ?2",
+            "SELECT DISTINCT f.file_id, f.display_path
+             FROM library_files f
+             LEFT JOIN library_file_units u ON u.file_id = f.file_id
+             WHERE f.media_id = ?1 AND COALESCE(NULLIF(u.season, -1), 1) = ?2",
         )?;
         let current = statement
             .query_map(
@@ -49,7 +52,7 @@ pub(super) fn validate_members(
                 Ok(true) => {}
                 Ok(false) => return Err(StoreError::Missing(format!("file_deleted: {id}"))),
                 Err(error) => {
-                    tracing::error!(%error, ledger_id = id, "检查标记发布源文件失败");
+                    tracing::error!(%error, file_id = id, "检查标记发布源文件失败");
                     return Err(error.into());
                 }
             }
@@ -67,7 +70,7 @@ pub(super) fn validate_job_members(
         .iter()
         .flat_map(|replacement| replacement.chapter_updates.iter().map(|(id, _)| id.clone()))
         .collect();
-    let mut statement = tx.prepare("SELECT ledger_id FROM probe_job_units WHERE job_id = ?1")?;
+    let mut statement = tx.prepare("SELECT file_id FROM probe_job_units WHERE job_id = ?1")?;
     let original: BTreeSet<String> = statement
         .query_map([job_id], |row| row.get(0))?
         .collect::<Result<_, _>>()?;
@@ -83,7 +86,7 @@ pub(super) fn validate_published_rows(
     tx: &Transaction<'_>,
     replacements: &[MarkerResultReplacement],
 ) -> Result<(), StoreError> {
-    let mut statement = tx.prepare("SELECT path FROM ledger WHERE id = ?1")?;
+    let mut statement = tx.prepare("SELECT display_path FROM library_files WHERE file_id = ?1")?;
     for replacement in replacements {
         for (id, _) in &replacement.chapter_updates {
             let path_opt: Option<String> = statement
@@ -97,7 +100,7 @@ pub(super) fn validate_published_rows(
                 Ok(true) => {}
                 Ok(false) => return Err(StoreError::Missing(format!("file_deleted: {id}"))),
                 Err(error) => {
-                    tracing::error!(%error, ledger_id = id, "检查标记发布源文件失败");
+                    tracing::error!(%error, file_id = id, "检查标记发布源文件失败");
                     return Err(error.into());
                 }
             }

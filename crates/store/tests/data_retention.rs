@@ -18,7 +18,7 @@ fn open_db(dir: &Path, name: &str) -> Connection {
 }
 
 fn metric_count(dir: &Path) -> i64 {
-    open_db(dir, "subscribe.db")
+    open_db(dir, "library.db")
         .query_row("SELECT COUNT(*) FROM playback_metrics", [], |row| row.get(0))
         .unwrap()
 }
@@ -41,14 +41,14 @@ fn insert_probe_job(
     .unwrap();
 }
 
-fn insert_unit(dir: &Path, job_id: &str, ledger_id: &str, status: &str) {
+fn insert_unit(dir: &Path, job_id: &str, file_id: &str, status: &str) {
     let conn = open_db(dir, "library.db");
     conn.execute(
         "INSERT INTO probe_job_units
-            (job_id, ledger_id, kind, force_fingerprint, reuse_fingerprint_cache,
+            (job_id, file_id, kind, force_fingerprint, reuse_fingerprint_cache,
              overwrite_markers, status, error, reuse_media_info_cache)
          VALUES (?1, ?2, 'metadata', 0, 0, 0, ?3, NULL, 0)",
-        params![job_id, ledger_id, status],
+        params![job_id, file_id, status],
     )
     .unwrap();
 }
@@ -57,9 +57,9 @@ fn insert_attempt(dir: &Path, attempt_id: &str, job_id: &str) {
     let conn = open_db(dir, "library.db");
     conn.execute(
         "INSERT INTO fingerprint_attempts
-            (attempt_id, job_id, ledger_id, kind, window_start_ms, window_end_ms,
+            (attempt_id, job_id, file_id, kind, window_start_ms, window_end_ms,
              phase, started_at_ms, finished_at_ms, status, error_kind, metrics_json)
-         VALUES (?1, ?2, 'ledger-1', 'intro', 0, 1000, 'capture', 1, 2, 'succeeded', NULL, '{}')",
+         VALUES (?1, ?2, 'file-1', 'intro', 0, 1000, 'capture', 1, 2, 'succeeded', NULL, '{}')",
         params![attempt_id, job_id],
     )
     .unwrap();
@@ -69,10 +69,10 @@ fn insert_sample(dir: &Path, sample_id: &str, job_id: &str) {
     let conn = open_db(dir, "library.db");
     conn.execute(
         "INSERT INTO fingerprint_samples
-            (sample_id, ledger_id, source_version, capture_profile_key, kind,
+            (sample_id, file_id, source_version, capture_profile_key, kind,
              window_start_ms, window_end_ms, pcm_duration_ms, fingerprint_json,
              captured_job_id, captured_at_ms, metrics_json)
-         VALUES (?1, 'ledger-1', 'v1', 'profile', 'intro', 0, 1000, 1000, '{}', ?2, 1, '{}')",
+         VALUES (?1, 'file-1', 'v1', 'profile', 'intro', 0, 1000, 1000, '{}', ?2, 1, '{}')",
         params![sample_id, job_id],
     )
     .unwrap();
@@ -93,8 +93,8 @@ fn attempt_count(dir: &Path) -> i64 {
 }
 
 fn catalog_count(dir: &Path) -> i64 {
-    open_db(dir, "catalog.db")
-        .query_row("SELECT COUNT(*) FROM catalog_cache", [], |row| row.get(0))
+    open_db(dir, "cache.db")
+        .query_row("SELECT COUNT(*) FROM tmdb_cache", [], |row| row.get(0))
         .unwrap()
 }
 
@@ -171,7 +171,7 @@ fn captured_sample_and_active_unit_protect_probe_jobs() {
     insert_sample(tmp.path(), "sample-1", "b-target");
     // 终态 job 但仍有活动 unit：保守保护。
     insert_probe_job(tmp.path(), "b-unit", "scope-b2", "failed", Some(10));
-    insert_unit(tmp.path(), "b-unit", "ledger-1", "running");
+    insert_unit(tmp.path(), "b-unit", "file-1", "running");
     for (id, ts) in [("b2-20", 20), ("b2-30", 30), ("b2-40", 40)] {
         insert_probe_job(tmp.path(), id, "scope-b2", "succeeded", Some(ts));
     }
@@ -184,8 +184,8 @@ fn captured_sample_and_active_unit_protect_probe_jobs() {
         let conn = open_db(tmp.path(), "library.db");
         conn.execute(
             "INSERT INTO probe_stage_state
-                (ledger_id, context_key, stage, status, updated_at_ms, active_job_id)
-             VALUES ('ledger-stage', 'ctx', 'metadata', 'running', 1, 'b-stage')",
+                (file_id, context_key, stage, status, updated_at_ms, active_job_id)
+             VALUES ('file-stage', 'ctx', 'metadata', 'running', 1, 'b-stage')",
             [],
         )
         .unwrap();

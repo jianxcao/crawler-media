@@ -2,11 +2,12 @@
 //!
 //! 三个类别各自有一个**稳定 keyset 游标**，单批只检视 `limit` 行：
 //!
-//! - [`RetentionClass::Qoe`]：`subscribe.db.playback_metrics`，按 `recorded_at`。
+//! - [`RetentionClass::Qoe`]：`library.db.playback_metrics`，按 `recorded_at`。
 //!   不动 `playback_units` / `playback_sessions` / 播放日志。
-//! - [`RetentionClass::TransientCatalog`]：`catalog.db.catalog_cache`，只删
-//!   URL path 白名单内的 search/discover/trending 临时结果。详情（`/movie/…`、
-//!   `/tv/…` 等）与无法分类的 key 一律保护——stale 不等于可删。
+//! - [`RetentionClass::TransientCatalog`]：`cache.db` 的 per-source cache 表
+//!   （`tmdb_cache`…`fanart_cache`），只删 URL path 白名单内的
+//!   search/discover/trending 临时结果。详情（`/movie/…`、`/tv/…` 等）与无法
+//!   分类的 key 一律保护——stale 不等于可删。
 //! - [`RetentionClass::ProbeHistory`]：`library.db.probe_jobs` 的终态行。每个
 //!   `scope_key` 至少保留最新 3 条（边界时间并列全部保留），被
 //!   `fingerprint_samples.captured_job_id` 引用的 job、以及仍有活动 unit 的 job
@@ -149,7 +150,7 @@ fn prune_qoe(
     let cursor_secs = cursor.map(|cursor| cursor.at_ms.div_euclid(1000));
     let cursor_id = cursor.map(|cursor| cursor.id.as_str());
 
-    let tx = store.subscribe.unchecked_transaction()?;
+    let tx = store.library.unchecked_transaction()?;
     let mut rows = Vec::with_capacity(limit.saturating_add(1));
     {
         let mut stmt = tx.prepare(
@@ -229,38 +230,69 @@ fn prune_transient_catalog(
 ) -> Result<DataRetentionBatch, StoreError> {
     let cutoff_secs = cutoff_ms.div_euclid(1000);
     let cursor_secs = cursor.map(|cursor| cursor.at_ms.div_euclid(1000));
-    let cursor_rowid = match cursor {
-        Some(cursor) => Some(cursor.id.parse::<i64>().map_err(|_| {
-            StoreError::Invalid(format!("invalid catalog retention cursor id: {}", cursor.id))
-        })?),
-        None => None,
+    let (cursor_source, cursor_entry) = match cursor {
+        Some(cursor) => {
+            let (source, entry_id) = cursor.id.split_once(':').ok_or_else(|| {
+                StoreError::Invalid(format!("invalid catalog retention cursor id: {}", cursor.id))
+            })?;
+            if !super::catalog::CACHE_TABLES
+                .iter()
+                .any(|(name, _)| *name == source)
+            {
+                return Err(StoreError::Invalid(format!(
+                    "invalid catalog retention cursor source: {source}"
+                )));
+            }
+            let entry_id = entry_id.parse::<i64>().map_err(|_| {
+                StoreError::Invalid(format!("invalid catalog retention cursor id: {}", cursor.id))
+            })?;
+            (Some(source), Some(entry_id))
+        }
+        None => (None, None),
     };
 
+    // The single `catalog_cache` table split into one table per source. The
+    // union keeps the same (fetched_at, entry_id) order; `source` only breaks
+    // ties between tables so the keyset stays a total order.
+    let union = super::catalog::CACHE_TABLES
+        .iter()
+        .map(|(source, table)| {
+            format!(
+                "SELECT '{source}' AS source, entry_id, cache_key, fetched_at FROM {table}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" UNION ALL ");
+    let sql = format!(
+        "SELECT source, entry_id, cache_key, fetched_at FROM ({union})
+         WHERE fetched_at < ?1
+           AND (?2 IS NULL
+                OR fetched_at > ?3
+                OR (fetched_at = ?3 AND entry_id > ?4)
+                OR (fetched_at = ?3 AND entry_id = ?4 AND source > ?5))
+         ORDER BY fetched_at ASC, entry_id ASC, source ASC
+         LIMIT ?6"
+    );
+
     let tx = store.cache.unchecked_transaction()?;
-    let mut rows: Vec<(i64, String, i64)> = Vec::with_capacity(limit.saturating_add(1));
+    let mut rows: Vec<(String, i64, String, i64)> = Vec::with_capacity(limit.saturating_add(1));
     {
-        let mut stmt = tx.prepare(
-            "SELECT rowid, cache_key, fetched_at FROM catalog_cache
-             WHERE fetched_at < ?1
-               AND (?2 IS NULL
-                    OR fetched_at > ?3
-                    OR (fetched_at = ?3 AND rowid > ?4))
-             ORDER BY fetched_at ASC, rowid ASC
-             LIMIT ?5",
-        )?;
+        let mut stmt = tx.prepare(&sql)?;
         let mapped = stmt.query_map(
             params![
                 cutoff_secs,
                 cursor_secs,
                 cursor_secs.unwrap_or(0),
-                cursor_rowid.unwrap_or(0),
+                cursor_entry.unwrap_or(0),
+                cursor_source.unwrap_or(""),
                 limit_plus_one(limit)
             ],
             |row| {
                 Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
                 ))
             },
         )?;
@@ -271,11 +303,19 @@ fn prune_transient_catalog(
     let incomplete = rows.len() > limit;
     rows.truncate(limit);
     let examined = rows.len();
-    let mut to_delete = Vec::new();
+    let mut to_delete: std::collections::BTreeMap<&'static str, Vec<i64>> =
+        std::collections::BTreeMap::new();
     let mut protected = 0usize;
-    for (rowid, cache_key, _) in &rows {
+    for (source, entry_id, cache_key, _) in &rows {
         if is_transient_catalog_key(cache_key) {
-            to_delete.push(*rowid);
+            let table = super::catalog::CACHE_TABLES
+                .iter()
+                .find(|(name, _)| name == source)
+                .map(|(_, table)| *table)
+                .ok_or_else(|| {
+                    StoreError::Invalid(format!("unknown cache source: {source}"))
+                })?;
+            to_delete.entry(table).or_default().push(*entry_id);
         } else {
             protected += 1;
         }
@@ -283,15 +323,20 @@ fn prune_transient_catalog(
     let deleted = if dry_run {
         0
     } else {
-        chunk_delete_rowids(&tx, "catalog_cache", &to_delete)?
+        let mut deleted = 0;
+        for (table, entry_ids) in &to_delete {
+            deleted += chunk_delete_rowids(&tx, table, entry_ids)?;
+        }
+        deleted
     };
     tx.commit()?;
 
     let resume_after = if incomplete {
-        rows.last().map(|(rowid, _, fetched_at)| DataRetentionCursor {
-            at_ms: fetched_at.saturating_mul(1000),
-            id: rowid.to_string(),
-        })
+        rows.last()
+            .map(|(source, entry_id, _, fetched_at)| DataRetentionCursor {
+                at_ms: fetched_at.saturating_mul(1000),
+                id: format!("{source}:{entry_id}"),
+            })
     } else {
         None
     };

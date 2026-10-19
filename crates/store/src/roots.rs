@@ -16,12 +16,15 @@ pub struct LibraryRoot {
     pub library_id: Option<String>,
     /// Position within the owning library; 0 = primary root.
     pub sort_order: i32,
+    /// Only enabled roots participate in path ownership.
+    pub enabled: bool,
 }
 
 impl Store {
     pub fn list_library_roots(&self) -> Result<Vec<LibraryRoot>, StoreError> {
         let mut stmt = self.library.prepare(
-            "SELECT r.root_id, l.kind, r.display_path, l.is_default, r.library_id, r.sort_order
+            "SELECT r.root_id, l.kind, r.display_path, l.is_default, r.library_id, r.sort_order,
+                    r.enabled
              FROM library_roots r
              JOIN libraries l ON r.library_id = l.library_id
              ORDER BY l.is_default DESC, r.sort_order, r.display_path",
@@ -34,11 +37,12 @@ impl Store {
                 row.get::<_, i64>(3)? != 0,
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, i32>(5)?,
+                row.get::<_, i64>(6)? != 0,
             ))
         })?;
         let mut roots = Vec::new();
         for row in rows {
-            let (id, kind, path, is_default, library_id, sort_order) = row?;
+            let (id, kind, path, is_default, library_id, sort_order, enabled) = row?;
             roots.push(LibraryRoot {
                 id,
                 kind: MediaKind::from_str(&kind).map_err(StoreError::MediaKind)?,
@@ -46,6 +50,7 @@ impl Store {
                 is_default,
                 library_id,
                 sort_order,
+                enabled,
             });
         }
         Ok(roots)
@@ -77,6 +82,7 @@ impl Store {
             is_default: false,
             library_id: Some(library.id),
             sort_order,
+            enabled: true,
         })
     }
 

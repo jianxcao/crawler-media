@@ -11,16 +11,21 @@ pub struct CatalogCacheRow {
     pub expires_at: Option<i64>,
 }
 
+pub(crate) const CACHE_TABLES: [(&str, &str); 6] = [
+    ("tmdb", "tmdb_cache"),
+    ("douban", "douban_cache"),
+    ("tvdb", "tvdb_cache"),
+    ("bangumi", "bangumi_cache"),
+    ("anilist", "anilist_cache"),
+    ("fanart", "fanart_cache"),
+];
+
 fn cache_table(source: &str) -> Result<&'static str, StoreError> {
-    match source {
-        "tmdb" => Ok("tmdb_cache"),
-        "douban" => Ok("douban_cache"),
-        "tvdb" => Ok("tvdb_cache"),
-        "bangumi" => Ok("bangumi_cache"),
-        "anilist" => Ok("anilist_cache"),
-        "fanart" => Ok("fanart_cache"),
-        other => Err(StoreError::Invalid(format!("unknown cache source: {other}"))),
-    }
+    CACHE_TABLES
+        .iter()
+        .find(|(name, _)| *name == source)
+        .map(|(_, table)| *table)
+        .ok_or_else(|| StoreError::Invalid(format!("unknown cache source: {source}")))
 }
 
 impl Store {

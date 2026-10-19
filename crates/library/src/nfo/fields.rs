@@ -97,6 +97,18 @@ pub fn parse_nfo_fields(body: &str, scope: EntityScope) -> NfoReadOutcome {
         fields.genres = FieldValue::Value(genres);
     }
 
+    // Countries mapping: the facet/filter contract (`docs/api-contracts/self.md`) uses the
+    // ISO 3166-1 alpha-2 code, while NFO sidecars carry the country name.
+    if !parsed.countries.is_empty() {
+        fields.countries = FieldValue::Value(
+            parsed
+                .countries
+                .iter()
+                .map(|country| country_code(country))
+                .collect(),
+        );
+    }
+
     // Cast mapping
     if !parsed.cast.is_empty() {
         let mut cast = Vec::new();
@@ -119,6 +131,61 @@ pub fn parse_nfo_fields(body: &str, scope: EntityScope) -> NfoReadOutcome {
         work_aliases: Vec::new(),
         source_version: "nfo_v1".into(),
     })
+}
+
+fn country_code(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.len() == 2 && trimmed.chars().all(|c| c.is_ascii_alphabetic()) {
+        return trimmed.to_ascii_uppercase();
+    }
+    // Kodi/TMM write the English country name; map the common ones to ISO 3166-1 alpha-2.
+    match trimmed.to_ascii_lowercase().as_str() {
+        "united states" | "united states of america" | "usa" => "US".into(),
+        "united kingdom" | "great britain" | "uk" => "GB".into(),
+        "china" | "mainland china" => "CN".into(),
+        "japan" => "JP".into(),
+        "south korea" | "korea" | "republic of korea" => "KR".into(),
+        "france" => "FR".into(),
+        "germany" => "DE".into(),
+        "hong kong" => "HK".into(),
+        "taiwan" => "TW".into(),
+        "canada" => "CA".into(),
+        "australia" => "AU".into(),
+        "india" => "IN".into(),
+        "italy" => "IT".into(),
+        "spain" => "ES".into(),
+        "russia" | "russian federation" => "RU".into(),
+        "thailand" => "TH".into(),
+        "singapore" => "SG".into(),
+        "brazil" => "BR".into(),
+        "mexico" => "MX".into(),
+        "sweden" => "SE".into(),
+        "norway" => "NO".into(),
+        "denmark" => "DK".into(),
+        "finland" => "FI".into(),
+        "netherlands" => "NL".into(),
+        "belgium" => "BE".into(),
+        "switzerland" => "CH".into(),
+        "austria" => "AT".into(),
+        "poland" => "PL".into(),
+        "czech republic" | "czechia" => "CZ".into(),
+        "ireland" => "IE".into(),
+        "new zealand" => "NZ".into(),
+        "south africa" => "ZA".into(),
+        "argentina" => "AR".into(),
+        "turkey" => "TR".into(),
+        "iran" => "IR".into(),
+        "israel" => "IL".into(),
+        "philippines" => "PH".into(),
+        "indonesia" => "ID".into(),
+        "malaysia" => "MY".into(),
+        "vietnam" => "VN".into(),
+        "ukraine" => "UA".into(),
+        "portugal" => "PT".into(),
+        "greece" => "GR".into(),
+        "egypt" => "EG".into(),
+        _ => trimmed.to_string(),
+    }
 }
 
 fn genre_filter_key(name: &str) -> String {

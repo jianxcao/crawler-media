@@ -79,6 +79,16 @@ fn large_pending_recovery_loads_only_dispatch_windows() {
         confidence: Confidence::High,
         filter_score: None,
     };
+    store
+        .create_library(
+            MediaKind::Movie,
+            "Window",
+            &[temp.path().to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
     store.insert_ledger(&row).unwrap();
 
     let metadata_ids: Vec<String> = std::iter::once(row.id.to_string())

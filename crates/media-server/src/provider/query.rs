@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use domain::{MediaKind, UserId};
+use domain::{MediaKind, TypedItemId, UserId};
 
 use super::{MediaItemSnapshot, MediaServerProvider, ServerLibrary};
 
@@ -219,15 +219,31 @@ pub fn item_matches_genre_or_studio(target: &str, genres: &[String], studios: &[
             .any(|value| matches_genre_or_studio(target, value))
 }
 
-/// `SeasonId` 去掉 `SeriesId` 前缀后的季号。
+/// Season number carried by a `SeasonId`, validated against the `SeriesId` it
+/// was requested with. Both are protocol wire ids (`s1_…`, `w1_…`); the bare
+/// media id is accepted as the work spelling internal callers use.
 pub fn parse_season_id(series_id: &str, season_id: &str) -> Option<u32> {
-    let series_id = series_id.replace('-', "");
-    let season_id = season_id.replace('-', "");
-    let suffix = season_id.get(series_id.len()..)?;
-    if !season_id[..series_id.len()].eq_ignore_ascii_case(&series_id) {
-        return None;
+    let media = series_media_id(series_id)?;
+    match TypedItemId::from_wire_string(season_id) {
+        Some(TypedItemId::Season {
+            media: season_media,
+            season,
+        }) if season_media == media => Some(season),
+        _ => None,
     }
-    suffix.parse().ok()
+}
+
+/// The work a `SeriesId` names: its typed work id, or its media id.
+pub fn series_media_id(series_id: &str) -> Option<domain::MediaId> {
+    match TypedItemId::from_wire_string(series_id) {
+        Some(TypedItemId::Work(media)) => Some(media),
+        _ => series_id.parse().ok(),
+    }
+}
+
+/// Whether `requested` names this item's work.
+pub fn work_matches(requested: &str, media: domain::MediaId) -> bool {
+    requested == TypedItemId::Work(media).to_wire_string() || requested == media.to_string()
 }
 
 /// 过滤 + 排序 + 计数 + 取页（旧式全量快照语义）。
@@ -495,16 +511,14 @@ fn matches_series(item: &MediaItemSnapshot, series_id: Option<&str>) -> bool {
     let Some(series_id) = series_id else {
         return true;
     };
-    !item.is_series
-        && item.media.kind == MediaKind::Tv
-        && compact_id(&item.media.id.to_string()) == compact_id(series_id)
+    !item.is_series && item.media.kind == MediaKind::Tv && work_matches(series_id, item.media.id)
 }
 
 fn matches_season(item: &MediaItemSnapshot, season_id: Option<&str>) -> bool {
     let Some(season_id) = season_id else {
         return true;
     };
-    let series_id = compact_id(&item.media.id.to_string());
+    let series_id = TypedItemId::Work(item.media.id).to_wire_string();
     parse_season_id(&series_id, season_id)
         .is_some_and(|season| !item.is_series && item.row.season == Some(season))
 }
@@ -563,7 +577,7 @@ pub async fn legacy_select(
             let mut expanded = Vec::new();
             for item in rows {
                 if item.is_series {
-                    let series_id = item.media.id.to_string().replace('-', "");
+                    let series_id = TypedItemId::Work(item.media.id).to_wire_string();
                     let episodes = provider.list_visible_items(user, Some(&series_id)).await?;
                     let in_folder: Vec<MediaItemSnapshot> = episodes
                         .into_iter()
@@ -604,7 +618,7 @@ pub async fn legacy_select(
         let mut expanded = Vec::new();
         for item in rows {
             if item.is_series {
-                let series_id = item.media.id.to_string().replace('-', "");
+                let series_id = TypedItemId::Work(item.media.id).to_wire_string();
                 let episodes = match &scope {
                     ParentScope::Library(library_id) => {
                         provider.list_visible_items_in_library(user, Some(&series_id), library_id).await?
@@ -664,7 +678,7 @@ pub async fn legacy_next_up(
     offset: usize,
     limit: usize,
 ) -> Result<ServerItemPage, String> {
-    let requested = series_id.map(|id| id.replace('-', ""));
+    let requested = series_id.map(str::to_string);
     let candidates = provider
         .list_visible_items(user, requested.as_deref())
         .await?;
@@ -683,7 +697,7 @@ pub async fn legacy_next_up(
         if !expanded_media.insert(item.media.id) {
             continue;
         }
-        let series_id = item.media.id.to_string().replace('-', "");
+        let series_id = TypedItemId::Work(item.media.id).to_wire_string();
         let expanded = provider.list_visible_items(user, Some(&series_id)).await?;
         episodes.extend(expanded.into_iter().filter(|episode| {
             !episode.is_series && (!restrict_kind || episode.media.kind == MediaKind::Tv)

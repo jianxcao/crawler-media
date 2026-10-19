@@ -153,6 +153,7 @@ fn outside_existing_path_is_not_owned_even_by_default_target() {
     f.store.set_default_library(&target.id).unwrap();
     let external = f.root("external.mkv");
     std::fs::write(&external, b"external").unwrap();
+    f.library("Other", &f.tmp.path().to_path_buf());
     f.ledger(&external, 100);
     f.save(&external, 100);
     // Resolve the selected Library through the default, not an explicit id.
@@ -180,25 +181,6 @@ fn outside_missing_and_relative_basename_facts_are_unscoped() {
             path.display()
         );
     }
-}
-
-#[test]
-fn ambiguous_existing_path_is_not_owned_by_either_library() {
-    let mut f = Fixture::new();
-    let root = f.root("shared");
-    let a = f.library("A", &root);
-    let b = f.library("B", &root);
-    let path = root.join("Scoped.mkv");
-    std::fs::write(&path, b"ambiguous").unwrap();
-    f.ledger(&path, 100);
-    f.save(&path, 100);
-    for target in [&a, &b] {
-        f.select(target);
-        let facts = f.load();
-        assert!(facts.movie().is_none());
-        assert!(facts.quality(path.to_str().unwrap()).is_none());
-    }
-    assert!(path.is_file());
 }
 
 #[test]
@@ -307,9 +289,10 @@ fn symlink_escape_is_not_owned_or_reintroduced_from_ledger() {
     let outside = f.root("outside");
     std::fs::create_dir_all(&outside).unwrap();
     std::fs::write(outside.join("Scoped.mkv"), b"external").unwrap();
+    f.library("Outside", &outside);
+    f.ledger(&outside.join("Scoped.mkv"), 100);
     std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
     let path = root.join("escape/Scoped.mkv");
-    f.ledger(&path, 100);
     f.save(&path, 100);
 
     let facts = f.load();
@@ -324,7 +307,7 @@ fn library_database_lookup_failure_is_returned() {
     let target = f.library("Target", &f.root("target"));
     f.select(&target);
     f.save(&f.root("target/missing.mkv"), 80);
-    let db = rusqlite::Connection::open(f.tmp.path().join("data/app.db")).unwrap();
+    let db = rusqlite::Connection::open(f.tmp.path().join("data/library.db")).unwrap();
     db.execute_batch("DROP TABLE library_roots").unwrap();
 
     assert!(
@@ -354,4 +337,120 @@ fn qualities_follow_retained_facts_after_ledger_score_selection() {
         facts.quality(lower.to_str().unwrap()).is_none(),
         "a rejected ledger candidate must not leave detached quality"
     );
+}
+
+#[test]
+fn subscribe_quality_evaluation_overlays_probe_fields_for_published_file() {
+    let mut f = Fixture::new();
+    let root = f.root("target");
+    let target = f.library("Target", &root);
+    f.select(&target);
+
+    let file_path = root.join("Movie.mkv");
+    let path_str = file_path.to_str().unwrap().to_string();
+    std::fs::write(&file_path, b"content").unwrap();
+
+    let roots = f.store.list_library_roots().unwrap();
+    let root_id = roots
+        .into_iter()
+        .find(|r| r.library_id == Some(target.id.clone()))
+        .unwrap()
+        .id;
+
+    let file_id = LedgerId::new();
+    let file = domain::LibraryFile {
+        file_id,
+        library_id: target.id.parse().unwrap(),
+        root_id,
+        media_id: f.subscribe.media_id,
+        kind: MediaKind::Movie,
+        path: file_path.clone(),
+        version: domain::FileVersion {
+            revision: 1,
+            source_version: "v1".into(),
+        },
+        presence: domain::FilePresence::Present,
+        publication: domain::FilePublication::Published,
+        size_bytes: Some(1_000_000),
+        stat_known: true,
+        created_ns: None,
+        modified_ns: None,
+        source_digest: None,
+        source_path: None,
+        transfer_mode: None,
+        resolution: Some("2160p".into()),
+        codec: Some("hevc".into()),
+        hdr: Some("HDR10".into()),
+        quality_source: QualitySource::Probe,
+        confidence: Confidence::High,
+        filter_score: Some(100),
+        release_quality: None,
+        duration_ms: Some(7_200_000),
+        tracks_version: 1,
+        poster_path: None,
+        backdrop_path: None,
+        still_path: None,
+    };
+
+    let scope = store::library_write::WriteScope {
+        library_id: target.id.parse().unwrap(),
+        config_revision: 0,
+    };
+    f.store
+        .publish_files(
+            &scope,
+            &[store::library_write::FilePublication {
+                file: &file,
+                units: &[domain::UnitKey::WHOLE],
+                expected_version: None,
+                probe_required: false,
+            }],
+            1000,
+        )
+        .unwrap();
+
+    // Record quality in SubscribeFacts with release dimensions
+    let mut facts = SubscribeFacts::default();
+    facts.replace(
+        None,
+        None,
+        QualityFact {
+            score: 95,
+            path: Some(path_str.clone()),
+        },
+    );
+    facts.set_quality(
+        path_str.clone(),
+        domain::Release {
+            title: "Test".into(),
+            year: None,
+            season: None,
+            episode: None,
+            episode_to: None,
+            resolution: Some("1080p".into()),
+            source: Some("WEB-DL".into()),
+            codec: Some("h264".into()),
+            hdr: None,
+            subtitle_language: None,
+            audio_language: None,
+            group: None,
+            confidence: Confidence::Low,
+            season_inferred: false,
+        },
+    );
+
+    f.store.save_subscribe_facts(f.subscribe.id, &facts).unwrap();
+
+    // Load the library subscribe facts back
+    let loaded = f.load();
+    assert_eq!(loaded.movie().unwrap().path.as_deref(), Some(path_str.as_str()));
+    let quality = loaded.quality(&path_str).expect("quality must be read back");
+
+    // Probe fields on the file row (2160p, hevc, HDR10, High) must overlay release dimensions
+    assert_eq!(quality.resolution.as_deref(), Some("2160p"));
+    assert_eq!(quality.codec.as_deref(), Some("hevc"));
+    assert_eq!(quality.hdr.as_deref(), Some("HDR10"));
+    assert_eq!(quality.confidence, Confidence::High);
+    // Stored release source dimension must be preserved
+    assert_eq!(quality.source.as_deref(), Some("WEB-DL"));
 }

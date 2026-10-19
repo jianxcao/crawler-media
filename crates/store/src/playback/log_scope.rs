@@ -1,5 +1,5 @@
 //! Request-scoped playback history paging: composite keyset cursor plus a
-//! visible-Media set resolved in SQL on the subscribe connection, so callers
+//! visible-Media set resolved in SQL on the library connection, so callers
 //! never load the whole `playback_logs` table to filter it in memory.
 
 use domain::{MediaId, UserId};
@@ -58,17 +58,17 @@ impl Store {
         // 先清空（SAVEPOINT 之外）：任何失败路径都不会把上一次调用的 scope 行
         // 留给下一次；SAVEPOINT 只包住本次填充与查询，回滚后表保持空。
         self.reset_visible_media()?;
-        self.subscribe
+        self.library
             .execute_batch("SAVEPOINT playback_log_scope")?;
         let result = self.scoped_log_page(scope, visible, limit);
         match result {
             Ok(page) => {
-                self.subscribe
+                self.library
                     .execute_batch("RELEASE playback_log_scope")?;
                 Ok(page)
             }
             Err(error) => {
-                let _ = self.subscribe.execute_batch(
+                let _ = self.library.execute_batch(
                     "ROLLBACK TO playback_log_scope; RELEASE playback_log_scope",
                 );
                 let _ = self.reset_visible_media();
@@ -93,7 +93,7 @@ impl Store {
             "SELECT {LOG_COLS}{filter}{} ORDER BY l.started_at DESC, l.id DESC LIMIT ?",
             visible_clause(visible)
         );
-        let mut stmt = self.subscribe.prepare(&page_sql)?;
+        let mut stmt = self.library.prepare(&page_sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(page_args), map_log)?;
         let mut entries = rows.collect::<Result<Vec<_>, _>>()?;
         let has_more = entries.len() > limit;
@@ -105,7 +105,7 @@ impl Store {
                     "SELECT COUNT(*){filter}{}",
                     " AND NOT EXISTS (SELECT 1 FROM request_visible_media v WHERE v.id = l.media_id)"
                 );
-                let mut stmt = self.subscribe.prepare(&count_sql)?;
+                let mut stmt = self.library.prepare(&count_sql)?;
                 let count: i64 = stmt.query_row(rusqlite::params_from_iter(args), |row| row.get(0))?;
                 count.max(0) as usize
             }
@@ -119,7 +119,7 @@ impl Store {
 
     /// TEMP 可见集合：清空 + 建表（TEMP 表随连接存在，故每次调用都要清）。
     fn reset_visible_media(&self) -> Result<(), StoreError> {
-        self.subscribe.execute_batch(
+        self.library.execute_batch(
             "CREATE TEMP TABLE IF NOT EXISTS request_visible_media (id TEXT PRIMARY KEY);
              DELETE FROM request_visible_media;",
         )?;
@@ -132,7 +132,7 @@ impl Store {
             let placeholders = vec!["(?)"; chunk.len()].join(",");
             let sql =
                 format!("INSERT OR IGNORE INTO request_visible_media (id) VALUES {placeholders}");
-            self.subscribe.execute(
+            self.library.execute(
                 &sql,
                 rusqlite::params_from_iter(chunk.iter().map(MediaId::to_string)),
             )?;

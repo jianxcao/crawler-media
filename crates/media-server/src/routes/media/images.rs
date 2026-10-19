@@ -86,11 +86,7 @@ async fn genre_primary_image(
                 || s.eq_ignore_ascii_case(&name)
         });
         if matches_genre {
-            let id = if it.is_series {
-                it.media.id.to_string().replace('-', "")
-            } else {
-                it.row.id.to_string().replace('-', "")
-            };
+            let id = it.protocol_id();
             if let Ok(Some(url)) = state
                 .provider
                 .resolve_primary_image_url(Some(user_id), &id)
@@ -137,11 +133,7 @@ async fn studio_primary_image(
                 || s.eq_ignore_ascii_case(&name)
         });
         if matches_studio {
-            let id = if it.is_series {
-                it.media.id.to_string().replace('-', "")
-            } else {
-                it.row.id.to_string().replace('-', "")
-            };
+            let id = it.protocol_id();
             if let Ok(Some(url)) = state
                 .provider
                 .resolve_primary_image_url(Some(user_id), &id)

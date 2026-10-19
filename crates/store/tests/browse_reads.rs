@@ -1,7 +1,8 @@
 //! Batch read facts: `Store::media_batch` and
 //! `Store::playback_units_for_user` (full `UnitState`, not a reduced row).
 
-use domain::{Media, MediaId, MediaKind, UserId};
+use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserId};
+use std::path::Path;
 use store::Store;
 
 fn media(kind: MediaKind, title: &str, tmdb_id: Option<&str>) -> Media {
@@ -18,6 +19,78 @@ fn media(kind: MediaKind, title: &str, tmdb_id: Option<&str>) -> Media {
         bangumi_id: None,
         anilist_id: None,
     }
+}
+
+/// Publish one file covering `(season, episode)` for `media_id`. Resume
+/// positions only bind to a published, present file unit, so the fixture must
+/// exist before `upsert_unit` records a position.
+fn publish_unit(store: &Store, base: &Path, media_id: MediaId, season: u32, episode: u32) {
+    let root = ensure_library(store, base, media_id);
+    let row = LedgerRow {
+        id: LedgerId::new(),
+        media_id,
+        path: root
+            .join(format!("{media_id}-s{season}e{episode}.mkv"))
+            .display()
+            .to_string(),
+        season: Some(season),
+        episode: Some(episode),
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: None,
+    };
+    store.insert_ledger(&row).unwrap();
+}
+
+/// A Library root is owned by exactly one Library and only owns files of its
+/// own kind, so the fixture creates a kind-specific Library for `base`.
+fn ensure_library(store: &Store, base: &Path, media_id: MediaId) -> std::path::PathBuf {
+    let kind = store.get_media(media_id).unwrap().unwrap().kind;
+    let root = base.join(kind.as_str());
+    if store
+        .list_library_roots()
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate.path == root && candidate.kind == kind)
+    {
+        return root;
+    }
+    store
+        .create_library(
+            kind,
+            &format!("lib-{}-{}", kind.as_str(), base.display()),
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    root
+}
+
+/// Publish one whole-file (`-1/-1`) source for `media_id`.
+fn publish_whole(store: &Store, base: &Path, media_id: MediaId) {
+    let root = ensure_library(store, base, media_id);
+    let row = LedgerRow {
+        id: LedgerId::new(),
+        media_id,
+        path: root
+            .join(format!("whole-{media_id}.mkv"))
+            .display()
+            .to_string(),
+        season: None,
+        episode: None,
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: None,
+    };
+    store.insert_ledger(&row).unwrap();
 }
 
 #[test]
@@ -70,6 +143,8 @@ fn playback_units_for_user_keeps_full_state_for_partial_progress() {
     let store = Store::open(tmp.path().join("data")).unwrap();
     let movie = media(MediaKind::Movie, "Partial", Some("603"));
     store.insert_media(&movie).unwrap();
+    let root = tmp.path().join("media");
+    publish_unit(&store, &root, movie.id, 1, 2);
     let user = UserId::new();
     store
         .upsert_unit(
@@ -153,6 +228,8 @@ fn first_movie_favorite_copies_legacy_whole_file_playback_state() {
     let user = UserId::new();
     let movie = media(MediaKind::Movie, "Legacy favorite", None);
     store.insert_media(&movie).unwrap();
+    let root = tmp.path().join("media");
+    publish_unit(&store, &root, movie.id, 0, 0);
     store
         .upsert_unit(
             user,
@@ -244,6 +321,8 @@ fn jellyfin_first_favorite_keeps_legacy_resume_played_and_play_count() {
     let user = UserId::new();
     let movie = media(MediaKind::Movie, "Jellyfin legacy favorite", None);
     store.insert_media(&movie).unwrap();
+    let root = tmp.path().join("media");
+    publish_unit(&store, &root, movie.id, 0, 0);
     store
         .upsert_unit(
             user,
@@ -284,6 +363,8 @@ fn favoriting_legacy_movie_fills_existing_favorite_only_canonical_row() {
     let user = UserId::new();
     let movie = media(MediaKind::Movie, "Blocked legacy favorite", None);
     store.insert_media(&movie).unwrap();
+    let root = tmp.path().join("media");
+    publish_unit(&store, &root, movie.id, 0, 0);
     store
         .upsert_unit(
             user,
@@ -303,11 +384,11 @@ fn favoriting_legacy_movie_fills_existing_favorite_only_canonical_row() {
     // A previous round created the canonical key as favourite-only before the
     // legacy copy could run. That row has no playback authority.
     {
-        let db = rusqlite::Connection::open(tmp.path().join("data/subscribe.db")).unwrap();
+        let db = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
         db.execute(
             "INSERT INTO playback_units
                 (user_id, media_id, season, episode, position_ms, played, favorite,
-                 duration_ms, audio_track, subtitle_track, play_count, updated_at, favorite_at)
+                 duration_ms, audio_track, subtitle_track, play_count, watch_activity_at, favorite_at)
              VALUES (?1, ?2, -1, -1, 0, 0, 1, NULL, NULL, NULL, 0, 0, 15)",
             rusqlite::params![user.to_string(), movie.id.to_string()],
         )
@@ -345,6 +426,10 @@ fn favoriting_legacy_movie_does_not_duplicate_resume_rows() {
     store.insert_media(&legacy).unwrap();
     store.insert_media(&other).unwrap();
     store.insert_media(&show).unwrap();
+    let root = tmp.path().join("media");
+    publish_unit(&store, &root, legacy.id, 0, 0);
+    publish_whole(&store, &root, other.id);
+    publish_unit(&store, &root, show.id, 0, 0);
     store
         .upsert_unit(user, legacy.id, 0, 0, 120_000, Some(false), Some(false), None, None, None, false, 10)
         .unwrap();
@@ -412,11 +497,12 @@ fn default_candidate_growth_and_ownership_parity() {
         nested.join("nested.mkv").display().to_string(),
         tied_root.join("ambiguous.mkv").display().to_string(),
         format!("{}/./odd.mkv", root.display()),
-        tmp.path().join("unmatched.mkv").display().to_string(),
     ];
     for (index, path) in paths.iter().enumerate() {
+        let item = media(MediaKind::Movie, &format!("parity item {index}"), None);
+        store.insert_media(&item).unwrap();
         let row = LedgerRow {
-            id: LedgerId::new(), media_id: MediaId::new(), path: path.clone(), season: None,
+            id: LedgerId::new(), media_id: item.id, path: path.clone(), season: None,
             episode: None, resolution: None, codec: None, hdr: None,
             quality_source: QualitySource::Release, confidence: Confidence::High, filter_score: None,
         };
@@ -439,7 +525,7 @@ fn default_candidate_growth_and_ownership_parity() {
         }).map(|row| row.id).collect::<std::collections::HashSet<_>>();
         assert_eq!(candidate, current);
     }
-    let cold_global_build_is_reported = store.list_ledger().unwrap().len() == 5;
+    let cold_global_build_is_reported = store.list_ledger().unwrap().len() == 4;
     assert!(cold_global_build_is_reported, "the existing default candidate build reads globally");
     // No derived index/interface exists today; stale-index rejection is therefore not applicable.
     let db = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
@@ -457,12 +543,14 @@ fn default_candidate_scan_size_and_write_cost() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let default = store.default_library(MediaKind::Movie).unwrap().unwrap();
+    let item = media(MediaKind::Movie, "unrelated", None);
+    store.insert_media(&item).unwrap();
     let mut total_rows = 0usize;
     for count in [1_000usize, 10_000, 50_000] {
         let started = Instant::now();
         for i in 0..count {
             store.insert_ledger(&LedgerRow {
-                id: LedgerId::new(), media_id: MediaId::new(), path: format!("/unrelated/{count}/{i}.mkv"),
+                id: LedgerId::new(), media_id: item.id, path: format!("/unrelated/{count}/{i}.mkv"),
                 season: None, episode: None, resolution: None, codec: None, hdr: None,
                 quality_source: QualitySource::Release, confidence: Confidence::High, filter_score: None,
             }).unwrap();

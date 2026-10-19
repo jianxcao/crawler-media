@@ -36,12 +36,4 @@ impl Item {
             path: file.path.display().to_string(),
         }
     }
-
-    pub fn from_ledger(name: &str, row: &domain::LedgerRow) -> Self {
-        Self {
-            id: row.id.to_string(),
-            name: name.to_string(),
-            path: row.path.clone(),
-        }
-    }
 }

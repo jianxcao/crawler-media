@@ -360,9 +360,9 @@ impl Store {
         reason: &str,
     ) -> Result<(), StoreError> {
         self.library.execute(
-            "INSERT INTO ledger_probe_obligations (ledger_id, created_at_ms, reason)
+            "INSERT INTO file_probe_obligations (file_id, created_at_ms, reason)
              VALUES (?1, ?2, ?3)
-             ON CONFLICT(ledger_id) DO UPDATE SET
+             ON CONFLICT(file_id) DO UPDATE SET
                  created_at_ms = excluded.created_at_ms, reason = excluded.reason",
             params![ledger_id, now_ms, reason],
         )?;

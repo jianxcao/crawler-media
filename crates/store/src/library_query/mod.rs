@@ -1,4 +1,5 @@
 pub mod details;
+pub mod facets;
 pub mod files;
 pub mod items;
 pub mod types;

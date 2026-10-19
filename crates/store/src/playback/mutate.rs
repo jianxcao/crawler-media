@@ -1,17 +1,83 @@
 use domain::{
-    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, LibraryId,
-    MediaId, MediaKind, PhysicalSourceId, QualitySource, TimelineMode, TypedItemId, UnitKey,
-    UnitScope, UserId,
+    LibraryFile, MediaId, PhysicalSourceId, TimelineMode, TypedItemId, UnitKey, UnitScope, UserId,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 
+use super::source::PlaybackSource;
+use super::user_summary::SummaryScope;
 use super::types::{
-    BoundPlaybackEvent, EventOutcome, PlaybackEventType, PlaybackMutation, PlaybackTarget,
-    ResolvedResume, ResumeStatus,
+    BoundPlaybackEvent, EventOutcome, PlaybackMutation, PlaybackTarget, ResolvedResume,
+    ResumeStatus,
 };
 use super::super::{Store, StoreError};
 
+/// Resume facts stored on `playback_units`, with the source binding they were
+/// written against.
+#[derive(Debug)]
+struct StoredResume {
+    played: bool,
+    position_ms: i64,
+    duration_ms: Option<i64>,
+    audio_track: Option<String>,
+    subtitle_track: Option<String>,
+    binding: Option<StoredBinding>,
+}
+
+/// Which source a stored resume belongs to. The five columns are written
+/// all-or-nothing (schema CHECK), so either all are present or the row carries
+/// no resume package at all.
+#[derive(Debug)]
+struct StoredBinding {
+    file_id: String,
+    revision: i64,
+    source_version: String,
+    timeline_mode: String,
+    tracks_version: i64,
+}
+
+impl StoredBinding {
+    /// R1: a stored position is reused only when the file, its revision, its
+    /// source version, the timeline mode and the track revision all still match
+    /// the source we are about to play.
+    fn matches(&self, source: &LibraryFile, tracks_version: i64) -> bool {
+        self.file_id == source.file_id.to_string()
+            && self.revision == source.version.revision
+            && self.source_version == source.version.source_version
+            && self.timeline_mode == TimelineMode::FullFile.as_str()
+            && self.tracks_version == tracks_version
+    }
+}
+
+/// How a stored resume relates to the selected source.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Binding {
+    /// No stored resume package: the item has no progress to resume.
+    Absent,
+    /// The stored resume belongs to the selected source.
+    Matches,
+    /// The stored resume belongs to another source, revision or track set.
+    Changed,
+}
+
+/// Watch unit coordinates of a logical item. Movies and videos are the whole
+/// file `(-1, -1)`; a season item plays its first episode.
+fn playback_unit(item: &TypedItemId) -> (MediaId, UnitKey) {
+    match item {
+        TypedItemId::Work(media) => (*media, UnitKey::WHOLE),
+        TypedItemId::Season { media, season } => (*media, UnitKey::new(*season as i32, 1)),
+        TypedItemId::Unit { media, key } => (*media, *key),
+    }
+}
+
 impl Store {
+    /// Resume the caller's own progress for a logical item.
+    ///
+    /// The source is picked through `library_files JOIN library_file_units`
+    /// (published + present, authorized libraries) and the stored position is
+    /// only reused when its whole binding still matches that source; otherwise
+    /// the result is `SourceChanged` with `start_ms = 0`, the current source's
+    /// duration and no track selection. An explicit `start_ms` from the client
+    /// always wins.
     pub fn resolve_playback(
         &self,
         user: UserId,
@@ -19,266 +85,176 @@ impl Store {
         preferred_source: Option<&PhysicalSourceId>,
         explicit_start_ms: Option<i64>,
     ) -> Result<ResolvedResume, StoreError> {
-        let (media_id, unit_key) = match item {
-            TypedItemId::Work(m) => (*m, UnitKey::WHOLE),
-            TypedItemId::Season { media, season } => (*media, UnitKey::new(*season as i32, 1)),
-            TypedItemId::Unit { media, key } => (*media, *key),
-        };
-
-        let media_id_str = media_id.to_string();
-        let allowed_libraries = self.authorized_library_ids(user)?;
-        if allowed_libraries.is_empty() {
-            return Err(StoreError::Missing(format!("no authorized libraries for unit {unit_key:?}")));
-        }
-        let lib_in_clause = allowed_libraries
-            .iter()
-            .map(|l| format!("'{l}'"))
-            .collect::<Vec<_>>()
-            .join(",");
-
-        // Find preferred file or active file for this unit, validating presence, publication, and revision
-        let file_row = match preferred_source {
-            Some(src) => {
-                let sql = format!(
-                    "SELECT f.file_id, f.library_id, f.root_id, f.media_id, f.kind, f.path_key,
-                            f.file_revision, f.source_version, f.presence_state, f.publication_state,
-                            f.duration_ms
-                     FROM library_files f
-                     JOIN library_file_units u ON f.file_id = u.file_id
-                     WHERE f.file_id = ?1 AND f.file_revision = ?2
-                       AND u.media_id = ?3 AND u.season = ?4 AND u.episode = ?5
-                       AND f.presence_state = 'present' AND f.publication_state = 'published'
-                       AND f.library_id IN ({lib_in_clause})"
-                );
-                self.library
-                    .query_row(
-                        &sql,
-                        params![
-                            src.file_id.to_string(),
-                            src.revision,
-                            media_id_str,
-                            unit_key.season,
-                            unit_key.episode,
-                        ],
-                        |r| {
-                            let fid: LedgerId = r.get::<_, String>(0)?.parse().unwrap();
-                            let lid: LibraryId = r.get::<_, String>(1)?.parse().unwrap();
-                            let mid: MediaId = r.get::<_, String>(3)?.parse().unwrap();
-                            let kind: MediaKind = r.get::<_, String>(4)?.parse().unwrap_or(MediaKind::Movie);
-                            let path_str: String = r.get(5)?;
-                            let pres_str: String = r.get(8)?;
-                            let pub_str: String = r.get(9)?;
-                            let dur: Option<i64> = r.get(10)?;
-
-                            Ok(LibraryFile {
-                                file_id: fid,
-                                library_id: lid,
-                                root_id: r.get(2)?,
-                                media_id: mid,
-                                kind,
-                                path: path_str.into(),
-                                version: FileVersion {
-                                    revision: r.get(6)?,
-                                    source_version: r.get(7)?,
-                                },
-                                presence: FilePresence::from_str(&pres_str).unwrap_or(FilePresence::Present),
-                                publication: FilePublication::from_str(&pub_str).unwrap_or(FilePublication::Published),
-                                size_bytes: None,
-                                stat_known: true,
-                                created_ns: None,
-                                modified_ns: None,
-                                source_digest: None,
-                                source_path: None,
-                                transfer_mode: None,
-                                resolution: None,
-                                codec: None,
-                                hdr: None,
-                                quality_source: QualitySource::Probe,
-                                confidence: Confidence::High,
-                                filter_score: None,
-                                release_quality: None,
-                                duration_ms: dur,
-                                tracks_version: 1,
-                                poster_path: None,
-                                backdrop_path: None,
-                                still_path: None,
-                            })
-                        },
-                    )
-                    .optional()?
-            }
-            None => None,
-        };
-
-        let file = match file_row {
-            Some(f) => f,
-            None => {
-                let sql = format!(
-                    "SELECT f.file_id, f.library_id, f.root_id, f.media_id, f.kind, f.path_key,
-                            f.file_revision, f.source_version, f.presence_state, f.publication_state,
-                            f.duration_ms
-                     FROM library_files f
-                     JOIN library_file_units u ON f.file_id = u.file_id
-                     WHERE u.media_id = ?1 AND u.season = ?2 AND u.episode = ?3
-                       AND f.presence_state = 'present' AND f.publication_state = 'published'
-                       AND f.library_id IN ({lib_in_clause})
-                     ORDER BY f.file_revision DESC, f.file_id ASC
-                     LIMIT 1"
-                );
-                self.library
-                    .query_row(
-                        &sql,
-                        params![media_id_str, unit_key.season, unit_key.episode],
-                        |r| {
-                            let fid: LedgerId = r.get::<_, String>(0)?.parse().unwrap();
-                            let lid: LibraryId = r.get::<_, String>(1)?.parse().unwrap();
-                            let mid: MediaId = r.get::<_, String>(3)?.parse().unwrap();
-                            let kind: MediaKind = r.get::<_, String>(4)?.parse().unwrap_or(MediaKind::Movie);
-                            let path_str: String = r.get(5)?;
-                            let pres_str: String = r.get(8)?;
-                            let pub_str: String = r.get(9)?;
-                            let dur: Option<i64> = r.get(10)?;
-
-                            Ok(LibraryFile {
-                                file_id: fid,
-                                library_id: lid,
-                                root_id: r.get(2)?,
-                                media_id: mid,
-                                kind,
-                                path: path_str.into(),
-                                version: FileVersion {
-                                    revision: r.get(6)?,
-                                    source_version: r.get(7)?,
-                                },
-                                presence: FilePresence::from_str(&pres_str).unwrap_or(FilePresence::Present),
-                                publication: FilePublication::from_str(&pub_str).unwrap_or(FilePublication::Published),
-                                size_bytes: None,
-                                stat_known: true,
-                                created_ns: None,
-                                modified_ns: None,
-                                source_digest: None,
-                                source_path: None,
-                                transfer_mode: None,
-                                resolution: None,
-                                codec: None,
-                                hdr: None,
-                                quality_source: QualitySource::Probe,
-                                confidence: Confidence::High,
-                                filter_score: None,
-                                release_quality: None,
-                                duration_ms: dur,
-                                tracks_version: 1,
-                                poster_path: None,
-                                backdrop_path: None,
-                                still_path: None,
-                            })
-                        },
-                    )
-                    .optional()?
-                    .ok_or_else(|| StoreError::Missing(format!("playable file for unit {unit_key:?}")))?
-            }
-        };
-
-        let target = PlaybackTarget {
-            media_id,
-            unit: unit_key,
-            file,
-            config_revision: 0,
-            timeline: TimelineMode::FullFile,
-        };
-        let file_dur_ms = target.file.duration_ms;
-        if let Some(start) = explicit_start_ms {
-            return Ok(ResolvedResume {
-                target,
-                start_ms: start,
-                duration_ms: file_dur_ms,
-                audio_track: None,
-                subtitle_track: None,
-                status: ResumeStatus::Compatible,
-            });
-        }
-
-        // Check playback_units table
-        let p_sql = "SELECT played, position_ms, duration_ms, resume_file_id, resume_file_revision,
-                            audio_track, subtitle_track
-                     FROM playback_units
-                     WHERE user_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4";
-        let user_id_str = user.to_string();
-        let row_opt = self.library.query_row(
-            p_sql,
-            params![user_id_str, media_id_str, unit_key.season, unit_key.episode],
-            |r| {
-                Ok((
-                    r.get::<_, i64>(0)? != 0,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, Option<i64>>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                    r.get::<_, Option<i64>>(4)?,
-                    r.get::<_, Option<String>>(5)?,
-                    r.get::<_, Option<String>>(6)?,
-                ))
-            },
-        ).optional()?;
-
-        let Some((played, pos_ms, dur_ms, res_fid, res_rev, a_track, s_track)) = row_opt else {
-            return Ok(ResolvedResume {
-                target,
-                start_ms: 0,
-                duration_ms: file_dur_ms,
-                audio_track: None,
-                subtitle_track: None,
-                status: ResumeStatus::NoProgress,
-            });
-        };
-
-        if played {
-            return Ok(ResolvedResume {
-                target,
-                start_ms: 0,
-                duration_ms: dur_ms.or(file_dur_ms),
-                audio_track: a_track,
-                subtitle_track: s_track,
-                status: ResumeStatus::AlreadyPlayed,
-            });
-        }
-
-        if pos_ms == 0 {
-            return Ok(ResolvedResume {
-                target,
-                start_ms: 0,
-                duration_ms: dur_ms.or(file_dur_ms),
-                audio_track: a_track,
-                subtitle_track: s_track,
-                status: ResumeStatus::NoProgress,
-            });
-        }
-
-        let is_same_source = match (res_fid, res_rev) {
-            (Some(f), Some(r)) => f == target.file.file_id.to_string() && r == target.file.version.revision,
-            _ => false,
-        };
-        if is_same_source {
-            Ok(ResolvedResume {
-                target,
-                start_ms: pos_ms,
-                duration_ms: dur_ms.or(file_dur_ms),
-                audio_track: a_track,
-                subtitle_track: s_track,
-                status: ResumeStatus::Compatible,
-            })
-        } else {
-            // F05: Source changed -> reset position to 0, use current target duration, clear old tracks
-            Ok(ResolvedResume {
-                target,
-                start_ms: 0,
-                duration_ms: file_dur_ms,
-                audio_track: None,
-                subtitle_track: None,
-                status: ResumeStatus::SourceChanged,
-            })
-        }
+        let (media_id, unit) = playback_unit(item);
+        let allowed = self.authorized_library_ids(user)?;
+        let source = self
+            .best_source_for_unit(&allowed, media_id, unit, preferred_source)?
+            .ok_or_else(|| StoreError::Missing(format!("no playable source for unit {unit:?}")))?;
+        let stored = self.stored_resume(user, media_id, unit)?;
+        Ok(resolve_resume(media_id, unit, source, stored, explicit_start_ms))
     }
 
+    /// Resume facts for one watch unit; `None` when the user never played it.
+    fn stored_resume(
+        &self,
+        user: UserId,
+        media_id: MediaId,
+        unit: UnitKey,
+    ) -> Result<Option<StoredResume>, StoreError> {
+        self.library
+            .query_row(
+                "SELECT played, position_ms, duration_ms, audio_track, subtitle_track,
+                        resume_file_id, resume_file_revision, resume_source_version, timeline_mode,
+                        tracks_version
+                 FROM playback_units
+                 WHERE user_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4",
+                params![
+                    user.to_string(),
+                    media_id.to_string(),
+                    unit.season,
+                    unit.episode
+                ],
+                |row| {
+                    let binding = match (
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<i64>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, Option<i64>>(9)?,
+                    ) {
+                        (
+                            Some(file_id),
+                            Some(revision),
+                            Some(source_version),
+                            Some(timeline_mode),
+                            Some(tracks_version),
+                        ) => Some(StoredBinding {
+                            file_id,
+                            revision,
+                            source_version,
+                            timeline_mode,
+                            tracks_version,
+                        }),
+                        _ => None,
+                    };
+                    Ok(StoredResume {
+                        played: row.get::<_, i64>(0)? != 0,
+                        position_ms: row.get(1)?,
+                        duration_ms: row.get(2)?,
+                        audio_track: row.get(3)?,
+                        subtitle_track: row.get(4)?,
+                        binding,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+}
+
+/// Pure R1 decision: duration and tracks always describe the selected source
+/// (never the previous one), and a changed source never keeps the old position.
+fn resolve_resume(
+    media_id: MediaId,
+    unit: UnitKey,
+    source: PlaybackSource,
+    stored: Option<StoredResume>,
+    explicit_start_ms: Option<i64>,
+) -> ResolvedResume {
+    let binding = match stored.as_ref().map(|resume| resume.binding.as_ref()) {
+        Some(Some(binding)) if binding.matches(&source.file, source.tracks_version) => {
+            Binding::Matches
+        }
+        Some(Some(_)) => Binding::Changed,
+        _ => Binding::Absent,
+    };
+    let (audio_track, subtitle_track, stored_duration) = match (binding, stored.as_ref()) {
+        (Binding::Matches, Some(resume)) => (
+            resume.audio_track.clone(),
+            resume.subtitle_track.clone(),
+            resume.duration_ms,
+        ),
+        _ => (None, None, None),
+    };
+    // The selected source decides the duration; a stored duration is only
+    // trusted while that same source (and its track revision) is still bound.
+    let duration_ms = source.file.duration_ms.or(stored_duration);
+    let target = PlaybackTarget {
+        media_id,
+        unit,
+        file: source.file,
+        config_revision: 0,
+        timeline: TimelineMode::FullFile,
+    };
+    let changed_status = match binding {
+        Binding::Changed => ResumeStatus::SourceChanged,
+        _ => ResumeStatus::Compatible,
+    };
+    // A client that names a position (a seek, or another file version it just
+    // picked) is always honoured.
+    if let Some(start_ms) = explicit_start_ms {
+        return ResolvedResume {
+            target,
+            start_ms,
+            duration_ms,
+            audio_track,
+            subtitle_track,
+            status: changed_status,
+        };
+    }
+    let Some(resume) = stored else {
+        return no_progress(target, duration_ms, audio_track, subtitle_track);
+    };
+    if binding == Binding::Changed {
+        return ResolvedResume {
+            target,
+            start_ms: 0,
+            duration_ms,
+            audio_track: None,
+            subtitle_track: None,
+            status: ResumeStatus::SourceChanged,
+        };
+    }
+    if resume.played {
+        return ResolvedResume {
+            target,
+            start_ms: 0,
+            duration_ms,
+            audio_track,
+            subtitle_track,
+            status: ResumeStatus::AlreadyPlayed,
+        };
+    }
+    if resume.position_ms == 0 {
+        return no_progress(target, duration_ms, audio_track, subtitle_track);
+    }
+    ResolvedResume {
+        target,
+        start_ms: resume.position_ms,
+        duration_ms,
+        audio_track,
+        subtitle_track,
+        status: ResumeStatus::Compatible,
+    }
+}
+
+fn no_progress(
+    target: PlaybackTarget,
+    duration_ms: Option<i64>,
+    audio_track: Option<String>,
+    subtitle_track: Option<String>,
+) -> ResolvedResume {
+    ResolvedResume {
+        target,
+        start_ms: 0,
+        duration_ms,
+        audio_track,
+        subtitle_track,
+        status: ResumeStatus::NoProgress,
+    }
+}
+
+impl Store {
     pub fn mutate_playback(
         &self,
         media: MediaId,
@@ -323,6 +299,12 @@ impl Store {
             fav_val,
         ])?;
 
+        self.refresh_user_library_summary(
+            change.user_id,
+            media,
+            SummaryScope::for_unit(season, episode),
+        )?;
+
         tx.commit()?;
         Ok(())
     }
@@ -333,15 +315,16 @@ impl Store {
         now_ms: i64,
     ) -> Result<EventOutcome, StoreError> {
         let tx = self.library.unchecked_transaction()?;
-        let (media_id, unit_key) = match &event.item {
-            TypedItemId::Work(m) => (*m, UnitKey::WHOLE),
-            TypedItemId::Season { media, season } => (*media, UnitKey::new(*season as i32, 1)),
-            TypedItemId::Unit { media, key } => (*media, *key),
-        };
+        let (media_id, unit_key) = playback_unit(&event.item);
 
         let user_id_str = event.user_id.to_string();
         let media_id_str = media_id.to_string();
         let file_id_str = event.source_id.file_id.to_string();
+        // The resume binding records the track revision it was written for, so a
+        // later resolve can tell whether the source (and its track set) is still
+        // the same. A file that is no longer a published, present source writes
+        // no track names at all.
+        let tracks_version = self.file_tracks_version(event.source_id.file_id)?;
 
         let played_threshold = event.duration_ms.map(|d| (d as f64 * 0.9) as i64).unwrap_or(i64::MAX);
         let reached_played = event.position_ms >= played_threshold;
@@ -350,10 +333,12 @@ impl Store {
                     (user_id, media_id, season, episode, played, has_played_assertion,
                      played_changed_at_ms, position_ms, duration_ms, resume_file_id,
                      resume_file_revision, resume_source_version, timeline_mode,
-                     watch_activity_at, audio_track, subtitle_track)
+                     watch_activity_at, tracks_version, audio_track, subtitle_track)
                    VALUES
                     (?1, ?2, ?3, ?4, ?5, ?5, CASE WHEN ?5 = 1 THEN ?6 ELSE NULL END,
-                     ?7, ?8, ?9, ?10, ?11, 'full_file', ?6, ?12, ?13)
+                     ?7, ?8, ?9, ?10, ?11, 'full_file', ?6, ?12,
+                     CASE WHEN ?12 IS NULL THEN NULL ELSE ?13 END,
+                     CASE WHEN ?12 IS NULL THEN NULL ELSE ?14 END)
                    ON CONFLICT(user_id, media_id, season, episode) DO UPDATE SET
                      played = CASE WHEN ?5 = 1 THEN 1 ELSE playback_units.played END,
                      has_played_assertion = CASE WHEN ?5 = 1 THEN 1 ELSE playback_units.has_played_assertion END,
@@ -365,8 +350,9 @@ impl Store {
                      resume_source_version = ?11,
                      timeline_mode = 'full_file',
                      watch_activity_at = ?6,
-                     audio_track = ?12,
-                     subtitle_track = ?13";
+                     tracks_version = ?12,
+                     audio_track = CASE WHEN ?12 IS NULL THEN NULL ELSE ?13 END,
+                     subtitle_track = CASE WHEN ?12 IS NULL THEN NULL ELSE ?14 END";
 
         tx.execute(sql, params![
             user_id_str,
@@ -380,9 +366,16 @@ impl Store {
             file_id_str,
             event.source_id.revision,
             event.source_version,
+            tracks_version,
             event.audio_track,
             event.subtitle_track,
         ])?;
+
+        self.refresh_user_library_summary(
+            event.user_id,
+            media_id,
+            SummaryScope::for_unit(unit_key.season, unit_key.episode),
+        )?;
 
         tx.commit()?;
         Ok(EventOutcome::Applied)
@@ -433,54 +426,6 @@ impl Store {
         operation_id: &str,
         now_ms: i64,
     ) -> Result<super::types::OperationStatus, StoreError> {
-        let tx = self.library.unchecked_transaction()?;
-        let (state, survivor_str, loser_str): (String, String, Option<String>) = tx.query_row(
-            "SELECT state, survivor_id, loser_id FROM media_operations WHERE operation_id = ?1",
-            params![operation_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
-
-        if state == "succeeded" {
-            return Ok(super::types::OperationStatus {
-                operation_id: operation_id.to_string(),
-                phase: "complete".into(),
-                state: "succeeded".into(),
-                error: None,
-            });
-        }
-
-        if let Some(loser) = loser_str {
-            // Delete loser's derived units and items first so foreign keys don't break
-            tx.execute("DELETE FROM library_units WHERE media_id = ?1", params![loser])?;
-            tx.execute("DELETE FROM library_items WHERE media_id = ?1", params![loser])?;
-
-            // Reassign loser's files to survivor
-            tx.execute(
-                "UPDATE library_files SET media_id = ?1 WHERE media_id = ?2",
-                params![survivor_str, loser],
-            )?;
-            tx.execute(
-                "UPDATE library_file_units SET media_id = ?1 WHERE media_id = ?2",
-                params![survivor_str, loser],
-            )?;
-            // Mark loser as retired pointing to survivor
-            tx.execute(
-                "UPDATE media SET identity_state = 'retired', survivor_id = ?1 WHERE media_id = ?2",
-                params![survivor_str, loser],
-            )?;
-        }
-
-        tx.execute(
-            "UPDATE media_operations SET state = 'succeeded', phase_cursor = 'complete', updated_at_ms = ?1 WHERE operation_id = ?2",
-            params![now_ms, operation_id],
-        )?;
-
-        tx.commit()?;
-        Ok(super::types::OperationStatus {
-            operation_id: operation_id.to_string(),
-            phase: "complete".into(),
-            state: "succeeded".into(),
-            error: None,
-        })
+        self.advance_merge_operation(operation_id, now_ms)
     }
 }

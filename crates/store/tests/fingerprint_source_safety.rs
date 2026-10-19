@@ -4,10 +4,55 @@ use store::{
     StoredFingerprintSample, StoredMediaMarker,
 };
 
-fn row(root: &std::path::Path) -> LedgerRow {
+fn ensure_media(store: &Store, media_id: MediaId) -> MediaId {
+    if store.get_media(media_id).unwrap().is_none() {
+        store
+            .insert_media(&domain::Media {
+                id: media_id,
+                kind: domain::MediaKind::Movie,
+                title: format!("Fixture {media_id}"),
+                year: None,
+                original_title: None,
+                aliases: Vec::new(),
+                tmdb_id: None,
+                douban_id: None,
+                tvdb_id: None,
+                bangumi_id: None,
+                anilist_id: None,
+            })
+            .unwrap();
+    }
+    media_id
+}
+
+fn ensure_root(store: &Store, root: &std::path::Path) {
+    if store
+        .list_library_roots()
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate.path == root)
+    {
+        return;
+    }
+    let name = format!("lib-{}", root.display());
+    store
+        .create_library(
+            domain::MediaKind::Movie,
+            &name,
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+}
+
+fn row(store: &Store, root: &std::path::Path, media_id: MediaId) -> LedgerRow {
+    std::fs::create_dir_all(root).unwrap();
+    ensure_root(store, root);
     let row = LedgerRow {
         id: LedgerId::new(),
-        media_id: MediaId::new(),
+        media_id: ensure_media(store, media_id),
         path: root.join("episode.mkv").to_string_lossy().into_owned(),
         season: Some(1),
         episode: Some(1),
@@ -41,7 +86,7 @@ fn marker(row: &LedgerRow, source: &str) -> StoredMediaMarker {
 fn checked_publication_rejects_file_only_deletion_and_keeps_previous_result() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path()).unwrap();
-    let row = row(temp.path());
+    let row = row(&store, temp.path(), MediaId::new());
     store.insert_ledger(&row).unwrap();
     store.put_media_marker(&marker(&row, "old")).unwrap();
     let replacement = MarkerResultReplacement {
@@ -93,7 +138,7 @@ fn checked_publication_rejects_file_only_deletion_and_keeps_previous_result() {
 fn guarded_sample_commit_never_recreates_deleted_ledger_samples() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path()).unwrap();
-    let row = row(temp.path());
+    let row = row(&store, temp.path(), MediaId::new());
     store.insert_ledger(&row).unwrap();
     let (attempt, sample) = capture_result(&row);
     store.begin_fingerprint_attempt(&attempt).unwrap();
@@ -201,7 +246,7 @@ fn sample_query(sample: &StoredFingerprintSample) -> store::FingerprintSampleQue
 fn refresh_cannot_publish_a_snapshot_that_omits_a_deleted_job_member() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path()).unwrap();
-    let row = row(temp.path());
+    let row = row(&store, temp.path(), MediaId::new());
     store.insert_ledger(&row).unwrap();
     store.put_media_marker(&marker(&row, "old")).unwrap();
     let id = row.id.to_string();
@@ -257,17 +302,17 @@ fn refresh_cannot_publish_a_snapshot_that_omits_a_deleted_job_member() {
 #[test]
 fn job_scoped_publication_publishes_rows_the_job_covers() {
     let temp_a = tempfile::tempdir().unwrap();
-    let temp_b = tempfile::tempdir().unwrap();
     let store = Store::open(temp_a.path()).unwrap();
     let media_id = MediaId::new();
 
-    let mut row_a = row(temp_a.path());
+    let mut row_a = row(&store, temp_a.path(), media_id);
     row_a.media_id = media_id;
     row_a.season = Some(1);
     row_a.episode = Some(1);
     store.insert_ledger(&row_a).unwrap();
 
-    let mut row_b = row(temp_b.path());
+    let second_root = temp_a.path().join("second");
+    let mut row_b = row(&store, &second_root, media_id);
     row_b.media_id = media_id;
     row_b.season = Some(1);
     row_b.episode = Some(2);
@@ -363,7 +408,7 @@ fn capture_result(row: &LedgerRow) -> (StoredFingerprintAttempt, StoredFingerpri
 fn deleting_all_media_ledgers_also_removes_their_fingerprint_samples() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path()).unwrap();
-    let row = row(temp.path());
+    let row = row(&store, temp.path(), MediaId::new());
     store.insert_ledger(&row).unwrap();
     let (attempt, sample) = capture_result(&row);
     assert!(
@@ -396,7 +441,7 @@ fn deleting_all_media_ledgers_also_removes_their_fingerprint_samples() {
 fn cancelled_refresh_unit_cannot_be_published_as_success() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path()).unwrap();
-    let row = row(temp.path());
+    let row = row(&store, temp.path(), MediaId::new());
     store.insert_ledger(&row).unwrap();
     store.put_media_marker(&marker(&row, "old")).unwrap();
     let id = row.id.to_string();
@@ -450,7 +495,7 @@ fn independent_store_handles_cannot_reinsert_samples_while_ledger_is_deleted() {
     let capturing = Store::open(temp.path()).unwrap();
     let rows: Vec<_> = (0..32)
         .map(|index| {
-            let mut row = row(temp.path());
+            let mut row = row(&deleting, temp.path(), MediaId::new());
             row.path = temp
                 .path()
                 .join(format!("episode-{index}.mkv"))
@@ -478,7 +523,24 @@ fn independent_store_handles_cannot_reinsert_samples_while_ledger_is_deleted() {
         });
         for row in rows {
             gate.wait();
-            deleting.delete_ledger_path(&row.path).unwrap();
+            // The capture thread holds the library write lock, so the delete can
+            // observe SQLITE_BUSY. Retry without yielding the barrier: the
+            // authoritative delete must still commit, and the barrier must be
+            // released on every path so a failure cannot deadlock the scope.
+            let mut attempts = 0;
+            loop {
+                match deleting.delete_ledger_path(&row.path) {
+                    Ok(()) => break,
+                    Err(store::StoreError::Sqlite(rusqlite::Error::SqliteFailure(
+                        failure,
+                        _,
+                    ))) if failure.code == rusqlite::ErrorCode::DatabaseBusy && attempts < 1000 => {
+                        attempts += 1;
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("delete failed: {error}"),
+                }
+            }
             gate.wait();
         }
     });

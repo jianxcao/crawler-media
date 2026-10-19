@@ -1,16 +1,14 @@
-//! Ledger presence types and transactional updates for safe verification and pruning.
+//! Presence types and transactional updates for safe verification and pruning.
+//!
+//! Presence is a property of a `library_files` row: `present` = usable, `missing`,
+//! `unknown`. A permission/IO error is never recorded as `missing`.
 
-use domain::{LedgerId, LedgerRow, MediaId};
-use rusqlite::Transaction;
+use domain::{LedgerRow, LibraryId, MediaId};
+use rusqlite::Connection;
 
 use crate::StoreError;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FilePresence {
-    Present,
-    Missing,
-    Unknown,
-}
+pub use domain::FilePresence;
 
 #[derive(Clone, Debug)]
 pub struct LedgerPresenceObservation {
@@ -33,23 +31,32 @@ pub struct LedgerPresenceResult {
     pub skipped: usize,
 }
 
+/// The Library and Media a presence write affected, so the summaries can follow.
+struct Affected {
+    library_id: LibraryId,
+    media_id: MediaId,
+}
+
 impl crate::Store {
     /// Apply presence observations within a single Immediate transaction in library.db.
     ///
     /// For each observation, checks whether the current database row still matches
-    /// the observed identity (id, path, media_id, and missing_at). If it changed,
+    /// the observed identity (file id, path, media_id, and missing_at). If it changed,
     /// the row is skipped.
     ///
     /// In Verify mode:
-    /// - Missing: sets missing_at = now if not already set.
-    /// - Present: clears missing_at if set.
+    /// - Missing: sets `missing_at = now` if not already set.
+    /// - Present: clears `missing_at` if set.
     /// - Unknown: no change.
     ///
     /// In Prune mode:
-    /// - Missing: if it was already marked missing (missing_at is Some), deletes
-    ///   the ledger row and file-derived rows via `delete_ledger_in_tx`.
-    /// - Present: clears missing_at if set.
+    /// - Missing: if it was already marked missing (`missing_at` is Some), removes
+    ///   the file row and its file-derived rows.
+    /// - Present: clears `missing_at` if set.
     /// - Unknown: no change.
+    ///
+    /// A `pending` file observed as present is the crash-recovery case: its bytes
+    /// completed Transfer, so it becomes published content.
     pub fn apply_ledger_presence(
         &self,
         observations: &[LedgerPresenceObservation],
@@ -62,92 +69,117 @@ impl crate::Store {
         )?;
 
         let mut result = LedgerPresenceResult::default();
-
+        let mut affected: Vec<Affected> = Vec::new();
         for obs in observations {
-            let current: Option<(String, String, Option<i64>, bool)> = tx
-                .query_row(
-                    "SELECT path, media_id, missing_at, transfer_pending FROM ledger WHERE id = ?1",
-                    [&obs.row.id.to_string()],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                )
-                .rusqlite_optional()?;
-
-            let Some((cur_path, cur_media_id, cur_missing_at, pending)) = current else {
-                result.skipped += 1;
-                continue;
-            };
-
-            // Check identity
-            if cur_path != obs.row.path
-                || cur_media_id != obs.row.media_id.to_string()
-                || cur_missing_at != obs.missing_at
-            {
-                result.skipped += 1;
-                continue;
+            if let Some(scope) = apply_observation(&tx, obs, mode, now, &mut result)? {
+                affected.push(scope);
             }
-            if pending {
-                if obs.presence != FilePresence::Present {
-                    result.skipped += 1;
-                    continue;
-                }
-                tx.execute("UPDATE ledger SET transfer_pending = 0 WHERE id = ?1",
-                    [obs.row.id.to_string()])?;
-                tracing::info!(ledger_id = %obs.row.id, path = %obs.row.path,
-                    "Recovered completed Transfer publication");
-            }
-
-            match mode {
-                LedgerPresenceMode::Verify => match obs.presence {
-                    FilePresence::Missing => {
-                        if cur_missing_at.is_none() {
-                            tx.execute(
-                                "UPDATE ledger SET missing_at = ?1 WHERE id = ?2",
-                                rusqlite::params![now, obs.row.id.to_string()],
-                            )?;
-                            result.missing += 1;
-                        }
-                    }
-                    FilePresence::Present => {
-                        if cur_missing_at.is_some() {
-                            tx.execute(
-                                "UPDATE ledger SET missing_at = NULL WHERE id = ?1",
-                                rusqlite::params![obs.row.id.to_string()],
-                            )?;
-                            result.restored += 1;
-                        }
-                    }
-                    FilePresence::Unknown => {
-                        result.skipped += 1;
-                    }
-                },
-                LedgerPresenceMode::Prune => match obs.presence {
-                    FilePresence::Missing => {
-                        if cur_missing_at.is_some() {
-                            crate::ledger_cleanup::delete_ledger_in_tx(&tx, obs.row.id)?;
-                            result.deleted += 1;
-                        } else {
-                            result.skipped += 1;
-                        }
-                    }
-                    FilePresence::Present => {
-                        if cur_missing_at.is_some() {
-                            tx.execute(
-                                "UPDATE ledger SET missing_at = NULL WHERE id = ?1",
-                                rusqlite::params![obs.row.id.to_string()],
-                            )?;
-                            result.restored += 1;
-                        }
-                    }
-                    FilePresence::Unknown => {
-                        result.skipped += 1;
-                    }
-                },
-            }
+        }
+        for scope in &affected {
+            crate::library_write::reduce_library_media(&tx, scope.library_id, scope.media_id)?;
         }
 
         tx.commit()?;
         Ok(result)
     }
+}
+
+/// Apply one observation; returns the scope whose summaries must be reduced.
+fn apply_observation(
+    tx: &Connection,
+    obs: &LedgerPresenceObservation,
+    mode: LedgerPresenceMode,
+    now: i64,
+    result: &mut LedgerPresenceResult,
+) -> Result<Option<Affected>, StoreError> {
+    let file_id = obs.row.id.to_string();
+    let current: Option<(String, String, String, Option<i64>, String)> = tx
+        .query_row(
+            "SELECT library_id, media_id, path_key, missing_at, publication_state
+             FROM library_files WHERE file_id = ?1",
+            [&file_id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                ))
+            },
+        )
+        .rusqlite_optional()?;
+
+    let Some((library_id, media_id, path, missing_at, publication)) = current else {
+        result.skipped += 1;
+        return Ok(None);
+    };
+    if path != obs.row.path
+        || media_id != obs.row.media_id.to_string()
+        || missing_at != obs.missing_at
+    {
+        result.skipped += 1;
+        return Ok(None);
+    }
+    let scope = Affected {
+        library_id: library_id.parse::<LibraryId>()?,
+        media_id: media_id.parse::<MediaId>()?,
+    };
+
+    if publication == "pending" {
+        if obs.presence != FilePresence::Present {
+            result.skipped += 1;
+            return Ok(None);
+        }
+        tx.execute(
+            "UPDATE library_files
+             SET publication_state = 'published', presence_state = 'present', missing_at = NULL
+             WHERE file_id = ?1",
+            [&file_id],
+        )?;
+        tracing::info!(file_id = %obs.row.id, path = %obs.row.path,
+            "Recovered completed Transfer publication");
+        return Ok(Some(scope));
+    }
+
+    match (mode, obs.presence) {
+        (LedgerPresenceMode::Verify, FilePresence::Missing) => {
+            if missing_at.is_none() {
+                tx.execute(
+                    "UPDATE library_files SET missing_at = ?1, presence_state = 'missing'
+                     WHERE file_id = ?2",
+                    rusqlite::params![now, file_id],
+                )?;
+                result.missing += 1;
+                return Ok(Some(scope));
+            }
+            result.skipped += 1;
+        }
+        (LedgerPresenceMode::Prune, FilePresence::Missing) => {
+            if missing_at.is_some() {
+                crate::ledger_cleanup::delete_file_in_tx(tx, &file_id)?;
+                result.deleted += 1;
+                return Ok(Some(scope));
+            }
+            result.skipped += 1;
+        }
+        (_, FilePresence::Present) => {
+            if missing_at.is_some() {
+                tx.execute(
+                    "UPDATE library_files SET missing_at = NULL, presence_state = 'present'
+                     WHERE file_id = ?1",
+                    [&file_id],
+                )?;
+                result.restored += 1;
+                return Ok(Some(scope));
+            }
+            result.skipped += 1;
+        }
+        (_, FilePresence::Unknown) => {
+            result.skipped += 1;
+        }
+    }
+    Ok(None)
 }
 
 trait RusqliteOptionalExt<T> {

@@ -209,13 +209,27 @@ fn pending_file_does_not_produce_playable_unit() {
 
     let item = store
         .get_library_item(scope.library_id, media_id.parse().unwrap())
-        .unwrap()
         .unwrap();
-    assert_eq!(item.file_count, 1);
-    assert_eq!(item.available_file_count, 0, "Pending file must have 0 available files");
-    assert_eq!(item.preferred_file_id, None, "Pending file cannot be preferred");
-}
+    assert!(item.is_none(), "pending-only library must produce no library_items row");
 
+    // Re-publishing the same file as Published must create the item
+    file.publication = FilePublication::Published;
+    let pub_published = StorePublication {
+        file: &file,
+        units: &[UnitKey::new(1, 1)],
+        expected_version: None,
+        probe_required: false,
+    };
+    store.publish_files(&scope, &[pub_published], 2000).expect("republish published file");
+
+    let item = store
+        .get_library_item(scope.library_id, media_id.parse().unwrap())
+        .unwrap()
+        .expect("library item must exist after publishing");
+    assert_eq!(item.file_count, 1);
+    assert_eq!(item.available_file_count, 1);
+    assert_eq!(item.size_bytes, Some(1_000_000));
+}
 #[test]
 fn probe_obligation_created_when_probe_required() {
     let tmp = tempfile::tempdir().unwrap();
@@ -458,4 +472,85 @@ fn deleting_all_files_cleans_item_but_preserves_media() {
     // But Canonical Media must still exist!
     let m = store.get_media(media_id.parse().unwrap()).unwrap();
     assert!(m.is_some(), "Media fact must survive file deletion");
+}
+
+/// A Transfer reservation and its publication carry the same `file_id`, so the
+/// destination identity a failed round already recorded (root, source path, mode)
+/// survives the completion call even when that call does not repeat it.
+#[test]
+fn publication_keeps_the_destination_identity_recorded_by_the_reservation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+
+    let media_id = "00000000-0000-0000-0000-000000000002";
+    create_media(&store, media_id, "Frieren", MediaKind::Tv);
+    let (lib, root_id) = create_library(&store, "Anime TV", MediaKind::Tv, "/anime");
+    let scope = WriteScope {
+        library_id: lib.id.parse().unwrap(),
+        config_revision: 0,
+    };
+
+    let mut reserved = make_file(
+        "00000000-0000-0000-0000-000000000011",
+        &lib.id,
+        &root_id,
+        media_id,
+        "Frieren/S01E01.mkv",
+        MediaKind::Tv,
+        1_000_000,
+    );
+    reserved.publication = FilePublication::Pending;
+    reserved.source_path = Some("/downloads/Frieren.S01E01.mkv".into());
+    reserved.transfer_mode = Some("copy".to_string());
+    let units = [UnitKey::new(1, 1)];
+    store
+        .publish_files(&scope, &[StorePublication {
+            file: &reserved,
+            units: &units,
+            expected_version: None,
+            probe_required: false,
+        }], 1000)
+        .expect("reserve the destination");
+
+    let mut published = reserved.clone();
+    published.publication = FilePublication::Published;
+    published.source_path = None;
+    published.transfer_mode = None;
+    let report = store
+        .publish_files(&scope, &[StorePublication {
+            file: &published,
+            units: &units,
+            expected_version: None,
+            probe_required: true,
+        }], 2000)
+        .expect("complete the reservation");
+    assert_eq!(report.updated, 1, "the completion updates the reserved row");
+
+    let library_path = store
+        .db_paths()
+        .into_iter()
+        .find(|path| path.ends_with("library.db"))
+        .unwrap();
+    let conn = rusqlite::Connection::open(library_path).unwrap();
+    let (root, source, mode, publication): (String, Option<String>, Option<String>, String) = conn
+        .query_row(
+            "SELECT root_id, source_path, transfer_mode, publication_state
+             FROM library_files WHERE file_id = ?1",
+            [published.file_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("the file row exists");
+    conn.close().unwrap();
+
+    assert_eq!(root, root_id);
+    assert_eq!(source.as_deref(), Some("/downloads/Frieren.S01E01.mkv"));
+    assert_eq!(mode.as_deref(), Some("copy"));
+    assert_eq!(publication, "published");
+    assert_eq!(store.count_probe_obligations().unwrap(), 1);
+    let item = store
+        .get_library_item(scope.library_id, media_id.parse().unwrap())
+        .unwrap()
+        .expect("published file produces the item summary");
+    assert_eq!(item.file_count, 1);
+    assert_eq!(item.available_file_count, 1);
 }

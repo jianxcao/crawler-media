@@ -32,6 +32,16 @@ fn aliases_conflict(a: &Media, b: &Media) -> bool {
         .any(|(a, b)| a.zip(b).is_some_and(|(a, b)| a != b))
 }
 
+/// True when `incoming` claims an external identity from a provider that
+/// `existing` has never confirmed. Matching such a pair by title+year would
+/// silently adopt a different provider's identity, so it must not merge.
+fn introduces_foreign_alias(existing: &Media, incoming: &Media) -> bool {
+    aliases(incoming)
+        .into_iter()
+        .zip(aliases(existing))
+        .any(|(incoming, existing)| incoming.is_some() && existing.is_none())
+}
+
 fn identity_conflict(incoming: &Media) -> StoreError {
     tracing::warn!(media_id = %incoming.id, kind = incoming.kind.as_str(), "Ambiguous scanned Media identity rejected");
     StoreError::Protected("Ambiguous or conflicting scanned Media identity".into())
@@ -306,31 +316,6 @@ impl Store {
         Ok(())
     }
 
-    /// Update rating, release_date, studio and studio_logo on library_items for a media when scraped
-    pub fn update_library_items_metadata_sort(
-        &self,
-        media_id: MediaId,
-        rating: Option<f64>,
-        release_date: Option<&str>,
-        studio: Option<&str>,
-        studio_logo: Option<&str>,
-    ) -> Result<(), StoreError> {
-        let rating_val = rating.unwrap_or(-1.0);
-        let rel_val = release_date.unwrap_or("");
-        let mut obj = serde_json::Map::new();
-        if let Some(s) = studio.filter(|s| !s.trim().is_empty()) {
-            obj.insert("studio".into(), s.into());
-        }
-        if let Some(logo) = studio_logo.filter(|s| !s.trim().is_empty()) {
-            obj.insert("studio_logo".into(), logo.into());
-        }
-        let aliases_json = serde_json::Value::Object(obj).to_string();
-        self.library.execute(
-            "UPDATE library_items SET rating_sort = ?2, release_date_sort = ?3, aliases_json = ?4 WHERE media_id = ?1",
-            params![media_id.to_string(), rating_val, rel_val, aliases_json],
-        )?;
-        Ok(())
-    }
 
     /// Recover canonical identity without selecting the first alias or ambiguous title.
     pub fn resolve_scanned_media(&self, incoming: Media) -> Result<Media, StoreError> {
@@ -401,6 +386,7 @@ impl Store {
                         existing.title == incoming.title
                             && incoming.year == existing.year
                             && !aliases_conflict(existing, &incoming)
+                            && !introduces_foreign_alias(existing, &incoming)
                     })
                     .collect();
                 if titles.len() == 1 {

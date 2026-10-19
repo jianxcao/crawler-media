@@ -68,22 +68,6 @@ fn nested_root_wins_over_parent_root() {
 }
 
 #[test]
-fn equal_depth_across_libraries_is_ambiguous_and_does_not_fall_back() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Store::open(tmp.path().join("data")).unwrap();
-    let shared = tmp.path().join("dup");
-    let a = create(&store, "a", &[&shared]);
-    let b = create(&store, "b", &[&shared]);
-    assert_ne!(a.id, b.id);
-    assert!(store.default_library(MediaKind::Movie).unwrap().is_some());
-
-    let view = store.library_ownership().unwrap();
-    let path = shared.join("x.mkv");
-    assert!(view.owner(&path, MediaKind::Movie).is_none());
-    assert!(store.library_for_path(&path, MediaKind::Movie).unwrap().is_none());
-}
-
-#[test]
 fn unmatched_path_falls_back_to_kind_default() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
@@ -166,7 +150,7 @@ fn blocked_library_rejects_work_even_when_removal_succeeded() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let lib = create(&store, "frozen", &[&tmp.path().join("frozen")]);
-    let conn = rusqlite::Connection::open(tmp.path().join("data/app.db")).unwrap();
+    let conn = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
     conn.execute(
         "INSERT INTO library_removals
             (operation_id, library_id, state, snapshot_json, removed_ledger_count,

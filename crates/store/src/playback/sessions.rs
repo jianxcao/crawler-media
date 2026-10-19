@@ -4,10 +4,37 @@ use rusqlite::{OptionalExtension, params};
 use super::{PlayLogRow, SessionRow, UnitState, media_id_from, user_id_from};
 use super::{Store, StoreError};
 
+/// The NOT NULL binding columns a live session shares with the play session id
+/// it was issued for. `playback_session_ids` is the API-visible record of the
+/// file, revision, library and generation the client is playing, so a session
+/// row must echo exactly that state instead of inventing defaults.
+struct SessionBinding {
+    play_session_id: String,
+    generation: i64,
+    file_id: String,
+    file_revision: i64,
+    source_version: String,
+    library_id: String,
+    config_revision: i64,
+    timeline_mode: String,
+}
+
 impl Store {
     pub fn upsert_session(&self, session: &SessionRow) -> Result<(), StoreError> {
-        // Align with schema/v1/library.sql:221-230
-        let file_id = session.ledger_id.clone().unwrap_or_else(|| "".into());
+        let binding = self.session_binding(
+            session.user_id,
+            &session.device_id,
+            session.play_session_id.as_deref(),
+        )?;
+        if let Some(ledger_id) = session.ledger_id.as_deref() {
+            if ledger_id != binding.file_id {
+                return Err(StoreError::Invalid(format!(
+                    "playback session file_id {ledger_id} does not match issued binding {}",
+                    binding.file_id
+                )));
+            }
+        }
+        // Align with schema/v1/library.sql: playback_sessions.
         self.library.execute(
             "INSERT OR REPLACE INTO playback_sessions
                 (device_id, user_id, media_id, season, episode, client, device_name,
@@ -17,14 +44,14 @@ impl Store {
                  library_id, config_revision, timeline_mode, play_session_id, generation,
                  last_report_at_ms, last_event_sequence)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19, ?20, ?21, 1, 'v1', '', 0, 'full_file',
-                     ?22, 1, ?23, ?24)",
+                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28,
+                     ?29, ?30)",
             params![
                 session.device_id,
                 session.user_id.to_string(),
                 session.media_id.to_string(),
-                session.season,
-                session.episode,
+                session.season.unwrap_or(super::UNIT_WHOLE),
+                session.episode.unwrap_or(super::UNIT_WHOLE),
                 session.client,
                 session.device_name,
                 session.client_version,
@@ -40,13 +67,63 @@ impl Store {
                 session.admin_ended as i64,
                 session.started_at,
                 session.last_report_at,
-                session.ledger_id,
-                session.play_session_id,
+                binding.file_id,
+                binding.file_revision,
+                binding.source_version,
+                binding.library_id,
+                binding.config_revision,
+                binding.timeline_mode,
+                binding.play_session_id,
+                binding.generation,
                 session.last_report_at_ms,
                 session.last_event_sequence,
             ],
         )?;
         Ok(())
+    }
+
+    /// Resolve the file/library/generation binding issued for this play session.
+    ///
+    /// Callers that omit `play_session_id`, or reference one this store never
+    /// issued, genuinely lack the NOT NULL columns; report that instead of
+    /// persisting a fabricated binding.
+    fn session_binding(
+        &self,
+        user_id: UserId,
+        device_id: &str,
+        play_session_id: Option<&str>,
+    ) -> Result<SessionBinding, StoreError> {
+        let Some(play_session_id) = play_session_id else {
+            return Err(StoreError::Invalid(format!(
+                "playback session for user {user_id} device {device_id} has no play_session_id"
+            )));
+        };
+        self.library
+            .query_row(
+                "SELECT play_session_id, generation, file_id, file_revision, source_version,
+                        library_id, config_revision, timeline_mode
+                 FROM playback_session_ids
+                 WHERE user_id = ?1 AND device_id = ?2 AND play_session_id = ?3",
+                params![user_id.to_string(), device_id, play_session_id],
+                |row| {
+                    Ok(SessionBinding {
+                        play_session_id: row.get(0)?,
+                        generation: row.get(1)?,
+                        file_id: row.get(2)?,
+                        file_revision: row.get(3)?,
+                        source_version: row.get(4)?,
+                        library_id: row.get(5)?,
+                        config_revision: row.get(6)?,
+                        timeline_mode: row.get(7)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::Invalid(format!(
+                    "play session {play_session_id} was not issued to user {user_id} device {device_id}"
+                ))
+            })
     }
 
     pub fn get_session(
@@ -59,7 +136,7 @@ impl Store {
                 "SELECT device_id, user_id, media_id, season, episode, client, device_name,
                         client_version, play_method, position_ms, start_position_ms,
                         duration_ms, paused, watched_ms, rate_bps, bytes_sent, connections,
-                        admin_ended, started_at, last_report_at, ledger_id, play_session_id,
+                        admin_ended, started_at, last_report_at, file_id, play_session_id,
                         last_report_at_ms, last_event_sequence
                  FROM playback_sessions WHERE user_id = ?1 AND device_id = ?2",
                 params![user_id.to_string(), device_id],
@@ -74,7 +151,7 @@ impl Store {
             "SELECT device_id, user_id, media_id, season, episode, client, device_name,
                     client_version, play_method, position_ms, start_position_ms,
                     duration_ms, paused, watched_ms, rate_bps, bytes_sent, connections,
-                    admin_ended, started_at, last_report_at, ledger_id, play_session_id,
+                    admin_ended, started_at, last_report_at, file_id, play_session_id,
                     last_report_at_ms, last_event_sequence
              FROM playback_sessions WHERE device_id = ?1
              ORDER BY last_report_at DESC",
@@ -92,7 +169,7 @@ impl Store {
             "SELECT device_id, user_id, media_id, season, episode, client, device_name,
                     client_version, play_method, position_ms, start_position_ms,
                     duration_ms, paused, watched_ms, rate_bps, bytes_sent, connections,
-                    admin_ended, started_at, last_report_at, ledger_id, play_session_id,
+                    admin_ended, started_at, last_report_at, file_id, play_session_id,
                     last_report_at_ms, last_event_sequence
              FROM playback_sessions WHERE last_report_at >= ?1
              ORDER BY last_report_at DESC",
@@ -120,6 +197,11 @@ impl Store {
         let Some(session) = self.get_session(user_id, device_id)? else {
             return Ok(None);
         };
+        let binding = self.session_binding(
+            user_id,
+            device_id,
+            session.play_session_id.as_deref(),
+        )?;
         self.library.execute(
             "DELETE FROM playback_sessions WHERE user_id = ?1 AND device_id = ?2",
             params![user_id.to_string(), device_id],
@@ -147,8 +229,10 @@ impl Store {
             "INSERT INTO playback_logs
                 (id, user_id, media_id, season, episode, client, device_name, play_method,
                  started_at, ended_at, watched_ms, start_position_ms, end_position_ms,
-                 duration_ms, completed, device_id, admin_ended)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                 duration_ms, completed, device_id, admin_ended, play_session_id, generation,
+                 file_id, file_revision, source_version, timeline_mode)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                     ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
             params![
                 log.id,
                 log.user_id.to_string(),
@@ -167,6 +251,12 @@ impl Store {
                 log.completed as i64,
                 log.device_id,
                 session.admin_ended as i64,
+                binding.play_session_id,
+                binding.generation,
+                binding.file_id,
+                binding.file_revision,
+                binding.source_version,
+                binding.timeline_mode,
             ],
         )?;
         Ok(Some(log))

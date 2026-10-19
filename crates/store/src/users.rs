@@ -465,26 +465,24 @@ impl Store {
         )?;
         subscribe_tx.commit()?;
 
-        let app_tx = self.app.unchecked_transaction()?;
-        app_tx.execute(
+        let library_tx = self.library.unchecked_transaction()?;
+        library_tx.execute(
             "UPDATE collections SET user_id = ?1 WHERE user_id = ?2",
             params![admin_id.to_string(), id.to_string()],
         )?;
-        app_tx.commit()?;
-
-        let playback_tx = self.subscribe.unchecked_transaction()?;
         for table in [
             "playback_units",
             "playback_sessions",
+            "playback_session_ids",
             "playback_logs",
             "playback_metrics",
         ] {
-            playback_tx.execute(
+            library_tx.execute(
                 &format!("DELETE FROM {table} WHERE user_id = ?1"),
                 params![id.to_string()],
             )?;
         }
-        playback_tx.commit()?;
+        library_tx.commit()?;
 
         let user_tx = self.app.unchecked_transaction()?;
         user_tx.execute(

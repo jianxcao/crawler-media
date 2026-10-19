@@ -1,10 +1,15 @@
 use std::path::PathBuf;
 use domain::{FileVersion, LedgerId, LibraryFile, LibraryId, UnitKey};
 
+pub mod artwork;
+pub mod delete;
+pub mod presence;
+pub mod probe;
 pub mod publish;
 pub mod reduce;
-pub mod presence;
+pub mod reduce_incremental;
 
+pub use artwork::*;
 pub use publish::*;
 pub use reduce::*;
 pub use presence::*;

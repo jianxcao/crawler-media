@@ -174,6 +174,16 @@ fn retiring_a_partial_unit_keeps_the_job_counters_honest() {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
+    store
+        .create_library(
+            domain::MediaKind::Movie,
+            "Probe",
+            &["/library"],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
     let rows = ["a", "b"].map(|suffix| domain::LedgerRow {
         id: domain::LedgerId::new(),
         media_id: media.id,

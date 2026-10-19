@@ -1,33 +1,66 @@
 use std::str::FromStr;
 
-use domain::{MediaId, UserId};
-use rusqlite::{Connection, params};
+use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserId};
+use rusqlite::Connection;
 use store::Store;
 
-#[test]
-fn old_play_logs_gain_nullable_identity_without_inventing_devices() {
-    let tmp = tempfile::tempdir().unwrap();
-    drop(Store::open(tmp.path()).unwrap());
-    let user = UserId::new();
-    let media = MediaId::new();
-    let db = Connection::open(tmp.path().join("subscribe.db")).unwrap();
-    db.execute_batch("ALTER TABLE playback_logs DROP COLUMN device_id; PRAGMA user_version=2;")
+fn insert_movie(store: &Store, id: MediaId) {
+    store
+        .insert_media(&Media {
+            id,
+            kind: MediaKind::Movie,
+            title: format!("Fixture {id}"),
+            year: None,
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
         .unwrap();
-    db.execute(
-        "INSERT INTO playback_logs (id,user_id,media_id,client,device_name,play_method,started_at,ended_at)
-         VALUES ('old',?1,?2,'Infuse','Same Name','DirectPlay',1,2)",
-        params![user.to_string(), media.to_string()],
-    ).unwrap();
-    for _ in 0..2 {
-        let reopened = Store::open(tmp.path()).unwrap();
-        let logs = reopened
-            .list_logs(10, None, None, None, 10, Some(user))
+}
+
+fn publish_unit(store: &Store, base: &std::path::Path, media_id: MediaId, season: u32, episode: u32) {
+    let kind = store.get_media(media_id).unwrap().unwrap().kind;
+    let root = base.join(kind.as_str());
+    std::fs::create_dir_all(&root).unwrap();
+    if !store
+        .list_library_roots()
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate.path == root && candidate.kind == kind)
+    {
+        store
+            .create_library(
+                kind,
+                &format!("lib-{}-{}", kind.as_str(), base.display()),
+                &[root.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+            )
             .unwrap();
-        assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0].device_id, None);
-        assert!(!logs[0].revocable());
-        assert!(!reopened.device_is_revocable(user, "jf-Same Name").unwrap());
     }
+    store
+        .insert_ledger(&LedgerRow {
+            id: LedgerId::new(),
+            media_id,
+            path: root
+                .join(format!("{media_id}-s{season}e{episode}.mkv"))
+                .display()
+                .to_string(),
+            season: Some(season),
+            episode: Some(episode),
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: QualitySource::Release,
+            confidence: Confidence::High,
+            filter_score: None,
+        })
+        .unwrap();
 }
 
 #[test]
@@ -40,8 +73,9 @@ fn failed_movie_mark_does_not_hide_legacy_progress() {
         id: media, kind: domain::MediaKind::Movie, title: "Legacy".into(), year: None,
         original_title: None, aliases: Vec::new(), tmdb_id: None, douban_id: None, tvdb_id: None, bangumi_id: None, anilist_id: None,
     }).unwrap();
+    publish_unit(&store, &tmp.path().join("media"), media, 0, 0);
     store.upsert_unit(user, media, 0, 0, 45000, Some(false), Some(true), Some(90000), None, None, false, 10).unwrap();
-    let db = Connection::open(tmp.path().join("subscribe.db")).unwrap();
+    let db = Connection::open(tmp.path().join("library.db")).unwrap();
     db.execute_batch("CREATE TRIGGER review_mark_update_block BEFORE UPDATE ON playback_units BEGIN SELECT RAISE(ABORT,'review mark blocked'); END;").unwrap();
     drop(db);
     let blocked = Store::open(tmp.path()).unwrap();
@@ -54,36 +88,6 @@ fn failed_movie_mark_does_not_hide_legacy_progress() {
     assert!(reopened.unit_state(user, media, -1, -1).unwrap().is_none());
 }
 
-#[test]
-fn old_library_gains_nullable_release_quality_idempotently() {
-    let tmp = tempfile::tempdir().unwrap();
-    drop(Store::open(tmp.path()).unwrap());
-    let db = Connection::open(tmp.path().join("library.db")).unwrap();
-    db.execute_batch("ALTER TABLE ledger DROP COLUMN release_quality; PRAGMA user_version=5;")
-        .unwrap();
-    let media = MediaId::new();
-    db.execute("INSERT INTO ledger (id,media_id,path,quality_source,confidence) VALUES ('old',?1,'old.mkv','probe','high')",[media.to_string()]).unwrap();
-    for _ in 0..2 {
-        let reopened = Store::open(tmp.path()).unwrap();
-        assert_eq!(
-            reopened
-                .schema_versions()
-                .into_iter()
-                .find(|(name, _)| *name == "library")
-                .unwrap()
-                .1,
-            17
-        );
-        let quality: Option<String> = db
-            .query_row(
-                "SELECT release_quality FROM ledger WHERE id='old'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(quality, None);
-    }
-}
 
 #[test]
 fn clear_viewing_facts_preserves_preferences_and_other_users_and_time_windows() {
@@ -93,6 +97,11 @@ fn clear_viewing_facts_preserves_preferences_and_other_users_and_time_windows() 
     let other = UserId::new();
     let media = MediaId::new();
     let outside = MediaId::new();
+    insert_movie(&store, media);
+    insert_movie(&store, outside);
+    let root = tmp.path().join("media");
+    publish_unit(&store, &root, media, 1, 1);
+    publish_unit(&store, &root, outside, 1, 1);
     for (who, what, at) in [(user, media, 100), (other, media, 100), (user, outside, 10)] {
         store
             .upsert_unit(
@@ -153,6 +162,7 @@ fn critical_unit_mark_cascade_failure_is_propagated_and_atomic() {
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
     let media = MediaId::new();
+    insert_movie(&store, media);
     for (season, episode) in [(-1, -1), (1, 1)] {
         store
             .upsert_unit(
@@ -171,7 +181,7 @@ fn critical_unit_mark_cascade_failure_is_propagated_and_atomic() {
             )
             .unwrap();
     }
-    let db = Connection::open(tmp.path().join("subscribe.db")).unwrap();
+    let db = Connection::open(tmp.path().join("library.db")).unwrap();
     db.execute_batch("CREATE TRIGGER block_mark BEFORE UPDATE ON playback_units WHEN OLD.season=1 BEGIN SELECT RAISE(ABORT,'mark blocked'); END;").unwrap();
     assert!(
         store
@@ -233,18 +243,23 @@ fn retargeted_subscribe_does_not_treat_previous_library_as_owned() {
 }
 
 fn closed_session(
+    store: &Store,
     user: UserId,
     media: MediaId,
     device: &str,
     started: i64,
     admin_ended: bool,
 ) -> store::SessionRow {
+    let ledger = LedgerId::new();
+    let play_session_id = store
+        .issue_play_session(user, device, ledger, started)
+        .unwrap();
     store::SessionRow {
         device_id: device.into(),
         user_id: user,
         media_id: media,
-        season: None,
-        episode: None,
+        season: Some(-1),
+        episode: Some(-1),
         client: Some("fixture".into()),
         device_name: None,
         client_version: None,
@@ -260,8 +275,8 @@ fn closed_session(
         admin_ended,
         started_at: started,
         last_report_at: started,
-        ledger_id: None,
-        play_session_id: None,
+        ledger_id: Some(ledger.to_string()),
+        play_session_id: Some(play_session_id),
         last_report_at_ms: started * 1000,
         last_event_sequence: None,
     }
@@ -277,15 +292,15 @@ fn only_admin_end_records_admin_ended_in_playback_log() {
     let media = MediaId::new();
 
     store
-        .upsert_session(&closed_session(user, media, "dev-user-stop", 10, false))
+        .upsert_session(&closed_session(&store, user, media, "dev-user-stop", 10, false))
         .unwrap();
     store.close_session(user, "dev-user-stop", 20).unwrap();
     store
-        .upsert_session(&closed_session(user, media, "dev-admin-end", 30, true))
+        .upsert_session(&closed_session(&store, user, media, "dev-admin-end", 30, true))
         .unwrap();
     store.close_session(user, "dev-admin-end", 40).unwrap();
 
-    let db = Connection::open(tmp.path().join("subscribe.db")).unwrap();
+    let db = Connection::open(tmp.path().join("library.db")).unwrap();
     let user_stop: i64 = db
         .query_row(
             "SELECT admin_ended FROM playback_logs WHERE device_id = 'dev-user-stop'",
@@ -311,48 +326,4 @@ fn only_admin_end_records_admin_ended_in_playback_log() {
         store.device_was_admin_ended(user, "dev-admin-end", 45, 60).unwrap(),
         "管理员结束后的心跳必须被告知已结束"
     );
-}
-
-/// 老库没有 `admin_ended` 列：重开 Store 必须幂等地补列，且默认 0。
-#[test]
-fn reopening_legacy_db_restores_admin_ended_column_with_default_zero() {
-    let tmp = tempfile::tempdir().unwrap();
-    drop(Store::open(tmp.path()).unwrap());
-    let user = UserId::new();
-    let media = MediaId::new();
-    {
-        let db = Connection::open(tmp.path().join("subscribe.db")).unwrap();
-        db.execute_batch("ALTER TABLE playback_logs DROP COLUMN admin_ended;")
-            .unwrap();
-        db.execute(
-            "INSERT INTO playback_logs (id,user_id,media_id,play_method,started_at,ended_at)
-             VALUES ('legacy',?1,?2,'local',1,2)",
-            params![user.to_string(), media.to_string()],
-        )
-        .unwrap();
-    }
-
-    for _ in 0..2 {
-        let reopened = Store::open(tmp.path()).unwrap();
-        let logs = reopened
-            .list_logs(10, None, None, None, 10, Some(user))
-            .unwrap();
-        assert_eq!(logs.len(), 1);
-        assert!(
-            !reopened
-                .device_was_admin_ended(user, "jf-legacy", 3, 60)
-                .unwrap(),
-            "老日志不得被当成管理员结束"
-        );
-    }
-
-    let db = Connection::open(tmp.path().join("subscribe.db")).unwrap();
-    let value: i64 = db
-        .query_row(
-            "SELECT admin_ended FROM playback_logs WHERE id = 'legacy'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(value, 0, "补列后老行默认 0");
 }

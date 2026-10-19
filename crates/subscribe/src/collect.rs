@@ -628,10 +628,19 @@ fn reserve_and_publish<D: Downloader + ?Sized>(
     src: &Path, dest: &Path, pending: bool, control: &library::WorkControl,
     recorder: Option<&dyn TransferRecorder>,
 ) -> Result<FileCoverage, SubscribeError> {
-    let library_id = added.input.library_id.unwrap_or_else(|| {
-        added.input.subscribe.library_id.unwrap_or_else(domain::LibraryId::new)
-    });
-    let root_id = added.input.root_id.clone().unwrap_or_else(|| "default_root".into());
+    // Publishing writes the destination identity: the Library that owns the root
+    // and the root itself. Inventing either would record a file nobody owns, so a
+    // missing identity fails the file instead.
+    let library_id = added
+        .input
+        .library_id
+        .ok_or(SubscribeError::MissingPublicationTarget("library_id"))?;
+    let root_id = added
+        .input
+        .root_id
+        .clone()
+        .ok_or(SubscribeError::MissingPublicationTarget("root_id"))?;
+    let mode = resolve_mode(src, added.input.library_root, added.input.transfer_mode);
     let file_id = LedgerId::new();
     let units: Vec<UnitKey> = if added.input.media.kind == domain::MediaKind::Movie {
         vec![UnitKey::WHOLE]
@@ -659,7 +668,7 @@ fn reserve_and_publish<D: Downloader + ?Sized>(
         modified_ns: None,
         source_digest: None,
         source_path: Some(src.to_path_buf()),
-        transfer_mode: None,
+        transfer_mode: Some(mode.as_str().to_string()),
         resolution: release.resolution.clone(),
         codec: release.codec.clone(),
         hdr: release.hdr.clone(),
@@ -675,8 +684,7 @@ fn reserve_and_publish<D: Downloader + ?Sized>(
     };
     let mut candidate = FileCoverage { file, units };
     if let Some(recorder) = recorder {
-        candidate = recorder.prepare(&candidate, src,
-            resolve_mode(src, added.input.library_root, added.input.transfer_mode))?;
+        candidate = recorder.prepare(&candidate, src, mode)?;
     }
     if !pending || !dest.is_file() {
         publish_video(added, src, dest, control)?;

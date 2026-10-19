@@ -1,4 +1,4 @@
-use domain::{LedgerRow, Media, MediaKind, UserId};
+use domain::{LedgerRow, LibraryFile, Media, MediaKind, TypedItemId, UnitKey, UserId};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -44,8 +44,13 @@ pub struct PlaybackEventIdentity {
     pub event_sequence: Option<i64>,
 }
 
+/// One library entry as the protocol layer sees it: the selected source file,
+/// the row view its artwork/NFO helpers consume, and the media it belongs to.
 #[derive(Clone, Debug)]
 pub struct MediaItemSnapshot {
+    /// The published, present source file this entry plays. Public item
+    /// identity is the logical target, never this file id.
+    pub file: LibraryFile,
     pub row: LedgerRow,
     pub media: Media,
     pub ticks: i64,
@@ -95,12 +100,34 @@ impl UserItemData {
 }
 
 impl MediaItemSnapshot {
+    /// Logical identity of this entry: its work for movies, videos and series,
+    /// and the exact unit for a TV episode. This is what the protocol exposes as
+    /// the item id — the physical file id is never an item identity.
+    pub fn item_identity(&self) -> TypedItemId {
+        match (self.media.kind, self.is_series) {
+            (MediaKind::Tv, false) => match (self.row.season, self.row.episode) {
+                (Some(season), Some(episode)) => TypedItemId::Unit {
+                    media: self.media.id,
+                    key: UnitKey::new(season as i32, episode as i32),
+                },
+                // Degenerate TV row without unit coverage: the whole work unit,
+                // never a fabricated `(0, 0)` coordinate.
+                _ => TypedItemId::Unit {
+                    media: self.media.id,
+                    key: UnitKey::WHOLE,
+                },
+            },
+            _ => TypedItemId::Work(self.media.id),
+        }
+    }
+
+    /// Public protocol id of this entry (`w1_…` work, `u1_…` unit).
+    pub fn protocol_id(&self) -> String {
+        self.item_identity().to_wire_string()
+    }
+
     pub fn user_item_data(&self) -> UserItemData {
-        let item_id = if self.is_series {
-            self.media.id.to_string().replace('-', "")
-        } else {
-            self.row.id.to_string().replace('-', "")
-        };
+        let item_id = self.protocol_id();
         let playback_position_ticks = if self.is_series { 0 } else { self.ticks };
         let played_percentage = if let Some(unplayed) = self.unplayed_item_count {
             self.metadata

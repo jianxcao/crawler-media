@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use domain::{LedgerId, LedgerRow, MediaKind, Release, Subscribe};
 use subscribe::SubscribeFacts;
 
-use crate::browse_projection::ReadRevisions;
 use crate::library_ownership::LibraryOwnership;
+use crate::read_freshness::ReadFingerprint;
 use crate::{Store, StoreError};
 
 /// Owned database snapshot for out-of-lock Subscribe library evaluation.
@@ -16,7 +16,9 @@ pub struct SubscribeLibrarySnapshot {
     pub saved: SubscribeFacts,
     pub rows: Vec<LedgerRow>,
     pub qualities: HashMap<LedgerId, Result<Release, String>>,
-    pub revisions: ReadRevisions,
+    /// Scoped fingerprint of the target Library's configuration and the
+    /// observed media's file facts, re-read before a side effect is admitted.
+    pub fingerprint: ReadFingerprint,
 }
 
 impl Store {
@@ -29,7 +31,14 @@ impl Store {
     ) -> Result<SubscribeLibrarySnapshot, StoreError> {
         let saved = self.load_subscribe_facts(subscribe.id)?;
         let ownership = self.library_ownership()?;
-        let revisions = self.read_revisions()?;
+        let target_library_id = match subscribe.library_id.clone() {
+            Some(id) => id.to_string(),
+            None => ownership
+                .default_for(kind)
+                .map(|library| library.id.clone())
+                .ok_or_else(|| StoreError::Missing("target Library".into()))?,
+        };
+        let fingerprint = self.read_fingerprint(&target_library_id, subscribe.media_id)?;
         let rows = self.ledger_for_media(subscribe.media_id)?;
         let mut qualities = HashMap::new();
         for row in &rows {
@@ -43,7 +52,7 @@ impl Store {
             saved,
             rows,
             qualities,
-            revisions,
+            fingerprint,
         })
     }
 }
