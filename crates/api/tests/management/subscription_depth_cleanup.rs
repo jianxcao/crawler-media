@@ -33,7 +33,7 @@ async fn setup_tv_subscription_with_two_seasons(
     let media_id = created["data"]["media"]["id"].as_str().unwrap().to_string();
 
     let store = Store::open(tmp.path().join("data")).unwrap();
-    let dir = tmp.path().join("tv");
+    let dir = tmp.path().join("data/library/tv");
     std::fs::create_dir_all(&dir).unwrap();
     for (season, episode) in [(1u32, 1u32), (2, 1)] {
         let path = dir.join(format!("s{season}e{episode}.mkv"));
@@ -109,7 +109,7 @@ async fn season_cleanup_keeps_ledger_when_physical_delete_fails() {
     .await;
     let id = created["data"]["id"].as_str().unwrap();
     let media_id = created["data"]["media"]["id"].as_str().unwrap();
-    let blocked = tmp.path().join("blocked.mkv");
+    let blocked = tmp.path().join("data/library/tv/blocked.mkv");
     std::fs::create_dir_all(&blocked).unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     store

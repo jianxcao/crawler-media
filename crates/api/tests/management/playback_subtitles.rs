@@ -1,8 +1,8 @@
 use super::*;
 
 fn movie_with_subtitle_tracks(tmp: &tempfile::TempDir) -> (domain::Media, domain::LedgerRow) {
-    let movie_file = tmp.path().join("library/movies/TestFilm.mkv");
-    let srt_file = tmp.path().join("library/movies/TestFilm.zh.srt");
+    let movie_file = tmp.path().join("data/library/movies/TestFilm.mkv");
+    let srt_file = tmp.path().join("data/library/movies/TestFilm.zh.srt");
     std::fs::create_dir_all(movie_file.parent().unwrap()).unwrap();
     std::fs::write(&movie_file, b"video-data").unwrap();
     std::fs::write(

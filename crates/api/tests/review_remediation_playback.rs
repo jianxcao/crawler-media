@@ -33,7 +33,9 @@ fn app(root: &Path) -> (axum::Router, MediaId, String) {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
-    let file = root.join("matrix.mkv");
+    let library_root = root.join("data/library/movies");
+    std::fs::create_dir_all(&library_root).unwrap();
+    let file = library_root.join("matrix.mkv");
     std::fs::write(&file, b"0123456789abcdef").unwrap();
     let row = LedgerRow {
         id: LedgerId::new(),
@@ -49,7 +51,7 @@ fn app(root: &Path) -> (axum::Router, MediaId, String) {
         filter_score: Some(100),
     };
     store.insert_ledger(&row).unwrap();
-    let compact = row.id.to_string().replace('-', "");
+    let item_id = domain::TypedItemId::Work(media.id).to_wire_string();
     let router = router(
         ApiState::new(
             store,
@@ -61,7 +63,7 @@ fn app(root: &Path) -> (axum::Router, MediaId, String) {
         )
         .unwrap(),
     );
-    (router, media.id, compact)
+    (router, media.id, item_id)
 }
 
 async fn json(response: axum::response::Response) -> Value {
@@ -71,6 +73,72 @@ async fn json(response: axum::response::Response) -> Value {
 
 fn admin() -> domain::UserId {
     domain::UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap()
+}
+
+/// The published file behind the fixture movie.
+fn file_id(store: &Store, media: MediaId) -> domain::LedgerId {
+    store
+        .ledger_for_media(media)
+        .unwrap()
+        .remove(0)
+        .id
+}
+
+/// Issue the play session that protocol events must carry.
+fn issue_session(store: &Store, device: &str, media: MediaId) -> String {
+    store
+        .issue_play_session(admin(), device, file_id(store, media), 1)
+        .unwrap()
+}
+
+/// Seed a pre-cutover `(0, 0)` movie unit. The canonical whole-media unit is
+/// `(-1, -1)`, so the store's own upsert no longer targets this legacy row.
+#[allow(clippy::too_many_arguments)]
+fn seed_legacy_movie_unit(
+    root: &Path,
+    media: MediaId,
+    position_ms: i64,
+    played: bool,
+    favorite: bool,
+    duration_ms: Option<i64>,
+    audio_track: Option<&str>,
+    subtitle_track: Option<&str>,
+    play_count: i64,
+) {
+    let db = rusqlite::Connection::open(root.join("data/library.db")).unwrap();
+    let (file_id, revision, source_version): (String, i64, String) = db
+        .query_row(
+            "SELECT file_id, file_revision, source_version FROM library_files
+             WHERE media_id = ?1 AND publication_state = 'published'
+             ORDER BY file_revision DESC, file_id ASC LIMIT 1",
+            rusqlite::params![media.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    db.execute(
+        "INSERT INTO playback_units
+            (user_id, media_id, season, episode, position_ms, played, favorite,
+             duration_ms, audio_track, subtitle_track, play_count, watch_activity_at,
+             favorite_at, resume_file_id, resume_file_revision, resume_source_version,
+             timeline_mode, tracks_version, has_played_assertion, played_changed_at_ms)
+         VALUES (?1, ?2, 0, 0, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, 1, ?10, ?11, ?12,
+                 'full_file', 0, 1, 1)",
+        rusqlite::params![
+            admin().to_string(),
+            media.to_string(),
+            position_ms,
+            played as i64,
+            favorite as i64,
+            duration_ms,
+            audio_track,
+            subtitle_track,
+            play_count,
+            file_id,
+            revision,
+            source_version,
+        ],
+    )
+    .unwrap();
 }
 async fn send(
     app: &axum::Router,
@@ -101,6 +169,7 @@ async fn jellyfin_completion_marks_watched() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, media, id) = app(tmp.path());
     let store = Store::open(tmp.path().join("data")).unwrap();
+    let session = issue_session(&store, "actual-device", media);
     store
         .upsert_unit(
             admin(),
@@ -128,7 +197,7 @@ async fn jellyfin_completion_marks_watched() {
                 "POST",
                 route,
                 "Bearer admin-token",
-                json!({"ItemId":id,"PositionTicks":ticks}),
+                json!({"ItemId":id,"PositionTicks":ticks,"PlaySessionId":session}),
                 Some("actual-device")
             )
             .await
@@ -156,8 +225,10 @@ async fn jellyfin_completion_marks_watched() {
 #[tokio::test]
 async fn standard_authorization_isolates_devices() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, _, id) = app(tmp.path());
+    let (app, media, id) = app(tmp.path());
+    let store = Store::open(tmp.path().join("data")).unwrap();
     for device in ["bedroom", "living-room"] {
+        let session = issue_session(&store, device, media);
         let auth =
             format!("MediaBrowser Token=\"admin-token\", DeviceId=\"{device}\", Client=\"Infuse\"");
         assert_eq!(
@@ -166,7 +237,7 @@ async fn standard_authorization_isolates_devices() {
                 "POST",
                 "/Sessions/Playing",
                 &auth,
-                json!({"ItemId":id,"PositionTicks":0}),
+                json!({"ItemId":id,"PositionTicks":0,"PlaySessionId":session}),
                 None
             )
             .await
@@ -174,7 +245,6 @@ async fn standard_authorization_isolates_devices() {
             StatusCode::NO_CONTENT
         );
     }
-    let store = Store::open(tmp.path().join("data")).unwrap();
     let sessions = store.active_sessions(i64::MAX / 2, i64::MAX / 2).unwrap();
     assert_eq!(sessions.len(), 2);
     assert_eq!(
@@ -191,8 +261,10 @@ async fn standard_authorization_isolates_devices() {
 #[tokio::test]
 async fn stopped_device_retains_revocable_identity() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, _, id) = app(tmp.path());
-    Store::open(tmp.path().join("data")).unwrap().set_user_token(admin(), "device-token").unwrap();
+    let (app, media, id) = app(tmp.path());
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    store.set_user_token(admin(), "device-token").unwrap();
+    let session = issue_session(&store, "actual-device", media);
     for route in ["/Sessions/Playing", "/Sessions/Playing/Stopped"] {
         assert_eq!(
             send(
@@ -200,7 +272,7 @@ async fn stopped_device_retains_revocable_identity() {
                 "POST",
                 route,
                 "Bearer device-token",
-                json!({"ItemId":id,"PositionTicks":10000000}),
+                json!({"ItemId":id,"PositionTicks":10000000,"PlaySessionId":session}),
                 Some("actual-device")
             )
             .await
@@ -267,12 +339,13 @@ async fn stopped_device_retains_revocable_identity() {
 async fn unit_write_failure_returns_error() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, media, _) = app(tmp.path());
-    let db = rusqlite::Connection::open(tmp.path().join("data/subscribe.db")).unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let session = issue_session(&store, "browser", media);
+    let db = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
     db.execute_batch("CREATE TRIGGER review_access_tmp_block BEFORE INSERT ON playback_units BEGIN SELECT RAISE(ABORT,'review write blocked'); END;").unwrap();
-    let response=send(&app,"POST","/api/v1/playback/progress","Bearer admin-token",json!({"media_item_id":media.to_string(),"event":"start","device_id":"browser","position_ms":30000}),None).await;
+    let response=send(&app,"POST","/api/v1/playback/progress","Bearer admin-token",json!({"media_item_id":media.to_string(),"event":"start","device_id":"browser","position_ms":30000,"play_session_id":session}),None).await;
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert!(json(response).await["data"].is_null());
-    let store = Store::open(tmp.path().join("data")).unwrap();
     assert!(store.unit_state(admin(), media, -1, -1).unwrap().is_none());
 }
 #[tokio::test]
@@ -324,7 +397,9 @@ async fn zero_history_limit_is_safe() {
 async fn web_revoke_is_explicitly_unsupported() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, media, id) = app(tmp.path());
-    let body = json!({"media_item_id":media.to_string(),"event":"start","device_id":"browser","position_ms":30000});
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let session = issue_session(&store, "browser", media);
+    let body = json!({"media_item_id":media.to_string(),"event":"start","device_id":"browser","position_ms":30000,"play_session_id":session});
     assert_eq!(
         send(
             &app,
@@ -383,18 +458,20 @@ async fn web_revoke_is_explicitly_unsupported() {
 #[tokio::test]
 async fn frontend_metrics_persist() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, media, id) = app(tmp.path());
+    let (app, media, _) = app(tmp.path());
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let file = file_id(&store, media);
     let response = send(
         &app,
         "POST",
         "/api/v1/playback/metrics",
         "Bearer admin-token",
-        json!({"library_file_id":id,"tier":0,"engine":"native","watched_ms":60000}),
+        json!({"library_file_id":file.to_string(),"tier":0,"engine":"native","watched_ms":60000}),
         None,
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    let db = rusqlite::Connection::open(tmp.path().join("data/subscribe.db")).unwrap();
+    let db = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
     let row = db
         .query_row(
             "SELECT user_id,media_id,engine,watched_ms FROM playback_metrics",
@@ -487,29 +564,25 @@ async fn jellyfin_preserves_legacy_movie_marks() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, media, id) = app(tmp.path());
     let store = Store::open(tmp.path().join("data")).unwrap();
-    store
-        .upsert_unit(
-            admin(),
-            media,
-            0,
-            0,
-            45000,
-            Some(true),
-            Some(true),
-            Some(120000),
-            Some("embedded:1"),
-            Some("off"),
-            true,
-            1,
-        )
-        .unwrap();
+    let session = issue_session(&store, "actual-device", media);
+    seed_legacy_movie_unit(
+        tmp.path(),
+        media,
+        45000,
+        true,
+        true,
+        Some(120000),
+        Some("embedded:1"),
+        Some("off"),
+        1,
+    );
     assert_eq!(
         send(
             &app,
             "POST",
             "/Sessions/Playing",
             "Bearer admin-token",
-            json!({"ItemId":id,"PositionTicks":450000000}),
+            json!({"ItemId":id,"PositionTicks":450000000,"PlaySessionId":session}),
             Some("actual-device")
         )
         .await

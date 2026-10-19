@@ -122,13 +122,21 @@ async fn canonical_zero_progress_overrides_historical_progress() {
         .id;
     store
         .upsert_unit(
-            user, media, 0, 0, 600_000, None, None, None, None, None, false, 1,
+            user, media, -1, -1, 600_000, None, None, None, None, None, false, 1,
         )
         .unwrap();
     target["season_number"] = json!(0);
     target["episode_number"] = json!(0);
     target["device_id"] = json!("replay-device");
     target["position_ms"] = json!(0);
+    let session = super::playback::open_play_session(
+        &app,
+        target["media_item_id"].as_str().unwrap(),
+        "replay-device",
+    )
+    .await;
+    target["play_session_id"] = json!(session);
+    target["event"] = json!("start");
     assert_eq!(
         post(&app, "progress", target.clone()).await.status(),
         StatusCode::OK
@@ -222,7 +230,7 @@ async fn tv_whole_resume_must_not_read_special_zero() {
         .id;
     store
         .upsert_unit(
-            user, media, 0, 0, 600_000, None, None, None, None, None, false, 1,
+            user, media, -1, -1, 600_000, None, None, None, None, None, false, 1,
         )
         .unwrap();
     let uri = format!("/api/v1/playback/resume?media_item_id={}", media);
@@ -255,15 +263,15 @@ async fn historical_movie_metadata_survives_first_canonical_progress() {
         .upsert_unit(
             user,
             media,
-            0,
-            0,
+            -1,
+            -1,
             600_000,
             None,
             Some(true),
             Some(7_200_000),
             Some("audio-old"),
             Some("subtitle-old"),
-            true,
+            false,
             1,
         )
         .unwrap();
@@ -310,8 +318,8 @@ async fn historical_state_survives_first_favorite_mark_write() {
         .upsert_unit(
             user,
             media,
-            0,
-            0,
+            -1,
+            -1,
             600_000,
             None,
             Some(true),
@@ -364,7 +372,7 @@ async fn tv_whole_mark_must_not_migrate_special_zero_progress() {
         .id;
     store
         .upsert_unit(
-            user, media, 0, 0, 600_000, None, None, None, None, None, false, 1,
+            user, media, -1, -1, 600_000, None, None, None, None, None, false, 1,
         )
         .unwrap();
     target["favorite"] = json!(true);

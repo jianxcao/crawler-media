@@ -47,7 +47,9 @@ async fn source_quality_survives_persistence_for_wash_cut() {
     let id: SubscribeId = created["id"].as_str().unwrap().parse().unwrap();
     let mut sub = state.store().lock().get_subscribe(id).unwrap().unwrap();
     sub.wash_cut = true;
-    let path = tmp.path().join("The.Matrix.2160p.Remux.mkv");
+    let root = state.store().lock().default_library(MediaKind::Movie).unwrap().unwrap().root_paths[0].clone();
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("The.Matrix.2160p.Remux.mkv");
     std::fs::write(&path, b"owned").unwrap();
     let row = owned_row(sub.media_id, &path);
     let mut facts = subscribe::SubscribeFacts::default();
@@ -155,7 +157,7 @@ async fn legacy_wash_cut_keeps_old_file_if_replacement_ledger_write_fails() {
     std::fs::write(&replacement, b"new version").unwrap();
     dl.map_enclosure("https://pt.example/download.php?id=1&passkey=abc", replacement);
     let db = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
-    db.execute_batch("CREATE TRIGGER review_pipeline_fail BEFORE INSERT ON ledger BEGIN SELECT RAISE(ABORT, 'fixture ledger failure'); END;").unwrap();
+    db.execute_batch("CREATE TRIGGER review_pipeline_fail BEFORE INSERT ON library_files BEGIN SELECT RAISE(ABORT, 'fixture ledger failure'); END;").unwrap();
     let response = app.oneshot(request("POST", &format!("/api/v1/subscriptions/{id}/run"),
         Some("management-secret"), Value::Null)).await.unwrap();
     // Review N-1: the unprobeable replacement is probed at the source and

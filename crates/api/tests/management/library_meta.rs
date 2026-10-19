@@ -52,8 +52,7 @@ async fn item_detail_reads_nfo_metadata_and_fanart() {
         .as_str()
         .unwrap()
         .to_string();
-    scan_and_wait(&app, &movie_id).await;
-    // 扫描会写自己的最小 NFO，测试的富 NFO 在扫描后落盘（模拟外部刮削器产物）。
+    // NFO 与 fanart 在发布时记录：必须在扫描前落盘，否则 publication 读不到它们。
     std::fs::write(
         movie.join("The.Matrix.1999.2160p.nfo"),
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -70,6 +69,7 @@ async fn item_detail_reads_nfo_metadata_and_fanart() {
     )
     .unwrap();
     std::fs::write(movie.join("fanart.jpg"), b"\xff\xd8\xff\xdb").unwrap();
+    scan_and_wait(&app, &movie_id).await;
 
     let ledger = json_body(
         app.clone()

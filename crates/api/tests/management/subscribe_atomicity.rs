@@ -50,7 +50,7 @@ async fn invalid_self_interval_does_not_insert_media() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(rows(&tmp, "app.db", "media"), 0);
+    assert_eq!(rows(&tmp, "library.db", "media"), 0);
     assert_eq!(rows(&tmp, "subscribe.db", "subscribes"), 0);
 }
 
@@ -72,7 +72,7 @@ async fn invalid_legacy_downloader_does_not_insert_media_or_filter() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(rows(&tmp, "app.db", "media"), 0);
+    assert_eq!(rows(&tmp, "library.db", "media"), 0);
     assert_eq!(rows(&tmp, "app.db", "filters"), before_filters);
 }
 
@@ -106,7 +106,7 @@ async fn failed_job_seed_rolls_back_legacy_and_self_resources() {
             uri,
             response.status()
         );
-        assert_eq!(rows(&tmp, "app.db", "media"), 0);
+        assert_eq!(rows(&tmp, "library.db", "media"), 0);
         assert_eq!(rows(&tmp, "app.db", "filters"), before_filters);
         assert_eq!(rows(&tmp, "subscribe.db", "subscribes"), 0);
         assert_eq!(rows(&tmp, "jobs.db", "job_defs"), before_jobs);
@@ -150,6 +150,6 @@ async fn failed_catalog_seed_removes_search_job_and_restores_existing_media() {
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(rows(&tmp, "jobs.db", "job_defs"), before_jobs);
     assert_eq!(rows(&tmp, "subscribe.db", "subscribes"), 0);
-    assert_eq!(rows(&tmp, "app.db", "media"), 1);
+    assert_eq!(rows(&tmp, "library.db", "media"), 1);
     assert_eq!(store.get_media(previous.id).unwrap(), Some(previous));
 }

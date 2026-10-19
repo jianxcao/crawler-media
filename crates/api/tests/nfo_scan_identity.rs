@@ -160,11 +160,25 @@ fn setup_rebind_movies(
     provisional.tmdb_id = None;
     store.insert_media(&old).unwrap();
     store.insert_media(&provisional).unwrap();
+    // 台账行必须落在真实 Library 根内；放进另一个电影库，才能验证扫描不会
+    // 跨库改写无关行。
+    let other_root = temp_path.join("unrelated-library");
+    std::fs::create_dir_all(&other_root).unwrap();
+    store
+        .create_library(
+            MediaKind::Movie,
+            "Unrelated",
+            &[other_root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
     let unrelated = domain::LedgerRow {
         id: domain::LedgerId::new(),
         media_id: provisional.id,
-        path: temp_path
-            .join("unrelated/English.Name.2022.mkv")
+        path: other_root
+            .join("English.Name.2022.mkv")
             .display()
             .to_string(),
         season: None,

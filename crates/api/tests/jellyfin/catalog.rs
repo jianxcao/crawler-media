@@ -12,7 +12,7 @@ async fn season_played_mark_updates_episode_rollup_and_next_up() {
     let first = insert_episode(&store, &root, show.id, 1, 1);
     insert_episode(&store, &root, show.id, 1, 2);
     drop(store);
-    let season_id = get_json(&app, &format!("/Shows/{}/Seasons", show.id.to_string().replace('-', ""))).await["Items"][0]["Id"].as_str().unwrap().to_owned();
+    let season_id = get_json(&app, &format!("/Shows/{}/Seasons", work_id(show.id))).await["Items"][0]["Id"].as_str().unwrap().to_owned();
     let marked = app.clone().oneshot(Request::builder().method("POST").uri(format!("/UserPlayedItems/{season_id}")).header("authorization", "Bearer admin-token").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(marked.status(), StatusCode::OK);
     let episode = get_json(&app, &format!("/Items/{}", first.to_string().replace('-', ""))).await;
@@ -40,6 +40,10 @@ async fn library_episode_expansion_respects_nested_and_default_library_ownership
     let child_episode = insert_episode(&store, &child_root, show.id, 1, 2);
     let outside_root = tmp.path().join("unowned-tv-path");
     std::fs::create_dir_all(&outside_root).unwrap();
+    // 额外根挂在默认库（parent）上：该集的路径必须由某个库根拥有。
+    store
+        .insert_library_root(MediaKind::Tv, outside_root.to_str().unwrap())
+        .unwrap();
     let outside_episode = insert_episode(&store, &outside_root, show.id, 1, 3);
     drop(store);
 
@@ -169,7 +173,7 @@ async fn series_and_episode_types_return_both_series_and_episodes() {
     assert_eq!(combined_items.len(), 2);
     assert_eq!(combined_items.iter().filter(|item| item["Type"] == "Series").count(), 1);
     assert_eq!(combined_items.iter().filter(|item| item["Type"] == "Episode").count(), 1);
-    assert!(combined_items.iter().any(|item| item["Id"] == show.id.to_string().replace('-', "")));
+    assert!(combined_items.iter().any(|item| item["Id"] == work_id(show.id)));
     assert!(combined_items.iter().any(|item| item["Id"] == episode.to_string().replace('-', "")));
     assert_eq!(combined["TotalRecordCount"], 2);
 
@@ -556,7 +560,7 @@ fn insert_episode(
     media_id: MediaId,
     season: u32,
     episode: u32,
-) -> LedgerId {
+) -> String {
     let path = root.join(format!("Show S{season:02}E{episode:02}.mkv"));
     std::fs::write(&path, b"episode").unwrap();
     let row = LedgerRow {
@@ -573,7 +577,7 @@ fn insert_episode(
         filter_score: None,
     };
     store.insert_ledger(&row).unwrap();
-    row.id
+    unit_id(media_id, season as i32, episode as i32)
 }
 
 #[tokio::test]
@@ -599,7 +603,7 @@ async fn tv_season_filter_resume_and_show_played_marks_work() {
     let second_id = insert_episode(&store, &root, show.id, 1, 2);
     let third_id = insert_episode(&store, &root, show.id, 2, 1);
     let fourth_id = insert_episode(&store, &root, show.id, 2, 2);
-    let series_id = show.id.to_string().replace('-', "");
+    let series_id = work_id(show.id);
 
     let seasons = get_json(&app, &format!("/Shows/{series_id}/Seasons")).await;
     let season_one_id = seasons["Items"][0]["Id"].as_str().unwrap();
@@ -639,6 +643,11 @@ async fn tv_season_filter_resume_and_show_played_marks_work() {
     .await;
     assert!(invalid_season["Items"].as_array().unwrap().is_empty());
 
+    let play_session = play_session_for(&app, &second_id, None).await;
+    assert_eq!(
+        post_event_without_device(&app, "/Sessions/Playing", &second_id, &play_session, 0).await,
+        StatusCode::NO_CONTENT
+    );
     let progress = app
         .clone()
         .oneshot(
@@ -650,7 +659,8 @@ async fn tv_season_filter_resume_and_show_played_marks_work() {
                 .body(Body::from(
                     json!({
                         "ItemId": second_id.to_string().replace('-', ""),
-                        "PositionTicks": 75_000_000
+                        "PositionTicks": 75_000_000,
+                        "PlaySessionId": play_session
                     })
                     .to_string(),
                 ))
@@ -952,7 +962,7 @@ async fn movie_marks_by_item_id_use_the_whole_media_unit() {
         filter_score: None,
     };
     store.insert_ledger(&row).unwrap();
-    let item_id = row.id.to_string().replace('-', "");
+    let item_id = work_id(movie.id);
     for (route, expected) in [
         (format!("/UserPlayedItems/{item_id}"), "Played"),
         (format!("/UserFavoriteItems/{item_id}"), "Favorite"),
@@ -1143,7 +1153,7 @@ async fn tv_items_include_nfo_artwork_metadata_and_cached_playback_streams() {
         })
         .unwrap();
 
-    let series_id = show.id.to_string().replace('-', "");
+    let series_id = work_id(show.id);
     let series_response = app
         .clone()
         .oneshot(
@@ -1193,7 +1203,7 @@ async fn tv_items_include_nfo_artwork_metadata_and_cached_playback_streams() {
     assert_eq!(marked_series["UserData"]["IsFavorite"], true);
     assert_eq!(marked_series["UserData"]["Played"], true);
 
-    let episode_id = row.id.to_string().replace('-', "");
+    let episode_id = unit_id(show.id, 1, 1);
     let episode_response = app
         .clone()
         .oneshot(

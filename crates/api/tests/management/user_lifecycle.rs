@@ -202,6 +202,22 @@ fn deleting_member_transfers_owned_records_and_clears_private_state() {
         follow_future: false,
         search_interval_secs: 1800,
     };
+    // `collection_items` / `playback_units` now have real media foreign keys.
+    store
+        .insert_media(&domain::Media {
+            id: subscribe.media_id,
+            kind: domain::MediaKind::Movie,
+            title: "Owned".into(),
+            year: None,
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
     store.insert_subscribe(&subscribe).unwrap();
     let collection = store.create_collection(member.id, "片单").unwrap();
     store

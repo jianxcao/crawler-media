@@ -83,7 +83,25 @@ pub(super) async fn save_position(app: &axum::Router, target: &Value) {
     let mut body = target.clone();
     body["device_id"] = json!("resume-device");
     body["position_ms"] = json!(600_000);
+    // 新模型里 `progress` 只更新已激活的会话：首次写入必须是 `start`。
+    body["event"] = json!("start");
+    // `playback_sessions` 现在绑定签发的 `play_session_id`：progress 之前必须先
+    // 走公开的 sessions 端点签发。
+    body["play_session_id"] = json!(open_session(app, &body).await);
     assert_eq!(post(app, "progress", body).await.status(), StatusCode::OK);
+}
+
+/// 通过公开的 `POST /playback/sessions` 签发一个 play session，返回其 id。
+pub(super) async fn open_session(app: &axum::Router, target: &Value) -> String {
+    let mut body = target.clone();
+    if body.get("device_id").is_none() {
+        body["device_id"] = json!("resume-device");
+    }
+    let session = json_data(post(app, "sessions", body).await).await;
+    session["play_session_id"]
+        .as_str()
+        .expect("sessions 必须签发 play_session_id")
+        .to_string()
 }
 
 #[tokio::test]

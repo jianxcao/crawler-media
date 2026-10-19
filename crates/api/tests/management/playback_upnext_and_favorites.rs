@@ -157,6 +157,7 @@ async fn playback_heartbeat_at_90_percent_sets_played_true() {
     let user_id = store.admin_user_id().unwrap();
     drop(store);
 
+    let session = super::playback::open_play_session(&app, &media.id.to_string(), "test-device").await;
     // 发送心跳：总时长 100,000ms，当前进度 95,000ms (95%)
     let heartbeat_res = app
         .clone()
@@ -168,7 +169,8 @@ async fn playback_heartbeat_at_90_percent_sets_played_true() {
                 "media_item_id": media.id.to_string(),
                 "file_id": row.id.to_string(),
                 "device_id": "test-device",
-                "event": "timeupdate",
+                "play_session_id": session,
+                "event": "start",
                 "position_ms": 95000,
                 "duration_ms": 100000
             }),

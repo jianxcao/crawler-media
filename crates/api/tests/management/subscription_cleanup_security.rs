@@ -158,21 +158,39 @@ async fn cleanup_does_not_delete_a_file_outside_every_library_root() {
     let outside = tmp.path().join("not-a-library/secret.mkv");
     std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
     std::fs::write(&outside, b"keep-me").unwrap();
-    Store::open(tmp.path().join("data"))
+    // 旧库可能遗留库外台账行；publication API 现在拒绝这种行，用原始 SQL 复现
+    // 该不一致状态，断言清理路径仍然拒绝删除库外文件。
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let library = store
+        .default_library(domain::MediaKind::Movie)
         .unwrap()
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
-            media_id,
-            path: outside.display().to_string(),
-            season: None,
-            episode: None,
-            resolution: None,
-            codec: None,
-            hdr: None,
-            quality_source: QualitySource::Probe,
-            confidence: Confidence::High,
-            filter_score: None,
-        })
+        .expect("default movie library");
+    let root_id = store
+        .list_library_roots()
+        .unwrap()
+        .into_iter()
+        .find(|root| root.library_id.as_deref() == Some(library.id.as_str()))
+        .expect("default movie root")
+        .id;
+    let file_id = LedgerId::new();
+    drop(store);
+    rusqlite::Connection::open(tmp.path().join("data/library.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO library_files
+                (file_id, library_id, root_id, media_id, kind, path_key, display_path,
+                 presence_state, publication_state, file_revision, source_version,
+                 quality_source, confidence)
+             VALUES (?1, ?2, ?3, ?4, 'movie', ?5, ?5, 'present', 'published', 1, 'legacy',
+                     'release', 'high')",
+            rusqlite::params![
+                file_id.to_string(),
+                library.id,
+                root_id,
+                media_id.to_string(),
+                outside.display().to_string(),
+            ],
+        )
         .unwrap();
 
     let deleted = app

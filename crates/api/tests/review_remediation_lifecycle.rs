@@ -68,6 +68,7 @@ fn deleting_one_version_preserves_locked_marker_for_other_version() {
     let tmp = tempfile::tempdir().unwrap(); let state = state(&tmp); let media = media();
     let a = row(&media, &tmp, "version-a.mkv", 1); let b = row(&media, &tmp, "version-b.mkv", 1);
     { let handle = state.store(); let s = handle.lock(); s.insert_media(&media).unwrap();
+      s.create_library(MediaKind::Tv, "TV", &[tmp.path().to_str().unwrap()], "everyone", true, &[]).unwrap();
       s.insert_ledger(&a).unwrap(); s.insert_ledger(&b).unwrap();
       s.put_media_marker(&marker(&media, 1, true)).unwrap(); }
     std::fs::remove_file(&a.path).unwrap(); deleted(&state, &a.path);
@@ -82,6 +83,7 @@ fn repeated_empty_chapter_read_does_not_borrow_neighbor_intro() {
     let tmp = tempfile::tempdir().unwrap(); let state = state(&tmp); let media = media();
     let neighbor = row(&media, &tmp, "e1.strm", 1); let special = row(&media, &tmp, "e2.strm", 2);
     { let handle = state.store(); let s = handle.lock(); s.insert_media(&media).unwrap();
+      s.create_library(MediaKind::Tv, "TV", &[tmp.path().to_str().unwrap()], "everyone", true, &[]).unwrap();
       s.insert_ledger(&neighbor).unwrap(); s.insert_ledger(&special).unwrap();
       s.put_media_marker(&marker(&media, 1, false)).unwrap(); }
     let runtime = tokio::runtime::Runtime::new().unwrap();

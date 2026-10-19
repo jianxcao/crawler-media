@@ -111,7 +111,13 @@ async fn legacy_cover_upgrade_failure_preserves_existing_legacy_file() {
 
     // 注入一个 trigger，使更新 libraries 表的 cover_path 时必定抛出异常失败！
     {
-        let conn = rusqlite::Connection::open(tmp.path().join("data/app.db")).unwrap();
+        let library_db = store
+            .lock()
+            .db_paths()
+            .into_iter()
+            .find(|path| path.ends_with("library.db"))
+            .expect("library.db path from Store::db_paths");
+        let conn = rusqlite::Connection::open(library_db).unwrap();
         conn.execute_batch(
             "CREATE TRIGGER fail_cover_update BEFORE UPDATE OF cover_path ON libraries
              BEGIN

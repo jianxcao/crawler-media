@@ -62,6 +62,7 @@ async fn admin_ended_session_does_not_resurrect_on_subsequent_progress_heartbeat
     store.insert_ledger(&row).unwrap();
     let user_id = store.admin_user_id().unwrap();
     let device_id = "device-to-end";
+    let session = super::playback::open_play_session(&app, &media.id.to_string(), device_id).await;
 
     // 1. 发起 start 心跳建立会话
     let start_res = app
@@ -74,6 +75,7 @@ async fn admin_ended_session_does_not_resurrect_on_subsequent_progress_heartbeat
                 "media_item_id": media.id.to_string(),
                 "file_id": row.id.to_string(),
                 "device_id": device_id,
+                "play_session_id": session,
                 "event": "start",
                 "position_ms": 1000,
                 "duration_ms": 100000

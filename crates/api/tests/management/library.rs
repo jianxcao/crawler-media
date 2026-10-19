@@ -523,6 +523,8 @@ async fn created_library_keeps_intro_and_fingerprint_off_until_edited() {
                     "name": "儿童剧",
                     "kind": "tv",
                     "root_paths": [root.display().to_string()],
+                    "detect_intros": false,
+                    "enable_fingerprint": false,
                 }),
             ))
             .await

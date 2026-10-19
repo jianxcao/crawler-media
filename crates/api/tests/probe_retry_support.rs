@@ -72,6 +72,79 @@ fn episode_number(path: &Path) -> u32 {
         .unwrap_or(0)
 }
 
+/// Publish one fixture row with the content-derived source version, exactly as a scan
+/// does. `insert_ledger` stamps its own timestamp version, which would make the probe
+/// manager see every cached metadata/fingerprint row as stale.
+fn publish_row(store: &Store, row: &LedgerRow, source_version: &str) {
+    let path = Path::new(&row.path);
+    let media = store.get_media(row.media_id).unwrap().expect("fixture media");
+    let library = store
+        .library_for_path_strict(path, media.kind)
+        .unwrap()
+        .expect("fixture path must belong to a Library");
+    let root = store
+        .list_library_roots()
+        .unwrap()
+        .into_iter()
+        .filter(|root| root.library_id.as_deref() == Some(library.id.as_str()))
+        .filter(|root| path.starts_with(&root.path))
+        .max_by_key(|root| root.path.components().count())
+        .expect("fixture path must sit inside a Library root");
+    let file = domain::LibraryFile {
+        file_id: row.id,
+        library_id: library.id.parse().unwrap(),
+        root_id: root.id,
+        media_id: row.media_id,
+        kind: media.kind,
+        path: path.to_path_buf(),
+        version: domain::FileVersion {
+            revision: 1,
+            source_version: source_version.into(),
+        },
+        presence: domain::FilePresence::Present,
+        publication: domain::FilePublication::Published,
+        size_bytes: None,
+        stat_known: false,
+        created_ns: None,
+        modified_ns: None,
+        source_digest: None,
+        source_path: None,
+        transfer_mode: None,
+        resolution: row.resolution.clone(),
+        codec: row.codec.clone(),
+        hdr: row.hdr.clone(),
+        quality_source: row.quality_source,
+        confidence: row.confidence,
+        filter_score: row.filter_score,
+        release_quality: None,
+        duration_ms: None,
+        tracks_version: 0,
+        poster_path: None,
+        backdrop_path: None,
+        still_path: None,
+    };
+    let units = vec![domain::UnitKey::new(
+        row.season.unwrap() as i32,
+        row.episode.unwrap() as i32,
+    )];
+    let publication = store::library_write::FilePublication {
+        file: &file,
+        units: &units,
+        expected_version: None,
+        probe_required: false,
+    };
+    store
+        .publish_files(
+            &store::library_write::WriteScope {
+                library_id: file.library_id,
+                config_revision: 0,
+            },
+            &[publication],
+            1000,
+        )
+        .unwrap();
+}
+
 pub struct ProbeScenario {
     pub tmp: tempfile::TempDir,
     pub store: Arc<Mutex<Store>>,
@@ -141,10 +214,8 @@ impl ProbeScenario {
                 confidence: Confidence::High,
                 filter_score: None,
             };
-            store.lock().insert_ledger(&row).unwrap();
-
-            // Populate cached media info
             let source_version = api::fingerprint_job::current_source_version(Path::new(&row.path));
+            publish_row(&store.lock(), &row, &source_version);
             let tracks = library::Tracks {
                 video: Some(library::VideoTrack {
                     codec: Some("h264".into()),

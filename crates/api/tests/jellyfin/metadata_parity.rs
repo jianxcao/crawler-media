@@ -90,7 +90,7 @@ async fn tvshow_nfo_metadata_reaches_series_and_flat_episode_details() {
     )
     .unwrap();
 
-    let series_id = show.id.to_string().replace('-', "");
+    let series_id = work_id(show.id);
     let series = get_json(&app, &format!("/Items/{series_id}")).await;
     assert_eq!(series["ProductionYear"], 2022);
     assert_eq!(series["PremiereDate"], "2022-09-01");
@@ -110,7 +110,7 @@ async fn tvshow_nfo_metadata_reaches_series_and_flat_episode_details() {
     );
     assert_eq!(series["People"][0]["Name"], "Paul Dano");
 
-    let episode_id = episode.id.to_string().replace('-', "");
+    let episode_id = unit_id(show.id, 1, 1);
     let episode = get_json(&app, &format!("/Items/{episode_id}")).await;
     assert_eq!(episode["Name"], "Zero Day");
     assert_eq!(episode["PremiereDate"], "2022-09-01");

@@ -138,6 +138,38 @@ pub(super) async fn post_async(
         .unwrap()
 }
 
+/// 通过公开的 `POST /playback/sessions` 签发一个 play session，返回其 id。
+///
+/// `playback_sessions` 现在绑定签发的 `play_session_id`：progress 心跳之前必须
+/// 先签发，否则 Store 拒绝写入。
+pub(super) async fn open_play_session(
+    app: &axum::Router,
+    media_id: &str,
+    device_id: &str,
+) -> String {
+    open_play_session_for(app, media_id, None, device_id).await
+}
+
+/// 同上，但显式指定文件：TV 媒体省略坐标时需要 file_id 才能推断分集。
+pub(super) async fn open_play_session_for(
+    app: &axum::Router,
+    media_id: &str,
+    file_id: Option<&str>,
+    device_id: &str,
+) -> String {
+    let mut body = json!({ "media_item_id": media_id, "device_id": device_id });
+    if let Some(file_id) = file_id {
+        body["file_id"] = json!(file_id);
+    }
+    let response = post_async(app, "/api/v1/playback/sessions", body).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    body["data"]["play_session_id"]
+        .as_str()
+        .expect("sessions 必须签发 play_session_id")
+        .to_string()
+}
+
 /// 带管理员 token 的 GET，返回信封里的 `data`。共享给 `playback_clock`。
 pub(super) async fn get_data(app: &axum::Router, uri: &str) -> Value {
     let body = json_body(
@@ -181,6 +213,23 @@ async fn marks_cascade_and_favorites_list() {
 
     // If an episode is favorited, query for whole show must also reflect is_favorite = true
     let tv_id = uuid::Uuid::new_v4().to_string();
+    // 新模型的 unit 写入有真实 media 外键：先登记一个 TV 媒体身份。
+    api::Store::open(tmp.path().join("data"))
+        .unwrap()
+        .insert_media(&domain::Media {
+            id: tv_id.parse().unwrap(),
+            kind: domain::MediaKind::Tv,
+            title: "Cascade Show".into(),
+            year: None,
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
     let _ = post_async(
         &app,
         "/api/v1/playback/marks",
@@ -265,6 +314,7 @@ async fn up_next_lists_next_episode_for_tv_subscription() {
     )
     .await;
     let media_id = ledger["data"][0]["media_id"].as_str().unwrap().to_string();
+    let file_id = ledger["data"][0]["id"].as_str().unwrap().to_string();
 
     let subscribe = create_subscribe(&app, "search").await;
     let _ = subscribe;
@@ -284,6 +334,7 @@ async fn up_next_lists_next_episode_for_tv_subscription() {
     assert!(up_next["data"]["items"].is_array());
 
     // 当用户播放了该本地扫库剧集（无订阅）后，即使无订阅也必须出现在 up-next
+    let session = open_play_session_for(&app, &media_id, Some(&file_id), "test-device").await;
     let progress_res = post_async(
         &app,
         "/api/v1/playback/progress",
@@ -291,6 +342,8 @@ async fn up_next_lists_next_episode_for_tv_subscription() {
             "media_item_id": media_id,
             "season": 1,
             "episode": 1,
+            "play_session_id": session,
+            "event": "start",
             "position_ms": 120_000,
             "duration_ms": 2_400_000,
             "device_id": "test-device"
@@ -328,10 +381,11 @@ async fn end_web_session_and_reject_unsupported_revoke() {
     let tmp = tempfile::tempdir().unwrap();
     let app = app(&tmp);
     let media_id = seed_movie(&app, &tmp).await;
+    let session = open_play_session(&app, &media_id, "tv-1").await;
     let start = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "start", "device_id": "tv-1" }),
+        json!({ "media_item_id": media_id, "event": "start", "device_id": "tv-1", "play_session_id": session }),
     )
     .await;
     assert_eq!(start.status(), StatusCode::OK);
@@ -359,10 +413,11 @@ async fn end_web_session_and_reject_unsupported_revoke() {
     assert!(activity["data"]["sessions"].as_array().unwrap().is_empty());
 
     // Web has no device credential: unsupported revocation must not block progress.
+    let session2 = open_play_session(&app, &media_id, "blocked-1").await;
     let start2 = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "start", "device_id": "blocked-1" }),
+        json!({ "media_item_id": media_id, "event": "start", "device_id": "blocked-1", "play_session_id": session2 }),
     )
     .await;
     assert_eq!(start2.status(), StatusCode::OK);

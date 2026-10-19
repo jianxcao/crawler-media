@@ -40,7 +40,7 @@ async fn vidhub_series_marks_are_returned_after_reentry_with_episode_states_pres
             )
             .unwrap();
     }
-    let series_id = show.id.to_string().replace('-', "");
+    let series_id = work_id(show.id);
 
     for (mark, field) in [("FavoriteItems", "IsFavorite"), ("PlayedItems", "Played")] {
         let response = app

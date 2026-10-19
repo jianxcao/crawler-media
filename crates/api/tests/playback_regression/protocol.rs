@@ -10,17 +10,18 @@ fn standard_auth(device: &str) -> String {
 #[tokio::test]
 async fn standard_identity_metadata_and_stop_are_independent() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, _, id) = app(tmp.path());
+    let (app, media, id) = app(tmp.path());
     let store = Store::open(tmp.path().join("data")).unwrap();
     for device in ["bedroom", "living-room"] {
         store.set_user_token(admin(), &format!("{device}-token")).unwrap();
+        let session = issue_session(&store, device, media);
         assert_eq!(
             send(
                 &app,
                 "POST",
                 "/Sessions/Playing",
                 &standard_auth(device),
-                json!({"ItemId":id,"PositionTicks":0}),
+                json!({"ItemId":id,"PositionTicks":0,"PlaySessionId":session}),
                 None
             )
             .await
@@ -28,18 +29,18 @@ async fn standard_identity_metadata_and_stop_are_independent() {
             StatusCode::NO_CONTENT
         );
     }
-    let store = Store::open(tmp.path().join("data")).unwrap();
     let bedroom = store.get_session(admin(), "bedroom").unwrap().unwrap();
     assert_eq!(bedroom.device_name.as_deref(), Some("Same Name"));
     assert_eq!(bedroom.client_version.as_deref(), Some("7.1"));
     assert!(bedroom.revocable());
+    let bedroom_session = bedroom.play_session_id.clone().unwrap();
     assert_eq!(
         send(
             &app,
             "POST",
             "/Sessions/Playing/Stopped",
             &standard_auth("bedroom"),
-            json!({"ItemId":id,"PositionTicks":10000000}),
+            json!({"ItemId":id,"PositionTicks":10000000,"PlaySessionId":bedroom_session}),
             None
         )
         .await
@@ -192,22 +193,17 @@ async fn direct_jellyfin_progress_preserves_legacy_preferences_and_completion() 
     let tmp = tempfile::tempdir().unwrap();
     let (_, media, id) = app(tmp.path());
     let store = Store::open(tmp.path().join("data")).unwrap();
-    store
-        .upsert_unit(
-            admin(),
-            media,
-            0,
-            0,
-            45000,
-            Some(false),
-            Some(true),
-            Some(120000),
-            Some("embedded:1"),
-            Some("off"),
-            true,
-            1,
-        )
-        .unwrap();
+    seed_legacy_movie_unit(
+        tmp.path(),
+        media,
+        45000,
+        false,
+        true,
+        Some(120000),
+        Some("embedded:1"),
+        Some("off"),
+        1,
+    );
     provider(tmp.path())
         .update_progress(admin(), &id, 120000, false)
         .await
@@ -243,7 +239,7 @@ async fn direct_jellyfin_progress_migration_failure_does_not_shadow_state() {
             1,
         )
         .unwrap();
-    let db = rusqlite::Connection::open(tmp.path().join("data/subscribe.db")).unwrap();
+    let db = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
     db.execute_batch("CREATE TRIGGER block_direct_copy BEFORE INSERT ON playback_units WHEN NEW.season=-1 BEGIN SELECT RAISE(ABORT,'migration blocked'); END;").unwrap();
     assert!(
         provider
@@ -264,12 +260,14 @@ async fn direct_jellyfin_progress_migration_failure_does_not_shadow_state() {
 #[tokio::test]
 async fn artwork_remains_public_and_streams_require_authentication() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, _, id) = app(tmp.path());
-    std::fs::write(tmp.path().join("poster.jpg"), b"poster").unwrap();
+    let (app, media, id) = app(tmp.path());
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let compact = file_id(&store, media).to_string().replace('-', "");
+    std::fs::write(tmp.path().join("data/library/movies/poster.jpg"), b"poster").unwrap();
     let poster = app
         .clone()
         .oneshot(
-            Request::get(format!("/api/v1/posters/{id}"))
+            Request::get(format!("/api/v1/posters/{compact}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -290,7 +288,9 @@ async fn artwork_remains_public_and_streams_require_authentication() {
 #[tokio::test]
 async fn metrics_are_best_effort_but_do_not_accept_invalid_identity() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, _, id) = app(tmp.path());
+    let (app, media, _) = app(tmp.path());
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let file = file_id(&store, media);
     let invalid = send(
         &app,
         "POST",
@@ -301,7 +301,7 @@ async fn metrics_are_best_effort_but_do_not_accept_invalid_identity() {
     )
     .await;
     assert_eq!(invalid.status(), StatusCode::OK);
-    let db = rusqlite::Connection::open(tmp.path().join("data/subscribe.db")).unwrap();
+    let db = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
     db.execute_batch("CREATE TRIGGER block_metric BEFORE INSERT ON playback_metrics BEGIN SELECT RAISE(ABORT,'metric blocked'); END;").unwrap();
     assert_eq!(
         send(
@@ -309,7 +309,7 @@ async fn metrics_are_best_effort_but_do_not_accept_invalid_identity() {
             "POST",
             "/api/v1/playback/metrics",
             "Bearer admin-token",
-            json!({"library_file_id":id,"watched_ms":1000}),
+            json!({"library_file_id":file.to_string(),"watched_ms":1000}),
             None
         )
         .await

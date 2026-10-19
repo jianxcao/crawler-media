@@ -51,7 +51,7 @@ async fn items_series_and_season_filters_return_episode_children() {
             .unwrap();
     }
 
-    let series_id = show.id.to_string().replace('-', "");
+    let series_id = work_id(show.id);
     let all_episodes = get_json(&app, &format!("/Items?SeriesId={series_id}")).await;
     assert_eq!(all_episodes["TotalRecordCount"], 3);
     assert!(
@@ -62,7 +62,7 @@ async fn items_series_and_season_filters_return_episode_children() {
             .all(|item| item["Type"] == "Episode")
     );
 
-    let season_id = format!("{series_id}02");
+    let season_id = season_item_id(show.id, 2);
     let season_episodes = get_json(
         &app,
         &format!("/Items?SeriesId={series_id}&SeasonId={season_id}"),

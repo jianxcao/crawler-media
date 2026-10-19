@@ -183,7 +183,8 @@ async fn distinct_negative_keys_are_bounded_and_expire_without_revisit() {
     // 1. Insert 4,096 distinct media with tmdb_id that triggers NotFound
     let mut keys = Vec::with_capacity(4096);
     for i in 0..4096 {
-        let media_id = insert_media(&store.lock(), &format!("not_found_{i}"), Some("not_found"));
+        let tmdb = format!("not_found_{i}");
+        let media_id = insert_media(&store.lock(), &format!("not_found_{i}"), Some(&tmdb));
         let res = service.get(media_id).await;
         assert!(matches!(res, Err(PosterError::NotFound)));
         keys.push(media_id);
@@ -197,7 +198,7 @@ async fn distinct_negative_keys_are_bounded_and_expire_without_revisit() {
     assert!(matches!(res0, Err(PosterError::NotFound)));
 
     // Insert a new key (4,097th). LRU must evict keys[1] (least recently used) while keys[0] survives
-    let new_key = insert_media(&store.lock(), "not_found_new", Some("not_found"));
+    let new_key = insert_media(&store.lock(), "not_found_new", Some("not_found_new"));
     let res_new = service.get(new_key).await;
     assert!(matches!(res_new, Err(PosterError::NotFound)));
 
@@ -217,7 +218,7 @@ async fn distinct_negative_keys_are_bounded_and_expire_without_revisit() {
 
     // A READ must sweep on its own, without relying on a later insert: query an absent
     // key (a miss that does not insert) and assert the expired entries are already gone.
-    let absent_id = insert_media(&store.lock(), "not_found_absent", Some("not_found"));
+    let absent_id = insert_media(&store.lock(), "not_found_absent", Some("not_found_absent"));
     assert!(!service.check_negative_cache_for_test(absent_id));
     assert_eq!(
         service.resource_counts().negative_entries,
@@ -226,7 +227,7 @@ async fn distinct_negative_keys_are_bounded_and_expire_without_revisit() {
     );
 
     // Next access to any key sweeps expired entries
-    let dummy_id = insert_media(&store.lock(), "not_found_dummy", Some("not_found"));
+    let dummy_id = insert_media(&store.lock(), "not_found_dummy", Some("not_found_dummy"));
     let _ = service.get(dummy_id).await;
 
     let counts_after = service.resource_counts();
@@ -313,7 +314,8 @@ async fn full_live_registry_returns_busy_and_same_key_still_joins() {
     // We hold strong references to keep gates alive
     let mut live_gates = Vec::new();
     for i in 0..4096 {
-        let media_id = insert_media(&store.lock(), &format!("live_gate_{i}"), Some("100"));
+        let tmdb = format!("100_{i}");
+        let media_id = insert_media(&store.lock(), &format!("live_gate_{i}"), Some(&tmdb));
         let inflight = Arc::new(api::media_posters::inflight::PosterInflight::new());
         service.insert_inflight_for_test(media_id, &inflight);
         live_gates.push((media_id, inflight));
@@ -441,7 +443,8 @@ async fn public_handler_surfaces_busy_as_service_unavailable_503() {
     // Fill registry to 4096 live gates
     let mut live_gates = Vec::new();
     for i in 0..4096 {
-        let media_id = insert_media(&store.lock(), &format!("h_live_{i}"), Some("100"));
+        let tmdb = format!("100_{i}");
+        let media_id = insert_media(&store.lock(), &format!("h_live_{i}"), Some(&tmdb));
         let inflight = Arc::new(api::media_posters::inflight::PosterInflight::new());
         service.insert_inflight_for_test(media_id, &inflight);
         live_gates.push(inflight);

@@ -100,7 +100,7 @@ fn seed_test_env(
     tmp_path: &std::path::Path,
 ) {
     let media = create_sample_media(media_id);
-    let library_dir = tmp_path.join("library").join("tv").join("Test Show");
+    let library_dir = tmp_path.join("data").join("library").join("tv").join("Test Show");
     let rows = seed_library_files(&library_dir, media_id);
 
     let store = api_state.store();

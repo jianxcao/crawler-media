@@ -82,7 +82,14 @@ fn make_state(root: &Path, catalog: Arc<dyn Catalog>) -> ApiState {
     .with_catalog(catalog)
 }
 fn seed_media(store: &Store, root: &Path, kind: MediaKind, title: &str, id: &str, season: Option<u32>, episode: Option<u32>) -> MediaId {
-    let path = root.join(format!("{title}.mkv"));
+    // Ledger rows must live under a seeded Library root: movies under
+    // `data/library/movies`, TV under `data/library/tv`.
+    let dir = root.join("data/library").join(match kind {
+        MediaKind::Tv => "tv",
+        _ => "movies",
+    });
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{title}.mkv"));
     std::fs::write(&path, b"video").unwrap();
     let media = store.ensure_media(Media {
         id: MediaId::new(), kind, title: title.into(), year: None, original_title: None,
@@ -164,7 +171,7 @@ async fn tv_episode_nfo_title_is_served_locally() {
         let store = state.store();
         let tv_id = seed_media(&store.lock(), &root, MediaKind::Tv, "Series", "5150", Some(1), Some(1));
         std::fs::write(
-            root.join("Series.nfo"),
+            root.join("data/library/tv/Series.nfo"),
             "<episodedetails><title>Pilot From Nfo</title></episodedetails>",
         )
         .unwrap();

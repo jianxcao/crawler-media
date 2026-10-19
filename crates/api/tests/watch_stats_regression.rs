@@ -80,7 +80,7 @@ fn ledger_row(media_id: MediaId, path: &Path) -> LedgerRow {
     }
 }
 
-/// 直接写 subscribe.db：HTTP 层没有公开的 insert_log。
+/// 直接写 library.db：HTTP 层没有公开的 insert_log。
 fn insert_log(
     root: &Path,
     user: UserId,
@@ -90,17 +90,22 @@ fn insert_log(
     client: Option<&str>,
     completed: bool,
 ) {
-    let conn = rusqlite::Connection::open(root.join("data/subscribe.db")).unwrap();
+    let conn = rusqlite::Connection::open(root.join("data/library.db")).unwrap();
     conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
     conn.execute(
         "INSERT INTO playback_logs
-            (id, user_id, media_id, client, started_at, ended_at, watched_ms, completed)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            (id, user_id, media_id, client, device_id, play_session_id, generation,
+             file_id, file_revision, source_version, timeline_mode,
+             started_at, ended_at, watched_ms, completed)
+         VALUES (?1, ?2, ?3, ?4, 'watch-stats-device', ?5, 1,
+                 ?6, 1, 'v1', 'full_file', ?7, ?8, ?9, ?10)",
         rusqlite::params![
             uuid::Uuid::new_v4().to_string(),
             user.to_string(),
             media.to_string(),
             client,
+            uuid::Uuid::new_v4().to_string(),
+            media.to_string(),
             started,
             started + 1,
             watched,

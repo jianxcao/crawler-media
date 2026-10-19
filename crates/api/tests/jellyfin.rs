@@ -17,8 +17,101 @@ impl Fetcher for NoFetch {
     }
 }
 
+fn work_id(media_id: MediaId) -> String {
+    domain::TypedItemId::Work(media_id).to_wire_string()
+}
+
+fn unit_id(media_id: MediaId, season: i32, episode: i32) -> String {
+    domain::TypedItemId::Unit {
+        media: media_id,
+        key: domain::UnitKey { season, episode },
+    }
+    .to_wire_string()
+}
+
+fn season_item_id(media_id: MediaId, season: u32) -> String {
+    domain::TypedItemId::Season {
+        media: media_id,
+        season,
+    }
+    .to_wire_string()
+}
+
+/// Issue a play session through the documented PlaybackInfo path and return the
+/// `PlaySessionId` later session events must carry.
+async fn play_session_for(app: &axum::Router, item_id: &str, device: Option<&str>) -> String {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(format!("/Items/{item_id}/PlaybackInfo"))
+        .header("authorization", "Bearer admin-token")
+        .header("content-type", "application/json");
+    if let Some(device) = device {
+        builder = builder
+            .header("X-Emby-Device-Id", device)
+            .header("X-Emby-Device-Name", "Bedroom Apple TV")
+            .header("X-Emby-Client", "Infuse")
+            .header("X-Emby-Client-Version", "8.1");
+    }
+    let response = app
+        .clone()
+        .oneshot(builder.body(Body::from("{}")).unwrap())
+        .await
+        .unwrap();
+    json(response).await["PlaySessionId"]
+        .as_str()
+        .expect("PlaybackInfo must issue a PlaySessionId")
+        .to_string()
+}
+
+/// Post one session event without device headers (the request fingerprint is
+/// the device identity). Returns the response status.
+async fn post_event_without_device(
+    app: &axum::Router,
+    path: &str,
+    item_id: &str,
+    play_session_id: &str,
+    ticks: i64,
+) -> StatusCode {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("authorization", "Bearer admin-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "ItemId": item_id,
+                        "PositionTicks": ticks,
+                        "PlaySessionId": play_session_id
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    response.status()
+}
+
+fn seed_movie_root(store: &Store, root: &Path) {
+    if store
+        .list_library_roots()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.path == root)
+    {
+        return;
+    }
+    store
+        .insert_library_root(MediaKind::Movie, root.to_str().unwrap())
+        .unwrap();
+}
+
 fn app(root: &Path) -> (axum::Router, MediaId, String) {
     let store = Store::open(root.join("data")).unwrap();
+    seed_movie_root(&store, root);
     let media = Media {
         id: MediaId::new(),
         kind: MediaKind::Movie,
@@ -49,7 +142,7 @@ fn app(root: &Path) -> (axum::Router, MediaId, String) {
         filter_score: Some(100),
     };
     store.insert_ledger(&row).unwrap();
-    let compact = row.id.to_string().replace('-', "");
+    let compact = work_id(media.id);
     let router = router(
         ApiState::new(
             store,
@@ -74,6 +167,7 @@ impl api::playback_events::PlaybackClock for FakeClock {
 
 fn app_with_clock(root: &Path, clock: Arc<dyn api::playback_events::PlaybackClock>) -> (axum::Router, MediaId, String) {
     let store = Store::open(root.join("data")).unwrap();
+    seed_movie_root(&store, root);
     let media = Media {
         id: MediaId::new(),
         kind: MediaKind::Movie,
@@ -104,7 +198,7 @@ fn app_with_clock(root: &Path, clock: Arc<dyn api::playback_events::PlaybackCloc
         filter_score: Some(100),
     };
     store.insert_ledger(&row).unwrap();
-    let compact = row.id.to_string().replace('-', "");
+    let compact = work_id(media.id);
     let state = ApiState::new(
         store,
         "admin-token".into(),

@@ -34,7 +34,7 @@ async fn cli_library_prints_media_title() {
         .insert_ledger(&LedgerRow {
             id: LedgerId::new(),
             media_id: media.id,
-            path: tmp.path().join("The Matrix.mkv").display().to_string(),
+            path: tmp.path().join("data/library/movies/The Matrix.mkv").display().to_string(),
             season: None,
             episode: None,
             resolution: Some("2160p".into()),
@@ -82,7 +82,7 @@ async fn cli_ledger_prints_media_title_and_path() {
         .insert_ledger(&LedgerRow {
             id: LedgerId::new(),
             media_id: media.id,
-            path: tmp.path().join("The Matrix.mkv").display().to_string(),
+            path: tmp.path().join("data/library/movies/The Matrix.mkv").display().to_string(),
             season: None,
             episode: None,
             resolution: Some("2160p".into()),

@@ -159,7 +159,11 @@ async fn root_failure_rejects_whole_request_without_writes() {
 #[tokio::test]
 async fn ambiguous_scope_rejects_without_default_fallback() {
     let fix = PresenceFixture::new();
-    // Create another library with the identical root
+    // 新模型在 `library_roots.path_key` 上全局唯一，无法登记两个字面相同的根；
+    // 用指向同一目录的符号链接别名复现「两个 Library 拥有同一物理根」的歧义。
+    let (_, _row) = fix.insert_media_and_ledger("one.mkv");
+    let alias = fix.dir.path().join("movies-alias");
+    std::os::unix::fs::symlink(&fix.root, &alias).unwrap();
     {
         let store_arc = fix.state.store();
         let guard = store_arc.lock();
@@ -167,14 +171,13 @@ async fn ambiguous_scope_rejects_without_default_fallback() {
             .create_library(
                 MediaKind::Movie,
                 "Movies Duplicate",
-                &[fix.root.to_str().unwrap()],
+                &[alias.to_str().unwrap()],
                 "everyone",
                 true,
                 &[],
             )
             .unwrap();
     }
-    let (_, _row) = fix.insert_media_and_ledger("one.mkv");
 
     let (status, res) = fix
         .request(

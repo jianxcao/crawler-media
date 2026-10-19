@@ -189,14 +189,14 @@ fn missing_optional_fanart_is_skipped_and_never_created() {
     run(&state, &job).unwrap();
 
     let report = progress_of(&state, &job);
-    let entry = db_entry(&report, "fanart");
-    assert_eq!(entry["outcome"], "skipped");
+    // fanart 缓存已是 cache.db 里的表，不再有可选库目标：既不报告也不创建。
     assert!(
-        entry["skip_reason"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("不存在"),
-        "跳过原因必须写明文件不存在: {entry}"
+        report["databases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["name"] != "fanart"),
+        "fanart 不得再作为独立维护目标: {report}"
     );
     assert!(!fanart.exists(), "缺失的可选库不得被创建");
     assert!(tmp.path().exists());
@@ -235,15 +235,13 @@ fn database_targets_are_an_allowlist_with_optional_fanart() {
 
     let targets = database_targets(&data, &app);
     let names: Vec<&str> = targets.iter().map(|target| target.name.as_str()).collect();
-    assert_eq!(names, ["app", "catalog", "library", "subscribe", "jobs"]);
+    // 源缓存已并入 cache.db（fanart_cache 等表），不再有独立的 catalog/fanart 库。
+    assert_eq!(names, ["app", "cache", "library", "subscribe", "jobs"]);
 
     std::fs::write(data.join("fanart.db"), b"fixture").unwrap();
     let targets = database_targets(&data, &app);
     let names: Vec<&str> = targets.iter().map(|target| target.name.as_str()).collect();
-    assert_eq!(
-        names,
-        ["app", "catalog", "library", "subscribe", "jobs", "fanart"]
-    );
+    assert_eq!(names, ["app", "cache", "library", "subscribe", "jobs"]);
     assert!(targets.iter().all(|target| target.name.as_str() != ".."));
 }
 
@@ -394,6 +392,20 @@ fn playback_retention_dry_run_keeps_logs_then_prunes_only_logs() {
     let store = state.store();
     {
         let guard = store.lock();
+        // `playback_units.media_id` 现在有真实外键：先登记 Media 身份。
+        guard.insert_media(&domain::Media {
+            id: media,
+            kind: domain::MediaKind::Movie,
+            title: "Retention Fixture".into(),
+            original_title: None,
+            aliases: Vec::new(),
+            year: None,
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        }).unwrap();
         guard
             .upsert_unit(
                 user,

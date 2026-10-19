@@ -87,7 +87,7 @@ fn insert_unplayed_movie(store: &Store, root: &Path, title: &str) -> String {
         confidence: Confidence::High,
         filter_score: None,
     };
-    let compact = row.id.to_string().replace('-', "");
+    let compact = work_id(media.id);
     store.insert_ledger(&row).unwrap();
     compact
 }
@@ -165,17 +165,31 @@ async fn user_me_and_user_prefixed_counts_return_profile_and_catalog_facts() {
 #[tokio::test]
 async fn latest_items_returns_date_order_and_honors_start_index_and_limit() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, media_id, seeded_id) = app(tmp.path());
+    let (app, _, seeded_id) = app(tmp.path());
     let store = Store::open(tmp.path().join("data")).unwrap();
     let mut added_ids = Vec::new();
     for name in ["matrix-copy-1.mkv", "matrix-copy-2.mkv"] {
         let path = tmp.path().join(name);
         std::fs::write(&path, b"copy").unwrap();
+        let copy = Media {
+            id: MediaId::new(),
+            kind: MediaKind::Movie,
+            title: name.into(),
+            year: None,
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        };
+        store.insert_media(&copy).unwrap();
         let id = LedgerId::new();
         store
             .insert_ledger(&LedgerRow {
                 id,
-                media_id,
+                media_id: copy.id,
                 path: path.display().to_string(),
                 season: None,
                 episode: None,
@@ -187,7 +201,7 @@ async fn latest_items_returns_date_order_and_honors_start_index_and_limit() {
                 filter_score: None,
             })
             .unwrap();
-        added_ids.push(id.to_string().replace('-', ""));
+        added_ids.push(work_id(copy.id));
     }
     let catalog = get_json(&app, "/Items").await;
     let catalog_ids: Vec<String> = catalog["Items"]

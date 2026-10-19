@@ -122,12 +122,27 @@ async fn send_playback(
     media_id: MediaId,
     event: &str,
 ) -> axum::response::Response {
+    // `playback_sessions` 绑定签发的 `play_session_id`：progress 之前先签发。
+    let issued = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/playback/sessions",
+            Some(token),
+            json!({"media_item_id":media_id.to_string(),"device_id":"shared-device"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(issued.status(), StatusCode::OK);
+    let body = json_body(issued).await;
+    let session = body["data"]["play_session_id"].as_str().unwrap().to_string();
     app.clone()
         .oneshot(request(
             "POST",
             "/api/v1/playback/progress",
             Some(token),
-            json!({"media_item_id":media_id.to_string(),"event":event,"device_id":"shared-device"}),
+            json!({"media_item_id":media_id.to_string(),"event":event,"device_id":"shared-device",
+                   "play_session_id": session}),
         ))
         .await
         .unwrap()

@@ -42,7 +42,7 @@ fn sqlite_defaults_under_the_data_directory() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     assert_eq!(store.sqlite_path(), dir.path().join("app.db"));
-    for name in ["app.db", "catalog.db", "library.db", "subscribe.db"] {
+    for name in ["app.db", "cache.db", "library.db", "subscribe.db"] {
         assert!(dir.path().join(name).is_file(), "{name}");
     }
 }
@@ -78,9 +78,13 @@ fn list_media_returns_error_on_corrupt_uuid_instead_of_panic() {
     let store = Store::open(dir.path()).unwrap();
     let media = movie("The Matrix");
     store.insert_media(&media).unwrap();
-    rusqlite::Connection::open(dir.path().join("app.db"))
-        .unwrap()
-        .execute("UPDATE media SET id = 'nope'", [])
+    let conn = rusqlite::Connection::open(dir.path().join("library.db")).unwrap();
+    // 刻意制造损坏的 id：关闭外键检查，让 UPDATE 成功，模拟磁盘上的坏行。
+    conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+    conn.execute("UPDATE media SET media_id = 'nope'", [])
+        .unwrap();
+    // 别名也必须指向坏 id，查询才会真正返回这一行并触发 id 解析失败。
+    conn.execute("UPDATE media_aliases SET media_id = 'nope'", [])
         .unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         store.get_media_by_tmdb("603")
@@ -209,7 +213,8 @@ fn naming_templates_and_library_roots_have_defaults() {
 
 #[test]
 fn legacy_libraries_table_gains_visibility_columns() {
-    // 模拟 Block 6 之前的旧库：libraries 表没有 access_mode 等列。
+    // v1 布局不再有迁移阶梯：旧 app.db（libraries 在 app.db、且没有
+    // application_id/user_version 标记）必须被明确拒绝，而不是静默改写。
     let tmp = tempfile::tempdir().unwrap();
     let data = tmp.path().join("data");
     std::fs::create_dir_all(&data).unwrap();
@@ -227,17 +232,11 @@ fn legacy_libraries_table_gains_visibility_columns() {
     .unwrap();
     drop(app);
 
-    let store = crate::Store::open(&data).unwrap();
-    let libraries = store.list_libraries().unwrap();
-    // seed_defaults 会为缺省类型补默认库，旧电影库 + 新剧集库 = 2。
-    assert_eq!(libraries.len(), 2, "旧库行保留且默认库补齐");
-    let legacy = libraries
-        .iter()
-        .find(|l| l.name == "旧电影库")
-        .expect("旧库行");
-    assert_eq!(legacy.access_mode, "everyone", "新列按默认值补齐");
-    assert_eq!(legacy.admin_visible, true);
-    assert!(legacy.member_ids.is_empty());
+    let error = crate::Store::open(&data).expect_err("旧布局必须被拒绝");
+    assert!(
+        error.to_string().contains("layout mismatch"),
+        "拒绝原因必须指明布局不匹配: {error}"
+    );
 }
 
 #[test]
@@ -247,7 +246,7 @@ fn ledger_keeps_its_source_path_for_manual_retransfer() {
     let media = movie("The Matrix");
     store.insert_media(&media).unwrap();
     let source = dir.path().join("downloads/matrix.mkv");
-    let destination = dir.path().join("library/matrix.mkv");
+    let destination = dir.path().join("library/movies/matrix.mkv");
     std::fs::create_dir_all(source.parent().unwrap()).unwrap();
     std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
     std::fs::write(&source, b"source").unwrap();

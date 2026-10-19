@@ -112,13 +112,16 @@ async fn mark_played(app: &axum::Router, media_item_id: &str) {
 
 /// 标成"在看"：有进度、没看完。
 async fn mark_watching(app: &axum::Router, media_item_id: &str) {
+    // `playback_sessions` 绑定签发的 `play_session_id`：progress 之前先签发。
+    let session = super::playback::open_play_session(app, media_item_id, "web-1").await;
     let response = post(
         app,
         "/api/v1/playback/progress",
         json!({
             "media_item_id": media_item_id,
-            "event": "progress",
+            "event": "start",
             "device_id": "web-1",
+            "play_session_id": session,
             "position_ms": 120_000,
         }),
     )

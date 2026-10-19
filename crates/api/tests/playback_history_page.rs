@@ -383,15 +383,19 @@ async fn hidden_count_counts_rows_beyond_the_legacy_cap() {
     };
 
     let base = now_secs();
-    let connection = rusqlite::Connection::open(tmp.path().join("data/subscribe.db")).unwrap();
+    let connection = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
     let transaction = connection.unchecked_transaction().unwrap();
     {
         let mut insert = transaction
             .prepare(
                 "INSERT INTO playback_logs
-                    (id, user_id, media_id, play_method, started_at, ended_at,
+                    (id, user_id, media_id, device_id, play_session_id, generation,
+                     file_id, file_revision, source_version, timeline_mode,
+                     play_method, started_at, ended_at,
                      watched_ms, start_position_ms, end_position_ms, completed)
-                 VALUES (?1, ?2, ?3, 'local', ?4, ?5, 0, 0, 0, 1)",
+                 VALUES (?1, ?2, ?3, 'cap-device', ?4, 1,
+                         'cap-file', 1, 'v1', 'full_file',
+                         'local', ?5, ?6, 0, 0, 0, 1)",
             )
             .unwrap();
         for index in 0..VISIBLE_ROWS {
@@ -400,6 +404,7 @@ async fn hidden_count_counts_rows_beyond_the_legacy_cap() {
                     format!("{index:032x}"),
                     member.to_string(),
                     visible.to_string(),
+                    format!("cap-session-{index}"),
                     base - index,
                     base - index + 1
                 ])
@@ -411,6 +416,7 @@ async fn hidden_count_counts_rows_beyond_the_legacy_cap() {
                 format!("{:032x}", 1_000_000u64),
                 member.to_string(),
                 hidden.to_string(),
+                "cap-session-hidden",
                 base - 20_000_000,
                 base - 20_000_000 + 1
             ])

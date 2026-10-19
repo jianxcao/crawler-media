@@ -194,7 +194,7 @@ fn legacy_playback_progress_is_merged_and_dropped() {
     let user_id = domain::UserId::new();
     let media_id = domain::MediaId::new();
 
-    // Simulate an old database: the legacy table with a row.
+    // 旧库：subscribe.db 里还有 legacy playback_progress 表。
     {
         let conn = rusqlite::Connection::open(&subscribe_db).unwrap();
         conn.execute_batch(
@@ -218,25 +218,19 @@ fn legacy_playback_progress_is_merged_and_dropped() {
         .unwrap();
     }
 
-    // Opening the Store runs the migration.
-    let store = Store::open(dir.path()).unwrap();
-
-    // Data survived into playback_units as the whole-media unit (-1, -1).
-    assert_eq!(
-        store.playback_progress(user_id, media_id).unwrap(),
-        Some(4242)
+    // v1 布局没有迁移阶梯：旧 subscribe.db 被明确拒绝，不会被静默改写。
+    let error = Store::open(dir.path()).expect_err("旧 subscribe 布局必须被拒绝");
+    assert!(
+        error.to_string().contains("layout mismatch"),
+        "拒绝原因必须指明布局不匹配: {error}"
     );
 
-    // The legacy table is gone.
+    // 旧表仍原样保留，Store 没有删除或改写它。
     let conn = rusqlite::Connection::open(&subscribe_db).unwrap();
-    let exists: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='playback_progress')",
-            [],
-            |row| row.get(0),
-        )
+    let rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM playback_progress", [], |row| row.get(0))
         .unwrap();
-    assert!(!exists, "legacy playback_progress table should be dropped");
+    assert_eq!(rows, 1, "被拒绝的旧库不得被改写");
 }
 
 #[test]

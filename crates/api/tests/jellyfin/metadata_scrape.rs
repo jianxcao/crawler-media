@@ -193,7 +193,7 @@ async fn detail_fills_sparse_nfo_from_catalog_and_refresh_writes_rich_show_and_e
 
     let before_refresh = json_get(
         &app,
-        &format!("/Items/{}", media_id.to_string().replace('-', "")),
+        &format!("/Items/{}", work_id(media_id)),
     )
     .await;
     assert_eq!(
@@ -244,7 +244,7 @@ async fn detail_fills_sparse_nfo_from_catalog_and_refresh_writes_rich_show_and_e
     assert_eq!(related_items["TotalRecordCount"], 1);
     assert_eq!(
         related_items["Items"][0]["Id"],
-        media_id.to_string().replace('-', "")
+        work_id(media_id)
     );
 
     for uri in [

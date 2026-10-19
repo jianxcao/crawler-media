@@ -238,8 +238,17 @@ async fn changed_strm_url_with_same_size_and_mtime_is_reprocessed_and_reprobed()
             }),
             ..Default::default()
         };
+        let version = guard
+            .get_file_version(row.id)
+            .unwrap()
+            .expect("published file version");
         guard
-            .put_file_meta_versioned(&ledger_id, &tracks, Some("v1"), Some(1000))
+            .put_file_meta_versioned(
+                &ledger_id,
+                &tracks,
+                Some(&version.source_version),
+                Some(1000),
+            )
             .unwrap();
         assert!(guard.get_file_meta(&ledger_id).unwrap().is_some(), "前置事实应存在");
         let op = guard

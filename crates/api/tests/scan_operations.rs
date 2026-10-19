@@ -316,10 +316,14 @@ async fn repeated_watch_event_for_same_target_is_consumed_with_cumulative_report
 #[tokio::test]
 async fn committed_chunk_prefix_survives_a_later_chunk_failure() {
     let fix = PresenceFixture::new();
-    // 给 Library A 增加一个与 Library B 同深度的根：sub 里的文件归属歧义，root 里的
-    // 文件仍然唯一归属 A，于是第一个 chunk 提交、第二个 chunk 必然失败。
+    // 给 Library A 增加一个指向 `sub` 的符号链接根：`library_roots.path_key`
+    // 全局唯一，无法再登记两个字面相同的根；链接别名解析后与 Library B 的
+    // `sub` 根同深度，sub 里的文件因此归属歧义，而 root 里的文件仍唯一归属 A，
+    // 于是第一个 chunk 提交、第二个 chunk 必然失败。
     let sub = fix.root.join("sub");
     std::fs::create_dir_all(&sub).unwrap();
+    let sub_alias = fix.root.join("sub-alias");
+    std::os::unix::fs::symlink(&sub, &sub_alias).unwrap();
     for i in 0..101 {
         std::fs::write(fix.root.join(format!("Movie_{i:03} (2024).mkv")), b"x").unwrap();
     }
@@ -331,7 +335,7 @@ async fn committed_chunk_prefix_survives_a_later_chunk_failure() {
             .update_library(
                 &fix.library_id,
                 None,
-                Some(&[fix.root.to_str().unwrap(), sub.to_str().unwrap()]),
+                Some(&[fix.root.to_str().unwrap(), sub_alias.to_str().unwrap()]),
                 None,
             )
             .unwrap();

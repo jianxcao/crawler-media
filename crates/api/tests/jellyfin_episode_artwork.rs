@@ -131,8 +131,12 @@ async fn jellyfin_series_primary_image_uses_series_poster_and_episode_uses_still
     store.insert_ledger(&row).unwrap();
 
     let app = router(app_state(tmp.path(), store).with_catalog(Arc::new(EpisodeCatalog)));
-    let series_id = show.id.to_string().replace('-', "");
-    let episode_id = row.id.to_string().replace('-', "");
+    let series_id = domain::TypedItemId::Work(show.id).to_wire_string();
+    let episode_id = domain::TypedItemId::Unit {
+        media: show.id,
+        key: domain::UnitKey { season: 1, episode: 1 },
+    }
+    .to_wire_string();
     let series_item = app
         .clone()
         .oneshot(
@@ -239,8 +243,16 @@ async fn jellyfin_uses_unique_episode_stills_before_the_season_poster() {
     let second = episode_row(show.id, &second_video, 2);
     store.insert_ledger(&first).unwrap();
     store.insert_ledger(&second).unwrap();
-    let first_id = first.id.to_string().replace('-', "");
-    let second_id = second.id.to_string().replace('-', "");
+    let first_id = domain::TypedItemId::Unit {
+        media: show.id,
+        key: domain::UnitKey { season: 1, episode: 1 },
+    }
+    .to_wire_string();
+    let second_id = domain::TypedItemId::Unit {
+        media: show.id,
+        key: domain::UnitKey { season: 1, episode: 2 },
+    }
+    .to_wire_string();
     let app = router(app_state(tmp.path(), store).with_catalog(Arc::new(EpisodeCatalog)));
 
     let first_item = app

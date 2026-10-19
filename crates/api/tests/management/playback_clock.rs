@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::*;
-use super::playback::{get_data, post_async, seed_movie};
+use super::playback::{get_data, open_play_session, post_async, seed_movie};
 
 pub(super) struct FakePlaybackClock(pub(super) std::sync::atomic::AtomicI64);
 
@@ -44,6 +44,7 @@ pub(super) async fn beat(
     app: &axum::Router,
     clock: &Arc<FakePlaybackClock>,
     media_id: &str,
+    session: &str,
     step: u32,
 ) -> axum::response::Response {
     clock
@@ -53,6 +54,7 @@ pub(super) async fn beat(
         app,
         "/api/v1/playback/progress",
         json!({ "media_item_id": media_id, "event": "progress", "device_id": "web-1",
+                "play_session_id": session,
                 "position_ms": step * 20_000, "paused": false }),
     )
     .await
@@ -61,17 +63,22 @@ pub(super) async fn beat(
 /// 直接写一条完结播放日志（`started_at`/`ended_at` 为 unix 秒），
 /// 用来覆盖统计/历史的窗口边界。
 fn seed_playback_log(tmp: &tempfile::TempDir, media_id: &str, started_at: i64, ended_at: i64) {
-    let conn = rusqlite::Connection::open(tmp.path().join("data/subscribe.db")).unwrap();
+    let conn = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
     conn.execute(
-        "INSERT INTO playback_logs (id, user_id, media_id, started_at, ended_at, watched_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO playback_logs
+             (id, user_id, media_id, device_id, started_at, ended_at, watched_ms,
+              play_session_id, generation, file_id, file_revision, source_version, timeline_mode)
+         VALUES (?1, ?2, ?3, 'seed-device', ?4, ?5, ?6,
+                 ?7, 1, ?8, 1, 'seed-source', 'full_file')",
         rusqlite::params![
             uuid::Uuid::new_v4().to_string(),
             "00000000-0000-0000-0000-000000000001",
             media_id,
             started_at,
             ended_at,
-            30_000
+            30_000,
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
         ],
     )
     .unwrap();
@@ -95,11 +102,12 @@ async fn progress_lifecycle_writes_session_log_and_unit() {
     )));
     let app = app_with_clock(&tmp, clock.clone());
     let media_id = seed_movie(&app, &tmp).await;
+    let session = open_play_session(&app, &media_id, "web-1").await;
 
     let start = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "start", "device_id": "web-1", "position_ms": 0 }),
+        json!({ "media_item_id": media_id, "event": "start", "device_id": "web-1", "play_session_id": session, "position_ms": 0 }),
     )
     .await;
     assert_eq!(start.status(), StatusCode::OK);
@@ -109,7 +117,7 @@ async fn progress_lifecycle_writes_session_log_and_unit() {
 
     // 真实节奏心跳（每步 20 秒，<= 30s，不会被判成 seek）。
     for step in 1..=6 {
-        let response = beat(&app, &clock, &media_id, step).await;
+        let response = beat(&app, &clock, &media_id, &session, step).await;
         assert_eq!(response.status(), StatusCode::OK);
         if step == 6 {
             assert_eq!(json_body(response).await["data"]["position_ms"], 120_000);
@@ -129,7 +137,7 @@ async fn progress_lifecycle_writes_session_log_and_unit() {
 
     for step in 7..=14 {
         assert_eq!(
-            beat(&app, &clock, &media_id, step).await.status(),
+            beat(&app, &clock, &media_id, &session, step).await.status(),
             StatusCode::OK
         );
     }
@@ -141,7 +149,7 @@ async fn progress_lifecycle_writes_session_log_and_unit() {
     let stop = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "stop", "device_id": "web-1", "position_ms": 300_000 }),
+        json!({ "media_item_id": media_id, "event": "stop", "device_id": "web-1", "play_session_id": session, "position_ms": 300_000 }),
     )
     .await;
     assert_eq!(stop.status(), StatusCode::OK);
@@ -217,15 +225,16 @@ impl ClockEnv {
 
     /// 在 `web-1` 上 start + 一次心跳，返回心跳后的假时钟毫秒值。
     async fn start_web_session(&self) -> i64 {
+        let session = open_play_session(&self.app, &self.media_id, "web-1").await;
         let response = post_async(
             &self.app,
             "/api/v1/playback/progress",
-            json!({ "media_item_id": self.media_id, "event": "start", "device_id": "web-1", "position_ms": 0 }),
+            json!({ "media_item_id": self.media_id, "event": "start", "device_id": "web-1", "play_session_id": session, "position_ms": 0 }),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
-            beat(&self.app, &self.clock, &self.media_id, 1)
+            beat(&self.app, &self.clock, &self.media_id, &session, 1)
                 .await
                 .status(),
             StatusCode::OK
@@ -342,16 +351,17 @@ async fn stats_aggregate_and_policy_round_trip() {
     )));
     let app = app_with_clock(&tmp, clock.clone());
     let media_id = seed_movie(&app, &tmp).await;
+    let session = open_play_session(&app, &media_id, "web-1").await;
     let start = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "start", "device_id": "web-1", "position_ms": 0 }),
+        json!({ "media_item_id": media_id, "event": "start", "device_id": "web-1", "play_session_id": session, "position_ms": 0 }),
     )
     .await;
     assert_eq!(start.status(), StatusCode::OK);
     for step in 1..=2 {
         assert_eq!(
-            beat(&app, &clock, &media_id, step).await.status(),
+            beat(&app, &clock, &media_id, &session, step).await.status(),
             StatusCode::OK
         );
     }
@@ -361,7 +371,7 @@ async fn stats_aggregate_and_policy_round_trip() {
     let stop = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "stop", "device_id": "web-1", "position_ms": 60_000 }),
+        json!({ "media_item_id": media_id, "event": "stop", "device_id": "web-1", "play_session_id": session, "position_ms": 60_000 }),
     )
     .await;
     assert_eq!(stop.status(), StatusCode::OK);
@@ -523,11 +533,12 @@ async fn heartbeat_persists_sub_second_report_time() {
     let st = state(tmp.path(), fetcher, downloader);
     let app = router(st.clone().with_playback_clock(clock.clone()));
     let media_id = seed_movie(&app, &tmp).await;
+    let session = open_play_session(&app, &media_id, "web-ms").await;
 
     let start = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "start", "device_id": "web-ms", "position_ms": 0 }),
+        json!({ "media_item_id": media_id, "event": "start", "device_id": "web-ms", "play_session_id": session, "position_ms": 0 }),
     )
     .await;
     assert_eq!(start.status(), StatusCode::OK);
@@ -537,7 +548,7 @@ async fn heartbeat_persists_sub_second_report_time() {
     let beat = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "progress", "device_id": "web-ms", "position_ms": 0, "paused": false }),
+        json!({ "media_item_id": media_id, "event": "progress", "device_id": "web-ms", "play_session_id": session, "position_ms": 0, "paused": false }),
     )
     .await;
     assert_eq!(beat.status(), StatusCode::OK);
@@ -609,7 +620,7 @@ async fn web_metrics_persist_injected_clock_seconds() {
     .await;
     assert_eq!(recorded.status(), StatusCode::OK);
 
-    let db = rusqlite::Connection::open(tmp.path().join("data/subscribe.db")).unwrap();
+    let db = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
     let recorded_at: i64 = db
         .query_row(
             "SELECT recorded_at FROM playback_metrics WHERE media_id = ?1",

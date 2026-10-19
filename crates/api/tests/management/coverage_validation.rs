@@ -83,7 +83,7 @@ async fn assert_rejected_without_writes(legacy: bool, coverage: Value, full_seas
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
-    assert_eq!(rows(&tmp, "app.db", "media"), 0, "{uri}");
+    assert_eq!(rows(&tmp, "library.db", "media"), 0, "{uri}");
     assert_eq!(rows(&tmp, "app.db", "filters"), before_filters, "{uri}");
     assert_eq!(rows(&tmp, "subscribe.db", "subscribes"), 0, "{uri}");
 }

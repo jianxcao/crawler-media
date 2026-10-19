@@ -46,7 +46,7 @@ fn enable_with_payload(state: &ApiState, def: &jobs::JobDef, payload: &Value) {
 }
 
 fn insert_old_metrics(state: &ApiState, count: usize, recorded_at: i64) {
-    let conn = rusqlite::Connection::open(data_dir(state).join("subscribe.db")).unwrap();
+    let conn = rusqlite::Connection::open(data_dir(state).join("library.db")).unwrap();
     conn.execute_batch("BEGIN").unwrap();
     {
         let mut stmt = conn
@@ -67,7 +67,7 @@ fn insert_old_metrics(state: &ApiState, count: usize, recorded_at: i64) {
 }
 
 fn metric_count(state: &ApiState) -> i64 {
-    rusqlite::Connection::open(data_dir(state).join("subscribe.db"))
+    rusqlite::Connection::open(data_dir(state).join("library.db"))
         .unwrap()
         .query_row("SELECT COUNT(*) FROM playback_metrics", [], |row| row.get(0))
         .unwrap()
@@ -202,7 +202,7 @@ fn disable_after_first_batch_stops_second() {
     let state_clone = state.clone();
     let monitor = thread::spawn(move || {
         let conn =
-            rusqlite::Connection::open(data_dir(&state_clone).join("subscribe.db")).unwrap();
+            rusqlite::Connection::open(data_dir(&state_clone).join("library.db")).unwrap();
         for _ in 0..5_000 {
             let count: i64 = conn
                 .query_row(
@@ -334,7 +334,7 @@ async fn preview_is_read_only_and_reports_classes() {
     assert_eq!(data["classes"].as_array().unwrap().len(), 3);
 
     assert_eq!(metric_count(&state), 3, "预览不得删除 QoE 行");
-    assert_eq!(table_count(&state, "catalog.db", "catalog_cache"), 1);
+    assert_eq!(table_count(&state, "cache.db", "tmdb_cache"), 1);
     assert_eq!(table_count(&state, "library.db", "probe_jobs"), 4);
     assert_eq!(cursor_settings(&state), 0, "预览不得写游标");
 }

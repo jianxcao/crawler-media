@@ -76,14 +76,16 @@ async fn strm_file_scans_and_stream_redirects_to_remote_url() {
         1,
         "strm file ledgered"
     );
-    let compact = ledger["data"][0]["id"].as_str().unwrap().replace('-', "");
+    // 流路由按类型化 item id 寻址（`w1_` = 作品）。
+    let media_id = ledger["data"][0]["media_id"].as_str().unwrap();
+    let item_id = format!("w1_{media_id}");
 
     let anonymous = app
         .clone()
         .oneshot(
             axum::http::Request::builder()
                 .method("GET")
-                .uri(format!("/Videos/{compact}/stream"))
+                .uri(format!("/Videos/{item_id}/stream"))
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
@@ -97,7 +99,7 @@ async fn strm_file_scans_and_stream_redirects_to_remote_url() {
         .oneshot(
             axum::http::Request::builder()
                 .method("GET")
-                .uri(format!("/Videos/{compact}/stream"))
+                .uri(format!("/Videos/{item_id}/stream"))
                 .header("authorization", "Bearer management-secret")
                 .body(axum::body::Body::empty())
                 .unwrap(),

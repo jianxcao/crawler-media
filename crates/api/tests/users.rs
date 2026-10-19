@@ -176,6 +176,27 @@ fn playback_progress_is_isolated_per_user() {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
+    // Playback positions only bind to a published Library file; the canonical
+    // resume package refuses to persist a position without one.
+    let library_root = tmp.path().join("library/movies");
+    std::fs::create_dir_all(&library_root).unwrap();
+    let file = library_root.join("The Matrix.mkv");
+    std::fs::write(&file, b"x").unwrap();
+    store
+        .insert_ledger(&domain::LedgerRow {
+            id: domain::LedgerId::new(),
+            media_id: media.id,
+            path: file.display().to_string(),
+            season: None,
+            episode: None,
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: domain::QualitySource::Probe,
+            confidence: domain::Confidence::High,
+            filter_score: None,
+        })
+        .unwrap();
     let alice = UserId::new();
     let bob = UserId::new();
     store.set_playback_progress(alice, media.id, 1200).unwrap();

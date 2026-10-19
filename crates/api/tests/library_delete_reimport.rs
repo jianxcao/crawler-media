@@ -290,7 +290,7 @@ fn seed_progress(store: &store::Store, users: [UserId; 2], media: &Media) {
     let (season, episode) = if media.kind == MediaKind::Tv {
         (1, 3)
     } else {
-        (0, 0)
+        (-1, -1)
     };
     for (user, position, favorite, watched) in [
         (users[0], 750_000, true, false),
@@ -352,7 +352,7 @@ impl Fixture {
         let (season, episode) = if self.kind == MediaKind::Tv {
             (1, 3)
         } else {
-            (0, 0)
+            (-1, -1)
         };
         for (user, position, favorite, watched) in [
             (self.users[0], 750_000, true, false),
@@ -474,6 +474,8 @@ async fn reimport(f: &Fixture, app: &Router) -> LedgerRow {
         json!({
             "kind": if f.kind == MediaKind::Tv { "tv" } else { "movie" },
             "name": "Recreated", "root_paths": [f.root],
+            "detect_intros": false,
+            "enable_fingerprint": false,
         }),
         StatusCode::OK,
     )
@@ -598,7 +600,7 @@ fn online_identity_rebind_succeeds_when_reimported_library_reuses_removed_root()
             let row = store.ledger_by_path(&fixture.old.path).unwrap().unwrap();
             assert_eq!(row.media_id, fixture.old.media_id);
             for user in fixture.users {
-                assert_eq!(store.unit_state(user, row.media_id, 0, 0).unwrap().unwrap().position_ms,
+                assert_eq!(store.unit_state(user, row.media_id, -1, -1).unwrap().unwrap().position_ms,
                     if user == fixture.users[0] { 750_000 } else { 120_000 });
             }
         });

@@ -47,6 +47,10 @@ fn app_connection(root: &Path) -> rusqlite::Connection {
     rusqlite::Connection::open(root.join("data").join("app.db")).unwrap()
 }
 
+fn library_connection(root: &Path) -> rusqlite::Connection {
+    rusqlite::Connection::open(root.join("data").join("library.db")).unwrap()
+}
+
 fn payload(tmp: &tempfile::TempDir) -> Value {
     json!({
         "movie_root": tmp.path().join("new-movies").display().to_string(),
@@ -66,9 +70,9 @@ async fn directory_tv_root_failure_rolls_back_movie_root() {
     let state = state(tmp.path());
     let old_movie = state.store().lock().library_root(MediaKind::Movie).unwrap();
     let old_tv = state.store().lock().library_root(MediaKind::Tv).unwrap();
-    app_connection(tmp.path())
+    library_connection(tmp.path())
         .execute_batch(
-            "CREATE TRIGGER reject_tv BEFORE UPDATE OF path ON library_roots
+            "CREATE TRIGGER reject_tv BEFORE UPDATE OF path_key ON library_roots
              WHEN OLD.kind = 'tv' BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;",
         )
         .unwrap();

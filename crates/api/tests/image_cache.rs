@@ -283,7 +283,7 @@ async fn metadata_file_io_runs_off_the_store_lock() {
     let state = make_state(tmp.path()).with_browse_file_read(Arc::new(BlockingBrowse {
         gate: gate.clone(),
     }));
-    let (user_id, ledger_id) = {
+    let (user_id, media_id) = {
         let library_root = tmp.path().join("visible");
         std::fs::create_dir_all(&library_root).unwrap();
         let file = library_root.join("Movie.mkv");
@@ -331,14 +331,13 @@ async fn metadata_file_io_runs_off_the_store_lock() {
             })
             .unwrap();
         let user_id = guard.user_id_by_token("management-secret").unwrap().unwrap();
-        (user_id, ledger_id)
+        (user_id, media.id)
     };
 
     let provider = api::media_server_provider::ApiServerProvider::new(state.clone());
+    let item_id = domain::TypedItemId::Work(media_id).to_wire_string();
     let handle = tokio::spawn(async move {
-        provider
-            .resolve_single_item(user_id, &ledger_id.to_string())
-            .await
+        provider.resolve_single_item(user_id, &item_id).await
     });
     // 有界等待：基线没有走 BrowseFileRead seam，这里会干净地失败而不是挂死。
     let entered = tokio::time::timeout(std::time::Duration::from_secs(5), async {

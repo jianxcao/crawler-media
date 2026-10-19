@@ -43,7 +43,10 @@ fn seed(path: &Path, unrelated: usize) -> (ApiState, domain::UserId, String) {
     for index in 0..unrelated {
         let outside = Media { id: MediaId::new(), kind: MediaKind::Movie, title: format!("Outside {index}"), year: None, original_title: None, aliases: Vec::new(), tmdb_id: None, douban_id: None, tvdb_id: None, bangumi_id: None, anilist_id: None };
         store.insert_media(&outside).unwrap();
-        store.insert_ledger(&LedgerRow { id: LedgerId::new(), media_id: outside.id, path: format!("{}/outside/unrelated-{index}.mkv", path.display()), season: None, episode: None, resolution: None, codec: None, hdr: None, quality_source: QualitySource::Probe, confidence: Confidence::High, filter_score: None }).unwrap();
+        let unrelated_path = path
+            .join("data/library/movies")
+            .join(format!("unrelated-{index}.mkv"));
+        store.insert_ledger(&LedgerRow { id: LedgerId::new(), media_id: outside.id, path: unrelated_path.display().to_string(), season: None, episode: None, resolution: None, codec: None, hdr: None, quality_source: QualitySource::Probe, confidence: Confidence::High, filter_score: None }).unwrap();
     }
     let state = ApiState::new(store, "management-secret".into(), ProfileSet::load(None).unwrap(), Arc::new(NoFetch), Arc::new(MemoryDownloader::new(path.join("stage"))), path.join("library")).unwrap();
     let user = state.store().lock().user_id_by_token("management-secret").unwrap().unwrap();

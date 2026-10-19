@@ -339,9 +339,15 @@ async fn playing_an_old_favorite_does_not_move_it_ahead_of_a_newer_one() {
     // Pre-clock favourite: the activity time was never recorded. Playback then
     // advances the viewing clock without a new favourite write.
     {
-        let conn = rusqlite::Connection::open(tmp.path().join("data/subscribe.db")).unwrap();
+        let guard = store.lock();
+        guard
+            .upsert_unit(member, historical, -1, -1, 90_000, None, None, None, None, None, false, 200)
+            .unwrap();
+    }
+    {
+        let conn = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
         conn.execute(
-            "UPDATE playback_units SET favorite_at = 0, updated_at = 200, position_ms = 90000
+            "UPDATE playback_units SET favorite_at = 0
              WHERE user_id = ?1 AND media_id = ?2",
             rusqlite::params![member.to_string(), historical.to_string()],
         )
@@ -434,14 +440,113 @@ async fn activity_media_target_fields_unchanged() {
     assert_eq!(target["kind"], "movie");
     assert_eq!(target["year"], 2023);
     assert_eq!(target["browsable"], true);
-    assert_eq!(target["season_number"], 0);
-    assert_eq!(target["episode_number"], 0);
+    // A whole-media session carries the canonical (-1, -1) unit; the API
+    // contract reports it as null, not as a coordinate.
+    assert_eq!(target["season_number"], Value::Null);
+    assert_eq!(target["episode_number"], Value::Null);
     assert_eq!(target["episode_title"], Value::Null);
     let library_id = target["library_id"].as_str().unwrap();
     assert!(
         !library_id.is_empty(),
         "owned single library must be reported"
     );
+}
+
+#[tokio::test]
+async fn episode_media_target_keeps_numeric_coordinates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = make_state(tmp.path());
+    let app = router(state.clone());
+    let store = state.store();
+    let library = tmp.path().join("library-episodes");
+    std::fs::create_dir_all(&library).unwrap();
+    store
+        .lock()
+        .create_library(
+            MediaKind::Tv,
+            "episodes",
+            &[library.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let (member, token) = seed_member(&store.lock(), "erin");
+    let media = {
+        let guard = store.lock();
+        let media = Media {
+            id: MediaId::new(),
+            kind: MediaKind::Tv,
+            title: "Episodic".into(),
+            year: Some(2022),
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        };
+        guard.insert_media(&media).unwrap();
+        let path = library.join("Episodic-S03E07.mkv");
+        std::fs::write(&path, b"x").unwrap();
+        guard
+            .insert_ledger(&LedgerRow {
+                id: LedgerId::new(),
+                media_id: media.id,
+                path: path.display().to_string(),
+                season: Some(3),
+                episode: Some(7),
+                resolution: None,
+                codec: None,
+                hdr: None,
+                quality_source: QualitySource::Probe,
+                confidence: Confidence::High,
+                filter_score: None,
+            })
+            .unwrap();
+        let started = now_secs();
+        let play_session_id = guard
+            .issue_play_session(member, "dev-2", LedgerId::new(), started)
+            .unwrap();
+        guard
+            .upsert_session(&api::store::SessionRow {
+                device_id: "dev-2".into(),
+                user_id: member,
+                media_id: media.id,
+                season: Some(3),
+                episode: Some(7),
+                client: Some("test".into()),
+                device_name: Some("test".into()),
+                client_version: None,
+                play_method: "local".into(),
+                position_ms: 50,
+                start_position_ms: 0,
+                duration_ms: Some(100),
+                paused: false,
+                watched_ms: 50,
+                rate_bps: 0,
+                bytes_sent: 0,
+                connections: 1,
+                admin_ended: false,
+                started_at: started,
+                last_report_at: started,
+                last_report_at_ms: started * 1000,
+                ledger_id: None,
+                play_session_id: Some(play_session_id),
+                last_event_sequence: None,
+            })
+            .unwrap();
+        media.id
+    };
+
+    let data = get(&app, "/api/v1/playback/activity", &token).await;
+    let sessions = data["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "{data}");
+    let target = &sessions[0]["media"];
+    assert_eq!(target["media_item_id"], media.to_string());
+    assert_eq!(target["season_number"], 3);
+    assert_eq!(target["episode_number"], 7);
 }
 
 #[tokio::test]

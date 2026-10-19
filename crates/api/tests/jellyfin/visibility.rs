@@ -111,8 +111,8 @@ async fn selected_library_bytes_require_auth_and_visibility() {
         .unwrap()
         .unwrap()
         .id;
-    let hidden_id = hidden_row.id.to_string().replace('-', "");
-    let hidden_media_id = hidden_media.id.to_string().replace('-', "");
+    let hidden_id = work_id(hidden_media.id);
+    let hidden_media_id = work_id(hidden_media.id);
     let items = super::playback::items_for(&app, &token).await;
     assert!(
         items["Items"]

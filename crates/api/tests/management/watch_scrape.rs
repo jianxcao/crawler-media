@@ -90,6 +90,18 @@ async fn scrape_job_does_not_write_placeholder_nfo_before_identification() {
     std::fs::write(&video, b"stay").unwrap();
     let app = app(&tmp);
     put_inplace(&app, &tmp, &watch).await;
+    // v1 只登记 Library 根内的文件：watch_inplace 目录必须同时是一个根。
+    let added = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/directory/roots",
+            Some("management-secret"),
+            json!({ "kind": "movie", "path": watch.display().to_string() }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(added.status(), StatusCode::CREATED);
     tick(&app, 1).await;
 
     assert_eq!(std::fs::read(&video).unwrap(), b"stay");

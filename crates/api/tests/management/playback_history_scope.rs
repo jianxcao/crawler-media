@@ -88,6 +88,7 @@ async fn empty_library_history_clear_preserves_other_library() {
     let lib_b_id = seed_test_library(&app, "Movie Library B", &tmp.path().join("lib_b")).await;
 
     // 2. 模拟用户上报该属于 lib_a 的媒体播放进度
+    let session = super::playback::open_play_session(&app, &media_id.to_string(), "test-device-1").await;
     let progress_res = app
         .clone()
         .oneshot(request(
@@ -97,6 +98,8 @@ async fn empty_library_history_clear_preserves_other_library() {
             serde_json::json!({
                 "device_id": "test-device-1",
                 "media_item_id": media_id.to_string(),
+                "play_session_id": session,
+                "event": "start",
                 "media_kind": "movie",
                 "position_ms": 120000,
                 "duration_ms": 7200000,

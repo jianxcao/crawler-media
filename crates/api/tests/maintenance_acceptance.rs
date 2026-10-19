@@ -219,6 +219,20 @@ fn playback_retention_prunes_only_logs_and_keeps_playback_state() {
     {
         let store_handle = state.store();
         let store = store_handle.lock();
+        // `playback_units.media_id` 现在有真实外键：先登记 Media 身份。
+        store.insert_media(&domain::Media {
+            id: media,
+            kind: domain::MediaKind::Movie,
+            title: "Retention Fixture".into(),
+            original_title: None,
+            aliases: Vec::new(),
+            year: None,
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        }).unwrap();
         // 两条超龄历史 + 一条近期历史。
         for (index, started) in [(0, now - 40 * DAY), (1, now - 30 * DAY), (2, now - 60)].iter() {
             store
