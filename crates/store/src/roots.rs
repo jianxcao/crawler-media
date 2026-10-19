@@ -11,6 +11,10 @@ pub struct LibraryRoot {
     pub id: String,
     pub kind: MediaKind,
     pub path: PathBuf,
+    /// Primary root of the kind's default Library (library `is_default` and
+    /// `sort_order = 0`). Additional roots of that Library, and every root of a
+    /// non-default Library, are reported as `false` (the directory surface's
+    /// "extra roots").
     pub is_default: bool,
     /// Owning library id (null until backfilled / assigned).
     pub library_id: Option<String>,

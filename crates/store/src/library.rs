@@ -294,16 +294,22 @@ impl Store {
     fn unidentified_scope(&self, path: &str) -> Result<(String, String), StoreError> {
         let resolved = crate::library_paths::resolved_path(Path::new(path))?;
         let roots = self.list_library_roots()?;
-        let best = roots
-            .iter()
-            .filter_map(|root| {
-                let root_path = crate::library_paths::resolved_path(&root.path).ok()?;
-                let library_id = root.library_id.clone()?;
-                resolved
-                    .starts_with(&root_path)
-                    .then_some((root_path.components().count(), library_id, root.id.clone()))
-            })
-            .max_by_key(|(depth, _, _)| *depth);
+        // A root that cannot be resolved is an error, not a silent miss: falling
+        // back to the default root would park the file under the wrong Library.
+        let mut best: Option<(usize, String, String)> = None;
+        for root in &roots {
+            let root_path = crate::library_paths::resolved_path(&root.path)?;
+            let Some(library_id) = root.library_id.clone() else {
+                continue;
+            };
+            if !resolved.starts_with(&root_path) {
+                continue;
+            }
+            let depth = root_path.components().count();
+            if best.as_ref().is_none_or(|(best_depth, _, _)| depth > *best_depth) {
+                best = Some((depth, library_id, root.id.clone()));
+            }
+        }
         if let Some((_, library_id, root_id)) = best {
             return Ok((library_id, root_id));
         }
