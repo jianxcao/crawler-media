@@ -761,7 +761,18 @@ fn item_facts_carry_seasons_and_studio_per_page() {
         .unwrap();
     assert_eq!(season_two.len(), 1);
     assert!(season_two[0].owned);
-    assert!(season_two[0].title.is_none());
+    // Season 2 has no adopted metadata: the title comes from the published file's
+    // name fallback, and nothing is fabricated for fields only a metadata source
+    // can provide.
+    assert!(
+        season_two[0]
+            .title
+            .as_deref()
+            .is_some_and(|name| !name.trim().is_empty()),
+        "an owned episode without metadata falls back to its file name"
+    );
+    assert!(season_two[0].overview.is_none());
+    assert!(season_two[0].air_date.is_none());
     assert!(store
         .library_episodes(library_id, show.id, Some(3), "")
         .unwrap()
