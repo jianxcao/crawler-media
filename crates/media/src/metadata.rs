@@ -304,7 +304,10 @@ pub fn details_meta_for(
     let genre_ids: Vec<i64> = parsed_genres.iter().filter_map(|g| g.id).collect();
     Ok(ItemMeta {
         overview,
-        rating: parsed.vote_average.map(|v| format!("{v:.1}")),
+        rating: parsed
+            .vote_average
+            .filter(|&v| v > 0.0 && parsed.vote_count.unwrap_or(0) >= 5)
+            .map(|v| format!("{v:.1}")),
         runtime_minutes,
         release_date: parsed
             .release_date

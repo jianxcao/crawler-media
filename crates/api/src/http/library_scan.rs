@@ -378,11 +378,10 @@ fn scrape_library_metadata(
                 return;
             }
             let nfo = crate::scrape_metadata::nfo_from_tmdb(media, &metadata);
-            if let Some(r) = nfo.rating.as_ref().and_then(|r| r.parse::<f64>().ok()) {
-                let studio_name = nfo.studios.first().map(String::as_str);
-                let studio_logo = nfo.studio_logo.as_deref();
-                let _ = state.store.lock().update_library_items_metadata_sort(media.id, Some(r), nfo.premiered.as_deref(), studio_name, studio_logo);
-            }
+            let rating_val = metadata.vote_count.filter(|&c| c >= 5).and_then(|_| nfo.rating.as_ref().and_then(|r| r.parse::<f64>().ok()));
+            let studio_name = nfo.studios.first().map(String::as_str);
+            let studio_logo = nfo.studio_logo.as_deref();
+            let _ = state.store.lock().update_library_items_metadata_sort(media.id, rating_val, nfo.premiered.as_deref(), studio_name, studio_logo);
             if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
                 let target = path.with_file_name(format!("{stem}.nfo"));
                 let write = || {

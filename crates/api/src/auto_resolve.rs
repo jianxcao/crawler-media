@@ -135,7 +135,10 @@ fn resolve_media(
     // Synchronize rating from TMDB metadata into library_items for poster wall
     if let Some(tmdb_id) = &updated.tmdb_id {
         if let Ok(Some(meta)) = crate::scrape_metadata::fetch_tmdb_metadata(state, updated.kind, tmdb_id) {
-            let rating_f = meta.rating.as_ref().and_then(|r| r.parse::<f64>().ok());
+            let rating_f = meta
+                .vote_count
+                .filter(|&c| c >= 5)
+                .and_then(|_| meta.rating.as_ref().and_then(|r| r.parse::<f64>().ok()));
             let studio_name = meta.studios.first().map(String::as_str);
             let studio_logo = meta.studio_logo.as_deref();
             let _ = state.store.lock().update_library_items_metadata_sort(

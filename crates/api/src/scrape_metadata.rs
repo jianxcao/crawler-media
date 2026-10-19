@@ -317,11 +317,10 @@ fn scrape_tv_episodes_and_nfos(
 ) -> Vec<(PathBuf, Option<String>)> {
     let tmdb_meta = fetch_tmdb_metadata(state, media.kind, tmdb_id).ok().flatten();
     if let Some(meta) = &tmdb_meta {
-        if let Some(r) = meta.rating.as_ref().and_then(|r| r.parse::<f64>().ok()) {
-            let studio_name = meta.studios.first().map(String::as_str);
-            let studio_logo = meta.studio_logo.as_deref();
-            let _ = state.store.lock().update_library_items_metadata_sort(media.id, Some(r), meta.release_date.as_deref(), studio_name, studio_logo);
-        }
+        let rating_val = meta.vote_count.filter(|&c| c >= 5).and_then(|_| meta.rating.as_ref().and_then(|r| r.parse::<f64>().ok()));
+        let studio_name = meta.studios.first().map(String::as_str);
+        let studio_logo = meta.studio_logo.as_deref();
+        let _ = state.store.lock().update_library_items_metadata_sort(media.id, rating_val, meta.release_date.as_deref(), studio_name, studio_logo);
     }
     let show_nfo = tmdb_meta.as_ref().map(|meta| nfo_from_tmdb(media, meta)).unwrap_or_default();
     let preferred_lang = preferred_language(state);
