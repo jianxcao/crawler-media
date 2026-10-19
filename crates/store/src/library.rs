@@ -429,7 +429,7 @@ impl Store {
     /// 文件重新入库后清除缺失标记。
     pub fn clear_ledger_missing(&self, path: &str) -> Result<bool, StoreError> {
         let changed = self.library.execute(
-            "UPDATE ledger SET missing_at = NULL WHERE path = ?1 AND missing_at IS NOT NULL",
+            "UPDATE library_files SET missing_at = NULL, presence_state = 'present' WHERE display_path = ?1 AND (missing_at IS NOT NULL OR presence_state <> 'present')",
             params![path],
         )?;
         Ok(changed > 0)

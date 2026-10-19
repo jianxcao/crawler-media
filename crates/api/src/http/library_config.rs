@@ -95,8 +95,10 @@ pub(crate) async fn create_library(
                 Ok(j) => j,
                 Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &e.to_string()),
             };
+            let detect_intros = body.get("detect_intros").and_then(|v| v.as_bool()).unwrap_or(true);
+            let enable_fingerprint = body.get("enable_fingerprint").and_then(|v| v.as_bool()).unwrap_or(true);
             if let Err(error) =
-                store.set_library_intro_settings(&library.id, false, false)
+                store.set_library_intro_settings(&library.id, detect_intros, enable_fingerprint)
             {
                 tracing::warn!(%error, "保存新建媒体库片头片尾开关失败");
             }

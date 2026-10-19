@@ -28,7 +28,7 @@ impl Store {
             .query_row(
                 "SELECT cache_key, algorithm_version, sample_duration_secs,
                         media_duration_ms, intro_json, outro_json
-                 FROM fingerprint_cache WHERE ledger_id = ?1",
+                 FROM fingerprint_cache WHERE file_id = ?1",
                 params![ledger_id],
                 |row| {
                     Ok((
@@ -73,10 +73,10 @@ impl Store {
     ) -> Result<(), StoreError> {
         self.library.execute(
             "INSERT INTO fingerprint_cache (
-                 ledger_id, cache_key, algorithm_version, sample_duration_secs,
+                 file_id, cache_key, algorithm_version, sample_duration_secs,
                  media_duration_ms, intro_json, outro_json, captured_at_ms
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(ledger_id) DO UPDATE SET
+             ON CONFLICT(file_id) DO UPDATE SET
                cache_key = excluded.cache_key,
                algorithm_version = excluded.algorithm_version,
                sample_duration_secs = excluded.sample_duration_secs,
@@ -125,7 +125,7 @@ impl Store {
 
     pub fn delete_fingerprint_cache(&self, ledger_id: &str) -> Result<(), StoreError> {
         self.library.execute(
-            "DELETE FROM fingerprint_cache WHERE ledger_id = ?1",
+            "DELETE FROM fingerprint_cache WHERE file_id = ?1",
             params![ledger_id],
         )?;
         Ok(())

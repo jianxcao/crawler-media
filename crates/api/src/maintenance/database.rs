@@ -48,22 +48,20 @@ const INTERRUPT_RETRY: Duration = Duration::from_millis(1);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DatabaseName {
     App,
-    Catalog,
+    Cache,
     Library,
     Subscribe,
     Jobs,
-    Fanart,
 }
 
 impl DatabaseName {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::App => "app",
-            Self::Catalog => "catalog",
+            Self::Cache => "cache",
             Self::Library => "library",
             Self::Subscribe => "subscribe",
             Self::Jobs => "jobs",
-            Self::Fanart => "fanart",
         }
     }
 }
@@ -75,7 +73,7 @@ pub struct DatabaseTarget {
 }
 
 /// 可选库：文件不存在时记 Skipped，**不**创建。
-const OPTIONAL: [DatabaseName; 1] = [DatabaseName::Fanart];
+const OPTIONAL: [DatabaseName; 0] = [];
 
 fn data_dir_path(name: DatabaseName, data_dir: &Path) -> PathBuf {
     data_dir.join(format!("{}.db", name.as_str()))
@@ -90,8 +88,8 @@ pub fn database_targets(data_dir: &Path, app_path: &Path) -> Vec<DatabaseTarget>
             path: app_path.to_path_buf(),
         },
         DatabaseTarget {
-            name: DatabaseName::Catalog,
-            path: data_dir_path(DatabaseName::Catalog, data_dir),
+            name: DatabaseName::Cache,
+            path: data_dir_path(DatabaseName::Cache, data_dir),
         },
         DatabaseTarget {
             name: DatabaseName::Library,
