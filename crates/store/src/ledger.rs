@@ -247,11 +247,12 @@ impl Store {
         hdr: Option<&str>,
     ) -> Result<bool, StoreError> {
         let n = self.library.execute(
-            "UPDATE ledger
+            "UPDATE library_files
              SET resolution = COALESCE(?2, resolution),
                  codec = COALESCE(?3, codec),
-                 hdr = COALESCE(?4, hdr)
-             WHERE id = ?1",
+                 hdr = COALESCE(?4, hdr),
+                 quality_source = 'probe'
+             WHERE file_id = ?1",
             params![ledger_id, resolution, codec, hdr],
         )?;
         Ok(n > 0)
