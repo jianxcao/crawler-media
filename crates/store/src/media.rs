@@ -343,7 +343,34 @@ impl Store {
             }
             titles.into_iter().next()
         } else {
-            None
+            // Even if incoming has an alias (like after online resolve), check if incoming.id already exists!
+            if let Some(existing) = self.get_media(incoming.id)? {
+                if !aliases_conflict(&existing, &incoming) {
+                    Some(existing)
+                } else {
+                    None
+                }
+            } else {
+                // Also check title + year if no conflict
+                let sql = format!("{MEDIA_SELECT} WHERE m.title = ?1 AND m.kind = ?2");
+                let mut stmt = self.library.prepare(&sql)?;
+                let candidates: Vec<Media> = stmt
+                    .query_map(params![incoming.title, incoming.kind.as_str()], map_media)?
+                    .collect::<Result<Vec<_>, _>>()?;
+                let titles: Vec<Media> = candidates
+                    .into_iter()
+                    .filter(|existing| {
+                        existing.title == incoming.title
+                            && incoming.year == existing.year
+                            && !aliases_conflict(existing, &incoming)
+                    })
+                    .collect();
+                if titles.len() == 1 {
+                    titles.into_iter().next()
+                } else {
+                    None
+                }
+            }
         };
 
         if let Some(existing) = existing {

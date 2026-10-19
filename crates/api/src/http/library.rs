@@ -370,6 +370,7 @@ pub(crate) async fn list_items(
             "title": item.title,
             "year": item.year,
             "rating": item.rating,
+            "poster_url": poster_url,
             "backdrop_url": backdrop_url,
             "file_count": item.file_count,
             "seasons": actual_seasons,

@@ -505,11 +505,40 @@ pub(crate) async fn poster(
             _ => return err(StatusCode::NOT_FOUND, "poster.missing", "海报不存在"),
         }
     };
-    let poster = std::path::Path::new(&row.path).parent().and_then(|dir| {
+    let file_dir = std::path::Path::new(&row.path).parent();
+    let poster = file_dir.and_then(|dir| {
         let here = dir.join("poster.jpg");
         let up = dir.parent().map(|p| p.join("poster.jpg"));
         [Some(here), up].into_iter().flatten().find(|p| p.is_file())
     });
+    let poster = match poster {
+        Some(p) => Some(p),
+        None => {
+            let media = state.store.lock().get_media(row.media_id).ok().flatten();
+            if let Some(m) = media {
+                let state_for_work = state.clone();
+                let path = std::path::Path::new(&row.path).to_path_buf();
+                let fetched = state
+                    .http_work
+                    .run_to_completion(move || {
+                        crate::poster_fetch::attach_poster(&state_for_work, &m, &path)
+                    })
+                    .await;
+                if let Err(BlockingError::Busy) = fetched {
+                    return err(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "runtime.busy",
+                        "服务繁忙，请重试",
+                    );
+                }
+            }
+            file_dir.and_then(|dir| {
+                let here = dir.join("poster.jpg");
+                let up = dir.parent().map(|p| p.join("poster.jpg"));
+                [Some(here), up].into_iter().flatten().find(|p| p.is_file())
+            })
+        }
+    };
     let Some(poster) = poster else {
         return err(StatusCode::NOT_FOUND, "poster.missing", "海报不存在");
     };
