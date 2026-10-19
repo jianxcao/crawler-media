@@ -1031,14 +1031,26 @@ export function VideoPlayer(props: VideoPlayerProps) {
         } else {
           consentGrantedRef.current = false;
         }
-        if (state.startMs === null) {
-          // 起点是服务端定的（续播点）：seek 目标与时间轴预填都跟上，
-          // 不填的话起播那几秒进度条停在 00:00，看起来像「时间没加载出来」
+        if (session.resume_status === "source_changed") {
+          // 源已发生替换或重转：必须使用服务端的 start_ms/duration_ms/tracks，
+          // 绝不能沿用之前保存的片长（例如 90 分钟合并集片长泄露到 45 分钟独立源）。
           pendingFileMsRef.current = session.start_ms;
           setPositionMs(session.start_ms);
+          if (session.watch) {
+            setResume(session.watch);
+          } else {
+            setResume(null);
+          }
+        } else {
+          if (state.startMs === null) {
+            // 起点是服务端定的（续播点）：seek 目标与时间轴预填都跟上，
+            // 不填的话起播那几秒进度条停在 00:00，看起来像「时间没加载出来」
+            pendingFileMsRef.current = session.start_ms;
+            setPositionMs(session.start_ms);
+          }
+          // 观看状态随响应带回：时间轴兜底片长、字幕记忆轨都从这里来
+          if (session.watch) setResume(session.watch);
         }
-        // 观看状态随响应带回：时间轴兜底片长、字幕记忆轨都从这里来
-        if (session.watch) setResume(session.watch);
         dispatch({ type: "session", session });
       } catch (error) {
         if (cancelled) return;

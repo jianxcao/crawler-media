@@ -117,3 +117,27 @@ Jinja 模板：MoviePilot 的能力。v1 否决——封闭占位符集合对两
 两者不是 Media/Library/Subscribe 的第二份记录，但不能据此说删除 jobs.db “只丢历史”：还丢def中的用户维护参数／开关／周期和queued/running工作。fanart可重抓，jobs只允许按明确保护规则清理终态历史。连接策略由各 crate 内的 `apply_connection_policy` 显式设置，不依赖 bundled SQLite 的构建默认值；`journal_mode` 是文件头属性（`crates/*/tests/connection_policy.rs` 从外部连接断言），`busy_timeout`/`foreign_keys` 是连接级设置（各 crate 的单元测试在**自己打开的连接**上断言）。
 
 跨文件仍然没有外键，也没有跨文件事务：这一点对这两个库同样成立。
+
+## 后记：存储重设计已落地（2026-10-19，替换上面的四文件归属）
+
+上面的四文件划分与 `ledger`/`file_meta`/浏览投影链已被
+[存储重设计](../superpowers/specs/2026-10-18-library-storage-redesign.md)取代，实现见
+`crates/store/src/schema/v1/`。当前事实：
+
+| 文件 | 保存内容 | 可清空？ |
+|---|---|---|
+| `app.db` | User／token、Site、Downloader、Filter、Naming template、实例设置、搜索快照 | 否 |
+| `library.db` | Media 身份与已采用元数据、Library／根、文件台账与覆盖、浏览摘要与倒排、Collection、Playback 单元／会话／历史／日志/指标、Probe 与 Scan 的持久工作 | 否（这就是馆藏索引） |
+| `subscribe.db` | Subscribe 策略、逐槽事实、待下载队列 | 否 |
+| `jobs.db` | Job 定义与执行／重试记录 | 否（按保护规则清理终态历史） |
+| `cache.db` | 六来源外部响应缓存（每来源一张表） | 是 |
+
+与本文原决策的三处实质差异：
+
+1. **Media 与 Playback 从 app/subscribe 移入 library.db**：一个文件的发布要同时写文件台账、覆盖、浏览摘要与受影响用户摘要，这些必须在一个事务内完成，不能跨库。
+2. **浏览投影链被删除**：`_read_revisions`、`_browse_changes`、`browse_change_cursors`、`browse_generations`、`browse_media`、`browse_files` 以及重建服务都不再存在。浏览读 `library_items`/`library_units`/`library_item_terms`，在写事实的同一事务内更新。
+3. **`cache.db` 按来源分表**，`catalog.db`/`fanart.db` 不再单独存在；清缓存不影响任何本地事实。
+
+仍然成立的约束：跨文件没有外键、没有跨文件事务；文件所属 root/Library/Media 在写入时确定并持久化，不在读路径按字符串或路径归属推断；`pending` 文件不是馆藏内容，只进管理／恢复视图。
+
+没有旧数据导入器、兼容视图或双读双写。未知或较新的库布局拒绝打开（各文件 `application_id` + `user_version`），升级只做前向 schema 版本变更。

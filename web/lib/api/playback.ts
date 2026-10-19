@@ -654,6 +654,8 @@ export interface PlaybackSession {
    * timeline="file"（VOD 预生成列表）时它只是建议起播位置：分片时间戳
    * 本身是文件绝对时间，currentTime 即文件时间，换算参照点为 0 */
   start_ms: number;
+  /** 续播状态：compatible | source_changed | no_progress | already_played */
+  resume_status?: "compatible" | "source_changed" | "no_progress" | "already_played";
   /** 时间轴语义：session = 会话相对（旧）；file = 文件绝对（VOD，§12） */
   timeline?: "session" | "file";
   /** master 播放列表（带 WEBVTT 字幕组），仅 VOD 会话有——iOS 原生 HLS 用 */

@@ -24,3 +24,12 @@
 - `cargo test -p subscribe`: 18 个套件通过
 - `cargo test -p playback`: 全部通过
 - `cargo test -p api`: 新写入与订阅运行时通过
+
+## 4. 更正（2026-10-19，当前树）
+
+第 1-3 节记录的是设计目标与当时的期望，**不是当前代码可复现的证据**：
+
+- 第 3 节的“套件通过”已过期。本人在当前树实测：`cargo test -p store` 单元测试 7 通过 / 22 失败（失败源于仍引用已删除的 `ledger`、`file_meta`、`browse_generations`）；`cargo check --workspace --all-targets` 被既有的 `downloader` 测试目标阻断（`atomic_try_update` 为不稳定 API，与本重构无关）。清理完成后必须重跑全量。
+- 第 2 节的 `< 1 ms` 不是实测值：该报告没有记录数据规模、并发、锁等待或分位数，应只当作索引覆盖的设计意图。真正的性能验收条件见设计文档第 8 节（EXPLAIN/VmStep、FullscanStep、p50/p95、WAL 与索引体积、锁等待，规模 ≥100k Media / 1M 文件）。
+- `catalog.db`/`fanart.db` 与浏览投影链的表述已过期：现在只有 `app/cache/library/subscribe/jobs` 五个文件，缓存按来源分表。详见 ADR-0008 的后记。
+- 本报告不构成“旧路径已删除”的证明：清理是否完成必须以代码中不再出现被删除表名为准。
