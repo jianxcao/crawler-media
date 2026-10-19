@@ -191,7 +191,7 @@ pub(crate) fn nfo_from_tmdb(media: &Media, metadata: &media::ItemMeta) -> librar
         original_language: metadata.original_language.clone(),
         countries: metadata.origin_countries.clone(),
         studios: metadata.studios.clone(),
-        status: metadata.status.clone(),
+        studio_logo: metadata.studio_logo.clone(),
         number_of_seasons: metadata.number_of_seasons,
         number_of_episodes: metadata.number_of_episodes,
         directors: metadata.directors.clone(),

@@ -31,6 +31,7 @@ pub struct NfoMeta {
     pub genres: Vec<String>,
     pub countries: Vec<String>,
     pub studios: Vec<String>,
+    pub studio_logo: Option<String>,
     pub directors: Vec<String>,
     pub creators: Vec<String>,
     pub cast: Vec<CastMember>,
