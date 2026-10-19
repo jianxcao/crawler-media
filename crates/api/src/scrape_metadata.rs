@@ -316,6 +316,11 @@ fn scrape_tv_episodes_and_nfos(
     mirror_nfo: bool,
 ) -> Vec<(PathBuf, Option<String>)> {
     let tmdb_meta = fetch_tmdb_metadata(state, media.kind, tmdb_id).ok().flatten();
+    if let Some(meta) = &tmdb_meta {
+        if let Some(r) = meta.rating.as_ref().and_then(|r| r.parse::<f64>().ok()) {
+            let _ = state.store.lock().update_library_items_metadata_sort(media.id, Some(r), meta.release_date.as_deref());
+        }
+    }
     let show_nfo = tmdb_meta.as_ref().map(|meta| nfo_from_tmdb(media, meta)).unwrap_or_default();
     let preferred_lang = preferred_language(state);
 

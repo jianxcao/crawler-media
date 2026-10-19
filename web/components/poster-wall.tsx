@@ -129,7 +129,7 @@ export const InventoryCell = memo(function InventoryCell({
     type: item.kind === "video" ? undefined : item.kind,
     title: item.title,
     year: item.year ?? undefined,
-    rating: 0,
+    rating: item.rating ?? 0,
     // 框比例按分区锁死（竖版 2:3 / 横版 16:9），同一分区里每格等高、片名一条线；
     // 主图真实比例新契约不下发，直接按框比例铺满
     aspect: frame,

@@ -306,6 +306,22 @@ impl Store {
         Ok(())
     }
 
+    /// Update rating and release_date on library_items for a media when scraped
+    pub fn update_library_items_metadata_sort(
+        &self,
+        media_id: MediaId,
+        rating: Option<f64>,
+        release_date: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let rating_val = rating.unwrap_or(-1.0);
+        let rel_val = release_date.unwrap_or("");
+        self.library.execute(
+            "UPDATE library_items SET rating_sort = ?2, release_date_sort = ?3 WHERE media_id = ?1",
+            params![media_id.to_string(), rating_val, rel_val],
+        )?;
+        Ok(())
+    }
+
     /// Recover canonical identity without selecting the first alias or ambiguous title.
     pub fn resolve_scanned_media(&self, incoming: Media) -> Result<Media, StoreError> {
         let mut matched_media_ids: std::collections::HashSet<MediaId> = std::collections::HashSet::new();
