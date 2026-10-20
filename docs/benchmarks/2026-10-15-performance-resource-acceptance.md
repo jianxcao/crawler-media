@@ -2,11 +2,13 @@
 
 ## Scope and evidence boundary
 
-This is the X1 acceptance record for the working tree inspected on 2026-10-17. No commit SHA was observed for this work, so every matrix commit value is **Not recorded (uncommitted)**. The integration tests use temp-backed stores and fakes; they do not establish production, device, slow-NAS, or ffmpeg behavior. Acceptance tests are characterization, not a claim that the named remediation is green.
+This historical record combines the X1 working-tree run inspected on 2026-10-17 with per-ID implementation/test evidence. It was published in `c44ca7a`; that documentation commit is not proof that the initial run used a clean runtime revision. No commit SHA was recorded for that run; matrix SHAs identify the associated per-ID implementation claims, while `Not recorded (uncommitted)` means no SHA was supplied for that row. The integration tests use temp-backed stores and fakes; they do not establish production, device, slow-NAS, or ffmpeg behavior. The original observations below are retained, not rerun or promoted to current storage-cutover acceptance.
 
 ## Acceptance matrix
 
 Statuses are restricted to `open / partial / fixed-tested / design-gated / not-reproduced`.
+
+These are the statuses recorded in this evidence layer, not a live closure ledger. In particular, `fixed-tested` is limited to the named historical seam and does not prove all named requirements, later wiring, or real-instance cutover. The audit's X1 snapshot and this matrix have different per-ID detail; neither automatically closes the other's gaps. Later R3 capacity work was recorded separately in `c9530ff` (`crates/api/tests/chapter_frame_capacity.rs`), and the DB-07 approval is preserved in the [historical ownership design](<2026-10-15-default-library-candidates.md>); the old `open`/`design-gated` entries below are not today's status.
 
 | ID | Status | Commit | Public regression / observed evidence |
 |---|---|---|---|

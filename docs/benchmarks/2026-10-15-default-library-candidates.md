@@ -1,5 +1,7 @@
 # Default Library candidate ownership measurement (DB-07)
 
+> **Historical characterization and approval record, not current storage implementation guidance.** Measurements/design were recorded in `0f6bf32`; the user approval was recorded in `c9530ff`. “Current” in the sections below means the implementation inspected for that record. Preserve the measurement and approval history, but do not use the absence of `browse_ledger_owners` or these proposed interfaces as today's acceptance test: the subsequent storage cutover uses a different model. No benchmark was rerun during this documentation cleanup.
+
 ## Scope and method
 
 Design-only characterization; no ledger data was changed and no derived ownership index was implemented. The `default_candidate_growth_and_ownership_parity` test compares current SQL candidates after the existing owner filter with the owned row set across unmatched paths, nested roots, equal-depth ambiguity, a non-canonical stored path, a second media kind, and a frozen library. It also records that the global ledger read is cold and asserts the documented absence of `browse_ledger_owners`; stale-index rejection is consequently not exercisable until that interface exists. This is not a product regression test and does not claim DB-07 is fixed.
@@ -21,14 +23,14 @@ The measurements grow one database cumulatively. Read time tracks cumulative glo
 
 Recommendation: approve the derived index design for a separate implementation task, with generation/revision safety and rollback specified above. This design gate makes no approval decision for the user and does not claim DB-07 fixed. ADR-0008 remains authoritative unchanged.
 
-## Approval
+## Historical approval (recorded 2026-10-17)
 
 Approved for implementation: avoid full-table scans for every library kind and
 add the supporting index rather than changing stored root ids. Implementation
 slices (each with its own migration, tests and fallback):
 
 1. persisted derived table `browse_ledger_owners(ledger_id, library_id, ownership_revision)` plus an ownership revision counter;
-2. batched initial build with a generation swap and crash recovery (a stale/incomplete generation is never used; the reader falls back to the current bounded scan);
+2. batched initial build with a generation swap and crash recovery (a stale/incomplete generation is never used; the historical reader falls back to its existing complement scan, whose work grows with global ledger size as measured above—not a proven bounded-work query);
 3. reader switch for `ledger_candidates_for_library`, with the default-library fallback preserved and `browse_owned_ledger_ids` returning `None` while the index is not ready;
 4. deletion/transfer keep strict-fresh semantics; rollback stops new dispatch and drains without deleting queued facts.
 

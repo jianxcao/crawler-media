@@ -9,6 +9,8 @@
 > 文中打 ✅ 的条目记录当时落地的方向；之后若端点合并或改名（例如
 > `/tracking-state` 并进 `PATCH /subscriptions/{id}`），以代码为准，不要按
 > 本文去「补回」旧路径。
+>
+> 其中 `apps/mc-web`、Next 构建、`playback_progress`、`file_meta`、旧迁移/回填等记录保留当时上下文，不是当前目录/DDL/部署指令。当前前端为 `web/` 的 Vite SPA；数据库入口为 `crates/store/src/schema/layout.rs`，没有旧库迁移阶梯。2026-10-20 存储切换仍有运行时缺口，后续执行仅按 [当前存储计划](<../superpowers/plans/2026-10-20-storage-clean-cutover.md>)。历史 ✅、测试结果不因归档而重验，也不证明新模型已端到端验收。
 
 来源：2026-09 浏览器 E2E 测试 + parity 差距盘点 + 用户方向决策。
 

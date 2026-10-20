@@ -15,15 +15,15 @@
 
 - 前缀：自有 REST 挂 `/api/v1`。
 - 信封：成功 `{"ok": true, "data": ...}`；失败 `{"ok": false, "error": {"code": "...", "message": "..."}}`，HTTP status 4xx/5xx。
-- ID：领域实体用 **UUID 字符串**（`MediaId` / `SiteId` / `SubscribeId` / … 的 Display）。Jellyfin 表面会把 UUID 去连字符（compact id），那是播放协议，不要写进自有 DTO。
-- 认证：`Authorization: Bearer <token>`。`POST /auth/login` 返回 `{token, user}`。静态图片（海报/背板/剧照/章节图/库封面）走 public 路由，因为 `<img>` 带不了 Bearer（见 `AGENTS.md`）。
+- ID：领域实体用 **UUID 字符串**（`MediaId` / `SiteId` / `SubscribeId` / … 的 Display），不能当数字 hash。Jellyfin 协议 ID 与物理来源 ID 是独立表面：领域已有 `w1_` / `s1_` / `u1_` typed item 和 `f1_<file>_<revision>` source 格式（`crates/domain/src/library_storage.rs`），但生产协议调用方尚未全部切换；不能把“UUID 去连字符”当作所有现行协议 ID 的规范，也不能把新类型存在当作生产切换完成。
+- 认证：`Authorization: Bearer <token>`；`POST /auth/login` 返回 `{token, user}` 并设置 HttpOnly `mc_session` cookie，protected routes 也接受该 cookie（`http/auth.rs`）。静态图片（海报/背板/剧照/章节图/库封面）仍走 public 路由，不得因存在 cookie 而改成必须认证（见 `AGENTS.md`）。
 - 错误 code：`resource.action`，如 `subscribe.missing`、`site.invalid`。message 中文可读。
 - 枚举：`media.kind` = `movie|tv|video`（`video` 是「其他」库，不识别、不刮削）；`subscribe.fetch_mode` = `search|rss|both`。
 - 时间：RFC3339 UTC。空值用 `null`。
 
 ## 核心形状
 
-下列是稳定的领域投影。列表不穷尽字段；实现多出来的字段以 handler JSON 为准。
+下列是面向现有调用方的核心投影，不是新存储模型的完整 DTO 保证。列表不穷尽字段；handler 的实际 JSON 与前端消费者必须共同核对，历史字段和未切换调用方不能作为新增兼容要求。
 
 ### User
 
@@ -40,6 +40,8 @@
 ### MediaView
 
 `{id, kind, title, year?, original_title?, tmdb_id?, douban_id?, tvdb_id?, bangumi_id?, anilist_id?, poster_url?}`
+
+Media 的权威身份与别名现存 `library.db.media` / `media_aliases`；别名键为 `(source, kind, external_id)`，同一来源可保留多个别名、至多一个 refresh target。上面的五个可空 `*_id` 仍是单值投影，不代表完整别名集合。现有 `Store::update_media` 先删后写单值别名，仍可能丢失多别名且未统一更新浏览摘要；这是待修切换缺口，不是允许的写入合同（`store/src/media.rs`、`schema/v1/library.sql`）。
 
 ### Subscription（CONTEXT：**Subscribe**）
 
@@ -74,9 +76,9 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 `{total, genres, countries, decades, watch, ratings, runtimes, languages, resolutions, hdr, stock, years: []}`，每项 `{value, label, count}`。
 
 - **计数**：维度 D 的值 v 的 `count` = 满足「**除 D 以外**全部已选条件」且 D 取 v 的 **distinct Media** 数；`total` = 满足全部条件的 distinct Media 数（不是 ledger 行数）。候选全集来自该库全部可见 Media，含 `count: 0`（前端置灰）。
-- **查询键**（与 items 接口共用 `filterQuery`，维内 OR、维间 AND）：`g`(TMDB genre id) `c`(ISO 3166-1 二字码) `d`(`2020s|2010s|2000s|1990s|earlier`) `w`(`unwatched|watching|played|favorite`) `rating_gte`(6|7|8|9) `rt`(`lte60|60to90|90to120|gt120`) `lang` `res` `hdr`(true|false) `stock`(`missing|unscraped`)。
+- **查询键**：items/facets 共用 `browse_filter_from_query`。多值维度用逗号分隔，支持 `genres|g`、`countries|c`、`decades|d`（`2020s|2010s|2000s|1990s|earlier`）、`runtimes|rt`（`lte60|60to90|90to120|gt120`）、`languages|lang`、`resolutions|res`、`stock`（`missing|unscraped`），维内 OR、维间 AND。`watch|w` 是单值 `unwatched|watching|played|favorite`；`rating_gte` 接受有限 `0..=10` 数值（6/7/8/9 是 UI 档位），`hdr` 为 `true|false`，另有 `identity`。不能把 UI 预设档位当作 handler 全部接受范围（`http/library.rs`、`store/src/library_query/items.rs`）。
 - **`tier`**：`primary` 只填 `genres/countries/decades/watch`，其余空数组；`all` 十维全填；**缺失或空串按 `all`**；其他非空值 → 400 `library.invalid`。
-- `years` 是历史遗留的空数组键，保留以免破坏未知消费者。
+- `years` 当前仍返回历史空数组键；这只描述现有响应，不是新增或继续扩展兼容层的要求。
 - 未知年份与 `>=2030` 不归入任何 `decades` 档。
 
 ### JobDef / Job
@@ -112,28 +114,34 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 - `expected_payload` 是并发令牌：**保存前的原 payload**，不是 payload 内的 schema `version`。与当前值不符 → 409 `job.conflict`；缺失 → 400 `job.missing_token`。
 - 未知 def → 404 `job.missing`；def 存在但非维护 kind → 400 `job.not_maintenance`；非法配置 → 400 `job.invalid_config`（且不落库）。
 - `interval_secs` 只对维护任务加范围 `3600..=31536000`，越界 → 400 `job.invalid_interval`；其他任务契约不变。
-- 返回 `{id, kind, payload, payload_token, schedule?}`。**当前只有 payload 的比较与更新在同一事务**；schedule 在后续独立写入，可能部分保存、并发混合，且省略 interval 时返回 `schedule:null` 不代表实际周期已清空。这是待修 F04，不是保证整个配置原子。
-- 目标是完整配置（payload＋schedule）的 CAS，并刷新尚未运行的 queued 子任务；当前旧 payload token 不能检测只改周期的冲突。见 [F02/F04 与后续计划](<../superpowers/plans/2026-10-13-database-api-followup.md>)。
+- 返回 `{id, kind, payload, payload_token, schedule?}`。当前 `jobs::update_def_config_cas` 在**同一事务**比较 payload、更新 payload/可选周期并刷新 queued 子任务的 payload；running 保留执行快照。省略周期时 handler 回读实际 schedule。并发令牌仍仅覆盖 payload，**不能检测仅改周期的冲突**，不能称为完整配置 revision。
+- 原 F02 与 F04 的实现现状须区分：queued 刷新与配置同事务路径已经存在，但仅周期冲突检测仍缺少令牌覆盖。历史复核与执行计划不等于本次重新验收；当前存储切换任务见 [执行计划](<../superpowers/plans/2026-10-20-storage-clean-cutover.md>)。
 
 `POST /api/v1/jobs/{id}/maintenance-preview`（**仅管理员**，会员 403）：
 
 - body = `{payload?}`（缺省用该 def 当前已保存的 payload）。
-- **只读、匹配返回行数有限额**：不写def、不创建删除Job、不改数据库内容，也不返回播放明细；真正SQL扫描／时间预算仍是待实现目标，不能将行数限额当硬执行上限。
-- 返回 `{kind, policy_version, retention_days?, cutoff?, scanned, candidates, protected, truncated, note?}`；`data_retention` 另含 `examined, incomplete, classes[]`（每类 `examined/candidates/protected/incomplete/resume_after`）；
-  目标合同中 `truncated=true` 表示固定预算截断了窗口，计数是**下界**而不是精确总量。**当前 Jobs 只按可删候选决定 truncated，保护计数最多501但未标其截断；不能把 `truncated=false` 当全部计数完整**（F03）。数据库维护没有删除候选，计数字段恒为 0。
-- `scanned/candidates` 当前是匹配窗口的行数，不是 SQLite 实际扫描量；LIMIT500 不构成时间或持锁预算，preview 同步 SQL 尚未 offload（F05）。
+- **只读窗口预览**：不写 def、不创建删除 Job、不写游标、不返回播放明细。当前已通过 `http_work` blocking budget 执行，等待上限 10 秒，超时返回 504 `job.preview_timeout`；该等待上限不证明底层 SQLite 单条语句已硬停止。
+- 返回 `{kind, policy_version, retention_days?, cutoff?, scanned, candidates, protected, truncated, note?}`；Jobs 另返回 `protected_truncated`，`data_retention` 另含 `examined, incomplete, classes[]`（每类 `examined/candidates/protected/incomplete/resume_after`）。
+- Jobs 当前走 `prune_terminal_window`，一个原始 keyset 窗口包含保护行；`truncated` / `protected_truncated` 来自窗口外是否还有未检视行，计数只描述该窗口，不是全库精确总量。数据库维护没有删除候选，计数字段恒为 0。
+- `scanned` 不等于 SQLite VM 实际扫描量；LIMIT 与批间预算不构成 SQL 执行时间/持锁硬上限。依据 `http/job_maintenance.rs`、`jobs/src/retention_cursor.rs`。
 
 手动执行（`POST /jobs/{id}/run`，仅管理员）：
 
 - `enabled=false` 的 def → 409 `job.disabled`（不再"返回 queued:true 却没入队"）。
-- 已有 queued/running 子任务 → 200 `{queued: false, live_status}`，不误报新增实例；否则 200 `{queued: true}`。**当前 future queued 不会被提前**，因而按钮“立即执行”的语义未完整实现（F12）。
-- **目标合同**：修改配置用于尚未运行的下次执行，运行中保留快照。**当前偏差**：已 queued 子任务仍带旧策略，改为更安全策略也可能再按旧策略删除一次（F02）；发布前需修复，而不是将偏差当允许的行为。
+- 当前返回 `status`：新建为 `created`，既有 future queued 被提前为 `expedited`，已排队为 `already_queued`，维护任务正在执行为 `already_running`；同时返回相应 `queued` / `live_status`，不把重复点击误报成新增工作。依据 `http/jobs.rs`、`jobs/src/schedule.rs`。
+- 修改配置会刷新尚未运行的 queued payload，running 继续快照；这不等于运行中策略已被改变，也不撤销已提交的删除。
 
 清理语义提醒：启用播放历史清理后，**历史页与依赖播放历史的统计窗口都只剩保留期内的数据**（不是仅隐藏列表）；删除不可撤销，只能从一致备份恢复。
 
-**目标合同**要求关闭后不启动下一批；**当前禁用只取消 queued，running 清理不检查 def.enabled，仍会继续后续批次**（F01）。不能只凭UI开关认定清理已停止，已删除数据也不会恢复。SSE `/jobs/stream` 的 `count` 因清理会**下降**，客户端不得把它当单调递增序列。
+当前 runner 在批/库边界检查 def 禁用、取消、停机与读取失败，停止后不启动下一批；已开始的一批不因此回滚，已删除数据也不恢复。SSE `/jobs/stream` 的 `count` 可因清理**下降**，不能用作单调递增序列；变更通知另有 revision（`jobs/src/change_state.rs`）。
 
-上述已确认偏差与优先级以 [总复核](<../audits/2026-10-13-database-api-review.md>) 为准；DB8 不是“全部完成并验收”。
+2026-10-13 的 [总复核](<../audits/2026-10-13-database-api-review.md>) 保留为历史缺陷证据；不能将其所有“当前缺陷”直接搬到现行合同，也不能仅据后续代码存在就宣布所有回归通过。DB8 的 SQL 硬预算、VACUUM best-effort 边界及仅周期冲突检测仍须分别核对。
+
+## 当前存储切换的未闭合边界（2026-10-20）
+
+四个 Store 文件为 `app.db`、`cache.db`、`library.db`、`subscribe.db`，队列另在 `jobs.db`。当前布局没有旧数据库迁移阶梯；DDL 不代表 API/消费者已全部切换。`protocol_item_page` 与 `commit_playback_event` 尚未形成所有生产调用方的统一路径；movie `(0,0)` 请求别名仍在前后端，目标存储整片坐标为 `(-1,-1)`。不得新增兼容建议来保留这些未切换路径。
+
+上一轮隔离复核已观察到：合并集文件 heartbeat 错报 `ended_by_admin`、旧 issued session 写入新文件版本、增量公共集数与用户计数不一致、文件续页 `next_cursor` 对接/恰好 50 条边界失败、采用元数据 runtime/rating 缺失与详情遗漏 tagline/certification、换根外键错误、多别名更新丢失/卡片陈旧；integrity-checks 与 Media merge 管理端点仍 404。这些不是已完成合同；本次文档清理没有重跑或改写这些观察。当前源码入口为 `http/library.rs`、`http/playback/`、`store/src/media.rs`、`store/src/library_query/`、`store/src/playback/`，闭环验收见 [存储执行计划](<../superpowers/plans/2026-10-20-storage-clean-cutover.md>)。
 
 ## 现行表面（去哪看）
 

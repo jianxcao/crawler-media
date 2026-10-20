@@ -4,7 +4,11 @@
 
 从用户可见的入口和工作流检查 Web 工作台，以及 VidHub 通过 Jellyfin-compatible API 访问本系统时的页面呈现、图片加载、播放和进度同步。本文覆盖当前 Web 路由、设置分区和关键跨页流程；用例以可观察结果为准。
 
+“预期结果”是待验收合同，不是已实现/已通过的功能声明。2026-10-20 当前存储切换仍有已知运行时缺口；历史测试与本文件列出的自动化源代码不能替代本构建实测。当前 DDL/布局见 `crates/store/src/schema/layout.rs` 与 `schema/v1/*.sql`，执行顺序见 [存储切换计划](<../superpowers/plans/2026-10-20-storage-clean-cutover.md>)。
+
 测试环境必须是隔离实例，数据写入临时目录和测试数据库。不得用生产 Site、真实 Downloader、真实 Library 文件目录或真实 User 的观看记录执行有写入的流程。
+
+隔离实例使用独立 `CRAWLER_MEDIA_DATA`。当前四个 Store 文件为 `app.db`、`cache.db`、`library.db`、`subscribe.db`，队列另在 `jobs.db`；没有旧数据库迁移阶梯。不得把历史用例的 v7 增量升级、旧 `catalog.db` / `file_meta` / `playback_progress` 名称当成当前 fixture 格式，也不得为准备回归删除真实实例目录。已有当前布局可重开；不匹配布局应失败而非自动迁移。
 
 ## 执行方式与判定规则
 
@@ -145,7 +149,7 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 
 #### Library removal 自动化辅助验收与未覆盖项
 
-`cargo test -p api --test library_delete_reimport` 通过公开 DELETE/status/创建/scan 路由检查 TV 两 User、电影整片、不同 NFO 别名不串进度、旧缓存删除和独立 Library 同 Media 保留。fixture 在没有 Tokio runtime 时创建 ApiState，随后进入 Tokio 执行 HTTP，避免启动真实 ffprobe worker；Catalog/Indexer 为离线 fake，STRM 不访问远程源。已有 file_meta 使用有效 VideoTrack，不能用空 Tracks 的读取 miss 假装验证清理。
+`crates/api/tests/library_delete_reimport.rs` 的公开 DELETE/status/创建/scan 路由用例包含 TV 两 User、电影整片、不同 NFO 别名不串进度、旧缓存删除和独立 Library 同 Media 保留等断言；此处列覆盖设计，不声明本次已执行通过。fixture 在没有 Tokio runtime 时创建 ApiState，随后进入 Tokio 执行 HTTP，避免启动真实 ffprobe worker；Catalog/Indexer 为离线 fake，STRM 不访问远程源。历史 API 名 `file_meta` 在当前持久结构中对应 `file_details`；已有缓存需有效 VideoTrack，不能用空 Tracks 的读取 miss 假装验证清理。
 
 这个 API 测试不是浏览器 E2E，不替代 LIB-07–11。它检查新 ledger 没有复制旧缓存，不验证新 fake-probe 成功写入 file_meta，也不独立覆盖重启/取消竞态、无 ID 歧义、成员权限、Subscribe 失效或实际播放。上述 UI 用例本次新增时均为 **Not run**；必须记录实际命令退出码和 UI 证据之后才能标记 Pass。
 
@@ -214,11 +218,11 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 
 每轮回归为每个 ID 记录：构建号、环境、User 角色、浏览器或 VidHub 版本、结果（Pass/Fail/Blocked/Not run）、实际结果和证据文件位置。Fail 必须包含失败原因、失败步骤、预期与实际结果、复现条件；Blocked 必须包含阻塞原因和解除条件；如已创建缺陷，还要记录缺陷链接。不得把 Blocked 或 Not run 计入通过率。
 
-## 数据库／维护新增验收（2026-10-13，尚未执行）
+## 数据库／维护验收历史基线（2026-10-13，原记录尚未执行）
 
-本节是待执行用例，不计入本轮workspace通过数。缺陷和自动化任务对应 [总复核](<../audits/2026-10-13-database-api-review.md>) 与 [T1–T9](<../superpowers/plans/2026-10-13-database-api-followup.md>)。
+下表保留当时待执行用例与缺陷关联，不计入 workspace 通过数，不改写原 Not run。后续源码已包含批边界停止、配置事务/queued 刷新、原始窗口计数、blocking 预览、future queued 提前与预览草稿绑定路径（`maintenance/runner.rs`、`http/job_maintenance.rs`、`jobs/src/store.rs`、`job_loop.rs`、`web/lib/maintenance-preview.ts`）；因此“已知 Fxx”是当时状态，不代表当前必然仍复现，也不能据源码宣布关闭。完整配置仅周期冲突与 SQL/VACUUM 硬预算仍须单独验收。历史依据为 [总复核](<../audits/2026-10-13-database-api-review.md>) 与 [T1–T9](<../superpowers/plans/2026-10-13-database-api-followup.md>)。
 
-| ID | 操作／条件 | 预期 | 当前状态 |
+| ID | 操作／条件 | 预期 | 2026-10-13 原记录状态 |
 |---|---|---|---|
 | DB8-01 | 清理第一批提交后禁用def | 已提交保留结果，不启动下一批 | 已知F01；本用例Not run |
 | DB8-02 | future queued已存在，90天改365天或打开dry_run | 尚未运行child采用新策略，running不改 | 已知F02；本用例Not run |
@@ -230,6 +234,23 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 | DB8-08 | 显式VACUUM超时／disk变化／scan在预检后开始 | 真实停止或明确best-effort超限，不谎报硬界 | F06需先批准合同 |
 | DB8-09 | 升级首次调度＋重启保存后的开关／策略 | 默认警告明确，配置不复位；不把StateRunner直调当loop验收 | T9待补 |
 | COVER-LEGACY | legacy封面升级中freeze／CAS失败／trigger拒绝 | 当前引用bytes不变，只清未引用版本 | 已知F08；本用例Not run |
+
+## 存储 clean-cutover 回归补充（2026-10-20）
+
+下表记录上一轮隔离复核的失败观察与修复后验收目标；本次仅清理文档，**未重跑**，不将旧结果改为 Pass。API/数据库诊断证据不替代上文 UI 主验收；每个 UI 结果仍须按实际构建独立记录。
+
+| ID | 复核场景与验收目标 | 既有观察／状态 |
+|---|---|---|
+| STORAGE-01 | 合并集物理文件选择 E02 后 heartbeat，进度只写正确 Unit；未被管理员终止不得报 ended_by_admin | 已观察误报；本次 Not run |
+| STORAGE-02 | 签发 session 后替换物理来源版本，迟到事件不得写入新版本；Web/Jellyfin 统一检查来源版本与会话绑定 | 已观察旧 issued session 写 B 版本；本次 Not run |
+| STORAGE-03 | 单文件增量写入后检查 TV 公共集数、两 User 分集状态、Summary 与 Episodes | 已观察公共 count=3、User count=2；本次 Not run |
+| STORAGE-04 | 文件列表分别准备恰好 50 条和超过一页，UI 加载续页无遗漏/重复，终页正确结束 | 已观察 next_cursor 对接与 exact-50 边界失败；本次 Not run |
+| STORAGE-05 | 采用 runtime/rating/tagline/certification 后，Library 卡片、筛选与详情读取同一采用事实 | 已观察 normalizer runtime/rating Missing、详情漏字段；本次 Not run |
+| STORAGE-06 | 已有文件 Library 更换根，失败原子且无外键异常；持久归属不悬空 | 已观察换根 FK 错误；本次 Not run |
+| STORAGE-07 | 同来源多个别名的 Media 更新后，全部历史别名保留，refresh target 唯一且卡片立即同步 | 已观察别名丢失/卡片陈旧；本次 Not run |
+| STORAGE-08 | 管理完整性检查与 Media 合并公开路径可用并有最终状态，失败不改身份；协议浏览与事件提交生产接线真实覆盖 | 已观察管理端点 404，protocol_item_page / commit_playback_event 未统一接线；本次 Not run |
+
+movie 整片持久 Unit 为 `(-1,-1)`（`domain::UnitKey::WHOLE`）；当前前后端 `(0,0)` 请求别名尚未清除，不能据此添加兼容验收或宣称 clean cutover 已完成。用例应按 [当前执行计划](<../superpowers/plans/2026-10-20-storage-clean-cutover.md>) 在隔离实例闭环，保留旧失败证据。
 
 ## 当前限制
 

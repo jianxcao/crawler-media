@@ -1,6 +1,6 @@
 # Media / Library 存储重设计：单表浏览与独立响应缓存
 
-状态（2026-10-20，`feat/storage-redesign`）：**核心读写与干净切换已收口，规模/设备验收未完成**。五文件布局、事实/摘要表、会话绑定取流、来源优先级采用、NFO 最后有效值、逻辑条目去重、删除/根归属与用户摘要维护均已落地；电影 `(0,0)` 兼容读写与测试已删除。R1–R8 提交为 `2f59103`…`6d35343`，本机 `cargo test --workspace` 与前端 typecheck 通过。仍未完成：真实 NAS 冷热缓存、并发扫描+心跳分位数、100k Media / 1M 文件基准、真实 Jellyfin 客户端与浏览器播放验收。第3–10节的规范性目标与验收要求保持不变；执行记录见[修复计划](../plans/2026-10-19-storage-cutover-remediation.md)与[证据报告](../../benchmarks/2026-10-18-library-storage.md)。
+状态（2026-10-20，源码基线 `bd6c3c8`）：**五文件布局已建立，生产干净切换未完成，不能发布为已收口。** 本轮 Store/真实 Router/前端函数烟测仍发现源版本与会话串用、增量用户摘要漏维护、详情续页及元数据丢字段；电影 `(0,0)` 边界兼容、旧单集写适配及 Jellyfin 旧读取仍在。具体证据见[检查记录](../../benchmarks/2026-10-18-library-storage.md)，唯一当前执行入口为[干净切换与优化计划](../plans/2026-10-20-storage-clean-cutover.md)。历史全套测试通过仅证明当时套件，不关闭本设计的端到端合同；设备/规模验收仍未完成。
 
 本文第3–10节保留规范性目标与验收要求，不因部分实现而放宽。设计阶段历轮审核补齐F1–F5、R1–R3；最后两项played断言三元组和目标无快照fallback经GPT-6.1 Sol限定范围复核，结论 `ready_for_implementation_plan`。该历史设计结论不是完整DDL、运行时切换、恢复/协议或性能验收，也不提供无缺陷保证；第8节设计原型均按原证据边界保留。
 
@@ -16,7 +16,7 @@
 
 ## 2. 重设计前的问题证据（历史）
 
-下表是2026-10-18设计时的旧架构定位，不是 `a3dab1b` 的现行文件清单；已删除的旧模块不能作为当前源码入口。当前布局、生产切换缺口与历史运行证据分别见[数据库文档](../../database/README.md)、[修复计划](../plans/2026-10-19-storage-cutover-remediation.md)和[证据报告](../../benchmarks/2026-10-18-library-storage.md)。
+下表是2026-10-18设计时的旧架构定位，不是现行文件清单；已删除的旧模块不能作为当前源码入口。当前布局、生产缺口与历史证据分别见[数据库文档](../../database/README.md)、[当前计划](../plans/2026-10-20-storage-clean-cutover.md)和[证据记录](../../benchmarks/2026-10-18-library-storage.md)。
 
 | 设计时的代码 | 当时已观察到的行为 | 本设计对应变化 |
 |---|---|---|
@@ -107,7 +107,7 @@ NFO读取入口必须返回可区分的状态：确认不存在、权限/根不�
 
 多值字段不靠 `LIKE '%...%'` 或热页 `json_each` 全库扫描：`library_item_terms(library_id,term_kind,term_value,media_id)` 为去重倒排表，主键同列顺序，反向索引 `(library_id,media_id,term_kind,term_value)`；genres/countries/resolutions/collection 等通过此表做必要的索引 EXISTS。一个类别内部 OR，不同类别 AND，跟现有筛选合同一致。
 
-Collection 定义/成员随Media迁入library.db，绑定canonical media_id，不依赖旧的路径式media_item_id；API旧格式由边界解析为同一身份，不能产生两套持久键。公共系列collection可进入公共terms；用户自建collection必须存有owner_user_id的独立成员索引，并在查询关联中显式校验owner，**不得把私有成员混入公共terms或全局facets**。成员变化与必要倒排索引同事务更新，移除Library不删除用户成员关系；卡片消失后只是不再出现在该Library可见结果。
+Collection 定义/成员随Media迁入library.db，绑定canonical media_id，不依赖路径式media_item_id；所有Web/CLI生产者使用同一规范身份，不保留旧ID解析别名或第二套持久键。公共系列collection可进入公共terms；用户自建collection必须存有owner_user_id的独立成员索引，并在查询关联中显式校验owner，**不得把私有成员混入公共terms或全局facets**。成员变化与必要倒排索引同事务更新，移除Library不删除用户成员关系；卡片消失后只是不再出现在该Library可见结果。
 
 ### 4.4 User Playback 单元与摘要
 
@@ -311,7 +311,7 @@ R1–R3本轮设计烟测：临时Python SQLite 3.51.0验证episode/season/whole
 ## 9. 切换、实施边界与交付门槛
 
 - 这是需要更新 ADR-0008 的新决策：同一事务需求优先于原先把 Media/Library配置/Playback单元分散在不同文件；不修改已接受的 Media 内部身份和文件删除安全合同。
-- 原始[详细开发计划](../plans/2026-10-18-library-storage-redesign.md)保留完整DDL附录、领域/Store事务接口、调用方清单与T1–T12验收合同；该计划已部分执行，未通过整批交付门。当前执行入口为[切换修复计划](../plans/2026-10-19-storage-cutover-remediation.md)，不得只改表后让旧服务勉强启动。
+- 当前执行入口为[2026-10-20计划](../plans/2026-10-20-storage-clean-cutover.md)，接口/数据合同保留在[开发合同](../plans/2026-10-18-library-storage-contracts.md)。已被替代的10-18/10-19步骤计划与重复SQL草案从工作树删除，历史读取方式与逐文件保留映射见[文档清理记录](../../README.md#2026-10-20全目录清理记录)；有效验收要求没有随旧步骤删除，不得只改表后让旧服务勉强启动。
 - 实施分为可验收批次：①新schema/事务基础；②来源缓存与元数据摄取；③扫描/Transfer/Scrape/探测写路径；④Library浏览/详情/统计；⑤Playback/Subscribe/collection/删除与根变更；⑥空库全流程、性能与旧路径清理。**这些是依赖分解，不是允许交付半套功能。** 全部通过后才切换用户实例。
 - 删除旧投影/通知表与代码之前，枚举所有修订计数/全量fallback/投影依赖者，迁完播放页、首页、CLI、Jellyfin与测试；不能仅删cache触发器。若审计发现独立用途，迁成该用途的明确局部版本/状态，不保留误导兼容别名。
 - 公共API既有筛选/排序/权限能力保留；有意变化（locale采用规则、显式归属、多集逻辑ItemId与物理MediaSource分离、watch_activity与favorite时间分离）必须在实施计划逐入口映射并同步全部Web/CLI/Jellyfin生产者消费者。旧数据库ID可舍弃，不保留file_id冒充逻辑分集的兼容分支；协议认证、字段单位和既有可用功能不能因换ID缩水。

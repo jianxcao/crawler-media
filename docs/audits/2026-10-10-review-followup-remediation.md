@@ -2,7 +2,7 @@
 
 > **历史状态（2026-10-13 整理）：** 本文记录 962564c/fbc6c13 后的局部功能修复及 red/green 证据，仅关闭正文明确覆盖的质量、严格 Library 归属、Check-in 行为；不替代原全项目审计逐 ID 对账，也不证明其余发现全部关闭。
 >
-> 原设计/ID/测试记录保留；旧执行、清理和提交命令不是当前执行授权，不应直接重跑。当前依据：[数据库/API review](<2026-10-13-database-api-review.md>) 与 [剩余计划](<../superpowers/plans/2026-10-13-database-api-followup.md>)；未覆盖的历史发现仍须独立对账。
+> 原设计/ID/测试记录保留；旧执行、清理和提交命令不是当前执行授权，不应直接重跑。[2026-10-13 数据库/API review](<2026-10-13-database-api-review.md>) 与[当时的剩余计划](<../superpowers/plans/2026-10-13-database-api-followup.md>)仅提供后续历史线索；未覆盖的历史发现仍须独立对账。下述 corrected/unchanged 是本次 follow-up 的版本内结论，不是当前 HEAD 的重新验收。
 
 Scope: follow-up to `962564c`, based on `fbc6c13`. No artwork/authentication, Web credential, Browser capability, schema, or unrelated watcher changes.
 

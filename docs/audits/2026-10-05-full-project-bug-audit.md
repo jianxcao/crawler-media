@@ -2,7 +2,7 @@
 
 > **历史状态（2026-10-13 整理）：** 广域 Bug 审计状态 UNRECONCILED：A/B/D/G 等原发现 ID 仍需逐项闭环核对。后续 second-review 是部分整改线索，当前数据库/API review 不是全审计关闭证明。
 >
-> 本文保留原设计、发现/任务 ID 与当时证据；日期本身不表示过时。旧执行/提交/清理命令仅作历史记录，不应直接重跑；复选框不是当前实现清单。当前依据：[数据库/API review](<2026-10-13-database-api-review.md>) 与 [剩余计划](<../superpowers/plans/2026-10-13-database-api-followup.md>)，未覆盖的旧 ID 仍须单独对账。
+> 本文保留原设计、发现/任务 ID 与当时证据；日期本身不表示过时。旧执行/提交/清理命令仅作历史记录，不应直接重跑；复选框不是当前实现清单。[2026-10-13 数据库/API review](<2026-10-13-database-api-review.md>) 与[当时的剩余计划](<../superpowers/plans/2026-10-13-database-api-followup.md>)只是后续历史线索；未覆盖的旧 ID 仍须单独对账。正文“当前”均指第 7–12 行所述提交加未提交工作树，不是今天的 HEAD。
 
 ## 范围与证据
 
@@ -86,7 +86,7 @@ A存在、B已外删但ledger仍在，count=2允许删A；或者roots real/alias
 P=/movies，C=/movies/private，C内两个版本；P duplicates列出并可删C文件，绕开最长root唯一owner。建议与正常rows_in_library共享归属。
 
 ### B10 P2 — 历史 recycle 移动后中断无法重新登记（S）
-证据：[恢复顺序](<../../crates/store/src/legacy_recycle.rs#L64-L86>)、[目标重选](<../../crates/store/src/legacy_recycle.rs#L102-L116>)。
+证据：历史路径 `crates/store/src/legacy_recycle.rs:64–86,102–116`（恢复顺序与目标重选）；文件已从当前树移除，按本节审计版本的 git 历史追溯，不把旧行号映射为现行实现。
 move到original后、insert ledger前中断；重启见original存在选新recovered路径，source又不存在，不能发现实际已恢复文件。建议持久化恢复目标与状态。
 
 ### B11 P2 — Watch intake固定Movie root，接受TV与非视频（S）
@@ -242,7 +242,7 @@ Bangumi/AniList/TVDB数字id变成TMDB查询，错Media/404；超时provider=unk
 每页返全库，dedupe不增但hasMore持续true；首页limit20失效，索引offset也无效。
 
 ### F04 P2 — 自然排序默认方向与FE不一致（S）
-证据：[后端默认升序](<../../crates/api/src/http/library/selection/filters.rs#L47-L48>)、[FE约定](<../../web/lib/wall-sort.ts#L69-L76>)。
+证据：历史路径 `crates/api/src/http/library/selection/filters.rs:47–48`（后端默认升序，文件已移除，按本节审计版本的 git 历史追溯）、[FE约定](<../../web/lib/wall-sort.ts#L69-L76>)。
 最近添加/评分/体积/最近观看自然方向FE不发order，后端升序；反向发asc仍一样。墙、首页与gallery共同受影响。
 
 ### F05 P2 — facets/index DTO使筛选、A-Z不可用（S）
@@ -274,7 +274,7 @@ base64 JSON约>1.5MiB图片即达到Axum默认2MB body；例如2MiB JPEG前端�
 在A指定一组文件标extras，B同Media也被移出ledger；修正身份同样跨库。建议按明确file_ids集合执行。
 
 ### F12 P2 — Library favorite筛选漏分级收藏（S）
-证据：[仅whole favorite](<../../crates/api/src/http/library/selection.rs#L117-L135>)。
+证据：历史路径 `crates/api/src/http/library/selection.rs:117–135`（仅whole favorite，文件已移除，按本节审计版本的 git 历史追溯）。
 TV仅收藏季/集，marks/favorites墙识别但Library favorite只whole，漏作品。电影(0,0)旧状态未读仅作为兼容性风险记录：当前新播放已canonical化，不能概括所有正常电影观看都漏。
 
 ## G. Playback与Metadata

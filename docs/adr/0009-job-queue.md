@@ -8,9 +8,9 @@ MoviePilot 拆分：APScheduler 进程内任务（`subscribe_search`、`transfer
 
 ## 位置
 
-Store 四文件之外的队列文件：`{data}/jobs.db`。它不是可随意清空的cache：清空会丢用户修改的def策略／开关／周期、queued/running工作、重试和历史。Media身份留在app，catalog是缓存，ledger在library，Subscribe事实在subscribe（[ADR-0008](<0008-sqlite-system-of-record.md>)）。终态历史可按明确的latest/tie保护规则分批删；不得据“不丢Media身份”推断整个jobs.db可丢。
+Store 四文件之外的队列文件：`{data}/jobs.db`。它不是可随意清空的 cache：清空会丢用户修改的 def 策略／开关／周期、queued/running 工作、重试和历史。当前 Media/别名、Library 文件与 Playback 在 `library.db`，Metadata source HTTP 响应在 `cache.db`，Subscribe 在 `subscribe.db`，实例配置在 `app.db`（`crates/store/src/open.rs`、`schema/v1/*.sql`；[ADR-0008](<0008-sqlite-system-of-record.md>)）。终态历史可按明确的 latest/tie 保护规则分批删；不得据“不丢 Media 身份”推断整个 `jobs.db` 可丢。
 
-两张表：
+两张核心表（下面是字段摘要，不是完整 DDL；另有 `retention_cursors`、`job_change_state` 与变更 triggers，见 `crates/jobs/src/store.rs`、`retention_cursor.rs`、`change_state.rs`）：
 
 ```
 job_defs (
@@ -61,10 +61,10 @@ WAL。进程内通过Queue mutex串行访问该连接，**不是专用单写线�
 | `transfer` | `downloader_id` 可选 | 轮询已完成文件、**Naming template**、ledger |
 | `scrape` | `ledger_id` 或 path | scrape_beside |
 | `check_in` | `site_id` | Check-in **Plugin** |
-| `catalog_refresh` | `media_id` | TMDB（等）经 `catalog.db`，upsert **Media** |
+| `catalog_refresh` | `media_id` | TMDB（等）经 `cache.db` 的来源表缓存，更新 Media/采用元数据 |
 | `watch_intake` | `root_id` | 以后 |
 
-`subscribe::run` 今天一次性做 search-admit-add-poll-transfer。在 Job 边界拆分：`subscribe_search` Job **加**到 Downloader 即结束；`transfer` Job 之后看到已完成文件。在搜索 Job 内轮询 qB 正是 live harness 卡在 `ledger=0` 的原因。Downloader 是外部的；完成是更晚的 Job。
+**历史拆分动机**：早期 `subscribe::run` 一次性做 search-admit-add-poll-transfer；当时 live harness 出现 `ledger=0`。Job 边界的目标是 `subscribe_search` 加到 Downloader 后结束，`transfer` Job 稍后读取完成文件。此段保留原因，不应将早期轮询实现描述成今天所有路径的现状。
 
 手动关键词搜索是没有 **Subscribe** 的 `subscribe_search` 一次性 Job（payload 有 `query` + `filter_id`）。同一 runner，同一 UI 日志行。
 
@@ -78,11 +78,11 @@ WAL。进程内通过Queue mutex串行访问该连接，**不是专用单写线�
 
 创建 **Subscribe** 会插入其 `job_defs` 行。删除它会取消 queued 子行并禁用该 def。
 
-## 维护任务（2026-10-13 状态）
+## 维护任务（2026-10-20 源码状态）
 
-已注册database_maintenance、jobs_retention、playback_history_retention；默认开关／周期／payload、latest/tie保护与剩余控制缺陷见 [DB8合同](<../superpowers/plans/2026-10-12-db8-maintenance-retention.md>)。保留参数只在job_defs.payload，schema version不是配置并发revision。
+当前注册 `database_maintenance`、`jobs_retention`、`playback_history_retention`、`data_retention` 四类；默认只开启前两类，保留参数仅在 `job_defs.payload`（`crates/api/src/maintenance/mod.rs`）。schema version 不是配置并发 revision。2026-10-13 的 [总复核](<../audits/2026-10-13-database-api-review.md>) 和 [DB8 合同](<../superpowers/plans/2026-10-12-db8-maintenance-retention.md>) 保留为历史发现/要求，不代表所有发现今天仍存在或已重新验收。
 
-当前关闭只取消queued，running retention尚未在批边界检查def.enabled；保存新策略未刷新future queued快照。这两条是已确认待修项，不是本ADR许可继续删除的合同。`/jobs/tick`的开发skip会取消queued维护子任务，也不是无副作用的“观察”。详见 [总复核](<../audits/2026-10-13-database-api-review.md>)。
+当前 runner 在批/库边界检查禁用、取消、停机；配置 CAS 已同事务保存 payload/可选周期并刷新 queued payload，running 保持快照。令牌仍仅覆盖 payload，不能检测仅改周期冲突。Jobs 预览与实跑走含保护行的原始 keyset 窗口，预览经 blocking budget 执行；批间 2 秒预算不是 SQL 硬执行上限。开发 `/jobs/tick` 跳过维护并将已 claim 的维护无惩罚放回 queued，不再取消它们。依据 `maintenance/runner.rs`、`http/job_maintenance.rs`、`jobs/src/store.rs`、`job_loop.rs`；代码存在不等于本次执行过这些回归。
 
 ## 不做这些
 

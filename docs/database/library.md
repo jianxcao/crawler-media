@@ -2,17 +2,17 @@
 
 [返回数据库总览](README.md)
 
-基线：`feat/storage-redesign@a3dab1b`。`application_id=1129139249`，`user_version=1`。不可按缓存清空。
+源码核对基线：`bd6c3c8`（2026-10-20）。`application_id=1129139249`，`user_version=1`。不可按缓存清空。
 
-本字典将 [生产 DDL](../../crates/store/src/schema/v1/library.sql) 在临时 SQLite 内存连接执行后读取结构：**45 张业务表、519 字段、53 个显式命名索引、32 组 FK、0 个触发器**。不计 SQLite 自动索引。此方法核对结构，不声称运行了完整 Store/API 或检查了用户实例。
+结构为 **45 张业务表、519 字段、53 个显式命名索引、32 组 FK、0 个触发器**，不计SQLite自动索引。历史 `a3dab1b` 临时初始化结果见[证据记录](../benchmarks/2026-10-18-library-storage.md)；当前字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准，结构一致不等于全部生产不变量已实现。
 
 ## 实现边界
 
-- `media`、Library 配置、Collection、Playback 已放同库；不存在旧 `ledger/file_meta/browse_*` 持久表。旧 `LedgerRow` 写适配和电影 `(0,0)` 迁移仍是待移除代码，不是支持的布局。
-- 文件事实的复合 FK 与局部公共摘要归约已存在；文件变化后的用户摘要、源版本更新、Transfer 多集收尾仍有不变量缺口。
+- `media`、Library配置、Collection、Playback已同库；旧ledger/file_meta/browse持久表已删除，但LedgerRow写适配和Web movie (0,0)边界alias仍在，不是允许保留的合同。
+- 复合ownership FK与完整归约已存在；增量归约漏用户摘要、重扫替换不推进物理版本、Transfer pending恢复身份记账仍有缺口；不将历史多集/删除修复笼统判为未实现。
 - `library_operations`、`integrity_state`、NFO `export_*` 是已建结构，不代表完整根/locale/checker/导出恢复实现。
 - `a3dab1b` 增加扫描变化时清 stat/durable 版本，未新增表或列；不等于物理 FileVersion、统计摘要及 Probe 版本合同已统一。
-- 元数据人工锁/来源冲突、合并冻结/恢复、协议生产接线的修复合同见 [实施计划](../superpowers/plans/2026-10-19-storage-cutover-remediation.md)。
+- 元数据人工锁/来源冲突、合并冻结/恢复、协议生产接线见[当前计划](../superpowers/plans/2026-10-20-storage-clean-cutover.md)。
 
 ## 字段阅读规则
 
@@ -40,8 +40,8 @@
 - [library_metadata_inputs](#library_metadata_inputs) — 18 字段；Library 独立 NFO 候选、解析状态与导出来源字段；自产反馈/恢复目前未完整接通。
 - [library_operations](#library_operations) — 10 字段；roots/locale/integrity/scrape 操作载体。当前建表不代表完整运行处理器已交付。
 - [library_removal_roots](#library_removal_roots) — 2 字段；删除操作冻结的根路径范围；与持久文件归属需要一致。
-- [library_removals](#library_removals) — 8 字段；Library freeze/drain/cleanup 操作、快照和恢复状态；多集及嵌套根清理仍有缺陷。
-- [library_roots](#library_roots) — 6 字段；根路径配置。path_key 唯一；新增嵌套根后的持久重归属尚待完成。
+- [library_removals](#library_removals) — 8字段；持久freeze/drain/cleanup，删除安全须连同当前ownership与依赖核对。
+- [library_roots](#library_roots) — 6字段；path_key唯一，新增嵌套根已有重归属代码，根替换和NFO/Unidentified从属关系完整迁移仍需操作化。
 - [library_units](#library_units) — 9 字段；Library/Media/单元级去重摘要和首选文件。whole=(-1,-1)，TV S00E00 合法。
 - [media](#media) — 9 字段；规范 Media 身份；可无文件存在。retired 墓碑不是可继续写的兼容实体。
 - [media_aliases](#media_aliases) — 5 字段；来源别名归属及每来源唯一刷新目标；不把来源 ID 当内部身份。
@@ -491,7 +491,7 @@ CREATE INDEX files_root_path ON library_files(root_id,path_key);
 **键与约束**
 
 - 主键：`(library_id, term_kind, term_value, media_id)`。
-- `term_kind: NOT NULL CHECK(term_kind IN ('genre','country','resolution','collection'))`。
+- `term_kind: NOT NULL CHECK(term_kind IN ('genre','country','resolution','collection','jellyfin_genre','studio','person_id','person_name','person_tmdb_id','overview','original_title'))`。这是当前DDL允许值，不表示每类都已成为正确的生产查询路径；长文本复制是否必要需依完整协议迁移和成本测量判断。
 - `PRIMARY KEY(library_id,term_kind,term_value,media_id)`。
 - `FOREIGN KEY(library_id,media_id) REFERENCES library_items(library_id,media_id) ON DELETE CASCADE`。
 
@@ -666,7 +666,7 @@ CREATE INDEX library_operation_dispatch ON library_operations(state,updated_at_m
 
 ## library_removals
 
-Library freeze/drain/cleanup 操作、快照和恢复状态；多集及嵌套根清理仍有缺陷。
+Library freeze/drain/cleanup操作、快照和恢复状态；完整删除安全由文件/覆盖、NFO/Unidentified归属及原始用户事实保留共同决定，不以本表存在证明全部边界验收。
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|
@@ -691,7 +691,7 @@ Library freeze/drain/cleanup 操作、快照和恢复状态；多集及嵌套根
 
 ## library_roots
 
-根路径配置。path_key 唯一；新增嵌套根后的持久重归属尚待完成。
+根路径配置。path_key唯一；新增嵌套根已有文件/覆盖重归属，根替换仍可能先删被引用根导致FK失败，见当前计划Task13。
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|

@@ -40,7 +40,9 @@ Authorization: MediaBrowser Client="VidHub", Device="iPhone", DeviceId="device-i
 理由：一个只有 3 部剧、其中 2 部看过的小库，筛完只剩 1 张卡，看起来像坏了；而"最近入库"这个名字描述的就是入库时间，把看过的藏起来反而名不副实。Jellyfin Web 的「最近添加」不传 `isPlayed`（`src/components/homesections/sections/recentlyAdded.ts` 只传 `userId/limit/fields/parentId`），所以它也会看到已看完的排在行尾。
 
 代价（有意的）：客户端再没有开关能把已看完的藏掉——只有**显式**传 `IsPlayed=false` 才严格，而多数客户端不传。要做到"用户自己决定藏不藏"，得补用户配置表面（`UserConfiguration.HidePlayedInLatest` 与 `GET/POST /Users/{id}/Configuration`；Jellyfin Web 本来就读 `user.Configuration`），落地后可以按这个开关在"严格筛"与"只排不筛"之间切。这套表面目前**尚未实现**，`/Users/Me` 也不返回 `Configuration` 块。
-## 播放会话代际与 PlaySessionId 约束 (2026-10-13 Batch 2)
+## 播放会话代际与 PlaySessionId 目标（2026-10-13 Batch 2）
+
+以下是当时确定的目标，不是当前所有生产写入路径的已验收保证。现有 Web/Jellyfin 处理仍未统一接入 `Store::commit_playback_event`；上一轮隔离复核已观察到合并集文件 heartbeat 错报 `ended_by_admin`，旧 issued session 仍写入文件新版本。因此不能仅凭 generation 字段/Store 新方法存在就宣称已防止所有迟到或换源污染。`protocol_item_page` 也尚未完成生产浏览入口统一。依据 `crates/api/src/http/playback/heartbeat.rs`、`crates/store/src/playback/mutate.rs` 与当前调用方；闭环要求见 [存储执行计划](<../superpowers/plans/2026-10-20-storage-clean-cutover.md>)。
 
 Jellyfin 客户端在 `PlaybackInfo` 阶段获得由服务端生成的持久 `PlaySessionId`（绑定 User、Device、LedgerId）。
 

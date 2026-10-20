@@ -1,6 +1,6 @@
 # 外部来源响应缓存：统一文件、按来源拆表
 
-状态：**设计修订，未实施**。本设计与 [Media / Library 存储重设计](2026-10-18-library-storage-redesign.md) 配套，以后者为整体架构准则。用户允许全部舍弃旧数据库数据；不需要导入、兼容层、双读双写或旧游标转换。
+状态（2026-10-20，`bd6c3c8`）：**六表与共享DDL已实现，跨应用离线/清缓存验收尚未完成。** Store与media共同使用 `media::response_cache::CACHE_SCHEMA_SQL`，实际索引名称见[现行cache字典](../../database/cache.md)，下方SQL只说明索引形状，不是第二份生产DDL。本设计与[Media / Library存储重设计](2026-10-18-library-storage-redesign.md)配套；无旧数据导入、兼容层、双读双写或旧游标转换。
 
 ## 1. 职责边界
 
@@ -56,4 +56,4 @@ CREATE INDEX tmdb_cache_retention_idx ON tmdb_cache(fetched_at ASC, entry_id ASC
 
 全部旧DB可在实施最后停服后一次性重建，只删除明确实例SQLite文件与WAL/SHM，不动视频、字幕、NFO、图片、下载目录、Indexer YAML或编译缓存；正常启动不自动清库。旧数据可丢，不代表可以交付无法扫描、Transfer、Scrape、浏览或播放的新schema。
 
-开发入口：[Media / Library 详细开发计划](../plans/2026-10-18-library-storage-redesign.md)，配套包含完整DDL、事务接口和T1–T12验收。旧缓存拆表计划已按用户要求删除，历史仅在Git保留，不得依据旧步骤创建浏览journal。
+开发入口：[干净切换与优化计划](../plans/2026-10-20-storage-clean-cutover.md)；现行DDL仅在生产源码维护，接口及完整验收见[开发合同](../plans/2026-10-18-library-storage-contracts.md)。旧步骤和SQL草案由Git保留，不得依据它们恢复浏览journal。

@@ -1,6 +1,6 @@
 # SQLite 是系统记录，按生命周期拆分
 
-> 本文保留原拆库决策及后续历史记录；第“四个文件”至2026-10-12后记中的文件、表名与迁移行为均是当时方案/实现，不是当前操作指南。当前布局与尚未完成的生产切换见文末2026-10-19后记及[数据库文档](../database/README.md)。
+> 本文保留原拆库决策与历史实现；第“四个文件”至2026-10-12后记都不是当前操作指南。当前五文件边界与未完成的生产切换见文末2026-10-20复审及[数据库文档](../database/README.md)。
 
 行存 SQLite。字节（视频、NFO、图、Indexer YAML、Chromium）留在磁盘。行中的路径指向这些字节。**Users**、**Sites**、**Filters**、**Subscribes**、**Media**、**Library** ledger、**Naming templates**、**Metadata source** 负载不存在 ad-hoc 文件的第二事实来源。
 
@@ -120,7 +120,7 @@ Jinja 模板：MoviePilot 的能力。v1 否决——封闭占位符集合对两
 
 跨文件仍然没有外键，也没有跨文件事务：这一点对这两个库同样成立。
 
-## 后记：新布局已建立，干净切换已收口（2026-10-20）
+## 后记：五文件已建立，生产干净切换未完成（2026-10-20复审）
 
 本节替代上面的历史文件归属。`feat/storage-redesign` 的生产 DDL 位于
 [`crates/store/src/schema/v1/`](../../crates/store/src/schema/v1/)，目标合同见
@@ -136,16 +136,8 @@ Jinja 模板：MoviePilot 的能力。v1 否决——封闭占位符集合对两
 
 Media 与 Playback 已迁入 `library.db`；旧浏览投影表/重建链已移除；`catalog.db`/`fanart.db` 由按来源分表的 `cache.db` 取代。Store 布局入口校验 `application_id` 与 `user_version`，没有旧数据库导入器或兼容视图；跨文件仍没有外键或原子事务。
 
-2026-10-20 的 R1–R8 修复（`2f59103`…`6d35343`）关闭了此前的阻塞项：
+`bd6c3c8`复审否定“R1–R8已关闭全部阻塞”的旧状态，不否认对应提交和当时测试存在。真实Router/Store/前端函数烟测仍发现：合并文件E02心跳被误拒、旧会话写入新源版本、增量用户摘要漏维护、50/101文件分页错误、采用冷字段丢失、根替换FK失败；movie `(0,0)`边界alias、旧LedgerRow写适配和Jellyfin现场读取仍在。
 
-- 电影旧 whole `(0,0)` 的复制、回读、断言归约与兼容测试已删除；movie/video 一律 `(-1,-1)`，TV S00E00 仍是真实分集。
-- Transfer 收尾直接使用完整 `FileCoverage`，多集覆盖不再被单集形状截断；pending 重试复用已有身份。
-- 生产心跳/会话改用会话绑定的物理源；自动续播优先仍可用的原源，换源返回 `source_changed` 且起点归零。
-- 文件增删在同一事务重建受影响用户摘要；观看分面、详情续页、`content_rating` 已贯通。
-- Jellyfin 物理多版本折叠为同一逻辑条目；genre/studio/search/person 过滤读取采用元数据，NFO 仅作无采用行时的兜底。
-- 采用元数据按固定来源优先级合并；无效/未知 NFO 保留最后有效输入。
-- 多覆盖文件与 `Unidentified` 不再阻断 Library 删除；新增嵌套根会在同一事务重归属文件并重建两侧摘要。
+决策不变：Media/Library/Playback同库，cache可弃，事实与摘要同事务，源版本/逻辑身份分离。**实现尚未满足全部决策合同**，操作表存在不代表根/locale/checker/合并恢复已接通。完整证据与历史通过记录见[benchmark记录](../benchmarks/2026-10-18-library-storage.md)。
 
-本机稳定树 `cargo test --workspace` 与前端 `typecheck` 已通过，记录见[证据报告](../benchmarks/2026-10-18-library-storage.md)第 1.2 节。**仍未完成**：真实 NAS 冷热缓存、并发扫描+心跳的 p50/p95/锁等待、100k Media / 1M 文件规模基准，以及真实 Jellyfin 客户端与浏览器播放验收。这些不因单元/集成测试通过而自动满足。
-
-当前数据库字段、键与索引以[数据库文档](../database/README.md)为准。后续性能工作按[切换修复计划](../superpowers/plans/2026-10-19-storage-cutover-remediation.md)的 O1–O3 执行，不恢复双读双写或旧模型兼容层。
+当前字段/键/索引见[数据库字典](../database/README.md)，唯一执行入口为[干净切换与优化计划](../superpowers/plans/2026-10-20-storage-clean-cutover.md)。先修正确性及迁完生产者消费者，再测NAS冷热缓存、100k Media/1M文件/1M Playback及扫描并发心跳，不恢复旧数据兼容、双读双写或跨库浏览journal。

@@ -2,7 +2,7 @@
 
 > **历史状态（2026-10-13 整理）：** PIPE/ROOT/ACCESS/I 原发现属于当时基线；整改计划和 follow-up 提供局部实现线索，但全清单仍为 **UNRECONCILED**，须逐 ID 确认关闭/残余风险。下文缺陷复现和当时绿色基线不代表今天仍有同样缺陷或全部已修复。
 >
-> 原设计/ID/测试记录保留；旧执行、清理和提交命令不是当前执行授权，不应直接重跑。当前依据：[数据库/API review](<2026-10-13-database-api-review.md>) 与 [剩余计划](<../superpowers/plans/2026-10-13-database-api-followup.md>)；未覆盖的历史发现仍须独立对账。
+> 原设计/ID/测试记录保留；旧执行、清理和提交命令不是当前执行授权，不应直接重跑。[2026-10-13 数据库/API review](<2026-10-13-database-api-review.md>) 与[当时的剩余计划](<../superpowers/plans/2026-10-13-database-api-followup.md>)只是后续历史线索，不是当前状态表；未覆盖的历史发现仍须独立对账。正文现在时和源码行号均限定于下述审查版本；末尾工作树测试有其单独边界。
 
 审查日期：2026-10-10（Asia/Shanghai）。审查基线：`277de10270f3b2ce7ccb5f30075073fdbfa614b2`。正文行号基于该基线，后续代码变更可能导致位置偏移。
 
@@ -392,7 +392,7 @@
 | review_integrations_tmp_login.rs | hooks | 2 failed | I04 |
 | review_integrations_tmp_browser.rs | indexer | 1 failed | I05 |
 
-复现源码曾随报告保存在同目录附件 `2026-10-10-full-project-review-repro/`（保持原 crate/tests 路径），**该附件已于 2026-10-15 从工作树移除**，正文可由 `git show <本轮清理提交>^:docs/audits/2026-10-10-full-project-review-repro/README.md` 一类命令取回。它们不是已修复的正式回归测试，默认 `cargo test` 不会执行 docs 下源码。各发现正文包含独立触发步骤和实际结果，不依赖临时日志才能理解。
+复现源码曾随报告保存在同目录附件 `2026-10-10-full-project-review-repro/`（保持原 crate/tests 路径），**该附件已于 2026-10-15 从工作树移除**。移除提交为 `2c649ed`；可用 `git show 2c649ed^:docs/audits/2026-10-10-full-project-review-repro/README.md` 读取历史说明，并从同一 revision 的相应路径取回源码。它们不是已修复的正式回归测试，默认 `cargo test` 不会执行 docs 下源码。各发现正文包含独立触发步骤和实际结果，不依赖临时日志才能理解。
 
 原始日志保存在 `/tmp/crawler-media-project-review-pipeline-repro.log`、`/tmp/crawler-media-project-review-root.log`、`/tmp/crawler-media-project-review-models.log`、`/tmp/crawler-media-review-access-test.log`，以及 `/tmp/crawler-media-project-review-integrations-repro/` 下的日志；临时日志可能被系统清理，长期证据以文档和保存的源码为准。
 

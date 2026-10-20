@@ -1,10 +1,10 @@
 # 存储重设计：检查、烟测与查询工作量证据
 
-更新：2026-10-19。**部分实现，生产干净切换未完成；没有完整性能达标结论。** 本页替代早期无测量支撑的“架构目标达成”及 `<1ms` 声明，不把表/索引存在当作运行验收。
+更新：2026-10-20，最新源码/烟测基线 `bd6c3c8`。**部分实现，生产干净切换未完成；没有完整性能达标结论。** 历史与当前记录按节分开，不把表/索引存在或测试通过扩大为端到端验收。
 
 ## 1. 版本与检查边界
 
-前次审查/运行记录固定在 `0a046e0`。当前提交为 `a3dab1b`，用户已修复扫描 checkpoint 失效，但相关检查尚未重跑。下列历史失败不是当前已证实失败；该修复也不是 workspace 全绿证据。本次未重新运行Cargo测试、构建或产品行为烟测；仅补充第1.1节的结构初始化烟测。
+本节至第3节保留 `0a046e0` / `a3dab1b` 的历史记录；“本次/当前”只指当时取证，不是现在源码。后续测试记载见1.2/1.3，`bd6c3c8`复审见第6节。历史失败不能推导新版本仍失败，历史通过也不能关闭未覆盖的生产合同。
 
 | 检查 | 版本 | 实际记录 | 结论边界 |
 |---|---|---|---|
@@ -49,15 +49,15 @@
 
 这组结果说明：`FullscanStep=0`、`Sort=0` 或EXPLAIN显示索引，仍不能证明深游标工作量有界；OR条件可在索引内遍历大量行。它是该SQL形状的引擎工作量对照，不是延迟、NAS吞吐或生产接口性能基准，不能推出 `<1ms`、p50/p95或所有排序已优化。
 
-## 4. 当前布局不等于生产切换
+## 4. `bd6c3c8`布局与生产接线边界
 
 五文件布局及字段/键/索引见[数据库文档](../database/README.md)，历史决策见[ADR-0008](../adr/0008-sqlite-system-of-record.md)。新 `library_files`/coverage/items 与 Store 事务已经存在，但仍有以下生产缺口：
 
 - movie旧whole `(0,0)` 兼容与 `LedgerRow` 有损适配未退出；不是允许保留的兼容合同。
-- Store的 `protocol_item_page`、`adopt_metadata`、`commit_playback_event` 尚未接入 API 生产消费者。不能由方法或测试存在宣称完整协议SQL分页、字段采用政策、会话/历史原子提交已完成。
+- `adopt_metadata`已有部分生产Scrape调用，但经有损DTO重建来源且字段/读取不完整；`protocol_item_page`与`commit_playback_event`仍未成为统一生产入口。不能由方法或测试存在宣称完整协议SQL分页、字段采用、会话/历史原子提交已完成。
 - 旧浏览投影链已删除，不代表上述生产调用方和恢复/删除合同已全部切换。
 
-后续按[切换修复计划](../superpowers/plans/2026-10-19-storage-cutover-remediation.md)修复并补验收；[原始实施计划](../superpowers/plans/2026-10-18-library-storage-redesign.md)保留T1–T12完整交付门，不因历史部分成功而追认勾选。
+后续按[当前干净切换计划](../superpowers/plans/2026-10-20-storage-clean-cutover.md)补齐；有效需求保留于Spec/合同，10-18/10-19旧步骤由Git保留，不因旧步骤状态“完成”追认验收。
 
 ## 5. 未取得的完整验收
 
@@ -78,7 +78,7 @@
 | `cargo test -p store --test adopted_filter_facts --test library_query_filters` | 3 / 8 通过 |
 | `web: npm run typecheck` | 通过 |
 
-本轮新增/改写的回归覆盖：
+当时记录的新增/改写回归与修复意图如下（不表示在所有生产入口成立，后续复审已发现反例）：
 
 - self-merge 在任何事实变动前被拒绝（`media_merge_v1`）。
 - Web 会话取流返回真实字节并支持 `Range`（`playback_read_regression`）。
@@ -92,9 +92,9 @@
 
 仍未取得：真实 NAS 冷热缓存、并发扫描+心跳的 p50/p95 与锁等待、100k Media / 1M 文件规模基准、真实 Jellyfin 客户端与浏览器播放验收。这些不因本轮测试通过而自动满足。
 
-### 1.3 未提交重构的编译与回归修复（2026-10-20）
+### 1.3 `bd6c3c8`提交所记编译与回归修复（历史）
 
-在 `5ef1957` 之后，工作树中的后续重构一度无法编译（`api` 库 19 个错误），整套测试无法启动。本轮修复后：
+`bd6c3c8`包含 `5ef1957` 之后当时工作树的修复；以下是原执行记录，不是本轮重跑结果。该工作树一度无法编译（api库19个错误），修复后记录：
 
 | 检查 | 结果 |
 |---|---|
@@ -116,4 +116,27 @@
 - movie `(0,0)` 续播读取未规范化到 `(-1,-1)`；`upsert_unit` 无物理源时逻辑标记被拒绝、进度声明未 clamp。
 - 缓存 DDL 两份并存（`store/schema/v1/cache.sql` 已删、`media/response_cache/schema.sql` 残留且索引命名不同）；统一为 `media::response_cache::CACHE_SCHEMA_SQL` 后删除死文件。
 
-以上结果来自本机 debug profile；仍未覆盖 1.2 末尾列出的设备/规模/真实客户端验收。改动尚未提交。
+以上来自当时本机debug profile，改动已包含在 `bd6c3c8`，不再称“尚未提交”。仍不覆盖设备/规模/真实客户端验收；下面审查使用独立公开行为烟测发现套件未钉住的缺陷。
+
+## 6. `bd6c3c8` 干净切换复审
+
+2026-10-20，对 `main@86122d7...HEAD@bd6c3c8` 只读review，未改业务代码。临时独立Cargo runner直接依赖仓库Store/API，Vite SSR加载实际前端API函数；外部网络用fixture/禁用Fetcher。以下不是完整workspace或浏览器/设备验证，临时脚手架已删除，没有修改用户实例。
+
+| 用例 | 本轮实际结果 | 边界 |
+|---|---|---|
+| 多集文件E02 Web start | HTTP200，但ended_by_admin=true、position=0、play_count=0 | get_ledger代表覆盖与逻辑目标混用 |
+| 已签发A会话→同file发布B→旧session进度 | HTTP200；恢复包记录revision2/source B/position8000 | 旧事件被写成新源进度，非推测 |
+| 新增E03的增量发布 | 公共episode_count3，用户owned仍2/completed仍1 | 漏维护用户摘要 |
+| 实际前端详情枚举101文件响应 | 只请求两页，返回100文件 | 续页next_cursor被错读 |
+| 实际前端枚举恰好50文件 | 第二页空终页触发“文件分页 cursor 未推进” | 非浏览器截图证明 |
+| TMDB runtime100/rating8.5标准化 | 两字段均Missing | normalizer缺映射 |
+| adopted details含Tagline/R | Store详情两字段仍Missing | 冷payload未完整水合 |
+| 有文件根/review/a改/review | FOREIGN KEY constraint failed | 旧根删除早于从属迁移 |
+| Media改标题/多alias回写 | media=After、card=Before；alias数2→1 | 扁平旧shape有损写入 |
+| scan清观察版本并登记新stamp | FileVersion前后仍revision2/source B | 只验证公开Store步骤；完整重扫调用链另经源码核对 |
+| Jellyfin PlaybackInfo | MediaSources[0].Id为u1逻辑ID | 未输出f1物理版本 |
+| integrity-checks/media merges | 真实Router均404 | 必需管理操作未生产接线 |
+
+源码还确认movie(0,0)前端生产者+边界alias、LedgerRow认领丢episode_to、NFO已有路径提前continue、Jellyfin现场NFO/catalog、持久操作无完整恢复链。不能把这些源码发现写成已运行对应全部场景。
+
+本轮未重跑workspace、前端三门、真实浏览器播放、真实Jellyfin客户端、NAS并发或100k/1M规模；历史1.2/1.3通过保留，但不能抵消上述新反例。后续关闭条件/逐项回归见[当前计划](../superpowers/plans/2026-10-20-storage-clean-cutover.md)。

@@ -1,8 +1,10 @@
 # Batch 3 Acceptance & Verification Audit
 
-- Status: Passed
+- Historical status: Passed for the recorded Batch 3 fixture checks, not current storage-cutover acceptance.
 - Date: 2026-10-13
 - Host: Darwin arm64
+- Record introduced by `bd0db998e7278e48a62efd007b2ba7a4057d6ce6`. The source paths below identify that revision's tests; this short record does not preserve exact commands/logs or establish a separate clean runtime revision.
+- All Pass entries are the original observations, not rerun results. They do not prove page-bounded production wiring, session/source-version safety, or later storage contracts; no finding from a broader audit is closed solely by this matrix.
 
 ## Acceptance Matrix
 

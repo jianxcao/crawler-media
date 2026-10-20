@@ -1,32 +1,30 @@
 # 当前数据库设计与全量数据字典
 
-基线：`feat/storage-redesign@a3dab1b`（2026-10-19）。本文描述该代码版本的新库布局，不代表全部生产消费者已切换或重构已验收。旧版 `main@2c3a5c7` 六文件字典已被替换；历史正文从 Git 读取，不作为现行操作说明。
+源码核对基线：`bd6c3c8`（2026-10-20）。**五文件布局存在，生产干净切换未完成。** 字典描述已声明的结构；规范、实现与运行验收分开，不以表存在或历史测试全绿证明业务合同成立。
 
-## 1. 权威来源与证据边界
+## 1. 权威来源
 
-- Store 的打开、只读预检及布局初始化：[open.rs](../../crates/store/src/open.rs)、[layout.rs](../../crates/store/src/schema/layout.rs)、[v1 DDL](../../crates/store/src/schema/v1/)。四个 Store 文件各自事务提交，不存在跨文件 FK 或原子提交。
-- media 的缓存初始化：[response_cache/mod.rs](../../crates/media/src/response_cache/mod.rs)。它与 Store 共用 `cache.db`，但当前两处建索引语句不同，详见 [cache 字典](cache.md)，不能宣称 DDL 完全统一。
-- Job 初始化：[store.rs](../../crates/jobs/src/store.rs)、[change_state.rs](../../crates/jobs/src/change_state.rs)、[retention_cursor.rs](../../crates/jobs/src/retention_cursor.rs)。
-- 本轮先将当前生产 DDL 在临时 SQLite 内存连接执行后读取结构，再用已编译的真实 `Store::open` / `Queue::open` 在独立临时目录初始化五文件，核对表/字段/索引/触发器、application_id/user_version；结果与下表一致，`integrity_check=ok`、`foreign_key_check` 无行。不访问生产数据；结构烟测不是完整应用运行验收。字典字段仍以链接的源码为准。
-- 设计合同见 [ADR-0008](../adr/0008-sqlite-system-of-record.md) 与 [存储重设计](../superpowers/specs/2026-10-18-library-storage-redesign.md)。缺陷及后续实施顺序见 [修复与优化计划](../superpowers/plans/2026-10-19-storage-cutover-remediation.md)。
+- Store打开/预检：[open.rs](../../crates/store/src/open.rs)、[layout.rs](../../crates/store/src/schema/layout.rs)；生产DDL：[app.sql](../../crates/store/src/schema/v1/app.sql)、[library.sql](../../crates/store/src/schema/v1/library.sql)、[subscribe.sql](../../crates/store/src/schema/v1/subscribe.sql)。
+- cache唯一DDL及校验：[media::response_cache](../../crates/media/src/response_cache/mod.rs)，Store直接复用；已删除的cache.sql不是现行入口。
+- Jobs：[store.rs](../../crates/jobs/src/store.rs)、[change_state.rs](../../crates/jobs/src/change_state.rs)、[retention_cursor.rs](../../crates/jobs/src/retention_cursor.rs)。
+- 目标：[存储设计](../superpowers/specs/2026-10-18-library-storage-redesign.md)、[开发合同](../superpowers/plans/2026-10-18-library-storage-contracts.md)；唯一当前执行入口：[干净切换与优化](../superpowers/plans/2026-10-20-storage-clean-cutover.md)。
+- 固定版本检查/失败证据：[benchmark记录](../benchmarks/2026-10-18-library-storage.md)。历史初始化/测试与本轮源码核对不混写，不访问用户实例。
 
-## 2. 五个文件
+## 2. 五文件生命周期
 
-| 文件 | 布局版本 | 表数 | 字段数 | 保存内容 | 能否按缓存清空 |
+| 文件 | 布局身份/版本 | 表数 | 字段数 | 职责 | 可按缓存清空 |
 |---|---|---:|---:|---|---|
-| [app.db](app.md) | application_id=1129139248，user_version=1 | 10 | 50 | User/凭证、Site、Downloader、Filter、Naming template、设置、搜索快照、实例锁 | 否 |
-| [library.db](library.md) | application_id=1129139249，user_version=1 | 45 | 519 | Media/采用元数据、Library/根、文件/覆盖/摘要、Collection、Playback、专用持久工作 | 否 |
-| [subscribe.db](subscribe.md) | application_id=1129139250，user_version=1 | 4 | 47 | Subscribe 策略、槽位事实、搜索状态、待下载记录 | 否 |
-| [cache.db](cache.md) | application_id=1129139251，user_version=1 | 6 | 30 | 六来源外部响应；不保存本地 Media/观看事实 | 是，需受控清理 |
-| [jobs.db](jobs.md) | 当前初始化不设置布局标识/版本；新库 PRAGMA 默认均为 0 | 4 | 29 | Job 定义、执行、重试、更新流计数、历史清理游标 | 否 |
+| [app.db](app.md) | 1129139248 / 1 | 10 | 50 | User/凭证、Site、Downloader、Filter、Naming、设置、搜索快照、实例锁 | 否 |
+| [library.db](library.md) | 1129139249 / 1 | 45 | 519 | Media/采用元数据、Library/根、文件/覆盖/摘要、Collection、Playback、持久文件工作 | 否 |
+| [subscribe.db](subscribe.md) | 1129139250 / 1 | 4 | 47 | Subscribe策略、覆盖/搜索事实、在途记录 | 否 |
+| [cache.db](cache.md) | 1129139251 / 1 | 6 | 30 | 六来源原始响应，不保存本地采用/观看事实 | 是，受控清理 |
+| [jobs.db](jobs.md) | Queue未设置，默认0 / 0 | 4 | 29 | Job定义/执行/重试、更新计数、保留游标 | 否 |
 
-合计 **69 张业务表、675 个字段**，不计 `sqlite_sequence` 等 SQLite 内部表。Store DDL 有 70 个显式命名索引、32 组 FK、0 个触发器；Jobs 有自己的 9 个命名索引、6 个更新流触发器。cache 的索引数取决于初始化路径，不把它混成一个固定全实例索引总数。
+合计69张业务表、675字段，不计SQLite内部表。Store四文件共70个显式命名索引（含cache12个）、32组FK、0触发器；Jobs另有9命名索引/6触发器。每文件独立提交，没有跨文件FK或原子提交。
 
-2026-10-19 本轮真实初始化仅运行 Store→Queue，未接着让media打开cache；因此实测cache为12个命名索引，不把它推广为所有初始化顺序都相同。未运行Cargo回归、Web或完整产品链，也未重跑用户checkpoint修复的行为门禁。
+`Store::open_at`只允许app另选路径，其他Store文件仍在data_dir；Jobs由Queue打开。正常启动不自动清库、不导入旧layout；错误/未知布局拒绝。所有连接显式WAL、5000ms busy_timeout、foreign_keys=ON。cache额外检查必需表/索引名称，不能推广为所有分区逐列校验。
 
-默认同名文件在数据目录。`Store::open_at` 仅允许 app 文件另选路径，cache/library/subscribe 仍在数据目录；Jobs 由 Queue 打开。视频、字幕、NFO、图片、Indexer YAML、下载目录不是 SQLite 表内容，不能随切换删除。
-
-## 3. library.db 内的事实与读模型
+## 3. library.db事实与摘要
 
 ```mermaid
 flowchart TD
@@ -36,57 +34,39 @@ flowchart TD
     M --> MD[来源快照与采用元数据]
     F --> D[file_details 冷详情]
     F --> FU[library_file_units 覆盖]
-    FU --> U[library_units 去重单元摘要]
-    F --> I[library_items 浏览摘要]
+    FU --> U[library_units 去重摘要]
+    F --> I[library_items 卡片]
     MD --> I
-    I --> T[library_item_terms 倒排]
-    P[playback_units 用户事实] --> UI[user_library_items 用户摘要]
+    I --> T[library_item_terms]
+    P[playback_units 用户事实] --> UI[user_library_items 稀疏摘要]
     U --> UI
 ```
 
-箭头表达业务依赖，精确 FK 以 [Library 字典](library.md) 为准。`items/units/terms/user_library_items` 是派生读模型，不是外部响应缓存；正常读请求不能通过清空、整库重建或访问网络来弥补未维护的摘要。
+箭头是业务依赖，不等于全是FK或每次请求都JOIN。`library_files`一个物理文件一行；file_units是一文件多集/同集多版本；units按逻辑单元去重；items每实际有已发布文件的Library/Media一行。size按文件一次计，whole=(-1,-1)，TV S00E00是真实分集。file_details仅冷探测数据，不是第二完整文件投影。
 
-- `library_files`：一个物理文件一行，显式持久化 Library/root/Media/kind，`path_key` 全局唯一。presence 为 present/missing/unknown；publication 为 pending/published。
-- `library_file_units`：一文件多集、多文件同集的覆盖事实；whole 为 `(-1,-1)`，TV S00E00 为真实分集。
-- `library_units`：每 Library/Media/逻辑单元一行；`library_items`：每实际有已发布文件的 Library/Media 一张卡片。字节数按文件而非覆盖行计。
-- `file_details` 保存音轨/字幕/章节等冷数据。Media 身份及 Playback 原始事实不依赖文件仍存在。
-- `media_metadata_sources` 保存来源快照，`media_metadata/media_seasons/media_episodes` 保存采用结果；Library NFO 输入及人工覆盖另存。表存在不表示来源优先级、人工锁、自产 NFO 反馈已经完整实现。
-- 认证凭证留在 app；Playback 逻辑事实、源绑定、会话、历史在 library。删除文件不可通过 FK 级联删除观看事实；删除卡片可删除对应用户摘要，重导入应从原始事实恢复，但当前写路径存在缺陷。
+Media与原始Playback事实独立于文件存在；最后文件/Library删除不能级联删身份、进度或Collection成员。用户摘要可随卡片删除，重导入从原始事实恢复。当前完整归约已实现，增量路径仍漏维护，不能用目标不变量描述所有生产入口。
 
-## 4. 当前生产接线与缺口
+## 4. `bd6c3c8`生产边界
 
-| 能力 | 当前代码事实 | 仍不可据此声称 |
+| 能力 | 已有实现 | 复审仍发现的缺口 |
 |---|---|---|
-| 新库启动 | Store 拒绝错误/未知布局，创建新四库；旧浏览表已删除 | 允许旧库导入或就地猜测兼容 |
-| Web Library 列表 | `http/library.rs` 读取 `library_item_page`，过滤/排序在 SQL | 省略 limit 已改为有界默认页 |
-| 文件详情 | Store 文件页有 cursor；HTTP 返回 `next_file_cursor` | 前端已自动串联全部文件页 |
-| Jellyfin | 输出逻辑 ItemId；物理多版本折叠为同一逻辑条目；genre/studio/search/person 过滤优先读采用元数据 | Jellyfin 筛选/排序/分页已全部在 SQL 完成 |
-| 元数据采用 | 生产 Scrape 仍只接部分展示字段及 NFO；`adopt_metadata` 未接生产 | 完整 work/season/episode 已自动采用 |
-| Playback | Web 会话取流与会话绑定；自动续播优先原可用源；换源归零 | 所有历史客户端/第三方路径均已验收 |
-| 文件事务 | 文件增删同事务重建受影响用户摘要；多集覆盖与 pending 身份完整 | 所有未来写入口无需再检查不变量 |
-| 根/locale/integrity | 新增嵌套根会重归属文件；删除清理 `Unidentified` 与多覆盖快照 | `library_operations` 的 locale/integrity 操作处理器已交付 |
+| 启动/cache | 五文件、拒旧、共享cache DDL | 不等于全消费者离线可用或未来升级器完成 |
+| 文件发布 | 复合ownership FK、覆盖与公共摘要 | 已有路径重扫不推进FileVersion；增量用户摘要不更新；部分旧writer仍用LedgerRow |
+| Web详情 | 本地采用字段、首50文件+cursor | 续页字段不匹配/50边界异常；冷字段读取丢失；状态/多覆盖DTO不完整 |
+| 元数据/NFO | adopt_metadata有部分生产调用、固定来源优先及最后有效值基础 | 原响应经旧DTO有损重建；人工锁/locale/多NFO/已有文件重扫/自产反馈未闭合 |
+| Playback | Web签发会话及session stream，源感知resolver | 心跳未严格消费签发版本；合并E02被误拒；Jellyfin原始位置与逻辑ID-as-source仍在 |
+| 协议查询 | typed ItemId和部分采用字段过滤 | protocol_item_page无生产调用，仍Rust候选筛选/现场NFO/catalog读取 |
+| 根/完整性/身份 | 删除协调器、部分嵌套根重归属、Store合并API | 根替换FK失败；library_operations/checker/merge管理路由与恢复未交付 |
 
-电影旧 `(0,0)` 的复制、回读与兼容测试已删除；`LedgerRow` 仍作为部分写入口的单集适配层存在，新增写路径必须直接使用 `FileCoverage`。TV `(0,0)`、Jellyfin 协议、明确的跨源恢复拒绝、正常来源回退不是旧数据兼容。
+电影 `(0,0)`仍被Web发送并由后端映射whole；禁止将“无旧持久行”写成“无兼容代码”。正常Jellyfin协议认证、TV00、来源stale回退不等于旧数据库兼容。
 
-## 5. 查询与事务边界
+## 5. 查询、事务与运维限制
 
-| 场景 | 当前表与实现 | 成本/正确性边界 |
-|---|---|---|
-| 单库卡片页 | `library_items` + 当前用户稀疏摘要；terms 索引 EXISTS | 普通排序有复合索引；观看排序/复杂筛选/精确 count 可扫描本库窄行 |
-| 文件/单元 | files/coverage/units 按 Library/Media/坐标读取 | 分页前按逻辑项去重，物理版本不能冒充多张同 ID 卡片 |
-| 文件写入 | `library_write` 的事实与局部归约 | 目标为同事务维护全部受影响摘要；当前仍有绕写与事务内 IO，见修复计划 |
-| Subscribe 与 Transfer | subscribe 的策略/下载事实 + library 的文件事实 | 同进程锁不等于跨文件原子提交，须持久幂等恢复 |
-| Job 与业务操作 | jobs 的执行记录 + library/subscribe 业务 ID | Job payload 不是 FK；冻结/排空/恢复必须由业务入口实现 |
-| User 删除 | app 的身份/凭证 + 其他库用户引用 | 无跨文件 FK；需显式恢复，不能声称一个 SQLite 事务完成 |
-| 外部发现/选图 | cache 来源表及外部请求 | 与本地 Library 展示采用事实区分，不禁止外部发现正常联网 |
-
-连接使用 WAL、5000ms busy timeout、`foreign_keys=ON`。FK 仅保护实际声明的同库关系；app/subscribe/jobs 仍有未声明的逻辑引用。多个 Store/Queue/cache 连接不形成跨文件事务。schema 当前按固定布局验证，不等于已实现未来前向升级器。
-
-## 6. 字典阅读、清理与运维
-
-- 字段表中的 `NOT NULL` 来自 SQLite 声明，主键不自动等于 `NOT NULL`；各表完整 CHECK/唯一/FK/索引另列。不得从 `_id` 后缀推断 FK。
-- 秒、毫秒、纳秒、RFC3339 仍混用。`played_changed_at_ms` 与 `watch_activity_at` 的语义/单位需由调用者核实；不能把收藏时间当观看或 played 断言时间。
-- `request_visible_media` 是 library 连接的 TEMP 表，不是第六个数据库。WAL/SHM 是活动数据库伴随文件，不能随意 unlink。
-- 旧 `catalog.db/fanart.db`、`ledger/file_meta`、浏览 journal/代次投影不在新库 schema 中；不创建同名兼容表/视图，不双读双写。旧 SQL 和实例文件不会因文档修改自动迁移或清理。
-- 本轮未操作任何用户实例。实际切换必须停所有写者、核实真实文件路径并按授权处理旧 SQLite/WAL/SHM；媒体及 sidecar 保留。受控清 cache 不得删除 adopted metadata、Job 定义、在途状态或观看事实。
-- 测试与测量必须引用代码版本：[证据记录](../benchmarks/2026-10-18-library-storage.md)。历史失败在新提交后不是当前失败证明，历史通过也不是当前通过证明。
+- 公共卡片/terms与稀疏用户摘要降低读成本，代价是局部写放大。普通seek有索引；精确count/facets、复杂观看排序、包含搜索与深offset不承诺常量成本。
+- 目标是同事务维护全部受影响事实/摘要、IO和大JSON解析在锁外；当前仍有绕写/锁内IO。不能读时stat/NFO/网络或整库重建掩盖漏维护。
+- 用户身份/凭证在app，Subscribe在subscribe，Job在jobs。共享进程锁/多连接不是跨文件事务，User删除/身份合并需持久阶段恢复。
+- 字段NOT NULL/默认/索引以DDL声明为准，不能从_id后缀推FK。JSON CHECK只验证语法；秒/ms/ns/RFC3339不能混比。
+- `request_visible_media`是连接TEMP表，WAL/SHM是活动伴随文件，不是额外业务分区。
+- 当前无ledger/file_meta/browse journal持久表，不建兼容表/视图，不双读双写。旧SQL/旧实例文件不会因文档修改自动迁移。
+- cache清空只允许连接内受控删除，或停写关闭全部连接后重建；备份不能直接复制活跃文件冒充五文件一致快照。
+- 实例切换需单独核实真实app_path/data_dir及停写授权，只处理明确SQLite/WAL/SHM；媒体、字幕、NFO、图片、下载目录、Indexer YAML、编译缓存保留。本轮文档任务不操作实例。

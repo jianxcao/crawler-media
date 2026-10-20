@@ -15,16 +15,16 @@ API + Jellyfin 兼容服务是单个 Rust 二进制（`crates/api`）。前端�
 
 ```bash
 # 1. 后端（数据目录默认 ./data，可用 CRAWLER_MEDIA_DATA 覆盖）
-cargo run -p api
+cargo run -p api --bin crawler-media -- serve
 
 # 2. 前端（开发模式，直连后端，跨域走后端 CORS）
 cd web
 VITE_API_BASE_URL=http://127.0.0.1:18765/api/v1 pnpm dev   # 监听 127.0.0.1:3334
 
-# 3. 生产构建 + 单端口冒烟
-cd web
-pnpm build                       # 产出 dist/
-CRAWLER_MEDIA_UI=$PWD/dist cargo run -p api   # 浏览器打开 http://127.0.0.1:18765 即完整应用
+# 3. 在仓库根目录另开终端：生产构建 + 单端口烟测
+pnpm --dir web build             # 产出 web/dist/
+CRAWLER_MEDIA_UI="$PWD/web/dist" cargo run -p api --bin crawler-media -- serve
+# 打开 http://127.0.0.1:18765；启动成功不是完整播放/协议验收。
 ```
 
 默认监听：后端 `127.0.0.1:18765`，前端 `127.0.0.1:3334`。首次创建管理员时须独立设置 `CRAWLER_MEDIA_ADMIN_PASSWORD`；已有管理员使用当前保存的口令，不能把该启动变量当作每次重启都会覆盖口令。CLI token 与网页登录口令独立。
@@ -43,18 +43,18 @@ docker compose up --build
 `/usr/share/crawler-media/ui`）+ API + Jellyfin 兼容，浏览器和播放器都打这一个端口。
 镜像内默认 **无 Chromium**。实例级 Browser 开关决定是否使用 CDP：**关闭**时所有请求走 HTTP，不探测端点、不下载、不启动任何浏览器进程，Site 的 `cdp_url` 也不生效；**开启**时端点按 Site `cdp_url` → 实例 `cdp.url` → 受管 Obscura 解析，浏览器只用于 Site 的登录与签到（Site 上选择「浏览器」方式，`maintenance_via = browser`）；**搜索与 RSS 始终走 HTTP**。失败回退规则见下段。端点只接受 `http` CDP discovery URL（不接受 `https`/`ws`/`wss`、内嵌凭据或 query）。
 
-回退规则：登录与签到只在**导航之前**失败（端点不可达、排队超时、target/WebSocket 建立失败、cookie 注入失败）时回退 HTTP 并 warn；导航之后失败直接报错，不会再发一次 HTTP 签到。回退不等于成功。浏览器支持多标签并发（默认 3），同一可注册域按公共后缀表串行。Site cookie 通过 host-only `Network.setCookies` 注入，读取仅限定当前 Site URL；会话期间及结束时**不发送任何 cookie 删除/清空命令**。第三方浏览器原有 cookie、本站点 cookie 和 SSO/跳转 host cookie 都留在原 jar，由浏览器/站点过期策略管理。若 endpoint 不支持 host-only 注入/当前 URL 回读，或接受公共后缀级 cookie，则不用于 Browser maintenance，导航前回退 HTTP。浏览器会话**不使用 Site 代理**，浏览器方式与 Site 代理互斥（两个方向都在保存时校验）。
+回退规则：登录与签到只在**导航之前**失败（端点不可达、排队超时、target/WebSocket 建立失败、cookie 注入失败）时回退 HTTP 并 warn；导航之后失败直接报错，不会再发一次 HTTP 签到。回退不等于成功。浏览器全局并发默认 3，同一可注册域按公共后缀表串行。每个会话创建独立 BrowserContext，结束时 dispose；不发送 cookie 删除/清空命令，也不修改第三方浏览器的默认上下文。Site cookie 以当前 URL 经 `Network.setCookies` 做 host-only 注入，并经 `Network.getCookies{urls}` 定向回读；当前 Obscura 的回读另限制 path=`/`。不支持 BrowserContext 的端点在导航前失败并回退 HTTP。公共后缀 cookie 拒收能力的实测仍未完成，不能宣称该项已验证。浏览器会话不使用 Site 代理，`maintenance_via = browser` 与 Site 代理在保存时互斥。实现见 `crates/indexer/src/cdp_page.rs`，历史实测见 ADR-0007。
 
-**Fresh start（不做数据迁移）**：此功能版本要求使用空的数据目录。部署前请自行备份需要保留的文件，并手动删除/换新 `<data>`；应用不会自动删除用户数据。旧 schema/旧设置不兼容，启动时会明确提示重置数据目录，不迁移 `cdp.sync.enabled`、`obscura.enabled/url` 或旧 Site 记录。新 Site 默认 `maintenance_via = http`，CDP 开关默认关闭；需要浏览器登录/签到时由管理员手动开启开关并选择 Site 的浏览器方式。Profile 的 `render: true` 不再控制搜索，搜索始终走 HTTP。
+**数据库启动边界（不迁移旧布局）**：当前 Store 只初始化空数据库或重开当前布局，不能将旧版本数据目录原地升级。启动先只读检查已存在的四个 Store 文件的 `application_id` / `user_version`（cache 另校验结构），不匹配时报 layout mismatch；错误不等于应用已重置目录。不要删除现有实例数据来试错：先停机、一致备份并保留原目录，使用独立的新目录评估；实际生产切换须另行批准。应用不会自动删除旧数据，也没有旧库导入器或迁移阶梯。当前布局可正常重启，并非每次启动都要求空目录。新 Site 默认 `maintenance_via = http`，CDP 默认关闭；旧 `cdp.sync.enabled`、`obscura.enabled/url` 不作为新开关使用，Profile `render` 不再控制搜索。依据：`crates/store/src/open.rs`、`schema/layout.rs`、`schema.rs`。
 
 **受管 Obscura 启动条件**：开关开启、未配置 `cdp.url`、至少有一个启用的 Site 选择浏览器登录/签到且没有自己的 `cdp_url`、二进制可用。不满足时设置页显示未启动原因（`no_managed_browser_sites`、`not_installed` 等）。受管 daemon 每次启动使用随机空闲端口并只绑定 `127.0.0.1`；只管理本进程拉起的 daemon，关闭开关或应用退出会停止它，外部服务不受影响。
 
 **安装策略**（`obscura.install`，启动默认值 `CRAWLER_MEDIA_OBSCURA_INSTALL`）：
 
-- `preinstalled`（默认）：不联网。**只需**把 v0.2.3 对应平台的原始发布归档（如 `obscura-x86_64-linux.tar.gz`）放为 `<data>/bin/obscura.tar.gz`；应用核对写死的 SHA-256 与大小后自行解出 `obscura`、`obscura-worker`。不接受只放二进制或手写哈希文件。
+- `preinstalled`（默认）：不联网。推荐把 v0.2.3 对应平台原始发布归档（如 `obscura-x86_64-linux.tar.gz`）放为 `<data>/bin/obscura.tar.gz`，应用按代码固定 SHA-256 与大小校验后解包。实现也接受 `obscura`、`obscura-worker` 加同目录部署者提供的 `obscura.sha256sums`；该方式只能校验与部署者清单一致，不能提供代码固定归档哈希的信任保证，须保证整个目录来源可信。
 - `download`：首次需要时从 GitHub Releases 下载对应平台归档，按写死的 SHA-256 与大小校验，上限 200 MiB，通过后原子落盘。
 
-信任根是代码中写死的哈希，不是发布仓库本身（详见 ADR-0007「信任模型」）。
+归档安装的信任根是代码中写死的哈希与大小；部署者清单方式的信任根则是部署者提供的目录，二者不能混称同一供应链保证。实现见 `crates/api/src/obscura_install.rs`，决策与历史实测见 ADR-0007。
 
 **`network_mode: host` 风险**：受管 daemon 虽只绑定回环，但同宿主的任何进程都能访问该无鉴权 CDP 端口并读取站点 cookie；在共享宿主上请使用 bridge 网络或改用独立容器中的外部端点。
 
@@ -111,17 +111,17 @@ Site 凭证（cookie / API key / RSS URL）按 [ADR-0003](<adr/0003-plaintext-si
 
 ## 数据库维护与升级注意
 
-默认注册数据库轻量 optimize（每6小时）、Jobs历史清理（每天、90天、启用）、Playback历史清理（每天、90天、**关闭**）。首个启用任务可能立即执行，Jobs超90天终态历史可能在首次后台调度即删除；各def保留latest/tie组，运行／排队行不删。VACUUM默认关闭，绝不因每次DELETE自动重建库。
+当前默认文件共五个：Store 管理 `<data>/app.db`（User/token、Site、Downloader、Filter、设置）、`cache.db`（按来源分表的 HTTP 响应缓存）、`library.db`（Media/别名/采用元数据、Library/根、文件/覆盖/摘要、Playback、Probe/Scan）、`subscribe.db`（Subscribe）；另有独立队列 `<data>/jobs.db`（定义、调度配置、在途任务与历史）。`catalog.db`、`fanart.db` 是旧布局名称，不是当前另需创建的库。`jobs.db` 不是可丢弃缓存。连接间无跨文件原子事务，备份需保持整体一致。DDL 与布局入口见 `crates/store/src/schema/layout.rs`、`crates/store/src/schema/v1/*.sql`，队列入口见 `crates/api/src/management/state.rs`。
 
-**当前控制缺陷必须了解：** 禁用running清理尚不能阻止下一批，修改更安全策略尚不刷新已queued的下一次快照；预览／报告存在计数截断与扫描预算缺口。不能把UI关闭当作已经停止，也不能把保存dry_run当作下一次一定只读。见 [总复核F01–F06](<audits/2026-10-13-database-api-review.md>) 与 [DB8合同](<superpowers/plans/2026-10-12-db8-maintenance-retention.md>)。
+默认注册数据库轻量 optimize（每6小时）、Jobs历史清理（每天、90天、启用）、Playback历史清理（每天、90天、**关闭**），以及分类历史保留 `data_retention`（默认关闭、dry_run=true，各窗口90天）。默认只在首次注册时应用，重启保留已有 def 配置。首个启用任务可能立即执行，Jobs超90天终态历史可能在首次后台调度即删除；各def保留latest/tie组，运行／排队行不删。VACUUM默认关闭，绝不因每次DELETE自动重建库。依据 `crates/api/src/maintenance/mod.rs`。
+
+维护控制以当前实现为准，不沿用 2026-10-13 审计中全部“当前缺陷”的措辞：`maintenance/runner.rs` 已在批/库边界检查禁用、取消与停机；`jobs::update_def_config_cas` 同事务保存 payload/可选周期并刷新 queued payload，running 保持快照；预览已通过 blocking budget 执行。仍需注意：payload token 不含周期版本，不能检测仅改周期的冲突；2 秒清理预算只在批间检查，不是单条 SQL 的硬时间上限；VACUUM 的部分页拷贝无法被 SQLite interrupt 硬停止。历史发现逐项验收不能仅凭代码存在判定关闭，见 [历史复核](<audits/2026-10-13-database-api-review.md>)；当前存储切换验收与优化顺序见 [执行计划](<superpowers/plans/2026-10-20-storage-clean-cutover.md>)。
 
 不要在运行时复制单个主体文件忽略WAL当备份；采用SQLite online backup或停机后对有关文件的一致备份。不要手工删除DB/WAL/SHM来缩空间。
 
 
 ### Obscura 受管浏览器补充（r9）
-- **预置方式**（`OBSCURA_INSTALL=preinstalled`，默认值），以下两种任选其一：
-  - 把官方发布包放到 `<data>/bin/obscura.tar.gz`，程序会按写死的 sha256 校验后解包；
-  - 把 `obscura` 和 `obscura-worker` 两个二进制放进 `<data>/bin/`，并在同目录放一份 `obscura.sha256sums`（`sha256sum` 格式，每行一项）。两种方式下，每次启动都会重新校验二进制的 hash。注意：`obscura.sha256sums` 由部署者提供、与二进制放在同一目录，**只能防止文件损坏或误放，不能防篡改**——能改二进制的人也能改清单。需要防篡改时请使用官方发布包方式（hash 写死在程序里），或通过镜像/只读挂载保证 `<data>/bin` 可信。
+- **预置方式**（`CRAWLER_MEDIA_OBSCURA_INSTALL=preinstalled`，默认值）：归档与部署者清单方式及其不同信任边界见上文「安装策略」，不要求同时准备两套输入。安装器会核对已有安装标记与二进制 hash，不能把同目录手写清单视为防篡改证据。
 - **局域网或内网站点**：Obscura 默认禁止访问私网地址。如果确实需要，设置 `CRAWLER_MEDIA_OBSCURA_ALLOW_PRIVATE_NETWORK=1`（默认关闭，注意 SSRF 风险）。
 - **版本核对**用 `obscura --version`；不符时显示在状态的 `last_error` 里。
 - **进程回收**：daemon 以独立进程组运行，停止时整组回收。应用崩溃后，由下次启动时的 pidfile 回收。

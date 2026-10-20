@@ -1,12 +1,12 @@
 # Media / Library 开发合同附录
 
-状态：开发计划的规范性附录，**不是当前已实现API**。与[主计划](2026-10-18-library-storage-redesign.md)、[主设计](../specs/2026-10-18-library-storage-redesign.md)一起阅读。新字段/公开符号改动前用LSP references枚举调用方；不靠猜名字/只改编译报错完成迁移。
+状态：规范性目标合同，**不是当前已实现API**。与[当前实施计划](2026-10-20-storage-clean-cutover.md)、[主设计](../specs/2026-10-18-library-storage-redesign.md)一起阅读；旧T编号只保留需求溯源，执行任务按当前计划。新增/替换接口由当前计划的Interfaces明确收敛；当前源码仍有缺口，不能将下列签名当作已可调用。改公开符号前用LSP references枚举调用方；服务不可用时记录错误后核对代码/SQL/路由/JSON全调用链。
 
 ## 1. DDL、布局与保留范围
 
-- [library SQL](2026-10-18-library-storage-schema.sql)是library.db完整目标建表/索引草案，包含45张代码表；不是生产迁移，不由运行时从docs读取。
-- [partition SQL](2026-10-18-storage-partitions.sql)分别包含APP、SUBSCRIBE、CACHE三个有标记区段，各自在独立空连接执行；不能把三个区段执行在同一个文件。
-- 实施Task1将上述DDL按职责落入 `crates/store/src/schema/v1/{media,library,playback,operations,probe,app,subscribe}.sql` 和 `crates/media/src/response_cache/schema.sql`。每个生产schema文件不含外层PRAGMA/BEGIN/COMMIT，由初始化器事务包裹；docs SQL随后从实际DDL生成，避免长期维护两个事实来源。
+- 唯一现行Store DDL为 [`schema/v1/app.sql`](../../../crates/store/src/schema/v1/app.sql)、[`library.sql`](../../../crates/store/src/schema/v1/library.sql)、[`subscribe.sql`](../../../crates/store/src/schema/v1/subscribe.sql)；cache为 [`media::response_cache::CACHE_SCHEMA_SQL`](../../../crates/media/src/response_cache/mod.rs)，Store直接复用。Jobs沿Queue自己的初始化模块。
+- 10-18两份SQL草案已被生产DDL取代并删除，历史可用 `git show bd6c3c8:docs/superpowers/plans/2026-10-18-library-storage-schema.sql` 与同目录 `2026-10-18-storage-partitions.sql` 取回；不再维护docs内的第二份可执行schema。
+- 生产schema变更同步字典、布局版本和全部消费者；初始化器负责事务与身份。字段/索引的当前事实见[数据库字典](../../database/README.md)，下述规则是目标约束而非额外迁移脚本。
 - 新布局application_id：app=1129139248、library=1129139249、subscribe=1129139250、cache=1129139251；四者user_version=1。jobs继续现有Queue schema/JobKind/change_state/retention_cursors，不改队列格式；这次不对其另设layout编号。
 - 仅sqlite_schema无任何用户对象且application_id/user_version均0的文件可初始化。所有已存在文件先READ_ONLY预检，任一旧布局、编号不匹配、未来版本或损坏时拒绝且不改文件/WAL模式。已存在目标布局只校验，不重复执行CREATE/seed修复损坏表。第一次初始化各文件独立事务、无跨库原子承诺；启动中断可以重启补齐尚为空的新文件，所有文件通过后才seed默认配置并启动worker。
 - WAL/5000ms busy_timeout/FK ON显式设置；维护独立连接仍短超时/no CREATE，不借初始化修改现有维护策略。Store::open_at继续仅自定义app路径；db_paths返回真实app/cache/library/subscribe路径，Queue目标从现有真实jobs.db取得。
@@ -22,7 +22,7 @@ SQLite CHECK不能表达跨表kind、复杂JSON的全部语义；事务入口必
 - UUID文本规范小写带连字符；公开逻辑ID由TypedItemId编码，不以字符串前缀猜对象。
 - locale标准化BCP47大小写，fallback顺序显式；source小写固定枚举。
 - normalized_json/details_json是标准化冷payload，拒绝未知版本；类型标签`version:1`。原始HTTP body只在cache。
-- FieldValue编码 `{"state":"value","value":...}` / `{"state":"empty"}`；对象中无键=Missing。present_fields_json保存对应字段集合，必须与payload相符；Empty与Missing分离。field_origins每字段记录source、provider_entity_id、source_revision、origin_media_id、presence以及pending_target_fallback/target_external_id，不能只写来源名。
+- FieldValue在现行serde中编码为 `{"state":"value","value":...}` / `{"state":"empty"}` / `{"state":"missing"}`；缺键反序列化为Missing，写入采用规范标记，不维护两套payload。present_fields_json只列Value/Empty字段，必须与payload及来源证据一致。effective field_origins每字段记录source、provider_entity_id、source_revision、origin_media_id、presence以及pending_target_fallback/target_external_id。
 - 已采用metadata的nullable SQL列只供存值，缺失/显式清空由field_origins/presence区分。只有经过字段校验的值可参与fallback；rating 0..10、runtime>=0、日期合法ISO日期。无效输入不是显式空。
 - library_items.title用本Library选定locale/NFO后显示值；media.title是基本身份名称，不作为全部语言的最终显示。title_sort保持现有Rust字符串字节排序；alias_json为固定五来源外部ID摘要，展示译名仍在media.aliases_display_json，不混用。
 - added_at_sort对NULL使用i64::MIN，非NULL为纳秒；size/runtime排序NULL映射0、rating映射-1、release_date为空串或年兜底日期；ASC/DESC与旧行为相同。cursor tie按方向同向ID，offset继续旧ID升序tie；shuffle取现有稳定算法，不用进程随机hash seed。
@@ -67,7 +67,7 @@ pub enum EntityScope { Work, Season(u32), Episode { season: u32, episode: u32 } 
 
 ## 3. Store原子接口：归约函数不公开原始SQL事务
 
-新 `crates/store/src/library_write/{mod.rs,publish.rs,reduce.rs,presence.rs}`。所有入口返回StoreError，新增 `Conflict { entity: &'static str, reason: String }`、`StaleVersion`、`LayoutMismatch`、`Integrity`（thiserror）；HTTP分别409/409/启动错误/500，存储失败不得改成空列表。仅内部 `LibraryWriteTx`持有rusqlite Transaction和引用，避免嵌套BEGIN与一个写入口调用另一个自带事务入口。
+所有入口返回StoreError；Invalid/Protected/Missing/Sqlite等现行错误与HTTP映射见源码，新增用例的冲突/源过期/完整性错误必须有明确409/500及稳定code，不以空列表掩盖。原草案新增多个错误variant并非已交付API，也不要求为了命名批量重写无关错误。内部事务helpers不公开Connection给API，避免嵌套BEGIN。
 
 ```rust
 pub struct WriteScope { pub library_id: LibraryId, pub config_revision: i64 }
@@ -204,13 +204,13 @@ impl Store {
 
 BrowseFilter完整保留g/c/d/rt/lang/res/stock、hdr/rating/identity、watch/未看优先及gallery图片条件；同类OR、跨类AND，所有参数绑定。BrowseOrder方向、null映射、stable tie严格按主设计；`probing`保留现有按title回退，不能杜撰额外索引列。LibraryItem字段覆盖DDL卡片列及当前User摘要，不含完整files；detail可返回有界文件页与后续cursor，不偷偷删旧响应文件。现有必须完整返回的协议按批次分页取齐并承认成本。
 
-LibraryItem在store/library_query/types.rs逐列映射library_items（typed Media/Library IDs、bool、Option标量、完整计数/排序值及可选UserItemSummary），UserItemSummary逐列映射user_library_items；LibraryUnit逐列映射library_units并包含UnitKey。SQL列到类型是唯一字段清单，不再手写第二份facts_json结构；新增字段必须同步DDL/mapper/序列化消费者。LibraryItemDetail首批文件上限50，旧HTTP需要完整files时adapter继续取文件页直到齐全，不默默截断；新cursor API可返回分页标识。空授权Library集合返回空页，跨库visible_item_page按当前ACL复核输入集合并在SQL去重后分页。
+LibraryItem在store/library_query/types.rs逐列映射library_items；用户摘要逐列映射user_library_items；LibraryUnit包含UnitKey。新增字段同步DDL/mapper/消费者，不再手写第二份facts_json。LibraryItemDetail首批文件50，明确next_file_cursor；续页响应next_cursor，limit+1判断EOF；前端按新合同取所需页，不能静默截断或保留旧完整响应兼容层。跨独立请求不承诺冻结快照；空授权集合返回空页。
 
 page/count/facets同一短读事务；权限在分页/计数前用当前Library配置检查。跨Library查询在SQL授权域内去重再分页，不在各库先取一页合并。cursor为version/Library/User/排序方向/filter指纹/末排序键/ID的base64编码，解码时与请求严格匹配（不是安全token，授权仍重查）。terms/用户状态索引关联是允许的例外；精确count、包含搜索和复杂观看排序不宣称恒定时间。
 
 分面保留排除自身维：total施加全部filter；维D候选来自授权Library全集（含count0），count为除D外条件满足且含D值的distinct Media数；primary=genre/country/decade/watch、all十维，years输出空数组。Genre28+CountryJP时total1，US仍按不施加country条件计数，T7沿facets_regression验收。
 
-续页由T4提供file索引读、T7暴露library_file_page：ORDER BY file_id ASC，after含version/Library/Media/末file_id并验证scope，limit1..100，detail首批50；files_library_media索引只读published，missing仍展示。51文件回归必须完整唯一，旧HTTP adapter逐页取齐不截断；单个完整HTTP枚举用同短读快照或明确版本冲突重试，不能拼两代结果。跨独立请求不保证冻结快照。
+续页 `ORDER BY file_id ASC`，after携Library/Media/order/末file_id并验证scope，limit1..100，首详情50；files_library_media只读published，missing/unknown允许管理展示但不可播，pending留在工作状态。文件DTO携完整units和presence/publication，不以首个season/episode代替全部覆盖。0/49/50/51/100/101文件边界完整唯一且EOF无cursor；实际生产者/消费者同批迁移，不支持旧字段别名。
 
 ### 协议查询完整输入与 SQL 执行（集成复审F01）
 
@@ -248,7 +248,7 @@ impl Store {
 }
 ```
 
-TypedItemId具体wire：`w1_<uuid无连字符>`、`s1_<uuid>_<season>`、`u1_<uuid>_<season>_<episode>`；非负数禁止溢出，whole unit使用-1/-1。工作级movie/video Work自动解析whole，TV Work用于Series，不冒充某集。MediaSourceId=`f1_<file_uuid无连字符>_<revision>`；旧路径中的ledger_id只是参数名，所有URL/前端一起生成新语义，不保留旧file-ID当episode的alias。原Web body的(0,0) movie在边界映射whole；TV S00E00保留。
+TypedItemId wire：`w1_<uuid无连字符>`、`s1_<uuid>_<season>`、`u1_<uuid>_<season>_<episode>`；非负数禁止溢出，whole unit为-1/-1。movie/video Work解析whole，TV Work用于Series，不冒充某集。MediaSourceId=`f1_<file_uuid无连字符>_<revision>`。Web movie/video省略season/episode，旧(0,0)请求明确拒绝，不再边界映射；TV S00E00保留。前端/CLI UUID字段全为string，裸file UUID不能作逻辑ItemId。
 
 BoundPlaybackEvent含user/device、session_id、generation、event_sequence、typed logical item、source id/version、position/duration/track、paused/rate/client信息及Playing/Progress/Stopped种类；EventOutcome=Applied/IgnoredStale（原协议应答不变，状态不变）。Start持久绑定逻辑/物理源/Library配置版本；解析不删旧恢复包；未完成心跳不凭空创建新的false断言，首次达到完成阈值写true@now_ms；人工mark/unmark写true/false断言；重播已看保留逻辑标记直至显式unmark，favorite/track不写断言。会话终态历史按稳定session键幂等，时间推进按现有墙钟/rate限制，不把seek累计为观看。
 
@@ -264,4 +264,4 @@ T8还拥有独立playback crate：`crates/playback/src/dto.rs`、lib.rs、tests/
 - 重新识别仍走现有 `/reidentify`，只移动显式文件及覆盖；不是调用merge。metadata人工字段修改新增管理员 `PUT /api/v1/media/{id}/metadata-overrides`，要求entity/locale/expected_revision；冲突409。
 - checker从文件/coverage和原始用户事实驱动并反查孤儿，每批<=100 Media，单Media内有界读/版本重检；repair按单Media写事务重算。检测前普通页不能保证发现所有漏行，检测后integrity=failed阻止假成功。
 - 历史清除保留既有收藏合同；清观看需清恢复包、play_count/活动/played断言并重算摘要；只删日志的保留Job不得清这些事实。file prune/removal更不能调用User历史清除。
-- app User删除跨DB：先在app.settings持久写版本化 `user_removal.<user_id>`（operation_id/阶段/cursor/错误），禁用User并revoke token→排空该用户session→清library用户事实/私有Collection→清subscribe与typed jobs引用→最后删User→完成标记。每阶段幂等、app提交后才能跨库推进，启动worker先恢复未完删除；不新增通用事件总线，认证检查disabled要覆盖全部协议。failure保阶段可重试，不让凭证恢复为可用；设置行按既有历史维护政策处理。
+- app User删除跨DB：先在app.settings持久写版本化 `user_removal.<user_id>`（operation_id/阶段/cursor/错误），禁用User并revoke token→排空该用户session→幂等转交Subscribe和私有Collection给admin（保留现行所有权合同）/处理typed Job引用→清library用户Playback及稀疏摘要→最后删User→完成标记。app提交后才能跨库推进，启动worker先恢复未完删除；failure保阶段、凭证不恢复可用，不新增通用事件bus。所有公开调用方同步202/status，不用200掩盖未完成。
