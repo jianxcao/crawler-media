@@ -360,56 +360,59 @@ impl Store {
         snapshot: &Snapshot,
         library_id: &str,
     ) -> Result<(), StoreError> {
-        let mut seen_files = std::collections::HashSet::new();
+        let mut seen_files =
+            std::collections::HashMap::<&str, std::collections::BTreeSet<(Option<u32>, Option<u32>)>>::new();
         for row in &snapshot.rows {
-            if !seen_files.insert(&row.ledger_id) {
-                continue;
-            }
-            let current = self
+            seen_files
+                .entry(row.ledger_id.as_str())
+                .or_default()
+                .insert((row.season, row.episode));
+        }
+        for (ledger_id, snapshot_units) in seen_files {
+            let first = snapshot
+                .rows
+                .iter()
+                .find(|row| row.ledger_id == ledger_id)
+                .ok_or_else(|| StoreError::Protected("删除快照台账身份无效".into()))?;
+            let current: Option<(String, String)> = self
+                .library
                 .query_row(
-                    "SELECT f.display_path, f.media_id, u.season, u.episode
-                     FROM library_files f
-                     LEFT JOIN library_file_units u ON u.file_id = f.file_id
-                     WHERE f.file_id = ?1 LIMIT 1",
-                    [&row.ledger_id],
-                    |record| {
-                        // `library_file_units` stores the canonical whole-media unit as
-                        // `(-1, -1)`, while `LedgerRow` expresses it as `None`. Normalise
-                        // through `u32` so both representations compare equal.
-                        Ok((
-                            record.get::<_, String>(0)?,
-                            record.get::<_, String>(1)?,
-                            record
-                                .get::<_, Option<i64>>(2)?
-                                .and_then(|value| u32::try_from(value).ok()),
-                            record
-                                .get::<_, Option<i64>>(3)?
-                                .and_then(|value| u32::try_from(value).ok()),
-                        ))
-                    },
+                    "SELECT display_path, media_id FROM library_files WHERE file_id = ?1",
+                    [ledger_id],
+                    |record| Ok((record.get::<_, String>(0)?, record.get::<_, String>(1)?)),
                 )
                 .optional()?;
             // Absent rows are expected after an interrupted library.db commit.
-            let Some(current) = current else { continue };
-            let unchanged = current
-                == (
-                    row.path.clone(),
-                    row.media_id.clone(),
-                    row.season,
-                    row.episode,
-                );
-            let media_id = row
+            let Some((path, media_id)) = current else { continue };
+            let mut stmt = self.library.prepare(
+                "SELECT season, episode FROM library_file_units WHERE file_id = ?1",
+            )?;
+            let rows = stmt.query_map([ledger_id], |record| {
+                let season = record
+                    .get::<_, i64>(0)
+                    .ok()
+                    .and_then(|value| u32::try_from(value).ok());
+                let episode = record
+                    .get::<_, i64>(1)
+                    .ok()
+                    .and_then(|value| u32::try_from(value).ok());
+                Ok((season, episode))
+            })?;
+            let current_units: std::collections::BTreeSet<(Option<u32>, Option<u32>)> =
+                rows.collect::<Result<_, _>>()?;
+            let unchanged = path == first.path && media_id == first.media_id;
+            let media_id = first
                 .media_id
                 .parse()
                 .map_err(|_| StoreError::Protected("删除快照 Media 身份无效".into()))?;
             let owned = match self.get_media(media_id)? {
                 Some(media) => self
-                    .library_for_path_strict(Path::new(&row.path), media.kind)?
+                    .library_for_path_strict(Path::new(&first.path), media.kind)?
                     .is_some_and(|owner| owner.id == library_id),
                 None => false,
             };
-            if !unchanged || !owned {
-                tracing::error!(%library_id, ledger_id = %row.ledger_id, "删除快照台账身份或归属已改变");
+            if !unchanged || current_units != snapshot_units || !owned {
+                tracing::error!(%library_id, %ledger_id, "删除快照台账身份或归属已改变");
                 return Err(StoreError::Protected("删除快照台账身份或归属已改变".into()));
             }
         }

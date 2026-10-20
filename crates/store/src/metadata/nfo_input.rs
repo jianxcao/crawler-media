@@ -85,6 +85,17 @@ pub(crate) fn record_nfo_input(tx: &Connection, file: &LibraryFile) -> Result<()
         )
         .optional()?
         .unwrap_or_else(|| "zh-CN".into());
+    if parse_state != "valid" && has_valid_input(tx, file, &locale)? {
+        // A sidecar that cannot be parsed says nothing about the fields it used to hold.
+        // Keep the last valid input instead of replacing it with empty fields.
+        tracing::warn!(
+            file_id = %file.file_id,
+            path = %sidecar.display(),
+            parse_state,
+            "NFO sidecar unparsable; keeping the last valid metadata input"
+        );
+        return Ok(());
+    }
     let fields_json = serde_json::to_string(&fields)?;
     let present: Vec<String> = serde_json::to_value(&fields)?
         .as_object()
@@ -129,6 +140,26 @@ pub(crate) fn record_nfo_input(tx: &Connection, file: &LibraryFile) -> Result<()
         ],
     )?;
     Ok(())
+}
+
+/// Whether this file already recorded a parseable NFO input for the locale.
+fn has_valid_input(tx: &Connection, file: &LibraryFile, locale: &str) -> Result<bool, StoreError> {
+    let valid: Option<bool> = tx
+        .query_row(
+            "SELECT parse_state = 'valid' FROM library_metadata_inputs
+             WHERE library_id = ?1 AND media_id = ?2 AND entity_scope = 'work'
+               AND season = -1 AND episode = -1 AND locale = ?3 AND input_key = ?4
+               AND source_version = 'nfo_v1'",
+            params![
+                file.library_id.to_string(),
+                file.media_id.to_string(),
+                locale,
+                file.path.to_string_lossy(),
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(valid.unwrap_or(false))
 }
 
 /// Drop the input this file recorded after a confirmed sidecar deletion.

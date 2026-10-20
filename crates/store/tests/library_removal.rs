@@ -206,3 +206,92 @@ fn removal_closes_playback_sessions_for_removed_files_and_preserves_other_librar
     assert!(store.get_session(user_b, device_b).unwrap().is_some());
     assert_eq!(store.get_library(&b.id).unwrap().is_some(), true);
 }
+
+#[test]
+fn removal_cleans_unidentified_rows_and_allows_multi_coverage_files() {
+    use domain::{FilePresence, FilePublication, FileVersion, LibraryFile, UnitKey};
+    use store::library_write::{FilePublication as StorePublication, WriteScope};
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path().join("data")).unwrap();
+    let root = temp.path().join("tv_root");
+    let other_root = temp.path().join("tv_other");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&other_root).unwrap();
+    let a = store
+        .create_library(MediaKind::Tv, "A", &[root.to_str().unwrap()], "everyone", true, &[])
+        .unwrap();
+    store
+        .create_library(MediaKind::Tv, "B", &[other_root.to_str().unwrap()], "everyone", true, &[])
+        .unwrap();
+    let media = media();
+    store.insert_media(&media).unwrap();
+
+    // 1. Park an unidentified row inside A's root.
+    let un_path = root.join("unknown.mp4").display().to_string();
+    store.insert_unidentified(un_path, Confidence::Low).unwrap();
+    assert!(!store.list_unidentified().unwrap().is_empty());
+
+    // 2. Publish one physical file covering two episodes.
+    let root_id = store
+        .list_library_roots()
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.library_id.as_deref() == Some(&a.id))
+        .unwrap()
+        .id;
+    let multi_path = root.join("S01E01-E02.mkv");
+    std::fs::write(&multi_path, b"video-content").unwrap();
+    let file = LibraryFile {
+        file_id: LedgerId::new(),
+        library_id: a.id.parse().unwrap(),
+        root_id,
+        media_id: media.id,
+        kind: MediaKind::Tv,
+        path: multi_path,
+        version: FileVersion { revision: 1, source_version: "v1".into() },
+        presence: FilePresence::Present,
+        publication: FilePublication::Published,
+        size_bytes: Some(1024),
+        stat_known: true,
+        created_ns: None,
+        modified_ns: None,
+        source_digest: None,
+        source_path: None,
+        transfer_mode: None,
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: None,
+        release_quality: None,
+        duration_ms: None,
+        tracks_version: 0,
+        poster_path: None,
+        backdrop_path: None,
+        still_path: None,
+    };
+    store
+        .publish_files(
+            &WriteScope { library_id: a.id.parse().unwrap(), config_revision: 0 },
+            &[StorePublication {
+                file: &file,
+                units: &[UnitKey::new(1, 1), UnitKey::new(1, 2)],
+                expected_version: None,
+                probe_required: false,
+            }],
+            1,
+        )
+        .unwrap();
+
+    // 3. Removal must validate the complete coverage set, then clean roots.
+    let removal = store.begin_library_removal(&a.id).unwrap();
+    store.set_removal_state(&removal.operation_id, "cleaning", None).unwrap();
+    let done = store.clean_library_removal(&removal.operation_id).unwrap();
+    assert_eq!(done.state, "succeeded");
+
+    // 4. Unidentified rows are gone; the Library row is deleted without an FK error.
+    assert!(store.list_unidentified().unwrap().is_empty());
+    assert!(store.get_library(&a.id).unwrap().is_none());
+}

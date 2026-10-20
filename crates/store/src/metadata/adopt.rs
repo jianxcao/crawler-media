@@ -1,9 +1,103 @@
 use rusqlite::{Connection, OptionalExtension, params};
-use serde_json::json;
 
 use domain::{EntityScope, MediaId, MetadataAdoption};
 use super::types::EffectiveMetadata;
 use super::super::{Store, StoreError};
+
+/// Fixed adoption priority: a lower rank wins a field for the same entity/locale.
+fn source_rank(source: &str) -> u8 {
+    match source {
+        "tmdb" => 0,
+        "douban" => 1,
+        "tvdb" => 2,
+        "bangumi" => 3,
+        "anilist" => 4,
+        "fanart" => 9,
+        _ => 5,
+    }
+}
+
+/// Per-field rank of the highest-priority source that already provided a value.
+fn existing_field_ranks(
+    tx: &Connection,
+    media_id: &str,
+    scope: EntityScope,
+    locale: &str,
+) -> Result<std::collections::BTreeMap<String, u8>, StoreError> {
+    let (scope_name, season, episode) = (scope.as_str(), scope.season_episode().0, scope.season_episode().1);
+    let mut stmt = tx.prepare(
+        "SELECT source, normalized_json FROM media_metadata_sources
+         WHERE media_id = ?1 AND entity_scope = ?2 AND season = ?3 AND episode = ?4
+           AND locale = ?5",
+    )?;
+    let rows = stmt.query_map(
+        params![media_id, scope_name, season, episode, locale],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )?;
+    let mut ranks = std::collections::BTreeMap::new();
+    for row in rows {
+        let (source, payload) = row?;
+        let rank = source_rank(&source);
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
+            continue;
+        };
+        let fields = value.get("fields").unwrap_or(&value);
+        let Some(map) = fields.as_object() else { continue };
+        for (field, field_value) in map {
+            if field_value.get("state").and_then(|state| state.as_str()) == Some("missing") {
+                continue;
+            }
+            ranks
+                .entry(field.clone())
+                .and_modify(|current: &mut u8| *current = (*current).min(rank))
+                .or_insert(rank);
+        }
+    }
+    Ok(ranks)
+}
+
+/// Merge one source's normalized fields over the already-adopted fields.
+///
+/// A field is replaced only when the incoming source has at least the rank of the
+/// source that currently owns it, so a later low-priority adoption cannot overwrite
+/// a higher-priority value. Missing incoming fields never erase an existing value;
+/// an explicit `Empty` is a real value and follows the same rank rule.
+fn merge_by_source_priority(
+    existing_details_json: Option<&str>,
+    owner_ranks: &std::collections::BTreeMap<String, u8>,
+    incoming: &domain::MetadataFields,
+    incoming_source: &str,
+) -> Result<domain::MetadataFields, StoreError> {
+    // Start from a complete field set so a partially populated row still deserializes.
+    let mut merged = serde_json::to_value(domain::MetadataFields::default())?;
+    if let Some(existing) = existing_details_json
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| value.get("fields").cloned())
+        .and_then(|value| value.as_object().cloned())
+    {
+        if let Some(merged_map) = merged.as_object_mut() {
+            for (field, value) in existing {
+                merged_map.insert(field, value);
+            }
+        }
+    }
+    let incoming_value = serde_json::to_value(incoming)?;
+    let incoming_rank = source_rank(incoming_source);
+    if let (Some(merged_map), Some(incoming_map)) =
+        (merged.as_object_mut(), incoming_value.as_object())
+    {
+        for (field, value) in incoming_map {
+            if value.get("state").and_then(|state| state.as_str()) == Some("missing") {
+                continue;
+            }
+            if owner_ranks.get(field).is_some_and(|rank| *rank < incoming_rank) {
+                continue;
+            }
+            merged_map.insert(field.clone(), value.clone());
+        }
+    }
+    Ok(serde_json::from_value(merged)?)
+}
 
 /// Display facts a **Scrape** observed for one **Media**; they are written with the
 /// adopted metadata so the card and the detail view read one source of truth.
@@ -24,6 +118,9 @@ impl Store {
         let tx = self.library.unchecked_transaction()?;
         let media_id_str = input.media_id.to_string();
         let (season, episode) = input.scope.season_episode();
+        // Who already owns each field, before this source is recorded: a lower-priority
+        // source must not overwrite a value adopted from a higher-priority one.
+        let owner_ranks = existing_field_ranks(&tx, &media_id_str, input.scope, &input.locale)?;
 
         // 1. Serialize fields and origins
         let normalized_json = serde_json::to_string(&input.normalized.fields)?;
@@ -95,26 +192,39 @@ impl Store {
                     )
                     .optional()?;
                 let rev = cur_rev.unwrap_or(0) + 1;
-                let title = input.normalized.fields.title.value().cloned().unwrap_or_default();
-                let original_title = input.normalized.fields.original_title.value().cloned();
-                let year = input.normalized.fields.year.value().copied().map(|y| y as i64);
-                let overview = input.normalized.fields.overview.value().cloned();
-                let release_date = input.normalized.fields.release_date.value().cloned();
-                let rating = input.normalized.fields.rating.value().copied();
-                let runtime = input.normalized.fields.runtime_minutes.value().copied().map(|r| r as i64);
-                let language = input.normalized.fields.language.value().cloned();
+                let existing_details: Option<String> = tx
+                    .query_row(
+                        "SELECT details_json FROM media_metadata WHERE media_id = ?1 AND locale = ?2",
+                        params![media_id_str, input.locale],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                let fields = merge_by_source_priority(
+                    existing_details.as_deref(),
+                    &owner_ranks,
+                    &input.normalized.fields,
+                    &input.source,
+                )?;
+                let title = fields.title.value().cloned().unwrap_or_default();
+                let original_title = fields.original_title.value().cloned();
+                let year = fields.year.value().copied().map(|y| y as i64);
+                let overview = fields.overview.value().cloned();
+                let release_date = fields.release_date.value().cloned();
+                let rating = fields.rating.value().copied();
+                let runtime = fields.runtime_minutes.value().copied().map(|r| r as i64);
+                let language = fields.language.value().cloned();
                 let empty_genres: Vec<domain::MetadataGenre> = Vec::new();
-                let genres_ref = input.normalized.fields.genres.value().unwrap_or(&empty_genres);
+                let genres_ref = fields.genres.value().unwrap_or(&empty_genres);
                 let genres_json = serde_json::to_string(genres_ref)?;
-                let poster_url = input.normalized.fields.poster_url.value().cloned();
-                let backdrop_url = input.normalized.fields.backdrop_url.value().cloned();
-                let countries_json = match input.normalized.fields.countries.value() {
+                let poster_url = fields.poster_url.value().cloned();
+                let backdrop_url = fields.backdrop_url.value().cloned();
+                let countries_json = match fields.countries.value() {
                     Some(list) => serde_json::to_string(list)?,
                     None => "[]".to_string(),
                 };
                 let details_json = serde_json::to_string(&serde_json::json!({
                     "version": 1,
-                    "fields": input.normalized.fields,
+                    "fields": fields,
                 }))?;
                 tx.execute(
                     "INSERT INTO media_metadata

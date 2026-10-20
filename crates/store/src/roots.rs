@@ -75,11 +75,14 @@ impl Store {
         self.ensure_library_mutable(&library.id)?;
         self.ensure_removal_roots_available(&[path])?;
         let sort_order = self.roots_of(&library.id)?.len() as i32;
-        self.library.execute(
+        let tx = self.library.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO library_roots (root_id, library_id, path_key, display_path, enabled, sort_order)
              VALUES (?1, ?2, ?3, ?3, 1, ?4)",
             params![id, library.id, path, sort_order],
         )?;
+        Self::reassign_files_under_root(&tx, &library.id, path)?;
+        tx.commit()?;
         Ok(LibraryRoot {
             id,
             kind,

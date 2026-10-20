@@ -188,17 +188,16 @@ impl Store {
         move_aliases(&tx, survivor, loser, &request.refresh_targets)?;
         let libraries = affected_libraries(&tx, survivor, loser)?;
         move_files(&tx, survivor, loser)?;
+        merge_metadata(&tx, survivor, loser)?;
+        merge_playback_units(&tx, survivor, loser)?;
+        merge_collection_items(&tx, survivor, loser)?;
         for library in &libraries {
             let library_id: LibraryId = library.parse()?;
             reduce_library_media(&tx, library_id, survivor)?;
         }
-        merge_metadata(&tx, survivor, loser)?;
-        merge_playback_units(&tx, survivor, loser)?;
-        merge_collection_items(&tx, survivor, loser)?;
         // The summaries are derived from the user's playback facts, so they are
         // only correct after the loser's rows moved onto the survivor.
         self.refresh_merged_summaries(&tx, survivor)?;
-
         tx.execute(
             "UPDATE media_operations
              SET state = 'applying', phase_cursor = ?2, error = NULL, updated_at_ms = ?3

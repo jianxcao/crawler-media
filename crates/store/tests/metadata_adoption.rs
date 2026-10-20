@@ -62,3 +62,169 @@ fn metadata_adoption_persists_source_snapshot_and_effective_row() {
     assert_eq!(effective.title, "Adopted Title");
     assert_eq!(effective.overview.as_deref(), Some("Adopted Overview"));
 }
+
+fn adoption(
+    media: domain::MediaId,
+    source: &str,
+    overview: &str,
+) -> MetadataAdoption {
+    let mut fields = domain::MetadataFields::default();
+    fields.title = domain::FieldValue::Value("Priority Title".into());
+    fields.overview = domain::FieldValue::Value(overview.into());
+    MetadataAdoption {
+        media_id: media,
+        scope: EntityScope::Work,
+        locale: "zh-CN".into(),
+        source: source.into(),
+        provider_entity_id: "1".into(),
+        provider_work_id: "1".into(),
+        fetched_at: 1000,
+        normalized: domain::NormalizedMetadata {
+            fields,
+            field_origins: Default::default(),
+        },
+        expected_revision: None,
+        preferences: MetadataPreferences {
+            language_priority: vec!["zh-CN".into()],
+            cert_country_priority: vec!["CN".into()],
+        },
+    }
+}
+
+#[test]
+fn lower_priority_source_does_not_overwrite_higher_priority_fields() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let media = domain::Media {
+        id: domain::MediaId::new(),
+        kind: domain::MediaKind::Movie,
+        title: "Priority".into(),
+        year: None,
+        original_title: None,
+        aliases: vec![],
+        tmdb_id: Some("1".into()),
+        douban_id: Some("2".into()),
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&media).unwrap();
+
+    store.adopt_metadata(&adoption(media.id, "tmdb", "TMDB overview"), 1).unwrap();
+    store.adopt_metadata(&adoption(media.id, "douban", "Douban overview"), 1).unwrap();
+
+    let effective = store.get_effective_metadata(media.id, "zh-CN").unwrap().unwrap();
+    assert_eq!(effective.overview.as_deref(), Some("TMDB overview"));
+
+    // A higher-priority refresh still replaces the value.
+    store.adopt_metadata(&adoption(media.id, "tmdb", "TMDB v2"), 2).unwrap();
+    let effective = store.get_effective_metadata(media.id, "zh-CN").unwrap().unwrap();
+    assert_eq!(effective.overview.as_deref(), Some("TMDB v2"));
+}
+
+#[test]
+fn invalid_nfo_keeps_the_last_valid_metadata_input() {
+    use domain::{Confidence, FilePresence, FilePublication, FileVersion, LibraryFile, QualitySource, UnitKey};
+    use store::library_write::{FilePublication as StorePublication, WriteScope};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let root = tmp.path().join("movies");
+    std::fs::create_dir_all(&root).unwrap();
+    let library = store
+        .create_library(domain::MediaKind::Movie, "Movies", &[root.to_str().unwrap()], "everyone", true, &[])
+        .unwrap();
+    let root_id = store
+        .list_library_roots()
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.library_id.as_deref() == Some(&library.id))
+        .unwrap()
+        .id;
+    let media = domain::Media {
+        id: domain::MediaId::new(),
+        kind: domain::MediaKind::Movie,
+        title: "NFO".into(),
+        year: None,
+        original_title: None,
+        aliases: vec![],
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&media).unwrap();
+
+    let video = root.join("Movie.mkv");
+    std::fs::write(&video, b"bytes").unwrap();
+    let nfo = video.with_extension("nfo");
+    std::fs::write(&nfo, "<movie><plot>Keep me</plot></movie>").unwrap();
+    let file = LibraryFile {
+        file_id: domain::LedgerId::new(),
+        library_id: library.id.parse().unwrap(),
+        root_id,
+        media_id: media.id,
+        kind: domain::MediaKind::Movie,
+        path: video,
+        version: FileVersion { revision: 1, source_version: "v1".into() },
+        presence: FilePresence::Present,
+        publication: FilePublication::Published,
+        size_bytes: Some(5),
+        stat_known: true,
+        created_ns: None,
+        modified_ns: None,
+        source_digest: None,
+        source_path: None,
+        transfer_mode: None,
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: None,
+        release_quality: None,
+        duration_ms: None,
+        tracks_version: 0,
+        poster_path: None,
+        backdrop_path: None,
+        still_path: None,
+    };
+    let scope = WriteScope { library_id: library.id.parse().unwrap(), config_revision: 0 };
+    let publish = |file: &LibraryFile| {
+        store
+            .publish_files(
+                &scope,
+                &[StorePublication {
+                    file,
+                    units: &[UnitKey::WHOLE],
+                    expected_version: None,
+                    probe_required: false,
+                }],
+                1,
+            )
+            .unwrap();
+    };
+    publish(&file);
+    let before = store
+        .library_item_detail(scope.library_id, media.id, "")
+        .unwrap()
+        .unwrap()
+        .metadata
+        .overview
+        .value()
+        .cloned();
+    assert_eq!(before.as_deref(), Some("Keep me"));
+
+    std::fs::write(&nfo, "<movie><plot>broken").unwrap();
+    publish(&file);
+    let after = store
+        .library_item_detail(scope.library_id, media.id, "")
+        .unwrap()
+        .unwrap()
+        .metadata
+        .overview
+        .value()
+        .cloned();
+    assert_eq!(after, before, "an unparsable sidecar must not erase the last valid input");
+}
