@@ -315,6 +315,10 @@ impl Store {
         removal_cleanup_failpoint()?;
         let tx = self.library.unchecked_transaction()?;
         tx.execute(
+            "DELETE FROM unidentified WHERE library_id=?1",
+            [&removal.library_id],
+        )?;
+        tx.execute(
             "DELETE FROM library_roots WHERE library_id=?1",
             [&removal.library_id],
         )?;
@@ -356,9 +360,12 @@ impl Store {
         snapshot: &Snapshot,
         library_id: &str,
     ) -> Result<(), StoreError> {
+        let mut seen_files = std::collections::HashSet::new();
         for row in &snapshot.rows {
+            if !seen_files.insert(&row.ledger_id) {
+                continue;
+            }
             let current = self
-                .library
                 .query_row(
                     "SELECT f.display_path, f.media_id, u.season, u.episode
                      FROM library_files f

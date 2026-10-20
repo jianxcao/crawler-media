@@ -137,20 +137,12 @@ impl Dimension {
                 ("missing".into(), "i.missing = 1".into(), true),
                 ("unscraped".into(), "i.scraped = 0".into(), true),
             ],
-            Self::Watch => {
-                let mut values = ["unwatched", "watching", "played"]
-                    .into_iter()
-                    .map(|value| {
-                        (
-                            value.to_string(),
-                            format!("({WATCH_TIER_SQL}) = '{value}'"),
-                            true,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                values.push(("favorite".into(), "COALESCE(u.favorite, 0) = 1".into(), false));
-                values
-            }
+            Self::Watch => vec![
+                ("unwatched".into(), format!("({WATCH_TIER_SQL}) = 0"), true),
+                ("watching".into(), format!("({WATCH_TIER_SQL}) = 1"), true),
+                ("played".into(), format!("({WATCH_TIER_SQL}) = 2"), true),
+                ("favorite".into(), "COALESCE(u.favorite, 0) = 1".into(), false),
+            ],
             _ => Vec::new(),
         }
     }

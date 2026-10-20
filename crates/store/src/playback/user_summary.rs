@@ -371,7 +371,7 @@ fn map_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<Summary> {
 /// most recent assertion wins and an equal timestamp prefers the more specific
 /// coordinate (episode, then season, then whole). A movie's legacy `(0, 0)`
 /// row is considered alongside its canonical `(-1, -1)` row.
-fn effective_played(
+pub(crate) fn effective_played(
     is_tv: bool,
     facts: &HashMap<(i32, i32), PlaybackFact>,
     season: i32,

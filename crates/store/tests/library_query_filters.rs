@@ -646,7 +646,7 @@ fn facets_count_each_dimension_without_its_own_condition() {
             .iter()
             .map(|count| (count.value.as_str(), count.count))
             .collect::<Vec<_>>(),
-        [("unwatched", 0), ("watching", 0), ("played", 0)]
+        [("unwatched", 3), ("watching", 0), ("played", 0)]
     );
 
     // `primary` fills only the four panel dimensions.

@@ -1420,6 +1420,7 @@ export async function getLibraryItemDetail(
     tmdb_id: r.tmdb_id == null ? null : str(r.tmdb_id),
     overview: r.overview == null ? null : str(r.overview),
     rating: r.rating == null ? null : str(r.rating),
+    content_rating: r.content_rating == null ? null : str(r.content_rating),
     runtime_minutes: r.runtime_minutes == null ? null : str(r.runtime_minutes),
     genres: Array.isArray(r.genres) ? (r.genres as unknown[]).map((g) => str(g)) : [],
     cast: Array.isArray(r.cast)

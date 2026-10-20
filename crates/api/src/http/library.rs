@@ -602,6 +602,7 @@ pub(crate) async fn item_detail(
         "poster_url": item.poster_ref.map(|file_id| artwork_url("posters", file_id)),
         "backdrop_url": item.backdrop_ref.map(|file_id| artwork_url("fanart", file_id)),
         "files": files,
+        "next_file_cursor": detail.next_file_cursor,
     }))
     .into_response()
 }
