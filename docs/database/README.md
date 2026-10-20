@@ -55,18 +55,18 @@ flowchart TD
 
 ## 4. 当前生产接线与缺口
 
-| 能力 | 当前代码事实 | 不可据此声称 |
+| 能力 | 当前代码事实 | 仍不可据此声称 |
 |---|---|---|
 | 新库启动 | Store 拒绝错误/未知布局，创建新四库；旧浏览表已删除 | 允许旧库导入或就地猜测兼容 |
-| Web Library 列表 | `http/library.rs` 读取 `library_item_page`，过滤/排序在 SQL | HTTP 已贯通 cursor；当前仍 offset，省略 limit 可返回全部 |
-| 文件详情 | Store 文件页有 cursor；HTTP 只暴露首 50 行 | 前端已支持完整详情分页 |
-| Jellyfin | 输出逻辑 ItemId；生产 selection 仍从文件候选读 NFO/部分 stat，在 Rust 筛选排序 | 新 `protocol_item_page` 已接通、查询只读采用元数据 |
-| 元数据采用 | 新表/规范化接口存在；生产 Scrape 只接部分展示字段及 NFO | 完整 work/season/episode 采用已接通，清缓存独立性已全链路验收 |
-| Playback | Web 开始会话使用源感知解析；实际心跳仍走旧 unit writer | 两协议全部使用同一个绑定写入器/恢复解析器 |
-| 文件事务 | 已有局部公共摘要归约和复合约束 | 所有入口都同事务维护用户摘要、源版本、完整多集覆盖 |
-| 根/locale/integrity | `library_operations` 和 integrity 字段已建；未发现完整运行处理器 | 有界校验修复、可恢复重归属/语言切换已交付 |
+| Web Library 列表 | `http/library.rs` 读取 `library_item_page`，过滤/排序在 SQL | 省略 limit 已改为有界默认页 |
+| 文件详情 | Store 文件页有 cursor；HTTP 返回 `next_file_cursor` | 前端已自动串联全部文件页 |
+| Jellyfin | 输出逻辑 ItemId；物理多版本折叠为同一逻辑条目；genre/studio/search/person 过滤优先读采用元数据 | Jellyfin 筛选/排序/分页已全部在 SQL 完成 |
+| 元数据采用 | 生产 Scrape 仍只接部分展示字段及 NFO；`adopt_metadata` 未接生产 | 完整 work/season/episode 已自动采用 |
+| Playback | Web 会话取流与会话绑定；自动续播优先原可用源；换源归零 | 所有历史客户端/第三方路径均已验收 |
+| 文件事务 | 文件增删同事务重建受影响用户摘要；多集覆盖与 pending 身份完整 | 所有未来写入口无需再检查不变量 |
+| 根/locale/integrity | 新增嵌套根会重归属文件；删除清理 `Unidentified` 与多覆盖快照 | `library_operations` 的 locale/integrity 操作处理器已交付 |
 
-当前仍存在电影旧 `(0,0)` 回读/复制、`LedgerRow` 有损写适配、路径归属消费者。这些是必须删除/迁完的缺陷，不是应保留的兼容能力。TV `(0,0)`、Jellyfin 协议、明确的跨源恢复拒绝、正常来源回退不是旧数据兼容。
+电影旧 `(0,0)` 的复制、回读与兼容测试已删除；`LedgerRow` 仍作为部分写入口的单集适配层存在，新增写路径必须直接使用 `FileCoverage`。TV `(0,0)`、Jellyfin 协议、明确的跨源恢复拒绝、正常来源回退不是旧数据兼容。
 
 ## 5. 查询与事务边界
 

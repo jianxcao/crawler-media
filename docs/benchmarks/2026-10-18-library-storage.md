@@ -65,3 +65,29 @@
 - **未取得**真实NAS、冷热缓存、并发扫描+心跳的p50/p95、事务/锁等待、busy失败、WAL/索引体积、内存与吞吐报告。
 - **未完成**空库真实API/CLI/Jellyfin/web全链路、重启/清cache/删除重导入，以及多集/换源/NFO/合并恢复的完整验收。
 - 完整目标仍按[设计第8节](../superpowers/specs/2026-10-18-library-storage-redesign.md#8-规模预算增长与验收)执行。先修正确性与干净切换，再基于实际查询证据优化，不删减筛选、权限、精确count或Playback合同来制造达标。
+
+## 1.2 本轮修复后的验证（`feat/storage-redesign`，2026-10-20）
+
+提交范围：`2f59103`…`6d35343`（R1–R9）。命令在本机 debug profile 执行。
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test -p store` | 全部套件通过（含 `metadata_adoption`、`library_removal`、`browse_reads`、`playback_resume_v1`、`file_publication`、`probe_publication`） |
+| `cargo test --workspace` | **通过**，含全部 crate 单元/集成测试与 doc-tests（单次约 523s） |
+| `cargo test -p api --test jellyfin --test jellyfin_paged_metadata --test jellyfin_read_scale` | 63 / 24 / 3 通过 |
+| `cargo test -p store --test adopted_filter_facts --test library_query_filters` | 3 / 8 通过 |
+| `web: npm run typecheck` | 通过 |
+
+本轮新增/改写的回归覆盖：
+
+- self-merge 在任何事实变动前被拒绝（`media_merge_v1`）。
+- Web 会话取流返回真实字节并支持 `Range`（`playback_read_regression`）。
+- 多集覆盖经 Transfer 收尾后完整保留；pending 重试复用身份；TV 有季无集不写非法覆盖。
+- 文件增删同事务重建受影响用户摘要；电影 whole 不再计入分集数。
+- 自动续播优先原可用源、换源归零；电影 `(0,0)` 兼容读写与测试已删除。
+- 观看分面计数正确；详情返回 `next_file_cursor`；`content_rating` 贯通到前端适配。
+- Jellyfin 物理多版本折叠为同一逻辑条目，genre/studio/search/person 过滤读取采用元数据。
+- 来源优先级（tmdb > douban > …）生效；无效/未知 NFO 保留最后有效输入。
+- 多覆盖文件与 Unidentified 不再阻断 Library 删除；新增嵌套根会重归属既有文件并重建两侧摘要。
+
+仍未取得：真实 NAS 冷热缓存、并发扫描+心跳的 p50/p95 与锁等待、100k Media / 1M 文件规模基准、真实 Jellyfin 客户端与浏览器播放验收。这些不因本轮测试通过而自动满足。

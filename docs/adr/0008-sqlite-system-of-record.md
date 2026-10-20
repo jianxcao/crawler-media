@@ -120,11 +120,11 @@ Jinja 模板：MoviePilot 的能力。v1 否决——封闭占位符集合对两
 
 跨文件仍然没有外键，也没有跨文件事务：这一点对这两个库同样成立。
 
-## 后记：新布局已建立，生产干净切换未完成（2026-10-19）
+## 后记：新布局已建立，干净切换已收口（2026-10-20）
 
-本节替代上面的历史文件归属。`a3dab1b` 的生产 DDL 位于
+本节替代上面的历史文件归属。`feat/storage-redesign` 的生产 DDL 位于
 [`crates/store/src/schema/v1/`](../../crates/store/src/schema/v1/)，目标合同见
-[存储重设计](../superpowers/specs/2026-10-18-library-storage-redesign.md)。**五文件布局已经实现，不代表生产读写、协议与删除恢复已端到端验收。**
+[存储重设计](../superpowers/specs/2026-10-18-library-storage-redesign.md)。
 
 | 文件 | 当前布局职责 | 可清空？ |
 |---|---|---|
@@ -134,13 +134,18 @@ Jinja 模板：MoviePilot 的能力。v1 否决——封闭占位符集合对两
 | `jobs.db` | Job 定义、执行／重试及保留游标 | 否（终态历史按保护规则清理） |
 | `cache.db` | 六来源外部响应缓存（每来源一表） | 是（受控清理，不 unlink 活跃 WAL 文件） |
 
-相对原决策，Media 与 Playback 已迁入 `library.db`；旧浏览投影表/重建链已移除，新摘要为 `library_items`、`library_units`、`library_item_terms`；`catalog.db`/`fanart.db` 由按来源分表的 `cache.db` 取代。Store 布局入口校验 `application_id` 与 `user_version`，没有旧数据库导入器或兼容视图；跨文件仍没有外键或原子事务。
+Media 与 Playback 已迁入 `library.db`；旧浏览投影表/重建链已移除；`catalog.db`/`fanart.db` 由按来源分表的 `cache.db` 取代。Store 布局入口校验 `application_id` 与 `user_version`，没有旧数据库导入器或兼容视图；跨文件仍没有外键或原子事务。
 
-**未完成的干净切换是缺陷，不是支持的兼容合同：**
+2026-10-20 的 R1–R8 修复（`2f59103`…`6d35343`）关闭了此前的阻塞项：
 
-- movie 的旧 whole `(0,0)` 复制/回退分支仍存在于 Store 与 API；必须统一为 `(-1,-1)`，同时保留 TV S00E00 的真实分集语义。
-- `LedgerRow` 及其写入适配器仍被生产调用；单集形状不能无损表达多集覆盖、源版本与显式归属。新文件表有这些列，不证明每个调用方已传递完整事实。
-- `protocol_item_page`、`adopt_metadata`、`commit_playback_event` 虽有 Store 实现，但 API 生产消费者尚未接入，不能据此宣称协议分页、字段采用或会话/历史原子提交已完成。
-- 前次真实 API/Store 烟测已暴露播放、分面、重导入用户摘要、多集 Transfer、无效 NFO、来源优先级、合并原子性及删除保护问题。历史复现不自动证明新提交仍失败；也不能被表创建或局部测试通过抵消。
+- 电影旧 whole `(0,0)` 的复制、回读、断言归约与兼容测试已删除；movie/video 一律 `(-1,-1)`，TV S00E00 仍是真实分集。
+- Transfer 收尾直接使用完整 `FileCoverage`，多集覆盖不再被单集形状截断；pending 重试复用已有身份。
+- 生产心跳/会话改用会话绑定的物理源；自动续播优先仍可用的原源，换源返回 `source_changed` 且起点归零。
+- 文件增删在同一事务重建受影响用户摘要；观看分面、详情续页、`content_rating` 已贯通。
+- Jellyfin 物理多版本折叠为同一逻辑条目；genre/studio/search/person 过滤读取采用元数据，NFO 仅作无采用行时的兜底。
+- 采用元数据按固定来源优先级合并；无效/未知 NFO 保留最后有效输入。
+- 多覆盖文件与 `Unidentified` 不再阻断 Library 删除；新增嵌套根会在同一事务重归属文件并重建两侧摘要。
 
-当前数据库字段、键与索引以[数据库文档](../database/README.md)为准；历史验证及查询工作量见[证据报告](../benchmarks/2026-10-18-library-storage.md)。`a3dab1b` 已有用户的扫描 checkpoint 失效修复，尚未重跑相关门禁；既不能沿用旧失败当当前结论，也不能标全绿。后续修复与完整验收按[切换修复计划](../superpowers/plans/2026-10-19-storage-cutover-remediation.md)执行，不恢复双读双写或旧模型兼容层。
+本机稳定树 `cargo test --workspace` 与前端 `typecheck` 已通过，记录见[证据报告](../benchmarks/2026-10-18-library-storage.md)第 1.2 节。**仍未完成**：真实 NAS 冷热缓存、并发扫描+心跳的 p50/p95/锁等待、100k Media / 1M 文件规模基准，以及真实 Jellyfin 客户端与浏览器播放验收。这些不因单元/集成测试通过而自动满足。
+
+当前数据库字段、键与索引以[数据库文档](../database/README.md)为准。后续性能工作按[切换修复计划](../superpowers/plans/2026-10-19-storage-cutover-remediation.md)的 O1–O3 执行，不恢复双读双写或旧模型兼容层。
