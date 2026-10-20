@@ -28,7 +28,7 @@ pub(super) fn resolve_target(
     let (season, episode) = (entry.unit.0, entry.unit.1);
     let duration_ms = {
         let store = provider.state.store.lock();
-        crate::http::playback::movie_compatible_state(
+        crate::http::playback::effective_watch_state(
             &store,
             user_id,
             entry.media.id,

@@ -325,7 +325,7 @@ pub(crate) async fn collection_gallery(
                 }
             }
             // 真实收藏态：whole unit；movie 沿用既有 legacy (0,0) 兜底。
-            let is_favorite = crate::http::playback::movie_compatible_state(
+            let is_favorite = crate::http::playback::effective_watch_state(
                 &store,
                 user_id,
                 item.media.id,

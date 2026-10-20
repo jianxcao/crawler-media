@@ -79,8 +79,8 @@ impl Store {
                 }
             }
         };
-        // A missing unit is favourite-only. Do not insert an empty canonical
-        // row first: that would block the legacy whole-file copy above.
+        // A missing unit is favourite-only: the UPDATE below leaves every other
+        // fact absent rather than materialising an inherited played mark.
         let changed = self.library.execute(
             "UPDATE playback_units SET favorite = ?5, favorite_at = ?6
              WHERE user_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4",
@@ -310,20 +310,6 @@ impl Store {
         )?;
         self.unit_state(user_id, media_id, season, episode)?
             .ok_or_else(|| StoreError::Missing("unit just written".into()))
-    }
-
-    /// Copy a legacy `(0, 0)` watch unit onto the canonical `(-1, -1)` unit for
-    /// whole-file media, then retire that obsolete row. A canonical row that
-    /// only records a favourite has no playback authority: its playback fields
-    /// are filled from the legacy row and its favourite clock is kept. TV keeps
-    /// `(0, 0)` as a real season/episode pair. Both writes stay in the caller's
-    /// transaction.
-    pub fn copy_legacy_movie_unit_if_missing(
-        &self,
-        _user_id: UserId,
-        _media_id: MediaId,
-    ) -> Result<(), StoreError> {
-        Ok(())
     }
 
     /// All distinct media ids and their most recent activity timestamp for a user.

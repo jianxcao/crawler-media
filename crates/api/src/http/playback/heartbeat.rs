@@ -7,7 +7,7 @@ use axum::{
 };
 use serde_json::Value;
 
-use super::{movie_compatible_state, row_for, watch_state_json};
+use super::{effective_watch_state, row_for, watch_state_json};
 use crate::store::{SessionRow, StoreError, UNIT_WHOLE, UnitState};
 use crate::{
     http::{err, ok},
@@ -115,7 +115,7 @@ fn unit_duration(
     season: i32,
     episode: i32,
 ) -> Result<Option<i64>, StoreError> {
-    if let Some(duration) = movie_compatible_state(store, user, row.media_id, season, episode)?
+    if let Some(duration) = effective_watch_state(store, user, row.media_id, season, episode)?
         .and_then(|unit| unit.duration_ms)
     {
         return Ok(Some(duration));

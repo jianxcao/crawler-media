@@ -38,14 +38,14 @@ fn resolve_media_id(raw: &str) -> Option<domain::MediaId> {
     domain::MediaId::from_str(raw).ok()
 }
 
-pub(super) fn movie_compatible_unit(
+pub(super) fn effective_watch_json(
     store: &crate::Store,
     user_id: domain::UserId,
     media_id: domain::MediaId,
     season: i32,
     episode: i32,
 ) -> Value {
-    match movie_compatible_state(store, user_id, media_id, season, episode) {
+    match effective_watch_state(store, user_id, media_id, season, episode) {
         Ok(Some(unit)) => unit_json(&unit),
         Ok(None) => unit_for_unit(store, user_id, media_id, season, episode),
         Err(error) => {
@@ -55,7 +55,7 @@ pub(super) fn movie_compatible_unit(
     }
 }
 
-pub(crate) fn movie_compatible_state(
+pub(crate) fn effective_watch_state(
     store: &crate::Store,
     user_id: domain::UserId,
     media_id: domain::MediaId,

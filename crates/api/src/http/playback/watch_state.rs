@@ -36,7 +36,7 @@ pub(crate) async fn resume(
         .unwrap_or(UNIT_WHOLE);
     let store = state.store.lock();
     let (season, episode) = super::selection::watch_unit(&store, media_id, season, episode);
-    ok(super::movie_compatible_unit(
+    ok(super::effective_watch_json(
         &store, user_id, media_id, season, episode,
     ))
     .into_response()
@@ -66,7 +66,7 @@ pub(crate) async fn marks(
     let store = state.store.lock();
     let (season, episode) = super::selection::watch_unit(&store, media_id, season, episode);
     let rows = store.unit_rows(user_id, media_id).unwrap_or_default();
-    let watch = super::movie_compatible_unit(&store, user_id, media_id, season, episode);
+    let watch = super::effective_watch_json(&store, user_id, media_id, season, episode);
     ok(json!({
         "played": watch["played"].as_bool().unwrap_or(false),
         "is_favorite": favorite_for(&store, user_id, media_id, season, episode, &rows),
@@ -170,7 +170,7 @@ pub(crate) async fn set_marks(
             &error.to_string(),
         );
     }
-    let unit = super::movie_compatible_unit(&store, user_id, media_id, season, episode);
+    let unit = super::effective_watch_json(&store, user_id, media_id, season, episode);
     ok(json!({
         "played": unit["played"].as_bool().unwrap_or(false),
         "is_favorite": unit["is_favorite"].as_bool().unwrap_or(false),
