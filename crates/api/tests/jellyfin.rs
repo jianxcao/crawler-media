@@ -243,3 +243,5 @@ mod metadata_parity;
 mod metadata_scrape;
 #[path = "jellyfin/people.rs"]
 mod people;
+#[path = "jellyfin/versions.rs"]
+mod versions;

@@ -32,7 +32,7 @@ use light::{
     build_light_items, merge_filter_facts, needs_filter_facts, paths_date_created,
     set_date_created, LightItem,
 };
-use scope::read_scope;
+use scope::{ScopedRead, read_scope};
 
 /// 选择阶段允许的 blocking 预算（与 `list_visible_items` 一致）。
 const SELECTION_DEADLINE: Duration = Duration::from_secs(30);
@@ -102,18 +102,21 @@ fn select_items_blocking(
     if scope.unresolved {
         return Ok(ServerItemPage::default());
     }
-    // 复杂 NFO 过滤的冷启动成本是线性的（每条候选一次 NFO 读）：显式记录，不假装
-    // 全部落在 SQL seek 上。
+    // 过滤公共字段优先读已采纳的元数据（与 Web 浏览同一份口径）；只有没有采纳行的
+    // 媒体才回退到 NFO，所以冷启动成本不再是「每条候选一次 NFO 读」。
     if needs_filter_facts(&query, scope.unknown_parent) {
+        let adopted = adopted_filter_facts(state, &scope, &items)?;
         tracing::debug!(
             candidates = items.len(),
-            "Jellyfin 选择按查询需要读取 NFO 公共字段（线性成本）"
+            adopted = adopted.len(),
+            "Jellyfin 选择按查询需要读取过滤公共字段"
         );
         for item in &mut items {
             let facts = item_metadata::filter_facts(
                 &item.snapshot.row,
                 &item.snapshot.media,
                 item.snapshot.is_series,
+                adopted.get(&item.snapshot.media.id),
             );
             item.snapshot.metadata =
                 merge_filter_facts(std::mem::take(&mut item.snapshot.metadata), facts);
@@ -159,6 +162,9 @@ fn select_items_blocking(
     }
     let mut kept: Vec<LightItem> = items;
     kept.retain(|item| matches_query(&item.snapshot, &query));
+    // 同一逻辑条目的多份物理版本（协议 id 相同）必须先折叠：否则 total 会被物理行数
+    // 放大，客户端还会收到重复 ItemId。折叠发生在排序/计数/分页之前。
+    let mut kept = dedupe_by_logical_item(kept);
     let (default_sort, default_order) = default_sort_for_items(kept.iter().map(|item| &item.snapshot));
     let sort_by = query.sort_by.clone().unwrap_or_else(|| default_sort.to_string());
     let sort_order = query
@@ -367,4 +373,76 @@ fn count_heavy(state: &ApiState, heavy: usize) {
         candidates = state.jellyfin_candidates.load(Ordering::SeqCst),
         "Jellyfin 选择工作量：候选与重元数据条数"
     );
+}
+
+/// 逻辑条目去重：协议 id 相同的多份物理版本只保留最佳物理源。
+///
+/// 保留顺序是候选首次出现的顺序；同一逻辑条目取 `file_revision` 最大的一份，
+/// revision 相同取 `file_id` 最小的一份，播放因此仍偏向最新版本。
+fn dedupe_by_logical_item(items: Vec<LightItem>) -> Vec<LightItem> {
+    let mut order: Vec<domain::TypedItemId> = Vec::new();
+    let mut best: HashMap<domain::TypedItemId, LightItem> = HashMap::new();
+    for item in items {
+        let key = item.snapshot.item_identity();
+        match best.entry(key.clone()) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                order.push(key);
+                slot.insert(item);
+            }
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                if source_preference(&item) < source_preference(slot.get()) {
+                    slot.insert(item);
+                }
+            }
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|key| best.remove(&key))
+        .collect()
+}
+
+/// 物理源偏好：`file_revision` 越大越好，同 revision 时 `file_id` 越小越好。
+fn source_preference(item: &LightItem) -> (std::cmp::Reverse<i64>, uuid::Uuid) {
+    (
+        std::cmp::Reverse(item.snapshot.file.version.revision),
+        item.snapshot.file.file_id.as_uuid(),
+    )
+}
+
+/// 过滤公共字段：一次批量读已采纳的元数据，按 Media 去重后交给 [`item_metadata::filter_facts`]。
+fn adopted_filter_facts(
+    state: &ApiState,
+    scope: &ScopedRead,
+    items: &[LightItem],
+) -> Result<HashMap<MediaId, store::library_query::AdoptedFilterFacts>, String> {
+    let mut media_ids: Vec<MediaId> = items.iter().map(|item| item.snapshot.media.id).collect();
+    media_ids.sort_by_key(|id| id.as_uuid());
+    media_ids.dedup();
+    if media_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let store = state.store.lock();
+    let locale = filter_locale(&store, scope.requested_library.as_deref());
+    store
+        .adopted_filter_facts(&media_ids, &locale)
+        .map_err(|error| {
+            tracing::error!(%error, "failed to load adopted metadata for Jellyfin filter facts");
+            error.to_string()
+        })
+}
+
+/// 过滤口径的 locale：请求库的显示语言（已含实例默认回退），否则实例默认。
+fn filter_locale(store: &crate::Store, library: Option<&str>) -> String {
+    if let Some(locale) = library
+        .and_then(|id| id.parse::<domain::LibraryId>().ok())
+        .and_then(|id| store::library_query::library_display_locale(store, id).ok().flatten())
+    {
+        return locale;
+    }
+    store
+        .get_setting(crate::settings_keys::METADATA_LANGUAGE)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }

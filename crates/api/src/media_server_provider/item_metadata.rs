@@ -80,16 +80,41 @@ pub(super) fn item_db_facts(
     ItemDbFacts { resume_state, tracks, is_favorite: favorite.is_some_and(|unit| unit.state.favorite) }
 }
 
-/// 过滤/排序需要的 NFO 公共字段（genre/studio/person/search 命中）。
+/// 过滤/排序需要的公共字段（genre/studio/person/search 命中）。
 ///
-/// 只有在查询真的用到这些字段时才读 NFO，所以复杂 NFO 过滤的冷启动成本是
-/// **线性**的（每条候选一次 NFO 读），调用方必须显式记录这份成本，不能假装
-/// 全部落在 SQL seek 上。字段口径与 [`item_metadata`] 完全一致，避免两套语义。
+/// 已采纳的元数据（Web 浏览用的同一份 `media_metadata`）是首选口径：有采纳行时不再
+/// stat/读 NFO，只有没有采纳行的媒体才回退到 NFO。字段口径与 [`item_metadata`] 一致，
+/// 避免两套语义。
 pub(super) fn filter_facts(
     row: &domain::LedgerRow,
     media: &Media,
     is_series: bool,
+    adopted: Option<&store::library_query::AdoptedFilterFacts>,
 ) -> MediaItemMetadata {
+    if let Some(adopted) = adopted {
+        return MediaItemMetadata {
+            overview: adopted.overview.clone(),
+            genres: adopted.genres.clone(),
+            studios: adopted.studios.clone(),
+            original_title: media.original_title.clone(),
+            people: adopted
+                .people
+                .iter()
+                .map(|person| crate::media_server_provider::MediaPerson {
+                    id: person
+                        .tmdb_id
+                        .clone()
+                        .unwrap_or_else(|| person.name.clone()),
+                    name: person.name.clone(),
+                    role: person.role.clone(),
+                    person_type: "Actor".into(),
+                    tmdb_id: person.tmdb_id.clone(),
+                    primary_image_url: None,
+                })
+                .collect(),
+            ..Default::default()
+        };
+    }
     let nfo = row_nfo_metadata(row, media, is_series);
     MediaItemMetadata {
         overview: nfo.as_ref().and_then(|metadata| metadata.plot.clone()),

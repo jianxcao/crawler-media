@@ -4,7 +4,7 @@
 //! wrote (`library_metadata_inputs`) fill the gaps. Nothing here touches the filesystem, so a
 //! detail request never stats a network share.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 
 use domain::{FieldValue, LedgerId, LibraryId, MediaId, MetadataFields, UnitKey};
@@ -13,6 +13,27 @@ use rusqlite::{OptionalExtension, params, params_from_iter};
 use super::super::{Store, StoreError};
 use super::items::{Bindings, ITEM_COLUMNS, item_from_row};
 use super::types::{BrowsePage, LibraryEpisode, LibraryItemDetail, LibraryUnit, UnitPage};
+
+/// Adopted work metadata the browse filters agree on: genres, studios and countries.
+///
+/// The web library browse reads the same `media_metadata` row, so a Jellyfin genre or studio
+/// filter reaches the same verdict as the web filter for the same item.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AdoptedFilterFacts {
+    pub genres: Vec<String>,
+    pub studios: Vec<String>,
+    pub countries: Vec<String>,
+    pub overview: Option<String>,
+    pub people: Vec<AdoptedPerson>,
+}
+
+/// One cast member of an adopted metadata row, provider-neutral.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AdoptedPerson {
+    pub name: String,
+    pub role: Option<String>,
+    pub tmdb_id: Option<String>,
+}
 
 /// Instance-wide metadata language, `settings_keys::METADATA_LANGUAGE` of the API crate: the
 /// KV key is the contract, and the store must not depend on the API crate for it.
@@ -26,7 +47,7 @@ fn instance_default_locale(store: &Store) -> Result<Option<String>, StoreError> 
 }
 
 /// Display locale of one library, falling back to the instance default.
-pub(crate) fn library_display_locale(
+pub fn library_display_locale(
     store: &Store,
     library_id: LibraryId,
 ) -> Result<Option<String>, StoreError> {
@@ -74,6 +95,79 @@ impl Store {
             }
         }
         Ok(locales.into_iter().next())
+    }
+
+    /// Adopted work metadata of a candidate set, one query per id batch.
+    ///
+    /// The requested locale wins, then the instance default, then the deterministically first
+    /// locale (`ORDER BY locale`). A malformed payload is skipped with a warning so one bad row
+    /// never fails a whole page; the caller's NFO fallback covers that media instead.
+    pub fn adopted_filter_facts(
+        &self,
+        media_ids: &[MediaId],
+        locale: &str,
+    ) -> Result<HashMap<MediaId, AdoptedFilterFacts>, StoreError> {
+        if media_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let requested = locale.trim();
+        let instance = instance_default_locale(self)?;
+        let mut picked: HashMap<MediaId, (bool, AdoptedFilterFacts)> = HashMap::new();
+        for chunk in media_ids.chunks(crate::browse_reads::MEDIA_BATCH_CHUNK) {
+            self.read_adopted_facts_batch(chunk, requested, instance.as_deref(), &mut picked)?;
+        }
+        Ok(picked
+            .into_iter()
+            .map(|(media_id, (_, facts))| (media_id, facts))
+            .collect())
+    }
+
+    /// One `IN (...)` batch of [`Self::adopted_filter_facts`], merged into `picked`.
+    fn read_adopted_facts_batch(
+        &self,
+        media_ids: &[MediaId],
+        requested: &str,
+        instance: Option<&str>,
+        picked: &mut HashMap<MediaId, (bool, AdoptedFilterFacts)>,
+    ) -> Result<(), StoreError> {
+        let list = (1..=media_ids.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT media_id, locale, genres_json, countries_json, details_json
+             FROM media_metadata WHERE media_id IN ({list}) ORDER BY media_id, locale"
+        );
+        let mut statement = self.library.prepare(&sql)?;
+        let mut rows =
+            statement.query(params_from_iter(media_ids.iter().map(|id| id.to_string())))?;
+        while let Some(row) = rows.next()? {
+            let media_raw: String = row.get(0)?;
+            let row_locale: String = row.get(1)?;
+            let genres_json: String = row.get(2)?;
+            let countries_json: String = row.get(3)?;
+            let details_json: String = row.get(4)?;
+            let Ok(media_id) = media_raw.parse::<MediaId>() else {
+                continue;
+            };
+            let exact = (!requested.is_empty() && row_locale == requested)
+                || instance == Some(row_locale.as_str());
+            // `ORDER BY locale` makes the first row of a media the deterministic fallback; an
+            // exact-locale row replaces it.
+            if picked
+                .get(&media_id)
+                .is_some_and(|(kept_exact, _)| *kept_exact || !exact)
+            {
+                continue;
+            }
+            let Some(facts) =
+                adopted_facts_from_json(&genres_json, &countries_json, &details_json, media_id)
+            else {
+                continue;
+            };
+            picked.insert(media_id, (exact, facts));
+        }
+        Ok(())
     }
 
     /// One item row, by the same column list every card query uses.
@@ -425,6 +519,89 @@ fn fill<T>(field: &mut FieldValue<T>, value: Option<T>) {
         if let Some(value) = value {
             *field = FieldValue::Value(value);
         }
+    }
+}
+
+/// Parse one adopted row into filter facts. `None` means a payload is malformed: the row is
+/// skipped (with a warning) so the caller can keep the next locale or its NFO fallback.
+fn adopted_facts_from_json(
+    genres_json: &str,
+    countries_json: &str,
+    details_json: &str,
+    media_id: MediaId,
+) -> Option<AdoptedFilterFacts> {
+    let genres = parse_adopted_json(genres_json, media_id, "genres_json")?;
+    let countries = parse_adopted_json(countries_json, media_id, "countries_json")?;
+    let details = parse_adopted_json(details_json, media_id, "details_json")?;
+    let fields = details.get("fields");
+    Some(AdoptedFilterFacts {
+        genres: json_names(&genres),
+        studios: fields
+            .and_then(|fields| fields.get("studios"))
+            .map(json_names)
+            .unwrap_or_default(),
+        countries: json_names(&countries),
+        overview: fields
+            .and_then(|fields| fields.get("overview"))
+            .and_then(|overview| overview.get("value"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        people: fields
+            .and_then(|fields| fields.get("cast"))
+            .and_then(|cast| cast.get("value"))
+            .and_then(|cast| cast.as_array())
+            .map(|cast| {
+                cast.iter()
+                    .filter_map(|member| {
+                        Some(AdoptedPerson {
+                            name: member.get("name")?.as_str()?.to_string(),
+                            role: member
+                                .get("role")
+                                .and_then(|role| role.as_str())
+                                .map(str::to_string),
+                            tmdb_id: member
+                                .get("tmdb_id")
+                                .and_then(|id| id.as_str())
+                                .map(str::to_string),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
+}
+
+fn parse_adopted_json(
+    raw: &str,
+    media_id: MediaId,
+    field: &str,
+) -> Option<serde_json::Value> {
+    match serde_json::from_str(raw) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                %media_id,
+                field,
+                "skipping malformed adopted metadata while loading filter facts"
+            );
+            None
+        }
+    }
+}
+
+/// Names of a JSON payload that may be a string, a list, or a `{"name"|"value": …}` object
+/// (`genres_json` holds `{"name": …}` items; `details_json.fields.studios` holds a field value).
+fn json_names(value: &serde_json::Value) -> Vec<String> {
+    match value {
+        serde_json::Value::String(text) => vec![text.clone()],
+        serde_json::Value::Array(items) => items.iter().flat_map(json_names).collect(),
+        serde_json::Value::Object(map) => ["name", "value"]
+            .iter()
+            .find_map(|key| map.get(*key))
+            .map(json_names)
+            .unwrap_or_default(),
+        _ => Vec::new(),
     }
 }
 

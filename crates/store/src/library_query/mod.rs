@@ -6,3 +6,4 @@ pub mod types;
 pub mod protocol;
 
 pub use types::*;
+pub use details::{AdoptedFilterFacts, library_display_locale};
