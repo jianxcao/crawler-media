@@ -8,6 +8,7 @@ import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Link } from "react-router-dom";
 import { useNavigate } from "react-router-dom";
 
+import { isPlayableFile } from "@/lib/library-file-pages";
 import { shouldPollProbeDetails } from "@/lib/probe-status";
 import { ArtworkPickerDialog } from "@/components/artwork-picker-dialog";
 import { BrandLoader } from "@/components/brand-loader";
@@ -561,8 +562,8 @@ export function LibraryItemDetailView({
   const trackFiles = isMovie
     ? detail.files
     : (selectedSeriesEpisode?.files ?? []);
-  // 新契约的详情文件没有 state 字段：返回的文件都是可播在位文件
-  const availableTrackFiles = trackFiles;
+  // 缺失/未知的文件仍可查看（保留在列表里说明「文件不在位」），但不作为可播版本。
+  const availableTrackFiles = trackFiles.filter(isPlayableFile);
   const selectedTrackFile =
     availableTrackFiles.find((file) => file.file_id === selectedTrackFileId) ??
     availableTrackFiles[0] ??

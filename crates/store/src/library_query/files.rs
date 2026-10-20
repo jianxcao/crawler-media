@@ -30,6 +30,9 @@ impl Store {
         let lib_id_str = library_id.to_string();
         let media_id_str = media_id.to_string();
         let limit = limit.clamp(1, 100);
+        // Ask for one row beyond the page so the last page reports `next_cursor: null`
+        // instead of pretending a following page exists.
+        let probe = limit + 1;
 
         let decoded = match after {
             Some(raw) => {
@@ -52,10 +55,11 @@ impl Store {
                         poster_path, backdrop_path, still_path
                  FROM library_files
                  WHERE library_id = ?1 AND media_id = ?2 AND file_id > ?3
+                   AND publication_state = 'published'
                  ORDER BY file_id ASC
                  LIMIT ?4"
                     .into(),
-                vec![lib_id_str.into(), media_id_str.into(), cursor.into(), (limit as i64).into()],
+                vec![lib_id_str.into(), media_id_str.into(), cursor.into(), (probe as i64).into()],
             ),
             None => (
                 "SELECT file_id, library_id, root_id, media_id, kind, path_key, display_path,
@@ -66,10 +70,11 @@ impl Store {
                         poster_path, backdrop_path, still_path
                  FROM library_files
                  WHERE library_id = ?1 AND media_id = ?2
+                   AND publication_state = 'published'
                  ORDER BY file_id ASC
                  LIMIT ?3"
                     .into(),
-                vec![lib_id_str.into(), media_id_str.into(), (limit as i64).into()],
+                vec![lib_id_str.into(), media_id_str.into(), (probe as i64).into()],
             ),
         };
 
@@ -149,8 +154,10 @@ impl Store {
             })
         })?;
 
-        let files = rows.collect::<Result<Vec<_>, _>>()?;
-        let next_cursor = if files.len() == limit {
+        let mut files = rows.collect::<Result<Vec<_>, _>>()?;
+        let has_more = files.len() > limit;
+        files.truncate(limit);
+        let next_cursor = if has_more {
             files.last().map(|file| serde_json::to_string(&FileCursor {
                 library_id,
                 media_id,

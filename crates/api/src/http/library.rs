@@ -676,6 +676,16 @@ fn item_file_json(
     json!({
         "file_id": file.file_id.to_string(),
         "path": file.path.to_string_lossy(),
+        // Complete coverage: one physical file may serve several episodes, so the
+        // full unit list travels with it. `season`/`episode` stay as the first
+        // concrete coordinate for consumers that only pick a default version.
+        "units": units
+            .iter()
+            .filter(|unit| !unit.is_whole())
+            .map(|unit| json!({ "season": unit.season, "episode": unit.episode }))
+            .collect::<Vec<_>>(),
+        "presence": file.presence.as_str(),
+        "publication": file.publication.as_str(),
         "season": unit.map(|unit| unit.season).filter(|season| *season >= 0),
         "episode": unit.map(|unit| unit.episode).filter(|episode| *episode >= 0),
         "resolution": file.resolution,

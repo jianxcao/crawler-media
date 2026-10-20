@@ -69,6 +69,26 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 
 每种 `kind` 可以有多个库（多根、可见性、刮削开关等）。完整字段见 [Store Library](<../../crates/store/src/libraries.rs>) 与 `GET /libraries`。
 
+### LibraryItemFile 与文件续页
+
+`GET /libraries/{id}/items/{media_item_id}` 首详情带 `files` 首页与 `next_file_cursor`；
+续页 `GET /libraries/{id}/items/{media_item_id}/files?after=&limit=`（`limit` 为 `1..=100`，默认 50）
+返回 `{files, next_cursor}`。`cursor` 绑定 Library/Media/`file_id ASC` 顺序，越界或跨 scope 一律 400。
+
+单个文件行（`web/lib/api/libraries.ts` 的 `LibraryItemFile`）：
+
+- `file_id`：文件 UUID 字符串；**不是**逻辑 `ItemId`。
+- `units: Array<{season, episode}>`：**完整覆盖**。一个物理文件可同时服务多集（如 E01–E02），
+  不能只用一个 `season`/`episode` 代表全部覆盖；`season`/`episode` 仅作为「首个具体坐标」的便捷字段。
+- `presence: "present" | "missing" | "unknown"`：`missing`/`unknown` **可查看但不可选播**。
+- `publication: "published" | "pending"`：browse/详情/播放版本只读 `published`；`pending` 只出现在管理工作状态。
+- 同文件的质量/轨道字段保持既有形状，不随 `units` 改变。
+
+分页语义：实现用 `limit + 1` 探测，返回恰好 `limit` 行时才给 `next_cursor`，**末页 `next_cursor` 必为 `null`**
+（不允许「刚好整页」时伪造下一页）。前端 `web/lib/library-file-pages.ts` 是唯一遍历实现，
+遇到重复 `file_id` 必须显式失败，不得静默去重。0/49/50/51/100/101 文件边界由
+`crates/api/tests/library_browse_rows.rs` 与 `web/test/library-file-pagination.test.mjs` 覆盖。
+
 ### LibraryFacets
 
 `GET /libraries/{id}/facets`（筛选面板的唯一数据源；前端 `web/lib/api/libraries.ts` 的 `LibraryFacets`）：

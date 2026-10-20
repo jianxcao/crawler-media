@@ -1,6 +1,7 @@
 import { request, resolveRequestUrl } from "@/lib/http";
 import type { LibraryKind, MediaType } from "@/lib/media-types";
 import { waitForLibraryRemoval, type RemovalWaitOptions } from "@/lib/library-removal";
+import { collectAllFilePages } from "@/lib/library-file-pages";
 
 export type { LibraryKind, MediaType };
 
@@ -101,6 +102,11 @@ export interface LibraryItem {
 export interface LibraryItemFile {
   file_id: string;
   path: string;
+  /** 完整覆盖：一个物理文件可服务多集；`season`/`episode` 只是首个具体坐标。 */
+  units?: Array<{ season: number; episode: number }>;
+  /** 在位状态；missing/unknown 仍可查看但不可播放。 */
+  presence?: "present" | "missing" | "unknown";
+  publication?: "published" | "pending";
   season: number | null;
   episode: number | null;
   resolution: string | null;
@@ -1494,19 +1500,13 @@ export async function getAllLibraryItemFiles(
   mediaItemId: string,
   firstPage: LibraryItemFilePage,
 ): Promise<LibraryItemFile[]> {
-  const files: LibraryItemFile[] = [];
-  const seen = new Set<string>();
-  let page = firstPage;
-  while (true) {
-    for (const file of page.files) {
-      if (seen.has(file.file_id)) throw new Error("文件分页出现重复 file_id");
-      seen.add(file.file_id);
-      files.push(file);
-    }
-    if (!page.next_cursor) return files;
-    page = await getLibraryItemFiles(libraryId, mediaItemId, page.next_cursor);
+  // 分页遍历只有一处实现：`lib/library-file-pages.ts` 负责不重不漏与末页判定，
+  // 这里只注入「按 cursor 取下一页」。
+  return collectAllFilePages(firstPage, async (after) => {
+    const page = await getLibraryItemFiles(libraryId, mediaItemId, after);
     if (page.files.length === 0) throw new Error("文件分页 cursor 未推进");
-  }
+    return page;
+  });
 }
 
 /** 剧集条目一季的分集清单（GET /libraries/{id}/items/{itemId}/episodes?season=）。 */
