@@ -41,8 +41,14 @@ impl PublicationRecorder<'_> {
                     return Err("Transfer source or Library configuration changed".into());
                 }
             }
-            // Route reservation to Store publish_files (Pending state)
+            let dest_path_str = candidate.file.path.display().to_string();
+            let existing_pending = store.ledger_by_path(&dest_path_str).map_err(|e| e.to_string())?;
             let mut pending_file = candidate.file.clone();
+            if let Some(existing) = existing_pending {
+                if existing.media_id == candidate.file.media_id {
+                    pending_file.file_id = existing.id;
+                }
+            }
             pending_file.publication = domain::FilePublication::Pending;
             let pub_item = store::library_write::FilePublication {
                 file: &pending_file,

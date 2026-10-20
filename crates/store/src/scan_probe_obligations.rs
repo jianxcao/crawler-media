@@ -118,10 +118,11 @@ impl Store {
                 still_path: artwork.still,
             };
             insert_file_row(&tx, &file)?;
-            let units = [domain::UnitKey::new(
-                row.season.map(|s| s as i32).unwrap_or(-1),
-                row.episode.map(|e| e as i32).unwrap_or(-1),
-            )];
+            let units: Vec<domain::UnitKey> = match (kind, row.season, row.episode) {
+                (domain::MediaKind::Tv, Some(s), Some(e)) => vec![domain::UnitKey::new(s as i32, e as i32)],
+                (domain::MediaKind::Tv, _, _) => vec![],
+                (_, _, _) => vec![domain::UnitKey::WHOLE],
+            };
             sync_coverage(&tx, &file, &units)?;
             if file.publication == domain::FilePublication::Published {
                 // The scan is a publication source: record the NFO sidecar here so

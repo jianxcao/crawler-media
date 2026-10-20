@@ -72,6 +72,15 @@ impl Store {
         )?;
         Ok(n > 0)
     }
+    pub fn get_file_units(&self, file_id: LedgerId) -> Result<Vec<UnitKey>, StoreError> {
+        let mut stmt = self.library.prepare(
+            "SELECT season, episode FROM library_file_units WHERE file_id = ?1 ORDER BY season ASC, episode ASC",
+        )?;
+        let rows = stmt.query_map(params![file_id.to_string()], |row| {
+            Ok(UnitKey::new(row.get(0)?, row.get(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
 
     pub fn ledger_for_media(&self, media_id: MediaId) -> Result<Vec<LedgerRow>, StoreError> {
         self.media_ledger_reads
@@ -302,7 +311,12 @@ impl Store {
             ));
         }
         let file = self.place_ledger_row(row, Some(transfer_mode), source_path)?;
-        let units = ledger_units(row);
+        let existing_units = self.get_file_units(row.id)?;
+        let units = if !existing_units.is_empty() {
+            existing_units
+        } else {
+            ledger_units(row)
+        };
         let expected = FileVersion {
             revision,
             source_version,
