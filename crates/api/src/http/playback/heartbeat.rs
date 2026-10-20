@@ -132,9 +132,7 @@ fn update_unit(
     heartbeat: &Heartbeat<'_>,
     event: &str,
 ) -> Result<UnitState, StoreError> {
-    if (heartbeat.season, heartbeat.episode) == (UNIT_WHOLE, UNIT_WHOLE) {
-        store.copy_legacy_movie_unit_if_missing(heartbeat.user_id, heartbeat.media_id)?;
-    }
+    // canonical whole-media coordinate (-1, -1) used directly
     let existing = store.unit_state(
         heartbeat.user_id,
         heartbeat.media_id,

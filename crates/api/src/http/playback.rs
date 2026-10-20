@@ -63,15 +63,8 @@ pub(crate) fn movie_compatible_state(
     episode: i32,
 ) -> Result<Option<crate::store::UnitState>, crate::store::StoreError> {
     let (season, episode) = selection::watch_unit(store, media_id, season, episode);
-    if let Some(unit) = store.unit_state(user_id, media_id, season, episode)? {
-        return Ok(Some(unit));
-    }
-    if !is_movie_media(store, media_id)? || (season, episode) != (UNIT_WHOLE, UNIT_WHOLE) {
-        return Ok(None);
-    }
-    store.unit_state(user_id, media_id, 0, 0)
+    store.unit_state(user_id, media_id, season, episode)
 }
-
 fn is_movie_media(
     store: &crate::Store,
     media_id: domain::MediaId,

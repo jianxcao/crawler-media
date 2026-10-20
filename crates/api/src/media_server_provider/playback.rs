@@ -325,9 +325,7 @@ fn persist_event_position(
     increment_play_count: bool,
     now: i64,
 ) -> Result<(), StoreError> {
-    if (target.season, target.episode) == (UNIT_WHOLE, UNIT_WHOLE) {
-        store.copy_legacy_movie_unit_if_missing(user_id, target.media.id)?;
-    }
+    // canonical whole-media coordinate (-1, -1) used directly
     let duration = target.duration_ms.or(store
         .unit_state(user_id, target.media.id, target.season, target.episode)?
         .and_then(|unit| unit.duration_ms));

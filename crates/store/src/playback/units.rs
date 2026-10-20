@@ -49,9 +49,7 @@ impl Store {
         now: i64,
     ) -> Result<(), StoreError> {
         self.playback_write(|store| {
-            if (season, episode) == (UNIT_WHOLE, UNIT_WHOLE) {
-                store.copy_legacy_movie_unit_if_missing(user_id, media_id)?;
-            }
+            // canonical whole unit (-1, -1)
             store.set_unit_favorite_inner(user_id, media_id, season, episode, favorite, now)?;
             store.refresh_user_library_summary(
                 user_id,
@@ -322,93 +320,9 @@ impl Store {
     /// transaction.
     pub fn copy_legacy_movie_unit_if_missing(
         &self,
-        user_id: UserId,
-        media_id: MediaId,
+        _user_id: UserId,
+        _media_id: MediaId,
     ) -> Result<(), StoreError> {
-        match self.get_media(media_id)? {
-            Some(media) if media.kind != domain::MediaKind::Tv => {}
-            _ => return Ok(()),
-        }
-        let user = user_id.to_string();
-        let media = media_id.to_string();
-        self.library.execute(
-            "INSERT OR IGNORE INTO playback_units
-                (user_id, media_id, season, episode, position_ms, played, favorite,
-                 duration_ms, audio_track, subtitle_track, play_count, watch_activity_at, favorite_at,
-                 resume_file_id, resume_file_revision, resume_source_version, timeline_mode, tracks_version,
-                 has_played_assertion, played_changed_at_ms)
-             SELECT user_id, media_id, -1, -1, position_ms, played, favorite,
-                    duration_ms, audio_track, subtitle_track, play_count, watch_activity_at, favorite_at,
-                    resume_file_id, resume_file_revision, resume_source_version, timeline_mode, tracks_version,
-                    has_played_assertion, played_changed_at_ms
-             FROM playback_units
-             WHERE user_id = ?1 AND media_id = ?2 AND season = 0 AND episode = 0",
-            params![user, media],
-        )?;
-        // Favourite-only canonical rows carry no playback facts. Fill those
-        // fields from the legacy row without replacing an independently
-        // recorded favourite or its clock.
-        self.library.execute(
-            "UPDATE playback_units AS canonical
-             SET position_ms = legacy.position_ms,
-                 played = legacy.played,
-                 duration_ms = legacy.duration_ms,
-                 audio_track = legacy.audio_track,
-                 subtitle_track = legacy.subtitle_track,
-                 play_count = legacy.play_count,
-                 watch_activity_at = legacy.watch_activity_at,
-                 resume_file_id = legacy.resume_file_id,
-                 resume_file_revision = legacy.resume_file_revision,
-                 resume_source_version = legacy.resume_source_version,
-                 timeline_mode = legacy.timeline_mode,
-                 tracks_version = legacy.tracks_version,
-                 has_played_assertion = legacy.has_played_assertion,
-                 played_changed_at_ms = legacy.played_changed_at_ms
-             FROM playback_units AS legacy
-             WHERE canonical.user_id = ?1 AND canonical.media_id = ?2
-               AND canonical.season = -1 AND canonical.episode = -1
-               AND legacy.user_id = canonical.user_id
-               AND legacy.media_id = canonical.media_id
-               AND legacy.season = 0 AND legacy.episode = 0
-               AND canonical.position_ms = 0 AND canonical.played = 0
-               AND canonical.play_count = 0 AND canonical.watch_activity_at = 0
-               AND canonical.duration_ms IS NULL
-               AND canonical.audio_track IS NULL
-               AND canonical.subtitle_track IS NULL
-               AND (
-                   legacy.position_ms != 0 OR legacy.played != 0
-                   OR legacy.play_count != 0 OR legacy.watch_activity_at != 0
-                   OR legacy.duration_ms IS NOT NULL
-                   OR legacy.audio_track IS NOT NULL
-                   OR legacy.subtitle_track IS NOT NULL
-               )",
-            params![user, media],
-        )?;
-        self.library.execute(
-            "DELETE FROM playback_units
-             WHERE user_id = ?1 AND media_id = ?2 AND season = 0 AND episode = 0
-               AND EXISTS (
-                   SELECT 1 FROM playback_units AS canonical
-                   WHERE canonical.user_id = playback_units.user_id
-                     AND canonical.media_id = playback_units.media_id
-                     AND canonical.season = -1 AND canonical.episode = -1
-                     AND (
-                         canonical.position_ms != 0 OR canonical.played != 0
-                         OR canonical.play_count != 0 OR canonical.watch_activity_at != 0
-                         OR canonical.duration_ms IS NOT NULL
-                         OR canonical.audio_track IS NOT NULL
-                         OR canonical.subtitle_track IS NOT NULL
-                         OR (
-                             playback_units.position_ms = 0 AND playback_units.played = 0
-                             AND playback_units.play_count = 0 AND playback_units.watch_activity_at = 0
-                             AND playback_units.duration_ms IS NULL
-                             AND playback_units.audio_track IS NULL
-                             AND playback_units.subtitle_track IS NULL
-                         )
-                     )
-               )",
-            params![user, media],
-        )?;
         Ok(())
     }
 
@@ -534,9 +448,7 @@ impl Store {
         now: i64,
     ) -> Result<(), StoreError> {
         self.playback_write(|store| {
-            if (season, episode) == (-1, -1) {
-                store.copy_legacy_movie_unit_if_missing(user_id, media_id)?;
-            }
+            // canonical whole unit (-1, -1)
             store.set_unit_marks_inner(user_id, media_id, season, episode, played, favorite, now)?;
             store.refresh_user_library_summary(
                 user_id,

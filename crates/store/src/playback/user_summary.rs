@@ -397,9 +397,6 @@ fn effective_played(
     };
     if (season, episode) == (UNIT_WHOLE, UNIT_WHOLE) {
         consider((UNIT_WHOLE, UNIT_WHOLE), if is_tv { 3 } else { 2 });
-        if !is_tv {
-            consider((0, 0), 1);
-        }
     } else if episode == UNIT_WHOLE {
         consider((season, UNIT_WHOLE), 2);
         consider((UNIT_WHOLE, UNIT_WHOLE), 1);

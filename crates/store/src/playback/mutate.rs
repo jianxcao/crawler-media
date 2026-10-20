@@ -87,13 +87,22 @@ impl Store {
     ) -> Result<ResolvedResume, StoreError> {
         let (media_id, unit) = playback_unit(item);
         let allowed = self.authorized_library_ids(user)?;
-        let source = self
-            .best_source_for_unit(&allowed, media_id, unit, preferred_source)?
-            .ok_or_else(|| StoreError::Missing(format!("no playable source for unit {unit:?}")))?;
         let stored = self.stored_resume(user, media_id, unit)?;
+        let resume_preferred = stored.as_ref().and_then(|s| s.binding.as_ref()).and_then(|b| {
+            let file_id = b.file_id.parse::<domain::LedgerId>().ok()?;
+            Some(PhysicalSourceId { file_id, revision: b.revision })
+        });
+        let source = if let Some(pref) = preferred_source {
+            self.best_source_for_unit(&allowed, media_id, unit, Some(pref))?
+        } else if let Some(resume_pref) = &resume_preferred {
+            self.best_source_for_unit(&allowed, media_id, unit, Some(resume_pref))?
+                .or_else(|| self.best_source_for_unit(&allowed, media_id, unit, None).ok().flatten())
+        } else {
+            self.best_source_for_unit(&allowed, media_id, unit, None)?
+        }
+        .ok_or_else(|| StoreError::Missing(format!("no playable source for unit {unit:?}")))?;
         Ok(resolve_resume(media_id, unit, source, stored, explicit_start_ms))
     }
-
     /// Resume facts for one watch unit; `None` when the user never played it.
     fn stored_resume(
         &self,

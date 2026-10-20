@@ -559,58 +559,6 @@ async fn clear_history_preserves_favorites_and_preferences() {
     assert!(store.user_active_media_ids(admin()).unwrap().is_empty());
 }
 
-#[tokio::test]
-async fn jellyfin_preserves_legacy_movie_marks() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (app, media, id) = app(tmp.path());
-    let store = Store::open(tmp.path().join("data")).unwrap();
-    let session = issue_session(&store, "actual-device", media);
-    seed_legacy_movie_unit(
-        tmp.path(),
-        media,
-        45000,
-        true,
-        true,
-        Some(120000),
-        Some("embedded:1"),
-        Some("off"),
-        1,
-    );
-    assert_eq!(
-        send(
-            &app,
-            "POST",
-            "/Sessions/Playing",
-            "Bearer admin-token",
-            json!({"ItemId":id,"PositionTicks":450000000,"PlaySessionId":session}),
-            Some("actual-device")
-        )
-        .await
-        .status(),
-        StatusCode::NO_CONTENT
-    );
-    let state = store.unit_state(admin(), media, -1, -1).unwrap().unwrap();
-    assert!(state.played);
-    assert!(state.favorite);
-    assert_eq!(state.duration_ms, Some(120000));
-    assert_eq!(state.audio_track.as_deref(), Some("embedded:1"));
-    assert_eq!(state.subtitle_track.as_deref(), Some("off"));
-    assert_eq!(state.play_count, 2);
-    let body = json(
-        send(
-            &app,
-            "GET",
-            &format!("/api/v1/playback/resume?media_item_id={media}"),
-            "Bearer admin-token",
-            json!({}),
-            None,
-        )
-        .await,
-    )
-    .await;
-    assert_eq!(body["data"]["played"], true);
-    assert_eq!(body["data"]["is_favorite"], true);
-}
 
 #[path = "playback_regression/failures.rs"]
 mod failures;
