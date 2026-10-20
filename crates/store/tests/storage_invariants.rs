@@ -354,3 +354,145 @@ fn republishing_identical_facts_keeps_the_revision() {
     assert_eq!(report.updated, 0);
     assert!(store.get_file_details(file.file_id).unwrap().is_none());
 }
+
+#[test]
+fn incremental_episode_add_refreshes_existing_user_summary() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let show = media(&store, "00000000-0000-0000-0000-000000000008", "Series", MediaKind::Tv);
+    let (lib, root_id) = library(&store, "TV", MediaKind::Tv, "/tv");
+    let lib_id = lib.id.parse::<domain::LibraryId>().unwrap();
+    let scope = WriteScope {
+        library_id: lib_id,
+        config_revision: 0,
+    };
+
+    // First publish Episode 1
+    let file1 = file(
+        "00000000-0000-0000-0001-000000000008",
+        &lib,
+        &root_id,
+        &show,
+        "/tv/Series/S01E01.mkv",
+    );
+    store
+        .publish_files(
+            &scope,
+            &[StorePublication {
+                file: &file1,
+                units: &[UnitKey::new(1, 1)],
+                expected_version: None,
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            1_000,
+        )
+        .unwrap();
+
+    let user_id = domain::UserId::new();
+    // Mark Episode 1 as played
+    store
+        .set_unit_marks(user_id, show.id, 1, 1, Some(true), None, 2_000)
+        .unwrap();
+
+    let summary_before = store.get_user_library_summary(user_id, lib_id, show.id).unwrap().unwrap();
+    assert_eq!((summary_before.owned_episode_count, summary_before.completed_episode_count), (1, 1));
+    assert!(summary_before.played);
+
+    // Now publish Episode 2 incrementally (single file publish)
+    let file2 = file(
+        "00000000-0000-0000-0001-000000000009",
+        &lib,
+        &root_id,
+        &show,
+        "/tv/Series/S01E02.mkv",
+    );
+    store
+        .publish_files(
+            &scope,
+            &[StorePublication {
+                file: &file2,
+                units: &[UnitKey::new(1, 2)],
+                expected_version: None,
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            3_000,
+        )
+        .unwrap();
+
+    let summary = store.get_user_library_summary(user_id, lib_id, show.id).unwrap().unwrap();
+    assert_eq!((summary.owned_episode_count, summary.completed_episode_count), (2, 1));
+    assert_eq!((summary.next_season, summary.next_episode), (Some(1), Some(2)));
+    assert!(!summary.played);
+}
+
+#[test]
+fn reimport_restores_sparse_favorites() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let movie = media(&store, "00000000-0000-0000-0000-000000000009", "Favorite Movie", MediaKind::Movie);
+    let (lib, root_id) = library(&store, "Movies", MediaKind::Movie, "/movies");
+    let lib_id = lib.id.parse::<domain::LibraryId>().unwrap();
+    let scope = WriteScope {
+        library_id: lib_id,
+        config_revision: 0,
+    };
+
+    let file1 = file(
+        "00000000-0000-0000-0001-000000000010",
+        &lib,
+        &root_id,
+        &movie,
+        "/movies/fav.mkv",
+    );
+    store
+        .publish_files(
+            &scope,
+            &[StorePublication {
+                file: &file1,
+                units: &[UnitKey::WHOLE],
+                expected_version: None,
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            1_000,
+        )
+        .unwrap();
+
+    let user_id = domain::UserId::new();
+    // Mark as favorite
+    store
+        .set_unit_marks(user_id, movie.id, store::UNIT_WHOLE, store::UNIT_WHOLE, None, Some(true), 2_000)
+        .unwrap();
+
+    let sum1 = store.get_user_library_summary(user_id, lib_id, movie.id).unwrap().unwrap();
+    assert!(sum1.favorite);
+
+    // Delete the file
+    store.delete_files(lib_id, &[file1.file_id]).unwrap();
+
+    // After deleting last file, user_library_items row is cleared
+    let sum2 = store.get_user_library_summary(user_id, lib_id, movie.id).unwrap();
+    assert!(sum2.is_none());
+
+    // Reimport file
+    store
+        .publish_files(
+            &scope,
+            &[StorePublication {
+                file: &file1,
+                units: &[UnitKey::WHOLE],
+                expected_version: None,
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            4_000,
+        )
+        .unwrap();
+
+    // Restores favorite state
+    let sum3 = store.get_user_library_summary(user_id, lib_id, movie.id).unwrap().unwrap();
+    assert!(sum3.favorite);
+}
+

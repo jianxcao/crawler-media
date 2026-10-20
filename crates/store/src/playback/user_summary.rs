@@ -79,13 +79,26 @@ pub(crate) struct PlaybackFact {
     watch_activity_at: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserLibrarySummary {
+    pub user_id: UserId,
+    pub library_id: domain::LibraryId,
+    pub media_id: MediaId,
+    pub seen: bool,
+    pub played: bool,
+    pub favorite: bool,
+    pub last_played_at: i64,
+    pub favorite_at: i64,
+    pub owned_episode_count: i64,
+    pub completed_episode_count: i64,
+    pub next_season: Option<i32>,
+    pub next_episode: Option<i32>,
+    pub resume_season: Option<i32>,
+    pub resume_episode: Option<i32>,
+    pub summary_revision: i64,
+}
+
 impl Store {
-    /// Recompute the affected `(user_id, library_id, media_id)` summaries.
-    ///
-    /// Runs inside the caller's transaction. Only libraries that own units in
-    /// the written scope are visited; a whole-scope write fans out through
-    /// `library_items` (the ownership fact), episode/season writes through
-    /// `library_units`.
     pub(crate) fn refresh_user_library_summary(
         &self,
         user_id: UserId,
@@ -101,10 +114,51 @@ impl Store {
             return Ok(());
         }
         let facts = Self::summary_facts(&self.library, user_id, media_id)?;
-        for library_id in libraries {
-            Self::write_library_summary(&self.library, user_id, media_id, &library_id, is_tv, &facts)?;
+        for library_id in &libraries {
+            Self::write_library_summary(&self.library, user_id, media_id, library_id, is_tv, &facts)?;
         }
         Ok(())
+    }
+
+    pub fn get_user_library_summary(
+        &self,
+        user_id: UserId,
+        library_id: domain::LibraryId,
+        media_id: MediaId,
+    ) -> Result<Option<UserLibrarySummary>, StoreError> {
+        let sql = "SELECT summary_revision, seen, played, favorite, last_played_at, favorite_at,
+                          owned_episode_count, completed_episode_count, next_season, next_episode,
+                          resume_season, resume_episode
+                   FROM user_library_items
+                   WHERE user_id = ?1 AND library_id = ?2 AND media_id = ?3";
+        let lib_str = library_id.to_string();
+        self.library
+            .query_row(
+                sql,
+                params![user_id.to_string(), lib_str, media_id.to_string()],
+                |row| {
+                    let s = map_summary(row)?;
+                    Ok(UserLibrarySummary {
+                        user_id,
+                        library_id,
+                        media_id,
+                        seen: s.seen,
+                        played: s.played,
+                        favorite: s.favorite,
+                        last_played_at: s.last_played_at,
+                        favorite_at: s.favorite_at,
+                        owned_episode_count: s.owned_episode_count,
+                        completed_episode_count: s.completed_episode_count,
+                        next_season: s.next_season,
+                        next_episode: s.next_episode,
+                        resume_season: s.resume_season,
+                        resume_episode: s.resume_episode,
+                        summary_revision: row.get(0)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     /// Recompute the survivor's summaries after a Media merge moved the loser's

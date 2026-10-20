@@ -179,6 +179,7 @@ pub(crate) fn reduce_library_media_incremental(
         &facts,
     )?;
     terms::sync_terms_delta(tx, &lib, &media, &facts, change)?;
+    super::reduce::refresh_affected_user_summaries(tx, library_id, media_id)?;
     Ok(())
 }
 

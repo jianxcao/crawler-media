@@ -86,7 +86,7 @@ pub use library_ownership::LibraryOwnership;
 pub use playback::{
     PlayLogRow, PlaySessionBinding, PlaySessionIdState, PlaybackLogPage, PlaybackLogScope,
     PlaybackRetentionBatch, PlaybackRetentionPreview, ResumeStatus, ResolvedResume, SessionRow,
-    UNIT_WHOLE, UnitRow, UnitState, WatchClient, WatchDay, WatchMedia, WatchMember, WatchReport,
+    UNIT_WHOLE, UnitRow, UnitState, UserLibrarySummary, WatchClient, WatchDay, WatchMedia, WatchMember, WatchReport,
     WatchTotals, WatchWindow,
 };
 pub use probe_state::{

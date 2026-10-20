@@ -118,7 +118,8 @@ pub(crate) fn reduce_media_everywhere(
     }
     Ok(libs.len())
 }
-fn refresh_affected_user_summaries(
+
+pub(crate) fn refresh_affected_user_summaries(
     tx: &Connection,
     library_id: LibraryId,
     media_id: MediaId,
