@@ -386,6 +386,10 @@ fn member_playback_routes() -> Router<ApiState> {
         // playback views (read playback_progress + ledger)
         .route("/playback/decide", post(playback::decide))
         .route("/playback/sessions", post(playback::start_session))
+        .route(
+            "/playback/sessions/{play_session_id}/stream",
+            get(playback::session_stream),
+        )
         .route("/playback/chapters", get(playback::cached_chapters))
         .route(
             "/playback/subtitles/{ledger_id}/{index}",

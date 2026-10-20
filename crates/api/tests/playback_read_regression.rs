@@ -609,3 +609,90 @@ async fn media_in_two_libraries_reports_null_library_id() {
         "ambiguous ownership must stay null: {data}"
     );
 }
+#[tokio::test]
+async fn session_stream_serves_valid_video_bytes_with_range_support() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = make_state(tmp.path());
+    let app = router(state.clone());
+    let store = state.store();
+    let lib_root = seed_library(&store.lock(), tmp.path(), "stream-test");
+    let (member, token) = seed_member(&store.lock(), "stream-user");
+    let media = {
+        let guard = store.lock();
+        let media = seed_media(&guard, "Stream Video", Some(2025));
+        let video_path = lib_root.join("sample.mp4");
+        std::fs::write(&video_path, b"abcdefghijklmnopqrstuvwxyz0123456789").unwrap();
+        guard
+            .insert_ledger(&LedgerRow {
+                id: LedgerId::new(),
+                media_id: media,
+                path: video_path.display().to_string(),
+                season: None,
+                episode: None,
+                resolution: Some("1080p".into()),
+                codec: Some("h264".into()),
+                hdr: None,
+                quality_source: QualitySource::Release,
+                confidence: Confidence::High,
+                filter_score: None,
+            })
+            .unwrap();
+        media
+    };
+
+    let session_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/playback/sessions")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&serde_json::json!({
+                    "media_item_id": media.to_string(),
+                    "device_id": "web-player",
+                })).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let session_data = json_data(session_res).await;
+    let stream_url = session_data["stream_url"].as_str().expect("must have stream_url");
+    assert!(stream_url.starts_with("/api/v1/playback/sessions/"));
+
+    // GET full file stream
+    let stream_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(stream_url)
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stream_res.status(), axum::http::StatusCode::OK);
+    let bytes = to_bytes(stream_res.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(&bytes[..], b"abcdefghijklmnopqrstuvwxyz0123456789");
+
+    // GET partial content with Range header
+    let range_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(stream_url)
+                .header("authorization", format!("Bearer {token}"))
+                .header("range", "bytes=0-3")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(range_res.status(), axum::http::StatusCode::PARTIAL_CONTENT);
+    let range_bytes = to_bytes(range_res.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(&range_bytes[..], b"abcd");
+}

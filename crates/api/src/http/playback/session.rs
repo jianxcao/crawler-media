@@ -57,12 +57,11 @@ pub(crate) async fn start_session(
             .ok()
     };
     tracing::info!(media_id = %media.id, file_id = %row.id, %user_id, start_ms, ?play_session_id, "Playback session selected");
-    let stream_id = row.id.to_string().replace('-', "");
     let is_strm = std::path::Path::new(&row.path)
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("strm"));
-    let stream_url = session_stream_url(&row, &stream_id, &token, is_strm);
+    let stream_url = session_stream_url(&row, play_session_id.as_deref(), device_id, &token, is_strm);
     let (chapters, chapters_pending) = session_chapters(&state, &row, &media);
     let source = session_source(&row, is_strm);
     let subtitle_urls: Vec<String> = decision
@@ -128,7 +127,8 @@ fn session_source(row: &domain::LedgerRow, is_strm: bool) -> Value {
 
 fn session_stream_url(
     row: &domain::LedgerRow,
-    stream_id: &str,
+    play_session_id: Option<&str>,
+    device_id: &str,
     token: &str,
     is_strm: bool,
 ) -> String {
@@ -138,7 +138,12 @@ fn session_stream_url(
             return direct_url;
         }
     }
-    format!("/Videos/{stream_id}/stream?api_key={token}")
+    if let Some(psid) = play_session_id {
+        format!("/api/v1/playback/sessions/{psid}/stream?device_id={device_id}&api_key={token}")
+    } else {
+        let stream_id = row.id.to_string().replace('-', "");
+        format!("/Videos/{stream_id}/stream?api_key={token}")
+    }
 }
 
 fn session_chapters(
@@ -167,4 +172,118 @@ fn session_chapters(
         .map(|chapter| json!({ "start_ms": chapter.start_ms, "title": chapter.title }))
         .collect();
     (chapters, pending)
+}
+#[derive(serde::Deserialize)]
+pub(crate) struct SessionStreamQuery {
+    pub device_id: String,
+}
+
+pub(crate) async fn session_stream(
+    State(state): State<ApiState>,
+    axum::Extension(user_id): axum::Extension<domain::UserId>,
+    axum::extract::Path(play_session_id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<SessionStreamQuery>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, StatusCode> {
+    let binding = {
+        let store = state.store.lock();
+        match store.play_session_binding(user_id, &query.device_id, &play_session_id) {
+            Ok(Some(b)) => b,
+            _ => return Err(StatusCode::NOT_FOUND),
+        }
+    };
+
+    let Some(file_id_str) = binding.file_id else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    let (path, is_strm) = {
+        let store = state.store.lock();
+        let Ok(file_id) = file_id_str.parse::<domain::LedgerId>() else {
+            return Err(StatusCode::NOT_FOUND);
+        };
+        let Some(file) = store.visible_file(user_id, file_id).ok().flatten() else {
+            return Err(StatusCode::NOT_FOUND);
+        };
+        let is_strm = file.path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"));
+        (file.path, is_strm)
+    };
+
+    if is_strm {
+        if let Some(direct_url) = library::read_strm_url(&path) {
+            return Ok((StatusCode::FOUND, [(axum::http::header::LOCATION, direct_url)]).into_response());
+        } else {
+            return Err(StatusCode::NOT_FOUND);
+        }
+    }
+
+    let mut file = tokio::fs::File::open(&path).await.map_err(|_| StatusCode::NOT_FOUND)?;
+    let content_type = match path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase().as_str() {
+        "mp4" | "m4v" => "video/mp4",
+        "mkv" => "video/x-matroska",
+        "webm" => "video/webm",
+        "avi" => "video/x-msvideo",
+        "mov" => "video/quicktime",
+        "ts" => "video/mp2t",
+        _ => "application/octet-stream",
+    };
+
+    let file_size = file
+        .metadata()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .len();
+
+    let range_header = headers
+        .get(axum::http::header::RANGE)
+        .and_then(|value| value.to_str().ok());
+
+    if let Some(header_value) = range_header {
+        let Some(spec) = playback::parse_range(header_value, file_size) else {
+            return Ok((
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [
+                    (axum::http::header::CONTENT_RANGE, format!("bytes */{file_size}")),
+                    (axum::http::header::ACCEPT_RANGES, "bytes".into()),
+                ],
+                axum::body::Body::empty(),
+            )
+                .into_response());
+        };
+
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        file.seek(tokio::io::SeekFrom::Start(spec.start))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let stream = tokio_util::io::ReaderStream::new(file.take(spec.len()));
+        let content_range = format!("bytes {}-{}/{file_size}", spec.start, spec.end);
+        let content_length = spec.len().to_string();
+
+        return Ok((
+            StatusCode::PARTIAL_CONTENT,
+            [
+                (axum::http::header::CONTENT_TYPE, content_type.to_string()),
+                (axum::http::header::CONTENT_RANGE, content_range),
+                (axum::http::header::CONTENT_LENGTH, content_length),
+                (axum::http::header::ACCEPT_RANGES, "bytes".to_string()),
+            ],
+            axum::body::Body::from_stream(stream),
+        )
+            .into_response());
+    }
+
+    let stream = tokio_util::io::ReaderStream::new(file);
+    Ok((
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, content_type.to_string()),
+            (axum::http::header::CONTENT_LENGTH, file_size.to_string()),
+            (axum::http::header::ACCEPT_RANGES, "bytes".to_string()),
+        ],
+        axum::body::Body::from_stream(stream),
+    )
+        .into_response())
 }

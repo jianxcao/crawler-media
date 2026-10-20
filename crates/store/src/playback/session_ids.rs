@@ -37,6 +37,10 @@ pub struct PlaySessionBinding {
     pub issued_at: i64,
     pub generation: i64,
     pub state: PlaySessionIdState,
+    pub file_id: Option<String>,
+    pub file_revision: Option<i64>,
+    pub source_version: Option<String>,
+    pub library_id: Option<String>,
 }
 
 impl Store {
@@ -140,7 +144,7 @@ impl Store {
     ) -> Result<Option<PlaySessionBinding>, StoreError> {
         self.library
             .query_row(
-                "SELECT item_id, issued_at, generation, state
+                "SELECT item_id, issued_at, generation, state, file_id, file_revision, source_version, library_id
                  FROM playback_session_ids
                  WHERE user_id = ?1 AND device_id = ?2 AND play_session_id = ?3",
                 params![user_id.to_string(), device_id, play_session_id],
@@ -149,6 +153,10 @@ impl Store {
                     let issued_at: i64 = row.get(1)?;
                     let generation: i64 = row.get(2)?;
                     let state_str: String = row.get(3)?;
+                    let file_id: Option<String> = row.get(4)?;
+                    let file_revision: Option<i64> = row.get(5)?;
+                    let source_version: Option<String> = row.get(6)?;
+                    let library_id: Option<String> = row.get(7)?;
                     let ledger_id = LedgerId::from_str(&item_str)
                         .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, 0))?;
                     let state = PlaySessionIdState::from_str(&state_str)
@@ -158,6 +166,10 @@ impl Store {
                         issued_at,
                         generation,
                         state,
+                        file_id,
+                        file_revision,
+                        source_version,
+                        library_id,
                     })
                 },
             )

@@ -63,6 +63,9 @@ impl Store {
             StoreError::Invalid(format!("merge operation {operation_id} has no loser"))
         })?;
         let loser: MediaId = loser_str.parse()?;
+        if survivor == loser {
+            return Err(StoreError::Invalid("cannot merge media with itself".into()));
+        }
         let request: MediaMergeRequest = serde_json::from_str(&plan_json)?;
         let mut phase = phase_cursor.unwrap_or_else(|| PHASE_INIT.to_string());
 

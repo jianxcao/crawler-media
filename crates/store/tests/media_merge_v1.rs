@@ -920,3 +920,20 @@ fn media_merge_refreshes_survivor_summaries_and_moves_season_metadata() {
     assert_eq!(before_a.map(|row| row.11), Some(1));
     assert_eq!(before_b.map(|row| row.11), Some(1));
 }
+#[test]
+fn self_merge_is_rejected_before_operation_or_fact_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    let id = "00000000-0000-0000-0000-000000000001";
+    let media = create_media(&store, id, "Keep identity", MediaKind::Movie);
+    let request = MediaMergeRequest {
+        request_id: "reject-self".into(),
+        survivor: media.id,
+        loser: media.id,
+        survivor_revision: 0,
+        loser_revision: 0,
+        refresh_targets: BTreeMap::new(),
+    };
+    assert!(matches!(store.begin_media_merge(&request, 1), Err(StoreError::Invalid(_))));
+    assert_eq!(store.get_media(media.id).unwrap().unwrap().title, "Keep identity");
+}

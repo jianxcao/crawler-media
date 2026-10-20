@@ -23,7 +23,7 @@ mod selection;
 mod session;
 pub(crate) use heartbeat::progress;
 use selection::row_for;
-pub(crate) use session::start_session;
+pub(crate) use session::{session_stream, start_session};
 mod watch_state;
 pub(crate) use chapter_cache::cached_chapters;
 pub(crate) use watch_state::{marks, resume, set_marks};

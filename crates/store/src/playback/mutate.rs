@@ -386,6 +386,9 @@ impl Store {
         request: &super::types::MediaMergeRequest,
         now_ms: i64,
     ) -> Result<String, StoreError> {
+        if request.survivor == request.loser {
+            return Err(StoreError::Invalid("cannot merge media with itself".into()));
+        }
         let tx = self.library.unchecked_transaction()?;
         let plan_json = serde_json::to_string(request)?;
 
