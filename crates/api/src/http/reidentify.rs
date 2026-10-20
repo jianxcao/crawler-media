@@ -198,12 +198,26 @@ fn reidentify_inner(state: &ApiState, body: &Value) -> Response {
                         "Library work cancelled",
                     );
                 }
+                let rev = store.media_revision(media_id).unwrap_or(None).unwrap_or(0);
                 let mut updated = media.clone();
                 updated.title = target.title.clone();
                 updated.year = target.year;
-                updated.tmdb_id = target.tmdb_id.clone();
                 updated.original_title = target.original_title.clone();
-                let _ = store.update_media(&updated);
+                if let Err(e) = store.update_media_identity(rev, &updated) {
+                    return err(
+                        StatusCode::CONFLICT,
+                        "library.frozen",
+                        &e.to_string(),
+                    );
+                }
+                if let Some(tmdb_id) = target.tmdb_id.as_deref() {
+                    let alias = domain::MediaAlias {
+                        source: "tmdb".into(),
+                        kind: target.kind,
+                        external_id: tmdb_id.to_string(),
+                    };
+                    let _ = store.add_media_alias(media_id, &alias);
+                }
             }
             // 重刷元数据（海报/背景/NFO）。
             if let Some(row) = rows.first() {

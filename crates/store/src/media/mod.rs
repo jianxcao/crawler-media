@@ -1,19 +1,11 @@
 use domain::{Media, MediaId};
 use rusqlite::{OptionalExtension, params};
 
-use super::maps::{aliases_json, map_media};
-use super::{Store, StoreError};
+pub(crate) mod alias;
+pub use alias::MEDIA_SELECT;
 
-pub const MEDIA_SELECT: &str = "
-    SELECT m.media_id, m.kind, m.title, m.year, m.original_title,
-           (SELECT external_id FROM media_aliases WHERE media_id = m.media_id AND source = 'tmdb' AND kind = m.kind LIMIT 1),
-           (SELECT external_id FROM media_aliases WHERE media_id = m.media_id AND source = 'douban' AND kind = m.kind LIMIT 1),
-           (SELECT external_id FROM media_aliases WHERE media_id = m.media_id AND source = 'tvdb' AND kind = m.kind LIMIT 1),
-           (SELECT external_id FROM media_aliases WHERE media_id = m.media_id AND source = 'bangumi' AND kind = m.kind LIMIT 1),
-           (SELECT external_id FROM media_aliases WHERE media_id = m.media_id AND source = 'anilist' AND kind = m.kind LIMIT 1),
-           m.aliases_display_json
-    FROM media m
-";
+use crate::maps::{aliases_json, map_media};
+use crate::{Store, StoreError};
 
 fn aliases(media: &Media) -> [Option<&str>; 5] {
     [
@@ -32,9 +24,6 @@ fn aliases_conflict(a: &Media, b: &Media) -> bool {
         .any(|(a, b)| a.zip(b).is_some_and(|(a, b)| a != b))
 }
 
-/// True when `incoming` claims an external identity from a provider that
-/// `existing` has never confirmed. Matching such a pair by title+year would
-/// silently adopt a different provider's identity, so it must not merge.
 fn introduces_foreign_alias(existing: &Media, incoming: &Media) -> bool {
     aliases(incoming)
         .into_iter()
@@ -47,8 +36,6 @@ fn identity_conflict(incoming: &Media) -> StoreError {
     StoreError::Protected("Ambiguous or conflicting scanned Media identity".into())
 }
 
-/// Read one complete Media row, including every external id and the display
-/// aliases, so callers can compare the whole identity.
 fn media_row(conn: &rusqlite::Connection, id: MediaId) -> Result<Option<Media>, StoreError> {
     let sql = format!("{MEDIA_SELECT} WHERE m.media_id = ?1");
     conn.query_row(&sql, params![id.to_string()], map_media)
@@ -56,7 +43,6 @@ fn media_row(conn: &rusqlite::Connection, id: MediaId) -> Result<Option<Media>, 
         .map_err(Into::into)
 }
 
-/// Write the complete identity of `media` on an already-open transaction.
 fn write_media(conn: &rusqlite::Connection, media: &Media) -> Result<(), StoreError> {
     let has_external = media.tmdb_id.is_some()
         || media.douban_id.is_some()
@@ -75,13 +61,12 @@ fn write_media(conn: &rusqlite::Connection, media: &Media) -> Result<(), StoreEr
             identity_state,
         ],
     )?;
-    // Keep library_items identity_state synchronized with media identity_state
     conn.execute(
         "UPDATE library_items SET identity_state = ?2 WHERE media_id = ?1",
         params![media.id.to_string(), identity_state],
     )?;
 
-    conn.execute("DELETE FROM media_aliases WHERE media_id = ?1", params![media.id.to_string()])?;
+    // Preserve non-conflicting existing aliases, update or insert incoming ones
     for (source, external_id) in [
         ("tmdb", media.tmdb_id.as_deref()),
         ("douban", media.douban_id.as_deref()),
@@ -90,11 +75,24 @@ fn write_media(conn: &rusqlite::Connection, media: &Media) -> Result<(), StoreEr
         ("anilist", media.anilist_id.as_deref()),
     ] {
         if let Some(ext_id) = external_id {
-            conn.execute(
-                "INSERT INTO media_aliases (source, kind, external_id, media_id, is_refresh_target)
-                 VALUES (?1, ?2, ?3, ?4, 1)",
-                params![source, media.kind.as_str(), ext_id, media.id.to_string()],
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM media_aliases WHERE media_id = ?1 AND source = ?2 AND kind = ?3 AND external_id = ?4)",
+                params![media.id.to_string(), source, media.kind.as_str(), ext_id],
+                |r| r.get(0),
             )?;
+            if !exists {
+                let has_target: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM media_aliases WHERE media_id = ?1 AND source = ?2 AND kind = ?3 AND is_refresh_target = 1)",
+                    params![media.id.to_string(), source, media.kind.as_str()],
+                    |r| r.get(0),
+                )?;
+                let is_target = if has_target { 0 } else { 1 };
+                conn.execute(
+                    "INSERT INTO media_aliases (source, kind, external_id, media_id, is_refresh_target)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![source, media.kind.as_str(), ext_id, media.id.to_string(), is_target],
+                )?;
+            }
         }
     }
     Ok(())
@@ -110,7 +108,6 @@ impl Store {
             || media.anilist_id.is_some();
         let identity_state = if has_external { "confirmed" } else { "provisional" };
 
-        // Pre-check for conflicting aliases belonging to different media
         for (source, ext_id) in [
             ("tmdb", media.tmdb_id.as_deref()),
             ("douban", media.douban_id.as_deref()),
@@ -170,7 +167,6 @@ impl Store {
         Ok(())
     }
 
-    /// Safely undo a newly inserted media if it matches expected and is completely unreferenced by subscribes or files.
     pub fn undo_ensured_media_if_unreferenced(
         &self,
         media_id: MediaId,
@@ -182,7 +178,6 @@ impl Store {
         )?;
 
         let id_str = media_id.to_string();
-        // Full identity CAS: only delete the row the caller itself wrote.
         let current = media_row(&tx, media_id)?;
         if current.as_ref() != Some(expected) {
             tracing::debug!(%media_id, "Media changed since it was inserted; skipping delete");
@@ -319,10 +314,6 @@ impl Store {
         Ok(())
     }
 
-    /// Compare-and-set: apply `replacement` only while the stored row still
-    /// equals `expected`. The full identity is compared (kind, title, year,
-    /// original title, aliases and every external id), so a concurrent edit is
-    /// never overwritten. Returns whether the write was applied.
     pub fn update_media_if_matches(
         &self,
         expected: &Media,
@@ -342,8 +333,6 @@ impl Store {
         Ok(true)
     }
 
-
-    /// Recover canonical identity without selecting the first alias or ambiguous title.
     pub fn resolve_scanned_media(&self, incoming: Media) -> Result<Media, StoreError> {
         let mut matched_media_ids: std::collections::HashSet<MediaId> = std::collections::HashSet::new();
         for (source, ext_id) in [
@@ -392,7 +381,6 @@ impl Store {
             }
             titles.into_iter().next()
         } else {
-            // Even if incoming has an alias (like after online resolve), check if incoming.id already exists!
             if let Some(existing) = self.get_media(incoming.id)? {
                 if !aliases_conflict(&existing, &incoming) {
                     Some(existing)
@@ -400,7 +388,6 @@ impl Store {
                     None
                 }
             } else {
-                // Also check title + year if no conflict
                 let sql = format!("{MEDIA_SELECT} WHERE m.title = ?1 AND m.kind = ?2");
                 let mut stmt = self.library.prepare(&sql)?;
                 let candidates: Vec<Media> = stmt
@@ -424,6 +411,18 @@ impl Store {
         };
 
         if let Some(existing) = existing {
+            let state: String = self.library.query_row(
+                "SELECT identity_state FROM media WHERE media_id = ?1",
+                params![existing.id.to_string()],
+                |r| r.get(0),
+            )?;
+            if state == "merging" || state == "retired" {
+                return Err(StoreError::Protected(format!(
+                    "cannot adopt frozen media {} in state {state}",
+                    existing.id
+                )));
+            }
+
             let mut canonical = existing.clone();
             canonical.year = canonical.year.or(incoming.year);
             canonical.original_title = canonical.original_title.or(incoming.original_title);
@@ -446,8 +445,6 @@ impl Store {
             .map(|(media, _)| media)
     }
 
-    /// Return the original row so a multi-database Subscribe creation can undo
-    /// both a new Media and an alias merge if a later write fails.
     pub fn ensure_media_with_previous(
         &self,
         incoming: Media,
@@ -479,8 +476,6 @@ impl Store {
         previous: Option<&Media>,
     ) -> Result<bool, StoreError> {
         if let Some(previous) = previous {
-            // CAS: revert only if the row still holds the identity this caller
-            // wrote. A concurrent writer's row must survive.
             self.update_media_if_matches(media, previous)
         } else {
             self.undo_ensured_media_if_unreferenced(media.id, media)

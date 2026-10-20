@@ -6,15 +6,29 @@ use crate::management::ApiState;
 
 pub fn run(state: &ApiState, payload: &str) -> Result<(), String> {
     let media_id = payload_media_id(payload)?;
-    let stored = state
-        .store
-        .lock()
+    let store = state.store.lock();
+    let stored = store
         .get_media(media_id)
         .map_err(|e| e.to_string())?
         .ok_or("Media not found")?;
-    let Some(tmdb_id) = stored.tmdb_id.clone() else {
+    let target = store
+        .media_refresh_alias(media_id, "tmdb")
+        .map_err(|e| e.to_string())?;
+    let Some(refresh_target) = target.or_else(|| {
+        stored.tmdb_id.clone().map(|ext_id| domain::MediaAlias {
+            source: "tmdb".into(),
+            kind: stored.kind,
+            external_id: ext_id,
+        })
+    }) else {
         return Ok(());
     };
+    let tmdb_id = refresh_target.external_id;
+    let rev = store
+        .media_revision(media_id)
+        .map_err(|e| e.to_string())?
+        .unwrap_or(0);
+    drop(store);
     tracing::debug!(media = %stored.title, tmdb_id = %tmdb_id, "刷新目录元数据");
     let Some(fresh) = state
         .catalog
@@ -32,7 +46,7 @@ pub fn run(state: &ApiState, payload: &str) -> Result<(), String> {
     state
         .store
         .lock()
-        .update_media(&updated)
+        .update_media_identity(rev, &updated)
         .map_err(|e| e.to_string())?;
     Ok(())
 }

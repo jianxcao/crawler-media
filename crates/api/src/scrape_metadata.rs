@@ -653,9 +653,12 @@ fn scrape_tv_fanart(
         Some(id) if !id.is_empty() => Some(id),
         _ => match state.catalog.tvdb_id(tmdb_id) {
             Ok(Some(id)) if !id.is_empty() => {
-                let mut updated = media.clone();
-                updated.tvdb_id = Some(id.clone());
-                let _ = state.store.lock().update_media(&updated);
+                let alias = domain::MediaAlias {
+                    source: "tvdb".into(),
+                    kind: media.kind,
+                    external_id: id.clone(),
+                };
+                let _ = state.store.lock().add_media_alias(media.id, &alias);
                 Some(id)
             }
             _ => None,

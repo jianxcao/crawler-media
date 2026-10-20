@@ -533,6 +533,22 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
     pub fn insert_subscribe(&self, subscribe: &Subscribe) -> Result<(), StoreError> {
+        let state: Option<String> = self
+            .library
+            .query_row(
+                "SELECT identity_state FROM media WHERE media_id = ?1",
+                params![subscribe.media_id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(state) = state.as_deref() {
+            if state == "merging" || state == "retired" {
+                return Err(StoreError::Protected(format!(
+                    "media {} identity is frozen ({state})",
+                    subscribe.media_id
+                )));
+            }
+        }
         let (coverage_kind, season, episode_from, episode_to) = match &subscribe.coverage {
             Coverage::Movie => ("movie", None, None, None),
             Coverage::Tv {
