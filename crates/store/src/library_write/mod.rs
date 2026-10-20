@@ -24,6 +24,7 @@ pub struct FilePublication<'a> {
     pub file: &'a LibraryFile,
     pub units: &'a [UnitKey],
     pub expected_version: Option<&'a FileVersion>,
+    pub nfo_observation: Option<&'a crate::metadata::NfoObservation>,
     pub probe_required: bool,
 }
 

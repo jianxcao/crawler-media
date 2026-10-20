@@ -8,15 +8,18 @@ license.workspace = true
 domain.workspace = true
 downloader.workspace = true
 library.workspace = true
-media.workspace = true
-subscribe.workspace = true
 rusqlite.workspace = true
+media.workspace = true
+release.workspace = true
+subscribe.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-argon2 = { version = "0.5", features = ["std"] }
+roxmltree.workspace = true
+sha2.workspace = true
 password-hash = { version = "0.5", features = ["rand_core"] }
+argon2 = { version = "0.5", features = ["std"] }
 tracing.workspace = true
 
 [dev-dependencies]

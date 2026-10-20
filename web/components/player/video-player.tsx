@@ -252,6 +252,12 @@ function SeekChevrons({ back }: { back: boolean }) {
 function unitKeyOf(unit: PlaybackUnit): string {
   return `${unit.media_item_id}/${unit.season_number ?? 0}/${unit.episode_number ?? 0}`;
 }
+function playbackRequestUnit(unit: PlaybackUnit): PlaybackUnit {
+  return unit.season_number == null && unit.episode_number == null
+    ? { media_item_id: unit.media_item_id }
+    : unit;
+}
+
 
 export function VideoPlayer(props: VideoPlayerProps) {
   const {

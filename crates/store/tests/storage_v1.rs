@@ -7,6 +7,93 @@ use store::schema::layout::{
 use store::{Store, StoreError};
 use domain::{Confidence, Media, MediaId, MediaKind, QualitySource};
 
+use media::response_cache::{CacheSource, initialize as initialize_cache, put as put_cache};
+
+fn cache_schema(conn: &Connection) -> (u32, i64, Vec<(String, String)>) {
+    let app_id = conn.pragma_query_value(None, "application_id", |row| row.get(0)).unwrap();
+    let user_version = conn.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT type, name FROM sqlite_schema WHERE type IN ('table','view','index','trigger') AND name NOT LIKE 'sqlite_%' ORDER BY type, name")
+        .unwrap();
+    let objects = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    (app_id, user_version, objects)
+}
+
+#[test]
+fn store_and_media_cache_initializers_converge_in_both_orders() {
+    let tmp = tempfile::tempdir().unwrap();
+    let media_first_dir = tmp.path().join("media-first");
+    std::fs::create_dir_all(&media_first_dir).unwrap();
+    let media_first_path = media_first_dir.join("cache.db");
+    let media_conn = Connection::open(&media_first_path).unwrap();
+    initialize_cache(&media_conn).unwrap();
+    put_cache(&media_conn, CacheSource::Tmdb, "/stored", "body", 123, None).unwrap();
+    drop(media_conn);
+
+    drop(Store::open(&media_first_dir).unwrap());
+    let media_first_conn = Connection::open(&media_first_path).unwrap();
+    let media_first_schema = cache_schema(&media_first_conn);
+    let row = media::response_cache::get(&media_first_conn, CacheSource::Tmdb, "/stored")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.body, "body");
+    assert_eq!(row.fetched_at, 123);
+    drop(media_first_conn);
+
+    let store_first_dir = tmp.path().join("store-first");
+    drop(Store::open(&store_first_dir).unwrap());
+    let store_first_path = store_first_dir.join("cache.db");
+    let store_conn = Connection::open(&store_first_path).unwrap();
+    initialize_cache(&store_conn).unwrap();
+    put_cache(&store_conn, CacheSource::Tmdb, "/stored", "body", 123, None).unwrap();
+    let store_first_schema = cache_schema(&store_conn);
+    let row = media::response_cache::get(&store_conn, CacheSource::Tmdb, "/stored")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.body, "body");
+    assert_eq!(row.fetched_at, 123);
+
+    assert_eq!(media_first_schema, store_first_schema);
+    assert_eq!(store_first_schema.0, media::response_cache::CACHE_APPLICATION_ID);
+    assert_eq!(store_first_schema.1, media::response_cache::CACHE_USER_VERSION as i64);
+    // One DDL owner: the media cache schema declares two indexes per source table.
+    assert_eq!(store_first_schema.2.iter().filter(|(kind, _)| kind == "index").count(), 12);
+}
+
+#[test]
+fn malformed_cache_layouts_are_rejected_without_mutation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let same_id_dir = tmp.path().join("same-id");
+    std::fs::create_dir_all(&same_id_dir).unwrap();
+    let same_id_path = same_id_dir.join("cache.db");
+    {
+        let conn = Connection::open(&same_id_path).unwrap();
+        conn.execute_batch("CREATE TABLE tmdb_cache (entry_id INTEGER PRIMARY KEY);").unwrap();
+        conn.pragma_update(None, "application_id", media::response_cache::CACHE_APPLICATION_ID).unwrap();
+        conn.pragma_update(None, "user_version", media::response_cache::CACHE_USER_VERSION as i64).unwrap();
+    }
+    let before_same_id = cache_schema(&Connection::open(&same_id_path).unwrap());
+    assert!(Store::open(&same_id_dir).is_err());
+    assert!(initialize_cache(&Connection::open_with_flags(&same_id_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap()).is_err());
+    let after_same_id = cache_schema(&Connection::open(&same_id_path).unwrap());
+    assert_eq!(before_same_id, after_same_id);
+
+    let index_only_dir = tmp.path().join("index-only");
+    std::fs::create_dir_all(&index_only_dir).unwrap();
+    let index_only_path = index_only_dir.join("cache.db");
+    {
+        let conn = Connection::open(&index_only_path).unwrap();
+        conn.execute_batch("CREATE TABLE unrelated (value INTEGER); CREATE INDEX unrelated_idx ON unrelated(value);").unwrap();
+    }
+    let before_index_only = cache_schema(&Connection::open(&index_only_path).unwrap());
+    assert!(Store::open(&index_only_dir).is_err());
+    let after_index_only = cache_schema(&Connection::open(&index_only_path).unwrap());
+    assert_eq!(before_index_only, after_index_only);
+}
 #[test]
 fn fresh_layout_reopens_without_old_files() {
     let tmp = tempfile::tempdir().unwrap();

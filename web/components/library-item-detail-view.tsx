@@ -53,6 +53,7 @@ import {
   getItemEpisodes,
   getLibrary,
   getLibraryItemDetail,
+  getAllLibraryItemFiles,
   listLibraries,
   refreshItemMetadata,
 } from "@/lib/api/libraries";
@@ -91,6 +92,8 @@ export interface SelectedEpisodeContext<F = LibraryItemFile> {
 /** 分集区需要的条目最小形状（详情视图与分享页的访客视图都满足）。 */
 export interface EpisodeSectionItem<F extends { file_id: string; season: number | null }> {
   media_item_id: string;
+  /** 在库的季号列表（剧集区季选择器；电影为空） */
+  seasons: number[];
   files: F[];
 }
 
@@ -191,14 +194,7 @@ export function LibraryItemDetailView({
   const playUnit = useMemo<PlaybackUnit | null>(() => {
     if (!detail) return null;
     if (detail.kind !== "tv") {
-      // 电影与其他库条目都是单一播放单元 (0, 0)
-      return {
-        // lib/api/playback 的播放单元仍按 number 声明，条目 id 是 UUID 字符串，
-        // 这里仅做类型投影，运行期原样传给播放器
-        media_item_id: detail.media_item_id as unknown as number,
-        season_number: 0,
-        episode_number: 0,
-      };
+      return { media_item_id: detail.media_item_id };
     }
     if (!selectedSeriesEpisode) return null;
     return {
@@ -1662,19 +1658,8 @@ export function SeasonEpisodesSection<F extends { file_id: string; season: numbe
   /** 变化即静默重拉本季分集（页面内改了观看状态后），不重置选中集与滚动位置 */
   refreshKey?: number;
 }) {
-  // 季清单：新契约详情不下发 seasons，从文件里实有的季号推导
-  const seasons = useMemo(() => {
-    const set = new Set<number>();
-    for (const f of detail.files) {
-      if (f.season != null) set.add(f.season);
-    }
-    return [...set].sort((a, b) => a - b);
-  }, [detail.files]);
-  // 哪些季真在库——台账文件的季号集合（这里与 seasons 同源）
-  const ownedSeasons = useMemo(
-    () => new Set(detail.files.map((f) => f.season).filter((v): v is number => v != null)),
-    [detail.files],
-  );
+  const seasons = detail.seasons;
+  const ownedSeasons = useMemo(() => new Set(detail.seasons), [detail.seasons]);
   // 默认落在第一个在库的季，而不是季号最小的那一季：只存了第 5、6 季的剧，
   // 打开详情页就停在满屏置灰的第 1 季，第一眼像"我的片子没了"
   const defaultSeason = seasons.find((s) => ownedSeasons.has(s)) ?? seasons[0];
@@ -1774,7 +1759,7 @@ export function SeasonEpisodesSection<F extends { file_id: string; season: numbe
     [detail.files],
   );
   const current =
-    data?.season_number === season
+    data !== null && data.season_number === season
       ? (data.episodes.find((e) => e.episode_number === selected) ?? null)
       : null;
   const currentFiles = useMemo(

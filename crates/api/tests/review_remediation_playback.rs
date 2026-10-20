@@ -1,3 +1,6 @@
+#[path = "support/mod.rs"]
+mod support;
+
 use api::{ApiState, Store, router};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
@@ -86,9 +89,7 @@ fn file_id(store: &Store, media: MediaId) -> domain::LedgerId {
 
 /// Issue the play session that protocol events must carry.
 fn issue_session(store: &Store, device: &str, media: MediaId) -> String {
-    store
-        .issue_play_session(admin(), device, file_id(store, media), 1)
-        .unwrap()
+    support::session::issue_session(store, admin(), device, file_id(store, media), 1)
 }
 
 /// Seed a pre-cutover `(0, 0)` movie unit. The canonical whole-media unit is

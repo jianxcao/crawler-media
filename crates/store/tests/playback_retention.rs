@@ -5,6 +5,8 @@
 //! 唯一例外是 `playback_metrics`：store 目前没有公开的 metrics 读取接口，
 //! 因此行数用 test-only 的直连只读 COUNT 断言（见 `metric_count`）。
 
+mod support;
+
 use std::path::Path;
 
 use domain::{LedgerId, MediaId, UserId};
@@ -65,18 +67,14 @@ fn log_fixture(
     store: &Store,
     user: UserId,
     media: MediaId,
+    file: LedgerId,
     device: &str,
     started: i64,
     ended: i64,
 ) -> String {
     let mut row = session(user, media, device, started);
-    let ledger = LedgerId::new();
-    row.ledger_id = Some(ledger.to_string());
-    row.play_session_id = Some(
-        store
-            .issue_play_session(user, device, ledger, started)
-            .unwrap(),
-    );
+    row.ledger_id = Some(file.to_string());
+    row.play_session_id = Some(support::issue_session(store, user, device, file, started));
     store.upsert_session(&row).unwrap();
     store
         .close_session(user, device, ended)
@@ -90,17 +88,13 @@ fn live_session(
     store: &Store,
     user: UserId,
     media: MediaId,
+    file: LedgerId,
     device: &str,
     started: i64,
 ) -> SessionRow {
     let mut row = session(user, media, device, started);
-    let ledger = LedgerId::new();
-    row.ledger_id = Some(ledger.to_string());
-    row.play_session_id = Some(
-        store
-            .issue_play_session(user, device, ledger, started)
-            .unwrap(),
-    );
+    row.ledger_id = Some(file.to_string());
+    row.play_session_id = Some(support::issue_session(store, user, device, file, started));
     store.upsert_session(&row).unwrap();
     row
 }
@@ -175,10 +169,11 @@ fn deletes_only_logs_ended_strictly_before_cutoff() {
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
     let media = MediaId::new();
+    let file = support::seed_published_file(&store, &tmp.path().join("library"), "cutoff").1;
     let cutoff = 1_700_000_000i64;
-    let expired = log_fixture(&store, user, media, "expired", cutoff - 100, cutoff - 1);
-    let on_cutoff = log_fixture(&store, user, media, "on-cutoff", cutoff - 100, cutoff);
-    let fresh = log_fixture(&store, user, media, "fresh", cutoff - 100, cutoff + 1);
+    let expired = log_fixture(&store, user, media, file, "expired", cutoff - 100, cutoff - 1);
+    let on_cutoff = log_fixture(&store, user, media, file, "on-cutoff", cutoff - 100, cutoff);
+    let fresh = log_fixture(&store, user, media, file, "fresh", cutoff - 100, cutoff + 1);
 
     let batch = store.prune_playback_logs(cutoff, 500, false).unwrap();
 
@@ -200,9 +195,10 @@ fn repeated_prune_is_idempotent() {
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
     let media = MediaId::new();
+    let file = support::seed_published_file(&store, &tmp.path().join("library"), "idempotent").1;
     let cutoff = 1_700_000_000i64;
     for index in 0..3 {
-        log_fixture(&store, user, media, &format!("old{index}"), cutoff - 50, cutoff - 10 - index);
+        log_fixture(&store, user, media, file, &format!("old{index}"), cutoff - 50, cutoff - 10 - index);
     }
 
     let first = store.prune_playback_logs(cutoff, 500, false).unwrap();
@@ -223,17 +219,18 @@ fn prune_keeps_progress_favorites_sessions_and_metrics() {
     let media = MediaId::new();
     let cutoff = 1_700_000_000i64;
     insert_movie(&store, media);
+    let file = support::publish_file(&store, &tmp.path().join("library"), media, "keeps");
     store
         .upsert_unit(user, media, -1, -1, 42_000, Some(false), Some(true), Some(100_000), None, None, false, 100)
         .unwrap();
     let progress = store.unit_state(user, media, -1, -1).unwrap().unwrap();
-    let live = live_session(&store, user, media, "live", cutoff);
+    let live = live_session(&store, user, media, file, "live", cutoff);
     store
         .insert_metric(user, media, 0, Some("web"), Some(120), 5, 1, 0, None, None, 1_000, cutoff)
         .unwrap();
     let metrics = metric_count(tmp.path(), user);
     for index in 0..2 {
-        log_fixture(&store, user, media, &format!("old{index}"), cutoff - 50, cutoff - 10 - index);
+        log_fixture(&store, user, media, file, &format!("old{index}"), cutoff - 50, cutoff - 10 - index);
     }
 
     let batch = store.prune_playback_logs(cutoff, 500, false).unwrap();
@@ -254,6 +251,7 @@ fn history_and_stats_only_cover_the_retention_window() {
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
     let media = MediaId::new();
+    let file = support::seed_published_file(&store, &tmp.path().join("library"), "history").1;
     let now = 1_700_000_000i64;
     let cutoff = now - 30 * DAY;
     let mut expired = Vec::new();
@@ -262,6 +260,7 @@ fn history_and_stats_only_cover_the_retention_window() {
             &store,
             user,
             media,
+            file,
             &format!("old{index}"),
             cutoff - 10 * DAY,
             cutoff - 5 * DAY - index,
@@ -273,6 +272,7 @@ fn history_and_stats_only_cover_the_retention_window() {
             &store,
             user,
             media,
+            file,
             &format!("new{index}"),
             cutoff + DAY,
             cutoff + DAY + index,
@@ -304,9 +304,10 @@ fn dry_run_reports_candidates_without_writing() {
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
     let media = MediaId::new();
+    let file = support::seed_published_file(&store, &tmp.path().join("library"), "dry-run").1;
     let cutoff = 1_700_000_000i64;
     for index in 0..3 {
-        log_fixture(&store, user, media, &format!("old{index}"), cutoff - 50, cutoff - 10 - index);
+        log_fixture(&store, user, media, file, &format!("old{index}"), cutoff - 50, cutoff - 10 - index);
     }
     let before = log_ids(&store, user);
 
@@ -352,8 +353,10 @@ fn delete_failure_rolls_back_the_whole_batch() {
     let cutoff = 1_700_000_000i64;
     {
         let store = Store::open(tmp.path()).unwrap();
+        let file =
+            support::seed_published_file(&store, &tmp.path().join("library"), "rollback").1;
         for index in 0..3 {
-            log_fixture(&store, user, media, &format!("old{index}"), cutoff - 50, cutoff - 1 - index);
+            log_fixture(&store, user, media, file, &format!("old{index}"), cutoff - 50, cutoff - 1 - index);
         }
     }
     {

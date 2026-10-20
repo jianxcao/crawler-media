@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, Release};
+use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, Release, UnitKey};
+use store::ScannedLedger;
 
 use crate::Store;
 
@@ -9,7 +10,7 @@ pub fn record_paths(
     paths: impl IntoIterator<Item = library::TransferredFile>,
 ) -> Result<Vec<PathBuf>, String> {
     let mut inserted = Vec::new();
-    let mut rows = Vec::new();
+    let mut rows: Vec<ScannedLedger> = Vec::new();
     let now_ms = crate::job_loop::unix_now() * 1000;
     for file in paths {
         let dest = file.path;
@@ -58,18 +59,58 @@ pub fn record_paths(
         let media = store
             .resolve_scanned_media(incoming)
             .map_err(|e| e.to_string())?;
-        rows.push(LedgerRow {
-            id: LedgerId::new(),
-            media_id: media.id,
-            path: path_str,
-            season: parsed.season,
-            episode: parsed.episode,
-            resolution: parsed.resolution,
-            codec: parsed.codec,
-            hdr: parsed.hdr,
-            quality_source: QualitySource::Release,
-            confidence: parsed.confidence,
-            filter_score: None,
+        let units = match media.kind {
+            MediaKind::Tv => parsed
+                .covered_episodes()
+                .into_iter()
+                .map(|(season, episode)| UnitKey::new(season as i32, episode as i32))
+                .collect(),
+            _ => vec![UnitKey::WHOLE],
+        };
+        let (size_bytes, created_ns, modified_ns) = observed_stat(&dest);
+        let source_version = crate::fingerprint_job::current_source_version(&dest);
+        // The sidecar is the scan's own observation input: read it here, before the
+        // publication transaction, and hand the result to the writer.
+        let observation = store
+            .library_for_path_strict(&dest, media.kind)
+            .map_err(|e| e.to_string())?
+            .map(|library| {
+                let locale = library
+                    .id
+                    .parse()
+                    .ok()
+                    .and_then(|library_id| {
+                        store::library_query::library_display_locale(store, library_id)
+                            .ok()
+                            .flatten()
+                    })
+                    .unwrap_or_default();
+                let config_revision = store
+                    .library_config_revision(&library.id)
+                    .unwrap_or(0);
+                store::metadata::NfoObservation::observe(
+                    &dest,
+                    media.kind,
+                    locale,
+                    source_version.clone(),
+                    config_revision,
+                )
+            });
+        rows.push(ScannedLedger {
+            row: LedgerRow {
+                id: LedgerId::new(), media_id: media.id, path: path_str,
+                season: parsed.season, episode: parsed.episode,
+                resolution: parsed.resolution, codec: parsed.codec, hdr: parsed.hdr,
+                quality_source: QualitySource::Release, confidence: parsed.confidence,
+                filter_score: None,
+            },
+            units,
+            source_version,
+            source_digest: None,
+            size_bytes,
+            created_ns,
+            modified_ns,
+            observation,
         });
         inserted.push(dest);
     }
@@ -84,7 +125,7 @@ pub fn record_video_paths(
     paths: impl IntoIterator<Item = PathBuf>,
 ) -> Result<Vec<PathBuf>, String> {
     let mut inserted = Vec::new();
-    let mut rows = Vec::new();
+    let mut rows: Vec<ScannedLedger> = Vec::new();
     let now_ms = crate::job_loop::unix_now() * 1000;
     for dest in paths {
         let path_str = dest.display().to_string();
@@ -128,18 +169,28 @@ pub fn record_video_paths(
                 anilist_id: None,
             })
             .map_err(|e| e.to_string())?;
-        rows.push(LedgerRow {
-            id: LedgerId::new(),
-            media_id: media.id,
-            path: dest.display().to_string(),
-            season: None,
-            episode: None,
-            resolution: None,
-            codec: None,
-            hdr: None,
-            quality_source: QualitySource::Release,
-            confidence: Confidence::High,
-            filter_score: None,
+        let (size_bytes, created_ns, modified_ns) = observed_stat(&dest);
+        rows.push(ScannedLedger {
+            row: LedgerRow {
+                id: LedgerId::new(),
+                media_id: media.id,
+                path: dest.display().to_string(),
+                season: None,
+                episode: None,
+                resolution: None,
+                codec: None,
+                hdr: None,
+                quality_source: QualitySource::Release,
+                confidence: Confidence::High,
+                filter_score: None,
+            },
+            units: vec![UnitKey::WHOLE],
+            source_version: crate::fingerprint_job::current_source_version(&dest),
+            source_digest: None,
+            size_bytes,
+            created_ns,
+            modified_ns,
+            observation: None,
         });
         inserted.push(dest);
     }
@@ -150,13 +201,32 @@ pub fn record_video_paths(
 /// Commit scanned ledger rows in the scan commit window: at most
 /// [`store::MAX_SCAN_BATCH`] files per transaction, so one media is reduced once per
 /// window instead of once per file.
-fn publish_scanned_rows(store: &Store, rows: &[LedgerRow], now_ms: i64) -> Result<(), String> {
+fn publish_scanned_rows(store: &Store, rows: &[ScannedLedger], now_ms: i64) -> Result<(), String> {
     for batch in rows.chunks(store::MAX_SCAN_BATCH) {
         store
-            .insert_scanned_ledgers(batch, now_ms)
+            .insert_scanned_files(batch, now_ms)
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Stat facts captured while the scan still holds the observed path. `None` means the
+/// observation failed (permissions, race): the row keeps `stat_known = 0` instead of
+/// inventing zero-valued metadata.
+fn observed_stat(path: &std::path::Path) -> (Option<i64>, Option<i64>, Option<i64>) {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return (None, None, None);
+    };
+    let to_ns = |time: std::io::Result<std::time::SystemTime>| {
+        time.ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|age| i64::try_from(age.as_nanos()).ok())
+    };
+    (
+        i64::try_from(metadata.len()).ok(),
+        to_ns(metadata.created()),
+        to_ns(metadata.modified()),
+    )
 }
 
 fn media_from_release(parsed: &Release) -> Media {

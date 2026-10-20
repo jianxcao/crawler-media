@@ -37,10 +37,13 @@ pub struct PlaySessionBinding {
     pub issued_at: i64,
     pub generation: i64,
     pub state: PlaySessionIdState,
+    pub media_id: domain::MediaId,
+    pub unit: domain::UnitKey,
     pub file_id: Option<String>,
     pub file_revision: Option<i64>,
     pub source_version: Option<String>,
     pub library_id: Option<String>,
+    pub config_revision: i64,
 }
 
 impl Store {
@@ -53,6 +56,9 @@ impl Store {
         user_id: UserId,
         device_id: &str,
         ledger_id: LedgerId,
+        media_id: domain::MediaId,
+        unit: domain::UnitKey,
+        version: &domain::FileVersion,
         now: i64,
     ) -> Result<String, StoreError> {
         let play_session_id = uuid::Uuid::new_v4().to_string();
@@ -64,71 +70,69 @@ impl Store {
             rusqlite::TransactionBehavior::Immediate,
         )?;
 
-        // Clean expired sessions (older than 30 days = 30 * 86400 = 2_592_000 seconds)
-        // only delete pending or closed, max 500
         let cutoff = now - 2_592_000;
         tx.execute(
             "DELETE FROM playback_session_ids
              WHERE rowid IN (
                  SELECT rowid FROM playback_session_ids
                  WHERE issued_at < ?1 AND state IN ('pending', 'closed')
-                 ORDER BY issued_at ASC
-                 LIMIT 500
+                 ORDER BY issued_at ASC LIMIT 500
              )",
             params![cutoff],
         )?;
 
-        // Compute generation = MAX(generation) + 1 for (user_id, device_id)
-        let max_gen: Option<i64> = tx
+        let max_gen: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(generation), 0) FROM playback_session_ids WHERE user_id = ?1 AND device_id = ?2",
+            params![user_str, device_id],
+            |r| r.get(0),
+        )?;
+        let generation = max_gen + 1;
+
+        let file_info: Option<(String, String, i64, String)> = tx
             .query_row(
-                "SELECT MAX(generation) FROM playback_session_ids WHERE user_id = ?1 AND device_id = ?2",
-                params![user_str, device_id],
-                |r| r.get::<_, Option<i64>>(0),
+                "SELECT media_id, library_id, file_revision, source_version
+                 FROM library_files WHERE file_id = ?1 AND presence_state = 'present'
+                   AND publication_state = 'published'",
+                params![item_id_str],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
-            .optional()?
-            .flatten();
-        let generation = max_gen.unwrap_or(0) + 1;
-
-        // Query target file binding from library_files and library_file_units
-        let file_info: Option<(String, String, i32, i32, i64, String, String)> = tx.query_row(
-            "SELECT f.media_id, f.library_id, COALESCE(u.season, -1), COALESCE(u.episode, -1),
-                    f.file_revision, f.source_version, f.file_id
-             FROM library_files f
-             LEFT JOIN library_file_units u ON f.file_id = u.file_id
-             WHERE f.file_id = ?1 LIMIT 1",
-            params![item_id_str],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
-        ).optional()?;
-
-        let (mid, lid, s, ep, rev, s_ver, fid) = match file_info {
-            Some(info) => info,
-            None => {
-                // If not in library_files, treat item_id as file_id with default revision
-                (item_id_str.clone(), "".into(), -1, -1, 1, "v1".into(), item_id_str.clone())
-            }
+            .optional()?;
+        let Some((file_media, library_id, revision, source_version)) = file_info else {
+            return Err(StoreError::Missing(format!("playable file {ledger_id}")));
         };
+        if file_media != media_id.to_string()
+            || revision != version.revision
+            || source_version != version.source_version
+        {
+            return Err(StoreError::Protected(format!("playback source changed for {ledger_id}")));
+        }
+        let coverage_exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM library_file_units
+             WHERE file_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4)",
+            params![item_id_str, media_id.to_string(), unit.season, unit.episode],
+            |r| r.get(0),
+        )?;
+        if !coverage_exists {
+            return Err(StoreError::Missing(format!("source does not cover {unit:?}")));
+        }
+        let (config_revision, lifecycle): (i64, String) = tx.query_row(
+            "SELECT config_revision, lifecycle_state FROM libraries WHERE library_id = ?1",
+            params![library_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if lifecycle != "ready" {
+            return Err(StoreError::Protected(format!("library {library_id} is not ready")));
+        }
 
         tx.execute(
             "INSERT INTO playback_session_ids
                 (user_id, device_id, play_session_id, item_id, media_id, season, episode,
                  file_id, file_revision, source_version, library_id, config_revision, timeline_mode,
                  issued_at, generation, state)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, 'full_file', ?12, ?13, 'pending')",
-            params![
-                user_str,
-                device_id,
-                play_session_id,
-                item_id_str,
-                mid,
-                s,
-                ep,
-                fid,
-                rev,
-                s_ver,
-                lid,
-                now,
-                generation,
-            ],
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'full_file', ?13, ?14, 'pending')",
+            params![user_str, device_id, play_session_id, item_id_str, media_id.to_string(),
+                unit.season, unit.episode, item_id_str, version.revision, version.source_version,
+                library_id, config_revision, now, generation],
         )?;
 
         tx.commit()?;
@@ -144,7 +148,7 @@ impl Store {
     ) -> Result<Option<PlaySessionBinding>, StoreError> {
         self.library
             .query_row(
-                "SELECT item_id, issued_at, generation, state, file_id, file_revision, source_version, library_id
+                "SELECT item_id, issued_at, generation, state, file_id, file_revision, source_version, library_id, config_revision, media_id, season, episode
                  FROM playback_session_ids
                  WHERE user_id = ?1 AND device_id = ?2 AND play_session_id = ?3",
                 params![user_id.to_string(), device_id, play_session_id],
@@ -157,6 +161,10 @@ impl Store {
                     let file_revision: Option<i64> = row.get(5)?;
                     let source_version: Option<String> = row.get(6)?;
                     let library_id: Option<String> = row.get(7)?;
+                    let config_revision: i64 = row.get(8)?;
+                    let media_id: String = row.get(9)?;
+                    let season: i32 = row.get(10)?;
+                    let episode: i32 = row.get(11)?;
                     let ledger_id = LedgerId::from_str(&item_str)
                         .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, 0))?;
                     let state = PlaySessionIdState::from_str(&state_str)
@@ -170,6 +178,9 @@ impl Store {
                         file_revision,
                         source_version,
                         library_id,
+                        config_revision,
+                        media_id: media_id.parse().map_err(|_| rusqlite::Error::IntegralValueOutOfRange(9, 0))?,
+                        unit: domain::UnitKey::new(season, episode),
                     })
                 },
             )

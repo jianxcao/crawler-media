@@ -167,7 +167,7 @@ CREATE INDEX items_size ON library_items(library_id,size_sort,media_id);
 CREATE INDEX items_resolution ON library_items(library_id,resolution_rank,media_id);
 CREATE INDEX items_shuffle ON library_items(library_id,stable_shuffle_key,media_id);
 CREATE TABLE library_item_terms (
- library_id TEXT NOT NULL, term_kind TEXT NOT NULL CHECK(term_kind IN ('genre','country','resolution','collection')),
+ library_id TEXT NOT NULL, term_kind TEXT NOT NULL CHECK(term_kind IN ('genre','country','resolution','collection','jellyfin_genre','studio','person_id','person_name','person_tmdb_id','overview','original_title')),
  term_value TEXT NOT NULL, media_id TEXT NOT NULL, PRIMARY KEY(library_id,term_kind,term_value,media_id),
  FOREIGN KEY(library_id,media_id) REFERENCES library_items(library_id,media_id) ON DELETE CASCADE
 );

@@ -122,7 +122,13 @@ fn bearer_token(request: &Request) -> Option<String> {
 fn query_token(request: &Request) -> Option<String> {
     let path = request.uri().path();
     // 窄范围 query-token：仅允许视频取流、字幕取流和直读类播放资源路由
+    let mut segments = path.split('/');
+    let is_session_stream = matches!(
+        (segments.next(), segments.next(), segments.next(), segments.next(), segments.next(), segments.next(), segments.next()),
+        (Some(""), Some("api"), Some("v1"), Some("playback"), Some("sessions"), Some(id), Some("stream")) if !id.is_empty()
+    ) && segments.next().is_none();
     let is_playback_resource = path.starts_with("/api/v1/playback/subtitles/")
+        || is_session_stream
         || path.starts_with("/Videos/")
         || path.starts_with("/playback/subtitles/");
     if !is_playback_resource {

@@ -496,7 +496,7 @@ export interface ClientCapability {
   native_hls: boolean;
 }
 
-/** 播放单元：电影用 (0, 0) 哨兵，与台账、playback_state 的约定一致。 */
+/** 播放单元：电影通过缺省季集表达规范 whole-work 请求。 */
 export interface PlaybackUnit {
   media_item_id: number | string;
   season_number?: number;
@@ -908,8 +908,9 @@ export async function fetchResumeState(
   }
   const params = new URLSearchParams({
     media_item_id: String(unit.media_item_id),
-    season_number: String(unit.season_number ?? 0),
-    episode_number: String(unit.episode_number ?? 0),
+    ...(unit.season_number == null && unit.episode_number == null
+      ? {}
+      : { season_number: String(unit.season_number), episode_number: String(unit.episode_number) }),
   });
   const response = await request<ApiEnvelope<PlaybackWatchState>>(
     `/playback/resume?${params}`,

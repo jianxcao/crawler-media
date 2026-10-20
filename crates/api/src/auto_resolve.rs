@@ -135,9 +135,8 @@ fn resolve_media(
     // Persist the display facts a Scrape observed (rating, release date, studio, logo)
     // through the adopted metadata; the affected cards are reduced in that transaction.
     if let Some(tmdb_id) = &updated.tmdb_id {
-        if let Ok(Some(meta)) =
-            crate::scrape_metadata::fetch_tmdb_metadata(state, updated.kind, tmdb_id)
-        {
+        if let Ok(Some(meta)) = crate::scrape_metadata::fetch_tmdb_metadata(state, updated.kind, tmdb_id) {
+            crate::scrape_metadata::adopt_tmdb_metadata(state, &updated, tmdb_id, domain::EntityScope::Work, &meta);
             crate::scrape_metadata::record_scraped_display(state, updated.id, &meta);
         }
     }

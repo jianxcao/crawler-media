@@ -2,7 +2,6 @@
 mod support;
 
 use axum::http::StatusCode;
-use domain::LedgerId;
 use serde_json::json;
 use support::library_presence::PresenceFixture;
 
@@ -22,9 +21,7 @@ async fn late_old_stop_does_not_close_new_session() {
     let session_id_a = {
         let store_arc = fix.state.store();
         let guard = store_arc.lock();
-        guard
-            .issue_play_session(user_id, "dev1", row_a.id, 1000)
-            .unwrap()
+        support::session::issue_session(&guard, user_id, "dev1", row_a.id, 1000)
     };
 
     // Start A with play_session_id_a
@@ -49,9 +46,7 @@ async fn late_old_stop_does_not_close_new_session() {
     let session_id_b = {
         let store_arc = fix.state.store();
         let guard = store_arc.lock();
-        guard
-            .issue_play_session(user_id, "dev1", row_b.id, 2000)
-            .unwrap()
+        support::session::issue_session(&guard, user_id, "dev1", row_b.id, 2000)
     };
     let (status, _) = fix
         .request_with_body(
@@ -117,7 +112,7 @@ async fn late_old_progress_does_not_rewind_position() {
     let id_1 = {
         let store_arc = fix.state.store();
         let guard = store_arc.lock();
-        guard.issue_play_session(user_id, "dev1", row.id, 1000).unwrap()
+        support::session::issue_session(&guard, user_id, "dev1", row.id, 1000)
     };
     fix.request_with_body(
         "POST",
@@ -137,7 +132,7 @@ async fn late_old_progress_does_not_rewind_position() {
     let id_2 = {
         let store_arc = fix.state.store();
         let guard = store_arc.lock();
-        guard.issue_play_session(user_id, "dev1", row.id, 2000).unwrap()
+        support::session::issue_session(&guard, user_id, "dev1", row.id, 2000)
     };
     fix.request_with_body(
         "POST",

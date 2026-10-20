@@ -59,6 +59,7 @@ mod scan_operations;
 mod scan_seen;
 pub use scan_operations::{ScanOperation, ScanOperationStatus};
 pub use scan_probe_obligations::{MAX_SCAN_BATCH, ScanProbeObligation};
+pub use scan_probe_obligations::ScannedLedger;
 mod search_history;
 pub use search_history::{HistoryDeleteOutcome, HistoryDeletePlan};
 mod sites;

@@ -102,6 +102,7 @@ fn single_table_browse_orders_and_paginates_without_in_memory_sort() {
             file: &file,
             units: &[UnitKey::WHOLE],
             expected_version: None,
+            nfo_observation: None,
             probe_required: false,
         }], 1000).unwrap();
     }
@@ -184,6 +185,7 @@ fn library_file_page_paginates_files_deterministically() {
             file: f,
             units: std::slice::from_ref(&unit_keys[i]),
             expected_version: None,
+            nfo_observation: None,
             probe_required: false,
         });
     }
@@ -234,6 +236,7 @@ fn library_unit_page_enumerates_units_for_tv_show() {
             file: f,
             units: std::slice::from_ref(&unit_keys[i]),
             expected_version: None,
+            nfo_observation: None,
             probe_required: false,
         });
     }
@@ -275,6 +278,7 @@ fn library_item_detail_hydrates_item_metadata_and_bounded_files() {
         file: &f,
         units: &[UnitKey::WHOLE],
         expected_version: None,
+        nfo_observation: None,
         probe_required: false,
     }], 1000).unwrap();
 
@@ -331,12 +335,14 @@ fn protocol_item_page_pagination_and_wire_ids() {
             file: &file1,
             units: &[UnitKey::WHOLE],
             expected_version: None,
+            nfo_observation: None,
             probe_required: false,
         },
         StorePublication {
             file: &file2,
             units: &[UnitKey::WHOLE],
             expected_version: None,
+            nfo_observation: None,
             probe_required: false,
         },
     ], 1000).unwrap();

@@ -97,7 +97,7 @@ export interface LibraryItem {
   missing: boolean;
 }
 
-/** 条目详情里的一个物理文件（一个版本 / 一集）。 */
+/** One physical file, with cached probe data when available. */
 export interface LibraryItemFile {
   file_id: string;
   path: string;
@@ -107,10 +107,10 @@ export interface LibraryItemFile {
   codec: string | null;
   hdr: string | null;
   quality_source: string | null;
-  /** ffprobe 抽取的音轨 / 字幕轨（file_meta 缓存；未探测为空数组） */
+  /** ffprobe 抽取的音轨 / 字幕轨（file_details 缓存；未探测为空数组） */
   audio_tracks?: AudioStream[];
   subtitle_tracks?: SubtitleStream[];
-  /** ffprobe 抽取的主视频流信息（file_meta 缓存；未探测为 null） */
+  /** ffprobe 抽取的主视频流信息（file_details 缓存；未探测为 null） */
   video_track?: VideoTrackInfo | null;
   /** 是否已探测完成（false = 后台探测中，前端显示「探测中」并轮询） */
   probed?: boolean;
@@ -121,6 +121,11 @@ export interface LibraryItemFile {
     intro?: ProbeStageView | null;
     outro?: ProbeStageView | null;
   } | null;
+}
+
+export interface LibraryItemFilePage {
+  files: LibraryItemFile[];
+  next_cursor: string | null;
 }
 
 export interface ProbeStageView {
@@ -165,6 +170,7 @@ export interface LibraryItemDetail {
   /** 本地 fanart.jpg 背景图（/fanart/{ledgerId}） */
   backdrop_url: string | null;
   files: LibraryItemFile[];
+  seasons: number[];
 }
 
 /** 剧集分集区的一集。 */
@@ -1411,6 +1417,11 @@ export async function getLibraryItemDetail(
     request<ApiEnvelope<unknown>>(`/libraries/${libraryId}/items/${mediaItemId}`),
   );
   const r = (raw ?? {}) as Record<string, unknown>;
+  const firstPage = {
+    files: Array.isArray(r.files) ? r.files.map(fileFrom) : [],
+    next_cursor: r.next_file_cursor == null ? null : str(r.next_file_cursor),
+  };
+  const files = await getAllLibraryItemFiles(libraryId, mediaItemId, firstPage);
   return {
     media_item_id: str(r.media_item_id) || mediaItemId,
     kind: (r.kind as LibraryKind) ?? "movie",
@@ -1436,27 +1447,66 @@ export async function getLibraryItemDetail(
       : [],
     poster_url: r.poster_url == null ? null : str(r.poster_url),
     backdrop_url: r.backdrop_url == null ? null : str(r.backdrop_url),
-    files: Array.isArray(r.files)
-      ? (r.files as unknown[]).map((f) => {
-          const fr = (f ?? {}) as Record<string, unknown>;
-          return {
-            file_id: str(fr.file_id),
-            path: str(fr.path),
-            season: fr.season == null ? null : num(fr.season),
-            episode: fr.episode == null ? null : num(fr.episode),
-            resolution: fr.resolution == null ? null : str(fr.resolution),
-            codec: fr.codec == null ? null : str(fr.codec),
-            hdr: fr.hdr == null ? null : str(fr.hdr),
-            quality_source: fr.quality_source == null ? null : str(fr.quality_source),
-            audio_tracks: Array.isArray(fr.audio_tracks) ? (fr.audio_tracks as unknown[]).map(trackFrom) : [],
-            subtitle_tracks: Array.isArray(fr.subtitle_tracks) ? (fr.subtitle_tracks as unknown[]).map(trackFrom) : [],
-            video_track: fr.video_track == null ? null : videoTrackFrom(fr.video_track),
-            probed: fr.probed === true,
-            probe_queued: fr.probe_queued === true,
-          };
-        })
-      : [],
+    seasons: Array.isArray(r.seasons) ? r.seasons.map(num) : [],
+    files,
   };
+
+}
+
+function fileFrom(f: unknown): LibraryItemFile {
+  const fr = (f ?? {}) as Record<string, unknown>;
+  return {
+    file_id: str(fr.file_id),
+    path: str(fr.path),
+    season: fr.season == null ? null : num(fr.season),
+    episode: fr.episode == null ? null : num(fr.episode),
+    resolution: fr.resolution == null ? null : str(fr.resolution),
+    codec: fr.codec == null ? null : str(fr.codec),
+    hdr: fr.hdr == null ? null : str(fr.hdr),
+    quality_source: fr.quality_source == null ? null : str(fr.quality_source),
+    audio_tracks: Array.isArray(fr.audio_tracks) ? (fr.audio_tracks as unknown[]).map(trackFrom) : [],
+    subtitle_tracks: Array.isArray(fr.subtitle_tracks) ? (fr.subtitle_tracks as unknown[]).map(trackFrom) : [],
+    video_track: fr.video_track == null ? null : videoTrackFrom(fr.video_track),
+    probed: fr.probed === true,
+    probe_queued: fr.probe_queued === true,
+  };
+}
+/** One bounded page of a detail item's files (`GET .../files?after=`). */
+export async function getLibraryItemFiles(
+  libraryId: string,
+  mediaItemId: string,
+  after: string,
+): Promise<LibraryItemFilePage> {
+  const raw = await unwrap(
+    request<ApiEnvelope<unknown>>(
+      `/libraries/${libraryId}/items/${mediaItemId}/files?after=${encodeURIComponent(after)}`,
+    ),
+  );
+  const r = (raw ?? {}) as Record<string, unknown>;
+  return {
+    files: Array.isArray(r.files) ? (r.files as unknown[]).map(fileFrom) : [],
+    next_cursor: r.next_file_cursor == null ? null : str(r.next_file_cursor),
+  };
+}
+
+export async function getAllLibraryItemFiles(
+  libraryId: string,
+  mediaItemId: string,
+  firstPage: LibraryItemFilePage,
+): Promise<LibraryItemFile[]> {
+  const files: LibraryItemFile[] = [];
+  const seen = new Set<string>();
+  let page = firstPage;
+  while (true) {
+    for (const file of page.files) {
+      if (seen.has(file.file_id)) throw new Error("文件分页出现重复 file_id");
+      seen.add(file.file_id);
+      files.push(file);
+    }
+    if (!page.next_cursor) return files;
+    page = await getLibraryItemFiles(libraryId, mediaItemId, page.next_cursor);
+    if (page.files.length === 0) throw new Error("文件分页 cursor 未推进");
+  }
 }
 
 /** 剧集条目一季的分集清单（GET /libraries/{id}/items/{itemId}/episodes?season=）。 */
@@ -1465,19 +1515,13 @@ export async function getItemEpisodes(
   mediaItemId: string,
   seasonNumber: number,
 ): Promise<SeasonEpisodes> {
-  const data = await unwrap(
-    request<ApiEnvelope<SeasonEpisodes | unknown[]>>(
+  const episodes = await unwrap(
+    request<ApiEnvelope<LibraryEpisode[]>>(
       `/libraries/${libraryId}/items/${mediaItemId}/episodes?season=${seasonNumber}`,
     ),
   );
-  if (Array.isArray(data)) {
-    const list = (data as LibraryEpisode[]).sort((a, b) => a.episode_number - b.episode_number);
-    return { season_number: seasonNumber, episodes: list };
-  }
-  if (data && Array.isArray((data as SeasonEpisodes).episodes)) {
-    (data as SeasonEpisodes).episodes.sort((a, b) => a.episode_number - b.episode_number);
-  }
-  return data as SeasonEpisodes;
+  episodes.sort((a, b) => a.episode_number - b.episode_number);
+  return { season_number: seasonNumber, episodes };
 }
 
 /** 手动触发完整探测：清空条目所有文件的流信息/章节/片头片尾缓存并重新入队

@@ -89,7 +89,7 @@ async fn create_movie_library_and_assert_empty_cover(
 async fn setup_movie_library_with_fanart(
     app: &axum::Router,
     tmp: &tempfile::TempDir,
-) -> (String, std::path::PathBuf) {
+) -> String {
     let movie_root = tmp.path().join("movies");
     std::fs::create_dir_all(&movie_root).unwrap();
 
@@ -102,19 +102,6 @@ async fn setup_movie_library_with_fanart(
     let second_poster = image::RgbImage::from_pixel(300, 450, image::Rgb([160, 90, 30]));
     second_poster.save(second_dir.join("poster.jpg")).unwrap();
     std::fs::write(second_dir.join("Arrival (2016).mkv"), b"video dummy").unwrap();
-
-    // 即使库内存在横版 fanart，也应从多部作品海报生成库封面。
-    let fanart = film_dir.join("fanart.jpg");
-    std::fs::write(&fanart, b"fake fanart bytes 12345").unwrap();
-    let cover_file = tmp
-        .path()
-        .join("data")
-        .join("library")
-        .join("covers")
-        .join(format!("library-{lib_id}.jpg"));
-    std::fs::create_dir_all(cover_file.parent().unwrap()).unwrap();
-    std::fs::copy(&fanart, &cover_file).unwrap();
-    scan_and_wait(&app, &lib_id).await;
 
     let cover_res3 = app
         .clone()
@@ -131,34 +118,15 @@ async fn setup_movie_library_with_fanart(
         cover_res3.headers().get("content-type").unwrap(),
         "image/jpeg"
     );
-    assert!(cover_file.is_file(), "自动拷贝生成了 cover.jpg");
-    // C2b / F08：legacy 文件内容保持原始 bytes 不被就地覆盖破坏，新生成的合成封面发布为新版本文件！
-    let after_scan = app
-        .clone()
-        .oneshot(request(
-            "GET",
-            &format!("/api/v1/libraries/{lib_id}/cover"),
-            Some("management-secret"),
-            Value::Null,
-        ))
+    let bytes = axum::body::to_bytes(cover_res3.into_body(), usize::MAX)
         .await
         .unwrap();
-    assert_eq!(after_scan.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(after_scan.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let generated = image::load_from_memory(&bytes).unwrap();
-    assert_eq!((generated.width(), generated.height()), (1920, 1080));
+    assert!(bytes.starts_with(b"\xff\xd8\xff"));
     assert_ne!(bytes.as_ref(), b"fake fanart bytes 12345");
-    assert_eq!(
-        std::fs::read(&cover_file).unwrap(),
-        b"fake fanart bytes 12345",
-        "legacy 封面文件必须保持只读"
-    );
-    (lib_id, cover_file)
+    lib_id
 }
 
-async fn assert_cover_crud(app: &axum::Router, lib_id: &str, cover_file: &std::path::Path) {
+async fn assert_cover_crud(app: &axum::Router, lib_id: &str) {
     // 4. 用户主动上传/更换封面 (POST /cover)
     let upload_res = app
         .clone()
@@ -173,7 +141,7 @@ async fn assert_cover_crud(app: &axum::Router, lib_id: &str, cover_file: &std::p
         .await
         .unwrap();
     assert_eq!(upload_res.status(), StatusCode::OK);
-    // C2b：手动封面发布为新的不可变版本文件；legacy 固定路径只读保留。
+    // 手动封面发布为新的不可变版本文件；GET 应返回 DB 指向的新版本。
     let after_upload = app
         .clone()
         .oneshot(request(
@@ -202,11 +170,6 @@ async fn assert_cover_crud(app: &axum::Router, lib_id: &str, cover_file: &std::p
         .await
         .unwrap();
     assert_eq!(delete_res.status(), StatusCode::OK);
-    // C2b：legacy 固定路径仅读、不预先 unlink；删除通过 revision CAS 到 none。
-    assert!(
-        cover_file.is_file(),
-        "legacy 固定路径不被 DELETE 预先 unlink"
-    );
 
     let cover_res4 = app
         .clone()
@@ -219,17 +182,17 @@ async fn assert_cover_crud(app: &axum::Router, lib_id: &str, cover_file: &std::p
         .await
         .unwrap();
     assert_eq!(cover_res4.status(), StatusCode::OK);
-    let fallback_after_delete = axum::body::to_bytes(cover_res4.into_body(), usize::MAX)
+    let generated_after_delete = axum::body::to_bytes(cover_res4.into_body(), usize::MAX)
         .await
         .unwrap();
-    assert!(fallback_after_delete.starts_with(b"\xff\xd8\xff"));
-    assert_ne!(fallback_after_delete.as_ref(), b"hello custom cover");
+    assert!(generated_after_delete.starts_with(b"\xff\xd8\xff"));
+    assert_ne!(generated_after_delete.as_ref(), b"hello custom cover");
 }
 
 #[tokio::test]
-async fn library_cover_auto_fill_only_uses_fanart_and_supports_crud() {
+async fn library_cover_generates_from_posters_and_supports_crud() {
     let tmp = tempfile::tempdir().unwrap();
     let app = app(&tmp);
-    let (lib_id, cover_file) = setup_movie_library_with_fanart(&app, &tmp).await;
-    assert_cover_crud(&app, &lib_id, &cover_file).await;
+    let lib_id = setup_movie_library_with_fanart(&app, &tmp).await;
+    assert_cover_crud(&app, &lib_id).await;
 }

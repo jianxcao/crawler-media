@@ -1,7 +1,7 @@
 //! `GET /libraries/{id}/items` 与 `/gallery` 的显式分页校验。
 //!
 //! 越界的显式 `limit`/`offset` 必须 400，不再静默 clamp；`offset + limit` 不得
-//! 溢出；**省略 `limit` 仍返回全部**（默认分页迁移是独立决策，本任务不动）。
+//! 溢出；省略 `limit` 时按默认上限返回一页。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -108,7 +108,7 @@ fn fixture() -> (tempfile::TempDir, axum::Router, String) {
 #[tokio::test]
 async fn invalid_explicit_paging_is_rejected_on_both_paths() {
     let (_tmp, app, library_id) = fixture();
-    for bad in ["limit=0", "limit=201", "limit=-1", "limit=abc", "limit="] {
+    for bad in ["limit=0", "limit=501", "limit=-1", "limit=abc", "limit="] {
         let (status, body) = get(&app, &format!("/api/v1/libraries/{library_id}/items?{bad}")).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "items {bad}: {body}");
         assert_eq!(body["error"]["code"], "library.invalid");
@@ -168,14 +168,14 @@ async fn explicit_limit_returns_the_requested_page() {
 }
 
 #[tokio::test]
-async fn omitted_limit_still_returns_everything() {
+async fn omitted_limit_returns_the_default_page() {
     let (_tmp, app, library_id) = fixture();
     let (status, body) = get(&app, &format!("/api/v1/libraries/{library_id}/items")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body["data"].as_array().unwrap().len(),
         5,
-        "省略 limit 的既有行为是返回全部"
+        "默认页上限大于本 fixture 的条目数，应全部返回"
     );
 
     // gallery：5 个 Media 里只有 2 个有图，空图组先被剔除，再分页。

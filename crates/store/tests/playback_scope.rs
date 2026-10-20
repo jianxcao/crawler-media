@@ -1,7 +1,9 @@
 //! Store-side playback history scope: SQL keyset paging with a visible-Media
 //! set and a hidden-row count for the same scope.
 
-use domain::{MediaId, UserId};
+mod support;
+
+use domain::{LedgerId, MediaId, UserId};
 use store::{PlaybackLogScope, PlayLogRow, SessionRow, Store};
 
 /// 没有公开 insert_log：用 issue_play_session 绑定 + upsert_session + close_session
@@ -10,14 +12,12 @@ fn log_fixture(
     store: &Store,
     user: UserId,
     media: MediaId,
+    file: LedgerId,
     device: &str,
     started: i64,
     watched: i64,
 ) -> PlayLogRow {
-    let ledger = domain::LedgerId::new();
-    let play_session_id = store
-        .issue_play_session(user, device, ledger, started)
-        .unwrap();
+    let play_session_id = support::issue_session(store, user, device, file, started);
     store
         .upsert_session(&SessionRow {
             device_id: device.into(),
@@ -40,7 +40,7 @@ fn log_fixture(
             admin_ended: false,
             started_at: started,
             last_report_at: started,
-            ledger_id: Some(ledger.to_string()),
+            ledger_id: Some(file.to_string()),
             play_session_id: Some(play_session_id),
             last_report_at_ms: started * 1000,
             last_event_sequence: None,
@@ -103,12 +103,13 @@ fn composite_cursor_pages_visible_rows_without_gaps_or_duplicates() {
     let user = UserId::new();
     let visible = MediaId::new();
     let hidden = MediaId::new();
+    let file = support::seed_published_file(&store, &tmp.path().join("library"), "cursor").1;
     let base = 1_700_000_000i64;
     let mut created = Vec::new();
     // 三组：每组一条可见、一条不可见，且组内 started_at 完全相同。
     for (index, started) in [base + 100, base + 50, base].into_iter().enumerate() {
-        created.push(log_fixture(&store, user, visible, &format!("v{index}"), started, 10));
-        created.push(log_fixture(&store, user, hidden, &format!("h{index}"), started, 10));
+        created.push(log_fixture(&store, user, visible, file, &format!("v{index}"), started, 10));
+        created.push(log_fixture(&store, user, hidden, file, &format!("h{index}"), started, 10));
     }
     let expected = expected_order(
         created
@@ -138,11 +139,12 @@ fn hidden_count_counts_rows_not_distinct_media() {
     let user = UserId::new();
     let visible = MediaId::new();
     let hidden = MediaId::new();
+    let file = support::seed_published_file(&store, &tmp.path().join("library"), "hidden").1;
     let base = 1_700_000_000i64;
-    log_fixture(&store, user, visible, "v0", base, 10);
+    log_fixture(&store, user, visible, file, "v0", base, 10);
     // 同一不可见 Media 的两行：hidden_count 应为 2（行数），不是 1（distinct）。
-    log_fixture(&store, user, hidden, "h0", base, 10);
-    log_fixture(&store, user, hidden, "h1", base - 10, 10);
+    log_fixture(&store, user, hidden, file, "h0", base, 10);
+    log_fixture(&store, user, hidden, file, "h1", base - 10, 10);
 
     let page = store
         .playback_log_page(&scope(user, Some(vec![visible]), None), 10)
@@ -159,9 +161,10 @@ fn empty_visible_scope_returns_empty_page() {
     let user = UserId::new();
     let first = MediaId::new();
     let second = MediaId::new();
+    let file = support::seed_published_file(&store, &tmp.path().join("library"), "empty").1;
     let base = 1_700_000_000i64;
-    log_fixture(&store, user, first, "a", base, 10);
-    log_fixture(&store, user, second, "b", base - 10, 10);
+    log_fixture(&store, user, first, file, "a", base, 10);
+    log_fixture(&store, user, second, file, "b", base - 10, 10);
 
     let page = store
         .playback_log_page(&scope(user, Some(Vec::new()), None), 10)
@@ -178,9 +181,10 @@ fn none_visible_scope_is_unrestricted() {
     let user = UserId::new();
     let first = MediaId::new();
     let second = MediaId::new();
+    let file = support::seed_published_file(&store, &tmp.path().join("library"), "unrestricted").1;
     let base = 1_700_000_000i64;
-    log_fixture(&store, user, first, "a", base, 10);
-    log_fixture(&store, user, second, "b", base - 10, 10);
+    log_fixture(&store, user, first, file, "a", base, 10);
+    log_fixture(&store, user, second, file, "b", base - 10, 10);
 
     let page = store.playback_log_page(&scope(user, None, None), 10).unwrap();
     assert_eq!(page.entries.len(), 2);
@@ -195,11 +199,12 @@ fn since_filters_both_page_and_hidden_count() {
     let user = UserId::new();
     let visible = MediaId::new();
     let hidden = MediaId::new();
+    let file = support::seed_published_file(&store, &tmp.path().join("library"), "since").1;
     let base = 1_700_000_000i64;
-    log_fixture(&store, user, visible, "v-new", base, 10);
-    log_fixture(&store, user, hidden, "h-new", base - 10, 10);
-    log_fixture(&store, user, visible, "v-old", base - 100, 10);
-    log_fixture(&store, user, hidden, "h-old", base - 200, 10);
+    log_fixture(&store, user, visible, file, "v-new", base, 10);
+    log_fixture(&store, user, hidden, file, "h-new", base - 10, 10);
+    log_fixture(&store, user, visible, file, "v-old", base - 100, 10);
+    log_fixture(&store, user, hidden, file, "h-old", base - 200, 10);
 
     let page = store
         .playback_log_page(&scope(user, Some(vec![visible]), Some(base - 50)), 10)
@@ -225,7 +230,8 @@ fn limit_bounds_and_ambiguous_cursor_are_errors() {
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
     let visible = MediaId::new();
-    log_fixture(&store, user, visible, "v", 1_700_000_000, 10);
+    let file = support::seed_published_file(&store, &tmp.path().join("library"), "limit").1;
+    log_fixture(&store, user, visible, file, "v", 1_700_000_000, 10);
     let scoped = scope(user, Some(vec![visible]), None);
 
     assert!(store.playback_log_page(&scoped, 0).is_err());
@@ -252,9 +258,10 @@ fn scope_does_not_leak_between_calls() {
     let user = UserId::new();
     let first = MediaId::new();
     let second = MediaId::new();
+    let file = support::seed_published_file(&store, &tmp.path().join("library"), "leak").1;
     let base = 1_700_000_000i64;
-    log_fixture(&store, user, first, "a", base, 10);
-    log_fixture(&store, user, second, "b", base - 10, 10);
+    log_fixture(&store, user, first, file, "a", base, 10);
+    log_fixture(&store, user, second, file, "b", base - 10, 10);
 
     // 第一次填满大可见集合。
     let filled = store
@@ -290,10 +297,11 @@ fn user_scope_filters_page_and_hidden() {
     let bob = UserId::new();
     let visible = MediaId::new();
     let hidden = MediaId::new();
+    let file = support::seed_published_file(&store, &tmp.path().join("library"), "users").1;
     let base = 1_700_000_000i64;
-    log_fixture(&store, alice, visible, "alice-v", base, 10);
-    log_fixture(&store, alice, hidden, "alice-h", base - 10, 10);
-    log_fixture(&store, bob, visible, "bob-v", base - 20, 10);
+    log_fixture(&store, alice, visible, file, "alice-v", base, 10);
+    log_fixture(&store, alice, hidden, file, "alice-h", base - 10, 10);
+    log_fixture(&store, bob, visible, file, "bob-v", base - 20, 10);
 
     let page = store
         .playback_log_page(&scope(alice, Some(vec![visible]), None), 10)

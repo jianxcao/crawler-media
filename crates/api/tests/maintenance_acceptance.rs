@@ -10,13 +10,16 @@ use std::sync::Arc;
 #[path = "maintenance_support/mod.rs"]
 mod support;
 
+#[path = "support/mod.rs"]
+mod api_support;
+
 use api::maintenance::{MaintenancePolicy, SqliteExecutor};
 use api::worker::StateRunner;
 use api::ApiState;
 use domain::{MediaId, UserId};
 use jobs::{JobKind, Runner, Schedule};
 use store::{SessionRow, Store};
-use support::{build_state, KEEP, DAY};
+use support::{DAY, KEEP, build_state, seed_published_file};
 
 /// 真实执行器 + 真实 Store；`ApiState::new` 会在构造时 seed 维护 def。
 fn real_state(root: &Path) -> ApiState {
@@ -176,10 +179,15 @@ fn user_changes_survive_a_restart() {
     );
 }
 
-fn session(store: &Store, user: UserId, media: MediaId, device: &str, started: i64) -> SessionRow {
-    let play_session_id = store
-        .issue_play_session(user, device, domain::LedgerId::new(), started)
-        .unwrap();
+fn session(
+    store: &Store,
+    user: UserId,
+    media: MediaId,
+    file_id: domain::LedgerId,
+    device: &str,
+    started: i64,
+) -> SessionRow {
+    let play_session_id = api_support::session::issue_session(store, user, device, file_id, started);
     SessionRow {
         device_id: device.into(),
         user_id: user,
@@ -233,17 +241,25 @@ fn playback_retention_prunes_only_logs_and_keeps_playback_state() {
             bangumi_id: None,
             anilist_id: None,
         }).unwrap();
+        let file_id = seed_published_file(&store, tmp.path(), media);
         // 两条超龄历史 + 一条近期历史。
         for (index, started) in [(0, now - 40 * DAY), (1, now - 30 * DAY), (2, now - 60)].iter() {
             store
-                .upsert_session(&session(&store, user, media, &format!("device-{index}"), *started))
+                .upsert_session(&session(
+                    &store,
+                    user,
+                    media,
+                    file_id,
+                    &format!("device-{index}"),
+                    *started,
+                ))
                 .unwrap();
             store
                 .close_session(user, &format!("device-{index}"), *started + 60)
                 .unwrap();
         }
         // 一条活跃会话 + 进度/收藏：清理不得碰它们。
-        let mut live = session(&store, user, media, "live-device", now - 30);
+        let mut live = session(&store, user, media, file_id, "live-device", now - 30);
         live.position_ms = 12_345;
         store.upsert_session(&live).unwrap();
         store

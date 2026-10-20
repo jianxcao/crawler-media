@@ -141,15 +141,15 @@ fn media_batch_spans_the_500_id_chunk_boundary() {
 fn playback_units_for_user_keeps_full_state_for_partial_progress() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
-    let movie = media(MediaKind::Movie, "Partial", Some("603"));
-    store.insert_media(&movie).unwrap();
+    let show = media(MediaKind::Tv, "Partial", Some("603"));
+    store.insert_media(&show).unwrap();
     let root = tmp.path().join("media");
-    publish_unit(&store, &root, movie.id, 1, 2);
+    publish_unit(&store, &root, show.id, 1, 2);
     let user = UserId::new();
     store
         .upsert_unit(
             user,
-            movie.id,
+            show.id,
             1,
             2,
             123_456,
@@ -163,7 +163,7 @@ fn playback_units_for_user_keeps_full_state_for_partial_progress() {
         )
         .unwrap();
     store
-        .upsert_unit(user, movie.id, -1, -1, 0, Some(true), Some(false), None, None, None, true, 43)
+        .upsert_unit(user, show.id, -1, -1, 0, Some(true), Some(false), None, None, None, true, 43)
         .unwrap();
 
     let units = store.playback_units_for_user(user).unwrap();
@@ -172,7 +172,7 @@ fn playback_units_for_user_keeps_full_state_for_partial_progress() {
         .iter()
         .find(|unit| unit.season == 1 && unit.episode == 2)
         .expect("partial unit");
-    assert_eq!(partial.media_id, movie.id);
+    assert_eq!(partial.media_id, show.id);
     assert_eq!(partial.state.position_ms, 123_456);
     assert!(!partial.state.played, "watched mark must not be implied");
     assert!(partial.state.favorite);
@@ -183,7 +183,7 @@ fn playback_units_for_user_keeps_full_state_for_partial_progress() {
     assert_eq!(partial.state.updated_at, 42);
     assert_eq!(
         partial.state,
-        store.unit_state(user, movie.id, 1, 2).unwrap().unwrap()
+        store.unit_state(user, show.id, 1, 2).unwrap().unwrap()
     );
 }
 
@@ -278,6 +278,7 @@ fn playback_units_for_user_is_scoped_to_one_user() {
     let store = Store::open(tmp.path().join("data")).unwrap();
     let movie = media(MediaKind::Movie, "Scoped", None);
     store.insert_media(&movie).unwrap();
+    publish_whole(&store, tmp.path(), movie.id);
     let owner = UserId::new();
     store
         .upsert_unit(owner, movie.id, -1, -1, 5_000, Some(false), Some(false), None, None, None, false, 7)

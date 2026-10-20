@@ -101,6 +101,7 @@ fn playback_resolve_and_mutation_lifecycle() {
         file: &file,
         units: &[UnitKey::new(1, 1)],
         expected_version: None,
+        nfo_observation: None,
         probe_required: false,
     }], 1000).unwrap();
 
@@ -178,6 +179,7 @@ fn playback_source_change_detection() {
         file: &file1,
         units: &[UnitKey::new(1, 1)],
         expected_version: None,
+        nfo_observation: None,
         probe_required: false,
     }], 1000).unwrap();
 
@@ -216,6 +218,7 @@ fn playback_source_change_detection() {
         file: &file2,
         units: &[UnitKey::new(1, 1)],
         expected_version: None,
+        nfo_observation: None,
         probe_required: false,
     }], 1500).unwrap();
 

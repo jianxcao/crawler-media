@@ -26,6 +26,7 @@ struct Heartbeat<'a> {
     duration_ms: Option<i64>,
     now: i64,
     now_ms: i64,
+    source: domain::PhysicalSourceId,
 }
 
 pub(crate) async fn progress(
@@ -64,7 +65,7 @@ pub(crate) async fn progress(
             return err(StatusCode::BAD_REQUEST, "playback.invalid", "event_sequence 必须非负");
         }
     }
-    let (row, media, season, episode, duration_ms) = {
+    let (row, media, season, episode, duration_ms, source) = {
         let store = state.store.lock();
         match store.is_device_revoked(user_id, device_id) {
             Ok(true) => return err(StatusCode::FORBIDDEN, "playback.revoked", "该设备已被注销"),
@@ -74,11 +75,15 @@ pub(crate) async fn progress(
         let Some((row, media, season, episode)) = row_for(&store, &body, Some(user_id)) else {
             return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
         };
+        let Some(source) = store.visible_file(user_id, row.id).ok().flatten() else {
+            return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
+        };
         let duration = match unit_duration(&store, user_id, &row, season, episode) {
             Ok(duration) => body["duration_ms"].as_i64().filter(|d| *d > 0).or(duration),
             Err(error) => return persistence_error(&error, user_id, device_id),
         };
-        (row, media, season, episode, duration)
+        (row, media, season, episode, duration,
+            domain::PhysicalSourceId { file_id: source.file_id, revision: source.version.revision })
     };
     if duration_ms.is_none() {
         let _ = crate::http::library::ensure_probe_enqueued(&state, &row);
@@ -95,6 +100,7 @@ pub(crate) async fn progress(
         duration_ms,
         now: now_ms / 1000,
         now_ms,
+        source,
     };
     apply_heartbeat(&state.store.lock(), &heartbeat, device_id)
 }
@@ -153,11 +159,11 @@ fn update_unit(
         .duration_ms
         .or(existing.as_ref().and_then(|u| u.duration_ms));
     let completed = UnitState::playback_completed(position, duration);
-    store.upsert_unit(
+    store.upsert_unit_for_source(
         heartbeat.user_id,
         heartbeat.media_id,
-        heartbeat.season,
-        heartbeat.episode,
+        domain::UnitKey::new(heartbeat.season, heartbeat.episode),
+        heartbeat.source.clone(),
         position,
         completed.then_some(true),
         None,
@@ -391,9 +397,13 @@ fn apply_heartbeat(store: &crate::Store, heartbeat: &Heartbeat<'_>, device: &str
                 .parse::<domain::LedgerId>()
                 .ok()
                 .and_then(|ledger_id| {
-                    store
-                        .issue_play_session(heartbeat.user_id, device, ledger_id, heartbeat.now)
-                        .ok()
+                    store.visible_file(heartbeat.user_id, ledger_id).ok().flatten().and_then(|file| {
+                        store.issue_play_session(
+                            heartbeat.user_id, device, ledger_id, heartbeat.media_id,
+                            domain::UnitKey::new(heartbeat.season, heartbeat.episode),
+                            &file.version, heartbeat.now,
+                        ).ok()
+                    })
                 }),
         }
     };
@@ -431,9 +441,15 @@ mod tests {
         store.rebind_scanned_ledger(ledger.id, canonical.id).unwrap();
         let user_id = domain::UserId::new();
         let body = serde_json::json!({"event":"start", "position_ms":500, "device_id":"race"});
+        let file = store
+            .published_files(&[ledger.id])
+            .unwrap()
+            .remove(&ledger.id)
+            .expect("rebound fixture file is published");
         let heartbeat = Heartbeat { body: &body, user_id, media_id: provisional.id,
             kind: domain::MediaKind::Movie, ledger_id: ledger.id.to_string(),
-            season: UNIT_WHOLE, episode: UNIT_WHOLE, duration_ms: Some(1000), now: 10, now_ms: 10_000 };
+            season: UNIT_WHOLE, episode: UNIT_WHOLE, duration_ms: Some(1000), now: 10, now_ms: 10_000,
+            source: domain::PhysicalSourceId { file_id: file.file_id, revision: file.version.revision } };
 
         let (_, ended) = persist_heartbeat(&store, &heartbeat, "race", None).unwrap();
 

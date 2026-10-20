@@ -437,7 +437,7 @@ impl Store {
         )?;
         Self::replace_roots(&tx, &id, kind, root_paths)?;
         for root in root_paths {
-            Self::reassign_files_under_root(&tx, &id, root)?;
+            Self::reassign_files_under_root(&tx, &id, kind, root)?;
         }
         tx.commit()?;
         Ok(self
@@ -587,7 +587,7 @@ impl Store {
         if let Some(root_paths) = root_paths {
             Self::replace_roots(&tx, id, library.kind, root_paths)?;
             for root in root_paths {
-                Self::reassign_files_under_root(&tx, id, root)?;
+                Self::reassign_files_under_root(&tx, id, library.kind, root)?;
             }
         }
         if let Some((access_mode, admin_visible, member_ids)) = access {
@@ -708,76 +708,6 @@ impl Store {
                 conn.execute("DELETE FROM library_roots WHERE root_id = ?1", params![root_id])?;
             }
         }
-        Ok(())
-    }
-
-    /// Re-own every file whose path falls under `root_path` to `library_id`.
-    ///
-    /// Adding a nested root must not leave rows pointing at the previous Library:
-    /// path-based reads would attribute the file to the new root while the persisted
-    /// row still belonged to the old one, and the old Library could no longer be
-    /// deleted because its roots still carried files. Rows and both affected
-    /// summaries move inside the caller's transaction.
-    pub(crate) fn reassign_files_under_root(
-        conn: &rusqlite::Connection,
-        library_id: &str,
-        root_path: &str,
-    ) -> Result<(), StoreError> {
-        let root_path = root_path.trim();
-        if root_path.is_empty() {
-            return Ok(());
-        }
-        let new_root_id: Option<String> = conn
-            .query_row(
-                "SELECT root_id FROM library_roots WHERE library_id = ?1 AND path_key = ?2",
-                params![library_id, root_path],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(new_root_id) = new_root_id else {
-            return Ok(());
-        };
-        let affected: Vec<(String, String)> = {
-            let mut stmt = conn.prepare(
-                "SELECT DISTINCT library_id, media_id FROM library_files
-                 WHERE library_id <> ?1
-                   AND substr(path_key, 1, length(?2) + 1) = ?2 || '/'",
-            )?;
-            let rows = stmt.query_map(params![library_id, root_path], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
-        let moved = conn.execute(
-            "UPDATE library_files SET library_id = ?1, root_id = ?2
-             WHERE substr(path_key, 1, length(?3) + 1) = ?3 || '/'
-               AND (library_id <> ?1 OR root_id <> ?2)",
-            params![library_id, new_root_id, root_path],
-        )?;
-        if moved == 0 {
-            return Ok(());
-        }
-        conn.execute(
-            "UPDATE library_file_units SET library_id = ?1
-             WHERE file_id IN (
-                 SELECT file_id FROM library_files WHERE library_id = ?1 AND root_id = ?2
-             )",
-            params![library_id, new_root_id],
-        )?;
-        let new_library: domain::LibraryId = library_id.parse()?;
-        let mut reduced = HashSet::new();
-        for (old_library, media) in affected {
-            let media_id: domain::MediaId = media.parse()?;
-            if reduced.insert((old_library.clone(), media.clone())) {
-                super::library_write::reduce::reduce_library_media(
-                    conn,
-                    old_library.parse()?,
-                    media_id,
-                )?;
-            }
-            super::library_write::reduce::reduce_library_media(conn, new_library, media_id)?;
-        }
-        tracing::info!(%library_id, root = %root_path, files = moved, "Re-owned files under a new Library root");
         Ok(())
     }
 

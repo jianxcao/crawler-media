@@ -131,6 +131,7 @@ fn publish_row(store: &Store, row: &LedgerRow, source_version: &str) {
         file: &file,
         units: &units,
         expected_version: None,
+        nfo_observation: None,
         probe_required: false,
     };
     store

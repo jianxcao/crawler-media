@@ -24,13 +24,19 @@ async fn full_lifecycle_playback_and_scan_correctness_acceptance() {
         .ledger_by_path(&movie_file.display().to_string())
         .unwrap()
         .unwrap();
+    // 扫描登记的 Movie 行只写文件事实、不写覆盖单元；重新登记同一路径让
+    // `insert_ledger` 写入 WHOLE 覆盖，播放请求与会话签发才有可解析的源。
+    store_arc.lock().insert_ledger(&row).unwrap();
 
     // 2. Playback session generation isolation and watch time accumulation
     let user_id = store_arc.lock().user_by_token(&fix.admin_token).unwrap().unwrap().id;
-    let session_id_1 = store_arc
-        .lock()
-        .issue_play_session(user_id, "device_acc", row.id, 1000)
-        .unwrap();
+    let session_id_1 = support::session::issue_session(
+        &store_arc.lock(),
+        user_id,
+        "device_acc",
+        row.id,
+        1000,
+    );
 
     // Start session 1 at t=1000s, pos=0
     fix.request_with_body(
@@ -63,10 +69,13 @@ async fn full_lifecycle_playback_and_scan_correctness_acceptance() {
     ).await;
 
     // Start session 2 (new generation) at t=2000s, pos=0
-    let session_id_2 = store_arc
-        .lock()
-        .issue_play_session(user_id, "device_acc", row.id, 2000)
-        .unwrap();
+    let session_id_2 = support::session::issue_session(
+        &store_arc.lock(),
+        user_id,
+        "device_acc",
+        row.id,
+        2000,
+    );
 
     fix.request_with_body(
         "POST",

@@ -91,3 +91,29 @@
 - 多覆盖文件与 Unidentified 不再阻断 Library 删除；新增嵌套根会重归属既有文件并重建两侧摘要。
 
 仍未取得：真实 NAS 冷热缓存、并发扫描+心跳的 p50/p95 与锁等待、100k Media / 1M 文件规模基准、真实 Jellyfin 客户端与浏览器播放验收。这些不因本轮测试通过而自动满足。
+
+### 1.3 未提交重构的编译与回归修复（2026-10-20）
+
+在 `5ef1957` 之后，工作树中的后续重构一度无法编译（`api` 库 19 个错误），整套测试无法启动。本轮修复后：
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test -p store` | 通过（全部套件） |
+| `cargo test -p api` | 通过（全部套件；`management` 573 passed / 0 failed） |
+| `cargo test --workspace` | 通过（单次约 398s） |
+| `web: npm run typecheck` | 通过 |
+| `web: npm test` | 795 passed / 0 failed |
+| `web: npm run build` | 通过 |
+
+修复的确定性缺陷（均先由现有回归或新行为失败暴露）：
+
+- `create_library` 丢失 `replace_roots`：新建 Library 不落根，路径归属全部失败。
+- 扫描发布丢失封面发现；Movie 扫描未写 whole 覆盖，导致播放会话 404。
+- 扫描/`insert_ledger` 不再读取 NFO sidecar：详情 overview/评分/语言为空。现由调用方在发布前构造 `NfoObservation`。
+- TV 刷新重构删掉了每集 `write_nfo`：rename/refresh 后无自产 NFO。已恢复为“采用元数据 + 写盘”同时进行。
+- `library_metadata_inputs.source_version` 写入文件版本而非 `nfo_v1`，Library 删除时 `library_roots` 外键失败。
+- `reduce` 未拆 `details_json` 的 `{version, fields}` 包装；`MetadataFields` 缺 `serde(default)`；`library_item_facts` 从未初始化结果 map。
+- movie `(0,0)` 续播读取未规范化到 `(-1,-1)`；`upsert_unit` 无物理源时逻辑标记被拒绝、进度声明未 clamp。
+- 缓存 DDL 两份并存（`store/schema/v1/cache.sql` 已删、`media/response_cache/schema.sql` 残留且索引命名不同）；统一为 `media::response_cache::CACHE_SCHEMA_SQL` 后删除死文件。
+
+以上结果来自本机 debug profile；仍未覆盖 1.2 末尾列出的设备/规模/真实客户端验收。改动尚未提交。

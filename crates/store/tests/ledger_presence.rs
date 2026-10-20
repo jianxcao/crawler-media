@@ -101,12 +101,108 @@ fn publish_file(
                 file: &file,
                 units: &[UnitKey::WHOLE],
                 expected_version: None,
+                nfo_observation: None,
                 probe_required: false,
             }],
             1_000,
         )
         .unwrap();
     file
+}
+
+#[test]
+fn tv_library_removal_recovers_empty_coverage_and_preserves_file_bytes() {
+    use domain::{FileVersion, LibraryFile};
+
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("data");
+    let root = temp.path().join("tv");
+    let other_root = temp.path().join("other-tv");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&other_root).unwrap();
+    let store = Store::open(&data).unwrap();
+    let library = store
+        .create_library(MediaKind::Tv, "TV", &[root.to_str().unwrap()], "everyone", true, &[])
+        .unwrap();
+    store
+        .create_library(MediaKind::Tv, "Other TV", &[other_root.to_str().unwrap()], "everyone", true, &[])
+        .unwrap();
+    let media = Media {
+        id: MediaId::new(),
+        kind: MediaKind::Tv,
+        title: "Uncovered episode".into(),
+        original_title: None,
+        aliases: Vec::new(),
+        year: None,
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&media).unwrap();
+    let root_id = store
+        .list_library_roots()
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.library_id.as_deref() == Some(library.id.as_str()))
+        .unwrap()
+        .id;
+    let path = root.join("uncovered.mkv");
+    let bytes = b"video facts must survive library deletion";
+    std::fs::write(&path, bytes).unwrap();
+    let file = LibraryFile {
+        file_id: LedgerId::new(),
+        library_id: library.id.parse().unwrap(),
+        root_id,
+        media_id: media.id,
+        kind: MediaKind::Tv,
+        path: path.clone(),
+        version: FileVersion { revision: 1, source_version: "v1".into() },
+        presence: FilePresence::Present,
+        publication: FilePublication::Published,
+        size_bytes: Some(bytes.len() as u64),
+        stat_known: true,
+        created_ns: None,
+        modified_ns: None,
+        source_digest: None,
+        source_path: None,
+        transfer_mode: None,
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: None,
+        release_quality: None,
+        duration_ms: None,
+        tracks_version: 0,
+        poster_path: None,
+        backdrop_path: None,
+        still_path: None,
+    };
+    store
+        .publish_files(
+            &WriteScope { library_id: library.id.parse().unwrap(), config_revision: 0 },
+            &[StorePublication { file: &file, units: &[], expected_version: None, nfo_observation: None, probe_required: false }],
+            1,
+        )
+        .unwrap();
+    assert!(store.get_file_units(file.file_id).unwrap().is_empty());
+
+    let removal = store.begin_library_removal(&library.id).unwrap();
+    store.set_removal_state(&removal.operation_id, "cleaning", None).unwrap();
+    drop(store);
+
+    let store = Store::open(&data).unwrap();
+    let done = store.clean_library_removal(&removal.operation_id).unwrap();
+    assert_eq!(done.state, "succeeded");
+    assert_eq!(done.removed_ledger_count, 1);
+    assert!(store.get_library(&library.id).unwrap().is_none());
+    assert!(store.get_ledger(&file.file_id.to_string()).unwrap().is_none());
+    assert!(store.get_media(media.id).unwrap().is_some());
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
+    assert_eq!(store.clean_library_removal(&removal.operation_id).unwrap(), done);
 }
 
 fn observation(row: domain::LedgerRow, missing_at: Option<i64>, presence: FilePresence) -> LedgerPresenceObservation {

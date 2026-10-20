@@ -191,7 +191,17 @@ fn invalid_nfo_keeps_the_last_valid_metadata_input() {
         still_path: None,
     };
     let scope = WriteScope { library_id: library.id.parse().unwrap(), config_revision: 0 };
+    let observe = |file: &LibraryFile| {
+        store::metadata::NfoObservation::observe(
+            &file.path,
+            file.kind,
+            String::new(),
+            file.version.source_version.clone(),
+            scope.config_revision,
+        )
+    };
     let publish = |file: &LibraryFile| {
+        let observation = observe(file);
         store
             .publish_files(
                 &scope,
@@ -199,6 +209,7 @@ fn invalid_nfo_keeps_the_last_valid_metadata_input() {
                     file,
                     units: &[UnitKey::WHOLE],
                     expected_version: None,
+                    nfo_observation: Some(&observation),
                     probe_required: false,
                 }],
                 1,

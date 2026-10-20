@@ -93,6 +93,7 @@ async fn scan_and_transfer_publication_atomic_file_writes() {
         file: &coverage.file,
         units: &coverage.units,
         expected_version: None,
+        nfo_observation: None,
         probe_required: true,
     };
 

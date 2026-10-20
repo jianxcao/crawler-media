@@ -1,6 +1,8 @@
 //! B6：SQL 聚合的播放统计——去重、窗口边界、时区桶与零填充。
 
-use domain::{MediaId, UserId};
+mod support;
+
+use domain::{LedgerId, MediaId, UserId};
 use store::{SessionRow, Store, WatchReport};
 
 const DAY: i64 = 86_400;
@@ -9,14 +11,12 @@ fn log_fixture(
     store: &Store,
     user: UserId,
     media: MediaId,
+    file: LedgerId,
     device: &str,
     started: i64,
     watched: i64,
 ) {
-    let ledger = domain::LedgerId::new();
-    let play_session_id = store
-        .issue_play_session(user, device, ledger, started)
-        .unwrap();
+    let play_session_id = support::issue_session(store, user, device, file, started);
     store
         .upsert_session(&SessionRow {
             device_id: device.into(),
@@ -39,7 +39,7 @@ fn log_fixture(
             admin_ended: false,
             started_at: started,
             last_report_at: started,
-            ledger_id: Some(ledger.to_string()),
+            ledger_id: Some(file.to_string()),
             play_session_id: Some(play_session_id),
             last_report_at_ms: started * 1000,
             last_event_sequence: None,
@@ -74,9 +74,10 @@ fn dedupes_members_and_media_and_zero_fills() {
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
     let media = MediaId::new();
+    let file = support::seed_published_file(&store, &tmp.path().join("library"), "dedupe").1;
     let now = 1_700_000_000i64;
     for (index, watched) in [1_000i64, 2_000, 3_000].into_iter().enumerate() {
-        log_fixture(&store, user, media, &format!("d{index}"), now - index as i64 * 60, watched);
+        log_fixture(&store, user, media, file, &format!("d{index}"), now - index as i64 * 60, watched);
     }
 
     let report = store
@@ -111,14 +112,15 @@ fn hidden_titles_counts_distinct_invisible_media_in_the_current_window() {
     let user = UserId::new();
     let visible = MediaId::new();
     let hidden = MediaId::new();
+    let file = support::seed_published_file(&store, &tmp.path().join("library"), "hidden").1;
     let now = 1_700_000_000i64;
-    log_fixture(&store, user, visible, "v0", now - 10, 1_000);
+    log_fixture(&store, user, visible, file, "v0", now - 10, 1_000);
     // 同一不可见 Media 三条 → hidden_titles 仍是 1（distinct），但计数是行数。
-    log_fixture(&store, user, hidden, "h0", now - 20, 500);
-    log_fixture(&store, user, hidden, "h1", now - 30, 500);
-    log_fixture(&store, user, hidden, "h2", now - 40, 500);
+    log_fixture(&store, user, hidden, file, "h0", now - 20, 500);
+    log_fixture(&store, user, hidden, file, "h1", now - 30, 500);
+    log_fixture(&store, user, hidden, file, "h2", now - 40, 500);
     // 上一窗口的不可见日志不计入 hidden_titles。
-    log_fixture(&store, user, hidden, "h-old", now - 10 * DAY, 500);
+    log_fixture(&store, user, hidden, file, "h-old", now - 10 * DAY, 500);
 
     let scope = [visible];
     let report = store
@@ -146,15 +148,16 @@ fn previous_window_boundaries_are_half_open() {
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
     let media = MediaId::new();
+    let file = support::seed_published_file(&store, &tmp.path().join("library"), "boundary").1;
     let now = 1_700_000_000i64;
     let days = 7;
     let boundary = now - days * DAY;
     // 边界（含）→ 当前窗口；边界前一秒 → 上一窗口。
-    log_fixture(&store, user, media, "current-edge", boundary, 100);
-    log_fixture(&store, user, media, "previous-edge", boundary - 1, 100);
+    log_fixture(&store, user, media, file, "current-edge", boundary, 100);
+    log_fixture(&store, user, media, file, "previous-edge", boundary - 1, 100);
     // 上一窗口起点（含）；再往前一秒两边都不算。
-    log_fixture(&store, user, media, "previous-start", now - 2 * days * DAY, 100);
-    log_fixture(&store, user, media, "outside", now - 2 * days * DAY - 1, 100);
+    log_fixture(&store, user, media, file, "previous-start", now - 2 * days * DAY, 100);
+    log_fixture(&store, user, media, file, "outside", now - 2 * days * DAY - 1, 100);
 
     let report = store
         .playback_watch_report(None, None, now, days as u16, 0)
@@ -169,6 +172,7 @@ fn timezone_buckets_match_euclid_semantics() {
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
     let media = MediaId::new();
+    let file = support::seed_published_file(&store, &tmp.path().join("library"), "timezone").1;
     let now = DAY;
     // 负 epoch 边界：-1 / 0 / 86399 / 86400。
     for (index, (started, watched)) in
@@ -176,7 +180,7 @@ fn timezone_buckets_match_euclid_semantics() {
             .into_iter()
             .enumerate()
     {
-        log_fixture(&store, user, media, &format!("tz{index}"), started, watched);
+        log_fixture(&store, user, media, file, &format!("tz{index}"), started, watched);
     }
 
     // tz = 0：day 用 floor 除法，-1 属于 day -1；hour 用 rem_euclid，-1 → 23 点。
@@ -233,9 +237,10 @@ fn scope_rows_do_not_leak_between_calls() {
     let user = UserId::new();
     let first = MediaId::new();
     let second = MediaId::new();
+    let file = support::seed_published_file(&store, &tmp.path().join("library"), "scope").1;
     let now = 1_700_000_000i64;
-    log_fixture(&store, user, first, "a", now - 10, 1_000);
-    log_fixture(&store, user, second, "b", now - 20, 1_000);
+    log_fixture(&store, user, first, file, "a", now - 10, 1_000);
+    log_fixture(&store, user, second, file, "b", now - 20, 1_000);
 
     let scoped = [first];
     let report = store

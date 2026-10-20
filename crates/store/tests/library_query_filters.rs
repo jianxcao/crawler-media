@@ -106,6 +106,7 @@ fn publish(store: &Store, scope: &WriteScope, files: Vec<(LibraryFile, Vec<UnitK
             file,
             units,
             expected_version: None,
+            nfo_observation: None,
             probe_required: false,
         })
         .collect::<Vec<_>>();

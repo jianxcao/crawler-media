@@ -1,3 +1,5 @@
+mod support;
+
 use std::str::FromStr;
 
 use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserId};
@@ -163,6 +165,8 @@ fn critical_unit_mark_cascade_failure_is_propagated_and_atomic() {
     let user = UserId::new();
     let media = MediaId::new();
     insert_movie(&store, media);
+    support::publish_file(&store, &tmp.path().join("library"), media, "cascade");
+    publish_unit(&store, &tmp.path().join("media"), media, 1, 1);
     for (season, episode) in [(-1, -1), (1, 1)] {
         store
             .upsert_unit(
@@ -246,14 +250,12 @@ fn closed_session(
     store: &Store,
     user: UserId,
     media: MediaId,
+    file: LedgerId,
     device: &str,
     started: i64,
     admin_ended: bool,
 ) -> store::SessionRow {
-    let ledger = LedgerId::new();
-    let play_session_id = store
-        .issue_play_session(user, device, ledger, started)
-        .unwrap();
+    let play_session_id = support::issue_session(store, user, device, file, started);
     store::SessionRow {
         device_id: device.into(),
         user_id: user,
@@ -275,7 +277,7 @@ fn closed_session(
         admin_ended,
         started_at: started,
         last_report_at: started,
-        ledger_id: Some(ledger.to_string()),
+        ledger_id: Some(file.to_string()),
         play_session_id: Some(play_session_id),
         last_report_at_ms: started * 1000,
         last_event_sequence: None,
@@ -290,13 +292,14 @@ fn only_admin_end_records_admin_ended_in_playback_log() {
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::new();
     let media = MediaId::new();
+    let file = support::seed_published_file(&store, &tmp.path().join("library"), "admin-end").1;
 
     store
-        .upsert_session(&closed_session(&store, user, media, "dev-user-stop", 10, false))
+        .upsert_session(&closed_session(&store, user, media, file, "dev-user-stop", 10, false))
         .unwrap();
     store.close_session(user, "dev-user-stop", 20).unwrap();
     store
-        .upsert_session(&closed_session(&store, user, media, "dev-admin-end", 30, true))
+        .upsert_session(&closed_session(&store, user, media, file, "dev-admin-end", 30, true))
         .unwrap();
     store.close_session(user, "dev-admin-end", 40).unwrap();
 

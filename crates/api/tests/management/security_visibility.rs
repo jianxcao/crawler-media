@@ -1,5 +1,8 @@
 //! Regression coverage for nested-library ownership and destructive cleanup authorization.
 
+#[path = "../support/mod.rs"]
+mod support;
+
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -90,9 +93,8 @@ fn seed_nested_hidden_movie(store: &Store, child_root: &std::path::Path, member_
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
-    let play_session_id = store
-        .issue_play_session(member_id, "legacy-hidden", file_id, now)
-        .unwrap();
+    let play_session_id =
+        support::session::issue_session(store, member_id, "legacy-hidden", file_id, now);
     store
         .upsert_session(&api::store::SessionRow {
             device_id: "legacy-hidden".into(),
@@ -293,9 +295,8 @@ async fn hidden_tv_library_history_does_not_fall_back_to_visible_movie_library()
         })
         .unwrap();
 
-    let play_session_id = store
-        .issue_play_session(member_id, "dev-tv", tv_file_id, 1000)
-        .unwrap();
+    let play_session_id =
+        support::session::issue_session(&store, member_id, "dev-tv", tv_file_id, 1000);
     store
         .upsert_session(&api::store::SessionRow {
             device_id: "dev-tv".into(),

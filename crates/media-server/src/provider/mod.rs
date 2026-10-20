@@ -436,12 +436,10 @@ pub trait MediaServerProvider: Send + Sync + 'static {
     ) -> Result<(), String>;
     async fn issue_play_session(
         &self,
-        _user_id: UserId,
-        _device_id: &str,
-        _item_id: &str,
-    ) -> Result<String, String> {
-        Ok(uuid::Uuid::new_v4().to_string())
-    }
+        user_id: UserId,
+        device_id: &str,
+        item_id: &str,
+    ) -> Result<String, String>;
 
     async fn report_playback_event(
         &self,

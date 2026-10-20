@@ -79,6 +79,22 @@ async fn legacy_migration_failure_returns_error_without_shadowing() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, media, id) = app(tmp.path());
     let store = Store::open(tmp.path().join("data")).unwrap();
+    // 预迁移的 (0, 0) 单元必须有一个覆盖该单元的已发布源，resume 事实才写得进去。
+    // 只追加覆盖行，保留 ledger 行「整媒体」的 (-1, -1) 身份。
+    let db = database(tmp.path());
+    let (file_id, library_id): (String, String) = db
+        .query_row(
+            "SELECT file_id, library_id FROM library_files WHERE media_id = ?1 LIMIT 1",
+            rusqlite::params![media.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    db.execute(
+        "INSERT OR IGNORE INTO library_file_units (file_id, library_id, media_id, season, episode)
+         VALUES (?1, ?2, ?3, 0, 0)",
+        rusqlite::params![file_id, library_id, media.to_string()],
+    )
+    .unwrap();
     store
         .upsert_unit(
             admin(),

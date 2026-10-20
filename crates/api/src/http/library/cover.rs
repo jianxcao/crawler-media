@@ -2,21 +2,9 @@ use cover_generator::{BackgroundOption, CoverOptions, CoverStyle, generate_cover
 use image::DynamicImage;
 use std::collections::HashSet;
 use std::io::Cursor;
-use std::path::Path;
 
 use crate::store::Library;
 
-/// Old releases copied a single `fanart.jpg` into the generated-cover path.
-/// Detect that exact byte-for-byte shape so upgrading preserves manual covers
-/// while replacing stale automatic covers when poster art is available.
-pub(crate) fn is_legacy_fanart_copy(rows: &[domain::LedgerRow], cover: &Path) -> bool {
-    let Ok(cover_bytes) = std::fs::read(cover) else {
-        return false;
-    };
-    rows.iter()
-        .filter_map(super::backdrop_path)
-        .any(|fanart| std::fs::read(fanart).is_ok_and(|bytes| bytes == cover_bytes))
-}
 
 /// 自动封面默认选项（标题取库名、多海报拼贴）。
 pub(crate) fn default_cover_options(library: &Library) -> CoverOptions {

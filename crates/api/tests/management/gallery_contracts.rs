@@ -112,6 +112,13 @@ fn seed_movie_with_artwork(
         library_id: lib_id.parse().unwrap(),
         config_revision: 0,
     };
+    let observation = store::metadata::NfoObservation::observe(
+        &video_file,
+        MediaKind::Movie,
+        String::new(),
+        format!("seed-{i}"),
+        scope.config_revision,
+    );
     api_state
         .store()
         .lock()
@@ -121,6 +128,7 @@ fn seed_movie_with_artwork(
                 file: &file,
                 units: &[UnitKey::WHOLE],
                 expected_version: None,
+                nfo_observation: Some(&observation),
                 probe_required: false,
             }],
             1000,

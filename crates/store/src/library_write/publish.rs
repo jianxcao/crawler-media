@@ -77,8 +77,10 @@ impl Store {
                 RowOutcome::Unchanged => report.unchanged += 1,
             }
             sync_coverage(&tx, file, pub_item.units)?;
-            if file.publication == domain::FilePublication::Published {
-                crate::metadata::nfo_input::record_nfo_input(&tx, file)?;
+            if let Some(observation) = pub_item.nfo_observation {
+                if !crate::metadata::nfo_input::record_nfo_observation(&tx, file, observation)? {
+                    return Err(StoreError::Protected(format!("stale NFO observation for {}", file.path.display())));
+                }
             }
             if pub_item.probe_required {
                 enqueue_probe(&tx, file.file_id, now_ms)?;

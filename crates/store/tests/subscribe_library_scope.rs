@@ -403,6 +403,7 @@ fn subscribe_quality_evaluation_overlays_probe_fields_for_published_file() {
                 file: &file,
                 units: &[domain::UnitKey::WHOLE],
                 expected_version: None,
+                nfo_observation: None,
                 probe_required: false,
             }],
             1000,

@@ -214,3 +214,49 @@ fn reservation_and_publication_keep_the_destination_identity() {
     );
     assert_eq!(publication, "published");
 }
+
+#[test]
+fn restarted_pending_reservation_reuses_file_identity_and_version() {
+    let (tmp, state, media, subscribe) = fixture();
+    let plan = resolve_transfer_plan(&state, &media, &subscribe).unwrap();
+    let lease = state.acquire_library_work(&plan.library_id).unwrap();
+    let first_recorder = recorder(&state, &subscribe, &lease, &plan);
+    let source = tmp.path().join("downloads/The Matrix.mkv");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    std::fs::write(&source, b"matrix").unwrap();
+    let candidate = candidate(&media, &plan, &source, library::TransferMode::Copy);
+    let first = subscribe::TransferRecorder::prepare(
+        &first_recorder, &candidate, &source, library::TransferMode::Copy,
+    ).unwrap();
+    let file_id = first.file.file_id;
+    drop(first_recorder);
+    drop(lease);
+    drop(state);
+
+    let state = ApiState::new(
+        crate::Store::open(tmp.path().join("data")).unwrap(),
+        "test-token".into(),
+        indexer::ProfileSet::load(None).unwrap(),
+        Arc::new(EmptyFetcher),
+        Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
+        tmp.path().join("library"),
+    ).unwrap();
+    let plan = resolve_transfer_plan(&state, &media, &subscribe).unwrap();
+    let lease = state.acquire_library_work(&plan.library_id).unwrap();
+    let restarted = recorder(&state, &subscribe, &lease, &plan);
+    let recovered = subscribe::TransferRecorder::prepare(
+        &restarted, &candidate, &source, library::TransferMode::Copy,
+    ).unwrap();
+    assert_eq!(recovered.file.file_id, file_id);
+    assert_eq!(recovered.file.version, first.file.version);
+    assert_eq!(recovered.file.source_path.as_deref(), Some(source.as_path()));
+    assert_eq!(recovered.file.transfer_mode.as_deref(), Some("copy"));
+
+    std::fs::write(&recovered.file.path, b"matrix").unwrap();
+    let mut published = recovered.clone();
+    published.file.publication = domain::FilePublication::Published;
+    subscribe::TransferRecorder::published(&restarted, &published).unwrap();
+    let store = state.store.lock();
+    assert_eq!(store.ledger_by_path(&recovered.file.path.display().to_string()).unwrap().unwrap().id, file_id);
+    assert_eq!(store.library_file_page(plan.library_id.parse().unwrap(), media.id, None, 100).unwrap().files.len(), 1);
+}

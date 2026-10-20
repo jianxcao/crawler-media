@@ -19,14 +19,10 @@ pub(crate) fn rows_in_library(store: &crate::Store, library: &Library) -> Vec<do
         .collect()
 }
 
-/// 封面决策的**路径输入**：只有 DB/内存事实，没有任何 `is_file` 观察。
+/// 封面决策的路径输入：只有显式配置路径，没有 legacy 固定路径候选。
 struct CoverInput {
-    /// 用户显式禁用封面（`cover_path` 为 `"none"`/空串）：不回填 legacy。
     disabled: bool,
-    /// 显式配置的封面路径。
     explicit: Option<PathBuf>,
-    /// legacy 固定路径 `library-{id}.jpg`。
-    legacy: PathBuf,
 }
 
 /// 一个 Library 在**锁内**收集到的 owned DB 事实。
@@ -40,17 +36,13 @@ pub(crate) struct LibraryFacts {
     cover: CoverInput,
 }
 
-/// 锁内读取：removal 状态、封面候选路径。全部是 DB 或内存事实。
+/// 锁内读取 removal 状态和显式封面路径；不再探测固定命名的旧封面文件。
 pub(crate) fn library_facts(store: &crate::Store, library: &Library) -> LibraryFacts {
     let cover = CoverInput {
         disabled: matches!(library.cover_path.as_deref(), Some("none") | Some("")),
         explicit: library.cover_path.as_deref().and_then(|path| {
-            // `"none"`/空串是「显式禁用」，不是路径。
             (!path.is_empty() && path != "none").then(|| PathBuf::from(path))
         }),
-        legacy: store
-            .library_covers_dir()
-            .join(format!("library-{}.jpg", library.id)),
     };
     LibraryFacts {
         library: library.clone(),
@@ -59,17 +51,10 @@ pub(crate) fn library_facts(store: &crate::Store, library: &Library) -> LibraryF
     }
 }
 
-/// 与 `library_cover_path` 同一套只读语义，但路径输入已经在锁内算好。
+/// Explicit configured covers only; fixed legacy cover names are not storage facts.
 fn cover_path_from_input(cover: &CoverInput) -> Option<PathBuf> {
-    if cover.disabled {
-        return None;
-    }
-    if let Some(path) = &cover.explicit {
-        if path.is_file() {
-            return Some(path.clone());
-        }
-    }
-    cover.legacy.is_file().then(|| cover.legacy.clone())
+    if cover.disabled { return None; }
+    cover.explicit.as_ref().filter(|path| path.is_file()).cloned()
 }
 
 /// 锁外：在 owned 事实之上做文件观察并渲染响应 JSON。

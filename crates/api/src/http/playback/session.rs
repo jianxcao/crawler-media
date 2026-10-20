@@ -53,7 +53,15 @@ pub(crate) async fn start_session(
     let play_session_id = {
         let store = state.store.lock();
         store
-            .issue_play_session(user_id, device_id, row.id, issued_at)
+            .issue_play_session(
+                user_id,
+                device_id,
+                row.id,
+                resolved.target.media_id,
+                resolved.target.unit,
+                &resolved.target.file.version,
+                issued_at,
+            )
             .ok()
     };
     tracing::info!(media_id = %media.id, file_id = %row.id, %user_id, start_ms, ?play_session_id, "Playback session selected");
@@ -188,15 +196,13 @@ pub(crate) async fn session_stream(
     let binding = {
         let store = state.store.lock();
         match store.play_session_binding(user_id, &query.device_id, &play_session_id) {
-            Ok(Some(b)) => b,
+            Ok(Some(b)) if matches!(b.state, crate::store::PlaySessionIdState::Pending | crate::store::PlaySessionIdState::Active) => b,
             _ => return Err(StatusCode::NOT_FOUND),
         }
     };
-
-    let Some(file_id_str) = binding.file_id else {
+    let Some(file_id_str) = binding.file_id.as_deref() else {
         return Err(StatusCode::NOT_FOUND);
     };
-
     let (path, is_strm) = {
         let store = state.store.lock();
         let Ok(file_id) = file_id_str.parse::<domain::LedgerId>() else {
@@ -205,6 +211,18 @@ pub(crate) async fn session_stream(
         let Some(file) = store.visible_file(user_id, file_id).ok().flatten() else {
             return Err(StatusCode::NOT_FOUND);
         };
+        let library_id = file.library_id.to_string();
+        if binding.media_id != file.media_id
+            || binding.file_revision != Some(file.version.revision)
+            || binding.source_version.as_deref() != Some(file.version.source_version.as_str())
+            || binding.library_id.as_deref() != Some(library_id.as_str())
+            || store.library_config_revision(&library_id).ok() != Some(binding.config_revision)
+            || !store.get_file_units(file_id).ok().is_some_and(|units| units.contains(&binding.unit))
+            || store.is_device_revoked(user_id, &query.device_id).unwrap_or(true)
+            || !store.library_accepts_work(&library_id).unwrap_or(false)
+        {
+            return Err(StatusCode::NOT_FOUND);
+        }
         let is_strm = file.path
             .extension()
             .and_then(|ext| ext.to_str())

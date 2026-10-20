@@ -26,13 +26,10 @@ pub(super) fn resolve_playback_for(
     let season = coordinate(body, "season_number", "season")?;
     let episode = coordinate(body, "episode_number", "episode")?;
     let whole_file = media.kind != domain::MediaKind::Tv;
-    // A movie owns exactly one canonical whole-media unit. Explicit nonzero
-    // coordinates name a unit that cannot exist; resolve nothing instead of
-    // silently aliasing them onto the whole movie.
-    if whole_file
-        && (season.is_some_and(|value| value != 0)
-            || episode.is_some_and(|value| value != 0))
-    {
+    // Movie requests use the canonical whole-work identity regardless of legacy
+    // zero coordinates; nonzero coordinates cannot name a movie unit.
+    if whole_file && (season.is_some_and(|value| value != 0)
+        || episode.is_some_and(|value| value != 0)) {
         return None;
     }
 
@@ -111,10 +108,8 @@ pub(super) fn row_for(
     // A movie owns exactly one canonical whole-media unit. Explicit nonzero
     // coordinates name a unit that cannot exist; resolve nothing instead of
     // silently aliasing them onto the whole movie.
-    if whole_file
-        && (season.is_some_and(|value| value != 0)
-            || episode.is_some_and(|value| value != 0))
-    {
+    if whole_file && (season.is_some_and(|value| value != 0)
+        || episode.is_some_and(|value| value != 0)) {
         return None;
     }
 
@@ -163,11 +158,19 @@ pub(super) fn watch_unit(
     season: i32,
     episode: i32,
 ) -> (i32, i32) {
-    if (season, episode) != (0, 0) {
-        return (season, episode);
+    if (season, episode) == (UNIT_WHOLE, UNIT_WHOLE) {
+        return (UNIT_WHOLE, UNIT_WHOLE);
     }
-    match store.get_media(media_id).ok().flatten() {
-        Some(media) if media.kind != domain::MediaKind::Tv => (UNIT_WHOLE, UNIT_WHOLE),
-        _ => (season, episode),
+    // A movie owns exactly one canonical whole-media unit. Clients that still send the
+    // historical zero coordinates name that same unit; they never name a stored (0, 0) row.
+    if (season, episode) == (0, 0)
+        && store
+            .get_media(media_id)
+            .ok()
+            .flatten()
+            .is_some_and(|media| media.kind != domain::MediaKind::Tv)
+    {
+        return (UNIT_WHOLE, UNIT_WHOLE);
     }
+    (season, episode)
 }

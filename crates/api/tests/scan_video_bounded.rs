@@ -57,8 +57,19 @@ fn seed_file_meta(fix: &PresenceFixture, ledger_id: &str) {
     };
     let store = fix.state.store();
     let guard = store.lock();
+    let file_id: domain::LedgerId = ledger_id.parse().expect("ledger id");
+    let file = guard
+        .published_files(&[file_id])
+        .unwrap()
+        .remove(&file_id)
+        .expect("published fixture file");
     guard
-        .put_file_meta_versioned(ledger_id, &tracks, Some("v1"), Some(1000))
+        .put_file_meta_versioned(
+            ledger_id,
+            &tracks,
+            Some(&file.version.source_version),
+            Some(1000),
+        )
         .unwrap();
     assert!(guard.get_file_meta(ledger_id).unwrap().is_some(), "前置事实应存在");
 }

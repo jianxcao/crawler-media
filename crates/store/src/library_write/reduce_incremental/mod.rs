@@ -302,10 +302,15 @@ fn other_file_has(
     file_id: &str,
     column: &str,
 ) -> Result<bool, StoreError> {
+    let predicate = if column == "hdr" {
+        "hdr IS NOT NULL AND TRIM(hdr) <> ''"
+    } else {
+        "has_still = 1"
+    };
     let sql = format!(
         "SELECT EXISTS(SELECT 1 FROM library_files
                        WHERE library_id = ?1 AND media_id = ?2
-                         AND publication_state = 'published' AND {column} = 1
+                         AND publication_state = 'published' AND {predicate}
                          AND file_id <> ?3)"
     );
     let exists: i64 = tx.query_row(&sql, params![lib, media, file_id], |r| r.get(0))?;

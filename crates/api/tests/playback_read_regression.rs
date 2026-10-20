@@ -1,6 +1,9 @@
 //! B3 播放读路径批量化回归：collection 真实收藏态、favorites 排序键、activity 字段、
 //! 以及同一 Media 跨多个 Library 时 `library_id` 仍为 null。
 
+#[path = "support/mod.rs"]
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -110,12 +113,13 @@ fn seed_media(store: &Store, title: &str, year: Option<u16>) -> MediaId {
     media.id
 }
 
-fn add_ledger(store: &Store, media_id: MediaId, library_root: &Path, name: &str) {
+fn add_ledger(store: &Store, media_id: MediaId, library_root: &Path, name: &str) -> LedgerId {
     let path = library_root.join(format!("{name}.mkv"));
     std::fs::write(&path, b"x").unwrap();
+    let id = LedgerId::new();
     store
         .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+            id,
             media_id,
             path: path.display().to_string(),
             season: None,
@@ -128,6 +132,7 @@ fn add_ledger(store: &Store, media_id: MediaId, library_root: &Path, name: &str)
             filter_score: None,
         })
         .unwrap();
+    id
 }
 
 fn favorite(store: &Store, user_id: domain::UserId, media_id: MediaId, favorite: bool) {
@@ -388,11 +393,10 @@ async fn activity_media_target_fields_unchanged() {
     let media = {
         let guard = store.lock();
         let media = seed_media(&guard, "Watching", Some(2023));
-        add_ledger(&guard, media, &library, "Watching");
+        let file = add_ledger(&guard, media, &library, "Watching");
         let started = now_secs();
-        let play_session_id = guard
-            .issue_play_session(member, "dev-1", domain::LedgerId::new(), started)
-            .unwrap();
+        let play_session_id =
+            support::session::issue_session(&guard, member, "dev-1", file, started);
         guard
             .upsert_session(&api::store::SessionRow {
                 device_id: "dev-1".into(),
@@ -490,9 +494,10 @@ async fn episode_media_target_keeps_numeric_coordinates() {
         guard.insert_media(&media).unwrap();
         let path = library.join("Episodic-S03E07.mkv");
         std::fs::write(&path, b"x").unwrap();
+        let file = LedgerId::new();
         guard
             .insert_ledger(&LedgerRow {
-                id: LedgerId::new(),
+                id: file,
                 media_id: media.id,
                 path: path.display().to_string(),
                 season: Some(3),
@@ -506,9 +511,8 @@ async fn episode_media_target_keeps_numeric_coordinates() {
             })
             .unwrap();
         let started = now_secs();
-        let play_session_id = guard
-            .issue_play_session(member, "dev-2", LedgerId::new(), started)
-            .unwrap();
+        let play_session_id =
+            support::session::issue_session(&guard, member, "dev-2", file, started);
         guard
             .upsert_session(&api::store::SessionRow {
                 device_id: "dev-2".into(),
@@ -561,12 +565,11 @@ async fn media_in_two_libraries_reports_null_library_id() {
     let media = {
         let guard = store.lock();
         let media = seed_media(&guard, "Shared", Some(2020));
-        add_ledger(&guard, media, &first, "Shared-A");
+        let file = add_ledger(&guard, media, &first, "Shared-A");
         add_ledger(&guard, media, &second, "Shared-B");
         let started = now_secs();
-        let play_session_id = guard
-            .issue_play_session(member, "dev-2", domain::LedgerId::new(), started)
-            .unwrap();
+        let play_session_id =
+            support::session::issue_session(&guard, member, "dev-2", file, started);
         guard
             .upsert_session(&api::store::SessionRow {
                 device_id: "dev-2".into(),

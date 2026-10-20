@@ -40,6 +40,27 @@ fn ledger_row(media_id: MediaId, path: &Path) -> LedgerRow {
     }
 }
 
+/// Fixture view of a scan row: whole-unit coverage for movie/video rows, the row's
+/// unit for TV rows, and no observation facts.
+fn scanned(row: &LedgerRow) -> crate::ScannedLedger {
+    let units = match (row.season, row.episode) {
+        (Some(season), Some(episode)) => {
+            vec![domain::UnitKey::new(season as i32, episode as i32)]
+        }
+        _ => vec![domain::UnitKey::WHOLE],
+    };
+    crate::ScannedLedger {
+        row: row.clone(),
+        units,
+        source_version: "fixture-v1".into(),
+        source_digest: None,
+        size_bytes: None,
+        created_ns: None,
+        modified_ns: None,
+        observation: None,
+    }
+}
+
 fn card_artwork(
     store: &Store,
     library_id: &str,
@@ -87,7 +108,7 @@ fn scanned_artwork_reaches_the_card() {
     std::fs::write(dir.join("Scanned-thumb.jpg"), b"still").unwrap();
 
     let row = ledger_row(media, &video);
-    store.insert_scanned_ledger(&row, 0).unwrap();
+    store.insert_scanned_files(&[scanned(&row)], 0).unwrap();
 
     let file_id = row.id.to_string();
     let (poster, backdrop, has_still) = card_artwork(&store, &library.id, media);

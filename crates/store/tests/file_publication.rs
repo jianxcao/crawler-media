@@ -117,6 +117,7 @@ fn twelve_episodes_two_versions_reduces_to_one_item_twenty_four_files() {
             file: f,
             units: &units_list[ep_idx],
             expected_version: None,
+            nfo_observation: None,
             probe_required: false,
         });
     }
@@ -158,6 +159,7 @@ fn single_file_multiple_episodes_not_double_counted() {
         file: &file,
         units: &units,
         expected_version: None,
+        nfo_observation: None,
         probe_required: false,
     };
 
@@ -202,6 +204,7 @@ fn pending_file_does_not_produce_playable_unit() {
         file: &file,
         units: &[UnitKey::new(1, 1)],
         expected_version: None,
+        nfo_observation: None,
         probe_required: false,
     };
 
@@ -218,6 +221,7 @@ fn pending_file_does_not_produce_playable_unit() {
         file: &file,
         units: &[UnitKey::new(1, 1)],
         expected_version: None,
+        nfo_observation: None,
         probe_required: false,
     };
     store.publish_files(&scope, &[pub_published], 2000).expect("republish published file");
@@ -258,6 +262,7 @@ fn probe_obligation_created_when_probe_required() {
         file: &file,
         units: &[UnitKey::new(1, 1)],
         expected_version: None,
+        nfo_observation: None,
         probe_required: true,
     };
 
@@ -296,6 +301,7 @@ fn stale_version_fails_and_rolls_back() {
         file: &file,
         units: &[UnitKey::new(1, 1)],
         expected_version: None,
+        nfo_observation: None,
         probe_required: false,
     }], 1000).unwrap();
 
@@ -305,6 +311,7 @@ fn stale_version_fails_and_rolls_back() {
         file: &file,
         units: &[UnitKey::new(1, 1)],
         expected_version: Some(&bad_ver),
+        nfo_observation: None,
         probe_required: false,
     }], 2000).expect_err("stale version must fail");
 
@@ -339,6 +346,7 @@ fn presence_verify_marks_missing_and_restores() {
         file: &file,
         units: &[UnitKey::new(1, 1)],
         expected_version: None,
+        nfo_observation: None,
         probe_required: false,
     }], 1000).unwrap();
 
@@ -401,6 +409,7 @@ fn publish_file_details_persists_details_atomically() {
         file: &file,
         units: &[UnitKey::new(1, 1)],
         expected_version: None,
+        nfo_observation: None,
         probe_required: false,
     }], 1000).unwrap();
 
@@ -452,6 +461,7 @@ fn deleting_all_files_cleans_item_but_preserves_media() {
         file: &file,
         units: &[UnitKey::new(1, 1)],
         expected_version: None,
+        nfo_observation: None,
         probe_required: false,
     }], 1000).unwrap();
 
@@ -508,6 +518,7 @@ fn publication_keeps_the_destination_identity_recorded_by_the_reservation() {
             file: &reserved,
             units: &units,
             expected_version: None,
+            nfo_observation: None,
             probe_required: false,
         }], 1000)
         .expect("reserve the destination");
@@ -521,6 +532,7 @@ fn publication_keeps_the_destination_identity_recorded_by_the_reservation() {
             file: &published,
             units: &units,
             expected_version: None,
+            nfo_observation: None,
             probe_required: true,
         }], 2000)
         .expect("complete the reservation");

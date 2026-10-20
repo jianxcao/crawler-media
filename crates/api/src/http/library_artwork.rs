@@ -573,7 +573,7 @@ pub(crate) async fn library_cover(
         }
         (library.id, library.kind)
     };
-    // 自动生成/legacy 升级统一走 service（渲染在锁外、CAS 发布）。
+    // 自动生成统一走 service（渲染在锁外、CAS 发布）。
     let cover_path = match state
         .cover_service()
         .ensure_cover(&state, &library_id)

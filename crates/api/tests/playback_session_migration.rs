@@ -1,7 +1,10 @@
 use std::str::FromStr;
 
+#[path = "support/mod.rs"]
+mod support;
+
 use api::Store;
-use domain::{LedgerId, UserId};
+use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserId};
 
 /// Sessions are user-scoped: the library layout keys `playback_sessions` by
 /// `(user_id, device_id)`, so two users sharing one device id never collide.
@@ -9,13 +12,56 @@ use domain::{LedgerId, UserId};
 fn legacy_device_primary_key_migrates_to_user_scoped_key() {
     let dir = tempfile::tempdir().unwrap();
     let user = UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap();
-    let media = domain::MediaId::from_str("00000000-0000-0000-0000-000000000002").unwrap();
-    let ledger = LedgerId::new();
+    let media = MediaId::from_str("00000000-0000-0000-0000-000000000002").unwrap();
+    let library_root = dir.path().join("media");
+    std::fs::create_dir_all(&library_root).unwrap();
+    let path = library_root.join("movie.mkv");
+    std::fs::write(&path, b"x").unwrap();
     {
         let store = Store::open(dir.path()).unwrap();
-        let play_session_id = store
-            .issue_play_session(user, "living-room", ledger, 1)
+        store
+            .insert_media(&Media {
+                id: media,
+                kind: MediaKind::Movie,
+                title: "Migration Fixture".into(),
+                year: None,
+                original_title: None,
+                aliases: Vec::new(),
+                tmdb_id: None,
+                douban_id: None,
+                tvdb_id: None,
+                bangumi_id: None,
+                anilist_id: None,
+            })
             .unwrap();
+        store
+            .create_library(
+                MediaKind::Movie,
+                "Movies",
+                &[library_root.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+        let ledger = LedgerId::new();
+        store
+            .insert_ledger(&LedgerRow {
+                id: ledger,
+                media_id: media,
+                path: path.display().to_string(),
+                season: None,
+                episode: None,
+                resolution: None,
+                codec: None,
+                hdr: None,
+                quality_source: QualitySource::Release,
+                confidence: Confidence::High,
+                filter_score: None,
+            })
+            .unwrap();
+        let play_session_id =
+            support::session::issue_session(&store, user, "living-room", ledger, 1);
         store
             .upsert_session(&api::store::SessionRow {
                 device_id: "living-room".into(),

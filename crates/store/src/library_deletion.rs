@@ -41,8 +41,7 @@ struct RemovalRow {
     ledger_id: String,
     path: String,
     media_id: String,
-    season: Option<u32>,
-    episode: Option<u32>,
+    coverage: Vec<(i32, i32)>,
 }
 
 const COLS: &str = "operation_id, library_id, state, removed_ledger_count, error";
@@ -137,7 +136,11 @@ impl Store {
             .map(|root| crate::library_paths::resolved_path(root))
             .collect::<Result<Vec<_>, _>>()?;
         let mut rows = Vec::new();
+        let mut seen_files = std::collections::HashSet::new();
         for row in self.list_ledger()? {
+            if !seen_files.insert(row.id) {
+                continue;
+            }
             let Some(media) = self.get_media(row.media_id)? else {
                 continue;
             };
@@ -156,13 +159,19 @@ impl Store {
                 continue;
             }
             match self.library_for_path_strict(path, media.kind)? {
-                Some(owner) if owner.id == id => rows.push(RemovalRow {
-                    ledger_id: row.id.to_string(),
-                    path: row.path,
-                    media_id: media.id.to_string(),
-                    season: row.season,
-                    episode: row.episode,
-                }),
+                Some(owner) if owner.id == id => {
+                    let coverage = self
+                        .get_file_units(row.id)?
+                        .into_iter()
+                        .map(|unit| (unit.season, unit.episode))
+                        .collect();
+                    rows.push(RemovalRow {
+                        ledger_id: row.id.to_string(),
+                        path: row.path,
+                        media_id: media.id.to_string(),
+                        coverage,
+                    });
+                }
                 Some(_) => {}
                 None => {
                     return Err(StoreError::Protected(
@@ -310,7 +319,8 @@ impl Store {
         }
         let snapshot = self.removal_snapshot(id)?;
         self.validate_removal_rows(&snapshot, &removal.library_id)?;
-        self.clean_removal_rows(&snapshot, &removal.library_id)?;
+        self.clean_removal_rows(&snapshot, &removal.library_id)
+            .map_err(|error| StoreError::Protected(format!("清理 Library 台账失败: {error}")))?;
         #[cfg(test)]
         removal_cleanup_failpoint()?;
         let tx = self.library.unchecked_transaction()?;
@@ -321,8 +331,10 @@ impl Store {
         tx.execute(
             "DELETE FROM library_roots WHERE library_id=?1",
             [&removal.library_id],
-        )?;
-        tx.execute("DELETE FROM libraries WHERE library_id=?1", [&removal.library_id])?;
+        )
+        .map_err(|error| StoreError::Protected(format!("删除 Library 根失败: {error}")))?;
+        tx.execute("DELETE FROM libraries WHERE library_id=?1", [&removal.library_id])
+            .map_err(|error| StoreError::Protected(format!("删除 Library 配置失败: {error}")))?;
         tx.execute(
             "UPDATE libraries SET is_default=1 WHERE library_id IN (
             SELECT l.library_id FROM libraries l WHERE NOT EXISTS (
@@ -360,13 +372,12 @@ impl Store {
         snapshot: &Snapshot,
         library_id: &str,
     ) -> Result<(), StoreError> {
-        let mut seen_files =
-            std::collections::HashMap::<&str, std::collections::BTreeSet<(Option<u32>, Option<u32>)>>::new();
+        let mut seen_files = std::collections::HashMap::<&str, std::collections::BTreeSet<(i32, i32)>>::new();
         for row in &snapshot.rows {
             seen_files
                 .entry(row.ledger_id.as_str())
                 .or_default()
-                .insert((row.season, row.episode));
+                .extend(row.coverage.iter().copied());
         }
         for (ledger_id, snapshot_units) in seen_files {
             let first = snapshot
@@ -388,17 +399,9 @@ impl Store {
                 "SELECT season, episode FROM library_file_units WHERE file_id = ?1",
             )?;
             let rows = stmt.query_map([ledger_id], |record| {
-                let season = record
-                    .get::<_, i64>(0)
-                    .ok()
-                    .and_then(|value| u32::try_from(value).ok());
-                let episode = record
-                    .get::<_, i64>(1)
-                    .ok()
-                    .and_then(|value| u32::try_from(value).ok());
-                Ok((season, episode))
+                Ok((record.get::<_, i32>(0)?, record.get::<_, i32>(1)?))
             })?;
-            let current_units: std::collections::BTreeSet<(Option<u32>, Option<u32>)> =
+            let current_units: std::collections::BTreeSet<(i32, i32)> =
                 rows.collect::<Result<_, _>>()?;
             let unchanged = path == first.path && media_id == first.media_id;
             let media_id = first
@@ -423,12 +426,12 @@ impl Store {
         let library_id: domain::LibraryId = library_id
             .parse()
             .map_err(|_| StoreError::Protected("删除快照 Library 身份无效".into()))?;
-        let file_ids = snapshot
-            .rows
-            .iter()
+        let file_ids = snapshot.rows.iter()
             .map(|row| row.ledger_id.parse::<domain::LedgerId>())
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| StoreError::Protected("删除快照台账身份无效".into()))?;
+            .collect::<Result<std::collections::HashSet<_>, _>>()
+            .map_err(|_| StoreError::Protected("删除快照台账身份无效".into()))?
+            .into_iter()
+            .collect::<Vec<_>>();
         tracing::info!(library_id = %library_id, files = file_ids.len(), "开始清理 Library 台账行");
         // Removing a file must go through the summary-maintaining path: the deferred
         // `preferred_file_id` composite foreign keys from `library_units`/`library_items`
@@ -438,27 +441,29 @@ impl Store {
         let tx = self.library.unchecked_transaction()?;
         let removed =
             crate::library_write::delete::delete_files_in_tx(&tx, library_id, &file_ids)?;
+        let mut unit_rows = std::collections::HashSet::new();
         for row in &snapshot.rows {
-            // Locked markers are user intent and outlive the files, exactly like
-            // `fs_watcher` keeps them when an STRM changes. Only unlocked markers
-            // (derived probe output) are cleared, and only once no ledger row for
-            // that media/season/episode remains anywhere.
-            tx.execute(
-                "DELETE FROM media_markers WHERE media_id=?1 AND season IS ?2 AND episode IS ?3
-                 AND locked=0
-                 AND NOT EXISTS (
-                     SELECT 1 FROM library_file_units u JOIN library_files f ON f.file_id = u.file_id
-                     WHERE u.media_id=?1 AND u.season IS ?2 AND u.episode IS ?3)",
-                params![&row.media_id, row.season, row.episode],
-            )?;
-            if let Some(season) = row.season {
+            for (season, episode) in &row.coverage {
+                if !unit_rows.insert((&row.media_id, *season, *episode)) {
+                    continue;
+                }
                 tx.execute(
-                    "DELETE FROM probe_season_comparison_history WHERE media_id=?1 AND season=?2
+                    "DELETE FROM media_markers WHERE media_id=?1 AND season IS ?2 AND episode IS ?3
+                     AND locked=0
                      AND NOT EXISTS (
                          SELECT 1 FROM library_file_units u JOIN library_files f ON f.file_id = u.file_id
-                         WHERE u.media_id=?1 AND u.season=?2)",
-                    params![&row.media_id, season],
+                         WHERE u.media_id=?1 AND u.season IS ?2 AND u.episode IS ?3)",
+                    params![&row.media_id, season, episode],
                 )?;
+                if *season >= 0 {
+                    tx.execute(
+                        "DELETE FROM probe_season_comparison_history WHERE media_id=?1 AND season=?2
+                         AND NOT EXISTS (
+                             SELECT 1 FROM library_file_units u JOIN library_files f ON f.file_id = u.file_id
+                             WHERE u.media_id=?1 AND u.season=?2)",
+                        params![&row.media_id, season],
+                    )?;
+                }
             }
         }
         tx.commit()?;
@@ -498,10 +503,11 @@ impl Store {
             let matches_removal = if let Some(ref lid) = session_ledger_id {
                 removal_ledger_ids.contains(lid.as_str())
             } else {
-                let in_snapshot = snapshot.rows.iter().any(|r| {
-                    r.media_id == media_id
-                        && r.season.map(|s| s as i32) == season
-                        && r.episode.map(|e| e as i32) == episode
+                let in_snapshot = snapshot.rows.iter().any(|row| {
+                    row.media_id == media_id && row.coverage.contains(&(
+                        season.unwrap_or(crate::UNIT_WHOLE),
+                        episode.unwrap_or(crate::UNIT_WHOLE),
+                    ))
                 });
                 if !in_snapshot {
                     false

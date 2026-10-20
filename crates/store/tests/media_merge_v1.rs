@@ -270,6 +270,7 @@ fn setup_merge() -> MergeFixture {
                     file: &file,
                     units: &[UnitKey::new(1, 1)],
                     expected_version: None,
+                    nfo_observation: None,
                     probe_required: false,
                 }],
                 1000,

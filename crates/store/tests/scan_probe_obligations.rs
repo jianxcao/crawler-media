@@ -17,6 +17,27 @@ fn sample_row(media_id: MediaId, path: &str) -> LedgerRow {
     }
 }
 
+/// Fixture view of a scan row: whole-unit coverage for movie/video rows, the row's
+/// unit for TV rows, and no observation facts.
+fn scanned(row: &LedgerRow) -> store::ScannedLedger {
+    let units = match (row.season, row.episode) {
+        (Some(season), Some(episode)) => {
+            vec![domain::UnitKey::new(season as i32, episode as i32)]
+        }
+        _ => vec![domain::UnitKey::WHOLE],
+    };
+    store::ScannedLedger {
+        row: row.clone(),
+        units,
+        source_version: "fixture-v1".into(),
+        source_digest: None,
+        size_bytes: None,
+        created_ns: None,
+        modified_ns: None,
+        observation: None,
+    }
+}
+
 fn setup(data_dir: &std::path::Path) -> (Store, store::Library, MediaId) {
     let store = Store::open(data_dir).unwrap();
     let lib = store
@@ -66,7 +87,7 @@ fn insert_and_obligation_are_atomic() {
         )
         .unwrap();
 
-    let res = store.insert_scanned_ledger(&row, 1000);
+    let res = store.insert_scanned_files(&[scanned(&row)], 1000);
     assert!(res.is_err(), "atomic insert must fail due to trigger");
 
     // Ledger row must NOT exist because transaction rolled back
@@ -79,7 +100,7 @@ fn ledger_cleanup_removes_obligation_not_user_facts() {
     let (store, lib, media_id) = setup(&tmp.path().join("data"));
 
     let row = sample_row(media_id, "/movies/clean.mkv");
-    store.insert_scanned_ledger(&row, 1000).unwrap();
+    store.insert_scanned_files(&[scanned(&row)], 1000).unwrap();
 
     // Verify obligation exists
     let obs = store.scan_probe_obligations(10).unwrap();
@@ -102,7 +123,7 @@ fn ack_removes_obligation() {
     let (store, _lib, media_id) = setup(&tmp.path().join("data"));
 
     let row = sample_row(media_id, "/movies/ack.mkv");
-    store.insert_scanned_ledger(&row, 1000).unwrap();
+    store.insert_scanned_files(&[scanned(&row)], 1000).unwrap();
 
     assert_eq!(store.scan_probe_obligations(10).unwrap().len(), 1);
     store.ack_scan_probe_obligation(row.id).unwrap();

@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use axum::http::StatusCode;
-use domain::LedgerId;
 use serde_json::json;
 use support::library_presence::PresenceFixture;
 
@@ -30,7 +29,7 @@ async fn watched_time_accumulates_correctly_and_ignores_seeks() {
     let session_id = {
         let store_arc = fix.state.store();
         let guard = store_arc.lock();
-        guard.issue_play_session(user_id, "dev_clock", row.id, 1000).unwrap()
+        support::session::issue_session(&guard, user_id, "dev_clock", row.id, 1000)
     };
 
     // 1. Start at t = 1000s, position 0

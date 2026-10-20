@@ -319,7 +319,10 @@ pub async fn playback_info(
         .provider
         .issue_play_session(user.id, &client.device_id, &id)
         .await
-        .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
+        .map_err(|error| {
+            tracing::error!(%error, user_id = %user.id, item_id = %id, "failed to issue playback session");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     Ok(Json(json!({
         "MediaSources": [source],
         "PlaySessionId": play_session_id,

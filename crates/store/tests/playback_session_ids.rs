@@ -1,5 +1,7 @@
-use domain::{LedgerId, UserId};
-use store::{PlaySessionBinding, PlaySessionIdState, SessionRow, Store};
+mod support;
+
+use domain::UserId;
+use store::{PlaySessionIdState, Store};
 
 #[test]
 fn issued_id_is_bound_to_user_device_and_ledger() {
@@ -8,11 +10,9 @@ fn issued_id_is_bound_to_user_device_and_ledger() {
 
     let user_a = UserId::new();
     let user_b = UserId::new();
-    let ledger_id = LedgerId::new();
+    let (_, ledger_id) = support::seed_published_file(&store, &tmp.path().join("library"), "bound");
 
-    let id = store
-        .issue_play_session(user_a, "device_1", ledger_id, 1000)
-        .unwrap();
+    let id = support::issue_session(&store, user_a, "device_1", ledger_id, 1000);
 
     // Matching user, device, and id returns binding
     let binding = store
@@ -47,18 +47,14 @@ fn closed_or_older_pending_cannot_reactivate() {
     let store = Store::open(tmp.path().join("data")).unwrap();
 
     let user = UserId::new();
-    let ledger_a = LedgerId::new();
-    let ledger_b = LedgerId::new();
+    let (_, ledger_a) = support::seed_published_file(&store, &tmp.path().join("library"), "gen_a");
+    let (_, ledger_b) = support::seed_published_file(&store, &tmp.path().join("library"), "gen_b");
 
     // Issue A at t = 1000, generation = 1
-    let id_a = store
-        .issue_play_session(user, "dev1", ledger_a, 1000)
-        .unwrap();
+    let id_a = support::issue_session(&store, user, "dev1", ledger_a, 1000);
 
     // Issue B at t = 1000 (same second!), generation = 2
-    let id_b = store
-        .issue_play_session(user, "dev1", ledger_b, 1000)
-        .unwrap();
+    let id_b = support::issue_session(&store, user, "dev1", ledger_b, 1000);
 
     // Activate B: this should activate B and close older pending A (generation 1 < 2)
     let ok_b = store.activate_play_session(user, "dev1", &id_b).unwrap();
@@ -88,11 +84,9 @@ fn repeated_activation_is_idempotent() {
     let store = Store::open(tmp.path().join("data")).unwrap();
 
     let user = UserId::new();
-    let ledger = LedgerId::new();
+    let (_, ledger) = support::seed_published_file(&store, &tmp.path().join("library"), "repeat");
 
-    let id = store
-        .issue_play_session(user, "dev1", ledger, 1000)
-        .unwrap();
+    let id = support::issue_session(&store, user, "dev1", ledger, 1000);
     assert!(store.activate_play_session(user, "dev1", &id).unwrap());
     // Second activation of same active session returns true (idempotent)
     assert!(store.activate_play_session(user, "dev1", &id).unwrap());
@@ -115,32 +109,24 @@ fn expiry_keeps_active_and_is_bounded_500() {
     let store = Store::open(tmp.path().join("data")).unwrap();
 
     let user = UserId::new();
-    let ledger = LedgerId::new();
+    let (_, ledger) = support::seed_published_file(&store, &tmp.path().join("library"), "expiry");
 
     // Issue 501 sessions at t = 100 (older than 30 days ago from now)
     let t_old = 100;
     for _ in 0..500 {
-        let id = store
-            .issue_play_session(user, "dev1", ledger, t_old)
-            .unwrap();
+        let id = support::issue_session(&store, user, "dev1", ledger, t_old);
         store.close_play_session_id(user, "dev1", &id).unwrap();
     }
-    let id_501 = store
-        .issue_play_session(user, "dev1", ledger, t_old)
-        .unwrap();
+    let id_501 = support::issue_session(&store, user, "dev1", ledger, t_old);
     store.close_play_session_id(user, "dev1", &id_501).unwrap();
 
     // Plus 1 active session at t_old
-    let id_active = store
-        .issue_play_session(user, "dev1", ledger, t_old)
-        .unwrap();
+    let id_active = support::issue_session(&store, user, "dev1", ledger, t_old);
     store.activate_play_session(user, "dev1", &id_active).unwrap();
 
     // Now issue a new session at t = 100_000_000 (triggering clean_expired bounded at 500)
     let now = 100_000_000;
-    let _id_new = store
-        .issue_play_session(user, "dev1", ledger, now)
-        .unwrap();
+    let _id_new = support::issue_session(&store, user, "dev1", ledger, now);
 
     // Active session MUST NOT be deleted
     let active_binding = store

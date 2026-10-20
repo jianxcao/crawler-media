@@ -373,6 +373,7 @@ fn scrape_library_metadata(
                 return;
             }
             let nfo = crate::scrape_metadata::nfo_from_tmdb(media, &metadata);
+            crate::scrape_metadata::adopt_tmdb_metadata(state, media, tmdb_id, domain::EntityScope::Work, &metadata);
             crate::scrape_metadata::record_scraped_display_meta(state, media.id, &metadata, &nfo);
             if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
                 let target = path.with_file_name(format!("{stem}.nfo"));

@@ -168,6 +168,7 @@ fn publish_file(
                 file: &file,
                 units: &[UnitKey::WHOLE],
                 expected_version: None,
+                nfo_observation: None,
                 probe_required: false,
             }],
             1000,

@@ -52,7 +52,7 @@ pub(crate) async fn gallery(
         descending,
         page: library_query::BrowsePage::Offset {
             start: page.offset,
-            limit: page.limit.unwrap_or(usize::MAX / 2),
+            limit: page.limit,
         },
         include_total: false,
     };

@@ -624,21 +624,22 @@ impl Store {
         media_ids: &[MediaId],
         user_id: Option<UserId>,
     ) -> Result<HashMap<MediaId, LibraryItemFacts>, StoreError> {
-        let mut facts: HashMap<MediaId, LibraryItemFacts> = HashMap::new();
+        let mut facts: HashMap<MediaId, LibraryItemFacts> = media_ids
+            .iter()
+            .map(|media_id| (*media_id, LibraryItemFacts::default()))
+            .collect();
         if media_ids.is_empty() {
             return Ok(facts);
         }
-        for media_id in media_ids {
-            facts.entry(*media_id).or_default();
-        }
-        self.fill_seasons(library_id, media_ids, &mut facts)?;
-        self.fill_studio(library_id, media_ids, &mut facts)?;
-        if let Some(user_id) = user_id {
-            self.fill_favorites(library_id, media_ids, user_id, &mut facts)?;
+        for media_chunk in media_ids.chunks(crate::browse_reads::MEDIA_BATCH_CHUNK) {
+            self.fill_seasons(library_id, media_chunk, &mut facts)?;
+            self.fill_studio(library_id, media_chunk, &mut facts)?;
+            if let Some(user_id) = user_id {
+                self.fill_favorites(library_id, media_chunk, user_id, &mut facts)?;
+            }
         }
         Ok(facts)
     }
-
     fn fill_seasons(
         &self,
         library_id: LibraryId,
@@ -766,14 +767,22 @@ impl Store {
         library_id: LibraryId,
         media_ids: &[MediaId],
     ) -> Result<Vec<LibraryStill>, StoreError> {
-        if media_ids.is_empty() {
-            return Ok(Vec::new());
+        let mut stills = Vec::new();
+        for media_chunk in media_ids.chunks(crate::browse_reads::MEDIA_BATCH_CHUNK) {
+            self.read_stills_batch(library_id, media_chunk, &mut stills)?;
         }
+        Ok(stills)
+    }
+
+    fn read_stills_batch(
+        &self,
+        library_id: LibraryId,
+        media_ids: &[MediaId],
+        stills: &mut Vec<LibraryStill>,
+    ) -> Result<(), StoreError> {
         let mut bindings = Bindings::new();
         let library = bindings.push(library_id.to_string().into());
-        let list = bindings.placeholders(media_ids.len(), |index| {
-            media_ids[index].to_string().into()
-        });
+        let list = bindings.placeholders(media_ids.len(), |index| media_ids[index].to_string().into());
         let sql = format!(
             "SELECT f.media_id, f.file_id, u.season, u.episode \
              FROM library_files f \
@@ -784,19 +793,11 @@ impl Store {
         );
         let mut statement = self.library.prepare(&sql)?;
         let rows = statement.query_map(params_from_iter(bindings.values()), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?))
         })?;
-        let mut stills = Vec::new();
         for row in rows {
-            let (media_id, file_id, season, episode) = row?;
-            let (Ok(media_id), Ok(file_id)) = (media_id.parse::<MediaId>(), file_id.parse()) else {
-                continue;
-            };
+            let (media, file, season, episode) = row?;
+            let (Ok(media_id), Ok(file_id)) = (media.parse::<MediaId>(), file.parse()) else { continue };
             stills.push(LibraryStill {
                 media_id,
                 file_id,
@@ -804,8 +805,9 @@ impl Store {
                 episode: (episode >= 0).then_some(episode as u32),
             });
         }
-        Ok(stills)
+        Ok(())
     }
+
 }
 
 fn count_items(store: &Store, base: &ItemQuerySql) -> Result<u64, StoreError> {

@@ -24,7 +24,7 @@ mod assets;
 mod cover;
 pub(crate) mod page;
 pub(crate) use assets::{library_json, poster_path, poster_path_with, preferred_row, rows_in_library};
-pub(crate) use cover::{default_cover_options, is_legacy_fanart_copy, render_cover_jpeg};
+pub(crate) use cover::{default_cover_options, render_cover_jpeg};
 
 pub(crate) const BROWSE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -295,11 +295,7 @@ pub(crate) fn library_cover_path(store: &crate::Store, library: &Library) -> Opt
         }
         None => {}
     }
-    // 1. legacy 固定路径 `library-{id}.jpg` 仅读、不 unlink
-    let legacy = store
-        .library_covers_dir()
-        .join(format!("library-{}.jpg", library.id));
-    legacy.is_file().then_some(legacy)
+    None
 }
 
 fn library_cover_checked_key(library_id: &str) -> String {
@@ -421,11 +417,12 @@ pub(crate) async fn list_items(
         Err(message) => return err(StatusCode::BAD_REQUEST, "library.invalid", &message),
     };
     let (order, descending) = browse_order_from_query(&query);
-    // 显式分页参数先校验：越界直接 400；省略 limit 仍是"返回全部"。
+    // Offset remains available for index jumps, while every response is bounded.
     let window = match crate::http::library::page::PageWindow::parse(&query) {
         Ok(window) => window,
         Err(message) => return err(StatusCode::BAD_REQUEST, "library.invalid", &message),
     };
+    let limit = window.limit;
     let lib_q = library_query::LibraryQuery {
         library_id: lib_id,
         user_id,
@@ -434,7 +431,7 @@ pub(crate) async fn list_items(
         descending,
         page: library_query::BrowsePage::Offset {
             start: window.offset,
-            limit: window.limit.unwrap_or(usize::MAX / 2),
+            limit,
         },
         include_total: true,
     };
@@ -603,8 +600,65 @@ pub(crate) async fn item_detail(
         "backdrop_url": item.backdrop_ref.map(|file_id| artwork_url("fanart", file_id)),
         "files": files,
         "next_file_cursor": detail.next_file_cursor,
+        "seasons": detail.seasons,
     }))
     .into_response()
+}
+
+/// GET /libraries/{id}/items/{item_id}/files?after=&limit= — one bounded page of files.
+pub(crate) async fn item_files(
+    State(state): State<ApiState>,
+    axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
+    Path((id, item_id)): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let Ok(lib_id) = id.parse::<domain::LibraryId>() else {
+        return missing_library();
+    };
+    let Ok(media_id) = MediaId::from_str(&item_id) else {
+        return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效");
+    };
+    let limit = match query.get("limit").map(String::as_str).unwrap_or("50").parse::<usize>() {
+        Ok(limit @ 1..=100) => limit,
+        _ => return err(StatusCode::BAD_REQUEST, "library.invalid", "limit 必须在 1..=100 之间"),
+    };
+    let after = query.get("after").map(String::as_str);
+    let page = {
+        let store = state.store.lock();
+        if let Err(response) = require_visible_library(&store, &id, user_id) {
+            return response;
+        }
+        match store.library_file_page(lib_id, media_id, after, limit) {
+            Ok(page) => page,
+            Err(error) => return browse_store_error(error),
+        }
+    };
+    let file_ids: Vec<_> = page.files.iter().map(|file| file.file_id).collect();
+    let (file_units, details) = {
+        let store = state.store.lock();
+        let units = match store.file_units(lib_id, media_id, &page.files) {
+            Ok(units) => units,
+            Err(error) => return browse_store_error(error),
+        };
+        let details = match store.file_details_batch(&file_ids) {
+            Ok(details) => details,
+            Err(error) => return browse_store_error(error),
+        };
+        (units, details)
+    };
+    let mut files = Vec::with_capacity(page.files.len());
+    for file in &page.files {
+        let units = file_units.iter().find(|(id, _)| *id == file.file_id).map(|(_, units)| units.as_slice()).unwrap_or_default();
+        let tracks = match details.get(&file.file_id) {
+            Some(details) => match tracks_from_details(details) {
+                Ok(tracks) => tracks,
+                Err(error) => return browse_store_error(error),
+            },
+            None => library::Tracks::default(),
+        };
+        files.push(item_file_json(&state, file, units, &tracks));
+    }
+    ok(json!({ "files": files, "next_cursor": page.next_cursor })).into_response()
 }
 
 /// One file of the detail view: stored quality facts plus whatever the probe has cached.
@@ -701,7 +755,7 @@ pub(crate) async fn item_episodes(
         Ok(lib_id) => lib_id,
         Err(_) => return missing_library(),
     };
-    let (episodes, progress) = {
+    let episodes = {
         let store = state.store.lock();
         if let Err(response) = require_visible_library(&store, &id, user_id) {
             return response;
@@ -711,31 +765,30 @@ pub(crate) async fn item_episodes(
             Ok(None) => return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在"),
             Err(error) => return browse_store_error(error),
         }
-        let episodes = match store.library_episodes(lib_id, media_id, season, "") {
+        match store.library_episodes(lib_id, media_id, season, "") {
             Ok(episodes) => episodes,
             Err(error) => return browse_store_error(error),
-        };
-        let progress = match user_id {
-            Some(user_id) => match store.playback_units_for_media(user_id, &[media_id]) {
-                Ok(rows) => rows,
-                Err(error) => return browse_store_error(error),
-            },
-            None => Vec::new(),
-        };
-        (episodes, progress)
+        }
     };
+    let mut effective_states = HashMap::new();
+    if let Some(user_id) = user_id {
+        let store = state.store.lock();
+        for episode in &episodes {
+            let unit_state = match crate::http::playback::effective_watch_state(
+                &store, user_id, media_id, episode.season as i32, episode.episode as i32,
+            ) {
+                Ok(state) => state,
+                Err(error) => return browse_store_error(error),
+            };
+            effective_states.insert((episode.season, episode.episode), unit_state);
+        }
+    }
     let rows: Vec<Value> = episodes
         .iter()
         .map(|episode| {
-            let unit_state = progress
-                .iter()
-                .find(|unit| {
-                    unit.season >= 0
-                        && unit.episode >= 0
-                        && unit.season as u32 == episode.season
-                        && unit.episode as u32 == episode.episode
-                })
-                .map(|unit| &unit.state);
+            let unit_state = effective_states
+                .get(&(episode.season, episode.episode))
+                .and_then(Option::as_ref);
             let (position_ms, played, progress_percent) = match unit_state {
                 Some(state) => {
                     let percent = (!state.played)

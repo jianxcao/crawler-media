@@ -1,4 +1,6 @@
 //! Shared TMDB → NFO mapping for every metadata scrape entry point.
+use domain::{EntityScope, MetadataAdoption, MetadataPreferences};
+
 
 use crate::catalog::Catalog;
 use crate::scrape_store::ScrapeStoreExt;
@@ -6,7 +8,119 @@ use domain::{LedgerRow, Media};
 use std::path::{Path, PathBuf};
 
 pub(crate) mod targets;
+/// Persist validated TMDB data through normalized source snapshots, independent of NFO output.
+pub(crate) fn adopt_tmdb_metadata(
+    state: &crate::management::ApiState,
+    media: &Media,
+    tmdb_id: &str,
+    scope: EntityScope,
+    meta: &media::ItemMeta,
+) {
+    let preferences = state.store.lock().get_scrape_config().ok()
+        .map(|config| MetadataPreferences {
+            language_priority: config.effective.language_priority,
+            cert_country_priority: config.effective.cert_country_priority,
+        })
+        .unwrap_or_else(|| MetadataPreferences {
+            language_priority: crate::scrape_config::default_language_priority(),
+            cert_country_priority: crate::scrape_config::default_cert_country_priority(),
+        });
+    let mut payload = serde_json::Map::new();
+    if let Some(value) = &meta.overview { payload.insert("overview".into(), value.clone().into()); }
+    if let Some(value) = &meta.tagline { payload.insert("tagline".into(), value.clone().into()); }
+    if let Some(value) = &meta.rating { if let Ok(value) = value.parse::<f64>() { payload.insert("vote_average".into(), value.into()); } }
+    if let Some(value) = meta.vote_count { payload.insert("vote_count".into(), value.into()); }
+    if let Some(value) = meta.runtime_minutes.as_deref().and_then(|value| value.parse::<u32>().ok()) { payload.insert("runtime".into(), value.into()); }
+    payload.insert("title".into(), media.title.clone().into());
+    if let Some(value) = &media.original_title { payload.insert("original_title".into(), value.clone().into()); }
+    let release_key = if media.kind == domain::MediaKind::Tv { "first_air_date" } else { "release_date" };
+    if let Some(value) = &meta.release_date { payload.insert(release_key.into(), value.clone().into()); }
+    if let Some(value) = &meta.last_air_date { payload.insert("last_air_date".into(), value.clone().into()); }
+    if let Some(value) = &meta.original_language { payload.insert("original_language".into(), value.clone().into()); }
+    if let Some(value) = &meta.status { payload.insert("status".into(), value.clone().into()); }
+    if !meta.studios.is_empty() { payload.insert("production_companies".into(), meta.studios.iter().map(|name| serde_json::json!({"name":name})).collect::<Vec<_>>().into()); }
+    if !meta.genres.is_empty() { payload.insert("genres".into(), meta.genres.iter().enumerate().map(|(index,name)| serde_json::json!({"id":meta.genre_ids.get(index),"name":name})).collect::<Vec<_>>().into()); }
+    if !meta.origin_countries.is_empty() { payload.insert("origin_country".into(), serde_json::json!(meta.origin_countries)); }
+    let normalized = match media::normalize_metadata("tmdb", scope, &serde_json::Value::Object(payload).to_string(), &preferences) {
+        Ok(normalized) => normalized,
+        Err(error) => { tracing::warn!(%error, media_id=%media.id, "TMDB metadata normalization failed"); return; }
+    };
+    let locale = preferred_language(state);
+    let fetched_at = crate::job_loop::unix_now() * 1000;
+    let adoption = MetadataAdoption {
+        media_id: media.id, scope, locale, source: "tmdb".into(),
+        provider_entity_id: tmdb_id.to_string(), provider_work_id: tmdb_id.to_string(),
+        fetched_at, normalized, expected_revision: None, preferences,
+    };
+    if let Err(error) = state.store.lock().adopt_metadata(&adoption, fetched_at) {
+        tracing::warn!(%error, media_id=%media.id, "TMDB metadata adoption failed");
+    }
+}
 
+fn adopt_tmdb_episode(
+    state: &crate::management::ApiState,
+    media: &Media,
+    tmdb_id: &str,
+    season: u32,
+    episode_number: u32,
+    episode: &media::EpisodeMeta,
+    locale: &str,
+) {
+    let preferences = MetadataPreferences { language_priority: vec![locale.to_string()], cert_country_priority: Vec::new() };
+    let mut payload = serde_json::Map::new();
+    if let Some(value) = &episode.name { payload.insert("title".into(), value.clone().into()); }
+    if let Some(value) = &episode.overview { payload.insert("overview".into(), value.clone().into()); }
+    if let Some(value) = &episode.air_date { payload.insert("air_date".into(), value.clone().into()); }
+    if let Some(value) = episode.runtime_minutes { payload.insert("runtime".into(), value.into()); }
+    if let Some(value) = episode.rating.as_deref().and_then(|value| value.parse::<f64>().ok()) { payload.insert("vote_average".into(), value.into()); }
+    if let Some(value) = episode.vote_count { payload.insert("vote_count".into(), value.into()); }
+    if let Some(value) = &episode.still_path { payload.insert("still_path".into(), value.clone().into()); }
+    let scope = EntityScope::Episode { season, episode: episode_number };
+    let normalized = match media::normalize_metadata("tmdb", scope, &serde_json::Value::Object(payload).to_string(), &preferences) {
+        Ok(value) => value,
+        Err(error) => { tracing::warn!(%error, media_id=%media.id, season, episode_number, "episode metadata normalization failed"); return; }
+    };
+    let fetched_at = crate::job_loop::unix_now() * 1000;
+    let adoption = MetadataAdoption {
+        media_id: media.id, scope, locale: locale.to_string(), source: "tmdb".into(),
+        provider_entity_id: format!("{tmdb_id}:{season}:{episode_number}"), provider_work_id: tmdb_id.to_string(),
+        fetched_at, normalized, expected_revision: None, preferences,
+    };
+    if let Err(error) = state.store.lock().adopt_metadata(&adoption, fetched_at) {
+        tracing::warn!(%error, media_id=%media.id, season, episode_number, "episode metadata adoption failed");
+    }
+}
+
+
+fn adopt_tmdb_season(
+    state: &crate::management::ApiState,
+    media: &Media,
+    tmdb_id: &str,
+    season: &media::TvSeason,
+    locale: &str,
+) {
+    let preferences = MetadataPreferences { language_priority: vec![locale.to_string()], cert_country_priority: Vec::new() };
+    let mut payload = serde_json::Map::new();
+    payload.insert("name".into(), season.name.clone().into());
+    if let Some(value) = &season.overview { payload.insert("overview".into(), value.clone().into()); }
+    if let Some(value) = &season.air_date { payload.insert("air_date".into(), value.clone().into()); }
+    if let Some(value) = season.episode_count { payload.insert("episode_count".into(), value.into()); }
+    if let Some(value) = &season.poster_path { payload.insert("poster_path".into(), value.clone().into()); }
+    let scope = EntityScope::Season(season.season_number);
+    let normalized = match media::normalize_metadata("tmdb", scope, &serde_json::Value::Object(payload).to_string(), &preferences) {
+        Ok(value) => value,
+        Err(error) => { tracing::warn!(%error, media_id=%media.id, season=season.season_number, "season metadata normalization failed"); return; }
+    };
+    let fetched_at = crate::job_loop::unix_now() * 1000;
+    let adoption = MetadataAdoption {
+        media_id: media.id, scope, locale: locale.to_string(), source: "tmdb".into(),
+        provider_entity_id: format!("{tmdb_id}:{}", season.season_number), provider_work_id: tmdb_id.to_string(),
+        fetched_at, normalized, expected_revision: None, preferences,
+    };
+    if let Err(error) = state.store.lock().adopt_metadata(&adoption, fetched_at) {
+        tracing::warn!(%error, media_id=%media.id, season=season.season_number, "season metadata adoption failed");
+    }
+}
 struct LeasedArtworkFetch<'a> {
     fetch: &'a dyn crate::poster_fetch::PosterFetch,
     lease: Option<&'a crate::library_lifecycle::LibraryWorkLease>,
@@ -170,6 +284,7 @@ pub(crate) fn write_series_nfos(
                     still_path = stills.into_iter().next();
                 }
             }
+            adopt_tmdb_episode(state, media, tmdb_id, season, episode_number, &episode, language);
             if lease.publish(|| Ok(write_nfo(&path, media, &nfo_from_episode(row, episode)))).is_err() { return matched_episodes; }
             matched_episodes.push((PathBuf::from(&row.path), still_path));
         }
@@ -317,6 +432,7 @@ fn scrape_tv_episodes_and_nfos(
 ) -> Vec<(PathBuf, Option<String>)> {
     let tmdb_meta = fetch_tmdb_metadata(state, media.kind, tmdb_id).ok().flatten();
     if let Some(meta) = &tmdb_meta {
+        adopt_tmdb_metadata(state, media, tmdb_id, EntityScope::Work, meta);
         record_scraped_display(state, media.id, meta);
     }
     let show_nfo = tmdb_meta.as_ref().map(|meta| nfo_from_tmdb(media, meta)).unwrap_or_default();
@@ -331,6 +447,11 @@ fn scrape_tv_episodes_and_nfos(
     };
 
     let owned_seasons: std::collections::HashSet<u32> = rows.iter().filter_map(|r| r.season).collect();
+    for season_meta in &tv_seasons {
+        if owned_seasons.contains(&season_meta.season_number) {
+            adopt_tmdb_season(state, media, tmdb_id, season_meta, &preferred_lang);
+        }
+    }
     let season_artworks: Vec<crate::fanart_artwork::SeasonArtwork> = tv_seasons
         .into_iter()
         .filter(|s| owned_seasons.contains(&(s.season_number as u32)))

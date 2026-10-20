@@ -65,6 +65,18 @@ pub fn library_display_locale(
     }
 }
 
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+struct UnitCursor {
+    library_id: LibraryId,
+    media_id: MediaId,
+    season: Option<i64>,
+    order: String,
+    last_season: i64,
+    last_episode: i64,
+}
+
+const UNIT_CURSOR_ORDER: &str = "season_episode_asc";
+
 impl Store {
     /// Adopted-metadata locale of one media: the requested locale first, then the library's
     /// display locale, then the instance default, then the deterministic `ORDER BY locale`.
@@ -197,71 +209,97 @@ impl Store {
     ) -> Result<UnitPage, StoreError> {
         let lib_id_str = library_id.to_string();
         let media_id_str = media_id.to_string();
-
-        let (total_sql, rows_sql, params_vec): (String, String, Vec<rusqlite::types::Value>) =
-            match season {
-                Some(s) => (
-                    "SELECT COUNT(*) FROM library_units WHERE library_id = ?1 AND media_id = ?2 AND season = ?3"
-                        .into(),
-                    "SELECT season, episode, file_count, available_file_count, preferred_file_id FROM library_units WHERE library_id = ?1 AND media_id = ?2 AND season = ?3 ORDER BY season ASC, episode ASC LIMIT ?4 OFFSET ?5"
-                        .into(),
-                    vec![
-                        lib_id_str.clone().into(),
-                        media_id_str.clone().into(),
-                        (s as i64).into(),
-                    ],
-                ),
-                None => (
-                    "SELECT COUNT(*) FROM library_units WHERE library_id = ?1 AND media_id = ?2"
-                        .into(),
-                    "SELECT season, episode, file_count, available_file_count, preferred_file_id FROM library_units WHERE library_id = ?1 AND media_id = ?2 ORDER BY season ASC, episode ASC LIMIT ?3 OFFSET ?4"
-                        .into(),
-                    vec![lib_id_str.clone().into(), media_id_str.clone().into()],
-                ),
-            };
-
-        let total: i64 = self.library.query_row(
-            &total_sql,
-            params_from_iter(params_vec.iter().cloned()),
-            |r| r.get(0),
-        )?;
-
-        let (offset, limit) = match page {
-            BrowsePage::Offset { start, limit } => (*start, *limit),
-            BrowsePage::Cursor { limit, .. } => (0, *limit),
+        let scope_season = season.map(i64::from);
+        let total: i64 = match scope_season {
+            Some(season) => self.library.query_row(
+                "SELECT COUNT(*) FROM library_units WHERE library_id = ?1 AND media_id = ?2 AND season = ?3",
+                params![lib_id_str, media_id_str, season],
+                |row| row.get(0),
+            )?,
+            None => self.library.query_row(
+                "SELECT COUNT(*) FROM library_units WHERE library_id = ?1 AND media_id = ?2",
+                params![lib_id_str, media_id_str],
+                |row| row.get(0),
+            )?,
         };
 
-        let mut query_params = params_vec;
-        query_params.push((limit as i64).into());
-        query_params.push((offset as i64).into());
+        let (sql, query_params, limit, cursor_page): (String, Vec<rusqlite::types::Value>, usize, bool) =
+            match page {
+                BrowsePage::Offset { start, limit } => {
+                    let mut params = vec![lib_id_str.clone().into(), media_id_str.clone().into()];
+                    let where_season = if let Some(season) = scope_season {
+                        params.push(season.into());
+                        " AND season = ?3"
+                    } else {
+                        ""
+                    };
+                    let next = params.len() + 1;
+                    params.push(i64::try_from(*limit).unwrap_or(i64::MAX).into());
+                    params.push(i64::try_from(*start).unwrap_or(i64::MAX).into());
+                    (format!("SELECT season, episode, file_count, available_file_count, preferred_file_id FROM library_units WHERE library_id = ?1 AND media_id = ?2{where_season} ORDER BY season ASC, episode ASC LIMIT ?{next} OFFSET ?{}", next + 1), params, *limit, false)
+                }
+                BrowsePage::Cursor { after, limit } => {
+                    let limit = (*limit).clamp(1, 500);
+                    let mut params = vec![lib_id_str.clone().into(), media_id_str.clone().into()];
+                    let mut where_sql = String::new();
+                    if let Some(season) = scope_season {
+                        params.push(season.into());
+                        where_sql.push_str(" AND season = ?3");
+                    }
+                    if let Some(raw) = after {
+                        let cursor: UnitCursor = serde_json::from_str(raw)
+                            .map_err(|_| StoreError::Invalid("malformed unit cursor".into()))?;
+                        if cursor.library_id != library_id || cursor.media_id != media_id || cursor.season != scope_season || cursor.order != UNIT_CURSOR_ORDER {
+                             return Err(StoreError::Invalid("unit cursor scope mismatch".into()));
+                        }
+                        let season_pos = params.len() + 1;
+                        params.push(cursor.last_season.into());
+                        let episode_pos = params.len() + 1;
+                        params.push(cursor.last_episode.into());
+                        where_sql.push_str(&format!(" AND (season > ?{season_pos} OR (season = ?{season_pos} AND episode > ?{episode_pos}))"));
+                    }
+                    let limit_pos = params.len() + 1;
+                    params.push(i64::try_from(limit + 1).unwrap_or(i64::MAX).into());
+                    (format!("SELECT season, episode, file_count, available_file_count, preferred_file_id FROM library_units WHERE library_id = ?1 AND media_id = ?2{where_sql} ORDER BY season ASC, episode ASC LIMIT ?{limit_pos}"), params, limit, true)
+                }
+            };
 
-        let mut stmt = self.library.prepare(&rows_sql)?;
-        let rows = stmt.query_map(params_from_iter(query_params), |r| {
-            let s: i32 = r.get(0)?;
-            let ep: i32 = r.get(1)?;
-            let fc: i64 = r.get(2)?;
-            let afc: i64 = r.get(3)?;
-            let pref_str: Option<String> = r.get(4)?;
-            let pref_id = pref_str.and_then(|id| id.parse::<LedgerId>().ok());
-
+        let mut stmt = self.library.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(query_params), |row| {
+            let season: i32 = row.get(0)?;
+            let episode: i32 = row.get(1)?;
+            let file_count: i64 = row.get(2)?;
+            let available_file_count: i64 = row.get(3)?;
+            let preferred = row.get::<_, Option<String>>(4)?;
             Ok(LibraryUnit {
                 library_id,
                 media_id,
-                key: UnitKey::new(s, ep),
-                file_count: fc as usize,
-                available_file_count: afc as usize,
-                preferred_file_id: pref_id,
+                key: UnitKey::new(season, episode),
+                file_count: file_count as usize,
+                available_file_count: available_file_count as usize,
+                preferred_file_id: preferred.and_then(|id| id.parse::<LedgerId>().ok()),
             })
         })?;
-
-        let units = rows.collect::<Result<Vec<_>, _>>()?;
-
-        Ok(UnitPage {
-            units,
-            total: total as u64,
-            next_cursor: None,
-        })
+        let mut units = rows.collect::<Result<Vec<_>, _>>()?;
+        let truncated = cursor_page && units.len() > limit;
+        if truncated {
+            units.pop();
+        }
+        let next_cursor = if truncated {
+            units.last().map(|unit| serde_json::to_string(&UnitCursor {
+                library_id,
+                media_id,
+                season: scope_season,
+                order: UNIT_CURSOR_ORDER.to_string(),
+                last_season: i64::from(unit.key.season),
+                last_episode: i64::from(unit.key.episode),
+            })).transpose().map_err(|error| StoreError::Invalid(error.to_string()))?
+        } else {
+            None
+        };
+        Ok(UnitPage { units, total: total as u64, next_cursor })
     }
+
 
     /// Item detail: the real `library_items` columns, adopted metadata for the resolved
     /// locale (Scrape inputs filling the gaps), the first page of files with their coverage.
@@ -285,11 +323,13 @@ impl Store {
         }
         let file_page = self.library_file_page(library_id, media_id, None, 50)?;
         let file_units = self.file_units(library_id, media_id, &file_page.files)?;
+        let seasons = self.library_seasons(library_id, media_id)?;
         Ok(Some(LibraryItemDetail {
             item,
             metadata,
             files: file_page.files,
             next_file_cursor: file_page.next_cursor,
+            seasons,
             file_units,
         }))
     }
@@ -321,8 +361,16 @@ impl Store {
         }
     }
 
+    fn library_seasons(&self, library_id: LibraryId, media_id: MediaId) -> Result<Vec<u32>, StoreError> {
+        let mut statement = self.library.prepare(
+            "SELECT season FROM library_units WHERE library_id = ?1 AND media_id = ?2 AND season >= 0 GROUP BY season ORDER BY season",
+        )?;
+        let rows = statement.query_map(params![library_id.to_string(), media_id.to_string()], |row| row.get::<_, i64>(0))?;
+        Ok(rows.map(|row| row.map(|season| season as u32)).collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Coverage of the listed files (`(-1,-1)` marks a whole-work file), one query.
-    fn file_units(
+    pub fn file_units(
         &self,
         library_id: LibraryId,
         media_id: MediaId,

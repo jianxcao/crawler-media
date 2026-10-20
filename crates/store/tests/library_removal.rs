@@ -1,3 +1,5 @@
+mod support;
+
 use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
 use store::Store;
 
@@ -133,12 +135,8 @@ fn removal_closes_playback_sessions_for_removed_files_and_preserves_other_librar
     let user_b = domain::UserId::new();
     let device_a = "device-a";
     let device_b = "device-b";
-    let play_session_a = store
-        .issue_play_session(user_a, device_a, a_row.id, 200)
-        .unwrap();
-    let play_session_b = store
-        .issue_play_session(user_b, device_b, b_row.id, 200)
-        .unwrap();
+    let play_session_a = support::issue_session(&store, user_a, device_a, a_row.id, 200);
+    let play_session_b = support::issue_session(&store, user_b, device_b, b_row.id, 200);
     let session_a = store::SessionRow {
         device_id: device_a.into(),
         user_id: user_a,
@@ -279,6 +277,7 @@ fn removal_cleans_unidentified_rows_and_allows_multi_coverage_files() {
                 file: &file,
                 units: &[UnitKey::new(1, 1), UnitKey::new(1, 2)],
                 expected_version: None,
+                nfo_observation: None,
                 probe_required: false,
             }],
             1,

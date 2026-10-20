@@ -15,6 +15,14 @@ struct TestProvider;
 
 #[async_trait::async_trait]
 impl MediaServerProvider for TestProvider {
+    async fn issue_play_session(
+        &self,
+        _user_id: UserId,
+        _device_id: &str,
+        _item_id: &str,
+    ) -> Result<String, String> {
+        Ok(uuid::Uuid::new_v4().to_string())
+    }
     fn server_id(&self) -> String {
         "test-server".to_string()
     }

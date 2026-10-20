@@ -11,6 +11,9 @@
 //! `docs/audits/2026-10-12-remediation-review-repro/endpoint-perf.md` uses the
 //! defaults. No network, no Chromium, no ffmpeg.
 
+#[path = "support/mod.rs"]
+mod support;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -141,13 +144,15 @@ fn seed_media(
         primary_root.join(format!("title-{index:06}"))
     };
     std::fs::create_dir_all(&dir).unwrap();
+    let mut playable = None;
     for file_index in 0..files {
         let path = dir.join(format!("file-{file_index}.mkv"));
         std::fs::write(&path, b"perf-fixture-payload").unwrap();
         std::fs::write(dir.join(format!("file-{file_index}.nfo")), nfo(&media, tv)).unwrap();
+        let file_id = LedgerId::new();
         store
             .insert_ledger(&LedgerRow {
-                id: LedgerId::new(),
+                id: file_id,
                 media_id: media.id,
                 path: path.display().to_string(),
                 season: tv.then_some(1),
@@ -160,14 +165,19 @@ fn seed_media(
                 filter_score: None,
             })
             .unwrap();
+        playable.get_or_insert(file_id);
     }
     std::fs::write(dir.join("poster.jpg"), JPEG).unwrap();
 
     let device = format!("dev-{index}");
     let started = now - (index as i64 % 30) * 86_400 - 60;
-    let play_session_id = store
-        .issue_play_session(admin, &device, domain::LedgerId::new(), started)
-        .unwrap();
+    let play_session_id = support::session::issue_session(
+        store,
+        admin,
+        &device,
+        playable.expect("fixture publishes at least one file"),
+        started,
+    );
     store
         .upsert_session(&SessionRow {
             device_id: device.clone(),

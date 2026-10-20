@@ -43,7 +43,7 @@ impl Store {
             "cache",
             &cache_path,
             schema::layout::CACHE_APPLICATION_ID,
-            schema::layout::V1_USER_VERSION,
+            schema::layout::CACHE_USER_VERSION_I64,
         )?;
         schema::layout::preflight_check_existing_file(
             "library",
@@ -139,7 +139,7 @@ impl Store {
             &self.cache,
             schema::layout::CACHE_DDL,
             schema::layout::CACHE_APPLICATION_ID,
-            schema::layout::V1_USER_VERSION,
+            schema::layout::CACHE_USER_VERSION_I64,
         )?;
         schema::layout::initialize_or_validate(
             "library",

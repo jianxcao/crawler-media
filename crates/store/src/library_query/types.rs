@@ -187,6 +187,8 @@ pub struct LibraryItemDetail {
     pub metadata: domain::MetadataFields,
     pub files: Vec<LibraryFile>,
     pub next_file_cursor: Option<String>,
+    /// All seasons represented by library_units, independent of the first file page.
+    pub seasons: Vec<u32>,
     /// Coverage of each listed file (`(-1,-1)` for a whole-work file).
     pub file_units: Vec<(LedgerId, Vec<UnitKey>)>,
 }

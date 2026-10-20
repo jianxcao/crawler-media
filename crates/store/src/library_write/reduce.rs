@@ -30,17 +30,11 @@ struct FileFact {
     revision: i64,
 }
 
-/// Adopted metadata for one library's display locale (falls back to any locale row).
+/// Adopted metadata for one Library's selected locale.
 struct Adopted {
-    title: Option<String>,
-    year: Option<i64>,
-    rating: Option<f64>,
-    runtime: Option<i64>,
-    language: Option<String>,
-    release_date: Option<String>,
-    revision: i64,
-    genres: Vec<String>,
-    countries: Vec<String>,
+    title: Option<String>, year: Option<i64>, rating: Option<f64>, runtime: Option<i64>,
+    language: Option<String>, release_date: Option<String>, revision: i64,
+    genres: Vec<String>, countries: Vec<String>, fields: MetadataFields,
 }
 
 /// Display facts for one card. The Library's own valid work NFO wins over the adopted
@@ -654,11 +648,29 @@ fn adopted_for_library(
         )
         .optional()?;
     const COLS: &str = "SELECT title, year, rating, runtime_minutes, language, release_date,
-                genres_json, countries_json, revision
+                genres_json, countries_json, revision, details_json
          FROM media_metadata WHERE media_id = ?1";
     let read = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Adopted> {
         let genres_raw: String = r.get(6)?;
         let countries_raw: String = r.get(7)?;
+        let fields_json: String = r.get(9)?;
+        let details: serde_json::Value = serde_json::from_str(&fields_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                9,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+        let fields: MetadataFields = match details.get("fields") {
+            Some(value) => serde_json::from_value(value.clone()).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    9,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+            None => MetadataFields::default(),
+        };
         Ok(Adopted {
             title: r.get(0)?,
             year: r.get(1)?,
@@ -669,6 +681,7 @@ fn adopted_for_library(
             revision: r.get(8)?,
             genres: genre_keys(&genres_raw),
             countries: country_codes(&countries_raw),
+            fields,
         })
     };
     if let Some(locale) = locale {
@@ -743,6 +756,7 @@ fn sync_terms(tx: &Connection, lib: &str, media: &str, facts: &Facts) -> Result<
     )?;
     Ok(())
 }
+
 
 pub(super) fn insert_term(
     tx: &Connection,

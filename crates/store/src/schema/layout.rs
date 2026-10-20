@@ -1,18 +1,18 @@
 use std::path::Path;
 use rusqlite::{Connection, OpenFlags};
+pub use media::response_cache::{CACHE_APPLICATION_ID, CACHE_SCHEMA_SQL as CACHE_DDL, CACHE_USER_VERSION};
 
 use crate::StoreError;
 
 pub const APP_APPLICATION_ID: u32 = 1129139248;
 pub const LIBRARY_APPLICATION_ID: u32 = 1129139249;
 pub const SUBSCRIBE_APPLICATION_ID: u32 = 1129139250;
-pub const CACHE_APPLICATION_ID: u32 = 1129139251;
 pub const V1_USER_VERSION: i64 = 1;
 
 pub const APP_DDL: &str = include_str!("v1/app.sql");
 pub const LIBRARY_DDL: &str = include_str!("v1/library.sql");
 pub const SUBSCRIBE_DDL: &str = include_str!("v1/subscribe.sql");
-pub const CACHE_DDL: &str = include_str!("v1/cache.sql");
+pub const CACHE_USER_VERSION_I64: i64 = CACHE_USER_VERSION as i64;
 
 pub fn read_application_id(conn: &Connection) -> Result<u32, StoreError> {
     let val: i64 = conn.pragma_query_value(None, "application_id", |row| row.get(0))?;
@@ -29,12 +29,12 @@ pub fn is_uninitialized(conn: &Connection) -> Result<bool, StoreError> {
     if app_id != 0 || user_ver != 0 {
         return Ok(false);
     }
-    let table_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+    let object_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
         [],
         |row| row.get(0),
     )?;
-    Ok(table_count == 0)
+    Ok(object_count == 0)
 }
 
 pub fn validate_database_layout(
@@ -51,6 +51,11 @@ pub fn validate_database_layout(
         )));
     }
     Ok(())
+}
+
+pub fn validate_cache_layout(conn: &Connection) -> Result<(), StoreError> {
+    media::response_cache::validate_schema(conn)
+        .map_err(|error| StoreError::Invalid(format!("cache database schema mismatch: {error}")))
 }
 
 pub fn preflight_check_existing_file(
@@ -72,7 +77,11 @@ pub fn preflight_check_existing_file(
     if is_uninitialized(&conn)? {
         return Ok(());
     }
-    validate_database_layout(name, &conn, expected_app_id, expected_user_ver)
+    validate_database_layout(name, &conn, expected_app_id, expected_user_ver)?;
+    if name == "cache" {
+        validate_cache_layout(&conn)?;
+    }
+    Ok(())
 }
 
 pub fn initialize_or_validate(
@@ -91,6 +100,9 @@ pub fn initialize_or_validate(
         tx.commit()?;
     } else {
         validate_database_layout(name, conn, expected_app_id, expected_user_ver)?;
+        if name == "cache" {
+            validate_cache_layout(conn)?;
+        }
     }
     Ok(())
 }

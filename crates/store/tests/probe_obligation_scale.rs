@@ -17,6 +17,27 @@ fn sample_row(media_id: MediaId, path: &str) -> LedgerRow {
     }
 }
 
+/// Fixture view of a scan row: whole-unit coverage for movie/video rows, the row's
+/// unit for TV rows, and no observation facts.
+fn scanned(row: &LedgerRow) -> store::ScannedLedger {
+    let units = match (row.season, row.episode) {
+        (Some(season), Some(episode)) => {
+            vec![domain::UnitKey::new(season as i32, episode as i32)]
+        }
+        _ => vec![domain::UnitKey::WHOLE],
+    };
+    store::ScannedLedger {
+        row: row.clone(),
+        units,
+        source_version: "fixture-v1".into(),
+        source_digest: None,
+        size_bytes: None,
+        created_ns: None,
+        modified_ns: None,
+        observation: None,
+    }
+}
+
 fn setup(data_dir: &std::path::Path) -> (Store, MediaId) {
     let store = Store::open(data_dir).unwrap();
     store
@@ -53,13 +74,13 @@ fn probe_obligations_bounded_vm_steps_at_scale() {
     // 100 fixed target obligations with low timestamps (1..=100)
     for index in 1..=100 {
         let row = sample_row(media_id, &format!("/movies/target_{index}.mkv"));
-        store.insert_scanned_ledger(&row, index).unwrap();
+        store.insert_scanned_files(&[scanned(&row)], index).unwrap();
     }
 
     // 1k series baseline: 1,000 backlog items with higher timestamps
     for index in 101..=1_100 {
         let row = sample_row(media_id, &format!("/movies/backlog_{index}.mkv"));
-        store.insert_scanned_ledger(&row, 10_000 + index).unwrap();
+        store.insert_scanned_files(&[scanned(&row)], 10_000 + index).unwrap();
     }
 
     let (obs_1k, vm_steps_1k) = store.scan_probe_obligations_with_vm_steps(100).unwrap();
@@ -70,7 +91,7 @@ fn probe_obligations_bounded_vm_steps_at_scale() {
     // Grow backlog to 50,000 items (49,000 additional rows)
     for index in 1_101..=50_100 {
         let row = sample_row(media_id, &format!("/movies/backlog_{index}.mkv"));
-        store.insert_scanned_ledger(&row, 10_000 + index).unwrap();
+        store.insert_scanned_files(&[scanned(&row)], 10_000 + index).unwrap();
     }
 
     let (obs_50k, vm_steps_50k) = store.scan_probe_obligations_with_vm_steps(100).unwrap();
@@ -91,7 +112,7 @@ fn probe_obligations_limit_clamping() {
 
     for index in 1..=150 {
         let row = sample_row(media_id, &format!("/movies/clamp_{index}.mkv"));
-        store.insert_scanned_ledger(&row, index).unwrap();
+        store.insert_scanned_files(&[scanned(&row)], index).unwrap();
     }
 
     // limit 0 clamped to 1

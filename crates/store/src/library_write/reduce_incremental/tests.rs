@@ -133,6 +133,7 @@ impl Fixture {
                     file,
                     units,
                     expected_version: None,
+                    nfo_observation: None,
                     probe_required: false,
                 }],
                 0,
@@ -216,12 +217,33 @@ fn snapshot(store: &Store, lib: &str, media: &str) -> Vec<String> {
     out
 }
 
+/// Fixture view of a scan row: whole-unit coverage for movie/video rows, the row's
+/// unit for TV rows, and no observation facts.
+fn scanned(row: &LedgerRow) -> crate::ScannedLedger {
+    let units = match (row.season, row.episode) {
+        (Some(season), Some(episode)) => {
+            vec![UnitKey::new(season as i32, episode as i32)]
+        }
+        _ => vec![UnitKey::WHOLE],
+    };
+    crate::ScannedLedger {
+        row: row.clone(),
+        units,
+        source_version: "fixture-v1".into(),
+        source_digest: None,
+        size_bytes: None,
+        created_ns: None,
+        modified_ns: None,
+        observation: None,
+    }
+}
+
 /// Insert two scanned files and update their presence, size, artwork and quality.
 fn insert_and_update(fixture: &Fixture) -> (LedgerId, LedgerId) {
     let a_row = scanned_row(fixture.media, "/tv/show/S01E01.mkv", 1, 1);
     let b_row = scanned_row(fixture.media, "/tv/show/S01E02.mkv", 1, 2);
-    fixture.store.insert_scanned_ledger(&a_row, 1).unwrap();
-    fixture.store.insert_scanned_ledger(&b_row, 2).unwrap();
+    fixture.store.insert_scanned_files(&[scanned(&a_row)], 1).unwrap();
+    fixture.store.insert_scanned_files(&[scanned(&b_row)], 2).unwrap();
 
     let a_missing = fixture.file(
         a_row.id,
@@ -340,7 +362,7 @@ fn incremental_reduction_matches_full_recompute() {
     let e_row = scanned_row(fixture.media, "/tv/show/S03E02.mkv", 3, 2);
     fixture
         .store
-        .insert_scanned_ledgers(&[d_row, e_row], 9)
+        .insert_scanned_files(&[scanned(&d_row), scanned(&e_row)], 9)
         .unwrap();
     fixture.assert_matches_full();
 }

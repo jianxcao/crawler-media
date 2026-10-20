@@ -8,8 +8,9 @@ use super::ApiServerProvider;
 pub(super) struct PlaybackTarget {
     pub(super) media: Media,
     pub(super) ledger_id: String,
-    season: i32,
-    episode: i32,
+    pub(crate) season: i32,
+    pub(crate) episode: i32,
+    pub(crate) file: domain::LibraryFile,
     duration_ms: Option<i64>,
 }
 
@@ -37,13 +38,13 @@ pub(super) fn resolve_target(
         )
         .map_err(|error| error.to_string())?
         .and_then(|unit| unit.duration_ms)
-        .or(entry.file.duration_ms)
     };
     Ok(Some(PlaybackTarget {
         media: entry.media,
         ledger_id: entry.file.file_id.to_string(),
         season,
         episode,
+        file: entry.file,
         duration_ms,
     }))
 }
@@ -154,7 +155,15 @@ pub(super) fn report_event(
                 Some(sid) => Some(sid),
                 None => Some(
                     store
-                        .issue_play_session(user_id, &client.device_id, target_ledger_id, now)
+                        .issue_play_session(
+                            user_id,
+                            &client.device_id,
+                            target_ledger_id,
+                            target.media.id,
+                            domain::UnitKey::new(target.season, target.episode),
+                            &target.file.version,
+                            now,
+                        )
                         .map_err(|error| error.to_string())?,
                 ),
             }
@@ -329,11 +338,11 @@ fn persist_event_position(
     let duration = target.duration_ms.or(store
         .unit_state(user_id, target.media.id, target.season, target.episode)?
         .and_then(|unit| unit.duration_ms));
-    store.upsert_unit(
+    store.upsert_unit_for_source(
         user_id,
         target.media.id,
-        target.season,
-        target.episode,
+        domain::UnitKey::new(target.season, target.episode),
+        domain::PhysicalSourceId { file_id: target.file.file_id, revision: target.file.version.revision },
         position_ms,
         UnitState::playback_completed(position_ms, duration).then_some(true),
         None,

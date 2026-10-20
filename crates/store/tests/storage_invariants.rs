@@ -7,6 +7,25 @@ use domain::{
 use store::library_write::{FilePublication as StorePublication, WriteScope};
 use store::Store;
 
+/// Fixture view of a scan row: whole-unit coverage for movie/video rows, the row's
+/// unit for TV rows, and no observation facts.
+fn scanned(row: &LedgerRow) -> store::ScannedLedger {
+    let units = match (row.season, row.episode) {
+        (Some(season), Some(episode)) => vec![UnitKey::new(season as i32, episode as i32)],
+        _ => vec![UnitKey::WHOLE],
+    };
+    store::ScannedLedger {
+        row: row.clone(),
+        units,
+        source_version: "fixture-v1".into(),
+        source_digest: None,
+        size_bytes: None,
+        created_ns: None,
+        modified_ns: None,
+        observation: None,
+    }
+}
+
 fn media(store: &Store, id: &str, title: &str, kind: MediaKind) -> Media {
     let media = Media {
         id: id.parse().unwrap(),
@@ -108,6 +127,7 @@ fn pending_files_do_not_create_cards_or_size() {
                 file: &pending,
                 units: &[UnitKey::WHOLE],
                 expected_version: None,
+                nfo_observation: None,
                 probe_required: false,
             }],
             1_000,
@@ -129,6 +149,7 @@ fn pending_files_do_not_create_cards_or_size() {
                 file: &pending,
                 units: &[UnitKey::WHOLE],
                 expected_version: None,
+                nfo_observation: None,
                 probe_required: false,
             }],
             2_000,
@@ -171,6 +192,7 @@ fn frozen_library_rejects_publication() {
                 file: &file,
                 units: &[UnitKey::WHOLE],
                 expected_version: None,
+                nfo_observation: None,
                 probe_required: false,
             }],
             1_000,
@@ -205,6 +227,7 @@ fn publication_rejects_path_outside_root() {
                     file: &file,
                     units: &[UnitKey::WHOLE],
                     expected_version: None,
+                    nfo_observation: None,
                     probe_required: false,
                 }],
                 1_000,
@@ -224,24 +247,20 @@ fn scan_ownership_prefers_real_component_root() {
     let (nested, _) = library(&store, "Nested", MediaKind::Movie, "/media/Show");
 
     let file_id = LedgerId::new();
-    store
-        .insert_scanned_ledger(
-            &LedgerRow {
-                id: file_id,
-                media_id: media.id,
-                path: "/media/Showcase/movie.mkv".into(),
-                season: None,
-                episode: None,
-                resolution: None,
-                codec: None,
-                hdr: None,
-                quality_source: QualitySource::Release,
-                confidence: Confidence::High,
-                filter_score: None,
-            },
-            1_000,
-        )
-        .unwrap();
+    let row = LedgerRow {
+        id: file_id,
+        media_id: media.id,
+        path: "/media/Showcase/movie.mkv".into(),
+        season: None,
+        episode: None,
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: None,
+    };
+    store.insert_scanned_files(&[scanned(&row)], 1_000).unwrap();
 
     let (_, owner) = store.get_file_path_and_library(file_id).unwrap().unwrap();
     assert_eq!(
@@ -277,6 +296,7 @@ fn rebind_moves_the_file_and_rebuilds_both_cards() {
                 file: &file,
                 units: &[UnitKey::WHOLE],
                 expected_version: None,
+                nfo_observation: None,
                 probe_required: false,
             }],
             1_000,
@@ -323,6 +343,7 @@ fn republishing_identical_facts_keeps_the_revision() {
         file: &file,
         units: &[UnitKey::WHOLE],
         expected_version: None,
+        nfo_observation: None,
         probe_required: false,
     };
     store.publish_files(&scope, &[publication()], 1_000).unwrap();

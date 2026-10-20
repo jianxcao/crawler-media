@@ -41,29 +41,71 @@ impl PublicationRecorder<'_> {
                     return Err("Transfer source or Library configuration changed".into());
                 }
             }
-            let dest_path_str = candidate.file.path.display().to_string();
-            let existing_pending = store.ledger_by_path(&dest_path_str).map_err(|e| e.to_string())?;
-            let mut pending_file = candidate.file.clone();
-            if let Some(existing) = existing_pending {
-                if existing.media_id == candidate.file.media_id {
-                    pending_file.file_id = existing.id;
-                }
+            if candidate.file.media_id != self.subscribe.media_id
+                || candidate.file.library_id.to_string() != self.lease.library_id()
+                || candidate.file.source_path.as_deref() != Some(source)
+                || candidate.file.transfer_mode.as_deref() != Some(mode.as_str())
+            {
+                return Err("Transfer candidate Media, Library, source or mode conflicts with its lease".into());
             }
-            pending_file.publication = domain::FilePublication::Pending;
+            let dest_path_str = candidate.file.path.display().to_string();
+            let mut reserved = candidate.clone();
+            if let Some(existing) = store.ledger_by_path(&dest_path_str).map_err(|e| e.to_string())? {
+                if existing.media_id != candidate.file.media_id {
+                    return Err("Transfer destination is already owned by another Media".into());
+                }
+                let mut cursor = None;
+                let mut recovered_file = None;
+                loop {
+                    let page = store
+                        .library_file_page(
+                            candidate.file.library_id,
+                            candidate.file.media_id,
+                            cursor.as_deref(),
+                            100,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    recovered_file = page
+                        .files
+                        .into_iter()
+                        .find(|file| file.path == candidate.file.path);
+                    if recovered_file.is_some() || page.next_cursor.is_none() {
+                        break;
+                    }
+                    cursor = page.next_cursor;
+                }
+                let file = recovered_file
+                    .ok_or_else(|| "Transfer destination file identity is unavailable".to_string())?;
+                if file.file_id != existing.id
+                    || file.publication != domain::FilePublication::Pending
+                    || file.library_id != candidate.file.library_id
+                    || file.root_id != candidate.file.root_id
+                    || file.source_path.as_deref() != Some(source)
+                    || file.transfer_mode.as_deref() != Some(mode.as_str())
+                {
+                    return Err("Transfer destination reservation identity or source changed".into());
+                }
+                reserved.file = file;
+                reserved.units = store
+                    .get_file_units(existing.id)
+                    .map_err(|e| e.to_string())?;
+            }
+            reserved.file.publication = domain::FilePublication::Pending;
             let pub_item = store::library_write::FilePublication {
-                file: &pending_file,
-                units: &candidate.units,
-                expected_version: None,
+                file: &reserved.file,
+                units: &reserved.units,
+                expected_version: Some(&reserved.file.version),
+                nfo_observation: None,
                 probe_required: false,
             };
             let scope = store::library_write::WriteScope {
-                library_id: candidate.file.library_id,
+                library_id: reserved.file.library_id,
                 config_revision: plan.map_or(0, |plan| plan.config_revision),
             };
             store
                 .publish_files(&scope, &[pub_item], crate::job_loop::unix_now() * 1000)
                 .map_err(|e| e.to_string())?;
-            Ok(candidate.clone())
+            Ok(reserved)
         })();
         result.map_err(|error| {
             tracing::error!(path = %candidate.file.path.display(), %error, "Transfer publication reservation failed");
@@ -83,6 +125,7 @@ impl PublicationRecorder<'_> {
             file: &candidate.file,
             units: &candidate.units,
             expected_version: None,
+            nfo_observation: None,
             probe_required: true,
         };
         let scope = store::library_write::WriteScope {

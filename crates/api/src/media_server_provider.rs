@@ -588,7 +588,15 @@ impl MediaServerProvider for ApiServerProvider {
         let now = self.state.playback_clock.now_ms() / 1000;
         let store = self.state.store.lock();
         store
-            .issue_play_session(user_id, device_id, ledger_id, now)
+            .issue_play_session(
+                user_id,
+                device_id,
+                ledger_id,
+                target.media.id,
+                domain::UnitKey::new(target.season, target.episode),
+                &target.file.version,
+                now,
+            )
             .map_err(|e| e.to_string())
     }
 

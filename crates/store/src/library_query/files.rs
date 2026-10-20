@@ -2,6 +2,18 @@ use domain::{
     Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, LibraryId,
     MediaId, MediaKind, QualitySource,
 };
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize, Serialize)]
+struct FileCursor {
+    library_id: LibraryId,
+    media_id: MediaId,
+    order: String,
+    after_file_id: LedgerId,
+}
+
+const FILE_CURSOR_ORDER: &str = "file_id_asc";
+
 use rusqlite::params;
 
 use super::types::FilePage;
@@ -19,7 +31,18 @@ impl Store {
         let media_id_str = media_id.to_string();
         let limit = limit.clamp(1, 100);
 
-        let (sql, params_vec): (String, Vec<rusqlite::types::Value>) = match after {
+        let decoded = match after {
+            Some(raw) => {
+                let cursor: FileCursor = serde_json::from_str(raw)
+                    .map_err(|_| StoreError::Invalid("malformed file cursor".into()))?;
+                if cursor.library_id != library_id || cursor.media_id != media_id || cursor.order != FILE_CURSOR_ORDER {
+                    return Err(StoreError::Invalid("file cursor scope mismatch".into()));
+                }
+                Some(cursor.after_file_id.to_string())
+            }
+            None => None,
+        };
+        let (sql, params_vec): (String, Vec<rusqlite::types::Value>) = match decoded {
             Some(cursor) => (
                 "SELECT file_id, library_id, root_id, media_id, kind, path_key, display_path,
                         presence_state, publication_state, file_revision, source_version,
@@ -32,12 +55,7 @@ impl Store {
                  ORDER BY file_id ASC
                  LIMIT ?4"
                     .into(),
-                vec![
-                    lib_id_str.into(),
-                    media_id_str.into(),
-                    cursor.to_string().into(),
-                    (limit as i64).into(),
-                ],
+                vec![lib_id_str.into(), media_id_str.into(), cursor.into(), (limit as i64).into()],
             ),
             None => (
                 "SELECT file_id, library_id, root_id, media_id, kind, path_key, display_path,
@@ -51,11 +69,7 @@ impl Store {
                  ORDER BY file_id ASC
                  LIMIT ?3"
                     .into(),
-                vec![
-                    lib_id_str.into(),
-                    media_id_str.into(),
-                    (limit as i64).into(),
-                ],
+                vec![lib_id_str.into(), media_id_str.into(), (limit as i64).into()],
             ),
         };
 
@@ -137,7 +151,12 @@ impl Store {
 
         let files = rows.collect::<Result<Vec<_>, _>>()?;
         let next_cursor = if files.len() == limit {
-            files.last().map(|f| f.file_id.to_string())
+            files.last().map(|file| serde_json::to_string(&FileCursor {
+                library_id,
+                media_id,
+                order: FILE_CURSOR_ORDER.to_string(),
+                after_file_id: file.file_id,
+            })).transpose().map_err(|error| StoreError::Invalid(error.to_string()))?
         } else {
             None
         };

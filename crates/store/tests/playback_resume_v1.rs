@@ -119,6 +119,7 @@ fn publish(f: &Fixture, file: &LibraryFile, units: &[UnitKey]) {
                 file,
                 units,
                 expected_version: None,
+                nfo_observation: None,
                 probe_required: false,
             }],
             1_000,

@@ -79,6 +79,7 @@ pub struct MetadataCast {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MetadataFields {
     pub title: FieldValue<String>,
     pub original_title: FieldValue<String>,

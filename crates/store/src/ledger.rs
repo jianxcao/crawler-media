@@ -264,6 +264,18 @@ impl Store {
     ) -> Result<(), StoreError> {
         let file = self.place_ledger_row(row, transfer_mode, source_path)?;
         let units = ledger_units(row);
+        let locale = crate::library_query::library_display_locale(self, file.library_id)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let config_revision = self.library_config_revision(&file.library_id.to_string()).unwrap_or(0);
+        let observation = crate::metadata::NfoObservation::observe(
+            &file.path,
+            file.kind,
+            locale,
+            file.version.source_version.clone(),
+            config_revision,
+        );
         self.publish_files(
             &WriteScope {
                 library_id: file.library_id,
@@ -273,6 +285,7 @@ impl Store {
                 file: &file,
                 units: &units,
                 expected_version: None,
+                nfo_observation: Some(&observation),
                 probe_required: false,
             }],
             crate::unix_now() * 1000,
@@ -330,6 +343,7 @@ impl Store {
                 file: &file,
                 units: &units,
                 expected_version: Some(&expected),
+                nfo_observation: None,
                 probe_required: false,
             }],
             crate::unix_now() * 1000,
@@ -575,6 +589,7 @@ mod batch_tests {
                     file: &file,
                     units: &[UnitKey::WHOLE],
                     expected_version: None,
+                    nfo_observation: None,
                     probe_required: false,
                 }],
                 1000,

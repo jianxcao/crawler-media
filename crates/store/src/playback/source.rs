@@ -91,7 +91,7 @@ impl Store {
             TypedItemId::Season { media, season } => (*media, Some(*season as i32), None),
             TypedItemId::Unit { media, key } => (*media, Some(key.season), Some(key.episode)),
         };
-        self.source_rows(Some(&allowed), media_id, season, episode, None, true)
+        self.source_rows(Some(&allowed), media_id, season, episode, None, false)
     }
 
     /// Published + present sources of one Media without a user scope, best
@@ -101,7 +101,7 @@ impl Store {
         &self,
         media_id: MediaId,
     ) -> Result<Vec<LibraryFile>, StoreError> {
-        let sources = self.source_rows(None, media_id, None, None, None, true)?;
+        let sources = self.source_rows(None, media_id, None, None, None, false)?;
         Ok(sources.into_iter().map(|source| source.file).collect())
     }
 
@@ -117,7 +117,7 @@ impl Store {
             TypedItemId::Season { media, season } => (*media, Some(*season as i32), None),
             TypedItemId::Unit { media, key } => (*media, Some(key.season), Some(key.episode)),
         };
-        self.source_rows(None, media_id, season, episode, None, true)
+        self.source_rows(None, media_id, season, episode, None, false)
     }
 
     /// Published + present file facts for these ids (any library). Pending,

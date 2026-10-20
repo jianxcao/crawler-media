@@ -90,21 +90,7 @@ impl LibraryCoverService {
             return Ok(None);
         }
         if let Some(existing) = existing_cover(&snapshot) {
-            if !needs_legacy_upgrade(&snapshot, &existing) {
-                return Ok(Some(existing));
-            }
-            // 兼容路径升级（F08）：同样使用不可变的新版本文件进行渲染和 CAS 发布！
-            // 只有当 CAS 发布成功后，新版本文件才生效；如果发布失败（例如并发修改或 DB 写入失败），
-            // 原有的旧 legacy 文件（包括内容）绝对不被就地覆盖破坏。未成功引用的新文件会被清除。
-            let options = crate::http::library::default_cover_options(&snapshot.library);
-            let rendered = render_off_lock(self.renderer.clone(), &snapshot, options).await?;
-            let Some(bytes) = rendered else {
-                mark(state, &snapshot.library.id, MARKER_RETRY);
-                return Ok(Some(existing));
-            };
-            let target = publish(state, &snapshot, &bytes, MARKER_CHECKED, &lease).await?;
-            mark(state, &snapshot.library.id, MARKER_CHECKED);
-            return Ok(Some(target));
+            return Ok(Some(existing));
         }
         if snapshot.marker.as_deref() == Some(MARKER_RETRY) {
             return Ok(None);
@@ -182,7 +168,7 @@ impl LibraryCoverService {
         if !published {
             return Err("cover.stale: 封面已被更新，请重试".into());
         }
-        // 只清理我们发布的版本文件；legacy 固定路径保持只读、不 unlink。
+        // 只清理我们发布的版本文件。
         if let Some(path) = previous {
             if path
                 .file_name()
@@ -229,21 +215,7 @@ pub fn existing_cover(snapshot: &CoverSnapshot) -> Option<PathBuf> {
         }
         None => {}
     }
-    let legacy = snapshot
-        .target_dir
-        .join(format!("library-{}.jpg", snapshot.library.id));
-    legacy.is_file().then_some(legacy)
-}
-
-/// 旧 release 把单张 fanart 复制成固定路径封面：只有这种形态才重渲染升级。
-fn needs_legacy_upgrade(snapshot: &CoverSnapshot, existing: &Path) -> bool {
-    let legacy = snapshot
-        .target_dir
-        .join(format!("library-{}.jpg", snapshot.library.id));
-    existing == legacy
-        && snapshot.marker.as_deref() != Some(MARKER_CHECKED)
-        && !snapshot.rows.is_empty()
-        && crate::http::library::is_legacy_fanart_copy(&snapshot.rows, existing)
+    None
 }
 
 /// `lease.publish` 内只做 CAS；命中返回 true。
@@ -339,11 +311,8 @@ fn mark(state: &ApiState, library_id: &str, marker: &str) {
 
 /// Remove every on-disk cover artifact owned by `library_id`.
 ///
-/// Library removal is the one place where the "legacy `library-{id}.jpg` is
-/// read-only and never unlinked" rule is intentionally lifted: the Library row is
-/// gone, so nothing can read that file again. Returns the number of files removed.
+/// Returns the number of versioned cover files removed.
 pub fn remove_library_cover_files(covers_dir: &Path, library_id: &str) -> usize {
-    let legacy = format!("library-{library_id}.jpg");
     let versioned = format!("library-{library_id}-");
     let entries = match std::fs::read_dir(covers_dir) {
         Ok(entries) => entries,
@@ -357,7 +326,7 @@ pub fn remove_library_cover_files(covers_dir: &Path, library_id: &str) -> usize 
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        if name != legacy && !name.starts_with(&versioned) {
+        if !name.starts_with(&versioned) {
             continue;
         }
         match std::fs::remove_file(entry.path()) {

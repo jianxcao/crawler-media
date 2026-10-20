@@ -22,8 +22,11 @@ use serde_json::{Value, json};
 mod support;
 use support::{
     DAY, DB_LIGHT, DB_VACUUM, KEEP, PREVIEW, Recorder, TOKEN, build_state, data_dir, db_entry,
-    enqueue_claim, progress_of, temp_state, unix_now,
+    enqueue_claim, progress_of, seed_published_file, temp_state, unix_now,
 };
+
+#[path = "support/mod.rs"]
+mod api_support;
 
 /// 第一次进入 `execute` 后阻塞，直到测试放行；用来证明维护不在 Store/Queue 锁内执行。
 struct BlockingExecutor {
@@ -384,7 +387,7 @@ fn playback_retention_dry_run_keeps_logs_then_prunes_only_logs() {
     use domain::{MediaId, UserId};
     use store::SessionRow;
 
-    let (_tmp, state) = temp_state(Arc::new(SqliteExecutor));
+    let (tmp, state) = temp_state(Arc::new(SqliteExecutor));
     let user = UserId::new();
     let media = MediaId::new();
     let now = unix_now();
@@ -406,6 +409,7 @@ fn playback_retention_dry_run_keeps_logs_then_prunes_only_logs() {
             bangumi_id: None,
             anilist_id: None,
         }).unwrap();
+        let file_id = seed_published_file(&guard, tmp.path(), media);
         guard
             .upsert_unit(
                 user,
@@ -424,10 +428,13 @@ fn playback_retention_dry_run_keeps_logs_then_prunes_only_logs() {
             .unwrap();
         for index in 0..2 {
             let device = format!("old{index}");
-            let ledger = domain::LedgerId::new();
-            let play_session_id = guard
-                .issue_play_session(user, &device, ledger, cutoff - 10 * DAY)
-                .unwrap();
+            let play_session_id = api_support::session::issue_session(
+                &guard,
+                user,
+                &device,
+                file_id,
+                cutoff - 10 * DAY,
+            );
             let session = SessionRow {
                 device_id: device,
                 user_id: user,
@@ -450,7 +457,7 @@ fn playback_retention_dry_run_keeps_logs_then_prunes_only_logs() {
                 started_at: cutoff - 10 * DAY,
                 last_report_at: cutoff - 10 * DAY,
                 last_report_at_ms: (cutoff - 10 * DAY) * 1000,
-                ledger_id: Some(ledger.to_string()),
+                ledger_id: Some(file_id.to_string()),
                 play_session_id: Some(play_session_id),
                 last_event_sequence: None,
             };

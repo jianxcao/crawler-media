@@ -334,6 +334,10 @@ fn member_library_routes() -> Router<ApiState> {
         .route("/libraries/{id}/items", get(library::list_items))
         .route("/libraries/{id}/items/{item_id}", get(library::item_detail))
         .route(
+            "/libraries/{id}/items/{item_id}/files",
+            get(library::item_files),
+        )
+        .route(
             "/libraries/{id}/items/{item_id}/episodes",
             get(library::item_episodes),
         )
