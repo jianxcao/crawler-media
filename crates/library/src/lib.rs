@@ -14,6 +14,8 @@ pub use watch_identity::read_watch_identity;
 mod probe_target;
 mod scrape;
 pub mod subtitles;
+pub mod source_observation;
+pub use source_observation::{SourceObservation, observe_source};
 mod tracks;
 mod watch;
 mod work_control;

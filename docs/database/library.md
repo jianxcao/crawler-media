@@ -11,7 +11,7 @@
 - `media`、Library配置、Collection、Playback已同库；旧ledger/file_meta/browse持久表已删除，但LedgerRow写适配和Web movie (0,0)边界alias仍在，不是允许保留的合同。
 - 复合ownership FK与完整归约已存在；增量归约漏用户摘要、重扫替换不推进物理版本、Transfer pending恢复身份记账仍有缺口；不将历史多集/删除修复笼统判为未实现。
 - `library_operations`、`integrity_state`、NFO `export_*` 是已建结构，不代表完整根/locale/checker/导出恢复实现。
-- `a3dab1b` 增加扫描变化时清 stat/durable 版本，未新增表或列；不等于物理 FileVersion、统计摘要及 Probe 版本合同已统一。
+- `a3dab1b` 增加扫描变化时清 stat/durable 版本，未新增表或列；在 Task 1 中统一由 `library::observe_source` 在锁外观察源，并通过 `Store::replace_file_source` CAS 原子递增 `file_revision`、更新 `source_version` 与 `source_digest`（STRM 文件基于内容 digest，普通文件基于 stat），失效旧冷详情/质量/轨道/artwork并重挂 probe 义务。
 - 元数据人工锁/来源冲突、合并冻结/恢复、协议生产接线见[当前计划](../superpowers/plans/2026-10-20-storage-clean-cutover.md)。
 
 ## 字段阅读规则
