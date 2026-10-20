@@ -52,6 +52,8 @@ mod probe_tasks;
 mod probe_dispatch;
 pub use probe_dispatch::{ProbeDispatchId, ProbeDispatchSnapshot, ProbeDispatchStage};
 mod roots;
+pub mod library_operations;
+pub use library_operations::LibraryReconfiguration;
 pub mod schema;
 mod scanned_ledger;
 mod scan_probe_obligations;

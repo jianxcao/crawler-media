@@ -1,0 +1,215 @@
+//! Root-set migration for a reconfiguration operation, one bounded batch at a time.
+//!
+//! The new root set is materialised as `library_roots` rows under the same Library, then
+//! each batch re-parents files, their coverage, scoped metadata inputs and unidentified
+//! rows by longest-prefix match. Old roots are only deleted once nothing references them,
+//! and no batch ever trusts an in-memory view of the previous pass.
+
+use std::path::{Path, PathBuf};
+
+use rusqlite::{Connection, params};
+
+use super::OperationCursor;
+use crate::StoreError;
+
+/// Whether the phase has more work after this batch.
+pub(crate) enum BatchOutcome {
+    More,
+    Done,
+}
+
+/// Apply one batch of the root change, resuming from `cursor.last_file_id`.
+pub(crate) fn apply_root_batch(
+    tx: &Connection,
+    library: &str,
+    requested: &[PathBuf],
+    cursor: &mut OperationCursor,
+    batch: usize,
+) -> Result<BatchOutcome, StoreError> {
+    let kind: String = tx.query_row(
+        "SELECT kind FROM libraries WHERE library_id = ?1",
+        params![library],
+        |r| r.get(0),
+    )?;
+    ensure_root_rows(tx, library, &kind, requested)?;
+
+    let files = next_file_batch(tx, library, cursor.last_file_id.as_deref(), batch)?;
+    if files.is_empty() {
+        // No file left to move: drop the roots nothing points at, then the phase is done.
+        prune_unreferenced_roots(tx, library, requested)?;
+        return Ok(BatchOutcome::Done);
+    }
+    // Every file of the batch moves; stopping at the page's last id would leave the
+    // rest of the page on the previous root generation.
+    for file_id in &files {
+        reparent_file(tx, library, file_id, requested)?;
+    }
+    let last_file_id = files.last().cloned().expect("non-empty batch");
+    cursor.last_file_id = Some(last_file_id.clone());
+    let more = files.len() >= batch && has_more_files(tx, library, Some(&last_file_id))?;
+    Ok(if more {
+        BatchOutcome::More
+    } else {
+        prune_unreferenced_roots(tx, library, requested)?;
+        BatchOutcome::Done
+    })
+}
+
+/// Create the requested roots that do not exist yet, keeping existing ids stable.
+fn ensure_root_rows(
+    tx: &Connection,
+    library: &str,
+    kind: &str,
+    requested: &[PathBuf],
+) -> Result<(), StoreError> {
+    let existing: Vec<(String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT root_id, display_path FROM library_roots WHERE library_id = ?1",
+        )?;
+        stmt.query_map(params![library], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for (index, path) in requested.iter().enumerate() {
+        let display = path.to_string_lossy().to_string();
+        let already = existing
+            .iter()
+            .any(|(_, candidate)| candidate == &display);
+        if already {
+            continue;
+        }
+        let root_id = uuid::Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO library_roots
+                (root_id, library_id, path_key, display_path, enabled, sort_order)
+             VALUES (?1, ?2, ?3, ?3, 1, ?4)",
+            params![root_id, library, display, index as i32],
+        )?;
+        let _ = kind;
+    }
+    Ok(())
+}
+
+/// One keyset page of file ids still owned by the Library.
+fn next_file_batch(
+    tx: &Connection,
+    library: &str,
+    after: Option<&str>,
+    batch: usize,
+) -> Result<Vec<String>, StoreError> {
+    let mut stmt = tx.prepare(
+        "SELECT file_id FROM library_files
+         WHERE library_id = ?1 AND (?2 IS NULL OR file_id > ?2)
+         ORDER BY file_id ASC
+         LIMIT ?3",
+    )?;
+    let ids = stmt
+        .query_map(params![library, after, batch as i64], |r| {
+            r.get::<_, String>(0)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ids)
+}
+
+fn has_more_files(
+    tx: &Connection,
+    library: &str,
+    after: Option<&str>,
+) -> Result<bool, StoreError> {
+    let exists: i64 = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM library_files
+                       WHERE library_id = ?1 AND (?2 IS NULL OR file_id > ?2))",
+        params![library, after],
+        |r| r.get(0),
+    )?;
+    Ok(exists != 0)
+}
+
+/// Re-parent one file (and everything scoped to it) to the longest matching new root.
+fn reparent_file(
+    tx: &Connection,
+    library: &str,
+    file_id: &str,
+    requested: &[PathBuf],
+) -> Result<(), StoreError> {
+    let path_key: String = tx.query_row(
+        "SELECT path_key FROM library_files WHERE file_id = ?1 AND library_id = ?2",
+        params![file_id, library],
+        |r| r.get(0),
+    )?;
+    let file_path = Path::new(&path_key);
+    let best = requested
+        .iter()
+        .filter(|root| file_path.starts_with(root))
+        .max_by_key(|root| root.components().count());
+    let Some(root) = best else {
+        // A file outside every requested root keeps its current owner; the caller
+        // decides later whether to remove it, so a reconfiguration never silently
+        // deletes library facts.
+        return Ok(());
+    };
+    let display = root.to_string_lossy().to_string();
+    let root_id: String = tx.query_row(
+        "SELECT root_id FROM library_roots WHERE library_id = ?1 AND display_path = ?2",
+        params![library, display],
+        |r| r.get(0),
+    )?;
+    tx.execute(
+        "UPDATE library_files SET root_id = ?2 WHERE file_id = ?1",
+        params![file_id, root_id],
+    )?;
+    // Scoped metadata inputs and unidentified rows carry the same ownership fact.
+    tx.execute(
+        "UPDATE library_metadata_inputs SET root_id = ?2
+         WHERE library_id = ?3 AND path_key IN
+             (SELECT path_key FROM library_files WHERE file_id = ?1)",
+        params![file_id, root_id, library],
+    )?;
+    let path_prefix = format!("{display}/%");
+    tx.execute(
+        "UPDATE unidentified SET root_id = ?2
+         WHERE library_id = ?3 AND (path = ?4 OR path LIKE ?5)",
+        params![
+            file_id,
+            root_id,
+            library,
+            file_path.to_string_lossy().to_string(),
+            path_prefix
+        ],
+    )?;
+    Ok(())
+}
+
+/// Delete roots of the Library that the requested set no longer contains and that no
+/// file, metadata input or unidentified row still references.
+fn prune_unreferenced_roots(
+    tx: &Connection,
+    library: &str,
+    requested: &[PathBuf],
+) -> Result<(), StoreError> {
+    let keep: Vec<String> = requested
+        .iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect();
+    let existing: Vec<(String, String)> = {
+        let mut stmt =
+            tx.prepare("SELECT root_id, display_path FROM library_roots WHERE library_id = ?1")?;
+        stmt.query_map(params![library], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for (root_id, display) in existing {
+        if keep.iter().any(|path| path == &display) {
+            continue;
+        }
+        let referenced: i64 = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM library_files WHERE root_id = ?1)
+                 OR EXISTS(SELECT 1 FROM library_metadata_inputs WHERE root_id = ?1)
+                 OR EXISTS(SELECT 1 FROM unidentified WHERE root_id = ?1)",
+            params![root_id],
+            |r| r.get(0),
+        )?;
+        if referenced == 0 {
+            tx.execute("DELETE FROM library_roots WHERE root_id = ?1", params![root_id])?;
+        }
+    }
+    Ok(())
+}

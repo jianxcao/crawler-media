@@ -10,7 +10,7 @@
 
 - `media`、Library配置、Collection、Playback已同库；旧ledger/file_meta/browse持久表已删除，但LedgerRow写适配和Web movie (0,0)边界alias仍在，不是允许保留的合同。
 - 复合ownership FK与完整归约已存在；增量归约漏用户摘要、重扫替换不推进物理版本、Transfer pending恢复身份记账仍有缺口；不将历史多集/删除修复笼统判为未实现。
-- `library_operations`、`integrity_state`、NFO `export_*` 是已建结构，不代表完整根/locale/checker/导出恢复实现。
+- `library_operations` 的 `roots`/`locale` 两类已由 `Store::begin_library_reconfiguration` + `Store::advance_library_operation` 持久化驱动：开始时对 `config_revision` 做真实 CAS 并把库置为 `reindexing`（旧 `WriteScope` 的写入被拒绝），再按 keyset 分批（≤100 Media/批）迁移 `library_files.root_id`、`library_metadata_inputs.root_id` 与 `unidentified.root_id`，最后才删除无引用的旧根并恢复 `ready`；中途重启由 `unfinished_library_operations` 续跑。`integrity_state` 与 NFO `export_*` 仍是已建结构，不代表 checker/导出恢复已实现。
 - `a3dab1b` 增加扫描变化时清 stat/durable 版本，未新增表或列；在 Task 1 中统一由 `library::observe_source` 在锁外观察源，并通过 `Store::replace_file_source` CAS 原子递增 `file_revision`、更新 `source_version` 与 `source_digest`（STRM 文件基于内容 digest，普通文件基于 stat），失效旧冷详情/质量/轨道/artwork并重挂 probe 义务。
 - 元数据人工锁/来源冲突、合并冻结/恢复、协议生产接线见[当前计划](../superpowers/plans/2026-10-20-storage-clean-cutover.md)。
 
