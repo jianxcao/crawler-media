@@ -93,7 +93,7 @@ impl Store {
 
 `crates/subscribe/src/{collect,types,collection_destinations}.rs`与API worker/transfer同批改，references继续枚举目的/恢复消费者，不引入Store依赖。domain新增 `FileCoverage { file: LibraryFile, units: Vec<UnitKey> }`；RunInput显式带library_id/root_id/config_revision；RunOutcome以 `files: Vec<FileCoverage>`替换ledger，保留facts/removed_paths/成功失败等其余字段。LedgerSource改为 `FileSource { file_id: LedgerId, destination: PathBuf, source: PathBuf }`。
 
-Recorder签名：`prepare(&self, candidate: &FileCoverage, source: &Path, mode: library::TransferMode) -> Result<FileCoverage, SubscribeError>`；`published(&self, candidate: &FileCoverage) -> Result<(), SubscribeError>`。覆盖从每个文件Release在发布前解析，随prepare/published/outcome完整传递；整季torrent不能让每个单集文件继承整季覆盖。Probe后质量在最终published前写入candidate，API recorder分别调用begin_transfer/finish_transfer。测试多集文件两单元、同路径恢复不丢E02、拒绝替换不提前删旧覆盖；失败保留其他已成功文件真实结果。
+Recorder签名：`prepare(&self, candidate: &FileCoverage, source: &Path, mode: library::TransferMode) -> Result<FileCoverage, SubscribeError>`；`published(&self, candidate: &FileCoverage) -> Result<(), SubscribeError>`。覆盖从每个文件Release在发布前解析，随prepare/published/outcome完整传递；整季torrent不能让每个单集文件继承整季覆盖。Probe后质量在最终published前写入candidate，API recorder分别调用 `Store::reserve_transfer` / `Store::finish_transfer`：前者在单一事务内校验 Library 可写、config_revision、Media 未冻结与同路径既有 pending 的 media/root/source/mode 身份，命中则返回持久 `file_id` 与已记录的覆盖单元（重启恢复不重复身份、不丢 E02），否则插入 pending 行并写入完整 `FileCoverage`；后者按 `FileVersion` CAS 发布，只推进 publication/presence 事实、重挂 probe 并归约，不再重建 stat/track/version。测试多集文件两单元、同路径恢复不丢E02、恢复A不阻塞B、拒绝替换不提前删旧覆盖；失败保留其他已成功文件真实结果。
 
 ## 4. 元数据/NFO采用接口
 

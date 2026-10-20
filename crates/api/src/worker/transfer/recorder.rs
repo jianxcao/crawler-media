@@ -48,64 +48,16 @@ impl PublicationRecorder<'_> {
             {
                 return Err("Transfer candidate Media, Library, source or mode conflicts with its lease".into());
             }
-            let dest_path_str = candidate.file.path.display().to_string();
-            let mut reserved = candidate.clone();
-            if let Some(existing) = store.ledger_by_path(&dest_path_str).map_err(|e| e.to_string())? {
-                if existing.media_id != candidate.file.media_id {
-                    return Err("Transfer destination is already owned by another Media".into());
-                }
-                let mut cursor = None;
-                let mut recovered_file = None;
-                loop {
-                    let page = store
-                        .library_file_page(
-                            candidate.file.library_id,
-                            candidate.file.media_id,
-                            cursor.as_deref(),
-                            100,
-                        )
-                        .map_err(|e| e.to_string())?;
-                    recovered_file = page
-                        .files
-                        .into_iter()
-                        .find(|file| file.path == candidate.file.path);
-                    if recovered_file.is_some() || page.next_cursor.is_none() {
-                        break;
-                    }
-                    cursor = page.next_cursor;
-                }
-                let file = recovered_file
-                    .ok_or_else(|| "Transfer destination file identity is unavailable".to_string())?;
-                if file.file_id != existing.id
-                    || file.publication != domain::FilePublication::Pending
-                    || file.library_id != candidate.file.library_id
-                    || file.root_id != candidate.file.root_id
-                    || file.source_path.as_deref() != Some(source)
-                    || file.transfer_mode.as_deref() != Some(mode.as_str())
-                {
-                    return Err("Transfer destination reservation identity or source changed".into());
-                }
-                reserved.file = file;
-                reserved.units = store
-                    .get_file_units(existing.id)
-                    .map_err(|e| e.to_string())?;
-            }
-            reserved.file.publication = domain::FilePublication::Pending;
-            let pub_item = store::library_write::FilePublication {
-                file: &reserved.file,
-                units: &reserved.units,
-                expected_version: Some(&reserved.file.version),
-                nfo_observation: None,
-                probe_required: false,
-            };
+            // The reservation owns the pending row identity: an interrupted round
+            // that left the same destination behind is recovered here rather than
+            // re-created, and a conflicting owner/source/mode is refused.
             let scope = store::library_write::WriteScope {
-                library_id: reserved.file.library_id,
+                library_id: candidate.file.library_id,
                 config_revision: plan.map_or(0, |plan| plan.config_revision),
             };
             store
-                .publish_files(&scope, &[pub_item], crate::job_loop::unix_now() * 1000)
-                .map_err(|e| e.to_string())?;
-            Ok(reserved)
+                .reserve_transfer(&scope, candidate, source, mode, crate::job_loop::unix_now() * 1000)
+                .map_err(|e| e.to_string())
         })();
         result.map_err(|error| {
             tracing::error!(path = %candidate.file.path.display(), %error, "Transfer publication reservation failed");
@@ -115,19 +67,13 @@ impl PublicationRecorder<'_> {
 
     /// Complete the publication of the reserved file. The reservation and this
     /// call carry the same `file_id`, so the row keeps its root, source path and
-    /// transfer mode (see `Store::publish_files` COALESCE semantics).
+    /// transfer mode; the completion is a version-checked publish, not a second
+    /// identity creation.
     fn published_with_plan(
         &self,
         candidate: &domain::FileCoverage,
         plan: Option<&TransferPlan>,
     ) -> Result<(), subscribe::SubscribeError> {
-        let pub_item = store::library_write::FilePublication {
-            file: &candidate.file,
-            units: &candidate.units,
-            expected_version: None,
-            nfo_observation: None,
-            probe_required: true,
-        };
         let scope = store::library_write::WriteScope {
             library_id: candidate.file.library_id,
             config_revision: plan.map_or(0, |plan| plan.config_revision),
@@ -135,12 +81,16 @@ impl PublicationRecorder<'_> {
         self.state
             .store
             .lock()
-            .publish_files(&scope, &[pub_item], crate::job_loop::unix_now() * 1000)
+            .finish_transfer(
+                &scope,
+                candidate,
+                &candidate.file.version,
+                crate::job_loop::unix_now() * 1000,
+            )
             .map_err(|error| {
                 tracing::error!(path = %candidate.file.path.display(), %error, "Transfer publication completion failed");
                 subscribe::SubscribeError::Downloader(downloader::DownloaderError::Message(error.to_string()))
-            })?;
-        Ok(())
+            })
     }
 }
 

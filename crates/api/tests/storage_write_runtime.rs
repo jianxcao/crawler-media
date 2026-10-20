@@ -2,6 +2,7 @@
 mod support;
 
 use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 use domain::{
     Confidence, FileCoverage, FilePresence, FilePublication, FileVersion, LedgerId,
@@ -116,6 +117,123 @@ async fn scan_and_transfer_publication_atomic_file_writes() {
         assert_eq!(store.count_probe_obligations().unwrap(), 1);
     }
 }
+
+#[tokio::test]
+async fn claim_multi_episode_preserves_all_units() {
+    let fix = PresenceFixture::new();
+    let store_arc = fix.state.store();
+    let (tv_lib, root_id) = {
+        let store = store_arc.lock();
+        let lib = store
+            .create_library(
+                MediaKind::Tv,
+                "TV Shows 2",
+                &["/tv_shows_2"],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+        let root = store
+            .list_library_roots()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.library_id.as_deref() == Some(&lib.id))
+            .map(|r| r.id)
+            .unwrap();
+        (lib, root)
+    };
+
+    let lib_id: LibraryId = tv_lib.id.parse().unwrap();
+    let scope = WriteScope {
+        library_id: lib_id,
+        config_revision: 0,
+    };
+
+    let media_id = MediaId::new();
+    let media = Media {
+        id: media_id,
+        kind: MediaKind::Tv,
+        title: "Test Multi Episode".into(),
+        year: Some(2024),
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+
+    {
+        let store = store_arc.lock();
+        store.insert_media(&media).unwrap();
+    }
+
+    let file_id = LedgerId::new();
+    let multi_coverage = FileCoverage {
+        file: LibraryFile {
+            file_id,
+            library_id: lib_id,
+            root_id,
+            media_id,
+            kind: MediaKind::Tv,
+            path: PathBuf::from("Test Multi Episode/S01E01-E02.mkv"),
+            version: FileVersion {
+                revision: 1,
+                source_version: "v1".into(),
+            },
+            presence: FilePresence::Present,
+            publication: FilePublication::Pending,
+            size_bytes: Some(1024 * 1024),
+            stat_known: true,
+            created_ns: None,
+            modified_ns: None,
+            source_digest: None,
+            source_path: Some(PathBuf::from("/downloads/source_multi.mkv")),
+            transfer_mode: Some("hardlink".into()),
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: QualitySource::Release,
+            confidence: Confidence::High,
+            filter_score: None,
+            release_quality: None,
+            duration_ms: None,
+            tracks_version: 0,
+            poster_path: None,
+            backdrop_path: None,
+            still_path: None,
+        },
+        units: vec![UnitKey::new(1, 1), UnitKey::new(1, 2)],
+    };
+
+    {
+        let store = store_arc.lock();
+        let reserved = store
+            .reserve_transfer(
+                &scope,
+                &multi_coverage,
+                std::path::Path::new("/downloads/source_multi.mkv"),
+                library::TransferMode::Hardlink,
+                1_000,
+            )
+            .unwrap();
+
+        store
+            .finish_transfer(&scope, &reserved, &reserved.file.version, 2_000)
+            .unwrap();
+
+        let units = store.get_file_units(file_id).unwrap();
+        assert_eq!(units, vec![UnitKey::new(1, 1), UnitKey::new(1, 2)]);
+
+        let item = store.get_library_item(lib_id, media_id).unwrap().unwrap();
+        assert_eq!(item.distinct_episode_count, 2);
+        assert_eq!(item.file_count, 1);
+        assert_eq!(item.size_bytes, Some(1024 * 1024));
+    }
+}
+
 
 #[tokio::test]
 async fn replacement_scan_advances_version_and_rejects_old_probe() {

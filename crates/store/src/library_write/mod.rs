@@ -7,6 +7,7 @@ pub mod presence;
 pub mod probe;
 pub mod publish;
 pub mod source;
+pub mod transfer;
 pub mod reduce;
 pub mod reduce_incremental;
 
