@@ -103,6 +103,7 @@ pub(crate) fn reduce_library_media(
         &facts,
     )?;
     sync_terms(tx, &lib, &media, &facts)?;
+    refresh_affected_user_summaries(tx, library_id, media_id)?;
     Ok(())
 }
 
@@ -122,6 +123,36 @@ pub(crate) fn reduce_media_everywhere(
         reduce_library_media(tx, library_id, media_id)?;
     }
     Ok(libs.len())
+}
+fn refresh_affected_user_summaries(
+    tx: &Connection,
+    library_id: LibraryId,
+    media_id: MediaId,
+) -> Result<(), StoreError> {
+    let users: Vec<String> = {
+        let mut stmt = tx.prepare("SELECT DISTINCT user_id FROM playback_units WHERE media_id = ?1 ORDER BY user_id")?;
+        let rows = stmt.query_map([media_id.to_string()], |r| r.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    if users.is_empty() {
+        return Ok(());
+    }
+    let is_tv: bool = tx
+        .query_row(
+            "SELECT kind = 'tv' FROM media WHERE media_id = ?1",
+            [media_id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    let lib_str = library_id.to_string();
+    for user_str in users {
+        let Ok(user_id) = user_str.parse::<domain::UserId>() else {
+            continue;
+        };
+        let facts = crate::Store::summary_facts(tx, user_id, media_id)?;
+        crate::Store::write_library_summary(tx, user_id, media_id, &lib_str, is_tv, &facts)?;
+    }
+    Ok(())
 }
 
 fn published_files(

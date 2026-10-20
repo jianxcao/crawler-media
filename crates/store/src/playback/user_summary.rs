@@ -67,7 +67,7 @@ impl Summary {
 }
 
 /// One `playback_units` row of the current user and media.
-struct PlaybackFact {
+pub(crate) struct PlaybackFact {
     season: i32,
     episode: i32,
     played: bool,
@@ -189,7 +189,7 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    fn summary_facts(
+    pub(crate) fn summary_facts(
         tx: &Connection,
         user_id: UserId,
         media_id: MediaId,
@@ -258,7 +258,7 @@ impl Store {
             .map_err(Into::into)
     }
 
-    fn write_library_summary(
+    pub(crate) fn write_library_summary(
         tx: &Connection,
         user_id: UserId,
         media_id: MediaId,

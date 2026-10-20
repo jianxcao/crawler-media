@@ -63,7 +63,7 @@ pub(super) fn refresh_units(
             after_covers,
             change,
         )?;
-        if before_exists != after_exists {
+        if before_exists != after_exists && *season >= 0 && *episode >= 0 {
             if after_exists {
                 item.distinct_episodes += 1;
             } else {
