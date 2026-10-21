@@ -51,6 +51,19 @@ User 登录身份、启用状态、角色和密码资料，不保存观看事实
 
 **索引**：无额外命名索引；登录唯一性由 UNIQUE 自动索引提供。
 
+### 用户生命周期与跨库删除合同
+用户删除通过 `DELETE /api/v1/users/{id}` 发起，采用分阶段幂等与故障可续模型：
+1. **202 异步合同**：删除请求立即返回 `202 Accepted` 与 `operation_id`，不使用 200 掩盖尚未完成的跨库清理。
+2. **凭据立即失效与阶段持久化**：
+   - 首先在 `settings` 持久化操作状态：键为 `user_removal.<id>`，版本为 `version: 1`，包含 `operation_id`、`phase`（如 `disabling` -> `cleaning`）、`cursor`、`error` 与 `updated_at`。
+   - 立即将用户设置为禁用（`enabled = 0`）并物理撤销 `user_tokens` 中该用户的全部会话 token。在整个删除执行与可能的故障恢复期间，被删除用户的 token 访问必须保证立即 401（Unauthorized）。
+3. **资源所有权与清理边界**：
+   - 保留现行产品行为：被删除用户的 Subscribe 所有权转移至系统管理员（`admin`），私有 Collection 亦转移至管理员，不静默删除用户创建的长期订阅与合集。
+   - 原始播放记录（`playback_units`、`playback_sessions`、`playback_session_ids`、`playback_logs`、`playback_metrics`）及稀疏用户摘要（`user_library_items`）被一并清理，不产生孤儿稀疏摘要。
+   - 跨库清理完成后，删除 `users` 记录并清除 `settings` 中的 `user_removal.<id>` 操作项。
+4. **故障恢复**：开机启动时扫描 `user_removal.` 前缀的在途操作，沿用 lease 模式继续完成未决阶段。
+
+
 ## sites
 
 Site 实例配置、认证资料、Indexer profile 与网络/Downloader 选择。本文只列字段，不读取或展示真实凭证。

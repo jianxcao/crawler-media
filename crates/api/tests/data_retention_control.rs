@@ -69,14 +69,18 @@ fn insert_old_metrics(state: &ApiState, count: usize, recorded_at: i64) {
 fn metric_count(state: &ApiState) -> i64 {
     rusqlite::Connection::open(data_dir(state).join("library.db"))
         .unwrap()
-        .query_row("SELECT COUNT(*) FROM playback_metrics", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM playback_metrics", [], |row| {
+            row.get(0)
+        })
         .unwrap()
 }
 
 fn table_count(state: &ApiState, db: &str, table: &str) -> i64 {
     rusqlite::Connection::open(data_dir(state).join(db))
         .unwrap()
-        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
         .unwrap()
 }
 
@@ -124,7 +128,10 @@ fn new_data_retention_is_disabled_and_dry_run() {
     assert!(!def.enabled, "新类别默认关闭，生产启用需用户显式确认");
     assert_eq!(def.kind.as_str(), "data_retention");
     assert!(def.kind.is_maintenance());
-    assert_eq!(def.schedule, Some(jobs::Schedule::Interval { secs: 86_400 }));
+    assert_eq!(
+        def.schedule,
+        Some(jobs::Schedule::Interval { secs: 86_400 })
+    );
 
     match MaintenancePolicy::parse(def.kind, &def.payload).unwrap() {
         MaintenancePolicy::DataRetention(policy) => {
@@ -187,7 +194,29 @@ fn restart_does_not_overwrite_user_config() {
         custom,
         "重启不得覆盖用户策略"
     );
-    assert_eq!(after.schedule, Some(jobs::Schedule::Interval { secs: 86_400 }));
+    assert_eq!(
+        after.schedule,
+        Some(jobs::Schedule::Interval { secs: 86_400 })
+    );
+}
+
+#[test]
+fn transient_report_examined_bounded_by_500() {
+    let (_tmp, state) = temp_state(Arc::new(api::maintenance::SqliteExecutor));
+    let now = unix_now();
+    let def = retention_def(&state);
+    enable_with_payload(&state, &def, &real_payload());
+
+    let job = claim_for(&state, def.id, now);
+    run(&state, &job).unwrap();
+    let report = support::progress_of(&state, &job);
+
+    for class_report in report["classes"].as_array().unwrap() {
+        if class_report["class"] == "transient_catalog" {
+            let examined = class_report["examined"].as_u64().unwrap();
+            assert!(examined <= 500, "examined must be <= 500 per batch");
+        }
+    }
 }
 
 #[test]
@@ -201,8 +230,7 @@ fn disable_after_first_batch_stops_second() {
     let job = claim_for(&state, def.id, now);
     let state_clone = state.clone();
     let monitor = thread::spawn(move || {
-        let conn =
-            rusqlite::Connection::open(data_dir(&state_clone).join("library.db")).unwrap();
+        let conn = rusqlite::Connection::open(data_dir(&state_clone).join("library.db")).unwrap();
         for _ in 0..5_000 {
             let count: i64 = conn
                 .query_row(
@@ -258,8 +286,14 @@ fn two_hundred_thousand_qoe_history_reports_bounded_batches_and_resumes() {
     assert_eq!(report["batches"], 20, "单轮批数上限 20: {report}");
     assert_eq!(report["examined"], 10_000, "20 × 500 窗口: {report}");
     assert_eq!(report["deleted"], 10_000, "20 × 500 删除: {report}");
-    assert_eq!(report["incomplete"], true, "200k 历史不可能一轮完成: {report}");
-    assert_eq!(report["remaining"], true, "预算不足必须显式 remaining: {report}");
+    assert_eq!(
+        report["incomplete"], true,
+        "200k 历史不可能一轮完成: {report}"
+    );
+    assert_eq!(
+        report["remaining"], true,
+        "预算不足必须显式 remaining: {report}"
+    );
     assert_eq!(report["budget_exhausted"], true);
     let qoe = &report["classes"][0];
     assert_eq!(qoe["class"], "qoe");
@@ -271,7 +305,10 @@ fn two_hundred_thousand_qoe_history_reports_bounded_batches_and_resumes() {
     let second = claim_for(&state, def.id, now);
     run(&state, &second).unwrap();
     let report = support::progress_of(&state, &second);
-    assert_eq!(report["deleted"], 10_000, "持久游标必须继续下一窗口: {report}");
+    assert_eq!(
+        report["deleted"], 10_000,
+        "持久游标必须继续下一窗口: {report}"
+    );
     assert_eq!(metric_count(&state), 180_000);
 }
 
@@ -284,7 +321,13 @@ async fn preview_is_read_only_and_reports_classes() {
         let store = state.store();
         let store = store.lock();
         store
-            .put_catalog_cache("tmdb", "/search/movie?query=avatar", "{}", now - 100 * DAY, None)
+            .put_catalog_cache(
+                "tmdb",
+                "/search/movie?query=avatar",
+                "{}",
+                now - 100 * DAY,
+                None,
+            )
             .unwrap();
     }
     {

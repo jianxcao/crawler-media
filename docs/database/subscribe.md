@@ -51,6 +51,14 @@ CREATE INDEX subscribes_user_idx ON subscribes(user_id);
 CREATE INDEX subscribes_media_idx ON subscribes(media_id);
 ```
 
+### 用户删除时的所有权转交合同
+当一个用户被删除时（见 [app.db 用户生命周期](../database/app.md)）：
+- 该用户创建的所有 `subscribes` 记录不会被物理级联删除（避免静默丢失已建立的长期下载策略）；
+- 其所有权字段 `user_id` 在独立事务中安全转交给系统默认管理员（`00000000-0000-0000-0000-000000000001`）；
+- 相关的定时任务定义（`jobs.db`）按 typed 引用与参数更新，不对 payload 进行全字符串替换；
+- 当 Subscribe 移除了显式 `library_id` 绑定时，策略评估读取新 coverage/units，但已保存的非目标库事实不会跳到默认库。
+
+
 ## subscribe_facts
 
 每个覆盖槽位已拥有文件的评分和路径事实，用于填空与 Wash-cut。它不是 Library 文件台账的替代物。

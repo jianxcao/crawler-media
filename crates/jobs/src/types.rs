@@ -73,6 +73,8 @@ pub enum JobError {
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
     #[error("unknown Job {0}")]
     UnknownJob(JobId),
     #[error("invalid job kind: {0}")]

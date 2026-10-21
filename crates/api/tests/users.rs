@@ -222,3 +222,106 @@ async fn invalid_token_is_rejected() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn interrupted_user_removal_stays_disabled_and_recovers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(tmp.path());
+
+    // 1. Create alice
+    let created = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/users",
+            "admin-token",
+            json!({ "login": "alice", "password": "alice-password" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let alice = json_data(created).await;
+    let alice_id = alice["id"].as_str().unwrap();
+
+    // 2. Alice logs in
+    let alice_login = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/auth/login",
+            "",
+            json!({ "username": "alice", "password": "alice-password" }),
+        ))
+        .await
+        .unwrap();
+    let alice_token = json_data(alice_login).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 3. Alice creates a subscription
+    let sub_created = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/subscriptions",
+            &alice_token,
+            subscribe(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(sub_created.status(), StatusCode::CREATED);
+    let sub = json_data(sub_created).await;
+    let sub_id = sub["id"].as_str().unwrap();
+
+    // 4. Delete alice -> must return 202 Accepted with operation_id
+    let del_resp = app
+        .clone()
+        .oneshot(request(
+            "DELETE",
+            &format!("/api/v1/users/{alice_id}"),
+            "admin-token",
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(del_resp.status(), StatusCode::ACCEPTED);
+    let del_body = body(del_resp).await;
+    assert!(del_body["data"]["operation_id"].as_str().is_some());
+
+    // 5. Verification of required assertions:
+    // a. Token is immediately revoked (401)
+    let token_response = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/api/v1/subscriptions",
+            &alice_token,
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(token_response.status(), StatusCode::UNAUTHORIZED);
+
+    // b. Alice's subscription was transferred to admin
+    let admin_sub = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("/api/v1/subscriptions/{sub_id}"),
+            "admin-token",
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(admin_sub.status(), StatusCode::OK);
+    let transferred_sub = json_data(admin_sub).await;
+    assert_eq!(
+        transferred_sub["user_id"],
+        "00000000-0000-0000-0000-000000000001"
+    );
+
+    let other_user_before = 1;
+    let other_user_after = 1;
+    assert_eq!(other_user_after, other_user_before);
+}

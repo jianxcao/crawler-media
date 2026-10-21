@@ -19,24 +19,26 @@ fn open_db(dir: &Path, name: &str) -> Connection {
 
 fn metric_count(dir: &Path) -> i64 {
     open_db(dir, "library.db")
-        .query_row("SELECT COUNT(*) FROM playback_metrics", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM playback_metrics", [], |row| {
+            row.get(0)
+        })
         .unwrap()
 }
 
-fn insert_probe_job(
-    dir: &Path,
-    id: &str,
-    scope: &str,
-    status: &str,
-    finished_at_ms: Option<i64>,
-) {
+fn insert_probe_job(dir: &Path, id: &str, scope: &str, status: &str, finished_at_ms: Option<i64>) {
     let conn = open_db(dir, "library.db");
     conn.execute(
         "INSERT INTO probe_jobs
             (id, kind, media_id, season, scope_key, status, total, completed,
              succeeded, failed, partial, error, created_at_ms, started_at_ms, finished_at_ms)
          VALUES (?1, 'metadata', 'media-1', NULL, ?2, ?3, 1, 1, 1, 0, 0, NULL, ?4, ?4, ?5)",
-        params![id, scope, status, finished_at_ms.unwrap_or(1), finished_at_ms],
+        params![
+            id,
+            scope,
+            status,
+            finished_at_ms.unwrap_or(1),
+            finished_at_ms
+        ],
     )
     .unwrap();
 }
@@ -80,15 +82,19 @@ fn insert_sample(dir: &Path, sample_id: &str, job_id: &str) {
 
 fn probe_job_exists(dir: &Path, id: &str) -> bool {
     open_db(dir, "library.db")
-        .query_row("SELECT EXISTS(SELECT 1 FROM probe_jobs WHERE id = ?1)", [id], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM probe_jobs WHERE id = ?1)",
+            [id],
+            |row| row.get(0),
+        )
         .unwrap()
 }
 
 fn attempt_count(dir: &Path) -> i64 {
     open_db(dir, "library.db")
-        .query_row("SELECT COUNT(*) FROM fingerprint_attempts", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM fingerprint_attempts", [], |row| {
+            row.get(0)
+        })
         .unwrap()
 }
 
@@ -106,7 +112,20 @@ fn qoe_only_deletes_rows_strictly_older_than_cutoff() {
     let media = MediaId::new();
     for recorded_at in [CUTOFF_SECS - 1, CUTOFF_SECS, CUTOFF_SECS + 1] {
         store
-            .insert_metric(user, media, 0, None, None, 0, 0, 0, None, None, 10, recorded_at)
+            .insert_metric(
+                user,
+                media,
+                0,
+                None,
+                None,
+                0,
+                0,
+                0,
+                None,
+                None,
+                10,
+                recorded_at,
+            )
             .unwrap();
     }
 
@@ -143,7 +162,10 @@ fn probe_keeps_three_newest_per_scope_and_all_time_ties() {
         .unwrap();
 
     assert_eq!(batch.examined, 6);
-    assert_eq!(batch.protected, 3, "40a/40b/50 必须保留（时间 tie 全部保护）");
+    assert_eq!(
+        batch.protected, 3,
+        "40a/40b/50 必须保留（时间 tie 全部保护）"
+    );
     assert_eq!(batch.deleted, 3);
     assert!(!batch.incomplete);
     for kept in ["a-40a", "a-40b", "a-50"] {
@@ -214,7 +236,14 @@ fn captured_sample_and_active_unit_protect_probe_jobs() {
 fn attempts_are_deleted_in_the_same_transaction_as_the_job() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
-    for (id, ts) in [("tx-target", 10), ("tx-20", 20), ("tx-30", 30), ("tx-40", 40), ("tx-50", 50), ("tx-60", 60)] {
+    for (id, ts) in [
+        ("tx-target", 10),
+        ("tx-20", 20),
+        ("tx-30", 30),
+        ("tx-40", 40),
+        ("tx-50", 50),
+        ("tx-60", 60),
+    ] {
         insert_probe_job(tmp.path(), id, "scope-tx", "succeeded", Some(ts));
     }
     insert_attempt(tmp.path(), "attempt-1", "tx-target");
@@ -225,10 +254,21 @@ fn attempts_are_deleted_in_the_same_transaction_as_the_job() {
         .unwrap();
     assert_eq!(batch.deleted, 3, "tx-target/tx-20/tx-30 可删");
     assert!(!probe_job_exists(tmp.path(), "tx-target"));
-    assert_eq!(attempt_count(tmp.path()), 0, "job 删除必须级联它的 attempts");
+    assert_eq!(
+        attempt_count(tmp.path()),
+        0,
+        "job 删除必须级联它的 attempts"
+    );
 
     // 用触发器证明 attempts 删除失败时 job 也不会被删（同一事务回滚）。
-    for (id, ts) in [("rb-target", 10), ("rb-20", 20), ("rb-30", 30), ("rb-40", 40), ("rb-50", 50), ("rb-60", 60)] {
+    for (id, ts) in [
+        ("rb-target", 10),
+        ("rb-20", 20),
+        ("rb-30", 30),
+        ("rb-40", 40),
+        ("rb-50", 50),
+        ("rb-60", 60),
+    ] {
         insert_probe_job(tmp.path(), id, "scope-rb", "succeeded", Some(ts));
     }
     insert_attempt(tmp.path(), "attempt-rb", "rb-target");
@@ -245,11 +285,15 @@ fn attempts_are_deleted_in_the_same_transaction_as_the_job() {
         .prune_data_history(RetentionClass::ProbeHistory, 1000, None, 500, false)
         .unwrap_err();
     assert!(error.to_string().contains("blocked"), "{error}");
-    assert!(probe_job_exists(tmp.path(), "rb-target"), "attempts 删除失败必须回滚 job 删除");
+    assert!(
+        probe_job_exists(tmp.path(), "rb-target"),
+        "attempts 删除失败必须回滚 job 删除"
+    );
     assert_eq!(attempt_count(tmp.path()), 1);
     {
         let conn = open_db(tmp.path(), "library.db");
-        conn.execute_batch("DROP TRIGGER block_attempt_delete;").unwrap();
+        conn.execute_batch("DROP TRIGGER block_attempt_delete;")
+            .unwrap();
     }
     let retried = store
         .prune_data_history(RetentionClass::ProbeHistory, 1000, None, 500, false)
@@ -305,14 +349,16 @@ fn transient_catalog_deletes_only_allowlisted_paths_and_protects_details_and_unk
         "/search/tv?query=fresh",
     ] {
         assert!(
-            store
-                .get_catalog_cache("tmdb", kept)
-                .unwrap()
-                .is_some(),
+            store.get_catalog_cache("tmdb", kept).unwrap().is_some(),
             "{kept} 必须保留"
         );
     }
-    assert!(store.get_catalog_cache("tmdb", "/search/movie?query=avatar").unwrap().is_none());
+    assert!(
+        store
+            .get_catalog_cache("tmdb", "/search/movie?query=avatar")
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -323,7 +369,20 @@ fn dry_run_reports_the_same_window_without_writing() {
     let media = MediaId::new();
     for _ in 0..3 {
         store
-            .insert_metric(user, media, 0, None, None, 0, 0, 0, None, None, 10, CUTOFF_SECS - 10)
+            .insert_metric(
+                user,
+                media,
+                0,
+                None,
+                None,
+                0,
+                0,
+                0,
+                None,
+                None,
+                10,
+                CUTOFF_SECS - 10,
+            )
             .unwrap();
     }
 
@@ -364,19 +423,28 @@ fn keyset_cursor_pages_without_duplicates_and_stops_at_the_end() {
     let first = store
         .prune_data_history(RetentionClass::Qoe, CUTOFF_MS, None, 500, false)
         .unwrap();
-    assert_eq!((first.examined, first.deleted, first.incomplete), (500, 500, true));
+    assert_eq!(
+        (first.examined, first.deleted, first.incomplete),
+        (500, 500, true)
+    );
     let cursor = first.resume_after.expect("窗口未完成必须返回游标");
 
     let second = store
         .prune_data_history(RetentionClass::Qoe, CUTOFF_MS, Some(&cursor), 500, false)
         .unwrap();
-    assert_eq!((second.examined, second.deleted, second.incomplete), (500, 500, true));
+    assert_eq!(
+        (second.examined, second.deleted, second.incomplete),
+        (500, 500, true)
+    );
     let cursor = second.resume_after.unwrap();
 
     let third = store
         .prune_data_history(RetentionClass::Qoe, CUTOFF_MS, Some(&cursor), 500, false)
         .unwrap();
-    assert_eq!((third.examined, third.deleted, third.incomplete), (200, 200, false));
+    assert_eq!(
+        (third.examined, third.deleted, third.incomplete),
+        (200, 200, false)
+    );
     assert!(third.resume_after.is_none());
     assert_eq!(metric_count(tmp.path()), 0);
 }
@@ -389,7 +457,20 @@ fn cursor_carries_examined_position_when_the_window_is_full_of_protected_rows() 
     let media = MediaId::new();
     for index in 0..3 {
         store
-            .insert_metric(user, media, 0, None, None, 0, 0, 0, None, None, 10, CUTOFF_SECS - 10 + index)
+            .insert_metric(
+                user,
+                media,
+                0,
+                None,
+                None,
+                0,
+                0,
+                0,
+                None,
+                None,
+                10,
+                CUTOFF_SECS - 10 + index,
+            )
             .unwrap();
     }
     let batch = store
@@ -412,3 +493,19 @@ fn zero_limit_is_rejected() {
     assert!(matches!(error, store::StoreError::Invalid(_)), "{error}");
 }
 
+#[test]
+fn transient_report_examined_limit_is_capped_at_500() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    // Verify that requesting limit > 500 does not exceed 500 examined rows
+    let batch = store
+        .prune_data_history(
+            RetentionClass::TransientCatalog,
+            CUTOFF_MS,
+            None,
+            1000,
+            true,
+        )
+        .unwrap();
+    assert!(batch.examined <= 500);
+}

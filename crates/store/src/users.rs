@@ -106,7 +106,8 @@ impl Store {
 
     /// "admin" | "member" — defaults to member for rows without a role.
     pub fn user_role(&self, id: UserId) -> Result<String, StoreError> {
-        self.role_lookups.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.role_lookups
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(self
             .app
             .query_row(
@@ -447,6 +448,74 @@ impl Store {
         UserId::from_str(&raw).map_err(Into::into)
     }
 
+    pub fn revoke_user_tokens(&self, user_id: UserId) -> Result<(), StoreError> {
+        self.app.execute(
+            "DELETE FROM user_tokens WHERE user_id = ?1",
+            params![user_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    pub fn transfer_user_subscribes(&self, from: UserId, to: UserId) -> Result<(), StoreError> {
+        let tx = self.subscribe.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE subscribes SET user_id = ?1 WHERE user_id = ?2",
+            params![to.to_string(), from.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn clean_user_library_data(
+        &self,
+        user_id: UserId,
+        admin_id: UserId,
+    ) -> Result<(), StoreError> {
+        let tx = self.library.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE collections SET user_id = ?1 WHERE user_id = ?2",
+            params![admin_id.to_string(), user_id.to_string()],
+        )?;
+        for table in [
+            "playback_units",
+            "playback_sessions",
+            "playback_session_ids",
+            "playback_logs",
+            "playback_metrics",
+            "user_library_items",
+        ] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE user_id = ?1"),
+                params![user_id.to_string()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn finish_user_removal(&self, user_id: UserId) -> Result<bool, StoreError> {
+        let tx = self.app.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM user_tokens WHERE user_id = ?1",
+            params![user_id.to_string()],
+        )?;
+        let n = tx.execute(
+            "DELETE FROM users WHERE id = ?1",
+            params![user_id.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(n > 0)
+    }
+
+    pub fn list_setting_keys_with_prefix(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self
+            .app
+            .prepare("SELECT key FROM settings WHERE key LIKE ?1")?;
+        let pattern = format!("{prefix}%");
+        let rows = stmt.query_map(params![pattern], |r| r.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn delete_user(&self, id: UserId) -> Result<bool, StoreError> {
         let admin_id = self.admin_user_id()?;
         if id == admin_id {
@@ -458,40 +527,9 @@ impl Store {
 
         // SQLite 文件之间无法组成一个原子事务。先做可恢复的所有权转移：任一步失败时
         // 用户仍存在，重试即可；最后才删除不可恢复的成员私有状态和用户行。
-        let subscribe_tx = self.subscribe.unchecked_transaction()?;
-        subscribe_tx.execute(
-            "UPDATE subscribes SET user_id = ?1 WHERE user_id = ?2",
-            params![admin_id.to_string(), id.to_string()],
-        )?;
-        subscribe_tx.commit()?;
-
-        let library_tx = self.library.unchecked_transaction()?;
-        library_tx.execute(
-            "UPDATE collections SET user_id = ?1 WHERE user_id = ?2",
-            params![admin_id.to_string(), id.to_string()],
-        )?;
-        for table in [
-            "playback_units",
-            "playback_sessions",
-            "playback_session_ids",
-            "playback_logs",
-            "playback_metrics",
-        ] {
-            library_tx.execute(
-                &format!("DELETE FROM {table} WHERE user_id = ?1"),
-                params![id.to_string()],
-            )?;
-        }
-        library_tx.commit()?;
-
-        let user_tx = self.app.unchecked_transaction()?;
-        user_tx.execute(
-            "DELETE FROM user_tokens WHERE user_id = ?1",
-            params![id.to_string()],
-        )?;
-        let n = user_tx.execute("DELETE FROM users WHERE id = ?1", params![id.to_string()])?;
-        user_tx.commit()?;
-        Ok(n > 0)
+        self.transfer_user_subscribes(id, admin_id)?;
+        self.clean_user_library_data(id, admin_id)?;
+        self.finish_user_removal(id)
     }
 
     /// 只解析未过期的会话 token（签发后 Session TTL 秒内有效；管理员配置的系统 CLI token 持续有效）。

@@ -89,6 +89,10 @@ impl Queue {
         Ok(jobs)
     }
 
+    pub fn rewrite_media_refs(&self, from: &str, to: &str) -> Result<usize, JobError> {
+        crate::media_refs::rewrite_media_refs(&self.conn, from, to)
+    }
+
     pub fn succeed(&self, id: JobId, now: i64) -> Result<Job, JobError> {
         let job = store::finish(&self.conn, id, now, JobStatus::Succeeded, None)?;
         tracing::info!(job_id = %job.id, kind = job.kind.as_str(), "任务执行成功");
@@ -224,7 +228,9 @@ impl Queue {
         limit: usize,
         dry_run: bool,
     ) -> Result<crate::retention_cursor::RetentionWindow, JobError> {
-        crate::retention_cursor::prune_terminal_window(&self.conn, cursor_key, cutoff, limit, dry_run)
+        crate::retention_cursor::prune_terminal_window(
+            &self.conn, cursor_key, cutoff, limit, dry_run,
+        )
     }
 
     pub fn change_state(&self) -> Result<crate::change_state::JobChangeState, JobError> {

@@ -440,12 +440,19 @@ fn subscribe_quality_evaluation_overlays_probe_fields_for_published_file() {
         },
     );
 
-    f.store.save_subscribe_facts(f.subscribe.id, &facts).unwrap();
+    f.store
+        .save_subscribe_facts(f.subscribe.id, &facts)
+        .unwrap();
 
     // Load the library subscribe facts back
     let loaded = f.load();
-    assert_eq!(loaded.movie().unwrap().path.as_deref(), Some(path_str.as_str()));
-    let quality = loaded.quality(&path_str).expect("quality must be read back");
+    assert_eq!(
+        loaded.movie().unwrap().path.as_deref(),
+        Some(path_str.as_str())
+    );
+    let quality = loaded
+        .quality(&path_str)
+        .expect("quality must be read back");
 
     // Probe fields on the file row (2160p, hevc, HDR10, High) must overlay release dimensions
     assert_eq!(quality.resolution.as_deref(), Some("2160p"));
@@ -454,4 +461,37 @@ fn subscribe_quality_evaluation_overlays_probe_fields_for_published_file() {
     assert_eq!(quality.confidence, Confidence::High);
     // Stored release source dimension must be preserved
     assert_eq!(quality.source.as_deref(), Some("WEB-DL"));
+}
+
+#[test]
+fn removing_explicit_library_binding_does_not_jump_to_default_library_facts() {
+    let mut f = Fixture::new();
+    let def_root = f.root("default_lib");
+    let def_lib = f.library("Default", &def_root);
+    f.store.set_default_library(&def_lib.id).unwrap();
+
+    let other_root = f.root("other_lib");
+    let other_lib = f.library("Other", &other_root);
+
+    // Bind to other_lib first
+    f.select(&other_lib);
+    let other_file = other_root.join("Movie.mkv");
+    f.ledger(&other_file, 100);
+    f.save(&other_file, 100);
+
+    // Facts are visible under other_lib
+    let facts = f.load();
+    assert!(facts.movie().is_some());
+
+    // Now remove explicit binding: subscribe.library_id = None
+    f.subscribe.library_id = None;
+    f.store.update_subscribe(&f.subscribe).unwrap();
+
+    // With explicit binding removed, the facts saved under other_lib should NOT
+    // be claimed as belonging to default_lib
+    let facts_after = f.load();
+    assert!(
+        facts_after.movie().is_none(),
+        "Saved facts of another library must not jump to default library"
+    );
 }

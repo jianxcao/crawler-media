@@ -166,16 +166,16 @@ pub(crate) async fn delete_user(
             );
         }
     }
-    match store.delete_user(id) {
-        Ok(true) => ok(json!({ "deleted": true })).into_response(),
-        Ok(false) => err(StatusCode::NOT_FOUND, "user.missing", "用户不存在"),
-        Err(StoreError::Protected(_)) => {
-            err(StatusCode::BAD_REQUEST, "user.protected", "不能删除管理员")
-        }
-        Err(error) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        ),
+    let removal_service =
+        crate::user_removal::UserRemovalService::new(std::sync::Arc::new(state.clone()));
+    drop(store);
+
+    match removal_service.start_removal(id) {
+        Ok(operation_id) => (
+            StatusCode::ACCEPTED,
+            ok(json!({ "operation_id": operation_id, "status": "accepted" })),
+        )
+            .into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, "user.removal_failed", &e),
     }
 }
