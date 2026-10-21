@@ -253,6 +253,15 @@ pub fn resume_library_reconfigurations(state: &ApiState) -> Result<(), String> {
             state = %view.state,
             "恢复未完成的 Library 重配置操作"
         );
+        if view.kind == store::metadata::NFO_EXPORT_KIND {
+            // 单文件导出自带摘要断点，既不需要冻结整个 Library，也不需要等它闲下来：
+            // 恢复直接在调用线程上把每个未完成的导出推到终态（重入安全）。
+            crate::scrape_metadata::export::resume_sidecar_exports(
+                state,
+                crate::job_loop::unix_now(),
+            );
+            continue;
+        }
         state.library_work.block(&view.library_id, &operation_id);
         spawn_driver(state, &operation_id, &view.library_id);
     }

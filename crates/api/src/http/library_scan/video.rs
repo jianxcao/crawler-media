@@ -47,7 +47,8 @@ pub(crate) fn attach_video_artwork(
         // 首个候选失败且目标仍缺失时，允许同目录后续视频重试。
         if let Some(dir) = path.parent() {
             if !poster_completed_dirs.contains(dir) {
-                let outcome = crate::poster_fetch::attach_poster_outcome_if_missing(state, &media, path);
+                let outcome =
+                    crate::poster_fetch::attach_poster_outcome_if_missing(state, &media, path);
                 match outcome {
                     crate::poster_fetch::ArtworkOutcome::Written
                     | crate::poster_fetch::ArtworkOutcome::AlreadyPresent => {

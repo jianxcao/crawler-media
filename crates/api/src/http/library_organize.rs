@@ -374,10 +374,21 @@ fn refresh_item_metadata_inner(state: &ApiState, id: &str, item_id: &str) -> Res
                     );
                 } else if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
                     let target = path.with_file_name(format!("{stem}.nfo"));
+                    // 同 library_scan：先捕获用户在 NFO 里的改动，write_nfo 之后再把生效
+                    // 元数据整体导回，用户改的那一项才不会在刷新时被 provider 覆盖掉。
+                    let export = crate::scrape_metadata::export::begin_sidecar_export(
+                        &state,
+                        &media,
+                        &path,
+                        domain::EntityScope::Work,
+                    );
                     let _ = lease.control().signal().publish(|| {
                         crate::scrape_metadata::write_nfo(&target, &media, &nfo);
                         Ok(())
                     });
+                    if let Some(request) = export {
+                        crate::scrape_metadata::export::finish_sidecar_export(&state, request);
+                    }
                     let movie_root = path.parent().unwrap_or(&path);
                     crate::scrape_metadata::scrape_movie_fanart(&state, &media, movie_root);
                 }

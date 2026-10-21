@@ -8,9 +8,13 @@ mod candidates;
 mod parse;
 mod write;
 
+pub mod export;
 pub mod fields;
 
 pub use candidates::{NfoLayer, NfoSidecar, nfo_sidecars, resolve_nfo_scope};
+pub use export::{
+    NFO_DIGEST_PREFIX, nfo_body_digest, nfo_digest, render_nfo, replace_nfo_atomically,
+};
 pub use fields::{NfoInput, NfoReadOutcome, parse_nfo_fields};
 pub use parse::{CastMember, NfoHeader, NfoMeta, parse_nfo, parse_nfo_header, read_nfo};
 pub use write::{write_nfo, write_streamdetails_into_nfo};

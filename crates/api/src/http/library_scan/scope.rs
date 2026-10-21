@@ -47,9 +47,7 @@ impl ScanScope {
             let store_arc = state.store();
             let guard = store_arc.lock();
             let snapshot = guard.library_ownership()?;
-            let library = snapshot
-                .library(library_id)
-                .ok_or(PresenceError::Missing)?;
+            let library = snapshot.library(library_id).ok_or(PresenceError::Missing)?;
             let kind = library.kind;
             let signature = crate::scan_operations::scan_scope_signature(library);
             if !snapshot.accepts_work(library_id) {

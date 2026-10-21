@@ -377,6 +377,14 @@ fn scrape_library_metadata(
             crate::scrape_metadata::record_scraped_display_meta(state, media.id, &metadata, &nfo);
             if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
                 let target = path.with_file_name(format!("{stem}.nfo"));
+                // 先捕获用户对上一份 NFO 的改动，再整体重写并导出：write_nfo 会原地
+                // 覆盖标量，捕获必须发生在它之前，否则改动无法进入 overrides。
+                let export = crate::scrape_metadata::export::begin_sidecar_export(
+                    state,
+                    media,
+                    path,
+                    domain::EntityScope::Work,
+                );
                 let write = || {
                     crate::scrape_metadata::write_nfo(&target, media, &nfo);
                     Ok(())
@@ -385,6 +393,9 @@ fn scrape_library_metadata(
                     Some(lease) => lease.publish(write),
                     None => write(),
                 };
+                if let Some(request) = export {
+                    crate::scrape_metadata::export::finish_sidecar_export(state, request);
+                }
                 let movie_root = path.parent().unwrap_or(path);
                 crate::scrape_metadata::scrape_movie_fanart(state, media, movie_root);
             }

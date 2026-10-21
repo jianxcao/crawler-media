@@ -63,7 +63,11 @@ pub fn format_scan_report(report: &ScanReport) -> ScanReportResponseData {
         }
     }
 
-    let overall_status = if root_responses.iter().any(|r| r.status == "unreachable" || r.status == "partial") || total_errors > 0 {
+    let overall_status = if root_responses
+        .iter()
+        .any(|r| r.status == "unreachable" || r.status == "partial")
+        || total_errors > 0
+    {
         "partial"
     } else {
         "completed"

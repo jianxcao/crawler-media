@@ -206,20 +206,25 @@ impl ScanContext<'_> {
             })
             .cloned()
             .collect();
-        let (affected, failed_invalidations) = match invalidate_changed_facts(self.state, &changed_in_scope) {
-            Ok(res) => res,
-            Err(e) => {
-                let committed = ChunkTotals {
-                    scanned,
-                    inserted: inserted.len(),
-                };
-                return Err(ChunkError {
-                    response: err(StatusCode::INTERNAL_SERVER_ERROR, "library.scan_invalidation", &e),
-                    error: format!("library.scan_invalidation: {e}"),
-                    totals: committed,
-                });
-            }
-        };
+        let (affected, failed_invalidations) =
+            match invalidate_changed_facts(self.state, &changed_in_scope) {
+                Ok(res) => res,
+                Err(e) => {
+                    let committed = ChunkTotals {
+                        scanned,
+                        inserted: inserted.len(),
+                    };
+                    return Err(ChunkError {
+                        response: err(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "library.scan_invalidation",
+                            &e,
+                        ),
+                        error: format!("library.scan_invalidation: {e}"),
+                        totals: committed,
+                    });
+                }
+            };
         // 到这里 ledger 已提交：任何后续失败都必须把这段前缀带回调用方（P3-3）。
         let committed = ChunkTotals {
             scanned,
@@ -243,19 +248,24 @@ impl ScanContext<'_> {
             // operation 断点标记为变化的路径；若沿用探测候选，普通重扫就再也不会
             // 尝试封面——镜像图片后开启无法回填、上次截帧失败无法重试、用户删掉的
             // 自动海报无法重生。断点跳过的文件不在 `filtered` 里，不会被重复处理。
-            let artwork_paths: Vec<PathBuf> = filtered
-                .iter()
-                .map(|file| file.path.clone())
-                .collect();
+            let artwork_paths: Vec<PathBuf> =
+                filtered.iter().map(|file| file.path.clone()).collect();
             attach_video_artwork(self.state, &artwork_paths, self.lease.control());
         } else {
             let scan_media = scan_media_for(self.state, &filtered);
-            resolve_scan_metadata(self.state, self.id, self.lease, scan_media, &inserted, self.scrape)
-                .map_err(|response| ChunkError {
-                    response,
-                    error: "library.scan_metadata".to_string(),
-                    totals: committed,
-                })?;
+            resolve_scan_metadata(
+                self.state,
+                self.id,
+                self.lease,
+                scan_media,
+                &inserted,
+                self.scrape,
+            )
+            .map_err(|response| ChunkError {
+                response,
+                error: "library.scan_metadata".to_string(),
+                totals: committed,
+            })?;
         }
         self.finish_chunk(filtered, stamps, &inserted, affected, failed_invalidations);
         Ok(committed)
@@ -293,7 +303,8 @@ impl ScanContext<'_> {
                         %error,
                         "窗口内变化路径的处理义务重挂失败，fail-closed: 这些路径不得推进断点与源版本"
                     );
-                    uncheckpointed.extend(changed_late.iter().map(|path| path.display().to_string()));
+                    uncheckpointed
+                        .extend(changed_late.iter().map(|path| path.display().to_string()));
                 }
             }
         }
@@ -334,11 +345,9 @@ impl ScanContext<'_> {
             .iter()
             .filter_map(|file| {
                 let key = file.path.display().to_string();
-                stamps
-                    .get(&key)
-                    .map(|(mtime_ms, file_size, digest)| {
-                        (key, *mtime_ms, *file_size, digest.clone())
-                    })
+                stamps.get(&key).map(|(mtime_ms, file_size, digest)| {
+                    (key, *mtime_ms, *file_size, digest.clone())
+                })
             })
             .collect();
         if entries.is_empty() {
@@ -374,7 +383,11 @@ fn publish_error(error: String) -> Response {
         return err(StatusCode::CONFLICT, "library.deleting", "Library 正在删除");
     }
     if error.contains("ScopeChanged") {
-        return err(StatusCode::CONFLICT, "library.scope_changed", "Library 配置变化");
+        return err(
+            StatusCode::CONFLICT,
+            "library.scope_changed",
+            "Library 配置变化",
+        );
     }
     err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error)
 }
