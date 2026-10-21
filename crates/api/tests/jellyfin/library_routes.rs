@@ -132,8 +132,9 @@ async fn items_sort_by_date_created_descending_and_emit_date_created() {
     store.insert_media(&recent_media).unwrap();
     let recent_file = tmp.path().join("recent.mkv");
     std::fs::write(&recent_file, b"new movie").unwrap();
-    store
-        .insert_ledger(&LedgerRow {
+    publish_scanned(
+        &store,
+        LedgerRow {
             id: LedgerId::new(),
             media_id: recent_media.id,
             path: recent_file.display().to_string(),
@@ -145,8 +146,8 @@ async fn items_sort_by_date_created_descending_and_emit_date_created() {
             quality_source: QualitySource::Probe,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+        },
+    );
 
     let body = json(
         get(

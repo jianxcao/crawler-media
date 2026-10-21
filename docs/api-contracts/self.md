@@ -169,7 +169,9 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 
 ## 当前存储切换的未闭合边界（2026-10-20）
 
-四个 Store 文件为 `app.db`、`cache.db`、`library.db`、`subscribe.db`，队列另在 `jobs.db`。当前布局没有旧数据库迁移阶梯；DDL 不代表 API/消费者已全部切换。`protocol_item_page` 与 `commit_playback_event` 尚未形成所有生产调用方的统一路径；movie `(0,0)` 请求别名仍在前后端，目标存储整片坐标为 `(-1,-1)`。不得新增兼容建议来保留这些未切换路径。
+四个 Store 文件为 `app.db`、`cache.db`、`library.db`、`subscribe.db`，队列另在 `jobs.db`。当前布局没有旧数据库迁移阶梯；DDL 不代表 API/消费者已全部切换。`commit_playback_event` 尚未形成所有生产调用方的统一路径；movie `(0,0)` 请求别名仍在前后端，目标存储整片坐标为 `(-1,-1)`。不得新增兼容建议来保留这些未切换路径。
+
+Jellyfin `Items` 选择已统一到 `protocol_item_page`：授权与作用域收敛、谓词、同逻辑条目的物理版本折叠、排序、`total` 计数与 `LIMIT/OFFSET` 都在 store 的一次短读事务内完成，只有返回页的条目才回落成本地轻候选并渲染；页内 metadata 取已采纳的合成快照，不读现场 NFO/cache/network。查询成本因此不再随命中数增长：旧的全候选 Rust filter/sort 与本地 catalog enrichment 已删除，NFO/stat/重渲染只对返回页发生（作用域内的行重读仍按既有 `VmStep` 计量，不隐藏放大）。两个已知例外：`PersonIds` 过滤仍在候选级判定（catalog 参与成员身份，catalog 失败必须硬失败，不能缩成更小的一页）；`NextUp` 走独立选择路径。另外两条与旧实现不同的口径：`SortBy=DateCreated` 在 SQL 侧按 `library_items.added_at_sort`（已发布文件的 `created_ns`/`mtime_ns` 最小值）排序，文件时间未知的条目排最后，而不再逐项现场 `stat`；`Name` 的二/多级排序键用 SQLite `lower()`，只折叠 ASCII 大小写。
 
 上一轮隔离复核已观察到：合并集文件 heartbeat 错报 `ended_by_admin`、旧 issued session 写入新文件版本、增量公共集数与用户计数不一致、文件续页 `next_cursor` 对接/恰好 50 条边界失败、采用元数据 runtime/rating 缺失与详情遗漏 tagline/certification、换根外键错误、多别名更新丢失/卡片陈旧；integrity-checks 与 Media merge 管理端点仍 404。这些不是已完成合同；本次文档清理没有重跑或改写这些观察。当前源码入口为 `http/library.rs`、`http/playback/`、`store/src/media.rs`、`store/src/library_query/`、`store/src/playback/`，闭环验收见 [存储执行计划](<../superpowers/plans/2026-10-20-storage-clean-cutover.md>)。
 

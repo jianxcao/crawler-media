@@ -185,10 +185,10 @@ async fn latest_items_returns_date_order_and_honors_start_index_and_limit() {
             anilist_id: None,
         };
         store.insert_media(&copy).unwrap();
-        let id = LedgerId::new();
-        store
-            .insert_ledger(&LedgerRow {
-                id,
+        publish_scanned(
+            &store,
+            LedgerRow {
+                id: LedgerId::new(),
                 media_id: copy.id,
                 path: path.display().to_string(),
                 season: None,
@@ -199,8 +199,8 @@ async fn latest_items_returns_date_order_and_honors_start_index_and_limit() {
                 quality_source: QualitySource::Probe,
                 confidence: Confidence::High,
                 filter_score: None,
-            })
-            .unwrap();
+            },
+        );
         added_ids.push(work_id(copy.id));
     }
     let catalog = get_json(&app, "/Items").await;

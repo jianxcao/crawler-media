@@ -3,7 +3,6 @@ use super::*;
 #[tokio::test]
 async fn nfo_people_are_clickable_and_filter_related_items() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, media_id, item_id) = app(tmp.path());
     let remaining_cast = (1..33)
         .map(|number| {
             format!(
@@ -12,13 +11,15 @@ async fn nfo_people_are_clickable_and_filter_related_items() {
             )
         })
         .collect::<String>();
-    std::fs::write(
-        tmp.path().join("matrix.nfo"),
-        format!(
-            "<movie><title>The Matrix</title><year>1999</year><plot>Neo wakes up.</plot><actor><name>Keanu Reeves</name><role>Neo</role><tmdbid>6384</tmdbid><thumb>/profile.jpg</thumb></actor>{remaining_cast}</movie>"
-        ),
-    )
-    .unwrap();
+    let (app, media_id, item_id) = app_seeded(tmp.path(), |root| {
+        std::fs::write(
+            root.join("matrix.nfo"),
+            format!(
+                "<movie><title>The Matrix</title><year>1999</year><plot>Neo wakes up.</plot><actor><name>Keanu Reeves</name><role>Neo</role><tmdbid>6384</tmdbid><thumb>/profile.jpg</thumb></actor>{remaining_cast}</movie>"
+            ),
+        )
+        .unwrap();
+    });
 
     let store = Store::open(tmp.path().join("data")).unwrap();
     let ledger_key = store

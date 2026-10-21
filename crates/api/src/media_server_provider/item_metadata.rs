@@ -12,7 +12,7 @@ pub(super) use artwork::{backdrop_path, local_primary_image, primary_image_url};
 use artwork::{primary_image_metadata, series_primary_image_tag};
 use nfo::row_nfo_metadata;
 pub(super) use people::{catalog_person_image_url, person_image_url, person_tmdb_id};
-use people::{merge_people, people_from_nfo};
+use people::{merge_people, people_from_fields, people_from_nfo};
 
 /// Owned per-item playback and probe facts collected with the Jellyfin batch.
 pub(super) struct ItemDbFacts {
@@ -135,9 +135,13 @@ pub(super) fn filter_facts(
     }
 }
 
-/// 锁外渲染：NFO/stat/外部字幕 IO 都在这里，调用方必须先释放 Store 锁。
+/// 锁外渲染：stat/外部字幕 IO 都在这里，调用方必须先释放 Store 锁。
+///
+/// `fields` 是调用方在锁内取好的页内合成快照（Task 8 观测输入 + Task 7 采纳）：页内条目
+/// 只呈现已经落库的口径，不在这里读现场 NFO。
 pub(super) fn item_metadata(
     facts: ItemDbFacts,
+    fields: &domain::MetadataFields,
     browse: &dyn crate::browse_file_read::BrowseFileRead,
     row: &domain::LedgerRow,
     media: &Media,
@@ -149,16 +153,15 @@ pub(super) fn item_metadata(
         mut tracks,
         is_favorite,
     } = facts;
-    let nfo = row_nfo_metadata(row, media, is_series);
     let (has_primary_image, primary_image_url) = primary_image_metadata(row, media, is_series);
     let primary_image_tag = series_primary_image_tag(row, media, is_series);
     let (child_count, local_season_count) = child_counts
         .map(|(episodes, seasons)| (Some(episodes), Some(seasons)))
         .unwrap_or((None, None));
-    let season_count = nfo
-        .as_ref()
-        .and_then(|metadata| metadata.number_of_seasons)
-        .map(|count| count as usize)
+    let season_count = fields
+        .number_of_seasons
+        .value()
+        .map(|count| *count as usize)
         .or(local_season_count);
     match browse.external_subtitles(std::path::Path::new(&row.path)) {
         Ok(sidecars) => {
@@ -179,78 +182,71 @@ pub(super) fn item_metadata(
         ),
     }
 
+    let runtime_ticks = runtime_ticks(fields, &tracks, is_series);
+    let mut item = metadata_from_fields(fields, media, is_series);
+    item.runtime_ticks = runtime_ticks;
+    item.is_favorite = is_favorite;
+    item.resume_updated_at = resume_state
+        .map(|state| state.updated_at)
+        .unwrap_or_default();
+    item.child_count = child_count;
+    item.season_count = season_count;
+    item.has_primary_image = has_primary_image;
+    item.has_backdrop_image = backdrop_path(row, is_series).is_some();
+    item.primary_image_tag = primary_image_tag;
+    item.primary_image_url = primary_image_url;
+    item.tracks = tracks;
+    item
+}
+
+/// 合成字段 → Jellyfin 字段；缺失与空值一律留空，交给 `merge_catalog_metadata` 兜底。
+fn metadata_from_fields(
+    fields: &domain::MetadataFields,
+    media: &Media,
+    is_series: bool,
+) -> MediaItemMetadata {
     MediaItemMetadata {
-        overview: nfo.as_ref().and_then(|metadata| metadata.plot.clone()),
-        community_rating: nfo
-            .as_ref()
-            .and_then(|metadata| metadata.rating.as_deref())
-            .and_then(|rating| rating.parse().ok()),
-        vote_count: nfo.as_ref().and_then(|metadata| metadata.vote_count),
-        genres: nfo
-            .as_ref()
-            .map(|metadata| metadata.genres.clone())
+        overview: fields.overview.value().cloned(),
+        community_rating: fields.rating.value().copied(),
+        vote_count: fields.vote_count.value().copied(),
+        genres: fields
+            .genres
+            .value()
+            .map(|genres| genres.iter().map(|genre| genre.name.clone()).collect())
             .unwrap_or_default(),
-        premiere_date: nfo.as_ref().and_then(|metadata| {
-            if is_series {
-                metadata.premiered.clone()
-            } else {
-                metadata
-                    .aired
-                    .clone()
-                    .or_else(|| metadata.premiered.clone())
-            }
-        }),
-        date_created: None,
-        end_date: nfo.as_ref().and_then(|metadata| metadata.end_date.clone()),
-        official_rating: nfo
-            .as_ref()
-            .and_then(|metadata| metadata.content_rating.clone()),
-        status: nfo.as_ref().and_then(|metadata| metadata.status.clone()),
-        original_language: nfo
-            .as_ref()
-            .and_then(|metadata| metadata.original_language.clone()),
-        taglines: nfo
-            .as_ref()
-            .and_then(|metadata| metadata.tagline.clone())
-            .into_iter()
-            .collect(),
-        studios: nfo
-            .as_ref()
-            .map(|metadata| metadata.studios.clone())
-            .unwrap_or_default(),
-        production_locations: nfo
-            .as_ref()
-            .map(|metadata| metadata.countries.clone())
-            .unwrap_or_default(),
-        number_of_episodes: nfo
-            .as_ref()
-            .and_then(|metadata| metadata.number_of_episodes),
-        production_year: nfo
-            .as_ref()
-            .and_then(|metadata| metadata.year.as_deref())
-            .and_then(|year| year.parse().ok())
+        premiere_date: if is_series {
+            fields.release_date.value().cloned()
+        } else {
+            fields
+                .air_date
+                .value()
+                .cloned()
+                .or_else(|| fields.release_date.value().cloned())
+        },
+        end_date: fields.end_date.value().cloned(),
+        official_rating: fields.content_rating.value().cloned(),
+        status: fields.status.value().cloned(),
+        original_language: fields.language.value().cloned(),
+        taglines: fields.tagline.value().cloned().into_iter().collect(),
+        studios: fields.studios.value().cloned().unwrap_or_default(),
+        production_locations: fields.countries.value().cloned().unwrap_or_default(),
+        number_of_episodes: fields.number_of_episodes.value().copied(),
+        production_year: fields
+            .year
+            .value()
+            .map(|year| i32::from(*year))
             .or_else(|| media.year.map(i32::from)),
-        original_title: nfo
-            .as_ref()
-            .and_then(|metadata| metadata.original_title.clone())
+        original_title: fields
+            .original_title
+            .value()
+            .cloned()
             .or_else(|| media.original_title.clone()),
-        runtime_ticks: runtime_ticks(nfo.as_ref(), &tracks, is_series),
         provider_ids: provider_ids(media),
         episode_name: (!is_series)
-            .then(|| nfo.as_ref().and_then(|metadata| metadata.title.clone()))
+            .then(|| fields.title.value().cloned())
             .flatten(),
-        people: people_from_nfo(nfo.as_ref()),
-        is_favorite,
-        resume_updated_at: resume_state
-            .map(|state| state.updated_at)
-            .unwrap_or_default(),
-        child_count,
-        season_count,
-        has_primary_image,
-        has_backdrop_image: backdrop_path(row, is_series).is_some(),
-        primary_image_tag,
-        primary_image_url,
-        tracks,
+        people: people_from_fields(fields),
+        ..Default::default()
     }
 }
 
@@ -359,16 +355,17 @@ fn provider_ids(media: &Media) -> BTreeMap<String, String> {
 }
 
 fn runtime_ticks(
-    nfo: Option<&library::NfoMeta>,
+    fields: &domain::MetadataFields,
     tracks: &library::Tracks,
     is_series: bool,
 ) -> Option<i64> {
     if is_series {
         return None;
     }
-    nfo.and_then(|metadata| metadata.runtime_minutes.as_deref())
-        .and_then(|minutes| minutes.parse::<i64>().ok())
-        .and_then(|minutes| minutes.checked_mul(60)?.checked_mul(10_000_000))
+    fields
+        .runtime_minutes
+        .value()
+        .and_then(|minutes| minutes_to_ticks(*minutes))
         .or_else(|| {
             tracks
                 .video
@@ -376,4 +373,51 @@ fn runtime_ticks(
                 .and_then(|video| video.duration_secs)
                 .map(|seconds| (seconds * 10_000_000.0).round() as i64)
         })
+}
+
+/// 页内水合的实体范围：Series 行按 work 打分，剧集行按 episode 打分。
+pub(super) fn page_scope(
+    row: &domain::LedgerRow,
+    media: &Media,
+    is_series: bool,
+) -> domain::EntityScope {
+    if !is_series && media.kind == domain::MediaKind::Tv {
+        if let (Some(season), Some(episode)) = (row.season, row.episode) {
+            return domain::EntityScope::Episode { season, episode };
+        }
+    }
+    domain::EntityScope::Work
+}
+
+/// 锁内取页内合成元数据（Task 8 观测输入 + Task 7 采纳），调用方持有 Store 锁。
+pub(super) fn page_fields(
+    store: &Store,
+    row: &domain::LedgerRow,
+    media: &Media,
+    is_series: bool,
+) -> Result<domain::MetadataFields, String> {
+    let Some(library_id) = crate::http::playback::library_id_for(store, media, &[row]) else {
+        tracing::warn!(
+            media_id = %row.media_id,
+            file_id = %row.id,
+            "page metadata skipped: 无法定位条目所属库"
+        );
+        return Ok(domain::MetadataFields::default());
+    };
+    let Ok(library_id) = library_id.parse::<domain::LibraryId>() else {
+        tracing::warn!(
+            library_id = %library_id,
+            media_id = %row.media_id,
+            "page metadata skipped: 库 ID 不是 UUID"
+        );
+        return Ok(domain::MetadataFields::default());
+    };
+    store
+        .protocol_page_metadata(
+            library_id,
+            row.media_id,
+            page_scope(row, media, is_series),
+            None,
+        )
+        .map_err(|error| error.to_string())
 }

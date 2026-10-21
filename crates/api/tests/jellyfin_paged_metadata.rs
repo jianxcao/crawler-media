@@ -150,6 +150,18 @@ fn insert_episode(store: &Store, dir: &Path, media: MediaId, season: u32, episod
 
 /// TV 库：`shows` 部剧、每部 `episodes` 集，全部挂在同一个根下。
 fn tv_fixture(shows: usize, episodes: usize) -> Fixture {
+    tv_fixture_seeded(shows, episodes, |_| {})
+}
+
+/// 同 [`tv_fixture`]，但每部剧的 sidecar 由 `seed` 在 ledger 行发布**之前**写下。
+///
+/// NFO 观测只在发布时采集（Task 8），`insert_ledger` 之后写下的 sidecar 到不了库内快照，
+/// 因此断言页内 genre/studio 的 fixture 必须先把 NFO 放好。
+fn tv_fixture_seeded(
+    shows: usize,
+    episodes: usize,
+    seed: impl Fn(&Path),
+) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let files = Arc::new(CountingFiles::default());
     let state = new_state(dir.path(), files.clone());
@@ -177,6 +189,7 @@ fn tv_fixture(shows: usize, episodes: usize) -> Fixture {
             let media_id = new_media(&store, &format!("Show{show:03}"));
             let show_dir = root.join(format!("Show{show:03}"));
             std::fs::create_dir_all(&show_dir).unwrap();
+            seed(&show_dir);
             for episode in 1..=episodes {
                 insert_episode(&store, &show_dir, media_id, 1, episode as u32);
             }

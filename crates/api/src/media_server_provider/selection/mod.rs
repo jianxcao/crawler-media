@@ -1,13 +1,12 @@
-//! Jellyfin「先选择后重元数据」：轻候选 → 完整筛选/排序/计数 → 只为本页构建
-//! tracks/chapters/NFO 细节。
+//! Jellyfin「先选择后重元数据」：筛选/去重/排序/计数/取页在 store 一次短读事务里
+//! 完成（`selection::page`），只为选中的那一页构建 tracks/chapters/NFO 细节。
 //!
-//! 与旧的全量路径（`items::list_visible_items`）的差别只在**工作量**，语义由
-//! `media_server::provider::query` 的共享谓词保证一致：
-//!
-//! - 一次作用域读：库/剧/分集的作用域在 SQL 层收敛（`ledger_candidates_for_library`
-//!   或索引化的 `ledger_for_media`），不再为每个 series 重读整库；
-//! - series 折叠与分集展开都在同一份候选上完成，folder 归属先于折叠确定；
-//! - 只有选中的那一页才做 NFO/stat/字幕发现与 tracks/chapters 组装；
+//! - 作用域先收敛（`read_scope`）：库/剧/分集/folder 只读相关的行，不再为每个
+//!   series 重读整库；
+//! - 选页在 store 侧用 `ProtocolItemQuery` 逐字段适配后的 SQL 完成，页内条目才
+//!   回落到本地轻候选，按协议 id 对齐（物理版本由 `preferred_source` 决定）；
+//! - person 过滤仍走候选级路径：它需要 catalog 参与成员判定，且 catalog 失败必须
+//!   当成硬失败，不能因为「这个人没在库里」缩成更小的一页；
 //! - 任何读取失败都向上抛，绝不退化成「更小的一页」。
 
 use std::sync::atomic::Ordering;
@@ -20,18 +19,19 @@ use media_server::provider::query::{
 };
 use media_server::provider::{MediaItemSnapshot, ServerItemPage, ServerItemQuery};
 
-
 use super::item_metadata;
 use super::items::with_date_created;
 use super::*;
 
 mod light;
+mod page;
 mod scope;
 
 use light::{
-    build_light_items, merge_filter_facts, needs_filter_facts, paths_date_created,
-    set_date_created, LightItem,
+    LightItem, build_light_items, merge_filter_facts, needs_filter_facts, paths_date_created,
+    set_date_created,
 };
+use page::PageSelection;
 use scope::{ScopedRead, read_scope};
 
 /// 选择阶段允许的 blocking 预算（与 `list_visible_items` 一致）。
@@ -81,10 +81,23 @@ fn select_items_blocking(
     user_id: UserId,
     query: ServerItemQuery,
 ) -> Result<ServerItemPage, String> {
-    let browse = state.browse_files.clone();
-    let (scope, mut items) = {
+    // person 过滤要 catalog 参与成员判定、且 catalog 失败必须是硬失败，所以它留在
+    // 候选级路径；其余请求一律由 store 在分页前选页。
+    if query.person_ids.is_some() {
+        return select_candidates_blocking(state, user_id, query);
+    }
+    select_page_blocking(state, user_id, query)
+}
+
+/// store 侧选页：页内的媒体才回落成轻候选，再按协议 id 对齐成快照。
+fn select_page_blocking(
+    state: &ApiState,
+    user_id: UserId,
+    query: ServerItemQuery,
+) -> Result<ServerItemPage, String> {
+    let (scope, selection) = {
         let store = state.store.lock();
-        let scope = match read_scope(&store, user_id, &query) {
+        let mut scope = match read_scope(&store, user_id, &query) {
             Ok(scope) => scope,
             Err(error) => {
                 count_candidates(state, error.rows_read);
@@ -92,85 +105,99 @@ fn select_items_blocking(
             }
         };
         count_candidates(state, scope.rows_read);
-        let items = if scope.unresolved {
-            Vec::new()
-        } else {
-            build_light_items(&scope, &query)
+        if scope.unresolved {
+            return Ok(ServerItemPage::default());
+        }
+        let selection = page::select_page(&store, &scope, &query)?;
+        let PageSelection::Selected(page) = &selection else {
+            return Ok(ServerItemPage::default());
         };
-        (scope, items)
+        // 页内才需要重元数据：候选先收敛到这一页涉及的媒体。按媒体而不是按行收敛，
+        // 页内条目的子项计数、播放状态仍来自完整的本地行。
+        let covered: HashSet<MediaId> =
+            page.items.iter().map(|item| item.item.media_id()).collect();
+        scope.rows.retain(|row| covered.contains(&row.media_id));
+        (scope, selection)
     };
+    let PageSelection::Selected(page) = selection else {
+        return Ok(ServerItemPage::default());
+    };
+    let mut candidates: HashMap<domain::TypedItemId, Vec<LightItem>> = HashMap::new();
+    for item in build_light_items(&scope, &query) {
+        candidates
+            .entry(item.snapshot.item_identity())
+            .or_default()
+            .push(item);
+    }
+    let mut items = Vec::with_capacity(page.items.len());
+    for reference in page.items {
+        let Some(mut bucket) = candidates.remove(&reference.item) else {
+            // 协议选出的条目在本地行里没有对应候选：这是数据面不一致，跳过它而不是
+            // 返回一张和 total 不符的页。
+            tracing::warn!(
+                item = %reference.item.to_wire_string(),
+                "Jellyfin 协议选中条目缺少对应的本地候选行"
+            );
+            continue;
+        };
+        let index = preferred_index(&bucket, reference.preferred_source.as_ref());
+        let item = bucket.swap_remove(index);
+        items.push(heavy_snapshot(state, user_id, item)?);
+        count_heavy(state, 1);
+    }
+    if items.len() != page.total as usize {
+        tracing::warn!(
+            total = page.total,
+            returned = items.len(),
+            "Jellyfin 页内条目与协议计数不一致"
+        );
+    }
+    Ok(ServerItemPage {
+        items,
+        total: page.total as usize,
+    })
+}
+
+/// 同一逻辑条目的多份物理版本里挑一份：store 授权的 `preferred_source` 优先，否则
+/// 沿用旧的「revision 最大、file_id 最小」。
+fn preferred_index(bucket: &[LightItem], preferred: Option<&domain::PhysicalSourceId>) -> usize {
+    if let Some(source) = preferred
+        && let Some(index) = bucket
+            .iter()
+            .position(|item| item.snapshot.file.file_id == source.file_id)
+    {
+        return index;
+    }
+    bucket
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, item)| source_preference(item))
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+/// 候选级路径（person 过滤）：轻候选 → 完整筛选/排序/计数 → 只为本页建重元数据。
+fn select_candidates_blocking(
+    state: &ApiState,
+    user_id: UserId,
+    query: ServerItemQuery,
+) -> Result<ServerItemPage, String> {
+    let browse = state.browse_files.clone();
+    let (scope, mut items) = candidate_scope(state, user_id, &query)?;
     if scope.unresolved {
         return Ok(ServerItemPage::default());
     }
-    // 过滤公共字段优先读已采纳的元数据（与 Web 浏览同一份口径）；只有没有采纳行的
-    // 媒体才回退到 NFO，所以冷启动成本不再是「每条候选一次 NFO 读」。
-    if needs_filter_facts(&query, scope.unknown_parent) {
-        let adopted = adopted_filter_facts(state, &scope, &items)?;
-        tracing::debug!(
-            candidates = items.len(),
-            adopted = adopted.len(),
-            "Jellyfin 选择按查询需要读取过滤公共字段"
-        );
-        for item in &mut items {
-            let facts = item_metadata::filter_facts(
-                &item.snapshot.row,
-                &item.snapshot.media,
-                item.snapshot.is_series,
-                adopted.get(&item.snapshot.media.id),
-            );
-            item.snapshot.metadata =
-                merge_filter_facts(std::mem::take(&mut item.snapshot.metadata), facts);
-        }
-    }
-    if query.person_ids.is_some() {
-        // 轻筛字段必须完整后选页：person 过滤不允许「选页后再 enrich 再筛」，
-        // catalog 失败也不能当成「这个人没出现」从而缩成更小的一页。探测与
-        // person 成员无关，只在选中的页上、锁外安排。
-        for item in &mut items {
-            let merge = super::enrichment::catalog_merge_required(state, &item.snapshot)?;
-            if let Some(merge) = merge.as_ref() {
-                let metadata = std::mem::take(&mut item.snapshot.metadata);
-                item.snapshot.metadata = merge.apply(metadata, &item.snapshot.media);
-            }
-            item.catalog = merge;
-        }
-    }
-    if scope.unknown_parent {
-        let parent = query.parent_id.clone().unwrap_or_default();
-        let classification = classify_genre_or_studio_facts(
-            &parent,
-            items.iter().map(|item| {
-                (
-                    item.snapshot.metadata.genres.as_slice(),
-                    item.snapshot.metadata.studios.as_slice(),
-                )
-            }),
-        );
-        match classification {
-            ParentScope::Genre(target) | ParentScope::Studio(target) => {
-                items.retain(|item| {
-                    item_matches_genre_or_studio(
-                        &target,
-                        item.snapshot.metadata.genres.as_slice(),
-                        item.snapshot.metadata.studios.as_slice(),
-                    )
-                });
-            }
-            // 认不出 genre/studio 的 parent 一律空集合，绝不退化成整库。
-            _ => return Ok(ServerItemPage::default()),
-        }
+    hydrate_filter_facts(state, &scope, &mut items, &query)?;
+    merge_person_metadata(state, &mut items, &query)?;
+    if scope.unknown_parent && !narrow_to_unknown_parent(&mut items, &query) {
+        return Ok(ServerItemPage::default());
     }
     let mut kept: Vec<LightItem> = items;
     kept.retain(|item| matches_query(&item.snapshot, &query));
     // 同一逻辑条目的多份物理版本（协议 id 相同）必须先折叠：否则 total 会被物理行数
     // 放大，客户端还会收到重复 ItemId。折叠发生在排序/计数/分页之前。
     let mut kept = dedupe_by_logical_item(kept);
-    let (default_sort, default_order) = default_sort_for_items(kept.iter().map(|item| &item.snapshot));
-    let sort_by = query.sort_by.clone().unwrap_or_else(|| default_sort.to_string());
-    let sort_order = query
-        .sort_order
-        .clone()
-        .unwrap_or_else(|| default_order.to_string());
+    let (sort_by, sort_order) = candidate_sort(&kept, &query);
     if sort_by
         .split(',')
         .any(|key| key.trim().eq_ignore_ascii_case("datecreated"))
@@ -179,16 +206,10 @@ fn select_items_blocking(
             set_date_created(browse.as_ref(), item);
         }
     }
-    sort_snapshots(
-        &mut kept,
-        |item| &item.snapshot,
-        &sort_by,
-        &sort_order,
-    );
+    sort_snapshots(&mut kept, |item| &item.snapshot, &sort_by, &sort_order);
     let total = kept.len();
-    let selected: Vec<LightItem> = kept.into_iter().skip(query.offset).take(query.limit).collect();
-    let mut page_items = Vec::with_capacity(selected.len());
-    for item in selected {
+    let mut page_items = Vec::new();
+    for item in kept.into_iter().skip(query.offset).take(query.limit) {
         let snapshot = heavy_snapshot(state, user_id, item)?;
         count_heavy(state, 1);
         page_items.push(snapshot);
@@ -197,6 +218,124 @@ fn select_items_blocking(
         items: page_items,
         total,
     })
+}
+
+/// 候选级路径的作用域收敛：候选行的重读量要计入观测，失败也带上已读行数。
+fn candidate_scope(
+    state: &ApiState,
+    user_id: UserId,
+    query: &ServerItemQuery,
+) -> Result<(ScopedRead, Vec<LightItem>), String> {
+    let store = state.store.lock();
+    let scope = match read_scope(&store, user_id, query) {
+        Ok(scope) => scope,
+        Err(error) => {
+            count_candidates(state, error.rows_read);
+            return Err(error.to_string());
+        }
+    };
+    count_candidates(state, scope.rows_read);
+    let items = if scope.unresolved {
+        Vec::new()
+    } else {
+        build_light_items(&scope, query)
+    };
+    Ok((scope, items))
+}
+
+/// 过滤公共字段优先读已采纳的元数据（与 Web 浏览同一份口径）；只有没有采纳行的
+/// 媒体才回退到 NFO，所以冷启动成本不再是「每条候选一次 NFO 读」。
+fn hydrate_filter_facts(
+    state: &ApiState,
+    scope: &ScopedRead,
+    items: &mut [LightItem],
+    query: &ServerItemQuery,
+) -> Result<(), String> {
+    if !needs_filter_facts(query, scope.unknown_parent) {
+        return Ok(());
+    }
+    let adopted = adopted_filter_facts(state, scope, items)?;
+    tracing::debug!(
+        candidates = items.len(),
+        adopted = adopted.len(),
+        "Jellyfin 选择按查询需要读取过滤公共字段"
+    );
+    for item in items.iter_mut() {
+        let facts = item_metadata::filter_facts(
+            &item.snapshot.row,
+            &item.snapshot.media,
+            item.snapshot.is_series,
+            adopted.get(&item.snapshot.media.id),
+        );
+        item.snapshot.metadata =
+            merge_filter_facts(std::mem::take(&mut item.snapshot.metadata), facts);
+    }
+    Ok(())
+}
+
+/// 轻筛字段必须完整后选页：person 过滤不允许「选页后再 enrich 再筛」，
+/// catalog 失败也不能当成「这个人没出现」从而缩成更小的一页。探测与
+/// person 成员无关，只在选中的页上、锁外安排。
+fn merge_person_metadata(
+    state: &ApiState,
+    items: &mut [LightItem],
+    query: &ServerItemQuery,
+) -> Result<(), String> {
+    if query.person_ids.is_none() {
+        return Ok(());
+    }
+    for item in items.iter_mut() {
+        let merge = super::enrichment::catalog_merge_required(state, &item.snapshot)?;
+        if let Some(merge) = merge.as_ref() {
+            let metadata = std::mem::take(&mut item.snapshot.metadata);
+            item.snapshot.metadata = merge.apply(metadata, &item.snapshot.media);
+        }
+        item.catalog = merge;
+    }
+    Ok(())
+}
+
+/// 未知 parent 只可能是 genre/studio 分类：认出来就按它收窄，认不出就整页为空，
+/// 绝不退化成整库。返回 `false` 表示调用方必须返回空页。
+fn narrow_to_unknown_parent(items: &mut Vec<LightItem>, query: &ServerItemQuery) -> bool {
+    let parent = query.parent_id.clone().unwrap_or_default();
+    let classification = classify_genre_or_studio_facts(
+        &parent,
+        items.iter().map(|item| {
+            (
+                item.snapshot.metadata.genres.as_slice(),
+                item.snapshot.metadata.studios.as_slice(),
+            )
+        }),
+    );
+    match classification {
+        ParentScope::Genre(target) | ParentScope::Studio(target) => {
+            items.retain(|item| {
+                item_matches_genre_or_studio(
+                    &target,
+                    item.snapshot.metadata.genres.as_slice(),
+                    item.snapshot.metadata.studios.as_slice(),
+                )
+            });
+            true
+        }
+        _ => false,
+    }
+}
+
+/// 显式 `SortBy`/`SortOrder` 优先，缺省按候选集自身推断（与协议端默认排序一致）。
+fn candidate_sort(kept: &[LightItem], query: &ServerItemQuery) -> (String, String) {
+    let (default_sort, default_order) =
+        default_sort_for_items(kept.iter().map(|item| &item.snapshot));
+    let sort_by = query
+        .sort_by
+        .clone()
+        .unwrap_or_else(|| default_sort.to_string());
+    let sort_order = query
+        .sort_order
+        .clone()
+        .unwrap_or_else(|| default_order.to_string());
+    (sort_by, sort_order)
 }
 
 fn next_up_blocking(
@@ -309,7 +448,7 @@ fn heavy_snapshot(
         is_series,
         ..
     } = snapshot;
-    let (facts, chapters, marker) = {
+    let (facts, fields, chapters, marker) = {
         let store = state.store.lock();
         // 过滤、计数和返回的 UserData 必须来自同一次单元观察，不能在这里重读。
         let facts = item_metadata::item_db_facts(
@@ -319,6 +458,8 @@ fn heavy_snapshot(
             unit.as_ref(),
             whole_unit.as_ref(),
         );
+        // 页内元数据也在锁内取：锁外只做渲染，不再读现场 NFO。
+        let fields = item_metadata::page_fields(&store, &row, &media, is_series)?;
         let chapters = store
             .get_cached_chapters(&row.id.to_string())
             .map_err(|error| error.to_string())?
@@ -326,10 +467,17 @@ fn heavy_snapshot(
         let marker = store
             .get_media_marker(row.media_id, row.season, row.episode)
             .map_err(|error| error.to_string())?;
-        (facts, chapters, marker)
+        (facts, fields, chapters, marker)
     };
-    let mut metadata =
-        item_metadata::item_metadata(facts, browse, &row, &media, is_series, child_counts);
+    let mut metadata = item_metadata::item_metadata(
+        facts,
+        &fields,
+        browse,
+        &row,
+        &media,
+        is_series,
+        child_counts,
+    );
     if let Some(catalog) = catalog.as_ref() {
         metadata = catalog.apply(metadata, &media);
     }
@@ -337,8 +485,7 @@ fn heavy_snapshot(
         // 探测不能改变 person 成员或计数，只为已经选中的页安排，且不持有 Store 锁。
         crate::http::library::ensure_probe_enqueued(state, &row);
     }
-    let date_created =
-        date_created.or_else(|| paths_date_created(browse, is_series, &stat_paths));
+    let date_created = date_created.or_else(|| paths_date_created(browse, is_series, &stat_paths));
     Ok(MediaItemSnapshot {
         file,
         row,
@@ -436,7 +583,11 @@ fn adopted_filter_facts(
 fn filter_locale(store: &crate::Store, library: Option<&str>) -> String {
     if let Some(locale) = library
         .and_then(|id| id.parse::<domain::LibraryId>().ok())
-        .and_then(|id| store::library_query::library_display_locale(store, id).ok().flatten())
+        .and_then(|id| {
+            store::library_query::library_display_locale(store, id)
+                .ok()
+                .flatten()
+        })
     {
         return locale;
     }

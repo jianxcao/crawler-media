@@ -95,7 +95,7 @@ pub(super) fn snapshot_from_entry(
     is_series: bool,
 ) -> MediaItemSnapshot {
     // 锁内只取 owned DB 事实。
-    let (marker, chapters, ticks, played, play_count, parent_id, facts, series_counts) = {
+    let (marker, chapters, ticks, played, play_count, parent_id, facts, fields, series_counts) = {
         let store = state.store.lock();
         let marker = store
             .get_media_marker(row.media_id, row.season, row.episode)
@@ -130,12 +130,28 @@ pub(super) fn snapshot_from_entry(
         };
         let (unit, whole_unit) = item_metadata::row_units(&store, user_id, &row, is_series);
         let facts = item_metadata::item_db_facts(&store, &row, is_series, unit.as_ref(), whole_unit.as_ref());
-        (marker, chapters, ticks, played, play_count, parent_id, facts, series_counts)
+        let fields = item_metadata::page_fields(&store, &row, &media, is_series)
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, media_id = %row.media_id, "page metadata 读取失败，按空字段渲染");
+                domain::MetadataFields::default()
+            });
+        (
+            marker,
+            chapters,
+            ticks,
+            played,
+            play_count,
+            parent_id,
+            facts,
+            fields,
+            series_counts,
+        )
     };
-    // 锁外：NFO / stat / 外部字幕 IO。
+    // 锁外：stat / 外部字幕 IO。
     let metadata = with_date_created(
         item_metadata(
             facts,
+            &fields,
             state.browse_files.as_ref(),
             &row,
             &media,
@@ -358,13 +374,18 @@ fn collect_pending(
         let unit = find_unit(&units, row.media_id, season, episode);
         let whole_unit = is_series.then(|| find_unit(&units, row.media_id, crate::store::UNIT_WHOLE, crate::store::UNIT_WHOLE)).flatten();
         let facts = item_metadata::item_db_facts(store, &row, is_series, unit, whole_unit);
+        let fields = item_metadata::page_fields(store, &row, &media, is_series)
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, media_id = %row.media_id, "page metadata 读取失败，按空字段渲染");
+                domain::MetadataFields::default()
+            });
         let ticks = unit.map(|unit| unit.state.position_ms.saturating_mul(10_000)).unwrap_or(0);
         let stat_path = (!is_series).then(|| row.path.clone());
         pending.push(PendingSnapshot {
             parent_id: if requested_series { series_id } else { owner.id.clone() }, ticks,
             intro_start_ms: marker.as_ref().and_then(|item| item.intro_start_ms), intro_end_ms: marker.as_ref().and_then(|item| item.intro_end_ms),
             outro_start_ms: marker.as_ref().and_then(|item| item.outro_start_ms), outro_end_ms: marker.as_ref().and_then(|item| item.outro_end_ms),
-            file, row, media, is_series, play_count, played, unplayed_item_count, chapters, facts, child_counts, stat_path,
+            file, row, media, is_series, play_count, played, unplayed_item_count, chapters, facts, fields, child_counts, stat_path,
         });
     }
     Ok((pending, ingest_paths))
@@ -389,6 +410,7 @@ struct PendingSnapshot {
     outro_start_ms: Option<i64>,
     outro_end_ms: Option<i64>,
     facts: item_metadata::ItemDbFacts,
+    fields: domain::MetadataFields,
     child_counts: Option<(usize, usize)>,
     /// 非 series：DateCreated 需要 stat 这个路径；series：用 ingest 映射。
     stat_path: Option<String>,
@@ -417,11 +439,20 @@ impl PendingSnapshot {
             outro_start_ms,
             outro_end_ms,
             facts,
+            fields,
             child_counts,
             stat_path: _,
         } = self;
         let metadata = with_date_created(
-            item_metadata(facts, browse, &row, &media, is_series, child_counts),
+            item_metadata(
+                facts,
+                &fields,
+                browse,
+                &row,
+                &media,
+                is_series,
+                child_counts,
+            ),
             date_created,
         );
         MediaItemSnapshot {

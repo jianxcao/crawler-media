@@ -35,48 +35,104 @@ fn same_person(left: &MediaPerson, right: &MediaPerson) -> bool {
 }
 
 pub(super) fn people_from_nfo(metadata: Option<&library::NfoMeta>) -> Vec<MediaPerson> {
-    let mut seen = std::collections::HashSet::new();
     let Some(metadata) = metadata else {
         return Vec::new();
     };
-    let mut people = metadata
-        .cast
-        .iter()
-        .map(|member| {
-            (
-                member.name.as_str(),
-                member.role.as_deref(),
-                "Actor",
-                member.tmdb_id.as_deref(),
-                member.thumb.as_deref(),
-            )
-        })
-        .chain(
-            metadata
-                .directors
-                .iter()
-                .map(|name| (name.as_str(), None, "Director", None, None)),
-        )
-        .chain(
-            metadata
-                .creators
-                .iter()
-                .map(|name| (name.as_str(), None, "Writer", None, None)),
-        )
-        .filter_map(|(name, role, person_type, tmdb_id, thumb)| {
-            let key = tmdb_id
-                .map(|id| format!("tmdb:{id}:{person_type}"))
-                .unwrap_or_else(|| format!("name:{}:{person_type}", name.to_lowercase()));
-            if name.trim().is_empty() || !seen.insert(key.clone()) {
+    people_from_parts(
+        metadata
+            .cast
+            .iter()
+            .map(|member| PersonParts {
+                name: member.name.as_str(),
+                role: member.role.as_deref(),
+                person_type: "Actor",
+                tmdb_id: member.tmdb_id.as_deref(),
+                thumb: member.thumb.as_deref(),
+            })
+            .chain(metadata.directors.iter().map(|name| PersonParts {
+                name: name.as_str(),
+                role: None,
+                person_type: "Director",
+                tmdb_id: None,
+                thumb: None,
+            }))
+            .chain(metadata.creators.iter().map(|name| PersonParts {
+                name: name.as_str(),
+                role: None,
+                person_type: "Writer",
+                tmdb_id: None,
+                thumb: None,
+            })),
+    )
+}
+
+/// 页内合成字段（Task 7/8 快照）里的演职人员，口径与 [`people_from_nfo`] 相同。
+pub(super) fn people_from_fields(fields: &domain::MetadataFields) -> Vec<MediaPerson> {
+    let cast = fields.cast.value().map(Vec::as_slice).unwrap_or_default();
+    let directors = fields
+        .directors
+        .value()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let creators = fields
+        .creators
+        .value()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    people_from_parts(
+        cast.iter()
+            .map(|member| PersonParts {
+                name: member.name.as_str(),
+                role: member.role.as_deref(),
+                person_type: "Actor",
+                tmdb_id: member.tmdb_id.as_deref(),
+                thumb: member.thumb.as_deref(),
+            })
+            .chain(directors.iter().map(|name| PersonParts {
+                name: name.as_str(),
+                role: None,
+                person_type: "Director",
+                tmdb_id: None,
+                thumb: None,
+            }))
+            .chain(creators.iter().map(|name| PersonParts {
+                name: name.as_str(),
+                role: None,
+                person_type: "Writer",
+                tmdb_id: None,
+                thumb: None,
+            })),
+    )
+}
+
+struct PersonParts<'a> {
+    name: &'a str,
+    role: Option<&'a str>,
+    person_type: &'static str,
+    tmdb_id: Option<&'a str>,
+    thumb: Option<&'a str>,
+}
+
+fn people_from_parts<'a>(parts: impl Iterator<Item = PersonParts<'a>>) -> Vec<MediaPerson> {
+    let mut seen = std::collections::HashSet::new();
+    let mut people = parts
+        .filter_map(|parts| {
+            let key = parts
+                .tmdb_id
+                .map(|id| format!("tmdb:{id}:{}", parts.person_type))
+                .unwrap_or_else(|| {
+                    format!("name:{}:{}", parts.name.to_lowercase(), parts.person_type)
+                });
+            if parts.name.trim().is_empty() || !seen.insert(key.clone()) {
                 return None;
             }
             Some(MediaPerson {
                 id: uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, key.as_bytes()).to_string(),
-                name: name.to_string(),
-                role: role.map(str::to_string),
-                person_type: person_type.into(),
-                tmdb_id: tmdb_id.map(str::to_string),
-                primary_image_url: thumb.and_then(person_thumb_url),
+                name: parts.name.to_string(),
+                role: parts.role.map(str::to_string),
+                person_type: parts.person_type.into(),
+                tmdb_id: parts.tmdb_id.map(str::to_string),
+                primary_image_url: parts.thumb.and_then(person_thumb_url),
             })
         })
         .collect::<Vec<_>>();

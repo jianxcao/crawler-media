@@ -55,7 +55,7 @@ Media与原始Playback事实独立于文件存在；最后文件/Library删除�
 | Web详情 | 本地采用字段、首50文件+cursor | 续页字段不匹配/50边界异常；冷字段读取丢失；状态/多覆盖DTO不完整 |
 | 元数据/NFO | adopt_metadata有部分生产调用、固定来源优先及最后有效值基础 | 原响应经旧DTO有损重建；人工锁/locale/多NFO/已有文件重扫/自产反馈未闭合 |
 | Playback | Web签发会话及session stream，源感知resolver | 心跳未严格消费签发版本；合并E02被误拒；Jellyfin原始位置与逻辑ID-as-source仍在 |
-| 协议查询 | typed ItemId和部分采用字段过滤 | protocol_item_page无生产调用，仍Rust候选筛选/现场NFO/catalog读取 |
+| 协议查询 | typed ItemId和部分采用字段过滤 | Jellyfin `Items` 已由 `protocol_item_page` 在 store 侧选页（谓词/折叠/排序/`total`/`LIMIT` 同一短读事务，页内用合成快照）；`PersonIds` 仍是候选级路径、`NextUp` 独立路径，作用域行重读仍计入成本 |
 | 根/完整性/身份 | 删除协调器、部分嵌套根重归属、Store合并API | 根替换FK失败；library_operations/checker/merge管理路由与恢复未交付 |
 
 电影 `(0,0)`仍被Web发送并由后端映射whole；禁止将“无旧持久行”写成“无兼容代码”。正常Jellyfin协议认证、TV00、来源stale回退不等于旧数据库兼容。

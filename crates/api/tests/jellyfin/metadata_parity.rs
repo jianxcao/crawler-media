@@ -53,21 +53,7 @@ async fn tvshow_nfo_metadata_reaches_series_and_flat_episode_details() {
     store.insert_media(&show).unwrap();
     let episode_path = show_root.join("Pantheon S01E01.mkv");
     std::fs::write(&episode_path, b"episode").unwrap();
-    let episode = LedgerRow {
-        id: LedgerId::new(),
-        media_id: show.id,
-        path: episode_path.display().to_string(),
-        season: Some(1),
-        episode: Some(1),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Probe,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
-    store.insert_ledger(&episode).unwrap();
-
+    // Task 8 只在 insert_ledger 时观测旁车 NFO：夹具必须在写 ledger 行之前落盘。
     std::fs::write(
         show_root.join("tvshow.nfo"),
         r#"<tvshow>
@@ -89,6 +75,20 @@ async fn tvshow_nfo_metadata_reaches_series_and_flat_episode_details() {
         "<episodedetails><title>Zero Day</title><aired>2022-09-01</aired><season>1</season><episode>1</episode></episodedetails>",
     )
     .unwrap();
+    let episode = LedgerRow {
+        id: LedgerId::new(),
+        media_id: show.id,
+        path: episode_path.display().to_string(),
+        season: Some(1),
+        episode: Some(1),
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Probe,
+        confidence: Confidence::High,
+        filter_score: None,
+    };
+    store.insert_ledger(&episode).unwrap();
 
     let series_id = work_id(show.id);
     let series = get_json(&app, &format!("/Items/{series_id}")).await;

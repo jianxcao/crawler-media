@@ -55,7 +55,8 @@ impl api::catalog::Catalog for RichCatalog {
     }
 }
 
-fn rich_tv_app(root: &Path) -> (axum::Router, String, MediaId, PathBuf, PathBuf) {
+/// `tvshow_nfo` 必须在写 ledger 行之前落盘：Task 8 只在 insert_ledger 时观测旁车。
+fn rich_tv_app(root: &Path, tvshow_nfo: &str) -> (axum::Router, String, MediaId, PathBuf, PathBuf) {
     let store = Store::open(root.join("data")).unwrap();
     let library_root = root.join("library/tv");
     let show_root = library_root.join("Pantheon");
@@ -86,6 +87,7 @@ fn rich_tv_app(root: &Path) -> (axum::Router, String, MediaId, PathBuf, PathBuf)
     store.insert_media(&show).unwrap();
     let episode_path = show_root.join("Pantheon S01E01.mkv");
     std::fs::write(&episode_path, b"episode").unwrap();
+    std::fs::write(show_root.join("tvshow.nfo"), tvshow_nfo).unwrap();
     let episode = LedgerRow {
         id: LedgerId::new(),
         media_id: show.id,
@@ -184,18 +186,12 @@ async fn json_get(app: &axum::Router, uri: &str) -> Value {
 #[tokio::test]
 async fn detail_fills_sparse_nfo_from_catalog_and_refresh_writes_rich_show_and_episode_nfo() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, library_id, media_id, show_root, episode_path) = rich_tv_app(tmp.path());
-    std::fs::write(
-        show_root.join("tvshow.nfo"),
+    let (app, library_id, media_id, show_root, episode_path) = rich_tv_app(
+        tmp.path(),
         "<tvshow><title>Pantheon</title><actor><name>Legacy Actor</name><order>0</order></actor><actor><name>Paul Dano</name><role>Caspian</role><tmdbid>6384</tmdbid><order>1</order></actor><actor><name>Rose McEwen</name><role>Maddie</role><order>2</order></actor></tvshow>",
-    )
-    .unwrap();
+    );
 
-    let before_refresh = json_get(
-        &app,
-        &format!("/Items/{}", work_id(media_id)),
-    )
-    .await;
+    let before_refresh = json_get(&app, &format!("/Items/{}", work_id(media_id))).await;
     assert_eq!(
         before_refresh["Overview"],
         "Uploaded intelligence changes humanity."

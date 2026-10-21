@@ -109,7 +109,45 @@ fn seed_movie_root(store: &Store, root: &Path) {
         .unwrap();
 }
 
+/// Publish one ledger row with the file's real stat facts.
+///
+/// `insert_ledger` never touches the filesystem, so a row published that way keeps
+/// `created_ns`/`mtime_ns` NULL and `library_items.added_at_sort` collapses to
+/// "unknown". Only the scan commit (`insert_scanned_files`) records stat, which is
+/// what `SortBy=DateCreated` orders by.
+fn publish_scanned(store: &Store, row: LedgerRow) {
+    let observation = library::observe_source(Path::new(&row.path)).unwrap();
+    let units = match (row.season, row.episode) {
+        (Some(season), Some(episode)) => vec![domain::UnitKey::new(season as i32, episode as i32)],
+        _ => vec![domain::UnitKey::WHOLE],
+    };
+    store
+        .insert_scanned_files(
+            &[store::ScannedLedger {
+                units,
+                source_version: observation.source_version,
+                source_digest: observation.content_digest,
+                size_bytes: observation
+                    .size_bytes
+                    .and_then(|size| i64::try_from(size).ok()),
+                created_ns: observation.created_ns,
+                modified_ns: observation.modified_ns,
+                observations: Vec::new(),
+                row,
+            }],
+            1_000,
+        )
+        .unwrap();
+}
+
 fn app(root: &Path) -> (axum::Router, MediaId, String) {
+    app_seeded(root, |_| {})
+}
+
+/// Same as [`app`], but calls `seed` before the ledger row is written: Task 8
+/// observes sidecar files only while inserting a ledger row, so a fixture that
+/// wants its NFO to reach the page must write it first.
+fn app_seeded(root: &Path, seed: impl FnOnce(&Path)) -> (axum::Router, MediaId, String) {
     let store = Store::open(root.join("data")).unwrap();
     seed_movie_root(&store, root);
     let media = Media {
@@ -128,6 +166,7 @@ fn app(root: &Path) -> (axum::Router, MediaId, String) {
     store.insert_media(&media).unwrap();
     let file = root.join("matrix.mkv");
     std::fs::write(&file, b"0123456789abcdef").unwrap();
+    seed(root);
     let row = LedgerRow {
         id: LedgerId::new(),
         media_id: media.id,
