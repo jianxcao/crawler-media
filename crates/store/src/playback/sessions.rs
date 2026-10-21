@@ -321,7 +321,7 @@ impl Store {
     }
 }
 
-fn map_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
+pub(super) fn map_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
     Ok(SessionRow {
         device_id: row.get(0)?,
         user_id: user_id_from(row, 1)?,

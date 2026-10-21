@@ -153,19 +153,25 @@ pub(super) fn report_event(
                 .and_then(|session| session.play_session_id.clone());
             match reused {
                 Some(sid) => Some(sid),
-                None => Some(
-                    store
-                        .issue_play_session(
-                            user_id,
-                            &client.device_id,
-                            target_ledger_id,
-                            target.media.id,
-                            domain::UnitKey::new(target.season, target.episode),
-                            &target.file.version,
-                            now,
+                None => {
+                    if event == PlaybackEvent::Playing {
+                        Some(
+                            store
+                                .issue_play_session(
+                                    user_id,
+                                    &client.device_id,
+                                    target_ledger_id,
+                                    target.media.id,
+                                    domain::UnitKey::new(target.season, target.episode),
+                                    &target.file.version,
+                                    now,
+                                )
+                                .map_err(|error| error.to_string())?,
                         )
-                        .map_err(|error| error.to_string())?,
-                ),
+                    } else {
+                        None
+                    }
+                }
             }
         }
     };
@@ -241,14 +247,18 @@ fn persist_event(
         }
     }
     // 验证目标所属媒体库未处于删除冻结中且台账未被清理，防止已删除文件在心跳中复活
-    if let Some(row) = store.get_ledger(&target.ledger_id)? {
-        if let Some(owner) = store.library_for_path_strict(std::path::Path::new(&row.path), target.media.kind)? {
-            if !store.library_accepts_work(&owner.id)? {
-                return Ok(());
-            }
-        }
-    } else {
+    let covers = store.file_covers_unit(
+        target.file.file_id,
+        target.media.id,
+        domain::UnitKey::new(target.season, target.episode),
+    )?;
+    if !covers {
         return Ok(());
+    }
+    if let Some(owner) = store.file_owner_library(target.file.file_id)? {
+        if !store.library_accepts_work(&owner.id)? {
+            return Ok(());
+        }
     }
 
     persist_event_position(

@@ -296,6 +296,22 @@ async fn merged_e02_heartbeat_updates_only_e02() {
             )
             .unwrap()
     };
+    fix.request_with_body(
+        "POST",
+        "/api/v1/playback/progress",
+        Some(&fix.admin_token),
+        json!({
+            "device_id": "dev_tv",
+            "media_item_id": media_id.to_string(),
+            "file_id": file_id.to_string(),
+            "season": 1,
+            "episode": 2,
+            "event": "start",
+            "position_ms": 0,
+            "play_session_id": session_id_e02,
+        }),
+    )
+    .await;
 
     // Set initial E01 state (e.g. at 2000ms)
     let session_id_e01 = {

@@ -83,6 +83,17 @@ pub fn classify_event(
     ledger: LedgerId,
     event: PlaybackEventKind,
 ) -> EventDecision {
+    classify_event_with_target(previous, binding, identity, ledger, None, event)
+}
+
+pub fn classify_event_with_target(
+    previous: Option<&SessionRow>,
+    binding: Option<&PlaySessionBinding>,
+    identity: &PlaybackEventIdentity,
+    ledger: LedgerId,
+    target_unit: Option<domain::UnitKey>,
+    event: PlaybackEventKind,
+) -> EventDecision {
     if let Some(session_id) = &identity.play_session_id {
         // ID-based playback session
         let Some(b) = binding else {
@@ -90,9 +101,14 @@ pub fn classify_event(
             return EventDecision::Ignore;
         };
 
-        // Binding must match target ledger
+        // Binding must match target ledger and target unit (if specified)
         if b.ledger_id != ledger {
             return EventDecision::Ignore;
+        }
+        if let Some(unit) = target_unit {
+            if b.unit != unit {
+                return EventDecision::Ignore;
+            }
         }
 
         // Sequence check if provided within the same session
@@ -130,7 +146,11 @@ pub fn classify_event(
                             EventDecision::Ignore
                         }
                     }
-                    _ => EventDecision::Ignore,
+                    // A client that resumes and reports progress without a `start` still owns
+                    // an issued (pending) session: activate it and apply the same progress
+                    // instead of dropping the first real position the user watched.
+                    PlaySessionIdState::Pending => EventDecision::Start,
+                    PlaySessionIdState::Closed => EventDecision::Ignore,
                 }
             }
             PlaybackEventKind::Stop => {
