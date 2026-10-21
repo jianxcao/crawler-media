@@ -55,7 +55,7 @@ pub struct BoundPlaybackEvent {
     pub device_id: String,
     pub session_id: String,
     pub generation: i64,
-    pub event_sequence: i64,
+    pub event_sequence: Option<i64>,
     pub item: TypedItemId,
     pub source_id: PhysicalSourceId,
     pub source_version: String,

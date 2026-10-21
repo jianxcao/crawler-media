@@ -113,7 +113,7 @@ fn clean_start_end_to_end_storage_lifecycle() {
         device_id: "tv_client".into(),
         session_id: "session_1".into(),
         generation: 1,
-        event_sequence: 1,
+        event_sequence: Some(1),
         item: item_id.clone(),
         source_id: PhysicalSourceId { file_id: file.file_id, revision: 1 },
         source_version: "v1".into(),

@@ -151,7 +151,7 @@ fn commit_progress(
                 device_id: "device_web".into(),
                 session_id: "sess_1".into(),
                 generation: 1,
-                event_sequence: 1,
+                event_sequence: Some(1),
                 item: item.clone(),
                 source_id: PhysicalSourceId {
                     file_id: file.file_id,
