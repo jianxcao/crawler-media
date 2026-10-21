@@ -27,10 +27,12 @@ pub(crate) mod library_deletion;
 pub(crate) mod library_duplicates;
 pub(crate) mod library_gallery;
 pub(crate) mod library_housekeeping;
+pub(crate) mod library_operations;
 pub(crate) mod library_organize;
 pub(crate) mod library_presence;
 pub(crate) mod library_scan;
 pub(crate) mod media;
+pub(crate) mod media_operations;
 pub(crate) mod media_posters;
 pub(crate) mod notify;
 pub(crate) mod playback;
@@ -437,7 +439,15 @@ fn member_playback_routes() -> Router<ApiState> {
 fn admin_routes(state: &ApiState) -> Router<ApiState> {
     Router::new()
         .merge(write_gated(state, admin_core_routes()))
-        .merge(write_gated(state, admin_library_routes()))
+        // 重建索引期间拒绝并发写：必须在 handler 改动字段之前判定，
+        // 也必须在只读门（write_gate）之内，否则只读模式会被 409 盖掉。
+        .merge(write_gated(
+            state,
+            admin_library_routes().route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                library_operations::reject_conflicting_writes,
+            )),
+        ))
         .merge(admin_metadata_routes())
         .merge(write_gated(state, admin_ops_routes()))
         .layer(axum::middleware::from_fn_with_state(
@@ -513,7 +523,10 @@ fn admin_core_routes() -> Router<ApiState> {
 fn admin_library_routes() -> Router<ApiState> {
     Router::new()
         // libraries：实体增删改 + 条目/文件删除
-        .route("/library-removals/{operation_id}", get(library_deletion::status))
+        .route(
+            "/library-removals/{operation_id}",
+            get(library_deletion::status),
+        )
         .route(
             "/library/pending-deletions",
             get(file_delete::pending_deletions),
@@ -549,7 +562,23 @@ fn admin_library_routes() -> Router<ApiState> {
             "/libraries/{id}/scan-operations/{operation_id}/cancel",
             post(library_scan::operations::cancel_scan_operation),
         )
-        .route("/libraries/{id}/verify", post(library_presence::verify_handler))
+        // 根/语言重配置的进度查询：写请求 202 返回同一个 operation 形状。
+        .route(
+            "/libraries/{id}/operations/{operation_id}",
+            get(library_operations::get_operation),
+        )
+        .route(
+            "/libraries/{id}/integrity-checks",
+            post(library_operations::integrity_checks),
+        )
+        .route(
+            "/libraries/{id}/integrity-repairs",
+            post(library_operations::integrity_repairs),
+        )
+        .route(
+            "/libraries/{id}/verify",
+            post(library_presence::verify_handler),
+        )
         .route(
             "/libraries/{id}/missing-rows",
             delete(library_presence::prune_handler),
@@ -682,6 +711,13 @@ fn admin_ops_routes() -> Router<ApiState> {
         .route("/jobs/{id}/cancel", post(jobs::cancel_job))
         .route("/jobs/tick", post(jobs::tick_jobs))
         .route("/search/admit", post(crate::admit::admit_torrent_v1))
+        // media merges：202 受理 + GET 轮询持久阶段。GET 必须保持读可用，
+        // 因此两条都在 write_gate 只管非读请求的 admin_ops_routes() 内。
+        .route("/media/merges", post(media_operations::post_merge))
+        .route(
+            "/media/operations/{id}",
+            get(media_operations::get_operation),
+        )
         .route("/playback/policy", put(playback::put_policy))
         // directory + settings + notify（写入）
         .route("/directory", put(directory::put_directory))
@@ -774,12 +810,7 @@ pub async fn request_logger(
         elapsed,
         slow_after,
     );
-    request_observation::log_request(
-        &observation,
-        &path,
-        query.as_deref(),
-        user_agent.as_deref(),
-    );
+    request_observation::log_request(&observation, &path, query.as_deref(), user_agent.as_deref());
     if let Ok(value) = axum::http::HeaderValue::from_str(&observation.request_id) {
         response.headers_mut().insert("x-request-id", value);
     }

@@ -142,11 +142,19 @@ pub struct LibraryWorkRegistry {
     entries: Mutex<HashMap<String, Entry>>,
     changed: Notify,
     removals: Mutex<std::collections::HashSet<String>>,
+    /// Operation ids whose driver task is already running in this process. A
+    /// reconfiguration is driven once per process; startup recovery and a new 202
+    /// can both ask for the same operation.
+    drivers: Mutex<std::collections::HashSet<String>>,
 }
 
 #[derive(Default)]
 struct Entry {
     cancelled: bool,
+    /// Set while a persistent reconfiguration owns this Library. Unlike
+    /// `cancelled` it is scoped to one operation and cleared when that operation
+    /// ends, so a failed reconfiguration does not block the Library forever.
+    blocked_by: Option<String>,
     controls: HashMap<String, library::WorkControl>,
 }
 
@@ -184,6 +192,9 @@ impl LibraryWorkRegistry {
     {
         let mut entries = self.entries.lock();
         let entry = entries.entry(library_id.to_string()).or_default();
+        if entry.blocked_by.is_some() {
+            return Err("Library 正在重建索引，暂时拒绝新的工作".into());
+        }
         if entry.cancelled || !store.lock().library_accepts_work(library_id).map_err(|e| e.to_string())? {
             return Err("Library 正在删除或已不存在".into());
         }
@@ -229,6 +240,77 @@ impl LibraryWorkRegistry {
         entry.cancelled = true;
         for control in entry.controls.values() { control.cancel(); }
         Ok(operation)
+    }
+
+    /// Lease held by a reconfiguration driver while it applies one batch.
+    ///
+    /// The driver is the only writer allowed on the Library, so it takes a lease
+    /// through the same registry as worker writes: a Library removal that starts
+    /// mid-operation still wins, because `cancelled` refuses this lease too.
+    pub(crate) fn acquire_for_reconfiguration(
+        self: &Arc<Self>,
+        store: &Mutex<store::Store>,
+        library_id: &str,
+        operation_id: &str,
+    ) -> Result<LibraryWorkLease, String> {
+        let mut entries = self.entries.lock();
+        let entry = entries.entry(library_id.to_string()).or_default();
+        if entry.cancelled {
+            return Err("Library work cancelled".into());
+        }
+        if entry.blocked_by.as_deref() != Some(operation_id) {
+            return Err(format!("Library 未被重配置操作 {operation_id} 冻结"));
+        }
+        if !store
+            .lock()
+            .library_accepts_work(library_id)
+            .map_err(|e| e.to_string())?
+        {
+            return Err("Library 正在删除或已不存在".into());
+        }
+        let lease_id = uuid::Uuid::new_v4().to_string();
+        let control = library::WorkControl::default();
+        entry.controls.insert(lease_id.clone(), control.clone());
+        Ok(LibraryWorkLease {
+            registry: self.clone(),
+            library_id: library_id.into(),
+            lease_id,
+            control,
+        })
+    }
+
+    /// Mark a Library as owned by one persistent reconfiguration until `release`.
+    ///
+    /// Infallible and Store-free on purpose: `begin_library_reconfiguration` already
+    /// committed the freeze, and this only mirrors it in the registry so that
+    /// in-process workers stop before touching a frozen generation.
+    pub(crate) fn block(&self, library_id: &str, operation_id: &str) {
+        let mut entries = self.entries.lock();
+        let entry = entries.entry(library_id.into()).or_default();
+        entry.blocked_by = Some(operation_id.into());
+        for control in entry.controls.values() {
+            control.cancel();
+        }
+    }
+
+    /// Clear the block, but only for the operation that owns it.
+    pub(crate) fn release(&self, library_id: &str, operation_id: &str) {
+        let mut entries = self.entries.lock();
+        if let Some(entry) = entries.get_mut(library_id)
+            && entry.blocked_by.as_deref() == Some(operation_id)
+        {
+            entry.blocked_by = None;
+        }
+    }
+
+    /// Claim the single in-process driver slot for one operation. `false` means a
+    /// driver for the same operation is already running here.
+    pub(crate) fn claim_driver(&self, operation_id: &str) -> bool {
+        self.drivers.lock().insert(operation_id.to_string())
+    }
+
+    pub(crate) fn release_driver(&self, operation_id: &str) {
+        self.drivers.lock().remove(operation_id);
     }
 
     pub fn active_control(&self, library_id: &str) -> Option<library::WorkControl> {

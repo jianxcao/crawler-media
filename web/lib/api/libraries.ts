@@ -1,6 +1,7 @@
 import { request, resolveRequestUrl } from "@/lib/http";
 import type { LibraryKind, MediaType } from "@/lib/media-types";
 import { waitForLibraryRemoval, type RemovalWaitOptions } from "@/lib/library-removal";
+import { waitForLibraryOperation, type OperationWaitOptions } from "@/lib/library-operations";
 import { collectAllFilePages } from "@/lib/library-file-pages";
 
 export type { LibraryKind, MediaType };
@@ -380,6 +381,32 @@ export interface LibraryPayload {
   realtime_watch?: boolean;
   scrape_overrides?: Record<string, unknown>;
 }
+
+/**
+ * 更新库的请求体：`root_paths` 省略表示不改目录。
+ *
+ * 改目录会冻结整库并异步迁移文件归属（202 + operation），只改其它字段仍是同步
+ * 200；因此更新体必须允许省略 `root_paths`，否则「改名」会被后端当成换根。
+ */
+export type LibraryUpdatePayload = Omit<LibraryPayload, "root_paths"> & {
+  root_paths?: string[];
+};
+
+/** 换根/换语言的异步操作（GET /libraries/{id}/operations/{operation_id}）。 */
+export interface LibraryOperation {
+  operation_id: string;
+  kind: "roots" | "locale" | string;
+  /** 后端把持久 state 当 phase 返回：`planned → applying → succeeded|failed`（冻结由 `reindexing` 生命周期表达，不是独立 state）。 */
+  state: "planned" | "frozen" | "applying" | "succeeded" | "failed" | string;
+  phase?: string;
+  cursor?: string | null;
+  error: string | null;
+}
+
+/** PATCH 结果：同步字段直接返回最新库；换根返回 202 受理的操作。 */
+export type LibraryUpdate =
+  | { kind: "library"; library: MediaLibrary }
+  | { kind: "operation"; operation: LibraryOperation };
 
 /** 收藏范围的可选项（GET /libraries/routing-options）。 */
 export interface RoutingOptions {
@@ -934,6 +961,26 @@ function emptyLibrary(partial: { name?: string; kind?: LibraryKind; root_paths?:
   };
 }
 
+/**
+ * 从 PATCH 响应里认出「这是 202 受理的操作」而不是库详情。
+ *
+ * 判别只认 `operation_id`（同步更新返回的库投影没有这个字段），避免把库当成操作。
+ */
+function libraryOperationFrom(raw: unknown): LibraryOperation | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const operationId = typeof r.operation_id === "string" && r.operation_id ? r.operation_id : null;
+  if (!operationId) return null;
+  const state = typeof r.state === "string" && r.state ? r.state : typeof r.phase === "string" ? r.phase : "planned";
+  return {
+    operation_id: operationId,
+    kind: typeof r.kind === "string" ? r.kind : "roots",
+    state,
+    phase: typeof r.phase === "string" ? r.phase : undefined,
+    cursor: typeof r.cursor === "string" ? r.cursor : null,
+    error: typeof r.error === "string" ? r.error : null,
+  };
+}
+
 function libraryFrom(raw: unknown): MediaLibrary {
   const r = (raw ?? {}) as Record<string, unknown>;
   const stats = (r.stats ?? {}) as Record<string, unknown>;
@@ -1045,11 +1092,66 @@ export function createLibrary(payload: LibraryPayload): Promise<MediaLibrary> {
   );
 }
 
-/** 更新媒体库（PATCH /libraries/{id}；只改传入的字段）。 */
-export function updateLibrary(id: string, payload: LibraryPayload): Promise<MediaLibrary> {
-  return unwrap(request<ApiEnvelope<unknown>>(`/libraries/${id}`, { method: "PATCH", body: JSON.stringify(payload) })).then(
-    (raw) => libraryFrom(raw),
+/**
+ * 更新媒体库（PATCH /libraries/{id}；只发要改的字段）。
+ *
+ * 换根会返回 202 + `{operation_id}`（不是库详情），调用方必须区分两种结果；
+ * 同步字段更新返回 200 + 最新库。
+ */
+export async function updateLibrary(
+  id: string,
+  payload: LibraryUpdatePayload,
+  signal?: AbortSignal,
+): Promise<LibraryUpdate> {
+  signal?.throwIfAborted();
+  const raw = await unwrap(
+    request<ApiEnvelope<unknown>>(`/libraries/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+      signal,
+    }),
   );
+  const operation = libraryOperationFrom(raw);
+  return operation
+    ? { kind: "operation", operation }
+    : { kind: "library", library: libraryFrom(raw) };
+}
+
+/** 轮询一个已受理的换根操作（GET /libraries/{id}/operations/{operation_id}）。 */
+export function getLibraryOperation(
+  libraryId: string,
+  operationId: string,
+  signal?: AbortSignal,
+): Promise<LibraryOperation> {
+  return unwrap(
+    request<ApiEnvelope<unknown>>(
+      `/libraries/${libraryId}/operations/${encodeURIComponent(operationId)}`,
+      { signal },
+    ),
+  ).then((raw) => {
+    const operation = libraryOperationFrom(raw);
+    if (!operation) throw new Error("媒体库操作状态缺失");
+    return operation;
+  });
+}
+
+/**
+ * 更新并等到真正生效：换目录的 202 只表示「已受理并冻结」，必须轮询到 succeeded，
+ * 再用列表里的最新事实重新读库（没有 GET /libraries/{id}）。
+ */
+export async function updateLibraryAndWait(
+  id: string,
+  payload: LibraryUpdatePayload,
+  options: OperationWaitOptions = {},
+): Promise<MediaLibrary> {
+  const accepted = await updateLibrary(id, payload, options.signal);
+  if (accepted.kind === "library") return accepted.library;
+  await waitForLibraryOperation(
+    accepted.operation,
+    (operationId, signal) => getLibraryOperation(id, operationId, signal),
+    options,
+  );
+  return getLibrary(id);
 }
 
 /** 设为该类型的默认库（PUT /libraries/{id}/default）。 */

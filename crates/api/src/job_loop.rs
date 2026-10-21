@@ -138,6 +138,23 @@ pub fn spawn_job_loop_with_control(
             if !loop_writable.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 tracing::info!("已获取实例锁，恢复后台任务");
             }
+            // 持有数据目录租约的实例在派发新工作之前，先把上个进程留下的 Library
+            // 重配置推进到终态；未完成的那些行只有这里（和启动路径）会驱动。
+            if let Err(error) = crate::storage_operations::resume_library_reconfigurations(&state) {
+                tracing::error!(%error, "恢复未完成的 Library 重配置操作失败");
+            }
+            // 上个进程可能正好停在「合并事务已落库、job 引用还没收敛」之间：此时
+            // `unfinished_media_merges()` 已经为空，tick 里的 `if advanced` 分支永远不会
+            // 再触发，孤儿引用就会一直指向已退休的 Media。开机无条件补一次（幂等）。
+            crate::storage_operations::converge_retired_media_refs(&state);
+            // 用户删除同样是分阶段落库的，重启后要把没走完的清理接着走完。
+            if let Err(error) = crate::user_removal::UserRemovalService::new(std::sync::Arc::new(
+                state.clone(),
+            ))
+            .recover_pending_removals()
+            {
+                tracing::error!(%error, "恢复未完成的用户删除操作失败");
+            }
             loop {
                 if loop_control.is_stopping() {
                     return;
@@ -149,36 +166,42 @@ pub fn spawn_job_loop_with_control(
                     tokio::time::sleep(crate::instance_lease::retry_interval()).await;
                     continue 'lease;
                 }
-            let now = read_clock(&clock);
-            if let Err(error) = state.probe.dispatch_due(now.saturating_mul(1000), 32) {
-                tracing::error!(%error, now, "【媒体探测】派发到期阶段失败");
-            }
-            // tick 内 runner 会同步执行 worker（订阅搜索 → Indexer 抓 PT 站点，
-            // 同步 ureq 阻塞 1-8s）。直接在 async 任务里跑会占满 tokio 工作
-            // 线程，导致所有 HTTP 请求（含无锁的 /health）排队超时——
-            // 表现就是「正在连接服务…」+ me 不返回。挪到 spawn_blocking 池。
-            let state_clone = state.clone();
-            let completion_clock = Arc::clone(&clock);
-            let worker_handle = tokio::task::spawn_blocking(move || {
-                if state_clone.job_loop_control().is_stopping() {
-                    return;
+                let now = read_clock(&clock);
+                if let Err(error) = state.probe.dispatch_due(now.saturating_mul(1000), 32) {
+                    tracing::error!(%error, now, "【媒体探测】派发到期阶段失败");
                 }
-                if let Err(error) = run_pending_jobs_with_clock(
-                    &state_clone,
-                    now,
-                    || read_clock(&completion_clock),
-                    TickSource::Background,
-                ) {
-                    tracing::error!(%error, now, "后台任务轮询失败");
-                }
-                // 播放会话心跳超时回收：停止上报的会话落成播放记录。
-                let _ = state_clone
-                    .store
-                    .lock()
-                    .sweep_stale_sessions(now, crate::http::playback::session_timeout_secs());
-            });
-            loop_control.track_worker(worker_handle);
-            tokio::time::sleep(interval).await;
+                // tick 内 runner 会同步执行 worker（订阅搜索 → Indexer 抓 PT 站点，
+                // 同步 ureq 阻塞 1-8s）。直接在 async 任务里跑会占满 tokio 工作
+                // 线程，导致所有 HTTP 请求（含无锁的 /health）排队超时——
+                // 表现就是「正在连接服务…」+ me 不返回。挪到 spawn_blocking 池。
+                let state_clone = state.clone();
+                let completion_clock = Arc::clone(&clock);
+                let worker_handle = tokio::task::spawn_blocking(move || {
+                    if state_clone.job_loop_control().is_stopping() {
+                        return;
+                    }
+                    if let Err(error) = run_pending_jobs_with_clock(
+                        &state_clone,
+                        now,
+                        || read_clock(&completion_clock),
+                        TickSource::Background,
+                    ) {
+                        tracing::error!(%error, now, "后台任务轮询失败");
+                    }
+                    // 播放会话心跳超时回收：停止上报的会话落成播放记录。
+                    let _ = state_clone
+                        .store
+                        .lock()
+                        .sweep_stale_sessions(now, crate::http::playback::session_timeout_secs());
+                    // Media 合并的持久阶段同样按轮推进（本人持有租约，别处不会驱动）；
+                    // 单条失败只告警，不停整轮后台工作。
+                    crate::storage_operations::advance_media_merges(
+                        &state_clone,
+                        read_clock(&completion_clock),
+                    );
+                });
+                loop_control.track_worker(worker_handle);
+                tokio::time::sleep(interval).await;
             }
         }
     });

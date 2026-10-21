@@ -69,6 +69,16 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 
 每种 `kind` 可以有多个库（多根、可见性、刮削开关等）。完整字段见 [Store Library](<../../crates/store/src/libraries.rs>) 与 `GET /libraries`。
 
+### Library 配置变更操作
+
+`PATCH /libraries/{id}`：带 `root_paths`（或 `display_locale`）时是一段可恢复、可观测的重配置，返回 **202** 操作对象（与下面 GET 同字段，`state` 此时为 `planned`）；只改名称/可见性等同步字段仍返回 **200** Library 本体，不带 `operation_id`。重配置期间该库处于 `reindexing`：`POST /libraries/{id}/scan` 等写请求返回 **409** `library.reindexing`，body 顶层额外带 `operation_id`；读取与下面的轮询端点不受影响。`GET /libraries/{id}/operations/{operation_id}` 返回 `{operation_id, library_id, kind, phase, state, cursor, error}`（`kind` 为 `roots` 或 `locale`，`phase` 与持久 `state` 同值，实际出现 `planned|applying|succeeded|failed`，`cursor` 是批处理游标）；不存在的 operation、以及属于其他 Library 的 operation 一律 **404**。「冻结」不是独立阶段，而是受理时与 `planned` 行同事务提交的 `libraries.lifecycle_state='reindexing'` + `config_revision` 自增，外加首批之前的排空等待。依据 `crates/api/src/http/library_config.rs`、`http/library_operations.rs`、`crates/api/tests/storage_operations_runtime.rs`。
+
+前端 `web/lib/api/libraries.ts` 把 202 与 200 分成 `updateLibrary` 的 `{kind:"operation"}` / `{kind:"library"}` 两种结果；`updateLibraryAndWait` 负责轮询到终态。`assignLibraryFilesToTitle`（`POST /reidentify`）仍是单次同步 200，不参与这套轮询。
+
+### Media 合并操作
+
+`POST /media/merges`（`{request_id, survivor, loser, survivor_revision, loser_revision, refresh_targets?}`）返回 **202** `{operation_id}`，且 `operation_id == request_id`：同一份 payload 用同一个 `request_id` 重发返回同一个操作（幂等，不产生第二份冻结），同一 `request_id` 换 payload 返回 **409** `media.merge_conflict`。`GET /media/operations/{id}` 返回 `{operation_id, phase, state, error}`，未知 id **404** `media.operation_missing`。阶段推进由持有数据目录写租约的进程在 job loop 内驱动，GET/POST 都不推进；重启后未完成的操作继续推进。依据 `crates/api/src/http/media_operations.rs`、`crates/api/src/storage_operations.rs`、`crates/api/tests/storage_operations_runtime.rs`。
+
 ### LibraryItemFile 与文件续页
 
 `GET /libraries/{id}/items/{media_item_id}` 首详情带 `files` 首页与 `next_file_cursor`；
@@ -162,6 +172,8 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 四个 Store 文件为 `app.db`、`cache.db`、`library.db`、`subscribe.db`，队列另在 `jobs.db`。当前布局没有旧数据库迁移阶梯；DDL 不代表 API/消费者已全部切换。`protocol_item_page` 与 `commit_playback_event` 尚未形成所有生产调用方的统一路径；movie `(0,0)` 请求别名仍在前后端，目标存储整片坐标为 `(-1,-1)`。不得新增兼容建议来保留这些未切换路径。
 
 上一轮隔离复核已观察到：合并集文件 heartbeat 错报 `ended_by_admin`、旧 issued session 写入新文件版本、增量公共集数与用户计数不一致、文件续页 `next_cursor` 对接/恰好 50 条边界失败、采用元数据 runtime/rating 缺失与详情遗漏 tagline/certification、换根外键错误、多别名更新丢失/卡片陈旧；integrity-checks 与 Media merge 管理端点仍 404。这些不是已完成合同；本次文档清理没有重跑或改写这些观察。当前源码入口为 `http/library.rs`、`http/playback/`、`store/src/media.rs`、`store/src/library_query/`、`store/src/playback/`，闭环验收见 [存储执行计划](<../superpowers/plans/2026-10-20-storage-clean-cutover.md>)。
+
+以上观察中只有一项已被本次切换改动：Media merge 管理端点不再 404 —— `POST /media/merges` 与 `GET /media/operations/{id}` 已挂载（见上文「Media 合并操作」）；其余观察未重跑。
 
 ## 现行表面（去哪看）
 

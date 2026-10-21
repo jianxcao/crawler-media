@@ -10,6 +10,7 @@ use std::str::FromStr;
 
 use crate::http::{err, ok};
 use crate::management::ApiState;
+use crate::storage_operations::StorageOperationError;
 use crate::store::StoreError;
 
 use super::library::{library_json, missing_library};
@@ -93,10 +94,22 @@ pub(crate) async fn create_library(
             let lib_id = library.id.clone();
             let _json_resp = match library_json(&store, &library) {
                 Ok(j) => j,
-                Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &e.to_string()),
+                Err(e) => {
+                    return err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "store.error",
+                        &e.to_string(),
+                    );
+                }
             };
-            let detect_intros = body.get("detect_intros").and_then(|v| v.as_bool()).unwrap_or(true);
-            let enable_fingerprint = body.get("enable_fingerprint").and_then(|v| v.as_bool()).unwrap_or(true);
+            let detect_intros = body
+                .get("detect_intros")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let enable_fingerprint = body
+                .get("enable_fingerprint")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             if let Err(error) =
                 store.set_library_intro_settings(&library.id, detect_intros, enable_fingerprint)
             {
@@ -120,7 +133,13 @@ pub(crate) async fn create_library(
                 .unwrap_or(library);
             let json_resp = match library_json(&store, &updated) {
                 Ok(j) => j,
-                Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &e.to_string()),
+                Err(e) => {
+                    return err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "store.error",
+                        &e.to_string(),
+                    );
+                }
             };
             drop(store);
 
@@ -144,55 +163,150 @@ pub(crate) async fn create_library(
     }
 }
 
-/// PATCH /libraries/{id} — rename and/or replace the root list.
+/// PATCH /libraries/{id} — rename, access, switches, and root/locale migration.
+///
+/// Plain fields stay synchronous. A `root_paths` or `display_locale` change rewrites
+/// `library_files` and NFO ownership in batches, so it answers `202` with an operation
+/// the caller polls at `GET /libraries/{id}/operations/{operation_id}`.
 pub(crate) async fn patch_library(
     State(state): State<ApiState>,
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> Response {
-    let name = body["name"].as_str().map(str::to_string);
     let root_paths = body["root_paths"].is_array().then(|| paths_from(&body));
-    if let Some(paths) = &root_paths {
-        if paths.is_empty() {
-            return err(
-                StatusCode::BAD_REQUEST,
-                "library.invalid_roots",
-                "媒体库至少需要一个目录",
-            );
-        }
+    if let Some(paths) = &root_paths
+        && paths.is_empty()
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "library.invalid_roots",
+            "媒体库至少需要一个目录",
+        );
     }
-    let refs: Option<Vec<&str>> = root_paths
-        .as_ref()
-        .map(|paths| paths.iter().map(String::as_str).collect());
-    let store = state.store.lock();
-    let Some(current) = (match store.get_library(&id) {
+    let display_locale = body["display_locale"]
+        .as_str()
+        .map(str::trim)
+        .filter(|locale| !locale.is_empty())
+        .map(str::to_string);
+    // 非批量字段先同步落库：失败时不启动任何操作，语义与旧版一致。
+    let library = match apply_library_settings(&state, &id, &body) {
         Ok(library) => library,
-        Err(error) => {
-            return err(
+        Err(response) => return response,
+    };
+    let request = crate::storage_operations::ReconfigurationRequest {
+        root_paths,
+        display_locale,
+    };
+    if request.root_paths.is_none() && request.display_locale.is_none() {
+        let store = state.store.lock();
+        return match library_json(&store, &library) {
+            Ok(json_resp) => ok(json_resp).into_response(),
+            Err(error) => err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "store.error",
                 &error.to_string(),
-            );
+            ),
+        };
+    }
+    // 竞态窗口：上面的字段已经落库，而 begin 仍可能被并发操作拒绝；此时 409 里带上
+    // 对方的 operation_id，前端轮询它就能看到最终结果。
+    match crate::storage_operations::begin_library_reconfiguration(&state, &id, request) {
+        Ok(operation) => (StatusCode::ACCEPTED, ok(operation)).into_response(),
+        Err(StorageOperationError::MissingLibrary) => missing_library(),
+        Err(StorageOperationError::Invalid(message)) => err(
+            StatusCode::BAD_REQUEST,
+            "library.invalid_operation",
+            &message,
+        ),
+        Err(StorageOperationError::Reindexing { operation_id }) => {
+            super::library_operations::reindexing_conflict(operation_id.as_deref())
+        }
+        Err(StorageOperationError::Store(StoreError::Missing(_))) => missing_library(),
+        Err(StorageOperationError::Store(error)) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store.error",
+            &error.to_string(),
+        ),
+    }
+}
+
+/// Apply the synchronous fields of a PATCH and return the updated Library.
+///
+/// Roots are deliberately absent: they belong to the batch reconfiguration, never to a
+/// single `update_library_full` call.
+fn apply_library_settings(
+    state: &ApiState,
+    id: &str,
+    body: &Value,
+) -> Result<crate::store::Library, Response> {
+    let name = body["name"].as_str().map(str::to_string);
+    let store = state.store.lock();
+    let Some(current) = (match store.get_library(id) {
+        Ok(library) => library,
+        Err(error) => {
+            return Err(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            ));
         }
     }) else {
-        return missing_library();
+        return Err(missing_library());
     };
-    let access_fields_sent = ["access_mode", "admin_visible", "member_ids"]
+    apply_library_toggles(&store, id, body, &current)?;
+    let access = ["access_mode", "admin_visible", "member_ids"]
         .iter()
-        .any(|field| body.get(*field).is_some());
-    let access = access_fields_sent.then(|| {
-        (
-            body["access_mode"].as_str().unwrap_or(&current.access_mode),
-            body["admin_visible"]
-                .as_bool()
-                .unwrap_or(current.admin_visible),
-            if body.get("member_ids").is_some() {
-                parse_member_ids(&body)
-            } else {
-                current.member_ids.clone()
-            },
-        )
-    });
+        .any(|field| body.get(*field).is_some())
+        .then(|| {
+            (
+                body["access_mode"].as_str().unwrap_or(&current.access_mode),
+                body["admin_visible"]
+                    .as_bool()
+                    .unwrap_or(current.admin_visible),
+                if body.get("member_ids").is_some() {
+                    parse_member_ids(body)
+                } else {
+                    current.member_ids.clone()
+                },
+            )
+        });
+    let match_rules = body["match_rules"].as_array().map(|arr| arr.clone());
+    let default_filter_id_update: Option<Option<&str>> = if body.get("default_filter_id").is_some()
+    {
+        Some(body["default_filter_id"].as_str().filter(|s| !s.is_empty()))
+    } else {
+        None
+    };
+    match store.update_library_full(
+        id,
+        name.as_deref(),
+        None,
+        access
+            .as_ref()
+            .map(|(mode, visible, ids)| (*mode, *visible, ids.as_slice())),
+        match_rules.as_deref(),
+        default_filter_id_update,
+    ) {
+        Ok(library) => Ok(library),
+        Err(StoreError::Missing(_)) => Err(missing_library()),
+        Err(StoreError::Protected(message)) => {
+            Err(err(StatusCode::BAD_REQUEST, "library.protected", &message))
+        }
+        Err(error) => Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store.error",
+            &error.to_string(),
+        )),
+    }
+}
+
+/// Apply the two independent toggle groups a PATCH may carry.
+fn apply_library_toggles(
+    store: &crate::Store,
+    id: &str,
+    body: &Value,
+    current: &crate::store::Library,
+) -> Result<(), Response> {
     if body.get("detect_intros").is_some() || body.get("enable_fingerprint").is_some() {
         let detect = body["detect_intros"]
             .as_bool()
@@ -200,12 +314,12 @@ pub(crate) async fn patch_library(
         let enable_fp = body["enable_fingerprint"]
             .as_bool()
             .unwrap_or(current.enable_fingerprint);
-        if let Err(error) = store.set_library_intro_settings(&id, detect, enable_fp) {
-            return err(
+        if let Err(error) = store.set_library_intro_settings(id, detect, enable_fp) {
+            return Err(err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "store.error",
                 &error.to_string(),
-            );
+            ));
         }
     }
     let switch_fields = [
@@ -223,45 +337,15 @@ pub(crate) async fn patch_library(
         let asc = body
             .get("auto_series_collections")
             .and_then(|v| v.as_bool());
-        if let Err(error) = store.set_library_switch_settings(&id, rw, gt, ec, efh, asc) {
-            return err(
+        if let Err(error) = store.set_library_switch_settings(id, rw, gt, ec, efh, asc) {
+            return Err(err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "store.error",
                 &error.to_string(),
-            );
+            ));
         }
     }
-    let match_rules = body["match_rules"].as_array().map(|arr| arr.clone());
-    let default_filter_id_update: Option<Option<&str>> = if body.get("default_filter_id").is_some()
-    {
-        Some(body["default_filter_id"].as_str().filter(|s| !s.is_empty()))
-    } else {
-        None
-    };
-    match store.update_library_full(
-        &id,
-        name.as_deref(),
-        refs.as_deref(),
-        access
-            .as_ref()
-            .map(|(mode, visible, ids)| (*mode, *visible, ids.as_slice())),
-        match_rules.as_deref(),
-        default_filter_id_update,
-    ) {
-        Ok(library) => match library_json(&store, &library) {
-            Ok(j) => ok(j).into_response(),
-            Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &e.to_string()),
-        },
-        Err(StoreError::Missing(_)) => missing_library(),
-        Err(StoreError::Protected(message)) => {
-            err(StatusCode::BAD_REQUEST, "library.protected", &message)
-        }
-        Err(error) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        ),
-    }
+    Ok(())
 }
 
 /// DELETE /libraries/{id} — remove the library and its roots. The last library
@@ -273,13 +357,22 @@ pub(crate) async fn delete_library(
     let preflight = state.library_work.freeze(&state.store, &id);
     match preflight {
         Ok(operation) => match crate::library_lifecycle::launch_library_removal(
-            &state, operation, tokio::runtime::Handle::current()) {
+            &state,
+            operation,
+            tokio::runtime::Handle::current(),
+        ) {
             Ok(operation) => (StatusCode::ACCEPTED, ok(json!(operation))).into_response(),
             Err(error) => err(StatusCode::INTERNAL_SERVER_ERROR, "library.removal", &error),
         },
         Err(StoreError::Missing(_)) => missing_library(),
-        Err(StoreError::Protected(message)) => err(StatusCode::CONFLICT, "library.protected", &message),
-        Err(error) => err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error.to_string()),
+        Err(StoreError::Protected(message)) => {
+            err(StatusCode::CONFLICT, "library.protected", &message)
+        }
+        Err(error) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store.error",
+            &error.to_string(),
+        ),
     }
 }
 
@@ -292,7 +385,11 @@ pub(crate) async fn set_default_library(
     match store.set_default_library(&id) {
         Ok(library) => match library_json(&store, &library) {
             Ok(j) => ok(j).into_response(),
-            Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &e.to_string()),
+            Err(e) => err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &e.to_string(),
+            ),
         },
         Err(StoreError::Missing(_)) => missing_library(),
         Err(error) => err(

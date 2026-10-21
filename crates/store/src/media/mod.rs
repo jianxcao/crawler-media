@@ -2,6 +2,7 @@ use domain::{Media, MediaId};
 use rusqlite::{OptionalExtension, params};
 
 pub(crate) mod alias;
+mod retired;
 pub use alias::MEDIA_SELECT;
 
 use crate::maps::{aliases_json, map_media};
@@ -49,7 +50,11 @@ fn write_media(conn: &rusqlite::Connection, media: &Media) -> Result<(), StoreEr
         || media.tvdb_id.is_some()
         || media.bangumi_id.is_some()
         || media.anilist_id.is_some();
-    let identity_state = if has_external { "confirmed" } else { "provisional" };
+    let identity_state = if has_external {
+        "confirmed"
+    } else {
+        "provisional"
+    };
     conn.execute(
         "UPDATE media SET title = ?2, year = ?3, original_title = ?4, aliases_display_json = ?5, identity_state = ?6 WHERE media_id = ?1",
         params![
@@ -106,7 +111,11 @@ impl Store {
             || media.tvdb_id.is_some()
             || media.bangumi_id.is_some()
             || media.anilist_id.is_some();
-        let identity_state = if has_external { "confirmed" } else { "provisional" };
+        let identity_state = if has_external {
+            "confirmed"
+        } else {
+            "provisional"
+        };
 
         for (source, ext_id) in [
             ("tmdb", media.tmdb_id.as_deref()),
@@ -232,19 +241,18 @@ impl Store {
     ) -> Result<Option<Media>, StoreError> {
         let year_i64 = year.map(i64::from);
         if year_i64.is_some() {
-            let sql = format!("{MEDIA_SELECT} WHERE m.title = ?1 AND m.kind = ?2 AND m.year IS ?3 LIMIT 1");
+            let sql = format!(
+                "{MEDIA_SELECT} WHERE m.title = ?1 AND m.kind = ?2 AND m.year IS ?3 LIMIT 1"
+            );
             return self
                 .library
-                .query_row(
-                    &sql,
-                    params![title, kind.as_str(), year_i64],
-                    map_media,
-                )
+                .query_row(&sql, params![title, kind.as_str(), year_i64], map_media)
                 .optional()
                 .map_err(Into::into);
         }
 
-        let sql_null = format!("{MEDIA_SELECT} WHERE m.title = ?1 AND m.kind = ?2 AND m.year IS NULL LIMIT 1");
+        let sql_null =
+            format!("{MEDIA_SELECT} WHERE m.title = ?1 AND m.kind = ?2 AND m.year IS NULL LIMIT 1");
         if let Some(media) = self
             .library
             .query_row(&sql_null, params![title, kind.as_str()], map_media)
@@ -253,7 +261,8 @@ impl Store {
             return Ok(Some(media));
         }
 
-        let sql_not_null = format!("{MEDIA_SELECT} WHERE m.title = ?1 AND m.kind = ?2 AND m.year IS NOT NULL");
+        let sql_not_null =
+            format!("{MEDIA_SELECT} WHERE m.title = ?1 AND m.kind = ?2 AND m.year IS NOT NULL");
         let mut stmt = self.library.prepare(&sql_not_null)?;
         let rows = stmt
             .query_map(params![title, kind.as_str()], map_media)?
@@ -334,7 +343,8 @@ impl Store {
     }
 
     pub fn resolve_scanned_media(&self, incoming: Media) -> Result<Media, StoreError> {
-        let mut matched_media_ids: std::collections::HashSet<MediaId> = std::collections::HashSet::new();
+        let mut matched_media_ids: std::collections::HashSet<MediaId> =
+            std::collections::HashSet::new();
         for (source, ext_id) in [
             ("tmdb", incoming.tmdb_id.as_deref()),
             ("douban", incoming.douban_id.as_deref()),
@@ -484,8 +494,14 @@ impl Store {
 
     pub fn delete_media(&self, id: MediaId) -> Result<(), StoreError> {
         let tx = self.library.unchecked_transaction()?;
-        tx.execute("DELETE FROM media_aliases WHERE media_id = ?1", params![id.to_string()])?;
-        tx.execute("DELETE FROM media WHERE media_id = ?1", params![id.to_string()])?;
+        tx.execute(
+            "DELETE FROM media_aliases WHERE media_id = ?1",
+            params![id.to_string()],
+        )?;
+        tx.execute(
+            "DELETE FROM media WHERE media_id = ?1",
+            params![id.to_string()],
+        )?;
         tx.commit()?;
         Ok(())
     }

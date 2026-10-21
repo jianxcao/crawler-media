@@ -21,6 +21,7 @@ use crate::{Store, StoreError};
 
 mod locale;
 mod roots;
+pub mod integrity;
 
 /// A requested root set and/or display locale for one Library.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +47,33 @@ pub(crate) struct ReconfigurationPlan {
 pub(crate) struct OperationCursor {
     #[serde(default)]
     pub last_file_id: Option<String>,
+}
+
+/// Read-only view of one persisted operation: its Library, kind, resumable cursor and
+/// last update. See [`Store::library_operation_view`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct LibraryOperationView {
+    pub operation_id: String,
+    pub library_id: String,
+    /// `"roots"` or `"locale"`; see [`LibraryReconfiguration`].
+    pub kind: String,
+    /// Same value as [`LibraryOperationView::state`]; kept because the HTTP contract
+    /// publishes both names.
+    pub phase: String,
+    pub state: String,
+    /// Last applied batch position, or `None` before the first batch.
+    pub cursor: Option<serde_json::Value>,
+    pub error: Option<String>,
+    pub updated_at_ms: i64,
+}
+
+fn decode_operation_cursor(raw: Option<String>) -> Result<Option<serde_json::Value>, StoreError> {
+    match raw.filter(|raw| !raw.trim().is_empty()) {
+        Some(raw) => serde_json::from_str(&raw)
+            .map(Some)
+            .map_err(|error| StoreError::Invalid(format!("operation cursor: {error}"))),
+        None => Ok(None),
+    }
 }
 
 impl Store {
@@ -112,7 +140,8 @@ impl Store {
                 library,
                 kind,
                 request.expected_revision,
-                serde_json::to_string(&plan).map_err(|error| StoreError::Invalid(error.to_string()))?,
+                serde_json::to_string(&plan)
+                    .map_err(|error| StoreError::Invalid(error.to_string()))?,
                 now_ms,
             ],
         )?;
@@ -180,6 +209,11 @@ impl Store {
                 batch,
             ),
             "locale" => locale::apply_locale(&tx, &library, plan.display_locale.as_deref()),
+            "integrity" => {
+                let integrity_plan: integrity::IntegrityPlan = serde_json::from_str(&plan_json)
+                    .map_err(|e| StoreError::Invalid(format!("integrity plan: {e}")))?;
+                integrity::apply_integrity_batch(&tx, &library, &integrity_plan, &mut cursor.last_file_id, batch)
+            }
             other => Err(StoreError::Invalid(format!(
                 "library operation kind {other} is not a reconfiguration"
             ))),
@@ -272,6 +306,65 @@ impl Store {
             })),
             None => Ok(None),
         }
+    }
+
+    /// Read-only projection of one operation, including its resumable cursor.
+    ///
+    /// [`Store::get_library_operation`] predates the cursor and is already consumed by
+    /// three callers, so the richer view is a separate additive read: it never writes.
+    pub fn library_operation_view(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<LibraryOperationView>, StoreError> {
+        let row: Option<(String, String, String, Option<String>, Option<String>, i64)> = self
+            .library
+            .query_row(
+                "SELECT library_id, kind, state, cursor_json, error, updated_at_ms
+                 FROM library_operations WHERE operation_id = ?1",
+                params![operation_id],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((library_id, kind, state, cursor, error, updated_at_ms)) = row else {
+            return Ok(None);
+        };
+        Ok(Some(LibraryOperationView {
+            operation_id: operation_id.to_string(),
+            library_id,
+            kind,
+            phase: state.clone(),
+            state,
+            cursor: decode_operation_cursor(cursor)?,
+            error,
+            updated_at_ms,
+        }))
+    }
+
+    /// The operation that currently owns this Library, if any is still running.
+    ///
+    /// `libraries.lifecycle_state = 'reindexing'` is the freeze verdict; this finds the
+    /// row that explains it, so a refused write can hand back its `operation_id`.
+    pub fn active_library_operation(&self, library_id: &str) -> Result<Option<String>, StoreError> {
+        self.library
+            .query_row(
+                "SELECT operation_id FROM library_operations
+                 WHERE library_id = ?1 AND state NOT IN ('succeeded', 'failed')
+                 ORDER BY updated_at_ms DESC, operation_id
+                 LIMIT 1",
+                params![library_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     fn read_library_operation(
