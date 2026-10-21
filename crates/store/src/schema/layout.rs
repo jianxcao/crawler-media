@@ -53,9 +53,18 @@ pub fn validate_database_layout(
     Ok(())
 }
 
+/// 五文件干净切换后 `cache.db` 只承载外部响应体：它是派生数据、不是事实来源
+/// （`docs/superpowers/specs/2026-10-18-source-separated-cache.md`）。
+/// 切换前布局（`bd6c3c8` 之前的 `*_cache_recent_idx` 索引名）按计划被**拒绝**，
+/// 不提供兼容视图、双读或旧数据导入；因此错误信息必须直接给出可执行的停机重建入口。
 pub fn validate_cache_layout(conn: &Connection) -> Result<(), StoreError> {
-    media::response_cache::validate_schema(conn)
-        .map_err(|error| StoreError::Invalid(format!("cache database schema mismatch: {error}")))
+    media::response_cache::validate_schema(conn).map_err(|error| {
+        StoreError::Invalid(format!(
+            "cache database schema mismatch: {error}. this cache.db predates the storage clean cutover; \
+stop the service and rebuild the derived cache with \
+`bash scripts/storage-cutover-rebuild.sh --data-dir <data-dir>` (it backs the old file up and imports no old data; see docs/deploy.md)"
+        ))
+    })
 }
 
 pub fn preflight_check_existing_file(

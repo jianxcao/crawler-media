@@ -119,6 +119,26 @@ Site 凭证（cookie / API key / RSS URL）按 [ADR-0003](<adr/0003-plaintext-si
 
 不要在运行时复制单个主体文件忽略WAL当备份；采用SQLite online backup或停机后对有关文件的一致备份。不要手工删除DB/WAL/SHM来缩空间。
 
+### 干净切换：旧 `cache.db` 的停机重建（不导入旧数据）
+
+**症状**：启动直接失败，日志末尾为 `invalid argument: cache database schema mismatch: legacy format error: cache schema is missing required index idx_*_cache_retention`。
+
+**原因**：`bd6c3c8` 把 per-source cache 的索引名从 `*_cache_recent_idx` / `*_cache_retention_idx` 收敛为 `idx_*_cache_fetched` / `idx_*_cache_retention`。切换前创建的 `cache.db` 主体身份（`application_id=1129139251`、`user_version=1`）与六张源表都在，只有索引名是旧布局；Store 启动按计划**拒绝**旧布局——不提供兼容视图、双读或旧数据导入器，所以不会自动修复。
+
+**处置**（只重建派生缓存）：
+
+```bash
+./stop-test.sh 2>/dev/null || true          # 先停服
+bash scripts/storage-cutover-rebuild.sh --data-dir data/live
+./start-test.sh
+```
+
+脚本把 `cache.db`（含 `-wal`/`-shm`）整体移到 `<data>/backups/cache-cutover-<时间戳>/`，**不删除**；重启后 Store 以当前 DDL 新建 `cache.db`。回滚即把备份目录里的文件移回原位。
+
+**为什么无损**：`cache.db` 只有外部响应体，清空/重建后 Library 列表、筛选、采用图片、播放与观看进度仍离线可用（见 [cache 规范](<superpowers/specs/2026-10-18-source-separated-cache.md>)）。事实库 `library.db` / `app.db` / `subscribe.db` / `jobs.db` **不要**重建，脚本也不触碰它们；它们的布局失配属于存储迁移问题，须按执行计划另行处理并先备份。
+
+**注意**：脚本在检测到该文件仍被进程持有（`lsof`）时默认拒绝执行；缺少 `sqlite3` 时无法只读确认布局，会直接按“需重建”处理（仅影响派生缓存）。`app.db` 等事实库若报 `database layout mismatch`，本脚本不适用。
+
 
 ### Obscura 受管浏览器补充（r9）
 - **预置方式**（`CRAWLER_MEDIA_OBSCURA_INSTALL=preinstalled`，默认值）：归档与部署者清单方式及其不同信任边界见上文「安装策略」，不要求同时准备两套输入。安装器会核对已有安装标记与二进制 hash，不能把同目录手写清单视为防篡改证据。

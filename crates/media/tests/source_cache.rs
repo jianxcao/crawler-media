@@ -83,3 +83,42 @@ fn unknown_source_cannot_become_sql_identifier() {
     assert!(CacheSource::from_str("unknown").is_err());
     assert!(CacheSource::from_str("tmdb_cache; DROP TABLE tmdb_cache").is_err());
 }
+
+/// 2026-10-18 之前的 cache.db 声明 `*_cache_recent_idx` / `*_cache_retention_idx`，
+/// 当前 DDL 声明 `idx_*_cache_fetched` / `idx_*_cache_retention`。
+fn rewrite_indexes_to_pre_cutover_names(path: &std::path::Path) {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    for table in ["tmdb", "douban", "tvdb", "bangumi", "anilist", "fanart"] {
+        conn.execute_batch(&format!(
+            "DROP INDEX idx_{table}_cache_retention;
+             CREATE INDEX {table}_cache_recent_idx ON {table}_cache(fetched_at DESC, entry_id ASC);
+             CREATE INDEX {table}_cache_retention_idx ON {table}_cache(fetched_at ASC, entry_id ASC);"
+        ))
+        .unwrap();
+    }
+}
+
+/// 切换前的索引名必须仍被拒绝（干净切换拒绝旧布局），且拒绝过程不得丢掉已缓存的行：
+/// cache.db 是派生数据，运维按 runbook 重建前原文件保持可读以备回滚。
+#[test]
+fn pre_cutover_index_names_are_rejected_without_losing_rows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("cache.db");
+    {
+        let conn = open(&db_path).expect("open cache.db");
+        put(&conn, CacheSource::Tmdb, "/movie/7", "body_kept", 1000, None).expect("put");
+    }
+    rewrite_indexes_to_pre_cutover_names(&db_path);
+
+    let error = open(&db_path).expect_err("pre-cutover index set must be rejected");
+    assert!(
+        error.to_string().contains("missing required index idx_tmdb_cache_retention"),
+        "unexpected error: {error}"
+    );
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    assert_eq!(
+        get(&conn, CacheSource::Tmdb, "/movie/7").expect("get").expect("row must survive").body,
+        "body_kept"
+    );
+}

@@ -94,6 +94,55 @@ fn malformed_cache_layouts_are_rejected_without_mutation() {
     let after_index_only = cache_schema(&Connection::open(&index_only_path).unwrap());
     assert_eq!(before_index_only, after_index_only);
 }
+
+/// 2026-10-18 之前的 cache.db 声明 `*_cache_recent_idx` / `*_cache_retention_idx`，
+/// 当前 DDL 声明 `idx_*_cache_fetched` / `idx_*_cache_retention`。
+fn rewrite_cache_indexes_to_pre_cutover_names(path: &Path) {
+    let conn = Connection::open(path).unwrap();
+    for table in ["tmdb", "douban", "tvdb", "bangumi", "anilist", "fanart"] {
+        conn.execute_batch(&format!(
+            "DROP INDEX idx_{table}_cache_retention;
+             CREATE INDEX {table}_cache_recent_idx ON {table}_cache(fetched_at DESC, entry_id ASC);
+             CREATE INDEX {table}_cache_retention_idx ON {table}_cache(fetched_at ASC, entry_id ASC);"
+        ))
+        .unwrap();
+    }
+}
+
+/// 切换前的 cache.db（旧索引名）必须被拒绝为“切换前布局”，错误里要给出可执行的停机重建指引；
+/// 检测是只读的，不得改动派生缓存（重建前保留原文件以备回滚）。
+#[test]
+fn pre_cutover_cache_layout_is_rejected_with_rebuild_guidance() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    {
+        let store = Store::open(&data_dir).unwrap();
+        store
+            .put_catalog_cache("tmdb", "/movie/100", "cached_body", 100, Some(200))
+            .unwrap();
+    }
+    let cache_path = data_dir.join("cache.db");
+    rewrite_cache_indexes_to_pre_cutover_names(&cache_path);
+    let before = cache_schema(&Connection::open(&cache_path).unwrap());
+
+    let error = match Store::open(&data_dir) {
+        Ok(_) => panic!("pre-cutover cache layout must not start the store"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("idx_tmdb_cache_retention"),
+        "error must name the missing declared index: {message}"
+    );
+    assert!(
+        message.contains("storage-cutover-rebuild.sh"),
+        "error must point at the stop-service rebuild runbook: {message}"
+    );
+
+    let after = cache_schema(&Connection::open(&cache_path).unwrap());
+    assert_eq!(before, after, "rejecting a pre-cutover cache must not mutate it");
+}
+
 #[test]
 fn fresh_layout_reopens_without_old_files() {
     let tmp = tempfile::tempdir().unwrap();
