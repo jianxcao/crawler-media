@@ -10,7 +10,7 @@ use std::str::FromStr;
 
 use domain::{LibraryId, MediaId, MediaKind, UserId};
 use rusqlite::types::Value as SqlValue;
-use rusqlite::{Row, params_from_iter};
+use rusqlite::{OptionalExtension, Row, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 
 use super::super::{Store, StoreError};
@@ -48,16 +48,18 @@ where
 /// Text column that must hold a known media kind: a value outside the enum is a broken row,
 /// not a movie.
 fn kind_from(row: &Row<'_>, index: usize) -> rusqlite::Result<MediaKind> {
-    row.get::<_, String>(index)?.parse().map_err(|kind: String| {
-        rusqlite::Error::FromSqlConversionFailure(
-            index,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("invalid media kind: {kind}"),
-            )),
-        )
-    })
+    row.get::<_, String>(index)?
+        .parse()
+        .map_err(|kind: String| {
+            rusqlite::Error::FromSqlConversionFailure(
+                index,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid media kind: {kind}"),
+                )),
+            )
+        })
 }
 pub(crate) fn item_from_row(row: &Row<'_>) -> rusqlite::Result<LibraryItem> {
     let lib_id: LibraryId = id_from(row, 0)?;
@@ -167,7 +169,10 @@ impl ItemQuerySql {
 
     /// `SELECT <columns> FROM <from> WHERE <where>` with no ordering or paging applied.
     fn select(&self, columns: &str) -> String {
-        format!("SELECT {columns} FROM {} WHERE {}", self.from, self.where_sql)
+        format!(
+            "SELECT {columns} FROM {} WHERE {}",
+            self.from, self.where_sql
+        )
     }
 }
 
@@ -329,7 +334,9 @@ impl BrowseFilter {
         ];
         for decade in &self.decades {
             if !DECADES.contains(&decade.as_str()) {
-                return Err(StoreError::Invalid(format!("invalid decade filter: {decade}")));
+                return Err(StoreError::Invalid(format!(
+                    "invalid decade filter: {decade}"
+                )));
             }
         }
         for bucket in &self.runtimes {
@@ -341,12 +348,16 @@ impl BrowseFilter {
         }
         for value in &self.stock {
             if !STOCK.contains(&value.as_str()) {
-                return Err(StoreError::Invalid(format!("invalid stock filter: {value}")));
+                return Err(StoreError::Invalid(format!(
+                    "invalid stock filter: {value}"
+                )));
             }
         }
         if let Some(watch) = &self.watch {
             if !WATCH.contains(&watch.as_str()) {
-                return Err(StoreError::Invalid(format!("invalid watch filter: {watch}")));
+                return Err(StoreError::Invalid(format!(
+                    "invalid watch filter: {watch}"
+                )));
             }
         }
         if let Some(identity) = &self.identity {
@@ -511,6 +522,26 @@ impl Store {
     /// One page of library items: filters and ordering applied in SQL, `total` from the same
     /// predicate, and a keyset cursor when the page was truncated.
     pub fn library_item_page(&self, query: &LibraryQuery) -> Result<ItemPage, StoreError> {
+        let (integrity, op_id): (String, Option<String>) = self
+            .library
+            .query_row(
+                "SELECT l.integrity_state,
+                        (SELECT operation_id FROM library_operations WHERE library_id = l.library_id AND kind = 'integrity' AND state IN ('failed', 'succeeded') ORDER BY updated_at_ms DESC LIMIT 1)
+                 FROM libraries l WHERE l.library_id = ?1",
+                params![query.library_id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or_else(|| ("unknown".into(), None));
+
+        if integrity == "failed" {
+            let op_str = op_id.unwrap_or_default();
+            return Err(StoreError::Protected(format!(
+                "library.integrity: library {} integrity check failed ({op_str})",
+                query.library_id
+            )));
+        }
+
         let base = ItemQuerySql::build(query.library_id, &query.filter, query.user_id)?;
         let total = if query.include_total {
             Some(count_items(self, &base)?)
@@ -564,7 +595,10 @@ impl Store {
                 )
             }
         };
-        let kinds: Vec<KeyKind> = spec[..spec.len() - 1].iter().map(|term| term.kind).collect();
+        let kinds: Vec<KeyKind> = spec[..spec.len() - 1]
+            .iter()
+            .map(|term| term.kind)
+            .collect();
         let page = read_page(
             self,
             &sql,
@@ -648,9 +682,8 @@ impl Store {
     ) -> Result<(), StoreError> {
         let mut bindings = Bindings::new();
         let library = bindings.push(library_id.to_string().into());
-        let list = bindings.placeholders(media_ids.len(), |index| {
-            media_ids[index].to_string().into()
-        });
+        let list =
+            bindings.placeholders(media_ids.len(), |index| media_ids[index].to_string().into());
         let sql = format!(
             "SELECT media_id, season FROM library_units \
              WHERE library_id = {library} AND season >= 0 AND media_id IN ({list}) \
@@ -680,9 +713,8 @@ impl Store {
     ) -> Result<(), StoreError> {
         let preferred_locale = super::details::library_display_locale(self, library_id)?;
         let mut bindings = Bindings::new();
-        let list = bindings.placeholders(media_ids.len(), |index| {
-            media_ids[index].to_string().into()
-        });
+        let list =
+            bindings.placeholders(media_ids.len(), |index| media_ids[index].to_string().into());
         let sql = format!(
             "SELECT m.media_id, m.locale, m.details_json, s.normalized_json \
              FROM media_metadata m \
@@ -737,9 +769,8 @@ impl Store {
         let mut bindings = Bindings::new();
         let library = bindings.push(library_id.to_string().into());
         let user = bindings.push(user_id.to_string().into());
-        let list = bindings.placeholders(media_ids.len(), |index| {
-            media_ids[index].to_string().into()
-        });
+        let list =
+            bindings.placeholders(media_ids.len(), |index| media_ids[index].to_string().into());
         let sql = format!(
             "SELECT media_id, favorite FROM user_library_items \
              WHERE library_id = {library} AND user_id = {user} AND media_id IN ({list})"
@@ -782,7 +813,8 @@ impl Store {
     ) -> Result<(), StoreError> {
         let mut bindings = Bindings::new();
         let library = bindings.push(library_id.to_string().into());
-        let list = bindings.placeholders(media_ids.len(), |index| media_ids[index].to_string().into());
+        let list =
+            bindings.placeholders(media_ids.len(), |index| media_ids[index].to_string().into());
         let sql = format!(
             "SELECT f.media_id, f.file_id, u.season, u.episode \
              FROM library_files f \
@@ -793,11 +825,18 @@ impl Store {
         );
         let mut statement = self.library.prepare(&sql)?;
         let rows = statement.query_map(params_from_iter(bindings.values()), |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
         })?;
         for row in rows {
             let (media, file, season, episode) = row?;
-            let (Ok(media_id), Ok(file_id)) = (media.parse::<MediaId>(), file.parse()) else { continue };
+            let (Ok(media_id), Ok(file_id)) = (media.parse::<MediaId>(), file.parse()) else {
+                continue;
+            };
             stills.push(LibraryStill {
                 media_id,
                 file_id,
@@ -807,16 +846,18 @@ impl Store {
         }
         Ok(())
     }
-
 }
 
 fn count_items(store: &Store, base: &ItemQuerySql) -> Result<u64, StoreError> {
-    let sql = format!("SELECT COUNT(*) FROM {} WHERE {}", base.from, base.where_sql);
-    let count: i64 = store
-        .library
-        .query_row(&sql, params_from_iter(base.bindings.iter().cloned()), |row| {
-            row.get(0)
-        })?;
+    let sql = format!(
+        "SELECT COUNT(*) FROM {} WHERE {}",
+        base.from, base.where_sql
+    );
+    let count: i64 = store.library.query_row(
+        &sql,
+        params_from_iter(base.bindings.iter().cloned()),
+        |row| row.get(0),
+    )?;
     Ok(count.max(0) as u64)
 }
 

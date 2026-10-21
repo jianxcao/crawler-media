@@ -19,9 +19,9 @@ use serde::{Deserialize, Serialize};
 use crate::playback::types::OperationStatus;
 use crate::{Store, StoreError};
 
+pub mod integrity;
 mod locale;
 mod roots;
-pub mod integrity;
 
 /// A requested root set and/or display locale for one Library.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,7 +212,16 @@ impl Store {
             "integrity" => {
                 let integrity_plan: integrity::IntegrityPlan = serde_json::from_str(&plan_json)
                     .map_err(|e| StoreError::Invalid(format!("integrity plan: {e}")))?;
-                integrity::apply_integrity_batch(&tx, &library, &integrity_plan, &mut cursor.last_file_id, batch)
+                let res = integrity::apply_integrity_batch(
+                    &tx,
+                    &library,
+                    &integrity_plan,
+                    operation_id,
+                    batch,
+                    now_ms,
+                );
+                tx.commit()?;
+                return res;
             }
             other => Err(StoreError::Invalid(format!(
                 "library operation kind {other} is not a reconfiguration"
