@@ -38,7 +38,7 @@ pub fn seed_defaults(
         ],
     )?;
     let filter_id = uuid::Uuid::new_v4().to_string();
-    // JSON atom form (see maps::serialize_atoms); the legacy DSL is still read.
+    // JSON atom form only (see maps::serialize_atoms): rows in the older DSL shape are refused.
     let atoms = r#"[{"priority":100,"rule":"resolution","exclude":false,"value":"2160p"},{"priority":50,"rule":"resolution","exclude":false,"value":"1080p"}]"#;
     app.execute(
         "INSERT INTO filters (id, name, atoms_json)

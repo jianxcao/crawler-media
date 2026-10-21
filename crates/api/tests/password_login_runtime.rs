@@ -86,10 +86,6 @@ impl PasswordEngine for BlockingEngine {
         self.gate.enter_and_wait();
         true
     }
-
-    fn hash(&self, password: &str) -> Result<String, String> {
-        store::password::hash_password(password)
-    }
 }
 
 fn setup(root: &Path, gate: Arc<Gate>, concurrency: usize) -> (ApiState, axum::Router, UserId) {

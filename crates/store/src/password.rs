@@ -12,19 +12,18 @@ pub fn hash_password(password: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Verify a password against a stored credential.
+///
+/// Storage only holds Argon2id PHC strings. A row in any other shape is a
+/// pre-cutover leftover: it fails closed instead of being compared verbatim,
+/// so a stale plaintext row can neither log in nor be silently upgraded.
 pub fn verify_password(password: &str, stored: &str) -> bool {
-    if is_argon2_hash(stored) {
-        if let Ok(parsed_hash) = PasswordHash::new(stored) {
-            Argon2::default()
-                .verify_password(password.as_bytes(), &parsed_hash)
-                .is_ok()
-        } else {
-            false
-        }
-    } else {
-        // 向前兼容存量明文密码
-        password == stored
-    }
+    let Ok(parsed_hash) = PasswordHash::new(stored) else {
+        return false;
+    };
+    Argon2::default()
+        .verify_password(password.as_bytes(), &parsed_hash)
+        .is_ok()
 }
 
 pub fn is_argon2_hash(stored: &str) -> bool {
@@ -45,10 +44,15 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_plaintext_compatibility() {
+    fn test_plaintext_row_fails_closed() {
         let plaintext = "legacy-plain-pwd";
         assert!(!is_argon2_hash(plaintext));
-        assert!(verify_password(plaintext, plaintext));
+        assert!(!verify_password(plaintext, plaintext));
         assert!(!verify_password("wrong-password", plaintext));
+    }
+
+    #[test]
+    fn test_malformed_argon2_row_fails_closed() {
+        assert!(!verify_password("secret", "$argon2id$not-a-phc-string"));
     }
 }

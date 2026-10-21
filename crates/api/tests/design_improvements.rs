@@ -1,6 +1,6 @@
 //! Regression tests for the P1/P2 design work: DB-sourced path maps,
-//! filter-atom JSON storage with legacy DSL compatibility, and the legacy
-//! `playback_progress` table migration.
+//! filter-atom JSON storage (legacy DSL rows are refused, not decoded), and the
+//! legacy `playback_progress` table migration.
 
 use api::{ChosenDownloader, DownloaderEnv, Store, choose_downloader};
 use domain::{AtomRule, Filter, FilterAtom, FilterId};
@@ -133,35 +133,29 @@ fn filter_atoms_round_trip_through_storage() {
 }
 
 #[test]
-fn legacy_dsl_filter_rows_still_load() {
+fn legacy_dsl_filter_rows_are_refused() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let id = FilterId::new();
-    // Write the pre-migration DSL payload directly.
     let conn = rusqlite::Connection::open(dir.path().join("app.db")).unwrap();
     conn.execute(
         "INSERT INTO filters (id, name, atoms_json) VALUES (?1, ?2, ?3)",
-        rusqlite::params![
-            id.to_string(),
-            "旧库",
-            "100:resolution=2160p|50:!hr|30:size=1000-50000"
-        ],
+        rusqlite::params![id.to_string(), "旧库", "100:resolution=2160p|50:!hr"],
     )
     .unwrap();
     drop(conn);
 
-    let loaded = store.get_filter(id).unwrap().unwrap();
-    assert_eq!(loaded.atoms.len(), 3);
-    assert_eq!(loaded.atoms[0].rule, AtomRule::Resolution("2160p".into()));
-    assert!(!loaded.atoms[0].exclude);
-    assert_eq!(loaded.atoms[1].rule, AtomRule::Hr);
-    assert!(loaded.atoms[1].exclude);
-    assert_eq!(
-        loaded.atoms[2].rule,
-        AtomRule::Size {
-            min_mb: Some(1000),
-            max_mb: Some(50_000)
-        }
+    // 切割后旧 shape 必须被拒，且不得静默退化成空 atoms。
+    let err = store
+        .get_filter(id)
+        .expect_err("legacy DSL rows must be refused");
+    assert!(
+        err.to_string().contains("legacy shape"),
+        "expected a legacy-shape rejection, got {err}"
+    );
+    assert!(
+        store.list_filters().is_err(),
+        "listing must surface the unreadable row instead of dropping it"
     );
 }
 

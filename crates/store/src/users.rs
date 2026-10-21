@@ -601,17 +601,7 @@ impl Store {
             return Ok(None);
         }
 
-        let new_hash = if !crate::password::is_argon2_hash(&stored_pw) {
-            let hash = crate::password::hash_password(password).map_err(|e| {
-                tracing::error!(user_id = %uid_str, error = %e, "存量明文口令哈希生成失败");
-                StoreError::PasswordHash(e)
-            })?;
-            Some(hash)
-        } else {
-            None
-        };
-
-        self.finish_verified_login(&uid_str, &stored_pw, new_hash.as_deref())
+        self.finish_verified_login(&uid_str, &stored_pw)
     }
 
     /// 读取密码校验所需的不可变登录快照（用户 id + 当时观察到的 password 列）。
@@ -641,37 +631,31 @@ impl Store {
         }))
     }
 
-    /// 在同一个事务中完成 CAS 密码升级（若需要）并原子签发会话 token。
-    /// 若处于升级路径且并发修改导致 CAS 未击中，返回 Ok(None) 并回滚，绝不签发过期凭据。
+    /// 在同一个事务中重查登录凭据并原子签发会话 token。
+    /// 校验必须在 Store 锁之外完成；这里只接受 Argon2 PHC 观测值（明文等旧行
+    /// 一律拒绝签发），若用户口令/启用状态在校验期间变更，返回 Ok(None) 并回滚，
+    /// 绝不签发过期凭据。
     pub fn finish_verified_login(
         &self,
         user_id: &str,
         observed_password: &str,
-        new_hash: Option<&str>,
     ) -> Result<Option<String>, StoreError> {
+        if !crate::password::is_argon2_hash(observed_password) {
+            tracing::warn!(user_id = %user_id, "非 Argon2 观测凭据拒绝签发会话 token");
+            return Ok(None);
+        }
         let tx = self.app.unchecked_transaction()?;
-        if let Some(hash) = new_hash {
-            let changed = tx.execute(
-                "UPDATE users SET password = ?1 WHERE id = ?2 AND password = ?3 AND enabled = 1",
-                params![hash, user_id, observed_password],
-            )?;
-            if changed == 0 {
-                tracing::warn!(user_id = %user_id, "存量密码升级 CAS 冲突或用户已被禁用，放弃登录会话签发");
-                return Ok(None);
-            }
-        } else {
-            let active = tx
-                .query_row(
-                    "SELECT 1 FROM users WHERE id = ?1 AND password = ?2 AND enabled = 1",
-                    params![user_id, observed_password],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some();
-            if !active {
-                tracing::warn!(user_id = %user_id, "用户状态或口令在校验期间发生变更，取消会话签发");
-                return Ok(None);
-            }
+        let active = tx
+            .query_row(
+                "SELECT 1 FROM users WHERE id = ?1 AND password = ?2 AND enabled = 1",
+                params![user_id, observed_password],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !active {
+            tracing::warn!(user_id = %user_id, "用户状态或口令在校验期间发生变更，取消会话签发");
+            return Ok(None);
         }
 
         let token = Uuid::new_v4().simple().to_string();

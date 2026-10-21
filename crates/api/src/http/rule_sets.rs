@@ -12,6 +12,7 @@ use std::str::FromStr;
 use crate::http::{err, ok, ok_list};
 use crate::management::ApiState;
 use crate::settings_keys;
+use store::StoreError;
 
 #[derive(Deserialize)]
 pub(crate) struct RuleSetInput {
@@ -152,6 +153,9 @@ pub(crate) async fn list_rule_sets(State(state): State<ApiState>) -> Response {
     let store = state.store.lock();
     let filters = match store.list_filters() {
         Ok(filters) => filters,
+        Err(StoreError::Invalid(message)) => {
+            return err(StatusCode::BAD_REQUEST, "rule_set.invalid", &message);
+        }
         Err(error) => {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -234,8 +238,21 @@ pub(crate) async fn get_rule_set(
         }
     };
     let store = state.store.lock();
-    let Some(filter) = store.get_filter(id).ok().flatten() else {
-        return err(StatusCode::NOT_FOUND, "rule_set.missing", "规则组不存在");
+    let filter = match store.get_filter(id) {
+        Ok(Some(filter)) => filter,
+        Ok(None) => {
+            return err(StatusCode::NOT_FOUND, "rule_set.missing", "规则组不存在");
+        }
+        Err(StoreError::Invalid(message)) => {
+            return err(StatusCode::BAD_REQUEST, "rule_set.invalid", &message);
+        }
+        Err(error) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
     };
     let is_default = store
         .get_setting(settings_keys::DEFAULT_FILTER_ID)

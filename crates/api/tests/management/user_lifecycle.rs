@@ -366,30 +366,20 @@ async fn user_password_is_stored_as_argon2_hash() {
 }
 
 #[tokio::test]
-async fn legacy_plaintext_password_is_transparently_upgraded_on_login() {
+async fn legacy_plaintext_password_row_is_rejected_without_being_rewritten() {
     let tmp = tempfile::tempdir().unwrap();
     let app = app(&tmp);
     let data_db = tmp.path().join("data").join("app.db");
 
-    // Simulate an existing database with a legacy unhashed plaintext password
+    // 存量旧 shape：库里仍是明文口令行。
     let conn = Connection::open(&data_db).unwrap();
     let user_id = domain::UserId::new();
     conn.execute(
         "INSERT INTO users (id, login, password, enabled, role) VALUES (?1, 'legacy-user', 'plain-text-secret', 1, 'member')",
         params![user_id.to_string()],
-    ).unwrap();
+    )
+    .unwrap();
 
-    // Verify it is plain text initially
-    let initial_pw: String = conn
-        .query_row(
-            "SELECT password FROM users WHERE id = ?1",
-            params![user_id.to_string()],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(initial_pw, "plain-text-secret");
-
-    // Login with the plaintext password succeeds
     let login_res = app
         .clone()
         .oneshot(request(
@@ -400,32 +390,29 @@ async fn legacy_plaintext_password_is_transparently_upgraded_on_login() {
         ))
         .await
         .unwrap();
-    assert_eq!(login_res.status(), StatusCode::OK);
+    assert_eq!(
+        login_res.status(),
+        StatusCode::UNAUTHORIZED,
+        "明文行必须失败关闭，而不是校验通过后被透明升级"
+    );
 
-    // Check that the password in database has been automatically upgraded to Argon2id!
-    let upgraded_pw: String = conn
+    // 被拒的行不得被静默改写，也不得签发任何 token。
+    let stored: String = conn
         .query_row(
             "SELECT password FROM users WHERE id = ?1",
             params![user_id.to_string()],
             |row| row.get(0),
         )
         .unwrap();
-    assert!(
-        upgraded_pw.starts_with("$argon2id$"),
-        "password must be upgraded to Argon2id hash: {upgraded_pw}"
-    );
-
-    // Next login with the same password still succeeds using the upgraded hash
-    let login_again = app
-        .oneshot(request(
-            "POST",
-            "/api/v1/auth/login",
-            None,
-            json!({ "username": "legacy-user", "password": "plain-text-secret" }),
-        ))
-        .await
+    assert_eq!(stored, "plain-text-secret");
+    let tokens: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM user_tokens WHERE user_id = ?1",
+            params![user_id.to_string()],
+            |row| row.get(0),
+        )
         .unwrap();
-    assert_eq!(login_again.status(), StatusCode::OK);
+    assert_eq!(tokens, 0, "被拒的登录不得留下 session token");
 }
 
 #[tokio::test]

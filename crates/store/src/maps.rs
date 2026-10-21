@@ -158,9 +158,9 @@ pub(super) fn map_site(row: &rusqlite::Row<'_>) -> rusqlite::Result<Site> {
 
 /// Serialize filter atoms as a JSON array.
 ///
-/// This replaced the legacy compact DSL (`100:resolution=2160p|50:source=bluray`).
-/// `parse_atoms` still reads the old form so existing rows keep working; every
-/// write after this migration produces JSON.
+/// This replaced the compact DSL (`100:resolution=2160p|50:source=bluray`).
+/// Storage is JSON-only: `parse_atoms` refuses the old form rather than decoding
+/// it, so every read and write after the cutover speaks the same shape.
 pub(super) fn serialize_atoms(atoms: &[FilterAtom]) -> String {
     let values: Vec<serde_json::Value> = atoms
         .iter()
@@ -204,17 +204,22 @@ pub(super) fn serialize_atoms(atoms: &[FilterAtom]) -> String {
 
 /// Parse filter atoms from storage.
 ///
-/// Accepts both the JSON form written since this migration and the legacy
-/// compact DSL, so a database written by an older build still loads.
-pub(super) fn parse_atoms(raw: &str) -> Vec<FilterAtom> {
+/// Storage only holds the JSON array form written by `serialize_atoms`. Any
+/// other shape (the pre-cutover compact DSL included) is rejected instead of
+/// being decoded on a best-effort basis, so a stale row surfaces as an error
+/// rather than as a silently different rule set.
+pub(super) fn parse_atoms(raw: &str) -> Result<Vec<FilterAtom>, StoreError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    if trimmed.starts_with('[') {
-        return parse_atoms_json(trimmed);
+    if !trimmed.starts_with('[') {
+        return Err(StoreError::Invalid(
+            "filter atoms use a legacy shape; only the JSON array form is read".into(),
+        ));
     }
-    parse_atoms_dsl(trimmed)
+    parse_atoms_json(trimmed)
+        .ok_or_else(|| StoreError::Invalid("filter atoms JSON array is malformed".into()))
 }
 
 /// Text value of a JSON atom payload; accepts a string or a number.
@@ -226,13 +231,14 @@ fn atom_text(value: &serde_json::Value) -> String {
     }
 }
 
-fn parse_atoms_json(raw: &str) -> Vec<FilterAtom> {
-    let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(raw) else {
-        return Vec::new();
+fn parse_atoms_json(raw: &str) -> Option<Vec<FilterAtom>> {
+    let serde_json::Value::Array(items) = serde_json::from_str::<serde_json::Value>(raw).ok()? else {
+        return None;
     };
-    items
-        .into_iter()
-        .filter_map(|item| {
+    Some(
+        items
+            .into_iter()
+            .filter_map(|item| {
             let priority = item["priority"].as_i64()? as i32;
             let kind = item["rule"].as_str()?;
             let exclude = item["exclude"].as_bool().unwrap_or(false);
@@ -264,59 +270,8 @@ fn parse_atoms_json(raw: &str) -> Vec<FilterAtom> {
                 exclude,
             })
         })
-        .collect()
-}
-
-/// Legacy compact DSL: `100:resolution=2160p|50:!source=cam`.
-fn parse_atoms_dsl(raw: &str) -> Vec<FilterAtom> {
-    raw.split('|')
-        .filter_map(|part| {
-            let (priority, rule) = part.split_once(':')?;
-            let priority = priority.parse().ok()?;
-            let (exclude, rule) = match rule.strip_prefix('!') {
-                Some(rest) => (true, rest),
-                None => (false, rule),
-            };
-            let rule = if let Some(v) = rule.strip_prefix("resolution=") {
-                domain::AtomRule::Resolution(v.to_string())
-            } else if let Some(v) = rule.strip_prefix("source=") {
-                domain::AtomRule::Source(v.to_string())
-            } else if rule == "free" {
-                domain::AtomRule::Free
-            } else if rule == "hr" {
-                domain::AtomRule::Hr
-            } else if let Some(v) = rule.strip_prefix("title=") {
-                domain::AtomRule::TitleMatch(v.to_string())
-            } else if let Some(v) = rule.strip_prefix("hdr=") {
-                domain::AtomRule::Hdr(v.to_string())
-            } else if let Some(v) = rule.strip_prefix("size=") {
-                let (min, max) = v.split_once('-').unwrap_or((v, ""));
-                domain::AtomRule::Size {
-                    min_mb: min.parse().ok().filter(|m| *m > 0),
-                    max_mb: max.parse().ok().filter(|m| *m > 0),
-                }
-            } else if let Some(v) = rule.strip_prefix("min_seeders=") {
-                domain::AtomRule::MinSeeders(v.parse().ok()?)
-            } else if let Some(v) = rule.strip_prefix("subtitle=") {
-                domain::AtomRule::SubtitleLanguage(v.to_string())
-            } else if let Some(v) = rule.strip_prefix("audio=") {
-                domain::AtomRule::AudioLanguage(v.to_string())
-            } else if let Some(v) = rule.strip_prefix("site=") {
-                domain::AtomRule::Site(v.to_string())
-            } else if let Some(v) = rule.strip_prefix("wash_target=") {
-                domain::AtomRule::WashTarget(v.to_string())
-            } else if let Some(v) = rule.strip_prefix("upgrade_ladder=") {
-                domain::AtomRule::UpgradeLadder(v.to_string())
-            } else {
-                return None;
-            };
-            Some(FilterAtom {
-                priority,
-                rule,
-                exclude,
-            })
-        })
-        .collect()
+        .collect(),
+    )
 }
 
 pub(super) fn torrent_from_json(value: &serde_json::Value) -> Result<Torrent, StoreError> {

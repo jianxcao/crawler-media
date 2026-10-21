@@ -2,7 +2,7 @@
 //! 共用的密码校验与 CAS 签发服务。
 //!
 //! Argon2 校验必须离开 Store 锁：闭包先在锁内取一次不可变快照，然后在
-//! `spawn_blocking` 中做 CPU 密集的 verify/hash，最后只用一次短锁完成
+//! `spawn_blocking` 中做 CPU 密集的 verify，最后只用一次短锁完成
 //! `finish_verified_login` 的 CAS 与 token→user 查询。并发 permit 由闭包
 //! 持有，直到 CAS 结束才释放，避免校验排队期间无限堆积阻塞线程。
 
@@ -16,19 +16,14 @@ use crate::Store;
 /// 可注入的密码原语；测试用它阻塞或观测校验过程。
 pub trait PasswordEngine: Send + Sync {
     fn verify(&self, password: &str, stored: &str) -> bool;
-    fn hash(&self, password: &str) -> Result<String, String>;
 }
 
-/// 生产实现：复用 store 的 Argon2id 参数与明文透明升级规则。
+/// 生产实现：复用 store 的 Argon2id 校验规则。
 pub struct Argon2Engine;
 
 impl PasswordEngine for Argon2Engine {
     fn verify(&self, password: &str, stored: &str) -> bool {
         store::password::verify_password(password, stored)
-    }
-
-    fn hash(&self, password: &str) -> Result<String, String> {
-        store::password::hash_password(password)
     }
 }
 
@@ -40,8 +35,6 @@ pub enum LoginError {
     Store(#[from] store::StoreError),
     #[error("password worker failed: {0}")]
     Worker(String),
-    #[error("password hashing failed: {0}")]
-    Hash(String),
 }
 
 pub struct PasswordLogin {
@@ -86,16 +79,10 @@ impl PasswordLogin {
             if !engine.verify(&password, &credential.observed_password) {
                 return Ok(None);
             }
-            let upgrade = if store::password::is_argon2_hash(&credential.observed_password) {
-                None
-            } else {
-                Some(engine.hash(&password).map_err(LoginError::Hash)?)
-            };
             let store = store.lock();
             let token = store.finish_verified_login(
                 &credential.user_id.to_string(),
                 &credential.observed_password,
-                upgrade.as_deref(),
             )?;
             match token {
                 None => Ok(None),

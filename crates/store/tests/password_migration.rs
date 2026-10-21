@@ -95,34 +95,26 @@ fn passwords_generate_different_salts() {
 }
 
 #[test]
-fn upgrade_failure_fails_closed_and_rolls_back_token() {
+fn plaintext_credentials_are_rejected_without_upgrade_or_token() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user_id = UserId::new();
     let conn = Connection::open(tmp.path().join("app.db")).unwrap();
 
-    // 插入旧明文用户
     conn.execute(
-        "INSERT INTO users (id, login, password, enabled, role) VALUES (?1, 'failing_user', 'plain-secret-1', 1, 'member')",
+        "INSERT INTO users (id, login, password, enabled, role) VALUES (?1, 'legacy_user', 'plain-secret-1', 1, 'member')",
         params![user_id.to_string()],
     )
     .unwrap();
 
-    // 安装触发器注入更新失败
-    conn.execute(
-        "CREATE TRIGGER reject_password_upgrade BEFORE UPDATE OF password ON users
-         BEGIN
-             SELECT RAISE(FAIL, 'reject upgrade');
-         END;",
-        [],
-    )
-    .unwrap();
-
-    // 登录必须返回 Err（fail closed），绝不能静默成功并放行明文
-    let verify_result = store.verify_user_password("failing_user", "plain-secret-1");
-    assert!(verify_result.is_err(), "upgrade failure must return Err");
-
-    // 验证数据库中未签发 token
+    // 明文行既不能登录，也不能被透明升级改写。
+    assert!(
+        store
+            .verify_user_password("legacy_user", "plain-secret-1")
+            .unwrap()
+            .is_none(),
+        "plaintext credential must not authenticate"
+    );
     let token_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM user_tokens WHERE user_id = ?1",
@@ -130,26 +122,15 @@ fn upgrade_failure_fails_closed_and_rolls_back_token() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(
-        token_count, 0,
-        "no token should be issued when upgrade fails"
-    );
-
-    // 移除触发器后，登录成功且升级
-    conn.execute("DROP TRIGGER reject_password_upgrade", [])
-        .unwrap();
-    let success_login = store
-        .verify_user_password("failing_user", "plain-secret-1")
-        .unwrap();
-    assert!(success_login.is_some());
-    let upgraded_pw: String = conn
+    assert_eq!(token_count, 0, "no token may be issued for plaintext rows");
+    let stored_pw: String = conn
         .query_row(
             "SELECT password FROM users WHERE id = ?1",
             params![user_id.to_string()],
             |r| r.get(0),
         )
         .unwrap();
-    assert!(upgraded_pw.starts_with("$argon2id$"));
+    assert_eq!(stored_pw, "plain-secret-1", "row must stay untouched");
 }
 
 #[test]
@@ -160,24 +141,29 @@ fn concurrent_password_change_causes_cas_rejection_without_token() {
     let user_id = UserId::new();
     let conn = Connection::open(tmp.path().join("app.db")).unwrap();
 
-    // 插入旧明文用户
-    conn.execute(
-        "INSERT INTO users (id, login, password, enabled, role) VALUES (?1, 'cas_user', 'old-password', 1, 'member')",
-        params![user_id.to_string()],
-    )
-    .unwrap();
+    store2
+        .insert_user_with_password(
+            &User {
+                id: user_id,
+                login: "cas_user".into(),
+                enabled: true,
+                role: UserRole::Member,
+            },
+            "old-password",
+        )
+        .unwrap();
 
-    // 模拟连接 A 读到旧密码后，连接 B 并发修改了密码
+    // 连接 A 读到的观测口令（Argon2 PHC 字符串）之后，连接 B 并发修改了密码。
+    let observed = store1
+        .login_credential("cas_user")
+        .unwrap()
+        .expect("credential snapshot")
+        .observed_password;
     store2.set_password(user_id, "new-password-from-b").unwrap();
 
-    // 此时尝试用连接 A 传入已失效的 observed_password 'old-password' 执行登录升级
-    // 应该因为 CAS 匹配不满足返回 None，并且不签发 token
+    // 用已失效的 observed_password 走 finalizer 必须因 CAS 不满足返回 None 且不签发 token。
     let finish_res = store1
-        .finish_verified_login(
-            &user_id.to_string(),
-            "old-password",
-            Some("$argon2id$some-new-hash"),
-        )
+        .finish_verified_login(&user_id.to_string(), &observed)
         .unwrap();
     assert!(finish_res.is_none(), "stale login must be rejected by CAS");
 
