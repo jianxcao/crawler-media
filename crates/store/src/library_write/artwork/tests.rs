@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use domain::{Confidence, FileVersion, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{
+    Confidence, FileVersion, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource,
+};
 use rusqlite::params;
 
 use super::FileArtwork;
@@ -57,7 +59,7 @@ fn scanned(row: &LedgerRow) -> crate::ScannedLedger {
         size_bytes: None,
         created_ns: None,
         modified_ns: None,
-        observation: None,
+        observations: Vec::new(),
     }
 }
 

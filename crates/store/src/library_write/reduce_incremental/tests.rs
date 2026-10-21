@@ -234,7 +234,7 @@ fn scanned(row: &LedgerRow) -> crate::ScannedLedger {
         size_bytes: None,
         created_ns: None,
         modified_ns: None,
-        observation: None,
+        observations: Vec::new(),
     }
 }
 
@@ -242,8 +242,14 @@ fn scanned(row: &LedgerRow) -> crate::ScannedLedger {
 fn insert_and_update(fixture: &Fixture) -> (LedgerId, LedgerId) {
     let a_row = scanned_row(fixture.media, "/tv/show/S01E01.mkv", 1, 1);
     let b_row = scanned_row(fixture.media, "/tv/show/S01E02.mkv", 1, 2);
-    fixture.store.insert_scanned_files(&[scanned(&a_row)], 1).unwrap();
-    fixture.store.insert_scanned_files(&[scanned(&b_row)], 2).unwrap();
+    fixture
+        .store
+        .insert_scanned_files(&[scanned(&a_row)], 1)
+        .unwrap();
+    fixture
+        .store
+        .insert_scanned_files(&[scanned(&b_row)], 2)
+        .unwrap();
 
     let a_missing = fixture.file(
         a_row.id,

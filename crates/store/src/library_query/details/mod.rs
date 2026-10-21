@@ -1,13 +1,13 @@
-use std::collections::BTreeMap;
-use domain::{LedgerId, LibraryId, MediaId, MetadataFields, UnitKey};
-use rusqlite::{params, OptionalExtension};
-use crate::{Store, StoreError};
 use crate::library_query::items::{ITEM_COLUMNS, item_from_row};
-use crate::library_query::types::{LibraryEpisode, LibraryItemDetail};
+use crate::library_query::types::LibraryItemDetail;
 use crate::metadata::EffectiveMetadata;
+use crate::{Store, StoreError};
+use domain::{LedgerId, LibraryId, MediaId, MetadataFields, UnitKey};
+use rusqlite::{OptionalExtension, params};
+use std::collections::BTreeMap;
 
-pub mod metadata;
 pub mod episodes;
+pub mod metadata;
 
 pub use metadata::{AdoptedFilterFacts, AdoptedPerson, library_display_locale};
 
@@ -27,26 +27,57 @@ impl Store {
         );
         let mut statement = self.library.prepare(&sql)?;
         let row = statement
-            .query_row(params![library_id.to_string(), media_id.to_string()], |row| {
-                item_from_row(row)
-            })
+            .query_row(
+                params![library_id.to_string(), media_id.to_string()],
+                |row| item_from_row(row),
+            )
             .optional()?;
         Ok(row)
     }
 
     /// Item detail: the real `library_items` columns, adopted metadata for the resolved
     /// locale (Scrape inputs filling the gaps), the first page of files with their coverage.
+    ///
+    /// Scrape inputs follow their own chain (requested → Library → instance) so a caller that
+    /// asks for `en-US` reads `en-US` inputs even when no adopted metadata exists yet.
     pub fn library_item_detail(
         &self,
         library_id: LibraryId,
         media_id: MediaId,
         locale: &str,
     ) -> Result<Option<LibraryItemDetail>, StoreError> {
+        let (integrity, op_id): (String, Option<String>) = self
+            .library
+            .query_row(
+                "SELECT l.integrity_state,
+                        (SELECT operation_id FROM library_operations WHERE library_id = l.library_id AND kind = 'integrity' AND state IN ('failed', 'succeeded') ORDER BY updated_at_ms DESC LIMIT 1)
+                 FROM libraries l WHERE l.library_id = ?1",
+                params![library_id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or_else(|| ("unknown".into(), None));
+
+        if integrity == "failed" {
+            let op_str = op_id.unwrap_or_default();
+            return Err(StoreError::Protected(format!(
+                "library.integrity: library {} integrity check failed ({op_str})",
+                library_id
+            )));
+        }
+
         let Some(item) = self.library_item_row(library_id, media_id)? else {
             return Ok(None);
         };
         let resolved = self.resolved_metadata_locale(library_id, media_id, locale)?;
-        let mut metadata = self.metadata_input_fields(library_id, media_id, resolved.as_deref())?;
+        // NFO 输入自带一条完整的链（请求 → Library → 实例）。媒体还没有任何已采纳元数据时
+        // `resolved` 是 `None`，此时若把 `resolved` 交给这条链，调用方请求的语言就会被丢掉，
+        // 只有 Library/实例 locale 能命中，按请求语言导入的输入会整片读不到。
+        let input_locale = match locale.trim() {
+            "" => resolved.as_deref(),
+            requested => Some(requested),
+        };
+        let mut metadata = self.metadata_input_fields(library_id, media_id, input_locale)?;
         let adopted = match resolved.as_deref() {
             Some(locale) => self.get_effective_metadata(media_id, locale)?,
             None => None,
@@ -67,40 +98,102 @@ impl Store {
         }))
     }
 
-
-    /// Scrape inputs of one media: the work-scope fields the Scrape step stored, preferring
-    /// the resolved locale and otherwise the deterministic `ORDER BY locale, input_key`.
+    /// Scrape inputs of one media: the work-scope fields already stored for the locale the
+    /// query chain resolves to.
+    ///
+    /// 绝不用 `rows.first()` 在语言之间任选：只有请求 → Library → 实例这条链上命中的
+    /// locale 才可读，外加导入时没有 locale 才会写入的 `''` 兜底桶。
     pub(crate) fn metadata_input_fields(
         &self,
         library_id: LibraryId,
         media_id: MediaId,
         locale: Option<&str>,
     ) -> Result<MetadataFields, StoreError> {
-        let preferred = locale.map(str::to_string);
-        let mut statement = self.library.prepare(
-            "SELECT locale, fields_json FROM library_metadata_inputs WHERE library_id = ?1 AND media_id = ?2 AND entity_scope = 'work' AND parse_state = 'valid' ORDER BY locale, input_key",
-        )?;
-        let rows = statement
-            .query_map(params![library_id.to_string(), media_id.to_string()], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        let chosen = rows
-            .iter()
-            .find(|(row_locale, _)| Some(row_locale.as_str()) == preferred.as_deref())
-            .or_else(|| rows.first());
-        match chosen {
-            Some((_, fields_json)) => Ok(serde_json::from_str(fields_json)?),
+        let Some(chosen) = self.metadata_input_locale(library_id, media_id, locale)? else {
+            return Ok(MetadataFields::default());
+        };
+        let fields_json: Option<String> = self
+            .library
+            .query_row(
+                "SELECT fields_json FROM library_metadata_inputs
+                 WHERE library_id = ?1 AND media_id = ?2 AND entity_scope = 'work'
+                   AND parse_state = 'valid' AND locale = ?3
+                 ORDER BY input_key
+                 LIMIT 1",
+                params![library_id.to_string(), media_id.to_string(), chosen],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match fields_json {
+            Some(fields_json) => Ok(serde_json::from_str(&fields_json)?),
             None => Ok(MetadataFields::default()),
         }
     }
 
-    pub(crate) fn library_seasons(&self, library_id: LibraryId, media_id: MediaId) -> Result<Vec<u32>, StoreError> {
+    /// Pick the NFO input locale along the request → Library → instance chain.
+    ///
+    /// The unbound bucket (`''`) is an explicit last resort for inputs imported while the
+    /// Library had no locale; any other stored locale is never selected implicitly.
+    fn metadata_input_locale(
+        &self,
+        library_id: LibraryId,
+        media_id: MediaId,
+        requested: Option<&str>,
+    ) -> Result<Option<String>, StoreError> {
+        let mut statement = self.library.prepare(
+            "SELECT DISTINCT locale FROM library_metadata_inputs
+             WHERE library_id = ?1 AND media_id = ?2 AND entity_scope = 'work'
+               AND parse_state = 'valid'
+             ORDER BY locale",
+        )?;
+        let locales = statement
+            .query_map(
+                params![library_id.to_string(), media_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        if locales.is_empty() {
+            return Ok(None);
+        }
+        let chain = [
+            requested.map(str::to_string),
+            library_display_locale(self, library_id)?,
+            metadata::instance_default_locale(self)?,
+        ];
+        for candidate in chain.into_iter().flatten() {
+            let candidate = candidate.trim();
+            if candidate.is_empty() {
+                continue;
+            }
+            if let Some(exact) = locales.iter().find(|stored| stored.as_str() == candidate) {
+                return Ok(Some(exact.clone()));
+            }
+            let prefix = candidate.split(['-', '_']).next().unwrap_or(candidate);
+            if let Some(prefix_match) = locales
+                .iter()
+                .find(|stored| stored.split(['-', '_']).next().unwrap_or(stored) == prefix)
+            {
+                return Ok(Some(prefix_match.clone()));
+            }
+        }
+        Ok(locales.into_iter().find(|stored| stored.is_empty()))
+    }
+
+    pub(crate) fn library_seasons(
+        &self,
+        library_id: LibraryId,
+        media_id: MediaId,
+    ) -> Result<Vec<u32>, StoreError> {
         let mut statement = self.library.prepare(
             "SELECT season FROM library_units WHERE library_id = ?1 AND media_id = ?2 AND season >= 0 GROUP BY season ORDER BY season",
         )?;
-        let rows = statement.query_map(params![library_id.to_string(), media_id.to_string()], |row| row.get::<_, i64>(0))?;
-        Ok(rows.map(|row| row.map(|season| season as u32)).collect::<Result<Vec<_>, _>>()?)
+        let rows = statement.query_map(
+            params![library_id.to_string(), media_id.to_string()],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(rows
+            .map(|row| row.map(|season| season as u32))
+            .collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Coverage of the listed files (`(-1,-1)` marks a whole-work file), one query.
@@ -141,4 +234,3 @@ impl Store {
             .collect())
     }
 }
-

@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, Release, UnitKey};
+use domain::{
+    Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, Release, UnitKey,
+};
 use store::ScannedLedger;
 
 use crate::Store;
@@ -32,6 +34,15 @@ pub fn record_paths(
                         "清除台账缺失标记失败：该路径不会进入本次新增/探测队列"
                     );
                 }
+            }
+            // Task 8：既有行同样要复核 sidecar —— 文件没变但旁边的 NFO 可能被编辑、损坏或删掉，
+            // 不重看一次，卡片就永远停在第一次入库时的元数据上。
+            if let Err(error) = store.reconcile_nfo_inputs(std::path::Path::new(&path_str)) {
+                tracing::warn!(
+                    %error,
+                    path = %path_str,
+                    "复核已有文件的 NFO 输入失败：卡片保留上一份输入"
+                );
             }
             continue;
         }
@@ -69,39 +80,34 @@ pub fn record_paths(
         };
         let (size_bytes, created_ns, modified_ns) = observed_stat(&dest);
         let source_version = crate::fingerprint_job::current_source_version(&dest);
-        // The sidecar is the scan's own observation input: read it here, before the
+        // The sidecars are the scan's own observation input: read them here, before the
         // publication transaction, and hand the result to the writer.
-        let observation = store
-            .library_for_path_strict(&dest, media.kind)
-            .map_err(|e| e.to_string())?
-            .map(|library| {
-                let locale = library
-                    .id
-                    .parse()
-                    .ok()
-                    .and_then(|library_id| {
-                        store::library_query::library_display_locale(store, library_id)
-                            .ok()
-                            .flatten()
-                    })
-                    .unwrap_or_default();
-                let config_revision = store
-                    .library_config_revision(&library.id)
-                    .unwrap_or(0);
-                store::metadata::NfoObservation::observe(
-                    &dest,
-                    media.kind,
-                    locale,
-                    source_version.clone(),
-                    config_revision,
-                )
-            });
+        let observations = match nfo_observation_context(store, &dest, media.kind) {
+            Some((locale, config_revision)) => store::metadata::observe_nfo_inputs(
+                &dest,
+                media.kind,
+                &units,
+                &locale,
+                &domain::FileVersion {
+                    revision: 1,
+                    source_version: source_version.clone(),
+                },
+                config_revision,
+            ),
+            None => Vec::new(),
+        };
         rows.push(ScannedLedger {
             row: LedgerRow {
-                id: LedgerId::new(), media_id: media.id, path: path_str,
-                season: parsed.season, episode: parsed.episode,
-                resolution: parsed.resolution, codec: parsed.codec, hdr: parsed.hdr,
-                quality_source: QualitySource::Release, confidence: parsed.confidence,
+                id: LedgerId::new(),
+                media_id: media.id,
+                path: path_str,
+                season: parsed.season,
+                episode: parsed.episode,
+                resolution: parsed.resolution,
+                codec: parsed.codec,
+                hdr: parsed.hdr,
+                quality_source: QualitySource::Release,
+                confidence: parsed.confidence,
                 filter_score: None,
             },
             units,
@@ -110,7 +116,7 @@ pub fn record_paths(
             size_bytes,
             created_ns,
             modified_ns,
-            observation,
+            observations,
         });
         inserted.push(dest);
     }
@@ -190,12 +196,35 @@ pub fn record_video_paths(
             size_bytes,
             created_ns,
             modified_ns,
-            observation: None,
+            observations: Vec::new(),
         });
         inserted.push(dest);
     }
     publish_scanned_rows(store, &rows, now_ms)?;
     Ok(inserted)
+}
+
+/// 扫描时观察 sidecar 需要的 Library 上下文：当前 locale 与 config_revision。
+///
+/// 路径不属于任何 ready Library 时返回 `None`（不观察，也不猜语言）。
+fn nfo_observation_context(
+    store: &Store,
+    path: &std::path::Path,
+    kind: MediaKind,
+) -> Option<(String, i64)> {
+    let library = store.library_for_path_strict(path, kind).ok()??;
+    let locale = library
+        .id
+        .parse()
+        .ok()
+        .and_then(|library_id| {
+            store::library_query::library_display_locale(store, library_id)
+                .ok()
+                .flatten()
+        })
+        .unwrap_or_default();
+    let config_revision = store.library_config_revision(&library.id).unwrap_or(0);
+    Some((locale, config_revision))
 }
 
 /// Commit scanned ledger rows in the scan commit window: at most

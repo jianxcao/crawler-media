@@ -1,5 +1,7 @@
-use domain::{
-    EntityScope, FieldValue, MediaAlias, MetadataCast, MetadataFields, MetadataGenre,
+use domain::{EntityScope, FieldValue, MediaAlias, MetadataCast, MetadataFields, MetadataGenre};
+
+use super::parse::{
+    NfoList, NfoPresence, NfoText, is_supported_root, parse_nfo_presence, parse_vote_count,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -31,14 +33,14 @@ pub fn parse_nfo_fields(body: &str, scope: EntityScope) -> NfoReadOutcome {
 
     let root = document.root_element();
     let root_name = root.tag_name().name();
-    if !crate::nfo::is_supported_root(root_name) {
+    if !is_supported_root(root_name) {
         return NfoReadOutcome::Unknown {
             message: format!("Unsupported NFO root element: {root_name}"),
         };
     }
 
-    let parsed = match crate::nfo::parse_nfo(body) {
-        Some(m) => m,
+    let presence = match parse_nfo_presence(body) {
+        Some(presence) => presence,
         None => {
             return NfoReadOutcome::Invalid {
                 message: "Failed to parse NFO metadata".into(),
@@ -47,81 +49,78 @@ pub fn parse_nfo_fields(body: &str, scope: EntityScope) -> NfoReadOutcome {
     };
 
     let mut fields = MetadataFields::default();
+    // 先按实体层取好日期：`presence` 的字段随后会被逐个移出（`NfoText` 不是 `Copy`）。
+    let (release_date, air_date) = date_fields(scope, &presence);
 
-    if let Some(t) = parsed.title {
-        fields.title = if t.is_empty() { FieldValue::Empty } else { FieldValue::Value(t) };
-    }
-    if let Some(ot) = parsed.original_title {
-        fields.original_title = if ot.is_empty() { FieldValue::Empty } else { FieldValue::Value(ot) };
-    }
-    if let Some(p) = parsed.plot {
-        fields.overview = if p.is_empty() { FieldValue::Empty } else { FieldValue::Value(p) };
-    }
-    if let Some(tag) = parsed.tagline {
-        fields.tagline = if tag.is_empty() { FieldValue::Empty } else { FieldValue::Value(tag) };
-    }
-    if let Some(y) = parsed.year.and_then(|s| s.parse::<u16>().ok()) {
-        fields.year = FieldValue::Value(y);
-    }
-    if let Some(r) = parsed.rating.and_then(|s| s.parse::<f64>().ok()) {
-        fields.rating = FieldValue::Value(r);
-    }
-    if let Some(v) = parsed.vote_count {
-        fields.vote_count = FieldValue::Value(v);
-    }
-    if let Some(rt) = parsed.runtime_minutes.and_then(|s| s.parse::<u32>().ok()) {
-        fields.runtime_minutes = FieldValue::Value(rt);
-    }
-    if let Some(cr) = parsed.content_rating {
-        fields.content_rating = if cr.is_empty() { FieldValue::Empty } else { FieldValue::Value(cr) };
-    }
-    if let Some(lang) = parsed.original_language {
-        fields.language = if lang.is_empty() { FieldValue::Empty } else { FieldValue::Value(lang) };
-    }
-    if let Some(st) = parsed.status {
-        fields.status = if st.is_empty() { FieldValue::Empty } else { FieldValue::Value(st) };
-    }
+    // 元素存在性决定字段存在：`<plot/>` 是 Empty（显式清空），没有 `<plot>` 才是 Missing。
+    fields.title = text_field(presence.title);
+    fields.original_title = text_field(presence.original_title);
+    fields.overview = text_field(presence.plot);
+    fields.tagline = text_field(presence.tagline);
+    fields.year = number_field(presence.year);
+    fields.rating = number_field(presence.rating);
+    fields.vote_count = count_field(&presence.votes);
+    fields.runtime_minutes = number_field(presence.runtime_minutes);
+    fields.content_rating = text_field(presence.content_rating);
+    fields.language = text_field(presence.original_language);
+    fields.status = text_field(presence.status);
+    // 日期与署名类字段：它们没有 provider 兜底，Task 11 的页内水合只读这份观测结果，
+    // 漏映射就等于 NFO 里的 studios/directors/creators/premiered 静默消失。
+    fields.release_date = release_date;
+    fields.air_date = air_date;
+    fields.end_date = text_field(presence.end_date);
+    fields.studios = text_list_field(presence.studios);
+    fields.directors = text_list_field(presence.directors);
+    fields.creators = text_list_field(presence.creators);
 
-    // Genres mapping
-    if !parsed.genres.is_empty() {
-        let mut genres = Vec::new();
-        for g_name in parsed.genres {
-            let filter_key = genre_filter_key(&g_name);
-            genres.push(MetadataGenre {
-                source: "nfo".into(),
-                source_id: None,
-                name: g_name,
-                filter_key,
-            });
+    match presence.genres {
+        NfoList::Missing => {}
+        NfoList::Empty => fields.genres = FieldValue::Empty,
+        NfoList::Value(names) => {
+            fields.genres = FieldValue::Value(
+                names
+                    .into_iter()
+                    .map(|name| {
+                        let filter_key = genre_filter_key(&name);
+                        MetadataGenre {
+                            source: "nfo".into(),
+                            source_id: None,
+                            name,
+                            filter_key,
+                        }
+                    })
+                    .collect(),
+            );
         }
-        fields.genres = FieldValue::Value(genres);
     }
 
     // Countries mapping: the facet/filter contract (`docs/api-contracts/self.md`) uses the
     // ISO 3166-1 alpha-2 code, while NFO sidecars carry the country name.
-    if !parsed.countries.is_empty() {
-        fields.countries = FieldValue::Value(
-            parsed
-                .countries
-                .iter()
-                .map(|country| country_code(country))
-                .collect(),
-        );
+    match presence.countries {
+        NfoList::Missing => {}
+        NfoList::Empty => fields.countries = FieldValue::Empty,
+        NfoList::Value(names) => {
+            fields.countries =
+                FieldValue::Value(names.iter().map(|country| country_code(country)).collect());
+        }
     }
 
-    // Cast mapping
-    if !parsed.cast.is_empty() {
-        let mut cast = Vec::new();
-        for c in parsed.cast {
-            cast.push(MetadataCast {
-                name: c.name,
-                role: c.role,
-                tmdb_id: c.tmdb_id,
-                thumb: c.thumb,
-                order: c.order,
-            });
+    match presence.cast {
+        NfoList::Missing => {}
+        NfoList::Empty => fields.cast = FieldValue::Empty,
+        NfoList::Value(cast) => {
+            fields.cast = FieldValue::Value(
+                cast.into_iter()
+                    .map(|member| MetadataCast {
+                        name: member.name,
+                        role: member.role,
+                        tmdb_id: member.tmdb_id,
+                        thumb: member.thumb,
+                        order: member.order,
+                    })
+                    .collect(),
+            );
         }
-        fields.cast = FieldValue::Value(cast);
     }
 
     NfoReadOutcome::Valid(NfoInput {
@@ -131,6 +130,72 @@ pub fn parse_nfo_fields(body: &str, scope: EntityScope) -> NfoReadOutcome {
         work_aliases: Vec::new(),
         source_version: "nfo_v1".into(),
     })
+}
+
+/// 单值文本字段：`Missing` 保持 `Missing`，元素存在但为空是 `Empty`。
+fn text_field(text: NfoText) -> FieldValue<String> {
+    match text {
+        NfoText::Missing => FieldValue::Missing,
+        NfoText::Empty => FieldValue::Empty,
+        NfoText::Value(value) => FieldValue::Value(value),
+    }
+}
+
+/// 上映/首播日期落点按 Jellyfin/Kodi 语义区分实体层。
+///
+/// work/season 的 `<premiered>` 是上映日期 → `release_date`；episode 的 `<premiered>` 与
+/// `<aired>` 同义（都是首播日期）→ `air_date`，且 `<aired>` 是 episode NFO 的正式字段，
+/// 两者同时出现时以它为准，不把同一个日期同时写进两个字段。
+fn date_fields(
+    scope: EntityScope,
+    presence: &NfoPresence,
+) -> (FieldValue<String>, FieldValue<String>) {
+    match scope {
+        EntityScope::Episode { .. } => {
+            let air_date = if presence.aired.is_missing() {
+                text_field(presence.premiered.clone())
+            } else {
+                text_field(presence.aired.clone())
+            };
+            (FieldValue::Missing, air_date)
+        }
+        _ => (
+            text_field(presence.premiered.clone()),
+            text_field(presence.aired.clone()),
+        ),
+    }
+}
+
+/// 重复元素文本字段（studio/director/creator）：同样保留“缺失 vs 存在但为空”的差别。
+fn text_list_field(list: NfoList<String>) -> FieldValue<Vec<String>> {
+    match list {
+        NfoList::Missing => FieldValue::Missing,
+        NfoList::Empty => FieldValue::Empty,
+        NfoList::Value(values) => FieldValue::Value(values),
+    }
+}
+
+/// 单值数字字段：元素存在但无法解析成目标类型时记 `Empty`，不冒充 `Missing`。
+fn number_field<T: std::str::FromStr>(text: NfoText) -> FieldValue<T> {
+    match text {
+        NfoText::Missing => FieldValue::Missing,
+        NfoText::Empty => FieldValue::Empty,
+        NfoText::Value(value) => value
+            .parse()
+            .map(FieldValue::Value)
+            .unwrap_or(FieldValue::Empty),
+    }
+}
+
+/// `<votes>` 允许 `1,500,000` 这类分隔符写法，解析失败同样记 `Empty`。
+fn count_field(text: &NfoText) -> FieldValue<u64> {
+    match text {
+        NfoText::Missing => FieldValue::Missing,
+        NfoText::Empty => FieldValue::Empty,
+        NfoText::Value(raw) => parse_vote_count(Some(raw))
+            .map(FieldValue::Value)
+            .unwrap_or(FieldValue::Empty),
+    }
 }
 
 fn country_code(name: &str) -> String {

@@ -1,8 +1,8 @@
-use std::collections::{BTreeMap, HashMap};
-use domain::{FieldValue, LibraryId, MediaId, MetadataFields};
-use rusqlite::{params, OptionalExtension};
-use crate::{Store, StoreError};
 use crate::metadata::EffectiveMetadata;
+use crate::{Store, StoreError};
+use domain::{FieldValue, LibraryId, MediaId, MetadataFields};
+use rusqlite::OptionalExtension;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AdoptedFilterFacts {
@@ -65,7 +65,11 @@ impl Store {
         let requested = requested.trim();
         let library = library_display_locale(self, library_id)?;
         let instance = instance_default_locale(self)?;
-        for candidate in [Some(requested).filter(|l| !l.is_empty()), library.as_deref(), instance.as_deref()] {
+        for candidate in [
+            Some(requested).filter(|l| !l.is_empty()),
+            library.as_deref(),
+            instance.as_deref(),
+        ] {
             if let Some(candidate) = candidate {
                 if let Some(exact) = locales.iter().find(|l| l.as_str() == candidate) {
                     return Ok(Some(exact.clone()));
@@ -105,15 +109,19 @@ impl Store {
             ))?;
             while let Some(row) = rows.next()? {
                 let id_raw: String = row.get(0)?;
-                let Ok(media_id) = id_raw.parse::<MediaId>() else { continue };
+                let Ok(media_id) = id_raw.parse::<MediaId>() else {
+                    continue;
+                };
                 let locale: String = row.get(1)?;
                 let genres_json: String = row.get(2)?;
                 let countries_json: String = row.get(3)?;
                 let details_json: String = row.get(4)?;
-                by_media
-                    .entry(media_id)
-                    .or_default()
-                    .push((locale, genres_json, countries_json, details_json));
+                by_media.entry(media_id).or_default().push((
+                    locale,
+                    genres_json,
+                    countries_json,
+                    details_json,
+                ));
             }
         }
 
@@ -239,11 +247,7 @@ fn adopted_facts_from_json(
     })
 }
 
-fn parse_adopted_json(
-    raw: &str,
-    media_id: MediaId,
-    field: &str,
-) -> Option<serde_json::Value> {
+fn parse_adopted_json(raw: &str, media_id: MediaId, field: &str) -> Option<serde_json::Value> {
     match serde_json::from_str(raw) {
         Ok(value) => Some(value),
         Err(error) => {

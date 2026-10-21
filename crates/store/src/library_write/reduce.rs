@@ -32,9 +32,16 @@ struct FileFact {
 
 /// Adopted metadata for one Library's selected locale.
 struct Adopted {
-    title: Option<String>, year: Option<i64>, rating: Option<f64>, runtime: Option<i64>,
-    language: Option<String>, release_date: Option<String>, revision: i64,
-    genres: Vec<String>, countries: Vec<String>, fields: MetadataFields,
+    title: Option<String>,
+    year: Option<i64>,
+    rating: Option<f64>,
+    runtime: Option<i64>,
+    language: Option<String>,
+    release_date: Option<String>,
+    revision: i64,
+    genres: Vec<String>,
+    countries: Vec<String>,
+    fields: MetadataFields,
 }
 
 /// Display facts for one card. The Library's own valid work NFO wins over the adopted
@@ -125,7 +132,9 @@ pub(crate) fn refresh_affected_user_summaries(
     media_id: MediaId,
 ) -> Result<(), StoreError> {
     let users: Vec<String> = {
-        let mut stmt = tx.prepare("SELECT DISTINCT user_id FROM playback_units WHERE media_id = ?1 ORDER BY user_id")?;
+        let mut stmt = tx.prepare(
+            "SELECT DISTINCT user_id FROM playback_units WHERE media_id = ?1 ORDER BY user_id",
+        )?;
         let rows = stmt.query_map([media_id.to_string()], |r| r.get::<_, String>(0))?;
         rows.collect::<Result<Vec<_>, _>>()?
     };
@@ -150,11 +159,7 @@ pub(crate) fn refresh_affected_user_summaries(
     Ok(())
 }
 
-fn published_files(
-    tx: &Connection,
-    lib: &str,
-    media: &str,
-) -> Result<Vec<FileFact>, StoreError> {
+fn published_files(tx: &Connection, lib: &str, media: &str) -> Result<Vec<FileFact>, StoreError> {
     let mut stmt = tx.prepare(
         "SELECT file_id, presence_state, size_bytes, resolution, hdr, has_still,
                 has_poster, has_backdrop, COALESCE(created_ns, mtime_ns), file_revision
@@ -260,8 +265,7 @@ fn rebuild_units(tx: &Connection, lib: &str, media: &str) -> Result<(i64, i64), 
     let mut seasons = HashSet::new();
     let mut episodes = HashSet::new();
     for (season, episode) in groups {
-        let (file_count, available, preferred) =
-            unit_counts(tx, lib, media, season, episode)?;
+        let (file_count, available, preferred) = unit_counts(tx, lib, media, season, episode)?;
         if season >= 0 {
             seasons.insert(season);
         }
@@ -278,17 +282,15 @@ fn rebuild_units(tx: &Connection, lib: &str, media: &str) -> Result<(i64, i64), 
                  available_file_count = excluded.available_file_count,
                  preferred_file_id = excluded.preferred_file_id,
                  unit_revision = library_units.unit_revision + 1",
-            params![lib, media, season, episode, file_count, available, preferred],
+            params![
+                lib, media, season, episode, file_count, available, preferred
+            ],
         )?;
     }
     Ok((seasons.len() as i64, episodes.len() as i64))
 }
 
-fn coverage_units(
-    tx: &Connection,
-    lib: &str,
-    media: &str,
-) -> Result<Vec<(i32, i32)>, StoreError> {
+fn coverage_units(tx: &Connection, lib: &str, media: &str) -> Result<Vec<(i32, i32)>, StoreError> {
     let mut stmt = tx.prepare(
         "SELECT DISTINCT u.season, u.episode
          FROM library_file_units u
@@ -354,16 +356,27 @@ pub(super) fn clear_summaries(tx: &Connection, lib: &str, media: &str) -> Result
 }
 
 /// Drop NFO inputs whose sidecar no longer belongs to a published file of this card.
+///
+/// `input_key` holds the canonical **sidecar** path, so it cannot be compared with
+/// `library_files.path_key` (a video path). An input survives while the sidecar's own
+/// directory still holds a published file of this card — `tvshow.nfo` / `season.nfo` keep
+/// describing the series while any episode remains — or while the file that observed it is
+/// still there.
 fn prune_nfo_inputs(tx: &Connection, lib: &str, media: &str) -> Result<(), StoreError> {
-    tx.execute(
+    const SIDECAR_DIR: &str = "rtrim(library_metadata_inputs.input_key, replace(library_metadata_inputs.input_key, '/', ''))";
+    let sql = format!(
         "DELETE FROM library_metadata_inputs
          WHERE library_id = ?1 AND media_id = ?2 AND source_version = 'nfo_v1'
-           AND input_key NOT IN (
-               SELECT path_key FROM library_files
-               WHERE library_id = ?1 AND media_id = ?2
-                 AND publication_state = 'published')",
-        params![lib, media],
-    )?;
+           AND NOT EXISTS (
+               SELECT 1 FROM library_files AS f
+                WHERE f.library_id = ?1 AND f.media_id = ?2
+                  AND f.publication_state = 'published'
+                  AND (f.path_key = library_metadata_inputs.path_key
+                       OR (length({SIDECAR_DIR}) > 0
+                           AND substr(f.path_key, 1, length({SIDECAR_DIR})) = {SIDECAR_DIR}))
+           )"
+    );
+    tx.execute(&sql, params![lib, media])?;
     Ok(())
 }
 
@@ -477,10 +490,7 @@ pub(super) fn upsert_item(
     Ok(())
 }
 
-fn media_identity(
-    tx: &Connection,
-    media: &str,
-) -> Result<(String, String, String), StoreError> {
+fn media_identity(tx: &Connection, media: &str) -> Result<(String, String, String), StoreError> {
     let (kind, identity_state): (String, String) = tx
         .query_row(
             "SELECT kind, identity_state FROM media WHERE media_id = ?1",
@@ -624,7 +634,7 @@ fn nfo_fields_for(
             "SELECT fields_json FROM library_metadata_inputs
              WHERE library_id = ?1 AND media_id = ?2 AND entity_scope = 'work'
                AND parse_state = 'valid'
-             ORDER BY (locale = ?3) DESC, (input_key = ?4) DESC, locale, input_key
+             ORDER BY (locale = ?3) DESC, (path_key = ?4) DESC, locale, input_key
              LIMIT 1",
             params![lib, media, locale, preferred_key],
             |r| r.get(0),
@@ -687,7 +697,11 @@ fn adopted_for_library(
     };
     if let Some(locale) = locale {
         let exact = tx
-            .query_row(&format!("{COLS} AND locale = ?2"), params![media, locale], read)
+            .query_row(
+                &format!("{COLS} AND locale = ?2"),
+                params![media, locale],
+                read,
+            )
             .optional()?;
         if exact.is_some() {
             return Ok(exact);
@@ -757,7 +771,6 @@ fn sync_terms(tx: &Connection, lib: &str, media: &str, facts: &Facts) -> Result<
     )?;
     Ok(())
 }
-
 
 pub(super) fn insert_term(
     tx: &Connection,

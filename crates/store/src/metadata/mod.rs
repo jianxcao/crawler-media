@@ -5,6 +5,5 @@ pub mod overrides;
 pub mod types;
 
 pub use adopt::ScrapedDisplay;
-pub use nfo_input::{NfoObservation, NfoParseState};
+pub use nfo_input::{NfoObservation, NfoParseState, observe_nfo_inputs, record_nfo_observations};
 pub use types::EffectiveMetadata;
-

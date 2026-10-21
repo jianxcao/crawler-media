@@ -200,6 +200,123 @@ fn setup_rebind_movies(
     )
 }
 
+/// Adopted metadata only fills what the NFO input leaves missing, so it doubles as the
+/// "lower layer" the card must fall back to once the input row is gone.
+fn adopt_provider_overview(store: &Store, media_id: MediaId) {
+    let mut fields = domain::MetadataFields::default();
+    fields.title = domain::FieldValue::Value("Reconcile Movie".into());
+    fields.overview = domain::FieldValue::Value("Provider".into());
+    let adoption = domain::MetadataAdoption {
+        media_id,
+        scope: domain::EntityScope::Work,
+        locale: "zh-CN".into(),
+        source: "tmdb".into(),
+        provider_entity_id: "1".into(),
+        provider_work_id: "1".into(),
+        fetched_at: 1000,
+        normalized: domain::NormalizedMetadata {
+            fields,
+            field_origins: Default::default(),
+        },
+        expected_revision: None,
+        preferences: domain::MetadataPreferences {
+            language_priority: vec!["zh-CN".into()],
+            cert_country_priority: vec!["CN".into()],
+        },
+    };
+    store.adopt_metadata(&adoption, 1000).unwrap();
+}
+
+/// 已有文件的 sidecar 每次相关扫描都必须重新观察：改成 Y 显示 Y；解析不了或坐标不清
+/// 保留上一份有效输入；sidecar 删除才解除输入、露出 adopted 的下层值。
+#[tokio::test]
+async fn existing_file_sidecar_changes_and_deletes_are_reconciled() {
+    const LOCALE: &str = "zh-CN";
+    let temp = tempfile::tempdir().unwrap();
+    let state = common::state(
+        temp.path(),
+        Arc::new(common::Fixtures {
+            requests: Mutex::new(Vec::new()),
+            bodies: HashMap::new(),
+        }),
+        Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
+    );
+    let state = state.with_catalog(Arc::new(ScanCatalog::default()));
+    let shared = state.store();
+    let (root, library_id) = {
+        let store = shared.lock();
+        let library = store
+            .list_libraries()
+            .unwrap()
+            .into_iter()
+            .find(|lib| lib.kind == MediaKind::Movie)
+            .unwrap();
+        (library.root_paths[0].clone(), library.id)
+    };
+    std::fs::create_dir_all(&root).unwrap();
+    let video = root.join("Reconcile.Movie.2020.strm");
+    std::fs::write(&video, "https://invalid.example/fixture").unwrap();
+    let sidecar = video.with_extension("nfo");
+    let body =
+        |plot: &str| format!("<movie><title>Reconcile Movie</title><plot>{plot}</plot></movie>");
+    std::fs::write(&sidecar, body("X")).unwrap();
+    let app = api::router(state);
+    common::scan_and_wait(&app, &library_id).await;
+    let media_id = {
+        let store = shared.lock();
+        store
+            .ledger_by_path(&video.display().to_string())
+            .unwrap()
+            .unwrap()
+            .media_id
+    };
+    let library: domain::LibraryId = library_id.parse().unwrap();
+    let detail = |store: &Store| {
+        store
+            .library_item_detail(library, media_id, LOCALE)
+            .unwrap()
+            .unwrap()
+    };
+    assert_eq!(
+        detail(&shared.lock())
+            .metadata
+            .overview
+            .value()
+            .map(String::as_str),
+        Some("X"),
+        "首次入库必须观察 sidecar"
+    );
+    adopt_provider_overview(&shared.lock(), media_id);
+
+    std::fs::write(&sidecar, body("Y")).unwrap();
+    common::scan_and_wait(&app, &library_id).await;
+    let edited = detail(&shared.lock());
+    assert_eq!(
+        edited.metadata.overview.value().map(String::as_str),
+        Some("Y")
+    );
+
+    // 无法读成 NFO 文档：不采纳也不删除，保留上一份有效输入。
+    std::fs::write(&sidecar, "not xml at all").unwrap();
+    common::scan_and_wait(&app, &library_id).await;
+    let invalid = detail(&shared.lock());
+    assert_eq!(invalid.metadata.overview, edited.metadata.overview);
+
+    // 合法的 XML，但在电影库里是剧集坐标：无法确定实体层，同样不动已有输入。
+    std::fs::write(&sidecar, "<episodedetails><plot>Z</plot></episodedetails>").unwrap();
+    common::scan_and_wait(&app, &library_id).await;
+    let unknown = detail(&shared.lock());
+    assert_eq!(unknown.metadata.overview, edited.metadata.overview);
+
+    std::fs::remove_file(&sidecar).unwrap();
+    common::scan_and_wait(&app, &library_id).await;
+    let deleted = detail(&shared.lock());
+    assert_eq!(
+        deleted.metadata.overview.value().map(String::as_str),
+        Some("Provider")
+    );
+}
+
 #[tokio::test]
 async fn incomplete_nfo_online_alias_rebinds_only_new_scanned_rows() {
     let temp = tempfile::tempdir().unwrap();

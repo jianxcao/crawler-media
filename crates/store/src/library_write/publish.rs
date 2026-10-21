@@ -77,9 +77,14 @@ impl Store {
                 RowOutcome::Unchanged => report.unchanged += 1,
             }
             sync_coverage(&tx, file, pub_item.units)?;
-            if let Some(observation) = pub_item.nfo_observation {
-                if !crate::metadata::nfo_input::record_nfo_observation(&tx, file, observation)? {
-                    return Err(StoreError::Protected(format!("stale NFO observation for {}", file.path.display())));
+            if let Some(observations) = pub_item.nfo_observation {
+                let target = crate::metadata::nfo_input::NfoInputTarget::from_file(file);
+                if !crate::metadata::nfo_input::record_nfo_observations(&tx, &target, observations)?
+                {
+                    return Err(StoreError::Protected(format!(
+                        "stale NFO observation for {}",
+                        file.path.display()
+                    )));
                 }
             }
             if pub_item.probe_required {
@@ -182,7 +187,9 @@ impl Store {
     pub fn count_probe_obligations(&self) -> Result<usize, StoreError> {
         let count: i64 =
             self.library
-                .query_row("SELECT COUNT(*) FROM file_probe_obligations", [], |r| r.get(0))?;
+                .query_row("SELECT COUNT(*) FROM file_probe_obligations", [], |r| {
+                    r.get(0)
+                })?;
         Ok(count as usize)
     }
 

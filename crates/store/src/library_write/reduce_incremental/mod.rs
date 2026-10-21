@@ -104,11 +104,7 @@ struct ItemRow {
     distinct_episodes: i64,
 }
 
-fn read_item_row(
-    tx: &Connection,
-    lib: &str,
-    media: &str,
-) -> Result<Option<ItemRow>, StoreError> {
+fn read_item_row(tx: &Connection, lib: &str, media: &str) -> Result<Option<ItemRow>, StoreError> {
     let row = tx
         .query_row(
             "SELECT file_count, available_file_count, missing_file_count, unknown_file_count,
@@ -441,11 +437,7 @@ fn update_preferred(
 }
 
 /// `ORDER BY file_revision DESC, file_id ASC` among published + present files.
-fn preferred_query(
-    tx: &Connection,
-    lib: &str,
-    media: &str,
-) -> Result<Option<String>, StoreError> {
+fn preferred_query(tx: &Connection, lib: &str, media: &str) -> Result<Option<String>, StoreError> {
     let value = tx
         .query_row(
             "SELECT file_id FROM library_files
@@ -468,12 +460,7 @@ fn update_art(
     after: &FileSummaryFacts,
     poster: bool,
 ) -> Result<Option<String>, StoreError> {
-    let qualifies = after.published
-        && if poster {
-            after.poster
-        } else {
-            after.backdrop
-        };
+    let qualifies = after.published && if poster { after.poster } else { after.backdrop };
     let Some(reference) = current else {
         return Ok(qualifies.then(|| after.file_id.clone()));
     };
@@ -548,10 +535,12 @@ fn prune_unpublished_input(
     if after.published {
         return Ok(());
     }
+    // `input_key` 是 sidecar 路径，不是文件路径：按观察者（`path_key` = 该文件路径）解除它
+    // 留下的输入，而不是拿视频路径去比 sidecar 键。
     tx.execute(
         "DELETE FROM library_metadata_inputs
          WHERE library_id = ?1 AND media_id = ?2 AND source_version = 'nfo_v1'
-           AND input_key = ?3",
+           AND path_key = ?3",
         params![lib, media, after.path_key],
     )?;
     Ok(())

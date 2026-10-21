@@ -10,10 +10,10 @@ use domain::{
     FilePresence, FilePublication, FileVersion, LedgerId, LedgerRow, LibraryFile, Media, MediaId,
     MediaKind, QualitySource, UnitKey,
 };
-use store::library_write::{FilePublication as StorePublication, WriteScope};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::Value;
+use store::library_write::{FilePublication as StorePublication, WriteScope};
 use tower::ServiceExt;
 
 use super::common::{Fixtures, json_data, request, state};
@@ -112,11 +112,12 @@ fn seed_movie_with_artwork(
         library_id: lib_id.parse().unwrap(),
         config_revision: 0,
     };
-    let observation = store::metadata::NfoObservation::observe(
+    let observations = store::metadata::observe_nfo_inputs(
         &video_file,
         MediaKind::Movie,
-        String::new(),
-        format!("seed-{i}"),
+        &[UnitKey::WHOLE],
+        "",
+        &file.version,
         scope.config_revision,
     );
     api_state
@@ -128,7 +129,7 @@ fn seed_movie_with_artwork(
                 file: &file,
                 units: &[UnitKey::WHOLE],
                 expected_version: None,
-                nfo_observation: Some(&observation),
+                nfo_observation: Some(&observations),
                 probe_required: false,
             }],
             1000,
@@ -519,4 +520,3 @@ async fn favorites_view_respects_title_sort_order() {
         .collect();
     assert_eq!(titles_desc, vec!["Movie 3", "Movie 2", "Movie 1"]);
 }
-

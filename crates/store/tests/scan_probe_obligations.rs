@@ -34,7 +34,7 @@ fn scanned(row: &LedgerRow) -> store::ScannedLedger {
         size_bytes: None,
         created_ns: None,
         modified_ns: None,
-        observation: None,
+        observations: Vec::new(),
     }
 }
 
@@ -108,13 +108,18 @@ fn ledger_cleanup_removes_obligation_not_user_facts() {
     assert_eq!(obs[0].ledger_id, row.id);
 
     // Delete files via Store::delete_files
-    let removed = store.delete_files(lib.id.parse().unwrap(), &[row.id]).unwrap();
+    let removed = store
+        .delete_files(lib.id.parse().unwrap(), &[row.id])
+        .unwrap();
     assert_eq!(removed, 1);
 
     // Ledger and obligation must both be gone
     assert!(store.get_ledger(&row.id.to_string()).unwrap().is_none());
     let obs_after = store.scan_probe_obligations(10).unwrap();
-    assert!(obs_after.is_empty(), "obligation must be deleted on ledger cleanup");
+    assert!(
+        obs_after.is_empty(),
+        "obligation must be deleted on ledger cleanup"
+    );
 }
 
 #[test]

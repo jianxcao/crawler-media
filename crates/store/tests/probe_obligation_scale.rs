@@ -34,7 +34,7 @@ fn scanned(row: &LedgerRow) -> store::ScannedLedger {
         size_bytes: None,
         created_ns: None,
         modified_ns: None,
-        observation: None,
+        observations: Vec::new(),
     }
 }
 
@@ -80,7 +80,9 @@ fn probe_obligations_bounded_vm_steps_at_scale() {
     // 1k series baseline: 1,000 backlog items with higher timestamps
     for index in 101..=1_100 {
         let row = sample_row(media_id, &format!("/movies/backlog_{index}.mkv"));
-        store.insert_scanned_files(&[scanned(&row)], 10_000 + index).unwrap();
+        store
+            .insert_scanned_files(&[scanned(&row)], 10_000 + index)
+            .unwrap();
     }
 
     let (obs_1k, vm_steps_1k) = store.scan_probe_obligations_with_vm_steps(100).unwrap();
@@ -91,7 +93,9 @@ fn probe_obligations_bounded_vm_steps_at_scale() {
     // Grow backlog to 50,000 items (49,000 additional rows)
     for index in 1_101..=50_100 {
         let row = sample_row(media_id, &format!("/movies/backlog_{index}.mkv"));
-        store.insert_scanned_files(&[scanned(&row)], 10_000 + index).unwrap();
+        store
+            .insert_scanned_files(&[scanned(&row)], 10_000 + index)
+            .unwrap();
     }
 
     let (obs_50k, vm_steps_50k) = store.scan_probe_obligations_with_vm_steps(100).unwrap();
@@ -125,4 +129,3 @@ fn probe_obligations_limit_clamping() {
     assert_eq!(clamped_101.len(), 100);
     assert_eq!(clamped_101[0].created_at_ms, 1);
 }
-

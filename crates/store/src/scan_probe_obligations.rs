@@ -14,15 +14,15 @@ pub struct ScannedLedger {
     pub size_bytes: Option<i64>,
     pub created_ns: Option<i64>,
     pub modified_ns: Option<i64>,
-    pub observation: Option<crate::metadata::NfoObservation>,
+    /// 该文件的全部 NFO 候选观察（每份存在的 sidecar 一条；不存在的候选也会出现，用来解除旧输入）。
+    pub observations: Vec<crate::metadata::NfoObservation>,
 }
-
 
 use super::library_write::reduce_incremental::{
     ChangedFile, read_file_summary_facts, reduce_library_media_incremental,
 };
 use super::library_write::{
-    ensure_library_writable, ensure_media_writable, enqueue_probe, insert_file_row,
+    enqueue_probe, ensure_library_writable, ensure_media_writable, insert_file_row,
     reduce_library_media, sync_coverage,
 };
 use super::{Store, StoreError};
@@ -50,10 +50,18 @@ struct BatchChange {
 }
 
 impl Store {
-    pub fn insert_scanned_files(&self, rows: &[ScannedLedger], now_ms: i64) -> Result<(), StoreError> {
-        if rows.is_empty() { return Ok(()); }
+    pub fn insert_scanned_files(
+        &self,
+        rows: &[ScannedLedger],
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
         if rows.len() > MAX_SCAN_BATCH {
-            return Err(StoreError::Invalid(format!("exceeded {MAX_SCAN_BATCH} files per scan batch")));
+            return Err(StoreError::Invalid(format!(
+                "exceeded {MAX_SCAN_BATCH} files per scan batch"
+            )));
         }
         let tx = self.library.unchecked_transaction()?;
         let mut affected: HashMap<(String, MediaId), BatchChange> = HashMap::new();
@@ -65,44 +73,89 @@ impl Store {
             ensure_media_writable(&tx, row.media_id)?;
             let artwork = crate::files::DiscoveredArtwork::discover(Path::new(&row.path));
             let file = domain::LibraryFile {
-                file_id: row.id, library_id: library_id.parse::<LibraryId>()?, root_id,
-                media_id: row.media_id, kind, path: Path::new(&row.path).to_path_buf(),
-                version: domain::FileVersion { revision: 1, source_version: scanned.source_version.clone() },
-                presence: domain::FilePresence::Present, publication: domain::FilePublication::Published,
+                file_id: row.id,
+                library_id: library_id.parse::<LibraryId>()?,
+                root_id,
+                media_id: row.media_id,
+                kind,
+                path: Path::new(&row.path).to_path_buf(),
+                version: domain::FileVersion {
+                    revision: 1,
+                    source_version: scanned.source_version.clone(),
+                },
+                presence: domain::FilePresence::Present,
+                publication: domain::FilePublication::Published,
                 size_bytes: scanned.size_bytes.and_then(|size| u64::try_from(size).ok()),
                 stat_known: scanned.modified_ns.is_some(),
-                created_ns: scanned.created_ns, modified_ns: scanned.modified_ns,
-                source_digest: scanned.source_digest.clone(), source_path: None, transfer_mode: None,
-                resolution: row.resolution.clone(), codec: row.codec.clone(), hdr: row.hdr.clone(),
-                quality_source: row.quality_source, confidence: row.confidence, filter_score: row.filter_score,
-                release_quality: None, duration_ms: None, tracks_version: 0,
-                poster_path: artwork.poster, backdrop_path: artwork.backdrop, still_path: artwork.still,
+                created_ns: scanned.created_ns,
+                modified_ns: scanned.modified_ns,
+                source_digest: scanned.source_digest.clone(),
+                source_path: None,
+                transfer_mode: None,
+                resolution: row.resolution.clone(),
+                codec: row.codec.clone(),
+                hdr: row.hdr.clone(),
+                quality_source: row.quality_source,
+                confidence: row.confidence,
+                filter_score: row.filter_score,
+                release_quality: None,
+                duration_ms: None,
+                tracks_version: 0,
+                poster_path: artwork.poster,
+                backdrop_path: artwork.backdrop,
+                still_path: artwork.still,
             };
             insert_file_row(&tx, &file)?;
-            let units = if kind == MediaKind::Video { vec![UnitKey::WHOLE] } else { scanned.units.clone() };
+            let units = if kind == MediaKind::Video {
+                vec![UnitKey::WHOLE]
+            } else {
+                scanned.units.clone()
+            };
             sync_coverage(&tx, &file, &units)?;
-            if let Some(observation) = &scanned.observation {
-                if !crate::metadata::nfo_input::record_nfo_observation(&tx, &file, observation)? {
-                    return Err(StoreError::Protected(format!("stale NFO observation for {}", row.path)));
-                }
+            let target = crate::metadata::nfo_input::NfoInputTarget::from_file(&file);
+            if !crate::metadata::nfo_input::record_nfo_observations(
+                &tx,
+                &target,
+                &scanned.observations,
+            )? {
+                return Err(StoreError::Protected(format!(
+                    "stale NFO observation for {}",
+                    row.path
+                )));
             }
             enqueue_probe(&tx, file.file_id, now_ms)?;
             let change = affected.entry((library_id, row.media_id)).or_default();
             change.count += 1;
             if change.count == 1 {
                 change.file_id = Some(file.file_id.to_string());
-                change.units = units.iter().map(|unit| (unit.season, unit.episode)).collect();
-            } else { change.file_id = None; change.units.clear(); }
+                change.units = units
+                    .iter()
+                    .map(|unit| (unit.season, unit.episode))
+                    .collect();
+            } else {
+                change.file_id = None;
+                change.units.clear();
+            }
         }
         for ((library_id, media_id), change) in affected {
             let library_id = library_id.parse::<LibraryId>()?;
             if let Some(file_id) = change.file_id {
                 let after = read_file_summary_facts(&tx, &file_id)?
                     .ok_or_else(|| StoreError::Missing(format!("file {file_id}")))?;
-                reduce_library_media_incremental(&tx, library_id, media_id, &ChangedFile {
-                    before: None, before_units: &[], after: &after, after_units: &change.units,
-                })?;
-            } else { reduce_library_media(&tx, library_id, media_id)?; }
+                reduce_library_media_incremental(
+                    &tx,
+                    library_id,
+                    media_id,
+                    &ChangedFile {
+                        before: None,
+                        before_units: &[],
+                        after: &after,
+                        after_units: &change.units,
+                    },
+                )?;
+            } else {
+                reduce_library_media(&tx, library_id, media_id)?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -111,18 +164,27 @@ impl Store {
 
 impl Store {
     /// Retrieve up to `limit` (clamped 1..=100) pending probe obligations in deterministic order.
-    pub fn scan_probe_obligations(&self, limit: usize) -> Result<Vec<ScanProbeObligation>, StoreError> {
-        self.scan_probe_obligations_with_vm_steps(limit).map(|(obligations, _)| obligations)
+    pub fn scan_probe_obligations(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ScanProbeObligation>, StoreError> {
+        self.scan_probe_obligations_with_vm_steps(limit)
+            .map(|(obligations, _)| obligations)
     }
 
-    pub fn scan_probe_obligations_with_vm_steps(&self, limit: usize) -> Result<(Vec<ScanProbeObligation>, i64), StoreError> {
+    pub fn scan_probe_obligations_with_vm_steps(
+        &self,
+        limit: usize,
+    ) -> Result<(Vec<ScanProbeObligation>, i64), StoreError> {
         let limit = limit.clamp(1, 100);
         let mut stmt = self.library.prepare("SELECT file_id, created_at_ms, reason FROM file_probe_obligations ORDER BY created_at_ms ASC, file_id ASC LIMIT ?1")?;
         let rows = stmt.query_map(params![limit], |row| {
             let id: String = row.get(0)?;
             Ok(ScanProbeObligation {
-                ledger_id: LedgerId::from_str(&id).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, 0))?,
-                created_at_ms: row.get(1)?, reason: row.get(2)?,
+                ledger_id: LedgerId::from_str(&id)
+                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, 0))?,
+                created_at_ms: row.get(1)?,
+                reason: row.get(2)?,
             })
         })?;
         let obligations = rows.collect::<Result<Vec<_>, _>>()?;
@@ -131,12 +193,18 @@ impl Store {
     }
 
     pub fn ack_scan_probe_obligation(&self, ledger_id: LedgerId) -> Result<(), StoreError> {
-        self.library.execute("DELETE FROM file_probe_obligations WHERE file_id = ?1", params![ledger_id.to_string()])?;
+        self.library.execute(
+            "DELETE FROM file_probe_obligations WHERE file_id = ?1",
+            params![ledger_id.to_string()],
+        )?;
         Ok(())
     }
 }
 
-fn media_kind(tx: &rusqlite::Connection, media_id: domain::MediaId) -> Result<MediaKind, StoreError> {
+fn media_kind(
+    tx: &rusqlite::Connection,
+    media_id: domain::MediaId,
+) -> Result<MediaKind, StoreError> {
     let kind: String = tx
         .query_row(
             "SELECT kind FROM media WHERE media_id = ?1",

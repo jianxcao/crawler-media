@@ -11,6 +11,7 @@
 - `media`、Library配置、Collection、Playback已同库；旧ledger/file_meta/browse持久表已删除，但LedgerRow写适配和Web movie (0,0)边界alias仍在，不是允许保留的合同。
 - 复合ownership FK与完整归约已存在；增量归约漏用户摘要、重扫替换不推进物理版本、Transfer pending恢复身份记账仍有缺口；不将历史多集/删除修复笼统判为未实现。
 - `library_operations` 的 `roots`/`locale` 两类已由 `Store::begin_library_reconfiguration` + `Store::advance_library_operation` 持久化驱动：开始时对 `config_revision` 做真实 CAS 并把库置为 `reindexing`（旧 `WriteScope` 的写入被拒绝），再按 keyset 分批（≤100 Media/批）迁移 `library_files.root_id`、`library_metadata_inputs.root_id` 与 `unidentified.root_id`，最后才删除无引用的旧根并恢复 `ready`；中途重启由 `unfinished_library_operations` 续跑。`integrity_state` 与 NFO `export_*` 仍是已建结构，不代表 checker/导出恢复已实现。
+- `media_operations` 的合并已由 `Store::begin_media_merge` + `Store::advance_media_merge` 驱动：`POST /media/merges` 只写计划并冻结双方，阶段推进由**持有数据目录写租约**的进程在 job loop 内调用 `advance_media_merge`，未完成操作由 `unfinished_media_merges` 在启动恢复时续跑（同一租约块内，重复执行幂等）。合并终态后由收敛步骤把排队中的 job payload 引用改挂到 survivor；`GET /media/operations/{id}` 只读阶段、不推进。
 - `a3dab1b` 增加扫描变化时清 stat/durable 版本，未新增表或列；在 Task 1 中统一由 `library::observe_source` 在锁外观察源，并通过 `Store::replace_file_source` CAS 原子递增 `file_revision`、更新 `source_version` 与 `source_digest`（STRM 文件基于内容 digest，普通文件基于 stat），失效旧冷详情/质量/轨道/artwork并重挂 probe 义务。
 - 元数据人工锁/来源冲突、合并冻结/恢复、协议生产接线见[当前计划](../superpowers/plans/2026-10-20-storage-clean-cutover.md)。
 
@@ -50,7 +51,7 @@
 - [media_metadata](#media_metadata) — 17 字段；work 级已采用元数据；当前采用入口尚未完整实现来源合成与生产接线。
 - [media_metadata_overrides](#media_metadata_overrides) — 7 字段；实体/locale 人工字段覆盖。当前合并冲突保护未完整实现，不能以有表作为保证。
 - [media_metadata_sources](#media_metadata_sources) — 14 字段；每实体/locale/来源的当前规范化快照与选择来源；不是响应缓存或历史表。
-- [media_operations](#media_operations) — 10 字段；Media 合并/改挂持久计划与阶段。Store 合并实现仍有冲突/冻结/接线缺口。
+- [media_operations](#media_operations) — 10 字段；Media 合并/改挂持久计划与阶段。冲突/冻结在 Store 内落库，HTTP（`POST /media/merges`、`GET /media/operations/{id}`）与 job loop 推进已接线；改挂仍非独立操作类型。
 - [media_seasons](#media_seasons) — 10 字段；已采用季详情；不是新的 Media 身份，不代表拥有该季。
 - [pending_file_deletions](#pending_file_deletions) — 8 字段；待删除磁盘文件意图、身份检查与重试状态；不是浏览事件流。
 - [playback_logs](#playback_logs) — 23 字段；终态会话历史；按稳定会话/generation 去重，不依赖文件仍存在。
@@ -572,7 +573,17 @@ CREATE INDEX items_title ON library_items(library_id,title_sort,media_id);
 
 ## library_metadata_inputs
 
-Library 独立 NFO 候选、解析状态与导出来源字段；自产反馈/恢复目前未完整接通。
+Library 独立 NFO 候选、解析状态与导出来源字段。自产反馈/恢复目前未完整接通。
+
+**写入方与生命周期（Task 8 落地）**
+
+- `input_key` 是 sidecar 的规范路径（`movie.nfo` / `tvshow.nfo` / `season.nfo` / `<视频名>.nfo`），**不是**视频路径；`path_key` 才是视频的绝对路径。
+- 一次观察覆盖视频同目录的每个候选，每候选一行：无 sidecar → `missing`（并删除该 `input_key` 的旧行）；XML 不可解析/根节点不受支持 → `unknown`（保留上一份输入，不改写）；解析成功 → `valid`（按同实体同 locale 精确 upsert）。
+- `entity_scope` 是 NFO 自身层级解析的结果（work/season/episode）；坐标无法确定时不升格为 work。同一 `input_key` 换 locale 时，旧 locale 的行由位移 DELETE 清理。
+- 写入前比对 `source_version` 与 `config_revision`：不一致即拒绝该次写入（fail-closed，卡片保留上一份输入）。
+- `locale` 取 NFO 声明的语言；没有声明就用导入时的 Library locale。读取链是**请求 locale → Library `display_locale` → 实例 `metadata.language`**（先精确匹配，再按 `-`/`_` 前缀匹配）；`''` 桶是链上都不命中时的显式兜底，任何其他已存 locale 都不会被隐式选中（禁止 `rows.first()` 任选语言）。
+- 当前只有 work 层 `valid` 行有公开读取路径（`library_item_detail` 的卡片字段）；season/episode 层行只落库。
+- 已有文件的复核在每次 fresh scan 的既有行分支触发（`Store::reconcile_nfo_inputs`），sidecar 的 X→Y→invalid/unknown→删除分别表现为：换成 Y、保留上一份值、保留上一份值、释放该输入。
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|
@@ -979,7 +990,7 @@ work 级已采用元数据；当前采用入口尚未完整实现来源合成与
 
 ## media_operations
 
-Media 合并/改挂持久计划与阶段。Store 合并实现仍有冲突/冻结/接线缺口。
+Media 合并/改挂持久计划与阶段。冲突/冻结在 Store 内落库，HTTP（`POST /media/merges`、`GET /media/operations/{id}`）与 job loop 推进已接线；改挂仍非独立操作类型。
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|

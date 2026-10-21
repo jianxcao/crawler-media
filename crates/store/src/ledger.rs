@@ -98,10 +98,7 @@ impl Store {
 
     /// 一次取多个 Media 的 ledger 行（≤500 个 id 一块，复用 `library_files.media_id` 索引）。
     /// 重复 id 只查询一次，输出行不保证顺序。
-    pub fn ledger_for_media_batch(
-        &self,
-        ids: &[MediaId],
-    ) -> Result<Vec<LedgerRow>, StoreError> {
+    pub fn ledger_for_media_batch(&self, ids: &[MediaId]) -> Result<Vec<LedgerRow>, StoreError> {
         let unique: std::collections::HashSet<MediaId> = ids.iter().copied().collect();
         let ids: Vec<MediaId> = unique.into_iter().collect();
         let mut out = Vec::new();
@@ -173,7 +170,9 @@ impl Store {
             let source_path: Option<String> = row.get(12)?;
             Ok((ledger, mode, source_path))
         })?;
-        let collected = rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from);
+        let collected = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from);
         self.root_ledger_scans.fetch_add(
             (stmt.get_status(rusqlite::StatementStatus::FullscanStep) as usize).max(1),
             std::sync::atomic::Ordering::Relaxed,
@@ -250,7 +249,11 @@ impl Store {
     /// Save the original completed download path alongside an imported row.
     /// The source is retained for an explicit administrator-triggered
     /// retransfer when the Library copy later goes missing.
-    pub fn insert_ledger_with_source(&self, row: &LedgerRow, source: &Path) -> Result<(), StoreError> {
+    pub fn insert_ledger_with_source(
+        &self,
+        row: &LedgerRow,
+        source: &Path,
+    ) -> Result<(), StoreError> {
         self.insert_ledger_with_mode_and_source(row, None, source.to_str())
     }
 
@@ -268,12 +271,15 @@ impl Store {
             .ok()
             .flatten()
             .unwrap_or_default();
-        let config_revision = self.library_config_revision(&file.library_id.to_string()).unwrap_or(0);
-        let observation = crate::metadata::NfoObservation::observe(
+        let config_revision = self
+            .library_config_revision(&file.library_id.to_string())
+            .unwrap_or(0);
+        let observations = crate::metadata::observe_nfo_inputs(
             &file.path,
             file.kind,
-            locale,
-            file.version.source_version.clone(),
+            &units,
+            &locale,
+            &file.version,
             config_revision,
         );
         self.publish_files(
@@ -285,7 +291,7 @@ impl Store {
                 file: &file,
                 units: &units,
                 expected_version: None,
-                nfo_observation: Some(&observation),
+                nfo_observation: Some(&observations),
                 probe_required: false,
             }],
             crate::unix_now() * 1000,
@@ -417,11 +423,7 @@ impl Store {
             Some((file_id, revision, source_version)) => {
                 (file_id.parse::<LedgerId>()?, revision, source_version)
             }
-            None => (
-                row.id,
-                1,
-                format!("{}-{}", crate::unix_now(), row.id),
-            ),
+            None => (row.id, 1, format!("{}-{}", crate::unix_now(), row.id)),
         };
         let artwork = crate::files::DiscoveredArtwork::discover(Path::new(&row.path));
         Ok(LibraryFile {
@@ -472,14 +474,15 @@ impl Store {
                 continue;
             }
             let depth = normalized.components().count();
-            if best.as_ref().is_none_or(|(best_depth, _)| *best_depth < depth) {
+            if best
+                .as_ref()
+                .is_none_or(|(best_depth, _)| *best_depth < depth)
+            {
                 best = Some((depth, root.id.clone()));
             }
         }
         best.map(|(_, id)| id).ok_or_else(|| {
-            StoreError::Invalid(format!(
-                "no root of library {library_id} contains {path}"
-            ))
+            StoreError::Invalid(format!("no root of library {library_id} contains {path}"))
         })
     }
 
@@ -631,6 +634,9 @@ mod batch_tests {
         // 重复 id 只查询一次，不产生重复行。
         let mut duplicated = ids.clone();
         duplicated.extend(ids.iter().take(10).copied());
-        assert_eq!(store.ledger_for_media_batch(&duplicated).unwrap().len(), 501);
+        assert_eq!(
+            store.ledger_for_media_batch(&duplicated).unwrap().len(),
+            501
+        );
     }
 }
