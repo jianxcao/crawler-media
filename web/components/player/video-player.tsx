@@ -253,9 +253,15 @@ function unitKeyOf(unit: PlaybackUnit): string {
   return `${unit.media_item_id}/${unit.season_number ?? 0}/${unit.episode_number ?? 0}`;
 }
 function playbackRequestUnit(unit: PlaybackUnit): PlaybackUnit {
-  return unit.season_number == null && unit.episode_number == null
-    ? { media_item_id: unit.media_item_id }
-    : unit;
+  const result: PlaybackUnit = { media_item_id: unit.media_item_id };
+  if (unit.season_number != null && unit.episode_number != null) {
+    result.season_number = unit.season_number;
+    result.episode_number = unit.episode_number;
+  }
+  if (unit.file_id) {
+    result.file_id = unit.file_id;
+  }
+  return result;
 }
 
 

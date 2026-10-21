@@ -55,14 +55,18 @@ pub(crate) fn default_library_cover(kind: MediaKind) -> Result<Vec<u8>, String> 
 fn library_cover_tag(cover_path: Option<&std::path::Path>, kind: MediaKind) -> String {
     if let Some(path) = cover_path {
         if let Ok(meta) = std::fs::metadata(path) {
-            let mtime = meta.modified().ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|duration| duration.as_secs()).unwrap_or(0);
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
             return format!("cover-{:x}-{:x}", meta.len(), mtime);
         }
     }
     let bytes = default_library_cover(kind).unwrap_or_default();
     format!("cover-{:x}", Sha256::digest(bytes))
 }
-
 
 fn catalog_episode_still_url(path: &str) -> Option<String> {
     if path.starts_with("https://image.tmdb.org/") || path.starts_with("http://image.tmdb.org/") {
@@ -227,22 +231,43 @@ impl MediaServerProvider for ApiServerProvider {
     async fn list_visible_libraries(&self, user_id: UserId) -> Result<Vec<ServerLibrary>, String> {
         let state = self.state.clone();
         let budget = state.http_work.clone();
-        budget.run(std::time::Duration::from_secs(30), move || {
-            let store = state.store.lock();
-            let ownership = store.library_ownership().map_err(|error| error.to_string())?;
-            let role = store.user_role(user_id).map_err(|error| error.to_string())?;
-            let libraries = store.list_libraries().map_err(|error| error.to_string())?;
-            let mut list = Vec::new();
-            for lib in libraries {
-                let visible = ownership.accepts_work(&lib.id) && if role == "admin" { lib.admin_visible } else { lib.access_mode == "everyone" || lib.member_ids.contains(&user_id) };
-                if !visible { continue; }
-                let cover_path = crate::http::library::library_cover_path(&store, &lib);
-                let cover_tag = library_cover_tag(cover_path.as_deref(), lib.kind);
-                list.push(ServerLibrary { id: lib.id, name: lib.name, kind: lib.kind, exclude_from_home: lib.exclude_from_home,
-                    root_paths: lib.root_paths, cover_path: cover_path.map(|path| path.display().to_string()), cover_tag });
-            }
-            Ok::<_, String>(list)
-        }).await.map_err(|error| error.to_string())?
+        budget
+            .run(std::time::Duration::from_secs(30), move || {
+                let store = state.store.lock();
+                let ownership = store
+                    .library_ownership()
+                    .map_err(|error| error.to_string())?;
+                let role = store
+                    .user_role(user_id)
+                    .map_err(|error| error.to_string())?;
+                let libraries = store.list_libraries().map_err(|error| error.to_string())?;
+                let mut list = Vec::new();
+                for lib in libraries {
+                    let visible = ownership.accepts_work(&lib.id)
+                        && if role == "admin" {
+                            lib.admin_visible
+                        } else {
+                            lib.access_mode == "everyone" || lib.member_ids.contains(&user_id)
+                        };
+                    if !visible {
+                        continue;
+                    }
+                    let cover_path = crate::http::library::library_cover_path(&store, &lib);
+                    let cover_tag = library_cover_tag(cover_path.as_deref(), lib.kind);
+                    list.push(ServerLibrary {
+                        id: lib.id,
+                        name: lib.name,
+                        kind: lib.kind,
+                        exclude_from_home: lib.exclude_from_home,
+                        root_paths: lib.root_paths,
+                        cover_path: cover_path.map(|path| path.display().to_string()),
+                        cover_tag,
+                    });
+                }
+                Ok::<_, String>(list)
+            })
+            .await
+            .map_err(|error| error.to_string())?
     }
 
     async fn list_visible_items(
@@ -355,7 +380,6 @@ impl MediaServerProvider for ApiServerProvider {
             .await?
             .map(|snapshot| snapshot.user_item_data()))
     }
-
 
     async fn enrich_visible_item(&self, item: MediaItemSnapshot) -> MediaItemSnapshot {
         self.enrich_single_item(item).await
@@ -496,6 +520,21 @@ impl MediaServerProvider for ApiServerProvider {
         user_id: UserId,
         id: &str,
     ) -> Result<Option<(PathBuf, bool)>, String> {
+        self.resolve_stream_source_bound(user_id, id, None, None, None).await
+    }
+
+    async fn resolve_stream_source_bound(
+        &self,
+        user_id: UserId,
+        id: &str,
+        media_source_id: Option<&str>,
+        _play_session_id: Option<&str>,
+        _device_id: Option<&str>,
+    ) -> Result<Option<(PathBuf, bool)>, String> {
+        // Must not accept bare file UUID as a logical ID
+        if id.len() == 36 && id.chars().filter(|c| *c == '-').count() == 4 && uuid::Uuid::parse_str(id).is_ok() {
+            return Ok(None);
+        }
         let entry = {
             let store = self.state.store.lock();
             items::resolve_entry(&store, Some(user_id), id)?
@@ -503,7 +542,32 @@ impl MediaServerProvider for ApiServerProvider {
         let Some(entry) = entry else {
             return Ok(None);
         };
-        let path = entry.file.path.clone();
+
+        let file = if let Some(msid) = media_source_id {
+            let store = self.state.store.lock();
+            let parsed_id = msid.replace('-', "").parse::<domain::LedgerId>().ok();
+            let Some(source_file_id) = parsed_id else {
+                return Ok(None);
+            };
+            let Some(file) = store.visible_file(user_id, source_file_id).map_err(|e| e.to_string())? else {
+                return Ok(None);
+            };
+            let covers = store
+                .file_covers_unit(
+                    source_file_id,
+                    entry.media.id,
+                    domain::UnitKey::new(entry.unit.0, entry.unit.1),
+                )
+                .map_err(|e| e.to_string())?;
+            if !covers || file.media_id != entry.media.id {
+                return Ok(None);
+            }
+            file
+        } else {
+            entry.file
+        };
+
+        let path = file.path.clone();
         let is_strm = path
             .extension()
             .and_then(|ext| ext.to_str())
@@ -610,7 +674,16 @@ impl MediaServerProvider for ApiServerProvider {
         event: PlaybackEvent,
         identity: media_server::provider::PlaybackEventIdentity,
     ) -> Result<(), String> {
-        playback::report_event(self, user_id, id, position_ms, paused, client, event, identity)
+        playback::report_event(
+            self,
+            user_id,
+            id,
+            position_ms,
+            paused,
+            client,
+            event,
+            identity,
+        )
     }
 }
 

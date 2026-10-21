@@ -36,13 +36,15 @@ export default function PlayPage() {
   const [searchParams] = useSearchParams();
   const parsed = parseUnitSegment(unitParam);
   const startSeconds = queryNumber(searchParams.get("t"));
-  const playerKey = `${mediaItemId}:${parsed?.season ?? 0}:${parsed?.episode ?? 0}`;
+  const fileId = searchParams.get("file_id") ?? undefined;
+  const playerKey = `${mediaItemId}:${parsed?.season ?? 0}:${parsed?.episode ?? 0}:${fileId ?? ""}`;
   return (
     <PlayerPage
       key={playerKey}
       mediaItemId={mediaItemId}
       season={parsed?.season}
       episode={parsed?.episode}
+      fileId={fileId}
       startMsOverride={startSeconds !== undefined ? startSeconds * 1000 : undefined}
     />
   );

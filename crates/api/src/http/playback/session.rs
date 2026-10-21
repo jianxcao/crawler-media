@@ -9,8 +9,8 @@ use serde_json::{Value, json};
 use crate::http::{err, ok};
 use crate::management::ApiState;
 
-use super::selection::resolve_playback_for;
 use super::direct_decision;
+use super::selection::resolve_playback_for;
 
 /// POST /playback/sessions — direct decision with session_id null (tier 0).
 pub(crate) async fn start_session(
@@ -26,6 +26,37 @@ pub(crate) async fn start_session(
                 "playback.invalid",
                 "start_ms 必须是非负整数",
             );
+        }
+    }
+
+    // Validate coordinates: movie cannot have explicit coordinates (even 0, 0 is invalid now);
+    // TV S00E00 (season 0 episode 0) is valid.
+    {
+        let store = state.store.lock();
+        if let Some(media_id) = body
+            .get("media_item_id")
+            .and_then(|v| v.as_str())
+            .and_then(super::resolve_media_id)
+        {
+            if let Ok(Some(media)) = store.get_media(media_id) {
+                if media.kind != domain::MediaKind::Tv {
+                    let has_season = body
+                        .get("season_number")
+                        .or_else(|| body.get("season"))
+                        .is_some();
+                    let has_episode = body
+                        .get("episode_number")
+                        .or_else(|| body.get("episode"))
+                        .is_some();
+                    if has_season || has_episode {
+                        return err(
+                            StatusCode::BAD_REQUEST,
+                            "playback.invalid",
+                            "电影不能包含季集坐标",
+                        );
+                    }
+                }
+            }
         }
     }
     let (row, media, resolved, tracks) = {
@@ -46,7 +77,10 @@ pub(crate) async fn start_session(
     }
     let start_ms = resolved.start_ms;
     let _ = crate::http::library::ensure_probe_enqueued(&state, &row);
-    let device_id = body.get("device_id").and_then(|v| v.as_str()).unwrap_or("web-player");
+    let device_id = body
+        .get("device_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("web-player");
     // 播放域时间一律走注入时钟。`issue_play_session` 的 `issued_at` 是**秒**
     // （Store 内部按 30 天秒数清理过期会话）。
     let issued_at = state.playback_clock.now_ms() / 1000;
@@ -69,7 +103,8 @@ pub(crate) async fn start_session(
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("strm"));
-    let stream_url = session_stream_url(&row, play_session_id.as_deref(), device_id, &token, is_strm);
+    let stream_url =
+        session_stream_url(&row, play_session_id.as_deref(), device_id, &token, is_strm);
     let (chapters, chapters_pending) = session_chapters(&state, &row, &media);
     let source = session_source(&row, is_strm);
     let subtitle_urls: Vec<String> = decision
@@ -196,7 +231,15 @@ pub(crate) async fn session_stream(
     let binding = {
         let store = state.store.lock();
         match store.play_session_binding(user_id, &query.device_id, &play_session_id) {
-            Ok(Some(b)) if matches!(b.state, crate::store::PlaySessionIdState::Pending | crate::store::PlaySessionIdState::Active) => b,
+            Ok(Some(b))
+                if matches!(
+                    b.state,
+                    crate::store::PlaySessionIdState::Pending
+                        | crate::store::PlaySessionIdState::Active
+                ) =>
+            {
+                b
+            }
             _ => return Err(StatusCode::NOT_FOUND),
         }
     };
@@ -217,13 +260,19 @@ pub(crate) async fn session_stream(
             || binding.source_version.as_deref() != Some(file.version.source_version.as_str())
             || binding.library_id.as_deref() != Some(library_id.as_str())
             || store.library_config_revision(&library_id).ok() != Some(binding.config_revision)
-            || !store.get_file_units(file_id).ok().is_some_and(|units| units.contains(&binding.unit))
-            || store.is_device_revoked(user_id, &query.device_id).unwrap_or(true)
+            || !store
+                .get_file_units(file_id)
+                .ok()
+                .is_some_and(|units| units.contains(&binding.unit))
+            || store
+                .is_device_revoked(user_id, &query.device_id)
+                .unwrap_or(true)
             || !store.library_accepts_work(&library_id).unwrap_or(false)
         {
             return Err(StatusCode::NOT_FOUND);
         }
-        let is_strm = file.path
+        let is_strm = file
+            .path
             .extension()
             .and_then(|ext| ext.to_str())
             .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"));
@@ -232,14 +281,26 @@ pub(crate) async fn session_stream(
 
     if is_strm {
         if let Some(direct_url) = library::read_strm_url(&path) {
-            return Ok((StatusCode::FOUND, [(axum::http::header::LOCATION, direct_url)]).into_response());
+            return Ok((
+                StatusCode::FOUND,
+                [(axum::http::header::LOCATION, direct_url)],
+            )
+                .into_response());
         } else {
             return Err(StatusCode::NOT_FOUND);
         }
     }
 
-    let mut file = tokio::fs::File::open(&path).await.map_err(|_| StatusCode::NOT_FOUND)?;
-    let content_type = match path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase().as_str() {
+    let mut file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    let content_type = match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase()
+        .as_str()
+    {
         "mp4" | "m4v" => "video/mp4",
         "mkv" => "video/x-matroska",
         "webm" => "video/webm",
@@ -264,7 +325,10 @@ pub(crate) async fn session_stream(
             return Ok((
                 StatusCode::RANGE_NOT_SATISFIABLE,
                 [
-                    (axum::http::header::CONTENT_RANGE, format!("bytes */{file_size}")),
+                    (
+                        axum::http::header::CONTENT_RANGE,
+                        format!("bytes */{file_size}"),
+                    ),
                     (axum::http::header::ACCEPT_RANGES, "bytes".into()),
                 ],
                 axum::body::Body::empty(),

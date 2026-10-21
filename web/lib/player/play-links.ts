@@ -25,14 +25,24 @@ export function parseUnitSegment(segment: string | undefined): {
  *  原本按数字写死，这里只把它当路径段拼进 URL。 */
 export function playHref(
   mediaItemId: number | string,
-  options?: { season?: number; episode?: number; tSeconds?: number },
+  options?: { season?: number; episode?: number; tSeconds?: number; fileId?: string },
 ): string {
-  const { season, episode, tSeconds } = options ?? {};
+  const { season, episode, tSeconds, fileId } = options ?? {};
   let href = `/play/${mediaItemId}`;
   if (season !== undefined && episode !== undefined) {
     href += `/s${String(season).padStart(2, "0")}e${String(episode).padStart(2, "0")}`;
   }
-  if (tSeconds !== undefined && tSeconds > 0) href += `?t=${Math.floor(tSeconds)}`;
+  const params = new URLSearchParams();
+  if (fileId) {
+    params.set("file_id", fileId);
+  }
+  if (tSeconds !== undefined && tSeconds > 0) {
+    params.set("t", String(Math.floor(tSeconds)));
+  }
+  const queryString = params.toString();
+  if (queryString) {
+    href += `?${queryString}`;
+  }
   return href;
 }
 

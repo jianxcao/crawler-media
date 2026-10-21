@@ -292,10 +292,36 @@ async fn newest_favorite_leads_without_reordering_played_marks() {
         add_ledger(&guard, older, &library, "older");
         add_ledger(&guard, newer, &library, "newer");
         guard
-            .upsert_unit(member, older, -1, -1, 0, Some(true), Some(true), None, None, None, false, 10)
+            .upsert_unit(
+                member,
+                older,
+                -1,
+                -1,
+                0,
+                Some(true),
+                Some(true),
+                None,
+                None,
+                None,
+                false,
+                10,
+            )
             .unwrap();
         guard
-            .upsert_unit(member, newer, -1, -1, 0, Some(true), Some(false), None, None, None, false, 50)
+            .upsert_unit(
+                member,
+                newer,
+                -1,
+                -1,
+                0,
+                Some(true),
+                Some(false),
+                None,
+                None,
+                None,
+                false,
+                50,
+            )
             .unwrap();
         guard
             .set_unit_marks(member, newer, -1, -1, None, Some(true), 80)
@@ -310,12 +336,19 @@ async fn newest_favorite_leads_without_reordering_played_marks() {
         .iter()
         .map(|item| item["media_item_id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids[0], newer.to_string(), "new favourite must lead: {favorites}");
+    assert_eq!(
+        ids[0],
+        newer.to_string(),
+        "new favourite must lead: {favorites}"
+    );
     let gallery = get(&app, "/api/v1/playback/favorites/gallery?limit=10", &token).await;
     assert_eq!(gallery[0]["media_item_id"], newer.to_string(), "{gallery}");
     let played = store.lock().user_active_media_ids(member).unwrap();
     assert_eq!(played[0].0, newer);
-    assert_eq!(played[0].1, 50, "favourite activity must not reorder played marks");
+    assert_eq!(
+        played[0].1, 50,
+        "favourite activity must not reorder played marks"
+    );
     let _ = older;
 }
 
@@ -334,7 +367,20 @@ async fn playing_an_old_favorite_does_not_move_it_ahead_of_a_newer_one() {
         add_ledger(&guard, historical, &library, "historical");
         add_ledger(&guard, recent, &library, "recent");
         guard
-            .upsert_unit(member, historical, -1, -1, 0, Some(false), Some(true), None, None, None, false, 10)
+            .upsert_unit(
+                member,
+                historical,
+                -1,
+                -1,
+                0,
+                Some(false),
+                Some(true),
+                None,
+                None,
+                None,
+                false,
+                10,
+            )
             .unwrap();
         guard
             .set_unit_marks(member, recent, -1, -1, None, Some(true), 50)
@@ -346,7 +392,9 @@ async fn playing_an_old_favorite_does_not_move_it_ahead_of_a_newer_one() {
     {
         let guard = store.lock();
         guard
-            .upsert_unit(member, historical, -1, -1, 90_000, None, None, None, None, None, false, 200)
+            .upsert_unit(
+                member, historical, -1, -1, 90_000, None, None, None, None, None, false, 200,
+            )
             .unwrap();
     }
     {
@@ -366,7 +414,11 @@ async fn playing_an_old_favorite_does_not_move_it_ahead_of_a_newer_one() {
         .iter()
         .map(|item| item["media_item_id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids[0], recent.to_string(), "playback must not promote an old favourite: {favorites}");
+    assert_eq!(
+        ids[0],
+        recent.to_string(),
+        "playback must not promote an old favourite: {favorites}"
+    );
     let gallery = get(&app, "/api/v1/playback/favorites/gallery?limit=10", &token).await;
     assert_eq!(gallery[0]["media_item_id"], recent.to_string(), "{gallery}");
 
@@ -374,9 +426,16 @@ async fn playing_an_old_favorite_does_not_move_it_ahead_of_a_newer_one() {
     drop(state);
     let reopened = Store::open(tmp.path().join("data")).unwrap();
     let rows = reopened.favorite_rows(member).unwrap();
-    assert_eq!(rows[0].0, recent, "reopening must not capture playback as favourite time: {rows:?}");
     assert_eq!(
-        reopened.unit_state(member, historical, -1, -1).unwrap().unwrap().favorite_at,
+        rows[0].0, recent,
+        "reopening must not capture playback as favourite time: {rows:?}"
+    );
+    assert_eq!(
+        reopened
+            .unit_state(member, historical, -1, -1)
+            .unwrap()
+            .unwrap()
+            .favorite_at,
         0,
         "an unknown historical favourite time must stay unknown"
     );
@@ -651,17 +710,22 @@ async fn session_stream_serves_valid_video_bytes_with_range_support() {
                 .uri("/api/v1/playback/sessions")
                 .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_string(&serde_json::json!({
-                    "media_item_id": media.to_string(),
-                    "device_id": "web-player",
-                })).unwrap()))
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "media_item_id": media.to_string(),
+                        "device_id": "web-player",
+                    }))
+                    .unwrap(),
+                ))
                 .unwrap(),
         )
         .await
         .unwrap();
 
     let session_data = json_data(session_res).await;
-    let stream_url = session_data["stream_url"].as_str().expect("must have stream_url");
+    let stream_url = session_data["stream_url"]
+        .as_str()
+        .expect("must have stream_url");
     assert!(stream_url.starts_with("/api/v1/playback/sessions/"));
 
     // GET full file stream
@@ -698,4 +762,73 @@ async fn session_stream_serves_valid_video_bytes_with_range_support() {
     assert_eq!(range_res.status(), axum::http::StatusCode::PARTIAL_CONTENT);
     let range_bytes = to_bytes(range_res.into_body(), usize::MAX).await.unwrap();
     assert_eq!(&range_bytes[..], b"abcd");
+}
+
+#[tokio::test]
+async fn web_movie_playback_omits_coords_and_explicit_zero_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = make_state(tmp.path());
+    let store = state.store();
+    let app = router(state.clone());
+    let lib_root = seed_library(&store.lock(), tmp.path(), "coord-test");
+    let (_member, token) = seed_member(&store.lock(), "coord-user");
+
+    let media = {
+        let guard = store.lock();
+        let media = seed_media(&guard, "Coord Movie", Some(2025));
+        let video_path = lib_root.join("movie.mp4");
+        std::fs::write(&video_path, b"movie-content-1234").unwrap();
+        guard
+            .insert_ledger(&LedgerRow {
+                id: LedgerId::new(),
+                media_id: media,
+                path: video_path.display().to_string(),
+                season: None,
+                episode: None,
+                resolution: Some("1080p".into()),
+                codec: Some("h264".into()),
+                hdr: None,
+                quality_source: QualitySource::Release,
+                confidence: Confidence::High,
+                filter_score: None,
+            })
+            .unwrap();
+        media
+    };
+
+    // 1. Movie omitting coordinates succeeds (200)
+    let req_omit = Request::builder()
+        .method("POST")
+        .uri("/api/v1/playback/sessions")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_string(&serde_json::json!({
+                "media_item_id": media.to_string(),
+                "device_id": "web-player",
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let res_omit = app.clone().oneshot(req_omit).await.unwrap();
+    assert_eq!(res_omit.status(), axum::http::StatusCode::OK);
+
+    // 2. Movie with explicit (0, 0) coordinates must be rejected with 400 Bad Request
+    let req_zeros = Request::builder()
+        .method("POST")
+        .uri("/api/v1/playback/sessions")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_string(&serde_json::json!({
+                "media_item_id": media.to_string(),
+                "season_number": 0,
+                "episode_number": 0,
+                "device_id": "web-player",
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let res_zeros = app.clone().oneshot(req_zeros).await.unwrap();
+    assert_eq!(res_zeros.status(), axum::http::StatusCode::BAD_REQUEST);
 }

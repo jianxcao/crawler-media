@@ -496,11 +496,12 @@ export interface ClientCapability {
   native_hls: boolean;
 }
 
-/** 播放单元：电影通过缺省季集表达规范 whole-work 请求。 */
+/** 播放单元：电影通过缺省季集表达规范 whole-work 请求；可选显式版本 file_id。 */
 export interface PlaybackUnit {
   media_item_id: number | string;
   season_number?: number;
   episode_number?: number;
+  file_id?: string;
 }
 
 export interface VideoPlan {
@@ -677,7 +678,7 @@ export interface PlaybackSession {
 }
 
 interface DecideBody extends PlaybackUnit {
-  file_id?: number;
+  file_id?: string;
   capability: ClientCapability;
   /** 运行期降档回路：带上已失败的档位，服务端跳过它们（§6.3） */
   failed_tiers?: number[];

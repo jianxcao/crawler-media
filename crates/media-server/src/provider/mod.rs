@@ -414,6 +414,20 @@ pub trait MediaServerProvider: Send + Sync + 'static {
         id: &str,
     ) -> Result<Option<(PathBuf, bool)>, String>;
 
+    /// Resolve a stream source for a specific requested physical source (MediaSourceId)
+    /// and/or play session id. Default implementation forwards to `resolve_stream_source`.
+    async fn resolve_stream_source_bound(
+        &self,
+        user_id: UserId,
+        id: &str,
+        media_source_id: Option<&str>,
+        _play_session_id: Option<&str>,
+        _device_id: Option<&str>,
+    ) -> Result<Option<(PathBuf, bool)>, String> {
+        let _ = media_source_id;
+        self.resolve_stream_source(user_id, id).await
+    }
+
     /// A05: 检查特定设备是否已被用户撤销
     async fn is_device_revoked(&self, _user_id: UserId, _device_id: &str) -> Result<bool, String> {
         Ok(false)

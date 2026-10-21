@@ -38,6 +38,7 @@ export interface PlayerPageProps {
   /** 剧集的起播季集；电影两者都不给 */
   season?: number;
   episode?: number;
+  fileId?: string;
   /** 分享链接的 `?t=` 起播覆盖（毫秒）；不给 = 服务端接各自的续播点 */
   startMsOverride?: number;
   /** 播放接口作用域（影片分享页传 sharePlaybackScope(slug)）；缺省 = 登录态 */
@@ -55,6 +56,7 @@ export function PlayerPage({
   mediaItemId,
   season,
   episode,
+  fileId,
   startMsOverride,
   api = DEFAULT_PLAYBACK_SCOPE,
   exitHref,
@@ -115,11 +117,12 @@ export function PlayerPage({
   const unit = useMemo(
     () => ({
       media_item_id: mediaItemId,
-      // 电影用 (0, 0) 哨兵，与台账、playback_state 的约定一致
-      season_number: current?.season ?? 0,
-      episode_number: current?.episode ?? 0,
+      // 电影省略坐标；剧集带季集
+      season_number: current?.season,
+      episode_number: current?.episode,
+      file_id: fileId,
     }),
-    [mediaItemId, current?.season, current?.episode],
+    [mediaItemId, current?.season, current?.episode, fileId],
   );
 
   const currentEpisode = current

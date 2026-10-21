@@ -147,17 +147,37 @@ async fn subtitle_stream(
     }
 }
 
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+struct StreamQuery {
+    media_source_id: Option<String>,
+    play_session_id: Option<String>,
+    device_id: Option<String>,
+}
+
 async fn stream(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<StreamQuery>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
     check_device_revocation(state.provider.as_ref(), &user, &headers, "Jellyfin 取流").await?;
 
+    let device_id = query
+        .device_id
+        .as_deref()
+        .or_else(|| user.device_id.as_deref());
+
     let (path, is_strm) = state
         .provider
-        .resolve_stream_source(user.id, &id)
+        .resolve_stream_source_bound(
+            user.id,
+            &id,
+            query.media_source_id.as_deref(),
+            query.play_session_id.as_deref(),
+            device_id,
+        )
         .await
         .map_err(|error| {
             tracing::error!(%error, user_id = %user.id, item_id = %id, "failed to resolve Jellyfin stream source");
@@ -299,8 +319,9 @@ pub async fn playback_info(
         .map(str::to_ascii_lowercase);
     let runtime_ticks = snapshot.metadata.runtime_ticks;
     let media_streams = dto::media_streams_with_item(&snapshot.metadata.tracks, Some(&id));
+    let source_id = snapshot.row.id.to_string();
     let mut source = json!({
-        "Id": id,
+        "Id": source_id,
         "Path": source_path,
         "Protocol": protocol,
         "Container": container,
@@ -338,7 +359,10 @@ mod tests {
 
     #[test]
     fn log_device_id_keeps_a_real_user_device_id() {
-        assert_eq!(log_device_id(Some("living-room-tv"), None, TOKEN), "living-room-tv");
+        assert_eq!(
+            log_device_id(Some("living-room-tv"), None, TOKEN),
+            "living-room-tv"
+        );
     }
 
     #[test]
@@ -351,8 +375,14 @@ mod tests {
         // 没有 DeviceId 时撤销检查回退到 token：日志必须脱敏。
         assert_eq!(log_device_id(None, None, TOKEN), SESSION_TOKEN_PLACEHOLDER);
         assert_ne!(log_device_id(None, None, TOKEN), TOKEN);
-        assert_eq!(log_device_id(Some(TOKEN), None, TOKEN), SESSION_TOKEN_PLACEHOLDER);
-        assert_eq!(log_device_id(None, Some(TOKEN), TOKEN), SESSION_TOKEN_PLACEHOLDER);
+        assert_eq!(
+            log_device_id(Some(TOKEN), None, TOKEN),
+            SESSION_TOKEN_PLACEHOLDER
+        );
+        assert_eq!(
+            log_device_id(None, Some(TOKEN), TOKEN),
+            SESSION_TOKEN_PLACEHOLDER
+        );
     }
 
     #[test]

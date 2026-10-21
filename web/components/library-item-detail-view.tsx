@@ -195,15 +195,19 @@ export function LibraryItemDetailView({
   const playUnit = useMemo<PlaybackUnit | null>(() => {
     if (!detail) return null;
     if (detail.kind !== "tv") {
-      return { media_item_id: detail.media_item_id };
+      return {
+        media_item_id: detail.media_item_id,
+        file_id: selectedTrackFileId ?? undefined,
+      };
     }
     if (!selectedSeriesEpisode) return null;
     return {
       media_item_id: detail.media_item_id as unknown as number,
       season_number: selectedSeriesEpisode.seasonNumber,
       episode_number: selectedSeriesEpisode.episode.episode_number,
+      file_id: selectedTrackFileId ?? undefined,
     };
-  }, [detail, selectedSeriesEpisode]);
+  }, [detail, selectedSeriesEpisode, selectedTrackFileId]);
 
   // 单元三元组的字符串形式：detail 每次轮询都是新对象，直接依赖 playUnit
   // 会让刮削期间每两秒重查一次续播点。
@@ -957,6 +961,7 @@ export function LibraryItemDetailView({
                       !isMovie && selectedSeriesEpisode
                         ? selectedSeriesEpisode.episode.episode_number
                         : undefined,
+                    fileId: selectedTrackFile?.file_id,
                   }),);
               }}
             />
