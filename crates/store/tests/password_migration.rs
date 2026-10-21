@@ -365,3 +365,42 @@ fn delete_session_tokens_is_atomic_and_protects_cli() {
     );
     assert!(store.user_by_token("token-2").unwrap().is_some());
 }
+
+#[test]
+fn pre_cutover_plaintext_admin_credential_is_detected() {
+    use std::str::FromStr;
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let admin_id = UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap();
+    store
+        .insert_user(&User {
+            id: admin_id,
+            login: "admin".into(),
+            enabled: true,
+            role: UserRole::Admin,
+        })
+        .unwrap();
+
+    assert!(
+        !store.admin_credential_is_legacy_plaintext(admin_id).unwrap(),
+        "空口令不是遗留明文凭据"
+    );
+
+    let conn = Connection::open(tmp.path().join("app.db")).unwrap();
+    conn.execute(
+        "UPDATE users SET password = 'plain-legacy-secret' WHERE id = ?1",
+        params![admin_id.to_string()],
+    )
+    .unwrap();
+    drop(conn);
+    assert!(
+        store.admin_credential_is_legacy_plaintext(admin_id).unwrap(),
+        "非 PHC 行必须被判为切换前遗留凭据"
+    );
+
+    store.set_password(admin_id, "plain-legacy-secret").unwrap();
+    assert!(
+        !store.admin_credential_is_legacy_plaintext(admin_id).unwrap(),
+        "Argon2 行不得被误判为遗留明文"
+    );
+}

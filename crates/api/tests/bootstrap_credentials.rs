@@ -482,3 +482,44 @@ async fn legacy_instance_with_token_as_password_upgrades_safely() {
         .unwrap();
     assert_eq!(login_old.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[test]
+fn pre_cutover_plaintext_admin_row_requires_explicit_password_on_boot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let store = Store::open(&data_dir).unwrap();
+    let admin_id = UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap();
+    let conn = Connection::open(data_dir.join("app.db")).unwrap();
+    conn.execute(
+        "INSERT INTO users (id, login, password, enabled, role) VALUES (?1, 'admin', ?2, 1, 'admin')",
+        rusqlite::params![admin_id.to_string(), "plain-legacy-secret"],
+    )
+    .unwrap();
+    drop(conn);
+
+    // 登录路径已对该行 fail closed；启动自检不能静默 Keep 并忽略环境变量，
+    // 必须要求运维显式提供独立密码完成轮换。
+    let err = prepare_admin_credentials(
+        &store,
+        "plain-legacy-secret",
+        None,
+        BootstrapMode::Production,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, BootstrapCredentialsError::InsecureLegacyNeedsPassword),
+        "遗留明文凭据必须要求独立密码，得到 {err:?}"
+    );
+
+    let action = prepare_admin_credentials(
+        &store,
+        "plain-legacy-secret",
+        Some("new-distinct-admin-password"),
+        BootstrapMode::Production,
+    )
+    .unwrap();
+    assert!(
+        matches!(action, AdminBootstrapAction::Rotate { .. }),
+        "遗留明文凭据必须经显式密码轮换，不能静默保留"
+    );
+}
