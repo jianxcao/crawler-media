@@ -81,6 +81,38 @@ fn make_file(
     }
 }
 
+/// Issue the play session this event belongs to. A playback event is only accepted for a
+/// session that was issued for its target and physical source.
+fn issue_session(
+    store: &Store,
+    user_id: UserId,
+    file: &LibraryFile,
+    item: &TypedItemId,
+) -> (String, i64) {
+    let (media_id, unit) = match item {
+        TypedItemId::Work(media) => (*media, UnitKey::WHOLE),
+        TypedItemId::Season { media, season } => (*media, UnitKey::new(*season as i32, 1)),
+        TypedItemId::Unit { media, key } => (*media, *key),
+    };
+    let session_id = store
+        .issue_play_session(
+            user_id,
+            "device_web",
+            file.file_id,
+            media_id,
+            unit,
+            &file.version,
+            1_000,
+        )
+        .expect("issue play session");
+    let generation = store
+        .play_session_binding(user_id, "device_web", &session_id)
+        .expect("binding")
+        .expect("issued binding")
+        .generation;
+    (session_id, generation)
+}
+
 #[test]
 fn playback_resolve_and_mutation_lifecycle() {
     let tmp = tempfile::tempdir().unwrap();
@@ -117,11 +149,12 @@ fn playback_resolve_and_mutation_lifecycle() {
     assert_eq!(res.start_ms, 0);
 
     // 2. Commit a Progress playback event at 120,000ms (2 minutes)
+    let (session_id, generation) = issue_session(&store, user_id, &file, &item_id);
     let event = BoundPlaybackEvent {
         user_id,
         device_id: "device_web".into(),
-        session_id: "sess_1".into(),
-        generation: 1,
+        session_id: session_id.clone(),
+        generation,
         event_sequence: Some(1),
         item: item_id.clone(),
         source_id: PhysicalSourceId { file_id: file.file_id, revision: 1 },
@@ -190,11 +223,12 @@ fn playback_source_change_detection() {
     };
 
     // Commit progress against file1
+    let (session_id, generation) = issue_session(&store, user_id, &file1, &item_id);
     let event = BoundPlaybackEvent {
         user_id,
         device_id: "device_web".into(),
-        session_id: "sess_1".into(),
-        generation: 1,
+        session_id: session_id.clone(),
+        generation,
         event_sequence: Some(1),
         item: item_id.clone(),
         source_id: PhysicalSourceId { file_id: file1.file_id, revision: 1 },

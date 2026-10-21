@@ -156,8 +156,7 @@ impl Store {
             }
             // A served still is addressed by file id, never by the filesystem path the
             // probe recorded: the API only serves `/stills/{file_id}`.
-            if entry.still_url.is_none()
-                && still_path.is_some()
+            if still_path.is_some()
                 && let Some(file_id) = entry.file_ids.first().or_else(|| file_ids.first())
             {
                 entry.still_url = Some(format!("/stills/{file_id}"));

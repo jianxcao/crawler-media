@@ -72,18 +72,61 @@ pub(crate) async fn progress(
             Ok(false) => {}
             Err(error) => return persistence_error(&error, user_id, device_id),
         }
-        let Some((row, media, season, episode)) = row_for(&store, &body, Some(user_id)) else {
-            return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
+
+        // If client provides a valid play_session_id, read target and source directly from the issued binding
+        let binding = if let Some(ref sid) = play_session_id {
+            store.play_session_binding(user_id, device_id, sid).ok().flatten()
+        } else {
+            None
         };
-        let Some(source) = store.visible_file(user_id, row.id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
-        };
-        let duration = match unit_duration(&store, user_id, &row, season, episode) {
-            Ok(duration) => body["duration_ms"].as_i64().filter(|d| *d > 0).or(duration),
-            Err(error) => return persistence_error(&error, user_id, device_id),
-        };
-        (row, media, season, episode, duration,
-            domain::PhysicalSourceId { file_id: source.file_id, revision: source.version.revision })
+
+        if let Some(b) = binding {
+            let Some(media) = store.get_media(b.media_id).ok().flatten() else {
+                return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
+            };
+            let Some(source) = store.visible_file(user_id, b.ledger_id).ok().flatten() else {
+                return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
+            };
+            let unit = (b.unit.season, b.unit.episode);
+            let row = crate::media_server_provider::items::row_view(&source, unit);
+            let duration = match unit_duration(&store, user_id, &row, unit.0, unit.1) {
+                Ok(duration) => body["duration_ms"].as_i64().filter(|d| *d > 0).or(duration),
+                Err(error) => return persistence_error(&error, user_id, device_id),
+            };
+            (
+                row,
+                media,
+                unit.0,
+                unit.1,
+                duration,
+                domain::PhysicalSourceId {
+                    file_id: source.file_id,
+                    revision: source.version.revision,
+                },
+            )
+        } else {
+            let Some((row, media, season, episode)) = row_for(&store, &body, Some(user_id)) else {
+                return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
+            };
+            let Some(source) = store.visible_file(user_id, row.id).ok().flatten() else {
+                return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
+            };
+            let duration = match unit_duration(&store, user_id, &row, season, episode) {
+                Ok(duration) => body["duration_ms"].as_i64().filter(|d| *d > 0).or(duration),
+                Err(error) => return persistence_error(&error, user_id, device_id),
+            };
+            (
+                row,
+                media,
+                season,
+                episode,
+                duration,
+                domain::PhysicalSourceId {
+                    file_id: source.file_id,
+                    revision: source.version.revision,
+                },
+            )
+        }
     };
     if duration_ms.is_none() {
         let _ = crate::http::library::ensure_probe_enqueued(&state, &row);
@@ -237,33 +280,36 @@ fn persist_heartbeat(
     device: &str,
     resolved_session_id: Option<&str>,
 ) -> Result<(UnitState, bool), StoreError> {
-    // The row may have been canonically rebound after initial selection. Never
-    // persist an event against the stale Media/unit captured by that selection.
-    if let Some(row) = store.get_ledger(&heartbeat.ledger_id)? {
-        if !heartbeat_matches_row(heartbeat, &row) {
-            tracing::warn!(ledger_id = %heartbeat.ledger_id, media_id = %heartbeat.media_id,
-                "Ignoring stale Playback heartbeat after ledger identity changed");
+    let ledger_id = match heartbeat.ledger_id.parse::<domain::LedgerId>() {
+        Ok(lid) => lid,
+        Err(_) => return Ok((store.unit_state(heartbeat.user_id, heartbeat.media_id, heartbeat.season, heartbeat.episode)?.unwrap_or_default(), true)),
+    };
+
+    // The file may have changed or does not cover the requested unit.
+    // Use coverage membership instead of get_ledger LIMIT 1.
+    let covers = store.file_covers_unit(
+        ledger_id,
+        heartbeat.media_id,
+        domain::UnitKey::new(heartbeat.season, heartbeat.episode),
+    )?;
+    if !covers {
+        tracing::warn!(ledger_id = %heartbeat.ledger_id, media_id = %heartbeat.media_id,
+            "Ignoring stale Playback heartbeat because file does not cover unit");
+        return Ok((
+            store.unit_state(heartbeat.user_id, heartbeat.media_id, heartbeat.season, heartbeat.episode)?
+                .unwrap_or_default(),
+            true,
+        ));
+    }
+
+    if let Some(owner) = store.file_owner_library(ledger_id)? {
+        if !store.library_accepts_work(&owner.id)? {
             return Ok((
                 store.unit_state(heartbeat.user_id, heartbeat.media_id, heartbeat.season, heartbeat.episode)?
                     .unwrap_or_default(),
                 true,
             ));
         }
-        if let Some(owner) = store.library_for_path_strict(std::path::Path::new(&row.path), heartbeat.kind)? {
-            if !store.library_accepts_work(&owner.id)? {
-                return Ok((
-                    store.unit_state(heartbeat.user_id, heartbeat.media_id, heartbeat.season, heartbeat.episode)?
-                        .unwrap_or_default(),
-                    true,
-                ));
-            }
-        }
-    } else {
-        return Ok((
-            store.unit_state(heartbeat.user_id, heartbeat.media_id, heartbeat.season, heartbeat.episode)?
-                .unwrap_or_default(),
-            true,
-        ));
     }
 
     let event = heartbeat.body["event"].as_str().unwrap_or("progress");
@@ -301,80 +347,101 @@ fn persist_heartbeat(
         false
     };
 
-    let decision = if was_admin_ended {
-        crate::playback_events::EventDecision::Ignore
-    } else {
-        crate::playback_events::classify_event(
-            previous.as_ref(),
-            binding.as_ref(),
-            &identity,
-            ledger_id,
-            event_kind,
-        )
+    if was_admin_ended {
+        return Ok((
+            store
+                .unit_state(heartbeat.user_id, heartbeat.media_id, heartbeat.season, heartbeat.episode)?
+                .unwrap_or_default(),
+            true,
+        ));
+    }
+
+    let session_id = match play_session_id {
+        Some(sid) => sid,
+        None => match resolved_session_id {
+            Some(sid) => sid.to_string(),
+            None => {
+                let admin_ended = previous.as_ref().is_some_and(|p| p.admin_ended);
+                return Ok((
+                    store
+                        .unit_state(heartbeat.user_id, heartbeat.media_id, heartbeat.season, heartbeat.episode)?
+                        .unwrap_or_default(),
+                    admin_ended,
+                ));
+            }
+        },
     };
 
-    match decision {
-        crate::playback_events::EventDecision::Ignore => {
-            let admin_ended = previous.as_ref().is_some_and(|p| p.admin_ended) || was_admin_ended;
-            return Ok((
-                store
-                    .unit_state(heartbeat.user_id, heartbeat.media_id, heartbeat.season, heartbeat.episode)?
-                    .unwrap_or_default(),
-                admin_ended,
-            ));
-        }
-        _ => {}
-    }
-    // Legacy clients omit `play_session_id`: classify with the no-id semantics
-    // above, but persist through a real issued id resolved outside this write
-    // transaction (issuing opens its own immediate transaction). A supplied
-    // unknown id was already rejected by classification.
-    let supplied_session_id = play_session_id.is_some();
-    let session_id = play_session_id.or_else(|| resolved_session_id.map(str::to_string));
-    match decision {
-        crate::playback_events::EventDecision::Ignore => {}
-        crate::playback_events::EventDecision::Start => {
-            if let Some(sid) = &session_id {
-                store.activate_play_session(heartbeat.user_id, device, sid)?;
-            }
-        }
-        crate::playback_events::EventDecision::Stop => {
-            if let Some(sid) = &session_id {
-                store.close_play_session_id(heartbeat.user_id, device, sid)?;
-            }
-        }
-        crate::playback_events::EventDecision::Update => {}
-    }
+    let Some(b) = store.play_session_binding(heartbeat.user_id, device, &session_id)? else {
+        let admin_ended = previous.as_ref().is_some_and(|p| p.admin_ended);
+        return Ok((
+            store
+                .unit_state(heartbeat.user_id, heartbeat.media_id, heartbeat.season, heartbeat.episode)?
+                .unwrap_or_default(),
+            admin_ended,
+        ));
+    };
 
-    let is_new_start = decision == crate::playback_events::EventDecision::Start;
-    let unit = update_unit(store, heartbeat, if is_new_start && event == "start" { "start" } else { event })?;
-    let next = next_session(
-        heartbeat,
-        &unit,
-        device,
-        previous.as_ref(),
-        is_new_start,
-    );
-    let admin_ended = next.admin_ended && event != "stop";
-    if event == "stop" {
-        if let Some(mut closing) = previous {
-            closing.watched_ms = next.watched_ms;
-            closing.position_ms = next.position_ms;
-            closing.duration_ms = next.duration_ms;
-            closing.play_session_id = session_id;
-            store.upsert_session(&closing)?;
+    let item = if heartbeat.season == UNIT_WHOLE {
+        domain::TypedItemId::Work(heartbeat.media_id)
+    } else {
+        domain::TypedItemId::Unit {
+            media: heartbeat.media_id,
+            key: domain::UnitKey::new(heartbeat.season, heartbeat.episode),
         }
-    } else if !admin_ended {
-        let mut to_save = next;
-        to_save.play_session_id = session_id;
-        if supplied_session_id {
-            to_save.last_event_sequence = event_sequence;
-        }
-        store.upsert_session(&to_save)?;
-    }
-    if event == "stop" || admin_ended {
-        store.close_session(heartbeat.user_id, device, heartbeat.now)?;
-    }
+    };
+
+    let event_type = match event {
+        "start" => store::playback::PlaybackEventType::Playing,
+        "stop" => store::playback::PlaybackEventType::Stopped,
+        _ => store::playback::PlaybackEventType::Progress,
+    };
+
+    let existing = store.unit_state(
+        heartbeat.user_id,
+        heartbeat.media_id,
+        heartbeat.season,
+        heartbeat.episode,
+    )?;
+    let position_ms = heartbeat.body["position_ms"]
+        .as_i64()
+        .or_else(|| {
+            (event == "start")
+                .then(|| existing.as_ref().map(|u| u.position_ms))
+                .flatten()
+        })
+        .unwrap_or(0)
+        .max(0);
+    let duration_ms = heartbeat
+        .duration_ms
+        .or(existing.as_ref().and_then(|u| u.duration_ms));
+
+    let bound_event = store::playback::BoundPlaybackEvent {
+        user_id: heartbeat.user_id,
+        device_id: device.to_string(),
+        session_id: session_id.clone(),
+        generation: b.generation,
+        event_sequence,
+        item,
+        source_id: heartbeat.source.clone(),
+        source_version: b.source_version.unwrap_or_default(),
+        position_ms,
+        duration_ms,
+        audio_track: heartbeat.body["audio_track"].as_str().map(str::to_string),
+        subtitle_track: heartbeat.body["subtitle_track"].as_str().map(str::to_string),
+        paused: heartbeat.body["paused"].as_bool().unwrap_or(false),
+        rate_bps: 0,
+        client: heartbeat.body["client"].as_str().map(str::to_string),
+        event_type,
+    };
+
+    let _outcome = store.commit_playback_event(&bound_event, heartbeat.now_ms)?;
+    let unit = store
+        .unit_state(heartbeat.user_id, heartbeat.media_id, heartbeat.season, heartbeat.episode)?
+        .unwrap_or_default();
+    let current_session = store.get_session(heartbeat.user_id, device)?;
+    let admin_ended = current_session.as_ref().is_some_and(|s| s.admin_ended) && event != "stop";
+
     Ok((unit, admin_ended))
 }
 

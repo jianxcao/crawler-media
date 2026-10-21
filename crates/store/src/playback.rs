@@ -12,6 +12,7 @@ pub mod session_ids;
 pub use session_ids::{PlaySessionBinding, PlaySessionIdState};
 pub mod merge;
 mod merge_facts;
+mod event;
 pub mod mutate;
 pub mod source;
 pub use source::PlaybackSource;

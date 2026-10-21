@@ -13,7 +13,7 @@ use store::library_write::probe::ProbePublication;
 use store::library_write::{
     FilePublication as StorePublication, PresenceMode, PresenceObservation, WriteScope,
 };
-use store::playback::{BoundPlaybackEvent, PlaybackEventType, ResumeStatus};
+use store::playback::{BoundPlaybackEvent, EventOutcome, PlaybackEventType, ResumeStatus};
 use store::Store;
 
 const USER: &str = "00000000-0000-0000-0000-000000000099";
@@ -144,13 +144,34 @@ fn commit_progress(
     audio: Option<&str>,
     subtitle: Option<&str>,
 ) {
-    f.store
+    // Progress is only accepted for a session that was actually issued for this
+    // target and source: the commit validates the issued binding.
+    let session_id = f
+        .store
+        .issue_play_session(
+            USER.parse().unwrap(),
+            "device_web",
+            file.file_id,
+            f.media_id,
+            domain::UnitKey::new(unit_coords(item).0, unit_coords(item).1),
+            &file.version,
+            1_000,
+        )
+        .unwrap();
+    let generation = f
+        .store
+        .play_session_binding(USER.parse().unwrap(), "device_web", &session_id)
+        .unwrap()
+        .expect("issued binding")
+        .generation;
+    let outcome = f
+        .store
         .commit_playback_event(
             &BoundPlaybackEvent {
                 user_id: USER.parse().unwrap(),
                 device_id: "device_web".into(),
-                session_id: "sess_1".into(),
-                generation: 1,
+                session_id,
+                generation,
                 event_sequence: Some(1),
                 item: item.clone(),
                 source_id: PhysicalSourceId {
@@ -170,6 +191,16 @@ fn commit_progress(
             1_000,
         )
         .unwrap();
+    assert_eq!(outcome, EventOutcome::Applied, "an issued session applies its own event");
+}
+
+/// `(season, episode)` of a logical item, mirroring the store's own mapping.
+fn unit_coords(item: &TypedItemId) -> (i32, i32) {
+    match item {
+        TypedItemId::Work(_) => (-1, -1),
+        TypedItemId::Season { season, .. } => (*season as i32, 1),
+        TypedItemId::Unit { key, .. } => (key.season, key.episode),
+    }
 }
 
 fn user() -> UserId {

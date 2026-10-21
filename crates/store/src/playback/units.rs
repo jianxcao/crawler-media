@@ -7,6 +7,41 @@ use super::user_summary::SummaryScope;
 use super::{UNIT_WHOLE, UnitRow, UnitState};
 
 impl Store {
+    pub fn file_owner_library(
+        &self,
+        file_id: domain::LedgerId,
+    ) -> Result<Option<crate::Library>, StoreError> {
+        let library_id: Option<String> = self
+            .library
+            .query_row(
+                "SELECT library_id FROM library_files WHERE file_id = ?1",
+                params![file_id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(lib_id) = library_id else {
+            return Ok(None);
+        };
+        self.get_library(&lib_id)
+    }
+
+    pub fn file_covers_unit(
+        &self,
+        file_id: domain::LedgerId,
+        media_id: MediaId,
+        unit: UnitKey,
+    ) -> Result<bool, StoreError> {
+        let exists: bool = self.library.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM library_file_units
+                 WHERE file_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4
+             )",
+            params![file_id.to_string(), media_id.to_string(), unit.season, unit.episode],
+            |r| r.get(0),
+        )?;
+        Ok(exists)
+    }
+
     pub fn unit_state(
         &self,
         user_id: UserId,

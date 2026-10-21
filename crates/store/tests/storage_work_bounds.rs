@@ -108,11 +108,28 @@ fn clean_start_end_to_end_storage_lifecycle() {
     // 6. Playback Resume and Tracking
     let user_id: UserId = "00000000-0000-0000-0000-000000000099".parse().unwrap();
     let item_id = TypedItemId::Work(media_id);
+    // A playback event is only accepted for a session issued for this target and source.
+    let session_id = store
+        .issue_play_session(
+            user_id,
+            "tv_client",
+            file.file_id,
+            media_id,
+            domain::UnitKey::WHOLE,
+            &file.version,
+            2_000,
+        )
+        .expect("issue play session");
+    let generation = store
+        .play_session_binding(user_id, "tv_client", &session_id)
+        .expect("binding")
+        .expect("issued binding")
+        .generation;
     let event = BoundPlaybackEvent {
         user_id,
         device_id: "tv_client".into(),
-        session_id: "session_1".into(),
-        generation: 1,
+        session_id,
+        generation,
         event_sequence: Some(1),
         item: item_id.clone(),
         source_id: PhysicalSourceId { file_id: file.file_id, revision: 1 },
