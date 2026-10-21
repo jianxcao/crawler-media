@@ -8,4 +8,4 @@ v1 需要五种 **Metadata source**，包括没有 TMDB id 的作品。把 TMDB 
 
 ## 当前落地边界（2026-10-20）
 
-此 ADR 保留身份决策，不证明合并/采用元数据/所有消费者切换已经验收。Store 有持久合并阶段代码（`crates/store/src/playback/merge.rs`），但管理 Media merge 路由在上一轮隔离复核仍为 404；`media.rs` 的单值写入路径还会删除重写别名，不能保证保留已合并的多别名。当前修复与验收按 [存储执行计划](<../superpowers/plans/2026-10-20-storage-clean-cutover.md>)，不恢复旧模型兼容层。
+此 ADR 保留身份决策，不证明合并/采用元数据/所有消费者切换已经验收。身份编辑与合并已落到 `crates/store/src/media/**`（`update_media_identity`、`add_media_alias`、`media_refresh_alias`）和持久合并阶段 `crates/store/src/media_operations/**`，显式文件改挂在 `crates/store/src/library_write/reassign.rs`；管理入口是 `POST /api/v1/media/merges`（202 + `operation_id`）与 `GET /api/v1/media/operations/{id}`（`crates/api/src/http/media_operations.rs`）。别名保留与 identity 屏障由 `crates/store/tests/media_alias_updates.rs`、合并冲突/恢复由 `crates/store/tests/media_merge_conflicts.rs`、`media_merge_recovery.rs` 覆盖。剩余验收（全调用方删旧、性能与规模门）按 [存储执行计划](<../superpowers/plans/2026-10-20-storage-clean-cutover.md>) Task 17–20 执行，不恢复旧模型兼容层。
