@@ -538,3 +538,24 @@
 - **测试盲区**：`crates/api/tests` 对 `/Genres`、`/Studios`、`/Shows/{id}/Seasons`、`/Shows/{id}/Episodes`、`/Items/Latest` 命中 0，`/Items/Resume` 仅 `review_remediation_playback.rs:216`——`docs/testing/system-regression-cases.md:190,196` 的 VH-02/VH-08 正落在这些粗路径上；粗路径的"清缓存重启同结果"只在手工冒烟日志里，提交内无断言。
 - **既有债照旧**：`npm run lint` exit 1（15 errors / 116 warnings，`web` 本轮未改）；13 个 `.rs` 超 800 行；`crates/api/tests/management/library_gaps.rs::collections_crud_and_items` 128 行超测试硬限。
 - **Not run**：真实 NAS、真实 Jellyfin/Infuse/VidHub、真实浏览器浏览与 seek、100k–1M 规模对照、`commit_playback_event` 生产写入统一。
+
+### 修复提交与对抗性验证（2026-10-21 收尾）
+
+修复提交：`aa70464 fix(storage): reject pre-cutover cache layout with actionable rebuild runbook`、`5b19957 fix(cutover): 切换脚本按全部 12 条声明索引判定布局`。仍**不**提供兼容视图／双读／旧数据导入器，`validate_cache_layout` 仍是只读严格校验（验证者复核 `layout.rs:60-68` 仅包装消息、`:85` 仍以 `SQLITE_OPEN_READ_ONLY` 打开、`CACHE_INDEXES` 仍 12 条；`grep -rn "reconcile_schema\|validate_tables\|ALTER INDEX\|DROP INDEX"` 在 cache/layout 零命中，exit 1）。
+
+对抗性验证（由独立 teammate 只读复现，未写仓库文件）：
+
+| 断言 | 结论 | 证据 |
+|---|---|---|
+| 严格拒绝、无兼容修复 | 成立 | `git show --stat aa70464` 6 files/247+；上述 grep 零命中；`CACHE_INDEXES:[&str;12]` 未放宽 |
+| 错误信息可执行（含重建指令） | 成立 | `cargo test -p store --test storage_v1 pre_cutover` 1 passed/0 failed；`cargo test -p media --test source_cache pre_cutover` 1 passed/0 failed；断言含 `idx_tmdb_cache_retention` 与 `storage-cutover-rebuild.sh`，并断言"拒绝不得改动文件" |
+| 脚本只动派生缓存、事实库前后一致 | 成立 | `/tmp` 副本：dry-run 零改动；真跑只移 `cache.db` 到 `<dir>/backups/cache-cutover-<ts>/`（`1429504 B`）；app/library/subscribe/jobs 的 `sha256`+`mtime`+`size` 前后 `diff` 为空 |
+| 持有者守卫 | 成立 | 真实持有者两例（bash fd 持有、python `sqlite3` 长事务）均被拒 `exit=1` 且文件未移动 |
+| 修复不是"只把错误写漂亮" | 成立 | 旧库启动 `exit=1` 且日志含新指令；跑脚本后再启动 → `health 200`，新建 `cache.db` = `application_id=1129139251 / user_version=1` 且 12 条声明索引齐 |
+| 反向排查 | 2 个缺陷（已修） | ①脚本只查 6 条 retention 索引：构造"retention 6/12、fetched 缺"的库时误报"已是当前布局，无需重建" `exit=0`，而 Store 仍以 `missing required index idx_tmdb_cache_fetched` 退出；②`usage` 写的 `backup-cutover-<ts>/` 与代码／回滚／`deploy.md` 不一致 |
+
+上述 ① 的 red→green（`5b19957` 后实测）：构造态（`retention 6 / fetched 0`）下二进制 `START_RESULT=PROCESS_EXITED`、日志 `missing required index idx_tmdb_cache_fetched`；修好的脚本报 `已声明索引(fetched+retention) 6/12` 并移走旧库，再启动 `START_RESULT=HEALTH_200`、`SCHEMA_MISMATCH_LINES=0`、新库 12 条索引；反向对照：真正当前布局的副本仍报 `12/12 已是当前布局，无需重建` `exit=0` 且文件未被移动（无误杀）。
+
+`-wal`/`-shm` 分支（验证者标记为未验证）本轮补齐：用 `python3` 打开旧库写 WAL 后 `kill -9`，得到无持有者的 `cache.db` + `-wal 16512` + `-shm 32768`；有 `sqlite3` 时脚本的布局探测会先做 WAL 恢复把已提交帧折叠进主库（备份成单个 `1433600 B` 文件，故备份自包含），**隐藏 `sqlite3` 后**该分支实测把三个文件一并移入备份、`exit=0`，重启 `START_RESULT=HEALTH_200`。据此修正脚本与 `docs/deploy.md` 中"只读确认布局"的不准确措辞。
+
+冻结树门禁（本轮）：`cargo test --workspace` → `WORKSPACE_EXIT=0`、`test result: FAILED` 0 行、累计 **2378 passed / 0 failed**（日志 `/tmp/cmsmoke/workspace_cutover.log`；含本轮新增 2 个测试，较上轮 2376 增加）；分组退出码 `cargo test -p media`=`0`、`cargo test -p store`=`0`、`cargo test -p api --test storage_cache_runtime`=`0`。`git diff f815b21..HEAD -- '*.rs' | shasum -a 256` = `0fbc1b9ba9c1beacdf86d07183a4565871870e689a8c86c629ce4516c1d6eccf`（本收尾只再改 `scripts/*.sh` 与文档，`*.rs` 未变）。真实实例：`data/live` 上 `./start-test.sh start` 后端 `http://127.0.0.1:18765` ✓、前端 `http://127.0.0.1:3334` ✓，`GET /api/v1/health` → `http=200 {"commit":"5b19957eceb8",...}`（与 HEAD 一致，重跑 `api` 包的 build script 后刷新），`.test-logs/backend.log` 中 `schema mismatch` 计数 0，`GET /api/v1/libraries` 返回事实数据，`/library` 页面 `http=200`。**仍未达成项见上节清单，本节不改变其状态，也不写"达标"。**

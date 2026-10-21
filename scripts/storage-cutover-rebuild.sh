@@ -57,6 +57,9 @@ fi
 
 NEEDS_REBUILD=1
 if command -v sqlite3 >/dev/null 2>&1; then
+  # 用 sqlite3 探测布局。注意这是读写打开：若 cache.db 旁有已提交的 -wal，SQLite 会先做
+  # WAL 恢复，把已提交帧折叠进 cache.db（备份因此自包含，回滚只需 cache.db 一个文件）；
+  # -wal/-shm 的移动分支只在没有 sqlite3 时才会走到（实测两分支见 docs/deploy.md）。
   # 与 media::response_cache::CACHE_INDEXES 同为 12 条：6 张源表各 fetched/retention 一枚。
   # 只查一族会误判（例如 retention 齐、fetched 缺时 Store 仍拒绝），故两族一起查。
   declared=""
@@ -72,7 +75,7 @@ if command -v sqlite3 >/dev/null 2>&1; then
     NEEDS_REBUILD=0
   fi
 else
-  echo "[..] 未找到 sqlite3，无法只读确认布局，按需要重建处理（cache.db 是派生数据）"
+  echo "[..] 未找到 sqlite3，无法确认布局，按需要重建处理（cache.db 是派生数据；-wal/-shm 会一并移入备份）"
 fi
 
 if [[ "$NEEDS_REBUILD" == "0" && "$FORCE" != "1" ]]; then

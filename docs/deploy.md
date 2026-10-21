@@ -130,14 +130,16 @@ Site 凭证（cookie / API key / RSS URL）按 [ADR-0003](<adr/0003-plaintext-si
 ```bash
 ./stop-test.sh 2>/dev/null || true          # 先停服
 bash scripts/storage-cutover-rebuild.sh --data-dir data/live
-./start-test.sh
+./start-test.sh start                       # 必须带子命令；裸执行只打印用法
 ```
 
 脚本把 `cache.db`（含 `-wal`/`-shm`）整体移到 `<data>/backups/cache-cutover-<时间戳>/`，**不删除**；重启后 Store 以当前 DDL 新建 `cache.db`。回滚即把备份目录里的文件移回原位。
 
+有 `sqlite3` 时脚本先用它探测布局：这是读写打开，若 `cache.db` 旁有已提交的 `-wal`，SQLite 会先做 WAL 恢复、把已提交帧折叠进 `cache.db`（实测 `1429504 + 16512` 字节的库折叠成单个 `1433600` 字节文件），因此备份自包含、回滚只需 `cache.db` 一个文件；`-wal`/`-shm` 的移动分支只在没有 `sqlite3` 时才会走到（实测该分支三个文件一并移入备份，事实库 sha256/mtime 前后不变）。
+
 **为什么无损**：`cache.db` 只有外部响应体，清空/重建后 Library 列表、筛选、采用图片、播放与观看进度仍离线可用（见 [cache 规范](<superpowers/specs/2026-10-18-source-separated-cache.md>)）。事实库 `library.db` / `app.db` / `subscribe.db` / `jobs.db` **不要**重建，脚本也不触碰它们；它们的布局失配属于存储迁移问题，须按执行计划另行处理并先备份。
 
-**注意**：脚本在检测到该文件仍被进程持有（`lsof`）时默认拒绝执行；缺少 `sqlite3` 时无法只读确认布局，会直接按“需重建”处理（仅影响派生缓存）。`app.db` 等事实库若报 `database layout mismatch`，本脚本不适用。
+**注意**：脚本在检测到该文件仍被进程持有（`lsof`）时默认拒绝执行（确需继续可加 `--force`）；缺少 `sqlite3` 时无法确认布局，会直接按“需重建”处理并连 `-wal`/`-shm` 一起备份（仅影响派生缓存）。脚本按与 `media::response_cache::CACHE_INDEXES` 相同的 12 条声明索引（6 表 × fetched/retention）判定“已是当前布局”，只查一族会误判为无需重建。`app.db` 等事实库若报 `database layout mismatch`，本脚本不适用。
 
 
 ### Obscura 受管浏览器补充（r9）
