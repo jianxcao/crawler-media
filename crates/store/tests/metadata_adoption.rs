@@ -39,7 +39,8 @@ fn metadata_adoption_persists_source_snapshot_and_effective_row() {
         language_priority: vec!["en-US".into()],
         cert_country_priority: vec!["US".into()],
     };
-    let normalized = media::normalize_metadata("tmdb", EntityScope::Work, raw_payload, &pref).unwrap();
+    let normalized =
+        media::normalize_metadata("tmdb", EntityScope::Work, raw_payload, &pref).unwrap();
 
     let adoption = MetadataAdoption {
         media_id: m.id,
@@ -54,11 +55,16 @@ fn metadata_adoption_persists_source_snapshot_and_effective_row() {
         preferences: pref,
     };
 
-    let rev = store.adopt_metadata(&adoption, 1000).expect("adopt_metadata");
+    let rev = store
+        .adopt_metadata(&adoption, 1000)
+        .expect("adopt_metadata");
     assert!(rev >= 1);
 
     // Read back effective metadata
-    let effective = store.get_effective_metadata(m.id, "zh-CN").unwrap().expect("effective exists");
+    let effective = store
+        .get_effective_metadata(m.id, "zh-CN")
+        .unwrap()
+        .expect("effective exists");
     assert_eq!(effective.title, "Adopted Title");
     assert_eq!(effective.overview.as_deref(), Some("Adopted Overview"));
 }
@@ -70,7 +76,14 @@ fn complete_source_metadata_survives_adoption_and_detail_read() {
     let root = tmp.path().join("movies");
     std::fs::create_dir_all(&root).unwrap();
     let library = store
-        .create_library(domain::MediaKind::Movie, "Movies", &[root.to_str().unwrap()], "everyone", true, &[])
+        .create_library(
+            domain::MediaKind::Movie,
+            "Movies",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
         .unwrap();
 
     let media_id = domain::MediaId::new();
@@ -115,7 +128,8 @@ fn complete_source_metadata_survives_adoption_and_detail_read() {
         language_priority: vec!["en-US".into()],
         cert_country_priority: vec!["US".into()],
     };
-    let normalized = media::normalize_metadata("tmdb", EntityScope::Work, raw_payload, &pref).unwrap();
+    let normalized =
+        media::normalize_metadata("tmdb", EntityScope::Work, raw_payload, &pref).unwrap();
 
     let adoption = MetadataAdoption {
         media_id: m.id,
@@ -130,16 +144,26 @@ fn complete_source_metadata_survives_adoption_and_detail_read() {
         preferences: pref,
     };
 
-    let rev = store.adopt_metadata(&adoption, 1000).expect("adopt_metadata");
+    let rev = store
+        .adopt_metadata(&adoption, 1000)
+        .expect("adopt_metadata");
     assert!(rev >= 1);
 
     let composed = store
-        .effective_metadata_fields(library.id.parse().unwrap(), m.id, EntityScope::Work, "zh-CN")
+        .effective_metadata_fields(
+            library.id.parse().unwrap(),
+            m.id,
+            EntityScope::Work,
+            "zh-CN",
+        )
         .expect("effective_metadata_fields");
 
     assert_eq!(composed.fields.runtime_minutes.value(), Some(&100));
     assert_eq!(composed.fields.rating.value(), Some(&8.5));
-    assert_eq!(composed.fields.content_rating.value().map(String::as_str), Some("R"));
+    assert_eq!(
+        composed.fields.content_rating.value().map(String::as_str),
+        Some("R")
+    );
     assert_eq!(
         composed
             .field_origins
@@ -149,12 +173,7 @@ fn complete_source_metadata_survives_adoption_and_detail_read() {
     );
 }
 
-
-fn adoption(
-    media: domain::MediaId,
-    source: &str,
-    overview: &str,
-) -> MetadataAdoption {
+fn adoption(media: domain::MediaId, source: &str, overview: &str) -> MetadataAdoption {
     let mut fields = domain::MetadataFields::default();
     fields.title = domain::FieldValue::Value("Priority Title".into());
     fields.overview = domain::FieldValue::Value(overview.into());
@@ -197,21 +216,35 @@ fn lower_priority_source_does_not_overwrite_higher_priority_fields() {
     };
     store.insert_media(&media).unwrap();
 
-    store.adopt_metadata(&adoption(media.id, "tmdb", "TMDB overview"), 1).unwrap();
-    store.adopt_metadata(&adoption(media.id, "douban", "Douban overview"), 1).unwrap();
+    store
+        .adopt_metadata(&adoption(media.id, "tmdb", "TMDB overview"), 1)
+        .unwrap();
+    store
+        .adopt_metadata(&adoption(media.id, "douban", "Douban overview"), 1)
+        .unwrap();
 
-    let effective = store.get_effective_metadata(media.id, "zh-CN").unwrap().unwrap();
+    let effective = store
+        .get_effective_metadata(media.id, "zh-CN")
+        .unwrap()
+        .unwrap();
     assert_eq!(effective.overview.as_deref(), Some("TMDB overview"));
 
     // A higher-priority refresh still replaces the value.
-    store.adopt_metadata(&adoption(media.id, "tmdb", "TMDB v2"), 2).unwrap();
-    let effective = store.get_effective_metadata(media.id, "zh-CN").unwrap().unwrap();
+    store
+        .adopt_metadata(&adoption(media.id, "tmdb", "TMDB v2"), 2)
+        .unwrap();
+    let effective = store
+        .get_effective_metadata(media.id, "zh-CN")
+        .unwrap()
+        .unwrap();
     assert_eq!(effective.overview.as_deref(), Some("TMDB v2"));
 }
 
 #[test]
 fn invalid_nfo_keeps_the_last_valid_metadata_input() {
-    use domain::{Confidence, FilePresence, FilePublication, FileVersion, LibraryFile, QualitySource, UnitKey};
+    use domain::{
+        Confidence, FilePresence, FilePublication, FileVersion, LibraryFile, QualitySource, UnitKey,
+    };
     use store::library_write::{FilePublication as StorePublication, WriteScope};
 
     let tmp = tempfile::tempdir().unwrap();
@@ -219,7 +252,14 @@ fn invalid_nfo_keeps_the_last_valid_metadata_input() {
     let root = tmp.path().join("movies");
     std::fs::create_dir_all(&root).unwrap();
     let library = store
-        .create_library(domain::MediaKind::Movie, "Movies", &[root.to_str().unwrap()], "everyone", true, &[])
+        .create_library(
+            domain::MediaKind::Movie,
+            "Movies",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
         .unwrap();
     let root_id = store
         .list_library_roots()
@@ -254,7 +294,10 @@ fn invalid_nfo_keeps_the_last_valid_metadata_input() {
         media_id: media.id,
         kind: domain::MediaKind::Movie,
         path: video,
-        version: FileVersion { revision: 1, source_version: "v1".into() },
+        version: FileVersion {
+            revision: 1,
+            source_version: "v1".into(),
+        },
         presence: FilePresence::Present,
         publication: FilePublication::Published,
         size_bytes: Some(5),
@@ -277,18 +320,22 @@ fn invalid_nfo_keeps_the_last_valid_metadata_input() {
         backdrop_path: None,
         still_path: None,
     };
-    let scope = WriteScope { library_id: library.id.parse().unwrap(), config_revision: 0 };
+    let scope = WriteScope {
+        library_id: library.id.parse().unwrap(),
+        config_revision: 0,
+    };
     let observe = |file: &LibraryFile| {
-        store::metadata::NfoObservation::observe(
+        store::metadata::observe_nfo_inputs(
             &file.path,
             file.kind,
-            String::new(),
-            file.version.source_version.clone(),
+            &[UnitKey::WHOLE],
+            "",
+            &file.version,
             scope.config_revision,
         )
     };
     let publish = |file: &LibraryFile| {
-        let observation = observe(file);
+        let observations = observe(file);
         store
             .publish_files(
                 &scope,
@@ -296,7 +343,7 @@ fn invalid_nfo_keeps_the_last_valid_metadata_input() {
                     file,
                     units: &[UnitKey::WHOLE],
                     expected_version: None,
-                    nfo_observation: Some(&observation),
+                    nfo_observation: Some(&observations),
                     probe_required: false,
                 }],
                 1,
@@ -324,5 +371,134 @@ fn invalid_nfo_keeps_the_last_valid_metadata_input() {
         .overview
         .value()
         .cloned();
-    assert_eq!(after, before, "an unparsable sidecar must not erase the last valid input");
+    assert_eq!(
+        after, before,
+        "an unparsable sidecar must not erase the last valid input"
+    );
 }
+
+#[test]
+fn record_scraped_display_with_studio_updates_and_allows_library_reduction() {
+    use domain::{
+        Confidence, FilePresence, FilePublication, FileVersion, LibraryFile, MediaKind,
+        QualitySource, UnitKey,
+    };
+    use store::library_write::{FilePublication as StorePublication, WriteScope};
+    use store::metadata::ScrapedDisplay;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let root = tmp.path().join("movies");
+    std::fs::create_dir_all(&root).unwrap();
+    let library = store
+        .create_library(
+            MediaKind::Movie,
+            "Movies",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let root_id = store
+        .list_library_roots()
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.library_id.as_deref() == Some(&library.id))
+        .unwrap()
+        .id;
+    let media = domain::Media {
+        id: domain::MediaId::new(),
+        kind: MediaKind::Movie,
+        title: "Studio Test".into(),
+        year: Some(2024),
+        original_title: None,
+        aliases: vec![],
+        tmdb_id: Some("12345".into()),
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&media).unwrap();
+
+    let video = root.join("Movie.mkv");
+    std::fs::write(&video, b"bytes").unwrap();
+    let file = LibraryFile {
+        file_id: domain::LedgerId::new(),
+        library_id: library.id.parse().unwrap(),
+        root_id,
+        media_id: media.id,
+        kind: MediaKind::Movie,
+        path: video,
+        version: FileVersion {
+            revision: 1,
+            source_version: "v1".into(),
+        },
+        presence: FilePresence::Present,
+        publication: FilePublication::Published,
+        size_bytes: Some(5),
+        stat_known: true,
+        created_ns: None,
+        modified_ns: None,
+        source_digest: None,
+        source_path: None,
+        transfer_mode: None,
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: None,
+        release_quality: None,
+        duration_ms: None,
+        tracks_version: 0,
+        poster_path: None,
+        backdrop_path: None,
+        still_path: None,
+    };
+    let scope = WriteScope {
+        library_id: library.id.parse().unwrap(),
+        config_revision: 0,
+    };
+    store
+        .publish_files(
+            &scope,
+            &[StorePublication {
+                file: &file,
+                units: &[UnitKey::WHOLE],
+                expected_version: None,
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            1,
+        )
+        .unwrap();
+
+    // Now record scraped display with a studio name
+    store
+        .record_scraped_display(
+            media.id,
+            "zh-CN",
+            ScrapedDisplay {
+                rating: Some(8.5),
+                release_date: Some("2024-01-01"),
+                studio: Some("Studio X"),
+                studio_logo: Some("https://example.com/logo.png"),
+            },
+        )
+        .unwrap();
+
+    // Trigger reduction / library item detail read which runs adopted_for_library
+    let detail = store
+        .library_item_detail(scope.library_id, media.id, "zh-CN")
+        .unwrap()
+        .expect("detail exists");
+
+    let facts = store
+        .adopted_filter_facts_for_media(&[media.id], Some("zh-CN"))
+        .unwrap();
+    let media_facts = facts.get(&media.id).expect("facts exist");
+    assert_eq!(media_facts.studios, vec!["Studio X".to_string()]);
+}
+

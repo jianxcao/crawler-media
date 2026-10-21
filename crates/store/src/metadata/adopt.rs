@@ -1,8 +1,8 @@
 use rusqlite::{Connection, OptionalExtension, params};
 
-use domain::{EntityScope, MediaId, MetadataAdoption};
-use super::types::EffectiveMetadata;
 use super::super::{Store, StoreError};
+use super::types::EffectiveMetadata;
+use domain::{EntityScope, MediaId, MetadataAdoption};
 
 /// Fixed adoption priority: a lower rank wins a field for the same entity/locale.
 fn source_rank(source: &str) -> u8 {
@@ -24,7 +24,11 @@ fn existing_field_ranks(
     scope: EntityScope,
     locale: &str,
 ) -> Result<std::collections::BTreeMap<String, u8>, StoreError> {
-    let (scope_name, season, episode) = (scope.as_str(), scope.season_episode().0, scope.season_episode().1);
+    let (scope_name, season, episode) = (
+        scope.as_str(),
+        scope.season_episode().0,
+        scope.season_episode().1,
+    );
     let mut stmt = tx.prepare(
         "SELECT source, normalized_json FROM media_metadata_sources
          WHERE media_id = ?1 AND entity_scope = ?2 AND season = ?3 AND episode = ?4
@@ -42,7 +46,9 @@ fn existing_field_ranks(
             continue;
         };
         let fields = value.get("fields").unwrap_or(&value);
-        let Some(map) = fields.as_object() else { continue };
+        let Some(map) = fields.as_object() else {
+            continue;
+        };
         for (field, field_value) in map {
             if field_value.get("state").and_then(|state| state.as_str()) == Some("missing") {
                 continue;
@@ -90,7 +96,10 @@ fn merge_by_source_priority(
             if value.get("state").and_then(|state| state.as_str()) == Some("missing") {
                 continue;
             }
-            if owner_ranks.get(field).is_some_and(|rank| *rank < incoming_rank) {
+            if owner_ranks
+                .get(field)
+                .is_some_and(|rank| *rank < incoming_rank)
+            {
                 continue;
             }
             merged_map.insert(field.clone(), value.clone());
@@ -124,7 +133,8 @@ impl Store {
 
         // 1. Serialize fields and origins
         let normalized_json = serde_json::to_string(&input.normalized.fields)?;
-        let present_fields_json = serde_json::to_string(&input.normalized.field_origins.keys().collect::<Vec<_>>())?;
+        let present_fields_json =
+            serde_json::to_string(&input.normalized.field_origins.keys().collect::<Vec<_>>())?;
         let preferences_json = serde_json::to_string(&input.preferences)?;
         let selection_origins_json = serde_json::to_string(&input.normalized.field_origins)?;
 
@@ -306,11 +316,20 @@ impl Store {
                 )?;
                 1
             }
-            EntityScope::Episode { season: s, episode: ep } => {
+            EntityScope::Episode {
+                season: s,
+                episode: ep,
+            } => {
                 let title = input.normalized.fields.title.value().cloned();
                 let overview = input.normalized.fields.overview.value().cloned();
                 let air_date = input.normalized.fields.air_date.value().cloned();
-                let runtime = input.normalized.fields.runtime_minutes.value().copied().map(|r| r as i64);
+                let runtime = input
+                    .normalized
+                    .fields
+                    .runtime_minutes
+                    .value()
+                    .copied()
+                    .map(|r| r as i64);
                 let rating = input.normalized.fields.rating.value().copied();
                 let still_url = input.normalized.fields.still_url.value().cloned();
                 tx.execute(
@@ -388,7 +407,9 @@ impl Store {
         display: ScrapedDisplay<'_>,
     ) -> Result<(), StoreError> {
         let rating = display.rating.filter(|value| (0.0..=10.0).contains(value));
-        let release_date = display.release_date.filter(|value| !value.trim().is_empty());
+        let release_date = display
+            .release_date
+            .filter(|value| !value.trim().is_empty());
         let studio = display.studio.filter(|value| !value.trim().is_empty());
         let studio_logo = display.studio_logo.filter(|value| !value.trim().is_empty());
         if rating.is_none() && release_date.is_none() && studio.is_none() && studio_logo.is_none() {
@@ -416,13 +437,19 @@ impl Store {
             if let Some(name) = studio {
                 object.insert(
                     "studios".into(),
-                    serde_json::Value::Array(vec![serde_json::Value::String(name.to_string())]),
+                    serde_json::json!({
+                        "state": "value",
+                        "value": [name.to_string()]
+                    }),
                 );
             }
             if let Some(logo) = studio_logo {
                 object.insert(
                     "studio_logo".into(),
-                    serde_json::Value::String(logo.to_string()),
+                    serde_json::json!({
+                        "state": "value",
+                        "value": logo.to_string()
+                    }),
                 );
             }
         }
