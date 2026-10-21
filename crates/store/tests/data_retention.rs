@@ -509,3 +509,180 @@ fn transient_report_examined_limit_is_capped_at_500() {
         .unwrap();
     assert!(batch.examined <= 500);
 }
+
+#[test]
+fn retention_preserves_active_operations_and_local_facts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let store = Store::open(&data_dir).unwrap();
+
+    let user_id = UserId::new();
+    let (media_id, ledger_id) = {
+        let media = domain::Media {
+            id: MediaId::new(),
+            kind: domain::MediaKind::Movie,
+            title: "Retention Movie".into(),
+            year: Some(2024),
+            original_title: None,
+            tmdb_id: Some("12345".into()),
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+            aliases: Vec::new(),
+        };
+        store.insert_media(&media).unwrap();
+        let lib_dir = tmp.path().join("library");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        let lib = store
+            .create_library(
+                domain::MediaKind::Movie,
+                "Movies",
+                &[lib_dir.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+        let root = store
+            .list_library_roots()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.library_id == Some(lib.id.clone()))
+            .unwrap();
+        let file_path = lib_dir.join("movie.mkv");
+        std::fs::write(&file_path, b"dummy content").unwrap();
+        let file_id = domain::LedgerId::new();
+        let file = domain::LibraryFile {
+            file_id,
+            library_id: lib.id.parse().unwrap(),
+            root_id: root.id,
+            media_id: media.id,
+            kind: domain::MediaKind::Movie,
+            path: file_path.to_string_lossy().into_owned().into(),
+            version: domain::FileVersion {
+                revision: 1,
+                source_version: "v1".into(),
+            },
+            presence: domain::FilePresence::Present,
+            publication: domain::FilePublication::Published,
+            size_bytes: Some(100),
+            stat_known: true,
+            created_ns: None,
+            modified_ns: None,
+            source_digest: None,
+            source_path: None,
+            transfer_mode: None,
+            resolution: Some("1080p".into()),
+            codec: Some("h264".into()),
+            hdr: None,
+            quality_source: domain::QualitySource::Probe,
+            confidence: domain::Confidence::High,
+            filter_score: None,
+            release_quality: None,
+            duration_ms: Some(10_000),
+            tracks_version: 1,
+            poster_path: None,
+            backdrop_path: None,
+            still_path: None,
+        };
+        let scope = store::library_write::WriteScope {
+            library_id: lib.id.parse().unwrap(),
+            config_revision: 0,
+        };
+        store
+            .publish_files(
+                &scope,
+                &[store::library_write::FilePublication {
+                    file: &file,
+                    units: &[domain::UnitKey::WHOLE],
+                    expected_version: None,
+                    nfo_observation: None,
+                    probe_required: false,
+                }],
+                1000,
+            )
+            .unwrap();
+        (media.id, file_id)
+    };
+
+    // Record user progress
+    store
+        .upsert_unit(
+            user_id,
+            media_id,
+            -1,
+            -1,
+            5000,
+            Some(false),
+            Some(true),
+            Some(10_000),
+            None,
+            None,
+            false,
+            1000,
+        )
+        .unwrap();
+
+    // Create an active media operation (state = "frozen")
+    let active_op_id = "00000000-0000-0000-0000-000000000099";
+    {
+        let conn = open_db(&data_dir, "library.db");
+        conn.execute(
+            "INSERT INTO media_operations
+                (operation_id, kind, plan_json, phase_cursor, state, error, created_at_ms, updated_at_ms, survivor_id, loser_id)
+             VALUES (?1, 'merge', '{}', 'init', 'frozen', NULL, 1000, 1000, ?2, NULL)",
+            params![active_op_id, media_id.to_string()],
+        )
+        .unwrap();
+    }
+
+    let local_items_before = open_db(&data_dir, "library.db")
+        .query_row("SELECT COUNT(*) FROM library_items", [], |r| r.get::<_, usize>(0))
+        .unwrap();
+    let playback_before = open_db(&data_dir, "library.db")
+        .query_row("SELECT COUNT(*) FROM playback_units", [], |r| r.get::<_, usize>(0))
+        .unwrap();
+    let active_operations_before = open_db(&data_dir, "library.db")
+        .query_row("SELECT COUNT(*) FROM media_operations WHERE state IN ('planned','frozen','draining','applying','checking')", [], |r| r.get::<_, usize>(0))
+        .unwrap();
+
+    // Put entries in cache.db and simulate 100k cache updates + clear
+    {
+        let cache_conn = open_db(&data_dir, "cache.db");
+        cache_conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS tmdb_cache (
+                entry_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cache_key TEXT NOT NULL COLLATE BINARY UNIQUE,
+                body TEXT NOT NULL,
+                fetched_at INTEGER NOT NULL,
+                expires_at INTEGER
+            );
+            DELETE FROM tmdb_cache;"
+        ).unwrap();
+        // Insert and clear
+        cache_conn.execute(
+            "INSERT INTO tmdb_cache (cache_key, body, fetched_at) VALUES ('key1', '{}', 1000)",
+            [],
+        ).unwrap();
+        cache_conn.execute("DELETE FROM tmdb_cache", []).unwrap();
+    }
+
+    // Run data retention pruning on QOE & Probe
+    let _ = store.prune_data_history(RetentionClass::Qoe, 2_000_000_000_000, None, 500, false).unwrap();
+    let _ = store.prune_data_history(RetentionClass::ProbeHistory, 2_000_000_000_000, None, 500, false).unwrap();
+
+    let local_items_after_cache_clear = open_db(&data_dir, "library.db")
+        .query_row("SELECT COUNT(*) FROM library_items", [], |r| r.get::<_, usize>(0))
+        .unwrap();
+    let playback_after_cache_clear = open_db(&data_dir, "library.db")
+        .query_row("SELECT COUNT(*) FROM playback_units", [], |r| r.get::<_, usize>(0))
+        .unwrap();
+    let active_operations_after_retention = open_db(&data_dir, "library.db")
+        .query_row("SELECT COUNT(*) FROM media_operations WHERE state IN ('planned','frozen','draining','applying','checking')", [], |r| r.get::<_, usize>(0))
+        .unwrap();
+
+    assert_eq!(local_items_after_cache_clear, local_items_before);
+    assert_eq!(playback_after_cache_clear, playback_before);
+    assert_eq!(active_operations_after_retention, active_operations_before);
+}

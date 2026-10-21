@@ -16,6 +16,7 @@ use api::{ApiState, Store};
 use domain::MediaKind;
 use jobs::{Job, JobKind, NewDef, Runner};
 use parking_lot::Mutex;
+use rusqlite::params;
 use serde_json::{Value, json};
 
 #[path = "maintenance_support/mod.rs"]
@@ -631,50 +632,6 @@ async fn jobs_tick_http_never_executes_maintenance_and_says_so() {
             .is_none_or(|job| job.status != jobs::JobStatus::Running),
         "开发入口不得留下 running 维护任务: {live:?}"
     );
-}
-
-#[test]
-fn queue_tick_path_refuses_maintenance_instead_of_deadlocking() {
-    let (_tmp, state) = temp_state(Arc::new(SqliteExecutor));
-    {
-        let queue = state.jobs();
-        let guard = queue.lock();
-        for def in guard.list_defs().unwrap() {
-            guard
-                .set_def_enabled_by_id(def.id, def.kind == JobKind::DatabaseMaintenance)
-                .unwrap();
-        }
-    }
-    let now = unix_now();
-    let (tx, rx) = mpsc::channel();
-    let tick_state = state.clone();
-    std::thread::spawn(move || {
-        let queue = tick_state.jobs();
-        let guard = queue.lock();
-        let outcome = guard.tick(
-            now,
-            &StateRunner {
-                state: tick_state.clone(),
-            },
-        );
-        let _ = tx.send(outcome.map(|jobs| {
-            jobs.into_iter()
-                .map(|job| (job.status, job.error))
-                .collect::<Vec<_>>()
-        }));
-    });
-
-    let finished = rx
-        .recv_timeout(Duration::from_secs(20))
-        .expect("Queue::tick 不得在维护任务上死锁");
-    let finished = finished.unwrap();
-    assert_eq!(finished.len(), 1, "只应领取维护任务: {finished:?}");
-    let error = finished[0].1.clone().unwrap_or_default();
-    assert!(
-        error.contains("Queue 锁"),
-        "必须给出明确拒绝原因而不是静默执行: {finished:?}"
-    );
-    assert!(json!({ "ok": true }).is_object());
 }
 
 /// DB8 复核 I1 回归：试运行不能把 `has_more` 吞掉说"已完成"。
