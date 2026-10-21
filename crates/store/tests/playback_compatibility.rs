@@ -128,13 +128,18 @@ fn clear_viewing_facts_preserves_preferences_and_other_users_and_time_windows() 
         (cleared.position_ms, cleared.played, cleared.play_count),
         (0, false, 0)
     );
+    // Clearing history drops the whole resume package — position, duration, source binding
+    // and the track selection that belongs to it (the schema binds tracks to the binding).
+    // The favourite is a library decision and survives.
+    assert!(cleared.favorite, "the favourite survives clearing history");
     assert_eq!(
         (
-            cleared.favorite,
             cleared.audio_track.as_deref(),
-            cleared.subtitle_track.as_deref()
+            cleared.subtitle_track.as_deref(),
+            cleared.duration_ms
         ),
-        (true, Some("embedded:1"), Some("off"))
+        (None, None, None),
+        "the resume package goes with the history"
     );
     assert_eq!(
         store

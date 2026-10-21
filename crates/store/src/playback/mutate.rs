@@ -289,14 +289,15 @@ impl Store {
                    VALUES
                     (?1, ?2, ?3, ?4, COALESCE(?5, 0), CASE WHEN ?5 IS NOT NULL THEN 1 ELSE 0 END,
                      CASE WHEN ?5 IS NOT NULL THEN ?6 ELSE NULL END, COALESCE(?7, 0),
-                     CASE WHEN ?7 = 1 THEN ?6 ELSE 0 END, ?6)
+                     CASE WHEN ?7 = 1 THEN ?6 ELSE 0 END, 0)
                    ON CONFLICT(user_id, media_id, season, episode) DO UPDATE SET
                      played = COALESCE(?5, playback_units.played),
                      has_played_assertion = CASE WHEN ?5 IS NOT NULL THEN 1 ELSE playback_units.has_played_assertion END,
                      played_changed_at_ms = CASE WHEN ?5 IS NOT NULL THEN ?6 ELSE playback_units.played_changed_at_ms END,
                      favorite = COALESCE(?7, playback_units.favorite),
                      favorite_at = CASE WHEN ?7 = 1 THEN ?6 ELSE playback_units.favorite_at END,
-                     watch_activity_at = ?6";
+                     -- A mark is a decision, not viewing: it must not move the activity clock.
+                     watch_activity_at = playback_units.watch_activity_at";
 
         tx.execute(sql, params![
             user_id_str,

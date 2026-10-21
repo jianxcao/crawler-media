@@ -12,6 +12,7 @@ pub mod session_ids;
 pub use session_ids::{PlaySessionBinding, PlaySessionIdState};
 pub mod merge;
 mod merge_facts;
+mod assertions;
 mod event;
 pub mod mutate;
 pub mod source;
@@ -114,6 +115,7 @@ mod units;
 mod user_summary;
 mod watch_aggregate;
 
+pub use assertions::{EffectiveAssertion, PlayedAssertionScope};
 pub use user_summary::UserLibrarySummary;
 pub use log_scope::{PlaybackLogPage, PlaybackLogScope};
 pub use retention::{PlaybackRetentionBatch, PlaybackRetentionPreview};

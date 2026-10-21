@@ -626,8 +626,16 @@ impl Store {
                 Some(ids) => ids.to_vec(),
                 None => store.user_playback_media_ids(user_id, since_ms)?,
             };
+            // Clearing history drops the whole resume package and the played assertion; the
+            // favourite is the user's library decision and survives it.
             let mut sql = String::from(
-                "UPDATE playback_units SET position_ms = 0, played = 0, play_count = 0, watch_activity_at = 0 WHERE user_id = ?",
+                "UPDATE playback_units SET
+                    position_ms = 0, played = 0, has_played_assertion = 0,
+                    played_changed_at_ms = NULL, play_count = 0, watch_activity_at = 0,
+                    duration_ms = NULL, resume_file_id = NULL, resume_file_revision = NULL,
+                    resume_source_version = NULL, timeline_mode = NULL, tracks_version = NULL,
+                    audio_track = NULL, subtitle_track = NULL
+                 WHERE user_id = ?",
             );
             let mut values: Vec<rusqlite::types::Value> =
                 vec![rusqlite::types::Value::Text(user_id.to_string())];

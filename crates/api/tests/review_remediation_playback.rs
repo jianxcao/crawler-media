@@ -549,13 +549,17 @@ async fn clear_history_preserves_favorites_and_preferences() {
         (state.position_ms, state.played, state.play_count),
         (0, false, 0)
     );
+    // The favourite is a library decision and survives; the resume package (position,
+    // duration, source binding and the track selection bound to it) goes with the history.
+    assert!(state.favorite, "the favourite survives clearing history");
     assert_eq!(
         (
-            state.favorite,
             state.audio_track.as_deref(),
-            state.subtitle_track.as_deref()
+            state.subtitle_track.as_deref(),
+            state.duration_ms
         ),
-        (true, Some("embedded:1"), Some("off"))
+        (None, None, None),
+        "the resume package is cleared with the history"
     );
     assert!(store.user_active_media_ids(admin()).unwrap().is_empty());
 }
