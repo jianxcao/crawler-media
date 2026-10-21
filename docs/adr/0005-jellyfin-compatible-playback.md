@@ -42,7 +42,7 @@ Authorization: MediaBrowser Client="VidHub", Device="iPhone", DeviceId="device-i
 代价（有意的）：客户端再没有开关能把已看完的藏掉——只有**显式**传 `IsPlayed=false` 才严格，而多数客户端不传。要做到"用户自己决定藏不藏"，得补用户配置表面（`UserConfiguration.HidePlayedInLatest` 与 `GET/POST /Users/{id}/Configuration`；Jellyfin Web 本来就读 `user.Configuration`），落地后可以按这个开关在"严格筛"与"只排不筛"之间切。这套表面目前**尚未实现**，`/Users/Me` 也不返回 `Configuration` 块。
 ## 播放会话代际与 PlaySessionId 目标（2026-10-13 Batch 2）
 
-以下是当时确定的目标，不是当前所有生产写入路径的已验收保证。现有 Web/Jellyfin 处理仍未统一接入 `Store::commit_playback_event`；上一轮隔离复核已观察到合并集文件 heartbeat 错报 `ended_by_admin`，旧 issued session 仍写入文件新版本。因此不能仅凭 generation 字段/Store 新方法存在就宣称已防止所有迟到或换源污染。`protocol_item_page` 也尚未完成生产浏览入口统一。依据 `crates/api/src/http/playback/heartbeat.rs`、`crates/store/src/playback/mutate.rs` 与当前调用方；闭环要求见 [存储执行计划](<../superpowers/plans/2026-10-20-storage-clean-cutover.md>)。
+以下是当时确定的目标，不是当前所有生产写入路径的已验收保证。浏览入口本轮已统一到 `protocol_item_page`（`485e36f`）：`select_page_blocking` 先在本地 SQL 选定规范条目再分页，`jellyfin_paged_metadata` 25 与 `jellyfin_sql_page` 9 全绿，冒烟里 Recursive 分页返回规范 `w1_…` Series+Movie、`/Shows/w1_…/Episodes` 返回 `u1_…_1_1`；但 `/Items/Resume`、`/Items/Latest`、`/Genres`、`/Studios`、`/Shows/{id}/Seasons`、`/Shows/{id}/Episodes`、`/Users/{id}/Views` 仍走 `list_visible_items` 加应用层过滤（13 处已知差异）。Web 与 Jellyfin 的写入仍未统一接入 `Store::commit_playback_event`，本轮未验证该统一；上一轮隔离复核观察到合并集文件 heartbeat 错报 `ended_by_admin`、旧 issued session 仍写入文件新版本，本轮未重放，因此不能仅凭 generation 字段/Store 新方法存在就宣称已防止所有迟到或换源污染。依据 `crates/api/src/http/playback/heartbeat.rs`、`crates/store/src/playback/mutate.rs` 与当前调用方；闭环要求见 [存储执行计划](<../superpowers/plans/2026-10-20-storage-clean-cutover.md>)。
 
 Jellyfin 客户端在 `PlaybackInfo` 阶段获得由服务端生成的持久 `PlaySessionId`（绑定 User、Device、LedgerId）。
 

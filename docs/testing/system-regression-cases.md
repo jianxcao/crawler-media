@@ -237,20 +237,20 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 
 ## 存储 clean-cutover 回归补充（2026-10-20）
 
-下表记录上一轮隔离复核的失败观察与修复后验收目标；本次仅清理文档，**未重跑**，不将旧结果改为 Pass。API/数据库诊断证据不替代上文 UI 主验收；每个 UI 结果仍须按实际构建独立记录。
+下表记录上一轮隔离复核的失败观察与修复后验收目标；本轮只重跑了计划点名的部分自动化目标（结果逐行注明），没重跑的不改为 Pass，浏览器／设备／规模验收仍未执行。API/数据库诊断证据不替代上文 UI 主验收；每个 UI 结果仍须按实际构建独立记录。
 
 | ID | 复核场景与验收目标 | 既有观察／状态 |
 |---|---|---|
-| STORAGE-01 | 合并集物理文件选择 E02 后 heartbeat，进度只写正确 Unit；未被管理员终止不得报 ended_by_admin | 已观察误报；本次 Not run |
-| STORAGE-02 | 签发 session 后替换物理来源版本，迟到事件不得写入新版本；Web/Jellyfin 统一检查来源版本与会话绑定 | 已观察旧 issued session 写 B 版本；本次 Not run |
-| STORAGE-03 | 单文件增量写入后检查 TV 公共集数、两 User 分集状态、Summary 与 Episodes | 已观察公共 count=3、User count=2；本次 Not run |
-| STORAGE-04 | 文件列表分别准备恰好 50 条和超过一页，UI 加载续页无遗漏/重复，终页正确结束 | 已观察 next_cursor 对接与 exact-50 边界失败；本次 Not run |
-| STORAGE-05 | 采用 runtime/rating/tagline/certification 后，Library 卡片、筛选与详情读取同一采用事实 | 已观察 normalizer runtime/rating Missing、详情漏字段；本次 Not run |
-| STORAGE-06 | 已有文件 Library 更换根，失败原子且无外键异常；持久归属不悬空 | 已观察换根 FK 错误；本次 Not run |
-| STORAGE-07 | 同来源多个别名的 Media 更新后，全部历史别名保留，refresh target 唯一且卡片立即同步 | 已观察别名丢失/卡片陈旧；本次 Not run |
-| STORAGE-08 | 管理完整性检查与 Media 合并公开路径可用并有最终状态，失败不改身份；协议浏览与事件提交生产接线真实覆盖 | 已观察管理端点 404，protocol_item_page / commit_playback_event 未统一接线；本次 Not run |
+| STORAGE-01 | 合并集物理文件选择 E02 后 heartbeat，进度只写正确 Unit；未被管理员终止不得报 ended_by_admin | 已观察误报；本轮 Not run：未跑 `api --test playback_event_identity`，`Store::commit_playback_event` 的生产写入统一本轮未验证 |
+| STORAGE-02 | 签发 session 后替换物理来源版本，迟到事件不得写入新版本；Web/Jellyfin 统一检查来源版本与会话绑定 | 已观察旧 issued session 写 B 版本；本轮部分实测：冒烟 `identity_preserved_cache_clear=True`、`identity_preserved_reimport=True`、`favorite_preserved=True`、`played_after_reimport=True`、`range_after_reimport=206 bytes=1024`；迟到事件与换源写入仍 Not run（未跑 `api --test playback_event_identity`） |
+| STORAGE-03 | 单文件增量写入后检查 TV 公共集数、两 User 分集状态、Summary 与 Episodes | 已观察公共 count=3、User count=2；本轮部分实测：store `storage_invariants`（含增量集刷新用户摘要）在本轮 `cargo test -p store` 337 passed / 0 failed 内，冒烟 `/Shows/w1_…/Episodes` 返回 count 1、Series `UnplayedItemCount 1`（新库，不是原 count=3 场景）；两 User 分集状态与 Summary 同轮对照仍 Not run |
+| STORAGE-04 | 文件列表分别准备恰好 50 条和超过一页，UI 加载续页无遗漏/重复，终页正确结束 | 已观察 next_cursor 对接与 exact-50 边界失败；本轮服务端部分实测：store `library_query_v1` 5 passed（在 store 套件内）；真实浏览器续页仍 Not run（本轮前端只跑 `library-operations`／`library-removal` 22/22，未跑 `web/test/library-file-pagination.test.mjs`） |
+| STORAGE-05 | 采用 runtime/rating/tagline/certification 后，Library 卡片、筛选与详情读取同一采用事实 | 已观察 normalizer runtime/rating Missing、详情漏字段；本轮 Not run：`media --test normalized_metadata` 与 `api --test metadata_priority` 未跑（store `metadata_adoption` 在本轮 store 套件内通过） |
+| STORAGE-06 | 已有文件 Library 更换根，失败原子且无外键异常；持久归属不悬空 | 已观察换根 FK 错误；本轮 store 部分实测：`library_reconfiguration` 在本轮 `cargo test -p store` 337 passed / 0 failed 内；真实 HTTP 换根与失败原子性仍 Not run |
+| STORAGE-07 | 同来源多个别名的 Media 更新后，全部历史别名保留，refresh target 唯一且卡片立即同步 | 已观察别名丢失/卡片陈旧；本轮 store 部分实测：`media_alias_updates` 在本轮 store 套件内通过；按 target 的实际刷新请求与卡片同步仍 Not run |
+| STORAGE-08 | 管理完整性检查与 Media 合并公开路径可用并有最终状态，失败不改身份；协议浏览与事件提交生产接线真实覆盖 | 已观察管理端点 404 与 protocol_item_page / commit_playback_event 未统一接线；本轮更正：浏览入口已统一（`485e36f`，`jellyfin_paged_metadata` 25、`jellyfin_sql_page` 9 全绿，冒烟 Recursive 分页返回规范 `w1_…` Series+Movie），`Store::commit_playback_event` 的生产写入统一仍未验证；管理侧仍缺 scrape 类 `library_operations`（`crates/store/src/library_operations/mod.rs:226-228` 对非 reconfiguration 的 kind 返回 `Invalid`） |
 
-movie 整片持久 Unit 为 `(-1,-1)`（`domain::UnitKey::WHOLE`）；当前前后端 `(0,0)` 请求别名尚未清除，不能据此添加兼容验收或宣称 clean cutover 已完成。用例应按 [当前执行计划](<../superpowers/plans/2026-10-20-storage-clean-cutover.md>) 在隔离实例闭环，保留旧失败证据。
+movie 整片持久 Unit 为 `(-1,-1)`（`domain::UnitKey::WHOLE`，TV 的 S00/E00 是合法值）；`(0,0)` 现在只是部分读／合并路径的行级容忍，不是请求别名，不能据此添加兼容验收。clean cutover 仍未完成：真实浏览器浏览与 seek、真实 Jellyfin 客户端（Infuse）、真实 NAS、100k–1M 规模性能本轮全部 Not run。用例应按 [当前执行计划](<../superpowers/plans/2026-10-20-storage-clean-cutover.md>) 在隔离实例闭环，保留旧失败证据。
 
 ## 当前限制
 

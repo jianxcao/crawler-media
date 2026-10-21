@@ -1,6 +1,6 @@
 # 存储重设计：检查、烟测与查询工作量证据
 
-更新：2026-10-20，最新源码/烟测基线 `bd6c3c8`。**部分实现，生产干净切换未完成；没有完整性能达标结论。** 历史与当前记录按节分开，不把表/索引存在或测试通过扩大为端到端验收。
+更新：2026-10-21，最新源码基线 `f815b21` 加本轮第二批修复（`crates/api` 5 个文件，见第 7 节），烟测基线为更早的 `70233ed` / `6abf493`。**存储干净切换的实现已落地并在本机跑过 `cargo test --workspace`、前端三门与端到端冒烟（第 7 节）；但真机 NAS、真实 Jellyfin 客户端、真实浏览器播放、10 万–100 万规模性能全部未跑（7.6），因此没有端到端验收与性能达标结论。** 历史与当前记录按节分开，不把表/索引存在或测试通过扩大为端到端验收。
 
 ## 1. 版本与检查边界
 
@@ -53,7 +53,7 @@
 
 五文件布局及字段/键/索引见[数据库文档](../database/README.md)，历史决策见[ADR-0008](../adr/0008-sqlite-system-of-record.md)。新 `library_files`/coverage/items 与 Store 事务已经存在，但仍有以下生产缺口：
 
-- movie旧whole `(0,0)` 兼容与 `LedgerRow` 有损适配未退出；不是允许保留的兼容合同。
+- movie旧whole `(0,0)` 兼容与 `LedgerRow` 有损适配未退出；不是允许保留的兼容合同。（2026-10-21 复审更正：movie 整片持久 Unit 现为 `(-1,-1)`（`domain::UnitKey::WHOLE`，TV 的 S00/E00 是合法值），`(0,0)` 只是部分读／合并路径的行级容忍，不再是前后端请求别名；`LedgerRow` 确实仍未移除，583 处引用按 `FileCoverage`／逐用途 DTO 消费，`crates/store/src/ledger.rs:242,394,518` 只剩文档注释。紧邻下一条里 `protocol_item_page` 仍未成为统一生产入口的表述已被 `485e36f` 取代——浏览入口本轮已统一（`jellyfin_paged_metadata` 25、`jellyfin_sql_page` 9 全绿），但 `commit_playback_event` 的生产写入统一仍未验证，本行以外不动该节。）
 - `adopt_metadata`已有部分生产Scrape调用，但经有损DTO重建来源且字段/读取不完整；`protocol_item_page`与`commit_playback_event`仍未成为统一生产入口。不能由方法或测试存在宣称完整协议SQL分页、字段采用、会话/历史原子提交已完成。
 - 旧浏览投影链已删除，不代表上述生产调用方和恢复/删除合同已全部切换。
 
@@ -139,4 +139,159 @@
 
 源码还确认movie(0,0)前端生产者+边界alias、LedgerRow认领丢episode_to、NFO已有路径提前continue、Jellyfin现场NFO/catalog、持久操作无完整恢复链。不能把这些源码发现写成已运行对应全部场景。
 
-本轮未重跑workspace、前端三门、真实浏览器播放、真实Jellyfin客户端、NAS并发或100k/1M规模；历史1.2/1.3通过保留，但不能抵消上述新反例。后续关闭条件/逐项回归见[当前计划](../superpowers/plans/2026-10-20-storage-clean-cutover.md)。
+上一轮（2026-10-20）未重跑workspace、前端三门、真实浏览器播放、真实Jellyfin客户端、NAS并发或100k/1M规模；历史1.2/1.3通过保留，但不能抵消上述新反例。**本轮（2026-10-21）已补跑 `cargo test --workspace`、前端三门与本机端到端冒烟，实测见第 7 节；真机／规模项仍未跑，见 7.6。** 后续关闭条件/逐项回归见[当前计划](../superpowers/plans/2026-10-20-storage-clean-cutover.md)。
+
+## 7. Task 17 整体门：干净切换的冻结、冒烟与测试证据（2026-10-21）
+
+本节只记录实测。未运行项集中在 7.6，不得由本节通过推导为它们已验收。
+
+### 7.1 冻结与版本
+
+| 项 | 实测值 |
+|---|---|
+| 分支 | `feat/storage-redesign` |
+| 切换代码合入点（会话前） | `6abf493 refactor(storage): reject legacy filter DSL and plaintext password rows` |
+| 本轮第一批提交（已入库） | `485e36f`（jellyfin 分页前先选规范本地条目）、`b0250c7`（nfo 多实体观测与崩溃恢复导出）、`d384f5c`（collect/library 删除拆分到 800 行内）、`32ae21d`（可测量查询/争用/保留工作负载）、`70233ed`（遗留明文管理员行必须显式轮换）、`f815b21`（修正浏览排序对 `release_date_sort` 的列类型声明） |
+| 本轮第二批修复（就是 7.3/7.9 验证的代码） | 5 个 `.rs`：`crates/api/src/http/reidentify.rs`、`crates/api/tests/management/{library_configuration,library_gaps,library_sidecar_cancellation,playback_movie_units}.rs`（244 插入 / 35 删除） |
+| 代码指纹 | 所有 `.rs` 合并 diff 的 sha256 `ffe2b6706002629fe0b25f403b22b64897a1010dd05c3edc368b27c0f9684b29`，基线 `f815b219905d8965caf47de406289a1c80913697`；第二批提交后该 diff 为空 |
+| 冒烟树（`70233ed`，干净树） | `git status --porcelain -uall` 为空；70 条 blob 清单与冻结树逐路径 `git rev-parse` 比对 mismatch 0；清单 sha256 `01a0367ea44ca6074ac27dc4533f43798fa34b0f922d1e519231970733a28fbc` |
+| 冒烟二进制 | debug `crawler-media serve`，sha256 前缀 `9f43c1778964dfc0` |
+| 冒烟根 / 端口 | `/tmp/crawler-smoke6.OlIbPT` / `127.0.0.1:18772`（`CRAWLER_MEDIA_BROWSER=false`，UI=`web/dist`） |
+| 冒烟日志 | `/tmp/cmsmoke/phase6c.log`，`PHASE6C_EXIT=0` |
+
+### 7.2 端到端冒烟 marker（全部为实际响应）
+
+| 证据 | 实测 |
+|---|---|
+| 五文件布局 | `app.db` / `cache.db` / `library.db` / `subscribe.db` / `jobs.db` 建立 |
+| 播放 Range | `range_0_1023=206 bytes=1024` |
+| 显式 seek | `seek_1000_2000=206 bytes=1001` |
+| 越界 Range | `range_past_eof=416` |
+| TV 集流 | `tv_episode_stream=206 bytes=2048` |
+| 令牌边界 | `stream_no_token=401`、`items_no_token=401`、`subtitle_no_token=401` |
+| Jellyfin 分页 | Recursive 页返回规范 `w1_…` Series+Movie |
+| Jellyfin 剧集 | `/Shows/w1_…/Episodes` → `u1_…_1_1`，count 1 |
+| 未播计数 | Series `UnplayedItemCount 1` |
+| 字幕索引规则 | 广告索引 `…/subtitles/51707560-6c36-40c1-abf6-0dac9723ed2b/2`（`srt`，`external:Smoke Show - S01E01 - Pilot.srt`）可服务；未广告索引 0 → 404（预期） |
+| 字幕交付 | `subtitle_delivery=200 bytes=47`；VTT `200 bytes=55 head=WEBVTT` |
+| 重启持久性 | `total 2 / played true / favorite true` |
+| 清 cache 后身份 | `identity_preserved_cache_clear=True` |
+| 重导入后身份 | `identity_preserved_reimport=True`、`favorite_preserved=True`、`played_after_reimport=True`、`range_after_reimport=206 bytes=1024` |
+| CLI over HTTP | `CRAWLER_MEDIA_URL` + `CRAWLER_MEDIA_TOKEN` 输出 `Smoke Movie\tmovie` / `Smoke Show\ttv` |
+| Web 静态 | `web_index=200 ctype=text/html` |
+| 日志噪声 | `error_lines=16 warn_lines=41`，逐条核对均为环境降级：`media::cache` 无可用 metadata cache source（tmdb/bangumi）、`api::runtime_downloader` 生产环境拒绝内存假下载 |
+
+### 7.3 测试门（冻结树实测，`cargo test`）
+
+| 目标 | 实测 | 目标 | 实测 |
+|---|---|---|---|
+| `cargo check -p api --lib --tests` | 干净 | `store --lib` | 34 passed |
+| `-p subscribe` | 89 passed / 18 targets | `store --test library_query_v1` | 5 passed |
+| `-p store` | 337 passed / 67 targets / 0 failed | `store --test subscribe_library_scope` | 12 passed |
+| `-p jobs` | 13 passed | `store --test data_retention` | 11 passed |
+| `-p library` | 20 suites / 0 FAILED | `store --test playback_compatibility` | 5 passed |
+| `api --test management`（整目标） | 574 passed / 0 failed / 1 ignored（32.31s） | `store --test password_migration` | 10 passed（`70233ed` 后） |
+| `api --test jellyfin` | 64 passed | `store --test login_snapshot` | 6 passed |
+| `api --test jellyfin_paged_metadata` | 25 passed | `store --test filter_codec_roundtrip` | 1 passed |
+| `api --test jellyfin_sql_page` | 9 passed | `media-server --test jellyfin_scope` | 10 passed |
+| `api --test jellyfin_read_scale` | 3 passed | `media-server --test next_up_paging` | 4 passed |
+| `api --test storage_operations_runtime` | 9 passed | `api --test storage_nfo_export` | 3 passed |
+| `api --test storage_end_to_end` | 4 passed | `api --test password_login_runtime` | 8 passed |
+| `api --test design_improvements` | 10 passed | `api --test users` | 5 passed |
+| `api --test bootstrap_credentials` | 13 passed（`70233ed` 后） | `api --test data_retention_control` | 9 passed |
+| `api --test reidentify_scoped` | 5 passed | `api --test management -- watch_scrape` | 5 passed |
+
+`api --test management` 整目标在第二批修复前从未运行过（564 passed / 9 failed，见 7.9）；修复后为 574 passed / 0 failed / 1 ignored（32.31s）。
+
+### 7.4 前端门（最终冻结树）
+
+| 门 | 实测 |
+|---|---|
+| `npx tsc --noEmit` | exit 0 |
+| `npm run test`（`node --test`） | `# tests 832 / # suites 6 / # pass 832 / # fail 0`，`NODETEST_EXIT=0` |
+| 其中 `test/library-operations.test.mjs` + `test/library-removal.test.mjs` | 22/22 |
+| `npm run build` | `BUILD_EXIT=0`，`✓ built in 2.67s` |
+| `npm run lint` | **exit 1**：`131 problems (15 errors, 116 warnings)`，全部在会话未触碰的文件里（`git status --porcelain web` 为空），属既有 lint 债；不作为本轮通过项 |
+
+日志：`/tmp/cmsmoke/web_final.log`、`/tmp/cmsmoke/web_lint2.log`。
+
+### 7.5 本轮修复：遗留明文管理员凭据不再被静默忽略（`70233ed`）
+
+- 现象与原因：干净切换把非 Argon2 PHC 行改为 fail closed（`verify_password` 只接受可解析 PHC，`finish_verified_login` 拒绝非 PHC 观测值），同时删掉了旧自检赖以判定不安全凭据的明文比较，`legacy_admin_password_matches_known_token` 因此恒为 false，`prepare_admin_credentials` 落到 `Keep`：运维显式提供的 `CRAWLER_MEDIA_ADMIN_PASSWORD` 被静默忽略，随后登录 401。
+- RED：`cargo test -p api --test bootstrap_credentials` → 11 passed / 2 failed；`cargo test -p store --test password_migration` 编译失败 `E0599`（新方法不存在）。
+- GREEN：`store` 新增 `password::is_verifiable_hash` 与 `Store::admin_credential_is_legacy_plaintext`（只按形态识别遗留行，不参与登录校验）；`bootstrap_credentials` 在该形态存在时进入 `prepare_legacy_admin`，生产缺独立密码即 `InsecureLegacyNeedsPassword` 拒绝启动，提供独立密码即 `Rotate` 写入 Argon2 哈希。登录路径仍 fail closed，`password_migration` 的明文行断言不变。
+- 修复后：`cargo test -p store` 67 targets / 0 failed；`cargo test -p api --test bootstrap_credentials` 13 passed；`--test password_login_runtime` 8、`--test users` 5、`--test storage_end_to_end` 4 全通过。该修复不是本次 workspace 全绿的最后一个障碍，见 7.9。
+
+### 7.6 明确 Not run（不得视为通过）
+
+真机 NAS（含 SMB/NFS 抖动、断电、磁盘满）、真 Jellyfin 客户端（Infuse/官方 App）、真实浏览器浏览与 seek、10 万–100 万条目 release 规模性能与延迟分位、真实多用户并发压力、全部 63 条索引的逐条消费者审计、`commit_playback_event` 的统一性。本节及 7.3/7.9 的结论不能外推到这些场景。
+
+### 7.7 有证据的偏差（相对计划原文）
+
+1. Task 13 Step 3 冻结屏障实现为单事务 `libraries.lifecycle_state='reindexing'` + `config_revision+1` 加 `wait_idle`，没有持久 `state='frozen'` 行；相应断言落在 `409 reindexing` 与闲置等待上。
+2. `LedgerRow` 未按“审查10”移除：583 处引用按 `FileCoverage` 与各用途 DTO 消费，`crates/store/src/ledger.rs:242,394,518` 的 “legacy” 只出现在文档注释；这是有证据的偏差。
+3. 行级 `(0,0)` 容忍仍在读/合并路径（整片 UnitKey 已统一为 `(-1,-1)`）。
+4. 仅浏览入口实测统一（`select_page_blocking` / `protocol_item_page`）；`commit_playback_event` 统一未验证，`/Items/Resume|Latest`、`/Genres`、`/Studios`、`/Shows/{id}/Seasons|Episodes`、`/Users/{id}/Views` 仍走 `list_visible_items` 加应用层过滤（13 处已知差异）。
+5. nfo 侧无 `library_operations/scrape.rs`（`crates/store/src/library_operations/mod.rs:226-228` 返回 `Invalid("library operation kind scrape is not a reconfiguration")`）；Watch Scrape / `scrape_tv_sidecars` 未接线（`crates/api/src/watch_scrape.rs:122-125`）；被显式删除的 metadata 字段未升级为 overrides。
+6. `web/lib/api/playback.ts` 调用的 `/playback/files/{id}/fonts`、`/playback/files/{id}/trickplay` 路由不存在（会话前既有死消费者，仅上报）。
+7. 计划正文的 `- [ ]` 复选框未勾选；逐任务状态见计划文件 `## 实施状态与证据`。
+8. 历史提交 `21cdc9a`、`fd955ae` 引用当时未跟踪的 `library_operations/integrity.rs`，不可独立编译；只有 `be67df1` 起（含 `6abf493`、第一批与本批提交）的树经过上述验证。
+9. `485e36f` 曾把 `release_date_sort` 的排序键误声明为 `KeyKind::Int`，`f815b21` 改回 `KeyKind::Text`；这是本轮唯一被 workspace 门捕获的回归，证据见 7.9。
+10. 第二批修复的次要语义变化（有意）：冻结库中缺 `title_ref` 的请求由 400 变 409，已就位文件的重复请求由 200 `claimed:0` 变 409；`crates/api/src/http/reidentify.rs` 的库冻结门读取 store 失败时按 `ok().flatten()` 放行（fail-open），多库 409 响应体里的 `library_id` 因 `HashSet` 迭代顺序不确定。三者均上报，未在提交信息里隐藏。
+11. `task-30` 在抽取 `reassign_parsed_files` 时一度把旁车刷新目标由 `to_media` 换成 `target`（未披露的语义变化），由 Lead 复查发现并在提交前改回原语义。
+12. 测试函数规模：`library_gaps::path_reconciliation_and_root_consolidation` 原 137 行（已超 120 硬限），第二批加到 170 行后拆为 `path_reconciliation_reports_and_applies_ledger_moves`（89 行）与 `root_consolidation_accepts_duplicate_root_as_async_operation`（52 行）；同文件 `collections_crud_and_items`（128 行）是本轮未触碰的既有超限，仅记录。全仓仍有 13 个 `.rs` 文件超 800 行（`6abf493` 与本轮 HEAD 同样存在），属既有债。
+13. 电影坐标被拒时没有新增 `info!`/`warn!` 日志，与相邻的 `start_ms` 校验保持一致；作为观察记录，不计为缺陷。
+14. 播放会话快照的“电影非零季集坐标”→ `400 playback.invalid` 判定位于 `crates/api/src/http/playback/session.rs:32-58`（`b675940` 引入），它遮蔽了 `crates/api/src/http/playback/selection.rs:31-33` 的旧 404 分支，该分支现无测试固定；保留为纵深防御。
+
+### 7.8 覆盖映射证据对照（14 行 → 本轮实测）
+
+| 要求/复审项 | 本轮证据 |
+|---|---|
+| 五文件/拒旧/缓存隔离 | 7.2 五文件建立；`store --test storage_work_bounds clean_start_end_to_end_storage_lifecycle`；清 cache 后离线链与重导入 |
+| S1 锁内 IO、源版本/旧 worker | `api --test storage_operations_runtime` 9、`--test storage_end_to_end` 4；冒烟 seek/Range |
+| 用户摘要与原始事实 | `api --test jellyfin` 64（UnplayedItemCount / Played）；冒烟重启后 `played true` |
+| 旧 writer、多集/pending | `store --test playback_compatibility` 5、`api --test design_improvements` 10；偏差 7.7-2 |
+| 会话与多集、迟到事件 | `store --test login_snapshot` 6、`api --test password_login_runtime` 8 |
+| 前端分页/选版本 | 7.4 前端门；`api --test jellyfin_paged_metadata` 25 |
+| 元数据、provenance、多 NFO | `api --test storage_nfo_export` 3、`api --test jellyfin` 64；偏差 7.7-5 |
+| 别名/身份、合并 | `api --test storage_operations_runtime` 9；冒烟 `identity_preserved_*` |
+| 协议本地读取与原始进度 | `api --test jellyfin_sql_page` 9、`api --test jellyfin_read_scale` 3；偏差 7.7-4 |
+| 根/locale/integrity | `api --test storage_operations_runtime` 9（202/409）；`api --test management` 的 `library_configuration`/`library_gaps`；偏差 7.7-1 |
+| 电影坐标拒绝不写库 | `api --test management -- playback_movie_units::movie_nonzero_episode_is_not_an_alias_for_whole_movie`（600000ms 读回未被覆盖） |
+| 冻结库拒绝写 | `api --test management -- library_sidecar_cancellation`（409，原文件未动、无 `new/`、无 `.nfo`） |
+| User/Subscribe/Job/维护保留 | `store --test data_retention` 11、`api --test data_retention_control` 9、`api --test management -- watch_scrape` 5 |
+| 无兼容、文件规模 | 7.3 全门；硬限核对（既有 13 个历史超限文件另记，本轮拆分 3 个目标文件已达标，偏差 7.7-12） |
+| 精确过滤/权限/count、查询成本 | `store --test filter_codec_roundtrip` 1、`--test library_query_v1` 5、`--test storage_work_bounds` |
+| 100k/1M 规模/锁/WAL/空间 | **Not run**（见 7.6）；仅 release 小规模对照见第 8 节 |
+
+### 7.9 `cargo test --workspace` 红 → 绿（含第二批修复）
+
+1. 第一次在 `70233ed`（干净树）上运行：日志 `/tmp/cmsmoke/workspace.log` 末尾 `WORKSPACE_EXIT=101`；唯一失败目标是 `crates/api/tests/management/main.rs`，`564 passed; 9 failed; 1 ignored`。归因：
+   - `gallery_contracts::library_browse_accepts_every_wall_sort_key`：`500 {"error":{"code":"store.error","message":"Invalid column type Text at index: 23, name: release_date_sort"}}` —— 本轮 `485e36f` 把该排序键误声明为 `KeyKind::Int`，属本轮回归；`f815b21` 改回 `KeyKind::Text` 后 `api --test management -- gallery_contracts::` 7 passed、`store --test library_query_v1` 5 passed。
+   - 其余 8 条（`library_configuration::libraries_patch_replaces_roots_and_renames`、`library_gaps::path_reconciliation_and_root_consolidation`、`library_sidecar_cancellation::frozen_library_rejects_organize_reidentify_and_sidecar_refresh`、`playback_movie_units` 5 条）是合并点前既有合同（`fd955ae` 的 202/409 契约、`b675940` 的电影坐标拒绝）与陈旧测试之间的差异：`git diff --stat 6abf493..HEAD -- crates/api/src/http/library_config.rs crates/api/src/http/playback/session.rs` 为空，证明生产侧本轮未改这两处。
+2. 第二次（第二批修复后，含 `to_media` 修正）：`/tmp/cmsmoke/workspace_final2.log` 末尾 `WORKSPACE_EXIT=0`，317 个测试目标全部 `0 failed`，`management` 573 passed / 0 failed / 1 ignored，汇总 2375 passed。
+3. 第三次（最终冻结树，含 `f815b21`、第二批修复与根归并测试拆分）：`/tmp/cmsmoke/workspace_final3.log` 末尾 `WORKSPACE_EXIT=0`（333 个测试目标全部 0 failed，汇总 2376 passed；`management` 574 passed / 0 failed / 1 ignored，32.31s）。
+4. 判定口径：只采信日志文件内的 `WORKSPACE_EXIT=` 行，包装进程的状态码不作为证据。
+
+## 8. 释放模式性能门与结论（Task 18–20，2026-10-21）
+
+`cargo test --release` 实测（日志 `/tmp/cmsmoke/release_perf.log`，退出码 0）：
+
+| 命令 | 实测 |
+|---|---|
+| `cargo test -p store --release --test storage_work_bounds` | 2 passed / 0 failed（0.70s），含 `unrelated_library_growth_does_not_expand_seek_work`：`fullscan_steps=0`、`vm_steps ≤ 2× baseline` |
+| `cargo test -p api --release --test storage_query_scale` | 1 passed / 0 failed（0.06s） |
+| `cargo test -p api --release --test storage_contention` | 1 passed / 0 failed（0.06s），`unrelated_user_growth_does_not_expand_heartbeat_write_scope` |
+| `cargo test -p store --release --test data_retention` | 11 passed / 0 failed |
+| `cargo test -p api --release --test data_retention_control` | 9 passed / 0 failed |
+| `cargo test -p api --release --test maintenance_runtime` | 14 passed / 0 failed（0.40s） |
+
+### 8.1 结论：Task 18/19/20 本轮无代码改动（有证据的“无变化”）
+
+- Task 18：计划 Step 2 期望的“深游标工作量随无关增长扩张”在本轮工作负载上没有出现，`fullscan_steps=0` 且 `vm_steps ≤ 2× baseline`，故按计划 Step 3 记录**无变化**，不改查询/索引形状；该断言保留为回归门。
+- Task 19：`unrelated_user_growth_does_not_expand_heartbeat_write_scope` 在 release 下通过，写事务范围未随无关用户增长扩张，故**无变化**。
+- Task 20：未删除任何索引。抽查候选中每个都有活消费者（如 `sites.enabled`、`playback_session_ids.issued_at`、`playback_logs.ended_at`、`fingerprint_samples.captured_job_id`、`fingerprint_model_members.sample_id` 均在 `.rs` 查询路径被引用）；计划 Step 3 要求“无消费者且有通过的读写对照”才可删，两个条件都不成立，故**无变化**。全部 63 条索引的逐条消费者审计未做（Not run）。
+
+### 8.2 边界
+
+上述 release 运行的数据规模为 50 与 500 行量级、单机单进程，**不是**性能基准：没有延迟分位、没有 10 万/100 万条目、没有真机 NAS 并发与 WAL/空间对照。因此本节不构成“性能达标”结论。
