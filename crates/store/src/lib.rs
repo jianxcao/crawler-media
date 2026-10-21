@@ -2,12 +2,12 @@
 //! Backed by 4 SQLite files in the data directory.
 
 mod app_write;
-mod instance_lock;
-mod pending_file_deletions;
-mod pending_progress;
 mod browse_reads;
 mod catalog;
 mod chapter_frame_tasks;
+mod instance_lock;
+mod pending_file_deletions;
+mod pending_progress;
 pub use chapter_frame_tasks::{ChapterFrameTask, ChapterFrameTaskCounts};
 mod collections;
 mod data_retention;
@@ -18,50 +18,51 @@ mod fingerprint_models;
 mod fingerprint_samples;
 mod ledger;
 mod ledger_cleanup;
-mod ledger_quality;
 mod ledger_presence;
+mod ledger_quality;
 pub use ledger_presence::{
     FilePresence, LedgerPresenceMode, LedgerPresenceObservation, LedgerPresenceResult,
 };
 mod libraries;
 mod library_stats;
 pub use library_stats::LibraryRosterStats;
-mod library;
 pub mod files;
-pub mod library_write;
-pub mod library_query;
+mod library;
 mod library_covers;
 mod library_deletion;
+pub mod library_query;
+pub mod library_write;
 pub use library_deletion::LibraryRemoval;
 mod library_ownership;
 mod library_paths;
 mod library_scope;
 pub use library_scope::{LibraryPathResolver, LibraryPathScope, StrictOwner};
 mod subscribe_library_snapshot;
-pub use subscribe_library_snapshot::SubscribeLibrarySnapshot;
 pub use pending_file_deletions::{MAX_FILE_DELETION_ATTEMPTS, QueuedFileDeletion, file_identity};
+pub use subscribe_library_snapshot::SubscribeLibrarySnapshot;
 mod subscribe_library;
 pub use subscribe_library::evaluate_subscribe_facts_pure;
 mod maps;
 mod media;
+mod media_operations;
 pub mod metadata;
 mod open;
 pub mod playback;
 mod playback_devices;
-mod probe_tasks;
 mod probe_dispatch;
+mod probe_tasks;
 pub use probe_dispatch::{ProbeDispatchId, ProbeDispatchSnapshot, ProbeDispatchStage};
-mod roots;
 pub mod library_operations;
+mod roots;
 pub use library_operations::LibraryReconfiguration;
-pub mod schema;
-mod scanned_ledger;
-mod scan_probe_obligations;
 mod scan_operations;
+mod scan_probe_obligations;
 mod scan_seen;
+mod scanned_ledger;
+pub mod schema;
 pub use scan_operations::{ScanOperation, ScanOperationStatus};
-pub use scan_probe_obligations::{MAX_SCAN_BATCH, ScanProbeObligation};
 pub use scan_probe_obligations::ScannedLedger;
+pub use scan_probe_obligations::{MAX_SCAN_BATCH, ScanProbeObligation};
 mod search_history;
 pub use search_history::{HistoryDeleteOutcome, HistoryDeletePlan};
 mod sites;
@@ -74,7 +75,6 @@ pub mod probe_state;
 
 pub use browse_reads::PlaybackUnitSnapshot;
 mod read_freshness;
-pub use read_freshness::{FileReadRevision, ReadFingerprint};
 pub use catalog::CatalogCacheRow;
 pub use data_retention::{DataRetentionBatch, DataRetentionCursor, RetentionClass};
 pub use downloaders::DownloaderRow;
@@ -87,14 +87,16 @@ pub use library::{MarkerResultReplacement, StoredMediaMarker};
 pub use library_ownership::LibraryOwnership;
 pub use playback::{
     PlayLogRow, PlaySessionBinding, PlaySessionIdState, PlaybackLogPage, PlaybackLogScope,
-    PlaybackRetentionBatch, PlaybackRetentionPreview, ResumeStatus, ResolvedResume, SessionRow,
-    UNIT_WHOLE, UnitRow, UnitState, UserLibrarySummary, WatchClient, WatchDay, WatchMedia, WatchMember, WatchReport,
-    WatchTotals, WatchWindow,
+    PlaybackRetentionBatch, PlaybackRetentionPreview, ResolvedResume, ResumeStatus, SessionRow,
+    UNIT_WHOLE, UnitRow, UnitState, UserLibrarySummary, WatchClient, WatchDay, WatchMedia,
+    WatchMember, WatchReport, WatchTotals, WatchWindow,
 };
 pub use probe_state::{
-    retry_delay_ms, ProbeStage, ProbeStageCompletion, ProbeStageKey, ProbeStageState, ProbeStageStatus,
+    ProbeStage, ProbeStageCompletion, ProbeStageKey, ProbeStageState, ProbeStageStatus,
+    retry_delay_ms,
 };
 pub use probe_tasks::{ProbeJob, ProbeJobUnit, ProbeJobUnitSpec};
+pub use read_freshness::{FileReadRevision, ReadFingerprint};
 pub use roots::LibraryRoot;
 pub use subscribe_wanted::WantedHistory;
 pub use subscribes::PendingDownload;
@@ -222,27 +224,32 @@ impl Store {
     /// Incremented beside that statement, so filtering the returned rows cannot
     /// hide the scan. `ledger_for_media` does not increment it.
     pub fn root_ledger_scans(&self) -> usize {
-        self.root_ledger_scans.load(std::sync::atomic::Ordering::Relaxed)
+        self.root_ledger_scans
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn reset_root_ledger_scans(&self) {
-        self.root_ledger_scans.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.root_ledger_scans
+            .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Times `ledger_for_media` executed its indexed read.
     pub fn media_ledger_reads(&self) -> usize {
-        self.media_ledger_reads.load(std::sync::atomic::Ordering::Relaxed)
+        self.media_ledger_reads
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn reset_media_ledger_reads(&self) {
-        self.media_ledger_reads.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.media_ledger_reads
+            .store(0, std::sync::atomic::Ordering::Relaxed);
     }
     pub fn role_lookups(&self) -> usize {
         self.role_lookups.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn reset_role_lookups(&self) {
-        self.role_lookups.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.role_lookups
+            .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn cache_db_path(&self) -> PathBuf {

@@ -1,4 +1,4 @@
-//! Canonical Media identity merge (design §4.6).
+//! Canonical Media identity merge apply phases (design §4.6).
 //!
 //! The merge runs in persisted phases recorded on the `media_operations` row:
 //!
@@ -20,9 +20,11 @@ use std::collections::BTreeMap;
 use domain::{LibraryId, MediaId};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::merge_facts::{merge_collection_items, merge_metadata, merge_playback_units};
-use super::types::{MediaMergeRequest, OperationStatus};
+use super::references::{
+    merge_collection_items, merge_metadata, merge_playback_units, merge_watch_facts,
+};
 use crate::library_write::reduce::reduce_library_media;
+use crate::playback::types::{MediaMergeRequest, OperationStatus};
 use crate::{Store, StoreError};
 
 const PHASE_INIT: &str = "init";
@@ -31,6 +33,46 @@ const PHASE_RETIRE: &str = "retire";
 const PHASE_COMPLETE: &str = "complete";
 
 impl Store {
+    /// Read-only status of one merge operation, so an HTTP caller can poll a
+    /// merge it started without driving it forward.
+    pub fn media_operation_status(
+        &self,
+        operation_id: &str,
+    ) -> Result<OperationStatus, StoreError> {
+        let row: Option<(String, Option<String>, Option<String>)> = self
+            .library
+            .query_row(
+                "SELECT state, phase_cursor, error FROM media_operations
+                 WHERE operation_id = ?1 AND kind = 'merge'",
+                params![operation_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((state, cursor, error)) = row else {
+            return Err(StoreError::Missing(format!(
+                "merge operation {operation_id}"
+            )));
+        };
+        Ok(operation_status(
+            operation_id,
+            cursor.as_deref().unwrap_or(PHASE_INIT),
+            &state,
+            error,
+        ))
+    }
+
+    /// Merge operations that still need driving, oldest first. The runtime
+    /// resumes these after a restart; frozen identities stay resumable.
+    pub fn unfinished_media_merges(&self) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self.library.prepare(
+            "SELECT operation_id FROM media_operations
+             WHERE kind = 'merge' AND state NOT IN ('succeeded', 'failed')
+             ORDER BY created_at_ms ASC, operation_id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Drive one merge operation forward through its persisted phases.
     pub(crate) fn advance_merge_operation(
         &self,
@@ -56,7 +98,12 @@ impl Store {
         self.ensure_survivor_accepts_merge(operation_id, survivor, &survivor_str)?;
 
         if state == "succeeded" {
-            return Ok(operation_status(operation_id, PHASE_COMPLETE, "succeeded", None));
+            return Ok(operation_status(
+                operation_id,
+                PHASE_COMPLETE,
+                "succeeded",
+                None,
+            ));
         }
 
         let loser_str = loser_str.ok_or_else(|| {
@@ -67,6 +114,7 @@ impl Store {
             return Err(StoreError::Invalid("cannot merge media with itself".into()));
         }
         let request: MediaMergeRequest = serde_json::from_str(&plan_json)?;
+        let frozen = crate::media_operations::frozen_of_plan(&plan_json)?;
         let mut phase = phase_cursor.unwrap_or_else(|| PHASE_INIT.to_string());
 
         // Each phase persists its successor before returning, so a crash at any
@@ -80,7 +128,7 @@ impl Store {
                     self.merge_subscribe_phase(operation_id, survivor, loser, now_ms)
                 }
                 PHASE_RETIRE => {
-                    break self.merge_retire_phase(operation_id, survivor, loser, now_ms);
+                    break self.merge_retire_phase(operation_id, survivor, loser, &frozen, now_ms);
                 }
                 PHASE_COMPLETE => break Ok(()),
                 other => {
@@ -125,7 +173,11 @@ impl Store {
         }
     }
 
-    /// A frozen (`merging`) or already retired survivor must not take new work.
+    /// A retired survivor can never take work, and a freeze belongs to exactly
+    /// one operation: only the operation named by the freeze may continue, any
+    /// other merge is refused. A freeze with no unfinished owner is stale (its
+    /// operation was marked failed), so it is taken over instead of wedging the
+    /// Media forever.
     fn ensure_survivor_accepts_merge(
         &self,
         operation_id: &str,
@@ -141,9 +193,18 @@ impl Store {
             )
             .optional()?;
         match identity.as_deref() {
-            Some(state @ ("merging" | "retired")) => Err(StoreError::Protected(format!(
-                "merge operation {operation_id}: survivor {survivor} is {state}"
+            Some("retired") => Err(StoreError::Protected(format!(
+                "merge operation {operation_id}: survivor {survivor} is retired"
             ))),
+            Some("merging") => {
+                match crate::media_operations::merge_holder(&self.library, survivor_str)? {
+                    Some(holder) if holder == operation_id => Ok(()),
+                    Some(holder) => Err(StoreError::Protected(format!(
+                        "merge operation {operation_id}: survivor {survivor} is frozen by merge operation {holder}"
+                    ))),
+                    None => Ok(()),
+                }
+            }
             Some(_) => Ok(()),
             None => Err(StoreError::Missing(format!(
                 "merge survivor media {survivor}"
@@ -188,9 +249,11 @@ impl Store {
         move_aliases(&tx, survivor, loser, &request.refresh_targets)?;
         let libraries = affected_libraries(&tx, survivor, loser)?;
         move_files(&tx, survivor, loser)?;
+        move_nfo_inputs(&tx, survivor, loser)?;
         merge_metadata(&tx, survivor, loser)?;
         merge_playback_units(&tx, survivor, loser)?;
         merge_collection_items(&tx, survivor, loser)?;
+        merge_watch_facts(&tx, survivor, loser)?;
         for library in &libraries {
             let library_id: LibraryId = library.parse()?;
             reduce_library_media(&tx, library_id, survivor)?;
@@ -249,12 +312,14 @@ impl Store {
     }
 
     /// Phase 3: close the operation with the loser's tombstone. The loser must
-    /// already have no rows left in `library.db`.
+    /// already have no rows left in `library.db`. The survivor is unfrozen only
+    /// here, restoring the identity state it had before the preflight froze it.
     fn merge_retire_phase(
         &self,
         operation_id: &str,
         survivor: MediaId,
         loser: MediaId,
+        frozen: &crate::media_operations::FrozenPair,
         now_ms: i64,
     ) -> Result<(), StoreError> {
         let tx = self.library.unchecked_transaction()?;
@@ -264,6 +329,13 @@ impl Store {
              WHERE media_id = ?2",
             params![survivor.to_string(), loser.to_string()],
         )?;
+        if !frozen.survivor_before.is_empty() {
+            tx.execute(
+                "UPDATE media SET identity_state = ?2
+                 WHERE media_id = ?1 AND identity_state = 'merging'",
+                params![survivor.to_string(), frozen.survivor_before],
+            )?;
+        }
         tx.execute(
             "UPDATE media_operations
              SET state = 'succeeded', phase_cursor = ?2, error = NULL, updated_at_ms = ?3
@@ -315,12 +387,45 @@ fn affected_libraries(
     Ok(rows)
 }
 
+/// Adopt the loser's NFO/export inputs. The survivor's own observation of a
+/// sidecar is authoritative: when both sides hold the same key the loser's row is
+/// dropped rather than overwriting the survivor's export. Runs before the summary
+/// reduction so the adopted inputs are pruned against the merged file set.
+fn move_nfo_inputs(tx: &Connection, survivor: MediaId, loser: MediaId) -> Result<(), StoreError> {
+    tx.execute(
+        "DELETE FROM library_metadata_inputs
+          WHERE media_id = ?1
+            AND EXISTS (
+                SELECT 1 FROM library_metadata_inputs AS keep
+                 WHERE keep.media_id = ?2
+                   AND keep.library_id = library_metadata_inputs.library_id
+                   AND keep.entity_scope = library_metadata_inputs.entity_scope
+                   AND keep.season = library_metadata_inputs.season
+                   AND keep.episode = library_metadata_inputs.episode
+                   AND keep.locale = library_metadata_inputs.locale
+                   AND keep.input_key = library_metadata_inputs.input_key
+            )",
+        params![loser.to_string(), survivor.to_string()],
+    )?;
+    tx.execute(
+        "UPDATE library_metadata_inputs SET media_id = ?1 WHERE media_id = ?2",
+        params![survivor.to_string(), loser.to_string()],
+    )?;
+    Ok(())
+}
+
 /// Move the loser's files and coverage, dropping its derived summaries first so
 /// no `preferred_file_id` points at a row whose owner just changed.
 fn move_files(tx: &Connection, survivor: MediaId, loser: MediaId) -> Result<(), StoreError> {
     let (survivor, loser) = (survivor.to_string(), loser.to_string());
-    tx.execute("DELETE FROM library_units WHERE media_id = ?1", params![loser])?;
-    tx.execute("DELETE FROM library_items WHERE media_id = ?1", params![loser])?;
+    tx.execute(
+        "DELETE FROM library_units WHERE media_id = ?1",
+        params![loser],
+    )?;
+    tx.execute(
+        "DELETE FROM library_items WHERE media_id = ?1",
+        params![loser],
+    )?;
     tx.execute(
         "UPDATE library_files SET media_id = ?1 WHERE media_id = ?2",
         params![survivor, loser],
@@ -334,13 +439,46 @@ fn move_files(tx: &Connection, survivor: MediaId, loser: MediaId) -> Result<(), 
 
 /// Move the loser's aliases onto the survivor while keeping exactly one refresh
 /// target per `(media, source, kind)`. A conflict between two refresh targets is
-/// resolved only by the request; otherwise the merge is refused.
+/// resolved only by the request, which the preflight has already validated;
+/// re-deciding it here keeps the phase safe to re-run after a crash.
 fn move_aliases(
     tx: &Connection,
     survivor: MediaId,
     loser: MediaId,
     refresh_targets: &BTreeMap<String, String>,
 ) -> Result<(), StoreError> {
+    for conflict in crate::media_operations::refresh_target_conflicts(tx, survivor, loser)? {
+        match refresh_targets.get(&conflict.source) {
+            Some(chosen) if *chosen == conflict.survivor_external => {
+                tx.execute(
+                    "UPDATE media_aliases SET is_refresh_target = 0
+                     WHERE source = ?1 AND kind = ?2 AND external_id = ?3",
+                    params![conflict.source, conflict.kind, conflict.loser_external],
+                )?;
+            }
+            Some(chosen) if *chosen == conflict.loser_external => {
+                tx.execute(
+                    "UPDATE media_aliases SET is_refresh_target = 0
+                     WHERE media_id = ?1 AND source = ?2 AND kind = ?3
+                       AND is_refresh_target = 1",
+                    params![survivor.to_string(), conflict.source, conflict.kind],
+                )?;
+            }
+            Some(chosen) => {
+                return Err(StoreError::Protected(format!(
+                    "refresh_targets[{}] = {chosen} is neither {} nor {}",
+                    conflict.source, conflict.survivor_external, conflict.loser_external
+                )));
+            }
+            None => {
+                return Err(StoreError::Protected(format!(
+                    "merge requires refresh_targets[{}] to choose between {} and {}",
+                    conflict.source, conflict.survivor_external, conflict.loser_external
+                )));
+            }
+        }
+    }
+
     let mut stmt = tx.prepare(
         "SELECT source, kind, external_id, is_refresh_target
          FROM media_aliases WHERE media_id = ?1",
@@ -357,30 +495,7 @@ fn move_aliases(
         .collect::<Result<Vec<_>, _>>()?;
     drop(stmt);
 
-    for (source, kind, external_id, is_target) in rows {
-        if is_target == 1 {
-            let survivor_target: Option<String> = tx
-                .query_row(
-                    "SELECT external_id FROM media_aliases
-                     WHERE media_id = ?1 AND source = ?2 AND kind = ?3 AND is_refresh_target = 1",
-                    params![survivor.to_string(), source, kind],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if let Some(existing) = survivor_target {
-                if existing != external_id {
-                    resolve_refresh_target(
-                        tx,
-                        survivor,
-                        &source,
-                        &kind,
-                        &existing,
-                        &external_id,
-                        refresh_targets,
-                    )?;
-                }
-            }
-        }
+    for (source, kind, external_id, _is_target) in rows {
         tx.execute(
             "UPDATE media_aliases SET media_id = ?1
              WHERE source = ?2 AND kind = ?3 AND external_id = ?4",
@@ -388,41 +503,6 @@ fn move_aliases(
         )?;
     }
     Ok(())
-}
-
-fn resolve_refresh_target(
-    tx: &Connection,
-    survivor: MediaId,
-    source: &str,
-    kind: &str,
-    survivor_external: &str,
-    loser_external: &str,
-    refresh_targets: &BTreeMap<String, String>,
-) -> Result<(), StoreError> {
-    let chosen = refresh_targets.get(source).ok_or_else(|| {
-        StoreError::Protected(format!(
-            "merge requires refresh_targets[{source}] to choose between {survivor_external} and {loser_external}"
-        ))
-    })?;
-    if chosen == survivor_external {
-        tx.execute(
-            "UPDATE media_aliases SET is_refresh_target = 0
-             WHERE source = ?1 AND kind = ?2 AND external_id = ?3",
-            params![source, kind, loser_external],
-        )?;
-        Ok(())
-    } else if chosen == loser_external {
-        tx.execute(
-            "UPDATE media_aliases SET is_refresh_target = 0
-             WHERE media_id = ?1 AND source = ?2 AND kind = ?3 AND is_refresh_target = 1",
-            params![survivor.to_string(), source, kind],
-        )?;
-        Ok(())
-    } else {
-        Err(StoreError::Protected(format!(
-            "refresh_targets[{source}] = {chosen} is neither {survivor_external} nor {loser_external}"
-        )))
-    }
 }
 
 /// The retired tombstone is only written once every mergeable reference has
@@ -434,6 +514,7 @@ fn ensure_loser_has_no_references(tx: &Connection, loser: MediaId) -> Result<(),
         "library_file_units",
         "library_units",
         "library_items",
+        "library_metadata_inputs",
         "media_aliases",
         "media_metadata",
         "media_metadata_sources",
@@ -442,6 +523,11 @@ fn ensure_loser_has_no_references(tx: &Connection, loser: MediaId) -> Result<(),
         "media_episodes",
         "playback_units",
         "collection_items",
+        "media_markers",
+        "fingerprint_season_models",
+        "probe_season_comparison_history",
+        "library_item_terms",
+        "user_library_items",
     ];
     let mut leftover = Vec::new();
     for table in tables {

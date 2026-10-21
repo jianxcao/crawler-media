@@ -3,13 +3,13 @@ use domain::{
 };
 use rusqlite::{OptionalExtension, params};
 
+use super::super::{Store, StoreError};
 use super::source::PlaybackSource;
-use super::user_summary::SummaryScope;
 use super::types::{
     BoundPlaybackEvent, EventOutcome, PlaybackMutation, PlaybackTarget, ResolvedResume,
     ResumeStatus,
 };
-use super::super::{Store, StoreError};
+use super::user_summary::SummaryScope;
 
 /// Resume facts stored on `playback_units`, with the source binding they were
 /// written against.
@@ -88,20 +88,36 @@ impl Store {
         let (media_id, unit) = playback_unit(item);
         let allowed = self.authorized_library_ids(user)?;
         let stored = self.stored_resume(user, media_id, unit)?;
-        let resume_preferred = stored.as_ref().and_then(|s| s.binding.as_ref()).and_then(|b| {
-            let file_id = b.file_id.parse::<domain::LedgerId>().ok()?;
-            Some(PhysicalSourceId { file_id, revision: b.revision })
-        });
+        let resume_preferred = stored
+            .as_ref()
+            .and_then(|s| s.binding.as_ref())
+            .and_then(|b| {
+                let file_id = b.file_id.parse::<domain::LedgerId>().ok()?;
+                Some(PhysicalSourceId {
+                    file_id,
+                    revision: b.revision,
+                })
+            });
         let source = if let Some(pref) = preferred_source {
             self.best_source_for_unit(&allowed, media_id, unit, Some(pref))?
         } else if let Some(resume_pref) = &resume_preferred {
             self.best_source_for_unit(&allowed, media_id, unit, Some(resume_pref))?
-                .or_else(|| self.best_source_for_unit(&allowed, media_id, unit, None).ok().flatten())
+                .or_else(|| {
+                    self.best_source_for_unit(&allowed, media_id, unit, None)
+                        .ok()
+                        .flatten()
+                })
         } else {
             self.best_source_for_unit(&allowed, media_id, unit, None)?
         }
         .ok_or_else(|| StoreError::Missing(format!("no playable source for unit {unit:?}")))?;
-        Ok(resolve_resume(media_id, unit, source, stored, explicit_start_ms))
+        Ok(resolve_resume(
+            media_id,
+            unit,
+            source,
+            stored,
+            explicit_start_ms,
+        ))
     }
     /// Resume facts for one watch unit; `None` when the user never played it.
     fn stored_resume(
@@ -299,15 +315,18 @@ impl Store {
                      -- A mark is a decision, not viewing: it must not move the activity clock.
                      watch_activity_at = playback_units.watch_activity_at";
 
-        tx.execute(sql, params![
-            user_id_str,
-            media_id_str,
-            season,
-            episode,
-            played_val,
-            now_ms,
-            fav_val,
-        ])?;
+        tx.execute(
+            sql,
+            params![
+                user_id_str,
+                media_id_str,
+                season,
+                episode,
+                played_val,
+                now_ms,
+                fav_val,
+            ],
+        )?;
 
         self.refresh_user_library_summary(
             change.user_id,
@@ -319,47 +338,16 @@ impl Store {
         Ok(())
     }
 
+    /// Accept or replay a merge request. The canonical operation id, the pinned
+    /// revisions, the lock conflict, the refresh-target decisions and the freeze
+    /// of both sides are settled by [`crate::media_operations`] before this
+    /// returns, so a refused request has written nothing.
     pub fn begin_media_merge(
         &self,
         request: &super::types::MediaMergeRequest,
         now_ms: i64,
     ) -> Result<String, StoreError> {
-        if request.survivor == request.loser {
-            return Err(StoreError::Invalid("cannot merge media with itself".into()));
-        }
-        let tx = self.library.unchecked_transaction()?;
-        let plan_json = serde_json::to_string(request)?;
-
-        // Idempotency: check if an operation already exists for this request_id
-        let existing_op: Option<String> = tx
-            .query_row(
-                "SELECT operation_id FROM media_operations WHERE json_extract(plan_json, '$.request_id') = ?1",
-                params![request.request_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-
-        if let Some(op_id) = existing_op {
-            return Ok(op_id);
-        }
-
-        let op_id = format!("op_merge_{}", uuid::Uuid::new_v4().simple());
-        tx.execute(
-            "INSERT INTO media_operations
-                (operation_id, kind, state, survivor_id, loser_id, plan_json, phase_cursor, error, created_at_ms, updated_at_ms)
-             VALUES
-                (?1, 'merge', 'planned', ?2, ?3, ?4, 'init', NULL, ?5, ?5)",
-            params![
-                op_id,
-                request.survivor.to_string(),
-                request.loser.to_string(),
-                plan_json,
-                now_ms,
-            ],
-        )?;
-
-        tx.commit()?;
-        Ok(op_id)
+        self.begin_merge(request, now_ms)
     }
 
     pub fn advance_media_merge(

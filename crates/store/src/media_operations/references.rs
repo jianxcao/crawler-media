@@ -4,7 +4,8 @@
 //! rows, so re-running a phase after a crash cannot duplicate or double-count.
 
 use domain::MediaId;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::types::Value as SqlValue;
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use serde_json::{Map, Value};
 
 use crate::StoreError;
@@ -39,9 +40,8 @@ fn load_adopted(
     media: MediaId,
     locale: &str,
 ) -> Result<Option<AdoptedRow>, StoreError> {
-    let sql = format!(
-        "SELECT {ADOPTED_COLUMNS} FROM media_metadata WHERE media_id = ?1 AND locale = ?2"
-    );
+    let sql =
+        format!("SELECT {ADOPTED_COLUMNS} FROM media_metadata WHERE media_id = ?1 AND locale = ?2");
     tx.query_row(&sql, params![media.to_string(), locale], |r| {
         Ok(AdoptedRow {
             locale: r.get(0)?,
@@ -447,6 +447,101 @@ pub(super) fn merge_playback_units(
                 )?;
             }
         }
+    }
+    Ok(())
+}
+
+/// Media-scoped watch facts that no file move can carry: timeline markers, the
+/// fingerprint season models built from the films' samples, and the season
+/// comparison history. They follow the identity, so the retired loser keeps none
+/// of them; for a key the survivor already holds, the survivor's own row wins.
+pub(super) fn merge_watch_facts(
+    tx: &Connection,
+    survivor: MediaId,
+    loser: MediaId,
+) -> Result<(), StoreError> {
+    move_scoped_rows(tx, "media_markers", &["season", "episode"], survivor, loser)?;
+    move_scoped_rows(
+        tx,
+        "fingerprint_season_models",
+        &["season", "kind"],
+        survivor,
+        loser,
+    )?;
+    move_scoped_rows(
+        tx,
+        "probe_season_comparison_history",
+        &["season"],
+        survivor,
+        loser,
+    )?;
+    Ok(())
+}
+
+/// Re-point the loser's rows of one media-scoped table onto the survivor. `key`
+/// names the table's remaining key columns: for a key the survivor already holds
+/// its own row wins and the loser's duplicate is dropped, so the loser is left
+/// with no row at all.
+fn move_scoped_rows(
+    tx: &Connection,
+    table: &str,
+    key: &[&str],
+    survivor: MediaId,
+    loser: MediaId,
+) -> Result<(), StoreError> {
+    let rows: Vec<Vec<SqlValue>> = {
+        let sql = format!("SELECT {} FROM {table} WHERE media_id = ?1", key.join(", "));
+        let mut stmt = tx.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params![loser.to_string()], |r| {
+                (0..key.len()).map(|i| r.get::<_, SqlValue>(i)).collect()
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    let predicate = |offset: usize| {
+        key.iter()
+            .enumerate()
+            .map(|(i, column)| format!("{column} IS ?{}", i + offset))
+            .collect::<Vec<_>>()
+            .join(" AND ")
+    };
+    for row in rows {
+        let mut owned = vec![SqlValue::Text(survivor.to_string())];
+        owned.extend(row.iter().cloned());
+        let survivor_has_it: Option<i64> = tx
+            .query_row(
+                &format!(
+                    "SELECT 1 FROM {table} WHERE media_id = ?1 AND {}",
+                    predicate(2)
+                ),
+                params_from_iter(owned),
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        let mut gone = vec![
+            SqlValue::Text(survivor.to_string()),
+            SqlValue::Text(loser.to_string()),
+        ];
+        gone.extend(row.iter().cloned());
+        if survivor_has_it.is_some() {
+            tx.execute(
+                &format!(
+                    "DELETE FROM {table} WHERE media_id = ?2 AND {}",
+                    predicate(3)
+                ),
+                params_from_iter(gone),
+            )?;
+            continue;
+        }
+        tx.execute(
+            &format!(
+                "UPDATE {table} SET media_id = ?1 WHERE media_id = ?2 AND {}",
+                predicate(3)
+            ),
+            params_from_iter(gone),
+        )?;
     }
     Ok(())
 }

@@ -10,8 +10,6 @@ use super::{Store, StoreError};
 
 pub mod session_ids;
 pub use session_ids::{PlaySessionBinding, PlaySessionIdState};
-pub mod merge;
-mod merge_facts;
 mod assertions;
 mod event;
 pub mod mutate;
