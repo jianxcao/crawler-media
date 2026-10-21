@@ -48,6 +48,12 @@ pub fn run(state: &ApiState, payload: &str) -> Result<(), String> {
         .lock()
         .update_media_identity(rev, &updated)
         .map_err(|e| e.to_string())?;
+
+    let meta_service = crate::metadata_service::MetadataService::new(std::sync::Arc::new(state.clone()));
+    if let Err(e) = meta_service.refresh_media_metadata(&updated, "zh-CN") {
+        tracing::warn!(media = %updated.title, error = %e, "刷新采纳元数据失败");
+    }
+
     Ok(())
 }
 

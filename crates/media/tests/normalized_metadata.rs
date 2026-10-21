@@ -115,3 +115,54 @@ fn missing_vs_empty_field_origin_contracts() {
     assert_eq!(norm.fields.overview, FieldValue::Missing);
     assert!(!norm.field_origins.contains_key("overview"));
 }
+
+#[test]
+fn complete_source_metadata_parses_all_fields_with_origins() {
+    let raw_payload = r#"{
+        "title": "Complete Movie",
+        "runtime": 100,
+        "vote_average": 8.5,
+        "vote_count": 1200,
+        "release_dates": {
+            "results": [
+                {
+                    "iso_3166_1": "US",
+                    "release_dates": [{"certification": "R"}]
+                }
+            ]
+        },
+        "production_countries": [
+            {"iso_3166_1": "US", "name": "United States"}
+        ],
+        "credits": {
+            "cast": [
+                {"name": "Actor A", "character": "Hero", "id": 123, "profile_path": "/thumb.jpg", "order": 0}
+            ]
+        }
+    }"#;
+    let pref = MetadataPreferences {
+        language_priority: vec!["en-US".into()],
+        cert_country_priority: vec!["US".into()],
+    };
+    let norm = normalize_metadata("tmdb", EntityScope::Work, raw_payload, &pref).unwrap();
+
+    assert_eq!(norm.fields.runtime_minutes.value(), Some(&100));
+    assert_eq!(norm.fields.rating.value(), Some(&8.5));
+    assert_eq!(norm.fields.vote_count.value(), Some(&1200));
+    assert_eq!(norm.fields.content_rating.value().map(String::as_str), Some("R"));
+    assert_eq!(norm.fields.countries.value().map(|c| c.as_slice()), Some(&["US".to_string()][..]));
+    let cast = norm.fields.cast.value().unwrap();
+    assert_eq!(cast.len(), 1);
+    assert_eq!(cast[0].name, "Actor A");
+    assert_eq!(cast[0].role.as_deref(), Some("Hero"));
+
+    assert_eq!(
+        norm.field_origins.get("content_rating").and_then(|o| o.certification_country.as_deref()),
+        Some("US")
+    );
+    assert!(norm.field_origins.contains_key("runtime_minutes"));
+    assert!(norm.field_origins.contains_key("rating"));
+    assert!(norm.field_origins.contains_key("countries"));
+    assert!(norm.field_origins.contains_key("cast"));
+}
+

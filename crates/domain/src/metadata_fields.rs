@@ -152,6 +152,32 @@ pub struct MetadataAdoption {
     pub preferences: MetadataPreferences,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldPresence {
+    Empty,
+    Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EffectiveFieldOrigin {
+    pub source: String,
+    pub provider_entity_id: String,
+    pub source_revision: i64,
+    pub origin_media_id: crate::MediaId,
+    pub presence: FieldPresence,
+    pub selection: SourceFieldOrigin,
+    pub pending_target_fallback: bool,
+    pub target_external_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ComposedMetadata {
+    pub fields: MetadataFields,
+    pub actual_locale: String,
+    pub field_origins: BTreeMap<String, EffectiveFieldOrigin>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MediaAlias {
     pub source: String,

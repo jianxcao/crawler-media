@@ -54,6 +54,7 @@ pub mod management;
 pub mod marker_resolver;
 pub mod media_posters;
 pub mod media_server_provider;
+pub mod metadata_service;
 pub(crate) mod pending_reconcile;
 pub(crate) mod probe_wait;
 pub mod playback_events;

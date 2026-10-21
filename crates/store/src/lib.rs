@@ -182,6 +182,8 @@ pub enum StoreError {
     Protected(String),
     #[error("credential conflict: {0}")]
     CredentialConflict(String),
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("password hashing error: {0}")]
     PasswordHash(String),
 }

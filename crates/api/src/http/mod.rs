@@ -647,6 +647,10 @@ fn admin_metadata_routes() -> Router<ApiState> {
             "/catalog/cache",
             delete(crate::catalog_cache::delete_catalog_cache),
         )
+        .route(
+            "/media/{id}/metadata-overrides",
+            put(media::put_metadata_overrides),
+        )
         .route("/fs/browse", get(fs::browse_fs))
         // ledger: 全局台账查看与删除是敏感文件操作，仅管理员可用
         .route("/ledger", get(library_admin::list_ledger))

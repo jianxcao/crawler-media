@@ -750,3 +750,40 @@ fn fetch_douban_celebrities(id: &str) -> Option<Value> {
     let body = response.into_body().read_to_string().ok()?;
     serde_json::from_str(&body).ok()
 }
+
+#[derive(Deserialize)]
+pub(crate) struct PutMetadataOverridesRequest {
+    pub scope: domain::EntityScope,
+    pub locale: String,
+    pub fields: domain::MetadataFields,
+    pub expected_revision: i64,
+}
+
+pub(crate) async fn put_metadata_overrides(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    axum::Json(payload): axum::Json<PutMetadataOverridesRequest>,
+) -> Response {
+    let Ok(media_id) = id.parse::<domain::MediaId>() else {
+        return err(StatusCode::BAD_REQUEST, "invalid_id", "Invalid media ID");
+    };
+
+    let result = state.store.lock().set_metadata_overrides(
+        media_id,
+        payload.scope,
+        &payload.locale,
+        &payload.fields,
+        payload.expected_revision,
+    );
+
+    match result {
+        Ok(rev) => ok(json!({ "revision": rev })).into_response(),
+        Err(store::StoreError::Conflict(msg)) => {
+            err(StatusCode::CONFLICT, "conflict", &msg)
+        }
+        Err(e) => {
+            err(StatusCode::INTERNAL_SERVER_ERROR, "store_error", &e.to_string())
+        }
+    }
+}
+

@@ -63,6 +63,93 @@ fn metadata_adoption_persists_source_snapshot_and_effective_row() {
     assert_eq!(effective.overview.as_deref(), Some("Adopted Overview"));
 }
 
+#[test]
+fn complete_source_metadata_survives_adoption_and_detail_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let root = tmp.path().join("movies");
+    std::fs::create_dir_all(&root).unwrap();
+    let library = store
+        .create_library(domain::MediaKind::Movie, "Movies", &[root.to_str().unwrap()], "everyone", true, &[])
+        .unwrap();
+
+    let media_id = domain::MediaId::new();
+    let m = domain::Media {
+        id: media_id,
+        kind: domain::MediaKind::Movie,
+        title: "Test Movie".into(),
+        year: Some(2023),
+        original_title: None,
+        aliases: vec![],
+        tmdb_id: Some("100".into()),
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&m).unwrap();
+
+    let raw_payload = r#"{
+        "title": "Complete Movie",
+        "runtime": 100,
+        "vote_average": 8.5,
+        "vote_count": 1200,
+        "release_dates": {
+            "results": [
+                {
+                    "iso_3166_1": "US",
+                    "release_dates": [{"certification": "R"}]
+                }
+            ]
+        },
+        "production_countries": [
+            {"iso_3166_1": "US", "name": "United States"}
+        ],
+        "credits": {
+            "cast": [
+                {"name": "Actor A", "character": "Hero", "id": 123, "profile_path": "/thumb.jpg", "order": 0}
+            ]
+        }
+    }"#;
+    let pref = MetadataPreferences {
+        language_priority: vec!["en-US".into()],
+        cert_country_priority: vec!["US".into()],
+    };
+    let normalized = media::normalize_metadata("tmdb", EntityScope::Work, raw_payload, &pref).unwrap();
+
+    let adoption = MetadataAdoption {
+        media_id: m.id,
+        scope: EntityScope::Work,
+        locale: "zh-CN".into(),
+        source: "tmdb".into(),
+        provider_entity_id: "100".into(),
+        provider_work_id: "100".into(),
+        fetched_at: 1000,
+        normalized,
+        expected_revision: None,
+        preferences: pref,
+    };
+
+    let rev = store.adopt_metadata(&adoption, 1000).expect("adopt_metadata");
+    assert!(rev >= 1);
+
+    let composed = store
+        .effective_metadata_fields(library.id.parse().unwrap(), m.id, EntityScope::Work, "zh-CN")
+        .expect("effective_metadata_fields");
+
+    assert_eq!(composed.fields.runtime_minutes.value(), Some(&100));
+    assert_eq!(composed.fields.rating.value(), Some(&8.5));
+    assert_eq!(composed.fields.content_rating.value().map(String::as_str), Some("R"));
+    assert_eq!(
+        composed
+            .field_origins
+            .get("content_rating")
+            .and_then(|o| o.selection.certification_country.as_deref()),
+        Some("US")
+    );
+}
+
+
 fn adoption(
     media: domain::MediaId,
     source: &str,

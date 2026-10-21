@@ -115,6 +115,15 @@ pub trait Catalog: Send + Sync {
         Ok(Vec::new())
     }
     fn details(&self, kind: MediaKind, tmdb_id: &str) -> Result<Option<Media>, String>;
+    fn normalized_metadata(
+        &self,
+        _kind: MediaKind,
+        _id: &str,
+        _scope: domain::EntityScope,
+        _preferences: &domain::MetadataPreferences,
+    ) -> Result<Option<domain::NormalizedMetadata>, String> {
+        Ok(None)
+    }
     fn poster_url(&self, kind: MediaKind, tmdb_id: &str) -> Result<Option<String>, String> {
         let _ = (kind, tmdb_id);
         Ok(None)

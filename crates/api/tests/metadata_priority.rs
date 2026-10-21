@@ -57,3 +57,37 @@ async fn new_metadata_waits_only_for_current_sample() {
     let wait_res2 = tokio::time::timeout(Duration::from_millis(50), gate.wait_before_capture()).await;
     assert!(wait_res2.is_ok(), "Gate should unblock after metadata finishes");
 }
+
+#[tokio::test]
+async fn metadata_overrides_endpoint_and_priority_resolution() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let media = domain::Media {
+        id: MediaId::new(),
+        kind: MediaKind::Movie,
+        title: "Test Movie".into(),
+        year: Some(2023),
+        original_title: None,
+        aliases: vec![],
+        tmdb_id: Some("100".into()),
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&media).unwrap();
+
+    let mut fields = domain::MetadataFields::default();
+    fields.title = domain::FieldValue::Value("Manual Title".into());
+    fields.overview = domain::FieldValue::Empty; // 手工Empty
+
+    let rev = store
+        .set_metadata_overrides(media.id, domain::EntityScope::Work, "zh-CN", &fields, 0)
+        .expect("set_metadata_overrides");
+    assert!(rev >= 1);
+
+    // Conflict test: wrong expected_revision should return conflict error
+    let conflict = store.set_metadata_overrides(media.id, domain::EntityScope::Work, "zh-CN", &fields, 0);
+    assert!(conflict.is_err(), "Expected 409 conflict when revision does not match");
+}
+

@@ -154,6 +154,9 @@ pub(crate) fn write_resolved_nfo(state: &ApiState, media: &Media, sample_path: &
     let Some(tmdb_id) = media.tmdb_id.as_deref() else {
         return;
     };
+    let meta_service = crate::metadata_service::MetadataService::new(std::sync::Arc::new(state.clone()));
+    let _ = meta_service.refresh_media_metadata(media, "zh-CN");
+
     if media.kind == MediaKind::Tv {
         let (rows, sample_row) = {
             let store = state.store.lock();
