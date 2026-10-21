@@ -21,7 +21,7 @@ usage() {
   --dry-run         只打印将要执行的动作，不改动文件
   --force           后端仍在运行、或无法确认布局时也继续
 
-动作: 停止服务后，把 <dir>/cache.db(含 -wal/-shm) 移入 <dir>/backup-cutover-<时间戳>/，
+动作: 停止服务后，把 <dir>/cache.db(含 -wal/-shm) 移入 <dir>/backups/cache-cutover-<时间戳>/，
       重启服务时 Store 以当前 DDL 重建 cache.db（application_id=1129139251, user_version=1）。
 回滚: 把 <dir>/backups/cache-cutover-<时间戳>/ 中的 cache.db(含 -wal/-shm) 移回 <dir>/。
 USAGE
@@ -57,12 +57,18 @@ fi
 
 NEEDS_REBUILD=1
 if command -v sqlite3 >/dev/null 2>&1; then
-  declared="'idx_tmdb_cache_retention','idx_douban_cache_retention','idx_tvdb_cache_retention','idx_bangumi_cache_retention','idx_anilist_cache_retention','idx_fanart_cache_retention'"
+  # 与 media::response_cache::CACHE_INDEXES 同为 12 条：6 张源表各 fetched/retention 一枚。
+  # 只查一族会误判（例如 retention 齐、fetched 缺时 Store 仍拒绝），故两族一起查。
+  declared=""
+  for table in tmdb douban tvdb bangumi anilist fanart; do
+    declared+="'idx_${table}_cache_fetched','idx_${table}_cache_retention',"
+  done
+  declared="${declared%,}"
   found=$(sqlite3 "$CACHE" "SELECT count(*) FROM sqlite_schema WHERE type='index' AND name IN ($declared);" 2>/dev/null || echo "0")
   app_id=$(sqlite3 "$CACHE" "PRAGMA application_id;" 2>/dev/null || echo "?")
   user_ver=$(sqlite3 "$CACHE" "PRAGMA user_version;" 2>/dev/null || echo "?")
-  echo "[..] $CACHE: application_id=$app_id user_version=$user_ver 已声明保留索引 $found/6"
-  if [[ "$found" == "6" && "$app_id" == "1129139251" && "$user_ver" == "1" ]]; then
+  echo "[..] $CACHE: application_id=$app_id user_version=$user_ver 已声明索引(fetched+retention) $found/12"
+  if [[ "$found" == "12" && "$app_id" == "1129139251" && "$user_ver" == "1" ]]; then
     NEEDS_REBUILD=0
   fi
 else
