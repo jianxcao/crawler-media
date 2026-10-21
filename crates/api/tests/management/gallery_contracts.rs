@@ -16,7 +16,7 @@ use serde_json::Value;
 use store::library_write::{FilePublication as StorePublication, WriteScope};
 use tower::ServiceExt;
 
-use super::common::{Fixtures, json_data, request, state};
+use super::common::{Fixtures, json_body, json_data, request, state};
 
 /// The seeded movie Library's real root (`<data>/library/movies`). The migrated
 /// schema resolves a file's Library by the longest matching `library_roots` row,
@@ -172,8 +172,10 @@ async fn fetch_gallery_json(app: &axum::Router, url: &str) -> Value {
         .oneshot(request("GET", url, Some("management-secret"), Value::Null))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    json_data(resp).await
+    let status = resp.status();
+    let body: Value = json_body(resp).await;
+    assert_eq!(status, StatusCode::OK, "{url} body={body}");
+    body.get("data").cloned().unwrap_or(Value::Null)
 }
 
 #[tokio::test]

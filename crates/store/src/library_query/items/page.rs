@@ -71,7 +71,7 @@ pub(crate) fn order_spec(query: &LibraryQuery) -> Vec<OrderTerm> {
     let (sort_expr, sort_desc, kind) = match query.order {
         BrowseOrder::Title => ("i.title_sort", query.descending, KeyKind::Text),
         BrowseOrder::AddedAt => ("i.added_at_sort", query.descending, KeyKind::Int),
-        BrowseOrder::ReleaseDate => ("i.release_date_sort", query.descending, KeyKind::Int),
+        BrowseOrder::ReleaseDate => ("i.release_date_sort", query.descending, KeyKind::Text),
         BrowseOrder::Rating => ("i.rating_sort", query.descending, KeyKind::Real),
         BrowseOrder::Runtime => ("i.runtime_sort", query.descending, KeyKind::Int),
         BrowseOrder::Size => ("i.size_sort", query.descending, KeyKind::Int),
