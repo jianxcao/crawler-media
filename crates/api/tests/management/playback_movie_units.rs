@@ -10,8 +10,8 @@ use tower::ServiceExt;
 async fn web_movie_zero_unit_keeps_resume_and_completed_marks() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, mut target) = fixture(&tmp, false);
-    target["season_number"] = json!(0);
-    target["episode_number"] = json!(0);
+    target.as_object_mut().unwrap().remove("season_number");
+    target.as_object_mut().unwrap().remove("episode_number");
     save_position(&app, &target).await;
     assert_eq!(
         post(&app, "decide", target.clone()).await.status(),
@@ -30,11 +30,11 @@ async fn web_movie_zero_unit_keeps_resume_and_completed_marks() {
 async fn frontend_resume_query_reads_saved_movie_progress() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, mut target) = fixture(&tmp, false);
-    target["season_number"] = json!(0);
-    target["episode_number"] = json!(0);
+    target.as_object_mut().unwrap().remove("season_number");
+    target.as_object_mut().unwrap().remove("episode_number");
     save_position(&app, &target).await;
     let uri = format!(
-        "/api/v1/playback/resume?media_item_id={}&season_number=0&episode_number=0",
+        "/api/v1/playback/resume?media_item_id={}",
         target["media_item_id"].as_str().unwrap()
     );
     let response = app
@@ -53,14 +53,14 @@ async fn frontend_resume_query_reads_saved_movie_progress() {
 async fn frontend_movie_marks_query_reads_saved_progress_as_played_state() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, mut target) = fixture(&tmp, false);
-    target["season_number"] = json!(0);
-    target["episode_number"] = json!(0);
+    target.as_object_mut().unwrap().remove("season_number");
+    target.as_object_mut().unwrap().remove("episode_number");
     save_position(&app, &target).await;
     let mut mark = target.clone();
     mark["played"] = json!(true);
     assert_eq!(post(&app, "marks", mark).await.status(), StatusCode::OK);
     let uri = format!(
-        "/api/v1/playback/marks?media_item_id={}&season_number=0&episode_number=0",
+        "/api/v1/playback/marks?media_item_id={}",
         target["media_item_id"].as_str().unwrap()
     );
     let response = app
@@ -79,7 +79,7 @@ async fn frontend_movie_marks_query_reads_saved_progress_as_played_state() {
         app.oneshot(request(
             "GET",
             &format!(
-                "/api/v1/playback/resume?media_item_id={}&season_number=0&episode_number=0",
+                "/api/v1/playback/resume?media_item_id={}",
                 target["media_item_id"].as_str().unwrap()
             ),
             Some("management-secret"),
@@ -275,11 +275,11 @@ async fn historical_movie_metadata_survives_first_canonical_progress() {
             1,
         )
         .unwrap();
-    target["season_number"] = json!(0);
-    target["episode_number"] = json!(0);
+    target.as_object_mut().unwrap().remove("season_number");
+    target.as_object_mut().unwrap().remove("episode_number");
     save_position(&app, &target).await;
     let uri = format!(
-        "/api/v1/playback/resume?media_item_id={}&season_number=0&episode_number=0",
+        "/api/v1/playback/resume?media_item_id={}",
         target["media_item_id"].as_str().unwrap()
     );
     let resume = json_data(
@@ -399,10 +399,44 @@ async fn tv_whole_mark_must_not_migrate_special_zero_progress() {
 async fn movie_nonzero_episode_is_not_an_alias_for_whole_movie() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, mut target) = fixture(&tmp, false);
+    let store = api::Store::open(tmp.path().join("data")).unwrap();
+    let media: domain::MediaId = target["media_item_id"].as_str().unwrap().parse().unwrap();
+    let user = store
+        .list_users()
+        .unwrap()
+        .into_iter()
+        .find(|u| u.role == domain::UserRole::Admin)
+        .unwrap()
+        .id;
+    store
+        .upsert_unit(
+            user, media, -1, -1, 600_000, Some(true), Some(true), Some(7_200_000), None, None, true,
+            1,
+        )
+        .unwrap();
     target["season_number"] = json!(0);
     target["episode_number"] = json!(1);
     assert_eq!(
         post(&app, "sessions", target).await.status(),
-        StatusCode::NOT_FOUND
+        StatusCode::BAD_REQUEST,
+        "a movie must reject episode coordinates instead of aliasing them onto the whole movie"
     );
+    let uri = format!("/api/v1/playback/resume?media_item_id={media}");
+    let resume = json_data(
+        app.oneshot(request(
+            "GET",
+            &uri,
+            Some("management-secret"),
+            serde_json::Value::Null,
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        resume["position_ms"], 600_000,
+        "the rejected (0,1) request must not overwrite the whole movie's saved progress"
+    );
+    assert_eq!(resume["played"], true);
+    assert_eq!(resume["play_count"], 1);
 }

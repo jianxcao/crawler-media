@@ -17,6 +17,7 @@ use crate::blocking_budget::BlockingError;
 use crate::http::library::{poster_path, preferred_row};
 use crate::http::title_ref::resolve_title;
 use crate::http::{err, ok};
+use crate::library_lifecycle::LibraryWorkLease;
 use crate::management::ApiState;
 
 /// Blocking-budget failure → HTTP response（上游/存储错误走各自原有路径）。
@@ -250,6 +251,40 @@ fn parse_file_targets(
     })
 }
 
+/// 冻结/删除中的 Library 必须拒绝重新识别：在任何目录读取、来源解析（catalog IO）
+/// 或台账写入之前取得目标 Library 的工作租约。
+///
+/// 这两条路由没有 `{id}` 捕获，Library 只能由文件反查；租约因此与
+/// `POST /libraries/{id}/organize` 共用同一套 `library_accepts_work` / 重配置冻结判定。
+fn acquire_file_leases(
+    state: &ApiState,
+    file_ids: &[LedgerId],
+) -> Result<Vec<LibraryWorkLease>, Response> {
+    let library_ids = {
+        let store = state.store.lock();
+        let mut ids: Vec<String> = Vec::new();
+        for file_id in file_ids {
+            if let Some((_, library_id)) = store.get_file_path_and_library(*file_id).ok().flatten()
+                && !ids.contains(&library_id)
+            {
+                ids.push(library_id);
+            }
+        }
+        ids
+    };
+    let mut leases = Vec::with_capacity(library_ids.len());
+    for library_id in &library_ids {
+        match state.acquire_library_work(library_id) {
+            Ok(lease) => leases.push(lease),
+            Err(error) => {
+                tracing::info!(%library_id, %error, "Library 冻结或删除中，拒绝重新识别写操作");
+                return Err(err(StatusCode::CONFLICT, "library.frozen", &error));
+            }
+        }
+    }
+    Ok(leases)
+}
+
 fn reidentify_inner(state: &ApiState, body: &Value) -> Response {
     let parsed = {
         let store = state.store.lock();
@@ -257,6 +292,13 @@ fn reidentify_inner(state: &ApiState, body: &Value) -> Response {
             Ok(p) => p,
             Err((status, code, msg)) => return err(status, code, &msg),
         }
+    };
+
+    // 冻结/删除中的 Library 只做拒绝，绝不做来源解析或目录 IO。
+    let file_ids: Vec<LedgerId> = parsed.files_to_reassign.iter().map(|(id, _)| *id).collect();
+    let _leases = match acquire_file_leases(state, &file_ids) {
+        Ok(leases) => leases,
+        Err(response) => return response,
     };
 
     let Some(title_ref) = body["title_ref"].as_str() else {
@@ -330,6 +372,20 @@ fn reidentify_inner(state: &ApiState, body: &Value) -> Response {
         }
     };
 
+    reassign_parsed_files(state, parsed, &target_media, &to_media)
+}
+
+/// 执行迁移并落别名与 sidecar 刷新副作用（失败不破坏已完成的迁移）。
+///
+/// `target` 是请求解析出的目标媒体（Tmdb 别名事实）；`to_media` 是
+/// `ensure_media` 落库后的目标媒体。台账迁移与 sidecar 刷新都用 `to_media`，
+/// 与拆分前 `reidentify_inner` 的行为完全一致。
+fn reassign_parsed_files(
+    state: &ApiState,
+    parsed: ParsedReidentifyRequest,
+    target: &Media,
+    to_media: &Media,
+) -> Response {
     let reassign_req = ReassignFiles {
         files: parsed.files_to_reassign,
         from: parsed.from_media_id,
@@ -346,10 +402,10 @@ fn reidentify_inner(state: &ApiState, body: &Value) -> Response {
         Err(e) => return err(StatusCode::CONFLICT, "library.frozen", &e.to_string()),
     };
 
-    if let Some(ext_id) = target_media.tmdb_id.as_deref() {
+    if let Some(ext_id) = target.tmdb_id.as_deref() {
         let alias = MediaAlias {
             source: "tmdb".into(),
-            kind: target_media.kind,
+            kind: target.kind,
             external_id: ext_id.to_string(),
         };
         if let Err(e) = state.store.lock().add_media_alias(to_media.id, &alias) {
@@ -363,7 +419,7 @@ fn reidentify_inner(state: &ApiState, body: &Value) -> Response {
     }
 
     // 针对已迁移的文件执行元数据刷新（失败不破坏已完成的迁移）
-    refresh_sidecars_for_reassigned(state, &to_media, &parsed.rows_to_refresh);
+    refresh_sidecars_for_reassigned(state, to_media, &parsed.rows_to_refresh);
 
     ok(json!({ "claimed": claimed })).into_response()
 }
@@ -405,7 +461,6 @@ fn refresh_sidecars_for_reassigned(state: &ApiState, target: &Media, rows: &[dom
 /// POST /libraries/{id}/items/{item_id}/reidentifications/extras —
 /// 把条目文件标为「非独立作品」：从台账拆出进未识别清单。
 pub(crate) async fn extras(State(state): State<ApiState>, Json(body): Json<Value>) -> Response {
-    let store = state.store.lock();
     let target_ids: HashSet<String> = body["file_ids"]
         .as_array()
         .map(|arr| {
@@ -422,6 +477,16 @@ pub(crate) async fn extras(State(state): State<ApiState>, Json(body): Json<Value
             "缺少 file_ids",
         );
     }
+    // 拆出 extras 也是改库：冻结/删除中的 Library 必须在任何台账写入前拒绝。
+    let file_ids: Vec<LedgerId> = target_ids
+        .iter()
+        .filter_map(|id| LedgerId::from_str(id).ok())
+        .collect();
+    let _leases = match acquire_file_leases(&state, &file_ids) {
+        Ok(leases) => leases,
+        Err(response) => return response,
+    };
+    let store = state.store.lock();
     let mut detached = 0usize;
     for file_id in target_ids {
         if let Some(row) = store.get_ledger(&file_id).ok().flatten() {

@@ -29,6 +29,31 @@ async fn get(app: &axum::Router, uri: &str) -> Value {
     json_body(response).await
 }
 
+/// 轮询媒体库操作到终态。
+///
+/// 带 `root_paths`/`display_locale` 的 PATCH 按异步契约受理（`202` + 操作视图，
+/// 见 `crates/api/src/http/library_config.rs:166-214`），响应体不再是 Library DTO，
+/// 因此业务断言必须在操作终态之后从 `GET /libraries` 读回。
+async fn poll_library_operation(app: &axum::Router, library_id: &str, operation_id: &str) -> Value {
+    let uri = format!("/api/v1/libraries/{library_id}/operations/{operation_id}");
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let body = get(app, &uri).await;
+            let state = body["data"]["state"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            if state == "succeeded" {
+                break body;
+            }
+            assert_ne!(state, "failed", "媒体库操作失败: {body}");
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("媒体库操作必须到达终态")
+}
+
 #[tokio::test]
 async fn libraries_seed_default_movie_and_tv() {
     let tmp = tempfile::tempdir().unwrap();
@@ -138,23 +163,40 @@ async fn libraries_patch_replaces_roots_and_renames() {
     .await;
     let id = created["data"]["id"].as_str().unwrap();
 
-    let patched = json_body(
-        app.clone()
-            .oneshot(request(
-                "PATCH",
-                &format!("/api/v1/libraries/{id}"),
-                Some("management-secret"),
-                json!({
-                    "name": "欧美精选剧集",
-                    "root_paths": ["/data/tv/us_archive", "/data/tv/us_current"],
-                }),
-            ))
-            .await
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(patched["data"]["name"], "欧美精选剧集");
-    let roots = patched["data"]["root_paths"].as_array().unwrap();
+    let patched = app
+        .clone()
+        .oneshot(request(
+            "PATCH",
+            &format!("/api/v1/libraries/{id}"),
+            Some("management-secret"),
+            json!({
+                "name": "欧美精选剧集",
+                "root_paths": ["/data/tv/us_archive", "/data/tv/us_current"],
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        patched.status(),
+        StatusCode::ACCEPTED,
+        "换根要重写台账与 NFO 归属，按异步操作受理"
+    );
+    let accepted = json_body(patched).await;
+    let operation_id = accepted["data"]["operation_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("202 必须带 operation_id: {accepted}"))
+        .to_string();
+    assert_eq!(accepted["data"]["kind"], "roots");
+    let finished = poll_library_operation(&app, id, &operation_id).await;
+    assert_eq!(finished["data"]["state"], "succeeded");
+
+    // 操作到达终态后读回：改名与换根都必须真实落库，且不得多出 library 行。
+    let listed = get(&app, "/api/v1/libraries").await;
+    let rows = listed["data"].as_array().unwrap();
+    let matched: Vec<&Value> = rows.iter().filter(|library| library["id"] == id).collect();
+    assert_eq!(matched.len(), 1, "改名/换根不得产生重复库行: {listed}");
+    assert_eq!(matched[0]["name"], "欧美精选剧集");
+    let roots = matched[0]["root_paths"].as_array().unwrap();
     assert_eq!(roots.len(), 2);
     assert_eq!(roots[0], "/data/tv/us_archive");
     assert_eq!(roots[1], "/data/tv/us_current");

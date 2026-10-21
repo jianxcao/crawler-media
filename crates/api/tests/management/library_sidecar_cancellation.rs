@@ -77,6 +77,10 @@ async fn frozen_library_rejects_organize_reidentify_and_sidecar_refresh() {
             json!({"file_ids":[row.id.to_string()],"title_ref":"tmdb:movie:123"}),
         ),
         (
+            "/api/v1/reidentify/extras".into(),
+            json!({"file_ids":[row.id.to_string()]}),
+        ),
+        (
             format!(
                 "/api/v1/libraries/{}/items/{}/metadata/refresh",
                 library.id, media.id
