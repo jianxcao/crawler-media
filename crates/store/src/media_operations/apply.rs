@@ -66,7 +66,7 @@ impl Store {
     pub fn unfinished_media_merges(&self) -> Result<Vec<String>, StoreError> {
         let mut stmt = self.library.prepare(
             "SELECT operation_id FROM media_operations
-             WHERE kind = 'merge' AND state NOT IN ('succeeded', 'failed')
+             WHERE kind = 'merge' AND state <> 'succeeded'
              ORDER BY created_at_ms ASC, operation_id ASC",
         )?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
@@ -175,9 +175,8 @@ impl Store {
 
     /// A retired survivor can never take work, and a freeze belongs to exactly
     /// one operation: only the operation named by the freeze may continue, any
-    /// other merge is refused. A freeze with no unfinished owner is stale (its
-    /// operation was marked failed), so it is taken over instead of wedging the
-    /// Media forever.
+    /// other merge is refused. A failed operation keeps its freeze and is retried
+    /// (R21), so it is never taken over by a newer one.
     fn ensure_survivor_accepts_merge(
         &self,
         operation_id: &str,

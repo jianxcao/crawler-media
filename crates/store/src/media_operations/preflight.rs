@@ -83,7 +83,7 @@ pub(crate) fn merge_holder(
     Ok(conn
         .query_row(
             "SELECT operation_id FROM media_operations
-             WHERE state NOT IN ('succeeded', 'failed')
+             WHERE state <> 'succeeded'
                AND (survivor_id = ?1 OR loser_id = ?1)
              ORDER BY created_at_ms DESC, operation_id DESC
              LIMIT 1",
