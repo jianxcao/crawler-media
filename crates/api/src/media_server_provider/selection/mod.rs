@@ -123,11 +123,20 @@ fn select_page_blocking(
             .or_default()
             .push(item);
     }
+    // R23: a row the store selected must be hydrated, not dropped. The light
+    // pass is shaped by the request's type switches; a selected row it did not
+    // produce is looked up again with every switch on, over the same scope.
+    let mut hydration: Option<HashMap<domain::TypedItemId, Vec<LightItem>>> = None;
     let mut items = Vec::with_capacity(page.items.len());
     for reference in page.items {
-        let Some(mut bucket) = candidates.remove(&reference.item) else {
-            // 协议选出的条目在本地行里没有对应候选：这是数据面不一致，跳过它而不是
-            // 返回一张和 total 不符的页。
+        let bucket = match candidates.remove(&reference.item) {
+            Some(bucket) => Some(bucket),
+            None => hydration
+                .get_or_insert_with(|| hydration_candidates(&scope, &query))
+                .remove(&reference.item),
+        };
+        let Some(mut bucket) = bucket.filter(|bucket| !bucket.is_empty()) else {
+            // 放宽类型开关后仍没有本地候选：这是数据面不一致，记录后跳过。
             tracing::warn!(
                 item = %reference.item.to_wire_string(),
                 "Jellyfin 协议选中条目缺少对应的本地候选行"
@@ -150,6 +159,25 @@ fn select_page_blocking(
         items,
         total: page.total as usize,
     })
+}
+
+/// 选中行补水用的候选：同一作用域、所有类型开关打开。
+fn hydration_candidates(
+    scope: &scope::ScopedRead,
+    query: &ServerItemQuery,
+) -> HashMap<domain::TypedItemId, Vec<LightItem>> {
+    let relaxed = ServerItemQuery {
+        include_item_types: Some("Movie,Series,Episode,Video".to_string()),
+        ..query.clone()
+    };
+    let mut candidates: HashMap<domain::TypedItemId, Vec<LightItem>> = HashMap::new();
+    for item in build_light_items(scope, &relaxed) {
+        candidates
+            .entry(item.snapshot.item_identity())
+            .or_default()
+            .push(item);
+    }
+    candidates
 }
 
 /// 同一逻辑条目的多份物理版本里挑一份：store 授权的 `preferred_source` 优先，否则
