@@ -24,6 +24,27 @@ pub(crate) fn source_rank(source: &str) -> u8 {
     }
 }
 
+/// Key inside `selection_origins_json` carrying a merge's pending target fallback (R21).
+pub(crate) const PENDING_TARGET_KEY: &str = "$pending_target";
+
+/// A snapshot (or some of its fields) kept by a Media merge although it does not
+/// describe the chosen refresh target. Its values are served as a fallback, marked
+/// `pending_target_fallback`, until the target itself is adopted for this key —
+/// adoption rewrites `selection_origins_json`, which resolves the fallback.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PendingTarget {
+    pub target_external_id: String,
+    /// The whole snapshot belongs to a non-target entity.
+    #[serde(default)]
+    pub whole: bool,
+    /// Per-field fallback from the non-target snapshot the merge superseded: only
+    /// fields the winning target snapshot does not carry (`Missing`).
+    #[serde(default)]
+    pub fields: MetadataFields,
+    #[serde(default)]
+    pub from_entity_id: String,
+}
+
 /// One current source snapshot of an entity/locale.
 pub(crate) struct SourceSnapshot {
     source: String,
@@ -31,6 +52,22 @@ pub(crate) struct SourceSnapshot {
     revision: i64,
     fields: MetadataFields,
     origins: BTreeMap<String, SourceFieldOrigin>,
+    pending: Option<PendingTarget>,
+}
+
+/// Split `selection_origins_json` into per-field origins and the pending marker.
+pub(crate) fn parse_selection_origins(
+    raw: &str,
+) -> (BTreeMap<String, SourceFieldOrigin>, Option<PendingTarget>) {
+    let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str::<serde_json::Value>(raw)
+    else {
+        return (BTreeMap::new(), None);
+    };
+    let pending = map
+        .remove(PENDING_TARGET_KEY)
+        .and_then(|value| serde_json::from_value(value).ok());
+    let origins = serde_json::from_value(serde_json::Value::Object(map)).unwrap_or_default();
+    (origins, pending)
 }
 
 pub(crate) type FieldOrigins = BTreeMap<String, EffectiveFieldOrigin>;
@@ -64,12 +101,14 @@ pub(crate) fn load_snapshots(
     let mut snapshots = Vec::new();
     for row in rows {
         let (source, provider_entity_id, revision, fields_json, origins_json) = row?;
+        let (origins, pending) = parse_selection_origins(&origins_json);
         snapshots.push(SourceSnapshot {
             source,
             provider_entity_id,
             revision,
             fields: serde_json::from_str(&fields_json)?,
-            origins: serde_json::from_str(&origins_json).unwrap_or_default(),
+            origins,
+            pending,
         });
     }
     snapshots.sort_by(|a, b| {
@@ -173,7 +212,7 @@ fn pick<T: Clone>(
             .get(name)
             .cloned()
             .unwrap_or_else(|| default_selection(name, empty));
-        let origin = origin(
+        let mut origin = origin(
             &snapshot.source,
             &snapshot.provider_entity_id,
             snapshot.revision,
@@ -181,6 +220,38 @@ fn pick<T: Clone>(
             empty,
             selection,
         );
+        if let Some(pending) = snapshot.pending.as_ref().filter(|pending| pending.whole) {
+            origin.pending_target_fallback = true;
+            origin.target_external_id = Some(pending.target_external_id.clone());
+        }
+        Some((value.clone(), origin))
+    })
+}
+
+/// Per-field pending fallback: the first snapshot whose merge stash carries `name`.
+fn pick_pending<T: Clone>(
+    snapshots: &[SourceSnapshot],
+    name: &str,
+    media: MediaId,
+    get: impl Fn(&MetadataFields) -> &FieldValue<T>,
+) -> Option<(FieldValue<T>, EffectiveFieldOrigin)> {
+    snapshots.iter().find_map(|snapshot| {
+        let pending = snapshot.pending.as_ref()?;
+        let value = get(&pending.fields);
+        if value.is_missing() {
+            return None;
+        }
+        let empty = matches!(value, FieldValue::Empty);
+        let mut origin = origin(
+            &snapshot.source,
+            &pending.from_entity_id,
+            snapshot.revision,
+            media,
+            empty,
+            default_selection(name, empty),
+        );
+        origin.pending_target_fallback = true;
+        origin.target_external_id = Some(pending.target_external_id.clone());
         Some((value.clone(), origin))
     })
 }
@@ -224,7 +295,9 @@ fn compose_sources(
 ) {
     macro_rules! compose_field {
         ($field:ident, $name:expr) => {
-            if let Some((value, origin)) = pick(snapshots, $name, media, |f| &f.$field) {
+            if let Some((value, origin)) = pick(snapshots, $name, media, |f| &f.$field)
+                .or_else(|| pick_pending(snapshots, $name, media, |f| &f.$field))
+            {
                 fields.$field = value;
                 origins.insert($name.into(), origin);
             }
@@ -275,4 +348,23 @@ impl Store {
             field_origins,
         })
     }
+}
+
+/// Fields `other` carries that `winner` lacks (`Missing`), or `None` when there are none.
+pub(crate) fn missing_fill(
+    winner: &MetadataFields,
+    other: &MetadataFields,
+) -> Option<MetadataFields> {
+    let mut fill = MetadataFields::default();
+    let mut any = false;
+    macro_rules! fill_field {
+        ($field:ident, $name:expr) => {
+            if winner.$field.is_missing() && !other.$field.is_missing() {
+                fill.$field = other.$field.clone();
+                any = true;
+            }
+        };
+    }
+    for_each_field!(fill_field);
+    any.then_some(fill)
 }

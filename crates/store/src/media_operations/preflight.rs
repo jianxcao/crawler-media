@@ -256,6 +256,7 @@ impl Store {
         pin_revision(&tx, "survivor", &survivor_id, request.survivor_revision)?;
         pin_revision(&tx, "loser", &loser_id, request.loser_revision)?;
         require_refresh_targets(&tx, request)?;
+        validate_target_entity_snapshots(&tx, request)?;
         refuse_override_conflicts(&tx, &survivor_id, &loser_id)?;
 
         let frozen = FrozenPair {
@@ -286,6 +287,46 @@ impl Store {
         );
         Ok(operation_id)
     }
+}
+
+/// Cross-entity merge (R21): the side whose alias is chosen as refresh target must
+/// really describe that target at every season/episode scope. A target-side
+/// season or episode snapshot adopted from another provider work would win the
+/// per-key resolution as "the target" while numbering a different show, so the
+/// merge is refused with zero writes until that snapshot is refreshed.
+fn validate_target_entity_snapshots(
+    conn: &Connection,
+    request: &MediaMergeRequest,
+) -> Result<(), StoreError> {
+    for conflict in refresh_target_conflicts(conn, request.survivor, request.loser)? {
+        let Some(chosen) = request.refresh_targets.get(&conflict.source) else {
+            continue;
+        };
+        let target_side = if *chosen == conflict.survivor_external {
+            request.survivor
+        } else {
+            request.loser
+        };
+        let stray: Option<(String, i64, i64, String)> = conn
+            .query_row(
+                "SELECT entity_scope, season, episode, provider_work_id
+                 FROM media_metadata_sources
+                 WHERE media_id = ?1 AND source = ?2 AND entity_scope <> 'work'
+                   AND provider_work_id <> '' AND provider_work_id <> ?3
+                 ORDER BY season, episode LIMIT 1",
+                params![target_side.to_string(), conflict.source, chosen],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        if let Some((scope, season, episode, work)) = stray {
+            return Err(StoreError::Protected(format!(
+                "merge refused: refresh target {}={chosen} has a {scope} snapshot S{season}E{episode} \
+                 from provider work {work}",
+                conflict.source
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Overrides of both Media that share a key must not set the same field differently: a

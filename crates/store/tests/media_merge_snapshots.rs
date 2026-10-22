@@ -174,3 +174,181 @@ fn conflicting_override_begin_is_refused_and_disjoint_overrides_merge() {
     let merged: serde_json::Value = serde_json::from_str(&merged).unwrap();
     assert_eq!(merged, serde_json::json!({"title": "S", "overview": "LO"}));
 }
+
+fn scoped_snapshot(
+    db: &Connection,
+    media: &str,
+    (scope, season, episode): (&str, i64, i64),
+    entity: &str,
+    work: &str,
+    fields: &domain::MetadataFields,
+) {
+    db.execute(
+        "INSERT INTO media_metadata_sources
+            (media_id, entity_scope, season, episode, source, locale, provider_entity_id,
+             provider_work_id, normalized_json, present_fields_json, preferences_json,
+             selection_origins_json, fetched_at, source_revision)
+         VALUES (?1, ?2, ?3, ?4, 'tmdb', 'zh-CN', ?5, ?6, ?7, '[]', '{}', '{}', 100, 1)",
+        params![
+            media,
+            scope,
+            season,
+            episode,
+            entity,
+            work,
+            serde_json::to_string(fields).unwrap()
+        ],
+    )
+    .unwrap();
+}
+
+fn fields(title: Option<&str>, tagline: Option<&str>) -> domain::MetadataFields {
+    domain::MetadataFields {
+        title: title.map_or(domain::FieldValue::Missing, |t| {
+            domain::FieldValue::Value(t.into())
+        }),
+        tagline: tagline.map_or(domain::FieldValue::Missing, |t| {
+            domain::FieldValue::Value(t.into())
+        }),
+        ..Default::default()
+    }
+}
+
+/// Two TV Media claiming different TMDB works (p2 survivor, p3 loser), merged with
+/// the loser's p3 chosen as refresh target.
+fn cross_entity_fixture() -> (tempfile::TempDir, Store, Connection, MediaMergeRequest) {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    create_media(&store, SURVIVOR, "Survivor", MediaKind::Tv);
+    create_media(&store, LOSER, "Loser", MediaKind::Tv);
+    let db = Connection::open(tmp.path().join("library.db")).unwrap();
+    db.execute("DELETE FROM media_aliases", []).unwrap();
+    merge_support::insert_alias(&db, SURVIVOR, "tmdb", "p2", 1);
+    merge_support::insert_alias(&db, LOSER, "tmdb", "p3", 1);
+    let req = MediaMergeRequest {
+        request_id: "00000000-0000-0000-0001-0000000000b1".into(),
+        survivor: SURVIVOR.parse().unwrap(),
+        loser: LOSER.parse().unwrap(),
+        survivor_revision: 0,
+        loser_revision: 0,
+        refresh_targets: BTreeMap::from([("tmdb".to_string(), "p3".to_string())]),
+    };
+    (tmp, store, db, req)
+}
+
+/// R21: cross-entity merge — the chosen target's snapshot wins at work/episode
+/// scope even when older; the superseded non-target fields the target lacks are a
+/// per-field pending fallback; a non-target-only episode is served whole as pending.
+#[test]
+fn cross_entity_target_wins_and_non_target_fields_are_pending_fallback() {
+    let (tmp, store, db, req) = cross_entity_fixture();
+    let work = ("work", -1, -1);
+    scoped_snapshot(
+        &db,
+        SURVIVOR,
+        work,
+        "p2",
+        "p2",
+        &fields(Some("P2"), Some("P2 TAG")),
+    );
+    scoped_snapshot(&db, LOSER, work, "p3", "p3", &fields(Some("P3"), None));
+    scoped_snapshot(
+        &db,
+        SURVIVOR,
+        ("episode", 1, 1),
+        "p2e1",
+        "p2",
+        &fields(Some("P2 E1"), None),
+    );
+    scoped_snapshot(
+        &db,
+        LOSER,
+        ("episode", 1, 2),
+        "p3e2",
+        "p3",
+        &fields(Some("P3 E2"), None),
+    );
+
+    let op = store.begin_media_merge(&req, 3000).unwrap();
+    assert_eq!(
+        store.advance_media_merge(&op, 3000).unwrap().state,
+        "succeeded"
+    );
+
+    let (library, _) = merge_support::create_library(
+        &store,
+        "TV",
+        MediaKind::Tv,
+        tmp.path().join("tv").to_str().unwrap(),
+    );
+    let library: domain::LibraryId = library.id.parse().unwrap();
+    let media: domain::MediaId = SURVIVOR.parse().unwrap();
+    let composed = store
+        .effective_metadata_fields(library, media, domain::EntityScope::Work, "zh-CN")
+        .unwrap();
+    assert_eq!(
+        composed.fields.title.value().map(String::as_str),
+        Some("P3")
+    );
+    assert!(!composed.field_origins["title"].pending_target_fallback);
+    assert_eq!(
+        composed.fields.tagline.value().map(String::as_str),
+        Some("P2 TAG"),
+        "a field the target lacks falls back per field"
+    );
+    let tag = &composed.field_origins["tagline"];
+    assert!(tag.pending_target_fallback);
+    assert_eq!(tag.target_external_id.as_deref(), Some("p3"));
+    assert_eq!(tag.provider_entity_id, "p2");
+
+    let e1 = store
+        .effective_metadata_fields(
+            library,
+            media,
+            domain::EntityScope::Episode {
+                season: 1,
+                episode: 1,
+            },
+            "zh-CN",
+        )
+        .unwrap();
+    assert_eq!(e1.fields.title.value().map(String::as_str), Some("P2 E1"));
+    assert!(e1.field_origins["title"].pending_target_fallback);
+    let e2 = store
+        .effective_metadata_fields(
+            library,
+            media,
+            domain::EntityScope::Episode {
+                season: 1,
+                episode: 2,
+            },
+            "zh-CN",
+        )
+        .unwrap();
+    assert_eq!(e2.fields.title.value().map(String::as_str), Some("P3 E2"));
+    assert!(!e2.field_origins["title"].pending_target_fallback);
+}
+
+/// R21: the target side must describe the target at season/episode scope too.
+#[test]
+fn cross_entity_target_with_foreign_episode_snapshot_is_refused() {
+    let (_tmp, store, db, req) = cross_entity_fixture();
+    scoped_snapshot(
+        &db,
+        LOSER,
+        ("episode", 1, 1),
+        "p9e1",
+        "p9",
+        &fields(Some("X"), None),
+    );
+    let error = store.begin_media_merge(&req, 3000).unwrap_err();
+    assert!(error.to_string().contains("p9"), "{error}");
+    let state: String = db
+        .query_row(
+            "SELECT identity_state FROM media WHERE media_id = ?1",
+            params![LOSER],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_ne!(state, "merging", "a refused merge writes nothing");
+}
