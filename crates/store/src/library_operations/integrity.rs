@@ -35,6 +35,32 @@ pub struct IntegrityReport {
     /// raw facts reduce to. Capped at [`REPORT_CAP`]; `issues_found` keeps the true total.
     #[serde(default)]
     pub mismatched_media: Vec<MediaId>,
+    /// Exact issue counts per category; the sample lists above are capped.
+    #[serde(default)]
+    pub totals: IntegrityTotals,
+    /// Whether any sample list dropped entries because it reached [`REPORT_CAP`].
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+/// Exact per-category counts behind the capped report samples.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrityTotals {
+    pub missing_items: usize,
+    pub missing_user_items: usize,
+    pub orphan_items: usize,
+    pub orphan_user_items: usize,
+    pub mismatched_media: usize,
+}
+
+/// Append a sample while it stays under [`REPORT_CAP`]; count it regardless.
+fn sample<T>(list: &mut Vec<T>, total: &mut usize, truncated: &mut bool, value: T) {
+    *total += 1;
+    if list.len() < REPORT_CAP {
+        list.push(value);
+    } else {
+        *truncated = true;
+    }
 }
 
 /// Most Media a persisted report lists; the cursor never accumulates the whole Library.
@@ -162,9 +188,13 @@ pub(crate) fn apply_integrity_batch(
         let probe = probe_media(tx, lib_id, library, media_str)?;
         let mut issues = record_presence_issues(&probe, media_id, &mut state.report);
         if probe.drift() {
-            if state.report.mismatched_media.len() < REPORT_CAP {
-                state.report.mismatched_media.push(media_id);
-            }
+            let report = &mut state.report;
+            sample(
+                &mut report.mismatched_media,
+                &mut report.totals.mismatched_media,
+                &mut report.truncated,
+                media_id,
+            );
             issues = issues.max(1);
         }
         if issues > 0 {
@@ -326,10 +356,20 @@ fn record_presence_issues(
 ) -> usize {
     let mut count = 0;
     if probe.expected_item && !probe.actual_item {
-        report.missing_items.push(media_id);
+        sample(
+            &mut report.missing_items,
+            &mut report.totals.missing_items,
+            &mut report.truncated,
+            media_id,
+        );
         count += 1;
     } else if !probe.expected_item && probe.actual_item {
-        report.orphan_items.push(media_id);
+        sample(
+            &mut report.orphan_items,
+            &mut report.totals.orphan_items,
+            &mut report.truncated,
+            media_id,
+        );
         count += 1;
     }
     let mut missing: Vec<_> = probe
@@ -344,13 +384,23 @@ fn record_presence_issues(
     orphan.sort();
     for user in missing {
         if let Ok(user_id) = user.parse::<UserId>() {
-            report.missing_user_items.push((user_id, media_id));
+            sample(
+                &mut report.missing_user_items,
+                &mut report.totals.missing_user_items,
+                &mut report.truncated,
+                (user_id, media_id),
+            );
             count += 1;
         }
     }
     for user in orphan {
         if let Ok(user_id) = user.parse::<UserId>() {
-            report.orphan_user_items.push((user_id, media_id));
+            sample(
+                &mut report.orphan_user_items,
+                &mut report.totals.orphan_user_items,
+                &mut report.truncated,
+                (user_id, media_id),
+            );
             count += 1;
         }
     }
