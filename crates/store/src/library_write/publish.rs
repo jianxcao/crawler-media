@@ -28,14 +28,29 @@ enum RowOutcome {
 
 /// The per-media outcome of a publication batch: a single changed file can be reduced
 /// incrementally, anything else needs the full recompute.
-enum MediaChange {
-    Single {
-        before: Option<FileSummaryFacts>,
-        before_units: Vec<(i32, i32)>,
-        after: FileSummaryFacts,
-        after_units: Vec<(i32, i32)>,
-    },
-    Multiple,
+/// Whether `(library, media)` already has a card row to move by deltas.
+fn item_card_exists(
+    tx: &Connection,
+    library_id: LibraryId,
+    media_id: MediaId,
+) -> Result<bool, StoreError> {
+    let found: Option<i64> = tx
+        .query_row(
+            "SELECT 1 FROM library_items WHERE library_id = ?1 AND media_id = ?2",
+            rusqlite::params![library_id.to_string(), media_id.to_string()],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(found.is_some())
+}
+
+/// One published file's before/after facts, kept so the reduction can apply per-file
+/// deltas instead of re-reading every published file of the media once per window.
+struct PendingChange {
+    before: Option<FileSummaryFacts>,
+    before_units: Vec<(i32, i32)>,
+    after: FileSummaryFacts,
+    after_units: Vec<(i32, i32)>,
 }
 
 impl Store {
@@ -58,7 +73,7 @@ impl Store {
         ensure_library_writable(&tx, &scope.library_id.to_string())?;
         ensure_config_revision(&tx, scope)?;
         let mut report = PublishReport::default();
-        let mut affected: HashMap<MediaId, MediaChange> = HashMap::new();
+        let mut affected: HashMap<MediaId, Vec<PendingChange>> = HashMap::new();
         for pub_item in files {
             let file = pub_item.file;
             if file.library_id != scope.library_id {
@@ -97,37 +112,39 @@ impl Store {
                 .iter()
                 .map(|unit| (unit.season, unit.episode))
                 .collect();
-            affected
-                .entry(file.media_id)
-                .and_modify(|change| *change = MediaChange::Multiple)
-                .or_insert(MediaChange::Single {
-                    before,
-                    before_units,
-                    after,
-                    after_units,
-                });
+            affected.entry(file.media_id).or_default().push(PendingChange {
+                before,
+                before_units,
+                after,
+                after_units,
+            });
         }
-        for (media_id, change) in affected {
-            match change {
-                MediaChange::Single {
-                    before,
-                    before_units,
-                    after,
-                    after_units,
-                } => reduce_library_media_incremental(
+        for (media_id, changes) in affected {
+            // A media without a card yet cannot be moved by deltas: the incremental path
+            // repairs it with a full reduce, and applying the remaining deltas afterwards
+            // would count those files twice. Do the full reduce once and skip the rest.
+            if !item_card_exists(&tx, scope.library_id, media_id)? {
+                reduce_library_media(&tx, scope.library_id, media_id)?;
+                continue;
+            }
+            // Apply one delta per changed file. A media that appears in several windows of a
+            // scan used to fall back to a full `reduce_library_media` per window, which
+            // re-reads every published file of that media: a 10k-episode series therefore
+            // cost O(files x windows). Per-file deltas keep each window proportional to the
+            // files it actually touched, and the totals end at the same place because the
+            // deltas are applied in the same order the files were published.
+            for change in changes {
+                reduce_library_media_incremental(
                     &tx,
                     scope.library_id,
                     media_id,
                     &ChangedFile {
-                        before: before.as_ref(),
-                        before_units: &before_units,
-                        after: &after,
-                        after_units: &after_units,
+                        before: change.before.as_ref(),
+                        before_units: &change.before_units,
+                        after: &change.after,
+                        after_units: &change.after_units,
                     },
-                )?,
-                MediaChange::Multiple => {
-                    reduce_library_media(&tx, scope.library_id, media_id)?;
-                }
+                )?;
             }
         }
         tx.commit()?;

@@ -141,7 +141,11 @@ async fn unrelated_user_growth_does_not_expand_heartbeat_write_scope() {
 
 #[tokio::test]
 async fn concurrent_scan_of_ten_thousand_episodes_keeps_heartbeat_write_scope_bounded() {
-    const EPISODES: usize = 10_000;
+    // 规模可调：默认 10k（计划 Step 1 点名的规模）；缩小只为定位写放大点，断言语义不变。
+    let episodes: usize = std::env::var("CRAWLER_MEDIA_CONTENTION_EPISODES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(10_000);
     const PER_BATCH: usize = 100;
 
     let fixture = fixture("Scan Series");
@@ -170,7 +174,7 @@ async fn concurrent_scan_of_ten_thousand_episodes_keeps_heartbeat_write_scope_bo
         ),
         root: fixture.series_root.clone(),
         first_episode: 2,
-        batches: EPISODES / PER_BATCH,
+        batches: episodes / PER_BATCH,
         per_batch: PER_BATCH,
     };
     let scanner = std::thread::spawn({
@@ -187,7 +191,10 @@ async fn concurrent_scan_of_ten_thousand_episodes_keeps_heartbeat_write_scope_bo
         "扫描批次不得报错: {:?}",
         report.errors
     );
-    assert_eq!(report.inserted, EPISODES, "10k 集必须整批写入: {report:?}");
+    assert_eq!(
+        report.inserted, episodes,
+        "全部集必须整批写入: {report:?}"
+    );
     let ok = statuses.get(&200).copied().unwrap_or(0);
     assert_eq!(
         ok,

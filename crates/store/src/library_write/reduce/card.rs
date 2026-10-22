@@ -175,6 +175,12 @@ fn preferred_file(files: &[FileFact]) -> Option<String> {
 }
 
 /// Rebuild `library_units` from published coverage. Returns distinct season/episode counts.
+///
+/// Set-based: one aggregate statement for the counters, one windowed statement for the
+/// preferred file. The previous per-unit loop issued two statements per unit inside the
+/// caller's transaction, so a scan window over a media with `n` units cost `O(n)` round
+/// trips and a 10k-episode series grew super-linearly (measured 336 ms @500 →
+/// 17,043 ms @2000 in release). Same rows, same counters, fewer statements.
 fn rebuild_units(tx: &Connection, lib: &str, media: &str) -> Result<(i64, i64), StoreError> {
     tx.execute(
         "DELETE FROM library_units
@@ -188,48 +194,55 @@ fn rebuild_units(tx: &Connection, lib: &str, media: &str) -> Result<(i64, i64), 
         params![lib, media],
     )?;
 
-    let groups = coverage_units(tx, lib, media)?;
-    let mut seasons = HashSet::new();
-    let mut episodes = HashSet::new();
-    for (season, episode) in groups {
-        let (file_count, available, preferred) = unit_counts(tx, lib, media, season, episode)?;
-        if season >= 0 {
-            seasons.insert(season);
-        }
-        if season >= 0 && episode >= 0 {
-            episodes.insert((season, episode));
-        }
-        tx.execute(
-            "INSERT INTO library_units
-                (library_id, media_id, season, episode, file_count, available_file_count,
-                 preferred_file_id, quality_json, unit_revision)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '{}', 1)
-             ON CONFLICT(library_id, media_id, season, episode) DO UPDATE SET
-                 file_count = excluded.file_count,
-                 available_file_count = excluded.available_file_count,
-                 preferred_file_id = excluded.preferred_file_id,
-                 unit_revision = library_units.unit_revision + 1",
-            params![
-                lib, media, season, episode, file_count, available, preferred
-            ],
-        )?;
-    }
-    Ok((seasons.len() as i64, episodes.len() as i64))
-}
-
-fn coverage_units(tx: &Connection, lib: &str, media: &str) -> Result<Vec<(i32, i32)>, StoreError> {
-    let mut stmt = tx.prepare(
-        "SELECT DISTINCT u.season, u.episode
+    let (seasons, episodes): (i64, i64) = tx.query_row(
+        "SELECT COUNT(DISTINCT CASE WHEN u.season >= 0 THEN u.season END),
+                COUNT(DISTINCT CASE WHEN u.season >= 0 AND u.episode >= 0
+                                    THEN u.season || ':' || u.episode END)
          FROM library_file_units u
          JOIN library_files f ON f.file_id = u.file_id
-         WHERE f.library_id = ?1 AND f.media_id = ?2 AND f.publication_state = 'published'
-         ORDER BY u.season, u.episode",
+         WHERE f.library_id = ?1 AND f.media_id = ?2
+           AND f.publication_state = 'published'",
+        params![lib, media],
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    let rows = stmt
-        .query_map(params![lib, media], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(rows)
+
+    tx.execute(
+        "INSERT INTO library_units
+            (library_id, media_id, season, episode, file_count, available_file_count,
+             preferred_file_id, quality_json, unit_revision)
+         SELECT ?1, ?2, g.season, g.episode, g.file_count, g.available,
+                (SELECT u2.file_id
+                 FROM library_file_units u2
+                 JOIN library_files f2 ON f2.file_id = u2.file_id
+                 WHERE f2.library_id = ?1 AND f2.media_id = ?2
+                   AND u2.season = g.season AND u2.episode = g.episode
+                   AND f2.publication_state = 'published'
+                   AND f2.presence_state = 'present'
+                 ORDER BY f2.file_revision DESC, f2.file_id ASC
+                 LIMIT 1),
+                '{}', 1
+         FROM (
+             SELECT u.season AS season, u.episode AS episode,
+                    COUNT(DISTINCT u.file_id) AS file_count,
+                    COUNT(DISTINCT CASE WHEN f.presence_state = 'present'
+                                        THEN u.file_id END) AS available
+             FROM library_file_units u
+             JOIN library_files f ON f.file_id = u.file_id
+             WHERE f.library_id = ?1 AND f.media_id = ?2
+               AND f.publication_state = 'published'
+             GROUP BY u.season, u.episode
+         ) g
+         WHERE true
+         ON CONFLICT(library_id, media_id, season, episode) DO UPDATE SET
+             file_count = excluded.file_count,
+             available_file_count = excluded.available_file_count,
+             preferred_file_id = excluded.preferred_file_id,
+             unit_revision = library_units.unit_revision + 1",
+        params![lib, media],
+    )?;
+    Ok((seasons, episodes))
 }
+
 
 /// Drop NFO inputs whose sidecar no longer belongs to a published file of this card.
 ///

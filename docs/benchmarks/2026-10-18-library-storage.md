@@ -372,3 +372,70 @@ growth: other 1000->1000000, target 300; seed 89.26s; db 2464907264 B; sqlite 3.
 - 冷热缓存分层对照、SQL 次数计数、返回/解码行字节统计
 - exact facets / 包含搜索 / offset 这三类**允许增长**路径的实测（计划 Step 2 要求区分，本轮未测）
 - 实际 Web/Jellyfin 深页烟测（浏览器侧仍为 Not run）
+
+## 10. Task 19 写放大优化实测（2026-10-22，release，本轮实测）
+
+### 10.1 先测后改：原始曲线（未改动代码，`release`）
+
+把 `crates/api/tests/storage_contention.rs` 的规模改成可用环境变量调整（`CRAWLER_MEDIA_CONTENTION_EPISODES`，默认仍 10,000，断言语义不变），量出原始曲线：
+
+| 集数 | 实测总时长 | 吞吐 |
+|---|---|---|
+| 500 | 336 ms | 1488.1 文件/秒 |
+| 1000 | 2,210 ms | 452.5 文件/秒 |
+| 2000 | 17,043 ms | 117.4 文件/秒 |
+
+每翻倍约 6.6×–7.7×（指数 ≈ 2.95）。按此外推 10k ≈ 35 分钟，与「`--release` 下 1800 s 看门狗被杀」的历史记录一致。
+
+### 10.2 根因（可指认到行）
+
+1. `crates/store/src/library_write/reduce/card.rs::rebuild_units`：对每个 unit 发两条 SQL（`reduce.rs::unit_counts` 查询 + `INSERT ... ON CONFLICT`），一个 10k 集 media 的单次归约就是 20,000 条语句。
+2. `crates/store/src/library_write/publish.rs`：同一 media 在一个 100 文件窗口里出现多次时走 `MediaChange::Multiple` → 整媒体全量重算，**每个窗口重读该 media 的全部已发布文件**，总代价 O(文件数 × 窗口数)。
+
+### 10.3 改动
+
+- `rebuild_units` 改为集合式：一条聚合算 `file_count`/`available_file_count`，一条相关子查询算 `preferred_file_id`（`ORDER BY f.file_revision DESC, f.file_id ASC LIMIT 1`，与原逐条逻辑同序），一条 `INSERT ... SELECT ... ON CONFLICT DO UPDATE`。SQLite 的 upsert+SELECT 解析歧义用 `WHERE true` 消除；因此变成死代码的 `coverage_units` 一并删除。
+- `publish.rs` 窗口归约改为**按文件逐条增量**（`PendingChange` 向量），窗口代价与「本窗口真正改动的文件数」成正比。
+- 回归修复：首文件时条目卡片尚不存在，增量路径内部会回退一次全量重算，若随后继续跑剩余增量会把同一批文件重复计入（`file_publication::twelve_episodes_two_versions_reduces_to_one_item_twenty_four_files` 实测 `left: 47, right: 24`）。修法：窗口归约前判断卡片是否存在，不存在则只做一次全量重算并跳过其余增量。
+
+### 10.4 改后（`release`，同机）
+
+| 集数 | 改前 | 改后 | 倍数 |
+|---|---|---|---|
+| 500 | 336 ms | 163 ms | 2.1× |
+| 1000 | 2,210 ms | 1,096 ms | 2.0× |
+| 2000 | 17,043 ms | 1,757–1,763 ms | 9.7× |
+| 10000 | 从未跑完（>1800 s 被看门狗 kill；debug 8m25s 不返回） | **60,889 ms，`RAW_EXIT=0`** | 首次跑完 |
+
+10k 用例自打印的 Step 2 指标（原文）：
+
+```text
+扫描: 100 批 × 100 文件 = 10000 集，实测总时长 60889 ms，吞吐 164.2 文件/秒
+单批提交（含等待持锁）: p50=530 ms, p95=1286 ms, max=1394 ms
+并发心跳 51 次，端到端延迟: p50=1049 ms, p95=2430 ms, max=3965 ms
+心跳状态码分布: {200: 51}；busy(503/429)=0；非 2xx=[]
+WAL: 1128912 -> 6212992 字节（增长 5084080）
+进程 RSS: 40336 -> 25984 KiB（增长 -14352）
+锁等待: 未测得（无公开计数器）
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 61.13s
+```
+
+用例断言全过，包括 Task 19 Step 1 点名的三项：同一 Media 长到 10k 集后心跳**写作用域不增长**、逐表写集合相同、不拥有该单元的 Library 未被写；并发扫描期间 51 次心跳全部 2xx、无 503/429。
+
+### 10.5 本节 `未跑`（不外推）
+
+- 锁等待纯值（无公开计数器，只有「事务时长 + 排队」上界）
+- 100k Media / 1M Playback 规模
+- Task 19 Step 4 的「临时服务并发真实 HTTP 观察」（本轮只有 in-process `oneshot` 路由，未起真实监听端口）
+- S1 读作用域计数（`READ_SCOPE_UNAVAILABLE`，需新增 store 侧公开计数器）
+- 1000 集以下之外的其他 profile（debug 下 10k 未重跑，历史记录为 8m25s 不返回）
+
+### 10.6 改动后的回归门（本轮实测）
+
+| 门 | 命令 | 时间窗（UTC） | 原始结果 | 日志 |
+|---|---|---|---|---|
+| store 全 crate | `cargo test -p store` | 2026-10-22T02:16:45Z → 02:18:37Z | 71 targets / 373 passed / **0 failed**；`RAW_EXIT[store_tests]=0` | `/private/tmp/task19-verify2.log` |
+| 争用 target（全 4 用例） | `cargo test -p api --release --test storage_contention` | 02:20:52Z → 02:21:51Z | `test result: ok. 4 passed; 0 failed; ...; finished in 58.95s`；`RAW_EXIT=0` | `/private/tmp/task19-api-verify.log` |
+| 工作区（与上轮同口径，带具名 10k skip） | `cargo test --workspace -- --skip concurrent_scan_of_ten_thousand_episodes_keeps_heartbeat_write_scope_bounded` | 02:27:07Z → 02:35:31Z（504 s） | **338 targets / 2467 passed / 0 failed / 10 ignored**；`RAW_EXIT[workspace]=0`、`WORKSPACE_EXIT=0` | `/private/tmp/task19-workspace-gate.log`（342,851 B，md5 `22e0b760566595ba5290064266257bcb`） |
+
+**一次抖动如实披露**：`cargo test -p api`（debug 全 crate，02:21:51Z→02:26:42Z）出现过 1 个失败——`request_admission::site_over_capacity_degrades_to_per_site_failure`（断言「占位请求应先占满 4 个搜索 permit」）。该用例与存储/发布路径无关，单独重跑 **3/3 通过**（每次 0.29 s），随后的工作区门同用例通过，判定为满载时序抖动，不记为代码缺陷，也不据此宣称「api 全绿」——api 的绿以上表工作区门为准。
