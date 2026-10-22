@@ -11,7 +11,6 @@ pub mod reduce;
 pub mod reduce_incremental;
 pub mod rename;
 pub mod rename_durable;
-mod rename_playback;
 pub mod rename_sidecars;
 pub mod source;
 pub mod transfer;

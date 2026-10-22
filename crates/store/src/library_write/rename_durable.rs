@@ -208,8 +208,7 @@ impl Store {
         // resolved form is only used for ownership checks (see ensure_*).
         let changed = tx.execute(
             "UPDATE library_files
-             SET path_key = norm_path_key(?2), display_path = ?2, root_id = ?3, library_id = ?4,
-                 file_revision = file_revision + 1
+             SET path_key = norm_path_key(?2), display_path = ?2, root_id = ?3, library_id = ?4
              WHERE file_id = ?1 AND file_revision = ?5 AND source_version = ?6",
             params![
                 id,
@@ -225,12 +224,6 @@ impl Store {
                 "file {id} changed during rename publish"
             )));
         }
-        super::rename_playback::carry_resume_bindings(
-            &tx,
-            &id,
-            owned.revision,
-            &owned.source_version,
-        )?;
         // Coverage rows carry composite FK (file_id, library_id, media_id).
         tx.execute(
             "UPDATE library_file_units SET library_id = ?2 WHERE file_id = ?1",

@@ -169,22 +169,33 @@ fn reparent_recomputes_both_sides_when_source_keeps_other_units() {
     integrity_clean(&fx, fx.libs[1], "b");
 }
 
-fn progress(fx: &Fx, position_ms: i64) {
-    use store::playback::{BoundPlaybackEvent, EventOutcome, PlaybackEventType};
+fn issue(fx: &Fx) -> String {
     let unit = domain::UnitKey::new(2, 1);
-    let file = &fx.moved;
-    let session_id = fx
-        .store
+    fx.store
         .issue_play_session(
             fx.user,
             "dev",
-            file.file_id,
+            fx.moved.file_id,
             fx.media,
             unit,
-            &file.version,
+            &fx.moved.version,
             1_000,
         )
-        .unwrap();
+        .unwrap()
+}
+
+fn progress(fx: &Fx, position_ms: i64) {
+    let session_id = issue(fx);
+    assert_eq!(
+        report(fx, session_id, position_ms),
+        store::playback::EventOutcome::Applied
+    );
+}
+
+fn report(fx: &Fx, session_id: String, position_ms: i64) -> store::playback::EventOutcome {
+    use store::playback::{BoundPlaybackEvent, PlaybackEventType};
+    let unit = domain::UnitKey::new(2, 1);
+    let file = &fx.moved;
     let generation = fx
         .store
         .play_session_binding(fx.user, "dev", &session_id)
@@ -218,9 +229,18 @@ fn progress(fx: &Fx, position_ms: i64) {
         play_method: None,
         event_type: PlaybackEventType::Progress,
     };
+    fx.store.commit_playback_event(&event, 1_000).unwrap()
+}
+
+#[test]
+fn active_session_survives_reparent_of_unchanged_bytes() {
+    let fx = fixture(false);
+    let session = issue(&fx);
+    reparent(&fx);
     assert_eq!(
-        fx.store.commit_playback_event(&event, 1_000).unwrap(),
-        EventOutcome::Applied
+        report(&fx, session, 900_000),
+        store::playback::EventOutcome::Applied,
+        "a path move must not invalidate the session the client is playing"
     );
 }
 
