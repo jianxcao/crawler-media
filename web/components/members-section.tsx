@@ -20,6 +20,7 @@ import { Modal } from "@/components/modal";
 import {
   createMember,
   deleteMember,
+  waitForUserRemoval,
   listMembers,
   resetMemberPassword,
   setMemberStatus,
@@ -110,10 +111,19 @@ export function MembersSection() {
     });
     if (!accepted) return;
     try {
-      await deleteMember(member.id);
-      setMembers((rows) => rows?.filter((row) => row.id !== member.id) ?? rows);
-      setEditing(null);
-      toast.success("成员已删除");
+      const accepted = await deleteMember(member.id);
+      const status = await waitForUserRemoval(accepted);
+      if (status.state === "succeeded") {
+        setMembers((rows) => rows?.filter((row) => row.id !== member.id) ?? rows);
+        setEditing(null);
+        toast.success("成员已删除");
+      } else if (status.state === "failed") {
+        toast.error(`删除失败（${status.phase}）：${status.error ?? "未知错误"}，将自动重试`);
+        await reload();
+      } else {
+        toast.info(`删除进行中（${status.phase}），完成后成员会从列表移除`);
+        await reload();
+      }
     } catch (error) {
       toast.error(`删除失败：${(error as Error).message}`);
     }

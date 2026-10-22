@@ -1,4 +1,5 @@
 import { request } from "@/lib/http";
+import type { UserRemovalStatus } from "@/lib/api/members";
 
 /** 后端统一响应信封（自有 API：{ok, data} / {ok, error}）。 */
 interface ApiEnvelope<T> {
@@ -137,10 +138,10 @@ export function updateUser(
   );
 }
 
-/** 删除成员（admin 不可删）。 */
-export function deleteUser(id: string): Promise<{ deleted: boolean }> {
+/** 删除成员（admin 不可删）：返回受理的删除操作状态，见 `members.ts` 的 `UserRemovalStatus`。 */
+export function deleteUser(id: string): Promise<UserRemovalStatus> {
   return unwrap(
-    request<ApiEnvelope<{ deleted: boolean }>>(`/users/${id}`, {
+    request<ApiEnvelope<UserRemovalStatus>>(`/users/${id}`, {
       method: "DELETE",
     }),
   );

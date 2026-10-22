@@ -78,6 +78,42 @@ export async function resetMemberPassword(
   return { id: user.id, username: user.login, password };
 }
 
-export function deleteMember(id: string): Promise<void> {
-  return unwrap(request<ApiEnvelope<void>>(`/users/${id}`, { method: "DELETE" }));
+/** 用户删除操作状态：`DELETE /users/{id}` 受理（202）与 `GET /users/removals/{op}` 共用。 */
+export interface UserRemovalStatus {
+  operation_id: string;
+  user_id: string;
+  phase: "disabling" | "cleaning" | "finalizing" | "succeeded" | string;
+  state: "pending" | "failed" | "succeeded";
+  error: string | null;
+}
+
+/** 受理删除：返回操作状态，而不是“已删除”。成员行只有 state=succeeded 才可移除。 */
+export function deleteMember(id: string): Promise<UserRemovalStatus> {
+  return unwrap(request<ApiEnvelope<UserRemovalStatus>>(`/users/${id}`, { method: "DELETE" }));
+}
+
+export function getUserRemoval(operationId: string): Promise<UserRemovalStatus> {
+  return unwrap(
+    request<ApiEnvelope<UserRemovalStatus>>(
+      `/users/removals/${encodeURIComponent(operationId)}`,
+    ),
+  );
+}
+
+/**
+ * 轮询直到删除离开 pending（成功或失败可见），或超过 `attempts` 次仍 pending 时返回最后状态。
+ */
+export async function waitForUserRemoval(
+  accepted: UserRemovalStatus,
+  options: { attempts?: number; intervalMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<UserRemovalStatus> {
+  const attempts = options.attempts ?? 30;
+  const intervalMs = options.intervalMs ?? 500;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  let status = accepted;
+  for (let i = 0; i < attempts && status.state === "pending"; i += 1) {
+    await sleep(intervalMs);
+    status = await getUserRemoval(accepted.operation_id);
+  }
+  return status;
 }
