@@ -235,14 +235,15 @@ fn mark_clauses(
 }
 
 /// `played` 读的是**有效断言**（与 [`Store::effective_played_assertion`] 同一优先级）：
-/// 集 > 季 > 整个作品；没有任何断言行就是未看。所以未看不能用 `favorite` 那种"存在即真"。
+/// 最新 `played_changed_at_ms` 胜，同一时刻再按 集 > 季 > 整个作品；没有任何断言行就是未看。所以未看不能用 `favorite` 那种"存在即真"。
 fn played_clause(branch: Branch, user: &str, value: i64, bindings: &mut Bindings) -> String {
     let expected = bindings.push(SqlValue::Integer(value));
     format!(
         "COALESCE((SELECT pu.played FROM playback_units pu \
            WHERE pu.user_id = {user} AND pu.media_id = s.media_id AND pu.has_played_assertion = 1 \
              AND ({}) \
-           ORDER BY CASE WHEN pu.episode >= 0 THEN 2 WHEN pu.season >= 0 THEN 1 ELSE 0 END DESC \
+           ORDER BY COALESCE(pu.played_changed_at_ms, 0) DESC, \
+             CASE WHEN pu.episode >= 0 THEN 2 WHEN pu.season >= 0 THEN 1 ELSE 0 END DESC \
            LIMIT 1), 0) = {expected}",
         assertion_scopes(branch)
     )

@@ -510,3 +510,43 @@ fn mixed_series_and_episode_types_share_one_page() {
         "offset/limit 必须在合并后的两粒度上切分"
     );
 }
+
+/// R12: the SQL played filter resolves assertions like `effective_played_assertion`: the
+/// newest change wins, a tie goes to the more specific scope.
+#[test]
+fn played_filter_follows_the_newest_assertion() {
+    let fx = Fx::new();
+    let dir = fx._dir.path().join("tv-played-time");
+    std::fs::create_dir_all(&dir).unwrap();
+    let library = create_library_tv(&fx.store, "Played", &dir);
+    let show = fx.add_show(&dir, &[(1, 1)]);
+    let user = UserId::new();
+    let mark = |scope: domain::UnitScope, played: bool, now: i64| {
+        fx.store
+            .mutate_playback(
+                show,
+                &store::playback::PlaybackMutation {
+                    user_id: user,
+                    scope,
+                    played: Some(played),
+                    favorite: None,
+                    expected_generation: None,
+                },
+                now,
+            )
+            .unwrap();
+    };
+    mark(domain::UnitScope::Episode { season: 1, episode: 1 }, true, 1_000);
+    mark(domain::UnitScope::Season(1), false, 2_000);
+    let mut query = base_query(ProtocolParent::Library(library));
+    query.user_id = user;
+    query.include_types = vec![ProtocolItemType::Episode];
+    query.is_played = Some(true);
+    let page = fx.store.protocol_item_page(&query).unwrap();
+    assert_eq!(page.total, 0, "season false@2000 beats episode true@1000: {page:?}");
+    let rust = fx
+        .store
+        .effective_played_assertion(user, show, UnitKey::new(1, 1))
+        .unwrap();
+    assert!(rust.is_none_or(|a| !a.played), "Rust and SQL agree");
+}

@@ -485,3 +485,40 @@ fn event_activity_clock_is_seconds_not_milliseconds() {
     assert_eq!(activity, 1_700_000_010);
     assert_eq!(played_ms, Some(1_700_000_010_000));
 }
+
+fn mark(f: &Fixture, scope: domain::UnitScope, played: bool, now_ms: i64) {
+    f.store
+        .mutate_playback(
+            f.media_id,
+            &store::playback::PlaybackMutation {
+                user_id: user(),
+                scope,
+                played: Some(played),
+                favorite: None,
+                expected_generation: None,
+            },
+            now_ms,
+        )
+        .unwrap();
+}
+
+#[test]
+fn newer_season_assertion_overrides_older_episode_and_ties_go_to_episode() {
+    let (_tmp, f) = seed(&[(1, 1), (1, 2)]);
+    let e01 = UnitKey::new(1, 1);
+    mark(&f, domain::UnitScope::Episode { season: 1, episode: 1 }, true, 1_000);
+    assert!(f.store.effective_played_assertion(user(), f.media_id, e01).unwrap().unwrap().played);
+    mark(&f, domain::UnitScope::Season(1), false, 2_000);
+    let effective = f.store.effective_played_assertion(user(), f.media_id, e01).unwrap();
+    assert!(
+        effective.as_ref().is_none_or(|a| !a.played),
+        "season false@2000 must beat episode true@1000: {effective:?}"
+    );
+
+    // Same change time: the more specific episode assertion wins.
+    let (_tmp2, g) = seed(&[(1, 1), (1, 2)]);
+    mark(&g, domain::UnitScope::Season(1), true, 3_000);
+    mark(&g, domain::UnitScope::Episode { season: 1, episode: 1 }, false, 3_000);
+    let tie = g.store.effective_played_assertion(user(), g.media_id, e01).unwrap();
+    assert!(tie.is_none_or(|a| !a.played), "tie goes to the episode scope");
+}

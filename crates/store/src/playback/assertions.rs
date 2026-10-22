@@ -88,27 +88,30 @@ impl Store {
             (PlayedAssertionScope::Season, unit.season, UNIT_WHOLE),
             (PlayedAssertionScope::WholeItem, UNIT_WHOLE, UNIT_WHOLE),
         ];
-        for (scope, season, episode) in candidates {
+        // The newest assertion wins; on an equal change time the more specific scope wins.
+        // `played_clause` in the protocol SQL orders identically.
+        let mut best: Option<((i64, u8), EffectiveAssertion)> = None;
+        for (specificity, (scope, season, episode)) in candidates.into_iter().rev().enumerate() {
             if scope == PlayedAssertionScope::Episode && unit.is_whole() {
                 continue;
             }
-            let row: Option<(bool, i64)> = self
+            let row: Option<(bool, i64, Option<i64>)> = self
                 .library
                 .query_row(
-                    "SELECT played, has_played_assertion FROM playback_units
+                    "SELECT played, has_played_assertion, played_changed_at_ms FROM playback_units
                      WHERE user_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4",
                     params![user.to_string(), media.to_string(), season, episode],
-                    |r| Ok((r.get::<_, i64>(0)? != 0, r.get(1)?)),
+                    |r| Ok((r.get::<_, i64>(0)? != 0, r.get(1)?, r.get(2)?)),
                 )
                 .optional()?;
-            let Some((played, has_assertion)) = row else {
+            let Some((played, 1, changed_at)) = row else {
                 continue;
             };
-            if has_assertion == 0 {
-                continue;
+            let key = (changed_at.unwrap_or(0), specificity as u8);
+            if best.as_ref().is_none_or(|(current, _)| key > *current) {
+                best = Some((key, EffectiveAssertion { scope, played }));
             }
-            return Ok(Some(EffectiveAssertion { scope, played }));
         }
-        Ok(None)
+        Ok(best.map(|(_, assertion)| assertion))
     }
 }
