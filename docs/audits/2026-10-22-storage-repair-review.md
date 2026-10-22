@@ -490,3 +490,13 @@ Remaining risks:
 - 未跑完整workspace、Web/浏览器/NAS、真实FFmpeg或旧live库修复。本轮业务代码与测试零修改；文档记录需修复项，不自动迁移历史数据、不重启用户服务。
 
 Spec：3项（P1两项、P2一项）；Standards：0项独立finding。最严重的Spec风险是有效重试饥饿与改名后Probe版本拒绝，不能宣告两项问题已完整关闭。
+
+### Probe 复审修复记录（P01–P03）
+
+| 项 | 提交 | 修复 | 回归测试（先红后绿） | 性能影响 |
+|---|---|---|---|---|
+| P02 | d9525b9 | 唯一内容 token 编码器 `library::current_source_version`（api `current_source_version`/`observe_source` 仅转调）：STRM=`strm:sha256(目标原始字节)`，普通文件=`file:size:mtime_ns:dev:ino`，不含路径。改名完成阶段（同步改名也走同一持久流程：intent→磁盘→完成）在锁外 observe 目标并在 CAS 事务内比较：token 相同仅改 path/root/library；不同（跨文件系统 copy 产生新 inode、或字节变化）则 revision+1、新 token、失效详情/指纹/阶段并重挂探测义务。崩溃恢复走同一 complete。fixture 发布磁盘上已存在的文件时使用生产 token。 | `api/tests/source_token_rename.rs`（6）：同 root/跨 root/跨 Library、STRM 改名与目标变化、新 inode 目标、磁盘阶段后崩溃恢复、编码器唯一 | 普通文件 token 由 sha256 改为单次 stat 拼接（更省）；改名完成阶段多一次 stat（STRM 一次读）。 |
+| P03 | ccea5bd | `bind_placed_file_source` 单事务：行上有放置 stat 证据（stat_known 且 size/mtime 等于观测）且冷行属于 expected 代际（或无冷行）→ 原子重绑 file_details 的 source_revision/source_version，保留 tracks/chapters，删除以占位 token 为 context 的指纹/阶段/样本；否则全量失效（`advance_to_new_content`，与 replace 共用）。Transfer 发布时写入放置 stat 证据。 | `store/tests/placed_source_bind.rs`（4）：同字节冷行重绑可读、无冷行、字节已变失效、陈旧 expected 拒绝且无半代际、重复绑定被拒 | 一次 PK 查询 + 一次冷行 UPDATE；无额外 IO。 |
+| P01 | d469499 | `probe_stage_state.dispatched_until_ms` 租约；`claim_due_probe_stages` 在一个事务内按 `(deadline,file_id,context,stage)` 取并租约；派发在计入 limit 前判定：上下文≠当前权威 context（FileVersion token+采样 profile+有效时长）→ 删除退役；Complete → 退役；同文件只入队一次；AlreadyRunning/Waiting/Disabled 不算成功，由租约延后；元数据缺失（时长未知）不据此退役。记录声纹阶段时 `adopt_probe_context` 退役其他 context；源变化时 `advance_to_new_content` 清空全部阶段（新源计数独立）。迟到 worker 的 job+context CAS 命中已删行 → 0 行，重启不复活。 | `api/tests/probe_context_retry.rs`（4）：32/1000 条旧 context 在前仍能在有限批次内入队、当前成功后旧 context 退役、迟到 worker/重启不复活、租约避免每 tick 重复命中 | 部分索引改为 `(next_retry_at_ms,file_id,context_key,stage)` 且排除 active 行：取窗为索引顺序扫描；每次调用最多扫描 `limit×32` 行，旧行被删除后不再占窗。 |
+
+剩余风险：同文件系统内 `mtime` 被外部改回且 inode 不变的同长替换无法用 stat 识别（与既有 stat 证据政策一致）；跨文件系统移动一律按新源重探测（无字节级同一性证明）；租约 10 分钟内作业丢失会延后重试一个租约周期；profile 变更后的旧 context 在下一次派发或记录时才退役（不占用已排序窗口之外的工作）。
