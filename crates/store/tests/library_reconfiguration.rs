@@ -718,3 +718,57 @@ fn success_leaves_no_file_owned_by_a_foreign_or_missing_root() {
         "the root that still owns a file must not be pruned"
     );
 }
+
+/// `config_revision = 0` is the real initial revision, not a wildcard: once the
+/// Library moved to revision 1, a non-empty write still pinned to 0 is refused
+/// and publishes nothing.
+#[test]
+fn initial_zero_scope_is_rejected_after_reconfiguration() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let movie = media(&store, "00000000-0000-0000-0000-0000000000c9", MediaKind::Movie);
+    let library = store
+        .create_library(MediaKind::Movie, "Movies", &["/z/b"], "everyone", true, &[])
+        .unwrap();
+    let lib_id: domain::LibraryId = library.id.parse().unwrap();
+    assert_eq!(store.library_config_revision(&library.id).unwrap(), 0);
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    store
+        .begin_library_reconfiguration(
+            &LibraryReconfiguration {
+                operation_id: operation_id.clone(),
+                library_id: lib_id,
+                expected_revision: 0,
+                root_paths: Some(vec![PathBuf::from("/z")]),
+                display_locale: None,
+            },
+            2_000,
+        )
+        .unwrap();
+    let status = store.advance_library_operation(&operation_id, 2_100, 10).unwrap();
+    assert_eq!(status.state, "succeeded");
+    assert_eq!(store.library_config_revision(&library.id).unwrap(), 1);
+    assert_eq!(store.library_lifecycle_state(&library.id).unwrap(), "ready");
+
+    let root = root_id_of(&store, &library.id, Path::new("/z"));
+    let file = library_file(lib_id, &movie, &root, "/z/Film/stale.mkv");
+    let stale_zero = WriteScope {
+        library_id: lib_id,
+        config_revision: 0,
+    };
+    let refused = store.publish_files(&stale_zero, &[publication_for(&file)], 2_200);
+    assert!(
+        matches!(refused, Err(store::StoreError::Protected(_))),
+        "a revision-0 writer must be refused after reconfiguration, got {refused:?}"
+    );
+    assert!(store.get_file_version(file.file_id).unwrap().is_none());
+
+    let current = WriteScope {
+        library_id: lib_id,
+        config_revision: 1,
+    };
+    store
+        .publish_files(&current, &[publication_for(&file)], 2_300)
+        .unwrap();
+    assert!(store.get_file_version(file.file_id).unwrap().is_some());
+}

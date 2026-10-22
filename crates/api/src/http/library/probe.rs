@@ -227,7 +227,7 @@ mod tests {
                 &guard,
                 &media,
                 &dest,
-                &crate::claim::ClaimedFacts::unidentified(),
+                &crate::claim::ClaimedFacts::for_path(media.kind, &dest),
             )
             .unwrap()
         };

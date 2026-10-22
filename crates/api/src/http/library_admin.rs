@@ -447,7 +447,7 @@ pub(crate) async fn claim_unidentified(
             "只能认领媒体库根目录内的文件",
         );
     }
-    let facts = crate::claim::ClaimedFacts::unidentified();
+    let facts = crate::claim::ClaimedFacts::for_path(media.kind, std::path::Path::new(path));
     let file = match crate::claim::publish_claimed_file(
         &store,
         &media,

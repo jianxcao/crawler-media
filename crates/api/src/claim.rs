@@ -42,14 +42,19 @@ pub(crate) struct ClaimedFacts {
 }
 
 impl ClaimedFacts {
-    /// Facts parsed out of the file name; coverage widens to every episode the
-    /// release spans (a single episode stays one unit).
-    pub(crate) fn from_release(release: &Release) -> Self {
+    /// Facts parsed out of the file name. Coverage spans every episode the
+    /// release names; only a movie/video defaults to the whole-work unit. An
+    /// unknown TV episode carries no coverage instead of a synthesized whole.
+    pub(crate) fn from_release(kind: MediaKind, release: &Release) -> Self {
         let units: Vec<UnitKey> = release
             .covered_episodes()
             .into_iter()
             .map(|(season, episode)| UnitKey::new(season as i32, episode as i32))
             .collect();
+        let units = match kind {
+            MediaKind::Tv => units,
+            _ => vec![UnitKey::WHOLE],
+        };
         Self {
             resolution: release.resolution.clone(),
             codec: release.codec.clone(),
@@ -57,26 +62,25 @@ impl ClaimedFacts {
             quality_source: QualitySource::Release,
             confidence: Confidence::High,
             filter_score: None,
-            units: if units.is_empty() {
-                vec![UnitKey::WHOLE]
-            } else {
-                units
-            },
+            units,
         }
     }
 
-    /// An administrator claim identified the media but not the episode: one
-    /// whole-work unit and no parsed quality facts.
-    pub(crate) fn unidentified() -> Self {
-        Self {
-            resolution: None,
-            codec: None,
-            hdr: None,
-            quality_source: QualitySource::Release,
-            confidence: Confidence::High,
-            filter_score: None,
-            units: vec![UnitKey::WHOLE],
-        }
+    /// Facts for an administrator claim onto an existing Media: the file name
+    /// at `path` is parsed so a named multi-episode file keeps its coverage.
+    pub(crate) fn for_path(kind: MediaKind, path: &Path) -> Self {
+        let parsed = release::parse(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default(),
+        );
+        Self::from_release(kind, &parsed)
+    }
+
+    /// Coverage this claim asserts.
+    #[cfg(test)]
+    pub(crate) fn units(&self) -> &[UnitKey] {
+        &self.units
     }
 }
 
@@ -117,9 +121,7 @@ pub(crate) fn publish_claimed_file(
             (file_id, version)
         }
     };
-    let config_revision = store
-        .library_config_revision(&owner.id)
-        .unwrap_or(0);
+    let config_revision = store.library_config_revision(&owner.id)?;
     let locale = store::library_query::library_display_locale(store, library_id)
         .ok()
         .flatten()
@@ -166,7 +168,7 @@ pub(crate) fn publish_claimed_file(
     store.publish_files(
         &WriteScope {
             library_id,
-            config_revision: 0,
+            config_revision,
         },
         &[PublicationRequest {
             file: &file,
@@ -329,7 +331,7 @@ fn commit_claim(
     media: &Media,
     plan: &ClaimPlan,
 ) -> Result<LibraryFile, ApiError> {
-    let facts = ClaimedFacts::from_release(&plan.release);
+    let facts = ClaimedFacts::from_release(plan.media.kind, &plan.release);
     let store = state.store.lock();
     let file = publish_claimed_file(&store, media, &plan.dest, &facts)?;
     if let Err(error) = store.delete_unidentified(unidentified) {
@@ -456,7 +458,7 @@ mod tests {
         std::fs::write(&dest, b"matrix").unwrap();
 
         let file =
-            publish_claimed_file(&store, &media, &dest, &ClaimedFacts::unidentified()).unwrap();
+            publish_claimed_file(&store, &media, &dest, &ClaimedFacts::for_path(media.kind, &dest)).unwrap();
         assert_eq!(file.root_id, inner_root.id);
         assert_eq!(file.library_id.to_string(), library.id);
     }
@@ -531,11 +533,43 @@ mod tests {
             "the strict owner lookup resolves the symlink and does find the Library"
         );
 
-        match publish_claimed_file(&store, &media, &dest, &ClaimedFacts::unidentified()) {
+        match publish_claimed_file(&store, &media, &dest, &ClaimedFacts::for_path(media.kind, &dest)) {
             Err(StoreError::Invalid(message)) => {
                 assert!(message.contains("contains"), "{message}")
             }
             other => panic!("expected the lexical root selection to refuse, got {other:?}"),
         }
+    }
+
+    /// Administrator claims parse the real file name: a named multi-episode TV
+    /// file keeps every episode, an unknown TV
+    /// episode asserts no coverage, and only movie/video default to whole.
+    #[test]
+    fn claim_coverage_follows_the_file_name_and_media_kind() {
+        let units = |kind, name: &str| {
+            ClaimedFacts::for_path(kind, Path::new(name)).units().to_vec()
+        };
+        assert_eq!(
+            units(MediaKind::Tv, "Show.S01E01-E02.1080p.mkv"),
+            vec![UnitKey::new(1, 1), UnitKey::new(1, 2)]
+        );
+        assert!(units(MediaKind::Tv, "Show.Behind.the.Scenes.mkv").is_empty());
+        assert_eq!(units(MediaKind::Movie, "The Matrix.1999.mkv"), vec![UnitKey::WHOLE]);
+    }
+
+    /// A Library reconfigured away from revision 0 accepts a claim published
+    /// under its current revision (0 is no longer a wildcard scope).
+    #[test]
+    fn claim_publishes_under_the_current_config_revision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("media");
+        let (store, media, library) = fixture(tmp.path(), &[&root]);
+        let dest = root.join("The Matrix.1999.mkv");
+        std::fs::write(&dest, b"matrix").unwrap();
+        assert_eq!(store.library_config_revision(&library.id).unwrap(), 0);
+        let file =
+            publish_claimed_file(&store, &media, &dest, &ClaimedFacts::for_path(media.kind, &dest))
+                .unwrap();
+        assert_eq!(store.get_file_units(file.file_id).unwrap(), vec![UnitKey::WHOLE]);
     }
 }

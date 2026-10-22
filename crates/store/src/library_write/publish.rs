@@ -379,14 +379,12 @@ pub(crate) fn ensure_library_writable(tx: &Connection, lib: &str) -> Result<(), 
     Ok(())
 }
 
-/// Verify the caller's expected configuration revision, when it pinned one.
+/// Verify the caller's expected configuration revision. `0` is the real
+/// initial revision of a Library, never an "unspecified" wildcard.
 pub(crate) fn ensure_config_revision(
     tx: &Connection,
     scope: &WriteScope,
 ) -> Result<(), StoreError> {
-    if scope.config_revision == 0 {
-        return Ok(());
-    }
     let current: i64 = tx.query_row(
         "SELECT config_revision FROM libraries WHERE library_id = ?1",
         params![scope.library_id.to_string()],
