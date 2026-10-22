@@ -627,3 +627,72 @@ fn genre_id_from_the_displayed_name_round_trips() {
     assert_eq!(genre_roundtrip_page.total, 1);
     assert_eq!(genre_roundtrip_page.items[0].item, TypedItemId::Work(drama));
 }
+
+fn library_db(fx: &Fx) -> rusqlite::Connection {
+    rusqlite::Connection::open(fx._dir.path().join("data").join("library.db")).unwrap()
+}
+
+/// R23: an Episode search matches the episode's own title/overview, not the
+/// series' work-level fields.
+#[test]
+fn episode_search_reads_episode_level_fields() {
+    let fx = Fx::new();
+    let dir = fx._dir.path().join("tv-episode-search");
+    std::fs::create_dir_all(&dir).unwrap();
+    let library = create_library_tv(&fx.store, "Shows", &dir);
+    let show = fx.add_show(&dir, &[(1, 1), (1, 2)]);
+    library_db(&fx)
+        .execute(
+            "INSERT INTO media_episodes (media_id, season, episode, locale, title, overview, revision)
+             VALUES (?1, 1, 2, 'zh-CN', 'Second', 'An episode needle.', 1)",
+            rusqlite::params![show.to_string()],
+        )
+        .unwrap();
+
+    let mut query = base_query(ProtocolParent::Library(library));
+    query.include_types = vec![ProtocolItemType::Episode];
+    query.search_term = Some("NEEDLE".into());
+    let page = fx.store.protocol_item_page(&query).unwrap();
+    assert_eq!(page.total, 1, "{page:?}");
+    assert_eq!(
+        page.items[0].item,
+        TypedItemId::Unit {
+            media: show,
+            key: UnitKey::new(1, 2),
+        }
+    );
+    query.search_term = Some("Show".into());
+    let page = fx.store.protocol_item_page(&query).unwrap();
+    assert_eq!(page.total, 0, "the series title is not an episode field");
+}
+
+/// R23: adopted work fields are read in the Library display locale, not the
+/// lexically first locale.
+#[test]
+fn search_reads_the_library_display_locale() {
+    let fx = Fx::new();
+    let movie = fx.add_movie("Localized");
+    let db = library_db(&fx);
+    for (locale, overview) in [("en-US", "english plot"), ("zh-CN", "chinese plot")] {
+        db.execute(
+            "INSERT INTO media_metadata (media_id, locale, title, overview, revision)
+             VALUES (?1, ?2, 'Localized', ?3, 1)",
+            rusqlite::params![movie.to_string(), locale, overview],
+        )
+        .unwrap();
+    }
+    db.execute(
+        "UPDATE libraries SET display_locale = 'zh-CN' WHERE library_id = ?1",
+        rusqlite::params![fx.alpha.to_string()],
+    )
+    .unwrap();
+    let mut query = base_query(ProtocolParent::Library(fx.alpha));
+    query.search_term = Some("chinese".into());
+    assert_eq!(fx.store.protocol_item_page(&query).unwrap().total, 1);
+    query.search_term = Some("english".into());
+    assert_eq!(
+        fx.store.protocol_item_page(&query).unwrap().total,
+        0,
+        "the lexically first locale must not stand in for the display locale"
+    );
+}

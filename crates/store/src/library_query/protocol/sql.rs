@@ -16,29 +16,55 @@ use super::order;
 use super::scope::{Granularity, Scope};
 use crate::library_query::items::Bindings;
 
+/// `library_items` 加上 `pref_locale`：Library 展示语言，缺省回落实例默认语言
+/// （与详情页 `library_display_locale` 同链）。别名仍是 `i`，作用域片段原样可用。
+fn items_with_locale_sql(scope: &Scope) -> String {
+    format!(
+        "(SELECT li.*, COALESCE(NULLIF(TRIM(l.display_locale), ''), {}) AS pref_locale \
+           FROM library_items li LEFT JOIN libraries l ON l.library_id = li.library_id) i",
+        scope.instance_locale
+    )
+}
+
 /// 上次有效的作品级 NFO 字段（`fields_json` 是裸 [`domain::MetadataFields`]）。
 ///
-/// 同一媒体可能有多个 locale/input_key，这里按字典序取第一个，保证离线可重放；
-/// locale 偏好由 Task 7/8 的合成结果负责，协议页只回放已采纳的那一份。
-pub(super) const NFO_JSON: &str = "(SELECT mi.fields_json FROM library_metadata_inputs mi \
-     WHERE mi.library_id = i.library_id AND mi.media_id = i.media_id \
-       AND mi.entity_scope = 'work' AND mi.parse_state = 'valid' \
-     ORDER BY mi.locale, mi.input_key LIMIT 1)";
+/// 同一媒体可能有多个 locale/input_key：先取 Library→实例 语言链命中的那份，
+/// 其余按字典序，保证离线可重放（R23：不再按字典序取首个语言）。
+///
+/// SQLite 不接受标量子查询 `ORDER BY` 里引用外层列，所以偏好语言用
+/// `COALESCE(命中偏好的一份, 字典序首份)` 两段表达。
+const NFO_JSON: &str = "COALESCE(\
+     (SELECT mi.fields_json FROM library_metadata_inputs mi \
+       WHERE mi.library_id = i.library_id AND mi.media_id = i.media_id \
+         AND mi.entity_scope = 'work' AND mi.parse_state = 'valid' \
+         AND mi.locale = i.pref_locale \
+       ORDER BY mi.input_key LIMIT 1), \
+     (SELECT mi.fields_json FROM library_metadata_inputs mi \
+       WHERE mi.library_id = i.library_id AND mi.media_id = i.media_id \
+         AND mi.entity_scope = 'work' AND mi.parse_state = 'valid' \
+       ORDER BY mi.locale, mi.input_key LIMIT 1))";
 
 /// `scoped` 预置：媒体级事实，不读现场 NFO、不查 cache、不联网。
+///
+/// `pref_locale` 留给分集支谓词：分集标题/简介按同一条语言链取。
 pub(super) fn scoped_cte(scope: &Scope) -> String {
     format!(
         "scoped AS (SELECT i.library_id AS library_id, i.media_id AS media_id, i.kind AS kind, \
            i.title AS title, i.added_at_sort AS added_at_sort, \
            {NFO_JSON} AS nfo_json, \
            mm.details_json AS adopted_json, mm.genres_json AS adopted_genres, \
-           mm.overview AS adopted_overview, mm.original_title AS adopted_original \
-         FROM library_items i \
+           mm.overview AS adopted_overview, mm.original_title AS adopted_original, \
+           i.pref_locale AS pref_locale \
+         FROM {items} \
          LEFT JOIN media_metadata mm ON mm.media_id = i.media_id \
-           AND mm.locale = (SELECT m2.locale FROM media_metadata m2 \
-             WHERE m2.media_id = i.media_id ORDER BY m2.locale LIMIT 1) \
+           AND mm.locale = COALESCE(\
+             (SELECT m2.locale FROM media_metadata m2 \
+               WHERE m2.media_id = i.media_id AND m2.locale = i.pref_locale), \
+             (SELECT m2.locale FROM media_metadata m2 \
+               WHERE m2.media_id = i.media_id ORDER BY m2.locale LIMIT 1)) \
          WHERE {})",
-        scope.where_sql
+        scope.where_sql,
+        items = items_with_locale_sql(scope),
     )
 }
 

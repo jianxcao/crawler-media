@@ -44,7 +44,7 @@ pub(super) fn build(
     if let Some(clause) = facts::genre_clause(conn, &genre_values(request), scope, bindings)? {
         clauses.push(clause);
     }
-    search_clause(request, bindings, &mut clauses);
+    search_clause(request, branch, bindings, &mut clauses);
     mark_clauses(request, branch, bindings, &mut clauses);
     if let Some(clause) = facts::people_clause(conn, request, scope, bindings)? {
         clauses.push(clause);
@@ -175,8 +175,17 @@ fn genre_values(request: &ProtocolItemQuery) -> Vec<String> {
     normalized(&values)
 }
 
-/// `SearchTerm`：标题、原始标题、简介任一包含即算（只对 ASCII 做小写折叠）。
-fn search_clause(request: &ProtocolItemQuery, bindings: &mut Bindings, clauses: &mut Vec<String>) {
+/// `SearchTerm`：标题、原始标题、简介任一包含即算（Unicode casefold）。
+///
+/// 作品支看作品级字段；分集支看**本集**的标题与简介（R23）：采纳的
+/// `media_episodes` 与分集 NFO 输入，均按 `pref_locale` 语言链取一份，
+/// 不再拿剧集的作品级字段或字典序首个语言冒充分集。
+fn search_clause(
+    request: &ProtocolItemQuery,
+    branch: Branch,
+    bindings: &mut Bindings,
+    clauses: &mut Vec<String>,
+) {
     let Some(term) = request
         .search_term
         .as_deref()
@@ -186,13 +195,42 @@ fn search_clause(request: &ProtocolItemQuery, bindings: &mut Bindings, clauses: 
         return;
     };
     let needle = bindings.push(SqlValue::Text(term.to_lowercase()));
-    let fields = [
-        "s.title".to_string(),
-        "COALESCE(json_extract(s.nfo_json, '$.original_title.value'), '')".to_string(),
-        "COALESCE(json_extract(s.nfo_json, '$.overview.value'), '')".to_string(),
-        "COALESCE(s.adopted_original, '')".to_string(),
-        "COALESCE(s.adopted_overview, '')".to_string(),
-    ];
+    let fields: Vec<String> = if branch.unit() {
+        // 标量子查询的 ORDER BY 不能引用外层列：偏好语言一段、字典序兜底一段。
+        let episode = |column: &str| {
+            let base = format!(
+                "SELECT me.{column} FROM media_episodes me \
+                 WHERE me.media_id = s.media_id AND me.season = u.season \
+                   AND me.episode = u.episode"
+            );
+            format!(
+                "COALESCE(({base} AND me.locale = s.pref_locale), \
+                   ({base} ORDER BY me.locale LIMIT 1), '')"
+            )
+        };
+        let nfo_base = "SELECT mi.fields_json FROM library_metadata_inputs mi \
+             WHERE mi.library_id = s.library_id AND mi.media_id = s.media_id \
+               AND mi.entity_scope = 'episode' AND mi.season = u.season \
+               AND mi.episode = u.episode AND mi.parse_state = 'valid'";
+        let nfo = format!(
+            "COALESCE(({nfo_base} AND mi.locale = s.pref_locale ORDER BY mi.input_key LIMIT 1), \
+               ({nfo_base} ORDER BY mi.locale, mi.input_key LIMIT 1))"
+        );
+        vec![
+            episode("title"),
+            episode("overview"),
+            format!("COALESCE(json_extract({nfo}, '$.title.value'), '')"),
+            format!("COALESCE(json_extract({nfo}, '$.overview.value'), '')"),
+        ]
+    } else {
+        vec![
+            "s.title".to_string(),
+            "COALESCE(json_extract(s.nfo_json, '$.original_title.value'), '')".to_string(),
+            "COALESCE(json_extract(s.nfo_json, '$.overview.value'), '')".to_string(),
+            "COALESCE(s.adopted_original, '')".to_string(),
+            "COALESCE(s.adopted_overview, '')".to_string(),
+        ]
+    };
     let parts: Vec<String> = fields
         .iter()
         .map(|field| format!("instr(casefold({field}), {needle}) > 0"))

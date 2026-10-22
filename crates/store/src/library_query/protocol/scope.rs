@@ -43,6 +43,9 @@ pub(super) struct Scope {
     pub(super) values: Vec<rusqlite::types::Value>,
     /// 本次请求要展开的粒度。
     pub(super) granularity: Granularity,
+    /// 实例默认元数据语言的占位符（`?n`，值可为 NULL）：locale 链
+    /// Library → 实例 在 SQL 里解析（R23），不再按字典序取首个语言。
+    pub(super) instance_locale: String,
 }
 
 impl Scope {
@@ -79,10 +82,18 @@ impl Scope {
             values.push(rusqlite::types::Value::Text(media.to_string()));
             where_sql.push_str(&format!(" AND i.media_id = ?{}", values.len()));
         }
+        values.push(
+            match crate::library_query::details::metadata::instance_default_locale(store)? {
+                Some(locale) => rusqlite::types::Value::Text(locale),
+                None => rusqlite::types::Value::Null,
+            },
+        );
+        let instance_locale = format!("?{}", values.len());
         Ok(Some(Self {
             where_sql,
             values,
             granularity: granularity(request),
+            instance_locale,
         }))
     }
 }
