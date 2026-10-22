@@ -553,6 +553,15 @@ pub(crate) fn delete_file_meta_for_ledger(
     ledger_id: &str,
 ) -> Result<(), StoreError> {
     tx.execute("DELETE FROM file_details WHERE file_id = ?1", [ledger_id])?;
+    delete_derived_contexts_for_ledger(tx, ledger_id)
+}
+
+/// Drop context-keyed derived state (fingerprints, attempts, probe stages,
+/// samples) of one file; cold details are left to the caller.
+pub(crate) fn delete_derived_contexts_for_ledger(
+    tx: &rusqlite::Transaction<'_>,
+    ledger_id: &str,
+) -> Result<(), StoreError> {
     tx.execute(
         "DELETE FROM fingerprint_cache WHERE file_id = ?1",
         [ledger_id],

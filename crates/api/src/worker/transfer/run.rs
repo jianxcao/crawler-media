@@ -121,6 +121,13 @@ pub(crate) fn publish_transfer_file(
     file.poster_path = artwork.poster;
     file.backdrop_path = artwork.backdrop;
     file.still_path = artwork.still;
+    // Placement stat is the persisted evidence `bind_placed_file_source` checks
+    // to keep facts probed from these very bytes.
+    if let Some(observation) = observed_source {
+        file.size_bytes = observation.size_bytes;
+        file.modified_ns = observation.modified_ns;
+        file.stat_known = true;
+    }
     store.publish_files(
         &WriteScope {
             library_id: library_id.parse::<domain::LibraryId>()?,
