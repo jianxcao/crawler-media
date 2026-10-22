@@ -115,7 +115,7 @@ impl Store {
             .library
             .query_row(
                 "SELECT file_id, library_id, media_id, root_id, kind, source_version, path_key
-                 FROM library_files WHERE path_key = ?1 OR display_path = ?1 LIMIT 1",
+                 FROM library_files WHERE path_key = norm_path_key(?1) OR display_path = ?1 LIMIT 1",
                 params![key.as_ref()],
                 |row| {
                     Ok((

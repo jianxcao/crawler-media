@@ -202,7 +202,7 @@ impl Store {
         // resolved form is only used for ownership checks (see ensure_*).
         let changed = tx.execute(
             "UPDATE library_files
-             SET path_key = ?2, display_path = ?2, root_id = ?3, library_id = ?4,
+             SET path_key = norm_path_key(?2), display_path = ?2, root_id = ?3, library_id = ?4,
                  file_revision = file_revision + 1
              WHERE file_id = ?1 AND file_revision = ?5 AND source_version = ?6",
             params![
@@ -418,7 +418,7 @@ pub(crate) struct DestOwner {
 fn refuse_occupied(tx: &Connection, path: &str, file_id: &str) -> Result<(), StoreError> {
     let occupied: i64 = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM library_files
-                       WHERE (path_key = ?1 OR display_path = ?1) AND file_id <> ?2)",
+                       WHERE (path_key = norm_path_key(?1) OR display_path = ?1) AND file_id <> ?2)",
         params![path, file_id],
         |r| r.get(0),
     )?;
@@ -525,8 +525,8 @@ fn migrate_metadata_inputs(
         if from_library == to_library {
             tx.execute(
                 "UPDATE library_metadata_inputs
-                 SET path_key = ?2, root_id = ?3, revision = revision + 1
-                 WHERE library_id = ?4 AND path_key = ?1",
+                 SET path_key = norm_path_key(?2), root_id = ?3, revision = revision + 1
+                 WHERE library_id = ?4 AND path_key = norm_path_key(?1)",
                 params![from, to, to_root, from_library],
             )?;
         } else {
@@ -537,18 +537,18 @@ fn migrate_metadata_inputs(
                     (library_id,media_id,entity_scope,season,episode,locale,input_key,root_id,path_key,
                      parse_state,source_version,fields_json,present_fields_json,provenance_json,
                      export_id,export_digest,export_fields_json,revision)
-                 SELECT ?2,media_id,entity_scope,season,episode,locale,input_key,?3,?4,
+                 SELECT ?2,media_id,entity_scope,season,episode,locale,input_key,?3,norm_path_key(?4),
                         parse_state,source_version,fields_json,present_fields_json,provenance_json,
                         export_id,export_digest,export_fields_json,revision+1
                  FROM library_metadata_inputs
-                 WHERE library_id = ?1 AND path_key = ?5
+                 WHERE library_id = ?1 AND path_key = norm_path_key(?5)
                  ON CONFLICT DO UPDATE SET
                     root_id=excluded.root_id, path_key=excluded.path_key,
                     revision=library_metadata_inputs.revision+1",
                 params![from_library, to_library, to_root, to, from],
             )?;
             tx.execute(
-                "DELETE FROM library_metadata_inputs WHERE library_id = ?1 AND path_key = ?2",
+                "DELETE FROM library_metadata_inputs WHERE library_id = ?1 AND path_key = norm_path_key(?2)",
                 params![from_library, from],
             )?;
         }

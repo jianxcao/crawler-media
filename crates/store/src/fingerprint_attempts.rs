@@ -93,7 +93,7 @@ impl Store {
             let exists: bool = tx.query_row(
                 "SELECT EXISTS(
                      SELECT 1 FROM library_files
-                     WHERE file_id = ?1 AND (path_key = ?2 OR display_path = ?2)
+                     WHERE file_id = ?1 AND (path_key = norm_path_key(?2) OR display_path = ?2)
                  )",
                 params![attempt.ledger_id, path],
                 |row| row.get(0),

@@ -173,7 +173,7 @@ fn ensure_root_rows(
         tx.execute(
             "INSERT INTO library_roots
                 (root_id, library_id, path_key, display_path, enabled, sort_order)
-             VALUES (?1, ?2, ?3, ?3, 1, ?4)",
+             VALUES (?1, ?2, norm_path_key(?3), ?3, 1, ?4)",
             params![root_id, library, display, index as i32],
         )?;
         let _ = kind;

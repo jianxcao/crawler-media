@@ -79,7 +79,7 @@ impl Store {
         let tx = self.library.unchecked_transaction()?;
         tx.execute(
             "INSERT INTO library_roots (root_id, library_id, path_key, display_path, enabled, sort_order)
-             VALUES (?1, ?2, ?3, ?3, 1, ?4)",
+             VALUES (?1, ?2, norm_path_key(?3), ?3, 1, ?4)",
             params![id, library.id, path, sort_order],
         )?;
         Self::reassign_files_under_root(&tx, &library.id, kind, path)?;

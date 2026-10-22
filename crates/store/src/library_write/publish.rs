@@ -253,7 +253,8 @@ impl Store {
 
             if obs.observed_version.revision != cur_rev
                 || obs.observed_version.source_version != cur_src_ver
-                || obs.observed_path.to_string_lossy() != cur_path
+                || crate::path_key::normalize_path_key(&obs.observed_path.to_string_lossy())
+                    != cur_path
             {
                 report.skipped += 1;
                 continue;
@@ -538,7 +539,7 @@ pub(crate) fn insert_file_row(tx: &Connection, file: &LibraryFile) -> Result<(),
              filter_score, release_quality, duration_ms, tracks_version,
              poster_path, backdrop_path, still_path, has_poster, has_backdrop, has_still)
          VALUES
-            (?1, ?2, ?3, ?4, ?5, ?6, ?6,
+            (?1, ?2, ?3, ?4, ?5, norm_path_key(?6), ?6,
              ?7, ?8, ?9, ?10,
              ?11, ?12, ?13, ?14, ?15,
              ?16, ?17, ?18, ?19, ?20, ?21, ?22,
@@ -595,7 +596,7 @@ fn update_file_row(tx: &Connection, file: &LibraryFile, revision: i64) -> Result
     // and a stat observation never overwrites a known value with NULL.
     tx.execute(
         "UPDATE library_files SET
-            path_key = ?1, display_path = ?1,
+            path_key = norm_path_key(?1), display_path = ?1,
             presence_state = ?2, publication_state = ?3, file_revision = ?4, source_version = ?5,
             size_bytes = COALESCE(?6, size_bytes), stat_known = MAX(stat_known, ?7),
             mtime_ns = COALESCE(?8, mtime_ns), created_ns = COALESCE(?9, created_ns),

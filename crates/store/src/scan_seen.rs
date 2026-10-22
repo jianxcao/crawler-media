@@ -78,7 +78,7 @@ impl Store {
                 "UPDATE library_files
                     SET mtime_ns = ?2 * 1000000, size_bytes = ?3,
                         source_digest = ?4
-                  WHERE path_key = ?1 OR display_path = ?1",
+                  WHERE path_key = norm_path_key(?1) OR display_path = ?1",
                 params![path, mtime_ms, file_size, content_digest],
             )?;
         }
@@ -158,8 +158,8 @@ impl Store {
         let placeholders: Vec<String> = (2..=paths.len() + 1).map(|i| format!("?{i}")).collect();
         let sql = format!(
             "SELECT s.path, s.mtime_ms, s.file_size, s.content_digest,
-                    EXISTS(SELECT 1 FROM library_files f WHERE f.path_key = s.path OR f.display_path = s.path) AS ledger_exists,
-                    (SELECT f.missing_at FROM library_files f WHERE f.path_key = s.path OR f.display_path = s.path LIMIT 1) AS missing_at
+                    EXISTS(SELECT 1 FROM library_files f WHERE f.path_key = norm_path_key(s.path) OR f.display_path = s.path) AS ledger_exists,
+                    (SELECT f.missing_at FROM library_files f WHERE f.path_key = norm_path_key(s.path) OR f.display_path = s.path LIMIT 1) AS missing_at
              FROM scan_seen s
              WHERE s.operation_id = ?1 AND s.path IN ({})",
             placeholders.join(",")

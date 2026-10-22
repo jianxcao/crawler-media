@@ -47,6 +47,7 @@ mod media;
 mod media_operations;
 pub mod metadata;
 mod open;
+pub mod path_key;
 pub mod playback;
 mod playback_devices;
 mod probe_dispatch;

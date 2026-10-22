@@ -576,7 +576,7 @@ fn prune_unpublished_input(
     tx.execute(
         "DELETE FROM library_metadata_inputs
          WHERE library_id = ?1 AND media_id = ?2 AND source_version = 'nfo_v1'
-           AND path_key = ?3",
+           AND path_key = norm_path_key(?3)",
         params![lib, media, after.path_key],
     )?;
     Ok(())

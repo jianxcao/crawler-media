@@ -38,7 +38,7 @@ impl Store {
     pub fn file_coverage_by_path(&self, path: &str) -> Result<Option<FileCoverage>, StoreError> {
         let sql = coverage_sql(
             "WHERE f.file_id = (SELECT file_id FROM library_files
-                                WHERE path_key = ?1 OR display_path = ?1 LIMIT 1)",
+                                WHERE path_key = norm_path_key(?1) OR display_path = ?1 LIMIT 1)",
         );
         Ok(self.read_coverage(&sql, [path])?.into_iter().next())
     }
@@ -51,7 +51,7 @@ impl Store {
         self.library
             .query_row(
                 "SELECT file_id, file_revision, source_version FROM library_files
-                 WHERE path_key = ?1 OR display_path = ?1
+                 WHERE path_key = norm_path_key(?1) OR display_path = ?1
                  LIMIT 1",
                 [path],
                 |row| {
@@ -151,7 +151,7 @@ impl Store {
             .library
             .query_row(
                 "SELECT file_id, library_id FROM library_files
-                 WHERE path_key = ?1 OR display_path = ?1
+                 WHERE path_key = norm_path_key(?1) OR display_path = ?1
                  LIMIT 1",
                 [path],
                 |row| Ok((row.get(0)?, row.get(1)?)),
@@ -198,7 +198,7 @@ impl Store {
             .library
             .query_row(
                 "SELECT publication_state = 'pending' FROM library_files
-                 WHERE path_key = ?1 OR display_path = ?1
+                 WHERE path_key = norm_path_key(?1) OR display_path = ?1
                  LIMIT 1",
                 [path],
                 |row| row.get(0),
@@ -216,7 +216,7 @@ impl Store {
             .library
             .query_row(
                 "SELECT source_path FROM library_files
-                 WHERE path_key = ?1 OR display_path = ?1
+                 WHERE path_key = norm_path_key(?1) OR display_path = ?1
                  LIMIT 1",
                 [path],
                 |row| row.get(0),

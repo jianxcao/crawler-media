@@ -146,7 +146,7 @@ fn place_fixture_file(store: &Store, spec: &FixtureFile) -> Result<LibraryFile, 
         .library
         .query_row(
             "SELECT file_id, file_revision, source_version FROM library_files
-             WHERE path_key = ?1 OR display_path = ?1
+             WHERE path_key = norm_path_key(?1) OR display_path = ?1
              LIMIT 1",
             [&spec.path],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
@@ -241,7 +241,7 @@ pub fn set_media_identity_state(
 pub fn force_file_path(store: &Store, from: &str, to: &str) -> Result<bool, StoreError> {
     let n = store.library.execute(
         "UPDATE library_files SET path_key = ?2, display_path = ?2
-         WHERE path_key = ?1 OR display_path = ?1",
+         WHERE path_key = norm_path_key(?1) OR display_path = ?1",
         rusqlite::params![from, to],
     )?;
     Ok(n > 0)

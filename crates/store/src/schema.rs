@@ -86,7 +86,7 @@ fn seed_libraries_and_roots(
         let root_str = root_path.display().to_string();
         let has_root: bool = library
             .query_row(
-                "SELECT 1 FROM library_roots WHERE path_key = ?1",
+                "SELECT 1 FROM library_roots WHERE path_key = norm_path_key(?1)",
                 params![root_str],
                 |_| Ok(()),
             )
@@ -97,7 +97,7 @@ fn seed_libraries_and_roots(
             let root_id = uuid::Uuid::new_v4().to_string();
             library.execute(
                 "INSERT INTO library_roots (root_id, library_id, path_key, display_path, enabled, sort_order)
-                 VALUES (?1, ?2, ?3, ?3, 1, 0)",
+                 VALUES (?1, ?2, norm_path_key(?3), ?3, 1, 0)",
                 params![root_id, lib_id, root_str],
             )?;
         }

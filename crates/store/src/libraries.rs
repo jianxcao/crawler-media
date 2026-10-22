@@ -702,7 +702,7 @@ impl Store {
             } else {
                 conn.execute(
                     "INSERT INTO library_roots (root_id, library_id, path_key, display_path, enabled, sort_order)
-                     VALUES (?1, ?2, ?3, ?3, 1, ?4)",
+                     VALUES (?1, ?2, norm_path_key(?3), ?3, 1, ?4)",
                     params![
                         uuid::Uuid::new_v4().to_string(),
                         library_id,

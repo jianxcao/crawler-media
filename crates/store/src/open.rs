@@ -148,6 +148,7 @@ impl Store {
             schema::layout::LIBRARY_APPLICATION_ID,
             schema::layout::V1_USER_VERSION,
         )?;
+        crate::path_key::migrate_library_keys(&self.library)?;
         schema::layout::initialize_or_validate(
             "subscribe",
             &self.subscribe,
@@ -252,6 +253,7 @@ fn apply_connection_policy(conn: &Connection) -> Result<(), StoreError> {
     conn.pragma_update(None, "busy_timeout", "5000")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     register_casefold(conn)?;
+    crate::path_key::register(conn)?;
     Ok(())
 }
 

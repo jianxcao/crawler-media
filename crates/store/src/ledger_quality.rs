@@ -50,7 +50,7 @@ impl Store {
                 continue;
             };
             tx.execute(
-                "UPDATE library_files SET release_quality = ?2 WHERE path_key = ?1 OR display_path = ?1",
+                "UPDATE library_files SET release_quality = ?2 WHERE path_key = norm_path_key(?1) OR display_path = ?1",
                 params![path, serde_json::to_string(&StoredQuality::from(quality))?],
             )?;
         }
@@ -63,7 +63,7 @@ impl Store {
         let (season, episode) = coverage_coordinates(coverage);
         let path = coverage.file.path.to_string_lossy().into_owned();
         let json: Option<String> = self.library.query_row(
-            "SELECT release_quality FROM library_files WHERE path_key = ?1 OR display_path = ?1",
+            "SELECT release_quality FROM library_files WHERE path_key = norm_path_key(?1) OR display_path = ?1",
             [path.as_str()],
             |r| r.get(0),
         ).optional()?.flatten();

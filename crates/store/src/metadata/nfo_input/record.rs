@@ -29,7 +29,7 @@ impl NfoInputTarget {
             library_id: file.library_id,
             media_id: file.media_id,
             root_id: file.root_id.clone(),
-            path_key: file.path.to_string_lossy().into_owned(),
+            path_key: crate::path_key::normalize_path_key(&file.path.to_string_lossy()),
             file_id: file.file_id,
             version: file.version.clone(),
         }

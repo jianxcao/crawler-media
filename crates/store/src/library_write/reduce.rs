@@ -386,7 +386,7 @@ fn nfo_fields_for(
             "SELECT fields_json FROM library_metadata_inputs
              WHERE library_id = ?1 AND media_id = ?2 AND entity_scope = 'work'
                AND parse_state = 'valid'
-             ORDER BY (locale = ?3) DESC, (path_key = ?4) DESC, locale, input_key
+             ORDER BY (locale = ?3) DESC, (path_key = norm_path_key(?4)) DESC, locale, input_key
              LIMIT 1",
             params![lib, media, locale, preferred_key],
             |r| r.get(0),

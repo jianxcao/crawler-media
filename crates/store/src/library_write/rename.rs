@@ -79,7 +79,7 @@ impl Store {
         let to_str = to.to_string_lossy().into_owned();
         let occupied: i64 = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM library_files
-                           WHERE (path_key = ?1 OR display_path = ?1) AND file_id <> ?2)",
+                           WHERE (path_key = norm_path_key(?1) OR display_path = ?1) AND file_id <> ?2)",
             params![to_str, id],
             |r| r.get(0),
         )?;
@@ -93,7 +93,7 @@ impl Store {
         }
         let changed = tx.execute(
             "UPDATE library_files
-             SET path_key = ?2, display_path = ?2, file_revision = file_revision + 1
+             SET path_key = norm_path_key(?2), display_path = ?2, file_revision = file_revision + 1
              WHERE file_id = ?1 AND file_revision = ?3 AND source_version = ?4",
             params![id, to_str, owned.revision, owned.source_version],
         )?;
@@ -154,7 +154,7 @@ pub(crate) fn load_owned(
     tx.query_row(
         "SELECT library_id, root_id, media_id, kind, file_revision, source_version
          FROM library_files
-         WHERE file_id = ?1 AND (path_key = ?2 OR display_path = ?2)",
+         WHERE file_id = ?1 AND (path_key = norm_path_key(?2) OR display_path = ?2)",
         params![id, from],
         |r| {
             Ok(Owned {
