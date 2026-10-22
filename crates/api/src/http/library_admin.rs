@@ -74,35 +74,24 @@ pub(crate) async fn list_ledger(State(state): State<ApiState>) -> Response {
             saved_mode.unwrap_or_else(|| global_transfer_mode.clone())
         };
 
-        // 一个物理文件可覆盖多个 unit；legacy 行是逐 unit 的 join 行，这里逐 unit 保值。
-        let whole = [domain::UnitKey::WHOLE];
-        let units: &[domain::UnitKey] = if coverage.units.is_empty() {
-            &whole
-        } else {
-            &coverage.units
-        };
-        for unit in units {
-            let coordinates = unit.episode_coordinates();
-            items.push(json!({
-                "id": file.file_id.to_string(),
-                "media_id": file.media_id.to_string(),
-                "library_id": library_id.clone(),
-                "media_title": title.clone(),
-                "media_kind": kind,
-                "path": path_json.clone(),
-                "source_path": source_path.clone(),
-                "season": coordinates.map(|(season, _)| season),
-                "episode": coordinates.map(|(_, episode)| episode),
-                "resolution": file.resolution.clone(),
-                "codec": file.codec.clone(),
-                "hdr": file.hdr.clone(),
-                "quality_source": file.quality_source.as_str(),
-                "confidence": file.confidence.as_str(),
-                "filter_score": file.filter_score,
-                "transfer_mode": mode_str.clone(),
-                "file_size": file_size,
-            }));
-        }
+        items.push(json!({
+            "id": file.file_id.to_string(),
+            "media_id": file.media_id.to_string(),
+            "library_id": library_id,
+            "media_title": title,
+            "media_kind": kind,
+            "path": path_json,
+            "source_path": source_path,
+            "units": coverage.units,
+            "resolution": file.resolution,
+            "codec": file.codec,
+            "hdr": file.hdr,
+            "quality_source": file.quality_source.as_str(),
+            "confidence": file.confidence.as_str(),
+            "filter_score": file.filter_score,
+            "transfer_mode": mode_str,
+            "file_size": file_size,
+        }));
     }
     ok_list(items).into_response()
 }

@@ -298,13 +298,12 @@ async fn tier_selects_the_filled_dimensions() {
     assert!(!values_of(&all, "languages").is_empty());
     assert!(!values_of(&all, "ratings").is_empty());
 
-    // 缺省 tier 与 all 等价（旧调用方仍能拿到 resolutions）。
+    // 缺省 tier 与 all 等价。
     let default_tier = facets(&app, &format!("/api/v1/libraries/{library_id}/facets")).await;
     assert_eq!(
         values_of(&default_tier, "resolutions"),
         values_of(&all, "resolutions")
     );
-    assert!(default_tier["years"].as_array().unwrap().is_empty());
 
     let response = app
         .clone()

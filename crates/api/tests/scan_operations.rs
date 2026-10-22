@@ -449,22 +449,13 @@ async fn committed_chunk_prefix_survives_a_later_chunk_failure() {
     assert_eq!(rows.len(), 100, "只有已提交的 chunk 前缀入账");
 }
 
-/// P2-NEW-1：上一个构建写下的 v1 签名，配置未变时不得被当成 scope 变化取消；
-/// 必须就地把持久化签名升级成新编码，并照常完成扫描。
+/// Clean cutover rejects old scope encodings even when the roots have not changed.
 #[tokio::test]
-async fn legacy_signature_with_unchanged_config_is_upgraded_not_cancelled() {
+async fn old_signature_is_cancelled_without_upgrading_or_publishing() {
     let fix = PresenceFixture::new();
     let file = fix.root.join("Movie1 (2024).mkv");
     std::fs::write(&file, b"1").unwrap();
     let legacy = fix.legacy_scope_signature();
-    let current = fix.scope_signature();
-    assert_ne!(legacy, current, "测试前提：旧编码与新编码不同");
-    // 单根、路径不含逗号：v1 编码可唯一还原，逐字节相等就是配置相等的证明（P2-A）。
-    assert_eq!(
-        legacy.split(',').count(),
-        1,
-        "测试前提：这是可证明等价的非碰撞旧编码: {legacy}"
-    );
 
     let op = {
         let store = fix.state.store();
@@ -478,19 +469,19 @@ async fn legacy_signature_with_unchanged_config_is_upgraded_not_cancelled() {
     let done = fix.wait_scan_terminal_op(&op.id).await;
     assert_eq!(
         done.status,
-        store::ScanOperationStatus::Completed,
-        "配置未变时旧签名 operation 不得消失: {}",
+        store::ScanOperationStatus::Cancelled,
+        "{}",
         done.report
     );
-    assert_eq!(done.scope_signature, current, "旧签名必须就地升级成新编码");
+    assert_eq!(done.scope_signature, legacy);
+    assert_eq!(done.report["error"], "library.scope_changed");
     assert!(
-        done.report["signature_upgrade"].is_string(),
-        "升级必须留下显式原因: {}",
-        done.report
-    );
-    assert_eq!(
-        fix.state.store().lock().list_file_coverage().unwrap().len(),
-        1
+        fix.state
+            .store()
+            .lock()
+            .list_file_coverage()
+            .unwrap()
+            .is_empty()
     );
 }
 
@@ -556,13 +547,6 @@ async fn colliding_legacy_signature_never_adopts_current_scope() {
         done.report
     );
     assert_eq!(done.report["error"], "library.scope_changed");
-    assert!(
-        done.report["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("not provably equivalent")),
-        "取消原因必须说明旧编码无法证明等价: {}",
-        done.report
-    );
     assert_eq!(
         done.scope_signature, legacy,
         "取消时不得把持久化签名改写成当前 scope"
@@ -625,13 +609,6 @@ async fn ambiguous_legacy_signature_equal_to_current_encoding_is_cancelled() {
         done.report
     );
     assert_eq!(done.report["error"], "library.scope_changed");
-    assert!(
-        done.report["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("not provably equivalent")),
-        "取消原因必须说明旧编码无法证明等价: {}",
-        done.report
-    );
     assert_eq!(done.scope_signature, legacy, "取消时不得改写签名");
     assert!(
         fix.state
@@ -716,13 +693,6 @@ async fn ambiguous_legacy_signature_after_scope_change_is_cancelled() {
         done.report
     );
     assert_eq!(done.report["error"], "library.scope_changed");
-    assert!(
-        done.report["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("not provably equivalent")),
-        "取消原因必须说明旧编码无法证明等价: {}",
-        done.report
-    );
     assert_eq!(done.scope_signature, legacy, "取消时不得改写签名");
     assert!(
         fix.state

@@ -90,6 +90,7 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 - `file_id`：文件 UUID 字符串；**不是**逻辑 `ItemId`。
 - `units: Array<{season, episode}>`：**完整覆盖**。一个物理文件可同时服务多集（如 E01–E02），
   不能只用一个 `season`/`episode` 代表全部覆盖；`season`/`episode` 仅作为「首个具体坐标」的便捷字段。
+- `units: []` 表示覆盖未知，不等于整片；不得从旧 `season`/`episode` 字段重建覆盖。
 - `presence: "present" | "missing" | "unknown"`：`missing`/`unknown` **可查看但不可选播**。
 - `publication: "published" | "pending"`：browse/详情/播放版本只读 `published`；`pending` 只出现在管理工作状态。
 - 同文件的质量/轨道字段保持既有形状，不随 `units` 改变。
@@ -99,16 +100,19 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 遇到重复 `file_id` 必须显式失败，不得静默去重。0/49/50/51/100/101 文件边界由
 `crates/api/tests/library_browse_rows.rs` 与 `web/test/library-file-pagination.test.mjs` 覆盖。
 
+管理台账与本地文件搜索同样按物理文件返回一行，携带完整 `units`；搜索结果使用 `file_id` 区分同一 Media 的多个文件。不展开为旧的一单元一行，也不为未知覆盖补 whole。
+
+Playback history/watch stats 的 `member_id` 只接受 User UUID；显式传入数字或其他无效值返回 400，不再按用户顺序映射。Library/Filter/Media ID 在 Web adapter 中始终保留 UUID 字符串，不作 `Number(...)` 转换。
+
 ### LibraryFacets
 
 `GET /libraries/{id}/facets`（筛选面板的唯一数据源；前端 `web/lib/api/libraries.ts` 的 `LibraryFacets`）：
 
-`{total, genres, countries, decades, watch, ratings, runtimes, languages, resolutions, hdr, stock, years: []}`，每项 `{value, label, count}`。
+`{total, genres, countries, decades, watch, ratings, runtimes, languages, resolutions, hdr, stock}`，每项 `{value, label, count}`。
 
 - **计数**：维度 D 的值 v 的 `count` = 满足「**除 D 以外**全部已选条件」且 D 取 v 的 **distinct Media** 数；`total` = 满足全部条件的 distinct Media 数（不是 ledger 行数）。候选全集来自该库全部可见 Media，含 `count: 0`（前端置灰）。
 - **查询键**：items/facets 共用 `browse_filter_from_query`。多值维度用逗号分隔，支持 `genres|g`、`countries|c`、`decades|d`（`2020s|2010s|2000s|1990s|earlier`）、`runtimes|rt`（`lte60|60to90|90to120|gt120`）、`languages|lang`、`resolutions|res`、`stock`（`missing|unscraped`），维内 OR、维间 AND。`watch|w` 是单值 `unwatched|watching|played|favorite`；`rating_gte` 接受有限 `0..=10` 数值（6/7/8/9 是 UI 档位），`hdr` 为 `true|false`，另有 `identity`。不能把 UI 预设档位当作 handler 全部接受范围（`http/library.rs`、`store/src/library_query/items.rs`）。
 - **`tier`**：`primary` 只填 `genres/countries/decades/watch`，其余空数组；`all` 十维全填；**缺失或空串按 `all`**；其他非空值 → 400 `library.invalid`。
-- `years` 当前仍返回历史空数组键；这只描述现有响应，不是新增或继续扩展兼容层的要求。
 - 未知年份与 `>=2030` 不归入任何 `decades` 档。
 
 ### JobDef / Job

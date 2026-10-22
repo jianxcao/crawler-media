@@ -365,25 +365,14 @@ pub(crate) async fn search_library_items(
                 {
                     continue;
                 }
-                // 一个物理文件可覆盖多个 unit；legacy 行是逐 unit 的 join 行，这里逐 unit 保值。
-                // 读 shape 下每个文件至少一个 unit（LEFT JOIN 缺失行读作 `UnitKey::WHOLE`），空 units 兜底同样按整片算。
-                let whole = [domain::UnitKey::WHOLE];
-                let units: &[domain::UnitKey] = if row.units.is_empty() {
-                    &whole
-                } else {
-                    &row.units
-                };
-                for unit in units {
-                    let coordinates = unit.episode_coordinates();
-                    items.push(json!({
-                        "media_item_id": media.id.to_string(),
-                        "title": media.title,
-                        "kind": media.kind.as_str(),
-                        "path": row.file.path,
-                        "season": coordinates.map(|(season, _)| season),
-                        "episode": coordinates.map(|(_, episode)| episode),
-                    }));
-                }
+                items.push(json!({
+                    "file_id": row.file.file_id.to_string(),
+                    "media_item_id": media.id.to_string(),
+                    "title": media.title,
+                    "kind": media.kind.as_str(),
+                    "path": row.file.path,
+                    "units": row.units,
+                }));
             }
             items
         })

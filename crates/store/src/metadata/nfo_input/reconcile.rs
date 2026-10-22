@@ -147,22 +147,18 @@ impl Store {
         }))
     }
 
-    /// 该文件当前覆盖的 unit；没有覆盖行时按整文件（`WHOLE`）处理。
+    /// Preserve the file's recorded coverage, including an unnumbered TV file's empty set.
     fn units_of_file(&self, file_id: LedgerId) -> Result<Vec<UnitKey>, StoreError> {
         let mut statement = self.library.prepare(
             "SELECT season, episode FROM library_file_units
              WHERE file_id = ?1 ORDER BY season, episode",
         )?;
-        let units = statement
+        statement
             .query_map(params![file_id.to_string()], |row| {
                 Ok(UnitKey::new(row.get::<_, i32>(0)?, row.get::<_, i32>(1)?))
             })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(if units.is_empty() {
-            vec![UnitKey::WHOLE]
-        } else {
-            units
-        })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 }
 

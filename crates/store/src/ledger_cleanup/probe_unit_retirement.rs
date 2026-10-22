@@ -5,8 +5,6 @@
 //! never run again, so it is dropped — and the job is resynced instead of being
 //! left `running` with a completion predicate it can no longer satisfy.
 //!
-//! The same derivation is enforced whenever a file disappears, and once
-//! from the library schema migration for databases written before that.
 
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -112,39 +110,6 @@ pub(crate) fn resync_probe_job(conn: &Connection, job_id: &str) -> Result<(), St
          WHERE id = ?1 AND status IN ('queued', 'running')",
         params![job_id, terminal, crate::unix_now() * 1000],
     )?;
-    Ok(())
-}
-
-/// One-shot repair for databases written before file deletion retired probe
-/// units: drop work items whose Library file row is gone and resync their jobs.
-///
-/// Bounded by the rows already present; runs from the library schema migration.
-pub(crate) fn repair_orphan_probe_units(conn: &Connection) -> Result<(), StoreError> {
-    let job_ids: Vec<String> = conn
-        .prepare(
-            "SELECT DISTINCT job_id FROM probe_job_units u
-             WHERE NOT EXISTS (SELECT 1 FROM library_files f WHERE f.file_id = u.file_id)",
-        )?
-        .query_map([], |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    if job_ids.is_empty() {
-        return Ok(());
-    }
-    let tx = conn.unchecked_transaction()?;
-    let removed = tx.execute(
-        "DELETE FROM probe_job_units
-         WHERE NOT EXISTS (SELECT 1 FROM library_files f WHERE f.file_id = probe_job_units.file_id)",
-        [],
-    )?;
-    for job_id in &job_ids {
-        resync_probe_job(&tx, job_id)?;
-    }
-    tx.commit()?;
-    tracing::info!(
-        removed_units = removed,
-        affected_jobs = job_ids.len(),
-        "已清理指向不存在文件行的探测工作项"
-    );
     Ok(())
 }
 

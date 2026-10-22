@@ -129,28 +129,24 @@ pub(super) fn map_library_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<Libr
 /// A file row plus the unit coordinate selected from the joined `library_file_units`
 /// columns (indices 30 and 31). Reads that join units map through here, so the file
 /// part of the row is decoded by exactly one function.
-pub(super) fn map_file_unit(row: &rusqlite::Row<'_>) -> rusqlite::Result<(LibraryFile, UnitKey)> {
-    Ok((map_library_file(row)?, unit_key(row.get(30)?, row.get(31)?)))
-}
-
-/// `library_file_units` records the whole-media unit as `(-1, -1)`; a missing join
-/// row is the same thing, so both read as [`UnitKey::WHOLE`].
-fn unit_key(season: Option<i64>, episode: Option<i64>) -> UnitKey {
-    let coordinate = |raw: Option<i64>| {
-        raw.and_then(|value| i32::try_from(value).ok())
-            .filter(|value| *value >= 0)
+pub(super) fn map_file_unit(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(LibraryFile, Option<UnitKey>)> {
+    let season: Option<i32> = row.get(30)?;
+    let episode: Option<i32> = row.get(31)?;
+    let unit = match (season, episode) {
+        (Some(season), Some(episode)) => Some(UnitKey::new(season, episode)),
+        (None, None) => None,
+        _ => return Err(rusqlite::Error::InvalidQuery),
     };
-    match (coordinate(season), coordinate(episode)) {
-        (Some(season), Some(episode)) => UnitKey::new(season, episode),
-        _ => UnitKey::WHOLE,
-    }
+    Ok((map_library_file(row)?, unit))
 }
 
 /// Fold `(file, unit)` rows into one [`FileCoverage`] per file: first-seen file
 /// order is preserved and each file lists its units as `(season ASC, episode ASC)`
 /// with duplicates removed, so a file's coverage never depends on join order.
 pub(super) fn group_file_coverage(
-    rows: impl IntoIterator<Item = (LibraryFile, UnitKey)>,
+    rows: impl IntoIterator<Item = (LibraryFile, Option<UnitKey>)>,
 ) -> Vec<FileCoverage> {
     let mut slots: HashMap<LedgerId, usize> = HashMap::new();
     let mut coverage: Vec<FileCoverage> = Vec::new();
@@ -166,7 +162,9 @@ pub(super) fn group_file_coverage(
                 coverage.len() - 1
             }
         };
-        coverage[slot].units.push(unit);
+        if let Some(unit) = unit {
+            coverage[slot].units.push(unit);
+        }
     }
     for file in &mut coverage {
         file.units

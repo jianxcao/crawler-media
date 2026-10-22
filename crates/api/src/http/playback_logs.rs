@@ -71,27 +71,18 @@ pub(super) fn member_name(store: &crate::Store, user_id: domain::UserId) -> Stri
         .unwrap_or_else(|| "成员".into())
 }
 
-/// Resolve the frontend's member filter: a user UUID string, or "0"/"" = admin
-/// (first admin user by role, not by alphabetical order).
-pub(super) fn member_filter(store: &crate::Store, raw: Option<&str>) -> Option<domain::UserId> {
-    let raw = raw?;
-    // Try parsing as UUID first (direct user id).
-    if let Ok(uid) = domain::UserId::from_str(raw) {
-        return Some(uid);
-    }
-    // Legacy numeric id: 0 = first admin, n = nth user by id.
-    let member_id: i64 = raw.parse().ok()?;
-    let users = store.list_users().unwrap_or_default();
-    if member_id <= 0 {
-        // Find the first admin user instead of relying on alphabetical sort.
-        users
-            .iter()
-            .find(|u| store.user_role(u.id).ok().as_deref() == Some("admin"))
-            .or(users.first())
-            .map(|u| u.id)
-    } else {
-        users.get((member_id - 1) as usize).map(|user| user.id)
-    }
+/// Resolve an optional canonical user UUID; malformed filters must not broaden the query.
+pub(super) fn member_filter(raw: Option<&str>) -> Result<Option<domain::UserId>, Response> {
+    raw.map(|raw| {
+        domain::UserId::from_str(raw).map_err(|_| {
+            err(
+                StatusCode::BAD_REQUEST,
+                "playback.invalid_member",
+                "member_id 必须是用户 UUID",
+            )
+        })
+    })
+    .transpose()
 }
 
 pub(super) fn visible_media_ids(
@@ -163,7 +154,10 @@ pub(crate) async fn history(
         .map(|role| role == "admin")
         .unwrap_or(false);
     let target_user = if admin {
-        member_filter(&store, query.get("member_id").map(String::as_str))
+        match member_filter(query.get("member_id").map(String::as_str)) {
+            Ok(filter) => filter,
+            Err(response) => return response,
+        }
     } else {
         Some(user_id)
     };

@@ -205,29 +205,14 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        Ok(stored_pw.flatten().is_some_and(|pw| !pw.trim().is_empty()))
-    }
-
-    /// 管理员的持久凭据是否仍是切换前的明文（或残破 PHC）形态。
-    ///
-    /// 登录校验对非可解析 PHC 行一律 fail closed，因此这种行永远无法认证。这里只服务
-    /// 启动自检：旧形态必须由运维显式提供独立密码完成轮换，既不能静默保留，也不能让
-    /// 环境变量被无声忽略。
-    pub fn admin_credential_is_legacy_plaintext(
-        &self,
-        admin_id: UserId,
-    ) -> Result<bool, StoreError> {
-        let stored_pw: Option<Option<String>> = self
-            .app
-            .query_row(
-                "SELECT password FROM users WHERE id = ?1",
-                params![admin_id.to_string()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(stored_pw
-            .flatten()
-            .is_some_and(|pw| !pw.trim().is_empty() && !crate::password::is_verifiable_hash(&pw)))
+        match stored_pw.flatten() {
+            None => Ok(false),
+            Some(password) if password.trim().is_empty() => Ok(false),
+            Some(password) if crate::password::is_verifiable_hash(&password) => Ok(true),
+            Some(_) => Err(StoreError::Invalid(
+                "administrator credential is not a supported password hash; rebuild the pre-cutover database using the documented storage clean-cutover procedure, or repair the credential explicitly while offline".into(),
+            )),
+        }
     }
 
     /// 在同一个事务中原子轮换管理员密码，并确保当前的 CLI token 登记有效且旧 CLI Bearer 被撤销。

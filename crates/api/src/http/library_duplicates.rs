@@ -19,15 +19,9 @@ fn file_entity(path: &FsPath) -> Option<std::path::PathBuf> {
     std::fs::canonicalize(path).ok()
 }
 
-/// The file's unit rows as the legacy `(season, episode)` pair: whole files keep
-/// the historical `(null, null)` shape, so the JSON stays byte-compatible with
-/// the one-row-per-unit era. A file with no unit row at all is a state the
-/// legacy schema could not represent; it is grouped as a whole file instead of
-/// being dropped from the response (see the slice judgment points).
+/// Only recorded coverage establishes duplicate logical units. Unidentified
+/// files must not become interchangeable whole-work copies.
 fn unit_coordinates(units: &[domain::UnitKey]) -> Vec<(Option<u32>, Option<u32>)> {
-    if units.is_empty() {
-        return vec![(None, None)];
-    }
     units
         .iter()
         .map(|unit| {

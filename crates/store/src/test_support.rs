@@ -89,7 +89,7 @@ pub fn publish_fixture_files(
         store.publish_files(
             &WriteScope {
                 library_id: file.library_id,
-                config_revision: 0,
+                config_revision,
             },
             &[PublicationRequest {
                 file: &file,

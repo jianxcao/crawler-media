@@ -245,7 +245,7 @@ async fn sibling_episodes_serve_their_own_stills() {
     )
     .await;
     for row in ledger["data"].as_array().unwrap() {
-        let episode = row["episode"].as_u64().unwrap();
+        let episode = row["units"][0]["episode"].as_u64().unwrap();
         let compact = row["id"].as_str().unwrap().replace('-', "");
         let response = app
             .clone()

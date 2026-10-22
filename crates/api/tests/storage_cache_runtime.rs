@@ -211,7 +211,7 @@ fn live_databases_copy_is_accepted_and_stamped_properly() {
 }
 
 #[test]
-fn unstamped_jobs_db_with_complete_layout_is_adopted_without_dropping_objects() {
+fn unstamped_jobs_db_is_rejected_without_changing_objects_or_headers() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
@@ -244,18 +244,18 @@ fn unstamped_jobs_db_with_complete_layout_is_adopted_without_dropping_objects() 
     let downloader =
         std::sync::Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage")));
 
-    // 2. ApiState::new must succeed on unstamped but complete jobs.db
-    let _state = api::ApiState::new(
+    // Unsupported populated files are rejected before any automatic adoption.
+    let result = api::ApiState::new(
         store::Store::open(&data_dir).unwrap(),
         "secret".into(),
         indexer::ProfileSet::load(None).unwrap(),
         fetcher,
         downloader,
         tmp.path().join("library"),
-    )
-    .expect("ApiState::new should adopt unstamped jobs.db");
+    );
+    assert!(result.is_err());
 
-    // 3. Verify pragma is updated and objects are identical
+    // Rejection preserves the unsupported identity headers and schema.
     let conn = rusqlite::Connection::open(&jobs_path).unwrap();
     let app_id: u32 = conn
         .pragma_query_value(None, "application_id", |r| r.get(0))
@@ -263,8 +263,7 @@ fn unstamped_jobs_db_with_complete_layout_is_adopted_without_dropping_objects() 
     let user_ver: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(app_id, store::schema::layout::JOBS_APPLICATION_ID);
-    assert_eq!(user_ver, store::schema::layout::JOBS_USER_VERSION);
+    assert_eq!((app_id, user_ver), (0, 0));
 
     let after_schema: Vec<String> = {
         let mut stmt = conn
@@ -275,25 +274,32 @@ fn unstamped_jobs_db_with_complete_layout_is_adopted_without_dropping_objects() 
             .collect::<Result<Vec<_>, _>>()
             .unwrap()
     };
-    assert_eq!(
-        before_schema, after_schema,
-        "adoption must only stamp pragmas without altering schema objects"
-    );
+    assert_eq!(before_schema, after_schema);
 }
 
 #[test]
-fn unstamped_jobs_db_missing_declared_index_is_rejected_instead_of_adopted() {
+fn stamped_jobs_db_missing_declared_index_is_rejected() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
     let jobs_path = data_dir.join("jobs.db");
 
-    // 1. Build jobs schema, clear pragmas, drop declared index
+    // A current identity still requires every declared schema object.
     {
         drop(jobs::Queue::open(&jobs_path).unwrap());
         let conn = rusqlite::Connection::open(&jobs_path).unwrap();
-        conn.pragma_update(None, "application_id", 0).unwrap();
-        conn.pragma_update(None, "user_version", 0).unwrap();
+        conn.pragma_update(
+            None,
+            "application_id",
+            store::schema::layout::JOBS_APPLICATION_ID,
+        )
+        .unwrap();
+        conn.pragma_update(
+            None,
+            "user_version",
+            store::schema::layout::JOBS_USER_VERSION,
+        )
+        .unwrap();
         conn.execute("DROP INDEX jobs_last_def_idx;", []).unwrap();
     }
 
@@ -315,7 +321,7 @@ fn unstamped_jobs_db_missing_declared_index_is_rejected_instead_of_adopted() {
     );
 
     let err = match res {
-        Ok(_) => panic!("unstamped jobs.db missing declared index must be rejected"),
+        Ok(_) => panic!("jobs.db missing a declared index must be rejected"),
         Err(e) => e,
     };
     let err_str = err.to_string();
@@ -328,7 +334,7 @@ fn unstamped_jobs_db_missing_declared_index_is_rejected_instead_of_adopted() {
         "error message must contain backup hint: {err_str}"
     );
 
-    // 3. Rejected DB must NOT be stamped
+    // Rejection must preserve the current identity headers.
     let conn = rusqlite::Connection::open(&jobs_path).unwrap();
     let app_id: u32 = conn
         .pragma_query_value(None, "application_id", |r| r.get(0))
@@ -336,6 +342,6 @@ fn unstamped_jobs_db_missing_declared_index_is_rejected_instead_of_adopted() {
     let user_ver: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(app_id, 0);
-    assert_eq!(user_ver, 0);
+    assert_eq!(app_id, store::schema::layout::JOBS_APPLICATION_ID);
+    assert_eq!(user_ver, store::schema::layout::JOBS_USER_VERSION);
 }

@@ -47,6 +47,8 @@ docker compose up --build
 
 **数据库启动边界（不迁移旧布局）**：当前 Store 只初始化空数据库或重开当前布局，不能将旧版本数据目录原地升级。启动先只读检查已存在的四个 Store 文件的 `application_id` / `user_version`（cache 另校验结构），不匹配时报 layout mismatch；错误不等于应用已重置目录。不要删除现有实例数据来试错：先停机、一致备份并保留原目录，使用独立的新目录评估；实际生产切换须另行批准。应用不会自动删除旧数据，也没有旧库导入器或迁移阶梯。当前布局可正常重启，并非每次启动都要求空目录。新 Site 默认 `maintenance_via = http`，CDP 默认关闭；旧 `cdp.sync.enabled`、`obscura.enabled/url` 不作为新开关使用，Profile `render` 不再控制搜索。依据：`crates/store/src/open.rs`、`schema/layout.rs`、`schema.rs`。
 
+干净切换还包括持久工作与凭据：已存在且无布局标记的 Jobs 数据库不会被认领为当前布局；旧扫描 scope 签名不会自动升级，旧 operation 会取消且不登记文件。非空明文/损坏管理员凭据使启动失败，即使设置新的启动密码也不隐式导入或轮换；保留原库并使用上述停机备份/干净切换流程。当前合法哈希凭据与 CLI Bearer 的安全分离检查仍保留。
+
 **受管 Obscura 启动条件**：开关开启、未配置 `cdp.url`、至少有一个启用的 Site 选择浏览器登录/签到且没有自己的 `cdp_url`、二进制可用。不满足时设置页显示未启动原因（`no_managed_browser_sites`、`not_installed` 等）。受管 daemon 每次启动使用随机空闲端口并只绑定 `127.0.0.1`；只管理本进程拉起的 daemon，关闭开关或应用退出会停止它，外部服务不受影响。
 
 **安装策略**（`obscura.install`，启动默认值 `CRAWLER_MEDIA_OBSCURA_INSTALL`）：

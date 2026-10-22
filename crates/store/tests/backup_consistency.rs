@@ -60,6 +60,7 @@ fn seed_five_database_cluster(dir: &Path) -> (domain::UserId, domain::MediaId, d
     // Initialize jobs.db (the 5th database)
     {
         let jobs_conn = Connection::open(dir.join("jobs.db")).unwrap();
+        initialize_jobs_layout(&jobs_conn).unwrap();
         jobs_conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS job_defs (
                 id TEXT PRIMARY KEY,
@@ -100,7 +101,6 @@ fn seed_five_database_cluster(dir: &Path) -> (domain::UserId, domain::MediaId, d
             CREATE INDEX IF NOT EXISTS jobs_live_def_idx ON jobs (def_id, status);
             CREATE INDEX IF NOT EXISTS jobs_last_def_idx ON jobs (def_id, status, run_after);"
         ).unwrap();
-        initialize_jobs_layout(&jobs_conn).unwrap();
         jobs_conn.execute(
             "INSERT INTO job_defs (id, kind, schedule_cron, enabled, payload) VALUES ('def-1', 'data_retention', '* * * * *', 1, '{}')",
             [],

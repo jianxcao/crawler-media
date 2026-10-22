@@ -66,25 +66,8 @@ pub fn validate_jobs_layout(conn: &Connection) -> Result<(), StoreError> {
     .map_err(jobs_layout_error)
 }
 
-/// 未打标（`application_id == 0 && user_version == 0`）但**形状已与声明布局一致**的
-/// jobs.db 是干净切换前的既有队列库：只补写身份头，不动任何表或数据。形状不一致时
-/// 仍然拒绝（不给兼容视图、不做自动迁移）。
-fn is_unstamped_but_complete_jobs_layout(conn: &Connection) -> Result<bool, StoreError> {
-    if read_application_id(conn)? != 0 || read_user_version(conn)? != 0 {
-        return Ok(false);
-    }
-    validate_schema_objects(
-        "jobs",
-        conn,
-        crate::schema::v1::JOBS_TABLES,
-        crate::schema::v1::JOBS_INDEXES,
-    )
-    .map_err(jobs_layout_error)?;
-    Ok(true)
-}
-
 pub fn initialize_jobs_layout(conn: &Connection) -> Result<(), StoreError> {
-    if is_uninitialized(conn)? || is_unstamped_but_complete_jobs_layout(conn)? {
+    if is_uninitialized(conn)? {
         conn.pragma_update(None, "application_id", JOBS_APPLICATION_ID)?;
         conn.pragma_update(None, "user_version", JOBS_USER_VERSION)?;
     } else {

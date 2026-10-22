@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use domain::{DownloaderId, Subscribe, Torrent, UnitKey};
+use domain::{DownloaderId, Subscribe, Torrent};
 use downloader::{Downloader, DownloaderError, QbitDownloader, TransmissionDownloader};
 use parking_lot::Mutex;
 
@@ -252,15 +252,7 @@ impl<'a> RoutedDownloader<'a> {
             let transfer_pending = store
                 .transfer_pending(coverage.file.path.to_string_lossy().as_ref())
                 .map_err(error)?;
-            // 一个物理文件可覆盖多个 unit；legacy 拿到的是逐 unit 的 join 行，这里逐 unit 保值。
-            // 读 shape 下每个文件至少一个 unit（LEFT JOIN 缺失行读作 `UnitKey::WHOLE`），空 units 兜底同样按整片算。
-            let whole = [UnitKey::WHOLE];
-            let units: &[UnitKey] = if coverage.units.is_empty() {
-                &whole
-            } else {
-                &coverage.units
-            };
-            for unit in units {
+            for unit in &coverage.units {
                 let mut slots = Vec::new();
                 if let Some((from, to)) = file_quality.episode_span() {
                     for ep in from..=to {

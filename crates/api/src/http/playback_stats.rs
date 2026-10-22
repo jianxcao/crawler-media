@@ -49,7 +49,10 @@ pub(crate) async fn watch_stats(
         .map(|role| role == "admin")
         .unwrap_or(false);
     let target_user = if admin {
-        member_filter(&store, query.get("member_id").map(String::as_str))
+        match member_filter(query.get("member_id").map(String::as_str)) {
+            Ok(filter) => filter,
+            Err(response) => return response,
+        }
     } else {
         Some(user_id)
     };

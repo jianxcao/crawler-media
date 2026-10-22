@@ -74,7 +74,7 @@ fn prepare_fresh_admin(
     }
 }
 
-fn prepare_legacy_admin(
+fn prepare_shared_bearer_admin(
     store: &Store,
     admin_id: UserId,
     token: &str,
@@ -122,10 +122,8 @@ pub fn prepare_admin_credentials(
     let admin_id = UserId::from_str(STATIC_ADMIN_UUID_STR).map_err(StoreError::from)?;
     if store.get_user(admin_id)?.is_none() || !store.admin_password_is_set(admin_id)? {
         prepare_fresh_admin(store, admin_id, token, admin_password, mode)
-    } else if store.admin_credential_is_legacy_plaintext(admin_id)?
-        || store.legacy_admin_password_matches_known_token(admin_id, token)?
-    {
-        prepare_legacy_admin(store, admin_id, token, admin_password, mode)
+    } else if store.legacy_admin_password_matches_known_token(admin_id, token)? {
+        prepare_shared_bearer_admin(store, admin_id, token, admin_password, mode)
     } else {
         Ok(AdminBootstrapAction::Keep {
             cli_token: token.to_string(),

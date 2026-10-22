@@ -367,7 +367,7 @@ fn delete_session_tokens_is_atomic_and_protects_cli() {
 }
 
 #[test]
-fn pre_cutover_plaintext_admin_credential_is_detected() {
+fn admin_password_configuration_rejects_unsupported_credentials_without_rewriting_them() {
     use std::str::FromStr;
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
@@ -381,32 +381,28 @@ fn pre_cutover_plaintext_admin_credential_is_detected() {
         })
         .unwrap();
 
-    assert!(
-        !store
-            .admin_credential_is_legacy_plaintext(admin_id)
-            .unwrap(),
-        "空口令不是遗留明文凭据"
-    );
+    assert!(!store.admin_password_is_set(admin_id).unwrap());
 
     let conn = Connection::open(tmp.path().join("app.db")).unwrap();
-    conn.execute(
-        "UPDATE users SET password = 'plain-legacy-secret' WHERE id = ?1",
-        params![admin_id.to_string()],
-    )
-    .unwrap();
-    drop(conn);
-    assert!(
-        store
-            .admin_credential_is_legacy_plaintext(admin_id)
-            .unwrap(),
-        "非 PHC 行必须被判为切换前遗留凭据"
-    );
+    for unsupported in ["plain-legacy-secret", "$argon2id$malformed"] {
+        conn.execute(
+            "UPDATE users SET password = ?2 WHERE id = ?1",
+            params![admin_id.to_string(), unsupported],
+        )
+        .unwrap();
+        assert!(store.admin_password_is_set(admin_id).is_err());
+        let retained: String = conn
+            .query_row(
+                "SELECT password FROM users WHERE id = ?1",
+                [admin_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained, unsupported);
+    }
 
-    store.set_password(admin_id, "plain-legacy-secret").unwrap();
-    assert!(
-        !store
-            .admin_credential_is_legacy_plaintext(admin_id)
-            .unwrap(),
-        "Argon2 行不得被误判为遗留明文"
-    );
+    store
+        .set_password(admin_id, "independent-password")
+        .unwrap();
+    assert!(store.admin_password_is_set(admin_id).unwrap());
 }

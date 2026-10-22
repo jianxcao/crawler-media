@@ -500,3 +500,55 @@ fn manual_override_wins_over_nfo_input_in_detail() {
         "detail must not restrict adopted fields to a short whitelist"
     );
 }
+
+#[test]
+fn unnumbered_tv_file_does_not_create_subscription_coverage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let (library, root) = library_with_root(&store, &tmp.path().join("tv"), "TV", MediaKind::Tv);
+    let media = insert_media(&store, MediaKind::Tv, "Unnumbered");
+    let file = video_file(
+        &library,
+        &root,
+        media,
+        MediaKind::Tv,
+        tmp.path().join("tv/Unnumbered.mkv"),
+    );
+    let scope = WriteScope {
+        library_id: library.parse().unwrap(),
+        config_revision: 0,
+    };
+    publish(&store, &scope, &file, &[], "zh-CN");
+    let subscribe = domain::Subscribe {
+        id: domain::SubscribeId::new(),
+        user_id: domain::UserId::new(),
+        media_id: media,
+        coverage: domain::Coverage::Tv {
+            season: 1,
+            episode_from: 1,
+            episode_to: Some(2),
+        },
+        fetch_mode: domain::FetchMode::Search,
+        filter_id: domain::FilterId::new(),
+        wash_cut: false,
+        wash_cut_filter_id: None,
+        keep_old_versions: false,
+        full_season_pack: false,
+        downloader_id: None,
+        library_id: Some(scope.library_id),
+        tracking_state: "active".into(),
+        follow_future: false,
+        search_interval_secs: 1800,
+    };
+
+    let facts = store
+        .load_library_subscribe_facts(&subscribe, MediaKind::Tv)
+        .unwrap();
+    assert!(facts.entries().next().is_none());
+    assert!(store.get_file_units(file.file_id).unwrap().is_empty());
+    let item = store
+        .get_library_item(scope.library_id, media)
+        .unwrap()
+        .unwrap();
+    assert_eq!((item.file_count, item.distinct_episode_count), (1, 0));
+}

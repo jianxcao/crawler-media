@@ -6,13 +6,9 @@ use subscribe::{QualityFact, SubscribeFacts};
 use super::{Store, StoreError};
 use crate::library_scope::{LibraryPathScope, StrictOwner};
 
-/// Unit coordinates of one coverage, as the legacy per-unit join rows expressed them:
-/// a whole-file unit（整片 / `(-1,-1)`）becomes `(None, None)`. An empty coverage keeps
-/// the legacy LEFT JOIN shape of a single `(None, None)` row.
+/// Only recorded coverage contributes ownership facts. Unnumbered TV files remain
+/// visible in the Library without claiming a whole work or any episode.
 fn coverage_coordinates(coverage: &domain::FileCoverage) -> Vec<(Option<u32>, Option<u32>)> {
-    if coverage.units.is_empty() {
-        return vec![(None, None)];
-    }
     coverage
         .units
         .iter()
@@ -121,7 +117,7 @@ pub fn evaluate_subscribe_facts_pure(
             score: coverage.file.filter_score.unwrap_or(0),
             path: Some(path.clone()),
         };
-        // 一个物理文件可覆盖多个 unit；legacy 拿到的是逐 unit 的 join 行，这里逐 unit 保值。
+        // A physical file contributes each explicitly recorded logical unit.
         let coordinates = coverage_coordinates(coverage);
         for (season, episode) in coordinates {
             let stale = facts

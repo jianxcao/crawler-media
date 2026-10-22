@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use domain::{MediaKind, Subscribe, UnitKey};
+use domain::{MediaKind, Subscribe};
 use store::{LibraryPathScope, StoreError, StrictOwner, SubscribeLibrarySnapshot};
 use subscribe::{QualityFact, SubscribeFacts};
 
@@ -122,15 +122,7 @@ fn merge_snapshot_rows(
             score: row.file.filter_score.unwrap_or(0),
             path: Some(path.clone()),
         };
-        // 一个物理文件可覆盖多个 unit；legacy 拿到的是逐 unit 的 join 行，这里逐 unit 保值。
-        // 读 shape 下每个文件至少一个 unit（LEFT JOIN 缺失行读作 `UnitKey::WHOLE`），空 units 兜底同样按整片算。
-        let whole = [UnitKey::WHOLE];
-        let units: &[UnitKey] = if row.units.is_empty() {
-            &whole
-        } else {
-            &row.units
-        };
-        for unit in units {
+        for unit in &row.units {
             let (season, episode) = match unit.episode_coordinates() {
                 Some((season, episode)) => (Some(season), Some(episode)),
                 None => (None, None),

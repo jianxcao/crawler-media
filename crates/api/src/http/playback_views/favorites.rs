@@ -262,12 +262,6 @@ fn favorite_tier(
             }
         }
     }
-    if media.kind == domain::MediaKind::Movie && !played {
-        if let Ok(Some(legacy)) = store.unit_state(user_id, media.id, 0, 0) {
-            played |= legacy.played;
-            seen |= legacy.played || legacy.position_ms > 0 || legacy.play_count > 0;
-        }
-    }
     WatchTier::of(seen, played)
 }
 

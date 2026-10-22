@@ -32,10 +32,18 @@ pub fn is_argon2_hash(stored: &str) -> bool {
 
 /// 该持久凭据是否处于登录路径唯一接受的可校验哈希形态。
 ///
-/// 与 [`is_argon2_hash`] 的差别是这里要求凭据真的能解析成 PHC 串，因此
-/// `$argon2id$not-a-valid-phc` 这类残行也算切换前遗留形态。
+/// PHC 语法合法不代表存在可验证的密码：还需要 Argon2 算法、有效参数、盐和输出。
 pub fn is_verifiable_hash(stored: &str) -> bool {
-    PasswordHash::new(stored).is_ok()
+    let Ok(hash) = PasswordHash::new(stored) else {
+        return false;
+    };
+    hash.salt.is_some()
+        && hash.hash.is_some()
+        && argon2::Algorithm::try_from(hash.algorithm).is_ok()
+        && hash
+            .version
+            .is_none_or(|version| argon2::Version::try_from(version).is_ok())
+        && argon2::Params::try_from(&hash).is_ok()
 }
 
 #[cfg(test)]

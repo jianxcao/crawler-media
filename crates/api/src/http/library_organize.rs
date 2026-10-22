@@ -249,13 +249,16 @@ fn apply_organize(store: &crate::Store, library: &store::Library, renames: &[Val
             errors.push(format!("{from} 重命名失败: {error}"));
             continue;
         }
-        if let Err(err) = store.rename_file_path(from, to) {
-            tracing::error!(%err, from, to, "整理文件更新台账失败，尝试回滚磁盘");
-            if let Err(rollback_err) = std::fs::rename(to, from) {
-                tracing::error!(%rollback_err, from, to, "整理文件回滚重命名失败");
+        match store.rename_file_path(from, to) {
+            Ok(true) => {}
+            result => {
+                tracing::error!(?result, from, to, "整理文件更新台账失败，尝试回滚磁盘");
+                if let Err(rollback_err) = std::fs::rename(to, from) {
+                    tracing::error!(%rollback_err, from, to, "整理文件回滚重命名失败");
+                }
+                errors.push(format!("{from} -> {to}: 台账记录更新失败: {result:?}"));
+                continue;
             }
-            errors.push(format!("{from} -> {to}: 台账记录更新失败: {err}"));
-            continue;
         }
         // 重命名后重写分集 NFO（新 stem）：扫描只给新文件写 NFO，已入台账的
         // 文件整理后必须跟着换名，否则 .nfo 变成孤儿。

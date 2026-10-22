@@ -521,39 +521,3 @@ fn ledger_source_version_survives_operation_checkpoint_clear() {
             .is_empty()
     );
 }
-
-/// P2-NEW-1：签名升级是 CAS，旧值不匹配时不写入、也不会覆盖别人的值。
-#[test]
-fn scope_signature_upgrade_is_compare_and_swap() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Store::open(tmp.path().join("data")).unwrap();
-    let op = store
-        .enqueue_scan("lib1", "movie:1:/old", &[], 1000)
-        .unwrap();
-
-    assert!(
-        !store
-            .upgrade_scan_scope_signature(&op.id, "movie:1:/other", "v2:movie:1:4:/old")
-            .unwrap(),
-        "期望值不匹配时不得写入"
-    );
-    assert!(
-        store
-            .upgrade_scan_scope_signature(&op.id, "movie:1:/old", "v2:movie:1:4:/old")
-            .unwrap()
-    );
-    assert_eq!(
-        store
-            .scan_operation(&op.id)
-            .unwrap()
-            .unwrap()
-            .scope_signature,
-        "v2:movie:1:4:/old"
-    );
-    assert!(
-        !store
-            .upgrade_scan_scope_signature(&op.id, "movie:1:/old", "v2:movie:1:4:/other")
-            .unwrap(),
-        "已升级的签名不得被重复升级覆盖"
-    );
-}

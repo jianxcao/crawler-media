@@ -422,69 +422,8 @@ async fn bootstrap_admin_password_and_cli_token_are_separated() {
     assert_eq!(login_token_as_pw.status(), StatusCode::UNAUTHORIZED);
 }
 
-#[tokio::test]
-async fn legacy_instance_with_token_as_password_upgrades_safely() {
-    let tmp = tempfile::tempdir().unwrap();
-    let data_dir = tmp.path().join("data");
-
-    // 模拟旧版本数据库：admin 的 password 等于 old-token
-    let old_token = "old-shared-secret-111";
-    let store_raw = Store::open(&data_dir).unwrap();
-    let admin_id = UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap();
-    let conn = Connection::open(data_dir.join("app.db")).unwrap();
-    conn.execute(
-        "INSERT INTO users (id, login, password, enabled, role) VALUES (?1, 'admin', ?2, 1, 'admin')",
-        rusqlite::params![admin_id.to_string(), old_token],
-    ).unwrap();
-    conn.execute(
-        "INSERT INTO user_tokens (token, user_id, created_at) VALUES (?1, ?2, 0)",
-        rusqlite::params![old_token, admin_id.to_string()],
-    )
-    .unwrap();
-    drop(conn);
-
-    let store = Arc::new(Mutex::new(store_raw));
-    let new_admin_pw = "new-distinct-admin-password";
-
-    // 重新启动服务并提供独立的 new_admin_pw
-    let state = ApiState::new_arc_with_admin_password(
-        store.clone(),
-        old_token.to_string(),
-        Some(new_admin_pw.to_string()),
-        ProfileSet::load(None).unwrap(),
-        Arc::new(NoopFetcher),
-        Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
-        tmp.path().join("library"),
-    )
-    .unwrap();
-    let app = router(state);
-
-    // 验证新密码能正常登录
-    let login_new = app
-        .clone()
-        .oneshot(request(
-            "POST",
-            "/api/v1/auth/login",
-            json!({ "username": "admin", "password": new_admin_pw }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(login_new.status(), StatusCode::OK);
-
-    // 验证旧 token 不能再被当作密码登录
-    let login_old = app
-        .oneshot(request(
-            "POST",
-            "/api/v1/auth/login",
-            json!({ "username": "admin", "password": old_token }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(login_old.status(), StatusCode::UNAUTHORIZED);
-}
-
 #[test]
-fn pre_cutover_plaintext_admin_row_requires_explicit_password_on_boot() {
+fn plaintext_admin_row_is_rejected_even_with_explicit_replacement_password() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().join("data");
     let store = Store::open(&data_dir).unwrap();
@@ -497,29 +436,20 @@ fn pre_cutover_plaintext_admin_row_requires_explicit_password_on_boot() {
     .unwrap();
     drop(conn);
 
-    // 登录路径已对该行 fail closed；启动自检不能静默 Keep 并忽略环境变量，
-    // 必须要求运维显式提供独立密码完成轮换。
-    let err = prepare_admin_credentials(
-        &store,
-        "plain-legacy-secret",
-        None,
-        BootstrapMode::Production,
-    )
-    .unwrap_err();
-    assert!(
-        matches!(err, BootstrapCredentialsError::InsecureLegacyNeedsPassword),
-        "遗留明文凭据必须要求独立密码，得到 {err:?}"
-    );
-
-    let action = prepare_admin_credentials(
-        &store,
-        "plain-legacy-secret",
-        Some("new-distinct-admin-password"),
-        BootstrapMode::Production,
-    )
-    .unwrap();
-    assert!(
-        matches!(action, AdminBootstrapAction::Rotate { .. }),
-        "遗留明文凭据必须经显式密码轮换，不能静默保留"
-    );
+    for replacement in [None, Some("new-distinct-admin-password")] {
+        let err = prepare_admin_credentials(
+            &store,
+            "plain-legacy-secret",
+            replacement,
+            BootstrapMode::Production,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                BootstrapCredentialsError::Store(store::StoreError::Invalid(_))
+            ),
+            "unsupported credentials must not be adopted or rotated: {err:?}"
+        );
+    }
 }

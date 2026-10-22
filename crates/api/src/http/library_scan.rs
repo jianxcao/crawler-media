@@ -642,7 +642,5 @@ pub(crate) async fn facets(
             }
         };
     }
-    // 兼容键：响应里一直有 `years`，保持空数组。
-    body.insert("years".into(), json!([]));
     ok(Value::Object(body)).into_response()
 }
