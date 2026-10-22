@@ -460,6 +460,61 @@ fn admin_ended_session(
     Ok(flagged || marker)
 }
 
+/// A new `PlaySessionId` on the same (user, device) supersedes the live row of the old one:
+/// archive that row under its *own* binding (one play log) and close its id, so the new
+/// session starts with fresh `started_at`/`watched_ms` instead of inheriting them.
+fn archive_superseded_session(
+    store: &Store,
+    tx: &Transaction<'_>,
+    event: &BoundPlaybackEvent,
+    now_ms: i64,
+) -> Result<(), StoreError> {
+    let Some(previous) = store.get_session(event.user_id, &event.device_id)? else {
+        return Ok(());
+    };
+    let Some(old_id) = previous.play_session_id.clone() else {
+        return Ok(());
+    };
+    if old_id == event.session_id {
+        return Ok(());
+    }
+    // Only a newer issued generation supersedes; a late event of an older session never
+    // archives the session that replaced it.
+    let old_generation: Option<i64> = tx.query_row(
+        "SELECT generation FROM playback_sessions WHERE user_id = ?1 AND device_id = ?2",
+        params![event.user_id.to_string(), event.device_id],
+        |r| r.get(0),
+    )?;
+    if old_generation.is_some_and(|g| g >= event.generation) {
+        return Ok(());
+    }
+    let completed = UnitState::playback_completed(previous.position_ms, previous.duration_ms);
+    let (user, device) = (event.user_id.to_string(), event.device_id.as_str());
+    tx.execute(
+        "INSERT INTO playback_logs
+            (id, user_id, media_id, season, episode, client, device_name, play_method,
+             started_at, ended_at, watched_ms, start_position_ms, end_position_ms,
+             duration_ms, completed, device_id, admin_ended, play_session_id, generation,
+             file_id, file_revision, source_version, timeline_mode)
+         SELECT ?3, user_id, media_id, season, episode, client, device_name, play_method,
+                started_at, ?4, watched_ms, start_position_ms, position_ms, duration_ms, ?5,
+                device_id, admin_ended, play_session_id, generation, file_id, file_revision,
+                source_version, COALESCE(timeline_mode, 'full_file')
+         FROM playback_sessions WHERE user_id = ?1 AND device_id = ?2",
+        params![user, device, uuid::Uuid::new_v4().to_string(), now_ms / 1000, completed as i64],
+    )?;
+    tx.execute(
+        "DELETE FROM playback_sessions WHERE user_id = ?1 AND device_id = ?2",
+        params![user, device],
+    )?;
+    tx.execute(
+        "UPDATE playback_session_ids SET state = 'closed'
+         WHERE user_id = ?1 AND device_id = ?2 AND play_session_id = ?3",
+        params![user, device, old_id],
+    )?;
+    Ok(())
+}
+
 fn close_live_session(
     tx: &Transaction<'_>,
     event: &BoundPlaybackEvent,
@@ -555,6 +610,7 @@ fn advance_session_state(
     binding: &IssuedBinding,
     now_ms: i64,
 ) -> Result<(), StoreError> {
+    archive_superseded_session(store, tx, event, now_ms)?;
     let previous = store.get_session(event.user_id, &event.device_id)?;
     if event.event_type == PlaybackEventType::Stopped {
         // A `Stop` carries the final position: record it on the live row before archiving, so

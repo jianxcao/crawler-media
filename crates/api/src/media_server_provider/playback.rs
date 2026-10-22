@@ -27,17 +27,32 @@ pub(super) fn resolve_target(
         return Ok(None);
     };
     let (season, episode) = (entry.unit.0, entry.unit.1);
-    let duration_ms = {
-        let store = provider.state.store.lock();
-        crate::http::playback::effective_watch_state(
-            &store,
-            user_id,
-            entry.media.id,
-            season,
-            episode,
-        )
-        .map_err(|error| error.to_string())?
-        .and_then(|unit| unit.duration_ms)
+    // Duration belongs to the physical source: prefer the probed duration of this file and
+    // only fall back to a stored user value recorded against the same source.
+    let duration_ms = match entry.file.duration_ms.filter(|d| *d > 0) {
+        Some(duration) => Some(duration),
+        None => {
+            let item = if season == crate::store::UNIT_WHOLE {
+                domain::TypedItemId::Work(entry.media.id)
+            } else {
+                domain::TypedItemId::Unit {
+                    media: entry.media.id,
+                    key: domain::UnitKey::new(season, episode),
+                }
+            };
+            let source = domain::PhysicalSourceId {
+                file_id: entry.file.file_id,
+                revision: entry.file.version.revision,
+            };
+            let store = provider.state.store.lock();
+            let resolved = store
+                .resolve_playback(user_id, &item, Some(&source), None)
+                .map_err(|error| error.to_string())?;
+            (resolved.target.file.file_id == source.file_id
+                && resolved.target.file.version.revision == source.revision)
+                .then_some(resolved.duration_ms)
+                .flatten()
+        }
     };
     Ok(Some(PlaybackTarget {
         media: entry.media,

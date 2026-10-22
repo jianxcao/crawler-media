@@ -142,3 +142,54 @@ async fn production_jellyfin_stream_uses_issued_binding() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_ne!(bytes, b"XXXX");
 }
+
+/// R10: a Jellyfin event's duration comes from the current physical source, never from a
+/// duration stored against older bytes.
+#[tokio::test]
+async fn jellyfin_event_duration_ignores_old_source_value() {
+    let tmp = tempfile::tempdir().unwrap();
+    let f = fixture(tmp.path());
+    let media_id = match domain::TypedItemId::from_wire_string(&f.item_id).unwrap() {
+        domain::TypedItemId::Work(id) => id,
+        _ => unreachable!(),
+    };
+    let user = {
+        let store = Store::open(tmp.path().join("data")).unwrap();
+        let user = store.user_by_token("admin-token").unwrap().unwrap().id;
+        let old = domain::PhysicalSourceId { file_id: f.file_id, revision: 1 };
+        store
+            .upsert_unit_for_source(user, media_id, domain::UnitKey::WHOLE, old, 500, None, None,
+                Some(1_000), None, None, false, 1)
+            .unwrap();
+        let version = store.get_file_version(f.file_id).unwrap().unwrap();
+        let file = store.file_coverage_by_path(&f.path.display().to_string()).unwrap().unwrap().file;
+        let scope = store::library_write::WriteScope {
+            library_id: file.library_id,
+            config_revision: store.library_config_revision(&file.library_id.to_string()).unwrap(),
+        };
+        std::fs::write(&f.path, b"XXXXXXXXXXXX").unwrap();
+        let observation = api::fingerprint_job::observe_source(&f.path).unwrap();
+        store.replace_file_source(&scope, f.file_id, &version, &observation, 5_000).unwrap();
+        user
+    };
+    let (status, body) = get(&f.app, "POST", &format!("/Items/{}/PlaybackInfo", f.item_id), "tv-1").await;
+    assert_eq!(status, StatusCode::OK);
+    let info: Value = serde_json::from_slice(&body).unwrap();
+    let session = info["PlaySessionId"].as_str().unwrap().to_string();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/Sessions/Playing")
+        .header("authorization", "Bearer admin-token")
+        .header("X-Emby-Device-Id", "tv-1")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({"ItemId": f.item_id, "PositionTicks": 10_000_000, "PlaySessionId": session})
+                .to_string(),
+        ))
+        .unwrap();
+    let response = f.app.clone().oneshot(request).await.unwrap();
+    assert!(response.status().is_success(), "{}", response.status());
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let unit = store.unit_state(user, media_id, -1, -1).unwrap().unwrap();
+    assert_ne!(unit.duration_ms, Some(1_000), "old-source duration leaked: {unit:?}");
+}

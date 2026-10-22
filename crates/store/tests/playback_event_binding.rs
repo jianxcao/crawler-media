@@ -788,3 +788,37 @@ fn paused_stop_still_records_its_final_position_and_watch_time() {
         "a pause on the stop must not suppress the interval the stop itself claims"
     );
 }
+
+#[test]
+fn new_session_on_same_device_starts_fresh_and_logs_the_old_once() {
+    let (_tmp, f) = seed();
+    let user: UserId = USER.parse().unwrap();
+    let a = issue(&f, &episode(&f, 1), &f.file);
+    assert_eq!(heartbeat(&f, "device_web", (&a.0, a.1), 0, false, 2_000), EventOutcome::Applied);
+    assert_eq!(heartbeat(&f, "device_web", (&a.0, a.1), 10_000, false, 12_000), EventOutcome::Applied);
+    assert_eq!(watched_ms(&f, "device_web"), 10_000, "positive control: A watched 10s");
+
+    let b = issue(&f, &episode(&f, 1), &f.file);
+    assert_eq!(heartbeat(&f, "device_web", (&b.0, b.1), 10_000, false, 13_000), EventOutcome::Applied);
+    let row = live_row(&f, "device_web");
+    assert_eq!(row.play_session_id.as_deref(), Some(b.0.as_str()));
+    assert_eq!(row.watched_ms, 0, "B must not inherit A's watch time");
+    assert_eq!(row.started_at, 13, "B starts at its own first event");
+
+    let logs = f
+        .store
+        .playback_log_page(
+            &store::playback::PlaybackLogScope {
+                before: None,
+                before_id: None,
+                since: None,
+                user_id: Some(user),
+                visible_media: None,
+            },
+            100,
+        )
+        .unwrap()
+        .entries;
+    assert_eq!(logs.len(), 1, "A is archived exactly once: {logs:?}");
+    assert_eq!(logs[0].watched_ms, 10_000);
+}

@@ -653,3 +653,57 @@ async fn http_event_sequence_regression_is_ignored_and_writes_nothing() {
 mod merged_session;
 #[path = "playback_event_identity/legacy_no_id_identity.rs"]
 mod legacy_no_id_identity;
+
+/// R09: a Start without `position_ms` may only reuse a resume point recorded against the same
+/// physical source; after the bytes were replaced it starts from zero.
+#[tokio::test]
+async fn start_without_position_does_not_rebind_old_source_resume() {
+    let fix = PresenceFixture::new();
+    let (media_id, file) = fix.insert_media_and_ledger("movie_resume.mkv");
+    let store_arc = fix.state.store();
+    let user_id = store_arc.lock().user_by_token(&fix.admin_token).unwrap().unwrap().id;
+    let post = |sid: String, event: &str, position: Option<i64>| {
+        let mut body = json!({
+            "device_id": "dev1",
+            "media_item_id": media_id.to_string(),
+            "file_id": file.file_id.to_string(),
+            "event": event,
+            "play_session_id": sid,
+        });
+        if let Some(p) = position {
+            body["position_ms"] = json!(p);
+        }
+        body
+    };
+    let s1 = support::session::issue_session(&store_arc.lock(), user_id, "dev1", file.file_id, 1000);
+    for (event, pos) in [("start", Some(0)), ("stop", Some(600_000))] {
+        let (status, _) = fix
+            .request_with_body("POST", "/api/v1/playback/progress", Some(&fix.admin_token), post(s1.clone(), event, pos))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let unit = |store: &store::Store| store.unit_state(user_id, media_id, -1, -1).unwrap().unwrap();
+    assert_eq!(unit(&store_arc.lock()).position_ms, 600_000, "positive control");
+
+    {
+        let guard = store_arc.lock();
+        let scope = store::library_write::WriteScope {
+            library_id: file.library_id,
+            config_revision: guard.library_config_revision(&file.library_id.to_string()).unwrap(),
+        };
+        let observation = library::SourceObservation {
+            source_version: "replaced-bytes".into(),
+            size_bytes: Some(1),
+            modified_ns: Some(1),
+            created_ns: None,
+            content_digest: None,
+        };
+        guard.replace_file_source(&scope, file.file_id, &file.version, &observation, 5_000).unwrap();
+    }
+    let s2 = support::session::issue_session(&store_arc.lock(), user_id, "dev1", file.file_id, 6000);
+    let (status, _) = fix
+        .request_with_body("POST", "/api/v1/playback/progress", Some(&fix.admin_token), post(s2, "start", None))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(unit(&store_arc.lock()).position_ms, 0, "old-source resume must not be rebound");
+}

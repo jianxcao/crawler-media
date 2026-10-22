@@ -258,25 +258,6 @@ fn persist_heartbeat(
     // canonical 是这次事件的唯一写路径:它自己开一个 IMMEDIATE 事务,并在事务内
     // 复核会话绑定、物理源版本、Library 可达性与播放单元坐标。API 层不再叠加任何
     // 写操作,也不再开第二个事务。
-    let existing = store.unit_state(
-        heartbeat.user_id,
-        heartbeat.media_id,
-        heartbeat.season,
-        heartbeat.episode,
-    )?;
-    // 客户端没带 position 的 start 保留已保存的续播点(旧 `update_unit` 语义)。
-    let position_ms = heartbeat.body["position_ms"]
-        .as_i64()
-        .or_else(|| {
-            (event == "start")
-                .then(|| existing.as_ref().map(|u| u.position_ms))
-                .flatten()
-        })
-        .unwrap_or(0)
-        .max(0);
-    let duration_ms = heartbeat
-        .duration_ms
-        .or(existing.as_ref().and_then(|u| u.duration_ms));
     let item = if heartbeat.season == UNIT_WHOLE {
         domain::TypedItemId::Work(heartbeat.media_id)
     } else {
@@ -285,6 +266,20 @@ fn persist_heartbeat(
             key: domain::UnitKey::new(heartbeat.season, heartbeat.episode),
         }
     };
+    // The saved resume point / duration are only valid for the physical source they were
+    // recorded against: resolve them for *this* source instead of reading the bare unit row.
+    let resolved = store
+        .resolve_playback(heartbeat.user_id, &item, Some(&heartbeat.source), None)?;
+    let same_source = resolved.target.file.file_id == heartbeat.source.file_id
+        && resolved.target.file.version.revision == heartbeat.source.revision;
+    let position_ms = heartbeat.body["position_ms"]
+        .as_i64()
+        .or_else(|| (event == "start" && same_source).then_some(resolved.start_ms))
+        .unwrap_or(0)
+        .max(0);
+    let duration_ms = heartbeat
+        .duration_ms
+        .or(same_source.then_some(resolved.duration_ms).flatten());
     let event_type = match event {
         "start" => store::playback::PlaybackEventType::Playing,
         "stop" => store::playback::PlaybackEventType::Stopped,
