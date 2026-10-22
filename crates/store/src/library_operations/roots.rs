@@ -273,3 +273,40 @@ fn prune_unreferenced_roots(
     }
     Ok(())
 }
+
+/// Whether some file, unidentified row or metadata input of the Library lies outside
+/// every requested root. A root change must not "succeed" while leaving such rows on a
+/// root the request dropped, so `begin` refuses it up front.
+pub(crate) fn has_uncovered_rows(
+    tx: &Connection,
+    library: &str,
+    requested: &[PathBuf],
+) -> Result<bool, StoreError> {
+    let roots: Vec<String> = requested
+        .iter()
+        .map(|root| root.to_string_lossy().trim_end_matches('/').to_string())
+        .collect();
+    for (table, column) in [
+        ("library_files", "path_key"),
+        ("unidentified", "path"),
+        ("library_metadata_inputs", "path_key"),
+    ] {
+        let covered: Vec<String> = (0..roots.len())
+            .map(|i| {
+                let n = i + 2;
+                format!("({column} = ?{n} OR substr({column}, 1, length(?{n}) + 1) = ?{n} || '/')")
+            })
+            .collect();
+        let sql = format!(
+            "SELECT EXISTS(SELECT 1 FROM {table} WHERE library_id = ?1 AND NOT ({}))",
+            covered.join(" OR ")
+        );
+        let mut values: Vec<&dyn rusqlite::ToSql> = vec![&library];
+        values.extend(roots.iter().map(|r| r as &dyn rusqlite::ToSql));
+        let exists: i64 = tx.query_row(&sql, values.as_slice(), |r| r.get(0))?;
+        if exists != 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}

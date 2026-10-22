@@ -146,6 +146,13 @@ impl Store {
                 "library {library} lifecycle is {lifecycle}"
             )));
         }
+        if let Some(paths) = &request.root_paths
+            && roots::has_uncovered_rows(&tx, &library, paths)?
+        {
+            return Err(StoreError::Invalid(format!(
+                "library {library} has files outside the requested roots; remove them first"
+            )));
+        }
         let plan = ReconfigurationPlan {
             root_paths: request.root_paths.clone(),
             display_locale: request.display_locale.clone(),
