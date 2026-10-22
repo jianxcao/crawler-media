@@ -330,12 +330,15 @@ async fn changed_strm_url_with_same_size_and_mtime_is_reprocessed_and_reprobed()
         guard.get_file_meta(&ledger_id).unwrap().is_none(),
         "变化文件的派生探测事实必须失效"
     );
+    // 后台义务派发器每 5s 一轮：满载下它可能已把义务派发进探测队列并 ack，
+    // 因此「义务仍挂着」或「已派发到队列」都满足 durable 合同。
+    let pending = guard
+        .scan_probe_obligations(100)
+        .unwrap()
+        .iter()
+        .any(|obligation| obligation.ledger_id.to_string() == ledger_id);
     assert!(
-        guard
-            .scan_probe_obligations(100)
-            .unwrap()
-            .iter()
-            .any(|obligation| obligation.ledger_id.to_string() == ledger_id),
+        pending || fix.state.probe.is_queued(&ledger_id),
         "变化文件必须重挂 durable probe 义务"
     );
     drop(guard);
