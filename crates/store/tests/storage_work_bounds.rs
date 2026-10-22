@@ -1,9 +1,9 @@
-use std::path::Path;
 use domain::{
     Confidence, EntityScope, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile,
     LibraryId, Media, MediaId, MediaKind, PhysicalSourceId, QualitySource, TimelineMode,
     TypedItemId, UnitKey, UserId,
 };
+use std::path::Path;
 use store::Store;
 use store::library_query::{BrowseFilter, BrowseOrder, BrowsePage, LibraryQuery};
 use store::library_write::{FilePublication as StorePublication, WriteScope};

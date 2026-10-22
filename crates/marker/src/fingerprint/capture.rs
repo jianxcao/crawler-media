@@ -8,8 +8,8 @@ use super::capture_types::{
     CaptureFailure, CaptureFailureKind, CaptureMetrics, CaptureRequest, CapturedFingerprint,
 };
 use super::chromaprint::{
-    CapturedStderr, ExtractionTimings, ffmpeg_exit_error, ffmpeg_log_level,
-    log_extraction_timings, start_fingerprinter,
+    CapturedStderr, ExtractionTimings, ffmpeg_exit_error, ffmpeg_log_level, log_extraction_timings,
+    start_fingerprinter,
 };
 use crate::target::ProbeTarget;
 
@@ -25,8 +25,11 @@ pub fn capture_window_controlled(
 ) -> Result<CapturedFingerprint, CaptureFailure> {
     let started = Instant::now();
     if control.is_cancelled() {
-        return Err(CaptureFailure { kind: CaptureFailureKind::Cancelled,
-            message: "Library work cancelled".into(), metrics: CaptureMetrics::default() });
+        return Err(CaptureFailure {
+            kind: CaptureFailureKind::Cancelled,
+            message: "Library work cancelled".into(),
+            metrics: CaptureMetrics::default(),
+        });
     }
     request.window.validate()?;
 
@@ -94,7 +97,8 @@ fn finish_captured_fingerprint(
             let words = fingerprinter.fingerprint().to_vec();
             if words.is_empty() {
                 let metrics = build_metrics(&timings, started, None);
-                let err_res = Err("Empty fingerprint extracted (ffmpeg produced no audio samples)".into());
+                let err_res =
+                    Err("Empty fingerprint extracted (ffmpeg produced no audio samples)".into());
                 log_extraction_timings(
                     &request.path,
                     source,
@@ -106,7 +110,8 @@ fn finish_captured_fingerprint(
                 );
                 return Err(CaptureFailure {
                     kind: CaptureFailureKind::EmptyAudio,
-                    message: "Empty fingerprint extracted (ffmpeg produced no audio samples)".into(),
+                    message: "Empty fingerprint extracted (ffmpeg produced no audio samples)"
+                        .into(),
                     metrics,
                 });
             }
@@ -166,16 +171,7 @@ fn build_capture_ffmpeg_command(request: &CaptureRequest, log_level: &str) -> Co
         command.args(["-map", &format!("0:{stream_idx}")]);
     }
 
-    command.args([
-        "-vn",
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-f",
-        "s16le",
-        "-",
-    ]);
+    command.args(["-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"]);
 
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     command
@@ -190,7 +186,10 @@ fn spawn_ffmpeg(mut command: Command, timings: &mut ExtractionTimings) -> Result
 
 fn spawn_stdout_reader(
     stdout: std::process::ChildStdout,
-) -> (mpsc::Receiver<Vec<u8>>, std::thread::JoinHandle<Result<(), String>>) {
+) -> (
+    mpsc::Receiver<Vec<u8>>,
+    std::thread::JoinHandle<Result<(), String>>,
+) {
     let (tx, rx) = mpsc::channel();
     let handle = std::thread::spawn(move || {
         use std::io::Read;
@@ -279,9 +278,8 @@ fn run_ffmpeg_with_deadline(
         metrics: build_metrics(timings, process_started, None),
     })?;
 
-    let stderr_reader = std::thread::spawn(move || {
-        super::chromaprint::diagnostics::read_stderr_tail(stderr)
-    });
+    let stderr_reader =
+        std::thread::spawn(move || super::chromaprint::diagnostics::read_stderr_tail(stderr));
 
     let (rx, stdout_join) = spawn_stdout_reader(stdout);
 
@@ -291,7 +289,9 @@ fn run_ffmpeg_with_deadline(
     let mut timed_out = false;
 
     loop {
-        if control.is_cancelled() { break; }
+        if control.is_cancelled() {
+            break;
+        }
         let elapsed = process_started.elapsed();
         if deadline_ms > 0 && elapsed >= deadline {
             timed_out = true;
@@ -311,7 +311,9 @@ fn run_ffmpeg_with_deadline(
                 if bytes.is_empty() {
                     break;
                 }
-                timings.time_to_first_pcm_ms.get_or_insert_with(|| process_started.elapsed().as_millis());
+                timings
+                    .time_to_first_pcm_ms
+                    .get_or_insert_with(|| process_started.elapsed().as_millis());
                 timings.pcm_bytes += bytes.len() as u64;
 
                 decode_pcm_chunk_ref(&bytes, &mut pending_low_byte, &mut samples);
@@ -341,16 +343,29 @@ fn run_ffmpeg_with_deadline(
         let _ = stdout_join.join();
         let _ = collect_stderr_to_timings(stderr_reader, timings);
         return Err(CaptureFailure {
-            kind: if cancelled { CaptureFailureKind::Cancelled } else { CaptureFailureKind::Timeout },
-            message: if cancelled { "Library work cancelled".into() }
-                else { format!("FFmpeg process exceeded deadline of {deadline_ms}ms") },
+            kind: if cancelled {
+                CaptureFailureKind::Cancelled
+            } else {
+                CaptureFailureKind::Timeout
+            },
+            message: if cancelled {
+                "Library work cancelled".into()
+            } else {
+                format!("FFmpeg process exceeded deadline of {deadline_ms}ms")
+            },
             metrics: build_metrics(timings, process_started, None),
         });
     }
 
     let _ = stdout_join.join();
 
-    finalize_ffmpeg_exit(child, stderr_reader, timings, pending_low_byte, process_started)
+    finalize_ffmpeg_exit(
+        child,
+        stderr_reader,
+        timings,
+        pending_low_byte,
+        process_started,
+    )
 }
 
 fn decode_pcm_chunk_ref(bytes: &[u8], pending_low_byte: &mut Option<u8>, samples: &mut Vec<i16>) {
@@ -415,9 +430,21 @@ fn build_metrics(
         ffmpeg_wait_ms: Some(timings.ffmpeg_wait_ms as u64),
         stderr_collect_ms: Some(timings.stderr_collect_ms as u64),
         sample_count: Some(timings.sample_count),
-        ffmpeg_user_cpu_ms: timings.ffmpeg_benchmark.as_ref().and_then(|b| b.user_cpu_ms).map(|v| v as u64),
-        ffmpeg_system_cpu_ms: timings.ffmpeg_benchmark.as_ref().and_then(|b| b.system_cpu_ms).map(|v| v as u64),
-        ffmpeg_real_ms: timings.ffmpeg_benchmark.as_ref().and_then(|b| b.real_ms).map(|v| v as u64),
+        ffmpeg_user_cpu_ms: timings
+            .ffmpeg_benchmark
+            .as_ref()
+            .and_then(|b| b.user_cpu_ms)
+            .map(|v| v as u64),
+        ffmpeg_system_cpu_ms: timings
+            .ffmpeg_benchmark
+            .as_ref()
+            .and_then(|b| b.system_cpu_ms)
+            .map(|v| v as u64),
+        ffmpeg_real_ms: timings
+            .ffmpeg_benchmark
+            .as_ref()
+            .and_then(|b| b.real_ms)
+            .map(|v| v as u64),
         ffmpeg_maxrss_kb: timings.ffmpeg_benchmark.as_ref().and_then(|b| b.max_rss_kb),
         ffmpeg_stderr_bytes: Some(timings.ffmpeg_stderr_bytes),
         ffmpeg_stderr_tail: Some(super::chromaprint::diagnostics::sanitized_excerpt(

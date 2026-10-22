@@ -10,8 +10,8 @@ use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use media::CatalogHit;
 use serde_json::Value;
+use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
-use store::test_support::{publish_fixture_file, FixtureFile};
 
 struct NoFetch;
 

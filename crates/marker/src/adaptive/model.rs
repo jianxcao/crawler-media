@@ -17,7 +17,11 @@ pub fn select_seed_episodes(
 
     // Sort by (episode, ledger_id)
     let mut sorted = episodes.to_vec();
-    sorted.sort_by(|a, b| a.episode.cmp(&b.episode).then_with(|| a.ledger_id.cmp(&b.ledger_id)));
+    sorted.sort_by(|a, b| {
+        a.episode
+            .cmp(&b.episode)
+            .then_with(|| a.ledger_id.cmp(&b.ledger_id))
+    });
 
     // De-duplicate by episode number: take first ledger_id for each episode
     let mut unique_episodes: Vec<&EpisodeDescriptor> = Vec::new();
@@ -212,23 +216,27 @@ fn build_models_for_kind(
                 None
             };
 
-            ep_refs.entry(ev1.sample_id.clone()).or_insert_with(|| TemplateReference {
-                sample_id: ev1.sample_id.clone(),
-                ledger_id: ev1.ledger_id.clone(),
-                episode: ev1.episode,
-                source_version: ev1.source_version.clone(),
-                match_interval_ms: (start1_ms, end1_ms),
-                match_from_end_ms: from_end1,
-            });
+            ep_refs
+                .entry(ev1.sample_id.clone())
+                .or_insert_with(|| TemplateReference {
+                    sample_id: ev1.sample_id.clone(),
+                    ledger_id: ev1.ledger_id.clone(),
+                    episode: ev1.episode,
+                    source_version: ev1.source_version.clone(),
+                    match_interval_ms: (start1_ms, end1_ms),
+                    match_from_end_ms: from_end1,
+                });
 
-            ep_refs.entry(ev2.sample_id.clone()).or_insert_with(|| TemplateReference {
-                sample_id: ev2.sample_id.clone(),
-                ledger_id: ev2.ledger_id.clone(),
-                episode: ev2.episode,
-                source_version: ev2.source_version.clone(),
-                match_interval_ms: (start2_ms, end2_ms),
-                match_from_end_ms: from_end2,
-            });
+            ep_refs
+                .entry(ev2.sample_id.clone())
+                .or_insert_with(|| TemplateReference {
+                    sample_id: ev2.sample_id.clone(),
+                    ledger_id: ev2.ledger_id.clone(),
+                    episode: ev2.episode,
+                    source_version: ev2.source_version.clone(),
+                    match_interval_ms: (start2_ms, end2_ms),
+                    match_from_end_ms: from_end2,
+                });
         }
 
         let references: Vec<TemplateReference> = ep_refs.into_values().collect();
@@ -246,10 +254,15 @@ fn build_models_for_kind(
         let is_stable = unique_episodes >= 3;
 
         template_models.push(TemplateModel {
-            model_id: format!("{}-{}-{}", match kind {
-                SegmentKind::Intro => "intro",
-                SegmentKind::Outro => "outro",
-            }, expected_duration_ms / 1000, idx),
+            model_id: format!(
+                "{}-{}-{}",
+                match kind {
+                    SegmentKind::Intro => "intro",
+                    SegmentKind::Outro => "outro",
+                },
+                expected_duration_ms / 1000,
+                idx
+            ),
             version: 1,
             kind,
             references,

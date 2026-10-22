@@ -1,6 +1,6 @@
+use library::extract_frame_with_ffmpeg;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use library::extract_frame_with_ffmpeg;
 
 fn fake_ffmpeg(dir: &std::path::Path) -> std::path::PathBuf {
     let program = dir.join("ffmpeg");

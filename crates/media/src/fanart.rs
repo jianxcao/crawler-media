@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
 use serde_json::Value;
 use sha2::Digest;
+use std::collections::BTreeMap;
 
 use crate::client::TmdbError;
 
@@ -48,17 +48,15 @@ fn parse_images_from_value(val: Option<&Value>) -> Vec<FanartImage> {
             .and_then(|l| l.as_str())
             .map(|s| s.to_string());
         let likes = parse_likes(item.get("likes"));
-        let season = item
-            .get("season")
-            .and_then(|s| {
-                if let Some(str_val) = s.as_str() {
-                    str_val.parse::<u32>().ok()
-                } else if let Some(num_val) = s.as_u64() {
-                    Some(num_val as u32)
-                } else {
-                    None
-                }
-            });
+        let season = item.get("season").and_then(|s| {
+            if let Some(str_val) = s.as_str() {
+                str_val.parse::<u32>().ok()
+            } else if let Some(num_val) = s.as_u64() {
+                Some(num_val as u32)
+            } else {
+                None
+            }
+        });
 
         result.push(FanartImage {
             url: url.to_string(),
@@ -205,7 +203,8 @@ impl<H: crate::client::CatalogGet> FanartClient<H> {
             inner: &self.http,
             url: &url,
         };
-        self.cache.get_or_fetch(&direct, &key, |body| parse_fanart(body, languages))
+        self.cache
+            .get_or_fetch(&direct, &key, |body| parse_fanart(body, languages))
     }
 
     pub fn movie(&self, tmdb_id: &str, languages: &[&str]) -> Result<FanartSet, TmdbError> {
@@ -218,7 +217,8 @@ impl<H: crate::client::CatalogGet> FanartClient<H> {
             inner: &self.http,
             url: &url,
         };
-        self.cache.get_or_fetch(&direct, &key, |body| parse_fanart(body, languages))
+        self.cache
+            .get_or_fetch(&direct, &key, |body| parse_fanart(body, languages))
     }
 }
 

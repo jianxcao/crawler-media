@@ -31,9 +31,9 @@ pub fn find_reusable_sample(
     };
 
     let samples = store.find_covering_fingerprint_samples(&query).ok()?;
-    let matched = samples.into_iter().find(|s| {
-        s.window_start_ms <= window.start_ms && s.window_end_ms >= window.end_ms
-    })?;
+    let matched = samples
+        .into_iter()
+        .find(|s| s.window_start_ms <= window.start_ms && s.window_end_ms >= window.end_ms)?;
 
     Some(stored_sample_to_evidence(
         &matched,

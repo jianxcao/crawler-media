@@ -1,8 +1,8 @@
-use std::path::PathBuf;
 use domain::{
     Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryId, MediaId,
     MediaKind, QualitySource,
 };
+use std::path::PathBuf;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileDetails {

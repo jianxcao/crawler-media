@@ -1,10 +1,7 @@
-use std::collections::BTreeMap;
 use serde_json::Value;
+use std::collections::BTreeMap;
 
-use domain::{
-    EntityScope, MetadataFields, MetadataPreferences,
-    NormalizedMetadata,
-};
+use domain::{EntityScope, MetadataFields, MetadataPreferences, NormalizedMetadata};
 
 use crate::client::TmdbError;
 

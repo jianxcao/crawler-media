@@ -130,7 +130,12 @@ fn cancelled_video_scan_fails_without_ledgering() {
     assert_eq!(failure.totals.scanned, 0);
     assert_eq!(failure.totals.inserted, 0);
     assert!(
-        state.store().lock().list_file_coverage().unwrap().is_empty(),
+        state
+            .store()
+            .lock()
+            .list_file_coverage()
+            .unwrap()
+            .is_empty(),
         "取消的 Video 扫描不得登记任何文件"
     );
 }
@@ -449,7 +454,10 @@ fn assert_not_confirmed(state: &ApiState, op_id: &str, path: &std::path::Path) {
         Some((0, 0, None)),
         "窗口内变化的路径不得推进 durable 源版本"
     );
-    let row = guard.file_coverage_by_path(&key).unwrap().expect("路径必须已入账");
+    let row = guard
+        .file_coverage_by_path(&key)
+        .unwrap()
+        .expect("路径必须已入账");
     let obligation = guard
         .scan_probe_obligations(100)
         .unwrap()

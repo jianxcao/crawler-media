@@ -159,8 +159,7 @@ fn apply_unit_delta(
     let Some(mut row) = current else {
         // The first file of this unit lands here. Any other shape means the summary lost a
         // row, so rebuild this one unit from the facts instead of guessing.
-        let (file_count, available, preferred) =
-            unit_counts(tx, lib, media, season, episode)?;
+        let (file_count, available, preferred) = unit_counts(tx, lib, media, season, episode)?;
         if file_count == 0 {
             delete_unit(tx, lib, media, season, episode)?;
             return Ok(false);
@@ -253,7 +252,9 @@ fn upsert_unit(
              available_file_count = excluded.available_file_count,
              preferred_file_id = excluded.preferred_file_id,
              unit_revision = library_units.unit_revision + 1",
-        params![lib, media, season, episode, file_count, available, preferred],
+        params![
+            lib, media, season, episode, file_count, available, preferred
+        ],
     )?;
     Ok(())
 }
@@ -297,4 +298,3 @@ fn unit_preferred_query(
         .optional()?;
     Ok(value)
 }
-

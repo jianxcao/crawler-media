@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::*;
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 fn app(tmp: &tempfile::TempDir) -> axum::Router {
     let fetcher = Arc::new(Fixtures {
@@ -80,11 +80,7 @@ async fn movie_library_id(app: &axum::Router) -> String {
 }
 
 /// 带 `root_paths` 的 PATCH：断言 `202` + `operation_id`，轮询到终态后返回完成的操作视图。
-async fn patch_roots_and_wait(
-    app: &axum::Router,
-    library_id: &str,
-    roots: Vec<String>,
-) -> Value {
+async fn patch_roots_and_wait(app: &axum::Router, library_id: &str, roots: Vec<String>) -> Value {
     let patch = app
         .clone()
         .oneshot(request(

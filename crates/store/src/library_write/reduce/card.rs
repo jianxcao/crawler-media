@@ -243,7 +243,6 @@ fn rebuild_units(tx: &Connection, lib: &str, media: &str) -> Result<(i64, i64), 
     Ok((seasons, episodes))
 }
 
-
 /// Drop NFO inputs whose sidecar no longer belongs to a published file of this card.
 ///
 /// `input_key` holds the canonical **sidecar** path, so it cannot be compared with

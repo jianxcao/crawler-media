@@ -1,15 +1,15 @@
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+use api::Store;
+use api::fingerprint_job::CaptureGate;
+use api::probe_manager::progress::MetadataPriorityGate;
+use api::probe_manager::{ProbeManager, ProbeUnit};
 use domain::{
     Confidence, FileCoverage, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile,
     LibraryId, MediaId, MediaKind, QualitySource, UnitKey,
 };
 use parking_lot::Mutex;
-use api::probe_manager::progress::MetadataPriorityGate;
-use api::probe_manager::{ProbeManager, ProbeUnit};
-use api::fingerprint_job::CaptureGate;
-use api::Store;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 /// Whole-work coverage fact, hand-built: this test only queues the unit and never
 /// probes it, so the file fact cannot come from `publish_fixture_file`.
@@ -62,7 +62,10 @@ async fn new_metadata_waits_only_for_current_sample() {
 
     // Initially with 0 pending metadata, gate wait returns immediately
     let res = tokio::time::timeout(Duration::from_millis(50), gate.wait_before_capture()).await;
-    assert!(res.is_ok(), "Gate should not wait when no metadata is pending");
+    assert!(
+        res.is_ok(),
+        "Gate should not wait when no metadata is pending"
+    );
 
     let unit = ProbeUnit {
         row: coverage(),
@@ -79,15 +82,23 @@ async fn new_metadata_waits_only_for_current_sample() {
     mgr.enqueue(unit);
 
     // Gate should wait while metadata is pending
-    let wait_res = tokio::time::timeout(Duration::from_millis(50), gate.wait_before_capture()).await;
-    assert!(wait_res.is_err(), "Gate must wait when metadata is pending in queue");
+    let wait_res =
+        tokio::time::timeout(Duration::from_millis(50), gate.wait_before_capture()).await;
+    assert!(
+        wait_res.is_err(),
+        "Gate must wait when metadata is pending in queue"
+    );
 
     // Finish metadata
     mgr.metadata_stage_finished();
 
     // Now gate returns
-    let wait_res2 = tokio::time::timeout(Duration::from_millis(50), gate.wait_before_capture()).await;
-    assert!(wait_res2.is_ok(), "Gate should unblock after metadata finishes");
+    let wait_res2 =
+        tokio::time::timeout(Duration::from_millis(50), gate.wait_before_capture()).await;
+    assert!(
+        wait_res2.is_ok(),
+        "Gate should unblock after metadata finishes"
+    );
 }
 
 #[tokio::test]
@@ -119,10 +130,13 @@ async fn metadata_overrides_endpoint_and_priority_resolution() {
     assert!(rev >= 1);
 
     // Conflict test: wrong expected_revision should return conflict error
-    let conflict = store.set_metadata_overrides(media.id, domain::EntityScope::Work, "zh-CN", &fields, 0);
-    assert!(conflict.is_err(), "Expected 409 conflict when revision does not match");
+    let conflict =
+        store.set_metadata_overrides(media.id, domain::EntityScope::Work, "zh-CN", &fields, 0);
+    assert!(
+        conflict.is_err(),
+        "Expected 409 conflict when revision does not match"
+    );
 }
-
 
 mod real_catalog {
     use std::sync::Arc;
@@ -176,12 +190,19 @@ mod real_catalog {
             .uri(uri)
             .header("Authorization", format!("Bearer {TOKEN}"))
             .header("Content-Type", "application/json")
-            .body(if body.is_null() { Body::empty() } else { Body::from(body.to_string()) })
+            .body(if body.is_null() {
+                Body::empty()
+            } else {
+                Body::from(body.to_string())
+            })
             .unwrap();
         let response = app.clone().oneshot(request).await.unwrap();
         let status = response.status();
         let bytes = to_bytes(response.into_body(), 4 << 20).await.unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
     }
 
     /// R15: the production refresh route adopts the complete normalized TMDB response (not a
@@ -234,7 +255,14 @@ mod real_catalog {
             let store = state.store();
             let store = store.lock();
             let library = store
-                .create_library(MediaKind::Movie, "Movies", &[root.to_str().unwrap()], "everyone", true, &[])
+                .create_library(
+                    MediaKind::Movie,
+                    "Movies",
+                    &[root.to_str().unwrap()],
+                    "everyone",
+                    true,
+                    &[],
+                )
                 .unwrap();
             store.insert_media(&media).unwrap();
             let path = root.join("Real.Movie.2020.mkv");
@@ -255,7 +283,10 @@ mod real_catalog {
         let (status, body) = send(
             &app,
             "POST",
-            &format!("/api/v1/libraries/{library_id}/items/{}/metadata/refresh", media.id),
+            &format!(
+                "/api/v1/libraries/{library_id}/items/{}/metadata/refresh",
+                media.id
+            ),
             Value::Null,
         )
         .await;
@@ -264,7 +295,10 @@ mod real_catalog {
         let (_, detail) = send(&app, "GET", &detail_uri, Value::Null).await;
         let metadata = &detail["data"];
         assert_eq!(metadata["overview"], "TMDB OVERVIEW", "{detail}");
-        assert_eq!(metadata["tagline"], "TMDB TAGLINE", "complete response adopted");
+        assert_eq!(
+            metadata["tagline"], "TMDB TAGLINE",
+            "complete response adopted"
+        );
         assert_eq!(metadata["studios"], json!(["Studio A"]));
 
         let (status, body) = send(

@@ -148,10 +148,9 @@ pub fn spawn_job_loop_with_control(
             // 再触发，孤儿引用就会一直指向已退休的 Media。开机无条件补一次（幂等）。
             crate::storage_operations::converge_retired_media_refs(&state);
             // 用户删除同样是分阶段落库的，重启后要把没走完的清理接着走完。
-            if let Err(error) = crate::user_removal::UserRemovalService::new(std::sync::Arc::new(
-                state.clone(),
-            ))
-            .recover_pending_removals()
+            if let Err(error) =
+                crate::user_removal::UserRemovalService::new(std::sync::Arc::new(state.clone()))
+                    .recover_pending_removals()
             {
                 tracing::error!(%error, "恢复未完成的用户删除操作失败");
             }
@@ -174,8 +173,10 @@ pub fn spawn_job_loop_with_control(
                     next_removal_retry = now.saturating_add(USER_REMOVAL_RETRY_SECS);
                     let retry_state = state.clone();
                     let retried = tokio::task::spawn_blocking(move || {
-                        crate::user_removal::UserRemovalService::new(std::sync::Arc::new(retry_state))
-                            .recover_pending_removals()
+                        crate::user_removal::UserRemovalService::new(std::sync::Arc::new(
+                            retry_state,
+                        ))
+                        .recover_pending_removals()
                     })
                     .await;
                     if let Ok(Err(error)) = retried {

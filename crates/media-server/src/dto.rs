@@ -46,7 +46,11 @@ pub fn user_profile_json(user: &ServerUser, server_id: &str) -> Value {
 }
 
 pub fn item_dto_json(snapshot: MediaItemSnapshot) -> Value {
-    let item = Item::from_target(&snapshot.item_identity(), &snapshot.media.title, &snapshot.file);
+    let item = Item::from_target(
+        &snapshot.item_identity(),
+        &snapshot.media.title,
+        &snapshot.file,
+    );
     let series_id = domain::TypedItemId::Work(snapshot.media.id).to_wire_string();
     let item_id = if snapshot.is_series {
         series_id.clone()
@@ -112,11 +116,13 @@ pub fn item_dto_json(snapshot: MediaItemSnapshot) -> Value {
         let season_num = snapshot.unit.map(|u| u.season as u32).unwrap_or(1);
         value["SeriesId"] = json!(series_id);
         value["SeriesName"] = json!(snapshot.media.title);
-        value["SeasonId"] = json!(domain::TypedItemId::Season {
-            media: snapshot.media.id,
-            season: season_num,
-        }
-        .to_wire_string());
+        value["SeasonId"] = json!(
+            domain::TypedItemId::Season {
+                media: snapshot.media.id,
+                season: season_num,
+            }
+            .to_wire_string()
+        );
         value["IndexNumber"] = json!(snapshot.unit.map(|u| u.episode as u32));
         value["ParentIndexNumber"] = json!(snapshot.unit.map(|u| u.season as u32));
         value["SeasonName"] = json!(format!("第 {} 季", season_num));
@@ -128,7 +134,13 @@ pub fn item_dto_json(snapshot: MediaItemSnapshot) -> Value {
                 .into_iter()
                 .collect::<Vec<_>>()
         );
-        value["SeriesPrimaryImageTag"] = json!(snapshot.metadata.primary_image_tag.as_deref().unwrap_or("poster"));
+        value["SeriesPrimaryImageTag"] = json!(
+            snapshot
+                .metadata
+                .primary_image_tag
+                .as_deref()
+                .unwrap_or("poster")
+        );
         value["PrimaryImageAspectRatio"] = json!(1.7777777777777777);
     } else if snapshot.is_series {
         let season_count = snapshot
@@ -139,7 +151,14 @@ pub fn item_dto_json(snapshot: MediaItemSnapshot) -> Value {
         value["ChildCount"] = json!(season_count);
         value["RecursiveItemCount"] = json!(snapshot.metadata.child_count.unwrap_or(0));
         value["NumberOfSeasons"] = json!(snapshot.metadata.season_count.unwrap_or(season_count));
-        value["NumberOfEpisodes"] = json!(snapshot.metadata.number_of_episodes.map(|n| n as usize).or(snapshot.metadata.child_count).unwrap_or(0));
+        value["NumberOfEpisodes"] = json!(
+            snapshot
+                .metadata
+                .number_of_episodes
+                .map(|n| n as usize)
+                .or(snapshot.metadata.child_count)
+                .unwrap_or(0)
+        );
     }
 
     if let Some(date_created) = snapshot.metadata.date_created.as_ref() {

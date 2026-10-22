@@ -278,21 +278,33 @@ fn execute(
 > {
     exclude_pending(state, id, &mut torrents)?;
     let facts = load_run_facts(state, id, context)?;
-    let plan = crate::worker::transfer::resolve_transfer_plan(state, &context.media, &context.subscribe)
+    let plan =
+        crate::worker::transfer::resolve_transfer_plan(state, &context.media, &context.subscribe)
+            .map_err(ApiError::internal)?;
+    let library_lease = state
+        .acquire_library_work(&plan.library_id)
         .map_err(ApiError::internal)?;
-    let library_lease = state.acquire_library_work(&plan.library_id).map_err(ApiError::internal)?;
-    let destinations = routed.imported_destinations()
+    let destinations = routed
+        .imported_destinations()
         .map_err(|error| ApiError::internal(error.to_string()))?;
     {
         let store = state.store.lock();
         validate_facts_observation(&store, context, &facts)?;
         crate::worker::transfer::validate_transfer_plan(
-            &store, &context.subscribe, &library_lease, &plan.fingerprint, &plan,
-        ).map_err(ApiError::internal)?;
+            &store,
+            &context.subscribe,
+            &library_lease,
+            &plan.fingerprint,
+            &plan,
+        )
+        .map_err(ApiError::internal)?;
     }
     let recorder = crate::worker::transfer::PlannedPublicationRecorder::new(
         crate::worker::transfer::PublicationRecorder {
-            state, subscribe: &context.subscribe, lease: &library_lease, fingerprint: plan.fingerprint.clone(),
+            state,
+            subscribe: &context.subscribe,
+            lease: &library_lease,
+            fingerprint: plan.fingerprint.clone(),
         },
         &plan,
     );
@@ -303,63 +315,80 @@ fn execute(
         torrents.iter().map(|t| t.title.as_str()),
     );
     let chooser = crate::pack_fallback::effective(state, &context.subscribe);
-    let added = subscribe::admit_and_add(
-        RunInput {
-            subscribe: &chooser,
-            media: &context.media,
-            filter: &context.filter,
-            wash_filter: context.wash_filter.as_ref(),
-            torrents,
-            search_keywords,
-            facts: facts.facts.clone(),
-            downloader: routed,
-            library_root: &plan.root,
-            library_id: plan.library_id.parse().ok(),
-            root_id: Some(plan.root_id.clone()),
-            config_revision: Some(plan.config_revision),
-            transfer_mode: plan.mode,
-            scrape: plan.nfo,
-            hooks: None,
-            naming: Some(&plan.naming),
-            preserve_removed: true,
-            overlap,
-            absolute: absolute.as_ref(),
-        },
-    )?;
+    let added = subscribe::admit_and_add(RunInput {
+        subscribe: &chooser,
+        media: &context.media,
+        filter: &context.filter,
+        wash_filter: context.wash_filter.as_ref(),
+        torrents,
+        search_keywords,
+        facts: facts.facts.clone(),
+        downloader: routed,
+        library_root: &plan.root,
+        library_id: plan.library_id.parse().ok(),
+        root_id: Some(plan.root_id.clone()),
+        config_revision: Some(plan.config_revision),
+        transfer_mode: plan.mode,
+        scrape: plan.nfo,
+        hooks: None,
+        naming: Some(&plan.naming),
+        preserve_removed: true,
+        overlap,
+        absolute: absolute.as_ref(),
+    })?;
     let mut outcome = subscribe::collect_completed_recorded(
-        added, &library::Ffprobe::default(), &destinations,
-        library_lease.control(), Some(&recorder),
+        added,
+        &library::Ffprobe::default(),
+        &destinations,
+        library_lease.control(),
+        Some(&recorder),
     )?;
     if !outcome.submission_errors.is_empty() && outcome.torrents_added.is_empty() {
-        return Err(subscribe::SubscribeError::Downloader(
-            downloader::DownloaderError::Message(outcome.submission_errors.join("; ")),
-        ).into());
+        return Err(
+            subscribe::SubscribeError::Downloader(downloader::DownloaderError::Message(
+                outcome.submission_errors.join("; "),
+            ))
+            .into(),
+        );
     }
-    library_lease.control().check().map_err(|e| ApiError::internal(e.to_string()))?;
+    library_lease
+        .control()
+        .check()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
     {
         // The transfer above published this round's file rows, so the scoped file
         // fingerprint legitimately moved. Re-check only the parts publication does
         // not touch (Library lifecycle, roots, transfer settings, Subscribe).
         let store = state.store.lock();
         crate::worker::transfer::validate_committed_transfer_plan(
-            &store, &context.subscribe, &library_lease, &plan,
-        ).map_err(ApiError::internal)?;
+            &store,
+            &context.subscribe,
+            &library_lease,
+            &plan,
+        )
+        .map_err(ApiError::internal)?;
     }
     outcome.facts.retain_owned();
     outcome.completed = subscribe::is_complete(&context.subscribe, &outcome.facts);
     Ok((outcome, plan.scrape, library_lease, plan))
 }
 
-fn load_run_facts(state: &ApiState, id: SubscribeId, context: &RunContext)
-    -> Result<RunFactsObservation, ApiError>
-{
+fn load_run_facts(
+    state: &ApiState,
+    id: SubscribeId,
+    context: &RunContext,
+) -> Result<RunFactsObservation, ApiError> {
     let existing = state.store.lock().load_pending(id)?;
-    let snapshot = state.store.lock()
+    let snapshot = state
+        .store
+        .lock()
         .subscribe_library_snapshot(&context.subscribe, context.media.kind)
         .map_err(|e| ApiError::internal(e.to_string()))?;
     let facts = crate::subscribe_library_read::evaluate_subscribe_facts_out_of_lock_with(
-        &snapshot, state.browse_files.as_ref(),
-    ).map_err(|e| ApiError::internal(e.to_string()))?;
+        &snapshot,
+        state.browse_files.as_ref(),
+    )
+    .map_err(|e| ApiError::internal(e.to_string()))?;
     // H4: same placeholder rule as the scheduled path (shared in subscribe).
     let releases = crate::worker::finish_search::pending_releases(&existing);
     let facts = subscribe::facts_with_pending(facts, &releases, &context.subscribe, &context.media);
@@ -387,7 +416,9 @@ fn validate_facts_observation(
     {
         tracing::warn!(subscribe_id = %context.subscribe.id,
             "Subscribe facts source rows or ownership changed after filesystem observation");
-        return Err(ApiError::internal("Subscribe facts source changed during admission".into()));
+        return Err(ApiError::internal(
+            "Subscribe facts source changed during admission".into(),
+        ));
     }
     Ok(())
 }
@@ -516,14 +547,20 @@ fn persist(
     // The transfer above published this round's file rows; the scoped file
     // fingerprint legitimately moved. Only publication-independent facts remain.
     crate::worker::transfer::validate_committed_transfer_plan(
-        &store, &store.get_subscribe(id)?.ok_or_else(|| ApiError::internal("Subscribe not found".into()))?,
-        lease, plan,
-    ).map_err(ApiError::internal)?;
+        &store,
+        &store
+            .get_subscribe(id)?
+            .ok_or_else(|| ApiError::internal("Subscribe not found".into()))?,
+        lease,
+        plan,
+    )
+    .map_err(ApiError::internal)?;
     let mut published = Vec::with_capacity(outcome.files.len());
     for ((coverage, mode), source) in outcome.files.iter().zip(modes.iter()).zip(sources.iter()) {
         let path = coverage.file.path.to_string_lossy().to_string();
-        let source_path = crate::worker::transfer::recorded_file_source(&outcome, coverage.file.file_id)
-            .map(|source| source.display().to_string());
+        let source_path =
+            crate::worker::transfer::recorded_file_source(&outcome, coverage.file.file_id)
+                .map(|source| source.display().to_string());
         let existing = store.file_coverage_by_path(&path)?;
         let existing_key = existing.as_ref().map(|existing| {
             (
@@ -535,7 +572,9 @@ fn persist(
         if existing_key != Some((coverage.file.file_id, coverage.file.media_id, path.clone()))
             || !store.ledger_source_path_matches(&path, source_path.as_deref())?
         {
-            return Err(ApiError::internal(format!("Transfer reservation missing or replaced: {path}")));
+            return Err(ApiError::internal(format!(
+                "Transfer reservation missing or replaced: {path}"
+            )));
         }
         published.push(crate::worker::transfer::publish_transfer_file(
             &store,

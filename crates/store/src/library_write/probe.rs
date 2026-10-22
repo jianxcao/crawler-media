@@ -37,7 +37,8 @@ pub struct ProbePublication<'a> {
     pub details: Option<&'a FileDetails>,
 }
 
-const SELECT_FILE_VERSION: &str = "SELECT file_revision, source_version FROM library_files WHERE file_id = ?1";
+const SELECT_FILE_VERSION: &str =
+    "SELECT file_revision, source_version FROM library_files WHERE file_id = ?1";
 
 const SELECT_DETAILS: &str = "SELECT source_revision, source_version, tracks_version, video_json,
                                      audio_json, subtitle_json, chapters_json, fingerprint_json,
@@ -48,7 +49,11 @@ impl Store {
     /// Current version of a file row; `None` once the row is gone.
     pub fn get_file_version(&self, file_id: LedgerId) -> Result<Option<FileVersion>, StoreError> {
         self.library
-            .query_row(SELECT_FILE_VERSION, params![file_id.to_string()], map_version)
+            .query_row(
+                SELECT_FILE_VERSION,
+                params![file_id.to_string()],
+                map_version,
+            )
             .optional()
             .map_err(Into::into)
     }
@@ -157,7 +162,10 @@ fn merge_details_tx(
     {
         return Err(StoreError::Invalid(format!(
             "probe details for file {file_id} carry r{}v{} but the probe pinned r{}v{}",
-            details.source_revision, details.source_version, expected.revision, expected.source_version
+            details.source_revision,
+            details.source_version,
+            expected.revision,
+            expected.source_version
         )));
     }
     let existing: Option<FileDetails> = tx
@@ -171,7 +179,10 @@ fn merge_details_tx(
     Ok(FileDetails {
         video_json: details.video_json.clone().or(existing.video_json),
         chapters_json: details.chapters_json.clone().or(existing.chapters_json),
-        fingerprint_json: details.fingerprint_json.clone().or(existing.fingerprint_json),
+        fingerprint_json: details
+            .fingerprint_json
+            .clone()
+            .or(existing.fingerprint_json),
         outro_fingerprint_json: details
             .outro_fingerprint_json
             .clone()

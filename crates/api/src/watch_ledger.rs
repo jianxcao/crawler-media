@@ -1,8 +1,6 @@
 use std::path::PathBuf;
 
-use domain::{
-    Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, Release, UnitKey,
-};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, Release, UnitKey};
 use store::ScannedLedger;
 
 use crate::Store;

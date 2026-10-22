@@ -1,5 +1,5 @@
 use axum::extract::{Path, State};
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use domain::MediaId;
 use std::str::FromStr;
@@ -32,11 +32,17 @@ pub(crate) async fn get_media_poster(
             "poster not found",
         )
             .into_response(),
-        Err(PosterError::Timeout) => (StatusCode::GATEWAY_TIMEOUT, "poster fetch timed out").into_response(),
+        Err(PosterError::Timeout) => {
+            (StatusCode::GATEWAY_TIMEOUT, "poster fetch timed out").into_response()
+        }
         Err(PosterError::InvalidImage | PosterError::Upstream(_)) => {
             (StatusCode::BAD_GATEWAY, "failed to fetch upstream poster").into_response()
         }
-        Err(PosterError::Io(_)) => (StatusCode::INTERNAL_SERVER_ERROR, "poster io error").into_response(),
-        Err(PosterError::Busy) => (StatusCode::SERVICE_UNAVAILABLE, "poster service busy").into_response(),
+        Err(PosterError::Io(_)) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, "poster io error").into_response()
+        }
+        Err(PosterError::Busy) => {
+            (StatusCode::SERVICE_UNAVAILABLE, "poster service busy").into_response()
+        }
     }
 }

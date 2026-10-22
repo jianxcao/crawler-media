@@ -2,9 +2,9 @@
 //! `Store::playback_units_for_user` (full `UnitState`, not a reduced row).
 
 use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UserId};
-use store::test_support::FixtureFile;
 use std::path::Path;
 use store::Store;
+use store::test_support::FixtureFile;
 
 fn media(kind: MediaKind, title: &str, tmdb_id: Option<&str>) -> Media {
     Media {
@@ -166,7 +166,20 @@ fn playback_units_for_user_keeps_full_state_for_partial_progress() {
         )
         .unwrap();
     store
-        .upsert_unit(user, show.id, -1, -1, 0, Some(true), Some(false), None, None, None, true, 43)
+        .upsert_unit(
+            user,
+            show.id,
+            -1,
+            -1,
+            0,
+            Some(true),
+            Some(false),
+            None,
+            None,
+            None,
+            true,
+            43,
+        )
         .unwrap();
 
     let units = store.playback_units_for_user(user).unwrap();
@@ -197,8 +210,25 @@ fn favorite_only_update_preserves_played_activity_timestamp() {
     let user = UserId::new();
     let media = media(MediaKind::Tv, "Favorite timestamp", None);
     store.insert_media(&media).unwrap();
-    store.upsert_unit(user, media.id, 1, -1, 0, Some(true), Some(false), None, None, None, false, 10).unwrap();
-    store.set_unit_favorite(user, media.id, 1, -1, true, 99).unwrap();
+    store
+        .upsert_unit(
+            user,
+            media.id,
+            1,
+            -1,
+            0,
+            Some(true),
+            Some(false),
+            None,
+            None,
+            None,
+            false,
+            10,
+        )
+        .unwrap();
+    store
+        .set_unit_favorite(user, media.id, 1, -1, true, 99)
+        .unwrap();
     let state = store.unit_state(user, media.id, 1, -1).unwrap().unwrap();
     assert!(state.played);
     assert!(state.favorite);
@@ -212,16 +242,90 @@ fn whole_unit_unfavorite_preserves_other_units_activity_timestamps() {
     let user = UserId::new();
     let media = media(MediaKind::Tv, "Cascade favorite timestamp", None);
     store.insert_media(&media).unwrap();
-    store.upsert_unit(user, media.id, -1, -1, 0, Some(false), Some(true), None, None, None, false, 5).unwrap();
-    store.upsert_unit(user, media.id, 1, -1, 0, Some(false), Some(true), None, None, None, false, 10).unwrap();
-    store.upsert_unit(user, media.id, 1, 1, 0, Some(false), Some(true), None, None, None, false, 15).unwrap();
+    store
+        .upsert_unit(
+            user,
+            media.id,
+            -1,
+            -1,
+            0,
+            Some(false),
+            Some(true),
+            None,
+            None,
+            None,
+            false,
+            5,
+        )
+        .unwrap();
+    store
+        .upsert_unit(
+            user,
+            media.id,
+            1,
+            -1,
+            0,
+            Some(false),
+            Some(true),
+            None,
+            None,
+            None,
+            false,
+            10,
+        )
+        .unwrap();
+    store
+        .upsert_unit(
+            user,
+            media.id,
+            1,
+            1,
+            0,
+            Some(false),
+            Some(true),
+            None,
+            None,
+            None,
+            false,
+            15,
+        )
+        .unwrap();
 
-    store.set_unit_marks(user, media.id, -1, -1, None, Some(false), 99).unwrap();
+    store
+        .set_unit_marks(user, media.id, -1, -1, None, Some(false), 99)
+        .unwrap();
 
-    assert_eq!(store.unit_state(user, media.id, -1, -1).unwrap().unwrap().updated_at, 5);
-    assert_eq!(store.unit_state(user, media.id, 1, -1).unwrap().unwrap().updated_at, 10);
-    assert_eq!(store.unit_state(user, media.id, 1, 1).unwrap().unwrap().updated_at, 15);
-    assert!(!store.unit_state(user, media.id, 1, 1).unwrap().unwrap().favorite);
+    assert_eq!(
+        store
+            .unit_state(user, media.id, -1, -1)
+            .unwrap()
+            .unwrap()
+            .updated_at,
+        5
+    );
+    assert_eq!(
+        store
+            .unit_state(user, media.id, 1, -1)
+            .unwrap()
+            .unwrap()
+            .updated_at,
+        10
+    );
+    assert_eq!(
+        store
+            .unit_state(user, media.id, 1, 1)
+            .unwrap()
+            .unwrap()
+            .updated_at,
+        15
+    );
+    assert!(
+        !store
+            .unit_state(user, media.id, 1, 1)
+            .unwrap()
+            .unwrap()
+            .favorite
+    );
 }
 
 #[test]
@@ -234,10 +338,36 @@ fn favorite_activity_orders_independently_of_played_activity() {
     store.insert_media(&older).unwrap();
     store.insert_media(&newer).unwrap();
     store
-        .upsert_unit(user, older.id, -1, -1, 0, Some(true), Some(true), None, None, None, false, 10)
+        .upsert_unit(
+            user,
+            older.id,
+            -1,
+            -1,
+            0,
+            Some(true),
+            Some(true),
+            None,
+            None,
+            None,
+            false,
+            10,
+        )
         .unwrap();
     store
-        .upsert_unit(user, newer.id, -1, -1, 0, Some(true), Some(false), None, None, None, false, 50)
+        .upsert_unit(
+            user,
+            newer.id,
+            -1,
+            -1,
+            0,
+            Some(true),
+            Some(false),
+            None,
+            None,
+            None,
+            false,
+            50,
+        )
         .unwrap();
 
     store
@@ -245,12 +375,25 @@ fn favorite_activity_orders_independently_of_played_activity() {
         .unwrap();
 
     let rows = store.favorite_rows(user).unwrap();
-    assert_eq!(rows[0].0, newer.id, "a new favourite must lead recent favourites");
+    assert_eq!(
+        rows[0].0, newer.id,
+        "a new favourite must lead recent favourites"
+    );
     assert_eq!(rows[0].1, 80);
     let played = store.user_active_media_ids(user).unwrap();
     assert_eq!(played[0].0, newer.id);
-    assert_eq!(played[0].1, 50, "favouriting must not refresh the played clock");
-    assert_eq!(store.unit_state(user, newer.id, -1, -1).unwrap().unwrap().updated_at, 50);
+    assert_eq!(
+        played[0].1, 50,
+        "favouriting must not refresh the played clock"
+    );
+    assert_eq!(
+        store
+            .unit_state(user, newer.id, -1, -1)
+            .unwrap()
+            .unwrap()
+            .updated_at,
+        50
+    );
 }
 
 #[test]
@@ -261,7 +404,20 @@ fn favorite_only_insert_does_not_materialize_inherited_played() {
     let show = media(MediaKind::Tv, "Inherited played", None);
     store.insert_media(&show).unwrap();
     store
-        .upsert_unit(user, show.id, 1, -1, 0, Some(true), None, None, None, None, false, 10)
+        .upsert_unit(
+            user,
+            show.id,
+            1,
+            -1,
+            0,
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+            false,
+            10,
+        )
         .unwrap();
 
     store
@@ -271,7 +427,10 @@ fn favorite_only_insert_does_not_materialize_inherited_played() {
 
     let episode = store.unit_state(user, show.id, 1, 1).unwrap().unwrap();
     assert!(episode.favorite);
-    assert!(!episode.played, "inherited played must not survive as an explicit fact");
+    assert!(
+        !episode.played,
+        "inherited played must not survive as an explicit fact"
+    );
     assert_eq!(episode.updated_at, 0);
 }
 
@@ -284,11 +443,29 @@ fn playback_units_for_user_is_scoped_to_one_user() {
     publish_whole(&store, tmp.path(), movie.id);
     let owner = UserId::new();
     store
-        .upsert_unit(owner, movie.id, -1, -1, 5_000, Some(false), Some(false), None, None, None, false, 7)
+        .upsert_unit(
+            owner,
+            movie.id,
+            -1,
+            -1,
+            5_000,
+            Some(false),
+            Some(false),
+            None,
+            None,
+            None,
+            false,
+            7,
+        )
         .unwrap();
 
     assert_eq!(store.playback_units_for_user(owner).unwrap().len(), 1);
-    assert!(store.playback_units_for_user(UserId::new()).unwrap().is_empty());
+    assert!(
+        store
+            .playback_units_for_user(UserId::new())
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// Design characterization only: no derived owner index exists yet, so this
@@ -304,13 +481,34 @@ fn default_candidate_growth_and_ownership_parity() {
     let nested = root.join("nested");
     let tied_root = tmp.path().join("tied");
     let target = store
-        .create_library(MediaKind::Movie, "Target", &[root.to_str().unwrap()], "everyone", true, &[])
+        .create_library(
+            MediaKind::Movie,
+            "Target",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
         .unwrap();
     let nested_library = store
-        .create_library(MediaKind::Movie, "Nested", &[nested.to_str().unwrap()], "everyone", true, &[])
+        .create_library(
+            MediaKind::Movie,
+            "Nested",
+            &[nested.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
         .unwrap();
     let tied = store
-        .create_library(MediaKind::Movie, "Tied", &[tied_root.to_str().unwrap()], "everyone", true, &[])
+        .create_library(
+            MediaKind::Movie,
+            "Tied",
+            &[tied_root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
         .unwrap();
     let default = store.default_library(MediaKind::Movie).unwrap().unwrap();
     let paths = [
@@ -352,20 +550,48 @@ fn default_candidate_growth_and_ownership_parity() {
     assert_eq!(frozen.library_id, target.id);
     let ownership = store.library_ownership().unwrap();
     for library_id in [&target.id, &nested_library.id, &tied.id, &default.id] {
-        let current = store.list_file_coverage().unwrap().into_iter().filter(|row| {
-            ownership.owner(Path::new(&row.file.path), MediaKind::Movie).is_some_and(|owner| owner.id == *library_id)
-        }).map(|row| row.file.file_id).collect::<std::collections::HashSet<_>>();
-        let candidate = store.ledger_candidates_for_library(&ownership, library_id).unwrap().into_iter().filter(|row| {
-            ownership.owner(Path::new(&row.file.path), MediaKind::Movie).is_some_and(|owner| owner.id == *library_id)
-        }).map(|row| row.file.file_id).collect::<std::collections::HashSet<_>>();
+        let current = store
+            .list_file_coverage()
+            .unwrap()
+            .into_iter()
+            .filter(|row| {
+                ownership
+                    .owner(Path::new(&row.file.path), MediaKind::Movie)
+                    .is_some_and(|owner| owner.id == *library_id)
+            })
+            .map(|row| row.file.file_id)
+            .collect::<std::collections::HashSet<_>>();
+        let candidate = store
+            .ledger_candidates_for_library(&ownership, library_id)
+            .unwrap()
+            .into_iter()
+            .filter(|row| {
+                ownership
+                    .owner(Path::new(&row.file.path), MediaKind::Movie)
+                    .is_some_and(|owner| owner.id == *library_id)
+            })
+            .map(|row| row.file.file_id)
+            .collect::<std::collections::HashSet<_>>();
         assert_eq!(candidate, current);
     }
     let cold_global_build_is_reported = store.list_file_coverage().unwrap().len() == 4;
-    assert!(cold_global_build_is_reported, "the existing default candidate build reads globally");
+    assert!(
+        cold_global_build_is_reported,
+        "the existing default candidate build reads globally"
+    );
     // No derived index/interface exists today; stale-index rejection is therefore not applicable.
     let db = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
-    let index_exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='browse_ledger_owners')", [], |r| r.get(0)).unwrap();
-    assert!(!index_exists, "documented absence: derived ownership index is unimplemented");
+    let index_exists: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='browse_ledger_owners')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        !index_exists,
+        "documented absence: derived ownership index is unimplemented"
+    );
 }
 
 /// Measurement only: current global-scan growth and persisted bytes/write time.
@@ -404,9 +630,16 @@ fn default_candidate_scan_size_and_write_cost() {
         let write_ms = started.elapsed().as_millis();
         let ownership = store.library_ownership().unwrap();
         let started = Instant::now();
-        let rows = store.ledger_candidates_for_library(&ownership, &default.id).unwrap();
+        let rows = store
+            .ledger_candidates_for_library(&ownership, &default.id)
+            .unwrap();
         let scan_ms = started.elapsed().as_millis();
-        let bytes = std::fs::metadata(tmp.path().join("data/library.db")).unwrap().len();
-        println!("batch_rows={count} cumulative_rows={total_rows} candidates={} scan_ms={scan_ms} batch_insert_ms={write_ms} library_db_bytes={bytes}", rows.len());
+        let bytes = std::fs::metadata(tmp.path().join("data/library.db"))
+            .unwrap()
+            .len();
+        println!(
+            "batch_rows={count} cumulative_rows={total_rows} candidates={} scan_ms={scan_ms} batch_insert_ms={write_ms} library_db_bytes={bytes}",
+            rows.len()
+        );
     }
 }

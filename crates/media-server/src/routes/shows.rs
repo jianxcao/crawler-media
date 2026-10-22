@@ -1,8 +1,8 @@
 //! Jellyfin/Emby shows: NextUp, seasons and episodes.
 
+use axum::Json;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde_json::{Value, json};
 
 use crate::auth::AuthUser;
@@ -28,7 +28,9 @@ pub(super) async fn shows_next_up(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
     let listed: Vec<Value> = page.items.into_iter().map(item_dto_json).collect();
-    Ok(Json(json!({ "Items": listed, "TotalRecordCount": page.total })))
+    Ok(Json(
+        json!({ "Items": listed, "TotalRecordCount": page.total }),
+    ))
 }
 pub(super) async fn show_seasons(
     State(state): State<AppState>,
@@ -117,7 +119,9 @@ pub(super) async fn show_episodes(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
     let listed: Vec<Value> = page.items.into_iter().map(item_dto_json).collect();
-    Ok(Json(json!({ "Items": listed, "TotalRecordCount": page.total })))
+    Ok(Json(
+        json!({ "Items": listed, "TotalRecordCount": page.total }),
+    ))
 }
 
 /// 分集请求 → 协议查询：钉住这部剧，只列分集，按 (季, 集) 升序。

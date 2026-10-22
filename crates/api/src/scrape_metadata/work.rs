@@ -14,7 +14,9 @@ pub(crate) fn adopt_tmdb_metadata(
     tmdb_id: &str,
     scope: EntityScope,
 ) {
-    if let Err(error) = crate::metadata_service::adopt_catalog_metadata(state, media, tmdb_id, scope) {
+    if let Err(error) =
+        crate::metadata_service::adopt_catalog_metadata(state, media, tmdb_id, scope)
+    {
         tracing::warn!(%error, media_id = %media.id, "TMDB metadata adoption failed");
     }
 }
@@ -25,14 +27,23 @@ pub(super) struct LeasedArtworkFetch<'a> {
 }
 impl crate::poster_fetch::PosterFetch for LeasedArtworkFetch<'_> {
     fn get(&self, url: &str) -> Result<Vec<u8>, String> {
-        if let Some(lease) = self.lease { lease.control().check().map_err(|e| e.to_string())?; }
+        if let Some(lease) = self.lease {
+            lease.control().check().map_err(|e| e.to_string())?;
+        }
         let bytes = self.fetch.get(url)?;
-        if let Some(lease) = self.lease { lease.control().check().map_err(|e| e.to_string())?; }
+        if let Some(lease) = self.lease {
+            lease.control().check().map_err(|e| e.to_string())?;
+        }
         Ok(bytes)
     }
     fn write(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         match self.lease {
-            Some(lease) => lease.publish(|| self.fetch.write(path, bytes).map_err(|error| error.to_string()))
+            Some(lease) => lease
+                .publish(|| {
+                    self.fetch
+                        .write(path, bytes)
+                        .map_err(|error| error.to_string())
+                })
                 .map_err(std::io::Error::other),
             None => self.fetch.write(path, bytes),
         }
@@ -185,8 +196,13 @@ pub(crate) fn scrape_movie_fanart(
         return;
     };
 
-    let Ok(lease) = state.acquire_path_work(movie_root, media.kind) else { return };
-    let fetch = LeasedArtworkFetch { fetch: state.poster_fetch.as_ref(), lease: lease.as_ref() };
+    let Ok(lease) = state.acquire_path_work(movie_root, media.kind) else {
+        return;
+    };
+    let fetch = LeasedArtworkFetch {
+        fetch: state.poster_fetch.as_ref(),
+        lease: lease.as_ref(),
+    };
     let getter = PosterFetchCatalogGet { fetch: &fetch };
     let fanart_db = state.store.lock().cache_db_path();
     match media::fanart::FanartClient::new(getter, &fanart_db, &api_key) {
@@ -194,12 +210,7 @@ pub(crate) fn scrape_movie_fanart(
             let lang_refs: Vec<&str> = fanart_lang.iter().map(|s| s.as_str()).collect();
             match client.movie(tmdb_id, &lang_refs) {
                 Ok(set) => {
-                    crate::fanart_artwork::save_fanart_files(
-                        &fetch,
-                        movie_root,
-                        &[],
-                        &set,
-                    );
+                    crate::fanart_artwork::save_fanart_files(&fetch, movie_root, &[], &set);
                 }
                 Err(error) => {
                     tracing::warn!(%error, %tmdb_id, "请求电影 Fanart.tv 失败");

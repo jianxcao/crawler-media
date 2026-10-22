@@ -1,11 +1,11 @@
 use super::fs_watcher::{
-    entry_scan_target_dir, is_relevant_media_entry, realtime_library_root_for_path,
-    FsWatcherSession, FsWatcherState,
+    FsWatcherSession, FsWatcherState, entry_scan_target_dir, is_relevant_media_entry,
+    realtime_library_root_for_path,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct EmptyFetcher;
 
@@ -88,8 +88,16 @@ fn realtime_library_root_matches_nested_strm_path() {
     crate::http::library_scan::scan_library_subdir(&state, &root, &show_dir).unwrap();
     let rows = state.store.lock().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].file.path.display().to_string(), episode.display().to_string());
-    assert!(rows[0].units.iter().any(|u| !u.is_whole() && u.season == 1 && u.episode == 1));
+    assert_eq!(
+        rows[0].file.path.display().to_string(),
+        episode.display().to_string()
+    );
+    assert!(
+        rows[0]
+            .units
+            .iter()
+            .any(|u| !u.is_whole() && u.season == 1 && u.episode == 1)
+    );
     assert!(state.probe.is_queued(&rows[0].file.file_id.to_string()));
 }
 
@@ -146,7 +154,10 @@ fn rescanning_a_show_queues_only_the_new_episode() {
     let rows = state.store.lock().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 2);
     assert!(!state.probe.is_queued(&first_id), "已有 E01 不能再次入队");
-    let second = rows.iter().find(|row| row.units.iter().any(|u| !u.is_whole() && u.episode == 2)).unwrap();
+    let second = rows
+        .iter()
+        .find(|row| row.units.iter().any(|u| !u.is_whole() && u.episode == 2))
+        .unwrap();
     assert!(state.probe.is_queued(&second.file.file_id.to_string()));
 }
 
@@ -403,8 +414,15 @@ async fn watch_event_enqueues_a_targeted_scan_through_the_coordinator() {
     for _ in 0..200 {
         let rows = state.store().lock().list_file_coverage().unwrap();
         if let Some(row) = rows.first() {
-            assert_eq!(row.file.path.display().to_string(), episode.display().to_string());
-            assert!(row.units.iter().any(|u| !u.is_whole() && u.season == 1 && u.episode == 1));
+            assert_eq!(
+                row.file.path.display().to_string(),
+                episode.display().to_string()
+            );
+            assert!(
+                row.units
+                    .iter()
+                    .any(|u| !u.is_whole() && u.season == 1 && u.episode == 1)
+            );
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;

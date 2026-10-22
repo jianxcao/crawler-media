@@ -16,8 +16,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use domain::{
-    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile,
-    LibraryId, Media, MediaId, MediaKind, QualitySource, TypedItemId, UnitKey, UserId,
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, LibraryId,
+    Media, MediaId, MediaKind, QualitySource, TypedItemId, UnitKey, UserId,
 };
 use media_server::provider::{
     AuthenticateError, MediaItemMetadata, MediaItemSnapshot, MediaServerProvider,
@@ -225,7 +225,7 @@ impl MediaServerProvider for EpisodeListProvider {
                     played: self.is_played(item),
                     ..item.clone()
                 })
-                .collect()
+                .collect(),
         })
     }
 
@@ -349,14 +349,8 @@ async fn next_up_pages_after_aggregating_every_series() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["TotalRecordCount"], SERIES, "total 是聚合后的完整条数");
     assert_eq!(body["Items"].as_array().map(Vec::len), Some(2));
-    assert_eq!(
-        body["Items"][0]["ParentId"],
-        wire_series(48)
-    );
-    assert_eq!(
-        body["Items"][1]["ParentId"],
-        wire_series(49)
-    );
+    assert_eq!(body["Items"][0]["ParentId"], wire_series(48));
+    assert_eq!(body["Items"][1]["ParentId"], wire_series(49));
     let (status, beyond) = get(provider.clone(), "/Shows/NextUp?StartIndex=500").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(beyond["Items"].as_array().map(Vec::len), Some(0));
@@ -368,13 +362,14 @@ async fn next_up_pages_after_aggregating_every_series() {
 async fn next_up_with_series_id_reads_only_that_series() {
     let provider = Arc::new(EpisodeListProvider::new());
     let series = wire_series(11);
-    let (status, body) = get(provider.clone(), &format!("/Shows/NextUp?SeriesId={series}")).await;
+    let (status, body) = get(
+        provider.clone(),
+        &format!("/Shows/NextUp?SeriesId={series}"),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["TotalRecordCount"], 1);
-    assert_eq!(
-        body["Items"][0]["ParentId"],
-        wire_series(11)
-    );
+    assert_eq!(body["Items"][0]["ParentId"], wire_series(11));
     assert_eq!(body["Items"][0]["IndexNumber"], 1);
     assert_eq!(provider.list_calls(), 1);
 }

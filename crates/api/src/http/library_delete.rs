@@ -29,7 +29,11 @@ fn observed_size(path: &str) -> u64 {
 }
 
 fn store_error(error: StoreError) -> Response {
-    err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error.to_string())
+    err(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "store.error",
+        &error.to_string(),
+    )
 }
 
 /// The files this Library owns for the item, newest identity first.

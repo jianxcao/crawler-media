@@ -67,9 +67,19 @@ async fn late_old_stop_does_not_close_new_session() {
 
     // Verify active session is B
     let store_arc = fix.state.store();
-    let current = store_arc.lock().get_session(user_id, "dev1").unwrap().unwrap();
-    assert_eq!(current.ledger_id.as_deref(), Some(&row_b.file_id.to_string()[..]));
-    assert_eq!(current.play_session_id.as_deref(), Some(session_id_b.as_str()));
+    let current = store_arc
+        .lock()
+        .get_session(user_id, "dev1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        current.ledger_id.as_deref(),
+        Some(&row_b.file_id.to_string()[..])
+    );
+    assert_eq!(
+        current.play_session_id.as_deref(),
+        Some(session_id_b.as_str())
+    );
 
     // 3. Late STOP from session A arrives!
     let (status, _) = fix
@@ -126,7 +136,8 @@ async fn late_old_progress_does_not_rewind_position() {
             "position_ms": 5000,
             "play_session_id": id_1,
         }),
-    ).await;
+    )
+    .await;
 
     // Session 2 on same file (newer generation)
     let id_2 = {
@@ -146,7 +157,8 @@ async fn late_old_progress_does_not_rewind_position() {
             "position_ms": 8000,
             "play_session_id": id_2,
         }),
-    ).await;
+    )
+    .await;
 
     // Late progress from session 1 with position 2000 arrives
     fix.request_with_body(
@@ -161,11 +173,16 @@ async fn late_old_progress_does_not_rewind_position() {
             "position_ms": 2000,
             "play_session_id": id_1,
         }),
-    ).await;
+    )
+    .await;
 
     // Active session position must remain 8000, not rewound to 2000
     let store_arc = fix.state.store();
-    let cur = store_arc.lock().get_session(user_id, "dev1").unwrap().unwrap();
+    let cur = store_arc
+        .lock()
+        .get_session(user_id, "dev1")
+        .unwrap()
+        .unwrap();
     assert_eq!(cur.position_ms, 8000);
 }
 
@@ -265,7 +282,10 @@ async fn late_other_episode_does_not_close_active_session() {
     let store_arc = fix.state.store();
     let guard = store_arc.lock();
     let active = guard.get_session(user_id, "dev1").unwrap().unwrap();
-    assert_eq!(active.play_session_id.as_deref(), Some(session_id_b.as_str()));
+    assert_eq!(
+        active.play_session_id.as_deref(),
+        Some(session_id_b.as_str())
+    );
 }
 
 #[tokio::test]
@@ -341,7 +361,11 @@ async fn duplicate_stop_only_records_one_log() {
     let logs = guard
         .list_logs(10, None, None, None, i64::MAX / 2, None)
         .unwrap();
-    assert_eq!(logs.len(), 1, "Duplicate stop should only generate 1 log entry");
+    assert_eq!(
+        logs.len(),
+        1,
+        "Duplicate stop should only generate 1 log entry"
+    );
 }
 
 /// RED(task-88 必做#2/#3):绑定会话的物理源已经换版(revision 前进)时,
@@ -384,7 +408,10 @@ async fn stale_source_event_after_revision_bump_writes_nothing() {
 
     let unit_before = {
         let guard = store_arc.lock();
-        guard.unit_state(user_id, media_id, -1, -1).unwrap().unwrap()
+        guard
+            .unit_state(user_id, media_id, -1, -1)
+            .unwrap()
+            .unwrap()
     };
     assert_eq!(unit_before.position_ms, 1000);
     let session_before = {
@@ -425,7 +452,10 @@ async fn stale_source_event_after_revision_bump_writes_nothing() {
 
         let unit_after = {
             let guard = store_arc.lock();
-            guard.unit_state(user_id, media_id, -1, -1).unwrap().unwrap()
+            guard
+                .unit_state(user_id, media_id, -1, -1)
+                .unwrap()
+                .unwrap()
         };
         assert_eq!(
             (unit_after.position_ms, unit_after.played),
@@ -474,7 +504,11 @@ async fn http_events_move_the_issued_session_id_through_activate_and_close() {
             .unwrap()
             .map(|binding| binding.state)
     };
-    assert_eq!(state(&sid), Some(PlaySessionIdState::Pending), "签发态必须是 pending");
+    assert_eq!(
+        state(&sid),
+        Some(PlaySessionIdState::Pending),
+        "签发态必须是 pending"
+    );
 
     let fixture = &fix;
     let post = |event: &str, position_ms: i64| {
@@ -490,7 +524,12 @@ async fn http_events_move_the_issued_session_id_through_activate_and_close() {
         let fixture = fixture;
         async move {
             fixture
-                .request_with_body("POST", "/api/v1/playback/progress", Some(&fixture.admin_token), body)
+                .request_with_body(
+                    "POST",
+                    "/api/v1/playback/progress",
+                    Some(&fixture.admin_token),
+                    body,
+                )
                 .await
         }
     };
@@ -498,21 +537,51 @@ async fn http_events_move_the_issued_session_id_through_activate_and_close() {
     // activate:start 必须把绑定推到 active 并建 live 行。
     let (start_status, start_body) = post("start", 1_000).await;
     assert_eq!(start_status, StatusCode::OK, "start body={start_body}");
-    assert_eq!(state(&sid), Some(PlaySessionIdState::Active), "start 后绑定必须是 active");
-    assert!(store_arc.lock().get_session(user_id, device).unwrap().is_some(), "active 绑定必须有 live 行");
+    assert_eq!(
+        state(&sid),
+        Some(PlaySessionIdState::Active),
+        "start 后绑定必须是 active"
+    );
+    assert!(
+        store_arc
+            .lock()
+            .get_session(user_id, device)
+            .unwrap()
+            .is_some(),
+        "active 绑定必须有 live 行"
+    );
 
     // close:stop 必须把绑定推到 closed 并归档 live 行。
     let (stop_status, stop_body) = post("stop", 5_000).await;
     assert_eq!(stop_status, StatusCode::OK, "stop body={stop_body}");
-    assert_eq!(state(&sid), Some(PlaySessionIdState::Closed), "stop 后绑定必须是 closed");
-    assert!(store_arc.lock().get_session(user_id, device).unwrap().is_none(), "closed 绑定不得留 live 行");
+    assert_eq!(
+        state(&sid),
+        Some(PlaySessionIdState::Closed),
+        "stop 后绑定必须是 closed"
+    );
+    assert!(
+        store_arc
+            .lock()
+            .get_session(user_id, device)
+            .unwrap()
+            .is_none(),
+        "closed 绑定不得留 live 行"
+    );
 
     // Ignore 不复活:同一个 closed 绑定再来 progress,协议 200 但状态机不动。
     let (late_status, late_body) = post("progress", 9_000).await;
     assert_eq!(late_status, StatusCode::OK, "late body={late_body}");
-    assert_eq!(state(&sid), Some(PlaySessionIdState::Closed), "Ignore 不得复活 closed 绑定");
+    assert_eq!(
+        state(&sid),
+        Some(PlaySessionIdState::Closed),
+        "Ignore 不得复活 closed 绑定"
+    );
     assert!(
-        store_arc.lock().get_session(user_id, device).unwrap().is_none(),
+        store_arc
+            .lock()
+            .get_session(user_id, device)
+            .unwrap()
+            .is_none(),
         "Ignore 不得新建 live 行"
     );
 }
@@ -649,10 +718,10 @@ async fn http_event_sequence_regression_is_ignored_and_writes_nothing() {
     assert_eq!(session_after, session_before, "会话行必须逐字节不变");
 }
 
-#[path = "playback_event_identity/merged_session.rs"]
-mod merged_session;
 #[path = "playback_event_identity/legacy_no_id_identity.rs"]
 mod legacy_no_id_identity;
+#[path = "playback_event_identity/merged_session.rs"]
+mod merged_session;
 
 /// R09: a Start without `position_ms` may only reuse a resume point recorded against the same
 /// physical source; after the bytes were replaced it starts from zero.
@@ -661,7 +730,12 @@ async fn start_without_position_does_not_rebind_old_source_resume() {
     let fix = PresenceFixture::new();
     let (media_id, file) = fix.insert_media_and_ledger("movie_resume.mkv");
     let store_arc = fix.state.store();
-    let user_id = store_arc.lock().user_by_token(&fix.admin_token).unwrap().unwrap().id;
+    let user_id = store_arc
+        .lock()
+        .user_by_token(&fix.admin_token)
+        .unwrap()
+        .unwrap()
+        .id;
     let post = |sid: String, event: &str, position: Option<i64>| {
         let mut body = json!({
             "device_id": "dev1",
@@ -675,21 +749,38 @@ async fn start_without_position_does_not_rebind_old_source_resume() {
         }
         body
     };
-    let s1 = support::session::issue_session(&store_arc.lock(), user_id, "dev1", file.file_id, 1000);
+    let s1 =
+        support::session::issue_session(&store_arc.lock(), user_id, "dev1", file.file_id, 1000);
     for (event, pos) in [("start", Some(0)), ("stop", Some(600_000))] {
         let (status, _) = fix
-            .request_with_body("POST", "/api/v1/playback/progress", Some(&fix.admin_token), post(s1.clone(), event, pos))
+            .request_with_body(
+                "POST",
+                "/api/v1/playback/progress",
+                Some(&fix.admin_token),
+                post(s1.clone(), event, pos),
+            )
             .await;
         assert_eq!(status, StatusCode::OK);
     }
-    let unit = |store: &store::Store| store.unit_state(user_id, media_id, -1, -1).unwrap().unwrap();
-    assert_eq!(unit(&store_arc.lock()).position_ms, 600_000, "positive control");
+    let unit = |store: &store::Store| {
+        store
+            .unit_state(user_id, media_id, -1, -1)
+            .unwrap()
+            .unwrap()
+    };
+    assert_eq!(
+        unit(&store_arc.lock()).position_ms,
+        600_000,
+        "positive control"
+    );
 
     {
         let guard = store_arc.lock();
         let scope = store::library_write::WriteScope {
             library_id: file.library_id,
-            config_revision: guard.library_config_revision(&file.library_id.to_string()).unwrap(),
+            config_revision: guard
+                .library_config_revision(&file.library_id.to_string())
+                .unwrap(),
         };
         let observation = library::SourceObservation {
             source_version: "replaced-bytes".into(),
@@ -698,14 +789,26 @@ async fn start_without_position_does_not_rebind_old_source_resume() {
             created_ns: None,
             content_digest: None,
         };
-        guard.replace_file_source(&scope, file.file_id, &file.version, &observation, 5_000).unwrap();
+        guard
+            .replace_file_source(&scope, file.file_id, &file.version, &observation, 5_000)
+            .unwrap();
     }
-    let s2 = support::session::issue_session(&store_arc.lock(), user_id, "dev1", file.file_id, 6000);
+    let s2 =
+        support::session::issue_session(&store_arc.lock(), user_id, "dev1", file.file_id, 6000);
     let (status, _) = fix
-        .request_with_body("POST", "/api/v1/playback/progress", Some(&fix.admin_token), post(s2, "start", None))
+        .request_with_body(
+            "POST",
+            "/api/v1/playback/progress",
+            Some(&fix.admin_token),
+            post(s2, "start", None),
+        )
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(unit(&store_arc.lock()).position_ms, 0, "old-source resume must not be rebound");
+    assert_eq!(
+        unit(&store_arc.lock()).position_ms,
+        0,
+        "old-source resume must not be rebound"
+    );
 }
 
 /// R13: the historical movie 0/0 coordinates are no longer an alias of the whole movie.
@@ -714,8 +817,14 @@ async fn movie_zero_coordinates_are_rejected_without_writes() {
     let fix = PresenceFixture::new();
     let (media_id, file) = fix.insert_media_and_ledger("movie_zero.mkv");
     let store_arc = fix.state.store();
-    let user_id = store_arc.lock().user_by_token(&fix.admin_token).unwrap().unwrap().id;
-    let sid = support::session::issue_session(&store_arc.lock(), user_id, "dev1", file.file_id, 1000);
+    let user_id = store_arc
+        .lock()
+        .user_by_token(&fix.admin_token)
+        .unwrap()
+        .unwrap()
+        .id;
+    let sid =
+        support::session::issue_session(&store_arc.lock(), user_id, "dev1", file.file_id, 1000);
     let (status, _) = fix
         .request_with_body(
             "POST",
@@ -733,8 +842,16 @@ async fn movie_zero_coordinates_are_rejected_without_writes() {
             }),
         )
         .await;
-    assert!(!status.is_success(), "movie 0/0 must be refused, got {status}");
+    assert!(
+        !status.is_success(),
+        "movie 0/0 must be refused, got {status}"
+    );
     let guard = store_arc.lock();
-    assert!(guard.unit_state(user_id, media_id, -1, -1).unwrap().is_none());
+    assert!(
+        guard
+            .unit_state(user_id, media_id, -1, -1)
+            .unwrap()
+            .is_none()
+    );
     assert!(guard.unit_state(user_id, media_id, 0, 0).unwrap().is_none());
 }

@@ -14,7 +14,7 @@ use std::time::Instant;
 use jobs::Job;
 use store::{DataRetentionCursor, RetentionClass};
 
-use super::policy::{BATCH_SIZE, DataRetentionPolicy, MAX_BATCHES, MAX_BATCH_BUDGET};
+use super::policy::{BATCH_SIZE, DataRetentionPolicy, MAX_BATCH_BUDGET, MAX_BATCHES};
 use super::report::{DataRetentionClassReport, MaintenanceReport};
 use super::runner::MaintenanceStop;
 use crate::management::ApiState;
@@ -74,7 +74,10 @@ pub(crate) fn load_cursor(
         return (requested_cutoff_ms, None);
     };
     let Ok(stored) = serde_json::from_str::<StoredCursor>(&raw) else {
-        tracing::warn!(class = class.as_str(), "数据保留游标损坏，本轮从新 cutoff 开始");
+        tracing::warn!(
+            class = class.as_str(),
+            "数据保留游标损坏，本轮从新 cutoff 开始"
+        );
         return (requested_cutoff_ms, None);
     };
     if stored.cutoff_ms <= requested_cutoff_ms {

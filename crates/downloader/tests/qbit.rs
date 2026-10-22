@@ -399,7 +399,9 @@ fn task_snapshots_extract_our_tag_and_live_state() {
     );
     assert_eq!(
         snapshot.owned_tags,
-        vec![downloader::ownership_tag("https://pt.example/download.php?id=1")],
+        vec![downloader::ownership_tag(
+            "https://pt.example/download.php?id=1"
+        )],
         "D-S1: per-torrent ownership tag must be exposed for HTTP identity"
     );
     assert_eq!(snapshot.state, "stalledDL");

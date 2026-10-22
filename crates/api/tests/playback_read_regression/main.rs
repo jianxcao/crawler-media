@@ -4,6 +4,6 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+mod activity_and_stream;
 mod common;
 mod favorites;
-mod activity_and_stream;

@@ -6,11 +6,11 @@ use domain::{
     LibraryId, Media, MediaId, MediaKind, MetadataAdoption, MetadataFields, MetadataGenre,
     MetadataPreferences, NormalizedMetadata, QualitySource, UnitKey, UserId,
 };
+use store::Store;
 use store::library_query::{
     BrowseFilter, BrowseOrder, BrowsePage, FacetRequest, FacetTier, LibraryQuery,
 };
 use store::library_write::{FilePublication as StorePublication, WriteScope};
-use store::Store;
 
 #[path = "library_query_filters/browse.rs"]
 mod browse;
@@ -42,7 +42,12 @@ fn create_media(
     media
 }
 
-fn create_library(store: &Store, name: &str, kind: MediaKind, root: &str) -> (store::Library, String) {
+fn create_library(
+    store: &Store,
+    name: &str,
+    kind: MediaKind,
+    root: &str,
+) -> (store::Library, String) {
     let library = store
         .create_library(kind, name, &[root], "everyone", true, &[])
         .unwrap();
@@ -129,7 +134,9 @@ fn work_fields(
         title: FieldValue::Value(title.to_string()),
         rating: rating.map_or(FieldValue::Missing, FieldValue::Value),
         runtime_minutes: runtime.map_or(FieldValue::Missing, FieldValue::Value),
-        language: language.map_or(FieldValue::Missing, |value| FieldValue::Value(value.to_string())),
+        language: language.map_or(FieldValue::Missing, |value| {
+            FieldValue::Value(value.to_string())
+        }),
         genres: FieldValue::Value(
             genres
                 .iter()
@@ -209,47 +216,104 @@ fn seeded() -> (tempfile::TempDir, Store, store::Library, WriteScope) {
         library_id: library.id.parse().unwrap(),
         config_revision: 0,
     };
-    let alpha = create_media(&store, ALPHA, "Alpha", MediaKind::Movie, Some(2024), Some("1"));
-    let bravo = create_media(&store, BRAVO, "Bravo", MediaKind::Movie, Some(2015), Some("2"));
-    let charlie = create_media(&store, CHARLIE, "Charlie", MediaKind::Movie, Some(1985), None);
-    adopt(&store, alpha.id, "en-US", work_fields("Alpha", Some(9.0), Some(130), Some("en"), &[("28", "Action")]));
-    adopt(&store, bravo.id, "en-US", work_fields("Bravo", Some(7.0), Some(100), Some("ja"), &[("18", "Drama")]));
+    let alpha = create_media(
+        &store,
+        ALPHA,
+        "Alpha",
+        MediaKind::Movie,
+        Some(2024),
+        Some("1"),
+    );
+    let bravo = create_media(
+        &store,
+        BRAVO,
+        "Bravo",
+        MediaKind::Movie,
+        Some(2015),
+        Some("2"),
+    );
+    let charlie = create_media(
+        &store,
+        CHARLIE,
+        "Charlie",
+        MediaKind::Movie,
+        Some(1985),
+        None,
+    );
+    adopt(
+        &store,
+        alpha.id,
+        "en-US",
+        work_fields(
+            "Alpha",
+            Some(9.0),
+            Some(130),
+            Some("en"),
+            &[("28", "Action")],
+        ),
+    );
+    adopt(
+        &store,
+        bravo.id,
+        "en-US",
+        work_fields(
+            "Bravo",
+            Some(7.0),
+            Some(100),
+            Some("ja"),
+            &[("18", "Drama")],
+        ),
+    );
     publish(
         &store,
         &scope,
         vec![
             (
-                make_file(&library, &root, alpha.id, FileShape {
-                    file_id: "00000000-0000-0000-0001-0000000000a1",
-                    path: "Alpha.mkv",
-                    resolution: Some("2160p"),
-                    hdr: Some("HDR10"),
-                    presence: FilePresence::Present,
-                }),
+                make_file(
+                    &library,
+                    &root,
+                    alpha.id,
+                    FileShape {
+                        file_id: "00000000-0000-0000-0001-0000000000a1",
+                        path: "Alpha.mkv",
+                        resolution: Some("2160p"),
+                        hdr: Some("HDR10"),
+                        presence: FilePresence::Present,
+                    },
+                ),
                 vec![UnitKey::WHOLE],
             ),
             (
-                make_file(&library, &root, bravo.id, FileShape {
-                    file_id: "00000000-0000-0000-0001-0000000000b2",
-                    path: "Bravo.mkv",
-                    resolution: Some("1080p"),
-                    hdr: None,
-                    presence: FilePresence::Present,
-                }),
+                make_file(
+                    &library,
+                    &root,
+                    bravo.id,
+                    FileShape {
+                        file_id: "00000000-0000-0000-0001-0000000000b2",
+                        path: "Bravo.mkv",
+                        resolution: Some("1080p"),
+                        hdr: None,
+                        presence: FilePresence::Present,
+                    },
+                ),
                 vec![UnitKey::WHOLE],
             ),
             (
-                make_file(&library, &root, charlie.id, FileShape {
-                    file_id: "00000000-0000-0000-0001-0000000000c3",
-                    path: "Charlie.mkv",
-                    resolution: Some("720p"),
-                    hdr: None,
-                    presence: FilePresence::Missing,
-                }),
+                make_file(
+                    &library,
+                    &root,
+                    charlie.id,
+                    FileShape {
+                        file_id: "00000000-0000-0000-0001-0000000000c3",
+                        path: "Charlie.mkv",
+                        resolution: Some("720p"),
+                        hdr: None,
+                        presence: FilePresence::Missing,
+                    },
+                ),
                 vec![UnitKey::WHOLE],
             ),
         ],
     );
     (tmp, store, library, scope)
 }
-

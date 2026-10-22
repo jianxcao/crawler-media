@@ -48,7 +48,8 @@ fn disable_after_first_committed_batch_stops_the_next_batch() {
                 .unwrap();
             for i in 0..10000 {
                 let ts = now - 10 * DAY;
-                stmt.execute(rusqlite::params![format!("expired-job-{i}"), ts]).unwrap();
+                stmt.execute(rusqlite::params![format!("expired-job-{i}"), ts])
+                    .unwrap();
             }
         }
         conn.execute_batch("COMMIT").unwrap();
@@ -78,9 +79,19 @@ fn disable_after_first_committed_batch_stops_the_next_batch() {
         let conn = rusqlite::Connection::open(data.join("jobs.db")).unwrap();
         // 轮询直到看到至少已经执行了删除（count < 10000）
         for _ in 0..1000 {
-            let count: i64 = conn.query_row("SELECT count(*) FROM jobs WHERE id LIKE 'expired-job-%'", [], |r| r.get(0)).unwrap();
+            let count: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM jobs WHERE id LIKE 'expired-job-%'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
             if count < 10000 {
-                state_clone.jobs().lock().set_def_enabled_by_id(def_id, false).unwrap();
+                state_clone
+                    .jobs()
+                    .lock()
+                    .set_def_enabled_by_id(def_id, false)
+                    .unwrap();
                 break;
             }
             std::thread::sleep(Duration::from_millis(1));
@@ -91,25 +102,37 @@ fn disable_after_first_committed_batch_stops_the_next_batch() {
     monitor.join().unwrap();
 
     let report = progress_of(&state, &job);
-    assert!(report["batches"].as_u64().unwrap() < 20, "禁用后必须提前停止，绝不得跑完全部批次: {report}");
-    assert!(report["batches"].as_u64().unwrap() >= 1, "至少跑完了第一批: {report}");
+    assert!(
+        report["batches"].as_u64().unwrap() < 20,
+        "禁用后必须提前停止，绝不得跑完全部批次: {report}"
+    );
+    assert!(
+        report["batches"].as_u64().unwrap() >= 1,
+        "至少跑完了第一批: {report}"
+    );
     assert_eq!(
         report["deleted"].as_u64().unwrap(),
         report["batches"].as_u64().unwrap() * 500,
         "已提交批次的删除数量一致"
     );
     assert!(
-        report["note"]
-            .as_str()
-            .unwrap_or("")
-            .contains("禁用"),
+        report["note"].as_str().unwrap_or("").contains("禁用"),
         "报告中需说明因为任务定义禁用而停止: {report}"
     );
 
     let data = support::data_dir(&state);
     let conn = rusqlite::Connection::open(data.join("jobs.db")).unwrap();
-    let remaining: i64 = conn.query_row("SELECT count(*) FROM jobs WHERE id LIKE 'expired-job-%'", [], |r| r.get(0)).unwrap();
-    assert!(remaining > 0, "必须有剩余超龄行未被删除: remaining={remaining}");
+    let remaining: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM jobs WHERE id LIKE 'expired-job-%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        remaining > 0,
+        "必须有剩余超龄行未被删除: remaining={remaining}"
+    );
 }
 
 #[tokio::test]

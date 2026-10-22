@@ -26,21 +26,27 @@ fn duplicate_version_and_targets_are_idempotent() {
     let store = Store::open(temp.path()).unwrap();
     let file = LedgerId::new();
 
-    assert!(store
-        .enqueue_chapter_frame_task(&task(file, "v1", "hash-a"))
-        .unwrap());
+    assert!(
+        store
+            .enqueue_chapter_frame_task(&task(file, "v1", "hash-a"))
+            .unwrap()
+    );
     assert!(
         !store
             .enqueue_chapter_frame_task(&task(file, "v1", "hash-a"))
             .unwrap(),
         "same version/hash must not create a second obligation"
     );
-    assert!(store
-        .enqueue_chapter_frame_task(&task(file, "v1", "hash-b"))
-        .unwrap());
-    assert!(store
-        .enqueue_chapter_frame_task(&task(file, "v2", "hash-a"))
-        .unwrap());
+    assert!(
+        store
+            .enqueue_chapter_frame_task(&task(file, "v1", "hash-b"))
+            .unwrap()
+    );
+    assert!(
+        store
+            .enqueue_chapter_frame_task(&task(file, "v2", "hash-a"))
+            .unwrap()
+    );
 
     let pending = store.pending_chapter_frame_tasks(10).unwrap();
     assert_eq!(pending.len(), 3);

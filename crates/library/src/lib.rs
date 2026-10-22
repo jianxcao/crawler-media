@@ -6,15 +6,15 @@ pub mod latest;
 pub mod markers;
 mod naming;
 pub mod nfo;
-mod nfo_season;
 mod nfo_identity;
+mod nfo_season;
 mod watch_identity;
 pub use nfo_identity::{NfoIdentity, parse_nfo_identity};
 pub use watch_identity::read_watch_identity;
 mod probe_target;
 mod scrape;
-pub mod subtitles;
 pub mod source_observation;
+pub mod subtitles;
 pub use source_observation::{SourceObservation, observe_source};
 mod tracks;
 mod watch;
@@ -56,9 +56,7 @@ pub use watch::{
     Unidentified, VIDEO_EXTENSIONS, WatchJob, WatchKind, WatchOutcome, is_video_file, scan_watch,
     scan_watch_intake_controlled, scan_watch_reported,
 };
-pub use watch::{
-    ScanChunk, ScanWalkBudget, ScanWalker,
-};
+pub use watch::{ScanChunk, ScanWalkBudget, ScanWalker};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransferMode {
     Hardlink,
@@ -109,7 +107,11 @@ pub fn resolve_mode(src: &Path, dest_dir: &Path, configured: Option<TransferMode
 
 pub trait MediaProbe: Send + Sync {
     fn probe(&self, path: &Path) -> Result<FileQuality, LibraryError>;
-    fn probe_controlled(&self, path: &Path, control: &WorkControl) -> Result<FileQuality, LibraryError> {
+    fn probe_controlled(
+        &self,
+        path: &Path,
+        control: &WorkControl,
+    ) -> Result<FileQuality, LibraryError> {
         control.check()?;
         let result = self.probe(path);
         control.check()?;
@@ -139,7 +141,11 @@ impl MediaProbe for Ffprobe {
     fn probe(&self, path: &Path) -> Result<FileQuality, LibraryError> {
         self.probe_controlled(path, &WorkControl::default())
     }
-    fn probe_controlled(&self, path: &Path, control: &WorkControl) -> Result<FileQuality, LibraryError> {
+    fn probe_controlled(
+        &self,
+        path: &Path,
+        control: &WorkControl,
+    ) -> Result<FileQuality, LibraryError> {
         let mut command = Command::new(&self.program);
         command
             .args([

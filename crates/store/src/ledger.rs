@@ -89,7 +89,10 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    pub fn file_coverage_for_media(&self, media_id: MediaId) -> Result<Vec<FileCoverage>, StoreError> {
+    pub fn file_coverage_for_media(
+        &self,
+        media_id: MediaId,
+    ) -> Result<Vec<FileCoverage>, StoreError> {
         self.media_ledger_reads
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let sql = coverage_sql("WHERE f.media_id = ?1");

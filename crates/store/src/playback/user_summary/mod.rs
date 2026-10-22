@@ -115,7 +115,14 @@ impl Store {
         }
         let facts = Self::summary_facts(&self.library, user_id, media_id)?;
         for library_id in &libraries {
-            Self::write_library_summary(&self.library, user_id, media_id, library_id, is_tv, &facts)?;
+            Self::write_library_summary(
+                &self.library,
+                user_id,
+                media_id,
+                library_id,
+                is_tv,
+                &facts,
+            )?;
         }
         Ok(())
     }
@@ -253,9 +260,8 @@ impl Store {
                     favorite, favorite_at, position_ms, watch_activity_at
              FROM playback_units WHERE user_id = ?1 AND media_id = ?2",
         )?;
-        let rows = statement.query_map(
-            params![user_id.to_string(), media_id.to_string()],
-            |row| {
+        let rows =
+            statement.query_map(params![user_id.to_string(), media_id.to_string()], |row| {
                 Ok(PlaybackFact {
                     season: row.get(0)?,
                     episode: row.get(1)?,
@@ -267,8 +273,7 @@ impl Store {
                     position_ms: row.get(7)?,
                     watch_activity_at: row.get(8)?,
                 })
-            },
-        )?;
+            })?;
         let mut facts = HashMap::new();
         for row in rows {
             let fact = row?;
@@ -286,10 +291,9 @@ impl Store {
             "SELECT season, episode FROM library_units
              WHERE library_id = ?1 AND media_id = ?2 ORDER BY season, episode",
         )?;
-        let rows = statement.query_map(
-            params![library_id, media_id.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
+        let rows = statement.query_map(params![library_id, media_id.to_string()], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -300,16 +304,16 @@ impl Store {
         media_id: MediaId,
     ) -> Result<Option<(i64, Summary)>, StoreError> {
         tx.query_row(
-                "SELECT summary_revision, seen, played, favorite, last_played_at, favorite_at,
+            "SELECT summary_revision, seen, played, favorite, last_played_at, favorite_at,
                         owned_episode_count, completed_episode_count, next_season, next_episode,
                         resume_season, resume_episode
                  FROM user_library_items
                  WHERE user_id = ?1 AND library_id = ?2 AND media_id = ?3",
-                params![user_id.to_string(), library_id, media_id.to_string()],
-                |row| Ok((row.get::<_, i64>(0)?, map_summary(row)?)),
-            )
-            .optional()
-            .map_err(Into::into)
+            params![user_id.to_string(), library_id, media_id.to_string()],
+            |row| Ok((row.get::<_, i64>(0)?, map_summary(row)?)),
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     pub(crate) fn write_library_summary(
@@ -513,9 +517,7 @@ fn summarize(
         .map(|fact| fact.watch_activity_at)
         .max()
         .unwrap_or(0);
-    let favorite = facts
-        .values()
-        .any(|fact| applies(fact) && fact.favorite);
+    let favorite = facts.values().any(|fact| applies(fact) && fact.favorite);
     let favorite_at = facts
         .values()
         .filter(|fact| applies(fact) && fact.favorite)
@@ -566,7 +568,6 @@ fn summarize(
         resume_episode,
     }
 }
-
 
 #[cfg(test)]
 mod tests;

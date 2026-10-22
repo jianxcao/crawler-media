@@ -71,4 +71,3 @@ async fn next_up_pages_after_aggregating_every_series() {
     assert_eq!(items(&beyond).len(), 0);
     assert_eq!(beyond["TotalRecordCount"], 5);
 }
-

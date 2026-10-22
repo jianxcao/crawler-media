@@ -25,10 +25,10 @@ pub(crate) fn season_nfo_meta(artwork: &SeasonArtwork) -> library::NfoMeta {
 
 /// 该文件是否带有属于 `season` 的具体剧集单元（整文件单元不算任何季）。
 fn covers_season(coverage: &domain::FileCoverage, season: u32) -> bool {
-    coverage
-        .units
-        .iter()
-        .any(|unit| unit.episode_coordinates().is_some_and(|(unit_season, _)| unit_season == season))
+    coverage.units.iter().any(|unit| {
+        unit.episode_coordinates()
+            .is_some_and(|(unit_season, _)| unit_season == season)
+    })
 }
 
 fn season_dir(
@@ -47,10 +47,7 @@ fn season_dir(
     if first_parent == show_root {
         return None;
     }
-    let dir_name = first_parent
-        .file_name()?
-        .to_str()?
-        .to_ascii_lowercase();
+    let dir_name = first_parent.file_name()?.to_str()?.to_ascii_lowercase();
     if !dir_name.starts_with("season") {
         return None;
     }
@@ -180,9 +177,9 @@ fn write_destination_if_missing(
         // Movie 场景没有分集 rows，检查目标父目录是否存在且为目录
         dest.parent().is_some_and(|p| p.is_dir())
     } else {
-        source_rows.iter().any(|row| {
-            crate::scrape_metadata::targets::video_present(&row.file.path)
-        })
+        source_rows
+            .iter()
+            .any(|row| crate::scrape_metadata::targets::video_present(&row.file.path))
     };
     if !live_source {
         return;
@@ -207,9 +204,9 @@ fn write_destination_if_missing(
     let live_source_after = if source_rows.is_empty() {
         dest.parent().is_some_and(|p| p.is_dir())
     } else {
-        source_rows.iter().any(|row| {
-            crate::scrape_metadata::targets::video_present(&row.file.path)
-        })
+        source_rows
+            .iter()
+            .any(|row| crate::scrape_metadata::targets::video_present(&row.file.path))
     };
     if !live_source_after {
         return;
@@ -248,21 +245,56 @@ pub(crate) fn save_fanart_files(
     // Show-level logo
     if let Some(ref logo) = set.logo {
         let mut bytes = None;
-        write_destination_if_missing(fetch, &logo.url, &mut bytes, &show_root.join("logo.png"), &mut written, coverages);
-        write_destination_if_missing(fetch, &logo.url, &mut bytes, &show_root.join("clearlogo.png"), &mut written, coverages);
+        write_destination_if_missing(
+            fetch,
+            &logo.url,
+            &mut bytes,
+            &show_root.join("logo.png"),
+            &mut written,
+            coverages,
+        );
+        write_destination_if_missing(
+            fetch,
+            &logo.url,
+            &mut bytes,
+            &show_root.join("clearlogo.png"),
+            &mut written,
+            coverages,
+        );
     }
 
     // Show-level thumb
     if let Some(ref thumb) = set.thumb {
         let mut bytes = None;
-        write_destination_if_missing(fetch, &thumb.url, &mut bytes, &show_root.join("thumb.jpg"), &mut written, coverages);
-        write_destination_if_missing(fetch, &thumb.url, &mut bytes, &show_root.join("landscape.jpg"), &mut written, coverages);
+        write_destination_if_missing(
+            fetch,
+            &thumb.url,
+            &mut bytes,
+            &show_root.join("thumb.jpg"),
+            &mut written,
+            coverages,
+        );
+        write_destination_if_missing(
+            fetch,
+            &thumb.url,
+            &mut bytes,
+            &show_root.join("landscape.jpg"),
+            &mut written,
+            coverages,
+        );
     }
 
     // Show-level banner
     if let Some(ref banner) = set.banner {
         let mut bytes = None;
-        write_destination_if_missing(fetch, &banner.url, &mut bytes, &show_root.join("banner.jpg"), &mut written, coverages);
+        write_destination_if_missing(
+            fetch,
+            &banner.url,
+            &mut bytes,
+            &show_root.join("banner.jpg"),
+            &mut written,
+            coverages,
+        );
     }
 
     let owned_seasons: HashSet<u32> = coverages
@@ -276,7 +308,9 @@ pub(crate) fn save_fanart_files(
     // Season posters
     for sp in &set.season_posters {
         let Some(s_num) = sp.season else { continue };
-        if !owned_seasons.contains(&s_num) { continue };
+        if !owned_seasons.contains(&s_num) {
+            continue;
+        };
         let season_rows: Vec<domain::FileCoverage> = coverages
             .iter()
             .filter(|coverage| covers_season(coverage, s_num))
@@ -284,16 +318,32 @@ pub(crate) fn save_fanart_files(
             .collect();
         let prefix = season_prefix(s_num);
         let mut bytes = None;
-        write_destination_if_missing(fetch, &sp.url, &mut bytes, &show_root.join(format!("{prefix}poster.jpg")), &mut written, &season_rows);
+        write_destination_if_missing(
+            fetch,
+            &sp.url,
+            &mut bytes,
+            &show_root.join(format!("{prefix}poster.jpg")),
+            &mut written,
+            &season_rows,
+        );
         if let Some(s_dir) = season_dir(show_root, coverages, s_num) {
-            write_destination_if_missing(fetch, &sp.url, &mut bytes, &s_dir.join("poster.jpg"), &mut written, &season_rows);
+            write_destination_if_missing(
+                fetch,
+                &sp.url,
+                &mut bytes,
+                &s_dir.join("poster.jpg"),
+                &mut written,
+                &season_rows,
+            );
         }
     }
 
     // Season thumbs
     for st in &set.season_thumbs {
         let Some(s_num) = st.season else { continue };
-        if !owned_seasons.contains(&s_num) { continue };
+        if !owned_seasons.contains(&s_num) {
+            continue;
+        };
         let season_rows: Vec<domain::FileCoverage> = coverages
             .iter()
             .filter(|coverage| covers_season(coverage, s_num))
@@ -301,17 +351,40 @@ pub(crate) fn save_fanart_files(
             .collect();
         let prefix = season_prefix(s_num);
         let mut bytes = None;
-        write_destination_if_missing(fetch, &st.url, &mut bytes, &show_root.join(format!("{prefix}thumb.jpg")), &mut written, &season_rows);
+        write_destination_if_missing(
+            fetch,
+            &st.url,
+            &mut bytes,
+            &show_root.join(format!("{prefix}thumb.jpg")),
+            &mut written,
+            &season_rows,
+        );
         if let Some(s_dir) = season_dir(show_root, coverages, s_num) {
-            write_destination_if_missing(fetch, &st.url, &mut bytes, &s_dir.join("thumb.jpg"), &mut written, &season_rows);
-            write_destination_if_missing(fetch, &st.url, &mut bytes, &s_dir.join("landscape.jpg"), &mut written, &season_rows);
+            write_destination_if_missing(
+                fetch,
+                &st.url,
+                &mut bytes,
+                &s_dir.join("thumb.jpg"),
+                &mut written,
+                &season_rows,
+            );
+            write_destination_if_missing(
+                fetch,
+                &st.url,
+                &mut bytes,
+                &s_dir.join("landscape.jpg"),
+                &mut written,
+                &season_rows,
+            );
         }
     }
 
     // Season banners
     for sb in &set.season_banners {
         let Some(s_num) = sb.season else { continue };
-        if !owned_seasons.contains(&s_num) { continue };
+        if !owned_seasons.contains(&s_num) {
+            continue;
+        };
         let season_rows: Vec<domain::FileCoverage> = coverages
             .iter()
             .filter(|coverage| covers_season(coverage, s_num))
@@ -319,9 +392,23 @@ pub(crate) fn save_fanart_files(
             .collect();
         let prefix = season_prefix(s_num);
         let mut bytes = None;
-        write_destination_if_missing(fetch, &sb.url, &mut bytes, &show_root.join(format!("{prefix}banner.jpg")), &mut written, &season_rows);
+        write_destination_if_missing(
+            fetch,
+            &sb.url,
+            &mut bytes,
+            &show_root.join(format!("{prefix}banner.jpg")),
+            &mut written,
+            &season_rows,
+        );
         if let Some(s_dir) = season_dir(show_root, coverages, s_num) {
-            write_destination_if_missing(fetch, &sb.url, &mut bytes, &s_dir.join("banner.jpg"), &mut written, &season_rows);
+            write_destination_if_missing(
+                fetch,
+                &sb.url,
+                &mut bytes,
+                &s_dir.join("banner.jpg"),
+                &mut written,
+                &season_rows,
+            );
         }
     }
 
@@ -331,8 +418,8 @@ pub(crate) fn save_fanart_files(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use media::fanart::FanartImage;
+    use std::collections::HashMap;
 
     struct MapFetch {
         bodies: HashMap<String, Vec<u8>>,
@@ -440,9 +527,15 @@ mod tests {
         assert_eq!(std::fs::read(show.join("logo.png")).unwrap(), b"logo");
         assert_eq!(std::fs::read(show.join("clearlogo.png")).unwrap(), b"logo");
         assert_eq!(std::fs::read(show.join("banner.jpg")).unwrap(), b"banner");
-        assert_eq!(std::fs::read(show.join("season01-poster.jpg")).unwrap(), b"season");
+        assert_eq!(
+            std::fs::read(show.join("season01-poster.jpg")).unwrap(),
+            b"season"
+        );
         assert_eq!(std::fs::read(season.join("poster.jpg")).unwrap(), b"season");
-        assert_eq!(std::fs::read(show.join("fanart.jpg")).unwrap(), b"tmdb-backdrop");
+        assert_eq!(
+            std::fs::read(show.join("fanart.jpg")).unwrap(),
+            b"tmdb-backdrop"
+        );
     }
 }
 

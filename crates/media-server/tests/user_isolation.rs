@@ -1,8 +1,8 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use domain::{
-    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile,
-    LibraryId, Media, MediaId, MediaKind, QualitySource, TypedItemId, UnitKey, UserId,
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, LibraryId,
+    Media, MediaId, MediaKind, QualitySource, TypedItemId, UnitKey, UserId,
 };
 use media_server::provider::{
     AuthenticateError, MediaItemSnapshot, MediaServerProvider, PlaybackClientInfo, PlaybackEvent,
@@ -186,7 +186,12 @@ impl MediaServerProvider for FakeProvider {
         Ok(items.into_iter().find(|it| {
             it.protocol_id() == id
                 || it.media.id.to_string() == id
-                || it.media.id.to_string().replace('-', "").eq_ignore_ascii_case(id)
+                || it
+                    .media
+                    .id
+                    .to_string()
+                    .replace('-', "")
+                    .eq_ignore_ascii_case(id)
         }))
     }
 

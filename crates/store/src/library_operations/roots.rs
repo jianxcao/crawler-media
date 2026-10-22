@@ -43,7 +43,8 @@ pub(crate) fn apply_root_batch(
         if let Some(last) = files.last() {
             cursor.last_file_id = Some(last.clone());
         }
-        let more = files.len() >= batch && has_more_files(tx, library, cursor.last_file_id.as_deref())?;
+        let more =
+            files.len() >= batch && has_more_files(tx, library, cursor.last_file_id.as_deref())?;
         if more {
             return Ok(BatchOutcome::More);
         }
@@ -52,7 +53,14 @@ pub(crate) fn apply_root_batch(
     // Unidentified rows and metadata inputs are ownership facts of their own: one with no
     // file under it (an unmatched folder, a sidecar whose video is gone) must still move.
     if !cursor.unidentified_done {
-        let rows = next_path_batch(tx, "unidentified", "path", library, cursor.last_unidentified_path.as_deref(), batch)?;
+        let rows = next_path_batch(
+            tx,
+            "unidentified",
+            "path",
+            library,
+            cursor.last_unidentified_path.as_deref(),
+            batch,
+        )?;
         reparent_paths(tx, "unidentified", "path", library, &rows, requested)?;
         if rows.len() >= batch {
             cursor.last_unidentified_path = rows.last().cloned();
@@ -60,8 +68,22 @@ pub(crate) fn apply_root_batch(
         }
         cursor.unidentified_done = true;
     }
-    let rows = next_path_batch(tx, "library_metadata_inputs", "path_key", library, cursor.last_input_path.as_deref(), batch)?;
-    reparent_paths(tx, "library_metadata_inputs", "path_key", library, &rows, requested)?;
+    let rows = next_path_batch(
+        tx,
+        "library_metadata_inputs",
+        "path_key",
+        library,
+        cursor.last_input_path.as_deref(),
+        batch,
+    )?;
+    reparent_paths(
+        tx,
+        "library_metadata_inputs",
+        "path_key",
+        library,
+        &rows,
+        requested,
+    )?;
     if rows.len() >= batch {
         cursor.last_input_path = rows.last().cloned();
         return Ok(BatchOutcome::More);
@@ -86,7 +108,9 @@ fn next_path_batch(
     );
     let mut stmt = tx.prepare(&sql)?;
     let rows = stmt
-        .query_map(params![library, after, batch as i64], |r| r.get::<_, String>(0))?
+        .query_map(params![library, after, batch as i64], |r| {
+            r.get::<_, String>(0)
+        })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
@@ -134,17 +158,14 @@ fn ensure_root_rows(
     requested: &[PathBuf],
 ) -> Result<(), StoreError> {
     let existing: Vec<(String, String)> = {
-        let mut stmt = tx.prepare(
-            "SELECT root_id, display_path FROM library_roots WHERE library_id = ?1",
-        )?;
+        let mut stmt =
+            tx.prepare("SELECT root_id, display_path FROM library_roots WHERE library_id = ?1")?;
         stmt.query_map(params![library], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<Result<Vec<_>, _>>()?
     };
     for (index, path) in requested.iter().enumerate() {
         let display = path.to_string_lossy().to_string();
-        let already = existing
-            .iter()
-            .any(|(_, candidate)| candidate == &display);
+        let already = existing.iter().any(|(_, candidate)| candidate == &display);
         if already {
             continue;
         }
@@ -181,11 +202,7 @@ fn next_file_batch(
     Ok(ids)
 }
 
-fn has_more_files(
-    tx: &Connection,
-    library: &str,
-    after: Option<&str>,
-) -> Result<bool, StoreError> {
+fn has_more_files(tx: &Connection, library: &str, after: Option<&str>) -> Result<bool, StoreError> {
     let exists: i64 = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM library_files
                        WHERE library_id = ?1 AND (?2 IS NULL OR file_id > ?2))",
@@ -268,7 +285,10 @@ fn prune_unreferenced_roots(
             |r| r.get(0),
         )?;
         if referenced == 0 {
-            tx.execute("DELETE FROM library_roots WHERE root_id = ?1", params![root_id])?;
+            tx.execute(
+                "DELETE FROM library_roots WHERE root_id = ?1",
+                params![root_id],
+            )?;
         }
     }
     Ok(())

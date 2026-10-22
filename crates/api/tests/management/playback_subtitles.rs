@@ -1,5 +1,5 @@
 use super::*;
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 fn movie_with_subtitle_tracks(tmp: &tempfile::TempDir) -> (domain::Media, domain::FileCoverage) {
     let movie_file = tmp.path().join("data/library/movies/TestFilm.mkv");
@@ -147,8 +147,7 @@ async fn playback_decide_and_subtitle_delivery_returns_tracks_and_content() {
 
     // 3. 验证内封字幕轨交付与缓存命中 (无 external 路径时走内封提取或缓存)
     // cache 维度包含 source_version：预置与 service 相同的版本化布局。
-    let source_version =
-        api::fingerprint_job::current_source_version(coverage.file.path.as_path());
+    let source_version = api::fingerprint_job::current_source_version(coverage.file.path.as_path());
     let cache_dir = api::subtitle_delivery::subtitle_cache_dir(file_id, &source_version);
     std::fs::create_dir_all(&cache_dir).unwrap();
     std::fs::write(

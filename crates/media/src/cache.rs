@@ -110,7 +110,7 @@ impl CatalogCache {
                             return Ok(value);
                         }
                         Err(stale_error) => {
-                        tracing::warn!(source = %self.source, path = key, %stale_error, "Rejected malformed stale Metadata cache");
+                            tracing::warn!(source = %self.source, path = key, %stale_error, "Rejected malformed stale Metadata cache");
                         }
                     }
                 }

@@ -290,7 +290,10 @@ fn auto_resolve_uses_ancestor_alias_when_filename_title_misses() {
     let show_root = root.join("动灵守护者 (2022)");
     let season_nfo = show_root.join("season.nfo");
     let season_body = std::fs::read_to_string(&season_nfo).expect("season.nfo");
-    assert!(season_body.contains("<seasonnumber>1</seasonnumber>"), "{season_body}");
+    assert!(
+        season_body.contains("<seasonnumber>1</seasonnumber>"),
+        "{season_body}"
+    );
     assert!(season_body.contains("第一季简介"), "{season_body}");
     assert!(
         season_body.contains("https://image.tmdb.org/t/p/w780/season-1.jpg"),
@@ -311,7 +314,11 @@ fn auto_resolve_writes_season_nfo_without_thumb_when_still_missing() {
         fn search_tv(&self, _query: &str) -> Result<Vec<media::CatalogHit>, String> {
             Ok(Vec::new())
         }
-        fn search_tv_year(&self, _query: &str, _year: Option<u16>) -> Result<Vec<media::CatalogHit>, String> {
+        fn search_tv_year(
+            &self,
+            _query: &str,
+            _year: Option<u16>,
+        ) -> Result<Vec<media::CatalogHit>, String> {
             Ok(vec![media::CatalogHit {
                 media: domain::Media {
                     id: domain::MediaId::new(),
@@ -347,7 +354,11 @@ fn auto_resolve_writes_season_nfo_without_thumb_when_still_missing() {
         fn now_playing_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
             Ok(Vec::new())
         }
-        fn details(&self, _kind: domain::MediaKind, _id: &str) -> Result<Option<domain::Media>, String> {
+        fn details(
+            &self,
+            _kind: domain::MediaKind,
+            _id: &str,
+        ) -> Result<Option<domain::Media>, String> {
             Ok(None)
         }
         fn metadata_with_preferences(
@@ -381,7 +392,11 @@ fn auto_resolve_writes_season_nfo_without_thumb_when_still_missing() {
                 cast: Vec::new(),
             }))
         }
-        fn season_details(&self, _id: &str, _season: u32) -> Result<Vec<media::EpisodeMeta>, String> {
+        fn season_details(
+            &self,
+            _id: &str,
+            _season: u32,
+        ) -> Result<Vec<media::EpisodeMeta>, String> {
             Ok(vec![media::EpisodeMeta {
                 episode_number: 1,
                 name: Some("Thunder Mountain".into()),
@@ -444,7 +459,10 @@ fn auto_resolve_writes_season_nfo_without_thumb_when_still_missing() {
     let season_nfo = show_root.join("season.nfo");
     assert!(season_nfo.is_file(), "season.nfo should exist");
     let still = show.join("Spirit.Rangers.S01E01.1080p-thumb.jpg");
-    assert!(!still.exists(), "thumb should not exist when still_path is None");
+    assert!(
+        !still.exists(),
+        "thumb should not exist when still_path is None"
+    );
 }
 
 #[test]

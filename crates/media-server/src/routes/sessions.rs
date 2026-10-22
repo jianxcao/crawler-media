@@ -65,7 +65,15 @@ async fn report_session_event(
     }
     match state
         .provider
-        .report_playback_event(user.id, item_id, position_ms, paused, client, event, identity)
+        .report_playback_event(
+            user.id,
+            item_id,
+            position_ms,
+            paused,
+            client,
+            event,
+            identity,
+        )
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT,

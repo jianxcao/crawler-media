@@ -88,7 +88,9 @@ fn is_calendar_date(digits: &str) -> bool {
     let year = &digits[..4];
     let month: u32 = digits[4..6].parse().unwrap_or(0);
     let day: u32 = digits[6..8].parse().unwrap_or(0);
-    crate::attributes::parse_year(year).is_some() && (1..=12).contains(&month) && (1..=31).contains(&day)
+    crate::attributes::parse_year(year).is_some()
+        && (1..=12).contains(&month)
+        && (1..=31).contains(&day)
 }
 
 fn is_likely_resolution(bytes: &[u8], ep: u32, m: usize) -> bool {

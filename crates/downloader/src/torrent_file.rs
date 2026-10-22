@@ -55,13 +55,20 @@ mod tests {
 
     #[test]
     fn hashes_exactly_the_raw_info_dictionary() {
-        let info = b"d6:lengthi12e4:name8:demo.mkv12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaae";
+        let info =
+            b"d6:lengthi12e4:name8:demo.mkv12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaae";
         let mut torrent = b"d8:announce16:https://t.ex/ann4:info".to_vec();
         torrent.extend_from_slice(info);
         torrent.extend_from_slice(b"e");
         use sha1::Digest;
-        let expected: String = sha1::Sha1::digest(info).iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(torrent_info_hash(&torrent).as_deref(), Some(expected.as_str()));
+        let expected: String = sha1::Sha1::digest(info)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            torrent_info_hash(&torrent).as_deref(),
+            Some(expected.as_str())
+        );
         // Known vector: SHA-1 of "d4:name1:ae".
         assert_eq!(
             torrent_info_hash(b"d4:infod4:name1:aee").as_deref(),
@@ -71,7 +78,10 @@ mod tests {
 
     fn sha1_hex(data: &[u8]) -> String {
         use sha1::Digest;
-        sha1::Sha1::digest(data).iter().map(|b| format!("{b:02x}")).collect()
+        sha1::Sha1::digest(data)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 
     /// Review M-5: hostile nesting must not overflow the worker stack.

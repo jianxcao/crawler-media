@@ -39,7 +39,10 @@ pub fn subtitle_index(tracks: &Tracks, ordinal: usize) -> u32 {
 }
 
 /// 根据请求的 index 在 tracks.subtitles 中定位对应的字幕轨
-pub fn find_subtitle_by_index<'a>(tracks: &'a Tracks, index: u32) -> Option<&'a crate::SubtitleTrack> {
+pub fn find_subtitle_by_index<'a>(
+    tracks: &'a Tracks,
+    index: u32,
+) -> Option<&'a crate::SubtitleTrack> {
     for (i, sub) in tracks.subtitles.iter().enumerate() {
         if subtitle_index(tracks, i) == index {
             return Some(sub);

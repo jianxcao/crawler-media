@@ -39,7 +39,10 @@ pub fn search_keywords_for(media: &Media, coverage: &Coverage) -> Vec<String> {
         if accepted_aliases == 3 {
             break;
         }
-        if keywords.iter().any(|existing| same_keyword(existing, alias)) {
+        if keywords
+            .iter()
+            .any(|existing| same_keyword(existing, alias))
+        {
             continue;
         }
         tracing::debug!(alias, "别名进入订阅搜索");
@@ -72,7 +75,10 @@ fn distinctive_alias(alias: &str) -> bool {
         .split(|ch: char| !ch.is_ascii_alphanumeric())
         .filter(|word| !word.is_empty() && word.chars().all(|ch| ch.is_ascii()))
         .count();
-    let non_latin = text.chars().filter(|ch| !ch.is_ascii() && !ch.is_whitespace()).count();
+    let non_latin = text
+        .chars()
+        .filter(|ch| !ch.is_ascii() && !ch.is_whitespace())
+        .count();
     if latin_words >= 2 || non_latin >= 2 {
         true
     } else {
@@ -128,7 +134,8 @@ fn search_keywords(
         let outcome = state.indexer.search_page(sites, keyword, 1);
         succeeded |=
             report_site_failures(&outcome, sites, &format!("search {keyword}"), &mut failures);
-        let continue_page = page_is_full_and_irrelevant(media, coverage, keyword, &outcome.torrents);
+        let continue_page =
+            page_is_full_and_irrelevant(media, coverage, keyword, &outcome.torrents);
         absorb(&mut seen, &mut merged, outcome.torrents);
         if continue_page {
             let second = state.indexer.search_page(sites, keyword, 2);

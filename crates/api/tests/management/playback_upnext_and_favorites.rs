@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::*;
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 fn app(tmp: &tempfile::TempDir) -> axum::Router {
     let fetcher = Arc::new(Fixtures {
@@ -159,7 +159,8 @@ async fn playback_heartbeat_at_90_percent_sets_played_true() {
     let user_id = store.admin_user_id().unwrap();
     drop(store);
 
-    let session = super::playback::open_play_session(&app, &media.id.to_string(), "test-device").await;
+    let session =
+        super::playback::open_play_session(&app, &media.id.to_string(), "test-device").await;
     // 发送心跳：总时长 100,000ms，当前进度 95,000ms (95%)
     let heartbeat_res = app
         .clone()

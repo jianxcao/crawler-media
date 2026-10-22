@@ -1,4 +1,4 @@
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 mod support;
 
 use axum::http::StatusCode;
@@ -132,8 +132,18 @@ async fn parent_verify_and_prune_do_not_touch_nested_library() {
     // Parent row is deleted, but nested child row remains!
     let store_arc = fix.state.store();
     let guard = store_arc.lock();
-    assert!(guard.file_coverage_by_id(parent_row.file_id).unwrap().is_none());
-    assert!(guard.file_coverage_by_id(nested_row.file_id).unwrap().is_some());
+    assert!(
+        guard
+            .file_coverage_by_id(parent_row.file_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        guard
+            .file_coverage_by_id(nested_row.file_id)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -142,7 +152,10 @@ async fn root_failure_rejects_whole_request_without_writes() {
     let (_, _row) = fix.insert_media_and_ledger("one.mkv");
 
     // Make root unreadable
-    fix.mock_files.unreadable_roots.lock().push(fix.root.clone());
+    fix.mock_files
+        .unreadable_roots
+        .lock()
+        .push(fix.root.clone());
 
     let (status, res) = fix
         .request(

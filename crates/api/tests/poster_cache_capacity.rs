@@ -1,22 +1,22 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::http::{Request, StatusCode};
 use domain::{Media, MediaId, MediaKind, Torrent};
 use downloader::{Downloader, DownloaderError};
-use indexer::{Fetcher, FetchRequest, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use media::CatalogHit;
 use parking_lot::{Condvar, Mutex};
 use tower::ServiceExt;
 
+use api::Store;
 use api::catalog::Catalog;
 use api::management::ApiState;
 use api::media_posters::cache::{DiskPosterCache, MAX_IMAGE_BYTES};
 use api::media_posters::http::ImageFetcher;
 use api::media_posters::service::MediaPosterService;
 use api::media_posters::{MediaPosterSource, PosterClock, PosterError};
-use api::Store;
 
 struct MockCatalog;
 
@@ -40,7 +40,9 @@ impl Catalog for MockCatalog {
         if tmdb_id.starts_with("not_found") {
             Ok(None)
         } else {
-            Ok(Some(format!("https://image.tmdb.org/t/p/w500/{tmdb_id}.jpg")))
+            Ok(Some(format!(
+                "https://image.tmdb.org/t/p/w500/{tmdb_id}.jpg"
+            )))
         }
     }
 }
@@ -57,14 +59,17 @@ impl ManualClock {
     }
 
     fn advance(&self, duration: Duration) {
-        self.now_ms.fetch_add(duration.as_millis() as usize, Ordering::SeqCst);
+        self.now_ms
+            .fetch_add(duration.as_millis() as usize, Ordering::SeqCst);
     }
 
     fn rewind(&self, duration: Duration) {
         let rewind_ms = duration.as_millis() as usize;
-        let _ = self.now_ms.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |curr| {
-            Some(curr.saturating_sub(rewind_ms))
-        });
+        let _ = self
+            .now_ms
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |curr| {
+                Some(curr.saturating_sub(rewind_ms))
+            });
     }
 }
 
@@ -143,12 +148,8 @@ fn create_store_and_service(
     let cache_dir = tmp.path().join("cache");
     let store = Arc::new(Mutex::new(Store::open(&data_dir).unwrap()));
     let catalog = Arc::new(MockCatalog);
-    let service = MediaPosterService::with_custom_fetcher(
-        store.clone(),
-        catalog,
-        cache_dir,
-        fetcher,
-    );
+    let service =
+        MediaPosterService::with_custom_fetcher(store.clone(), catalog, cache_dir, fetcher);
     (tmp, store, service)
 }
 
@@ -203,14 +204,23 @@ async fn distinct_negative_keys_are_bounded_and_expire_without_revisit() {
     assert!(matches!(res_new, Err(PosterError::NotFound)));
 
     // Assert LRU: touched keys[0] survived while keys[1] was evicted.
-    assert!(service.check_negative_cache_for_test(keys[0]), "keys[0] was touched so it must survive eviction");
-    assert!(!service.check_negative_cache_for_test(keys[1]), "keys[1] was least recently used so it must be evicted");
+    assert!(
+        service.check_negative_cache_for_test(keys[0]),
+        "keys[0] was touched so it must survive eviction"
+    );
+    assert!(
+        !service.check_negative_cache_for_test(keys[1]),
+        "keys[1] was least recently used so it must be evicted"
+    );
 
     // Move clock backward past the insertion time (e.g. from 100s to 50s)
     clock.rewind(Duration::from_secs(50));
 
     // Assert backward-clock handling: keys[0] must still be cached (not prematurely expired)
-    assert!(service.check_negative_cache_for_test(keys[0]), "entry inserted at positive clock must still be cached after backward clock move");
+    assert!(
+        service.check_negative_cache_for_test(keys[0]),
+        "entry inserted at positive clock must still be cached after backward clock move"
+    );
     let counts_rewound = service.resource_counts();
     assert_eq!(counts_rewound.negative_entries, 4_096);
     // Advance clock past expiration (30s TTL, move to 100s + 31s = 131s)
@@ -349,7 +359,10 @@ async fn full_live_registry_returns_busy_and_same_key_still_joins() {
     // requesting a NEW key must sweep dead entries during admission and succeed.
     let admitted_id = insert_media(&store.lock(), "admitted_after_drop", Some("100"));
     let admitted_res = service.get(admitted_id).await;
-    assert!(admitted_res.is_ok(), "new key must be admitted after strong references dropped");
+    assert!(
+        admitted_res.is_ok(),
+        "new key must be admitted after strong references dropped"
+    );
 
     // The admission above is the real proof: with 4,096 dead entries unswept the new
     // key would have been rejected as Busy instead of served. Every entry (including
@@ -379,10 +392,17 @@ fn max_image_bytes_round_trips_through_disk_cache() {
     // Exactly MAX_IMAGE_BYTES (8 MiB)
     let large_image = vec![0x42u8; MAX_IMAGE_BYTES];
     let put_res = cache.put(media_id, "image/jpeg", &large_image);
-    assert!(put_res.is_ok(), "putting exactly 8 MiB image must succeed: {:?}", put_res.err());
+    assert!(
+        put_res.is_ok(),
+        "putting exactly 8 MiB image must succeed: {:?}",
+        put_res.err()
+    );
 
     let get_res = cache.get(media_id);
-    assert!(get_res.is_some(), "getting exactly 8 MiB image must succeed");
+    assert!(
+        get_res.is_some(),
+        "getting exactly 8 MiB image must succeed"
+    );
     let poster = get_res.unwrap();
     assert_eq!(poster.content_type, "image/jpeg");
     assert_eq!(poster.bytes.len(), MAX_IMAGE_BYTES);
@@ -392,14 +412,27 @@ fn max_image_bytes_round_trips_through_disk_cache() {
     // Format is: "{now_secs()}\n{content_type}\n\n{img}"
     // meta_prefix is "{now_secs()}\n{content_type}\n"
     // If content_type is sized so meta_prefix is exactly MAX_META_BYTES:
-    let now_prefix = format!("{}\n", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+    let now_prefix = format!(
+        "{}\n",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    );
     let ct_len = api::media_posters::cache::MAX_META_BYTES - now_prefix.len() - 1; // -1 for trailing newline in meta_prefix
     let max_ct = "a".repeat(ct_len);
     let boundary_id = MediaId::new();
     let put_bound = cache.put(boundary_id, &max_ct, &large_image);
-    assert!(put_bound.is_ok(), "boundary meta allowance put must succeed: {:?}", put_bound.err());
+    assert!(
+        put_bound.is_ok(),
+        "boundary meta allowance put must succeed: {:?}",
+        put_bound.err()
+    );
     let get_bound = cache.get(boundary_id);
-    assert!(get_bound.is_some(), "boundary meta allowance get must succeed");
+    assert!(
+        get_bound.is_some(),
+        "boundary meta allowance get must succeed"
+    );
     assert_eq!(get_bound.unwrap().content_type, max_ct);
 
     // Oversized metadata must be rejected

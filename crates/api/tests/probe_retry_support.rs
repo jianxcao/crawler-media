@@ -3,14 +3,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use api::probe_manager::ProbeManager;
 use api::probe_manager::clock::ProbeClock;
 use api::probe_manager::policy::{ProbeRequestOrigin, ProbeRequestResult};
-use api::probe_manager::ProbeManager;
 use domain::{Confidence, FileCoverage, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use marker::FingerprintEngine;
 use parking_lot::Mutex;
-use store::{FingerprintCacheEntry, Store};
 use store::test_support::FixtureFile;
+use store::{FingerprintCacheEntry, Store};
 
 pub struct FakeFingerprintEngine {
     pub intro_words: Vec<u32>,
@@ -69,7 +69,12 @@ impl FingerprintEngine for FakeFingerprintEngine {
 fn episode_number(path: &Path) -> u32 {
     path.file_name()
         .and_then(|name| name.to_str())
-        .and_then(|name| name.trim_start_matches("S01E0").trim_end_matches(".strm").parse().ok())
+        .and_then(|name| {
+            name.trim_start_matches("S01E0")
+                .trim_end_matches(".strm")
+                .parse()
+                .ok()
+        })
         .unwrap_or(0)
 }
 
@@ -78,7 +83,10 @@ fn episode_number(path: &Path) -> u32 {
 /// the probe manager see every cached metadata/fingerprint row as stale.
 fn publish_row(store: &Store, spec: &FixtureFile, source_version: &str) -> FileCoverage {
     let path = Path::new(&spec.path);
-    let media = store.get_media(spec.media_id).unwrap().expect("fixture media");
+    let media = store
+        .get_media(spec.media_id)
+        .unwrap()
+        .expect("fixture media");
     let library = store
         .library_for_path_strict(path, media.kind)
         .unwrap()
@@ -175,15 +183,21 @@ impl ProbeScenario {
         let root = tmp.path().join("tv_root");
         std::fs::create_dir_all(&root).unwrap();
 
-        let library = store.lock().create_library(
-            MediaKind::Tv,
-            "TV Show Library",
-            &[root.to_str().unwrap()],
-            "everyone",
-            true,
-            &[],
-        ).unwrap();
-        store.lock().set_library_intro_settings(&library.id, true, true).unwrap();
+        let library = store
+            .lock()
+            .create_library(
+                MediaKind::Tv,
+                "TV Show Library",
+                &[root.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+        store
+            .lock()
+            .set_library_intro_settings(&library.id, true, true)
+            .unwrap();
 
         let media = Media {
             id: media_id,
@@ -219,7 +233,8 @@ impl ProbeScenario {
                 filter_score: None,
                 ..Default::default()
             };
-            let source_version = api::fingerprint_job::current_source_version(Path::new(&spec.path));
+            let source_version =
+                api::fingerprint_job::current_source_version(Path::new(&spec.path));
             let coverage = publish_row(&store.lock(), &spec, &source_version);
             let tracks = library::Tracks {
                 video: Some(library::VideoTrack {
@@ -231,26 +246,33 @@ impl ProbeScenario {
                 }),
                 ..library::Tracks::default()
             };
-            store.lock().put_file_meta_versioned(
-                &file_id.to_string(),
-                &tracks,
-                Some(&source_version),
-                Some(2400_000), // 40 minutes
-            ).unwrap();
+            store
+                .lock()
+                .put_file_meta_versioned(
+                    &file_id.to_string(),
+                    &tracks,
+                    Some(&source_version),
+                    Some(2400_000), // 40 minutes
+                )
+                .unwrap();
 
             // Populate cached fingerprint
-            let cache_key = api::fingerprint_job::fingerprint_cache_key(&source_version, 180, Some(2400_000));
-            store.lock().put_fingerprint_cache(
-                &file_id.to_string(),
-                &FingerprintCacheEntry {
-                    cache_key,
-                    algorithm_version: marker::FINGERPRINT_ALGORITHM_VERSION,
-                    sample_duration_secs: 180,
-                    media_duration_ms: Some(2400_000),
-                    intro: vec![1, 2, 3],
-                    outro: Some(vec![4, 5, 6]),
-                },
-            ).unwrap();
+            let cache_key =
+                api::fingerprint_job::fingerprint_cache_key(&source_version, 180, Some(2400_000));
+            store
+                .lock()
+                .put_fingerprint_cache(
+                    &file_id.to_string(),
+                    &FingerprintCacheEntry {
+                        cache_key,
+                        algorithm_version: marker::FINGERPRINT_ALGORITHM_VERSION,
+                        sample_duration_secs: 180,
+                        media_duration_ms: Some(2400_000),
+                        intro: vec![1, 2, 3],
+                        outro: Some(vec![4, 5, 6]),
+                    },
+                )
+                .unwrap();
 
             ledgers.push(coverage);
         }
@@ -271,9 +293,7 @@ impl ProbeScenario {
     }
 
     pub fn dispatch_due(&self) -> usize {
-        self.manager
-            .dispatch_due(self.clock.now_ms(), 32)
-            .unwrap()
+        self.manager.dispatch_due(self.clock.now_ms(), 32).unwrap()
     }
 
     pub fn reopen(&mut self) {
@@ -304,9 +324,17 @@ impl ProbeScenario {
     pub fn missing_outro(&mut self, episode: u32) {
         let row = self.ledger_for_episode(episode);
         let file_id = row.file.file_id.to_string();
-        let mut cache = self.store.lock().get_fingerprint_cache(&file_id).unwrap().unwrap();
+        let mut cache = self
+            .store
+            .lock()
+            .get_fingerprint_cache(&file_id)
+            .unwrap()
+            .unwrap();
         cache.outro = None;
-        self.store.lock().put_fingerprint_cache(&file_id, &cache).unwrap();
+        self.store
+            .lock()
+            .put_fingerprint_cache(&file_id, &cache)
+            .unwrap();
     }
 
     pub fn fail_next_outro(&self, _episode: u32, error: &str) {
@@ -317,8 +345,6 @@ impl ProbeScenario {
         let row = self.ledger_for_episode(episode);
         self.manager.request_probe(row, origin).unwrap()
     }
-
-
 
     pub async fn drain(&self) {
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -332,15 +358,30 @@ impl ProbeScenario {
     }
 
     pub fn metadata_reads(&self, episode: u32) -> usize {
-        self.engine.metadata_calls.lock().get(&episode).copied().unwrap_or(0)
+        self.engine
+            .metadata_calls
+            .lock()
+            .get(&episode)
+            .copied()
+            .unwrap_or(0)
     }
 
     pub fn intro_reads(&self, episode: u32) -> usize {
-        self.engine.intro_calls.lock().get(&episode).copied().unwrap_or(0)
+        self.engine
+            .intro_calls
+            .lock()
+            .get(&episode)
+            .copied()
+            .unwrap_or(0)
     }
 
     pub fn outro_reads(&self, episode: u32) -> usize {
-        self.engine.outro_calls.lock().get(&episode).copied().unwrap_or(0)
+        self.engine
+            .outro_calls
+            .lock()
+            .get(&episode)
+            .copied()
+            .unwrap_or(0)
     }
 
     pub fn set_intro_settings(&self, detect_intros: bool, enable_fingerprint: bool) {

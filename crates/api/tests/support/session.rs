@@ -26,6 +26,14 @@ pub fn issue_session(
         .copied()
         .unwrap_or(UnitKey::WHOLE);
     store
-        .issue_play_session(user, device, file_id, file.media_id, unit, &file.version, now)
+        .issue_play_session(
+            user,
+            device,
+            file_id,
+            file.media_id,
+            unit,
+            &file.version,
+            now,
+        )
         .expect("issue fixture play session")
 }

@@ -5,8 +5,8 @@
 //! the queue row and the Library file row it named.
 
 use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
-use store::test_support::FixtureFile;
 use store::Store;
+use store::test_support::FixtureFile;
 
 fn create_media(store: &Store, title: &str) -> Media {
     let media = Media {
@@ -85,9 +85,7 @@ fn queued_deletion_retries_by_file_id_and_clears_both_rows() {
     };
     store::test_support::publish_fixture_file(&store, &row).unwrap();
 
-    store
-        .enqueue_file_deletion(&path, "wash_replaced")
-        .unwrap();
+    store.enqueue_file_deletion(&path, "wash_replaced").unwrap();
 
     // The queue names the file by the current Library file id, not by path alone.
     let due = store.list_due_file_deletions(i64::MAX).unwrap();
@@ -97,11 +95,19 @@ fn queued_deletion_retries_by_file_id_and_clears_both_rows() {
         Some(row.file_id.expect("fixture file id").to_string().as_str())
     );
     assert_eq!(due[0].file_size, Some(5));
-    assert_eq!(store.file_id_at_path(&path).unwrap(), Some(row.file_id.expect("fixture file id").to_string()));
+    assert_eq!(
+        store.file_id_at_path(&path).unwrap(),
+        Some(row.file_id.expect("fixture file id").to_string())
+    );
 
     // Retry completion: the bytes are gone, so the queue row and the file row go.
     std::fs::remove_file(&path).unwrap();
     store.complete_file_deletion(&path).unwrap();
-    assert!(store.file_coverage_by_id(row.file_id.expect("fixture file id")).unwrap().is_none());
+    assert!(
+        store
+            .file_coverage_by_id(row.file_id.expect("fixture file id"))
+            .unwrap()
+            .is_none()
+    );
     assert!(store.list_pending_file_deletions().unwrap().is_empty());
 }

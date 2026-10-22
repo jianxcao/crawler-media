@@ -302,9 +302,7 @@ fn deletable_library_rows(
         .file_coverage_for_media(subscribe.media_id)
         .unwrap_or_default()
         .into_iter()
-        .filter(|coverage| {
-            coverage_owned_by_subscribe(store, subscribe, &media, coverage, &others)
-        })
+        .filter(|coverage| coverage_owned_by_subscribe(store, subscribe, &media, coverage, &others))
         .collect())
 }
 
@@ -329,8 +327,7 @@ fn coverage_owned_by_subscribe(
     }
     // 物理删除不能走「不在任何根下就回退默认库」的展示归属。库外路径
     // （手工 claim、根目录变更后的旧行）一律不删。
-    let Some(owner) =
-        crate::http::library::library_for_file_strict(store, &coverage.file, media)
+    let Some(owner) = crate::http::library::library_for_file_strict(store, &coverage.file, media)
     else {
         tracing::warn!(
             path = %coverage.file.path.display(),

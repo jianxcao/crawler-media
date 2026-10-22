@@ -80,8 +80,28 @@ async fn video_library_supports_mts_and_vob_and_iso() {
 
     let store_arc = fix.state.store();
     let guard = store_arc.lock();
-    assert!(guard.file_coverage_by_path(&f1.display().to_string()).unwrap().is_some());
-    assert!(guard.file_coverage_by_path(&f2.display().to_string()).unwrap().is_some());
-    assert!(guard.file_coverage_by_path(&f3.display().to_string()).unwrap().is_some());
-    assert!(guard.file_coverage_by_path(&f_invalid.display().to_string()).unwrap().is_none());
+    assert!(
+        guard
+            .file_coverage_by_path(&f1.display().to_string())
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        guard
+            .file_coverage_by_path(&f2.display().to_string())
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        guard
+            .file_coverage_by_path(&f3.display().to_string())
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        guard
+            .file_coverage_by_path(&f_invalid.display().to_string())
+            .unwrap()
+            .is_none()
+    );
 }

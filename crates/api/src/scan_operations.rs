@@ -33,7 +33,11 @@ pub struct ScanCoordinator {
 /// 逐字节相同、**且该旧编码可唯一还原**的旧签名才可就地升级；有歧义或与当前配置不同
 /// 的旧签名一律取消（P2-NEW-1 / P2-A）。
 pub fn scan_scope_signature(lib: &store::Library) -> String {
-    let mut roots: Vec<_> = lib.root_paths.iter().map(|p| p.display().to_string()).collect();
+    let mut roots: Vec<_> = lib
+        .root_paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
     roots.sort();
     let mut signature = format!("v2:{}:{}", lib.kind.as_str(), roots.len());
     for root in roots {
@@ -54,7 +58,9 @@ impl ScanCoordinator {
     }
 
     pub fn register_control(&self, op_id: &str, control: library::WorkControl) {
-        self.active_controls.lock().insert(op_id.to_string(), control);
+        self.active_controls
+            .lock()
+            .insert(op_id.to_string(), control);
     }
 
     pub fn unregister_control(&self, op_id: &str) {
@@ -128,13 +134,17 @@ impl ScanCoordinator {
                 .library_accepts_work(library_id)
                 .map_err(|e| ScanEnqueueError::Internal(e.to_string()))?
             {
-                return Err(ScanEnqueueError::Conflict("Library 正在删除或已冻结".to_string()));
+                return Err(ScanEnqueueError::Conflict(
+                    "Library 正在删除或已冻结".to_string(),
+                ));
             }
             scan_scope_signature(&lib)
         };
 
         if state.acquire_library_work(library_id).is_err() {
-            return Err(ScanEnqueueError::Conflict("Library 正在删除或已冻结".to_string()));
+            return Err(ScanEnqueueError::Conflict(
+                "Library 正在删除或已冻结".to_string(),
+            ));
         }
 
         let now_ms = crate::job_loop::unix_now() * 1000;
@@ -461,12 +471,20 @@ async fn run_operation(
                 ),
                 signature_upgrade.as_deref(),
             );
-            finalize_scan(&store, op_id, expected_dirty_rev, ScanOperationStatus::Failed, &report);
+            finalize_scan(
+                &store,
+                op_id,
+                expected_dirty_rev,
+                ScanOperationStatus::Failed,
+                &report,
+            );
             return;
         }
     };
 
-    state.scan_coordinator.register_control(op_id, lease.control().clone());
+    state
+        .scan_coordinator
+        .register_control(op_id, lease.control().clone());
 
     {
         let store = state.store.lock();
@@ -504,13 +522,12 @@ async fn run_operation(
                 signature_upgrade.as_deref(),
             );
             // 终态取累计报告的 status：前几轮的 partial/unreachable 不能被后续干净轮洗掉。
-            let status = if report.get("status").and_then(serde_json::Value::as_str)
-                == Some("partial")
-            {
-                ScanOperationStatus::Partial
-            } else {
-                ScanOperationStatus::Completed
-            };
+            let status =
+                if report.get("status").and_then(serde_json::Value::as_str) == Some("partial") {
+                    ScanOperationStatus::Partial
+                } else {
+                    ScanOperationStatus::Completed
+                };
             finalize_scan(&store, op_id, expected_dirty_rev, status, &report);
         }
         Ok(Err(crate::http::library_scan::runner::ScanRunError::ScopeChanged { reason })) => {
@@ -529,7 +546,13 @@ async fn run_operation(
                 ),
                 signature_upgrade.as_deref(),
             );
-            finalize_scan(&store, op_id, expected_dirty_rev, ScanOperationStatus::Failed, &report);
+            finalize_scan(
+                &store,
+                op_id,
+                expected_dirty_rev,
+                ScanOperationStatus::Failed,
+                &report,
+            );
         }
         Err(e) => {
             let report = with_signature_upgrade(
@@ -540,7 +563,13 @@ async fn run_operation(
                 ),
                 signature_upgrade.as_deref(),
             );
-            finalize_scan(&store, op_id, expected_dirty_rev, ScanOperationStatus::Failed, &report);
+            finalize_scan(
+                &store,
+                op_id,
+                expected_dirty_rev,
+                ScanOperationStatus::Failed,
+                &report,
+            );
         }
     }
 }
@@ -565,8 +594,13 @@ fn is_nonempty_object(value: &serde_json::Value) -> bool {
 }
 
 fn sum_report_field(base: &serde_json::Value, round: &serde_json::Value, key: &str) -> u64 {
-    base.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0)
-        + round.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0)
+    base.get(key)
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+        + round
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
 }
 
 fn worst_root_status(a: Option<&str>, b: Option<&str>) -> &'static str {
@@ -583,7 +617,10 @@ fn worst_root_status(a: Option<&str>, b: Option<&str>) -> &'static str {
 }
 
 /// 按路径合并两轮的根报告：visited/errors 相加，status 取更差的一侧。
-fn merge_report_roots(base: &serde_json::Value, round: &serde_json::Value) -> Vec<serde_json::Value> {
+fn merge_report_roots(
+    base: &serde_json::Value,
+    round: &serde_json::Value,
+) -> Vec<serde_json::Value> {
     let mut merged: Vec<serde_json::Value> = Vec::new();
     for source in [base, round] {
         for root in source
@@ -625,10 +662,7 @@ const MAX_REPORT_FAILURES: usize = 5;
 /// 计数相加、roots 按路径合并、issues 截断到 20 条；status 由合并结果重算。
 /// 失败历史（`failures` / `failure_count`）与签名升级原因跨轮保留：一次成功的补扫
 /// 可以让 operation 以 `completed` 结束，但失败记录不能被抹掉（P3-NEW-2）。
-fn merge_scan_reports(
-    base: &serde_json::Value,
-    round: &serde_json::Value,
-) -> serde_json::Value {
+fn merge_scan_reports(base: &serde_json::Value, round: &serde_json::Value) -> serde_json::Value {
     if !is_nonempty_object(base) {
         return round.clone();
     }

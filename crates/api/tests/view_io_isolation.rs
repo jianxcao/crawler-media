@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use api::browse_file_read::BrowseFileRead;
 use api::{ApiState, Store, router};
-use store::UNIT_WHOLE;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
@@ -11,8 +10,9 @@ use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use parking_lot::{Condvar, Mutex};
 use serde_json::Value;
+use store::UNIT_WHOLE;
+use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
-use store::test_support::{publish_fixture_file, FixtureFile};
 
 struct NoFetch;
 impl Fetcher for NoFetch {
@@ -130,7 +130,11 @@ fn seed_movie(state: &ApiState, tmp: &std::path::Path) -> (domain::UserId, Strin
     let movie_file = library_root.join("Test Movie (2024)/test.mp4");
     std::fs::create_dir_all(movie_file.parent().unwrap()).unwrap();
     std::fs::write(&movie_file, b"content").unwrap();
-    std::fs::write(movie_file.parent().unwrap().join("poster.jpg"), b"fake poster").unwrap();
+    std::fs::write(
+        movie_file.parent().unwrap().join("poster.jpg"),
+        b"fake poster",
+    )
+    .unwrap();
 
     let media_id = MediaId::new();
     let media = Media {
@@ -215,15 +219,23 @@ async fn slow_gallery_and_episodes_do_not_hold_store() {
     // Concurrent request: library episode endpoint completes while gallery is held
     let episode_req = Request::builder()
         .method("GET")
-        .uri(format!("/api/v1/libraries/{library_id}/items/{media_id}/episodes"))
+        .uri(format!(
+            "/api/v1/libraries/{library_id}/items/{media_id}/episodes"
+        ))
         .header("Authorization", "Bearer management-secret")
         .body(Body::empty())
         .unwrap();
     let episode_resp = app.clone().oneshot(episode_req).await.unwrap();
     assert_eq!(episode_resp.status(), StatusCode::OK);
-    let ep_bytes = to_bytes(episode_resp.into_body(), 1024 * 1024).await.unwrap();
+    let ep_bytes = to_bytes(episode_resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
     let ep_json: Value = serde_json::from_slice(&ep_bytes).unwrap();
-    assert!(ep_json["data"].as_array().is_some_and(|arr| !arr.is_empty()));
+    assert!(
+        ep_json["data"]
+            .as_array()
+            .is_some_and(|arr| !arr.is_empty())
+    );
 
     // Concurrent request: heartbeat / auth keeps responsive while gate is held
     let heartbeat_req = Request::builder()
@@ -239,7 +251,9 @@ async fn slow_gallery_and_episodes_do_not_hold_store() {
     gate.release();
     let gallery_response = gallery_handle.await.unwrap();
     assert_eq!(gallery_response.status(), StatusCode::OK);
-    let body_bytes = to_bytes(gallery_response.into_body(), 1024 * 1024).await.unwrap();
+    let body_bytes = to_bytes(gallery_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
     let gallery: Value = serde_json::from_slice(&body_bytes).unwrap();
     let items = gallery["data"].as_array().expect("gallery items array");
     assert_eq!(items.len(), 1, "real gallery payload must not be empty");
@@ -258,7 +272,9 @@ async fn playback_item_observes_poster_without_holding_store() {
     let gated_read = Arc::new(GatedFileRead { gate: gate.clone() });
     let state = make_state(tmp.path(), gated_read);
     let (_admin_user, library_id, media_id) = seed_movie(&state, tmp.path());
-    let ledger_id = state.store().lock().list_file_coverage().unwrap()[0].file.file_id;
+    let ledger_id = state.store().lock().list_file_coverage().unwrap()[0]
+        .file
+        .file_id;
     let app = router(state.clone());
     let item_app = app.clone();
     let _release = ReleaseOnDrop(gate.clone());
@@ -276,19 +292,19 @@ async fn playback_item_observes_poster_without_holding_store() {
     if !store_available {
         gate.release();
     }
-    assert!(store_available, "playback poster discovery must not hold Store");
+    assert!(
+        store_available,
+        "playback poster discovery must not hold Store"
+    );
     let auth_request = Request::builder()
         .uri("/api/v1/auth/me")
         .header("Authorization", "Bearer management-secret")
         .body(Body::empty())
         .unwrap();
-    let auth_response = tokio::time::timeout(
-        Duration::from_secs(2),
-        app.oneshot(auth_request),
-    )
-    .await
-    .expect("authentication must complete while poster discovery is gated")
-    .unwrap();
+    let auth_response = tokio::time::timeout(Duration::from_secs(2), app.oneshot(auth_request))
+        .await
+        .expect("authentication must complete while poster discovery is gated")
+        .unwrap();
     assert_eq!(auth_response.status(), StatusCode::OK);
 
     gate.release();
@@ -296,12 +312,15 @@ async fn playback_item_observes_poster_without_holding_store() {
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
     let item: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(item["data"], serde_json::json!({
-        "media_item_id": media_id.to_string(),
-        "library_id": library_id,
-        "kind": "movie",
-        "title": "Test Movie",
-        "year": 2024,
-        "poster_url": format!("/posters/{ledger_id}"),
-    }));
+    assert_eq!(
+        item["data"],
+        serde_json::json!({
+            "media_item_id": media_id.to_string(),
+            "library_id": library_id,
+            "kind": "movie",
+            "title": "Test Movie",
+            "year": 2024,
+            "poster_url": format!("/posters/{ledger_id}"),
+        })
+    );
 }

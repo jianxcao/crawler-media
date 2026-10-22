@@ -133,10 +133,16 @@ impl UserRemovalService {
                     record.updated_at = crate::job_loop::unix_now();
                     let json = serde_json::to_string(&record).map_err(|e| e.to_string())?;
                     store
-                        .put_setting(&format!("{USER_REMOVAL_RESULT_PREFIX}{operation_id}"), &json)
+                        .put_setting(
+                            &format!("{USER_REMOVAL_RESULT_PREFIX}{operation_id}"),
+                            &json,
+                        )
                         .map_err(|e| e.to_string())?;
                     store
-                        .put_setting(&format!("{USER_REMOVAL_DONE_PREFIX}{user_id}"), &operation_id)
+                        .put_setting(
+                            &format!("{USER_REMOVAL_DONE_PREFIX}{user_id}"),
+                            &operation_id,
+                        )
                         .map_err(|e| e.to_string())?;
                     store
                         .delete_setting(&record_key(user_id))
@@ -167,7 +173,9 @@ impl UserRemovalService {
         let mut failures = Vec::new();
         prune_results(&self.state.store.lock(), crate::job_loop::unix_now());
         for key in keys {
-            if key.starts_with(USER_REMOVAL_RESULT_PREFIX) || key.starts_with(USER_REMOVAL_DONE_PREFIX) {
+            if key.starts_with(USER_REMOVAL_RESULT_PREFIX)
+                || key.starts_with(USER_REMOVAL_DONE_PREFIX)
+            {
                 continue;
             }
             let user_id_str = key.trim_start_matches(USER_REMOVAL_PREFIX);
@@ -200,10 +208,7 @@ fn record_key(user_id: UserId) -> String {
     format!("{USER_REMOVAL_PREFIX}{user_id}")
 }
 
-fn read_record(
-    store: &store::Store,
-    user_id: UserId,
-) -> Result<Option<UserRemovalRecord>, String> {
+fn read_record(store: &store::Store, user_id: UserId) -> Result<Option<UserRemovalRecord>, String> {
     let Some(raw) = store
         .get_setting(&record_key(user_id))
         .map_err(|e| e.to_string())?
@@ -240,7 +245,9 @@ fn run_phase(
                 user.enabled = false;
                 store.save_user(&user).map_err(|e| e.to_string())?;
             }
-            store.revoke_user_tokens(user_id).map_err(|e| e.to_string())?;
+            store
+                .revoke_user_tokens(user_id)
+                .map_err(|e| e.to_string())?;
             Ok(Some("cleaning"))
         }
         "cleaning" => {
@@ -254,7 +261,9 @@ fn run_phase(
         }
         "finalizing" => {
             // Idempotent: a User already deleted by an interrupted run is not an error.
-            store.finish_user_removal(user_id).map_err(|e| e.to_string())?;
+            store
+                .finish_user_removal(user_id)
+                .map_err(|e| e.to_string())?;
             Ok(None)
         }
         other => Err(format!("unknown user removal phase {other}")),
@@ -289,13 +298,16 @@ pub fn find_removal(
         .get_setting(&format!("{USER_REMOVAL_RESULT_PREFIX}{operation_id}"))
         .map_err(|e| e.to_string())?
     {
-        return serde_json::from_str(&raw).map(Some).map_err(|e| e.to_string());
+        return serde_json::from_str(&raw)
+            .map(Some)
+            .map_err(|e| e.to_string());
     }
     let keys = store
         .list_setting_keys_with_prefix(USER_REMOVAL_PREFIX)
         .map_err(|e| e.to_string())?;
     for key in keys {
-        if key.starts_with(USER_REMOVAL_RESULT_PREFIX) || key.starts_with(USER_REMOVAL_DONE_PREFIX) {
+        if key.starts_with(USER_REMOVAL_RESULT_PREFIX) || key.starts_with(USER_REMOVAL_DONE_PREFIX)
+        {
             continue;
         }
         let Some(raw) = store.get_setting(&key).map_err(|e| e.to_string())? else {

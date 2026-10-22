@@ -1,9 +1,9 @@
-use std::path::Path;
 use domain::{
     Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, LibraryId,
     MediaId, QualitySource, UnitKey,
 };
 use rusqlite::OptionalExtension;
+use std::path::Path;
 
 use super::{Store, StoreError};
 use crate::library_write::{FilePublication as PublicationRequest, WriteScope};
@@ -48,10 +48,7 @@ impl Default for FixtureFile {
 }
 
 /// Publish a single fixture file to the store through the canonical publication path.
-pub fn publish_fixture_file(
-    store: &Store,
-    spec: &FixtureFile,
-) -> Result<LibraryFile, StoreError> {
+pub fn publish_fixture_file(store: &Store, spec: &FixtureFile) -> Result<LibraryFile, StoreError> {
     let published = publish_fixture_files(store, std::slice::from_ref(spec))?;
     published
         .into_iter()
@@ -117,10 +114,7 @@ fn fixture_units(spec: &FixtureFile) -> Vec<UnitKey> {
     }
 }
 
-fn place_fixture_file(
-    store: &Store,
-    spec: &FixtureFile,
-) -> Result<LibraryFile, StoreError> {
+fn place_fixture_file(store: &Store, spec: &FixtureFile) -> Result<LibraryFile, StoreError> {
     let media = store
         .get_media(spec.media_id)?
         .ok_or_else(|| StoreError::Missing(format!("media {}", spec.media_id)))?;
@@ -199,7 +193,10 @@ fn root_for_path(store: &Store, library_id: &str, path: &str) -> Result<String, 
             continue;
         }
         let depth = normalized.components().count();
-        if best.as_ref().is_none_or(|(best_depth, _)| *best_depth < depth) {
+        if best
+            .as_ref()
+            .is_none_or(|(best_depth, _)| *best_depth < depth)
+        {
             best = Some((depth, root.id));
         }
     }

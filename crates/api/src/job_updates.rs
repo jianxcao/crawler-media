@@ -105,7 +105,10 @@ impl JobUpdates {
     /// 订阅时立刻查一次真实计数：失败且没有上一次好值时返回 `Err`。
     fn current_count(&self, queue: &Arc<Mutex<jobs::Queue>>) -> Result<JobCount, String> {
         match queue.lock().change_state() {
-            Ok(state) => Ok(JobCount { count: state.finished_count, revision: state.revision }),
+            Ok(state) => Ok(JobCount {
+                count: state.finished_count,
+                revision: state.revision,
+            }),
             Err(error) => {
                 let last = self
                     .inner
@@ -151,7 +154,10 @@ async fn poll_loop(
         polls.fetch_add(1, Ordering::SeqCst);
         match queue.lock().change_state() {
             Ok(state) => {
-                let next = JobCount { count: state.finished_count, revision: state.revision };
+                let next = JobCount {
+                    count: state.finished_count,
+                    revision: state.revision,
+                };
                 sender.send_if_modified(|value| {
                     if *value == next {
                         false

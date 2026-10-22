@@ -60,7 +60,10 @@ async fn file_fonts(
     }
 
     // 尝试寻找同目录下的字体附件或同名字体目录
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
     let parent = path.parent().unwrap_or(FsPath::new(""));
     let font_dir = parent.join(format!("{stem}.fonts"));
     if font_dir.is_dir() {
@@ -68,7 +71,8 @@ async fn file_fonts(
         if let Ok(mut dir) = tokio::fs::read_dir(&font_dir).await {
             while let Ok(Some(entry)) = dir.next_entry().await {
                 if let Some(name) = entry.file_name().to_str() {
-                    if name.ends_with(".ttf") || name.ends_with(".otf") || name.ends_with(".woff2") {
+                    if name.ends_with(".ttf") || name.ends_with(".otf") || name.ends_with(".woff2")
+                    {
                         fonts.push(name.to_string());
                     }
                 }
@@ -110,7 +114,10 @@ async fn file_trickplay(
     }
 
     // 尝试寻找同目录下的 trickplay 缩略图文件（如 .jpg / .webp）
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
     let parent = path.parent().unwrap_or(FsPath::new(""));
     let candidates = [
         parent.join(format!("{stem}.trickplay.jpg")),

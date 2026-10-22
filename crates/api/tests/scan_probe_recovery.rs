@@ -23,10 +23,16 @@ async fn probe_obligation_is_created_on_scan_and_recovered() {
         .expect("row must exist");
 
     // Dispatch once
-    let count = api::scan_probe_dispatch::dispatch_once(fix.state.clone()).await.unwrap();
+    let count = api::scan_probe_dispatch::dispatch_once(fix.state.clone())
+        .await
+        .unwrap();
     // Either already enqueued/acked or acked in this dispatch_once call
     let remaining = store_arc.lock().scan_probe_obligations(10).unwrap();
-    assert_eq!(remaining.len(), 0, "all obligations must be dispatched and acked");
+    assert_eq!(
+        remaining.len(),
+        0,
+        "all obligations must be dispatched and acked"
+    );
 }
 
 #[tokio::test]
@@ -52,5 +58,8 @@ async fn deleted_ledger_cleans_obligation_without_probe() {
 
     // Verify obligation is cleaned up by delete_ledger_path
     let obs = store_arc.lock().scan_probe_obligations(10).unwrap();
-    assert!(obs.is_empty(), "obligation must be deleted when ledger row is deleted");
+    assert!(
+        obs.is_empty(),
+        "obligation must be deleted when ledger row is deleted"
+    );
 }

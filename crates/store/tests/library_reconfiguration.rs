@@ -5,12 +5,12 @@
 use std::path::{Path, PathBuf};
 
 use domain::{
-    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, Media,
-    MediaId, MediaKind, QualitySource, UnitKey,
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, Media, MediaId,
+    MediaKind, QualitySource, UnitKey,
 };
+use store::Store;
 use store::library_operations::LibraryReconfiguration;
 use store::library_write::{FilePublication as StorePublication, WriteScope};
-use store::Store;
 
 fn media(store: &Store, id: &str, kind: MediaKind) -> Media {
     let media = Media {
@@ -35,9 +35,7 @@ fn root_id_of(store: &Store, library_id: &str, path: &Path) -> String {
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|root| {
-            root.library_id.as_deref() == Some(library_id) && root.path == path
-        })
+        .find(|root| root.library_id.as_deref() == Some(library_id) && root.path == path)
         .unwrap_or_else(|| panic!("root {path:?} must exist"))
         .id
 }
@@ -115,7 +113,11 @@ fn publish_one(
 fn root_replacement_survives_restart_without_mixed_ownership() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
-    let movie = media(&store, "00000000-0000-0000-0000-0000000000c1", MediaKind::Movie);
+    let movie = media(
+        &store,
+        "00000000-0000-0000-0000-0000000000c1",
+        MediaKind::Movie,
+    );
     let library = store
         .create_library(MediaKind::Movie, "Movies", &["/a/b"], "everyone", true, &[])
         .unwrap();
@@ -165,7 +167,9 @@ fn root_replacement_survives_restart_without_mixed_ownership() {
 
     // Advance one batch at a time, reopening the store between passes so each step
     // is a real crash-and-resume rather than an in-memory continuation.
-    let mut status = store.advance_library_operation(&operation_id, 2_200, 2).unwrap();
+    let mut status = store
+        .advance_library_operation(&operation_id, 2_200, 2)
+        .unwrap();
     assert_eq!(status.state, "applying", "two of five files moved so far");
     let store = {
         drop(store);
@@ -176,9 +180,13 @@ fn root_replacement_survives_restart_without_mixed_ownership() {
         vec![operation_id.clone()],
         "an interrupted operation stays visible for startup recovery"
     );
-    status = store.advance_library_operation(&operation_id, 2_300, 2).unwrap();
+    status = store
+        .advance_library_operation(&operation_id, 2_300, 2)
+        .unwrap();
     assert_eq!(status.state, "applying");
-    status = store.advance_library_operation(&operation_id, 2_400, 2).unwrap();
+    status = store
+        .advance_library_operation(&operation_id, 2_400, 2)
+        .unwrap();
     assert_eq!(status.state, "succeeded");
     assert_eq!(status.phase, "succeeded");
 
@@ -200,10 +208,7 @@ fn root_replacement_survives_restart_without_mixed_ownership() {
     assert_eq!(file_root, new_root, "the file must move to the new root");
     assert_ne!(new_root, old_root);
     assert!(
-        store
-            .get_library_root(&old_root)
-            .unwrap()
-            .is_none(),
+        store.get_library_root(&old_root).unwrap().is_none(),
         "the replaced root must be gone once nothing references it"
     );
 
@@ -313,7 +318,9 @@ fn locale_change_keeps_existing_nfo_languages() {
             3_000,
         )
         .unwrap();
-    let status = store.advance_library_operation(&operation_id, 3_100, 100).unwrap();
+    let status = store
+        .advance_library_operation(&operation_id, 3_100, 100)
+        .unwrap();
     assert_eq!(status.state, "succeeded");
 
     let locale: String = {
@@ -349,7 +356,11 @@ fn locale_change_keeps_existing_nfo_languages() {
 fn begin_persists_the_frozen_phase_and_the_barrier_across_reopen() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
-    let movie = media(&store, "00000000-0000-0000-0000-0000000000d1", MediaKind::Movie);
+    let movie = media(
+        &store,
+        "00000000-0000-0000-0000-0000000000d1",
+        MediaKind::Movie,
+    );
     let library = store
         .create_library(MediaKind::Movie, "Movies", &["/c/d"], "everyone", true, &[])
         .unwrap();
@@ -429,7 +440,11 @@ fn begin_persists_the_frozen_phase_and_the_barrier_across_reopen() {
 fn advance_refuses_a_batch_size_outside_the_interface_range() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
-    let movie = media(&store, "00000000-0000-0000-0000-0000000000d2", MediaKind::Movie);
+    let movie = media(
+        &store,
+        "00000000-0000-0000-0000-0000000000d2",
+        MediaKind::Movie,
+    );
     let library = store
         .create_library(MediaKind::Movie, "Movies", &["/e/f"], "everyone", true, &[])
         .unwrap();
@@ -550,12 +565,21 @@ fn a_failed_batch_rolls_back_keeps_the_freeze_and_stays_recoverable() {
 
     // R19: the failed batch commits nothing, the freeze stays, and the operation is
     // still offered to startup recovery so it resumes instead of exposing a mixed state.
-    assert_eq!(store.library_lifecycle_state(&library.id).unwrap(), "reindexing");
+    assert_eq!(
+        store.library_lifecycle_state(&library.id).unwrap(),
+        "reindexing"
+    );
     let status = store.get_library_operation(&operation_id).unwrap().unwrap();
     assert_eq!(status.state, "failed");
     assert!(status.error.is_some(), "the failure keeps its cause");
-    assert_eq!(store.unfinished_library_operations().unwrap(), vec![operation_id.clone()]);
-    assert_eq!(store.active_library_operation(&library.id).unwrap(), Some(operation_id.clone()));
+    assert_eq!(
+        store.unfinished_library_operations().unwrap(),
+        vec![operation_id.clone()]
+    );
+    assert_eq!(
+        store.active_library_operation(&library.id).unwrap(),
+        Some(operation_id.clone())
+    );
     assert_eq!(
         store.library_config_revision(&library.id).unwrap(),
         expected_revision + 1,
@@ -638,7 +662,13 @@ fn success_leaves_no_file_owned_by_a_foreign_or_missing_root() {
     let kept_root = root_id_of(&store, &library.id, Path::new("/a/b"));
     let other_root = root_id_of(&store, &library.id, Path::new("/other"));
     publish_one(&store, lib_id, &movie, &kept_root, "/a/b/Film/kept.mkv");
-    publish_one(&store, lib_id, &movie, &other_root, "/other/Film/outside.mkv");
+    publish_one(
+        &store,
+        lib_id,
+        &movie,
+        &other_root,
+        "/other/Film/outside.mkv",
+    );
 
     let expected_revision = store.library_config_revision(&library.id).unwrap();
     // R19: dropping /other while it still owns a file is refused up front, zero writes.
@@ -652,9 +682,15 @@ fn success_leaves_no_file_owned_by_a_foreign_or_missing_root() {
         },
         2_900,
     );
-    assert!(refused.is_err(), "uncovered files must refuse the root change");
+    assert!(
+        refused.is_err(),
+        "uncovered files must refuse the root change"
+    );
     assert_eq!(store.library_lifecycle_state(&library.id).unwrap(), "ready");
-    assert_eq!(store.library_config_revision(&library.id).unwrap(), expected_revision);
+    assert_eq!(
+        store.library_config_revision(&library.id).unwrap(),
+        expected_revision
+    );
 
     let operation_id = uuid::Uuid::new_v4().to_string();
     store
@@ -738,7 +774,11 @@ fn success_leaves_no_file_owned_by_a_foreign_or_missing_root() {
 fn initial_zero_scope_is_rejected_after_reconfiguration() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
-    let movie = media(&store, "00000000-0000-0000-0000-0000000000c9", MediaKind::Movie);
+    let movie = media(
+        &store,
+        "00000000-0000-0000-0000-0000000000c9",
+        MediaKind::Movie,
+    );
     let library = store
         .create_library(MediaKind::Movie, "Movies", &["/z/b"], "everyone", true, &[])
         .unwrap();
@@ -757,7 +797,9 @@ fn initial_zero_scope_is_rejected_after_reconfiguration() {
             2_000,
         )
         .unwrap();
-    let status = store.advance_library_operation(&operation_id, 2_100, 10).unwrap();
+    let status = store
+        .advance_library_operation(&operation_id, 2_100, 10)
+        .unwrap();
     assert_eq!(status.state, "succeeded");
     assert_eq!(store.library_config_revision(&library.id).unwrap(), 1);
     assert_eq!(store.library_lifecycle_state(&library.id).unwrap(), "ready");

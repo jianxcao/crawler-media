@@ -7,16 +7,8 @@ use api::ApiState;
 use api::router;
 use axum::http::StatusCode;
 use domain::{
-    FilePresence,
-    FilePublication,
-    FileVersion,
-    LedgerId,
-    LibraryFile,
-    Media,
-    MediaId,
-    MediaKind,
-    QualitySource,
-    UnitKey,
+    FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, Media, MediaId, MediaKind,
+    QualitySource, UnitKey,
 };
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
@@ -25,7 +17,7 @@ use store::library_write::{FilePublication as StorePublication, WriteScope};
 use tower::ServiceExt;
 
 use super::common::{Fixtures, json_body, json_data, request, state};
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 /// The seeded movie Library's real root (`<data>/library/movies`). The migrated
 /// schema resolves a file's Library by the longest matching `library_roots` row,

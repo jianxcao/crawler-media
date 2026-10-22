@@ -30,11 +30,11 @@ mod marker_jobs;
 mod markers;
 pub mod policy;
 mod probe;
-mod projection;
 pub mod progress;
+mod projection;
 mod queue;
-mod refresh;
 pub mod recovery;
+mod refresh;
 mod retry;
 pub mod season;
 pub mod stages;
@@ -149,7 +149,10 @@ impl ProbeManager {
         manager
     }
 
-    pub(crate) fn set_library_registry(&self, registry: Arc<crate::library_lifecycle::LibraryWorkRegistry>) {
+    pub(crate) fn set_library_registry(
+        &self,
+        registry: Arc<crate::library_lifecycle::LibraryWorkRegistry>,
+    ) {
         *self.library_work.lock() = Some(registry);
     }
 
@@ -198,17 +201,21 @@ impl ProbeManager {
             marker_refresh_id: None,
             job_id: None,
         };
-        if need.metadata_valid && need.fingerprint_enabled && (need.intro_missing || need.outro_missing)
+        if need.metadata_valid
+            && need.fingerprint_enabled
+            && (need.intro_missing || need.outro_missing)
         {
-            return Ok(match self.enqueue_direct_fingerprint(
-                unit,
-                need.media_duration_ms,
-                need.source_version,
-                need.sample_duration_secs,
-            ) {
-                Some(job_id) => policy::ProbeRequestResult::Queued { job_id },
-                None => policy::ProbeRequestResult::AlreadyRunning,
-            });
+            return Ok(
+                match self.enqueue_direct_fingerprint(
+                    unit,
+                    need.media_duration_ms,
+                    need.source_version,
+                    need.sample_duration_secs,
+                ) {
+                    Some(job_id) => policy::ProbeRequestResult::Queued { job_id },
+                    None => policy::ProbeRequestResult::AlreadyRunning,
+                },
+            );
         }
         let ledger_id = unit.row.file.file_id.to_string();
         if self.enqueue(unit) {
@@ -283,8 +290,15 @@ impl ProbeManager {
             "【媒体信息】已进入高优先级探测队列；声纹将在媒体信息写入后另行排队"
         );
         if self.queue_metadata(unit).is_err() {
-            tracing::info!(ledger_id, job_id, "媒体信息窗口已满，取消本次入队并保持可恢复");
-            self.store.lock().cancel_probe_unit(&job_id, &ledger_id, "dispatch window full").ok();
+            tracing::info!(
+                ledger_id,
+                job_id,
+                "媒体信息窗口已满，取消本次入队并保持可恢复"
+            );
+            self.store
+                .lock()
+                .cancel_probe_unit(&job_id, &ledger_id, "dispatch window full")
+                .ok();
             return false;
         }
         self.seen.lock().insert(ledger_id);

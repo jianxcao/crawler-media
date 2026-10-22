@@ -173,7 +173,9 @@ fn raw_filter_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawFilterRow> {
     ))
 }
 
-fn build_filter((raw_id, name, atoms_json, keep_old_versions): RawFilterRow) -> Result<Filter, StoreError> {
+fn build_filter(
+    (raw_id, name, atoms_json, keep_old_versions): RawFilterRow,
+) -> Result<Filter, StoreError> {
     Ok(Filter {
         id: super::maps::parse_id(raw_id, 0)?,
         name,

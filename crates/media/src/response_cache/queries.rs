@@ -58,21 +58,14 @@ pub fn put(
     Ok(())
 }
 
-pub fn delete(
-    conn: &Connection,
-    source: CacheSource,
-    key: &str,
-) -> Result<bool, CacheDbError> {
+pub fn delete(conn: &Connection, source: CacheSource, key: &str) -> Result<bool, CacheDbError> {
     let table = source.table_name();
     let sql = format!("DELETE FROM {table} WHERE cache_key = ?1");
     let n = conn.execute(&sql, params![key])?;
     Ok(n > 0)
 }
 
-pub fn list(
-    conn: &Connection,
-    source: Option<CacheSource>,
-) -> Result<Vec<CacheRow>, CacheDbError> {
+pub fn list(conn: &Connection, source: Option<CacheSource>) -> Result<Vec<CacheRow>, CacheDbError> {
     let mut rows = Vec::new();
     match source {
         Some(s) => {

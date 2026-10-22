@@ -135,8 +135,15 @@ fn resolve_media(
     // Persist the display facts a Scrape observed (rating, release date, studio, logo)
     // through the adopted metadata; the affected cards are reduced in that transaction.
     if let Some(tmdb_id) = &updated.tmdb_id {
-        if let Ok(Some(meta)) = crate::scrape_metadata::fetch_tmdb_metadata(state, updated.kind, tmdb_id) {
-            crate::scrape_metadata::adopt_tmdb_metadata(state, &updated, tmdb_id, domain::EntityScope::Work);
+        if let Ok(Some(meta)) =
+            crate::scrape_metadata::fetch_tmdb_metadata(state, updated.kind, tmdb_id)
+        {
+            crate::scrape_metadata::adopt_tmdb_metadata(
+                state,
+                &updated,
+                tmdb_id,
+                domain::EntityScope::Work,
+            );
             crate::scrape_metadata::record_scraped_display(state, updated.id, &meta);
         }
     }
@@ -154,7 +161,8 @@ pub(crate) fn write_resolved_nfo(state: &ApiState, media: &Media, sample_path: &
     let Some(tmdb_id) = media.tmdb_id.as_deref() else {
         return;
     };
-    let meta_service = crate::metadata_service::MetadataService::new(std::sync::Arc::new(state.clone()));
+    let meta_service =
+        crate::metadata_service::MetadataService::new(std::sync::Arc::new(state.clone()));
     let _ = meta_service.refresh_media_metadata(media);
 
     if media.kind == MediaKind::Tv {
@@ -201,8 +209,14 @@ pub(crate) fn write_resolved_nfo(state: &ApiState, media: &Media, sample_path: &
                 let nfo = crate::scrape_metadata::nfo_from_tmdb(media, &metadata);
                 if let Some(stem) = sample_path.file_stem().and_then(|value| value.to_str()) {
                     let target = sample_path.with_file_name(format!("{stem}.nfo"));
-                    let write = || { crate::scrape_metadata::write_nfo(&target, media, &nfo); Ok(()) };
-                    let _ = match &lease { Some(lease) => lease.publish(write), None => write() };
+                    let write = || {
+                        crate::scrape_metadata::write_nfo(&target, media, &nfo);
+                        Ok(())
+                    };
+                    let _ = match &lease {
+                        Some(lease) => lease.publish(write),
+                        None => write(),
+                    };
                 }
             }
         }
@@ -455,11 +469,20 @@ pub(crate) fn rebind_scan_rows(
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "canonical Media missing".to_string())?
             .kind;
-        if let Some(owner) = store.library_for_path_strict(path, kind).map_err(|e| e.to_string())? {
-            if !store.library_accepts_work(&owner.id).map_err(|e| e.to_string())? {
+        if let Some(owner) = store
+            .library_for_path_strict(path, kind)
+            .map_err(|e| e.to_string())?
+        {
+            if !store
+                .library_accepts_work(&owner.id)
+                .map_err(|e| e.to_string())?
+            {
                 return Err("Library 正在删除".into());
             }
-        } else if store.path_in_removal_scope(path).map_err(|e| e.to_string())? {
+        } else if store
+            .path_in_removal_scope(path)
+            .map_err(|e| e.to_string())?
+        {
             return Err("Library 正在删除，拒绝重绑未归属的旧目录文件".into());
         }
         store

@@ -120,11 +120,12 @@ pub(crate) async fn update_maintenance_config(
     let schedule_ref = new_schedule.as_ref();
     let new_schedule_param = body.interval_secs.map(|_| schedule_ref);
 
-    let outcome = match state
-        .jobs
-        .lock()
-        .update_def_config_cas(id, &expected, &new_payload, new_schedule_param)
-    {
+    let outcome = match state.jobs.lock().update_def_config_cas(
+        id,
+        &expected,
+        &new_payload,
+        new_schedule_param,
+    ) {
         Ok(outcome) => outcome,
         Err(error) => {
             return err(
@@ -150,11 +151,9 @@ pub(crate) async fn update_maintenance_config(
 
     // 重新从库中读取实际生效的 schedule，避免在未修改 interval_secs 时返回错误 null
     let active_def = load_def(&state, id).ok();
-    let schedule = active_def
-        .and_then(|d| d.schedule)
-        .and_then(|s| match s {
-            jobs::Schedule::Interval { secs } => Some(json!({ "interval_secs": secs })),
-        });
+    let schedule = active_def.and_then(|d| d.schedule).and_then(|s| match s {
+        jobs::Schedule::Interval { secs } => Some(json!({ "interval_secs": secs })),
+    });
     tracing::info!(
         job_def_id = %id,
         kind = def.kind.as_str(),
@@ -266,15 +265,21 @@ pub(crate) async fn preview_maintenance(
     match preview_result {
         Ok(Ok(preview)) => ok(preview).into_response(),
         Ok(Err((code, err_code, msg))) => err(code, err_code, &msg),
-        Err(crate::blocking_budget::BlockingError::Busy) => {
-            err(StatusCode::SERVICE_UNAVAILABLE, "runtime.busy", "服务繁忙，请稍后重试预览")
-        }
-        Err(crate::blocking_budget::BlockingError::Timeout) => {
-            err(StatusCode::GATEWAY_TIMEOUT, "job.preview_timeout", "预览统计超时")
-        }
-        Err(crate::blocking_budget::BlockingError::Worker(msg)) => {
-            err(StatusCode::INTERNAL_SERVER_ERROR, "job.preview_failed", &msg)
-        }
+        Err(crate::blocking_budget::BlockingError::Busy) => err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "runtime.busy",
+            "服务繁忙，请稍后重试预览",
+        ),
+        Err(crate::blocking_budget::BlockingError::Timeout) => err(
+            StatusCode::GATEWAY_TIMEOUT,
+            "job.preview_timeout",
+            "预览统计超时",
+        ),
+        Err(crate::blocking_budget::BlockingError::Worker(msg)) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "job.preview_failed",
+            &msg,
+        ),
     }
 }
 

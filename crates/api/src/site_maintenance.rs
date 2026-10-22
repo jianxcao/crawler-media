@@ -58,7 +58,12 @@ pub fn perform_login(
     let http = crate::check_in::attendance_http();
     let via_http = |fallback: bool| {
         let plugin = LoginPlugin::http(bus, creds, &http).with_policy(&policy);
-        if fallback { plugin.without_hook_event() } else { plugin }.login(site.id)
+        if fallback {
+            plugin.without_hook_event()
+        } else {
+            plugin
+        }
+        .login(site.id)
     };
     match site.maintenance_via {
         domain::MaintenanceVia::Http => via_http(false),
@@ -86,7 +91,12 @@ pub fn perform_check_in(
     let http = crate::check_in::attendance_http();
     let via_http = |fallback: bool| {
         let plugin = CheckInPlugin::http(bus, creds, &http).with_policy(&policy);
-        if fallback { plugin.without_hook_event() } else { plugin }.check_in(site.id)
+        if fallback {
+            plugin.without_hook_event()
+        } else {
+            plugin
+        }
+        .check_in(site.id)
     };
     match site.maintenance_via {
         domain::MaintenanceVia::Http => via_http(false),
@@ -134,11 +144,17 @@ mod tests {
         let http_calls = Cell::new(0u32);
         let browser_was_pre_nav = matches!(browser, Err(PluginError::BrowserPreNavigation(_)));
         let s = site();
-        let r = run_with_browser_fallback(&s, "check_in", resolves, || browser, |fallback| {
-            assert_eq!(fallback, matches!(browser_was_pre_nav, true));
-            http_calls.set(http_calls.get() + 1);
-            Ok(())
-        });
+        let r = run_with_browser_fallback(
+            &s,
+            "check_in",
+            resolves,
+            || browser,
+            |fallback| {
+                assert_eq!(fallback, matches!(browser_was_pre_nav, true));
+                http_calls.set(http_calls.get() + 1);
+                Ok(())
+            },
+        );
         (r, http_calls.get())
     }
 
@@ -146,7 +162,10 @@ mod tests {
     fn post_navigation_error_does_not_fall_back_no_double_check_in() {
         let (r, calls) = run(Ok(true), Err(PluginError::Fetch("after goto".into())));
         assert!(r.is_err());
-        assert_eq!(calls, 0, "post-navigation failure must not trigger HTTP check-in");
+        assert_eq!(
+            calls, 0,
+            "post-navigation failure must not trigger HTTP check-in"
+        );
         let (r, calls) = run(Ok(true), Err(PluginError::Veto("policy".into())));
         assert!(r.is_err());
         assert_eq!(calls, 0);
@@ -154,7 +173,10 @@ mod tests {
 
     #[test]
     fn pre_navigation_error_falls_back_once() {
-        let (r, calls) = run(Ok(true), Err(PluginError::BrowserPreNavigation("busy".into())));
+        let (r, calls) = run(
+            Ok(true),
+            Err(PluginError::BrowserPreNavigation("busy".into())),
+        );
         assert!(r.is_ok());
         assert_eq!(calls, 1);
     }
@@ -173,6 +195,9 @@ mod tests {
         assert_eq!(calls, 1);
         let (r, calls) = run(Err(PluginError::Fetch("bad config".into())), Ok(()));
         assert!(r.is_err());
-        assert_eq!(calls, 0, "config errors must not be swallowed into HTTP fallback");
+        assert_eq!(
+            calls, 0,
+            "config errors must not be swallowed into HTTP fallback"
+        );
     }
 }

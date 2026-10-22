@@ -363,12 +363,11 @@ pub fn begin_library_integrity(
         .map_err(|_| StorageOperationError::MissingLibrary)?;
     let now_ms = crate::job_loop::unix_now();
 
-    let started = state.store.lock().begin_library_integrity(
-        library_ref,
-        repair,
-        &operation_id,
-        now_ms,
-    );
+    let started =
+        state
+            .store
+            .lock()
+            .begin_library_integrity(library_ref, repair, &operation_id, now_ms);
     let status = match started {
         Ok(status) => status,
         Err(StoreError::Missing(_)) => return Err(StorageOperationError::MissingLibrary),
@@ -378,12 +377,18 @@ pub fn begin_library_integrity(
                 .lock()
                 .active_library_operation(library_id)
                 .unwrap_or(None);
-            return Err(StorageOperationError::Reindexing { operation_id: active });
+            return Err(StorageOperationError::Reindexing {
+                operation_id: active,
+            });
         }
         Err(e) => return Err(StorageOperationError::Store(e)),
     };
 
-    let kind = if repair { "integrity-repairs" } else { "integrity-checks" };
+    let kind = if repair {
+        "integrity-repairs"
+    } else {
+        "integrity-checks"
+    };
     Ok(operation_json(&LibraryOperationView {
         operation_id,
         library_id: library_id.to_string(),

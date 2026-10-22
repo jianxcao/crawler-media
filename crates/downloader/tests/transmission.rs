@@ -659,7 +659,13 @@ fn transmission_duplicate_is_claimed_with_merged_labels() {
     .unwrap();
     dl.add(&torrent()).unwrap();
     let requests = capture.requests.lock();
-    let set = requests.iter().find(|r| r.contains("torrent-set")).expect("torrent-set sent");
+    let set = requests
+        .iter()
+        .find(|r| r.contains("torrent-set"))
+        .expect("torrent-set sent");
     let owned = downloader::ownership_tag(&torrent().enclosure);
-    assert!(set.contains("mine") && set.contains(downloader::TASK_TAG) && set.contains(&owned), "{set}");
+    assert!(
+        set.contains("mine") && set.contains(downloader::TASK_TAG) && set.contains(&owned),
+        "{set}"
+    );
 }

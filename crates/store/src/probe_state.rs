@@ -1,7 +1,7 @@
 pub mod retry;
 
-use rusqlite::{params, OptionalExtension, Transaction};
 use super::{Store, StoreError};
+use rusqlite::{OptionalExtension, Transaction, params};
 
 pub use retry::retry_delay_ms;
 
@@ -96,34 +96,39 @@ pub enum ProbeStageCompletion {
 }
 
 impl Store {
-    pub fn get_probe_stage(&self, key: &ProbeStageKey) -> Result<Option<ProbeStageState>, StoreError> {
+    pub fn get_probe_stage(
+        &self,
+        key: &ProbeStageKey,
+    ) -> Result<Option<ProbeStageState>, StoreError> {
         let mut stmt = self.library.prepare(
             "SELECT status, failure_count, next_retry_at_ms, error_kind, error, active_job_id
              FROM probe_stage_state
-             WHERE file_id = ?1 AND context_key = ?2 AND stage = ?3"
+             WHERE file_id = ?1 AND context_key = ?2 AND stage = ?3",
         )?;
-        let row = stmt.query_row(
-            params![key.ledger_id, key.context_key, key.stage.as_str()],
-            |row| {
-                let status_str: String = row.get(0)?;
-                let status = ProbeStageStatus::from_str(&status_str)
-                    .unwrap_or(ProbeStageStatus::Pending);
-                let failure_count: u32 = row.get(1)?;
-                let next_retry_at_ms: Option<i64> = row.get(2)?;
-                let error_kind: Option<String> = row.get(3)?;
-                let error: Option<String> = row.get(4)?;
-                let active_job_id: Option<String> = row.get(5)?;
-                Ok(ProbeStageState {
-                    key: key.clone(),
-                    status,
-                    failure_count,
-                    next_retry_at_ms,
-                    error_kind,
-                    error,
-                    active_job_id,
-                })
-            }
-        ).optional()?;
+        let row = stmt
+            .query_row(
+                params![key.ledger_id, key.context_key, key.stage.as_str()],
+                |row| {
+                    let status_str: String = row.get(0)?;
+                    let status = ProbeStageStatus::from_str(&status_str)
+                        .unwrap_or(ProbeStageStatus::Pending);
+                    let failure_count: u32 = row.get(1)?;
+                    let next_retry_at_ms: Option<i64> = row.get(2)?;
+                    let error_kind: Option<String> = row.get(3)?;
+                    let error: Option<String> = row.get(4)?;
+                    let active_job_id: Option<String> = row.get(5)?;
+                    Ok(ProbeStageState {
+                        key: key.clone(),
+                        status,
+                        failure_count,
+                        next_retry_at_ms,
+                        error_kind,
+                        error,
+                        active_job_id,
+                    })
+                },
+            )
+            .optional()?;
         Ok(row)
     }
 
@@ -150,9 +155,19 @@ impl Store {
     ) -> Result<bool, StoreError> {
         let tx = self.library.unchecked_transaction()?;
         let (status, err_kind, err_msg, next_retry, inc_fail) = match completion {
-            ProbeStageCompletion::Succeeded => (ProbeStageStatus::Succeeded, None, None, None, false),
-            ProbeStageCompletion::NotApplicable => (ProbeStageStatus::NotApplicable, None, None, None, false),
-            ProbeStageCompletion::Cancelled { reason } => (ProbeStageStatus::Cancelled, Some("cancelled".to_string()), Some(reason.clone()), None, false),
+            ProbeStageCompletion::Succeeded => {
+                (ProbeStageStatus::Succeeded, None, None, None, false)
+            }
+            ProbeStageCompletion::NotApplicable => {
+                (ProbeStageStatus::NotApplicable, None, None, None, false)
+            }
+            ProbeStageCompletion::Cancelled { reason } => (
+                ProbeStageStatus::Cancelled,
+                Some("cancelled".to_string()),
+                Some(reason.clone()),
+                None,
+                false,
+            ),
             ProbeStageCompletion::Failed { error_kind, error } => {
                 let current_fail: u32 = tx.query_row(
                     "SELECT failure_count FROM probe_stage_state WHERE file_id = ?1 AND context_key = ?2 AND stage = ?3",
@@ -162,7 +177,13 @@ impl Store {
                 let new_fail = current_fail + 1;
                 let delay = retry_delay_ms(new_fail);
                 let next_retry = delay.map(|d| now_ms + d);
-                (ProbeStageStatus::Failed, Some(error_kind.clone()), Some(error.clone()), next_retry, true)
+                (
+                    ProbeStageStatus::Failed,
+                    Some(error_kind.clone()),
+                    Some(error.clone()),
+                    next_retry,
+                    true,
+                )
             }
         };
 
@@ -233,32 +254,35 @@ impl Store {
              ORDER BY next_retry_at_ms ASC
              LIMIT ?2"
         )?;
-        let rows = stmt.query_map(params![now_ms, limit as i64], |row| {
-            let ledger_id: String = row.get(0)?;
-            let context_key: String = row.get(1)?;
-            let stage_str: String = row.get(2)?;
-            let stage = ProbeStage::from_str(&stage_str).unwrap_or(ProbeStage::Metadata);
-            let status_str: String = row.get(3)?;
-            let status = ProbeStageStatus::from_str(&status_str).unwrap_or(ProbeStageStatus::Failed);
-            let failure_count: u32 = row.get(4)?;
-            let next_retry_at_ms: Option<i64> = row.get(5)?;
-            let error_kind: Option<String> = row.get(6)?;
-            let error: Option<String> = row.get(7)?;
-            let active_job_id: Option<String> = row.get(8)?;
-            Ok(ProbeStageState {
-                key: ProbeStageKey {
-                    ledger_id,
-                    context_key,
-                    stage,
-                },
-                status,
-                failure_count,
-                next_retry_at_ms,
-                error_kind,
-                error,
-                active_job_id,
-            })
-        })?.collect::<Result<Vec<_>, _>>()?;
+        let rows = stmt
+            .query_map(params![now_ms, limit as i64], |row| {
+                let ledger_id: String = row.get(0)?;
+                let context_key: String = row.get(1)?;
+                let stage_str: String = row.get(2)?;
+                let stage = ProbeStage::from_str(&stage_str).unwrap_or(ProbeStage::Metadata);
+                let status_str: String = row.get(3)?;
+                let status =
+                    ProbeStageStatus::from_str(&status_str).unwrap_or(ProbeStageStatus::Failed);
+                let failure_count: u32 = row.get(4)?;
+                let next_retry_at_ms: Option<i64> = row.get(5)?;
+                let error_kind: Option<String> = row.get(6)?;
+                let error: Option<String> = row.get(7)?;
+                let active_job_id: Option<String> = row.get(8)?;
+                Ok(ProbeStageState {
+                    key: ProbeStageKey {
+                        ledger_id,
+                        context_key,
+                        stage,
+                    },
+                    status,
+                    failure_count,
+                    next_retry_at_ms,
+                    error_kind,
+                    error,
+                    active_job_id,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
@@ -317,12 +341,14 @@ pub(crate) fn claim_probe_stage_tx(
     job_id: &str,
     now_ms: i64,
 ) -> Result<bool, StoreError> {
-    let existing: Option<(String, Option<String>, Option<i64>)> = tx.query_row(
-        "SELECT status, active_job_id, next_retry_at_ms FROM probe_stage_state
+    let existing: Option<(String, Option<String>, Option<i64>)> = tx
+        .query_row(
+            "SELECT status, active_job_id, next_retry_at_ms FROM probe_stage_state
          WHERE file_id = ?1 AND context_key = ?2 AND stage = ?3",
-        params![key.ledger_id, key.context_key, key.stage.as_str()],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    ).optional()?;
+            params![key.ledger_id, key.context_key, key.stage.as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
     match existing {
         Some((status, active_job, next_retry)) => {
             if active_job.is_some() || status == "running" {
@@ -339,7 +365,13 @@ pub(crate) fn claim_probe_stage_tx(
                 "UPDATE probe_stage_state
                  SET status = 'running', active_job_id = ?4, updated_at_ms = ?5
                  WHERE file_id = ?1 AND context_key = ?2 AND stage = ?3 AND active_job_id IS NULL",
-                params![key.ledger_id, key.context_key, key.stage.as_str(), job_id, now_ms],
+                params![
+                    key.ledger_id,
+                    key.context_key,
+                    key.stage.as_str(),
+                    job_id,
+                    now_ms
+                ],
             )?;
             Ok(updated > 0)
         }

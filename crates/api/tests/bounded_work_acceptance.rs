@@ -23,7 +23,10 @@ async fn bounded_work_acceptance_full_batch_3_flow() {
     let (status, op_res) = fix
         .request(
             "GET",
-            &format!("/api/v1/libraries/{}/scan-operations/{}", fix.library_id, op_id),
+            &format!(
+                "/api/v1/libraries/{}/scan-operations/{}",
+                fix.library_id, op_id
+            ),
             Some(&fix.admin_token),
         )
         .await;

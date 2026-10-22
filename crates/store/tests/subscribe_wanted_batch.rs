@@ -78,7 +78,8 @@ fn failing_unit_rolls_back_the_earlier_units() {
 
     let rows = history(&store, id);
     assert_eq!(
-        rows[&(Some(1), Some(1))].search_attempts, 1,
+        rows[&(Some(1), Some(1))].search_attempts,
+        1,
         "the first unit's update must roll back"
     );
     assert_eq!(rows[&(Some(1), Some(1))].last_search_at, Some(100));

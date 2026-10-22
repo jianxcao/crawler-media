@@ -66,7 +66,7 @@ fn successful_download_additions_are_returned_when_another_add_fails() {
             exclude: false,
         }],
         keep_old_versions: false,
-};
+    };
     let subscribe = Subscribe {
         id: SubscribeId::new(),
         user_id: UserId::new(),

@@ -1,9 +1,9 @@
-use std::sync::Arc;
-use parking_lot::Mutex;
-use domain::{Confidence, FileCoverage, MediaId, MediaKind, QualitySource, UnitKey};
-use api::probe_manager::{ProbeManager, ProbeUnit};
 use api::Store;
-use store::test_support::{publish_fixture_file, FixtureFile};
+use api::probe_manager::{ProbeManager, ProbeUnit};
+use domain::{Confidence, FileCoverage, MediaId, MediaKind, QualitySource, UnitKey};
+use parking_lot::Mutex;
+use std::sync::Arc;
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 /// Publish one single-episode fixture file and read the coverage fact back: the
 /// `file_id` the pipeline keys on is assigned at publication.
@@ -57,12 +57,7 @@ fn season_refresh_does_not_overwrite_recapture_policy() {
         .lock()
         .set_library_root(MediaKind::Tv, tv_root.to_str().unwrap())
         .unwrap();
-    let row = publish_coverage(
-        &store.lock(),
-        media_id,
-        &tv_root.join("Test.S01E01.mkv"),
-        1,
-    );
+    let row = publish_coverage(&store.lock(), media_id, &tv_root.join("Test.S01E01.mkv"), 1);
 
     let mgr = ProbeManager::new(store.clone());
     let unit = ProbeUnit {
@@ -218,7 +213,10 @@ async fn seed_episodes_retain_markers_after_season_template_built() {
         fn capture_window(
             &self,
             request: &marker::fingerprint::capture_types::CaptureRequest,
-        ) -> Result<marker::fingerprint::capture_types::CapturedFingerprint, marker::fingerprint::capture_types::CaptureFailure> {
+        ) -> Result<
+            marker::fingerprint::capture_types::CapturedFingerprint,
+            marker::fingerprint::capture_types::CaptureFailure,
+        > {
             let dur_ms = request.window.duration_ms();
             // Generate identical fingerprint pattern so both seeds match each other
             let num_words = (dur_ms / 128).max(1) as usize;
@@ -317,22 +315,43 @@ async fn seed_episodes_retain_markers_after_season_template_built() {
     let _ = std::fs::remove_file(&ep1_path);
     let _ = std::fs::remove_file(&ep2_path);
 
-    assert!(res.is_ok(), "adaptive season pipeline should succeed: {:?}", res.err());
+    assert!(
+        res.is_ok(),
+        "adaptive season pipeline should succeed: {:?}",
+        res.err()
+    );
     let replacement = res.unwrap();
 
     // Verify both episode 1 and episode 2 markers exist and intro is populated!
     let ep1_marker = replacement.markers.iter().find(|m| m.episode == 1);
     let ep2_marker = replacement.markers.iter().find(|m| m.episode == 2);
 
-    assert!(ep1_marker.is_some(), "Episode 1 (seed) marker must not be missing!");
-    assert!(ep2_marker.is_some(), "Episode 2 (seed) marker must not be missing!");
+    assert!(
+        ep1_marker.is_some(),
+        "Episode 1 (seed) marker must not be missing!"
+    );
+    assert!(
+        ep2_marker.is_some(),
+        "Episode 2 (seed) marker must not be missing!"
+    );
 
     let ep1 = ep1_marker.unwrap();
     let ep2 = ep2_marker.unwrap();
 
-    assert!(ep1.intro_start_ms.is_some(), "Episode 1 intro start must be populated!");
-    assert!(ep1.intro_end_ms.is_some(), "Episode 1 intro end must be populated!");
-    assert!(ep2.intro_start_ms.is_some(), "Episode 2 intro start must be populated!");
-    assert!(ep2.intro_end_ms.is_some(), "Episode 2 intro end must be populated!");
+    assert!(
+        ep1.intro_start_ms.is_some(),
+        "Episode 1 intro start must be populated!"
+    );
+    assert!(
+        ep1.intro_end_ms.is_some(),
+        "Episode 1 intro end must be populated!"
+    );
+    assert!(
+        ep2.intro_start_ms.is_some(),
+        "Episode 2 intro start must be populated!"
+    );
+    assert!(
+        ep2.intro_end_ms.is_some(),
+        "Episode 2 intro end must be populated!"
+    );
 }
-

@@ -39,9 +39,10 @@ pub(crate) fn adopt_catalog_metadata(
 ) -> Result<bool, String> {
     let preferences = metadata_preferences(state);
     let locale = crate::scrape_metadata::preferred_language(state);
-    let Some(normalized) = state
-        .catalog
-        .normalized_metadata(media.kind, tmdb_id, scope, &preferences)?
+    let Some(normalized) =
+        state
+            .catalog
+            .normalized_metadata(media.kind, tmdb_id, scope, &preferences)?
     else {
         return Ok(false);
     };

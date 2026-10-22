@@ -109,7 +109,11 @@ fn write_work(
             year,
             fields.overview.value(),
             fields.release_date.value(),
-            fields.rating.value().copied().filter(|r| (0.0..=10.0).contains(r)),
+            fields
+                .rating
+                .value()
+                .copied()
+                .filter(|r| (0.0..=10.0).contains(r)),
             fields.runtime_minutes.value().map(|r| i64::from(*r)),
             fields.language.value(),
             genres,
@@ -122,10 +126,16 @@ fn write_work(
         ],
     )?;
     if let Some(title) = adopted_title {
-        tx.execute("UPDATE media SET title = ?1 WHERE media_id = ?2", params![title, media])?;
+        tx.execute(
+            "UPDATE media SET title = ?1 WHERE media_id = ?2",
+            params![title, media],
+        )?;
     }
     if let Some(year) = year {
-        tx.execute("UPDATE media SET year = ?1 WHERE media_id = ?2", params![year, media])?;
+        tx.execute(
+            "UPDATE media SET year = ?1 WHERE media_id = ?2",
+            params![year, media],
+        )?;
     }
     Ok(revision)
 }

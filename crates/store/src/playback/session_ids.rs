@@ -104,7 +104,9 @@ impl Store {
             || revision != version.revision
             || source_version != version.source_version
         {
-            return Err(StoreError::Protected(format!("playback source changed for {ledger_id}")));
+            return Err(StoreError::Protected(format!(
+                "playback source changed for {ledger_id}"
+            )));
         }
         let coverage_exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM library_file_units
@@ -113,7 +115,9 @@ impl Store {
             |r| r.get(0),
         )?;
         if !coverage_exists {
-            return Err(StoreError::Missing(format!("source does not cover {unit:?}")));
+            return Err(StoreError::Missing(format!(
+                "source does not cover {unit:?}"
+            )));
         }
         let (config_revision, lifecycle): (i64, String) = tx.query_row(
             "SELECT config_revision, lifecycle_state FROM libraries WHERE library_id = ?1",
@@ -121,7 +125,9 @@ impl Store {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         if lifecycle != "ready" {
-            return Err(StoreError::Protected(format!("library {library_id} is not ready")));
+            return Err(StoreError::Protected(format!(
+                "library {library_id} is not ready"
+            )));
         }
 
         tx.execute(

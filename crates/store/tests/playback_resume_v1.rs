@@ -9,12 +9,12 @@ use domain::{
     Confidence, FilePresence, FilePublication, FileVersion, LibraryFile, Media, MediaKind,
     PhysicalSourceId, QualitySource, TimelineMode, TypedItemId, UnitKey, UserId,
 };
+use store::Store;
 use store::library_write::probe::ProbePublication;
 use store::library_write::{
     FilePublication as StorePublication, PresenceMode, PresenceObservation, WriteScope,
 };
 use store::playback::{BoundPlaybackEvent, EventOutcome, PlaybackEventType, ResumeStatus};
-use store::Store;
 
 const USER: &str = "00000000-0000-0000-0000-000000000099";
 const MEDIA: &str = "00000000-0000-0000-0000-000000000001";
@@ -194,7 +194,11 @@ fn commit_progress(
             1_000,
         )
         .unwrap();
-    assert_eq!(outcome, EventOutcome::Applied, "an issued session applies its own event");
+    assert_eq!(
+        outcome,
+        EventOutcome::Applied,
+        "an issued session applies its own event"
+    );
 }
 
 /// `(season, episode)` of a logical item, mirroring the store's own mapping.
@@ -269,7 +273,15 @@ fn replaced_source_resets_position_and_tracks() {
     publish(&f, &file, &[UnitKey::new(1, 1)]);
     let e01 = unit(&f, 1, 1);
 
-    commit_progress(&f, &e01, &file, 900_000, 5_400_000, Some("eng"), Some("off"));
+    commit_progress(
+        &f,
+        &e01,
+        &file,
+        900_000,
+        5_400_000,
+        Some("eng"),
+        Some("off"),
+    );
     let bound = f.store.resolve_playback(user(), &e01, None, None).unwrap();
     assert_eq!(bound.status, ResumeStatus::Compatible);
     assert_eq!(bound.start_ms, 900_000);
@@ -288,10 +300,23 @@ fn replaced_source_resets_position_and_tracks() {
 
     let res = f.store.resolve_playback(user(), &e01, None, None).unwrap();
     assert_eq!(res.status, ResumeStatus::SourceChanged);
-    assert_eq!(res.start_ms, 0, "a changed source never keeps the old position");
-    assert_eq!(res.duration_ms, Some(7_200_000), "duration follows the new source");
-    assert_eq!(res.audio_track, None, "old audio selection must not be replayed");
-    assert_eq!(res.subtitle_track, None, "old subtitle selection must not be replayed");
+    assert_eq!(
+        res.start_ms, 0,
+        "a changed source never keeps the old position"
+    );
+    assert_eq!(
+        res.duration_ms,
+        Some(7_200_000),
+        "duration follows the new source"
+    );
+    assert_eq!(
+        res.audio_track, None,
+        "old audio selection must not be replayed"
+    );
+    assert_eq!(
+        res.subtitle_track, None,
+        "old subtitle selection must not be replayed"
+    );
     assert_eq!(res.target.file.file_id, file.file_id);
     assert_eq!(res.target.file.version.revision, 2);
     assert_eq!(res.target.file.version.source_version, "v2");
@@ -314,7 +339,15 @@ fn tracks_version_bump_resets_track_selection() {
     publish(&f, &file, &[UnitKey::new(1, 1)]);
     let e01 = unit(&f, 1, 1);
 
-    commit_progress(&f, &e01, &file, 300_000, 5_400_000, Some("eng"), Some("forced"));
+    commit_progress(
+        &f,
+        &e01,
+        &file,
+        300_000,
+        5_400_000,
+        Some("eng"),
+        Some("forced"),
+    );
     let bound = f.store.resolve_playback(user(), &e01, None, None).unwrap();
     assert_eq!(bound.status, ResumeStatus::Compatible);
     assert_eq!(bound.audio_track.as_deref(), Some("eng"));
@@ -342,11 +375,17 @@ fn tracks_version_bump_resets_track_selection() {
     let res = f.store.resolve_playback(user(), &e01, None, None).unwrap();
     // R13: re-probing tracks of the same bytes keeps the timeline, only tracks reset.
     assert_eq!(res.status, ResumeStatus::Compatible);
-    assert_eq!(res.start_ms, 300_000, "same-source track refresh keeps the position");
+    assert_eq!(
+        res.start_ms, 300_000,
+        "same-source track refresh keeps the position"
+    );
     assert_eq!(res.duration_ms, Some(5_400_000));
     assert_eq!(res.audio_track, None);
     assert_eq!(res.subtitle_track, None);
-    assert_eq!(res.target.file.version.revision, 1, "the file itself did not change");
+    assert_eq!(
+        res.target.file.version.revision, 1,
+        "the file itself did not change"
+    );
     assert_eq!(res.target.timeline, TimelineMode::FullFile);
 }
 

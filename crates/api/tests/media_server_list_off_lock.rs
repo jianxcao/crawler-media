@@ -12,7 +12,7 @@ use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use media_server::provider::MediaServerProvider;
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 struct NoFetch;
 impl Fetcher for NoFetch {
@@ -220,10 +220,13 @@ async fn jellyfin_metadata_gate_does_not_block_async_worker() {
     let _release = ReleaseOnDrop(gate.clone());
 
     let user_provider = api::media_server_provider::ApiServerProvider::new(state);
-    let unrelated = tokio::time::timeout(Duration::from_secs(1), user_provider.get_user(user_id)).await;
-    assert!(unrelated.is_ok(), "unrelated provider request stalled behind metadata IO");
+    let unrelated =
+        tokio::time::timeout(Duration::from_secs(1), user_provider.get_user(user_id)).await;
+    assert!(
+        unrelated.is_ok(),
+        "unrelated provider request stalled behind metadata IO"
+    );
     assert!(unrelated.unwrap().unwrap().is_some());
     gate.release();
     assert_eq!(listing.await.unwrap().unwrap().len(), 1);
 }
-

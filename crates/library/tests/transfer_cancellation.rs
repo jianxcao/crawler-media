@@ -2,7 +2,11 @@ use library::{TransferMode, WorkControl, transfer_file_controlled};
 
 #[test]
 fn cancelled_transfer_preserves_source_and_existing_destination() {
-    for mode in [TransferMode::Copy, TransferMode::Move, TransferMode::Hardlink] {
+    for mode in [
+        TransferMode::Copy,
+        TransferMode::Move,
+        TransferMode::Hardlink,
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("source.mkv");
         let destination = dir.path().join("destination.mkv");

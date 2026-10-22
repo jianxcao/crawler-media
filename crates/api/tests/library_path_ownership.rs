@@ -1,6 +1,6 @@
 use api::Store;
 use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 #[test]
 fn nested_root_wins_over_parent_library_root() {
@@ -45,7 +45,14 @@ fn root_path_is_globally_unique_across_libraries() {
     let shared = tmp.path().join("media");
     let shared_path = shared.to_str().unwrap();
     let owner = store
-        .create_library(MediaKind::Tv, "owner", &[shared_path], "everyone", true, &[])
+        .create_library(
+            MediaKind::Tv,
+            "owner",
+            &[shared_path],
+            "everyone",
+            true,
+            &[],
+        )
         .unwrap();
 
     // `library_roots.path_key TEXT NOT NULL UNIQUE`: a root belongs to exactly

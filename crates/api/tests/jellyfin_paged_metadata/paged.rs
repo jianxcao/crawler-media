@@ -91,7 +91,11 @@ async fn corrupted_heavy_facts_outside_the_page_do_not_fail_the_page() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "选中损坏行必须失败：{body}");
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "选中损坏行必须失败：{body}"
+    );
 }
 
 /// SCOPE-6-01：库作用域 + `SeriesId` 就是「列这部剧的分集」，与 `IncludeItemTypes`
@@ -199,7 +203,11 @@ async fn episode_expansion_stays_inside_the_folder() {
 
     let whole = get_json(&app, "/Items?Recursive=true&IncludeItemTypes=Episode").await;
     assert_eq!(whole["TotalRecordCount"], 2);
-    assert!(items(&whole).iter().any(|item| item["Id"] == unit_wire_id(show_media, 1, 1)));
+    assert!(
+        items(&whole)
+            .iter()
+            .any(|item| item["Id"] == unit_wire_id(show_media, 1, 1))
+    );
 
     // 剧 parent（不给 IncludeItemTypes）就是「列这部剧的分集」：一行一条，不折叠成剧。
     let by_show = get_json(
@@ -256,13 +264,31 @@ async fn latest_items_keeps_played_last_by_default_and_filters_when_asked() {
             .into_iter()
             .find(|row| row.file.path.to_string_lossy().contains("Show000"))
             .expect("Show000 row");
-        store.upsert_unit(user, row.file.media_id, -1, -1, 0, Some(true), None, None, None, None, false, 10).unwrap();
+        store
+            .upsert_unit(
+                user,
+                row.file.media_id,
+                -1,
+                -1,
+                0,
+                Some(true),
+                None,
+                None,
+                None,
+                None,
+                false,
+                10,
+            )
+            .unwrap();
         row.file.media_id
     };
     let latest = get_json(&app, "/Users/me/Items/Latest").await;
     let listed = latest.as_array().expect("latest array");
     assert_eq!(listed.len(), 3);
-    let ids: Vec<&str> = listed.iter().map(|item| item["Id"].as_str().unwrap()).collect();
+    let ids: Vec<&str> = listed
+        .iter()
+        .map(|item| item["Id"].as_str().unwrap())
+        .collect();
     let unique = {
         let mut copy = ids.clone();
         copy.sort_unstable();
@@ -364,7 +390,10 @@ async fn name_ties_keep_a_stable_order() {
                 anilist_id: None,
             };
             store.insert_media(&media).unwrap();
-            let ledger_id = LedgerId::from_uuid(uuid::Uuid::parse_str(&format!("00000000-0000-0000-0000-00000000000{}", 3 - index)).unwrap());
+            let ledger_id = LedgerId::from_uuid(
+                uuid::Uuid::parse_str(&format!("00000000-0000-0000-0000-00000000000{}", 3 - index))
+                    .unwrap(),
+            );
             let show_dir = root.join(format!("same-{index}"));
             std::fs::create_dir_all(&show_dir).unwrap();
             let path = show_dir.join("01x01.mkv");

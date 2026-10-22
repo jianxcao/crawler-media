@@ -10,7 +10,9 @@ pub(crate) mod diagnostics;
 pub(crate) mod pcm;
 pub(crate) mod timing;
 
-pub(crate) use diagnostics::{CapturedStderr, parse_benchmark, read_stderr_tail, sanitized_excerpt};
+pub(crate) use diagnostics::{
+    CapturedStderr, parse_benchmark, read_stderr_tail, sanitized_excerpt,
+};
 pub(crate) use pcm::consume_pcm;
 pub(crate) use timing::{ExtractionTimings, log_extraction_timings};
 

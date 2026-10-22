@@ -5,7 +5,9 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use domain::{Site, SiteId};
 use downloader::MemoryDownloader;
-use indexer::{Browser, BrowserConfig, FetchRequest, Fetcher, IndexerError, PageSession, ProfileSet};
+use indexer::{
+    Browser, BrowserConfig, FetchRequest, Fetcher, IndexerError, PageSession, ProfileSet,
+};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tower::ServiceExt;

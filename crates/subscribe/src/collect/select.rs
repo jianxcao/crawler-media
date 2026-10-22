@@ -11,10 +11,10 @@ use library::{MediaProbe, resolve_mode};
 use super::TransferRecorder;
 use super::recover::{quality_for, replacement_survives_probe};
 use super::transfer::{commit_video_facts, dest_path, reserve_and_publish};
+use crate::SubscribeError;
 use crate::add::Added;
 use crate::choose::covered_slots;
 use crate::facts::{QualityFact, SubscribeFacts};
-use crate::SubscribeError;
 
 pub(super) fn collect_scored_torrent<D: Downloader + ?Sized>(
     added: &mut Added<'_, D>,
@@ -169,10 +169,7 @@ fn collect_scored_torrent_inner<D: Downloader + ?Sized>(
     if vetoed && !rejected_enclosures.contains(&scored.torrent.enclosure) {
         rejected_enclosures.push(scored.torrent.enclosure.clone());
     }
-    if awaiting_probe
-        && !vetoed
-        && !awaiting_probe_enclosures.contains(&scored.torrent.enclosure)
-    {
+    if awaiting_probe && !vetoed && !awaiting_probe_enclosures.contains(&scored.torrent.enclosure) {
         awaiting_probe_enclosures.push(scored.torrent.enclosure.clone());
     }
 }

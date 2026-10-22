@@ -46,7 +46,8 @@ impl Store {
                  fetched_at = excluded.fetched_at,
                  expires_at = excluded.expires_at"
         );
-        self.cache.execute(&sql, params![cache_key, body, fetched_at, expires_at])?;
+        self.cache
+            .execute(&sql, params![cache_key, body, fetched_at, expires_at])?;
         Ok(())
     }
 

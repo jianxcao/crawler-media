@@ -2,21 +2,21 @@
 //! renderers, never hold more than 64 claimed IDs in memory, and never lose a
 //! durable obligation. The runner is a gated fake; no ffmpeg process starts.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::{Condvar, Mutex};
 
+use api::Store;
 use api::chapter_frame_service::{
-    chapter_frame_path, ChapterFrameRequest, ChapterFrameRunner, ChapterFrameService,
-    ChapterFrameStaged, DISPATCH_WINDOW, MAX_CHAPTER_PROCESSES,
+    ChapterFrameRequest, ChapterFrameRunner, ChapterFrameService, ChapterFrameStaged,
+    DISPATCH_WINDOW, MAX_CHAPTER_PROCESSES, chapter_frame_path,
 };
 use api::library_lifecycle::LibraryWorkRegistry;
-use api::Store;
 use domain::{Confidence, LedgerId, LibraryFile, Media, MediaId, MediaKind, QualitySource};
 use library::WorkControl;
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 const FILES: usize = 200;
 const TARGETS: [(i64, i64); 2] = [(0, 60_000), (60_000, 120_000)];
@@ -85,10 +85,9 @@ impl ChapterFrameRunner for FakeRunner {
         let mut staged = Vec::new();
         for index in 0..request.targets.len() {
             let target = chapter_frame_path(&request.video, index);
-            let staged_path = request.video.with_file_name(format!(
-                ".chapter-fake-{}-{index}.jpg",
-                request.file_id
-            ));
+            let staged_path = request
+                .video
+                .with_file_name(format!(".chapter-fake-{}-{index}.jpg", request.file_id));
             std::fs::write(&staged_path, b"frame").unwrap();
             staged.push(ChapterFrameStaged {
                 staged: staged_path,
@@ -258,7 +257,10 @@ impl Fixture {
 async fn chapter_batch_keeps_process_and_queue_limits() {
     // The plan pins the production numbers; asserting the constants keeps a
     // later "temporary" widening from silently passing the behavioral checks.
-    assert_eq!(MAX_CHAPTER_PROCESSES, 2, "chapter process bound must stay 2");
+    assert_eq!(
+        MAX_CHAPTER_PROCESSES, 2,
+        "chapter process bound must stay 2"
+    );
     assert_eq!(DISPATCH_WINDOW, 64, "chapter dispatch window must stay 64");
     let fixture = Fixture::new();
     assert_eq!(fixture.enqueue_all(), FILES);
@@ -282,7 +284,10 @@ async fn chapter_batch_keeps_process_and_queue_limits() {
 
 #[tokio::test]
 async fn chapter_capacity_defers_without_losing_requests() {
-    assert_eq!(MAX_CHAPTER_PROCESSES, 2, "chapter process bound must stay 2");
+    assert_eq!(
+        MAX_CHAPTER_PROCESSES, 2,
+        "chapter process bound must stay 2"
+    );
     assert_eq!(DISPATCH_WINDOW, 64, "chapter dispatch window must stay 64");
     let fixture = Fixture::new();
     assert_eq!(fixture.enqueue_all(), FILES);
@@ -331,13 +336,17 @@ async fn superseded_source_publishes_no_late_frames() {
     assert_eq!(fixture.counts().completed, FILES);
     assert_eq!(fixture.durable_total(), FILES);
     assert!(
-        !std::fs::read_dir(std::path::Path::new(&fixture.rows[0].path).parent().unwrap())
-            .unwrap()
-            .any(|entry| entry
+        !std::fs::read_dir(
+            std::path::Path::new(&fixture.rows[0].path)
+                .parent()
                 .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".chapter-fake-"))
+        )
+        .unwrap()
+        .any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".chapter-fake-"))
     );
     let _ = fixture.service.shutdown().await;
 }
@@ -382,9 +391,11 @@ async fn panicking_runner_is_acked_as_failed() {
         Arc::new(PanicRunner),
     ));
     let row = &fixture.rows[0];
-    assert!(service
-        .enqueue_ledger(&row.file_id.to_string(), TARGETS.to_vec())
-        .unwrap());
+    assert!(
+        service
+            .enqueue_ledger(&row.file_id.to_string(), TARGETS.to_vec())
+            .unwrap()
+    );
     service.start();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {

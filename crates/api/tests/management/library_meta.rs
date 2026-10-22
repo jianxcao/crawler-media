@@ -278,8 +278,11 @@ async fn episode_without_artwork_does_not_advertise_missing_fanart() {
     let app = app(&tmp);
     let tv = tmp.path().join("data/library/tv");
     std::fs::create_dir_all(&tv).unwrap();
-    std::fs::write(tv.join("Spirit.Rangers.S01E01.1080p.strm"), b"https://cdn.example/ep.mkv")
-        .unwrap();
+    std::fs::write(
+        tv.join("Spirit.Rangers.S01E01.1080p.strm"),
+        b"https://cdn.example/ep.mkv",
+    )
+    .unwrap();
     let libs = json_body(
         app.clone()
             .oneshot(request(

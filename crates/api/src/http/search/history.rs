@@ -159,10 +159,7 @@ pub(super) fn save_titles_history(
 }
 
 /// 单条删除的事务计划：历史里没有这个 id 就返回 `None`（不删快照、不改设置）。
-fn single_delete_plan(
-    current: Option<&str>,
-    id: &str,
-) -> Option<crate::store::HistoryDeletePlan> {
+fn single_delete_plan(current: Option<&str>, id: &str) -> Option<crate::store::HistoryDeletePlan> {
     let mut history = parse_history(current);
     let before = history.len();
     history.retain(|item| item["id"].as_str() != Some(id));

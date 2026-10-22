@@ -131,7 +131,9 @@ fn checked_publication_rejects_file_only_deletion_and_keeps_previous_result() {
         "new"
     );
     assert_eq!(
-        store.get_cached_chapters(&row.file_id.expect("fixture file id").to_string()).unwrap(),
+        store
+            .get_cached_chapters(&row.file_id.expect("fixture file id").to_string())
+            .unwrap(),
         Some(vec![])
     );
 }
@@ -367,7 +369,9 @@ fn job_scoped_publication_publishes_rows_the_job_covers() {
         Some(expected_chapters_a)
     );
     assert_eq!(
-        store.get_cached_chapters(&row_b.file_id.expect("fixture file id").to_string()).unwrap(),
+        store
+            .get_cached_chapters(&row_b.file_id.expect("fixture file id").to_string())
+            .unwrap(),
         None
     );
 }
@@ -533,10 +537,9 @@ fn independent_store_handles_cannot_reinsert_samples_while_ledger_is_deleted() {
             loop {
                 match deleting.delete_ledger_path(&row.path) {
                     Ok(()) => break,
-                    Err(store::StoreError::Sqlite(rusqlite::Error::SqliteFailure(
-                        failure,
-                        _,
-                    ))) if failure.code == rusqlite::ErrorCode::DatabaseBusy && attempts < 1000 => {
+                    Err(store::StoreError::Sqlite(rusqlite::Error::SqliteFailure(failure, _)))
+                        if failure.code == rusqlite::ErrorCode::DatabaseBusy && attempts < 1000 =>
+                    {
                         attempts += 1;
                         std::thread::yield_now();
                     }

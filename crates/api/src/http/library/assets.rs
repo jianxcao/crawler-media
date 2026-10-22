@@ -5,7 +5,10 @@ use super::library_for_file;
 use crate::store::{Library, LibraryRemoval};
 
 /// Files whose recorded path falls under any root of the library.
-pub(crate) fn files_in_library(store: &crate::Store, library: &Library) -> Vec<domain::LibraryFile> {
+pub(crate) fn files_in_library(
+    store: &crate::Store,
+    library: &Library,
+) -> Vec<domain::LibraryFile> {
     coverages_in_library(store, library)
         .into_iter()
         .map(|coverage| coverage.file)
@@ -25,7 +28,8 @@ pub(crate) fn coverages_in_library(
             let Some(media) = store.get_media(coverage.file.media_id).ok().flatten() else {
                 return false;
             };
-            library_for_file(store, &coverage.file, &media).is_some_and(|owner| owner.id == library.id)
+            library_for_file(store, &coverage.file, &media)
+                .is_some_and(|owner| owner.id == library.id)
         })
         .collect()
 }
@@ -51,9 +55,10 @@ pub(crate) struct LibraryFacts {
 pub(crate) fn library_facts(store: &crate::Store, library: &Library) -> LibraryFacts {
     let cover = CoverInput {
         disabled: matches!(library.cover_path.as_deref(), Some("none") | Some("")),
-        explicit: library.cover_path.as_deref().and_then(|path| {
-            (!path.is_empty() && path != "none").then(|| PathBuf::from(path))
-        }),
+        explicit: library
+            .cover_path
+            .as_deref()
+            .and_then(|path| (!path.is_empty() && path != "none").then(|| PathBuf::from(path))),
     };
     LibraryFacts {
         library: library.clone(),
@@ -64,8 +69,14 @@ pub(crate) fn library_facts(store: &crate::Store, library: &Library) -> LibraryF
 
 /// Explicit configured covers only; fixed legacy cover names are not storage facts.
 fn cover_path_from_input(cover: &CoverInput) -> Option<PathBuf> {
-    if cover.disabled { return None; }
-    cover.explicit.as_ref().filter(|path| path.is_file()).cloned()
+    if cover.disabled {
+        return None;
+    }
+    cover
+        .explicit
+        .as_ref()
+        .filter(|path| path.is_file())
+        .cloned()
 }
 
 /// 锁外：在 owned 事实之上做文件观察并渲染响应 JSON。
@@ -120,9 +131,15 @@ pub(crate) fn library_json_from_facts(
 
 /// 同步版本：库配置的写路径仍在锁内直接渲染（不在本次改动范围内），统计用
 /// [`crate::library_statistics::statistics_for`] 的同一套口径同步算一次，不构建。
-pub(crate) fn library_json(store: &crate::Store, library: &Library) -> Result<Value, store::StoreError> {
+pub(crate) fn library_json(
+    store: &crate::Store,
+    library: &Library,
+) -> Result<Value, store::StoreError> {
     let stats = crate::library_statistics::statistics_for(store, library)?;
-    Ok(library_json_from_facts(&library_facts(store, library), Some(stats)))
+    Ok(library_json_from_facts(
+        &library_facts(store, library),
+        Some(stats),
+    ))
 }
 
 /// Emby-style current cover source: latest TV episode wins; movies use their

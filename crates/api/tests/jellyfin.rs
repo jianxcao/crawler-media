@@ -210,7 +210,10 @@ impl api::playback_events::PlaybackClock for FakeClock {
     }
 }
 
-fn app_with_clock(root: &Path, clock: Arc<dyn api::playback_events::PlaybackClock>) -> (axum::Router, MediaId, String) {
+fn app_with_clock(
+    root: &Path,
+    clock: Arc<dyn api::playback_events::PlaybackClock>,
+) -> (axum::Router, MediaId, String) {
     let store = Store::open(root.join("data")).unwrap();
     seed_movie_root(&store, root);
     let media = Media {

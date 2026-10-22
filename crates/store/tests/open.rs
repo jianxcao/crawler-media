@@ -7,7 +7,10 @@ fn open_creates_four_sqlite_files() {
     for name in ["app.db", "cache.db", "library.db", "subscribe.db"] {
         assert!(tmp.path().join(name).is_file(), "{name} should exist");
     }
-    assert!(!tmp.path().join("catalog.db").exists(), "catalog.db should not exist");
+    assert!(
+        !tmp.path().join("catalog.db").exists(),
+        "catalog.db should not exist"
+    );
     let versions = store.schema_versions();
     assert_eq!(
         versions.iter().find(|(n, _)| *n == "app").unwrap().1,

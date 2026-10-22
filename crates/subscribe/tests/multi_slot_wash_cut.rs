@@ -230,27 +230,30 @@ fn wash_cut_does_not_delete_merged_file_still_referenced_by_other_slots() {
     mock_probed_file(&e1_src);
     let dl = downloader::MemoryDownloader::new(tmp.path().join("stage"));
     dl.map_enclosure_files(&e1.enclosure, vec![e1_src]);
-    let outcome = subscribe::run_with_probe(RunInput {
-        subscribe: &sub,
-        media: &media,
-        filter: &filter,
-        wash_filter: None,
-        torrents: vec![e1],
-        search_keywords: vec![],
-        facts,
-        downloader: &dl,
-        library_root: &tmp.path().join("lib"),
-        library_id: Some(domain::LibraryId::new()),
-        root_id: Some("test-root".into()),
-        config_revision: None,
-        transfer_mode: Some(TransferMode::Copy),
-        scrape: false,
-        hooks: None,
-        naming: None,
-        preserve_removed: false,
-        overlap: Default::default(),
-        absolute: None,
-    }, &Probed1080)
+    let outcome = subscribe::run_with_probe(
+        RunInput {
+            subscribe: &sub,
+            media: &media,
+            filter: &filter,
+            wash_filter: None,
+            torrents: vec![e1],
+            search_keywords: vec![],
+            facts,
+            downloader: &dl,
+            library_root: &tmp.path().join("lib"),
+            library_id: Some(domain::LibraryId::new()),
+            root_id: Some("test-root".into()),
+            config_revision: None,
+            transfer_mode: Some(TransferMode::Copy),
+            scrape: false,
+            hooks: None,
+            naming: None,
+            preserve_removed: false,
+            overlap: Default::default(),
+            absolute: None,
+        },
+        &Probed1080,
+    )
     .unwrap();
     assert!(
         merged.exists(),

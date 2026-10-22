@@ -136,7 +136,10 @@ async fn watch_intake_partial_success_records_non_conflicting_files() {
     tick(&app, 1).await;
 
     // 冲突文件不能覆盖已有文件
-    assert_eq!(std::fs::read(&conflict_dest).unwrap(), b"existing-inception");
+    assert_eq!(
+        std::fs::read(&conflict_dest).unwrap(),
+        b"existing-inception"
+    );
 
     // 正常文件成功进入 ledger
     let listed = app
@@ -161,8 +164,16 @@ async fn watch_intake_transfers_nested_tv_show_subdirectories() {
     let intake = tmp.path().join("intake");
     let show_dir = intake.join("法医秦明之龙番往事");
     std::fs::create_dir_all(&show_dir).unwrap();
-    std::fs::write(show_dir.join("法医秦明之龙番往事.S01E01.1080p.mkv"), b"tv-data-ep1").unwrap();
-    std::fs::write(show_dir.join("法医秦明之龙番往事.S01E02.1080p.mkv"), b"tv-data-ep2").unwrap();
+    std::fs::write(
+        show_dir.join("法医秦明之龙番往事.S01E01.1080p.mkv"),
+        b"tv-data-ep1",
+    )
+    .unwrap();
+    std::fs::write(
+        show_dir.join("法医秦明之龙番往事.S01E02.1080p.mkv"),
+        b"tv-data-ep2",
+    )
+    .unwrap();
 
     let app = app(&tmp);
     put_intake(&app, &tmp, &intake).await;

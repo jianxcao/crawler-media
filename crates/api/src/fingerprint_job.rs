@@ -20,7 +20,10 @@ pub use adaptive::{
     AdaptiveCaptureContext, CaptureGate, CapturePolicy, EpisodeCaptureRequest, EpisodeDetection,
     capture_episode_adaptive,
 };
-pub use cache::{FingerprintCaptureOutcome, capture_or_reuse_fingerprints, current_source_version, observe_source};
+pub use cache::{
+    FingerprintCaptureOutcome, capture_or_reuse_fingerprints, current_source_version,
+    observe_source,
+};
 pub use cache_key::{
     FingerprintCaptureProfile, analysis_policy_key, capture_profile_key, fingerprint_cache_key,
     media_source_version,

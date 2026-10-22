@@ -8,8 +8,8 @@
 //! 只用公开协议 JSON + 这份 seam，不依赖实现内部类型。
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use api::browse_file_read::BrowseFileRead;
 use api::{ApiState, Store, router};
@@ -128,7 +128,13 @@ fn new_media(store: &Store, title: &str) -> MediaId {
     media.id
 }
 
-fn insert_episode(store: &Store, dir: &Path, media: MediaId, season: u32, episode: u32) -> LedgerId {
+fn insert_episode(
+    store: &Store,
+    dir: &Path,
+    media: MediaId,
+    season: u32,
+    episode: u32,
+) -> LedgerId {
     let path = dir.join(format!("{season:02}x{episode:02}.mkv"));
     std::fs::write(&path, b"episode").unwrap();
     let spec = store::test_support::FixtureFile {
@@ -154,11 +160,7 @@ fn tv_fixture(shows: usize, episodes: usize) -> Fixture {
 ///
 /// NFO 观测只在发布时采集（Task 8），`publish_fixture_file` 之后写下的 sidecar 到不了库内快照，
 /// 因此断言页内 genre/studio 的 fixture 必须先把 NFO 放好。
-fn tv_fixture_seeded(
-    shows: usize,
-    episodes: usize,
-    seed: impl Fn(&Path),
-) -> Fixture {
+fn tv_fixture_seeded(shows: usize, episodes: usize, seed: impl Fn(&Path)) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let files = Arc::new(CountingFiles::default());
     let state = new_state(dir.path(), files.clone());
@@ -246,7 +248,11 @@ fn series_wire_id_for_title(state: &ApiState, title: &str) -> String {
 fn folder_id(root: &Path) -> String {
     format!(
         "folder_{}",
-        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, root.to_string_lossy().as_bytes()).simple()
+        uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            root.to_string_lossy().as_bytes()
+        )
+        .simple()
     )
 }
 
@@ -443,12 +449,11 @@ async fn nfo_only_remote_thumb_keeps_the_page_primary_image() {
     );
 }
 
+#[path = "jellyfin_paged_metadata/audit.rs"]
+mod audit;
+#[path = "jellyfin_paged_metadata/next_up.rs"]
+mod next_up;
 #[path = "jellyfin_paged_metadata/paged.rs"]
 mod paged;
 #[path = "jellyfin_paged_metadata/scope.rs"]
 mod scope;
-#[path = "jellyfin_paged_metadata/next_up.rs"]
-mod next_up;
-#[path = "jellyfin_paged_metadata/audit.rs"]
-mod audit;
-

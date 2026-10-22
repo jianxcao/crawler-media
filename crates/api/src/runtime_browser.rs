@@ -77,7 +77,9 @@ impl BrowserSettings {
             if let Some(install) = obs.get("install").and_then(Value::as_str) {
                 let inst = install.trim();
                 if inst != "preinstalled" && inst != "download" {
-                    return Err(invalid("obscura.install must be 'preinstalled' or 'download'"));
+                    return Err(invalid(
+                        "obscura.install must be 'preinstalled' or 'download'",
+                    ));
                 }
                 self.obscura_install = inst.to_string();
             }
@@ -148,7 +150,11 @@ impl BrowserSettings {
                     managed_browser_sites += 1;
                 }
             }
-            let has_cdp = s.cdp_url.as_deref().map(|u| !u.trim().is_empty()).unwrap_or(false);
+            let has_cdp = s
+                .cdp_url
+                .as_deref()
+                .map(|u| !u.trim().is_empty())
+                .unwrap_or(false);
             if (!self.cdp_enabled || s.maintenance_via == domain::MaintenanceVia::Http) && has_cdp {
                 ignored_site_endpoints += 1;
             }
@@ -261,7 +267,13 @@ pub fn configure(
 /// returned Browser still reads settings on every use, so fixing them in the
 /// UI takes effect without a restart.
 pub fn startup_browser(store: Arc<Mutex<Store>>) -> (Browser, Option<String>) {
-    if store.lock().get_setting("cdp.sync.enabled").ok().flatten().is_some() {
+    if store
+        .lock()
+        .get_setting("cdp.sync.enabled")
+        .ok()
+        .flatten()
+        .is_some()
+    {
         tracing::warn!(
             "Legacy setting cdp.sync.enabled is ignored; enable the Browser switch in settings \
              and choose maintenance_via=browser per Site if needed"

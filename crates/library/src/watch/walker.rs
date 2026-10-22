@@ -148,7 +148,8 @@ impl ScanWalker {
                 }
 
                 let reached_chunk = files.len() >= budget.chunk_files;
-                let reached_entry_or_time = visited >= budget.max_entries || start.elapsed() >= budget.max_elapsed;
+                let reached_entry_or_time =
+                    visited >= budget.max_entries || start.elapsed() >= budget.max_elapsed;
                 if reached_chunk || reached_entry_or_time {
                     return Ok(ScanChunk {
                         files,

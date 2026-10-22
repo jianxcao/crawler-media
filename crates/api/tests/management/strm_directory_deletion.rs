@@ -1,7 +1,7 @@
 use api::fs_watcher::StrmGraceTracker;
 use notify_debouncer_mini::DebouncedEvent;
 use std::sync::Arc;
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 struct EmptyFetcher;
 
@@ -95,16 +95,18 @@ async fn test_directory_deletion_removes_nested_strm_and_cleans_up_media() {
         "整目录缺失后，strm 记录应保留但被标记缺失"
     );
     assert!(
-        state.store().lock().missing_at_by_path().unwrap().contains_key(&strm_file.display().to_string()),
+        state
+            .store()
+            .lock()
+            .missing_at_by_path()
+            .unwrap()
+            .contains_key(&strm_file.display().to_string()),
         "文件应被标记缺失"
     );
 
     // 5. 验证 media 记录以及用户事实被保留
     let remaining_media = state.store().lock().get_media(media.id).unwrap();
-    assert!(
-        remaining_media.is_some(),
-        "文件缺失不应删除 Media 用户事实"
-    );
+    assert!(remaining_media.is_some(), "文件缺失不应删除 Media 用户事实");
     // 6. 模拟从回收站还原该目录（重新创建目录与 strm 文件）
     std::fs::create_dir_all(&movie_dir).unwrap();
     std::fs::write(&strm_file, "https://example.com/video.mkv").unwrap();
@@ -385,8 +387,22 @@ async fn deleting_one_episode_keeps_sibling_ledger_rows() {
         rows[0].file.path.to_string_lossy().into_owned(),
         episode_one.display().to_string()
     );
-    assert!(state.store().lock().missing_at_by_path().unwrap().contains_key(&episode_two.display().to_string()));
-    assert!(!state.store().lock().missing_at_by_path().unwrap().contains_key(&episode_one.display().to_string()));
+    assert!(
+        state
+            .store()
+            .lock()
+            .missing_at_by_path()
+            .unwrap()
+            .contains_key(&episode_two.display().to_string())
+    );
+    assert!(
+        !state
+            .store()
+            .lock()
+            .missing_at_by_path()
+            .unwrap()
+            .contains_key(&episode_one.display().to_string())
+    );
     assert!(state.store().lock().get_media(media.id).unwrap().is_some());
 }
 
@@ -410,7 +426,12 @@ async fn restoring_one_episode_within_grace_keeps_its_probe_caches() {
         .expect("宽限期内台账应保留");
     let coverage_file_id = coverage.file.file_id;
     assert_eq!(coverage_file_id, fixture.ledger_id);
-    assert!(during_grace.get_file_meta(&coverage_file_id.to_string()).unwrap().is_some());
+    assert!(
+        during_grace
+            .get_file_meta(&coverage_file_id.to_string())
+            .unwrap()
+            .is_some()
+    );
     assert!(
         during_grace
             .get_fingerprint_cache(&coverage_file_id.to_string())
@@ -666,7 +687,9 @@ fn episode_fixture() -> EpisodeFixture {
     state
         .store()
         .lock()
-        .upsert_unit(user_id, media_id, 1, 2, 12_000, None, None, None, None, None, false, 1)
+        .upsert_unit(
+            user_id, media_id, 1, 2, 12_000, None, None, None, None, None, false, 1,
+        )
         .unwrap();
     std::mem::forget(temp);
     EpisodeFixture {

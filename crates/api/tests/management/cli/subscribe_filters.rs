@@ -1,9 +1,9 @@
+use super::transport;
+use crate::common::*;
 use api::cli::{Command, Transport, run};
 use axum::http::StatusCode;
 use serde_json::json;
 use tower::ServiceExt;
-use super::transport;
-use crate::common::*;
 
 #[tokio::test]
 async fn cli_subscribe_prints_subscribe_id() {
@@ -193,4 +193,3 @@ async fn cli_filters_add_prints_name_and_lists() {
     assert!(listed.contains("uhd"), "{listed}");
     assert!(listed.contains("atoms=1"), "{listed}");
 }
-

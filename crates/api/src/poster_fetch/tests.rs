@@ -1,6 +1,6 @@
 use super::*;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 struct PosterCatalog;
 impl crate::catalog::Catalog for PosterCatalog {
@@ -85,11 +85,21 @@ fn failed_poster_download_does_not_frame_a_vanished_video() {
 
 struct NoCatalog;
 impl crate::catalog::Catalog for NoCatalog {
-    fn search_movie(&self, _: &str) -> Result<Vec<media::CatalogHit>, String> { Ok(Vec::new()) }
-    fn search_tv(&self, _: &str) -> Result<Vec<media::CatalogHit>, String> { Ok(Vec::new()) }
-    fn popular_movie(&self) -> Result<Vec<media::CatalogHit>, String> { Ok(Vec::new()) }
-    fn popular_tv(&self) -> Result<Vec<media::CatalogHit>, String> { Ok(Vec::new()) }
-    fn details(&self, _: domain::MediaKind, _: &str) -> Result<Option<domain::Media>, String> { Ok(None) }
+    fn search_movie(&self, _: &str) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn search_tv(&self, _: &str) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn popular_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn popular_tv(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn details(&self, _: domain::MediaKind, _: &str) -> Result<Option<domain::Media>, String> {
+        Ok(None)
+    }
 }
 
 fn test_state(tmp: &std::path::Path) -> ApiState {
@@ -140,10 +150,16 @@ fn frame_after_source_vanishes_returns_skipped() {
     let video = tmp.path().join("Movie.mp4");
     std::fs::write(&video, b"video-data").unwrap();
     let v_clone = video.clone();
-    let outcome = attach_poster_with(&test_state(tmp.path()), &test_media(), &video, true, move |_| {
-        let _ = std::fs::remove_file(&v_clone);
-        Ok(b"fake-frame-bytes".to_vec())
-    });
+    let outcome = attach_poster_with(
+        &test_state(tmp.path()),
+        &test_media(),
+        &video,
+        true,
+        move |_| {
+            let _ = std::fs::remove_file(&v_clone);
+            Ok(b"fake-frame-bytes".to_vec())
+        },
+    );
     assert_eq!(outcome, ArtworkOutcome::Skipped);
     assert!(!tmp.path().join("poster.jpg").exists());
 }
@@ -154,14 +170,18 @@ fn frame_after_cancelled_publication_returns_failed() {
     let root = tmp.path().join("homevideos");
     std::fs::create_dir_all(&root).unwrap();
     let state = test_state(tmp.path());
-    let library = state.store().lock().create_library(
-        domain::MediaKind::Movie,
-        "Movies",
-        &[root.to_str().unwrap()],
-        "everyone",
-        true,
-        &[],
-    ).unwrap();
+    let library = state
+        .store()
+        .lock()
+        .create_library(
+            domain::MediaKind::Movie,
+            "Movies",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
     let video = root.join("Movie.mp4");
     std::fs::write(&video, b"video-data").unwrap();
     let media = test_media();
@@ -175,7 +195,10 @@ fn frame_after_cancelled_publication_returns_failed() {
         state_ref.library_work().cancel(&library_id);
         Ok(b"fake-frame-bytes".to_vec())
     });
-    assert!(called.load(std::sync::atomic::Ordering::SeqCst), "frame 闭包必须被执行");
+    assert!(
+        called.load(std::sync::atomic::Ordering::SeqCst),
+        "frame 闭包必须被执行"
+    );
     assert_eq!(outcome, ArtworkOutcome::Failed);
     assert!(!target.exists(), "已取消的工作不得写入海报目标文件");
 }
@@ -186,19 +209,36 @@ fn library_lease_publish_after_cancelled_control_returns_err() {
     let root = tmp.path().join("homevideos");
     std::fs::create_dir_all(&root).unwrap();
     let state = test_state(tmp.path());
-    let _ = state.store().lock().create_library(
-        domain::MediaKind::Movie,
-        "Movies",
-        &[root.to_str().unwrap()],
-        "everyone",
-        true,
-        &[],
-    ).unwrap();
+    let _ = state
+        .store()
+        .lock()
+        .create_library(
+            domain::MediaKind::Movie,
+            "Movies",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
     let video = root.join("Movie.mp4");
     std::fs::write(&video, b"video-data").unwrap();
     let media = test_media();
-    let lease = state.acquire_path_work(&video, domain::MediaKind::Movie).unwrap().unwrap();
+    let lease = state
+        .acquire_path_work(&video, domain::MediaKind::Movie)
+        .unwrap()
+        .unwrap();
     lease.control().cancel();
-    let outcome = lease.publish(|| Ok(write_artwork(&media, &root.join("poster.jpg"), "海报", b"fake-frame-bytes")));
-    assert!(outcome.is_err(), "底层租约取消后 lease.publish 必须返回 Err");
+    let outcome = lease.publish(|| {
+        Ok(write_artwork(
+            &media,
+            &root.join("poster.jpg"),
+            "海报",
+            b"fake-frame-bytes",
+        ))
+    });
+    assert!(
+        outcome.is_err(),
+        "底层租约取消后 lease.publish 必须返回 Err"
+    );
 }

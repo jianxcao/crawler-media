@@ -6,11 +6,11 @@ use marker::fingerprint::{
 };
 use marker::{CommonSegment, FingerprintEngine};
 use parking_lot::Mutex;
-use store::test_support::{publish_fixture_file, FixtureFile};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 struct FixtureEngine {
     case: &'static str,
@@ -225,7 +225,12 @@ fn full_samples_from_nonseeds_discover_the_common_intro() {
         .units
         .iter()
         .map(|unit| {
-            let ep = unit.row.units.first().map(|u| u.episode as u32).unwrap_or(1);
+            let ep = unit
+                .row
+                .units
+                .first()
+                .map(|u| u.episode as u32)
+                .unwrap_or(1);
             let tag = intro_tag("blind-seeds", ep);
             (unit.row.clone(), (tag..tag + 200).collect())
         })
@@ -368,7 +373,12 @@ fn another_common_variant_is_discovered_after_full_fallbacks() {
         .units
         .iter()
         .map(|unit| {
-            let ep = unit.row.units.first().map(|u| u.episode as u32).unwrap_or(1);
+            let ep = unit
+                .row
+                .units
+                .first()
+                .map(|u| u.episode as u32)
+                .unwrap_or(1);
             let tag = intro_tag("other-variant", ep);
             (unit.row.clone(), (tag..tag + 200).collect())
         })
@@ -460,12 +470,18 @@ fn seed_probe(store: &Store, row: &domain::FileCoverage, duration_ms: Option<i64
         details: Some(&details),
     };
     assert!(
-        store.publish_probe_result(row.file.file_id, &publication, 0).unwrap(),
+        store
+            .publish_probe_result(row.file.file_id, &publication, 0)
+            .unwrap(),
         "probe publication must be accepted for a freshly published row"
     );
 }
 
-fn seed_store(store: &Arc<Mutex<Store>>, media_id: MediaId, rows: &[FixtureFile]) -> Vec<domain::FileCoverage> {
+fn seed_store(
+    store: &Arc<Mutex<Store>>,
+    media_id: MediaId,
+    rows: &[FixtureFile],
+) -> Vec<domain::FileCoverage> {
     let st = store.lock();
     let mut config = st.get_scrape_config().unwrap().setting;
     config.fingerprint_sampling_mode = Some("adaptive".into());
@@ -511,7 +527,10 @@ fn seed_store(store: &Arc<Mutex<Store>>, media_id: MediaId, rows: &[FixtureFile]
         .unwrap();
         coverages.push(coverage);
     }
-    let keys: Vec<_> = coverages.iter().map(|c| c.file.file_id.to_string()).collect();
+    let keys: Vec<_> = coverages
+        .iter()
+        .map(|c| c.file.file_id.to_string())
+        .collect();
     let specs: Vec<_> = keys
         .iter()
         .map(|key| api::store::ProbeJobUnitSpec {

@@ -164,7 +164,8 @@ pub(crate) async fn delete_user(
                 Ok(Some(_)) => {}
                 Ok(None) => match removal::finished_removal_of(&store, id) {
                     Ok(Some(done)) => {
-                        return (StatusCode::ACCEPTED, ok(removal::status_dto(&done))).into_response();
+                        return (StatusCode::ACCEPTED, ok(removal::status_dto(&done)))
+                            .into_response();
                     }
                     Ok(None) => return err(StatusCode::NOT_FOUND, "user.missing", "用户不存在"),
                     Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &e),
@@ -172,7 +173,11 @@ pub(crate) async fn delete_user(
                 Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &e),
             },
             Err(error) => {
-                return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error.to_string());
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                );
             }
         }
     }
@@ -198,7 +203,11 @@ pub(crate) async fn removal_status(
     let found = crate::user_removal::find_removal(&state.store.lock(), &operation_id);
     match found {
         Ok(Some(record)) => ok(crate::user_removal::status_dto(&record)).into_response(),
-        Ok(None) => err(StatusCode::NOT_FOUND, "user_removal.missing", "删除操作不存在"),
+        Ok(None) => err(
+            StatusCode::NOT_FOUND,
+            "user_removal.missing",
+            "删除操作不存在",
+        ),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &e),
     }
 }

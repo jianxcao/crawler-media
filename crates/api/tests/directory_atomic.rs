@@ -115,7 +115,10 @@ async fn directory_scrape_config_failure_keeps_roots_mode_and_watch() {
 
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let store = state.store();
-    assert_eq!(store.lock().library_root(MediaKind::Movie).unwrap(), old_movie);
+    assert_eq!(
+        store.lock().library_root(MediaKind::Movie).unwrap(),
+        old_movie
+    );
     assert_eq!(store.lock().library_root(MediaKind::Tv).unwrap(), old_tv);
     assert_eq!(store.lock().transfer_mode().unwrap(), "hardlink");
     assert_eq!(store.lock().watch_intake().unwrap(), None);

@@ -4,7 +4,7 @@
 mod support;
 
 use domain::{LedgerId, MediaId, UserId};
-use store::{PlaybackLogScope, PlayLogRow, SessionRow, Store};
+use store::{PlayLogRow, PlaybackLogScope, SessionRow, Store};
 
 /// 没有公开 insert_log：用 issue_play_session 绑定 + upsert_session + close_session
 /// 造一条 playback_logs。
@@ -46,7 +46,10 @@ fn log_fixture(
             last_event_sequence: None,
         })
         .unwrap();
-    store.close_session(user, device, started + 1).unwrap().unwrap()
+    store
+        .close_session(user, device, started + 1)
+        .unwrap()
+        .unwrap()
 }
 
 fn expected_order(mut rows: Vec<PlayLogRow>) -> Vec<PlayLogRow> {
@@ -82,11 +85,7 @@ fn page_all(store: &Store, scope: &PlaybackLogScope, limit: usize) -> Vec<PlayLo
     out
 }
 
-fn scope(
-    user: UserId,
-    visible: Option<Vec<MediaId>>,
-    since: Option<i64>,
-) -> PlaybackLogScope {
+fn scope(user: UserId, visible: Option<Vec<MediaId>>, since: Option<i64>) -> PlaybackLogScope {
     PlaybackLogScope {
         before: None,
         before_id: None,
@@ -108,8 +107,24 @@ fn composite_cursor_pages_visible_rows_without_gaps_or_duplicates() {
     let mut created = Vec::new();
     // 三组：每组一条可见、一条不可见，且组内 started_at 完全相同。
     for (index, started) in [base + 100, base + 50, base].into_iter().enumerate() {
-        created.push(log_fixture(&store, user, visible, file, &format!("v{index}"), started, 10));
-        created.push(log_fixture(&store, user, hidden, file, &format!("h{index}"), started, 10));
+        created.push(log_fixture(
+            &store,
+            user,
+            visible,
+            file,
+            &format!("v{index}"),
+            started,
+            10,
+        ));
+        created.push(log_fixture(
+            &store,
+            user,
+            hidden,
+            file,
+            &format!("h{index}"),
+            started,
+            10,
+        ));
     }
     let expected = expected_order(
         created
@@ -129,7 +144,10 @@ fn composite_cursor_pages_visible_rows_without_gaps_or_duplicates() {
     let first = store.playback_log_page(&scoped, 2).unwrap();
     assert_eq!(first.entries.len(), 2);
     assert!(first.has_more);
-    assert_eq!(first.hidden_count, 3, "hidden rows must count for the same scope");
+    assert_eq!(
+        first.hidden_count, 3,
+        "hidden rows must count for the same scope"
+    );
 }
 
 #[test]
@@ -186,7 +204,9 @@ fn none_visible_scope_is_unrestricted() {
     log_fixture(&store, user, first, file, "a", base, 10);
     log_fixture(&store, user, second, file, "b", base - 10, 10);
 
-    let page = store.playback_log_page(&scope(user, None, None), 10).unwrap();
+    let page = store
+        .playback_log_page(&scope(user, None, None), 10)
+        .unwrap();
     assert_eq!(page.entries.len(), 2);
     assert!(!page.has_more);
     assert_eq!(page.hidden_count, 0, "unrestricted scope hides nothing");

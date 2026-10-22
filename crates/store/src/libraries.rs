@@ -154,7 +154,10 @@ impl Store {
         Ok(LibraryOwnership::from_parts(libraries, blocked))
     }
     /// Determine authorized libraries for a user according to their role and library access settings.
-    pub fn authorized_library_ids(&self, user_id: domain::UserId) -> Result<HashSet<String>, StoreError> {
+    pub fn authorized_library_ids(
+        &self,
+        user_id: domain::UserId,
+    ) -> Result<HashSet<String>, StoreError> {
         let user_id_str = user_id.to_string();
         let role = self.user_role(user_id)?;
         let is_admin = role == "admin";
@@ -211,7 +214,10 @@ impl Store {
              ORDER BY sort_order, display_path",
         )?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, PathBuf::from(row.get::<_, String>(1)?)))
+            Ok((
+                row.get::<_, String>(0)?,
+                PathBuf::from(row.get::<_, String>(1)?),
+            ))
         })?;
         let mut roots: HashMap<String, Vec<PathBuf>> = HashMap::new();
         for row in rows {
@@ -412,8 +418,12 @@ impl Store {
             .optional()?
             .is_some();
         let is_default = if has_default { 0 } else { 1 };
-        let member_ids_json =
-            serde_json::to_string(&member_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>())?;
+        let member_ids_json = serde_json::to_string(
+            &member_ids
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>(),
+        )?;
         let match_rules_json = serde_json::to_string(match_rules)?;
         // The library row and its roots commit together: a rejected root must
         // not leave behind a Library the caller never successfully created.
@@ -672,7 +682,8 @@ impl Store {
         _kind: MediaKind,
         root_paths: &[&str],
     ) -> Result<(), StoreError> {
-        let mut stmt = conn.prepare("SELECT root_id, display_path FROM library_roots WHERE library_id = ?1")?;
+        let mut stmt =
+            conn.prepare("SELECT root_id, display_path FROM library_roots WHERE library_id = ?1")?;
         let existing = stmt
             .query_map(params![library_id], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -703,7 +714,10 @@ impl Store {
         }
         for (root_id, path) in existing {
             if !root_paths.iter().any(|p| p.trim() == path) {
-                conn.execute("DELETE FROM library_roots WHERE root_id = ?1", params![root_id])?;
+                conn.execute(
+                    "DELETE FROM library_roots WHERE root_id = ?1",
+                    params![root_id],
+                )?;
             }
         }
         Ok(())

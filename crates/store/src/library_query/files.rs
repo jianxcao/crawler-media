@@ -16,8 +16,8 @@ const FILE_CURSOR_ORDER: &str = "file_id_asc";
 
 use rusqlite::params;
 
-use super::types::FilePage;
 use super::super::{Store, StoreError};
+use super::types::FilePage;
 
 impl Store {
     pub fn library_file_page(
@@ -38,7 +38,10 @@ impl Store {
             Some(raw) => {
                 let cursor: FileCursor = serde_json::from_str(raw)
                     .map_err(|_| StoreError::Invalid("malformed file cursor".into()))?;
-                if cursor.library_id != library_id || cursor.media_id != media_id || cursor.order != FILE_CURSOR_ORDER {
+                if cursor.library_id != library_id
+                    || cursor.media_id != media_id
+                    || cursor.order != FILE_CURSOR_ORDER
+                {
                     return Err(StoreError::Invalid("file cursor scope mismatch".into()));
                 }
                 Some(cursor.after_file_id.to_string())
@@ -59,7 +62,12 @@ impl Store {
                  ORDER BY file_id ASC
                  LIMIT ?4"
                     .into(),
-                vec![lib_id_str.into(), media_id_str.into(), cursor.into(), (probe as i64).into()],
+                vec![
+                    lib_id_str.into(),
+                    media_id_str.into(),
+                    cursor.into(),
+                    (probe as i64).into(),
+                ],
             ),
             None => (
                 "SELECT file_id, library_id, root_id, media_id, kind, path_key, display_path,
@@ -74,7 +82,11 @@ impl Store {
                  ORDER BY file_id ASC
                  LIMIT ?3"
                     .into(),
-                vec![lib_id_str.into(), media_id_str.into(), (probe as i64).into()],
+                vec![
+                    lib_id_str.into(),
+                    media_id_str.into(),
+                    (probe as i64).into(),
+                ],
             ),
         };
 
@@ -170,12 +182,18 @@ impl Store {
         let has_more = files.len() > limit;
         files.truncate(limit);
         let next_cursor = if has_more {
-            files.last().map(|file| serde_json::to_string(&FileCursor {
-                library_id,
-                media_id,
-                order: FILE_CURSOR_ORDER.to_string(),
-                after_file_id: file.file_id,
-            })).transpose().map_err(|error| StoreError::Invalid(error.to_string()))?
+            files
+                .last()
+                .map(|file| {
+                    serde_json::to_string(&FileCursor {
+                        library_id,
+                        media_id,
+                        order: FILE_CURSOR_ORDER.to_string(),
+                        after_file_id: file.file_id,
+                    })
+                })
+                .transpose()
+                .map_err(|error| StoreError::Invalid(error.to_string()))?
         } else {
             None
         };

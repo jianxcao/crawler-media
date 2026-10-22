@@ -6,10 +6,8 @@ use crate::management::ApiState;
 pub(crate) mod finish_search;
 use finish_search::finish_search;
 mod search;
-pub(crate) use search::{
-    report_site_failures, search_torrents_for_subscribe,
-};
 pub use search::{page_is_full_and_irrelevant, search_keywords_for};
+pub(crate) use search::{report_site_failures, search_torrents_for_subscribe};
 pub(crate) mod transfer;
 pub use transfer::transfer_one;
 

@@ -4,15 +4,15 @@ pub mod capture;
 pub mod types;
 
 use marker::adaptive::{
-    plan_episode_window, EpisodeDescriptor, EpisodeEvidence, SegmentKind, VerificationOutcome,
-    VerifiedInterval, WindowDecision,
+    EpisodeDescriptor, EpisodeEvidence, SegmentKind, VerificationOutcome, VerifiedInterval,
+    WindowDecision, plan_episode_window,
 };
 use marker::fingerprint::capture_types::SampleWindow;
 
+use crate::fingerprint_job::episode_or_one;
 pub use analysis::analyze_and_verify_segment;
 pub use cache::{find_reusable_sample, stored_sample_to_evidence};
 pub use capture::capture_or_reuse_segment_sample;
-use crate::fingerprint_job::episode_or_one;
 pub use types::{
     AdaptiveCaptureContext, CaptureGate, CapturePolicy, EpisodeCaptureRequest, EpisodeDetection,
 };
@@ -20,7 +20,9 @@ pub use types::{
 pub struct NoopGate;
 
 impl CaptureGate for NoopGate {
-    fn wait_before_capture(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+    fn wait_before_capture(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         Box::pin(async {})
     }
 }
@@ -96,9 +98,22 @@ async fn process_segment(
 
     match decision {
         WindowDecision::Full { window, .. } => {
-            let ev = capture_with_retries(ctx, request, kind, &window, "full_window", attempts, max_budget)
-                .await?;
-            let outcome = analyze_and_verify_segment(ctx.matcher.as_ref(), request, &ev, ctx.timings.as_ref());
+            let ev = capture_with_retries(
+                ctx,
+                request,
+                kind,
+                &window,
+                "full_window",
+                attempts,
+                max_budget,
+            )
+            .await?;
+            let outcome = analyze_and_verify_segment(
+                ctx.matcher.as_ref(),
+                request,
+                &ev,
+                ctx.timings.as_ref(),
+            );
             let verified = match outcome {
                 VerificationOutcome::Verified(v) => Some(v),
                 VerificationOutcome::NeedsFullWindow { ref reason } => {
@@ -127,20 +142,50 @@ async fn process_segment(
         WindowDecision::Verify { window, .. } => {
             // First try verification window (up to max_budget - 1 attempts, reserving at least 1 for fallback)
             let verify_budget = max_budget.saturating_sub(1).max(1);
-            let verify_ev = match capture_with_retries(ctx, request, kind, &window, "fast_verify", attempts, verify_budget).await {
+            let verify_ev = match capture_with_retries(
+                ctx,
+                request,
+                kind,
+                &window,
+                "fast_verify",
+                attempts,
+                verify_budget,
+            )
+            .await
+            {
                 Ok(ev) => ev,
                 Err(err) => {
                     if err.starts_with("file_deleted") {
                         return Err(err);
                     }
                     tracing::warn!(error = %err, "fast verify capture failed, trying full window fallback");
-                    let fallback_win = full_window_for_kind(descriptor.duration_ms, request.policy.full_window_duration_secs, kind);
-                    let fb_ev = capture_with_retries(ctx, request, kind, &fallback_win, "fallback_full_window", attempts, max_budget).await?;
-                    let outcome = analyze_and_verify_segment(ctx.matcher.as_ref(), request, &fb_ev, ctx.timings.as_ref());
+                    let fallback_win = full_window_for_kind(
+                        descriptor.duration_ms,
+                        request.policy.full_window_duration_secs,
+                        kind,
+                    );
+                    let fb_ev = capture_with_retries(
+                        ctx,
+                        request,
+                        kind,
+                        &fallback_win,
+                        "fallback_full_window",
+                        attempts,
+                        max_budget,
+                    )
+                    .await?;
+                    let outcome = analyze_and_verify_segment(
+                        ctx.matcher.as_ref(),
+                        request,
+                        &fb_ev,
+                        ctx.timings.as_ref(),
+                    );
                     let verified = match outcome {
                         VerificationOutcome::Verified(v) => Some(v),
                         VerificationOutcome::NeedsFullWindow { reason } => {
-                            return Err(format!("Fallback full window verification failed: {reason}"));
+                            return Err(format!(
+                                "Fallback full window verification failed: {reason}"
+                            ));
                         }
                         VerificationOutcome::NoMatch { ref reason } => {
                             if !has_models_for_kind {
@@ -158,18 +203,43 @@ async fn process_segment(
                 }
             };
 
-            let outcome = analyze_and_verify_segment(ctx.matcher.as_ref(), request, &verify_ev, ctx.timings.as_ref());
+            let outcome = analyze_and_verify_segment(
+                ctx.matcher.as_ref(),
+                request,
+                &verify_ev,
+                ctx.timings.as_ref(),
+            );
             match outcome {
                 VerificationOutcome::Verified(v) => Ok((Some(verify_ev), Some(v))),
                 VerificationOutcome::NeedsFullWindow { reason } => {
                     tracing::info!(reason = %reason, "verification requested full window fallback");
-                    let fallback_win = full_window_for_kind(descriptor.duration_ms, request.policy.full_window_duration_secs, kind);
-                    let fb_ev = capture_with_retries(ctx, request, kind, &fallback_win, "fallback_full_window", attempts, max_budget).await?;
-                    let outcome2 = analyze_and_verify_segment(ctx.matcher.as_ref(), request, &fb_ev, ctx.timings.as_ref());
+                    let fallback_win = full_window_for_kind(
+                        descriptor.duration_ms,
+                        request.policy.full_window_duration_secs,
+                        kind,
+                    );
+                    let fb_ev = capture_with_retries(
+                        ctx,
+                        request,
+                        kind,
+                        &fallback_win,
+                        "fallback_full_window",
+                        attempts,
+                        max_budget,
+                    )
+                    .await?;
+                    let outcome2 = analyze_and_verify_segment(
+                        ctx.matcher.as_ref(),
+                        request,
+                        &fb_ev,
+                        ctx.timings.as_ref(),
+                    );
                     let verified2 = match outcome2 {
                         VerificationOutcome::Verified(v) => Some(v),
                         VerificationOutcome::NeedsFullWindow { reason } => {
-                            return Err(format!("Fallback full window verification failed: {reason}"));
+                            return Err(format!(
+                                "Fallback full window verification failed: {reason}"
+                            ));
                         }
                         VerificationOutcome::NoMatch { ref reason } => {
                             if !has_models_for_kind {
@@ -188,13 +258,33 @@ async fn process_segment(
                 VerificationOutcome::NoMatch { ref reason } => {
                     // Fast window 无匹配时，尝试全量窗口回退
                     tracing::info!(reason = %reason, "fast verification returned no match, trying full window fallback");
-                    let fallback_win = full_window_for_kind(descriptor.duration_ms, request.policy.full_window_duration_secs, kind);
-                    let fb_ev = capture_with_retries(ctx, request, kind, &fallback_win, "fallback_full_window", attempts, max_budget).await?;
-                    let outcome2 = analyze_and_verify_segment(ctx.matcher.as_ref(), request, &fb_ev, ctx.timings.as_ref());
+                    let fallback_win = full_window_for_kind(
+                        descriptor.duration_ms,
+                        request.policy.full_window_duration_secs,
+                        kind,
+                    );
+                    let fb_ev = capture_with_retries(
+                        ctx,
+                        request,
+                        kind,
+                        &fallback_win,
+                        "fallback_full_window",
+                        attempts,
+                        max_budget,
+                    )
+                    .await?;
+                    let outcome2 = analyze_and_verify_segment(
+                        ctx.matcher.as_ref(),
+                        request,
+                        &fb_ev,
+                        ctx.timings.as_ref(),
+                    );
                     let verified2 = match outcome2 {
                         VerificationOutcome::Verified(v) => Some(v),
                         VerificationOutcome::NeedsFullWindow { reason } => {
-                            return Err(format!("Fallback full window verification failed: {reason}"));
+                            return Err(format!(
+                                "Fallback full window verification failed: {reason}"
+                            ));
                         }
                         VerificationOutcome::NoMatch { ref reason } => {
                             if !has_models_for_kind {
@@ -234,13 +324,7 @@ async fn capture_with_retries(
     while *attempts < max_budget && step_attempts < max_step_retries {
         step_attempts += 1;
         match capture_or_reuse_segment_sample(
-            ctx,
-            request,
-            kind,
-            window,
-            phase,
-            attempts,
-            max_budget,
+            ctx, request, kind, window, phase, attempts, max_budget,
         )
         .await
         {

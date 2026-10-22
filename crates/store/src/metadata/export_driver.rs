@@ -564,7 +564,10 @@ fn merge_overrides(target: &mut MetadataFields, diff: &MetadataFields) {
 
 /// Refuse to replace a sidecar that changed since the export snapshot, or one that is
 /// not a readable NFO: its bytes stay exactly as found (R17).
-fn ensure_sidecar_replaceable(plan: &NfoExportRequest, disk: Option<&str>) -> Result<(), StoreError> {
+fn ensure_sidecar_replaceable(
+    plan: &NfoExportRequest,
+    disk: Option<&str>,
+) -> Result<(), StoreError> {
     if disk != plan.expected_digest.as_deref() {
         return Err(StoreError::Conflict(format!(
             "nfo export {} refused: {} changed since the export snapshot",

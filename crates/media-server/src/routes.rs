@@ -1,6 +1,6 @@
+use axum::Router;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
-use axum::Router;
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
@@ -91,11 +91,29 @@ pub struct ItemsQuery {
     pub is_folder: Option<bool>,
     #[serde(default, rename = "SearchTerm", alias = "searchTerm")]
     pub search_term: Option<String>,
-    #[serde(default, rename = "Genres", alias = "genres", alias = "Genre", alias = "genre")]
+    #[serde(
+        default,
+        rename = "Genres",
+        alias = "genres",
+        alias = "Genre",
+        alias = "genre"
+    )]
     pub genres: Option<String>,
-    #[serde(default, rename = "GenreIds", alias = "genreIds", alias = "GenreId", alias = "genreId")]
+    #[serde(
+        default,
+        rename = "GenreIds",
+        alias = "genreIds",
+        alias = "GenreId",
+        alias = "genreId"
+    )]
     pub genre_ids: Option<String>,
-    #[serde(default, rename = "StudioIds", alias = "studioIds", alias = "Studios", alias = "studios")]
+    #[serde(
+        default,
+        rename = "StudioIds",
+        alias = "studioIds",
+        alias = "Studios",
+        alias = "studios"
+    )]
     pub studio_ids: Option<String>,
 }
 #[derive(Deserialize)]

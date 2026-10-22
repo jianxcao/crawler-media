@@ -12,7 +12,10 @@ use crate::management::ApiState;
 pub fn evaluate_subscribe_facts_out_of_lock(
     snapshot: &SubscribeLibrarySnapshot,
 ) -> Result<SubscribeFacts, StoreError> {
-    evaluate_subscribe_facts_out_of_lock_with(snapshot, &crate::browse_file_read::LocalBrowseFileRead)
+    evaluate_subscribe_facts_out_of_lock_with(
+        snapshot,
+        &crate::browse_file_read::LocalBrowseFileRead,
+    )
 }
 
 /// Evaluate SubscribeFacts out-of-lock using an owned DB snapshot and a file existence seam.
@@ -122,7 +125,11 @@ fn merge_snapshot_rows(
         // 一个物理文件可覆盖多个 unit；legacy 拿到的是逐 unit 的 join 行，这里逐 unit 保值。
         // 读 shape 下每个文件至少一个 unit（LEFT JOIN 缺失行读作 `UnitKey::WHOLE`），空 units 兜底同样按整片算。
         let whole = [UnitKey::WHOLE];
-        let units: &[UnitKey] = if row.units.is_empty() { &whole } else { &row.units };
+        let units: &[UnitKey] = if row.units.is_empty() {
+            &whole
+        } else {
+            &row.units
+        };
         for unit in units {
             let (season, episode) = match unit.episode_coordinates() {
                 Some((season, episode)) => (Some(season), Some(episode)),
@@ -150,7 +157,11 @@ fn merge_snapshot_rows(
         if let Some(quality_res) = snapshot.qualities.get(&row.file.file_id) {
             match quality_res {
                 Ok(quality) => facts.set_quality(path.clone(), quality.clone()),
-                Err(e) => return Err(StoreError::Invalid(format!("corrupt persisted quality: {e}"))),
+                Err(e) => {
+                    return Err(StoreError::Invalid(format!(
+                        "corrupt persisted quality: {e}"
+                    )));
+                }
             }
         }
     }

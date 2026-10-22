@@ -202,7 +202,8 @@ async fn read_failure_never_becomes_a_silently_empty_page() {
     let db = fixture.dir.path().join("data/library.db");
     fixture.files.fail_store_on_first_io(Box::new(move || {
         let conn = rusqlite::Connection::open(&db).expect("open library db");
-        conn.execute_batch("DROP TABLE file_details").expect("drop file_details");
+        conn.execute_batch("DROP TABLE file_details")
+            .expect("drop file_details");
     }));
     let (status, listing) = get(
         &app,
@@ -224,12 +225,17 @@ async fn read_failure_never_becomes_a_silently_empty_page() {
     let failing = {
         let store = heavy_fixture.state.store();
         let store = store.lock();
-        store.list_file_coverage().unwrap().into_iter().next().expect("row").file.file_id
+        store
+            .list_file_coverage()
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("row")
+            .file
+            .file_id
     };
-    let conn = rusqlite::Connection::open(
-        heavy_fixture.dir.path().join("data/library.db"),
-    )
-    .unwrap();
+    let conn =
+        rusqlite::Connection::open(heavy_fixture.dir.path().join("data/library.db")).unwrap();
     conn.execute(
         "INSERT INTO file_details
              (file_id, source_revision, source_version, tracks_version,
@@ -292,9 +298,16 @@ async fn jellyfin_selection_records_candidate_and_heavy_counts() {
     .await;
     let scans = fixture.state.store().lock().root_ledger_scans();
     assert_eq!(scoped["TotalRecordCount"], 10);
-    assert_eq!(scans, 0, "cross-thread series selection must not root-scan ledger: {scans}");
+    assert_eq!(
+        scans, 0,
+        "cross-thread series selection must not root-scan ledger: {scans}"
+    );
     assert_eq!(candidates.load(Ordering::SeqCst) - before, 10);
-    assert_eq!(heavy.load(Ordering::SeqCst), 2, "第二次请求仍然只 enrich 本页");
+    assert_eq!(
+        heavy.load(Ordering::SeqCst),
+        2,
+        "第二次请求仍然只 enrich 本页"
+    );
 }
 
 /// A3-06-01：播放单元解码失败发生在台账读完之后，已读行仍要计入候选。
@@ -390,9 +403,15 @@ async fn invisible_series_classification_keeps_its_ledger_read() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["TotalRecordCount"], 0, "admin_visible=false 的剧不得列出：{body}");
+    assert_eq!(
+        body["TotalRecordCount"], 0,
+        "admin_visible=false 的剧不得列出：{body}"
+    );
     let reads = fixture.state.store().lock().media_ledger_reads();
-    assert_eq!(reads, 1, "分类已经读过这部剧，显式目标不得再读一遍，实际 {reads}");
+    assert_eq!(
+        reads, 1,
+        "分类已经读过这部剧，显式目标不得再读一遍，实际 {reads}"
+    );
     assert_eq!(
         candidates.load(Ordering::SeqCst),
         2,
@@ -400,4 +419,3 @@ async fn invisible_series_classification_keeps_its_ledger_read() {
         candidates.load(Ordering::SeqCst)
     );
 }
-

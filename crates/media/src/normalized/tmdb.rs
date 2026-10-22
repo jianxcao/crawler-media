@@ -1,13 +1,13 @@
-use std::collections::BTreeMap;
 use domain::{
     EntityScope, FieldValue, MetadataCast, MetadataFields, MetadataGenre, MetadataPreferences,
     SourceFieldOrigin, SourceSelection,
 };
 use serde_json::Value;
+use std::collections::BTreeMap;
 
-use crate::client::TmdbError;
 use super::generic::{extract_direct_string, set_field};
 use super::selection::parse_locale;
+use crate::client::TmdbError;
 
 pub fn normalize_tmdb(
     json: &Value,
@@ -43,17 +43,26 @@ pub fn normalize_tmdb(
     extract_numbers(json, fields, origins);
 
     // Translations fallback for overview & tagline
-    if let Some(trans_arr) = json.pointer("/translations/translations").and_then(Value::as_array) {
+    if let Some(trans_arr) = json
+        .pointer("/translations/translations")
+        .and_then(Value::as_array)
+    {
         check_translations(trans_arr, preferences, fields, origins);
     }
 
     // Content rating / Certification
     match scope {
         EntityScope::Work => {
-            if let Some(rd_arr) = json.pointer("/release_dates/results").and_then(Value::as_array) {
+            if let Some(rd_arr) = json
+                .pointer("/release_dates/results")
+                .and_then(Value::as_array)
+            {
                 check_movie_certifications(rd_arr, preferences, fields, origins);
             }
-            if let Some(cr_arr) = json.pointer("/content_ratings/results").and_then(Value::as_array) {
+            if let Some(cr_arr) = json
+                .pointer("/content_ratings/results")
+                .and_then(Value::as_array)
+            {
                 check_tv_content_ratings(cr_arr, preferences, fields, origins);
             }
         }
@@ -80,12 +89,15 @@ fn extract_numbers(
     if let Some(val) = json.get("runtime") {
         if let Some(n) = val.as_u64() {
             fields.runtime_minutes = FieldValue::Value(n as u32);
-            origins.insert("runtime_minutes".into(), SourceFieldOrigin {
-                selection: SourceSelection::Direct,
-                response_pointer: "/runtime".into(),
-                actual_locale: None,
-                certification_country: None,
-            });
+            origins.insert(
+                "runtime_minutes".into(),
+                SourceFieldOrigin {
+                    selection: SourceSelection::Direct,
+                    response_pointer: "/runtime".into(),
+                    actual_locale: None,
+                    certification_country: None,
+                },
+            );
         } else if val.is_null() {
             fields.runtime_minutes = FieldValue::Empty;
         }
@@ -93,23 +105,29 @@ fn extract_numbers(
     if let Some(val) = json.get("vote_average") {
         if let Some(n) = val.as_f64() {
             fields.rating = FieldValue::Value(n);
-            origins.insert("rating".into(), SourceFieldOrigin {
-                selection: SourceSelection::Direct,
-                response_pointer: "/vote_average".into(),
-                actual_locale: None,
-                certification_country: None,
-            });
+            origins.insert(
+                "rating".into(),
+                SourceFieldOrigin {
+                    selection: SourceSelection::Direct,
+                    response_pointer: "/vote_average".into(),
+                    actual_locale: None,
+                    certification_country: None,
+                },
+            );
         }
     }
     if let Some(val) = json.get("vote_count") {
         if let Some(n) = val.as_u64() {
             fields.vote_count = FieldValue::Value(n);
-            origins.insert("vote_count".into(), SourceFieldOrigin {
-                selection: SourceSelection::Direct,
-                response_pointer: "/vote_count".into(),
-                actual_locale: None,
-                certification_country: None,
-            });
+            origins.insert(
+                "vote_count".into(),
+                SourceFieldOrigin {
+                    selection: SourceSelection::Direct,
+                    response_pointer: "/vote_count".into(),
+                    actual_locale: None,
+                    certification_country: None,
+                },
+            );
         }
     }
 }
@@ -124,8 +142,14 @@ fn extract_genres(
             let mut list = Vec::new();
             for g in arr {
                 let id = g.get("id").and_then(|v| v.as_i64()).map(|n| n.to_string());
-                let name = g.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
-                let filter_key = id.clone().unwrap_or_else(|| format!("name:{}", name.to_lowercase()));
+                let name = g
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let filter_key = id
+                    .clone()
+                    .unwrap_or_else(|| format!("name:{}", name.to_lowercase()));
                 list.push(MetadataGenre {
                     source: "tmdb".into(),
                     source_id: id,
@@ -166,7 +190,11 @@ fn extract_countries_and_studios(
     if let Some(arr) = json.get("production_countries").and_then(Value::as_array) {
         let countries: Vec<String> = arr
             .iter()
-            .filter_map(|c| c.get("iso_3166_1").and_then(Value::as_str).map(ToString::to_string))
+            .filter_map(|c| {
+                c.get("iso_3166_1")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
             .collect();
         fields.countries = FieldValue::Value(countries);
         origins.insert(
@@ -182,7 +210,11 @@ fn extract_countries_and_studios(
     if let Some(arr) = json.get("production_companies").and_then(Value::as_array) {
         let studios: Vec<String> = arr
             .iter()
-            .filter_map(|c| c.get("name").and_then(Value::as_str).map(ToString::to_string))
+            .filter_map(|c| {
+                c.get("name")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
             .collect();
         fields.studios = FieldValue::Value(studios);
         origins.insert(
@@ -202,14 +234,27 @@ fn extract_credits(
     fields: &mut MetadataFields,
     origins: &mut BTreeMap<String, SourceFieldOrigin>,
 ) {
-    let cast_arr = json.pointer("/credits/cast").and_then(Value::as_array).or_else(|| json.get("cast").and_then(Value::as_array));
+    let cast_arr = json
+        .pointer("/credits/cast")
+        .and_then(Value::as_array)
+        .or_else(|| json.get("cast").and_then(Value::as_array));
     if let Some(arr) = cast_arr {
         let mut cast = Vec::new();
         for c in arr {
-            let name = c.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
-            let role = c.get("character").and_then(Value::as_str).map(ToString::to_string);
+            let name = c
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let role = c
+                .get("character")
+                .and_then(Value::as_str)
+                .map(ToString::to_string);
             let tmdb_id = c.get("id").and_then(|v| v.as_i64()).map(|n| n.to_string());
-            let thumb = c.get("profile_path").and_then(Value::as_str).map(ToString::to_string);
+            let thumb = c
+                .get("profile_path")
+                .and_then(Value::as_str)
+                .map(ToString::to_string);
             let order = c.get("order").and_then(|v| v.as_u64()).map(|n| n as u32);
             cast.push(MetadataCast {
                 name,
@@ -242,7 +287,10 @@ fn check_translations(
         let (req_lang, req_country) = parse_locale(pref_lang);
 
         for (idx, tr) in translations.iter().enumerate() {
-            let iso_lang = tr.get("iso_639_1").and_then(Value::as_str).unwrap_or_default();
+            let iso_lang = tr
+                .get("iso_639_1")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let iso_country = tr.get("iso_3166_1").and_then(Value::as_str);
 
             let lang_matches = iso_lang.eq_ignore_ascii_case(req_lang);
@@ -265,7 +313,9 @@ fn check_translations(
                             "overview".into(),
                             SourceFieldOrigin {
                                 selection: SourceSelection::Translation,
-                                response_pointer: format!("/translations/translations/{idx}/data/overview"),
+                                response_pointer: format!(
+                                    "/translations/translations/{idx}/data/overview"
+                                ),
                                 actual_locale: actual_locale.clone(),
                                 certification_country: None,
                             },
@@ -283,7 +333,9 @@ fn check_translations(
                             "tagline".into(),
                             SourceFieldOrigin {
                                 selection: SourceSelection::Empty,
-                                response_pointer: format!("/translations/translations/{idx}/data/tagline"),
+                                response_pointer: format!(
+                                    "/translations/translations/{idx}/data/tagline"
+                                ),
                                 actual_locale,
                                 certification_country: None,
                             },
@@ -294,7 +346,9 @@ fn check_translations(
                             "tagline".into(),
                             SourceFieldOrigin {
                                 selection: SourceSelection::Translation,
-                                response_pointer: format!("/translations/translations/{idx}/data/tagline"),
+                                response_pointer: format!(
+                                    "/translations/translations/{idx}/data/tagline"
+                                ),
                                 actual_locale,
                                 certification_country: None,
                             },
@@ -317,7 +371,10 @@ fn check_movie_certifications(
 ) {
     for pref_country in &preferences.cert_country_priority {
         for (res_idx, r) in results.iter().enumerate() {
-            let country = r.get("iso_3166_1").and_then(Value::as_str).unwrap_or_default();
+            let country = r
+                .get("iso_3166_1")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             if country.eq_ignore_ascii_case(pref_country) {
                 if let Some(dates) = r.get("release_dates").and_then(Value::as_array) {
                     for (date_idx, d) in dates.iter().enumerate() {
@@ -353,7 +410,10 @@ fn check_tv_content_ratings(
 ) {
     for pref_country in &preferences.cert_country_priority {
         for (idx, r) in results.iter().enumerate() {
-            let country = r.get("iso_3166_1").and_then(Value::as_str).unwrap_or_default();
+            let country = r
+                .get("iso_3166_1")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             if country.eq_ignore_ascii_case(pref_country) {
                 if let Some(rating) = r.get("rating").and_then(Value::as_str) {
                     if !rating.is_empty() {

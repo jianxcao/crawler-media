@@ -7,8 +7,8 @@ use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::json;
 use std::{collections::HashMap, sync::Arc};
+use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
-use store::test_support::{publish_fixture_file, FixtureFile};
 
 #[tokio::test]
 async fn frozen_library_rejects_organize_reidentify_and_sidecar_refresh() {

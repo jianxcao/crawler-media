@@ -1,6 +1,5 @@
 use rusqlite::{Connection, OptionalExtension, params};
 
-
 use super::super::{Store, StoreError};
 use super::types::EffectiveMetadata;
 use domain::{MediaId, MetadataAdoption};

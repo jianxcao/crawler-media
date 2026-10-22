@@ -7,9 +7,9 @@ use domain::{FileVersion, LedgerId};
 use library::SourceObservation;
 use rusqlite::{OptionalExtension, params};
 
+use super::WriteScope;
 use super::publish::{ensure_config_revision, ensure_library_writable, ensure_media_writable};
 use super::reduce::reduce_library_media;
-use super::WriteScope;
 use crate::{Store, StoreError};
 
 impl Store {
@@ -108,7 +108,10 @@ impl Store {
             )?;
             super::publish::enqueue_probe(&tx, file_id, now_ms)?;
             tx.commit()?;
-            return Ok(FileVersion { revision: new_revision, source_version: new_source_version });
+            return Ok(FileVersion {
+                revision: new_revision,
+                source_version: new_source_version,
+            });
         }
 
         // Invalidate old probe, cold details, tracks, and hot probed quality

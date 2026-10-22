@@ -22,13 +22,15 @@ pub(crate) async fn cached_chapters(
     let store = state.store.lock();
     let file_id = match query.file_id.replace('-', "").parse::<domain::LedgerId>() {
         Ok(id) => id,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "playback.invalid", "无效的 file_id"),
+        Err(_) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "playback.invalid",
+                "无效的 file_id",
+            );
+        }
     };
-    let Some(cov) = store
-        .file_coverage_by_id(file_id)
-        .ok()
-        .flatten()
-    else {
+    let Some(cov) = store.file_coverage_by_id(file_id).ok().flatten() else {
         return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
     };
     let Some(media) = store.get_media(cov.file.media_id).ok().flatten() else {

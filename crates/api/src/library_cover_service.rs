@@ -352,7 +352,10 @@ pub fn remove_library_cover_files(covers_dir: &Path, library_id: &str) -> usize 
 pub fn purge_removed_library_covers(state: &ApiState) {
     let (covers_dir, removals) = {
         let store = state.store.lock();
-        (store.library_covers_dir(), store.succeeded_library_removals())
+        (
+            store.library_covers_dir(),
+            store.succeeded_library_removals(),
+        )
     };
     let removals = match removals {
         Ok(removals) => removals,

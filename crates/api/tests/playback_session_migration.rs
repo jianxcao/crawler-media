@@ -1,5 +1,5 @@
 use std::str::FromStr;
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 #[path = "support/mod.rs"]
 mod support;

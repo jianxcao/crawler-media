@@ -12,20 +12,20 @@ use crate::http::{err, ok, ok_list};
 use crate::management::ApiState;
 use crate::scrape_store::ScrapeStoreExt;
 
-pub(crate) mod scope;
 pub(crate) mod operations;
 pub(crate) mod report;
 pub(crate) mod runner;
+pub(crate) mod scope;
 pub(crate) mod video;
-pub(crate) use runner::scan_library_leased_resumable;
-#[cfg(test)]
-pub(crate) use runner::checkpoint_fresh;
-use scope::{ScanScope, walk_video_files};
 use super::library::{
-    browse_filter_from_query, browse_order_from_query, browse_store_error, missing_library,
-    preferred_coverage, require_visible_library, coverages_in_library,
+    browse_filter_from_query, browse_order_from_query, browse_store_error, coverages_in_library,
+    missing_library, preferred_coverage, require_visible_library,
 };
 use crate::store::library_query;
+#[cfg(test)]
+pub(crate) use runner::checkpoint_fresh;
+pub(crate) use runner::scan_library_leased_resumable;
+use scope::{ScanScope, walk_video_files};
 
 /// POST /libraries/{id}/scan — walk every root of the library and ledger
 /// high-confidence video files in place.
@@ -34,21 +34,19 @@ pub(crate) async fn scan_library(
     Path(id): Path<String>,
 ) -> Response {
     match state.scan_coordinator.enqueue(&state, &id, vec![]) {
-        Ok(op) => {
-            (
-                StatusCode::ACCEPTED,
-                axum::Json(serde_json::json!({
-                    "ok": true,
-                    "data": {
-                        "operation_id": op.id,
-                        "status": op.status.as_str(),
-                        "queued": true,
-                        "transferred": false,
-                    }
-                })),
-            )
-                .into_response()
-        }
+        Ok(op) => (
+            StatusCode::ACCEPTED,
+            axum::Json(serde_json::json!({
+                "ok": true,
+                "data": {
+                    "operation_id": op.id,
+                    "status": op.status.as_str(),
+                    "queued": true,
+                    "transferred": false,
+                }
+            })),
+        )
+            .into_response(),
         Err(crate::scan_operations::ScanEnqueueError::NotFound(e)) => {
             err(StatusCode::NOT_FOUND, "library.missing", &e)
         }
@@ -151,7 +149,9 @@ pub(crate) fn scan_library_subdir(
 
     let inserted = lease.publish(|| {
         let store = state.store.lock();
-        scan_scope.validate(&store).map_err(|e| format!("{:?}", e))?;
+        scan_scope
+            .validate(&store)
+            .map_err(|e| format!("{:?}", e))?;
         crate::watch_ledger::record_paths(&store, filtered_transferred.clone())
     })?;
 
@@ -201,10 +201,14 @@ fn scan_video_subdir(
     let mut files = Vec::new();
     walk_video_files(target_dir, &mut files);
     let scan_scope = ScanScope::capture(state, library_id).map_err(|e| format!("{:?}", e))?;
-    let filtered_files = scan_scope.filter_paths(files).map_err(|e| format!("{:?}", e))?;
+    let filtered_files = scan_scope
+        .filter_paths(files)
+        .map_err(|e| format!("{:?}", e))?;
     let inserted = lease.publish(|| {
         let store = state.store.lock();
-        scan_scope.validate(&store).map_err(|e| format!("{:?}", e))?;
+        scan_scope
+            .validate(&store)
+            .map_err(|e| format!("{:?}", e))?;
         crate::watch_ledger::record_video_paths(&store, filtered_files)
     })?;
     tracing::info!(root = %root.display(), target_dir = %target_dir.display(),
@@ -285,7 +289,6 @@ fn resolve_and_scrape_subdir(
     Ok(())
 }
 
-
 /// POST /libraries/{id}/metadata/refresh — one cover per Media owned under the
 /// library, using the newest owned episode for TV; also writes rich NFO from
 /// TMDB details and episode stills for owned TV episodes.
@@ -319,9 +322,7 @@ pub(crate) async fn refresh_metadata(
         };
         let live_coverages: Vec<_> = media_coverages
             .iter()
-            .filter(|coverage| {
-                crate::scrape_metadata::targets::video_present(&coverage.file.path)
-            })
+            .filter(|coverage| crate::scrape_metadata::targets::video_present(&coverage.file.path))
             .collect();
         if let Some(coverage) = preferred_coverage(&live_coverages) {
             work.push((media, (*coverage).clone()));
@@ -330,8 +331,18 @@ pub(crate) async fn refresh_metadata(
     drop(store);
     let mut refreshed = 0u32;
     for (media, coverage) in work {
-        if lease.control().is_cancelled() || !state.store.lock().library_accepts_work(&id).unwrap_or(false) {
-            return err(StatusCode::CONFLICT, "library.deleting", "Library 正在删除或已冻结");
+        if lease.control().is_cancelled()
+            || !state
+                .store
+                .lock()
+                .library_accepts_work(&id)
+                .unwrap_or(false)
+        {
+            return err(
+                StatusCode::CONFLICT,
+                "library.deleting",
+                "Library 正在删除或已冻结",
+            );
         }
         let path = coverage.file.path.clone();
         if crate::poster_fetch::attach_poster(&state, &media, &path).is_some() {
@@ -385,7 +396,12 @@ fn scrape_library_metadata(
                 return;
             }
             let nfo = crate::scrape_metadata::nfo_from_tmdb(media, &metadata);
-            crate::scrape_metadata::adopt_tmdb_metadata(state, media, tmdb_id, domain::EntityScope::Work);
+            crate::scrape_metadata::adopt_tmdb_metadata(
+                state,
+                media,
+                tmdb_id,
+                domain::EntityScope::Work,
+            );
             crate::scrape_metadata::record_scraped_display_meta(state, media.id, &metadata, &nfo);
             if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
                 let target = path.with_file_name(format!("{stem}.nfo"));

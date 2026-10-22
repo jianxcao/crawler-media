@@ -18,7 +18,8 @@ fn season_body(path: &Path, meta: &NfoMeta) -> io::Result<String> {
         }
     }
 
-    let mut body = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<season>\n");
+    let mut body =
+        String::from("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<season>\n");
 
     if let Some(ref title) = meta.title {
         if !title.is_empty() {
@@ -34,7 +35,10 @@ fn season_body(path: &Path, meta: &NfoMeta) -> io::Result<String> {
 
     if let Some(ref premiered) = meta.premiered {
         if !premiered.is_empty() {
-            body.push_str(&format!("  <premiered>{}</premiered>\n", xml_escape(premiered)));
+            body.push_str(&format!(
+                "  <premiered>{}</premiered>\n",
+                xml_escape(premiered)
+            ));
             if premiered.len() >= 4 {
                 if let Ok(year) = premiered[0..4].parse::<u16>() {
                     body.push_str(&format!("  <year>{}</year>\n", year));

@@ -6,8 +6,8 @@ use std::time::Instant;
 
 use domain::{Site, SiteId};
 use indexer::{
-    Browser, BrowserConfig, FetchMethod, FetchRequest, Fetcher, Indexer, IndexerError, PageSession, ProfileSet,
-    RecordingFetcher,
+    Browser, BrowserConfig, FetchMethod, FetchRequest, Fetcher, Indexer, IndexerError, PageSession,
+    ProfileSet, RecordingFetcher,
 };
 
 fn site_with_profile(profile_id: &str, cdp_url: Option<&str>) -> Site {
@@ -188,10 +188,18 @@ fn timing_constraints_are_validated() {
 fn render_returns_html_and_read_back_cookie() {
     struct TestCookiePage;
     impl PageSession for TestCookiePage {
-        fn goto(&self, _: &str) -> Result<(), IndexerError> { Ok(()) }
-        fn set_site_cookies(&self, _: &str, _: &str) -> Result<(), IndexerError> { Ok(()) }
-        fn content(&self) -> Result<String, IndexerError> { Ok("<html>ok</html>".into()) }
-        fn cookie_header(&self, _: &str) -> Result<String, IndexerError> { Ok("session=123".into()) }
+        fn goto(&self, _: &str) -> Result<(), IndexerError> {
+            Ok(())
+        }
+        fn set_site_cookies(&self, _: &str, _: &str) -> Result<(), IndexerError> {
+            Ok(())
+        }
+        fn content(&self) -> Result<String, IndexerError> {
+            Ok("<html>ok</html>".into())
+        }
+        fn cookie_header(&self, _: &str) -> Result<String, IndexerError> {
+            Ok("session=123".into())
+        }
     }
 
     let browser = Browser::with_opener(BrowserConfig::enabled_for_test(), |_| {
@@ -221,8 +229,12 @@ fn target_is_closed_when_goto_fails() {
         fn goto(&self, _: &str) -> Result<(), IndexerError> {
             Err(IndexerError::Fetch("navigation rejected".into()))
         }
-        fn set_site_cookies(&self, _: &str, _: &str) -> Result<(), IndexerError> { Ok(()) }
-        fn content(&self) -> Result<String, IndexerError> { Ok("".into()) }
+        fn set_site_cookies(&self, _: &str, _: &str) -> Result<(), IndexerError> {
+            Ok(())
+        }
+        fn content(&self) -> Result<String, IndexerError> {
+            Ok("".into())
+        }
     }
     impl Drop for FailGotoPage {
         fn drop(&mut self) {
@@ -264,8 +276,12 @@ fn websocket_url_on_a_different_host_or_port_is_rejected() {
                     let body = serde_json::json!({
                         "id": "target1",
                         "webSocketDebuggerUrl": "ws://10.0.0.9:9999/devtools/page/x"
-                    }).to_string();
-                    let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    })
+                    .to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
                     let _ = stream.write_all(resp.as_bytes());
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -307,8 +323,12 @@ fn different_sites_render_concurrently_up_to_the_limit() {
             self.active.fetch_sub(1, Ordering::SeqCst);
             Ok(())
         }
-        fn set_site_cookies(&self, _: &str, _: &str) -> Result<(), IndexerError> { Ok(()) }
-        fn content(&self) -> Result<String, IndexerError> { Ok("ok".into()) }
+        fn set_site_cookies(&self, _: &str, _: &str) -> Result<(), IndexerError> {
+            Ok(())
+        }
+        fn content(&self) -> Result<String, IndexerError> {
+            Ok("ok".into())
+        }
     }
 
     let active_c = active.clone();
@@ -320,10 +340,15 @@ fn different_sites_render_concurrently_up_to_the_limit() {
             max_concurrent: max_c.clone(),
             barrier: barrier_c.clone(),
         }) as Arc<dyn PageSession>)
-    }).with_max_sessions(3);
+    })
+    .with_max_sessions(3);
 
     let mut handles = Vec::new();
-    for site in ["https://site1.org/s", "https://site2.org/s", "https://site3.org/s"] {
+    for site in [
+        "https://site1.org/s",
+        "https://site2.org/s",
+        "https://site3.org/s",
+    ] {
         let b = browser.clone();
         let s = site.to_string();
         handles.push(std::thread::spawn(move || {
@@ -335,7 +360,7 @@ fn different_sites_render_concurrently_up_to_the_limit() {
                 cookie: None,
                 api_key: None,
                 proxy: None,
-                        cdp_url: Some("http://127.0.0.1:9222".into()),
+                cdp_url: Some("http://127.0.0.1:9222".into()),
             };
             b.render(&req)
         }));
@@ -368,8 +393,12 @@ fn same_site_sessions_are_serialized() {
             self.active.fetch_sub(1, Ordering::SeqCst);
             Ok(())
         }
-        fn set_site_cookies(&self, _: &str, _: &str) -> Result<(), IndexerError> { Ok(()) }
-        fn content(&self) -> Result<String, IndexerError> { Ok("ok".into()) }
+        fn set_site_cookies(&self, _: &str, _: &str) -> Result<(), IndexerError> {
+            Ok(())
+        }
+        fn content(&self) -> Result<String, IndexerError> {
+            Ok("ok".into())
+        }
     }
 
     let active_c = active.clone();
@@ -379,7 +408,8 @@ fn same_site_sessions_are_serialized() {
             active: active_c.clone(),
             max_concurrent: max_c.clone(),
         }) as Arc<dyn PageSession>)
-    }).with_max_sessions(3);
+    })
+    .with_max_sessions(3);
 
     let mut handles = Vec::new();
     // Same eTLD+1: example.org
@@ -395,7 +425,7 @@ fn same_site_sessions_are_serialized() {
                 cookie: None,
                 api_key: None,
                 proxy: None,
-                        cdp_url: Some("http://127.0.0.1:9222".into()),
+                cdp_url: Some("http://127.0.0.1:9222".into()),
             };
             b.render(&req)
         }));
@@ -424,15 +454,20 @@ fn cousin_and_cross_level_subdomains_are_serialized() {
             self.0.fetch_sub(1, Ordering::SeqCst);
             Ok(())
         }
-        fn set_site_cookies(&self, _: &str, _: &str) -> Result<(), IndexerError> { Ok(()) }
-        fn content(&self) -> Result<String, IndexerError> { Ok("ok".into()) }
+        fn set_site_cookies(&self, _: &str, _: &str) -> Result<(), IndexerError> {
+            Ok(())
+        }
+        fn content(&self) -> Result<String, IndexerError> {
+            Ok("ok".into())
+        }
     }
 
     let active_c = active.clone();
     let max_c = max_concurrent.clone();
     let browser = Browser::with_opener(BrowserConfig::enabled_for_test(), move |_| {
         Ok(Arc::new(SerialPage(active_c.clone(), max_c.clone())) as Arc<dyn PageSession>)
-    }).with_max_sessions(3);
+    })
+    .with_max_sessions(3);
 
     let mut handles = Vec::new();
     for site in ["https://x.a.example.org/s", "https://y.b.example.org/s"] {
@@ -447,7 +482,7 @@ fn cousin_and_cross_level_subdomains_are_serialized() {
                 cookie: None,
                 api_key: None,
                 proxy: None,
-                        cdp_url: Some("http://127.0.0.1:9222".into()),
+                cdp_url: Some("http://127.0.0.1:9222".into()),
             };
             b.render(&req)
         }));
@@ -469,8 +504,12 @@ fn waiting_beyond_the_queue_cap_is_busy_before_navigation() {
             std::thread::sleep(Duration::from_millis(200));
             Ok(())
         }
-        fn set_site_cookies(&self, _: &str, _: &str) -> Result<(), IndexerError> { Ok(()) }
-        fn content(&self) -> Result<String, IndexerError> { Ok("ok".into()) }
+        fn set_site_cookies(&self, _: &str, _: &str) -> Result<(), IndexerError> {
+            Ok(())
+        }
+        fn content(&self) -> Result<String, IndexerError> {
+            Ok("ok".into())
+        }
     }
 
     let opened_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -495,7 +534,7 @@ fn waiting_beyond_the_queue_cap_is_busy_before_navigation() {
             cookie: None,
             api_key: None,
             proxy: None,
-                cdp_url: Some("http://127.0.0.1:9222".into()),
+            cdp_url: Some("http://127.0.0.1:9222".into()),
         };
         b1.render(&req)
     });
@@ -529,8 +568,12 @@ fn too_little_time_left_after_queueing_is_busy_before_navigation() {
             std::thread::sleep(Duration::from_millis(1150));
             Ok(())
         }
-        fn set_site_cookies(&self, _: &str, _: &str) -> Result<(), IndexerError> { Ok(()) }
-        fn content(&self) -> Result<String, IndexerError> { Ok("ok".into()) }
+        fn set_site_cookies(&self, _: &str, _: &str) -> Result<(), IndexerError> {
+            Ok(())
+        }
+        fn content(&self) -> Result<String, IndexerError> {
+            Ok("ok".into())
+        }
     }
 
     let browser = Browser::with_opener(BrowserConfig::enabled_for_test(), |_| {
@@ -551,7 +594,7 @@ fn too_little_time_left_after_queueing_is_busy_before_navigation() {
             cookie: None,
             api_key: None,
             proxy: None,
-                cdp_url: Some("http://127.0.0.1:9222".into()),
+            cdp_url: Some("http://127.0.0.1:9222".into()),
         })
     });
 
@@ -588,8 +631,12 @@ fn waiters_are_served_in_fifo_order() {
             self.1.lock().unwrap().push(self.0);
             Ok(())
         }
-        fn set_site_cookies(&self, _: &str, _: &str) -> Result<(), IndexerError> { Ok(()) }
-        fn content(&self) -> Result<String, IndexerError> { Ok("ok".into()) }
+        fn set_site_cookies(&self, _: &str, _: &str) -> Result<(), IndexerError> {
+            Ok(())
+        }
+        fn content(&self) -> Result<String, IndexerError> {
+            Ok("ok".into())
+        }
     }
 
     let finish_log = finish_order.clone();
@@ -616,7 +663,7 @@ fn waiters_are_served_in_fifo_order() {
                 cookie: None,
                 api_key: None,
                 proxy: None,
-                        cdp_url: Some("http://127.0.0.1:9222".into()),
+                cdp_url: Some("http://127.0.0.1:9222".into()),
             })
         }));
         std::thread::sleep(Duration::from_millis(15));
@@ -633,12 +680,19 @@ fn unrelated_registrable_domains_can_render_concurrently() {
     let browser = Browser::with_opener(BrowserConfig::enabled_for_test(), |_| {
         struct QuickPage;
         impl PageSession for QuickPage {
-            fn goto(&self, _: &str) -> Result<(), IndexerError> { Ok(()) }
-            fn set_site_cookies(&self, _: &str, _: &str) -> Result<(), IndexerError> { Ok(()) }
-            fn content(&self) -> Result<String, IndexerError> { Ok("ok".into()) }
+            fn goto(&self, _: &str) -> Result<(), IndexerError> {
+                Ok(())
+            }
+            fn set_site_cookies(&self, _: &str, _: &str) -> Result<(), IndexerError> {
+                Ok(())
+            }
+            fn content(&self) -> Result<String, IndexerError> {
+                Ok("ok".into())
+            }
         }
         Ok(Arc::new(QuickPage) as Arc<dyn PageSession>)
-    }).with_max_sessions(2);
+    })
+    .with_max_sessions(2);
 
     let res1 = browser.render(&FetchRequest {
         key: "1".into(),
@@ -683,7 +737,9 @@ fn render_respects_the_total_deadline_and_closes_the_target() {
             }
             Ok(())
         }
-        fn set_site_cookies(&self, _: &str, _: &str) -> Result<(), IndexerError> { Ok(()) }
+        fn set_site_cookies(&self, _: &str, _: &str) -> Result<(), IndexerError> {
+            Ok(())
+        }
         fn content(&self) -> Result<String, IndexerError> {
             std::thread::sleep(std::time::Duration::from_millis(650));
             if let Some(d) = *self.deadline.lock().unwrap() {
@@ -699,7 +755,8 @@ fn render_respects_the_total_deadline_and_closes_the_target() {
     }
     impl Drop for TimeoutPage {
         fn drop(&mut self) {
-            self.closed.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.closed
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -729,7 +786,6 @@ fn render_respects_the_total_deadline_and_closes_the_target() {
     assert!(closed.load(std::sync::atomic::Ordering::Relaxed));
 }
 
-
 fn plain_req(proxy: Option<&str>) -> FetchRequest {
     FetchRequest {
         key: "t".into(),
@@ -751,7 +807,9 @@ fn render_rejects_proxy_before_opening_a_target() {
         *o.lock().unwrap() += 1;
         Err(IndexerError::BrowserSetup("unused".into()))
     });
-    let err = browser.render(&plain_req(Some("http://proxy:8080"))).unwrap_err();
+    let err = browser
+        .render(&plain_req(Some("http://proxy:8080")))
+        .unwrap_err();
     assert!(matches!(err, IndexerError::BrowserSetup(_)), "{err:?}");
     assert_eq!(*opened.lock().unwrap(), 0);
 }
@@ -760,20 +818,41 @@ fn render_rejects_proxy_before_opening_a_target() {
 fn cookie_injection_failure_is_setup_but_content_failure_is_not() {
     struct P(bool);
     impl PageSession for P {
-        fn goto(&self, _: &str) -> Result<(), IndexerError> { Ok(()) }
-        fn set_site_cookies(&self, _: &str, _: &str) -> Result<(), IndexerError> {
-            if self.0 { Err(IndexerError::Fetch("setCookies".into())) } else { Ok(()) }
+        fn goto(&self, _: &str) -> Result<(), IndexerError> {
+            Ok(())
         }
-        fn content(&self) -> Result<String, IndexerError> { Err(IndexerError::Fetch("after goto".into())) }
+        fn set_site_cookies(&self, _: &str, _: &str) -> Result<(), IndexerError> {
+            if self.0 {
+                Err(IndexerError::Fetch("setCookies".into()))
+            } else {
+                Ok(())
+            }
+        }
+        fn content(&self) -> Result<String, IndexerError> {
+            Err(IndexerError::Fetch("after goto".into()))
+        }
     }
-    let b = Browser::with_opener(BrowserConfig::enabled_for_test(), |_| Ok(Arc::new(P(true)) as Arc<dyn PageSession>));
-    assert!(matches!(b.render(&plain_req(None)), Err(IndexerError::BrowserSetup(_))));
-    let b = Browser::with_opener(BrowserConfig::enabled_for_test(), |_| Ok(Arc::new(P(false)) as Arc<dyn PageSession>));
-    assert!(matches!(b.render(&plain_req(None)), Err(IndexerError::Fetch(_))));
+    let b = Browser::with_opener(BrowserConfig::enabled_for_test(), |_| {
+        Ok(Arc::new(P(true)) as Arc<dyn PageSession>)
+    });
+    assert!(matches!(
+        b.render(&plain_req(None)),
+        Err(IndexerError::BrowserSetup(_))
+    ));
+    let b = Browser::with_opener(BrowserConfig::enabled_for_test(), |_| {
+        Ok(Arc::new(P(false)) as Arc<dyn PageSession>)
+    });
+    assert!(matches!(
+        b.render(&plain_req(None)),
+        Err(IndexerError::Fetch(_))
+    ));
 }
 
 #[test]
 fn try_group_key_errors_on_unnormalizable_host() {
     assert!(indexer::browser_host::try_group_key("").is_err());
-    assert_eq!(indexer::browser_host::try_group_key("a.example.org").unwrap(), "example.org");
+    assert_eq!(
+        indexer::browser_host::try_group_key("a.example.org").unwrap(),
+        "example.org"
+    );
 }

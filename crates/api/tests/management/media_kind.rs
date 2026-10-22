@@ -67,7 +67,7 @@ fn merge_pending_keeps_existing_downloads_across_search_rounds() {
             exclude: false,
         }],
         keep_old_versions: false,
-};
+    };
     store.insert_filter(&filter).unwrap();
     let subscribe = Subscribe {
         id: SubscribeId::new(),

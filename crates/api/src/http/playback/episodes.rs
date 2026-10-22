@@ -94,13 +94,7 @@ pub fn aggregate_visible_episodes_with(
             }
         }
     }
-    aggregate_visible_episodes_owned(
-        rows,
-        target_season,
-        &unit_states,
-        season_metas,
-        files,
-    )
+    aggregate_visible_episodes_owned(rows, target_season, &unit_states, season_metas, files)
 }
 
 /// Bounded out-of-lock aggregation: takes owned rows, pre-loaded unit states and file seam.
@@ -134,8 +128,8 @@ pub fn aggregate_visible_episodes_owned(
                 .unwrap_or_default()
                 .to_string();
 
-            let local_still =
-                crate::episode_still::existing_with(file_path, files).map(|_| artwork_url("stills", row.file.file_id));
+            let local_still = crate::episode_still::existing_with(file_path, files)
+                .map(|_| artwork_url("stills", row.file.file_id));
             // 只有磁盘上真有 fanart 才给地址。没有剧照时卡片用集号占位，
             // 不再对每一集打出必定 404 的 /fanart/{id}。
             let backdrop = if !unit.is_whole()
@@ -158,7 +152,8 @@ pub fn aggregate_visible_episodes_owned(
 
     keys.into_iter()
         .map(|(season, episode)| {
-            let (file_ids, file_name, local_still, backdrop) = grouped.remove(&(season, episode)).unwrap();
+            let (file_ids, file_name, local_still, backdrop) =
+                grouped.remove(&(season, episode)).unwrap();
             let meta = season_metas
                 .get(&season)
                 .and_then(|ep_map| ep_map.get(&episode));
@@ -167,16 +162,26 @@ pub fn aggregate_visible_episodes_owned(
                 Some(m) => (
                     m.name.clone(),
                     m.overview.clone(),
-                    m.still_path.as_ref().map(|p| format!("https://image.tmdb.org/t/p/w300{p}")),
+                    m.still_path
+                        .as_ref()
+                        .map(|p| format!("https://image.tmdb.org/t/p/w300{p}")),
                 ),
                 None => (None, None, None),
             };
 
-            let (position_ms, played, progress_percent) = match unit_states.get(&(season, episode)).and_then(|state| state.as_ref()) {
+            let (position_ms, played, progress_percent) = match unit_states
+                .get(&(season, episode))
+                .and_then(|state| state.as_ref())
+            {
                 Some(ps) => {
                     let percent = if !ps.played {
-                        ps.duration_ms
-                            .and_then(|d| if d > 0 { Some(((ps.position_ms * 100) / d).clamp(0, 100)) } else { None })
+                        ps.duration_ms.and_then(|d| {
+                            if d > 0 {
+                                Some(((ps.position_ms * 100) / d).clamp(0, 100))
+                            } else {
+                                None
+                            }
+                        })
                     } else {
                         None
                     };

@@ -20,13 +20,18 @@ async fn scan_returns_202_with_operation_id_and_polls() {
     assert_eq!(res["ok"], true);
     assert_eq!(res["data"]["queued"], true);
 
-    let op_id = res["data"]["operation_id"].as_str().expect("must return operation_id");
+    let op_id = res["data"]["operation_id"]
+        .as_str()
+        .expect("must return operation_id");
 
     // Poll operation status
     let (poll_status, poll_res) = fix
         .request(
             "GET",
-            &format!("/api/v1/libraries/{}/scan-operations/{}", fix.library_id, op_id),
+            &format!(
+                "/api/v1/libraries/{}/scan-operations/{}",
+                fix.library_id, op_id
+            ),
             Some(&fix.admin_token),
         )
         .await;
@@ -54,7 +59,10 @@ async fn cancel_scan_does_not_break_subsequent_library_work_leases() {
     let (wrong_status, _) = fix
         .request(
             "POST",
-            &format!("/api/v1/libraries/wrong-lib-id/scan-operations/{}/cancel", op_id),
+            &format!(
+                "/api/v1/libraries/wrong-lib-id/scan-operations/{}/cancel",
+                op_id
+            ),
             Some(&fix.admin_token),
         )
         .await;
@@ -64,7 +72,10 @@ async fn cancel_scan_does_not_break_subsequent_library_work_leases() {
     let (cancel_status, cancel_res) = fix
         .request(
             "POST",
-            &format!("/api/v1/libraries/{}/scan-operations/{}/cancel", fix.library_id, op_id),
+            &format!(
+                "/api/v1/libraries/{}/scan-operations/{}/cancel",
+                fix.library_id, op_id
+            ),
             Some(&fix.admin_token),
         )
         .await;
@@ -75,16 +86,26 @@ async fn cancel_scan_does_not_break_subsequent_library_work_leases() {
     let (again_status, again_res) = fix
         .request(
             "POST",
-            &format!("/api/v1/libraries/{}/scan-operations/{}/cancel", fix.library_id, op_id),
+            &format!(
+                "/api/v1/libraries/{}/scan-operations/{}/cancel",
+                fix.library_id, op_id
+            ),
             Some(&fix.admin_token),
         )
         .await;
-    assert_eq!(again_status, StatusCode::OK, "重复取消必须幂等: {again_res}");
+    assert_eq!(
+        again_status,
+        StatusCode::OK,
+        "重复取消必须幂等: {again_res}"
+    );
     assert_eq!(again_res["data"]["cancelled"], false);
 
     // 4. Critical: library work lease must NOT be permanently broken!
     let lease_res = fix.state.acquire_library_work(&fix.library_id);
-    assert!(lease_res.is_ok(), "Canceling a scan must not freeze the library permanently");
+    assert!(
+        lease_res.is_ok(),
+        "Canceling a scan must not freeze the library permanently"
+    );
 
     // 5. Subsequent scan must be accepted and **actually complete** — a
     //    cancelled shared control would leave it failed/partial.
@@ -145,7 +166,11 @@ async fn cross_operation_change_invalidates_derived_facts() {
         .unwrap();
     let after = std::fs::metadata(&strm).unwrap();
     assert_eq!(after.len(), strm_len, "测试前提：URL 长度未变");
-    assert_eq!(after.modified().unwrap(), strm_mtime, "测试前提：mtime 未变");
+    assert_eq!(
+        after.modified().unwrap(),
+        strm_mtime,
+        "测试前提：mtime 未变"
+    );
 
     // operation B：全新 operation，没有任何该路径的 scan_seen 断点。
     let op_b = {
@@ -189,7 +214,9 @@ async fn cross_operation_change_invalidates_derived_facts() {
         let obligation = obligations
             .iter()
             .find(|obligation| obligation.ledger_id == id)
-            .unwrap_or_else(|| panic!("{label} 变化后必须重挂 durable probe 义务: {obligations:?}"));
+            .unwrap_or_else(|| {
+                panic!("{label} 变化后必须重挂 durable probe 义务: {obligations:?}")
+            });
         assert_eq!(obligation.reason, "scan_changed", "{label}");
     }
 }
@@ -210,7 +237,12 @@ fn seed_probe_baseline(
             ..Default::default()
         };
         store
-            .put_file_meta_versioned(&row.file.file_id.to_string(), &tracks, Some("v1"), Some(1000))
+            .put_file_meta_versioned(
+                &row.file.file_id.to_string(),
+                &tracks,
+                Some("v1"),
+                Some(1000),
+            )
             .unwrap();
     }
     assert!(
@@ -261,7 +293,12 @@ async fn full_scan_merged_with_watch_target_still_ledgers_whole_library() {
 
     fix.state.scan_coordinator.trigger_next(&fix.state);
     let done = fix.wait_scan_terminal_op(&op.id).await;
-    assert_eq!(done.status, store::ScanOperationStatus::Completed, "{:?}", done.report);
+    assert_eq!(
+        done.status,
+        store::ScanOperationStatus::Completed,
+        "{:?}",
+        done.report
+    );
 
     let rows = fix.state.store().lock().list_file_coverage().unwrap();
     let paths: Vec<String> = rows
@@ -312,7 +349,12 @@ async fn repeated_watch_event_for_same_target_is_consumed_with_cumulative_report
 
     fix.state.scan_coordinator.trigger_next(&fix.state);
     let done = fix.wait_scan_terminal_op(&op.id).await;
-    assert_eq!(done.status, store::ScanOperationStatus::Completed, "{:?}", done.report);
+    assert_eq!(
+        done.status,
+        store::ScanOperationStatus::Completed,
+        "{:?}",
+        done.report
+    );
     assert_eq!(done.dirty_rev, 1);
     // 本轮已带上合并后的意图：新文件入账，终态报告是累计结果而不是被清空。
     assert_eq!(
@@ -440,16 +482,16 @@ async fn legacy_signature_with_unchanged_config_is_upgraded_not_cancelled() {
         "配置未变时旧签名 operation 不得消失: {}",
         done.report
     );
-    assert_eq!(
-        done.scope_signature, current,
-        "旧签名必须就地升级成新编码"
-    );
+    assert_eq!(done.scope_signature, current, "旧签名必须就地升级成新编码");
     assert!(
         done.report["signature_upgrade"].is_string(),
         "升级必须留下显式原因: {}",
         done.report
     );
-    assert_eq!(fix.state.store().lock().list_file_coverage().unwrap().len(), 1);
+    assert_eq!(
+        fix.state.store().lock().list_file_coverage().unwrap().len(),
+        1
+    );
 }
 
 /// P2-A：v1 编码不是单射——两组不同的根数组可以编码出同一串字节，逐字节相等不能
@@ -491,7 +533,11 @@ async fn colliding_legacy_signature_never_adopts_current_scope() {
         fix.legacy_scope_signature(),
         "测试前提：旧根数组与当前根数组的 v1 编码逐字节碰撞"
     );
-    assert_ne!(legacy, fix.scope_signature(), "测试前提：遗留签名仍是旧编码");
+    assert_ne!(
+        legacy,
+        fix.scope_signature(),
+        "测试前提：遗留签名仍是旧编码"
+    );
 
     let op = {
         let store = fix.state.store();
@@ -522,7 +568,12 @@ async fn colliding_legacy_signature_never_adopts_current_scope() {
         "取消时不得把持久化签名改写成当前 scope"
     );
     assert!(
-        fix.state.store().lock().list_file_coverage().unwrap().is_empty(),
+        fix.state
+            .store()
+            .lock()
+            .list_file_coverage()
+            .unwrap()
+            .is_empty(),
         "取消的 operation 不得把当前 scope 的文件登记进台账"
     );
 }
@@ -583,7 +634,12 @@ async fn ambiguous_legacy_signature_equal_to_current_encoding_is_cancelled() {
     );
     assert_eq!(done.scope_signature, legacy, "取消时不得改写签名");
     assert!(
-        fix.state.store().lock().list_file_coverage().unwrap().is_empty(),
+        fix.state
+            .store()
+            .lock()
+            .list_file_coverage()
+            .unwrap()
+            .is_empty(),
         "取消的 operation 不得登记任何文件"
     );
 }
@@ -669,7 +725,12 @@ async fn ambiguous_legacy_signature_after_scope_change_is_cancelled() {
     );
     assert_eq!(done.scope_signature, legacy, "取消时不得改写签名");
     assert!(
-        fix.state.store().lock().list_file_coverage().unwrap().is_empty(),
+        fix.state
+            .store()
+            .lock()
+            .list_file_coverage()
+            .unwrap()
+            .is_empty(),
         "取消的 operation 不得登记任何文件（尤其不能扫新根）"
     );
 }

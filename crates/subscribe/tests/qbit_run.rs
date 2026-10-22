@@ -123,7 +123,7 @@ fn finished_qbittorrent_task_transfers_into_library_ledger() {
             exclude: false,
         }],
         keep_old_versions: false,
-};
+    };
     let subscribe = Subscribe {
         id: SubscribeId::new(),
         user_id: UserId::new(),

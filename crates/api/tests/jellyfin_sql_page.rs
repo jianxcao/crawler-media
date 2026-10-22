@@ -536,14 +536,24 @@ fn played_filter_follows_the_newest_assertion() {
             )
             .unwrap();
     };
-    mark(domain::UnitScope::Episode { season: 1, episode: 1 }, true, 1_000);
+    mark(
+        domain::UnitScope::Episode {
+            season: 1,
+            episode: 1,
+        },
+        true,
+        1_000,
+    );
     mark(domain::UnitScope::Season(1), false, 2_000);
     let mut query = base_query(ProtocolParent::Library(library));
     query.user_id = user;
     query.include_types = vec![ProtocolItemType::Episode];
     query.is_played = Some(true);
     let page = fx.store.protocol_item_page(&query).unwrap();
-    assert_eq!(page.total, 0, "season false@2000 beats episode true@1000: {page:?}");
+    assert_eq!(
+        page.total, 0,
+        "season false@2000 beats episode true@1000: {page:?}"
+    );
     let rust = fx
         .store
         .effective_played_assertion(user, show, UnitKey::new(1, 1))
@@ -581,12 +591,21 @@ fn case_equal_names_fall_through_to_the_next_sort_key() {
     }
     let mut query = base_query(ProtocolParent::Library(fx.alpha));
     query.sort = vec![
-        ProtocolSort { key: ProtocolSortKey::Name, descending: false },
-        ProtocolSort { key: ProtocolSortKey::DateCreated, descending: true },
+        ProtocolSort {
+            key: ProtocolSortKey::Name,
+            descending: false,
+        },
+        ProtocolSort {
+            key: ProtocolSortKey::DateCreated,
+            descending: true,
+        },
     ];
     let page = fx.store.protocol_item_page(&query).unwrap();
     let case_tie_ids: Vec<_> = page.items.iter().map(|item| item.item.clone()).collect();
-    assert_eq!(case_tie_ids, vec![TypedItemId::Work(lower_a_id), TypedItemId::Work(upper_a_id)]);
+    assert_eq!(
+        case_tie_ids,
+        vec![TypedItemId::Work(lower_a_id), TypedItemId::Work(upper_a_id)]
+    );
 }
 
 /// R23: a genre id derived from the displayed name ("Drama") filters to that genre.
@@ -597,7 +616,11 @@ fn genre_id_from_the_displayed_name_round_trips() {
     fx.add_movie("Plain");
     let db = rusqlite::Connection::open(fx._dir.path().join("data").join("library.db")).unwrap();
     // Only the NFO carries the genre: no derived term row may paper over the lookup.
-    db.execute("DELETE FROM library_item_terms WHERE term_kind = 'genre'", []).unwrap();
+    db.execute(
+        "DELETE FROM library_item_terms WHERE term_kind = 'genre'",
+        [],
+    )
+    .unwrap();
     let mut query = base_query(ProtocolParent::Library(fx.alpha));
     query.genre_ids = vec![uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, b"Drama").to_string()];
     let genre_roundtrip_page = fx.store.protocol_item_page(&query).unwrap();

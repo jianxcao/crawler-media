@@ -197,11 +197,8 @@ impl Store {
         let Some(session) = self.get_session(user_id, device_id)? else {
             return Ok(None);
         };
-        let binding = self.session_binding(
-            user_id,
-            device_id,
-            session.play_session_id.as_deref(),
-        )?;
+        let binding =
+            self.session_binding(user_id, device_id, session.play_session_id.as_deref())?;
         self.library.execute(
             "DELETE FROM playback_sessions WHERE user_id = ?1 AND device_id = ?2",
             params![user_id.to_string(), device_id],

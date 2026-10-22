@@ -51,7 +51,10 @@ pub(super) fn snapshot_unit_coords(unit: Option<domain::UnitKey>) -> (i32, i32) 
 /// 因此这里返回整片坐标而**不是** `(0, 0)`。
 pub(super) fn coverage_units(coverage: &domain::FileCoverage) -> Vec<(i32, i32)> {
     if coverage.units.is_empty() {
-        vec![(domain::UnitKey::WHOLE.season, domain::UnitKey::WHOLE.episode)]
+        vec![(
+            domain::UnitKey::WHOLE.season,
+            domain::UnitKey::WHOLE.episode,
+        )]
     } else {
         coverage
             .units
@@ -454,8 +457,7 @@ fn collect_pending(
         .iter()
         .filter_map(|coverage| {
             let item = media.get(&coverage.file.media_id)?;
-            coverage_visible(coverage)
-                .then(|| (item.id, coverage.file.path.display().to_string()))
+            coverage_visible(coverage).then(|| (item.id, coverage.file.path.display().to_string()))
         })
         .collect::<Vec<_>>();
     let context = PendingContext {
@@ -528,7 +530,10 @@ fn collect_show_units(
                 .entry(item.id)
                 .or_default()
                 .insert((unit.season as u32, unit.episode as u32));
-            show_seasons.entry(item.id).or_default().insert(unit.season as u32);
+            show_seasons
+                .entry(item.id)
+                .or_default()
+                .insert(unit.season as u32);
         }
     }
 }
@@ -566,8 +571,16 @@ fn pending_for_unit(
     );
     let child_counts = is_series.then(|| {
         (
-            context.show_episodes.get(&media.id).map(HashSet::len).unwrap_or(0),
-            context.show_seasons.get(&media.id).map(HashSet::len).unwrap_or(0),
+            context
+                .show_episodes
+                .get(&media.id)
+                .map(HashSet::len)
+                .unwrap_or(0),
+            context
+                .show_seasons
+                .get(&media.id)
+                .map(HashSet::len)
+                .unwrap_or(0),
         )
     });
     let own_unit = find_unit(context.units, coverage.file.media_id, unit.0, unit.1);

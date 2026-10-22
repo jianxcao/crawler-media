@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::{Fixtures, json_data, json_error, request, state};
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 async fn create_user_and_login(app: &axum::Router, name: &str, pass: &str) -> (UserId, String) {
     let user_resp = app
@@ -99,7 +99,11 @@ fn seed_test_env(
     tmp_path: &std::path::Path,
 ) {
     let media = create_sample_media(media_id);
-    let library_dir = tmp_path.join("data").join("library").join("tv").join("Test Show");
+    let library_dir = tmp_path
+        .join("data")
+        .join("library")
+        .join("tv")
+        .join("Test Show");
     let rows = seed_library_files(&library_dir, media_id);
 
     let store = api_state.store();

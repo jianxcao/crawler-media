@@ -30,7 +30,11 @@ pub(super) fn order_by_sql(
     }
     // 只有大小写不同的标题：所有请求的键都比完之后才用原串定序（R23），
     // 不让原串抢在后续请求键（如 DateCreated）之前。
-    if request.sort.iter().any(|sort| sort.key == ProtocolSortKey::Name) {
+    if request
+        .sort
+        .iter()
+        .any(|sort| sort.key == ProtocolSortKey::Name)
+    {
         keys.push(format!("{alias}.title ASC"));
     }
     // 收敛项与旧实现的最终 tie-break（media id）一致，并让分页在并列时不抖动。

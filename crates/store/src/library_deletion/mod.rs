@@ -69,7 +69,9 @@ impl Store {
     /// deserializes a snapshot that lists every removed file.
     pub fn path_in_removal_scope(&self, path: &Path) -> Result<bool, StoreError> {
         let path = crate::library_paths::resolved_path(path)?;
-        let mut statement = self.library.prepare("SELECT path FROM library_removal_roots")?;
+        let mut statement = self
+            .library
+            .prepare("SELECT path FROM library_removal_roots")?;
         for root in statement.query_map([], |row| row.get::<_, String>(0))? {
             if path.starts_with(Path::new(&root?)) {
                 return Ok(true);
@@ -334,8 +336,11 @@ impl Store {
             [&removal.library_id],
         )
         .map_err(|error| StoreError::Protected(format!("删除 Library 根失败: {error}")))?;
-        tx.execute("DELETE FROM libraries WHERE library_id=?1", [&removal.library_id])
-            .map_err(|error| StoreError::Protected(format!("删除 Library 配置失败: {error}")))?;
+        tx.execute(
+            "DELETE FROM libraries WHERE library_id=?1",
+            [&removal.library_id],
+        )
+        .map_err(|error| StoreError::Protected(format!("删除 Library 配置失败: {error}")))?;
         tx.execute(
             "UPDATE libraries SET is_default=1 WHERE library_id IN (
             SELECT l.library_id FROM libraries l WHERE NOT EXISTS (
@@ -373,7 +378,8 @@ impl Store {
         snapshot: &Snapshot,
         library_id: &str,
     ) -> Result<(), StoreError> {
-        let mut seen_files = std::collections::HashMap::<&str, std::collections::BTreeSet<(i32, i32)>>::new();
+        let mut seen_files =
+            std::collections::HashMap::<&str, std::collections::BTreeSet<(i32, i32)>>::new();
         for row in &snapshot.rows {
             seen_files
                 .entry(row.ledger_id.as_str())
@@ -395,10 +401,12 @@ impl Store {
                 )
                 .optional()?;
             // Absent rows are expected after an interrupted library.db commit.
-            let Some((path, media_id)) = current else { continue };
-            let mut stmt = self.library.prepare(
-                "SELECT season, episode FROM library_file_units WHERE file_id = ?1",
-            )?;
+            let Some((path, media_id)) = current else {
+                continue;
+            };
+            let mut stmt = self
+                .library
+                .prepare("SELECT season, episode FROM library_file_units WHERE file_id = ?1")?;
             let rows = stmt.query_map([ledger_id], |record| {
                 Ok((record.get::<_, i32>(0)?, record.get::<_, i32>(1)?))
             })?;
@@ -427,7 +435,9 @@ impl Store {
         let library_id: domain::LibraryId = library_id
             .parse()
             .map_err(|_| StoreError::Protected("删除快照 Library 身份无效".into()))?;
-        let file_ids = snapshot.rows.iter()
+        let file_ids = snapshot
+            .rows
+            .iter()
             .map(|row| row.ledger_id.parse::<domain::LedgerId>())
             .collect::<Result<std::collections::HashSet<_>, _>>()
             .map_err(|_| StoreError::Protected("删除快照台账身份无效".into()))?
@@ -440,8 +450,7 @@ impl Store {
         // Everything stays in this one transaction, so any failure rolls back the
         // whole cleanup instead of leaving a partially reduced Library.
         let tx = self.library.unchecked_transaction()?;
-        let removed =
-            crate::library_write::delete::delete_files_in_tx(&tx, library_id, &file_ids)?;
+        let removed = crate::library_write::delete::delete_files_in_tx(&tx, library_id, &file_ids)?;
         let mut unit_rows = std::collections::HashSet::new();
         for row in &snapshot.rows {
             for (season, episode) in &row.coverage {
@@ -505,10 +514,11 @@ impl Store {
                 removal_ledger_ids.contains(lid.as_str())
             } else {
                 let in_snapshot = snapshot.rows.iter().any(|row| {
-                    row.media_id == media_id && row.coverage.contains(&(
-                        season.unwrap_or(crate::UNIT_WHOLE),
-                        episode.unwrap_or(crate::UNIT_WHOLE),
-                    ))
+                    row.media_id == media_id
+                        && row.coverage.contains(&(
+                            season.unwrap_or(crate::UNIT_WHOLE),
+                            episode.unwrap_or(crate::UNIT_WHOLE),
+                        ))
                 });
                 if !in_snapshot {
                     false

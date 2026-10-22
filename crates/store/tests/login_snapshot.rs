@@ -155,10 +155,7 @@ fn plaintext_credential_snapshot_is_refused_without_upgrade() {
     let token = store
         .finish_verified_login(&snapshot.user_id.to_string(), &snapshot.observed_password)
         .unwrap();
-    assert!(
-        token.is_none(),
-        "非 Argon2 观测凭据不得签发会话 token"
-    );
+    assert!(token.is_none(), "非 Argon2 观测凭据不得签发会话 token");
     assert!(
         store.latest_token_for_user(user_id).unwrap().is_none(),
         "明文行不得留下任何会话凭据"

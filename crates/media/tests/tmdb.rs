@@ -226,13 +226,18 @@ fn cached_season_details_reads_fresh_stale_and_miss_without_fetching() {
     const NOW: i64 = 1_000_000;
     let dir = tempfile::tempdir().unwrap();
     let hits = Arc::new(Mutex::new(Vec::new()));
-    let tmdb = Tmdb::new_at(FakeTmdb {
-        bodies: HashMap::from([(
-            "/tv/1396/season/1".to_string(),
-            include_str!("fixtures/rich_season_details.json").to_string(),
-        )]),
-        hits: hits.clone(),
-    }, &dir.path().join("catalog.db"), NOW).unwrap();
+    let tmdb = Tmdb::new_at(
+        FakeTmdb {
+            bodies: HashMap::from([(
+                "/tv/1396/season/1".to_string(),
+                include_str!("fixtures/rich_season_details.json").to_string(),
+            )]),
+            hits: hits.clone(),
+        },
+        &dir.path().join("catalog.db"),
+        NOW,
+    )
+    .unwrap();
     assert!(tmdb.cached_season_details("1396", 1).unwrap().is_none());
     tmdb.season_details("1396", 1).unwrap();
     let fresh = tmdb.cached_season_details("1396", 1).unwrap().unwrap();
@@ -240,7 +245,11 @@ fn cached_season_details_reads_fresh_stale_and_miss_without_fetching() {
     tmdb.set_now(NOW + media::DEFAULT_TTL_SECS + 1);
     let stale = tmdb.cached_season_details("1396", 1).unwrap().unwrap();
     assert_eq!(stale, fresh);
-    assert_eq!(hits.lock().unwrap().len(), 1, "cache-only reads must never fetch");
+    assert_eq!(
+        hits.lock().unwrap().len(),
+        1,
+        "cache-only reads must never fetch"
+    );
 }
 
 #[test]

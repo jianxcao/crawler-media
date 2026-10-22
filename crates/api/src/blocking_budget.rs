@@ -35,7 +35,6 @@ impl BlockingBudget {
         self.permits.available_permits()
     }
 
-
     /// 在 blocking 线程上执行 `work`，最多等待 `deadline`。
     ///
     /// 超时不会中止 `work`（也不会提前释放 permit）；调用方必须把

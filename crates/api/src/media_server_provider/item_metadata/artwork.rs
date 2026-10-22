@@ -93,11 +93,7 @@ pub fn primary_image_url(
 }
 
 /// 分集本地主图：文件系统约定（剧照旁车、海报）与已采纳字段无关，故无新增入参。
-pub fn local_primary_image(
-    file: &LibraryFile,
-    unit: (i32, i32),
-    media: &Media,
-) -> Option<PathBuf> {
+pub fn local_primary_image(file: &LibraryFile, unit: (i32, i32), media: &Media) -> Option<PathBuf> {
     let episode_still = (media.kind == MediaKind::Tv && unit.1 >= 0)
         .then(|| crate::episode_still::existing(file.path.as_path()))
         .flatten();

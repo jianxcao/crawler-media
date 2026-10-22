@@ -67,8 +67,13 @@ fn duplicate_alias_and_single_row_alias_contradictions_are_protected() {
         store.resolve_scanned_media(incoming),
         Err(StoreError::Protected(_))
     ));
-    let duplicate_err = store.insert_media(&media("Second", Some("1"))).expect_err("duplicate alias must fail");
-    assert!(matches!(duplicate_err, StoreError::Protected(_) | StoreError::Sqlite(_)));
+    let duplicate_err = store
+        .insert_media(&media("Second", Some("1")))
+        .expect_err("duplicate alias must fail");
+    assert!(matches!(
+        duplicate_err,
+        StoreError::Protected(_) | StoreError::Sqlite(_)
+    ));
     assert_eq!(store.get_media(old.id).unwrap().unwrap(), old);
 }
 
@@ -128,7 +133,10 @@ fn frozen_media_is_never_revived_by_a_scan() {
     store.insert_media(&survivor).unwrap();
 
     // `retired` needs a survivor: CHECK((identity_state='retired')=(survivor_id IS NOT NULL)).
-    for (state, survivor_id) in [("merging", None), ("retired", Some(survivor.id.to_string()))] {
+    for (state, survivor_id) in [
+        ("merging", None),
+        ("retired", Some(survivor.id.to_string())),
+    ] {
         db.execute(
             "UPDATE media SET identity_state = ?2, survivor_id = ?3 WHERE media_id = ?1",
             rusqlite::params![frozen.id.to_string(), state, survivor_id],
@@ -136,14 +144,18 @@ fn frozen_media_is_never_revived_by_a_scan() {
         .unwrap();
 
         // The scan still sees the tmdb alias, but must not adopt the frozen identity...
-        let alias_err = store.resolve_scanned_media(media("Frozen", Some("1"))).unwrap_err();
+        let alias_err = store
+            .resolve_scanned_media(media("Frozen", Some("1")))
+            .unwrap_err();
         assert!(
             matches!(alias_err, StoreError::Protected(_)),
             "{state}: alias path returned {alias_err}"
         );
 
         // ...nor revive it through the title-only path (both rows carry the same year).
-        let title_err = store.resolve_scanned_media(media("Frozen", None)).unwrap_err();
+        let title_err = store
+            .resolve_scanned_media(media("Frozen", None))
+            .unwrap_err();
         assert!(
             matches!(title_err, StoreError::Protected(_)),
             "{state}: title path returned {title_err}"
@@ -177,7 +189,10 @@ fn frozen_media_rejects_scan_adoption_and_revert() {
     let survivor = media("Survivor", Some("2"));
     store.insert_media(&survivor).unwrap();
 
-    for (state, survivor_id) in [("merging", None), ("retired", Some(survivor.id.to_string()))] {
+    for (state, survivor_id) in [
+        ("merging", None),
+        ("retired", Some(survivor.id.to_string())),
+    ] {
         db.execute(
             "UPDATE media SET identity_state = ?2, survivor_id = ?3 WHERE media_id = ?1",
             rusqlite::params![frozen.id.to_string(), state, survivor_id],

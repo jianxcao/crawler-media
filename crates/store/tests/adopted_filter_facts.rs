@@ -84,7 +84,12 @@ fn adopted_filter_facts_reads_the_adopted_row_per_media() {
         "en-US",
         fields(&["Action", "Drama"], &["Studio X"], &["US", "KR"]),
     );
-    adopt(&store, bravo.id, "zh-CN", fields(&["Comedy"], &["Studio Y"], &[]));
+    adopt(
+        &store,
+        bravo.id,
+        "zh-CN",
+        fields(&["Comedy"], &["Studio Y"], &[]),
+    );
 
     let facts = store
         .adopted_filter_facts(&[alpha.id, bravo.id], "en-US")
@@ -111,12 +116,7 @@ fn adopted_filter_facts_skips_media_without_an_adopted_row() {
     assert!(facts.is_empty());
 
     // An empty candidate set issues no query.
-    assert!(
-        store
-            .adopted_filter_facts(&[], "en-US")
-            .unwrap()
-            .is_empty()
-    );
+    assert!(store.adopted_filter_facts(&[], "en-US").unwrap().is_empty());
 }
 
 #[test]
@@ -124,7 +124,12 @@ fn adopted_filter_facts_tolerates_unexpected_payload_shapes() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let alpha = media(&store, ALPHA, "Alpha");
-    adopt(&store, alpha.id, "en-US", fields(&["Action"], &["Studio X"], &[]));
+    adopt(
+        &store,
+        alpha.id,
+        "en-US",
+        fields(&["Action"], &["Studio X"], &[]),
+    );
     // `json_valid` accepts any JSON, including shapes this reader never writes. One odd
     // payload must not fail the whole batch.
     rusqlite::Connection::open(tmp.path().join("library.db"))

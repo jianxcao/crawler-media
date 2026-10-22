@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use domain::{
-    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile,
-    LibraryId, Media, MediaId, MediaKind, QualitySource, TypedItemId, UnitKey, UserId,
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, LibraryId,
+    Media, MediaId, MediaKind, QualitySource, TypedItemId, UnitKey, UserId,
 };
 use media_server::provider::query::{
     folder_id_for_root, legacy_next_up, legacy_select, series_media_id,
@@ -91,13 +91,7 @@ fn snapshot(
     is_series: bool,
 ) -> MediaItemSnapshot {
     let file_id = LedgerId::new();
-    let file = fake_file(
-        file_id,
-        "root",
-        item_media.id,
-        item_media.kind,
-        path,
-    );
+    let file = fake_file(file_id, "root", item_media.id, item_media.kind, path);
     let unit = match (season, episode) {
         (Some(s), Some(e)) => Some(UnitKey::new(s as i32, e as i32)),
         _ => None,
@@ -156,13 +150,7 @@ impl SplitRootProvider {
             false,
         );
         let other = media(MediaKind::Tv, "Collapsed other");
-        let collapsed_b = snapshot(
-            other.clone(),
-            "/media/root-b/Other",
-            None,
-            None,
-            true,
-        );
+        let collapsed_b = snapshot(other.clone(), "/media/root-b/Other", None, None, true);
         Self {
             show,
             episode_a,
@@ -213,7 +201,10 @@ impl MediaServerProvider for SplitRootProvider {
             name: "TV".into(),
             kind: MediaKind::Tv,
             exclude_from_home: false,
-            root_paths: vec![PathBuf::from("/media/root-a"), PathBuf::from("/media/root-b")],
+            root_paths: vec![
+                PathBuf::from("/media/root-a"),
+                PathBuf::from("/media/root-b"),
+            ],
             cover_path: None,
             cover_tag: "tag".into(),
         }])
@@ -244,7 +235,12 @@ impl MediaServerProvider for SplitRootProvider {
         let mut series = self.episode_a.clone();
         series.is_series = true;
         series.file.path = PathBuf::from("/media/root-a/Show");
-        Ok(vec![series, self.episode_b.clone(), self.collapsed_b.clone(), self.movie.clone()])
+        Ok(vec![
+            series,
+            self.episode_b.clone(),
+            self.collapsed_b.clone(),
+            self.movie.clone(),
+        ])
     }
 
     async fn resolve_single_item(
@@ -328,9 +324,15 @@ async fn legacy_folder_keeps_series_whose_representative_is_elsewhere() {
     )
     .await
     .expect("legacy select");
-    let names: Vec<&str> = page.items.iter().map(|item| item.media.title.as_str()).collect();
+    let names: Vec<&str> = page
+        .items
+        .iter()
+        .map(|item| item.media.title.as_str())
+        .collect();
     assert!(
-        page.items.iter().any(|item| item.is_series && item.media.id == provider.show.id),
+        page.items
+            .iter()
+            .any(|item| item.is_series && item.media.id == provider.show.id),
         "folder B 必须保留代表行在 root A 的剧：{names:?}"
     );
     assert!(
@@ -340,9 +342,14 @@ async fn legacy_folder_keeps_series_whose_representative_is_elsewhere() {
         "folder B 必须保留该剧在 B 的分集：{names:?}"
     );
     assert!(
-        page.items.iter().all(|item| item.file.path.starts_with("/media/root-b")),
+        page.items
+            .iter()
+            .all(|item| item.file.path.starts_with("/media/root-b")),
         "不得带回 root A 的代表行：{:?}",
-        page.items.iter().map(|item| &item.file.path).collect::<Vec<_>>()
+        page.items
+            .iter()
+            .map(|item| &item.file.path)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -363,8 +370,23 @@ async fn legacy_folder_series_only_expands_membership_and_rebuilds_aggregates() 
     .await
     .expect("legacy folder selection");
     assert_eq!(page.total, 2);
-    let series = page.items.iter().find(|item| item.media.id == provider.show.id).unwrap_or_else(|| panic!("split folder series missing: {:?}", page.items.iter().map(|item| (&item.media.title, item.is_series, &item.file.path)).collect::<Vec<_>>()));
-    assert_eq!(series.file.path, PathBuf::from("/media/root-b/Show/S01E02.mkv"));
+    let series = page
+        .items
+        .iter()
+        .find(|item| item.media.id == provider.show.id)
+        .unwrap_or_else(|| {
+            panic!(
+                "split folder series missing: {:?}",
+                page.items
+                    .iter()
+                    .map(|item| (&item.media.title, item.is_series, &item.file.path))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        series.file.path,
+        PathBuf::from("/media/root-b/Show/S01E02.mkv")
+    );
     assert_eq!(series.metadata.child_count, Some(1));
     assert_eq!(series.metadata.season_count, Some(1));
     assert_eq!(series.unplayed_item_count, Some(1));
@@ -384,9 +406,19 @@ async fn legacy_next_up_returns_explicit_movie_and_expands_collapsed_media() {
     let mixed = legacy_next_up(&provider, user(), None, 0, 20)
         .await
         .expect("mixed granularity");
-    let titles: Vec<&str> = mixed.items.iter().map(|item| item.media.title.as_str()).collect();
-    assert!(titles.contains(&"Split show"), "已有分集的剧必须留下：{titles:?}");
-    assert!(titles.contains(&"Collapsed other"), "缺分集的折叠剧必须各自展开：{titles:?}");
+    let titles: Vec<&str> = mixed
+        .items
+        .iter()
+        .map(|item| item.media.title.as_str())
+        .collect();
+    assert!(
+        titles.contains(&"Split show"),
+        "已有分集的剧必须留下：{titles:?}"
+    );
+    assert!(
+        titles.contains(&"Collapsed other"),
+        "缺分集的折叠剧必须各自展开：{titles:?}"
+    );
     assert_eq!(mixed.total, 2);
     assert_eq!(mixed.items[0].media.title, "Split show");
     assert_eq!(mixed.items[1].media.title, "Collapsed other");

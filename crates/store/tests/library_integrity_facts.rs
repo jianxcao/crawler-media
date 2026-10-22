@@ -13,7 +13,14 @@ fn setup() -> (tempfile::TempDir, Store, LibraryId, Vec<String>) {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let lib = store
-        .create_library(MediaKind::Movie, "Movies", &["/movies"], "everyone", true, &[])
+        .create_library(
+            MediaKind::Movie,
+            "Movies",
+            &["/movies"],
+            "everyone",
+            true,
+            &[],
+        )
         .unwrap();
     let library_id: LibraryId = lib.id.parse().unwrap();
     let root_id = store
@@ -47,7 +54,10 @@ fn setup() -> (tempfile::TempDir, Store, LibraryId, Vec<String>) {
             media_id: media.id,
             kind: MediaKind::Movie,
             path: format!("/movies/m{n}.mkv").into(),
-            version: FileVersion { revision: 1, source_version: "v1".into() },
+            version: FileVersion {
+                revision: 1,
+                source_version: "v1".into(),
+            },
             presence: FilePresence::Present,
             publication: FilePublication::Published,
             size_bytes: Some(1024),
@@ -72,7 +82,10 @@ fn setup() -> (tempfile::TempDir, Store, LibraryId, Vec<String>) {
         };
         store
             .publish_files(
-                &WriteScope { library_id, config_revision: 0 },
+                &WriteScope {
+                    library_id,
+                    config_revision: 0,
+                },
                 &[StorePublication {
                     file: &file,
                     units: &[UnitKey::WHOLE],
@@ -89,11 +102,15 @@ fn setup() -> (tempfile::TempDir, Store, LibraryId, Vec<String>) {
 }
 
 fn run(store: &Store, library: LibraryId, repair: bool, op: &str) -> (String, usize) {
-    store.begin_library_integrity(library, repair, op, 2000).unwrap();
+    store
+        .begin_library_integrity(library, repair, op, 2000)
+        .unwrap();
     let mut calls = 0;
     loop {
         calls += 1;
-        let status = store.advance_library_operation(op, 2000 + calls as i64, 1).unwrap();
+        let status = store
+            .advance_library_operation(op, 2000 + calls as i64, 1)
+            .unwrap();
         if status.state != "applying" {
             return (status.state, calls);
         }
@@ -129,21 +146,44 @@ fn missing_units_and_terms_are_detected() {
     let (state, _) = run(&store, library, false, "op-clean");
     assert_eq!(state, "succeeded");
     assert_eq!(integrity_state(&db, library), "clean");
-    assert!(!store.library_integrity_report("op-clean").unwrap().has_issues());
+    assert!(
+        !store
+            .library_integrity_report("op-clean")
+            .unwrap()
+            .has_issues()
+    );
 
     db.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
-    db.execute("DELETE FROM library_units WHERE media_id = ?1", params![ids[0]]).unwrap();
-    db.execute("DELETE FROM library_item_terms WHERE media_id = ?1", params![ids[1]]).unwrap();
-    db.execute("UPDATE library_items SET size_bytes = 1, size_sort = 1 WHERE media_id = ?1", params![ids[2]])
-        .unwrap();
+    db.execute(
+        "DELETE FROM library_units WHERE media_id = ?1",
+        params![ids[0]],
+    )
+    .unwrap();
+    db.execute(
+        "DELETE FROM library_item_terms WHERE media_id = ?1",
+        params![ids[1]],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE library_items SET size_bytes = 1, size_sort = 1 WHERE media_id = ?1",
+        params![ids[2]],
+    )
+    .unwrap();
 
     let (state, calls) = run(&store, library, false, "op-check");
     assert_eq!(state, "succeeded");
-    assert!(calls >= 3, "one Media per batch, never the whole Library at once");
+    assert!(
+        calls >= 3,
+        "one Media per batch, never the whole Library at once"
+    );
     assert_eq!(integrity_state(&db, library), "failed");
     let damaged_report = store.library_integrity_report("op-check").unwrap();
     assert!(damaged_report.has_issues());
-    assert_eq!(damaged_report.mismatched_media.len(), 3, "{damaged_report:?}");
+    assert_eq!(
+        damaged_report.mismatched_media.len(),
+        3,
+        "{damaged_report:?}"
+    );
 
     let (state, _) = run(&store, library, true, "op-repair");
     assert_eq!(state, "succeeded");

@@ -13,7 +13,7 @@ use cover_generator::CoverOptions;
 use domain::{Confidence, LedgerId, LibraryFile, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 struct NoFetch;
 impl Fetcher for NoFetch {

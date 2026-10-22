@@ -3,17 +3,26 @@ use super::*;
 struct ReservationRecorder(std::cell::RefCell<Option<domain::FileCoverage>>);
 
 impl subscribe::TransferRecorder for ReservationRecorder {
-    fn prepare(&self, candidate: &domain::FileCoverage, _: &Path, _: TransferMode)
-        -> Result<domain::FileCoverage, subscribe::SubscribeError>
-    {
-        assert!(!candidate.file.path.exists(), "reservation must precede publication");
+    fn prepare(
+        &self,
+        candidate: &domain::FileCoverage,
+        _: &Path,
+        _: TransferMode,
+    ) -> Result<domain::FileCoverage, subscribe::SubscribeError> {
+        assert!(
+            !candidate.file.path.exists(),
+            "reservation must precede publication"
+        );
         *self.0.borrow_mut() = Some(candidate.clone());
         Ok(candidate.clone())
     }
 
     fn published(&self, candidate: &domain::FileCoverage) -> Result<(), subscribe::SubscribeError> {
         assert!(candidate.file.path.is_file());
-        assert_eq!(self.0.borrow().as_ref().unwrap().file.file_id, candidate.file.file_id);
+        assert_eq!(
+            self.0.borrow().as_ref().unwrap().file.file_id,
+            candidate.file.file_id
+        );
         Ok(())
     }
 }
@@ -30,13 +39,30 @@ fn recorded_collection_reserves_intended_path_before_publication() {
     let dl = MemoryDownloader::new(tmp.path().join("stage"));
     map_file(&dl, &torrent, source);
     let root = tmp.path().join("lib");
-    let added = subscribe::admit_and_add(run_input(&sub, &media, &filter, vec![torrent],
-        SubscribeFacts::default(), &dl, &root)).unwrap();
+    let added = subscribe::admit_and_add(run_input(
+        &sub,
+        &media,
+        &filter,
+        vec![torrent],
+        SubscribeFacts::default(),
+        &dl,
+        &root,
+    ))
+    .unwrap();
     let recorder = ReservationRecorder(Default::default());
-    let outcome = subscribe::collect_completed_recorded(added, &FixedProbe, &[],
-        &library::WorkControl::default(), Some(&recorder)).unwrap();
+    let outcome = subscribe::collect_completed_recorded(
+        added,
+        &FixedProbe,
+        &[],
+        &library::WorkControl::default(),
+        Some(&recorder),
+    )
+    .unwrap();
     assert_eq!(outcome.files.len(), 1);
-    assert_eq!(outcome.files[0].file.path, recorder.0.borrow().as_ref().unwrap().file.path);
+    assert_eq!(
+        outcome.files[0].file.path,
+        recorder.0.borrow().as_ref().unwrap().file.path
+    );
     assert!(outcome.collection_errors.is_empty());
 }
 
@@ -54,13 +80,33 @@ fn pending_publication_retry_reuses_reserved_destination() {
     let root = tmp.path().join("lib");
     let destination = root.join("reserved.mkv");
     let mut mapping = subscribe::collection_destinations::DestinationMapping::new(
-        tmp.path().join("stage").join(source.file_name().unwrap()).display().to_string(), &destination);
+        tmp.path()
+            .join("stage")
+            .join(source.file_name().unwrap())
+            .display()
+            .to_string(),
+        &destination,
+    );
     mapping.transfer_pending = true;
-    let added = subscribe::admit_and_add(run_input(&sub, &media, &filter, vec![torrent],
-        SubscribeFacts::default(), &dl, &root)).unwrap();
+    let added = subscribe::admit_and_add(run_input(
+        &sub,
+        &media,
+        &filter,
+        vec![torrent],
+        SubscribeFacts::default(),
+        &dl,
+        &root,
+    ))
+    .unwrap();
     let recorder = ReservationRecorder(Default::default());
-    let outcome = subscribe::collect_completed_recorded(added, &FixedProbe, &[mapping],
-        &library::WorkControl::default(), Some(&recorder)).unwrap();
+    let outcome = subscribe::collect_completed_recorded(
+        added,
+        &FixedProbe,
+        &[mapping],
+        &library::WorkControl::default(),
+        Some(&recorder),
+    )
+    .unwrap();
     assert!(outcome.collection_errors.is_empty());
     assert_eq!(outcome.files.len(), 1);
     assert_eq!(outcome.files[0].file.path, destination);

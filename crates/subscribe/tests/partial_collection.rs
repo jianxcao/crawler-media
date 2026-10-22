@@ -57,7 +57,7 @@ fn one_failed_file_does_not_discard_successful_files_from_same_torrent() {
             exclude: false,
         }],
         keep_old_versions: false,
-};
+    };
     let subscribe = Subscribe {
         id: SubscribeId::new(),
         user_id: UserId::new(),

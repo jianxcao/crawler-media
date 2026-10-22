@@ -265,9 +265,7 @@ pub(crate) async fn diagnose_proxy(State(state): State<ApiState>) -> Response {
             "直连 (未配置代理)".to_string()
         };
 
-        set.spawn(async move {
-            run_single_probe(target, proxy, is_proxied, route_label).await
-        });
+        set.spawn(async move { run_single_probe(target, proxy, is_proxied, route_label).await });
     }
 
     let mut results = Vec::new();
@@ -375,20 +373,22 @@ async fn run_single_probe(
     let proxy_for_block = proxy;
 
     let probe_res = tokio::task::spawn_blocking(move || {
-        crate::http_agent::call_with_proxy(proxy_for_block.as_deref(), |agent| match target.method {
-            ProbeMethod::Get { ua, referer } => {
-                let mut req = agent.get(&probe_url).header("User-Agent", ua);
-                if let Some(ref_val) = referer {
-                    req = req.header("Referer", ref_val);
+        crate::http_agent::call_with_proxy(proxy_for_block.as_deref(), |agent| {
+            match target.method {
+                ProbeMethod::Get { ua, referer } => {
+                    let mut req = agent.get(&probe_url).header("User-Agent", ua);
+                    if let Some(ref_val) = referer {
+                        req = req.header("Referer", ref_val);
+                    }
+                    req.call()
                 }
-                req.call()
+                ProbeMethod::PostJson { ua, body } => agent
+                    .post(&probe_url)
+                    .header("User-Agent", ua)
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json")
+                    .send(body),
             }
-            ProbeMethod::PostJson { ua, body } => agent
-                .post(&probe_url)
-                .header("User-Agent", ua)
-                .header("Content-Type", "application/json")
-                .header("Accept", "application/json")
-                .send(body),
         })
     })
     .await;

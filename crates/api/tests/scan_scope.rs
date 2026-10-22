@@ -1,8 +1,8 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use std::path::PathBuf;
 use domain::MediaKind;
+use std::path::PathBuf;
 use support::library_presence::PresenceFixture;
 
 #[tokio::test]
@@ -45,7 +45,12 @@ async fn full_movie_scan_skips_nested_independent_library() {
     assert_eq!(rows[0].file.path, parent_file);
 
     // Nested file was NOT registered in ledger
-    assert!(guard.file_coverage_by_path(&nested_file.display().to_string()).unwrap().is_none());
+    assert!(
+        guard
+            .file_coverage_by_path(&nested_file.display().to_string())
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -93,9 +98,19 @@ async fn full_video_scan_skips_nested_independent_library() {
 
     let store_arc = fix.state.store();
     let guard = store_arc.lock();
-    assert!(guard.file_coverage_by_path(&p_file.display().to_string()).unwrap().is_some());
+    assert!(
+        guard
+            .file_coverage_by_path(&p_file.display().to_string())
+            .unwrap()
+            .is_some()
+    );
     // Nested file was NOT registered under parent video library!
-    assert!(guard.file_coverage_by_path(&n_file.display().to_string()).unwrap().is_none());
+    assert!(
+        guard
+            .file_coverage_by_path(&n_file.display().to_string())
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -122,7 +137,12 @@ async fn rescanning_restored_movie_clears_missing_without_overwriting_probe_qual
                 1000,
             )
             .unwrap();
-        assert!(guard.missing_at_by_path().unwrap().contains_key(row.path.to_str().unwrap()));
+        assert!(
+            guard
+                .missing_at_by_path()
+                .unwrap()
+                .contains_key(row.path.to_str().unwrap())
+        );
     }
 
     // Restore file on disk
@@ -134,7 +154,12 @@ async fn rescanning_restored_movie_clears_missing_without_overwriting_probe_qual
 
     // missing_at must be cleared, ledger row and media id preserved
     let guard = store_arc.lock();
-    assert!(!guard.missing_at_by_path().unwrap().contains_key(row.path.to_str().unwrap()));
+    assert!(
+        !guard
+            .missing_at_by_path()
+            .unwrap()
+            .contains_key(row.path.to_str().unwrap())
+    );
     let loaded = guard.file_coverage_by_id(row.file_id).unwrap().unwrap();
     assert_eq!(loaded.file.file_id, row.file_id);
     assert_eq!(loaded.file.media_id, media_id);

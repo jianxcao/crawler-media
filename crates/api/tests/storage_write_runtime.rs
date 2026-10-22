@@ -1,13 +1,13 @@
 #[path = "support/mod.rs"]
 mod support;
 
+use domain::{
+    Confidence, FileCoverage, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile,
+    LibraryId, Media, MediaId, MediaKind, QualitySource, UnitKey,
+};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use domain::{
-    Confidence, FileCoverage, FilePresence, FilePublication, FileVersion, LedgerId,
-    LibraryFile, LibraryId, Media, MediaId, MediaKind, QualitySource, UnitKey,
-};
 use store::library_write::{FilePublication as StorePublication, WriteScope};
 use support::library_presence::PresenceFixture;
 
@@ -100,7 +100,9 @@ async fn scan_and_transfer_publication_atomic_file_writes() {
 
     {
         let store = store_arc.lock();
-        let report = store.publish_files(&scope, &[store_pub], 1000).expect("atomic publish");
+        let report = store
+            .publish_files(&scope, &[store_pub], 1000)
+            .expect("atomic publish");
         assert_eq!(report.inserted, 1);
         assert_eq!(report.updated, 0);
 
@@ -233,7 +235,6 @@ async fn claim_multi_episode_preserves_all_units() {
         assert_eq!(item.size_bytes, Some(1024 * 1024));
     }
 }
-
 
 #[tokio::test]
 async fn replacement_scan_advances_version_and_rejects_old_probe() {
@@ -410,18 +411,11 @@ async fn unknown_root_does_not_publish_missing() {
     let report = {
         let store = store_arc.lock();
         store
-            .apply_presence(
-                &scope,
-                &[],
-                store::library_write::PresenceMode::Prune,
-                1000,
-            )
+            .apply_presence(&scope, &[], store::library_write::PresenceMode::Prune, 1000)
             .unwrap()
     };
     assert_eq!(report.deleted, 0);
 }
-
-
 
 /// R01: a real POST scan over a replaced source (STRM A → B with identical stat)
 /// advances the FileVersion through the production scan writer; an old Probe
@@ -443,11 +437,19 @@ async fn actual_rescan_replaces_physical_source() {
             .unwrap()
             .expect("scanned row")
             .file;
-        (file.file_id, store.get_file_version(file.file_id).unwrap().unwrap())
+        (
+            file.file_id,
+            store.get_file_version(file.file_id).unwrap().unwrap(),
+        )
     };
 
     fs::write(&strm, "http://example.com/bbbb").unwrap();
-    fs::File::options().write(true).open(&strm).unwrap().set_modified(mtime).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&strm)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
     fix.scan_and_wait_completed(&fix.library_id).await;
 
     let store = store_arc.lock();
@@ -463,5 +465,9 @@ async fn actual_rescan_replaces_physical_source() {
         duration_ms: Some(1),
         details: None,
     };
-    assert!(!store.publish_probe_result(file_id, &old_probe, 9_000).unwrap());
+    assert!(
+        !store
+            .publish_probe_result(file_id, &old_probe, 9_000)
+            .unwrap()
+    );
 }

@@ -16,7 +16,7 @@ use tower::ServiceExt;
 use super::common::*;
 pub(crate) use super::common::{install_fake_ffprobe, probed_video, unprobeable_video};
 use super::mock_qbit::MockQbit;
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 pub const TOKEN: &str = "management-secret";
 pub const MATRIX_TITLE: &str = "The.Matrix.1999.2160p.BluRay.x265-GROUP";

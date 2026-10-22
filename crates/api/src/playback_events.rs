@@ -157,7 +157,9 @@ fn classify_legacy(
     match event {
         PlaybackEventKind::Start => EventDecision::Start,
         PlaybackEventKind::Progress => match previous {
-            Some(prev) if !legacy_target_matches(prev, ledger, target_unit) => EventDecision::Ignore,
+            Some(prev) if !legacy_target_matches(prev, ledger, target_unit) => {
+                EventDecision::Ignore
+            }
             _ => EventDecision::Update,
         },
         PlaybackEventKind::Stop => match previous {
@@ -175,7 +177,8 @@ fn legacy_target_matches(
     ledger: LedgerId,
     target_unit: Option<domain::UnitKey>,
 ) -> bool {
-    let same_file = prev.ledger_id.as_deref() == Some(&ledger.to_string()) || prev.ledger_id.is_none();
+    let same_file =
+        prev.ledger_id.as_deref() == Some(&ledger.to_string()) || prev.ledger_id.is_none();
     let same_unit = target_unit.is_none_or(|unit| {
         domain::UnitKey::new(prev.season.unwrap_or(-1), prev.episode.unwrap_or(-1)) == unit
     });

@@ -128,7 +128,11 @@ pub(crate) fn media_target(
 }
 
 /// 与 `library_id_for` 同义：所有已归属文件指向同一 Library 才给出 id，否则 `None`。
-fn library_id_for(read: &PlaybackRead, media: &Media, coverages: &[FileCoverage]) -> Option<String> {
+fn library_id_for(
+    read: &PlaybackRead,
+    media: &Media,
+    coverages: &[FileCoverage],
+) -> Option<String> {
     let mut ids = coverages
         .iter()
         .filter_map(|coverage| {

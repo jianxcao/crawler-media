@@ -195,7 +195,11 @@ impl Store {
     ///
     /// 生产 runner 不走这里：它必须先在 Store 锁外采集版本，再调用
     /// [`Self::record_scan_seen_stamps`]（P2-NEW-2）。
-    pub fn record_scan_seen(&self, operation_id: &str, paths: &[std::path::PathBuf]) -> Result<(), StoreError> {
+    pub fn record_scan_seen(
+        &self,
+        operation_id: &str,
+        paths: &[std::path::PathBuf],
+    ) -> Result<(), StoreError> {
         let stamps: Vec<(String, i64, i64, Option<String>)> = paths
             .iter()
             .map(|path| {
@@ -223,15 +227,15 @@ impl Store {
     pub fn scan_seen_is_current(&self, operation_id: &str, path: &str) -> Result<bool, StoreError> {
         let current = Self::scan_seen_stamp(Path::new(path));
         let checkpoints = self.scan_seen_checkpoints(operation_id, &[path.to_string()])?;
-        Ok(checkpoints.get(path).is_some_and(
-            |(mtime_ms, file_size, digest, ledger_current)| {
+        Ok(checkpoints
+            .get(path)
+            .is_some_and(|(mtime_ms, file_size, digest, ledger_current)| {
                 *ledger_current
                     && Self::scan_seen_stamp_matches(
                         &(*mtime_ms, *file_size, digest.clone()),
                         &current,
                     )
-            },
-        ))
+            }))
     }
 
     /// Clear seen entries when operation completes or is cancelled.

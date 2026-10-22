@@ -14,8 +14,8 @@ use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::Value;
+use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
-use store::test_support::{publish_fixture_file, FixtureFile};
 
 #[path = "management/common.rs"]
 mod common;
@@ -26,7 +26,11 @@ fn base_state(tmp: &tempfile::TempDir) -> ApiState {
         requests: Mutex::new(Vec::new()),
         bodies: HashMap::new(),
     });
-    state(tmp.path(), fixtures, Arc::new(MemoryDownloader::new(tmp.path().join("stage"))))
+    state(
+        tmp.path(),
+        fixtures,
+        Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
+    )
 }
 
 fn movie_library(state: &ApiState) -> (String, PathBuf) {
@@ -104,7 +108,9 @@ async fn nfo_metadata_still_drives_filter_and_sort() {
         &api_state,
         high,
         &root.join("High").join("High.mkv"),
-        Some("<movie><rating>8.5</rating><runtime>150</runtime><original_language>en</original_language></movie>"),
+        Some(
+            "<movie><rating>8.5</rating><runtime>150</runtime><original_language>en</original_language></movie>",
+        ),
     );
     let low = MediaId::new();
     insert_media(&api_state, low, "Low");
@@ -112,7 +118,9 @@ async fn nfo_metadata_still_drives_filter_and_sort() {
         &api_state,
         low,
         &root.join("Low").join("Low.mkv"),
-        Some("<movie><rating>5.5</rating><runtime>90</runtime><original_language>ja</original_language></movie>"),
+        Some(
+            "<movie><rating>5.5</rating><runtime>90</runtime><original_language>ja</original_language></movie>",
+        ),
     );
 
     let all = get_json(
@@ -194,7 +202,6 @@ async fn nested_libraries_keep_their_own_rows() {
     assert_eq!(child_rows.len(), 1);
     assert_eq!(child_rows[0]["file_count"], 1, "子库只应看到自己的文件");
 }
-
 
 // ---------------------------------------------------------------------------
 // 文件分页契约：每个已发布文件恰好出现一次，末页 `next_cursor` 为 null，
@@ -298,9 +305,8 @@ async fn walk_file_pages(
     let mut ids: Vec<String> = Vec::new();
     let mut rows: Vec<Value> = Vec::new();
     loop {
-        let mut url = format!(
-            "/api/v1/libraries/{library_id}/items/{media_id}/files?limit={limit}"
-        );
+        let mut url =
+            format!("/api/v1/libraries/{library_id}/items/{media_id}/files?limit={limit}");
         if let Some(after) = cursor.as_deref() {
             url.push_str(&format!("&after={}", urlencoding_encode(after)));
         }
@@ -362,7 +368,10 @@ async fn detail_file_pages_preserve_all_files() {
             let mut want: Vec<String> = expected.iter().map(|id| id.to_string()).collect();
             got.sort();
             want.sort();
-            assert_eq!(got, want, "count={count} limit={limit}: page union must be exact");
+            assert_eq!(
+                got, want,
+                "count={count} limit={limit}: page union must be exact"
+            );
             for row in &rows {
                 assert_eq!(row["publication"], "published");
                 assert!(row["presence"].is_string());
@@ -440,9 +449,17 @@ async fn pending_files_and_multi_unit_coverage_are_state_aware() {
     assert_eq!(files[0]["file_id"], multi.file_id.to_string());
     assert_eq!(files[0]["publication"], "published");
     let units_json = files[0]["units"].as_array().expect("units array");
-    assert_eq!(units_json.len(), 2, "a multi-unit file carries complete coverage");
+    assert_eq!(
+        units_json.len(),
+        2,
+        "a multi-unit file carries complete coverage"
+    );
     assert_eq!(units_json[0]["season"], 1);
     assert_eq!(units_json[0]["episode"], 1);
     assert_eq!(units_json[1]["episode"], 2);
-    assert_eq!(body["next_cursor"], Value::Null, "one file is the last page");
+    assert_eq!(
+        body["next_cursor"],
+        Value::Null,
+        "one file is the last page"
+    );
 }

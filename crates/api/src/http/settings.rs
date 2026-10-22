@@ -225,7 +225,9 @@ pub(crate) use super::browser_settings::{
 /// Discovers cookies from Chrome, updates existing sites, and returns discovered candidate sites.
 pub(crate) async fn sync_cdp_cookies(State(state): State<ApiState>) -> Response {
     let resolved_endpoint = {
-        let config = state.browser.effective_config()
+        let config = state
+            .browser
+            .effective_config()
             .map_err(|e| (StatusCode::BAD_REQUEST, "cdp.disabled", e.to_string()));
         match config {
             Ok(c) => match c.resolve(None) {

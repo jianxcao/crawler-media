@@ -221,8 +221,14 @@ fn next_up_blocking(
             // 整片没有坐标，排序键退化成 0（与旧 `Option<u32>` 的
             // `unwrap_or_default()` 同值），不能写成 `UNIT_WHOLE`（-1）。
             (
-                item.snapshot.unit.map(|unit| unit.season).unwrap_or_default(),
-                item.snapshot.unit.map(|unit| unit.episode).unwrap_or_default(),
+                item.snapshot
+                    .unit
+                    .map(|unit| unit.season)
+                    .unwrap_or_default(),
+                item.snapshot
+                    .unit
+                    .map(|unit| unit.episode)
+                    .unwrap_or_default(),
             )
         });
         if let Some(episode) = group.into_iter().find(|item| !item.snapshot.played) {

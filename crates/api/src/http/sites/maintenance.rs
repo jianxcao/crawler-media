@@ -18,7 +18,9 @@ pub(crate) async fn verify_site(State(state): State<ApiState>, Path(id): Path<St
     let outcome = state
         .http_work
         .run(SITE_READ_DEADLINE, move || {
-            state_for_work.indexer.search(std::slice::from_ref(&site), " ")
+            state_for_work
+                .indexer
+                .search(std::slice::from_ref(&site), " ")
         })
         .await;
     let outcome = match outcome {
@@ -63,14 +65,15 @@ pub(crate) async fn site_login(State(state): State<ApiState>, Path(id): Path<Str
             })?;
             let bus = hooks::Bus::new();
             let creds = crate::check_in::store_sites(&state_for_work.store);
-            crate::site_maintenance::perform_login(&state_for_work, &site, &bus, &creds)
-                .map_err(|error| {
+            crate::site_maintenance::perform_login(&state_for_work, &site, &bus, &creds).map_err(
+                |error| {
                     (
                         StatusCode::BAD_REQUEST,
                         "site.login_failed",
                         error.to_string(),
                     )
-                })
+                },
+            )
         })
         .await;
     match result {
@@ -104,14 +107,15 @@ pub(crate) async fn site_check_in(
             })?;
             let bus = hooks::Bus::new();
             let creds = crate::check_in::store_sites(&state_for_work.store);
-            crate::site_maintenance::perform_check_in(&state_for_work, &site, &bus, &creds)
-                .map_err(|error| {
+            crate::site_maintenance::perform_check_in(&state_for_work, &site, &bus, &creds).map_err(
+                |error| {
                     (
                         StatusCode::BAD_REQUEST,
                         "site.check_in_failed",
                         error.to_string(),
                     )
-                })
+                },
+            )
         })
         .await;
     match result {

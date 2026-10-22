@@ -18,7 +18,7 @@ use std::str::FromStr;
 
 use crate::http::{err, ok, ok_list};
 use crate::management::ApiState;
-use crate::store::{library_query, Library};
+use crate::store::{Library, library_query};
 
 mod assets;
 mod cover;
@@ -32,13 +32,13 @@ pub(crate) use cover::{default_cover_options, render_cover_jpeg};
 mod query;
 mod visibility;
 pub(crate) use query::{
-    browse_filter_from_query, browse_order_from_query, browse_store_error, browse_work_error,
-    BROWSE_DEADLINE,
+    BROWSE_DEADLINE, browse_filter_from_query, browse_order_from_query, browse_store_error,
+    browse_work_error,
 };
 pub(crate) use visibility::{
-    artwork_url, backdrop_path, backdrop_path_with, clear_library_cover_checked, file_visible_to_user,
-    library_cover_path, library_for_file, library_for_file_strict, library_visible,
-    library_visible_with_role, missing_library, require_visible_library,
+    artwork_url, backdrop_path, backdrop_path_with, clear_library_cover_checked,
+    file_visible_to_user, library_cover_path, library_for_file, library_for_file_strict,
+    library_visible, library_visible_with_role, missing_library, require_visible_library,
 };
 
 /// GET /libraries?kind= — one entry per Library entity, defaults first;
@@ -87,7 +87,10 @@ pub(crate) async fn list_libraries(
         (facts, roster, is_admin)
     };
     let stats = match crate::library_statistics::collect_statistics_for_roster(
-        state.clone(), user_id, &roster, is_admin,
+        state.clone(),
+        user_id,
+        &roster,
+        is_admin,
     )
     .await
     {
@@ -342,9 +345,20 @@ pub(crate) async fn item_files(
     let Ok(media_id) = MediaId::from_str(&item_id) else {
         return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效");
     };
-    let limit = match query.get("limit").map(String::as_str).unwrap_or("50").parse::<usize>() {
+    let limit = match query
+        .get("limit")
+        .map(String::as_str)
+        .unwrap_or("50")
+        .parse::<usize>()
+    {
         Ok(limit @ 1..=100) => limit,
-        _ => return err(StatusCode::BAD_REQUEST, "library.invalid", "limit 必须在 1..=100 之间"),
+        _ => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "library.invalid",
+                "limit 必须在 1..=100 之间",
+            );
+        }
     };
     let after = query.get("after").map(String::as_str);
     let page = {
@@ -372,7 +386,11 @@ pub(crate) async fn item_files(
     };
     let mut files = Vec::with_capacity(page.files.len());
     for file in &page.files {
-        let units = file_units.iter().find(|(id, _)| *id == file.file_id).map(|(_, units)| units.as_slice()).unwrap_or_default();
+        let units = file_units
+            .iter()
+            .find(|(id, _)| *id == file.file_id)
+            .map(|(_, units)| units.as_slice())
+            .unwrap_or_default();
         let tracks = match details.get(&file.file_id) {
             Some(details) => match tracks_from_details(details) {
                 Ok(tracks) => tracks,
@@ -444,14 +462,13 @@ fn item_file_json(
 fn tracks_from_details(
     details: &store::files::FileDetails,
 ) -> Result<library::Tracks, store::StoreError> {
-    let video = match details.video_json.as_deref() {
-        Some(raw) => Some(
-            serde_json::from_str::<library::VideoTrack>(raw).map_err(|error| {
-                store::StoreError::Invalid(format!("file details video: {error}"))
-            })?,
-        ),
-        None => None,
-    };
+    let video =
+        match details.video_json.as_deref() {
+            Some(raw) => Some(serde_json::from_str::<library::VideoTrack>(raw).map_err(
+                |error| store::StoreError::Invalid(format!("file details video: {error}")),
+            )?),
+            None => None,
+        };
     let audio = serde_json::from_str::<Vec<library::AudioTrack>>(&details.audio_json)
         .map_err(|error| store::StoreError::Invalid(format!("file details audio: {error}")))?;
     let subtitles = serde_json::from_str::<Vec<library::SubtitleTrack>>(&details.subtitle_json)
@@ -509,7 +526,11 @@ pub(crate) async fn item_episodes(
         let store = state.store.lock();
         for episode in &episodes {
             let unit_state = match crate::http::playback::effective_watch_state(
-                &store, user_id, media_id, episode.season as i32, episode.episode as i32,
+                &store,
+                user_id,
+                media_id,
+                episode.season as i32,
+                episode.episode as i32,
             ) {
                 Ok(state) => state,
                 Err(error) => return browse_store_error(error),
@@ -569,4 +590,3 @@ fn still_url(reference: &str) -> String {
         format!("https://image.tmdb.org/t/p/w300{reference}")
     }
 }
-

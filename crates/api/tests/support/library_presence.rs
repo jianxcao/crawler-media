@@ -5,12 +5,14 @@ use api::library_presence::LibraryFileRead;
 use api::management::{ApiState, router};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use domain::{Confidence, LedgerId, LibraryFile, Media, MediaId, MediaKind, QualitySource, UserId, UserRole};
+use domain::{
+    Confidence, LedgerId, LibraryFile, Media, MediaId, MediaKind, QualitySource, UserId, UserRole,
+};
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use parking_lot::Mutex;
 use serde_json::Value;
+use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
-use store::test_support::{publish_fixture_file, FixtureFile};
 
 struct NoFetch;
 impl Fetcher for NoFetch {
@@ -24,7 +26,10 @@ impl downloader::Downloader for MemoryDownloader {
     fn add(&self, _: &domain::Torrent) -> Result<(), downloader::DownloaderError> {
         Ok(())
     }
-    fn completed_files(&self, _: &domain::Torrent) -> Result<Vec<PathBuf>, downloader::DownloaderError> {
+    fn completed_files(
+        &self,
+        _: &domain::Torrent,
+    ) -> Result<Vec<PathBuf>, downloader::DownloaderError> {
         Ok(vec![])
     }
 }
@@ -241,7 +246,8 @@ impl PresenceFixture {
         uri: &str,
         token: Option<&str>,
     ) -> (StatusCode, Value) {
-        self.request_with_body(method, uri, token, Value::Null).await
+        self.request_with_body(method, uri, token, Value::Null)
+            .await
     }
 
     pub async fn request_with_body(
@@ -286,7 +292,9 @@ impl PresenceFixture {
         if status != StatusCode::ACCEPTED {
             return (status, res);
         }
-        let op_id = res["data"]["operation_id"].as_str().expect("must return operation_id");
+        let op_id = res["data"]["operation_id"]
+            .as_str()
+            .expect("must return operation_id");
         for _ in 0..100 {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let (poll_status, poll_res) = self
@@ -299,9 +307,18 @@ impl PresenceFixture {
             if poll_status == StatusCode::OK {
                 let status_str = poll_res["data"]["status"].as_str().unwrap_or("");
                 match status_str {
-                    "completed" | "partial" => return (StatusCode::OK, poll_res["data"]["report"].clone()),
-                    "cancelled" => return (StatusCode::CONFLICT, poll_res["data"]["report"].clone()),
-                    "failed" => return (StatusCode::INTERNAL_SERVER_ERROR, poll_res["data"]["report"].clone()),
+                    "completed" | "partial" => {
+                        return (StatusCode::OK, poll_res["data"]["report"].clone());
+                    }
+                    "cancelled" => {
+                        return (StatusCode::CONFLICT, poll_res["data"]["report"].clone());
+                    }
+                    "failed" => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            poll_res["data"]["report"].clone(),
+                        );
+                    }
                     _ => {}
                 }
             }

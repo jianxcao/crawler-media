@@ -177,23 +177,29 @@ fn pick_locale_row<'a>(
 /// effective origin is a manual override wins over the input as well, so details, cards and
 /// protocol hydration show the same value the composer persisted.
 pub(crate) fn fill_from_adopted(base: &mut MetadataFields, adopted: &EffectiveMetadata) {
-    fill(&mut base.title, Some(adopted.title.clone()).filter(|t| !t.is_empty()));
+    fill(
+        &mut base.title,
+        Some(adopted.title.clone()).filter(|t| !t.is_empty()),
+    );
     let composed = serde_json::from_str::<serde_json::Value>(&adopted.details_json)
         .ok()
         .and_then(|value| value.get("fields").cloned())
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
-    let manual: Vec<String> = serde_json::from_str::<serde_json::Value>(&adopted.field_origins_json)
-        .ok()
-        .and_then(|value| value.as_object().cloned())
-        .map(|origins| {
-            origins
-                .into_iter()
-                .filter(|(_, origin)| origin.get("source").and_then(|s| s.as_str()) == Some("manual"))
-                .map(|(field, _)| field)
-                .collect()
-        })
-        .unwrap_or_default();
+    let manual: Vec<String> =
+        serde_json::from_str::<serde_json::Value>(&adopted.field_origins_json)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .map(|origins| {
+                origins
+                    .into_iter()
+                    .filter(|(_, origin)| {
+                        origin.get("source").and_then(|s| s.as_str()) == Some("manual")
+                    })
+                    .map(|(field, _)| field)
+                    .collect()
+            })
+            .unwrap_or_default();
     let Ok(serde_json::Value::Object(mut merged)) = serde_json::to_value(&*base) else {
         return;
     };

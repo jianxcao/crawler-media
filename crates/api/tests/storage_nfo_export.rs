@@ -33,7 +33,10 @@ impl ExportCatalog {
     }
 
     fn title(&self) -> String {
-        self.title.lock().clone().unwrap_or_else(|| "Fixture Movie".into())
+        self.title
+            .lock()
+            .clone()
+            .unwrap_or_else(|| "Fixture Movie".into())
     }
 
     fn set_overview(&self, overview: &str) {
@@ -531,5 +534,8 @@ async fn provider_title_changes_when_only_plot_was_edited() {
         .unwrap()
         .metadata;
     assert_eq!(after.title.value().map(String::as_str), Some("TITLE V2"));
-    assert_eq!(after.overview.value().map(String::as_str), Some("USER PLOT"));
+    assert_eq!(
+        after.overview.value().map(String::as_str),
+        Some("USER PLOT")
+    );
 }

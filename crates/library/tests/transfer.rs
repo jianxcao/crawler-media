@@ -24,12 +24,20 @@ fn hardlink_replacement_preserves_old_seeding_bytes() {
     assert_eq!(fs::read(&destination).unwrap(), b"old release bytes");
     assert_eq!(fs::read(&old_source).unwrap(), b"old release bytes");
     assert_eq!(fs::read(&new_source).unwrap(), b"new release bytes");
-    assert_eq!(fs::read_dir(destination.parent().unwrap()).unwrap().count(), 1, "no temp left behind");
+    assert_eq!(
+        fs::read_dir(destination.parent().unwrap()).unwrap().count(),
+        1,
+        "no temp left behind"
+    );
 }
 
 #[test]
 fn transfer_never_overwrites_existing_destination_in_any_mode() {
-    for mode in [TransferMode::Copy, TransferMode::Move, TransferMode::Hardlink] {
+    for mode in [
+        TransferMode::Copy,
+        TransferMode::Move,
+        TransferMode::Hardlink,
+    ] {
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("new.mkv");
         let dest = tmp.path().join("library/movie.mkv");
@@ -37,10 +45,17 @@ fn transfer_never_overwrites_existing_destination_in_any_mode() {
         fs::write(&src, b"new").unwrap();
         fs::write(&dest, b"user file").unwrap();
         let error = transfer_file(&src, &dest, mode).unwrap_err();
-        assert!(matches!(&error, library::LibraryError::Io(e) if e.kind() == std::io::ErrorKind::AlreadyExists), "{mode:?}: {error:?}");
+        assert!(
+            matches!(&error, library::LibraryError::Io(e) if e.kind() == std::io::ErrorKind::AlreadyExists),
+            "{mode:?}: {error:?}"
+        );
         assert_eq!(fs::read(&dest).unwrap(), b"user file", "{mode:?}");
         assert!(src.is_file(), "{mode:?}: source kept on conflict");
-        assert_eq!(fs::read_dir(dest.parent().unwrap()).unwrap().count(), 1, "{mode:?}: no temp left");
+        assert_eq!(
+            fs::read_dir(dest.parent().unwrap()).unwrap().count(),
+            1,
+            "{mode:?}: no temp left"
+        );
     }
 }
 
@@ -68,11 +83,22 @@ fn concurrent_transfers_to_one_destination_publish_exactly_one() {
             })
         })
         .collect();
-    let wins = handles.into_iter().map(|h| h.join().unwrap()).filter(|ok| *ok).count();
+    let wins = handles
+        .into_iter()
+        .map(|h| h.join().unwrap())
+        .filter(|ok| *ok)
+        .count();
     assert_eq!(wins, 1, "exactly one writer publishes");
     let bytes = fs::read(&dest).unwrap();
-    assert!(bytes.iter().all(|b| *b == bytes[0]), "published file is one intact source");
-    assert_eq!(fs::read_dir(dest.parent().unwrap()).unwrap().count(), 1, "no temps left");
+    assert!(
+        bytes.iter().all(|b| *b == bytes[0]),
+        "published file is one intact source"
+    );
+    assert_eq!(
+        fs::read_dir(dest.parent().unwrap()).unwrap().count(),
+        1,
+        "no temps left"
+    );
 }
 
 #[test]
@@ -138,6 +164,10 @@ fn same_device_move_is_a_rename_without_copy() {
     let inode = fs::metadata(&src).unwrap().ino();
     transfer_file(&src, &dest, TransferMode::Move).unwrap();
     assert!(!src.exists(), "source moved away");
-    assert_eq!(fs::metadata(&dest).unwrap().ino(), inode, "same inode: no copy");
+    assert_eq!(
+        fs::metadata(&dest).unwrap().ino(),
+        inode,
+        "same inode: no copy"
+    );
     assert_eq!(fs::read(&dest).unwrap(), b"video");
 }

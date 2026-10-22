@@ -29,7 +29,10 @@ fn tmdb_movie_certification_priorities_pick_first_matching_country() {
         cert_country_priority: vec!["CN".into(), "US".into()],
     };
     let norm_cn = normalize_metadata("tmdb", EntityScope::Work, raw_payload, &pref_cn).unwrap();
-    assert_eq!(norm_cn.fields.content_rating, FieldValue::Value("15".into()));
+    assert_eq!(
+        norm_cn.fields.content_rating,
+        FieldValue::Value("15".into())
+    );
     let origin_cn = norm_cn.field_origins.get("content_rating").unwrap();
     assert_eq!(origin_cn.selection, SourceSelection::Certification);
     assert_eq!(origin_cn.certification_country.as_deref(), Some("CN"));
@@ -40,7 +43,10 @@ fn tmdb_movie_certification_priorities_pick_first_matching_country() {
         cert_country_priority: vec!["GB".into(), "US".into(), "CN".into()],
     };
     let norm_gb = normalize_metadata("tmdb", EntityScope::Work, raw_payload, &pref_gb).unwrap();
-    assert_eq!(norm_gb.fields.content_rating, FieldValue::Value("12A".into()));
+    assert_eq!(
+        norm_gb.fields.content_rating,
+        FieldValue::Value("12A".into())
+    );
     let origin_gb = norm_gb.field_origins.get("content_rating").unwrap();
     assert_eq!(origin_gb.selection, SourceSelection::Certification);
     assert_eq!(origin_gb.certification_country.as_deref(), Some("GB"));
@@ -149,15 +155,23 @@ fn complete_source_metadata_parses_all_fields_with_origins() {
     assert_eq!(norm.fields.runtime_minutes.value(), Some(&100));
     assert_eq!(norm.fields.rating.value(), Some(&8.5));
     assert_eq!(norm.fields.vote_count.value(), Some(&1200));
-    assert_eq!(norm.fields.content_rating.value().map(String::as_str), Some("R"));
-    assert_eq!(norm.fields.countries.value().map(|c| c.as_slice()), Some(&["US".to_string()][..]));
+    assert_eq!(
+        norm.fields.content_rating.value().map(String::as_str),
+        Some("R")
+    );
+    assert_eq!(
+        norm.fields.countries.value().map(|c| c.as_slice()),
+        Some(&["US".to_string()][..])
+    );
     let cast = norm.fields.cast.value().unwrap();
     assert_eq!(cast.len(), 1);
     assert_eq!(cast[0].name, "Actor A");
     assert_eq!(cast[0].role.as_deref(), Some("Hero"));
 
     assert_eq!(
-        norm.field_origins.get("content_rating").and_then(|o| o.certification_country.as_deref()),
+        norm.field_origins
+            .get("content_rating")
+            .and_then(|o| o.certification_country.as_deref()),
         Some("US")
     );
     assert!(norm.field_origins.contains_key("runtime_minutes"));
@@ -165,4 +179,3 @@ fn complete_source_metadata_parses_all_fields_with_origins() {
     assert!(norm.field_origins.contains_key("countries"));
     assert!(norm.field_origins.contains_key("cast"));
 }
-

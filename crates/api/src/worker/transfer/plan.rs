@@ -32,7 +32,10 @@ fn destination_root_id(
 ) -> Result<String, String> {
     let mut best: Option<(usize, String)> = None;
     let mut ambiguous = false;
-    for root in store.list_library_roots().map_err(|error| error.to_string())? {
+    for root in store
+        .list_library_roots()
+        .map_err(|error| error.to_string())?
+    {
         if root.library_id.as_deref() != Some(library_id) || !root.enabled {
             continue;
         }
@@ -86,11 +89,15 @@ pub(crate) fn resolve_transfer_plan(
         crate::directory::transfer_plan_for_library(&store, media.kind, Some(&library.id))
             .map_err(|e| e.to_string())?;
     let root_id = destination_root_id(&store, &library.id, &root)?;
-    let config_revision = store.library_config_revision(&library.id).map_err(|error| {
-        tracing::error!(library_id = %library.id, %error, "读取 Library 配置版本失败");
-        error.to_string()
-    })?;
-    let naming = store.naming_pattern(media.kind).map_err(|e| e.to_string())?;
+    let config_revision = store
+        .library_config_revision(&library.id)
+        .map_err(|error| {
+            tracing::error!(library_id = %library.id, %error, "读取 Library 配置版本失败");
+            error.to_string()
+        })?;
+    let naming = store
+        .naming_pattern(media.kind)
+        .map_err(|e| e.to_string())?;
     let cfg = store.get_scrape_config().map_err(|e| e.to_string())?;
     let fingerprint = store
         .read_fingerprint(&library.id, media.id)
@@ -180,7 +187,10 @@ pub(super) fn validate_transfer_plan_at(
     plan: &TransferPlan,
 ) -> Result<(), String> {
     lease.control().check().map_err(|e| e.to_string())?;
-    if !store.library_accepts_work(lease.library_id()).map_err(|e| e.to_string())? {
+    if !store
+        .library_accepts_work(lease.library_id())
+        .map_err(|e| e.to_string())?
+    {
         return Err("目标 Library 正在删除或已不存在".into());
     }
     let fingerprint_changed = match fingerprint {
@@ -193,24 +203,40 @@ pub(super) fn validate_transfer_plan_at(
         }
         None => false,
     };
-    let library = store.get_library(&plan.library_id).map_err(|e| e.to_string())?;
+    let library = store
+        .get_library(&plan.library_id)
+        .map_err(|e| e.to_string())?;
     let (root, mode, scrape) = crate::directory::transfer_plan_for_library(
-        store, plan.library.kind, Some(&plan.library_id),
-    ).map_err(|e| e.to_string())?;
+        store,
+        plan.library.kind,
+        Some(&plan.library_id),
+    )
+    .map_err(|e| e.to_string())?;
     let root_id = destination_root_id(store, &plan.library_id, &root)?;
-    let config_revision = store.library_config_revision(&plan.library_id).map_err(|e| e.to_string())?;
-    let naming = store.naming_pattern(plan.library.kind).map_err(|e| e.to_string())?;
+    let config_revision = store
+        .library_config_revision(&plan.library_id)
+        .map_err(|e| e.to_string())?;
+    let naming = store
+        .naming_pattern(plan.library.kind)
+        .map_err(|e| e.to_string())?;
     let cfg = store.get_scrape_config().map_err(|e| e.to_string())?;
     // Roots and global settings are not all covered by the scoped fingerprint.
     // Compare the actual plan as well, including changes before the facts snapshot.
     if fingerprint_changed
         || lease.library_id() != plan.library_id
         || library.as_ref() != Some(&plan.library)
-        || root != plan.root || root_id != plan.root_id
+        || root != plan.root
+        || root_id != plan.root_id
         || config_revision != plan.config_revision
-        || mode != plan.mode || scrape != plan.scrape
-        || naming != plan.naming || (scrape && cfg.effective.mirror_nfo) != plan.nfo
-        || store.get_subscribe(subscribe.id).map_err(|e| e.to_string())?.as_ref() != Some(subscribe)
+        || mode != plan.mode
+        || scrape != plan.scrape
+        || naming != plan.naming
+        || (scrape && cfg.effective.mirror_nfo) != plan.nfo
+        || store
+            .get_subscribe(subscribe.id)
+            .map_err(|e| e.to_string())?
+            .as_ref()
+            != Some(subscribe)
     {
         tracing::warn!(subscribe_id = %subscribe.id, library_id = %plan.library_id,
             "Transfer source or Library configuration changed");

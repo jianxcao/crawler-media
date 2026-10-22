@@ -4,8 +4,8 @@
 //! refresh-target decisions, freeze) in `preflight`, then driven through its
 //! persisted phases by `apply`.
 
-mod preflight;
 pub mod apply;
+mod preflight;
 mod references;
 
 pub(crate) use preflight::{FrozenPair, frozen_of_plan, merge_holder, refresh_target_conflicts};

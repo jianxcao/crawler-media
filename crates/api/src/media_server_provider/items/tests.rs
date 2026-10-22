@@ -93,14 +93,8 @@ fn series_rollup_honours_the_whole_show_mark() {
         10,
     )];
     let index = unit_index(&units);
-    let (played, _, unplayed) = unit_counts_from_snapshot(
-        &index,
-        &file,
-        (1, 1),
-        &media,
-        true,
-        &two_episodes(media.id),
-    );
+    let (played, _, unplayed) =
+        unit_counts_from_snapshot(&index, &file, (1, 1), &media, true, &two_episodes(media.id));
     assert!(played, "whole-show mark must make every episode played");
     assert_eq!(unplayed, Some(0));
 }
@@ -121,14 +115,8 @@ fn series_rollup_keeps_a_newer_episode_mark() {
         unit(media.id, 1, 2, true, 5),
     ];
     let index = unit_index(&units);
-    let (played, _, unplayed) = unit_counts_from_snapshot(
-        &index,
-        &file,
-        (1, 1),
-        &media,
-        true,
-        &two_episodes(media.id),
-    );
+    let (played, _, unplayed) =
+        unit_counts_from_snapshot(&index, &file, (1, 1), &media, true, &two_episodes(media.id));
     assert!(
         !played,
         "a newer episode unmark must win over the whole-show mark"

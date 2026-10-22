@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use domain::MediaId;
+use std::sync::Arc;
 
 pub mod cache;
 pub mod http;

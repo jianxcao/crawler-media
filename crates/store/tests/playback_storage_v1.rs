@@ -1,14 +1,14 @@
 use domain::{
     Confidence, EntityScope, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile,
-    LibraryId, Media, MediaId, MediaKind, PhysicalSourceId, QualitySource, TimelineMode, TypedItemId, UnitKey,
-    UnitScope, UserId,
+    LibraryId, Media, MediaId, MediaKind, PhysicalSourceId, QualitySource, TimelineMode,
+    TypedItemId, UnitKey, UnitScope, UserId,
 };
+use store::Store;
 use store::library_write::{FilePublication as StorePublication, WriteScope};
 use store::playback::{
     BoundPlaybackEvent, EventOutcome, PlaybackEventType, PlaybackMutation, ResolvedResume,
     ResumeStatus,
 };
-use store::Store;
 
 fn create_media(store: &Store, id: &str, title: &str, kind: MediaKind) -> Media {
     let m = Media {
@@ -28,12 +28,20 @@ fn create_media(store: &Store, id: &str, title: &str, kind: MediaKind) -> Media 
     m
 }
 
-fn create_library(store: &Store, name: &str, kind: MediaKind, root_path: &str) -> (store::Library, String) {
+fn create_library(
+    store: &Store,
+    name: &str,
+    kind: MediaKind,
+    root_path: &str,
+) -> (store::Library, String) {
     let lib = store
         .create_library(kind, name, &[root_path], "everyone", true, &[])
         .unwrap();
     let roots = store.list_library_roots().unwrap();
-    let root = roots.into_iter().find(|r| r.library_id == Some(lib.id.clone())).unwrap();
+    let root = roots
+        .into_iter()
+        .find(|r| r.library_id == Some(lib.id.clone()))
+        .unwrap();
     (lib, root.id)
 }
 
@@ -128,14 +136,28 @@ fn playback_resolve_and_mutation_lifecycle() {
     create_media(&store, media_id, "Show", MediaKind::Tv);
 
     let fid = "00000000-0000-0000-0000-000000000011";
-    let file = make_file(fid, &lib.id, &root_id, media_id, "Show/S01E01.mkv", MediaKind::Tv, 2_400_000);
-    store.publish_files(&scope, &[StorePublication {
-        file: &file,
-        units: &[UnitKey::new(1, 1)],
-        expected_version: None,
-        nfo_observation: None,
-        probe_required: false,
-    }], 1000).unwrap();
+    let file = make_file(
+        fid,
+        &lib.id,
+        &root_id,
+        media_id,
+        "Show/S01E01.mkv",
+        MediaKind::Tv,
+        2_400_000,
+    );
+    store
+        .publish_files(
+            &scope,
+            &[StorePublication {
+                file: &file,
+                units: &[UnitKey::new(1, 1)],
+                expected_version: None,
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            1000,
+        )
+        .unwrap();
 
     let user_id: UserId = "00000000-0000-0000-0000-000000000099".parse().unwrap();
     let item_id = TypedItemId::Unit {
@@ -144,7 +166,9 @@ fn playback_resolve_and_mutation_lifecycle() {
     };
 
     // 1. Initial resolve: NoProgress
-    let res = store.resolve_playback(user_id, &item_id, None, None).expect("resolve_playback");
+    let res = store
+        .resolve_playback(user_id, &item_id, None, None)
+        .expect("resolve_playback");
     assert_eq!(res.status, ResumeStatus::NoProgress);
     assert_eq!(res.start_ms, 0);
 
@@ -157,7 +181,10 @@ fn playback_resolve_and_mutation_lifecycle() {
         generation,
         event_sequence: Some(1),
         item: item_id.clone(),
-        source_id: PhysicalSourceId { file_id: file.file_id, revision: 1 },
+        source_id: PhysicalSourceId {
+            file_id: file.file_id,
+            revision: 1,
+        },
         source_version: "v1".into(),
         position_ms: 120_000,
         duration_ms: Some(2_400_000),
@@ -172,26 +199,37 @@ fn playback_resolve_and_mutation_lifecycle() {
         event_type: PlaybackEventType::Progress,
     };
 
-    let outcome = store.commit_playback_event(&event, 1000).expect("commit_playback_event");
+    let outcome = store
+        .commit_playback_event(&event, 1000)
+        .expect("commit_playback_event");
     assert_eq!(outcome, EventOutcome::Applied);
 
     // 3. Resolve again: Compatible, starts at 120,000ms
-    let res2 = store.resolve_playback(user_id, &item_id, None, None).expect("resolve_playback");
+    let res2 = store
+        .resolve_playback(user_id, &item_id, None, None)
+        .expect("resolve_playback");
     assert_eq!(res2.status, ResumeStatus::Compatible);
     assert_eq!(res2.start_ms, 120_000);
 
     // 4. Mark played via mutation
     let mutation = PlaybackMutation {
         user_id,
-        scope: UnitScope::Episode { season: 1, episode: 1 },
+        scope: UnitScope::Episode {
+            season: 1,
+            episode: 1,
+        },
         played: Some(true),
         favorite: Some(true),
         expected_generation: None,
     };
-    store.mutate_playback(media_id.parse().unwrap(), &mutation, 2000).expect("mutate_playback");
+    store
+        .mutate_playback(media_id.parse().unwrap(), &mutation, 2000)
+        .expect("mutate_playback");
 
     // 5. Resolve when played: AlreadyPlayed
-    let res3 = store.resolve_playback(user_id, &item_id, None, None).expect("resolve_playback");
+    let res3 = store
+        .resolve_playback(user_id, &item_id, None, None)
+        .expect("resolve_playback");
     assert_eq!(res3.status, ResumeStatus::AlreadyPlayed);
 }
 
@@ -210,14 +248,28 @@ fn playback_source_change_detection() {
     create_media(&store, media_id, "Show", MediaKind::Tv);
 
     let fid1 = "00000000-0000-0000-0000-000000000011";
-    let file1 = make_file(fid1, &lib.id, &root_id, media_id, "Show/S01E01.v1.mkv", MediaKind::Tv, 2_400_000);
-    store.publish_files(&scope, &[StorePublication {
-        file: &file1,
-        units: &[UnitKey::new(1, 1)],
-        expected_version: None,
-        nfo_observation: None,
-        probe_required: false,
-    }], 1000).unwrap();
+    let file1 = make_file(
+        fid1,
+        &lib.id,
+        &root_id,
+        media_id,
+        "Show/S01E01.v1.mkv",
+        MediaKind::Tv,
+        2_400_000,
+    );
+    store
+        .publish_files(
+            &scope,
+            &[StorePublication {
+                file: &file1,
+                units: &[UnitKey::new(1, 1)],
+                expected_version: None,
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            1000,
+        )
+        .unwrap();
 
     let user_id: UserId = "00000000-0000-0000-0000-000000000099".parse().unwrap();
     let item_id = TypedItemId::Unit {
@@ -234,7 +286,10 @@ fn playback_source_change_detection() {
         generation,
         event_sequence: Some(1),
         item: item_id.clone(),
-        source_id: PhysicalSourceId { file_id: file1.file_id, revision: 1 },
+        source_id: PhysicalSourceId {
+            file_id: file1.file_id,
+            revision: 1,
+        },
         source_version: "v1".into(),
         position_ms: 500_000,
         duration_ms: Some(2_400_000),
@@ -252,18 +307,42 @@ fn playback_source_change_detection() {
 
     // Now publish a newer version of the file (e.g. replace or upgraded release)
     let fid2 = "00000000-0000-0000-0000-000000000022";
-    let mut file2 = make_file(fid2, &lib.id, &root_id, media_id, "Show/S01E01.v2.mkv", MediaKind::Tv, 2_400_000);
+    let mut file2 = make_file(
+        fid2,
+        &lib.id,
+        &root_id,
+        media_id,
+        "Show/S01E01.v2.mkv",
+        MediaKind::Tv,
+        2_400_000,
+    );
     file2.version.revision = 2;
-    store.publish_files(&scope, &[StorePublication {
-        file: &file2,
-        units: &[UnitKey::new(1, 1)],
-        expected_version: None,
-        nfo_observation: None,
-        probe_required: false,
-    }], 1500).unwrap();
+    store
+        .publish_files(
+            &scope,
+            &[StorePublication {
+                file: &file2,
+                units: &[UnitKey::new(1, 1)],
+                expected_version: None,
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            1500,
+        )
+        .unwrap();
 
     // Resolve specifying the preferred source file2 -> Status must detect SourceChanged!
-    let res = store.resolve_playback(user_id, &item_id, Some(&PhysicalSourceId { file_id: file2.file_id, revision: 2 }), None).unwrap();
+    let res = store
+        .resolve_playback(
+            user_id,
+            &item_id,
+            Some(&PhysicalSourceId {
+                file_id: file2.file_id,
+                revision: 2,
+            }),
+            None,
+        )
+        .unwrap();
     assert_eq!(res.status, ResumeStatus::SourceChanged);
     assert_eq!(res.start_ms, 0, "Source changed must reset start_ms to 0");
 }

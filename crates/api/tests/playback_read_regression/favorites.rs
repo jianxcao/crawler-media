@@ -1,6 +1,6 @@
-use std::sync::Arc;
 use api::router;
 use domain::MediaId;
+use std::sync::Arc;
 use store::Store;
 
 use super::common::{

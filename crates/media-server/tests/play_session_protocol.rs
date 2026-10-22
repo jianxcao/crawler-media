@@ -60,16 +60,34 @@ impl MediaServerProvider for TestProvider {
     ) -> Result<Option<MediaItemSnapshot>, String> {
         Ok(None)
     }
-    async fn resolve_cover_bytes(&self, _user_id: Option<UserId>, _id: &str) -> Result<Option<Vec<u8>>, String> {
+    async fn resolve_cover_bytes(
+        &self,
+        _user_id: Option<UserId>,
+        _id: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
         Ok(None)
     }
-    async fn resolve_poster_bytes(&self, _user_id: Option<UserId>, _id: &str) -> Result<Option<Vec<u8>>, String> {
+    async fn resolve_poster_bytes(
+        &self,
+        _user_id: Option<UserId>,
+        _id: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
         Ok(None)
     }
-    async fn resolve_stream_source(&self, _user: UserId, _id: &str) -> Result<Option<(std::path::PathBuf, bool)>, String> {
+    async fn resolve_stream_source(
+        &self,
+        _user: UserId,
+        _id: &str,
+    ) -> Result<Option<(std::path::PathBuf, bool)>, String> {
         Ok(Some((std::path::PathBuf::from("/movies/test.mkv"), false)))
     }
-    async fn set_user_marks(&self, _user: UserId, _id: &str, _played: Option<bool>, _fav: Option<bool>) -> Result<bool, String> {
+    async fn set_user_marks(
+        &self,
+        _user: UserId,
+        _id: &str,
+        _played: Option<bool>,
+        _fav: Option<bool>,
+    ) -> Result<bool, String> {
         Ok(true)
     }
     async fn report_playback_event(
@@ -97,11 +115,14 @@ async fn sequence_and_id_length_validation() {
         .uri("/Sessions/Playing/Progress")
         .header("Authorization", "MediaBrowser Token=\"test\"")
         .header("Content-Type", "application/json")
-        .body(axum::body::Body::from(serde_json::to_vec(&json!({
-            "ItemId": "item1",
-            "PositionTicks": 100000,
-            "EventSequence": -1,
-        })).unwrap()))
+        .body(axum::body::Body::from(
+            serde_json::to_vec(&json!({
+                "ItemId": "item1",
+                "PositionTicks": 100000,
+                "EventSequence": -1,
+            }))
+            .unwrap(),
+        ))
         .unwrap();
 
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -114,11 +135,14 @@ async fn sequence_and_id_length_validation() {
         .uri("/Sessions/Playing/Progress")
         .header("Authorization", "MediaBrowser Token=\"test\"")
         .header("Content-Type", "application/json")
-        .body(axum::body::Body::from(serde_json::to_vec(&json!({
-            "ItemId": "item1",
-            "PositionTicks": 100000,
-            "PlaySessionId": long_id,
-        })).unwrap()))
+        .body(axum::body::Body::from(
+            serde_json::to_vec(&json!({
+                "ItemId": "item1",
+                "PositionTicks": 100000,
+                "PlaySessionId": long_id,
+            }))
+            .unwrap(),
+        ))
         .unwrap();
 
     let resp2 = app.oneshot(req2).await.unwrap();

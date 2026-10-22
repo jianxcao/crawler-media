@@ -150,11 +150,19 @@ fn season_pack_retry_only_reconciles_mapped_slots_without_forging_facts() {
         broken: Vec::new(),
     };
 
-    let outcome = collect_completed_with_destinations(added, &library::Ffprobe::default(), &existing_mappings).unwrap();
+    let outcome = collect_completed_with_destinations(
+        added,
+        &library::Ffprobe::default(),
+        &existing_mappings,
+    )
+    .unwrap();
 
     // E01 事实恢复，E02 绝不能被凭空赋予相同路径或事实！
     assert_eq!(
-        outcome.facts.get(Some(1), Some(1)).and_then(|f| f.path.clone()),
+        outcome
+            .facts
+            .get(Some(1), Some(1))
+            .and_then(|f| f.path.clone()),
         Some(dest1.display().to_string())
     );
     assert!(outcome.facts.get(Some(1), Some(2)).is_none());
@@ -243,7 +251,12 @@ fn stale_facts_pointing_at_missing_file_are_reconciled_to_new_destination() {
         broken: Vec::new(),
     };
 
-    let outcome = collect_completed_with_destinations(added, &library::Ffprobe::default(), &existing_mappings).unwrap();
+    let outcome = collect_completed_with_destinations(
+        added,
+        &library::Ffprobe::default(),
+        &existing_mappings,
+    )
+    .unwrap();
 
     // 陈旧的 facts 必须被修复指向 new_dest，分值提升为 100
     let fact = outcome.facts.get(Some(1), Some(1)).unwrap();

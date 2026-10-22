@@ -1,4 +1,4 @@
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 #[path = "management/common.rs"]
 mod common;
 use domain::{Media, MediaId, MediaKind};
@@ -123,7 +123,12 @@ async fn public_scan_recovers_existing_media_from_local_work_alias() {
             .probe_unit_recorded_for_ledger(&row.file.file_id.to_string())
             .unwrap()
     );
-    assert!(store.get_file_meta(&row.file.file_id.to_string()).unwrap().is_none());
+    assert!(
+        store
+            .get_file_meta(&row.file.file_id.to_string())
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(row.file.media_id, old.id);
     assert_eq!(row.units, vec![domain::UnitKey::new(1, 3)]);
     assert_eq!(
@@ -379,7 +384,10 @@ async fn incomplete_nfo_online_alias_rebinds_only_new_scanned_rows() {
             row.file.file_id
         );
     }
-    let untouched = store.file_coverage_by_path(&unrelated.path.display().to_string()).unwrap().unwrap();
+    let untouched = store
+        .file_coverage_by_path(&unrelated.path.display().to_string())
+        .unwrap()
+        .unwrap();
     assert_eq!(untouched.file.file_id, unrelated.file_id);
     assert_eq!(untouched.file.media_id, provisional.id);
     assert!(

@@ -99,7 +99,11 @@ impl Store {
         let ids = self.expired_log_ids(cutoff, batch_size)?;
         let has_more = ids.len() > batch_size;
         let ids = &ids[..ids.len().min(batch_size)];
-        let deleted = if dry_run { 0 } else { self.delete_log_ids(ids)? };
+        let deleted = if dry_run {
+            0
+        } else {
+            self.delete_log_ids(ids)?
+        };
         Ok(PlaybackRetentionBatch {
             scanned: ids.len(),
             candidates: ids.len(),
@@ -129,9 +133,10 @@ impl Store {
         for chunk in ids.chunks(DELETE_CHUNK) {
             let marks = vec!["?"; chunk.len()].join(",");
             let sql = format!("DELETE FROM playback_logs WHERE id IN ({marks})");
-            deleted += self
-                .library
-                .execute(&sql, rusqlite::params_from_iter(chunk.iter().map(String::as_str)))?;
+            deleted += self.library.execute(
+                &sql,
+                rusqlite::params_from_iter(chunk.iter().map(String::as_str)),
+            )?;
         }
         Ok(deleted)
     }

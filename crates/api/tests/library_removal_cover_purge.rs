@@ -111,10 +111,12 @@ async fn startup_reconciles_covers_left_by_an_interrupted_removal() {
         !cover.exists(),
         "startup reconciliation must finish the interrupted cleanup"
     );
-    assert!(restarted
-        .store()
-        .lock()
-        .get_library(&removed)
-        .unwrap()
-        .is_none());
+    assert!(
+        restarted
+            .store()
+            .lock()
+            .get_library(&removed)
+            .unwrap()
+            .is_none()
+    );
 }

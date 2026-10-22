@@ -8,8 +8,8 @@ use domain::{Media, MediaId, MediaKind, UserId};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use serde_json::{Value, json};
+use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
-use store::test_support::{publish_fixture_file, FixtureFile};
 
 struct NoFetch;
 impl Fetcher for NoFetch {
@@ -62,7 +62,12 @@ async fn wait_removal(app: &axum::Router, operation_id: &str) -> Value {
     for _ in 0..200 {
         let response = app
             .clone()
-            .oneshot(request("GET", &format!("/api/v1/users/removals/{operation_id}"), "admin-token", Value::Null))
+            .oneshot(request(
+                "GET",
+                &format!("/api/v1/users/removals/{operation_id}"),
+                "admin-token",
+                Value::Null,
+            ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -309,7 +314,10 @@ async fn interrupted_user_removal_stays_disabled_and_recovers() {
         .unwrap();
     assert_eq!(del_resp.status(), StatusCode::ACCEPTED);
     let del_body = body(del_resp).await;
-    let accepted = del_body["data"]["operation_id"].as_str().unwrap().to_string();
+    let accepted = del_body["data"]["operation_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert_eq!(del_body["data"]["state"], "pending");
 
     // 5. Verification of required assertions:
@@ -370,7 +378,12 @@ async fn interrupted_removal_reuses_operation_and_reports_failure() {
     let app = router(state.clone());
     let created = app
         .clone()
-        .oneshot(request("POST", "/api/v1/users", "admin-token", json!({ "login": "bob", "password": "bob-password" })))
+        .oneshot(request(
+            "POST",
+            "/api/v1/users",
+            "admin-token",
+            json!({ "login": "bob", "password": "bob-password" }),
+        ))
         .await
         .unwrap();
     let bob_id = json_data(created).await["id"].as_str().unwrap().to_string();
@@ -384,36 +397,62 @@ async fn interrupted_removal_reuses_operation_and_reports_failure() {
         let store = store.lock();
         store.finish_user_removal(uid).unwrap();
         store
-            .put_setting(&key, &json!({
-                "operation_id": accepted_operation, "user_id": bob_id, "phase": "finalizing",
-                "cursor": null, "error": null, "updated_at": 1
-            }).to_string())
+            .put_setting(
+                &key,
+                &json!({
+                    "operation_id": accepted_operation, "user_id": bob_id, "phase": "finalizing",
+                    "cursor": null, "error": null, "updated_at": 1
+                })
+                .to_string(),
+            )
             .unwrap();
     }
     let repeated_delete = app
         .clone()
-        .oneshot(request("DELETE", &format!("/api/v1/users/{bob_id}"), "admin-token", Value::Null))
+        .oneshot(request(
+            "DELETE",
+            &format!("/api/v1/users/{bob_id}"),
+            "admin-token",
+            Value::Null,
+        ))
         .await
         .unwrap();
     assert_eq!(repeated_delete.status(), StatusCode::ACCEPTED);
-    assert_eq!(body(repeated_delete).await["data"]["operation_id"], accepted_operation);
+    assert_eq!(
+        body(repeated_delete).await["data"]["operation_id"],
+        accepted_operation
+    );
     let status_after_user_deleted = wait_removal(&app, accepted_operation).await;
     assert_eq!(status_after_user_deleted["state"], "succeeded");
     // Once finished, a repeated DELETE answers with the same operation, not a new one.
     let again = app
         .clone()
-        .oneshot(request("DELETE", &format!("/api/v1/users/{bob_id}"), "admin-token", Value::Null))
+        .oneshot(request(
+            "DELETE",
+            &format!("/api/v1/users/{bob_id}"),
+            "admin-token",
+            Value::Null,
+        ))
         .await
         .unwrap();
     assert_eq!(again.status(), StatusCode::ACCEPTED);
-    assert_eq!(body(again).await["data"]["operation_id"], accepted_operation);
+    assert_eq!(
+        body(again).await["data"]["operation_id"],
+        accepted_operation
+    );
     let unknown = app
         .clone()
-        .oneshot(request("GET", "/api/v1/users/removals/nope", "admin-token", Value::Null))
+        .oneshot(request(
+            "GET",
+            "/api/v1/users/removals/nope",
+            "admin-token",
+            Value::Null,
+        ))
         .await
         .unwrap();
     assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
-    let pending_setting_remains_after_success = state.store().lock().get_setting(&key).unwrap().is_some();
+    let pending_setting_remains_after_success =
+        state.store().lock().get_setting(&key).unwrap().is_some();
     assert!(!pending_setting_remains_after_success);
 
     // An unreadable record is a visible recovery failure, not a silent Ok.

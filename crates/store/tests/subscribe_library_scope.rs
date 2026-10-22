@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use domain::{
-    Confidence, Coverage, FetchMode, FilterId, LedgerId, LibraryId, Media, MediaId,
-    MediaKind, QualitySource, Subscribe, SubscribeId, UserId,
+    Confidence, Coverage, FetchMode, FilterId, LedgerId, LibraryId, Media, MediaId, MediaKind,
+    QualitySource, Subscribe, SubscribeId, UserId,
 };
 use store::test_support::FixtureFile;
 use store::{Library, Store};
@@ -111,8 +111,7 @@ impl Fixture {
             filter_score: Some(score),
             ..Default::default()
         };
-        store::test_support::publish_fixture_file(&self.store, &row)
-            .unwrap();
+        store::test_support::publish_fixture_file(&self.store, &row).unwrap();
     }
 
     fn load(&self) -> SubscribeFacts {

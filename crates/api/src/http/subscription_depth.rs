@@ -270,14 +270,25 @@ pub(crate) fn wanted_json_with_air_dates(
         target_score,
         target_label: &target_label,
     };
-    crate::open_coverage::units(subscribe, media, facts, &pending, &history, air_dates.keys().copied())
-        .into_iter()
-        .map(|(season, episode)| wanted_unit_json(season, episode, &context))
-        .collect()
+    crate::open_coverage::units(
+        subscribe,
+        media,
+        facts,
+        &pending,
+        &history,
+        air_dates.keys().copied(),
+    )
+    .into_iter()
+    .map(|(season, episode)| wanted_unit_json(season, episode, &context))
+    .collect()
 }
 
 /// 一个 wanted 单元的详情 JSON（原 `wanted_json_with_air_dates` 的内联映射体，逐字搬移）。
-fn wanted_unit_json(season: Option<u32>, episode: Option<u32>, context: &WantedUnitContext<'_>) -> Value {
+fn wanted_unit_json(
+    season: Option<u32>,
+    episode: Option<u32>,
+    context: &WantedUnitContext<'_>,
+) -> Value {
     let fmt = crate::store::rfc3339_from_secs;
     let fact = context.facts.get(season, episode);
     let in_flight = context
@@ -353,15 +364,18 @@ fn current_coverage_label(
         .find(|row| {
             row.file.media_id == subscribe.media_id
                 && row.units.iter().any(|u| {
-                    u32::try_from(u.season).ok() == season && u32::try_from(u.episode).ok() == episode
+                    u32::try_from(u.season).ok() == season
+                        && u32::try_from(u.episode).ok() == episode
                 })
         })
-        .and_then(|row| match (row.file.resolution.as_deref(), row.file.codec.as_deref()) {
-            (Some(r), Some(c)) => Some(format!("{r} {c}")),
-            (Some(r), None) => Some(r.to_string()),
-            (None, Some(c)) => Some(c.to_string()),
-            (None, None) => None,
-        })
+        .and_then(
+            |row| match (row.file.resolution.as_deref(), row.file.codec.as_deref()) {
+                (Some(r), Some(c)) => Some(format!("{r} {c}")),
+                (Some(r), None) => Some(r.to_string()),
+                (None, Some(c)) => Some(c.to_string()),
+                (None, None) => None,
+            },
+        )
 }
 
 /// `status == "grabbed"` 时的下载器投递时点快照；其余状态为 `null`。

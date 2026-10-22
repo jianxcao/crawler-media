@@ -290,11 +290,18 @@ impl Store {
 
 /// Overrides of both Media that share a key must not set the same field differently: a
 /// user lock is never silently dropped by a merge (R21). Disjoint fields are merged.
-fn refuse_override_conflicts(conn: &Connection, survivor: &str, loser: &str) -> Result<(), StoreError> {
+fn refuse_override_conflicts(
+    conn: &Connection,
+    survivor: &str,
+    loser: &str,
+) -> Result<(), StoreError> {
     for (survivor_json, loser_json) in shared_override_pairs(conn, survivor, loser)? {
         let s: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&survivor_json)?;
         let l: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&loser_json)?;
-        if let Some(field) = l.iter().find_map(|(k, v)| s.get(k).filter(|sv| *sv != v).map(|_| k)) {
+        if let Some(field) = l
+            .iter()
+            .find_map(|(k, v)| s.get(k).filter(|sv| *sv != v).map(|_| k))
+        {
             return Err(StoreError::Protected(format!(
                 "merge refused: both Media lock field {field} to different values"
             )));

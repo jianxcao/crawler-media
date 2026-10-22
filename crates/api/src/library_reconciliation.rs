@@ -154,7 +154,9 @@ fn process_dir_entries(
                         continue;
                     }
                 };
-                if next_canonical.starts_with(canonical_root) && visited_dirs.insert(next_canonical.clone()) {
+                if next_canonical.starts_with(canonical_root)
+                    && visited_dirs.insert(next_canonical.clone())
+                {
                     // Traverse the raw path so discovered candidates keep the path as it
                     // exists under the root; the canonical form is only for containment
                     // verification and the visited-directory set.

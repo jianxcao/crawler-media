@@ -184,10 +184,7 @@ impl Store {
     }
 
     /// Active non-marker jobs whose units are all terminal.
-    pub fn active_completed_probe_jobs(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<ProbeJob>, StoreError> {
+    pub fn active_completed_probe_jobs(&self, limit: usize) -> Result<Vec<ProbeJob>, StoreError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -220,9 +217,7 @@ impl Store {
              WHERE u.status = 'queued' AND j.status IN ('queued', 'running')
              ORDER BY u.rowid LIMIT ?1",
         )?;
-        let rows = statement.query_map([limit as i64], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?;
+        let rows = statement.query_map([limit as i64], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -252,13 +247,16 @@ impl Store {
              FROM probe_jobs WHERE status IN ('queued', 'running')
              ORDER BY created_at_ms, id",
         )?;
-        let jobs = statement.query_map([], map_probe_job)?.collect::<Result<Vec<_>, _>>()?;
-        jobs.into_iter().map(|job| {
-            let units = self.probe_job_units(&job.id)?;
-            Ok((job, units))
-        }).collect()
+        let jobs = statement
+            .query_map([], map_probe_job)?
+            .collect::<Result<Vec<_>, _>>()?;
+        jobs.into_iter()
+            .map(|job| {
+                let units = self.probe_job_units(&job.id)?;
+                Ok((job, units))
+            })
+            .collect()
     }
-
 
     pub fn probe_job_units(&self, job_id: &str) -> Result<Vec<ProbeJobUnit>, StoreError> {
         let mut statement = self.library.prepare(
@@ -355,7 +353,13 @@ impl Store {
         ledger_id: &str,
         reason: &str,
     ) -> Result<(ProbeJob, bool, bool), StoreError> {
-        self.finish_probe_unit_with_status(job_id, ledger_id, "cancelled", Some("cancelled"), Some(reason))
+        self.finish_probe_unit_with_status(
+            job_id,
+            ledger_id,
+            "cancelled",
+            Some("cancelled"),
+            Some(reason),
+        )
     }
 
     /// Cancel an atomic refresh, terminalizing pending units and releasing the scope together.
@@ -385,7 +389,8 @@ impl Store {
         _error_kind: Option<&str>,
         error: Option<&str>,
     ) -> Result<(ProbeJob, bool, bool), StoreError> {
-        let (job, changed, all_done, _) = self.finish_probe_transition(job_id, ledger_id, status, error)?;
+        let (job, changed, all_done, _) =
+            self.finish_probe_transition(job_id, ledger_id, status, error)?;
         Ok((job, changed, all_done))
     }
 

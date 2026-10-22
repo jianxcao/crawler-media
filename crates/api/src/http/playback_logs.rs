@@ -120,7 +120,13 @@ pub(crate) async fn history(
     let before = match query.get("before") {
         Some(s) => match s.parse::<i64>() {
             Ok(ms) => Some(ms.checked_div(1000).unwrap_or(0)),
-            Err(_) => return err(StatusCode::BAD_REQUEST, "playback.invalid_cursor", "游标时间戳无效"),
+            Err(_) => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "playback.invalid_cursor",
+                    "游标时间戳无效",
+                );
+            }
         },
         None => None,
     };
@@ -128,17 +134,29 @@ pub(crate) async fn history(
         Some(s) => match s.parse::<i64>() {
             Ok(d) if d >= 0 => {
                 if d > 36500 || d.checked_mul(86_400).is_none() {
-                    return err(StatusCode::BAD_REQUEST, "playback.invalid_days", "天数过滤参数超出有效范围");
+                    return err(
+                        StatusCode::BAD_REQUEST,
+                        "playback.invalid_days",
+                        "天数过滤参数超出有效范围",
+                    );
                 }
                 Some(d)
             }
-            _ => return err(StatusCode::BAD_REQUEST, "playback.invalid_days", "天数过滤参数无效"),
+            _ => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "playback.invalid_days",
+                    "天数过滤参数无效",
+                );
+            }
         },
         None => None,
     };
     // `days` 窗口基准走注入时钟；`since` 是**秒**（`started_at >= since`）。
     let now = state.playback_clock.now_ms() / 1000;
-    let since = days.and_then(|d| d.checked_mul(86_400)).map(|secs| now.saturating_sub(secs));
+    let since = days
+        .and_then(|d| d.checked_mul(86_400))
+        .map(|secs| now.saturating_sub(secs));
     let store = state.store.lock();
     let admin = store
         .user_role(user_id)

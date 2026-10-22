@@ -25,7 +25,7 @@ fn veto_hook_prevents_add_to_downloader() {
             exclude: false,
         }],
         keep_old_versions: false,
-};
+    };
     let media = Media {
         id: MediaId::new(),
         kind: MediaKind::Movie,

@@ -42,9 +42,7 @@ impl ServerItemQuery {
     /// 就锁定了 Series/Season（`SeriesId`/`SeasonId` 是列分集的请求，与
     /// `IncludeItemTypes` 无关）。
     pub fn wants_episodes(&self) -> bool {
-        self.series_id.is_some()
-            || self.season_id.is_some()
-            || self.item_types_contain("Episode")
+        self.series_id.is_some() || self.season_id.is_some() || self.item_types_contain("Episode")
     }
 
     /// 这次请求要不要「剧」条目：`IncludeItemTypes` 里有 Series，或者没给类型
@@ -59,7 +57,11 @@ impl ServerItemQuery {
     fn item_types_contain(&self, kind: &str) -> bool {
         self.include_item_types
             .as_deref()
-            .map(|types| types.split(',').any(|item| item.trim().eq_ignore_ascii_case(kind)))
+            .map(|types| {
+                types
+                    .split(',')
+                    .any(|item| item.trim().eq_ignore_ascii_case(kind))
+            })
             .unwrap_or(false)
     }
 }
@@ -96,7 +98,11 @@ pub enum ParentScope {
 pub fn folder_id_for_root(root: &Path) -> String {
     format!(
         "folder_{}",
-        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, root.to_string_lossy().as_bytes()).simple()
+        uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            root.to_string_lossy().as_bytes()
+        )
+        .simple()
     )
 }
 
@@ -168,9 +174,12 @@ pub async fn resolve_parent_scope(
 pub fn classify_genre_or_studio(parent: &str, items: &[MediaItemSnapshot]) -> ParentScope {
     classify_genre_or_studio_facts(
         parent,
-        items
-            .iter()
-            .map(|item| (item.metadata.genres.as_slice(), item.metadata.studios.as_slice())),
+        items.iter().map(|item| {
+            (
+                item.metadata.genres.as_slice(),
+                item.metadata.studios.as_slice(),
+            )
+        }),
     )
 }
 
@@ -183,8 +192,12 @@ pub fn classify_genre_or_studio_facts<'a>(
     let mut genre = false;
     let mut studio = false;
     for (genres, studios) in items {
-        genre |= genres.iter().any(|value| matches_genre_or_studio(parent, value));
-        studio |= studios.iter().any(|value| matches_genre_or_studio(parent, value));
+        genre |= genres
+            .iter()
+            .any(|value| matches_genre_or_studio(parent, value));
+        studio |= studios
+            .iter()
+            .any(|value| matches_genre_or_studio(parent, value));
     }
     if genre {
         ParentScope::Genre(parent.to_string())
@@ -400,9 +413,12 @@ fn matches_studios(item: &MediaItemSnapshot, studio_ids: Option<&str>) -> bool {
     if targets.is_empty() {
         return true;
     }
-    targets
-        .iter()
-        .any(|ts| item.metadata.studios.iter().any(|s| s.eq_ignore_ascii_case(ts)))
+    targets.iter().any(|ts| {
+        item.metadata
+            .studios
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(ts))
+    })
 }
 
 pub fn sort_items(
@@ -573,7 +589,9 @@ pub async fn legacy_select(
         ParentScope::Library(id) | ParentScope::Series(id) => Some(id.as_str()),
         _ => None,
     };
-    let mut rows = provider.list_visible_items(user, parent_id_for_provider).await?;
+    let mut rows = provider
+        .list_visible_items(user, parent_id_for_provider)
+        .await?;
     let wants_episodes = query.wants_episodes();
     let wants_series = query.wants_series();
     // folder 归属必须先于折叠：代表行在别的根下不能决定整个 series 是否属于
@@ -602,7 +620,8 @@ pub async fn legacy_select(
                                     .collect::<HashSet<_>>()
                                     .len(),
                             );
-                            series.unplayed_item_count = Some(in_folder.iter().filter(|episode| !episode.played).count());
+                            series.unplayed_item_count =
+                                Some(in_folder.iter().filter(|episode| !episode.played).count());
                             series.played = in_folder.iter().all(|episode| episode.played);
                             expanded.push(series);
                         }
@@ -632,7 +651,9 @@ pub async fn legacy_select(
                 let series_id = TypedItemId::Work(item.media.id).to_wire_string();
                 let episodes = match &scope {
                     ParentScope::Library(library_id) => {
-                        provider.list_visible_items_in_library(user, Some(&series_id), library_id).await?
+                        provider
+                            .list_visible_items_in_library(user, Some(&series_id), library_id)
+                            .await?
                     }
                     _ => provider.list_visible_items(user, Some(&series_id)).await?,
                 };

@@ -153,7 +153,9 @@ pub(crate) async fn remove_rows(
 
 /// Review L-10: `GET /library/pending-deletions` — deletions that stopped
 /// retrying (with their last error) and how many are still queued.
-pub(crate) async fn pending_deletions(State(state): State<crate::management::ApiState>) -> Response {
+pub(crate) async fn pending_deletions(
+    State(state): State<crate::management::ApiState>,
+) -> Response {
     let store = state.store.lock();
     let queued = match store.list_pending_file_deletions() {
         Ok(queued) => queued.len(),

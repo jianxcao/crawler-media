@@ -414,7 +414,11 @@ async fn show_episodes_hydrates_only_the_requested_page() {
     fx.heavy.store(0, Ordering::SeqCst);
     let second = scale_get_json(&app, &format!("{uri}&StartIndex=38")).await;
     assert_eq!(second["TotalRecordCount"], 40, "{second}");
-    assert_eq!(second["Items"].as_array().map(Vec::len), Some(2), "{second}");
+    assert_eq!(
+        second["Items"].as_array().map(Vec::len),
+        Some(2),
+        "{second}"
+    );
     assert_eq!(
         fx.heavy.load(Ordering::SeqCst),
         2,
@@ -588,7 +592,11 @@ async fn resume_hydrates_only_the_requested_page() {
     fx.heavy.store(0, Ordering::SeqCst);
     let second = scale_get_json(&app, "/Users/Me/Items/Resume?Limit=3&StartIndex=2").await;
     assert_eq!(second["TotalRecordCount"], 40, "{second}");
-    assert_eq!(second["Items"].as_array().map(Vec::len), Some(3), "{second}");
+    assert_eq!(
+        second["Items"].as_array().map(Vec::len),
+        Some(3),
+        "{second}"
+    );
     assert_eq!(second["Items"][0]["Name"], "Resume 37", "{second}");
     assert_eq!(
         fx.heavy.load(Ordering::SeqCst),

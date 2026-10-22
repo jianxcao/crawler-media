@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use notify::RecursiveMode;
@@ -302,7 +302,8 @@ pub(crate) fn realtime_library_id_for_root(state: &ApiState, root: &Path) -> Opt
 /// 若直接平铺在 `<root>` 下，则返回 `<root>` 本身。
 pub(crate) fn entry_scan_target_dir(root: &Path, file_path: &Path) -> PathBuf {
     let resolved_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let resolved_path = std::fs::canonicalize(file_path).unwrap_or_else(|_| file_path.to_path_buf());
+    let resolved_path =
+        std::fs::canonicalize(file_path).unwrap_or_else(|_| file_path.to_path_buf());
     let rel_opt = resolved_path
         .strip_prefix(&resolved_root)
         .ok()
@@ -378,7 +379,10 @@ pub fn handle_fs_events(
     let mut has_scrape_needed = false;
     let mut library_scan_targets = HashSet::new();
 
-    tracing::debug!(event_count = events.len(), "fs_watcher 收到文件系统变动事件批次");
+    tracing::debug!(
+        event_count = events.len(),
+        "fs_watcher 收到文件系统变动事件批次"
+    );
 
     for event in events {
         let path = event.path;
@@ -550,8 +554,8 @@ fn note_present_path_presence(state: &ApiState, path: &Path) {
 /// 父目录事件在处理瞬间可能 `exists()==false`，但其下仍在的 strm 不能被级联删掉。
 fn ledger_path_is_gone(event_path: &Path, ledger_path: &str) -> bool {
     let row_path = Path::new(ledger_path);
-    let under_event = ledger_path == event_path.display().to_string()
-        || row_path.starts_with(event_path);
+    let under_event =
+        ledger_path == event_path.display().to_string() || row_path.starts_with(event_path);
     under_event && !row_path.exists()
 }
 
@@ -588,7 +592,11 @@ fn invalidate_strm_caches(state: &ApiState, path: &std::path::Path) {
             .flatten()
             .map(|m| m.locked)
             .unwrap_or(false);
-        if is_locked || store.delete_media_marker(media_id, season, episode).is_err() {
+        if is_locked
+            || store
+                .delete_media_marker(media_id, season, episode)
+                .is_err()
+        {
             continue;
         }
         cleared += 1;
@@ -643,7 +651,11 @@ impl FsWatcherState {
     /// - desired: 期望监听的目录集合
     /// - watch 失败或目录不存在时不加入 active，保留下次刷新重试
     /// - unwatch 失败保留在 active，下次刷新重试
-    pub(crate) fn reconcile<W: FsWatcherSession>(&mut self, watcher: &mut W, desired: &HashSet<PathBuf>) {
+    pub(crate) fn reconcile<W: FsWatcherSession>(
+        &mut self,
+        watcher: &mut W,
+        desired: &HashSet<PathBuf>,
+    ) {
         // 新增监听：desired - active
         let to_add: Vec<PathBuf> = desired.difference(&self.active).cloned().collect();
         for dir in to_add {
@@ -677,4 +689,3 @@ impl FsWatcherState {
         }
     }
 }
-

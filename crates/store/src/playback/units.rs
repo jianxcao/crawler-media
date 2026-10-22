@@ -2,8 +2,8 @@ use domain::{MediaId, PhysicalSourceId, TypedItemId, UnitKey, UserId};
 use rusqlite::{OptionalExtension, params};
 use std::str::FromStr;
 
-use super::{Store, StoreError};
 use super::user_summary::SummaryScope;
+use super::{Store, StoreError};
 use super::{UNIT_WHOLE, UnitRow, UnitState};
 
 impl Store {
@@ -36,7 +36,12 @@ impl Store {
                  SELECT 1 FROM library_file_units
                  WHERE file_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4
              )",
-            params![file_id.to_string(), media_id.to_string(), unit.season, unit.episode],
+            params![
+                file_id.to_string(),
+                media_id.to_string(),
+                unit.season,
+                unit.episode
+            ],
             |r| r.get(0),
         )?;
         Ok(exists)
@@ -163,8 +168,12 @@ impl Store {
         increment_play_count: bool,
         now: i64,
     ) -> Result<UnitState, StoreError> {
-        let source = self.best_source_for_unit(&self.authorized_library_ids(user_id)?, media_id,
-            UnitKey::new(season, episode), None)?;
+        let source = self.best_source_for_unit(
+            &self.authorized_library_ids(user_id)?,
+            media_id,
+            UnitKey::new(season, episode),
+            None,
+        )?;
         // A played/favourite mark is a logical fact and must not require a file. A write that
         // claims resume state (position, duration, tracks) needs a bound source; without one the
         // claim is dropped instead of persisting a position that names no physical file.
@@ -181,8 +190,20 @@ impl Store {
             ),
             None => (None, 0, None, None, None),
         };
-        self.upsert_unit_bound(user_id, media_id, UnitKey::new(season, episode), source, position_ms,
-            played, favorite, duration_ms, audio_track, subtitle_track, increment_play_count, now)
+        self.upsert_unit_bound(
+            user_id,
+            media_id,
+            UnitKey::new(season, episode),
+            source,
+            position_ms,
+            played,
+            favorite,
+            duration_ms,
+            audio_track,
+            subtitle_track,
+            increment_play_count,
+            now,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -201,8 +222,20 @@ impl Store {
         increment_play_count: bool,
         now: i64,
     ) -> Result<UnitState, StoreError> {
-        self.upsert_unit_bound(user_id, media_id, unit, Some(source), position_ms, played, favorite,
-            duration_ms, audio_track, subtitle_track, increment_play_count, now)
+        self.upsert_unit_bound(
+            user_id,
+            media_id,
+            unit,
+            Some(source),
+            position_ms,
+            played,
+            favorite,
+            duration_ms,
+            audio_track,
+            subtitle_track,
+            increment_play_count,
+            now,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -224,10 +257,25 @@ impl Store {
         let (season, episode) = (unit.season, unit.episode);
         self.playback_write(|store| {
             let state = store.upsert_unit_internal(
-                user_id, media_id, season, episode, Some(position_ms), played, favorite,
-                duration_ms, audio_track, subtitle_track, increment_play_count, now, source,
+                user_id,
+                media_id,
+                season,
+                episode,
+                Some(position_ms),
+                played,
+                favorite,
+                duration_ms,
+                audio_track,
+                subtitle_track,
+                increment_play_count,
+                now,
+                source,
             )?;
-            store.refresh_user_library_summary(user_id, media_id, SummaryScope::for_unit(season, episode))?;
+            store.refresh_user_library_summary(
+                user_id,
+                media_id,
+                SummaryScope::for_unit(season, episode),
+            )?;
             Ok(state)
         })
     }
@@ -273,7 +321,8 @@ impl Store {
         let (has_played_assertion, played_changed_at) = match played_input {
             Some(_) => (1, Some(now)),
             None => {
-                let existing_assertion: Option<(i64, Option<i64>)> = self.library
+                let existing_assertion: Option<(i64, Option<i64>)> = self
+                    .library
                     .query_row(
                         "SELECT has_played_assertion, played_changed_at_ms FROM playback_units
                          WHERE user_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4",
@@ -301,17 +350,35 @@ impl Store {
             .optional()?;
 
         let is_mark_only = position_input.is_none();
-        let (bound_file_id, bound_rev, bound_src_ver, bound_timeline, bound_tracks_ver, pos_val, dur_val, aud_val, sub_val) =
-            if is_mark_only {
-                match existing_resume {
-                    Some((Some(fid), Some(rev), Some(sver), Some(tmode), tracks_ver, p, d, a, s)) =>
-                        (Some(fid), Some(rev), Some(sver), Some(tmode), tracks_ver, p, d, a, s),
-                    _ => (None, None, None, None, None, 0, None, None, None),
-                }
-            } else {
-                // Every real playback write is a complete resume package for the
-                // currently preferred physical source, not an update to a stale binding.
-                let file_binding: Option<(String, i64, String, i64)> = self.library
+        let (
+            bound_file_id,
+            bound_rev,
+            bound_src_ver,
+            bound_timeline,
+            bound_tracks_ver,
+            pos_val,
+            dur_val,
+            aud_val,
+            sub_val,
+        ) = if is_mark_only {
+            match existing_resume {
+                Some((Some(fid), Some(rev), Some(sver), Some(tmode), tracks_ver, p, d, a, s)) => (
+                    Some(fid),
+                    Some(rev),
+                    Some(sver),
+                    Some(tmode),
+                    tracks_ver,
+                    p,
+                    d,
+                    a,
+                    s,
+                ),
+                _ => (None, None, None, None, None, 0, None, None, None),
+            }
+        } else {
+            // Every real playback write is a complete resume package for the
+            // currently preferred physical source, not an update to a stale binding.
+            let file_binding: Option<(String, i64, String, i64)> = self.library
                     .query_row(
                         "SELECT f.file_id, f.file_revision, f.source_version, COALESCE(d.tracks_version, f.tracks_version)
                          FROM library_files f
@@ -327,14 +394,21 @@ impl Store {
                         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                     )
                     .optional()?;
-                match file_binding {
-                    Some((fid, rev, sver, tver)) => (
-                        Some(fid), Some(rev), Some(sver), Some("full_file".into()), Some(tver),
-                        position_ms, duration_ms, audio_track.clone(), subtitle_track.clone(),
-                    ),
-                    None => (None, None, None, None, None, 0, None, None, None),
-                }
-            };
+            match file_binding {
+                Some((fid, rev, sver, tver)) => (
+                    Some(fid),
+                    Some(rev),
+                    Some(sver),
+                    Some("full_file".into()),
+                    Some(tver),
+                    position_ms,
+                    duration_ms,
+                    audio_track.clone(),
+                    subtitle_track.clone(),
+                ),
+                None => (None, None, None, None, None, 0, None, None, None),
+            }
+        };
 
         self.library.execute(
             "INSERT INTO playback_units
@@ -451,7 +525,10 @@ impl Store {
     /// Favourited units ordered by favourite activity, newest first.
     /// `favorite_at = 0` is an unknown historical time and sorts last; readers
     /// must not substitute the still-changing playback clock.
-    pub fn favorite_rows(&self, user_id: UserId) -> Result<Vec<(MediaId, i64, i32, i32)>, StoreError> {
+    pub fn favorite_rows(
+        &self,
+        user_id: UserId,
+    ) -> Result<Vec<(MediaId, i64, i32, i32)>, StoreError> {
         let mut stmt = self.library.prepare(
             "SELECT media_id, season, episode, favorite_at
              FROM playback_units
@@ -459,7 +536,12 @@ impl Store {
              ORDER BY favorite_at DESC, media_id, season, episode",
         )?;
         let rows = stmt.query_map(params![user_id.to_string()], |row| {
-            Ok((row.get::<_, String>(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+            ))
         })?;
         let mut list = Vec::new();
         for row in rows {
@@ -510,7 +592,8 @@ impl Store {
     ) -> Result<(), StoreError> {
         self.playback_write(|store| {
             // canonical whole unit (-1, -1)
-            store.set_unit_marks_inner(user_id, media_id, season, episode, played, favorite, now)?;
+            store
+                .set_unit_marks_inner(user_id, media_id, season, episode, played, favorite, now)?;
             store.refresh_user_library_summary(
                 user_id,
                 media_id,
@@ -546,8 +629,12 @@ impl Store {
                     played,
                     Some(favorite),
                     existing.as_ref().and_then(|unit| unit.duration_ms),
-                    existing.as_ref().and_then(|unit| unit.audio_track.as_deref()),
-                    existing.as_ref().and_then(|unit| unit.subtitle_track.as_deref()),
+                    existing
+                        .as_ref()
+                        .and_then(|unit| unit.audio_track.as_deref()),
+                    existing
+                        .as_ref()
+                        .and_then(|unit| unit.subtitle_track.as_deref()),
                     false,
                     now,
                     None,

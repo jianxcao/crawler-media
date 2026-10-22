@@ -71,7 +71,9 @@ fn store_api_key(store: &Mutex<Store>) -> Result<(), TmdbError> {
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    Err(TmdbError::Http("Store lock is held while arrivals resolves".into()))
+    Err(TmdbError::Http(
+        "Store lock is held while arrivals resolves".into(),
+    ))
 }
 
 /// 冷缓存路径：返回 body 前必须成功借用 Store。

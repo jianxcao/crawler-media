@@ -114,9 +114,9 @@ mod user_summary;
 mod watch_aggregate;
 
 pub use assertions::{EffectiveAssertion, PlayedAssertionScope};
-pub use user_summary::UserLibrarySummary;
 pub use log_scope::{PlaybackLogPage, PlaybackLogScope};
 pub use retention::{PlaybackRetentionBatch, PlaybackRetentionPreview};
+pub use user_summary::UserLibrarySummary;
 pub use watch_aggregate::{
     WatchClient, WatchDay, WatchMedia, WatchMember, WatchReport, WatchTotals, WatchWindow,
 };

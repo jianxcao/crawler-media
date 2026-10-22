@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::{Fixtures, json_body, request, state};
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 fn app(tmp: &tempfile::TempDir) -> axum::Router {
     router(state(

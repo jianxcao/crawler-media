@@ -1,4 +1,4 @@
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 #[path = "support/mod.rs"]
 mod support;
 
@@ -216,7 +216,10 @@ async fn unbound_jellyfin_progress_never_fabricates_a_live_session() {
     assert_eq!(unit.position_ms, 5_000);
 
     assert!(
-        store.get_session(admin(), "unbound-device").unwrap().is_none(),
+        store
+            .get_session(admin(), "unbound-device")
+            .unwrap()
+            .is_none(),
         "未绑定 Progress 不得伪造 live 会话行"
     );
 }
@@ -351,15 +354,31 @@ async fn unit_write_failure_returns_error() {
 async fn zero_playback_limits_return_a_bounded_page() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, media, _) = app(tmp.path());
-    send(&app, "POST", "/api/v1/playback/marks", "Bearer admin-token",
-        json!({"media_item_id": media.to_string(), "favorite": true}), None).await;
-    for route in ["/api/v1/playback/favorites?limit=0", "/api/v1/playback/favorites/gallery?limit=0"] {
+    send(
+        &app,
+        "POST",
+        "/api/v1/playback/marks",
+        "Bearer admin-token",
+        json!({"media_item_id": media.to_string(), "favorite": true}),
+        None,
+    )
+    .await;
+    for route in [
+        "/api/v1/playback/favorites?limit=0",
+        "/api/v1/playback/favorites/gallery?limit=0",
+    ] {
         let response = send(&app, "GET", route, "Bearer admin-token", json!({}), None).await;
         assert_eq!(response.status(), StatusCode::OK, "{route}");
         let body = json(response).await;
-        let items = body["data"]["items"].as_array().or_else(|| body["data"].as_array())
+        let items = body["data"]["items"]
+            .as_array()
+            .or_else(|| body["data"].as_array())
             .unwrap_or_else(|| panic!("{route} missing bounded collection: {body}"));
-        assert_eq!(items.len(), 1, "{route} did not clamp limit=0 to one existing item");
+        assert_eq!(
+            items.len(),
+            1,
+            "{route} did not clamp limit=0 to one existing item"
+        );
     }
 }
 
@@ -562,10 +581,9 @@ async fn clear_history_preserves_favorites_and_preferences() {
     assert!(store.user_active_media_ids(admin()).unwrap().is_empty());
 }
 
-
+#[path = "playback_regression/credentials.rs"]
+mod credentials;
 #[path = "playback_regression/failures.rs"]
 mod failures;
 #[path = "playback_regression/protocol.rs"]
 mod protocol;
-#[path = "playback_regression/credentials.rs"]
-mod credentials;

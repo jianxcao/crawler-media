@@ -5,15 +5,20 @@ use super::types::FileDetails;
 use crate::{Store, StoreError};
 
 impl Store {
-    pub fn get_file_path_and_library(&self, file_id: LedgerId) -> Result<Option<(std::path::PathBuf, String)>, StoreError> {
-        let mut stmt = self.library.prepare(
-            "SELECT path_key, library_id FROM library_files WHERE file_id = ?1",
-        )?;
-        let row = stmt.query_row([file_id.to_string()], |r: &rusqlite::Row<'_>| {
-            let path_str: String = r.get(0)?;
-            let lib_id: String = r.get(1)?;
-            Ok((std::path::PathBuf::from(path_str), lib_id))
-        }).optional()?;
+    pub fn get_file_path_and_library(
+        &self,
+        file_id: LedgerId,
+    ) -> Result<Option<(std::path::PathBuf, String)>, StoreError> {
+        let mut stmt = self
+            .library
+            .prepare("SELECT path_key, library_id FROM library_files WHERE file_id = ?1")?;
+        let row = stmt
+            .query_row([file_id.to_string()], |r: &rusqlite::Row<'_>| {
+                let path_str: String = r.get(0)?;
+                let lib_id: String = r.get(1)?;
+                Ok((std::path::PathBuf::from(path_str), lib_id))
+            })
+            .optional()?;
         Ok(row)
     }
 
@@ -24,11 +29,15 @@ impl Store {
         preferred_file_id: Option<LedgerId>,
     ) -> (String, Vec<i32>) {
         let res = match preferred_file_id {
-            Some(fid) => self.library.query_row(
-                "SELECT resolution FROM library_files WHERE file_id = ?1",
-                params![fid.to_string()],
-                |r: &rusqlite::Row<'_>| r.get::<_, Option<String>>(0),
-            ).unwrap_or(None).unwrap_or_else(|| "1080p".into()),
+            Some(fid) => self
+                .library
+                .query_row(
+                    "SELECT resolution FROM library_files WHERE file_id = ?1",
+                    params![fid.to_string()],
+                    |r: &rusqlite::Row<'_>| r.get::<_, Option<String>>(0),
+                )
+                .unwrap_or(None)
+                .unwrap_or_else(|| "1080p".into()),
             None => "1080p".into(),
         };
 
@@ -63,10 +72,8 @@ impl Store {
             .map(|index| format!("?{}", index + 1))
             .collect::<Vec<_>>()
             .join(", ");
-        let params: Vec<rusqlite::types::Value> = file_ids
-            .iter()
-            .map(|id| id.to_string().into())
-            .collect();
+        let params: Vec<rusqlite::types::Value> =
+            file_ids.iter().map(|id| id.to_string().into()).collect();
         let sql = format!(
             "SELECT file_id, source_revision, source_version, tracks_version, video_json,
                     audio_json, subtitle_json, chapters_json, fingerprint_json,
@@ -102,7 +109,10 @@ impl Store {
         Ok(details)
     }
 
-    pub fn missing_paths_for_library(&self, library_id: &str) -> Result<std::collections::HashMap<String, i64>, StoreError> {
+    pub fn missing_paths_for_library(
+        &self,
+        library_id: &str,
+    ) -> Result<std::collections::HashMap<String, i64>, StoreError> {
         let mut stmt = self.library.prepare(
             "SELECT path_key, COALESCE(missing_at, 0) FROM library_files WHERE library_id = ?1 AND presence_state = 'missing'",
         )?;

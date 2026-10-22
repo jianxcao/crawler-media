@@ -57,7 +57,13 @@ fn full_samples_from_nonseeds_discover_the_common_intro() {
         .units
         .iter()
         .map(|unit| {
-            let episode = unit.row.units.iter().find(|u| !u.is_whole()).map(|u| u.episode.max(0) as u32).unwrap();
+            let episode = unit
+                .row
+                .units
+                .iter()
+                .find(|u| !u.is_whole())
+                .map(|u| u.episode.max(0) as u32)
+                .unwrap();
             let tag = intro_tag("blind-seeds", episode);
             (unit.row.clone(), (tag..tag + 200).collect())
         })
@@ -203,7 +209,13 @@ fn another_common_variant_is_discovered_after_full_fallbacks() {
         .units
         .iter()
         .map(|unit| {
-            let episode = unit.row.units.iter().find(|u| !u.is_whole()).map(|u| u.episode.max(0) as u32).unwrap();
+            let episode = unit
+                .row
+                .units
+                .iter()
+                .find(|u| !u.is_whole())
+                .map(|u| u.episode.max(0) as u32)
+                .unwrap();
             let tag = intro_tag("other-variant", episode);
             (unit.row.clone(), (tag..tag + 200).collect())
         })

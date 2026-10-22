@@ -1,11 +1,11 @@
 //! Regression tests for TV metadata refresh sidecars when directory was renamed
 //! but stale ledger rows still linger during grace period.
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 mod fixture;
+use super::common::request;
 use fixture::RenameFixture;
 use serde_json::json;
-use super::common::request;
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -29,7 +29,10 @@ async fn rename_grace_all_missing_does_not_recreate_directory() {
     std::fs::remove_dir_all(&f.live_root).unwrap();
     f.refresh().await;
     assert!(!f.old_root.exists(), "old root must not be recreated");
-    assert!(!f.live_root.exists(), "live root must not be recreated if all files missing");
+    assert!(
+        !f.live_root.exists(),
+        "live root must not be recreated if all files missing"
+    );
     let store_guard = f.state.store();
     let store = store_guard.lock();
     assert_eq!(
@@ -81,7 +84,10 @@ async fn rename_grace_stale_preferred_row_does_not_poison_target() {
             if episode == 1 { b"one" } else { b"two" }
         );
     }
-    assert!(!f.old_root.exists(), "old root must not be recreated even with stale preferred row");
+    assert!(
+        !f.old_root.exists(),
+        "old root must not be recreated even with stale preferred row"
+    );
     let store_guard = f.state.store();
     let store = store_guard.lock();
     assert_eq!(store.file_coverage_for_media(f.media.id).unwrap().len(), 5);
@@ -102,7 +108,11 @@ async fn rename_grace_two_seasons() {
             assert!(nfo.contains("Episode plot"));
             assert_eq!(
                 std::fs::read(dir.join(format!("{stem}-thumb.jpg"))).unwrap(),
-                if episode == 1 { &b"one"[..] } else { &b"two"[..] }
+                if episode == 1 {
+                    &b"one"[..]
+                } else {
+                    &b"two"[..]
+                }
             );
         }
     }
@@ -172,7 +182,11 @@ async fn rename_grace_without_nfo_still_writes_live_stills() {
         assert!(!f.live_root.join(format!("{stem}.nfo")).exists());
         assert_eq!(
             std::fs::read(f.live_root.join(format!("{stem}-thumb.jpg"))).unwrap(),
-            if episode == 1 { &b"one"[..] } else { &b"two"[..] }
+            if episode == 1 {
+                &b"one"[..]
+            } else {
+                &b"two"[..]
+            }
         );
     }
     assert!(!f.old_root.exists());

@@ -89,9 +89,9 @@ fn each_newer_database_is_rejected_individually() {
         let original = user_version(&path);
         set_user_version(&path, before[name] + 1);
         let error = match Store::open(&dir) {
-        Ok(_) => panic!("newer schema must be rejected"),
-        Err(error) => error,
-    };
+            Ok(_) => panic!("newer schema must be rejected"),
+            Err(error) => error,
+        };
         assert!(
             error.to_string().contains(name),
             "error for {name} should name it: {error}"

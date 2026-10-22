@@ -137,10 +137,12 @@ fn removal_keeps_locked_markers_and_clears_unlocked_ones() {
         .expect("locked marker is user intent and must survive");
     assert!(kept.locked);
     assert_eq!(kept.intro_start_ms, Some(10_000));
-    assert!(store
-        .get_media_marker(unlocked_media.id, Some(1), Some(1))
-        .unwrap()
-        .is_none());
+    assert!(
+        store
+            .get_media_marker(unlocked_media.id, Some(1), Some(1))
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -162,12 +164,16 @@ fn removed_root_stays_a_boundary_and_can_be_reconfigured_as_a_new_library() {
 
     remove(&store, &a);
 
-    assert!(store
-        .path_in_removal_scope(&root_a.join("E01.strm"))
-        .unwrap());
-    assert!(!store
-        .path_in_removal_scope(&root_b.join("E01.strm"))
-        .unwrap());
+    assert!(
+        store
+            .path_in_removal_scope(&root_a.join("E01.strm"))
+            .unwrap()
+    );
+    assert!(
+        !store
+            .path_in_removal_scope(&root_b.join("E01.strm"))
+            .unwrap()
+    );
 
     // Re-adding the removed directory is still allowed and owns its paths again.
     library(&store, "A2", &root_a);
@@ -199,10 +205,11 @@ fn removal_boundary_survives_reopen_without_the_per_file_snapshot() {
     drop(store);
 
     let reopened = Store::open(&data).unwrap();
-    assert!(reopened
-        .path_in_removal_scope(&root.join("E01.strm"))
-        .unwrap());
+    assert!(
+        reopened
+            .path_in_removal_scope(&root.join("E01.strm"))
+            .unwrap()
+    );
     assert_eq!(reopened.removal_roots(&done.operation_id).unwrap().len(), 1);
     assert!(reopened.get_library(&library_id).unwrap().is_none());
 }
-

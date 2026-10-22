@@ -4,8 +4,8 @@ use std::str::FromStr;
 use domain::MediaKind;
 use rusqlite::params;
 
-use std::collections::HashSet;
 use super::{Store, StoreError};
+use std::collections::HashSet;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LibraryRoot {
@@ -113,21 +113,20 @@ impl Store {
         if let Some(owner) = &root.library_id {
             self.ensure_library_mutable(owner)?;
         }
-        let n = self.library.execute(
-            "DELETE FROM library_roots WHERE root_id = ?1",
-            params![id],
-        )?;
+        let n = self
+            .library
+            .execute("DELETE FROM library_roots WHERE root_id = ?1", params![id])?;
         Ok(n > 0)
     }
 }
 
 impl Store {
     pub(crate) fn reassign_files_under_root(
-         tx: &rusqlite::Connection,
+        tx: &rusqlite::Connection,
         _library_id: &str,
-         kind: MediaKind,
-         root_path: &str,
-     ) -> Result<(), StoreError> {
+        kind: MediaKind,
+        root_path: &str,
+    ) -> Result<(), StoreError> {
         let roots = {
             let mut stmt = tx.prepare(
                 "SELECT r.root_id, r.library_id, r.display_path
@@ -138,8 +137,13 @@ impl Store {
                                    WHERE m.library_id = r.library_id AND m.state <> 'succeeded')",
             )?;
             stmt.query_map(params![kind.as_str()], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
-            })?.collect::<Result<Vec<_>, _>>()?
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
         };
         let root = Path::new(root_path);
         let candidates = {
@@ -148,18 +152,36 @@ impl Store {
                  WHERE kind = ?1",
             )?;
             stmt.query_map(params![kind.as_str()], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?))
-            })?.collect::<Result<Vec<_>, _>>()?
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
         };
         let mut moves = Vec::new();
         for (file_id, old_library, media_id, path) in candidates {
             let file_path = Path::new(&path);
-            if !file_path.starts_with(root) { continue; }
-            let best = roots.iter().filter(|(_, _, candidate)| file_path.starts_with(Path::new(candidate)))
+            if !file_path.starts_with(root) {
+                continue;
+            }
+            let best = roots
+                .iter()
+                .filter(|(_, _, candidate)| file_path.starts_with(Path::new(candidate)))
                 .max_by_key(|(_, _, candidate)| Path::new(candidate).components().count());
-            let Some((root_id, new_library, _)) = best else { continue; };
+            let Some((root_id, new_library, _)) = best else {
+                continue;
+            };
             if old_library != *new_library || !file_root_id_is(tx, &file_id, root_id)? {
-                moves.push((file_id, old_library, media_id, root_id.clone(), new_library.clone()));
+                moves.push((
+                    file_id,
+                    old_library,
+                    media_id,
+                    root_id.clone(),
+                    new_library.clone(),
+                ));
             }
         }
         let mut affected = HashSet::new();
@@ -176,7 +198,11 @@ impl Store {
             affected.insert((new_library, media_id));
         }
         for (library, media) in affected {
-            super::library_write::reduce::reduce_library_media(tx, library.parse()?, media.parse()?)?;
+            super::library_write::reduce::reduce_library_media(
+                tx,
+                library.parse()?,
+                media.parse()?,
+            )?;
         }
         Ok(())
     }

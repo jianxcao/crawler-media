@@ -64,7 +64,10 @@ pub(crate) async fn start_session(
         let Some((file, media, resolved)) = resolve_playback_for(&store, &body, user_id) else {
             return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
         };
-        let tracks = store.get_file_meta(&file.file_id.to_string()).ok().flatten();
+        let tracks = store
+            .get_file_meta(&file.file_id.to_string())
+            .ok()
+            .flatten();
         (file, media, resolved, tracks)
     };
     let decision = direct_decision(&file, &body, tracks.as_ref());
@@ -78,7 +81,10 @@ pub(crate) async fn start_session(
     let start_ms = resolved.start_ms;
     let coverage = domain::FileCoverage {
         file: file.clone(),
-        units: vec![domain::UnitKey::new(resolved.target.unit.season, resolved.target.unit.episode)],
+        units: vec![domain::UnitKey::new(
+            resolved.target.unit.season,
+            resolved.target.unit.episode,
+        )],
     };
     let _ = crate::http::library::ensure_probe_enqueued(&state, &coverage);
     let device_id = body
@@ -103,12 +109,18 @@ pub(crate) async fn start_session(
             .ok()
     };
     tracing::info!(media_id = %media.id, file_id = %file.file_id, %user_id, start_ms, ?play_session_id, "Playback session selected");
-    let is_strm = file.path
+    let is_strm = file
+        .path
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("strm"));
-    let stream_url =
-        session_stream_url(&file, play_session_id.as_deref(), device_id, &token, is_strm);
+    let stream_url = session_stream_url(
+        &file,
+        play_session_id.as_deref(),
+        device_id,
+        &token,
+        is_strm,
+    );
     let (chapters, chapters_pending) = session_chapters(&state, &file, &media);
     let source = session_source(&file, is_strm);
     let subtitle_urls: Vec<String> = decision
@@ -214,7 +226,8 @@ fn session_chapters(
                 file,
                 units: Vec::new(),
             };
-            let _ = crate::marker_resolver::resolve_item_chapters(&state, &coverage, &media, None).await;
+            let _ = crate::marker_resolver::resolve_item_chapters(&state, &coverage, &media, None)
+                .await;
         });
     }
     let chapters = cached_chapters

@@ -28,30 +28,39 @@ fn upsert_unit_and_set_unit_marks_satisfies_schema_check_constraints() {
     store.insert_media(&m).unwrap();
 
     // 1. Favorite only episode (no played assertion, position 0) -> R01-A trigger
-    store.set_unit_favorite(user_id, media_id, 1, 1, true, 100).unwrap();
+    store
+        .set_unit_favorite(user_id, media_id, 1, 1, true, 100)
+        .unwrap();
 
     // 2. Mark unit played -> Should update has_played_assertion=1, played_changed_at_ms=101
-    store.set_unit_marks(user_id, media_id, 1, 1, Some(true), None, 101).unwrap();
+    store
+        .set_unit_marks(user_id, media_id, 1, 1, Some(true), None, 101)
+        .unwrap();
 
-    let state = store.unit_state(user_id, media_id, 1, 1).unwrap().expect("unit state exists");
+    let state = store
+        .unit_state(user_id, media_id, 1, 1)
+        .unwrap()
+        .expect("unit state exists");
     assert!(state.played);
     assert!(state.favorite);
 
     // 3. Upsert unit with position_ms > 0 when no file exists yet -> Must clamp to 0/NULL to satisfy R01-B
-    let upserted = store.upsert_unit(
-        user_id,
-        media_id,
-        1,
-        2,
-        1000,
-        Some(false),
-        None,
-        None,
-        None,
-        None,
-        false,
-        200,
-    ).unwrap();
+    let upserted = store
+        .upsert_unit(
+            user_id,
+            media_id,
+            1,
+            2,
+            1000,
+            Some(false),
+            None,
+            None,
+            None,
+            None,
+            false,
+            200,
+        )
+        .unwrap();
 
     assert_eq!(upserted.position_ms, 0);
 }

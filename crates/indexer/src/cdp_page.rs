@@ -92,12 +92,12 @@ impl PageSession for CdpPageSession {
     }
 
     fn set_site_cookies(&self, page_url: &str, header: &str) -> Result<(), IndexerError> {
-        let uri: tungstenite::http::Uri = page_url
-            .parse()
-            .map_err(|e| failure("parse URL", e))?;
+        let uri: tungstenite::http::Uri = page_url.parse().map_err(|e| failure("parse URL", e))?;
         let scheme = uri.scheme_str().unwrap_or("http");
         if scheme != "http" && scheme != "https" {
-            return Err(IndexerError::BrowserSetup(format!("invalid scheme '{scheme}' for cookies")));
+            return Err(IndexerError::BrowserSetup(format!(
+                "invalid scheme '{scheme}' for cookies"
+            )));
         }
         let host = uri
             .host()
@@ -131,7 +131,10 @@ impl PageSession for CdpPageSession {
         if cookies.is_empty() {
             return Ok(());
         }
-        tracing::debug!(cookie_count = cookies.len(), "Setting site cookies via Network.setCookies");
+        tracing::debug!(
+            cookie_count = cookies.len(),
+            "Setting site cookies via Network.setCookies"
+        );
         self.with_transport(|transport, deadline| {
             transport.command("Network.setCookies", json!({"cookies": cookies}), deadline)?;
             Ok(())
@@ -146,7 +149,8 @@ impl PageSession for CdpPageSession {
 
     fn cookie_header(&self, page_url: &str) -> Result<String, IndexerError> {
         self.with_transport(|transport, deadline| {
-            let result = transport.command("Network.getCookies", json!({"urls": [page_url]}), deadline)?;
+            let result =
+                transport.command("Network.getCookies", json!({"urls": [page_url]}), deadline)?;
             let cookies = result["cookies"]
                 .as_array()
                 .ok_or_else(|| failure("getCookies", "missing cookies field"))?;
@@ -310,7 +314,11 @@ fn open_cdp_session_inner(
     // 2. Isolated cookie jar per session. Only an explicit "not supported"
     //    answer marks the endpoint incompatible; timeouts etc. stay transient.
     let context = transport
-        .command_root("Target.createBrowserContext", json!({"disposeOnDetach": true}), deadline)
+        .command_root(
+            "Target.createBrowserContext",
+            json!({"disposeOnDetach": true}),
+            deadline,
+        )
         .map_err(|error| {
             if is_method_not_found(&error) {
                 IndexerError::BrowserSetup(format!(
@@ -323,7 +331,9 @@ fn open_cdp_session_inner(
     let context_id = context["browserContextId"]
         .as_str()
         .ok_or_else(|| {
-            IndexerError::BrowserSetup(format!("{INCOMPATIBLE_PREFIX} no browserContextId returned"))
+            IndexerError::BrowserSetup(format!(
+                "{INCOMPATIBLE_PREFIX} no browserContextId returned"
+            ))
         })?
         .to_owned();
 
@@ -336,9 +346,14 @@ fn open_cdp_session_inner(
         deadline: Mutex::new(Some(deadline)),
         target_close_cap,
     };
-    let slot = session.transport.get_mut().unwrap_or_else(|p| p.into_inner());
+    let slot = session
+        .transport
+        .get_mut()
+        .unwrap_or_else(|p| p.into_inner());
     *slot = Some(transport);
-    let transport = slot.as_mut().ok_or_else(|| failure("transport", "missing"))?;
+    let transport = slot
+        .as_mut()
+        .ok_or_else(|| failure("transport", "missing"))?;
 
     let target = transport.command_root(
         "Target.createTarget",

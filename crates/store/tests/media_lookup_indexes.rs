@@ -53,7 +53,10 @@ fn same_numeric_alias_across_kinds_stays_separate() {
         .expect("tv by alias+kind");
     assert_eq!(found_movie.id, movie.id);
     assert_eq!(found_tv.id, tv.id);
-    assert_ne!(found_movie.id, found_tv.id, "数字别名相同不得合并成同一 Media");
+    assert_ne!(
+        found_movie.id, found_tv.id,
+        "数字别名相同不得合并成同一 Media"
+    );
 
     // 不带 kind 的旧查找仍能命中其中之一，且两个 Media 都还在。
     let any = store.get_media_by_alias("tmdb_id", "603").unwrap();

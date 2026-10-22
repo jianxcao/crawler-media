@@ -93,7 +93,10 @@ fn collect_show_units(
                 .entry(media.id)
                 .or_default()
                 .insert((unit.season as u32, unit.episode as u32));
-            show_seasons.entry(media.id).or_default().insert(unit.season as u32);
+            show_seasons
+                .entry(media.id)
+                .or_default()
+                .insert(unit.season as u32);
         }
     }
     (show_episodes, show_seasons)
@@ -226,7 +229,6 @@ fn push_media_group(
         }
     }
 }
-
 
 /// 一个 coverage 的每个单元各出一条轻候选：旧台账里它们是同一文件的多行。
 ///

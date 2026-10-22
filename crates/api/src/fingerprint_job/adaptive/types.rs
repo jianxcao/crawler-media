@@ -2,11 +2,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use marker::FingerprintEngine;
 use marker::adaptive::{
     EpisodeEvidence, SamplingPolicy, SourceCostSummary, TemplateContext, VerifiedInterval,
 };
 use marker::fingerprint::capture_types::FingerprintCaptureEngine;
-use marker::FingerprintEngine;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use store::Store;

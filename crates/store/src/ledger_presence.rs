@@ -103,15 +103,7 @@ fn apply_observation(
             "SELECT library_id, media_id, path_key, missing_at, publication_state
              FROM library_files WHERE file_id = ?1",
             [&file_id],
-            |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                ))
-            },
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .rusqlite_optional()?;
 

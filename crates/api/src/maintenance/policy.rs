@@ -86,8 +86,8 @@ pub enum MaintenancePolicy {
 impl MaintenancePolicy {
     /// 按任务类型解析并校验 payload。
     pub fn parse(kind: JobKind, json: &str) -> Result<Self, String> {
-        let value: serde_json::Value =
-            serde_json::from_str(json).map_err(|error| format!("维护配置不是合法 JSON: {error}"))?;
+        let value: serde_json::Value = serde_json::from_str(json)
+            .map_err(|error| format!("维护配置不是合法 JSON: {error}"))?;
         let version = value
             .get("version")
             .and_then(serde_json::Value::as_u64)

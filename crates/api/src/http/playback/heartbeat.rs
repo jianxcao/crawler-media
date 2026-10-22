@@ -65,12 +65,20 @@ pub(crate) async fn progress(
     let event_sequence = body["event_sequence"].as_i64();
     if let Some(ref sid) = play_session_id {
         if sid.len() > 128 {
-            return err(StatusCode::BAD_REQUEST, "playback.invalid", "play_session_id 超长");
+            return err(
+                StatusCode::BAD_REQUEST,
+                "playback.invalid",
+                "play_session_id 超长",
+            );
         }
     }
     if let Some(seq) = event_sequence {
         if seq < 0 {
-            return err(StatusCode::BAD_REQUEST, "playback.invalid", "event_sequence 必须非负");
+            return err(
+                StatusCode::BAD_REQUEST,
+                "playback.invalid",
+                "event_sequence 必须非负",
+            );
         }
     }
     let (file, media, season, episode, duration_ms, source, source_version) = {
@@ -91,9 +99,18 @@ pub(crate) async fn progress(
             Err(error) => return persistence_error(&error, user_id, device_id),
         };
         let source_version = source.version.source_version.clone();
-        (file, media, season, episode, duration,
-            domain::PhysicalSourceId { file_id: source.file_id, revision: source.version.revision },
-            source_version)
+        (
+            file,
+            media,
+            season,
+            episode,
+            duration,
+            domain::PhysicalSourceId {
+                file_id: source.file_id,
+                revision: source.version.revision,
+            },
+            source_version,
+        )
     };
     if duration_ms.is_none() {
         let coverage = domain::FileCoverage {
@@ -165,10 +182,16 @@ fn persist_heartbeat(
         Ok(id) => id,
         Err(_) => {
             return Ok((
-                store.unit_state(heartbeat.user_id, heartbeat.media_id, heartbeat.season, heartbeat.episode)?
+                store
+                    .unit_state(
+                        heartbeat.user_id,
+                        heartbeat.media_id,
+                        heartbeat.season,
+                        heartbeat.episode,
+                    )?
                     .unwrap_or_default(),
                 true,
-            ))
+            ));
         }
     };
 
@@ -194,7 +217,13 @@ fn persist_heartbeat(
         tracing::warn!(ledger_id = %heartbeat.ledger_id, media_id = %heartbeat.media_id,
             "Ignoring stale Playback heartbeat: target or coverage changed");
         return Ok((
-            store.unit_state(heartbeat.user_id, heartbeat.media_id, heartbeat.season, heartbeat.episode)?
+            store
+                .unit_state(
+                    heartbeat.user_id,
+                    heartbeat.media_id,
+                    heartbeat.season,
+                    heartbeat.episode,
+                )?
                 .unwrap_or_default(),
             true,
         ));
@@ -202,13 +231,17 @@ fn persist_heartbeat(
 
     let event = heartbeat.body["event"].as_str().unwrap_or("progress");
     let previous = store.get_session(heartbeat.user_id, device)?;
-    let play_session_id = heartbeat.body["play_session_id"].as_str().map(str::to_string);
+    let play_session_id = heartbeat.body["play_session_id"]
+        .as_str()
+        .map(str::to_string);
     let event_sequence = heartbeat.body["event_sequence"].as_i64();
 
     // 生效会话 id:客户端显式携带的优先,否则用事务外已签发(或本次签发)的 id。
     // 必须用「生效 id」查绑定,否则 legacy 无 id 客户端签发出来的会话不会流经
     // canonical,源被替换后就没人能判 IgnoredStale。
-    let session_id = play_session_id.clone().or_else(|| resolved_session_id.map(str::to_string));
+    let session_id = play_session_id
+        .clone()
+        .or_else(|| resolved_session_id.map(str::to_string));
     let binding = match &session_id {
         Some(sid) => store.play_session_binding(heartbeat.user_id, device, sid)?,
         None => None,
@@ -252,7 +285,14 @@ fn persist_heartbeat(
     );
 
     if decision == crate::playback_events::EventDecision::Ignore {
-        let current = store.unit_state(heartbeat.user_id, heartbeat.media_id, heartbeat.season, heartbeat.episode)?.unwrap_or_default();
+        let current = store
+            .unit_state(
+                heartbeat.user_id,
+                heartbeat.media_id,
+                heartbeat.season,
+                heartbeat.episode,
+            )?
+            .unwrap_or_default();
         return Ok((current, admin_ended));
     }
     // canonical 是这次事件的唯一写路径:它自己开一个 IMMEDIATE 事务,并在事务内
@@ -268,8 +308,8 @@ fn persist_heartbeat(
     };
     // The saved resume point / duration are only valid for the physical source they were
     // recorded against: resolve them for *this* source instead of reading the bare unit row.
-    let resolved = store
-        .resolve_playback(heartbeat.user_id, &item, Some(&heartbeat.source), None)?;
+    let resolved =
+        store.resolve_playback(heartbeat.user_id, &item, Some(&heartbeat.source), None)?;
     let same_source = resolved.target.file.file_id == heartbeat.source.file_id
         && resolved.target.file.version.revision == heartbeat.source.revision;
     let position_ms = heartbeat.body["position_ms"]
@@ -317,12 +357,16 @@ fn persist_heartbeat(
         position_ms,
         duration_ms,
         audio_track: heartbeat.body["audio_track"].as_str().map(str::to_string),
-        subtitle_track: heartbeat.body["subtitle_track"].as_str().map(str::to_string),
+        subtitle_track: heartbeat.body["subtitle_track"]
+            .as_str()
+            .map(str::to_string),
         paused: heartbeat.body["paused"].as_bool().unwrap_or(false),
         rate_bps: 0,
         client: heartbeat.body["client"].as_str().map(str::to_string),
         device_name: heartbeat.body["device_name"].as_str().map(str::to_string),
-        client_version: heartbeat.body["client_version"].as_str().map(str::to_string),
+        client_version: heartbeat.body["client_version"]
+            .as_str()
+            .map(str::to_string),
         play_method: None,
         event_type,
     };
@@ -336,7 +380,14 @@ fn persist_heartbeat(
             tracing::warn!(session_id = %event_session_id, "commit_playback_event ignored as stale");
         }
     }
-    let current = store.unit_state(heartbeat.user_id, heartbeat.media_id, heartbeat.season, heartbeat.episode)?.unwrap_or_default();
+    let current = store
+        .unit_state(
+            heartbeat.user_id,
+            heartbeat.media_id,
+            heartbeat.season,
+            heartbeat.episode,
+        )?
+        .unwrap_or_default();
     Ok((current, admin_ended))
 }
 
@@ -364,13 +415,26 @@ fn apply_heartbeat(store: &crate::Store, heartbeat: &Heartbeat<'_>, device: &str
                         .parse::<domain::LedgerId>()
                         .ok()
                         .and_then(|ledger_id| {
-                            store.visible_file(heartbeat.user_id, ledger_id).ok().flatten().and_then(|file| {
-                                store.issue_play_session(
-                                    heartbeat.user_id, device, ledger_id, heartbeat.media_id,
-                                    domain::UnitKey::new(heartbeat.season, heartbeat.episode),
-                                    &file.version, heartbeat.now,
-                                ).ok()
-                            })
+                            store
+                                .visible_file(heartbeat.user_id, ledger_id)
+                                .ok()
+                                .flatten()
+                                .and_then(|file| {
+                                    store
+                                        .issue_play_session(
+                                            heartbeat.user_id,
+                                            device,
+                                            ledger_id,
+                                            heartbeat.media_id,
+                                            domain::UnitKey::new(
+                                                heartbeat.season,
+                                                heartbeat.episode,
+                                            ),
+                                            &file.version,
+                                            heartbeat.now,
+                                        )
+                                        .ok()
+                                })
                         })
                 } else {
                     None
@@ -392,18 +456,45 @@ mod tests {
     fn stale_heartbeat_after_canonical_rebind_does_not_write_old_media() {
         let temp = tempfile::tempdir().unwrap();
         let store = crate::Store::open(temp.path()).unwrap();
-        let library = store.list_libraries().unwrap().into_iter()
-            .find(|library| library.kind == domain::MediaKind::Movie).unwrap();
-        let provisional = domain::Media { id: domain::MediaId::new(), kind: domain::MediaKind::Movie,
-            title: "provisional".into(), year: None, original_title: None, aliases: Vec::new(), tmdb_id: None,
-            douban_id: None, tvdb_id: None, bangumi_id: None, anilist_id: None };
-        let canonical = domain::Media { id: domain::MediaId::new(), kind: domain::MediaKind::Movie,
-            title: "canonical".into(), year: None, original_title: None, aliases: Vec::new(), tmdb_id: Some("123".into()),
-            douban_id: None, tvdb_id: None, bangumi_id: None, anilist_id: None };
+        let library = store
+            .list_libraries()
+            .unwrap()
+            .into_iter()
+            .find(|library| library.kind == domain::MediaKind::Movie)
+            .unwrap();
+        let provisional = domain::Media {
+            id: domain::MediaId::new(),
+            kind: domain::MediaKind::Movie,
+            title: "provisional".into(),
+            year: None,
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        };
+        let canonical = domain::Media {
+            id: domain::MediaId::new(),
+            kind: domain::MediaKind::Movie,
+            title: "canonical".into(),
+            year: None,
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: Some("123".into()),
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        };
         store.insert_media(&provisional).unwrap();
         store.insert_media(&canonical).unwrap();
         let file_id = domain::LedgerId::new();
-        let path = library.root_paths[0].join("movie.mkv").display().to_string();
+        let path = library.root_paths[0]
+            .join("movie.mkv")
+            .display()
+            .to_string();
         let spec = store::test_support::FixtureFile {
             file_id: Some(file_id),
             media_id: provisional.id,
@@ -428,16 +519,33 @@ mod tests {
             .unwrap()
             .remove(&file_id)
             .expect("rebound fixture file is published");
-        let heartbeat = Heartbeat { body: &body, user_id, media_id: provisional.id,
-            kind: domain::MediaKind::Movie, ledger_id: file_id.to_string(),
-            season: UNIT_WHOLE, episode: UNIT_WHOLE, duration_ms: Some(1000), now: 10, now_ms: 10_000,
+        let heartbeat = Heartbeat {
+            body: &body,
+            user_id,
+            media_id: provisional.id,
+            kind: domain::MediaKind::Movie,
+            ledger_id: file_id.to_string(),
+            season: UNIT_WHOLE,
+            episode: UNIT_WHOLE,
+            duration_ms: Some(1000),
+            now: 10,
+            now_ms: 10_000,
             source_version: file.version.source_version.clone(),
-            source: domain::PhysicalSourceId { file_id: file.file_id, revision: file.version.revision } };
+            source: domain::PhysicalSourceId {
+                file_id: file.file_id,
+                revision: file.version.revision,
+            },
+        };
 
         let (_, ended) = persist_heartbeat(&store, &heartbeat, "race", None).unwrap();
 
         assert!(ended);
-        assert!(store.unit_state(user_id, provisional.id, UNIT_WHOLE, UNIT_WHOLE).unwrap().is_none());
+        assert!(
+            store
+                .unit_state(user_id, provisional.id, UNIT_WHOLE, UNIT_WHOLE)
+                .unwrap()
+                .is_none()
+        );
         assert!(store.get_session(user_id, "race").unwrap().is_none());
     }
 }

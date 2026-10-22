@@ -289,7 +289,6 @@ fn search_catalog_source(
     (hits, ok, count, err_msg)
 }
 
-
 pub(crate) async fn search_titles(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
@@ -361,7 +360,9 @@ pub(crate) async fn search_library_items(
                 if !crate::http::library::file_visible_to_user(&store, &row.file, &media, user_id) {
                     continue;
                 }
-                if !keyword.is_empty() && !media.title.to_lowercase().contains(&keyword.to_lowercase()) {
+                if !keyword.is_empty()
+                    && !media.title.to_lowercase().contains(&keyword.to_lowercase())
+                {
                     continue;
                 }
                 // 一个物理文件可覆盖多个 unit；legacy 行是逐 unit 的 join 行，这里逐 unit 保值。
@@ -393,7 +394,11 @@ pub(crate) async fn search_library_items(
         Err(error) => {
             tracing::warn!(%error, "库内搜索未获搜索预算准入");
             if matches!(error, crate::blocking_budget::BlockingError::Busy) {
-                err(StatusCode::SERVICE_UNAVAILABLE, "search.busy", "搜索并发过载")
+                err(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "search.busy",
+                    "搜索并发过载",
+                )
             } else {
                 // 用户可见文案必须是可读中文；具体英文错误只进日志。
                 err(

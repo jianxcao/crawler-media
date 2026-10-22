@@ -50,7 +50,10 @@ pub(crate) fn observe_transfer_modes(files: &[FileCoverage], default_mode: &str)
 
 /// The download source this round recorded for a published file, if any. The
 /// outcome owns the mapping, keyed by the file identity the reservation minted.
-pub(crate) fn recorded_file_source(outcome: &RunOutcome, file_id: LedgerId) -> Option<&std::path::Path> {
+pub(crate) fn recorded_file_source(
+    outcome: &RunOutcome,
+    file_id: LedgerId,
+) -> Option<&std::path::Path> {
     outcome
         .file_sources
         .iter()
@@ -93,7 +96,8 @@ pub(crate) fn publish_transfer_file(
     let committed = store.get_file_version(file_id)?.ok_or_else(|| {
         StoreError::Protected("Transfer reservation changed or was detached".into())
     })?;
-    if committed.revision != observed.revision || committed.source_version != observed.source_version
+    if committed.revision != observed.revision
+        || committed.source_version != observed.source_version
     {
         return Err(StoreError::Protected(
             "Transfer reservation changed or was detached".into(),
@@ -187,27 +191,25 @@ fn commit_transfer_outcome(
         // each reservation; the scoped fingerprint now reflects this round's
         // own published rows, so only the untouched plan parts are re-checked.
         validate_committed_transfer_plan(&store, subscribe, lease, plan)?;
-        for ((coverage, mode), observed_source) in
-            outcome.files.iter().zip(observed_modes.iter()).zip(observed_sources.iter())
+        for ((coverage, mode), observed_source) in outcome
+            .files
+            .iter()
+            .zip(observed_modes.iter())
+            .zip(observed_sources.iter())
         {
             let path = coverage.file.path.to_string_lossy().to_string();
             let source_path = recorded_file_source(outcome, coverage.file.file_id)
                 .map(|source| source.display().to_string());
-            let existing = store.file_coverage_by_path(&path).map_err(|e| e.to_string())?;
-            if existing
-                .as_ref()
-                .map(|existing| {
-                    (
-                        existing.file.file_id,
-                        existing.file.media_id,
-                        existing.file.path.to_string_lossy().into_owned(),
-                    )
-                })
-                != Some((
-                    coverage.file.file_id,
-                    coverage.file.media_id,
-                    path.clone(),
-                ))
+            let existing = store
+                .file_coverage_by_path(&path)
+                .map_err(|e| e.to_string())?;
+            if existing.as_ref().map(|existing| {
+                (
+                    existing.file.file_id,
+                    existing.file.media_id,
+                    existing.file.path.to_string_lossy().into_owned(),
+                )
+            }) != Some((coverage.file.file_id, coverage.file.media_id, path.clone()))
                 || !store
                     .ledger_source_path_matches(&path, source_path.as_deref())
                     .map_err(|e| e.to_string())?
@@ -228,7 +230,9 @@ fn commit_transfer_outcome(
             );
         }
         for path in &outcome.removed_paths {
-            if store.file_coverage_by_path(path).map_err(|e| e.to_string())?
+            if store
+                .file_coverage_by_path(path)
+                .map_err(|e| e.to_string())?
                 .is_some_and(|existing| existing.file.media_id != subscribe.media_id)
             {
                 return Err("待替换路径已被其他媒体占用，放弃本轮提交".into());
@@ -318,9 +322,7 @@ fn load_transfer_context(
         (media, filter, wash_filter)
     };
     let obs = crate::subscribe_library_read::observe_subscribe_library_facts(
-        state,
-        subscribe,
-        media.kind,
+        state, subscribe, media.kind,
     )?;
     Ok((media, filter, obs.facts, wash_filter, obs.fingerprint))
 }
@@ -420,8 +422,11 @@ fn wait_for_transfer_library(state: &ApiState, library_id: &str) -> Result<bool,
         .is_ok()
     });
     if !idle {
-        tracing::warn!(library_id, elapsed_ms = started.elapsed().as_millis(),
-            "Library 工作尚未结束，保留待处理下载供下一轮 Transfer 重试");
+        tracing::warn!(
+            library_id,
+            elapsed_ms = started.elapsed().as_millis(),
+            "Library 工作尚未结束，保留待处理下载供下一轮 Transfer 重试"
+        );
     }
     Ok(idle)
 }
@@ -471,13 +476,18 @@ pub fn transfer_one(state: &ApiState, subscribe_id: SubscribeId) -> Result<(), S
         return Ok(());
     };
 
-    let media = state.store.lock().get_media(subscribe.media_id)
-        .map_err(|error| error.to_string())?.ok_or("Media not found")?;
+    let media = state
+        .store
+        .lock()
+        .get_media(subscribe.media_id)
+        .map_err(|error| error.to_string())?
+        .ok_or("Media not found")?;
     let plan = resolve_transfer_plan(state, &media, &subscribe)?;
     if !wait_for_transfer_library(state, &plan.library_id)? {
         return Ok(());
     }
-    let (media, filter, facts, wash_filter, observation_fingerprint) = load_transfer_context(state, &subscribe)?;
+    let (media, filter, facts, wash_filter, observation_fingerprint) =
+        load_transfer_context(state, &subscribe)?;
     let routed = crate::delivery::RoutedDownloader::with_pending(state, &subscribe, &pending);
     restore_identities(state, &subscribe, &routed, &pending);
     let absolute = crate::season_check::absolute_map(
@@ -490,9 +500,10 @@ pub fn transfer_one(state: &ApiState, subscribe_id: SubscribeId) -> Result<(), S
     let library_lease = state.acquire_library_work(&plan.library_id)?;
     library_lease.control().check().map_err(|e| e.to_string())?;
     tracing::info!(%subscribe_id, pending_count = chosen.len(), "Transfer 开始");
-    let destination_library: domain::LibraryId = plan.library_id.parse().map_err(|error| {
-        format!("Library id {} 无法作为目标身份: {error}", plan.library_id)
-    })?;
+    let destination_library: domain::LibraryId = plan
+        .library_id
+        .parse()
+        .map_err(|error| format!("Library id {} 无法作为目标身份: {error}", plan.library_id))?;
 
     let added = build_added_input(
         RunInput {
@@ -654,8 +665,8 @@ fn rollback_new_files(
         if known.contains(&path) || !path.exists() {
             continue;
         }
-        let source = recorded_file_source(outcome, coverage.file.file_id)
-            .map(std::path::Path::to_path_buf);
+        let source =
+            recorded_file_source(outcome, coverage.file.file_id).map(std::path::Path::to_path_buf);
         let result = match (mode, source) {
             (Some(library::TransferMode::Move), Some(source)) => {
                 if source.exists() {

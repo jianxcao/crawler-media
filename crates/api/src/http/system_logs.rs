@@ -9,8 +9,8 @@ use axum::response::{IntoResponse, Response};
 use futures_core::Stream;
 use serde_json::json;
 use tokio_stream::StreamExt;
-use tokio_util::io::ReaderStream;
 use tokio_stream::wrappers::BroadcastStream;
+use tokio_util::io::ReaderStream;
 
 use crate::http::ok;
 use crate::management::ApiState;
@@ -80,7 +80,10 @@ pub(crate) async fn export_logs(State(state): State<ApiState>) -> Response {
         headers.insert(header::CONTENT_DISPOSITION, value);
     }
     if let Some(length) = length {
-        headers.insert(header::CONTENT_LENGTH, axum::http::HeaderValue::from(length));
+        headers.insert(
+            header::CONTENT_LENGTH,
+            axum::http::HeaderValue::from(length),
+        );
     }
     response
 }

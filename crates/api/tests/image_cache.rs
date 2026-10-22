@@ -9,8 +9,8 @@ use axum::http::{Request, StatusCode, header};
 use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UserRole};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
-use store::test_support::{publish_fixture_file, FixtureFile};
 
 struct NoFetch;
 impl Fetcher for NoFetch {
@@ -225,10 +225,7 @@ impl api::browse_file_read::BrowseFileRead for BlockingBrowse {
         std::fs::metadata(path)
     }
 
-    fn external_subtitles(
-        &self,
-        _path: &Path,
-    ) -> Result<Vec<library::SubtitleTrack>, String> {
+    fn external_subtitles(&self, _path: &Path) -> Result<Vec<library::SubtitleTrack>, String> {
         self.gate.enter_and_wait();
         Ok(Vec::new())
     }
@@ -284,9 +281,8 @@ async fn metadata_file_io_runs_off_the_store_lock() {
 
     let tmp = tempfile::tempdir().unwrap();
     let gate = Arc::new(Gate::new());
-    let state = make_state(tmp.path()).with_browse_file_read(Arc::new(BlockingBrowse {
-        gate: gate.clone(),
-    }));
+    let state = make_state(tmp.path())
+        .with_browse_file_read(Arc::new(BlockingBrowse { gate: gate.clone() }));
     let (user_id, media_id) = {
         let library_root = tmp.path().join("visible");
         std::fs::create_dir_all(&library_root).unwrap();
@@ -337,15 +333,16 @@ async fn metadata_file_io_runs_off_the_store_lock() {
             },
         )
         .unwrap();
-        let user_id = guard.user_id_by_token("management-secret").unwrap().unwrap();
+        let user_id = guard
+            .user_id_by_token("management-secret")
+            .unwrap()
+            .unwrap();
         (user_id, media.id)
     };
 
     let provider = api::media_server_provider::ApiServerProvider::new(state.clone());
     let item_id = domain::TypedItemId::Work(media_id).to_wire_string();
-    let handle = tokio::spawn(async move {
-        provider.resolve_single_item(user_id, &item_id).await
-    });
+    let handle = tokio::spawn(async move { provider.resolve_single_item(user_id, &item_id).await });
     // 有界等待：基线没有走 BrowseFileRead seam，这里会干净地失败而不是挂死。
     let entered = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while !gate.entered() {
@@ -366,6 +363,10 @@ async fn metadata_file_io_runs_off_the_store_lock() {
         );
     }
     gate.release();
-    let snapshot = handle.await.unwrap().unwrap().expect("snapshot must resolve");
+    let snapshot = handle
+        .await
+        .unwrap()
+        .unwrap()
+        .expect("snapshot must resolve");
     assert_eq!(snapshot.media.title, "Lock Test");
 }

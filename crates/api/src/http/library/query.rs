@@ -133,6 +133,10 @@ pub(crate) fn browse_store_error(error: store::StoreError) -> Response {
         store::StoreError::Invalid(message) => {
             err(StatusCode::BAD_REQUEST, "library.invalid", &message)
         }
-        error => err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error.to_string()),
+        error => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store.error",
+            &error.to_string(),
+        ),
     }
 }

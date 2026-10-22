@@ -120,7 +120,8 @@ pub fn has_explicit_season(raw: &str) -> bool {
         let at_word = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
         at_word
             && bytes[i] == b'S'
-            && (bytes.get(i + 1).is_some_and(u8::is_ascii_digit) || upper[i..].starts_with("SEASON"))
+            && (bytes.get(i + 1).is_some_and(u8::is_ascii_digit)
+                || upper[i..].starts_with("SEASON"))
     })
 }
 
@@ -298,9 +299,10 @@ fn parse_ep_numbers(ep_part: &str) -> (Option<u32>, Option<u32>) {
         .filter(|text| plausible_episode(text))
         .collect();
     if digits.is_empty() {
-        if let Some(token) = ep_part.split(|c: char| !c.is_ascii_digit()).find(|text| {
-            text.len() == 8 && boundary::is_calendar_date_text(text)
-        }) {
+        if let Some(token) = ep_part
+            .split(|c: char| !c.is_ascii_digit())
+            .find(|text| text.len() == 8 && boundary::is_calendar_date_text(text))
+        {
             boundary::reject_date_token(token);
         }
     }
@@ -323,7 +325,10 @@ mod season_inferred_tests {
     #[test]
     fn missing_season_marker_is_flagged_as_inferred() {
         let r = super::parse("Show Episode 13 1080p WEB-DL");
-        assert_eq!((r.season, r.episode, r.season_inferred), (Some(1), Some(13), true));
+        assert_eq!(
+            (r.season, r.episode, r.season_inferred),
+            (Some(1), Some(13), true)
+        );
         assert!(super::parse("Show E05 1080p").season_inferred);
         assert!(!super::parse("Show.S01E05.1080p").season_inferred);
         assert!(!super::parse("Show Season 2 Episode 3").season_inferred);

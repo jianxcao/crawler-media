@@ -6,12 +6,12 @@
 //! assertions while leaving the favourite intact.
 
 use domain::{
-    Confidence, FilePresence, FilePublication, FileVersion, LibraryFile, Media, MediaId,
-    MediaKind, PhysicalSourceId, QualitySource, TypedItemId, UnitKey, UserId,
+    Confidence, FilePresence, FilePublication, FileVersion, LibraryFile, Media, MediaId, MediaKind,
+    PhysicalSourceId, QualitySource, TypedItemId, UnitKey, UserId,
 };
+use store::Store;
 use store::library_write::{FilePublication as StorePublication, WriteScope};
 use store::playback::{PlaybackEventType, PlayedAssertionScope, ResumeStatus};
-use store::Store;
 
 const USER: &str = "00000000-0000-0000-0000-000000000099";
 const MEDIA: &str = "00000000-0000-0000-0000-000000000001";
@@ -131,7 +131,14 @@ fn episode(f: &Fixture, season: i32, number: i32) -> TypedItemId {
 }
 
 /// Commit real progress so the unit carries a resume package bound to `file`.
-fn commit_progress(f: &Fixture, file: &LibraryFile, season: i32, number: i32, position_ms: i64, duration_ms: i64) {
+fn commit_progress(
+    f: &Fixture,
+    file: &LibraryFile,
+    season: i32,
+    number: i32,
+    position_ms: i64,
+    duration_ms: i64,
+) {
     let item = episode(f, season, number);
     let session_id = f
         .store
@@ -271,7 +278,10 @@ fn source_change_drops_old_duration_and_tracks() {
             None,
         )
         .unwrap();
-    assert_eq!(original.start_ms, 3_600_000, "the original keeps its own position");
+    assert_eq!(
+        original.start_ms, 3_600_000,
+        "the original keeps its own position"
+    );
 }
 
 #[test]
@@ -354,7 +364,10 @@ fn mark_does_not_advance_the_watch_clock() {
         .unit_state(user(), f.media_id, 1, 1)
         .unwrap()
         .unwrap();
-    assert_eq!(before.updated_at, 2, "progress at 2000 ms set the activity clock (seconds)");
+    assert_eq!(
+        before.updated_at, 2,
+        "progress at 2000 ms set the activity clock (seconds)"
+    );
 
     f.store
         .mutate_playback(
@@ -405,7 +418,10 @@ fn clear_history_removes_resume_and_assertions_keeps_favorite() {
         )
         .unwrap();
 
-    let cleared = f.store.clear_units(user(), Some(&[f.media_id]), None).unwrap();
+    let cleared = f
+        .store
+        .clear_units(user(), Some(&[f.media_id]), None)
+        .unwrap();
     assert_eq!(cleared, 1);
 
     let resume = f
@@ -430,7 +446,10 @@ fn clear_history_removes_resume_and_assertions_keeps_favorite() {
         .unit_state(user(), f.media_id, 1, 1)
         .unwrap()
         .unwrap();
-    assert!(state.favorite, "the favourite is a library decision, not history");
+    assert!(
+        state.favorite,
+        "the favourite is a library decision, not history"
+    );
     assert!(!state.played);
     assert_eq!(state.position_ms, 0);
 }
@@ -443,7 +462,15 @@ fn event_activity_clock_is_seconds_not_milliseconds() {
     let file = f.files[0].clone();
     let session_id = f
         .store
-        .issue_play_session(user(), "device_web", file.file_id, f.media_id, UnitKey::new(1, 1), &file.version, 1_000)
+        .issue_play_session(
+            user(),
+            "device_web",
+            file.file_id,
+            f.media_id,
+            UnitKey::new(1, 1),
+            &file.version,
+            1_000,
+        )
         .unwrap();
     let generation = f
         .store
@@ -458,7 +485,10 @@ fn event_activity_clock_is_seconds_not_milliseconds() {
         generation,
         event_sequence: Some(1),
         item: episode(&f, 1, 1),
-        source_id: PhysicalSourceId { file_id: file.file_id, revision: file.version.revision },
+        source_id: PhysicalSourceId {
+            file_id: file.file_id,
+            revision: file.version.revision,
+        },
         source_version: file.version.source_version.clone(),
         position_ms: 2_600_000,
         duration_ms: Some(2_700_000),
@@ -472,7 +502,9 @@ fn event_activity_clock_is_seconds_not_milliseconds() {
         play_method: None,
         event_type: PlaybackEventType::Progress,
     };
-    f.store.commit_playback_event(&event, 1_700_000_010_000).unwrap();
+    f.store
+        .commit_playback_event(&event, 1_700_000_010_000)
+        .unwrap();
     let conn = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
     let (activity, played_ms): (i64, Option<i64>) = conn
         .query_row(
@@ -506,10 +538,27 @@ fn mark(f: &Fixture, scope: domain::UnitScope, played: bool, now_ms: i64) {
 fn newer_season_assertion_overrides_older_episode_and_ties_go_to_episode() {
     let (_tmp, f) = seed(&[(1, 1), (1, 2)]);
     let e01 = UnitKey::new(1, 1);
-    mark(&f, domain::UnitScope::Episode { season: 1, episode: 1 }, true, 1_000);
-    assert!(f.store.effective_played_assertion(user(), f.media_id, e01).unwrap().unwrap().played);
+    mark(
+        &f,
+        domain::UnitScope::Episode {
+            season: 1,
+            episode: 1,
+        },
+        true,
+        1_000,
+    );
+    assert!(
+        f.store
+            .effective_played_assertion(user(), f.media_id, e01)
+            .unwrap()
+            .unwrap()
+            .played
+    );
     mark(&f, domain::UnitScope::Season(1), false, 2_000);
-    let effective = f.store.effective_played_assertion(user(), f.media_id, e01).unwrap();
+    let effective = f
+        .store
+        .effective_played_assertion(user(), f.media_id, e01)
+        .unwrap();
     assert!(
         effective.as_ref().is_none_or(|a| !a.played),
         "season false@2000 must beat episode true@1000: {effective:?}"
@@ -518,7 +567,21 @@ fn newer_season_assertion_overrides_older_episode_and_ties_go_to_episode() {
     // Same change time: the more specific episode assertion wins.
     let (_tmp2, g) = seed(&[(1, 1), (1, 2)]);
     mark(&g, domain::UnitScope::Season(1), true, 3_000);
-    mark(&g, domain::UnitScope::Episode { season: 1, episode: 1 }, false, 3_000);
-    let tie = g.store.effective_played_assertion(user(), g.media_id, e01).unwrap();
-    assert!(tie.is_none_or(|a| !a.played), "tie goes to the episode scope");
+    mark(
+        &g,
+        domain::UnitScope::Episode {
+            season: 1,
+            episode: 1,
+        },
+        false,
+        3_000,
+    );
+    let tie = g
+        .store
+        .effective_played_assertion(user(), g.media_id, e01)
+        .unwrap();
+    assert!(
+        tie.is_none_or(|a| !a.played),
+        "tie goes to the episode scope"
+    );
 }

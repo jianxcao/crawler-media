@@ -10,8 +10,8 @@ pub mod worker;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use parking_lot::Mutex;
@@ -136,11 +136,7 @@ impl ChapterFrameService {
     }
 
     /// Persist one obligation for a file and wake the workers.
-    pub fn enqueue_ledger(
-        &self,
-        file_id: &str,
-        targets: Vec<(i64, i64)>,
-    ) -> Result<bool, String> {
+    pub fn enqueue_ledger(&self, file_id: &str, targets: Vec<(i64, i64)>) -> Result<bool, String> {
         if targets.is_empty() {
             return Ok(false);
         }
@@ -163,11 +159,7 @@ impl ChapterFrameService {
     }
 
     /// Persist one obligation resolved from a file path.
-    pub fn enqueue_path(
-        &self,
-        path: &Path,
-        targets: Vec<(i64, i64)>,
-    ) -> Result<bool, String> {
+    pub fn enqueue_path(&self, path: &Path, targets: Vec<(i64, i64)>) -> Result<bool, String> {
         if targets.is_empty() {
             return Ok(false);
         }
@@ -178,11 +170,7 @@ impl ChapterFrameService {
                 .map_err(|error| error.to_string())?
         };
         match file_id {
-            Some(file_id) => self.enqueue_path_inner(
-                file_id_from_str(&file_id)?,
-                path,
-                targets,
-            ),
+            Some(file_id) => self.enqueue_path_inner(file_id_from_str(&file_id)?, path, targets),
             None => Ok(false),
         }
     }

@@ -1,7 +1,7 @@
-#[path = "support/mod.rs"]
-mod support;
 #[path = "support/remediation.rs"]
 mod remediation;
+#[path = "support/mod.rs"]
+mod support;
 
 use axum::http::StatusCode;
 
@@ -53,7 +53,11 @@ async fn scoped_pages_remain_equivalent_under_background_changes() {
 
     // An admin-scoped read cannot change subsequent member authorization results.
     let (admin_status, _) = fixture
-        .request("GET", "/api/v1/libraries?scope=admin", Some(&fixture.admin_token))
+        .request(
+            "GET",
+            "/api/v1/libraries?scope=admin",
+            Some(&fixture.admin_token),
+        )
         .await;
     assert_eq!(admin_status, StatusCode::OK);
     let (repeat_status, repeated) = fixture

@@ -1,6 +1,6 @@
-use rusqlite::{OptionalExtension, params};
-use domain::{EntityScope, MediaId, MetadataFields};
 use crate::{Store, StoreError};
+use domain::{EntityScope, MediaId, MetadataFields};
+use rusqlite::{OptionalExtension, params};
 
 impl Store {
     pub fn set_metadata_overrides(
@@ -44,7 +44,15 @@ impl Store {
              ON CONFLICT(media_id, entity_scope, season, episode, locale) DO UPDATE SET
                 fields_json = excluded.fields_json,
                 revision = excluded.revision",
-            params![media_str, scope_str, season, episode, locale, fields_json, next_rev],
+            params![
+                media_str,
+                scope_str,
+                season,
+                episode,
+                locale,
+                fields_json,
+                next_rev
+            ],
         )?;
 
         // Overrides take part in composition: recompose the effective row and cards now.

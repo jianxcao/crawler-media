@@ -12,7 +12,7 @@ use subscribe::QualityFact;
 use tower::ServiceExt;
 
 use super::common::{create_site, json_body, request};
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 #[tokio::test]
 async fn legacy_run_uses_shared_keywords_and_wash_cut_ladder() {

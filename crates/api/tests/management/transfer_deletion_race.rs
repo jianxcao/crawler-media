@@ -356,7 +356,14 @@ async fn library_freeze_while_downloader_is_blocked_prevents_physical_transfer()
     resume_tx.send(()).unwrap();
     assert!(transfer.await.unwrap().is_err());
     assert_eq!(std::fs::read(src_file).unwrap(), b"video content");
-    assert!(api_state.store().lock().list_file_coverage().unwrap().is_empty());
+    assert!(
+        api_state
+            .store()
+            .lock()
+            .list_file_coverage()
+            .unwrap()
+            .is_empty()
+    );
     for root in library.root_paths {
         if root.exists() {
             assert_eq!(std::fs::read_dir(root).unwrap().count(), 0);

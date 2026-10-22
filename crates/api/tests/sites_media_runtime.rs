@@ -16,8 +16,8 @@ use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use serde_json::{Value, json};
+use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
-use store::test_support::{publish_fixture_file, FixtureFile};
 
 const TOKEN: &str = "management-secret";
 
@@ -184,7 +184,13 @@ async fn blocked_site_verify_keeps_health_responsive() {
     let fetcher = Arc::new(GatedFetcher::new(gate.clone()));
     let state = state(tmp.path(), fetcher.clone());
     let app = router(state);
-    let id = create_site(&app, "pterclub", "http://127.0.0.1:9/", Some("uid=1; pass=abc")).await;
+    let id = create_site(
+        &app,
+        "pterclub",
+        "http://127.0.0.1:9/",
+        Some("uid=1; pass=abc"),
+    )
+    .await;
 
     let target = tokio::spawn({
         let app = app.clone();
@@ -241,7 +247,10 @@ async fn blocked_site_verify_keeps_health_responsive() {
     let response = target.await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = json_body(response).await;
-    assert_eq!(body["data"]["ok"], false, "gated upstream must report failure");
+    assert_eq!(
+        body["data"]["ok"], false,
+        "gated upstream must report failure"
+    );
 }
 
 #[tokio::test]
@@ -275,7 +284,10 @@ async fn site_action_status_contracts_are_unchanged() {
     let nexus = create_site(&app, "pterclub", "http://127.0.0.1:9/", None).await;
     let response = site_action(&app, &nexus.to_string(), "login").await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(json_body(response).await["error"]["code"], "site.login_failed");
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "site.login_failed"
+    );
 }
 
 fn fixture_file(media_id: MediaId, path: &Path) -> FixtureFile {
@@ -352,7 +364,10 @@ async fn organize_side_effect_really_renames_on_disk() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = json_body(response).await;
     assert_eq!(body["data"]["applied"], 1, "body={body}");
-    assert!(new.is_file(), "side-effect rename must have really executed");
+    assert!(
+        new.is_file(),
+        "side-effect rename must have really executed"
+    );
     assert!(!old.exists(), "source file must be gone after organize");
     let store = state.store();
     let store = store.lock();

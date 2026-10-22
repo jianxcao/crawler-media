@@ -1,5 +1,5 @@
 //! Regression coverage for nested-library ownership and destructive cleanup authorization.
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 #[path = "../support/mod.rs"]
 mod support;
@@ -59,7 +59,11 @@ async fn create_member(app: &axum::Router, login: &str) -> (domain::UserId, Stri
     (id, token)
 }
 
-fn seed_nested_hidden_movie(store: &Store, child_root: &std::path::Path, member_id: domain::UserId) -> Media {
+fn seed_nested_hidden_movie(
+    store: &Store,
+    child_root: &std::path::Path,
+    member_id: domain::UserId,
+) -> Media {
     let media = Media {
         id: MediaId::new(),
         kind: MediaKind::Movie,

@@ -1,8 +1,8 @@
 //! A3 审计回归：未知 folder + SeriesId、剧 parent 的 SQL 下推、person catalog
 //! 失败、favourite 观察一致性、工作量计数、页外重读失败、选页前不得探测。
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use axum::http::StatusCode;
 use domain::{MediaId, MediaKind};
@@ -16,11 +16,21 @@ struct SelectiveCatalog {
 }
 
 impl api::catalog::Catalog for SelectiveCatalog {
-    fn search_movie(&self, _: &str) -> Result<Vec<media::CatalogHit>, String> { Ok(Vec::new()) }
-    fn search_tv(&self, _: &str) -> Result<Vec<media::CatalogHit>, String> { Ok(Vec::new()) }
-    fn popular_movie(&self) -> Result<Vec<media::CatalogHit>, String> { Ok(Vec::new()) }
-    fn popular_tv(&self) -> Result<Vec<media::CatalogHit>, String> { Ok(Vec::new()) }
-    fn details(&self, _: MediaKind, _: &str) -> Result<Option<domain::Media>, String> { Ok(None) }
+    fn search_movie(&self, _: &str) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn search_tv(&self, _: &str) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn popular_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn popular_tv(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn details(&self, _: MediaKind, _: &str) -> Result<Option<domain::Media>, String> {
+        Ok(None)
+    }
     fn metadata_with_preferences(
         &self,
         _kind: MediaKind,
@@ -71,7 +81,10 @@ async fn unknown_folder_plus_series_id_returns_no_episodes() {
     )
     .await;
     assert_eq!(listing["TotalRecordCount"], 0, "{listing}");
-    assert!(items(&listing).is_empty(), "未知 folder 不得带回别的分集：{listing}");
+    assert!(
+        items(&listing).is_empty(),
+        "未知 folder 不得带回别的分集：{listing}"
+    );
 }
 
 #[tokio::test]
@@ -106,11 +119,16 @@ async fn series_parent_does_not_scan_the_root_ledger() {
     )
     .await;
     let scans = fixture.state.store().lock().root_ledger_scans();
-    assert_eq!(listing["TotalRecordCount"], 2, "坏掉的无关行不得让这部剧失败：{listing}");
+    assert_eq!(
+        listing["TotalRecordCount"], 2,
+        "坏掉的无关行不得让这部剧失败：{listing}"
+    );
     assert_eq!(items(&listing).len(), 1);
-    assert_eq!(scans, 0, "剧 parent 不得执行无 WHERE 的根账本扫描，实际 {scans} 次");
+    assert_eq!(
+        scans, 0,
+        "剧 parent 不得执行无 WHERE 的根账本扫描，实际 {scans} 次"
+    );
 }
-
 
 /// R24: PersonIds is answered from local observed facts; a failing catalog neither
 /// fails the request nor changes the result (replaces the old "catalog failure → 500").
@@ -140,14 +158,20 @@ async fn person_filter_is_local_and_survives_catalog_failure() {
         fixture.library_id
     );
     let online_person_page = get_json(&router(fixture.state.clone()), &uri).await;
-    let offline = fixture.state.clone().with_catalog(Arc::new(SelectiveCatalog {
-        fail: "200".into(),
-        actor: "Catalog Alice".into(),
-    }));
+    let offline = fixture
+        .state
+        .clone()
+        .with_catalog(Arc::new(SelectiveCatalog {
+            fail: "200".into(),
+            actor: "Catalog Alice".into(),
+        }));
     let (status, offline_person_page) = get(&router(offline), &uri).await;
     assert_eq!(status, StatusCode::OK, "{offline_person_page}");
     assert_eq!(offline_person_page, online_person_page);
-    assert_eq!(offline_person_page["TotalRecordCount"], 1, "{offline_person_page}");
+    assert_eq!(
+        offline_person_page["TotalRecordCount"], 1,
+        "{offline_person_page}"
+    );
 }
 
 #[tokio::test]
@@ -158,9 +182,27 @@ async fn favorite_filter_uses_the_same_observation_as_the_response() {
     let media = {
         let store = fixture.state.store();
         let store = store.lock();
-        let row = store.list_file_coverage().unwrap().into_iter().next().expect("row");
+        let row = store
+            .list_file_coverage()
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("row");
         store
-            .upsert_unit(user, row.file.media_id, -1, -1, 0, None, Some(true), None, None, None, false, 10)
+            .upsert_unit(
+                user,
+                row.file.media_id,
+                -1,
+                -1,
+                0,
+                None,
+                Some(true),
+                None,
+                None,
+                None,
+                false,
+                10,
+            )
             .unwrap();
         row.file.media_id
     };
@@ -170,7 +212,20 @@ async fn favorite_filter_uses_the_same_observation_as_the_response() {
             let store = state.store();
             let store = store.lock();
             store
-                .upsert_unit(user, media, -1, -1, 0, None, Some(false), None, None, None, false, 11)
+                .upsert_unit(
+                    user,
+                    media,
+                    -1,
+                    -1,
+                    0,
+                    None,
+                    Some(false),
+                    None,
+                    None,
+                    None,
+                    false,
+                    11,
+                )
                 .unwrap();
         }
     }));
@@ -315,6 +370,10 @@ async fn off_page_blob_chapters_fail_only_when_that_row_is_selected() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "选中损坏行必须失败：{body}");
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "选中损坏行必须失败：{body}"
+    );
     let _ = MediaId::new();
 }

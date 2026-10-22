@@ -10,7 +10,7 @@
 //! iterating; the published table in
 //! `docs/audits/2026-10-12-remediation-review-repro/endpoint-perf.md` uses the
 //! defaults. No network, no Chromium, no ffmpeg.
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 #[path = "support/mod.rs"]
 mod support;
@@ -23,9 +23,9 @@ use api::{ApiState, Store, router};
 use axum::body::{Body, to_bytes};
 use axum::http::Request;
 use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UserId};
-use store::SessionRow;
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use store::SessionRow;
 use tower::ServiceExt;
 
 const DEFAULT_SIZES: &[usize] = &[100, 500, 2_000, 10_000];
@@ -320,7 +320,10 @@ async fn measure(app: &axum::Router, uri: &str, samples: usize) -> Vec<Sample> {
         let start = Instant::now();
         let response = app.clone().oneshot(request).await.unwrap();
         let status = response.status().as_u16();
-        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap().len();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .len();
         out.push(Sample {
             status,
             bytes,
@@ -347,7 +350,10 @@ fn env_list(name: &str, default: &[usize]) -> Vec<usize> {
 
 fn env_modes(default: &[&str]) -> Vec<String> {
     match std::env::var("PERF_MODES") {
-        Ok(raw) => raw.split(',').map(|value| value.trim().to_string()).collect(),
+        Ok(raw) => raw
+            .split(',')
+            .map(|value| value.trim().to_string())
+            .collect(),
         Err(_) => default.iter().map(|value| (*value).to_string()).collect(),
     }
 }

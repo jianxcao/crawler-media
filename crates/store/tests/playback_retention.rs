@@ -171,7 +171,15 @@ fn deletes_only_logs_ended_strictly_before_cutoff() {
     let media = MediaId::new();
     let file = support::seed_published_file(&store, &tmp.path().join("library"), "cutoff").1;
     let cutoff = 1_700_000_000i64;
-    let expired = log_fixture(&store, user, media, file, "expired", cutoff - 100, cutoff - 1);
+    let expired = log_fixture(
+        &store,
+        user,
+        media,
+        file,
+        "expired",
+        cutoff - 100,
+        cutoff - 1,
+    );
     let on_cutoff = log_fixture(&store, user, media, file, "on-cutoff", cutoff - 100, cutoff);
     let fresh = log_fixture(&store, user, media, file, "fresh", cutoff - 100, cutoff + 1);
 
@@ -198,7 +206,15 @@ fn repeated_prune_is_idempotent() {
     let file = support::seed_published_file(&store, &tmp.path().join("library"), "idempotent").1;
     let cutoff = 1_700_000_000i64;
     for index in 0..3 {
-        log_fixture(&store, user, media, file, &format!("old{index}"), cutoff - 50, cutoff - 10 - index);
+        log_fixture(
+            &store,
+            user,
+            media,
+            file,
+            &format!("old{index}"),
+            cutoff - 50,
+            cutoff - 10 - index,
+        );
     }
 
     let first = store.prune_playback_logs(cutoff, 500, false).unwrap();
@@ -221,22 +237,59 @@ fn prune_keeps_progress_favorites_sessions_and_metrics() {
     insert_movie(&store, media);
     let file = support::publish_file(&store, &tmp.path().join("library"), media, "keeps");
     store
-        .upsert_unit(user, media, -1, -1, 42_000, Some(false), Some(true), Some(100_000), None, None, false, 100)
+        .upsert_unit(
+            user,
+            media,
+            -1,
+            -1,
+            42_000,
+            Some(false),
+            Some(true),
+            Some(100_000),
+            None,
+            None,
+            false,
+            100,
+        )
         .unwrap();
     let progress = store.unit_state(user, media, -1, -1).unwrap().unwrap();
     let live = live_session(&store, user, media, file, "live", cutoff);
     store
-        .insert_metric(user, media, 0, Some("web"), Some(120), 5, 1, 0, None, None, 1_000, cutoff)
+        .insert_metric(
+            user,
+            media,
+            0,
+            Some("web"),
+            Some(120),
+            5,
+            1,
+            0,
+            None,
+            None,
+            1_000,
+            cutoff,
+        )
         .unwrap();
     let metrics = metric_count(tmp.path(), user);
     for index in 0..2 {
-        log_fixture(&store, user, media, file, &format!("old{index}"), cutoff - 50, cutoff - 10 - index);
+        log_fixture(
+            &store,
+            user,
+            media,
+            file,
+            &format!("old{index}"),
+            cutoff - 50,
+            cutoff - 10 - index,
+        );
     }
 
     let batch = store.prune_playback_logs(cutoff, 500, false).unwrap();
 
     assert_eq!(batch.deleted, 2);
-    assert_eq!(store.unit_state(user, media, -1, -1).unwrap().unwrap(), progress);
+    assert_eq!(
+        store.unit_state(user, media, -1, -1).unwrap().unwrap(),
+        progress
+    );
     assert_eq!(store.get_session(user, "live").unwrap().unwrap(), live);
     let active = store.active_sessions(cutoff, 600).unwrap();
     assert_eq!(active.len(), 1, "活跃会话必须保留");
@@ -279,7 +332,12 @@ fn history_and_stats_only_cover_the_retention_window() {
         ));
     }
     assert_eq!(
-        store.playback_watch_report(Some(user), None, now, 365, 0).unwrap().current.totals.plays,
+        store
+            .playback_watch_report(Some(user), None, now, 365, 0)
+            .unwrap()
+            .current
+            .totals
+            .plays,
         5
     );
 
@@ -293,7 +351,9 @@ fn history_and_stats_only_cover_the_retention_window() {
         assert!(kept.contains(&entry.id));
         assert!(!expired.contains(&entry.id));
     }
-    let report = store.playback_watch_report(Some(user), None, now, 365, 0).unwrap();
+    let report = store
+        .playback_watch_report(Some(user), None, now, 365, 0)
+        .unwrap();
     assert_eq!(report.current.totals.plays, 2, "统计窗口内只剩保留数据");
     assert_eq!(report.current.totals.watched_ms, 20);
 }
@@ -307,7 +367,15 @@ fn dry_run_reports_candidates_without_writing() {
     let file = support::seed_published_file(&store, &tmp.path().join("library"), "dry-run").1;
     let cutoff = 1_700_000_000i64;
     for index in 0..3 {
-        log_fixture(&store, user, media, file, &format!("old{index}"), cutoff - 50, cutoff - 10 - index);
+        log_fixture(
+            &store,
+            user,
+            media,
+            file,
+            &format!("old{index}"),
+            cutoff - 50,
+            cutoff - 10 - index,
+        );
     }
     let before = log_ids(&store, user);
 
@@ -353,10 +421,17 @@ fn delete_failure_rolls_back_the_whole_batch() {
     let cutoff = 1_700_000_000i64;
     {
         let store = Store::open(tmp.path()).unwrap();
-        let file =
-            support::seed_published_file(&store, &tmp.path().join("library"), "rollback").1;
+        let file = support::seed_published_file(&store, &tmp.path().join("library"), "rollback").1;
         for index in 0..3 {
-            log_fixture(&store, user, media, file, &format!("old{index}"), cutoff - 50, cutoff - 1 - index);
+            log_fixture(
+                &store,
+                user,
+                media,
+                file,
+                &format!("old{index}"),
+                cutoff - 50,
+                cutoff - 1 - index,
+            );
         }
     }
     {

@@ -415,7 +415,17 @@ async fn movie_nonzero_episode_is_not_an_alias_for_whole_movie() {
         .id;
     store
         .upsert_unit(
-            user, media, -1, -1, 600_000, Some(true), Some(true), Some(7_200_000), None, None, true,
+            user,
+            media,
+            -1,
+            -1,
+            600_000,
+            Some(true),
+            Some(true),
+            Some(7_200_000),
+            None,
+            None,
+            true,
             1,
         )
         .unwrap();

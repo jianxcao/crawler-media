@@ -1,4 +1,4 @@
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 #[path = "support/mod.rs"]
 mod support;
 
@@ -44,7 +44,12 @@ async fn full_lifecycle_playback_and_scan_correctness_acceptance() {
     .unwrap();
 
     // 2. Playback session generation isolation and watch time accumulation
-    let user_id = store_arc.lock().user_by_token(&fix.admin_token).unwrap().unwrap().id;
+    let user_id = store_arc
+        .lock()
+        .user_by_token(&fix.admin_token)
+        .unwrap()
+        .unwrap()
+        .id;
     let session_id_1 = support::session::issue_session(
         &store_arc.lock(),
         user_id,
@@ -66,7 +71,8 @@ async fn full_lifecycle_playback_and_scan_correctness_acceptance() {
             "position_ms": 0,
             "play_session_id": session_id_1,
         }),
-    ).await;
+    )
+    .await;
 
     // Normal progress at pos=5000ms
     fix.request_with_body(
@@ -81,7 +87,8 @@ async fn full_lifecycle_playback_and_scan_correctness_acceptance() {
             "position_ms": 5000,
             "play_session_id": session_id_1,
         }),
-    ).await;
+    )
+    .await;
 
     // Start session 2 (new generation) at t=2000s, pos=0
     let session_id_2 = support::session::issue_session(
@@ -104,7 +111,8 @@ async fn full_lifecycle_playback_and_scan_correctness_acceptance() {
             "position_ms": 0,
             "play_session_id": session_id_2,
         }),
-    ).await;
+    )
+    .await;
 
     // Late stop from session 1 arrives
     fix.request_with_body(
@@ -119,10 +127,15 @@ async fn full_lifecycle_playback_and_scan_correctness_acceptance() {
             "position_ms": 5000,
             "play_session_id": session_id_1,
         }),
-    ).await;
+    )
+    .await;
 
     // Active session is still session 2!
-    let cur = store_arc.lock().get_session(user_id, "device_acc").unwrap().unwrap();
+    let cur = store_arc
+        .lock()
+        .get_session(user_id, "device_acc")
+        .unwrap()
+        .unwrap();
     assert_eq!(cur.play_session_id.as_deref(), Some(session_id_2.as_str()));
 
     // 3. Obligations dispatched

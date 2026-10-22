@@ -242,7 +242,10 @@ async fn media_merge_converges_queued_job_references_once() {
         loop {
             let response = app.clone().oneshot(request("GET", &path)).await.unwrap();
             let body = body_json(response).await;
-            let phase = body["data"]["state"].as_str().unwrap_or_default().to_string();
+            let phase = body["data"]["state"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
             if phase == "succeeded" {
                 return;
             }

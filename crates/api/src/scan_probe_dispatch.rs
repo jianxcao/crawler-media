@@ -27,7 +27,9 @@ fn dispatch_once_sync(state: &ApiState) -> Result<usize, String> {
     for ob in obligations {
         let row_opt = {
             let store = state.store.lock();
-            store.file_coverage_by_id(ob.ledger_id).map_err(|e| e.to_string())?
+            store
+                .file_coverage_by_id(ob.ledger_id)
+                .map_err(|e| e.to_string())?
         };
 
         let Some(row) = row_opt else {
@@ -46,10 +48,10 @@ fn dispatch_once_sync(state: &ApiState) -> Result<usize, String> {
             continue;
         };
 
-        let enqueued_or_active = match state
-            .probe
-            .request_probe(&row, crate::probe_manager::policy::ProbeRequestOrigin::Detail)
-        {
+        let enqueued_or_active = match state.probe.request_probe(
+            &row,
+            crate::probe_manager::policy::ProbeRequestOrigin::Detail,
+        ) {
             Ok(crate::probe_manager::policy::ProbeRequestResult::Queued { .. }) => {
                 state.probe.holds_dispatch_id(&row.file.file_id.to_string())
             }

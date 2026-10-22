@@ -1,9 +1,9 @@
-use std::collections::HashMap;
-use api::cli::{Command, Transport, run};
-use serde_json::json;
-use tower::ServiceExt;
 use super::{search_transport, transport};
 use crate::common::*;
+use api::cli::{Command, Transport, run};
+use serde_json::json;
+use std::collections::HashMap;
+use tower::ServiceExt;
 
 #[tokio::test]
 async fn cli_users_prints_seeded_admin() {
@@ -112,4 +112,3 @@ async fn cli_jobs_prints_transfer_kind() {
     assert!(out.contains("transfer"), "{out}");
     assert!(out.contains("subscribe_rss"), "{out}");
 }
-

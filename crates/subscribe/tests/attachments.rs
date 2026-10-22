@@ -18,7 +18,7 @@ fn movie_filter() -> Filter {
             exclude: false,
         }],
         keep_old_versions: false,
-}
+    }
 }
 
 fn media_movie() -> Media {

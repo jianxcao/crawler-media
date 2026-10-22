@@ -360,10 +360,7 @@ mod debug_tests {
             "http://bob@127.0.0.1:7890",
             "只有用户名、没有口令时没有可隐藏的秘密，原样保留"
         );
-        assert_eq!(
-            mask_proxy_url("bob@127.0.0.1:7890"),
-            "bob@127.0.0.1:7890"
-        );
+        assert_eq!(mask_proxy_url("bob@127.0.0.1:7890"), "bob@127.0.0.1:7890");
         assert_eq!(
             mask_proxy_url("socks5://127.0.0.1:1080"),
             "socks5://127.0.0.1:1080",

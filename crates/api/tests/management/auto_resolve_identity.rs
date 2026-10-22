@@ -23,9 +23,19 @@ async fn http_scan_rebinds_incoming_rows_to_canonical_media_identity() {
         fn search_tv(&self, _query: &str) -> Result<Vec<media::CatalogHit>, String> {
             Ok(Vec::new())
         }
-        fn popular_movie(&self) -> Result<Vec<media::CatalogHit>, String> { Ok(Vec::new()) }
-        fn popular_tv(&self) -> Result<Vec<media::CatalogHit>, String> { Ok(Vec::new()) }
-        fn details(&self, _kind: domain::MediaKind, _id: &str) -> Result<Option<domain::Media>, String> { Ok(None) }
+        fn popular_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
+            Ok(Vec::new())
+        }
+        fn popular_tv(&self) -> Result<Vec<media::CatalogHit>, String> {
+            Ok(Vec::new())
+        }
+        fn details(
+            &self,
+            _kind: domain::MediaKind,
+            _id: &str,
+        ) -> Result<Option<domain::Media>, String> {
+            Ok(None)
+        }
     }
     let hit = media::CatalogHit {
         media: domain::Media {
@@ -85,8 +95,7 @@ async fn http_scan_rebinds_incoming_rows_to_canonical_media_identity() {
         .unwrap()
         .expect("scanned ledger should exist");
     assert_eq!(
-        coverage.file.media_id,
-        old_canonical.id,
+        coverage.file.media_id, old_canonical.id,
         "新增台账必须重新绑定到已有 canonical Media"
     );
 }

@@ -45,7 +45,10 @@ fn log_fixture(
             last_event_sequence: None,
         })
         .unwrap();
-    store.close_session(user, device, started + 1).unwrap().unwrap();
+    store
+        .close_session(user, device, started + 1)
+        .unwrap()
+        .unwrap();
 }
 
 fn day_plays(report: &WatchReport, day: i64) -> i64 {
@@ -77,16 +80,25 @@ fn dedupes_members_and_media_and_zero_fills() {
     let file = support::seed_published_file(&store, &tmp.path().join("library"), "dedupe").1;
     let now = 1_700_000_000i64;
     for (index, watched) in [1_000i64, 2_000, 3_000].into_iter().enumerate() {
-        log_fixture(&store, user, media, file, &format!("d{index}"), now - index as i64 * 60, watched);
+        log_fixture(
+            &store,
+            user,
+            media,
+            file,
+            &format!("d{index}"),
+            now - index as i64 * 60,
+            watched,
+        );
     }
 
-    let report = store
-        .playback_watch_report(None, None, now, 7, 0)
-        .unwrap();
+    let report = store.playback_watch_report(None, None, now, 7, 0).unwrap();
 
     assert_eq!(report.current.totals.plays, 3);
     assert_eq!(report.current.totals.watched_ms, 6_000);
-    assert_eq!(report.current.totals.members, 1, "同一成员的多条日志只算一次");
+    assert_eq!(
+        report.current.totals.members, 1,
+        "同一成员的多条日志只算一次"
+    );
     assert_eq!(report.current.media.len(), 1, "同一 Media 只出现一行");
     assert_eq!(report.current.media[0].plays, 3);
     assert_eq!(report.current.media[0].members, 1);
@@ -98,7 +110,15 @@ fn dedupes_members_and_media_and_zero_fills() {
     assert_eq!(report.current.days.len(), 7);
     assert_eq!(report.current.hours.len(), 7);
     assert!(report.current.hours.iter().all(|row| row.len() == 24));
-    assert_eq!(report.current.days.iter().map(|d| d.totals.plays).sum::<i64>(), 3);
+    assert_eq!(
+        report
+            .current
+            .days
+            .iter()
+            .map(|d| d.totals.plays)
+            .sum::<i64>(),
+        3
+    );
 
     assert_eq!(report.previous.totals.plays, 0, "上一窗口为空");
     assert_eq!(report.previous.days.len(), 7);
@@ -131,7 +151,10 @@ fn hidden_titles_counts_distinct_invisible_media_in_the_current_window() {
     assert_eq!(report.current.totals.plays, 1, "不可见 Media 不进 totals");
     assert_eq!(report.current.media.len(), 1);
     assert_eq!(report.current.media[0].media_id, visible);
-    assert_eq!(report.previous.totals.plays, 0, "上一窗口的不可见日志也不可见");
+    assert_eq!(
+        report.previous.totals.plays, 0,
+        "上一窗口的不可见日志也不可见"
+    );
 
     // 空可见集合：全部隐藏，totals 为空但 hidden_titles 是当前窗口 distinct。
     let report = store
@@ -139,7 +162,10 @@ fn hidden_titles_counts_distinct_invisible_media_in_the_current_window() {
         .unwrap();
     assert_eq!(report.current.totals.plays, 0);
     assert!(report.current.media.is_empty());
-    assert_eq!(report.hidden_titles, 2, "visible + hidden 两个 Media 都不可见");
+    assert_eq!(
+        report.hidden_titles, 2,
+        "visible + hidden 两个 Media 都不可见"
+    );
 }
 
 #[test]
@@ -154,16 +180,43 @@ fn previous_window_boundaries_are_half_open() {
     let boundary = now - days * DAY;
     // 边界（含）→ 当前窗口；边界前一秒 → 上一窗口。
     log_fixture(&store, user, media, file, "current-edge", boundary, 100);
-    log_fixture(&store, user, media, file, "previous-edge", boundary - 1, 100);
+    log_fixture(
+        &store,
+        user,
+        media,
+        file,
+        "previous-edge",
+        boundary - 1,
+        100,
+    );
     // 上一窗口起点（含）；再往前一秒两边都不算。
-    log_fixture(&store, user, media, file, "previous-start", now - 2 * days * DAY, 100);
-    log_fixture(&store, user, media, file, "outside", now - 2 * days * DAY - 1, 100);
+    log_fixture(
+        &store,
+        user,
+        media,
+        file,
+        "previous-start",
+        now - 2 * days * DAY,
+        100,
+    );
+    log_fixture(
+        &store,
+        user,
+        media,
+        file,
+        "outside",
+        now - 2 * days * DAY - 1,
+        100,
+    );
 
     let report = store
         .playback_watch_report(None, None, now, days as u16, 0)
         .unwrap();
     assert_eq!(report.current.totals.plays, 1, "当前窗口 [now-days, ∞)");
-    assert_eq!(report.previous.totals.plays, 2, "上一窗口 [now-2*days, now-days)");
+    assert_eq!(
+        report.previous.totals.plays, 2,
+        "上一窗口 [now-2*days, now-days)"
+    );
 }
 
 #[test]
@@ -175,12 +228,24 @@ fn timezone_buckets_match_euclid_semantics() {
     let file = support::seed_published_file(&store, &tmp.path().join("library"), "timezone").1;
     let now = DAY;
     // 负 epoch 边界：-1 / 0 / 86399 / 86400。
-    for (index, (started, watched)) in
-        [(-1i64, 1_000i64), (0, 2_000), (86_399, 3_000), (86_400, 4_000)]
-            .into_iter()
-            .enumerate()
+    for (index, (started, watched)) in [
+        (-1i64, 1_000i64),
+        (0, 2_000),
+        (86_399, 3_000),
+        (86_400, 4_000),
+    ]
+    .into_iter()
+    .enumerate()
     {
-        log_fixture(&store, user, media, file, &format!("tz{index}"), started, watched);
+        log_fixture(
+            &store,
+            user,
+            media,
+            file,
+            &format!("tz{index}"),
+            started,
+            watched,
+        );
     }
 
     // tz = 0：day 用 floor 除法，-1 属于 day -1；hour 用 rem_euclid，-1 → 23 点。
@@ -194,7 +259,9 @@ fn timezone_buckets_match_euclid_semantics() {
     assert_eq!(report.current.hours[4][0], 4_000, "weekday(1)=4");
 
     // tz = +480（+8h）：today=1，区间 [-1,1]；day0 收 -1/0，day1 收 86399/86400。
-    let report = store.playback_watch_report(None, None, now, 3, 480).unwrap();
+    let report = store
+        .playback_watch_report(None, None, now, 3, 480)
+        .unwrap();
     assert_eq!(day_plays(&report, -1), 0);
     assert_eq!(day_plays(&report, 0), 2);
     assert_eq!(day_plays(&report, 1), 2);
@@ -204,7 +271,9 @@ fn timezone_buckets_match_euclid_semantics() {
     assert_eq!(report.current.hours[4][8], 4_000);
 
     // tz = -480（-8h）：today=0，区间 [-2,0]；负 epoch 的 floor 除法是关键。
-    let report = store.playback_watch_report(None, None, now, 3, -480).unwrap();
+    let report = store
+        .playback_watch_report(None, None, now, 3, -480)
+        .unwrap();
     assert_eq!(day_plays(&report, -2), 0);
     assert_eq!(day_plays(&report, -1), 2);
     assert_eq!(day_plays(&report, 0), 2);
@@ -223,11 +292,31 @@ fn validates_window_and_timezone_bounds() {
     let now = 1_700_000_000i64;
 
     assert!(store.playback_watch_report(None, None, now, 0, 0).is_err());
-    assert!(store.playback_watch_report(None, None, now, 366, 0).is_err());
-    assert!(store.playback_watch_report(None, None, now, 1, 1_441).is_err());
-    assert!(store.playback_watch_report(None, None, now, 1, -1_441).is_err());
-    assert!(store.playback_watch_report(None, None, now, 1, 1_440).is_ok());
-    assert!(store.playback_watch_report(None, None, now, 365, -1_440).is_ok());
+    assert!(
+        store
+            .playback_watch_report(None, None, now, 366, 0)
+            .is_err()
+    );
+    assert!(
+        store
+            .playback_watch_report(None, None, now, 1, 1_441)
+            .is_err()
+    );
+    assert!(
+        store
+            .playback_watch_report(None, None, now, 1, -1_441)
+            .is_err()
+    );
+    assert!(
+        store
+            .playback_watch_report(None, None, now, 1, 1_440)
+            .is_ok()
+    );
+    assert!(
+        store
+            .playback_watch_report(None, None, now, 365, -1_440)
+            .is_ok()
+    );
 }
 
 #[test]

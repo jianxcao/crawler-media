@@ -61,10 +61,20 @@ fn nested_root_wins_over_parent_root() {
     let parent_path = parent_root.join("one.mkv");
     let child_path = child_root.join("two.mkv");
 
-    assert_eq!(view.owner(&parent_path, MediaKind::Movie).unwrap().id, parent.id);
-    assert_eq!(view.owner(&child_path, MediaKind::Movie).unwrap().id, child.id);
     assert_eq!(
-        store.library_for_path(&child_path, MediaKind::Movie).unwrap().unwrap().id,
+        view.owner(&parent_path, MediaKind::Movie).unwrap().id,
+        parent.id
+    );
+    assert_eq!(
+        view.owner(&child_path, MediaKind::Movie).unwrap().id,
+        child.id
+    );
+    assert_eq!(
+        store
+            .library_for_path(&child_path, MediaKind::Movie)
+            .unwrap()
+            .unwrap()
+            .id,
         child.id
     );
 }
@@ -78,9 +88,16 @@ fn unmatched_path_falls_back_to_kind_default() {
 
     let view = store.library_ownership().unwrap();
     assert_eq!(view.default_for(MediaKind::Movie).unwrap().id, default.id);
-    assert_eq!(view.owner(&outside, MediaKind::Movie).unwrap().id, default.id);
     assert_eq!(
-        store.library_for_path(&outside, MediaKind::Movie).unwrap().unwrap().id,
+        view.owner(&outside, MediaKind::Movie).unwrap().id,
+        default.id
+    );
+    assert_eq!(
+        store
+            .library_for_path(&outside, MediaKind::Movie)
+            .unwrap()
+            .unwrap()
+            .id,
         default.id
     );
 }
@@ -117,14 +134,28 @@ fn same_media_in_two_libraries_owns_each_path_separately() {
     store::test_support::publish_fixture_file(&store, &&r2).unwrap();
 
     let view = store.library_ownership().unwrap();
-    assert_eq!(view.owner(&parent_path, MediaKind::Movie).unwrap().id, parent.id);
-    assert_eq!(view.owner(&child_path, MediaKind::Movie).unwrap().id, child.id);
     assert_eq!(
-        store.library_for_path(&parent_path, MediaKind::Movie).unwrap().unwrap().id,
+        view.owner(&parent_path, MediaKind::Movie).unwrap().id,
         parent.id
     );
     assert_eq!(
-        store.library_for_path(&child_path, MediaKind::Movie).unwrap().unwrap().id,
+        view.owner(&child_path, MediaKind::Movie).unwrap().id,
+        child.id
+    );
+    assert_eq!(
+        store
+            .library_for_path(&parent_path, MediaKind::Movie)
+            .unwrap()
+            .unwrap()
+            .id,
+        parent.id
+    );
+    assert_eq!(
+        store
+            .library_for_path(&child_path, MediaKind::Movie)
+            .unwrap()
+            .unwrap()
+            .id,
         child.id
     );
 }

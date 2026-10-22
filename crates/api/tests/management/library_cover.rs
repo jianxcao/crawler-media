@@ -86,10 +86,7 @@ async fn create_movie_library_and_assert_empty_cover(
     (lib_id, film_dir)
 }
 
-async fn setup_movie_library_with_fanart(
-    app: &axum::Router,
-    tmp: &tempfile::TempDir,
-) -> String {
+async fn setup_movie_library_with_fanart(app: &axum::Router, tmp: &tempfile::TempDir) -> String {
     let movie_root = tmp.path().join("movies");
     std::fs::create_dir_all(&movie_root).unwrap();
 

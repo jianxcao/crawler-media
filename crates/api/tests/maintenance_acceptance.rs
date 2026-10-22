@@ -13,9 +13,9 @@ mod support;
 #[path = "support/mod.rs"]
 mod api_support;
 
+use api::ApiState;
 use api::maintenance::{MaintenancePolicy, SqliteExecutor};
 use api::worker::StateRunner;
-use api::ApiState;
 use domain::{MediaId, UserId};
 use jobs::{JobKind, Runner, Schedule};
 use store::{SessionRow, Store};
@@ -85,7 +85,10 @@ fn fresh_state_registers_the_four_maintenance_defs_with_documented_defaults() {
     );
 
     let data = by_kind(JobKind::DataRetention);
-    assert!(!data.enabled, "分类历史保留默认关闭，生产启用需用户显式确认");
+    assert!(
+        !data.enabled,
+        "分类历史保留默认关闭，生产启用需用户显式确认"
+    );
     assert_eq!(
         data.schedule,
         Some(Schedule::Interval { secs: 86_400 }),
@@ -187,7 +190,8 @@ fn session(
     device: &str,
     started: i64,
 ) -> SessionRow {
-    let play_session_id = api_support::session::issue_session(store, user, device, file_id, started);
+    let play_session_id =
+        api_support::session::issue_session(store, user, device, file_id, started);
     SessionRow {
         device_id: device.into(),
         user_id: user,
@@ -228,19 +232,21 @@ fn playback_retention_prunes_only_logs_and_keeps_playback_state() {
         let store_handle = state.store();
         let store = store_handle.lock();
         // `playback_units.media_id` 现在有真实外键：先登记 Media 身份。
-        store.insert_media(&domain::Media {
-            id: media,
-            kind: domain::MediaKind::Movie,
-            title: "Retention Fixture".into(),
-            original_title: None,
-            aliases: Vec::new(),
-            year: None,
-            tmdb_id: None,
-            douban_id: None,
-            tvdb_id: None,
-            bangumi_id: None,
-            anilist_id: None,
-        }).unwrap();
+        store
+            .insert_media(&domain::Media {
+                id: media,
+                kind: domain::MediaKind::Movie,
+                title: "Retention Fixture".into(),
+                original_title: None,
+                aliases: Vec::new(),
+                year: None,
+                tmdb_id: None,
+                douban_id: None,
+                tvdb_id: None,
+                bangumi_id: None,
+                anilist_id: None,
+            })
+            .unwrap();
         let file_id = seed_published_file(&store, tmp.path(), media);
         // 两条超龄历史 + 一条近期历史。
         for (index, started) in [(0, now - 40 * DAY), (1, now - 30 * DAY), (2, now - 60)].iter() {
@@ -264,8 +270,18 @@ fn playback_retention_prunes_only_logs_and_keeps_playback_state() {
         store.upsert_session(&live).unwrap();
         store
             .upsert_unit(
-                user, media, -1, -1, 42_000, Some(false), Some(true), Some(100_000), None, None,
-                false, 100,
+                user,
+                media,
+                -1,
+                -1,
+                42_000,
+                Some(false),
+                Some(true),
+                Some(100_000),
+                None,
+                None,
+                false,
+                100,
             )
             .unwrap();
     }
@@ -330,7 +346,8 @@ fn large_history_prune_stops_at_the_budget_and_resumes_next_run() {
 
     // test-only：单事务原始 SQL 造历史（断言仍走公开 seam）。
     {
-        let conn = rusqlite::Connection::open(support::data_dir(&state).join("subscribe.db")).unwrap();
+        let conn =
+            rusqlite::Connection::open(support::data_dir(&state).join("subscribe.db")).unwrap();
         let tx = conn.unchecked_transaction().unwrap();
         {
             let mut stmt = tx
@@ -358,19 +375,33 @@ fn large_history_prune_stops_at_the_budget_and_resumes_next_run() {
 
     let first = support::enqueue_claim(&state, JobKind::PlaybackHistoryRetention, KEEP, now);
     let started = std::time::Instant::now();
-    StateRunner { state: state.clone() }.run(&first).unwrap();
+    StateRunner {
+        state: state.clone(),
+    }
+    .run(&first)
+    .unwrap();
     let first_elapsed = started.elapsed();
     let report = support::progress_of(&state, &first);
     println!(
         "large-history run#1: batches={} deleted={} budget_exhausted={} elapsed_ms={}",
-        report["batches"], report["deleted"], report["budget_exhausted"], first_elapsed.as_millis()
+        report["batches"],
+        report["deleted"],
+        report["budget_exhausted"],
+        first_elapsed.as_millis()
     );
     assert_eq!(report["batches"], 20, "单次运行受 MAX_BATCHES 限制");
-    assert_eq!(report["deleted"], 10_000, "单次最多删 MAX_BATCHES*BATCH_SIZE 行");
+    assert_eq!(
+        report["deleted"], 10_000,
+        "单次最多删 MAX_BATCHES*BATCH_SIZE 行"
+    );
     assert_eq!(report["budget_exhausted"], true);
 
     let second = support::enqueue_claim(&state, JobKind::PlaybackHistoryRetention, KEEP, now);
-    StateRunner { state: state.clone() }.run(&second).unwrap();
+    StateRunner {
+        state: state.clone(),
+    }
+    .run(&second)
+    .unwrap();
     let report = support::progress_of(&state, &second);
     println!("large-history run#2: deleted={}", report["deleted"]);
     assert_eq!(report["deleted"], 10_000, "下一次运行继续推进，不是死循环");
@@ -384,7 +415,11 @@ async fn real_job_loop_executes_maintenance_with_shutdown_and_updates() {
 
     // 塞入一条超龄 scrape 终态
     let stale = support::enqueue_claim(&state, JobKind::Scrape, "{}", now - 100 * DAY);
-    state.jobs().lock().succeed_claimed(&stale, now - 100 * DAY).unwrap();
+    state
+        .jobs()
+        .lock()
+        .succeed_claimed(&stale, now - 100 * DAY)
+        .unwrap();
 
     let def = maintenance_defs(&state)
         .into_iter()

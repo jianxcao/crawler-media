@@ -85,7 +85,9 @@ pub(crate) fn record_file_artwork_in(
             has_still = MAX(has_still, ?6)
          WHERE file_id = ?7",
         params![
-            artwork.poster.map(|path| path.to_string_lossy().to_string()),
+            artwork
+                .poster
+                .map(|path| path.to_string_lossy().to_string()),
             artwork
                 .backdrop
                 .map(|path| path.to_string_lossy().to_string()),

@@ -631,12 +631,21 @@ fn merge_shared_overrides(tx: &Connection, survivor: &str, loser: &str) -> Resul
     type Row = (String, i64, i64, String, String, String);
     let rows: Vec<Row> = stmt
         .query_map(params![survivor, loser], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     for (scope, season, episode, locale, survivor_json, loser_json) in rows {
-        let mut merged: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&survivor_json)?;
-        let loser_fields: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&loser_json)?;
+        let mut merged: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&survivor_json)?;
+        let loser_fields: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&loser_json)?;
         let before = merged.len();
         for (key, value) in loser_fields {
             merged.entry(key).or_insert(value);

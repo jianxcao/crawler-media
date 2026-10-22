@@ -1,13 +1,23 @@
 mod support;
 
 use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
-use store::test_support::FixtureFile;
 use store::Store;
+use store::test_support::FixtureFile;
 
 fn media() -> Media {
-    Media { id: MediaId::new(), kind: MediaKind::Tv, title: "Example".into(),
-        year: Some(2022), original_title: None, aliases: Vec::new(), tmdb_id: Some("123".into()),
-        douban_id: None, tvdb_id: None, bangumi_id: None, anilist_id: None }
+    Media {
+        id: MediaId::new(),
+        kind: MediaKind::Tv,
+        title: "Example".into(),
+        year: Some(2022),
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: Some("123".into()),
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    }
 }
 
 fn row(media_id: MediaId, path: &std::path::Path) -> FixtureFile {
@@ -34,8 +44,26 @@ fn removal_cleans_only_owned_rows_and_preserves_files_and_media() {
     let root = temp.path().join("tv_%");
     let child = root.join("kids");
     std::fs::create_dir_all(&child).unwrap();
-    let a = store.create_library(MediaKind::Tv, "A", &[root.to_str().unwrap()], "everyone", true, &[]).unwrap();
-    let b = store.create_library(MediaKind::Tv, "B", &[child.to_str().unwrap()], "everyone", true, &[]).unwrap();
+    let a = store
+        .create_library(
+            MediaKind::Tv,
+            "A",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let b = store
+        .create_library(
+            MediaKind::Tv,
+            "B",
+            &[child.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
     let media = media();
     store.insert_media(&media).unwrap();
     let path = root.join("E01.strm");
@@ -46,20 +74,49 @@ fn removal_cleans_only_owned_rows_and_preserves_files_and_media() {
     let b_row = row(media.id, &child_path);
     store::test_support::publish_fixture_file(&store, &&a_row).unwrap();
     store::test_support::publish_fixture_file(&store, &&b_row).unwrap();
-    store.put_file_meta(&a_row.file_id.expect("fixture file id").to_string(), &library::Tracks::default()).unwrap();
+    store
+        .put_file_meta(
+            &a_row.file_id.expect("fixture file id").to_string(),
+            &library::Tracks::default(),
+        )
+        .unwrap();
     let user = domain::UserId::new();
-    store.upsert_unit(user, media.id, 1, 1, 750_000, Some(false), Some(true),
-        Some(1_000_000), None, None, false, 1).unwrap();
+    store
+        .upsert_unit(
+            user,
+            media.id,
+            1,
+            1,
+            750_000,
+            Some(false),
+            Some(true),
+            Some(1_000_000),
+            None,
+            None,
+            false,
+            1,
+        )
+        .unwrap();
     let removal = store.begin_library_removal(&a.id).unwrap();
     assert!(!store.library_accepts_work(&a.id).unwrap());
-    assert_eq!(store.begin_library_removal(&a.id).unwrap().operation_id, removal.operation_id);
+    assert_eq!(
+        store.begin_library_removal(&a.id).unwrap().operation_id,
+        removal.operation_id
+    );
     assert!(store.clean_library_removal(&removal.operation_id).is_err());
-    store.set_removal_state(&removal.operation_id, "cleaning", None).unwrap();
+    store
+        .set_removal_state(&removal.operation_id, "cleaning", None)
+        .unwrap();
     let done = store.clean_library_removal(&removal.operation_id).unwrap();
     assert_eq!(done.state, "succeeded");
     assert_eq!(done.removed_ledger_count, 1);
     assert!(store.file_coverage_by_path(&a_row.path).unwrap().is_none());
-    assert!(store.get_file_meta(&a_row.file_id.expect("fixture file id").to_string()).unwrap().is_none());
+    assert!(
+        store
+            .get_file_meta(&a_row.file_id.expect("fixture file id").to_string())
+            .unwrap()
+            .is_none()
+    );
     assert!(store.file_coverage_by_path(&b_row.path).unwrap().is_some());
     assert!(store.get_library(&b.id).unwrap().is_some());
     assert!(store.get_media(media.id).unwrap().is_some());
@@ -67,7 +124,13 @@ fn removal_cleans_only_owned_rows_and_preserves_files_and_media() {
     assert_eq!(progress.position_ms, 750_000);
     assert!(progress.favorite);
     assert_eq!(std::fs::read(&path).unwrap(), b"https://example.test/one");
-    assert_eq!(store.clean_library_removal(&removal.operation_id).unwrap().removed_ledger_count, 1);
+    assert_eq!(
+        store
+            .clean_library_removal(&removal.operation_id)
+            .unwrap()
+            .removed_ledger_count,
+        1
+    );
 }
 
 #[test]
@@ -78,8 +141,26 @@ fn removal_cleans_fingerprint_attempts_and_preserves_shared_season_comparison() 
     let root_b = temp.path().join("tv_b");
     std::fs::create_dir_all(&root_a).unwrap();
     std::fs::create_dir_all(&root_b).unwrap();
-    let a = store.create_library(MediaKind::Tv, "A", &[root_a.to_str().unwrap()], "everyone", true, &[]).unwrap();
-    let _b = store.create_library(MediaKind::Tv, "B", &[root_b.to_str().unwrap()], "everyone", true, &[]).unwrap();
+    let a = store
+        .create_library(
+            MediaKind::Tv,
+            "A",
+            &[root_a.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let _b = store
+        .create_library(
+            MediaKind::Tv,
+            "B",
+            &[root_b.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
     let media = media();
     store.insert_media(&media).unwrap();
     let path_a = root_a.join("E01.strm");
@@ -109,10 +190,14 @@ fn removal_cleans_fingerprint_attempts_and_preserves_shared_season_comparison() 
     assert!(store.get_fingerprint_attempt("att-1").unwrap().is_some());
 
     // 写入季对比历史：同一 Media、Season 1
-    store.save_season_comparison_digest(&media.id.to_string(), 1, "digest-1", 1000).unwrap();
+    store
+        .save_season_comparison_digest(&media.id.to_string(), 1, "digest-1", 1000)
+        .unwrap();
 
     let removal = store.begin_library_removal(&a.id).unwrap();
-    store.set_removal_state(&removal.operation_id, "cleaning", None).unwrap();
+    store
+        .set_removal_state(&removal.operation_id, "cleaning", None)
+        .unwrap();
     let done = store.clean_library_removal(&removal.operation_id).unwrap();
     assert_eq!(done.state, "succeeded");
 
@@ -120,7 +205,12 @@ fn removal_cleans_fingerprint_attempts_and_preserves_shared_season_comparison() 
     assert!(store.get_fingerprint_attempt("att-1").unwrap().is_none());
 
     // 因为 b 库依然有同一个 Media 的 Season 1 ledger，所以该季的对比历史应该得以保留！
-    assert!(store.season_comparison_digest(&media.id.to_string(), 1).unwrap().is_some());
+    assert!(
+        store
+            .season_comparison_digest(&media.id.to_string(), 1)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -131,8 +221,26 @@ fn removal_closes_playback_sessions_for_removed_files_and_preserves_other_librar
     let root_b = temp.path().join("tv_b");
     std::fs::create_dir_all(&root_a).unwrap();
     std::fs::create_dir_all(&root_b).unwrap();
-    let a = store.create_library(MediaKind::Tv, "A", &[root_a.to_str().unwrap()], "everyone", true, &[]).unwrap();
-    let b = store.create_library(MediaKind::Tv, "B", &[root_b.to_str().unwrap()], "everyone", true, &[]).unwrap();
+    let a = store
+        .create_library(
+            MediaKind::Tv,
+            "A",
+            &[root_a.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let b = store
+        .create_library(
+            MediaKind::Tv,
+            "B",
+            &[root_b.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
     let media = media();
     store.insert_media(&media).unwrap();
 
@@ -147,8 +255,20 @@ fn removal_closes_playback_sessions_for_removed_files_and_preserves_other_librar
     let user_b = domain::UserId::new();
     let device_a = "device-a";
     let device_b = "device-b";
-    let play_session_a = support::issue_session(&store, user_a, device_a, a_row.file_id.expect("fixture file id"), 200);
-    let play_session_b = support::issue_session(&store, user_b, device_b, b_row.file_id.expect("fixture file id"), 200);
+    let play_session_a = support::issue_session(
+        &store,
+        user_a,
+        device_a,
+        a_row.file_id.expect("fixture file id"),
+        200,
+    );
+    let play_session_b = support::issue_session(
+        &store,
+        user_b,
+        device_b,
+        b_row.file_id.expect("fixture file id"),
+        200,
+    );
     let session_a = store::SessionRow {
         device_id: device_a.into(),
         user_id: user_a,
@@ -207,7 +327,9 @@ fn removal_closes_playback_sessions_for_removed_files_and_preserves_other_librar
     assert!(store.get_session(user_b, device_b).unwrap().is_some());
 
     let removal = store.begin_library_removal(&a.id).unwrap();
-    let closed = store.close_playback_sessions_for_removal(&removal.operation_id).unwrap();
+    let closed = store
+        .close_playback_sessions_for_removal(&removal.operation_id)
+        .unwrap();
     assert_eq!(closed, 1);
 
     // A 库的会话被精确关闭
@@ -229,10 +351,24 @@ fn removal_cleans_unidentified_rows_and_allows_multi_coverage_files() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::create_dir_all(&other_root).unwrap();
     let a = store
-        .create_library(MediaKind::Tv, "A", &[root.to_str().unwrap()], "everyone", true, &[])
+        .create_library(
+            MediaKind::Tv,
+            "A",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
         .unwrap();
     store
-        .create_library(MediaKind::Tv, "B", &[other_root.to_str().unwrap()], "everyone", true, &[])
+        .create_library(
+            MediaKind::Tv,
+            "B",
+            &[other_root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
         .unwrap();
     let media = media();
     store.insert_media(&media).unwrap();
@@ -259,7 +395,10 @@ fn removal_cleans_unidentified_rows_and_allows_multi_coverage_files() {
         media_id: media.id,
         kind: MediaKind::Tv,
         path: multi_path,
-        version: FileVersion { revision: 1, source_version: "v1".into() },
+        version: FileVersion {
+            revision: 1,
+            source_version: "v1".into(),
+        },
         presence: FilePresence::Present,
         publication: FilePublication::Published,
         size_bytes: Some(1024),
@@ -284,7 +423,10 @@ fn removal_cleans_unidentified_rows_and_allows_multi_coverage_files() {
     };
     store
         .publish_files(
-            &WriteScope { library_id: a.id.parse().unwrap(), config_revision: 0 },
+            &WriteScope {
+                library_id: a.id.parse().unwrap(),
+                config_revision: 0,
+            },
             &[StorePublication {
                 file: &file,
                 units: &[UnitKey::new(1, 1), UnitKey::new(1, 2)],
@@ -298,7 +440,9 @@ fn removal_cleans_unidentified_rows_and_allows_multi_coverage_files() {
 
     // 3. Removal must validate the complete coverage set, then clean roots.
     let removal = store.begin_library_removal(&a.id).unwrap();
-    store.set_removal_state(&removal.operation_id, "cleaning", None).unwrap();
+    store
+        .set_removal_state(&removal.operation_id, "cleaning", None)
+        .unwrap();
     let done = store.clean_library_removal(&removal.operation_id).unwrap();
     assert_eq!(done.state, "succeeded");
 

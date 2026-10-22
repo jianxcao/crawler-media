@@ -180,22 +180,32 @@ pub(crate) async fn item(
                 .filter(|coverage| {
                     crate::http::library::poster_path_with(&coverage.file, files.as_ref()).is_some()
                 })
-                .map(|coverage| {
-                    crate::http::library::artwork_url("posters", coverage.file.file_id)
-                })
+                .map(|coverage| crate::http::library::artwork_url("posters", coverage.file.file_id))
         })
         .await
     {
         Ok(url) => url,
         Err(crate::blocking_budget::BlockingError::Busy) => {
-            return err(StatusCode::SERVICE_UNAVAILABLE, "runtime.busy", "服务繁忙，请重试");
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "runtime.busy",
+                "服务繁忙，请重试",
+            );
         }
         Err(crate::blocking_budget::BlockingError::Timeout) => {
-            return err(StatusCode::GATEWAY_TIMEOUT, "playback.timeout", "加载条目超时");
+            return err(
+                StatusCode::GATEWAY_TIMEOUT,
+                "playback.timeout",
+                "加载条目超时",
+            );
         }
         Err(crate::blocking_budget::BlockingError::Worker(message)) => {
             tracing::error!(%message, media_id = %media.id, "读取播放条目海报失败");
-            return err(StatusCode::INTERNAL_SERVER_ERROR, "runtime.worker", "加载条目失败");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "runtime.worker",
+                "加载条目失败",
+            );
         }
     };
     ok(json!({
@@ -289,12 +299,17 @@ pub(crate) async fn episodes(
                         .unwrap_or_default()
                         .to_string();
 
-                    let local_still = crate::episode_still::existing_with(file_path, files.as_ref())
-                        .map(|_| crate::http::library::artwork_url("stills", cov.file.file_id));
+                    let local_still =
+                        crate::episode_still::existing_with(file_path, files.as_ref())
+                            .map(|_| crate::http::library::artwork_url("stills", cov.file.file_id));
                     let backdrop = if !unit.is_whole()
-                        && crate::http::library::backdrop_path_with(&cov.file, files.as_ref()).is_some()
+                        && crate::http::library::backdrop_path_with(&cov.file, files.as_ref())
+                            .is_some()
                     {
-                        Some(crate::http::library::artwork_url("fanart", cov.file.file_id))
+                        Some(crate::http::library::artwork_url(
+                            "fanart",
+                            cov.file.file_id,
+                        ))
                     } else {
                         None
                     };
@@ -315,7 +330,10 @@ pub(crate) async fn episodes(
                     let (file_ids, file_name, local_still, backdrop) =
                         grouped.remove(&(season, episode)).unwrap();
 
-                    let (position_ms, played, progress_percent) = match unit_states.get(&(season, episode)).and_then(|state| state.as_ref()) {
+                    let (position_ms, played, progress_percent) = match unit_states
+                        .get(&(season, episode))
+                        .and_then(|state| state.as_ref())
+                    {
                         Some(ps) => {
                             let percent = if !ps.played {
                                 ps.duration_ms.and_then(|d| {
@@ -356,14 +374,26 @@ pub(crate) async fn episodes(
     let rows = match rows_res {
         Ok(rows) => rows,
         Err(crate::blocking_budget::BlockingError::Busy) => {
-            return err(StatusCode::SERVICE_UNAVAILABLE, "runtime.busy", "服务繁忙，请重试");
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "runtime.busy",
+                "服务繁忙，请重试",
+            );
         }
         Err(crate::blocking_budget::BlockingError::Timeout) => {
-            return err(StatusCode::GATEWAY_TIMEOUT, "playback.timeout", "加载集列表超时");
+            return err(
+                StatusCode::GATEWAY_TIMEOUT,
+                "playback.timeout",
+                "加载集列表超时",
+            );
         }
         Err(crate::blocking_budget::BlockingError::Worker(message)) => {
             tracing::error!(%message, media_id = %media.id, "读取播放集列表 blocking worker 失败");
-            return err(StatusCode::INTERNAL_SERVER_ERROR, "runtime.worker", "加载集列表失败");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "runtime.worker",
+                "加载集列表失败",
+            );
         }
     };
     ok(json!({ "season_number": season_number, "episodes": rows })).into_response()
@@ -502,7 +532,10 @@ pub(crate) async fn decide(
     let Some((file, _media, _, _)) = row_for(&store, &body, user_id) else {
         return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
     };
-    let tracks = store.get_file_meta(&file.file_id.to_string()).ok().flatten();
+    let tracks = store
+        .get_file_meta(&file.file_id.to_string())
+        .ok()
+        .flatten();
     ok(direct_decision(&file, &body, tracks.as_ref())).into_response()
 }
 
@@ -732,7 +765,10 @@ pub(crate) async fn get_subtitle_file(
             kind: media.kind,
             tracks,
             index,
-            wants_vtt: query.get("format").map(|f| f.eq_ignore_ascii_case("vtt")).unwrap_or(false),
+            wants_vtt: query
+                .get("format")
+                .map(|f| f.eq_ignore_ascii_case("vtt"))
+                .unwrap_or(false),
         };
         let file_path = file.path.display().to_string();
         let fid = file.file_id;

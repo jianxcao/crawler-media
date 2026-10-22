@@ -336,8 +336,11 @@ fn every_metadata_source_retries_preexisting_malformed_fresh_cache() {
         let expected = (case.run)(http.clone(), &db, NOW).unwrap();
         let conn = rusqlite::Connection::open(&db).unwrap();
         for source in media::response_cache::CACHE_SOURCES {
-            conn.execute(&format!("UPDATE {} SET body = ?1", source.table_name()), [ERROR])
-                .unwrap();
+            conn.execute(
+                &format!("UPDATE {} SET body = ?1", source.table_name()),
+                [ERROR],
+            )
+            .unwrap();
         }
         let actual = (case.run)(http, &db, NOW + 1);
         assert_eq!(

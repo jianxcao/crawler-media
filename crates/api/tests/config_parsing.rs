@@ -51,7 +51,9 @@ fn corrupt_scrape_config_logs_error_and_preserves_raw_value() {
         .unwrap();
 
     let logs = capture_logs(|| {
-        let config = store.get_scrape_config().expect("坏 JSON 必须回退而不是报错");
+        let config = store
+            .get_scrape_config()
+            .expect("坏 JSON 必须回退而不是报错");
         assert!(
             !config.effective.compose_movie_pattern().is_empty(),
             "回退后必须得到可用的默认配置"
@@ -126,8 +128,14 @@ impl api::config::EnvSource for MapEnv {
 
 #[test]
 fn bool_vocabulary_is_shared_across_env_kv_and_cli() {
-    for raw in ["1", "true", "TRUE", "True", "yes", "YES", "on", "ON", " on "] {
-        assert_eq!(api::config::parse_bool(raw), Some(true), "{raw:?} 必须为 true");
+    for raw in [
+        "1", "true", "TRUE", "True", "yes", "YES", "on", "ON", " on ",
+    ] {
+        assert_eq!(
+            api::config::parse_bool(raw),
+            Some(true),
+            "{raw:?} 必须为 true"
+        );
     }
     for raw in ["0", "false", "FALSE", "False", "no", "NO", "off", "OFF"] {
         assert_eq!(
@@ -177,7 +185,9 @@ fn cdp_switch_reads_only_new_key_and_defaults_off() {
 fn unknown_new_switch_value_is_an_error_not_http_fallback() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    store.put_setting(settings_keys::CDP_ENABLED, "maybe").unwrap();
+    store
+        .put_setting(settings_keys::CDP_ENABLED, "maybe")
+        .unwrap();
     assert!(api::runtime_browser::BrowserSettings::load(&store).is_err());
 }
 
@@ -185,12 +195,15 @@ fn unknown_new_switch_value_is_an_error_not_http_fallback() {
 fn unknown_obscura_install_policy_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    assert!(api::runtime_browser::BrowserSettings::save(
-        &store,
-        &serde_json::json!({
-            "obscura": { "install": "invalid_policy" }
-        })
-    ).is_err());
+    assert!(
+        api::runtime_browser::BrowserSettings::save(
+            &store,
+            &serde_json::json!({
+                "obscura": { "install": "invalid_policy" }
+            })
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -320,10 +333,7 @@ fn env_whitelist_covers_every_variable_the_server_reads() {
         "白名单缺少实际在用的变量，启动会打假 warning: {unknown:?}"
     );
     assert_eq!(
-        api::config::unknown_env_keys([
-            "CRAWLER_MEDIA_TMDB_KET".to_string(),
-            "PATH".to_string()
-        ]),
+        api::config::unknown_env_keys(["CRAWLER_MEDIA_TMDB_KET".to_string(), "PATH".to_string()]),
         ["CRAWLER_MEDIA_TMDB_KET".to_string()],
         "只有 CRAWLER_MEDIA_ 前缀的未知名才告警"
     );

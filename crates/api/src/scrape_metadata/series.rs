@@ -19,25 +19,64 @@ fn adopt_tmdb_episode(
     episode: &media::EpisodeMeta,
     locale: &str,
 ) {
-    let preferences = MetadataPreferences { language_priority: vec![locale.to_string()], cert_country_priority: Vec::new() };
+    let preferences = MetadataPreferences {
+        language_priority: vec![locale.to_string()],
+        cert_country_priority: Vec::new(),
+    };
     let mut payload = serde_json::Map::new();
-    if let Some(value) = &episode.name { payload.insert("title".into(), value.clone().into()); }
-    if let Some(value) = &episode.overview { payload.insert("overview".into(), value.clone().into()); }
-    if let Some(value) = &episode.air_date { payload.insert("air_date".into(), value.clone().into()); }
-    if let Some(value) = episode.runtime_minutes { payload.insert("runtime".into(), value.into()); }
-    if let Some(value) = episode.rating.as_deref().and_then(|value| value.parse::<f64>().ok()) { payload.insert("vote_average".into(), value.into()); }
-    if let Some(value) = episode.vote_count { payload.insert("vote_count".into(), value.into()); }
-    if let Some(value) = &episode.still_path { payload.insert("still_path".into(), value.clone().into()); }
-    let scope = EntityScope::Episode { season, episode: episode_number };
-    let normalized = match media::normalize_metadata("tmdb", scope, &serde_json::Value::Object(payload).to_string(), &preferences) {
+    if let Some(value) = &episode.name {
+        payload.insert("title".into(), value.clone().into());
+    }
+    if let Some(value) = &episode.overview {
+        payload.insert("overview".into(), value.clone().into());
+    }
+    if let Some(value) = &episode.air_date {
+        payload.insert("air_date".into(), value.clone().into());
+    }
+    if let Some(value) = episode.runtime_minutes {
+        payload.insert("runtime".into(), value.into());
+    }
+    if let Some(value) = episode
+        .rating
+        .as_deref()
+        .and_then(|value| value.parse::<f64>().ok())
+    {
+        payload.insert("vote_average".into(), value.into());
+    }
+    if let Some(value) = episode.vote_count {
+        payload.insert("vote_count".into(), value.into());
+    }
+    if let Some(value) = &episode.still_path {
+        payload.insert("still_path".into(), value.clone().into());
+    }
+    let scope = EntityScope::Episode {
+        season,
+        episode: episode_number,
+    };
+    let normalized = match media::normalize_metadata(
+        "tmdb",
+        scope,
+        &serde_json::Value::Object(payload).to_string(),
+        &preferences,
+    ) {
         Ok(value) => value,
-        Err(error) => { tracing::warn!(%error, media_id=%media.id, season, episode_number, "episode metadata normalization failed"); return; }
+        Err(error) => {
+            tracing::warn!(%error, media_id=%media.id, season, episode_number, "episode metadata normalization failed");
+            return;
+        }
     };
     let fetched_at = crate::job_loop::unix_now() * 1000;
     let adoption = MetadataAdoption {
-        media_id: media.id, scope, locale: locale.to_string(), source: "tmdb".into(),
-        provider_entity_id: format!("{tmdb_id}:{season}:{episode_number}"), provider_work_id: tmdb_id.to_string(),
-        fetched_at, normalized, expected_revision: None, preferences,
+        media_id: media.id,
+        scope,
+        locale: locale.to_string(),
+        source: "tmdb".into(),
+        provider_entity_id: format!("{tmdb_id}:{season}:{episode_number}"),
+        provider_work_id: tmdb_id.to_string(),
+        fetched_at,
+        normalized,
+        expected_revision: None,
+        preferences,
     };
     if let Err(error) = state.store.lock().adopt_metadata(&adoption, fetched_at) {
         tracing::warn!(%error, media_id=%media.id, season, episode_number, "episode metadata adoption failed");
@@ -51,23 +90,49 @@ fn adopt_tmdb_season(
     season: &media::TvSeason,
     locale: &str,
 ) {
-    let preferences = MetadataPreferences { language_priority: vec![locale.to_string()], cert_country_priority: Vec::new() };
+    let preferences = MetadataPreferences {
+        language_priority: vec![locale.to_string()],
+        cert_country_priority: Vec::new(),
+    };
     let mut payload = serde_json::Map::new();
     payload.insert("name".into(), season.name.clone().into());
-    if let Some(value) = &season.overview { payload.insert("overview".into(), value.clone().into()); }
-    if let Some(value) = &season.air_date { payload.insert("air_date".into(), value.clone().into()); }
-    if let Some(value) = season.episode_count { payload.insert("episode_count".into(), value.into()); }
-    if let Some(value) = &season.poster_path { payload.insert("poster_path".into(), value.clone().into()); }
+    if let Some(value) = &season.overview {
+        payload.insert("overview".into(), value.clone().into());
+    }
+    if let Some(value) = &season.air_date {
+        payload.insert("air_date".into(), value.clone().into());
+    }
+    if let Some(value) = season.episode_count {
+        payload.insert("episode_count".into(), value.into());
+    }
+    if let Some(value) = &season.poster_path {
+        payload.insert("poster_path".into(), value.clone().into());
+    }
     let scope = EntityScope::Season(season.season_number);
-    let normalized = match media::normalize_metadata("tmdb", scope, &serde_json::Value::Object(payload).to_string(), &preferences) {
+    let normalized = match media::normalize_metadata(
+        "tmdb",
+        scope,
+        &serde_json::Value::Object(payload).to_string(),
+        &preferences,
+    ) {
         Ok(value) => value,
-        Err(error) => { tracing::warn!(%error, media_id=%media.id, season=season.season_number, "season metadata normalization failed"); return; }
+        Err(error) => {
+            tracing::warn!(%error, media_id=%media.id, season=season.season_number, "season metadata normalization failed");
+            return;
+        }
     };
     let fetched_at = crate::job_loop::unix_now() * 1000;
     let adoption = MetadataAdoption {
-        media_id: media.id, scope, locale: locale.to_string(), source: "tmdb".into(),
-        provider_entity_id: format!("{tmdb_id}:{}", season.season_number), provider_work_id: tmdb_id.to_string(),
-        fetched_at, normalized, expected_revision: None, preferences,
+        media_id: media.id,
+        scope,
+        locale: locale.to_string(),
+        source: "tmdb".into(),
+        provider_entity_id: format!("{tmdb_id}:{}", season.season_number),
+        provider_work_id: tmdb_id.to_string(),
+        fetched_at,
+        normalized,
+        expected_revision: None,
+        preferences,
     };
     if let Err(error) = state.store.lock().adopt_metadata(&adoption, fetched_at) {
         tracing::warn!(%error, media_id=%media.id, season=season.season_number, "season metadata adoption failed");
@@ -85,16 +150,31 @@ pub(crate) fn write_series_nfos(
 ) -> Vec<(PathBuf, Option<String>)> {
     let target = show_root.join("tvshow.nfo");
     let lease = match state.acquire_path_work(&target, media.kind) {
-        Ok(Some(lease)) => lease, _ => return Vec::new(),
+        Ok(Some(lease)) => lease,
+        _ => return Vec::new(),
     };
     let rows: Vec<_> = {
         let store = state.store.lock();
-        coverages.iter().filter(|coverage| store.library_for_path_strict(&coverage.file.path, media.kind)
-            .ok().flatten().is_some_and(|owner| owner.id == lease.library_id())
-            && super::show_root(&coverage.file.path, coverage) == show_root).cloned().collect()
+        coverages
+            .iter()
+            .filter(|coverage| {
+                store
+                    .library_for_path_strict(&coverage.file.path, media.kind)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|owner| owner.id == lease.library_id())
+                    && super::show_root(&coverage.file.path, coverage) == show_root
+            })
+            .cloned()
+            .collect()
     };
     let catalog = state.catalog.as_ref();
-    if lease.publish(|| Ok(write_nfo(&target, media, show_metadata))).is_err() { return Vec::new(); }
+    if lease
+        .publish(|| Ok(write_nfo(&target, media, show_metadata)))
+        .is_err()
+    {
+        return Vec::new();
+    }
     let mut matched_episodes = Vec::new();
     let seasons = rows
         .iter()
@@ -125,7 +205,9 @@ pub(crate) fn write_series_nfos(
                 if unit_season != season {
                     continue;
                 }
-                if lease.control().is_cancelled() { return matched_episodes; }
+                if lease.control().is_cancelled() {
+                    return matched_episodes;
+                }
                 if !targets::video_present(&row.file.path) {
                     continue;
                 }
@@ -143,12 +225,31 @@ pub(crate) fn write_series_nfos(
                         still_path = stills.into_iter().next();
                     }
                 }
-                adopt_tmdb_episode(state, media, tmdb_id, season, episode_number, &episode, language);
+                adopt_tmdb_episode(
+                    state,
+                    media,
+                    tmdb_id,
+                    season,
+                    episode_number,
+                    &episode,
+                    language,
+                );
                 let episode_coverage = domain::FileCoverage {
                     file: row.file.clone(),
                     units: vec![*unit],
                 };
-                if lease.publish(|| Ok(write_nfo(&path, media, &nfo_from_episode(&episode_coverage, episode)))).is_err() { return matched_episodes; }
+                if lease
+                    .publish(|| {
+                        Ok(write_nfo(
+                            &path,
+                            media,
+                            &nfo_from_episode(&episode_coverage, episode),
+                        ))
+                    })
+                    .is_err()
+                {
+                    return matched_episodes;
+                }
                 matched_episodes.push((row.file.path.clone(), still_path));
             }
         }
@@ -186,10 +287,7 @@ pub(super) struct PosterFetchCatalogGet<'a> {
 
 impl media::CatalogGet for PosterFetchCatalogGet<'_> {
     fn get(&self, path: &str) -> Result<String, media::TmdbError> {
-        let bytes = self
-            .fetch
-            .get(path)
-            .map_err(media::TmdbError::Http)?;
+        let bytes = self.fetch.get(path).map_err(media::TmdbError::Http)?;
         String::from_utf8(bytes).map_err(|e| media::TmdbError::Parse(e.to_string()))
     }
 }
@@ -203,11 +301,19 @@ pub(crate) fn scrape_tv_sidecars(
     let Some(tmdb_id) = media.tmdb_id.as_deref() else {
         return;
     };
-    let path_leases: Vec<_> = coverages.iter().filter_map(|coverage| {
-        state.acquire_path_work(&coverage.file.path, media.kind).ok()
-            .map(|lease| (coverage.clone(), lease))
-    }).collect();
-    let allowed_rows: Vec<_> = path_leases.iter().map(|(coverage, _)| coverage.clone()).collect();
+    let path_leases: Vec<_> = coverages
+        .iter()
+        .filter_map(|coverage| {
+            state
+                .acquire_path_work(&coverage.file.path, media.kind)
+                .ok()
+                .map(|lease| (coverage.clone(), lease))
+        })
+        .collect();
+    let allowed_rows: Vec<_> = path_leases
+        .iter()
+        .map(|(coverage, _)| coverage.clone())
+        .collect();
     let groups = targets::live_groups(&allowed_rows);
     if groups.is_empty() {
         tracing::debug!(media = %media.title, "没有可用的视频文件，跳过电视剧刮削");
@@ -251,7 +357,14 @@ pub(crate) fn scrape_tv_sidecars(
 
         if mirror_images {
             if let Some(ref api_key) = fanart_api_key {
-                scrape_tv_fanart(state, media, &effective_root, &group_rows, api_key, &fanart_lang);
+                scrape_tv_fanart(
+                    state,
+                    media,
+                    &effective_root,
+                    &group_rows,
+                    api_key,
+                    &fanart_lang,
+                );
             }
         }
     }
@@ -266,12 +379,17 @@ fn scrape_tv_episodes_and_nfos(
     rows: &[domain::FileCoverage],
     mirror_nfo: bool,
 ) -> Vec<(PathBuf, Option<String>)> {
-    let tmdb_meta = fetch_tmdb_metadata(state, media.kind, tmdb_id).ok().flatten();
+    let tmdb_meta = fetch_tmdb_metadata(state, media.kind, tmdb_id)
+        .ok()
+        .flatten();
     if let Some(meta) = &tmdb_meta {
         adopt_tmdb_metadata(state, media, tmdb_id, EntityScope::Work);
         record_scraped_display(state, media.id, meta);
     }
-    let show_nfo = tmdb_meta.as_ref().map(|meta| nfo_from_tmdb(media, meta)).unwrap_or_default();
+    let show_nfo = tmdb_meta
+        .as_ref()
+        .map(|meta| nfo_from_tmdb(media, meta))
+        .unwrap_or_default();
     let preferred_lang = preferred_language(state);
 
     let tv_seasons = match state.catalog.tv_seasons(tmdb_id) {
@@ -320,8 +438,14 @@ fn scrape_tv_episodes_and_nfos(
             &preferred_lang,
         );
         if let Ok(lease) = state.acquire_path_work(show_root, media.kind) {
-            let write = || { crate::fanart_artwork::write_season_nfos(show_root, rows, &season_artworks); Ok(()) };
-            let _ = match lease { Some(lease) => lease.publish(write), None => write() };
+            let write = || {
+                crate::fanart_artwork::write_season_nfos(show_root, rows, &season_artworks);
+                Ok(())
+            };
+            let _ = match lease {
+                Some(lease) => lease.publish(write),
+                None => write(),
+            };
         }
         for row in rows {
             let row_path = row.file.path.clone();
@@ -344,7 +468,10 @@ fn scrape_tv_episodes_and_nfos(
     } else {
         let mut ep_matches = Vec::new();
         for season in &owned_seasons {
-            let episodes = state.catalog.season_details(tmdb_id, *season).unwrap_or_default();
+            let episodes = state
+                .catalog
+                .season_details(tmdb_id, *season)
+                .unwrap_or_default();
             for row in rows.iter() {
                 for unit in &row.units {
                     let Some((unit_season, ep_num)) = unit.episode_coordinates() else {
@@ -377,8 +504,12 @@ fn scrape_tv_stills(
 ) {
     scrape_tv_stills_with(state, matched_episodes, still_size, |video, at, target| {
         let lease = state.acquire_path_work(video, domain::MediaKind::Tv)?;
-        let control = lease.as_ref().map(|lease| lease.control().clone()).unwrap_or_default();
-        library::extract_frame_controlled(video, at, target, &control).map_err(|error| error.to_string())
+        let control = lease
+            .as_ref()
+            .map(|lease| lease.control().clone())
+            .unwrap_or_default();
+        library::extract_frame_controlled(video, at, target, &control)
+            .map_err(|error| error.to_string())
     });
 }
 
@@ -413,15 +544,25 @@ fn scrape_tv_stills_with(
         if !targets::video_present(&ep_path) {
             continue;
         }
-        let Ok(lease) = state.acquire_path_work(&ep_path, domain::MediaKind::Tv) else { continue };
-        let fetch = LeasedArtworkFetch { fetch: state.poster_fetch.as_ref(), lease: lease.as_ref() };
+        let Ok(lease) = state.acquire_path_work(&ep_path, domain::MediaKind::Tv) else {
+            continue;
+        };
+        let fetch = LeasedArtworkFetch {
+            fetch: state.poster_fetch.as_ref(),
+            lease: lease.as_ref(),
+        };
         let ok = crate::fanart_artwork::mirror_episode_still(
             &fetch,
             &ep_path,
             still_path.as_deref(),
             still_size,
         );
-        if lease.as_ref().is_some_and(|lease| lease.control().is_cancelled()) { continue; }
+        if lease
+            .as_ref()
+            .is_some_and(|lease| lease.control().is_cancelled())
+        {
+            continue;
+        }
         if !ok && targets::video_present(&ep_path) && is_allowed(&ep_path) {
             if crate::episode_still::existing(&ep_path).is_none() {
                 let still_dest = crate::episode_still::path(&ep_path);
@@ -437,8 +578,8 @@ fn scrape_tv_stills_with(
 #[cfg(test)]
 mod still_fallback_tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     struct EmptyFetcher;
     impl indexer::Fetcher for EmptyFetcher {
@@ -521,8 +662,13 @@ fn scrape_tv_fanart(
         return;
     };
 
-    let Ok(lease) = state.acquire_path_work(show_root, media.kind) else { return };
-    let fetch = LeasedArtworkFetch { fetch: state.poster_fetch.as_ref(), lease: lease.as_ref() };
+    let Ok(lease) = state.acquire_path_work(show_root, media.kind) else {
+        return;
+    };
+    let fetch = LeasedArtworkFetch {
+        fetch: state.poster_fetch.as_ref(),
+        lease: lease.as_ref(),
+    };
     let getter = PosterFetchCatalogGet { fetch: &fetch };
     let fanart_db = state.store.lock().cache_db_path();
     match media::fanart::FanartClient::new(getter, &fanart_db, api_key) {
@@ -530,12 +676,7 @@ fn scrape_tv_fanart(
             let lang_refs: Vec<&str> = fanart_lang.iter().map(|s| s.as_str()).collect();
             match client.tv(&tvdb_id, &lang_refs) {
                 Ok(set) => {
-                    crate::fanart_artwork::save_fanart_files(
-                        &fetch,
-                        show_root,
-                        rows,
-                        &set,
-                    );
+                    crate::fanart_artwork::save_fanart_files(&fetch, show_root, rows, &set);
                 }
                 Err(error) => {
                     tracing::warn!(%error, %tvdb_id, "请求 Fanart.tv 失败");

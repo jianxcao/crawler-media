@@ -273,7 +273,15 @@ fn cursor_sweep(store: &Store, base: &LibraryQuery, limit: usize) -> Sweep {
 /// Titles with heavy ties, case mixes and non-ASCII, so collation shows up in the order.
 fn ordering_seed(total: usize) -> Vec<SeedItem> {
     const TITLES: [&str; 10] = [
-        "alpha", "Alpha", "same", "same", "same", "Zebra", "Émile", "中文条目", "ünïcode",
+        "alpha",
+        "Alpha",
+        "same",
+        "same",
+        "same",
+        "Zebra",
+        "Émile",
+        "中文条目",
+        "ünïcode",
         "Ångström",
     ];
     (0..total)
@@ -289,9 +297,21 @@ fn ordering_seed(total: usize) -> Vec<SeedItem> {
                 format!("{:04}-06-15", 1960 + key % 60)
             };
             item.rating = if key % 3 == 0 { 7.5 } else { (key % 10) as f64 };
-            item.runtime = if key % 4 == 0 { 90 } else { 60 + (key % 60) as i64 };
-            item.added_at = if key % 6 == 0 { 1_700_000_000 } else { key as i64 };
-            item.size = if key % 8 == 0 { 4_096 } else { 1_000 + key as i64 };
+            item.runtime = if key % 4 == 0 {
+                90
+            } else {
+                60 + (key % 60) as i64
+            };
+            item.added_at = if key % 6 == 0 {
+                1_700_000_000
+            } else {
+                key as i64
+            };
+            item.size = if key % 8 == 0 {
+                4_096
+            } else {
+                1_000 + key as i64
+            };
             item
         })
         .collect()
@@ -336,7 +356,10 @@ fn watch_filter(watch: Option<&str>, unwatched_first: bool) -> BrowseFilter {
 #[test]
 fn seek_work_stays_flat_while_an_unrelated_library_grows() {
     let growth = env_count(GROWTH_ENV, 10_000);
-    assert!(growth > OTHER_START, "{GROWTH_ENV} must exceed {OTHER_START}");
+    assert!(
+        growth > OTHER_START,
+        "{GROWTH_ENV} must exceed {OTHER_START}"
+    );
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().join("data");
     let store = Store::open(&data_dir).unwrap();
@@ -437,8 +460,15 @@ fn deep_cursor_sweep_has_no_duplicate_or_gap() {
         sweep.page_lens.len()
     );
 
-    assert_eq!(sweep.ids.len(), total, "cursor sweep returned the wrong count");
-    assert_eq!(sweep.ids, one_shot, "cursor order differs from a one-shot ordered read");
+    assert_eq!(
+        sweep.ids.len(),
+        total,
+        "cursor sweep returned the wrong count"
+    );
+    assert_eq!(
+        sweep.ids, one_shot,
+        "cursor order differs from a one-shot ordered read"
+    );
     assert_eq!(
         sweep.ids.iter().collect::<BTreeSet<_>>().len(),
         total,
@@ -496,7 +526,10 @@ fn ordering_and_cursor_agree_across_null_ties_and_unicode() {
                 Some(user),
                 order,
                 descending,
-                BrowsePage::Offset { start: 0, limit: total },
+                BrowsePage::Offset {
+                    start: 0,
+                    limit: total,
+                },
             );
             let one_shot = offset_ids(&store, &base, 0, total);
             let sweep = cursor_sweep(&store, &base, 7);
@@ -625,14 +658,18 @@ fn tiered_order(lib: &LibSeed, sets: &WatchSets, total: usize) -> Vec<String> {
 /// The same media id seeded in two libraries is one card per library, each card pointing
 /// at its own published file (never the other library's), and counts stay per-library.
 fn assert_cross_library_cards(store: &Store, lib_a: &LibSeed, lib_b: &LibSeed, total: usize) {
-    for (lib, file_salt, expected_total) in [(lib_a, 1, total), (lib_b, 2, total + SECOND_ONLY_ITEMS)]
+    for (lib, file_salt, expected_total) in
+        [(lib_a, 1, total), (lib_b, 2, total + SECOND_ONLY_ITEMS)]
     {
         let count_query = query_for(
             lib,
             None,
             BrowseOrder::Title,
             false,
-            BrowsePage::Offset { start: 0, limit: 10 },
+            BrowsePage::Offset {
+                start: 0,
+                limit: 10,
+            },
         );
         assert_eq!(
             store.library_item_count(&count_query).unwrap(),
@@ -702,7 +739,10 @@ fn watch_filters_counts_and_cross_library_media_share_one_snapshot() {
         Some(user),
         BrowseOrder::Title,
         false,
-        BrowsePage::Offset { start: 0, limit: 10 },
+        BrowsePage::Offset {
+            start: 0,
+            limit: 10,
+        },
         watch_filter(Some("unwatched"), false),
     );
     counted.include_total = true;
@@ -724,7 +764,10 @@ fn watch_filters_counts_and_cross_library_media_share_one_snapshot() {
         Some(user),
         BrowseOrder::AddedAt,
         false,
-        BrowsePage::Offset { start: 0, limit: total },
+        BrowsePage::Offset {
+            start: 0,
+            limit: total,
+        },
         watch_filter(None, true),
     );
     assert_eq!(

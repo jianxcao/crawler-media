@@ -273,12 +273,13 @@ impl<'a> RoutedDownloader<'a> {
                         None => (None, None),
                     });
                 }
-                let mut mapping = subscribe::collection_destinations::DestinationMapping::with_slots_and_quality(
-                    source.to_string_lossy().into_owned(),
-                    path,
-                    slots,
-                    Some(file_quality.clone()),
-                );
+                let mut mapping =
+                    subscribe::collection_destinations::DestinationMapping::with_slots_and_quality(
+                        source.to_string_lossy().into_owned(),
+                        path,
+                        slots,
+                        Some(file_quality.clone()),
+                    );
                 mapping.transfer_pending = transfer_pending;
                 sources.push(mapping);
             }

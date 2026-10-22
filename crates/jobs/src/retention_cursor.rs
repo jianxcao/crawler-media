@@ -52,15 +52,18 @@ fn fetch_candidate_rows(
          ORDER BY finished_at ASC, rowid ASC
          LIMIT ?4",
     )?;
-    let rows_iter = stmt.query_map(params![cutoff, cur_finished_at, cur_rowid, limit + 1], |r| {
-        Ok(RawRow {
-            rowid: r.get(0)?,
-            id: r.get(1)?,
-            def_id: r.get(2)?,
-            finished_at: r.get(3)?,
-            run_after: r.get(4)?,
-        })
-    })?;
+    let rows_iter = stmt.query_map(
+        params![cutoff, cur_finished_at, cur_rowid, limit + 1],
+        |r| {
+            Ok(RawRow {
+                rowid: r.get(0)?,
+                id: r.get(1)?,
+                def_id: r.get(2)?,
+                finished_at: r.get(3)?,
+                run_after: r.get(4)?,
+            })
+        },
+    )?;
     rows_iter.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 

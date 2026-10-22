@@ -4,13 +4,13 @@
 use std::path::Path;
 
 use domain::{
-    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, Media,
-    MediaId, MediaKind, QualitySource, UnitKey, UserId,
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, Media, MediaId,
+    MediaKind, QualitySource, UnitKey, UserId,
 };
 use rusqlite::Connection;
+use store::Store;
 use store::files::FileDetails;
 use store::library_write::{FilePublication as StorePublication, WriteScope};
-use store::Store;
 
 fn create_media(store: &Store, title: &str, kind: MediaKind) -> Media {
     let media = Media {
@@ -51,12 +51,7 @@ fn create_library(store: &Store, root: &Path) -> (store::Library, String) {
     (library, root_id)
 }
 
-fn make_file(
-    library: &store::Library,
-    root_id: &str,
-    media: MediaId,
-    name: &str,
-) -> LibraryFile {
+fn make_file(library: &store::Library, root_id: &str, media: MediaId, name: &str) -> LibraryFile {
     LibraryFile {
         file_id: LedgerId::new(),
         library_id: library.id.parse().unwrap(),
@@ -166,7 +161,10 @@ fn deleting_a_file_removes_only_its_derived_rows() {
     for file in [&deleted, &kept] {
         conn.execute(
             "INSERT INTO scrape_sidecars (file_id, kind, path) VALUES (?1, 'nfo', ?2)",
-            rusqlite::params![file.file_id.to_string(), format!("{}.nfo", file.path.display())],
+            rusqlite::params![
+                file.file_id.to_string(),
+                format!("{}.nfo", file.path.display())
+            ],
         )
         .unwrap();
     }
@@ -177,7 +175,12 @@ fn deleting_a_file_removes_only_its_derived_rows() {
     assert_eq!(removed, 1);
 
     // The file, its details, its sidecars and its card are gone.
-    assert!(store.file_coverage_by_id(deleted.file_id).unwrap().is_none());
+    assert!(
+        store
+            .file_coverage_by_id(deleted.file_id)
+            .unwrap()
+            .is_none()
+    );
     assert!(store.get_file_details(deleted.file_id).unwrap().is_none());
     assert_eq!(sidecar_count(&conn, deleted.file_id), 0);
     assert!(
@@ -199,10 +202,7 @@ fn deleting_a_file_removes_only_its_derived_rows() {
             .is_some()
     );
     assert!(store.get_media(movies.id).unwrap().is_some());
-    assert_eq!(
-        store.playback_progress(user, movies.id).unwrap(),
-        Some(500)
-    );
+    assert_eq!(store.playback_progress(user, movies.id).unwrap(), Some(500));
 }
 
 #[test]
@@ -273,13 +273,20 @@ fn deleting_every_file_of_a_media_keeps_media_and_playback() {
         .unwrap();
 
     assert_eq!(store.delete_ledger_for_media(media.id).unwrap(), 2);
-    assert!(store.file_coverage_by_id(part_one.file_id).unwrap().is_none());
-    assert!(store.file_coverage_by_id(part_two.file_id).unwrap().is_none());
-    assert!(store.get_media(media.id).unwrap().is_some());
-    assert_eq!(
-        store.playback_progress(user, media.id).unwrap(),
-        Some(900)
+    assert!(
+        store
+            .file_coverage_by_id(part_one.file_id)
+            .unwrap()
+            .is_none()
     );
+    assert!(
+        store
+            .file_coverage_by_id(part_two.file_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.get_media(media.id).unwrap().is_some());
+    assert_eq!(store.playback_progress(user, media.id).unwrap(), Some(900));
 }
 
 #[test]

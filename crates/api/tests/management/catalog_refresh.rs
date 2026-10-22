@@ -219,7 +219,10 @@ async fn catalog_refresh_requests_only_the_selected_refresh_target() {
                 rusqlite::params![media_id.to_string()],
             )
             .unwrap();
-        assert_eq!(flipped, 2, "expected the deselected and the selected tmdb alias");
+        assert_eq!(
+            flipped, 2,
+            "expected the deselected and the selected tmdb alias"
+        );
     }
     catalog.requests.lock().clear();
 

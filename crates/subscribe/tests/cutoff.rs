@@ -1,6 +1,6 @@
 use domain::{AtomRule, Coverage, Filter, FilterAtom, MediaId, Release, Subscribe, Torrent};
 use filter::ScoredTorrent;
-use subscribe::{choose, target_reached, QualityFact, SubscribeFacts};
+use subscribe::{QualityFact, SubscribeFacts, choose, target_reached};
 
 fn tv_subscribe() -> Subscribe {
     Subscribe {
@@ -45,7 +45,12 @@ fn release_with(resolution: Option<&str>, source: Option<&str>) -> Release {
     }
 }
 
-fn scored_candidate(title: &str, resolution: Option<&str>, source: Option<&str>, score: i32) -> ScoredTorrent {
+fn scored_candidate(
+    title: &str,
+    resolution: Option<&str>,
+    source: Option<&str>,
+    score: i32,
+) -> ScoredTorrent {
     ScoredTorrent {
         torrent: Torrent {
             site_id: domain::SiteId::new(),
@@ -76,31 +81,52 @@ fn test_target_reached_unit_matrix() {
 
     // owned 2160p WEB-DL 未达标
     let owned_webdl = release_with(Some("2160p"), Some("WEB-DL"));
-    assert!(!target_reached(&owned_webdl, &target), "2160p WEB-DL 未达到 2160p Remux 目标");
+    assert!(
+        !target_reached(&owned_webdl, &target),
+        "2160p WEB-DL 未达到 2160p Remux 目标"
+    );
 
     // owned 2160p Remux 达标
     let owned_remux = release_with(Some("2160p"), Some("Remux"));
-    assert!(target_reached(&owned_remux, &target), "2160p Remux 达到 2160p Remux 目标");
+    assert!(
+        target_reached(&owned_remux, &target),
+        "2160p Remux 达到 2160p Remux 目标"
+    );
 
     // 只设 source 目标时不凭空要求 resolution
     let target_source_only = release_with(None, Some("Remux"));
     let owned_no_res = release_with(None, Some("Remux"));
-    assert!(target_reached(&owned_no_res, &target_source_only), "只设 source 目标且 owned 达到时达标");
+    assert!(
+        target_reached(&owned_no_res, &target_source_only),
+        "只设 source 目标且 owned 达到时达标"
+    );
 
     let owned_720p_remux = release_with(Some("720p"), Some("Remux"));
-    assert!(target_reached(&owned_720p_remux, &target_source_only), "只设 source 目标时不凭空要求 resolution");
+    assert!(
+        target_reached(&owned_720p_remux, &target_source_only),
+        "只设 source 目标时不凭空要求 resolution"
+    );
 
     let owned_webdl_no_res = release_with(None, Some("WEB-DL"));
-    assert!(!target_reached(&owned_webdl_no_res, &target_source_only), "source 未达到时不达标");
+    assert!(
+        !target_reached(&owned_webdl_no_res, &target_source_only),
+        "source 未达到时不达标"
+    );
 
     // owned 字段未知时视为未达标
     let target_res = release_with(Some("2160p"), None);
     let owned_unknown_res = release_with(None, Some("WEB-DL"));
-    assert!(!target_reached(&owned_unknown_res, &target_res), "owned 缺少目标指定维度时未达标");
+    assert!(
+        !target_reached(&owned_unknown_res, &target_res),
+        "owned 缺少目标指定维度时未达标"
+    );
 
     // 空 target 绝不达标
     let target_empty = release_with(None, None);
-    assert!(!target_reached(&owned_remux, &target_empty), "目标未声明任何维度时不达标");
+    assert!(
+        !target_reached(&owned_remux, &target_empty),
+        "目标未声明任何维度时不达标"
+    );
 }
 
 #[test]
@@ -121,7 +147,10 @@ fn test_choose_target_2160p_with_source_ladder_not_blocked() {
             path: Some(owned_path.into()),
         },
     );
-    facts.set_quality(owned_path.into(), release_with(Some("720p"), Some("WEB-DL")));
+    facts.set_quality(
+        owned_path.into(),
+        release_with(Some("720p"), Some("WEB-DL")),
+    );
 
     let wash_filter = Filter::new(
         domain::FilterId::new(),
@@ -142,7 +171,12 @@ fn test_choose_target_2160p_with_source_ladder_not_blocked() {
 
     // 候选：2160p BluRay，source 优于 owned (BluRay > WEB-DL)，且 owned 720p 未达标 2160p cutoff，
     // 那么 2160p BluRay 候选绝不能被 cutoff 挡住！
-    let candidate = scored_candidate("Show.S01E01.2160p.BluRay", Some("2160p"), Some("BluRay"), 100);
+    let candidate = scored_candidate(
+        "Show.S01E01.2160p.BluRay",
+        Some("2160p"),
+        Some("BluRay"),
+        100,
+    );
 
     let chosen = choose(&subscribe, Some(&wash_filter), &[candidate], &facts);
     assert_eq!(chosen.len(), 1, "2160p 候选不能被 cutoff 挡住");
@@ -163,7 +197,10 @@ fn test_upgrade_ladder_preserves_worse_or_equal_candidate_rejection() {
             path: Some(owned_path.into()),
         },
     );
-    facts.set_quality(owned_path.into(), release_with(Some("720p"), Some("WEB-DL")));
+    facts.set_quality(
+        owned_path.into(),
+        release_with(Some("720p"), Some("WEB-DL")),
+    );
 
     let wash_filter = Filter::new(
         domain::FilterId::new(),
@@ -183,10 +220,23 @@ fn test_upgrade_ladder_preserves_worse_or_equal_candidate_rejection() {
     );
 
     // 虽然 owned 未达到 2160p 目标，但候选也是 WEB-DL（同质量），按 ladder("source") 并未优于 owned，不能被选中
-    let same_quality = scored_candidate("Show.S01E01.720p.WEB-DL-RERUN", Some("720p"), Some("WEB-DL"), 60);
+    let same_quality = scored_candidate(
+        "Show.S01E01.720p.WEB-DL-RERUN",
+        Some("720p"),
+        Some("WEB-DL"),
+        60,
+    );
     // 候选是 HDTV（低质量），也不能被选中
     let lower_quality = scored_candidate("Show.S01E01.720p.HDTV", Some("720p"), Some("HDTV"), 80);
 
-    let chosen = choose(&subscribe, Some(&wash_filter), &[same_quality, lower_quality], &facts);
-    assert!(chosen.is_empty(), "低质量和同质量候选不能因为未达 cutoff 就被替换");
+    let chosen = choose(
+        &subscribe,
+        Some(&wash_filter),
+        &[same_quality, lower_quality],
+        &facts,
+    );
+    assert!(
+        chosen.is_empty(),
+        "低质量和同质量候选不能因为未达 cutoff 就被替换"
+    );
 }

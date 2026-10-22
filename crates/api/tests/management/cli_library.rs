@@ -3,7 +3,7 @@ use api::cli::{Command, run};
 use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 
 use super::cli::transport;
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 #[tokio::test]
 async fn cli_library_prints_no_media_when_empty() {
@@ -36,7 +36,11 @@ async fn cli_library_prints_media_title() {
         &FixtureFile {
             file_id: Some(LedgerId::new()),
             media_id: media.id,
-            path: tmp.path().join("data/library/movies/The Matrix.mkv").display().to_string(),
+            path: tmp
+                .path()
+                .join("data/library/movies/The Matrix.mkv")
+                .display()
+                .to_string(),
             season: None,
             episode: None,
             resolution: Some("2160p".into()),
@@ -87,7 +91,11 @@ async fn cli_ledger_prints_media_title_and_path() {
         &FixtureFile {
             file_id: Some(LedgerId::new()),
             media_id: media.id,
-            path: tmp.path().join("data/library/movies/The Matrix.mkv").display().to_string(),
+            path: tmp
+                .path()
+                .join("data/library/movies/The Matrix.mkv")
+                .display()
+                .to_string(),
             season: None,
             episode: None,
             resolution: Some("2160p".into()),

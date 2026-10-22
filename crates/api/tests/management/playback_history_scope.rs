@@ -10,7 +10,7 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 use super::common::*;
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 fn app(tmp: &tempfile::TempDir) -> axum::Router {
     let fetcher = Arc::new(Fixtures {
@@ -92,7 +92,8 @@ async fn empty_library_history_clear_preserves_other_library() {
     let lib_b_id = seed_test_library(&app, "Movie Library B", &tmp.path().join("lib_b")).await;
 
     // 2. 模拟用户上报该属于 lib_a 的媒体播放进度
-    let session = super::playback::open_play_session(&app, &media_id.to_string(), "test-device-1").await;
+    let session =
+        super::playback::open_play_session(&app, &media_id.to_string(), "test-device-1").await;
     let progress_res = app
         .clone()
         .oneshot(request(

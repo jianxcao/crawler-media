@@ -18,12 +18,16 @@ impl PageWindow {
     pub(crate) fn parse(query: &HashMap<String, String>) -> Result<Self, String> {
         let offset = match query.get("offset") {
             None => 0,
-            Some(raw) => raw.parse::<usize>().map_err(|_| format!("offset 必须是非负整数: {raw}"))?,
+            Some(raw) => raw
+                .parse::<usize>()
+                .map_err(|_| format!("offset 必须是非负整数: {raw}"))?,
         };
         let limit = match query.get("limit") {
             None => MAX_PAGE_LIMIT,
             Some(raw) => {
-                let value = raw.parse::<usize>().map_err(|_| format!("limit 必须是正整数: {raw}"))?;
+                let value = raw
+                    .parse::<usize>()
+                    .map_err(|_| format!("limit 必须是正整数: {raw}"))?;
                 if value == 0 || value > MAX_PAGE_LIMIT {
                     return Err(format!("limit 必须在 1..={MAX_PAGE_LIMIT} 之间: {raw}"));
                 }
@@ -43,7 +47,7 @@ impl PageWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{PageWindow, MAX_PAGE_LIMIT};
+    use super::{MAX_PAGE_LIMIT, PageWindow};
 
     fn query(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
         pairs
@@ -54,7 +58,7 @@ mod tests {
 
     #[test]
     fn omitted_limit_defaults_to_a_bounded_page() {
-         let window = PageWindow::parse(&query(&[])).unwrap();
+        let window = PageWindow::parse(&query(&[])).unwrap();
         assert_eq!(window.limit, MAX_PAGE_LIMIT);
         assert_eq!(window.bounds(MAX_PAGE_LIMIT + 1), 0..MAX_PAGE_LIMIT);
     }
@@ -68,7 +72,9 @@ mod tests {
             );
         }
         assert_eq!(
-            PageWindow::parse(&query(&[("limit", "200")])).unwrap().limit,
+            PageWindow::parse(&query(&[("limit", "200")]))
+                .unwrap()
+                .limit,
             200
         );
         assert_eq!(

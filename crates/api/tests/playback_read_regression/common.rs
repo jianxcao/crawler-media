@@ -9,7 +9,7 @@ use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, Use
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use serde_json::Value;
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
 
 pub struct NoFetch;

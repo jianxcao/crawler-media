@@ -73,7 +73,8 @@ pub(crate) fn load_snapshots(
         });
     }
     snapshots.sort_by(|a, b| {
-        (source_rank(&a.source), a.source.as_str()).cmp(&(source_rank(&b.source), b.source.as_str()))
+        (source_rank(&a.source), a.source.as_str())
+            .cmp(&(source_rank(&b.source), b.source.as_str()))
     });
     Ok(snapshots)
 }
@@ -130,7 +131,11 @@ fn origin(
         provider_entity_id: provider_entity_id.to_string(),
         source_revision: revision,
         origin_media_id: media,
-        presence: if empty { FieldPresence::Empty } else { FieldPresence::Value },
+        presence: if empty {
+            FieldPresence::Empty
+        } else {
+            FieldPresence::Value
+        },
         selection,
         pending_target_fallback: false,
         target_external_id: None,
@@ -139,7 +144,11 @@ fn origin(
 
 fn default_selection(field: &str, empty: bool) -> SourceFieldOrigin {
     SourceFieldOrigin {
-        selection: if empty { SourceSelection::Empty } else { SourceSelection::Direct },
+        selection: if empty {
+            SourceSelection::Empty
+        } else {
+            SourceSelection::Direct
+        },
         response_pointer: format!("/{field}"),
         actual_locale: None,
         certification_country: None,
@@ -237,7 +246,10 @@ fn apply_overrides(
                 let empty = matches!(overrides.$field, FieldValue::Empty);
                 let mut selection = default_selection($name, empty);
                 selection.response_pointer = "/override".into();
-                origins.insert($name.into(), origin("manual", "", revision, media, empty, selection));
+                origins.insert(
+                    $name.into(),
+                    origin("manual", "", revision, media, empty, selection),
+                );
                 fields.$field = overrides.$field.clone();
             }
         };

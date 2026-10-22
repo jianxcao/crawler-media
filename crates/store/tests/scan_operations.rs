@@ -59,16 +59,12 @@ fn enqueue_scan_deduplicates_active_operations() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
 
-    let op1 = store
-        .enqueue_scan("lib1", "sig1", &[], 1000)
-        .unwrap();
+    let op1 = store.enqueue_scan("lib1", "sig1", &[], 1000).unwrap();
     assert_eq!(op1.status, ScanOperationStatus::Queued);
     assert_eq!(op1.generation, 1);
 
     // Enqueueing again returns the existing operation
-    let op2 = store
-        .enqueue_scan("lib1", "sig1", &[], 1050)
-        .unwrap();
+    let op2 = store.enqueue_scan("lib1", "sig1", &[], 1050).unwrap();
     assert_eq!(op1.id, op2.id);
 
     // Cancel operation
@@ -77,9 +73,7 @@ fn enqueue_scan_deduplicates_active_operations() {
     assert_eq!(op_cancelled.status, ScanOperationStatus::Cancelled);
 
     // Enqueueing after cancel creates generation 2
-    let op3 = store
-        .enqueue_scan("lib1", "sig1", &[], 1200)
-        .unwrap();
+    let op3 = store.enqueue_scan("lib1", "sig1", &[], 1200).unwrap();
     assert_ne!(op1.id, op3.id);
     assert_eq!(op3.generation, 2);
 }
@@ -157,7 +151,10 @@ fn admin_full_request_upgrades_targeted_operation() {
 
     let op2 = store.enqueue_scan("lib1", "sig1", &[], 1050).unwrap();
     assert_eq!(op1.id, op2.id);
-    assert!(op2.is_full_scope(), "整库请求必须把增量 operation 升级为整库");
+    assert!(
+        op2.is_full_scope(),
+        "整库请求必须把增量 operation 升级为整库"
+    );
     assert!(op2.targets.is_empty());
 
     let reloaded = store.scan_operation(&op1.id).unwrap().unwrap();
@@ -218,7 +215,10 @@ fn scan_seen_requires_current_ledger_and_file_version() {
     let path = file.display().to_string();
 
     let op = store.enqueue_scan("lib1", "sig1", &[], 1000).unwrap();
-    assert!(!store.scan_seen_is_current(&op.id, &path).unwrap(), "未记录断点");
+    assert!(
+        !store.scan_seen_is_current(&op.id, &path).unwrap(),
+        "未记录断点"
+    );
 
     // 文件存在但没有台账行：断点无效，必须重新入账。
     store.record_scan_seen(&op.id, &[file.clone()]).unwrap();
@@ -241,7 +241,9 @@ fn scan_seen_requires_current_ledger_and_file_version() {
     // 恢复场景：文件被删除并标记 missing，再恢复后即使版本相同也必须重新处理。
     store.record_scan_seen(&op.id, &[file.clone()]).unwrap();
     std::fs::remove_file(&file).unwrap();
-    let (missing, _restored) = store.verify_library_files(std::slice::from_ref(&root), 1).unwrap();
+    let (missing, _restored) = store
+        .verify_library_files(std::slice::from_ref(&root), 1)
+        .unwrap();
     assert_eq!(missing, 1, "文件不存在时应标记 missing");
     std::fs::write(&file, b"one-changed-content").unwrap();
     assert!(
@@ -340,10 +342,14 @@ fn finalize_scan_refuses_to_overwrite_new_dirty_event() {
     assert_eq!(claimed.dirty_rev, 1);
     let seen_file = tmp.path().join("seen.mkv");
     std::fs::write(&seen_file, b"x").unwrap();
-    store.record_scan_seen(&op.id, &[seen_file.clone()]).unwrap();
-    assert!(store
-        .is_scan_seen(&op.id, &seen_file.display().to_string())
-        .unwrap());
+    store
+        .record_scan_seen(&op.id, &[seen_file.clone()])
+        .unwrap();
+    assert!(
+        store
+            .is_scan_seen(&op.id, &seen_file.display().to_string())
+            .unwrap()
+    );
     assert_eq!(
         store
             .finalize_or_requeue_scan(&op.id, 1, ScanOperationStatus::Completed, &report)
@@ -360,7 +366,6 @@ fn finalize_scan_refuses_to_overwrite_new_dirty_event() {
         "写终态必须同时清理断点"
     );
 }
-
 
 /// P3-NEW-1：补扫轮标记 Running 与崩溃恢复都不得清空 requeue 落库的累计报告。
 #[test]
@@ -407,9 +412,11 @@ fn crash_recovery_keeps_requeued_round_report() {
 
     // 第二轮认领（Running）→ 只改状态，不得覆盖报告。
     assert!(store.claim_next_queued_scan(&[]).unwrap().is_some());
-    assert!(store
-        .set_scan_operation_status(&op.id, ScanOperationStatus::Running)
-        .unwrap());
+    assert!(
+        store
+            .set_scan_operation_status(&op.id, ScanOperationStatus::Running)
+            .unwrap()
+    );
     assert_eq!(
         store.scan_operation(&op.id).unwrap().unwrap().report,
         report,
@@ -445,20 +452,32 @@ fn ledger_source_version_survives_operation_checkpoint_clear() {
         .remove(&path)
         .expect("已处理的路径必须有 durable 源版本");
     assert!(
-        recorded.2.as_deref().is_some_and(|digest| !digest.is_empty()),
+        recorded
+            .2
+            .as_deref()
+            .is_some_and(|digest| !digest.is_empty()),
         "STRM 必须有受限内容指纹"
     );
 
     // 终态清空断点：durable 版本必须还在，且能证明未变化的文件是同一版本。
     assert_eq!(
         store
-            .finalize_or_requeue_scan(&op1.id, 0, ScanOperationStatus::Completed, &serde_json::json!({}))
+            .finalize_or_requeue_scan(
+                &op1.id,
+                0,
+                ScanOperationStatus::Completed,
+                &serde_json::json!({})
+            )
             .unwrap(),
         None
     );
     assert!(!store.is_scan_seen(&op1.id, &path).unwrap());
     let surviving = store.ledger_source_versions(&[path.clone()]).unwrap();
-    assert_eq!(surviving.get(&path), Some(&recorded), "断点清空不得丢掉 durable 版本");
+    assert_eq!(
+        surviving.get(&path),
+        Some(&recorded),
+        "断点清空不得丢掉 durable 版本"
+    );
     assert!(Store::scan_seen_stamp_matches(
         &recorded,
         &Store::scan_seen_stamp(&file)
@@ -518,11 +537,17 @@ fn scope_signature_upgrade_is_compare_and_swap() {
             .unwrap(),
         "期望值不匹配时不得写入"
     );
-    assert!(store
-        .upgrade_scan_scope_signature(&op.id, "movie:1:/old", "v2:movie:1:4:/old")
-        .unwrap());
+    assert!(
+        store
+            .upgrade_scan_scope_signature(&op.id, "movie:1:/old", "v2:movie:1:4:/old")
+            .unwrap()
+    );
     assert_eq!(
-        store.scan_operation(&op.id).unwrap().unwrap().scope_signature,
+        store
+            .scan_operation(&op.id)
+            .unwrap()
+            .unwrap()
+            .scope_signature,
         "v2:movie:1:4:/old"
     );
     assert!(

@@ -81,12 +81,21 @@ fn interrupted_attempt_preserves_unknown_byte_measurement() {
     store.begin_fingerprint_attempt(&att).unwrap();
 
     // Recover jobs / recover interrupted attempts
-    store.recover_interrupted_fingerprint_attempts("job-crash").unwrap();
+    store
+        .recover_interrupted_fingerprint_attempts("job-crash")
+        .unwrap();
 
-    let recovered = store.get_fingerprint_attempt("att-interrupted").unwrap().unwrap();
+    let recovered = store
+        .get_fingerprint_attempt("att-interrupted")
+        .unwrap()
+        .unwrap();
     assert_eq!(recovered.status, "interrupted");
     assert!(recovered.metrics_json.contains("\"input_bytes\":null"));
-    assert!(recovered.metrics_json.contains("\"measurement_complete\":false"));
+    assert!(
+        recovered
+            .metrics_json
+            .contains("\"measurement_complete\":false")
+    );
 }
 
 #[test]
@@ -103,7 +112,14 @@ fn put_and_read_probe_sampling_plan_and_outcome() {
         reuse_media_info_cache: true,
     };
     store
-        .create_probe_job("job-plan", "marker_refresh", "media-1", Some(1), "scope-1", &[unit])
+        .create_probe_job(
+            "job-plan",
+            "marker_refresh",
+            "media-1",
+            Some(1),
+            "scope-1",
+            &[unit],
+        )
         .unwrap();
 
     store
@@ -115,6 +131,12 @@ fn put_and_read_probe_sampling_plan_and_outcome() {
 
     let units = store.probe_job_units("job-plan").unwrap();
     assert_eq!(units.len(), 1);
-    assert_eq!(units[0].sampling_plan_json.as_deref(), Some("{\"mode\":\"adaptive\"}"));
-    assert_eq!(units[0].detection_outcome_json.as_deref(), Some("{\"result\":\"detected\"}"));
+    assert_eq!(
+        units[0].sampling_plan_json.as_deref(),
+        Some("{\"mode\":\"adaptive\"}")
+    );
+    assert_eq!(
+        units[0].detection_outcome_json.as_deref(),
+        Some("{\"result\":\"detected\"}")
+    );
 }

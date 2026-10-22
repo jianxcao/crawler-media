@@ -7,14 +7,18 @@ pub struct Gate {
 
 impl Gate {
     pub fn new() -> Self {
-        Self { state: Arc::new((Mutex::new(false), Condvar::new())) }
+        Self {
+            state: Arc::new((Mutex::new(false), Condvar::new())),
+        }
     }
 
     pub fn wait(&self) {
         let (lock, cvar) = &*self.state;
         let mut released = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         while !*released {
-            released = cvar.wait(released).unwrap_or_else(|poisoned| poisoned.into_inner());
+            released = cvar
+                .wait(released)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
     }
 

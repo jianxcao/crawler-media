@@ -228,9 +228,7 @@ fn serialize_chapter_updates(
             replacement
                 .chapter_updates
                 .iter()
-                .map(|(file_id, chapters)| {
-                    Ok((file_id.clone(), serde_json::to_string(chapters)?))
-                })
+                .map(|(file_id, chapters)| Ok((file_id.clone(), serde_json::to_string(chapters)?)))
         })
         .collect()
 }
@@ -356,10 +354,7 @@ fn upsert_chapter_cache(
     };
 
     if !super::upsert_chapter_cache_tx(tx, file_id, &chapters_json)? {
-        tracing::warn!(
-            file_id,
-            "章节缓存写入被忽略：文件行不存在或源版本已变化"
-        );
+        tracing::warn!(file_id, "章节缓存写入被忽略：文件行不存在或源版本已变化");
     }
     Ok(())
 }

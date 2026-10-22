@@ -267,12 +267,23 @@ pub fn details_meta_for(
         .filter_map(|credit| credit.name.clone().filter(|name| !name.is_empty()))
         .collect();
     let (studios, studio_logo) = if parsed.networks.is_empty() {
-        let logo = parsed.production_companies.iter().find_map(|r| r.logo_path.clone());
-        let names = parsed.production_companies.iter().filter_map(|row| row.name.clone().filter(|name| !name.is_empty())).collect();
+        let logo = parsed
+            .production_companies
+            .iter()
+            .find_map(|r| r.logo_path.clone());
+        let names = parsed
+            .production_companies
+            .iter()
+            .filter_map(|row| row.name.clone().filter(|name| !name.is_empty()))
+            .collect();
         (names, logo)
     } else {
         let logo = parsed.networks.iter().find_map(|r| r.logo_path.clone());
-        let names = parsed.networks.iter().filter_map(|row| row.name.clone().filter(|name| !name.is_empty())).collect();
+        let names = parsed
+            .networks
+            .iter()
+            .filter_map(|row| row.name.clone().filter(|name| !name.is_empty()))
+            .collect();
         (names, logo)
     };
     let episode_run_time: Vec<u32> = parsed

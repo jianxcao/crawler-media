@@ -9,7 +9,7 @@ use tower::ServiceExt;
 
 use super::common::*;
 use super::subscription_depth::{authed_app, seed_pending_torrent};
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 async fn setup_tv_subscription_with_two_seasons(
     app: &axum::Router,

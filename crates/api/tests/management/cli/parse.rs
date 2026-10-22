@@ -285,4 +285,3 @@ fn search_admit_without_subscribe_is_error() {
         .is_err()
     );
 }
-

@@ -74,7 +74,8 @@ async fn unrelated_user_growth_does_not_expand_heartbeat_write_scope() {
     );
 
     let unowned_library_revision_before = revision(&fixture.state, &fixture.unowned_library);
-    let baseline_beat_delta = counter_delta(read_counters(&fixture.state), counters_pre_baseline_beat);
+    let baseline_beat_delta =
+        counter_delta(read_counters(&fixture.state), counters_pre_baseline_beat);
     println!("[diag:counters] baseline_beat_delta={baseline_beat_delta:?}");
 
     watch.snapshot().unwrap();
@@ -191,10 +192,7 @@ async fn concurrent_scan_of_ten_thousand_episodes_keeps_heartbeat_write_scope_bo
         "扫描批次不得报错: {:?}",
         report.errors
     );
-    assert_eq!(
-        report.inserted, episodes,
-        "全部集必须整批写入: {report:?}"
-    );
+    assert_eq!(report.inserted, episodes, "全部集必须整批写入: {report:?}");
     let ok = statuses.get(&200).copied().unwrap_or(0);
     assert_eq!(
         ok,
@@ -410,7 +408,10 @@ fn write_scope_instrument_detects_row_changes() {
         }),
         "正控制②：一行原地 UPDATE 只记 1 行（不是前后镜像各记一次）: {facts:?}"
     );
-    assert_eq!(facts.write_scope, 1, "一行 UPDATE 的写作用域是 1: {facts:?}");
+    assert_eq!(
+        facts.write_scope, 1,
+        "一行 UPDATE 的写作用域是 1: {facts:?}"
+    );
 
     // 正控制③：DELETE 记 deleted=1。
     watch.snapshot().unwrap();
@@ -432,5 +433,8 @@ fn write_scope_instrument_detects_row_changes() {
         }),
         "正控制③：一行 DELETE 必须被数成 deleted=1: {facts:?}"
     );
-    assert_eq!(facts.write_scope, 1, "一行 DELETE 的写作用域是 1: {facts:?}");
+    assert_eq!(
+        facts.write_scope, 1,
+        "一行 DELETE 的写作用域是 1: {facts:?}"
+    );
 }

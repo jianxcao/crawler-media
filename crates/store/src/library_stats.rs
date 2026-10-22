@@ -1,5 +1,5 @@
-use rusqlite::params;
 use super::{Store, StoreError};
+use rusqlite::params;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LibraryRosterStats {

@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::*;
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 #[tokio::test]
 async fn manual_probe_refreshes_every_library_holding_the_media() {

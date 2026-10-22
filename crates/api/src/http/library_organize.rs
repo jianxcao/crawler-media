@@ -172,9 +172,7 @@ fn organize_inner(state: &ApiState, id: &str, body: &Value) -> Response {
         .signal()
         .publish(|| Ok(apply_organize(&store, &library, renames)))
     {
-        Ok(response) => {
-            response
-        }
+        Ok(response) => response,
         Err(error) => err(StatusCode::CONFLICT, "library.frozen", &error),
     }
 }
@@ -300,9 +298,7 @@ pub(crate) async fn refresh_item_metadata(
     let state_for_work = state.clone();
     let work = state
         .http_work
-        .run_to_completion(move || {
-            refresh_item_metadata_inner(&state_for_work, &id, &item_id)
-        })
+        .run_to_completion(move || refresh_item_metadata_inner(&state_for_work, &id, &item_id))
         .await;
     match work {
         Ok(response) => response,
@@ -364,17 +360,14 @@ fn refresh_item_metadata_inner(state: &ApiState, id: &str, item_id: &str) -> Res
     if let Some(tmdb_id) = media.tmdb_id.as_deref() {
         match crate::scrape_metadata::fetch_tmdb_metadata(&state, media.kind, tmdb_id) {
             Ok(Some(meta)) => {
-                let meta_service = crate::metadata_service::MetadataService::new(std::sync::Arc::new(state.clone()));
+                let meta_service = crate::metadata_service::MetadataService::new(
+                    std::sync::Arc::new(state.clone()),
+                );
                 let _ = meta_service.refresh_media_metadata(&media);
 
                 let nfo = crate::scrape_metadata::nfo_from_tmdb(&media, &meta);
                 if media.kind == domain::MediaKind::Tv {
-                    crate::scrape_metadata::scrape_tv_sidecars(
-                        &state,
-                        &media,
-                        &show_root,
-                        &rows,
-                    );
+                    crate::scrape_metadata::scrape_tv_sidecars(&state, &media, &show_root, &rows);
                 } else if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
                     let target = path.with_file_name(format!("{stem}.nfo"));
                     // 同 library_scan：先捕获用户在 NFO 里的改动，write_nfo 之后再把生效

@@ -5,7 +5,6 @@ use std::io::Cursor;
 
 use crate::store::Library;
 
-
 /// 自动封面默认选项（标题取库名、多海报拼贴）。
 pub(crate) fn default_cover_options(library: &Library) -> CoverOptions {
     CoverOptions {

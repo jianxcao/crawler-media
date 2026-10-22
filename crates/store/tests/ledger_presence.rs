@@ -122,10 +122,24 @@ fn tv_library_removal_recovers_empty_coverage_and_preserves_file_bytes() {
     std::fs::create_dir_all(&other_root).unwrap();
     let store = Store::open(&data).unwrap();
     let library = store
-        .create_library(MediaKind::Tv, "TV", &[root.to_str().unwrap()], "everyone", true, &[])
+        .create_library(
+            MediaKind::Tv,
+            "TV",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
         .unwrap();
     store
-        .create_library(MediaKind::Tv, "Other TV", &[other_root.to_str().unwrap()], "everyone", true, &[])
+        .create_library(
+            MediaKind::Tv,
+            "Other TV",
+            &[other_root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
         .unwrap();
     let media = Media {
         id: MediaId::new(),
@@ -158,7 +172,10 @@ fn tv_library_removal_recovers_empty_coverage_and_preserves_file_bytes() {
         media_id: media.id,
         kind: MediaKind::Tv,
         path: path.clone(),
-        version: FileVersion { revision: 1, source_version: "v1".into() },
+        version: FileVersion {
+            revision: 1,
+            source_version: "v1".into(),
+        },
         presence: FilePresence::Present,
         publication: FilePublication::Published,
         size_bytes: Some(bytes.len() as u64),
@@ -183,15 +200,26 @@ fn tv_library_removal_recovers_empty_coverage_and_preserves_file_bytes() {
     };
     store
         .publish_files(
-            &WriteScope { library_id: library.id.parse().unwrap(), config_revision: 0 },
-            &[StorePublication { file: &file, units: &[], expected_version: None, nfo_observation: None, probe_required: false }],
+            &WriteScope {
+                library_id: library.id.parse().unwrap(),
+                config_revision: 0,
+            },
+            &[StorePublication {
+                file: &file,
+                units: &[],
+                expected_version: None,
+                nfo_observation: None,
+                probe_required: false,
+            }],
             1,
         )
         .unwrap();
     assert!(store.get_file_units(file.file_id).unwrap().is_empty());
 
     let removal = store.begin_library_removal(&library.id).unwrap();
-    store.set_removal_state(&removal.operation_id, "cleaning", None).unwrap();
+    store
+        .set_removal_state(&removal.operation_id, "cleaning", None)
+        .unwrap();
     drop(store);
 
     let store = Store::open(&data).unwrap();
@@ -202,10 +230,17 @@ fn tv_library_removal_recovers_empty_coverage_and_preserves_file_bytes() {
     assert!(store.file_coverage_by_id(file.file_id).unwrap().is_none());
     assert!(store.get_media(media.id).unwrap().is_some());
     assert_eq!(std::fs::read(path).unwrap(), bytes);
-    assert_eq!(store.clean_library_removal(&removal.operation_id).unwrap(), done);
+    assert_eq!(
+        store.clean_library_removal(&removal.operation_id).unwrap(),
+        done
+    );
 }
 
-fn observation(row: domain::FileCoverage, missing_at: Option<i64>, presence: FilePresence) -> LedgerPresenceObservation {
+fn observation(
+    row: domain::FileCoverage,
+    missing_at: Option<i64>,
+    presence: FilePresence,
+) -> LedgerPresenceObservation {
     LedgerPresenceObservation {
         file: row,
         missing_at,
@@ -348,7 +383,11 @@ fn restored_file_clears_flag_without_replacing_identity() {
 
     let result = store
         .apply_ledger_presence(
-            &[observation(row.clone(), Some(1000), ObservedPresence::Present)],
+            &[observation(
+                row.clone(),
+                Some(1000),
+                ObservedPresence::Present,
+            )],
             LedgerPresenceMode::Verify,
             2000,
         )
@@ -395,7 +434,11 @@ fn unknown_observation_preserves_prior_state() {
     // A permission/IO error is reported as Unknown and must not change state.
     let result = store
         .apply_ledger_presence(
-            &[observation(row.clone(), Some(1000), ObservedPresence::Unknown)],
+            &[observation(
+                row.clone(),
+                Some(1000),
+                ObservedPresence::Unknown,
+            )],
             LedgerPresenceMode::Verify,
             2000,
         )

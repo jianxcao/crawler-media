@@ -5,7 +5,7 @@
 //! work recoverable instead of losing it with the in-memory queue.
 
 use domain::LedgerId;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 use std::str::FromStr;
 
 use super::{Store, StoreError};
@@ -38,10 +38,7 @@ impl Store {
     /// Persist one obligation. `false` means the same
     /// `(file_id, source_version, targets_hash)` already exists, so the
     /// caller must not start the work twice.
-    pub fn enqueue_chapter_frame_task(
-        &self,
-        task: &ChapterFrameTask,
-    ) -> Result<bool, StoreError> {
+    pub fn enqueue_chapter_frame_task(&self, task: &ChapterFrameTask) -> Result<bool, StoreError> {
         let targets_json = serde_json::to_string(&task.targets)?;
         let changed = self.library.execute(
             "INSERT INTO chapter_frame_tasks (

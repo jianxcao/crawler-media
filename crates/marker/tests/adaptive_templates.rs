@@ -2,15 +2,20 @@ use std::path::Path;
 
 use marker::{
     CaptureMetrics, CapturedFingerprint, CommonSegment, EpisodeDescriptor, EpisodeEvidence,
-    FingerprintEngine, SampleWindow, SamplingPolicy, SegmentKind,
-    build_season_models, select_seed_episodes,
+    FingerprintEngine, SampleWindow, SamplingPolicy, SegmentKind, build_season_models,
+    select_seed_episodes,
 };
 
 #[derive(Clone, Default)]
 struct MockEngine {}
 
 impl FingerprintEngine for MockEngine {
-    fn extract_at(&self, _path: &Path, _start_secs: u32, _duration_secs: u32) -> Result<Vec<u32>, String> {
+    fn extract_at(
+        &self,
+        _path: &Path,
+        _start_secs: u32,
+        _duration_secs: u32,
+    ) -> Result<Vec<u32>, String> {
         Ok(Vec::new())
     }
 
@@ -21,7 +26,9 @@ impl FingerprintEngine for MockEngine {
         min_duration_secs: f32,
         max_duration_secs: f32,
     ) -> Option<CommonSegment> {
-        self.find_common_segments(first, second, min_duration_secs, max_duration_secs).into_iter().next()
+        self.find_common_segments(first, second, min_duration_secs, max_duration_secs)
+            .into_iter()
+            .next()
     }
 
     fn find_common_segments(
@@ -176,7 +183,10 @@ fn same_episode_versions_count_once_as_support() {
     assert_eq!(selected.len(), 3);
     let has_1080 = selected.contains(&"ledger-e02-1080p".to_string());
     let has_4k = selected.contains(&"ledger-e02-4k".to_string());
-    assert!(!(has_1080 && has_4k), "Same episode should not be selected twice as seed");
+    assert!(
+        !(has_1080 && has_4k),
+        "Same episode should not be selected twice as seed"
+    );
 }
 
 #[test]
@@ -190,7 +200,11 @@ fn multiple_credit_variants_remain_separate() {
     let ev4 = make_evidence("s4", "l4", 4, SegmentKind::Outro, 300, 700);
 
     let models = build_season_models(&engine, &[ev1, ev2, ev3, ev4], &policy);
-    assert_eq!(models.len(), 2, "Should create two separate models for two outro variants");
+    assert_eq!(
+        models.len(),
+        2,
+        "Should create two separate models for two outro variants"
+    );
 }
 
 #[test]
@@ -204,5 +218,8 @@ fn constant_fingerprints_do_not_form_trusted_templates() {
     let ev3 = make_evidence("s3", "l3", 3, SegmentKind::Intro, 0, 500);
 
     let models = build_season_models(&engine, &[ev1, ev2, ev3], &policy);
-    assert!(models.is_empty(), "Constant or silent fingerprints must not form template models");
+    assert!(
+        models.is_empty(),
+        "Constant or silent fingerprints must not form template models"
+    );
 }

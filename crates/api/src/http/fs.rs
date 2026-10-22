@@ -60,14 +60,18 @@ pub async fn browse_fs(
 
     match state
         .fs_work
-        .run(std::time::Duration::from_secs(10), move || read_directory(&target))
+        .run(std::time::Duration::from_secs(10), move || {
+            read_directory(&target)
+        })
         .await
     {
         Ok(Ok(browse)) => ok(serde_json::to_value(browse).unwrap_or_default()).into_response(),
         Ok(Err(response)) => response,
-        Err(crate::blocking_budget::BlockingError::Busy) => {
-            err(StatusCode::SERVICE_UNAVAILABLE, "fs.busy", "文件系统浏览并发过载")
-        }
+        Err(crate::blocking_budget::BlockingError::Busy) => err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "fs.busy",
+            "文件系统浏览并发过载",
+        ),
         Err(error) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
             "fs.worker",
@@ -94,7 +98,9 @@ fn read_directory(target: &Path) -> Result<FsBrowse, Response> {
         ));
     }
 
-    let canonical = target.canonicalize().unwrap_or_else(|_| target.to_path_buf());
+    let canonical = target
+        .canonicalize()
+        .unwrap_or_else(|_| target.to_path_buf());
     let parent = canonical.parent().map(|p| p.display().to_string());
 
     let entries = match fs::read_dir(&canonical) {

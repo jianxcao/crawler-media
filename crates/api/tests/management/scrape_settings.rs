@@ -227,10 +227,7 @@ async fn member_reading_scrape_settings_redacts_theintrodb_api_key() {
         admin_read["data"]["setting"]["fanart_api_key"],
         "fanart-secret"
     );
-    assert_eq!(
-        admin_read["data"]["effective"]["fanart_configured"],
-        true
-    );
+    assert_eq!(admin_read["data"]["effective"]["fanart_configured"], true);
 
     // 2. 创建一个普通成员用户
     let create_user_res = app
@@ -292,8 +289,5 @@ async fn member_reading_scrape_settings_redacts_theintrodb_api_key() {
         Value::Null,
         "普通成员读取 scrape settings 时必须脱敏 Fanart API key"
     );
-    assert_eq!(
-        member_read["data"]["effective"]["fanart_configured"],
-        true
-    );
+    assert_eq!(member_read["data"]["effective"]["fanart_configured"], true);
 }

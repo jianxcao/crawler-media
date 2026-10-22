@@ -1,4 +1,6 @@
-use domain::{Coverage, FetchMode, FilterId, LibraryId, MediaId, MediaKind, Subscribe, SubscribeId, UserId};
+use domain::{
+    Coverage, FetchMode, FilterId, LibraryId, MediaId, MediaKind, Subscribe, SubscribeId, UserId,
+};
 use store::Store;
 
 #[test]
@@ -12,7 +14,14 @@ fn subscription_with_units_and_retention_alignment() {
 
     // 1. Create a library
     let lib = store
-        .create_library(MediaKind::Tv, "Anime TV", &["/anime"], "everyone", true, &[])
+        .create_library(
+            MediaKind::Tv,
+            "Anime TV",
+            &["/anime"],
+            "everyone",
+            true,
+            &[],
+        )
         .unwrap();
 
     // 2. Insert a subscribe record tied to this library
@@ -40,7 +49,10 @@ fn subscription_with_units_and_retention_alignment() {
 
     store.insert_subscribe(&sub).unwrap();
 
-    let fetched = store.get_subscribe(sub.id).unwrap().expect("subscribe exists");
+    let fetched = store
+        .get_subscribe(sub.id)
+        .unwrap()
+        .expect("subscribe exists");
     assert_eq!(fetched.library_id, Some(lib.id.parse().unwrap()));
     assert_eq!(fetched.tracking_state, "active");
 }

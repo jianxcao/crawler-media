@@ -6,8 +6,8 @@ use std::collections::{HashMap, HashSet};
 use crate::http::ok;
 use crate::management::ApiState;
 
-use std::sync::LazyLock;
 use parking_lot::Mutex;
+use std::sync::LazyLock;
 
 /// A local up-next plan, with a separate key for background name enrichment.
 #[derive(Clone)]
@@ -232,7 +232,9 @@ pub(crate) async fn up_next(
                 .iter()
                 .filter(|r| {
                     r.file.media_id == media.id
-                        && r.units.iter().any(|u| !u.is_whole() && u.season.max(0) as u32 == season)
+                        && r.units
+                            .iter()
+                            .any(|u| !u.is_whole() && u.season.max(0) as u32 == season)
                         && crate::http::library::file_visible_to_user(
                             &store,
                             &r.file,
@@ -281,11 +283,16 @@ pub(crate) async fn up_next(
     // A local cache hit may supply the episode name; misses are refreshed asynchronously.
     let mut titles: HashMap<EpisodeTitleKey, Option<String>> = HashMap::new();
     for plan in &plans {
-        if plan.kind != domain::MediaKind::Tv { continue; }
-        let Some(tmdb_id) = plan.tmdb_id.as_deref() else { continue; };
+        if plan.kind != domain::MediaKind::Tv {
+            continue;
+        }
+        let Some(tmdb_id) = plan.tmdb_id.as_deref() else {
+            continue;
+        };
         match state.catalog.cached_season_details(tmdb_id, plan.season) {
             Ok(Some(details)) => {
-                let title = details.into_iter()
+                let title = details
+                    .into_iter()
                     .find(|episode| episode.episode_number == plan.next_episode as u32)
                     .and_then(|episode| episode.name);
                 if title.is_none() {
@@ -295,8 +302,12 @@ pub(crate) async fn up_next(
             }
             Ok(None) => schedule_season_enrichment(&state, tmdb_id, plan.season),
             Err(error) => {
-                tracing::warn!(kind = "tv", season = plan.season, error_type = error_type(&error),
-                    "up-next cached season lookup failed");
+                tracing::warn!(
+                    kind = "tv",
+                    season = plan.season,
+                    error_type = error_type(&error),
+                    "up-next cached season lookup failed"
+                );
                 schedule_season_enrichment(&state, tmdb_id, plan.season);
             }
         }
@@ -325,7 +336,9 @@ pub(crate) async fn up_next(
             let Some(media) = store.get_media(plan.media_id).ok().flatten() else {
                 continue;
             };
-            let episode_title = plan.tmdb_id.as_ref()
+            let episode_title = plan
+                .tmdb_id
+                .as_ref()
                 .and_then(|tmdb_id| titles.get(&(tmdb_id.clone(), plan.season, plan.next_episode)))
                 .cloned()
                 .flatten();
@@ -345,7 +358,12 @@ pub(crate) async fn up_next(
                 .iter()
                 .filter(|r| r.file.media_id == media.id)
                 .filter(|r| {
-                    crate::http::library::file_visible_to_user(&store, &r.file, &media, Some(user_id))
+                    crate::http::library::file_visible_to_user(
+                        &store,
+                        &r.file,
+                        &media,
+                        Some(user_id),
+                    )
                 })
                 .cloned()
                 .collect();
@@ -364,7 +382,11 @@ pub(crate) async fn up_next(
             let next_row = if media.kind == domain::MediaKind::Tv {
                 rows.iter()
                     .find(|r| {
-                        r.units.iter().any(|u| !u.is_whole() && u.season.max(0) as u32 == plan.season && u.episode.max(0) as i32 == plan.next_episode)
+                        r.units.iter().any(|u| {
+                            !u.is_whole()
+                                && u.season.max(0) as u32 == plan.season
+                                && u.episode.max(0) as i32 == plan.next_episode
+                        })
                     })
                     .cloned()
             } else {
@@ -415,7 +437,9 @@ pub(crate) async fn up_next(
                 let poster = cand
                     .preferred_coverage
                     .as_ref()
-                    .and_then(|row| crate::http::library::poster_path_with(&row.file, files.as_ref()))
+                    .and_then(|row| {
+                        crate::http::library::poster_path_with(&row.file, files.as_ref())
+                    })
                     .map(|_| {
                         let row = cand.preferred_coverage.as_ref().expect("checked");
                         crate::http::library::artwork_url("posters", row.file.file_id)
@@ -423,7 +447,9 @@ pub(crate) async fn up_next(
                 let mut backdrop = cand
                     .preferred_coverage
                     .as_ref()
-                    .and_then(|row| crate::http::library::backdrop_path_with(&row.file, files.as_ref()))
+                    .and_then(|row| {
+                        crate::http::library::backdrop_path_with(&row.file, files.as_ref())
+                    })
                     .map(|_| {
                         let row = cand.preferred_coverage.as_ref().expect("checked");
                         crate::http::library::artwork_url("fanart", row.file.file_id)
@@ -451,9 +477,9 @@ pub(crate) async fn up_next(
                     })
                     .or_else(|| backdrop.clone())
                     .or_else(|| {
-                        cand.preferred_coverage
-                            .as_ref()
-                            .map(|row| crate::http::library::artwork_url("fanart", row.file.file_id))
+                        cand.preferred_coverage.as_ref().map(|row| {
+                            crate::http::library::artwork_url("fanart", row.file.file_id)
+                        })
                     });
                 if backdrop.is_none() {
                     backdrop = cand
@@ -537,30 +563,40 @@ fn schedule_season_enrichment(state: &ApiState, tmdb_id: &str, season: u32) {
     }
     {
         let mut flights = TITLE_FLIGHTS.lock();
-        if !flights.insert(key.clone()) { return; }
+        if !flights.insert(key.clone()) {
+            return;
+        }
     }
     let catalog = state.catalog.clone();
     let search_work = state.search_work.clone();
     tokio::spawn(async move {
         let worker_key = key.clone();
         let lease = SeasonFlightLease(key);
-        let result = search_work.run_to_completion(move || {
-            let _lease = lease;
-            let result = catalog.season_details(&worker_key.1, worker_key.2);
-            if let Err(error) = &result {
-                tracing::warn!(kind = "tv", tmdb_id = %worker_key.1, season = worker_key.2,
+        let result = search_work
+            .run_to_completion(move || {
+                let _lease = lease;
+                let result = catalog.season_details(&worker_key.1, worker_key.2);
+                if let Err(error) = &result {
+                    tracing::warn!(kind = "tv", tmdb_id = %worker_key.1, season = worker_key.2,
                     error_type = error_type(error), "up-next cached season lookup failed");
-            }
-            result
-        }).await;
+                }
+                result
+            })
+            .await;
         if result.is_err() {
-            tracing::debug!(kind = "tv", season, error_type = "worker",
-                "up-next enrichment worker unavailable");
+            tracing::debug!(
+                kind = "tv",
+                season,
+                error_type = "worker",
+                "up-next enrichment worker unavailable"
+            );
         }
     });
 }
 
-fn error_type(_error: &str) -> &'static str { "catalog" }
+fn error_type(_error: &str) -> &'static str {
+    "catalog"
+}
 
 #[cfg(test)]
 mod tests {

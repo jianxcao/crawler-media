@@ -42,7 +42,10 @@ fn merge_with(survivor: (&str, i64), loser: (&str, i64), loser_entity: &str) -> 
         refresh_targets: BTreeMap::from([("tmdb".to_string(), SURVIVOR.to_string())]),
     };
     let op = store.begin_media_merge(&req, 3000).unwrap();
-    assert_eq!(store.advance_media_merge(&op, 3000).unwrap().state, "succeeded");
+    assert_eq!(
+        store.advance_media_merge(&op, 3000).unwrap().state,
+        "succeeded"
+    );
     db.query_row(
         "SELECT normalized_json, fetched_at FROM media_metadata_sources WHERE media_id = ?1",
         params![SURVIVOR],
@@ -92,16 +95,24 @@ fn failed_merge_is_recoverable_and_not_taken_over() {
         loser_revision: 0,
         refresh_targets: BTreeMap::from([("tmdb".to_string(), SURVIVOR.to_string())]),
     };
-    let op = store.begin_media_merge(&req("00000000-0000-0000-0001-0000000000b1"), 1000).unwrap();
+    let op = store
+        .begin_media_merge(&req("00000000-0000-0000-0001-0000000000b1"), 1000)
+        .unwrap();
     assert!(store.advance_media_merge(&op, 1100).is_err());
-    let failed_operation_is_recoverable = store.unfinished_media_merges().unwrap() == vec![op.clone()];
+    let failed_operation_is_recoverable =
+        store.unfinished_media_merges().unwrap() == vec![op.clone()];
     assert!(failed_operation_is_recoverable);
     assert!(
-        store.begin_media_merge(&req("00000000-0000-0000-0001-0000000000b2"), 1200).is_err(),
+        store
+            .begin_media_merge(&req("00000000-0000-0000-0001-0000000000b2"), 1200)
+            .is_err(),
         "a newer operation must not take over the failed one's freeze"
     );
     db.execute_batch("DROP TRIGGER fail_merge;").unwrap();
-    assert_eq!(store.advance_media_merge(&op, 1300).unwrap().state, "succeeded");
+    assert_eq!(
+        store.advance_media_merge(&op, 1300).unwrap().state,
+        "succeeded"
+    );
     assert!(store.unfinished_media_merges().unwrap().is_empty());
 }
 
@@ -138,7 +149,10 @@ fn conflicting_override_begin_is_refused_and_disjoint_overrides_merge() {
         matches!(&conflicting_override_begin, Err(store::StoreError::Protected(m)) if m.contains("lock field title")),
         "{conflicting_override_begin:?}"
     );
-    assert!(store.unfinished_media_merges().unwrap().is_empty(), "zero writes");
+    assert!(
+        store.unfinished_media_merges().unwrap().is_empty(),
+        "zero writes"
+    );
 
     db.execute(
         "UPDATE media_metadata_overrides SET fields_json = '{\"overview\":\"LO\"}' WHERE media_id = ?1",
@@ -146,7 +160,10 @@ fn conflicting_override_begin_is_refused_and_disjoint_overrides_merge() {
     )
     .unwrap();
     let op = store.begin_media_merge(&req, 1100).unwrap();
-    assert_eq!(store.advance_media_merge(&op, 1200).unwrap().state, "succeeded");
+    assert_eq!(
+        store.advance_media_merge(&op, 1200).unwrap().state,
+        "succeeded"
+    );
     let merged: String = db
         .query_row(
             "SELECT fields_json FROM media_metadata_overrides WHERE media_id = ?1",

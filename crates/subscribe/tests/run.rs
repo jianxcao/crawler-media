@@ -43,7 +43,7 @@ fn movie_filter() -> Filter {
             },
         ],
         keep_old_versions: false,
-}
+    }
 }
 
 fn media_movie() -> Media {

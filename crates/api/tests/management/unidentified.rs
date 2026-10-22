@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::*;
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 #[tokio::test]
 async fn unidentified_empty_store_is_empty_list() {
@@ -434,7 +434,14 @@ async fn actual_claim_routes_preserve_tv_coverage() {
         let store = Store::open(tmp.path().join("data")).unwrap();
         store.insert_media(&media).unwrap();
         store
-            .create_library(domain::MediaKind::Tv, "TV", &[root.to_str().unwrap()], "everyone", true, &[])
+            .create_library(
+                domain::MediaKind::Tv,
+                "TV",
+                &[root.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+            )
             .unwrap();
         for name in names {
             let path = root.join("Show").join(name);
@@ -446,7 +453,10 @@ async fn actual_claim_routes_preserve_tv_coverage() {
     }
     let app = router(state(
         tmp.path(),
-        Arc::new(Fixtures { requests: Mutex::new(Vec::new()), bodies: HashMap::new() }),
+        Arc::new(Fixtures {
+            requests: Mutex::new(Vec::new()),
+            bodies: HashMap::new(),
+        }),
         Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
     ));
     for name in names {
@@ -470,7 +480,13 @@ async fn actual_claim_routes_preserve_tv_coverage() {
         store.get_file_units(file.file_id).unwrap()
     };
     use domain::UnitKey;
-    assert_eq!(units(names[0]), vec![UnitKey::new(1, 1), UnitKey::new(1, 2)]);
+    assert_eq!(
+        units(names[0]),
+        vec![UnitKey::new(1, 1), UnitKey::new(1, 2)]
+    );
     assert_eq!(units(names[1]), vec![UnitKey::new(0, 0)]);
-    assert!(units(names[2]).is_empty(), "unknown TV must not become a whole");
+    assert!(
+        units(names[2]).is_empty(),
+        "unknown TV must not become a whole"
+    );
 }

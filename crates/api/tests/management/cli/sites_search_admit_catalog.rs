@@ -1,11 +1,11 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use super::{RouterTransport, search_transport, transport};
+use crate::common::*;
 use api::cli::{Command, Transport, run};
 use api::{Store, router};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
-use super::{RouterTransport, search_transport, transport};
-use crate::common::*;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn cli_sites_prints_created_site_name() {
@@ -161,4 +161,3 @@ async fn cli_catalog_lists_and_deletes_cache_row() {
     let listed = run(Command::Catalog, &t).await.unwrap();
     assert_eq!(listed, "No cache\n");
 }
-

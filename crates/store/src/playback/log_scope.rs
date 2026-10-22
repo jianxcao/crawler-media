@@ -58,19 +58,17 @@ impl Store {
         // 先清空（SAVEPOINT 之外）：任何失败路径都不会把上一次调用的 scope 行
         // 留给下一次；SAVEPOINT 只包住本次填充与查询，回滚后表保持空。
         self.reset_visible_media()?;
-        self.library
-            .execute_batch("SAVEPOINT playback_log_scope")?;
+        self.library.execute_batch("SAVEPOINT playback_log_scope")?;
         let result = self.scoped_log_page(scope, visible, limit);
         match result {
             Ok(page) => {
-                self.library
-                    .execute_batch("RELEASE playback_log_scope")?;
+                self.library.execute_batch("RELEASE playback_log_scope")?;
                 Ok(page)
             }
             Err(error) => {
-                let _ = self.library.execute_batch(
-                    "ROLLBACK TO playback_log_scope; RELEASE playback_log_scope",
-                );
+                let _ = self
+                    .library
+                    .execute_batch("ROLLBACK TO playback_log_scope; RELEASE playback_log_scope");
                 let _ = self.reset_visible_media();
                 Err(error)
             }
@@ -106,7 +104,8 @@ impl Store {
                     " AND NOT EXISTS (SELECT 1 FROM request_visible_media v WHERE v.id = l.media_id)"
                 );
                 let mut stmt = self.library.prepare(&count_sql)?;
-                let count: i64 = stmt.query_row(rusqlite::params_from_iter(args), |row| row.get(0))?;
+                let count: i64 =
+                    stmt.query_row(rusqlite::params_from_iter(args), |row| row.get(0))?;
                 count.max(0) as usize
             }
         };

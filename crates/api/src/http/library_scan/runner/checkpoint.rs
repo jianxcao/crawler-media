@@ -246,11 +246,17 @@ fn changed_targets(state: &ApiState, changed: &[PathBuf]) -> Result<Vec<ChangedT
     let mut targets = Vec::new();
     for path in changed {
         let path_str = path.display().to_string();
-        let Some(coverage) = store.file_coverage_by_path(&path_str).map_err(|e| e.to_string())? else {
+        let Some(coverage) = store
+            .file_coverage_by_path(&path_str)
+            .map_err(|e| e.to_string())?
+        else {
             continue;
         };
         let file = coverage.file;
-        let Some(version) = store.get_file_version(file.file_id).map_err(|e| e.to_string())? else {
+        let Some(version) = store
+            .get_file_version(file.file_id)
+            .map_err(|e| e.to_string())?
+        else {
             continue;
         };
         let config_revision = store
@@ -259,7 +265,10 @@ fn changed_targets(state: &ApiState, changed: &[PathBuf]) -> Result<Vec<ChangedT
         targets.push(ChangedTarget {
             path: path.clone(),
             file_id: file.file_id,
-            scope: store::library_write::WriteScope { library_id: file.library_id, config_revision },
+            scope: store::library_write::WriteScope {
+                library_id: file.library_id,
+                config_revision,
+            },
             version,
         });
     }
@@ -275,7 +284,13 @@ fn advance_source(
     if observation.source_version == target.version.source_version {
         return Ok(());
     }
-    store.replace_file_source(&target.scope, target.file_id, &target.version, observation, now_ms)?;
+    store.replace_file_source(
+        &target.scope,
+        target.file_id,
+        &target.version,
+        observation,
+        now_ms,
+    )?;
     tracing::info!(file_id = %target.file_id, revision = target.version.revision + 1, "扫描推进文件源版本");
     Ok(())
 }

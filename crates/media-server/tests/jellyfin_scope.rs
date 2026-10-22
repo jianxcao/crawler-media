@@ -9,8 +9,8 @@ use std::sync::Arc;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use domain::{
-    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile,
-    LibraryId, Media, MediaId, MediaKind, QualitySource, TypedItemId, UserId,
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, LibraryId,
+    Media, MediaId, MediaKind, QualitySource, TypedItemId, UserId,
 };
 use media_server::provider::query::series_media_id;
 use media_server::provider::{
@@ -105,7 +105,14 @@ fn fake_file(
 
 fn movie(title: &str, path: &str, genres: &[&str], studios: &[&str]) -> MediaItemSnapshot {
     let media = media(&MediaId::new().to_string(), MediaKind::Movie, title);
-    let file = fake_file(LedgerId::new(), library(MOVIES_LIBRARY), "root-movies", media.id, MediaKind::Movie, path);
+    let file = fake_file(
+        LedgerId::new(),
+        library(MOVIES_LIBRARY),
+        "root-movies",
+        media.id,
+        MediaKind::Movie,
+        path,
+    );
     MediaItemSnapshot {
         file,
         unit: None,
@@ -131,7 +138,14 @@ fn movie(title: &str, path: &str, genres: &[&str], studios: &[&str]) -> MediaIte
 
 fn series(title: &str, path: &str) -> MediaItemSnapshot {
     let media = media(SERIES, MediaKind::Tv, title);
-    let file = fake_file(LedgerId::new(), library(TV_LIBRARY), "root-tv", media.id, MediaKind::Tv, path);
+    let file = fake_file(
+        LedgerId::new(),
+        library(TV_LIBRARY),
+        "root-tv",
+        media.id,
+        MediaKind::Tv,
+        path,
+    );
     MediaItemSnapshot {
         file,
         unit: None,
@@ -268,9 +282,11 @@ impl MediaServerProvider for FakeProvider {
         _user_id: UserId,
         id: &str,
     ) -> Result<Option<MediaItemSnapshot>, String> {
-        Ok(self.items.iter().find(|item| {
-            item.is_series && series_media_id(id) == Some(item.media.id)
-        }).cloned())
+        Ok(self
+            .items
+            .iter()
+            .find(|item| item.is_series && series_media_id(id) == Some(item.media.id))
+            .cloned())
     }
 
     async fn resolve_cover_bytes(
@@ -360,7 +376,11 @@ fn item_count(body: &Value) -> usize {
 async fn unknown_parent_returns_an_empty_page_instead_of_the_whole_library() {
     let (status, body) = get(&app(false), "/Items?ParentId=does-not-exist", "token-a").await;
     assert_eq!(status, StatusCode::OK, "未知 ParentId 不能变成 404：{body}");
-    assert_eq!(body["Items"].as_array().map(Vec::len), Some(0), "body={body}");
+    assert_eq!(
+        body["Items"].as_array().map(Vec::len),
+        Some(0),
+        "body={body}"
+    );
     assert_eq!(body["TotalRecordCount"], 0, "body={body}");
 }
 
@@ -382,7 +402,12 @@ async fn library_parent_keeps_its_items() {
 
 #[tokio::test]
 async fn series_parent_keeps_its_episodes() {
-    let (status, body) = get(&app(false), &format!("/Items?ParentId={}", series_wire()), "token-a").await;
+    let (status, body) = get(
+        &app(false),
+        &format!("/Items?ParentId={}", series_wire()),
+        "token-a",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(item_count(&body), 1, "body={body}");
     assert_eq!(body["Items"][0]["Name"], "Beta");
@@ -434,10 +459,7 @@ async fn user_profile_accepts_self_and_rejects_other_users() {
         assert_eq!(expected, 200);
     }
 
-    for uri in [
-        format!("/Users/{USER_B}"),
-        "/Users/bob".to_string(),
-    ] {
+    for uri in [format!("/Users/{USER_B}"), "/Users/bob".to_string()] {
         let (status, _) = get(&app, &uri, "token-a").await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{uri} 必须 404");
     }

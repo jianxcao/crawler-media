@@ -16,8 +16,15 @@ async fn task_listing_keeps_in_flight_http_pending_past_grace_period() {
     // 16 minutes later the user opens the task center.
     h.age_pending(id, 16 * 60);
     let listed = h.list_tasks().await;
-    let items = listed["data"]["items"].as_array().cloned().unwrap_or_default();
-    assert_eq!(h.pending_state(id, "active"), 1, "in-flight pending must survive: {listed}");
+    let items = listed["data"]["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        h.pending_state(id, "active"),
+        1,
+        "in-flight pending must survive: {listed}"
+    );
     assert_eq!(items.len(), 1, "{listed}");
     assert_eq!(items[0]["state"], "downloading", "{listed}");
     assert_eq!(
@@ -45,7 +52,10 @@ async fn task_listing_still_cleans_a_task_removed_from_the_client() {
     h.qb.inject(Task {
         hash: "f".repeat(40),
         name: "Other.Show.S01E01".into(),
-        tags: vec!["crawler-media".into(), downloader::ownership_tag("https://pt.example/other")],
+        tags: vec![
+            "crawler-media".into(),
+            downloader::ownership_tag("https://pt.example/other"),
+        ],
         progress: 0.5,
         save_path: "/downloads".into(),
         files: vec![],
@@ -57,11 +67,19 @@ async fn task_listing_still_cleans_a_task_removed_from_the_client() {
 
     h.age_pending(id, 5 * 60);
     h.list_tasks().await;
-    assert_eq!(h.pending_state(id, "active"), 1, "inside grace period: keep");
+    assert_eq!(
+        h.pending_state(id, "active"),
+        1,
+        "inside grace period: keep"
+    );
 
     h.age_pending(id, 16 * 60);
     let listed = h.list_tasks().await;
-    assert_eq!(h.pending_state(id, "active"), 0, "absent past grace: cleaned {listed}");
+    assert_eq!(
+        h.pending_state(id, "active"),
+        0,
+        "absent past grace: cleaned {listed}"
+    );
 }
 
 #[tokio::test]
@@ -76,5 +94,9 @@ async fn task_listing_refuses_cleanup_when_client_hides_ownership_tags() {
     }
     h.age_pending(id, 16 * 60);
     h.list_tasks().await;
-    assert_eq!(h.pending_state(id, "active"), 1, "unprovable identity must not delete pending");
+    assert_eq!(
+        h.pending_state(id, "active"),
+        1,
+        "unprovable identity must not delete pending"
+    );
 }

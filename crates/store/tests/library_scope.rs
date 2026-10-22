@@ -109,4 +109,3 @@ fn scope_is_stale_after_root_kind_or_freeze_change() {
     let snapshot2 = store.library_ownership().unwrap();
     assert!(!scope.matches(&snapshot2));
 }
-

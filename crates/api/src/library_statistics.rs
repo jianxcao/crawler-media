@@ -1,7 +1,7 @@
-use std::collections::HashMap;
 use axum::http::StatusCode;
 use axum::response::Response;
 use domain::UserId;
+use std::collections::HashMap;
 use store::Library;
 
 use crate::ApiState;
@@ -16,7 +16,10 @@ pub struct LibraryStatistics {
     pub stale: bool,
 }
 
-pub(crate) fn statistics_for(store: &store::Store, library: &Library) -> Result<LibraryStatistics, store::StoreError> {
+pub(crate) fn statistics_for(
+    store: &store::Store,
+    library: &Library,
+) -> Result<LibraryStatistics, store::StoreError> {
     let stats = store.library_roster_stats(&library.id)?;
     Ok(LibraryStatistics {
         item_count: stats.item_count,

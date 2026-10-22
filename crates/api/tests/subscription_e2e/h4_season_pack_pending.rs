@@ -34,7 +34,11 @@ async fn tv_subscribe(h: &Harness, full_season_pack: bool) -> SubscribeId {
     .await
     .unwrap();
     assert_eq!(response.status(), axum::http::StatusCode::CREATED);
-    super::common::json_data(response).await["id"].as_str().unwrap().parse().unwrap()
+    super::common::json_data(response).await["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap()
 }
 
 async fn pack_in_flight_blocks_more_downloads(full_season_pack: bool) {
@@ -60,7 +64,11 @@ async fn pack_in_flight_blocks_more_downloads(full_season_pack: bool) {
         .unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
     }
-    assert_eq!(h.qb.add_count(), 1, "season pack submitted (fsp={full_season_pack})");
+    assert_eq!(
+        h.qb.add_count(),
+        1,
+        "season pack submitted (fsp={full_season_pack})"
+    );
     h.qb.set_progress(0, 0.2);
 
     h.set_search_rows(&[
@@ -68,9 +76,17 @@ async fn pack_in_flight_blocks_more_downloads(full_season_pack: bool) {
         ("The.Long.Watch.S01E02.1080p.WEB-DL.x264-GRP", 3),
     ]);
     h.run_subscribe(id).await;
-    assert_eq!(h.qb.add_count(), 1, "manual run: pack in flight covers E01..E03 (fsp={full_season_pack})");
+    assert_eq!(
+        h.qb.add_count(),
+        1,
+        "manual run: pack in flight covers E01..E03 (fsp={full_season_pack})"
+    );
     h.scheduled_search(id).await.unwrap();
-    assert_eq!(h.qb.add_count(), 1, "scheduled: pack in flight covers E01..E03 (fsp={full_season_pack})");
+    assert_eq!(
+        h.qb.add_count(),
+        1,
+        "scheduled: pack in flight covers E01..E03 (fsp={full_season_pack})"
+    );
 }
 
 #[tokio::test]

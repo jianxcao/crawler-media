@@ -25,7 +25,11 @@ pub(crate) async fn integrity_checks(
     Path(library_id): Path<String>,
 ) -> Response {
     match storage_operations::begin_library_integrity(&state, &library_id, false) {
-        Ok(operation) => (StatusCode::ACCEPTED, Json(serde_json::json!({ "ok": true, "data": operation }))).into_response(),
+        Ok(operation) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "ok": true, "data": operation })),
+        )
+            .into_response(),
         Err(storage_operations::StorageOperationError::MissingLibrary) => {
             err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在")
         }
@@ -35,9 +39,11 @@ pub(crate) async fn integrity_checks(
         Err(storage_operations::StorageOperationError::Invalid(message)) => {
             err(StatusCode::BAD_REQUEST, "library.invalid", &message)
         }
-        Err(storage_operations::StorageOperationError::Store(error)) => {
-            err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error.to_string())
-        }
+        Err(storage_operations::StorageOperationError::Store(error)) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store.error",
+            &error.to_string(),
+        ),
     }
 }
 
@@ -47,7 +53,11 @@ pub(crate) async fn integrity_repairs(
     Path(library_id): Path<String>,
 ) -> Response {
     match storage_operations::begin_library_integrity(&state, &library_id, true) {
-        Ok(operation) => (StatusCode::ACCEPTED, Json(serde_json::json!({ "ok": true, "data": operation }))).into_response(),
+        Ok(operation) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "ok": true, "data": operation })),
+        )
+            .into_response(),
         Err(storage_operations::StorageOperationError::MissingLibrary) => {
             err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在")
         }
@@ -57,9 +67,11 @@ pub(crate) async fn integrity_repairs(
         Err(storage_operations::StorageOperationError::Invalid(message)) => {
             err(StatusCode::BAD_REQUEST, "library.invalid", &message)
         }
-        Err(storage_operations::StorageOperationError::Store(error)) => {
-            err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error.to_string())
-        }
+        Err(storage_operations::StorageOperationError::Store(error)) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store.error",
+            &error.to_string(),
+        ),
     }
 }
 

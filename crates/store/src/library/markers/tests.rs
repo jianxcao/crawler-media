@@ -54,7 +54,14 @@ fn seed_fixture(store: &Store, dir: &std::path::Path, kind: MediaKind) -> Fixtur
         .unwrap();
     let root = dir.to_path_buf();
     let library = store
-        .create_library(kind, "Fixture", &[root.to_str().unwrap()], "everyone", true, &[])
+        .create_library(
+            kind,
+            "Fixture",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
         .unwrap();
     let root_id = store
         .list_library_roots()
@@ -171,7 +178,9 @@ fn two_season_refresh_setup(
     );
     for unit_id in &unit_ids {
         assert!(store.start_probe_unit(job_id, unit_id).unwrap());
-        store.finish_probe_unit(job_id, unit_id, true, None).unwrap();
+        store
+            .finish_probe_unit(job_id, unit_id, true, None)
+            .unwrap();
     }
     (fixture.media_id, file_ids, old_chapters)
 }
@@ -325,7 +334,10 @@ fn locked_marker_preserves_and_syncs_chapters_across_file_versions() {
     }
 
     // When empty replacements arrive, locked marker and chapters still remain 10s..70s.
-    let empty_updates: Vec<_> = file_ids.iter().map(|id| (id.to_string(), Vec::new())).collect();
+    let empty_updates: Vec<_> = file_ids
+        .iter()
+        .map(|id| (id.to_string(), Vec::new()))
+        .collect();
     store
         .replace_marker_results(media_id, 1, &[], &empty_updates)
         .unwrap();
@@ -476,7 +488,9 @@ fn seed_locked_versions(store: &Store, root: &std::path::Path) -> (MediaId, Vec<
             &library::build_complete_timeline_chapters(&[], Some((20_000, 80_000)), None, None),
         )
         .unwrap();
-    store.put_cached_chapters(&file_ids[2].to_string(), &[]).unwrap();
+    store
+        .put_cached_chapters(&file_ids[2].to_string(), &[])
+        .unwrap();
 
     (fixture.media_id, file_ids)
 }

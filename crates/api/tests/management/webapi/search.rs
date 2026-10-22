@@ -281,8 +281,8 @@ struct OpenGate(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
 
 impl Drop for OpenGate {
     fn drop(&mut self) {
-        *self.0 .0.lock().unwrap() = true;
-        self.0 .1.notify_all();
+        *self.0.0.lock().unwrap() = true;
+        self.0.1.notify_all();
     }
 }
 
@@ -294,16 +294,17 @@ async fn title_search_beyond_the_window_still_searches_every_source() {
     let started = Arc::new(std::sync::Mutex::new(Vec::new()));
     let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let _open = OpenGate(gate.clone());
-    let sources: Vec<Arc<dyn api::catalog::Catalog>> = ["tmdb", "douban", "tvdb", "bangumi", "anilist"]
-        .into_iter()
-        .map(|name| {
-            Arc::new(GatedCatalog {
-                name,
-                started: started.clone(),
-                gate: gate.clone(),
-            }) as Arc<dyn api::catalog::Catalog>
-        })
-        .collect();
+    let sources: Vec<Arc<dyn api::catalog::Catalog>> =
+        ["tmdb", "douban", "tvdb", "bangumi", "anilist"]
+            .into_iter()
+            .map(|name| {
+                Arc::new(GatedCatalog {
+                    name,
+                    started: started.clone(),
+                    gate: gate.clone(),
+                }) as Arc<dyn api::catalog::Catalog>
+            })
+            .collect();
     let fanout = api::catalog::FanoutCatalog::new(sources);
     let app = router(
         state(

@@ -410,20 +410,23 @@ impl MediaServerProvider for ApiServerProvider {
                 return Ok(None);
             }
             // 旧 `(season, episode)` 的 both-or-neither：整片没有分集坐标，端点直接放弃。
-            let Some((season, episode)) = items::snapshot_unit(entry.unit)
-                .and_then(|unit| unit.episode_coordinates())
+            let Some((season, episode)) =
+                items::snapshot_unit(entry.unit).and_then(|unit| unit.episode_coordinates())
             else {
                 return Ok(None);
             };
             // 与页内同一个已采纳字段入口：图片端点不再自己读现场 NFO。
-            let adopted_still =
-                item_metadata::page_fields(&store, &entry.file, entry.unit, &entry.media, entry.is_series)
-                    .ok()
-                    .and_then(|fields| fields.still_url.value().cloned());
-            let adopted_url =
-                primary_image_url(entry.unit, &entry.media, adopted_still.as_deref());
-            let local_still =
-                crate::episode_still::existing(entry.file.path.as_path()).is_some();
+            let adopted_still = item_metadata::page_fields(
+                &store,
+                &entry.file,
+                entry.unit,
+                &entry.media,
+                entry.is_series,
+            )
+            .ok()
+            .and_then(|fields| fields.still_url.value().cloned());
+            let adopted_url = primary_image_url(entry.unit, &entry.media, adopted_still.as_deref());
+            let local_still = crate::episode_still::existing(entry.file.path.as_path()).is_some();
             let tmdb_episode = entry
                 .media
                 .tmdb_id
@@ -540,7 +543,10 @@ impl MediaServerProvider for ApiServerProvider {
                     domain::UnitKey::new(entry.unit.0, entry.unit.1),
                 )
                 .map_err(|e| e.to_string())?;
-            if !covers || file.media_id != entry.media.id || file.version.revision != physical.revision {
+            if !covers
+                || file.media_id != entry.media.id
+                || file.version.revision != physical.revision
+            {
                 return Ok(None);
             }
             file

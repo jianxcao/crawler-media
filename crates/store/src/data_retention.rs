@@ -60,7 +60,6 @@ pub struct DataRetentionBatch {
     pub resume_after: Option<DataRetentionCursor>,
 }
 
-
 /// `cutoff_ms` 是 epoch 毫秒。QoE 的 `recorded_at` 以 unix 秒存储，因此比较时
 /// 取秒级下界（严格小于 cutoff 所在秒）：边界行保留，绝不因毫秒换算多删。
 pub fn prune_data_history(
@@ -83,7 +82,9 @@ pub fn prune_data_history(
         RetentionClass::TransientCatalog => {
             prune_transient_catalog(store, cutoff_ms, cursor, limit, dry_run)
         }
-        RetentionClass::ProbeHistory => prune_probe_history(store, cutoff_ms, cursor, limit, dry_run),
+        RetentionClass::ProbeHistory => {
+            prune_probe_history(store, cutoff_ms, cursor, limit, dry_run)
+        }
     }
 }
 
@@ -233,7 +234,10 @@ fn prune_transient_catalog(
     let (cursor_source, cursor_entry) = match cursor {
         Some(cursor) => {
             let (source, entry_id) = cursor.id.split_once(':').ok_or_else(|| {
-                StoreError::Invalid(format!("invalid catalog retention cursor id: {}", cursor.id))
+                StoreError::Invalid(format!(
+                    "invalid catalog retention cursor id: {}",
+                    cursor.id
+                ))
             })?;
             if !super::catalog::CACHE_TABLES
                 .iter()
@@ -244,7 +248,10 @@ fn prune_transient_catalog(
                 )));
             }
             let entry_id = entry_id.parse::<i64>().map_err(|_| {
-                StoreError::Invalid(format!("invalid catalog retention cursor id: {}", cursor.id))
+                StoreError::Invalid(format!(
+                    "invalid catalog retention cursor id: {}",
+                    cursor.id
+                ))
             })?;
             (Some(source), Some(entry_id))
         }
@@ -257,9 +264,7 @@ fn prune_transient_catalog(
     let union = super::catalog::CACHE_TABLES
         .iter()
         .map(|(source, table)| {
-            format!(
-                "SELECT '{source}' AS source, entry_id, cache_key, fetched_at FROM {table}"
-            )
+            format!("SELECT '{source}' AS source, entry_id, cache_key, fetched_at FROM {table}")
         })
         .collect::<Vec<_>>()
         .join(" UNION ALL ");
@@ -312,9 +317,7 @@ fn prune_transient_catalog(
                 .iter()
                 .find(|(name, _)| name == source)
                 .map(|(_, table)| *table)
-                .ok_or_else(|| {
-                    StoreError::Invalid(format!("unknown cache source: {source}"))
-                })?;
+                .ok_or_else(|| StoreError::Invalid(format!("unknown cache source: {source}")))?;
             to_delete.entry(table).or_default().push(*entry_id);
         } else {
             protected += 1;
@@ -540,4 +543,3 @@ mod tests {
         }
     }
 }
-

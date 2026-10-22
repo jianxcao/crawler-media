@@ -373,7 +373,10 @@ pub(super) fn coverage_visible(scope: &ScopedRead, coverage: &FileCoverage) -> b
     let Some(media) = scope.media.get(&coverage.file.media_id) else {
         return false;
     };
-    let Some(owner) = scope.ownership.owner(coverage.file.path.as_path(), media.kind) else {
+    let Some(owner) = scope
+        .ownership
+        .owner(coverage.file.path.as_path(), media.kind)
+    else {
         return false;
     };
     scope.ownership.accepts_work(&owner.id)

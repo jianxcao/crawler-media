@@ -1,11 +1,11 @@
+use rusqlite::Connection;
 use std::fs;
 use std::path::Path;
-use rusqlite::Connection;
-use store::schema::layout::{
-    initialize_jobs_layout, validate_cache_layout, validate_database_layout, validate_jobs_layout,
-    APP_APPLICATION_ID, LIBRARY_APPLICATION_ID, SUBSCRIBE_APPLICATION_ID, V1_USER_VERSION,
-};
 use store::Store;
+use store::schema::layout::{
+    APP_APPLICATION_ID, LIBRARY_APPLICATION_ID, SUBSCRIBE_APPLICATION_ID, V1_USER_VERSION,
+    initialize_jobs_layout, validate_cache_layout, validate_database_layout, validate_jobs_layout,
+};
 
 #[path = "support/mod.rs"]
 mod support;
@@ -13,7 +13,8 @@ mod support;
 fn seed_five_database_cluster(dir: &Path) -> (domain::UserId, domain::MediaId, domain::LedgerId) {
     let store = Store::open(dir).unwrap();
     let user_id = domain::UserId::new();
-    let (media_id, ledger_id) = support::seed_published_file(&store, &dir.join("library_root"), "matrix");
+    let (media_id, ledger_id) =
+        support::seed_published_file(&store, &dir.join("library_root"), "matrix");
 
     // Add progress in library.db
     store
@@ -111,13 +112,23 @@ fn seed_five_database_cluster(dir: &Path) -> (domain::UserId, domain::MediaId, d
 
 fn controlled_snapshot(src: &Path, dst: &Path) {
     fs::create_dir_all(dst).unwrap();
-    for db_name in ["app.db", "cache.db", "library.db", "subscribe.db", "jobs.db"] {
+    for db_name in [
+        "app.db",
+        "cache.db",
+        "library.db",
+        "subscribe.db",
+        "jobs.db",
+    ] {
         let src_file = src.join(db_name);
         let dst_file = dst.join(db_name);
         let conn = Connection::open(&src_file).unwrap();
         // Controlled snapshot uses SQLite's official VACUUM INTO / backup API
         // which forces checkpoint flush and creates a consistent, clean database copy
-        conn.execute("VACUUM INTO ?1", rusqlite::params![dst_file.to_str().unwrap()]).unwrap();
+        conn.execute(
+            "VACUUM INTO ?1",
+            rusqlite::params![dst_file.to_str().unwrap()],
+        )
+        .unwrap();
     }
 }
 
@@ -126,10 +137,22 @@ fn validate_cluster_layout_and_consistency(dir: &Path) -> (usize, usize, usize) 
     validate_database_layout("app", &app_conn, APP_APPLICATION_ID, V1_USER_VERSION).unwrap();
 
     let lib_conn = Connection::open(dir.join("library.db")).unwrap();
-    validate_database_layout("library", &lib_conn, LIBRARY_APPLICATION_ID, V1_USER_VERSION).unwrap();
+    validate_database_layout(
+        "library",
+        &lib_conn,
+        LIBRARY_APPLICATION_ID,
+        V1_USER_VERSION,
+    )
+    .unwrap();
 
     let sub_conn = Connection::open(dir.join("subscribe.db")).unwrap();
-    validate_database_layout("subscribe", &sub_conn, SUBSCRIBE_APPLICATION_ID, V1_USER_VERSION).unwrap();
+    validate_database_layout(
+        "subscribe",
+        &sub_conn,
+        SUBSCRIBE_APPLICATION_ID,
+        V1_USER_VERSION,
+    )
+    .unwrap();
 
     let cache_conn = Connection::open(dir.join("cache.db")).unwrap();
     validate_cache_layout(&cache_conn).unwrap();
@@ -191,13 +214,23 @@ fn naive_copy_of_live_writer_wal_fails_or_loses_uncheckpointed_data() {
 
     let db_path = src_dir.join("library.db");
     let live_conn = Connection::open(&db_path).unwrap();
-    live_conn.pragma_update(None, "journal_mode", "WAL").unwrap();
-    live_conn.pragma_update(None, "application_id", LIBRARY_APPLICATION_ID).unwrap();
-    live_conn.pragma_update(None, "user_version", V1_USER_VERSION).unwrap();
-    live_conn.execute_batch(include_str!("../src/schema/v1/library.sql")).unwrap();
+    live_conn
+        .pragma_update(None, "journal_mode", "WAL")
+        .unwrap();
+    live_conn
+        .pragma_update(None, "application_id", LIBRARY_APPLICATION_ID)
+        .unwrap();
+    live_conn
+        .pragma_update(None, "user_version", V1_USER_VERSION)
+        .unwrap();
+    live_conn
+        .execute_batch(include_str!("../src/schema/v1/library.sql"))
+        .unwrap();
 
     // Prevent autocheckpoint so all new writes stay purely in WAL file
-    live_conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    live_conn
+        .pragma_update(None, "wal_autocheckpoint", 0)
+        .unwrap();
 
     // Commit a real transaction into the active writer database.
     // Because autocheckpoint is 0, this committed data resides entirely in library.db-wal!
@@ -207,7 +240,13 @@ fn naive_copy_of_live_writer_wal_fails_or_loses_uncheckpointed_data() {
     ).unwrap();
 
     // Verify data exists when queried via the live connection
-    let count_live: i64 = live_conn.query_row("SELECT COUNT(*) FROM media WHERE media_id = 'media-wal-only'", [], |r| r.get(0)).unwrap();
+    let count_live: i64 = live_conn
+        .query_row(
+            "SELECT COUNT(*) FROM media WHERE media_id = 'media-wal-only'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(count_live, 1);
 
     // NAIVE COPY: Copy ONLY library.db without checkpointing and without library.db-wal
@@ -229,7 +268,9 @@ fn naive_copy_of_live_writer_wal_fails_or_loses_uncheckpointed_data() {
         Err(err) => {
             let msg = err.to_string();
             assert!(
-                msg.contains("no such table") || msg.contains("disk I/O error") || msg.contains("database disk image is malformed"),
+                msg.contains("no such table")
+                    || msg.contains("disk I/O error")
+                    || msg.contains("database disk image is malformed"),
                 "Expected schema or corruption error when copying without WAL, got: {msg}"
             );
         }

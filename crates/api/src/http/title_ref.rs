@@ -254,8 +254,7 @@ fn owned_episode_counts(
     coverage: &[domain::FileCoverage],
     media_id: domain::MediaId,
 ) -> (std::collections::HashMap<u32, usize>, bool) {
-    let mut owned_seasons: std::collections::HashMap<u32, usize> =
-        std::collections::HashMap::new();
+    let mut owned_seasons: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
     let mut has_owned = false;
     for row in coverage.iter().filter(|row| row.file.media_id == media_id) {
         has_owned = true;

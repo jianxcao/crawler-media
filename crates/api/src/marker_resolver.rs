@@ -105,7 +105,9 @@ pub async fn resolve_item_chapters(
             return cached;
         }
         let store = state.store.lock();
-        if crate::fingerprint_job::source::ensure_source_available(&store, row).is_err() { return Vec::new(); }
+        if crate::fingerprint_job::source::ensure_source_available(&store, row).is_err() {
+            return Vec::new();
+        }
         // A read may reconstruct chapters from this episode's verified marker,
         // but cannot promote a neighboring episode's candidate into target facts.
         let marker_candidate = store
@@ -139,7 +141,9 @@ pub async fn resolve_item_chapters(
     let mut chapters = output.chapters;
     {
         let store = state.store.lock();
-        if crate::fingerprint_job::source::ensure_source_available(&store, row).is_err() { return Vec::new(); }
+        if crate::fingerprint_job::source::ensure_source_available(&store, row).is_err() {
+            return Vec::new();
+        }
         for marker in &output.markers {
             let _ = store.put_media_marker(marker);
         }
@@ -253,7 +257,10 @@ fn resolve_without_store(snapshot: ResolveSnapshot) -> ResolveOutput {
     // STRM 同步解析不做内嵌章节探测：ffprobe 对远程 URL 每次最多等 30s，
     // 会拖慢 PlaybackInfo/详情页请求。STRM 的片头片尾走 TheIntroDB 云端
     // 与后台探测任务的声纹（不阻塞请求）。
-    let is_strm = snapshot.row.file.path
+    let is_strm = snapshot
+        .row
+        .file
+        .path
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("strm"));

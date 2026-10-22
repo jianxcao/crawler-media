@@ -1,5 +1,5 @@
-use std::path::Path;
 use rusqlite::Connection;
+use std::path::Path;
 
 pub mod queries;
 pub mod source;
@@ -108,10 +108,16 @@ pub fn open(path: impl AsRef<Path>) -> Result<Connection, CacheDbError> {
 
         if app_id == CACHE_APPLICATION_ID && user_ver == CACHE_USER_VERSION {
             validate_schema(&ro)?;
-        } else if has_tables || (app_id != 0 && app_id != CACHE_APPLICATION_ID) || (user_ver != 0 && user_ver != CACHE_USER_VERSION) {
+        } else if has_tables
+            || (app_id != 0 && app_id != CACHE_APPLICATION_ID)
+            || (user_ver != 0 && user_ver != CACHE_USER_VERSION)
+        {
             return Err(CacheDbError::LegacyFormat(format!(
                 "invalid cache layout at {}: app_id={}, user_version={}, has_schema_objects={}",
-                path.display(), app_id, user_ver, has_tables
+                path.display(),
+                app_id,
+                user_ver,
+                has_tables
             )));
         }
     }
@@ -132,12 +138,18 @@ const CACHE_TABLES: [&str; 6] = [
 ];
 
 const CACHE_INDEXES: [&str; 12] = [
-    "idx_tmdb_cache_fetched", "idx_tmdb_cache_retention",
-    "idx_douban_cache_fetched", "idx_douban_cache_retention",
-    "idx_tvdb_cache_fetched", "idx_tvdb_cache_retention",
-    "idx_bangumi_cache_fetched", "idx_bangumi_cache_retention",
-    "idx_anilist_cache_fetched", "idx_anilist_cache_retention",
-    "idx_fanart_cache_fetched", "idx_fanart_cache_retention",
+    "idx_tmdb_cache_fetched",
+    "idx_tmdb_cache_retention",
+    "idx_douban_cache_fetched",
+    "idx_douban_cache_retention",
+    "idx_tvdb_cache_fetched",
+    "idx_tvdb_cache_retention",
+    "idx_bangumi_cache_fetched",
+    "idx_bangumi_cache_retention",
+    "idx_anilist_cache_fetched",
+    "idx_anilist_cache_retention",
+    "idx_fanart_cache_fetched",
+    "idx_fanart_cache_retention",
 ];
 
 /// Checks the required cache schema objects without changing the database.

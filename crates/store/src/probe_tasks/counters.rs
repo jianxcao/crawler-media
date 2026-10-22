@@ -13,7 +13,10 @@ struct ProbeCounts {
 
 impl ProbeCounts {
     fn for_status(status: &str) -> Self {
-        let mut counts = Self { completed: 1, ..Self::default() };
+        let mut counts = Self {
+            completed: 1,
+            ..Self::default()
+        };
         match status {
             "succeeded" => counts.succeeded = 1,
             "failed" => counts.failed = 1,
@@ -41,18 +44,28 @@ impl Store {
                 "SELECT total, kind, completed, succeeded, failed, partial
                  FROM probe_jobs WHERE id = ?1 AND status IN ('queued', 'running')",
             )?;
-            let result = statement.query_row([job_id], |row: &rusqlite::Row<'_>| Ok((
-                row.get::<_, usize>(0)?, row.get::<_, String>(1)?, ProbeCounts {
-                    completed: row.get::<_, usize>(2)?, succeeded: row.get::<_, usize>(3)?,
-                    failed: row.get::<_, usize>(4)?, partial: row.get::<_, usize>(5)?,
-                },
-            ))).optional()?;
+            let result = statement
+                .query_row([job_id], |row: &rusqlite::Row<'_>| {
+                    Ok((
+                        row.get::<_, usize>(0)?,
+                        row.get::<_, String>(1)?,
+                        ProbeCounts {
+                            completed: row.get::<_, usize>(2)?,
+                            succeeded: row.get::<_, usize>(3)?,
+                            failed: row.get::<_, usize>(4)?,
+                            partial: row.get::<_, usize>(5)?,
+                        },
+                    ))
+                })
+                .optional()?;
             vm_steps += i64::from(statement.get_status(rusqlite::StatementStatus::VmStep));
             result
         };
         let Some((total, kind, current)) = existing else {
             tx.commit()?;
-            let job = self.get_probe_job(job_id)?.ok_or_else(|| StoreError::Missing(format!("probe job {job_id}")))?;
+            let job = self
+                .get_probe_job(job_id)?
+                .ok_or_else(|| StoreError::Missing(format!("probe job {job_id}")))?;
             let all_done = job.completed >= job.total;
             return Ok((job, false, all_done, vm_steps));
         };
@@ -65,7 +78,11 @@ impl Store {
             vm_steps += i64::from(statement.get_status(rusqlite::StatementStatus::VmStep));
             changed
         };
-        let delta = if changed == 1 { ProbeCounts::for_status(status) } else { ProbeCounts::default() };
+        let delta = if changed == 1 {
+            ProbeCounts::for_status(status)
+        } else {
+            ProbeCounts::default()
+        };
         let completed = current.completed + delta.completed;
         let succeeded = current.succeeded + delta.succeeded;
         let failed = current.failed + delta.failed;
@@ -73,27 +90,43 @@ impl Store {
         let all_done = completed >= total;
         if changed == 1 {
             let cancelled = completed - succeeded - failed - partial;
-            let terminal = probe_job_terminal_status(&kind, total, completed, failed, partial, cancelled);
+            let terminal =
+                probe_job_terminal_status(&kind, total, completed, failed, partial, cancelled);
             let mut statement = tx.prepare(
                 "UPDATE probe_jobs SET completed=?2, succeeded=?3, failed=?4, partial=?5,
                      status=COALESCE(?6, 'running'), finished_at_ms=COALESCE(?7, finished_at_ms),
                      error=COALESCE(?8, error)
                  WHERE id=?1 AND status IN ('queued','running')",
             )?;
-            statement.execute(params![job_id, completed, succeeded, failed, partial, terminal,
-                terminal.map(|_| now_ms()), error])?;
+            statement.execute(params![
+                job_id,
+                completed,
+                succeeded,
+                failed,
+                partial,
+                terminal,
+                terminal.map(|_| now_ms()),
+                error
+            ])?;
             vm_steps += i64::from(statement.get_status(rusqlite::StatementStatus::VmStep));
         }
         let accepted = changed == 1;
         if accepted {
             tracing::debug!(
-                job_id, ledger_id, completed, succeeded, failed, partial,
+                job_id,
+                ledger_id,
+                completed,
+                succeeded,
+                failed,
+                partial,
                 latency_us = started_at.elapsed().as_micros() as u64,
                 "probe unit transition counters updated"
             );
         }
         tx.commit()?;
-        let job = self.get_probe_job(job_id)?.ok_or_else(|| StoreError::Missing(format!("probe job {job_id}")))?;
+        let job = self
+            .get_probe_job(job_id)?
+            .ok_or_else(|| StoreError::Missing(format!("probe job {job_id}")))?;
         Ok((job, accepted, all_done, vm_steps))
     }
 
@@ -101,7 +134,8 @@ impl Store {
         let tx = self.library.unchecked_transaction()?;
         reconcile_counts_in_transaction(&tx, job_id)?;
         tx.commit()?;
-        self.get_probe_job(job_id)?.ok_or_else(|| StoreError::Missing(format!("probe job {job_id}")))
+        self.get_probe_job(job_id)?
+            .ok_or_else(|| StoreError::Missing(format!("probe job {job_id}")))
     }
 }
 

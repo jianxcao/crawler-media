@@ -14,8 +14,8 @@ use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::Value;
+use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
-use store::test_support::{publish_fixture_file, FixtureFile};
 
 #[path = "management/common.rs"]
 mod common;
@@ -111,17 +111,25 @@ fn fixture() -> (tempfile::TempDir, axum::Router, String) {
 async fn invalid_explicit_paging_is_rejected_on_both_paths() {
     let (_tmp, app, library_id) = fixture();
     for bad in ["limit=0", "limit=501", "limit=-1", "limit=abc", "limit="] {
-        let (status, body) = get(&app, &format!("/api/v1/libraries/{library_id}/items?{bad}")).await;
+        let (status, body) =
+            get(&app, &format!("/api/v1/libraries/{library_id}/items?{bad}")).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "items {bad}: {body}");
         assert_eq!(body["error"]["code"], "library.invalid");
-        let (status, body) =
-            get(&app, &format!("/api/v1/libraries/{library_id}/gallery?{bad}")).await;
+        let (status, body) = get(
+            &app,
+            &format!("/api/v1/libraries/{library_id}/gallery?{bad}"),
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "gallery {bad}: {body}");
     }
     for bad in ["offset=-1", "offset=abc", "offset="] {
         let (status, _) = get(&app, &format!("/api/v1/libraries/{library_id}/items?{bad}")).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "items {bad}");
-        let (status, _) = get(&app, &format!("/api/v1/libraries/{library_id}/gallery?{bad}")).await;
+        let (status, _) = get(
+            &app,
+            &format!("/api/v1/libraries/{library_id}/gallery?{bad}"),
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "gallery {bad}");
     }
 }
@@ -156,7 +164,11 @@ async fn explicit_limit_returns_the_requested_page() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["data"].as_array().unwrap().len(), 5);
 
-    let (status, body) = get(&app, &format!("/api/v1/libraries/{library_id}/items?limit=1")).await;
+    let (status, body) = get(
+        &app,
+        &format!("/api/v1/libraries/{library_id}/items?limit=1"),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["data"].as_array().unwrap().len(), 1);
 

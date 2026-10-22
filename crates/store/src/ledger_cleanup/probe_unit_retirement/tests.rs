@@ -1,6 +1,6 @@
 use crate::Store;
-use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use crate::test_support::FixtureFile;
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 
 fn fixture(store: &Store, root: &std::path::Path) -> (Media, FixtureFile, FixtureFile) {
     std::fs::create_dir_all(root).unwrap();
@@ -165,7 +165,6 @@ fn a_late_unit_finish_does_not_resurrect_a_retired_job() {
         "cancelled"
     );
 }
-
 
 /// Two-unit job whose first unit is already terminal while the second is still
 /// outstanding, so a later deletion of the second ledger retires the last

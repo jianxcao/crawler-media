@@ -73,7 +73,11 @@ async fn legacy_unbound_progress_writes_only_unit_facts(
             }),
         )
         .await;
-    assert_eq!(s_stale, StatusCode::OK, "unbound progress 必须 200(不能是 500 保存播放状态失败): {stale_body}");
+    assert_eq!(
+        s_stale,
+        StatusCode::OK,
+        "unbound progress 必须 200(不能是 500 保存播放状态失败): {stale_body}"
+    );
 
     // §16.3 ① : unbound 分支仍要写单元事实。
     let store_arc = fix.state.store();
@@ -87,13 +91,24 @@ async fn legacy_unbound_progress_writes_only_unit_facts(
         "unbound progress 必须写 playback_units 行"
     );
     let db = rusqlite::Connection::open(fix.dir.path().join("data/library.db")).unwrap();
-    assert_eq!(count_rows(&db, "playback_units"), units_before + 1, "unbound progress 写一行单元事实");
-    assert_eq!(count_rows(&db, "playback_sessions"), sessions_before, "unbound progress 不得新增会话行");
+    assert_eq!(
+        count_rows(&db, "playback_units"),
+        units_before + 1,
+        "unbound progress 写一行单元事实"
+    );
+    assert_eq!(
+        count_rows(&db, "playback_sessions"),
+        sessions_before,
+        "unbound progress 不得新增会话行"
+    );
     drop(db);
 
     // Stale progress must not create a session
     let sess = store_arc.lock().get_session(user_id, "legacy_dev").unwrap();
-    assert!(sess.is_none(), "Unbound progress without active session must not fabricate a session");
+    assert!(
+        sess.is_none(),
+        "Unbound progress without active session must not fabricate a session"
+    );
     LegacyCounts {
         units: units_before,
         sessions: sessions_before,
@@ -129,8 +144,15 @@ async fn legacy_no_id_start_then_progress_reuses_the_session(
     assert_eq!(s_start, StatusCode::OK);
 
     // Session on A is active
-    let sess_after_start = store_arc.lock().get_session(user_id, "legacy_dev").unwrap().unwrap();
-    assert_eq!(sess_after_start.ledger_id.as_deref(), Some(&row_a.file_id.to_string()[..]));
+    let sess_after_start = store_arc
+        .lock()
+        .get_session(user_id, "legacy_dev")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        sess_after_start.ledger_id.as_deref(),
+        Some(&row_a.file_id.to_string()[..])
+    );
 
     // 2b. §16.3 ① 正面证据:同一设备、同样不带 `play_session_id` 的后续 `progress` 复用已签发
     //     会话(canonical 的 bound 分支),必须 HTTP 200 + 位置写进 `playback_units` +
@@ -139,8 +161,16 @@ async fn legacy_no_id_start_then_progress_reuses_the_session(
     let sessions_after_start = count_rows(&db, "playback_sessions");
     let units_after_start = count_rows(&db, "playback_units");
     drop(db);
-    assert_eq!(sessions_after_start, sessions_before + 1, "no-id start 只签发一个会话行");
-    assert_eq!(units_after_start, units_before + 1, "no-id start 落一行单元事实(正控制)");
+    assert_eq!(
+        sessions_after_start,
+        sessions_before + 1,
+        "no-id start 只签发一个会话行"
+    );
+    assert_eq!(
+        units_after_start,
+        units_before + 1,
+        "no-id start 落一行单元事实(正控制)"
+    );
 
     let (s_progress, progress_body) = fix
         .request_with_body(
@@ -157,7 +187,11 @@ async fn legacy_no_id_start_then_progress_reuses_the_session(
             }),
         )
         .await;
-    assert_eq!(s_progress, StatusCode::OK, "no-id progress 必须 200: {progress_body}");
+    assert_eq!(
+        s_progress,
+        StatusCode::OK,
+        "no-id progress 必须 200: {progress_body}"
+    );
     let unit_after_progress = {
         let guard = store_arc.lock();
         guard.unit_state(user_id, row_a.media_id, -1, -1).unwrap()
@@ -168,7 +202,11 @@ async fn legacy_no_id_start_then_progress_reuses_the_session(
         "§16.3 ① :no-id progress 必须把位置写进 playback_units"
     );
     let db = rusqlite::Connection::open(fix.dir.path().join("data/library.db")).unwrap();
-    assert_eq!(count_rows(&db, "playback_units"), units_after_start, "progress 只更新单元事实,不新增行");
+    assert_eq!(
+        count_rows(&db, "playback_units"),
+        units_after_start,
+        "progress 只更新单元事实,不新增行"
+    );
     assert_eq!(
         count_rows(&db, "playback_sessions"),
         sessions_after_start,
@@ -203,11 +241,21 @@ async fn legacy_stale_stop_on_other_target_leaves_session_a(
         .await;
     assert_eq!(s_stop_b, StatusCode::OK);
 
-    let sess_after_mismatch = store_arc.lock().get_session(user_id, "legacy_dev").unwrap().unwrap();
-    assert_eq!(sess_after_mismatch.ledger_id.as_deref(), Some(&row_a.file_id.to_string()[..]), "Mismatch stop must not close session A");
+    let sess_after_mismatch = store_arc
+        .lock()
+        .get_session(user_id, "legacy_dev")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        sess_after_mismatch.ledger_id.as_deref(),
+        Some(&row_a.file_id.to_string()[..]),
+        "Mismatch stop must not close session A"
+    );
 }
 
 fn count_rows(db: &rusqlite::Connection, table: &str) -> i64 {
-    db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
-        .unwrap_or_else(|error| panic!("count {table}: {error}"))
+    db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+        row.get(0)
+    })
+    .unwrap_or_else(|error| panic!("count {table}: {error}"))
 }

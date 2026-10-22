@@ -85,7 +85,9 @@ fn movie_library_removal_accepts_the_whole_media_unit() {
     crate::test_support::publish_fixture_file(&store, &row).unwrap();
     let user = UserId::new();
     store
-        .upsert_unit(user, media.id, -1, -1, 1_000, None, None, None, None, None, false, 1)
+        .upsert_unit(
+            user, media.id, -1, -1, 1_000, None, None, None, None, None, false, 1,
+        )
         .unwrap();
 
     let removal = store.begin_library_removal(&library.id).unwrap();
@@ -185,7 +187,10 @@ fn removal_reduces_preferred_file_summaries_and_keeps_media_and_playback() {
         .get_library_item(library_id, row.media_id)
         .unwrap()
         .expect("a published file creates a card");
-    assert_eq!(card.preferred_file_id, Some(row.file_id.expect("fixture file id")));
+    assert_eq!(
+        card.preferred_file_id,
+        Some(row.file_id.expect("fixture file id"))
+    );
     assert_eq!(summary_rows(&store, &library.id, row.media_id), (1, 1));
 
     let user = UserId::new();

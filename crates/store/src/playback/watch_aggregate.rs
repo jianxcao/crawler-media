@@ -132,9 +132,8 @@ impl Store {
         // 错误路径回滚后再清一次，保证 scope 行不会残留给下一次调用。
         self.reset_watch_visible_media()?;
         self.library.execute_batch("SAVEPOINT watch_aggregate")?;
-        let result = self.watch_report_inner(
-            &user_text, visible, now, days, tz_secs, today, window,
-        );
+        let result =
+            self.watch_report_inner(&user_text, visible, now, days, tz_secs, today, window);
         match result {
             Ok(report) => {
                 self.library.execute_batch("RELEASE watch_aggregate")?;
@@ -163,7 +162,11 @@ impl Store {
         if let Some(ids) = visible {
             self.fill_watch_visible_media(ids)?;
         }
-        let visibility = if visible.is_some() { VISIBLE_CLAUSE } else { "" };
+        let visibility = if visible.is_some() {
+            VISIBLE_CLAUSE
+        } else {
+            ""
+        };
         let current = self.window_report(
             user,
             now - window,
@@ -183,7 +186,10 @@ impl Store {
             visibility,
         )?;
         let hidden_titles = if visible.is_some() {
-            let sql = format!("{} SELECT COUNT(DISTINCT media_id) FROM scoped", scoped_cte(HIDDEN_CLAUSE));
+            let sql = format!(
+                "{} SELECT COUNT(DISTINCT media_id) FROM scoped",
+                scoped_cte(HIDDEN_CLAUSE)
+            );
             let mut stmt = self.library.prepare(&sql)?;
             let count: i64 = stmt.query_row(
                 named_params! { ":tz": tz_secs, ":start": now - window, ":end": i64::MAX, ":user": user },
@@ -311,7 +317,13 @@ impl Store {
         let mut stmt = self.library.prepare(&sql)?;
         let rows = stmt.query_map(
             named_params! { ":tz": tz_secs, ":start": start, ":end": end, ":user": user },
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
         )?;
         let mut hours = vec![vec![0i64; 24]; 7];
         for row in rows {

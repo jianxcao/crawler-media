@@ -151,11 +151,9 @@ fn session_library_visible(
     let Some(media) = read.media(session.media_id) else {
         return false;
     };
-    read.rows_for(session.media_id)
-        .iter()
-        .any(|coverage| {
-            crate::http::library::file_visible_to_user(store, &coverage.file, media, user_id)
-        })
+    read.rows_for(session.media_id).iter().any(|coverage| {
+        crate::http::library::file_visible_to_user(store, &coverage.file, media, user_id)
+    })
 }
 
 /// POST /playback/activity/sessions/{device_id}/end?user_id=... — mark one

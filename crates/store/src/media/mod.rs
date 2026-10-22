@@ -350,7 +350,9 @@ impl Store {
     fn alias_set_conflicts(&self, existing: &Media, incoming: &Media) -> Result<bool, StoreError> {
         let sources = ["tmdb", "douban", "tvdb", "bangumi", "anilist"];
         for (source, incoming_id) in sources.into_iter().zip(aliases(incoming)) {
-            let Some(incoming_id) = incoming_id else { continue };
+            let Some(incoming_id) = incoming_id else {
+                continue;
+            };
             let mut stmt = self.library.prepare_cached(
                 "SELECT external_id FROM media_aliases WHERE media_id = ?1 AND source = ?2 AND kind = ?3",
             )?;

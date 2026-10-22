@@ -292,7 +292,9 @@ async fn merged_no_id_other_unit_is_ignored() {
     let read = |season, episode| {
         let store_arc = fix.state.store();
         let guard = store_arc.lock();
-        guard.unit_state(merged.user_id, merged.media_id, season, episode).unwrap()
+        guard
+            .unit_state(merged.user_id, merged.media_id, season, episode)
+            .unwrap()
     };
     let (e01_before, e02_before) = (read(1, 1), read(1, 2));
     for event in ["progress", "stop"] {
@@ -314,6 +316,10 @@ async fn merged_no_id_other_unit_is_ignored() {
             .await;
         assert_eq!(status, StatusCode::OK);
     }
-    assert_eq!(read(1, 1), e01_before, "E01 must not move through the E02 session");
+    assert_eq!(
+        read(1, 1),
+        e01_before,
+        "E01 must not move through the E02 session"
+    );
     assert_eq!(read(1, 2), e02_before);
 }

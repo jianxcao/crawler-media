@@ -16,7 +16,7 @@ use tower::ServiceExt;
 
 use super::catalog::hit;
 use super::common::{Fixtures, json_data, request, state};
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 const TMDB_ID: &str = "603";
 

@@ -225,9 +225,9 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        Ok(stored_pw.flatten().is_some_and(|pw| {
-            !pw.trim().is_empty() && !crate::password::is_verifiable_hash(&pw)
-        }))
+        Ok(stored_pw
+            .flatten()
+            .is_some_and(|pw| !pw.trim().is_empty() && !crate::password::is_verifiable_hash(&pw)))
     }
 
     /// 在同一个事务中原子轮换管理员密码，并确保当前的 CLI token 登记有效且旧 CLI Bearer 被撤销。

@@ -16,8 +16,13 @@ use crate::add::Added;
 use crate::facts::QualityFact;
 
 pub(super) fn reserve_and_publish<D: Downloader + ?Sized>(
-    added: &Added<'_, D>, scored: &ScoredTorrent, release: &Release,
-    src: &Path, dest: &Path, pending: bool, control: &library::WorkControl,
+    added: &Added<'_, D>,
+    scored: &ScoredTorrent,
+    release: &Release,
+    src: &Path,
+    dest: &Path,
+    pending: bool,
+    control: &library::WorkControl,
     recorder: Option<&dyn TransferRecorder>,
 ) -> Result<FileCoverage, SubscribeError> {
     // Publishing writes the destination identity: the Library that owns the root
@@ -39,7 +44,9 @@ pub(super) fn reserve_and_publish<D: Downloader + ?Sized>(
     } else {
         let span = release.episode_span();
         match (release.season, span) {
-            (Some(s), Some((from, to))) => (from..=to).map(|e| UnitKey::new(s as i32, e as i32)).collect(),
+            (Some(s), Some((from, to))) => (from..=to)
+                .map(|e| UnitKey::new(s as i32, e as i32))
+                .collect(),
             (Some(s), None) => vec![UnitKey::new(s as i32, release.episode.unwrap_or(1) as i32)],
             _ => vec![UnitKey::WHOLE],
         }
@@ -51,7 +58,10 @@ pub(super) fn reserve_and_publish<D: Downloader + ?Sized>(
         media_id: added.input.media.id,
         kind: added.input.media.kind,
         path: dest.to_path_buf(),
-        version: domain::FileVersion { revision: 1, source_version: "v1".into() },
+        version: domain::FileVersion {
+            revision: 1,
+            source_version: "v1".into(),
+        },
         presence: domain::FilePresence::Present,
         publication: domain::FilePublication::Pending,
         size_bytes: std::fs::metadata(src).ok().map(|m| m.len()),

@@ -1,11 +1,11 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use std::path::{Path, PathBuf};
 use domain::{
-    Confidence, FileCoverage, FilePresence, FilePublication, FileVersion, LedgerId,
-    LibraryFile, LibraryId, Media, MediaId, MediaKind, QualitySource, UnitKey,
+    Confidence, FileCoverage, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile,
+    LibraryId, Media, MediaId, MediaKind, QualitySource, UnitKey,
 };
+use std::path::{Path, PathBuf};
 use store::library_write::WriteScope;
 use support::library_presence::PresenceFixture;
 

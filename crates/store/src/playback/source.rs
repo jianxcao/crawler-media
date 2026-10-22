@@ -203,10 +203,7 @@ impl Store {
     /// `file_details.tracks_version` when it exists, otherwise the revision
     /// published on the file row. `None` when the file is not a published,
     /// present source any more.
-    pub(crate) fn file_tracks_version(
-        &self,
-        file_id: LedgerId,
-    ) -> Result<Option<i64>, StoreError> {
+    pub(crate) fn file_tracks_version(&self, file_id: LedgerId) -> Result<Option<i64>, StoreError> {
         self.library
             .query_row(
                 "SELECT COALESCE(d.tracks_version, f.tracks_version)

@@ -3,20 +3,20 @@
 //! terminal, and refuse a second worker start in the same runtime. Capture is
 //! a gated fake; no chromaprint process starts.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::{Condvar, Mutex};
 
-use api::probe_manager::ProbeManager;
 use api::Store;
+use api::probe_manager::ProbeManager;
 use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use marker::fingerprint::capture_types::{
     CaptureFailure, CaptureMetrics, CaptureRequest, CapturedFingerprint, FingerprintCaptureEngine,
 };
 use marker::{AudioFingerprint, CommonSegment, FingerprintEngine};
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 const METADATA_PENDING: usize = 100_000;
 const FINGERPRINT_PENDING: usize = 100_000;
@@ -296,7 +296,10 @@ async fn full_fingerprint_window_does_not_lose_metadata_completion() {
         workers_after_first,
         "a second start in the same runtime must not add workers"
     );
-    assert!(workers_after_first >= 2, "metadata and fingerprint workers start");
+    assert!(
+        workers_after_first >= 2,
+        "metadata and fingerprint workers start"
+    );
 
     // Fill the fingerprint window, then release it. A completed metadata unit
     // must stay durable (queued for fingerprint, or terminal) — never dropped

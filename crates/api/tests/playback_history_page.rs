@@ -2,7 +2,7 @@
 //!
 //! characterization：entries/hidden_count/has_more/复合游标/days/scope=all 语义不变；
 //! 另有一条真实回归：hidden_count 必须覆盖整个 scope，而不是旧的「前 20 万行」窗口。
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 #[path = "support/mod.rs"]
 mod support;
@@ -163,11 +163,7 @@ fn seed_hidden_media(store: &Store, title: &str) -> MediaId {
 }
 
 /// 成员不可见 Library 中的媒体：有真实发布文件可签发 session，但对成员 hidden。
-fn seed_hidden_playable_media(
-    store: &Store,
-    root: &Path,
-    title: &str,
-) -> (MediaId, LedgerId) {
+fn seed_hidden_playable_media(store: &Store, root: &Path, title: &str) -> (MediaId, LedgerId) {
     let library_root = root.join("hidden-library");
     std::fs::create_dir_all(&library_root).unwrap();
     store
@@ -191,7 +187,8 @@ fn log_play(
     started_at: i64,
     device: &str,
 ) {
-    let play_session_id = support::session::issue_session(store, user_id, device, file_id, started_at);
+    let play_session_id =
+        support::session::issue_session(store, user_id, device, file_id, started_at);
     store
         .upsert_session(&api::store::SessionRow {
             device_id: device.into(),
@@ -317,17 +314,44 @@ async fn days_filter_applies_to_page_and_hidden_count() {
     let (visible, visible_file, hidden, hidden_file) = {
         let guard = store.lock();
         let (visible, visible_file) = seed_media_with_ledger(&guard, &library_root, "Recent");
-        let (hidden, hidden_file) =
-            seed_hidden_playable_media(&guard, tmp.path(), "HiddenRecent");
+        let (hidden, hidden_file) = seed_hidden_playable_media(&guard, tmp.path(), "HiddenRecent");
         (visible, visible_file, hidden, hidden_file)
     };
     let now = now_secs();
     {
         let guard = store.lock();
-        log_play(&guard, member, visible, visible_file, now - 3600, "dev-recent");
-        log_play(&guard, member, hidden, hidden_file, now - 7200, "dev-hidden-recent");
-        log_play(&guard, member, visible, visible_file, now - 10 * 86_400, "dev-old");
-        log_play(&guard, member, hidden, hidden_file, now - 11 * 86_400, "dev-hidden-old");
+        log_play(
+            &guard,
+            member,
+            visible,
+            visible_file,
+            now - 3600,
+            "dev-recent",
+        );
+        log_play(
+            &guard,
+            member,
+            hidden,
+            hidden_file,
+            now - 7200,
+            "dev-hidden-recent",
+        );
+        log_play(
+            &guard,
+            member,
+            visible,
+            visible_file,
+            now - 10 * 86_400,
+            "dev-old",
+        );
+        log_play(
+            &guard,
+            member,
+            hidden,
+            hidden_file,
+            now - 11 * 86_400,
+            "dev-hidden-old",
+        );
     }
 
     let data = history(&app, &token, "days=5").await;
@@ -351,8 +375,7 @@ async fn admin_scope_all_ignores_visibility() {
     let (visible, visible_file, hidden, hidden_file) = {
         let guard = store.lock();
         let (visible, visible_file) = seed_media_with_ledger(&guard, &library_root, "AdminVisible");
-        let (hidden, hidden_file) =
-            seed_hidden_playable_media(&guard, tmp.path(), "AdminHidden");
+        let (hidden, hidden_file) = seed_hidden_playable_media(&guard, tmp.path(), "AdminHidden");
         (visible, visible_file, hidden, hidden_file)
     };
     {
@@ -374,9 +397,15 @@ async fn member_without_visible_library_gets_empty_page() {
     let app = router(state.clone());
     let store = state.store();
     let (member, token) = seed_member(&store.lock(), "erin");
-    let (hidden, hidden_file) =
-        seed_hidden_playable_media(&store.lock(), tmp.path(), "NoLibrary");
-    log_play(&store.lock(), member, hidden, hidden_file, 1000, "dev-hidden");
+    let (hidden, hidden_file) = seed_hidden_playable_media(&store.lock(), tmp.path(), "NoLibrary");
+    log_play(
+        &store.lock(),
+        member,
+        hidden,
+        hidden_file,
+        1000,
+        "dev-hidden",
+    );
 
     let data = history(&app, &token, "").await;
     assert_eq!(data["entries"].as_array().unwrap().len(), 0, "{data}");

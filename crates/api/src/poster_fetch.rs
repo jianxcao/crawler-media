@@ -63,11 +63,7 @@ pub fn attach_poster_outcome_if_missing(
     attach_poster_outcome_opts(state, media, video, false)
 }
 
-pub fn attach_backdrop_outcome(
-    state: &ApiState,
-    media: &Media,
-    video: &Path,
-) -> ArtworkOutcome {
+pub fn attach_backdrop_outcome(state: &ApiState, media: &Media, video: &Path) -> ArtworkOutcome {
     attach_backdrop_outcome_opts(state, media, video, false)
 }
 
@@ -95,7 +91,10 @@ fn attach_poster_outcome_opts(
 ) -> ArtworkOutcome {
     attach_poster_with(state, media, video, force, |video| {
         let lease = state.acquire_path_work(video, media.kind)?;
-        let control = lease.as_ref().map(|lease| lease.control().clone()).unwrap_or_default();
+        let control = lease
+            .as_ref()
+            .map(|lease| lease.control().clone())
+            .unwrap_or_default();
         frame_poster_controlled(video, &control)
     })
 }
@@ -165,9 +164,7 @@ fn attach_poster_catalog(
         language_poster(state, media, tmdb_id, config.as_ref())
     } else {
         match state.catalog.poster_url(media.kind, tmdb_id) {
-            Ok(Some(url)) => {
-                fetch_artwork(state, media, "海报", &poster_url_at_size(&url, size))
-            }
+            Ok(Some(url)) => fetch_artwork(state, media, "海报", &poster_url_at_size(&url, size)),
             Ok(None) => {
                 tracing::warn!(media = %media.title, tmdb_id, "目录没有海报地址");
                 None
@@ -312,7 +309,10 @@ fn write_frame_poster(
         .extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"));
-    if is_strm || !thumbnails_allowed(state, video) || !crate::scrape_metadata::targets::video_present(video) {
+    if is_strm
+        || !thumbnails_allowed(state, video)
+        || !crate::scrape_metadata::targets::video_present(video)
+    {
         return None;
     }
     match frame_poster_with(video, frame) {
@@ -404,10 +404,18 @@ fn write_artwork(media: &Media, target: &Path, kind: &str, bytes: &[u8]) -> Opti
     }
 }
 
-fn publish_artwork(lease: Option<&crate::library_lifecycle::LibraryWorkLease>, media: &Media,
-    target: &Path, kind: &str, bytes: &[u8]) -> Option<Vec<u8>> {
+fn publish_artwork(
+    lease: Option<&crate::library_lifecycle::LibraryWorkLease>,
+    media: &Media,
+    target: &Path,
+    kind: &str,
+    bytes: &[u8],
+) -> Option<Vec<u8>> {
     match lease {
-        Some(lease) => lease.publish(|| Ok(write_artwork(media, target, kind, bytes))).ok().flatten(),
+        Some(lease) => lease
+            .publish(|| Ok(write_artwork(media, target, kind, bytes)))
+            .ok()
+            .flatten(),
         None => write_artwork(media, target, kind, bytes),
     }
 }
@@ -423,8 +431,7 @@ fn poster_url_at_size(url: &str, size: &str) -> String {
 /// that was replaced while the download ran.
 pub(crate) fn record_discovered_artwork(state: &ApiState, video: &Path) {
     let store = state.store.lock();
-    let Ok(Some((file_id, version))) = store.file_version_for_path(&video.to_string_lossy())
-    else {
+    let Ok(Some((file_id, version))) = store.file_version_for_path(&video.to_string_lossy()) else {
         return;
     };
     let discovered = store::files::DiscoveredArtwork::discover(video);
@@ -447,7 +454,10 @@ pub fn frame_poster(video: &Path) -> Result<Vec<u8>, String> {
     frame_poster_controlled(video, &library::WorkControl::default())
 }
 
-fn frame_poster_controlled(video: &Path, control: &library::WorkControl) -> Result<Vec<u8>, String> {
+fn frame_poster_controlled(
+    video: &Path,
+    control: &library::WorkControl,
+) -> Result<Vec<u8>, String> {
     use std::process::Command;
     let out = tempfile_posters_dir()?.join(format!(
         "frame-{}-{}.jpg",
@@ -459,11 +469,19 @@ fn frame_poster_controlled(video: &Path, control: &library::WorkControl) -> Resu
     ));
     let mut command = Command::new("ffmpeg");
     command.args([
-            "-y", "-ss", "60", "-i", &video.display().to_string(),
-            "-frames:v", "1",
-            "-vf", "scale=342:513:force_original_aspect_ratio=decrease,pad=342:513:(ow-iw)/2:(oh-ih)/2:black",
-            "-q:v", "2", &out.display().to_string(),
-        ]);
+        "-y",
+        "-ss",
+        "60",
+        "-i",
+        &video.display().to_string(),
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale=342:513:force_original_aspect_ratio=decrease,pad=342:513:(ow-iw)/2:(oh-ih)/2:black",
+        "-q:v",
+        "2",
+        &out.display().to_string(),
+    ]);
     let output = control.output(&mut command).map_err(|e| e.to_string())?;
     if !output.status.success() {
         return Err("ffmpeg frame extraction failed".into());
@@ -650,4 +668,3 @@ fn lang_matches(candidate: &Option<String>, want: &Option<String>) -> bool {
 
 #[cfg(test)]
 mod tests;
-

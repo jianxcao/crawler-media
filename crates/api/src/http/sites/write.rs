@@ -2,10 +2,7 @@
 
 use super::*;
 
-async fn create_site_inner(
-    State(state): State<ApiState>,
-    Json(body): Json<SiteInput>,
-) -> Response {
+async fn create_site_inner(State(state): State<ApiState>, Json(body): Json<SiteInput>) -> Response {
     if state.indexer.profile(&body.profile_id).is_none() {
         return err(
             StatusCode::BAD_REQUEST,
@@ -333,7 +330,10 @@ pub(crate) async fn create_site(
     State(state): State<ApiState>,
     Json(body): Json<SiteInput>,
 ) -> Response {
-    after_site_write(&state, create_site_inner(State(state.clone()), Json(body)).await)
+    after_site_write(
+        &state,
+        create_site_inner(State(state.clone()), Json(body)).await,
+    )
 }
 
 pub(crate) async fn put_site(
@@ -341,7 +341,10 @@ pub(crate) async fn put_site(
     Path(id): Path<String>,
     Json(body): Json<SiteInput>,
 ) -> Response {
-    after_site_write(&state, put_site_inner(State(state.clone()), Path(id), Json(body)).await)
+    after_site_write(
+        &state,
+        put_site_inner(State(state.clone()), Path(id), Json(body)).await,
+    )
 }
 
 pub(crate) async fn patch_site(
@@ -349,13 +352,17 @@ pub(crate) async fn patch_site(
     Path(id): Path<String>,
     Json(body): Json<PatchSiteInput>,
 ) -> Response {
-    after_site_write(&state, patch_site_inner(State(state.clone()), Path(id), Json(body)).await)
+    after_site_write(
+        &state,
+        patch_site_inner(State(state.clone()), Path(id), Json(body)).await,
+    )
 }
 
-pub(crate) async fn delete_site(
-    State(state): State<ApiState>, Path(id): Path<String>
-) -> Response {
-    after_site_write(&state, delete_site_inner(State(state.clone()), Path(id)).await)
+pub(crate) async fn delete_site(State(state): State<ApiState>, Path(id): Path<String>) -> Response {
+    after_site_write(
+        &state,
+        delete_site_inner(State(state.clone()), Path(id)).await,
+    )
 }
 
 /// Site writes can change `managed_browser_sites`; re-run the managed-daemon

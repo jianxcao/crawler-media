@@ -6,12 +6,12 @@
 use std::path::{Path, PathBuf};
 
 use domain::{
-    Confidence, LedgerId, LibraryFile, Media, MediaId, MediaKind, PhysicalSourceId,
-    QualitySource, UnitKey, UserId,
+    Confidence, LedgerId, LibraryFile, Media, MediaId, MediaKind, PhysicalSourceId, QualitySource,
+    UnitKey, UserId,
 };
-use store::test_support::FixtureFile;
 use store::library_write::ReassignFiles;
 use store::playback::MediaMergeRequest;
+use store::test_support::FixtureFile;
 use store::{PlaySessionIdState, SessionRow, Store, StoreError};
 
 struct Fixture {
@@ -564,7 +564,10 @@ fn reassignment_result_is_independent_of_the_listed_order() {
     );
     assert_eq!(forward.moved, 2, "every listed file moves");
     assert!(forward.owners_moved, "both files belong to the target");
-    assert!(forward.same_library, "reassignment never changes the library");
+    assert!(
+        forward.same_library,
+        "reassignment never changes the library"
+    );
 }
 
 fn reassign_two_files(reversed: bool) -> ReassignOutcome {

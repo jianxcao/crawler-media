@@ -14,9 +14,9 @@ use domain::{
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use parking_lot::{Condvar, Mutex};
+use store::test_support::{FixtureFile, publish_fixture_file};
 use store::{LibraryPathResolver, LibraryPathScope, StoreError};
 use tower::ServiceExt;
-use store::test_support::{publish_fixture_file, FixtureFile};
 
 struct NoFetch;
 impl Fetcher for NoFetch {
@@ -177,9 +177,7 @@ async fn slow_subscribe_fact_read_keeps_heartbeat_responsive() {
     let gate = Arc::new(Gate::new());
     let state = make_state(
         tmp.path(),
-        Arc::new(GatedBrowseFileRead {
-            gate: gate.clone(),
-        }),
+        Arc::new(GatedBrowseFileRead { gate: gate.clone() }),
     );
     let (subscribe, movie_file) = seed_subscription(&state, tmp.path());
     // Start the production facts read on a current-thread blocking worker
@@ -223,7 +221,10 @@ async fn slow_subscribe_fact_read_keeps_heartbeat_responsive() {
     gate.release();
     let facts_res = facts_handle.await.unwrap().expect("facts read result");
     let movie_fact = facts_res.movie().expect("movie fact should be discovered");
-    assert_eq!(movie_fact.path.as_deref(), Some(movie_file.to_str().unwrap()));
+    assert_eq!(
+        movie_fact.path.as_deref(),
+        Some(movie_file.to_str().unwrap())
+    );
     assert_eq!(movie_fact.score, 85);
 }
 

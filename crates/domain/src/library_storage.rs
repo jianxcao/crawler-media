@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 use crate::{Confidence, LedgerId, LibraryId, MediaId, MediaKind, QualitySource, UserId};
 
@@ -439,17 +439,29 @@ mod tests {
         assert!(work_wire.starts_with("w1_"));
         assert_eq!(TypedItemId::from_wire_string(&work_wire), Some(work));
 
-        let season = TypedItemId::Season { media: media_id, season: 2 };
+        let season = TypedItemId::Season {
+            media: media_id,
+            season: 2,
+        };
         let season_wire = season.to_wire_string();
         assert!(season_wire.starts_with("s1_"));
         assert_eq!(TypedItemId::from_wire_string(&season_wire), Some(season));
 
-        let unit = TypedItemId::Unit { media: media_id, key: UnitKey { season: 2, episode: 5 } };
+        let unit = TypedItemId::Unit {
+            media: media_id,
+            key: UnitKey {
+                season: 2,
+                episode: 5,
+            },
+        };
         let unit_wire = unit.to_wire_string();
         assert!(unit_wire.starts_with("u1_"));
         assert_eq!(TypedItemId::from_wire_string(&unit_wire), Some(unit));
 
-        let whole_unit = TypedItemId::Unit { media: media_id, key: UnitKey::WHOLE };
+        let whole_unit = TypedItemId::Unit {
+            media: media_id,
+            key: UnitKey::WHOLE,
+        };
         let whole_wire = whole_unit.to_wire_string();
         assert_eq!(TypedItemId::from_wire_string(&whole_wire), Some(whole_unit));
 
@@ -460,7 +472,10 @@ mod tests {
     #[test]
     fn physical_source_id_wire_roundtrip() {
         let file_id = LedgerId::new();
-        let source_id = PhysicalSourceId { file_id, revision: 42 };
+        let source_id = PhysicalSourceId {
+            file_id,
+            revision: 42,
+        };
         let wire = source_id.to_wire_string();
         assert!(wire.starts_with("f1_"));
         assert_eq!(PhysicalSourceId::from_wire_string(&wire), Some(source_id));
@@ -472,6 +487,13 @@ mod tests {
     fn entity_scope_coordinates() {
         assert_eq!(EntityScope::Work.season_episode(), (-1, -1));
         assert_eq!(EntityScope::Season(3).season_episode(), (3, -1));
-        assert_eq!(EntityScope::Episode { season: 3, episode: 8 }.season_episode(), (3, 8));
+        assert_eq!(
+            EntityScope::Episode {
+                season: 3,
+                episode: 8
+            }
+            .season_episode(),
+            (3, 8)
+        );
     }
 }

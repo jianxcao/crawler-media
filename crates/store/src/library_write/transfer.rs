@@ -8,11 +8,11 @@ use std::path::Path;
 use domain::{FileCoverage, FilePublication, FileVersion, LedgerId};
 use rusqlite::{OptionalExtension, params};
 
+use super::WriteScope;
 use super::publish::{
     ensure_config_revision, ensure_library_writable, ensure_media_writable, sync_coverage,
 };
 use super::reduce::reduce_library_media;
-use super::WriteScope;
 use crate::{Store, StoreError};
 
 impl Store {
@@ -35,19 +35,37 @@ impl Store {
 
         let dest_path_str = candidate.file.path.to_string_lossy().to_string();
 
-        let existing: Option<(String, String, String, String, Option<String>, Option<String>)> = tx
+        let existing: Option<(
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        )> = tx
             .query_row(
                 "SELECT file_id, media_id, root_id, publication_state, source_path, transfer_mode
                  FROM library_files
                  WHERE library_id = ?1 AND (path_key = ?2 OR display_path = ?2)",
                 params![scope.library_id.to_string(), dest_path_str],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
             )
             .optional()?;
 
         let mut reserved = candidate.clone();
 
-        if let Some((existing_id, existing_media, existing_root, pub_state, src_path, tr_mode)) = existing {
+        if let Some((existing_id, existing_media, existing_root, pub_state, src_path, tr_mode)) =
+            existing
+        {
             if existing_media != candidate.file.media_id.to_string() {
                 return Err(StoreError::Invalid(
                     "Transfer destination is already owned by another Media".into(),
@@ -90,7 +108,11 @@ impl Store {
                     source_path = ?2,
                     transfer_mode = ?3
                  WHERE file_id = ?1",
-                params![file_id_str, source.to_string_lossy().to_string(), mode.as_str()],
+                params![
+                    file_id_str,
+                    source.to_string_lossy().to_string(),
+                    mode.as_str()
+                ],
             )?;
         } else {
             super::publish::insert_file_row(&tx, &reserved.file)?;

@@ -3,10 +3,10 @@ use std::time::{Duration, Instant};
 
 use store::ScannedLedger;
 
-use super::*;
 use super::scan_windows::{
     MediaRow, count_in, fixture_media, insert_medias, media_rows, scanned_row,
 };
+use super::*;
 
 fn library_bytes(data_dir: &Path) -> (u64, u64) {
     let size = |name: &str| {
@@ -28,7 +28,9 @@ fn rss_kb() -> Option<u64> {
 
 fn timed_window(store: &Store, rows: &[ScannedLedger], now_ms: i64) -> f64 {
     let start = Instant::now();
-    store.insert_scanned_files(rows, now_ms).expect("window commits");
+    store
+        .insert_scanned_files(rows, now_ms)
+        .expect("window commits");
     start.elapsed().as_secs_f64() * 1000.0
 }
 
@@ -52,7 +54,14 @@ fn scan_window_cost_measurement() {
     let data_dir = tmp.path().join("data");
     let store = Store::open(&data_dir).unwrap();
     let lib = store
-        .create_library(MediaKind::Movie, "Measure", &["/measure"], "everyone", true, &[])
+        .create_library(
+            MediaKind::Movie,
+            "Measure",
+            &["/measure"],
+            "everyone",
+            true,
+            &[],
+        )
         .unwrap();
     let medias = insert_medias(&store, 100, MediaKind::Movie);
     let bulk_media = medias[0];
@@ -81,7 +90,13 @@ fn scan_window_cost_measurement() {
     // 10 windows: 100 new files of a single Media (one reduce for the whole window).
     for round in 1..=10u32 {
         let rows: Vec<ScannedLedger> = (0..100)
-            .map(|index| scanned_row(bulk_media, &format!("/measure/bulk/r{round:02}_f{index:03}.mkv"), None))
+            .map(|index| {
+                scanned_row(
+                    bulk_media,
+                    &format!("/measure/bulk/r{round:02}_f{index:03}.mkv"),
+                    None,
+                )
+            })
             .collect();
         files += rows.len();
         window_ms.push(timed_window(&store, &rows, 2_000 + round as i64));
@@ -145,7 +160,14 @@ fn window_commit_under_write_lock_contention() {
     let db = data_dir.join("library.db");
     let store = Store::open(&data_dir).unwrap();
     let lib = store
-        .create_library(MediaKind::Movie, "Movies", &["/movies"], "everyone", true, &[])
+        .create_library(
+            MediaKind::Movie,
+            "Movies",
+            &["/movies"],
+            "everyone",
+            true,
+            &[],
+        )
         .unwrap();
     let media = fixture_media(0, MediaKind::Movie);
     store.insert_media(&media).unwrap();

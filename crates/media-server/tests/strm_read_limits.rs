@@ -62,16 +62,34 @@ impl MediaServerProvider for TestStrmProvider {
     ) -> Result<Option<MediaItemSnapshot>, String> {
         Ok(None)
     }
-    async fn resolve_cover_bytes(&self, _user_id: Option<UserId>, _id: &str) -> Result<Option<Vec<u8>>, String> {
+    async fn resolve_cover_bytes(
+        &self,
+        _user_id: Option<UserId>,
+        _id: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
         Ok(None)
     }
-    async fn resolve_poster_bytes(&self, _user_id: Option<UserId>, _id: &str) -> Result<Option<Vec<u8>>, String> {
+    async fn resolve_poster_bytes(
+        &self,
+        _user_id: Option<UserId>,
+        _id: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
         Ok(None)
     }
-    async fn resolve_stream_source(&self, _user: UserId, _id: &str) -> Result<Option<(std::path::PathBuf, bool)>, String> {
+    async fn resolve_stream_source(
+        &self,
+        _user: UserId,
+        _id: &str,
+    ) -> Result<Option<(std::path::PathBuf, bool)>, String> {
         Ok(Some((self.strm_path.clone(), true)))
     }
-    async fn set_user_marks(&self, _user: UserId, _id: &str, _played: Option<bool>, _fav: Option<bool>) -> Result<bool, String> {
+    async fn set_user_marks(
+        &self,
+        _user: UserId,
+        _id: &str,
+        _played: Option<bool>,
+        _fav: Option<bool>,
+    ) -> Result<bool, String> {
         Ok(true)
     }
     async fn report_playback_event(

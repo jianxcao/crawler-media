@@ -67,24 +67,29 @@ pub(crate) async fn discover_kind(
     let source = query.source.clone();
     let sections = state
         .http_work
-        .run(DISCOVER_DEADLINE, move || -> Result<Vec<Value>, (u16, String)> {
-            let mut catalog: &dyn Catalog = state_clone.catalog.as_ref();
-            if let Some(source) = source.as_deref().filter(|source| !source.is_empty()) {
-                match catalog.source(source) {
-                    Some(found) => catalog = found,
-                    None if catalog.source_name() == source => {}
-                    None => return Err((400, format!("未知数据源: {source}"))),
+        .run(
+            DISCOVER_DEADLINE,
+            move || -> Result<Vec<Value>, (u16, String)> {
+                let mut catalog: &dyn Catalog = state_clone.catalog.as_ref();
+                if let Some(source) = source.as_deref().filter(|source| !source.is_empty()) {
+                    match catalog.source(source) {
+                        Some(found) => catalog = found,
+                        None if catalog.source_name() == source => {}
+                        None => return Err((400, format!("未知数据源: {source}"))),
+                    }
                 }
-            }
-            match kind_clone.as_str() {
-                // 豆瓣源用独立分区表（真实豆瓣 tag），不走 TMDB 分区映射。
-                "movie" if catalog.source_name() == "douban" => Ok(douban_movie_sections(catalog)),
-                "tv" if catalog.source_name() == "douban" => Ok(douban_tv_sections(catalog)),
-                "movie" => Ok(movie_sections("movie", catalog)),
-                "tv" => Ok(tv_sections("tv", catalog)),
-                _ => Err((400, "kind 必须是 movie 或 tv".into())),
-            }
-        })
+                match kind_clone.as_str() {
+                    // 豆瓣源用独立分区表（真实豆瓣 tag），不走 TMDB 分区映射。
+                    "movie" if catalog.source_name() == "douban" => {
+                        Ok(douban_movie_sections(catalog))
+                    }
+                    "tv" if catalog.source_name() == "douban" => Ok(douban_tv_sections(catalog)),
+                    "movie" => Ok(movie_sections("movie", catalog)),
+                    "tv" => Ok(tv_sections("tv", catalog)),
+                    _ => Err((400, "kind 必须是 movie 或 tv".into())),
+                }
+            },
+        )
         .await;
     let sections = match sections {
         Ok(Ok(sections)) => sections,
@@ -269,15 +274,16 @@ pub(crate) async fn discover_filtered(
                             }
                         }
                     }
-                    "tv" => match catalog.collection_paged(domain::MediaKind::Tv, &qs_clone, page)
-                    {
-                        Ok(Some((hits, _, tp, tr))) => Ok((hits, tp, tr)),
-                        _ => {
-                            let hits = catalog.filtered_tv(&qs_clone).map_err(|e| (502, e))?;
-                            let len = hits.len() as i64;
-                            Ok((hits, if len > 0 { 1 } else { 0 }, len))
+                    "tv" => {
+                        match catalog.collection_paged(domain::MediaKind::Tv, &qs_clone, page) {
+                            Ok(Some((hits, _, tp, tr))) => Ok((hits, tp, tr)),
+                            _ => {
+                                let hits = catalog.filtered_tv(&qs_clone).map_err(|e| (502, e))?;
+                                let len = hits.len() as i64;
+                                Ok((hits, if len > 0 { 1 } else { 0 }, len))
+                            }
                         }
-                    },
+                    }
                     _ => Err((400, "kind 必须是 movie 或 tv".into())),
                 }
             },
@@ -424,7 +430,9 @@ pub(crate) async fn genres(State(state): State<ApiState>, Path(kind): Path<Strin
     let state_clone = state.clone();
     let rows = state
         .http_work
-        .run(DISCOVER_DEADLINE, move || state_clone.catalog.genres(media_kind))
+        .run(DISCOVER_DEADLINE, move || {
+            state_clone.catalog.genres(media_kind)
+        })
         .await;
     let rows = match rows {
         Ok(Ok(rows)) => rows,

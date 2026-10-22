@@ -1,11 +1,10 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use parking_lot::Mutex;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use api::fingerprint_job::{
-    capture_episode_adaptive, capture_profile_key,
     AdaptiveCaptureContext, CaptureGate, CapturePolicy, EpisodeCaptureRequest,
-    FingerprintCaptureProfile,
+    FingerprintCaptureProfile, capture_episode_adaptive, capture_profile_key,
 };
 use domain::{FileCoverage, UnitKey};
 use marker::adaptive::{SamplingPolicy, TemplateContext};
@@ -15,7 +14,7 @@ use marker::fingerprint::capture_types::{
 };
 use marker::{AudioFingerprint, CommonSegment, FingerprintEngine};
 use store::Store;
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 struct NoopGate;
 
@@ -49,7 +48,10 @@ impl FingerprintCaptureEngine for MockEngine {
         request: &CaptureRequest,
     ) -> Result<CapturedFingerprint, CaptureFailure> {
         let call_idx = self.capture_calls.fetch_add(1, Ordering::SeqCst);
-        self.captured_windows.lock().unwrap().push(request.window.clone());
+        self.captured_windows
+            .lock()
+            .unwrap()
+            .push(request.window.clone());
         if call_idx < self.fail_attempts {
             return Err(CaptureFailure {
                 kind: CaptureFailureKind::Io,

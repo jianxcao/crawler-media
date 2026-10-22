@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
 use domain::{FieldValue, MetadataFields, SourceFieldOrigin, SourceSelection};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 pub fn normalize_generic(
     json: &Value,

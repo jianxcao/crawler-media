@@ -1,6 +1,6 @@
 use marker::{
-    EpisodeDescriptor, SamplingPolicy, SegmentKind, SourceCostSummary,
-    TemplateContext, TemplateModel, TemplateReference, WindowDecision, plan_episode_window,
+    EpisodeDescriptor, SamplingPolicy, SegmentKind, SourceCostSummary, TemplateContext,
+    TemplateModel, TemplateReference, WindowDecision, plan_episode_window,
 };
 
 #[test]
@@ -201,7 +201,10 @@ fn large_prediction_skips_fast_path() {
             );
         }
         WindowDecision::Verify { window, .. } => {
-            panic!("Expected Full window for large prediction, got Verify: {:?}", window);
+            panic!(
+                "Expected Full window for large prediction, got Verify: {:?}",
+                window
+            );
         }
     }
 }

@@ -140,8 +140,10 @@ fn overview_of(store: &Store, library: &str, media: MediaId, locale: &str) -> Op
 fn nfo_inputs_are_read_at_the_requested_locale_and_never_picked_implicitly() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
-    let (library_a, root_a) = library_with_root(&store, &tmp.path().join("a"), "A", MediaKind::Movie);
-    let (library_b, root_b) = library_with_root(&store, &tmp.path().join("b"), "B", MediaKind::Movie);
+    let (library_a, root_a) =
+        library_with_root(&store, &tmp.path().join("a"), "A", MediaKind::Movie);
+    let (library_b, root_b) =
+        library_with_root(&store, &tmp.path().join("b"), "B", MediaKind::Movie);
     let media_a = insert_media(&store, MediaKind::Movie, "A");
     let media_b = insert_media(&store, MediaKind::Movie, "B");
 
@@ -153,7 +155,11 @@ fn nfo_inputs_are_read_at_the_requested_locale_and_never_picked_implicitly() {
         tmp.path().join("a/A.mkv"),
     );
     std::fs::write(&file_a.path, b"bytes").unwrap();
-    std::fs::write(file_a.path.with_extension("nfo"), "<movie><plot>Plot A</plot></movie>").unwrap();
+    std::fs::write(
+        file_a.path.with_extension("nfo"),
+        "<movie><plot>Plot A</plot></movie>",
+    )
+    .unwrap();
 
     let file_b = video_file(
         &library_b,
@@ -163,7 +169,11 @@ fn nfo_inputs_are_read_at_the_requested_locale_and_never_picked_implicitly() {
         tmp.path().join("b/B.mkv"),
     );
     std::fs::write(&file_b.path, b"bytes").unwrap();
-    std::fs::write(file_b.path.with_extension("nfo"), "<movie><plot>Plot B</plot></movie>").unwrap();
+    std::fs::write(
+        file_b.path.with_extension("nfo"),
+        "<movie><plot>Plot B</plot></movie>",
+    )
+    .unwrap();
 
     let scope_a = WriteScope {
         library_id: library_a.parse().unwrap(),
@@ -227,13 +237,7 @@ fn tv_sidecar_layers_are_observed_and_do_not_leak_across_layers() {
     )
     .unwrap();
 
-    let file = video_file(
-        &library,
-        &root_id,
-        media,
-        MediaKind::Tv,
-        e01.clone(),
-    );
+    let file = video_file(&library, &root_id, media, MediaKind::Tv, e01.clone());
     let units = [UnitKey::new(1, 1)];
     let scope = WriteScope {
         library_id: library.parse().unwrap(),
@@ -277,7 +281,10 @@ fn tv_sidecar_layers_are_observed_and_do_not_leak_across_layers() {
         .library_item_detail(scope.library_id, media, "zh-CN")
         .unwrap()
         .unwrap();
-    assert_eq!(detail.metadata.title.value().map(String::as_str), Some("Work title"));
+    assert_eq!(
+        detail.metadata.title.value().map(String::as_str),
+        Some("Work title")
+    );
     assert_eq!(
         detail.metadata.overview.value().map(String::as_str),
         Some("Work plot")
@@ -309,7 +316,10 @@ fn tv_sidecar_layers_are_observed_and_do_not_leak_across_layers() {
         })
         .expect("E02 必须有自己的集层观察结果");
     assert!(sibling_episode.input_key.ends_with("Show.S01E02.nfo"));
-    assert_ne!(sibling_episode.input_key, scoped(EntityScope::Work).input_key);
+    assert_ne!(
+        sibling_episode.input_key,
+        scoped(EntityScope::Work).input_key
+    );
 
     let detail = store
         .library_item_detail(scope.library_id, media, "zh-CN")
@@ -421,12 +431,28 @@ fn manual_override_wins_over_nfo_input_in_detail() {
     let store = Store::open(tmp.path()).unwrap();
     let (library, root) = library_with_root(&store, &tmp.path().join("m"), "M", MediaKind::Movie);
     let media = insert_media(&store, MediaKind::Movie, "Base");
-    let file = video_file(&library, &root, media, MediaKind::Movie, tmp.path().join("m/M.mkv"));
+    let file = video_file(
+        &library,
+        &root,
+        media,
+        MediaKind::Movie,
+        tmp.path().join("m/M.mkv"),
+    );
     std::fs::write(&file.path, b"bytes").unwrap();
-    std::fs::write(file.path.with_extension("nfo"), "<movie><plot>NFO PLOT</plot></movie>").unwrap();
-    let scope = WriteScope { library_id: library.parse().unwrap(), config_revision: 0 };
+    std::fs::write(
+        file.path.with_extension("nfo"),
+        "<movie><plot>NFO PLOT</plot></movie>",
+    )
+    .unwrap();
+    let scope = WriteScope {
+        library_id: library.parse().unwrap(),
+        config_revision: 0,
+    };
     publish(&store, &scope, &file, &[UnitKey::WHOLE], "zh-CN");
-    assert_eq!(overview_of(&store, &library, media, "zh-CN").as_deref(), Some("NFO PLOT"));
+    assert_eq!(
+        overview_of(&store, &library, media, "zh-CN").as_deref(),
+        Some("NFO PLOT")
+    );
 
     let mut fields = domain::MetadataFields::default();
     fields.tagline = FieldValue::Value("PROVIDER TAGLINE".into());
@@ -441,7 +467,10 @@ fn manual_override_wins_over_nfo_input_in_detail() {
                 provider_entity_id: "1".into(),
                 provider_work_id: "1".into(),
                 fetched_at: 1,
-                normalized: domain::NormalizedMetadata { fields, field_origins: Default::default() },
+                normalized: domain::NormalizedMetadata {
+                    fields,
+                    field_origins: Default::default(),
+                },
                 expected_revision: None,
                 preferences: domain::MetadataPreferences {
                     language_priority: vec!["zh-CN".into()],
@@ -453,13 +482,18 @@ fn manual_override_wins_over_nfo_input_in_detail() {
         .unwrap();
     let mut manual = domain::MetadataFields::default();
     manual.overview = FieldValue::Value("MANUAL".into());
-    store.set_metadata_overrides(media, EntityScope::Work, "zh-CN", &manual, 0).unwrap();
+    store
+        .set_metadata_overrides(media, EntityScope::Work, "zh-CN", &manual, 0)
+        .unwrap();
 
     let detail = store
         .library_item_detail(library.parse().unwrap(), media, "zh-CN")
         .unwrap()
         .unwrap();
-    assert_eq!(detail.metadata.overview.value().map(String::as_str), Some("MANUAL"));
+    assert_eq!(
+        detail.metadata.overview.value().map(String::as_str),
+        Some("MANUAL")
+    );
     assert_eq!(
         detail.metadata.tagline.value().map(String::as_str),
         Some("PROVIDER TAGLINE"),

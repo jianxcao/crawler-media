@@ -168,10 +168,8 @@ pub(crate) async fn delete_ledger_row(
             );
         }
         if delete_file
-            && let Err(error) = store.enqueue_file_deletion(
-                target.file.path.to_string_lossy().as_ref(),
-                "admin_delete",
-            )
+            && let Err(error) = store
+                .enqueue_file_deletion(target.file.path.to_string_lossy().as_ref(), "admin_delete")
         {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -288,7 +286,11 @@ fn retransfer_target(
         .into_iter()
         .find(|coverage| coverage.file.file_id == ledger_id)
     else {
-        return Err(err(StatusCode::NOT_FOUND, "ledger.missing", "整理记录不存在"));
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            "ledger.missing",
+            "整理记录不存在",
+        ));
     };
     let Some(src) = target
         .file

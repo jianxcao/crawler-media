@@ -153,7 +153,8 @@ pub(crate) fn apply_integrity_batch(
 
     // One keyset page over every Media the Library has a raw or derived row for; the
     // page is bounded by `batch_size`, never a full-Library materialisation (S02).
-    let (paged, has_more) = next_media_page(tx, library, state.last_media_id.as_deref(), batch_size)?;
+    let (paged, has_more) =
+        next_media_page(tx, library, state.last_media_id.as_deref(), batch_size)?;
 
     let lib_id = library.parse::<LibraryId>()?;
     for media_str in &paged {
@@ -199,7 +200,11 @@ pub(crate) fn apply_integrity_batch(
             "UPDATE libraries SET integrity_state = ?2 WHERE library_id = ?1",
             params![library, if clean { "clean" } else { "failed" }],
         )?;
-        let final_state = if plan.repair && !clean { "failed" } else { "succeeded" };
+        let final_state = if plan.repair && !clean {
+            "failed"
+        } else {
+            "succeeded"
+        };
         write_integrity_cursor(tx, operation_id, &state, final_state, now_ms)?;
         Ok(OperationStatus {
             operation_id: operation_id.to_string(),
@@ -343,7 +348,9 @@ fn next_media_page(
          ORDER BY media_id LIMIT ?3",
     )?;
     let mut ids = stmt
-        .query_map(params![library, after, (batch + 1) as i64], |r| r.get::<_, String>(0))?
+        .query_map(params![library, after, (batch + 1) as i64], |r| {
+            r.get::<_, String>(0)
+        })?
         .collect::<Result<Vec<_>, _>>()?;
     let more = ids.len() > batch;
     ids.truncate(batch);
@@ -374,7 +381,11 @@ fn derived_rows_drift(
     Ok(before != reduced?)
 }
 
-fn derived_snapshot(tx: &Connection, library: &str, media: &str) -> Result<Vec<String>, StoreError> {
+fn derived_snapshot(
+    tx: &Connection,
+    library: &str,
+    media: &str,
+) -> Result<Vec<String>, StoreError> {
     let mut rows = Vec::new();
     for table in DERIVED_TABLES {
         let columns: Vec<String> = {

@@ -1,7 +1,5 @@
 use api::Store;
-use domain::{
-    Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, Site, SiteId,
-};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, Site, SiteId};
 use store::test_support::{FixtureFile, publish_fixture_file};
 
 fn movie(title: &str) -> Media {

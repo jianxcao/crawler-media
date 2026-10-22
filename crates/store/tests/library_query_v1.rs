@@ -2,9 +2,9 @@ use domain::{
     Confidence, EntityScope, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile,
     LibraryId, Media, MediaId, MediaKind, QualitySource, UnitKey, UserId,
 };
+use store::Store;
 use store::library_query::{BrowseFilter, BrowseOrder, BrowsePage, LibraryQuery};
 use store::library_write::{FilePublication as StorePublication, WriteScope};
-use store::Store;
 
 fn create_media(store: &Store, id: &str, title: &str, kind: MediaKind, year: u16) -> Media {
     let m = Media {
@@ -24,12 +24,20 @@ fn create_media(store: &Store, id: &str, title: &str, kind: MediaKind, year: u16
     m
 }
 
-fn create_library(store: &Store, name: &str, kind: MediaKind, root_path: &str) -> (store::Library, String) {
+fn create_library(
+    store: &Store,
+    name: &str,
+    kind: MediaKind,
+    root_path: &str,
+) -> (store::Library, String) {
     let lib = store
         .create_library(kind, name, &[root_path], "everyone", true, &[])
         .unwrap();
     let roots = store.list_library_roots().unwrap();
-    let root = roots.into_iter().find(|r| r.library_id == Some(lib.id.clone())).unwrap();
+    let root = roots
+        .into_iter()
+        .find(|r| r.library_id == Some(lib.id.clone()))
+        .unwrap();
     (lib, root.id)
 }
 
@@ -96,15 +104,29 @@ fn single_table_browse_orders_and_paginates_without_in_memory_sort() {
 
         let file_id = format!("00000000-0000-0000-0001-{:012x}", i);
         let path = format!("Movie_{i}.mkv");
-        let file = make_file(&file_id, &lib.id, &root_id, &media_id, &path, MediaKind::Movie, i * 1_000_000);
+        let file = make_file(
+            &file_id,
+            &lib.id,
+            &root_id,
+            &media_id,
+            &path,
+            MediaKind::Movie,
+            i * 1_000_000,
+        );
 
-        store.publish_files(&scope, &[StorePublication {
-            file: &file,
-            units: &[UnitKey::WHOLE],
-            expected_version: None,
-            nfo_observation: None,
-            probe_required: false,
-        }], 1000).unwrap();
+        store
+            .publish_files(
+                &scope,
+                &[StorePublication {
+                    file: &file,
+                    units: &[UnitKey::WHOLE],
+                    expected_version: None,
+                    nfo_observation: None,
+                    probe_required: false,
+                }],
+                1000,
+            )
+            .unwrap();
     }
 
     // Page 1: Order by Title Asc, limit 2
@@ -175,7 +197,15 @@ fn library_file_page_paginates_files_deterministically() {
     for ep in 1..=5 {
         let fid = format!("00000000-0000-0000-0000-{:012x}", ep);
         let path = format!("Show/S01E{:02}.mkv", ep);
-        let f = make_file(&fid, &lib.id, &root_id, media_id, &path, MediaKind::Tv, 1_000_000);
+        let f = make_file(
+            &fid,
+            &lib.id,
+            &root_id,
+            media_id,
+            &path,
+            MediaKind::Tv,
+            1_000_000,
+        );
         files.push(f);
     }
 
@@ -193,7 +223,9 @@ fn library_file_page_paginates_files_deterministically() {
     store.publish_files(&scope, &publications, 1000).unwrap();
 
     // Query first page with limit 3
-    let p1 = store.library_file_page(scope.library_id, media_id.parse().unwrap(), None, 3).unwrap();
+    let p1 = store
+        .library_file_page(scope.library_id, media_id.parse().unwrap(), None, 3)
+        .unwrap();
     assert_eq!(p1.files.len(), 3);
     assert_eq!(p1.files[0].path.to_str().unwrap(), "Show/S01E01.mkv");
     assert_eq!(p1.files[2].path.to_str().unwrap(), "Show/S01E03.mkv");
@@ -201,7 +233,9 @@ fn library_file_page_paginates_files_deterministically() {
     // Query next page with limit 3 using cursor
     let cursor = p1.next_cursor.as_deref();
     assert!(cursor.is_some());
-    let p2 = store.library_file_page(scope.library_id, media_id.parse().unwrap(), cursor, 3).unwrap();
+    let p2 = store
+        .library_file_page(scope.library_id, media_id.parse().unwrap(), cursor, 3)
+        .unwrap();
     assert_eq!(p2.files.len(), 2);
     assert_eq!(p2.files[0].path.to_str().unwrap(), "Show/S01E04.mkv");
     assert_eq!(p2.files[1].path.to_str().unwrap(), "Show/S01E05.mkv");
@@ -226,7 +260,15 @@ fn library_unit_page_enumerates_units_for_tv_show() {
     for ep in 1..=3 {
         let fid = format!("00000000-0000-0000-0000-{:012x}", ep);
         let path = format!("Show/S01E{:02}.mkv", ep);
-        let f = make_file(&fid, &lib.id, &root_id, media_id, &path, MediaKind::Tv, 1_000_000);
+        let f = make_file(
+            &fid,
+            &lib.id,
+            &root_id,
+            media_id,
+            &path,
+            MediaKind::Tv,
+            1_000_000,
+        );
         files.push(f);
     }
 
@@ -248,7 +290,10 @@ fn library_unit_page_enumerates_units_for_tv_show() {
             scope.library_id,
             media_id.parse().unwrap(),
             Some(1),
-            &BrowsePage::Offset { start: 0, limit: 10 },
+            &BrowsePage::Offset {
+                start: 0,
+                limit: 10,
+            },
         )
         .expect("library_unit_page");
 
@@ -273,14 +318,28 @@ fn library_item_detail_hydrates_item_metadata_and_bounded_files() {
     create_media(&store, media_id, "Inception", MediaKind::Movie, 2010);
 
     let fid = "00000000-0000-0000-0000-000000000011";
-    let f = make_file(fid, &lib.id, &root_id, media_id, "Inception.mkv", MediaKind::Movie, 5_000_000);
-    store.publish_files(&scope, &[StorePublication {
-        file: &f,
-        units: &[UnitKey::WHOLE],
-        expected_version: None,
-        nfo_observation: None,
-        probe_required: false,
-    }], 1000).unwrap();
+    let f = make_file(
+        fid,
+        &lib.id,
+        &root_id,
+        media_id,
+        "Inception.mkv",
+        MediaKind::Movie,
+        5_000_000,
+    );
+    store
+        .publish_files(
+            &scope,
+            &[StorePublication {
+                file: &f,
+                units: &[UnitKey::WHOLE],
+                expected_version: None,
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            1000,
+        )
+        .unwrap();
 
     // Adopt metadata
     let raw = r#"{"title":"Inception","overview":"Dream within a dream"}"#;
@@ -289,18 +348,23 @@ fn library_item_detail_hydrates_item_metadata_and_bounded_files() {
         cert_country_priority: vec!["US".into()],
     };
     let norm = media::normalize_metadata("tmdb", EntityScope::Work, raw, &pref).unwrap();
-    store.adopt_metadata(&domain::MetadataAdoption {
-        media_id: media_id.parse().unwrap(),
-        scope: EntityScope::Work,
-        locale: "en-US".into(),
-        source: "tmdb".into(),
-        provider_entity_id: "27205".into(),
-        provider_work_id: "27205".into(),
-        fetched_at: 1000,
-        normalized: norm,
-        expected_revision: None,
-        preferences: pref,
-    }, 1000).unwrap();
+    store
+        .adopt_metadata(
+            &domain::MetadataAdoption {
+                media_id: media_id.parse().unwrap(),
+                scope: EntityScope::Work,
+                locale: "en-US".into(),
+                source: "tmdb".into(),
+                provider_entity_id: "27205".into(),
+                provider_work_id: "27205".into(),
+                fetched_at: 1000,
+                normalized: norm,
+                expected_revision: None,
+                preferences: pref,
+            },
+            1000,
+        )
+        .unwrap();
 
     let detail = store
         .library_item_detail(scope.library_id, media_id.parse().unwrap(), "en-US")
@@ -309,14 +373,18 @@ fn library_item_detail_hydrates_item_metadata_and_bounded_files() {
 
     assert_eq!(detail.item.title, "Inception");
     assert_eq!(detail.files.len(), 1);
-    assert_eq!(detail.metadata.overview.value().unwrap(), "Dream within a dream");
+    assert_eq!(
+        detail.metadata.overview.value().unwrap(),
+        "Dream within a dream"
+    );
 }
 
 #[test]
 fn protocol_item_page_pagination_and_wire_ids() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
-    let (lib, root_id) = create_library(&store, "Protocol Movies", MediaKind::Movie, "/media/movies");
+    let (lib, root_id) =
+        create_library(&store, "Protocol Movies", MediaKind::Movie, "/media/movies");
     let scope = WriteScope {
         library_id: lib.id.parse().unwrap(),
         config_revision: 0,
@@ -327,25 +395,47 @@ fn protocol_item_page_pagination_and_wire_ids() {
     create_media(&store, media_id1, "Alien", MediaKind::Movie, 1979);
     create_media(&store, media_id2, "Blade Runner", MediaKind::Movie, 1982);
 
-    let file1 = make_file("00000000-0000-0000-0000-000000000011", &lib.id, &root_id, media_id1, "Alien.mkv", MediaKind::Movie, 100);
-    let file2 = make_file("00000000-0000-0000-0000-000000000012", &lib.id, &root_id, media_id2, "Blade Runner.mkv", MediaKind::Movie, 200);
+    let file1 = make_file(
+        "00000000-0000-0000-0000-000000000011",
+        &lib.id,
+        &root_id,
+        media_id1,
+        "Alien.mkv",
+        MediaKind::Movie,
+        100,
+    );
+    let file2 = make_file(
+        "00000000-0000-0000-0000-000000000012",
+        &lib.id,
+        &root_id,
+        media_id2,
+        "Blade Runner.mkv",
+        MediaKind::Movie,
+        200,
+    );
 
-    store.publish_files(&scope, &[
-        StorePublication {
-            file: &file1,
-            units: &[UnitKey::WHOLE],
-            expected_version: None,
-            nfo_observation: None,
-            probe_required: false,
-        },
-        StorePublication {
-            file: &file2,
-            units: &[UnitKey::WHOLE],
-            expected_version: None,
-            nfo_observation: None,
-            probe_required: false,
-        },
-    ], 1000).unwrap();
+    store
+        .publish_files(
+            &scope,
+            &[
+                StorePublication {
+                    file: &file1,
+                    units: &[UnitKey::WHOLE],
+                    expected_version: None,
+                    nfo_observation: None,
+                    probe_required: false,
+                },
+                StorePublication {
+                    file: &file2,
+                    units: &[UnitKey::WHOLE],
+                    expected_version: None,
+                    nfo_observation: None,
+                    probe_required: false,
+                },
+            ],
+            1000,
+        )
+        .unwrap();
 
     let user_id = UserId::new();
     let query = domain::ProtocolItemQuery {
@@ -376,15 +466,24 @@ fn protocol_item_page_pagination_and_wire_ids() {
     assert_eq!(page.total, 2);
     assert_eq!(page.items.len(), 1);
     let first = &page.items[0];
-    assert_eq!(first.item, domain::TypedItemId::Work(media_id1.parse().unwrap()));
+    assert_eq!(
+        first.item,
+        domain::TypedItemId::Work(media_id1.parse().unwrap())
+    );
     let wire_item = first.item.to_wire_string();
     assert!(wire_item.starts_with("w1_"));
-    assert_eq!(domain::TypedItemId::from_wire_string(&wire_item), Some(first.item.clone()));
+    assert_eq!(
+        domain::TypedItemId::from_wire_string(&wire_item),
+        Some(first.item.clone())
+    );
 
     let pref_src = first.preferred_source.as_ref().unwrap();
     let wire_src = pref_src.to_wire_string();
     assert!(wire_src.starts_with("f1_"));
-    assert_eq!(domain::PhysicalSourceId::from_wire_string(&wire_src), Some(pref_src.clone()));
+    assert_eq!(
+        domain::PhysicalSourceId::from_wire_string(&wire_src),
+        Some(pref_src.clone())
+    );
 
     // Page 2
     let mut query2 = query.clone();
@@ -392,7 +491,10 @@ fn protocol_item_page_pagination_and_wire_ids() {
     let page2 = store.protocol_item_page(&query2).unwrap();
     assert_eq!(page2.total, 2);
     assert_eq!(page2.items.len(), 1);
-    assert_eq!(page2.items[0].item, domain::TypedItemId::Work(media_id2.parse().unwrap()));
+    assert_eq!(
+        page2.items[0].item,
+        domain::TypedItemId::Work(media_id2.parse().unwrap())
+    );
 
     // Unknown parent returns empty
     let mut query_unknown = query.clone();
@@ -417,29 +519,48 @@ fn library_file_page_rejects_unknown_presence_state() {
     let media = create_media(&store, media_id_str, "Test Movie", MediaKind::Movie, 2024);
 
     let file_id_str1 = "00000000-0000-0000-0001-000000000001";
-    let file1 = make_file(file_id_str1, &lib.id, &root_id, media_id_str, "test1.mkv", MediaKind::Movie, 1_000_000);
-    store.publish_files(&scope, &[StorePublication {
-        file: &file1,
-        units: &[UnitKey::WHOLE],
-        expected_version: None,
-        nfo_observation: None,
-        probe_required: false,
-    }], 1000).unwrap();
+    let file1 = make_file(
+        file_id_str1,
+        &lib.id,
+        &root_id,
+        media_id_str,
+        "test1.mkv",
+        MediaKind::Movie,
+        1_000_000,
+    );
+    store
+        .publish_files(
+            &scope,
+            &[StorePublication {
+                file: &file1,
+                units: &[UnitKey::WHOLE],
+                expected_version: None,
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            1000,
+        )
+        .unwrap();
 
     // 1. 验证正常查询为 Ok
-    let page = store.library_file_page(scope.library_id, media.id, None, 10).unwrap();
+    let page = store
+        .library_file_page(scope.library_id, media.id, None, 10)
+        .unwrap();
     assert_eq!(page.files.len(), 1);
 
     // 2. 注入非法 presence_state ('bogus')：断言显式拒绝
     let db = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
-    db.execute_batch("PRAGMA ignore_check_constraints = ON;").unwrap();
+    db.execute_batch("PRAGMA ignore_check_constraints = ON;")
+        .unwrap();
     db.execute(
         "UPDATE library_files SET presence_state = 'bogus' WHERE file_id = ?1",
         rusqlite::params![file1.file_id.to_string()],
     )
     .unwrap();
 
-    let err_presence = store.library_file_page(scope.library_id, media.id, None, 10).unwrap_err();
+    let err_presence = store
+        .library_file_page(scope.library_id, media.id, None, 10)
+        .unwrap_err();
     let msg_presence = err_presence.to_string();
     assert!(
         msg_presence.contains("bogus") && msg_presence.contains(&file1.file_id.to_string()),
@@ -458,7 +579,9 @@ fn library_file_page_rejects_unknown_presence_state() {
     )
     .unwrap();
 
-    let page_bogus_pub = store.library_file_page(scope.library_id, media.id, None, 10).unwrap();
+    let page_bogus_pub = store
+        .library_file_page(scope.library_id, media.id, None, 10)
+        .unwrap();
     assert!(
         page_bogus_pub.files.is_empty(),
         "files with publication_state != 'published' must be filtered out at SQL boundary before mapping"

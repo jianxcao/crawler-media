@@ -547,7 +547,10 @@ async fn run_is_refused_for_disabled_defs_and_queued_defs_report_existing() {
         Value::Null,
     )
     .await;
-    assert_eq!(while_running["status"], "already_running", "{while_running}");
+    assert_eq!(
+        while_running["status"], "already_running",
+        "{while_running}"
+    );
     assert_eq!(while_running["queued"], false, "{while_running}");
     state.jobs().lock().succeed(queued.id, 1_100).unwrap();
     let follow_up = state.jobs().lock().get_live_child(id).unwrap();

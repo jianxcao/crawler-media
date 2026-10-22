@@ -171,9 +171,7 @@ fn api_app(temp: &tempfile::TempDir) -> (api::ApiState, axum::Router) {
             requests: Mutex::new(Vec::new()),
             bodies: HashMap::new(),
         }),
-        Arc::new(downloader::MemoryDownloader::new(
-            temp.path().join("stage"),
-        )),
+        Arc::new(downloader::MemoryDownloader::new(temp.path().join("stage"))),
     );
     let app = api::router(state.clone());
     (state, app)
@@ -191,7 +189,12 @@ fn fixture_cards(total: usize) -> Vec<Card> {
             release_sort: if key % 7 == 0 {
                 String::new()
             } else {
-                format!("{:04}-{:02}-{:02}", 1990 + key % 30, 1 + key % 12, 1 + key % 28)
+                format!(
+                    "{:04}-{:02}-{:02}",
+                    1990 + key % 30,
+                    1 + key % 12,
+                    1 + key % 28
+                )
             },
             rating: (key % 5) as f64 * 0.5,
             added_at: 1000 + key as i64,
@@ -286,7 +289,11 @@ async fn api_items(app: &axum::Router, token: &str, uri: &str) -> Vec<Value> {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK, "GET {uri}");
-    common::json_data(response).await.as_array().unwrap().clone()
+    common::json_data(response)
+        .await
+        .as_array()
+        .unwrap()
+        .clone()
 }
 
 fn item_ids(items: &[Value]) -> Vec<String> {
@@ -385,11 +392,15 @@ async fn api_ordering_windows_are_stable_across_blank_ties_and_unicode() {
         let mut windowed = Vec::new();
         let mut offset = 0;
         while offset < CARD_COUNT {
-            let page = item_ids(&api_items(&app, token, &format!("{base}&limit=7&offset={offset}")).await);
+            let page =
+                item_ids(&api_items(&app, token, &format!("{base}&limit=7&offset={offset}")).await);
             windowed.extend(page);
             offset += 7;
         }
-        assert_eq!(windowed, expected, "offset windows sort={sort} order={order}");
+        assert_eq!(
+            windowed, expected,
+            "offset windows sort={sort} order={order}"
+        );
         assert_eq!(
             windowed.iter().collect::<BTreeSet<_>>().len(),
             CARD_COUNT,
@@ -415,7 +426,11 @@ async fn api_ordering_windows_are_stable_across_blank_ties_and_unicode() {
         )
         .await,
     );
-    assert_eq!(&ascending[..blank.len()], &blank[..], "blank release_date first");
+    assert_eq!(
+        &ascending[..blank.len()],
+        &blank[..],
+        "blank release_date first"
+    );
 }
 
 struct WatchMembers {
@@ -554,7 +569,11 @@ async fn api_watch_filters_and_unwatched_first_over_http() {
         )
         .await,
     );
-    assert_eq!(by_last_played, last_played_order(&cards), "last_played desc");
+    assert_eq!(
+        by_last_played,
+        last_played_order(&cards),
+        "last_played desc"
+    );
 }
 
 #[tokio::test]
@@ -566,7 +585,14 @@ async fn api_cross_library_media_keeps_one_card_per_library() {
     let created = state
         .store()
         .lock()
-        .create_library(domain::MediaKind::Movie, "Second", &["/second"], "everyone", true, &[])
+        .create_library(
+            domain::MediaKind::Movie,
+            "Second",
+            &["/second"],
+            "everyone",
+            true,
+            &[],
+        )
         .unwrap();
     let second = lib_coords_for(&state, &created.id);
 
@@ -582,13 +608,19 @@ async fn api_cross_library_media_keeps_one_card_per_library() {
     let first_items = api_items(
         &app,
         token,
-        &format!("/api/v1/libraries/{}/items?sort=title&order=asc&limit=200", first.library_id),
+        &format!(
+            "/api/v1/libraries/{}/items?sort=title&order=asc&limit=200",
+            first.library_id
+        ),
     )
     .await;
     let second_items = api_items(
         &app,
         token,
-        &format!("/api/v1/libraries/{}/items?sort=title&order=asc&limit=200", second.library_id),
+        &format!(
+            "/api/v1/libraries/{}/items?sort=title&order=asc&limit=200",
+            second.library_id
+        ),
     )
     .await;
     assert_eq!(
@@ -608,9 +640,16 @@ async fn api_cross_library_media_keeps_one_card_per_library() {
         for card in shared {
             let json = card_in(items, &card.media_id());
             assert_eq!(json["library_id"].as_str().unwrap(), coords.library_id);
-            assert_eq!(json["file_count"].as_u64().unwrap(), 1, "per-library file_count");
+            assert_eq!(
+                json["file_count"].as_u64().unwrap(),
+                1,
+                "per-library file_count"
+            );
             assert!(
-                json["poster_url"].as_str().unwrap().ends_with(&card.file_id(salt)),
+                json["poster_url"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with(&card.file_id(salt)),
                 "per-library preferred file for {}",
                 card.media_id()
             );

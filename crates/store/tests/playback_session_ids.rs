@@ -122,7 +122,9 @@ fn expiry_keeps_active_and_is_bounded_500() {
 
     // Plus 1 active session at t_old
     let id_active = support::issue_session(&store, user, "dev1", ledger, t_old);
-    store.activate_play_session(user, "dev1", &id_active).unwrap();
+    store
+        .activate_play_session(user, "dev1", &id_active)
+        .unwrap();
 
     // Now issue a new session at t = 100_000_000 (triggering clean_expired bounded at 500)
     let now = 100_000_000;
@@ -132,15 +134,20 @@ fn expiry_keeps_active_and_is_bounded_500() {
     let active_binding = store
         .play_session_binding(user, "dev1", &id_active)
         .unwrap();
-    assert!(active_binding.is_some(), "active session must not be deleted");
+    assert!(
+        active_binding.is_some(),
+        "active session must not be deleted"
+    );
 
     // Out of 501 closed old sessions, 500 were cleaned, leaving 1 closed + 1 active + 1 new pending = 3 rows
-    let sub_conn =
-        rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
+    let sub_conn = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
     let count: i64 = sub_conn
         .query_row("SELECT COUNT(*) FROM playback_session_ids", [], |r| {
             r.get(0)
         })
         .unwrap();
-    assert_eq!(count, 3, "expected 1 remaining old closed + 1 active + 1 new pending");
+    assert_eq!(
+        count, 3,
+        "expected 1 remaining old closed + 1 active + 1 new pending"
+    );
 }

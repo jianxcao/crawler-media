@@ -149,8 +149,8 @@ impl MediaServerProvider for RecordingProvider {
 }
 
 fn stream_request(device_id: Option<&str>) -> Request<Body> {
-    let mut builder = Request::get("/Videos/episode/stream")
-        .header("authorization", format!("Bearer {TOKEN}"));
+    let mut builder =
+        Request::get("/Videos/episode/stream").header("authorization", format!("Bearer {TOKEN}"));
     if let Some(device_id) = device_id {
         builder = builder.header("X-Emby-Device-Id", device_id);
     }

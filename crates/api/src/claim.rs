@@ -5,8 +5,8 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use domain::{
-    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, LibraryId, Media,
-    MediaId, MediaKind, QualitySource, Release, UnitKey,
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, LibraryId,
+    Media, MediaId, MediaKind, QualitySource, Release, UnitKey,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -99,7 +99,10 @@ pub(crate) fn publish_claimed_file(
     let owner = store
         .library_for_path_strict(dest, media.kind)?
         .ok_or_else(|| {
-            StoreError::Invalid(format!("path is outside every Library root: {}", dest.display()))
+            StoreError::Invalid(format!(
+                "path is outside every Library root: {}",
+                dest.display()
+            ))
         })?;
     let library_id = owner.id.parse::<LibraryId>()?;
     let root_id = owning_root_id(store, &owner.id, dest)?;
@@ -188,7 +191,11 @@ pub(crate) fn publish_claimed_file(
 /// Lexical containment: `store::library_paths::resolved_path` is crate-private, so
 /// the API cannot normalize symlinks the way the legacy writer did. The two agree
 /// whenever the roots and the destination are already in the same normalized form.
-fn owning_root_id(store: &store::Store, library_id: &str, dest: &Path) -> Result<String, StoreError> {
+fn owning_root_id(
+    store: &store::Store,
+    library_id: &str,
+    dest: &Path,
+) -> Result<String, StoreError> {
     let mut best: Option<(usize, String)> = None;
     for root in store.list_library_roots()? {
         if root.library_id.as_deref() != Some(library_id) {
@@ -315,8 +322,8 @@ fn stage_claim_file(
     };
     library::transfer_file(src, &plan.dest, staged)
         .map_err(|err| ApiError::invalid("unidentified.invalid", err.to_string()))?;
-    let rollback_dest =
-        (plan.requested == library::TransferMode::Move && plan.dest != src).then(|| plan.dest.clone());
+    let rollback_dest = (plan.requested == library::TransferMode::Move && plan.dest != src)
+        .then(|| plan.dest.clone());
     let _ = library::scrape_beside(&plan.dest, &plan.media, plan.mirror_nfo, None);
     if plan.scrape {
         crate::poster_fetch::attach_poster(state, &plan.media, &plan.dest);
@@ -457,8 +464,13 @@ mod tests {
         let dest = inner.join("The Matrix.1999.mkv");
         std::fs::write(&dest, b"matrix").unwrap();
 
-        let file =
-            publish_claimed_file(&store, &media, &dest, &ClaimedFacts::for_path(media.kind, &dest)).unwrap();
+        let file = publish_claimed_file(
+            &store,
+            &media,
+            &dest,
+            &ClaimedFacts::for_path(media.kind, &dest),
+        )
+        .unwrap();
         assert_eq!(file.root_id, inner_root.id);
         assert_eq!(file.library_id.to_string(), library.id);
     }
@@ -472,7 +484,11 @@ mod tests {
         let (store, media, library) = fixture(tmp.path(), &[&root]);
         let dest = root.join("The Matrix.1999.mkv");
         std::fs::write(&dest, b"matrix").unwrap();
-        std::fs::write(dest.with_extension("nfo"), "<movie><plot>Plot A</plot></movie>").unwrap();
+        std::fs::write(
+            dest.with_extension("nfo"),
+            "<movie><plot>Plot A</plot></movie>",
+        )
+        .unwrap();
         let facts = ClaimedFacts {
             resolution: Some("1080p".into()),
             codec: Some("H264".into()),
@@ -501,7 +517,10 @@ mod tests {
         assert_eq!(published.filter_score, Some(88));
         assert_eq!(published.presence, FilePresence::Present);
         assert_eq!(published.publication, FilePublication::Published);
-        assert_eq!(store.get_file_units(file.file_id).unwrap(), vec![UnitKey::new(1, 2)]);
+        assert_eq!(
+            store.get_file_units(file.file_id).unwrap(),
+            vec![UnitKey::new(1, 2)]
+        );
         let locale = store::library_query::library_display_locale(&store, library_id)
             .unwrap()
             .unwrap_or_default();
@@ -509,7 +528,10 @@ mod tests {
             .library_item_detail(library_id, media.id, &locale)
             .unwrap()
             .unwrap();
-        assert_eq!(detail.metadata.overview.value().map(String::as_str), Some("Plot A"));
+        assert_eq!(
+            detail.metadata.overview.value().map(String::as_str),
+            Some("Plot A")
+        );
     }
 
     /// Known deviation: the strict Library lookup resolves `dest`, the root
@@ -529,11 +551,19 @@ mod tests {
         let dest = link.join("The Matrix.1999.mkv");
         std::fs::write(&dest, b"matrix").unwrap();
         assert!(
-            store.library_for_path_strict(&dest, MediaKind::Movie).unwrap().is_some(),
+            store
+                .library_for_path_strict(&dest, MediaKind::Movie)
+                .unwrap()
+                .is_some(),
             "the strict owner lookup resolves the symlink and does find the Library"
         );
 
-        match publish_claimed_file(&store, &media, &dest, &ClaimedFacts::for_path(media.kind, &dest)) {
+        match publish_claimed_file(
+            &store,
+            &media,
+            &dest,
+            &ClaimedFacts::for_path(media.kind, &dest),
+        ) {
             Err(StoreError::Invalid(message)) => {
                 assert!(message.contains("contains"), "{message}")
             }
@@ -547,15 +577,23 @@ mod tests {
     #[test]
     fn claim_coverage_follows_the_file_name_and_media_kind() {
         let units = |kind, name: &str| {
-            ClaimedFacts::for_path(kind, Path::new(name)).units().to_vec()
+            ClaimedFacts::for_path(kind, Path::new(name))
+                .units()
+                .to_vec()
         };
         assert_eq!(
             units(MediaKind::Tv, "Show.S01E01-E02.1080p.mkv"),
             vec![UnitKey::new(1, 1), UnitKey::new(1, 2)]
         );
-        assert_eq!(units(MediaKind::Tv, "Show.S00E00.mkv"), vec![UnitKey::new(0, 0)]);
+        assert_eq!(
+            units(MediaKind::Tv, "Show.S00E00.mkv"),
+            vec![UnitKey::new(0, 0)]
+        );
         assert!(units(MediaKind::Tv, "Show.Behind.the.Scenes.mkv").is_empty());
-        assert_eq!(units(MediaKind::Movie, "The Matrix.1999.mkv"), vec![UnitKey::WHOLE]);
+        assert_eq!(
+            units(MediaKind::Movie, "The Matrix.1999.mkv"),
+            vec![UnitKey::WHOLE]
+        );
     }
 
     /// A Library reconfigured away from revision 0 accepts a claim published
@@ -568,9 +606,16 @@ mod tests {
         let dest = root.join("The Matrix.1999.mkv");
         std::fs::write(&dest, b"matrix").unwrap();
         assert_eq!(store.library_config_revision(&library.id).unwrap(), 0);
-        let file =
-            publish_claimed_file(&store, &media, &dest, &ClaimedFacts::for_path(media.kind, &dest))
-                .unwrap();
-        assert_eq!(store.get_file_units(file.file_id).unwrap(), vec![UnitKey::WHOLE]);
+        let file = publish_claimed_file(
+            &store,
+            &media,
+            &dest,
+            &ClaimedFacts::for_path(media.kind, &dest),
+        )
+        .unwrap();
+        assert_eq!(
+            store.get_file_units(file.file_id).unwrap(),
+            vec![UnitKey::WHOLE]
+        );
     }
 }

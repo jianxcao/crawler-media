@@ -28,8 +28,9 @@ pub(super) fn resolve_playback_for(
     let whole_file = media.kind != domain::MediaKind::Tv;
     // Movie requests use the canonical whole-work identity regardless of legacy
     // zero coordinates; nonzero coordinates cannot name a movie unit.
-    if whole_file && (season.is_some_and(|value| value != 0)
-        || episode.is_some_and(|value| value != 0)) {
+    if whole_file
+        && (season.is_some_and(|value| value != 0) || episode.is_some_and(|value| value != 0))
+    {
         return None;
     }
 
@@ -58,14 +59,13 @@ pub(super) fn resolve_playback_for(
         }
     };
 
-    let preferred_source = preferred_file_id
-        .and_then(|file_id| {
-            let file = store.visible_file(user_id, file_id).ok().flatten()?;
-            Some(PhysicalSourceId {
-                file_id,
-                revision: file.version.revision,
-            })
-        });
+    let preferred_source = preferred_file_id.and_then(|file_id| {
+        let file = store.visible_file(user_id, file_id).ok().flatten()?;
+        Some(PhysicalSourceId {
+            file_id,
+            revision: file.version.revision,
+        })
+    });
 
     let explicit_start_ms = body
         .get("start_ms")

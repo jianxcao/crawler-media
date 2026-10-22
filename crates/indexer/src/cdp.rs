@@ -101,7 +101,10 @@ mod debug_tests {
         );
         assert!(rendered.contains("<redacted>"), "{rendered}");
         assert!(rendered.contains("pterclub"), "{rendered}");
-        assert!(rendered.contains("cookie_count: 2"), "非凭证字段保留: {rendered}");
+        assert!(
+            rendered.contains("cookie_count: 2"),
+            "非凭证字段保留: {rendered}"
+        );
     }
 }
 

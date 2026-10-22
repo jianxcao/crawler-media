@@ -252,7 +252,6 @@ impl Store {
         Ok((group_file_coverage(collected), vm_steps))
     }
 
-
     /// Restrict a Jellyfin parent request to ownership candidates before loading
     /// media and playback facts.
     pub fn jellyfin_ledger_candidates(
@@ -261,7 +260,9 @@ impl Store {
         parent_id: Option<&str>,
     ) -> Result<Vec<FileCoverage>, StoreError> {
         match parent_id {
-            Some(id) if ownership.library(id).is_some() => self.ledger_candidates_for_library(ownership, id),
+            Some(id) if ownership.library(id).is_some() => {
+                self.ledger_candidates_for_library(ownership, id)
+            }
             Some(id) => match domain::TypedItemId::protocol_media_id(id) {
                 Some(media_id) => self.file_coverage_for_media(media_id),
                 None => Ok(Vec::new()),
@@ -421,7 +422,10 @@ fn normalized_root_text(root: &Path) -> String {
     for component in root.components() {
         normalized.push(component.as_os_str());
     }
-    normalized.to_string_lossy().trim_end_matches('/').to_string()
+    normalized
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_string()
 }
 
 #[cfg(test)]

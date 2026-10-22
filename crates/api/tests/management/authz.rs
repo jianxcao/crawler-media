@@ -23,7 +23,7 @@ use std::str::FromStr;
 use tower::{Service, ServiceExt};
 
 use super::common::{Fixtures, json_body, request, scan_and_wait, state as common_state};
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 struct NoFetch;
 impl Fetcher for NoFetch {

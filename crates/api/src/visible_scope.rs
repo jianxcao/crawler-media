@@ -29,7 +29,8 @@ impl VisibleScope {
             let Some(media) = media_map.get(&row.file.media_id) else {
                 continue;
             };
-            let Ok(resolved) = LibraryPathScope::resolve_path(std::path::Path::new(&row.file.path)) else {
+            let Ok(resolved) = LibraryPathScope::resolve_path(std::path::Path::new(&row.file.path))
+            else {
                 continue;
             };
             match scope.owner(&resolved, media.kind) {

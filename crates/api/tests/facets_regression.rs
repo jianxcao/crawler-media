@@ -13,8 +13,8 @@ use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, Use
 use downloader::MemoryDownloader;
 use parking_lot::Mutex as ParkingMutex;
 use serde_json::Value;
+use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
-use store::test_support::{publish_fixture_file, FixtureFile};
 
 #[path = "management/common.rs"]
 mod common;

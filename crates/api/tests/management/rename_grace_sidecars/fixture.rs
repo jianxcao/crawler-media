@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use tower::ServiceExt;
 
 use super::super::common::{Fixtures, request, state};
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 pub struct RenameCatalog;
 
@@ -118,7 +118,12 @@ fn file_spec(
     }
 }
 
-fn seed_layout(store: &api::Store, media_id: domain::MediaId, layout: &str, root: &std::path::Path) {
+fn seed_layout(
+    store: &api::Store,
+    media_id: domain::MediaId,
+    layout: &str,
+    root: &std::path::Path,
+) {
     if layout == "two_seasons" {
         seed_season(store, media_id, &root.join("Season 01"), 1);
         seed_season(store, media_id, &root.join("Season 02"), 2);
@@ -132,12 +137,7 @@ fn seed_layout(store: &api::Store, media_id: domain::MediaId, layout: &str, root
     seed_season(store, media_id, &dir, 1);
 }
 
-fn seed_season(
-    store: &api::Store,
-    media_id: domain::MediaId,
-    dir: &std::path::Path,
-    season: u32,
-) {
+fn seed_season(store: &api::Store, media_id: domain::MediaId, dir: &std::path::Path, season: u32) {
     std::fs::create_dir_all(dir).unwrap();
     for episode in 1..=2 {
         let path = dir.join(format!("Spirit.Rangers.S{season:02}E{episode:02}.strm"));

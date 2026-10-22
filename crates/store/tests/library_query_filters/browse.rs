@@ -89,7 +89,10 @@ fn facets_count_each_dimension_without_its_own_condition() {
         .library_facets(&FacetRequest {
             library_id,
             user_id: None,
-            filter: BrowseFilter { genres: vec!["28".into()], ..BrowseFilter::default() },
+            filter: BrowseFilter {
+                genres: vec!["28".into()],
+                ..BrowseFilter::default()
+            },
             tier: FacetTier::All,
         })
         .unwrap();
@@ -127,7 +130,10 @@ fn facets_count_each_dimension_without_its_own_condition() {
         .library_facets(&FacetRequest {
             library_id,
             user_id: None,
-            filter: BrowseFilter { watch: Some("favorite".into()), ..BrowseFilter::default() },
+            filter: BrowseFilter {
+                watch: Some("favorite".into()),
+                ..BrowseFilter::default()
+            },
             tier: FacetTier::All,
         })
         .unwrap();
@@ -209,37 +215,59 @@ fn item_facts_carry_seasons_and_studio_per_page() {
         &store,
         show.id,
         "en-US",
-        work_fields("Show", Some(8.0), Some(50), Some("en"), &[("10759", "Action & Adventure")]),
+        work_fields(
+            "Show",
+            Some(8.0),
+            Some(50),
+            Some("en"),
+            &[("10759", "Action & Adventure")],
+        ),
     );
     publish(
         &store,
         &scope,
         vec![
             (
-                make_file(&library, &root, show.id, FileShape {
-                    file_id: "00000000-0000-0000-0002-000000000001",
-                    path: "Show/S01E01.mkv",
-                    resolution: Some("1080p"),
-                    hdr: None,
-                    presence: FilePresence::Present,
-                }),
+                make_file(
+                    &library,
+                    &root,
+                    show.id,
+                    FileShape {
+                        file_id: "00000000-0000-0000-0002-000000000001",
+                        path: "Show/S01E01.mkv",
+                        resolution: Some("1080p"),
+                        hdr: None,
+                        presence: FilePresence::Present,
+                    },
+                ),
                 vec![UnitKey::new(1, 1)],
             ),
             (
-                make_file(&library, &root, show.id, FileShape {
-                    file_id: "00000000-0000-0000-0002-000000000002",
-                    path: "Show/S02E01.mkv",
-                    resolution: Some("1080p"),
-                    hdr: None,
-                    presence: FilePresence::Present,
-                }),
+                make_file(
+                    &library,
+                    &root,
+                    show.id,
+                    FileShape {
+                        file_id: "00000000-0000-0000-0002-000000000002",
+                        path: "Show/S02E01.mkv",
+                        resolution: Some("1080p"),
+                        hdr: None,
+                        presence: FilePresence::Present,
+                    },
+                ),
                 vec![UnitKey::new(2, 1)],
             ),
         ],
     );
     let library_id: LibraryId = library.id.parse().unwrap();
     let page = store
-        .library_item_page(&query(library_id, BrowseFilter::default(), BrowseOrder::Title, false, offset(0, 10)))
+        .library_item_page(&query(
+            library_id,
+            BrowseFilter::default(),
+            BrowseOrder::Title,
+            false,
+            offset(0, 10),
+        ))
         .unwrap();
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].distinct_episode_count, 2);
@@ -277,10 +305,12 @@ fn item_facts_carry_seasons_and_studio_per_page() {
     );
     assert!(season_two[0].overview.is_none());
     assert!(season_two[0].air_date.is_none());
-    assert!(store
-        .library_episodes(library_id, show.id, Some(3), "")
-        .unwrap()
-        .is_empty());
+    assert!(
+        store
+            .library_episodes(library_id, show.id, Some(3), "")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -309,8 +339,14 @@ fn detail_returns_stored_columns_and_file_coverage() {
     assert_eq!(detail.metadata.rating.value(), Some(&9.0));
 
     // An unknown item is absent, not empty.
-    assert!(store
-        .library_item_detail(library_id, "00000000-0000-0000-0000-0000000000ff".parse().unwrap(), "en-US")
-        .unwrap()
-        .is_none());
+    assert!(
+        store
+            .library_item_detail(
+                library_id,
+                "00000000-0000-0000-0000-0000000000ff".parse().unwrap(),
+                "en-US"
+            )
+            .unwrap()
+            .is_none()
+    );
 }

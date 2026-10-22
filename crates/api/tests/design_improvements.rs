@@ -222,7 +222,9 @@ fn legacy_playback_progress_is_merged_and_dropped() {
     // 旧表仍原样保留，Store 没有删除或改写它。
     let conn = rusqlite::Connection::open(&subscribe_db).unwrap();
     let rows: i64 = conn
-        .query_row("SELECT COUNT(*) FROM playback_progress", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM playback_progress", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(rows, 1, "被拒绝的旧库不得被改写");
 }

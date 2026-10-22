@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use rusqlite::params_from_iter;
 
 use super::super::{Store, StoreError};
-use super::items::{filter_clauses, Bindings, ItemQuerySql, WATCH_TIER_SQL};
+use super::items::{Bindings, ItemQuerySql, WATCH_TIER_SQL, filter_clauses};
 use super::types::{
     BrowseFilter, FacetCount, FacetRequest, FacetTier, LibraryFacets, LibraryQuery,
 };
@@ -115,13 +115,7 @@ impl Dimension {
             .collect(),
             Self::Rating => ["6", "7", "8", "9"]
                 .into_iter()
-                .map(|value| {
-                    (
-                        value.to_string(),
-                        format!("i.rating_sort >= {value}"),
-                        true,
-                    )
-                })
+                .map(|value| (value.to_string(), format!("i.rating_sort >= {value}"), true))
                 .collect(),
             Self::Hdr => ["true", "false"]
                 .into_iter()
@@ -141,7 +135,11 @@ impl Dimension {
                 ("unwatched".into(), format!("({WATCH_TIER_SQL}) = 0"), true),
                 ("watching".into(), format!("({WATCH_TIER_SQL}) = 1"), true),
                 ("played".into(), format!("({WATCH_TIER_SQL}) = 2"), true),
-                ("favorite".into(), "COALESCE(u.favorite, 0) = 1".into(), false),
+                (
+                    "favorite".into(),
+                    "COALESCE(u.favorite, 0) = 1".into(),
+                    false,
+                ),
             ],
             _ => Vec::new(),
         }
@@ -227,10 +225,7 @@ impl Store {
             filter: request.filter.clone(),
             order: super::types::BrowseOrder::Title,
             descending: false,
-            page: super::types::BrowsePage::Offset {
-                start: 0,
-                limit: 0,
-            },
+            page: super::types::BrowsePage::Offset { start: 0, limit: 0 },
             include_total: false,
         };
         let total = self.library_item_count(&total_query)?;
@@ -295,7 +290,11 @@ fn term_counts(
 
 /// Scalar dimensions: one row per value present anywhere in the library, counted over the
 /// base filter (a value nobody matches under the other dimensions still returns count 0).
-fn value_counts(store: &Store, base: &ItemQuerySql, expr: &str) -> Result<Vec<(String, u64)>, StoreError> {
+fn value_counts(
+    store: &Store,
+    base: &ItemQuerySql,
+    expr: &str,
+) -> Result<Vec<(String, u64)>, StoreError> {
     let bindings = Bindings::from_values(base.bindings.clone());
     let sql = format!(
         "SELECT {expr}, SUM(CASE WHEN {where_sql} THEN 1 ELSE 0 END) \

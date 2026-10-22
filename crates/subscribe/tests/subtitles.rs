@@ -18,7 +18,7 @@ fn movie_filter() -> Filter {
             exclude: false,
         }],
         keep_old_versions: false,
-}
+    }
 }
 
 fn media_movie() -> Media {
@@ -261,7 +261,7 @@ fn multi_episode_subtitles_match_respective_episodes_without_overwriting() {
             exclude: false,
         }],
         keep_old_versions: false,
-};
+    };
     let sub = create_test_tv_sub(media.id, filter.id);
     let t = create_test_pack_torrent();
     let (v1, v2, s1, s2) = create_test_pack_files(&tmp);

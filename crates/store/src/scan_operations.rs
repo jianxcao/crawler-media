@@ -143,8 +143,7 @@ fn map_scan_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScanOperation
         id: row.get(0)?,
         library_id: row.get(1)?,
         scope_signature: row.get(2)?,
-        status: ScanOperationStatus::from_str(&status_str)
-            .unwrap_or(ScanOperationStatus::Queued),
+        status: ScanOperationStatus::from_str(&status_str).unwrap_or(ScanOperationStatus::Queued),
         generation: row.get(4)?,
         report: serde_json::from_str(&report_json).unwrap_or_default(),
         targets: parse_targets(&targets_raw),
@@ -156,8 +155,7 @@ fn map_scan_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScanOperation
 }
 
 /// 所有 `ScanOperation` 查询共用的列清单。
-const SCAN_OPERATION_COLUMNS: &str =
-    "id, library_id, scope_signature, status, generation, report_json, targets_json, \
+const SCAN_OPERATION_COLUMNS: &str = "id, library_id, scope_signature, status, generation, report_json, targets_json, \
      scope_kind, dirty_rev, consumed_rev";
 
 impl Store {
@@ -316,7 +314,8 @@ impl Store {
         let Some((status_raw, dirty_rev, consumed_rev)) = current else {
             return Ok(None);
         };
-        let status = ScanOperationStatus::from_str(&status_raw).unwrap_or(ScanOperationStatus::Queued);
+        let status =
+            ScanOperationStatus::from_str(&status_raw).unwrap_or(ScanOperationStatus::Queued);
         if !status.is_active() {
             return Ok(None);
         }
@@ -373,7 +372,10 @@ impl Store {
     ///
     /// 用 `BEGIN IMMEDIATE`：SELECT 与 UPDATE 必须在同一个写事务里，否则多连接下
     /// 两个 worker 可以同时读到同一行 queued（B3 §6）。
-    pub fn claim_next_queued_scan(&self, excluding: &[String]) -> Result<Option<ScanOperation>, StoreError> {
+    pub fn claim_next_queued_scan(
+        &self,
+        excluding: &[String],
+    ) -> Result<Option<ScanOperation>, StoreError> {
         let tx = rusqlite::Transaction::new_unchecked(
             &self.library,
             rusqlite::TransactionBehavior::Immediate,
@@ -384,7 +386,8 @@ impl Store {
              WHERE status = 'queued'"
         );
         if !excluding.is_empty() {
-            let placeholders: Vec<String> = (1..=excluding.len()).map(|i| format!("?{}", i)).collect();
+            let placeholders: Vec<String> =
+                (1..=excluding.len()).map(|i| format!("?{}", i)).collect();
             query.push_str(&format!(" AND id NOT IN ({})", placeholders.join(",")));
         }
         query.push_str(" ORDER BY created_at_ms ASC, rowid ASC LIMIT 1");
@@ -417,9 +420,9 @@ impl Store {
     /// if deleted/deleting, marks cancelled, otherwise re-queues.
     pub fn recover_orphaned_scans(&self) -> Result<usize, StoreError> {
         let running: Vec<(String, String)> = {
-            let mut stmt = self.library.prepare(
-                "SELECT id, library_id FROM scan_operations WHERE status = 'running'",
-            )?;
+            let mut stmt = self
+                .library
+                .prepare("SELECT id, library_id FROM scan_operations WHERE status = 'running'")?;
             let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
             let mut list = Vec::new();
             for r in rows {

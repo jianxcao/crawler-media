@@ -53,7 +53,13 @@ impl Store {
         tx.execute(
             "INSERT INTO media_aliases (source, kind, external_id, media_id, is_refresh_target)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![alias.source, alias.kind.as_str(), alias.external_id, id_str, is_target],
+            params![
+                alias.source,
+                alias.kind.as_str(),
+                alias.external_id,
+                id_str,
+                is_target
+            ],
         )?;
 
         // If media was provisional, it's now confirmed

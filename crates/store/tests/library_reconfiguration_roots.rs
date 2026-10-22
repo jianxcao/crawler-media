@@ -55,12 +55,16 @@ fn roots_and_locale_commit_together() {
             2_000,
         )
         .unwrap();
-    let mut status = store.advance_library_operation(&operation_id, 2_100, 100).unwrap();
+    let mut status = store
+        .advance_library_operation(&operation_id, 2_100, 100)
+        .unwrap();
     for step in 0..10 {
         if status.state == "succeeded" {
             break;
         }
-        status = store.advance_library_operation(&operation_id, 2_200 + step, 100).unwrap();
+        status = store
+            .advance_library_operation(&operation_id, 2_200 + step, 100)
+            .unwrap();
     }
     assert_eq!(status.state, "succeeded");
     let finished = store.get_library(&library.id).unwrap().unwrap();
@@ -112,7 +116,10 @@ fn unidentified_rows_without_files_move_to_the_new_root() {
         .unwrap();
     let mut state = String::new();
     for step in 0..20 {
-        state = store.advance_library_operation(&operation_id, 1_100 + step, 1).unwrap().state;
+        state = store
+            .advance_library_operation(&operation_id, 1_100 + step, 1)
+            .unwrap()
+            .state;
         if state == "succeeded" {
             break;
         }
@@ -167,8 +174,15 @@ fn failed_root_batch_retries_the_same_operation_to_success() {
             1_000,
         )
         .unwrap();
-    assert!(store.advance_library_operation(&operation_id, 1_100, 10).is_err());
-    assert_eq!(store.library_lifecycle_state(&library.id).unwrap(), "reindexing");
+    assert!(
+        store
+            .advance_library_operation(&operation_id, 1_100, 10)
+            .is_err()
+    );
+    assert_eq!(
+        store.library_lifecycle_state(&library.id).unwrap(),
+        "reindexing"
+    );
     let locale_after_failure: String = db
         .query_row(
             "SELECT display_locale FROM libraries WHERE library_id = ?1",
@@ -176,14 +190,26 @@ fn failed_root_batch_retries_the_same_operation_to_success() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_ne!(locale_after_failure, "en-US", "nothing of the failed batch commits");
+    assert_ne!(
+        locale_after_failure, "en-US",
+        "nothing of the failed batch commits"
+    );
 
     db.execute_batch("DROP TRIGGER fail_move;").unwrap();
-    let status = store.advance_library_operation(&operation_id, 1_200, 10).unwrap();
+    let status = store
+        .advance_library_operation(&operation_id, 1_200, 10)
+        .unwrap();
     assert_eq!(status.state, "succeeded");
     assert_eq!(store.library_lifecycle_state(&library.id).unwrap(), "ready");
     let owner: String = db
-        .query_row("SELECT root_id FROM unidentified WHERE path = '/tv/anime/X'", [], |r| r.get(0))
+        .query_row(
+            "SELECT root_id FROM unidentified WHERE path = '/tv/anime/X'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
-    assert_eq!(owner, root_id_of(&store, &library.id, Path::new("/tv/anime")));
+    assert_eq!(
+        owner,
+        root_id_of(&store, &library.id, Path::new("/tv/anime"))
+    );
 }

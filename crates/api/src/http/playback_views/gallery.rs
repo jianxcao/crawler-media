@@ -104,7 +104,12 @@ pub(crate) async fn favorites_gallery(
                     .iter()
                     .filter(|cov| cov.file.media_id == media_id)
                     .filter(|cov| {
-                        crate::http::library::file_visible_to_user(&store, &cov.file, &media, Some(user_id))
+                        crate::http::library::file_visible_to_user(
+                            &store,
+                            &cov.file,
+                            &media,
+                            Some(user_id),
+                        )
                     })
                     .cloned()
                     .collect();
@@ -113,7 +118,9 @@ pub(crate) async fn favorites_gallery(
                 }
                 let library_id = owned
                     .first()
-                    .and_then(|cov| crate::http::library::library_for_file(&store, &cov.file, &media))
+                    .and_then(|cov| {
+                        crate::http::library::library_for_file(&store, &cov.file, &media)
+                    })
                     .map(|library| library.id)
                     .unwrap_or_default();
                 let pref = crate::http::library::preferred_coverage(&owned).cloned();

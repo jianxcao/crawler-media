@@ -4,8 +4,8 @@
 //! that need a session must first seed one real file instead of inventing a `LedgerId`.
 
 use domain::{Confidence, LedgerId, MediaId, QualitySource, UnitKey, UserId};
-use store::test_support::FixtureFile;
 use store::Store;
+use store::test_support::FixtureFile;
 
 /// Seed one published whole-unit file under `root` and return its Media and file id.
 ///
@@ -107,6 +107,14 @@ pub fn issue_session(
         .copied()
         .unwrap_or(UnitKey::WHOLE);
     store
-        .issue_play_session(user, device, file_id, file.media_id, unit, &file.version, now)
+        .issue_play_session(
+            user,
+            device,
+            file_id,
+            file.media_id,
+            unit,
+            &file.version,
+            now,
+        )
         .expect("issue fixture play session")
 }

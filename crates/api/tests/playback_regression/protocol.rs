@@ -13,7 +13,9 @@ async fn standard_identity_metadata_and_stop_are_independent() {
     let (app, media, id) = app(tmp.path());
     let store = Store::open(tmp.path().join("data")).unwrap();
     for device in ["bedroom", "living-room"] {
-        store.set_user_token(admin(), &format!("{device}-token")).unwrap();
+        store
+            .set_user_token(admin(), &format!("{device}-token"))
+            .unwrap();
         let session = issue_session(&store, device, media);
         assert_eq!(
             send(
@@ -187,7 +189,6 @@ fn provider(root: &Path) -> api::media_server_provider::ApiServerProvider {
         .unwrap(),
     )
 }
-
 
 #[tokio::test]
 async fn artwork_remains_public_and_streams_require_authentication() {

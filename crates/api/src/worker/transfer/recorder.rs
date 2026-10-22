@@ -13,7 +13,10 @@ pub(crate) struct PublicationRecorder<'a> {
 
 impl PublicationRecorder<'_> {
     fn prepare_with_plan(
-        &self, candidate: &domain::FileCoverage, source: &std::path::Path, mode: library::TransferMode,
+        &self,
+        candidate: &domain::FileCoverage,
+        source: &std::path::Path,
+        mode: library::TransferMode,
         plan: Option<&TransferPlan>,
         ignored_files: &std::collections::HashSet<String>,
     ) -> Result<domain::FileCoverage, subscribe::SubscribeError> {
@@ -30,13 +33,22 @@ impl PublicationRecorder<'_> {
                     plan,
                 )?;
             } else {
-                self.lease.control().check().map_err(|error| error.to_string())?;
-                if !store.library_accepts_work(self.lease.library_id()).map_err(|e| e.to_string())?
+                self.lease
+                    .control()
+                    .check()
+                    .map_err(|error| error.to_string())?;
+                if !store
+                    .library_accepts_work(self.lease.library_id())
+                    .map_err(|e| e.to_string())?
                     || store
                         .read_fingerprint(self.lease.library_id(), self.subscribe.media_id)
                         .map_err(|e| e.to_string())?
                         != self.fingerprint
-                    || store.get_subscribe(self.subscribe.id).map_err(|e| e.to_string())?.as_ref() != Some(self.subscribe)
+                    || store
+                        .get_subscribe(self.subscribe.id)
+                        .map_err(|e| e.to_string())?
+                        .as_ref()
+                        != Some(self.subscribe)
                 {
                     return Err("Transfer source or Library configuration changed".into());
                 }
@@ -46,7 +58,10 @@ impl PublicationRecorder<'_> {
                 || candidate.file.source_path.as_deref() != Some(source)
                 || candidate.file.transfer_mode.as_deref() != Some(mode.as_str())
             {
-                return Err("Transfer candidate Media, Library, source or mode conflicts with its lease".into());
+                return Err(
+                    "Transfer candidate Media, Library, source or mode conflicts with its lease"
+                        .into(),
+                );
             }
             // The reservation owns the pending row identity: an interrupted round
             // that left the same destination behind is recovered here rather than
@@ -62,7 +77,13 @@ impl PublicationRecorder<'_> {
                 config_revision,
             };
             store
-                .reserve_transfer(&scope, candidate, source, mode, crate::job_loop::unix_now() * 1000)
+                .reserve_transfer(
+                    &scope,
+                    candidate,
+                    source,
+                    mode,
+                    crate::job_loop::unix_now() * 1000,
+                )
                 .map_err(|e| e.to_string())
         })();
         result.map_err(|error| {
@@ -97,7 +118,12 @@ impl PublicationRecorder<'_> {
                 config_revision,
             };
             store
-                .finish_transfer(&scope, candidate, &candidate.file.version, crate::job_loop::unix_now() * 1000)
+                .finish_transfer(
+                    &scope,
+                    candidate,
+                    &candidate.file.version,
+                    crate::job_loop::unix_now() * 1000,
+                )
                 .map_err(|error| fail(error.to_string()))
         }?;
         Ok(())
@@ -105,9 +131,12 @@ impl PublicationRecorder<'_> {
 }
 
 impl subscribe::TransferRecorder for PublicationRecorder<'_> {
-    fn prepare(&self, candidate: &domain::FileCoverage, source: &std::path::Path, mode: library::TransferMode)
-        -> Result<domain::FileCoverage, subscribe::SubscribeError>
-    {
+    fn prepare(
+        &self,
+        candidate: &domain::FileCoverage,
+        source: &std::path::Path,
+        mode: library::TransferMode,
+    ) -> Result<domain::FileCoverage, subscribe::SubscribeError> {
         self.prepare_with_plan(
             candidate,
             source,
@@ -144,17 +173,17 @@ impl<'a> PlannedPublicationRecorder<'a> {
 }
 
 impl subscribe::TransferRecorder for PlannedPublicationRecorder<'_> {
-    fn prepare(&self, candidate: &domain::FileCoverage, source: &std::path::Path, mode: library::TransferMode)
-        -> Result<domain::FileCoverage, subscribe::SubscribeError>
-    {
-        let mut reserved = self
-            .reserved
-            .lock()
-            .map_err(|_| {
-                subscribe::SubscribeError::Downloader(downloader::DownloaderError::Message(
-                    "Transfer publication recorder poisoned".into(),
-                ))
-            })?;
+    fn prepare(
+        &self,
+        candidate: &domain::FileCoverage,
+        source: &std::path::Path,
+        mode: library::TransferMode,
+    ) -> Result<domain::FileCoverage, subscribe::SubscribeError> {
+        let mut reserved = self.reserved.lock().map_err(|_| {
+            subscribe::SubscribeError::Downloader(downloader::DownloaderError::Message(
+                "Transfer publication recorder poisoned".into(),
+            ))
+        })?;
         let result =
             self.recorder
                 .prepare_with_plan(candidate, source, mode, Some(self.plan), &reserved);
@@ -168,6 +197,7 @@ impl subscribe::TransferRecorder for PlannedPublicationRecorder<'_> {
     }
 
     fn published(&self, candidate: &domain::FileCoverage) -> Result<(), subscribe::SubscribeError> {
-        self.recorder.published_with_plan(candidate, Some(self.plan))
+        self.recorder
+            .published_with_plan(candidate, Some(self.plan))
     }
 }

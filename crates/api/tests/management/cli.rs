@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use super::common::*;
 use api::cli::Transport;
 use api::router;
 use axum::body::{Body, to_bytes};
@@ -7,8 +6,9 @@ use axum::http::Request;
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
 use tower::ServiceExt;
-use super::common::*;
 
 pub(super) struct RouterTransport {
     pub(super) app: axum::Router,

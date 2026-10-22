@@ -48,7 +48,9 @@ impl Catalog for ArtworkCatalog {
         Ok(None)
     }
     fn poster_url(&self, _: MediaKind, _: &str) -> Result<Option<String>, String> {
-        Ok(Some("https://image.tmdb.org/t/p/w342/clip-poster.jpg".into()))
+        Ok(Some(
+            "https://image.tmdb.org/t/p/w342/clip-poster.jpg".into(),
+        ))
     }
     fn image_candidates(&self, _: MediaKind, _: &str) -> Result<ArtworkCandidates, String> {
         Ok(ArtworkCandidates {
@@ -156,10 +158,7 @@ async fn video_artwork_fixture() -> VideoArtworkFixture {
     let library_id = create_video_library(&app, &root).await;
     put_scrape_setting(&app, false).await;
     scan_and_wait(&app, &library_id).await;
-    assert!(
-        !root.join("poster.jpg").exists(),
-        "镜像关闭时不得写封面"
-    );
+    assert!(!root.join("poster.jpg").exists(), "镜像关闭时不得写封面");
 
     put_scrape_setting(&app, true).await;
     {

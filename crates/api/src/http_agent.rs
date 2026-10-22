@@ -290,7 +290,10 @@ mod mask_tests {
             mask_proxy_url("http://bob:pw@host:1"),
             domain::mask_proxy_url("http://bob:pw@host:1")
         );
-        assert_eq!(mask_proxy_url("http://bob:pw@host:1"), "http://bob:***@host:1");
+        assert_eq!(
+            mask_proxy_url("http://bob:pw@host:1"),
+            "http://bob:***@host:1"
+        );
     }
 
     /// 旧 api 实现遇到没有 scheme 的 `user:pass@host` 会原样返回（等于把口令

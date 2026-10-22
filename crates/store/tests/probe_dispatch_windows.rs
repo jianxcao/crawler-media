@@ -93,9 +93,10 @@ fn large_pending_recovery_loads_only_dispatch_windows() {
         .unwrap();
     store::test_support::publish_fixture_file(&store, &row).unwrap();
 
-    let metadata_ids: Vec<String> = std::iter::once(row.file_id.expect("fixture file id").to_string())
-        .chain((1..METADATA_PENDING).map(|index| format!("ledger-m-{index:06}")))
-        .collect();
+    let metadata_ids: Vec<String> =
+        std::iter::once(row.file_id.expect("fixture file id").to_string())
+            .chain((1..METADATA_PENDING).map(|index| format!("ledger-m-{index:06}")))
+            .collect();
     let metadata_specs: Vec<_> = metadata_ids.iter().map(|id| spec(id)).collect();
     assert!(
         store
@@ -130,7 +131,11 @@ fn large_pending_recovery_loads_only_dispatch_windows() {
     let metadata_window = store
         .pending_probe_dispatch_ids(ProbeDispatchStage::Metadata, 64)
         .unwrap();
-    assert_eq!(metadata_window.len(), 64, "metadata window is bounded at 64");
+    assert_eq!(
+        metadata_window.len(),
+        64,
+        "metadata window is bounded at 64"
+    );
     assert!(
         metadata_window
             .iter()
@@ -159,12 +164,19 @@ fn large_pending_recovery_loads_only_dispatch_windows() {
     assert_eq!(snapshot.unit.job_id, "metadata-job");
     assert_eq!(snapshot.unit.ledger_id, metadata_window[0].ledger_id);
     assert_eq!(snapshot.unit.stage, ProbeDispatchStage::Metadata);
-    assert_eq!(snapshot.row.file.file_id.to_string(), metadata_window[0].ledger_id);
+    assert_eq!(
+        snapshot.row.file.file_id.to_string(),
+        metadata_window[0].ledger_id
+    );
     assert_eq!(snapshot.source_version, "");
 
     // Metadata -> fingerprint is persisted, not guessed from memory.
     let first = metadata_window[0].clone();
-    assert!(store.start_probe_unit(&first.job_id, &first.ledger_id).unwrap());
+    assert!(
+        store
+            .start_probe_unit(&first.job_id, &first.ledger_id)
+            .unwrap()
+    );
     assert!(
         store
             .advance_probe_unit_to_fingerprint(&first.job_id, &first.ledger_id)

@@ -2,8 +2,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
-use domain::MediaId;
 use super::PosterError;
+use domain::MediaId;
 
 pub trait PosterClock: Send + Sync {
     fn now(&self) -> Duration;

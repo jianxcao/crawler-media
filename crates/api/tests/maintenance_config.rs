@@ -4,10 +4,10 @@
 //! 原始 SQL（仓库既有约定：setup 可以用 raw SQL，断言不行）。
 
 use api::maintenance::{
-    DataRetentionPolicy, DatabaseMaintenancePolicy, DEFAULT_DATABASE_INTERVAL_SECS,
     DEFAULT_DATA_RETENTION_DAYS, DEFAULT_DATA_RETENTION_INTERVAL_SECS,
-    DEFAULT_JOBS_INTERVAL_SECS, DEFAULT_RETENTION_DAYS, JobsRetentionPolicy, MaintenancePolicy,
-    MAX_RETENTION_DAYS, PlaybackHistoryRetentionPolicy, POLICY_VERSION, seed_maintenance_defs,
+    DEFAULT_DATABASE_INTERVAL_SECS, DEFAULT_JOBS_INTERVAL_SECS, DEFAULT_RETENTION_DAYS,
+    DataRetentionPolicy, DatabaseMaintenancePolicy, JobsRetentionPolicy, MAX_RETENTION_DAYS,
+    MaintenancePolicy, POLICY_VERSION, PlaybackHistoryRetentionPolicy, seed_maintenance_defs,
     validate_maintenance_interval,
 };
 use domain::JobDefId;
@@ -125,7 +125,11 @@ fn seed_is_idempotent() {
     let queue = open(&tmp);
     seed_maintenance_defs(&queue).unwrap();
     seed_maintenance_defs(&queue).unwrap();
-    assert_eq!(queue.list_defs().unwrap().len(), 4, "重复 seed 不得产生重复 def");
+    assert_eq!(
+        queue.list_defs().unwrap().len(),
+        4,
+        "重复 seed 不得产生重复 def"
+    );
 }
 
 #[test]

@@ -18,7 +18,11 @@ use super::*;
 // ---------------------------------------------------------------------------
 
 /// One fixture scan row. `unit` sets the TV coverage unit; `None` is a whole-unit row.
-pub(crate) fn scanned_row(media_id: MediaId, path: &str, unit: Option<(u32, u32)>) -> ScannedLedger {
+pub(crate) fn scanned_row(
+    media_id: MediaId,
+    path: &str,
+    unit: Option<(u32, u32)>,
+) -> ScannedLedger {
     let units = match unit {
         Some((season, episode)) => vec![UnitKey::new(season as i32, episode as i32)],
         None => vec![UnitKey::WHOLE],
@@ -73,13 +77,7 @@ pub(crate) fn insert_medias(store: &Store, count: usize, kind: MediaKind) -> Vec
 fn window_one_file_each(medias: &[MediaId], prefix: &str) -> Vec<ScannedLedger> {
     medias
         .iter()
-        .map(|media| {
-            scanned_row(
-                *media,
-                &format!("/{prefix}/m{media}/new.mkv"),
-                None,
-            )
-        })
+        .map(|media| scanned_row(*media, &format!("/{prefix}/m{media}/new.mkv"), None))
         .collect()
 }
 
@@ -163,7 +161,11 @@ fn one_window_reduces_a_single_media_once_not_once_per_file() {
             )
         })
         .collect();
-    assert_eq!(rows.len(), store::MAX_SCAN_BATCH, "window is one full batch");
+    assert_eq!(
+        rows.len(),
+        store::MAX_SCAN_BATCH,
+        "window is one full batch"
+    );
     store.insert_scanned_files(&rows, 1_000).unwrap();
 
     let key = series.id.to_string();
@@ -219,7 +221,9 @@ fn window_work_does_not_grow_with_pre_existing_library_files() {
                 )
             })
             .collect();
-        store.insert_scanned_files(&rows, 1_000 + round as i64).unwrap();
+        store
+            .insert_scanned_files(&rows, 1_000 + round as i64)
+            .unwrap();
     }
     let before_dense = media_rows(&data_dir, &dense.id);
     assert_eq!(count_in(&data_dir, "library_files", &dense.id), 1_000);
@@ -283,7 +287,14 @@ fn one_window_accepts_at_most_one_hundred_files() {
     let data_dir = tmp.path().join("data");
     let store = Store::open(&data_dir).unwrap();
     let lib = store
-        .create_library(MediaKind::Movie, "Movies", &["/movies"], "everyone", true, &[])
+        .create_library(
+            MediaKind::Movie,
+            "Movies",
+            &["/movies"],
+            "everyone",
+            true,
+            &[],
+        )
         .unwrap();
     let media = fixture_media(0, MediaKind::Movie);
     store.insert_media(&media).unwrap();
@@ -325,20 +336,21 @@ fn failed_window_leaves_facts_and_summary_consistent_after_restart() {
     let data_dir = tmp.path().join("data");
     let store = Store::open(&data_dir).unwrap();
     let lib = store
-        .create_library(MediaKind::Movie, "Movies", &["/movies"], "everyone", true, &[])
+        .create_library(
+            MediaKind::Movie,
+            "Movies",
+            &["/movies"],
+            "everyone",
+            true,
+            &[],
+        )
         .unwrap();
     let media = fixture_media(0, MediaKind::Movie);
     store.insert_media(&media).unwrap();
 
     let window = |prefix: &str| -> Vec<ScannedLedger> {
         (0..100)
-            .map(|index| {
-                scanned_row(
-                    media.id,
-                    &format!("/movies/{prefix}_{index:03}.mkv"),
-                    None,
-                )
-            })
+            .map(|index| scanned_row(media.id, &format!("/movies/{prefix}_{index:03}.mkv"), None))
             .collect()
     };
     store.insert_scanned_files(&window("pre"), 1_000).unwrap();
@@ -355,7 +367,9 @@ fn failed_window_leaves_facts_and_summary_consistent_after_restart() {
     .unwrap();
     drop(conn);
 
-    let error = store.insert_scanned_files(&window("window"), 2_000).unwrap_err();
+    let error = store
+        .insert_scanned_files(&window("window"), 2_000)
+        .unwrap_err();
     assert!(
         matches!(
             error,
@@ -379,7 +393,9 @@ fn failed_window_leaves_facts_and_summary_consistent_after_restart() {
     let conn = rusqlite::Connection::open(data_dir.join("library.db")).unwrap();
     conn.execute_batch("DROP TRIGGER block_mid_window").unwrap();
     drop(conn);
-    store.insert_scanned_files(&window("window"), 3_000).unwrap();
+    store
+        .insert_scanned_files(&window("window"), 3_000)
+        .unwrap();
 
     assert_eq!(count_in(&data_dir, "library_files", &lib.id), 200);
     assert_eq!(count_in(&data_dir, "file_probe_obligations", &lib.id), 200);

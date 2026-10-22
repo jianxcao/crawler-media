@@ -10,7 +10,7 @@ use std::process::Command;
 
 use library::{ProbeTarget, WorkControl};
 
-use super::{chapter_frame_path, ChapterFrameRequest, ChapterFrameRunner, ChapterFrameStaged};
+use super::{ChapterFrameRequest, ChapterFrameRunner, ChapterFrameStaged, chapter_frame_path};
 use crate::library_lifecycle::LibraryWorkLease;
 
 pub struct FfmpegChapterFrameRunner {

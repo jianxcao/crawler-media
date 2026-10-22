@@ -46,14 +46,10 @@ fn collect_event_observations(
             continue;
         }
 
-        let matching_root = owner_lib
-            .root_paths
-            .iter()
-            .find(|r| {
-                resolved.starts_with(r)
-                    || LibraryPathScope::resolve_path(r)
-                        .is_ok_and(|res_r| resolved.starts_with(&res_r))
-            });
+        let matching_root = owner_lib.root_paths.iter().find(|r| {
+            resolved.starts_with(r)
+                || LibraryPathScope::resolve_path(r).is_ok_and(|res_r| resolved.starts_with(&res_r))
+        });
         let Some(root) = matching_root else {
             continue;
         };
@@ -179,7 +175,11 @@ pub(crate) fn observe_event(
         return Ok(LedgerPresenceResult::default());
     }
 
-    Ok(publish_event_observations(state, &scope, observations_by_lib))
+    Ok(publish_event_observations(
+        state,
+        &scope,
+        observations_by_lib,
+    ))
 }
 
 #[cfg(test)]

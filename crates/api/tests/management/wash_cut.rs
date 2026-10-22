@@ -13,7 +13,7 @@ use subscribe::QualityFact;
 use tower::ServiceExt;
 
 use super::common::*;
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 #[tokio::test]
 async fn wash_cut_deletes_previous_library_file_and_ledger_row() {

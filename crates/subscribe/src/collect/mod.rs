@@ -16,8 +16,12 @@ use select::{collect_scored_torrent, reconcile_mapping_facts};
 /// Durable final-path reservation around filesystem publication. Implementations
 /// must not perform filesystem work while recording or completing a row.
 pub trait TransferRecorder {
-    fn prepare(&self, candidate: &FileCoverage, source: &Path, mode: library::TransferMode)
-        -> Result<FileCoverage, SubscribeError>;
+    fn prepare(
+        &self,
+        candidate: &FileCoverage,
+        source: &Path,
+        mode: library::TransferMode,
+    ) -> Result<FileCoverage, SubscribeError>;
     fn published(&self, candidate: &FileCoverage) -> Result<(), SubscribeError>;
 }
 

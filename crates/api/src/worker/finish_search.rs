@@ -118,9 +118,7 @@ fn load_search_context(
     media: &domain::Media,
 ) -> Result<SearchContext, String> {
     let obs = crate::subscribe_library_read::observe_subscribe_library_facts(
-        state,
-        subscribe,
-        media.kind,
+        state, subscribe, media.kind,
     )?;
     let facts = obs.facts;
     let library_id = obs.library_id;
@@ -234,7 +232,15 @@ fn admit_candidates(
     })?;
     let deferred = selective
         .as_ref()
-        .map(|before| crate::selective_files::apply(&routed, subscribe, &added.chosen, before, absolute.as_ref()))
+        .map(|before| {
+            crate::selective_files::apply(
+                &routed,
+                subscribe,
+                &added.chosen,
+                before,
+                absolute.as_ref(),
+            )
+        })
         .unwrap_or_default();
     notify_search_additions(state, subscribe, media, &added);
     merge_added_pending(state, subscribe, &added, &routed)?;

@@ -272,7 +272,8 @@ async fn browse(app: &Router, library_id: &str) -> Vec<Value> {
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK, "目录浏览必须成功");
-    common::json_data(response).await
+    common::json_data(response)
+        .await
         .as_array()
         .expect("目录浏览必须返回数组")
         .clone()
@@ -351,7 +352,11 @@ async fn subscribe_tv(app: &Router, library_id: &str) {
         "episode_to": EPISODE,
     });
     let response = send(app, "POST", "/api/v1/subscriptions", Some(TOKEN), payload).await;
-    assert_eq!(response.status(), StatusCode::CREATED, "Subscribe 必须创建成功");
+    assert_eq!(
+        response.status(),
+        StatusCode::CREATED,
+        "Subscribe 必须创建成功"
+    );
 }
 
 async fn scrape(app: &Router, library_id: &str) {
@@ -363,7 +368,11 @@ async fn scrape(app: &Router, library_id: &str) {
         json!({}),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::OK, "离线 Scrape 必须降级而不是失败");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "离线 Scrape 必须降级而不是失败"
+    );
 }
 
 async fn remove_library(app: &Router, library_id: &str) {
@@ -375,7 +384,11 @@ async fn remove_library(app: &Router, library_id: &str) {
         Value::Null,
     )
     .await;
-    assert_eq!(response.status(), StatusCode::ACCEPTED, "删除媒体库必须是异步操作");
+    assert_eq!(
+        response.status(),
+        StatusCode::ACCEPTED,
+        "删除媒体库必须是异步操作"
+    );
     let operation_id = common::json_data(response).await["operation_id"]
         .as_str()
         .expect("删除操作必须带 operation_id")
@@ -477,7 +490,9 @@ async fn clean_start_restart_clear_cache_remove_reimport_preserves_identity_and_
         let handle = state.store();
         let store = handle.lock();
         store.clear_search_snapshots().unwrap();
-        store.delete_fingerprint_cache(&file_id.to_string()).unwrap();
+        store
+            .delete_fingerprint_cache(&file_id.to_string())
+            .unwrap();
     }
     let after_cache_clear = snapshot(&app, &fixture.library_id, &token).await;
 
@@ -536,7 +551,10 @@ async fn legacy_filter_dsl_is_rejected() {
         "旧 Filter DSL 字符串必须被判为不可解析的旧 shape"
     );
     let error = common::json_error(legacy_filter).await;
-    assert_eq!(error["code"], "rule_set.invalid", "错误码必须指向 Filter 解析");
+    assert_eq!(
+        error["code"], "rule_set.invalid",
+        "错误码必须指向 Filter 解析"
+    );
 
     // 正向对照：typed atoms 必须正常往返，证明上面的 400 来自旧 shape 本身。
     let created = send(
@@ -553,7 +571,11 @@ async fn legacy_filter_dsl_is_rejected() {
         }),
     )
     .await;
-    assert_eq!(created.status(), StatusCode::CREATED, "typed atoms 必须可创建");
+    assert_eq!(
+        created.status(),
+        StatusCode::CREATED,
+        "typed atoms 必须可创建"
+    );
     let typed_id = common::json_data(created).await["id"]
         .as_str()
         .expect("Filter 必须带 id")
@@ -566,7 +588,11 @@ async fn legacy_filter_dsl_is_rejected() {
         Value::Null,
     )
     .await;
-    assert_eq!(round_trip.status(), StatusCode::OK, "typed atoms 必须可读回");
+    assert_eq!(
+        round_trip.status(),
+        StatusCode::OK,
+        "typed atoms 必须可读回"
+    );
     let round_trip = common::json_data(round_trip).await;
     assert_eq!(
         round_trip["atoms"].as_array().map(Vec::len),
@@ -718,19 +744,35 @@ async fn unknown_cache_source_is_400_and_api_key_session_stream_authenticates() 
     let file_id = LedgerId::new();
     let media_id = fixture.seed_episode(file_id);
     // The seeded episode is a STRM; give it a real target so the stream resolves to a redirect.
-    std::fs::write(fixture.root.join(EPISODE_NAME), "http://media.example.invalid/e03.mkv").unwrap();
+    std::fs::write(
+        fixture.root.join(EPISODE_NAME),
+        "http://media.example.invalid/e03.mkv",
+    )
+    .unwrap();
     let psid = {
         let handle = fixture.state.store();
         let store = handle.lock();
         let user = store.user_by_token(TOKEN).unwrap().unwrap().id;
         let version = store.get_file_version(file_id).unwrap().unwrap();
         store
-            .issue_play_session(user, "web-1", file_id, media_id, UnitKey::new(SEASON, EPISODE), &version, 1)
+            .issue_play_session(
+                user,
+                "web-1",
+                file_id,
+                media_id,
+                UnitKey::new(SEASON, EPISODE),
+                &version,
+                1,
+            )
             .unwrap()
     };
     let uri = format!("/api/v1/playback/sessions/{psid}/stream?device_id=web-1&api_key={TOKEN}");
     let response = send(&app, "GET", &uri, None, Value::Null).await;
-    assert_ne!(response.status(), StatusCode::UNAUTHORIZED, "api_key-only stream must authenticate");
+    assert_ne!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "api_key-only stream must authenticate"
+    );
     assert!(
         response.status().is_success() || response.status().is_redirection(),
         "issued api_key stream: {}",

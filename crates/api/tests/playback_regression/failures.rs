@@ -15,7 +15,15 @@ async fn web_event(
     if let Some(session) = session {
         body["play_session_id"] = json!(session);
     }
-    send(app, "POST", "/api/v1/playback/progress", "Bearer admin-token", body, None).await
+    send(
+        app,
+        "POST",
+        "/api/v1/playback/progress",
+        "Bearer admin-token",
+        body,
+        None,
+    )
+    .await
 }
 
 #[tokio::test]
@@ -27,7 +35,9 @@ async fn session_write_failure_rolls_back_unit() {
     let db = database(tmp.path());
     db.execute_batch("CREATE TRIGGER block_session BEFORE INSERT ON playback_sessions BEGIN SELECT RAISE(ABORT,'session blocked'); END;").unwrap();
     assert_eq!(
-        web_event(&app, media, "start", 30000, Some(&session)).await.status(),
+        web_event(&app, media, "start", 30000, Some(&session))
+            .await
+            .status(),
         StatusCode::INTERNAL_SERVER_ERROR
     );
     assert!(store.unit_state(admin(), media, -1, -1).unwrap().is_none());
@@ -41,13 +51,17 @@ async fn stop_log_failure_retains_session_and_prior_unit() {
     let store = Store::open(tmp.path().join("data")).unwrap();
     let session = issue_session(&store, "browser", media);
     assert_eq!(
-        web_event(&app, media, "start", 1000, Some(&session)).await.status(),
+        web_event(&app, media, "start", 1000, Some(&session))
+            .await
+            .status(),
         StatusCode::OK
     );
     let db = database(tmp.path());
     db.execute_batch("CREATE TRIGGER block_log BEFORE INSERT ON playback_logs BEGIN SELECT RAISE(ABORT,'log blocked'); END;").unwrap();
     assert_eq!(
-        web_event(&app, media, "stop", 30000, Some(&session)).await.status(),
+        web_event(&app, media, "stop", 30000, Some(&session))
+            .await
+            .status(),
         StatusCode::INTERNAL_SERVER_ERROR
     );
     assert_eq!(

@@ -7,7 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use domain::{LedgerId, QualitySource, SubscribeId};
 
 use super::harness::*;
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 async fn wash_owning_locked_1080p(h: &Harness) -> (SubscribeId, std::path::PathBuf) {
     h.create_site().await;

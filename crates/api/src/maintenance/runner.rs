@@ -14,12 +14,12 @@ use std::time::{Duration, Instant};
 
 use jobs::{Job, JobStatus};
 
+use super::data_retention::run_data_retention;
 use super::database::{
     DatabaseName, MaintenanceContext, database_targets, missing_optional_targets,
 };
-use super::data_retention::run_data_retention;
 use super::policy::{
-    BATCH_SIZE, DatabaseMaintenancePolicy, MAX_BATCHES, MAX_BATCH_BUDGET, MaintenancePolicy,
+    BATCH_SIZE, DatabaseMaintenancePolicy, MAX_BATCH_BUDGET, MAX_BATCHES, MaintenancePolicy,
 };
 use super::report::{DatabaseOutcome, DatabaseReport, MaintenanceReport};
 use crate::management::ApiState;
@@ -449,8 +449,7 @@ fn run_batches(
         more_remains = true;
     }
     report.batches = batches;
-    report.budget_exhausted =
-        more_remains && (dry_run || batches >= MAX_BATCHES || time_exhausted);
+    report.budget_exhausted = more_remains && (dry_run || batches >= MAX_BATCHES || time_exhausted);
     if time_exhausted {
         tracing::info!(
             batches,

@@ -100,14 +100,18 @@ fn resolve_verified_models(
             interval.start_ms.abs_diff(other.start_ms) > tolerance
                 || interval.end_ms.abs_diff(other.end_ms) > tolerance
         }) {
-            tracing::warn!(models = outcomes.len(), "有效片头片尾模型区间冲突，保持未决");
+            tracing::warn!(
+                models = outcomes.len(),
+                "有效片头片尾模型区间冲突，保持未决"
+            );
             return VerificationOutcome::NeedsFullWindow {
                 reason: "conflicting_verified_templates".into(),
             };
         }
     }
     outcomes.sort_by(|a, b| {
-        b.supporting_episodes.cmp(&a.supporting_episodes)
+        b.supporting_episodes
+            .cmp(&a.supporting_episodes)
             .then(a.score.total_cmp(&b.score))
             .then(b.coverage.total_cmp(&a.coverage))
             .then(a.start_ms.cmp(&b.start_ms))
@@ -116,7 +120,9 @@ fn resolve_verified_models(
     // Called only for a nonempty list; avoid an unchecked unwrap nevertheless.
     match outcomes.into_iter().next() {
         Some(interval) => VerificationOutcome::Verified(interval),
-        None => VerificationOutcome::NeedsFullWindow { reason: "no_verified_templates".into() },
+        None => VerificationOutcome::NeedsFullWindow {
+            reason: "no_verified_templates".into(),
+        },
     }
 }
 

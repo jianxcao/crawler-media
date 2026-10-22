@@ -15,14 +15,7 @@ async fn patch_is_refused_while_a_removal_owns_the_library() {
         let store = store.lock();
         // A removal needs a second Library of the same kind to exist first.
         store
-            .create_library(
-                MediaKind::Movie,
-                "Second",
-                &["/s/t"],
-                "everyone",
-                true,
-                &[],
-            )
+            .create_library(MediaKind::Movie, "Second", &["/s/t"], "everyone", true, &[])
             .unwrap();
         let removal = store.begin_library_removal(&seeded.library_id).unwrap();
         assert_eq!(removal.state, "frozen");

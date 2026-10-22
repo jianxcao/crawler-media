@@ -3,8 +3,8 @@ use std::path::Path;
 use domain::{MediaKind, Subscribe};
 use subscribe::{QualityFact, SubscribeFacts};
 
-use crate::library_scope::{LibraryPathScope, StrictOwner};
 use super::{Store, StoreError};
+use crate::library_scope::{LibraryPathScope, StrictOwner};
 
 /// Unit coordinates of one coverage, as the legacy per-unit join rows expressed them:
 /// a whole-file unit（整片 / `(-1,-1)`）becomes `(None, None)`. An empty coverage keeps
@@ -113,7 +113,8 @@ pub fn evaluate_subscribe_facts_pure(
     for coverage in &snapshot.rows {
         let path = coverage.file.path.to_string_lossy().into_owned();
         let resolved = LibraryPathScope::resolve_path(Path::new(&path))?;
-        if !matches!(scope.owner(&resolved, snapshot.kind), StrictOwner::Owned(owner) if owner.id == target_library.id) {
+        if !matches!(scope.owner(&resolved, snapshot.kind), StrictOwner::Owned(owner) if owner.id == target_library.id)
+        {
             continue;
         }
         let fact = QualityFact {
@@ -144,7 +145,11 @@ pub fn evaluate_subscribe_facts_pure(
         if let Some(quality_res) = snapshot.qualities.get(&coverage.file.file_id) {
             match quality_res {
                 Ok(quality) => facts.set_quality(path.clone(), quality.clone()),
-                Err(e) => return Err(StoreError::Invalid(format!("corrupt persisted quality: {e}"))),
+                Err(e) => {
+                    return Err(StoreError::Invalid(format!(
+                        "corrupt persisted quality: {e}"
+                    )));
+                }
             }
         }
     }

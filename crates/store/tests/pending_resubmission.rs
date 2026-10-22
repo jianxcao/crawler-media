@@ -201,16 +201,36 @@ fn rejected_pending_is_only_revived_by_manual_submission() {
         downloader_id: None,
         submitted_at: None,
     };
-    store.record_pending_submissions(id, &[(10, pending())]).unwrap();
-    store.mark_pending_rejected(id, &[torrent.enclosure.clone()]).unwrap();
+    store
+        .record_pending_submissions(id, &[(10, pending())])
+        .unwrap();
+    store
+        .mark_pending_rejected(id, &[torrent.enclosure.clone()])
+        .unwrap();
     assert!(store.load_pending(id).unwrap().is_empty());
-    assert!(store.load_rejected_enclosures(id).unwrap().contains(&torrent.enclosure));
+    assert!(
+        store
+            .load_rejected_enclosures(id)
+            .unwrap()
+            .contains(&torrent.enclosure)
+    );
 
-    store.record_pending_submissions(id, &[(10, pending())]).unwrap();
+    store
+        .record_pending_submissions(id, &[(10, pending())])
+        .unwrap();
     store.merge_pending(id, &[(10, pending())]).unwrap();
-    assert!(store.load_pending(id).unwrap().is_empty(), "automatic paths keep it rejected");
+    assert!(
+        store.load_pending(id).unwrap().is_empty(),
+        "automatic paths keep it rejected"
+    );
 
-    store.record_manual_pending_submissions(id, &[(10, pending())]).unwrap();
-    assert_eq!(store.load_pending(id).unwrap().len(), 1, "manual submission revives");
+    store
+        .record_manual_pending_submissions(id, &[(10, pending())])
+        .unwrap();
+    assert_eq!(
+        store.load_pending(id).unwrap().len(),
+        1,
+        "manual submission revives"
+    );
     assert!(store.load_rejected_enclosures(id).unwrap().is_empty());
 }

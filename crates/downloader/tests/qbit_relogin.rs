@@ -24,8 +24,16 @@ fn serve(fake: Arc<Fake>) -> String {
             let req = String::from_utf8_lossy(&buf[..n]).to_string();
             let (status, body, extra) = if req.starts_with("POST /api/v2/auth/login") {
                 let n = fake.logins.fetch_add(1, Ordering::SeqCst);
-                ("200 OK", "Ok.".to_string(), format!("Set-Cookie: SID=sid-{n}; HttpOnly\r\n"))
-            } else if fake.forbid.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() {
+                (
+                    "200 OK",
+                    "Ok.".to_string(),
+                    format!("Set-Cookie: SID=sid-{n}; HttpOnly\r\n"),
+                )
+            } else if fake
+                .forbid
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
                 ("403 Forbidden", "Forbidden".into(), String::new())
             } else {
                 ("200 OK", "[]".into(), String::new())
@@ -53,22 +61,40 @@ fn connect(url: String) -> QbitDownloader {
 
 #[test]
 fn single_403_triggers_exactly_one_relogin_and_retry() {
-    let fake = Arc::new(Fake { logins: AtomicUsize::new(0), forbid: AtomicUsize::new(0) });
+    let fake = Arc::new(Fake {
+        logins: AtomicUsize::new(0),
+        forbid: AtomicUsize::new(0),
+    });
     let dl = connect(serve(fake.clone()));
     fake.forbid.store(1, Ordering::SeqCst);
     assert!(dl.task_snapshots().unwrap().is_empty());
-    assert_eq!(fake.logins.load(Ordering::SeqCst), 2, "connect + one re-login");
+    assert_eq!(
+        fake.logins.load(Ordering::SeqCst),
+        2,
+        "connect + one re-login"
+    );
     assert!(dl.task_snapshots().unwrap().is_empty());
-    assert_eq!(fake.logins.load(Ordering::SeqCst), 2, "renewed cookie is reused");
+    assert_eq!(
+        fake.logins.load(Ordering::SeqCst),
+        2,
+        "renewed cookie is reused"
+    );
 }
 
 #[test]
 fn persistent_403_is_an_authentication_error_without_loops() {
-    let fake = Arc::new(Fake { logins: AtomicUsize::new(0), forbid: AtomicUsize::new(0) });
+    let fake = Arc::new(Fake {
+        logins: AtomicUsize::new(0),
+        forbid: AtomicUsize::new(0),
+    });
     let dl = connect(serve(fake.clone()));
     fake.forbid.store(10, Ordering::SeqCst);
     let error = dl.task_snapshots().unwrap_err().to_string();
     assert!(error.contains("authentication failed"), "{error}");
     assert_eq!(fake.logins.load(Ordering::SeqCst), 2);
-    assert_eq!(fake.forbid.load(Ordering::SeqCst), 8, "exactly two attempts");
+    assert_eq!(
+        fake.forbid.load(Ordering::SeqCst),
+        8,
+        "exactly two attempts"
+    );
 }

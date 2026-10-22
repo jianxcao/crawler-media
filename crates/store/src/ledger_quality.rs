@@ -28,8 +28,12 @@ struct StoredQuality {
 
 impl From<&Release> for StoredQuality {
     fn from(release: &Release) -> Self {
-        Self { resolution: release.resolution.clone(), source: release.source.clone(),
-            codec: release.codec.clone(), hdr: release.hdr.clone() }
+        Self {
+            resolution: release.resolution.clone(),
+            source: release.source.clone(),
+            codec: release.codec.clone(),
+            hdr: release.hdr.clone(),
+        }
     }
 }
 
@@ -39,8 +43,12 @@ impl Store {
     pub(crate) fn persist_owned_quality(&self, facts: &SubscribeFacts) -> Result<(), StoreError> {
         let tx = self.library.unchecked_transaction()?;
         for (_, fact) in facts.entries() {
-            let Some(path) = fact.path.as_deref() else { continue };
-            let Some(quality) = facts.quality(path) else { continue };
+            let Some(path) = fact.path.as_deref() else {
+                continue;
+            };
+            let Some(quality) = facts.quality(path) else {
+                continue;
+            };
             tx.execute(
                 "UPDATE library_files SET release_quality = ?2 WHERE path_key = ?1 OR display_path = ?1",
                 params![path, serde_json::to_string(&StoredQuality::from(quality))?],
@@ -63,17 +71,35 @@ impl Store {
             Some(json) => {
                 let stored: StoredQuality = serde_json::from_str(&json)?;
                 Release {
-                    title: String::new(), year: None, season, episode,
-                    episode_to: None, resolution: stored.resolution, source: stored.source,
-                    codec: stored.codec, hdr: stored.hdr, subtitle_language: None,
-                    audio_language: None, group: None, confidence: coverage.file.confidence,
+                    title: String::new(),
+                    year: None,
+                    season,
+                    episode,
+                    episode_to: None,
+                    resolution: stored.resolution,
+                    source: stored.source,
+                    codec: stored.codec,
+                    hdr: stored.hdr,
+                    subtitle_language: None,
+                    audio_language: None,
+                    group: None,
+                    confidence: coverage.file.confidence,
                     season_inferred: false,
                 }
-            },
+            }
             None => Release {
-                title: String::new(), year: None, season, episode,
-                episode_to: None, resolution: None, source: None, codec: None, hdr: None,
-                subtitle_language: None, audio_language: None, group: None,
+                title: String::new(),
+                year: None,
+                season,
+                episode,
+                episode_to: None,
+                resolution: None,
+                source: None,
+                codec: None,
+                hdr: None,
+                subtitle_language: None,
+                audio_language: None,
+                group: None,
                 confidence: Confidence::High,
                 season_inferred: false,
             },

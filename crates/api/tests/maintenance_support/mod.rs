@@ -17,7 +17,7 @@ use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use jobs::{Job, JobKind};
 use parking_lot::Mutex;
 use serde_json::Value;
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 pub const TOKEN: &str = "maintenance-secret";
 pub const DAY: i64 = 86_400;

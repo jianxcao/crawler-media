@@ -565,11 +565,21 @@ async fn reidentify_inserts_the_tmdb_alias_for_a_media_matched_by_another_provid
         tvdb_only.id
     );
     assert_eq!(
-        store.file_coverage_by_id(f1).unwrap().unwrap().file.media_id,
+        store
+            .file_coverage_by_id(f1)
+            .unwrap()
+            .unwrap()
+            .file
+            .media_id,
         tvdb_only.id
     );
     assert_eq!(
-        store.file_coverage_by_id(f2).unwrap().unwrap().file.media_id,
+        store
+            .file_coverage_by_id(f2)
+            .unwrap()
+            .unwrap()
+            .file
+            .media_id,
         media.id
     );
 }

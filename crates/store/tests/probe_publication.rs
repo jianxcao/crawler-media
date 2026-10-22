@@ -10,10 +10,10 @@ use domain::{
     QualitySource, UnitKey,
 };
 use library::{ChapterMarker, MarkerType, Tracks};
-use store::files::FileDetails;
-use store::library_write::probe::{ProbePublication, CURRENT_TRACKS_VERSION};
-use store::library_write::{FilePublication as StorePublication, WriteScope};
 use store::Store;
+use store::files::FileDetails;
+use store::library_write::probe::{CURRENT_TRACKS_VERSION, ProbePublication};
+use store::library_write::{FilePublication as StorePublication, WriteScope};
 
 const MEDIA_ID: &str = "00000000-0000-0000-0000-0000000000aa";
 const FILE_ID: &str = "00000000-0000-0000-0000-0000000000bb";
@@ -87,7 +87,14 @@ fn seed(dir: &Path) -> Fixture {
     let store = Store::open(dir).unwrap();
     create_media(&store, MEDIA_ID, "Probe Me", MediaKind::Movie);
     let library = store
-        .create_library(MediaKind::Movie, "Movies", &["/movies"], "everyone", true, &[])
+        .create_library(
+            MediaKind::Movie,
+            "Movies",
+            &["/movies"],
+            "everyone",
+            true,
+            &[],
+        )
         .unwrap();
     let root_id = store
         .list_library_roots()
@@ -200,9 +207,11 @@ fn probe_publication_refreshes_quality_and_card_summary() {
         duration_ms: Some(7_200_000),
         details: Some(&details),
     };
-    assert!(store
-        .publish_probe_result(fixture.file.file_id, &publication, 2_000)
-        .unwrap());
+    assert!(
+        store
+            .publish_probe_result(fixture.file.file_id, &publication, 2_000)
+            .unwrap()
+    );
 
     let hot = query_row(
         dir,
@@ -252,7 +261,10 @@ fn probe_publication_refreshes_quality_and_card_summary() {
     );
     assert_eq!(resolution_terms, Some(1));
 
-    let tracks = store.get_file_meta(FILE_ID).unwrap().expect("probed tracks");
+    let tracks = store
+        .get_file_meta(FILE_ID)
+        .unwrap()
+        .expect("probed tracks");
     assert_eq!(tracks.video.unwrap().height, Some(2160));
 }
 
@@ -304,13 +316,7 @@ fn stale_probe_result_is_rejected_and_changes_nothing() {
     );
     assert_eq!(
         hot,
-        Some((
-            "720p".to_string(),
-            None,
-            None,
-            None,
-            "release".to_string(),
-        ))
+        Some(("720p".to_string(), None, None, None, "release".to_string(),))
     );
     let details_rows: Option<i64> = read(
         dir,

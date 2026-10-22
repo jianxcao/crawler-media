@@ -378,11 +378,7 @@ async fn source_replaced_after_key_capture_does_not_return_stale_warm_cache() {
         matches!(result, Err(SubtitleServiceError::Cancelled)),
         "源文件已变时必须取消，而不是返回旧暖缓存: {result:?}"
     );
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        0,
-        "暖缓存路径不应触发提取"
-    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "暖缓存路径不应触发提取");
 }
 
 #[tokio::test]

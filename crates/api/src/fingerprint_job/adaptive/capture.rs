@@ -57,7 +57,10 @@ pub async fn capture_or_reuse_segment_sample(
     };
     let capture = ctx.capture.clone();
     let control = ctx.gate.work_control(&request.row);
-    let result = tokio::task::spawn_blocking(move || capture.capture_window_controlled(&capture_req, &control)).await;
+    let result = tokio::task::spawn_blocking(move || {
+        capture.capture_window_controlled(&capture_req, &control)
+    })
+    .await;
     // Recheck even when FFmpeg returned an error: a deletion is cancellation, not a retry.
     let availability = ensure_source_available(&ctx.store.lock(), &request.row);
     if let Err(error) = availability {

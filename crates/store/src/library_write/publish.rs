@@ -14,8 +14,8 @@ use super::super::files::LibraryItemSummary;
 use super::super::{Store, StoreError};
 use super::reduce::{reduce_library_media, reduce_media_everywhere};
 use super::reduce_incremental::{
-    ChangedFile, FileSummaryFacts, read_file_summary_facts, read_file_units,
-    BatchSettled, reduce_library_media_incremental_in_batch,
+    BatchSettled, ChangedFile, FileSummaryFacts, read_file_summary_facts, read_file_units,
+    reduce_library_media_incremental_in_batch,
 };
 use super::{FilePublication, PublishReport, WriteScope};
 
@@ -112,12 +112,15 @@ impl Store {
                 .iter()
                 .map(|unit| (unit.season, unit.episode))
                 .collect();
-            affected.entry(file.media_id).or_default().push(PendingChange {
-                before,
-                before_units,
-                after,
-                after_units,
-            });
+            affected
+                .entry(file.media_id)
+                .or_default()
+                .push(PendingChange {
+                    before,
+                    before_units,
+                    after,
+                    after_units,
+                });
         }
         for (media_id, changes) in affected {
             // A media without a card yet cannot be moved by deltas: the incremental path

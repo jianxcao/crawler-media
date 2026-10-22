@@ -124,15 +124,21 @@ pub(crate) async fn artwork_candidates(
     match result {
         Ok(Ok(val)) => ok(val).into_response(),
         Ok(Err(resp)) => resp,
-        Err(BlockingError::Busy) => {
-            err(StatusCode::SERVICE_UNAVAILABLE, "runtime.busy", "服务繁忙，请稍后重试")
-        }
-        Err(BlockingError::Timeout) => {
-            err(StatusCode::GATEWAY_TIMEOUT, "library.artwork_timeout", "获取海报候选超时")
-        }
-        Err(BlockingError::Worker(msg)) => {
-            err(StatusCode::INTERNAL_SERVER_ERROR, "library.artwork_failed", &msg)
-        }
+        Err(BlockingError::Busy) => err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "runtime.busy",
+            "服务繁忙，请稍后重试",
+        ),
+        Err(BlockingError::Timeout) => err(
+            StatusCode::GATEWAY_TIMEOUT,
+            "library.artwork_timeout",
+            "获取海报候选超时",
+        ),
+        Err(BlockingError::Worker(msg)) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "library.artwork_failed",
+            &msg,
+        ),
     }
 }
 
@@ -227,8 +233,7 @@ fn visible_coverage(
         .ok()
         .flatten()?;
     let media = store.get_media(coverage.file.media_id).ok().flatten()?;
-    super::library::file_visible_to_user(store, &coverage.file, &media, user_id)
-        .then_some(coverage)
+    super::library::file_visible_to_user(store, &coverage.file, &media, user_id).then_some(coverage)
 }
 
 /// POST /libraries/{id}/items/{item_id}/artwork/select — apply a candidate
@@ -432,7 +437,12 @@ pub(crate) async fn fanart(
         None => {
             // 本地尚无背景图时，尝试即时从 TMDB 拉取并落地。抓取+落盘是副作用，
             // 放在 blocking worker 上跑到结束，async worker 不再被占用。
-            let media = state.store.lock().get_media(row.file.media_id).ok().flatten();
+            let media = state
+                .store
+                .lock()
+                .get_media(row.file.media_id)
+                .ok()
+                .flatten();
             if let Some(m) = media {
                 let state_for_work = state.clone();
                 let path = row.file.path.clone();
@@ -529,7 +539,12 @@ pub(crate) async fn poster(
     let poster = match poster {
         Some(p) => Some(p),
         None => {
-            let media = state.store.lock().get_media(row.file.media_id).ok().flatten();
+            let media = state
+                .store
+                .lock()
+                .get_media(row.file.media_id)
+                .ok()
+                .flatten();
             if let Some(m) = media {
                 let state_for_work = state.clone();
                 let path = row.file.path.clone();

@@ -76,7 +76,9 @@ impl Default for ReleaseInstaller {
 impl ReleaseInstaller {
     pub fn new() -> Self {
         Self {
-            base_url: format!("https://github.com/h4ckf0r0day/obscura/releases/download/{OBSCURA_VERSION}"),
+            base_url: format!(
+                "https://github.com/h4ckf0r0day/obscura/releases/download/{OBSCURA_VERSION}"
+            ),
             custom_assets: None,
             max_archive_bytes: MAX_ARCHIVE_BYTES,
         }
@@ -102,9 +104,21 @@ impl ReleaseInstaller {
 }
 
 impl crate::obscura_manager::ObscuraInstaller for ReleaseInstaller {
-    fn ensure_installed(&self, bin_dir: &Path, policy: InstallPolicy) -> Result<PathBuf, InstallError> {
-        let binary_path = bin_dir.join(if cfg!(windows) { "obscura.exe" } else { "obscura" });
-        let worker_path = bin_dir.join(if cfg!(windows) { "obscura-worker.exe" } else { "obscura-worker" });
+    fn ensure_installed(
+        &self,
+        bin_dir: &Path,
+        policy: InstallPolicy,
+    ) -> Result<PathBuf, InstallError> {
+        let binary_path = bin_dir.join(if cfg!(windows) {
+            "obscura.exe"
+        } else {
+            "obscura"
+        });
+        let worker_path = bin_dir.join(if cfg!(windows) {
+            "obscura-worker.exe"
+        } else {
+            "obscura-worker"
+        });
         let hash_path = bin_dir.join(".obscura.sha256");
 
         let os = std::env::consts::OS;
@@ -123,7 +137,10 @@ impl crate::obscura_manager::ObscuraInstaller for ReleaseInstaller {
         //    on-disk binaries must still hash to what was recorded at install.
         if binary_path.is_file() && worker_path.is_file() && hash_path.is_file() {
             let accepted_archive = if policy == InstallPolicy::PreinstalledOnly {
-                vec![expected_hash.to_ascii_lowercase(), MANIFEST_MARKER.to_string()]
+                vec![
+                    expected_hash.to_ascii_lowercase(),
+                    MANIFEST_MARKER.to_string(),
+                ]
             } else {
                 vec![expected_hash.to_ascii_lowercase()]
             };
@@ -179,7 +196,8 @@ impl crate::obscura_manager::ObscuraInstaller for ReleaseInstaller {
                 if let Some(len_header) = response.headers().get("content-length") {
                     if let Ok(len_str) = len_header.to_str() {
                         if let Ok(content_len) = len_str.parse::<u64>() {
-                            if content_len > self.max_archive_bytes || content_len != expected_size {
+                            if content_len > self.max_archive_bytes || content_len != expected_size
+                            {
                                 return Err(InstallError::InvalidArchive(format!(
                                     "Content-Length mismatch: expected {expected_size}, got {content_len}"
                                 )));
@@ -228,12 +246,22 @@ impl crate::obscura_manager::ObscuraInstaller for ReleaseInstaller {
         };
 
         // 3. Verify and unpack archive
-        let file = File::open(&archive_source_path).map_err(|e| InstallError::Io(std::io::Error::new(e.kind(), format!("open archive_source_path: {e}"))))?;
+        let file = File::open(&archive_source_path).map_err(|e| {
+            InstallError::Io(std::io::Error::new(
+                e.kind(),
+                format!("open archive_source_path: {e}"),
+            ))
+        })?;
         let mut hasher = Sha256::new();
         let mut buf_reader = BufReader::new(file);
         let mut buf = [0u8; 8192];
         loop {
-            let n = buf_reader.read(&mut buf).map_err(|e| InstallError::Io(std::io::Error::new(e.kind(), format!("buf_reader.read: {e}"))))?;
+            let n = buf_reader.read(&mut buf).map_err(|e| {
+                InstallError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("buf_reader.read: {e}"),
+                ))
+            })?;
             if n == 0 {
                 break;
             }
@@ -253,16 +281,35 @@ impl crate::obscura_manager::ObscuraInstaller for ReleaseInstaller {
         // Unpack into temporary staging directory
         let nonce = uuid::Uuid::new_v4().simple().to_string();
         let temp_unpack_dir = bin_dir.join(format!(".obscura-unpack-{nonce}"));
-        fs::create_dir_all(&temp_unpack_dir).map_err(|e| InstallError::Io(std::io::Error::new(e.kind(), format!("create temp_unpack_dir: {e}"))))?;
+        fs::create_dir_all(&temp_unpack_dir).map_err(|e| {
+            InstallError::Io(std::io::Error::new(
+                e.kind(),
+                format!("create temp_unpack_dir: {e}"),
+            ))
+        })?;
 
-        let tar_gz = File::open(&archive_source_path).map_err(|e| InstallError::Io(std::io::Error::new(e.kind(), format!("open tar_gz: {e}"))))?;
+        let tar_gz = File::open(&archive_source_path).map_err(|e| {
+            InstallError::Io(std::io::Error::new(e.kind(), format!("open tar_gz: {e}")))
+        })?;
         let tar = GzDecoder::new(BufReader::new(tar_gz));
         let mut archive = Archive::new(tar);
 
-        let entries = archive.entries().map_err(|e| InstallError::Io(std::io::Error::new(e.kind(), format!("archive.entries: {e}"))))?;
+        let entries = archive.entries().map_err(|e| {
+            InstallError::Io(std::io::Error::new(
+                e.kind(),
+                format!("archive.entries: {e}"),
+            ))
+        })?;
         for entry in entries {
-            let mut entry = entry.map_err(|e| InstallError::Io(std::io::Error::new(e.kind(), format!("entry item: {e}"))))?;
-            let path = entry.path().map_err(|e| InstallError::Io(std::io::Error::new(e.kind(), format!("entry.path: {e}"))))?.to_path_buf();
+            let mut entry = entry.map_err(|e| {
+                InstallError::Io(std::io::Error::new(e.kind(), format!("entry item: {e}")))
+            })?;
+            let path = entry
+                .path()
+                .map_err(|e| {
+                    InstallError::Io(std::io::Error::new(e.kind(), format!("entry.path: {e}")))
+                })?
+                .to_path_buf();
             let file_name = path
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -275,7 +322,10 @@ impl crate::obscura_manager::ObscuraInstaller for ReleaseInstaller {
                 .count()
                 == 1;
 
-            if !top_level || !EXPECTED_ENTRIES.contains(&file_name) || !entry.header().entry_type().is_file() {
+            if !top_level
+                || !EXPECTED_ENTRIES.contains(&file_name)
+                || !entry.header().entry_type().is_file()
+            {
                 let _ = fs::remove_dir_all(&temp_unpack_dir);
                 if archive_source_path != preinstalled_archive {
                     let _ = fs::remove_file(&archive_source_path);
@@ -284,9 +334,9 @@ impl crate::obscura_manager::ObscuraInstaller for ReleaseInstaller {
                     "unexpected or non-regular archive entry: {file_name}"
                 )));
             }
-            entry
-                .unpack_in(&temp_unpack_dir)
-                .map_err(|e| InstallError::InvalidArchive(format!("unpack_in '{file_name}': {e}")))?;
+            entry.unpack_in(&temp_unpack_dir).map_err(|e| {
+                InstallError::InvalidArchive(format!("unpack_in '{file_name}': {e}"))
+            })?;
         }
 
         #[cfg(unix)]
@@ -344,7 +394,11 @@ fn verify_manifest(manifest: &Path, bin: &Path, worker: &Path) -> Result<(), Ins
             })
             .find(|(_, n)| *n == name)
             .map(|(h, _)| h.to_ascii_lowercase())
-            .ok_or_else(|| InstallError::InvalidArchive(format!("{PREINSTALLED_MANIFEST} has no entry for {name}")))?;
+            .ok_or_else(|| {
+                InstallError::InvalidArchive(format!(
+                    "{PREINSTALLED_MANIFEST} has no entry for {name}"
+                ))
+            })?;
         let actual = sha256_file(path)?;
         if actual != expected {
             return Err(InstallError::HashMismatch { expected, actual });
@@ -368,14 +422,23 @@ fn sha256_file(path: &Path) -> Result<String, std::io::Error> {
 }
 
 /// Marker format: `archive=<sha>\nobscura=<sha>\nobscura-worker=<sha>\n`.
-fn installed_marker_matches(marker: &Path, expected_archive: &str, bin: &Path, worker: &Path) -> bool {
-    let Ok(text) = fs::read_to_string(marker) else { return false };
+fn installed_marker_matches(
+    marker: &Path,
+    expected_archive: &str,
+    bin: &Path,
+    worker: &Path,
+) -> bool {
+    let Ok(text) = fs::read_to_string(marker) else {
+        return false;
+    };
     let field = |key: &str| {
         text.lines()
             .find_map(|l| l.strip_prefix(key).and_then(|r| r.strip_prefix('=')))
             .map(|v| v.trim().to_ascii_lowercase())
     };
-    let (Some(archive), Some(b), Some(w)) = (field("archive"), field("obscura"), field("obscura-worker")) else {
+    let (Some(archive), Some(b), Some(w)) =
+        (field("archive"), field("obscura"), field("obscura-worker"))
+    else {
         return false;
     };
     archive.eq_ignore_ascii_case(expected_archive)
@@ -421,7 +484,9 @@ fn listener_owned_by_group(port: u16, pgid: u32) -> Option<bool> {
     let port_hex = format!("{port:04X}");
     let mut inodes = Vec::new();
     for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
-        let Ok(text) = fs::read_to_string(table) else { continue };
+        let Ok(text) = fs::read_to_string(table) else {
+            continue;
+        };
         for line in text.lines().skip(1) {
             let cols: Vec<&str> = line.split_whitespace().collect();
             if cols.len() < 10 || cols[3] != "0A" {
@@ -437,15 +502,30 @@ fn listener_owned_by_group(port: u16, pgid: u32) -> Option<bool> {
     }
     let procs = fs::read_dir("/proc").ok()?;
     for entry in procs.flatten() {
-        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
-        let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
         // pgrp is the 3rd field after the parenthesised comm.
-        let Some(after) = stat.rsplit_once(')').map(|(_, r)| r) else { continue };
-        let pgrp = after.split_whitespace().nth(2).and_then(|v| v.parse::<u32>().ok());
+        let Some(after) = stat.rsplit_once(')').map(|(_, r)| r) else {
+            continue;
+        };
+        let pgrp = after
+            .split_whitespace()
+            .nth(2)
+            .and_then(|v| v.parse::<u32>().ok());
         if pgrp != Some(pgid) {
             continue;
         }
-        let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else { continue };
+        let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+            continue;
+        };
         for fd in fds.flatten() {
             if let Ok(link) = fs::read_link(fd.path()) {
                 if inodes.iter().any(|i| link.as_os_str() == i.as_str()) {
@@ -518,7 +598,9 @@ impl DaemonLauncher for ProcessLauncher {
             .arg(port.to_string());
         // Obscura blocks loopback/RFC1918 targets by default (SSRF guard).
         // LAN-hosted Sites need an explicit operator opt-in.
-        if std::env::var(ALLOW_PRIVATE_NETWORK_ENV).is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")) {
+        if std::env::var(ALLOW_PRIVATE_NETWORK_ENV)
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        {
             command.arg("--allow-private-network");
         }
         #[cfg(unix)]
@@ -549,7 +631,10 @@ mod port_owner_tests {
         // SAFETY: getpgrp(2) has no preconditions.
         let own = unsafe { libc::getpgrp() } as u32;
         assert_eq!(listener_owned_by_group(port, own), Some(true));
-        assert_eq!(listener_owned_by_group(port, own.wrapping_add(7_777_777)), Some(false));
+        assert_eq!(
+            listener_owned_by_group(port, own.wrapping_add(7_777_777)),
+            Some(false)
+        );
         drop(listener);
     }
 }
@@ -570,7 +655,10 @@ mod spawn_thread_tests {
             .join()
             .unwrap();
         std::thread::sleep(Duration::from_millis(300));
-        assert!(handle.try_alive(), "spawning thread exit must not kill the daemon");
+        assert!(
+            handle.try_alive(),
+            "spawning thread exit must not kill the daemon"
+        );
         handle.kill();
         assert!(!handle.try_alive());
     }

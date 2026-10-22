@@ -75,7 +75,14 @@ pub(crate) async fn favorites(
                 let owned: Vec<domain::FileCoverage> = all_rows
                     .iter()
                     .filter(|cov| cov.file.media_id == media_id)
-                    .filter(|cov| crate::http::library::file_visible_to_user(&store, &cov.file, &media, Some(user_id)))
+                    .filter(|cov| {
+                        crate::http::library::file_visible_to_user(
+                            &store,
+                            &cov.file,
+                            &media,
+                            Some(user_id),
+                        )
+                    })
                     .cloned()
                     .collect();
                 if owned.is_empty() {
@@ -83,7 +90,9 @@ pub(crate) async fn favorites(
                 }
                 let library_id = owned
                     .first()
-                    .and_then(|cov| crate::http::library::library_for_file(&store, &cov.file, &media))
+                    .and_then(|cov| {
+                        crate::http::library::library_for_file(&store, &cov.file, &media)
+                    })
                     .map(|library| library.id)
                     .unwrap_or_default();
                 let pref = crate::http::library::preferred_coverage(&owned).cloned();
@@ -122,7 +131,9 @@ pub(crate) async fn favorites(
                 let poster = cand
                     .preferred_coverage
                     .as_ref()
-                    .and_then(|cov| crate::http::library::poster_path_with(&cov.file, files.as_ref()))
+                    .and_then(|cov| {
+                        crate::http::library::poster_path_with(&cov.file, files.as_ref())
+                    })
                     .map(|_| {
                         let cov = cand.preferred_coverage.as_ref().expect("checked");
                         crate::http::library::artwork_url("posters", cov.file.file_id)
@@ -228,15 +239,25 @@ fn favorite_tier(
     };
     let mut seen = false;
     let mut played = false;
-    if let Ok(Some(whole)) = store.unit_state(user_id, media.id, crate::store::UNIT_WHOLE, crate::store::UNIT_WHOLE) {
+    if let Ok(Some(whole)) = store.unit_state(
+        user_id,
+        media.id,
+        crate::store::UNIT_WHOLE,
+        crate::store::UNIT_WHOLE,
+    ) {
         played |= whole.played;
         seen |= whole.played || whole.position_ms > 0 || whole.play_count > 0;
     }
     for row in all_rows.iter().filter(|row| row.file.media_id == media_id) {
         for unit in &row.units {
             let (Ok(season), Ok(episode)) =
-                (u32::try_from(unit.season), u32::try_from(unit.episode)) else { continue };
-            if let Ok(Some(unit)) = store.unit_state(user_id, media.id, season as i32, episode as i32) {
+                (u32::try_from(unit.season), u32::try_from(unit.episode))
+            else {
+                continue;
+            };
+            if let Ok(Some(unit)) =
+                store.unit_state(user_id, media.id, season as i32, episode as i32)
+            {
                 seen |= unit.played || unit.position_ms > 0 || unit.play_count > 0;
             }
         }
@@ -297,4 +318,3 @@ fn sort_favorite_entries(
             .then_with(|| a.media_id.to_string().cmp(&b.media_id.to_string()))
     });
 }
-

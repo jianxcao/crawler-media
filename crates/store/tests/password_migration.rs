@@ -382,7 +382,9 @@ fn pre_cutover_plaintext_admin_credential_is_detected() {
         .unwrap();
 
     assert!(
-        !store.admin_credential_is_legacy_plaintext(admin_id).unwrap(),
+        !store
+            .admin_credential_is_legacy_plaintext(admin_id)
+            .unwrap(),
         "空口令不是遗留明文凭据"
     );
 
@@ -394,13 +396,17 @@ fn pre_cutover_plaintext_admin_credential_is_detected() {
     .unwrap();
     drop(conn);
     assert!(
-        store.admin_credential_is_legacy_plaintext(admin_id).unwrap(),
+        store
+            .admin_credential_is_legacy_plaintext(admin_id)
+            .unwrap(),
         "非 PHC 行必须被判为切换前遗留凭据"
     );
 
     store.set_password(admin_id, "plain-legacy-secret").unwrap();
     assert!(
-        !store.admin_credential_is_legacy_plaintext(admin_id).unwrap(),
+        !store
+            .admin_credential_is_legacy_plaintext(admin_id)
+            .unwrap(),
         "Argon2 行不得被误判为遗留明文"
     );
 }

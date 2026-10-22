@@ -3,10 +3,6 @@
 
 use std::collections::HashMap;
 
-use serde_json::{Value, json};
-use axum::response::{IntoResponse, Response};
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
 use crate::http::library::{
     browse_filter_from_query, browse_order_from_query, browse_store_error, missing_library,
     require_visible_library,
@@ -14,6 +10,10 @@ use crate::http::library::{
 use crate::http::{err, ok_list};
 use crate::management::ApiState;
 use crate::store::library_query;
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use serde_json::{Value, json};
 
 pub(crate) async fn gallery(
     State(state): State<ApiState>,
@@ -98,7 +98,10 @@ pub(crate) async fn gallery(
                 None,
             ));
         }
-        for still in stills.iter().filter(|still| still.media_id == item.media_id) {
+        for still in stills
+            .iter()
+            .filter(|still| still.media_id == item.media_id)
+        {
             images.push(image_json(
                 &library_id,
                 &item.title,

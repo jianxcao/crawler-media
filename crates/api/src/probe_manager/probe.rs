@@ -362,7 +362,8 @@ fn reused_media_duration(
         return None;
     }
     let duration_ms = reusable_media_duration(mgr, ledger_id, source_version)?;
-    mgr.timings.record_media_info(unit.job_id.as_deref(), 0, true);
+    mgr.timings
+        .record_media_info(unit.job_id.as_deref(), 0, true);
     tracing::info!(
         media_id = %unit.row.file.media_id,
         season = projected_season(&unit.row),

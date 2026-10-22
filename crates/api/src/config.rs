@@ -170,9 +170,9 @@ impl ServerConfig {
     /// Unknown `CRAWLER_MEDIA_*` variables are logged as warnings to catch
     /// typos (e.g. `CRAWLER_MEDIA_TMDB_KET` instead of `_KEY`).
     pub fn from_env() -> Self {
-        for key in unknown_env_keys(
-            std::env::vars_os().filter_map(|(key, _)| key.into_string().ok()),
-        ) {
+        for key in
+            unknown_env_keys(std::env::vars_os().filter_map(|(key, _)| key.into_string().ok()))
+        {
             tracing::warn!(
                 env = %key,
                 "unrecognized CRAWLER_MEDIA_* environment variable (typo?)"
@@ -218,7 +218,11 @@ pub fn parse_slow_request_ms(raw: Option<&str>) -> u64 {
 /// Read the slow-request threshold once at startup. The HTTP middleware takes
 /// it as injected layer state and never reads the environment itself.
 pub fn slow_request_ms() -> u64 {
-    parse_slow_request_ms(std::env::var("CRAWLER_MEDIA_SLOW_REQUEST_MS").ok().as_deref())
+    parse_slow_request_ms(
+        std::env::var("CRAWLER_MEDIA_SLOW_REQUEST_MS")
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// Environment lookup seam.
@@ -316,10 +320,7 @@ impl std::fmt::Debug for ProxyEnv {
         f.debug_struct("ProxyEnv")
             .field(
                 "url",
-                &self
-                    .url
-                    .as_deref()
-                    .map(crate::http_agent::mask_proxy_url),
+                &self.url.as_deref().map(crate::http_agent::mask_proxy_url),
             )
             .field("username", &self.username)
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
@@ -405,9 +406,7 @@ pub fn env_pinned_message(settings_key: &str) -> Option<String> {
 /// `CRAWLER_MEDIA_*` names in `keys` that [`KNOWN_ENV_VARS`] does not list.
 pub fn unknown_env_keys(keys: impl IntoIterator<Item = String>) -> Vec<String> {
     keys.into_iter()
-        .filter(|key| {
-            key.starts_with("CRAWLER_MEDIA_") && !KNOWN_ENV_VARS.contains(&key.as_str())
-        })
+        .filter(|key| key.starts_with("CRAWLER_MEDIA_") && !KNOWN_ENV_VARS.contains(&key.as_str()))
         .collect()
 }
 

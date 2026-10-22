@@ -95,7 +95,6 @@ pub(super) fn item_db_facts(
     }
 }
 
-
 /// 锁外渲染：stat/外部字幕 IO 都在这里，调用方必须先释放 Store 锁。
 ///
 /// `fields` 是调用方在锁内取好的页内合成快照（Task 8 观测输入 + Task 7 采纳）：页内条目
@@ -340,11 +339,7 @@ fn runtime_ticks(
 }
 
 /// 页内水合的实体范围：Series 行按 work 打分，剧集行按 episode 打分。
-pub(super) fn page_scope(
-    unit: (i32, i32),
-    media: &Media,
-    is_series: bool,
-) -> domain::EntityScope {
+pub(super) fn page_scope(unit: (i32, i32), media: &Media, is_series: bool) -> domain::EntityScope {
     if !is_series && media.kind == domain::MediaKind::Tv {
         let (season, episode) = unit;
         if season >= 0 && episode >= 0 {

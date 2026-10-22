@@ -26,12 +26,20 @@ fn create_media(store: &Store, id: &str, title: &str, kind: MediaKind) -> Media 
     m
 }
 
-fn create_library(store: &Store, name: &str, kind: MediaKind, root_path: &str) -> (store::Library, String) {
+fn create_library(
+    store: &Store,
+    name: &str,
+    kind: MediaKind,
+    root_path: &str,
+) -> (store::Library, String) {
     let lib = store
         .create_library(kind, name, &[root_path], "everyone", true, &[])
         .unwrap();
     let roots = store.list_library_roots().unwrap();
-    let root = roots.into_iter().find(|r| r.library_id == Some(lib.id.clone())).unwrap();
+    let root = roots
+        .into_iter()
+        .find(|r| r.library_id == Some(lib.id.clone()))
+        .unwrap();
     (lib, root.id)
 }
 
@@ -95,9 +103,7 @@ fn twelve_episodes_two_versions_reduces_to_one_item_twenty_four_files() {
 
     let mut publications = Vec::new();
     let mut files = Vec::new();
-    let units_list: Vec<Vec<UnitKey>> = (1..=12)
-        .map(|ep| vec![UnitKey::new(1, ep)])
-        .collect();
+    let units_list: Vec<Vec<UnitKey>> = (1..=12).map(|ep| vec![UnitKey::new(1, ep)]).collect();
 
     // 12 episodes x 2 versions = 24 files
     let mut file_idx = 10;
@@ -106,7 +112,15 @@ fn twelve_episodes_two_versions_reduces_to_one_item_twenty_four_files() {
             file_idx += 1;
             let fid = format!("00000000-0000-0000-0000-{:012x}", file_idx);
             let path = format!("Frieren/S01/Frieren.S01E{:02}.{ver}.mkv", ep);
-            let f = make_file(&fid, &lib.id, &root_id, media_id, &path, MediaKind::Tv, 1_000_000);
+            let f = make_file(
+                &fid,
+                &lib.id,
+                &root_id,
+                media_id,
+                &path,
+                MediaKind::Tv,
+                1_000_000,
+            );
             files.push(f);
         }
     }
@@ -122,7 +136,9 @@ fn twelve_episodes_two_versions_reduces_to_one_item_twenty_four_files() {
         });
     }
 
-    let report = store.publish_files(&scope, &publications, 1000).expect("publish_files");
+    let report = store
+        .publish_files(&scope, &publications, 1000)
+        .expect("publish_files");
     assert_eq!(report.inserted, 24);
 
     // Verify 24 files, 1 item, aggregated size = 24 * 1_000_000 = 24_000_000
@@ -152,7 +168,15 @@ fn single_file_multiple_episodes_not_double_counted() {
 
     // 1 file covering E01 and E02
     let fid = "00000000-0000-0000-0000-000000000011";
-    let file = make_file(fid, &lib.id, &root_id, media_id, "Frieren/S01E01-E02.mkv", MediaKind::Tv, 2_000_000);
+    let file = make_file(
+        fid,
+        &lib.id,
+        &root_id,
+        media_id,
+        "Frieren/S01E01-E02.mkv",
+        MediaKind::Tv,
+        2_000_000,
+    );
     let units = vec![UnitKey::new(1, 1), UnitKey::new(1, 2)];
 
     let pub_item = StorePublication {
@@ -163,7 +187,9 @@ fn single_file_multiple_episodes_not_double_counted() {
         probe_required: false,
     };
 
-    store.publish_files(&scope, &[pub_item], 1000).expect("publish multi-episode file");
+    store
+        .publish_files(&scope, &[pub_item], 1000)
+        .expect("publish multi-episode file");
 
     let item = store
         .get_library_item(scope.library_id, media_id.parse().unwrap())
@@ -171,7 +197,11 @@ fn single_file_multiple_episodes_not_double_counted() {
         .unwrap();
 
     assert_eq!(item.file_count, 1, "Must be exactly 1 file");
-    assert_eq!(item.size_bytes, Some(2_000_000), "Bytes must not be double counted");
+    assert_eq!(
+        item.size_bytes,
+        Some(2_000_000),
+        "Bytes must not be double counted"
+    );
     assert_eq!(item.distinct_episode_count, 2, "Distinct episodes = 2");
 }
 
@@ -208,12 +238,17 @@ fn pending_file_does_not_produce_playable_unit() {
         probe_required: false,
     };
 
-    store.publish_files(&scope, &[pub_item], 1000).expect("publish pending file");
+    store
+        .publish_files(&scope, &[pub_item], 1000)
+        .expect("publish pending file");
 
     let item = store
         .get_library_item(scope.library_id, media_id.parse().unwrap())
         .unwrap();
-    assert!(item.is_none(), "pending-only library must produce no library_items row");
+    assert!(
+        item.is_none(),
+        "pending-only library must produce no library_items row"
+    );
 
     // Re-publishing the same file as Published must create the item
     file.publication = FilePublication::Published;
@@ -224,7 +259,9 @@ fn pending_file_does_not_produce_playable_unit() {
         nfo_observation: None,
         probe_required: false,
     };
-    store.publish_files(&scope, &[pub_published], 2000).expect("republish published file");
+    store
+        .publish_files(&scope, &[pub_published], 2000)
+        .expect("republish published file");
 
     let item = store
         .get_library_item(scope.library_id, media_id.parse().unwrap())
@@ -297,25 +334,43 @@ fn stale_version_fails_and_rolls_back() {
         1_000_000,
     );
 
-    store.publish_files(&scope, &[StorePublication {
-        file: &file,
-        units: &[UnitKey::new(1, 1)],
-        expected_version: None,
-        nfo_observation: None,
-        probe_required: false,
-    }], 1000).unwrap();
+    store
+        .publish_files(
+            &scope,
+            &[StorePublication {
+                file: &file,
+                units: &[UnitKey::new(1, 1)],
+                expected_version: None,
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            1000,
+        )
+        .unwrap();
 
     // Now update with wrong expected version
-    let bad_ver = FileVersion { revision: 99, source_version: "v99".into() };
-    let err = store.publish_files(&scope, &[StorePublication {
-        file: &file,
-        units: &[UnitKey::new(1, 1)],
-        expected_version: Some(&bad_ver),
-        nfo_observation: None,
-        probe_required: false,
-    }], 2000).expect_err("stale version must fail");
+    let bad_ver = FileVersion {
+        revision: 99,
+        source_version: "v99".into(),
+    };
+    let err = store
+        .publish_files(
+            &scope,
+            &[StorePublication {
+                file: &file,
+                units: &[UnitKey::new(1, 1)],
+                expected_version: Some(&bad_ver),
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            2000,
+        )
+        .expect_err("stale version must fail");
 
-    assert!(matches!(err, StoreError::Protected(_) | StoreError::Invalid(_)));
+    assert!(matches!(
+        err,
+        StoreError::Protected(_) | StoreError::Invalid(_)
+    ));
 }
 
 #[test]
@@ -342,13 +397,19 @@ fn presence_verify_marks_missing_and_restores() {
         1_000_000,
     );
 
-    store.publish_files(&scope, &[StorePublication {
-        file: &file,
-        units: &[UnitKey::new(1, 1)],
-        expected_version: None,
-        nfo_observation: None,
-        probe_required: false,
-    }], 1000).unwrap();
+    store
+        .publish_files(
+            &scope,
+            &[StorePublication {
+                file: &file,
+                units: &[UnitKey::new(1, 1)],
+                expected_version: None,
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            1000,
+        )
+        .unwrap();
 
     // Observe Missing
     let obs_missing = PresenceObservation {
@@ -358,10 +419,15 @@ fn presence_verify_marks_missing_and_restores() {
         presence: FilePresence::Missing,
     };
 
-    let rep = store.apply_presence(&scope, &[obs_missing], PresenceMode::Verify, 1500).unwrap();
+    let rep = store
+        .apply_presence(&scope, &[obs_missing], PresenceMode::Verify, 1500)
+        .unwrap();
     assert_eq!(rep.missing, 1);
 
-    let item = store.get_library_item(scope.library_id, media_id.parse().unwrap()).unwrap().unwrap();
+    let item = store
+        .get_library_item(scope.library_id, media_id.parse().unwrap())
+        .unwrap()
+        .unwrap();
     assert_eq!(item.available_file_count, 0);
     assert_eq!(item.missing_file_count, 1);
 
@@ -373,10 +439,15 @@ fn presence_verify_marks_missing_and_restores() {
         presence: FilePresence::Present,
     };
 
-    let rep2 = store.apply_presence(&scope, &[obs_present], PresenceMode::Verify, 2000).unwrap();
+    let rep2 = store
+        .apply_presence(&scope, &[obs_present], PresenceMode::Verify, 2000)
+        .unwrap();
     assert_eq!(rep2.restored, 1);
 
-    let item2 = store.get_library_item(scope.library_id, media_id.parse().unwrap()).unwrap().unwrap();
+    let item2 = store
+        .get_library_item(scope.library_id, media_id.parse().unwrap())
+        .unwrap()
+        .unwrap();
     assert_eq!(item2.available_file_count, 1);
     assert_eq!(item2.missing_file_count, 0);
 }
@@ -405,13 +476,19 @@ fn publish_file_details_persists_details_atomically() {
         1_000_000,
     );
 
-    store.publish_files(&scope, &[StorePublication {
-        file: &file,
-        units: &[UnitKey::new(1, 1)],
-        expected_version: None,
-        nfo_observation: None,
-        probe_required: false,
-    }], 1000).unwrap();
+    store
+        .publish_files(
+            &scope,
+            &[StorePublication {
+                file: &file,
+                units: &[UnitKey::new(1, 1)],
+                expected_version: None,
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            1000,
+        )
+        .unwrap();
 
     let details = FileDetails {
         source_revision: 1,
@@ -426,9 +503,14 @@ fn publish_file_details_persists_details_atomically() {
         format_duration_ms: Some(120_000),
     };
 
-    store.publish_file_details(file.file_id, &file.version, &details, 2000).unwrap();
+    store
+        .publish_file_details(file.file_id, &file.version, &details, 2000)
+        .unwrap();
 
-    let fetched = store.get_file_details(file.file_id).unwrap().expect("details must exist");
+    let fetched = store
+        .get_file_details(file.file_id)
+        .unwrap()
+        .expect("details must exist");
     assert_eq!(fetched.source_version, "v1");
     assert_eq!(fetched.format_duration_ms, Some(120_000));
 }
@@ -457,15 +539,26 @@ fn deleting_all_files_cleans_item_but_preserves_media() {
         1_000_000,
     );
 
-    store.publish_files(&scope, &[StorePublication {
-        file: &file,
-        units: &[UnitKey::new(1, 1)],
-        expected_version: None,
-        nfo_observation: None,
-        probe_required: false,
-    }], 1000).unwrap();
+    store
+        .publish_files(
+            &scope,
+            &[StorePublication {
+                file: &file,
+                units: &[UnitKey::new(1, 1)],
+                expected_version: None,
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            1000,
+        )
+        .unwrap();
 
-    assert!(store.get_library_item(scope.library_id, media_id.parse().unwrap()).unwrap().is_some());
+    assert!(
+        store
+            .get_library_item(scope.library_id, media_id.parse().unwrap())
+            .unwrap()
+            .is_some()
+    );
 
     // Prune the file
     let obs = PresenceObservation {
@@ -474,10 +567,17 @@ fn deleting_all_files_cleans_item_but_preserves_media() {
         observed_path: file.path.clone(),
         presence: FilePresence::Missing,
     };
-    store.apply_presence(&scope, &[obs], PresenceMode::Prune, 2000).unwrap();
+    store
+        .apply_presence(&scope, &[obs], PresenceMode::Prune, 2000)
+        .unwrap();
 
     // Item must be cleaned up because 0 files remain
-    assert!(store.get_library_item(scope.library_id, media_id.parse().unwrap()).unwrap().is_none());
+    assert!(
+        store
+            .get_library_item(scope.library_id, media_id.parse().unwrap())
+            .unwrap()
+            .is_none()
+    );
 
     // But Canonical Media must still exist!
     let m = store.get_media(media_id.parse().unwrap()).unwrap();
@@ -514,13 +614,17 @@ fn publication_keeps_the_destination_identity_recorded_by_the_reservation() {
     reserved.transfer_mode = Some("copy".to_string());
     let units = [UnitKey::new(1, 1)];
     store
-        .publish_files(&scope, &[StorePublication {
-            file: &reserved,
-            units: &units,
-            expected_version: None,
-            nfo_observation: None,
-            probe_required: false,
-        }], 1000)
+        .publish_files(
+            &scope,
+            &[StorePublication {
+                file: &reserved,
+                units: &units,
+                expected_version: None,
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            1000,
+        )
         .expect("reserve the destination");
 
     let mut published = reserved.clone();
@@ -528,13 +632,17 @@ fn publication_keeps_the_destination_identity_recorded_by_the_reservation() {
     published.source_path = None;
     published.transfer_mode = None;
     let report = store
-        .publish_files(&scope, &[StorePublication {
-            file: &published,
-            units: &units,
-            expected_version: None,
-            nfo_observation: None,
-            probe_required: true,
-        }], 2000)
+        .publish_files(
+            &scope,
+            &[StorePublication {
+                file: &published,
+                units: &units,
+                expected_version: None,
+                nfo_observation: None,
+                probe_required: true,
+            }],
+            2000,
+        )
         .expect("complete the reservation");
     assert_eq!(report.updated, 1, "the completion updates the reserved row");
 
@@ -575,10 +683,12 @@ fn unit_rows(tmp: &std::path::Path) -> Vec<(i32, i32, i64, i64, Option<String>)>
              FROM library_units ORDER BY season, episode",
         )
         .unwrap();
-    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
-        .unwrap()
-        .map(Result::unwrap)
-        .collect()
+    stmt.query_map([], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+    })
+    .unwrap()
+    .map(Result::unwrap)
+    .collect()
 }
 
 /// An existing card gains a new episode through two versions in one batch: the
@@ -591,32 +701,63 @@ fn existing_card_batch_two_versions_of_new_episode() {
     let media_id = "00000000-0000-0000-0000-0000000000e2";
     create_media(&store, media_id, "Batch Show", MediaKind::Tv);
     let (lib, root_id) = create_library(&store, "TV", MediaKind::Tv, "/tv");
-    let scope = WriteScope { library_id: lib.id.parse().unwrap(), config_revision: 0 };
+    let scope = WriteScope {
+        library_id: lib.id.parse().unwrap(),
+        config_revision: 0,
+    };
     let e01 = make_file(
-        "00000000-0000-0000-0000-0000000000f1", &lib.id, &root_id, media_id,
-        "Batch/S01E01.mkv", MediaKind::Tv, 1_000,
+        "00000000-0000-0000-0000-0000000000f1",
+        &lib.id,
+        &root_id,
+        media_id,
+        "Batch/S01E01.mkv",
+        MediaKind::Tv,
+        1_000,
     );
     let e01_units = [UnitKey::new(1, 1)];
     let publication = |file, units| StorePublication {
-        file, units, expected_version: None, nfo_observation: None, probe_required: false,
+        file,
+        units,
+        expected_version: None,
+        nfo_observation: None,
+        probe_required: false,
     };
-    store.publish_files(&scope, &[publication(&e01, &e01_units)], 1_000).unwrap();
+    store
+        .publish_files(&scope, &[publication(&e01, &e01_units)], 1_000)
+        .unwrap();
 
     let a = make_file(
-        "00000000-0000-0000-0000-0000000000f2", &lib.id, &root_id, media_id,
-        "Batch/S01E02.a.mkv", MediaKind::Tv, 2_000,
+        "00000000-0000-0000-0000-0000000000f2",
+        &lib.id,
+        &root_id,
+        media_id,
+        "Batch/S01E02.a.mkv",
+        MediaKind::Tv,
+        2_000,
     );
     let b = make_file(
-        "00000000-0000-0000-0000-0000000000f3", &lib.id, &root_id, media_id,
-        "Batch/S01E02.b.mkv", MediaKind::Tv, 3_000,
+        "00000000-0000-0000-0000-0000000000f3",
+        &lib.id,
+        &root_id,
+        media_id,
+        "Batch/S01E02.b.mkv",
+        MediaKind::Tv,
+        3_000,
     );
     let e02_units = [UnitKey::new(1, 2)];
     store
-        .publish_files(&scope, &[publication(&a, &e02_units), publication(&b, &e02_units)], 2_000)
+        .publish_files(
+            &scope,
+            &[publication(&a, &e02_units), publication(&b, &e02_units)],
+            2_000,
+        )
         .unwrap();
 
     let incremental = unit_rows(tmp.path());
-    let e02 = incremental.iter().find(|row| (row.0, row.1) == (1, 2)).unwrap();
+    let e02 = incremental
+        .iter()
+        .find(|row| (row.0, row.1) == (1, 2))
+        .unwrap();
     assert_eq!((e02.2, e02.3), (2, 2));
     let item = store
         .get_library_item(scope.library_id, media_id.parse().unwrap())
@@ -624,6 +765,12 @@ fn existing_card_batch_two_versions_of_new_episode() {
         .unwrap();
     assert_eq!((item.file_count, item.distinct_episode_count), (3, 2));
 
-    store.refresh_media_summaries(media_id.parse().unwrap(), 3_000).unwrap();
-    assert_eq!(unit_rows(tmp.path()), incremental, "incremental == full reduce");
+    store
+        .refresh_media_summaries(media_id.parse().unwrap(), 3_000)
+        .unwrap();
+    assert_eq!(
+        unit_rows(tmp.path()),
+        incremental,
+        "incremental == full reduce"
+    );
 }

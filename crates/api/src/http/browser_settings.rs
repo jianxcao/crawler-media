@@ -58,7 +58,9 @@ pub(crate) async fn post_obscura_start(State(state): State<ApiState>) -> Respons
     tokio::task::spawn_blocking(move || match worker.obscura.start(policy) {
         Ok(()) => {
             worker.obscura.set_not_started_reason(None);
-            worker.browser.set_managed_endpoint(worker.obscura.cdp_url());
+            worker
+                .browser
+                .set_managed_endpoint(worker.obscura.cdp_url());
         }
         Err(error) => {
             tracing::warn!(%error, "Manual Obscura start failed");
@@ -78,7 +80,9 @@ pub(crate) async fn post_obscura_stop(State(state): State<ApiState>) -> Response
         // Clear the endpoint first so no session targets a released port.
         worker.browser.set_managed_endpoint(None);
         worker.obscura.stop();
-        worker.obscura.set_not_started_reason(Some("stopped_manually"));
+        worker
+            .obscura
+            .set_not_started_reason(Some("stopped_manually"));
     })
     .await;
     ok(serde_json::to_value(state.obscura.status()).unwrap_or_default()).into_response()
@@ -127,7 +131,11 @@ fn load_want(state: &ApiState) -> (ReconcileWant, crate::obscura_manager::Instal
                 .parse()
                 .unwrap_or(crate::obscura_manager::InstallPolicy::PreinstalledOnly),
         ),
-        Err(_) => (false, false, crate::obscura_manager::InstallPolicy::PreinstalledOnly),
+        Err(_) => (
+            false,
+            false,
+            crate::obscura_manager::InstallPolicy::PreinstalledOnly,
+        ),
     };
     let managed_browser_sites = store
         .list_sites()
@@ -146,7 +154,11 @@ fn load_want(state: &ApiState) -> (ReconcileWant, crate::obscura_manager::Instal
             0
         });
     (
-        ReconcileWant { switch_on, instance_endpoint_configured: instance, managed_browser_sites },
+        ReconcileWant {
+            switch_on,
+            instance_endpoint_configured: instance,
+            managed_browser_sites,
+        },
         policy,
     )
 }
@@ -193,7 +205,14 @@ pub async fn reconcile_off_runtime(state: &ApiState) {
         let s = state.clone();
         tokio::task::spawn_blocking(move || load_want(&s))
             .await
-            .unwrap_or((ReconcileWant { switch_on: false, instance_endpoint_configured: false, managed_browser_sites: 0 }, crate::obscura_manager::InstallPolicy::PreinstalledOnly))
+            .unwrap_or((
+                ReconcileWant {
+                    switch_on: false,
+                    instance_endpoint_configured: false,
+                    managed_browser_sites: 0,
+                },
+                crate::obscura_manager::InstallPolicy::PreinstalledOnly,
+            ))
     };
     // Stop decision: clear the endpoint and record the reason now (cheap,
     // lock-free for the daemon), then let the actual stop run detached so the
@@ -234,14 +253,27 @@ mod reconcile_tests {
     use super::*;
 
     fn want(on: bool, inst: bool, n: usize) -> ReconcileWant {
-        ReconcileWant { switch_on: on, instance_endpoint_configured: inst, managed_browser_sites: n }
+        ReconcileWant {
+            switch_on: on,
+            instance_endpoint_configured: inst,
+            managed_browser_sites: n,
+        }
     }
 
     #[test]
     fn decision_matches_plan() {
-        assert_eq!(not_started_reason(want(false, false, 3)), Some("switch_off"));
-        assert_eq!(not_started_reason(want(true, true, 3)), Some("instance_endpoint_configured"));
-        assert_eq!(not_started_reason(want(true, false, 0)), Some("no_managed_browser_sites"));
+        assert_eq!(
+            not_started_reason(want(false, false, 3)),
+            Some("switch_off")
+        );
+        assert_eq!(
+            not_started_reason(want(true, true, 3)),
+            Some("instance_endpoint_configured")
+        );
+        assert_eq!(
+            not_started_reason(want(true, false, 0)),
+            Some("no_managed_browser_sites")
+        );
         assert_eq!(not_started_reason(want(true, false, 1)), None);
     }
 }

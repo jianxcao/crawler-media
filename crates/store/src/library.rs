@@ -149,14 +149,20 @@ impl Store {
                     if video_raw.is_none() {
                         return Ok(None);
                     }
-                    let audio = serde_json::from_str::<Vec<library::AudioTrack>>(&row.get::<_, String>(0)?)
-                        .unwrap_or_default();
-                    let subtitles =
-                        serde_json::from_str::<Vec<library::SubtitleTrack>>(&row.get::<_, String>(1)?)
+                    let audio =
+                        serde_json::from_str::<Vec<library::AudioTrack>>(&row.get::<_, String>(0)?)
                             .unwrap_or_default();
+                    let subtitles = serde_json::from_str::<Vec<library::SubtitleTrack>>(
+                        &row.get::<_, String>(1)?,
+                    )
+                    .unwrap_or_default();
                     let video = video_raw
                         .and_then(|s| serde_json::from_str::<library::VideoTrack>(&s).ok());
-                    Ok(Some(library::Tracks { video, audio, subtitles }))
+                    Ok(Some(library::Tracks {
+                        video,
+                        audio,
+                        subtitles,
+                    }))
                 },
             )
             .optional()
@@ -306,7 +312,10 @@ impl Store {
                 continue;
             }
             let depth = root_path.components().count();
-            if best.as_ref().is_none_or(|(best_depth, _, _)| depth > *best_depth) {
+            if best
+                .as_ref()
+                .is_none_or(|(best_depth, _, _)| depth > *best_depth)
+            {
                 best = Some((depth, library_id, root.id.clone()));
             }
         }
@@ -380,9 +389,9 @@ impl Store {
 
     /// path → missing_at 映射（接口打「文件缺失」标用）。
     pub fn missing_at_by_path(&self) -> Result<std::collections::HashMap<String, i64>, StoreError> {
-        let mut stmt = self
-            .library
-            .prepare("SELECT display_path, missing_at FROM library_files WHERE missing_at IS NOT NULL")?;
+        let mut stmt = self.library.prepare(
+            "SELECT display_path, missing_at FROM library_files WHERE missing_at IS NOT NULL",
+        )?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;

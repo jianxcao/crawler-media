@@ -26,15 +26,23 @@ struct Reconciliation {
 
 fn reconciliation_error(error: crate::blocking_budget::BlockingError) -> Response {
     match error {
-        crate::blocking_budget::BlockingError::Busy => {
-            err(StatusCode::SERVICE_UNAVAILABLE, "runtime.busy", "服务繁忙，请重试")
-        }
-        crate::blocking_budget::BlockingError::Timeout => {
-            err(StatusCode::GATEWAY_TIMEOUT, "reconciliation.timeout", "目录索引超时")
-        }
+        crate::blocking_budget::BlockingError::Busy => err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "runtime.busy",
+            "服务繁忙，请重试",
+        ),
+        crate::blocking_budget::BlockingError::Timeout => err(
+            StatusCode::GATEWAY_TIMEOUT,
+            "reconciliation.timeout",
+            "目录索引超时",
+        ),
         crate::blocking_budget::BlockingError::Worker(message) => {
             tracing::error!(%message, "Reconciliation observation worker failed");
-            err(StatusCode::INTERNAL_SERVER_ERROR, "runtime.worker", "目录核对失败")
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "runtime.worker",
+                "目录核对失败",
+            )
         }
     }
 }
@@ -58,50 +66,71 @@ pub(crate) async fn path_reconciliation_preview(
 
     let preview_res = state
         .http_work
-        .run(std::time::Duration::from_secs(30), move || -> Result<(Vec<serde_json::Value>, usize, bool), String> {
-            let index = index_basenames(&roots, &control, 100_000)?;
-            let mut missing = Vec::new();
-            for row in rows {
-                let row_path = FsPath::new(&row.path);
-                if row_path.is_file() {
-                    continue;
-                }
-                let name_os = row_path.file_name().unwrap_or_default();
-                let name_str = name_os.to_str().unwrap_or_default().to_string();
+        .run(
+            std::time::Duration::from_secs(30),
+            move || -> Result<(Vec<serde_json::Value>, usize, bool), String> {
+                let index = index_basenames(&roots, &control, 100_000)?;
+                let mut missing = Vec::new();
+                for row in rows {
+                    let row_path = FsPath::new(&row.path);
+                    if row_path.is_file() {
+                        continue;
+                    }
+                    let name_os = row_path.file_name().unwrap_or_default();
+                    let name_str = name_os.to_str().unwrap_or_default().to_string();
 
-                let mut candidates = Vec::new();
-                if let Some(matches) = index.candidates.get(name_os) {
-                    for cand in matches {
-                        if cand != row_path {
-                            candidates.push(cand.display().to_string());
+                    let mut candidates = Vec::new();
+                    if let Some(matches) = index.candidates.get(name_os) {
+                        for cand in matches {
+                            if cand != row_path {
+                                candidates.push(cand.display().to_string());
+                            }
                         }
                     }
-                }
 
-                missing.push(json!({
-                    "file_id": row.file_id.to_string(),
-                    "media_id": row.media_id.to_string(),
-                    "path": row.path.display().to_string(),
-                    "file_name": name_str,
-                    "candidates": candidates,
-                }));
-            }
-            Ok((missing, index.examined, index.incomplete))
-        })
+                    missing.push(json!({
+                        "file_id": row.file_id.to_string(),
+                        "media_id": row.media_id.to_string(),
+                        "path": row.path.display().to_string(),
+                        "file_name": name_str,
+                        "candidates": candidates,
+                    }));
+                }
+                Ok((missing, index.examined, index.incomplete))
+            },
+        )
         .await;
 
     let (missing, examined, incomplete) = match preview_res {
         Ok(Ok(data)) => data,
-        Ok(Err(e)) => return err(StatusCode::INTERNAL_SERVER_ERROR, "reconciliation.index_failed", &e),
+        Ok(Err(e)) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "reconciliation.index_failed",
+                &e,
+            );
+        }
         Err(crate::blocking_budget::BlockingError::Busy) => {
-            return err(StatusCode::SERVICE_UNAVAILABLE, "runtime.busy", "服务繁忙，请重试");
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "runtime.busy",
+                "服务繁忙，请重试",
+            );
         }
         Err(crate::blocking_budget::BlockingError::Timeout) => {
-            return err(StatusCode::GATEWAY_TIMEOUT, "reconciliation.timeout", "目录索引超时");
+            return err(
+                StatusCode::GATEWAY_TIMEOUT,
+                "reconciliation.timeout",
+                "目录索引超时",
+            );
         }
         Err(crate::blocking_budget::BlockingError::Worker(message)) => {
             tracing::error!(%message, "目录索引 blocking worker 失败");
-            return err(StatusCode::INTERNAL_SERVER_ERROR, "runtime.worker", "目录索引失败");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "runtime.worker",
+                "目录索引失败",
+            );
         }
     };
 
@@ -126,18 +155,33 @@ pub(crate) async fn path_reconciliations(
         };
         let ownership = match store.library_ownership() {
             Ok(ownership) => ownership,
-            Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error.to_string()),
+            Err(error) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                );
+            }
         };
         let rows = match reconciliation_rows(&store, &body) {
             Ok(rows) => rows,
-            Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error.to_string()),
+            Err(error) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                );
+            }
         };
         (library, ownership, rows)
     };
     let files = state.browse_files.clone();
-    let work = state.http_work.run(HOUSEKEEPING_DEADLINE, move || {
-        observe_reconciliations(&library, ownership, rows, files.as_ref())
-    }).await;
+    let work = state
+        .http_work
+        .run(HOUSEKEEPING_DEADLINE, move || {
+            observe_reconciliations(&library, ownership, rows, files.as_ref())
+        })
+        .await;
     let (scope, rows) = match work {
         Ok(observed) => observed,
         Err(error) => {
@@ -153,7 +197,13 @@ pub(crate) async fn path_reconciliations(
     };
     let current = match store.library_ownership() {
         Ok(current) => current,
-        Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error.to_string()),
+        Err(error) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
     };
     let valid = scope.as_ref().is_some_and(|scope| {
         scope.matches(&current) && scope.accepts_work(&id) && current.accepts_work(&id)
@@ -180,7 +230,10 @@ pub(crate) async fn path_reconciliations(
     ok(json!({ "reconciled": reconciled, "errors": errors })).into_response()
 }
 
-fn reconciliation_rows(store: &store::Store, body: &Value) -> Result<Vec<Reconciliation>, store::StoreError> {
+fn reconciliation_rows(
+    store: &store::Store,
+    body: &Value,
+) -> Result<Vec<Reconciliation>, store::StoreError> {
     let mut rows = Vec::new();
     if let Some(input) = body["reconciliations"].as_array() {
         for row in input {
@@ -194,7 +247,11 @@ fn reconciliation_rows(store: &store::Store, body: &Value) -> Result<Vec<Reconci
                 }
                 None => None,
             };
-            rows.push(Reconciliation { from: from.to_owned(), to: to.to_owned(), source });
+            rows.push(Reconciliation {
+                from: from.to_owned(),
+                to: to.to_owned(),
+                source,
+            });
         }
     }
     Ok(rows)
@@ -205,7 +262,10 @@ fn observe_reconciliations(
     ownership: store::LibraryOwnership,
     rows: Vec<Reconciliation>,
     files: &dyn crate::browse_file_read::BrowseFileRead,
-) -> (Option<store::LibraryPathScope>, Vec<Result<Reconciliation, String>>) {
+) -> (
+    Option<store::LibraryPathScope>,
+    Vec<Result<Reconciliation, String>>,
+) {
     let scope = match store::LibraryPathScope::resolve(ownership) {
         Ok(scope) => Some(scope),
         Err(error) => {
@@ -213,31 +273,53 @@ fn observe_reconciliations(
             None
         }
     };
-    let observed = rows.into_iter().map(|row| {
-        if FsPath::new(&row.from).exists() {
-            return Err(format!("{}: 原文件仍然存在，不能重关联", row.from));
-        }
-        if !files.is_file(FsPath::new(&row.to)) {
-            return Err(format!("{} 不是文件", row.to));
-        }
-        if !strictly_owned(scope.as_ref(), FsPath::new(&row.to), library.kind, &library.id) {
-            return Err(format!("{} 不属于当前媒体库范围", row.to));
-        }
-        let Some((source, kind)) = row.source.as_ref() else {
-            return Err(format!("{} 不在台账中", row.from));
-        };
-        if !kind.is_some_and(|kind| strictly_owned(scope.as_ref(), FsPath::new(&source.file.path), kind, &library.id)) {
-            return Err(format!("{} 不属于当前媒体库", row.from));
-        }
-        Ok(row)
-    }).collect();
+    let observed = rows
+        .into_iter()
+        .map(|row| {
+            if FsPath::new(&row.from).exists() {
+                return Err(format!("{}: 原文件仍然存在，不能重关联", row.from));
+            }
+            if !files.is_file(FsPath::new(&row.to)) {
+                return Err(format!("{} 不是文件", row.to));
+            }
+            if !strictly_owned(
+                scope.as_ref(),
+                FsPath::new(&row.to),
+                library.kind,
+                &library.id,
+            ) {
+                return Err(format!("{} 不属于当前媒体库范围", row.to));
+            }
+            let Some((source, kind)) = row.source.as_ref() else {
+                return Err(format!("{} 不在台账中", row.from));
+            };
+            if !kind.is_some_and(|kind| {
+                strictly_owned(
+                    scope.as_ref(),
+                    FsPath::new(&source.file.path),
+                    kind,
+                    &library.id,
+                )
+            }) {
+                return Err(format!("{} 不属于当前媒体库", row.from));
+            }
+            Ok(row)
+        })
+        .collect();
     (scope, observed)
 }
 
-fn strictly_owned(scope: Option<&store::LibraryPathScope>, path: &FsPath, kind: domain::MediaKind, id: &str) -> bool {
+fn strictly_owned(
+    scope: Option<&store::LibraryPathScope>,
+    path: &FsPath,
+    kind: domain::MediaKind,
+    id: &str,
+) -> bool {
     let Some(scope) = scope else { return false };
     match store::LibraryPathScope::resolve_path(path) {
-        Ok(path) => matches!(scope.owner(&path, kind), store::StrictOwner::Owned(owner) if owner.id == id),
+        Ok(path) => {
+            matches!(scope.owner(&path, kind), store::StrictOwner::Owned(owner) if owner.id == id)
+        }
         Err(error) => {
             tracing::warn!(%error, "Reconciliation path resolution failed");
             false
@@ -245,9 +327,15 @@ fn strictly_owned(scope: Option<&store::LibraryPathScope>, path: &FsPath, kind: 
     }
 }
 
-fn apply_reconciliation(store: &store::Store, library: &store::Library, row: &Reconciliation) -> Result<(), String> {
+fn apply_reconciliation(
+    store: &store::Store,
+    library: &store::Library,
+    row: &Reconciliation,
+) -> Result<(), String> {
     let failure = || format!("{} -> {} 台账重命名失败", row.from, row.to);
-    let Some((source, kind)) = row.source.as_ref() else { return Err(failure()) };
+    let Some((source, kind)) = row.source.as_ref() else {
+        return Err(failure());
+    };
     let current = store.file_coverage_by_path(&row.from).map_err(|error| {
         tracing::warn!(%error, "Reconciliation source revalidation failed");
         failure()
@@ -285,22 +373,25 @@ pub(crate) async fn root_consolidation_preview(
         };
         library
     };
-    let result = state.http_work.run(HOUSEKEEPING_DEADLINE, move || {
-        let mut seen: Vec<(String, String)> = Vec::new(); // (canonical, path)
-        let mut duplicates = Vec::new();
-        for root in &library.root_paths {
-            let Ok(real) = std::fs::canonicalize(root) else {
-                continue;
-            };
-            let real = real.display().to_string();
-            if let Some((keep, _)) = seen.iter().find(|(c, _)| *c == real) {
-                duplicates.push(json!({ "keep": keep, "merge": root }));
-            } else {
-                seen.push((real, root.display().to_string()));
+    let result = state
+        .http_work
+        .run(HOUSEKEEPING_DEADLINE, move || {
+            let mut seen: Vec<(String, String)> = Vec::new(); // (canonical, path)
+            let mut duplicates = Vec::new();
+            for root in &library.root_paths {
+                let Ok(real) = std::fs::canonicalize(root) else {
+                    continue;
+                };
+                let real = real.display().to_string();
+                if let Some((keep, _)) = seen.iter().find(|(c, _)| *c == real) {
+                    duplicates.push(json!({ "keep": keep, "merge": root }));
+                } else {
+                    seen.push((real, root.display().to_string()));
+                }
             }
-        }
-        duplicates
-    }).await;
+            duplicates
+        })
+        .await;
     match result {
         Ok(duplicates) => ok(json!({ "duplicates": duplicates })).into_response(),
         Err(error) => {

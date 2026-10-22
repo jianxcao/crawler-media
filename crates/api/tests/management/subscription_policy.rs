@@ -11,7 +11,7 @@ use tower::ServiceExt;
 
 use super::common::*;
 use super::subscription_depth::{authed_app, fake_state};
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 async fn create_long_watch_sub(app: &axum::Router) -> String {
     let created = json_body(

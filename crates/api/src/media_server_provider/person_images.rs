@@ -23,7 +23,10 @@ pub(super) async fn resolve_person_image_url(
     let mut seen = HashSet::new();
     {
         let store = provider.state.store.lock();
-        for coverage in store.list_file_coverage().map_err(|error| error.to_string())? {
+        for coverage in store
+            .list_file_coverage()
+            .map_err(|error| error.to_string())?
+        {
             let file = &coverage.file;
             let Some(media) = store.get_media(file.media_id).ok().flatten() else {
                 continue;

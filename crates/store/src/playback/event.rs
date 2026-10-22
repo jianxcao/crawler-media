@@ -501,7 +501,13 @@ fn archive_superseded_session(
                 device_id, admin_ended, play_session_id, generation, file_id, file_revision,
                 source_version, COALESCE(timeline_mode, 'full_file')
          FROM playback_sessions WHERE user_id = ?1 AND device_id = ?2",
-        params![user, device, uuid::Uuid::new_v4().to_string(), now_ms / 1000, completed as i64],
+        params![
+            user,
+            device,
+            uuid::Uuid::new_v4().to_string(),
+            now_ms / 1000,
+            completed as i64
+        ],
     )?;
     tx.execute(
         "DELETE FROM playback_sessions WHERE user_id = ?1 AND device_id = ?2",

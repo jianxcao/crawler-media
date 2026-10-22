@@ -778,12 +778,11 @@ pub(crate) async fn put_metadata_overrides(
 
     match result {
         Ok(rev) => ok(json!({ "revision": rev })).into_response(),
-        Err(store::StoreError::Conflict(msg)) => {
-            err(StatusCode::CONFLICT, "conflict", &msg)
-        }
-        Err(e) => {
-            err(StatusCode::INTERNAL_SERVER_ERROR, "store_error", &e.to_string())
-        }
+        Err(store::StoreError::Conflict(msg)) => err(StatusCode::CONFLICT, "conflict", &msg),
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store_error",
+            &e.to_string(),
+        ),
     }
 }
-

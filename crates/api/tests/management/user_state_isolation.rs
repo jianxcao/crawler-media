@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::{Fixtures, json_body, request, state};
-use store::test_support::{publish_fixture_file, FixtureFile};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 fn app(tmp: &tempfile::TempDir) -> axum::Router {
     router(state(
@@ -139,7 +139,10 @@ async fn send_playback(
         .unwrap();
     assert_eq!(issued.status(), StatusCode::OK);
     let body = json_body(issued).await;
-    let session = body["data"]["play_session_id"].as_str().unwrap().to_string();
+    let session = body["data"]["play_session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     app.clone()
         .oneshot(request(
             "POST",

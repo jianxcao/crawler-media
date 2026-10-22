@@ -87,7 +87,14 @@ pub fn run(state: &ApiState) -> Result<(), String> {
         crate::watch_ledger::record_paths(&store, transferred.clone())?
     };
 
-    finish_intake_metadata(state, &transferred, inserted, &movie_lease, tv_lease.as_ref(), nfo)?;
+    finish_intake_metadata(
+        state,
+        &transferred,
+        inserted,
+        &movie_lease,
+        tv_lease.as_ref(),
+        nfo,
+    )?;
     if !outcome.errors.is_empty() {
         let err_msgs: Vec<String> = outcome
             .errors
