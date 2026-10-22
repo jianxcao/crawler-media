@@ -288,3 +288,74 @@ node "$REVIEW_ROOT/web-review.mjs"
 - 历史 12 处锁跨 await 候选中，4 处代理配置测试确实跨异步挂起持有进程全局锁，改为同步测试持有隔离锁、在内部 runtime 驱动请求；其余8处显式 drop 改词法作用域，不将这些已提前 drop 的位置误报为已复现死锁。部分阻塞测试屏障/通道增加有界等待，失败不再无限拖住 runtime shutdown。
 - 验证：`cargo test -p library` 113 passed；`cargo test -p api --lib` 169 passed。workspace 全 target 锁专项 Clippy 通过：`cargo clippy --workspace --all-targets --locked -- -A clippy::overly_complex_bool_expr -D clippy::await_holding_lock`。未放宽锁 lint，也未在源码加 allow。普通 Clippy 被未修改的 `release/src/boundary.rs:119` 布尔表达式 lint 阻断；因此不声称普通 Clippy 全绿或其余警告归零。
 - 此记录只覆盖本轮锁补丁，不替代数据库重构全量审查；其他 cutover 改动另行验证。
+
+## main 基线增量复审与后续设计（本轮）
+
+比较基线为 `main` 的 merge-base `86122d73a4a23439e1d83234590fdd98b388fc50`，起始被审提交 `999acdb`。用户随后要求先提交合理修复，再输出审查与详细设计。本节区别已修补丁与仍待设计的问题，不将历史 R01–R25 再报为新缺陷。
+
+### 设计判断
+
+Media／Library／Playback 放在同一 `library.db`、cache 按生命周期独立、物理文件与覆盖单元分离、局部同事务维护派生摘要，方向合理。DDL 的 root/Library 与 Media/kind 复合外键能防止单纯 ID 错配；但不能保证路径真属于 root，也不能代替所有写入口的生命周期与源版本校验。跨文件操作必须使用持久阶段恢复，不能把进程 Mutex 当作跨数据库原子提交。
+
+### 本轮保留的修复
+
+- 删除扫描旧 scope 编码的识别/升级/CAS/报告链，仅精确匹配当前编码。旧签名测试在修改前实际扫描并新增1文件，修改后取消且零登记。
+- Store LEFT JOIN 的空覆盖原本由 `maps::map_file_unit` 补成 whole；现区分 `None` 与显式 `(-1,-1)`，保存未知文件但不伪造单元。同步去掉 Subscribe/NFO/管理/搜索/重复检测与 Web 的空覆盖兼容兜底。TV S00E00 继续保留。
+- 管理台账与本地文件搜索一物理文件一行、完整 units；Web Library/Media/User/Filter UUID 不再 Number 转换；无效 numeric member filter 返回400；删除 facets 的 years 兼容键及 movie00 读取分支。`resolve_playback_for` 的 movie00 删除属于一致性清理：旧 `/decide` 与 `/sessions` 公开入口已有校验，不冒称新增复现漏洞。
+- 不再认领无标记的已有 Jobs 布局、不再引导明文管理员凭据隐式轮换；当前合法哈希与 Bearer 分离检查保留。凭据检查同时验证 PHC 完整盐/输出与 Argon2 算法/版本/参数。
+
+### 尚未修复的 Spec findings（按风险排序）
+
+#### N01 / P1：重复文件删除只要求任一单元重叠
+
+源码证据：`api/src/http/library_duplicates.rs` 的 `delete_duplicate`，siblings 通过 `.any(|unit| target_units.contains(unit))` 选出，再按物理实体个数判断能否删除。目标覆盖 E01+E02，另一个文件仅 E01，存在独立实体即可放行；剩余 E02 覆盖未证明。空覆盖修复不解决此问题。本轮未执行实际删除反例。
+
+设计：在 Store 事务内捕获目标完整覆盖、版本及同 Library 的剩余可发布/可用文件；逐目标单元确认至少一个不同物理实体仍覆盖，不能用候选个数代替集合包含。硬链接同实体不当独立副本；空/unknown/pending 均不提供可删除证据。准入时建立删除意图并与该版本绑定，锁外执行文件删除，再事务清理事实/摘要，沿用既有删除恢复机制，不新建兼容路径。
+
+验收：E01+E02 对 E01-only 拒绝且字节/台账不变；剩余两个独立文件分别覆盖 E01/E02 可删除；硬链接、missing、unknown、pending 不满足替代；捕获后版本变化拒绝旧删除；重启幂等恢复。
+
+#### N02 / P1：Transfer 写 API 的 scope 与实际文件未闭合
+
+源码证据：`store/src/library_write/transfer.rs:128-151` 的 `finish_transfer` 校验 scope Library 与 file version，但未核对持久文件 Library 等于 scope、未复核 Media 可写，随后发布实际 file_id 却归约 scope Library。`reserve_transfer` 也未先要求 candidate.library_id 等于 scope；主键冲突更新分支可修改另一条已有文件的 pending 状态。本轮为源码证明，未执行错 scope runner；不宣称外部请求可任意触达。
+
+设计：reserve/finish 共用事务内校验：scope/config/lifecycle、实际 file Library/root/Media/kind、Media 可写、预期版本、reservation pending 状态、源路径与 mode。主键碰撞只允许同一持久 reservation 幂等恢复，禁止将无关 published 行重新置 pending。finish 用 `WHERE file_id + library_id + version + publication_state='pending'` CAS，必须影响1行，再按验证后的实际归属维护 coverage、probe 与摘要。
+
+验收：A scope+B文件拒绝且两库事实/摘要不变；无关 file_id 碰撞拒绝；reserve 后 freeze/merge/retire 或换版本时 finish 拒绝；同一 reservation 重启继续仍使用原 file_id/source version；失败全事务回滚。
+
+#### N03 / P1：重命名写者未维持显式归属和派生事实
+
+源码证据：`store/src/ledger.rs:74-80` 的 `rename_file_path` 只 UPDATE path；无 root/lifecycle/Media 校验、无局部归约。调用者包括 organize 与 path reconciliation。隔离 Store 反例中跨 root rename 返回 `Ok(true)`；尝试补丁因未覆盖规范路径与 sidecar 一致性已撤回，仅保留 organize 对 `Ok(false)` 的错误/回滚处理。
+
+设计：明确分开“同归属改名”和“跨 root/Library 改挂”。观察阶段锁外完成路径规范化、组件边界/符号链接解析、sidecar 清单与文件源版本捕获；同归属请求事务重验 root/config/Media/lifecycle/目标唯一性。跨归属必须走已有持久 operation，不隐式 UPDATE root。文件与 NFO/artwork 的磁盘变更登记持久意图、锁外执行、事务 CAS 发布路径/输入引用并归约同一 Media；磁盘失败可恢复，不能先改字节后吞写入错误。路径对外保留 display 拼写，path_key 采用同一规范策略。
+
+验收：跨 root、嵌套 Library、symlink 目标、冻结、目标占用都拒绝且字节不变；普通改名后卡片 preferred path、NFO 输入、Subscribe 路径引用一致；各磁盘/提交边界崩溃可继续，不留半完成“成功”。
+
+#### N04 / P2：完整性检查把合法稀疏用户摘要判为缺失
+
+源码证据：`library_operations/integrity.rs:279-303` 对 Media 的每个 playback 用户要求每个有文件 Library 都存在用户摘要；而 `playback/user_summary/mod.rs:333-347,485-493` 明确只归约本 Library 拥有季/集并删除空摘要。用户仅收藏 S02，A库只有S01、B库有S02，A库缺行合法，却被反复报 missing；repair 的派生比较可仍判一致。本轮源码证明，未执行 runner。
+
+设计：检测与修复共用同一 scoped summary 归约结果，expected row 应是 Option，None 表示合法缺省；禁止从“任一 playback 行存在”推导每库必有摘要。最终复核必须使用与检测相同的期望集合与值，不能修复后仅复核另一套口径。
+
+验收：跨 Library 不相交季/集的收藏/观看不误报，whole 与 season 断言按拥有范围生效；真正缺失/错误用户行可发现并修复；check→repair→check 稳定 clean，未伪造其他用户状态。
+
+### 尚未修复的 Standards finding
+
+#### N05 / P2：完整性报告累积数组不受 REPORT_CAP 限制
+
+源码证据：`integrity.rs:40-41` 承诺最多100个样本，但 `:272,275,300,322` 的 missing/orphan 四组数组无界 push；仅 mismatched_media 截断。分页工作有界不代表 cursor/report 空间有界。
+
+设计：五类样本统一采用上限100的追加策略；精确总数独立持久化，不用样本长度推计数。保持 last_media_id keyset 游标、失败恢复与累计计数幂等，截断状态显式可观察。不要把整库坏行列表当持久 operation 游标。
+
+验收：远超100个坏 Media/用户、batch=1和100及中断续跑，样本均≤100、精确计数相同、序列化大小有固定上界；最后一页修复失败不虚报 clean。
+
+### 无兼容切换仍未完全收敛
+
+剩余源码证据：`api/src/worker/transfer/run.rs:108-115` 在持久与携带 units 都空时仍补 WHOLE；`media_server_provider/items.rs:48-64` 的 coverage_units 同样补 whole，被 `selection/light.rs:252` 和人物图片读取消费。`web/lib/api/libraries.ts:1798-1815,1895-1903` 仍接受多组旧 DTO 别名（key/path/file_path、id/file_id、season_number/season）。这意味着本轮提交后仍不能宣布用户要求的“所有旧逻辑清零”。前两者是明确剩余空覆盖推断，Web 别名属于合同残留，不仅凭命名就宣称运行时已出错。
+
+设计：Transfer 的空覆盖原样发布；若调用业务必须有明确覆盖，准入时拒绝而不补 whole。协议查询与水合保留物理文件但仅从明确 unit 生成逻辑可播身份，人物图片不能借未知单元冒充 work。Web 以实际后端分组/缺失清单 DTO 定义唯一字段，迁移全部渲染与请求调用方后一次删除别名适配；不静默返回空成功掩盖 schema 错误。验收覆盖 movie 显式 whole、TV S00E00、TV unknown、合并集文件及 unknown 的协议总数/页内结果一致；实际 API 模块对新响应保持字段且不读取旧别名。
+
+### 验证边界
+
+已实际执行：空覆盖/旧签名/未知Jobs/凭据公开 Store/Router 回归；Web 类型检查、841测试、生产构建；隔离生产进程 HTTP smoke（facets 无years、numeric member400、UUID member200、auth响应）；浏览器登录并点击UUID电影库成功。独立补丁审查发现并处理旧 Jobs 和 facets 测试契约残留。普通 Web lint 有15 errors/115 warnings（包括未改的 library-detail-view 空块和 request-signal 全局声明），普通 Clippy 有 release 布尔 lint 阻断；两者均不称全绿。全量 crate/workspace 结果另据本次最终执行输出登记，不把中途失败改写为通过。
+
+本轮不修改用户真实数据目录，不运行真实 Downloader/第三方 Catalog/NAS 压力验收。上列未修项保持 review/design 状态，不因已提交局部补丁宣称“所有旧逻辑已清除”或“系统不存在死锁”。
