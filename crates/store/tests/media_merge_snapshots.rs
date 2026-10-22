@@ -104,3 +104,56 @@ fn failed_merge_is_recoverable_and_not_taken_over() {
     assert_eq!(store.advance_media_merge(&op, 1300).unwrap().state, "succeeded");
     assert!(store.unfinished_media_merges().unwrap().is_empty());
 }
+
+fn override_row(db: &Connection, media: &str, fields: &str) {
+    db.execute(
+        "INSERT INTO media_metadata_overrides
+            (media_id, entity_scope, season, episode, locale, fields_json, revision)
+         VALUES (?1, 'work', -1, -1, 'zh-CN', ?2, 1)",
+        params![media, fields],
+    )
+    .unwrap();
+}
+
+/// R21: conflicting user locks refuse the merge with zero writes; disjoint locks merge.
+#[test]
+fn conflicting_override_begin_is_refused_and_disjoint_overrides_merge() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    create_media(&store, SURVIVOR, "Survivor", MediaKind::Movie);
+    create_media(&store, LOSER, "Loser", MediaKind::Movie);
+    let db = Connection::open(tmp.path().join("library.db")).unwrap();
+    override_row(&db, SURVIVOR, r#"{"title":"S"}"#);
+    override_row(&db, LOSER, r#"{"title":"L","overview":"LO"}"#);
+    let req = MediaMergeRequest {
+        request_id: "00000000-0000-0000-0001-0000000000c1".into(),
+        survivor: SURVIVOR.parse().unwrap(),
+        loser: LOSER.parse().unwrap(),
+        survivor_revision: 0,
+        loser_revision: 0,
+        refresh_targets: BTreeMap::from([("tmdb".to_string(), SURVIVOR.to_string())]),
+    };
+    let conflicting_override_begin = store.begin_media_merge(&req, 1000);
+    assert!(
+        matches!(&conflicting_override_begin, Err(store::StoreError::Protected(m)) if m.contains("lock field title")),
+        "{conflicting_override_begin:?}"
+    );
+    assert!(store.unfinished_media_merges().unwrap().is_empty(), "zero writes");
+
+    db.execute(
+        "UPDATE media_metadata_overrides SET fields_json = '{\"overview\":\"LO\"}' WHERE media_id = ?1",
+        params![LOSER],
+    )
+    .unwrap();
+    let op = store.begin_media_merge(&req, 1100).unwrap();
+    assert_eq!(store.advance_media_merge(&op, 1200).unwrap().state, "succeeded");
+    let merged: String = db
+        .query_row(
+            "SELECT fields_json FROM media_metadata_overrides WHERE media_id = ?1",
+            params![SURVIVOR],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let merged: serde_json::Value = serde_json::from_str(&merged).unwrap();
+    assert_eq!(merged, serde_json::json!({"title": "S", "overview": "LO"}));
+}

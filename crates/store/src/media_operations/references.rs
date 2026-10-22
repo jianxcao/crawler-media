@@ -192,6 +192,9 @@ pub(super) fn merge_metadata(
         "UPDATE media_metadata_sources SET media_id = ?1 WHERE media_id = ?2",
         params![survivor_str, loser_str],
     )?;
+    // Shared override keys: preflight refused conflicting fields, so the loser's fields
+    // the survivor lacks are folded into the survivor's row before the loser row goes.
+    merge_shared_overrides(tx, &survivor_str, &loser_str)?;
     tx.execute(
         "DELETE FROM media_metadata_overrides WHERE media_id = ?2 AND EXISTS (
              SELECT 1 FROM media_metadata_overrides o
@@ -612,6 +615,40 @@ pub(super) fn merge_collection_items(
                 )?;
             }
         }
+    }
+    Ok(())
+}
+
+fn merge_shared_overrides(tx: &Connection, survivor: &str, loser: &str) -> Result<(), StoreError> {
+    let mut stmt = tx.prepare(
+        "SELECT s.entity_scope, s.season, s.episode, s.locale, s.fields_json, l.fields_json
+           FROM media_metadata_overrides s
+           JOIN media_metadata_overrides l
+             ON l.entity_scope = s.entity_scope AND l.season = s.season
+            AND l.episode = s.episode AND l.locale = s.locale
+          WHERE s.media_id = ?1 AND l.media_id = ?2",
+    )?;
+    type Row = (String, i64, i64, String, String, String);
+    let rows: Vec<Row> = stmt
+        .query_map(params![survivor, loser], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (scope, season, episode, locale, survivor_json, loser_json) in rows {
+        let mut merged: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&survivor_json)?;
+        let loser_fields: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&loser_json)?;
+        let before = merged.len();
+        for (key, value) in loser_fields {
+            merged.entry(key).or_insert(value);
+        }
+        if merged.len() == before {
+            continue;
+        }
+        tx.execute(
+            "UPDATE media_metadata_overrides SET fields_json = ?6, revision = revision + 1
+             WHERE media_id = ?1 AND entity_scope = ?2 AND season = ?3 AND episode = ?4 AND locale = ?5",
+            params![survivor, scope, season, episode, locale, serde_json::Value::Object(merged).to_string()],
+        )?;
     }
     Ok(())
 }

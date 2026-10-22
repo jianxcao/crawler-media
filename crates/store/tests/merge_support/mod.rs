@@ -446,7 +446,8 @@ fn setup_merge_inner(advance: bool) -> MergeFixture {
         &library_db,
         loser_id,
         "zh-CN",
-        r#"{"title":"loser override"}"#,
+        // Same lock as the survivor: a conflicting lock is refused (R21), not dropped.
+        r#"{"title":"survivor override"}"#,
     );
     insert_metadata_override(
         &library_db,

@@ -256,6 +256,7 @@ impl Store {
         pin_revision(&tx, "survivor", &survivor_id, request.survivor_revision)?;
         pin_revision(&tx, "loser", &loser_id, request.loser_revision)?;
         require_refresh_targets(&tx, request)?;
+        refuse_override_conflicts(&tx, &survivor_id, &loser_id)?;
 
         let frozen = FrozenPair {
             survivor_before,
@@ -285,4 +286,39 @@ impl Store {
         );
         Ok(operation_id)
     }
+}
+
+/// Overrides of both Media that share a key must not set the same field differently: a
+/// user lock is never silently dropped by a merge (R21). Disjoint fields are merged.
+fn refuse_override_conflicts(conn: &Connection, survivor: &str, loser: &str) -> Result<(), StoreError> {
+    for (survivor_json, loser_json) in shared_override_pairs(conn, survivor, loser)? {
+        let s: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&survivor_json)?;
+        let l: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&loser_json)?;
+        if let Some(field) = l.iter().find_map(|(k, v)| s.get(k).filter(|sv| *sv != v).map(|_| k)) {
+            return Err(StoreError::Protected(format!(
+                "merge refused: both Media lock field {field} to different values"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// `(survivor fields_json, loser fields_json)` for every override key both Media carry.
+pub(crate) fn shared_override_pairs(
+    conn: &Connection,
+    survivor: &str,
+    loser: &str,
+) -> Result<Vec<(String, String)>, StoreError> {
+    let mut stmt = conn.prepare(
+        "SELECT s.fields_json, l.fields_json
+           FROM media_metadata_overrides s
+           JOIN media_metadata_overrides l
+             ON l.entity_scope = s.entity_scope AND l.season = s.season
+            AND l.episode = s.episode AND l.locale = s.locale
+          WHERE s.media_id = ?1 AND l.media_id = ?2",
+    )?;
+    let rows = stmt
+        .query_map(params![survivor, loser], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
 }
