@@ -262,14 +262,15 @@ node "$REVIEW_ROOT/web-review.mjs"
 | R06/R07 | 已修（95495b4） | `api --test review_remediation_playback`、`playback_event_identity` |
 | R08–R10 | 已修（dbce599） | `api --test playback_watch_time`、`review_remediation_playback` |
 | R11 | 已修已验 | `store --test playback_assertions event_activity_clock_is_seconds_not_milliseconds` |
-| R12 | 已修（3741bd4，Store/API决议）；Series协议筛选按集归约未单独回归 | `store --test playback_assertions` |
+| R12 | 已修（3741bd4，Store/API决议）；Series协议筛选按集归约已回归（53616b4） | `store --test playback_assertions` |
 | R13 | 已修（6b1f79d） | `api --test review_remediation_playback` |
 | R14 | 已修已验（浏览器Not run） | `node --test web/test/library-file-pagination.test.mjs` |
 | R15/R16 | 已修（36fe331、db1328a） | `api --test metadata_priority`、`store --test metadata_adoption` |
 | R17 | 已修（89cff86）：已入账视频只经driver导出，begin校验file/source/config/media，磁盘变化或无效XML拒写保字节，先register后终态；**未做**：锁外IO（S01导出侧） | `api --test storage_nfo_export normal_refresh_preserves_invalid_external_sidecar` |
 | R18 | 部分（e0c8d1f）：编辑按上次导出baseline三方比较；**未做**：局部(按Library/input)覆盖、删除NFO解除覆盖 | `api --test storage_nfo_export provider_title_changes_when_only_plot_was_edited` |
 | R19 | 已修已验（523cbcb、8bcfe2d、16b8689、5134ca8）：roots+locale同提交；unidentified/metadata inputs独立迁移；未覆盖文件预检拒绝；失败批回滚、保freeze、同operation可续 | `store --test library_reconfiguration_roots`、`library_reconfiguration a_failed_batch_rolls_back_keeps_the_freeze_and_stays_recoverable` |
-| R20/S02 | 已修已验（29a43ed）：每Media在savepoint内重归约对比items/units/terms/user行（排除*_revision），keyset分页≤batch，repair逐Media复核；100k测量Not run | `store --test library_integrity_facts missing_units_and_terms_are_detected` |
+| R20/S02 | 已修已验（29a43ed）：每Media在savepoint内重归约对比items/units/terms/user行（排除*_revision），keyset分页≤batch，repair逐Media复核；100k测量已跑（a6afd79：分页改为各表索引游标LIMIT、preferred子查询避开files_presence全库扫描）：seed 149s，检查1000批共122s，最慢批215ms，前10批1.19s/后10批1.00s | `store --test library_integrity_facts missing_units_and_terms_are_detected` |
+| 搜索扇出窗口 | 已修（fe2e4f5）：派生前预留search permit，窗口不再因任务异步取permit被重复扣减而缩小（request_admission/title_search 负载下偶发失败） | `api --test request_admission`、`api --test management title_search_beyond_the_window` |
 | R21 | 部分（be68cd5、923e6c4、05200ce）：同实体新快照胜/tie留survivor；人工锁冲突拒绝、互不冲突合并；失败operation保freeze可续不被接管；**未做**：异实体目标季集校验、pending fallback逐字段决议 | `store --test media_merge_snapshots` |
 | R22 | 已修（5cbc133） | `store --test media_alias_updates` |
 | R23 | 部分（2013e93、7ccb7f7）：Unicode casefold（SQLite函数）、Name原串tie置于全部请求键后、genre id按原名解析；**未做**：episode/locale级谓词、missing选中行水合丢弃 | `api --test jellyfin_sql_page` |
