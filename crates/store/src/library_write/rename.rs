@@ -1,8 +1,10 @@
-//! Same-ownership file rename.
+//! Same-ownership file rename (synchronous ledger update).
 //!
 //! A rename only changes the recorded path of one file inside the root and
 //! Library that already own it. Moving a file to another root or Library is a
-//! re-parent and must go through a durable operation; it is rejected here.
+//! re-parent and must go through [`super::rename_durable`] (persisted intent,
+//! lock-out disk IO, CAS publish). The helpers here stay available for the
+//! same-root fast path and for tests that only touch the ledger.
 
 use std::path::{Path, PathBuf};
 
@@ -14,13 +16,13 @@ use super::reduce::reduce_library_media;
 use crate::library_paths::resolved_path;
 use crate::{Store, StoreError};
 
-struct Owned {
-    library_id: String,
-    root_id: String,
-    media_id: String,
-    kind: String,
-    revision: i64,
-    source_version: String,
+pub(crate) struct Owned {
+    pub library_id: String,
+    pub root_id: String,
+    pub media_id: String,
+    pub kind: String,
+    pub revision: i64,
+    pub source_version: String,
 }
 
 impl Store {
@@ -144,7 +146,11 @@ impl Store {
     }
 }
 
-fn load_owned(tx: &rusqlite::Connection, id: &str, from: &str) -> Result<Owned, StoreError> {
+pub(crate) fn load_owned(
+    tx: &rusqlite::Connection,
+    id: &str,
+    from: &str,
+) -> Result<Owned, StoreError> {
     tx.query_row(
         "SELECT library_id, root_id, media_id, kind, file_revision, source_version
          FROM library_files

@@ -156,10 +156,6 @@ fn organize_inner(state: &ApiState, id: &str, body: &Value) -> Response {
         Ok(lease) => lease,
         Err(error) => return err(StatusCode::CONFLICT, "library.frozen", &error),
     };
-    let store = state.store.lock();
-    let Some(library) = store.get_library(id).ok().flatten() else {
-        return missing_library();
-    };
     let Some(renames) = body["renames"].as_array() else {
         return err(
             StatusCode::BAD_REQUEST,
@@ -167,17 +163,24 @@ fn organize_inner(state: &ApiState, id: &str, body: &Value) -> Response {
             "缺少 renames 列表",
         );
     };
+    let library = {
+        let store = state.store.lock();
+        let Some(library) = store.get_library(id).ok().flatten() else {
+            return missing_library();
+        };
+        library
+    };
     match lease
         .control()
         .signal()
-        .publish(|| Ok(apply_organize(&store, &library, renames)))
+        .publish(|| Ok(apply_organize(state, &library, renames)))
     {
         Ok(response) => response,
         Err(error) => err(StatusCode::CONFLICT, "library.frozen", &error),
     }
 }
 
-fn apply_organize(store: &crate::Store, library: &store::Library, renames: &[Value]) -> Response {
+fn apply_organize(state: &ApiState, library: &store::Library, renames: &[Value]) -> Response {
     let mut applied = 0usize;
     let mut skipped = Vec::new();
     let mut errors = Vec::new();
@@ -191,86 +194,82 @@ fn apply_organize(store: &crate::Store, library: &store::Library, renames: &[Val
             continue;
         }
         let from_path = FsPath::new(from);
-        let from_owner = store
-            .library_for_path_strict(from_path, library.kind)
-            .ok()
-            .flatten();
-        if from_owner.as_ref().map(|l| &l.id) != Some(&library.id) {
-            errors.push(format!("{from}: 源文件不属于当前媒体库"));
-            continue;
-        }
-        let to_owner = store
-            .library_for_path_strict(to_path, library.kind)
-            .ok()
-            .flatten();
-        if to_owner.as_ref().map(|l| &l.id) != Some(&library.id) {
-            errors.push(format!("{to}: 目标路径不属于当前媒体库范围"));
-            continue;
-        }
-        if !from_path.is_file() {
-            skipped.push(format!("源文件不存在 {from}"));
-            continue;
-        }
-        if to_path.exists() {
-            skipped.push(format!("目标已存在 {to}"));
-            continue;
-        }
-        // 预检目标路径在 ledger 中是否已被占用（避免改名后因 UNIQUE 约束造成 ledger 记录孤立和归属错乱）
-        if store.file_coverage_by_path(to).ok().flatten().is_some() {
-            errors.push(format!("{to}: 目标路径已在台账中存在"));
-            continue;
-        }
-        // 源文件必须已登记在当前媒体库的台账中，防止整理未登记的任意宿主机文件
-        let Some(source_ledger) = store.file_coverage_by_path(from).ok().flatten() else {
-            errors.push(format!("{from}: 源文件未登记在台账中"));
-            continue;
-        };
-        let Some(source_media) = store.get_media(source_ledger.file.media_id).ok().flatten() else {
-            errors.push(format!("{from}: 关联媒体信息不存在"));
-            continue;
-        };
-        if crate::http::library::library_for_file(&store, &source_ledger.file, &source_media)
-            .as_ref()
-            .map(|l| &l.id)
-            != Some(&library.id)
-        {
-            errors.push(format!("{from}: 台账记录不属于当前媒体库"));
-            continue;
-        }
-        let (file_id, version) = (
-            source_ledger.file.file_id,
-            source_ledger.file.version.clone(),
-        );
-        if let Err(error) = store.check_file_rename(file_id, &version, from_path, to_path) {
-            tracing::warn!(from, to, %error, "整理目标未通过归属复核，拒绝改名");
-            errors.push(format!("{from} -> {to}: {error}"));
-            continue;
-        }
-        if let Some(parent) = to_path.parent() {
-            if let Err(error) = std::fs::create_dir_all(parent) {
-                tracing::error!(from, to, %error, "创建整理目标目录失败");
-                errors.push(format!("{from}: {error}"));
+        let now_ms = crate::job_loop::unix_now();
+        let request = {
+            let store = state.store.lock();
+            let from_owner = store
+                .library_for_path_strict(from_path, library.kind)
+                .ok()
+                .flatten();
+            if from_owner.as_ref().map(|l| &l.id) != Some(&library.id) {
+                errors.push(format!("{from}: 源文件不属于当前媒体库"));
                 continue;
             }
-        }
-        if let Err(error) = std::fs::rename(from, to) {
+            let to_owner = store
+                .library_for_path_strict(to_path, library.kind)
+                .ok()
+                .flatten();
+            if to_owner.as_ref().map(|l| &l.id) != Some(&library.id) {
+                errors.push(format!("{to}: 目标路径不属于当前媒体库范围"));
+                continue;
+            }
+            if !from_path.is_file() {
+                skipped.push(format!("源文件不存在 {from}"));
+                continue;
+            }
+            if to_path.exists() {
+                skipped.push(format!("目标已存在 {to}"));
+                continue;
+            }
+            if store.file_coverage_by_path(to).ok().flatten().is_some() {
+                errors.push(format!("{to}: 目标路径已在台账中存在"));
+                continue;
+            }
+            let Some(source_ledger) = store.file_coverage_by_path(from).ok().flatten() else {
+                errors.push(format!("{from}: 源文件未登记在台账中"));
+                continue;
+            };
+            let Some(source_media) = store.get_media(source_ledger.file.media_id).ok().flatten()
+            else {
+                errors.push(format!("{from}: 关联媒体信息不存在"));
+                continue;
+            };
+            if crate::http::library::library_for_file(&store, &source_ledger.file, &source_media)
+                .as_ref()
+                .map(|l| &l.id)
+                != Some(&library.id)
+            {
+                errors.push(format!("{from}: 台账记录不属于当前媒体库"));
+                continue;
+            }
+            let (file_id, version) = (
+                source_ledger.file.file_id,
+                source_ledger.file.version.clone(),
+            );
+            match store.begin_file_rename(file_id, &version, from_path, to_path, now_ms) {
+                Ok(request) => request,
+                Err(error) => {
+                    tracing::warn!(from, to, %error, "整理目标未通过归属复核，拒绝改名");
+                    errors.push(format!("{from} -> {to}: {error}"));
+                    continue;
+                }
+            }
+        };
+        // Store mutex released: durable intent is already on disk.
+        if let Err(error) = store::library_write::move_rename_bytes(&request) {
             tracing::error!(from, to, %error, "整理文件重命名失败");
             errors.push(format!("{from} 重命名失败: {error}"));
             continue;
         }
-        match store.rename_file_within_root(file_id, &version, from_path, to_path) {
-            Ok(()) => {}
-            result => {
-                tracing::error!(?result, from, to, "整理文件更新台账失败，尝试回滚磁盘");
-                if let Err(rollback_err) = std::fs::rename(to, from) {
-                    tracing::error!(%rollback_err, from, to, "整理文件回滚重命名失败");
-                }
-                errors.push(format!("{from} -> {to}: 台账记录更新失败: {result:?}"));
-                continue;
-            }
+        let store = state.store.lock();
+        if let Err(error) = store
+            .apply_file_rename_disk(&request.rename_id, now_ms)
+            .and_then(|_| store.complete_file_rename(&request.rename_id, now_ms))
+        {
+            tracing::error!(from, to, %error, "整理文件更新台账失败");
+            errors.push(format!("{from} -> {to}: 台账记录更新失败: {error}"));
+            continue;
         }
-        // 重命名后重写分集 NFO（新 stem）：扫描只给新文件写 NFO，已入台账的
-        // 文件整理后必须跟着换名，否则 .nfo 变成孤儿。
         match store.file_coverage_by_path(to) {
             Ok(Some(coverage)) => {
                 if let Ok(Some(media_row)) = store.get_media(coverage.file.media_id) {
@@ -280,11 +279,6 @@ fn apply_organize(store: &crate::Store, library: &store::Library, renames: &[Val
                             let _ = library::write_nfo(&nfo_path, &media_row, None);
                         }
                     }
-                }
-                // 归属订阅的事实路径同步（洗版替换仍能找到旧文件的位置）。
-                if let Err(error) = store.rewrite_fact_paths(coverage.file.media_id, from, to) {
-                    tracing::error!(from, to, %error, "整理后同步订阅事实路径失败");
-                    errors.push(format!("{to}: 订阅事实路径同步失败: {error}"));
                 }
             }
             Ok(None) => {}

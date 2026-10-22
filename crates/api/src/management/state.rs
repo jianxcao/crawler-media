@@ -327,6 +327,15 @@ impl ApiState {
                 Ok(_) => {}
                 Err(e) => tracing::error!(%e, "恢复未完成的扫描操作失败"),
             }
+            match state
+                .store
+                .lock()
+                .resume_pending_file_renames(crate::store::unix_now())
+            {
+                Ok(n) if n > 0 => tracing::info!(count = n, "已恢复未完成的文件改名/改挂"),
+                Ok(_) => {}
+                Err(e) => tracing::error!(%e, "恢复未完成的文件改名/改挂失败"),
+            }
             state.scan_coordinator.trigger_next(&state);
         }
         // 幂等对账：崩溃可能停在「DB 已提交、封面文件还没删」之间，每次启动重试。

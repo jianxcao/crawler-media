@@ -347,23 +347,27 @@ fn apply_reconciliation(
     if current.as_ref() != Some(source) || media.as_ref().map(|media| media.kind) != *kind {
         return Err(failure());
     }
-    match store.rename_file_within_root(
-        source.file.file_id,
-        &source.file.version,
-        FsPath::new(&row.from),
-        FsPath::new(&row.to),
-    ) {
-        Ok(()) => {
-            if let Err(error) = store.rewrite_fact_paths(source.file.media_id, &row.from, &row.to) {
-                tracing::error!(library_id = %library.id, %error, "Reconciliation fact path rewrite failed");
-            }
-            Ok(())
-        }
-        result => {
-            tracing::warn!(library_id = %library.id, ?result, "Reconciliation ledger rename failed");
-            Err(failure())
-        }
-    }
+    let now = crate::job_loop::unix_now();
+    let request = store
+        .begin_file_rename(
+            source.file.file_id,
+            &source.file.version,
+            FsPath::new(&row.from),
+            FsPath::new(&row.to),
+            now,
+        )
+        .map_err(|error| {
+            tracing::warn!(library_id = %library.id, %error, "Reconciliation begin rename failed");
+            failure()
+        })?;
+    // Disk already sits at `to` for reconciliation; apply marks disk_applied then complete CAS-publishes.
+    store
+        .apply_file_rename_disk(&request.rename_id, now)
+        .and_then(|_| store.complete_file_rename(&request.rename_id, now))
+        .map_err(|error| {
+            tracing::warn!(library_id = %library.id, %error, "Reconciliation durable rename failed");
+            failure()
+        })
 }
 
 /// POST /libraries/{id}/root-consolidation-preview — 物理目录去重。

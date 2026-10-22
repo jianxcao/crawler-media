@@ -264,6 +264,28 @@ CREATE TABLE library_removals (
 );
 CREATE TABLE library_removal_roots (operation_id TEXT NOT NULL REFERENCES library_removals(operation_id),path TEXT NOT NULL,PRIMARY KEY(operation_id,path));
 CREATE TABLE pending_file_deletions (path TEXT PRIMARY KEY NOT NULL,reason TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_retry_at INTEGER NOT NULL DEFAULT 0,last_error TEXT,file_id TEXT,file_size INTEGER,file_inode INTEGER);
+CREATE TABLE pending_file_renames (
+ rename_id TEXT PRIMARY KEY NOT NULL,
+ file_id TEXT NOT NULL,
+ from_path TEXT NOT NULL,
+ to_path TEXT NOT NULL,
+ expected_revision INTEGER NOT NULL,
+ expected_source_version TEXT NOT NULL,
+ from_library_id TEXT NOT NULL,
+ from_root_id TEXT NOT NULL,
+ to_library_id TEXT NOT NULL,
+ to_root_id TEXT NOT NULL,
+ sidecars_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(sidecars_json)),
+ phase TEXT NOT NULL CHECK(phase IN ('planned','disk_applied','failed')),
+ file_size INTEGER,
+ file_inode INTEGER,
+ attempts INTEGER NOT NULL DEFAULT 0,
+ next_retry_at INTEGER NOT NULL DEFAULT 0,
+ last_error TEXT,
+ created_at_ms INTEGER NOT NULL,
+ updated_at_ms INTEGER NOT NULL
+);
+CREATE INDEX pending_file_renames_due ON pending_file_renames(next_retry_at, rename_id);
 CREATE TABLE scrape_sidecars (file_id TEXT NOT NULL REFERENCES library_files(file_id) ON DELETE CASCADE,kind TEXT NOT NULL,path TEXT NOT NULL,PRIMARY KEY(file_id,kind));
 CREATE TABLE unidentified (library_id TEXT NOT NULL,root_id TEXT NOT NULL,path TEXT NOT NULL,confidence TEXT NOT NULL,PRIMARY KEY(library_id,path),FOREIGN KEY(root_id,library_id) REFERENCES library_roots(root_id,library_id));
 CREATE TABLE scan_operations (
