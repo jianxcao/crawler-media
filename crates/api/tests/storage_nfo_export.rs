@@ -507,7 +507,6 @@ async fn normal_refresh_preserves_invalid_external_sidecar() {
 
 /// R18: an edit to the plot alone must not lock the title the provider later changes.
 #[tokio::test]
-#[ignore = "R18 fixed in the next commit"]
 async fn provider_title_changes_when_only_plot_was_edited() {
     let temp = tempfile::tempdir().unwrap();
     let catalog = Arc::new(ExportCatalog::default());

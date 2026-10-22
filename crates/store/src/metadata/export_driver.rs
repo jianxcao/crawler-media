@@ -136,7 +136,13 @@ impl Store {
             request.scope,
             &locale,
         )?;
-        let Some(diff) = nfo_field_diff(&parsed.fields, &effective.fields) else {
+        // R18: an edit is what changed relative to what we last *exported*, not relative
+        // to today's provider value; otherwise an untouched field would be locked to the
+        // previous provider value as soon as the provider moves on.
+        let Some(baseline) = anchor.fields else {
+            return Ok(false);
+        };
+        let Some(diff) = nfo_field_diff(&parsed.fields, &baseline) else {
             return Ok(false);
         };
         let override_locale = effective.actual_locale.as_str();
@@ -347,10 +353,10 @@ impl Store {
     ) -> Result<Option<NfoExportAnchor>, StoreError> {
         let (season, episode) = request.scope.season_episode();
         let key = request.path.to_string_lossy();
-        let digest: Option<Option<String>> = self
+        let row: Option<(Option<String>, Option<String>)> = self
             .library
             .query_row(
-                "SELECT export_digest FROM library_metadata_inputs
+                "SELECT export_digest, export_fields_json FROM library_metadata_inputs
                  WHERE library_id = ?1 AND media_id = ?2 AND entity_scope = ?3
                    AND season = ?4 AND episode = ?5 AND locale = ?6 AND input_key = ?7",
                 params![
@@ -362,10 +368,17 @@ impl Store {
                     self.nfo_export_locale(request)?,
                     key.as_ref()
                 ],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        Ok(digest.map(|digest| NfoExportAnchor { digest }))
+        let Some((digest, fields_json)) = row else {
+            return Ok(None);
+        };
+        let fields = match fields_json {
+            Some(json) => Some(serde_json::from_str::<MetadataFields>(&json)?),
+            None => None,
+        };
+        Ok(Some(NfoExportAnchor { digest, fields }))
     }
 
     fn tag_nfo_export(&self, request: &NfoExportRequest) -> Result<bool, StoreError> {
@@ -403,9 +416,11 @@ impl Store {
 /// Baseline digest of the sidecar as this library last registered it.
 struct NfoExportAnchor {
     digest: Option<String>,
+    /// Fields of the last export: the three-way baseline an edit is measured against.
+    fields: Option<MetadataFields>,
 }
 
-/// Fields the sidecar changed relative to effective metadata, or `None`.
+/// Fields the sidecar changed relative to the last exported baseline, or `None`.
 ///
 /// A field the sidecar does not carry at all (`Missing`) is ambiguous — the
 /// renderer deliberately omits artwork and list provenance — so a removal is not
