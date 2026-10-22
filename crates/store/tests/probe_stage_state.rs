@@ -216,7 +216,7 @@ fn two_connections_claim_due_stage_once() {
 
     // At time 1_000_050 + 60_000, stage is due
     let due_time = 1_000_050 + 60_000;
-    let due_list = store.list_due_probe_stages(due_time, 10).unwrap();
+    let due_list = store.claim_due_probe_stages(due_time, 60_000, 10).unwrap();
     assert_eq!(due_list.len(), 1);
 
     // Claim with two simulated concurrent workers

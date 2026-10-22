@@ -50,6 +50,9 @@ pub(super) struct ProbeNeed {
     pub media_duration_ms: Option<i64>,
     pub source_version: String,
     pub sample_duration_secs: u32,
+    /// The authoritative current probe context (FileVersion token, sample
+    /// profile/algorithm, effective media duration).
+    pub context_key: String,
     pub retry: ProbeRequestResult,
 }
 
@@ -124,6 +127,7 @@ pub(super) fn assess_probe_need(
         media_duration_ms,
         source_version,
         sample_duration_secs,
+        context_key: expected_key,
         retry,
     }
 }

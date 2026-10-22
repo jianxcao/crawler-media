@@ -315,8 +315,8 @@ CREATE INDEX probe_unit_dispatch ON probe_job_units(stage,status,job_id) WHERE s
 CREATE INDEX probe_unit_status ON probe_job_units(job_id,status);
 CREATE TABLE file_probe_obligations (file_id TEXT PRIMARY KEY NOT NULL REFERENCES library_files(file_id) ON DELETE CASCADE,created_at_ms INTEGER NOT NULL,reason TEXT NOT NULL);
 CREATE INDEX probe_obligation_dispatch ON file_probe_obligations(created_at_ms,file_id);
-CREATE TABLE probe_stage_state (file_id TEXT NOT NULL,context_key TEXT NOT NULL,stage TEXT NOT NULL,status TEXT NOT NULL,failure_count INTEGER NOT NULL DEFAULT 0,next_retry_at_ms INTEGER,error_kind TEXT,error TEXT,active_job_id TEXT,updated_at_ms INTEGER NOT NULL,PRIMARY KEY(file_id,context_key,stage));
-CREATE INDEX probe_retry ON probe_stage_state(status,next_retry_at_ms) WHERE status='failed' AND next_retry_at_ms IS NOT NULL;
+CREATE TABLE probe_stage_state (file_id TEXT NOT NULL,context_key TEXT NOT NULL,stage TEXT NOT NULL,status TEXT NOT NULL,failure_count INTEGER NOT NULL DEFAULT 0,next_retry_at_ms INTEGER,error_kind TEXT,error TEXT,active_job_id TEXT,dispatched_until_ms INTEGER,updated_at_ms INTEGER NOT NULL,PRIMARY KEY(file_id,context_key,stage));
+CREATE INDEX probe_retry ON probe_stage_state(next_retry_at_ms,file_id,context_key,stage) WHERE status='failed' AND next_retry_at_ms IS NOT NULL AND active_job_id IS NULL;
 CREATE TABLE probe_season_comparison_history (media_id TEXT NOT NULL,season INTEGER NOT NULL,comparison_digest TEXT NOT NULL,published_at_ms INTEGER NOT NULL,PRIMARY KEY(media_id,season));
 CREATE TABLE chapter_frame_tasks (id TEXT PRIMARY KEY NOT NULL,file_id TEXT NOT NULL,source_version TEXT NOT NULL,targets_json TEXT NOT NULL,targets_hash TEXT NOT NULL,status TEXT NOT NULL,error TEXT,created_at_ms INTEGER NOT NULL,started_at_ms INTEGER,finished_at_ms INTEGER,UNIQUE(file_id,source_version,targets_hash));
 CREATE INDEX chapter_dispatch ON chapter_frame_tasks(status,created_at_ms,id);

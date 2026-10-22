@@ -16,6 +16,11 @@ pub(super) fn record_fingerprint_stages(
         stage: ProbeStage::Intro,
     };
     let store = mgr.store.lock();
+    // The attempt's context becomes the file's current context; older contexts
+    // retire in the same short transaction so they cannot occupy the retry window.
+    if let Err(error) = store.adopt_probe_context(ledger_id, cache_key) {
+        tracing::warn!(%error, file_id = %ledger_id, context = %cache_key, "声纹上下文收敛失败");
+    }
     claim_stage(&store, &intro_key, job_id, now_ms);
     finish_stage(
         &store,

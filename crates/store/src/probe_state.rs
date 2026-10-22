@@ -196,6 +196,7 @@ impl Store {
                      error_kind = ?6,
                      error = ?7,
                      active_job_id = NULL,
+                     dispatched_until_ms = NULL,
                      updated_at_ms = ?8
                  WHERE file_id = ?1 AND context_key = ?2 AND stage = ?3 AND active_job_id = ?9",
                 params![
@@ -218,6 +219,7 @@ impl Store {
                      error_kind = ?6,
                      error = ?7,
                      active_job_id = NULL,
+                     dispatched_until_ms = NULL,
                      updated_at_ms = ?8
                  WHERE file_id = ?1 AND context_key = ?2 AND stage = ?3 AND active_job_id = ?9",
                 params![
@@ -242,48 +244,69 @@ impl Store {
         }
     }
 
-    pub fn list_due_probe_stages(
+    /// Claim up to `limit` due failed stages in one transaction, in
+    /// `(deadline, file_id, context, stage)` order, leasing each until
+    /// `now_ms + lease_ms` so the next ticks skip them while the dispatcher
+    /// evaluates and queues them. A finished attempt clears the lease; an
+    /// abandoned one simply becomes due again when it expires (restart-safe).
+    pub fn claim_due_probe_stages(
         &self,
         now_ms: i64,
+        lease_ms: i64,
         limit: usize,
     ) -> Result<Vec<ProbeStageState>, StoreError> {
-        let mut stmt = self.library.prepare(
-            "SELECT file_id, context_key, stage, status, failure_count, next_retry_at_ms, error_kind, error, active_job_id
-             FROM probe_stage_state
-             WHERE status = 'failed' AND next_retry_at_ms IS NOT NULL AND next_retry_at_ms <= ?1 AND active_job_id IS NULL
-             ORDER BY next_retry_at_ms ASC
-             LIMIT ?2"
-        )?;
-        let rows = stmt
-            .query_map(params![now_ms, limit as i64], |row| {
-                let ledger_id: String = row.get(0)?;
-                let context_key: String = row.get(1)?;
-                let stage_str: String = row.get(2)?;
-                let stage = ProbeStage::from_str(&stage_str).unwrap_or(ProbeStage::Metadata);
-                let status_str: String = row.get(3)?;
-                let status =
-                    ProbeStageStatus::from_str(&status_str).unwrap_or(ProbeStageStatus::Failed);
-                let failure_count: u32 = row.get(4)?;
-                let next_retry_at_ms: Option<i64> = row.get(5)?;
-                let error_kind: Option<String> = row.get(6)?;
-                let error: Option<String> = row.get(7)?;
-                let active_job_id: Option<String> = row.get(8)?;
-                Ok(ProbeStageState {
-                    key: ProbeStageKey {
-                        ledger_id,
-                        context_key,
-                        stage,
-                    },
-                    status,
-                    failure_count,
-                    next_retry_at_ms,
-                    error_kind,
-                    error,
-                    active_job_id,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+        let tx = self.library.unchecked_transaction()?;
+        let rows = {
+            let mut stmt = tx.prepare(
+                "SELECT file_id, context_key, stage, status, failure_count, next_retry_at_ms, error_kind, error, active_job_id
+                 FROM probe_stage_state
+                 WHERE status = 'failed' AND next_retry_at_ms IS NOT NULL AND active_job_id IS NULL
+                   AND next_retry_at_ms <= ?1
+                   AND (dispatched_until_ms IS NULL OR dispatched_until_ms <= ?1)
+                 ORDER BY next_retry_at_ms, file_id, context_key, stage
+                 LIMIT ?2",
+            )?;
+            stmt.query_map(params![now_ms, limit as i64], stage_row)?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        {
+            let mut lease = tx.prepare_cached(
+                "UPDATE probe_stage_state SET dispatched_until_ms = ?4
+                 WHERE file_id = ?1 AND context_key = ?2 AND stage = ?3",
+            )?;
+            for row in &rows {
+                lease.execute(params![
+                    row.key.ledger_id,
+                    row.key.context_key,
+                    row.key.stage.as_str(),
+                    now_ms.saturating_add(lease_ms)
+                ])?;
+            }
+        }
+        tx.commit()?;
         Ok(rows)
+    }
+
+    /// Retire one stage row (superseded context, or no longer needed). Deleting
+    /// it makes a late worker's job+context CAS miss, and a restart cannot revive it.
+    pub fn retire_probe_stage(&self, key: &ProbeStageKey) -> Result<bool, StoreError> {
+        Ok(self.library.execute(
+            "DELETE FROM probe_stage_state WHERE file_id = ?1 AND context_key = ?2 AND stage = ?3",
+            params![key.ledger_id, key.context_key, key.stage.as_str()],
+        )? > 0)
+    }
+
+    /// Adopt `context_key` as the file's current probe context: every other
+    /// context's stage state is retired in the same short transaction.
+    pub fn adopt_probe_context(
+        &self,
+        ledger_id: &str,
+        context_key: &str,
+    ) -> Result<usize, StoreError> {
+        Ok(self.library.execute(
+            "DELETE FROM probe_stage_state WHERE file_id = ?1 AND context_key <> ?2",
+            params![ledger_id, context_key],
+        )?)
     }
 
     pub fn season_comparison_digest(
@@ -396,4 +419,22 @@ pub(crate) fn delete_probe_stages_for_ledger(
         params![ledger_id],
     )?;
     Ok(())
+}
+
+fn stage_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProbeStageState> {
+    let stage_str: String = row.get(2)?;
+    let status_str: String = row.get(3)?;
+    Ok(ProbeStageState {
+        key: ProbeStageKey {
+            ledger_id: row.get(0)?,
+            context_key: row.get(1)?,
+            stage: ProbeStage::from_str(&stage_str).unwrap_or(ProbeStage::Metadata),
+        },
+        status: ProbeStageStatus::from_str(&status_str).unwrap_or(ProbeStageStatus::Failed),
+        failure_count: row.get(4)?,
+        next_retry_at_ms: row.get(5)?,
+        error_kind: row.get(6)?,
+        error: row.get(7)?,
+        active_job_id: row.get(8)?,
+    })
 }
