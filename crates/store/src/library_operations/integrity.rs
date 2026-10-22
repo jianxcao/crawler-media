@@ -10,13 +10,12 @@
 //! When errors are detected and repair=false, persists `integrity_state='failed'`.
 //! When repair succeeds and a final verification passes, clears to `integrity_state='clean'`.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 
 use domain::{LibraryId, MediaId, UserId};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-use crate::library_operations::roots::BatchOutcome;
 use crate::library_write::reduce::reduce_library_media;
 use crate::playback::types::OperationStatus;
 use crate::{Store, StoreError};
@@ -32,6 +31,24 @@ pub struct IntegrityReport {
     pub missing_user_items: Vec<(UserId, MediaId)>,
     pub orphan_items: Vec<MediaId>,
     pub orphan_user_items: Vec<(UserId, MediaId)>,
+    /// Media whose derived rows (items, units, terms, user rows) differ from what their
+    /// raw facts reduce to. Capped at [`REPORT_CAP`]; `issues_found` keeps the true total.
+    #[serde(default)]
+    pub mismatched_media: Vec<MediaId>,
+}
+
+/// Most Media a persisted report lists; the cursor never accumulates the whole Library.
+pub const REPORT_CAP: usize = 100;
+
+impl IntegrityReport {
+    /// Whether the check found any issue (the bounded issue lists are non-empty).
+    pub fn has_issues(&self) -> bool {
+        !(self.missing_items.is_empty()
+            && self.missing_user_items.is_empty()
+            && self.orphan_items.is_empty()
+            && self.orphan_user_items.is_empty()
+            && self.mismatched_media.is_empty())
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -42,6 +59,9 @@ pub(crate) struct IntegrityCursor {
     pub issues_found: usize,
     #[serde(default)]
     pub issues_repaired: usize,
+    /// Media still inconsistent after their repair was re-verified.
+    #[serde(default)]
+    pub unrepaired: usize,
     #[serde(default)]
     pub report: IntegrityReport,
 }
@@ -131,73 +151,34 @@ pub(crate) fn apply_integrity_batch(
 ) -> Result<OperationStatus, StoreError> {
     let mut state = read_integrity_cursor(tx, operation_id)?;
 
-    // 1. Gather distinct media candidates in this library:
-    // (a) from library_files (published)
-    // (b) from library_items (derived)
-    // (c) from user_library_items (derived user rows)
-    let candidates = {
-        let mut set = BTreeSet::new();
-        let mut stmt = tx.prepare(
-            "SELECT DISTINCT media_id FROM library_files WHERE library_id = ?1 AND publication_state = 'published'",
-        )?;
-        let rows = stmt.query_map(params![library], |r| r.get::<_, String>(0))?;
-        for r in rows {
-            set.insert(r?);
-        }
-
-        let mut stmt =
-            tx.prepare("SELECT DISTINCT media_id FROM library_items WHERE library_id = ?1")?;
-        let rows = stmt.query_map(params![library], |r| r.get::<_, String>(0))?;
-        for r in rows {
-            set.insert(r?);
-        }
-
-        let mut stmt =
-            tx.prepare("SELECT DISTINCT media_id FROM user_library_items WHERE library_id = ?1")?;
-        let rows = stmt.query_map(params![library], |r| r.get::<_, String>(0))?;
-        for r in rows {
-            set.insert(r?);
-        }
-        set
-    };
-
-    let paged: Vec<String> = match state.last_media_id.as_deref() {
-        Some(last) => candidates
-            .range((
-                std::ops::Bound::Excluded(last.to_string()),
-                std::ops::Bound::Unbounded,
-            ))
-            .take(batch_size)
-            .cloned()
-            .collect(),
-        None => candidates.iter().take(batch_size).cloned().collect(),
-    };
+    // One keyset page over every Media the Library has a raw or derived row for; the
+    // page is bounded by `batch_size`, never a full-Library materialisation (S02).
+    let (paged, has_more) = next_media_page(tx, library, state.last_media_id.as_deref(), batch_size)?;
 
     let lib_id = library.parse::<LibraryId>()?;
     for media_str in &paged {
         let media_id = media_str.parse::<MediaId>()?;
-        let issues = inspect_media_integrity(tx, library, media_id, &mut state.report)?;
+        let mut issues = inspect_media_integrity(tx, library, media_id, &mut state.report)?;
+        if derived_rows_drift(tx, lib_id, library, media_str)? {
+            if state.report.mismatched_media.len() < REPORT_CAP {
+                state.report.mismatched_media.push(media_id);
+            }
+            issues = issues.max(1);
+        }
         if issues > 0 {
             state.issues_found += issues;
             if plan.repair {
-                // Re-reduce locally from raw facts
                 reduce_library_media(tx, lib_id, media_id)?;
-                state.issues_repaired += issues;
+                // Re-verify this Media against its raw facts, users included.
+                if derived_rows_drift(tx, lib_id, library, media_str)? {
+                    state.unrepaired += 1;
+                } else {
+                    state.issues_repaired += issues;
+                }
             }
         }
         state.last_media_id = Some(media_str.clone());
     }
-
-    let total_remaining_after_page = match state.last_media_id.as_deref() {
-        Some(last) => candidates
-            .range((
-                std::ops::Bound::Excluded(last.to_string()),
-                std::ops::Bound::Unbounded,
-            ))
-            .count(),
-        None => 0,
-    };
-    let has_more = total_remaining_after_page > 0;
 
     if has_more {
         write_integrity_cursor(tx, operation_id, &state, "applying", now_ms)?;
@@ -208,35 +189,17 @@ pub(crate) fn apply_integrity_batch(
             error: None,
         })
     } else {
-        let remaining = check_remaining_issues(tx, library)?;
-        let final_state = if !plan.repair {
-            if state.issues_found > 0 || remaining > 0 {
-                tx.execute(
-                    "UPDATE libraries SET integrity_state = 'failed' WHERE library_id = ?1",
-                    params![library],
-                )?;
-            } else {
-                tx.execute(
-                    "UPDATE libraries SET integrity_state = 'clean' WHERE library_id = ?1",
-                    params![library],
-                )?;
-            }
-            "succeeded"
+        // Every Media was compared (and, in repair mode, re-verified) page by page.
+        let clean = if plan.repair {
+            state.unrepaired == 0
         } else {
-            if remaining == 0 {
-                tx.execute(
-                    "UPDATE libraries SET integrity_state = 'clean' WHERE library_id = ?1",
-                    params![library],
-                )?;
-                "succeeded"
-            } else {
-                tx.execute(
-                    "UPDATE libraries SET integrity_state = 'failed' WHERE library_id = ?1",
-                    params![library],
-                )?;
-                "failed"
-            }
+            state.issues_found == 0
         };
+        tx.execute(
+            "UPDATE libraries SET integrity_state = ?2 WHERE library_id = ?1",
+            params![library, if clean { "clean" } else { "failed" }],
+        )?;
+        let final_state = if plan.repair && !clean { "failed" } else { "succeeded" };
         write_integrity_cursor(tx, operation_id, &state, final_state, now_ms)?;
         Ok(OperationStatus {
             operation_id: operation_id.to_string(),
@@ -360,24 +323,83 @@ fn inspect_media_integrity(
     Ok(count)
 }
 
-fn check_remaining_issues(tx: &Connection, library: &str) -> Result<usize, StoreError> {
-    // Check missing items
-    let missing_items: i64 = tx.query_row(
-        "SELECT COUNT(DISTINCT media_id) FROM library_files f
-         WHERE library_id = ?1 AND publication_state = 'published'
-           AND NOT EXISTS (SELECT 1 FROM library_items i WHERE i.library_id = f.library_id AND i.media_id = f.media_id)",
-        params![library],
-        |r| r.get(0),
+/// One page of Media ids (after `after`) with any raw or derived row in the Library,
+/// plus whether another page follows.
+fn next_media_page(
+    tx: &Connection,
+    library: &str,
+    after: Option<&str>,
+    batch: usize,
+) -> Result<(Vec<String>, bool), StoreError> {
+    let mut stmt = tx.prepare(
+        "SELECT media_id FROM (
+             SELECT media_id FROM library_files
+              WHERE library_id = ?1 AND publication_state = 'published'
+             UNION SELECT media_id FROM library_items WHERE library_id = ?1
+             UNION SELECT media_id FROM library_units WHERE library_id = ?1
+             UNION SELECT media_id FROM library_item_terms WHERE library_id = ?1
+             UNION SELECT media_id FROM user_library_items WHERE library_id = ?1)
+         WHERE ?2 IS NULL OR media_id > ?2
+         ORDER BY media_id LIMIT ?3",
     )?;
+    let mut ids = stmt
+        .query_map(params![library, after, (batch + 1) as i64], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let more = ids.len() > batch;
+    ids.truncate(batch);
+    Ok((ids, more))
+}
 
-    // Check orphan items
-    let orphan_items: i64 = tx.query_row(
-        "SELECT COUNT(DISTINCT media_id) FROM library_items i
-         WHERE library_id = ?1
-           AND NOT EXISTS (SELECT 1 FROM library_files f WHERE f.library_id = i.library_id AND f.media_id = i.media_id AND f.publication_state = 'published')",
-        params![library],
-        |r| r.get(0),
-    )?;
+const DERIVED_TABLES: [&str; 4] = [
+    "library_items",
+    "library_units",
+    "library_item_terms",
+    "user_library_items",
+];
 
-    Ok((missing_items + orphan_items) as usize)
+/// Whether this Media's derived rows differ from what its raw facts reduce to. The
+/// reduction runs inside a savepoint that is always rolled back, so a check never writes.
+/// Revision counters are excluded: a re-reduction may bump them without changing facts.
+fn derived_rows_drift(
+    tx: &Connection,
+    lib_id: LibraryId,
+    library: &str,
+    media: &str,
+) -> Result<bool, StoreError> {
+    let before = derived_snapshot(tx, library, media)?;
+    tx.execute_batch("SAVEPOINT integrity_probe")?;
+    let reduced = reduce_library_media(tx, lib_id, media.parse()?)
+        .and_then(|_| derived_snapshot(tx, library, media));
+    tx.execute_batch("ROLLBACK TO integrity_probe; RELEASE integrity_probe")?;
+    Ok(before != reduced?)
+}
+
+fn derived_snapshot(tx: &Connection, library: &str, media: &str) -> Result<Vec<String>, StoreError> {
+    let mut rows = Vec::new();
+    for table in DERIVED_TABLES {
+        let columns: Vec<String> = {
+            let mut stmt = tx.prepare(&format!("PRAGMA table_info({table})"))?;
+            stmt.query_map([], |r| r.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter(|c| !c.ends_with("_revision"))
+                .collect()
+        };
+        let list = columns.join(", ");
+        let mut stmt = tx.prepare(&format!(
+            "SELECT {list} FROM {table} WHERE library_id = ?1 AND media_id = ?2 ORDER BY {list}"
+        ))?;
+        let width = columns.len();
+        let mapped = stmt.query_map(params![library, media], |r| {
+            let mut values = Vec::with_capacity(width);
+            for i in 0..width {
+                values.push(format!("{:?}", r.get::<_, rusqlite::types::Value>(i)?));
+            }
+            Ok(format!("{table}:{}", values.join("|")))
+        })?;
+        for row in mapped {
+            rows.push(row?);
+        }
+    }
+    Ok(rows)
 }
