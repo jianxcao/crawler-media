@@ -32,6 +32,12 @@ impl Store {
         ensure_library_writable(&tx, &scope.library_id.to_string())?;
         ensure_config_revision(&tx, scope)?;
         ensure_media_writable(&tx, candidate.file.media_id)?;
+        if candidate.file.library_id != scope.library_id {
+            return Err(StoreError::Protected(format!(
+                "transfer candidate library {} is outside write scope {}",
+                candidate.file.library_id, scope.library_id
+            )));
+        }
 
         let dest_path_str = candidate.file.path.to_string_lossy().to_string();
 
@@ -102,6 +108,7 @@ impl Store {
         )?;
 
         if exists != 0 {
+            ensure_same_reservation(&tx, &file_id_str, scope, &dest_path_str)?;
             tx.execute(
                 "UPDATE library_files SET
                     publication_state = 'pending',
@@ -137,14 +144,36 @@ impl Store {
         ensure_config_revision(&tx, scope)?;
 
         let file_id_str = coverage.file.file_id.to_string();
+        let (library_id, media_id) = persisted_owner(&tx, &file_id_str)?;
+        if library_id != scope.library_id.to_string()
+            || library_id != coverage.file.library_id.to_string()
+            || media_id != coverage.file.media_id.to_string()
+        {
+            return Err(StoreError::Protected(format!(
+                "transfer file {file_id_str} is not owned by write scope {}",
+                scope.library_id
+            )));
+        }
+        ensure_media_writable(&tx, coverage.file.media_id)?;
         super::publish::ensure_file_version(&tx, &file_id_str, expected)?;
 
-        tx.execute(
+        let changed = tx.execute(
             "UPDATE library_files SET
                 publication_state = 'published'
-             WHERE file_id = ?1",
-            params![file_id_str],
+             WHERE file_id = ?1 AND library_id = ?2 AND file_revision = ?3
+               AND source_version = ?4 AND publication_state = 'pending'",
+            params![
+                file_id_str,
+                library_id,
+                expected.revision,
+                expected.source_version
+            ],
         )?;
+        if changed != 1 {
+            return Err(StoreError::Protected(format!(
+                "transfer file {file_id_str} is no longer a pending reservation"
+            )));
+        }
 
         sync_coverage(&tx, &coverage.file, &coverage.units)?;
         super::publish::enqueue_probe(&tx, coverage.file.file_id, now_ms)?;
@@ -153,4 +182,42 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+}
+
+/// Library and Media actually recorded for a file row.
+fn persisted_owner(
+    tx: &rusqlite::Connection,
+    file_id: &str,
+) -> Result<(String, String), StoreError> {
+    tx.query_row(
+        "SELECT library_id, media_id FROM library_files WHERE file_id = ?1",
+        params![file_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()?
+    .ok_or_else(|| StoreError::Missing(format!("file {file_id}")))
+}
+
+/// A primary-key hit may only resume the same pending reservation (same
+/// Library and destination); it must never re-pend an unrelated row.
+fn ensure_same_reservation(
+    tx: &rusqlite::Connection,
+    file_id: &str,
+    scope: &WriteScope,
+    dest: &str,
+) -> Result<(), StoreError> {
+    let same: i64 = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM library_files
+                       WHERE file_id = ?1 AND library_id = ?2
+                         AND publication_state = 'pending'
+                         AND (path_key = ?3 OR display_path = ?3))",
+        params![file_id, scope.library_id.to_string(), dest],
+        |r| r.get(0),
+    )?;
+    if same == 0 {
+        return Err(StoreError::Protected(format!(
+            "transfer file id {file_id} collides with an unrelated file"
+        )));
+    }
+    Ok(())
 }

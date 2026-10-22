@@ -221,3 +221,16 @@ fn root_for_path(store: &Store, library_id: &str, path: &str) -> Result<String, 
     best.map(|(_, id)| id)
         .ok_or_else(|| StoreError::Invalid(format!("path is outside every Library root: {path}")))
 }
+
+/// Force a Media identity state (e.g. `merging`) to exercise freeze guards.
+pub fn set_media_identity_state(
+    store: &Store,
+    media_id: MediaId,
+    state: &str,
+) -> Result<(), StoreError> {
+    store.library.execute(
+        "UPDATE media SET identity_state = ?2 WHERE media_id = ?1",
+        rusqlite::params![media_id.to_string(), state],
+    )?;
+    Ok(())
+}
