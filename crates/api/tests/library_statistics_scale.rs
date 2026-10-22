@@ -773,22 +773,23 @@ async fn same_count_strm_change_does_not_reuse_physical_bytes_as_fresh() {
     assert_eq!(old["total_size_bytes"].as_u64(), Some(FAKE_SIZE));
     assert_eq!(old["stale"], false, "库表聚合必须是最新值");
 
-    let guard = store_arc.lock();
-    assert!(
-        guard
-            .rename_file_path(&from.display().to_string(), &to.display().to_string())
+    {
+        let guard = store_arc.lock();
+        assert!(
+            guard
+                .rename_file_path(&from.display().to_string(), &to.display().to_string())
+                .unwrap()
+        );
+        // 扫描器观察到指针文件后按新体积重发布同一文件（同一 revision）。
+        let version = guard
+            .get_file_version(file_id)
             .unwrap()
-    );
-    // 扫描器观察到指针文件后按新体积重发布同一文件（同一 revision）。
-    let version = guard
-        .get_file_version(file_id)
-        .unwrap()
-        .expect("file version");
-    let library = library_of(&guard, &library_id);
-    publish_file(
-        &guard, &library, &root_id, media_id, file_id, version, &to, 0,
-    );
-    drop(guard);
+            .expect("file version");
+        let library = library_of(&guard, &library_id);
+        publish_file(
+            &guard, &library, &root_id, media_id, file_id, version, &to, 0,
+        );
+    }
 
     let after = seeded.list().await;
     let stats = StatsFixture::stats(&after, &library_id);

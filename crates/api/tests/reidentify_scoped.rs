@@ -279,8 +279,6 @@ async fn reidentify_stale_file_version_returns_conflict_and_zero_moved() {
 async fn reidentify_alias_conflict_returns_409_without_claimed() {
     let (_tmp, _state, app, token, lib_id, media, [f1, _f2, _f3], catalog) = setup_fixture();
 
-    let shared = _state.store();
-    let store = shared.lock();
     let other_media = Media {
         id: MediaId::new(),
         kind: MediaKind::Movie,
@@ -294,8 +292,11 @@ async fn reidentify_alias_conflict_returns_409_without_claimed() {
         bangumi_id: None,
         anilist_id: None,
     };
-    store.insert_media(&other_media).unwrap();
-    drop(store);
+    {
+        let shared = _state.store();
+        let store = shared.lock();
+        store.insert_media(&other_media).unwrap();
+    }
 
     let target_media = Media {
         id: MediaId::new(),
@@ -357,80 +358,81 @@ async fn reidentify_invalid_or_cross_media_file_ids_returns_400() {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
     // Cross-media file_ids
-    let shared = _state.store();
-    let store = shared.lock();
-    let other_m = Media {
-        id: MediaId::new(),
-        kind: MediaKind::Movie,
-        title: "Second Media".into(),
-        year: Some(2022),
-        original_title: None,
-        aliases: vec![],
-        tmdb_id: Some("9999".into()),
-        douban_id: None,
-        tvdb_id: None,
-        bangumi_id: None,
-        anilist_id: None,
-    };
-    store.insert_media(&other_m).unwrap();
     let other_fid = LedgerId::new();
-    let roots = store.list_library_roots().unwrap();
-    let root = roots
-        .into_iter()
-        .find(|r| r.library_id == Some(lib_id.to_string()))
-        .unwrap();
-    let scope = WriteScope {
-        library_id: lib_id,
-        config_revision: 0,
-    };
-    let other_path = format!("{}/other.mkv", root.path.display());
-    let other_file = LibraryFile {
-        file_id: other_fid,
-        library_id: lib_id,
-        root_id: root.id,
-        media_id: other_m.id,
-        kind: MediaKind::Movie,
-        path: other_path.into(),
-        version: FileVersion {
-            revision: 1,
-            source_version: "v1".into(),
-        },
-        presence: FilePresence::Present,
-        publication: FilePublication::Published,
-        size_bytes: Some(1024),
-        stat_known: true,
-        created_ns: Some(0),
-        modified_ns: Some(0),
-        source_digest: None,
-        source_path: None,
-        transfer_mode: None,
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Probe,
-        confidence: Confidence::High,
-        filter_score: None,
-        release_quality: None,
-        duration_ms: None,
-        tracks_version: 1,
-        poster_path: None,
-        backdrop_path: None,
-        still_path: None,
-    };
-    store
-        .publish_files(
-            &scope,
-            &[StorePublication {
-                file: &other_file,
-                units: &[UnitKey::WHOLE],
-                expected_version: None,
-                nfo_observation: None,
-                probe_required: false,
-            }],
-            1000,
-        )
-        .unwrap();
-    drop(store);
+    {
+        let shared = _state.store();
+        let store = shared.lock();
+        let other_m = Media {
+            id: MediaId::new(),
+            kind: MediaKind::Movie,
+            title: "Second Media".into(),
+            year: Some(2022),
+            original_title: None,
+            aliases: vec![],
+            tmdb_id: Some("9999".into()),
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        };
+        store.insert_media(&other_m).unwrap();
+        let roots = store.list_library_roots().unwrap();
+        let root = roots
+            .into_iter()
+            .find(|r| r.library_id == Some(lib_id.to_string()))
+            .unwrap();
+        let scope = WriteScope {
+            library_id: lib_id,
+            config_revision: 0,
+        };
+        let other_path = format!("{}/other.mkv", root.path.display());
+        let other_file = LibraryFile {
+            file_id: other_fid,
+            library_id: lib_id,
+            root_id: root.id,
+            media_id: other_m.id,
+            kind: MediaKind::Movie,
+            path: other_path.into(),
+            version: FileVersion {
+                revision: 1,
+                source_version: "v1".into(),
+            },
+            presence: FilePresence::Present,
+            publication: FilePublication::Published,
+            size_bytes: Some(1024),
+            stat_known: true,
+            created_ns: Some(0),
+            modified_ns: Some(0),
+            source_digest: None,
+            source_path: None,
+            transfer_mode: None,
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: QualitySource::Probe,
+            confidence: Confidence::High,
+            filter_score: None,
+            release_quality: None,
+            duration_ms: None,
+            tracks_version: 1,
+            poster_path: None,
+            backdrop_path: None,
+            still_path: None,
+        };
+        store
+            .publish_files(
+                &scope,
+                &[StorePublication {
+                    file: &other_file,
+                    units: &[UnitKey::WHOLE],
+                    expected_version: None,
+                    nfo_observation: None,
+                    probe_required: false,
+                }],
+                1000,
+            )
+            .unwrap();
+    }
 
     let cross_body = json!({
         "title_ref": "tmdb:movie:2002",

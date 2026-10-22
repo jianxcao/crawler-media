@@ -42,9 +42,11 @@ impl Gate {
         *self.entered.lock() = true;
         self.entered_cv.notify_all();
         let mut open = self.open.lock();
-        while !*open {
-            self.open_cv.wait(&mut open);
-        }
+        self.open_cv
+            .wait_while_for(&mut open, |open| !*open, std::time::Duration::from_secs(30));
+        let released = *open;
+        drop(open);
+        assert!(released, "test must release the view I/O gate");
     }
 
     fn entered(&self) -> bool {

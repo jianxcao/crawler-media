@@ -102,9 +102,11 @@ impl TestGate {
 
     fn wait(&self) {
         let mut rel = self.released.lock();
-        while !*rel {
-            self.cvar.wait(&mut rel);
-        }
+        self.cvar
+            .wait_while_for(&mut rel, |released| !*released, Duration::from_secs(30));
+        let released = *rel;
+        drop(rel);
+        assert!(released, "test must release the poster cache gate");
     }
 
     fn release(&self) {

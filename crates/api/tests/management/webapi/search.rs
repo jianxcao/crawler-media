@@ -243,10 +243,15 @@ impl GatedCatalog {
     fn search(&self) -> Result<Vec<media::CatalogHit>, String> {
         self.started.lock().unwrap().push(self.name);
         let (lock, cv) = &*self.gate;
-        let mut open = lock.lock().unwrap();
-        while !*open {
-            open = cv.wait(open).unwrap();
-        }
+        let released = *cv
+            .wait_timeout_while(
+                lock.lock().unwrap(),
+                std::time::Duration::from_secs(30),
+                |open| !*open,
+            )
+            .unwrap()
+            .0;
+        assert!(released, "test must release the catalog search gate");
         Ok(Vec::new())
     }
 }

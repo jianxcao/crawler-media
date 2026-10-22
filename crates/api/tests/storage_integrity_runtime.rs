@@ -136,11 +136,12 @@ async fn integrity_check_and_repair_http_endpoints() {
     let op_id = body["operation_id"].as_str().unwrap().to_string();
 
     // Advance check via background or driver
-    let shared = state.store();
-    let store = shared.lock();
-    let status = store.advance_library_operation(&op_id, 1000, 100).unwrap();
+    let status = {
+        let shared = state.store();
+        let store = shared.lock();
+        store.advance_library_operation(&op_id, 1000, 100).unwrap()
+    };
     assert_eq!(status.state, "succeeded");
-    drop(store);
 
     // Reading items must now return 500 library.integrity
     let req = common::request(
@@ -164,13 +165,14 @@ async fn integrity_check_and_repair_http_endpoints() {
     let r_body: Value = common::json_data(res).await;
     let repair_op_id = r_body["operation_id"].as_str().unwrap().to_string();
 
-    let shared = state.store();
-    let store = shared.lock();
-    let r_status = store
-        .advance_library_operation(&repair_op_id, 2000, 100)
-        .unwrap();
+    let r_status = {
+        let shared = state.store();
+        let store = shared.lock();
+        store
+            .advance_library_operation(&repair_op_id, 2000, 100)
+            .unwrap()
+    };
     assert_eq!(r_status.state, "succeeded");
-    drop(store);
 
     // Reading items after repair succeeds
     let req = common::request(

@@ -29,11 +29,14 @@ struct PauseGateFetcher {
 
 impl Fetcher for PauseGateFetcher {
     fn fetch(&self, _request: &FetchRequest) -> Result<String, IndexerError> {
-        if let Some(resume) = self.resume.lock().take() {
+        let resume = { self.resume.lock().take() };
+        if let Some(resume) = resume {
             if let Some(started) = self.started.lock().take() {
                 let _ = started.send(());
             }
-            let _ = resume.recv();
+            resume
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("test must resume the legacy lifecycle fetcher");
         }
         Ok(nexusphp().into())
     }

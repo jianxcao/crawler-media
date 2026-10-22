@@ -247,7 +247,9 @@ async fn housekeeping_uses_bounded_blocking_admission() {
         budget
             .run_to_completion(move || {
                 entered_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(30))
+                    .expect("test must release the reconciliation budget holder");
             })
             .await
             .unwrap();

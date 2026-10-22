@@ -41,10 +41,16 @@ impl Gate {
     fn enter_and_wait(&self) {
         *self.entered.lock().unwrap() = true;
         self.entered_cv.notify_all();
-        let mut open = self.open.lock().unwrap();
-        while !*open {
-            open = self.open_cv.wait(open).unwrap();
-        }
+        let released = *self
+            .open_cv
+            .wait_timeout_while(
+                self.open.lock().unwrap(),
+                std::time::Duration::from_secs(30),
+                |open| !*open,
+            )
+            .unwrap()
+            .0;
+        assert!(released, "test must release the listing gate");
     }
 
     fn entered(&self) -> bool {

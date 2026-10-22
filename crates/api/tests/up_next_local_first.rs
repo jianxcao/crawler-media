@@ -32,17 +32,25 @@ struct Gate {
 impl Gate {
     fn wait_until_entered(&self) {
         let mut guard = self.entered.lock();
-        self.changed.wait_for(&mut guard, Duration::from_secs(2));
-        assert!(*guard, "catalog worker did not reach gate");
+        self.changed
+            .wait_while_for(&mut guard, |entered| !*entered, Duration::from_secs(2));
+        let entered = *guard;
+        drop(guard);
+        assert!(entered, "catalog worker did not reach gate");
     }
 
     fn block_worker(&self) {
         *self.entered.lock() = true;
         self.changed.notify_all();
         let mut guard = self.released.lock();
-        self.release_changed
-            .wait_for(&mut guard, Duration::from_secs(2));
-        assert!(*guard, "test did not release catalog gate");
+        self.release_changed.wait_while_for(
+            &mut guard,
+            |released| !*released,
+            Duration::from_secs(2),
+        );
+        let released = *guard;
+        drop(guard);
+        assert!(released, "test did not release catalog gate");
     }
 
     fn release(&self) {

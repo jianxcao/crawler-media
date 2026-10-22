@@ -38,9 +38,14 @@ impl Gate {
         let mut state = self.state.lock();
         state.0 += 1;
         self.changed.notify_all();
-        while !state.1 {
-            self.changed.wait(&mut state);
-        }
+        self.changed.wait_while_for(
+            &mut state,
+            |state| !state.1,
+            std::time::Duration::from_secs(30),
+        );
+        let released = state.1;
+        drop(state);
+        assert!(released, "test must release the chapter frame gate");
     }
 
     fn entered(&self) -> usize {

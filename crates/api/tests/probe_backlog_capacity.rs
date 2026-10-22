@@ -96,9 +96,14 @@ impl FingerprintCaptureEngine for GatedCapture {
             let mut state = self.gate.state.lock();
             state.0 += 1;
             self.gate.changed.notify_all();
-            while !state.1 {
-                self.gate.changed.wait(&mut state);
-            }
+            self.gate.changed.wait_while_for(
+                &mut state,
+                |state| !state.1,
+                std::time::Duration::from_secs(30),
+            );
+            let released = state.1;
+            drop(state);
+            assert!(released, "test must release the probe capture gate");
         }
         self.active.fetch_sub(1, Ordering::SeqCst);
         let duration_ms = request.window.duration_ms();
