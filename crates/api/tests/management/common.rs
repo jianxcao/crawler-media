@@ -254,8 +254,8 @@ pub(crate) fn install_fake_ffprobe() {
         let dir = std::env::temp_dir().join(format!("crawler-media-e2e-bin-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("ffprobe");
-        // Write under a temp name and rename into place so a concurrent
-        // fork/exec never sees the file open for writing (ETXTBSY).
+        // Rename-into-place alone does not prevent ETXTBSY (a forked sibling
+        // can still hold the inherited write fd); seal_executable does.
         let staging = dir.join("ffprobe.tmp");
         std::fs::write(
             &staging,
@@ -268,6 +268,7 @@ pub(crate) fn install_fake_ffprobe() {
             std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         std::fs::rename(&staging, &script).unwrap();
+        seal_executable(&script);
         let path = std::env::var("PATH").unwrap_or_default();
         // SAFETY: test-only, executed once before the harness spawns workers.
         unsafe { std::env::set_var("PATH", format!("{}:{path}", dir.display())) };
@@ -294,4 +295,23 @@ pub(crate) fn probed_video(height: u32, codec: &str, hdr: bool) -> Vec<u8> {
 /// Bytes the fake ffprobe cannot read (probe failure).
 pub(crate) fn unprobeable_video() -> Vec<u8> {
     b"not-a-real-video".to_vec()
+}
+
+/// Re-create a freshly written test script from a child process before it is
+/// exec'd. A sibling test thread's fork can inherit this process's (CLOEXEC)
+/// write fd for the script inode until that child execs, making our exec fail
+/// with ETXTBSY. Rename-into-place does not help (the fd pins the inode); a
+/// copy made by `cp` gives a new inode this process never opened for writing.
+#[cfg(unix)]
+fn seal_executable(path: &std::path::Path) {
+    let mut sealed = path.as_os_str().to_owned();
+    sealed.push(".sealed");
+    let status = std::process::Command::new("cp")
+        .arg("-p")
+        .arg(path)
+        .arg(&sealed)
+        .status()
+        .expect("spawn cp to seal test executable");
+    assert!(status.success(), "cp failed sealing {}", path.display());
+    std::fs::rename(&sealed, path).expect("rename sealed test executable");
 }

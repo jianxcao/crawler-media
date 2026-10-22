@@ -162,6 +162,7 @@ fn recording_ffmpeg(dir: &std::path::Path) -> (std::path::PathBuf, std::path::Pa
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o755)).unwrap();
+        seal_executable(&ffmpeg);
     }
     (ffmpeg, args)
 }
@@ -276,6 +277,7 @@ async fn cancelling_detached_chapter_frames_reaps_child_and_preserves_sidecars()
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o755)).unwrap();
+        seal_executable(&ffmpeg);
     }
     let updates =
         persist_marker(&store, &[row.clone()], fingerprint_marker(media_id), false).unwrap();
@@ -428,4 +430,23 @@ fn marker_publication_skips_frozen_library_but_updates_live_copy() {
             .unwrap()
             .is_some()
     );
+}
+
+/// Re-create a freshly written test script from a child process before it is
+/// exec'd. A sibling test thread's fork can inherit this process's (CLOEXEC)
+/// write fd for the script inode until that child execs, making our exec fail
+/// with ETXTBSY. Rename-into-place does not help (the fd pins the inode); a
+/// copy made by `cp` gives a new inode this process never opened for writing.
+#[cfg(unix)]
+fn seal_executable(path: &std::path::Path) {
+    let mut sealed = path.as_os_str().to_owned();
+    sealed.push(".sealed");
+    let status = std::process::Command::new("cp")
+        .arg("-p")
+        .arg(path)
+        .arg(&sealed)
+        .status()
+        .expect("spawn cp to seal test executable");
+    assert!(status.success(), "cp failed sealing {}", path.display());
+    std::fs::rename(&sealed, path).expect("rename sealed test executable");
 }

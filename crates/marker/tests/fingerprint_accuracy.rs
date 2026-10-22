@@ -268,6 +268,7 @@ fn chromaprint_engine_logs_extraction_phase_timings() {
         .permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(&ffmpeg, permissions).expect("fake ffmpeg should be executable");
+    seal_executable(&ffmpeg);
 
     let output = Command::new(std::env::current_exe().expect("test executable path should exist"))
         .args([
@@ -340,6 +341,7 @@ fn chromaprint_engine_logs_sanitized_ffmpeg_diagnostics_when_no_pcm_is_produced(
         .permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(&ffmpeg, permissions).expect("fake ffmpeg should be executable");
+    seal_executable(&ffmpeg);
 
     let output = Command::new(std::env::current_exe().expect("test executable path should exist"))
         .args([
@@ -389,4 +391,23 @@ fn chromaprint_engine_logs_sanitized_ffmpeg_diagnostics_when_no_pcm_is_produced(
             && !logs.contains("relative-secret"),
         "diagnostic must not leak URL credentials or headers: {logs}"
     );
+}
+
+/// Re-create a freshly written test script from a child process before it is
+/// exec'd. A sibling test thread's fork can inherit this process's (CLOEXEC)
+/// write fd for the script inode until that child execs, making our exec fail
+/// with ETXTBSY. Rename-into-place does not help (the fd pins the inode); a
+/// copy made by `cp` gives a new inode this process never opened for writing.
+#[cfg(unix)]
+fn seal_executable(path: &std::path::Path) {
+    let mut sealed = path.as_os_str().to_owned();
+    sealed.push(".sealed");
+    let status = std::process::Command::new("cp")
+        .arg("-p")
+        .arg(path)
+        .arg(&sealed)
+        .status()
+        .expect("spawn cp to seal test executable");
+    assert!(status.success(), "cp failed sealing {}", path.display());
+    std::fs::rename(&sealed, path).expect("rename sealed test executable");
 }

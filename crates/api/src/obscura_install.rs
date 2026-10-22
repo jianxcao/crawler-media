@@ -650,6 +650,7 @@ mod spawn_thread_tests {
         let fake = dir.path().join("obscura");
         fs::write(&fake, "#!/bin/sh\nexec sleep 30\n").unwrap();
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        seal_executable(&fake);
         let path = fake.clone();
         let handle = std::thread::spawn(move || ProcessLauncher.spawn(&path, 1).unwrap())
             .join()
@@ -661,5 +662,24 @@ mod spawn_thread_tests {
         );
         handle.kill();
         assert!(!handle.try_alive());
+    }
+
+    /// Re-create a freshly written test script from a child process before it is
+    /// exec'd. A sibling test thread's fork can inherit this process's (CLOEXEC)
+    /// write fd for the script inode until that child execs, making our exec fail
+    /// with ETXTBSY. Rename-into-place does not help (the fd pins the inode); a
+    /// copy made by `cp` gives a new inode this process never opened for writing.
+    #[cfg(unix)]
+    fn seal_executable(path: &std::path::Path) {
+        let mut sealed = path.as_os_str().to_owned();
+        sealed.push(".sealed");
+        let status = std::process::Command::new("cp")
+            .arg("-p")
+            .arg(path)
+            .arg(&sealed)
+            .status()
+            .expect("spawn cp to seal test executable");
+        assert!(status.success(), "cp failed sealing {}", path.display());
+        std::fs::rename(&sealed, path).expect("rename sealed test executable");
     }
 }
