@@ -248,6 +248,7 @@ fn export_request(
         body,
         fields: fields_with_overview(plot),
         field_origins: BTreeMap::new(),
+        local_edits: MetadataFields::default(),
     }
 }
 
@@ -620,4 +621,80 @@ async fn phased_export_writes_the_sidecar_with_the_store_unlocked() {
             .is_some(),
         "the final locked phase registers the export"
     );
+}
+
+/// R18: a sidecar edit is this Library's local edit. It survives later provider
+/// changes and re-exports, never becomes a global Media override (so no other
+/// Library renders it), and deleting the NFO drops it.
+#[tokio::test]
+async fn sidecar_edit_is_local_and_deleting_the_nfo_clears_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog = Arc::new(ExportCatalog::default());
+    catalog.set_overview("PLOT V1");
+    catalog.set_title("TITLE V1");
+    let state = export_state(temp.path(), catalog.clone());
+    let (library_id, video, nfo) = movie_fixture(&state);
+    let app = api::router(state.clone());
+    common::scan_and_wait(&app, &library_id.to_string()).await;
+    let media = media_at(&state, &video);
+
+    let edited = edit_plot(&std::fs::read_to_string(&nfo).unwrap(), "USER PLOT");
+    std::fs::write(&nfo, edited).unwrap();
+    catalog.set_title("TITLE V2");
+    refresh_item(&app, library_id, media).await;
+    catalog.set_title("TITLE V3");
+    refresh_item(&app, library_id, media).await;
+
+    let body = std::fs::read_to_string(&nfo).unwrap();
+    assert!(
+        body.contains("USER PLOT"),
+        "edit survives re-exports: {body}"
+    );
+    assert!(
+        body.contains("TITLE V3"),
+        "untouched title follows provider: {body}"
+    );
+    let shared = state.store();
+    {
+        let store = shared.lock();
+        let detail = store
+            .library_item_detail(library_id, media, LOCALE)
+            .unwrap()
+            .unwrap()
+            .metadata;
+        assert_eq!(
+            detail.overview.value().map(String::as_str),
+            Some("USER PLOT")
+        );
+        let overrides = store
+            .get_metadata_overrides(media, EntityScope::Work, LOCALE)
+            .unwrap();
+        assert!(
+            overrides.is_none_or(|(fields, _)| fields.overview.is_missing()),
+            "a sidecar edit must not become a global Media override"
+        );
+        let effective = store
+            .effective_metadata_fields(library_id, media, EntityScope::Work, LOCALE)
+            .unwrap();
+        assert_eq!(
+            effective.fields.overview.value().map(String::as_str),
+            Some("PLOT V1"),
+            "what other Libraries render stays the provider value"
+        );
+    }
+
+    std::fs::remove_file(&nfo).unwrap();
+    refresh_item(&app, library_id, media).await;
+    let body = std::fs::read_to_string(&nfo).unwrap();
+    assert!(
+        !body.contains("USER PLOT") && body.contains("PLOT V1"),
+        "deleting the NFO clears the local edit: {body}"
+    );
+    let detail = shared
+        .lock()
+        .library_item_detail(library_id, media, LOCALE)
+        .unwrap()
+        .unwrap()
+        .metadata;
+    assert_eq!(detail.overview.value().map(String::as_str), Some("PLOT V1"));
 }

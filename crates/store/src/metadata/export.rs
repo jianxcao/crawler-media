@@ -47,8 +47,16 @@ pub struct NfoExportRequest {
     pub body: String,
     /// Digest of `body`, registered once the file holds it.
     pub output_digest: String,
+    /// Base effective fields the body was rendered from: the three-way baseline
+    /// recorded as `export_fields_json`, *without* local edits.
     pub fields: MetadataFields,
     pub field_origins: BTreeMap<String, EffectiveFieldOrigin>,
+    /// R18: this Library's sidecar edits (sidecar vs. last exported base), rendered
+    /// on top of `fields`. They live only in this sidecar/input — never in the
+    /// global Media overrides — so deleting the NFO drops them and another
+    /// Library never sees them.
+    #[serde(default)]
+    pub local_edits: MetadataFields,
 }
 
 /// Durable record of a sidecar this library produced.

@@ -4,8 +4,8 @@
 //! scrape and the Store driver:
 //!
 //! * [`begin_sidecar_export`] runs **before** the caller rewrites the sidecar. It
-//!   records the export intent and turns an edit found on disk into a local
-//!   override; `write_nfo` clobbers scalars in place, so an edit that is not
+//!   records the export intent and keeps an edit found on disk as this
+//!   Library's local edit (R18, never a global override); `write_nfo` clobbers scalars in place, so an edit that is not
 //!   captured here is gone for good.
 //! * [`finish_sidecar_export`] runs **after** the rewrite and projects effective
 //!   metadata back onto the whole file, then registers it as a metadata input.
@@ -70,17 +70,22 @@ pub(crate) fn begin_sidecar_export(
         }
     };
     request.expected_digest = observation.digest.clone();
-    let captured = state
+    let edits = state
         .store
         .lock()
-        .capture_nfo_edits_observed(&request, &observation);
-    match captured {
-        Ok(true) => tracing::info!(
-            media_id = %media.id,
-            path = %request.path.display(),
-            "NFO sidecar edit captured as a local override"
-        ),
-        Ok(false) => {}
+        .nfo_local_edits_observed(&request, &observation);
+    match edits {
+        Ok(Some(edits)) => {
+            if edits != domain::MetadataFields::default() {
+                tracing::info!(
+                    media_id = %media.id,
+                    path = %request.path.display(),
+                    "NFO sidecar edits kept as this Library's local edits"
+                );
+            }
+            request.local_edits = edits;
+        }
+        Ok(None) => {}
         Err(error) => tracing::warn!(
             %error,
             media_id = %media.id,

@@ -117,82 +117,41 @@ impl Store {
             output_digest: String::new(),
             fields: MetadataFields::default(),
             field_origins: BTreeMap::new(),
+            local_edits: MetadataFields::default(),
         }))
     }
 
-    /// Turn edits someone else made to a generated sidecar into local overrides.
+    /// R18: this Library's local edits of a generated sidecar, observed off-lock.
     ///
-    /// Only a sidecar this library produced is inspected: without a recorded
-    /// `export_digest` there is no baseline, and a hand-written NFO keeps its
-    /// existing sidecar authority. Returns whether overrides were written.
-    pub fn capture_nfo_edits(&self, request: &NfoExportRequest) -> Result<bool, StoreError> {
-        let observation = observe_nfo_sidecar(&request.path, request.scope)?;
-        self.capture_nfo_edits_observed(request, &observation)
-    }
-
-    /// [`Self::capture_nfo_edits`] against a sidecar observed off the Store lock.
-    ///
-    /// The baseline anchor and the override revision are read *now*, under the
-    /// caller's lock, so a stale observation can only be compared with current
-    /// state; the override write itself is a revision CAS.
-    pub fn capture_nfo_edits_observed(
+    /// The edits are the sidecar's readable fields that differ from the base
+    /// effective fields of the last export (`export_fields_json`), compared after a
+    /// render/parse round trip so serialisation noise is not mistaken for an edit.
+    /// `Ok(None)` means there is no baseline (never exported here, or the sidecar is
+    /// gone/unreadable): a hand-written NFO keeps its own sidecar authority.
+    /// Nothing is written: the edits travel in the export request and are rendered
+    /// back into this sidecar only, never promoted to global Media overrides.
+    pub fn nfo_local_edits_observed(
         &self,
         request: &NfoExportRequest,
         observation: &NfoSidecarObservation,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<Option<MetadataFields>, StoreError> {
         let Some(anchor) = self.nfo_export_anchor(request)? else {
-            return Ok(false);
+            return Ok(None);
         };
-        let Some(disk) = observation.digest.as_deref() else {
-            return Ok(false);
+        let Some(baseline) = anchor.fields else {
+            return Ok(None);
         };
-        if Some(disk) == anchor.digest.as_deref() {
-            // Still exactly what we last registered: the file holds no edit.
-            return Ok(false);
+        if observation.digest.is_none() {
+            return Ok(None);
         }
         let Some(parsed) = observation.parsed.as_ref() else {
             tracing::warn!(
                 path = %request.path.display(),
-                "generated NFO is no longer parseable; keeping the previous overrides"
+                "generated NFO is no longer parseable; no local edits are carried"
             );
-            return Ok(false);
+            return Ok(None);
         };
-        let locale = self.nfo_export_locale(request)?;
-        let effective = self.effective_metadata_fields(
-            request.library_id,
-            request.media_id,
-            request.scope,
-            &locale,
-        )?;
-        // R18: an edit is what changed relative to what we last *exported*, not relative
-        // to today's provider value; otherwise an untouched field would be locked to the
-        // previous provider value as soon as the provider moves on.
-        let Some(baseline) = anchor.fields else {
-            return Ok(false);
-        };
-        let Some(diff) = nfo_field_diff(parsed, &baseline) else {
-            return Ok(false);
-        };
-        let override_locale = effective.actual_locale.as_str();
-        let (mut merged, revision) = self
-            .get_metadata_overrides(request.media_id, request.scope, override_locale)?
-            .unwrap_or_default();
-        merge_overrides(&mut merged, &diff);
-        let revision = self.set_metadata_overrides(
-            request.media_id,
-            request.scope,
-            override_locale,
-            &merged,
-            revision,
-        )?;
-        tracing::info!(
-            path = %request.path.display(),
-            media = %request.media_id,
-            locale = override_locale,
-            revision,
-            "NFO sidecar 的外部编辑已升级为用户覆盖"
-        );
-        Ok(true)
+        Ok(Some(local_edits(parsed, &baseline, request.scope)))
     }
 
     /// Render effective metadata into the sidecar and register what was written.
@@ -223,7 +182,9 @@ impl Store {
             request.scope,
             &locale,
         )?;
-        let body = library::nfo::render_nfo(request.scope, &effective.fields);
+        let mut rendered = effective.fields.clone();
+        overlay_fields(&mut rendered, &request.local_edits);
+        let body = library::nfo::render_nfo(request.scope, &rendered);
         let output_digest = library::nfo::nfo_body_digest(&body);
         let plan = NfoExportRequest {
             locale,
@@ -562,15 +523,17 @@ where
     }
     // Neither digest matches: the sidecar changed while this export was
     // pending. Escalate that edit into user overrides before re-rendering.
-    if lock().capture_nfo_edits_observed(request, &observation)? {
+    let edits = lock().nfo_local_edits_observed(request, &observation)?;
+    if let Some(local_edits) = edits {
         tracing::warn!(
             path = %request.path.display(),
             media = %request.media_id,
             export_id = %request.export_id,
-            "崩溃恢复：sidecar 在导出期间被外部修改，已升级为用户覆盖后重新导出"
+            "崩溃恢复：sidecar 在导出期间被外部修改，保留为本库局部编辑后重新导出"
         );
         let fresh = NfoExportRequest {
             expected_digest: observation.digest,
+            local_edits,
             ..request.clone()
         };
         return export_nfo_sidecar_phased(lock, &fresh, now_ms);
@@ -579,7 +542,7 @@ where
         path = %request.path.display(),
         media = %request.media_id,
         export_id = %request.export_id,
-        "崩溃恢复：sidecar 与意图不符且无法升级为用户覆盖，保留原文件等待下次重试"
+        "崩溃恢复：sidecar 与意图不符且没有可比较的导出基线，保留原文件等待下次重试"
     );
     Err(StoreError::Invalid(format!(
         "nfo export {} refused to overwrite externally changed {}",
@@ -703,9 +666,22 @@ fn diff_cast(
     true
 }
 
-/// Overlay the captured diff onto existing overrides: an edit to one field must
-/// not drop overrides captured earlier.
-fn merge_overrides(target: &mut MetadataFields, diff: &MetadataFields) {
+/// Local edits: what `parsed` changed relative to the round-tripped `baseline`.
+fn local_edits(
+    parsed: &MetadataFields,
+    baseline: &MetadataFields,
+    scope: EntityScope,
+) -> MetadataFields {
+    let rendered = library::nfo::render_nfo(scope, baseline);
+    let comparator = match library::nfo::parse_nfo_fields(&rendered, scope) {
+        library::nfo::NfoReadOutcome::Valid(round_trip) => round_trip.fields,
+        _ => baseline.clone(),
+    };
+    nfo_field_diff(parsed, &comparator).unwrap_or_default()
+}
+
+/// Overlay `diff` onto `target`: only fields `diff` carries are replaced.
+fn overlay_fields(target: &mut MetadataFields, diff: &MetadataFields) {
     macro_rules! merge {
         ($($field:ident),* $(,)?) => {
             $(if !diff.$field.is_missing() {
