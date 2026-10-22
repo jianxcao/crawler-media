@@ -384,3 +384,7 @@ Media／Library／Playback 放在同一 `library.db`、cache 按生命周期独�
 
 见上节 N03 条目与提交 `4ad52fa`。定向门：`cargo test -p store --test file_rename --test file_rename_durable` 7 passed。全量 workspace 门见该提交后的验证段。
 
+### N03 余量合入后全量门（4ad52fa / 42b3487）
+
+- `cargo test --workspace --no-fail-fast`（`/workspace/ws_n03.log`）：**2539 passed、0 failed、11 ignored**（349 suites），`EXIT=0`。无挂起。
+- 定向：`cargo test -p store --test file_rename --test file_rename_durable` 7 passed；`cargo fmt --all --check` exit 0；`cargo check -p api --lib --tests` clean。
