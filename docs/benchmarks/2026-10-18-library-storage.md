@@ -323,3 +323,52 @@
 - 处置：全量 `cargo test -p store` 属 Task 17 门后的统一重测项，引用该行前必须以当时树的实测日志为准。
 
 **本节未覆盖**：第 8 节其余行（`data_retention`、`data_retention_control`、`maintenance_runtime`、`storage_query_scale`、`storage_contention` 等）本轮均未复核，其数字保持 2026-10-18 的历史含义；本节不为它们给出新数字。
+
+## 9. Task 18 查询工作量基线（2026-10-22，release，本轮实测）
+
+本节只记录本轮真跑出来的数字，命令与 `RAW_EXIT` 逐字保留；没有测到的项在末尾逐条列为 `未跑`，不外推。
+
+### 9.1 命令与退出码
+
+| 命令 | 时间窗（UTC） | 原始结果 | 日志 |
+|---|---|---|---|
+| `cargo test -p store --release --test storage_work_bounds -- --nocapture` | 2026-10-22T01:57:32Z → 01:58:16Z | `test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.81s`；`RAW_EXIT[store_release]=0` | `/private/tmp/task18-step2-baseline.log` |
+| `cargo test -p api --release --test storage_query_scale -- --nocapture` | 2026-10-22T01:58:16Z → 01:59:15Z | `test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s`；`RAW_EXIT[api_release]=0` | 同上 |
+| `CRAWLER_MEDIA_SEEK_GROWTH_ITEMS=1000000 cargo test -p store --release --test storage_work_bounds seek_work_stays_flat_while_an_unrelated_library_grows -- --nocapture` | 2026-10-22T02:00:35Z → 02:02:05Z | `test result: ok. 1 passed; 0 failed; ...; finished in 89.62s`；`RAW_EXIT[1m_growth]=0` | `/private/tmp/task18-step4-1m.log` |
+
+环境：macOS arm64（Apple M4 Pro，12 核）、SQLite `3.50.2`（bundled）、`target/release`、运行前后 `pgrep -x cargo` 为空（无并发 cargo，排除锁争用）。冷热缓存未做分层对照（见 9.4）。
+
+### 9.2 关键度量（用例自打印原文）
+
+```text
+# 默认规模（无关库 1,000 → 10,000 文件，目标库 300 条目）
+growth: other 1000->10000, target 300; seed 1.56s; db 25972736 B; sqlite 3.50.2;
+        before QueryWorkStats { fullscan_steps: 0, vm_steps: 1963, rows_returned: 50 };
+        after  QueryWorkStats { fullscan_steps: 0, vm_steps: 1963, rows_returned: 50 }
+
+# 深游标（50,000 条目，100 页游标扫描）
+deep: 50000 items seeded in 4.45s; 100 cursor pages in 0.17s
+
+# 计划 Step 4 要求的大规模（无关库 1,000 → 1,000,000 文件，目标库 300 条目）
+growth: other 1000->1000000, target 300; seed 89.26s; db 2464907264 B; sqlite 3.50.2;
+        before QueryWorkStats { fullscan_steps: 0, vm_steps: 1963, rows_returned: 50 };
+        after  QueryWorkStats { fullscan_steps: 0, vm_steps: 1963, rows_returned: 50 }
+```
+
+**结论（只就这三条数据）**：无关库文件数 1,000 → 1,000,000（1,000 倍）时，目标库 seek 的 `fullscan_steps` 恒为 `0`、`vm_steps` 恒为 `1963`、返回行数恒为 `50`，即计划 Step 1 的 `fullscan_steps == 0` 与 `vm_steps ≤ 2×基线` 在 1M 文件规模下成立（比值为 1.000）。因此本轮**没有**改动查询生产代码，也就没有 `perf(query): bound canonical reads with measured compound seeks` 这条提交——计划 `:414` 建议的提交信息与实际改动不符，如实记偏差。
+
+### 9.3 覆盖到的用例（本轮全部通过）
+
+- `seek_work_stays_flat_while_an_unrelated_library_grows`（含 `fullscan_steps == 0`、`vm_steps <= before*2` 断言，`crates/store/tests/storage_work_bounds/seek_scale.rs:393-400`）
+- `deep_cursor_sweep_has_no_duplicate_or_gap`（50k 深游标无重无漏）
+- `ordering_and_cursor_agree_across_null_ties_and_unicode`（NULL/tie/ASC/DESC/Unicode）
+- `watch_filters_counts_and_cross_library_media_share_one_snapshot`（未看/last_played/跨库去重/count 同快照）
+- api：`api_query_scale_page_and_cursor`、`api_cross_library_media_keeps_one_card_per_library`、`api_ordering_windows_are_stable_across_blank_ties_and_unicode`、`api_watch_filters_and_unwatched_first_over_http`
+
+### 9.4 本节 `未跑`（不外推）
+
+- 100k Media / 1M Playback 规模对照（只做了「无关库 1M 文件」这一维）
+- p50/p95 分位与峰值 RSS（用例未埋点，本轮未另做采样）
+- 冷热缓存分层对照、SQL 次数计数、返回/解码行字节统计
+- exact facets / 包含搜索 / offset 这三类**允许增长**路径的实测（计划 Step 2 要求区分，本轮未测）
+- 实际 Web/Jellyfin 深页烟测（浏览器侧仍为 Not run）
