@@ -588,3 +588,19 @@ fn case_equal_names_fall_through_to_the_next_sort_key() {
     let case_tie_ids: Vec<_> = page.items.iter().map(|item| item.item.clone()).collect();
     assert_eq!(case_tie_ids, vec![TypedItemId::Work(lower_a_id), TypedItemId::Work(upper_a_id)]);
 }
+
+/// R23: a genre id derived from the displayed name ("Drama") filters to that genre.
+#[test]
+fn genre_id_from_the_displayed_name_round_trips() {
+    let fx = Fx::new();
+    let drama = fx.add_movie_with_nfo("Dramatic", ALICE_NFO);
+    fx.add_movie("Plain");
+    let db = rusqlite::Connection::open(fx._dir.path().join("data").join("library.db")).unwrap();
+    // Only the NFO carries the genre: no derived term row may paper over the lookup.
+    db.execute("DELETE FROM library_item_terms WHERE term_kind = 'genre'", []).unwrap();
+    let mut query = base_query(ProtocolParent::Library(fx.alpha));
+    query.genre_ids = vec![uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, b"Drama").to_string()];
+    let genre_roundtrip_page = fx.store.protocol_item_page(&query).unwrap();
+    assert_eq!(genre_roundtrip_page.total, 1);
+    assert_eq!(genre_roundtrip_page.items[0].item, TypedItemId::Work(drama));
+}

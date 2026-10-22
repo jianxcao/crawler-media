@@ -89,10 +89,16 @@ pub(super) fn genre_clause(
     Ok(Some(format!("({})", clauses.join(" OR "))))
 }
 
-/// 流派元素既可能是 `{"name": ...}` 对象，也可能是裸字符串。
+/// 流派元素既可能是 `{"name": ...}` 对象，也可能是裸字符串；比较用折叠形。
 fn genre_expr() -> &'static str {
     "casefold(CASE g.type WHEN 'object' THEN json_extract(g.value, '$.name') \
       WHEN 'text' THEN g.value END)"
+}
+
+/// 原串流派名：协议 id 由显示名派生，解析时不能先折叠（R23）。
+fn genre_raw_expr() -> &'static str {
+    "CASE g.type WHEN 'object' THEN json_extract(g.value, '$.name') \
+      WHEN 'text' THEN g.value END"
 }
 
 /// 范围内出现过的人物 → 命中请求集合的 (角色, 名字/tmdb)。
@@ -176,7 +182,7 @@ fn resolve_genres(
              FROM scoped s, json_each(COALESCE(s.nfo_json, '{{}}'), '$.genres.value') g\
          ) WHERE name IS NOT NULL AND trim(name) != ''",
         scoped = scoped_cte(scope),
-        expr = genre_expr()
+        expr = genre_raw_expr()
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(
@@ -199,7 +205,7 @@ fn genre_hits(wanted: &str, name: &str) -> bool {
     if wanted.is_empty() {
         return false;
     }
-    if name.eq_ignore_ascii_case(wanted) {
+    if name.to_lowercase() == wanted.to_lowercase() {
         return true;
     }
     derived_genre_ids(name)
