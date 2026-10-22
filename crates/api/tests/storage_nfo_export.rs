@@ -150,9 +150,10 @@ fn media_at(state: &ApiState, path: &Path) -> MediaId {
     state
         .store()
         .lock()
-        .ledger_by_path(&path.display().to_string())
+        .file_coverage_by_path(&path.display().to_string())
         .unwrap()
         .expect("ledger row for the scanned video")
+        .file
         .media_id
 }
 

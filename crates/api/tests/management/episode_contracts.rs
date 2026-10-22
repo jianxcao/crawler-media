@@ -6,13 +6,14 @@ use std::sync::Arc;
 use api::ApiState;
 use api::router;
 use axum::http::StatusCode;
-use domain::{LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserId};
+use domain::{LedgerId, Media, MediaId, MediaKind, QualitySource, UserId};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::{Fixtures, json_data, json_error, request, state};
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 async fn create_user_and_login(app: &axum::Router, name: &str, pass: &str) -> (UserId, String) {
     let user_resp = app
@@ -65,7 +66,7 @@ fn create_sample_media(media_id: MediaId) -> Media {
     }
 }
 
-fn seed_library_files(dir: &std::path::Path, media_id: MediaId) -> Vec<LedgerRow> {
+fn seed_library_files(dir: &std::path::Path, media_id: MediaId) -> Vec<FixtureFile> {
     std::fs::create_dir_all(dir).unwrap();
     let files = [
         (1, 1, "Test Show S01E01.mkv"),
@@ -76,18 +77,16 @@ fn seed_library_files(dir: &std::path::Path, media_id: MediaId) -> Vec<LedgerRow
     for (s, ep, name) in files {
         let p = dir.join(name);
         std::fs::write(&p, b"video").unwrap();
-        rows.push(LedgerRow {
-            id: LedgerId::new(),
+        rows.push(FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id,
             path: p.to_string_lossy().to_string(),
             season: Some(s),
             episode: Some(ep),
             resolution: Some("1080p".into()),
             codec: Some("H264".into()),
-            hdr: None,
             quality_source: QualitySource::Probe,
-            confidence: domain::Confidence::High,
-            filter_score: None,
+            ..Default::default()
         });
     }
     rows
@@ -106,8 +105,8 @@ fn seed_test_env(
     let store = api_state.store();
     let s = store.lock();
     s.insert_media(&media).unwrap();
-    for row in &rows {
-        s.insert_ledger(row).unwrap();
+    for spec in &rows {
+        publish_fixture_file(&s, spec).unwrap();
     }
     s.upsert_unit(
         user_a_id,
@@ -284,14 +283,30 @@ async fn library_episodes_accept_season_zero_for_specials() {
     let library_id = {
         let store = api_state.store();
         let store = store.lock();
-        let mut special = store
-            .list_ledger()
+        let special = store
+            .file_coverage_for_media(media_id)
             .unwrap()
             .into_iter()
-            .find(|row| row.media_id == media_id && row.season == Some(2))
-            .unwrap();
-        special.season = Some(0);
-        store.insert_ledger(&special).unwrap();
+            .find(|coverage| coverage.units == vec![domain::UnitKey::new(2, 1)])
+            .expect("seeded season 2 file");
+        publish_fixture_file(
+            &store,
+            &FixtureFile {
+                file_id: Some(special.file.file_id),
+                media_id: special.file.media_id,
+                path: special.file.path.to_string_lossy().into_owned(),
+                season: Some(0),
+                episode: Some(1),
+                resolution: special.file.resolution.clone(),
+                codec: special.file.codec.clone(),
+                hdr: special.file.hdr.clone(),
+                quality_source: special.file.quality_source,
+                confidence: special.file.confidence,
+                filter_score: special.file.filter_score,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         store
             .list_libraries()
             .unwrap()

@@ -3,7 +3,7 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use domain::{Confidence, MediaId, QualitySource};
+use domain::MediaId;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -14,7 +14,7 @@ use crate::management::ApiState;
 /// GET /ledger — every ledger row (management view).
 pub(crate) async fn list_ledger(State(state): State<ApiState>) -> Response {
     let store = state.store.lock();
-    let rows_with_mode = match store.list_ledger_with_mode() {
+    let rows_with_mode = match store.list_file_coverage() {
         Ok(rows) => rows,
         Err(error) => {
             return err(
@@ -34,60 +34,76 @@ pub(crate) async fn list_ledger(State(state): State<ApiState>) -> Response {
             );
         }
     };
-    let items: Vec<Value> = rows_with_mode
-        .into_iter()
-        .map(|(row, saved_mode, source_path)| {
-            let media = store.get_media(row.media_id).ok().flatten();
-            let library_id = media.as_ref().and_then(|media| {
-                crate::http::library::library_for_row(&store, &row, media).map(|library| library.id)
-            });
-            let title = media.as_ref().map(|m| m.title.clone()).unwrap_or_default();
-            let kind = media.as_ref().map(|m| m.kind.as_str()).unwrap_or("movie");
-            let meta = std::fs::metadata(&row.path).ok();
-            let file_size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-            let is_strm = std::path::Path::new(&row.path)
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"));
+    let mut items: Vec<Value> = Vec::new();
+    for coverage in rows_with_mode {
+        let file = coverage.file;
+        let media = store.get_media(file.media_id).ok().flatten();
+        let library_id = media.as_ref().and_then(|media| {
+            crate::http::library::library_for_file(&store, &file, media).map(|library| library.id)
+        });
+        let title = media.as_ref().map(|m| m.title.clone()).unwrap_or_default();
+        let kind = media.as_ref().map(|m| m.kind.as_str()).unwrap_or("movie");
+        let meta = std::fs::metadata(&file.path).ok();
+        let file_size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let is_strm = file
+            .path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"));
+        let path_json = file.path.to_string_lossy().into_owned();
+        let source_path = file
+            .source_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        let saved_mode = file.transfer_mode.clone();
 
-            #[cfg(unix)]
-            let is_hardlink = {
-                use std::os::unix::fs::MetadataExt;
-                meta.as_ref().map(|m| m.nlink() > 1).unwrap_or(false)
-            };
-            #[cfg(not(unix))]
-            let is_hardlink =
-                saved_mode.as_deref() == Some("hardlink") || global_transfer_mode == "hardlink";
+        #[cfg(unix)]
+        let is_hardlink = {
+            use std::os::unix::fs::MetadataExt;
+            meta.as_ref().map(|m| m.nlink() > 1).unwrap_or(false)
+        };
+        #[cfg(not(unix))]
+        let is_hardlink =
+            saved_mode.as_deref() == Some("hardlink") || global_transfer_mode == "hardlink";
 
-            let mode_str = if is_strm {
-                "strm".to_string()
-            } else if is_hardlink {
-                "hardlink".to_string()
-            } else {
-                saved_mode.unwrap_or_else(|| global_transfer_mode.clone())
-            };
+        let mode_str = if is_strm {
+            "strm".to_string()
+        } else if is_hardlink {
+            "hardlink".to_string()
+        } else {
+            saved_mode.unwrap_or_else(|| global_transfer_mode.clone())
+        };
 
-            json!({
-                "id": row.id.to_string(),
-                "media_id": row.media_id.to_string(),
-                "library_id": library_id,
-                "media_title": title,
+        // 一个物理文件可覆盖多个 unit；legacy 行是逐 unit 的 join 行，这里逐 unit 保值。
+        let whole = [domain::UnitKey::WHOLE];
+        let units: &[domain::UnitKey] = if coverage.units.is_empty() {
+            &whole
+        } else {
+            &coverage.units
+        };
+        for unit in units {
+            let coordinates = unit.episode_coordinates();
+            items.push(json!({
+                "id": file.file_id.to_string(),
+                "media_id": file.media_id.to_string(),
+                "library_id": library_id.clone(),
+                "media_title": title.clone(),
                 "media_kind": kind,
-                "path": row.path,
-                "source_path": source_path,
-                "season": row.season,
-                "episode": row.episode,
-                "resolution": row.resolution,
-                "codec": row.codec,
-                "hdr": row.hdr,
-                "quality_source": row.quality_source.as_str(),
-                "confidence": row.confidence.as_str(),
-                "filter_score": row.filter_score,
-                "transfer_mode": mode_str,
+                "path": path_json.clone(),
+                "source_path": source_path.clone(),
+                "season": coordinates.map(|(season, _)| season),
+                "episode": coordinates.map(|(_, episode)| episode),
+                "resolution": file.resolution.clone(),
+                "codec": file.codec.clone(),
+                "hdr": file.hdr.clone(),
+                "quality_source": file.quality_source.as_str(),
+                "confidence": file.confidence.as_str(),
+                "filter_score": file.filter_score,
+                "transfer_mode": mode_str.clone(),
                 "file_size": file_size,
-            })
-        })
-        .collect();
+            }));
+        }
+    }
     ok_list(items).into_response()
 }
 #[derive(serde::Deserialize)]
@@ -108,7 +124,7 @@ pub(crate) async fn delete_ledger_row(
     let delete_file = query.delete_file.unwrap_or(false);
     let target = {
         let store = state.store.lock();
-        let target = match store.get_ledger(&ledger_id.to_string()) {
+        let target = match store.file_coverage_by_id(ledger_id) {
             Ok(Some(target)) => target,
             Ok(None) => return err(StatusCode::NOT_FOUND, "ledger.missing", "整理记录不存在"),
             Err(error) => {
@@ -119,8 +135,8 @@ pub(crate) async fn delete_ledger_row(
                 );
             }
         };
-        if let Some(media) = store.get_media(target.media_id).ok().flatten() {
-            let owner = crate::http::library::library_for_row_strict(&store, &target, &media);
+        if let Some(media) = store.get_media(target.file.media_id).ok().flatten() {
+            let owner = crate::http::library::library_for_file_strict(&store, &target.file, &media);
             match owner {
                 Some(owner) => match store.library_accepts_work(&owner.id) {
                     Ok(true) => {}
@@ -152,7 +168,10 @@ pub(crate) async fn delete_ledger_row(
             );
         }
         if delete_file
-            && let Err(error) = store.enqueue_file_deletion(&target.path, "admin_delete")
+            && let Err(error) = store.enqueue_file_deletion(
+                target.file.path.to_string_lossy().as_ref(),
+                "admin_delete",
+            )
         {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -160,7 +179,7 @@ pub(crate) async fn delete_ledger_row(
                 &error.to_string(),
             );
         }
-        if let Err(error) = store.delete_ledger_path(&target.path) {
+        if let Err(error) = store.delete_ledger_path(target.file.path.to_string_lossy().as_ref()) {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "store.error",
@@ -173,9 +192,14 @@ pub(crate) async fn delete_ledger_row(
     if delete_file
         && let Err(error) = crate::http::file_delete::retry_queued_deletions(&state.store)
     {
-        tracing::error!(path = %target.path, %error, "管理删除物理文件失败，保留在待删除队列");
+        tracing::error!(path = %target.file.path.display(), %error, "管理删除物理文件失败，保留在待删除队列");
     }
-    ok(json!({ "deleted": true, "path": target.path, "file_deleted": delete_file })).into_response()
+    ok(json!({
+        "deleted": true,
+        "path": target.file.path.to_string_lossy().into_owned(),
+        "file_deleted": delete_file
+    }))
+    .into_response()
 }
 
 /// GET /unidentified — files that failed confidence matching.
@@ -242,6 +266,59 @@ pub(crate) async fn list_unidentified(
     ok_list(items).into_response()
 }
 
+/// Resolve what a retransfer targets: the Library destination the coverage was
+/// published to and the download source this round recorded for it. Failures
+/// carry the HTTP response the handler returns, so the store read stays in one
+/// place and the handler only drives the transfer.
+fn retransfer_target(
+    store: &crate::Store,
+    ledger_id: domain::LedgerId,
+) -> Result<(std::path::PathBuf, String), Response> {
+    let rows_with_mode = match store.list_file_coverage() {
+        Ok(rows) => rows,
+        Err(error) => {
+            return Err(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            ));
+        }
+    };
+    let Some(target) = rows_with_mode
+        .into_iter()
+        .find(|coverage| coverage.file.file_id == ledger_id)
+    else {
+        return Err(err(StatusCode::NOT_FOUND, "ledger.missing", "整理记录不存在"));
+    };
+    let Some(src) = target
+        .file
+        .source_path
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned())
+    else {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "ledger.no_source",
+            "该条目未记录源文件地址，无法重新生成",
+        ));
+    };
+    let Some(media) = store.get_media(target.file.media_id).ok().flatten() else {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "library.outside_root",
+            "无法确认媒体库归属，拒绝重新生成",
+        ));
+    };
+    if crate::http::library::library_for_file_strict(store, &target.file, &media).is_none() {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "library.outside_root",
+            "目标已不在任何媒体库根目录内，拒绝重新生成",
+        ));
+    }
+    Ok((target.file.path, src))
+}
+
 /// POST /ledger/{id}/retransfer — 从源地址重新硬链接/重新生成文件到媒体库
 pub(crate) async fn retransfer_ledger_row(
     State(state): State<ApiState>,
@@ -253,44 +330,10 @@ pub(crate) async fn retransfer_ledger_row(
     };
     let (destination, src) = {
         let store = state.store.lock();
-        let rows_with_mode = match store.list_ledger_with_mode() {
-            Ok(rows) => rows,
-            Err(error) => {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "store.error",
-                    &error.to_string(),
-                );
-            }
-        };
-        let Some((target, _, source_path)) = rows_with_mode
-            .into_iter()
-            .find(|(r, _, _)| r.id == ledger_id)
-        else {
-            return err(StatusCode::NOT_FOUND, "ledger.missing", "整理记录不存在");
-        };
-        let Some(src) = source_path else {
-            return err(
-                StatusCode::BAD_REQUEST,
-                "ledger.no_source",
-                "该条目未记录源文件地址，无法重新生成",
-            );
-        };
-        let Some(media) = store.get_media(target.media_id).ok().flatten() else {
-            return err(
-                StatusCode::FORBIDDEN,
-                "library.outside_root",
-                "无法确认媒体库归属，拒绝重新生成",
-            );
-        };
-        if crate::http::library::library_for_row_strict(&store, &target, &media).is_none() {
-            return err(
-                StatusCode::FORBIDDEN,
-                "library.outside_root",
-                "目标已不在任何媒体库根目录内，拒绝重新生成",
-            );
+        match retransfer_target(&store, ledger_id) {
+            Ok(target) => target,
+            Err(response) => return response,
         }
-        (target.path, src)
     };
     let src_path = std::path::PathBuf::from(&src);
     let dest_path = std::path::PathBuf::from(&destination);
@@ -345,9 +388,13 @@ pub(crate) async fn retransfer_ledger_row(
         "已从其记录的源路径重新转移媒体库文件"
     );
 
-    if let Err(error) = state.store.lock().clear_ledger_missing(&destination) {
+    if let Err(error) = state
+        .store
+        .lock()
+        .clear_ledger_missing(destination.to_string_lossy().as_ref())
+    {
         tracing::error!(
-            destination = %destination,
+            destination = %destination.display(),
             %error,
             "重新转移后无法清除缺失标记"
         );
@@ -361,7 +408,7 @@ pub(crate) async fn retransfer_ledger_row(
     ok(json!({
         "retransferred": true,
         "source": src,
-        "destination": destination
+        "destination": destination.to_string_lossy().into_owned()
     }))
     .into_response()
 }
@@ -400,29 +447,25 @@ pub(crate) async fn claim_unidentified(
             "只能认领媒体库根目录内的文件",
         );
     }
-    let row = domain::LedgerRow {
-        id: domain::LedgerId::new(),
-        media_id,
-        path: path.to_string(),
-        season: None,
-        episode: None,
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
+    let facts = crate::claim::ClaimedFacts::unidentified();
+    let file = match crate::claim::publish_claimed_file(
+        &store,
+        &media,
+        std::path::Path::new(path),
+        &facts,
+    ) {
+        Ok(file) => file,
+        Err(error) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
     };
-    if let Err(error) = store.insert_ledger(&row) {
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        );
-    }
     let _ = store.delete_unidentified(path);
     drop(store);
-    crate::http::library::enqueue_probes_for_rows(&state, std::slice::from_ref(&row));
+    crate::http::library::enqueue_probes_for_files(&state, std::slice::from_ref(&file));
     ok(json!({
         "media_item_id": media.id.to_string(),
         "path": path,

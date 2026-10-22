@@ -79,25 +79,28 @@ fn is_movie_media(
 pub(crate) fn library_id_for(
     store: &crate::Store,
     media: &domain::Media,
-    rows: &[&domain::LedgerRow],
+    files: &[&domain::LibraryFile],
 ) -> Option<String> {
-    let mut ids = rows
+    let mut ids = files
         .iter()
-        .filter_map(|row| crate::http::library::library_for_row(store, row, media))
+        .filter_map(|file| crate::http::library::library_for_file(store, file, media))
         .map(|library| library.id);
     let first = ids.next()?;
     ids.all(|id| id == first).then_some(first)
 }
 
-fn visible_rows_for_media<'a>(
+fn visible_coverages_for_media<'a>(
     store: &crate::Store,
     media: &domain::Media,
-    rows: &'a [domain::LedgerRow],
+    coverages: &'a [domain::FileCoverage],
     user_id: Option<domain::UserId>,
-) -> Vec<&'a domain::LedgerRow> {
-    rows.iter()
-        .filter(|row| row.media_id == media.id)
-        .filter(|row| crate::http::library::row_visible_to_user(store, row, media, user_id))
+) -> Vec<&'a domain::FileCoverage> {
+    coverages
+        .iter()
+        .filter(|coverage| coverage.file.media_id == media.id)
+        .filter(|coverage| {
+            crate::http::library::file_visible_to_user(store, &coverage.file, media, user_id)
+        })
         .collect()
 }
 
@@ -147,7 +150,7 @@ pub(crate) async fn item(
     axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response {
-    let (media, library_id, preferred_row) = {
+    let (media, library_id, preferred_coverage) = {
         let store = state.store.lock();
         let Some(media_id) = resolve_media_id(&id) else {
             return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
@@ -155,25 +158,29 @@ pub(crate) async fn item(
         let Some(media) = store.get_media(media_id).ok().flatten() else {
             return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
         };
-        let all_rows = store.list_ledger().unwrap_or_default();
-        let rows = visible_rows_for_media(&store, &media, &all_rows, user_id);
-        if rows.is_empty() {
+        let all_coverages = store.list_file_coverage().unwrap_or_default();
+        let coverages = visible_coverages_for_media(&store, &media, &all_coverages, user_id);
+        if coverages.is_empty() {
             return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
         }
-        let library_id = library_id_for(&store, &media, &rows).unwrap_or_default();
-        let preferred_row = crate::http::library::preferred_row(&rows).cloned();
-        (media, library_id, preferred_row)
+        let files: Vec<&domain::LibraryFile> =
+            coverages.iter().map(|coverage| &coverage.file).collect();
+        let library_id = library_id_for(&store, &media, &files).unwrap_or_default();
+        let preferred_coverage = crate::http::library::preferred_coverage(&coverages).cloned();
+        (media, library_id, preferred_coverage)
     };
     let files = state.browse_files.clone();
     let poster_url = match state
         .http_work
         .run(std::time::Duration::from_secs(30), move || {
-            preferred_row
+            preferred_coverage
                 .as_ref()
-                .filter(|row| {
-                    crate::http::library::poster_path_with(row, files.as_ref()).is_some()
+                .filter(|coverage| {
+                    crate::http::library::poster_path_with(&coverage.file, files.as_ref()).is_some()
                 })
-                .map(|row| crate::http::library::artwork_url("posters", row.id))
+                .map(|coverage| {
+                    crate::http::library::artwork_url("posters", coverage.file.file_id)
+                })
         })
         .await
     {
@@ -227,19 +234,23 @@ pub(crate) async fn episodes(
         let Some(media) = store.get_media(media_id).ok().flatten() else {
             return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
         };
-        let all_rows = store.list_ledger().unwrap_or_default();
-        let visible_rows = visible_rows_for_media(&store, &media, &all_rows, user_id);
-        if visible_rows.is_empty() {
+        let all_coverages = store.list_file_coverage().unwrap_or_default();
+        let visible_covs = visible_coverages_for_media(&store, &media, &all_coverages, user_id);
+        if visible_covs.is_empty() {
             return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
         }
-        let visible_cloned: Vec<domain::LedgerRow> = visible_rows.into_iter().cloned().collect();
+        let visible_cloned: Vec<domain::FileCoverage> = visible_covs.into_iter().cloned().collect();
         let mut unit_states = std::collections::HashMap::new();
         if let Some(uid) = user_id {
-            for row in &visible_cloned {
-                let Some(e) = row.episode else { continue };
-                let s = row.season.unwrap_or(1);
-                if let Ok(st) = store.unit_state(uid, media.id, s as i32, e as i32) {
-                    unit_states.insert((s, e), st);
+            for cov in &visible_cloned {
+                for unit in &cov.units {
+                    if unit.is_whole() {
+                        continue;
+                    }
+                    let (s, e) = (unit.season.max(0) as u32, unit.episode.max(0) as u32);
+                    if let Ok(st) = store.unit_state(uid, media.id, unit.season, unit.episode) {
+                        unit_states.insert((s, e), st);
+                    }
                 }
             }
         }
@@ -256,38 +267,41 @@ pub(crate) async fn episodes(
                 (Vec<String>, String, Option<String>, Option<String>),
             > = std::collections::HashMap::new();
 
-            for row in &visible_cloned {
-                let Some(ep_num) = row.episode else {
-                    continue;
-                };
-                let season_num = row.season.unwrap_or(1);
-                if let Some(target) = season_number {
-                    if season_num != target {
+            for cov in &visible_cloned {
+                for unit in &cov.units {
+                    if unit.is_whole() {
                         continue;
                     }
+                    let season_num = unit.season.max(0) as u32;
+                    let ep_num = unit.episode.max(0) as u32;
+                    if let Some(target) = season_number {
+                        if season_num != target {
+                            continue;
+                        }
+                    }
+
+                    let file_path = &cov.file.path;
+                    let file_name = file_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default()
+                        .to_string();
+
+                    let local_still = crate::episode_still::existing_with(file_path, files.as_ref())
+                        .map(|_| crate::http::library::artwork_url("stills", cov.file.file_id));
+                    let backdrop = if !unit.is_whole()
+                        && crate::http::library::backdrop_path_with(&cov.file, files.as_ref()).is_some()
+                    {
+                        Some(crate::http::library::artwork_url("fanart", cov.file.file_id))
+                    } else {
+                        None
+                    };
+
+                    let entry = grouped
+                        .entry((season_num, ep_num))
+                        .or_insert_with(|| (Vec::new(), file_name, local_still, backdrop));
+                    entry.0.push(cov.file.file_id.to_string());
                 }
-
-                let file_path = std::path::Path::new(&row.path);
-                let file_name = file_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default()
-                    .to_string();
-
-                let local_still = crate::episode_still::existing_with(file_path, files.as_ref())
-                    .map(|_| crate::http::library::artwork_url("stills", row.id));
-                let backdrop = if row.season.is_some()
-                    && crate::http::library::backdrop_path_with(row, files.as_ref()).is_some()
-                {
-                    Some(crate::http::library::artwork_url("fanart", row.id))
-                } else {
-                    None
-                };
-
-                let entry = grouped
-                    .entry((season_num, ep_num))
-                    .or_insert_with(|| (Vec::new(), file_name, local_still, backdrop));
-                entry.0.push(row.id.to_string());
             }
 
             let mut keys: Vec<(u32, u32)> = grouped.keys().copied().collect();
@@ -354,7 +368,7 @@ pub(crate) async fn episodes(
 }
 
 fn direct_decision(
-    row: &domain::LedgerRow,
+    file: &domain::LibraryFile,
     body: &Value,
     tracks: Option<&library::Tracks>,
 ) -> Value {
@@ -380,7 +394,7 @@ fn direct_decision(
             "capability": body["capability"],
         });
     }
-    let path = std::path::Path::new(&row.path);
+    let path = &file.path;
     let is_strm = path
         .extension()
         .and_then(|e| e.to_str())
@@ -446,7 +460,7 @@ fn direct_decision(
                         "is_default": s.is_default,
                         "forced": s.forced,
                         "is_external": s.is_external,
-                        "delivery_url": format!("/api/v1/playback/subtitles/{}/{}", row.id, stream_idx),
+                        "delivery_url": format!("/api/v1/playback/subtitles/{}/{}", file.file_id, stream_idx),
                     })
                 })
                 .collect();
@@ -457,9 +471,9 @@ fn direct_decision(
     json!({
         "outcome": "plan",
         "tier": 0,
-        "file_id": row.id.to_string(),
+        "file_id": file.file_id.to_string(),
         "container": container,
-        "video": { "action": "copy", "codec": row.codec, "height": null, "tone_map": false, "burn_subtitle": null },
+        "video": { "action": "copy", "codec": file.codec, "height": null, "tone_map": false, "burn_subtitle": null },
         "audio": { "action": "copy", "track_ref": null, "codec": null, "channels": null, "downmix": false },
         // 直出整份文件时浏览器只放容器默认音轨，请求里的 audio_track 不会生效。
         // 不把探测到的多条轨交给菜单，避免用户点了之后白重启、仍听到默认轨。
@@ -483,11 +497,11 @@ pub(crate) async fn decide(
     Json(body): Json<Value>,
 ) -> Response {
     let store = state.store.lock();
-    let Some((row, _media, _, _)) = row_for(&store, &body, user_id) else {
+    let Some((file, _media, _, _)) = row_for(&store, &body, user_id) else {
         return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
     };
-    let tracks = store.get_file_meta(&row.id.to_string()).ok().flatten();
-    ok(direct_decision(&row, &body, tracks.as_ref())).into_response()
+    let tracks = store.get_file_meta(&file.file_id.to_string()).ok().flatten();
+    ok(direct_decision(&file, &body, tracks.as_ref())).into_response()
 }
 
 pub(super) fn unit_for_unit(
@@ -560,8 +574,8 @@ fn metric_media_id(
     }
     let id = explicit?;
     let media = store.get_media(id).ok().flatten()?;
-    let rows = store.list_ledger().ok()?;
-    (!visible_rows_for_media(store, &media, &rows, Some(user_id)).is_empty()).then_some(id)
+    let rows = store.list_file_coverage().ok()?;
+    (!visible_coverages_for_media(store, &media, &rows, Some(user_id)).is_empty()).then_some(id)
 }
 
 /// GET/PUT /playback/policy — direct-play only; transcode flags persist in KV.
@@ -694,7 +708,7 @@ pub(crate) async fn get_subtitle_file(
     axum::extract::Path((ledger_id, index)): axum::extract::Path<(String, u32)>,
     axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    let (row, media_title, media_kind, tracks) = {
+    let (row, media_title, file_path, file_id) = {
         let store = state.store.lock();
         let file_id = match ledger_id.parse::<domain::LedgerId>() {
             Ok(id) => id,
@@ -710,23 +724,20 @@ pub(crate) async fn get_subtitle_file(
         let Ok(Some(tracks)) = store.get_file_meta(&file.file_id.to_string()) else {
             return err(StatusCode::NOT_FOUND, "subtitle.not_found", "字幕未找到");
         };
-        let row = crate::media_server_provider::items::row_view(&file, (crate::store::UNIT_WHOLE, crate::store::UNIT_WHOLE));
-        (row, media.title, media.kind, tracks)
-    };
-    let wants_vtt = query
-        .get("format")
-        .map(|f| f.eq_ignore_ascii_case("vtt"))
-        .unwrap_or(false);
-    let request = crate::subtitle_delivery::SubtitleRequest {
-        ledger_id: row.id,
-        source_path: std::path::PathBuf::from(&row.path),
-        kind: media_kind,
-        tracks,
-        index,
-        wants_vtt,
+        let row = crate::subtitle_delivery::SubtitleRequest {
+            ledger_id: file.file_id,
+            source_path: file.path.clone(),
+            kind: media.kind,
+            tracks,
+            index,
+            wants_vtt: query.get("format").map(|f| f.eq_ignore_ascii_case("vtt")).unwrap_or(false),
+        };
+        let file_path = file.path.display().to_string();
+        let fid = file.file_id;
+        (row, media.title, file_path, fid)
     };
 
-    match state.subtitle_delivery.deliver(&state, request).await {
+    match state.subtitle_delivery.deliver(&state, row).await {
         Ok(payload) => (
             [(axum::http::header::CONTENT_TYPE, payload.content_type)],
             payload.bytes,
@@ -735,8 +746,8 @@ pub(crate) async fn get_subtitle_file(
         Err(error) => {
             tracing::error!(
                 media = %media_title,
-                path = %row.path,
-                ledger_id = %ledger_id,
+                path = %file_path,
+                ledger_id = %file_id,
                 index,
                 %error,
                 "交付字幕文件失败"

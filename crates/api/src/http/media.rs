@@ -108,13 +108,13 @@ fn find_library_links(store: &crate::Store, media: &domain::Media) -> Vec<Value>
         .map(|m| m.id)
         .unwrap_or(media.id);
     let mut links = Vec::new();
-    for row in store.list_ledger().unwrap_or_default() {
-        if row.media_id == canonical_id || row.media_id == media.id {
+    for row in store.list_file_coverage().unwrap_or_default() {
+        if row.file.media_id == canonical_id || row.file.media_id == media.id {
             if let Some(owner) = store
-                .get_media(row.media_id)
+                .get_media(row.file.media_id)
                 .ok()
                 .flatten()
-                .and_then(|m| crate::http::library::library_for_row(store, &row, &m))
+                .and_then(|m| crate::http::library::library_for_file(store, &row.file, &m))
             {
                 if !links
                     .iter()
@@ -123,7 +123,7 @@ fn find_library_links(store: &crate::Store, media: &domain::Media) -> Vec<Value>
                     links.push(json!({
                         "library_id": owner.id,
                         "library_name": owner.name,
-                        "media_item_id": row.media_id.to_string(),
+                        "media_item_id": row.file.media_id.to_string(),
                     }));
                 }
             }

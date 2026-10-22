@@ -2,7 +2,7 @@
 
 > **本文不是现行完整路由表。** 资源、方法、字段以代码为准：
 >
-> - 后端路由：`crates/api/src/http/mod.rs`（`/api/v1`）
+> - 后端路由：`crates/api/src/http/mod.rs`（`router_with_slow_after`）与路由表 `crates/api/src/http/routes/{mod,member,admin}.rs`（`/api/v1`）
 > - 前端调用：`web/lib/api/*`
 > - 领域词汇：`CONTEXT.md`
 >
@@ -186,7 +186,7 @@ Jellyfin `Items` 选择已统一到 `protocol_item_page`：授权与作用域收
 
 根路径上的历史遗留管理路径（`/subscribes` `/filters` `/search` 等）已彻底移除并返回 404；自有管理面完全统一在 `/api/v1`。
 
-完整 method/path 以 `crates/api/src/http/mod.rs` 的 `router()` 为准。
+完整 method/path 以 `crates/api/src/http/mod.rs` 的 `router_with_slow_after()` 与 `crates/api/src/http/routes/{mod,member,admin}.rs` 的 `.route(...)` 注册为准（2026-10-21 由 818 行的 `http/mod.rs` 拆分而来，路由字符串与 merge 顺序未变）。
 
 前端 `web/lib/api/*` 的路径是相对 `VITE_API_BASE_URL`（默认 `/api/v1`）。改密走 `PATCH /users/{id}` 的 `password`，没有 `POST /users/{id}/reset-password`。
 

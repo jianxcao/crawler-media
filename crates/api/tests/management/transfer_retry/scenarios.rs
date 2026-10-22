@@ -22,7 +22,9 @@ async fn mixed_tv_retry_binds_old_subtitle_to_persisted_custom_destination() {
     assert!(!d2.exists());
     fixture.assert_sources(&[(&e1, &d1)]);
     fixture.assert_pending(1, 0);
-    let original_id = fixture.state.store().lock().list_ledger().unwrap()[0].id;
+    let original_id = fixture.state.store().lock().list_file_coverage().unwrap()[0]
+        .file
+        .file_id;
     fixture.unblock(&blocker, "tv/The Long Watch/01/01.zh.srt");
 
     // Downloader still returns E1: ownership dedup must not discard its source identity.
@@ -36,12 +38,13 @@ async fn mixed_tv_retry_binds_old_subtitle_to_persisted_custom_destination() {
     );
     fixture.assert_sources(&[(&e1, &d1), (&e2, &d2)]);
     fixture.assert_pending(0, 1);
-    let rows = fixture.state.store().lock().list_ledger().unwrap();
+    let rows = fixture.state.store().lock().list_file_coverage().unwrap();
     assert_eq!(
         rows.iter()
-            .find(|row| row.path == d1.to_str().unwrap())
+            .find(|coverage| coverage.file.path.as_path() == d1)
             .unwrap()
-            .id,
+            .file
+            .file_id,
         original_id
     );
     assert!(fixture.transfer().await.is_ok());
@@ -58,7 +61,9 @@ async fn all_owned_videos_without_subtitles_complete_reactivated_pending() {
     fixture.pending(&torrent);
     assert!(fixture.transfer().await.is_ok());
     fixture.assert_pending(0, 1);
-    let original_id = fixture.state.store().lock().list_ledger().unwrap()[0].id;
+    let original_id = fixture.state.store().lock().list_file_coverage().unwrap()[0]
+        .file
+        .file_id;
 
     fixture.pending(&torrent);
     fixture.assert_pending(1, 0);
@@ -66,7 +71,9 @@ async fn all_owned_videos_without_subtitles_complete_reactivated_pending() {
     fixture.assert_pending(0, 1);
     fixture.assert_sources(&[(&source, &destination)]);
     assert_eq!(
-        fixture.state.store().lock().list_ledger().unwrap()[0].id,
+        fixture.state.store().lock().list_file_coverage().unwrap()[0]
+            .file
+            .file_id,
         original_id
     );
     assert_eq!(std::fs::read(destination).unwrap(), b"owned-video");
@@ -137,17 +144,15 @@ async fn unrelated_torrent_with_same_episode_does_not_steal_owned_destination() 
         "Unrelated source must not bind by episode facts: {result:?}"
     );
     assert_eq!(std::fs::read(&destination).unwrap(), b"owned");
-    let rows = fixture
-        .state
-        .store()
-        .lock()
-        .list_ledger_with_mode()
-        .unwrap();
+    let rows = fixture.state.store().lock().list_file_coverage().unwrap();
     let owned_row = rows
         .iter()
-        .find(|(row, _, _)| row.path == destination.to_str().unwrap())
+        .find(|coverage| coverage.file.path.as_path() == destination)
         .unwrap();
-    assert_eq!(owned_row.2.as_deref(), own_source.to_str());
+    assert_eq!(
+        owned_row.file.source_path.as_deref(),
+        Some(own_source.as_path())
+    );
     // M2: without wash-cut the episode is already owned, so the unrelated
     // source is a duplicate and is not imported (no parallel library copy).
     assert_eq!(rows.len(), 1, "owned episode is not duplicated (M2)");

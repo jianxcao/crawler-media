@@ -5,13 +5,14 @@ use std::sync::Arc;
 
 use api::{Store, router};
 use axum::http::StatusCode;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::*;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 fn app(tmp: &tempfile::TempDir) -> axum::Router {
     let fetcher = Arc::new(Fixtures {
@@ -53,9 +54,10 @@ fn seed_media(
     };
     store.insert_media(&media).unwrap();
     for path in [&a, &b] {
-        store
-            .insert_ledger(&LedgerRow {
-                id: LedgerId::new(),
+        publish_fixture_file(
+            &store,
+            &FixtureFile {
+                file_id: Some(LedgerId::new()),
                 media_id: media.id,
                 path: path.display().to_string(),
                 season: None,
@@ -66,8 +68,10 @@ fn seed_media(
                 quality_source: QualitySource::Release,
                 confidence: Confidence::High,
                 filter_score: None,
-            })
-            .unwrap();
+                ..Default::default()
+            },
+        )
+        .unwrap();
     }
     let app = app(tmp);
     (app, media.id, media.id.to_string(), a, b)
@@ -137,9 +141,10 @@ async fn delete_library_item_keeps_same_media_in_another_library() {
             &[],
         )
         .unwrap();
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id,
             path: other_file.display().to_string(),
             season: None,
@@ -150,8 +155,10 @@ async fn delete_library_item_keeps_same_media_in_another_library() {
             quality_source: QualitySource::Release,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     drop(store);
     let libraries = json_body(
         app.clone()
@@ -191,10 +198,10 @@ async fn delete_library_item_keeps_same_media_in_another_library() {
     );
     let remaining = Store::open(tmp.path().join("data"))
         .unwrap()
-        .ledger_for_media(media_id)
+        .file_coverage_for_media(media_id)
         .unwrap();
     assert_eq!(remaining.len(), 1);
-    assert_eq!(remaining[0].path, other_file.display().to_string());
+    assert_eq!(remaining[0].file.path, other_file);
 }
 
 #[tokio::test]
@@ -273,10 +280,10 @@ async fn duplicates_group_and_delete_one() {
     assert!(kept.exists(), "one physical duplicate remains");
     let remaining = Store::open(tmp.path().join("data"))
         .unwrap()
-        .list_ledger()
+        .list_file_coverage()
         .unwrap();
     assert_eq!(remaining.len(), 1, "one ledger row remains");
-    let unique_id = remaining[0].id.to_string();
+    let unique_id = remaining[0].file.file_id.to_string();
     let unique_delete = app
         .oneshot(request(
             "DELETE",
@@ -337,12 +344,13 @@ async fn duplicates_do_not_delete_the_last_present_copy() {
     );
     let store = Store::open(tmp.path().join("data")).unwrap();
     let present_id = store
-        .list_ledger()
+        .list_file_coverage()
         .unwrap()
         .into_iter()
-        .find(|row| row.path == a.display().to_string())
+        .find(|coverage| coverage.file.path == a)
         .unwrap()
-        .id;
+        .file
+        .file_id;
     let blocked = app
         .oneshot(request(
             "DELETE",
@@ -415,21 +423,13 @@ async fn parent_library_duplicates_cannot_delete_nested_child_library_files() {
     };
     store.insert_media(&media).unwrap();
     for path in [&a, &b] {
-        store
-            .insert_ledger(&LedgerRow {
-                id: LedgerId::new(),
-                media_id: media.id,
-                path: path.display().to_string(),
-                season: None,
-                episode: None,
-                resolution: None,
-                codec: None,
-                hdr: None,
-                quality_source: QualitySource::Release,
-                confidence: Confidence::High,
-                filter_score: None,
-            })
-            .unwrap();
+        let spec = FixtureFile {
+            file_id: Some(LedgerId::new()),
+            media_id: media.id,
+            path: path.display().to_string(),
+            ..Default::default()
+        };
+        publish_fixture_file(&store, &spec).unwrap();
     }
     drop(store);
     let parent_id = parent["data"]["id"].as_str().unwrap();

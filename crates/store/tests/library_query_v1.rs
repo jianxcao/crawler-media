@@ -401,3 +401,81 @@ fn protocol_item_page_pagination_and_wire_ids() {
     assert_eq!(page_unknown.total, 0);
     assert!(page_unknown.items.is_empty());
 }
+
+#[test]
+fn library_file_page_rejects_unknown_presence_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+
+    let (lib, root_id) = create_library(&store, "Test Lib", MediaKind::Movie, "/test");
+    let scope = WriteScope {
+        library_id: lib.id.parse().unwrap(),
+        config_revision: 0,
+    };
+
+    let media_id_str = "00000000-0000-0000-0000-000000000001";
+    let media = create_media(&store, media_id_str, "Test Movie", MediaKind::Movie, 2024);
+
+    let file_id_str1 = "00000000-0000-0000-0001-000000000001";
+    let file1 = make_file(file_id_str1, &lib.id, &root_id, media_id_str, "test1.mkv", MediaKind::Movie, 1_000_000);
+    store.publish_files(&scope, &[StorePublication {
+        file: &file1,
+        units: &[UnitKey::WHOLE],
+        expected_version: None,
+        nfo_observation: None,
+        probe_required: false,
+    }], 1000).unwrap();
+
+    // 1. 验证正常查询为 Ok
+    let page = store.library_file_page(scope.library_id, media.id, None, 10).unwrap();
+    assert_eq!(page.files.len(), 1);
+
+    // 2. 注入非法 presence_state ('bogus')：断言显式拒绝
+    let db = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
+    db.execute_batch("PRAGMA ignore_check_constraints = ON;").unwrap();
+    db.execute(
+        "UPDATE library_files SET presence_state = 'bogus' WHERE file_id = ?1",
+        rusqlite::params![file1.file_id.to_string()],
+    )
+    .unwrap();
+
+    let err_presence = store.library_file_page(scope.library_id, media.id, None, 10).unwrap_err();
+    let msg_presence = err_presence.to_string();
+    assert!(
+        msg_presence.contains("bogus") && msg_presence.contains(&file1.file_id.to_string()),
+        "presence rejection must explicitly report bogus state and file_id: {msg_presence}"
+    );
+
+    // 3. 证明非法 publication_state 在公共 seam 不可达：
+    // 原因：crates/store/src/library_query/files.rs:58 与 :73 的两处查询分支均硬编码了
+    // `AND publication_state = 'published'` 过滤条件。
+    // 当数据库中存在 publication_state='bogus'（或非 published）的行时，该行在 SQL 结果集阶段
+    // 直接被过滤排除，根本不会返回给映射闭包，因此返回 Ok 且列表为空。
+    // 该分支（files.rs:117-122 中的 ok_or_else(publication)）属于防御性实现，公共 seam 无法触发其错误分支。
+    db.execute(
+        "UPDATE library_files SET presence_state = 'present', publication_state = 'bogus' WHERE file_id = ?1",
+        rusqlite::params![file1.file_id.to_string()],
+    )
+    .unwrap();
+
+    let page_bogus_pub = store.library_file_page(scope.library_id, media.id, None, 10).unwrap();
+    assert!(
+        page_bogus_pub.files.is_empty(),
+        "files with publication_state != 'published' must be filtered out at SQL boundary before mapping"
+    );
+    let stored_bogus_pub: String = db
+        .query_row(
+            "SELECT publication_state FROM library_files WHERE file_id = ?1",
+            rusqlite::params![file1.file_id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        stored_bogus_pub, "bogus",
+        "the row must still exist with the bogus value: it is the SQL filter, not deletion, that hides it"
+    );
+    assert!(
+        page_bogus_pub.next_cursor.is_none(),
+        "an empty page cannot carry a cursor"
+    );
+}

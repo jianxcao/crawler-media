@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::*;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 fn app(tmp: &tempfile::TempDir) -> axum::Router {
     router(state(
@@ -389,19 +390,24 @@ async fn watch_scrape_job_rebinds_incoming_rows_to_canonical_media_identity() {
         let store = store_arc.lock();
         store.insert_media(&old_canonical).unwrap();
         // 预存 canonical Media 在已有其它目录的既有分集（Season 1 Episode 2），使 rows 非空
-        store.insert_ledger(&domain::LedgerRow {
-            id: domain::LedgerId::new(),
-            media_id: old_canonical.id,
-            path: tmp.path().join("data/library/tv/Orbit/Season 1/Orbit.S01E02.1080p.mkv").display().to_string(),
-            season: Some(1),
-            episode: Some(2),
-            resolution: None,
-            codec: None,
-            hdr: None,
-            quality_source: domain::QualitySource::Probe,
-            confidence: domain::Confidence::High,
-            filter_score: None,
-        }).unwrap();
+        publish_fixture_file(
+            &store,
+            &FixtureFile {
+                file_id: Some(domain::LedgerId::new()),
+                media_id: old_canonical.id,
+                path: tmp.path().join("data/library/tv/Orbit/Season 1/Orbit.S01E02.1080p.mkv").display().to_string(),
+                season: Some(1),
+                episode: Some(2),
+                resolution: None,
+                codec: None,
+                hdr: None,
+                quality_source: domain::QualitySource::Probe,
+                confidence: domain::Confidence::High,
+                filter_score: None,
+                ..Default::default()
+            },
+        )
+        .unwrap();
     }
     let app = router(state.clone());
 
@@ -427,8 +433,9 @@ async fn watch_scrape_job_rebinds_incoming_rows_to_canonical_media_identity() {
 
     let store_arc = state.store();
     let store = store_arc.lock();
-    let row = store.ledger_by_path(&video.display().to_string()).unwrap().expect("watch job inserts the new episode");
-    assert_eq!(row.media_id, old_canonical.id, "TV episode ledger should use the retained canonical Media");
+    let video_path = video.display().to_string();
+    let coverage = store.file_coverage_by_path(&video_path).unwrap().expect("watch job inserts the new episode");
+    assert_eq!(coverage.file.media_id, old_canonical.id, "TV episode ledger should use the retained canonical Media");
     let episode_nfo = std::fs::read_to_string(video.with_extension("nfo")).expect("new episode NFO is published");
     assert!(episode_nfo.contains("Pilot Episode"), "episode NFO must use fetched canonical episode metadata: {episode_nfo}");
 }

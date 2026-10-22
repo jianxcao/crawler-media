@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use domain::{Confidence, FileCoverage, FileSource, LedgerRow, QualitySource, Release};
+use domain::{Confidence, FileCoverage, FileSource, QualitySource, Release};
 use downloader::Downloader;
 use filter::ScoredTorrent;
 use library::{MediaProbe, resolve_mode};
@@ -14,7 +14,7 @@ use super::transfer::{commit_video_facts, dest_path, reserve_and_publish};
 use crate::add::Added;
 use crate::choose::covered_slots;
 use crate::facts::{QualityFact, SubscribeFacts};
-use crate::{LedgerSource, SubscribeError};
+use crate::SubscribeError;
 
 pub(super) fn collect_scored_torrent<D: Downloader + ?Sized>(
     added: &mut Added<'_, D>,
@@ -23,8 +23,6 @@ pub(super) fn collect_scored_torrent<D: Downloader + ?Sized>(
     scored: &ScoredTorrent,
     files: &mut Vec<FileCoverage>,
     file_sources: &mut Vec<FileSource>,
-    ledger: &mut Vec<LedgerRow>,
-    ledger_sources: &mut Vec<LedgerSource>,
     removed_paths: &mut Vec<String>,
     transferred_enclosures: &mut Vec<String>,
     rejected_enclosures: &mut Vec<String>,
@@ -53,8 +51,6 @@ pub(super) fn collect_scored_torrent<D: Downloader + ?Sized>(
         scored,
         files,
         file_sources,
-        ledger,
-        ledger_sources,
         removed_paths,
         transferred_enclosures,
         rejected_enclosures,
@@ -74,8 +70,6 @@ fn collect_scored_torrent_inner<D: Downloader + ?Sized>(
     scored: &ScoredTorrent,
     files: &mut Vec<FileCoverage>,
     file_sources: &mut Vec<FileSource>,
-    ledger: &mut Vec<LedgerRow>,
-    ledger_sources: &mut Vec<LedgerSource>,
     removed_paths: &mut Vec<String>,
     transferred_enclosures: &mut Vec<String>,
     rejected_enclosures: &mut Vec<String>,
@@ -129,8 +123,6 @@ fn collect_scored_torrent_inner<D: Downloader + ?Sized>(
             torrent_files.single_file,
             files,
             file_sources,
-            ledger,
-            ledger_sources,
             removed_paths,
             &mut vetoed,
             &mut awaiting_probe,
@@ -344,8 +336,6 @@ fn collect_one<D: Downloader + ?Sized>(
     single_file: bool,
     files: &mut Vec<FileCoverage>,
     file_sources: &mut Vec<FileSource>,
-    ledger: &mut Vec<LedgerRow>,
-    ledger_sources: &mut Vec<LedgerSource>,
     removed_paths: &mut Vec<String>,
     vetoed: &mut bool,
     awaiting_probe: &mut bool,
@@ -354,13 +344,16 @@ fn collect_one<D: Downloader + ?Sized>(
     recorder: Option<&dyn TransferRecorder>,
     pending: Option<&crate::collection_destinations::DestinationMapping>,
 ) -> Result<Option<PathBuf>, SubscribeError> {
+    // The files this round already published: the M2 ownership check reads them
+    // as a read-only snapshot while the collected list keeps growing below.
+    let published: &[FileCoverage] = &files[..];
     let admitted = match admit_arrival(
         added,
         probe,
         scored,
         &src,
         single_file,
-        ledger,
+        published,
         vetoed,
         awaiting_probe,
         duplicate,
@@ -412,7 +405,7 @@ fn collect_one<D: Downloader + ?Sized>(
         &dest,
         actual_score,
         approved,
-        ledger,
+        published,
         removed_paths,
     )?;
     let ledger_path = dest.display().to_string();
@@ -424,10 +417,6 @@ fn collect_one<D: Downloader + ?Sized>(
         .input
         .facts
         .set_quality(ledger_path.clone(), owned_quality);
-    ledger_sources.push(LedgerSource {
-        ledger_path: ledger_path.clone(),
-        source_path: src.display().to_string(),
-    });
     file_sources.push(FileSource {
         file_id: candidate.file.file_id,
         destination: dest.clone(),
@@ -439,20 +428,7 @@ fn collect_one<D: Downloader + ?Sized>(
     candidate.file.quality_source = source;
     candidate.file.confidence = confidence;
     candidate.file.filter_score = Some(actual_score);
-    files.push(candidate.clone());
-    ledger.push(LedgerRow {
-        id: candidate.file.file_id,
-        media_id: candidate.file.media_id,
-        path: candidate.file.path.to_string_lossy().to_string(),
-        season: release.season,
-        episode: release.episode,
-        resolution: candidate.file.resolution,
-        codec: candidate.file.codec,
-        hdr: candidate.file.hdr,
-        quality_source: candidate.file.quality_source,
-        confidence: candidate.file.confidence,
-        filter_score: candidate.file.filter_score,
-    });
+    files.push(candidate);
     Ok(Some(dest))
 }
 
@@ -482,7 +458,7 @@ fn admit_arrival<D: Downloader + ?Sized>(
     scored: &ScoredTorrent,
     src: &Path,
     single_file: bool,
-    ledger: &[LedgerRow],
+    published: &[FileCoverage],
     vetoed: &mut bool,
     awaiting_probe: &mut bool,
     duplicate: &mut bool,
@@ -540,7 +516,7 @@ fn admit_arrival<D: Downloader + ?Sized>(
                 .get(*season, *episode)
                 .and_then(|fact| fact.path.as_deref())
                 .is_some_and(|path| {
-                    Path::new(path).exists() && !ledger.iter().any(|row| row.path == path)
+                    Path::new(path).exists() && !published_this_round(published, path)
                 })
         });
     if !added.input.subscribe.wash_cut && all_owned {
@@ -696,13 +672,22 @@ fn confirm_replacement<D: Downloader + ?Sized>(
     }))
 }
 
+/// Was `path` published by this very round? Facts carry canonical destination
+/// paths, so the M2 ownership checks read the round's own publications instead
+/// of keeping a second, parallel bookkeeping list of ledger rows.
+fn published_this_round(published: &[FileCoverage], path: &str) -> bool {
+    published
+        .iter()
+        .any(|coverage| coverage.file.path.to_string_lossy().as_ref() == path)
+}
+
 fn commit_arrival<D: Downloader + ?Sized>(
     added: &mut Added<'_, D>,
     slots: &[(Option<u32>, Option<u32>)],
     dest: &Path,
     actual_score: i32,
     approved: bool,
-    ledger: &[LedgerRow],
+    published: &[FileCoverage],
     removed_paths: &mut Vec<String>,
 ) -> Result<(), SubscribeError> {
     // 拒绝的 Wash-cut 只能登记并列文件，不能借标题高分改写已有槽位。
@@ -720,7 +705,7 @@ fn commit_arrival<D: Downloader + ?Sized>(
                     .facts
                     .get(*s, *e)
                     .and_then(|fact| fact.path.as_deref())
-                    .is_some_and(|path| !ledger.iter().any(|row| row.path == path))
+                    .is_some_and(|path| !published_this_round(published, path))
         })
         .collect();
     commit_video_facts(

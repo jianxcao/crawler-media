@@ -69,9 +69,9 @@ async fn resumed_scan_skips_checkpointed_files() {
     };
     fix.state.scan_coordinator.trigger_next(&fix.state);
     wait_scan_terminal(&fix, &op_id).await;
-    let first = fix.state.store().lock().list_ledger().unwrap();
+    let first = fix.state.store().lock().list_file_coverage().unwrap();
     assert_eq!(first.len(), 1, "第一轮应入账 f1");
-    let f1_row = first[0].id.to_string();
+    let f1_row = first[0].file.file_id.to_string();
     // 让 f1 的探测结束，这样“断点生效”不会被“本来就没再探测”混淆。
     {
         let store = fix.state.store();
@@ -114,13 +114,14 @@ async fn resumed_scan_skips_checkpointed_files() {
         "断点命中的 f1 不得被重复处理: {report}"
     );
     assert_eq!(report["inserted"], 1, "只有新增的 f2 入账: {report}");
-    let rows = fix.state.store().lock().list_ledger().unwrap();
+    let rows = fix.state.store().lock().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 2);
     let f2_row = rows
         .iter()
-        .find(|row| row.path.ends_with("Movie2 (2024).mkv"))
+        .find(|row| row.file.path.to_string_lossy().ends_with("Movie2 (2024).mkv"))
         .expect("f2 应已入账")
-        .id
+        .file
+        .file_id
         .to_string();
     assert!(fix.state.probe.is_queued(&f2_row), "新增文件必须进入探测队列");
     assert!(
@@ -224,7 +225,7 @@ async fn changed_strm_url_with_same_size_and_mtime_is_reprocessed_and_reprobed()
     let file = fix.root.join(rel);
     std::fs::write(&file, "https://a/video").unwrap();
     let (_, row) = fix.insert_media_and_ledger(rel);
-    let ledger_id = row.id.to_string();
+    let ledger_id = row.file_id.to_string();
     let sig = fix.scope_signature();
 
     let op = {
@@ -239,7 +240,7 @@ async fn changed_strm_url_with_same_size_and_mtime_is_reprocessed_and_reprobed()
             ..Default::default()
         };
         let version = guard
-            .get_file_version(row.id)
+            .get_file_version(row.file_id)
             .unwrap()
             .expect("published file version");
         guard
@@ -330,7 +331,7 @@ async fn stale_scope_signature_cancels_operation_without_ledgering() {
         done.report
     );
     assert!(
-        fix.state.store().lock().list_ledger().unwrap().is_empty(),
+        fix.state.store().lock().list_file_coverage().unwrap().is_empty(),
         "取消的 operation 不得登记任何文件"
     );
 }

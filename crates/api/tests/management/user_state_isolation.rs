@@ -6,13 +6,14 @@ use std::sync::Arc;
 
 use api::{Store, router};
 use axum::http::StatusCode;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::{Fixtures, json_body, request, state};
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 fn app(tmp: &tempfile::TempDir) -> axum::Router {
     router(state(
@@ -77,9 +78,10 @@ fn seed_movie(tmp: &tempfile::TempDir, users: &[domain::UserId]) -> MediaId {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id: media.id,
             path: library.root_paths[0]
                 .join("Shared.Movie.mkv")
@@ -93,8 +95,10 @@ fn seed_movie(tmp: &tempfile::TempDir, users: &[domain::UserId]) -> MediaId {
             quality_source: QualitySource::Probe,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     for user in users {
         store
             .upsert_unit(

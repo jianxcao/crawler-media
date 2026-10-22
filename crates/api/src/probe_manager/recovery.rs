@@ -45,21 +45,14 @@ mod tests {
                         )
                         .unwrap(),
                 );
-                let row = domain::LedgerRow {
-                    id: domain::LedgerId::new(),
-                    media_id: media.id,
-                    path: root.join("episode.mkv").to_string_lossy().into_owned(),
-                    season: Some(1),
-                    episode: Some(1),
-                    resolution: None,
-                    codec: None,
-                    hdr: None,
-                    quality_source: domain::QualitySource::Release,
-                    confidence: domain::Confidence::High,
-                    filter_score: None,
-                };
-                store.lock().insert_ledger(&row).unwrap();
-                ledger_ids.push(row.id.to_string());
+                let mut row = super::super::test_support::coverage(
+                    media.id,
+                    &root.join("episode.mkv").to_string_lossy(),
+                    Some(1),
+                    Some(1),
+                );
+                super::super::test_support::publish_into(&store.lock(), &mut row);
+                ledger_ids.push(row.file.file_id.to_string());
             }
             let specs: Vec<_> = ledger_ids
                 .iter()
@@ -156,15 +149,19 @@ impl ProbeManager {
                 .flatten()
                 .map(|job| job.kind);
             if kind.as_deref() == Some("marker_refresh") {
-                if let Err(error) = self.store.lock().cancel_probe_job(&job_id, "Library removed") {
+                if let Err(error) = self
+                    .store
+                    .lock()
+                    .cancel_probe_job(&job_id, "Library removed")
+                {
                     tracing::error!(%error, %job_id, "恢复时取消删除库任务失败");
                 }
                 continue;
             }
-            if let Err(error) = self
-                .store
-                .lock()
-                .cancel_probe_unit(&job_id, &ledger_id, "Library removed")
+            if let Err(error) =
+                self.store
+                    .lock()
+                    .cancel_probe_unit(&job_id, &ledger_id, "Library removed")
             {
                 tracing::error!(%error, %job_id, %ledger_id, "恢复时取消删除库单元失败");
             }
@@ -185,7 +182,11 @@ impl ProbeManager {
     }
 
     fn recover_marker_refreshes(&self) {
-        let jobs = match self.store.lock().active_probe_jobs_by_kind("marker_refresh") {
+        let jobs = match self
+            .store
+            .lock()
+            .active_probe_jobs_by_kind("marker_refresh")
+        {
             Ok(jobs) => jobs,
             Err(error) => {
                 tracing::error!(%error, "读取片头片尾刷新任务失败");
@@ -206,7 +207,11 @@ impl ProbeManager {
             }
             let removed = self.removed_recovery_units(&units);
             if !removed.is_empty() {
-                if let Err(error) = self.store.lock().cancel_probe_job(&job.id, "Library removed") {
+                if let Err(error) = self
+                    .store
+                    .lock()
+                    .cancel_probe_job(&job.id, "Library removed")
+                {
                     tracing::error!(%error, job_id = %job.id, "恢复时取消删除库刷新失败");
                 }
                 continue;
@@ -251,11 +256,11 @@ impl ProbeManager {
         };
         if refreshed.completed >= refreshed.total && refreshed.is_active() {
             if refreshed.failed > 0 {
-                if let Err(error) = self.store.lock().finish_probe_job(
-                    &job.id,
-                    false,
-                    refreshed.error.as_deref(),
-                ) {
+                if let Err(error) =
+                    self.store
+                        .lock()
+                        .finish_probe_job(&job.id, false, refreshed.error.as_deref())
+                {
                     tracing::error!(%error, job_id = %job.id, "持久化恢复任务的失败状态失败");
                 }
             } else if refreshed.kind == "marker_refresh" {
@@ -302,11 +307,18 @@ impl ProbeManager {
         removed: &[String],
     ) {
         for ledger_id in removed {
-            if let Err(error) = self.store.lock().cancel_probe_unit(&job.id, ledger_id, "Library removed") {
+            if let Err(error) =
+                self.store
+                    .lock()
+                    .cancel_probe_unit(&job.id, ledger_id, "Library removed")
+            {
                 tracing::error!(%error, job_id = %job.id, %ledger_id, "恢复时取消删除库单元失败");
             }
         }
-        let retained: Vec<_> = units.into_iter().filter(|unit| !removed.contains(&unit.ledger_id)).collect();
+        let retained: Vec<_> = units
+            .into_iter()
+            .filter(|unit| !removed.contains(&unit.ledger_id))
+            .collect();
         self.recover_job_units(job, &retained);
     }
 
@@ -315,11 +327,12 @@ impl ProbeManager {
         units
             .iter()
             .filter(|unit| {
-                let row = store.get_ledger(&unit.ledger_id).ok().flatten();
+                let row = super::ledger_id(&unit.ledger_id)
+                    .and_then(|file_id| store.file_coverage_by_id(file_id).ok().flatten());
                 row.and_then(|row| {
-                    let media = store.get_media(row.media_id).ok().flatten()?;
+                    let media = store.get_media(row.file.media_id).ok().flatten()?;
                     store
-                        .library_for_path_strict(std::path::Path::new(&row.path), media.kind)
+                        .library_for_path_strict(std::path::Path::new(&row.file.path), media.kind)
                         .ok()
                         .flatten()
                 })
@@ -345,10 +358,11 @@ impl ProbeManager {
             {
                 break;
             }
-            let row = self
-                .store
-                .lock()
-                .get_ledger(&persisted.ledger_id.replace('-', ""));
+            // 旧实现以原始字符串查台账；id 解析失败的字符串必然查不到行，与 Ok(None) 同一分支。
+            let row = match super::ledger_id(&persisted.ledger_id) {
+                Some(file_id) => self.store.lock().file_coverage_by_id(file_id),
+                None => Ok(None),
+            };
             let row = match row {
                 Ok(Some(row)) => row,
                 Ok(None) => {
@@ -424,31 +438,14 @@ impl ProbeManager {
         let store = self.store.lock();
         let persisted_units = store.probe_job_units(&job.id)?;
         for unit in &persisted_units {
-            let row = store
-                .get_ledger(&unit.ledger_id.replace('-', ""))?
-                .ok_or_else(|| {
-                    crate::store::StoreError::Missing(format!(
-                        "file_deleted: ledger {}",
-                        unit.ledger_id
-                    ))
-                })?;
+            let row = super::coverage_for_ledger_id(&store, &unit.ledger_id)?;
             crate::fingerprint_job::source::ensure_source_available(&store, &row)
                 .map_err(crate::store::StoreError::Missing)?;
         }
-        let persisted = persisted_units
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                crate::store::StoreError::Missing(format!("units for job {}", job.id))
-            })?;
-        let row = store
-            .get_ledger(&persisted.ledger_id.replace('-', ""))?
-            .ok_or_else(|| {
-                crate::store::StoreError::Missing(format!(
-                    "file_deleted: ledger {}",
-                    persisted.ledger_id
-                ))
-            })?;
+        let persisted = persisted_units.into_iter().next().ok_or_else(|| {
+            crate::store::StoreError::Missing(format!("units for job {}", job.id))
+        })?;
+        let row = super::coverage_for_ledger_id(&store, &persisted.ledger_id)?;
         let kind = persisted
             .kind
             .parse::<MediaKind>()

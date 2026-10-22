@@ -6,10 +6,11 @@ use std::sync::Arc;
 use api::{ApiState, Store, router};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserRole};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UserRole};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use tower::ServiceExt;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 struct NoFetch;
 impl Fetcher for NoFetch {
@@ -101,9 +102,10 @@ fn seed_poster(root: &Path, state: &ApiState, poster: &[u8]) -> LedgerId {
     };
     guard.insert_media(&media).unwrap();
     let ledger_id = LedgerId::new();
-    guard
-        .insert_ledger(&LedgerRow {
-            id: ledger_id,
+    publish_fixture_file(
+        &guard,
+        &FixtureFile {
+            file_id: Some(ledger_id),
             media_id: media.id,
             path: file.display().to_string(),
             season: None,
@@ -114,8 +116,10 @@ fn seed_poster(root: &Path, state: &ApiState, poster: &[u8]) -> LedgerId {
             quality_source: QualitySource::Probe,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     ledger_id
 }
 
@@ -315,9 +319,10 @@ async fn metadata_file_io_runs_off_the_store_lock() {
         };
         guard.insert_media(&media).unwrap();
         let ledger_id = LedgerId::new();
-        guard
-            .insert_ledger(&LedgerRow {
-                id: ledger_id,
+        publish_fixture_file(
+            &guard,
+            &FixtureFile {
+                file_id: Some(ledger_id),
                 media_id: media.id,
                 path: file.display().to_string(),
                 season: None,
@@ -328,8 +333,10 @@ async fn metadata_file_io_runs_off_the_store_lock() {
                 quality_source: QualitySource::Probe,
                 confidence: Confidence::High,
                 filter_score: None,
-            })
-            .unwrap();
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let user_id = guard.user_id_by_token("management-secret").unwrap().unwrap();
         (user_id, media.id)
     };

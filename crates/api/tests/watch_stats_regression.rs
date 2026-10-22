@@ -1,4 +1,5 @@
 //! B6：`GET /playback/stats/watch` 改为 Store SQL 聚合后，HTTP DTO 与统计语义不变。
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 #[path = "management/common.rs"]
 mod common;
@@ -9,7 +10,7 @@ use std::sync::Arc;
 
 use api::{ApiState, Store, router};
 use axum::http::StatusCode;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserId};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UserId};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -64,9 +65,9 @@ fn media(title: &str) -> Media {
     }
 }
 
-fn ledger_row(media_id: MediaId, path: &Path) -> LedgerRow {
-    LedgerRow {
-        id: LedgerId::new(),
+fn fixture_file(media_id: MediaId, path: &Path) -> FixtureFile {
+    FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id,
         path: path.display().to_string(),
         season: None,
@@ -77,6 +78,7 @@ fn ledger_row(media_id: MediaId, path: &Path) -> LedgerRow {
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     }
 }
 
@@ -141,8 +143,8 @@ fn seed(state: &ApiState, tmp: &tempfile::TempDir) -> Fixture {
         for item in [&media_a, &media_b, &media_hidden] {
             store.insert_media(item).unwrap();
         }
-        store.insert_ledger(&ledger_row(media_a.id, &path_a)).unwrap();
-        store.insert_ledger(&ledger_row(media_b.id, &path_b)).unwrap();
+        publish_fixture_file(&store, &fixture_file(media_a.id, &path_a)).unwrap();
+        publish_fixture_file(&store, &fixture_file(media_b.id, &path_b)).unwrap();
     }
     let now = unix_now();
     Fixture {

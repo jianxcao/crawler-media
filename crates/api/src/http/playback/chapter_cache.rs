@@ -20,20 +20,24 @@ pub(crate) async fn cached_chapters(
     axum::extract::Query(query): axum::extract::Query<ChapterCacheQuery>,
 ) -> Response {
     let store = state.store.lock();
-    let Some(row) = store
-        .get_ledger(&query.file_id.replace('-', ""))
+    let file_id = match query.file_id.replace('-', "").parse::<domain::LedgerId>() {
+        Ok(id) => id,
+        Err(_) => return err(StatusCode::BAD_REQUEST, "playback.invalid", "无效的 file_id"),
+    };
+    let Some(cov) = store
+        .file_coverage_by_id(file_id)
         .ok()
         .flatten()
     else {
         return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
     };
-    let Some(media) = store.get_media(row.media_id).ok().flatten() else {
+    let Some(media) = store.get_media(cov.file.media_id).ok().flatten() else {
         return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
     };
-    if !crate::http::library::row_visible_to_user(&store, &row, &media, user_id) {
+    if !crate::http::library::file_visible_to_user(&store, &cov.file, &media, user_id) {
         return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
     }
-    match store.get_cached_chapters(&row.id.to_string()) {
+    match store.get_cached_chapters(&cov.file.file_id.to_string()) {
         Ok(Some(chapters)) => ok(json!({
             "ready": true,
             "chapters": chapters.iter().map(|chapter| json!({

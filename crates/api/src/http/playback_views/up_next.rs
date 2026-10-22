@@ -89,7 +89,7 @@ pub(crate) async fn up_next(
 
     {
         let store = state.store.lock();
-        let ledger = store.list_ledger().unwrap_or_default();
+        let ledger = store.list_file_coverage().unwrap_or_default();
 
         // 1. 优先读取当前用户的活跃播放记录 (playback_units)
         // 覆盖本地扫库作品和已有播放进度的条目（按最近活跃时间倒序）
@@ -103,17 +103,17 @@ pub(crate) async fn up_next(
             };
 
             // 检查该媒体在当前用户的库中是否可见、是否有文件，且库未被设置为 exclude_from_home
-            let media_rows: Vec<&domain::LedgerRow> = ledger
+            let media_rows: Vec<&domain::FileCoverage> = ledger
                 .iter()
                 .filter(|r| {
-                    r.media_id == media_id
-                        && crate::http::library::row_visible_to_user(
+                    r.file.media_id == media_id
+                        && crate::http::library::file_visible_to_user(
                             &store,
-                            r,
+                            &r.file,
                             &media,
                             Some(user_id),
                         )
-                        && crate::http::playback::library_id_for(&store, &media, &[r])
+                        && crate::http::playback::library_id_for(&store, &media, &[&r.file])
                             .and_then(|lib_id| store.get_library(&lib_id).ok().flatten())
                             .map(|lib| !lib.exclude_from_home)
                             .unwrap_or(true)
@@ -148,7 +148,9 @@ pub(crate) async fn up_next(
                 // 查找该媒体库在位的所有集数 (season, episode)
                 let owned_units: HashSet<(u32, u32)> = media_rows
                     .iter()
-                    .filter_map(|r| Some((r.season?, r.episode?)))
+                    .flat_map(|r| &r.units)
+                    .filter(|u| !u.is_whole())
+                    .map(|u| (u.season.max(0) as u32, u.episode.max(0) as u32))
                     .collect();
 
                 // 用户最近更新过的播放记录
@@ -229,20 +231,22 @@ pub(crate) async fn up_next(
             let owned: HashSet<u32> = ledger
                 .iter()
                 .filter(|r| {
-                    r.media_id == media.id
-                        && r.season == Some(season)
-                        && crate::http::library::row_visible_to_user(
+                    r.file.media_id == media.id
+                        && r.units.iter().any(|u| !u.is_whole() && u.season.max(0) as u32 == season)
+                        && crate::http::library::file_visible_to_user(
                             &store,
-                            r,
+                            &r.file,
                             &media,
                             Some(user_id),
                         )
-                        && crate::http::playback::library_id_for(&store, &media, &[r])
+                        && crate::http::playback::library_id_for(&store, &media, &[&r.file])
                             .and_then(|lib_id| store.get_library(&lib_id).ok().flatten())
                             .map(|lib| !lib.exclude_from_home)
                             .unwrap_or(true)
                 })
-                .filter_map(|r| r.episode)
+                .flat_map(|r| &r.units)
+                .filter(|u| !u.is_whole() && u.season.max(0) as u32 == season)
+                .map(|u| u.episode.max(0) as u32)
                 .collect();
             let cap = start_from.saturating_add(domain::Coverage::MAX_EPISODES as i32 - 1);
             let window_to = owned
@@ -301,8 +305,8 @@ pub(crate) async fn up_next(
     struct UpNextCandidate {
         media: domain::Media,
         library_id: String,
-        preferred_row: Option<domain::LedgerRow>,
-        next_row: Option<domain::LedgerRow>,
+        preferred_coverage: Option<domain::FileCoverage>,
+        next_row: Option<domain::FileCoverage>,
         plan_season: u32,
         plan_next_episode: i32,
         episode_title: Option<String>,
@@ -315,7 +319,7 @@ pub(crate) async fn up_next(
 
     let candidates: Vec<UpNextCandidate> = {
         let store = state.store.lock();
-        let all_rows = store.list_ledger().unwrap_or_default();
+        let all_rows = store.list_file_coverage().unwrap_or_default();
         let mut cands = Vec::new();
         for plan in plans {
             let Some(media) = store.get_media(plan.media_id).ok().flatten() else {
@@ -340,11 +344,11 @@ pub(crate) async fn up_next(
             if unit.is_none() && is_movie {
                 unit = store.unit_state(user_id, media.id, 0, 0).ok().flatten();
             }
-            let rows: Vec<domain::LedgerRow> = all_rows
+            let rows: Vec<domain::FileCoverage> = all_rows
                 .iter()
-                .filter(|r| r.media_id == media.id)
+                .filter(|r| r.file.media_id == media.id)
                 .filter(|r| {
-                    crate::http::library::row_visible_to_user(&store, r, &media, Some(user_id))
+                    crate::http::library::file_visible_to_user(&store, &r.file, &media, Some(user_id))
                 })
                 .cloned()
                 .collect();
@@ -353,17 +357,17 @@ pub(crate) async fn up_next(
             }
             let library_id = rows
                 .first()
-                .and_then(|row| crate::http::library::library_for_row(&store, row, &media))
+                .and_then(|row| crate::http::library::library_for_file(&store, &row.file, &media))
                 .map(|library| library.id)
                 .unwrap_or_default();
 
-            let refs: Vec<&domain::LedgerRow> = rows.iter().collect();
-            let preferred_row = crate::http::library::preferred_row(&refs).cloned();
+            let refs: Vec<&domain::FileCoverage> = rows.iter().collect();
+            let preferred_coverage = crate::http::library::preferred_coverage(&refs).cloned();
 
             let next_row = if media.kind == domain::MediaKind::Tv {
                 rows.iter()
                     .find(|r| {
-                        r.season == Some(plan.season) && r.episode == Some(plan.next_episode as u32)
+                        r.units.iter().any(|u| !u.is_whole() && u.season.max(0) as u32 == plan.season && u.episode.max(0) as i32 == plan.next_episode)
                     })
                     .cloned()
             } else {
@@ -385,7 +389,7 @@ pub(crate) async fn up_next(
             cands.push(UpNextCandidate {
                 media,
                 library_id,
-                preferred_row,
+                preferred_coverage,
                 next_row,
                 plan_season: plan.season,
                 plan_next_episode: plan.next_episode,
@@ -412,26 +416,26 @@ pub(crate) async fn up_next(
             let mut items = Vec::new();
             for cand in candidates {
                 let poster = cand
-                    .preferred_row
+                    .preferred_coverage
                     .as_ref()
-                    .and_then(|row| crate::http::library::poster_path_with(row, files.as_ref()))
+                    .and_then(|row| crate::http::library::poster_path_with(&row.file, files.as_ref()))
                     .map(|_| {
-                        let row = cand.preferred_row.as_ref().expect("checked");
-                        crate::http::library::artwork_url("posters", row.id)
+                        let row = cand.preferred_coverage.as_ref().expect("checked");
+                        crate::http::library::artwork_url("posters", row.file.file_id)
                     });
                 let mut backdrop = cand
-                    .preferred_row
+                    .preferred_coverage
                     .as_ref()
-                    .and_then(|row| crate::http::library::backdrop_path_with(row, files.as_ref()))
+                    .and_then(|row| crate::http::library::backdrop_path_with(&row.file, files.as_ref()))
                     .map(|_| {
-                        let row = cand.preferred_row.as_ref().expect("checked");
-                        crate::http::library::artwork_url("fanart", row.id)
+                        let row = cand.preferred_coverage.as_ref().expect("checked");
+                        crate::http::library::artwork_url("fanart", row.file.file_id)
                     });
                 if backdrop.is_none() {
-                    if let Some(preferred) = &cand.preferred_row {
+                    if let Some(preferred) = &cand.preferred_coverage {
                         let state_clone = state_for_work.clone();
                         let media_clone = cand.media.clone();
-                        let pref_path = std::path::PathBuf::from(&preferred.path);
+                        let pref_path = preferred.file.path.clone();
                         tokio::spawn(async move {
                             let _ = crate::poster_fetch::attach_backdrop(
                                 &state_clone,
@@ -445,20 +449,20 @@ pub(crate) async fn up_next(
                     .next_row
                     .as_ref()
                     .and_then(|row| {
-                        crate::episode_still::existing_with(std::path::Path::new(&row.path), files.as_ref())
-                            .map(|_| crate::http::library::artwork_url("stills", row.id))
+                        crate::episode_still::existing_with(row.file.path.as_path(), files.as_ref())
+                            .map(|_| crate::http::library::artwork_url("stills", row.file.file_id))
                     })
                     .or_else(|| backdrop.clone())
                     .or_else(|| {
-                        cand.preferred_row
+                        cand.preferred_coverage
                             .as_ref()
-                            .map(|row| crate::http::library::artwork_url("fanart", row.id))
+                            .map(|row| crate::http::library::artwork_url("fanart", row.file.file_id))
                     });
                 if backdrop.is_none() {
                     backdrop = cand
-                        .preferred_row
+                        .preferred_coverage
                         .as_ref()
-                        .map(|row| crate::http::library::artwork_url("fanart", row.id));
+                        .map(|row| crate::http::library::artwork_url("fanart", row.file.file_id));
                 }
 
                 items.push(json!({
@@ -478,7 +482,7 @@ pub(crate) async fn up_next(
                         // 与库内其它 NFO 读取约定一致（`path.with_extension("nfo")`）。
                         cand.next_row.as_ref()
                             .and_then(|row| {
-                                let nfo = std::path::Path::new(&row.path).with_extension("nfo");
+                                let nfo = row.file.path.with_extension("nfo");
                                 files.read_nfo(&nfo)
                             })
                             .and_then(|nfo| nfo.title)

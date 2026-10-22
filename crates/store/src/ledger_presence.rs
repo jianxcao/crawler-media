@@ -3,16 +3,21 @@
 //! Presence is a property of a `library_files` row: `present` = usable, `missing`,
 //! `unknown`. A permission/IO error is never recorded as `missing`.
 
-use domain::{LedgerRow, LibraryId, MediaId};
+use domain::{FileCoverage, LibraryId, MediaId};
 use rusqlite::Connection;
 
 use crate::StoreError;
 
 pub use domain::FilePresence;
 
+/// One observed file plus the presence verdict the scan derived for it.
+///
+/// The file is the frozen read shape ([`FileCoverage`]); identity is read from
+/// `file.file_id`/`file.path`/`file.media_id`, so a caller cannot hand over a
+/// mismatched id/path pair produced by a different query.
 #[derive(Clone, Debug)]
 pub struct LedgerPresenceObservation {
-    pub row: LedgerRow,
+    pub file: FileCoverage,
     pub missing_at: Option<i64>,
     pub presence: FilePresence,
 }
@@ -92,7 +97,7 @@ fn apply_observation(
     now: i64,
     result: &mut LedgerPresenceResult,
 ) -> Result<Option<Affected>, StoreError> {
-    let file_id = obs.row.id.to_string();
+    let file_id = obs.file.file.file_id.to_string();
     let current: Option<(String, String, String, Option<i64>, String)> = tx
         .query_row(
             "SELECT library_id, media_id, path_key, missing_at, publication_state
@@ -114,8 +119,11 @@ fn apply_observation(
         result.skipped += 1;
         return Ok(None);
     };
-    if path != obs.row.path
-        || media_id != obs.row.media_id.to_string()
+    // 与既有行为一致：库里存的是 `path_key`，观察值来自 `display_path`；
+    // 两者在规范化/大小写不同的场景下本来就可能不等（已记录的容忍项，本轮不统一）。
+    let observed_path = obs.file.file.path.to_string_lossy();
+    if path != observed_path.as_ref()
+        || media_id != obs.file.file.media_id.to_string()
         || missing_at != obs.missing_at
     {
         result.skipped += 1;
@@ -137,7 +145,7 @@ fn apply_observation(
              WHERE file_id = ?1",
             [&file_id],
         )?;
-        tracing::info!(file_id = %obs.row.id, path = %obs.row.path,
+        tracing::info!(file_id = %obs.file.file.file_id, path = %obs.file.file.path.display(),
             "Recovered completed Transfer publication");
         return Ok(Some(scope));
     }

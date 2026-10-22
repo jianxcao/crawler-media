@@ -5,13 +5,14 @@ use std::time::Duration;
 use api::{ApiState, Store, catalog::Catalog, router};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use media::CatalogHit;
 use parking_lot::{Condvar, Mutex};
 use serde_json::Value;
 use tower::ServiceExt;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 struct NoFetch;
 impl Fetcher for NoFetch {
@@ -96,11 +97,16 @@ fn seed_media(store: &Store, root: &Path, kind: MediaKind, title: &str, id: &str
         aliases: Vec::new(),
         tmdb_id: Some(id.into()), douban_id: None, tvdb_id: None, bangumi_id: None, anilist_id: None,
     }).unwrap();
-    store.insert_ledger(&LedgerRow {
-        id: LedgerId::new(), media_id: media.id, path: path.display().to_string(), season, episode,
-        resolution: None, codec: None, hdr: None, quality_source: QualitySource::Release,
-        confidence: Confidence::High, filter_score: None,
-    }).unwrap();
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()), media_id: media.id, path: path.display().to_string(), season, episode,
+            resolution: None, codec: None, hdr: None, quality_source: QualitySource::Release,
+            confidence: Confidence::High, filter_score: None,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     media.id
 }
 

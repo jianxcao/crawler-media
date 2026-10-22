@@ -224,7 +224,7 @@ async fn read_failure_never_becomes_a_silently_empty_page() {
     let failing = {
         let store = heavy_fixture.state.store();
         let store = store.lock();
-        store.list_ledger().unwrap().into_iter().next().expect("row").id
+        store.list_file_coverage().unwrap().into_iter().next().expect("row").file.file_id
     };
     let conn = rusqlite::Connection::open(
         heavy_fixture.dir.path().join("data/library.db"),
@@ -318,12 +318,13 @@ async fn failed_playback_unit_read_still_counts_loaded_ledger_rows() {
         let store = fixture.state.store();
         let store = store.lock();
         store
-            .list_ledger()
+            .list_file_coverage()
             .unwrap()
             .into_iter()
-            .find(|row| row.path.contains("Show000"))
+            .find(|row| row.file.path.to_string_lossy().contains("Show000"))
             .expect("Show000 row")
-            .id
+            .file
+            .file_id
     };
     // v1 行：`playback_units` 在 library.db。`position_ms` 存文本即可让解码失败，
     // 但 resume 包必须成套（否则 CHECK 拒绝），所以同时写入完整的 resume 包。

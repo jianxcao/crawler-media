@@ -4,10 +4,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use domain::{LedgerRow, Media, MediaId, UserId};
+use domain::{FileCoverage, Media, MediaId, UserId};
 use rusqlite::params;
 
-use super::maps::{map_ledger, map_media, parse_id};
+use super::maps::{LIBRARY_FILE_COLUMNS, group_file_coverage, map_file_unit, map_media, parse_id};
 use super::media::MEDIA_SELECT;
 use super::playback::UnitState;
 use super::{LibraryOwnership, Store, StoreError};
@@ -183,7 +183,7 @@ impl Store {
         &self,
         ownership: &LibraryOwnership,
         library_id: &str,
-    ) -> Result<Vec<LedgerRow>, StoreError> {
+    ) -> Result<Vec<FileCoverage>, StoreError> {
         self.ledger_candidates_with_vm_steps(ownership, library_id)
             .map(|(rows, _)| rows)
     }
@@ -195,7 +195,7 @@ impl Store {
         &self,
         ownership: &LibraryOwnership,
         library_id: &str,
-    ) -> Result<(Vec<LedgerRow>, i64), StoreError> {
+    ) -> Result<(Vec<FileCoverage>, i64), StoreError> {
         let Some(target) = ownership.library(library_id) else {
             return Ok((Vec::new(), 0));
         };
@@ -238,16 +238,18 @@ impl Store {
         if clauses.is_empty() {
             return Ok((Vec::new(), 0));
         }
-        let sql = "SELECT f.file_id, f.media_id, f.display_path, u.season, u.episode, f.resolution, f.codec, f.hdr,
-                          f.quality_source, f.confidence, f.filter_score
+        let sql = format!(
+            "SELECT {LIBRARY_FILE_COLUMNS}, u.season, u.episode
                    FROM library_files f
                    LEFT JOIN library_file_units u ON f.file_id = u.file_id
-                   WHERE f.library_id = ?1";
-        let mut stmt = self.library.prepare(sql)?;
-        let rows = stmt.query_map([library_id], map_ledger)?;
+                   WHERE f.library_id = ?1"
+        );
+        let mut stmt = self.library.prepare(&sql)?;
+        let rows = stmt.query_map([library_id], map_file_unit)?;
         let collected = rows.collect::<Result<Vec<_>, _>>()?;
         let vm_steps = i64::from(stmt.get_status(rusqlite::StatementStatus::VmStep));
-        Ok((collected, vm_steps))
+        drop(stmt);
+        Ok((group_file_coverage(collected), vm_steps))
     }
 
 
@@ -257,14 +259,14 @@ impl Store {
         &self,
         ownership: &LibraryOwnership,
         parent_id: Option<&str>,
-    ) -> Result<Vec<LedgerRow>, StoreError> {
+    ) -> Result<Vec<FileCoverage>, StoreError> {
         match parent_id {
             Some(id) if ownership.library(id).is_some() => self.ledger_candidates_for_library(ownership, id),
             Some(id) => match domain::TypedItemId::protocol_media_id(id) {
-                Some(media_id) => self.ledger_for_media(media_id),
+                Some(media_id) => self.file_coverage_for_media(media_id),
                 None => Ok(Vec::new()),
             },
-            None => self.list_ledger(),
+            None => self.list_file_coverage(),
         }
     }
 
@@ -272,7 +274,7 @@ impl Store {
         &self,
         ownership: &LibraryOwnership,
         parent_id: &str,
-    ) -> Result<(Vec<LedgerRow>, i64), StoreError> {
+    ) -> Result<(Vec<FileCoverage>, i64), StoreError> {
         self.ledger_candidates_with_vm_steps(ownership, parent_id)
     }
 

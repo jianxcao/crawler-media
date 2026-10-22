@@ -15,9 +15,7 @@ import {
   type PlaybackApiScope,
   type PlaybackChapterMark,
   fetchPlaybackChapters,
-  fetchPlaybackDiagnostics,
   type PlaybackUnit,
-  type PlaybackDiagnostics,
   type PlaybackWatchState,
   pingPlaybackSession,
   reportPlaybackClientLog,
@@ -252,18 +250,6 @@ function SeekChevrons({ back }: { back: boolean }) {
 function unitKeyOf(unit: PlaybackUnit): string {
   return `${unit.media_item_id}/${unit.season_number ?? 0}/${unit.episode_number ?? 0}`;
 }
-function playbackRequestUnit(unit: PlaybackUnit): PlaybackUnit {
-  const result: PlaybackUnit = { media_item_id: unit.media_item_id };
-  if (unit.season_number != null && unit.episode_number != null) {
-    result.season_number = unit.season_number;
-    result.episode_number = unit.episode_number;
-  }
-  if (unit.file_id) {
-    result.file_id = unit.file_id;
-  }
-  return result;
-}
-
 
 export function VideoPlayer(props: VideoPlayerProps) {
   const {
@@ -336,7 +322,6 @@ export function VideoPlayer(props: VideoPlayerProps) {
   // 直接闭包会拿到过期的会话，上报到错误的档位上。
   const qoeSnapshotRef = useRef<() => PlaybackMetricPayload | null>(() => null);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
-  const [serverDiagnostics, setServerDiagnostics] = useState<PlaybackDiagnostics | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   /** 指针正按在进度条上：按住不动时也要把控制条钉住（lib/player/chrome.ts） */
   const [scrubbing, setScrubbing] = useState(false);
@@ -824,13 +809,12 @@ export function VideoPlayer(props: VideoPlayerProps) {
   sessionIdRef.current = sessionId;
 
   // 片长：服务端算的真值优先。**旧会话相对制**里 video.duration 只到「已经
-  // 转出来的那一段」，拿它当分母会让进度条一路自己缩放；VOD 全片列表
-  // （timeline="file"）和档 0 直出的 video.duration 都是真片长，可以兜底。
+  // 转出来的那一段」，拿它当分母会让进度条一路自己缩放；档 0 直出的
+  // video.duration 是真片长，可以兜底。
   const durationMs = useMemo(() => {
     if (resume?.duration_ms) return resume.duration_ms;
-    if (state.session?.timeline === "file") return videoDurationMs;
     return sessionId ? null : videoDurationMs;
-  }, [resume?.duration_ms, state.session?.timeline, sessionId, videoDurationMs]);
+  }, [resume?.duration_ms, sessionId, videoDurationMs]);
   const durationMsRef = useRef<number | null>(null);
   durationMsRef.current = durationMs;
 
@@ -1273,39 +1257,6 @@ export function VideoPlayer(props: VideoPlayerProps) {
     deadSessionRef.current = false;
     setAutoplay(null);
   }, [state.session, clearPendingCommit]);
-
-  /** 诊断面板打开时轮询服务端会话，关闭后不额外占用 NAS 请求。 */
-  const diagnosticsSessionId = state.session?.session_id;
-  const diagnosticsStreamUrl = state.session?.stream_url;
-  useEffect(() => {
-    if (!diagnosticsOpen || !diagnosticsSessionId || !diagnosticsStreamUrl) {
-      setServerDiagnostics(null);
-      return;
-    }
-    let cancelled = false;
-    let timer: number | null = null;
-
-    const poll = async () => {
-      try {
-        const snapshot = await fetchPlaybackDiagnostics(
-          diagnosticsSessionId,
-          diagnosticsStreamUrl,
-          apiRef.current,
-        );
-        if (!cancelled) setServerDiagnostics(snapshot);
-      } catch {
-        // 诊断是旁路信息，服务端瞬时不可用时保留上一份快照，不影响播放。
-      }
-      if (!cancelled) timer = window.setTimeout(poll, 2_000);
-    };
-
-    setServerDiagnostics(null);
-    void poll();
-    return () => {
-      cancelled = true;
-      if (timer !== null) window.clearTimeout(timer);
-    };
-  }, [diagnosticsOpen, diagnosticsSessionId, diagnosticsStreamUrl]);
 
   /**
    * 取流速度读数：每秒问一次引擎，格式化后进 state（docs/design/player-feel.md §2.G3）。
@@ -3760,7 +3711,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
             engine={engineRef.current}
             qoe={() => liveStats(qoeRef.current)}
             landscape={landscape}
-            diagnostics={serverDiagnostics}
+            diagnostics={null}
             onClose={() => setDiagnosticsOpen(false)}
           />
         ) : null}

@@ -1,10 +1,11 @@
 use std::str::FromStr;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 #[path = "support/mod.rs"]
 mod support;
 
 use api::Store;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserId};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UserId};
 
 /// Sessions are user-scoped: the library layout keys `playback_sessions` by
 /// `(user_id, device_id)`, so two users sharing one device id never collide.
@@ -45,9 +46,10 @@ fn legacy_device_primary_key_migrates_to_user_scoped_key() {
             )
             .unwrap();
         let ledger = LedgerId::new();
-        store
-            .insert_ledger(&LedgerRow {
-                id: ledger,
+        publish_fixture_file(
+            &store,
+            &FixtureFile {
+                file_id: Some(ledger),
                 media_id: media,
                 path: path.display().to_string(),
                 season: None,
@@ -58,8 +60,10 @@ fn legacy_device_primary_key_migrates_to_user_scoped_key() {
                 quality_source: QualitySource::Release,
                 confidence: Confidence::High,
                 filter_score: None,
-            })
-            .unwrap();
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let play_session_id =
             support::session::issue_session(&store, user, "living-room", ledger, 1);
         store

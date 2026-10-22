@@ -16,6 +16,7 @@ use tower::ServiceExt;
 use super::common::*;
 pub(crate) use super::common::{install_fake_ffprobe, probed_video, unprobeable_video};
 use super::mock_qbit::MockQbit;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 pub const TOKEN: &str = "management-secret";
 pub const MATRIX_TITLE: &str = "The.Matrix.1999.2160p.BluRay.x265-GROUP";
@@ -203,36 +204,37 @@ impl Harness {
             .join(format!("The Matrix (1999) - {height}p.mkv"));
         std::fs::create_dir_all(owned.parent().unwrap()).unwrap();
         std::fs::write(&owned, probed_video(height, codec, false)).unwrap();
-        let row = domain::LedgerRow {
-            id: domain::LedgerId::new(),
-            media_id,
-            path: owned.display().to_string(),
-            season: None,
-            episode: None,
-            resolution: Some(format!("{height}p")),
-            codec: Some(codec.into()),
-            hdr: None,
-            quality_source: domain::QualitySource::Probe,
-            confidence: domain::Confidence::High,
-            filter_score: Some(score),
-        };
+        let owned_path = owned.display().to_string();
         let mut facts = subscribe::SubscribeFacts::default();
         facts.replace(
             None,
             None,
             subscribe::QualityFact {
                 score,
-                path: Some(row.path.clone()),
+                path: Some(owned_path.clone()),
             },
         );
         let codec_tag = if codec == "hevc" { "x265" } else { "x264" };
         facts.set_quality(
-            row.path.clone(),
+            owned_path.clone(),
             release::parse(&format!("The.Matrix.1999.{height}p.WEB-DL.{codec_tag}")),
         );
         let store = self.state.store();
         let store = store.lock();
-        store.insert_ledger(&row).unwrap();
+        publish_fixture_file(
+            &store,
+            &FixtureFile {
+                file_id: Some(domain::LedgerId::new()),
+                media_id,
+                path: owned_path,
+                resolution: Some(format!("{height}p")),
+                codec: Some(codec.into()),
+                quality_source: domain::QualitySource::Probe,
+                filter_score: Some(score),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         store.save_subscribe_facts(id, &facts).unwrap();
         owned
     }
@@ -412,10 +414,10 @@ impl Harness {
         self.state
             .store()
             .lock()
-            .list_ledger()
+            .list_file_coverage()
             .unwrap()
             .into_iter()
-            .map(|r| r.path)
+            .map(|coverage| coverage.file.path.to_string_lossy().into_owned())
             .collect()
     }
 

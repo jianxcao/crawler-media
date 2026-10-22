@@ -6,10 +6,11 @@ use std::time::Duration;
 use api::probe_manager::clock::ProbeClock;
 use api::probe_manager::policy::{ProbeRequestOrigin, ProbeRequestResult};
 use api::probe_manager::ProbeManager;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, FileCoverage, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use marker::FingerprintEngine;
 use parking_lot::Mutex;
 use store::{FingerprintCacheEntry, Store};
+use store::test_support::FixtureFile;
 
 pub struct FakeFingerprintEngine {
     pub intro_words: Vec<u32>,
@@ -73,11 +74,11 @@ fn episode_number(path: &Path) -> u32 {
 }
 
 /// Publish one fixture row with the content-derived source version, exactly as a scan
-/// does. `insert_ledger` stamps its own timestamp version, which would make the probe
-/// manager see every cached metadata/fingerprint row as stale.
-fn publish_row(store: &Store, row: &LedgerRow, source_version: &str) {
-    let path = Path::new(&row.path);
-    let media = store.get_media(row.media_id).unwrap().expect("fixture media");
+/// does. The plain publication path stamps its own timestamp version, which would make
+/// the probe manager see every cached metadata/fingerprint row as stale.
+fn publish_row(store: &Store, spec: &FixtureFile, source_version: &str) -> FileCoverage {
+    let path = Path::new(&spec.path);
+    let media = store.get_media(spec.media_id).unwrap().expect("fixture media");
     let library = store
         .library_for_path_strict(path, media.kind)
         .unwrap()
@@ -91,10 +92,10 @@ fn publish_row(store: &Store, row: &LedgerRow, source_version: &str) {
         .max_by_key(|root| root.path.components().count())
         .expect("fixture path must sit inside a Library root");
     let file = domain::LibraryFile {
-        file_id: row.id,
+        file_id: spec.file_id.unwrap(),
         library_id: library.id.parse().unwrap(),
         root_id: root.id,
-        media_id: row.media_id,
+        media_id: spec.media_id,
         kind: media.kind,
         path: path.to_path_buf(),
         version: domain::FileVersion {
@@ -110,12 +111,12 @@ fn publish_row(store: &Store, row: &LedgerRow, source_version: &str) {
         source_digest: None,
         source_path: None,
         transfer_mode: None,
-        resolution: row.resolution.clone(),
-        codec: row.codec.clone(),
-        hdr: row.hdr.clone(),
-        quality_source: row.quality_source,
-        confidence: row.confidence,
-        filter_score: row.filter_score,
+        resolution: spec.resolution.clone(),
+        codec: spec.codec.clone(),
+        hdr: spec.hdr.clone(),
+        quality_source: spec.quality_source,
+        confidence: spec.confidence,
+        filter_score: spec.filter_score,
         release_quality: None,
         duration_ms: None,
         tracks_version: 0,
@@ -124,8 +125,8 @@ fn publish_row(store: &Store, row: &LedgerRow, source_version: &str) {
         still_path: None,
     };
     let units = vec![domain::UnitKey::new(
-        row.season.unwrap() as i32,
-        row.episode.unwrap() as i32,
+        spec.season.unwrap() as i32,
+        spec.episode.unwrap() as i32,
     )];
     let publication = store::library_write::FilePublication {
         file: &file,
@@ -144,6 +145,7 @@ fn publish_row(store: &Store, row: &LedgerRow, source_version: &str) {
             1000,
         )
         .unwrap();
+    FileCoverage { file, units }
 }
 
 pub struct ProbeScenario {
@@ -153,7 +155,7 @@ pub struct ProbeScenario {
     pub engine: Arc<FakeFingerprintEngine>,
     pub clock: Arc<api::probe_manager::clock::FakeClock>,
     pub media_id: MediaId,
-    pub ledgers: Vec<LedgerRow>,
+    pub ledgers: Vec<FileCoverage>,
 }
 
 impl ProbeScenario {
@@ -202,8 +204,9 @@ impl ProbeScenario {
         for ep in 1..=8 {
             let ep_path = root.join(format!("S01E0{ep}.strm"));
             std::fs::write(&ep_path, format!("http://127.0.0.1:8080/ep{ep}.mkv\n")).unwrap();
-            let row = LedgerRow {
-                id: LedgerId::new(),
+            let file_id = LedgerId::new();
+            let spec = FixtureFile {
+                file_id: Some(file_id),
                 media_id,
                 path: ep_path.to_str().unwrap().to_string(),
                 season: Some(1),
@@ -214,9 +217,10 @@ impl ProbeScenario {
                 quality_source: QualitySource::Probe,
                 confidence: Confidence::High,
                 filter_score: None,
+                ..Default::default()
             };
-            let source_version = api::fingerprint_job::current_source_version(Path::new(&row.path));
-            publish_row(&store.lock(), &row, &source_version);
+            let source_version = api::fingerprint_job::current_source_version(Path::new(&spec.path));
+            let coverage = publish_row(&store.lock(), &spec, &source_version);
             let tracks = library::Tracks {
                 video: Some(library::VideoTrack {
                     codec: Some("h264".into()),
@@ -228,7 +232,7 @@ impl ProbeScenario {
                 ..library::Tracks::default()
             };
             store.lock().put_file_meta_versioned(
-                &row.id.to_string(),
+                &file_id.to_string(),
                 &tracks,
                 Some(&source_version),
                 Some(2400_000), // 40 minutes
@@ -237,7 +241,7 @@ impl ProbeScenario {
             // Populate cached fingerprint
             let cache_key = api::fingerprint_job::fingerprint_cache_key(&source_version, 180, Some(2400_000));
             store.lock().put_fingerprint_cache(
-                &row.id.to_string(),
+                &file_id.to_string(),
                 &FingerprintCacheEntry {
                     cache_key,
                     algorithm_version: marker::FINGERPRINT_ALGORITHM_VERSION,
@@ -248,7 +252,7 @@ impl ProbeScenario {
                 },
             ).unwrap();
 
-            ledgers.push(row);
+            ledgers.push(coverage);
         }
 
         ProbeScenario {
@@ -284,11 +288,25 @@ impl ProbeScenario {
         self.manager.try_start_workers();
     }
 
+    /// The published coverage of one season-1 episode of the fixture library.
+    fn ledger_for_episode(&self, episode: u32) -> &FileCoverage {
+        self.ledgers
+            .iter()
+            .find(|ledger| {
+                ledger
+                    .units
+                    .iter()
+                    .any(|unit| unit.episode_coordinates() == Some((1, episode)))
+            })
+            .unwrap()
+    }
+
     pub fn missing_outro(&mut self, episode: u32) {
-        let row = self.ledgers.iter().find(|l| l.episode == Some(episode)).unwrap();
-        let mut cache = self.store.lock().get_fingerprint_cache(&row.id.to_string()).unwrap().unwrap();
+        let row = self.ledger_for_episode(episode);
+        let file_id = row.file.file_id.to_string();
+        let mut cache = self.store.lock().get_fingerprint_cache(&file_id).unwrap().unwrap();
         cache.outro = None;
-        self.store.lock().put_fingerprint_cache(&row.id.to_string(), &cache).unwrap();
+        self.store.lock().put_fingerprint_cache(&file_id, &cache).unwrap();
     }
 
     pub fn fail_next_outro(&self, _episode: u32, error: &str) {
@@ -296,7 +314,7 @@ impl ProbeScenario {
     }
 
     pub fn request(&self, episode: u32, origin: ProbeRequestOrigin) -> ProbeRequestResult {
-        let row = self.ledgers.iter().find(|l| l.episode == Some(episode)).unwrap();
+        let row = self.ledger_for_episode(episode);
         self.manager.request_probe(row, origin).unwrap()
     }
 
@@ -329,7 +347,7 @@ impl ProbeScenario {
         let row = &self.ledgers[0];
         let store = self.store.lock();
         let library = store
-            .library_for_path(std::path::Path::new(&row.path), MediaKind::Tv)
+            .library_for_path(row.file.path.as_path(), MediaKind::Tv)
             .unwrap()
             .unwrap();
         store
@@ -344,10 +362,10 @@ impl ProbeScenario {
     }
 
     pub fn fingerprint_job_status(&self, episode: u32) -> String {
-        let row = self.ledgers.iter().find(|l| l.episode == Some(episode)).unwrap();
+        let row = self.ledger_for_episode(episode);
         let store = self.store.lock();
         store
-            .latest_probe_job_for_scope(&format!("ledger:{}", row.id))
+            .latest_probe_job_for_scope(&format!("ledger:{}", row.file.file_id))
             .unwrap()
             .map(|job| job.status)
             .unwrap_or_else(|| "none".to_string())

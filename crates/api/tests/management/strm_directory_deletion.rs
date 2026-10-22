@@ -1,6 +1,7 @@
 use api::fs_watcher::StrmGraceTracker;
 use notify_debouncer_mini::DebouncedEvent;
 use std::sync::Arc;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 struct EmptyFetcher;
 
@@ -51,25 +52,25 @@ async fn test_directory_deletion_removes_nested_strm_and_cleans_up_media() {
     };
     state.store().lock().insert_media(&media).unwrap();
 
-    let row = domain::LedgerRow {
-        id: domain::LedgerId::new(),
-        media_id: media.id,
-        path: strm_file.display().to_string(),
-        season: None,
-        episode: None,
-        resolution: Some("2160p".into()),
-        codec: None,
-        hdr: None,
-        quality_source: domain::QualitySource::Release,
-        confidence: domain::Confidence::High,
-        filter_score: None,
-    };
-    state.store().lock().insert_ledger(&row).unwrap();
+    publish_fixture_file(
+        &state.store().lock(),
+        &FixtureFile {
+            file_id: Some(domain::LedgerId::new()),
+            media_id: media.id,
+            path: strm_file.display().to_string(),
+            resolution: Some("2160p".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     // 校验入账成功
-    let rows = state.store().lock().list_ledger().unwrap();
+    let rows = state.store().lock().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].path, strm_file.display().to_string());
+    assert_eq!(
+        rows[0].file.path.to_string_lossy().into_owned(),
+        strm_file.display().to_string()
+    );
 
     // 2. 模拟用户直接删除了整部剧/电影目录（包含 strm）
     std::fs::remove_dir_all(&movie_dir).unwrap();
@@ -87,7 +88,7 @@ async fn test_directory_deletion_removes_nested_strm_and_cleans_up_media() {
     api::fs_watcher::handle_fs_events(&state, &tracker, Vec::new());
 
     // 4. 验证 ledger 中的该文件记录被标记缺失，而不是自动物理删除
-    let remaining_rows = state.store().lock().list_ledger().unwrap();
+    let remaining_rows = state.store().lock().list_file_coverage().unwrap();
     assert_eq!(
         remaining_rows.len(),
         1,
@@ -119,28 +120,31 @@ async fn test_directory_deletion_removes_nested_strm_and_cleans_up_media() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // 7. 验证还原后重新入账
-    let restored_rows = state.store().lock().list_ledger().unwrap();
+    let restored_rows = state.store().lock().list_file_coverage().unwrap();
     assert_eq!(
         restored_rows.len(),
         1,
         "目录还原后应重新扫描入账，但未找到记录"
     );
-    assert_eq!(restored_rows[0].path, strm_file.display().to_string());
+    assert_eq!(
+        restored_rows[0].file.path.to_string_lossy().into_owned(),
+        strm_file.display().to_string()
+    );
 }
 
-fn episode_row(media_id: domain::MediaId, path: &std::path::Path, episode: u32) -> domain::LedgerRow {
-    domain::LedgerRow {
-        id: domain::LedgerId::new(),
+fn episode_spec(
+    file_id: domain::LedgerId,
+    media_id: domain::MediaId,
+    path: &std::path::Path,
+    episode: u32,
+) -> FixtureFile {
+    FixtureFile {
+        file_id: Some(file_id),
         media_id,
         path: path.display().to_string(),
         season: Some(1),
         episode: Some(episode),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: domain::QualitySource::Release,
-        confidence: domain::Confidence::High,
-        filter_score: None,
+        ..Default::default()
     }
 }
 
@@ -193,9 +197,12 @@ async fn finder_and_recycle_metadata_events_are_ignored_before_handling() {
         anilist_id: None,
     };
     state.store().lock().insert_media(&media).unwrap();
-    let row = episode_row(media.id, &episode, 1);
-    let ledger_id = row.id;
-    state.store().lock().insert_ledger(&row).unwrap();
+    let ledger_id = domain::LedgerId::new();
+    publish_fixture_file(
+        &state.store().lock(),
+        &episode_spec(ledger_id, media.id, &episode, 1),
+    )
+    .unwrap();
 
     let tracker = Arc::new(StrmGraceTracker::new());
     let events = vec![fs_event(finder_metadata), fs_event(recycle_file)];
@@ -262,9 +269,12 @@ async fn hidden_finder_metadata_does_not_reprobe_existing_episodes() {
         anilist_id: None,
     };
     state.store().lock().insert_media(&media).unwrap();
-    let row = episode_row(media.id, &episode, 1);
-    let ledger_id = row.id;
-    state.store().lock().insert_ledger(&row).unwrap();
+    let ledger_id = domain::LedgerId::new();
+    publish_fixture_file(
+        &state.store().lock(),
+        &episode_spec(ledger_id, media.id, &episode, 1),
+    )
+    .unwrap();
 
     let tracker = Arc::new(StrmGraceTracker::new());
     api::fs_watcher::handle_fs_events(&state, &tracker, vec![fs_event(finder_metadata)]);
@@ -333,11 +343,17 @@ async fn deleting_one_episode_keeps_sibling_ledger_rows() {
         anilist_id: None,
     };
     state.store().lock().insert_media(&media).unwrap();
-    let first = episode_row(media.id, &episode_one, 1);
-    let second = episode_row(media.id, &episode_two, 2);
-    let first_id = first.id;
-    state.store().lock().insert_ledger(&first).unwrap();
-    state.store().lock().insert_ledger(&second).unwrap();
+    let first_id = domain::LedgerId::new();
+    publish_fixture_file(
+        &state.store().lock(),
+        &episode_spec(first_id, media.id, &episode_one, 1),
+    )
+    .unwrap();
+    publish_fixture_file(
+        &state.store().lock(),
+        &episode_spec(domain::LedgerId::new(), media.id, &episode_two, 2),
+    )
+    .unwrap();
 
     std::fs::remove_file(&episode_two).unwrap();
     // macOS 的 notify 会在单集删除后上报父目录，且事件处理时 path.exists()
@@ -359,10 +375,16 @@ async fn deleting_one_episode_keeps_sibling_ledger_rows() {
         let _ = std::fs::remove_dir_all(&parked_season);
     }
 
-    let rows = state.store().lock().list_ledger().unwrap();
+    let rows = state.store().lock().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 2, "文件缺失后台账保留并被标记缺失: {rows:?}");
-    assert_eq!(rows[0].id, first_id, "仍在磁盘上的 E01 不能换 ledger_id");
-    assert_eq!(rows[0].path, episode_one.display().to_string());
+    assert_eq!(
+        rows[0].file.file_id, first_id,
+        "仍在磁盘上的 E01 不能换 ledger_id"
+    );
+    assert_eq!(
+        rows[0].file.path.to_string_lossy().into_owned(),
+        episode_one.display().to_string()
+    );
     assert!(state.store().lock().missing_at_by_path().unwrap().contains_key(&episode_two.display().to_string()));
     assert!(!state.store().lock().missing_at_by_path().unwrap().contains_key(&episode_one.display().to_string()));
     assert!(state.store().lock().get_media(media.id).unwrap().is_some());
@@ -382,15 +404,16 @@ async fn restoring_one_episode_within_grace_keeps_its_probe_caches() {
 
     let store = fixture.state.store();
     let during_grace = store.lock();
-    let row = during_grace
-        .ledger_by_path(&fixture.episode.display().to_string())
+    let coverage = during_grace
+        .file_coverage_by_path(&fixture.episode.display().to_string())
         .unwrap()
         .expect("宽限期内台账应保留");
-    assert_eq!(row.id, fixture.ledger_id);
-    assert!(during_grace.get_file_meta(&row.id.to_string()).unwrap().is_some());
+    let coverage_file_id = coverage.file.file_id;
+    assert_eq!(coverage_file_id, fixture.ledger_id);
+    assert!(during_grace.get_file_meta(&coverage_file_id.to_string()).unwrap().is_some());
     assert!(
         during_grace
-            .get_fingerprint_cache(&row.id.to_string())
+            .get_fingerprint_cache(&coverage_file_id.to_string())
             .unwrap()
             .is_some()
     );
@@ -412,13 +435,13 @@ async fn restoring_one_episode_within_grace_keeps_its_probe_caches() {
     let store = fixture.state.store();
     let after_restore = store.lock();
     let restored = after_restore
-        .ledger_by_path(&fixture.episode.display().to_string())
+        .file_coverage_by_path(&fixture.episode.display().to_string())
         .unwrap()
         .expect("相同 URL 恢复后仍用原来的台账");
-    assert_eq!(restored.id, fixture.ledger_id);
+    assert_eq!(restored.file.file_id, fixture.ledger_id);
     assert!(
         !after_restore
-            .is_probe_queued(&restored.id.to_string())
+            .is_probe_queued(&restored.file.file_id.to_string())
             .unwrap(),
         "宽限期内相同 URL 恢复不应重新探测"
     );
@@ -472,7 +495,10 @@ async fn restoring_one_episode_after_grace_requeues_probe() {
     );
 
     let restored = wait_for_restored_ledger(&fixture);
-    assert_eq!(restored.id, fixture.ledger_id, "文件恢复时保留原有台账");
+    assert_eq!(
+        restored.file.file_id, fixture.ledger_id,
+        "文件恢复时保留原有台账"
+    );
     let missing_cleared = !fixture
         .state
         .store()
@@ -483,15 +509,15 @@ async fn restoring_one_episode_after_grace_requeues_probe() {
     assert!(missing_cleared, "恢复后缺失标记应被清除");
 }
 
-fn wait_for_restored_ledger(fixture: &EpisodeFixture) -> domain::LedgerRow {
+fn wait_for_restored_ledger(fixture: &EpisodeFixture) -> domain::FileCoverage {
     for _ in 0..50 {
-        if let Ok(Some(row)) = fixture
+        if let Ok(Some(coverage)) = fixture
             .state
             .store()
             .lock()
-            .ledger_by_path(&fixture.episode.display().to_string())
+            .file_coverage_by_path(&fixture.episode.display().to_string())
         {
-            return row;
+            return coverage;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
@@ -554,11 +580,10 @@ fn episode_fixture() -> EpisodeFixture {
         })
         .unwrap();
     let ledger_id = domain::LedgerId::new();
-    state
-        .store()
-        .lock()
-        .insert_ledger(&domain::LedgerRow {
-            id: ledger_id,
+    publish_fixture_file(
+        &state.store().lock(),
+        &FixtureFile {
+            file_id: Some(ledger_id),
             media_id,
             path: episode.display().to_string(),
             season: Some(1),
@@ -569,13 +594,14 @@ fn episode_fixture() -> EpisodeFixture {
             quality_source: domain::QualitySource::Release,
             confidence: domain::Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
-    state
-        .store()
-        .lock()
-        .insert_ledger(&domain::LedgerRow {
-            id: domain::LedgerId::new(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    publish_fixture_file(
+        &state.store().lock(),
+        &FixtureFile {
+            file_id: Some(domain::LedgerId::new()),
             media_id,
             path: sibling.display().to_string(),
             season: Some(1),
@@ -586,8 +612,10 @@ fn episode_fixture() -> EpisodeFixture {
             quality_source: domain::QualitySource::Release,
             confidence: domain::Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let tracks = library::Tracks {
         video: Some(library::VideoTrack {
             codec: Some("h264".into()),
@@ -696,16 +724,16 @@ async fn deleting_the_show_directory_removes_every_episode_ledger_row() {
         anilist_id: None,
     };
     state.store().lock().insert_media(&media).unwrap();
-    state
-        .store()
-        .lock()
-        .insert_ledger(&episode_row(media.id, &episode_one, 1))
-        .unwrap();
-    state
-        .store()
-        .lock()
-        .insert_ledger(&episode_row(media.id, &episode_two, 2))
-        .unwrap();
+    publish_fixture_file(
+        &state.store().lock(),
+        &episode_spec(domain::LedgerId::new(), media.id, &episode_one, 1),
+    )
+    .unwrap();
+    publish_fixture_file(
+        &state.store().lock(),
+        &episode_spec(domain::LedgerId::new(), media.id, &episode_two, 2),
+    )
+    .unwrap();
 
     std::fs::remove_dir_all(&show_dir).unwrap();
     let tracker = Arc::new(StrmGraceTracker::new());

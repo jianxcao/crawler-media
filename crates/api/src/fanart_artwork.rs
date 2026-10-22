@@ -2,7 +2,6 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
-use domain::LedgerRow;
 use media::fanart::FanartSet;
 
 pub(crate) struct SeasonArtwork {
@@ -24,15 +23,27 @@ pub(crate) fn season_nfo_meta(artwork: &SeasonArtwork) -> library::NfoMeta {
     }
 }
 
-fn season_dir(show_root: &Path, rows: &[LedgerRow], season_number: u32) -> Option<PathBuf> {
-    let season_rows: Vec<&LedgerRow> = rows
+/// 该文件是否带有属于 `season` 的具体剧集单元（整文件单元不算任何季）。
+fn covers_season(coverage: &domain::FileCoverage, season: u32) -> bool {
+    coverage
+        .units
         .iter()
-        .filter(|r| r.season == Some(season_number))
+        .any(|unit| unit.episode_coordinates().is_some_and(|(unit_season, _)| unit_season == season))
+}
+
+fn season_dir(
+    show_root: &Path,
+    coverages: &[domain::FileCoverage],
+    season_number: u32,
+) -> Option<PathBuf> {
+    let season_rows: Vec<&domain::FileCoverage> = coverages
+        .iter()
+        .filter(|coverage| covers_season(coverage, season_number))
         .collect();
     if season_rows.is_empty() {
         return None;
     }
-    let first_parent = Path::new(&season_rows[0].path).parent()?;
+    let first_parent = season_rows[0].file.path.parent()?;
     if first_parent == show_root {
         return None;
     }
@@ -43,8 +54,8 @@ fn season_dir(show_root: &Path, rows: &[LedgerRow], season_number: u32) -> Optio
     if !dir_name.starts_with("season") {
         return None;
     }
-    for row in &season_rows[1..] {
-        if Path::new(&row.path).parent()? != first_parent {
+    for coverage in &season_rows[1..] {
+        if coverage.file.path.parent()? != first_parent {
             return None;
         }
     }
@@ -53,17 +64,19 @@ fn season_dir(show_root: &Path, rows: &[LedgerRow], season_number: u32) -> Optio
 
 pub(crate) fn write_season_nfos(
     show_root: &Path,
-    rows: &[LedgerRow],
+    coverages: &[domain::FileCoverage],
     seasons: &[SeasonArtwork],
 ) {
-    let live_rows: Vec<&LedgerRow> = rows
+    let live_rows: Vec<&domain::FileCoverage> = coverages
         .iter()
-        .filter(|r| crate::scrape_metadata::targets::video_present(Path::new(&r.path)))
+        .filter(|coverage| crate::scrape_metadata::targets::video_present(&coverage.file.path))
         .collect();
 
     let owned_seasons: HashSet<u32> = live_rows
         .iter()
-        .filter_map(|r| r.season)
+        .flat_map(|coverage| coverage.units.iter())
+        .filter_map(|unit| unit.episode_coordinates())
+        .map(|(season, _)| season)
         .collect();
 
     let target_seasons: Vec<&SeasonArtwork> = seasons
@@ -73,7 +86,7 @@ pub(crate) fn write_season_nfos(
 
     for artwork in &target_seasons {
         let meta = season_nfo_meta(artwork);
-        let path = if let Some(s_dir) = season_dir(show_root, rows, artwork.number) {
+        let path = if let Some(s_dir) = season_dir(show_root, coverages, artwork.number) {
             s_dir.join("season.nfo")
         } else if owned_seasons.len() <= 1 {
             show_root.join("season.nfo")
@@ -84,10 +97,10 @@ pub(crate) fn write_season_nfos(
         };
 
         // Re-check before write that this season still has live files
-        let season_still_live = rows
+        let season_still_live = coverages
             .iter()
-            .filter(|r| r.season == Some(artwork.number))
-            .any(|r| crate::scrape_metadata::targets::video_present(Path::new(&r.path)));
+            .filter(|coverage| covers_season(coverage, artwork.number))
+            .any(|coverage| crate::scrape_metadata::targets::video_present(&coverage.file.path));
         if !season_still_live {
             continue;
         }
@@ -158,7 +171,7 @@ fn write_destination_if_missing(
     cached_bytes: &mut Option<Vec<u8>>,
     dest: &Path,
     written_count: &mut usize,
-    source_rows: &[LedgerRow],
+    source_rows: &[domain::FileCoverage],
 ) {
     if dest.is_file() {
         return;
@@ -168,7 +181,7 @@ fn write_destination_if_missing(
         dest.parent().is_some_and(|p| p.is_dir())
     } else {
         source_rows.iter().any(|row| {
-            crate::scrape_metadata::targets::video_present(Path::new(&row.path))
+            crate::scrape_metadata::targets::video_present(&row.file.path)
         })
     };
     if !live_source {
@@ -195,7 +208,7 @@ fn write_destination_if_missing(
         dest.parent().is_some_and(|p| p.is_dir())
     } else {
         source_rows.iter().any(|row| {
-            crate::scrape_metadata::targets::video_present(Path::new(&row.path))
+            crate::scrape_metadata::targets::video_present(&row.file.path)
         })
     };
     if !live_source_after {
@@ -227,7 +240,7 @@ fn season_prefix(season: u32) -> String {
 pub(crate) fn save_fanart_files(
     fetch: &dyn crate::poster_fetch::PosterFetch,
     show_root: &Path,
-    rows: &[LedgerRow],
+    coverages: &[domain::FileCoverage],
     set: &FanartSet,
 ) -> usize {
     let mut written = 0;
@@ -235,38 +248,44 @@ pub(crate) fn save_fanart_files(
     // Show-level logo
     if let Some(ref logo) = set.logo {
         let mut bytes = None;
-        write_destination_if_missing(fetch, &logo.url, &mut bytes, &show_root.join("logo.png"), &mut written, rows);
-        write_destination_if_missing(fetch, &logo.url, &mut bytes, &show_root.join("clearlogo.png"), &mut written, rows);
+        write_destination_if_missing(fetch, &logo.url, &mut bytes, &show_root.join("logo.png"), &mut written, coverages);
+        write_destination_if_missing(fetch, &logo.url, &mut bytes, &show_root.join("clearlogo.png"), &mut written, coverages);
     }
 
     // Show-level thumb
     if let Some(ref thumb) = set.thumb {
         let mut bytes = None;
-        write_destination_if_missing(fetch, &thumb.url, &mut bytes, &show_root.join("thumb.jpg"), &mut written, rows);
-        write_destination_if_missing(fetch, &thumb.url, &mut bytes, &show_root.join("landscape.jpg"), &mut written, rows);
+        write_destination_if_missing(fetch, &thumb.url, &mut bytes, &show_root.join("thumb.jpg"), &mut written, coverages);
+        write_destination_if_missing(fetch, &thumb.url, &mut bytes, &show_root.join("landscape.jpg"), &mut written, coverages);
     }
 
     // Show-level banner
     if let Some(ref banner) = set.banner {
         let mut bytes = None;
-        write_destination_if_missing(fetch, &banner.url, &mut bytes, &show_root.join("banner.jpg"), &mut written, rows);
+        write_destination_if_missing(fetch, &banner.url, &mut bytes, &show_root.join("banner.jpg"), &mut written, coverages);
     }
 
-    let owned_seasons: HashSet<u32> = rows
+    let owned_seasons: HashSet<u32> = coverages
         .iter()
-        .filter(|r| crate::scrape_metadata::targets::video_present(Path::new(&r.path)))
-        .filter_map(|r| r.season)
+        .filter(|coverage| crate::scrape_metadata::targets::video_present(&coverage.file.path))
+        .flat_map(|coverage| coverage.units.iter())
+        .filter_map(|unit| unit.episode_coordinates())
+        .map(|(season, _)| season)
         .collect();
 
     // Season posters
     for sp in &set.season_posters {
         let Some(s_num) = sp.season else { continue };
         if !owned_seasons.contains(&s_num) { continue };
-        let season_rows: Vec<LedgerRow> = rows.iter().filter(|r| r.season == Some(s_num)).cloned().collect();
+        let season_rows: Vec<domain::FileCoverage> = coverages
+            .iter()
+            .filter(|coverage| covers_season(coverage, s_num))
+            .cloned()
+            .collect();
         let prefix = season_prefix(s_num);
         let mut bytes = None;
         write_destination_if_missing(fetch, &sp.url, &mut bytes, &show_root.join(format!("{prefix}poster.jpg")), &mut written, &season_rows);
-        if let Some(s_dir) = season_dir(show_root, rows, s_num) {
+        if let Some(s_dir) = season_dir(show_root, coverages, s_num) {
             write_destination_if_missing(fetch, &sp.url, &mut bytes, &s_dir.join("poster.jpg"), &mut written, &season_rows);
         }
     }
@@ -275,11 +294,15 @@ pub(crate) fn save_fanart_files(
     for st in &set.season_thumbs {
         let Some(s_num) = st.season else { continue };
         if !owned_seasons.contains(&s_num) { continue };
-        let season_rows: Vec<LedgerRow> = rows.iter().filter(|r| r.season == Some(s_num)).cloned().collect();
+        let season_rows: Vec<domain::FileCoverage> = coverages
+            .iter()
+            .filter(|coverage| covers_season(coverage, s_num))
+            .cloned()
+            .collect();
         let prefix = season_prefix(s_num);
         let mut bytes = None;
         write_destination_if_missing(fetch, &st.url, &mut bytes, &show_root.join(format!("{prefix}thumb.jpg")), &mut written, &season_rows);
-        if let Some(s_dir) = season_dir(show_root, rows, s_num) {
+        if let Some(s_dir) = season_dir(show_root, coverages, s_num) {
             write_destination_if_missing(fetch, &st.url, &mut bytes, &s_dir.join("thumb.jpg"), &mut written, &season_rows);
             write_destination_if_missing(fetch, &st.url, &mut bytes, &s_dir.join("landscape.jpg"), &mut written, &season_rows);
         }
@@ -289,11 +312,15 @@ pub(crate) fn save_fanart_files(
     for sb in &set.season_banners {
         let Some(s_num) = sb.season else { continue };
         if !owned_seasons.contains(&s_num) { continue };
-        let season_rows: Vec<LedgerRow> = rows.iter().filter(|r| r.season == Some(s_num)).cloned().collect();
+        let season_rows: Vec<domain::FileCoverage> = coverages
+            .iter()
+            .filter(|coverage| covers_season(coverage, s_num))
+            .cloned()
+            .collect();
         let prefix = season_prefix(s_num);
         let mut bytes = None;
         write_destination_if_missing(fetch, &sb.url, &mut bytes, &show_root.join(format!("{prefix}banner.jpg")), &mut written, &season_rows);
-        if let Some(s_dir) = season_dir(show_root, rows, s_num) {
+        if let Some(s_dir) = season_dir(show_root, coverages, s_num) {
             write_destination_if_missing(fetch, &sb.url, &mut bytes, &s_dir.join("banner.jpg"), &mut written, &season_rows);
         }
     }
@@ -328,19 +355,42 @@ mod tests {
         }
     }
 
-    pub(super) fn ledger_row(path: &str, season: u32) -> domain::LedgerRow {
-        domain::LedgerRow {
-            id: domain::LedgerId::new(),
-            media_id: domain::MediaId::new(),
-            path: path.to_string(),
-            season: Some(season),
-            episode: Some(1),
-            resolution: None,
-            codec: None,
-            hdr: None,
-            quality_source: domain::QualitySource::Release,
-            confidence: domain::Confidence::High,
-            filter_score: None,
+    pub(super) fn ledger_row(path: &str, season: u32) -> domain::FileCoverage {
+        domain::FileCoverage {
+            file: domain::LibraryFile {
+                file_id: domain::LedgerId::new(),
+                library_id: domain::LibraryId::new(),
+                root_id: String::new(),
+                media_id: domain::MediaId::new(),
+                kind: domain::MediaKind::Tv,
+                path: path.into(),
+                version: domain::FileVersion {
+                    revision: 1,
+                    source_version: String::new(),
+                },
+                presence: domain::FilePresence::Present,
+                publication: domain::FilePublication::Published,
+                size_bytes: None,
+                stat_known: false,
+                created_ns: None,
+                modified_ns: None,
+                source_digest: None,
+                source_path: None,
+                transfer_mode: None,
+                resolution: None,
+                codec: None,
+                hdr: None,
+                quality_source: domain::QualitySource::Release,
+                confidence: domain::Confidence::High,
+                filter_score: None,
+                release_quality: None,
+                duration_ms: None,
+                tracks_version: 0,
+                poster_path: None,
+                backdrop_path: None,
+                still_path: None,
+            },
+            units: vec![domain::UnitKey::new(season as i32, 1)],
         }
     }
 

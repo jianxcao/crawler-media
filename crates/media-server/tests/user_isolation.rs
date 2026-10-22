@@ -1,11 +1,12 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use domain::{
-    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LedgerRow, LibraryFile,
-    LibraryId, Media, MediaId, MediaKind, QualitySource, TypedItemId, UserId,
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile,
+    LibraryId, Media, MediaId, MediaKind, QualitySource, TypedItemId, UnitKey, UserId,
 };
 use media_server::provider::{
-    AuthenticateError, MediaItemSnapshot, MediaServerProvider, ServerLibrary, ServerUser,
+    AuthenticateError, MediaItemSnapshot, MediaServerProvider, PlaybackClientInfo, PlaybackEvent,
+    PlaybackEventIdentity, ServerLibrary, ServerUser,
 };
 use serde_json::Value;
 use std::net::{SocketAddr, TcpStream};
@@ -21,8 +22,8 @@ struct FakeProvider {
     user_b: UserId,
     media_a: Media,
     media_b: Media,
-    row_a: LedgerRow,
-    row_b: LedgerRow,
+    unit_a: Option<UnitKey>,
+    unit_b: Option<UnitKey>,
     file_a: LibraryFile,
     file_b: LibraryFile,
     favorite_a: Arc<AtomicBool>,
@@ -134,7 +135,7 @@ impl MediaServerProvider for FakeProvider {
         if user_id == self.user_a {
             Ok(vec![MediaItemSnapshot {
                 file: self.file_a.clone(),
-                row: self.row_a.clone(),
+                unit: self.unit_a,
                 media: self.media_a.clone(),
                 ticks: 120_000_000,
                 play_count: 0,
@@ -155,7 +156,7 @@ impl MediaServerProvider for FakeProvider {
         } else {
             Ok(vec![MediaItemSnapshot {
                 file: self.file_b.clone(),
-                row: self.row_b.clone(),
+                unit: self.unit_b,
                 media: self.media_b.clone(),
                 ticks: 0,
                 play_count: 0,
@@ -221,9 +222,9 @@ impl MediaServerProvider for FakeProvider {
         favorite: Option<bool>,
     ) -> Result<bool, String> {
         let target = if user_id == self.user_a {
-            Some((self.media_a.id, self.row_a.id, &self.favorite_a))
+            Some((self.media_a.id, self.file_a.file_id, &self.favorite_a))
         } else if user_id == self.user_b {
-            Some((self.media_b.id, self.row_b.id, &self.favorite_b))
+            Some((self.media_b.id, self.file_b.file_id, &self.favorite_b))
         } else {
             None
         };
@@ -237,12 +238,15 @@ impl MediaServerProvider for FakeProvider {
         Ok(true)
     }
 
-    async fn update_progress(
+    async fn report_playback_event(
         &self,
         _user_id: UserId,
         _id: &str,
         _position_ms: i64,
         _paused: bool,
+        _client: PlaybackClientInfo,
+        _event: PlaybackEvent,
+        _identity: PlaybackEventIdentity,
     ) -> Result<(), String> {
         Ok(())
     }
@@ -285,19 +289,6 @@ fn test_provider(user_a_kind: MediaKind) -> Arc<FakeProvider> {
         bangumi_id: None,
         anilist_id: None,
     };
-    let row = |media_id, path: &str, is_tv: bool| LedgerRow {
-        id: LedgerId::new(),
-        media_id,
-        path: path.into(),
-        season: is_tv.then_some(1),
-        episode: is_tv.then_some(1),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Probe,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
     let make_file = |file_id, media_id, kind: MediaKind, path: &str| LibraryFile {
         file_id,
         library_id: LibraryId::from_str("00000000-0000-0000-0000-0000000000f1").unwrap(),
@@ -331,15 +322,15 @@ fn test_provider(user_a_kind: MediaKind) -> Arc<FakeProvider> {
         backdrop_path: None,
         still_path: None,
     };
-    let row_a = row(media_a.id, "/path/a.mkv", user_a_kind == MediaKind::Tv);
-    let row_b = row(media_b.id, "/path/b.mkv", false);
-    let file_a = make_file(row_a.id, media_a.id, media_a.kind, &row_a.path);
-    let file_b = make_file(row_b.id, media_b.id, media_b.kind, &row_b.path);
+    let unit_a = (user_a_kind == MediaKind::Tv).then_some(UnitKey::new(1, 1));
+    let unit_b = None;
+    let file_a = make_file(LedgerId::new(), media_a.id, media_a.kind, "/path/a.mkv");
+    let file_b = make_file(LedgerId::new(), media_b.id, media_b.kind, "/path/b.mkv");
     Arc::new(FakeProvider {
         user_a,
         user_b,
-        row_a,
-        row_b,
+        unit_a,
+        unit_b,
         file_a,
         file_b,
         media_a,

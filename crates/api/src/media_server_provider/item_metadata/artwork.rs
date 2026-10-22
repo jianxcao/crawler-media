@@ -1,9 +1,8 @@
-use super::nfo::row_nfo_path;
-use domain::{Media, MediaKind};
+use domain::{LibraryFile, Media, MediaKind};
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::UNIX_EPOCH,
 };
 
@@ -17,28 +16,18 @@ fn remote_episode_thumb(thumb: &str) -> Option<String> {
     }
 }
 
-fn local_episode_thumb(row: &domain::LedgerRow, thumb: Option<&str>) -> Option<PathBuf> {
-    let path = Path::new(&row.path);
+fn sidecar_episode_thumb(file: &LibraryFile) -> Option<PathBuf> {
+    let path = file.path.as_path();
     let dir = path.parent()?;
     let stem = path.file_stem()?.to_str()?;
-    if let Some(thumb) = thumb {
-        let nfo = dir.join(format!("{stem}.nfo"));
-        if Path::new(thumb).is_absolute() && Path::new(thumb).is_file() {
-            return Some(PathBuf::from(thumb));
-        }
-        let candidate = nfo.parent()?.join(thumb);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
     ["-thumb.jpg", "-thumb.png", ".jpg", ".png"]
         .into_iter()
         .map(|suffix| dir.join(format!("{stem}{suffix}")))
         .find(|candidate| candidate.is_file())
 }
 
-pub fn backdrop_path(row: &domain::LedgerRow, is_series: bool) -> Option<PathBuf> {
-    let file_dir = Path::new(&row.path).parent()?;
+pub fn backdrop_path(file: &LibraryFile, is_series: bool) -> Option<PathBuf> {
+    let file_dir = file.path.parent()?;
     let parent_dir = file_dir.parent().unwrap_or(file_dir);
     let dirs = if is_series {
         [parent_dir, file_dir]
@@ -50,70 +39,80 @@ pub fn backdrop_path(row: &domain::LedgerRow, is_series: bool) -> Option<PathBuf
         .find(|candidate| candidate.is_file())
 }
 
+/// 页内主图事实：只取「已采纳的 `still_url`」与文件系统旁车两处来源。
+///
+/// 这里刻意不读现场 NFO（`library::read_nfo`）：页内渲染的是已落库口径，sidecar 被改坏或
+/// 删除都不得改变同一页的响应。图片端点（[`primary_image_url`] / [`local_primary_image`]）
+/// 与页内同源：远端一律来自调用方传入的已采纳 `still_url`，本地一律来自文件系统约定。
 pub(super) fn primary_image_metadata(
-    row: &domain::LedgerRow,
+    file: &LibraryFile,
+    unit: (i32, i32),
     media: &Media,
     is_series: bool,
+    adopted_still_url: Option<&str>,
 ) -> (bool, Option<String>) {
-    let nfo = row_nfo_path(row, media, is_series).and_then(|path| library::read_nfo(&path));
-    let thumb = nfo.as_ref().and_then(|metadata| metadata.thumb.as_deref());
-    let local = (!is_series && media.kind == MediaKind::Tv)
-        .then(|| local_episode_thumb(row, thumb))
+    let episode = !is_series && media.kind == MediaKind::Tv;
+    let local = episode.then(|| sidecar_episode_thumb(file)).flatten();
+    let local_still = (!is_series && media.kind == MediaKind::Tv && unit.1 >= 0)
+        .then(|| crate::episode_still::existing(file.path.as_path()))
         .flatten();
-    let local_still = (!is_series && media.kind == MediaKind::Tv && row.episode.is_some())
-        .then(|| crate::episode_still::existing(Path::new(&row.path)))
+    let remote = episode
+        .then(|| primary_image_url(unit, media, adopted_still_url))
         .flatten();
-    let remote = (!is_series && media.kind == MediaKind::Tv)
-        .then(|| thumb.and_then(remote_episode_thumb))
-        .flatten();
+    let has_poster = crate::http::library::poster_path(file).is_some();
+    if episode {
+        tracing::debug!(
+            path = %file.path.display(),
+            adopted_still = adopted_still_url.is_some(),
+            local = local.is_some(),
+            local_still = local_still.is_some(),
+            remote = remote.is_some(),
+            poster = has_poster,
+            "页内主图事实来自已采纳字段与文件系统"
+        );
+    }
     (
-        local.is_some()
-            || local_still.is_some()
-            || remote.is_some()
-            || crate::http::library::poster_path(row).is_some(),
+        local.is_some() || local_still.is_some() || remote.is_some() || has_poster,
         remote,
     )
 }
 
-pub fn primary_image_url(row: &domain::LedgerRow, media: &Media) -> Option<String> {
-    if media.kind != MediaKind::Tv || row.episode.is_none() {
+/// 分集远端主图：只认调用方给的**已采纳** `still_url`，不读现场 NFO。
+///
+/// 页内 [`primary_image_metadata`] 与本函数共用同一入口，所以「页内声明有主图」与
+/// 「端点能返回这张图」是同一个事实。
+pub fn primary_image_url(
+    unit: (i32, i32),
+    media: &Media,
+    adopted_still_url: Option<&str>,
+) -> Option<String> {
+    if media.kind != MediaKind::Tv || unit.1 < 0 {
         return None;
     }
-    row_nfo_path(row, media, false)
-        .and_then(|path| library::read_nfo(&path))
-        .and_then(|metadata| metadata.thumb)
-        .and_then(|thumb| remote_episode_thumb(&thumb))
+    adopted_still_url.and_then(remote_episode_thumb)
 }
 
-pub fn local_primary_image(row: &domain::LedgerRow, media: &Media) -> Option<PathBuf> {
-    let episode_still = (media.kind == MediaKind::Tv && row.episode.is_some())
-        .then(|| crate::episode_still::existing(Path::new(&row.path)))
+/// 分集本地主图：文件系统约定（剧照旁车、海报）与已采纳字段无关，故无新增入参。
+pub fn local_primary_image(
+    file: &LibraryFile,
+    unit: (i32, i32),
+    media: &Media,
+) -> Option<PathBuf> {
+    let episode_still = (media.kind == MediaKind::Tv && unit.1 >= 0)
+        .then(|| crate::episode_still::existing(file.path.as_path()))
         .flatten();
-    let nfo_thumb = if media.kind == MediaKind::Tv && row.episode.is_some() {
-        row_nfo_path(row, media, false)
-            .and_then(|path| library::read_nfo(&path))
-            .and_then(|metadata| metadata.thumb)
-    } else {
-        None
-    };
-    episode_still
-        .or_else(|| {
-            nfo_thumb
-                .as_deref()
-                .and_then(|thumb| local_episode_thumb(row, Some(thumb)))
-        })
-        .or_else(|| crate::http::library::poster_path(row))
+    episode_still.or_else(|| crate::http::library::poster_path(file))
 }
 
 pub fn series_primary_image_tag(
-    row: &domain::LedgerRow,
+    file: &LibraryFile,
     media: &Media,
     is_series: bool,
 ) -> Option<String> {
     if !is_series || media.kind != MediaKind::Tv {
         return None;
     }
-    let path = crate::http::library::poster_path(row)?;
+    let path = crate::http::library::poster_path(file)?;
     let metadata = std::fs::metadata(&path).ok()?;
     let mut hasher = DefaultHasher::new();
     path.hash(&mut hasher);

@@ -4,7 +4,8 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use domain::UserId;
 use media_server::provider::{
-    AuthenticateError, MediaItemSnapshot, MediaServerProvider, ServerLibrary, ServerUser,
+    AuthenticateError, MediaItemSnapshot, MediaServerProvider, PlaybackClientInfo, PlaybackEvent,
+    PlaybackEventIdentity, ServerLibrary, ServerUser,
 };
 use media_server::routes;
 use tower::ServiceExt;
@@ -73,7 +74,16 @@ impl MediaServerProvider for TestStrmProvider {
     async fn set_user_marks(&self, _user: UserId, _id: &str, _played: Option<bool>, _fav: Option<bool>) -> Result<bool, String> {
         Ok(true)
     }
-    async fn update_progress(&self, _user: UserId, _id: &str, _pos: i64, _paused: bool) -> Result<(), String> {
+    async fn report_playback_event(
+        &self,
+        _user: UserId,
+        _id: &str,
+        _pos: i64,
+        _paused: bool,
+        _client: PlaybackClientInfo,
+        _event: PlaybackEvent,
+        _identity: PlaybackEventIdentity,
+    ) -> Result<(), String> {
         Ok(())
     }
 }

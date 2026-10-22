@@ -9,6 +9,7 @@ use notify_debouncer_mini::{DebouncedEvent, new_debouncer};
 use parking_lot::Mutex;
 
 use crate::management::ApiState;
+use crate::media_server_provider::items::unit_columns;
 
 pub(crate) mod presence;
 /// STRM 延迟删除条目：记录删除时间戳与删除前的流媒体 URL。
@@ -138,9 +139,9 @@ impl StrmGraceTracker {
 pub fn spawn_fs_watcher(state: ApiState) {
     tokio::spawn(async move {
         let tracker = Arc::new(StrmGraceTracker::new());
-        if let Ok(rows) = state.store.lock().list_ledger() {
+        if let Ok(rows) = state.store.lock().list_file_coverage() {
             for row in rows {
-                let path = Path::new(&row.path);
+                let path = row.file.path.as_path();
                 if path
                     .extension()
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"))
@@ -562,10 +563,11 @@ fn ledger_path_is_gone(event_path: &Path, ledger_path: &str) -> bool {
 fn invalidate_strm_caches(state: &ApiState, path: &std::path::Path) {
     let path_str = path.display().to_string();
     let store = state.store.lock();
-    let Ok(Some(row)) = store.ledger_by_path(&path_str) else {
+    let Ok(Some(coverage)) = store.file_coverage_by_path(&path_str) else {
         return;
     };
-    let ledger_id = row.id.to_string();
+    let ledger_id = coverage.file.file_id.to_string();
+    let media_id = coverage.file.media_id;
     let mut cleared = 0;
     if store.delete_file_meta_by_ledger_id(&ledger_id).is_ok() {
         cleared += 1;
@@ -573,27 +575,34 @@ fn invalidate_strm_caches(state: &ApiState, path: &std::path::Path) {
     if store.clear_cached_chapters(&ledger_id).is_ok() {
         cleared += 1;
     }
-    // 只清当前行对应季集未锁定的标记：电视剧各集共用 media_id，绝不能删整部剧；用户手动锁定标记保留。
-    let is_locked = store
-        .get_media_marker(row.media_id, row.season, row.episode)
-        .ok()
-        .flatten()
-        .map(|m| m.locked)
-        .unwrap_or(false);
-    if !is_locked
-        && store
-            .delete_media_marker(row.media_id, row.season, row.episode)
-            .is_ok()
-    {
+    // 只清当前文件各单元未锁定的标记：电视剧各集共用 media_id，绝不能删整部剧；用户手动锁定标记保留。
+    // 旧实现只覆盖按路径取到的那一条 (file, unit) 行；现在按该文件的全部单元扇出，
+    // 单单元文件（121 文件 / 121 单元）逐字等价，多单元文件清得更全。
+    let mut units = coverage.units.clone();
+    units.sort_by_key(|unit| (unit.season, unit.episode));
+    for unit in units {
+        let (season, episode) = unit_columns((unit.season, unit.episode));
+        let is_locked = store
+            .get_media_marker(media_id, season, episode)
+            .ok()
+            .flatten()
+            .map(|m| m.locked)
+            .unwrap_or(false);
+        if is_locked || store.delete_media_marker(media_id, season, episode).is_err() {
+            continue;
+        }
         cleared += 1;
+        tracing::info!(
+            path = %path_str,
+            season = ?season,
+            episode = ?episode,
+            cleared,
+            "【STRM】检测到 strm 内容变化，已清空该集旧探测缓存（流信息/章节/片头片尾），下次访问将按新 URL 重新探测"
+        );
     }
-    tracing::info!(
-        path = %path_str,
-        season = row.season,
-        episode = row.episode,
-        cleared,
-        "【STRM】检测到 strm 内容变化，已清空该集旧探测缓存（流信息/章节/片头片尾），下次访问将按新 URL 重新探测"
-    );
+    if cleared == 0 {
+        tracing::debug!(path = %path_str, "【STRM】内容变化但没有可清理的探测缓存");
+    }
 }
 
 /// 抽象文件系统 Watcher 行为，方便单元测试注入 fake/mock

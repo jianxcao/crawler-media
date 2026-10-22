@@ -30,29 +30,24 @@ fn season_refresh_keeps_old_markers_until_success_then_clears_empty_result() {
             anilist_id: None,
         })
         .unwrap();
-    let make_row = |episode| LedgerRow {
-        id: LedgerId::new(),
-        media_id,
-        path: tmp
-            .path()
-            .join(format!("Pantheon.S01E{episode:02}.mkv"))
-            .to_string_lossy()
-            .into_owned(),
-        season: Some(1),
-        episode: Some(episode),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
+    let make_row = |episode| {
+        super::super::test_support::coverage(
+            media_id,
+            &tmp.path()
+                .join(format!("Pantheon.S01E{episode:02}.mkv"))
+                .to_string_lossy()
+                .into_owned(),
+            Some(1),
+            Some(episode),
+        )
     };
-    let rows = [make_row(1), make_row(2)];
-    for row in &rows {
-        std::fs::write(&row.path, b"dummy").unwrap();
-        store.lock().insert_ledger(row).unwrap();
+    let mut rows = [make_row(1), make_row(2)];
+    for row in rows.iter_mut() {
+        std::fs::write(&row.file.path, b"dummy").unwrap();
+        super::super::test_support::publish_into(&store.lock(), row);
     }
-    let cached = seed_old_refresh_result(&store.lock(), media_id, &rows[0].id.to_string());
+    let cached =
+        seed_old_refresh_result(&store.lock(), media_id, &rows[0].file.file_id.to_string());
 
     let manager = ProbeManager::new(store.clone());
     let units = rows
@@ -82,7 +77,7 @@ fn season_refresh_keeps_old_markers_until_success_then_clears_empty_result() {
     assert_eq!(
         store
             .lock()
-            .get_cached_chapters(&rows[0].id.to_string())
+            .get_cached_chapters(&rows[0].file.file_id.to_string())
             .unwrap()
             .unwrap(),
         cached
@@ -98,7 +93,7 @@ fn season_refresh_keeps_old_markers_until_success_then_clears_empty_result() {
     );
     let chapters = store
         .lock()
-        .get_cached_chapters(&rows[0].id.to_string())
+        .get_cached_chapters(&rows[0].file.file_id.to_string())
         .unwrap()
         .unwrap();
     assert_eq!(chapters.len(), 2);

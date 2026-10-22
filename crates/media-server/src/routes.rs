@@ -20,8 +20,6 @@ mod user_data;
 mod users;
 mod websocket;
 
-pub(super) use crate::provider::query::parse_season_id;
-
 use catalog::{
     genre_by_name, genres, item_by_id, items, latest_items, resume_items, search_hints,
     studio_by_name, studios,

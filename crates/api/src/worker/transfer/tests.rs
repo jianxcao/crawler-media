@@ -125,7 +125,7 @@ fn changed_root_is_rejected_before_reservation_even_with_a_new_facts_snapshot() 
         &recorder, &candidate_cov, &source, library::TransferMode::Copy,
     );
     assert!(result.is_err(), "obsolete root must not be reserved: {result:?}");
-    assert!(state.store.lock().list_ledger().unwrap().is_empty());
+    assert!(state.store.lock().list_file_coverage().unwrap().is_empty());
     assert!(!candidate_cov.file.path.exists());
 }
 
@@ -148,7 +148,7 @@ fn changed_transfer_setting_is_rejected_before_reservation() {
         &recorder, &candidate_cov, &source, library::TransferMode::Copy,
     );
     assert!(result.is_err(), "obsolete mode must not be reserved: {result:?}");
-    assert!(state.store.lock().list_ledger().unwrap().is_empty());
+    assert!(state.store.lock().list_file_coverage().unwrap().is_empty());
     assert!(!candidate_cov.file.path.exists());
 }
 
@@ -257,6 +257,273 @@ fn restarted_pending_reservation_reuses_file_identity_and_version() {
     published.file.publication = domain::FilePublication::Published;
     subscribe::TransferRecorder::published(&restarted, &published).unwrap();
     let store = state.store.lock();
-    assert_eq!(store.ledger_by_path(&recovered.file.path.display().to_string()).unwrap().unwrap().id, file_id);
+    assert_eq!(store.file_coverage_by_path(&recovered.file.path.display().to_string()).unwrap().unwrap().file.file_id, file_id);
     assert_eq!(store.library_file_page(plan.library_id.parse().unwrap(), media.id, None, 100).unwrap().files.len(), 1);
+}
+
+/// `StoreError` carries no `PartialEq`: assert the reservation guard's variant
+/// and message instead of widening the public error enum for a test.
+fn assert_reservation_changed(error: store::StoreError) {
+    match error {
+        store::StoreError::Protected(message) => {
+            assert_eq!(message, "Transfer reservation changed or was detached")
+        }
+        other => panic!("expected a Protected reservation error, got {other:?}"),
+    }
+}
+
+fn write_scope(plan: &TransferPlan) -> store::library_write::WriteScope {
+    store::library_write::WriteScope {
+        library_id: plan.library_id.parse().unwrap(),
+        config_revision: plan.config_revision,
+    }
+}
+
+fn reserve(
+    state: &ApiState,
+    plan: &TransferPlan,
+    coverage: &domain::FileCoverage,
+    source: &std::path::Path,
+) -> domain::FileCoverage {
+    state
+        .store
+        .lock()
+        .reserve_transfer(&write_scope(plan), coverage, source, library::TransferMode::Copy, 0)
+        .unwrap()
+}
+
+/// The outcome the collector builds for one reserved file, carrying the
+/// confirmed quality verdict (not the reservation's placeholder facts).
+fn outcome_of(coverage: domain::FileCoverage, source: &std::path::Path) -> subscribe::RunOutcome {
+    subscribe::RunOutcome {
+        facts: subscribe::SubscribeFacts::default(),
+        file_sources: vec![domain::FileSource {
+            file_id: coverage.file.file_id,
+            destination: coverage.file.path.clone(),
+            source: source.to_path_buf(),
+        }],
+        files: vec![coverage],
+        removed_paths: Vec::new(),
+        completed: true,
+        transferred_enclosures: Vec::new(),
+        rejected_enclosures: Vec::new(),
+        awaiting_probe_enclosures: Vec::new(),
+        collection_errors: Vec::new(),
+        submission_errors: Vec::new(),
+        torrents_added: Vec::new(),
+    }
+}
+
+/// Prepare a reserved destination plus the source file and sidecar artwork, and
+/// return the reservation and the confirmed coverage of that file.
+fn reserved_round(
+    state: &ApiState,
+    media: &Media,
+    plan: &TransferPlan,
+    tmp: &tempfile::TempDir,
+) -> (domain::FileCoverage, domain::FileCoverage) {
+    let source = tmp.path().join("downloads/The Matrix.mkv");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    std::fs::write(&source, b"matrix").unwrap();
+    let mut placeholder = candidate(media, plan, &source, library::TransferMode::Copy);
+    placeholder.units = vec![domain::UnitKey::new(1, 1)];
+    let reserved = reserve(state, plan, &placeholder, &source);
+    std::fs::write(&reserved.file.path, b"matrix").unwrap();
+    std::fs::write(reserved.file.path.with_file_name("poster.jpg"), b"jpg").unwrap();
+
+    let mut confirmed = reserved.clone();
+    confirmed.file.presence = domain::FilePresence::Present;
+    confirmed.file.publication = domain::FilePublication::Published;
+    confirmed.file.resolution = Some("1080p".into());
+    confirmed.file.codec = Some("H264".into());
+    confirmed.file.hdr = Some("HDR10".into());
+    confirmed.file.quality_source = domain::QualitySource::Probe;
+    confirmed.file.confidence = domain::Confidence::High;
+    confirmed.file.filter_score = Some(77);
+    (reserved, confirmed)
+}
+
+/// The confirmed verdict, the observed transfer mode, the source path and the
+/// sidecar artwork of a reserved Transfer file all reach the ledger file, under
+/// the reservation's identity and without moving its version.
+#[test]
+fn publication_writes_confirmed_facts_mode_source_and_artwork() {
+    let (tmp, state, media, subscribe) = fixture();
+    let plan = resolve_transfer_plan(&state, &media, &subscribe).unwrap();
+    let (reserved, confirmed) = reserved_round(&state, &media, &plan, &tmp);
+    let source = tmp.path().join("downloads/The Matrix.mkv");
+    let outcome = outcome_of(confirmed, &source);
+
+    let published = publish_transfer_file(
+        &state.store.lock(),
+        &plan.library_id,
+        plan.config_revision,
+        &outcome.files[0],
+        Some(&source),
+        "hardlink",
+    )
+    .unwrap();
+
+    assert_eq!(published.file_id, reserved.file.file_id);
+    assert_eq!(published.transfer_mode.as_deref(), Some("hardlink"));
+    assert!(published.version == reserved.file.version, "the reservation's version is kept");
+    let store = state.store.lock();
+    let files = store
+        .library_file_page(plan.library_id.parse().unwrap(), media.id, None, 100)
+        .unwrap()
+        .files;
+    assert_eq!(files.len(), 1);
+    let file = &files[0];
+    assert_eq!(file.file_id, reserved.file.file_id);
+    assert!(file.version == reserved.file.version, "publication never bumps the reserved version");
+    assert_eq!(file.resolution.as_deref(), Some("1080p"));
+    assert_eq!(file.codec.as_deref(), Some("H264"));
+    assert_eq!(file.hdr.as_deref(), Some("HDR10"));
+    assert_eq!(file.quality_source, domain::QualitySource::Probe);
+    assert_eq!(file.confidence, domain::Confidence::High);
+    assert_eq!(file.filter_score, Some(77));
+    assert_eq!(file.transfer_mode.as_deref(), Some("hardlink"));
+    assert_eq!(file.source_path.as_deref(), Some(source.as_path()));
+    assert_eq!(file.poster_path, Some(file.path.with_file_name("poster.jpg")));
+    assert_eq!(file.root_id, plan.root_id);
+    assert_eq!(file.publication, domain::FilePublication::Published);
+    assert_eq!(store.get_file_units(reserved.file.file_id).unwrap(), vec![domain::UnitKey::new(1, 1)]);
+}
+
+/// A file whose committed version moved after the reservation is refused instead
+/// of being published over the newer one.
+#[test]
+fn publication_refuses_a_reservation_whose_version_moved() {
+    let (tmp, state, media, subscribe) = fixture();
+    let plan = resolve_transfer_plan(&state, &media, &subscribe).unwrap();
+    let (reserved, confirmed) = reserved_round(&state, &media, &plan, &tmp);
+    let source = tmp.path().join("downloads/The Matrix.mkv");
+    let mut bumped = reserved.file.clone();
+    bumped.version = domain::FileVersion { revision: 1, source_version: "v2".into() };
+    state
+        .store
+        .lock()
+        .publish_files(
+            &write_scope(&plan),
+            &[store::library_write::FilePublication {
+                file: &bumped,
+                units: &[domain::UnitKey::new(1, 1)],
+                expected_version: Some(&reserved.file.version),
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            store::unix_now() * 1000,
+        )
+        .unwrap();
+    assert_eq!(
+        state.store.lock().get_file_version(reserved.file.file_id).unwrap().unwrap().source_version,
+        "v2"
+    );
+
+    let outcome = outcome_of(confirmed, &source);
+    let error = publish_transfer_file(
+        &state.store.lock(),
+        &plan.library_id,
+        plan.config_revision,
+        &outcome.files[0],
+        Some(&source),
+        "hardlink",
+    )
+    .unwrap_err();
+    assert_reservation_changed(error);
+}
+
+/// A destination with no reservation row can never be published: nothing may
+/// recreate an identity the reservation did not own.
+#[test]
+fn publication_refuses_a_destination_without_a_reservation() {
+    let (tmp, state, media, subscribe) = fixture();
+    let plan = resolve_transfer_plan(&state, &media, &subscribe).unwrap();
+    let source = tmp.path().join("downloads/The Matrix.mkv");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    std::fs::write(&source, b"matrix").unwrap();
+    let coverage = candidate(&media, &plan, &source, library::TransferMode::Copy);
+    let outcome = outcome_of(coverage, &source);
+
+    let error = publish_transfer_file(
+        &state.store.lock(),
+        &plan.library_id,
+        plan.config_revision,
+        &outcome.files[0],
+        Some(&source),
+        "copy",
+    )
+    .unwrap_err();
+    assert_reservation_changed(error);
+    assert!(state.store.lock().list_file_coverage().unwrap().is_empty());
+}
+
+/// The collected coverage widens a span the reservation recorded as one unit:
+/// publication must add the carried units instead of dropping them.
+#[test]
+fn publication_keeps_carried_units_when_the_row_has_none() {
+    let (tmp, state, media, subscribe) = fixture();
+    let plan = resolve_transfer_plan(&state, &media, &subscribe).unwrap();
+    let (reserved, confirmed) = reserved_round(&state, &media, &plan, &tmp);
+    let source = tmp.path().join("downloads/The Matrix.mkv");
+    // A reservation without units (the shape an old reservation could leave behind).
+    state
+        .store
+        .lock()
+        .publish_files(
+            &write_scope(&plan),
+            &[store::library_write::FilePublication {
+                file: &reserved.file,
+                units: &[],
+                expected_version: Some(&reserved.file.version),
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            store::unix_now() * 1000,
+        )
+        .unwrap();
+    assert!(state.store.lock().get_file_units(reserved.file.file_id).unwrap().is_empty());
+
+    let mut widened = confirmed;
+    widened.units = vec![domain::UnitKey::new(2, 3), domain::UnitKey::new(2, 4)];
+    let outcome = outcome_of(widened, &source);
+    publish_transfer_file(
+        &state.store.lock(),
+        &plan.library_id,
+        plan.config_revision,
+        &outcome.files[0],
+        Some(&source),
+        "copy",
+    )
+    .unwrap();
+    assert_eq!(
+        state.store.lock().get_file_units(reserved.file.file_id).unwrap(),
+        vec![domain::UnitKey::new(2, 3), domain::UnitKey::new(2, 4)]
+    );
+}
+
+/// The reservation is the source of truth for coverage: a narrower carried
+/// coverage never shrinks the units already committed with the row.
+#[test]
+fn publication_prefers_reserved_units_over_carried_ones() {
+    let (tmp, state, media, subscribe) = fixture();
+    let plan = resolve_transfer_plan(&state, &media, &subscribe).unwrap();
+    let (reserved, mut confirmed) = reserved_round(&state, &media, &plan, &tmp);
+    let source = tmp.path().join("downloads/The Matrix.mkv");
+    confirmed.units = vec![domain::UnitKey::WHOLE];
+    let outcome = outcome_of(confirmed, &source);
+
+    publish_transfer_file(
+        &state.store.lock(),
+        &plan.library_id,
+        plan.config_revision,
+        &outcome.files[0],
+        Some(&source),
+        "copy",
+    )
+    .unwrap();
+    assert_eq!(
+        state.store.lock().get_file_units(reserved.file.file_id).unwrap(),
+        vec![domain::UnitKey::new(1, 1)]
+    );
 }

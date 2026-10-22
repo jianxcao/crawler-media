@@ -1,11 +1,12 @@
 use std::sync::{Arc, Mutex};
 use api::{ApiState, PosterFetch, Store, router};
 use axum::{body::Body, http::{Request, StatusCode}};
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use serde_json::{Value, json};
 use tower::ServiceExt;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 struct NoFetch;
 impl Fetcher for NoFetch {
@@ -39,10 +40,17 @@ fn fixture(root: &std::path::Path) -> (ApiState, String, MediaId) {
         year: None, original_title: None, aliases: Vec::new(), tmdb_id: None, douban_id: None, tvdb_id: None,
         bangumi_id: None, anilist_id: None };
     store.insert_media(&media).unwrap();
-    store.insert_ledger(&LedgerRow { id: LedgerId::new(), media_id: media.id,
-        path: directory.join("movie.strm").display().to_string(), season: None, episode: None,
-        resolution: None, codec: None, hdr: None, quality_source: QualitySource::Release,
-        confidence: Confidence::High, filter_score: None }).unwrap();
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()), media_id: media.id,
+            path: directory.join("movie.strm").display().to_string(), season: None, episode: None,
+            resolution: None, codec: None, hdr: None, quality_source: QualitySource::Release,
+            confidence: Confidence::High, filter_score: None,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     drop(store);
     (state, library.id, media.id)
 }

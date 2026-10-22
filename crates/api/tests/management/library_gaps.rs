@@ -5,13 +5,14 @@ use std::sync::Arc;
 
 use api::{Store, router};
 use axum::http::StatusCode;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::*;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 fn app(tmp: &tempfile::TempDir) -> axum::Router {
     let fetcher = Arc::new(Fixtures {
@@ -109,8 +110,11 @@ async fn patch_roots_and_wait(
     finished
 }
 
-#[tokio::test]
-async fn collections_crud_and_items() {
+/// 建一个 movie media + 一个台账文件的最小合集夹具。
+///
+/// 返回的 `TempDir` 必须随返回值存活：`app` 与台账文件路径都指向它。`store` 句柄在
+/// 准备阶段结束即关闭，后续断言全部走 HTTP 面。
+fn seeded_collections_fixture() -> (tempfile::TempDir, axum::Router, Media) {
     let tmp = tempfile::tempdir().unwrap();
     let app = app(&tmp);
     // 建一个 media + ledger 供加入。
@@ -129,9 +133,10 @@ async fn collections_crud_and_items() {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id: media.id,
             path: tmp
                 .path()
@@ -146,17 +151,28 @@ async fn collections_crud_and_items() {
             quality_source: QualitySource::Release,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
-    // store 层直测：collections 表是否已迁移。
-    let probe = Store::open(tmp.path().join("data")).unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    drop(store);
+    (tmp, app, media)
+}
+
+/// store 层直测：collections 表是否已迁移（同一 data 目录上另开短命句柄）。
+fn assert_collections_store_layer_available(data_dir: &std::path::Path) {
+    let probe = Store::open(data_dir).unwrap();
     let probe_user = domain::UserId::new();
     let probe_id = probe.create_collection(probe_user, "直测").unwrap();
     let probe_list = probe.list_collections(probe_user).unwrap();
     assert_eq!(probe_list.len(), 1, "store 层集合可用");
     let _ = probe.delete_collection(&probe_id);
-    drop(probe);
-    drop(store);
+}
+
+#[tokio::test]
+async fn collections_crud_and_items() {
+    let (tmp, app, media) = seeded_collections_fixture();
+    assert_collections_store_layer_available(&tmp.path().join("data"));
 
     let created = json_body(
         app.clone()
@@ -265,9 +281,10 @@ async fn path_reconciliation_reports_and_applies_ledger_moves() {
     };
     store.insert_media(&media).unwrap();
     let original = movie.join("Matrix.1999.mkv");
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id: media.id,
             path: original.display().to_string(),
             season: None,
@@ -278,8 +295,10 @@ async fn path_reconciliation_reports_and_applies_ledger_moves() {
             quality_source: QualitySource::Release,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     drop(store);
 
     let movie_id = movie_library_id(&app).await;

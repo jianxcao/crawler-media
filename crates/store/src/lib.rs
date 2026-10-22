@@ -72,6 +72,8 @@ mod users;
 
 pub mod password;
 pub mod probe_state;
+#[doc(hidden)]
+pub mod test_support;
 
 pub use browse_reads::PlaybackUnitSnapshot;
 mod read_freshness;
@@ -192,12 +194,12 @@ pub enum StoreError {
 
 pub struct Store {
     data_dir: PathBuf,
-    /// Times this store's `list_ledger` executed its unfiltered
+    /// Times this store's `list_file_coverage` executed its unfiltered
     /// `FROM library_files f LEFT JOIN library_file_units u` statement.
     /// Per-instance so concurrent tests never share the diagnostic.
     pub(crate) root_ledger_scans: std::sync::atomic::AtomicUsize,
-    /// Calls to `ledger_for_media` on this store. Selection can load the same
-    /// media twice; the logical candidate count does not show that second read.
+    /// Calls to `file_coverage_for_media` on this store. Selection can load the
+    /// same media twice; the logical candidate count does not show that read.
     pub(crate) media_ledger_reads: std::sync::atomic::AtomicUsize,
     /// Per-store role lookup diagnostic for bounded roster work.
     pub(crate) role_lookups: std::sync::atomic::AtomicUsize,
@@ -218,11 +220,11 @@ impl std::fmt::Debug for Store {
 }
 
 impl Store {
-    /// Times `list_ledger` executed its unfiltered
+    /// Times `list_file_coverage` executed its unfiltered
     /// `FROM library_files f LEFT JOIN library_file_units u` statement.
     ///
     /// Incremented beside that statement, so filtering the returned rows cannot
-    /// hide the scan. `ledger_for_media` does not increment it.
+    /// hide the scan. `file_coverage_for_media` does not increment it.
     pub fn root_ledger_scans(&self) -> usize {
         self.root_ledger_scans
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -233,7 +235,7 @@ impl Store {
             .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Times `ledger_for_media` executed its indexed read.
+    /// Times `file_coverage_for_media` executed its indexed read.
     pub fn media_ledger_reads(&self) -> usize {
         self.media_ledger_reads
             .load(std::sync::atomic::Ordering::Relaxed)

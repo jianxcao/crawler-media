@@ -9,6 +9,7 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 use super::common::*;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 fn app(tmp: &tempfile::TempDir) -> axum::Router {
     let fetcher = Arc::new(Fixtures {
@@ -64,9 +65,10 @@ fn seed_parent_and_nested_ledgers(
             tvdb_id: None,
         })
         .unwrap();
-    store
-        .insert_ledger(&domain::LedgerRow {
-            id: domain::LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(domain::LedgerId::new()),
             media_id,
             path: parent_file.to_str().unwrap().into(),
             season: None,
@@ -77,11 +79,14 @@ fn seed_parent_and_nested_ledgers(
             quality_source: domain::QualitySource::Probe,
             confidence: domain::Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
-    store
-        .insert_ledger(&domain::LedgerRow {
-            id: domain::LedgerId::new(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(domain::LedgerId::new()),
             media_id,
             path: nested_file.to_str().unwrap().into(),
             season: None,
@@ -92,8 +97,10 @@ fn seed_parent_and_nested_ledgers(
             quality_source: domain::QualitySource::Probe,
             confidence: domain::Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
 }
 
 #[tokio::test]
@@ -136,7 +143,7 @@ async fn deleting_item_in_parent_library_does_not_delete_nested_library_file() {
     );
 
     let store = api::Store::open(tmp.path().join("data")).unwrap();
-    let remaining_ledger = store.ledger_for_media(media_id).unwrap();
+    let remaining_ledger = store.file_coverage_for_media(media_id).unwrap();
     assert_eq!(remaining_ledger.len(), 1, "嵌套子库的台账必须保留");
-    assert_eq!(remaining_ledger[0].path, nested_file.to_str().unwrap());
+    assert_eq!(remaining_ledger[0].file.path, nested_file);
 }

@@ -52,10 +52,10 @@ async fn corrupted_heavy_facts_outside_the_page_do_not_fail_the_page() {
         let store = fixture.state.store();
         let store = store.lock();
         let rows: Vec<_> = store
-            .list_ledger()
+            .list_file_coverage()
             .unwrap()
             .into_iter()
-            .filter(|row| row.path.contains("Show000"))
+            .filter(|row| row.file.path.to_string_lossy().contains("Show000"))
             .collect();
         assert!(!rows.is_empty(), "Show000 rows");
         let conn = rusqlite::Connection::open(fixture.dir.path().join("data/library.db")).unwrap();
@@ -66,11 +66,11 @@ async fn corrupted_heavy_facts_outside_the_page_do_not_fail_the_page() {
                       audio_json, subtitle_json, chapters_json)
                  SELECT file_id, file_revision, source_version, 0, '[]', '[]', x'5b5d'
                  FROM library_files WHERE file_id = ?1",
-                [row.id.to_string()],
+                [row.file.file_id.to_string()],
             )
             .unwrap();
         }
-        rows[0].id
+        rows[0].file.file_id
     };
     assert!(!out_of_page.to_string().is_empty());
     let listing = get_json(
@@ -251,13 +251,13 @@ async fn latest_items_keeps_played_last_by_default_and_filters_when_asked() {
         let store = fixture.state.store();
         let store = store.lock();
         let row = store
-            .list_ledger()
+            .list_file_coverage()
             .unwrap()
             .into_iter()
-            .find(|row| row.path.contains("Show000"))
+            .find(|row| row.file.path.to_string_lossy().contains("Show000"))
             .expect("Show000 row");
-        store.upsert_unit(user, row.media_id, -1, -1, 0, Some(true), None, None, None, None, false, 10).unwrap();
-        row.media_id
+        store.upsert_unit(user, row.file.media_id, -1, -1, 0, Some(true), None, None, None, None, false, 10).unwrap();
+        row.file.media_id
     };
     let latest = get_json(&app, "/Users/me/Items/Latest").await;
     let listed = latest.as_array().expect("latest array");
@@ -288,12 +288,12 @@ async fn person_filter_selects_before_paging() {
         let store = fixture.state.store();
         let store = store.lock();
         let row = store
-            .list_ledger()
+            .list_file_coverage()
             .unwrap()
             .into_iter()
-            .find(|row| row.path.contains("Show000"))
+            .find(|row| row.file.path.to_string_lossy().contains("Show000"))
             .expect("Show000 row");
-        let dir = Path::new(&row.path).parent().unwrap();
+        let dir = row.file.path.parent().unwrap();
         std::fs::write(
             dir.join("tvshow.nfo"),
             "<tvshow><actor><name>Alice</name><role>Lead</role></actor></tvshow>",
@@ -367,19 +367,20 @@ async fn name_ties_keep_a_stable_order() {
             std::fs::create_dir_all(&show_dir).unwrap();
             let path = show_dir.join("01x01.mkv");
             std::fs::write(&path, b"episode").unwrap();
-            store.insert_ledger(&LedgerRow {
-                id: ledger_id,
-                media_id,
-                path: path.display().to_string(),
-                season: Some(1),
-                episode: Some(1),
-                resolution: None,
-                codec: None,
-                hdr: None,
-                quality_source: QualitySource::Probe,
-                confidence: Confidence::High,
-                filter_score: None,
-            }).unwrap();
+            store::test_support::publish_fixture_file(
+                &store,
+                &store::test_support::FixtureFile {
+                    media_id,
+                    path: path.display().to_string(),
+                    season: Some(1),
+                    episode: Some(1),
+                    quality_source: QualitySource::Probe,
+                    confidence: Confidence::High,
+                    file_id: Some(ledger_id),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             expected.push(work_wire_id(media_id));
         }
         expected.sort();
@@ -450,7 +451,7 @@ fn adopt_show_metadata(state: &ApiState, media: MediaId) {
 
 /// 页内元数据取库内快照（Task 8 观测 + Task 7 采纳），现场 NFO 不参与渲染。
 ///
-/// 观测输入只在 `insert_ledger` 时采集，所以 `insert_ledger` 之后写下的 sidecar 只可能
+/// 观测输入只在 `publish_fixture_file` 时采集，所以 `publish_fixture_file` 之后写下的 sidecar 只可能
 /// 被「现场读 NFO」看到；坏 sidecar 也不得改变同一页的响应。
 #[tokio::test]
 async fn page_metadata_uses_composed_snapshot_and_ignores_live_nfo() {

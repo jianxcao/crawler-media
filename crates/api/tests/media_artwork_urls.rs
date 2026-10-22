@@ -5,12 +5,13 @@ use api::catalog::{ArtworkCandidate, ArtworkCandidates, Catalog};
 use api::{ApiState, PosterFetch, Store, router};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use media::CatalogHit;
 use serde_json::Value;
 use tower::ServiceExt;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 struct NoFetch;
 
@@ -169,9 +170,10 @@ async fn metadata_refresh_fetches_the_configured_large_default_poster() {
     store.insert_media(&film).unwrap();
     let video = library_root.join("Film.strm");
     std::fs::write(&video, "https://media.example/film").unwrap();
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id: film.id,
             path: video.display().to_string(),
             season: None,
@@ -182,8 +184,10 @@ async fn metadata_refresh_fetches_the_configured_large_default_poster() {
             quality_source: QualitySource::Probe,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     let fetcher = Arc::new(CapturingPosterFetch::default());
     let state = app_state(tmp.path(), store)

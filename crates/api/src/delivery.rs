@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use domain::{DownloaderId, Subscribe, Torrent};
+use domain::{DownloaderId, Subscribe, Torrent, UnitKey};
 use downloader::{Downloader, DownloaderError, QbitDownloader, TransmissionDownloader};
 use parking_lot::Mutex;
 
@@ -217,11 +217,11 @@ impl<'a> RoutedDownloader<'a> {
                 .map_err(error)?;
         let target = store.library_for_path(&root, media.kind).map_err(error)?;
         let mut sources = Vec::new();
-        for (row, _, source) in store.list_ledger_with_mode().map_err(error)? {
-            if row.media_id != subscribe.media_id {
+        for coverage in store.list_file_coverage().map_err(error)? {
+            if coverage.file.media_id != subscribe.media_id {
                 continue;
             }
-            let path = std::path::Path::new(&row.path);
+            let path = coverage.file.path.as_path();
             let in_target = match &target {
                 Some(target) => store
                     .library_for_path(path, media.kind)
@@ -229,37 +229,58 @@ impl<'a> RoutedDownloader<'a> {
                     .is_some_and(|owner| owner.id == target.id),
                 None => path.starts_with(&root),
             };
-            if in_target {
-                if let Some(source) = source {
-                    let mut file_quality = release::parse(
-                        path.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or_default(),
-                    );
-                    if row.resolution.is_some() {
-                        file_quality.resolution = row.resolution.clone();
+            if !in_target {
+                continue;
+            }
+            let Some(source) = coverage.file.source_path.as_deref() else {
+                continue;
+            };
+            let mut file_quality = release::parse(
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default(),
+            );
+            if coverage.file.resolution.is_some() {
+                file_quality.resolution = coverage.file.resolution.clone();
+            }
+            if coverage.file.codec.is_some() {
+                file_quality.codec = coverage.file.codec.clone();
+            }
+            if coverage.file.hdr.is_some() {
+                file_quality.hdr = coverage.file.hdr.clone();
+            }
+            let transfer_pending = store
+                .transfer_pending(coverage.file.path.to_string_lossy().as_ref())
+                .map_err(error)?;
+            // 一个物理文件可覆盖多个 unit；legacy 拿到的是逐 unit 的 join 行，这里逐 unit 保值。
+            // 读 shape 下每个文件至少一个 unit（LEFT JOIN 缺失行读作 `UnitKey::WHOLE`），空 units 兜底同样按整片算。
+            let whole = [UnitKey::WHOLE];
+            let units: &[UnitKey] = if coverage.units.is_empty() {
+                &whole
+            } else {
+                &coverage.units
+            };
+            for unit in units {
+                let mut slots = Vec::new();
+                if let Some((from, to)) = file_quality.episode_span() {
+                    for ep in from..=to {
+                        slots.push((file_quality.season, Some(ep)));
                     }
-                    if row.codec.is_some() {
-                        file_quality.codec = row.codec.clone();
-                    }
-                    if row.hdr.is_some() {
-                        file_quality.hdr = row.hdr.clone();
-                    }
-                    let mut slots = Vec::new();
-                    if let Some((from, to)) = file_quality.episode_span() {
-                        for ep in from..=to {
-                            slots.push((file_quality.season, Some(ep)));
-                        }
-                    }
-                    if slots.is_empty() {
-                        slots.push((row.season, row.episode));
-                    }
-                    let mut mapping = subscribe::collection_destinations::DestinationMapping::with_slots_and_quality(
-                        source, path, slots, Some(file_quality),
-                    );
-                    mapping.transfer_pending = store.transfer_pending(&row.path).map_err(error)?;
-                    sources.push(mapping);
                 }
+                if slots.is_empty() {
+                    slots.push(match unit.episode_coordinates() {
+                        Some((season, episode)) => (Some(season), Some(episode)),
+                        None => (None, None),
+                    });
+                }
+                let mut mapping = subscribe::collection_destinations::DestinationMapping::with_slots_and_quality(
+                    source.to_string_lossy().into_owned(),
+                    path,
+                    slots,
+                    Some(file_quality.clone()),
+                );
+                mapping.transfer_pending = transfer_pending;
+                sources.push(mapping);
             }
         }
         Ok(sources)

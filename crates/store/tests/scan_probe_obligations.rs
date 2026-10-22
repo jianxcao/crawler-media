@@ -1,34 +1,19 @@
-use domain::{Confidence, LedgerId, LedgerRow, MediaId, QualitySource};
+use domain::{Confidence, LedgerId, MediaId, QualitySource};
 use store::Store;
 
-fn sample_row(media_id: MediaId, path: &str) -> LedgerRow {
-    LedgerRow {
-        id: LedgerId::new(),
+/// Fixture scan row: a whole-unit file with a release observation and no NFO facts.
+fn sample_row(media_id: MediaId, path: &str) -> store::ScannedLedger {
+    store::ScannedLedger {
+        file_id: LedgerId::new(),
         media_id,
         path: path.to_string(),
-        season: None,
-        episode: None,
+        units: vec![domain::UnitKey::WHOLE],
         resolution: None,
         codec: None,
         hdr: None,
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
-    }
-}
-
-/// Fixture view of a scan row: whole-unit coverage for movie/video rows, the row's
-/// unit for TV rows, and no observation facts.
-fn scanned(row: &LedgerRow) -> store::ScannedLedger {
-    let units = match (row.season, row.episode) {
-        (Some(season), Some(episode)) => {
-            vec![domain::UnitKey::new(season as i32, episode as i32)]
-        }
-        _ => vec![domain::UnitKey::WHOLE],
-    };
-    store::ScannedLedger {
-        row: row.clone(),
-        units,
         source_version: "fixture-v1".into(),
         source_digest: None,
         size_bytes: None,
@@ -87,11 +72,11 @@ fn insert_and_obligation_are_atomic() {
         )
         .unwrap();
 
-    let res = store.insert_scanned_files(&[scanned(&row)], 1000);
+    let res = store.insert_scanned_files(&[row.clone()], 1000);
     assert!(res.is_err(), "atomic insert must fail due to trigger");
 
     // Ledger row must NOT exist because transaction rolled back
-    assert!(store.get_ledger(&row.id.to_string()).unwrap().is_none());
+    assert!(store.file_coverage_by_id(row.file_id).unwrap().is_none());
 }
 
 #[test]
@@ -100,21 +85,21 @@ fn ledger_cleanup_removes_obligation_not_user_facts() {
     let (store, lib, media_id) = setup(&tmp.path().join("data"));
 
     let row = sample_row(media_id, "/movies/clean.mkv");
-    store.insert_scanned_files(&[scanned(&row)], 1000).unwrap();
+    store.insert_scanned_files(&[row.clone()], 1000).unwrap();
 
     // Verify obligation exists
     let obs = store.scan_probe_obligations(10).unwrap();
     assert_eq!(obs.len(), 1);
-    assert_eq!(obs[0].ledger_id, row.id);
+    assert_eq!(obs[0].ledger_id, row.file_id);
 
     // Delete files via Store::delete_files
     let removed = store
-        .delete_files(lib.id.parse().unwrap(), &[row.id])
+        .delete_files(lib.id.parse().unwrap(), &[row.file_id])
         .unwrap();
     assert_eq!(removed, 1);
 
     // Ledger and obligation must both be gone
-    assert!(store.get_ledger(&row.id.to_string()).unwrap().is_none());
+    assert!(store.file_coverage_by_id(row.file_id).unwrap().is_none());
     let obs_after = store.scan_probe_obligations(10).unwrap();
     assert!(
         obs_after.is_empty(),
@@ -128,9 +113,9 @@ fn ack_removes_obligation() {
     let (store, _lib, media_id) = setup(&tmp.path().join("data"));
 
     let row = sample_row(media_id, "/movies/ack.mkv");
-    store.insert_scanned_files(&[scanned(&row)], 1000).unwrap();
+    store.insert_scanned_files(&[row.clone()], 1000).unwrap();
 
     assert_eq!(store.scan_probe_obligations(10).unwrap().len(), 1);
-    store.ack_scan_probe_obligation(row.id).unwrap();
+    store.ack_scan_probe_obligation(row.file_id).unwrap();
     assert_eq!(store.scan_probe_obligations(10).unwrap().len(), 0);
 }

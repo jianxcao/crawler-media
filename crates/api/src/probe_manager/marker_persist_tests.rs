@@ -28,21 +28,14 @@ fn fresh_fingerprint_replaces_stale_unlocked_intro_marker() {
             anilist_id: None,
         })
         .unwrap();
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let mut row = super::super::test_support::coverage(
         media_id,
-        path: tmp.path().join("Pantheon.S01E01.mkv").display().to_string(),
-        season: Some(1),
-        episode: Some(1),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
-    std::fs::write(&row.path, b"fixture").unwrap();
-    store.insert_ledger(&row).unwrap();
+        &tmp.path().join("Pantheon.S01E01.mkv").display().to_string(),
+        Some(1),
+        Some(1),
+    );
+    std::fs::write(&row.file.path, b"fixture").unwrap();
+    super::super::test_support::publish_into(&store, &mut row);
     store
         .put_media_marker(&crate::store::StoredMediaMarker {
             media_id,
@@ -103,7 +96,12 @@ fn fingerprint_marker(media_id: domain::MediaId) -> crate::store::StoredMediaMar
 
 fn tv_episode(
     tmp: &tempfile::TempDir,
-) -> (Store, domain::MediaId, LedgerRow, crate::store::Library) {
+) -> (
+    Store,
+    domain::MediaId,
+    domain::FileCoverage,
+    crate::store::Library,
+) {
     let store = Store::open(tmp.path()).unwrap();
     // `library_files` 只能登记在某个 Library 的根之下；文件放在 tmp 根，库也以它生根。
     let library = store
@@ -134,20 +132,13 @@ fn tv_episode(
         .unwrap();
     let video = tmp.path().join("episode.strm");
     std::fs::write(&video, "https://cdn.example.test/episode.mkv\n").unwrap();
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let mut row = super::super::test_support::coverage(
         media_id,
-        path: video.display().to_string(),
-        season: Some(1),
-        episode: Some(1),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
-    store.insert_ledger(&row).unwrap();
+        &video.display().to_string(),
+        Some(1),
+        Some(1),
+    );
+    super::super::test_support::publish_into(&store, &mut row);
     (store, media_id, row, library)
 }
 
@@ -306,10 +297,10 @@ async fn cancelling_detached_chapter_frames_reaps_child_and_preserves_sidecars()
         .await
         .expect("chapter frame work did not stop after freeze");
     let _ = service.shutdown().await;
-    let image = std::path::Path::new(&row.path).with_file_name("episode-chapter_0.jpg");
+    let image = std::path::Path::new(&row.file.path).with_file_name("episode-chapter_0.jpg");
     assert!(!image.exists());
     assert_eq!(
-        std::fs::read_to_string(&row.path).unwrap(),
+        std::fs::read_to_string(&row.file.path).unwrap(),
         "https://cdn.example.test/episode.mkv\n"
     );
     assert!(!std::fs::read_dir(tmp.path()).unwrap().any(|entry| {
@@ -325,25 +316,51 @@ async fn cancelling_detached_chapter_frames_reaps_child_and_preserves_sidecars()
 fn stale_marker_snapshot_does_not_resurrect_deleted_episode() {
     let tmp = tempfile::tempdir().unwrap();
     let (store, media_id, row, _library) = tv_episode(&tmp);
-    store.delete_ledger_path(&row.path).unwrap();
-    let updates = persist_marker(&store, &[row.clone()], fingerprint_marker(media_id), false).unwrap();
+    store
+        .delete_ledger_path(&row.file.path.display().to_string())
+        .unwrap();
+    let updates =
+        persist_marker(&store, &[row.clone()], fingerprint_marker(media_id), false).unwrap();
     assert!(updates.is_empty());
-    assert!(store.get_media_marker(media_id, Some(1), Some(1)).unwrap().is_none());
-    assert!(store.get_cached_chapters(&row.id.to_string()).unwrap().is_none());
+    assert!(
+        store
+            .get_media_marker(media_id, Some(1), Some(1))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get_cached_chapters(&row.file.file_id.to_string())
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
 fn marker_snapshot_cannot_follow_reimported_path_to_a_new_ledger_id() {
     let tmp = tempfile::tempdir().unwrap();
     let (store, media_id, row, _library) = tv_episode(&tmp);
-    store.delete_ledger_path(&row.path).unwrap();
+    store
+        .delete_ledger_path(&row.file.path.display().to_string())
+        .unwrap();
     let mut reimported = row.clone();
-    reimported.id = LedgerId::new();
-    store.insert_ledger(&reimported).unwrap();
-    let updates = persist_marker(&store, &[row.clone()], fingerprint_marker(media_id), false).unwrap();
+    reimported.file.file_id = LedgerId::new();
+    super::super::test_support::publish_into(&store, &mut reimported);
+    let updates =
+        persist_marker(&store, &[row.clone()], fingerprint_marker(media_id), false).unwrap();
     assert!(updates.is_empty());
-    assert!(store.get_media_marker(media_id, Some(1), Some(1)).unwrap().is_none());
-    assert!(store.get_cached_chapters(&reimported.id.to_string()).unwrap().is_none());
+    assert!(
+        store
+            .get_media_marker(media_id, Some(1), Some(1))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get_cached_chapters(&reimported.file.file_id.to_string())
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -351,11 +368,22 @@ fn frozen_marker_snapshot_does_not_publish_any_result() {
     let tmp = tempfile::tempdir().unwrap();
     let (store, media_id, row, owner) = tv_episode(&tmp);
     store.begin_library_removal(&owner.id).unwrap();
-    let updates = persist_marker(&store, &[row.clone()], fingerprint_marker(media_id), false).unwrap();
+    let updates =
+        persist_marker(&store, &[row.clone()], fingerprint_marker(media_id), false).unwrap();
     assert!(updates.is_empty());
-    assert!(store.get_media_marker(media_id, Some(1), Some(1)).unwrap().is_none());
-    assert!(store.get_cached_chapters(&row.id.to_string()).unwrap().is_none());
-    assert!(std::path::Path::new(&row.path).exists());
+    assert!(
+        store
+            .get_media_marker(media_id, Some(1), Some(1))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get_cached_chapters(&row.file.file_id.to_string())
+            .unwrap()
+            .is_none()
+    );
+    assert!(std::path::Path::new(&row.file.path).exists());
 }
 
 #[test]
@@ -363,20 +391,41 @@ fn marker_publication_skips_frozen_library_but_updates_live_copy() {
     let tmp = tempfile::tempdir().unwrap();
     let (store, media_id, row, frozen) = tv_episode(&tmp);
     let other = tempfile::tempdir().unwrap();
-    store.create_library(
-        MediaKind::Tv, "Live", &[other.path().to_str().unwrap()], "everyone", true, &[],
-    ).unwrap();
+    store
+        .create_library(
+            MediaKind::Tv,
+            "Live",
+            &[other.path().to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
     let mut live = row.clone();
-    live.id = LedgerId::new();
-    live.path = other.path().join("episode.strm").display().to_string();
-    std::fs::write(&live.path, "https://fixture.invalid/episode.mkv").unwrap();
-    store.insert_ledger(&live).unwrap();
+    live.file.file_id = LedgerId::new();
+    live.file.path = other.path().join("episode.strm");
+    std::fs::write(&live.file.path, "https://fixture.invalid/episode.mkv").unwrap();
+    super::super::test_support::publish_into(&store, &mut live);
     store.begin_library_removal(&frozen.id).unwrap();
     let updates = persist_marker(
-        &store, &[row.clone(), live.clone()], fingerprint_marker(media_id), false,
-    ).unwrap();
+        &store,
+        &[row.clone(), live.clone()],
+        fingerprint_marker(media_id),
+        false,
+    )
+    .unwrap();
     assert_eq!(updates.len(), 1);
-    assert_eq!(updates[0].0, live.id.to_string());
-    assert!(store.get_cached_chapters(&row.id.to_string()).unwrap().is_none());
-    assert!(store.get_cached_chapters(&live.id.to_string()).unwrap().is_some());
+    assert_eq!(updates[0].0, live.file.file_id.to_string());
+    assert!(
+        store
+            .get_cached_chapters(&row.file.file_id.to_string())
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get_cached_chapters(&live.file.file_id.to_string())
+            .unwrap()
+            .is_some()
+    );
 }

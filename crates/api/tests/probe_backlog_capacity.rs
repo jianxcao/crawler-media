@@ -16,6 +16,7 @@ use marker::fingerprint::capture_types::{
     CaptureFailure, CaptureMetrics, CaptureRequest, CapturedFingerprint, FingerprintCaptureEngine,
 };
 use marker::{AudioFingerprint, CommonSegment, FingerprintEngine};
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 const METADATA_PENDING: usize = 100_000;
 const FINGERPRINT_PENDING: usize = 100_000;
@@ -226,9 +227,10 @@ async fn full_fingerprint_window_does_not_lose_metadata_completion() {
         store
             .set_library_intro_settings(&library.id, true, true)
             .unwrap();
-        store
-            .insert_ledger(&domain::LedgerRow {
-                id: ledger_id,
+        publish_fixture_file(
+            &store,
+            &FixtureFile {
+                file_id: Some(ledger_id),
                 media_id,
                 path: video.to_string_lossy().into_owned(),
                 season: Some(1),
@@ -239,8 +241,10 @@ async fn full_fingerprint_window_does_not_lose_metadata_completion() {
                 quality_source: QualitySource::Release,
                 confidence: Confidence::High,
                 filter_score: None,
-            })
-            .unwrap();
+                ..Default::default()
+            },
+        )
+        .unwrap();
         store
             .put_file_meta_versioned(
                 &ledger_id.to_string(),

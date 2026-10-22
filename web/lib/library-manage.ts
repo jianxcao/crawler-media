@@ -10,7 +10,7 @@
  * 可见范围、首页排除、实时监控读库对象上的真实字段（access_mode 等）。
  */
 
-import type { ChapterJobProgress, MediaLibrary, ScanPhase } from "./api/libraries";
+import type { MediaLibrary, ScanPhase } from "./api/libraries";
 import { formatBytes } from "./format.ts";
 import type { LibraryKind } from "./media-types";
 
@@ -46,11 +46,6 @@ export interface LibraryStatusContext {
   relativeTime: (iso: string) => string;
 }
 
-function percentOf(processed: number, total: number): number | null {
-  if (total <= 0) return null;
-  return Math.min(100, Math.round((processed / total) * 100));
-}
-
 /**
  * 一行库的状态归类。
  *
@@ -67,22 +62,6 @@ export function libraryStatus(library: MediaLibrary, ctx: LibraryStatusContext):
     detail: "",
     percent: null,
   };
-}
-
-function chapterJobRunning(job: ChapterJobProgress): boolean {
-  return job.status === "running" || job.status === "cancelling";
-}
-
-/**
- * 「生成章节」菜单项与状态列共用的一句话：没作业时是动作名，有作业时如实
- * 说到哪了。列表接口没有章节作业进度，管理页传入 null 时显示动作名。
- */
-export function chapterJobLabel(job: ChapterJobProgress | null | undefined): string {
-  if (!job) return "生成章节";
-  if (job.stopping) return "正在停止生成章节";
-  if (!chapterJobRunning(job)) return "生成章节排队中";
-  const percent = percentOf(job.processed, job.total);
-  return percent === null ? "正在生成章节" : `正在生成章节 ${percent}%`;
 }
 
 /** 是否有长任务在跑。列表接口没有作业进度，恒 false。 */

@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
+use store::test_support::FixtureFile;
 use store::{ScanOperationStatus, Store};
 
-fn insert_ledger_row(store: &Store, path: &std::path::Path) {
+fn publish_fixture_row(store: &Store, path: &std::path::Path) {
     let media = Media {
         id: MediaId::new(),
         kind: MediaKind::Movie,
@@ -36,21 +37,21 @@ fn insert_ledger_row(store: &Store, path: &std::path::Path) {
             )
             .unwrap();
     }
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
-            media_id: media.id,
-            path: path.display().to_string(),
-            season: None,
-            episode: None,
-            resolution: None,
-            codec: None,
-            hdr: None,
-            quality_source: QualitySource::Release,
-            confidence: Confidence::High,
-            filter_score: None,
-        })
-        .unwrap();
+    let row = FixtureFile {
+        file_id: Some(LedgerId::new()),
+        media_id: media.id,
+        path: path.display().to_string(),
+        season: None,
+        episode: None,
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: None,
+        ..Default::default()
+    };
+    store::test_support::publish_fixture_file(store, &row).unwrap();
 }
 
 #[test]
@@ -227,7 +228,7 @@ fn scan_seen_requires_current_ledger_and_file_version() {
     );
 
     // 补上台账行且未 missing：版本一致时可以跳过。
-    insert_ledger_row(&store, &file);
+    publish_fixture_row(&store, &file);
     assert!(store.scan_seen_is_current(&op.id, &path).unwrap());
 
     // 内容变化（size 变）：必须重新处理。
@@ -261,7 +262,7 @@ fn strm_url_change_with_same_size_and_mtime_is_not_current() {
     let path = file.display().to_string();
 
     let op = store.enqueue_scan("lib1", "sig1", &[], 1000).unwrap();
-    insert_ledger_row(&store, &file);
+    publish_fixture_row(&store, &file);
     store.record_scan_seen(&op.id, &[file.clone()]).unwrap();
     assert!(
         store.scan_seen_is_current(&op.id, &path).unwrap(),
@@ -294,7 +295,7 @@ fn unknown_zero_version_checkpoint_is_not_current() {
 
     let op = store.enqueue_scan("lib1", "sig1", &[], 1000).unwrap();
     // 台账行存在，但文件读不到 metadata → 断点版本 0/0（等价于老断点行）。
-    insert_ledger_row(&store, &missing_file);
+    publish_fixture_row(&store, &missing_file);
     store
         .record_scan_seen(&op.id, &[missing_file.clone()])
         .unwrap();
@@ -433,7 +434,7 @@ fn ledger_source_version_survives_operation_checkpoint_clear() {
     let file = root.join("Movie (2024).strm");
     std::fs::write(&file, "https://a/video").unwrap();
     let path = file.display().to_string();
-    insert_ledger_row(&store, &file);
+    publish_fixture_row(&store, &file);
 
     // 首次处理：断点与 durable 版本一起写下。
     let op1 = store.enqueue_scan("lib1", "sig1", &[], 1000).unwrap();

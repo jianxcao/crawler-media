@@ -1,4 +1,5 @@
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
+use store::test_support::FixtureFile;
 use store::{FingerprintCacheEntry, Store};
 
 /// `file_details` has a foreign key to `library_files`, so a details fixture
@@ -28,8 +29,8 @@ fn seed_file(store: &Store, root: &std::path::Path, title: &str) -> String {
             &[],
         )
         .unwrap();
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let row = FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id: media.id,
         path: root.join(format!("{title}.mkv")).display().to_string(),
         season: None,
@@ -40,9 +41,10 @@ fn seed_file(store: &Store, root: &std::path::Path, title: &str) -> String {
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     };
-    store.insert_ledger(&row).unwrap();
-    row.id.to_string()
+    store::test_support::publish_fixture_file(store, &row).unwrap();
+    row.file_id.expect("fixture file id").to_string()
 }
 
 fn entry(cache_key: &str) -> FingerprintCacheEntry {

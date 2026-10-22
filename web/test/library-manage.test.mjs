@@ -4,7 +4,6 @@ import test from "node:test";
 import {
   accessLabel,
   accessRestricted,
-  chapterJobLabel,
   configNotes,
   filterIsActive,
   filterLibraries,
@@ -58,15 +57,9 @@ test("空闲态不带无法核实的时间信息", () => {
   assert.equal(libraryStatus(lib(), ctx).percent, null);
 });
 
-test("新契约：章节作业状态不再进状态列，菜单项文案保留同一口径", () => {
+test("新契约：章节作业状态不再进状态列", () => {
   const running = { status: "running", processed: 35, total: 100, stopping: false };
   assert.equal(libraryStatus(lib({ chapter_job: running }), ctx).kind, "idle");
-  assert.equal(chapterJobLabel(null), "生成章节");
-  assert.equal(chapterJobLabel({ status: "queued" }), "生成章节排队中");
-  assert.equal(chapterJobLabel(running), "正在生成章节 35%");
-  assert.equal(chapterJobLabel({ status: "cancelling", stopping: true }), "正在停止生成章节");
-  // 刚开始跑、还没统计出分母：不给百分比也不写 0 / 0
-  assert.equal(chapterJobLabel({ status: "running", processed: 0, total: 0 }), "正在生成章节");
 });
 
 test("根路径缺失算待处理；列表没有作业进度所以不算忙碌", () => {

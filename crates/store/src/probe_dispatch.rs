@@ -63,7 +63,7 @@ pub struct ProbeDispatchId {
 pub struct ProbeDispatchSnapshot {
     pub job: ProbeJob,
     pub unit: ProbeJobUnit,
-    pub row: domain::LedgerRow,
+    pub row: domain::FileCoverage,
     pub source_version: String,
 }
 
@@ -140,7 +140,12 @@ impl Store {
         let Some(job) = self.get_probe_job(&id.job_id)? else {
             return Ok(None);
         };
-        let Some(row) = self.get_ledger(&id.ledger_id)? else {
+        // `ProbeDispatchId` carries the raw ledger id as text；读路径只接受强类型，
+        // 转换失败与「该行不存在」在行为上等价（都是 `None`）。
+        let Some(file_id) = id.ledger_id.parse::<domain::LedgerId>().ok() else {
+            return Ok(None);
+        };
+        let Some(row) = self.file_coverage_by_id(file_id)? else {
             return Ok(None);
         };
         let source_version = self

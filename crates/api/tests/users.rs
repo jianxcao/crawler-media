@@ -9,6 +9,7 @@ use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use serde_json::{Value, json};
 use tower::ServiceExt;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 struct NoFetch;
 impl Fetcher for NoFetch {
@@ -182,9 +183,10 @@ fn playback_progress_is_isolated_per_user() {
     std::fs::create_dir_all(&library_root).unwrap();
     let file = library_root.join("The Matrix.mkv");
     std::fs::write(&file, b"x").unwrap();
-    store
-        .insert_ledger(&domain::LedgerRow {
-            id: domain::LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(domain::LedgerId::new()),
             media_id: media.id,
             path: file.display().to_string(),
             season: None,
@@ -195,8 +197,10 @@ fn playback_progress_is_isolated_per_user() {
             quality_source: domain::QualitySource::Probe,
             confidence: domain::Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let alice = UserId::new();
     let bob = UserId::new();
     store.set_playback_progress(alice, media.id, 1200).unwrap();

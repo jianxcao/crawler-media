@@ -3,13 +3,14 @@ use std::sync::Arc;
 
 use api::router;
 use axum::http::StatusCode;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{LedgerId, Media, MediaId, MediaKind};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::*;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 fn app(tmp: &tempfile::TempDir) -> axum::Router {
     let fetcher = Arc::new(Fixtures {
@@ -46,20 +47,18 @@ async fn admin_ended_session_does_not_resurrect_on_subsequent_progress_heartbeat
     std::fs::create_dir_all(movie_file.parent().unwrap()).unwrap();
     std::fs::write(&movie_file, b"video").unwrap();
 
-    let row = LedgerRow {
-        id: LedgerId::new(),
-        media_id: media.id,
-        path: movie_file.display().to_string(),
-        season: None,
-        episode: None,
-        resolution: Some("1080p".into()),
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
-    store.insert_ledger(&row).unwrap();
+    let file_id = LedgerId::new();
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(file_id),
+            media_id: media.id,
+            path: movie_file.display().to_string(),
+            resolution: Some("1080p".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let user_id = store.admin_user_id().unwrap();
     let device_id = "device-to-end";
     let session = super::playback::open_play_session(&app, &media.id.to_string(), device_id).await;
@@ -73,7 +72,7 @@ async fn admin_ended_session_does_not_resurrect_on_subsequent_progress_heartbeat
             Some("management-secret"),
             json!({
                 "media_item_id": media.id.to_string(),
-                "file_id": row.id.to_string(),
+                "file_id": file_id.to_string(),
                 "device_id": device_id,
                 "play_session_id": session,
                 "event": "start",
@@ -114,7 +113,7 @@ async fn admin_ended_session_does_not_resurrect_on_subsequent_progress_heartbeat
             Some("management-secret"),
             json!({
                 "media_item_id": media.id.to_string(),
-                "file_id": row.id.to_string(),
+                "file_id": file_id.to_string(),
                 "device_id": device_id,
                 "event": "timeupdate",
                 "position_ms": 2000,
@@ -139,7 +138,7 @@ async fn admin_ended_session_does_not_resurrect_on_subsequent_progress_heartbeat
             Some("management-secret"),
             json!({
                 "media_item_id": media.id.to_string(),
-                "file_id": row.id.to_string(),
+                "file_id": file_id.to_string(),
                 "device_id": device_id,
                 "event": "timeupdate",
                 "position_ms": 3000,
@@ -189,34 +188,26 @@ async fn borrowed_marker_clears_outro_and_does_not_cache_permanently() {
     std::fs::write(&ep1_file, b"ep1").unwrap();
     std::fs::write(&ep2_file, b"ep2").unwrap();
 
-    let row1 = LedgerRow {
-        id: LedgerId::new(),
-        media_id: media.id,
-        path: ep1_file.display().to_string(),
-        season: Some(1),
-        episode: Some(1),
-        resolution: Some("1080p".into()),
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
-    let row2 = LedgerRow {
-        id: LedgerId::new(),
-        media_id: media.id,
-        path: ep2_file.display().to_string(),
-        season: Some(1),
-        episode: Some(2),
-        resolution: Some("1080p".into()),
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
-    store.insert_ledger(&row1).unwrap();
-    store.insert_ledger(&row2).unwrap();
+    let ep1_id = LedgerId::new();
+    let ep2_id = LedgerId::new();
+    for (file_id, path, episode) in [
+        (ep1_id, ep1_file.display().to_string(), 1u32),
+        (ep2_id, ep2_file.display().to_string(), 2u32),
+    ] {
+        publish_fixture_file(
+            &store,
+            &FixtureFile {
+                file_id: Some(file_id),
+                media_id: media.id,
+                path,
+                season: Some(1),
+                episode: Some(episode),
+                resolution: Some("1080p".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
 
     // 在 Episode 1 写入完整的片头和片尾标记
     store
@@ -236,7 +227,7 @@ async fn borrowed_marker_clears_outro_and_does_not_cache_permanently() {
     // Episode 2 写入仅包含空 intro_start_ms 的初始缓存 (is_only_intro 状态)
     store
         .put_cached_chapters(
-            &row2.id.to_string(),
+            &ep2_id.to_string(),
             &[marker::ChapterMarker {
                 start_ms: 0,
                 end_ms: 10_000,
@@ -253,7 +244,7 @@ async fn borrowed_marker_clears_outro_and_does_not_cache_permanently() {
         .clone()
         .oneshot(request(
             "GET",
-            &format!("/api/v1/playback/chapters?file_id={}", row2.id),
+            &format!("/api/v1/playback/chapters?file_id={}", ep2_id),
             Some("management-secret"),
             Value::Null,
         ))
@@ -277,7 +268,7 @@ async fn borrowed_marker_clears_outro_and_does_not_cache_permanently() {
     // 验证：借用生成的内容绝不被永久写入数据库 put_cached_chapters，保留自愈能力 (G08)
     let store = api::Store::open(tmp.path().join("data")).unwrap();
     let ep2_persisted = store
-        .get_cached_chapters(&row2.id.to_string())
+        .get_cached_chapters(&ep2_id.to_string())
         .unwrap()
         .unwrap();
     assert_eq!(ep2_persisted.len(), 1, "借用的暂态章节标记不应永久覆盖缓存");

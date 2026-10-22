@@ -108,8 +108,20 @@ impl Store {
             let backdrop: Option<String> = r.get(28)?;
             let still: Option<String> = r.get(29)?;
 
-            let presence = FilePresence::from_str(&presence_str).unwrap_or(FilePresence::Present);
-            let publication = FilePublication::from_str(&pub_str).unwrap_or(FilePublication::Published);
+            let presence = FilePresence::from_str(&presence_str).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    7,
+                    rusqlite::types::Type::Text,
+                    format!("unknown file presence '{presence_str}' for file_id {file_id}").into(),
+                )
+            })?;
+            let publication = FilePublication::from_str(&pub_str).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    8,
+                    rusqlite::types::Type::Text,
+                    format!("unknown file publication '{pub_str}' for file_id {file_id}").into(),
+                )
+            })?;
             let quality_source = match qs_str.as_str() {
                 "probe" => QualitySource::Probe,
                 _ => QualitySource::Release,

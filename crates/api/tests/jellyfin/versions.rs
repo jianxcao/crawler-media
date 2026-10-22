@@ -18,23 +18,30 @@ async fn listing(app: &axum::Router, uri: &str) -> Value {
     json(response).await
 }
 
-fn insert_version(store: &Store, media_id: MediaId, path: &Path, id: &str, unit: (Option<u32>, Option<u32>)) {
+fn insert_version(
+    store: &Store,
+    media_id: MediaId,
+    path: &Path,
+    id: &str,
+    unit: (Option<u32>, Option<u32>),
+) {
     std::fs::write(path, b"version").unwrap();
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::from_str(id).unwrap(),
-            media_id,
-            path: path.display().to_string(),
-            season: unit.0,
-            episode: unit.1,
-            resolution: None,
-            codec: None,
-            hdr: None,
-            quality_source: QualitySource::Probe,
-            confidence: Confidence::High,
-            filter_score: None,
-        })
-        .unwrap();
+    let spec = store::test_support::FixtureFile {
+        media_id,
+        path: path.display().to_string(),
+        season: unit.0,
+        episode: unit.1,
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Probe,
+        confidence: Confidence::High,
+        filter_score: None,
+        transfer_mode: None,
+        source_path: None,
+        file_id: Some(LedgerId::from_str(id).unwrap()),
+    };
+    store::test_support::publish_fixture_file(store, &spec).unwrap();
 }
 
 fn router_for(store: Store, dir: &Path) -> axum::Router {
@@ -83,8 +90,20 @@ fn duplicate_movie(dir: &Path, newer: Option<&str>) -> (axum::Router, MediaId, S
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
-    insert_version(&store, media.id, &root.join("first.mkv"), FIRST, (None, None));
-    insert_version(&store, media.id, &root.join("second.mkv"), SECOND, (None, None));
+    insert_version(
+        &store,
+        media.id,
+        &root.join("first.mkv"),
+        FIRST,
+        (None, None),
+    );
+    insert_version(
+        &store,
+        media.id,
+        &root.join("second.mkv"),
+        SECOND,
+        (None, None),
+    );
     if let Some(name) = newer {
         let file_id = if name == "first.mkv" { FIRST } else { SECOND };
         rusqlite::Connection::open(dir.join("data/library.db"))
@@ -102,7 +121,11 @@ fn duplicate_movie(dir: &Path, newer: Option<&str>) -> (axum::Router, MediaId, S
 async fn duplicate_physical_versions_collapse_to_one_logical_item() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, media_id, library_id) = duplicate_movie(tmp.path(), None);
-    let body = listing(&app, &format!("/Items?ParentId={library_id}&Recursive=true")).await;
+    let body = listing(
+        &app,
+        &format!("/Items?ParentId={library_id}&Recursive=true"),
+    )
+    .await;
 
     assert_eq!(body["TotalRecordCount"], 1, "{body}");
     let items = body["Items"].as_array().unwrap();
@@ -119,7 +142,11 @@ async fn duplicate_physical_versions_collapse_to_one_logical_item() {
 async fn newest_physical_revision_is_the_kept_source() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, media_id, library_id) = duplicate_movie(tmp.path(), Some("second.mkv"));
-    let body = listing(&app, &format!("/Items?ParentId={library_id}&Recursive=true")).await;
+    let body = listing(
+        &app,
+        &format!("/Items?ParentId={library_id}&Recursive=true"),
+    )
+    .await;
 
     assert_eq!(body["TotalRecordCount"], 1, "{body}");
     assert_eq!(body["Items"][0]["Id"], work_id(media_id));
@@ -179,7 +206,10 @@ async fn duplicate_episode_versions_collapse_to_one_unit_item() {
     let app = router_for(store, tmp.path());
     let body = listing(
         &app,
-        &format!("/Items?ParentId={}&Recursive=true&IncludeItemTypes=Episode", library.id),
+        &format!(
+            "/Items?ParentId={}&Recursive=true&IncludeItemTypes=Episode",
+            library.id
+        ),
     )
     .await;
 

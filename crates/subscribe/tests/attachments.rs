@@ -1,5 +1,4 @@
 use std::fs;
-use std::path::Path;
 
 use domain::{
     AtomRule, Coverage, FetchMode, Filter, FilterAtom, FilterId, Media, MediaId, MediaKind, SiteId,
@@ -115,8 +114,8 @@ fn attachments_are_not_treated_as_video() {
     })
     .unwrap();
 
-    // 没有视频文件 → 什么都不入库，ledger 为空、无事实。
-    assert!(outcome.ledger.is_empty());
+    // 没有视频文件 → 什么都不入库，无已发布文件、无事实。
+    assert!(outcome.files.is_empty());
     assert!(outcome.facts.movie().is_none());
     assert!(
         library_root

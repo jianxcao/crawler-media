@@ -1,4 +1,4 @@
-use domain::{LedgerRow, LibraryFile, Media, MediaKind, TypedItemId, UnitKey, UserId};
+use domain::{LibraryFile, Media, MediaKind, TypedItemId, UnitKey, UserId};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -51,7 +51,7 @@ pub struct MediaItemSnapshot {
     /// The published, present source file this entry plays. Public item
     /// identity is the logical target, never this file id.
     pub file: LibraryFile,
-    pub row: LedgerRow,
+    pub unit: Option<UnitKey>,
     pub media: Media,
     pub ticks: i64,
     pub play_count: i64,
@@ -105,14 +105,14 @@ impl MediaItemSnapshot {
     /// the item id — the physical file id is never an item identity.
     pub fn item_identity(&self) -> TypedItemId {
         match (self.media.kind, self.is_series) {
-            (MediaKind::Tv, false) => match (self.row.season, self.row.episode) {
-                (Some(season), Some(episode)) => TypedItemId::Unit {
+            (MediaKind::Tv, false) => match self.unit {
+                Some(key) => TypedItemId::Unit {
                     media: self.media.id,
-                    key: UnitKey::new(season as i32, episode as i32),
+                    key,
                 },
                 // Degenerate TV row without unit coverage: the whole work unit,
                 // never a fabricated `(0, 0)` coordinate.
-                _ => TypedItemId::Unit {
+                None => TypedItemId::Unit {
                     media: self.media.id,
                     key: UnitKey::WHOLE,
                 },
@@ -310,22 +310,22 @@ pub trait MediaServerProvider: Send + Sync + 'static {
         query::legacy_next_up(self, user_id, series_id, offset, limit).await
     }
 
-    async fn list_resumable_items(
+    /// 续播页：按「最近观看倒序、每个 Media 只出第一条」选出完整条数与请求页。
+    ///
+    /// 默认实现用一次 `list_visible_items` 过滤后取页，**不承诺有界**；生产 provider
+    /// 覆盖它，在 store 的一次短读里完成过滤与分页。
+    async fn resumable_items_page(
         &self,
         user_id: UserId,
+        offset: usize,
         limit: usize,
-    ) -> Result<Vec<MediaItemSnapshot>, String> {
+    ) -> Result<ServerItemPage, String> {
         let items = self.list_visible_items(user_id, None).await?;
-        let mut resumable = Vec::new();
-        for item in items {
-            if item.ticks > 0 && !item.played {
-                resumable.push(item);
-                if resumable.len() >= limit {
-                    break;
-                }
-            }
-        }
-        Ok(resumable)
+        let resumable: Vec<MediaItemSnapshot> = items
+            .into_iter()
+            .filter(|item| item.ticks > 0 && !item.played)
+            .collect();
+        Ok(ServerItemPage::from_rows(resumable, offset, limit))
     }
     async fn resolve_single_item(
         &self,
@@ -441,13 +441,6 @@ pub trait MediaServerProvider: Send + Sync + 'static {
         favorite: Option<bool>,
     ) -> Result<bool, String>;
 
-    async fn update_progress(
-        &self,
-        user_id: UserId,
-        id: &str,
-        position_ms: i64,
-        paused: bool,
-    ) -> Result<(), String>;
     async fn issue_play_session(
         &self,
         user_id: UserId,
@@ -464,7 +457,5 @@ pub trait MediaServerProvider: Send + Sync + 'static {
         _client: PlaybackClientInfo,
         _event: PlaybackEvent,
         _identity: PlaybackEventIdentity,
-    ) -> Result<(), String> {
-        self.update_progress(user_id, id, position_ms, paused).await
-    }
+    ) -> Result<(), String>;
 }

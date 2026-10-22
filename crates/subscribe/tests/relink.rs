@@ -122,8 +122,6 @@ fn transfer_once(
             facts: SubscribeFacts::default(),
             files: vec![],
             file_sources: vec![],
-            ledger: vec![],
-            ledger_sources: vec![],
             removed_paths: vec![],
             completed: false,
             transferred_enclosures: vec![],
@@ -162,9 +160,9 @@ fn deleted_library_file_is_not_auto_restored() {
         SubscribeFacts::default(),
         &library_root,
     );
-    assert_eq!(outcome.ledger.len(), 1);
-    let dest = outcome.ledger[0].path.clone();
-    assert!(Path::new(&dest).exists());
+    assert_eq!(outcome.files.len(), 1);
+    let dest = outcome.files[0].file.path.clone();
+    assert!(dest.exists());
 
     // 用户删除库文件。
     fs::remove_file(&dest).unwrap();
@@ -172,6 +170,6 @@ fn deleted_library_file_is_not_auto_restored() {
     // 同样的种子再次进入收集：facts 仍指向该路径 → 跳过，不自动恢复。
     let second = transfer_once(&dl, &filter, &media, &sub, &t, outcome.facts, &library_root);
     assert!(!Path::new(&dest).exists(), "删除的库文件不得被自动恢复");
-    assert!(second.ledger.is_empty(), "不得重新转存已删除的文件");
+    assert!(second.files.is_empty(), "不得重新转存已删除的文件");
     assert!(second.transferred_enclosures.is_empty());
 }

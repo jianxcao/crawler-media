@@ -9,7 +9,7 @@
 3. **目标合同：** [存储设计](superpowers/specs/2026-10-18-library-storage-redesign.md)、[接口/字段合同](superpowers/plans/2026-10-18-library-storage-contracts.md)、[来源缓存合同](superpowers/specs/2026-10-18-source-separated-cache.md)。规范不因未实现而放宽，不与当前事实混写。
 4. **现行结构：** [五文件数据库字典](database/README.md)。唯一可执行DDL在生产源码，docs不保留第二份SQL草案。
 5. **证据：** [存储复审与历史烟测](benchmarks/2026-10-18-library-storage.md)；旧审计/benchmark只对其明确版本和场景负责。
-6. **运行/API：** [deploy](deploy.md)、[自有API约定](api-contracts/self.md)；完整路由以 [HTTP router](../crates/api/src/http/mod.rs) 与 `web/lib/api/*` 为准。typed逻辑ID/物理源/UUID DTO不同，不保留旧数据兼容。
+6. **运行/API：** [deploy](deploy.md)、[自有API约定](api-contracts/self.md)；完整路由以 [HTTP router](../crates/api/src/http/mod.rs) 与 [路由表](../crates/api/src/http/routes/mod.rs)、`web/lib/api/*` 为准。typed逻辑ID/物理源/UUID DTO不同，不保留旧数据兼容。
 7. **验收清单：** [system regression](testing/system-regression-cases.md)是场景清单，不是已运行证明。设备、NAS、规模未测须明确Not run。
 
 ## 权威与保留规则

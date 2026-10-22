@@ -15,12 +15,12 @@
 //! and no session is closed. This is what keeps a late event for a replaced source, or for
 //! another episode of the same file, from leaking into the wrong unit or session.
 
-use domain::{MediaId, TypedItemId, UnitKey, UserId};
-use rusqlite::{OptionalExtension, Transaction, params};
+use domain::{MediaId, TypedItemId, UnitKey};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::types::{BoundPlaybackEvent, EventOutcome, PlaybackEventType};
 use super::user_summary::SummaryScope;
-use super::{PlayLogRow, SessionRow, Store, StoreError, UnitState};
+use super::{PlayLogRow, Store, StoreError, UnitState};
 
 /// What the session was issued for.
 struct IssuedBinding {
@@ -35,6 +35,11 @@ struct IssuedBinding {
     season: i32,
     episode: i32,
 }
+
+/// How long after an admin ends a device's playback a later heartbeat still counts as
+/// belonging to the ended session. Same window the HTTP route used before this guard moved
+/// into the transaction that owns the session state.
+const ADMIN_ENDED_WINDOW_SECS: i64 = 10;
 
 /// Watch unit coordinates of a logical item.
 fn playback_unit(item: &TypedItemId) -> (MediaId, UnitKey) {
@@ -56,47 +61,34 @@ impl Store {
         now_ms: i64,
     ) -> Result<EventOutcome, StoreError> {
         let (media_id, unit) = playback_unit(&event.item);
-        let tx = self.library.unchecked_transaction()?;
+        self.ensure_owns_transaction()?;
+        // `&self` only: `Store::library` is not reachable as `&mut` here, so ask rusqlite for
+        // the IMMEDIATE lock directly instead of `Connection::transaction_with_behavior`.
+        let tx = Transaction::new_unchecked(&self.library, TransactionBehavior::Immediate)?;
         let Some(binding) = read_binding(&tx, event)? else {
-            // Legacy clients never issued a session id: they still report progress, so the
-            // unit facts are written, but no session state is invented for them. Once a
-            // session *was* issued, the checks below decide and a mismatch writes nothing.
-            if !source_still_current(&tx, event)? {
+            if !stage_unbound_event(self, &tx, event, media_id, unit, now_ms)? {
                 return Ok(EventOutcome::IgnoredStale);
             }
-            tracing::debug!(
-                user_id = %event.user_id,
-                device_id = %event.device_id,
-                session_id = %event.session_id,
-                "unbound playback event: writing unit facts only"
-            );
-            write_unit_facts(self, &tx, event, media_id, unit, now_ms)?;
-            self.refresh_user_library_summary(
-                event.user_id,
-                media_id,
-                SummaryScope::for_unit(unit.season, unit.episode),
-            )?;
             tx.commit()?;
             return Ok(EventOutcome::Applied);
         };
-        if !binding_matches(&binding, event, media_id, unit) {
-            tracing::debug!(
-                session_id = %event.session_id,
-                generation = event.generation,
-                "playback event does not match its issued binding"
-            );
+        if stale_bound_event(self, &tx, event, &binding, media_id, unit)? {
             return Ok(EventOutcome::IgnoredStale);
         }
-        if !source_still_current(&tx, event)? {
+        // An admin ended this device's playback: a later event must not resurrect the session
+        // nor write unit facts, it archives the live row instead. `Applied` (not
+        // `IgnoredStale`) because this event *is* handled — it ends the session, which is a
+        // write; `IgnoredStale` stays reserved for events that write nothing.
+        if admin_ended_session(self, event, now_ms)?
+            && event.event_type != PlaybackEventType::Stopped
+        {
+            archive_admin_ended_session(&tx, event, &binding, now_ms)?;
+            tx.commit()?;
             tracing::debug!(
                 session_id = %event.session_id,
-                file_id = %event.source_id.file_id,
-                "playback event for a replaced source ignored"
+                "playback event for an admin-ended session closed without unit writes"
             );
-            return Ok(EventOutcome::IgnoredStale);
-        }
-        if !library_still_readable(&tx, self, event, &binding)? {
-            return Ok(EventOutcome::IgnoredStale);
+            return Ok(EventOutcome::Applied);
         }
         // Starting or progressing activates exactly this session; a session already closed by
         // a newer generation on the same device is refused instead of being reused.
@@ -107,6 +99,9 @@ impl Store {
         }
 
         write_unit_facts(self, &tx, event, media_id, unit, now_ms)?;
+        if event.event_type == PlaybackEventType::Stopped {
+            bump_play_count_for_completed_stop(self, &tx, event, media_id, unit)?;
+        }
         advance_session_state(self, &tx, event, &binding, now_ms)?;
 
         self.refresh_user_library_summary(
@@ -123,6 +118,129 @@ impl Store {
         );
         Ok(EventOutcome::Applied)
     }
+
+    /// Refuse to commit when the caller already holds a transaction.
+    ///
+    /// Exactly one IMMEDIATE transaction: a nested BEGIN is rejected by SQLite (`cannot start
+    /// a transaction within a transaction`), and the old heartbeat route swallowed that error
+    /// and kept writing through the legacy helpers, so an event committed by nobody.
+    /// Same rule as the reuse guard in `playback.rs` `playback_write`.
+    fn ensure_owns_transaction(&self) -> Result<(), StoreError> {
+        if !self.library.is_autocommit() {
+            return Err(StoreError::Invalid(
+                "commit_playback_event must own its IMMEDIATE transaction".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Legacy clients never issued a session id: they still report progress, so the unit facts are
+/// written, but no session state is invented for them. Once a session *was* issued, the bound
+/// guards decide and a mismatch writes nothing.
+///
+/// Returns `true` when the caller must commit, `false` when the event is stale and nothing was
+/// written.
+fn stage_unbound_event(
+    store: &Store,
+    tx: &Transaction<'_>,
+    event: &BoundPlaybackEvent,
+    media_id: MediaId,
+    unit: UnitKey,
+    now_ms: i64,
+) -> Result<bool, StoreError> {
+    if !source_still_current(tx, event)? {
+        return Ok(false);
+    }
+    // Same admin-ended invariant, but an unbound event has no issued binding to archive the
+    // live row with, so it only refuses to write.
+    if admin_ended_session(store, event, now_ms)? {
+        tracing::debug!(
+            device_id = %event.device_id,
+            "unbound playback event for an admin-ended session ignored"
+        );
+        return Ok(false);
+    }
+    tracing::debug!(
+        user_id = %event.user_id,
+        device_id = %event.device_id,
+        session_id = %event.session_id,
+        "unbound playback event: writing unit facts only"
+    );
+    write_unit_facts(store, tx, event, media_id, unit, now_ms)?;
+    store.refresh_user_library_summary(
+        event.user_id,
+        media_id,
+        SummaryScope::for_unit(unit.season, unit.episode),
+    )?;
+    Ok(true)
+}
+
+/// Guards for an event whose session id was issued: it must describe the generation, unit and
+/// source the session was issued for, and that source and the library must still be readable.
+///
+/// Returns `true` when the event must be ignored as stale (nothing written).
+fn stale_bound_event(
+    store: &Store,
+    tx: &Transaction<'_>,
+    event: &BoundPlaybackEvent,
+    binding: &IssuedBinding,
+    media_id: MediaId,
+    unit: UnitKey,
+) -> Result<bool, StoreError> {
+    if !binding_matches(binding, event, media_id, unit) {
+        tracing::debug!(
+            session_id = %event.session_id,
+            generation = event.generation,
+            "playback event does not match its issued binding"
+        );
+        return Ok(true);
+    }
+    if !source_still_current(tx, event)? {
+        tracing::debug!(
+            session_id = %event.session_id,
+            file_id = %event.source_id.file_id,
+            "playback event for a replaced source ignored"
+        );
+        return Ok(true);
+    }
+    Ok(!library_still_readable(tx, store, event, binding)?)
+}
+
+/// Close the issued session of an admin-ended device without writing any unit fact.
+fn archive_admin_ended_session(
+    tx: &Transaction<'_>,
+    event: &BoundPlaybackEvent,
+    binding: &IssuedBinding,
+    now_ms: i64,
+) -> Result<(), StoreError> {
+    tx.execute(
+        "UPDATE playback_session_ids SET state = 'closed'
+         WHERE user_id = ?1 AND device_id = ?2 AND play_session_id = ?3",
+        params![event.user_id.to_string(), event.device_id, event.session_id],
+    )?;
+    close_live_session(tx, event, binding, now_ms)
+}
+
+/// A completed stop is the only event that counts as one play.
+fn bump_play_count_for_completed_stop(
+    store: &Store,
+    tx: &Transaction<'_>,
+    event: &BoundPlaybackEvent,
+    media_id: MediaId,
+    unit: UnitKey,
+) -> Result<(), StoreError> {
+    let previous_unit = store.unit_state(event.user_id, media_id, unit.season, unit.episode)?;
+    let duration = event
+        .duration_ms
+        .or(previous_unit.as_ref().and_then(|u| u.duration_ms));
+    if UnitState::playback_completed(event.position_ms, duration) {
+        tx.execute(
+            "UPDATE playback_units SET play_count = play_count + 1 WHERE user_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4",
+            params![event.user_id.to_string(), media_id.to_string(), unit.season, unit.episode],
+        )?;
+    }
+    Ok(())
 }
 
 fn read_binding(
@@ -135,11 +253,7 @@ fn read_binding(
                     config_revision, media_id, season, episode
              FROM playback_session_ids
              WHERE user_id = ?1 AND device_id = ?2 AND play_session_id = ?3",
-            params![
-                event.user_id.to_string(),
-                event.device_id,
-                event.session_id
-            ],
+            params![event.user_id.to_string(), event.device_id, event.session_id],
             |r| {
                 Ok(IssuedBinding {
                     generation: r.get(0)?,
@@ -319,6 +433,31 @@ fn write_unit_facts(
     Ok(())
 }
 
+/// Did an admin end this device's playback, so a later event must not restart it?
+///
+/// Two sources, both owned by the store: the live row may still be flagged `admin_ended` (the
+/// admin ended it while it was live), or the archived play log left the device marker behind
+/// within [`ADMIN_ENDED_WINDOW_SECS`]. A `start` is a *new* session and stays allowed unless
+/// the live row is still flagged; this mirrors the guard the HTTP route ran before calling
+/// the store, now inside the transaction that owns the session state.
+fn admin_ended_session(
+    store: &Store,
+    event: &BoundPlaybackEvent,
+    now_ms: i64,
+) -> Result<bool, StoreError> {
+    let flagged = store
+        .get_session(event.user_id, &event.device_id)?
+        .is_some_and(|session| session.admin_ended);
+    let marker = event.event_type != PlaybackEventType::Playing
+        && store.device_was_admin_ended(
+            event.user_id,
+            &event.device_id,
+            now_ms / 1000,
+            ADMIN_ENDED_WINDOW_SECS,
+        )?;
+    Ok(flagged || marker)
+}
+
 fn close_live_session(
     tx: &Transaction<'_>,
     event: &BoundPlaybackEvent,
@@ -415,6 +554,29 @@ fn advance_session_state(
     now_ms: i64,
 ) -> Result<(), StoreError> {
     let previous = store.get_session(event.user_id, &event.device_id)?;
+    if event.event_type == PlaybackEventType::Stopped {
+        // A `Stop` carries the final position: record it on the live row before archiving, so
+        // the play log ends where playback actually stopped instead of at the last heartbeat,
+        // and this last heartbeat's watch time is still claimed.
+        if let Some(session) = previous.as_ref() {
+            let watched_ms =
+                session
+                    .watched_ms
+                    .saturating_add(watch_increment(Some(session), event, now_ms));
+            tx.execute(
+                "UPDATE playback_sessions
+                 SET position_ms = ?3, paused = 1, watched_ms = ?4, last_report_at_ms = ?5
+                 WHERE user_id = ?1 AND device_id = ?2",
+                params![
+                    event.user_id.to_string(),
+                    event.device_id,
+                    event.position_ms,
+                    watched_ms,
+                    now_ms
+                ],
+            )?;
+        }
+    }
     if event.event_type == PlaybackEventType::Stopped
         || previous.as_ref().is_some_and(|s| s.admin_ended)
     {
@@ -457,23 +619,27 @@ fn upsert_live_session(
         .map(|session| session.watched_ms)
         .unwrap_or(0)
         + watch_increment(previous.as_ref(), event, now_ms);
-    let play_method = previous
-        .as_ref()
-        .map(|session| session.play_method.clone())
+    let play_method = event
+        .play_method
+        .clone()
+        .or_else(|| previous.as_ref().map(|session| session.play_method.clone()))
         .unwrap_or_else(|| "local".to_string());
     let (media_id, unit) = playback_unit(&event.item);
     tx.execute(
         "INSERT INTO playback_sessions
-            (user_id, device_id, media_id, season, episode, client, play_method, position_ms,
-             start_position_ms, duration_ms, paused, watched_ms, rate_bps, started_at,
-             last_report_at, file_id, file_revision, source_version, library_id,
+            (user_id, device_id, media_id, season, episode, client, device_name, client_version,
+             play_method, position_ms, start_position_ms, duration_ms, paused, watched_ms, rate_bps,
+             started_at, last_report_at, file_id, file_revision, source_version, library_id,
              config_revision, timeline_mode, play_session_id, generation, last_report_at_ms,
              last_event_sequence)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                 ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
+                 ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)
          ON CONFLICT(user_id, device_id) DO UPDATE SET
             media_id = excluded.media_id, season = excluded.season, episode = excluded.episode,
             client = COALESCE(excluded.client, playback_sessions.client),
+            device_name = COALESCE(excluded.device_name, playback_sessions.device_name),
+            client_version = COALESCE(excluded.client_version, playback_sessions.client_version),
+            play_method = excluded.play_method,
             position_ms = excluded.position_ms, duration_ms = excluded.duration_ms,
             paused = excluded.paused, watched_ms = excluded.watched_ms,
             rate_bps = excluded.rate_bps,
@@ -492,6 +658,8 @@ fn upsert_live_session(
             unit.season,
             unit.episode,
             event.client,
+            event.device_name,
+            event.client_version,
             play_method,
             event.position_ms,
             start_position_ms,
@@ -518,11 +686,21 @@ fn upsert_live_session(
 
 /// Watch time this heartbeat may claim: elapsed wall time, capped by the position advance so a
 /// seek never counts as watching.
-fn watch_increment(previous: Option<&super::SessionRow>, event: &BoundPlaybackEvent, now_ms: i64) -> i64 {
+///
+/// A paused sample claims nothing: neither when the row was already paused, nor when this event
+/// itself reports the pause, unless the event is the `Stop` that carries the final position.
+fn watch_increment(
+    previous: Option<&super::SessionRow>,
+    event: &BoundPlaybackEvent,
+    now_ms: i64,
+) -> i64 {
     let Some(previous) = previous else {
         return 0;
     };
-    if previous.paused || previous.last_report_at_ms <= 0 {
+    if previous.paused
+        || previous.last_report_at_ms <= 0
+        || (event.paused && event.event_type != PlaybackEventType::Stopped)
+    {
         return 0;
     }
     let elapsed = (now_ms - previous.last_report_at_ms).clamp(0, 30_000);
@@ -540,8 +718,4 @@ fn watch_increment(previous: Option<&super::SessionRow>, event: &BoundPlaybackEv
         return 0;
     }
     elapsed.min((advance as f64 / rate) as i64).max(0)
-}
-
-fn binding_library_placeholder() -> String {
-    String::new()
 }

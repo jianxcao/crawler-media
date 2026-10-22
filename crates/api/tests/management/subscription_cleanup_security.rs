@@ -5,13 +5,14 @@ use std::sync::Arc;
 
 use api::{Store, router};
 use axum::http::StatusCode;
-use domain::{Confidence, LedgerId, LedgerRow, MediaId, QualitySource};
+use domain::{Confidence, LedgerId, MediaId, QualitySource};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::{Fixtures, json_body, request, state};
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 fn app(tmp: &tempfile::TempDir) -> axum::Router {
     router(state(
@@ -109,9 +110,10 @@ async fn failed_file_cleanup_keeps_subscription_for_retry() {
     let root = store.library_root(domain::MediaKind::Movie).unwrap();
     let blocked = root.join("directory-cannot-be-removed-as-file");
     std::fs::create_dir_all(&blocked).unwrap();
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id,
             path: blocked.display().to_string(),
             season: None,
@@ -122,8 +124,10 @@ async fn failed_file_cleanup_keeps_subscription_for_retry() {
             quality_source: QualitySource::Probe,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     let failed = app
         .clone()

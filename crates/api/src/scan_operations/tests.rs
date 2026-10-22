@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, FileCoverage, Media, MediaId, MediaKind, QualitySource};
 use store::ScanOperation;
 
 use super::*;
@@ -69,7 +69,7 @@ impl Fixture {
         scan_scope_signature(&library)
     }
 
-    fn insert_media_and_ledger(&self, rel_path: &str) -> (MediaId, LedgerRow) {
+    fn insert_media_and_ledger(&self, rel_path: &str) -> (MediaId, FileCoverage) {
         let media = Media {
             id: MediaId::new(),
             kind: MediaKind::Movie,
@@ -83,24 +83,20 @@ impl Fixture {
             bangumi_id: None,
             anilist_id: None,
         };
-        let row = LedgerRow {
-            id: LedgerId::new(),
+        let path = self.root.join(rel_path).to_str().unwrap().to_string();
+        let spec = store::test_support::FixtureFile {
             media_id: media.id,
-            path: self.root.join(rel_path).to_str().unwrap().to_string(),
-            season: None,
-            episode: None,
-            resolution: None,
-            codec: None,
-            hdr: None,
+            path: path.clone(),
             quality_source: QualitySource::Release,
             confidence: Confidence::High,
-            filter_score: None,
+            ..Default::default()
         };
         let store = self.state.store();
         let guard = store.lock();
         guard.insert_media(&media).unwrap();
-        guard.insert_ledger(&row).unwrap();
-        (media.id, row)
+        store::test_support::publish_fixture_file(&guard, &spec).unwrap();
+        let coverage = guard.file_coverage_by_path(&path).unwrap().unwrap();
+        (media.id, coverage)
     }
 
     async fn wait_terminal(&self, op_id: &str) -> ScanOperation {
@@ -303,11 +299,11 @@ async fn dirty_event_during_round_requeues_with_cumulative_report() {
         done.report
     );
     assert_eq!(done.report["inserted"], 1, "{}", done.report);
-    let rows = fix.state.store().lock().list_ledger().unwrap();
+    let rows = fix.state.store().lock().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 2);
     assert!(rows
         .iter()
-        .any(|row| row.path.ends_with("Movie2 (2024).mkv")));
+        .any(|row| row.file.path.ends_with("Movie2 (2024).mkv")));
 }
 
 /// P2-4：准入通过之后、scope 捕获之前 PATCH roots，旧 operation 必须取消且零登记。
@@ -360,7 +356,7 @@ async fn scope_change_between_admission_and_capture_cancels_without_ledgering() 
         done.report
     );
     assert!(
-        fix.state.store().lock().list_ledger().unwrap().is_empty(),
+        fix.state.store().lock().list_file_coverage().unwrap().is_empty(),
         "取消的 operation 不得登记任何文件"
     );
 }
@@ -554,7 +550,7 @@ async fn requeued_failed_round_keeps_bounded_failure_history() {
     // 第一轮已提交的前缀 + 第二轮的成功轮，都要在累计计数里。
     assert_eq!(done.report["scanned"], 2, "{}", done.report);
     assert_eq!(done.report["inserted"], 1, "{}", done.report);
-    assert_eq!(fix.state.store().lock().list_ledger().unwrap().len(), 1);
+    assert_eq!(fix.state.store().lock().list_file_coverage().unwrap().len(), 1);
 }
 
 /// P3-3：chunk 已提交 ledger 后失败，失败报告必须带上该 chunk 的已提交前缀。
@@ -603,7 +599,7 @@ async fn chunk_failure_after_ledger_commit_reports_its_prefix() {
         done.report
     );
     assert_eq!(
-        fix.state.store().lock().list_ledger().unwrap().len(),
+        fix.state.store().lock().list_file_coverage().unwrap().len(),
         1,
         "ledger 已提交，报告必须承认这段前缀"
     );
@@ -636,7 +632,7 @@ fn missing_operation_fails_closed_without_ledgering() {
         Ok(_) => panic!("无法对账的 operation 不得放行"),
     }
     assert!(
-        fix.state.store().lock().list_ledger().unwrap().is_empty(),
+        fix.state.store().lock().list_file_coverage().unwrap().is_empty(),
         "失败关闭时不得登记任何文件"
     );
 }
@@ -691,7 +687,7 @@ async fn video_scope_change_between_admission_and_capture_cancels_without_ledger
         done.report
     );
     assert!(
-        fix.state.store().lock().list_ledger().unwrap().is_empty(),
+        fix.state.store().lock().list_file_coverage().unwrap().is_empty(),
         "取消的 Video operation 不得登记任何文件"
     );
 }
@@ -715,7 +711,7 @@ async fn invalidation_failure_does_not_advance_durable_source_version() {
     let done1 = fix.wait_terminal(&op1.id).await;
     assert_eq!(done1.status, ScanOperationStatus::Completed);
 
-    let row = fix.state.store().lock().ledger_by_path(&file.display().to_string()).unwrap().unwrap();
+    let row = fix.state.store().lock().file_coverage_by_path(&file.display().to_string()).unwrap().unwrap();
     // 写入派生事实（file_details）
     let tracks = library::Tracks {
         video: Some(library::VideoTrack {
@@ -725,8 +721,8 @@ async fn invalidation_failure_does_not_advance_durable_source_version() {
         audio: Vec::new(),
         subtitles: Vec::new(),
     };
-    fix.state.store().lock().put_file_meta(&row.id.to_string(), &tracks).unwrap();
-    assert!(fix.state.store().lock().get_file_meta(&row.id.to_string()).unwrap().is_some());
+    fix.state.store().lock().put_file_meta(&row.file.file_id.to_string(), &tracks).unwrap();
+    assert!(fix.state.store().lock().get_file_meta(&row.file.file_id.to_string()).unwrap().is_some());
 
     // 修改文件内容和 mtime
     std::fs::write(&file, b"modified-content").unwrap();
@@ -758,7 +754,7 @@ async fn invalidation_failure_does_not_advance_durable_source_version() {
     let versions = fix.state.store().lock().ledger_source_versions(&[file.display().to_string()]).unwrap();
     let (_v_ms, v_size, _) = versions.get(&file.display().to_string()).cloned().unwrap();
     assert_eq!(v_size, b"initial".len() as i64, "失效失败不得推进 durable 源版本！");
-    assert!(fix.state.store().lock().get_file_meta(&row.id.to_string()).unwrap().is_some());
+    assert!(fix.state.store().lock().get_file_meta(&row.file.file_id.to_string()).unwrap().is_some());
 
     // 解除故障注入
     {
@@ -777,11 +773,14 @@ async fn invalidation_failure_does_not_advance_durable_source_version() {
     assert_eq!(done3.status, ScanOperationStatus::Completed);
 
     // 旧派生事实已被成功删除，新版本已成功确认，probe 义务已挂上
-    assert!(fix.state.store().lock().get_file_meta(&row.id.to_string()).unwrap().is_none(), "旧派生事实已失效");
+    assert!(fix.state.store().lock().get_file_meta(&row.file.file_id.to_string()).unwrap().is_none(), "旧派生事实已失效");
     let versions3 = fix.state.store().lock().ledger_source_versions(&[file.display().to_string()]).unwrap();
     let (_, v3_size, _) = versions3.get(&file.display().to_string()).cloned().unwrap();
     assert_eq!(v3_size, b"modified-content".len() as i64, "故障解除后新版本已确认");
 
     let obs = fix.state.store().lock().scan_probe_obligations(10).unwrap();
-    assert!(obs.iter().any(|o| o.ledger_id == row.id), "探测义务必须挂上");
+    assert!(
+        obs.iter().any(|o| o.ledger_id == row.file.file_id),
+        "探测义务必须挂上"
+    );
 }

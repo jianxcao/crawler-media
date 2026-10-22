@@ -1,11 +1,12 @@
 use api::probe_manager::{ProbeManager, ProbeUnit};
 use api::{ScrapeStoreExt, Store};
-use domain::{Confidence, LedgerId, LedgerRow, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, MediaId, MediaKind, QualitySource};
 use marker::fingerprint::{
     CaptureFailure, CaptureMetrics, CaptureRequest, CapturedFingerprint, FingerprintCaptureEngine,
 };
 use marker::{CommonSegment, FingerprintEngine};
 use parking_lot::Mutex;
+use store::test_support::{publish_fixture_file, FixtureFile};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -108,8 +109,8 @@ fn setup(case: &'static str, episodes: &[u32]) -> Fixture {
     let rows: Vec<_> = episodes
         .iter()
         .enumerate()
-        .map(|(index, &episode)| LedgerRow {
-            id: LedgerId::new(),
+        .map(|(index, &episode)| FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id,
             path: tv_root
                 .join(format!("episode-{episode}-version-{index}.mkv"))
@@ -123,10 +124,11 @@ fn setup(case: &'static str, episodes: &[u32]) -> Fixture {
             quality_source: QualitySource::Release,
             confidence: Confidence::High,
             filter_score: None,
+            ..Default::default()
         })
         .collect();
-    seed_store(&store, media_id, &rows);
-    let units = rows
+    let coverages = seed_store(&store, media_id, &rows);
+    let units = coverages
         .into_iter()
         .map(|row| ProbeUnit {
             row,
@@ -223,7 +225,8 @@ fn full_samples_from_nonseeds_discover_the_common_intro() {
         .units
         .iter()
         .map(|unit| {
-            let tag = intro_tag("blind-seeds", unit.row.episode.unwrap());
+            let ep = unit.row.units.first().map(|u| u.episode as u32).unwrap_or(1);
+            let tag = intro_tag("blind-seeds", ep);
             (unit.row.clone(), (tag..tag + 200).collect())
         })
         .collect();
@@ -285,7 +288,7 @@ fn unlocked_timeline_uses_the_known_media_duration() {
     let chapters = f
         .store
         .lock()
-        .get_cached_chapters(&f.units[0].row.id.to_string())
+        .get_cached_chapters(&f.units[0].row.file.file_id.to_string())
         .unwrap()
         .unwrap();
     let feature = chapters
@@ -309,12 +312,12 @@ fn missing_duration_does_not_publish_a_successful_outro_deletion() {
     {
         let st = f.store.lock();
         let version = st
-            .get_file_version(first.id)
+            .get_file_version(first.file.file_id)
             .unwrap()
             .expect("published row must carry a file version")
             .source_version;
         st.put_file_meta_versioned(
-            &first.id.to_string(),
+            &first.file.file_id.to_string(),
             &library::Tracks {
                 video: Some(library::VideoTrack::default()),
                 audio: vec![],
@@ -365,7 +368,8 @@ fn another_common_variant_is_discovered_after_full_fallbacks() {
         .units
         .iter()
         .map(|unit| {
-            let tag = intro_tag("other-variant", unit.row.episode.unwrap());
+            let ep = unit.row.units.first().map(|u| u.episode as u32).unwrap_or(1);
+            let tag = intro_tag("other-variant", ep);
             (unit.row.clone(), (tag..tag + 200).collect())
         })
         .collect();
@@ -417,9 +421,9 @@ fn another_common_variant_is_discovered_after_full_fallbacks() {
     );
 }
 
-fn seed_probe(store: &Store, row: &LedgerRow, duration_ms: Option<i64>) {
+fn seed_probe(store: &Store, row: &domain::FileCoverage, duration_ms: Option<i64>) {
     let expected = store
-        .get_file_version(row.id)
+        .get_file_version(row.file.file_id)
         .unwrap()
         .expect("published row must carry a file version");
     let tracks = library::Tracks {
@@ -456,12 +460,12 @@ fn seed_probe(store: &Store, row: &LedgerRow, duration_ms: Option<i64>) {
         details: Some(&details),
     };
     assert!(
-        store.publish_probe_result(row.id, &publication, 0).unwrap(),
+        store.publish_probe_result(row.file.file_id, &publication, 0).unwrap(),
         "probe publication must be accepted for a freshly published row"
     );
 }
 
-fn seed_store(store: &Arc<Mutex<Store>>, media_id: MediaId, rows: &[LedgerRow]) {
+fn seed_store(store: &Arc<Mutex<Store>>, media_id: MediaId, rows: &[FixtureFile]) -> Vec<domain::FileCoverage> {
     let st = store.lock();
     let mut config = st.get_scrape_config().unwrap().setting;
     config.fingerprint_sampling_mode = Some("adaptive".into());
@@ -480,10 +484,18 @@ fn seed_store(store: &Arc<Mutex<Store>>, media_id: MediaId, rows: &[LedgerRow]) 
         anilist_id: None,
     })
     .unwrap();
+    let mut coverages = Vec::new();
     for row in rows {
         std::fs::write(&row.path, b"dummy").unwrap();
-        st.insert_ledger(row).unwrap();
-        seed_probe(&st, row, Some(1_000_000));
+        let file = publish_fixture_file(&st, row).unwrap();
+        let coverage = domain::FileCoverage {
+            file,
+            units: match (row.season, row.episode) {
+                (Some(s), Some(e)) => vec![domain::UnitKey::new(s as i32, e as i32)],
+                _ => vec![domain::UnitKey::WHOLE],
+            },
+        };
+        seed_probe(&st, &coverage, Some(1_000_000));
         st.put_media_marker(&api::store::StoredMediaMarker {
             media_id,
             season: 1,
@@ -497,8 +509,9 @@ fn seed_store(store: &Arc<Mutex<Store>>, media_id: MediaId, rows: &[LedgerRow]) 
             updated_at: 0,
         })
         .unwrap();
+        coverages.push(coverage);
     }
-    let keys: Vec<_> = rows.iter().map(|row| row.id.to_string()).collect();
+    let keys: Vec<_> = coverages.iter().map(|c| c.file.file_id.to_string()).collect();
     let specs: Vec<_> = keys
         .iter()
         .map(|key| api::store::ProbeJobUnitSpec {
@@ -524,4 +537,5 @@ fn seed_store(store: &Arc<Mutex<Store>>, media_id: MediaId, rows: &[LedgerRow]) 
         st.finish_probe_unit("review9-job", key, true, None)
             .unwrap();
     }
+    coverages
 }

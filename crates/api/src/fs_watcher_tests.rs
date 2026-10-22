@@ -86,12 +86,11 @@ fn realtime_library_root_matches_nested_strm_path() {
     assert_eq!(entry_scan_target_dir(&root, &episode), show_dir);
 
     crate::http::library_scan::scan_library_subdir(&state, &root, &show_dir).unwrap();
-    let rows = state.store.lock().list_ledger().unwrap();
+    let rows = state.store.lock().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].path, episode.display().to_string());
-    assert_eq!(rows[0].season, Some(1));
-    assert_eq!(rows[0].episode, Some(1));
-    assert!(state.probe.is_queued(&rows[0].id.to_string()));
+    assert_eq!(rows[0].file.path.display().to_string(), episode.display().to_string());
+    assert!(rows[0].units.iter().any(|u| !u.is_whole() && u.season == 1 && u.episode == 1));
+    assert!(state.probe.is_queued(&rows[0].file.file_id.to_string()));
 }
 
 #[test]
@@ -118,8 +117,8 @@ fn rescanning_a_show_queues_only_the_new_episode() {
     .unwrap();
     let show_dir = root.join("喜剧之王 (2026)");
     crate::http::library_scan::scan_library_subdir(&state, &root, &show_dir).unwrap();
-    let first = state.store.lock().list_ledger().unwrap();
-    let first_id = first[0].id.to_string();
+    let first = state.store.lock().list_file_coverage().unwrap();
+    let first_id = first[0].file.file_id.to_string();
     while state.probe.take_queued_for_test().is_some() {}
     let job_id = state
         .store
@@ -144,11 +143,11 @@ fn rescanning_a_show_queues_only_the_new_episode() {
     std::fs::write(&episode_two, "https://example.test/e02.mkv").unwrap();
     crate::http::library_scan::scan_library_subdir(&state, &root, &show_dir).unwrap();
 
-    let rows = state.store.lock().list_ledger().unwrap();
+    let rows = state.store.lock().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 2);
     assert!(!state.probe.is_queued(&first_id), "已有 E01 不能再次入队");
-    let second = rows.iter().find(|row| row.episode == Some(2)).unwrap();
-    assert!(state.probe.is_queued(&second.id.to_string()));
+    let second = rows.iter().find(|row| row.units.iter().any(|u| !u.is_whole() && u.episode == 2)).unwrap();
+    assert!(state.probe.is_queued(&second.file.file_id.to_string()));
 }
 
 #[test]
@@ -402,10 +401,10 @@ async fn watch_event_enqueues_a_targeted_scan_through_the_coordinator() {
 
     // 定向扫描真的跑完（走 ScanWalker 的 targets 模式）：剧集入账。
     for _ in 0..200 {
-        let rows = state.store().lock().list_ledger().unwrap();
+        let rows = state.store().lock().list_file_coverage().unwrap();
         if let Some(row) = rows.first() {
-            assert_eq!(row.path, episode.display().to_string());
-            assert_eq!((row.season, row.episode), (Some(1), Some(1)));
+            assert_eq!(row.file.path.display().to_string(), episode.display().to_string());
+            assert!(row.units.iter().any(|u| !u.is_whole() && u.season == 1 && u.episode == 1));
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;

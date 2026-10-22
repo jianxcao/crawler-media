@@ -20,21 +20,21 @@ impl VisibleScope {
             .collect();
 
         let scope = LibraryPathScope::resolve(snapshot)?;
-        let rows = store.list_ledger()?;
-        let media_ids: Vec<MediaId> = rows.iter().map(|r| r.media_id).collect();
+        let rows = store.list_file_coverage()?;
+        let media_ids: Vec<MediaId> = rows.iter().map(|r| r.file.media_id).collect();
         let media_map = store.media_batch(&media_ids)?;
 
         let mut media_set = HashSet::new();
         for row in rows {
-            let Some(media) = media_map.get(&row.media_id) else {
+            let Some(media) = media_map.get(&row.file.media_id) else {
                 continue;
             };
-            let Ok(resolved) = LibraryPathScope::resolve_path(std::path::Path::new(&row.path)) else {
+            let Ok(resolved) = LibraryPathScope::resolve_path(std::path::Path::new(&row.file.path)) else {
                 continue;
             };
             match scope.owner(&resolved, media.kind) {
                 StrictOwner::Owned(owner) if visible_libs.contains(&owner.id) => {
-                    media_set.insert(row.media_id);
+                    media_set.insert(row.file.media_id);
                 }
                 _ => {}
             }

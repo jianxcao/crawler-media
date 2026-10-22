@@ -1,10 +1,11 @@
+use store::test_support::{publish_fixture_file, FixtureFile};
 #[path = "support/mod.rs"]
 mod support;
 
 use api::{ApiState, Store, router};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use serde_json::{Value, json};
@@ -40,8 +41,8 @@ fn app(root: &Path) -> (axum::Router, MediaId, String) {
     std::fs::create_dir_all(&library_root).unwrap();
     let file = library_root.join("matrix.mkv");
     std::fs::write(&file, b"0123456789abcdef").unwrap();
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let spec = FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id: media.id,
         path: file.display().to_string(),
         season: None,
@@ -52,8 +53,9 @@ fn app(root: &Path) -> (axum::Router, MediaId, String) {
         quality_source: QualitySource::Probe,
         confidence: Confidence::High,
         filter_score: Some(100),
+        ..Default::default()
     };
-    store.insert_ledger(&row).unwrap();
+    publish_fixture_file(&store, &spec).unwrap();
     let item_id = domain::TypedItemId::Work(media.id).to_wire_string();
     let router = router(
         ApiState::new(
@@ -81,10 +83,11 @@ fn admin() -> domain::UserId {
 /// The published file behind the fixture movie.
 fn file_id(store: &Store, media: MediaId) -> domain::LedgerId {
     store
-        .ledger_for_media(media)
+        .file_coverage_for_media(media)
         .unwrap()
         .remove(0)
-        .id
+        .file
+        .file_id
 }
 
 /// Issue the play session that protocol events must carry.
@@ -92,55 +95,6 @@ fn issue_session(store: &Store, device: &str, media: MediaId) -> String {
     support::session::issue_session(store, admin(), device, file_id(store, media), 1)
 }
 
-/// Seed a pre-cutover `(0, 0)` movie unit. The canonical whole-media unit is
-/// `(-1, -1)`, so the store's own upsert no longer targets this legacy row.
-#[allow(clippy::too_many_arguments)]
-fn seed_legacy_movie_unit(
-    root: &Path,
-    media: MediaId,
-    position_ms: i64,
-    played: bool,
-    favorite: bool,
-    duration_ms: Option<i64>,
-    audio_track: Option<&str>,
-    subtitle_track: Option<&str>,
-    play_count: i64,
-) {
-    let db = rusqlite::Connection::open(root.join("data/library.db")).unwrap();
-    let (file_id, revision, source_version): (String, i64, String) = db
-        .query_row(
-            "SELECT file_id, file_revision, source_version FROM library_files
-             WHERE media_id = ?1 AND publication_state = 'published'
-             ORDER BY file_revision DESC, file_id ASC LIMIT 1",
-            rusqlite::params![media.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
-    db.execute(
-        "INSERT INTO playback_units
-            (user_id, media_id, season, episode, position_ms, played, favorite,
-             duration_ms, audio_track, subtitle_track, play_count, watch_activity_at,
-             favorite_at, resume_file_id, resume_file_revision, resume_source_version,
-             timeline_mode, tracks_version, has_played_assertion, played_changed_at_ms)
-         VALUES (?1, ?2, 0, 0, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, 1, ?10, ?11, ?12,
-                 'full_file', 0, 1, 1)",
-        rusqlite::params![
-            admin().to_string(),
-            media.to_string(),
-            position_ms,
-            played as i64,
-            favorite as i64,
-            duration_ms,
-            audio_track,
-            subtitle_track,
-            play_count,
-            file_id,
-            revision,
-            source_version,
-        ],
-    )
-    .unwrap();
-}
 async fn send(
     app: &axum::Router,
     method: &str,
@@ -223,6 +177,50 @@ async fn jellyfin_completion_marks_watched() {
     .await;
     assert_eq!(result["TotalRecordCount"], 0);
 }
+/// 卡 必做#2 / 缺陷 A：没有绑定的 Progress 事件**只**写播放单元事实，绝不伪造
+/// `playback_sessions` 行，也绝不让事件整体失败。legacy Jellyfin 客户端不带
+/// `PlaySessionId`，canonical 的无绑定分支只写单元事实；旧
+/// `media_server_provider/playback.rs:170-193` 的遗留叠加块先开一个 IMMEDIATE
+/// 事务调 `store.upsert_session`，而该 seam 拒绝没有 `play_session_id` 的会话行
+/// （`playback session ... has no play_session_id`）⇒ 事务回滚、单元事实丢失、
+/// 整个请求 500，canonical 根本没机会跑。
+#[tokio::test]
+async fn unbound_jellyfin_progress_never_fabricates_a_live_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, media, id) = app(tmp.path());
+    let store = Store::open(tmp.path().join("data")).unwrap();
+
+    let response = send(
+        &app,
+        "POST",
+        "/Sessions/Playing/Progress",
+        "Bearer admin-token",
+        json!({"ItemId":id,"PositionTicks":50000000}),
+        Some("unbound-device"),
+    )
+    .await;
+    let status = response.status();
+    if status != StatusCode::NO_CONTENT {
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        panic!(
+            "未绑定 Progress 应答 {status}: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    // 正控制：事件确实被提交，单元事实必须落库。
+    let unit = store
+        .unit_state(admin(), media, -1, -1)
+        .unwrap()
+        .expect("未绑定 Progress 必须写播放单元事实");
+    assert_eq!(unit.position_ms, 5_000);
+
+    assert!(
+        store.get_session(admin(), "unbound-device").unwrap().is_none(),
+        "未绑定 Progress 不得伪造 live 会话行"
+    );
+}
+
 #[tokio::test]
 async fn standard_authorization_isolates_devices() {
     let tmp = tempfile::tempdir().unwrap();

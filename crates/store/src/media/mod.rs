@@ -337,6 +337,9 @@ impl Store {
             tracing::debug!(media_id = %expected.id, "Media changed since it was written; skipping revert");
             return Ok(false);
         }
+        // Same barrier as `update_media`: a revert must not resurrect the identity of
+        // a Media that is being merged into a survivor or already retired.
+        crate::library_write::publish::ensure_media_writable(&tx, replacement.id)?;
         write_media(&tx, replacement)?;
         tx.commit()?;
         Ok(true)
@@ -471,6 +474,9 @@ impl Store {
             if let Some(existing) =
                 self.get_media_by_alias_kind(column, &id, Some(incoming.kind))?
             {
+                // A frozen (merging/retired) Media must not be rewritten by a scan:
+                // `write_media` would recompute `identity_state` and re-point aliases.
+                crate::library_write::publish::ensure_media_writable(&self.library, existing.id)?;
                 let merged = ::media::merge(existing.clone(), incoming);
                 self.update_media(&merged)?;
                 return Ok((merged, Some(existing)));

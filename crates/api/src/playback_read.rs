@@ -1,12 +1,11 @@
 //! 播放读路径的请求级物化快照。
 //!
-//! 一次批量取 ownership / media / ledger rows / 成员名，之后所有渲染都是纯函数，
+//! 一次批量取 ownership / media / 文件覆盖 / 成员名，之后所有渲染都是纯函数，
 //! 不再在每条记录、每次比较里查库。
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 
-use domain::{LedgerRow, Media, MediaId, UserId};
+use domain::{FileCoverage, Media, MediaId, UserId};
 use serde_json::{Value, json};
 
 use crate::store::{LibraryOwnership, Store, StoreError};
@@ -14,7 +13,7 @@ use crate::store::{LibraryOwnership, Store, StoreError};
 pub(crate) struct PlaybackRead {
     pub ownership: LibraryOwnership,
     pub media: HashMap<MediaId, Media>,
-    pub rows: HashMap<MediaId, Vec<LedgerRow>>,
+    pub rows: HashMap<MediaId, Vec<FileCoverage>>,
     pub names: HashMap<UserId, String>,
 }
 
@@ -37,9 +36,11 @@ impl PlaybackRead {
         let ownership = store.library_ownership()?;
         let unique_media: Vec<MediaId> = dedup(media_ids);
         let media = store.media_batch(&unique_media)?;
-        let mut rows: HashMap<MediaId, Vec<LedgerRow>> = HashMap::new();
-        for row in store.ledger_for_media_batch(&unique_media)? {
-            rows.entry(row.media_id).or_default().push(row);
+        let mut rows: HashMap<MediaId, Vec<FileCoverage>> = HashMap::new();
+        for coverage in store.file_coverage_for_media_batch(&unique_media)? {
+            rows.entry(coverage.file.media_id)
+                .or_default()
+                .push(coverage);
         }
         let mut names = HashMap::new();
         let wanted: HashSet<UserId> = user_ids.iter().copied().collect();
@@ -62,7 +63,7 @@ impl PlaybackRead {
         self.media.get(&id)
     }
 
-    pub(crate) fn rows_for(&self, id: MediaId) -> &[LedgerRow] {
+    pub(crate) fn rows_for(&self, id: MediaId) -> &[FileCoverage] {
         self.rows.get(&id).map(Vec::as_slice).unwrap_or(&[])
     }
 
@@ -107,14 +108,11 @@ pub(crate) fn media_target(
     let Some(media) = read.media(id) else {
         return json!({ "media_item_id": id.to_string(), "title": "", "kind": "movie" });
     };
-    let rows = read.rows_for(id);
-    let library_id = library_id_for(read, media, rows);
-    let poster_url = crate::http::library::preferred_row(rows)
-        .and_then(crate::http::library::poster_path)
-        .map(|_| {
-            let row = crate::http::library::preferred_row(rows).expect("just checked");
-            crate::http::library::artwork_url("posters", row.id)
-        });
+    let coverages = read.rows_for(id);
+    let library_id = library_id_for(read, media, coverages);
+    let poster_url = crate::http::library::preferred_coverage(coverages)
+        .filter(|coverage| crate::http::library::poster_path(&coverage.file).is_some())
+        .map(|coverage| crate::http::library::artwork_url("posters", coverage.file.file_id));
     json!({
         "media_item_id": media.id.to_string(),
         "library_id": library_id,
@@ -129,11 +127,14 @@ pub(crate) fn media_target(
     })
 }
 
-/// 与 `library_id_for` 同义：所有已归属行指向同一 Library 才给出 id，否则 `None`。
-fn library_id_for(read: &PlaybackRead, media: &Media, rows: &[LedgerRow]) -> Option<String> {
-    let mut ids = rows
+/// 与 `library_id_for` 同义：所有已归属文件指向同一 Library 才给出 id，否则 `None`。
+fn library_id_for(read: &PlaybackRead, media: &Media, coverages: &[FileCoverage]) -> Option<String> {
+    let mut ids = coverages
         .iter()
-        .filter_map(|row| read.ownership.owner(Path::new(&row.path), media.kind))
+        .filter_map(|coverage| {
+            read.ownership
+                .owner(coverage.file.path.as_path(), media.kind)
+        })
         .map(|library| library.id.clone());
     let first = ids.next()?;
     ids.all(|id| id == first).then_some(first)

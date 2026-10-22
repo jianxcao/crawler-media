@@ -105,14 +105,14 @@ async fn targeted_video_scan_walks_only_its_targets() {
     let guard = store.lock();
     assert!(
         guard
-            .ledger_by_path(&target_file.display().to_string())
+            .file_coverage_by_path(&target_file.display().to_string())
             .unwrap()
             .is_some(),
         "目标目录里的文件必须入账"
     );
     assert!(
         guard
-            .ledger_by_path(&other_file.display().to_string())
+            .file_coverage_by_path(&other_file.display().to_string())
             .unwrap()
             .is_none(),
         "定向 Video 扫描不得触碰无关目录: {:?}",
@@ -147,10 +147,11 @@ async fn video_scan_checkpoint_skips_seen_and_reprocesses_changed() {
         let store = fix.state.store();
         let guard = store.lock();
         guard
-            .ledger_by_path(&clip.display().to_string())
+            .file_coverage_by_path(&clip.display().to_string())
             .unwrap()
             .expect("clip 应已入账")
-            .id
+            .file
+            .file_id
             .to_string()
     };
     seed_file_meta(&fix, &ledger_id);

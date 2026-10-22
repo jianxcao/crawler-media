@@ -23,31 +23,36 @@ pub(super) async fn resolve_person_image_url(
     let mut seen = HashSet::new();
     {
         let store = provider.state.store.lock();
-        for row in store.list_ledger().map_err(|error| error.to_string())? {
-            let Some(media) = store.get_media(row.media_id).ok().flatten() else {
+        for coverage in store.list_file_coverage().map_err(|error| error.to_string())? {
+            let file = &coverage.file;
+            let Some(media) = store.get_media(file.media_id).ok().flatten() else {
                 continue;
             };
-            if !crate::http::library::row_visible_to_user(&store, &row, &media, user_id) {
+            if !crate::http::library::file_visible_to_user(&store, file, &media, user_id) {
                 continue;
             }
-            if let Some(image_url) = person_image_url(&row, &media, query) {
-                return Ok(Some(image_url));
-            }
-            let Some(media_id) = media.tmdb_id.clone() else {
-                continue;
-            };
-            let person_id = if uuid::Uuid::parse_str(query).is_ok() {
-                Some(query.to_string())
-            } else {
-                person_tmdb_id(&row, &media, query).flatten()
-            };
-            let key = (
-                media.kind.as_str().to_string(),
-                media_id.clone(),
-                person_id.clone(),
-            );
-            if seen.insert(key) {
-                candidates.push((media.kind, media_id, person_id));
+            // 旧台账一个 `(file, unit)` 一行；现在一个 coverage 覆盖该文件的全部观看
+            // 单元，所以要在单元上展开，且保持「先主图、再 tmdb 候选」的旧顺序。
+            for unit in super::items::coverage_units(&coverage) {
+                if let Some(image_url) = person_image_url(file, unit, &media, query) {
+                    return Ok(Some(image_url));
+                }
+                let Some(media_id) = media.tmdb_id.clone() else {
+                    continue;
+                };
+                let person_id = if uuid::Uuid::parse_str(query).is_ok() {
+                    Some(query.to_string())
+                } else {
+                    person_tmdb_id(file, unit, &media, query).flatten()
+                };
+                let key = (
+                    media.kind.as_str().to_string(),
+                    media_id.clone(),
+                    person_id.clone(),
+                );
+                if seen.insert(key) {
+                    candidates.push((media.kind, media_id, person_id));
+                }
             }
         }
     }

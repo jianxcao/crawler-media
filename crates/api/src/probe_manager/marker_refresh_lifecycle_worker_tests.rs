@@ -73,8 +73,8 @@ async fn window1_queued_stage_freeze_aborts_cleanly_and_releases_scope() {
             .store
             .lock()
             .active_probe_job_for_scope(&harness.scope)
-        .unwrap()
-        .is_none()
+            .unwrap()
+            .is_none()
     );
     wait_for_worker_cleanup(&harness).await;
     assert!(!harness.registry.has_active_work());
@@ -145,10 +145,7 @@ async fn window5_resource_lifecycle_releases_leases_counters_and_scope() {
     assert!(!harness.registry.has_active_work());
 
     assert_eq!(
-        harness
-            .manager
-            .enqueue_forced_item_refresh(units)
-            .unwrap(),
+        harness.manager.enqueue_forced_item_refresh(units).unwrap(),
         2
     );
     assert_eq!(
@@ -163,7 +160,7 @@ async fn window5_resource_lifecycle_releases_leases_counters_and_scope() {
             .manager
             .seen
             .lock()
-            .contains(&harness.rows[0].id.to_string())
+            .contains(&harness.rows[0].file.file_id.to_string())
     );
 
     let job_id = harness
@@ -196,8 +193,16 @@ async fn window5_resource_lifecycle_releases_leases_counters_and_scope() {
             .unwrap()
             .is_none()
     );
-    assert!(!harness.manager.is_queued(&harness.rows[0].id.to_string()));
-    assert!(!harness.manager.is_queued(&harness.rows[1].id.to_string()));
+    assert!(
+        !harness
+            .manager
+            .is_queued(&harness.rows[0].file.file_id.to_string())
+    );
+    assert!(
+        !harness
+            .manager
+            .is_queued(&harness.rows[1].file.file_id.to_string())
+    );
     harness.assert_old_markers_intact();
 
     // Scope is immediately re-acquirable without AlreadyRunning error

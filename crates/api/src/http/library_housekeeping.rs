@@ -21,7 +21,7 @@ const HOUSEKEEPING_DEADLINE: std::time::Duration = std::time::Duration::from_sec
 struct Reconciliation {
     from: String,
     to: String,
-    source: Option<(domain::LedgerRow, Option<domain::MediaKind>)>,
+    source: Option<(domain::FileCoverage, Option<domain::MediaKind>)>,
 }
 
 fn reconciliation_error(error: crate::blocking_budget::BlockingError) -> Response {
@@ -49,7 +49,7 @@ pub(crate) async fn path_reconciliation_preview(
         let Some(library) = store.get_library(&id).ok().flatten() else {
             return missing_library();
         };
-        let rows = super::library::rows_in_library(&store, &library);
+        let rows = super::library::files_in_library(&store, &library);
         (library, rows)
     };
 
@@ -79,9 +79,9 @@ pub(crate) async fn path_reconciliation_preview(
                 }
 
                 missing.push(json!({
-                    "file_id": row.id.to_string(),
+                    "file_id": row.file_id.to_string(),
                     "media_id": row.media_id.to_string(),
-                    "path": row.path,
+                    "path": row.path.display().to_string(),
                     "file_name": name_str,
                     "candidates": candidates,
                 }));
@@ -187,9 +187,9 @@ fn reconciliation_rows(store: &store::Store, body: &Value) -> Result<Vec<Reconci
             let (Some(from), Some(to)) = (row["from"].as_str(), row["to"].as_str()) else {
                 continue;
             };
-            let source = match store.ledger_by_path(from)? {
+            let source = match store.file_coverage_by_path(from)? {
                 Some(row) => {
-                    let kind = store.get_media(row.media_id)?.map(|media| media.kind);
+                    let kind = store.get_media(row.file.media_id)?.map(|media| media.kind);
                     Some((row, kind))
                 }
                 None => None,
@@ -226,7 +226,7 @@ fn observe_reconciliations(
         let Some((source, kind)) = row.source.as_ref() else {
             return Err(format!("{} 不在台账中", row.from));
         };
-        if !kind.is_some_and(|kind| strictly_owned(scope.as_ref(), FsPath::new(&source.path), kind, &library.id)) {
+        if !kind.is_some_and(|kind| strictly_owned(scope.as_ref(), FsPath::new(&source.file.path), kind, &library.id)) {
             return Err(format!("{} 不属于当前媒体库", row.from));
         }
         Ok(row)
@@ -248,20 +248,20 @@ fn strictly_owned(scope: Option<&store::LibraryPathScope>, path: &FsPath, kind: 
 fn apply_reconciliation(store: &store::Store, library: &store::Library, row: &Reconciliation) -> Result<(), String> {
     let failure = || format!("{} -> {} 台账重命名失败", row.from, row.to);
     let Some((source, kind)) = row.source.as_ref() else { return Err(failure()) };
-    let current = store.ledger_by_path(&row.from).map_err(|error| {
+    let current = store.file_coverage_by_path(&row.from).map_err(|error| {
         tracing::warn!(%error, "Reconciliation source revalidation failed");
         failure()
     })?;
-    let media = store.get_media(source.media_id).map_err(|error| {
+    let media = store.get_media(source.file.media_id).map_err(|error| {
         tracing::warn!(%error, "Reconciliation media revalidation failed");
         failure()
     })?;
     if current.as_ref() != Some(source) || media.as_ref().map(|media| media.kind) != *kind {
         return Err(failure());
     }
-    match store.rename_ledger_path(&row.from, &row.to) {
+    match store.rename_file_path(&row.from, &row.to) {
         Ok(true) => {
-            if let Err(error) = store.rewrite_fact_paths(source.media_id, &row.from, &row.to) {
+            if let Err(error) = store.rewrite_fact_paths(source.file.media_id, &row.from, &row.to) {
                 tracing::error!(library_id = %library.id, %error, "Reconciliation fact path rewrite failed");
             }
             Ok(())

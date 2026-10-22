@@ -12,6 +12,7 @@ use subscribe::QualityFact;
 use tower::ServiceExt;
 
 use super::common::{create_site, json_body, request};
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 #[tokio::test]
 async fn legacy_run_uses_shared_keywords_and_wash_cut_ladder() {
@@ -109,9 +110,10 @@ fn seed_owned_matrix(store: &Store, id: SubscribeId) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, b"owned").unwrap();
     let subscribe = store.get_subscribe(id).unwrap().unwrap();
-    store
-        .insert_ledger(&domain::LedgerRow {
-            id: domain::LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(domain::LedgerId::new()),
             media_id: subscribe.media_id,
             path: path.display().to_string(),
             season: None,
@@ -122,8 +124,10 @@ fn seed_owned_matrix(store: &Store, id: SubscribeId) {
             quality_source: domain::QualitySource::Probe,
             confidence: domain::Confidence::High,
             filter_score: Some(1),
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let mut facts = subscribe::SubscribeFacts::default();
     facts.replace(
         None,

@@ -82,7 +82,7 @@ struct Expected {
 /// 一次 `/libraries` 请求观察到的文件/DB 工作量。
 #[derive(Clone, Copy, Debug)]
 struct Work {
-    /// 无 WHERE 的根账本扫描步数（`list_ledger`）。
+    /// 无 WHERE 的根账本扫描步数（`list_file_coverage`）。
     ledger_scans: usize,
     /// 媒体文件 IO 次数（注入 seam）。
     media_stats: usize,
@@ -698,7 +698,7 @@ async fn same_count_strm_change_does_not_reuse_physical_bytes_as_fresh() {
 
     let guard = store_arc.lock();
     assert!(guard
-        .rename_ledger_path(&from.display().to_string(), &to.display().to_string())
+        .rename_file_path(&from.display().to_string(), &to.display().to_string())
         .unwrap());
     // 扫描器观察到指针文件后按新体积重发布同一文件（同一 revision）。
     let version = guard.get_file_version(file_id).unwrap().expect("file version");

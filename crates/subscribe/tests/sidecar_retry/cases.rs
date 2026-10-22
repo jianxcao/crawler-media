@@ -34,7 +34,16 @@ impl RetryFixture {
 }
 
 fn mappings(outcome: &subscribe::RunOutcome) -> Vec<DestinationMapping> {
-    outcome.ledger_sources.iter().map(|s| DestinationMapping::new(&s.source_path, &s.ledger_path)).collect()
+    outcome
+        .file_sources
+        .iter()
+        .map(|source| {
+            DestinationMapping::new(
+                source.source.to_string_lossy().to_string(),
+                source.destination.clone(),
+            )
+        })
+        .collect()
 }
 
 #[test]
@@ -48,7 +57,7 @@ fn movie_retry_uses_persisted_destination_and_finishes_without_new_video() {
     let blocker = fixture.root.join("Movie (1999)/Movie (1999).zh.srt");
     std::fs::create_dir_all(&blocker).unwrap();
     let first = fixture.round(vec![video.clone(), sub.clone()], SubscribeFacts::default(), &[]);
-    assert_eq!(first.ledger.len(), 1);
+    assert_eq!(first.files.len(), 1);
     assert!(!first.collection_errors.is_empty());
     assert!(first.transferred_enclosures.is_empty());
     let persisted = mappings(&first);
@@ -56,11 +65,11 @@ fn movie_retry_uses_persisted_destination_and_finishes_without_new_video() {
     std::fs::remove_dir(&blocker).unwrap();
     let second = fixture.round(vec![video.clone(), sub], first.facts, &persisted);
     assert!(second.collection_errors.is_empty());
-    assert!(second.ledger.is_empty());
+    assert!(second.files.is_empty());
     assert_eq!(second.transferred_enclosures.len(), 1);
     assert_eq!(std::fs::read(&blocker).unwrap(), b"subtitle");
     let third = fixture.round(vec![video], second.facts, &persisted);
-    assert!(third.ledger.is_empty());
+    assert!(third.files.is_empty());
     assert_eq!(third.transferred_enclosures.len(), 1, "owned video without subtitles still completes");
 }
 
@@ -82,14 +91,14 @@ fn mixed_tv_retry_matches_source_even_when_destinations_have_no_release_identity
     let blocker = fixture.root.join("Long Watch/01/01.zh.srt");
     std::fs::create_dir_all(&blocker).unwrap();
     let first = fixture.round(vec![e1.clone(), subtitle.clone()], SubscribeFacts::default(), &[]);
-    assert_eq!(first.ledger.len(), 1);
+    assert_eq!(first.files.len(), 1);
     assert!(!first.collection_errors.is_empty());
     let persisted = mappings(&first);
     assert!(blocker.canonicalize().unwrap().starts_with(fixture.root.canonicalize().unwrap()));
     std::fs::remove_dir(&blocker).unwrap();
     let second = fixture.round(vec![e1, e2, subtitle], first.facts, &persisted);
     assert!(second.collection_errors.is_empty(), "{:?}", second.collection_errors);
-    assert_eq!(second.ledger.len(), 1);
+    assert_eq!(second.files.len(), 1);
     assert_eq!(second.transferred_enclosures.len(), 1);
     assert_eq!(std::fs::read(blocker).unwrap(), b"E1 subtitle");
     assert!(!fixture.root.join("Long Watch/01/02.zh.srt").exists());

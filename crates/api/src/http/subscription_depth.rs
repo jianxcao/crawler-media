@@ -235,6 +235,19 @@ pub(crate) fn wanted_json(
     wanted_json_with_air_dates(store, media, subscribe, facts, air_dates)
 }
 
+/// `wanted_json_with_air_dates` 逐单元映射所需的只读上下文（纯数据视图，不持有 store）。
+struct WantedUnitContext<'a> {
+    media: &'a domain::Media,
+    subscribe: &'a Subscribe,
+    facts: &'a subscribe::SubscribeFacts,
+    pending: &'a [(i32, crate::store::PendingDownload)],
+    history: &'a std::collections::HashMap<(Option<u32>, Option<u32>), crate::store::WantedHistory>,
+    ledger: &'a [domain::FileCoverage],
+    air_dates: &'a std::collections::HashMap<u32, Option<String>>,
+    target_score: i32,
+    target_label: &'a str,
+}
+
 pub(crate) fn wanted_json_with_air_dates(
     store: &crate::Store,
     media: &domain::Media,
@@ -245,138 +258,184 @@ pub(crate) fn wanted_json_with_air_dates(
     let pending = store.load_pending(subscribe.id).unwrap_or_default();
     let history = store.load_wanted_history(subscribe.id).unwrap_or_default();
     let (target_score, target_label) = wash_target(store, subscribe);
-    let ledger = store.list_ledger().unwrap_or_default();
-    let fmt = crate::store::rfc3339_from_secs;
+    let ledger = store.list_file_coverage().unwrap_or_default();
+    let context = WantedUnitContext {
+        media,
+        subscribe,
+        facts,
+        pending: &pending,
+        history: &history,
+        ledger: &ledger,
+        air_dates: &air_dates,
+        target_score,
+        target_label: &target_label,
+    };
     crate::open_coverage::units(subscribe, media, facts, &pending, &history, air_dates.keys().copied())
         .into_iter()
-        .map(|(season, episode)| {
-            let fact = facts.get(season, episode);
-            let in_flight = pending
-                .iter()
-                .any(|(_, p)| release_covers_unit(&p.torrent.title, season, episode));
-            let h = history
-                .get(&(season, episode))
-                .cloned()
-                .unwrap_or_default();
-            let status = if fact.is_some() {
-                "imported"
-            } else if in_flight || h.grabbed_at.is_some() {
-                "grabbed"
-            } else {
-                "wanted"
-            };
-            let state = unit_wash_state(subscribe, fact, in_flight, target_score);
-            let current_label = ledger
-                .iter()
-                .find(|row| {
-                    row.media_id == subscribe.media_id
-                        && row.season == season
-                        && row.episode == episode
+        .map(|(season, episode)| wanted_unit_json(season, episode, &context))
+        .collect()
+}
+
+/// 一个 wanted 单元的详情 JSON（原 `wanted_json_with_air_dates` 的内联映射体，逐字搬移）。
+fn wanted_unit_json(season: Option<u32>, episode: Option<u32>, context: &WantedUnitContext<'_>) -> Value {
+    let fmt = crate::store::rfc3339_from_secs;
+    let fact = context.facts.get(season, episode);
+    let in_flight = context
+        .pending
+        .iter()
+        .any(|(_, p)| release_covers_unit(&p.torrent.title, season, episode));
+    let h = context
+        .history
+        .get(&(season, episode))
+        .cloned()
+        .unwrap_or_default();
+    let status = if fact.is_some() {
+        "imported"
+    } else if in_flight || h.grabbed_at.is_some() {
+        "grabbed"
+    } else {
+        "wanted"
+    };
+    let state = unit_wash_state(context.subscribe, fact, in_flight, context.target_score);
+    let current_label = current_coverage_label(context.ledger, context.subscribe, season, episode);
+    let upgrade = if status == "wanted" {
+        Value::Null
+    } else {
+        json!({
+            "active": state == "upgradable" || state == "in_flight",
+            "current_label": current_label,
+            "target_label": if context.target_label.is_empty() { Value::Null } else { json!(context.target_label) },
+            "search_attempts": h.search_attempts,
+            "indeterminate": state == "not_comparable",
+        })
+    };
+    let air_date = match (context.media.kind, episode) {
+        (domain::MediaKind::Tv, Some(ep)) => context.air_dates.get(&ep).cloned().flatten(),
+        _ => None,
+    };
+    let release_forecast = air_date
+        .as_deref()
+        .and_then(|date| forecast::forecast_for_unit(context.subscribe, context.pending, date))
+        .unwrap_or(Value::Null);
+    let resource_timing = wanted_unit_resource_timing(context.pending, season, episode, status);
+    let next_search = wanted_unit_next_search(context.subscribe, status, &air_date, &h);
+    json!({
+        "id": format!("{}-{}-{}", context.subscribe.id, season.unwrap_or(0), episode.unwrap_or(0)),
+        "season_number": season.unwrap_or(0) as i64,
+        "episode_number": episode.unwrap_or(0) as i64,
+        "status": status,
+        "air_date": air_date,
+        "priority": 0,
+        "next_search_at": next_search.map(fmt),
+        "search_attempts": h.search_attempts,
+        "last_search_at": h.last_search_at.map(fmt),
+        "release_forecast": release_forecast,
+        "resource_timing": resource_timing,
+        "grabbed_at": h.grabbed_at.map(fmt),
+        "downloaded_at": Value::Null,
+        "imported_at": h.imported_at.map(fmt),
+        "info_hash": Value::Null,
+        "last_reject_reason": h.last_reject_reason,
+        "grab_title": h.grab_title,
+        "upgrade": upgrade,
+    })
+}
+
+/// 该单元在文件覆盖视图里的现况标签（分辨率 + 编码）；无匹配覆盖时为 `None`。
+fn current_coverage_label(
+    ledger: &[domain::FileCoverage],
+    subscribe: &Subscribe,
+    season: Option<u32>,
+    episode: Option<u32>,
+) -> Option<String> {
+    ledger
+        .iter()
+        .find(|row| {
+            row.file.media_id == subscribe.media_id
+                && row.units.iter().any(|u| {
+                    u32::try_from(u.season).ok() == season && u32::try_from(u.episode).ok() == episode
                 })
-                .and_then(|row| match (row.resolution.as_deref(), row.codec.as_deref()) {
-                    (Some(r), Some(c)) => Some(format!("{r} {c}")),
-                    (Some(r), None) => Some(r.to_string()),
-                    (None, Some(c)) => Some(c.to_string()),
-                    (None, None) => None,
-                });
-            let upgrade = if status == "wanted" {
-                Value::Null
-            } else {
-                json!({
-                    "active": state == "upgradable" || state == "in_flight",
-                    "current_label": current_label,
-                    "target_label": if target_label.is_empty() { Value::Null } else { json!(target_label) },
-                    "search_attempts": h.search_attempts,
-                    "indeterminate": state == "not_comparable",
-                })
-            };
-            let air_date = match (media.kind, episode) {
-                (domain::MediaKind::Tv, Some(ep)) => air_dates.get(&ep).cloned().flatten(),
-                _ => None,
-            };
-            let release_forecast = air_date
+        })
+        .and_then(|row| match (row.file.resolution.as_deref(), row.file.codec.as_deref()) {
+            (Some(r), Some(c)) => Some(format!("{r} {c}")),
+            (Some(r), None) => Some(r.to_string()),
+            (None, Some(c)) => Some(c.to_string()),
+            (None, None) => None,
+        })
+}
+
+/// `status == "grabbed"` 时的下载器投递时点快照；其余状态为 `null`。
+fn wanted_unit_resource_timing(
+    pending: &[(i32, crate::store::PendingDownload)],
+    season: Option<u32>,
+    episode: Option<u32>,
+    status: &str,
+) -> Value {
+    if status != "grabbed" {
+        return Value::Null;
+    }
+    let fmt = crate::store::rfc3339_from_secs;
+    pending
+        .iter()
+        .find(|(_, p)| release_covers_unit(&p.torrent.title, season, episode))
+        .map(|(_, p)| {
+            let publish_unix = p
+                .torrent
+                .upload_time
                 .as_deref()
-                .and_then(|date| forecast::forecast_for_unit(subscribe, &pending, date))
-                .unwrap_or(Value::Null);
-            let resource_timing = if status == "grabbed" {
-                pending
-                    .iter()
-                    .find(|(_, p)| release_covers_unit(&p.torrent.title, season, episode))
-                    .map(|(_, p)| {
-                        let publish_unix = p
-                            .torrent
-                            .upload_time
-                            .as_deref()
-                            .and_then(super::subscriptions::parse_upload_time);
-                        let submitted = p.submitted_at;
-                        json!({
-                            "site_id": p.torrent.site_id.to_string(),
-                            "torrent_id": p.torrent.id.clone(),
-                            "publish_time": p.torrent.upload_time,
-                            "first_seen_at": submitted.map(fmt),
-                            "submitted_at": submitted.map(fmt),
-                            "publish_to_seen_seconds": Value::Null,
-                            "seen_to_submit_seconds": Value::Null,
-                            "publish_to_submit_seconds": match (publish_unix, submitted) {
-                                (Some(publish), Some(submit)) if submit >= publish => {
-                                    json!(submit - publish)
-                                }
-                                _ => Value::Null,
-                            },
-                            "dry_run": false,
-                        })
-                    })
-                    .unwrap_or(Value::Null)
-            } else {
-                Value::Null
-            };
-            let now = crate::job_loop::unix_now();
-            let next_search = if status == "wanted" {
-                match &air_date {
-                    Some(date_str) => {
-                        let today_str = crate::store::now_rfc3339();
-                        let today = today_str.split('T').next().unwrap_or(&today_str);
-                        if date_str.as_str() > today {
-                            // 播出日在未来：到期日 = 播出日（按当天 0 点估算 unix 时间戳）
-                            crate::http::subscriptions::parse_upload_time(date_str)
-                        } else {
-                            h.last_search_at
-                                .map(|ts| ts + subscribe.search_interval_secs as i64)
-                                .or(Some(now))
-                        }
-                    }
-                    None => {
-                        // 未定档但处于订阅周期搜索中：下次搜索 = 上次搜索 + 搜索间隔
-                        h.last_search_at
-                            .map(|ts| ts + subscribe.search_interval_secs as i64)
-                            .or(Some(now))
-                    }
-                }
-            } else {
-                None
-            };
+                .and_then(super::subscriptions::parse_upload_time);
+            let submitted = p.submitted_at;
             json!({
-                "id": format!("{}-{}-{}", subscribe.id, season.unwrap_or(0), episode.unwrap_or(0)),
-                "season_number": season.unwrap_or(0) as i64,
-                "episode_number": episode.unwrap_or(0) as i64,
-                "status": status,
-                "air_date": air_date,
-                "priority": 0,
-                "next_search_at": next_search.map(fmt),
-                "search_attempts": h.search_attempts,
-                "last_search_at": h.last_search_at.map(fmt),
-                "release_forecast": release_forecast,
-                "resource_timing": resource_timing,
-                "grabbed_at": h.grabbed_at.map(fmt),
-                "downloaded_at": Value::Null,
-                "imported_at": h.imported_at.map(fmt),
-                "info_hash": Value::Null,
-                "last_reject_reason": h.last_reject_reason,
-                "grab_title": h.grab_title,
-                "upgrade": upgrade,
+                "site_id": p.torrent.site_id.to_string(),
+                "torrent_id": p.torrent.id.clone(),
+                "publish_time": p.torrent.upload_time,
+                "first_seen_at": submitted.map(fmt),
+                "submitted_at": submitted.map(fmt),
+                "publish_to_seen_seconds": Value::Null,
+                "seen_to_submit_seconds": Value::Null,
+                "publish_to_submit_seconds": match (publish_unix, submitted) {
+                    (Some(publish), Some(submit)) if submit >= publish => {
+                        json!(submit - publish)
+                    }
+                    _ => Value::Null,
+                },
+                "dry_run": false,
             })
         })
-        .collect()
+        .unwrap_or(Value::Null)
+}
+
+/// `status == "wanted"` 时的下次搜索时间戳；其余状态为 `None`。
+fn wanted_unit_next_search(
+    subscribe: &Subscribe,
+    status: &str,
+    air_date: &Option<String>,
+    h: &crate::store::WantedHistory,
+) -> Option<i64> {
+    let now = crate::job_loop::unix_now();
+    if status != "wanted" {
+        return None;
+    }
+    match air_date {
+        Some(date_str) => {
+            let today_str = crate::store::now_rfc3339();
+            let today = today_str.split('T').next().unwrap_or(&today_str);
+            if date_str.as_str() > today {
+                // 播出日在未来：到期日 = 播出日（按当天 0 点估算 unix 时间戳）
+                crate::http::subscriptions::parse_upload_time(date_str)
+            } else {
+                h.last_search_at
+                    .map(|ts| ts + subscribe.search_interval_secs as i64)
+                    .or(Some(now))
+            }
+        }
+        None => {
+            // 未定档但处于订阅周期搜索中：下次搜索 = 上次搜索 + 搜索间隔
+            h.last_search_at
+                .map(|ts| ts + subscribe.search_interval_secs as i64)
+                .or(Some(now))
+        }
+    }
 }
 
 fn upgrade_summary(
@@ -450,12 +509,19 @@ pub(crate) async fn removal_preview(
         Err(response) => return response,
     };
     let store = state.store.lock();
-    let ledger = store.list_ledger().unwrap_or_default();
-    let files: Vec<&domain::LedgerRow> = ledger
+    let ledger = store.list_file_coverage().unwrap_or_default();
+    // 读 shape 就是每文件一条 `FileCoverage`，不再投影回旧的 `(file × unit)` 行：
+    // `library_file_count` 因此是**文件数**（与 `file_delete::remove_rows` 的落地口径一致，
+    // preview 与 apply 必须同口径）。`library_bytes` 相应按文件路径累加一次；只有「同一
+    // 文件带多个 unit」时旧读数才会把同一 path 的大小重复累加，活库当前没有这种文件。
+    let files: Vec<&domain::FileCoverage> = ledger
         .iter()
-        .filter(|row| row.media_id == subscribe.media_id)
+        .filter(|coverage| coverage.file.media_id == subscribe.media_id)
         .collect();
-    let bytes: u64 = files.iter().map(|row| row_bytes(&row.path)).sum();
+    let bytes: u64 = files
+        .iter()
+        .map(|coverage| row_bytes(&coverage.file.path))
+        .sum();
     // In-flight torrents this Subscribe is still waiting on.
     let pending = store.load_pending(subscribe.id).unwrap_or_default();
     let mut torrent_titles: Vec<String> = pending
@@ -506,7 +572,7 @@ pub(crate) async fn removal_preview(
     .into_response()
 }
 
-fn row_bytes(path: &str) -> u64 {
+fn row_bytes(path: &std::path::Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
@@ -547,14 +613,14 @@ pub(crate) async fn season_cleanup(
             .delete_library_files
             .then(|| {
                 store
-                    .list_ledger()
+                    .list_file_coverage()
                     .unwrap_or_default()
                     .into_iter()
-                    .filter(|row| {
-                        row.media_id == subscribe.media_id
-                            && row
-                                .season
-                                .is_some_and(|season| body.seasons.contains(&season))
+                    .filter(|coverage| {
+                        coverage.file.media_id == subscribe.media_id
+                            && coverage.units.iter().any(|unit| {
+                                !unit.is_whole() && body.seasons.contains(&(unit.season as u32))
+                            })
                     })
                     .collect()
             })

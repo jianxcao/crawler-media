@@ -130,7 +130,7 @@ fn cancelled_video_scan_fails_without_ledgering() {
     assert_eq!(failure.totals.scanned, 0);
     assert_eq!(failure.totals.inserted, 0);
     assert!(
-        state.store().lock().list_ledger().unwrap().is_empty(),
+        state.store().lock().list_file_coverage().unwrap().is_empty(),
         "取消的 Video 扫描不得登记任何文件"
     );
 }
@@ -188,10 +188,10 @@ fn unchanged_video_file_is_artwork_attempted_without_reregistration() {
         let store = state.store();
         let guard = store.lock();
         let row = guard
-            .ledger_by_path(&clip.display().to_string())
+            .file_coverage_by_path(&clip.display().to_string())
             .unwrap()
             .expect("clip 必须已入账");
-        let mut media = guard.get_media(row.media_id).unwrap().expect("media");
+        let mut media = guard.get_media(row.file.media_id).unwrap().expect("media");
         media.tmdb_id = Some("603".into());
         guard.update_media(&media).unwrap();
     }
@@ -248,21 +248,14 @@ fn checkpoint_fault_fixture() -> CheckpointFaultFixture {
         let store = state.store();
         let guard = store.lock();
         guard.insert_media(&media).unwrap();
-        guard
-            .insert_ledger(&domain::LedgerRow {
-                id: domain::LedgerId::new(),
-                media_id: media.id,
-                path: key.clone(),
-                season: None,
-                episode: None,
-                resolution: None,
-                codec: None,
-                hdr: None,
-                quality_source: domain::QualitySource::Release,
-                confidence: domain::Confidence::High,
-                filter_score: None,
-            })
-            .unwrap();
+        // 夹具直接用 `FixtureFile`（规则 §2③）：season/episode 皆 None ⇒ 落 `UnitKey::WHOLE`，
+        // 与旧台账行「season、episode 都是 None」逐字等价。
+        let spec = store::test_support::FixtureFile {
+            media_id: media.id,
+            path: key.clone(),
+            ..Default::default()
+        };
+        store::test_support::publish_fixture_file(&guard, &spec).unwrap();
         guard
             .record_scan_seen_stamps(
                 op_id,
@@ -456,12 +449,12 @@ fn assert_not_confirmed(state: &ApiState, op_id: &str, path: &std::path::Path) {
         Some((0, 0, None)),
         "窗口内变化的路径不得推进 durable 源版本"
     );
-    let row = guard.ledger_by_path(&key).unwrap().expect("路径必须已入账");
+    let row = guard.file_coverage_by_path(&key).unwrap().expect("路径必须已入账");
     let obligation = guard
         .scan_probe_obligations(100)
         .unwrap()
         .into_iter()
-        .find(|obligation| obligation.ledger_id == row.id)
+        .find(|obligation| obligation.ledger_id == row.file.file_id)
         .expect("窗口内变化的路径必须重挂处理义务");
     assert_eq!(obligation.reason, "scan_changed");
 }

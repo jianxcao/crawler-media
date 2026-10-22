@@ -10,6 +10,7 @@
 //! iterating; the published table in
 //! `docs/audits/2026-10-12-remediation-review-repro/endpoint-perf.md` uses the
 //! defaults. No network, no Chromium, no ffmpeg.
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 #[path = "support/mod.rs"]
 mod support;
@@ -21,7 +22,7 @@ use std::time::{Duration, Instant};
 use api::{ApiState, Store, router};
 use axum::body::{Body, to_bytes};
 use axum::http::Request;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserId};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UserId};
 use store::SessionRow;
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
@@ -150,9 +151,10 @@ fn seed_media(
         std::fs::write(&path, b"perf-fixture-payload").unwrap();
         std::fs::write(dir.join(format!("file-{file_index}.nfo")), nfo(&media, tv)).unwrap();
         let file_id = LedgerId::new();
-        store
-            .insert_ledger(&LedgerRow {
-                id: file_id,
+        publish_fixture_file(
+            &store,
+            &FixtureFile {
+                file_id: Some(file_id),
                 media_id: media.id,
                 path: path.display().to_string(),
                 season: tv.then_some(1),
@@ -163,8 +165,10 @@ fn seed_media(
                 quality_source: QualitySource::Release,
                 confidence: Confidence::High,
                 filter_score: None,
-            })
-            .unwrap();
+                ..Default::default()
+            },
+        )
+        .unwrap();
         playable.get_or_insert(file_id);
     }
     std::fs::write(dir.join("poster.jpg"), JPEG).unwrap();

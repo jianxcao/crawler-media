@@ -1,3 +1,4 @@
+use store::test_support::{publish_fixture_file, FixtureFile};
 mod support;
 
 use axum::http::StatusCode;
@@ -38,9 +39,9 @@ async fn restored_missing_row_is_not_pruned() {
     // Ledger row still exists and unchanged
     let store_arc = fix.state.store();
     let guard = store_arc.lock();
-    let loaded = guard.get_ledger(&row.id.to_string()).unwrap().unwrap();
-    assert_eq!(loaded.id, row.id);
-    assert_eq!(loaded.media_id, media_id);
+    let loaded = guard.file_coverage_by_id(row.file_id).unwrap().unwrap();
+    assert_eq!(loaded.file.file_id, row.file_id);
+    assert_eq!(loaded.file.media_id, media_id);
 }
 
 #[tokio::test]
@@ -85,8 +86,9 @@ async fn parent_verify_and_prune_do_not_touch_nested_library() {
             bangumi_id: None,
             anilist_id: None,
         };
-        let r = domain::LedgerRow {
-            id: domain::LedgerId::new(),
+        let r = domain::LedgerId::new();
+        let spec = FixtureFile {
+            file_id: Some(r),
             media_id: mid,
             path: nested_file.to_str().unwrap().to_string(),
             season: None,
@@ -97,10 +99,11 @@ async fn parent_verify_and_prune_do_not_touch_nested_library() {
             quality_source: domain::QualitySource::Release,
             confidence: domain::Confidence::High,
             filter_score: None,
+            ..Default::default()
         };
         guard.insert_media(&m).unwrap();
-        guard.insert_ledger(&r).unwrap();
-        (mid, r)
+        let published = publish_fixture_file(&guard, &spec).unwrap();
+        (mid, published)
     };
 
     // Both files are missing on disk
@@ -129,8 +132,8 @@ async fn parent_verify_and_prune_do_not_touch_nested_library() {
     // Parent row is deleted, but nested child row remains!
     let store_arc = fix.state.store();
     let guard = store_arc.lock();
-    assert!(guard.get_ledger(&parent_row.id.to_string()).unwrap().is_none());
-    assert!(guard.get_ledger(&nested_row.id.to_string()).unwrap().is_some());
+    assert!(guard.file_coverage_by_id(parent_row.file_id).unwrap().is_none());
+    assert!(guard.file_coverage_by_id(nested_row.file_id).unwrap().is_some());
 }
 
 #[tokio::test]

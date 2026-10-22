@@ -24,11 +24,112 @@ pub(super) fn routes(provider: Arc<dyn MediaServerProvider>) -> Router {
             "/Videos/{id}/Subtitles/{index}/Stream.{codec}",
             get(subtitle_stream),
         )
+        .route("/playback/files/{id}/fonts", get(file_fonts))
+        .route("/playback/files/{id}/trickplay", get(file_trickplay))
         .route_layer(axum::middleware::from_fn(move |req, next| {
             let provider = stream_provider.clone();
             authenticate(provider, req, next)
         }))
         .with_state(AppState::new(provider))
+}
+
+async fn file_fonts(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    check_device_revocation(state.provider.as_ref(), &user, &headers, "内嵌字体").await?;
+    tracing::info!(user_id = %user.id, file_id = %id, "读取内嵌字体附件");
+    let (path, is_strm) = state
+        .provider
+        .resolve_stream_source(user.id, &id)
+        .await
+        .map_err(|e| {
+            tracing::error!(%e, user_id = %user.id, file_id = %id, "解析字体文件源失败");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if is_strm {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    if !path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // 尝试寻找同目录下的字体附件或同名字体目录
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    let parent = path.parent().unwrap_or(FsPath::new(""));
+    let font_dir = parent.join(format!("{stem}.fonts"));
+    if font_dir.is_dir() {
+        let mut fonts = Vec::new();
+        if let Ok(mut dir) = tokio::fs::read_dir(&font_dir).await {
+            while let Ok(Some(entry)) = dir.next_entry().await {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.ends_with(".ttf") || name.ends_with(".otf") || name.ends_with(".woff2") {
+                        fonts.push(name.to_string());
+                    }
+                }
+            }
+        }
+        if !fonts.is_empty() {
+            return Ok(Json(json!({ "fonts": fonts })).into_response());
+        }
+    }
+
+    // 字体文件存在时返回可用字体列表（JASSUB 消费），缺失返回 404
+    Err(StatusCode::NOT_FOUND)
+}
+
+async fn file_trickplay(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    check_device_revocation(state.provider.as_ref(), &user, &headers, "缩略图索引").await?;
+    tracing::info!(user_id = %user.id, file_id = %id, "读取 trickplay 缩略图");
+    let (path, is_strm) = state
+        .provider
+        .resolve_stream_source(user.id, &id)
+        .await
+        .map_err(|e| {
+            tracing::error!(%e, user_id = %user.id, file_id = %id, "解析缩略图文件源失败");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if is_strm {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    if !path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // 尝试寻找同目录下的 trickplay 缩略图文件（如 .jpg / .webp）
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    let parent = path.parent().unwrap_or(FsPath::new(""));
+    let candidates = [
+        parent.join(format!("{stem}.trickplay.jpg")),
+        parent.join(format!("{stem}.trickplay.webp")),
+        parent.join(format!("{stem}-trickplay.jpg")),
+    ];
+    for cand in candidates {
+        if cand.exists() {
+            let content_type = match cand.extension().and_then(|e| e.to_str()) {
+                Some("webp") => "image/webp",
+                _ => "image/jpeg",
+            };
+            if let Ok(bytes) = tokio::fs::read(&cand).await {
+                return Ok(([(header::CONTENT_TYPE, content_type)], bytes).into_response());
+            }
+        }
+    }
+
+    Err(StatusCode::NOT_FOUND)
 }
 
 /// 会话 token 的日志占位：日志里永不出现 token 原文。
@@ -298,14 +399,15 @@ pub async fn playback_info(
             StatusCode::INTERNAL_SERVER_ERROR
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
-    let is_strm = snapshot.row.path.to_ascii_lowercase().ends_with(".strm");
+    let path_str = snapshot.file.path.to_string_lossy();
+    let is_strm = path_str.to_ascii_lowercase().ends_with(".strm");
     let direct_url = is_strm
-        .then(|| library::read_strm_url(FsPath::new(&snapshot.row.path)))
+        .then(|| library::read_strm_url(FsPath::new(path_str.as_ref())))
         .flatten();
     if is_strm && direct_url.is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
-    let source_path = direct_url.as_deref().unwrap_or(snapshot.row.path.as_str());
+    let source_path = direct_url.as_deref().unwrap_or(path_str.as_ref());
     let protocol = if source_path.starts_with("http://") || source_path.starts_with("https://") {
         "Http"
     } else {
@@ -319,7 +421,7 @@ pub async fn playback_info(
         .map(str::to_ascii_lowercase);
     let runtime_ticks = snapshot.metadata.runtime_ticks;
     let media_streams = dto::media_streams_with_item(&snapshot.metadata.tracks, Some(&id));
-    let source_id = snapshot.row.id.to_string();
+    let source_id = snapshot.file.file_id.to_string();
     let mut source = json!({
         "Id": source_id,
         "Path": source_path,

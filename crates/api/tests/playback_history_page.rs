@@ -2,6 +2,7 @@
 //!
 //! characterization：entries/hidden_count/has_more/复合游标/days/scope=all 语义不变；
 //! 另有一条真实回归：hidden_count 必须覆盖整个 scope，而不是旧的「前 20 万行」窗口。
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 #[path = "support/mod.rs"]
 mod support;
@@ -13,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use api::{ApiState, Store, router};
 use axum::body::{Body, to_bytes};
 use axum::http::Request;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserRole};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UserRole};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use serde_json::Value;
@@ -121,9 +122,10 @@ fn seed_media_with_ledger(store: &Store, library_root: &Path, title: &str) -> (M
     let path = library_root.join(format!("{title}.mkv"));
     std::fs::write(&path, b"x").unwrap();
     let file_id = LedgerId::new();
-    store
-        .insert_ledger(&LedgerRow {
-            id: file_id,
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(file_id),
             media_id: media.id,
             path: path.display().to_string(),
             season: None,
@@ -134,8 +136,10 @@ fn seed_media_with_ledger(store: &Store, library_root: &Path, title: &str) -> (M
             quality_source: QualitySource::Probe,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     (media.id, file_id)
 }
 

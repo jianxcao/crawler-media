@@ -23,7 +23,7 @@ pub(crate) use runner::checkpoint_fresh;
 use scope::{ScanScope, walk_video_files};
 use super::library::{
     browse_filter_from_query, browse_order_from_query, browse_store_error, missing_library,
-    preferred_row, require_visible_library, rows_in_library,
+    preferred_coverage, require_visible_library, coverages_in_library,
 };
 use crate::store::library_query;
 
@@ -70,8 +70,10 @@ pub(crate) fn scan_library_root(state: &ApiState, root: &std::path::Path) -> Res
     scan_library_subdir(state, root, root)
 }
 
-fn ledger_row_by_path(store: &crate::Store, path: &str) -> Option<domain::LedgerRow> {
-    store.ledger_by_path(path).unwrap_or_else(|error| {
+/// 路径 → 覆盖记录（含该文件已入库的 unit）。旧 `ledger_row_by_path` 的单值
+/// `(season, episode)` 读数在这里被 `FileCoverage.units` 取代。
+fn coverage_by_path(store: &crate::Store, path: &str) -> Option<domain::FileCoverage> {
+    store.file_coverage_by_path(path).unwrap_or_else(|error| {
         tracing::warn!(%error, path, "扫描期间读取台账行失败");
         None
     })
@@ -157,15 +159,15 @@ pub(crate) fn scan_library_subdir(
         let store = state.store.lock();
         let mut map = HashMap::new();
         for file in &filtered_transferred {
-            let Some(row) = ledger_row_by_path(&store, &file.path.display().to_string()) else {
+            let Some(coverage) = coverage_by_path(&store, &file.path.display().to_string()) else {
                 continue;
             };
-            let Some(media) = media_by_id(&store, row.media_id) else {
+            let Some(media) = media_by_id(&store, coverage.file.media_id) else {
                 continue;
             };
             if media.kind != domain::MediaKind::Video {
                 map.entry(media.id)
-                    .or_insert((media, PathBuf::from(row.path)));
+                    .or_insert((media, coverage.file.path.clone()));
             }
         }
         map
@@ -260,21 +262,23 @@ fn resolve_and_scrape_subdir(
             // None 也包含"本来就没有可写的图"，不是错误。
             let _ = crate::poster_fetch::attach_poster(state, &resolved_media, &path);
             let _ = crate::poster_fetch::attach_backdrop(state, &resolved_media, &path);
-            let (target_row, all_rows) = {
+            let (target_coverage, all_coverages) = {
                 let store = state.store.lock();
-                let rows = match store.ledger_for_media(resolved_media.id) {
-                    Ok(rows) => rows,
+                let coverages = match store.file_coverage_for_media(resolved_media.id) {
+                    Ok(coverages) => coverages,
                     Err(error) => {
                         tracing::warn!(%error, media_id = %resolved_media.id, "读取 Media 台账行失败");
                         Vec::new()
                     }
                 };
-                let path_str = path.display().to_string();
-                let row = rows.iter().find(|r| r.path == path_str).cloned();
-                (row, rows)
+                let target = coverages
+                    .iter()
+                    .find(|coverage| coverage.file.path.as_path() == path)
+                    .cloned();
+                (target, coverages)
             };
-            if let Some(row) = target_row {
-                scrape_library_metadata(state, &resolved_media, &row, &path, &all_rows);
+            if let Some(coverage) = target_coverage {
+                scrape_library_metadata(state, &resolved_media, &coverage, &path, &all_coverages);
             }
         }
     }
@@ -297,40 +301,46 @@ pub(crate) async fn refresh_metadata(
     let Some(library) = library_by_id(&store, &id) else {
         return missing_library();
     };
-    let owned_rows = rows_in_library(&store, &library);
-    let mut grouped: HashMap<domain::MediaId, Vec<domain::LedgerRow>> = HashMap::new();
-    for row in &owned_rows {
-        grouped.entry(row.media_id).or_default().push(row.clone());
+    // 读数口径保持 `list_file_coverage()` + library 归属过滤：这就是 Task 18/19/20
+    // 基线记录的 `root_ledger_scans` 路径，换成 `file_coverage_for_media` 会让已冻结的
+    // store 侧读数与这里的 api 侧读数不可比，并且丢掉 library 归属过滤。
+    let owned_coverages = coverages_in_library(&store, &library);
+    let mut grouped: HashMap<domain::MediaId, Vec<domain::FileCoverage>> = HashMap::new();
+    for coverage in &owned_coverages {
+        grouped
+            .entry(coverage.file.media_id)
+            .or_default()
+            .push(coverage.clone());
     }
     let mut work = Vec::new();
-    for (media_id, media_rows) in grouped {
+    for (media_id, media_coverages) in grouped {
         let Some(media) = media_by_id(&store, media_id) else {
             continue;
         };
-        let live_rows: Vec<_> = media_rows
+        let live_coverages: Vec<_> = media_coverages
             .iter()
-            .filter(|row| {
-                crate::scrape_metadata::targets::video_present(std::path::Path::new(&row.path))
+            .filter(|coverage| {
+                crate::scrape_metadata::targets::video_present(&coverage.file.path)
             })
             .collect();
-        if let Some(row) = preferred_row(&live_rows) {
-            work.push((media, (*row).clone()));
+        if let Some(coverage) = preferred_coverage(&live_coverages) {
+            work.push((media, (*coverage).clone()));
         }
     }
     drop(store);
     let mut refreshed = 0u32;
-    for (media, row) in work {
+    for (media, coverage) in work {
         if lease.control().is_cancelled() || !state.store.lock().library_accepts_work(&id).unwrap_or(false) {
             return err(StatusCode::CONFLICT, "library.deleting", "Library 正在删除或已冻结");
         }
-        let path = PathBuf::from(&row.path);
+        let path = coverage.file.path.clone();
         if crate::poster_fetch::attach_poster(&state, &media, &path).is_some() {
             refreshed += 1;
         }
         // 真实失败由 poster_fetch 内部记录；None 表示没有可写的图。
         let _ = crate::poster_fetch::force_attach_backdrop(&state, &media, &path);
         // TMDB 详情 + 演职员写入 NFO（无 NFO 时也补一份），供条目详情页读取。
-        scrape_library_metadata(&state, &media, &row, &path, &owned_rows);
+        scrape_library_metadata(&state, &media, &coverage, &path, &owned_coverages);
         if lease.control().is_cancelled() {
             return err(StatusCode::CONFLICT, "library.deleting", "Library 正在删除");
         }
@@ -343,9 +353,9 @@ pub(crate) async fn refresh_metadata(
 fn scrape_library_metadata(
     state: &ApiState,
     media: &domain::Media,
-    row: &domain::LedgerRow,
+    coverage: &domain::FileCoverage,
     path: &std::path::Path,
-    owned_rows: &[domain::LedgerRow],
+    owned_coverages: &[domain::FileCoverage],
 ) {
     let lease = match state.acquire_path_work(path, media.kind) {
         Ok(lease) => lease,
@@ -355,10 +365,12 @@ fn scrape_library_metadata(
         return;
     };
     if media.kind == domain::MediaKind::Tv {
-        let show_root = crate::scrape_metadata::show_root(path, row);
-        let episodes = owned_rows
+        // S4 目标签名（`scrape_metadata::show_root(path, coverage)` / `scrape_tv_sidecars(state, media,
+        // show_root, coverages)`）在 task-79 落地前这两行按目标形状传参，报错归属 S4。
+        let show_root = crate::scrape_metadata::show_root(path, coverage);
+        let episodes = owned_coverages
             .iter()
-            .filter(|episode| episode.media_id == media.id)
+            .filter(|owned| owned.file.media_id == media.id)
             .cloned()
             .collect::<Vec<_>>();
         crate::scrape_metadata::scrape_tv_sidecars(state, media, &show_root, &episodes);
@@ -420,20 +432,26 @@ pub(crate) async fn missing(
     };
     let missing_map = store.missing_at_by_path().unwrap_or_default();
     let mut media_groups: HashMap<domain::MediaId, (domain::Media, Vec<Value>)> = HashMap::new();
-    for row in rows_in_library(&store, &library) {
-        if missing_map.contains_key(&row.path) {
-            if let Some(media) = store.get_media(row.media_id).ok().flatten() {
-                let entry = media_groups
-                    .entry(row.media_id)
-                    .or_insert_with(|| (media, Vec::new()));
-                entry.1.push(json!({
-                    "id": row.id.to_string(),
-                    "file_path": row.path,
-                    "season_number": row.season.unwrap_or(0),
-                    "episode_number": row.episode.unwrap_or(0),
-                    "size_bytes": 0,
-                }));
-            }
+    for coverage in coverages_in_library(&store, &library) {
+        if !missing_map.contains_key(coverage.file.path.to_string_lossy().as_ref()) {
+            continue;
+        }
+        let Some(media) = store.get_media(coverage.file.media_id).ok().flatten() else {
+            continue;
+        };
+        let entry = media_groups
+            .entry(coverage.file.media_id)
+            .or_insert_with(|| (media, Vec::new()));
+        // 旧读模型里每个 (file × unit) 一条 JSON：整片（旧 season/episode 皆 None）
+        // 记 (0, 0)，其余记 unit 的季/集，逐条展开保持条目集合不变。
+        for unit in &coverage.units {
+            entry.1.push(json!({
+                "id": coverage.file.file_id.to_string(),
+                "file_path": coverage.file.path,
+                "season_number": if unit.is_whole() { 0 } else { unit.season },
+                "episode_number": if unit.is_whole() { 0 } else { unit.episode },
+                "size_bytes": 0,
+            }));
         }
     }
     let items: Vec<Value> = media_groups

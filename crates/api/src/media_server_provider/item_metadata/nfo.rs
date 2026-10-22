@@ -1,15 +1,16 @@
-use domain::{Media, MediaKind};
+use domain::{LibraryFile, Media, MediaKind};
 use std::path::{Path, PathBuf};
 
-pub(super) fn row_nfo_path(
-    row: &domain::LedgerRow,
+pub(super) fn file_nfo_path(
+    file: &LibraryFile,
+    unit: (i32, i32),
     media: &Media,
     is_series: bool,
 ) -> Option<PathBuf> {
-    let path = Path::new(&row.path);
+    let path = file.path.as_path();
     let dir = path.parent()?;
     let stem = path.file_stem()?.to_str()?;
-    let series_dir = series_directory(row, dir);
+    let series_dir = series_directory(unit.0 >= 0, dir);
     let candidates = if is_series {
         vec![
             series_dir.join("tvshow.nfo"),
@@ -28,31 +29,33 @@ pub(super) fn row_nfo_path(
     candidates.into_iter().find(|candidate| candidate.is_file())
 }
 
-fn series_directory<'a>(row: &domain::LedgerRow, directory: &'a Path) -> &'a Path {
+/// 剧集文件的 NFO 归属目录：文件在 `Season xx` 下且该单元分集时，向上一层找剧集根。
+fn series_directory<'a>(has_season: bool, directory: &'a Path) -> &'a Path {
     let is_season_directory = directory
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.to_ascii_lowercase().starts_with("season"));
-    if row.season.is_some() && is_season_directory {
+    if has_season && is_season_directory {
         directory.parent().unwrap_or(directory)
     } else {
         directory
     }
 }
 
-pub(super) fn row_nfo_metadata(
-    row: &domain::LedgerRow,
+pub(super) fn file_nfo_metadata(
+    file: &LibraryFile,
+    unit: (i32, i32),
     media: &Media,
     is_series: bool,
 ) -> Option<library::NfoMeta> {
-    let mut metadata = row_nfo_path(row, media, is_series)
+    let mut metadata = file_nfo_path(file, unit, media, is_series)
         .and_then(|path| library::read_nfo(&path))
         .unwrap_or_default();
     if !is_series && media.kind == MediaKind::Tv {
-        let path = Path::new(&row.path);
+        let path = file.path.as_path();
         let show_nfo = path
             .parent()
-            .map(|directory| series_directory(row, directory).join("tvshow.nfo"));
+            .map(|directory| series_directory(unit.0 >= 0, directory).join("tvshow.nfo"));
         let fallback = show_nfo
             .filter(|path| path.is_file())
             .and_then(|path| library::read_nfo(&path));

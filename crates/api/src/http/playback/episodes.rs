@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use domain::{LedgerRow, Media, UserId};
+use domain::{FileCoverage, Media, UserId};
 use serde_json::{Value, json};
 
 use crate::http::library::artwork_url;
@@ -55,7 +55,7 @@ pub fn format_episodes_json(episodes: &[EpisodeRow], media_item_id: &str) -> Vec
 pub fn aggregate_visible_episodes(
     store: &Store,
     media: &Media,
-    rows: &[LedgerRow],
+    rows: &[FileCoverage],
     target_season: Option<u32>,
     user_id: Option<UserId>,
     season_metas: &HashMap<u32, HashMap<u32, media::EpisodeMeta>>,
@@ -74,7 +74,7 @@ pub fn aggregate_visible_episodes(
 pub fn aggregate_visible_episodes_with(
     store: &Store,
     media: &Media,
-    rows: &[LedgerRow],
+    rows: &[FileCoverage],
     target_season: Option<u32>,
     user_id: Option<UserId>,
     season_metas: &HashMap<u32, HashMap<u32, media::EpisodeMeta>>,
@@ -83,10 +83,14 @@ pub fn aggregate_visible_episodes_with(
     let mut unit_states = HashMap::new();
     if let Some(uid) = user_id {
         for row in rows {
-            let Some(e) = row.episode else { continue };
-            let s = row.season.unwrap_or(1);
-            if let Ok(st) = store.unit_state(uid, media.id, s as i32, e as i32) {
-                unit_states.insert((s, e), st);
+            for unit in &row.units {
+                if unit.is_whole() {
+                    continue;
+                }
+                let (s, e) = (unit.season.max(0) as u32, unit.episode.max(0) as u32);
+                if let Ok(st) = store.unit_state(uid, media.id, unit.season, unit.episode) {
+                    unit_states.insert((s, e), st);
+                }
             }
         }
     }
@@ -101,7 +105,7 @@ pub fn aggregate_visible_episodes_with(
 
 /// Bounded out-of-lock aggregation: takes owned rows, pre-loaded unit states and file seam.
 pub fn aggregate_visible_episodes_owned(
-    rows: &[LedgerRow],
+    rows: &[FileCoverage],
     target_season: Option<u32>,
     unit_states: &HashMap<(u32, u32), Option<crate::store::UnitState>>,
     season_metas: &HashMap<u32, HashMap<u32, media::EpisodeMeta>>,
@@ -111,39 +115,42 @@ pub fn aggregate_visible_episodes_owned(
         HashMap::new();
 
     for row in rows {
-        let Some(ep_num) = row.episode else {
-            continue;
-        };
-        let season_num = row.season.unwrap_or(1);
-        if let Some(target) = target_season {
-            if season_num != target {
+        for unit in &row.units {
+            if unit.is_whole() {
                 continue;
             }
+            let season_num = unit.season.max(0) as u32;
+            let ep_num = unit.episode.max(0) as u32;
+            if let Some(target) = target_season {
+                if season_num != target {
+                    continue;
+                }
+            }
+
+            let file_path = &row.file.path;
+            let file_name = file_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
+
+            let local_still =
+                crate::episode_still::existing_with(file_path, files).map(|_| artwork_url("stills", row.file.file_id));
+            // 只有磁盘上真有 fanart 才给地址。没有剧照时卡片用集号占位，
+            // 不再对每一集打出必定 404 的 /fanart/{id}。
+            let backdrop = if !unit.is_whole()
+                && crate::http::library::backdrop_path_with(&row.file, files).is_some()
+            {
+                Some(artwork_url("fanart", row.file.file_id))
+            } else {
+                None
+            };
+
+            let entry = grouped
+                .entry((season_num, ep_num))
+                .or_insert_with(|| (Vec::new(), file_name, local_still, backdrop));
+            entry.0.push(row.file.file_id.to_string());
         }
-
-        let file_path = Path::new(&row.path);
-        let file_name = file_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default()
-            .to_string();
-
-        let local_still =
-            crate::episode_still::existing_with(file_path, files).map(|_| artwork_url("stills", row.id));
-        // 只有磁盘上真有 fanart 才给地址。没有剧照时卡片用集号占位，
-        // 不再对每一集打出必定 404 的 /fanart/{id}。
-        let backdrop = if row.season.is_some()
-            && crate::http::library::backdrop_path_with(row, files).is_some()
-        {
-            Some(artwork_url("fanart", row.id))
-        } else {
-            None
-        };
-
-        let entry = grouped
-            .entry((season_num, ep_num))
-            .or_insert_with(|| (Vec::new(), file_name, local_still, backdrop));
-        entry.0.push(row.id.to_string());
     }
 
     let mut keys: Vec<(u32, u32)> = grouped.keys().copied().collect();

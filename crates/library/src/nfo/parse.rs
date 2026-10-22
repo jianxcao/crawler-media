@@ -68,6 +68,8 @@ pub(crate) struct NfoPresence {
     pub(crate) content_rating: NfoText,
     pub(crate) original_language: NfoText,
     pub(crate) status: NfoText,
+    /// 根元素 `<thumb>`（episode 的剧集剧照 URL）。存在性语义与其它文本字段一致。
+    pub(crate) thumb: NfoText,
     pub(crate) genres: NfoList<String>,
     pub(crate) countries: NfoList<String>,
     pub(crate) studios: NfoList<String>,
@@ -220,6 +222,7 @@ fn presence_of(root: roxmltree::Node<'_, '_>) -> Option<NfoPresence> {
         content_rating: child_text_state(root, &["mpaa", "contentrating", "certification"]),
         original_language: child_text_state(root, &["original_language", "originallanguage"]),
         status: child_text_state(root, &["status"]),
+        thumb: child_text_state(root, &["thumb"]),
         genres: child_texts_state(root, &["genre", "tag"]),
         countries: child_texts_state(root, &["country"]),
         studios: child_texts_state(root, &["studio", "network", "productioncompany"]),

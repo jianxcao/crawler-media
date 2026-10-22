@@ -62,7 +62,7 @@ pub fn item_dto_json(snapshot: MediaItemSnapshot) -> Value {
     };
     let item_path = std::path::Path::new(&item.path);
     let series_path = item_path.parent().map(|directory| {
-        let show_directory = if snapshot.row.season.is_some() {
+        let show_directory = if snapshot.unit.is_some() {
             directory.parent().unwrap_or(directory)
         } else {
             directory
@@ -74,7 +74,7 @@ pub fn item_dto_json(snapshot: MediaItemSnapshot) -> Value {
     let mut value = json!({
         "Id": item_id,
         "Name": if snapshot.media.kind == domain::MediaKind::Tv && !snapshot.is_series {
-            format!("S{:02}E{:02}", snapshot.row.season.unwrap_or(0), snapshot.row.episode.unwrap_or(0))
+            format!("S{:02}E{:02}", snapshot.unit.map(|u| u.season as u32).unwrap_or(0), snapshot.unit.map(|u| u.episode as u32).unwrap_or(0))
         } else { item.name },
         "Path": if snapshot.is_series {
             series_path.unwrap_or(item.path)
@@ -109,7 +109,7 @@ pub fn item_dto_json(snapshot: MediaItemSnapshot) -> Value {
     });
 
     if snapshot.media.kind == domain::MediaKind::Tv && !snapshot.is_series {
-        let season_num = snapshot.row.season.unwrap_or(1);
+        let season_num = snapshot.unit.map(|u| u.season as u32).unwrap_or(1);
         value["SeriesId"] = json!(series_id);
         value["SeriesName"] = json!(snapshot.media.title);
         value["SeasonId"] = json!(domain::TypedItemId::Season {
@@ -117,8 +117,8 @@ pub fn item_dto_json(snapshot: MediaItemSnapshot) -> Value {
             season: season_num,
         }
         .to_wire_string());
-        value["IndexNumber"] = json!(snapshot.row.episode);
-        value["ParentIndexNumber"] = json!(snapshot.row.season);
+        value["IndexNumber"] = json!(snapshot.unit.map(|u| u.episode as u32));
+        value["ParentIndexNumber"] = json!(snapshot.unit.map(|u| u.season as u32));
         value["SeasonName"] = json!(format!("第 {} 季", season_num));
         value["ParentBackdropImageTags"] = json!(
             snapshot
@@ -154,7 +154,7 @@ pub fn item_dto_json(snapshot: MediaItemSnapshot) -> Value {
     if snapshot.metadata.has_primary_image {
         let fallback_tag = if (snapshot.media.kind == domain::MediaKind::Tv
             && !snapshot.is_series
-            && snapshot.row.episode.is_some())
+            && snapshot.unit.is_some())
             || snapshot.metadata.primary_image_url.is_some()
         {
             "episode"

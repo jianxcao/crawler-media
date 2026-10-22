@@ -52,17 +52,22 @@ impl MetadataPriorityGate {
                 .iter()
                 .map(|unit| {
                     let current = store
-                        .get_ledger(&unit.row.id.to_string())
+                        .file_coverage_by_id(unit.row.file.file_id)
                         .map_err(|e| e.to_string())?
                         .ok_or("file_deleted: probe ledger missing")?;
-                    if current.path != unit.row.path || current.media_id != unit.row.media_id {
+                    if current.file.path != unit.row.file.path
+                        || current.file.media_id != unit.row.file.media_id
+                    {
                         return Err("Library probe source identity changed".to_string());
                     }
                     let owner = store
-                        .library_for_path_strict(std::path::Path::new(&unit.row.path), unit.kind)
+                        .library_for_path_strict(
+                            std::path::Path::new(&unit.row.file.path),
+                            unit.kind,
+                        )
                         .map_err(|e| e.to_string())?
                         .ok_or("Library no longer owns probe source")?;
-                    Ok((unit.row.id.to_string(), owner.id))
+                    Ok((unit.row.file.file_id.to_string(), owner.id))
                 })
                 .collect::<Result<Vec<_>, String>>()?
         };
@@ -135,20 +140,13 @@ mod tests {
                     &[],
                 )
                 .unwrap();
-            let row = domain::LedgerRow {
-                id: domain::LedgerId::new(),
-                media_id: media.id,
-                path: root.join("episode.mkv").to_string_lossy().into_owned(),
-                season: Some(1),
-                episode: Some(1),
-                resolution: None,
-                codec: None,
-                hdr: None,
-                quality_source: domain::QualitySource::Release,
-                confidence: domain::Confidence::High,
-                filter_score: None,
-            };
-            store.lock().insert_ledger(&row).unwrap();
+            let mut row = super::super::test_support::coverage(
+                media.id,
+                &root.join("episode.mkv").to_string_lossy(),
+                Some(1),
+                Some(1),
+            );
+            super::super::test_support::publish_into(&store.lock(), &mut row);
             units.push(super::super::ProbeUnit {
                 row,
                 kind: media.kind,
@@ -183,16 +181,18 @@ mod tests {
 }
 
 impl CaptureGate for MetadataPriorityGate {
-    fn work_control(&self, row: &domain::LedgerRow) -> marker::WorkControl {
+    fn work_control(&self, row: &domain::FileCoverage) -> marker::WorkControl {
         let owner = {
             let store = self.store.lock();
-            let current = store.get_ledger(&row.id.to_string()).ok().flatten();
+            let current = store.file_coverage_by_id(row.file.file_id).ok().flatten();
             current
-                .filter(|current| current.path == row.path && current.media_id == row.media_id)
-                .and_then(|_| store.get_media(row.media_id).ok().flatten())
+                .filter(|current| {
+                    current.file.path == row.file.path && current.file.media_id == row.file.media_id
+                })
+                .and_then(|_| store.get_media(row.file.media_id).ok().flatten())
                 .and_then(|media| {
                     store
-                        .library_for_path_strict(std::path::Path::new(&row.path), media.kind)
+                        .library_for_path_strict(std::path::Path::new(&row.file.path), media.kind)
                         .ok()
                         .flatten()
                 })
@@ -203,7 +203,7 @@ impl CaptureGate for MetadataPriorityGate {
             return marker::WorkControl::default();
         }
         if let Some(owners) = &self.owners {
-            if let Some((original, control)) = owners.get(&row.id.to_string()) {
+            if let Some((original, control)) = owners.get(&row.file.file_id.to_string()) {
                 if owner.as_ref().is_some_and(|owner| &owner.id == original) {
                     return control.clone();
                 }

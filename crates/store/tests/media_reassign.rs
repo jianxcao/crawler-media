@@ -6,9 +6,10 @@
 use std::path::{Path, PathBuf};
 
 use domain::{
-    Confidence, LedgerId, LedgerRow, LibraryFile, Media, MediaId, MediaKind, PhysicalSourceId,
+    Confidence, LedgerId, LibraryFile, Media, MediaId, MediaKind, PhysicalSourceId,
     QualitySource, UnitKey, UserId,
 };
+use store::test_support::FixtureFile;
 use store::library_write::ReassignFiles;
 use store::playback::MediaMergeRequest;
 use store::{PlaySessionIdState, SessionRow, Store, StoreError};
@@ -75,8 +76,8 @@ fn publish(
         std::fs::create_dir_all(parent).expect("create file parent");
     }
     std::fs::write(&path, b"fixture").expect("write fixture file");
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let row = FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id,
         path: path.to_string_lossy().into_owned(),
         season: unit.map(|u| u.season.max(0) as u32),
@@ -87,9 +88,10 @@ fn publish(
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     };
-    store.insert_ledger(&row).expect("publish fixture file");
-    row.id
+    store::test_support::publish_fixture_file(store, &row).expect("publish fixture file");
+    row.file_id.expect("fixture file id")
 }
 
 fn file(store: &Store, id: LedgerId) -> LibraryFile {

@@ -1,13 +1,14 @@
 use api::{ApiState, Store, router};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
+use store::test_support::FixtureFile;
 use tower::ServiceExt;
 
 struct NoFetch;
@@ -111,20 +112,29 @@ fn seed_movie_root(store: &Store, root: &Path) {
 
 /// Publish one ledger row with the file's real stat facts.
 ///
-/// `insert_ledger` never touches the filesystem, so a row published that way keeps
+/// `publish_fixture_file` never touches the filesystem, so a file published that way keeps
 /// `created_ns`/`mtime_ns` NULL and `library_items.added_at_sort` collapses to
 /// "unknown". Only the scan commit (`insert_scanned_files`) records stat, which is
 /// what `SortBy=DateCreated` orders by.
-fn publish_scanned(store: &Store, row: LedgerRow) {
-    let observation = library::observe_source(Path::new(&row.path)).unwrap();
-    let units = match (row.season, row.episode) {
+fn publish_scanned(store: &Store, spec: FixtureFile) {
+    let observation = library::observe_source(Path::new(&spec.path)).unwrap();
+    let units = match (spec.season, spec.episode) {
         (Some(season), Some(episode)) => vec![domain::UnitKey::new(season as i32, episode as i32)],
         _ => vec![domain::UnitKey::WHOLE],
     };
     store
         .insert_scanned_files(
             &[store::ScannedLedger {
+                file_id: spec.file_id.unwrap_or_else(LedgerId::new),
+                media_id: spec.media_id,
+                path: spec.path,
                 units,
+                resolution: spec.resolution,
+                codec: spec.codec,
+                hdr: spec.hdr,
+                quality_source: spec.quality_source,
+                confidence: spec.confidence,
+                filter_score: spec.filter_score,
                 source_version: observation.source_version,
                 source_digest: observation.content_digest,
                 size_bytes: observation
@@ -133,7 +143,6 @@ fn publish_scanned(store: &Store, row: LedgerRow) {
                 created_ns: observation.created_ns,
                 modified_ns: observation.modified_ns,
                 observations: Vec::new(),
-                row,
             }],
             1_000,
         )
@@ -167,20 +176,17 @@ fn app_seeded(root: &Path, seed: impl FnOnce(&Path)) -> (axum::Router, MediaId, 
     let file = root.join("matrix.mkv");
     std::fs::write(&file, b"0123456789abcdef").unwrap();
     seed(root);
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let spec = store::test_support::FixtureFile {
         media_id: media.id,
         path: file.display().to_string(),
-        season: None,
-        episode: None,
         resolution: Some("2160p".into()),
         codec: Some("hevc".into()),
-        hdr: None,
         quality_source: QualitySource::Probe,
         confidence: Confidence::High,
         filter_score: Some(100),
+        ..Default::default()
     };
-    store.insert_ledger(&row).unwrap();
+    store::test_support::publish_fixture_file(&store, &spec).unwrap();
     let compact = work_id(media.id);
     let router = router(
         ApiState::new(
@@ -223,20 +229,17 @@ fn app_with_clock(root: &Path, clock: Arc<dyn api::playback_events::PlaybackCloc
     store.insert_media(&media).unwrap();
     let file = root.join("matrix.mkv");
     std::fs::write(&file, b"0123456789abcdef").unwrap();
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let spec = store::test_support::FixtureFile {
         media_id: media.id,
         path: file.display().to_string(),
-        season: None,
-        episode: None,
         resolution: Some("2160p".into()),
         codec: Some("hevc".into()),
-        hdr: None,
         quality_source: QualitySource::Probe,
         confidence: Confidence::High,
         filter_score: Some(100),
+        ..Default::default()
     };
-    store.insert_ledger(&row).unwrap();
+    store::test_support::publish_fixture_file(&store, &spec).unwrap();
     let compact = work_id(media.id);
     let state = ApiState::new(
         store,

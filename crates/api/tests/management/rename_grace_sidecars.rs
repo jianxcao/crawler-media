@@ -1,5 +1,6 @@
 //! Regression tests for TV metadata refresh sidecars when directory was renamed
 //! but stale ledger rows still linger during grace period.
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 mod fixture;
 use fixture::RenameFixture;
@@ -31,7 +32,11 @@ async fn rename_grace_all_missing_does_not_recreate_directory() {
     assert!(!f.live_root.exists(), "live root must not be recreated if all files missing");
     let store_guard = f.state.store();
     let store = store_guard.lock();
-    assert_eq!(store.ledger_for_media(f.media.id).unwrap().len(), 4, "ledgers must remain during grace");
+    assert_eq!(
+        store.file_coverage_for_media(f.media.id).unwrap().len(),
+        4,
+        "ledgers must remain during grace"
+    );
     assert!(store.get_media(f.media.id).unwrap().is_some());
 }
 
@@ -43,19 +48,24 @@ async fn rename_grace_stale_preferred_row_does_not_poison_target() {
     let old_e99 = f.old_root.join("Spirit.Rangers.S01E99.strm");
     let store_guard = f.state.store();
     let store = store_guard.lock();
-    store.insert_ledger(&domain::LedgerRow {
-        id: domain::LedgerId::new(),
-        media_id: f.media.id,
-        path: old_e99.display().to_string(),
-        season: Some(1),
-        episode: Some(99),
-        resolution: Some("1080p".into()),
-        codec: None,
-        hdr: None,
-        quality_source: domain::QualitySource::Release,
-        confidence: domain::Confidence::High,
-        filter_score: None,
-    }).unwrap();
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(domain::LedgerId::new()),
+            media_id: f.media.id,
+            path: old_e99.display().to_string(),
+            season: Some(1),
+            episode: Some(99),
+            resolution: Some("1080p".into()),
+            codec: None,
+            hdr: None,
+            quality_source: domain::QualitySource::Release,
+            confidence: domain::Confidence::High,
+            filter_score: None,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     drop(store);
     drop(store_guard);
 
@@ -74,7 +84,7 @@ async fn rename_grace_stale_preferred_row_does_not_poison_target() {
     assert!(!f.old_root.exists(), "old root must not be recreated even with stale preferred row");
     let store_guard = f.state.store();
     let store = store_guard.lock();
-    assert_eq!(store.ledger_for_media(f.media.id).unwrap().len(), 5);
+    assert_eq!(store.file_coverage_for_media(f.media.id).unwrap().len(), 5);
 }
 
 #[tokio::test]
@@ -109,9 +119,10 @@ async fn rename_grace_keeps_two_live_copies_separate() {
     for episode in 1..=2 {
         let path = copy.join(format!("Spirit.Rangers.S01E{episode:02}.strm"));
         std::fs::write(&path, b"https://example.com/copy").unwrap();
-        store
-            .insert_ledger(&domain::LedgerRow {
-                id: domain::LedgerId::new(),
+        publish_fixture_file(
+            &store,
+            &FixtureFile {
+                file_id: Some(domain::LedgerId::new()),
                 media_id: f.media.id,
                 path: path.display().to_string(),
                 season: Some(1),
@@ -122,8 +133,10 @@ async fn rename_grace_keeps_two_live_copies_separate() {
                 quality_source: domain::QualitySource::Release,
                 confidence: domain::Confidence::High,
                 filter_score: None,
-            })
-            .unwrap();
+                ..Default::default()
+            },
+        )
+        .unwrap();
     }
     drop(store);
     drop(store_guard);

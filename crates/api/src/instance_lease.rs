@@ -20,6 +20,10 @@ pub const INSTANCE_LEASE_TTL_SECS: i64 = 60;
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(20);
 /// Escape hatch for deliberate multi-instance setups (env var, "1"/"true").
 pub const ALLOW_MULTI_INSTANCE_ENV: &str = "CRAWLER_MEDIA_ALLOW_MULTI_INSTANCE";
+/// Retry cadence override for a read-only instance waiting on the lease.
+pub const LEASE_RETRY_ENV: &str = "CRAWLER_MEDIA_LEASE_RETRY_MS";
+/// Heartbeat cadence override for the lease holder.
+pub const LEASE_HEARTBEAT_ENV: &str = "CRAWLER_MEDIA_LEASE_HEARTBEAT_MS";
 
 pub struct InstanceLease {
     store: Arc<Mutex<Store>>,
@@ -45,7 +49,7 @@ fn env_ms(name: &str, default: Duration) -> Duration {
 /// H-1: how often a read-only instance retries the lease (TTL/2).
 pub(crate) fn retry_interval() -> Duration {
     env_ms(
-        "CRAWLER_MEDIA_LEASE_RETRY_MS",
+        LEASE_RETRY_ENV,
         Duration::from_secs((INSTANCE_LEASE_TTL_SECS / 2) as u64),
     )
 }
@@ -107,7 +111,7 @@ fn spawn_heartbeat(lease: Weak<InstanceLease>) {
         .name("instance-lease".into())
         .spawn(move || {
             loop {
-                std::thread::sleep(env_ms("CRAWLER_MEDIA_LEASE_HEARTBEAT_MS", HEARTBEAT_EVERY));
+                std::thread::sleep(env_ms(LEASE_HEARTBEAT_ENV, HEARTBEAT_EVERY));
                 let Some(lease) = lease.upgrade() else { return };
                 let now = crate::job_loop::unix_now();
                 match lease

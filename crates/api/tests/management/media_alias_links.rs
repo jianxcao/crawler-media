@@ -7,7 +7,7 @@ use std::sync::Arc;
 use api::catalog::Catalog;
 use api::{Store, router};
 use axum::http::StatusCode;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use media::CatalogHit;
 use parking_lot::Mutex;
@@ -16,6 +16,7 @@ use tower::ServiceExt;
 
 use super::catalog::hit;
 use super::common::{Fixtures, json_data, request, state};
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 const TMDB_ID: &str = "603";
 
@@ -69,9 +70,10 @@ fn seed_owned_media(store: &Store, root: &Path, kind: MediaKind) -> Value {
     let video = library_root.join("Media.mkv");
     std::fs::write(&video, b"fixture").unwrap();
     let is_tv = kind == MediaKind::Tv;
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id: media.id,
             path: video.display().to_string(),
             season: is_tv.then_some(1),
@@ -82,8 +84,10 @@ fn seed_owned_media(store: &Store, root: &Path, kind: MediaKind) -> Value {
             quality_source: QualitySource::Probe,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     json!({
         "library_id": library.id,
         "library_name": library_name,

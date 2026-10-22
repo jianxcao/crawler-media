@@ -1,6 +1,8 @@
-use std::path::Path;
+pub use media::response_cache::{
+    CACHE_APPLICATION_ID, CACHE_SCHEMA_SQL as CACHE_DDL, CACHE_USER_VERSION,
+};
 use rusqlite::{Connection, OpenFlags};
-pub use media::response_cache::{CACHE_APPLICATION_ID, CACHE_SCHEMA_SQL as CACHE_DDL, CACHE_USER_VERSION};
+use std::path::Path;
 
 use crate::StoreError;
 
@@ -37,6 +39,93 @@ pub fn is_uninitialized(conn: &Connection) -> Result<bool, StoreError> {
     Ok(object_count == 0)
 }
 
+pub const JOBS_APPLICATION_ID: u32 = 1129139252;
+pub const JOBS_USER_VERSION: i64 = 1;
+
+const JOBS_REPAIR_HINT: &str = "jobs.db is an active queue database containing durable job definitions and states, not a disposable cache. \
+Do not delete or recreate automatically; please back up data/jobs.db before repairing or running migrations.";
+
+fn jobs_layout_error(error: StoreError) -> StoreError {
+    StoreError::Invalid(format!("{error}. {JOBS_REPAIR_HINT}"))
+}
+
+pub fn validate_jobs_layout(conn: &Connection) -> Result<(), StoreError> {
+    let app_id = read_application_id(conn)?;
+    let user_ver = read_user_version(conn)?;
+    if app_id != JOBS_APPLICATION_ID || user_ver != JOBS_USER_VERSION {
+        return Err(StoreError::Invalid(format!(
+            "jobs database layout mismatch: expected application_id {JOBS_APPLICATION_ID}, user_version {JOBS_USER_VERSION}, found application_id {app_id}, user_version {user_ver}. {JOBS_REPAIR_HINT}"
+        )));
+    }
+    validate_schema_objects(
+        "jobs",
+        conn,
+        crate::schema::v1::JOBS_TABLES,
+        crate::schema::v1::JOBS_INDEXES,
+    )
+    .map_err(jobs_layout_error)
+}
+
+/// 未打标（`application_id == 0 && user_version == 0`）但**形状已与声明布局一致**的
+/// jobs.db 是干净切换前的既有队列库：只补写身份头，不动任何表或数据。形状不一致时
+/// 仍然拒绝（不给兼容视图、不做自动迁移）。
+fn is_unstamped_but_complete_jobs_layout(conn: &Connection) -> Result<bool, StoreError> {
+    if read_application_id(conn)? != 0 || read_user_version(conn)? != 0 {
+        return Ok(false);
+    }
+    validate_schema_objects(
+        "jobs",
+        conn,
+        crate::schema::v1::JOBS_TABLES,
+        crate::schema::v1::JOBS_INDEXES,
+    )
+    .map_err(jobs_layout_error)?;
+    Ok(true)
+}
+
+pub fn initialize_jobs_layout(conn: &Connection) -> Result<(), StoreError> {
+    if is_uninitialized(conn)? || is_unstamped_but_complete_jobs_layout(conn)? {
+        conn.pragma_update(None, "application_id", JOBS_APPLICATION_ID)?;
+        conn.pragma_update(None, "user_version", JOBS_USER_VERSION)?;
+    } else {
+        validate_jobs_layout(conn)?;
+    }
+    Ok(())
+}
+
+pub fn validate_schema_objects(
+    name: &str,
+    conn: &Connection,
+    tables: &[&str],
+    indexes: &[&str],
+) -> Result<(), StoreError> {
+    for &tbl in tables {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)",
+            [tbl],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Err(StoreError::Invalid(format!(
+                "{name} database schema is missing required table {tbl}"
+            )));
+        }
+    }
+    for &idx in indexes {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'index' AND name = ?1)",
+            [idx],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Err(StoreError::Invalid(format!(
+                "{name} database schema is missing required index {idx}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_database_layout(
     name: &str,
     conn: &Connection,
@@ -49,6 +138,27 @@ pub fn validate_database_layout(
         return Err(StoreError::Invalid(format!(
             "{name} database layout mismatch: expected application_id {expected_app_id}, user_version {expected_user_ver}, found application_id {app_id}, user_version {user_ver}"
         )));
+    }
+    match name {
+        "app" => validate_schema_objects(
+            name,
+            conn,
+            crate::schema::v1::APP_TABLES,
+            crate::schema::v1::APP_INDEXES,
+        )?,
+        "library" => validate_schema_objects(
+            name,
+            conn,
+            crate::schema::v1::LIBRARY_TABLES,
+            crate::schema::v1::LIBRARY_INDEXES,
+        )?,
+        "subscribe" => validate_schema_objects(
+            name,
+            conn,
+            crate::schema::v1::SUBSCRIBE_TABLES,
+            crate::schema::v1::SUBSCRIBE_INDEXES,
+        )?,
+        _ => {}
     }
     Ok(())
 }

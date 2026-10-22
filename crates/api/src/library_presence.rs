@@ -182,28 +182,33 @@ fn collect_presence_observations(
     library_id: &str,
     target_media_id: Option<MediaId>,
     candidate_scope: &LibraryPathScope,
-    candidate_rows: Vec<domain::LedgerRow>,
+    candidate_coverages: Vec<domain::FileCoverage>,
     missing_map: &std::collections::HashMap<String, i64>,
     media_kinds: &std::collections::HashMap<MediaId, domain::MediaKind>,
 ) -> Result<Vec<LedgerPresenceObservation>, PresenceError> {
     let mut observations = Vec::new();
 
-    for row in candidate_rows {
+    for coverage in candidate_coverages {
+        let media_id = coverage.file.media_id;
         if let Some(mid) = target_media_id {
-            if row.media_id != mid {
+            if media_id != mid {
                 continue;
             }
         }
 
-        let Some(&real_kind) = media_kinds.get(&row.media_id) else {
+        let Some(&real_kind) = media_kinds.get(&media_id) else {
             // Missing media identity: skip conservatively
             continue;
         };
 
-        let Ok(resolved) = LibraryPathScope::resolve_path(Path::new(&row.path)) else {
+        // 旧行模型的 `path` 是库里的 TEXT；`missing_at` 索引仍按同一个键取，
+        // `PathBuf` 由该 TEXT 构造，`display()` 往返逐字节一致。
+        let path_key = coverage.file.path.display().to_string();
+        let missing_at = missing_map.get(&path_key).copied();
+        let Ok(resolved) = LibraryPathScope::resolve_path(coverage.file.path.as_path()) else {
             observations.push(LedgerPresenceObservation {
-                row: row.clone(),
-                missing_at: missing_map.get(&row.path).copied(),
+                file: coverage,
+                missing_at,
                 presence: FilePresence::Unknown,
             });
             continue;
@@ -217,18 +222,18 @@ fn collect_presence_observations(
             _ => continue,
         }
 
-        let presence = match state.library_files.presence(Path::new(&row.path)) {
+        let presence = match state.library_files.presence(coverage.file.path.as_path()) {
             Ok(true) => FilePresence::Present,
             Ok(false) => FilePresence::Missing,
             Err(e) => {
-                tracing::warn!(path = %row.path, error = %e, "Observing file presence failed");
+                tracing::warn!(path = %coverage.file.path.display(), error = %e, "Observing file presence failed");
                 FilePresence::Unknown
             }
         };
 
         observations.push(LedgerPresenceObservation {
-            row: row.clone(),
-            missing_at: missing_map.get(&row.path).copied(),
+            file: coverage,
+            missing_at,
             presence,
         });
     }
@@ -272,10 +277,10 @@ fn reconcile_presence(
     }
 
     // Collect candidates for this library and batch load their media kinds
-    let (candidate_rows, media_kinds, candidate_scope) = {
+    let (candidate_coverages, media_kinds, candidate_scope) = {
         let guard = state.store.lock();
-        let rows = guard.list_ledger()?;
-        let media_ids: Vec<MediaId> = rows.iter().map(|r| r.media_id).collect();
+        let rows = guard.list_file_coverage()?;
+        let media_ids: Vec<MediaId> = rows.iter().map(|row| row.file.media_id).collect();
         let media_map = guard.media_batch(&media_ids)?;
         let kinds: std::collections::HashMap<MediaId, domain::MediaKind> = media_map
             .into_iter()
@@ -289,7 +294,7 @@ fn reconcile_presence(
         library_id,
         target_media_id,
         &candidate_scope,
-        candidate_rows,
+        candidate_coverages,
         &missing_map,
         &media_kinds,
     )?;
@@ -299,11 +304,11 @@ fn reconcile_presence(
         for obs in &mut observations {
             if obs.presence == FilePresence::Missing && obs.missing_at.is_some() {
                 // Re-verify immediately before pruning
-                match state.library_files.presence(Path::new(&obs.row.path)) {
+                match state.library_files.presence(obs.file.file.path.as_path()) {
                     Ok(true) => obs.presence = FilePresence::Present,
                     Ok(false) => obs.presence = FilePresence::Missing,
                     Err(e) => {
-                        tracing::warn!(path = %obs.row.path, error = %e, "Re-verifying file presence returned error, skipping deletion");
+                        tracing::warn!(path = %obs.file.file.path.display(), error = %e, "Re-verifying file presence returned error, skipping deletion");
                         obs.presence = FilePresence::Unknown;
                     }
                 }
@@ -313,7 +318,7 @@ fn reconcile_presence(
         let ids_to_cancel: Vec<String> = observations
             .iter()
             .filter(|obs| obs.presence == FilePresence::Missing && obs.missing_at.is_some())
-            .map(|obs| obs.row.id.to_string())
+            .map(|obs| obs.file.file.file_id.to_string())
             .collect();
         if !ids_to_cancel.is_empty() {
             state

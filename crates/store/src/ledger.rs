@@ -1,39 +1,46 @@
-//! Ledger reads and file-fact writes for the `library_files` model.
+//! File-fact reads and writes for the `library_files` model.
 //!
-//! `domain::LedgerRow` stays the flat read shape management views consume; the
-//! richer file facts (root, publication/presence state, version, source) live in
-//! `library_files` and are read by the callers that need them.
+//! Reads return the explicit [`FileCoverage`] view: one `LibraryFile` plus every unit
+//! coordinate recorded for it. Nothing here takes a compact (dashless) id string — the
+//! API boundary converts request ids to `LedgerId` once and calls the typed accessors.
 
-use std::path::Path;
-
-use domain::{
-    FilePresence, FilePublication, FileVersion, LedgerId, LedgerRow, LibraryFile, LibraryId,
-    MediaId, UnitKey,
-};
+use domain::{FileCoverage, FileVersion, LedgerId, LibraryId, MediaId, UnitKey};
 use rusqlite::{OptionalExtension, params};
 
-use super::maps::map_ledger;
+use super::maps::{LIBRARY_FILE_COLUMNS, group_file_coverage, map_file_unit};
 use super::{Store, StoreError};
-use crate::library_write::{FilePublication as PublicationRequest, WriteScope};
 
-/// Column projection consumed by [`map_ledger`] (indices 0..=10).
-const LEDGER_COLUMNS: &str = "f.file_id, f.media_id, f.display_path, u.season, u.episode, \
-     f.resolution, f.codec, f.hdr, f.quality_source, f.confidence, f.filter_score";
+/// File facts plus the joined unit coordinate; callers group the rows into coverage.
+fn coverage_sql(filter: &str) -> String {
+    format!(
+        "SELECT {LIBRARY_FILE_COLUMNS}, u.season, u.episode
+         FROM library_files f
+         LEFT JOIN library_file_units u ON f.file_id = u.file_id
+         {filter}"
+    )
+}
 
 impl Store {
-    /// 按路径取已有台账行（扫描入库时判断「已记录」用）。
-    pub fn ledger_by_path(&self, path: &str) -> Result<Option<LedgerRow>, StoreError> {
-        let sql = format!(
-            "SELECT {LEDGER_COLUMNS}
-             FROM library_files f
-             LEFT JOIN library_file_units u ON f.file_id = u.file_id
-             WHERE f.path_key = ?1 OR f.display_path = ?1
-             LIMIT 1"
+    /// One file's coverage, grouped from the file-fact projection.
+    fn read_coverage<P: rusqlite::Params>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> Result<Vec<FileCoverage>, StoreError> {
+        let mut stmt = self.library.prepare(sql)?;
+        let rows = stmt
+            .query_map(params, map_file_unit)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(group_file_coverage(rows))
+    }
+
+    /// 按路径取文件覆盖（扫描入库时判断「已记录」用）。
+    pub fn file_coverage_by_path(&self, path: &str) -> Result<Option<FileCoverage>, StoreError> {
+        let sql = coverage_sql(
+            "WHERE f.file_id = (SELECT file_id FROM library_files
+                                WHERE path_key = ?1 OR display_path = ?1 LIMIT 1)",
         );
-        let mut stmt = self.library.prepare(&sql)?;
-        stmt.query_row(params![path], map_ledger)
-            .optional()
-            .map_err(Into::into)
+        Ok(self.read_coverage(&sql, [path])?.into_iter().next())
     }
 
     /// The file recorded at `path` and its version, for version-checked artwork publication.
@@ -64,7 +71,7 @@ impl Store {
     }
 
     /// Rename a file's recorded path (整理后落名一致；`path_key` 唯一约束保持）。
-    pub fn rename_ledger_path(&self, from: &str, to: &str) -> Result<bool, StoreError> {
+    pub fn rename_file_path(&self, from: &str, to: &str) -> Result<bool, StoreError> {
         let n = self.library.execute(
             "UPDATE library_files SET path_key = ?2, display_path = ?2
              WHERE path_key = ?1 OR display_path = ?1",
@@ -82,102 +89,56 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    pub fn ledger_for_media(&self, media_id: MediaId) -> Result<Vec<LedgerRow>, StoreError> {
+    pub fn file_coverage_for_media(&self, media_id: MediaId) -> Result<Vec<FileCoverage>, StoreError> {
         self.media_ledger_reads
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let sql = format!(
-            "SELECT {LEDGER_COLUMNS}
-             FROM library_files f
-             LEFT JOIN library_file_units u ON f.file_id = u.file_id
-             WHERE f.media_id = ?1"
-        );
-        let mut stmt = self.library.prepare(&sql)?;
-        let rows = stmt.query_map(params![media_id.to_string()], map_ledger)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let sql = coverage_sql("WHERE f.media_id = ?1");
+        self.read_coverage(&sql, [media_id.to_string()])
     }
 
-    /// 一次取多个 Media 的 ledger 行（≤500 个 id 一块，复用 `library_files.media_id` 索引）。
-    /// 重复 id 只查询一次，输出行不保证顺序。
-    pub fn ledger_for_media_batch(&self, ids: &[MediaId]) -> Result<Vec<LedgerRow>, StoreError> {
+    /// 一次取多个 Media 的文件覆盖（≤500 个 id 一块，复用 `library_files.media_id` 索引）。
+    /// 重复 id 只查询一次，输出不保证顺序。
+    pub fn file_coverage_for_media_batch(
+        &self,
+        ids: &[MediaId],
+    ) -> Result<Vec<FileCoverage>, StoreError> {
         let unique: std::collections::HashSet<MediaId> = ids.iter().copied().collect();
         let ids: Vec<MediaId> = unique.into_iter().collect();
         let mut out = Vec::new();
         for chunk in ids.chunks(500) {
             let placeholders = vec!["?"; chunk.len()].join(",");
-            let sql = format!(
-                "SELECT {LEDGER_COLUMNS}
-                 FROM library_files f
-                 LEFT JOIN library_file_units u ON f.file_id = u.file_id
-                 WHERE f.media_id IN ({placeholders})"
-            );
-            let mut stmt = self.library.prepare(&sql)?;
-            let rows = stmt.query_map(
+            let sql = coverage_sql(&format!("WHERE f.media_id IN ({placeholders})"));
+            out.extend(self.read_coverage(
+                &sql,
                 rusqlite::params_from_iter(chunk.iter().map(MediaId::to_string)),
-                map_ledger,
-            )?;
-            out.extend(rows.collect::<Result<Vec<_>, _>>()?);
+            )?);
         }
         Ok(out)
     }
 
-    pub fn get_ledger_by_unit(
+    /// One file's coverage by its typed id; an unknown id reads as `None`.
+    pub fn file_coverage_by_id(
         &self,
-        media_id: MediaId,
-        season: Option<u32>,
-        episode: Option<u32>,
-    ) -> Result<Option<LedgerRow>, StoreError> {
-        let rows = self.ledger_for_media(media_id)?;
-        Ok(rows
-            .into_iter()
-            .find(|r| r.season == season && r.episode == episode))
-    }
-
-    pub fn get_ledger(&self, compact_id: &str) -> Result<Option<LedgerRow>, StoreError> {
-        let sql = format!(
-            "SELECT {LEDGER_COLUMNS}
-             FROM library_files f
-             LEFT JOIN library_file_units u ON f.file_id = u.file_id
-             WHERE f.file_id = ?1 OR REPLACE(f.file_id, '-', '') = ?1
-             LIMIT 1"
-        );
-        let mut stmt = self.library.prepare(&sql)?;
-        stmt.query_row(params![compact_id], map_ledger)
-            .optional()
-            .map_err(Into::into)
-    }
-
-    pub fn list_ledger(&self) -> Result<Vec<LedgerRow>, StoreError> {
+        file_id: LedgerId,
+    ) -> Result<Option<FileCoverage>, StoreError> {
+        let sql = coverage_sql("WHERE f.file_id = ?1");
         Ok(self
-            .list_ledger_with_mode()?
+            .read_coverage(&sql, [file_id.to_string()])?
             .into_iter()
-            .map(|(row, _, _)| row)
-            .collect())
+            .next())
     }
 
-    /// Every file row plus its recorded transfer mode and source path.
-    pub fn list_ledger_with_mode(
-        &self,
-    ) -> Result<Vec<(LedgerRow, Option<String>, Option<String>)>, StoreError> {
-        let sql = format!(
-            "SELECT {LEDGER_COLUMNS}, f.transfer_mode, f.source_path
-             FROM library_files f
-             LEFT JOIN library_file_units u ON f.file_id = u.file_id"
-        );
+    /// Every file with its unit coverage, plus the unfiltered-scan work the read cost.
+    pub fn list_file_coverage(&self) -> Result<Vec<FileCoverage>, StoreError> {
+        let sql = coverage_sql("");
         let mut stmt = self.library.prepare(&sql)?;
-        let rows = stmt.query_map([], |row| {
-            let ledger = map_ledger(row)?;
-            let mode: Option<String> = row.get(11)?;
-            let source_path: Option<String> = row.get(12)?;
-            Ok((ledger, mode, source_path))
-        })?;
-        let collected = rows
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(StoreError::from);
+        let rows = stmt.query_map([], map_file_unit)?;
+        let collected = group_file_coverage(rows.collect::<Result<Vec<_>, _>>()?);
         self.root_ledger_scans.fetch_add(
             (stmt.get_status(rusqlite::StatementStatus::FullscanStep) as usize).max(1),
             std::sync::atomic::Ordering::Relaxed,
         );
-        collected
+        Ok(collected)
     }
 
     /// Remove every file row of `media_id`, whichever Library owns it.
@@ -237,127 +198,6 @@ impl Store {
 }
 
 impl Store {
-    /// Record a scanned/claimed file as Library content.
-    ///
-    /// Legacy adapter over the canonical publication path: it resolves the owning
-    /// Library root, requires the Media to be writable, writes the row and its
-    /// coverage, and reduces the affected summaries in one transaction.
-    pub fn insert_ledger(&self, row: &LedgerRow) -> Result<(), StoreError> {
-        self.insert_ledger_with_mode_and_source(row, None, None)
-    }
-
-    /// Save the original completed download path alongside an imported row.
-    /// The source is retained for an explicit administrator-triggered
-    /// retransfer when the Library copy later goes missing.
-    pub fn insert_ledger_with_source(
-        &self,
-        row: &LedgerRow,
-        source: &Path,
-    ) -> Result<(), StoreError> {
-        self.insert_ledger_with_mode_and_source(row, None, source.to_str())
-    }
-
-    /// Insert a file row with caller-observed transfer mode and optional source
-    /// path, avoiding filesystem metadata inspection under the Store lock.
-    pub fn insert_ledger_with_mode_and_source(
-        &self,
-        row: &LedgerRow,
-        transfer_mode: Option<&str>,
-        source_path: Option<&str>,
-    ) -> Result<(), StoreError> {
-        let file = self.place_ledger_row(row, transfer_mode, source_path)?;
-        let units = ledger_units(row);
-        let locale = crate::library_query::library_display_locale(self, file.library_id)
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-        let config_revision = self
-            .library_config_revision(&file.library_id.to_string())
-            .unwrap_or(0);
-        let observations = crate::metadata::observe_nfo_inputs(
-            &file.path,
-            file.kind,
-            &units,
-            &locale,
-            &file.version,
-            config_revision,
-        );
-        self.publish_files(
-            &WriteScope {
-                library_id: file.library_id,
-                config_revision: 0,
-            },
-            &[PublicationRequest {
-                file: &file,
-                units: &units,
-                expected_version: None,
-                nfo_observation: Some(&observations),
-                probe_required: false,
-            }],
-            crate::unix_now() * 1000,
-        )?;
-        Ok(())
-    }
-
-    /// Finalize a previously reserved Transfer row without recreating it if detached.
-    pub fn finalize_transfer(
-        &self,
-        row: &LedgerRow,
-        transfer_mode: &str,
-        source_path: Option<&str>,
-    ) -> Result<(), StoreError> {
-        let file_id = row.id.to_string();
-        let reservation: Option<(String, String, Option<String>, i64, String)> = self
-            .library
-            .query_row(
-                "SELECT media_id, path_key, source_path, file_revision, source_version
-                 FROM library_files WHERE file_id = ?1",
-                [&file_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )
-            .optional()?;
-        let Some((media_id, path, source, revision, source_version)) = reservation else {
-            return Err(StoreError::Protected(
-                "Transfer reservation changed or was detached".into(),
-            ));
-        };
-        if media_id != row.media_id.to_string()
-            || path != row.path
-            || source.as_deref() != source_path
-        {
-            return Err(StoreError::Protected(
-                "Transfer reservation changed or was detached".into(),
-            ));
-        }
-        let file = self.place_ledger_row(row, Some(transfer_mode), source_path)?;
-        let existing_units = self.get_file_units(row.id)?;
-        let units = if !existing_units.is_empty() {
-            existing_units
-        } else {
-            ledger_units(row)
-        };
-        let expected = FileVersion {
-            revision,
-            source_version,
-        };
-        self.publish_files(
-            &WriteScope {
-                library_id: file.library_id,
-                config_revision: 0,
-            },
-            &[PublicationRequest {
-                file: &file,
-                units: &units,
-                expected_version: Some(&expected),
-                nfo_observation: None,
-                probe_required: false,
-            }],
-            crate::unix_now() * 1000,
-        )?;
-        tracing::info!(file_id = %row.id, path = %row.path, "Finalized Transfer publication");
-        Ok(())
-    }
-
     /// Whether the path holds a reserved (not yet published) Transfer row.
     pub fn transfer_pending(&self, path: &str) -> Result<bool, StoreError> {
         let pending: Option<bool> = self
@@ -391,101 +231,6 @@ impl Store {
         Ok(actual.flatten().as_deref() == expected)
     }
 
-    /// Build the `library_files` row for a legacy [`LedgerRow`]: the owning Library
-    /// and root come from the path, the version from whatever is already recorded
-    /// there (a re-import of the same path keeps one file identity).
-    fn place_ledger_row(
-        &self,
-        row: &LedgerRow,
-        transfer_mode: Option<&str>,
-        source_path: Option<&str>,
-    ) -> Result<LibraryFile, StoreError> {
-        let media = self
-            .get_media(row.media_id)?
-            .ok_or_else(|| StoreError::Missing(format!("media {}", row.media_id)))?;
-        let library = self
-            .library_for_path_strict(Path::new(&row.path), media.kind)?
-            .ok_or_else(|| {
-                StoreError::Invalid(format!("path is outside every Library root: {}", row.path))
-            })?;
-        let root_id = self.root_for_path(&library.id, &row.path)?;
-        let existing: Option<(String, i64, String)> = self
-            .library
-            .query_row(
-                "SELECT file_id, file_revision, source_version FROM library_files
-                 WHERE path_key = ?1 OR display_path = ?1
-                 LIMIT 1",
-                [&row.path],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional()?;
-        let (file_id, revision, source_version) = match existing {
-            Some((file_id, revision, source_version)) => {
-                (file_id.parse::<LedgerId>()?, revision, source_version)
-            }
-            None => (row.id, 1, format!("{}-{}", crate::unix_now(), row.id)),
-        };
-        let artwork = crate::files::DiscoveredArtwork::discover(Path::new(&row.path));
-        Ok(LibraryFile {
-            file_id,
-            library_id: library.id.parse::<LibraryId>()?,
-            root_id,
-            media_id: row.media_id,
-            kind: media.kind,
-            path: row.path.clone().into(),
-            version: FileVersion {
-                revision,
-                source_version,
-            },
-            presence: FilePresence::Present,
-            publication: FilePublication::Published,
-            size_bytes: None,
-            stat_known: false,
-            created_ns: None,
-            modified_ns: None,
-            source_digest: None,
-            source_path: source_path.map(Into::into),
-            transfer_mode: transfer_mode.map(str::to_string),
-            resolution: row.resolution.clone(),
-            codec: row.codec.clone(),
-            hdr: row.hdr.clone(),
-            quality_source: row.quality_source,
-            confidence: row.confidence,
-            filter_score: row.filter_score,
-            release_quality: None,
-            duration_ms: None,
-            tracks_version: 0,
-            poster_path: artwork.poster,
-            backdrop_path: artwork.backdrop,
-            still_path: artwork.still,
-        })
-    }
-
-    /// The deepest root of `library_id` that contains `path`.
-    fn root_for_path(&self, library_id: &str, path: &str) -> Result<String, StoreError> {
-        let resolved = crate::library_paths::resolved_path(Path::new(path))?;
-        let mut best: Option<(usize, String)> = None;
-        for root in self.list_library_roots()? {
-            if root.library_id.as_deref() != Some(library_id) {
-                continue;
-            }
-            let normalized = crate::library_paths::resolved_path(&root.path)?;
-            if !resolved.starts_with(&normalized) {
-                continue;
-            }
-            let depth = normalized.components().count();
-            if best
-                .as_ref()
-                .is_none_or(|(best_depth, _)| *best_depth < depth)
-            {
-                best = Some((depth, root.id.clone()));
-            }
-        }
-        best.map(|(_, id)| id).ok_or_else(|| {
-            StoreError::Invalid(format!("no root of library {library_id} contains {path}"))
-        })
-    }
-
     /// Rewrite every fact path equal to `from` into `to` for a media's
     /// subscribes（整理后 wash-cut 的事实路径仍指向新文件）。
     pub fn rewrite_fact_paths(
@@ -515,19 +260,13 @@ impl Store {
     }
 }
 
-/// Coverage of one legacy row: whole-work when it carries no episode, otherwise
-/// the single season/episode it names.
-fn ledger_units(row: &LedgerRow) -> Vec<UnitKey> {
-    match (row.season, row.episode) {
-        (Some(season), Some(episode)) => vec![UnitKey::new(season as i32, episode as i32)],
-        _ => vec![UnitKey::WHOLE],
-    }
-}
-
 #[cfg(test)]
 mod batch_tests {
     use super::*;
-    use domain::{Confidence, MediaKind, QualitySource};
+    use crate::library_write::{FilePublication as PublicationRequest, WriteScope};
+    use domain::{
+        Confidence, FilePresence, FilePublication, LibraryFile, MediaKind, QualitySource,
+    };
 
     fn seed_media(store: &Store, index: usize) -> MediaId {
         let media = domain::Media {
@@ -601,7 +340,7 @@ mod batch_tests {
     }
 
     #[test]
-    fn ledger_for_media_batch_covers_chunk_boundary_and_dedups() {
+    fn file_coverage_for_media_batch_covers_chunk_boundary_and_dedups() {
         let tmp = tempfile::tempdir().unwrap();
         let data = tmp.path().join("data");
         let store = Store::open(&data).unwrap();
@@ -628,15 +367,19 @@ mod batch_tests {
             seed_file(&store, &library.id, &root.id, *media_id, &path);
         }
 
-        assert_eq!(store.ledger_for_media_batch(&ids).unwrap().len(), 501);
-        assert!(store.ledger_for_media_batch(&[]).unwrap().is_empty());
+        let coverage = store.file_coverage_for_media_batch(&ids).unwrap();
+        assert_eq!(coverage.len(), 501);
+        assert!(
+            coverage
+                .iter()
+                .all(|file| file.units == vec![UnitKey::WHOLE])
+        );
+        assert!(store.file_coverage_for_media_batch(&[]).unwrap().is_empty());
 
-        // 重复 id 只查询一次，不产生重复行。
+        // 重复 id 只查询一次，不产生重复覆盖。
         let mut duplicated = ids.clone();
         duplicated.extend(ids.iter().take(10).copied());
-        assert_eq!(
-            store.ledger_for_media_batch(&duplicated).unwrap().len(),
-            501
-        );
+        let deduped = store.file_coverage_for_media_batch(&duplicated).unwrap();
+        assert_eq!(deduped.len(), 501);
     }
 }

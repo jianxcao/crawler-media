@@ -4,7 +4,7 @@
 >
 > - 领域词汇：`CONTEXT.md`
 > - API 信封与核心 DTO：`docs/api-contracts/self.md`（约定，不是完整路由表）
-> - 现行路由：`crates/api/src/http/mod.rs`、`web/lib/api/*`
+> - 现行路由：`crates/api/src/http/mod.rs`（`router_with_slow_after`）与 `crates/api/src/http/routes/{mod,member,admin}.rs`、`web/lib/api/*`
 >
 > 文中打 ✅ 的条目记录当时落地的方向；之后若端点合并或改名（例如
 > `/tracking-state` 并进 `PATCH /subscriptions/{id}`），以代码为准，不要按

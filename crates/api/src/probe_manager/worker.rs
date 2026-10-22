@@ -1,5 +1,5 @@
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use super::{ProbeManager, ProbeUnit, probe};
 
@@ -105,20 +105,24 @@ async fn run_metadata_worker(manager: Arc<ProbeManager>) {
     }
 }
 fn cancel_deleted_dispatch(manager: &ProbeManager, id: &store::ProbeDispatchId) {
-    let missing = manager
-        .store
-        .lock()
-        .get_ledger(&id.ledger_id)
-        .ok()
-        .flatten()
+    let missing = super::ledger_id(&id.ledger_id)
+        .and_then(|file_id| {
+            manager
+                .store
+                .lock()
+                .file_coverage_by_id(file_id)
+                .ok()
+                .flatten()
+        })
         .is_none();
     if !missing {
         return;
     }
-    if let Err(error) = manager
-        .store
-        .lock()
-        .cancel_probe_unit(&id.job_id, &id.ledger_id, "file_deleted")
+    if let Err(error) =
+        manager
+            .store
+            .lock()
+            .cancel_probe_unit(&id.job_id, &id.ledger_id, "file_deleted")
     {
         tracing::error!(%error, job_id = %id.job_id, ledger_id = %id.ledger_id, "删除文件后取消探测单元失败");
         return;
@@ -131,7 +135,11 @@ fn cancel_deleted_dispatch(manager: &ProbeManager, id: &store::ProbeDispatchId) 
         .flatten()
         .is_some_and(|job| job.kind == "marker_refresh" && job.is_active());
     if refresh {
-        if let Err(error) = manager.store.lock().cancel_probe_job(&id.job_id, "file_deleted") {
+        if let Err(error) = manager
+            .store
+            .lock()
+            .cancel_probe_job(&id.job_id, "file_deleted")
+        {
             tracing::error!(%error, job_id = %id.job_id, "删除文件后取消刷新任务失败");
         }
     }
@@ -182,7 +190,10 @@ async fn run_fingerprint_worker(manager: Arc<ProbeManager>) {
             message
         };
         let Some((id, work)) = message else { break };
-        if manager.shutting_down.load(std::sync::atomic::Ordering::SeqCst) {
+        if manager
+            .shutting_down
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
             manager.seen.lock().remove(&id.ledger_id);
             continue;
         }
@@ -247,11 +258,11 @@ fn refresh_leases(
     let rows = manager
         .store
         .lock()
-        .list_ledger()
+        .list_file_coverage()
         .map_err(|e| e.to_string())?;
     let units: Vec<_> = rows
         .into_iter()
-        .filter(|row| row.media_id == unit.row.media_id)
+        .filter(|row| row.file.media_id == unit.row.file.media_id)
         .map(|row| {
             let mut expanded = unit.clone();
             expanded.row = row;
@@ -272,7 +283,7 @@ pub(super) fn work_lease(
     let library_id = {
         let store = manager.store.lock();
         store
-            .library_for_path_strict(std::path::Path::new(&unit.row.path), unit.kind)
+            .library_for_path_strict(std::path::Path::new(&unit.row.file.path), unit.kind)
             .map_err(|e| e.to_string())?
             .map(|library| library.id)
     }
@@ -290,7 +301,10 @@ pub(super) fn source_ready(manager: &ProbeManager, unit: &ProbeUnit) -> bool {
             .flatten()
             .is_some_and(|job| !job.is_active())
         {
-            manager.seen.lock().remove(&unit.row.id.to_string());
+            manager
+                .seen
+                .lock()
+                .remove(&unit.row.file.file_id.to_string());
             return false;
         }
     }
@@ -303,7 +317,7 @@ pub(super) fn source_ready(manager: &ProbeManager, unit: &ProbeUnit) -> bool {
             false
         }
         Err(error) => {
-            tracing::error!(%error, ledger_id = %unit.row.id, "检查探测源文件失败");
+            tracing::error!(%error, ledger_id = %unit.row.file.file_id, "检查探测源文件失败");
             manager.finish(unit, false);
             false
         }
@@ -315,7 +329,10 @@ pub(super) async fn wait_for_metadata_idle(manager: &ProbeManager) {
         .metadata_idle_generation
         .load(std::sync::atomic::Ordering::Acquire);
     loop {
-        if manager.metadata_pending.load(std::sync::atomic::Ordering::Acquire) == 0
+        if manager
+            .metadata_pending
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
             || manager
                 .metadata_idle_generation
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -326,7 +343,10 @@ pub(super) async fn wait_for_metadata_idle(manager: &ProbeManager) {
         let notified = manager.metadata_idle.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        if manager.metadata_pending.load(std::sync::atomic::Ordering::Acquire) == 0
+        if manager
+            .metadata_pending
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
             || manager
                 .metadata_idle_generation
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -339,7 +359,7 @@ pub(super) async fn wait_for_metadata_idle(manager: &ProbeManager) {
 }
 
 fn start_persisted_unit(manager: &ProbeManager, unit: &ProbeUnit) -> bool {
-    let ledger_id = unit.row.id.to_string();
+    let ledger_id = unit.row.file.file_id.to_string();
     let started = match unit.job_id.as_deref() {
         Some(job_id) => manager.store.lock().start_probe_unit(job_id, &ledger_id),
         None => {

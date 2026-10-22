@@ -6,6 +6,29 @@ use subscribe::{QualityFact, SubscribeFacts};
 use crate::library_scope::{LibraryPathScope, StrictOwner};
 use super::{Store, StoreError};
 
+/// Unit coordinates of one coverage, as the legacy per-unit join rows expressed them:
+/// a whole-file unit（整片 / `(-1,-1)`）becomes `(None, None)`. An empty coverage keeps
+/// the legacy LEFT JOIN shape of a single `(None, None)` row.
+fn coverage_coordinates(coverage: &domain::FileCoverage) -> Vec<(Option<u32>, Option<u32>)> {
+    if coverage.units.is_empty() {
+        return vec![(None, None)];
+    }
+    coverage
+        .units
+        .iter()
+        .map(|unit| {
+            if unit.is_whole() {
+                (None, None)
+            } else {
+                (
+                    u32::try_from(unit.season).ok(),
+                    u32::try_from(unit.episode).ok(),
+                )
+            }
+        })
+        .collect()
+}
+
 impl Store {
     /// Coordinate a Subscribe's local facts with the selected shared Library.
     /// In-flight coverage is deliberately absent; recorded user deletion facts
@@ -87,32 +110,40 @@ pub fn evaluate_subscribe_facts_pure(
         }
     }
 
-    for row in &snapshot.rows {
-        let p = Path::new(&row.path);
-        let resolved = LibraryPathScope::resolve_path(p)?;
+    for coverage in &snapshot.rows {
+        let path = coverage.file.path.to_string_lossy().into_owned();
+        let resolved = LibraryPathScope::resolve_path(Path::new(&path))?;
         if !matches!(scope.owner(&resolved, snapshot.kind), StrictOwner::Owned(owner) if owner.id == target_library.id) {
             continue;
         }
         let fact = QualityFact {
-            score: row.filter_score.unwrap_or(0),
-            path: Some(row.path.clone()),
+            score: coverage.file.filter_score.unwrap_or(0),
+            path: Some(path.clone()),
         };
-        let key = (row.season, row.episode);
-        let stale = facts
-            .get(key.0, key.1)
-            .and_then(|f| f.path.as_deref())
-            .map(|old| !snapshot.rows.iter().any(|r| r.path == old))
-            .unwrap_or(false);
+        // 一个物理文件可覆盖多个 unit；legacy 拿到的是逐 unit 的 join 行，这里逐 unit 保值。
+        let coordinates = coverage_coordinates(coverage);
+        for (season, episode) in coordinates {
+            let stale = facts
+                .get(season, episode)
+                .and_then(|f| f.path.as_deref())
+                .map(|old| {
+                    !snapshot
+                        .rows
+                        .iter()
+                        .any(|c| c.file.path.to_string_lossy().as_ref() == old)
+                })
+                .unwrap_or(false);
 
-        if stale {
-            facts.replace(key.0, key.1, fact);
-        } else {
-            facts.upsert(key.0, key.1, fact);
+            if stale {
+                facts.replace(season, episode, fact.clone());
+            } else {
+                facts.upsert(season, episode, fact.clone());
+            }
         }
 
-        if let Some(quality_res) = snapshot.qualities.get(&row.id) {
+        if let Some(quality_res) = snapshot.qualities.get(&coverage.file.file_id) {
             match quality_res {
-                Ok(quality) => facts.set_quality(row.path.clone(), quality.clone()),
+                Ok(quality) => facts.set_quality(path.clone(), quality.clone()),
                 Err(e) => return Err(StoreError::Invalid(format!("corrupt persisted quality: {e}"))),
             }
         }

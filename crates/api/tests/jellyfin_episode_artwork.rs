@@ -1,15 +1,15 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use api::catalog::Catalog;
 use api::{ApiState, Store, router};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use media::CatalogHit;
 use serde_json::Value;
+use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
 
 struct NoFetch;
@@ -69,9 +69,19 @@ async fn response_json(response: axum::response::Response) -> Value {
     serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
 }
 
-fn episode_row(media_id: MediaId, path: &Path, episode: u32) -> LedgerRow {
-    LedgerRow {
-        id: LedgerId::new(),
+use domain::{Confidence, Media, MediaId, MediaKind, QualitySource};
+
+/// 分集条目的可寻址 ID（`/Items/{id}` 用）。
+fn episode_item_id(media_id: MediaId, season: i32, episode: i32) -> String {
+    domain::TypedItemId::Unit {
+        media: media_id,
+        key: domain::UnitKey { season, episode },
+    }
+    .to_wire_string()
+}
+
+fn episode_file(media_id: MediaId, path: &Path, episode: u32) -> FixtureFile {
+    FixtureFile {
         media_id,
         path: path.display().to_string(),
         season: Some(1),
@@ -82,6 +92,9 @@ fn episode_row(media_id: MediaId, path: &Path, episode: u32) -> LedgerRow {
         quality_source: QualitySource::Probe,
         confidence: Confidence::High,
         filter_score: None,
+        transfer_mode: None,
+        source_path: None,
+        file_id: None,
     }
 }
 
@@ -127,16 +140,12 @@ async fn jellyfin_series_primary_image_uses_series_poster_and_episode_uses_still
         b"episode-still",
     )
     .unwrap();
-    let row = episode_row(show.id, &video, 1);
-    store.insert_ledger(&row).unwrap();
+    let spec = episode_file(show.id, &video, 1);
+    publish_fixture_file(&store, &spec).unwrap();
 
     let app = router(app_state(tmp.path(), store).with_catalog(Arc::new(EpisodeCatalog)));
     let series_id = domain::TypedItemId::Work(show.id).to_wire_string();
-    let episode_id = domain::TypedItemId::Unit {
-        media: show.id,
-        key: domain::UnitKey { season: 1, episode: 1 },
-    }
-    .to_wire_string();
+    let episode_id = episode_item_id(show.id, 1, 1);
     let series_item = app
         .clone()
         .oneshot(
@@ -239,20 +248,12 @@ async fn jellyfin_uses_unique_episode_stills_before_the_season_poster() {
         b"episode-one-still",
     )
     .unwrap();
-    let first = episode_row(show.id, &first_video, 1);
-    let second = episode_row(show.id, &second_video, 2);
-    store.insert_ledger(&first).unwrap();
-    store.insert_ledger(&second).unwrap();
-    let first_id = domain::TypedItemId::Unit {
-        media: show.id,
-        key: domain::UnitKey { season: 1, episode: 1 },
-    }
-    .to_wire_string();
-    let second_id = domain::TypedItemId::Unit {
-        media: show.id,
-        key: domain::UnitKey { season: 1, episode: 2 },
-    }
-    .to_wire_string();
+    let first = episode_file(show.id, &first_video, 1);
+    let second = episode_file(show.id, &second_video, 2);
+    publish_fixture_file(&store, &first).unwrap();
+    publish_fixture_file(&store, &second).unwrap();
+    let first_id = episode_item_id(show.id, 1, 1);
+    let second_id = episode_item_id(show.id, 1, 2);
     let app = router(app_state(tmp.path(), store).with_catalog(Arc::new(EpisodeCatalog)));
 
     let first_item = app
@@ -314,5 +315,162 @@ async fn jellyfin_uses_unique_episode_stills_before_the_season_poster() {
     assert_eq!(
         second_image.headers()[axum::http::header::LOCATION],
         "https://image.tmdb.org/t/p/w300/1-2-still.jpg"
+    );
+}
+
+/// 页内与图片端点共用的一集 fixture：库里没有任何本地海报/剧照，唯一的图源只可能是
+/// NFO `<thumb>`（现场）或发布期落库的观测事实。
+struct EpisodeArtwork {
+    _tmp: tempfile::TempDir,
+    state: ApiState,
+    episode_id: String,
+    nfo_path: PathBuf,
+}
+
+/// `thumb` 写进 `<stem>.nfo`；`observed` 为真时先写 NFO 再发布（走发布期观测），
+/// 为假时发布之后才写（现场 NFO 存在，但从未成为页内事实）。
+fn episode_artwork(thumb: &str, observed: bool) -> EpisodeArtwork {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = app_state(tmp.path(), Store::open(tmp.path().join("data")).unwrap());
+    let library_root = tmp.path().join("library/tv");
+    let episode_dir = library_root.join("Pantheon/Season 1");
+    std::fs::create_dir_all(&episode_dir).unwrap();
+    let video = episode_dir.join("Pantheon S01E01.strm");
+    std::fs::write(&video, "https://media.example/episode-1").unwrap();
+    let nfo_path = episode_dir.join("Pantheon S01E01.nfo");
+    let nfo =
+        format!("<episodedetails><title>Observed</title><thumb>{thumb}</thumb></episodedetails>");
+    if observed {
+        std::fs::write(&nfo_path, &nfo).unwrap();
+    }
+    let media_id = {
+        let store = state.store();
+        let store = store.lock();
+        let root = library_root.display().to_string();
+        store
+            .create_library(MediaKind::Tv, "TV", &[root.as_str()], "everyone", true, &[])
+            .unwrap();
+        let show = Media {
+            id: MediaId::new(),
+            kind: MediaKind::Tv,
+            title: "Pantheon".into(),
+            year: Some(2022),
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        };
+        store.insert_media(&show).unwrap();
+        publish_fixture_file(&store, &episode_file(show.id, &video, 1)).unwrap();
+        show.id
+    };
+    if !observed {
+        std::fs::write(&nfo_path, &nfo).unwrap();
+    }
+    let episode_id = episode_item_id(media_id, 1, 1);
+    EpisodeArtwork {
+        _tmp: tmp,
+        state,
+        episode_id,
+        nfo_path,
+    }
+}
+
+fn episode_app(fixture: &EpisodeArtwork) -> axum::Router {
+    router(fixture.state.clone().with_catalog(Arc::new(EpisodeCatalog)))
+}
+
+async fn item_primary_image_tag(app: &axum::Router, item_id: &str) -> Value {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/Items/{item_id}"))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    response_json(response).await["ImageTags"]["Primary"].clone()
+}
+
+async fn primary_image_response(app: &axum::Router, item_id: &str) -> (StatusCode, Option<String>) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/Items/{item_id}/Images/Primary"))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let location = response
+        .headers()
+        .get(axum::http::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    (response.status(), location)
+}
+
+/// 页内声明有主图 ⟺ 端点返回同一张图：图源是发布期观测到的事实，现场 NFO 被删后
+/// 两边都不许改变。
+#[tokio::test]
+async fn episode_primary_image_keeps_the_observed_still_after_the_nfo_is_gone() {
+    let fixture = episode_artwork("https://image.tmdb.org/t/p/w300/observed-still.jpg", true);
+    let app = episode_app(&fixture);
+    assert_eq!(
+        item_primary_image_tag(&app, &fixture.episode_id).await,
+        Value::String("episode".into()),
+        "发布期观测到的 <thumb> 必须让页内声明主图"
+    );
+    let (status, location) = primary_image_response(&app, &fixture.episode_id).await;
+    assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(
+        location.as_deref(),
+        Some("https://image.tmdb.org/t/p/w300/observed-still.jpg")
+    );
+
+    std::fs::remove_file(&fixture.nfo_path).unwrap();
+    assert_eq!(
+        item_primary_image_tag(&app, &fixture.episode_id).await,
+        Value::String("episode".into()),
+        "页内主图来自已落库的观测事实，现场 NFO 消失不得改变它"
+    );
+    let (status, location) = primary_image_response(&app, &fixture.episode_id).await;
+    assert_eq!(
+        status,
+        StatusCode::TEMPORARY_REDIRECT,
+        "页内声明有主图时端点必须返回同一张图，而不是现场 NFO"
+    );
+    assert_eq!(
+        location.as_deref(),
+        Some("https://image.tmdb.org/t/p/w300/observed-still.jpg")
+    );
+}
+
+/// 现场 NFO 有 `<thumb>` 但从未被观测：页内没有主图，端点也不得凭空变出一张。
+#[tokio::test]
+async fn episode_primary_image_ignores_a_thumb_that_was_never_observed() {
+    let fixture = episode_artwork(
+        "https://image.tmdb.org/t/p/w300/live-sidecar-still.jpg",
+        false,
+    );
+    let app = episode_app(&fixture);
+    assert_eq!(
+        item_primary_image_tag(&app, &fixture.episode_id).await,
+        Value::Null,
+        "未观测的现场 <thumb> 不是页内事实"
+    );
+    let (status, location) = primary_image_response(&app, &fixture.episode_id).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "页内没有主图时端点不得从现场 NFO 返回图片（location={location:?}）"
     );
 }

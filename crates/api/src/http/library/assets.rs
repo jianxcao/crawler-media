@@ -1,20 +1,31 @@
 use serde_json::{Value, json};
 use std::path::{Path as FsPath, PathBuf};
 
-use super::library_for_row;
+use super::library_for_file;
 use crate::store::{Library, LibraryRemoval};
 
-/// Ledger rows whose path falls under any root of the library.
-pub(crate) fn rows_in_library(store: &crate::Store, library: &Library) -> Vec<domain::LedgerRow> {
+/// Files whose recorded path falls under any root of the library.
+pub(crate) fn files_in_library(store: &crate::Store, library: &Library) -> Vec<domain::LibraryFile> {
+    coverages_in_library(store, library)
+        .into_iter()
+        .map(|coverage| coverage.file)
+        .collect()
+}
+
+/// 同 [`files_in_library`] 的过滤，但保留每个文件的 unit 覆盖（`FileCoverage`）。
+pub(crate) fn coverages_in_library(
+    store: &crate::Store,
+    library: &Library,
+) -> Vec<domain::FileCoverage> {
     store
-        .list_ledger()
+        .list_file_coverage()
         .unwrap_or_default()
         .into_iter()
-        .filter(|row| {
-            let Some(media) = store.get_media(row.media_id).ok().flatten() else {
+        .filter(|coverage| {
+            let Some(media) = store.get_media(coverage.file.media_id).ok().flatten() else {
                 return false;
             };
-            library_for_row(store, row, &media).is_some_and(|owner| owner.id == library.id)
+            library_for_file(store, &coverage.file, &media).is_some_and(|owner| owner.id == library.id)
         })
         .collect()
 }
@@ -116,34 +127,41 @@ pub(crate) fn library_json(store: &crate::Store, library: &Library) -> Result<Va
 
 /// Emby-style current cover source: latest TV episode wins; movies use their
 /// sole file. This makes a newly imported episode refresh the series cover.
-pub(crate) fn preferred_row<'a, R>(rows: &'a [R]) -> Option<&'a domain::LedgerRow>
+///
+/// Legacy key was `(row.season.unwrap_or(0), row.episode.unwrap_or(0), row.path)` over
+/// one row per unit; a whole file read as `(0, 0)`. Here the key is the same over the
+/// file's units (whole = `(-1, -1)` clamps to `(0, 0)`), so a multi-unit file picks the
+/// same file the legacy max over its unit rows picked.
+pub(crate) fn preferred_coverage<'a, R>(covs: &'a [R]) -> Option<&'a domain::FileCoverage>
 where
-    R: std::borrow::Borrow<domain::LedgerRow>,
+    R: std::borrow::Borrow<domain::FileCoverage>,
 {
-    rows.iter()
+    covs.iter()
         .map(std::borrow::Borrow::borrow)
-        .max_by_key(|row| {
-            (
-                row.season.unwrap_or(0),
-                row.episode.unwrap_or(0),
-                row.path.clone(),
-            )
+        .max_by_key(|coverage| {
+            let unit = coverage
+                .units
+                .iter()
+                .map(|unit| (unit.season.max(0), unit.episode.max(0)))
+                .max()
+                .unwrap_or((0, 0));
+            (unit.0, unit.1, coverage.file.path.clone())
         })
 }
 
-pub(crate) fn poster_path(row: &domain::LedgerRow) -> Option<PathBuf> {
-    poster_path_with(row, &crate::browse_file_read::LocalBrowseFileRead)
+pub(crate) fn poster_path(file: &domain::LibraryFile) -> Option<PathBuf> {
+    poster_path_with(file, &crate::browse_file_read::LocalBrowseFileRead)
 }
 
 /// 与 [`poster_path`] 同一套布局，存在性判断走注入的浏览文件 seam。
 pub(crate) fn poster_path_with(
-    row: &domain::LedgerRow,
+    file: &domain::LibraryFile,
     files: &dyn crate::browse_file_read::BrowseFileRead,
 ) -> Option<PathBuf> {
-    if let Some(poster) = crate::poster::poster_beside(&row.path, files) {
+    if let Some(poster) = crate::poster::poster_beside(&file.path.to_string_lossy(), files) {
         return Some(poster);
     }
-    let file_dir = FsPath::new(&row.path).parent()?;
+    let file_dir = file.path.parent()?;
     // 兼容两种布局：平铺（文件旁 poster.jpg）与模板整理后
     // （<show>/Season N/file → show 根 poster.jpg，向上找一层）。
     let up = file_dir.parent()?.join("poster.jpg");

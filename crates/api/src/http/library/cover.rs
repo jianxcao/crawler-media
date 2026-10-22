@@ -22,10 +22,10 @@ pub(crate) fn default_cover_options(library: &Library) -> CoverOptions {
 /// `None` means this Library has no readable local poster yet.
 pub(crate) fn render_cover_jpeg(
     library: &Library,
-    rows: &[domain::LedgerRow],
+    files: &[domain::LibraryFile],
     options: &CoverOptions,
 ) -> Result<Option<Vec<u8>>, String> {
-    let posters = collect_posters(rows);
+    let posters = collect_posters(files);
     if posters.is_empty() {
         return Ok(None);
     }
@@ -38,16 +38,23 @@ pub(crate) fn render_cover_jpeg(
     Ok(Some(jpeg))
 }
 
-fn collect_posters(rows: &[domain::LedgerRow]) -> Vec<DynamicImage> {
-    let mut rows: Vec<&domain::LedgerRow> = rows.iter().collect();
-    rows.sort_by(|left, right| left.path.cmp(&right.path));
+/// 只用到文件级事实（path / poster_path / media_id），所以收 `LibraryFile`；旧读模型里
+/// 同一文件的多个 unit 是重复行，`seen_media_ids` 去重后结果一致。排序仍按旧
+/// `row.path: String` 的逐字节序（`PathBuf` 是分量序，不能直接用）。
+fn collect_posters(files: &[domain::LibraryFile]) -> Vec<DynamicImage> {
+    let mut files: Vec<&domain::LibraryFile> = files.iter().collect();
+    files.sort_by(|left, right| {
+        left.path
+            .to_string_lossy()
+            .cmp(&right.path.to_string_lossy())
+    });
     let mut seen_media_ids = HashSet::new();
     let mut posters: Vec<DynamicImage> = Vec::new();
-    for row in rows {
-        if seen_media_ids.contains(&row.media_id) {
+    for file in files {
+        if seen_media_ids.contains(&file.media_id) {
             continue;
         }
-        let Some(path) = super::poster_path(&row) else {
+        let Some(path) = super::poster_path(file) else {
             continue;
         };
         match std::fs::read(&path).and_then(|bytes| {
@@ -55,7 +62,7 @@ fn collect_posters(rows: &[domain::LedgerRow]) -> Vec<DynamicImage> {
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
         }) {
             Ok(poster) => {
-                seen_media_ids.insert(row.media_id);
+                seen_media_ids.insert(file.media_id);
                 posters.push(poster);
                 if posters.len() == 6 {
                     break;

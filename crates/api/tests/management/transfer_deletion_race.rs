@@ -198,7 +198,7 @@ async fn transfer_started_first_is_finished_before_delete_snapshot() {
     let store_arc = api_state.store();
     let store = store_arc.lock();
     assert!(store.get_subscribe(sub_id).unwrap().is_none());
-    assert!(store.ledger_for_media(media_id).unwrap().is_empty());
+    assert!(store.file_coverage_for_media(media_id).unwrap().is_empty());
     assert!(
         store
             .load_subscribe_facts(sub_id)
@@ -271,7 +271,7 @@ async fn delete_reserved_first_prevents_transfer_mutation() {
     assert!(!downloader.completed_called.load(Ordering::SeqCst));
     let store_arc = api_state.store();
     let store = store_arc.lock();
-    assert!(store.ledger_for_media(media_id).unwrap().is_empty());
+    assert!(store.file_coverage_for_media(media_id).unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -356,7 +356,7 @@ async fn library_freeze_while_downloader_is_blocked_prevents_physical_transfer()
     resume_tx.send(()).unwrap();
     assert!(transfer.await.unwrap().is_err());
     assert_eq!(std::fs::read(src_file).unwrap(), b"video content");
-    assert!(api_state.store().lock().list_ledger().unwrap().is_empty());
+    assert!(api_state.store().lock().list_file_coverage().unwrap().is_empty());
     for root in library.root_paths {
         if root.exists() {
             assert_eq!(std::fs::read_dir(root).unwrap().count(), 0);

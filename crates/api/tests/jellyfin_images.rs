@@ -4,13 +4,11 @@ use std::sync::Arc;
 use api::{ApiState, Store, router};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use domain::{
-    Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, User, UserId,
-    UserRole,
-};
+use domain::{Confidence, Media, MediaId, MediaKind, QualitySource, User, UserId, UserRole};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use serde_json::Value;
+use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
 
 struct NoFetch;
@@ -50,8 +48,8 @@ fn app(root: &Path) -> (axum::Router, String, String) {
         .unwrap();
     let file = library_root.join("matrix.mkv");
     std::fs::write(&file, b"0123456789abcdef").unwrap();
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let file_id = domain::LedgerId::new();
+    let spec = FixtureFile {
         media_id: media.id,
         path: file.display().to_string(),
         season: None,
@@ -62,9 +60,12 @@ fn app(root: &Path) -> (axum::Router, String, String) {
         quality_source: QualitySource::Probe,
         confidence: Confidence::High,
         filter_score: Some(100),
+        transfer_mode: None,
+        source_path: None,
+        file_id: Some(file_id),
     };
-    store.insert_ledger(&row).unwrap();
-    let compact = row.id.to_string().replace('-', "");
+    let published = publish_fixture_file(&store, &spec).unwrap();
+    let compact = published.file_id.to_string().replace('-', "");
     let item_id = domain::TypedItemId::Work(media.id).to_wire_string();
     let router = router(
         ApiState::new(
@@ -271,9 +272,11 @@ async fn primary_image_returns_poster_jpeg_and_items_tag() {
         .unwrap();
     let views_body: Value =
         serde_json::from_slice(&to_bytes(views.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert!(views_body["Items"][0]["ImageTags"]["Primary"]
-        .as_str()
-        .is_some_and(|tag| tag.starts_with("cover-")));
+    assert!(
+        views_body["Items"][0]["ImageTags"]["Primary"]
+            .as_str()
+            .is_some_and(|tag| tag.starts_with("cover-"))
+    );
 
     let library_id = views_body["Items"][0]["Id"].as_str().unwrap();
     let library_image = app
@@ -346,8 +349,8 @@ async fn static_artwork_is_public_but_respects_authenticated_library_visibility(
     store
         .set_library_cover_path(&private.id, Some(&poster.display().to_string()))
         .unwrap();
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let file_id = domain::LedgerId::new();
+    let spec = FixtureFile {
         media_id: media.id,
         path: file.display().to_string(),
         season: None,
@@ -358,9 +361,12 @@ async fn static_artwork_is_public_but_respects_authenticated_library_visibility(
         quality_source: QualitySource::Probe,
         confidence: Confidence::High,
         filter_score: None,
+        transfer_mode: None,
+        source_path: None,
+        file_id: Some(file_id),
     };
-    store.insert_ledger(&row).unwrap();
-    let compact = row.id.to_string().replace('-', "");
+    let published = publish_fixture_file(&store, &spec).unwrap();
+    let compact = published.file_id.to_string().replace('-', "");
     let item_id = domain::TypedItemId::Work(media.id).to_wire_string();
     let member_id = UserId::new();
     store

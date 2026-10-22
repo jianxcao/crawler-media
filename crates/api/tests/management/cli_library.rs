@@ -1,8 +1,9 @@
 use api::Store;
 use api::cli::{Command, run};
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 
 use super::cli::transport;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 #[tokio::test]
 async fn cli_library_prints_no_media_when_empty() {
@@ -30,9 +31,10 @@ async fn cli_library_prints_media_title() {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id: media.id,
             path: tmp.path().join("data/library/movies/The Matrix.mkv").display().to_string(),
             season: None,
@@ -43,8 +45,10 @@ async fn cli_library_prints_media_title() {
             quality_source: QualitySource::Release,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     drop(store);
     let t = transport(&tmp);
     let out = run(Command::Library, &t).await.unwrap();
@@ -78,9 +82,10 @@ async fn cli_ledger_prints_media_title_and_path() {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id: media.id,
             path: tmp.path().join("data/library/movies/The Matrix.mkv").display().to_string(),
             season: None,
@@ -91,8 +96,10 @@ async fn cli_ledger_prints_media_title_and_path() {
             quality_source: QualitySource::Release,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     drop(store);
     let t = transport(&tmp);
     let out = run(Command::Ledger, &t).await.unwrap();

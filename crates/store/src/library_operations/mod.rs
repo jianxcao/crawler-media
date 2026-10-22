@@ -6,7 +6,10 @@
 //! and advanced in bounded phases, so a crash mid-way resumes instead of publishing a
 //! mixed-ownership library.
 //!
-//! Phases: `planned` → `frozen` → `applying` (batched) → `succeeded`, plus `failed`.
+//! Phases: `frozen` → `applying` (batched) → `succeeded`, plus `failed`. The `frozen` row
+//! is written in the same transaction as the freeze itself, so the barrier is durable from
+//! the moment `begin` returns; operations that do not freeze a Library (integrity, export)
+//! stay `planned`.
 //! Any phase after `begin` leaves the Library in `reindexing`, which rejects new
 //! worker writes through `ensure_library_writable` until the operation succeeds.
 
@@ -99,6 +102,11 @@ impl Store {
             ));
         }
         let library = request.library_id.to_string();
+        // Step 3's first item: a pending removal owns the Library *before* it touches
+        // `lifecycle_state`, so the removal row — not the lifecycle — is what refuses a
+        // second owner. Without this, a Library being deleted is frozen again for a
+        // migration that then fights the removal for the same files.
+        self.ensure_library_mutable(&library)?;
         let tx = self.library.unchecked_transaction()?;
         let current: Option<(i64, String)> = tx
             .query_row(
@@ -134,7 +142,7 @@ impl Store {
             "INSERT INTO library_operations
                 (operation_id, library_id, kind, state, expected_revision, plan_json,
                  cursor_json, error, created_at_ms, updated_at_ms)
-             VALUES (?1, ?2, ?3, 'planned', ?4, ?5, NULL, NULL, ?6, ?6)",
+             VALUES (?1, ?2, ?3, 'frozen', ?4, ?5, NULL, NULL, ?6, ?6)",
             params![
                 request.operation_id,
                 library,
@@ -161,23 +169,36 @@ impl Store {
         );
         Ok(OperationStatus {
             operation_id: request.operation_id.clone(),
-            phase: "planned".into(),
-            state: "planned".into(),
+            phase: "frozen".into(),
+            state: "frozen".into(),
             error: None,
         })
     }
 
     /// Advance one reconfiguration operation by at most `max_media` Media.
     ///
-    /// Re-running after a crash continues from the persisted cursor; an operation that
-    /// is already terminal returns its stored state without doing work.
+    /// `max_media` is an interface contract, not a hint: a value outside `1..=100` is
+    /// refused instead of being silently clamped, so an operator that asks for a batch
+    /// size the interface does not offer learns about it. Re-running after a crash
+    /// continues from the persisted cursor; an operation that is already terminal returns
+    /// its stored state without doing work.
     pub fn advance_library_operation(
         &self,
         operation_id: &str,
         now_ms: i64,
         max_media: usize,
     ) -> Result<OperationStatus, StoreError> {
-        let batch = max_media.clamp(1, 100);
+        if !(1..=100).contains(&max_media) {
+            tracing::warn!(
+                operation_id,
+                max_media,
+                "library operation batch size outside 1..=100 rejected"
+            );
+            return Err(StoreError::Invalid(format!(
+                "max_media {max_media} is outside the interface range 1..=100"
+            )));
+        }
+        let batch = max_media;
         let tx = self.library.unchecked_transaction()?;
         let row: Option<(String, String, String, String, i64)> = tx
             .query_row(
@@ -228,21 +249,62 @@ impl Store {
             ))),
         };
 
+        Self::finish_library_batch(
+            tx,
+            operation_id,
+            &library,
+            &kind,
+            batch,
+            &cursor,
+            now_ms,
+            outcome,
+        )?;
+        Self::read_library_operation(&self.library, operation_id)
+    }
+
+    /// Persist one applied batch and commit it: record progress while Media remain, or
+    /// finish the operation. A failed batch is recorded and committed too, and the Library
+    /// becomes writable again on the last applied generation, because a failed
+    /// reconfiguration must not freeze it forever.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_library_batch(
+        tx: rusqlite::Transaction<'_>,
+        operation_id: &str,
+        library: &str,
+        kind: &str,
+        batch: usize,
+        cursor: &OperationCursor,
+        now_ms: i64,
+        outcome: Result<roots::BatchOutcome, StoreError>,
+    ) -> Result<(), StoreError> {
         match outcome {
             Ok(roots::BatchOutcome::More) => {
-                Self::write_operation_progress(&tx, operation_id, "applying", &cursor, now_ms)?;
+                Self::write_operation_progress(&tx, operation_id, "applying", cursor, now_ms)?;
+                tracing::info!(
+                    operation_id,
+                    library_id = %library,
+                    kind,
+                    batch,
+                    "library reconfiguration applying"
+                );
+                tx.commit()?;
             }
             Ok(roots::BatchOutcome::Done) => {
                 tx.execute(
                     "UPDATE libraries SET lifecycle_state = 'ready' WHERE library_id = ?1",
                     params![library],
                 )?;
-                Self::write_operation_progress(&tx, operation_id, "succeeded", &cursor, now_ms)?;
+                Self::write_operation_progress(&tx, operation_id, "succeeded", cursor, now_ms)?;
+                tracing::info!(
+                    operation_id,
+                    library_id = %library,
+                    kind,
+                    batch,
+                    "library reconfiguration succeeded"
+                );
+                tx.commit()?;
             }
             Err(error) => {
-                // A failed reconfiguration must not leave the Library frozen forever:
-                // record the failure and make the Library writable again on the last
-                // applied generation.
                 tx.execute(
                     "UPDATE libraries SET lifecycle_state = 'ready' WHERE library_id = ?1",
                     params![library],
@@ -263,8 +325,7 @@ impl Store {
                 return Err(error);
             }
         }
-        tx.commit()?;
-        Self::read_library_operation(&self.library, operation_id)
+        Ok(())
     }
 
     /// Current lifecycle state of a Library (`ready`, `reindexing`, ...).

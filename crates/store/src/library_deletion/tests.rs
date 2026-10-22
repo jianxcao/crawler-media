@@ -1,12 +1,13 @@
 use std::path::Path;
 
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserId};
+use domain::{LedgerId, Media, MediaId, MediaKind, UserId};
 use rusqlite::params;
 
 use super::*;
+use crate::test_support::FixtureFile;
 use crate::{Store, StoreError};
 
-fn fixture(store: &Store, root: &Path) -> (crate::Library, LedgerRow) {
+fn fixture(store: &Store, root: &Path) -> (crate::Library, FixtureFile) {
     std::fs::create_dir_all(root).unwrap();
     let library = store
         .create_library(
@@ -32,20 +33,15 @@ fn fixture(store: &Store, root: &Path) -> (crate::Library, LedgerRow) {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let row = FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id: media.id,
         path: root.join("E01.strm").display().to_string(),
         season: Some(1),
         episode: Some(1),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
+        ..FixtureFile::default()
     };
-    store.insert_ledger(&row).unwrap();
+    crate::test_support::publish_fixture_file(&store, &row).unwrap();
     (library, row)
 }
 
@@ -79,21 +75,14 @@ fn movie_library_removal_accepts_the_whole_media_unit() {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let row = FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id: media.id,
         path: root.join("Whole.mkv").display().to_string(),
-        season: None,
-        episode: None,
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
+        ..FixtureFile::default()
     };
     // A movie publishes the canonical whole-media unit, stored as (-1, -1).
-    store.insert_ledger(&row).unwrap();
+    crate::test_support::publish_fixture_file(&store, &row).unwrap();
     let user = UserId::new();
     store
         .upsert_unit(user, media.id, -1, -1, 1_000, None, None, None, None, None, false, 1)
@@ -108,7 +97,7 @@ fn movie_library_removal_accepts_the_whole_media_unit() {
     assert_eq!(done.state, "succeeded");
     assert_eq!(done.removed_ledger_count, 1);
     assert!(store.get_library(&library.id).unwrap().is_none());
-    assert!(store.ledger_by_path(&row.path).unwrap().is_none());
+    assert!(store.file_coverage_by_path(&row.path).unwrap().is_none());
     assert!(store.get_media(media.id).unwrap().is_some());
     assert_eq!(
         store
@@ -132,7 +121,7 @@ fn interruption_between_databases_recovers_original_operation_and_count() {
         .unwrap();
     INTERRUPT_AFTER_LIBRARY_COMMIT.with(|flag| flag.set(true));
     assert!(store.clean_library_removal(&removal.operation_id).is_err());
-    assert!(store.ledger_by_path(&row.path).unwrap().is_none());
+    assert!(store.file_coverage_by_path(&row.path).unwrap().is_none());
     assert!(store.get_library(&library.id).unwrap().is_some());
     assert!(!store.library_accepts_work(&library.id).unwrap());
     drop(store);
@@ -169,7 +158,7 @@ fn changed_snapshot_identity_rejects_cleanup_before_any_row_is_removed() {
     let tx = store.library.unchecked_transaction().unwrap();
     tx.execute(
         "UPDATE library_file_units SET episode=2 WHERE file_id=?1",
-        [row.id.to_string()],
+        [row.file_id.expect("fixture file id").to_string()],
     )
     .unwrap();
     tx.execute(
@@ -182,7 +171,7 @@ fn changed_snapshot_identity_rejects_cleanup_before_any_row_is_removed() {
         store.clean_library_removal(&removal.operation_id),
         Err(StoreError::Protected(_))
     ));
-    assert!(store.ledger_by_path(&row.path).unwrap().is_some());
+    assert!(store.file_coverage_by_path(&row.path).unwrap().is_some());
     assert!(store.get_library(&library.id).unwrap().is_some());
 }
 
@@ -196,7 +185,7 @@ fn removal_reduces_preferred_file_summaries_and_keeps_media_and_playback() {
         .get_library_item(library_id, row.media_id)
         .unwrap()
         .expect("a published file creates a card");
-    assert_eq!(card.preferred_file_id, Some(row.id));
+    assert_eq!(card.preferred_file_id, Some(row.file_id.expect("fixture file id")));
     assert_eq!(summary_rows(&store, &library.id, row.media_id), (1, 1));
 
     let user = UserId::new();

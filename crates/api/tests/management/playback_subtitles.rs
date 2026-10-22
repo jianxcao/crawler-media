@@ -1,6 +1,7 @@
 use super::*;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
-fn movie_with_subtitle_tracks(tmp: &tempfile::TempDir) -> (domain::Media, domain::LedgerRow) {
+fn movie_with_subtitle_tracks(tmp: &tempfile::TempDir) -> (domain::Media, domain::FileCoverage) {
     let movie_file = tmp.path().join("data/library/movies/TestFilm.mkv");
     let srt_file = tmp.path().join("data/library/movies/TestFilm.zh.srt");
     std::fs::create_dir_all(movie_file.parent().unwrap()).unwrap();
@@ -28,25 +29,24 @@ fn movie_with_subtitle_tracks(tmp: &tempfile::TempDir) -> (domain::Media, domain
         })
         .unwrap();
 
-    let row = domain::LedgerRow {
-        id: domain::LedgerId::new(),
-        media_id: media.id,
-        path: movie_file.display().to_string(),
-        season: None,
-        episode: None,
-        resolution: Some("1080p".into()),
-        codec: Some("h264".into()),
-        hdr: None,
-        quality_source: domain::QualitySource::Release,
-        confidence: domain::Confidence::High,
-        filter_score: None,
-    };
-    store.insert_ledger(&row).unwrap();
+    let file_id = domain::LedgerId::new();
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(file_id),
+            media_id: media.id,
+            path: movie_file.display().to_string(),
+            resolution: Some("1080p".into()),
+            codec: Some("h264".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     // 写入该文件的探测轨道数据（包含音轨与外部字幕）
     store
         .put_file_meta(
-            &row.id.to_string(),
+            &file_id.to_string(),
             &library::Tracks {
                 video: Some(library::VideoTrack {
                     stream_index: Some(0),
@@ -79,7 +79,11 @@ fn movie_with_subtitle_tracks(tmp: &tempfile::TempDir) -> (domain::Media, domain
             },
         )
         .unwrap();
-    (media, row)
+    let coverage = store
+        .file_coverage_by_id(file_id)
+        .unwrap()
+        .expect("published fixture file");
+    (media, coverage)
 }
 
 #[tokio::test]
@@ -87,7 +91,8 @@ async fn playback_decide_and_subtitle_delivery_returns_tracks_and_content() {
     let tmp = tempfile::tempdir().unwrap();
     let app = app(&tmp);
 
-    let (media, row) = movie_with_subtitle_tracks(&tmp);
+    let (media, coverage) = movie_with_subtitle_tracks(&tmp);
+    let file_id = coverage.file.file_id;
 
     // 1. 调用 POST /api/v1/playback/decide
     let decide_res = app
@@ -98,7 +103,7 @@ async fn playback_decide_and_subtitle_delivery_returns_tracks_and_content() {
             Some("management-secret"),
             json!({
                 "media_item_id": media.id.to_string(),
-                "file_id": row.id.to_string(),
+                "file_id": file_id.to_string(),
             }),
         ))
         .await
@@ -115,7 +120,7 @@ async fn playback_decide_and_subtitle_delivery_returns_tracks_and_content() {
     assert_eq!(subtitles[0]["language"], "chi");
     let delivery_url = subtitles[0]["delivery_url"].as_str().unwrap();
     assert!(
-        delivery_url.contains(&row.id.to_string()),
+        delivery_url.contains(&file_id.to_string()),
         "字幕对象必须包含正确的交付 URL"
     );
 
@@ -143,8 +148,8 @@ async fn playback_decide_and_subtitle_delivery_returns_tracks_and_content() {
     // 3. 验证内封字幕轨交付与缓存命中 (无 external 路径时走内封提取或缓存)
     // cache 维度包含 source_version：预置与 service 相同的版本化布局。
     let source_version =
-        api::fingerprint_job::current_source_version(std::path::Path::new(&row.path));
-    let cache_dir = api::subtitle_delivery::subtitle_cache_dir(row.id, &source_version);
+        api::fingerprint_job::current_source_version(coverage.file.path.as_path());
+    let cache_dir = api::subtitle_delivery::subtitle_cache_dir(file_id, &source_version);
     std::fs::create_dir_all(&cache_dir).unwrap();
     std::fs::write(
         cache_dir.join("sub_3.vtt"),
@@ -155,7 +160,7 @@ async fn playback_decide_and_subtitle_delivery_returns_tracks_and_content() {
     let store = api::Store::open(tmp.path().join("data")).unwrap();
     store
         .put_file_meta(
-            &row.id.to_string(),
+            &file_id.to_string(),
             &library::Tracks {
                 video: Some(library::VideoTrack {
                     stream_index: Some(0),
@@ -180,7 +185,7 @@ async fn playback_decide_and_subtitle_delivery_returns_tracks_and_content() {
         .unwrap();
     drop(store);
 
-    let embedded_sub_url = format!("/api/v1/playback/subtitles/{}/3?format=vtt", row.id);
+    let embedded_sub_url = format!("/api/v1/playback/subtitles/{}/3?format=vtt", file_id);
     let embedded_res = app
         .clone()
         .oneshot(request(

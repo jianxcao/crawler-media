@@ -1,4 +1,5 @@
 use domain::{Confidence, LedgerId, MediaId, MediaKind, QualitySource};
+use store::test_support::FixtureFile;
 use store::{ProbeDispatchStage, ProbeJobUnitSpec, Store};
 
 const METADATA_PENDING: usize = 100_000;
@@ -62,8 +63,8 @@ fn large_pending_recovery_loads_only_dispatch_windows() {
             anilist_id: None,
         })
         .unwrap();
-    let row = domain::LedgerRow {
-        id: LedgerId::new(),
+    let row = FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id,
         path: temp
             .path()
@@ -78,6 +79,7 @@ fn large_pending_recovery_loads_only_dispatch_windows() {
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     };
     store
         .create_library(
@@ -89,9 +91,9 @@ fn large_pending_recovery_loads_only_dispatch_windows() {
             &[],
         )
         .unwrap();
-    store.insert_ledger(&row).unwrap();
+    store::test_support::publish_fixture_file(&store, &row).unwrap();
 
-    let metadata_ids: Vec<String> = std::iter::once(row.id.to_string())
+    let metadata_ids: Vec<String> = std::iter::once(row.file_id.expect("fixture file id").to_string())
         .chain((1..METADATA_PENDING).map(|index| format!("ledger-m-{index:06}")))
         .collect();
     let metadata_specs: Vec<_> = metadata_ids.iter().map(|id| spec(id)).collect();
@@ -157,7 +159,7 @@ fn large_pending_recovery_loads_only_dispatch_windows() {
     assert_eq!(snapshot.unit.job_id, "metadata-job");
     assert_eq!(snapshot.unit.ledger_id, metadata_window[0].ledger_id);
     assert_eq!(snapshot.unit.stage, ProbeDispatchStage::Metadata);
-    assert_eq!(snapshot.row.id.to_string(), metadata_window[0].ledger_id);
+    assert_eq!(snapshot.row.file.file_id.to_string(), metadata_window[0].ledger_id);
     assert_eq!(snapshot.source_version, "");
 
     // Metadata -> fingerprint is persisted, not guessed from memory.

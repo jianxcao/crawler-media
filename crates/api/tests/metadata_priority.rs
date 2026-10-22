@@ -1,11 +1,56 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use domain::{Confidence, LedgerId, MediaId, MediaKind, QualitySource};
+use domain::{
+    Confidence, FileCoverage, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile,
+    LibraryId, MediaId, MediaKind, QualitySource, UnitKey,
+};
 use parking_lot::Mutex;
 use api::probe_manager::progress::MetadataPriorityGate;
 use api::probe_manager::{ProbeManager, ProbeUnit};
 use api::fingerprint_job::CaptureGate;
 use api::Store;
+
+/// Whole-work coverage fact, hand-built: this test only queues the unit and never
+/// probes it, so the file fact cannot come from `publish_fixture_file`.
+fn coverage() -> FileCoverage {
+    FileCoverage {
+        file: LibraryFile {
+            file_id: LedgerId::new(),
+            library_id: LibraryId::new(),
+            root_id: "fixture-root".into(),
+            media_id: MediaId::new(),
+            kind: MediaKind::Movie,
+            path: PathBuf::from("Test.mkv"),
+            version: FileVersion {
+                revision: 1,
+                source_version: "fixture".into(),
+            },
+            presence: FilePresence::Present,
+            publication: FilePublication::Published,
+            size_bytes: None,
+            stat_known: false,
+            created_ns: None,
+            modified_ns: None,
+            source_digest: None,
+            source_path: None,
+            transfer_mode: None,
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: QualitySource::Release,
+            confidence: Confidence::High,
+            filter_score: None,
+            release_quality: None,
+            duration_ms: None,
+            tracks_version: 0,
+            poster_path: None,
+            backdrop_path: None,
+            still_path: None,
+        },
+        units: vec![UnitKey::WHOLE],
+    }
+}
 
 #[tokio::test]
 async fn new_metadata_waits_only_for_current_sample() {
@@ -19,21 +64,8 @@ async fn new_metadata_waits_only_for_current_sample() {
     let res = tokio::time::timeout(Duration::from_millis(50), gate.wait_before_capture()).await;
     assert!(res.is_ok(), "Gate should not wait when no metadata is pending");
 
-    let row = domain::LedgerRow {
-        id: LedgerId::new(),
-        media_id: MediaId::new(),
-        path: "Test.mkv".into(),
-        season: None,
-        episode: None,
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
     let unit = ProbeUnit {
-        row,
+        row: coverage(),
         kind: MediaKind::Movie,
         force_fingerprint: false,
         reuse_fingerprint_cache: true,

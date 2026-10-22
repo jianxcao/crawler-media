@@ -4,7 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
+use store::test_support::FixtureFile;
 use store::{Library, Store};
 
 fn create(store: &Store, name: &str, roots: &[&Path]) -> Library {
@@ -14,9 +15,9 @@ fn create(store: &Store, name: &str, roots: &[&Path]) -> Library {
         .unwrap()
 }
 
-fn ledger_row(media_id: MediaId, path: &Path) -> LedgerRow {
-    LedgerRow {
-        id: LedgerId::new(),
+fn ledger_row(media_id: MediaId, path: &Path) -> FixtureFile {
+    FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id,
         path: path.display().to_string(),
         season: None,
@@ -27,6 +28,7 @@ fn ledger_row(media_id: MediaId, path: &Path) -> LedgerRow {
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     }
 }
 
@@ -109,8 +111,10 @@ fn same_media_in_two_libraries_owns_each_path_separately() {
     store.insert_media(&media).unwrap();
     let parent_path = parent_root.join("one.mkv");
     let child_path = child_root.join("two.mkv");
-    store.insert_ledger(&ledger_row(media.id, &parent_path)).unwrap();
-    store.insert_ledger(&ledger_row(media.id, &child_path)).unwrap();
+    let r1 = ledger_row(media.id, &parent_path);
+    let r2 = ledger_row(media.id, &child_path);
+    store::test_support::publish_fixture_file(&store, &&r1).unwrap();
+    store::test_support::publish_fixture_file(&store, &&r2).unwrap();
 
     let view = store.library_ownership().unwrap();
     assert_eq!(view.owner(&parent_path, MediaKind::Movie).unwrap().id, parent.id);

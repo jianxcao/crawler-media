@@ -1,30 +1,11 @@
 //! Invariants the summary model must hold, exercised through the public Store seam.
 
 use domain::{
-    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LedgerRow, LibraryFile,
-    Media, MediaId, MediaKind, QualitySource, UnitKey,
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, Media, MediaId,
+    MediaKind, QualitySource, UnitKey,
 };
 use store::Store;
 use store::library_write::{FilePublication as StorePublication, WriteScope};
-
-/// Fixture view of a scan row: whole-unit coverage for movie/video rows, the row's
-/// unit for TV rows, and no observation facts.
-fn scanned(row: &LedgerRow) -> store::ScannedLedger {
-    let units = match (row.season, row.episode) {
-        (Some(season), Some(episode)) => vec![UnitKey::new(season as i32, episode as i32)],
-        _ => vec![UnitKey::WHOLE],
-    };
-    store::ScannedLedger {
-        row: row.clone(),
-        units,
-        source_version: "fixture-v1".into(),
-        source_digest: None,
-        size_bytes: None,
-        created_ns: None,
-        modified_ns: None,
-        observations: Vec::new(),
-    }
-}
 
 fn media(store: &Store, id: &str, title: &str, kind: MediaKind) -> Media {
     let media = Media {
@@ -270,20 +251,25 @@ fn scan_ownership_prefers_real_component_root() {
     let (nested, _) = library(&store, "Nested", MediaKind::Movie, "/media/Show");
 
     let file_id = LedgerId::new();
-    let row = LedgerRow {
-        id: file_id,
+    let row = store::ScannedLedger {
+        file_id,
         media_id: media.id,
         path: "/media/Showcase/movie.mkv".into(),
-        season: None,
-        episode: None,
+        units: vec![UnitKey::WHOLE],
         resolution: None,
         codec: None,
         hdr: None,
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        source_version: "fixture-v1".into(),
+        source_digest: None,
+        size_bytes: None,
+        created_ns: None,
+        modified_ns: None,
+        observations: Vec::new(),
     };
-    store.insert_scanned_files(&[scanned(&row)], 1_000).unwrap();
+    store.insert_scanned_files(&[row], 1_000).unwrap();
 
     let (_, owner) = store.get_file_path_and_library(file_id).unwrap().unwrap();
     assert_eq!(

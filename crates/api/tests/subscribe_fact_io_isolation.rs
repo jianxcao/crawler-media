@@ -8,14 +8,15 @@ use api::{ApiState, PosterFetch, Store, router};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use domain::{
-    Confidence, Coverage, FetchMode, FilterId, LedgerId, LedgerRow, Media, MediaId, MediaKind,
-    QualitySource, Subscribe, SubscribeId, UserId,
+    Confidence, Coverage, FetchMode, FilterId, Media, MediaId, MediaKind, QualitySource, Subscribe,
+    SubscribeId, UserId,
 };
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use parking_lot::{Condvar, Mutex};
 use store::{LibraryPathResolver, LibraryPathScope, StoreError};
 use tower::ServiceExt;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 struct NoFetch;
 impl Fetcher for NoFetch {
@@ -135,20 +136,20 @@ fn seed_subscription(state: &ApiState, tmp: &Path) -> (Subscribe, PathBuf) {
     };
     guard.insert_media(&media).unwrap();
 
-    let row = LedgerRow {
-        id: LedgerId::new(),
-        media_id,
-        path: movie_file.to_str().unwrap().into(),
-        season: None,
-        episode: None,
-        resolution: Some("1080p".into()),
-        codec: Some("h264".into()),
-        hdr: None,
-        quality_source: QualitySource::Probe,
-        confidence: Confidence::High,
-        filter_score: Some(85),
-    };
-    guard.insert_ledger(&row).unwrap();
+    publish_fixture_file(
+        &guard,
+        &FixtureFile {
+            media_id,
+            path: movie_file.to_str().unwrap().into(),
+            resolution: Some("1080p".into()),
+            codec: Some("h264".into()),
+            quality_source: QualitySource::Probe,
+            confidence: Confidence::High,
+            filter_score: Some(85),
+            ..FixtureFile::default()
+        },
+    )
+    .unwrap();
 
     let sub = Subscribe {
         id: SubscribeId::new(),

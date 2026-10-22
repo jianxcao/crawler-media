@@ -203,6 +203,8 @@
 
 `api --test management` 整目标在第二批修复前从未运行过（564 passed / 9 failed，见 7.9）；修复后为 574 passed / 0 failed / 1 ignored（32.31s）。
 
+**待复核（2026-10-21，task-71/R12）**：本表 `-p store | 337 passed / 67 targets`（原 :190）是 2026-10-18 的历史值，**本轮未复核**，本次也不给出新数字。已知自 2026-10-21 起 store 测试目标/用例数已变化（`storage_work_bounds` 由 2 个用例变为 8 个，见 8.3），且同期有多个 `crates/store/tests/**` 与 `crates/store/src/**` 正在改动；全量 `cargo test -p store` 属 Task 17 门后的统一重测项，引用该行前必须以当时树的实测日志为准。
+
 ### 7.4 前端门（最终冻结树）
 
 | 门 | 实测 |
@@ -280,6 +282,7 @@
 | 命令 | 实测 |
 |---|---|
 | `cargo test -p store --release --test storage_work_bounds` | 2 passed / 0 failed（0.70s），含 `unrelated_library_growth_does_not_expand_seek_work`：`fullscan_steps=0`、`vm_steps ≤ 2× baseline` |
+| ↳ **复审更正 2026-10-21（task-71/R12）：上一行的 `2 passed`（0.70s）已过时** | 同一命令现为 `8 passed / 0 failed`（debug 1.42s、release 1.08s），raw 退出码 0；逐字 `test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.08s`（release，2026-10-21T10:48:49Z）；该用例已拆为父文件 + 2 个子模块，明细与第 8 节其余行的复核状态见 8.3 |
 | `cargo test -p api --release --test storage_query_scale` | 1 passed / 0 failed（0.06s） |
 | `cargo test -p api --release --test storage_contention` | 1 passed / 0 failed（0.06s），`unrelated_user_growth_does_not_expand_heartbeat_write_scope` |
 | `cargo test -p store --release --test data_retention` | 11 passed / 0 failed |
@@ -295,3 +298,28 @@
 ### 8.2 边界
 
 上述 release 运行的数据规模为 50 与 500 行量级、单机单进程，**不是**性能基准：没有延迟分位、没有 10 万/100 万条目、没有真机 NAS 并发与 WAL/空间对照。因此本节不构成“性能达标”结论。
+
+### 8.3 复审更正与待复核明细（2026-10-21，task-71/R12）
+
+本节只做**事实更正与挂账**，不修改第 7/8 节的历史数字，也不删除历史行。执行者 task-71（meta-split-worker），依据 Lead 裁定 R12；本节的更正依据是本轮 task-64 的实测证据，**本节自身未跑任何 cargo**。
+
+**复审更正 1 —— 第 8 节表格第 1 行（原 :282）`storage_work_bounds` 的用例数**
+
+- 更正对象：原记录 `2 passed / 0 failed（0.70s）`。
+- 现状：`crates/store/tests/storage_work_bounds.rs` 已拆为父文件 + `crates/store/tests/storage_work_bounds/{scan_windows.rs, scan_windows_measurement.rs}`，用例数 **2 → 8**；本轮另新增 store 侧 Task 19 case：扫描提交窗口上界（`MAX_SCAN_BATCH = 100`，101 行窗口被拒且库内计数不变）、同一 Media 下 N 文件单窗口只产生一次归约（读 `library_items` 的摘要行/revision 而非私有 helper）、窗口工作量不随既有文件总数增长、窗口失败后重启事实与摘要一致、以及写锁争用下的诊断（plain 写者等锁 vs `BEGIN DEFERRED` 读→写升级 vs store 窗口）。
+- 命令原文：`cargo test -p store --test storage_work_bounds -- --nocapture`（debug）与 `cargo test -p store --release --test storage_work_bounds -- --nocapture`（release）。
+- raw 退出码：debug `0`（2026-10-21T10:47:59Z–10:48:04Z）、release `0`（2026-10-21T10:48:49Z–10:48:52Z）。
+- 逐字 `test result:` 行：
+  - debug：`test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.42s`
+  - release：`test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.08s`
+- 并发说明：两次运行前/后 `pgrep -fl -x cargo` 均为空（无其他 cargo 在跑，target 锁未争用），故上述数字不是并发产物。
+- 原记录中同行的 `unrelated_library_growth_does_not_expand_seek_work`（`fullscan_steps=0`、`vm_steps ≤ 2× baseline`）用例仍存在、未改名、仍通过，该结论部分**未**被更正。
+- 测试名与归属核对（原 :250 `store --test storage_work_bounds clean_start_end_to_end_storage_lifecycle`、原 :264 `--test storage_work_bounds`）：target 名与用例名均未变（该用例字节未变），这两处**无需更正**。
+
+**待复核 —— 第 7.3 节表格 `-p store | 337 passed / 67 targets / 0 failed`（原 :190）**
+
+- 该行是 2026-10-18 的历史值，本轮**未复核**；本节不给出替代数字（本轮没有在统一树上重跑全量 `cargo test -p store`）。
+- 已知变化：`storage_work_bounds` 用例数 2 → 8（见上），故 store 的 target/用例总数与 2026-10-18 相比已不同；同期 `crates/store/tests/**` 与 `crates/store/src/**` 仍有多个文件在改动中。
+- 处置：全量 `cargo test -p store` 属 Task 17 门后的统一重测项，引用该行前必须以当时树的实测日志为准。
+
+**本节未覆盖**：第 8 节其余行（`data_retention`、`data_retention_control`、`maintenance_runtime`、`storage_query_scale`、`storage_contention` 等）本轮均未复核，其数字保持 2026-10-18 的历史含义；本节不为它们给出新数字。

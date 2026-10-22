@@ -25,4 +25,4 @@ pub use collect::{
 pub use facts::{QualityFact, SubscribeFacts};
 pub use pending::{facts_with_pending, pending_slots};
 pub use run::{run, run_with_destinations, run_with_destinations_controlled, run_with_probe};
-pub use types::{LedgerSource, RunInput, RunOutcome, SubscribeError};
+pub use types::{RunInput, RunOutcome, SubscribeError};

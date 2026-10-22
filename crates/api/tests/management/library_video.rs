@@ -126,9 +126,10 @@ fn media_id_for(state: &ApiState, path: &std::path::Path) -> domain::MediaId {
     let store = state.store();
     let guard = store.lock();
     guard
-        .ledger_by_path(&path.display().to_string())
+        .file_coverage_by_path(&path.display().to_string())
         .unwrap()
         .expect("path must be ledgered")
+        .file
         .media_id
 }
 
@@ -164,11 +165,14 @@ async fn video_artwork_fixture() -> VideoArtworkFixture {
     {
         let store = state.store();
         let guard = store.lock();
-        let row = guard
-            .ledger_by_path(&clip.display().to_string())
+        let coverage = guard
+            .file_coverage_by_path(&clip.display().to_string())
             .unwrap()
             .expect("clip 必须已入账");
-        let mut media = guard.get_media(row.media_id).unwrap().expect("media");
+        let mut media = guard
+            .get_media(coverage.file.media_id)
+            .unwrap()
+            .expect("media");
         media.tmdb_id = Some("603".into());
         guard.update_media(&media).unwrap();
     }

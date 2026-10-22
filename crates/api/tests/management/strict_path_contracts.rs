@@ -152,7 +152,7 @@ async fn path_reconciliations_rejects_outside_missing_source_in_default_library(
     let store = Store::open(tmp.path().join("data")).unwrap();
     assert!(
         store
-            .rename_ledger_path(
+            .rename_file_path(
                 fixture.source.to_str().unwrap(),
                 missing_source.to_str().unwrap(),
             )

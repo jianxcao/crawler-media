@@ -1,20 +1,21 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
-use domain::LedgerRow;
+use domain::FileCoverage;
 use marker::FINGERPRINT_ALGORITHM_VERSION;
 
 use super::{ProbeManager, ProbeUnit};
+use super::{projected_episode, projected_season};
 use crate::Store;
 use crate::fingerprint_job::{fingerprint_cache_key, media_source_version};
 use crate::scrape_store::ScrapeStoreExt;
 use crate::store::{MarkerResultReplacement, StoredMediaMarker};
 
 struct SeasonFingerprintSamples {
-    all_rows: Vec<LedgerRow>,
-    season_rows: Vec<LedgerRow>,
-    intros: Vec<(LedgerRow, Vec<u32>)>,
-    outros: Vec<(LedgerRow, Vec<u32>, i64)>,
+    all_rows: Vec<FileCoverage>,
+    season_rows: Vec<FileCoverage>,
+    intros: Vec<(FileCoverage, Vec<u32>)>,
+    outros: Vec<(FileCoverage, Vec<u32>, i64)>,
 }
 
 struct MarkerComparison {
@@ -33,8 +34,8 @@ pub(super) fn compare_and_store_markers(
 ) -> Result<(), crate::store::StoreError> {
     if !unit.overwrite_markers && season_input_unchanged(mgr, unit)? {
         tracing::debug!(
-            media_id = %unit.row.media_id,
-            season = unit.row.season.unwrap_or(1),
+            media_id = %unit.row.file.media_id,
+            season = projected_season(&unit.row),
             "【片头片尾】声纹输入未变化，跳过整季比对"
         );
         return Ok(());
@@ -43,15 +44,15 @@ pub(super) fn compare_and_store_markers(
     if let Err(error) = remember_season_digest(mgr, unit) {
         tracing::warn!(
             %error,
-            media_id = %unit.row.media_id,
-            season = unit.row.season.unwrap_or(1),
+            media_id = %unit.row.file.media_id,
+            season = projected_season(&unit.row),
             "【片头片尾】比对摘要写入失败，本轮结果仍继续发布"
         );
     }
-    let season = unit.row.season.unwrap_or(1);
+    let season = projected_season(&unit.row);
     if comparison.markers.is_empty() && !unit.overwrite_markers {
         tracing::warn!(
-            media_id = %unit.row.media_id,
+            media_id = %unit.row.file.media_id,
             season,
             intro_samples = comparison.intro_count,
             outro_samples = comparison.outro_count,
@@ -77,7 +78,7 @@ pub(super) fn compare_and_store_markers(
             );
         }
         tracing::info!(
-            media_id = %unit.row.media_id,
+            media_id = %unit.row.file.media_id,
             season,
             replaced_markers = comparison.markers.len(),
             updated_chapter_caches = chapter_count,
@@ -101,8 +102,7 @@ pub(super) fn compare_and_store_markers(
         // Drop Store before enqueueing; the service re-reads it when it runs.
         if let Some(service) = mgr.chapter_frames() {
             crate::http::library_chapters::trigger_scene_frames_for_chapter_updates(
-                &updates,
-                &service,
+                &updates, &service,
             );
         }
     }
@@ -116,7 +116,7 @@ pub(super) fn compare_and_store_markers(
 /// Call only while holding Store, immediately before publishing the computed result.
 pub(super) fn validate_publication_rows(
     store: &Store,
-    rows: &[LedgerRow],
+    rows: &[FileCoverage],
 ) -> Result<(), crate::store::StoreError> {
     for row in rows {
         crate::fingerprint_job::source::ensure_source_available(store, row)
@@ -130,10 +130,10 @@ fn season_input_unchanged(
     unit: &ProbeUnit,
 ) -> Result<bool, crate::store::StoreError> {
     let digest = season_digest(mgr, unit)?;
-    let stored = mgr
-        .store
-        .lock()
-        .season_comparison_digest(&unit.row.media_id.to_string(), unit.row.season.unwrap_or(1))?;
+    let stored = mgr.store.lock().season_comparison_digest(
+        &unit.row.file.media_id.to_string(),
+        projected_season(&unit.row),
+    )?;
     Ok(stored.as_deref() == Some(digest.as_str()))
 }
 
@@ -145,8 +145,8 @@ fn remember_season_digest(
     let store = mgr.store.lock();
     validate_publication_rows(&store, std::slice::from_ref(&unit.row))?;
     store.save_season_comparison_digest(
-        &unit.row.media_id.to_string(),
-        unit.row.season.unwrap_or(1),
+        &unit.row.file.media_id.to_string(),
+        projected_season(&unit.row),
         &digest,
         mgr.clock.lock().now_ms(),
     )
@@ -156,10 +156,10 @@ fn season_digest(mgr: &ProbeManager, unit: &ProbeUnit) -> Result<String, crate::
     let samples = load_season_samples(mgr, unit)?;
     let mut parts = Vec::new();
     for (row, words) in &samples.intros {
-        parts.push(format!("i:{}:{}", row.id, words.len()));
+        parts.push(format!("i:{}:{}", row.file.file_id, words.len()));
     }
     for (row, words, offset) in &samples.outros {
-        parts.push(format!("o:{}:{}:{}", row.id, words.len(), offset));
+        parts.push(format!("o:{}:{}:{}", row.file.file_id, words.len(), offset));
     }
     parts.sort();
     Ok(parts.join("|"))
@@ -180,10 +180,10 @@ fn compare_season_fingerprints(
     unit: &ProbeUnit,
 ) -> Result<MarkerComparison, crate::store::StoreError> {
     let started_at = Instant::now();
-    let season = unit.row.season.unwrap_or(1);
+    let season = projected_season(&unit.row);
     let samples = load_season_samples(mgr, unit)?;
     tracing::info!(
-        media_id = %unit.row.media_id,
+        media_id = %unit.row.file.media_id,
         season,
         episode_rows = samples.season_rows.len(),
         intro_samples = samples.intros.len(),
@@ -195,12 +195,12 @@ fn compare_season_fingerprints(
     let intro_sample_episodes = samples
         .intros
         .iter()
-        .map(|(row, _)| row.episode.unwrap_or(1))
+        .map(|(row, _)| projected_episode(row))
         .collect();
     let outro_sample_episodes = samples
         .outros
         .iter()
-        .map(|(row, _, _)| row.episode.unwrap_or(1))
+        .map(|(row, _, _)| projected_episode(row))
         .collect();
     let compare_started_at = Instant::now();
     mgr.comparison_runs
@@ -208,7 +208,7 @@ fn compare_season_fingerprints(
     let markers = if samples.intros.len() >= 2 || samples.outros.len() >= 2 {
         crate::fingerprint_job::analyze_fingerprints_with_outro_engine(
             mgr.fingerprint_engine.as_ref(),
-            unit.row.media_id,
+            unit.row.file.media_id,
             season,
             samples.intros.clone(),
             samples.outros.clone(),
@@ -238,12 +238,12 @@ fn load_season_samples(
     unit: &ProbeUnit,
 ) -> Result<SeasonFingerprintSamples, crate::store::StoreError> {
     let store = mgr.store.lock();
-    let all_rows = store.list_ledger()?;
+    let all_rows = store.list_file_coverage()?;
     let season_rows: Vec<_> = all_rows
         .iter()
         .filter(|row| {
-            row.media_id == unit.row.media_id
-                && row.season.unwrap_or(1) == unit.row.season.unwrap_or(1)
+            row.file.media_id == unit.row.file.media_id
+                && projected_season(row) == projected_season(&unit.row)
         })
         .cloned()
         .collect();
@@ -255,10 +255,10 @@ fn load_season_samples(
     let mut intros = Vec::new();
     let mut outros = Vec::new();
     for row in &season_rows {
-        let key = row.id.to_string();
+        let key = row.file.file_id.to_string();
         match store.get_fingerprint_cache(&key) {
             Ok(Some(cache)) => {
-                let source_version = media_source_version(std::path::Path::new(&row.path));
+                let source_version = media_source_version(std::path::Path::new(&row.file.path));
                 let expected_key = fingerprint_cache_key(
                     &source_version,
                     cache.sample_duration_secs,
@@ -270,7 +270,7 @@ fn load_season_samples(
                 {
                     tracing::warn!(
                         ledger_id = %key,
-                        episode = row.episode.unwrap_or(1),
+                        episode = projected_episode(row),
                         cache_key = %cache.cache_key,
                         expected_cache_key = %expected_key,
                         source_version = %source_version,
@@ -324,8 +324,8 @@ fn log_comparison_counts(
         .filter(|marker| marker.outro_start_ms.is_some() || marker.outro_end_ms.is_some())
         .count();
     tracing::info!(
-        media_id = %unit.row.media_id,
-        season = unit.row.season.unwrap_or(1),
+        media_id = %unit.row.file.media_id,
+        season = projected_season(&unit.row),
         intro_samples = samples.intros.len(),
         outro_samples = samples.outros.len(),
         matched_episodes = markers.len(),
@@ -337,17 +337,17 @@ fn log_comparison_counts(
     );
 }
 
-fn log_match_details(unit: &ProbeUnit, rows: &[LedgerRow], markers: &[StoredMediaMarker]) {
+fn log_match_details(unit: &ProbeUnit, rows: &[FileCoverage], markers: &[StoredMediaMarker]) {
     for marker in markers {
         let path = rows
             .iter()
             .find(|row| {
-                row.media_id == marker.media_id
-                    && row.season.unwrap_or(1) == marker.season
-                    && row.episode.unwrap_or(1) == marker.episode
+                row.file.media_id == marker.media_id
+                    && projected_season(row) == marker.season
+                    && projected_episode(row) == marker.episode
             })
-            .map(|row| row.path.as_str())
-            .unwrap_or("");
+            .map(|row| row.file.path.display().to_string())
+            .unwrap_or_default();
         if unit.overwrite_markers {
             tracing::info!(
                 media_id = %marker.media_id,
@@ -381,14 +381,14 @@ fn build_marker_replacement(
     unit: &ProbeUnit,
     comparison: &MarkerComparison,
 ) -> Result<MarkerResultReplacement, crate::store::StoreError> {
-    let season = unit.row.season.unwrap_or(1);
+    let season = projected_season(&unit.row);
     let store = mgr.store.lock();
     let mut chapter_updates = Vec::with_capacity(comparison.samples.season_rows.len());
     for row in &comparison.samples.season_rows {
         let matched = comparison
             .markers
             .iter()
-            .find(|candidate| candidate.episode == row.episode.unwrap_or(1));
+            .find(|candidate| candidate.episode == projected_episode(row));
         let intro = matched.and_then(|candidate| {
             match (candidate.intro_start_ms, candidate.intro_end_ms) {
                 (Some(start), Some(end)) if end > start => Some((start, end)),
@@ -403,13 +403,13 @@ fn build_marker_replacement(
             }
         });
         let existing = store
-            .get_cached_chapters(&row.id.to_string())?
+            .get_cached_chapters(&row.file.file_id.to_string())?
             .unwrap_or_default();
         let complete = marker::build_complete_timeline_chapters(&existing, intro, outro, None);
-        chapter_updates.push((row.id.to_string(), complete));
+        chapter_updates.push((row.file.file_id.to_string(), complete));
     }
     Ok(MarkerResultReplacement {
-        media_id: unit.row.media_id,
+        media_id: unit.row.file.media_id,
         season,
         markers: comparison.markers.clone(),
         chapter_updates,
@@ -423,15 +423,15 @@ fn log_unmatched_episodes(unit: &ProbeUnit, comparison: &MarkerComparison) {
         .map(|marker| marker.episode)
         .collect::<HashSet<_>>();
     for row in &comparison.samples.season_rows {
-        let episode = row.episode.unwrap_or(1);
+        let episode = projected_episode(row);
         if matched.contains(&episode) {
             continue;
         }
         tracing::info!(
-            media_id = %unit.row.media_id,
-            season = unit.row.season.unwrap_or(1),
+            media_id = %unit.row.file.media_id,
+            season = projected_season(&unit.row),
             episode,
-            path = %row.path,
+            path = %row.file.path.display(),
             had_intro_sample = comparison.intro_sample_episodes.contains(&episode),
             had_outro_sample = comparison.outro_sample_episodes.contains(&episode),
             "【片头片尾】该集本轮未匹配到片头或片尾，刷新成功后移除旧结果"
@@ -451,8 +451,8 @@ fn log_comparison_complete(unit: &ProbeUnit, comparison: &MarkerComparison) {
         .filter(|marker| marker.outro_start_ms.is_some() || marker.outro_end_ms.is_some())
         .count();
     tracing::info!(
-        media_id = %unit.row.media_id,
-        season = unit.row.season.unwrap_or(1),
+        media_id = %unit.row.file.media_id,
+        season = projected_season(&unit.row),
         episodes = comparison.samples.season_rows.len(),
         matched_episodes = comparison.markers.len(),
         intro_markers,
@@ -466,7 +466,7 @@ fn log_comparison_complete(unit: &ProbeUnit, comparison: &MarkerComparison) {
 
 pub(super) fn persist_marker(
     store: &Store,
-    rows: &[LedgerRow],
+    rows: &[FileCoverage],
     mut marker: crate::store::StoredMediaMarker,
     overwrite_markers: bool,
 ) -> Result<Vec<(String, Vec<library::ChapterMarker>)>, crate::store::StoreError> {
@@ -474,14 +474,14 @@ pub(super) fn persist_marker(
     let started_at = Instant::now();
     let mut live_rows = Vec::new();
     for row in rows.iter().filter(|row| {
-        row.media_id == marker.media_id
-            && row.season.unwrap_or(1) == marker.season
-            && row.episode.unwrap_or(1) == marker.episode
+        row.file.media_id == marker.media_id
+            && projected_season(row) == marker.season
+            && projected_episode(row) == marker.episode
     }) {
         match crate::fingerprint_job::source::ensure_source_available(store, row) {
             Ok(()) => live_rows.push(row),
             Err(reason) if crate::fingerprint_job::source::is_file_deleted(&reason) => {
-                tracing::info!(ledger_id = %row.id, %reason, "跳过已删除或冻结的标记发布目标");
+                tracing::info!(ledger_id = %row.file.file_id, %reason, "跳过已删除或冻结的标记发布目标");
             }
             Err(reason) => return Err(crate::store::StoreError::Missing(reason)),
         }
@@ -520,20 +520,20 @@ pub(super) fn persist_marker(
             _ => None,
         };
         let existing_chapters = store
-            .get_cached_chapters(&row.id.to_string())?
+            .get_cached_chapters(&row.file.file_id.to_string())?
             .unwrap_or_default();
         let complete =
             marker::build_complete_timeline_chapters(&existing_chapters, intro, outro, None);
-        store.put_cached_chapters(&row.id.to_string(), &complete)?;
+        store.put_cached_chapters(&row.file.file_id.to_string(), &complete)?;
         // 返回给调用方在放下 Store 锁之后抓帧。这里若直接抓，会在持锁时
         // 再次读取媒体库开关，和普通声纹入库的外层锁自死锁。
-        chapter_updates.push((row.id.to_string(), complete.clone()));
+        chapter_updates.push((row.file.file_id.to_string(), complete.clone()));
         tracing::debug!(
             media_id = %marker.media_id,
             season = marker.season,
             episode = marker.episode,
-            ledger_id = %row.id,
-            path = %row.path,
+            ledger_id = %row.file.file_id,
+            path = %row.file.path.display(),
             intro = intro.is_some(),
             outro = outro.is_some(),
             chapter_count = complete.len(),

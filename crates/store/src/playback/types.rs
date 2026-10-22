@@ -66,6 +66,13 @@ pub struct BoundPlaybackEvent {
     pub paused: bool,
     pub rate_bps: i64,
     pub client: Option<String>,
+    /// Device identity as reported by the client for this event; `None` keeps the
+    /// stored value (or NULL for a new row).
+    pub device_name: Option<String>,
+    pub client_version: Option<String>,
+    /// Playback method (`"DirectPlay"` for media-server clients); `None` keeps the
+    /// stored value and falls back to `"local"` for a new row.
+    pub play_method: Option<String>,
     pub event_type: PlaybackEventType,
 }
 

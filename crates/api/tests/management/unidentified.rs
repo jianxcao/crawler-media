@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::*;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 #[tokio::test]
 async fn unidentified_empty_store_is_empty_list() {
@@ -287,9 +288,10 @@ async fn claim_rejects_overwriting_existing_ledger_file() {
     }
     std::fs::write(&existing_path, b"original-bytes").unwrap();
 
-    store
-        .insert_ledger(&domain::LedgerRow {
-            id: domain::LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(domain::LedgerId::new()),
             media_id: media.id,
             path: existing_path.display().to_string(),
             season: None,
@@ -300,8 +302,10 @@ async fn claim_rejects_overwriting_existing_ledger_file() {
             quality_source: domain::QualitySource::Release,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     store
         .insert_unidentified(unknown_file.display().to_string(), Confidence::Low)

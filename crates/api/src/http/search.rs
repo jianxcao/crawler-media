@@ -352,26 +352,37 @@ pub(crate) async fn search_library_items(
         .search_work
         .run(fanout::SEARCH_DEADLINE, move || {
             let store = state.store.lock();
-            let rows = store.list_ledger().unwrap_or_default();
+            let rows = store.list_file_coverage().unwrap_or_default();
             let mut items = Vec::new();
             for row in rows {
-                let Some(media) = store.get_media(row.media_id).ok().flatten() else {
+                let Some(media) = store.get_media(row.file.media_id).ok().flatten() else {
                     continue;
                 };
-                if !crate::http::library::row_visible_to_user(&store, &row, &media, user_id) {
+                if !crate::http::library::file_visible_to_user(&store, &row.file, &media, user_id) {
                     continue;
                 }
                 if !keyword.is_empty() && !media.title.to_lowercase().contains(&keyword.to_lowercase()) {
                     continue;
                 }
-                items.push(json!({
-                    "media_item_id": media.id.to_string(),
-                    "title": media.title,
-                    "kind": media.kind.as_str(),
-                    "path": row.path,
-                    "season": row.season,
-                    "episode": row.episode,
-                }));
+                // 一个物理文件可覆盖多个 unit；legacy 行是逐 unit 的 join 行，这里逐 unit 保值。
+                // 读 shape 下每个文件至少一个 unit（LEFT JOIN 缺失行读作 `UnitKey::WHOLE`），空 units 兜底同样按整片算。
+                let whole = [domain::UnitKey::WHOLE];
+                let units: &[domain::UnitKey] = if row.units.is_empty() {
+                    &whole
+                } else {
+                    &row.units
+                };
+                for unit in units {
+                    let coordinates = unit.episode_coordinates();
+                    items.push(json!({
+                        "media_item_id": media.id.to_string(),
+                        "title": media.title,
+                        "kind": media.kind.as_str(),
+                        "path": row.file.path,
+                        "season": coordinates.map(|(season, _)| season),
+                        "episode": coordinates.map(|(_, episode)| episode),
+                    }));
+                }
             }
             items
         })

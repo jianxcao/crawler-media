@@ -1,4 +1,5 @@
 use store::{ProbeJobUnitSpec, Store};
+use store::test_support::FixtureFile;
 
 fn finish_workload(units: usize) -> (usize, usize, usize, usize, i64) {
     let temp = tempfile::tempdir().unwrap();
@@ -184,8 +185,8 @@ fn retiring_a_partial_unit_keeps_the_job_counters_honest() {
             &[],
         )
         .unwrap();
-    let rows = ["a", "b"].map(|suffix| domain::LedgerRow {
-        id: domain::LedgerId::new(),
+    let rows = ["a", "b"].map(|suffix| FixtureFile {
+        file_id: Some(domain::LedgerId::new()),
         media_id: media.id,
         path: format!("/library/{suffix}.mkv"),
         season: None,
@@ -196,11 +197,12 @@ fn retiring_a_partial_unit_keeps_the_job_counters_honest() {
         quality_source: domain::QualitySource::Probe,
         confidence: domain::Confidence::High,
         filter_score: None,
+        ..Default::default()
     });
     for row in &rows {
-        store.insert_ledger(row).unwrap();
+        store::test_support::publish_fixture_file(&store, &row).unwrap();
     }
-    let ids: Vec<String> = rows.iter().map(|row| row.id.to_string()).collect();
+    let ids: Vec<String> = rows.iter().map(|row| row.file_id.expect("fixture file id").to_string()).collect();
     let specs: Vec<_> = ids
         .iter()
         .map(|ledger_id| ProbeJobUnitSpec {

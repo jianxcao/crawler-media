@@ -275,7 +275,6 @@ CREATE INDEX attempt_job_file ON fingerprint_attempts(job_id,file_id);
 
 ```sql
 CREATE INDEX model_file ON fingerprint_model_members(file_id);
-CREATE INDEX model_sample ON fingerprint_model_members(sample_id);
 ```
 
 ## fingerprint_samples
@@ -1237,9 +1236,7 @@ CREATE INDEX session_id_expiry ON playback_session_ids(issued_at);
 
 **显式命名索引**
 
-```sql
-CREATE INDEX sessions_user ON playback_sessions(user_id);
-```
+无；主键/UNIQUE 自动索引不重复列出。
 
 ## playback_units
 

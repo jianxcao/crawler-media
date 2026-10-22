@@ -15,7 +15,7 @@ use api::browse_file_read::BrowseFileRead;
 use api::{ApiState, Store, router};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use serde_json::Value;
@@ -131,21 +131,18 @@ fn new_media(store: &Store, title: &str) -> MediaId {
 fn insert_episode(store: &Store, dir: &Path, media: MediaId, season: u32, episode: u32) -> LedgerId {
     let path = dir.join(format!("{season:02}x{episode:02}.mkv"));
     std::fs::write(&path, b"episode").unwrap();
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let spec = store::test_support::FixtureFile {
         media_id: media,
         path: path.display().to_string(),
         season: Some(season),
         episode: Some(episode),
-        resolution: None,
-        codec: None,
-        hdr: None,
         quality_source: QualitySource::Probe,
         confidence: Confidence::High,
-        filter_score: None,
+        ..Default::default()
     };
-    store.insert_ledger(&row).unwrap();
-    row.id
+    store::test_support::publish_fixture_file(store, &spec)
+        .unwrap()
+        .file_id
 }
 
 /// TV 库：`shows` 部剧、每部 `episodes` 集，全部挂在同一个根下。
@@ -155,7 +152,7 @@ fn tv_fixture(shows: usize, episodes: usize) -> Fixture {
 
 /// 同 [`tv_fixture`]，但每部剧的 sidecar 由 `seed` 在 ledger 行发布**之前**写下。
 ///
-/// NFO 观测只在发布时采集（Task 8），`insert_ledger` 之后写下的 sidecar 到不了库内快照，
+/// NFO 观测只在发布时采集（Task 8），`publish_fixture_file` 之后写下的 sidecar 到不了库内快照，
 /// 因此断言页内 genre/studio 的 fixture 必须先把 NFO 放好。
 fn tv_fixture_seeded(
     shows: usize,
@@ -208,8 +205,8 @@ fn tv_fixture_seeded(
 fn media_for_title(state: &ApiState, title: &str) -> MediaId {
     let store = state.store();
     let store = store.lock();
-    for row in store.list_ledger().unwrap() {
-        let Some(media) = store.get_media(row.media_id).unwrap() else {
+    for row in store.list_file_coverage().unwrap() {
+        let Some(media) = store.get_media(row.file.media_id).unwrap() else {
             continue;
         };
         if media.title == title {
@@ -275,6 +272,175 @@ async fn get_json(app: &axum::Router, uri: &str) -> Value {
 
 fn items(body: &Value) -> &Vec<Value> {
     body["Items"].as_array().expect("Items array")
+}
+
+/// 页内 URL 的采纳对象：作品作用域给简介/类型/工作室，分集作用域给主图 `still_url`。
+fn adopt_page_metadata(state: &ApiState, media: MediaId) {
+    let fields = domain::MetadataFields {
+        overview: domain::FieldValue::Value("adopted plot".into()),
+        studios: domain::FieldValue::Value(vec!["Studio X".into()]),
+        genres: domain::FieldValue::Value(vec![domain::MetadataGenre {
+            source: "tmdb".into(),
+            source_id: None,
+            name: "Drama".into(),
+            filter_key: "drama".into(),
+        }]),
+        still_url: domain::FieldValue::Value(
+            "https://image.tmdb.org/t/p/w500/adopted-still.jpg".into(),
+        ),
+        ..Default::default()
+    };
+    let adoption = |scope: domain::EntityScope| domain::MetadataAdoption {
+        media_id: media,
+        scope,
+        locale: "zh-CN".into(),
+        source: "tmdb".into(),
+        provider_entity_id: "100".into(),
+        provider_work_id: "100".into(),
+        fetched_at: 1,
+        normalized: domain::NormalizedMetadata {
+            fields: fields.clone(),
+            field_origins: std::collections::BTreeMap::new(),
+        },
+        expected_revision: None,
+        preferences: domain::MetadataPreferences {
+            language_priority: vec!["zh-CN".into()],
+            cert_country_priority: Vec::new(),
+        },
+    };
+    let store = state.store();
+    let store = store.lock();
+    store
+        .adopt_metadata(&adoption(domain::EntityScope::Work), 1)
+        .unwrap();
+    store
+        .adopt_metadata(
+            &adoption(domain::EntityScope::Episode {
+                season: 1,
+                episode: 1,
+            }),
+            1,
+        )
+        .unwrap();
+}
+
+/// 采纳行在场时，页内主图只能来自已采纳事实（`still_url`）与本地文件约定；现场 NFO 被
+/// 改坏、它引用的本地图片被删除，都不得改变同一个页的任何一个字段。
+///
+/// 出站网络由 fixture 的 [`NoFetch`] 全程拒绝，所以「离线 + 坏现场 NFO」这条差分里只剩
+/// 现场 NFO 一个变量：`library::read_nfo` 读到的 `<thumb>` 一旦还参与渲染，页内
+/// `ImageTags` 就会随 sidecar 消失，两个响应不再逐字段相等。
+#[tokio::test]
+async fn adopted_page_ignores_live_nfo_artwork() {
+    let fixture = tv_fixture_seeded(1, 1, |show_dir| {
+        std::fs::write(show_dir.join("reference-still.jpg"), b"jpeg").unwrap();
+        std::fs::write(
+            show_dir.join("01x01.nfo"),
+            b"<episodedetails><title>Observed</title><thumb>reference-still.jpg</thumb></episodedetails>",
+        )
+        .unwrap();
+    });
+    let media = media_for_title(&fixture.state, "Show000");
+    adopt_page_metadata(&fixture.state, media);
+    let app = router(fixture.state.clone());
+    let uri = format!(
+        "/Items?ParentId={}&Recursive=true&IncludeItemTypes=Episode&SortBy=SortName",
+        fixture.library_id
+    );
+    let online = get_json(&app, &uri).await;
+    assert_eq!(items(&online).len(), 1, "{online}");
+    assert_eq!(
+        items(&online)[0]["ImageTags"]["Primary"],
+        "episode",
+        "在线采纳页的主图必须成立：{online}"
+    );
+
+    let sidecar = fixture.roots[0].join("Show000").join("01x01.nfo");
+    std::fs::write(&sidecar, b"<episodedetails><thumb>broken").unwrap();
+    std::fs::remove_file(fixture.roots[0].join("Show000").join("reference-still.jpg")).unwrap();
+    let offline = get_json(&app, &uri).await;
+    assert_eq!(
+        items(&offline)[0]["ImageTags"]["Primary"],
+        "episode",
+        "采纳行在场时页内主图不得来自现场 NFO 的 <thumb>：{offline}"
+    );
+    assert_eq!(
+        offline, online,
+        "现场 NFO 被改坏/删除不得改变采纳页的任何一个字段"
+    );
+}
+
+/// 采纳页 + 现场 `<thumb>` 是远端形态：页内主图照旧成立，且现场 NFO 被改坏后响应不变。
+#[tokio::test]
+async fn adopted_page_keeps_its_primary_image_with_a_remote_nfo_thumb() {
+    let fixture = tv_fixture_seeded(1, 1, |show_dir| {
+        std::fs::write(
+            show_dir.join("01x01.nfo"),
+            b"<episodedetails><title>Observed</title>\
+              <thumb>https://image.tmdb.org/t/p/w300/sidecar-still.jpg</thumb></episodedetails>",
+        )
+        .unwrap();
+    });
+    let media = media_for_title(&fixture.state, "Show000");
+    adopt_page_metadata(&fixture.state, media);
+    let app = router(fixture.state.clone());
+    let uri = format!(
+        "/Items?ParentId={}&Recursive=true&IncludeItemTypes=Episode&SortBy=SortName",
+        fixture.library_id
+    );
+    let online = get_json(&app, &uri).await;
+    assert_eq!(
+        items(&online)[0]["ImageTags"]["Primary"],
+        "episode",
+        "远端形态的现场 <thumb> 不得让采纳页丢主图：{online}"
+    );
+
+    std::fs::write(
+        fixture.roots[0].join("Show000").join("01x01.nfo"),
+        b"<episodedetails><thumb>broken",
+    )
+    .unwrap();
+    let offline = get_json(&app, &uri).await;
+    assert_eq!(
+        offline, online,
+        "页内主图只来自已落库字段，现场 NFO 被改坏不得改变页内响应"
+    );
+}
+
+/// NFO-only 剧集（没有采纳行）：远端 `<thumb>` 经观察层落库后必须在页内生效，
+/// 现场 NFO 事后被改坏也不得改变页内响应——页内不读现场 NFO。
+#[tokio::test]
+async fn nfo_only_remote_thumb_keeps_the_page_primary_image() {
+    let fixture = tv_fixture_seeded(1, 1, |show_dir| {
+        std::fs::write(
+            show_dir.join("01x01.nfo"),
+            b"<episodedetails><title>Observed</title>\
+              <thumb>https://image.tmdb.org/t/p/w500/nfo-only-still.jpg</thumb></episodedetails>",
+        )
+        .unwrap();
+    });
+    let app = router(fixture.state.clone());
+    let uri = format!(
+        "/Items?ParentId={}&Recursive=true&IncludeItemTypes=Episode&SortBy=SortName",
+        fixture.library_id
+    );
+    let online = get_json(&app, &uri).await;
+    assert_eq!(
+        items(&online)[0]["ImageTags"]["Primary"],
+        "episode",
+        "只有 NFO <thumb> 有图的剧集必须在页内拿到主图：{online}"
+    );
+
+    std::fs::write(
+        fixture.roots[0].join("Show000").join("01x01.nfo"),
+        b"<episodedetails><thumb>broken",
+    )
+    .unwrap();
+    let offline = get_json(&app, &uri).await;
+    assert_eq!(
+        offline, online,
+        "页内主图只来自已落库字段，现场 NFO 被改坏不得改变页内响应"
+    );
 }
 
 #[path = "jellyfin_paged_metadata/paged.rs"]

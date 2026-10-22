@@ -38,16 +38,16 @@ fn item_files(
     library_id: &str,
     media: &domain::Media,
 ) -> Result<Vec<ItemFile>, StoreError> {
-    let rows = store.ledger_for_media(media.id)?;
+    let rows = store.file_coverage_for_media(media.id)?;
     Ok(rows
         .into_iter()
         .filter(|row| {
-            crate::http::library::library_for_row_strict(store, row, media)
+            crate::http::library::library_for_file_strict(store, &row.file, media)
                 .is_some_and(|library| library.id == library_id)
         })
         .map(|row| ItemFile {
-            file_id: row.id,
-            path: row.path,
+            file_id: row.file.file_id,
+            path: row.file.path.to_string_lossy().into_owned(),
         })
         .collect())
 }

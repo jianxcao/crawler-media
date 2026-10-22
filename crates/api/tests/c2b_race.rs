@@ -10,6 +10,7 @@ use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use serde_json::{Value, json};
 use tower::ServiceExt;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 struct NoFetch;
 impl Fetcher for NoFetch {
@@ -63,9 +64,10 @@ fn seed(root: &Path, state: &ApiState) -> String {
             anilist_id: None,
         };
         guard.insert_media(&media).unwrap();
-        guard
-            .insert_ledger(&domain::LedgerRow {
-                id: domain::LedgerId::new(),
+        publish_fixture_file(
+            &guard,
+            &FixtureFile {
+                file_id: Some(domain::LedgerId::new()),
                 media_id: media.id,
                 path: file.display().to_string(),
                 season: None,
@@ -76,8 +78,10 @@ fn seed(root: &Path, state: &ApiState) -> String {
                 quality_source: domain::QualitySource::Probe,
                 confidence: domain::Confidence::High,
                 filter_score: None,
-            })
-            .unwrap();
+                ..Default::default()
+            },
+        )
+        .unwrap();
     }
     library.id
 }

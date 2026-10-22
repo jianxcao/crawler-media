@@ -72,7 +72,7 @@ fn explicit_no_match_in_one_version_conflicts_with_detected_intro_in_another() {
         let has_intro = replacement
             .chapter_updates
             .iter()
-            .find(|(id, _)| id == &ledger_b.id.to_string())
+            .find(|(id, _)| id == &ledger_b.file.file_id.to_string())
             .unwrap()
             .1
             .iter()

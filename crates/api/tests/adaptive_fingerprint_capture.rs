@@ -7,7 +7,7 @@ use api::fingerprint_job::{
     AdaptiveCaptureContext, CaptureGate, CapturePolicy, EpisodeCaptureRequest,
     FingerprintCaptureProfile,
 };
-use domain::LedgerRow;
+use domain::{FileCoverage, UnitKey};
 use marker::adaptive::{SamplingPolicy, TemplateContext};
 use marker::fingerprint::capture_types::{
     CaptureFailure, CaptureFailureKind, CaptureMetrics, CaptureRequest, CapturedFingerprint,
@@ -15,6 +15,7 @@ use marker::fingerprint::capture_types::{
 };
 use marker::{AudioFingerprint, CommonSegment, FingerprintEngine};
 use store::Store;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 struct NoopGate;
 
@@ -98,7 +99,7 @@ impl FingerprintEngine for MockEngine {
     }
 }
 
-fn dummy_row(store: &Store, ledger_id: &str, ep: u32) -> LedgerRow {
+fn dummy_row(store: &Store, ledger_id: &str, ep: u32) -> FileCoverage {
     let media_id = domain::MediaId::new();
     store
         .insert_media(&domain::Media {
@@ -120,18 +121,21 @@ fn dummy_row(store: &Store, ledger_id: &str, ep: u32) -> LedgerRow {
         .unwrap()
         .join(format!("dummy_{ledger_id}.mkv"));
     std::fs::write(&dummy_path, b"dummy").unwrap();
-    LedgerRow {
-        id: domain::LedgerId::new(),
+    let spec = FixtureFile {
         media_id,
         path: dummy_path.to_string_lossy().to_string(),
         season: Some(1),
         episode: Some(ep),
-        resolution: None,
-        codec: None,
-        hdr: None,
         quality_source: domain::QualitySource::Probe,
         confidence: domain::Confidence::High,
-        filter_score: None,
+        ..FixtureFile::default()
+    };
+    // The published file fact — and with it the `file_id` the pipeline keys on —
+    // is only known after publication, so read it back instead of inventing one.
+    let file = publish_fixture_file(store, &spec).unwrap();
+    FileCoverage {
+        file,
+        units: vec![UnitKey::new(1, ep as i32)],
     }
 }
 
@@ -166,7 +170,6 @@ async fn reuse_valid_does_not_read_media() {
     let policy = SamplingPolicy::default();
 
     let row = dummy_row(&store.lock(), "l-1", 1);
-    store.lock().insert_ledger(&row).unwrap();
     let req = EpisodeCaptureRequest {
         job_id: "job-1".into(),
         row,
@@ -207,7 +210,6 @@ async fn recapture_requires_new_job_evidence() {
     let policy = SamplingPolicy::default();
 
     let row = dummy_row(&store.lock(), "l-1", 1);
-    store.lock().insert_ledger(&row).unwrap();
     let req1 = EpisodeCaptureRequest {
         job_id: "job-1".into(),
         row,
@@ -253,7 +255,6 @@ async fn retries_and_fallback_share_four_attempt_budget() {
     let policy = SamplingPolicy::default();
 
     let row = dummy_row(&store.lock(), "l-exhaust", 1);
-    store.lock().insert_ledger(&row).unwrap();
     let req = EpisodeCaptureRequest {
         job_id: "job-exhaust".into(),
         row,

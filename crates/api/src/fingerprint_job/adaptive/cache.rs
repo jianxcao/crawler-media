@@ -3,6 +3,7 @@ use marker::fingerprint::capture_types::{CaptureMetrics, CapturedFingerprint, Sa
 use store::{FingerprintSampleQuery, Store, StoredFingerprintSample};
 
 use super::types::{CapturePolicy, EpisodeCaptureRequest};
+use crate::fingerprint_job::episode_or_one;
 
 pub fn find_reusable_sample(
     store: &Store,
@@ -20,7 +21,7 @@ pub fn find_reusable_sample(
     };
 
     let query = FingerprintSampleQuery {
-        ledger_id: request.row.id.to_string(),
+        ledger_id: request.row.file.file_id.to_string(),
         source_version: request.source_version.clone(),
         capture_profile_key: request.capture_profile_key.clone(),
         kind: kind_str.to_string(),
@@ -36,7 +37,7 @@ pub fn find_reusable_sample(
 
     Some(stored_sample_to_evidence(
         &matched,
-        request.row.episode.unwrap_or(1),
+        episode_or_one(&request.row),
         kind,
         request.media_duration_ms,
     ))

@@ -4,8 +4,8 @@
 //! store; workers load one snapshot, claim it, and refill the window. A full
 //! fingerprint window leaves the unit queued instead of finishing it failed.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use store::{ProbeDispatchId, ProbeDispatchStage};
 use tokio::sync::mpsc;
@@ -70,7 +70,7 @@ impl ProbeManager {
         };
         let id = ProbeDispatchId {
             job_id,
-            ledger_id: unit.row.id.to_string(),
+            ledger_id: unit.row.file.file_id.to_string(),
             stage: ProbeDispatchStage::Metadata,
         };
         self.offer(self.metadata_tx.clone(), id, unit)
@@ -84,7 +84,7 @@ impl ProbeManager {
         &self,
         mut work: probe::FingerprintWork,
     ) -> bool {
-        let ledger_id = work.unit.row.id.to_string();
+        let ledger_id = work.unit.row.file.file_id.to_string();
         let Some(current_job_id) = work.unit.job_id.clone() else {
             tracing::error!(ledger_id, "媒体信息已完成，但声纹任务缺少持久化任务 ID");
             self.seen.lock().remove(&ledger_id);
@@ -119,7 +119,8 @@ impl ProbeManager {
                 self.seen.lock().remove(&ledger_id);
                 return false;
             }
-            let Some(fingerprint_job_id) = self.persist_single_unit(&work.unit, "fingerprint_probe")
+            let Some(fingerprint_job_id) =
+                self.persist_single_unit(&work.unit, "fingerprint_probe")
             else {
                 tracing::error!(ledger_id, "创建声纹任务失败，工作保持可恢复");
                 self.seen.lock().remove(&ledger_id);
@@ -189,7 +190,7 @@ impl ProbeManager {
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 tracing::info!(
-                    ledger_id = %unit.row.id,
+                    ledger_id = %unit.row.file.file_id,
                     "探测窗口已满，任务保持数据库排队"
                 );
                 Err(unit)
@@ -368,5 +369,3 @@ impl ProbeManager {
         Some((unit, work))
     }
 }
-
-

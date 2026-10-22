@@ -12,15 +12,46 @@ use crate::management::ApiState;
 
 use super::library::missing_library;
 
-fn file_entity(path: &str) -> Option<std::path::PathBuf> {
-    let path = FsPath::new(path);
+fn file_entity(path: &FsPath) -> Option<std::path::PathBuf> {
     if !path.exists() {
         return None;
     }
     std::fs::canonicalize(path).ok()
 }
 
-fn distinct_present_entities(rows: &[domain::LedgerRow]) -> Vec<std::path::PathBuf> {
+/// The file's unit rows as the legacy `(season, episode)` pair: whole files keep
+/// the historical `(null, null)` shape, so the JSON stays byte-compatible with
+/// the one-row-per-unit era. A file with no unit row at all is a state the
+/// legacy schema could not represent; it is grouped as a whole file instead of
+/// being dropped from the response (see the slice judgment points).
+fn unit_coordinates(units: &[domain::UnitKey]) -> Vec<(Option<u32>, Option<u32>)> {
+    if units.is_empty() {
+        return vec![(None, None)];
+    }
+    units
+        .iter()
+        .map(|unit| {
+            if unit.is_whole() {
+                (None, None)
+            } else {
+                (Some(unit.season as u32), Some(unit.episode as u32))
+            }
+        })
+        .collect()
+}
+
+/// Units of a file in the library listing, recorded or not.
+fn units_of(store: &crate::Store, file: &domain::LibraryFile) -> Vec<domain::UnitKey> {
+    match store.get_file_units(file.file_id) {
+        Ok(units) => units,
+        Err(error) => {
+            tracing::warn!(%error, file_id = %file.file_id, "读取文件单元失败");
+            Vec::new()
+        }
+    }
+}
+
+fn distinct_present_entities(rows: &[domain::LibraryFile]) -> Vec<std::path::PathBuf> {
     let mut entities = Vec::new();
     for row in rows {
         let Some(entity) = file_entity(&row.path) else {
@@ -33,20 +64,22 @@ fn distinct_present_entities(rows: &[domain::LedgerRow]) -> Vec<std::path::PathB
     entities
 }
 
-/// GET /libraries/{id}/duplicates — ledger rows sharing the same
+/// GET /libraries/{id}/duplicates — file rows sharing the same
 /// (media, season, episode) unit, grouped for keep/delete decisions.
 pub(crate) async fn duplicates(State(state): State<ApiState>, Path(id): Path<String>) -> Response {
     let store = state.store.lock();
     let Some(library) = store.get_library(&id).ok().flatten() else {
         return missing_library();
     };
-    let mut units: HashMap<(domain::MediaId, Option<u32>, Option<u32>), Vec<domain::LedgerRow>> =
+    let mut units: HashMap<(domain::MediaId, Option<u32>, Option<u32>), Vec<domain::LibraryFile>> =
         HashMap::new();
-    for row in super::library::rows_in_library(&store, &library) {
-        units
-            .entry((row.media_id, row.season, row.episode))
-            .or_default()
-            .push(row);
+    for row in super::library::files_in_library(&store, &library) {
+        for (season, episode) in unit_coordinates(&units_of(&store, &row)) {
+            units
+                .entry((row.media_id, season, episode))
+                .or_default()
+                .push(row.clone());
+        }
     }
     let mut groups = Vec::new();
     for ((media_id, season, episode), rows) in units {
@@ -60,8 +93,8 @@ pub(crate) async fn duplicates(State(state): State<ApiState>, Path(id): Path<Str
             .iter()
             .map(|row| {
                 json!({
-                    "file_id": row.id.to_string(),
-                    "path": row.path,
+                    "file_id": row.file_id.to_string(),
+                    "path": row.path.display().to_string(),
                     "resolution": row.resolution,
                     "codec": row.codec,
                     "hdr": row.hdr,
@@ -90,23 +123,29 @@ pub(crate) async fn delete_duplicate(
     let Some(library) = store.get_library(&library_id).ok().flatten() else {
         return missing_library();
     };
-    let Some(row) = store.get_ledger(&file_id.replace('-', "")).ok().flatten() else {
+    let Ok(file_id) = file_id.parse::<domain::LedgerId>() else {
         return err(StatusCode::NOT_FOUND, "file.missing", "文件不存在");
     };
+    let Some(coverage) = store.file_coverage_by_id(file_id).ok().flatten() else {
+        return err(StatusCode::NOT_FOUND, "file.missing", "文件不存在");
+    };
+    let row = coverage.file;
+    let target_units = unit_coordinates(&coverage.units);
     let Some(media) = store.get_media(row.media_id).ok().flatten() else {
         return err(StatusCode::NOT_FOUND, "file.missing", "文件不存在");
     };
-    if crate::http::library::library_for_row_strict(&store, &row, &media)
+    if crate::http::library::library_for_file_strict(&store, &row, &media)
         .is_none_or(|owner| owner.id != library.id)
     {
         return err(StatusCode::NOT_FOUND, "file.missing", "文件不属于该媒体库");
     }
-    let siblings: Vec<_> = super::library::rows_in_library(&store, &library)
+    let siblings: Vec<domain::LibraryFile> = super::library::files_in_library(&store, &library)
         .into_iter()
         .filter(|other| {
             other.media_id == row.media_id
-                && other.season == row.season
-                && other.episode == row.episode
+                && unit_coordinates(&units_of(&store, other))
+                    .iter()
+                    .any(|unit| target_units.contains(unit))
         })
         .collect();
     let present_entities = distinct_present_entities(&siblings);
@@ -129,8 +168,9 @@ pub(crate) async fn delete_duplicate(
             "没有另一份在位的独立副本，拒绝删除",
         );
     }
-    if let Err(error) = file_delete::remove_file_and_ledger(&store, &row.path) {
+    let path = row.path.to_string_lossy();
+    if let Err(error) = file_delete::remove_file_and_ledger(&store, &path) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "file.delete", &error);
     }
-    ok(json!({ "deleted": true, "path": row.path })).into_response()
+    ok(json!({ "deleted": true, "path": row.path.display().to_string() })).into_response()
 }

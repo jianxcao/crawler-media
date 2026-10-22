@@ -97,8 +97,6 @@ fn make_added<'a>(
             facts: Default::default(),
             files: vec![],
             file_sources: vec![],
-            ledger: vec![],
-            ledger_sources: vec![],
             removed_paths: vec![],
             completed: false,
             transferred_enclosures: vec![],

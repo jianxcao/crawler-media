@@ -116,8 +116,8 @@ fn finish_intake_metadata(
         let store = state.store.lock();
         let mut map = std::collections::HashMap::new();
         for dest in transferred {
-            if let Ok(Some(row)) = store.ledger_by_path(&dest.path.display().to_string()) {
-                if let Ok(Some(m)) = store.get_media(row.media_id) {
+            if let Ok(Some(row)) = store.file_coverage_by_path(&dest.path.display().to_string()) {
+                if let Ok(Some(m)) = store.get_media(row.file.media_id) {
                     if m.tmdb_id.is_none() && m.kind != domain::MediaKind::Video {
                         map.entry(m.id).or_insert((m, dest.path.clone()));
                     }
@@ -151,7 +151,7 @@ fn finish_intake_metadata(
             .iter()
             .filter_map(|t| {
                 let row = store
-                    .ledger_by_path(&t.path.display().to_string())
+                    .file_coverage_by_path(&t.path.display().to_string())
                     .ok()
                     .flatten()?;
                 let missing_poster = t
@@ -160,7 +160,7 @@ fn finish_intake_metadata(
                     .map(|dir| !dir.join("poster.jpg").is_file())
                     .unwrap_or(false);
                 if missing_poster {
-                    Some((row.media_id, t.path.clone()))
+                    Some((row.file.media_id, t.path.clone()))
                 } else {
                     None
                 }
@@ -232,11 +232,11 @@ mod tests {
 
         run(&state).unwrap();
 
-        let rows = state.store.lock().list_ledger().unwrap();
+        let rows = state.store.lock().list_file_coverage().unwrap();
         assert_eq!(rows.len(), 1);
         assert!(
-            state.probe.is_queued(&rows[0].id.to_string()),
-            "new ledger rows should start media probing during intake"
+            state.probe.is_queued(&rows[0].file.file_id.to_string()),
+            "new files should start media probing during intake"
         );
     }
 
@@ -280,23 +280,20 @@ mod tests {
             anilist_id: None,
         };
         let media = state.store.lock().ensure_media(media).unwrap();
-        let row = domain::LedgerRow {
-            id: domain::LedgerId::new(),
+        let fixture = store::test_support::FixtureFile {
             media_id: media.id,
             path: episode_path.display().to_string(),
             season: Some(1),
             episode: Some(1),
-            resolution: None,
-            codec: None,
-            hdr: None,
-            quality_source: domain::QualitySource::Release,
-            confidence: domain::Confidence::High,
-            filter_score: None,
+            ..Default::default()
         };
-        state.store.lock().insert_ledger(&row).unwrap();
+        store::test_support::publish_fixture_file(&state.store.lock(), &fixture).unwrap();
 
         assert_eq!(
-            crate::http::library::enqueue_probes_for_rows(&state, &[row]),
+            crate::http::library::enqueue_probes_for_paths(
+                &state,
+                [std::path::PathBuf::from(&fixture.path)]
+            ),
             1
         );
         let queued = state.probe.take_queued_for_test().unwrap();
@@ -354,23 +351,20 @@ mod tests {
                 anilist_id: None,
             })
             .unwrap();
-        let row = domain::LedgerRow {
-            id: domain::LedgerId::new(),
+        let fixture = store::test_support::FixtureFile {
             media_id: media.id,
             path: episode_path.display().to_string(),
             season: Some(1),
             episode: Some(1),
-            resolution: None,
-            codec: None,
-            hdr: None,
-            quality_source: domain::QualitySource::Release,
-            confidence: domain::Confidence::High,
-            filter_score: None,
+            ..Default::default()
         };
-        state.store.lock().insert_ledger(&row).unwrap();
+        store::test_support::publish_fixture_file(&state.store.lock(), &fixture).unwrap();
 
         assert_eq!(
-            crate::http::library::enqueue_probes_for_rows(&state, &[row]),
+            crate::http::library::enqueue_probes_for_paths(
+                &state,
+                [std::path::PathBuf::from(&fixture.path)]
+            ),
             1
         );
         let queued = state.probe.take_queued_for_test().unwrap();

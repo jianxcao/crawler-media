@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use domain::LedgerRow;
 
 pub(crate) fn video_present(path: &Path) -> bool {
     match std::fs::metadata(path) {
@@ -16,10 +15,12 @@ pub(crate) fn video_present(path: &Path) -> bool {
     }
 }
 
-pub(crate) fn live_groups(rows: &[LedgerRow]) -> BTreeMap<PathBuf, Vec<LedgerRow>> {
+pub(crate) fn live_groups(
+    coverages: &[domain::FileCoverage],
+) -> BTreeMap<PathBuf, Vec<domain::FileCoverage>> {
     let mut groups = BTreeMap::new();
-    for row in rows {
-        let path = Path::new(&row.path);
+    for row in coverages {
+        let path = row.file.path.as_path();
         if video_present(path) {
             groups
                 .entry(super::show_root(path, row))

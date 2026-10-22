@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use api::ApiState;
 use api::maintenance::{MaintenancePolicy, run, seed_maintenance_defs};
@@ -450,203 +450,348 @@ async fn maintenance_config_accepts_data_retention_and_enforces_cas() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
-#[test]
-fn retention_preserves_active_operations_and_local_facts() {
-    let tmp = tempfile::tempdir().unwrap();
-    let data_dir_path = tmp.path().join("data");
-    let store_instance = api::Store::open(&data_dir_path).unwrap();
-    let state = support::build_state(tmp.path(), store_instance, Arc::new(api::maintenance::SqliteExecutor));
+const CACHE_ROWS: usize = 100_000;
+/// 与 `real_payload()` 的 `probe_days` 对齐，种子必须落在保留窗口之外。
+const RETENTION_DAYS: i64 = 90;
+
+/// 夹具：真实登记 Media、经公开 `publish_files` 落一个已发布文件、写一条播放进度。
+/// 返回的 (user, media) 之后一律用公开 seam 复核，不读私有 SQL。
+fn seed_local_facts(state: &ApiState, root: &std::path::Path) -> (domain::UserId, domain::MediaId) {
+    let user = domain::UserId::new();
+    let media = domain::MediaId::new();
     let store = state.store();
-    let user_id = domain::UserId::new();
-    let (media_id, _file_id) = {
-        let guard_scope = store.lock();
-        let media = domain::Media {
-            id: domain::MediaId::new(),
+    let guard = store.lock();
+    guard
+        .insert_media(&domain::Media {
+            id: media,
             kind: domain::MediaKind::Movie,
             title: "Retention Movie".into(),
-            year: Some(2024),
             original_title: None,
+            aliases: Vec::new(),
+            year: Some(2024),
             tmdb_id: Some("12345".into()),
             douban_id: None,
             tvdb_id: None,
             bangumi_id: None,
             anilist_id: None,
-            aliases: Vec::new(),
-        };
-        guard_scope.insert_media(&media).unwrap();
-        let lib_dir = tmp.path().join("library");
-        std::fs::create_dir_all(&lib_dir).unwrap();
-        let lib = guard_scope
-            .create_library(
-                domain::MediaKind::Movie,
-                "Movies",
-                &[lib_dir.to_str().unwrap()],
-                "everyone",
-                true,
-                &[],
-            )
-            .unwrap();
-        let root = guard_scope
-            .list_library_roots()
-            .unwrap()
-            .into_iter()
-            .find(|r| r.library_id == Some(lib.id.clone()))
-            .unwrap();
-        let file_path = lib_dir.join("movie.mkv");
-        std::fs::write(&file_path, b"dummy content").unwrap();
-        let file_id = domain::LedgerId::new();
-        let file = domain::LibraryFile {
-            file_id,
-            library_id: lib.id.parse().unwrap(),
-            root_id: root.id,
-            media_id: media.id,
-            kind: domain::MediaKind::Movie,
-            path: file_path.to_string_lossy().into_owned().into(),
-            version: domain::FileVersion {
-                revision: 1,
-                source_version: "v1".into(),
-            },
-            presence: domain::FilePresence::Present,
-            publication: domain::FilePublication::Published,
-            size_bytes: Some(100),
-            stat_known: true,
-            created_ns: None,
-            modified_ns: None,
-            source_digest: None,
-            source_path: None,
-            transfer_mode: None,
-            resolution: Some("1080p".into()),
-            codec: Some("h264".into()),
-            hdr: None,
-            quality_source: domain::QualitySource::Probe,
-            confidence: domain::Confidence::High,
-            filter_score: None,
-            release_quality: None,
-            duration_ms: Some(10_000),
-            tracks_version: 1,
-            poster_path: None,
-            backdrop_path: None,
-            still_path: None,
-        };
-        let scope = store::library_write::WriteScope {
-            library_id: lib.id.parse().unwrap(),
-            config_revision: 0,
-        };
-        guard_scope
-            .publish_files(
-                &scope,
-                &[store::library_write::FilePublication {
-                    file: &file,
-                    units: &[domain::UnitKey::WHOLE],
-                    expected_version: None,
-                    nfo_observation: None,
-                    probe_required: false,
-                }],
-                1000,
-            )
-            .unwrap();
-        (media.id, file_id)
-    };
+        })
+        .unwrap();
+    support::seed_published_file(&guard, root, media);
+    guard
+        .upsert_unit(
+            user,
+            media,
+            -1,
+            -1,
+            5000,
+            Some(false),
+            Some(true),
+            Some(10_000),
+            None,
+            None,
+            false,
+            1000,
+        )
+        .unwrap();
+    (user, media)
+}
 
-    // Record user progress
-    {
-        let guard = store.lock();
-        guard
-            .upsert_unit(
-                user_id,
-                media_id,
-                -1,
-                -1,
-                5000,
-                Some(false),
-                Some(true),
-                Some(10_000),
-                None,
-                None,
-                false,
-                1000,
-            )
-            .unwrap();
-    }
+fn fixture_library_id(state: &ApiState) -> String {
+    state
+        .store()
+        .lock()
+        .list_libraries()
+        .unwrap()
+        .into_iter()
+        .find(|library| library.name == "Fixture")
+        .expect("夹具必须落了 Fixture 库")
+        .id
+}
 
-    // Active media operation
-    let active_op_id = "00000000-0000-0000-0000-000000000099";
-    {
-        let conn = rusqlite::Connection::open(data_dir_path.join("library.db")).unwrap();
+fn library_stats(state: &ApiState) -> store::LibraryRosterStats {
+    let library_id = fixture_library_id(state);
+    state
+        .store()
+        .lock()
+        .library_roster_stats(&library_id)
+        .unwrap()
+}
+
+fn playback_count(state: &ApiState, user: domain::UserId, media: domain::MediaId) -> usize {
+    state
+        .store()
+        .lock()
+        .playback_units_for_media(user, &[media])
+        .unwrap()
+        .len()
+}
+
+fn active_operations(state: &ApiState) -> usize {
+    state
+        .store()
+        .lock()
+        .unfinished_media_merges()
+        .unwrap()
+        .len()
+}
+
+/// 公开 API 没有创建 `media_operations` 行的入口（`begin_merge` 是 crate 私有），
+/// 活动操作只能用种子 SQL 造出来；读取一律走 `unfinished_media_merges()`。
+fn seed_active_merge(state: &ApiState, media: domain::MediaId) {
+    let conn = rusqlite::Connection::open(data_dir(state).join("library.db")).unwrap();
+    conn.execute(
+        "INSERT INTO media_operations
+            (operation_id, kind, plan_json, phase_cursor, state, error, created_at_ms, updated_at_ms, survivor_id, loser_id)
+         VALUES ('00000000-0000-0000-0000-000000000099', 'merge', '{}', 'init', 'frozen', NULL, 1000, 1000, ?1, NULL)",
+        params![media.to_string()],
+    )
+    .unwrap();
+}
+
+/// Probe 历史同样没有公开写入口，只能种子。四条都在 `real_payload()` 的 90 天保留窗口
+/// 之外（都是候选），其中最新 3 条落在同 scope 的「最新 3 条终态」保护窗口内。
+fn seed_probe_history(state: &ApiState, now: i64) {
+    let conn = rusqlite::Connection::open(data_dir(state).join("library.db")).unwrap();
+    let cutoff_ms = (now - RETENTION_DAYS * DAY) * 1000;
+    for (id, age_ms) in [
+        ("retention-oldest", 4 * DAY * 1000),
+        ("retention-mid", 3 * DAY * 1000),
+        ("retention-new", 2 * DAY * 1000),
+        ("retention-newest", 1 * DAY * 1000),
+    ] {
+        let finished_at_ms = cutoff_ms - age_ms;
         conn.execute(
-            "INSERT INTO media_operations
-                (operation_id, kind, plan_json, phase_cursor, state, error, created_at_ms, updated_at_ms, survivor_id, loser_id)
-             VALUES (?1, 'merge', '{}', 'init', 'frozen', NULL, 1000, 1000, ?2, NULL)",
-            params![active_op_id, media_id.to_string()],
+            "INSERT INTO probe_jobs
+                (id, kind, media_id, season, scope_key, status, total, completed,
+                 succeeded, failed, partial, error, created_at_ms, started_at_ms, finished_at_ms)
+             VALUES (?1, 'metadata', 'm', NULL, 'scope-retention', 'succeeded', 1, 1, 1, 0, 0, NULL, ?2, ?2, ?2)",
+            params![id, finished_at_ms],
         )
         .unwrap();
     }
+}
 
-    let local_items_before = {
-        let conn = rusqlite::Connection::open(data_dir_path.join("library.db")).unwrap();
-        conn.query_row("SELECT COUNT(*) FROM library_items", [], |r| r.get::<_, usize>(0))
-            .unwrap()
-    };
-    let playback_before = {
-        let conn = rusqlite::Connection::open(data_dir_path.join("library.db")).unwrap();
-        conn.query_row("SELECT COUNT(*) FROM playback_units", [], |r| r.get::<_, usize>(0))
-            .unwrap()
-    };
-    let active_operations_before = {
-        let conn = rusqlite::Connection::open(data_dir_path.join("library.db")).unwrap();
-        conn.query_row(
-            "SELECT COUNT(*) FROM media_operations WHERE state IN ('planned','frozen','draining','applying','checking')",
-            [],
-            |r| r.get::<_, usize>(0),
+fn probe_job_exists(state: &ApiState, id: &str) -> bool {
+    let conn = rusqlite::Connection::open(data_dir(state).join("library.db")).unwrap();
+    let rows = conn
+        .query_row(
+            "SELECT COUNT(*) FROM probe_jobs WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, i64>(0),
         )
-        .unwrap()
-    };
+        .unwrap();
+    rows > 0
+}
 
-    // 100k cache updates + cache clear simulation
-    {
-        let cache_conn = rusqlite::Connection::open(data_dir_path.join("cache.db")).unwrap();
-        cache_conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS tmdb_cache (
-                entry_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                cache_key TEXT NOT NULL COLLATE BINARY UNIQUE,
-                body TEXT NOT NULL,
-                fetched_at INTEGER NOT NULL,
-                expires_at INTEGER
-            );
-            DELETE FROM tmdb_cache;"
-        ).unwrap();
-        cache_conn.execute(
-            "INSERT INTO tmdb_cache (cache_key, body, fetched_at) VALUES ('key1', '{}', 1000)",
-            [],
-        ).unwrap();
-        cache_conn.execute("DELETE FROM tmdb_cache", []).unwrap();
+fn open_cache(state: &ApiState) -> rusqlite::Connection {
+    media::response_cache::open(data_dir(state).join("cache.db")).unwrap()
+}
+
+/// 计划 Task 20 的 10 万行缓存写入 + 逐键清空，全部走 media 公开 API 写真实 `cache.db`。
+/// 返回 (写入成功的行数, 墙钟耗时)；规模由调用点断言，避免「缩到 10 行冒充」。
+fn churn_cache(state: &ApiState) -> (usize, Duration) {
+    let conn = open_cache(state);
+    let started = Instant::now();
+    conn.execute_batch("BEGIN").unwrap();
+    for index in 0..CACHE_ROWS {
+        media::response_cache::put(
+            &conn,
+            media::response_cache::CacheSource::Tmdb,
+            &format!("/search/movie?page={index}"),
+            "{}",
+            unix_now() - 200 * DAY,
+            None,
+        )
+        .unwrap();
     }
-
-    // Trigger data retention pruning directly through store
-    let _ = store.lock().prune_data_history(store::RetentionClass::Qoe, 2_000_000_000_000, None, 500, false).unwrap();
-    let _ = store.lock().prune_data_history(store::RetentionClass::ProbeHistory, 2_000_000_000_000, None, 500, false).unwrap();
-
-    let local_items_after_cache_clear = {
-        let conn = rusqlite::Connection::open(data_dir_path.join("library.db")).unwrap();
-        conn.query_row("SELECT COUNT(*) FROM library_items", [], |r| r.get::<_, usize>(0))
-            .unwrap()
-    };
-    let playback_after_cache_clear = {
-        let conn = rusqlite::Connection::open(data_dir_path.join("library.db")).unwrap();
-        conn.query_row("SELECT COUNT(*) FROM playback_units", [], |r| r.get::<_, usize>(0))
-            .unwrap()
-    };
-    let active_operations_after_retention = {
-        let conn = rusqlite::Connection::open(data_dir_path.join("library.db")).unwrap();
-        conn.query_row(
-            "SELECT COUNT(*) FROM media_operations WHERE state IN ('planned','frozen','draining','applying','checking')",
-            [],
-            |r| r.get::<_, usize>(0),
+    conn.execute_batch("COMMIT").unwrap();
+    let loaded = response_cache_rows(state);
+    conn.execute_batch("BEGIN").unwrap();
+    for index in 0..CACHE_ROWS {
+        media::response_cache::delete(
+            &conn,
+            media::response_cache::CacheSource::Tmdb,
+            &format!("/search/movie?page={index}"),
         )
-        .unwrap()
-    };
+        .unwrap();
+    }
+    conn.execute_batch("COMMIT").unwrap();
+    (loaded, started.elapsed())
+}
 
-    assert_eq!(local_items_after_cache_clear, local_items_before);
-    assert_eq!(playback_after_cache_clear, playback_before);
-    assert_eq!(active_operations_after_retention, active_operations_before);
+fn response_cache_rows(state: &ApiState) -> usize {
+    media::response_cache::list(&open_cache(state), None)
+        .unwrap()
+        .len()
+}
+
+/// 超龄瞬态搜索键（可清理）+ 详情键（必须保护），写入真实 `cache.db`。
+fn seed_catalog_keys(state: &ApiState, now: i64) {
+    let conn = open_cache(state);
+    for key in ["/search/movie?page=0", "/movie/12345"] {
+        media::response_cache::put(
+            &conn,
+            media::response_cache::CacheSource::Tmdb,
+            key,
+            "{}",
+            now - 200 * DAY,
+            None,
+        )
+        .unwrap();
+    }
+}
+
+fn cached(state: &ApiState, key: &str) -> bool {
+    media::response_cache::get(
+        &open_cache(state),
+        media::response_cache::CacheSource::Tmdb,
+        key,
+    )
+    .unwrap()
+    .is_some()
+}
+
+fn class_report<'a>(report: &'a Value, class: &str) -> &'a Value {
+    report["classes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("报告缺少 classes 数组: {report}"))
+        .iter()
+        .find(|entry| entry["class"] == class)
+        .unwrap_or_else(|| panic!("报告缺少 {class} 类别: {report}"))
+}
+
+fn file_len(path: &std::path::Path) -> u64 {
+    std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+}
+
+fn pragma_i64(state: &ApiState, db: &str, pragma: &str) -> i64 {
+    rusqlite::Connection::open(data_dir(state).join(db))
+        .unwrap()
+        .query_row(&format!("PRAGMA {pragma}"), [], |row| row.get(0))
+        .unwrap()
+}
+
+/// 计划 Task 20 Step 2 的原始数字：缓存写吞吐、清理耗时/计数、DB/WAL 字节、页利用率。
+fn report_measurements(
+    state: &ApiState,
+    churn: (usize, Duration),
+    elapsed: Duration,
+    report: &Value,
+) {
+    let dir = data_dir(state);
+    println!(
+        "MEASURE task20 cache_churn rows={} write_and_clear_wall_ms={} write_throughput_rows_per_s={:.0}",
+        churn.0,
+        churn.1.as_millis(),
+        churn.0 as f64 / churn.1.as_secs_f64()
+    );
+    println!(
+        "MEASURE task20 retention_job wall_ms={} batches={} examined={} deleted={} protected={}",
+        elapsed.as_millis(),
+        report["batches"],
+        report["examined"],
+        report["deleted"],
+        report["protected"]
+    );
+    println!(
+        "MEASURE task20 bytes library.db={} library.db-wal={} cache.db={} cache.db-wal={}",
+        file_len(&dir.join("library.db")),
+        file_len(&dir.join("library.db-wal")),
+        file_len(&dir.join("cache.db")),
+        file_len(&dir.join("cache.db-wal"))
+    );
+    for db in ["library.db", "cache.db"] {
+        let page_size = pragma_i64(state, db, "page_size");
+        let page_count = pragma_i64(state, db, "page_count");
+        let freelist = pragma_i64(state, db, "freelist_count");
+        let used = if page_count > 0 {
+            (page_count - freelist) as f64 * 100.0 / page_count as f64
+        } else {
+            0.0
+        };
+        println!(
+            "MEASURE task20 page_util {db} page_size={page_size} page_count={page_count} freelist={freelist} used_no_freelist_pct={used:.1}"
+        );
+    }
+}
+
+#[test]
+fn retention_preserves_active_operations_and_local_facts() {
+    let (tmp, state) = temp_state(Arc::new(api::maintenance::SqliteExecutor));
+    let now = unix_now();
+    let (user_id, media_id) = seed_local_facts(&state, tmp.path());
+    seed_active_merge(&state, media_id);
+    seed_probe_history(&state, now);
+
+    // 本地事实（条目/进度/活动操作）先经公开 seam 快照，之后逐条对比。
+    let stats_before = library_stats(&state);
+    let playback_before = playback_count(&state, user_id, media_id);
+    let operations_before = active_operations(&state);
+    assert_eq!(stats_before.item_count, 1, "夹具必须真的落了本地条目");
+    assert_eq!(stats_before.file_count, 1, "夹具必须真的落了已发布文件");
+    assert_eq!(playback_before, 1, "夹具必须真的留下播放进度");
+    assert_eq!(operations_before, 1, "夹具必须真的留下一个活动操作");
+
+    // 10 万行缓存更新 + 逐键清空：真库、真规模，只走 media 公开 API。
+    let churn = churn_cache(&state);
+    assert_eq!(churn.0, CACHE_ROWS, "缓存必须真的写入 10 万行");
+    assert_eq!(response_cache_rows(&state), 0, "清空必须真的删掉每一行");
+    assert_eq!(
+        library_stats(&state),
+        stats_before,
+        "缓存 10 万次更新/清空不得改动本地条目"
+    );
+    assert_eq!(
+        playback_count(&state, user_id, media_id),
+        playback_before,
+        "缓存变更不得改动播放进度"
+    );
+
+    // 清理目标：超龄瞬态搜索键（必须删）+ 详情键（必须保护）。
+    seed_catalog_keys(&state, now);
+    let def = retention_def(&state);
+    enable_with_payload(&state, &def, &real_payload());
+
+    let started = Instant::now();
+    let job = claim_for(&state, def.id, now);
+    run(&state, &job).unwrap();
+    let elapsed = started.elapsed();
+    let report = support::progress_of(&state, &job);
+
+    let catalog = class_report(&report, "transient_catalog");
+    let probe = class_report(&report, "probe_history");
+    assert_eq!(catalog["deleted"], 1, "超龄瞬态搜索键必须被真删: {report}");
+    assert_eq!(catalog["protected"], 1, "详情键必须受保护: {report}");
+    assert_eq!(probe["deleted"], 1, "最旧的 Probe 历史必须被真删: {report}");
+    assert_eq!(
+        probe["protected"], 3,
+        "最新 3 条 Probe 历史必须留下: {report}"
+    );
+    assert!(
+        !probe_job_exists(&state, "retention-oldest"),
+        "超龄 Probe 历史必须真的删掉: {report}"
+    );
+    for kept in ["retention-mid", "retention-new", "retention-newest"] {
+        assert!(probe_job_exists(&state, kept), "{kept} 必须留下: {report}");
+    }
+    assert!(
+        !cached(&state, "/search/movie?page=0"),
+        "超龄瞬态键不得残留"
+    );
+    assert!(cached(&state, "/movie/12345"), "详情键不得被清理掉");
+
+    // 清理后本地事实必须逐条不变。
+    assert_eq!(library_stats(&state), stats_before, "清理不得改动本地条目");
+    assert_eq!(
+        playback_count(&state, user_id, media_id),
+        playback_before,
+        "清理不得改动播放进度"
+    );
+    assert_eq!(
+        active_operations(&state),
+        operations_before,
+        "活动操作不得被清理带走"
+    );
+
+    report_measurements(&state, churn, elapsed, &report);
 }

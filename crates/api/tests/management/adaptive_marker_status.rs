@@ -3,13 +3,14 @@ use std::sync::Arc;
 
 use api::router;
 use axum::http::StatusCode;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{LedgerId, Media, MediaId, MediaKind};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::Value;
 use tower::ServiceExt;
 
 use super::common::*;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 fn app(tmp: &tempfile::TempDir) -> (axum::Router, api::Store) {
     let fetcher = Arc::new(Fixtures {
@@ -49,20 +50,18 @@ async fn concurrent_manual_refresh_returns_same_active_job() {
     };
     let media = store.ensure_media(media).unwrap();
 
-    let row = LedgerRow {
-        id: LedgerId::new(),
-        media_id: media.id,
-        path: strm_file.display().to_string(),
-        season: Some(1),
-        episode: Some(1),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
-    store.insert_ledger(&row).unwrap();
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
+            media_id: media.id,
+            path: strm_file.display().to_string(),
+            season: Some(1),
+            episode: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     let libs = json_body(
         app.clone()

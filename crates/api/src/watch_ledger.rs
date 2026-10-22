@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use domain::{
-    Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, Release, UnitKey,
+    Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, Release, UnitKey,
 };
 use store::ScannedLedger;
 
@@ -20,7 +20,7 @@ pub fn record_paths(
         // 该路径已有台账行（Transfer 时 probe 过、带 filter_score）：扫描
         // 绝不能按文件名覆盖更可靠的既有信息。复用已有行，仅保留。
         if store
-            .ledger_by_path(&path_str)
+            .file_coverage_by_path(&path_str)
             .map_err(|e| e.to_string())?
             .is_some()
         {
@@ -97,20 +97,16 @@ pub fn record_paths(
             None => Vec::new(),
         };
         rows.push(ScannedLedger {
-            row: LedgerRow {
-                id: LedgerId::new(),
-                media_id: media.id,
-                path: path_str,
-                season: parsed.season,
-                episode: parsed.episode,
-                resolution: parsed.resolution,
-                codec: parsed.codec,
-                hdr: parsed.hdr,
-                quality_source: QualitySource::Release,
-                confidence: parsed.confidence,
-                filter_score: None,
-            },
+            file_id: LedgerId::new(),
+            media_id: media.id,
+            path: path_str,
             units,
+            resolution: parsed.resolution,
+            codec: parsed.codec,
+            hdr: parsed.hdr,
+            quality_source: QualitySource::Release,
+            confidence: parsed.confidence,
+            filter_score: None,
             source_version,
             source_digest: None,
             size_bytes,
@@ -138,7 +134,7 @@ pub fn record_video_paths(
         // 已有台账行：复用既有 Media ID（播放进度/收藏挂在它上面），
         // 绝不再建一个无别名的新 Media 顶替（P2：重扫换 Media ID）。
         if store
-            .ledger_by_path(&path_str)
+            .file_coverage_by_path(&path_str)
             .map_err(|e| e.to_string())?
             .is_some()
         {
@@ -177,20 +173,16 @@ pub fn record_video_paths(
             .map_err(|e| e.to_string())?;
         let (size_bytes, created_ns, modified_ns) = observed_stat(&dest);
         rows.push(ScannedLedger {
-            row: LedgerRow {
-                id: LedgerId::new(),
-                media_id: media.id,
-                path: dest.display().to_string(),
-                season: None,
-                episode: None,
-                resolution: None,
-                codec: None,
-                hdr: None,
-                quality_source: QualitySource::Release,
-                confidence: Confidence::High,
-                filter_score: None,
-            },
+            file_id: LedgerId::new(),
+            media_id: media.id,
+            path: dest.display().to_string(),
             units: vec![UnitKey::WHOLE],
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: QualitySource::Release,
+            confidence: Confidence::High,
+            filter_score: None,
             source_version: crate::fingerprint_job::current_source_version(&dest),
             source_digest: None,
             size_bytes,

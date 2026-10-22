@@ -1,3 +1,4 @@
+use store::test_support::{publish_fixture_file, FixtureFile};
 #[path = "management/common.rs"]
 mod common;
 use domain::{Media, MediaId, MediaKind};
@@ -101,7 +102,7 @@ async fn public_scan_recovers_existing_media_from_local_work_alias() {
     common::scan_and_wait(&app, &id).await;
     let store = shared.lock();
     let row = store
-        .ledger_by_path(&path.display().to_string())
+        .file_coverage_by_path(&path.display().to_string())
         .unwrap()
         .unwrap();
     assert!(
@@ -119,12 +120,12 @@ async fn public_scan_recovers_existing_media_from_local_work_alias() {
     // probe worker 可能已经把这个 unit 跑完，所以断言"登记过 probe"而非"此刻仍在队列"。
     assert!(
         store
-            .probe_unit_recorded_for_ledger(&row.id.to_string())
+            .probe_unit_recorded_for_ledger(&row.file.file_id.to_string())
             .unwrap()
     );
-    assert!(store.get_file_meta(&row.id.to_string()).unwrap().is_none());
-    assert_eq!(row.media_id, old.id);
-    assert_eq!((row.season, row.episode), (Some(1), Some(3)));
+    assert!(store.get_file_meta(&row.file.file_id.to_string()).unwrap().is_none());
+    assert_eq!(row.file.media_id, old.id);
+    assert_eq!(row.units, vec![domain::UnitKey::new(1, 3)]);
     assert_eq!(
         std::fs::read_to_string(root.join("tvshow.nfo")).unwrap(),
         nfo
@@ -134,7 +135,7 @@ async fn public_scan_recovers_existing_media_from_local_work_alias() {
 fn setup_rebind_movies(
     store: &Store,
     temp_path: &Path,
-) -> (PathBuf, String, Media, Media, domain::LedgerRow) {
+) -> (PathBuf, String, Media, Media, domain::LibraryFile) {
     let library = store
         .list_libraries()
         .unwrap()
@@ -174,8 +175,8 @@ fn setup_rebind_movies(
             &[],
         )
         .unwrap();
-    let unrelated = domain::LedgerRow {
-        id: domain::LedgerId::new(),
+    let spec = FixtureFile {
+        file_id: Some(domain::LedgerId::new()),
         media_id: provisional.id,
         path: other_root
             .join("English.Name.2022.mkv")
@@ -189,8 +190,9 @@ fn setup_rebind_movies(
         quality_source: domain::QualitySource::Release,
         confidence: domain::Confidence::High,
         filter_score: None,
+        ..Default::default()
     };
-    store.insert_ledger(&unrelated).unwrap();
+    let unrelated = publish_fixture_file(&store, &spec).unwrap();
     (
         library.root_paths[0].clone(),
         library.id,
@@ -265,9 +267,10 @@ async fn existing_file_sidecar_changes_and_deletes_are_reconciled() {
     let media_id = {
         let store = shared.lock();
         store
-            .ledger_by_path(&video.display().to_string())
+            .file_coverage_by_path(&video.display().to_string())
             .unwrap()
             .unwrap()
+            .file
             .media_id
     };
     let library: domain::LibraryId = library_id.parse().unwrap();
@@ -362,23 +365,23 @@ async fn incomplete_nfo_online_alias_rebinds_only_new_scanned_rows() {
     let store = shared.lock();
     for path in &paths {
         let row = store
-            .ledger_by_path(&path.display().to_string())
+            .file_coverage_by_path(&path.display().to_string())
             .unwrap()
             .unwrap();
-        assert_eq!(row.media_id, old.id);
+        assert_eq!(row.file.media_id, old.id);
         // probe worker 可能在断言前就跑完这个 unit，所以断言"曾经排入过 probe"
         // 而不是"此刻仍在队列里"。
         assert!(
             store
-                .probe_unit_recorded_for_ledger(&row.id.to_string())
+                .probe_unit_recorded_for_ledger(&row.file.file_id.to_string())
                 .unwrap(),
             "扫描必须为台账行 {} 登记 probe",
-            row.id
+            row.file.file_id
         );
     }
-    let untouched = store.ledger_by_path(&unrelated.path).unwrap().unwrap();
-    assert_eq!(untouched.id, unrelated.id);
-    assert_eq!(untouched.media_id, provisional.id);
+    let untouched = store.file_coverage_by_path(&unrelated.path.display().to_string()).unwrap().unwrap();
+    assert_eq!(untouched.file.file_id, unrelated.file_id);
+    assert_eq!(untouched.file.media_id, provisional.id);
     assert!(
         store
             .get_media(provisional.id)

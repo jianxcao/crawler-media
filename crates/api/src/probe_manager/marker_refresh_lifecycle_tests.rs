@@ -60,7 +60,7 @@ struct RefreshHarness {
     manager: Arc<ProbeManager>,
     media_id: MediaId,
     library_id: String,
-    rows: Vec<LedgerRow>,
+    rows: Vec<domain::FileCoverage>,
     expected_chapters: Vec<Vec<marker::ChapterMarker>>,
     scope: String,
 }
@@ -99,32 +99,37 @@ impl RefreshHarness {
                 anilist_id: None,
             })
             .unwrap();
-        let make_row = |episode| LedgerRow {
-            id: LedgerId::new(),
-            media_id,
-            path: lib_dir
-                .join(format!("Pantheon.S01E{episode:02}.mkv"))
-                .to_string_lossy()
-                .into_owned(),
-            season: Some(1),
-            episode: Some(episode),
-            resolution: None,
-            codec: None,
-            hdr: None,
-            quality_source: QualitySource::Release,
-            confidence: Confidence::High,
-            filter_score: None,
+        let make_row = |episode| {
+            super::super::test_support::coverage(
+                media_id,
+                &lib_dir
+                    .join(format!("Pantheon.S01E{episode:02}.mkv"))
+                    .to_string_lossy()
+                    .into_owned(),
+                Some(1),
+                Some(episode),
+            )
         };
-        let rows = vec![make_row(1), make_row(2)];
-        for row in &rows {
-            std::fs::write(&row.path, b"dummy").unwrap();
-            store.lock().insert_ledger(row).unwrap();
+        let mut rows = vec![make_row(1), make_row(2)];
+        for row in rows.iter_mut() {
+            std::fs::write(&row.file.path, b"dummy").unwrap();
+            super::super::test_support::publish_into(&store.lock(), row);
         }
         let expected_chapters = {
             let store = store.lock();
             vec![
-                seed_episode_old_refresh_result(&store, media_id, &rows[0].id.to_string(), 1),
-                seed_episode_old_refresh_result(&store, media_id, &rows[1].id.to_string(), 2),
+                seed_episode_old_refresh_result(
+                    &store,
+                    media_id,
+                    &rows[0].file.file_id.to_string(),
+                    1,
+                ),
+                seed_episode_old_refresh_result(
+                    &store,
+                    media_id,
+                    &rows[1].file.file_id.to_string(),
+                    2,
+                ),
             ]
         };
 
@@ -166,7 +171,11 @@ impl RefreshHarness {
         let store = self.store.lock();
         for (idx, row) in self.rows.iter().enumerate() {
             let marker = store
-                .get_media_marker(self.media_id, row.season, row.episode)
+                .get_media_marker(
+                    self.media_id,
+                    super::super::projected_season_opt(row),
+                    super::super::projected_episode_opt(row),
+                )
                 .unwrap()
                 .expect("旧标记事实必须保持可见");
             assert_eq!(marker.source, "old-result");
@@ -175,7 +184,7 @@ impl RefreshHarness {
             assert_eq!(marker.outro_start_ms, Some(1_000_000));
             assert_eq!(marker.outro_end_ms, Some(1_050_000));
             let chapters = store
-                .get_cached_chapters(&row.id.to_string())
+                .get_cached_chapters(&row.file.file_id.to_string())
                 .unwrap()
                 .expect("旧章节缓存必须存在");
             assert_eq!(chapters, self.expected_chapters[idx]);
@@ -183,9 +192,6 @@ impl RefreshHarness {
         }
     }
 }
-
-
-
 
 #[test]
 fn window1_queued_stage_cancellation_releases_scope() {
@@ -207,7 +213,7 @@ fn window1_queued_stage_cancellation_releases_scope() {
 
     harness
         .manager
-        .cancel_ledger_work(&[harness.rows[0].id.to_string()], "user_abort")
+        .cancel_ledger_work(&[harness.rows[0].file.file_id.to_string()], "user_abort")
         .unwrap();
 
     let job = harness
@@ -229,9 +235,14 @@ fn window1_queued_stage_cancellation_releases_scope() {
 
     let first = harness.manager.take_queued_for_test().unwrap();
     assert!(!worker::source_ready(&harness.manager, &first));
-    assert!(!harness.manager.seen.lock().contains(&first.row.id.to_string()));
+    assert!(
+        !harness
+            .manager
+            .seen
+            .lock()
+            .contains(&first.row.file.file_id.to_string())
+    );
 }
-
 
 #[test]
 fn window3_pre_publication_freeze_prevents_late_result() {
@@ -275,7 +286,12 @@ fn window3_pre_publication_freeze_prevents_late_result() {
 
     harness.manager.finish(&second, true);
 
-    let job = harness.store.lock().get_probe_job(&job_id).unwrap().unwrap();
+    let job = harness
+        .store
+        .lock()
+        .get_probe_job(&job_id)
+        .unwrap()
+        .unwrap();
     assert_ne!(job.status, "succeeded");
     assert_eq!(job.status, "cancelled");
     assert_eq!(job.error.as_deref(), Some("file_deleted"));
@@ -314,11 +330,16 @@ fn window3_pre_publication_file_deleted_prevents_late_result() {
 
     harness.manager.finish(&first, true);
 
-    std::fs::remove_file(&harness.rows[0].path).unwrap();
+    std::fs::remove_file(&harness.rows[0].file.path).unwrap();
 
     harness.manager.finish(&second, true);
 
-    let job = harness.store.lock().get_probe_job(&job_id).unwrap().unwrap();
+    let job = harness
+        .store
+        .lock()
+        .get_probe_job(&job_id)
+        .unwrap()
+        .unwrap();
     assert_ne!(job.status, "succeeded");
     assert_eq!(job.status, "cancelled");
     assert_eq!(job.error.as_deref(), Some("file_deleted"));
@@ -360,10 +381,15 @@ fn window4_recovery_interrupted_with_frozen_library_cancels_cleanly() {
     let restarted = ProbeManager::new(harness.store.clone());
     restarted.recover_pending_jobs();
 
-    let job = harness.store.lock().get_probe_job(&job_id).unwrap().unwrap();
+    let job = harness
+        .store
+        .lock()
+        .get_probe_job(&job_id)
+        .unwrap()
+        .unwrap();
     assert_eq!(job.status, "cancelled");
     assert_eq!(job.error.as_deref(), Some("Library removed"));
-    assert!(!restarted.is_queued(&harness.rows[0].id.to_string()));
+    assert!(!restarted.is_queued(&harness.rows[0].file.file_id.to_string()));
     assert!(
         harness
             .store
@@ -409,7 +435,7 @@ fn assert_recovery_cancels_after_member_deletion(deleted_index: usize) {
         .lock()
         .finish_probe_unit_with_status(
             &job_id,
-            &harness.rows[0].id.to_string(),
+            &harness.rows[0].file.file_id.to_string(),
             "succeeded",
             None,
             None,
@@ -420,19 +446,24 @@ fn assert_recovery_cancels_after_member_deletion(deleted_index: usize) {
         .lock()
         .finish_probe_unit_with_status(
             &job_id,
-            &harness.rows[1].id.to_string(),
+            &harness.rows[1].file.file_id.to_string(),
             "succeeded",
             None,
             None,
         )
         .unwrap();
 
-    std::fs::remove_file(&harness.rows[deleted_index].path).unwrap();
+    std::fs::remove_file(&harness.rows[deleted_index].file.path).unwrap();
 
     let restarted = ProbeManager::new(harness.store.clone());
     restarted.recover_pending_jobs();
 
-    let job = harness.store.lock().get_probe_job(&job_id).unwrap().unwrap();
+    let job = harness
+        .store
+        .lock()
+        .get_probe_job(&job_id)
+        .unwrap()
+        .unwrap();
     assert_eq!(job.status, "cancelled");
     assert_eq!(job.error.as_deref(), Some("file_deleted"));
     assert!(
@@ -453,7 +484,6 @@ fn window4_recovery_completed_units_with_deleted_source_cancels_job() {
     }
 }
 
-
 // Season split across two libraries, refresh requested from library A only.
 #[test]
 fn window6_cross_library_season_refresh_publishes_only_job_members() {
@@ -473,30 +503,23 @@ fn window6_cross_library_season_refresh_publishes_only_job_members() {
             )
             .unwrap();
     }
-    let row_b = LedgerRow {
-        id: LedgerId::new(),
-        media_id: harness.media_id,
-        path: lib_b_dir
+    let mut row_b = super::super::test_support::coverage(
+        harness.media_id,
+        &lib_b_dir
             .join("Pantheon.S01E03.mkv")
             .to_string_lossy()
             .into_owned(),
-        season: Some(1),
-        episode: Some(3),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
-    std::fs::write(&row_b.path, b"dummy").unwrap();
+        Some(1),
+        Some(3),
+    );
+    std::fs::write(&row_b.file.path, b"dummy").unwrap();
     let expected_chapters_b = {
         let store = harness.store.lock();
-        store.insert_ledger(&row_b).unwrap();
+        super::super::test_support::publish_into(&store, &mut row_b);
         seed_episode_old_refresh_result(
             &store,
             harness.media_id,
-            &row_b.id.to_string(),
+            &row_b.file.file_id.to_string(),
             3,
         )
     };
@@ -519,12 +542,11 @@ fn window6_cross_library_season_refresh_publishes_only_job_members() {
     let job_id = {
         let store = harness.store.lock();
         store
-            .active_probe_unit_for_ledger(&harness.rows[0].id.to_string())
+            .active_probe_unit_for_ledger(&harness.rows[0].file.file_id.to_string())
             .unwrap()
             .unwrap()
             .job_id
     };
-
 
     let first = harness.manager.take_queued_for_test().unwrap();
     let second = harness.manager.take_queued_for_test().unwrap();
@@ -535,15 +557,21 @@ fn window6_cross_library_season_refresh_publishes_only_job_members() {
         let store = harness.store.lock();
         (
             store.get_probe_job(&job_id).unwrap().unwrap(),
-            store.get_cached_chapters(&row_b.id.to_string()).unwrap(),
             store
-                .get_cached_chapters(&harness.rows[0].id.to_string())
+                .get_cached_chapters(&row_b.file.file_id.to_string())
                 .unwrap(),
             store
-                .get_cached_chapters(&harness.rows[1].id.to_string())
+                .get_cached_chapters(&harness.rows[0].file.file_id.to_string())
                 .unwrap(),
             store
-                .get_media_marker(harness.media_id, row_b.season, row_b.episode)
+                .get_cached_chapters(&harness.rows[1].file.file_id.to_string())
+                .unwrap(),
+            store
+                .get_media_marker(
+                    harness.media_id,
+                    super::super::projected_season_opt(&row_b),
+                    super::super::projected_episode_opt(&row_b),
+                )
                 .unwrap(),
             store.active_probe_job_for_scope(&harness.scope).unwrap(),
         )

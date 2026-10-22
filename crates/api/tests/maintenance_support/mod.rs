@@ -17,6 +17,7 @@ use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use jobs::{Job, JobKind};
 use parking_lot::Mutex;
 use serde_json::Value;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 pub const TOKEN: &str = "maintenance-secret";
 pub const DAY: i64 = 86_400;
@@ -97,9 +98,10 @@ pub fn seed_published_file(store: &Store, root: &Path, media: domain::MediaId) -
     let path = library_root.join(format!("{media}.mkv"));
     std::fs::write(&path, b"x").unwrap();
     let id = domain::LedgerId::new();
-    store
-        .insert_ledger(&domain::LedgerRow {
-            id,
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(id),
             media_id: media,
             path: path.display().to_string(),
             season: None,
@@ -110,8 +112,10 @@ pub fn seed_published_file(store: &Store, root: &Path, media: domain::MediaId) -
             quality_source: domain::QualitySource::Release,
             confidence: domain::Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     id
 }
 

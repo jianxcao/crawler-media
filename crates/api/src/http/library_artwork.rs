@@ -21,7 +21,7 @@ use crate::blocking_budget::BlockingError;
 use crate::http::{err, ok};
 use crate::management::ApiState;
 
-use super::library::{library_for_row, poster_path, preferred_row, require_visible_library};
+use super::library::{library_for_file, poster_path, preferred_coverage, require_visible_library};
 
 fn artwork_key(media_id: MediaId) -> String {
     format!("artwork.{}", media_id)
@@ -61,33 +61,34 @@ pub(crate) async fn artwork_candidates(
             let Some(media) = store.get_media(media_id).ok().flatten() else {
                 return Err(err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在"));
             };
-            let rows: Vec<domain::LedgerRow> = store
-                .list_ledger()
+            let rows: Vec<domain::FileCoverage> = store
+                .list_file_coverage()
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|row| row.media_id == media_id)
-                .filter(|row| {
-                    library_for_row(&store, row, &media).is_some_and(|owner| owner.id == library.id)
+                .filter(|coverage| coverage.file.media_id == media_id)
+                .filter(|coverage| {
+                    library_for_file(&store, &coverage.file, &media)
+                        .is_some_and(|owner| owner.id == library.id)
                 })
                 .collect();
             if rows.is_empty() {
                 return Err(err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在"));
             }
-            let selected = preferred_row(&rows).cloned();
+            let selected = preferred_coverage(&rows).cloned();
             let locked = poster_locked(&store, media_id);
             // 及时释放 Store 锁，再做后续文件/网络检查
             drop(store);
 
             let current = selected
                 .as_ref()
-                .and_then(poster_path)
+                .and_then(|coverage| poster_path(&coverage.file))
                 .map(|p| p.display().to_string());
 
             let mut posters: Vec<Value> = Vec::new();
-            if let (Some(path), Some(row)) = (&current, &selected) {
+            if let (Some(path), Some(coverage)) = (&current, &selected) {
                 posters.push(json!({
                     "file_path": path,
-                    "preview_url": crate::http::library::artwork_url("posters", row.id),
+                    "preview_url": crate::http::library::artwork_url("posters", coverage.file.file_id),
                     "width": 342,
                     "height": 513,
                     "language": null,
@@ -141,19 +142,19 @@ fn artwork_target(
     library_id: Option<&str>,
     is_backdrop: bool,
 ) -> Result<std::path::PathBuf, Response> {
-    let all_rows: Vec<domain::LedgerRow> = store
-        .list_ledger()
+    let all_rows: Vec<domain::FileCoverage> = store
+        .list_file_coverage()
         .unwrap_or_default()
         .into_iter()
-        .filter(|row| row.media_id == media_id)
+        .filter(|coverage| coverage.file.media_id == media_id)
         .collect();
     let media = store.get_media(media_id).ok().flatten();
-    let rows: Vec<domain::LedgerRow> = if let (Some(lib_id), Some(m)) = (library_id, &media) {
+    let rows: Vec<domain::FileCoverage> = if let (Some(lib_id), Some(m)) = (library_id, &media) {
         all_rows
             .into_iter()
-            .filter(|row| {
+            .filter(|coverage| {
                 store
-                    .library_for_path(std::path::Path::new(&row.path), m.kind)
+                    .library_for_path(std::path::Path::new(&coverage.file.path), m.kind)
                     .ok()
                     .flatten()
                     .is_some_and(|l| l.id == lib_id)
@@ -162,7 +163,7 @@ fn artwork_target(
     } else {
         all_rows
     };
-    let Some(target_row) = preferred_row(&rows) else {
+    let Some(target_row) = preferred_coverage(&rows) else {
         return Err(err(
             StatusCode::NOT_FOUND,
             "library.item_missing",
@@ -174,7 +175,7 @@ fn artwork_target(
     } else {
         "poster.jpg"
     };
-    std::path::Path::new(&target_row.path)
+    std::path::Path::new(&target_row.file.path)
         .parent()
         .map(|dir| dir.join(file_name))
         .ok_or_else(|| {
@@ -216,14 +217,18 @@ pub(crate) fn image_content_type(bytes: &[u8]) -> &'static str {
     }
 }
 
-fn visible_ledger_row(
+fn visible_coverage(
     store: &crate::Store,
     compact_id: &str,
     user_id: Option<domain::UserId>,
-) -> Option<domain::LedgerRow> {
-    let row = store.get_ledger(compact_id).ok().flatten()?;
-    let media = store.get_media(row.media_id).ok().flatten()?;
-    super::library::row_visible_to_user(store, &row, &media, user_id).then_some(row)
+) -> Option<domain::FileCoverage> {
+    let coverage = store
+        .file_coverage_by_id(domain::LedgerId::from_str(compact_id).ok()?)
+        .ok()
+        .flatten()?;
+    let media = store.get_media(coverage.file.media_id).ok().flatten()?;
+    super::library::file_visible_to_user(store, &coverage.file, &media, user_id)
+        .then_some(coverage)
 }
 
 /// POST /libraries/{id}/items/{item_id}/artwork/select — apply a candidate
@@ -251,15 +256,15 @@ pub(crate) async fn select_artwork(
         Ok(target) => target,
         Err(response) => return response,
     };
-    let preferred_path = preferred_row(
+    let preferred_path = preferred_coverage(
         &store
-            .list_ledger()
+            .list_file_coverage()
             .unwrap_or_default()
-            .into_iter()
-            .filter(|row| row.media_id == media_id)
+            .iter()
+            .filter(|row| row.file.media_id == media_id)
             .collect::<Vec<_>>(),
     )
-    .map(|row| std::path::PathBuf::from(&row.path));
+    .map(|row| row.file.path.clone());
 
     match file_path {
         None => {
@@ -351,15 +356,15 @@ pub(crate) async fn upload_artwork(
             Ok(target) => target,
             Err(response) => return response,
         };
-        let preferred = preferred_row(
+        let preferred = preferred_coverage(
             &store
-                .list_ledger()
+                .list_file_coverage()
                 .unwrap_or_default()
-                .into_iter()
-                .filter(|row| row.media_id == media_id)
+                .iter()
+                .filter(|row| row.file.media_id == media_id)
                 .collect::<Vec<_>>(),
         )
-        .map(|row| std::path::PathBuf::from(&row.path));
+        .map(|row| row.file.path.clone());
         (target, preferred)
     };
     let write_target = target.clone();
@@ -410,12 +415,12 @@ pub(crate) async fn fanart(
     let compact = ledger_id.replace('-', "");
     let row = {
         let store = state.store.lock();
-        match visible_ledger_row(&store, &compact, user_id) {
+        match visible_coverage(&store, &compact, user_id) {
             Some(row) => row,
             _ => return err(StatusCode::NOT_FOUND, "poster.missing", "背景图不存在"),
         }
     };
-    let file_dir = std::path::Path::new(&row.path).parent();
+    let file_dir = row.file.path.parent();
     let fanart = file_dir.and_then(|dir| {
         // 兼容平铺（文件旁）与整理后（<show>/Season N → show 根）布局。
         let here = dir.join("fanart.jpg");
@@ -427,10 +432,10 @@ pub(crate) async fn fanart(
         None => {
             // 本地尚无背景图时，尝试即时从 TMDB 拉取并落地。抓取+落盘是副作用，
             // 放在 blocking worker 上跑到结束，async worker 不再被占用。
-            let media = state.store.lock().get_media(row.media_id).ok().flatten();
+            let media = state.store.lock().get_media(row.file.media_id).ok().flatten();
             if let Some(m) = media {
                 let state_for_work = state.clone();
-                let path = std::path::Path::new(&row.path).to_path_buf();
+                let path = row.file.path.clone();
                 let fetched = state
                     .http_work
                     .run_to_completion(move || {
@@ -475,17 +480,17 @@ pub(crate) async fn stills(
     let compact = ledger_id.replace('-', "");
     let row = {
         let store = state.store.lock();
-        match visible_ledger_row(&store, &compact, user_id) {
+        match visible_coverage(&store, &compact, user_id) {
             Some(row) => row,
             _ => return err(StatusCode::NOT_FOUND, "poster.missing", "剧照不存在"),
         }
     };
-    let still = crate::episode_still::existing(std::path::Path::new(&row.path));
+    let still = crate::episode_still::existing(row.file.path.as_path());
     let still = match still {
         Some(s) => Some(s),
         None => {
             // 本地尚无分集剧照时，回退尝试使用同条目的 fanart 作为剧照输出
-            let file_dir = std::path::Path::new(&row.path).parent();
+            let file_dir = row.file.path.parent();
             file_dir.and_then(|dir| {
                 let here = dir.join("fanart.jpg");
                 let up = dir.parent().map(|p| p.join("fanart.jpg"));
@@ -510,12 +515,12 @@ pub(crate) async fn poster(
     let compact = ledger_id.replace('-', "");
     let row = {
         let store = state.store.lock();
-        match visible_ledger_row(&store, &compact, user_id) {
+        match visible_coverage(&store, &compact, user_id) {
             Some(row) => row,
             _ => return err(StatusCode::NOT_FOUND, "poster.missing", "海报不存在"),
         }
     };
-    let file_dir = std::path::Path::new(&row.path).parent();
+    let file_dir = row.file.path.parent();
     let poster = file_dir.and_then(|dir| {
         let here = dir.join("poster.jpg");
         let up = dir.parent().map(|p| p.join("poster.jpg"));
@@ -524,10 +529,10 @@ pub(crate) async fn poster(
     let poster = match poster {
         Some(p) => Some(p),
         None => {
-            let media = state.store.lock().get_media(row.media_id).ok().flatten();
+            let media = state.store.lock().get_media(row.file.media_id).ok().flatten();
             if let Some(m) = media {
                 let state_for_work = state.clone();
-                let path = std::path::Path::new(&row.path).to_path_buf();
+                let path = row.file.path.clone();
                 let fetched = state
                     .http_work
                     .run_to_completion(move || {

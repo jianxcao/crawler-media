@@ -6,12 +6,13 @@ use api::{ApiState, Store, router};
 use store::UNIT_WHOLE;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use parking_lot::{Condvar, Mutex};
 use serde_json::Value;
 use tower::ServiceExt;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 struct NoFetch;
 impl Fetcher for NoFetch {
@@ -147,8 +148,8 @@ fn seed_movie(state: &ApiState, tmp: &std::path::Path) -> (domain::UserId, Strin
     };
     guard.insert_media(&media).unwrap();
 
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let spec = FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id,
         path: movie_file.to_str().unwrap().into(),
         season: Some(1),
@@ -159,8 +160,9 @@ fn seed_movie(state: &ApiState, tmp: &std::path::Path) -> (domain::UserId, Strin
         quality_source: QualitySource::Probe,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     };
-    guard.insert_ledger(&row).unwrap();
+    publish_fixture_file(&guard, &spec).unwrap();
 
     guard
         .set_unit_marks(
@@ -256,7 +258,7 @@ async fn playback_item_observes_poster_without_holding_store() {
     let gated_read = Arc::new(GatedFileRead { gate: gate.clone() });
     let state = make_state(tmp.path(), gated_read);
     let (_admin_user, library_id, media_id) = seed_movie(&state, tmp.path());
-    let ledger_id = state.store().lock().list_ledger().unwrap()[0].id;
+    let ledger_id = state.store().lock().list_file_coverage().unwrap()[0].file.file_id;
     let app = router(state.clone());
     let item_app = app.clone();
     let _release = ReleaseOnDrop(gate.clone());

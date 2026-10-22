@@ -23,9 +23,11 @@ pub const MARKER_MANUAL: &str = "manual-v2";
 pub const MARKER_RETRY: &str = "auto-v2";
 
 /// 锁内取到的 owned 事实快照；渲染/写盘全部在锁外进行。
+///
+/// `rows` 的类型是文件列表（`LibraryFile`），沿用旧字段名以免跨切片改名。
 pub struct CoverSnapshot {
     pub library: crate::store::Library,
-    pub rows: Vec<domain::LedgerRow>,
+    pub rows: Vec<domain::LibraryFile>,
     pub revision: i64,
     pub marker: Option<String>,
     pub target_dir: PathBuf,
@@ -35,7 +37,7 @@ pub trait CoverRenderer: Send + Sync {
     fn render(
         &self,
         library: &crate::store::Library,
-        rows: &[domain::LedgerRow],
+        rows: &[domain::LibraryFile],
         options: &CoverOptions,
     ) -> Result<Option<Vec<u8>>, String>;
 }
@@ -47,7 +49,7 @@ impl CoverRenderer for LocalCoverRenderer {
     fn render(
         &self,
         library: &crate::store::Library,
-        rows: &[domain::LedgerRow],
+        rows: &[domain::LibraryFile],
         options: &CoverOptions,
     ) -> Result<Option<Vec<u8>>, String> {
         crate::http::library::render_cover_jpeg(library, rows, options)
@@ -189,7 +191,7 @@ pub fn snapshot(state: &ApiState, id: &str) -> Result<CoverSnapshot, String> {
         .get_library(id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "library.missing: 媒体库不存在".to_string())?;
-    let rows = crate::http::library::rows_in_library(&store, &library);
+    let rows = crate::http::library::files_in_library(&store, &library);
     let marker = store
         .get_setting(&format!("library_cover_checked.{}", library.id))
         .ok()

@@ -7,8 +7,16 @@ use api::ApiState;
 use api::router;
 use axum::http::StatusCode;
 use domain::{
-    FilePresence, FilePublication, FileVersion, LedgerId, LedgerRow, LibraryFile, Media, MediaId,
-    MediaKind, QualitySource, UnitKey,
+    FilePresence,
+    FilePublication,
+    FileVersion,
+    LedgerId,
+    LibraryFile,
+    Media,
+    MediaId,
+    MediaKind,
+    QualitySource,
+    UnitKey,
 };
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
@@ -17,6 +25,7 @@ use store::library_write::{FilePublication as StorePublication, WriteScope};
 use tower::ServiceExt;
 
 use super::common::{Fixtures, json_body, json_data, request, state};
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 /// The seeded movie Library's real root (`<data>/library/movies`). The migrated
 /// schema resolves a file's Library by the longest matching `library_roots` row,
@@ -315,11 +324,10 @@ async fn library_gallery_skips_empty_artwork_groups() {
     std::fs::create_dir_all(&blank_dir).unwrap();
     let blank_file = blank_dir.join("Blank.mkv");
     std::fs::write(&blank_file, b"content").unwrap();
-    api_state
-        .store()
-        .lock()
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_fixture_file(
+        &api_state.store().lock(),
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id: blank_id,
             path: blank_file.to_string_lossy().to_string(),
             season: None,
@@ -330,8 +338,10 @@ async fn library_gallery_skips_empty_artwork_groups() {
             quality_source: QualitySource::Probe,
             confidence: domain::Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let gallery = fetch_gallery_json(&app, &format!("/api/v1/libraries/{lib_id}/gallery")).await;
     let titles: Vec<&str> = gallery
         .as_array()
@@ -479,10 +489,10 @@ async fn favorites_view_respects_title_sort_order() {
     let media_ids: std::collections::HashSet<_> = api_state
         .store()
         .lock()
-        .list_ledger()
+        .list_file_coverage()
         .unwrap()
         .into_iter()
-        .map(|row| row.media_id)
+        .map(|coverage| coverage.file.media_id)
         .collect();
 
     for media_id in media_ids {

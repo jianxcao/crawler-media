@@ -1,7 +1,5 @@
 //! Dispatch pending probe obligations bounded at 100 entries per round.
 
-use std::sync::Arc;
-
 use crate::management::ApiState;
 
 /// Attempt to dispatch up to 100 pending probe obligations.
@@ -29,7 +27,7 @@ fn dispatch_once_sync(state: &ApiState) -> Result<usize, String> {
     for ob in obligations {
         let row_opt = {
             let store = state.store.lock();
-            store.get_ledger(&ob.ledger_id.to_string()).map_err(|e| e.to_string())?
+            store.file_coverage_by_id(ob.ledger_id).map_err(|e| e.to_string())?
         };
 
         let Some(row) = row_opt else {
@@ -53,7 +51,7 @@ fn dispatch_once_sync(state: &ApiState) -> Result<usize, String> {
             .request_probe(&row, crate::probe_manager::policy::ProbeRequestOrigin::Detail)
         {
             Ok(crate::probe_manager::policy::ProbeRequestResult::Queued { .. }) => {
-                state.probe.holds_dispatch_id(&row.id.to_string())
+                state.probe.holds_dispatch_id(&row.file.file_id.to_string())
             }
             Ok(
                 crate::probe_manager::policy::ProbeRequestResult::AlreadyRunning

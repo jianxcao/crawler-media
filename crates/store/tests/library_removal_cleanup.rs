@@ -1,4 +1,5 @@
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
+use store::test_support::FixtureFile;
 use store::{Store, StoredMediaMarker};
 
 fn library(store: &Store, name: &str, root: &std::path::Path) {
@@ -33,9 +34,9 @@ fn media(store: &Store, title: &str) -> Media {
     media
 }
 
-fn ledger(store: &Store, media: &Media, path: &std::path::Path) -> LedgerRow {
-    let row = LedgerRow {
-        id: LedgerId::new(),
+fn ledger(store: &Store, media: &Media, path: &std::path::Path) -> FixtureFile {
+    let row = FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id: media.id,
         path: path.display().to_string(),
         season: Some(1),
@@ -46,8 +47,9 @@ fn ledger(store: &Store, media: &Media, path: &std::path::Path) -> LedgerRow {
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     };
-    store.insert_ledger(&row).unwrap();
+    store::test_support::publish_fixture_file(store, &&row).unwrap();
     row
 }
 

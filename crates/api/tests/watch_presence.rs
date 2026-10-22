@@ -40,9 +40,9 @@ async fn last_local_file_missing_keeps_media_and_all_user_facts() {
     // Ledger row still exists, but missing_at is set!
     let store_arc = fix.state.store();
     let guard = store_arc.lock();
-    let loaded = guard.get_ledger(&row.id.to_string()).unwrap().unwrap();
-    assert_eq!(loaded.id, row.id);
-    assert!(guard.missing_at_by_path().unwrap().contains_key(&row.path));
+    let loaded = guard.file_coverage_by_id(row.file_id).unwrap().unwrap();
+    assert_eq!(loaded.file.file_id, row.file_id);
+    assert!(guard.missing_at_by_path().unwrap().contains_key(row.path.to_str().unwrap()));
 
     // Media and User facts PRESERVED (S1)
     assert!(guard.get_media(media_id).unwrap().is_some());
@@ -84,7 +84,7 @@ async fn last_strm_missing_after_45_seconds_keeps_ledger_and_history() {
     // Ledger row and user facts MUST STILL EXIST!
     let store_arc = fix.state.store();
     let guard = store_arc.lock();
-    assert!(guard.get_ledger(&row.id.to_string()).unwrap().is_some());
+    assert!(guard.file_coverage_by_id(row.file_id).unwrap().is_some());
     assert!(guard.get_media(media_id).unwrap().is_some());
     assert_eq!(
         guard.playback_progress(user_id, media_id).unwrap(),
@@ -103,7 +103,7 @@ async fn same_url_restore_clears_missing_and_preserves_probe_cache() {
         let guard = store_arc.lock();
         guard
             .put_file_meta_versioned(
-                &row.id.to_string(),
+                &row.file_id.to_string(),
                 &library::Tracks {
                     video: Some(library::VideoTrack::default()),
                     audio: Vec::new(),
@@ -131,7 +131,7 @@ async fn same_url_restore_clears_missing_and_preserves_probe_cache() {
             .lock()
             .missing_at_by_path()
             .unwrap()
-            .contains_key(&row.path)
+            .contains_key(row.path.to_str().unwrap())
     );
 
     // Write file back to disk with same content
@@ -150,14 +150,14 @@ async fn same_url_restore_clears_missing_and_preserves_probe_cache() {
             .lock()
             .missing_at_by_path()
             .unwrap()
-            .contains_key(&row.path)
+            .contains_key(row.path.to_str().unwrap())
     );
 
     // probe cache is preserved
     assert!(
         store_arc
             .lock()
-            .get_file_meta(&row.id.to_string())
+            .get_file_meta(&row.file_id.to_string())
             .unwrap()
             .is_some()
     );

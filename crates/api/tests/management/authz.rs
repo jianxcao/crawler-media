@@ -13,10 +13,7 @@ use std::sync::Arc;
 use api::{Store, router};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use domain::{
-    Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, User, UserId,
-    UserRole,
-};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, User, UserId, UserRole};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use parking_lot::Mutex;
@@ -26,6 +23,7 @@ use std::str::FromStr;
 use tower::{Service, ServiceExt};
 
 use super::common::{Fixtures, json_body, request, scan_and_wait, state as common_state};
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 struct NoFetch;
 impl Fetcher for NoFetch {
@@ -513,9 +511,9 @@ fn tv_media() -> Media {
     }
 }
 
-fn ledger_row(media_id: MediaId, root: &Path, episode: u32) -> LedgerRow {
-    LedgerRow {
-        id: LedgerId::new(),
+fn file_spec(media_id: MediaId, root: &Path, episode: u32) -> FixtureFile {
+    FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id,
         path: root
             .join(format!("E{episode:02}.mkv"))
@@ -524,11 +522,9 @@ fn ledger_row(media_id: MediaId, root: &Path, episode: u32) -> LedgerRow {
         season: Some(1),
         episode: Some(episode),
         resolution: Some("2160p".into()),
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
         confidence: Confidence::Low,
         filter_score: Some(60),
+        ..Default::default()
     }
 }
 
@@ -553,9 +549,7 @@ fn setup_tv_show_and_subscribes(
         )
         .unwrap();
     for episode in 1..=3u32 {
-        store
-            .insert_ledger(&ledger_row(media_id, root, episode))
-            .unwrap();
+        publish_fixture_file(&store, &file_spec(media_id, root, episode)).unwrap();
     }
     let subscribe_for = |user_id: UserId| domain::Subscribe {
         id: domain::SubscribeId::new(),

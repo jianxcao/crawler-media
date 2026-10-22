@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+use store::test_support::{publish_fixture_file, FixtureFile};
 #[path = "management/common.rs"]
 mod common;
 
@@ -20,12 +21,20 @@ fn setup(root: &std::path::Path) -> (api::ApiState, Arc<MemoryDownloader>) {
     (state, dl)
 }
 
-fn owned_row(media_id: MediaId, path: &std::path::Path) -> LedgerRow {
-    LedgerRow {
-        id: LedgerId::new(), media_id, path: path.display().to_string(),
-        season: None, episode: None, resolution: Some("2160p".into()),
-        codec: Some("hevc".into()), hdr: None, quality_source: QualitySource::Probe,
-        confidence: Confidence::High, filter_score: Some(100),
+fn owned_row(media_id: MediaId, path: &std::path::Path) -> FixtureFile {
+    FixtureFile {
+        file_id: Some(LedgerId::new()),
+        media_id,
+        path: path.display().to_string(),
+        season: None,
+        episode: None,
+        resolution: Some("2160p".into()),
+        codec: Some("hevc".into()),
+        hdr: None,
+        quality_source: QualitySource::Probe,
+        confidence: Confidence::High,
+        filter_score: Some(100),
+        ..Default::default()
     }
 }
 
@@ -67,7 +76,7 @@ async fn source_quality_survives_persistence_for_wash_cut() {
     {
         let handle = state.store();
         let store = handle.lock();
-        store.insert_ledger(&row).unwrap();
+        publish_fixture_file(&store, &row).unwrap();
         store.save_subscribe_facts(id, &facts).unwrap();
     }
     // Reopen a separate connection to prove the quality is durable, not an in-memory fallback.
@@ -96,7 +105,7 @@ async fn legacy_second_run_does_not_turn_pending_into_owned_fact() {
     assert!(!dl.added().is_empty());
     let handle = state.store();
     let store = handle.lock();
-    assert!(store.list_ledger().unwrap().is_empty());
+    assert!(store.list_file_coverage().unwrap().is_empty());
     assert!(!store.load_pending(id).unwrap().is_empty());
     assert!(store.load_subscribe_facts(id).unwrap().movie().is_none(),
         "unfinished pending must not be persisted as imported facts");
@@ -114,7 +123,8 @@ async fn existing_library_prevents_redundant_download_for_new_subscribe() {
     let owned = root.join("The Matrix").join("The Matrix - 2160p.mkv");
     std::fs::create_dir_all(owned.parent().unwrap()).unwrap();
     std::fs::write(&owned, b"owned").unwrap();
-    state.store().lock().insert_ledger(&owned_row(media_id, &owned)).unwrap();
+    publish_fixture_file(&state.store().lock(), &owned_row(media_id, &owned))
+    .unwrap();
     // G-M1: one subscription per media/library/coverage — the first one is
     // gone before the new one is created; the library file still counts.
     let original_id: SubscribeId = original["id"].as_str().unwrap().parse().unwrap();
@@ -151,7 +161,7 @@ async fn legacy_wash_cut_keeps_old_file_if_replacement_ledger_write_fails() {
     let mut facts = subscribe::SubscribeFacts::default();
     facts.replace(None, None, subscribe::QualityFact { score: 1, path: Some(row.path.clone()) });
     let store = Store::open(tmp.path().join("data")).unwrap();
-    store.insert_ledger(&row).unwrap();
+    publish_fixture_file(&store, &row).unwrap();
     store.save_subscribe_facts(id, &facts).unwrap();
     let replacement = tmp.path().join("better.mkv");
     std::fs::write(&replacement, b"new version").unwrap();
@@ -170,7 +180,7 @@ async fn legacy_wash_cut_keeps_old_file_if_replacement_ledger_write_fails() {
         response.status()
     );
     assert!(old.is_file(), "owned version must survive a failed replacement commit");
-    assert!(store.ledger_by_path(&row.path).unwrap().is_some());
+    assert!(store.file_coverage_by_path(&row.path).unwrap().is_some());
 }
 
 #[test]

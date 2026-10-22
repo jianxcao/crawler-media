@@ -3,6 +3,7 @@ use api::fs_watcher::{StrmGraceTracker, handle_fs_events};
 use domain::*;
 use notify_debouncer_mini::{DebouncedEvent, DebouncedEventKind};
 use std::sync::Arc;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 struct NoNetwork;
 impl indexer::Fetcher for NoNetwork {
@@ -24,12 +25,11 @@ fn media() -> Media {
         original_title: None, aliases: Vec::new(), tmdb_id: None, douban_id: None, tvdb_id: None,
         bangumi_id: None, anilist_id: None }
 }
-fn row(media: &Media, tmp: &tempfile::TempDir, name: &str, episode: u32) -> LedgerRow {
+fn row(media: &Media, tmp: &tempfile::TempDir, name: &str, episode: u32) -> FixtureFile {
     let path = tmp.path().join(name);
     std::fs::write(&path, b"fixture").unwrap();
-    LedgerRow { id: LedgerId::new(), media_id: media.id, path: path.display().to_string(),
-        season: Some(1), episode: Some(episode), resolution: None, codec: None, hdr: None,
-        quality_source: QualitySource::Release, confidence: Confidence::High, filter_score: None }
+    FixtureFile { media_id: media.id, path: path.display().to_string(),
+        season: Some(1), episode: Some(episode), ..FixtureFile::default() }
 }
 fn deleted(state: &ApiState, path: &str) {
     handle_fs_events(state, &Arc::new(StrmGraceTracker::new()), vec![DebouncedEvent {
@@ -54,26 +54,29 @@ fn watcher_preserves_media_still_targeted_by_subscribe() {
     { let handle = state.store(); let s = handle.lock();
       s.create_library(MediaKind::Tv, "TV", &[tmp.path().to_str().unwrap()], "everyone", true, &[]).unwrap();
       s.insert_media(&media).unwrap();
-      s.insert_ledger(&row).unwrap(); s.insert_subscribe(&sub).unwrap(); }
+      publish_fixture_file(&s, &row)
+      .unwrap(); s.insert_subscribe(&sub).unwrap(); }
     std::fs::remove_file(&row.path).unwrap(); deleted(&state, &row.path);
     let handle = state.store(); let s = handle.lock();
     assert!(s.get_subscribe(sub.id).unwrap().is_some());
     assert!(s.get_media(media.id).unwrap().is_some(), "file deletion must not orphan Subscribe");
     assert!(s.missing_at_by_path().unwrap().contains_key(&row.path), "file deletion marks missing rather than deleting ledger row");
-    assert!(s.ledger_by_path(&row.path).unwrap().is_some(), "ledger row preserved until admin prune");
+    assert!(s.file_coverage_by_path(&row.path).unwrap().is_some(), "ledger row preserved until admin prune");
 }
 
 #[test]
 fn deleting_one_version_preserves_locked_marker_for_other_version() {
     let tmp = tempfile::tempdir().unwrap(); let state = state(&tmp); let media = media();
     let a = row(&media, &tmp, "version-a.mkv", 1); let b = row(&media, &tmp, "version-b.mkv", 1);
-    { let handle = state.store(); let s = handle.lock(); s.insert_media(&media).unwrap();
+    let b_file = { let handle = state.store(); let s = handle.lock(); s.insert_media(&media).unwrap();
       s.create_library(MediaKind::Tv, "TV", &[tmp.path().to_str().unwrap()], "everyone", true, &[]).unwrap();
-      s.insert_ledger(&a).unwrap(); s.insert_ledger(&b).unwrap();
-      s.put_media_marker(&marker(&media, 1, true)).unwrap(); }
+      publish_fixture_file(&s, &a)
+      .unwrap(); let b_file = publish_fixture_file(&s, &b)
+      .unwrap();
+      s.put_media_marker(&marker(&media, 1, true)).unwrap(); b_file };
     std::fs::remove_file(&a.path).unwrap(); deleted(&state, &a.path);
     let handle = state.store(); let s = handle.lock();
-    assert!(s.get_ledger(&b.id.to_string()).unwrap().is_some());
+    assert!(s.file_coverage_by_id(b_file.file_id).unwrap().is_some());
     assert!(s.get_media_marker(media.id, Some(1), Some(1)).unwrap().is_some(),
         "another version still owns the locked episode marker");
 }
@@ -82,13 +85,16 @@ fn deleting_one_version_preserves_locked_marker_for_other_version() {
 fn repeated_empty_chapter_read_does_not_borrow_neighbor_intro() {
     let tmp = tempfile::tempdir().unwrap(); let state = state(&tmp); let media = media();
     let neighbor = row(&media, &tmp, "e1.strm", 1); let special = row(&media, &tmp, "e2.strm", 2);
-    { let handle = state.store(); let s = handle.lock(); s.insert_media(&media).unwrap();
+    let special_coverage = { let handle = state.store(); let s = handle.lock(); s.insert_media(&media).unwrap();
       s.create_library(MediaKind::Tv, "TV", &[tmp.path().to_str().unwrap()], "everyone", true, &[]).unwrap();
-      s.insert_ledger(&neighbor).unwrap(); s.insert_ledger(&special).unwrap();
-      s.put_media_marker(&marker(&media, 1, false)).unwrap(); }
+      publish_fixture_file(&s, &neighbor)
+      .unwrap(); publish_fixture_file(&s, &special)
+      .unwrap();
+      s.put_media_marker(&marker(&media, 1, false)).unwrap();
+      s.file_coverage_by_path(&special.path).unwrap().unwrap() };
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let first = runtime.block_on(api::marker_resolver::resolve_item_chapters(&state, &special, &media, None));
-    let second = runtime.block_on(api::marker_resolver::resolve_item_chapters(&state, &special, &media, None));
+    let first = runtime.block_on(api::marker_resolver::resolve_item_chapters(&state, &special_coverage, &media, None));
+    let second = runtime.block_on(api::marker_resolver::resolve_item_chapters(&state, &special_coverage, &media, None));
     assert!(first.is_empty());
     assert!(second.is_empty(), "no new evidence supports a different episode intro");
 }
@@ -107,8 +113,8 @@ fn realtime_video_library_uses_video_ingestion() {
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
             loop {
                 let kind = { let handle = state.store(); let s = handle.lock();
-                    s.ledger_by_path(file.to_str().unwrap()).unwrap()
-                    .and_then(|r| s.get_media(r.media_id).unwrap()).map(|m| m.kind) };
+                    s.file_coverage_by_path(file.to_str().unwrap()).unwrap()
+                    .and_then(|c| s.get_media(c.file.media_id).unwrap()).map(|m| m.kind) };
                 if let Some(kind) = kind { assert_eq!(kind, MediaKind::Video); break; }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }

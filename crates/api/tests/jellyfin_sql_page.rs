@@ -2,7 +2,7 @@
 //! 选完再分页，页内 `TypedItemId`/授权 `preferred_source`/`filtered total` 一次性给出。
 //!
 //! 断言只用公开缝：`Store::protocol_item_page`（api re-export）+ `domain` 合同类型。
-//! fixture 通过 `insert_ledger` 走真实发布路径，所以 NFO 只在此刻被观察一次，
+//! fixture 通过 `publish_fixture_file` 走真实发布路径，所以 NFO 只在此刻被观察一次，
 //! 之后页查询不得再读现场 NFO。
 
 use std::collections::BTreeMap;
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use api::Store;
 use domain::{
-    Confidence, EntityScope, FieldValue, LedgerId, LedgerRow, LibraryId, Media, MediaId, MediaKind,
+    Confidence, EntityScope, FieldValue, LedgerId, LibraryId, Media, MediaId, MediaKind,
     MetadataAdoption, MetadataFields, MetadataPreferences, NormalizedMetadata, ProtocolItemQuery,
     ProtocolItemType, ProtocolMarkFilter, ProtocolParent, ProtocolSort, ProtocolSortKey,
     QualitySource, TypedItemId, UnitKey, UserId,
@@ -57,7 +57,7 @@ impl Fx {
         if let Some(body) = nfo {
             std::fs::write(root.join(format!("{title}.nfo")), body).unwrap();
         }
-        insert_ledger(&self.store, media, &path, None, None);
+        publish_fixture(&self.store, media, &path, None, None);
         media
     }
 
@@ -73,7 +73,7 @@ impl Fx {
     fn add_version(&self, root: &Path, media: MediaId, title: &str) {
         let path = root.join(format!("{title}.mkv"));
         std::fs::write(&path, b"payload").unwrap();
-        insert_ledger(&self.store, media, &path, None, None);
+        publish_fixture(&self.store, media, &path, None, None);
     }
 
     /// TV 库里一部剧的分集；返回 series media。
@@ -84,7 +84,7 @@ impl Fx {
         for (season, episode) in episodes {
             let path = show_dir.join(format!("S{season:02}E{episode:02}.mkv"));
             std::fs::write(&path, b"payload").unwrap();
-            insert_ledger(&self.store, media, &path, Some(*season), Some(*episode));
+            publish_fixture(&self.store, media, &path, Some(*season), Some(*episode));
         }
         media
     }
@@ -124,28 +124,25 @@ fn insert_media(store: &Store, title: &str, kind: MediaKind) -> MediaId {
     media.id
 }
 
-fn insert_ledger(
+fn publish_fixture(
     store: &Store,
     media: MediaId,
     path: &Path,
     season: Option<u32>,
     episode: Option<u32>,
 ) -> LedgerId {
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let spec = store::test_support::FixtureFile {
         media_id: media,
         path: path.display().to_string(),
         season,
         episode,
-        resolution: None,
-        codec: None,
-        hdr: None,
         quality_source: QualitySource::Probe,
         confidence: Confidence::High,
-        filter_score: None,
+        ..Default::default()
     };
-    store.insert_ledger(&row).unwrap();
-    row.id
+    store::test_support::publish_fixture_file(store, &spec)
+        .unwrap()
+        .file_id
 }
 
 fn base_query(parent: ProtocolParent) -> ProtocolItemQuery {

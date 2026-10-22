@@ -9,6 +9,7 @@ use tower::ServiceExt;
 
 use super::common::*;
 use super::subscription_depth::{authed_app, seed_pending_torrent};
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 async fn setup_tv_subscription_with_two_seasons(
     app: &axum::Router,
@@ -38,9 +39,10 @@ async fn setup_tv_subscription_with_two_seasons(
     for (season, episode) in [(1u32, 1u32), (2, 1)] {
         let path = dir.join(format!("s{season}e{episode}.mkv"));
         std::fs::write(&path, b"ep").unwrap();
-        store
-            .insert_ledger(&domain::LedgerRow {
-                id: domain::LedgerId::new(),
+        publish_fixture_file(
+            &store,
+            &FixtureFile {
+                file_id: Some(domain::LedgerId::new()),
                 media_id: media_id.parse().unwrap(),
                 path: path.display().to_string(),
                 season: Some(season),
@@ -51,8 +53,10 @@ async fn setup_tv_subscription_with_two_seasons(
                 quality_source: domain::QualitySource::Probe,
                 confidence: domain::Confidence::High,
                 filter_score: Some(80),
-            })
-            .unwrap();
+                ..Default::default()
+            },
+        )
+        .unwrap();
     }
     (id, media_id)
 }
@@ -79,13 +83,13 @@ async fn season_cleanup_bins_out_of_scope_files() {
 
     let store = Store::open(tmp.path().join("data")).unwrap();
     let remaining: Vec<_> = store
-        .list_ledger()
+        .list_file_coverage()
         .unwrap()
         .into_iter()
-        .filter(|row| row.media_id == media_id.parse().unwrap())
+        .filter(|coverage| coverage.file.media_id == media_id.parse().unwrap())
         .collect();
     assert_eq!(remaining.len(), 1, "季 2 文件应移出 ledger");
-    assert_eq!(remaining[0].season, Some(1));
+    assert_eq!(remaining[0].units, vec![domain::UnitKey::new(1, 1)]);
 }
 
 #[tokio::test]
@@ -112,9 +116,10 @@ async fn season_cleanup_keeps_ledger_when_physical_delete_fails() {
     let blocked = tmp.path().join("data/library/tv/blocked.mkv");
     std::fs::create_dir_all(&blocked).unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
-    store
-        .insert_ledger(&domain::LedgerRow {
-            id: domain::LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(domain::LedgerId::new()),
             media_id: media_id.parse().unwrap(),
             path: blocked.display().to_string(),
             season: Some(2),
@@ -125,8 +130,10 @@ async fn season_cleanup_keeps_ledger_when_physical_delete_fails() {
             quality_source: domain::QualitySource::Probe,
             confidence: domain::Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     drop(store);
     let cleanup = app
         .oneshot(request(
@@ -142,7 +149,7 @@ async fn season_cleanup_keeps_ledger_when_physical_delete_fails() {
     assert_eq!(cleanup["error"]["code"], "subscription.file_cleanup_failed");
     let remaining = Store::open(tmp.path().join("data"))
         .unwrap()
-        .ledger_for_media(media_id.parse().unwrap())
+        .file_coverage_for_media(media_id.parse().unwrap())
         .unwrap();
     assert_eq!(remaining.len(), 1);
     assert!(blocked.is_dir());

@@ -10,11 +10,12 @@ use std::sync::Arc;
 use api::ApiState;
 use api::router;
 use axum::http::StatusCode;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::Value;
 use tower::ServiceExt;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 #[path = "management/common.rs"]
 mod common;
@@ -65,11 +66,10 @@ fn seed_movie(state: &ApiState, title: &str, root: &Path, with_poster: bool) {
     if with_poster {
         std::fs::write(dir.join("poster.jpg"), b"poster").unwrap();
     }
-    state
-        .store()
-        .lock()
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_fixture_file(
+        &state.store().lock(),
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id: media.id,
             path: file.to_string_lossy().to_string(),
             season: None,
@@ -80,8 +80,10 @@ fn seed_movie(state: &ApiState, title: &str, root: &Path, with_poster: bool) {
             quality_source: QualitySource::Probe,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
 }
 
 async fn get(app: &axum::Router, url: &str) -> (StatusCode, Value) {

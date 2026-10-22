@@ -7,15 +7,16 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use domain::{
-    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LedgerRow, LibraryFile,
-    LibraryId, Media, MediaId, MediaKind, QualitySource, TypedItemId, UserId,
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile,
+    LibraryId, Media, MediaId, MediaKind, QualitySource, TypedItemId, UnitKey, UserId,
 };
 use media_server::provider::query::{
     folder_id_for_root, legacy_next_up, legacy_select, series_media_id,
 };
 use media_server::provider::{
-    AuthenticateError, MediaItemMetadata, MediaItemSnapshot, MediaServerProvider, ServerItemQuery,
-    ServerLibrary, ServerUser,
+    AuthenticateError, MediaItemMetadata, MediaItemSnapshot, MediaServerProvider,
+    PlaybackClientInfo, PlaybackEvent, PlaybackEventIdentity, ServerItemQuery, ServerLibrary,
+    ServerUser,
 };
 
 const USER: &str = "00000000-0000-0000-0000-0000000000a1";
@@ -40,21 +41,6 @@ fn media(kind: MediaKind, title: &str) -> Media {
     }
 }
 
-fn row(media_id: MediaId, path: &str, season: Option<u32>, episode: Option<u32>) -> LedgerRow {
-    LedgerRow {
-        id: LedgerId::new(),
-        media_id,
-        path: path.into(),
-        season,
-        episode,
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    }
-}
 fn fake_file(
     file_id: LedgerId,
     root_id: &str,
@@ -97,18 +83,29 @@ fn fake_file(
     }
 }
 
-fn snapshot(item_media: Media, item_row: LedgerRow, is_series: bool) -> MediaItemSnapshot {
+fn snapshot(
+    item_media: Media,
+    path: &str,
+    season: Option<u32>,
+    episode: Option<u32>,
+    is_series: bool,
+) -> MediaItemSnapshot {
+    let file_id = LedgerId::new();
     let file = fake_file(
-        item_row.id,
+        file_id,
         "root",
         item_media.id,
         item_media.kind,
-        &item_row.path,
+        path,
     );
+    let unit = match (season, episode) {
+        (Some(s), Some(e)) => Some(UnitKey::new(s as i32, e as i32)),
+        _ => None,
+    };
     MediaItemSnapshot {
         file,
         parent_id: "lib".into(),
-        row: item_row,
+        unit,
         media: item_media,
         ticks: 0,
         play_count: 0,
@@ -138,24 +135,32 @@ impl SplitRootProvider {
         let show = media(MediaKind::Tv, "Split show");
         let episode_a = snapshot(
             show.clone(),
-            row(show.id, "/media/root-a/Show/S01E01.mkv", Some(1), Some(1)),
+            "/media/root-a/Show/S01E01.mkv",
+            Some(1),
+            Some(1),
             false,
         );
         let episode_b = snapshot(
             show.clone(),
-            row(show.id, "/media/root-b/Show/S01E02.mkv", Some(1), Some(2)),
+            "/media/root-b/Show/S01E02.mkv",
+            Some(1),
+            Some(2),
             false,
         );
         let movie_media = media(MediaKind::Movie, "Requested movie");
         let movie = snapshot(
             movie_media.clone(),
-            row(movie_media.id, "/media/movies/Requested.mkv", None, None),
+            "/media/movies/Requested.mkv",
+            None,
+            None,
             false,
         );
         let other = media(MediaKind::Tv, "Collapsed other");
         let collapsed_b = snapshot(
             other.clone(),
-            row(other.id, "/media/root-b/Other", None, None),
+            "/media/root-b/Other",
+            None,
+            None,
             true,
         );
         Self {
@@ -228,12 +233,9 @@ impl MediaServerProvider for SplitRootProvider {
         if parent_id.is_some_and(|id| series_media_id(id) == Some(self.collapsed_b.media.id)) {
             return Ok(vec![snapshot(
                 self.collapsed_b.media.clone(),
-                row(
-                    self.collapsed_b.media.id,
-                    "/media/root-b/Other/S01E01.mkv",
-                    Some(1),
-                    Some(1),
-                ),
+                "/media/root-b/Other/S01E01.mkv",
+                Some(1),
+                Some(1),
                 false,
             )]);
         }
@@ -241,7 +243,7 @@ impl MediaServerProvider for SplitRootProvider {
         // then another collapsed show which requires expansion.
         let mut series = self.episode_a.clone();
         series.is_series = true;
-        series.row.path = "/media/root-a/Show".into();
+        series.file.path = PathBuf::from("/media/root-a/Show");
         Ok(vec![series, self.episode_b.clone(), self.collapsed_b.clone(), self.movie.clone()])
     }
 
@@ -295,7 +297,16 @@ impl MediaServerProvider for SplitRootProvider {
         Ok(true)
     }
 
-    async fn update_progress(&self, _: UserId, _: &str, _: i64, _: bool) -> Result<(), String> {
+    async fn report_playback_event(
+        &self,
+        _: UserId,
+        _: &str,
+        _: i64,
+        _: bool,
+        _: PlaybackClientInfo,
+        _: PlaybackEvent,
+        _: PlaybackEventIdentity,
+    ) -> Result<(), String> {
         Ok(())
     }
 }
@@ -324,14 +335,14 @@ async fn legacy_folder_keeps_series_whose_representative_is_elsewhere() {
     );
     assert!(
         page.items.iter().any(|item| {
-            !item.is_series && item.row.path == "/media/root-b/Show/S01E02.mkv"
+            !item.is_series && item.file.path == PathBuf::from("/media/root-b/Show/S01E02.mkv")
         }),
         "folder B 必须保留该剧在 B 的分集：{names:?}"
     );
     assert!(
-        page.items.iter().all(|item| item.row.path.starts_with("/media/root-b")),
+        page.items.iter().all(|item| item.file.path.starts_with("/media/root-b")),
         "不得带回 root A 的代表行：{:?}",
-        page.items.iter().map(|item| &item.row.path).collect::<Vec<_>>()
+        page.items.iter().map(|item| &item.file.path).collect::<Vec<_>>()
     );
 }
 
@@ -352,8 +363,8 @@ async fn legacy_folder_series_only_expands_membership_and_rebuilds_aggregates() 
     .await
     .expect("legacy folder selection");
     assert_eq!(page.total, 2);
-    let series = page.items.iter().find(|item| item.media.id == provider.show.id).unwrap_or_else(|| panic!("split folder series missing: {:?}", page.items.iter().map(|item| (&item.media.title, item.is_series, &item.row.path)).collect::<Vec<_>>()));
-    assert_eq!(series.row.path, "/media/root-b/Show/S01E02.mkv");
+    let series = page.items.iter().find(|item| item.media.id == provider.show.id).unwrap_or_else(|| panic!("split folder series missing: {:?}", page.items.iter().map(|item| (&item.media.title, item.is_series, &item.file.path)).collect::<Vec<_>>()));
+    assert_eq!(series.file.path, PathBuf::from("/media/root-b/Show/S01E02.mkv"));
     assert_eq!(series.metadata.child_count, Some(1));
     assert_eq!(series.metadata.season_count, Some(1));
     assert_eq!(series.unplayed_item_count, Some(1));
@@ -379,6 +390,6 @@ async fn legacy_next_up_returns_explicit_movie_and_expands_collapsed_media() {
     assert_eq!(mixed.total, 2);
     assert_eq!(mixed.items[0].media.title, "Split show");
     assert_eq!(mixed.items[1].media.title, "Collapsed other");
-    assert_eq!(mixed.items[0].row.media_id, provider.show.id);
-    assert_eq!(mixed.items[1].row.media_id, provider.collapsed_b.media.id);
+    assert_eq!(mixed.items[0].file.media_id, provider.show.id);
+    assert_eq!(mixed.items[1].file.media_id, provider.collapsed_b.media.id);
 }

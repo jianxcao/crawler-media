@@ -58,7 +58,7 @@ Count `wc -l`. Generated code and fixture bytes in tests are exempt; test **logi
 
 Already over the hard limit (split when you next touch them — do not ignore):
 
-- `crates/subscribe/tests/run.rs`
+- None as of 2026-10-21. `crates/api/src/http/mod.rs` (818 lines) was split into `http/routes/{mod,member,admin}.rs` and `http/request_logging.rs` (165 + 77 + 256 + 327 + 53). An earlier entry, `crates/subscribe/tests/run.rs`, measured 197 lines — below the soft limit — so it was removed from this list.
 
 ### Shape
 
@@ -92,7 +92,7 @@ Do not write silent code. All critical paths must emit structured tracing logs:
 
 - Glossary: `CONTEXT.md`
 - API conventions (envelope + core DTOs, **not** the live route table): `docs/api-contracts/self.md`
-- Live HTTP surface: `crates/api/src/http/mod.rs` (`/api/v1`) and `web/lib/api/*`
+- Live HTTP surface: `crates/api/src/http/mod.rs` (`router_with_slow_after`, `/api/v1`) plus the route tables in `crates/api/src/http/routes/{mod,member,admin}.rs`, and `web/lib/api/*`
 - Stage archive (not an API spec): `docs/agents/roadmap.md`
 - Spec / current state: the user's request and `CONTEXT.md`; read an issue only when the user explicitly asks to use GitHub issue tracking
 - ADRs: `docs/adr/`

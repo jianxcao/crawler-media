@@ -166,6 +166,9 @@ fn playback_resolve_and_mutation_lifecycle() {
         paused: false,
         rate_bps: 0,
         client: Some("Web".into()),
+        device_name: None,
+        client_version: None,
+        play_method: None,
         event_type: PlaybackEventType::Progress,
     };
 
@@ -240,6 +243,9 @@ fn playback_source_change_detection() {
         paused: false,
         rate_bps: 0,
         client: Some("Web".into()),
+        device_name: None,
+        client_version: None,
+        play_method: None,
         event_type: PlaybackEventType::Progress,
     };
     store.commit_playback_event(&event, 1000).unwrap();

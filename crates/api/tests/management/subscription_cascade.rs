@@ -6,8 +6,19 @@ use std::sync::Arc;
 use api::{Store, router};
 use axum::http::StatusCode;
 use domain::{
-    Confidence, Coverage, FetchMode, Filter, FilterId, LedgerId, LedgerRow, Media, MediaId,
-    MediaKind, QualitySource, Subscribe, SubscribeId, UserId,
+    Confidence,
+    Coverage,
+    FetchMode,
+    Filter,
+    FilterId,
+    LedgerId,
+    Media,
+    MediaId,
+    MediaKind,
+    QualitySource,
+    Subscribe,
+    SubscribeId,
+    UserId,
 };
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
@@ -15,6 +26,7 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 use super::common::*;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 fn app(tmp: &tempfile::TempDir) -> axum::Router {
     let fetcher = Arc::new(Fixtures {
@@ -50,9 +62,10 @@ async fn cancel_subscription_with_files_bins_library_files() {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id: media.id,
             path: file.display().to_string(),
             season: None,
@@ -63,8 +76,10 @@ async fn cancel_subscription_with_files_bins_library_files() {
             quality_source: QualitySource::Release,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let filter = Filter {
         id: FilterId::new(),
         name: "f".into(),
@@ -171,9 +186,10 @@ fn tv_subscribe(media_id: MediaId, season: u32) -> Subscribe {
 }
 
 fn insert_episode(store: &Store, media_id: MediaId, path: &std::path::Path, season: u32) {
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id,
             path: path.display().to_string(),
             season: Some(season),
@@ -184,8 +200,10 @@ fn insert_episode(store: &Store, media_id: MediaId, path: &std::path::Path, seas
             quality_source: QualitySource::Release,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
 }
 
 #[tokio::test]
@@ -263,13 +281,17 @@ async fn cancel_season_one_does_not_delete_other_season_or_library_files() {
         "其他 Library 的同 Media 文件绝不能被带走"
     );
     let store = Store::open(tmp.path().join("data")).unwrap();
-    let remaining = store.ledger_for_media(media.id).unwrap();
+    let remaining = store.file_coverage_for_media(media.id).unwrap();
     assert_eq!(remaining.len(), 2);
-    assert!(remaining.iter().any(|row| row.season == Some(2)));
     assert!(
         remaining
             .iter()
-            .any(|row| row.path == other_lib.display().to_string())
+            .any(|coverage| coverage.units.iter().any(|u| u.season == 2))
+    );
+    assert!(
+        remaining
+            .iter()
+            .any(|coverage| coverage.file.path == other_lib)
     );
     let _ = other_library_id;
 }

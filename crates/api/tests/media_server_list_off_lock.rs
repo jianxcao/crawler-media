@@ -8,10 +8,11 @@ use std::time::Duration;
 
 use api::browse_file_read::BrowseFileRead;
 use api::{ApiState, Store};
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use media_server::provider::MediaServerProvider;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 struct NoFetch;
 impl Fetcher for NoFetch {
@@ -138,9 +139,10 @@ fn seed(state: &ApiState, root: &Path) -> domain::UserId {
         anilist_id: None,
     };
     guard.insert_media(&media).unwrap();
-    guard
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_fixture_file(
+        &guard,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id: media.id,
             path: file.display().to_string(),
             season: None,
@@ -151,8 +153,10 @@ fn seed(state: &ApiState, root: &Path) -> domain::UserId {
             quality_source: QualitySource::Probe,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     guard
         .user_id_by_token("management-secret")
         .unwrap()

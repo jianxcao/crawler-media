@@ -1,10 +1,11 @@
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
+use store::test_support::FixtureFile;
 use store::{
     retry_delay_ms, ProbeJobUnitSpec, ProbeStage, ProbeStageCompletion, ProbeStageKey,
     ProbeStageStatus, Store,
 };
 
-fn create_test_media_and_ledger(store: &Store, path_suffix: &str) -> (Media, LedgerRow) {
+fn create_test_media_and_ledger(store: &Store, path_suffix: &str) -> (Media, FixtureFile) {
     let media = Media {
         id: MediaId::new(),
         kind: MediaKind::Tv,
@@ -19,8 +20,8 @@ fn create_test_media_and_ledger(store: &Store, path_suffix: &str) -> (Media, Led
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let row = FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id: media.id,
         path: format!("/path/to/{}", path_suffix),
         season: Some(1),
@@ -31,6 +32,7 @@ fn create_test_media_and_ledger(store: &Store, path_suffix: &str) -> (Media, Led
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     };
     if !store
         .list_library_roots()
@@ -49,7 +51,7 @@ fn create_test_media_and_ledger(store: &Store, path_suffix: &str) -> (Media, Led
             )
             .unwrap();
     }
-    store.insert_ledger(&row).unwrap();
+    store::test_support::publish_fixture_file(store, &row).unwrap();
     (media, row)
 }
 
@@ -67,7 +69,7 @@ fn partial_job_is_terminal_after_reopen() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let (_media, row) = create_test_media_and_ledger(&store, "ep1.strm");
-    let ledger_id = row.id.to_string();
+    let ledger_id = row.file_id.expect("fixture file id").to_string();
 
     let job_id = "test-job-partial";
     let spec = ProbeJobUnitSpec {
@@ -105,7 +107,7 @@ fn stale_job_cannot_finish_new_context() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let (_media, row) = create_test_media_and_ledger(&store, "ep1.strm");
-    let ledger_id = row.id.to_string();
+    let ledger_id = row.file_id.expect("fixture file id").to_string();
 
     let key_old = ProbeStageKey {
         ledger_id: ledger_id.clone(),
@@ -142,7 +144,7 @@ fn two_connections_claim_due_stage_once() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let (_media, row) = create_test_media_and_ledger(&store, "ep1.strm");
-    let ledger_id = row.id.to_string();
+    let ledger_id = row.file_id.expect("fixture file id").to_string();
 
     let key = ProbeStageKey {
         ledger_id,
@@ -192,12 +194,12 @@ fn deleting_ledger_removes_only_its_stage_state() {
     let (_m2, r2) = create_test_media_and_ledger(&store, "ep2.strm");
 
     let k1 = ProbeStageKey {
-        ledger_id: r1.id.to_string(),
+        ledger_id: r1.file_id.expect("fixture file id").to_string(),
         context_key: "ctx1".into(),
         stage: ProbeStage::Intro,
     };
     let k2 = ProbeStageKey {
-        ledger_id: r2.id.to_string(),
+        ledger_id: r2.file_id.expect("fixture file id").to_string(),
         context_key: "ctx2".into(),
         stage: ProbeStage::Intro,
     };
@@ -221,7 +223,7 @@ fn v6_database_migrates_without_losing_probe_jobs() {
     // Initialize DB up to schema 6
     let store = Store::open(tmp.path()).unwrap();
     let (_m, r) = create_test_media_and_ledger(&store, "ep1.strm");
-    let ledger_id = r.id.to_string();
+    let ledger_id = r.file_id.expect("fixture file id").to_string();
 
     let job_id = "job-pre-migration";
     let spec = ProbeJobUnitSpec {

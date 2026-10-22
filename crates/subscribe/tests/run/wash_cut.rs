@@ -145,7 +145,7 @@ fn assert_rejected_probe_preserves_owned(old_score: i32, resolution: &str, codec
     );
     assert_eq!(outcome.facts.movie().unwrap().score, old_score);
     // Review N-1: a non-upgrade is probed at the source and never published.
-    assert!(outcome.ledger.is_empty(), "rejected alternate is not recorded");
+    assert!(outcome.files.is_empty(), "rejected alternate is not recorded");
     assert!(outcome.removed_paths.is_empty(), "{:?}", outcome.removed_paths);
     assert_eq!(outcome.rejected_enclosures.len(), 1);
     assert!(
@@ -371,7 +371,7 @@ fn wash_cut_keep_old_versions_keeps_both_files() {
         "no removed paths reported"
     );
     // 旧台账行由 api 层保留（removed_paths 为空 → 不删 ledger 行）。
-    assert_eq!(outcome.ledger.len(), 1, "outcome carries only the new row");
+    assert_eq!(outcome.files.len(), 1, "outcome carries only the new file");
 }
 
 struct FailingProbe;

@@ -9,13 +9,13 @@ use std::sync::Arc;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use domain::{
-    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LedgerRow, LibraryFile,
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile,
     LibraryId, Media, MediaId, MediaKind, QualitySource, TypedItemId, UserId,
 };
 use media_server::provider::query::series_media_id;
 use media_server::provider::{
-    AuthenticateError, MediaItemMetadata, MediaItemSnapshot, MediaServerProvider, ServerLibrary,
-    ServerUser,
+    AuthenticateError, MediaItemMetadata, MediaItemSnapshot, MediaServerProvider,
+    PlaybackClientInfo, PlaybackEvent, PlaybackEventIdentity, ServerLibrary, ServerUser,
 };
 use serde_json::Value;
 use tower::ServiceExt;
@@ -42,22 +42,6 @@ fn series_wire() -> String {
 
 fn user(raw: &str) -> UserId {
     UserId::from_str(raw).unwrap()
-}
-
-fn ledger(media_id: MediaId, path: &str) -> LedgerRow {
-    LedgerRow {
-        id: LedgerId::new(),
-        media_id,
-        path: path.into(),
-        season: None,
-        episode: None,
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    }
 }
 
 fn media(raw_id: &str, kind: MediaKind, title: &str) -> Media {
@@ -121,11 +105,10 @@ fn fake_file(
 
 fn movie(title: &str, path: &str, genres: &[&str], studios: &[&str]) -> MediaItemSnapshot {
     let media = media(&MediaId::new().to_string(), MediaKind::Movie, title);
-    let row = ledger(media.id, path);
-    let file = fake_file(row.id, library(MOVIES_LIBRARY), "root-movies", media.id, MediaKind::Movie, path);
+    let file = fake_file(LedgerId::new(), library(MOVIES_LIBRARY), "root-movies", media.id, MediaKind::Movie, path);
     MediaItemSnapshot {
         file,
-        row,
+        unit: None,
         media,
         ticks: 0,
         play_count: 0,
@@ -148,11 +131,10 @@ fn movie(title: &str, path: &str, genres: &[&str], studios: &[&str]) -> MediaIte
 
 fn series(title: &str, path: &str) -> MediaItemSnapshot {
     let media = media(SERIES, MediaKind::Tv, title);
-    let row = ledger(media.id, path);
-    let file = fake_file(row.id, library(TV_LIBRARY), "root-tv", media.id, MediaKind::Tv, path);
+    let file = fake_file(LedgerId::new(), library(TV_LIBRARY), "root-tv", media.id, MediaKind::Tv, path);
     MediaItemSnapshot {
         file,
-        row,
+        unit: None,
         media,
         ticks: 0,
         play_count: 0,
@@ -325,12 +307,15 @@ impl MediaServerProvider for FakeProvider {
         Ok(true)
     }
 
-    async fn update_progress(
+    async fn report_playback_event(
         &self,
         _user_id: UserId,
         _id: &str,
         _position_ms: i64,
         _paused: bool,
+        _client: PlaybackClientInfo,
+        _event: PlaybackEvent,
+        _identity: PlaybackEventIdentity,
     ) -> Result<(), String> {
         Ok(())
     }

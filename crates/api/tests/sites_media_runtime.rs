@@ -12,11 +12,12 @@ use std::time::Duration;
 use api::{ApiState, Store, router};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use serde_json::{Value, json};
 use tower::ServiceExt;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 const TOKEN: &str = "management-secret";
 
@@ -277,9 +278,9 @@ async fn site_action_status_contracts_are_unchanged() {
     assert_eq!(json_body(response).await["error"]["code"], "site.login_failed");
 }
 
-fn ledger_row(media_id: MediaId, path: &Path) -> LedgerRow {
-    LedgerRow {
-        id: LedgerId::new(),
+fn fixture_file(media_id: MediaId, path: &Path) -> FixtureFile {
+    FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id,
         path: path.display().to_string(),
         season: None,
@@ -290,6 +291,7 @@ fn ledger_row(media_id: MediaId, path: &Path) -> LedgerRow {
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     }
 }
 
@@ -333,7 +335,7 @@ async fn organize_side_effect_really_renames_on_disk() {
         let store = state.store();
         let store = store.lock();
         store.insert_media(&media).unwrap();
-        store.insert_ledger(&ledger_row(media.id, &old)).unwrap();
+        publish_fixture_file(&store, &fixture_file(media.id, &old)).unwrap();
     }
 
     let app = router(state.clone());
@@ -356,7 +358,7 @@ async fn organize_side_effect_really_renames_on_disk() {
     let store = store.lock();
     assert!(
         store
-            .ledger_by_path(&new.display().to_string())
+            .file_coverage_by_path(&new.display().to_string())
             .unwrap()
             .is_some(),
         "ledger must follow the renamed file"

@@ -25,44 +25,6 @@ pub enum EventDecision {
     Ignore,
 }
 
-/// current position, event flags, timestamps, and playback rate.
-///
-/// Implements Section 3 of Batch 2 design:
-/// - elapsed = clamp(now_ms - last_report_at_ms, 0, 30_000)
-/// - if previous was paused or current event is paused (and not stop): delta = 0
-/// - advance = max(position - previous.position, 0)
-/// - if advance > elapsed * rate + 2_000 -> treated as seek, delta = 0
-/// - otherwise delta = min(elapsed, advance / rate) rounded down to integer ms
-pub fn watched_increment(
-    previous: &SessionRow,
-    position_ms: i64,
-    paused: bool,
-    stopped: bool,
-    now_ms: i64,
-    rate: f64,
-) -> i64 {
-    // If previous was paused, or current progress is paused, no watch time is accumulated
-    if previous.paused || (paused && !stopped) {
-        return 0;
-    }
-
-    let rate = if (0.25..=4.0).contains(&rate) { rate } else { 1.0 };
-    let elapsed = clock::clamp_elapsed(now_ms, previous.last_report_at_ms);
-    if elapsed == 0 {
-        return 0;
-    }
-
-    let advance = (position_ms - previous.position_ms).max(0);
-    let allowed_advance = (elapsed as f64 * rate) as i64 + 2_000;
-    if advance > allowed_advance {
-        // Seek detected
-        return 0;
-    }
-
-    let advance_scaled = (advance as f64 / rate) as i64;
-    elapsed.min(advance_scaled).max(0)
-}
-
 /// Classify an incoming playback event based on session identity, bindings, and previous session.
 ///
 /// Implements the state machine in Section 2.3 and 2.4 of Batch 2 design:
@@ -94,108 +56,116 @@ pub fn classify_event_with_target(
     target_unit: Option<domain::UnitKey>,
     event: PlaybackEventKind,
 ) -> EventDecision {
-    if let Some(session_id) = &identity.play_session_id {
-        // ID-based playback session
-        let Some(b) = binding else {
-            // Unrecognized or forged session ID -> Ignore
-            return EventDecision::Ignore;
-        };
-
-        // Binding must match target ledger and target unit (if specified)
-        if b.ledger_id != ledger {
-            return EventDecision::Ignore;
-        }
-        if let Some(unit) = target_unit {
-            if b.unit != unit {
-                return EventDecision::Ignore;
-            }
-        }
-
-        // Sequence check if provided within the same session
-        if let (Some(prev), Some(seq)) = (previous, identity.event_sequence) {
-            if prev.play_session_id.as_deref() == Some(session_id.as_str()) {
-                if let Some(prev_seq) = prev.last_event_sequence {
-                    if seq <= prev_seq {
-                        return EventDecision::Ignore;
-                    }
-                }
-            }
-        }
-
-        match event {
-            PlaybackEventKind::Start => {
-                match b.state {
-                    PlaySessionIdState::Pending => EventDecision::Start,
-                    PlaySessionIdState::Active => {
-                        if previous.and_then(|p| p.play_session_id.as_deref()) == Some(session_id.as_str()) {
-                            EventDecision::Update
-                        } else {
-                            EventDecision::Start
-                        }
-                    }
-                    PlaySessionIdState::Closed => EventDecision::Ignore,
-                }
-            }
-            PlaybackEventKind::Progress => {
-                match b.state {
-                    PlaySessionIdState::Active => {
-                        // Must match current active session row's play_session_id
-                        if previous.and_then(|p| p.play_session_id.as_deref()) == Some(session_id.as_str()) {
-                            EventDecision::Update
-                        } else {
-                            EventDecision::Ignore
-                        }
-                    }
-                    // A client that resumes and reports progress without a `start` still owns
-                    // an issued (pending) session: activate it and apply the same progress
-                    // instead of dropping the first real position the user watched.
-                    PlaySessionIdState::Pending => EventDecision::Start,
-                    PlaySessionIdState::Closed => EventDecision::Ignore,
-                }
-            }
-            PlaybackEventKind::Stop => {
-                match b.state {
-                    PlaySessionIdState::Active => {
-                        if previous.and_then(|p| p.play_session_id.as_deref()) == Some(session_id.as_str()) {
-                            EventDecision::Stop
-                        } else {
-                            EventDecision::Ignore
-                        }
-                    }
-                    _ => EventDecision::Ignore,
-                }
-            }
-        }
-    } else {
-        // Legacy no-ID playback session
-        match event {
-            PlaybackEventKind::Start => EventDecision::Start,
-            PlaybackEventKind::Progress => {
-                if let Some(prev) = previous {
-                    let cur_match = prev.ledger_id.as_deref() == Some(&ledger.to_string())
-                        || prev.ledger_id.is_none();
-                    if cur_match {
-                        EventDecision::Update
-                    } else {
-                        EventDecision::Ignore
-                    }
-                } else {
-                    EventDecision::Update
-                }
-            }
-            PlaybackEventKind::Stop => {
-                if let Some(prev) = previous {
-                    let cur_match = prev.ledger_id.as_deref() == Some(&ledger.to_string())
-                        || prev.ledger_id.is_none();
-                    if cur_match {
-                        EventDecision::Stop
-                    } else {
-                        EventDecision::Ignore
-                    }
-                } else {
-                    EventDecision::Ignore
-                }
-            }
-        }
+    let Some(session_id) = identity.play_session_id.as_deref() else {
+        return classify_legacy(previous, ledger, event);
+    };
+    // Unrecognized or forged session ID -> Ignore
+    let Some(b) = binding else {
+        return EventDecision::Ignore;
+    };
+    if !binding_matches_target(b, ledger, target_unit) {
+        return EventDecision::Ignore;
     }
+    if sequence_regressed(previous, session_id, identity.event_sequence) {
+        return EventDecision::Ignore;
+    }
+    classify_with_session_id(previous, b, session_id, event)
+}
+
+/// Binding must match target ledger and target unit (if specified).
+///
+/// `b.generation` 不校验:`playback_session_ids` 的唯一 INSERT 用 `COALESCE(MAX(generation), 0) + 1`,
+/// 所以在本仓全部写入路径上 generation 恒 ≥ 1,本分支不可达;DDL 只要求 `CHECK(generation>=0)`
+/// (`crates/store/src/schema/v1/library.sql:216`),允许 0,故只声明「本仓写入路径上不可达」。
+fn binding_matches_target(
+    b: &PlaySessionBinding,
+    ledger: LedgerId,
+    target_unit: Option<domain::UnitKey>,
+) -> bool {
+    if b.ledger_id != ledger {
+        return false;
+    }
+    match target_unit {
+        Some(unit) => b.unit == unit,
+        None => true,
+    }
+}
+
+/// Sequence check if provided within the same session.
+fn sequence_regressed(
+    previous: Option<&SessionRow>,
+    session_id: &str,
+    event_sequence: Option<i64>,
+) -> bool {
+    let (Some(prev), Some(seq)) = (previous, event_sequence) else {
+        return false;
+    };
+    if prev.play_session_id.as_deref() != Some(session_id) {
+        return false;
+    }
+    prev.last_event_sequence
+        .is_some_and(|prev_seq| seq <= prev_seq)
+}
+
+/// ID-based playback session state machine (Section 2.3 of Batch 2 design).
+fn classify_with_session_id(
+    previous: Option<&SessionRow>,
+    b: &PlaySessionBinding,
+    session_id: &str,
+    event: PlaybackEventKind,
+) -> EventDecision {
+    // Must match current active session row's play_session_id
+    let same_session = previous.and_then(|p| p.play_session_id.as_deref()) == Some(session_id);
+    match event {
+        PlaybackEventKind::Start => match b.state {
+            PlaySessionIdState::Pending => EventDecision::Start,
+            PlaySessionIdState::Active if same_session => EventDecision::Update,
+            PlaySessionIdState::Active => EventDecision::Start,
+            PlaySessionIdState::Closed => EventDecision::Ignore,
+        },
+        PlaybackEventKind::Progress => match b.state {
+            // A client that resumes and reports progress without a `start` still owns
+            // an issued (pending) session: activate it and apply the same progress
+            // instead of dropping the first real position the user watched.
+            PlaySessionIdState::Pending => EventDecision::Start,
+            PlaySessionIdState::Active if same_session => EventDecision::Update,
+            _ => EventDecision::Ignore,
+        },
+        PlaybackEventKind::Stop => match b.state {
+            PlaySessionIdState::Active if same_session => EventDecision::Stop,
+            _ => EventDecision::Ignore,
+        },
+    }
+}
+
+/// Plan Task 4 Step 3: No-ID legacy playback session contract.
+/// 首个 no-id `progress`(设备上没有任何 live 会话 ⇒ `previous == None`)判 `Update`:
+/// 这就是 §16.3 ①「unbound 分支仍要写单元事实」① 的入口。canonical 的 unbound 分支
+/// (`store/src/playback/event.rs:68-74` + `stage_unbound_event:144-177`)只写单元事实、不签发会话、不写播放日志,
+/// 因此它既不伪造会话,也不让「进度事件」变成一次播放。
+/// 判 `Ignore` 会让 `persist_heartbeat`(`http/playback/heartbeat.rs:254`)整段短路 ⇒
+/// 心跳零写入,直接顶掉 `storage_contention` 的写作用域正控制
+/// (`tests/storage_contention.rs:156`「基线心跳必须真的写库」)。
+/// 跨目标陈旧保护不变:`previous` 存在但目标不匹配时仍是 `Ignore`。
+/// stop 保持 `Ignore`(没有活动会话的 stop 不得伪造会话/日志)。
+fn classify_legacy(
+    previous: Option<&SessionRow>,
+    ledger: LedgerId,
+    event: PlaybackEventKind,
+) -> EventDecision {
+    match event {
+        PlaybackEventKind::Start => EventDecision::Start,
+        PlaybackEventKind::Progress => match previous {
+            Some(prev) if !legacy_target_matches(prev, ledger) => EventDecision::Ignore,
+            _ => EventDecision::Update,
+        },
+        PlaybackEventKind::Stop => match previous {
+            Some(prev) if legacy_target_matches(prev, ledger) => EventDecision::Stop,
+            _ => EventDecision::Ignore,
+        },
+    }
+}
+
+fn legacy_target_matches(prev: &SessionRow, ledger: LedgerId) -> bool {
+    prev.ledger_id.as_deref() == Some(&ledger.to_string()) || prev.ledger_id.is_none()
 }

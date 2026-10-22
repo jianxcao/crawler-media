@@ -4,11 +4,12 @@ use std::time::Duration;
 use api::{ApiState, Store, router};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use serde_json::Value;
 use tower::ServiceExt;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 struct NoFetch;
 impl Fetcher for NoFetch {
@@ -63,8 +64,8 @@ fn seed_reconciliation_tree(state: &ApiState, tmp: &std::path::Path) -> (String,
     };
     guard.insert_media(&media1).unwrap();
 
-    let row1 = LedgerRow {
-        id: LedgerId::new(),
+    let spec1 = FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id: media_id1,
         path: library_root.join("OldDir/test_movie1.mkv").to_str().unwrap().into(),
         season: None,
@@ -75,8 +76,9 @@ fn seed_reconciliation_tree(state: &ApiState, tmp: &std::path::Path) -> (String,
         quality_source: QualitySource::Probe,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     };
-    guard.insert_ledger(&row1).unwrap();
+    publish_fixture_file(&guard, &spec1).unwrap();
 
     let media_id2 = MediaId::new();
     let media2 = Media {
@@ -94,8 +96,8 @@ fn seed_reconciliation_tree(state: &ApiState, tmp: &std::path::Path) -> (String,
     };
     guard.insert_media(&media2).unwrap();
 
-    let row2 = LedgerRow {
-        id: LedgerId::new(),
+    let spec2 = FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id: media_id2,
         path: library_root.join("OldDir/test_movie2.mkv").to_str().unwrap().into(),
         season: None,
@@ -106,8 +108,9 @@ fn seed_reconciliation_tree(state: &ApiState, tmp: &std::path::Path) -> (String,
         quality_source: QualitySource::Probe,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     };
-    guard.insert_ledger(&row2).unwrap();
+    publish_fixture_file(&guard, &spec2).unwrap();
 
     // Put the files into a new shared directory (NewDir/test_movie1.mkv and NewDir/test_movie2.mkv)
     let new_dir = library_root.join("NewDir");
@@ -244,7 +247,7 @@ async fn housekeeping_uses_bounded_blocking_admission() {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE,
             "{endpoint} must return service unavailable when blocking admission is full");
     }
-    assert!(state.store().lock().ledger_by_path(
+    assert!(state.store().lock().file_coverage_by_path(
         root.join("OldDir/test_movie1.mkv").to_str().unwrap()).unwrap().is_some(),
         "rejected work must not mutate the ledger");
 }
@@ -283,10 +286,21 @@ impl api::browse_file_read::BrowseFileRead for ReconciliationFileRead {
                 "freeze" => { store.begin_library_removal(&self.library_id).unwrap(); }
                 "source" => {
                     let from = library.root_paths[0].join("OldDir/test_movie1.mkv");
-                    let mut row = store.ledger_by_path(from.to_str().unwrap()).unwrap().unwrap();
-                    store.delete_ledger_path(&row.path).unwrap();
-                    row.id = LedgerId::new();
-                    store.insert_ledger(&row).unwrap();
+                    let cov = store.file_coverage_by_path(from.to_str().unwrap()).unwrap().unwrap();
+                    store.delete_ledger_path(&cov.file.path.display().to_string()).unwrap();
+                    let spec = FixtureFile {
+                        file_id: Some(LedgerId::new()),
+                        media_id: cov.file.media_id,
+                        path: cov.file.path.display().to_string(),
+                        resolution: cov.file.resolution,
+                        codec: cov.file.codec,
+                        hdr: cov.file.hdr,
+                        quality_source: cov.file.quality_source,
+                        confidence: cov.file.confidence,
+                        filter_score: cov.file.filter_score,
+                        ..Default::default()
+                    };
+                    publish_fixture_file(&store, &spec).unwrap();
                 }
                 "unchanged" => {}
                 _ => panic!("unexpected fixture change"),
@@ -328,7 +342,7 @@ async fn reconciliation_revalidates_off_lock_scope_freeze_and_source() {
         assert_eq!(body["data"]["errors"].as_array().unwrap().len(), usize::from(!applied));
         let store = state.store();
         let store = store.lock();
-        assert_eq!(store.ledger_by_path(from.to_str().unwrap()).unwrap().is_some(), !applied);
-        assert_eq!(store.ledger_by_path(to.to_str().unwrap()).unwrap().is_some(), applied);
+        assert_eq!(store.file_coverage_by_path(from.to_str().unwrap()).unwrap().is_some(), !applied);
+        assert_eq!(store.file_coverage_by_path(to.to_str().unwrap()).unwrap().is_some(), applied);
     }
 }

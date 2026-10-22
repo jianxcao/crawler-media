@@ -38,6 +38,13 @@ pub const KNOWN_ENV_VARS: &[&str] = &[
     "CRAWLER_MEDIA_URL", // CLI-only
     // Read by other crates in the same process (marker/fingerprint).
     "CRAWLER_MEDIA_FFMPEG_LOG_LEVEL",
+    // Read in-process by sibling modules (not parsed into [`ServerConfig`]):
+    // the instance lease and the obscura installer. Listed here so a legitimate
+    // setting never trips the typo warning.
+    "CRAWLER_MEDIA_ALLOW_MULTI_INSTANCE",
+    "CRAWLER_MEDIA_LEASE_HEARTBEAT_MS",
+    "CRAWLER_MEDIA_LEASE_RETRY_MS",
+    "CRAWLER_MEDIA_OBSCURA_ALLOW_PRIVATE_NETWORK",
     // Secret-file variants (Docker/K8s secret volumes).
     "CRAWLER_MEDIA_TOKEN_FILE",
     "CRAWLER_MEDIA_ADMIN_PASSWORD_FILE",
@@ -477,6 +484,23 @@ mod tests {
         assert_eq!(
             read_secret_file("/nonexistent/definitely-missing", "X_FILE"),
             None
+        );
+    }
+
+    /// Env vars read by sibling modules must stay whitelisted, or every real
+    /// start logs a bogus "typo?" warning for a supported setting.
+    #[test]
+    fn in_process_env_overrides_are_whitelisted() {
+        let in_process = [
+            crate::instance_lease::ALLOW_MULTI_INSTANCE_ENV,
+            crate::instance_lease::LEASE_RETRY_ENV,
+            crate::instance_lease::LEASE_HEARTBEAT_ENV,
+            crate::obscura_manager::ALLOW_PRIVATE_NETWORK_ENV,
+        ];
+        assert_eq!(
+            unknown_env_keys(in_process.iter().map(|key| (*key).to_string())),
+            Vec::<String>::new(),
+            "在进程内读取的变量必须列入 KNOWN_ENV_VARS"
         );
     }
 }

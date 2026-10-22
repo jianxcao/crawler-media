@@ -137,17 +137,18 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()?;
         let mut rows = Vec::new();
         let mut seen_files = std::collections::HashSet::new();
-        for row in self.list_ledger()? {
-            if !seen_files.insert(row.id) {
+        for observed in self.list_file_coverage()? {
+            let file = &observed.file;
+            if !seen_files.insert(file.file_id) {
                 continue;
             }
-            let Some(media) = self.get_media(row.media_id)? else {
+            let Some(media) = self.get_media(file.media_id)? else {
                 continue;
             };
             if media.kind != library.kind {
                 continue;
             }
-            let path = Path::new(&row.path);
+            let path = Path::new(&file.path);
             let resolved = crate::library_paths::resolved_path(path)?;
             let under_root = roots
                 .iter()
@@ -161,13 +162,13 @@ impl Store {
             match self.library_for_path_strict(path, media.kind)? {
                 Some(owner) if owner.id == id => {
                     let coverage = self
-                        .get_file_units(row.id)?
+                        .get_file_units(file.file_id)?
                         .into_iter()
                         .map(|unit| (unit.season, unit.episode))
                         .collect();
                     rows.push(RemovalRow {
-                        ledger_id: row.id.to_string(),
-                        path: row.path,
+                        ledger_id: file.file_id.to_string(),
+                        path: file.path.to_string_lossy().into_owned(),
                         media_id: media.id.to_string(),
                         coverage,
                     });

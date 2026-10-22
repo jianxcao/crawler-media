@@ -35,7 +35,6 @@ fn recorded_collection_reserves_intended_path_before_publication() {
     let recorder = ReservationRecorder(Default::default());
     let outcome = subscribe::collect_completed_recorded(added, &FixedProbe, &[],
         &library::WorkControl::default(), Some(&recorder)).unwrap();
-    assert_eq!(outcome.ledger.len(), 1);
     assert_eq!(outcome.files.len(), 1);
     assert_eq!(outcome.files[0].file.path, recorder.0.borrow().as_ref().unwrap().file.path);
     assert!(outcome.collection_errors.is_empty());
@@ -63,8 +62,8 @@ fn pending_publication_retry_reuses_reserved_destination() {
     let outcome = subscribe::collect_completed_recorded(added, &FixedProbe, &[mapping],
         &library::WorkControl::default(), Some(&recorder)).unwrap();
     assert!(outcome.collection_errors.is_empty());
-    assert_eq!(outcome.ledger.len(), 1);
-    assert_eq!(outcome.ledger[0].path, destination.display().to_string());
+    assert_eq!(outcome.files.len(), 1);
+    assert_eq!(outcome.files[0].file.path, destination);
     assert_eq!(fs::read_dir(root).unwrap().count(), 1);
 }
 
@@ -97,15 +96,15 @@ fn transfer_ledger_row_uses_probed_quality() {
     )
     .unwrap();
 
-    let row = &outcome.ledger[0];
-    assert_eq!(row.media_id, media.id);
-    assert!(Path::new(&row.path).exists());
-    assert_eq!(row.resolution.as_deref(), Some("2160p"));
-    assert_eq!(row.codec.as_deref(), Some("hevc"));
-    assert_eq!(row.hdr.as_deref(), Some("hdr10"));
-    assert_eq!(row.quality_source, domain::QualitySource::Probe);
-    assert!(row.season.is_none());
-    assert!(row.episode.is_none());
+    let coverage = &outcome.files[0];
+    let file = &coverage.file;
+    assert_eq!(file.media_id, media.id);
+    assert!(file.path.exists());
+    assert_eq!(file.resolution.as_deref(), Some("2160p"));
+    assert_eq!(file.codec.as_deref(), Some("hevc"));
+    assert_eq!(file.hdr.as_deref(), Some("hdr10"));
+    assert_eq!(file.quality_source, domain::QualitySource::Probe);
+    assert_eq!(coverage.units, vec![domain::UnitKey::WHOLE]);
 }
 
 #[test]
@@ -134,10 +133,10 @@ fn transfer_falls_back_to_release_when_probe_fails() {
     ))
     .unwrap();
 
-    let row = &outcome.ledger[0];
-    assert_eq!(row.resolution.as_deref(), Some("1080p"));
-    assert_eq!(row.quality_source, domain::QualitySource::Release);
-    assert_eq!(row.confidence, domain::Confidence::Low);
+    let file = &outcome.files[0].file;
+    assert_eq!(file.resolution.as_deref(), Some("1080p"));
+    assert_eq!(file.quality_source, domain::QualitySource::Release);
+    assert_eq!(file.confidence, domain::Confidence::Low);
 }
 #[test]
 fn extra_files_do_not_overwrite_the_main_library_file() {
@@ -169,12 +168,14 @@ fn extra_files_do_not_overwrite_the_main_library_file() {
     ))
     .unwrap();
 
-    assert_eq!(outcome.ledger.len(), 2);
+    assert_eq!(outcome.files.len(), 2);
     let mut names: Vec<_> = outcome
-        .ledger
+        .files
         .iter()
-        .map(|row| {
-            Path::new(&row.path)
+        .map(|coverage| {
+            coverage
+                .file
+                .path
                 .file_name()
                 .unwrap()
                 .to_string_lossy()
@@ -188,11 +189,11 @@ fn extra_files_do_not_overwrite_the_main_library_file() {
         assert!(name.ends_with(".mkv"));
         assert!(!name.contains("BluRay"));
     }
-    for row in &outcome.ledger {
-        assert!(Path::new(&row.path).is_file());
+    for coverage in &outcome.files {
+        assert!(coverage.file.path.is_file());
     }
     assert_ne!(
-        fs::read(&outcome.ledger[0].path).unwrap(),
-        fs::read(&outcome.ledger[1].path).unwrap()
+        fs::read(&outcome.files[0].file.path).unwrap(),
+        fs::read(&outcome.files[1].file.path).unwrap()
     );
 }

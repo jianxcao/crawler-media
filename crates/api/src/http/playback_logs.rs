@@ -263,7 +263,7 @@ fn resolve_history_media_ids(
                 })?
                 .ok_or_else(|| err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在"))?;
             let mut ids = Vec::new();
-            let ledger = store.list_ledger().map_err(|e: store::StoreError| {
+            let ledger = store.list_file_coverage().map_err(|e: store::StoreError| {
                 err(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "store.error",
@@ -274,10 +274,10 @@ fn resolve_history_media_ids(
                 if library
                     .root_paths
                     .iter()
-                    .any(|root| std::path::Path::new(&row.path).starts_with(root))
-                    && !ids.contains(&row.media_id)
+                    .any(|root| row.file.path.starts_with(root))
+                    && !ids.contains(&row.file.media_id)
                 {
-                    ids.push(row.media_id);
+                    ids.push(row.file.media_id);
                 }
             }
             Ok(Some(ids))

@@ -1,4 +1,4 @@
-use domain::{Media, UserId};
+use domain::{LibraryFile, Media, UserId};
 use media_server::provider::MediaItemMetadata;
 use std::collections::BTreeMap;
 
@@ -10,9 +10,11 @@ mod people;
 
 pub(super) use artwork::{backdrop_path, local_primary_image, primary_image_url};
 use artwork::{primary_image_metadata, series_primary_image_tag};
-use nfo::row_nfo_metadata;
+use nfo::file_nfo_metadata;
 pub(super) use people::{catalog_person_image_url, person_image_url, person_tmdb_id};
 use people::{merge_people, people_from_fields, people_from_nfo};
+
+use super::items::is_whole_unit;
 
 /// Owned per-item playback and probe facts collected with the Jellyfin batch.
 pub(super) struct ItemDbFacts {
@@ -21,32 +23,44 @@ pub(super) struct ItemDbFacts {
     is_favorite: bool,
 }
 
-/// Resolve one row's own playback unit and (for series rows) its whole-show unit.
+/// Resolve one item's own playback unit and (for series rows) its whole-show unit.
 ///
 /// 单条目路径用它补齐事实；批量路径已经在快照里持有这些单元，直接传引用，
 /// 不再为每个条目重查一次 `unit_state`。
 pub(super) fn row_units(
     store: &Store,
     user_id: UserId,
-    row: &domain::LedgerRow,
+    file: &LibraryFile,
+    unit: (i32, i32),
     is_series: bool,
-) -> (Option<crate::store::PlaybackUnitSnapshot>, Option<crate::store::PlaybackUnitSnapshot>) {
-    let unit = {
-        let (season, episode) = row_unit_key(row);
-        store
-            .unit_state(user_id, row.media_id, season, episode)
-            .ok()
-            .flatten()
-            .map(|state| crate::store::PlaybackUnitSnapshot { media_id: row.media_id, season, episode, state })
-    };
+) -> (
+    Option<crate::store::PlaybackUnitSnapshot>,
+    Option<crate::store::PlaybackUnitSnapshot>,
+) {
+    let (season, episode) = unit;
+    let unit = store
+        .unit_state(user_id, file.media_id, season, episode)
+        .ok()
+        .flatten()
+        .map(|state| crate::store::PlaybackUnitSnapshot {
+            media_id: file.media_id,
+            season,
+            episode,
+            state,
+        });
     let whole_unit = is_series
         .then(|| {
             store
-                .unit_state(user_id, row.media_id, crate::store::UNIT_WHOLE, crate::store::UNIT_WHOLE)
+                .unit_state(
+                    user_id,
+                    file.media_id,
+                    crate::store::UNIT_WHOLE,
+                    crate::store::UNIT_WHOLE,
+                )
                 .ok()
                 .flatten()
                 .map(|state| crate::store::PlaybackUnitSnapshot {
-                    media_id: row.media_id,
+                    media_id: file.media_id,
                     season: crate::store::UNIT_WHOLE,
                     episode: crate::store::UNIT_WHOLE,
                     state,
@@ -56,28 +70,30 @@ pub(super) fn row_units(
     (unit, whole_unit)
 }
 
-/// 台账行对应的单元键：有季/集用该集，否则用整片 `(-1,-1)`。
-fn row_unit_key(row: &domain::LedgerRow) -> (i32, i32) {
-    let season = row.season.map(|value| value as i32).unwrap_or(crate::store::UNIT_WHOLE);
-    let episode = row.episode.map(|value| value as i32).unwrap_or(crate::store::UNIT_WHOLE);
-    (season, episode)
-}
-
 /// Load one item's DB facts while the shared snapshot's Store guard is held.
 pub(super) fn item_db_facts(
     store: &Store,
-    row: &domain::LedgerRow,
+    file: &LibraryFile,
+    unit_coords: (i32, i32),
     is_series: bool,
     unit: Option<&crate::store::PlaybackUnitSnapshot>,
     whole_unit: Option<&crate::store::PlaybackUnitSnapshot>,
 ) -> ItemDbFacts {
-    let resume_state = row
-        .season
-        .zip(row.episode)
-        .and_then(|_| unit.map(|unit| unit.state.clone()));
-    let tracks = store.get_file_meta(&row.id.to_string()).ok().flatten().unwrap_or_default();
+    // 旧口径：`row.season.zip(row.episode)` 同时存在时才带上恢复进度；整片不参与续播。
+    let resume_state = (!is_whole_unit(unit_coords))
+        .then(|| unit.map(|unit| unit.state.clone()))
+        .flatten();
+    let tracks = store
+        .get_file_meta(&file.file_id.to_string())
+        .ok()
+        .flatten()
+        .unwrap_or_default();
     let favorite = if is_series { whole_unit } else { unit };
-    ItemDbFacts { resume_state, tracks, is_favorite: favorite.is_some_and(|unit| unit.state.favorite) }
+    ItemDbFacts {
+        resume_state,
+        tracks,
+        is_favorite: favorite.is_some_and(|unit| unit.state.favorite),
+    }
 }
 
 /// 过滤/排序需要的公共字段（genre/studio/person/search 命中）。
@@ -86,7 +102,8 @@ pub(super) fn item_db_facts(
 /// stat/读 NFO，只有没有采纳行的媒体才回退到 NFO。字段口径与 [`item_metadata`] 一致，
 /// 避免两套语义。
 pub(super) fn filter_facts(
-    row: &domain::LedgerRow,
+    file: &LibraryFile,
+    unit: (i32, i32),
     media: &Media,
     is_series: bool,
     adopted: Option<&store::library_query::AdoptedFilterFacts>,
@@ -115,7 +132,7 @@ pub(super) fn filter_facts(
             ..Default::default()
         };
     }
-    let nfo = row_nfo_metadata(row, media, is_series);
+    let nfo = file_nfo_metadata(file, unit, media, is_series);
     MediaItemMetadata {
         overview: nfo.as_ref().and_then(|metadata| metadata.plot.clone()),
         genres: nfo
@@ -143,7 +160,8 @@ pub(super) fn item_metadata(
     facts: ItemDbFacts,
     fields: &domain::MetadataFields,
     browse: &dyn crate::browse_file_read::BrowseFileRead,
-    row: &domain::LedgerRow,
+    file: &LibraryFile,
+    unit: (i32, i32),
     media: &Media,
     is_series: bool,
     child_counts: Option<(usize, usize)>,
@@ -153,8 +171,10 @@ pub(super) fn item_metadata(
         mut tracks,
         is_favorite,
     } = facts;
-    let (has_primary_image, primary_image_url) = primary_image_metadata(row, media, is_series);
-    let primary_image_tag = series_primary_image_tag(row, media, is_series);
+    let adopted_still_url = fields.still_url.value().map(String::as_str);
+    let (has_primary_image, primary_image_url) =
+        primary_image_metadata(file, unit, media, is_series, adopted_still_url);
+    let primary_image_tag = series_primary_image_tag(file, media, is_series);
     let (child_count, local_season_count) = child_counts
         .map(|(episodes, seasons)| (Some(episodes), Some(seasons)))
         .unwrap_or((None, None));
@@ -163,7 +183,7 @@ pub(super) fn item_metadata(
         .value()
         .map(|count| *count as usize)
         .or(local_season_count);
-    match browse.external_subtitles(std::path::Path::new(&row.path)) {
+    match browse.external_subtitles(file.path.as_path()) {
         Ok(sidecars) => {
             for sidecar in sidecars {
                 let already_present = tracks
@@ -177,7 +197,7 @@ pub(super) fn item_metadata(
         }
         Err(error) => tracing::warn!(
             %error,
-            path = %row.path,
+            path = %file.path.display(),
             "failed to discover Jellyfin external subtitles"
         ),
     }
@@ -192,7 +212,7 @@ pub(super) fn item_metadata(
     item.child_count = child_count;
     item.season_count = season_count;
     item.has_primary_image = has_primary_image;
-    item.has_backdrop_image = backdrop_path(row, is_series).is_some();
+    item.has_backdrop_image = backdrop_path(file, is_series).is_some();
     item.primary_image_tag = primary_image_tag;
     item.primary_image_url = primary_image_url;
     item.tracks = tracks;
@@ -377,13 +397,17 @@ fn runtime_ticks(
 
 /// 页内水合的实体范围：Series 行按 work 打分，剧集行按 episode 打分。
 pub(super) fn page_scope(
-    row: &domain::LedgerRow,
+    unit: (i32, i32),
     media: &Media,
     is_series: bool,
 ) -> domain::EntityScope {
     if !is_series && media.kind == domain::MediaKind::Tv {
-        if let (Some(season), Some(episode)) = (row.season, row.episode) {
-            return domain::EntityScope::Episode { season, episode };
+        let (season, episode) = unit;
+        if season >= 0 && episode >= 0 {
+            return domain::EntityScope::Episode {
+                season: season as u32,
+                episode: episode as u32,
+            };
         }
     }
     domain::EntityScope::Work
@@ -392,14 +416,15 @@ pub(super) fn page_scope(
 /// 锁内取页内合成元数据（Task 8 观测输入 + Task 7 采纳），调用方持有 Store 锁。
 pub(super) fn page_fields(
     store: &Store,
-    row: &domain::LedgerRow,
+    file: &LibraryFile,
+    unit: (i32, i32),
     media: &Media,
     is_series: bool,
 ) -> Result<domain::MetadataFields, String> {
-    let Some(library_id) = crate::http::playback::library_id_for(store, media, &[row]) else {
+    let Some(library_id) = crate::http::playback::library_id_for(store, media, &[file]) else {
         tracing::warn!(
-            media_id = %row.media_id,
-            file_id = %row.id,
+            media_id = %file.media_id,
+            file_id = %file.file_id,
             "page metadata skipped: 无法定位条目所属库"
         );
         return Ok(domain::MetadataFields::default());
@@ -407,7 +432,7 @@ pub(super) fn page_fields(
     let Ok(library_id) = library_id.parse::<domain::LibraryId>() else {
         tracing::warn!(
             library_id = %library_id,
-            media_id = %row.media_id,
+            media_id = %file.media_id,
             "page metadata skipped: 库 ID 不是 UUID"
         );
         return Ok(domain::MetadataFields::default());
@@ -415,8 +440,8 @@ pub(super) fn page_fields(
     store
         .protocol_page_metadata(
             library_id,
-            row.media_id,
-            page_scope(row, media, is_series),
+            file.media_id,
+            page_scope(unit, media, is_series),
             None,
         )
         .map_err(|error| error.to_string())

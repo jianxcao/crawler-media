@@ -1,5 +1,5 @@
-use super::policy::ProbeRequestOrigin;
 use super::ProbeManager;
+use super::policy::ProbeRequestOrigin;
 
 impl ProbeManager {
     /// Claim due failed stages and queue only those stages. Does not read media.
@@ -7,10 +7,17 @@ impl ProbeManager {
         let due = self.store.lock().list_due_probe_stages(now_ms, limit)?;
         let mut queued = 0;
         for stage in due {
+            let Some(file_id) = super::ledger_id(&stage.key.ledger_id) else {
+                tracing::error!(
+                    ledger_id = %stage.key.ledger_id,
+                    "【媒体探测】到期阶段台账 id 无法解析"
+                );
+                continue;
+            };
             let Some(row) = self
                 .store
                 .lock()
-                .get_ledger(&stage.key.ledger_id)
+                .file_coverage_by_id(file_id)
                 .unwrap_or_else(|error| {
                     tracing::error!(
                         %error,

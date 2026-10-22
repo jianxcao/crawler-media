@@ -1,5 +1,6 @@
 use api::Store;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 #[test]
 fn nested_root_wins_over_parent_library_root() {
@@ -100,9 +101,10 @@ fn restricted_root_cannot_move_while_owned_ledger_rows_remain() {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id: media.id,
             path: path.display().to_string(),
             season: None,
@@ -113,8 +115,10 @@ fn restricted_root_cannot_move_while_owned_ledger_rows_remain() {
             quality_source: QualitySource::Probe,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(
         store
             .library_for_path(&path, MediaKind::Movie)
@@ -178,9 +182,10 @@ async fn deleting_library_with_owned_ledger_is_blocked_with_conflict() {
     store.insert_media(&media).unwrap();
     let media_id = media.id;
     let path = restricted_root.join("secret.mkv");
-    store
-        .insert_ledger(&LedgerRow {
-            id: domain::LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(domain::LedgerId::new()),
             media_id,
             path: path.to_str().unwrap().into(),
             season: None,
@@ -191,8 +196,10 @@ async fn deleting_library_with_owned_ledger_is_blocked_with_conflict() {
             quality_source: domain::QualitySource::Probe,
             confidence: domain::Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     // 尝试删除仍有台账文件的媒体库：必须返回 409 Conflict 或 Protected Error
     let err = store.delete_library(&restricted.id);

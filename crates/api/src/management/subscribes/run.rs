@@ -24,7 +24,7 @@ struct RunContext {
 struct RunFactsObservation {
     facts: subscribe::SubscribeFacts,
     saved: subscribe::SubscribeFacts,
-    rows: Vec<domain::LedgerRow>,
+    rows: Vec<domain::FileCoverage>,
     qualities: std::collections::HashMap<domain::LedgerId, Result<domain::Release, String>>,
     ownership_libraries: Vec<store::Library>,
 }
@@ -78,22 +78,15 @@ fn run_subscribe_inner(
     );
     let admitted = admit_after_search(state, id, user_id, torrents, search_keywords)?;
     if admitted.scrape {
-        for row in &admitted.ledger {
+        for coverage in &admitted.files {
             admitted
                 .library_lease
                 .control()
                 .check()
                 .map_err(|e| ApiError::internal(e.to_string()))?;
-            crate::poster_fetch::attach_poster(
-                state,
-                &admitted.media,
-                std::path::Path::new(&row.path),
-            );
-            crate::poster_fetch::attach_backdrop(
-                state,
-                &admitted.media,
-                std::path::Path::new(&row.path),
-            );
+            let path = coverage.file.path.as_path();
+            crate::poster_fetch::attach_poster(state, &admitted.media, path);
+            crate::poster_fetch::attach_backdrop(state, &admitted.media, path);
         }
     }
     if !admitted.run_errors.is_empty() {
@@ -199,7 +192,7 @@ struct AdmittedRun {
     scrape: bool,
     completed: bool,
     ledger_rows: usize,
-    ledger: Vec<domain::LedgerRow>,
+    files: Vec<domain::FileCoverage>,
     run_errors: Vec<String>,
     library_lease: crate::library_lifecycle::LibraryWorkLease,
 }
@@ -218,8 +211,8 @@ fn admit_after_search(
     let (outcome, scrape, library_lease, plan) =
         execute(state, id, &context, &routed, torrents, search_keywords)?;
     let completed = outcome.completed;
-    let ledger_rows = outcome.ledger.len();
-    let ledger = outcome.ledger.clone();
+    let ledger_rows = outcome.files.len();
+    let files = outcome.files.clone();
     let run_errors = outcome
         .submission_errors
         .iter()
@@ -232,7 +225,7 @@ fn admit_after_search(
         scrape,
         completed,
         ledger_rows,
-        ledger,
+        files,
         run_errors,
         library_lease,
     })
@@ -501,7 +494,7 @@ fn persist(
         store.transfer_mode().unwrap_or_else(|_| "copy".into())
     };
     let modes =
-        crate::worker::transfer::observe_transfer_modes(&outcome.ledger, &default_transfer_mode);
+        crate::worker::transfer::observe_transfer_modes(&outcome.files, &default_transfer_mode);
     // Review N-1: capped wait for a source probe (outside the Store lock).
     let mut outcome = outcome;
     let exhausted =
@@ -525,18 +518,32 @@ fn persist(
         &store, &store.get_subscribe(id)?.ok_or_else(|| ApiError::internal("Subscribe not found".into()))?,
         lease, plan,
     ).map_err(ApiError::internal)?;
-    for (row, mode) in outcome.ledger.iter().zip(modes.iter()) {
-        let source_path = outcome.ledger_sources.iter()
-            .find(|source| source.ledger_path == row.path)
-            .map(|source| source.source_path.as_str());
-        let existing = store.ledger_by_path(&row.path)?;
-        if existing.as_ref().map(|existing| (&existing.id, existing.media_id, &existing.path))
-            != Some((&row.id, row.media_id, &row.path))
-            || !store.ledger_source_path_matches(&row.path, source_path)?
+    let mut published = Vec::with_capacity(outcome.files.len());
+    for (coverage, mode) in outcome.files.iter().zip(modes.iter()) {
+        let path = coverage.file.path.to_string_lossy().to_string();
+        let source_path = crate::worker::transfer::recorded_file_source(&outcome, coverage.file.file_id)
+            .map(|source| source.display().to_string());
+        let existing = store.file_coverage_by_path(&path)?;
+        let existing_key = existing.as_ref().map(|existing| {
+            (
+                existing.file.file_id,
+                existing.file.media_id,
+                existing.file.path.to_string_lossy().into_owned(),
+            )
+        });
+        if existing_key != Some((coverage.file.file_id, coverage.file.media_id, path.clone()))
+            || !store.ledger_source_path_matches(&path, source_path.as_deref())?
         {
-            return Err(ApiError::internal(format!("Transfer reservation missing or replaced: {}", row.path)));
+            return Err(ApiError::internal(format!("Transfer reservation missing or replaced: {path}")));
         }
-        store.finalize_transfer(row, mode, source_path)?;
+        published.push(crate::worker::transfer::publish_transfer_file(
+            &store,
+            &plan.library_id,
+            plan.config_revision,
+            coverage,
+            source_path.as_deref().map(std::path::Path::new),
+            mode,
+        )?);
     }
     let now = crate::job_loop::unix_now();
     let transferred = outcome.transferred_enclosures;
@@ -590,6 +597,6 @@ fn persist(
     }
     drop(store);
     crate::http::file_delete::retry_queued_deletions(&state.store)?;
-    crate::http::library::enqueue_probes_for_rows(state, &outcome.ledger);
+    crate::http::library::enqueue_probes_for_files(state, &published);
     Ok(())
 }

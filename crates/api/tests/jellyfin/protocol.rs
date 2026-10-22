@@ -38,21 +38,22 @@ async fn mark_request(app: &axum::Router, method: axum::http::Method, uri: &str)
 fn insert_episode(store: &Store, root: &Path, media_id: MediaId, season: u32, episode: u32) {
     let path = root.join(format!("Show S{season:02}E{episode:02}.mkv"));
     std::fs::write(&path, b"episode").unwrap();
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
-            media_id,
-            path: path.display().to_string(),
-            season: Some(season),
-            episode: Some(episode),
-            resolution: None,
-            codec: None,
-            hdr: None,
-            quality_source: QualitySource::Probe,
-            confidence: Confidence::High,
-            filter_score: None,
-        })
-        .unwrap();
+    let spec = store::test_support::FixtureFile {
+        media_id,
+        path: path.display().to_string(),
+        season: Some(season),
+        episode: Some(episode),
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Probe,
+        confidence: Confidence::High,
+        filter_score: None,
+        transfer_mode: None,
+        source_path: None,
+        file_id: None,
+    };
+    store::test_support::publish_fixture_file(store, &spec).unwrap();
 }
 
 /// 加一部全新的、没看过的电影，返回它的条目 id（`/UserPlayedItems/{id}` 用的是它）。
@@ -74,8 +75,7 @@ fn insert_unplayed_movie(store: &Store, root: &Path, title: &str) -> String {
     store.insert_media(&media).unwrap();
     let path = root.join(format!("{}.mkv", title.replace(' ', "-").to_lowercase()));
     std::fs::write(&path, b"copy").unwrap();
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let spec = store::test_support::FixtureFile {
         media_id: media.id,
         path: path.display().to_string(),
         season: None,
@@ -86,9 +86,12 @@ fn insert_unplayed_movie(store: &Store, root: &Path, title: &str) -> String {
         quality_source: QualitySource::Probe,
         confidence: Confidence::High,
         filter_score: None,
+        transfer_mode: None,
+        source_path: None,
+        file_id: None,
     };
     let compact = work_id(media.id);
-    store.insert_ledger(&row).unwrap();
+    store::test_support::publish_fixture_file(store, &spec).unwrap();
     compact
 }
 
@@ -187,8 +190,8 @@ async fn latest_items_returns_date_order_and_honors_start_index_and_limit() {
         store.insert_media(&copy).unwrap();
         publish_scanned(
             &store,
-            LedgerRow {
-                id: LedgerId::new(),
+            FixtureFile {
+                file_id: Some(LedgerId::new()),
                 media_id: copy.id,
                 path: path.display().to_string(),
                 season: None,
@@ -199,6 +202,7 @@ async fn latest_items_returns_date_order_and_honors_start_index_and_limit() {
                 quality_source: QualitySource::Probe,
                 confidence: Confidence::High,
                 filter_score: None,
+                ..Default::default()
             },
         );
         added_ids.push(work_id(copy.id));

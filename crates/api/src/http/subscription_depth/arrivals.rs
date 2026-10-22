@@ -22,7 +22,7 @@ pub(crate) struct ArrivalSnapshot {
     pub(crate) media: domain::Media,
     pub(crate) pending: Vec<(i32, crate::store::PendingDownload)>,
     pub(crate) facts: subscribe::SubscribeFacts,
-    pub(crate) rows: Vec<domain::LedgerRow>,
+    pub(crate) rows: Vec<domain::FileCoverage>,
 }
 
 /// 只在持有 Store 锁时读取/Clone；DB 错误向上传播（handler 记 500，不静默空集合）。
@@ -37,9 +37,12 @@ pub(crate) fn load_arrivals(
     } else {
         store.list_subscribes_for_user(user_id)?
     };
-    let mut rows_by_media: HashMap<domain::MediaId, Vec<domain::LedgerRow>> = HashMap::new();
-    for row in store.list_ledger()? {
-        rows_by_media.entry(row.media_id).or_default().push(row);
+    let mut rows_by_media: HashMap<domain::MediaId, Vec<domain::FileCoverage>> = HashMap::new();
+    for coverage in store.list_file_coverage()? {
+        rows_by_media
+            .entry(coverage.file.media_id)
+            .or_default()
+            .push(coverage);
     }
     let mut snapshots = Vec::with_capacity(subscribes.len());
     for subscribe in subscribes {
@@ -96,10 +99,11 @@ pub(crate) fn build_arrivals(
                 "grabbed_at": Value::Null,
             }));
         }
-        // 当日入库：ledger 行文件修改时间在 24h 内的订阅，status=imported。
+        // 当日入库：ledger 文件修改时间在 24h 内的订阅，status=imported。
+        // 修改时间按文件取，同一文件的多个 unit 在旧读模型里是重复的同一答案。
         let imported_today = rows
             .iter()
-            .any(|row| modified_within_day(&row.path, now, day_secs));
+            .any(|coverage| modified_within_day(&coverage.file.path, now, day_secs));
         if imported_today && pending.is_empty() {
             items.push(json!({
                 "subscription_id": subscribe.id.to_string(),
@@ -181,7 +185,7 @@ fn episodes_for<'a>(
         .as_slice()
 }
 
-fn modified_within_day(path: &str, now: i64, day_secs: i64) -> bool {
+fn modified_within_day(path: &std::path::Path, now: i64, day_secs: i64) -> bool {
     std::fs::metadata(path)
         .and_then(|metadata| metadata.modified())
         .map(|modified| {

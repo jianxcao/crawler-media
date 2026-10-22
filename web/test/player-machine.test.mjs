@@ -16,7 +16,7 @@ function planSession(tier, startMs = 0) {
     decision: {
       outcome: "plan",
       tier,
-      file_id: 1,
+      file_id: "file-1",
       container: tier === 0 ? "mp4" : "hls-fmp4",
       video: { action: "copy", codec: null, height: null, tone_map: false },
       audio: { action: "copy", track_ref: null, codec: null, channels: null, downmix: false },

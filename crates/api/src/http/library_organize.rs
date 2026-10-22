@@ -12,7 +12,7 @@ use std::str::FromStr;
 
 use crate::blocking_budget::BlockingError;
 use crate::http::library::{
-    library_for_row, preferred_row, require_visible_library, rows_in_library,
+    coverages_in_library, library_for_file, preferred_coverage, require_visible_library,
 };
 use crate::http::{err, ok, ok_list};
 use crate::management::ApiState;
@@ -40,15 +40,17 @@ fn blocking_error(error: BlockingError, code: &'static str) -> Response {
     }
 }
 
-fn release_for(row: &domain::LedgerRow) -> domain::Release {
-    let name = FsPath::new(&row.path)
+fn release_for(coverage: &domain::FileCoverage) -> domain::Release {
+    let name = coverage
+        .file
+        .path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or_default();
     let mut parsed = release::parse(name);
-    parsed.resolution = row.resolution.clone().or(parsed.resolution);
-    parsed.codec = row.codec.clone().or(parsed.codec);
-    parsed.hdr = row.hdr.clone().or(parsed.hdr);
+    parsed.resolution = coverage.file.resolution.clone().or(parsed.resolution);
+    parsed.codec = coverage.file.codec.clone().or(parsed.codec);
+    parsed.hdr = coverage.file.hdr.clone().or(parsed.hdr);
     parsed
 }
 
@@ -90,11 +92,12 @@ fn preview_organize_inner(state: &ApiState, id: &str) -> Response {
     let mut renames = Vec::new();
     let mut already_ok = 0usize;
     let mut skips = 0usize;
-    for row in rows_in_library(&store, &library) {
+    for coverage in coverages_in_library(&store, &library) {
+        let row = &coverage.file;
         let Some(media) = store.get_media(row.media_id).ok().flatten() else {
             continue;
         };
-        let release = release_for(&row);
+        let release = release_for(&coverage);
         let target = match library::render_path(
             &primary,
             &pattern,
@@ -108,7 +111,7 @@ fn preview_organize_inner(state: &ApiState, id: &str) -> Response {
                 continue;
             }
         };
-        if target.to_string_lossy() == row.path {
+        if target.to_string_lossy() == row.path.to_string_lossy() {
             already_ok += 1;
             continue;
         }
@@ -215,20 +218,20 @@ fn apply_organize(store: &crate::Store, library: &store::Library, renames: &[Val
             continue;
         }
         // 预检目标路径在 ledger 中是否已被占用（避免改名后因 UNIQUE 约束造成 ledger 记录孤立和归属错乱）
-        if store.ledger_by_path(to).ok().flatten().is_some() {
+        if store.file_coverage_by_path(to).ok().flatten().is_some() {
             errors.push(format!("{to}: 目标路径已在台账中存在"));
             continue;
         }
         // 源文件必须已登记在当前媒体库的台账中，防止整理未登记的任意宿主机文件
-        let Some(source_ledger) = store.ledger_by_path(from).ok().flatten() else {
+        let Some(source_ledger) = store.file_coverage_by_path(from).ok().flatten() else {
             errors.push(format!("{from}: 源文件未登记在台账中"));
             continue;
         };
-        let Some(source_media) = store.get_media(source_ledger.media_id).ok().flatten() else {
+        let Some(source_media) = store.get_media(source_ledger.file.media_id).ok().flatten() else {
             errors.push(format!("{from}: 关联媒体信息不存在"));
             continue;
         };
-        if crate::http::library::library_for_row(&store, &source_ledger, &source_media)
+        if crate::http::library::library_for_file(&store, &source_ledger.file, &source_media)
             .as_ref()
             .map(|l| &l.id)
             != Some(&library.id)
@@ -248,7 +251,7 @@ fn apply_organize(store: &crate::Store, library: &store::Library, renames: &[Val
             errors.push(format!("{from} 重命名失败: {error}"));
             continue;
         }
-        if let Err(err) = store.rename_ledger_path(from, to) {
+        if let Err(err) = store.rename_file_path(from, to) {
             tracing::error!(%err, from, to, "整理文件更新台账失败，尝试回滚磁盘");
             if let Err(rollback_err) = std::fs::rename(to, from) {
                 tracing::error!(%rollback_err, from, to, "整理文件回滚重命名失败");
@@ -258,9 +261,9 @@ fn apply_organize(store: &crate::Store, library: &store::Library, renames: &[Val
         }
         // 重命名后重写分集 NFO（新 stem）：扫描只给新文件写 NFO，已入台账的
         // 文件整理后必须跟着换名，否则 .nfo 变成孤儿。
-        match store.ledger_by_path(to) {
-            Ok(Some(ledger_row)) => {
-                if let Ok(Some(media_row)) = store.get_media(ledger_row.media_id) {
+        match store.file_coverage_by_path(to) {
+            Ok(Some(coverage)) => {
+                if let Ok(Some(media_row)) = store.get_media(coverage.file.media_id) {
                     if let Some(new_stem) = FsPath::new(to).file_stem().and_then(|n| n.to_str()) {
                         let nfo_path = FsPath::new(to).with_file_name(format!("{new_stem}.nfo"));
                         if !nfo_path.is_file() {
@@ -269,7 +272,7 @@ fn apply_organize(store: &crate::Store, library: &store::Library, renames: &[Val
                     }
                 }
                 // 归属订阅的事实路径同步（洗版替换仍能找到旧文件的位置）。
-                let _ = store.rewrite_fact_paths(ledger_row.media_id, from, to);
+                let _ = store.rewrite_fact_paths(coverage.file.media_id, from, to);
             }
             Ok(None) => {}
             Err(error) => {
@@ -325,11 +328,11 @@ fn refresh_item_metadata_inner(state: &ApiState, id: &str, item_id: &str) -> Res
     let Some(media) = store.get_media(media_id).ok().flatten() else {
         return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
     };
-    let rows: Vec<domain::LedgerRow> = rows_in_library(&store, &library)
+    let rows: Vec<domain::FileCoverage> = coverages_in_library(&store, &library)
         .into_iter()
-        .filter(|row| row.media_id == media_id)
+        .filter(|row| row.file.media_id == media_id)
         .collect();
-    let Some(row) = preferred_row(&rows).cloned() else {
+    let Some(row) = preferred_coverage(&rows).cloned() else {
         return err(
             StatusCode::NOT_FOUND,
             "library.item_missing",
@@ -337,7 +340,7 @@ fn refresh_item_metadata_inner(state: &ApiState, id: &str, item_id: &str) -> Res
         );
     };
     drop(store);
-    let path = FsPath::new(&row.path).to_path_buf();
+    let path = row.file.path.clone();
     // 剧集级目录：模板整理后是 `<show>/Season N/file`，show 根 = 文件父目录的上一级；
     // 平铺时 = 文件所在目录。poster/fanart/tvshow.nfo 落在 show 根。
     let file_dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
@@ -439,10 +442,13 @@ fn relax_filter_inner(state: &ApiState, id: &str, body: &Value) -> Response {
         })
         .unwrap_or_default();
     let want_hdr: Option<bool> = body["hdr"].as_bool();
-    let mut by_media: std::collections::HashMap<domain::MediaId, Vec<domain::LedgerRow>> =
+    let mut by_media: std::collections::HashMap<domain::MediaId, Vec<domain::FileCoverage>> =
         std::collections::HashMap::new();
-    for row in rows_in_library(&store, &library) {
-        by_media.entry(row.media_id).or_default().push(row);
+    for coverage in coverages_in_library(&store, &library) {
+        by_media
+            .entry(coverage.file.media_id)
+            .or_default()
+            .push(coverage);
     }
     let count_with = |drop_resolutions: &[String], drop_hdr: bool| -> usize {
         by_media
@@ -450,7 +456,8 @@ fn relax_filter_inner(state: &ApiState, id: &str, body: &Value) -> Response {
             .filter(|rows| {
                 let keeps_res = drop_resolutions.is_empty()
                     || rows.iter().any(|row| {
-                        row.resolution
+                        row.file
+                            .resolution
                             .as_deref()
                             .is_some_and(|r| drop_resolutions.iter().any(|w| w == r))
                     });
@@ -460,7 +467,7 @@ fn relax_filter_inner(state: &ApiState, id: &str, body: &Value) -> Response {
                 if !drop_hdr {
                     return true;
                 }
-                let has_hdr = rows.iter().any(|row| row.hdr.is_some());
+                let has_hdr = rows.iter().any(|row| row.file.hdr.is_some());
                 has_hdr == want_hdr.unwrap_or(false) || want_hdr.is_none()
             })
             .count()
@@ -537,7 +544,7 @@ fn similar_inner(
     let Some(media) = store.get_media(media_id).ok().flatten() else {
         return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
     };
-    let rows = match store.ledger_for_media(media_id) {
+    let rows = match store.file_coverage_for_media(media_id) {
         Ok(rows) => rows,
         Err(error) => {
             return err(
@@ -548,7 +555,7 @@ fn similar_inner(
         }
     };
     let belongs_to_library = rows.iter().any(|row| {
-        library_for_row(&store, row, &media).is_some_and(|owner| owner.id == library.id)
+        library_for_file(&store, &row.file, &media).is_some_and(|owner| owner.id == library.id)
     });
     if !belongs_to_library {
         return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");

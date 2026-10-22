@@ -324,3 +324,91 @@ fn tv_sidecar_layers_are_observed_and_do_not_leak_across_layers() {
         FieldValue::Value(vec!["Work Studio".into()])
     );
 }
+
+/// NFO `<thumb>` 必须真的落进 episode 层的观测输入并出现在页内事实里，
+/// 否则只有 NFO 有剧照的剧集页内会静默丢主图。
+/// tvshow 层的 `<thumb>` 是海报语义，不得被映射，也不得被 overlay 漏进集层。
+#[test]
+fn episode_thumb_lands_in_observed_inputs_and_page_fact_but_work_thumb_does_not_leak() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let shows = tmp.path().join("shows");
+    let (library, root_id) = library_with_root(&store, &shows, "Shows", MediaKind::Tv);
+    let media = insert_media(&store, MediaKind::Tv, "Show");
+
+    let thumb = "https://image.tmdb.org/t/p/w500/episode-still.jpg";
+    let season_dir = shows.join("Show").join("Season 01");
+    std::fs::create_dir_all(&season_dir).unwrap();
+    std::fs::write(
+        shows.join("Show").join("tvshow.nfo"),
+        "<tvshow><title>Show</title>\
+         <thumb>https://image.tmdb.org/t/p/w500/work-poster.jpg</thumb></tvshow>",
+    )
+    .unwrap();
+    let episode = season_dir.join("Show.S01E01.mkv");
+    std::fs::write(&episode, b"e01").unwrap();
+    std::fs::write(
+        season_dir.join("Show.S01E01.nfo"),
+        format!(
+            "<episodedetails><season>1</season><episode>1</episode>\
+             <title>Pilot</title><thumb>{thumb}</thumb></episodedetails>"
+        ),
+    )
+    .unwrap();
+
+    let file = video_file(&library, &root_id, media, MediaKind::Tv, episode);
+    let units = [UnitKey::new(1, 1)];
+    let scope = WriteScope {
+        library_id: library.parse().unwrap(),
+        config_revision: 0,
+    };
+    publish(&store, &scope, &file, &units, "zh-CN");
+
+    // 落库证据：NFO 的落库表是观测输入 `library_metadata_inputs`（`media_episodes.still_url`
+    // 只由 provider 归一化采纳写入，见 `crates/store/src/metadata/adopt.rs` 的 episode 分支；
+    // NFO 从不进 adopt，`media_metadata_sources` 也只在 adopt 里写）。所以这里的「真的落了」
+    // 必须直接读观测行，而不是读采纳行。
+    let db = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
+    let observed = |entity: &str, season: i64, episode: i64| -> domain::MetadataFields {
+        let fields_json: String = db
+            .query_row(
+                "SELECT fields_json FROM library_metadata_inputs
+                 WHERE media_id = ?1 AND entity_scope = ?2 AND season = ?3 AND episode = ?4
+                   AND locale = 'zh-CN' AND parse_state = 'valid'",
+                rusqlite::params![media.to_string(), entity, season, episode],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str(&fields_json).unwrap()
+    };
+    assert_eq!(
+        observed("episode", 1, 1).still_url,
+        FieldValue::Value(thumb.into()),
+        "episode 观测行必须带上 NFO <thumb> 得到的 still_url"
+    );
+    assert_eq!(
+        observed("work", -1, -1).still_url,
+        FieldValue::Missing,
+        "Work 观测行不得把 tvshow 的 <thumb> 当作剧照"
+    );
+
+    // 页内读取链拿得到同一个值（Task 11 页内元数据只读已采纳事实）。
+    let episode_scope = EntityScope::Episode {
+        season: 1,
+        episode: 1,
+    };
+    let page = store
+        .protocol_page_metadata(scope.library_id, media, episode_scope, Some("zh-CN"))
+        .unwrap();
+    assert_eq!(page.still_url, FieldValue::Value(thumb.into()));
+
+    // Work 作用域：tvshow 的 `<thumb>` 不得出现在作品层。
+    let work = store
+        .protocol_page_metadata(scope.library_id, media, EntityScope::Work, Some("zh-CN"))
+        .unwrap();
+    assert_eq!(
+        work.still_url,
+        FieldValue::Missing,
+        "Work 作用域的 <thumb> 是海报语义，不得写进 still_url"
+    );
+}

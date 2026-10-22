@@ -80,9 +80,13 @@ async fn http_scan_rebinds_incoming_rows_to_canonical_media_identity() {
 
     let store_arc = state.store();
     let store = store_arc.lock();
-    let row = store
-        .ledger_by_path(&video.display().to_string())
+    let coverage = store
+        .file_coverage_by_path(&video.display().to_string())
         .unwrap()
         .expect("scanned ledger should exist");
-    assert_eq!(row.media_id, old_canonical.id, "新增台账必须重新绑定到已有 canonical Media");
+    assert_eq!(
+        coverage.file.media_id,
+        old_canonical.id,
+        "新增台账必须重新绑定到已有 canonical Media"
+    );
 }

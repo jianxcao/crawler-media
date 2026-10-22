@@ -134,11 +134,20 @@ async fn jellyfin_session_events_create_activity_and_a_play_log() {
     let play_session = play_session_for(&app, &item_id, Some("infuse-bedroom")).await;
 
     assert_eq!(
-        post_session_event(&app, "/Sessions/Playing", &item_id, &play_session, 10_000_000).await,
+        post_session_event(
+            &app,
+            "/Sessions/Playing",
+            &item_id,
+            &play_session,
+            10_000_000
+        )
+        .await,
         StatusCode::NO_CONTENT
     );
 
-    clock.0.store((now + 2) * 1000, std::sync::atomic::Ordering::SeqCst);
+    clock
+        .0
+        .store((now + 2) * 1000, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         post_session_event(
             &app,
@@ -150,7 +159,9 @@ async fn jellyfin_session_events_create_activity_and_a_play_log() {
         .await,
         StatusCode::NO_CONTENT
     );
-    clock.0.store((now + 3) * 1000, std::sync::atomic::Ordering::SeqCst);
+    clock
+        .0
+        .store((now + 3) * 1000, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         post_session_event(
             &app,
@@ -181,10 +192,18 @@ async fn jellyfin_session_events_create_activity_and_a_play_log() {
     assert_eq!(sessions[0].device_name.as_deref(), Some("Bedroom Apple TV"));
     assert_eq!(sessions[0].position_ms, 4_000);
 
-    clock.0.store((now + 4) * 1000, std::sync::atomic::Ordering::SeqCst);
+    clock
+        .0
+        .store((now + 4) * 1000, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
-        post_session_event(&app, "/Sessions/Playing/Stopped", &item_id, &play_session, 50_000_000)
-            .await,
+        post_session_event(
+            &app,
+            "/Sessions/Playing/Stopped",
+            &item_id,
+            &play_session,
+            50_000_000
+        )
+        .await,
         StatusCode::NO_CONTENT
     );
     assert!(store.active_sessions(now + 4, 60).unwrap().is_empty());
@@ -248,7 +267,14 @@ async fn admin_ended_session_is_not_resurrected_by_a_late_progress_event() {
     let play_session = play_session_for(&app, &item_id, Some("infuse-bedroom")).await;
 
     assert_eq!(
-        post_session_event(&app, "/Sessions/Playing", &item_id, &play_session, 10_000_000).await,
+        post_session_event(
+            &app,
+            "/Sessions/Playing",
+            &item_id,
+            &play_session,
+            10_000_000
+        )
+        .await,
         StatusCode::NO_CONTENT
     );
 
@@ -271,11 +297,15 @@ async fn admin_ended_session_is_not_resurrected_by_a_late_progress_event() {
 
     // 会话随后被清理（等价于 sweep 关闭并写 admin_ended=1 的播放日志）。
     let store = Store::open(tmp.path().join("data")).unwrap();
-    store.close_session(user_id, "infuse-bedroom", now + 1).unwrap();
+    store
+        .close_session(user_id, "infuse-bedroom", now + 1)
+        .unwrap();
     assert!(store.active_sessions(now + 1, 60).unwrap().is_empty());
 
     // 迟到 progress：不得复活会话。
-    clock.0.store((now + 2) * 1000, std::sync::atomic::Ordering::SeqCst);
+    clock
+        .0
+        .store((now + 2) * 1000, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         post_session_event(
             &app,
@@ -513,8 +543,7 @@ async fn strm_playback_exposes_the_direct_source_and_redirects_to_it() {
     let strm_path = tmp.path().join("remote.strm");
     let direct_url = "https://media.example.test/watch/episode.mp4?ticket=play-token";
     std::fs::write(&strm_path, direct_url).unwrap();
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let spec = store::test_support::FixtureFile {
         media_id: strm_media.id,
         path: strm_path.display().to_string(),
         season: None,
@@ -525,8 +554,11 @@ async fn strm_playback_exposes_the_direct_source_and_redirects_to_it() {
         quality_source: QualitySource::Probe,
         confidence: Confidence::High,
         filter_score: None,
+        transfer_mode: None,
+        source_path: None,
+        file_id: None,
     };
-    store.insert_ledger(&row).unwrap();
+    store::test_support::publish_fixture_file(&store, &spec).unwrap();
     let item_id = work_id(strm_media.id);
 
     let info = app

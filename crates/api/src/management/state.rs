@@ -223,8 +223,24 @@ impl ApiState {
                 }
             }
         };
-        let jobs = jobs::Queue::open(store.lock().data_dir().join("jobs.db"))
-            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        let jobs_path = store.lock().data_dir().join("jobs.db");
+        // 布局闸门必须排在 `jobs::Queue::open` **之前**：open 会执行队列 DDL 迁移，
+        // 形状不符的 jobs.db 不允许先被写入。全新 data 目录此刻还没有 jobs.db，
+        // 这里先写定身份头，open 之后再校验队列实际建出的形状（见下）。
+        {
+            let conn = rusqlite::Connection::open(&jobs_path)
+                .map_err(|err| std::io::Error::other(err.to_string()))?;
+            store::schema::layout::initialize_jobs_layout(&conn)
+                .map_err(|err| std::io::Error::other(err.to_string()))?;
+        }
+        let jobs =
+            jobs::Queue::open(&jobs_path).map_err(|err| std::io::Error::other(err.to_string()))?;
+        {
+            let conn = rusqlite::Connection::open(&jobs_path)
+                .map_err(|err| std::io::Error::other(err.to_string()))?;
+            store::schema::layout::validate_jobs_layout(&conn)
+                .map_err(|err| std::io::Error::other(err.to_string()))?;
+        }
         crate::jobs_api::seed_instance_defs(&jobs)
             .map_err(|err| std::io::Error::other(err.to_string()))?;
         // 维护任务默认 def：幂等注册，用户改过的开关/频率/payload 原样保留。
@@ -334,11 +350,13 @@ impl ApiState {
         mut self,
         runner: Arc<dyn crate::chapter_frame_service::ChapterFrameRunner>,
     ) -> Self {
-        let service = Arc::new(crate::chapter_frame_service::ChapterFrameService::with_runner(
-            self.store.clone(),
-            self.library_work.clone(),
-            runner,
-        ));
+        let service = Arc::new(
+            crate::chapter_frame_service::ChapterFrameService::with_runner(
+                self.store.clone(),
+                self.library_work.clone(),
+                runner,
+            ),
+        );
         self.chapter_frames.abort();
         self.probe.set_chapter_frames(service.clone());
         self.chapter_frames = service;
@@ -468,7 +486,6 @@ impl ApiState {
         self
     }
 
-
     /// 替换字幕交付服务（测试注入 FakeRunner 与并发上限）。
     pub fn with_subtitle_delivery(
         mut self,
@@ -541,10 +558,7 @@ impl ApiState {
         self
     }
 
-    pub fn with_job_loop_control(
-        mut self,
-        control: Arc<crate::job_loop::JobLoopControl>,
-    ) -> Self {
+    pub fn with_job_loop_control(mut self, control: Arc<crate::job_loop::JobLoopControl>) -> Self {
         self.job_loop_control = control;
         self
     }

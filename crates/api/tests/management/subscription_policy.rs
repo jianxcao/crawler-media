@@ -11,6 +11,7 @@ use tower::ServiceExt;
 
 use super::common::*;
 use super::subscription_depth::{authed_app, fake_state};
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 async fn create_long_watch_sub(app: &axum::Router) -> String {
     let created = json_body(
@@ -374,9 +375,10 @@ fn setup_ladder_and_old_ledger(tmp: &tempfile::TempDir, media_id: &str, sub_id: 
     std::fs::create_dir_all(old.parent().unwrap()).unwrap();
     std::fs::write(&old, b"old-1080p").unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
-    store
-        .insert_ledger(&domain::LedgerRow {
-            id: domain::LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(domain::LedgerId::new()),
             media_id: media_id.parse().unwrap(),
             path: old.display().to_string(),
             season: None,
@@ -387,8 +389,10 @@ fn setup_ladder_and_old_ledger(tmp: &tempfile::TempDir, media_id: &str, sub_id: 
             quality_source: domain::QualitySource::Probe,
             confidence: domain::Confidence::High,
             filter_score: Some(200),
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let mut facts = subscribe::SubscribeFacts::default();
     facts.upsert(
         None,

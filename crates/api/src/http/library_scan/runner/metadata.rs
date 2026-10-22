@@ -9,27 +9,27 @@ use axum::http::StatusCode;
 use axum::response::Response;
 
 use crate::http::err;
-use crate::http::library::rows_in_library;
+use crate::http::library::coverages_in_library;
 use crate::management::ApiState;
 
-use super::super::{ledger_row_by_path, library_by_id, media_by_id, scrape_library_metadata};
+use super::super::{coverage_by_path, library_by_id, media_by_id, scrape_library_metadata};
 
-/// chunk 内涉及到的非 Video Media 台账行（身份解析按 Media 去重）。
+/// chunk 内涉及到的非 Video Media 台账覆盖（身份解析按 Media 去重）。
 pub(super) fn scan_media_for(
     state: &ApiState,
     files: &[library::TransferredFile],
-) -> HashMap<domain::MediaId, (domain::Media, domain::LedgerRow)> {
+) -> HashMap<domain::MediaId, (domain::Media, domain::FileCoverage)> {
     let store = state.store.lock();
     let mut map = HashMap::new();
     for file in files {
-        let Some(row) = ledger_row_by_path(&store, &file.path.display().to_string()) else {
+        let Some(coverage) = coverage_by_path(&store, &file.path.display().to_string()) else {
             continue;
         };
-        let Some(m) = media_by_id(&store, row.media_id) else {
+        let Some(m) = media_by_id(&store, coverage.file.media_id) else {
             continue;
         };
         if m.kind != domain::MediaKind::Video {
-            map.entry(m.id).or_insert((m, row));
+            map.entry(m.id).or_insert((m, coverage));
         }
     }
     map
@@ -40,11 +40,11 @@ pub(super) fn resolve_scan_metadata(
     state: &ApiState,
     id: &str,
     lease: &crate::library_lifecycle::LibraryWorkLease,
-    scan_media: HashMap<domain::MediaId, (domain::Media, domain::LedgerRow)>,
+    scan_media: HashMap<domain::MediaId, (domain::Media, domain::FileCoverage)>,
     inserted: &[PathBuf],
     scrape: bool,
 ) -> Result<(), Response> {
-    for (_, (media, row)) in scan_media {
+    for (_, (media, coverage)) in scan_media {
         if lease.control().is_cancelled() {
             return Err(err(
                 StatusCode::CONFLICT,
@@ -52,7 +52,7 @@ pub(super) fn resolve_scan_metadata(
                 "Library 正在删除",
             ));
         }
-        let path_buf = PathBuf::from(&row.path);
+        let path_buf = coverage.file.path.clone();
         let path = path_buf.as_path();
         if crate::auto_resolve::has_local_scan_metadata(state, &media, path) {
             continue;
@@ -72,16 +72,17 @@ pub(super) fn resolve_scan_metadata(
             // 见上：真实失败由 poster_fetch 内部记录，None 不是错误。
             let _ = crate::poster_fetch::attach_poster(state, &resolved, path);
             let _ = crate::poster_fetch::attach_backdrop(state, &resolved, path);
-            // Reread after alias convergence; stale rows still contain the provisional ID.
-            let (row, rows) = {
+            // Reread after alias convergence; stale coverage still carries the provisional ID.
+            let (coverage, coverages) = {
                 let store = state.store.lock();
-                let row = ledger_row_by_path(&store, &row.path).unwrap_or(row);
-                let rows = library_by_id(&store, id)
-                    .map(|library| rows_in_library(&store, &library))
+                let key = coverage.file.path.to_string_lossy().into_owned();
+                let coverage = coverage_by_path(&store, &key).unwrap_or(coverage);
+                let coverages = library_by_id(&store, id)
+                    .map(|library| coverages_in_library(&store, &library))
                     .unwrap_or_default();
-                (row, rows)
+                (coverage, coverages)
             };
-            scrape_library_metadata(state, &resolved, &row, path, &rows);
+            scrape_library_metadata(state, &resolved, &coverage, path, &coverages);
         }
     }
 

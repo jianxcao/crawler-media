@@ -123,10 +123,10 @@ async fn extras_only_detaches_specified_file_ids_not_whole_media() {
     scan_and_wait(&app, tv_id).await;
 
     let store = api::Store::open(tmp.path().join("data")).unwrap();
-    let ledger = store.list_ledger().unwrap();
+    let ledger = store.list_file_coverage().unwrap();
     assert_eq!(ledger.len(), 2);
-    let ep1_id = ledger[0].id.to_string();
-    let ep2_id = ledger[1].id.to_string();
+    let ep1_id = ledger[0].file.file_id.to_string();
+    let ep2_id = ledger[1].file.file_id.to_string();
 
     // 仅把 ep1 标为 extras
     let extras_res = app
@@ -142,7 +142,7 @@ async fn extras_only_detaches_specified_file_ids_not_whole_media() {
     assert_eq!(extras_res.status(), StatusCode::OK);
 
     // 验证：ep1 从 ledger 移出，ep2 仍安然保存在 ledger 中
-    let remaining = store.list_ledger().unwrap();
+    let remaining = store.list_file_coverage().unwrap();
     assert_eq!(remaining.len(), 1, "只应移出 1 个指定的 file_id");
-    assert_eq!(remaining[0].id.to_string(), ep2_id);
+    assert_eq!(remaining[0].file.file_id.to_string(), ep2_id);
 }

@@ -221,23 +221,14 @@ async fn reidentify_two_files_moves_only_listed_files_and_reports_honest_claimed
 
     let shared = _state.store();
     let store = shared.lock();
-    let row1 = store
-        .get_ledger(&f1.to_string().replace('-', ""))
-        .unwrap()
-        .unwrap();
-    let row2 = store
-        .get_ledger(&f2.to_string().replace('-', ""))
-        .unwrap()
-        .unwrap();
-    let row3 = store
-        .get_ledger(&f3.to_string().replace('-', ""))
-        .unwrap()
-        .unwrap();
+    let row1 = store.file_coverage_by_id(f1).unwrap().unwrap();
+    let row2 = store.file_coverage_by_id(f2).unwrap().unwrap();
+    let row3 = store.file_coverage_by_id(f3).unwrap().unwrap();
 
     // f1 and f2 moved to target_media, f3 stayed on media
-    assert_ne!(row1.media_id, media.id);
-    assert_eq!(row1.media_id, row2.media_id);
-    assert_eq!(row3.media_id, media.id);
+    assert_ne!(row1.file.media_id, media.id);
+    assert_eq!(row1.file.media_id, row2.file.media_id);
+    assert_eq!(row3.file.media_id, media.id);
 
     // Media A anchor must not be changed!
     let current_a = store.get_media(media.id).unwrap().unwrap();
@@ -278,16 +269,10 @@ async fn reidentify_stale_file_version_returns_conflict_and_zero_moved() {
 
     let shared = _state.store();
     let store = shared.lock();
-    let row1 = store
-        .get_ledger(&f1.to_string().replace('-', ""))
-        .unwrap()
-        .unwrap();
-    let row2 = store
-        .get_ledger(&f2.to_string().replace('-', ""))
-        .unwrap()
-        .unwrap();
-    assert_eq!(row1.media_id, media.id);
-    assert_eq!(row2.media_id, media.id);
+    let row1 = store.file_coverage_by_id(f1).unwrap().unwrap();
+    let row2 = store.file_coverage_by_id(f2).unwrap().unwrap();
+    assert_eq!(row1.file.media_id, media.id);
+    assert_eq!(row2.file.media_id, media.id);
 }
 
 #[tokio::test]
@@ -343,11 +328,8 @@ async fn reidentify_alias_conflict_returns_409_without_claimed() {
 
     let shared = _state.store();
     let store = shared.lock();
-    let row1 = store
-        .get_ledger(&f1.to_string().replace('-', ""))
-        .unwrap()
-        .unwrap();
-    assert_eq!(row1.media_id, media.id);
+    let row1 = store.file_coverage_by_id(f1).unwrap().unwrap();
+    assert_eq!(row1.file.media_id, media.id);
 }
 
 #[tokio::test]
@@ -493,9 +475,101 @@ async fn reidentify_already_in_place_returns_claimed_zero_and_no_writes() {
 
     let shared = _state.store();
     let store = shared.lock();
-    let row1 = store
-        .get_ledger(&f1.to_string().replace('-', ""))
+    let row1 = store.file_coverage_by_id(f1).unwrap().unwrap();
+    assert_eq!(row1.file.media_id, media.id);
+}
+
+/// `reidentify` 必须为目标媒体落下 TMDB 别名（`reassign_parsed_files` 里的
+/// `add_media_alias`，reidentify.rs:410）：`ensure_media` 通过另一个 provider
+/// 别名（tvdb）匹配到既有 Media 时，该 Media 的 tmdb 锚点不会被 `write_media`
+/// 改成请求里的 tmdb id，落别名是唯一能让 `tmdb:movie:2002` 解析到它的写入。
+#[tokio::test]
+async fn reidentify_inserts_the_tmdb_alias_for_a_media_matched_by_another_provider() {
+    let (_tmp, _state, app, token, _lib_id, media, [f1, f2, _f3], catalog) = setup_fixture();
+
+    let tvdb_only = Media {
+        id: MediaId::new(),
+        kind: MediaKind::Movie,
+        title: "Tvdb Only".into(),
+        year: Some(2019),
+        original_title: None,
+        aliases: vec![],
+        tmdb_id: Some("9999".into()),
+        douban_id: None,
+        tvdb_id: Some("555".into()),
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    {
+        let shared = _state.store();
+        let store = shared.lock();
+        store.insert_media(&tvdb_only).unwrap();
+        assert!(
+            store
+                .get_media_by_alias_kind("tmdb_id", "2002", Some(MediaKind::Movie))
+                .unwrap()
+                .is_none(),
+            "没有任何 Media 占有 tmdb 2002，前置检查必须放行"
+        );
+    }
+
+    let target_media = Media {
+        id: MediaId::new(),
+        kind: MediaKind::Movie,
+        title: "Tvdb Only".into(),
+        year: Some(2019),
+        original_title: None,
+        aliases: vec![],
+        tmdb_id: Some("2002".into()),
+        douban_id: None,
+        tvdb_id: Some("555".into()),
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    catalog.set(MediaKind::Movie, "2002", target_media);
+
+    let req_body = json!({
+        "title_ref": "tmdb:movie:2002",
+        "file_ids": [f1.to_string()]
+    });
+    let req = common::request("POST", "/api/v1/reidentify", Some(&token), req_body);
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: Value = common::json_data(res).await;
+    assert_eq!(body["claimed"], 1);
+
+    let shared = _state.store();
+    let store = shared.lock();
+    let by_new_alias = store
+        .get_media_by_alias_kind("tmdb_id", "2002", Some(MediaKind::Movie))
         .unwrap()
-        .unwrap();
-    assert_eq!(row1.media_id, media.id);
+        .expect("reidentify 必须为目标媒体落下 tmdb 别名");
+    assert_eq!(by_new_alias.id, tvdb_only.id);
+    assert_eq!(by_new_alias.title, "Tvdb Only");
+    assert_eq!(by_new_alias.tmdb_id.as_deref(), Some("9999"));
+    assert_eq!(
+        store
+            .media_refresh_alias(tvdb_only.id, "tmdb")
+            .unwrap()
+            .unwrap()
+            .external_id,
+        "9999",
+        "新别名不是 refresh target"
+    );
+    assert_eq!(
+        store
+            .get_media_by_alias_kind("tvdb", "555", Some(MediaKind::Movie))
+            .unwrap()
+            .unwrap()
+            .id,
+        tvdb_only.id
+    );
+    assert_eq!(
+        store.file_coverage_by_id(f1).unwrap().unwrap().file.media_id,
+        tvdb_only.id
+    );
+    assert_eq!(
+        store.file_coverage_by_id(f2).unwrap().unwrap().file.media_id,
+        media.id
+    );
 }

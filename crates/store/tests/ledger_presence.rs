@@ -199,15 +199,15 @@ fn tv_library_removal_recovers_empty_coverage_and_preserves_file_bytes() {
     assert_eq!(done.state, "succeeded");
     assert_eq!(done.removed_ledger_count, 1);
     assert!(store.get_library(&library.id).unwrap().is_none());
-    assert!(store.get_ledger(&file.file_id.to_string()).unwrap().is_none());
+    assert!(store.file_coverage_by_id(file.file_id).unwrap().is_none());
     assert!(store.get_media(media.id).unwrap().is_some());
     assert_eq!(std::fs::read(path).unwrap(), bytes);
     assert_eq!(store.clean_library_removal(&removal.operation_id).unwrap(), done);
 }
 
-fn observation(row: domain::LedgerRow, missing_at: Option<i64>, presence: FilePresence) -> LedgerPresenceObservation {
+fn observation(row: domain::FileCoverage, missing_at: Option<i64>, presence: FilePresence) -> LedgerPresenceObservation {
     LedgerPresenceObservation {
-        row,
+        file: row,
         missing_at,
         presence,
     }
@@ -231,7 +231,7 @@ fn unpublished_transfer_survives_presence_and_present_publication_publishes_it()
         LedgerId::new(),
     );
     let row = store
-        .ledger_by_path(&path)
+        .file_coverage_by_path(&path)
         .unwrap()
         .expect("pending file row");
     assert!(store.transfer_pending(&path).unwrap());
@@ -245,7 +245,7 @@ fn unpublished_transfer_survives_presence_and_present_publication_publishes_it()
             )
             .unwrap();
         assert_eq!(result.skipped, 1);
-        assert!(store.ledger_by_path(&path).unwrap().is_some());
+        assert!(store.file_coverage_by_path(&path).unwrap().is_some());
         assert!(store.missing_at_by_path().unwrap().is_empty());
     }
 
@@ -258,7 +258,7 @@ fn unpublished_transfer_survives_presence_and_present_publication_publishes_it()
         .unwrap();
     assert_eq!(result.restored, 0);
     assert!(!store.transfer_pending(&path).unwrap());
-    assert_eq!(file.file_id, row.id);
+    assert_eq!(file.file_id, row.file.file_id);
     assert!(
         store
             .get_library_item(library.id.parse().unwrap(), media_id)
@@ -285,7 +285,7 @@ fn stale_observation_does_not_delete_replacement_file() {
         FilePublication::Published,
         LedgerId::new(),
     );
-    let old_row = store.ledger_by_path(&path).unwrap().unwrap();
+    let old_row = store.file_coverage_by_path(&path).unwrap().unwrap();
 
     // The file disappears and a replacement lands on the same path.
     store.delete_ledger_path(&path).unwrap();
@@ -309,7 +309,7 @@ fn stale_observation_does_not_delete_replacement_file() {
     assert_eq!(result.skipped, 1);
     assert!(
         store
-            .get_ledger(&replacement.file_id.to_string())
+            .file_coverage_by_id(replacement.file_id)
             .unwrap()
             .is_some()
     );
@@ -332,7 +332,7 @@ fn restored_file_clears_flag_without_replacing_identity() {
         FilePublication::Published,
         LedgerId::new(),
     );
-    let row = store.ledger_by_path(&path).unwrap().unwrap();
+    let row = store.file_coverage_by_path(&path).unwrap().unwrap();
 
     store
         .apply_ledger_presence(
@@ -342,7 +342,7 @@ fn restored_file_clears_flag_without_replacing_identity() {
         )
         .unwrap();
     assert_eq!(
-        store.missing_at_by_path().unwrap().get(&row.path).copied(),
+        store.missing_at_by_path().unwrap().get(&path).copied(),
         Some(1000)
     );
 
@@ -356,13 +356,13 @@ fn restored_file_clears_flag_without_replacing_identity() {
     assert_eq!(result.restored, 1);
     assert_eq!(result.missing, 0);
     assert_eq!(
-        store.missing_at_by_path().unwrap().get(&row.path).copied(),
+        store.missing_at_by_path().unwrap().get(&path).copied(),
         None
     );
-    let fetched = store.get_ledger(&file.file_id.to_string()).unwrap().unwrap();
-    assert_eq!(fetched.id, file.file_id);
-    assert_eq!(fetched.path, row.path);
-    assert_eq!(fetched.media_id, row.media_id);
+    let fetched = store.file_coverage_by_id(file.file_id).unwrap().unwrap();
+    assert_eq!(fetched.file.file_id, file.file_id);
+    assert_eq!(fetched.file.path, row.file.path);
+    assert_eq!(fetched.file.media_id, row.file.media_id);
 }
 
 #[test]
@@ -382,7 +382,7 @@ fn unknown_observation_preserves_prior_state() {
         FilePublication::Published,
         LedgerId::new(),
     );
-    let row = store.ledger_by_path(&path).unwrap().unwrap();
+    let row = store.file_coverage_by_path(&path).unwrap().unwrap();
 
     store
         .apply_ledger_presence(
@@ -404,7 +404,7 @@ fn unknown_observation_preserves_prior_state() {
     assert_eq!(result.missing, 0);
     assert_eq!(result.restored, 0);
     assert_eq!(
-        store.missing_at_by_path().unwrap().get(&row.path).copied(),
+        store.missing_at_by_path().unwrap().get(&path).copied(),
         Some(1000)
     );
 }
@@ -437,8 +437,8 @@ fn prune_rolls_back_whole_batch_on_derived_error() {
         FilePublication::Published,
         LedgerId::new(),
     );
-    let first_row = store.ledger_by_path(&first_path).unwrap().unwrap();
-    let second_row = store.ledger_by_path(&second_path).unwrap().unwrap();
+    let first_row = store.file_coverage_by_path(&first_path).unwrap().unwrap();
+    let second_row = store.file_coverage_by_path(&second_path).unwrap().unwrap();
 
     let mark_missing = vec![
         observation(first_row.clone(), None, ObservedPresence::Missing),
@@ -469,6 +469,6 @@ fn prune_rolls_back_whole_batch_on_derived_error() {
     let result = store.apply_ledger_presence(&prune, LedgerPresenceMode::Prune, 2000);
     assert!(result.is_err(), "batch prune must fail due to trigger");
 
-    assert!(store.get_ledger(&first.file_id.to_string()).unwrap().is_some());
-    assert!(store.get_ledger(&second.file_id.to_string()).unwrap().is_some());
+    assert!(store.file_coverage_by_id(first.file_id).unwrap().is_some());
+    assert!(store.file_coverage_by_id(second.file_id).unwrap().is_some());
 }

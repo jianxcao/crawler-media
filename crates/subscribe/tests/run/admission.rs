@@ -28,8 +28,8 @@ fn movie_fill_completes_after_one_acceptable_torrent() {
 
     assert!(outcome.completed);
     assert_eq!(dl.added().len(), 1);
-    assert_eq!(outcome.ledger.len(), 1);
-    assert_eq!(outcome.ledger[0].media_id, media.id);
+    assert_eq!(outcome.files.len(), 1);
+    assert_eq!(outcome.files[0].file.media_id, media.id);
     assert_eq!(outcome.facts.movie().unwrap().score, 100);
 }
 
@@ -107,7 +107,7 @@ fn quality_match_does_not_download_the_wrong_media() {
     .unwrap();
 
     assert!(dl.added().is_empty());
-    assert!(outcome.ledger.is_empty());
+    assert!(outcome.files.is_empty());
     assert!(!outcome.completed);
 }
 
@@ -138,11 +138,11 @@ fn admit_and_add_does_not_wait_for_downloader_files() {
     .unwrap();
     assert_eq!(dl.added().len(), 1);
     assert_eq!(added.chosen.len(), 1);
-    assert!(added.outcome.ledger.is_empty());
+    assert!(added.outcome.files.is_empty());
     assert!(!added.outcome.completed);
 
     map_file(&dl, &t, src);
     let outcome = subscribe::collect_completed(added, &FixedProbe).unwrap();
-    assert_eq!(outcome.ledger.len(), 1);
+    assert_eq!(outcome.files.len(), 1);
     assert!(outcome.completed);
 }

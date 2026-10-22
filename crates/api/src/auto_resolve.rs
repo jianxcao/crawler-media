@@ -158,14 +158,17 @@ pub(crate) fn write_resolved_nfo(state: &ApiState, media: &Media, sample_path: &
     let _ = meta_service.refresh_media_metadata(media, "zh-CN");
 
     if media.kind == MediaKind::Tv {
-        let (rows, sample_row) = {
+        let (coverages, sample_coverage) = {
             let store = state.store.lock();
-            let all = store.ledger_for_media(media.id).unwrap_or_default();
+            let all = store.file_coverage_for_media(media.id).unwrap_or_default();
             let sample_path_str = sample_path.display().to_string();
-            let sample = all.iter().find(|r| r.path == sample_path_str).cloned();
+            let sample = all
+                .iter()
+                .find(|coverage| coverage.file.path.display().to_string() == sample_path_str)
+                .cloned();
             (all, sample)
         };
-        let sample_row = sample_row.unwrap_or_else(|| {
+        let sample_coverage = sample_coverage.unwrap_or_else(|| {
             let (season, episode) = sample_path
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -174,32 +177,15 @@ pub(crate) fn write_resolved_nfo(state: &ApiState, media: &Media, sample_path: &
                     (parsed.season, parsed.episode)
                 })
                 .unwrap_or((None, None));
-            domain::LedgerRow {
-                id: domain::LedgerId::new(),
-                media_id: media.id,
-                path: sample_path.display().to_string(),
-                season,
-                episode,
-                resolution: None,
-                codec: None,
-                hdr: None,
-                quality_source: domain::QualitySource::Release,
-                confidence: domain::Confidence::High,
-                filter_score: None,
-            }
+            synthetic_coverage(media.id, media.kind, sample_path, season, episode)
         });
-        let show_root = crate::scrape_metadata::show_root(sample_path, &sample_row);
-        let rows_to_write = if rows.is_empty() {
-            vec![sample_row]
+        let show_root = crate::scrape_metadata::show_root(sample_path, &sample_coverage);
+        let coverages_to_write = if coverages.is_empty() {
+            vec![sample_coverage]
         } else {
-            rows
+            coverages
         };
-        crate::scrape_metadata::scrape_tv_sidecars(
-            state,
-            media,
-            &show_root,
-            &rows_to_write,
-        );
+        crate::scrape_metadata::scrape_tv_sidecars(state, media, &show_root, &coverages_to_write);
     } else {
         let nfo_enabled = state
             .store
@@ -225,6 +211,60 @@ pub(crate) fn write_resolved_nfo(state: &ApiState, media: &Media, sample_path: &
     }
 }
 
+/// 样例文件在台账里查无行时的占位覆盖：只携带文件名解析出的集坐标与路径。
+///
+/// 仅用于 `show_root` 的整片/分集判定与 `scrape_tv_sidecars` 的按路径取租约，
+/// 不写库、不代表任何已发布的文件版本。季节与集号两者都有才算分集；
+/// 只有一个（旧模型允许 `(Some, None)` 这种半坐标）时按整片处理，绝不造 `(0, 0)`。
+fn synthetic_coverage(
+    media_id: domain::MediaId,
+    kind: domain::MediaKind,
+    path: &std::path::Path,
+    season: Option<u32>,
+    episode: Option<u32>,
+) -> domain::FileCoverage {
+    let units = match (season, episode) {
+        (Some(season), Some(episode)) => vec![domain::UnitKey::new(season as i32, episode as i32)],
+        _ => vec![domain::UnitKey::WHOLE],
+    };
+    domain::FileCoverage {
+        file: domain::LibraryFile {
+            file_id: domain::LedgerId::new(),
+            library_id: domain::LibraryId::new(),
+            root_id: String::new(),
+            media_id,
+            kind,
+            path: path.to_path_buf(),
+            version: domain::FileVersion {
+                revision: 1,
+                source_version: crate::fingerprint_job::current_source_version(path),
+            },
+            presence: domain::FilePresence::Present,
+            publication: domain::FilePublication::Published,
+            size_bytes: None,
+            stat_known: false,
+            created_ns: None,
+            modified_ns: None,
+            source_digest: None,
+            source_path: None,
+            transfer_mode: None,
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: domain::QualitySource::Release,
+            confidence: domain::Confidence::High,
+            filter_score: None,
+            release_quality: None,
+            duration_ms: None,
+            tracks_version: 0,
+            poster_path: None,
+            backdrop_path: None,
+            still_path: None,
+        },
+        units,
+    }
+}
+
 /// 目录对不上时，给同一部剧还没有剧照的分集各截一帧。
 /// STRM 走里面的远程地址，和流探测同一套输入，不把 `.strm` 文本当视频。
 fn attach_episode_frames(state: &ApiState, media: &Media, sample_path: &std::path::Path) {
@@ -234,11 +274,11 @@ fn attach_episode_frames(state: &ApiState, media: &Media, sample_path: &std::pat
     let paths = {
         let store = state.store.lock();
         store
-            .list_ledger()
+            .list_file_coverage()
             .unwrap_or_default()
             .into_iter()
-            .filter(|row| row.media_id == media.id)
-            .map(|row| std::path::PathBuf::from(row.path))
+            .filter(|coverage| coverage.file.media_id == media.id)
+            .map(|coverage| coverage.file.path)
             .filter(|path| path.parent() == Some(dir))
             .collect::<Vec<_>>()
     };
@@ -403,10 +443,10 @@ pub(crate) fn rebind_scan_rows(
     }
     let store = state.store.lock();
     for path in inserted {
-        let Some(row) = store
-            .ledger_by_path(&path.display().to_string())
+        let Some(coverage) = store
+            .file_coverage_by_path(&path.display().to_string())
             .map_err(|e| e.to_string())?
-            .filter(|row| row.media_id == previous)
+            .filter(|coverage| coverage.file.media_id == previous)
         else {
             continue;
         };
@@ -423,7 +463,7 @@ pub(crate) fn rebind_scan_rows(
             return Err("Library 正在删除，拒绝重绑未归属的旧目录文件".into());
         }
         store
-            .rebind_scanned_ledger(row.id, canonical)
+            .rebind_scanned_ledger(coverage.file.file_id, canonical)
             .map_err(|e| e.to_string())?;
     }
     Ok(())

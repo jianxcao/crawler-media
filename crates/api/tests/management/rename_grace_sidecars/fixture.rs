@@ -9,6 +9,7 @@ use parking_lot::Mutex;
 use tower::ServiceExt;
 
 use super::super::common::{Fixtures, request, state};
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 pub struct RenameCatalog;
 
@@ -100,24 +101,20 @@ pub struct RenameFixture {
     pub live_root: PathBuf,
 }
 
-fn row(
+fn file_spec(
     media_id: domain::MediaId,
     path: &std::path::Path,
     season: u32,
     episode: u32,
-) -> domain::LedgerRow {
-    domain::LedgerRow {
-        id: domain::LedgerId::new(),
+) -> FixtureFile {
+    FixtureFile {
+        file_id: Some(domain::LedgerId::new()),
         media_id,
         path: path.display().to_string(),
         season: Some(season),
         episode: Some(episode),
         resolution: Some("1080p".into()),
-        codec: None,
-        hdr: None,
-        quality_source: domain::QualitySource::Release,
-        confidence: domain::Confidence::High,
-        filter_score: None,
+        ..Default::default()
     }
 }
 
@@ -145,9 +142,7 @@ fn seed_season(
     for episode in 1..=2 {
         let path = dir.join(format!("Spirit.Rangers.S{season:02}E{episode:02}.strm"));
         std::fs::write(&path, b"https://example.com/stream").unwrap();
-        store
-            .insert_ledger(&row(media_id, &path, season, episode))
-            .unwrap();
+        publish_fixture_file(&store, &file_spec(media_id, &path, season, episode)).unwrap();
     }
 }
 
@@ -265,7 +260,7 @@ impl RenameFixture {
         let store_guard = self.state.store();
         let store = store_guard.lock();
         assert_eq!(
-            store.ledger_for_media(self.media.id).unwrap().len(),
+            store.file_coverage_for_media(self.media.id).unwrap().len(),
             4,
             "both 2 old rows and 2 new rows should remain in ledger during grace period"
         );

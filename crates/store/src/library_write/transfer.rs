@@ -1,7 +1,7 @@
 //! Transfer reservation and completion transactions.
 //!
 //! Prepares and publishes FileCoverage facts during Download transfers,
-//! maintaining atomic recovery of pending states without legacy LedgerRow shims.
+//! maintaining atomic recovery of pending states without a legacy projection shim.
 
 use std::path::Path;
 

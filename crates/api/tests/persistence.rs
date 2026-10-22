@@ -1,7 +1,8 @@
 use api::Store;
 use domain::{
-    Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, Site, SiteId,
+    Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, Site, SiteId,
 };
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 fn movie(title: &str) -> Media {
     Media {
@@ -251,10 +252,12 @@ fn ledger_keeps_its_source_path_for_manual_retransfer() {
     std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
     std::fs::write(&source, b"source").unwrap();
     std::fs::write(&destination, b"destination").unwrap();
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let file_id = LedgerId::new();
+    let spec = FixtureFile {
+        file_id: Some(file_id),
         media_id: media.id,
         path: destination.display().to_string(),
+        source_path: source.to_str().map(str::to_owned),
         season: None,
         episode: None,
         resolution: None,
@@ -263,15 +266,16 @@ fn ledger_keeps_its_source_path_for_manual_retransfer() {
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     };
 
-    store.insert_ledger_with_source(&row, &source).unwrap();
+    publish_fixture_file(&store, &spec).unwrap();
 
     let source_path = store
-        .list_ledger_with_mode()
+        .list_file_coverage()
         .unwrap()
         .into_iter()
-        .find(|(saved, _, _)| saved.id == row.id)
-        .and_then(|(_, _, source_path)| source_path);
-    assert_eq!(source_path.as_deref(), source.to_str());
+        .find(|cov| cov.file.file_id == file_id)
+        .and_then(|cov| cov.file.source_path);
+    assert_eq!(source_path.as_deref(), Some(source.as_path()));
 }

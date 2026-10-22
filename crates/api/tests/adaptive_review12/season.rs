@@ -27,14 +27,17 @@ fn final_outro_deletion_must_not_publish_deleted_episode() {
     let capture = Arc::new(ChangedCapture {
         inner: f.engine.clone(),
         store: f.store.clone(),
-        target: row.path.clone(),
+        target: row.file.path.to_string_lossy().into_owned(),
         mode: "delete-outro",
     });
     f.manager = ProbeManager::with_engines(f.store.clone(), f.engine.clone(), capture);
     let result = raw_season(&f);
     println!(
         "after final outro deleted ledger={:?}; replacement={result:?}",
-        f.store.lock().get_ledger(&row.id.to_string()).unwrap()
+        f.store
+            .lock()
+            .file_coverage_by_id(row.file.file_id)
+            .unwrap()
     );
     assert!(
         result
@@ -50,7 +53,7 @@ fn inconclusive_silent_fingerprint_must_not_be_refreshed_as_success() {
     let capture = Arc::new(ChangedCapture {
         inner: f.engine.clone(),
         store: f.store.clone(),
-        target: f.units[0].row.path.clone(),
+        target: f.units[0].row.file.path.to_string_lossy().into_owned(),
         mode: "silent-intro",
     });
     f.manager = ProbeManager::with_engines(f.store.clone(), f.engine.clone(), capture);
@@ -75,7 +78,11 @@ fn inconclusive_silent_fingerprint_must_not_be_refreshed_as_success() {
 #[test]
 fn cancelled_last_unit_must_not_mark_aborted_forced_refresh_successful() {
     let mut f = setup("uniform", &[1, 2, 3]);
-    let keys: Vec<_> = f.units.iter().map(|u| u.row.id.to_string()).collect();
+    let keys: Vec<_> = f
+        .units
+        .iter()
+        .map(|u| u.row.file.file_id.to_string())
+        .collect();
     {
         let st = f.store.lock();
         let specs: Vec<_> = keys
@@ -110,8 +117,11 @@ fn cancelled_last_unit_must_not_mark_aborted_forced_refresh_successful() {
         u.job_id = Some("cancel-last".into());
     }
     let deleted = &f.units[2].row;
-    std::fs::remove_file(&deleted.path).unwrap();
-    f.store.lock().delete_ledger_path(&deleted.path).unwrap();
+    std::fs::remove_file(&deleted.file.path).unwrap();
+    f.store
+        .lock()
+        .delete_ledger_path(deleted.file.path.to_str().unwrap())
+        .unwrap();
     let result = tokio::runtime::Runtime::new().unwrap().block_on(
         api::probe_manager::season::run_adaptive_season_pipeline(
             &f.manager,
@@ -144,8 +154,11 @@ fn deletion_between_analysis_and_publication_keeps_old_results() {
     let f = setup("uniform", &[1, 2, 3]);
     let replacement = raw_season(&f).unwrap();
     let row = &f.units[2].row;
-    std::fs::remove_file(&row.path).unwrap();
-    f.store.lock().delete_ledger_path(&row.path).unwrap();
+    std::fs::remove_file(&row.file.path).unwrap();
+    f.store
+        .lock()
+        .delete_ledger_path(row.file.path.to_str().unwrap())
+        .unwrap();
     let store = f.store.lock();
     let result = store.complete_marker_refresh_checked("review9-job", &[replacement]);
     assert!(result.is_err());
@@ -156,7 +169,7 @@ fn deletion_between_analysis_and_publication_keeps_old_results() {
     assert_eq!(previous.source, "old");
     assert!(
         store
-            .get_cached_chapters(&row.id.to_string())
+            .get_cached_chapters(&row.file.file_id.to_string())
             .unwrap()
             .is_none()
     );
@@ -172,7 +185,7 @@ async fn queued_deletion_cancels_refresh_and_releases_scope_for_retry() {
     let units = f.units.clone();
     let manager = Arc::new(f.manager);
     assert_eq!(manager.enqueue_marker_refresh(units.clone()), 3);
-    let first_id = units[0].row.id.to_string();
+    let first_id = units[0].row.file.file_id.to_string();
     let job_id = f
         .store
         .lock()
@@ -180,10 +193,10 @@ async fn queued_deletion_cancels_refresh_and_releases_scope_for_retry() {
         .unwrap()
         .unwrap()
         .job_id;
-    std::fs::remove_file(&units[0].row.path).unwrap();
+    std::fs::remove_file(&units[0].row.file.path).unwrap();
     f.store
         .lock()
-        .delete_ledger_path(&units[0].row.path)
+        .delete_ledger_path(units[0].row.file.path.to_str().unwrap())
         .unwrap();
     assert!(manager.try_start_workers());
     let job = wait_for_terminal(&f.store, &job_id).await;
@@ -195,7 +208,7 @@ async fn queued_deletion_cancels_refresh_and_releases_scope_for_retry() {
     let retry_id = f
         .store
         .lock()
-        .active_probe_unit_for_ledger(&units[1].row.id.to_string())
+        .active_probe_unit_for_ledger(&units[1].row.file.file_id.to_string())
         .unwrap()
         .unwrap()
         .job_id;
@@ -226,7 +239,7 @@ async fn restarted_refresh_still_rejects_unresolved_results() {
     let capture = Arc::new(ChangedCapture {
         inner: f.engine.clone(),
         store: f.store.clone(),
-        target: f.units[0].row.path.clone(),
+        target: f.units[0].row.file.path.to_string_lossy().into_owned(),
         mode: "silent-intro",
     });
     let restarted = Arc::new(ProbeManager::with_engines(

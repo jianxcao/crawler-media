@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use domain::{FileCoverage, FileSource, Filter, LedgerRow, LibraryId, Media, Subscribe, Torrent};
+use domain::{FileCoverage, FileSource, Filter, LibraryId, Media, Subscribe, Torrent};
 use downloader::Downloader;
 use hooks::{Bus, PluginError};
 use library::TransferMode;
@@ -55,10 +55,11 @@ pub struct RunInput<'a, D: Downloader + ?Sized> {
 
 pub struct RunOutcome {
     pub facts: SubscribeFacts,
+    /// The files this round published into the Library: the authoritative
+    /// coverage (identity, path, facts, units) every caller persists from.
     pub files: Vec<FileCoverage>,
+    /// Where each published file came from, keyed by `FileSource::file_id`.
     pub file_sources: Vec<FileSource>,
-    pub ledger: Vec<LedgerRow>,
-    pub ledger_sources: Vec<LedgerSource>,
     pub removed_paths: Vec<String>,
     pub completed: bool,
     /// Enclosures whose completed files were transferred into the Library.
@@ -76,9 +77,4 @@ pub struct RunOutcome {
     pub submission_errors: Vec<String>,
     /// All torrents added to downloader during this run along with their scores.
     pub torrents_added: Vec<(i32, Torrent)>,
-}
-
-pub struct LedgerSource {
-    pub ledger_path: String,
-    pub source_path: String,
 }

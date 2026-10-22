@@ -4,12 +4,13 @@
 //! 真实 SQLite 执行器见 `maintenance_sqlite.rs`。
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use api::maintenance::{
-    DatabaseExecutor, DatabaseName, DatabaseOutcome, DatabaseReport, DatabaseTarget,
-    MaintenanceContext, SqliteExecutor, database_targets, run,
+    ConfiguredSqliteExecutor, DatabaseExecutor, DatabaseName, DatabaseOutcome, DatabaseReport,
+    DatabaseTarget, MaintenanceContext, SqliteExecutor, SqliteLimits, database_targets, run,
 };
 use api::worker::StateRunner;
 use api::{ApiState, Store};
@@ -397,19 +398,21 @@ fn playback_retention_dry_run_keeps_logs_then_prunes_only_logs() {
     {
         let guard = store.lock();
         // `playback_units.media_id` 现在有真实外键：先登记 Media 身份。
-        guard.insert_media(&domain::Media {
-            id: media,
-            kind: domain::MediaKind::Movie,
-            title: "Retention Fixture".into(),
-            original_title: None,
-            aliases: Vec::new(),
-            year: None,
-            tmdb_id: None,
-            douban_id: None,
-            tvdb_id: None,
-            bangumi_id: None,
-            anilist_id: None,
-        }).unwrap();
+        guard
+            .insert_media(&domain::Media {
+                id: media,
+                kind: domain::MediaKind::Movie,
+                title: "Retention Fixture".into(),
+                original_title: None,
+                aliases: Vec::new(),
+                year: None,
+                tmdb_id: None,
+                douban_id: None,
+                tvdb_id: None,
+                bangumi_id: None,
+                anilist_id: None,
+            })
+            .unwrap();
         let file_id = seed_published_file(&guard, tmp.path(), media);
         guard
             .upsert_unit(
@@ -659,4 +662,124 @@ fn dry_run_reports_a_truncated_budget_instead_of_claiming_completion() {
         "还有更多可删候选时必须如实报告，不能说'已完成': {report}"
     );
     assert_eq!(terminal_count(&data), 1_200, "dry_run 不写库");
+}
+
+// ---------------------------------------------------------------------------
+// Task 20 Step 2：真实 VACUUM 的持锁墙钟 + 并发写入被拒的实测证据
+// ---------------------------------------------------------------------------
+
+/// 放宽准入阈值（阈值行为本身由 `maintenance_sqlite.rs` 覆盖）：测试用 ~32MiB 的库
+/// 就能触发一次真实 VACUUM，从而量出独占锁被竞争写入撞到的墙钟窗口。
+fn vacuum_limits() -> SqliteLimits {
+    SqliteLimits {
+        min_free_bytes: 0,
+        min_free_ratio_percent: 0,
+        vacuum_headroom_bytes: 0,
+        per_database_limit: Duration::from_secs(30),
+    }
+}
+
+/// ~32MiB 负载并删掉一半：VACUUM 需要真实的重写时间，才有可观测的持锁窗口。
+fn seed_free_pages(path: &Path) {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE gauge_payload (id INTEGER PRIMARY KEY, body TEXT);
+         WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 8000)
+         INSERT INTO gauge_payload (id, body) SELECT x, hex(zeroblob(2000)) FROM c;
+         DELETE FROM gauge_payload WHERE id % 2 = 0;",
+    )
+    .unwrap();
+}
+
+/// 竞争写探针：独立连接 + `busy_timeout=0`，VACUUM 持独占锁期间的
+/// `BEGIN IMMEDIATE` 会立即返回 BUSY，因此 busy 次数与首末 busy 间隔都是实测值。
+struct WriteProbe {
+    attempts: AtomicUsize,
+    busy: AtomicUsize,
+    window: StdMutex<Option<(Instant, Instant)>>,
+    stop: AtomicBool,
+}
+
+impl WriteProbe {
+    fn blocked_window_ms(&self) -> u128 {
+        self.window
+            .lock()
+            .unwrap()
+            .map(|(first, last)| last.duration_since(first).as_millis())
+            .unwrap_or(0)
+    }
+
+    fn run(&self, path: &Path) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.pragma_update(None, "busy_timeout", 0).unwrap();
+        while !self.stop.load(Ordering::SeqCst) {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            if conn.execute_batch("BEGIN IMMEDIATE").is_err() {
+                let at = Instant::now();
+                self.busy.fetch_add(1, Ordering::SeqCst);
+                let mut window = self.window.lock().unwrap();
+                let entry = window.get_or_insert((at, at));
+                entry.1 = at;
+                continue;
+            }
+            let _ = conn.execute_batch("ROLLBACK");
+            std::thread::sleep(Duration::from_micros(200));
+        }
+    }
+}
+
+#[test]
+fn vacuum_lock_duration_is_measured_against_a_concurrent_writer() {
+    let executor = Arc::new(ConfiguredSqliteExecutor::with_limits(vacuum_limits()));
+    let (tmp, state) = temp_state(executor);
+    let app_db = data_dir(&state).join("app.db");
+    seed_free_pages(&app_db);
+
+    let probe = Arc::new(WriteProbe {
+        attempts: AtomicUsize::new(0),
+        busy: AtomicUsize::new(0),
+        window: StdMutex::new(None),
+        stop: AtomicBool::new(false),
+    });
+    let writer = {
+        let probe = probe.clone();
+        let path = app_db.clone();
+        std::thread::spawn(move || probe.run(&path))
+    };
+
+    let job = enqueue_claim(&state, JobKind::DatabaseMaintenance, DB_VACUUM, unix_now());
+    run(&state, &job).unwrap();
+    let report = progress_of(&state, &job);
+    probe.stop.store(true, Ordering::SeqCst);
+    writer.join().unwrap();
+
+    let app = db_entry(&report, "app");
+    assert_eq!(
+        app["outcome"], "vacuumed",
+        "放宽阈值后必须真的跑完一次 VACUUM: {report}"
+    );
+    let size_before = app["size_before"].as_u64().unwrap();
+    let size_after = app["size_after"].as_u64().unwrap();
+    assert!(
+        size_after < size_before,
+        "VACUUM 必须真的重写文件并回收空闲页: {app}"
+    );
+    let attempts = probe.attempts.load(Ordering::SeqCst);
+    let busy = probe.busy.load(Ordering::SeqCst);
+    assert!(attempts > 0, "竞争写探针必须真的尝试过写入");
+    assert!(
+        busy > 0,
+        "VACUUM 持锁期间另一连接的写入必须被拒（attempts={attempts} busy={busy}）"
+    );
+
+    println!(
+        "MEASURE task20 vacuum_lock db=app report_elapsed_ms={} (该库整段维护: PRAGMA optimize + VACUUM) size_before={} size_after={} probe_attempts={} probe_busy={} probe_blocked_window_ms={}",
+        app["elapsed_ms"],
+        size_before,
+        size_after,
+        attempts,
+        busy,
+        probe.blocked_window_ms()
+    );
+    assert!(tmp.path().exists());
 }

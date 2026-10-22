@@ -20,7 +20,7 @@ pub(super) fn resolve_playback_for(
     store: &crate::Store,
     body: &Value,
     user_id: domain::UserId,
-) -> Option<(domain::LedgerRow, domain::Media, ResolvedResume)> {
+) -> Option<(domain::LibraryFile, domain::Media, ResolvedResume)> {
     let media_id = resolve_media_id(body["media_item_id"].as_str()?)?;
     let media = store.get_media(media_id).ok().flatten()?;
     let season = coordinate(body, "season_number", "season")?;
@@ -76,8 +76,7 @@ pub(super) fn resolve_playback_for(
         .resolve_playback(user_id, &item, preferred_source.as_ref(), explicit_start_ms)
         .ok()?;
 
-    let unit = (resolved.target.unit.season, resolved.target.unit.episode);
-    let row = crate::media_server_provider::items::row_view(&resolved.target.file, unit);
+    let file = resolved.target.file.clone();
 
     // If caller specified file_id, verify that the resolved file matches it
     if let Some(pref) = preferred_source {
@@ -86,20 +85,21 @@ pub(super) fn resolve_playback_for(
         }
     }
 
-    Some((row, media, resolved))
+    Some((file, media, resolved))
 }
 
 /// Unit recorded for a selected file, used when a TV request omits coordinates.
 fn inferred_unit(store: &crate::Store, file_id: Option<LedgerId>) -> Option<(i32, i32)> {
-    let row = store.get_ledger(&file_id?.to_string()).ok().flatten()?;
-    Some((row.season? as i32, row.episode? as i32))
+    let cov = store.file_coverage_by_id(file_id?).ok().flatten()?;
+    let u = cov.units.iter().find(|u| !u.is_whole())?;
+    Some((u.season, u.episode))
 }
 
 pub(super) fn row_for(
     store: &crate::Store,
     body: &Value,
     user_id: Option<domain::UserId>,
-) -> Option<(domain::LedgerRow, domain::Media, i32, i32)> {
+) -> Option<(domain::LibraryFile, domain::Media, i32, i32)> {
     let media_id = resolve_media_id(body["media_item_id"].as_str()?)?;
     let media = store.get_media(media_id).ok().flatten()?;
     let season = coordinate(body, "season_number", "season")?;
@@ -148,8 +148,7 @@ pub(super) fn row_for(
     };
 
     let unit = (source.unit.season, source.unit.episode);
-    let row = crate::media_server_provider::items::row_view(&source.file, unit);
-    Some((row, media, unit.0, unit.1))
+    Some((source.file, media, unit.0, unit.1))
 }
 
 pub(super) fn watch_unit(

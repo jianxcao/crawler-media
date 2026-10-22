@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use domain::{LedgerId, LedgerRow, MediaKind, Release, Subscribe};
+use domain::{FileCoverage, LedgerId, MediaKind, Release, Subscribe};
 use subscribe::SubscribeFacts;
 
 use crate::library_ownership::LibraryOwnership;
@@ -14,7 +14,7 @@ pub struct SubscribeLibrarySnapshot {
     pub kind: MediaKind,
     pub ownership: LibraryOwnership,
     pub saved: SubscribeFacts,
-    pub rows: Vec<LedgerRow>,
+    pub rows: Vec<FileCoverage>,
     pub qualities: HashMap<LedgerId, Result<Release, String>>,
     /// Scoped fingerprint of the target Library's configuration and the
     /// observed media's file facts, re-read before a side effect is admitted.
@@ -39,10 +39,13 @@ impl Store {
                 .ok_or_else(|| StoreError::Missing("target Library".into()))?,
         };
         let fingerprint = self.read_fingerprint(&target_library_id, subscribe.media_id)?;
-        let rows = self.ledger_for_media(subscribe.media_id)?;
+        let rows = self.file_coverage_for_media(subscribe.media_id)?;
         let mut qualities = HashMap::new();
-        for row in &rows {
-            qualities.insert(row.id, self.owned_quality(row).map_err(|e| e.to_string()));
+        for coverage in &rows {
+            qualities.insert(
+                coverage.file.file_id,
+                self.owned_quality(coverage).map_err(|e| e.to_string()),
+            );
         }
 
         Ok(SubscribeLibrarySnapshot {

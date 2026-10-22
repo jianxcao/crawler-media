@@ -3,13 +3,14 @@ use std::sync::Arc;
 
 use api::{Store, router};
 use axum::http::StatusCode;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{LedgerId, Media, MediaId, MediaKind};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::*;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 #[tokio::test]
 async fn manual_probe_refreshes_every_library_holding_the_media() {
@@ -49,23 +50,20 @@ async fn manual_probe_refreshes_every_library_holding_the_media() {
     for root in [&primary, &secondary] {
         let path = root.join("Shared.Media.2024.mkv");
         std::fs::write(&path, b"invalid-video").unwrap();
-        let row = LedgerRow {
-            id: LedgerId::new(),
-            media_id: media.id,
-            path: path.display().to_string(),
-            season: None,
-            episode: None,
-            resolution: None,
-            codec: None,
-            hdr: None,
-            quality_source: QualitySource::Release,
-            confidence: Confidence::High,
-            filter_score: None,
-        };
-        store.insert_ledger(&row).unwrap();
+        let file_id = LedgerId::new();
+        publish_fixture_file(
+            &store,
+            &FixtureFile {
+                file_id: Some(file_id),
+                media_id: media.id,
+                path: path.display().to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         store
             .put_cached_chapters(
-                &row.id.to_string(),
+                &file_id.to_string(),
                 &[library::ChapterMarker {
                     start_ms: 12_000,
                     end_ms: 30_000,
@@ -75,7 +73,7 @@ async fn manual_probe_refreshes_every_library_holding_the_media() {
                 }],
             )
             .unwrap();
-        ids.push(row.id.to_string());
+        ids.push(file_id.to_string());
     }
     drop(store);
     let fetcher = Arc::new(Fixtures {
@@ -139,23 +137,20 @@ async fn playback_session_returns_cached_chapters_without_reprobing_file() {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
-    let row = LedgerRow {
-        id: LedgerId::new(),
-        media_id: media.id,
-        path: path.display().to_string(),
-        season: None,
-        episode: None,
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
-    store.insert_ledger(&row).unwrap();
+    let file_id = LedgerId::new();
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(file_id),
+            media_id: media.id,
+            path: path.display().to_string(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     store
         .put_cached_chapters(
-            &row.id.to_string(),
+            &file_id.to_string(),
             &[library::ChapterMarker {
                 start_ms: 12_000,
                 end_ms: 20_000,
@@ -186,9 +181,9 @@ async fn playback_session_returns_cached_chapters_without_reprobing_file() {
     let body = json_body(response).await;
     assert_eq!(body["data"]["chapters"][0]["start_ms"], 12_000);
     assert_eq!(body["data"]["chapters_pending"], false);
-    assert_eq!(body["data"]["file_id"], row.id.to_string());
+    assert_eq!(body["data"]["file_id"], file_id.to_string());
 
-    let cache_url = format!("/api/v1/playback/chapters?file_id={}", row.id);
+    let cache_url = format!("/api/v1/playback/chapters?file_id={}", file_id);
     let response = app
         .clone()
         .oneshot(request(
@@ -206,7 +201,7 @@ async fn playback_session_returns_cached_chapters_without_reprobing_file() {
 
     Store::open(&data)
         .unwrap()
-        .clear_cached_chapters(&row.id.to_string())
+        .clear_cached_chapters(&file_id.to_string())
         .unwrap();
     let response = app
         .oneshot(request(

@@ -55,8 +55,6 @@ pub fn collect_completed_recorded<D: Downloader + ?Sized>(
     control.check()?;
     let mut files: Vec<FileCoverage> = Vec::new();
     let mut file_sources: Vec<FileSource> = Vec::new();
-    let mut ledger = Vec::new();
-    let mut ledger_sources = Vec::new();
     let mut removed_paths = Vec::new();
     let mut transferred_enclosures = Vec::new();
     let mut rejected_enclosures = Vec::new();
@@ -81,8 +79,6 @@ pub fn collect_completed_recorded<D: Downloader + ?Sized>(
             &scored,
             &mut files,
             &mut file_sources,
-            &mut ledger,
-            &mut ledger_sources,
             &mut removed_paths,
             &mut transferred_enclosures,
             &mut rejected_enclosures,
@@ -98,8 +94,6 @@ pub fn collect_completed_recorded<D: Downloader + ?Sized>(
         facts: added.input.facts,
         files,
         file_sources,
-        ledger,
-        ledger_sources,
         removed_paths,
         transferred_enclosures,
         rejected_enclosures,

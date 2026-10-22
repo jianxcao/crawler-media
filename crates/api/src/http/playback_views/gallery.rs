@@ -36,19 +36,19 @@ pub(crate) async fn favorites_gallery(
     struct MediaGalleryCandidate {
         media: domain::Media,
         library_id: String,
-        preferred_row: Option<domain::LedgerRow>,
-        owned_rows: Vec<domain::LedgerRow>,
+        preferred_coverage: Option<domain::FileCoverage>,
+        owned_rows: Vec<domain::FileCoverage>,
     }
 
     let candidates: Vec<MediaGalleryCandidate> = {
         let store = state.store.lock();
-        let all_rows = store.list_ledger().unwrap_or_default();
+        let all_rows = store.list_file_coverage().unwrap_or_default();
         let media_ids: HashSet<domain::MediaId> = all_rows
             .iter()
-            .filter_map(|row| {
-                let media = store.get_media(row.media_id).ok().flatten()?;
-                crate::http::library::row_visible_to_user(&store, row, &media, Some(user_id))
-                    .then_some(row.media_id)
+            .filter_map(|cov| {
+                let media = store.get_media(cov.file.media_id).ok().flatten()?;
+                crate::http::library::file_visible_to_user(&store, &cov.file, &media, Some(user_id))
+                    .then_some(cov.file.media_id)
             })
             .collect();
         let mut by_media: HashMap<domain::MediaId, i64> = HashMap::new();
@@ -100,28 +100,27 @@ pub(crate) async fn favorites_gallery(
             .take(limit)
             .filter_map(|(media_id, _)| {
                 let media = store.get_media(media_id).ok().flatten()?;
-                let owned: Vec<domain::LedgerRow> = all_rows
+                let owned: Vec<domain::FileCoverage> = all_rows
                     .iter()
-                    .filter(|r| r.media_id == media_id)
-                    .filter(|r| {
-                        crate::http::library::row_visible_to_user(&store, r, &media, Some(user_id))
+                    .filter(|cov| cov.file.media_id == media_id)
+                    .filter(|cov| {
+                        crate::http::library::file_visible_to_user(&store, &cov.file, &media, Some(user_id))
                     })
                     .cloned()
                     .collect();
                 if owned.is_empty() {
                     return None;
                 }
-                let refs: Vec<&domain::LedgerRow> = owned.iter().collect();
-                let library_id = refs
+                let library_id = owned
                     .first()
-                    .and_then(|row| crate::http::library::library_for_row(&store, row, &media))
+                    .and_then(|cov| crate::http::library::library_for_file(&store, &cov.file, &media))
                     .map(|library| library.id)
                     .unwrap_or_default();
-                let pref = crate::http::library::preferred_row(&refs).cloned();
+                let pref = crate::http::library::preferred_coverage(&owned).cloned();
                 Some(MediaGalleryCandidate {
                     media,
                     library_id,
-                    preferred_row: pref,
+                    preferred_coverage: pref,
                     owned_rows: owned,
                 })
             })
@@ -136,15 +135,15 @@ pub(crate) async fn favorites_gallery(
             let mut groups = Vec::new();
             for cand in candidates {
                 let mut images = Vec::new();
-                if let Some(ref row) = cand.preferred_row {
-                    let dir = std::path::Path::new(&row.path)
+                if let Some(ref cov) = cand.preferred_coverage {
+                    let dir = cov.file.path
                         .parent()
                         .map(|p| p.to_path_buf());
                     if let Some(dir) = dir {
                         if files.is_file(&dir.join("poster.jpg")) {
                             images.push(json!({
                                 "kind": "poster",
-                                "url": crate::http::library::artwork_url("posters", row.id),
+                                "url": crate::http::library::artwork_url("posters", cov.file.file_id),
                                 "aspect": 0.667,
                                 "label": "海报",
                                 "season": null,
@@ -155,7 +154,7 @@ pub(crate) async fn favorites_gallery(
                         if files.is_file(&dir.join("fanart.jpg")) {
                             images.push(json!({
                                 "kind": "backdrop",
-                                "url": crate::http::library::artwork_url("fanart", row.id),
+                                "url": crate::http::library::artwork_url("fanart", cov.file.file_id),
                                 "aspect": 1.778,
                                 "label": "背景",
                                 "season": null,
@@ -163,23 +162,25 @@ pub(crate) async fn favorites_gallery(
                                 "t_seconds": null,
                             }));
                         }
-                        for row in &cand.owned_rows {
-                            if row.episode.is_some()
-                                && crate::episode_still::existing_with(
-                                    std::path::Path::new(&row.path),
-                                    files.as_ref(),
-                                )
-                                .is_some()
-                            {
-                                images.push(json!({
-                                    "kind": "still",
-                                    "url": crate::http::library::artwork_url("stills", row.id),
-                                    "aspect": 1.778,
-                                    "label": "剧照",
-                                    "season": row.season,
-                                    "episode": row.episode,
-                                    "t_seconds": null,
-                                }));
+                        for cov in &cand.owned_rows {
+                            for unit in &cov.units {
+                                if !unit.is_whole()
+                                    && crate::episode_still::existing_with(
+                                        &cov.file.path,
+                                        files.as_ref(),
+                                    )
+                                    .is_some()
+                                {
+                                    images.push(json!({
+                                        "kind": "still",
+                                        "url": crate::http::library::artwork_url("stills", cov.file.file_id),
+                                        "aspect": 1.778,
+                                        "label": "剧照",
+                                        "season": unit.season,
+                                        "episode": unit.episode,
+                                        "t_seconds": null,
+                                    }));
+                                }
                             }
                         }
                     }

@@ -1,34 +1,20 @@
-use domain::{Confidence, LedgerId, LedgerRow, MediaId, QualitySource};
+use domain::{Confidence, LedgerId, MediaId, QualitySource};
 use store::Store;
 
-fn sample_row(media_id: MediaId, path: &str) -> LedgerRow {
-    LedgerRow {
-        id: LedgerId::new(),
+/// Fixture scan row: a whole-unit file with an 1080p release observation and no
+/// NFO facts. The read shape carries the file identity directly.
+fn sample_row(media_id: MediaId, path: &str) -> store::ScannedLedger {
+    store::ScannedLedger {
+        file_id: LedgerId::new(),
         media_id,
         path: path.to_string(),
-        season: None,
-        episode: None,
+        units: vec![domain::UnitKey::WHOLE],
         resolution: None,
         codec: None,
         hdr: None,
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
-    }
-}
-
-/// Fixture view of a scan row: whole-unit coverage for movie/video rows, the row's
-/// unit for TV rows, and no observation facts.
-fn scanned(row: &LedgerRow) -> store::ScannedLedger {
-    let units = match (row.season, row.episode) {
-        (Some(season), Some(episode)) => {
-            vec![domain::UnitKey::new(season as i32, episode as i32)]
-        }
-        _ => vec![domain::UnitKey::WHOLE],
-    };
-    store::ScannedLedger {
-        row: row.clone(),
-        units,
         source_version: "fixture-v1".into(),
         source_digest: None,
         size_bytes: None,
@@ -74,14 +60,14 @@ fn probe_obligations_bounded_vm_steps_at_scale() {
     // 100 fixed target obligations with low timestamps (1..=100)
     for index in 1..=100 {
         let row = sample_row(media_id, &format!("/movies/target_{index}.mkv"));
-        store.insert_scanned_files(&[scanned(&row)], index).unwrap();
+        store.insert_scanned_files(&[row], index).unwrap();
     }
 
     // 1k series baseline: 1,000 backlog items with higher timestamps
     for index in 101..=1_100 {
         let row = sample_row(media_id, &format!("/movies/backlog_{index}.mkv"));
         store
-            .insert_scanned_files(&[scanned(&row)], 10_000 + index)
+            .insert_scanned_files(&[row], 10_000 + index)
             .unwrap();
     }
 
@@ -94,7 +80,7 @@ fn probe_obligations_bounded_vm_steps_at_scale() {
     for index in 1_101..=50_100 {
         let row = sample_row(media_id, &format!("/movies/backlog_{index}.mkv"));
         store
-            .insert_scanned_files(&[scanned(&row)], 10_000 + index)
+            .insert_scanned_files(&[row], 10_000 + index)
             .unwrap();
     }
 
@@ -116,7 +102,7 @@ fn probe_obligations_limit_clamping() {
 
     for index in 1..=150 {
         let row = sample_row(media_id, &format!("/movies/clamp_{index}.mkv"));
-        store.insert_scanned_files(&[scanned(&row)], index).unwrap();
+        store.insert_scanned_files(&[row], index).unwrap();
     }
 
     // limit 0 clamped to 1

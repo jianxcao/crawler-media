@@ -140,7 +140,10 @@ fn nfo_reader_maps_dates_studios_directors_and_creators() {
     let NfoReadOutcome::Valid(episode) = outcome else {
         panic!("Nfo must parse as valid");
     };
-    assert_eq!(episode.fields.air_date, FieldValue::Value("2019-03-01".into()));
+    assert_eq!(
+        episode.fields.air_date,
+        FieldValue::Value("2019-03-01".into())
+    );
     assert_eq!(episode.fields.release_date, FieldValue::Missing);
 
     let outcome = parse_nfo_fields(
@@ -150,8 +153,110 @@ fn nfo_reader_maps_dates_studios_directors_and_creators() {
     let NfoReadOutcome::Valid(episode) = outcome else {
         panic!("Nfo must parse as valid");
     };
-    assert_eq!(episode.fields.air_date, FieldValue::Value("2019-03-02".into()));
+    assert_eq!(
+        episode.fields.air_date,
+        FieldValue::Value("2019-03-02".into())
+    );
     assert_eq!(episode.fields.release_date, FieldValue::Missing);
+}
+
+/// 页内主图只认已采纳事实：观察层必须把 episode 的 `<thumb>` 映射进 `still_url`，
+/// 否则「只有 NFO `<thumb>` 有图」的剧集在页内会静默丢主图（端点却仍能返回图片）。
+/// `still_url` 只落在 `media_episodes`，所以 Work/Season 作用域不得盲映射。
+#[test]
+fn episode_thumb_maps_to_still_url_but_work_and_season_do_not() {
+    let episode_scope = EntityScope::Episode {
+        season: 1,
+        episode: 1,
+    };
+    let outcome = parse_nfo_fields(
+        "<episodedetails><title>Pilot</title>\
+         <thumb>https://image.tmdb.org/t/p/w500/x.jpg</thumb></episodedetails>",
+        episode_scope,
+    );
+    let NfoReadOutcome::Valid(episode) = outcome else {
+        panic!("Nfo must parse as valid");
+    };
+    assert_eq!(
+        episode.fields.still_url,
+        FieldValue::Value("https://image.tmdb.org/t/p/w500/x.jpg".into()),
+        "episode 的 NFO <thumb> 必须成为观测到的 still_url"
+    );
+
+    // 存在性语义与其它字段一致：`<thumb/>` 是 Empty（显式清空），没写才是 Missing。
+    let outcome = parse_nfo_fields("<episodedetails><thumb/></episodedetails>", episode_scope);
+    let NfoReadOutcome::Valid(empty) = outcome else {
+        panic!("Nfo must parse as valid");
+    };
+    assert_eq!(empty.fields.still_url, FieldValue::Empty);
+    let outcome = parse_nfo_fields(
+        "<episodedetails><title>Pilot</title></episodedetails>",
+        episode_scope,
+    );
+    let NfoReadOutcome::Valid(missing) = outcome else {
+        panic!("Nfo must parse as valid");
+    };
+    assert_eq!(missing.fields.still_url, FieldValue::Missing);
+
+    let outcome = parse_nfo_fields(
+        "<movie><thumb>https://image.tmdb.org/t/p/w500/m.jpg</thumb></movie>",
+        EntityScope::Work,
+    );
+    let NfoReadOutcome::Valid(work) = outcome else {
+        panic!("Nfo must parse as valid");
+    };
+    assert_eq!(
+        work.fields.still_url,
+        FieldValue::Missing,
+        "Work 作用域没有 media_episodes.still_url，不得把 <thumb> 写进 still_url"
+    );
+
+    let outcome = parse_nfo_fields(
+        "<season><thumb>https://image.tmdb.org/t/p/w500/s.jpg</thumb></season>",
+        EntityScope::Season(1),
+    );
+    let NfoReadOutcome::Valid(season) = outcome else {
+        panic!("Nfo must parse as valid");
+    };
+    assert_eq!(season.fields.still_url, FieldValue::Missing);
+}
+
+/// 页内主图事实只认可渲染的远端 URL。`<thumb>` 写成本地引用（相对路径、绝对路径）时属于
+/// 文件系统旁车口径：把它落成 `still_url` 会盖掉已采纳的远端剧照，而页内主图渲染器
+/// （`crates/api` 的 `remote_episode_thumb`）只认远端 URL，结果页内主图反而静默消失。
+#[test]
+fn local_file_thumb_is_not_a_page_still_url() {
+    let episode_scope = EntityScope::Episode {
+        season: 1,
+        episode: 1,
+    };
+    for thumb in [
+        "reference-still.jpg",
+        "Show/Season 01/reference-still.jpg",
+        "/data/library/episode-still.jpg",
+    ] {
+        let body = format!("<episodedetails><thumb>{thumb}</thumb></episodedetails>");
+        let NfoReadOutcome::Valid(fields) = parse_nfo_fields(&body, episode_scope) else {
+            panic!("Nfo must parse as valid");
+        };
+        assert_eq!(
+            fields.fields.still_url,
+            FieldValue::Missing,
+            "本地引用 {thumb} 不是页内主图事实，不得写进 still_url"
+        );
+    }
+
+    let NfoReadOutcome::Valid(remote) = parse_nfo_fields(
+        "<episodedetails><thumb>https://image.example/still.jpg</thumb></episodedetails>",
+        episode_scope,
+    ) else {
+        panic!("Nfo must parse as valid");
+    };
+    assert_eq!(
+        remote.fields.still_url,
+        FieldValue::Value("https://image.example/still.jpg".into()),
+        "远端 URL 形态的 <thumb> 仍必须成为观测到的 still_url"
+    );
 }
 
 #[test]

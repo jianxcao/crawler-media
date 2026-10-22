@@ -547,7 +547,7 @@ async fn transfer_does_not_ledger_a_stale_mismatched_pending_torrent() {
         }
     }
     assert!(transfer_ran);
-    assert!(store.list_ledger().unwrap().is_empty());
+    assert!(store.list_file_coverage().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -613,7 +613,7 @@ async fn valid_manual_movie_and_tv_submissions_enter_their_own_library_media() {
         assert_eq!(response.status(), StatusCode::OK);
         if Store::open(tmp.path().join("data"))
             .unwrap()
-            .list_ledger()
+            .list_file_coverage()
             .unwrap()
             .len()
             == 2
@@ -623,10 +623,10 @@ async fn valid_manual_movie_and_tv_submissions_enter_their_own_library_media() {
     }
     let rows = Store::open(tmp.path().join("data"))
         .unwrap()
-        .list_ledger()
+        .list_file_coverage()
         .unwrap();
     assert_eq!(rows.len(), 2);
-    assert_ne!(rows[0].media_id, rows[1].media_id);
+    assert_ne!(rows[0].file.media_id, rows[1].file.media_id);
 }
 
 fn seed_transmission_downloader(store: &Store, url: String) -> domain::DownloaderId {

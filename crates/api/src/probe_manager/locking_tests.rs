@@ -1,21 +1,8 @@
 use super::*;
-use domain::{Confidence, LedgerId, QualitySource};
 
 fn unit() -> ProbeUnit {
     ProbeUnit {
-        row: LedgerRow {
-            id: LedgerId::new(),
-            media_id: MediaId::new(),
-            path: "deleted.strm".into(),
-            season: Some(1),
-            episode: Some(1),
-            resolution: None,
-            codec: None,
-            hdr: None,
-            quality_source: QualitySource::Release,
-            confidence: Confidence::High,
-            filter_score: None,
-        },
+        row: super::test_support::coverage(MediaId::new(), "deleted.strm", Some(1), Some(1)),
         kind: MediaKind::Tv,
         force_fingerprint: false,
         reuse_fingerprint_cache: false,

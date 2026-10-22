@@ -1,3 +1,4 @@
+use store::test_support::{publish_fixture_file, FixtureFile};
 #[path = "support/mod.rs"]
 mod support;
 
@@ -21,12 +22,26 @@ async fn full_lifecycle_playback_and_scan_correctness_acceptance() {
     let store_arc = fix.state.store();
     let row = store_arc
         .lock()
-        .ledger_by_path(&movie_file.display().to_string())
+        .file_coverage_by_path(&movie_file.display().to_string())
         .unwrap()
         .unwrap();
     // 扫描登记的 Movie 行只写文件事实、不写覆盖单元；重新登记同一路径让
-    // `insert_ledger` 写入 WHOLE 覆盖，播放请求与会话签发才有可解析的源。
-    store_arc.lock().insert_ledger(&row).unwrap();
+    // `publish_fixture_file` 写入 WHOLE 覆盖，播放请求与会话签发才有可解析的源。
+    publish_fixture_file(
+        &store_arc.lock(),
+        &FixtureFile {
+            media_id: row.file.media_id,
+            path: row.file.path.display().to_string(),
+            resolution: row.file.resolution.clone(),
+            codec: row.file.codec.clone(),
+            hdr: row.file.hdr.clone(),
+            quality_source: row.file.quality_source,
+            confidence: row.file.confidence,
+            filter_score: row.file.filter_score,
+            ..FixtureFile::default()
+        },
+    )
+    .unwrap();
 
     // 2. Playback session generation isolation and watch time accumulation
     let user_id = store_arc.lock().user_by_token(&fix.admin_token).unwrap().unwrap().id;
@@ -34,7 +49,7 @@ async fn full_lifecycle_playback_and_scan_correctness_acceptance() {
         &store_arc.lock(),
         user_id,
         "device_acc",
-        row.id,
+        row.file.file_id,
         1000,
     );
 
@@ -45,8 +60,8 @@ async fn full_lifecycle_playback_and_scan_correctness_acceptance() {
         Some(&fix.admin_token),
         json!({
             "device_id": "device_acc",
-            "media_item_id": row.media_id.to_string(),
-            "file_id": row.id.to_string(),
+            "media_item_id": row.file.media_id.to_string(),
+            "file_id": row.file.file_id.to_string(),
             "event": "start",
             "position_ms": 0,
             "play_session_id": session_id_1,
@@ -60,8 +75,8 @@ async fn full_lifecycle_playback_and_scan_correctness_acceptance() {
         Some(&fix.admin_token),
         json!({
             "device_id": "device_acc",
-            "media_item_id": row.media_id.to_string(),
-            "file_id": row.id.to_string(),
+            "media_item_id": row.file.media_id.to_string(),
+            "file_id": row.file.file_id.to_string(),
             "event": "progress",
             "position_ms": 5000,
             "play_session_id": session_id_1,
@@ -73,7 +88,7 @@ async fn full_lifecycle_playback_and_scan_correctness_acceptance() {
         &store_arc.lock(),
         user_id,
         "device_acc",
-        row.id,
+        row.file.file_id,
         2000,
     );
 
@@ -83,8 +98,8 @@ async fn full_lifecycle_playback_and_scan_correctness_acceptance() {
         Some(&fix.admin_token),
         json!({
             "device_id": "device_acc",
-            "media_item_id": row.media_id.to_string(),
-            "file_id": row.id.to_string(),
+            "media_item_id": row.file.media_id.to_string(),
+            "file_id": row.file.file_id.to_string(),
             "event": "start",
             "position_ms": 0,
             "play_session_id": session_id_2,
@@ -98,8 +113,8 @@ async fn full_lifecycle_playback_and_scan_correctness_acceptance() {
         Some(&fix.admin_token),
         json!({
             "device_id": "device_acc",
-            "media_item_id": row.media_id.to_string(),
-            "file_id": row.id.to_string(),
+            "media_item_id": row.file.media_id.to_string(),
+            "file_id": row.file.file_id.to_string(),
             "event": "stop",
             "position_ms": 5000,
             "play_session_id": session_id_1,

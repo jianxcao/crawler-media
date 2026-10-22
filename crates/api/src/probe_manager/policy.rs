@@ -1,6 +1,6 @@
-use std::path::Path;
-use domain::MediaKind;
 use crate::scrape_store::ScrapeStoreExt;
+use domain::MediaKind;
+use std::path::Path;
 use store::Store;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,34 +55,41 @@ pub(super) struct ProbeNeed {
 
 pub(super) fn assess_probe_need(
     store: &Store,
-    row: &domain::LedgerRow,
+    file: &domain::LibraryFile,
     origin: ProbeRequestOrigin,
     now_ms: i64,
     source_version: String,
 ) -> ProbeNeed {
-    let ledger_id = row.id.to_string();
+    let ledger_id = file.file_id.to_string();
     let kind = store
-        .get_media(row.media_id)
+        .get_media(file.media_id)
         .ok()
         .flatten()
         .map(|media| media.kind)
         .unwrap_or(MediaKind::Movie);
-    let path = Path::new(&row.path);
+    let path = file.path.as_path();
     let fingerprint_enabled = is_fingerprint_enabled_for_path(store, path, kind);
     let sample_duration_secs = store
         .get_scrape_config()
         .ok()
         .map(|config| config.effective.fingerprint_duration_secs)
         .unwrap_or(180);
-    let cached_meta = store.get_media_info_cache_version(&ledger_id).ok().flatten();
+    let cached_meta = store
+        .get_media_info_cache_version(&ledger_id)
+        .ok()
+        .flatten();
     let metadata_valid = cached_meta.as_ref().is_some_and(|version| {
         version.source_version == source_version
-            && version.format_duration_ms.is_some_and(|duration| duration > 0)
+            && version
+                .format_duration_ms
+                .is_some_and(|duration| duration > 0)
     });
     let media_duration_ms = cached_meta.and_then(|version| version.format_duration_ms);
-    let outro_expected = media_duration_ms.filter(|duration| *duration > 0).is_some_and(
-        |duration| duration / 1000 > i64::from(sample_duration_secs.saturating_add(30)),
-    );
+    let outro_expected = media_duration_ms
+        .filter(|duration| *duration > 0)
+        .is_some_and(|duration| {
+            duration / 1000 > i64::from(sample_duration_secs.saturating_add(30))
+        });
     let expected_key = crate::fingerprint_job::fingerprint_cache_key(
         &source_version,
         sample_duration_secs,
@@ -169,15 +176,16 @@ fn retry_gate(
 }
 
 fn matching_library(store: &Store, path: &Path, kind: MediaKind) -> Option<store::Library> {
-    store.library_for_path(path, kind).ok().flatten().or_else(|| {
-        store.list_libraries().ok().and_then(|libraries| {
-            libraries.into_iter().find(|library| {
-                library.kind == kind
-                    && library
-                        .root_paths
-                        .iter()
-                        .any(|root| path.starts_with(root))
+    store
+        .library_for_path(path, kind)
+        .ok()
+        .flatten()
+        .or_else(|| {
+            store.list_libraries().ok().and_then(|libraries| {
+                libraries.into_iter().find(|library| {
+                    library.kind == kind
+                        && library.root_paths.iter().any(|root| path.starts_with(root))
+                })
             })
         })
-    })
 }

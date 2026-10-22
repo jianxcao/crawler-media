@@ -20,11 +20,12 @@ use media_server::provider::query::{
 use media_server::provider::{MediaItemSnapshot, ServerItemPage, ServerItemQuery};
 
 use super::item_metadata;
-use super::items::with_date_created;
+use super::items::{snapshot_unit_coords, unit_columns, with_date_created};
 use super::*;
 
 mod light;
 mod page;
+mod resume;
 mod scope;
 
 use light::{
@@ -32,6 +33,7 @@ use light::{
     set_date_created,
 };
 use page::PageSelection;
+pub(super) use resume::resumable_items;
 use scope::{ScopedRead, read_scope};
 
 /// 选择阶段允许的 blocking 预算（与 `list_visible_items` 一致）。
@@ -116,7 +118,9 @@ fn select_page_blocking(
         // 页内条目的子项计数、播放状态仍来自完整的本地行。
         let covered: HashSet<MediaId> =
             page.items.iter().map(|item| item.item.media_id()).collect();
-        scope.rows.retain(|row| covered.contains(&row.media_id));
+        scope
+            .coverages
+            .retain(|coverage| covered.contains(&coverage.file.media_id));
         (scope, selection)
     };
     let PageSelection::Selected(page) = selection else {
@@ -262,7 +266,8 @@ fn hydrate_filter_facts(
     );
     for item in items.iter_mut() {
         let facts = item_metadata::filter_facts(
-            &item.snapshot.row,
+            &item.coverage.file,
+            snapshot_unit_coords(item.snapshot.unit),
             &item.snapshot.media,
             item.snapshot.is_series,
             adopted.get(&item.snapshot.media.id),
@@ -386,9 +391,11 @@ fn next_up_blocking(
     for media_id in order {
         let mut group = groups.remove(&media_id).unwrap_or_default();
         group.sort_by_key(|item| {
+            // 整片没有坐标，排序键退化成 0（与旧 `Option<u32>` 的
+            // `unwrap_or_default()` 同值），不能写成 `UNIT_WHOLE`（-1）。
             (
-                item.snapshot.row.season.unwrap_or_default(),
-                item.snapshot.row.episode.unwrap_or_default(),
+                item.snapshot.unit.map(|unit| unit.season).unwrap_or_default(),
+                item.snapshot.unit.map(|unit| unit.episode).unwrap_or_default(),
             )
         });
         if let Some(episode) = group.into_iter().find(|item| !item.snapshot.played) {
@@ -409,13 +416,16 @@ fn next_up_blocking(
 }
 
 /// NextUp 的候选读只需要「这个用户能看到的行」或「这个 Media 的行」。
+///
+/// 这里没有 `limit`：NextUp 的取页发生在「每个 Media 第一条未看」这个分组之后，
+/// 无法用一条 `LIMIT` 表达（`protocol_item_page` 不支持按播放状态排序/分组），
+/// 所以候选读必须覆盖作用域内的全部分集行；**水合仍然只有返回页那几条**。
 fn next_up_query(series_id: Option<&str>) -> ServerItemQuery {
     ServerItemQuery {
         series_id: series_id.map(str::to_owned),
         // NextUp 要的是分集候选：显式只列分集，避免为「剧折叠」条目建快照。
         include_item_types: Some("Episode".into()),
         recursive: true,
-        limit: usize::MAX,
         ..Default::default()
     }
 }
@@ -429,6 +439,7 @@ fn heavy_snapshot(
     let browse = state.browse_files.as_ref();
     let LightItem {
         snapshot,
+        coverage,
         child_counts,
         stat_paths,
         catalog,
@@ -438,7 +449,7 @@ fn heavy_snapshot(
     } = item;
     let MediaItemSnapshot {
         file,
-        row,
+        unit: snapshot_unit,
         media,
         ticks,
         play_count,
@@ -448,24 +459,29 @@ fn heavy_snapshot(
         is_series,
         ..
     } = snapshot;
+    // 协议快照里的单元是 `Option<UnitKey>`；本页的 store 访问器要坐标对，
+    // 整片回落到 `(-1, -1)`，绝不拼 `(0, 0)`。
+    let coords = snapshot_unit_coords(snapshot_unit);
+    let (season, episode) = unit_columns(coords);
     let (facts, fields, chapters, marker) = {
         let store = state.store.lock();
         // 过滤、计数和返回的 UserData 必须来自同一次单元观察，不能在这里重读。
         let facts = item_metadata::item_db_facts(
             &store,
-            &row,
+            &coverage.file,
+            coords,
             is_series,
             unit.as_ref(),
             whole_unit.as_ref(),
         );
         // 页内元数据也在锁内取：锁外只做渲染，不再读现场 NFO。
-        let fields = item_metadata::page_fields(&store, &row, &media, is_series)?;
+        let fields = item_metadata::page_fields(&store, &coverage.file, coords, &media, is_series)?;
         let chapters = store
-            .get_cached_chapters(&row.id.to_string())
+            .get_cached_chapters(&coverage.file.file_id.to_string())
             .map_err(|error| error.to_string())?
             .unwrap_or_default();
         let marker = store
-            .get_media_marker(row.media_id, row.season, row.episode)
+            .get_media_marker(coverage.file.media_id, season, episode)
             .map_err(|error| error.to_string())?;
         (facts, fields, chapters, marker)
     };
@@ -473,7 +489,8 @@ fn heavy_snapshot(
         facts,
         &fields,
         browse,
-        &row,
+        &coverage.file,
+        coords,
         &media,
         is_series,
         child_counts,
@@ -483,12 +500,12 @@ fn heavy_snapshot(
     }
     if !is_series {
         // 探测不能改变 person 成员或计数，只为已经选中的页安排，且不持有 Store 锁。
-        crate::http::library::ensure_probe_enqueued(state, &row);
+        crate::http::library::ensure_probe_enqueued(state, &coverage);
     }
     let date_created = date_created.or_else(|| paths_date_created(browse, is_series, &stat_paths));
     Ok(MediaItemSnapshot {
         file,
-        row,
+        unit: snapshot_unit,
         media,
         ticks,
         play_count,

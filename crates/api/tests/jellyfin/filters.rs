@@ -34,21 +34,22 @@ async fn items_series_and_season_filters_return_episode_children() {
     for (season, episode) in [(1, 1), (1, 2), (2, 1)] {
         let path = root.join(format!("S{season:02}E{episode:02}.mkv"));
         std::fs::write(&path, b"episode").unwrap();
-        store
-            .insert_ledger(&LedgerRow {
-                id: LedgerId::new(),
-                media_id: show.id,
-                path: path.display().to_string(),
-                season: Some(season),
-                episode: Some(episode),
-                resolution: None,
-                codec: None,
-                hdr: None,
-                quality_source: QualitySource::Probe,
-                confidence: Confidence::High,
-                filter_score: None,
-            })
-            .unwrap();
+        let spec = store::test_support::FixtureFile {
+            media_id: show.id,
+            path: path.display().to_string(),
+            season: Some(season),
+            episode: Some(episode),
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: QualitySource::Probe,
+            confidence: Confidence::High,
+            filter_score: None,
+            transfer_mode: None,
+            source_path: None,
+            file_id: None,
+        };
+        store::test_support::publish_fixture_file(&store, &spec).unwrap();
     }
 
     let series_id = work_id(show.id);

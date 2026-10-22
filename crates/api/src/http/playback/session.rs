@@ -59,15 +59,15 @@ pub(crate) async fn start_session(
             }
         }
     }
-    let (row, media, resolved, tracks) = {
+    let (file, media, resolved, tracks) = {
         let store = state.store.lock();
-        let Some((row, media, resolved)) = resolve_playback_for(&store, &body, user_id) else {
+        let Some((file, media, resolved)) = resolve_playback_for(&store, &body, user_id) else {
             return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
         };
-        let tracks = store.get_file_meta(&row.id.to_string()).ok().flatten();
-        (row, media, resolved, tracks)
+        let tracks = store.get_file_meta(&file.file_id.to_string()).ok().flatten();
+        (file, media, resolved, tracks)
     };
-    let decision = direct_decision(&row, &body, tracks.as_ref());
+    let decision = direct_decision(&file, &body, tracks.as_ref());
     if decision["outcome"].as_str() == Some("rejected") {
         return err(
             StatusCode::BAD_REQUEST,
@@ -76,7 +76,11 @@ pub(crate) async fn start_session(
         );
     }
     let start_ms = resolved.start_ms;
-    let _ = crate::http::library::ensure_probe_enqueued(&state, &row);
+    let coverage = domain::FileCoverage {
+        file: file.clone(),
+        units: vec![domain::UnitKey::new(resolved.target.unit.season, resolved.target.unit.episode)],
+    };
+    let _ = crate::http::library::ensure_probe_enqueued(&state, &coverage);
     let device_id = body
         .get("device_id")
         .and_then(|v| v.as_str())
@@ -90,7 +94,7 @@ pub(crate) async fn start_session(
             .issue_play_session(
                 user_id,
                 device_id,
-                row.id,
+                file.file_id,
                 resolved.target.media_id,
                 resolved.target.unit,
                 &resolved.target.file.version,
@@ -98,15 +102,15 @@ pub(crate) async fn start_session(
             )
             .ok()
     };
-    tracing::info!(media_id = %media.id, file_id = %row.id, %user_id, start_ms, ?play_session_id, "Playback session selected");
-    let is_strm = std::path::Path::new(&row.path)
+    tracing::info!(media_id = %media.id, file_id = %file.file_id, %user_id, start_ms, ?play_session_id, "Playback session selected");
+    let is_strm = file.path
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("strm"));
     let stream_url =
-        session_stream_url(&row, play_session_id.as_deref(), device_id, &token, is_strm);
-    let (chapters, chapters_pending) = session_chapters(&state, &row, &media);
-    let source = session_source(&row, is_strm);
+        session_stream_url(&file, play_session_id.as_deref(), device_id, &token, is_strm);
+    let (chapters, chapters_pending) = session_chapters(&state, &file, &media);
+    let source = session_source(&file, is_strm);
     let subtitle_urls: Vec<String> = decision
         .get("subtitles")
         .and_then(|s| s.as_array())
@@ -145,7 +149,7 @@ pub(crate) async fn start_session(
         "hw_backend": null,
         "chapters": chapters,
         "chapters_pending": chapters_pending,
-        "file_id": row.id.to_string(),
+        "file_id": file.file_id.to_string(),
         "watch": watch,
         "source": source,
         "title": media.title,
@@ -153,15 +157,15 @@ pub(crate) async fn start_session(
     .into_response()
 }
 
-fn session_source(row: &domain::LedgerRow, is_strm: bool) -> Value {
+fn session_source(file: &domain::LibraryFile, is_strm: bool) -> Value {
     let size_bytes = (!is_strm)
-        .then(|| std::fs::metadata(&row.path).ok().map(|m| m.len() as i64))
+        .then(|| std::fs::metadata(&file.path).ok().map(|m| m.len() as i64))
         .flatten();
     json!({
-        "container": std::path::Path::new(&row.path).extension().and_then(|e| e.to_str()),
-        "resolution": row.resolution,
-        "video_codec": row.codec,
-        "hdr": row.hdr,
+        "container": file.path.extension().and_then(|e| e.to_str()),
+        "resolution": file.resolution,
+        "video_codec": file.codec,
+        "hdr": file.hdr,
         "bit_rate": null,
         "frame_rate": null,
         "size_bytes": size_bytes,
@@ -169,7 +173,7 @@ fn session_source(row: &domain::LedgerRow, is_strm: bool) -> Value {
 }
 
 fn session_stream_url(
-    row: &domain::LedgerRow,
+    file: &domain::LibraryFile,
     play_session_id: Option<&str>,
     device_id: &str,
     token: &str,
@@ -177,36 +181,40 @@ fn session_stream_url(
 ) -> String {
     // STRM 优先给客户端直链；没有有效直链时回退本地流中转。
     if is_strm {
-        if let Some(direct_url) = library::read_strm_url(std::path::Path::new(&row.path)) {
+        if let Some(direct_url) = library::read_strm_url(&file.path) {
             return direct_url;
         }
     }
     if let Some(psid) = play_session_id {
         format!("/api/v1/playback/sessions/{psid}/stream?device_id={device_id}&api_key={token}")
     } else {
-        let stream_id = row.id.to_string().replace('-', "");
+        let stream_id = file.file_id.to_string().replace('-', "");
         format!("/Videos/{stream_id}/stream?api_key={token}")
     }
 }
 
 fn session_chapters(
     state: &ApiState,
-    row: &domain::LedgerRow,
+    file: &domain::LibraryFile,
     media: &domain::Media,
 ) -> (Vec<Value>, bool) {
     let cached_chapters = state
         .store
         .lock()
-        .get_cached_chapters(&row.id.to_string())
+        .get_cached_chapters(&file.file_id.to_string())
         .ok()
         .flatten();
     let pending = cached_chapters.is_none();
     if pending {
         let state = state.clone();
-        let row = row.clone();
+        let file = file.clone();
         let media = media.clone();
         tokio::spawn(async move {
-            let _ = crate::marker_resolver::resolve_item_chapters(&state, &row, &media, None).await;
+            let coverage = domain::FileCoverage {
+                file,
+                units: Vec::new(),
+            };
+            let _ = crate::marker_resolver::resolve_item_chapters(&state, &coverage, &media, None).await;
         });
     }
     let chapters = cached_chapters

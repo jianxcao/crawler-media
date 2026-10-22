@@ -55,7 +55,7 @@ impl api::catalog::Catalog for RichCatalog {
     }
 }
 
-/// `tvshow_nfo` 必须在写 ledger 行之前落盘：Task 8 只在 insert_ledger 时观测旁车。
+/// `tvshow_nfo` 必须在写文件之前落盘：Task 8/17 只在 publish_fixture_file 时观测旁车。
 fn rich_tv_app(root: &Path, tvshow_nfo: &str) -> (axum::Router, String, MediaId, PathBuf, PathBuf) {
     let store = Store::open(root.join("data")).unwrap();
     let library_root = root.join("library/tv");
@@ -88,8 +88,7 @@ fn rich_tv_app(root: &Path, tvshow_nfo: &str) -> (axum::Router, String, MediaId,
     let episode_path = show_root.join("Pantheon S01E01.mkv");
     std::fs::write(&episode_path, b"episode").unwrap();
     std::fs::write(show_root.join("tvshow.nfo"), tvshow_nfo).unwrap();
-    let episode = LedgerRow {
-        id: LedgerId::new(),
+    let spec = store::test_support::FixtureFile {
         media_id: show.id,
         path: episode_path.display().to_string(),
         season: Some(1),
@@ -100,8 +99,11 @@ fn rich_tv_app(root: &Path, tvshow_nfo: &str) -> (axum::Router, String, MediaId,
         quality_source: QualitySource::Probe,
         confidence: Confidence::High,
         filter_score: None,
+        transfer_mode: None,
+        source_path: None,
+        file_id: None,
     };
-    store.insert_ledger(&episode).unwrap();
+    store::test_support::publish_fixture_file(&store, &spec).unwrap();
 
     let metadata = media::ItemMeta {
         overview: Some("Uploaded intelligence changes humanity.".into()),
@@ -238,10 +240,7 @@ async fn detail_fills_sparse_nfo_from_catalog_and_refresh_writes_rich_show_and_e
 
     let related_items = json_get(&app, &format!("/Items?PersonIds={person_id}")).await;
     assert_eq!(related_items["TotalRecordCount"], 1);
-    assert_eq!(
-        related_items["Items"][0]["Id"],
-        work_id(media_id)
-    );
+    assert_eq!(related_items["Items"][0]["Id"], work_id(media_id));
 
     for uri in [
         "/Persons/Catalog%20Only%20Actor/Images/Primary".to_string(),

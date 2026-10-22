@@ -2,9 +2,10 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use domain::{
-    Confidence, Coverage, FetchMode, FilterId, LedgerId, LedgerRow, LibraryId, Media, MediaId,
+    Confidence, Coverage, FetchMode, FilterId, LedgerId, LibraryId, Media, MediaId,
     MediaKind, QualitySource, Subscribe, SubscribeId, UserId,
 };
+use store::test_support::FixtureFile;
 use store::{Library, Store};
 use subscribe::{QualityFact, SubscribeFacts};
 
@@ -96,20 +97,21 @@ impl Fixture {
     }
 
     fn ledger(&self, path: &Path, score: i32) {
-        self.store
-            .insert_ledger(&LedgerRow {
-                id: LedgerId::new(),
-                media_id: self.subscribe.media_id,
-                path: path.to_str().unwrap().into(),
-                season: None,
-                episode: None,
-                resolution: Some("2160p".into()),
-                codec: Some("hevc".into()),
-                hdr: None,
-                quality_source: QualitySource::Probe,
-                confidence: Confidence::High,
-                filter_score: Some(score),
-            })
+        let row = FixtureFile {
+            file_id: Some(LedgerId::new()),
+            media_id: self.subscribe.media_id,
+            path: path.to_str().unwrap().into(),
+            season: None,
+            episode: None,
+            resolution: Some("2160p".into()),
+            codec: Some("hevc".into()),
+            hdr: None,
+            quality_source: QualitySource::Probe,
+            confidence: Confidence::High,
+            filter_score: Some(score),
+            ..Default::default()
+        };
+        store::test_support::publish_fixture_file(&self.store, &row)
             .unwrap();
     }
 

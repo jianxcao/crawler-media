@@ -18,7 +18,7 @@ async fn probe_obligation_is_created_on_scan_and_recovered() {
     let store_arc = fix.state.store();
     let row = store_arc
         .lock()
-        .ledger_by_path(&file.display().to_string())
+        .file_coverage_by_path(&file.display().to_string())
         .unwrap()
         .expect("row must exist");
 
@@ -40,12 +40,15 @@ async fn deleted_ledger_cleans_obligation_without_probe() {
     let store_arc = fix.state.store();
     let row = store_arc
         .lock()
-        .ledger_by_path(&file.display().to_string())
+        .file_coverage_by_path(&file.display().to_string())
         .unwrap()
         .unwrap();
 
     // Delete ledger path
-    store_arc.lock().delete_ledger_path(&row.path).unwrap();
+    store_arc
+        .lock()
+        .delete_ledger_path(&row.file.path.to_string_lossy())
+        .unwrap();
 
     // Verify obligation is cleaned up by delete_ledger_path
     let obs = store_arc.lock().scan_probe_obligations(10).unwrap();

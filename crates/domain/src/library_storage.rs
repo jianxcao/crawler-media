@@ -22,6 +22,21 @@ impl UnitKey {
     pub fn is_whole(&self) -> bool {
         self.season == -1 && self.episode == -1
     }
+
+    /// The concrete `(season, episode)` of an episode unit; a whole-work unit
+    /// reads as `None`.
+    ///
+    /// This is the `UnitKey` form of the retired single-value
+    /// `(season, episode)` pair: whole is `None`, never `(0, 0)`.
+    /// Non-whole coordinates are non-negative by construction (`library_file_units`
+    /// `CHECK`), so the cast loses nothing.
+    pub fn episode_coordinates(&self) -> Option<(u32, u32)> {
+        if self.is_whole() {
+            None
+        } else {
+            Some((self.season as u32, self.episode as u32))
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -172,6 +187,33 @@ pub struct LibraryFile {
 pub struct FileCoverage {
     pub file: LibraryFile,
     pub units: Vec<UnitKey>,
+}
+
+impl FileCoverage {
+    /// The file names at least one concrete episode (as opposed to covering the
+    /// whole work, `[UnitKey::WHOLE]`).
+    ///
+    /// This is the `FileCoverage` form of the retired "the file carries a
+    /// concrete season" flag: a single-value row carried a season only when it
+    /// was episodic. A file with no unit rows reads as whole, never as episodic.
+    pub fn is_episodic(&self) -> bool {
+        self.units.iter().any(|unit| !unit.is_whole())
+    }
+
+    /// The season to file this coverage under, replacing the retired
+    /// `season.unwrap_or(1)`: the highest concrete episode season, or `1` when
+    /// the file covers the whole work (a whole-work file carried no season and
+    /// defaulted to `1`). Matches `preferred_coverage`'s ordering:
+    /// the max `(season, episode)` unit has the max season.
+    pub fn season_or_one(&self) -> u32 {
+        self.units
+            .iter()
+            .filter(|unit| !unit.is_whole())
+            .map(|unit| unit.season)
+            .max()
+            .and_then(|season| u32::try_from(season).ok())
+            .unwrap_or(1)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

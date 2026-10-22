@@ -57,7 +57,8 @@ fn full_samples_from_nonseeds_discover_the_common_intro() {
         .units
         .iter()
         .map(|unit| {
-            let tag = intro_tag("blind-seeds", unit.row.episode.unwrap());
+            let episode = unit.row.units.iter().find(|u| !u.is_whole()).map(|u| u.episode.max(0) as u32).unwrap();
+            let tag = intro_tag("blind-seeds", episode);
             (unit.row.clone(), (tag..tag + 200).collect())
         })
         .collect();
@@ -119,7 +120,7 @@ fn unlocked_timeline_uses_the_known_media_duration() {
     let chapters = f
         .store
         .lock()
-        .get_cached_chapters(&f.units[0].row.id.to_string())
+        .get_cached_chapters(&f.units[0].row.file.file_id.to_string())
         .unwrap()
         .unwrap();
     let feature = chapters
@@ -143,12 +144,12 @@ fn missing_duration_does_not_publish_a_successful_outro_deletion() {
     {
         let st = f.store.lock();
         let version = st
-            .get_file_version(first.id)
+            .get_file_version(first.file.file_id)
             .unwrap()
             .expect("published row must carry a file version")
             .source_version;
         st.put_file_meta_versioned(
-            &first.id.to_string(),
+            &first.file.file_id.to_string(),
             &library::Tracks {
                 video: Some(library::VideoTrack::default()),
                 audio: vec![],
@@ -202,7 +203,8 @@ fn another_common_variant_is_discovered_after_full_fallbacks() {
         .units
         .iter()
         .map(|unit| {
-            let tag = intro_tag("other-variant", unit.row.episode.unwrap());
+            let episode = unit.row.units.iter().find(|u| !u.is_whole()).map(|u| u.episode.max(0) as u32).unwrap();
+            let tag = intro_tag("other-variant", episode);
             (unit.row.clone(), (tag..tag + 200).collect())
         })
         .collect();
@@ -295,12 +297,12 @@ fn missing_duration_preserves_start_only_outro_marker() {
     {
         let st = f.store.lock();
         let version = st
-            .get_file_version(first.id)
+            .get_file_version(first.file.file_id)
             .unwrap()
             .expect("published row must carry a file version")
             .source_version;
         st.put_file_meta_versioned(
-            &first.id.to_string(),
+            &first.file.file_id.to_string(),
             &library::Tracks {
                 video: Some(library::VideoTrack::default()),
                 audio: vec![],

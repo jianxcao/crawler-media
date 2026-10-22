@@ -23,12 +23,13 @@ async fn nfo_people_are_clickable_and_filter_related_items() {
 
     let store = Store::open(tmp.path().join("data")).unwrap();
     let ledger_key = store
-        .list_ledger()
+        .list_file_coverage()
         .unwrap()
         .into_iter()
-        .find(|row| row.media_id == media_id)
+        .find(|row| row.file.media_id == media_id)
         .expect("matrix ledger row")
-        .id
+        .file
+        .file_id
         .to_string();
     store
         .put_file_meta(

@@ -4,7 +4,8 @@
 //! attempts and stays visible with its last error; a successful retry clears both
 //! the queue row and the Library file row it named.
 
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
+use store::test_support::FixtureFile;
 use store::Store;
 
 fn create_media(store: &Store, title: &str) -> Media {
@@ -68,8 +69,8 @@ fn queued_deletion_retries_by_file_id_and_clears_both_rows() {
     std::fs::write(&path, b"bytes").unwrap();
     let path = path.display().to_string();
 
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let row = FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id: media.id,
         path: path.clone(),
         season: None,
@@ -80,8 +81,9 @@ fn queued_deletion_retries_by_file_id_and_clears_both_rows() {
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     };
-    store.insert_ledger(&row).unwrap();
+    store::test_support::publish_fixture_file(&store, &row).unwrap();
 
     store
         .enqueue_file_deletion(&path, "wash_replaced")
@@ -92,14 +94,14 @@ fn queued_deletion_retries_by_file_id_and_clears_both_rows() {
     assert_eq!(due.len(), 1);
     assert_eq!(
         due[0].file_id.as_deref(),
-        Some(row.id.to_string().as_str())
+        Some(row.file_id.expect("fixture file id").to_string().as_str())
     );
     assert_eq!(due[0].file_size, Some(5));
-    assert_eq!(store.file_id_at_path(&path).unwrap(), Some(row.id.to_string()));
+    assert_eq!(store.file_id_at_path(&path).unwrap(), Some(row.file_id.expect("fixture file id").to_string()));
 
     // Retry completion: the bytes are gone, so the queue row and the file row go.
     std::fs::remove_file(&path).unwrap();
     store.complete_file_deletion(&path).unwrap();
-    assert!(store.get_ledger(&row.id.to_string()).unwrap().is_none());
+    assert!(store.file_coverage_by_id(row.file_id.expect("fixture file id")).unwrap().is_none());
     assert!(store.list_pending_file_deletions().unwrap().is_empty());
 }

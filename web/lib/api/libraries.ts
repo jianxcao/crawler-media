@@ -329,11 +329,6 @@ export interface UnidentifiedGroup {
   files: UnidentifiedFile[];
 }
 
-/** 全部 ledger 行（管理视图，GET /ledger）。 */
-export interface LedgerRow {
-  [key: string]: unknown;
-}
-
 // ---------------------------------------------------------------------------
 // 保留的旧领域类型（组件引用；对应端点已删除，仅作类型契约保留）
 // ---------------------------------------------------------------------------
@@ -343,18 +338,6 @@ export interface MatchRule {
   field: "genres" | "origin_countries";
   op: "any_of";
   values: (number | string)[];
-}
-
-/** 库的能力位（旧 LibraryProfile 投影；新契约无此字段，类型保留供组件引用）。 */
-export interface LibraryCapabilities {
-  scraped: boolean;
-  episodic: boolean;
-  naming: boolean;
-  subscribable: boolean;
-  write_nfo: boolean;
-  default_aspect: number;
-  playable: boolean;
-  jellyfin_collection: string;
 }
 
 /** 库的可见范围模式。 */
@@ -563,21 +546,6 @@ export interface LastOrganize {
   errors: string[];
 }
 
-/** 整库刷新中正在处理的一部片。 */
-
-/** 整库元数据刷新的实时状态（端点已删，类型保留供组件引用）。 */
-
-/** 整库生成章节的作业状态。 */
-export interface ChapterJobProgress {
-  job_id: string;
-  status: string;
-  processed: number;
-  total: number;
-  failed: number;
-  percent: number | null;
-  stopping: boolean;
-}
-
 /** 一条音轨。 */
 export interface AudioStream {
   codec: string | null;
@@ -659,10 +627,6 @@ export interface MediaSourceAnnotationCandidate {
   media_source: string | null;
   media_source_manual: boolean;
 }
-
-/** 身份复核里的一方（现身份 / 建议身份）。 */
-
-/** 身份复核清单的一组。 */
 
 /** 「修正识别结果」预览里一组文件的识别结论。 */
 export interface ReidentifyOutcome {
@@ -1460,11 +1424,6 @@ export async function startLibraryMetadataRefresh(id: string): Promise<Persisten
   return jobStartOf(data ?? {});
 }
 
-
-
-
-
-/** 刷新单个条目的元数据（端点已删）。 */
 /** 刷新单个条目的元数据（海报/背景/NFO；POST .../metadata/refresh）。 */
 export async function refreshItemMetadata(
   libraryId: string,
@@ -2038,11 +1997,6 @@ export function resolveAllDuplicates(payload: {
 /** 收藏范围可选项（GET /libraries/routing-options）。 */
 export function listLibraryRoutingOptions(): Promise<RoutingOptions> {
   return unwrap(request<ApiEnvelope<RoutingOptions>>("/libraries/routing-options"));
-}
-
-/** 全部 ledger 行（管理视图，GET /ledger）。 */
-export function getLedger(): Promise<LedgerRow[]> {
-  return unwrap(request<ApiEnvelope<LedgerRow[]>>("/ledger"));
 }
 
 /** 海报图片地址（GET /posters/{ledger_id}，按库可见性鉴权）。 */

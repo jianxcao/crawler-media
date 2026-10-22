@@ -1,8 +1,11 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use domain::{
-    Confidence, Coverage, FilterAtom, LedgerRow, Media, QualitySource, Site, SiteId, Subscribe,
-    Torrent,
+    Confidence, Coverage, FileCoverage, FilePresence, FilePublication, FileVersion, FilterAtom,
+    LedgerId, LibraryFile, Media, MediaKind, QualitySource, Site, SiteId, Subscribe, Torrent,
+    UnitKey,
 };
 
 use super::StoreError;
@@ -60,20 +63,51 @@ pub(super) fn map_media(row: &rusqlite::Row<'_>) -> rusqlite::Result<Media> {
     })
 }
 
-pub(super) fn map_ledger(row: &rusqlite::Row<'_>) -> rusqlite::Result<LedgerRow> {
-    let quality_source: String = row.get(8)?;
-    let confidence: String = row.get(9)?;
-    Ok(LedgerRow {
-        id: parse_id(row.get(0)?, 0)?,
-        media_id: parse_id(row.get(1)?, 1)?,
-        path: row.get(2)?,
-        // `library_file_units` stores the whole-media unit as (-1, -1); only real
-        // season/episode coordinates are exposed, so a whole-file row reads as None.
-        season: whole_or_coordinate(row.get(3)?),
-        episode: whole_or_coordinate(row.get(4)?),
-        resolution: row.get(5)?,
-        codec: row.get(6)?,
-        hdr: row.get(7)?,
+/// The 30-column file-fact projection behind [`map_library_file`] (indices 0..=29).
+///
+/// Every read that returns a [`LibraryFile`] or a [`FileCoverage`] selects exactly
+/// this list (plus `u.season, u.episode` when it joins units), so the file fact has
+/// a single mapping site and a new column is added here once.
+pub(super) const LIBRARY_FILE_COLUMNS: &str = "f.file_id, f.library_id, f.root_id, f.media_id, f.kind, \
+     f.path_key, f.display_path, f.presence_state, f.publication_state, f.file_revision, \
+     f.source_version, f.size_bytes, f.stat_known, f.mtime_ns, f.created_ns, f.source_digest, \
+     f.source_path, f.transfer_mode, f.resolution, f.codec, f.hdr, f.quality_source, \
+     f.confidence, f.filter_score, f.release_quality, f.duration_ms, f.tracks_version, \
+     f.poster_path, f.backdrop_path, f.still_path";
+
+pub(super) fn map_library_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryFile> {
+    let kind: String = row.get(4)?;
+    let presence: String = row.get(7)?;
+    let publication: String = row.get(8)?;
+    let stat_known: i64 = row.get(12)?;
+    let quality_source: String = row.get(21)?;
+    let confidence: String = row.get(22)?;
+    let size_bytes: Option<i64> = row.get(11)?;
+    Ok(LibraryFile {
+        file_id: parse_id(row.get(0)?, 0)?,
+        library_id: parse_id(row.get(1)?, 1)?,
+        root_id: row.get(2)?,
+        media_id: parse_id(row.get(3)?, 3)?,
+        kind: kind.parse().unwrap_or(MediaKind::Movie),
+        // The read shape exposes the display spelling; `path_key` remains the
+        // lookup key used by [`Store::file_coverage_by_path`].
+        path: row.get::<_, String>(6)?.into(),
+        version: FileVersion {
+            revision: row.get(9)?,
+            source_version: row.get(10)?,
+        },
+        presence: FilePresence::from_str(&presence).unwrap_or(FilePresence::Present),
+        publication: FilePublication::from_str(&publication).unwrap_or(FilePublication::Published),
+        size_bytes: size_bytes.and_then(|size| u64::try_from(size).ok()),
+        stat_known: stat_known != 0,
+        created_ns: row.get(14)?,
+        modified_ns: row.get(13)?,
+        source_digest: row.get(15)?,
+        source_path: row.get::<_, Option<String>>(16)?.map(PathBuf::from),
+        transfer_mode: row.get(17)?,
+        resolution: row.get(18)?,
+        codec: row.get(19)?,
+        hdr: row.get(20)?,
         quality_source: match quality_source.as_str() {
             "probe" => QualitySource::Probe,
             _ => QualitySource::Release,
@@ -82,13 +116,64 @@ pub(super) fn map_ledger(row: &rusqlite::Row<'_>) -> rusqlite::Result<LedgerRow>
             "low" => Confidence::Low,
             _ => Confidence::High,
         },
-        filter_score: row.get(10)?,
+        filter_score: row.get(23)?,
+        release_quality: row.get(24)?,
+        duration_ms: row.get(25)?,
+        tracks_version: row.get(26)?,
+        poster_path: row.get::<_, Option<String>>(27)?.map(PathBuf::from),
+        backdrop_path: row.get::<_, Option<String>>(28)?.map(PathBuf::from),
+        still_path: row.get::<_, Option<String>>(29)?.map(PathBuf::from),
     })
 }
 
-/// Unit coordinates are `-1` for the whole-media unit; anything else negative is invalid.
-fn whole_or_coordinate(raw: Option<i64>) -> Option<u32> {
-    raw.and_then(|value| u32::try_from(value).ok())
+/// A file row plus the unit coordinate selected from the joined `library_file_units`
+/// columns (indices 30 and 31). Reads that join units map through here, so the file
+/// part of the row is decoded by exactly one function.
+pub(super) fn map_file_unit(row: &rusqlite::Row<'_>) -> rusqlite::Result<(LibraryFile, UnitKey)> {
+    Ok((map_library_file(row)?, unit_key(row.get(30)?, row.get(31)?)))
+}
+
+/// `library_file_units` records the whole-media unit as `(-1, -1)`; a missing join
+/// row is the same thing, so both read as [`UnitKey::WHOLE`].
+fn unit_key(season: Option<i64>, episode: Option<i64>) -> UnitKey {
+    let coordinate = |raw: Option<i64>| {
+        raw.and_then(|value| i32::try_from(value).ok())
+            .filter(|value| *value >= 0)
+    };
+    match (coordinate(season), coordinate(episode)) {
+        (Some(season), Some(episode)) => UnitKey::new(season, episode),
+        _ => UnitKey::WHOLE,
+    }
+}
+
+/// Fold `(file, unit)` rows into one [`FileCoverage`] per file: first-seen file
+/// order is preserved and each file lists its units as `(season ASC, episode ASC)`
+/// with duplicates removed, so a file's coverage never depends on join order.
+pub(super) fn group_file_coverage(
+    rows: impl IntoIterator<Item = (LibraryFile, UnitKey)>,
+) -> Vec<FileCoverage> {
+    let mut slots: HashMap<LedgerId, usize> = HashMap::new();
+    let mut coverage: Vec<FileCoverage> = Vec::new();
+    for (file, unit) in rows {
+        let slot = match slots.get(&file.file_id) {
+            Some(slot) => *slot,
+            None => {
+                slots.insert(file.file_id, coverage.len());
+                coverage.push(FileCoverage {
+                    file,
+                    units: Vec::new(),
+                });
+                coverage.len() - 1
+            }
+        };
+        coverage[slot].units.push(unit);
+    }
+    for file in &mut coverage {
+        file.units
+            .sort_unstable_by_key(|unit| (unit.season, unit.episode));
+        file.units.dedup();
+    }
+    coverage
 }
 
 pub(super) fn map_subscribe(row: &rusqlite::Row<'_>) -> rusqlite::Result<Subscribe> {

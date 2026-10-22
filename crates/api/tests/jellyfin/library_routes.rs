@@ -134,8 +134,8 @@ async fn items_sort_by_date_created_descending_and_emit_date_created() {
     std::fs::write(&recent_file, b"new movie").unwrap();
     publish_scanned(
         &store,
-        LedgerRow {
-            id: LedgerId::new(),
+        FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id: recent_media.id,
             path: recent_file.display().to_string(),
             season: None,
@@ -146,6 +146,7 @@ async fn items_sort_by_date_created_descending_and_emit_date_created() {
             quality_source: QualitySource::Probe,
             confidence: Confidence::High,
             filter_score: None,
+            ..Default::default()
         },
     );
 
@@ -248,21 +249,22 @@ fn seed_library_items(store: &Store, movie_root: &PathBuf, tv_root: &PathBuf) {
         store.insert_media(&media).unwrap();
         let file = root.join(format!("{title}.mkv"));
         std::fs::write(&file, b"video").unwrap();
-        store
-            .insert_ledger(&LedgerRow {
-                id: LedgerId::new(),
-                media_id: media.id,
-                path: file.display().to_string(),
-                season,
-                episode,
-                resolution: None,
-                codec: None,
-                hdr: None,
-                quality_source: QualitySource::Probe,
-                confidence: Confidence::High,
-                filter_score: None,
-            })
-            .unwrap();
+        let spec = store::test_support::FixtureFile {
+            media_id: media.id,
+            path: file.display().to_string(),
+            season,
+            episode,
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: QualitySource::Probe,
+            confidence: Confidence::High,
+            filter_score: None,
+            transfer_mode: None,
+            source_path: None,
+            file_id: None,
+        };
+        store::test_support::publish_fixture_file(store, &spec).unwrap();
         if kind == MediaKind::Tv {
             seed_second_episode(store, tv_root, media.id);
         }
@@ -272,21 +274,22 @@ fn seed_library_items(store: &Store, movie_root: &PathBuf, tv_root: &PathBuf) {
 fn seed_second_episode(store: &Store, tv_root: &Path, media_id: MediaId) {
     let second_episode = tv_root.join("A Show S02E01.mkv");
     std::fs::write(&second_episode, b"episode two").unwrap();
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
-            media_id,
-            path: second_episode.display().to_string(),
-            season: Some(2),
-            episode: Some(1),
-            resolution: None,
-            codec: None,
-            hdr: None,
-            quality_source: QualitySource::Probe,
-            confidence: Confidence::High,
-            filter_score: None,
-        })
-        .unwrap();
+    let spec = store::test_support::FixtureFile {
+        media_id,
+        path: second_episode.display().to_string(),
+        season: Some(2),
+        episode: Some(1),
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Probe,
+        confidence: Confidence::High,
+        filter_score: None,
+        transfer_mode: None,
+        source_path: None,
+        file_id: None,
+    };
+    store::test_support::publish_fixture_file(store, &spec).unwrap();
 }
 
 async fn assert_movie_parent(app: &axum::Router, movie_id: &str, movie_root: &Path) {

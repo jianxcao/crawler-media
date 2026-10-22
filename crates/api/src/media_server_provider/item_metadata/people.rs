@@ -1,7 +1,7 @@
-use domain::Media;
+use domain::{LibraryFile, Media};
 use media_server::provider::MediaPerson;
 
-use super::nfo::row_nfo_metadata;
+use super::nfo::file_nfo_metadata;
 
 pub(super) fn merge_people(people: &mut Vec<MediaPerson>, catalog_people: Vec<MediaPerson>) {
     for catalog_person in catalog_people {
@@ -141,11 +141,12 @@ fn people_from_parts<'a>(parts: impl Iterator<Item = PersonParts<'a>>) -> Vec<Me
 }
 
 pub(in crate::media_server_provider) fn person_image_url(
-    row: &domain::LedgerRow,
+    file: &LibraryFile,
+    unit: (i32, i32),
     media: &Media,
     name: &str,
 ) -> Option<String> {
-    row_nfo_metadata(row, media, false)?
+    file_nfo_metadata(file, unit, media, false)?
         .cast
         .into_iter()
         .find(|member| member.name.eq_ignore_ascii_case(name))
@@ -154,11 +155,12 @@ pub(in crate::media_server_provider) fn person_image_url(
 }
 
 pub(in crate::media_server_provider) fn person_tmdb_id(
-    row: &domain::LedgerRow,
+    file: &LibraryFile,
+    unit: (i32, i32),
     media: &Media,
     name: &str,
 ) -> Option<Option<String>> {
-    row_nfo_metadata(row, media, false)?
+    file_nfo_metadata(file, unit, media, false)?
         .cast
         .into_iter()
         .find(|member| member.name.eq_ignore_ascii_case(name))

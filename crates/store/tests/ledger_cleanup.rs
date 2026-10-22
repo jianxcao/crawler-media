@@ -177,7 +177,7 @@ fn deleting_a_file_removes_only_its_derived_rows() {
     assert_eq!(removed, 1);
 
     // The file, its details, its sidecars and its card are gone.
-    assert!(store.get_ledger(&deleted.file_id.to_string()).unwrap().is_none());
+    assert!(store.file_coverage_by_id(deleted.file_id).unwrap().is_none());
     assert!(store.get_file_details(deleted.file_id).unwrap().is_none());
     assert_eq!(sidecar_count(&conn, deleted.file_id), 0);
     assert!(
@@ -189,7 +189,7 @@ fn deleting_a_file_removes_only_its_derived_rows() {
     );
 
     // The other file, the Media and the user's watch state stay.
-    assert!(store.get_ledger(&kept.file_id.to_string()).unwrap().is_some());
+    assert!(store.file_coverage_by_id(kept.file_id).unwrap().is_some());
     assert!(store.get_file_details(kept.file_id).unwrap().is_some());
     assert_eq!(sidecar_count(&conn, kept.file_id), 1);
     assert!(
@@ -251,7 +251,7 @@ fn derived_delete_failure_rolls_back_every_row() {
 
     let result = store.delete_files(library.id.parse().unwrap(), &[file.file_id]);
     assert!(result.is_err(), "the trigger must fail the whole deletion");
-    assert!(store.get_ledger(&file.file_id.to_string()).unwrap().is_some());
+    assert!(store.file_coverage_by_id(file.file_id).unwrap().is_some());
     assert!(store.get_file_details(file.file_id).unwrap().is_some());
     assert_eq!(sidecar_count(&conn, file.file_id), 1);
 }
@@ -273,8 +273,8 @@ fn deleting_every_file_of_a_media_keeps_media_and_playback() {
         .unwrap();
 
     assert_eq!(store.delete_ledger_for_media(media.id).unwrap(), 2);
-    assert!(store.get_ledger(&part_one.file_id.to_string()).unwrap().is_none());
-    assert!(store.get_ledger(&part_two.file_id.to_string()).unwrap().is_none());
+    assert!(store.file_coverage_by_id(part_one.file_id).unwrap().is_none());
+    assert!(store.file_coverage_by_id(part_two.file_id).unwrap().is_none());
     assert!(store.get_media(media.id).unwrap().is_some());
     assert_eq!(
         store.playback_progress(user, media.id).unwrap(),

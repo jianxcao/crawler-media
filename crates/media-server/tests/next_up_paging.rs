@@ -16,12 +16,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use domain::{
-    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LedgerRow, LibraryFile,
-    LibraryId, Media, MediaId, MediaKind, QualitySource, TypedItemId, UserId,
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile,
+    LibraryId, Media, MediaId, MediaKind, QualitySource, TypedItemId, UnitKey, UserId,
 };
 use media_server::provider::{
-    AuthenticateError, MediaItemMetadata, MediaItemSnapshot, MediaServerProvider, ServerLibrary,
-    ServerUser,
+    AuthenticateError, MediaItemMetadata, MediaItemSnapshot, MediaServerProvider,
+    PlaybackClientInfo, PlaybackEvent, PlaybackEventIdentity, ServerLibrary, ServerUser,
 };
 use serde_json::Value;
 use tower::ServiceExt;
@@ -56,27 +56,14 @@ fn episode_snapshot(series: usize, episode: u32, played: bool) -> MediaItemSnaps
         bangumi_id: None,
         anilist_id: None,
     };
-    let row = LedgerRow {
-        id: LedgerId::new(),
-        media_id: media.id,
-        path: format!("/media/tv/Series{series:02}/S01E{episode:02}.mkv"),
-        season: Some(1),
-        episode: Some(episode),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
     let series_wire = TypedItemId::Work(media.id).to_wire_string();
     let file = LibraryFile {
-        file_id: row.id,
+        file_id: LedgerId::new(),
         library_id: LibraryId::from_str("00000000-0000-0000-0000-0000000000f1").unwrap(),
         root_id: "root-tv".to_string(),
         media_id: media.id,
         kind: MediaKind::Tv,
-        path: PathBuf::from(&row.path),
+        path: PathBuf::from(format!("/media/tv/Series{series:02}/S01E{episode:02}.mkv")),
         version: FileVersion {
             revision: 1,
             source_version: "v1".to_string(),
@@ -105,7 +92,7 @@ fn episode_snapshot(series: usize, episode: u32, played: bool) -> MediaItemSnaps
     };
     MediaItemSnapshot {
         file,
-        row,
+        unit: Some(UnitKey::new(1, episode as i32)),
         media,
         ticks: 0,
         play_count: 0,
@@ -155,7 +142,7 @@ impl EpisodeListProvider {
 
     fn is_played(&self, item: &MediaItemSnapshot) -> bool {
         let series = self.series_index(item);
-        let episode = item.row.episode.unwrap_or_default();
+        let episode = item.unit.map(|u| u.episode as u32).unwrap_or_default();
         self.fully_played.contains(&series)
             || (self.first_episode_played.contains(&series) && episode == 1)
     }
@@ -284,12 +271,15 @@ impl MediaServerProvider for EpisodeListProvider {
         Ok(true)
     }
 
-    async fn update_progress(
+    async fn report_playback_event(
         &self,
         _user_id: UserId,
         _id: &str,
         _position_ms: i64,
         _paused: bool,
+        _client: PlaybackClientInfo,
+        _event: PlaybackEvent,
+        _identity: PlaybackEventIdentity,
     ) -> Result<(), String> {
         Ok(())
     }

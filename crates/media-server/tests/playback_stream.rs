@@ -2,7 +2,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use domain::UserId;
 use media_server::provider::{
-    AuthenticateError, MediaItemSnapshot, MediaServerProvider, ServerLibrary, ServerUser,
+    AuthenticateError, MediaItemSnapshot, MediaServerProvider, PlaybackClientInfo, PlaybackEvent,
+    PlaybackEventIdentity, ServerLibrary, ServerUser,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -101,12 +102,15 @@ impl MediaServerProvider for DirectStreamProvider {
         Ok(true)
     }
 
-    async fn update_progress(
+    async fn report_playback_event(
         &self,
         _user_id: UserId,
         _id: &str,
         _position_ms: i64,
         _paused: bool,
+        _client: PlaybackClientInfo,
+        _event: PlaybackEvent,
+        _identity: PlaybackEventIdentity,
     ) -> Result<(), String> {
         Ok(())
     }
@@ -279,12 +283,15 @@ impl MediaServerProvider for MultiVersionStreamProvider {
     ) -> Result<bool, String> {
         Ok(true)
     }
-    async fn update_progress(
+    async fn report_playback_event(
         &self,
         _user_id: UserId,
         _id: &str,
         _position_ms: i64,
         _paused: bool,
+        _client: PlaybackClientInfo,
+        _event: PlaybackEvent,
+        _identity: PlaybackEventIdentity,
     ) -> Result<(), String> {
         Ok(())
     }

@@ -105,9 +105,12 @@ pub(crate) fn remove_file_and_ledger(store: &Store, path: &str) -> Result<(), St
 /// corresponding file rows in one short database critical section.
 pub(crate) async fn remove_rows(
     state: &crate::management::ApiState,
-    rows: Vec<domain::LedgerRow>,
+    coverages: Vec<domain::FileCoverage>,
 ) -> (usize, Vec<String>) {
-    let paths: Vec<String> = rows.into_iter().map(|row| row.path).collect();
+    let paths: Vec<String> = coverages
+        .into_iter()
+        .map(|coverage| coverage.file.path.to_string_lossy().into_owned())
+        .collect();
     let delete_paths = paths.clone();
     let physical = tokio::task::spawn_blocking(move || {
         delete_paths

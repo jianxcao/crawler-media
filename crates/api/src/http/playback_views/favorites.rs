@@ -51,7 +51,7 @@ pub(crate) async fn favorites(
     struct FavoriteCandidate {
         media: domain::Media,
         library_id: String,
-        preferred_row: Option<domain::LedgerRow>,
+        preferred_coverage: Option<domain::FileCoverage>,
         file_count: usize,
         seasons: std::collections::BTreeSet<u32>,
         episode_count: i64,
@@ -61,7 +61,7 @@ pub(crate) async fn favorites(
 
     let (candidates, total) = {
         let store = state.store.lock();
-        let all_rows = store.list_ledger().unwrap_or_default();
+        let all_rows = store.list_file_coverage().unwrap_or_default();
         let mut list = favorite_entries(&store, user_id, &all_rows, unwatched_first);
         sort_favorite_entries(&store, &mut list, sort_key, is_desc, unwatched_first);
         let total = list.len();
@@ -72,28 +72,36 @@ pub(crate) async fn favorites(
             .filter_map(|entry| {
                 let media_id = entry.media_id;
                 let media = store.get_media(media_id).ok().flatten()?;
-                let owned: Vec<domain::LedgerRow> = all_rows
+                let owned: Vec<domain::FileCoverage> = all_rows
                     .iter()
-                    .filter(|r| r.media_id == media_id)
-                    .filter(|r| crate::http::library::row_visible_to_user(&store, r, &media, Some(user_id)))
+                    .filter(|cov| cov.file.media_id == media_id)
+                    .filter(|cov| crate::http::library::file_visible_to_user(&store, &cov.file, &media, Some(user_id)))
                     .cloned()
                     .collect();
                 if owned.is_empty() {
                     return None;
                 }
-                let refs: Vec<&domain::LedgerRow> = owned.iter().collect();
-                let library_id = refs
+                let library_id = owned
                     .first()
-                    .and_then(|row| crate::http::library::library_for_row(&store, row, &media))
+                    .and_then(|cov| crate::http::library::library_for_file(&store, &cov.file, &media))
                     .map(|library| library.id)
                     .unwrap_or_default();
-                let pref = crate::http::library::preferred_row(&refs).cloned();
-                let seasons = owned.iter().filter_map(|r| r.season).collect::<std::collections::BTreeSet<_>>();
-                let episode_count = owned.iter().filter(|r| r.episode.is_some()).count() as i64;
+                let pref = crate::http::library::preferred_coverage(&owned).cloned();
+                let seasons = owned
+                    .iter()
+                    .flat_map(|cov| &cov.units)
+                    .filter(|u| !u.is_whole())
+                    .map(|u| u.season.max(0) as u32)
+                    .collect::<std::collections::BTreeSet<_>>();
+                let episode_count = owned
+                    .iter()
+                    .flat_map(|cov| &cov.units)
+                    .filter(|u| !u.is_whole())
+                    .count() as i64;
                 Some(FavoriteCandidate {
                     media,
                     library_id,
-                    preferred_row: pref,
+                    preferred_coverage: pref,
                     file_count: owned.len(),
                     seasons,
                     episode_count,
@@ -112,12 +120,12 @@ pub(crate) async fn favorites(
             let mut items = Vec::new();
             for cand in candidates {
                 let poster = cand
-                    .preferred_row
+                    .preferred_coverage
                     .as_ref()
-                    .and_then(|row| crate::http::library::poster_path_with(row, files.as_ref()))
+                    .and_then(|cov| crate::http::library::poster_path_with(&cov.file, files.as_ref()))
                     .map(|_| {
-                        let row = cand.preferred_row.as_ref().expect("checked");
-                        crate::http::library::artwork_url("posters", row.id)
+                        let cov = cand.preferred_coverage.as_ref().expect("checked");
+                        crate::http::library::artwork_url("posters", cov.file.file_id)
                     });
                 items.push(json!({
                     "media_item_id": cand.media.id.to_string(),
@@ -169,15 +177,15 @@ pub(crate) async fn favorites(
 fn favorite_entries(
     store: &crate::Store,
     user_id: domain::UserId,
-    all_rows: &[domain::LedgerRow],
+    all_rows: &[domain::FileCoverage],
     with_tier: bool,
 ) -> Vec<FavoriteEntry> {
     let media_ids: HashSet<domain::MediaId> = all_rows
         .iter()
         .filter_map(|row| {
-            let media = store.get_media(row.media_id).ok().flatten()?;
-            crate::http::library::row_visible_to_user(store, row, &media, Some(user_id))
-                .then_some(row.media_id)
+            let media = store.get_media(row.file.media_id).ok().flatten()?;
+            crate::http::library::file_visible_to_user(store, &row.file, &media, Some(user_id))
+                .then_some(row.file.media_id)
         })
         .collect();
     let mut by_media: HashMap<domain::MediaId, (i64, i32, i32)> = HashMap::new();
@@ -212,7 +220,7 @@ fn favorite_entries(
 fn favorite_tier(
     store: &crate::Store,
     user_id: domain::UserId,
-    all_rows: &[domain::LedgerRow],
+    all_rows: &[domain::FileCoverage],
     media_id: domain::MediaId,
 ) -> WatchTier {
     let Some(media) = store.get_media(media_id).ok().flatten() else {
@@ -224,8 +232,10 @@ fn favorite_tier(
         played |= whole.played;
         seen |= whole.played || whole.position_ms > 0 || whole.play_count > 0;
     }
-    for row in all_rows.iter().filter(|row| row.media_id == media_id) {
-        if let (Some(season), Some(episode)) = (row.season, row.episode) {
+    for row in all_rows.iter().filter(|row| row.file.media_id == media_id) {
+        for unit in &row.units {
+            let (Ok(season), Ok(episode)) =
+                (u32::try_from(unit.season), u32::try_from(unit.episode)) else { continue };
             if let Ok(Some(unit)) = store.unit_state(user_id, media.id, season as i32, episode as i32) {
                 seen |= unit.played || unit.position_ms > 0 || unit.play_count > 0;
             }

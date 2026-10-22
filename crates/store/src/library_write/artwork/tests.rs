@@ -1,11 +1,10 @@
 use std::path::Path;
 
-use domain::{
-    Confidence, FileVersion, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource,
-};
+use domain::{FileVersion, LedgerId, Media, MediaId, MediaKind, UnitKey};
 use rusqlite::params;
 
 use super::FileArtwork;
+use crate::test_support::FixtureFile;
 use crate::{Store, StoreError};
 
 fn movie_media(store: &Store, title: &str) -> MediaId {
@@ -26,34 +25,30 @@ fn movie_media(store: &Store, title: &str) -> MediaId {
     media.id
 }
 
-fn ledger_row(media_id: MediaId, path: &Path) -> LedgerRow {
-    LedgerRow {
-        id: LedgerId::new(),
+/// Fixture publication spec for one scanned file, carrying the explicit file id
+/// the read shape now exposes instead of a legacy ledger row.
+fn fixture_file(media_id: MediaId, path: &Path) -> FixtureFile {
+    FixtureFile {
         media_id,
         path: path.to_string_lossy().to_string(),
-        season: None,
-        episode: None,
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
+        file_id: Some(LedgerId::new()),
+        ..FixtureFile::default()
     }
 }
 
-/// Fixture view of a scan row: whole-unit coverage for movie/video rows, the row's
-/// unit for TV rows, and no observation facts.
-fn scanned(row: &LedgerRow) -> crate::ScannedLedger {
-    let units = match (row.season, row.episode) {
-        (Some(season), Some(episode)) => {
-            vec![domain::UnitKey::new(season as i32, episode as i32)]
-        }
-        _ => vec![domain::UnitKey::WHOLE],
-    };
+/// Fixture scan row: whole-unit coverage and no observation facts.
+fn scanned(spec: &FixtureFile) -> crate::ScannedLedger {
     crate::ScannedLedger {
-        row: row.clone(),
-        units,
+        file_id: spec.file_id.expect("fixture file id"),
+        media_id: spec.media_id,
+        path: spec.path.clone(),
+        units: vec![UnitKey::WHOLE],
+        resolution: spec.resolution.clone(),
+        codec: spec.codec.clone(),
+        hdr: spec.hdr.clone(),
+        quality_source: spec.quality_source,
+        confidence: spec.confidence,
+        filter_score: spec.filter_score,
         source_version: "fixture-v1".into(),
         source_digest: None,
         size_bytes: None,
@@ -109,10 +104,10 @@ fn scanned_artwork_reaches_the_card() {
     std::fs::write(dir.join("fanart.jpg"), b"fanart").unwrap();
     std::fs::write(dir.join("Scanned-thumb.jpg"), b"still").unwrap();
 
-    let row = ledger_row(media, &video);
-    store.insert_scanned_files(&[scanned(&row)], 0).unwrap();
+    let spec = fixture_file(media, &video);
+    store.insert_scanned_files(&[scanned(&spec)], 0).unwrap();
 
-    let file_id = row.id.to_string();
+    let file_id = spec.file_id.expect("fixture file id").to_string();
     let (poster, backdrop, has_still) = card_artwork(&store, &library.id, media);
     assert_eq!(poster.as_deref(), Some(file_id.as_str()));
     assert_eq!(backdrop.as_deref(), Some(file_id.as_str()));
@@ -145,8 +140,8 @@ fn recorded_artwork_updates_the_card_and_stale_versions_are_rejected() {
     std::fs::create_dir_all(&dir).unwrap();
     let video = dir.join("Recorded.mkv");
     std::fs::write(&video, b"video").unwrap();
-    let row = ledger_row(media, &video);
-    store.insert_ledger(&row).unwrap();
+    let spec = fixture_file(media, &video);
+    crate::test_support::publish_fixture_file(&store, &spec).unwrap();
     let (poster, backdrop, has_still) = card_artwork(&store, &library.id, media);
     assert_eq!((poster, backdrop, has_still), (None, None, false));
 
@@ -157,10 +152,10 @@ fn recorded_artwork_updates_the_card_and_stale_versions_are_rejected() {
         std::fs::write(path, b"image").unwrap();
     }
     let (file_id, version) = store
-        .file_version_for_path(&row.path)
+        .file_version_for_path(&spec.path)
         .unwrap()
         .expect("published file");
-    assert_eq!(file_id, row.id);
+    assert_eq!(file_id, spec.file_id.expect("fixture file id"));
 
     let changed = store
         .record_file_artwork(

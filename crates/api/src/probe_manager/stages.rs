@@ -17,7 +17,13 @@ pub(super) fn record_fingerprint_stages(
     };
     let store = mgr.store.lock();
     claim_stage(&store, &intro_key, job_id, now_ms);
-    finish_stage(&store, &intro_key, job_id, &ProbeStageCompletion::Succeeded, now_ms);
+    finish_stage(
+        &store,
+        &intro_key,
+        job_id,
+        &ProbeStageCompletion::Succeeded,
+        now_ms,
+    );
 
     let outro_key = ProbeStageKey {
         ledger_id: ledger_id.to_string(),

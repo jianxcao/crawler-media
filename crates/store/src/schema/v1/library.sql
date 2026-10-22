@@ -229,7 +229,6 @@ CREATE TABLE playback_sessions (
  tracks_version INTEGER, play_session_id TEXT NOT NULL, generation INTEGER NOT NULL CHECK(generation>=0),
  last_report_at_ms INTEGER NOT NULL DEFAULT 0, last_event_sequence INTEGER, PRIMARY KEY(user_id,device_id)
 );
-CREATE INDEX sessions_user ON playback_sessions(user_id);
 CREATE TABLE playback_logs (
  id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, media_id TEXT NOT NULL, season INTEGER, episode INTEGER,
  client TEXT, device_name TEXT, device_id TEXT NOT NULL, play_method TEXT NOT NULL DEFAULT 'local',
@@ -307,7 +306,6 @@ CREATE INDEX sample_job ON fingerprint_samples(captured_job_id);
 CREATE TABLE fingerprint_season_models (model_id TEXT PRIMARY KEY NOT NULL,media_id TEXT NOT NULL,season INTEGER NOT NULL,kind TEXT NOT NULL,model_version INTEGER NOT NULL,membership_key TEXT NOT NULL,policy_key TEXT NOT NULL,model_json TEXT NOT NULL,created_at_ms INTEGER NOT NULL);
 CREATE INDEX season_model_lookup ON fingerprint_season_models(media_id,season,kind);
 CREATE TABLE fingerprint_model_members (model_id TEXT NOT NULL REFERENCES fingerprint_season_models(model_id) ON DELETE CASCADE,sample_id TEXT NOT NULL,file_id TEXT NOT NULL,source_version TEXT NOT NULL,PRIMARY KEY(model_id,sample_id));
-CREATE INDEX model_sample ON fingerprint_model_members(sample_id);
 CREATE INDEX model_file ON fingerprint_model_members(file_id);
 CREATE TABLE fingerprint_attempts (attempt_id TEXT PRIMARY KEY NOT NULL,job_id TEXT NOT NULL,file_id TEXT NOT NULL,kind TEXT NOT NULL,window_start_ms INTEGER NOT NULL,window_end_ms INTEGER NOT NULL,phase TEXT NOT NULL,started_at_ms INTEGER NOT NULL,finished_at_ms INTEGER,status TEXT NOT NULL,error_kind TEXT,metrics_json TEXT NOT NULL);
 CREATE INDEX attempt_job_file ON fingerprint_attempts(job_id,file_id);

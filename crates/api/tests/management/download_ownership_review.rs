@@ -671,11 +671,11 @@ async fn tick(app: &axum::Router, now: i64) {
 async fn transfer_until(app: &axum::Router, store: &Store, count: usize, start: i64) {
     for now in (start..start + 300).step_by(30) {
         tick(app, now).await;
-        if store.list_ledger().unwrap().len() == count {
+        if store.list_file_coverage().unwrap().len() == count {
             return;
         }
     }
-    assert_eq!(store.list_ledger().unwrap().len(), count);
+    assert_eq!(store.list_file_coverage().unwrap().len(), count);
 }
 
 #[tokio::test]
@@ -704,16 +704,16 @@ async fn same_media_source_transfers_to_two_libraries_but_is_idempotent_in_each(
         .record_pending_submission(original, 80, &owned)
         .unwrap();
     transfer_until(&app, &store, 1, 1).await;
-    let first_row = store.list_ledger().unwrap().remove(0);
-    assert!(std::path::Path::new(&first_row.path).starts_with(&first_root));
+    let first_coverage = store.list_file_coverage().unwrap().remove(0);
+    assert!(first_coverage.file.path.starts_with(&first_root));
     store
         .record_pending_submission(second.id, 80, &owned)
         .unwrap();
     transfer_until(&app, &store, 2, 301).await;
-    let rows = store.list_ledger().unwrap();
+    let rows = store.list_file_coverage().unwrap();
     assert!(
         rows.iter()
-            .any(|row| std::path::Path::new(&row.path).starts_with(&second_root))
+            .any(|coverage| coverage.file.path.starts_with(&second_root))
     );
     let repeated = duplicate(&store, original);
     store
@@ -722,14 +722,16 @@ async fn same_media_source_transfers_to_two_libraries_but_is_idempotent_in_each(
     for now in [601, 631, 661] {
         tick(&app, now).await;
     }
-    assert_eq!(store.list_ledger().unwrap().len(), 2);
+    assert_eq!(store.list_file_coverage().unwrap().len(), 2);
     assert_eq!(
-        store.ledger_by_path(&first_row.path).unwrap().unwrap().id,
-        first_row.id
+        store
+            .file_coverage_by_path(&first_coverage.file.path.to_string_lossy())
+            .unwrap()
+            .unwrap()
+            .file
+            .file_id,
+        first_coverage.file.file_id
     );
-    assert!(
-        rows.iter()
-            .all(|row| std::path::Path::new(&row.path).exists())
-    );
+    assert!(rows.iter().all(|coverage| coverage.file.path.exists()));
     assert!(source.exists());
 }

@@ -1,25 +1,33 @@
 use domain::{
     Confidence, FilePresence, FilePublication as DomainPublication, FileVersion, LedgerId,
-    LedgerRow, LibraryFile, LibraryId, Media, MediaId, MediaKind, QualitySource, UnitKey,
+    LibraryFile, LibraryId, Media, MediaId, MediaKind, QualitySource, UnitKey,
 };
 use rusqlite::params;
 
 use crate::Store;
 use crate::library_write::{FilePublication as StorePublication, WriteScope};
 
-fn scanned_row(media_id: MediaId, path: &str, season: u32, episode: u32) -> LedgerRow {
-    LedgerRow {
-        id: LedgerId::new(),
+/// Fixture scan row: the file identity plus the unit the scan observed, and no
+/// observation facts. The read shape exposes the id and path directly, so the
+/// fixture no longer wraps a legacy ledger row.
+fn scanned_row(media_id: MediaId, path: &str, season: u32, episode: u32) -> crate::ScannedLedger {
+    crate::ScannedLedger {
+        file_id: LedgerId::new(),
         media_id,
         path: path.to_string(),
-        season: Some(season),
-        episode: Some(episode),
+        units: vec![UnitKey::new(season as i32, episode as i32)],
         resolution: Some("1080p".to_string()),
         codec: None,
         hdr: None,
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        source_version: "fixture-v1".into(),
+        source_digest: None,
+        size_bytes: None,
+        created_ns: None,
+        modified_ns: None,
+        observations: Vec::new(),
     }
 }
 
@@ -217,42 +225,21 @@ fn snapshot(store: &Store, lib: &str, media: &str) -> Vec<String> {
     out
 }
 
-/// Fixture view of a scan row: whole-unit coverage for movie/video rows, the row's
-/// unit for TV rows, and no observation facts.
-fn scanned(row: &LedgerRow) -> crate::ScannedLedger {
-    let units = match (row.season, row.episode) {
-        (Some(season), Some(episode)) => {
-            vec![UnitKey::new(season as i32, episode as i32)]
-        }
-        _ => vec![UnitKey::WHOLE],
-    };
-    crate::ScannedLedger {
-        row: row.clone(),
-        units,
-        source_version: "fixture-v1".into(),
-        source_digest: None,
-        size_bytes: None,
-        created_ns: None,
-        modified_ns: None,
-        observations: Vec::new(),
-    }
-}
-
 /// Insert two scanned files and update their presence, size, artwork and quality.
 fn insert_and_update(fixture: &Fixture) -> (LedgerId, LedgerId) {
     let a_row = scanned_row(fixture.media, "/tv/show/S01E01.mkv", 1, 1);
     let b_row = scanned_row(fixture.media, "/tv/show/S01E02.mkv", 1, 2);
     fixture
         .store
-        .insert_scanned_files(&[scanned(&a_row)], 1)
+        .insert_scanned_files(&[a_row.clone()], 1)
         .unwrap();
     fixture
         .store
-        .insert_scanned_files(&[scanned(&b_row)], 2)
+        .insert_scanned_files(&[b_row.clone()], 2)
         .unwrap();
 
     let a_missing = fixture.file(
-        a_row.id,
+        a_row.file_id,
         "/tv/show/S01E01.mkv",
         FilePresence::Missing,
         DomainPublication::Published,
@@ -268,7 +255,7 @@ fn insert_and_update(fixture: &Fixture) -> (LedgerId, LedgerId) {
     fixture.publish(&a_missing, &[UnitKey::new(1, 1)]);
 
     let b_present = fixture.file(
-        b_row.id,
+        b_row.file_id,
         "/tv/show/S01E02.mkv",
         FilePresence::Present,
         DomainPublication::Published,
@@ -282,7 +269,7 @@ fn insert_and_update(fixture: &Fixture) -> (LedgerId, LedgerId) {
         false,
     );
     fixture.publish(&b_present, &[UnitKey::new(1, 2)]);
-    (a_row.id, b_row.id)
+    (a_row.file_id, b_row.file_id)
 }
 
 /// Add a file, withdraw it, lose every present file, then restore the newest revision.
@@ -368,7 +355,7 @@ fn incremental_reduction_matches_full_recompute() {
     let e_row = scanned_row(fixture.media, "/tv/show/S03E02.mkv", 3, 2);
     fixture
         .store
-        .insert_scanned_files(&[scanned(&d_row), scanned(&e_row)], 9)
+        .insert_scanned_files(&[d_row.clone(), e_row.clone()], 9)
         .unwrap();
     fixture.assert_matches_full();
 }

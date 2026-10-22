@@ -1,8 +1,33 @@
 use std::sync::Arc;
 use parking_lot::Mutex;
-use domain::{Confidence, LedgerId, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, FileCoverage, MediaId, MediaKind, QualitySource, UnitKey};
 use api::probe_manager::{ProbeManager, ProbeUnit};
 use api::Store;
+use store::test_support::{publish_fixture_file, FixtureFile};
+
+/// Publish one single-episode fixture file and read the coverage fact back: the
+/// `file_id` the pipeline keys on is assigned at publication.
+fn publish_coverage(
+    store: &Store,
+    media_id: MediaId,
+    path: &std::path::Path,
+    episode: u32,
+) -> FileCoverage {
+    let spec = FixtureFile {
+        media_id,
+        path: path.to_string_lossy().to_string(),
+        season: Some(1),
+        episode: Some(episode),
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        ..FixtureFile::default()
+    };
+    let file = publish_fixture_file(store, &spec).unwrap();
+    FileCoverage {
+        file,
+        units: vec![UnitKey::new(1, episode as i32)],
+    }
+}
 
 #[test]
 fn season_refresh_does_not_overwrite_recapture_policy() {
@@ -32,20 +57,12 @@ fn season_refresh_does_not_overwrite_recapture_policy() {
         .lock()
         .set_library_root(MediaKind::Tv, tv_root.to_str().unwrap())
         .unwrap();
-    let row = domain::LedgerRow {
-        id: LedgerId::new(),
+    let row = publish_coverage(
+        &store.lock(),
         media_id,
-        path: tv_root.join("Test.S01E01.mkv").to_string_lossy().to_string(),
-        season: Some(1),
-        episode: Some(1),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
-    store.lock().insert_ledger(&row).unwrap();
+        &tv_root.join("Test.S01E01.mkv"),
+        1,
+    );
 
     let mgr = ProbeManager::new(store.clone());
     let unit = ProbeUnit {
@@ -65,7 +82,7 @@ fn season_refresh_does_not_overwrite_recapture_policy() {
     // Verify in database that reuse_fingerprint_cache is false, and reuse_media_info_cache is true
     let active_unit = store
         .lock()
-        .active_probe_unit_for_ledger(&row.id.to_string())
+        .active_probe_unit_for_ledger(&row.file.file_id.to_string())
         .unwrap()
         .expect("active probe unit should exist");
 
@@ -107,23 +124,12 @@ fn database_failure_rolls_back_markers_chapters_and_job_terminal() {
         .lock()
         .set_library_root(MediaKind::Tv, tv_root.to_str().unwrap())
         .unwrap();
-    let row = domain::LedgerRow {
-        id: LedgerId::new(),
+    let row = publish_coverage(
+        &store.lock(),
         media_id,
-        path: tv_root
-            .join("Test.Rollback.S01E01.mkv")
-            .to_string_lossy()
-            .to_string(),
-        season: Some(1),
-        episode: Some(1),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
-    store.lock().insert_ledger(&row).unwrap();
+        &tv_root.join("Test.Rollback.S01E01.mkv"),
+        1,
+    );
 
     // Initial marker
     store
@@ -144,7 +150,7 @@ fn database_failure_rolls_back_markers_chapters_and_job_terminal() {
 
     let job_id = "test-job-rollback";
     let spec = api::store::ProbeJobUnitSpec {
-        ledger_id: &row.id.to_string(),
+        ledger_id: &row.file.file_id.to_string(),
         kind: "tv",
         force_fingerprint: true,
         reuse_fingerprint_cache: false,
@@ -202,36 +208,10 @@ async fn seed_episodes_retain_markers_after_season_template_built() {
         .unwrap();
     let ep1_path = tv_root.join("Test.Retain.S01E01.mkv");
     let ep2_path = tv_root.join("Test.Retain.S01E02.mkv");
-    let row1 = domain::LedgerRow {
-        id: LedgerId::new(),
-        media_id,
-        path: ep1_path.to_string_lossy().to_string(),
-        season: Some(1),
-        episode: Some(1),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
-    let row2 = domain::LedgerRow {
-        id: LedgerId::new(),
-        media_id,
-        path: ep2_path.to_string_lossy().to_string(),
-        season: Some(1),
-        episode: Some(2),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
     std::fs::write(&ep1_path, b"dummy").unwrap();
     std::fs::write(&ep2_path, b"dummy").unwrap();
-    store.lock().insert_ledger(&row1).unwrap();
-    store.lock().insert_ledger(&row2).unwrap();
+    let row1 = publish_coverage(&store.lock(), media_id, &ep1_path, 1);
+    let row2 = publish_coverage(&store.lock(), media_id, &ep2_path, 2);
 
     struct SharedMatchEngine;
     impl marker::fingerprint::capture_types::FingerprintCaptureEngine for SharedMatchEngine {

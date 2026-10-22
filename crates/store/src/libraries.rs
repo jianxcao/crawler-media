@@ -550,22 +550,20 @@ impl Store {
         if let Some(root_paths) = root_paths {
             self.ensure_removal_roots_available(root_paths)?;
             let proposed: Vec<PathBuf> = root_paths.iter().map(PathBuf::from).collect();
-            for row in self.list_ledger()? {
-                let Some(media) = self.get_media(row.media_id)? else {
+            for observed in self.list_file_coverage()? {
+                let file = &observed.file;
+                let Some(media) = self.get_media(file.media_id)? else {
                     continue;
                 };
                 if media.kind != library.kind
                     || self
-                        .library_for_path(std::path::Path::new(&row.path), media.kind)?
+                        .library_for_path(&file.path, media.kind)?
                         .map(|owner| owner.id != library.id)
                         .unwrap_or(true)
                 {
                     continue;
                 }
-                if !proposed
-                    .iter()
-                    .any(|root| std::path::Path::new(&row.path).starts_with(root))
-                {
+                if !proposed.iter().any(|root| file.path.starts_with(root)) {
                     return Err(StoreError::Protected(format!(
                         "媒体库 {} 仍有台账文件位于现有根目录；先迁移或清理这些文件，再修改根目录",
                         library.name

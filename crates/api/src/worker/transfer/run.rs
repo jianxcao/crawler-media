@@ -1,5 +1,7 @@
-use domain::{LedgerRow, Media, Subscribe, SubscribeId};
+use domain::{FileCoverage, LedgerId, Media, Subscribe, SubscribeId};
 use filter::ScoredTorrent;
+use store::StoreError;
+use store::library_write::{FilePublication as PublicationRequest, WriteScope};
 use subscribe::{Added, RunInput, RunOutcome, SubscribeFacts, collect_completed_recorded};
 
 use crate::management::ApiState;
@@ -7,14 +9,12 @@ use crate::management::ApiState;
 use super::plan::{TransferPlan, resolve_transfer_plan, validate_committed_transfer_plan};
 use super::recorder::{PlannedPublicationRecorder, PublicationRecorder};
 
-fn attach_metadata_and_chapters(state: &ApiState, media: &Media, rows: &[LedgerRow]) {
-    for row in rows {
-        crate::poster_fetch::attach_poster(state, media, std::path::Path::new(&row.path));
-        crate::poster_fetch::attach_backdrop(state, media, std::path::Path::new(&row.path));
-        crate::http::library_chapters::auto_generate_chapters(
-            state,
-            std::path::Path::new(&row.path),
-        );
+fn attach_metadata_and_chapters(state: &ApiState, media: &Media, files: &[FileCoverage]) {
+    for coverage in files {
+        let path = coverage.file.path.as_path();
+        crate::poster_fetch::attach_poster(state, media, path);
+        crate::poster_fetch::attach_backdrop(state, media, path);
+        crate::http::library_chapters::auto_generate_chapters(state, path);
     }
 }
 
@@ -22,10 +22,11 @@ fn attach_metadata_and_chapters(state: &ApiState, media: &Media, rows: &[LedgerR
 /// inode with its download source came in as a hardlink, everything else kept the
 /// configured mode. `library_files.transfer_mode` only accepts the three real
 /// transfer modes, so the observation never invents a fourth one.
-pub(crate) fn observe_transfer_modes(rows: &[LedgerRow], default_mode: &str) -> Vec<String> {
-    rows.iter()
-        .map(|row| {
-            let is_hardlink = std::fs::metadata(&row.path)
+pub(crate) fn observe_transfer_modes(files: &[FileCoverage], default_mode: &str) -> Vec<String> {
+    files
+        .iter()
+        .map(|coverage| {
+            let is_hardlink = std::fs::metadata(&coverage.file.path)
                 .map(|meta| {
                     #[cfg(unix)]
                     {
@@ -47,44 +48,156 @@ pub(crate) fn observe_transfer_modes(rows: &[LedgerRow], default_mode: &str) -> 
         .collect()
 }
 
+/// The download source this round recorded for a published file, if any. The
+/// outcome owns the mapping, keyed by the file identity the reservation minted.
+pub(crate) fn recorded_file_source(outcome: &RunOutcome, file_id: LedgerId) -> Option<&std::path::Path> {
+    outcome
+        .file_sources
+        .iter()
+        .find(|source| source.file_id == file_id)
+        .map(|source| source.source.as_path())
+}
+
+/// The Subscribe slots a published file covers, as `mark_wanted_imported`
+/// spells them: a whole-work unit is `(None, None)` (its `wanted_key` maps both
+/// to `(-1, -1)`), an episode unit is its own `(season, episode)`.
+fn wanted_slots(units: &[domain::UnitKey]) -> Vec<(Option<u32>, Option<u32>)> {
+    units
+        .iter()
+        .map(|unit| {
+            if unit.is_whole() {
+                (None, None)
+            } else {
+                (Some(unit.season as u32), Some(unit.episode as u32))
+            }
+        })
+        .collect()
+}
+
+/// Publish one reserved Transfer file: the reservation owns the file identity,
+/// so this is a version-checked publish of the confirmed coverage of that same
+/// file, never a second identity creation. The transfer mode a placed file
+/// actually ended up with (a hardlink is only visible here), its source path and
+/// the sidecar artwork beside it are written with the file.
+pub(crate) fn publish_transfer_file(
+    store: &store::Store,
+    library_id: &str,
+    config_revision: i64,
+    coverage: &FileCoverage,
+    source_path: Option<&std::path::Path>,
+    mode: &str,
+) -> Result<domain::LibraryFile, StoreError> {
+    let file_id = coverage.file.file_id;
+    let observed = &coverage.file.version;
+    let committed = store.get_file_version(file_id)?.ok_or_else(|| {
+        StoreError::Protected("Transfer reservation changed or was detached".into())
+    })?;
+    if committed.revision != observed.revision || committed.source_version != observed.source_version
+    {
+        return Err(StoreError::Protected(
+            "Transfer reservation changed or was detached".into(),
+        ));
+    }
+    // The reservation already wrote this file's units; the collected coverage is
+    // the fallback so a span is never narrowed back to its first episode.
+    let stored_units = store.get_file_units(file_id)?;
+    let units: Vec<domain::UnitKey> = if !stored_units.is_empty() {
+        stored_units
+    } else if !coverage.units.is_empty() {
+        coverage.units.clone()
+    } else {
+        vec![domain::UnitKey::WHOLE]
+    };
+    let artwork = store::files::DiscoveredArtwork::discover(&coverage.file.path);
+    let mut file = coverage.file.clone();
+    file.presence = domain::FilePresence::Present;
+    file.publication = domain::FilePublication::Published;
+    file.source_path = source_path.map(std::path::PathBuf::from);
+    file.transfer_mode = Some(mode.to_string());
+    file.poster_path = artwork.poster;
+    file.backdrop_path = artwork.backdrop;
+    file.still_path = artwork.still;
+    store.publish_files(
+        &WriteScope {
+            library_id: library_id.parse::<domain::LibraryId>()?,
+            config_revision,
+        },
+        &[PublicationRequest {
+            file: &file,
+            units: &units,
+            expected_version: Some(observed),
+            nfo_observation: None,
+            probe_required: false,
+        }],
+        store::unix_now() * 1000,
+    )?;
+    tracing::info!(file_id = %file_id, path = %coverage.file.path.display(), "Published Transfer file");
+    Ok(file)
+}
+
 fn commit_transfer_outcome(
     state: &ApiState,
     subscribe: &Subscribe,
     outcome: &RunOutcome,
     lease: &crate::library_lifecycle::LibraryWorkLease,
     plan: &TransferPlan,
-) -> Result<(), String> {
+) -> Result<Vec<domain::LibraryFile>, String> {
     let default_transfer_mode = {
         let store = state.store.lock();
         store.transfer_mode().unwrap_or_else(|_| "copy".into())
     };
 
     // Observe transfer modes outside Store lock
-    let observed_modes = observe_transfer_modes(&outcome.ledger, &default_transfer_mode);
+    let observed_modes = observe_transfer_modes(&outcome.files, &default_transfer_mode);
 
-    // Commit replacement ledger/source mapping and facts in a short Store section
+    // Commit replacement file/source mapping and facts in a short Store section
+    let mut published = Vec::with_capacity(outcome.files.len());
     {
         let store = state.store.lock();
         // Publication already validated the pre-publication fingerprint before
         // each reservation; the scoped fingerprint now reflects this round's
         // own published rows, so only the untouched plan parts are re-checked.
         validate_committed_transfer_plan(&store, subscribe, lease, plan)?;
-        for (row, mode) in outcome.ledger.iter().zip(observed_modes.iter()) {
-            let source_path = outcome.ledger_sources.iter()
-                .find(|source| source.ledger_path == row.path)
-                .map(|source| source.source_path.as_str());
-            let existing = store.ledger_by_path(&row.path).map_err(|e| e.to_string())?;
-            if existing.as_ref().map(|existing| (&existing.id, existing.media_id, &existing.path))
-                != Some((&row.id, row.media_id, &row.path))
-                || !store.ledger_source_path_matches(&row.path, source_path).map_err(|e| e.to_string())?
+        for (coverage, mode) in outcome.files.iter().zip(observed_modes.iter()) {
+            let path = coverage.file.path.to_string_lossy().to_string();
+            let source_path = recorded_file_source(outcome, coverage.file.file_id)
+                .map(|source| source.display().to_string());
+            let existing = store.file_coverage_by_path(&path).map_err(|e| e.to_string())?;
+            if existing
+                .as_ref()
+                .map(|existing| {
+                    (
+                        existing.file.file_id,
+                        existing.file.media_id,
+                        existing.file.path.to_string_lossy().into_owned(),
+                    )
+                })
+                != Some((
+                    coverage.file.file_id,
+                    coverage.file.media_id,
+                    path.clone(),
+                ))
+                || !store
+                    .ledger_source_path_matches(&path, source_path.as_deref())
+                    .map_err(|e| e.to_string())?
             {
-                return Err(format!("Transfer reservation missing or replaced: {}", row.path));
+                return Err(format!("Transfer reservation missing or replaced: {path}"));
             }
-            store.finalize_transfer(row, mode, source_path).map_err(|e| e.to_string())?;
+            published.push(
+                publish_transfer_file(
+                    &store,
+                    &plan.library_id,
+                    plan.config_revision,
+                    coverage,
+                    source_path.as_deref().map(std::path::Path::new),
+                    mode,
+                )
+                .map_err(|e| e.to_string())?,
+            );
         }
         for path in &outcome.removed_paths {
-            if store.ledger_by_path(path).map_err(|e| e.to_string())?
-                .is_some_and(|existing| existing.media_id != subscribe.media_id)
+            if store.file_coverage_by_path(path).map_err(|e| e.to_string())?
+                .is_some_and(|existing| existing.file.media_id != subscribe.media_id)
             {
                 return Err("待替换路径已被其他媒体占用，放弃本轮提交".into());
             }
@@ -95,17 +208,20 @@ fn commit_transfer_outcome(
             .map_err(|e| e.to_string())?;
 
         let now = crate::job_loop::unix_now();
-        for row in &outcome.ledger {
-            store
-                .mark_wanted_imported(subscribe.id, row.season, row.episode, now)
-                .map_err(|e| e.to_string())?;
+        for coverage in &outcome.files {
+            for (season, episode) in wanted_slots(&coverage.units) {
+                store
+                    .mark_wanted_imported(subscribe.id, season, episode, now)
+                    .map_err(|e| e.to_string())?;
+            }
         }
         store
             .mark_pending_imported(subscribe.id, &outcome.transferred_enclosures)
             .map_err(|e| e.to_string())?;
-        for row in &outcome.ledger {
-            store.clear_ledger_missing(&row.path).map_err(|error| {
-                tracing::error!(path = %row.path, %error, "清理 Library 缺失标记失败");
+        for coverage in &outcome.files {
+            let path = coverage.file.path.to_string_lossy().to_string();
+            store.clear_ledger_missing(&path).map_err(|error| {
+                tracing::error!(path = %path, %error, "清理 Library 缺失标记失败");
                 error.to_string()
             })?;
         }
@@ -134,7 +250,7 @@ fn commit_transfer_outcome(
             .map_err(|e| e.to_string())?;
     }
     crate::http::file_delete::retry_queued_deletions(&state.store).map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(published)
 }
 
 fn load_transfer_context(
@@ -243,8 +359,6 @@ fn build_added_input<'a>(
             facts: Default::default(),
             files: Vec::new(),
             file_sources: Vec::new(),
-            ledger: Vec::new(),
-            ledger_sources: Vec::new(),
             removed_paths: Vec::new(),
             completed: false,
             transferred_enclosures: Vec::new(),
@@ -447,14 +561,14 @@ fn commit_transfer_round(
         return Err(error.to_string());
     }
     if plan.scrape {
-        attach_metadata_and_chapters(state, media, &outcome.ledger);
+        attach_metadata_and_chapters(state, media, &outcome.files);
     }
 
     lease.control().check().map_err(|e| e.to_string())?;
-    let ledger_count = outcome.ledger.len();
-    commit_transfer_outcome(state, subscribe, outcome, lease, plan)?;
+    let ledger_count = outcome.files.len();
+    let published = commit_transfer_outcome(state, subscribe, outcome, lease, plan)?;
 
-    crate::http::library::enqueue_probes_for_rows(state, &outcome.ledger);
+    crate::http::library::enqueue_probes_for_files(state, &published);
     let fallbacks = library::hardlink_fallback_count().saturating_sub(fallbacks_before);
     if fallbacks > 0 {
         tracing::warn!(%subscribe_id, fallbacks, "硬链接失败，已回退为复制");
@@ -503,16 +617,13 @@ fn rollback_new_files(
     mode: Option<library::TransferMode>,
     known: &std::collections::HashSet<std::path::PathBuf>,
 ) {
-    for row in &outcome.ledger {
-        let path = std::path::PathBuf::from(&row.path);
+    for coverage in &outcome.files {
+        let path = coverage.file.path.clone();
         if known.contains(&path) || !path.exists() {
             continue;
         }
-        let source = outcome
-            .ledger_sources
-            .iter()
-            .find(|s| s.ledger_path == row.path)
-            .map(|s| std::path::PathBuf::from(&s.source_path));
+        let source = recorded_file_source(outcome, coverage.file.file_id)
+            .map(std::path::Path::to_path_buf);
         let result = match (mode, source) {
             (Some(library::TransferMode::Move), Some(source)) => {
                 if source.exists() {
@@ -531,8 +642,9 @@ fn rollback_new_files(
             Ok(()) => {
                 tracing::info!(path = %path.display(), "回滚放弃提交的 Transfer 新文件");
                 // The ledger row was reserved before publishing: drop it too.
-                if let Err(error) = state.store.lock().delete_ledger_path(&row.path) {
-                    tracing::warn!(path = %row.path, %error, "回滚时删除预留台账行失败");
+                let ledger_path = path.to_string_lossy().to_string();
+                if let Err(error) = state.store.lock().delete_ledger_path(&ledger_path) {
+                    tracing::warn!(path = %ledger_path, %error, "回滚时删除预留台账行失败");
                 }
             }
             Err(error) => {

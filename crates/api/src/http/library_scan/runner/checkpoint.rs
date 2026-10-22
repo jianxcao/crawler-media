@@ -193,10 +193,10 @@ pub(super) fn invalidate_changed_facts(
     let mut failed_paths = std::collections::HashSet::new();
     for path in changed {
         let path_str = path.display().to_string();
-        let Some(row) = store.ledger_by_path(&path_str).map_err(|e| e.to_string())? else {
+        let Some(coverage) = store.file_coverage_by_path(&path_str).map_err(|e| e.to_string())? else {
             continue;
         };
-        let ledger_id = row.id.to_string();
+        let ledger_id = coverage.file.file_id.to_string();
         if let Err(error) = store.delete_file_meta_by_ledger_id(&ledger_id) {
             tracing::error!(%error, %ledger_id, %path_str, "变化文件的派生探测事实失效失败");
             failed_paths.insert(path_str);

@@ -194,6 +194,9 @@ impl Store {
     /// If pending, verifies that no higher generation session has been activated on the device,
     /// marks older pending/active sessions on this device as closed, and marks this one active.
     /// If closed or unknown, returns Ok(false).
+    ///
+    /// A refused activation writes nothing: neither the `closed`/unknown row nor an older
+    /// generation than the active session is touched.
     pub fn activate_play_session(
         &self,
         user_id: UserId,
@@ -258,11 +261,8 @@ impl Store {
 
         if let Some(active_gen) = max_active_gen {
             if active_gen >= generation {
-                conn.execute(
-                    "UPDATE playback_session_ids SET state = 'closed'
-                     WHERE user_id = ?1 AND device_id = ?2 AND play_session_id = ?3",
-                    params![user_id.to_string(), device_id, play_session_id],
-                )?;
+                // 被拒绝的激活是零写入:这一行既不能置 `closed`,也不能有任何别的改动。
+                // 它是否被清理交给后续成功的激活或 `close_play_session_id`。
                 return Ok(false);
             }
         }

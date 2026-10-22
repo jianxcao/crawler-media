@@ -1,7 +1,7 @@
 use domain::{EntityScope, MetadataAdoption, MetadataPreferences};
 
 use crate::scrape_store::ScrapeStoreExt;
-use domain::{LedgerRow, Media};
+use domain::Media;
 use std::path::{Path, PathBuf};
 
 use super::targets;
@@ -79,7 +79,7 @@ pub(crate) fn write_series_nfos(
     media: &Media,
     tmdb_id: &str,
     show_root: &Path,
-    rows: &[LedgerRow],
+    coverages: &[domain::FileCoverage],
     show_metadata: &library::NfoMeta,
     language: &str,
 ) -> Vec<(PathBuf, Option<String>)> {
@@ -89,16 +89,18 @@ pub(crate) fn write_series_nfos(
     };
     let rows: Vec<_> = {
         let store = state.store.lock();
-        rows.iter().filter(|row| store.library_for_path_strict(Path::new(&row.path), media.kind)
+        coverages.iter().filter(|coverage| store.library_for_path_strict(&coverage.file.path, media.kind)
             .ok().flatten().is_some_and(|owner| owner.id == lease.library_id())
-            && super::show_root(Path::new(&row.path), row) == show_root).cloned().collect()
+            && super::show_root(&coverage.file.path, coverage) == show_root).cloned().collect()
     };
     let catalog = state.catalog.as_ref();
     if lease.publish(|| Ok(write_nfo(&target, media, show_metadata))).is_err() { return Vec::new(); }
     let mut matched_episodes = Vec::new();
     let seasons = rows
         .iter()
-        .filter_map(|row| row.season)
+        .flat_map(|coverage| coverage.units.iter())
+        .filter_map(|unit| unit.episode_coordinates())
+        .map(|(season, _)| season)
         .collect::<std::collections::BTreeSet<_>>();
     for season in seasons {
         let episodes = match catalog.season_details_lang(tmdb_id, season, language) {
@@ -115,37 +117,53 @@ pub(crate) fn write_series_nfos(
                 continue;
             }
         };
-        for row in rows.iter().filter(|row| row.season == Some(season)) {
-            if lease.control().is_cancelled() { return matched_episodes; }
-            let Some(episode_number) = row.episode else {
-                continue;
-            };
-            if !targets::video_present(Path::new(&row.path)) {
-                continue;
-            }
-            let Some(episode) = episodes
-                .iter()
-                .find(|episode| episode.episode_number == episode_number)
-                .cloned()
-            else {
-                continue;
-            };
-            let path = Path::new(&row.path).with_extension("nfo");
-            let mut still_path = episode.still_path.clone();
-            if still_path.is_none() {
-                if let Ok(stills) = catalog.episode_stills(tmdb_id, season, episode_number) {
-                    still_path = stills.into_iter().next();
+        for row in &rows {
+            for unit in &row.units {
+                let Some((unit_season, episode_number)) = unit.episode_coordinates() else {
+                    continue;
+                };
+                if unit_season != season {
+                    continue;
                 }
+                if lease.control().is_cancelled() { return matched_episodes; }
+                if !targets::video_present(&row.file.path) {
+                    continue;
+                }
+                let Some(episode) = episodes
+                    .iter()
+                    .find(|episode| episode.episode_number == episode_number)
+                    .cloned()
+                else {
+                    continue;
+                };
+                let path = row.file.path.with_extension("nfo");
+                let mut still_path = episode.still_path.clone();
+                if still_path.is_none() {
+                    if let Ok(stills) = catalog.episode_stills(tmdb_id, season, episode_number) {
+                        still_path = stills.into_iter().next();
+                    }
+                }
+                adopt_tmdb_episode(state, media, tmdb_id, season, episode_number, &episode, language);
+                let episode_coverage = domain::FileCoverage {
+                    file: row.file.clone(),
+                    units: vec![*unit],
+                };
+                if lease.publish(|| Ok(write_nfo(&path, media, &nfo_from_episode(&episode_coverage, episode)))).is_err() { return matched_episodes; }
+                matched_episodes.push((row.file.path.clone(), still_path));
             }
-            adopt_tmdb_episode(state, media, tmdb_id, season, episode_number, &episode, language);
-            if lease.publish(|| Ok(write_nfo(&path, media, &nfo_from_episode(row, episode)))).is_err() { return matched_episodes; }
-            matched_episodes.push((PathBuf::from(&row.path), still_path));
         }
     }
     matched_episodes
 }
 
-pub(crate) fn nfo_from_episode(row: &LedgerRow, episode: media::EpisodeMeta) -> library::NfoMeta {
+pub(crate) fn nfo_from_episode(
+    coverage: &domain::FileCoverage,
+    episode: media::EpisodeMeta,
+) -> library::NfoMeta {
+    let coordinates = coverage
+        .units
+        .iter()
+        .find_map(|unit| unit.episode_coordinates());
     library::NfoMeta {
         title: episode.name,
         plot: episode.overview,
@@ -153,8 +171,8 @@ pub(crate) fn nfo_from_episode(row: &LedgerRow, episode: media::EpisodeMeta) -> 
         rating: episode.rating,
         vote_count: episode.vote_count,
         aired: episode.air_date,
-        season: row.season.map(|value| value as u32),
-        episode: row.episode,
+        season: coordinates.map(|(season, _)| season),
+        episode: coordinates.map(|(_, episode)| episode),
         thumb: episode
             .still_path
             .map(|path| format!("https://image.tmdb.org/t/p/w300{path}")),
@@ -180,16 +198,16 @@ pub(crate) fn scrape_tv_sidecars(
     state: &crate::management::ApiState,
     media: &Media,
     _show_root: &Path,
-    rows: &[LedgerRow],
+    coverages: &[domain::FileCoverage],
 ) {
     let Some(tmdb_id) = media.tmdb_id.as_deref() else {
         return;
     };
-    let path_leases: Vec<_> = rows.iter().filter_map(|row| {
-        state.acquire_path_work(Path::new(&row.path), media.kind).ok()
-            .map(|lease| (row.clone(), lease))
+    let path_leases: Vec<_> = coverages.iter().filter_map(|coverage| {
+        state.acquire_path_work(&coverage.file.path, media.kind).ok()
+            .map(|lease| (coverage.clone(), lease))
     }).collect();
-    let allowed_rows: Vec<_> = path_leases.iter().map(|(row, _)| row.clone()).collect();
+    let allowed_rows: Vec<_> = path_leases.iter().map(|(coverage, _)| coverage.clone()).collect();
     let groups = targets::live_groups(&allowed_rows);
     if groups.is_empty() {
         tracing::debug!(media = %media.title, "没有可用的视频文件，跳过电视剧刮削");
@@ -245,7 +263,7 @@ fn scrape_tv_episodes_and_nfos(
     media: &Media,
     tmdb_id: &str,
     show_root: &Path,
-    rows: &[LedgerRow],
+    rows: &[domain::FileCoverage],
     mirror_nfo: bool,
 ) -> Vec<(PathBuf, Option<String>)> {
     let tmdb_meta = fetch_tmdb_metadata(state, media.kind, tmdb_id).ok().flatten();
@@ -264,7 +282,12 @@ fn scrape_tv_episodes_and_nfos(
         }
     };
 
-    let owned_seasons: std::collections::HashSet<u32> = rows.iter().filter_map(|r| r.season).collect();
+    let owned_seasons: std::collections::HashSet<u32> = rows
+        .iter()
+        .flat_map(|row| row.units.iter())
+        .filter_map(|unit| unit.episode_coordinates())
+        .map(|(season, _)| season)
+        .collect();
     for season_meta in &tv_seasons {
         if owned_seasons.contains(&season_meta.season_number) {
             adopt_tmdb_season(state, media, tmdb_id, season_meta, &preferred_lang);
@@ -301,15 +324,19 @@ fn scrape_tv_episodes_and_nfos(
             let _ = match lease { Some(lease) => lease.publish(write), None => write() };
         }
         for row in rows {
-            let row_path = PathBuf::from(&row.path);
+            let row_path = row.file.path.clone();
             if !ep_matches.iter().any(|(p, _)| p == &row_path) {
-                let still_path = row.season.zip(row.episode).and_then(|(s, e)| {
-                    state
-                        .catalog
-                        .episode_stills(tmdb_id, s, e)
-                        .ok()
-                        .and_then(|mut v| v.drain(..).next())
-                });
+                let still_path = row
+                    .units
+                    .iter()
+                    .find_map(|unit| unit.episode_coordinates())
+                    .and_then(|(s, e)| {
+                        state
+                            .catalog
+                            .episode_stills(tmdb_id, s, e)
+                            .ok()
+                            .and_then(|mut v| v.drain(..).next())
+                    });
                 ep_matches.push((row_path, still_path));
             }
         }
@@ -318,8 +345,14 @@ fn scrape_tv_episodes_and_nfos(
         let mut ep_matches = Vec::new();
         for season in &owned_seasons {
             let episodes = state.catalog.season_details(tmdb_id, *season).unwrap_or_default();
-            for row in rows.iter().filter(|r| r.season == Some(*season)) {
-                if let Some(ep_num) = row.episode {
+            for row in rows.iter() {
+                for unit in &row.units {
+                    let Some((unit_season, ep_num)) = unit.episode_coordinates() else {
+                        continue;
+                    };
+                    if unit_season != *season {
+                        continue;
+                    }
                     let mut still_path = episodes
                         .iter()
                         .find(|e| e.episode_number == ep_num)
@@ -329,7 +362,7 @@ fn scrape_tv_episodes_and_nfos(
                             still_path = stills.into_iter().next();
                         }
                     }
-                    ep_matches.push((PathBuf::from(&row.path), still_path));
+                    ep_matches.push((row.file.path.clone(), still_path));
                 }
             }
         }
@@ -460,7 +493,7 @@ fn scrape_tv_fanart(
     state: &crate::management::ApiState,
     media: &Media,
     show_root: &Path,
-    rows: &[LedgerRow],
+    rows: &[domain::FileCoverage],
     api_key: &str,
     fanart_lang: &[String],
 ) {

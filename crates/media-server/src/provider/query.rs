@@ -440,8 +440,14 @@ pub fn sort_snapshots<T>(
                         .title
                         .to_lowercase()
                         .cmp(&right.media.title.to_lowercase()),
-                    "parentindexnumber" => left.row.season.cmp(&right.row.season),
-                    "indexnumber" => left.row.episode.cmp(&right.row.episode),
+                    "parentindexnumber" => left
+                        .unit
+                        .map(|u| u.season)
+                        .cmp(&right.unit.map(|u| u.season)),
+                    "indexnumber" => left
+                        .unit
+                        .map(|u| u.episode)
+                        .cmp(&right.unit.map(|u| u.episode)),
                     _ => std::cmp::Ordering::Equal,
                 };
                 let order = sort_orders
@@ -520,7 +526,7 @@ fn matches_season(item: &MediaItemSnapshot, season_id: Option<&str>) -> bool {
     };
     let series_id = TypedItemId::Work(item.media.id).to_wire_string();
     parse_season_id(&series_id, season_id)
-        .is_some_and(|season| !item.is_series && item.row.season == Some(season))
+        .is_some_and(|season| !item.is_series && item.unit.map(|u| u.season as u32) == Some(season))
 }
 
 fn matches_people(item: &MediaItemSnapshot, person_ids: Option<&HashSet<String>>) -> bool {
@@ -581,15 +587,20 @@ pub async fn legacy_select(
                     let episodes = provider.list_visible_items(user, Some(&series_id)).await?;
                     let in_folder: Vec<MediaItemSnapshot> = episodes
                         .into_iter()
-                        .filter(|episode| Path::new(&episode.row.path).starts_with(root))
+                        .filter(|episode| episode.file.path.starts_with(root))
                         .collect();
                     if wants_series {
                         if let Some(representative) = in_folder.first() {
                             let mut series = item;
-                            series.row = representative.row.clone();
+                            series.unit = representative.unit;
+                            series.file = representative.file.clone();
                             series.metadata.child_count = Some(in_folder.len());
                             series.metadata.season_count = Some(
-                                in_folder.iter().filter_map(|episode| episode.row.season).collect::<HashSet<_>>().len(),
+                                in_folder
+                                    .iter()
+                                    .filter_map(|episode| episode.unit.map(|u| u.season))
+                                    .collect::<HashSet<_>>()
+                                    .len(),
                             );
                             series.unplayed_item_count = Some(in_folder.iter().filter(|episode| !episode.played).count());
                             series.played = in_folder.iter().all(|episode| episode.played);
@@ -599,7 +610,7 @@ pub async fn legacy_select(
                     if wants_episodes {
                         expanded.extend(in_folder);
                     }
-                } else if Path::new(&item.row.path).starts_with(root)
+                } else if item.file.path.starts_with(root)
                     && (item.media.kind != MediaKind::Tv
                         || item.is_series && wants_series
                         || !item.is_series && wants_episodes)
@@ -610,7 +621,7 @@ pub async fn legacy_select(
             rows = expanded;
         } else {
             rows.retain(|item| {
-                Path::new(&item.row.path).starts_with(root)
+                item.file.path.starts_with(root)
                     && (item.is_series && wants_series || !item.is_series && wants_episodes)
             });
         }
@@ -732,8 +743,8 @@ pub fn first_unwatched_per_media(
         let mut group = groups.remove(&media_id).unwrap_or_default();
         group.sort_by_key(|item| {
             (
-                item.row.season.unwrap_or_default(),
-                item.row.episode.unwrap_or_default(),
+                item.unit.map(|u| u.season).unwrap_or_default(),
+                item.unit.map(|u| u.episode).unwrap_or_default(),
             )
         });
         if let Some(episode) = group.into_iter().find(|item| !item.played) {

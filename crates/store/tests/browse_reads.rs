@@ -1,7 +1,8 @@
 //! Batch read facts: `Store::media_batch` and
 //! `Store::playback_units_for_user` (full `UnitState`, not a reduced row).
 
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserId};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UserId};
+use store::test_support::FixtureFile;
 use std::path::Path;
 use store::Store;
 
@@ -26,8 +27,8 @@ fn media(kind: MediaKind, title: &str, tmdb_id: Option<&str>) -> Media {
 /// exist before `upsert_unit` records a position.
 fn publish_unit(store: &Store, base: &Path, media_id: MediaId, season: u32, episode: u32) {
     let root = ensure_library(store, base, media_id);
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let row = FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id,
         path: root
             .join(format!("{media_id}-s{season}e{episode}.mkv"))
@@ -41,8 +42,9 @@ fn publish_unit(store: &Store, base: &Path, media_id: MediaId, season: u32, epis
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     };
-    store.insert_ledger(&row).unwrap();
+    store::test_support::publish_fixture_file(store, &row).unwrap();
 }
 
 /// A Library root is owned by exactly one Library and only owns files of its
@@ -74,8 +76,8 @@ fn ensure_library(store: &Store, base: &Path, media_id: MediaId) -> std::path::P
 /// Publish one whole-file (`-1/-1`) source for `media_id`.
 fn publish_whole(store: &Store, base: &Path, media_id: MediaId) {
     let root = ensure_library(store, base, media_id);
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let row = FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id,
         path: root
             .join(format!("whole-{media_id}.mkv"))
@@ -89,8 +91,9 @@ fn publish_whole(store: &Store, base: &Path, media_id: MediaId) {
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     };
-    store.insert_ledger(&row).unwrap();
+    store::test_support::publish_fixture_file(store, &row).unwrap();
 }
 
 #[test]
@@ -292,7 +295,7 @@ fn playback_units_for_user_is_scoped_to_one_user() {
 /// checks current candidate/owner parity rather than claiming a regression.
 #[test]
 fn default_candidate_growth_and_ownership_parity() {
-    use domain::{Confidence, LedgerId, LedgerRow, QualitySource};
+    use domain::{Confidence, LedgerId, QualitySource};
     use std::path::Path;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -319,15 +322,29 @@ fn default_candidate_growth_and_ownership_parity() {
     for (index, path) in paths.iter().enumerate() {
         let item = media(MediaKind::Movie, &format!("parity item {index}"), None);
         store.insert_media(&item).unwrap();
-        let row = LedgerRow {
-            id: LedgerId::new(), media_id: item.id, path: path.clone(), season: None,
-            episode: None, resolution: None, codec: None, hdr: None,
-            quality_source: QualitySource::Release, confidence: Confidence::High, filter_score: None,
+        let row = FixtureFile {
+            file_id: Some(LedgerId::new()),
+            media_id: item.id,
+            path: path.clone(),
+            season: None,
+            episode: None,
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: QualitySource::Release,
+            confidence: Confidence::High,
+            filter_score: None,
+            ..Default::default()
         };
-        store.insert_ledger(&row).unwrap();
+        store::test_support::publish_fixture_file(&store, &row).unwrap();
         if index == 0 {
-            let tv_row = LedgerRow { id: LedgerId::new(), media_id: row.media_id, path: path.clone(), ..row.clone() };
-            store.insert_ledger(&tv_row).unwrap();
+            let tv_row = FixtureFile {
+                file_id: Some(LedgerId::new()),
+                media_id: row.media_id,
+                path: path.clone(),
+                ..row.clone()
+            };
+            store::test_support::publish_fixture_file(&store, &tv_row).unwrap();
         }
     }
     let ownership = store.library_ownership().unwrap();
@@ -335,15 +352,15 @@ fn default_candidate_growth_and_ownership_parity() {
     assert_eq!(frozen.library_id, target.id);
     let ownership = store.library_ownership().unwrap();
     for library_id in [&target.id, &nested_library.id, &tied.id, &default.id] {
-        let current = store.list_ledger().unwrap().into_iter().filter(|row| {
-            ownership.owner(Path::new(&row.path), MediaKind::Movie).is_some_and(|owner| owner.id == *library_id)
-        }).map(|row| row.id).collect::<std::collections::HashSet<_>>();
+        let current = store.list_file_coverage().unwrap().into_iter().filter(|row| {
+            ownership.owner(Path::new(&row.file.path), MediaKind::Movie).is_some_and(|owner| owner.id == *library_id)
+        }).map(|row| row.file.file_id).collect::<std::collections::HashSet<_>>();
         let candidate = store.ledger_candidates_for_library(&ownership, library_id).unwrap().into_iter().filter(|row| {
-            ownership.owner(Path::new(&row.path), MediaKind::Movie).is_some_and(|owner| owner.id == *library_id)
-        }).map(|row| row.id).collect::<std::collections::HashSet<_>>();
+            ownership.owner(Path::new(&row.file.path), MediaKind::Movie).is_some_and(|owner| owner.id == *library_id)
+        }).map(|row| row.file.file_id).collect::<std::collections::HashSet<_>>();
         assert_eq!(candidate, current);
     }
-    let cold_global_build_is_reported = store.list_ledger().unwrap().len() == 4;
+    let cold_global_build_is_reported = store.list_file_coverage().unwrap().len() == 4;
     assert!(cold_global_build_is_reported, "the existing default candidate build reads globally");
     // No derived index/interface exists today; stale-index rejection is therefore not applicable.
     let db = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
@@ -355,7 +372,7 @@ fn default_candidate_growth_and_ownership_parity() {
 #[test]
 #[ignore = "measurement; run with --ignored --nocapture"]
 fn default_candidate_scan_size_and_write_cost() {
-    use domain::{Confidence, LedgerId, LedgerRow, QualitySource};
+    use domain::{Confidence, LedgerId, QualitySource};
     use std::time::Instant;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -367,11 +384,21 @@ fn default_candidate_scan_size_and_write_cost() {
     for count in [1_000usize, 10_000, 50_000] {
         let started = Instant::now();
         for i in 0..count {
-            store.insert_ledger(&LedgerRow {
-                id: LedgerId::new(), media_id: item.id, path: format!("/unrelated/{count}/{i}.mkv"),
-                season: None, episode: None, resolution: None, codec: None, hdr: None,
-                quality_source: QualitySource::Release, confidence: Confidence::High, filter_score: None,
-            }).unwrap();
+            let row = FixtureFile {
+                file_id: Some(LedgerId::new()),
+                media_id: item.id,
+                path: format!("/unrelated/{count}/{i}.mkv"),
+                season: None,
+                episode: None,
+                resolution: None,
+                codec: None,
+                hdr: None,
+                quality_source: QualitySource::Release,
+                confidence: Confidence::High,
+                filter_score: None,
+                ..Default::default()
+            };
+            store::test_support::publish_fixture_file(&store, &row).unwrap();
         }
         total_rows += count;
         let write_ms = started.elapsed().as_millis();

@@ -10,9 +10,10 @@ use std::time::Duration;
 use api::library_cover_service::{CoverRenderer, LibraryCoverService};
 use api::{ApiState, Store, router};
 use cover_generator::CoverOptions;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, LibraryFile, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 struct NoFetch;
 impl Fetcher for NoFetch {
@@ -79,7 +80,7 @@ impl CoverRenderer for GatedRenderer {
     fn render(
         &self,
         _library: &store::Library,
-        _rows: &[domain::LedgerRow],
+        _rows: &[domain::LibraryFile],
         _options: &CoverOptions,
     ) -> Result<Option<Vec<u8>>, String> {
         self.gate.enter_and_wait();
@@ -94,7 +95,7 @@ impl CoverRenderer for FixedRenderer {
     fn render(
         &self,
         _library: &store::Library,
-        _rows: &[domain::LedgerRow],
+        _rows: &[domain::LibraryFile],
         _options: &CoverOptions,
     ) -> Result<Option<Vec<u8>>, String> {
         Ok(Some(self.0.clone()))
@@ -153,9 +154,10 @@ fn seed_library(state: &ApiState, root: &Path) -> String {
         anilist_id: None,
     };
     guard.insert_media(&media).unwrap();
-    guard
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_fixture_file(
+        &guard,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id: media.id,
             path: file.display().to_string(),
             season: None,
@@ -166,8 +168,10 @@ fn seed_library(state: &ApiState, root: &Path) -> String {
             quality_source: QualitySource::Probe,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     library.id
 }
 

@@ -538,13 +538,12 @@ async fn library_scan_auto_resolves_tmdb_metadata() {
     scan_and_wait(&app, tv_lib_id).await;
 
     // Verify media was auto-recorded in ledger
-    let ledger = store.list_ledger().unwrap();
+    let ledger = store.list_file_coverage().unwrap();
     assert_eq!(ledger.len(), 1);
-    let row = &ledger[0];
-    assert_eq!(row.season, Some(1));
-    assert_eq!(row.episode, Some(1));
+    let coverage = &ledger[0];
+    assert_eq!(coverage.units, vec![domain::UnitKey::new(1, 1)]);
 
-    let media = store.get_media(row.media_id).unwrap().unwrap();
+    let media = store.get_media(coverage.file.media_id).unwrap().unwrap();
     assert_eq!(media.title, "葬送的芙莉莲");
 }
 
@@ -587,11 +586,11 @@ async fn scan_keeps_same_title_different_years_and_kinds_separate() {
             .unwrap();
         scan_and_wait(&app, id).await;
     }
-    let rows = store.list_ledger().unwrap();
+    let rows = store.list_file_coverage().unwrap();
     assert_eq!(rows.len(), 3);
     let media: Vec<_> = rows
         .iter()
-        .map(|row| store.get_media(row.media_id).unwrap().unwrap())
+        .map(|coverage| store.get_media(coverage.file.media_id).unwrap().unwrap())
         .collect();
     assert_eq!(
         media
@@ -663,9 +662,9 @@ async fn metadata_refresh_writes_each_episode_still_in_shared_directory() {
         .as_str()
         .unwrap();
     scan_and_wait(&app, id).await;
-    let rows = store.list_ledger().unwrap();
+    let rows = store.list_file_coverage().unwrap();
     assert_eq!(rows.len(), 2);
-    let mut item = store.get_media(rows[0].media_id).unwrap().unwrap();
+    let mut item = store.get_media(rows[0].file.media_id).unwrap().unwrap();
     item.tmdb_id = Some("123".into());
     store.update_media(&item).unwrap();
     let refresh = app

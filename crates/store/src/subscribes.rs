@@ -729,8 +729,8 @@ impl Store {
         for row in rows {
             let (season, episode, fact) = row?;
             if let Some(path) = fact.path.as_deref() {
-                if let Some(ledger) = self.ledger_by_path(path)? {
-                    facts.set_quality(path.to_string(), self.owned_quality(&ledger)?);
+                if let Some(coverage) = self.file_coverage_by_path(path)? {
+                    facts.set_quality(path.to_string(), self.owned_quality(&coverage)?);
                 }
             }
             facts.upsert(season, episode, fact);

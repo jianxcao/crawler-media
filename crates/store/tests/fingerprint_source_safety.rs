@@ -1,4 +1,5 @@
-use domain::{Confidence, LedgerId, LedgerRow, MediaId, QualitySource};
+use domain::{Confidence, LedgerId, MediaId, QualitySource};
+use store::test_support::FixtureFile;
 use store::{
     MarkerResultReplacement, ProbeJobUnitSpec, Store, StoredFingerprintAttempt,
     StoredFingerprintSample, StoredMediaMarker,
@@ -47,11 +48,11 @@ fn ensure_root(store: &Store, root: &std::path::Path) {
         .unwrap();
 }
 
-fn row(store: &Store, root: &std::path::Path, media_id: MediaId) -> LedgerRow {
+fn row(store: &Store, root: &std::path::Path, media_id: MediaId) -> FixtureFile {
     std::fs::create_dir_all(root).unwrap();
     ensure_root(store, root);
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let row = FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id: ensure_media(store, media_id),
         path: root.join("episode.mkv").to_string_lossy().into_owned(),
         season: Some(1),
@@ -62,12 +63,13 @@ fn row(store: &Store, root: &std::path::Path, media_id: MediaId) -> LedgerRow {
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     };
     std::fs::write(&row.path, b"fixture").unwrap();
     row
 }
 
-fn marker(row: &LedgerRow, source: &str) -> StoredMediaMarker {
+fn marker(row: &FixtureFile, source: &str) -> StoredMediaMarker {
     StoredMediaMarker {
         media_id: row.media_id,
         season: 1,
@@ -87,13 +89,13 @@ fn checked_publication_rejects_file_only_deletion_and_keeps_previous_result() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path()).unwrap();
     let row = row(&store, temp.path(), MediaId::new());
-    store.insert_ledger(&row).unwrap();
+    store::test_support::publish_fixture_file(&store, &&row).unwrap();
     store.put_media_marker(&marker(&row, "old")).unwrap();
     let replacement = MarkerResultReplacement {
         media_id: row.media_id,
         season: 1,
         markers: vec![marker(&row, "new")],
-        chapter_updates: vec![(row.id.to_string(), vec![])],
+        chapter_updates: vec![(row.file_id.expect("fixture file id").to_string(), vec![])],
     };
     std::fs::remove_file(&row.path).unwrap();
     assert!(
@@ -111,7 +113,7 @@ fn checked_publication_rejects_file_only_deletion_and_keeps_previous_result() {
     );
     assert!(
         store
-            .get_cached_chapters(&row.id.to_string())
+            .get_cached_chapters(&row.file_id.expect("fixture file id").to_string())
             .unwrap()
             .is_none()
     );
@@ -129,7 +131,7 @@ fn checked_publication_rejects_file_only_deletion_and_keeps_previous_result() {
         "new"
     );
     assert_eq!(
-        store.get_cached_chapters(&row.id.to_string()).unwrap(),
+        store.get_cached_chapters(&row.file_id.expect("fixture file id").to_string()).unwrap(),
         Some(vec![])
     );
 }
@@ -139,7 +141,7 @@ fn guarded_sample_commit_never_recreates_deleted_ledger_samples() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path()).unwrap();
     let row = row(&store, temp.path(), MediaId::new());
-    store.insert_ledger(&row).unwrap();
+    store::test_support::publish_fixture_file(&store, &&row).unwrap();
     let (attempt, sample) = capture_result(&row);
     store.begin_fingerprint_attempt(&attempt).unwrap();
     assert!(
@@ -247,9 +249,9 @@ fn refresh_cannot_publish_a_snapshot_that_omits_a_deleted_job_member() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path()).unwrap();
     let row = row(&store, temp.path(), MediaId::new());
-    store.insert_ledger(&row).unwrap();
+    store::test_support::publish_fixture_file(&store, &&row).unwrap();
     store.put_media_marker(&marker(&row, "old")).unwrap();
-    let id = row.id.to_string();
+    let id = row.file_id.expect("fixture file id").to_string();
     let units: Vec<_> = [id.as_str(), "deleted-before-snapshot"]
         .iter()
         .map(|id| ProbeJobUnitSpec {
@@ -309,16 +311,16 @@ fn job_scoped_publication_publishes_rows_the_job_covers() {
     row_a.media_id = media_id;
     row_a.season = Some(1);
     row_a.episode = Some(1);
-    store.insert_ledger(&row_a).unwrap();
+    store::test_support::publish_fixture_file(&store, &&row_a).unwrap();
 
     let second_root = temp_a.path().join("second");
     let mut row_b = row(&store, &second_root, media_id);
     row_b.media_id = media_id;
     row_b.season = Some(1);
     row_b.episode = Some(2);
-    store.insert_ledger(&row_b).unwrap();
+    store::test_support::publish_fixture_file(&store, &&row_b).unwrap();
 
-    let id_a = row_a.id.to_string();
+    let id_a = row_a.file_id.expect("fixture file id").to_string();
     let units = [ProbeJobUnitSpec {
         ledger_id: &id_a,
         kind: "tv",
@@ -365,16 +367,16 @@ fn job_scoped_publication_publishes_rows_the_job_covers() {
         Some(expected_chapters_a)
     );
     assert_eq!(
-        store.get_cached_chapters(&row_b.id.to_string()).unwrap(),
+        store.get_cached_chapters(&row_b.file_id.expect("fixture file id").to_string()).unwrap(),
         None
     );
 }
 
-fn capture_result(row: &LedgerRow) -> (StoredFingerprintAttempt, StoredFingerprintSample) {
+fn capture_result(row: &FixtureFile) -> (StoredFingerprintAttempt, StoredFingerprintSample) {
     let mut attempt = StoredFingerprintAttempt {
-        attempt_id: format!("capture-{}", row.id),
+        attempt_id: format!("capture-{}", row.file_id.expect("fixture file id")),
         job_id: "job".into(),
-        ledger_id: row.id.to_string(),
+        ledger_id: row.file_id.expect("fixture file id").to_string(),
         kind: "intro".into(),
         window_start_ms: 0,
         window_end_ms: 60_000,
@@ -388,8 +390,8 @@ fn capture_result(row: &LedgerRow) -> (StoredFingerprintAttempt, StoredFingerpri
     attempt.status = "succeeded".into();
     attempt.finished_at_ms = Some(2);
     let sample = StoredFingerprintSample {
-        sample_id: format!("sample-{}", row.id),
-        ledger_id: row.id.to_string(),
+        sample_id: format!("sample-{}", row.file_id.expect("fixture file id")),
+        ledger_id: row.file_id.expect("fixture file id").to_string(),
         source_version: "v1".into(),
         capture_profile_key: "profile".into(),
         kind: "intro".into(),
@@ -409,7 +411,7 @@ fn deleting_all_media_ledgers_also_removes_their_fingerprint_samples() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path()).unwrap();
     let row = row(&store, temp.path(), MediaId::new());
-    store.insert_ledger(&row).unwrap();
+    store::test_support::publish_fixture_file(&store, &&row).unwrap();
     let (attempt, sample) = capture_result(&row);
     assert!(
         store
@@ -442,9 +444,9 @@ fn cancelled_refresh_unit_cannot_be_published_as_success() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path()).unwrap();
     let row = row(&store, temp.path(), MediaId::new());
-    store.insert_ledger(&row).unwrap();
+    store::test_support::publish_fixture_file(&store, &&row).unwrap();
     store.put_media_marker(&marker(&row, "old")).unwrap();
-    let id = row.id.to_string();
+    let id = row.file_id.expect("fixture file id").to_string();
     let unit = ProbeJobUnitSpec {
         ledger_id: &id,
         kind: "tv",
@@ -502,7 +504,7 @@ fn independent_store_handles_cannot_reinsert_samples_while_ledger_is_deleted() {
                 .to_string_lossy()
                 .into_owned();
             std::fs::write(&row.path, b"fixture").unwrap();
-            deleting.insert_ledger(&row).unwrap();
+            store::test_support::publish_fixture_file(&deleting, &&row).unwrap();
             row
         })
         .collect();
@@ -546,7 +548,7 @@ fn independent_store_handles_cannot_reinsert_samples_while_ledger_is_deleted() {
     });
     for row in rows {
         let (_, sample) = capture_result(&row);
-        assert!(deleting.ledger_by_path(&row.path).unwrap().is_none());
+        assert!(deleting.file_coverage_by_path(&row.path).unwrap().is_none());
         assert!(
             deleting
                 .find_covering_fingerprint_samples(&sample_query(&sample))

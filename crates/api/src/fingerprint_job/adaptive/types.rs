@@ -19,7 +19,7 @@ pub enum CapturePolicy {
 }
 
 pub trait CaptureGate: Send + Sync {
-    fn work_control(&self, _row: &domain::LedgerRow) -> marker::WorkControl {
+    fn work_control(&self, _row: &domain::FileCoverage) -> marker::WorkControl {
         marker::WorkControl::default()
     }
     fn wait_before_capture(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
@@ -36,7 +36,7 @@ pub struct AdaptiveCaptureContext {
 #[derive(Clone, Debug)]
 pub struct EpisodeCaptureRequest {
     pub job_id: String,
-    pub row: domain::LedgerRow,
+    pub row: domain::FileCoverage,
     pub source_version: String,
     pub media_duration_ms: Option<i64>,
     pub audio_stream_index: Option<u32>,

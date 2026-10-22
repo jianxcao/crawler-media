@@ -1,13 +1,14 @@
 //! Jellyfin/Emby catalog: items, search hints, genres and studios.
 
+use axum::Json;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::auth::AuthUser;
 use crate::dto::item_dto_json;
+use crate::provider::ServerItemPage;
 use crate::provider::query;
 
 use super::parent_scope::require_user_path;
@@ -38,7 +39,10 @@ pub(super) async fn items(
                 let mut folder_items: Vec<Value> = Vec::new();
                 let server_id = state.provider.server_id();
                 for root in &target_lib.root_paths {
-                    let folder_name = root.file_name().and_then(|n| n.to_str()).unwrap_or("folder");
+                    let folder_name = root
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("folder");
                     let folder_id = crate::provider::query::folder_id_for_root(root);
                     folder_items.push(json!({
                         "Name": folder_name,
@@ -54,7 +58,9 @@ pub(super) async fn items(
                     }));
                 }
                 let total = folder_items.len();
-                return Ok(Json(json!({ "Items": folder_items, "TotalRecordCount": total })));
+                return Ok(Json(
+                    json!({ "Items": folder_items, "TotalRecordCount": total }),
+                ));
             }
         }
     }
@@ -69,7 +75,9 @@ pub(super) async fn items(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
     let listed: Vec<Value> = page.items.into_iter().map(item_dto_json).collect();
-    Ok(Json(json!({ "Items": listed, "TotalRecordCount": page.total })))
+    Ok(Json(
+        json!({ "Items": listed, "TotalRecordCount": page.total }),
+    ))
 }
 pub(super) async fn resume_items(
     State(state): State<AppState>,
@@ -79,9 +87,23 @@ pub(super) async fn resume_items(
 ) -> Result<Json<Value>, StatusCode> {
     require_user_path(state.provider.as_ref(), user.id, path.user_id.as_deref()).await?;
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
-    let mut rows = if query.parent_id.is_none() {
-        state.provider.list_resumable_items(user.id, usize::MAX).await.unwrap_or_default()
-    } else {
+    let start_index = query.start_index.unwrap_or(0);
+    if query.parent_id.is_none() {
+        // 无 ParentId：选页在 store 侧完成，只为返回页建重元数据。
+        let page = state
+            .provider
+            .resumable_items_page(user.id, start_index, limit)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, user_id = %user.id, "Jellyfin 续播选页失败");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        let listed: Vec<Value> = page.items.into_iter().map(item_dto_json).collect();
+        return Ok(Json(
+            json!({ "Items": listed, "TotalRecordCount": page.total }),
+        ));
+    }
+    let mut rows = {
         let root_rows = state
             .provider
             .list_visible_items(user.id, query.parent_id.as_deref())
@@ -90,10 +112,9 @@ pub(super) async fn resume_items(
         root_rows
             .into_iter()
             .filter(|item| item.ticks > 0 && !item.played)
-            .collect()
+            .collect::<Vec<_>>()
     };
     let total = rows.len();
-    let start_index = query.start_index.unwrap_or(0);
     let listed: Vec<Value> = rows
         .drain(..)
         .skip(start_index)
@@ -102,6 +123,32 @@ pub(super) async fn resume_items(
         .collect();
     Ok(Json(json!({ "Items": listed, "TotalRecordCount": total })))
 }
+/// `/Items/Latest` 的一段：谓词、排序、COUNT、LIMIT/OFFSET 都在 store 的同一次短读里完成，
+/// 调用方拿到的 `items` 就是最终返回的那几行（只为它们建重元数据）。
+async fn latest_segment(
+    state: &AppState,
+    user_id: domain::UserId,
+    query: &ItemsQuery,
+    played: bool,
+    offset: usize,
+    limit: usize,
+) -> Result<ServerItemPage, StatusCode> {
+    let mut mapped = query.to_server_query();
+    mapped.is_played = Some(played);
+    mapped.sort_by = Some("DateCreated,SortName".to_string());
+    mapped.sort_order = Some("Descending".to_string());
+    mapped.offset = offset;
+    mapped.limit = limit;
+    state
+        .provider
+        .query_visible_items(user_id, mapped)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, %user_id, "Jellyfin 最近入库选页失败");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+}
+
 pub(super) async fn latest_items(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
@@ -109,34 +156,37 @@ pub(super) async fn latest_items(
     Query(query): Query<ItemsQuery>,
 ) -> Result<Json<Value>, StatusCode> {
     require_user_path(state.provider.as_ref(), user.id, path.user_id.as_deref()).await?;
-    let rows = state
-        .provider
-        .list_visible_items(user.id, query.parent_id.as_deref())
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    // 「最近入库」的播放状态口径（见 library::latest）：
-    // 显式给了 IsPlayed 就按它严格筛（协议语义原样保留）；没给时**只排不筛**——
-    // 没看完的在前、已看完的沉底，段内仍是入库时间倒序。
-    // Jellyfin 在缺省位置会因为 HidePlayedInLatest 直接把已看完的藏掉，全看过的库
-    // 更是连入口都没有；我们改成排到最后，客户端那一行于是永远有内容。
-    let server_query = query.to_server_query();
-    let rows = query::filter_items_except_played(rows, &server_query);
-    let rows = query::sort_items(rows, "DateCreated,SortName", "Descending");
-    let rows = match query.is_played {
-        Some(played) => rows
-            .into_iter()
-            .filter(|item| item.played == played)
-            .collect(),
-        None => library::played_last(rows, |item| item.played),
-    };
+    // 「最近入库」的播放状态口径（见 library::latest）：显式给了 IsPlayed 就按它严格筛
+    // （协议语义原样保留）；没给时**只排不筛**——没看完的在前、已看完的沉底，段内仍是
+    // 入库时间倒序。Jellyfin 在缺省位置会因为 HidePlayedInLatest 直接把已看完的藏掉，
+    // 全看过的库更是连入口都没有；我们改成排到最后，客户端那一行于是永远有内容。
     let start_index = query.start_index.unwrap_or(0);
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
-    let listed: Vec<Value> = rows
-        .into_iter()
-        .skip(start_index)
-        .take(limit)
-        .map(item_dto_json)
-        .collect();
+    let mut page_items = Vec::new();
+    match query.is_played {
+        Some(played) => {
+            let page = latest_segment(&state, user.id, &query, played, start_index, limit).await?;
+            page_items = page.items;
+        }
+        None => {
+            // 未看完段先选页；只有它装不满本页时才去取已看完段。
+            let unplayed =
+                latest_segment(&state, user.id, &query, false, start_index, limit).await?;
+            let unplayed_total = unplayed.total;
+            page_items = unplayed.items;
+            if page_items.len() < limit {
+                // 整段顺序 = 未看完[0..U) ++ 已看完[0..P)：越过 U 之后，
+                // 改从已看完段的第 (start + 已取条数 - U) 条接上。
+                let taken = page_items.len();
+                let played_offset = (start_index + taken).saturating_sub(unplayed_total);
+                let played_page =
+                    latest_segment(&state, user.id, &query, true, played_offset, limit - taken)
+                        .await?;
+                page_items.extend(played_page.items);
+            }
+        }
+    }
+    let listed: Vec<Value> = page_items.into_iter().map(item_dto_json).collect();
     Ok(Json(json!(listed)))
 }
 pub(super) async fn genres(
@@ -155,7 +205,8 @@ pub(super) async fn genres(
         .list_visible_items(user.id, parent_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let mut genre_counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut genre_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
     for it in items {
         for g in it.metadata.genres {
             if !g.trim().is_empty() {
@@ -220,7 +271,8 @@ pub(super) async fn studios(
         .list_visible_items(user.id, parent_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let mut studio_counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut studio_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
     for it in items {
         for s in it.metadata.studios {
             if !s.trim().is_empty() {
@@ -283,7 +335,11 @@ pub(super) async fn search_hints(
     Extension(user): Extension<AuthUser>,
     Query(query): Query<SearchHintsQuery>,
 ) -> Result<Json<Value>, StatusCode> {
-    let Some(term) = query.search_term.map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()) else {
+    let Some(term) = query
+        .search_term
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+    else {
         return Ok(Json(json!({ "SearchHints": [], "TotalRecordCount": 0 })));
     };
     let items = state
@@ -294,7 +350,12 @@ pub(super) async fn search_hints(
     let mut hints = Vec::new();
     for it in items {
         let title_match = it.media.title.to_lowercase().contains(&term);
-        let orig_match = it.metadata.original_title.as_deref().map(|s| s.to_lowercase().contains(&term)).unwrap_or(false);
+        let orig_match = it
+            .metadata
+            .original_title
+            .as_deref()
+            .map(|s| s.to_lowercase().contains(&term))
+            .unwrap_or(false);
         if title_match || orig_match {
             let id = it.protocol_id();
             let item_type = if it.is_series {
@@ -320,7 +381,9 @@ pub(super) async fn search_hints(
     let start_index = query.start_index.unwrap_or(0);
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let listed: Vec<Value> = hints.into_iter().skip(start_index).take(limit).collect();
-    Ok(Json(json!({ "SearchHints": listed, "TotalRecordCount": total })))
+    Ok(Json(
+        json!({ "SearchHints": listed, "TotalRecordCount": total }),
+    ))
 }
 pub(super) async fn item_by_id(
     State(state): State<AppState>,

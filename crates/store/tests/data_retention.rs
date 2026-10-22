@@ -4,14 +4,20 @@
 //! 用 test-only 原始 SQL 造数（store 没有公开的任意时间戳写入接口），读取断言
 //! 仍按真实表内容进行。
 
+mod support;
+
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use domain::{MediaId, UserId};
+use media::response_cache::CacheSource;
 use rusqlite::{Connection, params};
-use store::{DataRetentionCursor, RetentionClass, Store};
+use store::{DataRetentionBatch, DataRetentionCursor, RetentionClass, Store};
 
 const CUTOFF_SECS: i64 = 1_700_000_000;
 const CUTOFF_MS: i64 = CUTOFF_SECS * 1000;
+/// 计划 Task 20 Step 1 的缓存规模：真实 10 万行写入 + 清空。
+const CACHE_ROWS: usize = 100_000;
 
 fn open_db(dir: &Path, name: &str) -> Connection {
     Connection::open(dir.join(name)).unwrap()
@@ -386,6 +392,8 @@ fn dry_run_reports_the_same_window_without_writing() {
             .unwrap();
     }
 
+    // Step 2「preview 零写」：dry_run 前后主库字节数（WAL 只记录，不断言）。
+    let db_before = file_len(&tmp.path().join("library.db"));
     let batch = store
         .prune_data_history(RetentionClass::Qoe, CUTOFF_MS, None, 500, true)
         .unwrap();
@@ -393,6 +401,10 @@ fn dry_run_reports_the_same_window_without_writing() {
     assert_eq!(batch.examined, 3);
     assert_eq!(batch.deleted, 0);
     assert_eq!(metric_count(tmp.path()), 3, "dry_run 不得写任何行");
+    let db_after = file_len(&tmp.path().join("library.db"));
+    let wal_after = file_len(&tmp.path().join("library.db-wal"));
+    println!("MEASURE task20/store preview_zero_write db={db_before}->{db_after} wal={wal_after}");
+    assert_eq!(db_after, db_before, "dry_run 必须连字节都不写");
 }
 
 #[test]
@@ -510,103 +522,20 @@ fn transient_report_examined_limit_is_capped_at_500() {
     assert!(batch.examined <= 500);
 }
 
+/// 计划 Task 20 Step 1：真实 10 万行缓存更新/清空 + 瞬态目录/Probe 历史清理都不得
+/// 改动本地事实（条目/进度/活动操作），并且必须证明可清理的旧历史真被删掉——只断言
+/// 「没删」在清理器整体失效时仍会通过。
+///
+/// 读取断言全走公开 seam（`library_roster_stats`/`playback_units_for_media`/
+/// `unfinished_media_merges`/`media::response_cache`）；probe job 与 media_operations
+/// 的 fixture 只能用 test-only 原始 SQL（store 无公开的任意时间戳写入/创建入口）。
 #[test]
 fn retention_preserves_active_operations_and_local_facts() {
     let tmp = tempfile::tempdir().unwrap();
-    let data_dir = tmp.path().join("data");
+    let data_dir = tmp.path().to_path_buf();
     let store = Store::open(&data_dir).unwrap();
-
+    let (library_id, media_id) = seed_local_movie(&store, tmp.path());
     let user_id = UserId::new();
-    let (media_id, ledger_id) = {
-        let media = domain::Media {
-            id: MediaId::new(),
-            kind: domain::MediaKind::Movie,
-            title: "Retention Movie".into(),
-            year: Some(2024),
-            original_title: None,
-            tmdb_id: Some("12345".into()),
-            douban_id: None,
-            tvdb_id: None,
-            bangumi_id: None,
-            anilist_id: None,
-            aliases: Vec::new(),
-        };
-        store.insert_media(&media).unwrap();
-        let lib_dir = tmp.path().join("library");
-        std::fs::create_dir_all(&lib_dir).unwrap();
-        let lib = store
-            .create_library(
-                domain::MediaKind::Movie,
-                "Movies",
-                &[lib_dir.to_str().unwrap()],
-                "everyone",
-                true,
-                &[],
-            )
-            .unwrap();
-        let root = store
-            .list_library_roots()
-            .unwrap()
-            .into_iter()
-            .find(|r| r.library_id == Some(lib.id.clone()))
-            .unwrap();
-        let file_path = lib_dir.join("movie.mkv");
-        std::fs::write(&file_path, b"dummy content").unwrap();
-        let file_id = domain::LedgerId::new();
-        let file = domain::LibraryFile {
-            file_id,
-            library_id: lib.id.parse().unwrap(),
-            root_id: root.id,
-            media_id: media.id,
-            kind: domain::MediaKind::Movie,
-            path: file_path.to_string_lossy().into_owned().into(),
-            version: domain::FileVersion {
-                revision: 1,
-                source_version: "v1".into(),
-            },
-            presence: domain::FilePresence::Present,
-            publication: domain::FilePublication::Published,
-            size_bytes: Some(100),
-            stat_known: true,
-            created_ns: None,
-            modified_ns: None,
-            source_digest: None,
-            source_path: None,
-            transfer_mode: None,
-            resolution: Some("1080p".into()),
-            codec: Some("h264".into()),
-            hdr: None,
-            quality_source: domain::QualitySource::Probe,
-            confidence: domain::Confidence::High,
-            filter_score: None,
-            release_quality: None,
-            duration_ms: Some(10_000),
-            tracks_version: 1,
-            poster_path: None,
-            backdrop_path: None,
-            still_path: None,
-        };
-        let scope = store::library_write::WriteScope {
-            library_id: lib.id.parse().unwrap(),
-            config_revision: 0,
-        };
-        store
-            .publish_files(
-                &scope,
-                &[store::library_write::FilePublication {
-                    file: &file,
-                    units: &[domain::UnitKey::WHOLE],
-                    expected_version: None,
-                    nfo_observation: None,
-                    probe_required: false,
-                }],
-                1000,
-            )
-            .unwrap();
-        (media.id, file_id)
-    };
-
-    // Record user progress
     store
         .upsert_unit(
             user_id,
@@ -623,66 +552,240 @@ fn retention_preserves_active_operations_and_local_facts() {
             1000,
         )
         .unwrap();
+    seed_active_merge(&data_dir, media_id);
+    seed_probe_history(&data_dir);
 
-    // Create an active media operation (state = "frozen")
-    let active_op_id = "00000000-0000-0000-0000-000000000099";
-    {
-        let conn = open_db(&data_dir, "library.db");
-        conn.execute(
-            "INSERT INTO media_operations
-                (operation_id, kind, plan_json, phase_cursor, state, error, created_at_ms, updated_at_ms, survivor_id, loser_id)
-             VALUES (?1, 'merge', '{}', 'init', 'frozen', NULL, 1000, 1000, ?2, NULL)",
-            params![active_op_id, media_id.to_string()],
-        )
-        .unwrap();
+    let stats_before = store.library_roster_stats(&library_id).unwrap();
+    let local_items_before = stats_before.item_count;
+    let playback_before = play_unit_count(&store, user_id, media_id);
+    let active_operations_before = store.unfinished_media_merges().unwrap();
+    assert_eq!(local_items_before, 1, "夹具必须真的落了本地条目");
+    assert_eq!(stats_before.file_count, 1, "夹具必须真的发布了文件");
+    assert_eq!(playback_before, 1, "夹具必须真的落了用户进度");
+    assert_eq!(
+        active_operations_before.len(),
+        1,
+        "夹具必须真的落了活动操作"
+    );
+
+    let (cache_rows, cache_elapsed) = churn_cache(&data_dir);
+    seed_catalog_keys(&data_dir);
+
+    let stats_after_cache_clear = store.library_roster_stats(&library_id).unwrap();
+    let local_items_after_cache_clear = stats_after_cache_clear.item_count;
+    let playback_after_cache_clear = play_unit_count(&store, user_id, media_id);
+
+    let prune_started = Instant::now();
+    let catalog = prune(&store, RetentionClass::TransientCatalog);
+    let probe = prune(&store, RetentionClass::ProbeHistory);
+    let prune_elapsed = prune_started.elapsed();
+
+    let active_operations_after_retention = store.unfinished_media_merges().unwrap();
+
+    // 清理器必须真的动手：瞬态搜索键 + 最旧 Probe 历史被删；详情键与最新 3 条被保护。
+    assert_eq!(catalog.deleted, 1, "过期瞬态搜索键必须被删掉");
+    assert_eq!(catalog.protected, 1, "详情键必须被保护");
+    assert_eq!(probe.deleted, 1, "最旧的 Probe 历史必须被删掉");
+    assert_eq!(probe.protected, 3, "同一 scope 最新 3 条必须保留");
+    assert!(!probe_job_exists(&data_dir, "retention-oldest"));
+    for kept in ["retention-mid", "retention-new", "retention-newest"] {
+        assert!(probe_job_exists(&data_dir, kept), "{kept} 必须保留");
     }
+    let cache = open_cache(&data_dir);
+    let cached = |key: &str| {
+        media::response_cache::get(&cache, CacheSource::Tmdb, key)
+            .unwrap()
+            .is_some()
+    };
+    assert!(cached("/movie/12345"), "详情键不得被瞬态清理删掉");
+    assert!(!cached("/search/movie?page=0"), "瞬态键必须已被删掉");
 
-    let local_items_before = open_db(&data_dir, "library.db")
-        .query_row("SELECT COUNT(*) FROM library_items", [], |r| r.get::<_, usize>(0))
-        .unwrap();
-    let playback_before = open_db(&data_dir, "library.db")
-        .query_row("SELECT COUNT(*) FROM playback_units", [], |r| r.get::<_, usize>(0))
-        .unwrap();
-    let active_operations_before = open_db(&data_dir, "library.db")
-        .query_row("SELECT COUNT(*) FROM media_operations WHERE state IN ('planned','frozen','draining','applying','checking')", [], |r| r.get::<_, usize>(0))
-        .unwrap();
-
-    // Put entries in cache.db and simulate 100k cache updates + clear
-    {
-        let cache_conn = open_db(&data_dir, "cache.db");
-        cache_conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS tmdb_cache (
-                entry_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                cache_key TEXT NOT NULL COLLATE BINARY UNIQUE,
-                body TEXT NOT NULL,
-                fetched_at INTEGER NOT NULL,
-                expires_at INTEGER
-            );
-            DELETE FROM tmdb_cache;"
-        ).unwrap();
-        // Insert and clear
-        cache_conn.execute(
-            "INSERT INTO tmdb_cache (cache_key, body, fetched_at) VALUES ('key1', '{}', 1000)",
-            [],
-        ).unwrap();
-        cache_conn.execute("DELETE FROM tmdb_cache", []).unwrap();
-    }
-
-    // Run data retention pruning on QOE & Probe
-    let _ = store.prune_data_history(RetentionClass::Qoe, 2_000_000_000_000, None, 500, false).unwrap();
-    let _ = store.prune_data_history(RetentionClass::ProbeHistory, 2_000_000_000_000, None, 500, false).unwrap();
-
-    let local_items_after_cache_clear = open_db(&data_dir, "library.db")
-        .query_row("SELECT COUNT(*) FROM library_items", [], |r| r.get::<_, usize>(0))
-        .unwrap();
-    let playback_after_cache_clear = open_db(&data_dir, "library.db")
-        .query_row("SELECT COUNT(*) FROM playback_units", [], |r| r.get::<_, usize>(0))
-        .unwrap();
-    let active_operations_after_retention = open_db(&data_dir, "library.db")
-        .query_row("SELECT COUNT(*) FROM media_operations WHERE state IN ('planned','frozen','draining','applying','checking')", [], |r| r.get::<_, usize>(0))
-        .unwrap();
-
+    // 本地事实在「缓存清空后」与「历史清理后」都必须一字不差（整条 roster 快照）。
     assert_eq!(local_items_after_cache_clear, local_items_before);
     assert_eq!(playback_after_cache_clear, playback_before);
     assert_eq!(active_operations_after_retention, active_operations_before);
+    assert_eq!(
+        store.library_roster_stats(&library_id).unwrap(),
+        stats_before
+    );
+    assert_eq!(play_unit_count(&store, user_id, media_id), playback_before);
+    assert_eq!(store.unfinished_media_merges().unwrap().len(), 1);
+
+    report_measurements(
+        &data_dir,
+        cache_rows,
+        cache_elapsed,
+        prune_elapsed,
+        &catalog,
+        &probe,
+    );
+}
+
+fn play_unit_count(store: &Store, user: UserId, media: MediaId) -> usize {
+    store
+        .playback_units_for_media(user, &[media])
+        .unwrap()
+        .len()
+}
+
+fn prune(store: &Store, class: RetentionClass) -> DataRetentionBatch {
+    store
+        .prune_data_history(class, CUTOFF_MS, None, 500, false)
+        .unwrap()
+}
+
+/// 一条真实发布的本地条目 + 它所属 Library 的 id（读取走 `list_libraries`）。
+fn seed_local_movie(store: &Store, root: &Path) -> (String, MediaId) {
+    let root = root.join("library");
+    let (media_id, _) = support::seed_published_file(store, &root, "retention");
+    let canonical = std::fs::canonicalize(&root).unwrap();
+    let libraries = store.list_libraries().unwrap();
+    let owner = libraries.iter().find(|l| l.root_paths.contains(&canonical));
+    let library_id = owner.expect("夹具必须创建 Library").id.clone();
+    (library_id, media_id)
+}
+
+/// 活动 merge 操作（state = `frozen`）：store 无公开创建入口，只能 test-only 写入。
+fn seed_active_merge(data_dir: &Path, media_id: MediaId) {
+    let sql = "INSERT INTO media_operations
+            (operation_id, kind, plan_json, phase_cursor, state, error, created_at_ms,
+             updated_at_ms, survivor_id, loser_id)
+         VALUES ('00000000-0000-0000-0000-000000000099', 'merge', '{}', 'init', 'frozen',
+                 NULL, 1000, 1000, ?1, NULL)";
+    open_db(data_dir, "library.db")
+        .execute(sql, params![media_id.to_string()])
+        .unwrap();
+}
+
+/// 同一 scope 4 条终态 Probe job：最新 3 条按规则保留，最旧 1 条必须被真正删掉。
+fn seed_probe_history(data_dir: &Path) {
+    let jobs = [
+        ("retention-oldest", 4000),
+        ("retention-mid", 3000),
+        ("retention-new", 2000),
+        ("retention-newest", 1000),
+    ];
+    for (id, age_ms) in jobs {
+        insert_probe_job(
+            data_dir,
+            id,
+            "scope-retention",
+            "succeeded",
+            Some(CUTOFF_MS - age_ms),
+        );
+    }
+}
+
+fn open_cache(data_dir: &Path) -> Connection {
+    media::response_cache::open(data_dir.join("cache.db")).unwrap()
+}
+
+/// 计划 Task 20 的 10 万行缓存写入 + 逐键清空（只走 media 公开 API）：(写入行数, 耗时)。
+fn churn_cache(data_dir: &Path) -> (usize, Duration) {
+    let conn = open_cache(data_dir);
+    let started = Instant::now();
+    conn.execute_batch("BEGIN").unwrap();
+    for index in 0..CACHE_ROWS {
+        search_put(&conn, index);
+    }
+    conn.execute_batch("COMMIT").unwrap();
+    let loaded = media::response_cache::list(&conn, None).unwrap().len();
+    assert_eq!(loaded, CACHE_ROWS, "10 万行必须真的写进 cache.db");
+
+    conn.execute_batch("BEGIN").unwrap();
+    let mut deleted = 0usize;
+    for index in 0..CACHE_ROWS {
+        let key = format!("/search/movie?page={index}");
+        if media::response_cache::delete(&conn, CacheSource::Tmdb, &key).unwrap() {
+            deleted += 1;
+        }
+    }
+    conn.execute_batch("COMMIT").unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(deleted, CACHE_ROWS, "清空必须真的删掉每一行");
+    assert_eq!(media::response_cache::list(&conn, None).unwrap().len(), 0);
+    (loaded, elapsed)
+}
+
+fn search_put(conn: &Connection, index: usize) {
+    let key = format!("/search/movie?page={index}");
+    media::response_cache::put(conn, CacheSource::Tmdb, &key, "{}", 1_000, None).unwrap();
+}
+
+/// 过期瞬态键（可清理）与详情键（必须保护）各一条；fetched_at 早于 cutoff 秒。
+fn seed_catalog_keys(data_dir: &Path) {
+    let conn = open_cache(data_dir);
+    let old = CUTOFF_SECS - 10;
+    for key in ["/search/movie?page=0", "/movie/12345"] {
+        media::response_cache::put(&conn, CacheSource::Tmdb, key, "{}", old, None).unwrap();
+    }
+}
+
+/// Step 2 指标输出：只打印、不对数值断言；`--nocapture` 可见。测不到的项标「未测得」。
+fn report_measurements(
+    data_dir: &Path,
+    cache_rows: usize,
+    cache_elapsed: Duration,
+    prune_elapsed: Duration,
+    catalog: &DataRetentionBatch,
+    probe: &DataRetentionBatch,
+) {
+    let throughput = cache_rows as f64 / cache_elapsed.as_secs_f64().max(f64::MIN_POSITIVE);
+    println!(
+        "MEASURE task20/store cache_rows={cache_rows} write_and_clear_wall_ms={} \
+         write_throughput_rows_per_s={throughput:.0}",
+        cache_elapsed.as_millis()
+    );
+    println!(
+        "MEASURE task20/store prune_wall_ms={} catalog_examined={} catalog_deleted={} \
+         catalog_protected={} probe_examined={} probe_deleted={} probe_protected={}",
+        prune_elapsed.as_millis(),
+        catalog.examined,
+        catalog.deleted,
+        catalog.protected,
+        probe.examined,
+        probe.deleted,
+        probe.protected
+    );
+    let sizes = ["library.db", "library.db-wal", "cache.db", "cache.db-wal"]
+        .map(|name| format!("{name}={}", file_len(&data_dir.join(name))))
+        .join(" ");
+    println!("MEASURE task20/store bytes {sizes}");
+    for name in ["library.db", "cache.db"] {
+        let conn = open_db(data_dir, name);
+        let page_size = pragma_i64(&conn, "PRAGMA page_size");
+        let page_count = pragma_i64(&conn, "PRAGMA page_count");
+        let free = pragma_i64(&conn, "PRAGMA freelist_count");
+        let used_pct = (page_count - free) as f64 * 100.0 / page_count.max(1) as f64;
+        println!(
+            "MEASURE task20/store page_util {name} page_size={page_size} page_count={page_count} \
+             freelist={free} used_pct={used_pct:.1}"
+        );
+        let stat = match dbstat_pages(&conn) {
+            Some(rows) => {
+                let total: i64 = rows.iter().map(|(_, bytes)| *bytes).sum();
+                let top: Vec<_> = rows.iter().take(8).collect();
+                format!("total_bytes={total} top8={top:?}")
+            }
+            None => "未测得(本构建无 dbstat 虚表)".to_string(),
+        };
+        println!("MEASURE task20/store dbstat {name}={stat}");
+    }
+}
+
+fn file_len(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+}
+
+fn pragma_i64(conn: &Connection, pragma: &str) -> i64 {
+    conn.query_row(pragma, [], |row| row.get::<_, i64>(0))
+        .unwrap()
+}
+
+/// `dbstat` 虚表不可用时返回 `None`，由调用方标「未测得」，不编造数字。
+fn dbstat_pages(conn: &Connection) -> Option<Vec<(String, i64)>> {
+    let sql = "SELECT name, SUM(pgsize) FROM dbstat GROUP BY name ORDER BY 2 DESC";
+    let mut stmt = conn.prepare(sql).ok()?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).ok()?;
+    rows.collect::<Result<Vec<_>, _>>().ok()
 }

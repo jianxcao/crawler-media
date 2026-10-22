@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use crate::auth::AuthUser;
 use crate::dto::item_dto_json;
 
-use super::{AppState, ItemsQuery, parse_season_id};
+use super::{AppState, ItemsQuery};
 
 pub(super) async fn shows_next_up(
     State(state): State<AppState>,
@@ -50,10 +50,10 @@ pub(super) async fn show_seasons(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let mut season_numbers: std::collections::BTreeSet<u32> = episodes
         .iter()
-        .map(|episode| episode.row.season.unwrap_or(1))
+        .map(|episode| episode.unit.map(|u| u.season as u32).unwrap_or(1))
         .collect();
     if season_numbers.is_empty() {
-        season_numbers.insert(item.row.season.unwrap_or(1));
+        season_numbers.insert(item.unit.map(|u| u.season as u32).unwrap_or(1));
     }
     let server_id = state.provider.server_id();
     let mut seasons_json: Vec<Value> = Vec::new();
@@ -63,7 +63,10 @@ pub(super) async fn show_seasons(
             season: season_num,
         }
         .to_wire_string();
-        let season_episodes: Vec<&crate::provider::MediaItemSnapshot> = episodes.iter().filter(|e| e.row.season == Some(season_num)).collect();
+        let season_episodes: Vec<&crate::provider::MediaItemSnapshot> = episodes
+            .iter()
+            .filter(|e| e.unit.map(|u| u.season as u32) == Some(season_num))
+            .collect();
         let played_count = season_episodes.iter().filter(|e| e.played).count();
         let season_total = season_episodes.len();
         let unplayed = season_total.saturating_sub(played_count);
@@ -103,35 +106,39 @@ pub(super) async fn show_episodes(
     Path(id): Path<String>,
     Query(query): Query<ItemsQuery>,
 ) -> Result<Json<Value>, StatusCode> {
-    let rows = state
+    // 授权、剧/季收敛、排序、COUNT 与 LIMIT 都在 store 的同一段短读里完成；这里
+    // 只把返回页渲染成 JSON。旧实现先整库取快照、再在内存里过滤排序切页。
+    let page = state
         .provider
-        .list_visible_items(user.id, Some(&id))
+        .query_visible_items(user.id, episode_query(&id, &query))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let season_number = query
-        .season_id
-        .as_deref()
-        .and_then(|season_id| parse_season_id(&id, season_id));
-    let limit = query.limit.unwrap_or(200);
-    let mut rows: Vec<_> = rows
-        .into_iter()
-        .filter(|episode| match season_number {
-            Some(season) => episode.row.season == Some(season),
-            None => query.season_id.is_none(),
-        })
-        .collect();
-    rows.sort_by_key(|episode| {
-        (
-            episode.row.season.unwrap_or_default(),
-            episode.row.episode.unwrap_or_default(),
-        )
-    });
-    let total = rows.len();
-    let listed: Vec<Value> = rows
-        .into_iter()
-        .skip(query.start_index.unwrap_or(0))
-        .take(limit)
-        .map(item_dto_json)
-        .collect();
-    Ok(Json(json!({ "Items": listed, "TotalRecordCount": total })))
+        .map_err(|error| {
+            tracing::error!(%error, user_id = %user.id, series_id = %id, "Jellyfin 分集选页失败");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let listed: Vec<Value> = page.items.into_iter().map(item_dto_json).collect();
+    Ok(Json(json!({ "Items": listed, "TotalRecordCount": page.total })))
+}
+
+/// 分集请求 → 协议查询：钉住这部剧，只列分集，按 (季, 集) 升序。
+/// 旧实现在这条路由上忽略 `PersonIds`/`Filters`/`Genres` 等契约字段，这里显式
+/// 清空，绝不因为它们把结果收窄成旧行为之外的一页。
+fn episode_query(series_id: &str, query: &ItemsQuery) -> crate::provider::ServerItemQuery {
+    let mut mapped = query.to_server_query();
+    mapped.parent_id = Some(series_id.to_string());
+    mapped.series_id = None;
+    mapped.include_item_types = Some("Episode".to_string());
+    mapped.recursive = true;
+    mapped.person_ids = None;
+    mapped.filters = None;
+    mapped.is_favorite = None;
+    mapped.is_played = None;
+    mapped.genres = None;
+    mapped.genre_ids = None;
+    mapped.studio_ids = None;
+    mapped.search_term = None;
+    mapped.is_folder = None;
+    mapped.sort_by = Some("ParentIndexNumber,IndexNumber".to_string());
+    mapped.sort_order = Some("Ascending".to_string());
+    mapped
 }

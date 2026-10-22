@@ -554,7 +554,7 @@ export interface SubtitlePlan {
 export interface PlaybackDecision {
   outcome: "plan" | "consent" | "rejected";
   tier: number | null;
-  file_id: number | null;
+  file_id: string | null;
   container: string | null;
   video: VideoPlan | null;
   audio: AudioPlan | null;
@@ -651,14 +651,10 @@ export interface PlaybackSession {
   play_session_id?: string | null;
   /** 可直接喂给 <video src> 或 hls.js 的地址，已带签名 token */
   stream_url: string | null;
-  /** 会话时间轴的零点在文件里的位置。**文件时间 = start_ms + currentTime**。
-   * timeline="file"（VOD 预生成列表）时它只是建议起播位置：分片时间戳
-   * 本身是文件绝对时间，currentTime 即文件时间，换算参照点为 0 */
+  /** 会话时间轴的零点在文件里的位置。**文件时间 = start_ms + currentTime**。 */
   start_ms: number;
   /** 续播状态：compatible | source_changed | no_progress | already_played */
   resume_status?: "compatible" | "source_changed" | "no_progress" | "already_played";
-  /** 时间轴语义：session = 会话相对（旧）；file = 文件绝对（VOD，§12） */
-  timeline?: "session" | "file";
   /** master 播放列表（带 WEBVTT 字幕组），仅 VOD 会话有——iOS 原生 HLS 用 */
   master_url?: string | null;
   /** 旁挂字幕地址（已带 token），与 decision.subtitles 一一对应 */
@@ -741,26 +737,6 @@ export async function fetchPlaybackChapters(
   const query = new URLSearchParams({ file_id: fileId });
   const response = await request<ApiEnvelope<{ ready: boolean; chapters: PlaybackChapterMark[] }>>(
     `${scope.base}/chapters?${query}`,
-  );
-  return response.data;
-}
-
-/** 读取当前会话诊断；从播放 URL 复用已有取流 token，不另发放凭据。 */
-export async function fetchPlaybackDiagnostics(
-  sessionId: string,
-  streamUrl: string,
-  scope: PlaybackApiScope = DEFAULT_PLAYBACK_SCOPE,
-): Promise<PlaybackDiagnostics> {
-  const resolvedUrl = new URL(
-    resolveStreamUrl(streamUrl),
-    typeof window === "undefined" ? "http://localhost" : window.location.origin,
-  );
-  const token = resolvedUrl.searchParams.get("token");
-  if (!token) {
-    throw new Error("播放地址缺少诊断凭据");
-  }
-  const response = await request<ApiEnvelope<PlaybackDiagnostics>>(
-    `${scope.base}/sessions/${encodeURIComponent(sessionId)}/diagnostics?token=${encodeURIComponent(token)}`,
   );
   return response.data;
 }
@@ -1128,8 +1104,8 @@ export async function fetchTrickplay(subtitleOrStreamUrl: string): Promise<Trick
 export interface PlaybackMetricPayload {
   /** Canonical Media identity; a UUID string, not a numeric UI index. */
   media_item_id: string;
-  /** Visible Library ledger identity, including UUID-backed direct play. */
-  library_file_id: number | string | null;
+  /** Visible Library ledger identity, including UUID-backed direct play; a UUID string, not a numeric UI index. */
+  library_file_id: string | null;
   tier: number;
   degraded_from: number | null;
   engine: string;

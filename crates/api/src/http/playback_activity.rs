@@ -153,7 +153,9 @@ fn session_library_visible(
     };
     read.rows_for(session.media_id)
         .iter()
-        .any(|row| crate::http::library::row_visible_to_user(store, row, media, user_id))
+        .any(|coverage| {
+            crate::http::library::file_visible_to_user(store, &coverage.file, media, user_id)
+        })
 }
 
 /// POST /playback/activity/sessions/{device_id}/end?user_id=... — mark one

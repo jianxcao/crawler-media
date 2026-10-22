@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use domain::{MediaKind, Subscribe};
-use store::{LibraryPathScope, Store, StoreError, StrictOwner, SubscribeLibrarySnapshot};
+use domain::{MediaKind, Subscribe, UnitKey};
+use store::{LibraryPathScope, StoreError, StrictOwner, SubscribeLibrarySnapshot};
 use subscribe::{QualityFact, SubscribeFacts};
 
 use crate::management::ApiState;
@@ -74,48 +74,7 @@ pub fn evaluate_subscribe_facts_out_of_lock_with(
         }
     }
 
-    for row in &snapshot.rows {
-        let p = Path::new(&row.path);
-        if !files.is_file(p) {
-            continue;
-        }
-
-        let resolved = match LibraryPathScope::resolve_path(p) {
-            Ok(r) => r,
-            Err(e) => return Err(e),
-        };
-
-        if !matches!(scope.owner(&resolved, snapshot.kind), StrictOwner::Owned(owner) if owner.id == target_library.id)
-        {
-            continue;
-        }
-
-        let fact = QualityFact {
-            score: row.filter_score.unwrap_or(0),
-            path: Some(row.path.clone()),
-        };
-        let key = (row.season, row.episode);
-
-        // Check if older path for this key is missing from snapshot rows
-        let stale = facts
-            .get(key.0, key.1)
-            .and_then(|f| f.path.as_deref())
-            .map(|old| !snapshot.rows.iter().any(|r| r.path == old))
-            .unwrap_or(false);
-
-        if stale {
-            facts.replace(key.0, key.1, fact);
-        } else {
-            facts.upsert(key.0, key.1, fact);
-        }
-
-        if let Some(quality_res) = snapshot.qualities.get(&row.id) {
-            match quality_res {
-                Ok(quality) => facts.set_quality(row.path.clone(), quality.clone()),
-                Err(e) => return Err(StoreError::Invalid(format!("corrupt persisted quality: {e}"))),
-            }
-        }
-    }
+    merge_snapshot_rows(snapshot, files, &scope, &target_library.id, &mut facts)?;
 
     let mut scoped = SubscribeFacts::default();
     for ((season, episode), fact) in facts.entries() {
@@ -128,6 +87,74 @@ pub fn evaluate_subscribe_facts_out_of_lock_with(
     }
 
     Ok(scoped)
+}
+
+/// Merge the snapshot's covered files into `facts`: every existing file owned by
+/// the target Library contributes the facts of each `(file, unit)` it covers.
+fn merge_snapshot_rows(
+    snapshot: &SubscribeLibrarySnapshot,
+    files: &dyn crate::browse_file_read::BrowseFileRead,
+    scope: &LibraryPathScope,
+    target_library_id: &str,
+    facts: &mut SubscribeFacts,
+) -> Result<(), StoreError> {
+    for row in &snapshot.rows {
+        let path = row.file.path.to_string_lossy().into_owned();
+        let p = Path::new(&path);
+        if !files.is_file(p) {
+            continue;
+        }
+
+        let resolved = match LibraryPathScope::resolve_path(p) {
+            Ok(r) => r,
+            Err(e) => return Err(e),
+        };
+
+        if !matches!(scope.owner(&resolved, snapshot.kind), StrictOwner::Owned(owner) if owner.id == target_library_id)
+        {
+            continue;
+        }
+
+        let fact = QualityFact {
+            score: row.file.filter_score.unwrap_or(0),
+            path: Some(path.clone()),
+        };
+        // 一个物理文件可覆盖多个 unit；legacy 拿到的是逐 unit 的 join 行，这里逐 unit 保值。
+        // 读 shape 下每个文件至少一个 unit（LEFT JOIN 缺失行读作 `UnitKey::WHOLE`），空 units 兜底同样按整片算。
+        let whole = [UnitKey::WHOLE];
+        let units: &[UnitKey] = if row.units.is_empty() { &whole } else { &row.units };
+        for unit in units {
+            let (season, episode) = match unit.episode_coordinates() {
+                Some((season, episode)) => (Some(season), Some(episode)),
+                None => (None, None),
+            };
+            // Check if older path for this key is missing from snapshot rows
+            let stale = facts
+                .get(season, episode)
+                .and_then(|f| f.path.as_deref())
+                .map(|old| {
+                    !snapshot
+                        .rows
+                        .iter()
+                        .any(|r| r.file.path.to_string_lossy().as_ref() == old)
+                })
+                .unwrap_or(false);
+
+            if stale {
+                facts.replace(season, episode, fact.clone());
+            } else {
+                facts.upsert(season, episode, fact.clone());
+            }
+        }
+
+        if let Some(quality_res) = snapshot.qualities.get(&row.file.file_id) {
+            match quality_res {
+                Ok(quality) => facts.set_quality(path.clone(), quality.clone()),
+                Err(e) => return Err(StoreError::Invalid(format!("corrupt persisted quality: {e}"))),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// An observed Subscribe facts result alongside the scoped read fingerprint

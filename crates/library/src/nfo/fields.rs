@@ -64,6 +64,12 @@ pub fn parse_nfo_fields(body: &str, scope: EntityScope) -> NfoReadOutcome {
     fields.content_rating = text_field(presence.content_rating);
     fields.language = text_field(presence.original_language);
     fields.status = text_field(presence.status);
+    // `<thumb>` 只映射到 episode 作用域：`still_url` 是剧集主图字段，Work/Season 的
+    // `<thumb>` 是海报/季封，语义不同，不得盲映射。漏掉这一行，只有 NFO `<thumb>` 的剧集
+    // 在「页内只读已采纳事实」下会静默丢主图。观测结果落 `library_metadata_inputs`。
+    if matches!(scope, EntityScope::Episode { .. }) {
+        fields.still_url = remote_thumb_field(presence.thumb);
+    }
     // 日期与署名类字段：它们没有 provider 兜底，Task 11 的页内水合只读这份观测结果，
     // 漏映射就等于 NFO 里的 studios/directors/creators/premiered 静默消失。
     fields.release_date = release_date;
@@ -139,6 +145,27 @@ fn text_field(text: NfoText) -> FieldValue<String> {
         NfoText::Empty => FieldValue::Empty,
         NfoText::Value(value) => FieldValue::Value(value),
     }
+}
+
+/// 剧照取「远端 URL」形态的 `<thumb>`：本地引用（相对路径、绝对路径）属于文件系统旁车口径。
+///
+/// 页内主图事实会盖住已采纳的远端剧照，而页内主图的渲染器只认远端 URL；把本地引用写进
+/// `still_url` 会让「本地引用 + 已采纳剧照」的剧集页内主图反而消失。存在性语义不变：
+/// `<thumb/>` 仍是 Empty（显式清空），没有 `<thumb>` 才是 Missing。
+fn remote_thumb_field(thumb: NfoText) -> FieldValue<String> {
+    match thumb {
+        NfoText::Value(value) if is_remote_url(&value) => FieldValue::Value(value),
+        NfoText::Value(_) => FieldValue::Missing,
+        other => text_field(other),
+    }
+}
+
+fn is_remote_url(value: &str) -> bool {
+    let Some((scheme, rest)) = value.split_once("://") else {
+        return false;
+    };
+    !rest.is_empty()
+        && (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
 }
 
 /// 上映/首播日期落点按 Jellyfin/Kodi 语义区分实体层。

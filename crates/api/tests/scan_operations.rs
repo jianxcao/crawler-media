@@ -129,29 +129,9 @@ async fn cross_operation_change_invalidates_derived_facts() {
     let (mkv_id, strm_id) = {
         let store = fix.state.store();
         let guard = store.lock();
-        let rows = guard.list_ledger().unwrap();
+        let rows = guard.list_file_coverage().unwrap();
         assert_eq!(rows.len(), 2, "operation A 必须登记两个文件");
-        for row in &rows {
-            guard.ack_scan_probe_obligation(row.id).unwrap();
-            let tracks = library::Tracks {
-                video: Some(library::VideoTrack {
-                    codec: Some("h264".to_string()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            };
-            guard
-                .put_file_meta_versioned(&row.id.to_string(), &tracks, Some("v1"), Some(1000))
-                .unwrap();
-        }
-        assert!(
-            guard.scan_probe_obligations(100).unwrap().is_empty(),
-            "基线不应有未了结的探测义务"
-        );
-        (
-            rows.iter().find(|r| r.path.ends_with(".mkv")).unwrap().id,
-            rows.iter().find(|r| r.path.ends_with(".strm")).unwrap().id,
-        )
+        seed_probe_baseline(&guard, &rows)
     };
 
     // 文件变化：mkv 内容变长；strm 换成同长度 URL 并把 mtime 恢复成原值。
@@ -192,11 +172,11 @@ async fn cross_operation_change_invalidates_derived_facts() {
 
     let store = fix.state.store();
     let guard = store.lock();
-    let rows = guard.list_ledger().unwrap();
+    let rows = guard.list_file_coverage().unwrap();
     assert_eq!(rows.len(), 2, "变化文件必须复用既有台账行，不得重新入库");
     for id in [mkv_id, strm_id] {
         assert!(
-            rows.iter().any(|row| row.id == id),
+            rows.iter().any(|row| row.file.file_id == id),
             "台账行身份必须保持不变（{id}）"
         );
         assert!(
@@ -212,6 +192,43 @@ async fn cross_operation_change_invalidates_derived_facts() {
             .unwrap_or_else(|| panic!("{label} 变化后必须重挂 durable probe 义务: {obligations:?}"));
         assert_eq!(obligation.reason, "scan_changed", "{label}");
     }
+}
+
+/// 变化前的基线：了结 `rows` 的全部探测义务、为每行写入派生探测事实，
+/// 然后返回 (mkv, strm) 两行的台账行身份。
+fn seed_probe_baseline(
+    store: &store::Store,
+    rows: &[domain::FileCoverage],
+) -> (domain::LedgerId, domain::LedgerId) {
+    for row in rows {
+        store.ack_scan_probe_obligation(row.file.file_id).unwrap();
+        let tracks = library::Tracks {
+            video: Some(library::VideoTrack {
+                codec: Some("h264".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        store
+            .put_file_meta_versioned(&row.file.file_id.to_string(), &tracks, Some("v1"), Some(1000))
+            .unwrap();
+    }
+    assert!(
+        store.scan_probe_obligations(100).unwrap().is_empty(),
+        "基线不应有未了结的探测义务"
+    );
+    (
+        rows.iter()
+            .find(|r| r.file.path.to_string_lossy().ends_with(".mkv"))
+            .unwrap()
+            .file
+            .file_id,
+        rows.iter()
+            .find(|r| r.file.path.to_string_lossy().ends_with(".strm"))
+            .unwrap()
+            .file
+            .file_id,
+    )
 }
 
 /// P2-1 端到端：先排整库、再把 watch 目标 A 合并进来，整库语义不得被缩小，
@@ -246,8 +263,11 @@ async fn full_scan_merged_with_watch_target_still_ledgers_whole_library() {
     let done = fix.wait_scan_terminal_op(&op.id).await;
     assert_eq!(done.status, store::ScanOperationStatus::Completed, "{:?}", done.report);
 
-    let rows = fix.state.store().lock().list_ledger().unwrap();
-    let paths: Vec<&str> = rows.iter().map(|row| row.path.as_str()).collect();
+    let rows = fix.state.store().lock().list_file_coverage().unwrap();
+    let paths: Vec<String> = rows
+        .iter()
+        .map(|row| row.file.path.to_string_lossy().to_string())
+        .collect();
     assert!(
         paths.iter().any(|p| p.ends_with("Movie A (2024).mkv")),
         "目标 A 必须入账: {paths:?}"
@@ -302,8 +322,11 @@ async fn repeated_watch_event_for_same_target_is_consumed_with_cumulative_report
     );
     assert_eq!(done.report["inserted"], 1, "{}", done.report);
 
-    let rows = fix.state.store().lock().list_ledger().unwrap();
-    let paths: Vec<&str> = rows.iter().map(|row| row.path.as_str()).collect();
+    let rows = fix.state.store().lock().list_file_coverage().unwrap();
+    let paths: Vec<String> = rows
+        .iter()
+        .map(|row| row.file.path.to_string_lossy().to_string())
+        .collect();
     assert!(
         paths.iter().any(|p| p.ends_with("Movie2 (2024).mkv")),
         "补扫轮的新文件必须入账: {paths:?}"
@@ -380,7 +403,7 @@ async fn committed_chunk_prefix_survives_a_later_chunk_failure() {
         "失败终态必须写错误摘要: {}",
         done.report
     );
-    let rows = fix.state.store().lock().list_ledger().unwrap();
+    let rows = fix.state.store().lock().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 100, "只有已提交的 chunk 前缀入账");
 }
 
@@ -426,7 +449,7 @@ async fn legacy_signature_with_unchanged_config_is_upgraded_not_cancelled() {
         "升级必须留下显式原因: {}",
         done.report
     );
-    assert_eq!(fix.state.store().lock().list_ledger().unwrap().len(), 1);
+    assert_eq!(fix.state.store().lock().list_file_coverage().unwrap().len(), 1);
 }
 
 /// P2-A：v1 编码不是单射——两组不同的根数组可以编码出同一串字节，逐字节相等不能
@@ -499,7 +522,7 @@ async fn colliding_legacy_signature_never_adopts_current_scope() {
         "取消时不得把持久化签名改写成当前 scope"
     );
     assert!(
-        fix.state.store().lock().list_ledger().unwrap().is_empty(),
+        fix.state.store().lock().list_file_coverage().unwrap().is_empty(),
         "取消的 operation 不得把当前 scope 的文件登记进台账"
     );
 }
@@ -560,7 +583,7 @@ async fn ambiguous_legacy_signature_equal_to_current_encoding_is_cancelled() {
     );
     assert_eq!(done.scope_signature, legacy, "取消时不得改写签名");
     assert!(
-        fix.state.store().lock().list_ledger().unwrap().is_empty(),
+        fix.state.store().lock().list_file_coverage().unwrap().is_empty(),
         "取消的 operation 不得登记任何文件"
     );
 }
@@ -646,7 +669,7 @@ async fn ambiguous_legacy_signature_after_scope_change_is_cancelled() {
     );
     assert_eq!(done.scope_signature, legacy, "取消时不得改写签名");
     assert!(
-        fix.state.store().lock().list_ledger().unwrap().is_empty(),
+        fix.state.store().lock().list_file_coverage().unwrap().is_empty(),
         "取消的 operation 不得登记任何文件（尤其不能扫新根）"
     );
 }

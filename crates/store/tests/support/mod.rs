@@ -3,7 +3,8 @@
 //! Playback sessions are only issued for a published, version-matching file, so tests
 //! that need a session must first seed one real file instead of inventing a `LedgerId`.
 
-use domain::{Confidence, LedgerId, LedgerRow, MediaId, QualitySource, UnitKey, UserId};
+use domain::{Confidence, LedgerId, MediaId, QualitySource, UnitKey, UserId};
+use store::test_support::FixtureFile;
 use store::Store;
 
 /// Seed one published whole-unit file under `root` and return its Media and file id.
@@ -68,8 +69,8 @@ pub fn publish_file(
 
     let path = root.join(format!("{name}.mkv"));
     std::fs::write(&path, b"fixture").expect("write fixture file");
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let row = FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id,
         path: path.to_string_lossy().into_owned(),
         season: None,
@@ -80,9 +81,10 @@ pub fn publish_file(
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     };
-    store.insert_ledger(&row).expect("publish fixture file");
-    row.id
+    store::test_support::publish_fixture_file(store, &row).expect("publish fixture file");
+    row.file_id.expect("fixture file id")
 }
 
 /// Issue a play session bound to an already-published fixture file.

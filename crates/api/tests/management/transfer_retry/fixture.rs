@@ -172,15 +172,15 @@ impl TransferFixture {
     }
 
     pub fn assert_sources(&self, expected: &[(&Path, &Path)]) {
-        let rows = self.state.store().lock().list_ledger_with_mode().unwrap();
+        let rows = self.state.store().lock().list_file_coverage().unwrap();
         assert_eq!(rows.len(), expected.len(), "No duplicate video ledger");
         for (source, destination) in expected {
-            let row = rows
+            let coverage = rows
                 .iter()
-                .find(|(row, _, _)| Path::new(&row.path) == *destination)
+                .find(|coverage| coverage.file.path.as_path() == *destination)
                 .unwrap();
-            assert_eq!(row.0.media_id, self.media_id);
-            assert_eq!(row.2.as_deref(), source.to_str());
+            assert_eq!(coverage.file.media_id, self.media_id);
+            assert_eq!(coverage.file.source_path.as_deref(), Some(*source));
         }
     }
 

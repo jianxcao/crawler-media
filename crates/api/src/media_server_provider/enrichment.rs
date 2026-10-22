@@ -13,7 +13,11 @@ pub(super) struct CatalogMerge {
 }
 
 impl CatalogMerge {
-    pub(super) fn apply(&self, metadata: media_server::provider::MediaItemMetadata, media: &domain::Media) -> media_server::provider::MediaItemMetadata {
+    pub(super) fn apply(
+        &self,
+        metadata: media_server::provider::MediaItemMetadata,
+        media: &domain::Media,
+    ) -> media_server::provider::MediaItemMetadata {
         merge_catalog_metadata(metadata, media, &self.metadata, self.episode.as_ref())
     }
 }
@@ -22,7 +26,10 @@ impl CatalogMerge {
 ///
 /// 单条目 enrich 把读取失败当成「没有 catalog」：那只影响可选字段。选择路径在
 /// person 过滤需要这份事实时必须用 [`catalog_merge_required`]，失败要向上抛。
-pub(super) fn catalog_merge(state: &ApiState, snapshot: &MediaItemSnapshot) -> Option<CatalogMerge> {
+pub(super) fn catalog_merge(
+    state: &ApiState,
+    snapshot: &MediaItemSnapshot,
+) -> Option<CatalogMerge> {
     match catalog_merge_required(state, snapshot) {
         Ok(merge) => merge,
         Err(error) => {
@@ -55,8 +62,10 @@ pub(super) fn catalog_merge_required(
             return Err(error);
         }
     };
+    // 旧口径：`season.zip(episode)`，两者都在才有分集。新载体只有整片与具体单元两态，
+    // `UnitKey::episode_coordinates()` 把整片读成 `None`，非整片坐标由 `CHECK` 保证非负。
     let episode = (!snapshot.is_series && snapshot.media.kind == MediaKind::Tv)
-        .then(|| snapshot.row.season.zip(snapshot.row.episode))
+        .then(|| snapshot.unit.and_then(|unit| unit.episode_coordinates()))
         .flatten()
         .and_then(|(season, episode)| catalog_episode(state, &tmdb_id, season, episode));
     Ok(Some(CatalogMerge { metadata, episode }))
@@ -88,7 +97,13 @@ impl ApiServerProvider {
 /// 锁外：一次 probe 入队 + 一次 catalog 合并（单条目路径与选择路径共用）。
 pub(super) fn enrich_snapshot_blocking(state: &ApiState, snapshot: &mut MediaItemSnapshot) {
     if !snapshot.is_series {
-        crate::http::library::ensure_probe_enqueued(state, &snapshot.row);
+        // 旧路径交出的就是快照自身那一行 `(file, unit)`；新载体按同一事实构造覆盖：
+        // 整片快照（`unit == None`）等价于「该文件没有 unit 行」，不是 `(0, 0)`。
+        let coverage = domain::FileCoverage {
+            file: snapshot.file.clone(),
+            units: snapshot.unit.into_iter().collect(),
+        };
+        crate::http::library::ensure_probe_enqueued(state, &coverage);
     }
     let Some(merge) = catalog_merge(state, snapshot) else {
         return;

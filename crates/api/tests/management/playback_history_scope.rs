@@ -10,6 +10,7 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 use super::common::*;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 fn app(tmp: &tempfile::TempDir) -> axum::Router {
     let fetcher = Arc::new(Fixtures {
@@ -59,9 +60,10 @@ fn seed_test_ledger(tmp: &tempfile::TempDir, lib_dir: &std::path::Path) -> domai
             tvdb_id: None,
         })
         .unwrap();
-    store
-        .insert_ledger(&domain::LedgerRow {
-            id: domain::LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(domain::LedgerId::new()),
             media_id,
             path: lib_dir.join("Movie.A.1999.mkv").to_str().unwrap().into(),
             season: None,
@@ -72,8 +74,10 @@ fn seed_test_ledger(tmp: &tempfile::TempDir, lib_dir: &std::path::Path) -> domai
             quality_source: domain::QualitySource::Probe,
             confidence: domain::Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     media_id
 }
 

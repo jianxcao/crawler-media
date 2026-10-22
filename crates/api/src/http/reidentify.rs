@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use store::library_write::ReassignFiles;
 
 use crate::blocking_budget::BlockingError;
-use crate::http::library::{poster_path, preferred_row};
+use crate::http::library::{poster_path, preferred_coverage};
 use crate::http::title_ref::resolve_title;
 use crate::http::{err, ok};
 use crate::library_lifecycle::LibraryWorkLease;
@@ -60,28 +60,28 @@ pub(crate) async fn preview(
     let Some(media) = store.get_media(media_id).ok().flatten() else {
         return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
     };
-    let rows: Vec<domain::LedgerRow> = store
-        .list_ledger()
+    let coverages: Vec<domain::FileCoverage> = store
+        .list_file_coverage()
         .unwrap_or_default()
         .into_iter()
-        .filter(|row| row.media_id == media_id)
+        .filter(|coverage| coverage.file.media_id == media_id)
         .collect();
-    let search_seed = rows
+    let search_seed = coverages
         .iter()
-        .filter_map(|row| {
-            FsPath::new(&row.path)
+        .filter_map(|coverage| {
+            FsPath::new(&coverage.file.path)
                 .file_name()
                 .and_then(|name| name.to_str())
                 .map(|name| release::parse(name).title)
         })
         .next()
         .unwrap_or_else(|| media.title.clone());
-    let selected = preferred_row(&rows);
-    let poster = selected.and_then(poster_path);
+    let selected = preferred_coverage(&coverages);
+    let poster = selected.and_then(|coverage| poster_path(&coverage.file));
     let poster_url = selected
         .filter(|_| poster.is_some())
-        .map(|row| crate::http::library::artwork_url("posters", row.id));
-    let groups: Vec<Value> = if rows.is_empty() {
+        .map(|coverage| crate::http::library::artwork_url("posters", coverage.file.file_id));
+    let groups: Vec<Value> = if coverages.is_empty() {
         Vec::new()
     } else {
         vec![json!({
@@ -98,11 +98,11 @@ pub(crate) async fn preview(
                 "code": null,
                 "candidates": [],
             },
-            "file_ids": rows.iter().map(|row| row.id.to_string()).collect::<Vec<_>>(),
-            "file_count": rows.len(),
+            "file_ids": coverages.iter().map(|coverage| coverage.file.file_id.to_string()).collect::<Vec<_>>(),
+            "file_count": coverages.len(),
             "total_size_bytes": 0,
-            "sample_names": rows.iter().take(3).filter_map(|row| {
-                FsPath::new(&row.path).file_name().and_then(|n| n.to_str()).map(str::to_string)
+            "sample_names": coverages.iter().take(3).filter_map(|coverage| {
+                FsPath::new(&coverage.file.path).file_name().and_then(|n| n.to_str()).map(str::to_string)
             }).collect::<Vec<_>>(),
         })]
     };
@@ -135,7 +135,7 @@ pub(crate) async fn reidentify(State(state): State<ApiState>, Json(body): Json<V
 struct ParsedReidentifyRequest {
     files_to_reassign: Vec<(LedgerId, FileVersion)>,
     from_media_id: MediaId,
-    rows_to_refresh: Vec<domain::LedgerRow>,
+    rows_to_refresh: Vec<domain::FileCoverage>,
     source_revision: i64,
 }
 
@@ -198,17 +198,16 @@ fn parse_file_targets(
     let mut rows_to_refresh = Vec::with_capacity(parsed_ids.len());
 
     for lid in parsed_ids {
-        let clean = lid.to_string().replace('-', "");
-        let row = store.get_ledger(&clean).ok().flatten().ok_or((
+        let coverage = store.file_coverage_by_id(lid).ok().flatten().ok_or((
             StatusCode::NOT_FOUND,
             "library.file_missing",
             format!("文件不存在: {lid}"),
         ))?;
 
         match from_media_id {
-            None => from_media_id = Some(row.media_id),
+            None => from_media_id = Some(coverage.file.media_id),
             Some(prev_mid) => {
-                if prev_mid != row.media_id {
+                if prev_mid != coverage.file.media_id {
                     return Err((
                         StatusCode::BAD_REQUEST,
                         "reidentify.invalid",
@@ -228,7 +227,7 @@ fn parse_file_targets(
         };
 
         files_to_reassign.push((lid, version));
-        rows_to_refresh.push(row);
+        rows_to_refresh.push(coverage);
     }
 
     let from_media_id = from_media_id.ok_or((
@@ -424,9 +423,15 @@ fn reassign_parsed_files(
     ok(json!({ "claimed": claimed })).into_response()
 }
 
-fn refresh_sidecars_for_reassigned(state: &ApiState, target: &Media, rows: &[domain::LedgerRow]) {
-    let Some(row) = rows.first() else { return };
-    let path = FsPath::new(&row.path).to_path_buf();
+fn refresh_sidecars_for_reassigned(
+    state: &ApiState,
+    target: &Media,
+    coverages: &[domain::FileCoverage],
+) {
+    let Some(coverage) = coverages.first() else {
+        return;
+    };
+    let path = coverage.file.path.clone();
     let _ = crate::poster_fetch::attach_poster(state, target, &path);
     let _ = crate::poster_fetch::attach_backdrop(state, target, &path);
 
@@ -438,8 +443,8 @@ fn refresh_sidecars_for_reassigned(state: &ApiState, target: &Media, rows: &[dom
                     crate::scrape_metadata::scrape_tv_sidecars(
                         state,
                         target,
-                        &crate::scrape_metadata::show_root(&path, row),
-                        rows,
+                        &crate::scrape_metadata::show_root(&path, coverage),
+                        coverages,
                     );
                 } else if let Some(stem) = path.file_stem().and_then(|v| v.to_str()) {
                     let nfo_path = path.with_file_name(format!("{stem}.nfo"));
@@ -489,11 +494,15 @@ pub(crate) async fn extras(State(state): State<ApiState>, Json(body): Json<Value
     let store = state.store.lock();
     let mut detached = 0usize;
     for file_id in target_ids {
-        if let Some(row) = store.get_ledger(&file_id).ok().flatten() {
+        let Ok(file_id) = LedgerId::from_str(&file_id) else {
+            continue;
+        };
+        if let Some(coverage) = store.file_coverage_by_id(file_id).ok().flatten() {
+            let path = coverage.file.path.to_string_lossy().into_owned();
             if store
-                .insert_unidentified(row.path.clone(), row.confidence)
+                .insert_unidentified(path.clone(), coverage.file.confidence)
                 .is_ok()
-                && store.delete_ledger_path(&row.path).is_ok()
+                && store.delete_ledger_path(&path).is_ok()
             {
                 detached += 1;
             }

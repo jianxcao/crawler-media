@@ -1,7 +1,7 @@
 use domain::{EntityScope, MetadataAdoption, MetadataPreferences};
 
 use crate::scrape_store::ScrapeStoreExt;
-use domain::{LedgerRow, Media};
+use domain::Media;
 use std::path::{Path, PathBuf};
 
 use super::series::PosterFetchCatalogGet;
@@ -112,16 +112,16 @@ pub(crate) fn preferred_language(state: &crate::management::ApiState) -> String 
         .unwrap_or_else(|| "zh-CN".into())
 }
 
-/// NFO sidecars to read for one ledger row, most specific first. TV keeps the
+/// NFO sidecars to read for one library file, most specific first. TV keeps the
 /// show-level `tvshow.nfo`; movies may carry either `<file>.nfo` or `movie.nfo`.
 /// Shared so browse and wall never disagree about where metadata lives.
 pub(crate) fn nfo_candidates(
     path: &Path,
-    row: &LedgerRow,
+    coverage: &domain::FileCoverage,
     kind: domain::MediaKind,
 ) -> Vec<PathBuf> {
     match kind {
-        domain::MediaKind::Tv => vec![show_root(path, row).join("tvshow.nfo")],
+        domain::MediaKind::Tv => vec![show_root(path, coverage).join("tvshow.nfo")],
         _ => {
             let directory = path.parent().unwrap_or(path);
             vec![path.with_extension("nfo"), directory.join("movie.nfo")]
@@ -129,7 +129,7 @@ pub(crate) fn nfo_candidates(
     }
 }
 
-pub(crate) fn show_root(path: &Path, row: &LedgerRow) -> PathBuf {
+pub(crate) fn show_root(path: &Path, coverage: &domain::FileCoverage) -> PathBuf {
     let directory = path.parent().unwrap_or(path);
     let dir_name = directory
         .file_name()
@@ -138,7 +138,7 @@ pub(crate) fn show_root(path: &Path, row: &LedgerRow) -> PathBuf {
         .unwrap_or_default();
     let is_season_directory = dir_name.starts_with("season")
         || (dir_name.contains(".s0") || dir_name.contains(".s1") || dir_name.contains(".s2"));
-    if row.season.is_some() && is_season_directory {
+    if coverage.is_episodic() && is_season_directory {
         directory.parent().unwrap_or(directory).to_path_buf()
     } else {
         directory.to_path_buf()

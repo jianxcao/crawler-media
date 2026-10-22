@@ -1,17 +1,21 @@
-use std::path::Path;
+use domain::{Confidence, Media, MediaId, MediaKind, QualitySource};
 use rusqlite::Connection;
+use std::path::Path;
 use store::schema::layout::{
     APP_APPLICATION_ID, CACHE_APPLICATION_ID, LIBRARY_APPLICATION_ID, SUBSCRIBE_APPLICATION_ID,
     V1_USER_VERSION,
 };
 use store::{Store, StoreError};
-use domain::{Confidence, Media, MediaId, MediaKind, QualitySource};
 
 use media::response_cache::{CacheSource, initialize as initialize_cache, put as put_cache};
 
 fn cache_schema(conn: &Connection) -> (u32, i64, Vec<(String, String)>) {
-    let app_id = conn.pragma_query_value(None, "application_id", |row| row.get(0)).unwrap();
-    let user_version = conn.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+    let app_id = conn
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .unwrap();
+    let user_version = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
     let mut stmt = conn
         .prepare("SELECT type, name FROM sqlite_schema WHERE type IN ('table','view','index','trigger') AND name NOT LIKE 'sqlite_%' ORDER BY type, name")
         .unwrap();
@@ -58,10 +62,23 @@ fn store_and_media_cache_initializers_converge_in_both_orders() {
     assert_eq!(row.fetched_at, 123);
 
     assert_eq!(media_first_schema, store_first_schema);
-    assert_eq!(store_first_schema.0, media::response_cache::CACHE_APPLICATION_ID);
-    assert_eq!(store_first_schema.1, media::response_cache::CACHE_USER_VERSION as i64);
+    assert_eq!(
+        store_first_schema.0,
+        media::response_cache::CACHE_APPLICATION_ID
+    );
+    assert_eq!(
+        store_first_schema.1,
+        media::response_cache::CACHE_USER_VERSION as i64
+    );
     // One DDL owner: the media cache schema declares two indexes per source table.
-    assert_eq!(store_first_schema.2.iter().filter(|(kind, _)| kind == "index").count(), 12);
+    assert_eq!(
+        store_first_schema
+            .2
+            .iter()
+            .filter(|(kind, _)| kind == "index")
+            .count(),
+        12
+    );
 }
 
 #[test]
@@ -72,13 +89,30 @@ fn malformed_cache_layouts_are_rejected_without_mutation() {
     let same_id_path = same_id_dir.join("cache.db");
     {
         let conn = Connection::open(&same_id_path).unwrap();
-        conn.execute_batch("CREATE TABLE tmdb_cache (entry_id INTEGER PRIMARY KEY);").unwrap();
-        conn.pragma_update(None, "application_id", media::response_cache::CACHE_APPLICATION_ID).unwrap();
-        conn.pragma_update(None, "user_version", media::response_cache::CACHE_USER_VERSION as i64).unwrap();
+        conn.execute_batch("CREATE TABLE tmdb_cache (entry_id INTEGER PRIMARY KEY);")
+            .unwrap();
+        conn.pragma_update(
+            None,
+            "application_id",
+            media::response_cache::CACHE_APPLICATION_ID,
+        )
+        .unwrap();
+        conn.pragma_update(
+            None,
+            "user_version",
+            media::response_cache::CACHE_USER_VERSION as i64,
+        )
+        .unwrap();
     }
     let before_same_id = cache_schema(&Connection::open(&same_id_path).unwrap());
     assert!(Store::open(&same_id_dir).is_err());
-    assert!(initialize_cache(&Connection::open_with_flags(&same_id_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap()).is_err());
+    assert!(
+        initialize_cache(
+            &Connection::open_with_flags(&same_id_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap()
+        )
+        .is_err()
+    );
     let after_same_id = cache_schema(&Connection::open(&same_id_path).unwrap());
     assert_eq!(before_same_id, after_same_id);
 
@@ -140,7 +174,32 @@ fn pre_cutover_cache_layout_is_rejected_with_rebuild_guidance() {
     );
 
     let after = cache_schema(&Connection::open(&cache_path).unwrap());
-    assert_eq!(before, after, "rejecting a pre-cutover cache must not mutate it");
+    assert_eq!(
+        before, after,
+        "rejecting a pre-cutover cache must not mutate it"
+    );
+}
+
+#[test]
+fn missing_declared_table_or_index_in_facts_db_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+
+    // Initialize clean store
+    drop(Store::open(&data_dir).unwrap());
+
+    // 1. Corrupt app.db by dropping an index
+    let app_db_path = data_dir.join("app.db");
+    {
+        let conn = Connection::open(&app_db_path).unwrap();
+        conn.execute("DROP INDEX sites_enabled_idx;", []).unwrap();
+    }
+    let err = Store::open(&data_dir).expect_err("app.db missing index must be rejected");
+    assert!(
+        err.to_string()
+            .contains("app database schema is missing required index sites_enabled_idx"),
+        "unexpected error message: {err}"
+    );
 }
 
 #[test]
@@ -155,14 +214,23 @@ fn fresh_layout_reopens_without_old_files() {
         assert!(data_dir.join("library.db").is_file());
         assert!(data_dir.join("subscribe.db").is_file());
 
-        assert!(!data_dir.join("catalog.db").exists(), "catalog.db must not be created");
-        assert!(!data_dir.join("fanart.db").exists(), "fanart.db must not be created");
+        assert!(
+            !data_dir.join("catalog.db").exists(),
+            "catalog.db must not be created"
+        );
+        assert!(
+            !data_dir.join("fanart.db").exists(),
+            "fanart.db must not be created"
+        );
 
         assert_eq!(store.cache_db_path(), data_dir.join("cache.db"));
 
         // Check seeded libraries exist in library.db
         let libs = store.list_libraries().expect("list_libraries");
-        assert!(libs.len() >= 2, "Seeded default movie and tv libraries must exist");
+        assert!(
+            libs.len() >= 2,
+            "Seeded default movie and tv libraries must exist"
+        );
     }
 
     // Reopen must succeed idempotently
@@ -185,21 +253,29 @@ fn wrong_layout_is_rejected_without_mutation() {
         // Set invalid application_id and user_version = 99
         conn.pragma_update(None, "application_id", 9999).unwrap();
         conn.pragma_update(None, "user_version", 99).unwrap();
-        conn.execute("CREATE TABLE sentinel (id INTEGER);", []).unwrap();
+        conn.execute("CREATE TABLE sentinel (id INTEGER);", [])
+            .unwrap();
     }
 
     let err = Store::open(&data_dir).expect_err("Store::open must reject invalid layout");
     match err {
         StoreError::Invalid(msg) => {
-            assert!(msg.contains("app database layout mismatch"), "Expected layout mismatch message: {msg}");
+            assert!(
+                msg.contains("app database layout mismatch"),
+                "Expected layout mismatch message: {msg}"
+            );
         }
         other => panic!("Expected StoreError::Invalid, got {other:?}"),
     }
 
     // File must not have been modified by Store::open
     let conn = Connection::open(&app_file).unwrap();
-    let app_id: i64 = conn.pragma_query_value(None, "application_id", |r| r.get(0)).unwrap();
-    let user_ver: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+    let app_id: i64 = conn
+        .pragma_query_value(None, "application_id", |r| r.get(0))
+        .unwrap();
+    let user_ver: i64 = conn
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
     assert_eq!(app_id, 9999);
     assert_eq!(user_ver, 99);
 }
@@ -238,7 +314,9 @@ fn media_and_aliases_isolation_and_conflict() {
         bangumi_id: None,
         anilist_id: None,
     };
-    store.insert_media(&tv).expect("insert tv with same numeric id as movie must succeed");
+    store
+        .insert_media(&tv)
+        .expect("insert tv with same numeric id as movie must succeed");
 
     // Another movie with same TMDB id (603) must fail (conflict)
     let duplicate_movie = Media {
@@ -254,11 +332,19 @@ fn media_and_aliases_isolation_and_conflict() {
         bangumi_id: None,
         anilist_id: None,
     };
-    let err = store.insert_media(&duplicate_movie).expect_err("duplicate movie alias must fail");
-    assert!(matches!(err, StoreError::Protected(_) | StoreError::Sqlite(_)));
+    let err = store
+        .insert_media(&duplicate_movie)
+        .expect_err("duplicate movie alias must fail");
+    assert!(matches!(
+        err,
+        StoreError::Protected(_) | StoreError::Sqlite(_)
+    ));
 
     // Read back movie and tv by ID
-    let fetched_movie = store.get_media(movie.id).unwrap().expect("movie should be found");
+    let fetched_movie = store
+        .get_media(movie.id)
+        .unwrap()
+        .expect("movie should be found");
     assert_eq!(fetched_movie.title, "Matrix");
     assert_eq!(fetched_movie.tmdb_id.as_deref(), Some("603"));
 

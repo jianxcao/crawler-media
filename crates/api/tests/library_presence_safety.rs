@@ -49,7 +49,7 @@ async fn prune_preserves_other_library_and_user_facts() {
     // Verify ledger row is deleted
     let store_arc = fix.state.store();
     let guard = store_arc.lock();
-    assert!(guard.get_ledger(&row.id.to_string()).unwrap().is_none());
+    assert!(guard.file_coverage_by_id(row.file_id).unwrap().is_none());
 
     // User playback facts and Media record are PRESERVED (S1)
     assert!(guard.get_media(media_id).unwrap().is_some());
@@ -152,7 +152,7 @@ async fn scope_change_race_is_classified_as_scope_changed() {
     let guard = fix.state.store();
     let guard = guard.lock();
     assert!(guard.missing_at_by_path().unwrap().is_empty());
-    assert!(guard.get_ledger(&row.id.to_string()).unwrap().is_some());
+    assert!(guard.file_coverage_by_id(row.file_id).unwrap().is_some());
 }
 
 #[tokio::test]
@@ -197,5 +197,5 @@ async fn prune_with_permission_denied_on_recheck_skips_and_preserves_ledger() {
     // 4. Ledger row is safely preserved!
     let store_arc = fix.state.store();
     let guard = store_arc.lock();
-    assert!(guard.get_ledger(&row.id.to_string()).unwrap().is_some());
+    assert!(guard.file_coverage_by_id(row.file_id).unwrap().is_some());
 }

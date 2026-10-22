@@ -101,8 +101,8 @@ fn scrape_dir(state: &ApiState, path: PathBuf, nfo: bool) -> Result<(), String> 
         let store = state.store.lock();
         let mut map = std::collections::HashMap::new();
         for dest in &outcome.transferred {
-            if let Ok(Some(row)) = store.ledger_by_path(&dest.path.display().to_string()) {
-                if let Ok(Some(m)) = store.get_media(row.media_id) {
+            if let Ok(Some(row)) = store.file_coverage_by_path(&dest.path.display().to_string()) {
+                if let Ok(Some(m)) = store.get_media(row.file.media_id) {
                     if m.tmdb_id.is_none() && m.kind != domain::MediaKind::Video {
                         map.entry(m.id).or_insert((m, dest.path.clone()));
                     }
@@ -134,17 +134,17 @@ fn attach_missing_posters(state: &ApiState, dir_to_scan: &std::path::Path) {
     let targets: Vec<(domain::MediaId, PathBuf)> = {
         let store = state.store.lock();
         store
-            .list_ledger()
+            .list_file_coverage()
             .unwrap_or_default()
             .into_iter()
-            .filter(|row| std::path::Path::new(&row.path).starts_with(dir_to_scan))
+            .filter(|row| std::path::Path::new(&row.file.path).starts_with(dir_to_scan))
             .filter(|row| {
-                std::path::Path::new(&row.path)
+                std::path::Path::new(&row.file.path)
                     .parent()
                     .map(|dir| !dir.join("poster.jpg").is_file())
                     .unwrap_or(false)
             })
-            .map(|row| (row.media_id, PathBuf::from(&row.path)))
+            .map(|row| (row.file.media_id, row.file.path.clone()))
             .collect()
     };
     for (media_id, row_path) in targets {

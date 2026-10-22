@@ -12,6 +12,7 @@ use marker::fingerprint::capture_types::SampleWindow;
 pub use analysis::analyze_and_verify_segment;
 pub use cache::{find_reusable_sample, stored_sample_to_evidence};
 pub use capture::capture_or_reuse_segment_sample;
+use crate::fingerprint_job::episode_or_one;
 pub use types::{
     AdaptiveCaptureContext, CaptureGate, CapturePolicy, EpisodeCaptureRequest, EpisodeDetection,
 };
@@ -32,8 +33,8 @@ pub async fn capture_episode_adaptive(
     let mut outro_attempts_used = 0;
 
     let descriptor = EpisodeDescriptor {
-        ledger_id: request.row.id.to_string(),
-        episode: request.row.episode.unwrap_or(1),
+        ledger_id: request.row.file.file_id.to_string(),
+        episode: episode_or_one(&request.row),
         source_version: request.source_version.clone(),
         duration_ms: request.media_duration_ms.unwrap_or(0),
     };
@@ -63,8 +64,8 @@ pub async fn capture_episode_adaptive(
     };
 
     Ok(EpisodeDetection {
-        ledger_id: request.row.id.to_string(),
-        episode: request.row.episode.unwrap_or(1),
+        ledger_id: request.row.file.file_id.to_string(),
+        episode: episode_or_one(&request.row),
         intro_evidence,
         outro_evidence,
         intro_match,

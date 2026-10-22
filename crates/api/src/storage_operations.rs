@@ -19,7 +19,7 @@ use serde_json::Value;
 use crate::management::ApiState;
 use crate::store::{LibraryReconfiguration, StoreError, library_operations::LibraryOperationView};
 
-/// Media rows migrated per applied batch; the Store clamps to 1..=100.
+/// Media rows migrated per applied batch; the Store rejects anything outside 1..=100.
 const BATCH_MEDIA: usize = 100;
 /// How long in-flight Library work may take to stop before the driver stands aside.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);

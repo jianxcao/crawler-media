@@ -2,13 +2,27 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
 
-use domain::{LedgerId, LedgerRow, LibraryId, MediaId, MediaKind, UnitKey};
+use domain::{Confidence, LedgerId, LibraryId, MediaId, MediaKind, QualitySource, UnitKey};
 use rusqlite::{OptionalExtension, params};
 
+/// One file observed by a scan, before it becomes a `library_files` row.
+///
+/// The scan only asserts what it measured: identity, path, unit coordinates and the
+/// probe-ish labels. Ownership is not part of the input — [`Store::insert_scanned_files`]
+/// derives `library_id`/`root_id` with `resolve_owned_root`, so a caller cannot forge
+/// presence, publication or version state.
 #[derive(Clone, Debug)]
 pub struct ScannedLedger {
-    pub row: LedgerRow,
+    pub file_id: LedgerId,
+    pub media_id: MediaId,
+    pub path: String,
     pub units: Vec<UnitKey>,
+    pub resolution: Option<String>,
+    pub codec: Option<String>,
+    pub hdr: Option<String>,
+    pub quality_source: QualitySource,
+    pub confidence: Confidence,
+    pub filter_score: Option<i32>,
     pub source_version: String,
     pub source_digest: Option<String>,
     pub size_bytes: Option<i64>,
@@ -66,19 +80,18 @@ impl Store {
         let tx = self.library.unchecked_transaction()?;
         let mut affected: HashMap<(String, MediaId), BatchChange> = HashMap::new();
         for scanned in rows {
-            let row = &scanned.row;
-            let kind = media_kind(&tx, row.media_id)?;
-            let (library_id, root_id) = resolve_owned_root(&tx, Path::new(&row.path), kind)?;
+            let kind = media_kind(&tx, scanned.media_id)?;
+            let (library_id, root_id) = resolve_owned_root(&tx, Path::new(&scanned.path), kind)?;
             ensure_library_writable(&tx, &library_id)?;
-            ensure_media_writable(&tx, row.media_id)?;
-            let artwork = crate::files::DiscoveredArtwork::discover(Path::new(&row.path));
+            ensure_media_writable(&tx, scanned.media_id)?;
+            let artwork = crate::files::DiscoveredArtwork::discover(Path::new(&scanned.path));
             let file = domain::LibraryFile {
-                file_id: row.id,
+                file_id: scanned.file_id,
                 library_id: library_id.parse::<LibraryId>()?,
                 root_id,
-                media_id: row.media_id,
+                media_id: scanned.media_id,
                 kind,
-                path: Path::new(&row.path).to_path_buf(),
+                path: Path::new(&scanned.path).to_path_buf(),
                 version: domain::FileVersion {
                     revision: 1,
                     source_version: scanned.source_version.clone(),
@@ -92,12 +105,12 @@ impl Store {
                 source_digest: scanned.source_digest.clone(),
                 source_path: None,
                 transfer_mode: None,
-                resolution: row.resolution.clone(),
-                codec: row.codec.clone(),
-                hdr: row.hdr.clone(),
-                quality_source: row.quality_source,
-                confidence: row.confidence,
-                filter_score: row.filter_score,
+                resolution: scanned.resolution.clone(),
+                codec: scanned.codec.clone(),
+                hdr: scanned.hdr.clone(),
+                quality_source: scanned.quality_source,
+                confidence: scanned.confidence,
+                filter_score: scanned.filter_score,
                 release_quality: None,
                 duration_ms: None,
                 tracks_version: 0,
@@ -120,11 +133,11 @@ impl Store {
             )? {
                 return Err(StoreError::Protected(format!(
                     "stale NFO observation for {}",
-                    row.path
+                    scanned.path
                 )));
             }
             enqueue_probe(&tx, file.file_id, now_ms)?;
-            let change = affected.entry((library_id, row.media_id)).or_default();
+            let change = affected.entry((library_id, scanned.media_id)).or_default();
             change.count += 1;
             if change.count == 1 {
                 change.file_id = Some(file.file_id.to_string());

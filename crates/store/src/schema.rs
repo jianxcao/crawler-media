@@ -11,6 +11,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use super::StoreError;
 
 pub mod layout;
+#[path = "schema/v1/objects.rs"]
+pub mod v1;
 
 /// Insert the built-in naming templates, the default Filter and the default
 /// Libraries with their roots. Idempotent: existing rows are kept.
@@ -58,10 +60,8 @@ fn seed_libraries_and_roots(
     movie_root: &std::path::Path,
     tv_root: &std::path::Path,
 ) -> Result<(), StoreError> {
-    for (kind, name, root_path) in [
-        ("movie", "电影库", movie_root),
-        ("tv", "剧集库", tv_root),
-    ] {
+    for (kind, name, root_path) in [("movie", "电影库", movie_root), ("tv", "剧集库", tv_root)]
+    {
         let existing: Option<String> = library
             .query_row(
                 "SELECT library_id FROM libraries WHERE kind = ?1 LIMIT 1",

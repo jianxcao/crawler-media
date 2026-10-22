@@ -2,7 +2,8 @@ mod support;
 
 use std::str::FromStr;
 
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserId};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UserId};
+use store::test_support::FixtureFile;
 use rusqlite::Connection;
 use store::Store;
 
@@ -45,24 +46,24 @@ fn publish_unit(store: &Store, base: &std::path::Path, media_id: MediaId, season
             )
             .unwrap();
     }
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
-            media_id,
-            path: root
-                .join(format!("{media_id}-s{season}e{episode}.mkv"))
-                .display()
-                .to_string(),
-            season: Some(season),
-            episode: Some(episode),
-            resolution: None,
-            codec: None,
-            hdr: None,
-            quality_source: QualitySource::Release,
-            confidence: Confidence::High,
-            filter_score: None,
-        })
-        .unwrap();
+    let row = FixtureFile {
+        file_id: Some(LedgerId::new()),
+        media_id,
+        path: root
+            .join(format!("{media_id}-s{season}e{episode}.mkv"))
+            .display()
+            .to_string(),
+        season: Some(season),
+        episode: Some(episode),
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: None,
+        ..Default::default()
+    };
+    store::test_support::publish_fixture_file(store, &row).unwrap();
 }
 
 #[test]
@@ -228,11 +229,21 @@ fn retargeted_subscribe_does_not_treat_previous_library_as_owned() {
     store.set_default_library(&a.id).unwrap();
     let path = a_root.join("Shared.mkv");
     std::fs::write(&path, b"owned").unwrap();
-    store.insert_ledger(&domain::LedgerRow {
-        id: LedgerId::new(), media_id: media, path: path.display().to_string(),
-        season: None, episode: None, resolution: Some("2160p".into()), codec: None, hdr: None,
-        quality_source: QualitySource::Probe, confidence: Confidence::High, filter_score: Some(100),
-    }).unwrap();
+    let row = FixtureFile {
+        file_id: Some(LedgerId::new()),
+        media_id: media,
+        path: path.display().to_string(),
+        season: None,
+        episode: None,
+        resolution: Some("2160p".into()),
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Probe,
+        confidence: Confidence::High,
+        filter_score: Some(100),
+        ..Default::default()
+    };
+    store::test_support::publish_fixture_file(&store, &row).unwrap();
     let mut subscribe = domain::Subscribe {
         id: domain::SubscribeId::new(), user_id: domain::UserId::new(), media_id: media,
         coverage: domain::Coverage::Movie, fetch_mode: domain::FetchMode::Search,

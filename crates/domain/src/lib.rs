@@ -592,21 +592,6 @@ impl Confidence {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LedgerRow {
-    pub id: LedgerId,
-    pub media_id: MediaId,
-    pub path: String,
-    pub season: Option<u32>,
-    pub episode: Option<u32>,
-    pub resolution: Option<String>,
-    pub codec: Option<String>,
-    pub hdr: Option<String>,
-    pub quality_source: QualitySource,
-    pub confidence: Confidence,
-    pub filter_score: Option<i32>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Torrent {
     pub site_id: SiteId,
     pub title: String,

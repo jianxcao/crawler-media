@@ -42,9 +42,8 @@ export interface PlaybackMode {
   /** overlay 模式下是否挂 PiP 补丁轨（direct 档 0 无会话字幕地址时不挂） */
   pipPatchTrack: boolean;
   /**
-   * seek 越出已缓冲区间时是否要换会话重来。只有旧的会话相对制（EVENT
-   * 列表只覆盖已转出的部分）需要；VOD 列表覆盖全片、档 0 是完整文件，
-   * seek 都是播放器内跳转。
+   * seek 越出已缓冲区间时是否要换会话重来。会话相对制（EVENT 列表只覆盖
+   * 已转出的部分）越界即换会话；档 0 是完整文件，seek 都在播放器内跳转。
    */
   seekBeyondBufferedRestarts: boolean;
 }
@@ -70,16 +69,14 @@ export function shouldApplyPostAttachSeek(
 export function resolvePlaybackMode(
   session: Pick<
     PlaybackSession,
-    "stream_url" | "master_url" | "timeline" | "start_ms" | "decision"
+    "stream_url" | "master_url" | "start_ms" | "decision"
   >,
   capability: Pick<ClientCapability, "mse" | "native_hls" | "is_mobile">,
 ): PlaybackMode | null {
   if (!session.stream_url) return null;
 
-  const fileTimeline = session.timeline === "file";
-  // 会话相对制的参照点是 start_ms；文件绝对制（VOD）分片时间戳就是文件
-  // 时间，参照点为 0。档 0 直出没有偏移，也是 0。
-  const originMs = fileTimeline ? 0 : session.start_ms;
+  // 会话相对制的参照点是 start_ms（档 0 直出没有偏移，直接返回 0）。
+  const originMs = session.start_ms;
 
   if (session.decision.container !== "hls-fmp4") {
     return {
@@ -97,23 +94,6 @@ export function resolvePlaybackMode(
   // 从高位分片起播」的 VOD 清单更严格，实机会在 init/首片返回后报
   // MEDIA_ERR_DECODE。无 MSE 时仍优先使用带字幕组的 master，保留原生字幕
   // 与全屏/AirPlay 的兜底能力。
-  const nativeEligible =
-    capability.mse === "none" &&
-    capability.native_hls &&
-    capability.is_mobile &&
-    fileTimeline &&
-    session.master_url;
-  if (nativeEligible && session.master_url) {
-    return {
-      engine: "native-hls",
-      streamUrl: session.master_url,
-      originMs,
-      subtitleRenderer: "system-track",
-      pipPatchTrack: false,
-      seekBeyondBufferedRestarts: false,
-    };
-  }
-
   if (capability.mse !== "none") {
     return {
       engine: "mse",
@@ -121,7 +101,7 @@ export function resolvePlaybackMode(
       originMs,
       subtitleRenderer: "overlay",
       pipPatchTrack: true,
-      seekBeyondBufferedRestarts: !fileTimeline,
+      seekBeyondBufferedRestarts: true,
     };
   }
 
@@ -133,7 +113,7 @@ export function resolvePlaybackMode(
     originMs,
     subtitleRenderer: "overlay",
     pipPatchTrack: true,
-    seekBeyondBufferedRestarts: !fileTimeline,
+    seekBeyondBufferedRestarts: true,
   };
 }
 

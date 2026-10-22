@@ -46,8 +46,8 @@ impl api::catalog::Catalog for SelectiveCatalog {
 fn set_tmdb(state: &ApiState, title_contains: &str, tmdb_id: &str) {
     let store = state.store();
     let store = store.lock();
-    for row in store.list_ledger().unwrap() {
-        let Some(mut media) = store.get_media(row.media_id).unwrap() else {
+    for row in store.list_file_coverage().unwrap() {
+        let Some(mut media) = store.get_media(row.file.media_id).unwrap() else {
             continue;
         };
         if media.title.contains(title_contains) {
@@ -85,12 +85,13 @@ async fn series_parent_does_not_scan_the_root_ledger() {
             let store = fixture.state.store();
             let store = store.lock();
             store
-                .list_ledger()
+                .list_file_coverage()
                 .unwrap()
                 .into_iter()
-                .find(|row| row.path.contains("Show001"))
+                .find(|row| row.file.path.to_string_lossy().contains("Show001"))
                 .expect("unrelated row")
-                .id
+                .file
+                .file_id
         };
         conn.execute(
             "UPDATE library_files SET filter_score = 'not-a-score' WHERE file_id = ?1",
@@ -152,11 +153,11 @@ async fn favorite_filter_uses_the_same_observation_as_the_response() {
     let media = {
         let store = fixture.state.store();
         let store = store.lock();
-        let row = store.list_ledger().unwrap().into_iter().next().expect("row");
+        let row = store.list_file_coverage().unwrap().into_iter().next().expect("row");
         store
-            .upsert_unit(user, row.media_id, -1, -1, 0, None, Some(true), None, None, None, false, 10)
+            .upsert_unit(user, row.file.media_id, -1, -1, 0, None, Some(true), None, None, None, false, 10)
             .unwrap();
-        row.media_id
+        row.file.media_id
     };
     fixture.files.fail_store_on_first_io(Box::new({
         let state = fixture.state.clone();
@@ -193,12 +194,13 @@ async fn heavy_counter_records_a_completed_snapshot_before_a_later_failure() {
         let store = fixture.state.store();
         let store = store.lock();
         store
-            .list_ledger()
+            .list_file_coverage()
             .unwrap()
             .into_iter()
-            .find(|row| row.path.contains("Show001"))
+            .find(|row| row.file.path.to_string_lossy().contains("Show001"))
             .expect("Show001")
-            .id
+            .file
+            .file_id
     };
     fixture.files.fail_store_on_first_io(Box::new({
         let db = fixture.dir.path().join("data/library.db");
@@ -232,12 +234,12 @@ async fn person_filter_does_not_assess_probes_for_unselected_rows() {
         let store = fixture.state.store();
         let store = store.lock();
         let row = store
-            .list_ledger()
+            .list_file_coverage()
             .unwrap()
             .into_iter()
-            .find(|row| row.path.contains("Show000"))
+            .find(|row| row.file.path.to_string_lossy().contains("Show000"))
             .expect("Show000");
-        let dir = Path::new(&row.path).parent().unwrap();
+        let dir = row.file.path.parent().unwrap();
         std::fs::write(
             dir.join("tvshow.nfo"),
             "<tvshow><actor><name>Alice</name><role>Lead</role></actor></tvshow>",
@@ -269,12 +271,13 @@ async fn off_page_blob_chapters_fail_only_when_that_row_is_selected() {
         let store = fixture.state.store();
         let store = store.lock();
         store
-            .list_ledger()
+            .list_file_coverage()
             .unwrap()
             .into_iter()
-            .find(|row| row.path.contains("Show000"))
+            .find(|row| row.file.path.to_string_lossy().contains("Show000"))
             .expect("Show000")
-            .id
+            .file
+            .file_id
     };
     let conn = rusqlite::Connection::open(fixture.dir.path().join("data/library.db")).unwrap();
     conn.execute(

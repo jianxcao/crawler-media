@@ -1,6 +1,7 @@
 mod support;
 
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
+use store::test_support::FixtureFile;
 use store::Store;
 
 fn media() -> Media {
@@ -9,10 +10,21 @@ fn media() -> Media {
         douban_id: None, tvdb_id: None, bangumi_id: None, anilist_id: None }
 }
 
-fn row(media_id: MediaId, path: &std::path::Path) -> LedgerRow {
-    LedgerRow { id: LedgerId::new(), media_id, path: path.display().to_string(),
-        season: Some(1), episode: Some(1), resolution: None, codec: None, hdr: None,
-        quality_source: QualitySource::Release, confidence: Confidence::High, filter_score: None }
+fn row(media_id: MediaId, path: &std::path::Path) -> FixtureFile {
+    FixtureFile {
+        file_id: Some(LedgerId::new()),
+        media_id,
+        path: path.display().to_string(),
+        season: Some(1),
+        episode: Some(1),
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: None,
+        ..Default::default()
+    }
 }
 
 #[test]
@@ -32,9 +44,9 @@ fn removal_cleans_only_owned_rows_and_preserves_files_and_media() {
     std::fs::write(&child_path, b"https://example.test/two").unwrap();
     let a_row = row(media.id, &path);
     let b_row = row(media.id, &child_path);
-    store.insert_ledger(&a_row).unwrap();
-    store.insert_ledger(&b_row).unwrap();
-    store.put_file_meta(&a_row.id.to_string(), &library::Tracks::default()).unwrap();
+    store::test_support::publish_fixture_file(&store, &&a_row).unwrap();
+    store::test_support::publish_fixture_file(&store, &&b_row).unwrap();
+    store.put_file_meta(&a_row.file_id.expect("fixture file id").to_string(), &library::Tracks::default()).unwrap();
     let user = domain::UserId::new();
     store.upsert_unit(user, media.id, 1, 1, 750_000, Some(false), Some(true),
         Some(1_000_000), None, None, false, 1).unwrap();
@@ -46,9 +58,9 @@ fn removal_cleans_only_owned_rows_and_preserves_files_and_media() {
     let done = store.clean_library_removal(&removal.operation_id).unwrap();
     assert_eq!(done.state, "succeeded");
     assert_eq!(done.removed_ledger_count, 1);
-    assert!(store.ledger_by_path(&a_row.path).unwrap().is_none());
-    assert!(store.get_file_meta(&a_row.id.to_string()).unwrap().is_none());
-    assert!(store.ledger_by_path(&b_row.path).unwrap().is_some());
+    assert!(store.file_coverage_by_path(&a_row.path).unwrap().is_none());
+    assert!(store.get_file_meta(&a_row.file_id.expect("fixture file id").to_string()).unwrap().is_none());
+    assert!(store.file_coverage_by_path(&b_row.path).unwrap().is_some());
     assert!(store.get_library(&b.id).unwrap().is_some());
     assert!(store.get_media(media.id).unwrap().is_some());
     let progress = store.unit_state(user, media.id, 1, 1).unwrap().unwrap();
@@ -76,13 +88,13 @@ fn removal_cleans_fingerprint_attempts_and_preserves_shared_season_comparison() 
     std::fs::write(&path_b, b"b").unwrap();
     let a_row = row(media.id, &path_a);
     let b_row = row(media.id, &path_b);
-    store.insert_ledger(&a_row).unwrap();
-    store.insert_ledger(&b_row).unwrap();
+    store::test_support::publish_fixture_file(&store, &&a_row).unwrap();
+    store::test_support::publish_fixture_file(&store, &&b_row).unwrap();
 
     let attempt = store::StoredFingerprintAttempt {
         attempt_id: "att-1".into(),
         job_id: "job-1".into(),
-        ledger_id: a_row.id.to_string(),
+        ledger_id: a_row.file_id.expect("fixture file id").to_string(),
         kind: "intro".into(),
         window_start_ms: 0,
         window_end_ms: 10_000,
@@ -128,15 +140,15 @@ fn removal_closes_playback_sessions_for_removed_files_and_preserves_other_librar
     let path_b = root_b.join("E01.strm");
     let a_row = row(media.id, &path_a);
     let b_row = row(media.id, &path_b);
-    store.insert_ledger(&a_row).unwrap();
-    store.insert_ledger(&b_row).unwrap();
+    store::test_support::publish_fixture_file(&store, &&a_row).unwrap();
+    store::test_support::publish_fixture_file(&store, &&b_row).unwrap();
 
     let user_a = domain::UserId::new();
     let user_b = domain::UserId::new();
     let device_a = "device-a";
     let device_b = "device-b";
-    let play_session_a = support::issue_session(&store, user_a, device_a, a_row.id, 200);
-    let play_session_b = support::issue_session(&store, user_b, device_b, b_row.id, 200);
+    let play_session_a = support::issue_session(&store, user_a, device_a, a_row.file_id.expect("fixture file id"), 200);
+    let play_session_b = support::issue_session(&store, user_b, device_b, b_row.file_id.expect("fixture file id"), 200);
     let session_a = store::SessionRow {
         device_id: device_a.into(),
         user_id: user_a,
@@ -158,7 +170,7 @@ fn removal_closes_playback_sessions_for_removed_files_and_preserves_other_librar
         admin_ended: false,
         started_at: 100,
         last_report_at: 200,
-        ledger_id: Some(a_row.id.to_string()),
+        ledger_id: Some(a_row.file_id.expect("fixture file id").to_string()),
         play_session_id: Some(play_session_a),
         last_report_at_ms: 200_000,
         last_event_sequence: None,
@@ -184,7 +196,7 @@ fn removal_closes_playback_sessions_for_removed_files_and_preserves_other_librar
         admin_ended: false,
         started_at: 100,
         last_report_at: 200,
-        ledger_id: Some(b_row.id.to_string()),
+        ledger_id: Some(b_row.file_id.expect("fixture file id").to_string()),
         play_session_id: Some(play_session_b),
         last_report_at_ms: 200_000,
         last_event_sequence: None,

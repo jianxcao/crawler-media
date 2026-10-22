@@ -2,7 +2,6 @@
 //! renderers, never hold more than 64 claimed IDs in memory, and never lose a
 //! durable obligation. The runner is a gated fake; no ffmpeg process starts.
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,8 +14,9 @@ use api::chapter_frame_service::{
 };
 use api::library_lifecycle::LibraryWorkRegistry;
 use api::Store;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, LibraryFile, Media, MediaId, MediaKind, QualitySource};
 use library::WorkControl;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 const FILES: usize = 200;
 const TARGETS: [(i64, i64); 2] = [(0, 60_000), (60_000, 120_000)];
@@ -107,7 +107,7 @@ struct Fixture {
     runner: Arc<FakeRunner>,
     gate: Arc<Gate>,
     service: Arc<ChapterFrameService>,
-    rows: Vec<LedgerRow>,
+    rows: Vec<LibraryFile>,
 }
 
 impl Drop for Fixture {
@@ -154,8 +154,9 @@ impl Fixture {
         for index in 0..FILES {
             let path = root.join(format!("Batch.S01E{:03}.mkv", index + 1));
             std::fs::write(&path, b"fixture").unwrap();
-            let row = LedgerRow {
-                id: LedgerId::new(),
+            let file_id = LedgerId::new();
+            let spec = FixtureFile {
+                file_id: Some(file_id),
                 media_id,
                 path: path.display().to_string(),
                 season: Some(1),
@@ -166,9 +167,10 @@ impl Fixture {
                 quality_source: QualitySource::Release,
                 confidence: Confidence::High,
                 filter_score: None,
+                ..Default::default()
             };
-            store.insert_ledger(&row).unwrap();
-            rows.push(row);
+            let published = publish_fixture_file(&store, &spec).unwrap();
+            rows.push(published);
         }
 
         let store = Arc::new(Mutex::new(store));
@@ -194,9 +196,9 @@ impl Fixture {
     fn enqueue_all(&self) -> usize {
         self.rows
             .iter()
-            .filter(|row| {
+            .filter(|file| {
                 self.service
-                    .enqueue_ledger(&row.id.to_string(), TARGETS.to_vec())
+                    .enqueue_ledger(&file.file_id.to_string(), TARGETS.to_vec())
                     .unwrap()
             })
             .count()
@@ -211,10 +213,10 @@ impl Fixture {
         counts.queued + counts.running + counts.completed + counts.failed
     }
 
-    fn published_frames(&self, row: &LedgerRow) -> usize {
-        let path = PathBuf::from(&row.path);
+    fn published_frames(&self, file: &LibraryFile) -> usize {
+        let path = &file.path;
         (0..TARGETS.len())
-            .filter(|index| chapter_frame_path(&path, *index).exists())
+            .filter(|index| chapter_frame_path(path, *index).exists())
             .count()
     }
 
@@ -381,7 +383,7 @@ async fn panicking_runner_is_acked_as_failed() {
     ));
     let row = &fixture.rows[0];
     assert!(service
-        .enqueue_ledger(&row.id.to_string(), TARGETS.to_vec())
+        .enqueue_ledger(&row.file_id.to_string(), TARGETS.to_vec())
         .unwrap());
     service.start();
     tokio::time::timeout(Duration::from_secs(10), async {

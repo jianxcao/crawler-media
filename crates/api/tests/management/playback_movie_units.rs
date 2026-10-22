@@ -271,7 +271,10 @@ async fn historical_movie_metadata_survives_first_canonical_progress() {
             Some(7_200_000),
             Some("audio-old"),
             Some("subtitle-old"),
-            false,
+            // Seed a real historical play count so the assertion below is about *invariance*:
+            // plan:146 keeps progress events from touching play_count, so a canonical progress
+            // write must leave this historical value at exactly 1 (a spurious bump would make it 2).
+            true,
             1,
         )
         .unwrap();

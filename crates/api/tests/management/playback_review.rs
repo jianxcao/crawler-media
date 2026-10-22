@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::*;
+use store::test_support::{publish_fixture_file, FixtureFile};
 
 pub(super) fn fixture(tmp: &tempfile::TempDir, tv: bool) -> (axum::Router, Value) {
     let state = state(
@@ -37,33 +38,33 @@ pub(super) fn fixture(tmp: &tempfile::TempDir, tv: bool) -> (axum::Router, Value
         anilist_id: None,
         tvdb_id: None,
     };
-    let row = domain::LedgerRow {
-        id: domain::LedgerId::new(),
-        media_id: media.id,
-        path: tmp
-            .path()
-            .join(if tv {
-                "data/library/tv/episode.mkv"
-            } else {
-                "data/library/movies/movie.mkv"
-            })
-            .to_string_lossy()
-            .into(),
-        season: tv.then_some(2),
-        episode: tv.then_some(3),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: domain::QualitySource::Probe,
-        confidence: domain::Confidence::High,
-        filter_score: None,
-    };
+    let file_id = domain::LedgerId::new();
     let store = api::Store::open(tmp.path().join("data")).unwrap();
     store.insert_media(&media).unwrap();
-    store.insert_ledger(&row).unwrap();
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(file_id),
+            media_id: media.id,
+            path: tmp
+                .path()
+                .join(if tv {
+                    "data/library/tv/episode.mkv"
+                } else {
+                    "data/library/movies/movie.mkv"
+                })
+                .to_string_lossy()
+                .into(),
+            season: tv.then_some(2),
+            episode: tv.then_some(3),
+            quality_source: domain::QualitySource::Probe,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     (
         router(state),
-        json!({ "media_item_id": media.id.to_string(), "file_id": row.id.to_string() }),
+        json!({ "media_item_id": media.id.to_string(), "file_id": file_id.to_string() }),
     )
 }
 

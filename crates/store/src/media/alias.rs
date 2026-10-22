@@ -72,15 +72,23 @@ impl Store {
         Ok(())
     }
 
-    /// Read the current refresh target alias for a given source.
+    /// Read the current refresh target alias for a given source, restricted to the
+    /// Media's own kind. `media_aliases(media_id, kind)` references
+    /// `media(media_id, kind)`, so this matches the `kind = m.kind` filter of
+    /// `MEDIA_SELECT`: the flat provider ids a reader sees and the id a refresh
+    /// requests are the same alias. `alias_target` is unique per
+    /// `(media_id, source, kind)`, and `ORDER BY external_id` pins the pick, so the
+    /// request is deterministic.
     pub fn media_refresh_alias(
         &self,
         media: MediaId,
         source: &str,
     ) -> Result<Option<MediaAlias>, StoreError> {
         let mut stmt = self.library.prepare(
-            "SELECT source, kind, external_id FROM media_aliases
-             WHERE media_id = ?1 AND source = ?2 AND is_refresh_target = 1 LIMIT 1",
+            "SELECT a.source, a.kind, a.external_id FROM media_aliases a
+             JOIN media m ON m.media_id = a.media_id AND m.kind = a.kind
+             WHERE a.media_id = ?1 AND a.source = ?2 AND a.is_refresh_target = 1
+             ORDER BY a.external_id ASC LIMIT 1",
         )?;
         let mut rows = stmt.query(params![media.to_string(), source])?;
         if let Some(row) = rows.next()? {

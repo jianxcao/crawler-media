@@ -183,8 +183,8 @@ fn finished_qbittorrent_task_transfers_into_library_ledger() {
     })
     .unwrap();
 
-    assert_eq!(outcome.ledger.len(), 1);
-    assert!(std::path::Path::new(&outcome.ledger[0].path).is_file());
-    assert_eq!(outcome.ledger[0].media_id, media.id);
-    assert_eq!(outcome.ledger[0].resolution.as_deref(), Some("2160p"));
+    assert_eq!(outcome.files.len(), 1);
+    assert!(outcome.files[0].file.path.is_file());
+    assert_eq!(outcome.files[0].file.media_id, media.id);
+    assert_eq!(outcome.files[0].file.resolution.as_deref(), Some("2160p"));
 }

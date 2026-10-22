@@ -20,7 +20,9 @@ pub(super) fn unit_played(
         match store.unit_state(user_id, media_id, unit_season, unit_episode) {
             Ok(Some(state)) => units[index] = Some(state),
             Ok(None) => {}
-            Err(error) => tracing::warn!(%error, %user_id, %media_id, season = unit_season, episode = unit_episode, "failed to read Jellyfin played mark"),
+            Err(error) => {
+                tracing::warn!(%error, %user_id, %media_id, season = unit_season, episode = unit_episode, "failed to read Jellyfin played mark")
+            }
         }
     }
     resolve_effective_played(
@@ -60,19 +62,11 @@ pub(super) fn resolve_effective_played(
 pub(super) fn item_is_played(
     store: &crate::Store,
     user_id: UserId,
-    row: &domain::LedgerRow,
+    file: &domain::LibraryFile,
+    unit: (i32, i32),
 ) -> bool {
-    unit_played(
-        store,
-        user_id,
-        row.media_id,
-        row.season
-            .map(|value| value as i32)
-            .unwrap_or(crate::store::UNIT_WHOLE),
-        row.episode
-            .map(|value| value as i32)
-            .unwrap_or(crate::store::UNIT_WHOLE),
-    )
+    // 旧行模型的 `season/episode` 为 `None` 即整片；`UnitKey` 用 `-1` 表达同一件事。
+    unit_played(store, user_id, file.media_id, unit.0, unit.1)
 }
 
 pub(super) fn unit_play_count(
