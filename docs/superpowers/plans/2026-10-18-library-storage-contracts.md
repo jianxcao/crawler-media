@@ -1,6 +1,6 @@
 # Media / Library 开发合同附录
 
-状态：规范性目标合同，**不是当前已实现API**。与[当前实施计划](2026-10-20-storage-clean-cutover.md)、[主设计](../specs/2026-10-18-library-storage-redesign.md)一起阅读；旧T编号只保留需求溯源，执行任务按当前计划。新增/替换接口由当前计划的Interfaces明确收敛；当前源码仍有缺口，不能将下列签名当作已可调用。改公开符号前用LSP references枚举调用方；服务不可用时记录错误后核对代码/SQL/路由/JSON全调用链。
+状态：规范性目标合同，**不是当前已实现API**。与[当前实施计划](2026-10-22-storage-repair-remediation.md)、[主设计](../specs/2026-10-18-library-storage-redesign.md)一起阅读；旧T编号只保留需求溯源，执行任务按当前计划。新增/替换接口由当前计划的Interfaces明确收敛；当前源码仍有缺口，不能将下列签名当作已可调用。改公开符号前用LSP references枚举调用方；服务不可用时记录错误后核对代码/SQL/路由/JSON全调用链。
 
 ## 1. DDL、布局与保留范围
 

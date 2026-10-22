@@ -8,4 +8,4 @@ v1 需要五种 **Metadata source**，包括没有 TMDB id 的作品。把 TMDB 
 
 ## 当前落地边界（2026-10-20）
 
-此 ADR 保留身份决策，不证明合并/采用元数据/所有消费者切换已经验收。身份编辑与合并已落到 `crates/store/src/media/**`（`update_media_identity`、`add_media_alias`、`media_refresh_alias`）和持久合并阶段 `crates/store/src/media_operations/**`，显式文件改挂在 `crates/store/src/library_write/reassign.rs`；管理入口是 `POST /api/v1/media/merges`（202 + `operation_id`）与 `GET /api/v1/media/operations/{id}`（`crates/api/src/http/media_operations.rs`）。别名保留与 identity 屏障由 `crates/store/tests/media_alias_updates.rs`、合并冲突/恢复由 `crates/store/tests/media_merge_conflicts.rs`、`media_merge_recovery.rs` 覆盖。剩余验收（全调用方删旧、性能与规模门）按 [存储执行计划](<../superpowers/plans/2026-10-20-storage-clean-cutover.md>) Task 17–20 执行，不恢复旧模型兼容层。
+此ADR保留身份决策；身份编辑、显式文件改挂、持久merge及管理路由均已有实现。2026-10-22复审不再报告“编辑删除别名”，但确认非刷新目标别名扫描失败、同来源新快照被丢及merge失败恢复缺口，见[复审R21/R22](../audits/2026-10-22-storage-repair-review.md)和[当前技术方案Task10](../superpowers/plans/2026-10-22-storage-repair-remediation.md#task-10-合并快照决议冲突与恢复别名识别r21r22)。既有测试不足以关闭来源冲突矩阵，不恢复旧模型兼容层。

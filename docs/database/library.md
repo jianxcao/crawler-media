@@ -2,18 +2,18 @@
 
 [返回数据库总览](README.md)
 
-源码核对基线：`bd6c3c8`（2026-10-20）。`application_id=1129139249`，`user_version=1`。不可按缓存清空。
+结构/行为复审：`1845dab`（2026-10-22）。`application_id=1129139249`，`user_version=1`。不可按缓存清空。
 
-结构为 **45 张业务表、519 字段、53 个显式命名索引、32 组 FK、0 个触发器**，不计SQLite自动索引。历史 `a3dab1b` 临时初始化结果见[证据记录](../benchmarks/2026-10-18-library-storage.md)；当前字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准，结构一致不等于全部生产不变量已实现。
+结构为 **45张业务表、519字段、51个显式命名索引、32组FK、0触发器**，不计SQLite自动索引。已移除两个与主键/UNIQUE重复的声明；历史53索引测量仍只对原版本有效。当前字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准，结构一致不等于业务不变量已验收。
 
 ## 实现边界
 
-- `media`、Library配置、Collection、Playback已同库；旧ledger/file_meta/browse持久表已删除，但LedgerRow写适配和Web movie (0,0)边界alias仍在，不是允许保留的合同。
-- 复合ownership FK与完整归约已存在；增量归约漏用户摘要、重扫替换不推进物理版本、Transfer pending恢复身份记账仍有缺口；不将历史多集/删除修复笼统判为未实现。
-- `library_operations` 的 `roots`/`locale` 两类已由 `Store::begin_library_reconfiguration` + `Store::advance_library_operation` 持久化驱动：开始时对 `config_revision` 做真实 CAS 并把库置为 `reindexing`（旧 `WriteScope` 的写入被拒绝），再按 keyset 分批（≤100 Media/批）迁移 `library_files.root_id`、`library_metadata_inputs.root_id` 与 `unidentified.root_id`，最后才删除无引用的旧根并恢复 `ready`；中途重启由 `unfinished_library_operations` 续跑。`integrity_state` 与 NFO `export_*` 仍是已建结构，不代表 checker/导出恢复已实现。
-- `media_operations` 的合并已由 `Store::begin_media_merge` + `Store::advance_media_merge` 驱动：`POST /media/merges` 只写计划并冻结双方，阶段推进由**持有数据目录写租约**的进程在 job loop 内调用 `advance_media_merge`，未完成操作由 `unfinished_media_merges` 在启动恢复时续跑（同一租约块内，重复执行幂等）。合并终态后由收敛步骤把排队中的 job payload 引用改挂到 survivor；`GET /media/operations/{id}` 只读阶段、不推进。
-- `a3dab1b` 增加扫描变化时清 stat/durable 版本，未新增表或列；在 Task 1 中统一由 `library::observe_source` 在锁外观察源，并通过 `Store::replace_file_source` CAS 原子递增 `file_revision`、更新 `source_version` 与 `source_digest`（STRM 文件基于内容 digest，普通文件基于 stat），失效旧冷详情/质量/轨道/artwork并重挂 probe 义务。
-- 元数据人工锁/来源冲突、合并冻结/恢复、协议生产接线见[当前计划](../superpowers/plans/2026-10-20-storage-clean-cutover.md)。
+- Media/Library/Collection/Playback已同库；旧ledger/file_meta/browse持久表及domain::LedgerRow载体已移除。部分movie00请求alias仍在（R13），不得作为兼容合同保留。
+- 完整与增量归约均已维护用户摘要；本轮实测已有卡片批内新增同unit两版本得到3而非2（R03）。真实重扫未推进源版本、pending恢复recorder记错返回ID（R01/R04），不能用直接Store方法测试关闭生产路径。
+- roots/locale/checker已有持久操作与HTTP恢复驱动；根+locale组合实测只应用根，config0仍可绕过代际，checker漏units/terms且每批全库提取。见R02/R19/R20，不再笼统称checker未实现或全部旧写被拒。
+- Media合并已有begin/advance/HTTP/Job收敛；同实体新快照仍无条件让survivor胜，人工锁冲突与failed恢复不闭合（R21）。别名编辑保留已修，但非target别名扫描冲突（R22）。
+- `library::observe_source`和`Store::replace_file_source`具备独立源CAS，但当前生产scan/watch/Probe链仍有旧观察算法，existing-path只复用行/清stat；实际重扫revision/source不变（R01），不得把方法存在写成生产已统一。
+- 元数据人工锁/来源冲突、合并冻结/恢复、协议生产接线见[当前计划](../superpowers/plans/2026-10-22-storage-repair-remediation.md)。
 
 ## 字段阅读规则
 
@@ -58,7 +58,7 @@
 - [playback_metrics](#playback_metrics) — 13 字段；Playback QoE 指标；仅按明确保留策略清理，不作为用户播放次数来源。
 - [playback_session_ids](#playback_session_ids) — 16 字段；签发会话的逻辑目标、物理源、生命周期与 generation。`Store::commit_playback_event` 写入前校验 `(user, device, session)` 的 generation/目标单元/文件版本/source_version 与库 `lifecycle_state`+`config_revision`+ACL，不匹配一律 `IgnoredStale` 不落事实；`pending` 会话的首个 progress 视为 Start 原子激活；`Stop` 只关闭上报会话并归档一条 play log，重复 Stop 因会话已 `closed` 而幂等。
 - [playback_sessions](#playback_sessions) — 31 字段；每用户/设备活动会话及源绑定、事件顺序、传输/观看统计。
-- [playback_units](#playback_units) — 20 字段；用户逻辑观看/收藏事实及一套源绑定恢复包；不 FK 到物理文件，删文件保留原始事实。`played` 是**显式断言**（`has_played_assertion` + `played_changed_at_ms`），进度心跳不改写它；读取走 `Store::effective_unit_state`，按 episode > season > whole 逐级解析，季节标记无需为每集造行即可见。手动 mark 只写断言、不推进 `watch_activity_at`；清历史会清掉完整 resume binding（含 tracks/duration）与断言，favorite 独立保留。
+- [playback_units](#playback_units) — 20字段；用户逻辑观看/收藏事实及源绑定恢复包，不FK到物理文件。未完成Progress保留既有played断言；达到已知源时长90%阈值会写true及毫秒断言时钟，人工mark/unmark写显式true/false。目标按最新时钟、同时间episode>season>whole决议；当前部分生产read/mark及新resolver仍未统一/未按时间排序（R12），不能声称全部读取已走effective_unit_state或人工mark不改活动。清历史清完整resume与断言、favorite保留。
 - [probe_job_units](#probe_job_units) — 12 字段；Probe 文件单元、阶段与输出；活动单元/派发索引控制工作窗口。
 - [probe_jobs](#probe_jobs) — 17 字段；专用 Probe 作业与单元计数、阶段策略和历史；不同于 jobs.db 的通用 Job。
 - [probe_season_comparison_history](#probe_season_comparison_history) — 4 字段；每 Media/季最近比较摘要与发布时间，不是完整历史集合。
@@ -67,7 +67,7 @@
 - [scan_seen](#scan_seen) — 5 字段；当前扫描 operation 已确认处理的路径版本；与源观察、物理 FileVersion 不是同一语义。
 - [scrape_sidecars](#scrape_sidecars) — 3 字段；文件的 NFO/图片 sidecar 路径；登记不等于导出 provenance 合同已完成。
 - [unidentified](#unidentified) — 4 字段；带 Library/root 的低置信度待认领文件；删除 Library 前需显式清理，不能删磁盘字节。
-- [user_library_items](#user_library_items) — 15 字段；用户/Library/Media 稀疏摘要；卡片删除会级联清理，重导入需要从原始用户事实重算。当前此写链存在漏维护。
+- [user_library_items](#user_library_items) — 15字段；用户/Library/Media稀疏摘要，卡片删除级联、重导入由原始用户事实恢复。完整/增量已有维护；当前具体一致性缺陷见R03/R12/R20，不沿用泛称“从未维护”。
 
 ## chapter_frame_tasks
 

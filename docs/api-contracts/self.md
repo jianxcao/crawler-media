@@ -145,7 +145,7 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 - 未知 def → 404 `job.missing`；def 存在但非维护 kind → 400 `job.not_maintenance`；非法配置 → 400 `job.invalid_config`（且不落库）。
 - `interval_secs` 只对维护任务加范围 `3600..=31536000`，越界 → 400 `job.invalid_interval`；其他任务契约不变。
 - 返回 `{id, kind, payload, payload_token, schedule?}`。当前 `jobs::update_def_config_cas` 在**同一事务**比较 payload、更新 payload/可选周期并刷新 queued 子任务的 payload；running 保留执行快照。省略周期时 handler 回读实际 schedule。并发令牌仍仅覆盖 payload，**不能检测仅改周期的冲突**，不能称为完整配置 revision。
-- 原 F02 与 F04 的实现现状须区分：queued 刷新与配置同事务路径已经存在，但仅周期冲突检测仍缺少令牌覆盖。历史复核与执行计划不等于本次重新验收；当前存储切换任务见 [执行计划](<../superpowers/plans/2026-10-20-storage-clean-cutover.md>)。
+- 原 F02 与 F04 的实现现状须区分：queued 刷新与配置同事务路径已经存在，但仅周期冲突检测仍缺少令牌覆盖。历史复核与执行计划不等于本次重新验收；当前存储切换任务见 [执行计划](<../superpowers/plans/2026-10-22-storage-repair-remediation.md>)。
 
 `POST /api/v1/jobs/{id}/maintenance-preview`（**仅管理员**，会员 403）：
 
@@ -171,11 +171,11 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 
 四个 Store 文件为 `app.db`、`cache.db`、`library.db`、`subscribe.db`，队列另在 `jobs.db`。当前布局没有旧数据库迁移阶梯；DDL 不代表 API/消费者已全部切换。`commit_playback_event` 尚未形成所有生产调用方的统一路径；movie `(0,0)` 请求别名仍在前后端，目标存储整片坐标为 `(-1,-1)`。不得新增兼容建议来保留这些未切换路径。
 
-Jellyfin `Items` 选择已统一到 `protocol_item_page`：授权与作用域收敛、谓词、同逻辑条目的物理版本折叠、排序、`total` 计数与 `LIMIT/OFFSET` 都在 store 的一次短读事务内完成，只有返回页的条目才回落成本地轻候选并渲染；页内 metadata 取已采纳的合成快照，不读现场 NFO/cache/network。查询成本因此不再随命中数增长：旧的全候选 Rust filter/sort 与本地 catalog enrichment 已删除，NFO/stat/重渲染只对返回页发生（作用域内的行重读仍按既有 `VmStep` 计量，不隐藏放大）。两个已知例外：`PersonIds` 过滤仍在候选级判定（catalog 参与成员身份，catalog 失败必须硬失败，不能缩成更小的一页）；`NextUp` 走独立选择路径。另外两条与旧实现不同的口径：`SortBy=DateCreated` 在 SQL 侧按 `library_items.added_at_sort`（已发布文件的 `created_ns`/`mtime_ns` 最小值）排序，文件时间未知的条目排最后，而不再逐项现场 `stat`；`Name` 的二/多级排序键用 SQLite `lower()`，只折叠 ASCII 大小写。
+Jellyfin普通Items等已有Store protocol_item_page生产选择；PersonIds仍走候选Catalog路径，这是待移除缺陷而非允许网络依赖的合同。当前Unicode搜索、genre ID roundtrip、多键排序、entity/locale、played及不可播放条目的count/page仍有不一致，见[复审R12/R23/R24](../audits/2026-10-22-storage-repair-review.md)。SQL存在与历史绿测不能证明所有谓词正确或成本不随命中数增长。
 
-上一轮隔离复核已观察到：合并集文件 heartbeat 错报 `ended_by_admin`、旧 issued session 写入新文件版本、增量公共集数与用户计数不一致、文件续页 `next_cursor` 对接/恰好 50 条边界失败、采用元数据 runtime/rating 缺失与详情遗漏 tagline/certification、换根外键错误、多别名更新丢失/卡片陈旧；integrity-checks 与 Media merge 管理端点仍 404。这些不是已完成合同；本次文档清理没有重跑或改写这些观察。当前源码入口为 `http/library.rs`、`http/playback/`、`store/src/media.rs`、`store/src/library_query/`、`store/src/playback/`，闭环验收见 [存储执行计划](<../superpowers/plans/2026-10-20-storage-clean-cutover.md>)。
+`bd6c3c8`旧隔离复核作为历史保留于benchmark；2026-10-22已确认LedgerRow去除、显式session统一、管理路由挂载、增量用户摘要等修复，不沿用旧“全部仍坏”清单。新的真实Router/Store/实际Web adapter反例及证据级别见[本轮复审](../audits/2026-10-22-storage-repair-review.md)。
 
-以上观察中只有一项已被本次切换改动：Media merge 管理端点不再 404 —— `POST /media/merges` 与 `GET /media/operations/{id}` 已挂载（见上文「Media 合并操作」）；其余观察未重跑。
+当前修复任务以[详细技术方案](../superpowers/plans/2026-10-22-storage-repair-remediation.md)为唯一执行入口；该方案不是实现或验收结果。
 
 ## 现行表面（去哪看）
 

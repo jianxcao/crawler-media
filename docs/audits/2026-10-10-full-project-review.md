@@ -77,7 +77,7 @@
 
 ### PIPE-02 [P1]：仍公开的 legacy /run 在新 ledger 提交前删除旧版本
 
-**定位**：[crates/api/src/management/subscribes/run.rs:276](<../../crates/api/src/management/subscribes/run.rs#L276>)（第 291 行 `preserve_removed: false`），`:381-395`；[crates/subscribe/src/collect.rs:361](<../../crates/subscribe/src/collect.rs#L361>)。
+**定位**：[crates/api/src/management/subscribes/run.rs:276](<../../crates/api/src/management/subscribes/run.rs#L276>)（第 291 行 `preserve_removed: false`），`:381-395`；crates/subscribe/src/collect.rs:361（历史源码 `git show aec73cc:crates/subscribe/src/collect.rs`，原定位`L361`）。
 
 **触发**：`POST /api/v1/subscriptions/{id}/run` 对 Wash-cut 获取已完成的更高分文件，且写入新 ledger 时发生 SQLite/IO 错误。
 
@@ -127,7 +127,7 @@
 
 ### ROOT-01 [P1] 删除最后一个文件会误删仍被 Subscribe 引用的 Media
 
-**定位**：[crates/api/src/fs_watcher.rs:477](<../../crates/api/src/fs_watcher.rs#L477>)；[crates/store/src/media.rs:214](<../../crates/store/src/media.rs#L214>)。
+**定位**：[crates/api/src/fs_watcher.rs:477](<../../crates/api/src/fs_watcher.rs#L477>)；crates/store/src/media.rs:214（历史源码 `git show aec73cc:crates/store/src/media.rs`，原定位`L214`）。
 
 **触发与影响**：存在 active Subscribe，并且目标 Media 只剩一个 Library 文件。用户从磁盘删除该文件，Watcher 清理 ledger 后发现 remaining=0，直接清除 Media。Subscribe 行仍然存在，但其 media_id 已无对应身份；后续搜索不能加载目标 Media，无法按持续目标补齐。Media 身份的生命周期被错误地绑定到“至少拥有一个文件”。
 

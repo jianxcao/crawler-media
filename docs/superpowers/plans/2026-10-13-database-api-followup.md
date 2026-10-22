@@ -1,6 +1,6 @@
 # 数据库与接口收敛：历史实施映射与剩余门
 
-**2026-10-20 整理；不是重跑旧T1–T9的执行计划。** 最初基线 `723394e`，历史发现 [F01–F12](<../../audits/2026-10-13-database-api-review.md>)、[DB8合同](<2026-10-12-db8-maintenance-retention.md>)仍保留。旧四Store＋独立catalog/fanart、ledger／projection等实现指令已被当前布局替代；存储正确性按 [当前clean-cutover计划](<2026-10-20-storage-clean-cutover.md>)执行，不把历史性能／设备门无条件塞进存储切换。
+**2026-10-20 整理；不是重跑旧T1–T9的执行计划。** 最初基线 `723394e`，历史发现 [F01–F12](<../../audits/2026-10-13-database-api-review.md>)、[DB8合同](<2026-10-12-db8-maintenance-retention.md>)仍保留。旧四Store＋独立catalog/fanart、ledger／projection等实现指令已被当前布局替代；存储正确性按 [当前clean-cutover计划](<2026-10-22-storage-repair-remediation.md>)执行，不把历史性能／设备门无条件塞进存储切换。
 
 ## 1. 已有实现提交，不等于全部验收
 

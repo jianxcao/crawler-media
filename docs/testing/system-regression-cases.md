@@ -4,7 +4,7 @@
 
 从用户可见的入口和工作流检查 Web 工作台，以及 VidHub 通过 Jellyfin-compatible API 访问本系统时的页面呈现、图片加载、播放和进度同步。本文覆盖当前 Web 路由、设置分区和关键跨页流程；用例以可观察结果为准。
 
-“预期结果”是待验收合同，不是已实现/已通过的功能声明。2026-10-20 当前存储切换仍有已知运行时缺口；历史测试与本文件列出的自动化源代码不能替代本构建实测。当前 DDL/布局见 `crates/store/src/schema/layout.rs` 与 `schema/v1/*.sql`，执行顺序见 [存储切换计划](<../superpowers/plans/2026-10-20-storage-clean-cutover.md>)。
+“预期结果”是待验收合同，不是已实现/已通过的功能声明。2026-10-20 当前存储切换仍有已知运行时缺口；历史测试与本文件列出的自动化源代码不能替代本构建实测。当前 DDL/布局见 `crates/store/src/schema/layout.rs` 与 `schema/v1/*.sql`，执行顺序见 [存储切换计划](<../superpowers/plans/2026-10-22-storage-repair-remediation.md>)。
 
 测试环境必须是隔离实例，数据写入临时目录和测试数据库。不得用生产 Site、真实 Downloader、真实 Library 文件目录或真实 User 的观看记录执行有写入的流程。
 
@@ -250,7 +250,7 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 | STORAGE-07 | 同来源多个别名的 Media 更新后，全部历史别名保留，refresh target 唯一且卡片立即同步 | 已观察别名丢失/卡片陈旧；本轮 store 部分实测：`media_alias_updates` 在本轮 store 套件内通过；按 target 的实际刷新请求与卡片同步仍 Not run |
 | STORAGE-08 | 管理完整性检查与 Media 合并公开路径可用并有最终状态，失败不改身份；协议浏览与事件提交生产接线真实覆盖 | 已观察管理端点 404 与 protocol_item_page / commit_playback_event 未统一接线；本轮更正：浏览入口已统一（`485e36f`，`jellyfin_paged_metadata` 25、`jellyfin_sql_page` 9 全绿，冒烟 Recursive 分页返回规范 `w1_…` Series+Movie），`Store::commit_playback_event` 的生产写入统一仍未验证；管理侧仍缺 scrape 类 `library_operations`（`crates/store/src/library_operations/mod.rs:226-228` 对非 reconfiguration 的 kind 返回 `Invalid`） |
 
-movie 整片持久 Unit 为 `(-1,-1)`（`domain::UnitKey::WHOLE`，TV 的 S00/E00 是合法值）；`(0,0)` 现在只是部分读／合并路径的行级容忍，不是请求别名，不能据此添加兼容验收。clean cutover 仍未完成：真实浏览器浏览与 seek、真实 Jellyfin 客户端（Infuse）、真实 NAS、100k–1M 规模性能本轮全部 Not run。用例应按 [当前执行计划](<../superpowers/plans/2026-10-20-storage-clean-cutover.md>) 在隔离实例闭环，保留旧失败证据。
+movie持久whole=(-1,-1)，TV S00E00合法；当前marks/progress/resume仍有movie00请求alias（R13），不能宣称已全拒。真实浏览器/客户端/NAS尚未在本轮运行；上轮1M只测无关Library文件增长，不等于100k Media/1M Playback完整验收。按[当前方案](../superpowers/plans/2026-10-22-storage-repair-remediation.md)新增真实consumer回归，历史数值见benchmark。
 
 ## 当前限制
 

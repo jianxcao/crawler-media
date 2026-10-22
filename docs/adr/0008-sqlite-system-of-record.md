@@ -138,6 +138,6 @@ Media 与 Playback 已迁入 `library.db`；旧浏览投影表/重建链已移�
 
 `bd6c3c8`复审否定“R1–R8已关闭全部阻塞”的旧状态，不否认对应提交和当时测试存在。真实Router/Store/前端函数烟测仍发现：合并文件E02心跳被误拒、旧会话写入新源版本、增量用户摘要漏维护、50/101文件分页错误、采用冷字段丢失、根替换FK失败；movie `(0,0)`边界alias、旧LedgerRow写适配和Jellyfin现场读取仍在。
 
-决策不变：Media/Library/Playback同库，cache可弃，事实与摘要同事务，源版本/逻辑身份分离。**实现尚未满足全部决策合同**，操作表存在不代表根/locale/checker/合并恢复已接通。完整证据与历史通过记录见[benchmark记录](../benchmarks/2026-10-18-library-storage.md)。
+决策不变：Media/Library/Playback同库，cache可弃，事实与摘要同事务，源版本/逻辑身份分离。2026-10-22已有根/locale/checker/合并管理与恢复入口，但仍有具体一致性缺陷；见[复审](../audits/2026-10-22-storage-repair-review.md)。历史通过和测量仍见[benchmark](../benchmarks/2026-10-18-library-storage.md)，不再将旧“未接通”概括当现状。
 
-当前字段/键/索引见[数据库字典](../database/README.md)，唯一执行入口为[干净切换与优化计划](../superpowers/plans/2026-10-20-storage-clean-cutover.md)。先修正确性及迁完生产者消费者，再测NAS冷热缓存、100k Media/1M文件/1M Playback及扫描并发心跳，不恢复旧数据兼容、双读双写或跨库浏览journal。
+当前字段/键/索引见[数据库字典](../database/README.md)，唯一执行入口为[干净切换与优化计划](../superpowers/plans/2026-10-22-storage-repair-remediation.md)。先修正确性及迁完生产者消费者，再测NAS冷热缓存、100k Media/1M文件/1M Playback及扫描并发心跳，不恢复旧数据兼容、双读双写或跨库浏览journal。

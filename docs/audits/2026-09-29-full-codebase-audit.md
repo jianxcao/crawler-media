@@ -76,7 +76,7 @@
 
 ### W03 · P1 · Torrent 身份验证通过后，文件级 Media 身份没有继续验证
 
-位置：[pick_release](<../../crates/subscribe/src/collect.rs#L233-L249>)；[目标 Media ledger](<../../crates/subscribe/src/collect.rs#L217-L229>)。
+位置：pick_release（历史源码 `git show aec73cc:crates/subscribe/src/collect.rs`，原定位`L233-L249`）；目标 Media ledger（历史源码 `git show aec73cc:crates/subscribe/src/collect.rs`，原定位`L217-L229`）。
 
 触发：正确 Torrent 内含另一个电影、sample.mkv，或者 TV 包里含另一个 Media 的同季集号视频。
 
@@ -84,7 +84,7 @@
 
 ### W04 · P1 · 多集 Wash-cut 用 any 批准，却对所有槽位覆盖和删除
 
-位置：[任一槽位通过即批准](<../../crates/subscribe/src/choose.rs#L97-L128>)；[覆盖全部槽位并删旧路径](<../../crates/subscribe/src/collect.rs#L175-L208>)。
+位置：[任一槽位通过即批准](<../../crates/subscribe/src/choose.rs#L97-L128>)；覆盖全部槽位并删旧路径（历史源码 `git show aec73cc:crates/subscribe/src/collect.rs`，原定位`L175-L208`）。
 
 触发：E01 已有 score=100，E02 缺失；低分 score=10 的单文件 `S01E01-E02.mkv` 因 E02 获准。
 

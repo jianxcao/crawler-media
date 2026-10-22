@@ -1,11 +1,11 @@
 # 文档入口、权威层级与清理记录
 
-更新：2026-10-20；源码核对基线 `bd6c3c8`。**存储五文件已建立，生产干净切换未完成。** 旧movie坐标、LedgerRow写适配、协议读取与恢复/操作接线仍有缺口；不得把历史全套绿测或表存在写成完整交付。
+更新：2026-10-22；复审源码基线 `1845dab`。**五文件、LedgerRow去除、显式会话统一与部分查询优化已落地，但生产干净切换仍未通过。** 本轮[复审](audits/2026-10-22-storage-repair-review.md)记录25组Spec缺陷及4项工程约束问题，区分实测与源码证明；不得沿用旧“已完成”表关闭生产断层。
 
 ## 当前先读
 
 1. 术语：[CONTEXT](../CONTEXT.md)；工程约束：[AGENTS](../AGENTS.md)。当前用户请求是工作单元，不主动创建/关闭issue。
-2. **唯一当前存储执行方案：** [干净切换与有证据优化](superpowers/plans/2026-10-20-storage-clean-cutover.md)。先正确性/调用方迁移，再查询、锁竞争、索引空间优化；此页不是实施授权或结果。
+2. **唯一当前存储执行方案：** [生产修复收口技术方案](superpowers/plans/2026-10-22-storage-repair-remediation.md)，13个任务覆盖R01–R25/S01–S04。方案待review，不是实现授权或结果。上轮修复/更正见[执行历史](audits/2026-10-22-storage-cutover-execution-history.md)，测量原值见benchmark。
 3. **目标合同：** [存储设计](superpowers/specs/2026-10-18-library-storage-redesign.md)、[接口/字段合同](superpowers/plans/2026-10-18-library-storage-contracts.md)、[来源缓存合同](superpowers/specs/2026-10-18-source-separated-cache.md)。规范不因未实现而放宽，不与当前事实混写。
 4. **现行结构：** [五文件数据库字典](database/README.md)。唯一可执行DDL在生产源码，docs不保留第二份SQL草案。
 5. **证据：** [存储复审与历史烟测](benchmarks/2026-10-18-library-storage.md)；旧审计/benchmark只对其明确版本和场景负责。
@@ -47,7 +47,7 @@
 | [0007 Browser](adr/0007-cdp-browser-opt-in.md) | CDP开关/隔离/受管Obscura/回退与信任边界 |
 | [0008 SQLite](adr/0008-sqlite-system-of-record.md) | 历史拆库与现行五文件，未完成生产切换 |
 | [0009 Job](adr/0009-job-queue.md) | Interval/queued-running约束、状态事实与恢复 |
-| [0010 Password](adr/0010-password-hashing.md) | Argon2id，旧凭证数据fallback待干净切换移除 |
+| [0010 Password](adr/0010-password-hashing.md) | Argon2id；旧明文fallback已移除，历史兼容描述不作当前合同 |
 | [0011 Probe retry](adr/0011-probe-stage-retry.md) | 持久阶段/退避，不以NFO代替Probe成功 |
 | [0012 Library removal](adr/0012-library-removal.md) | freeze/drain、明确归属、保留Media/User事实及字节 |
 
@@ -77,3 +77,10 @@ Agent导航：[domain](agents/domain.md)；[issue tracker](agents/issue-tracker.
 | `superpowers/specs/2026-10-15-performance-resource-remediation.md` | 安全/容量/测量要求合并到10-15整改映射 |
 
 删除前正文可按表内路径用 `git show bd6c3c8:docs/<路径>` 取回。另压缩Subscribe、CDP、搜索、DB8、10-13/10-15旧计划，保留所有独有要求与未闭环门；修复已删源码/文档链接及错误当前时态。更早10-15删除的51份历史产物原清单亦可从 `git show bd6c3c8:docs/README.md` 查询，不在本页重复维护。
+
+## 2026-10-22修复复审与旧计划撤下
+
+- 删除`superpowers/plans/2026-10-20-storage-clean-cutover.md`：已执行步骤、新建文件建议、历史“已完成”表与后续更正混在同一执行入口，已被当前13任务技术方案取代。
+- 原完整文件可用`git show 1845dab:docs/superpowers/plans/2026-10-20-storage-clean-cutover.md`读取；独有修复记录及R15/R19决策原样迁入[历史归档](audits/2026-10-22-storage-cutover-execution-history.md)，benchmark测量未删除/重写。
+- 当前[问题报告](audits/2026-10-22-storage-repair-review.md)和[技术方案](superpowers/plans/2026-10-22-storage-repair-remediation.md)区分实测、源码证明和Not run。其他历史文档有独有要求/证据，本轮不按年龄删除。
+- 本轮仅docs变更；隔离Store/Router/实际Web adapter烟测，不修改Rust/TS，不操作真实实例。

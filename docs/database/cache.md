@@ -8,7 +8,7 @@
 
 ## 职责与来源
 
-只保存外部响应，不保存 Media 身份、Library 文件、已采用元数据、观看状态或图片字节。正常清缓存不能修改这些事实；当前 Jellyfin 等生产消费者尚有请求时 NFO/catalog 读取缺口，见[干净切换计划](../superpowers/plans/2026-10-20-storage-clean-cutover.md)，不能由缓存表隔离推导全应用已经离线可用。
+只保存外部响应，不保存 Media 身份、Library 文件、已采用元数据、观看状态或图片字节。正常清缓存不能修改这些事实；当前 Jellyfin 等生产消费者尚有请求时 NFO/catalog 读取缺口，见[干净切换计划](../superpowers/plans/2026-10-22-storage-repair-remediation.md)，不能由缓存表隔离推导全应用已经离线可用。
 
 来源是固定 [CacheSource](../../crates/media/src/response_cache/source.rs) 白名单，不是用户提供的 SQL 表名；表内没有 `source` 列。
 

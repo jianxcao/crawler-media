@@ -2,9 +2,9 @@
 
 [返回数据库总览](README.md)
 
-当前源码基线：`feat/storage-redesign@a3dab1b`。初始化入口是 [jobs::Queue::open](../../crates/jobs/src/queue.rs)，调用 [store::migrate](../../crates/jobs/src/store.rs)，并继续调用 [change_state.rs](../../crates/jobs/src/change_state.rs) 与 [retention_cursor.rs](../../crates/jobs/src/retention_cursor.rs) 的初始化函数。下列字典逐项核对这些源码 DDL；不是本次真实 Queue 初始化后的 schema 提取。
+结构源码基线：`1845dab`（2026-10-22）。Queue入口仍是[jobs::Queue::open](../../crates/jobs/src/queue.rs)，调用[store::migrate](../../crates/jobs/src/store.rs)、[change_state.rs](../../crates/jobs/src/change_state.rs)与[retention_cursor.rs](../../crates/jobs/src/retention_cursor.rs)初始化；API启动另先调用[Store布局闸门](../../crates/store/src/schema/layout.rs)的initialize_jobs_layout。这里是源码核对，不是本轮真实实例操作。
 
-共 **4 张业务表、29 个字段、9 个显式命名索引、6 个触发器**。当前初始化代码不设置 `application_id` 或 `user_version`；新 SQLite 文件默认两者为 0，这不是本次运行实测，也不表示没有表或未初始化。这里仍使用幂等 `CREATE ... IF NOT EXISTS`，不属于 Store 的 v1 SQL 文件与文件身份校验链路；不能套用 Store 的版本号。
+共 **4张业务表、29字段、9个显式命名索引、6触发器**。API启动链当前标记 `application_id=1129139252 / user_version=1`，检查声明表/索引名称；全形状但0/0的已有Queue库会补身份头，不搬行或建兼容视图。独立Queue构造器自身仍不设该头，不能混淆这两个入口。旧合同“不另设Jobs编号”与实现已有偏差，事实记录于此，不因本文自动授权新的迁移/删队列。Queue仍用幂等CREATE，不宣称逐列完整schema验证。
 
 本库没有声明外键。下表 NOT NULL 指显式声明：`job_defs.id`、`jobs.id` 与 `retention_cursors.def_id` 的 `TEXT PRIMARY KEY` 没有另写 NOT NULL，不能误报成显式非空。主键自动索引不计入命名索引。Job 状态枚举、payload JSON、enabled 的 0/1 都是业务约定，不是 DDL CHECK。
 

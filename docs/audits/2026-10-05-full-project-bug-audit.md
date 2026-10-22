@@ -21,7 +21,7 @@
 建议：关闭或统一路由到现有owner-checked Job/worker seam，加入可控并发测试。
 
 ### A02 P1 — 自动 Library 路由预检重复获取同一 Store 锁（S）
-证据：[持锁调用metadata](<../../crates/api/src/http/routing_preview.rs#L48-L74>) → [metadata再次取锁](<../../crates/api/src/scrape_metadata.rs#L13-L16>)。
+证据：[持锁调用metadata](<../../crates/api/src/http/routing_preview.rs#L48-L74>) → metadata再次取锁（历史源码 `git show aec73cc:crates/api/src/scrape_metadata.rs`，原定位`L13-L16`）。
 管理员打开ready、有tmdb_id、未指定Library的Subscribe弹窗，非重入Mutex自锁，不依赖真实网络；预检卡住并阻塞其他Store请求。
 建议：锁内只快照所需数据，metadata IO移到锁外。
 
@@ -54,11 +54,11 @@ admin配置TheIntroDB key后，member GET `/settings/scrape`返回完整key。Do
 管理员取消S1并勾delete_library_files，S2仍有Subscribe也会删除S2及其他库版本。预览也使用扩大范围，不能证明安全。建议明确coverage、Library、共享引用保护。
 
 ### B02 P1 — 单集 Wash-cut 删除仍被其他集引用的合并文件（S）
-证据：[更新部分slots却整路径删除](<../../crates/subscribe/src/collect.rs#L247-L275>)。
+证据：更新部分slots却整路径删除（历史源码 `git show aec73cc:crates/subscribe/src/collect.rs`，原定位`L247-L275`）。
 E1/E2 facts同指S01E01-E02文件；只升级E1，会删除旧整文件，但E2 fact仍指已删路径、仍算complete。建议按实际文件覆盖slot集合保护残余引用。
 
 ### B03 P1 — ledger/facts提交中断后重试不能修复（S）
-证据：[删旧、写ledger、再写facts](<../../crates/api/src/worker/transfer.rs#L22-L49>)、[已导入映射直接跳过facts](<../../crates/subscribe/src/collect.rs#L58-L65>)。
+证据：[删旧、写ledger、再写facts](<../../crates/api/src/worker/transfer.rs#L22-L49>)、已导入映射直接跳过facts（历史源码 `git show aec73cc:crates/subscribe/src/collect.rs`，原定位`L58-L65`）。
 新ledger写完、facts前断电或subscribe.db失败；重启source→dest映射令收集跳过事实更新，之后还可mark pending imported。首次导入facts空/洗版facts指已删旧文件永久残留。建议持久journal/幂等reconcile而非仅增加事务名义。
 
 ### B04 P1 — Unidentified claim 覆盖已有Library文件（S）
@@ -66,7 +66,7 @@ E1/E2 facts同指S01E01-E02文件；只升级E1，会删除旧整文件，但E2 
 另一个Unidentified认领为相同Media/year/resolution/ext，render相同dest，无冲突保护；旧字节被替换，ledger同path被覆盖。建议在claim建立目标ownership/collision合同，默认禁止覆盖。
 
 ### B05 P1 — Move成功后Scrape失败留下无ledger孤儿（S）
-证据：[先Transfer后Scrape再facts/ledger](<../../crates/subscribe/src/collect.rs#L210-L235>)。
+证据：先Transfer后Scrape再facts/ledger（历史源码 `git show aec73cc:crates/subscribe/src/collect.rs`，原定位`L210-L235`）。
 Move源已删，目标同stem `.nfo`预先是目录或无写权限，scrape返回Err，事实和ledger尚未push；下一轮Downloader找不到源，不能自愈。建议Transfer成功事实先可恢复持久化，Scrape作为可重试独立阶段。
 
 ### B06 P1 — Library删除/原始ledger删除/retransfer未用strict root（S）
@@ -138,11 +138,11 @@ Transmission RPC15不支持labels，真实在途快照被过滤，然后当客�
 旧2160p事实路径`Test Show - S01E01.mkv`解析resolution空，新720p被判更高。Movie默认也丢source/codec/HDR。建议使用Library authoritative probed质量，不用命名信息当事实。
 
 ### D02 P1 — 多槽位ladder等分保护不足，牺牲已有更好集（S）
-证据：[任一slot批准](<../../crates/subscribe/src/choose.rs#L97-L128>)、[保护只比较分数](<../../crates/subscribe/src/slot_replacement.rs#L19-L27>)、[整组替换](<../../crates/subscribe/src/collect.rs#L247-L275>)。
+证据：[任一slot批准](<../../crates/subscribe/src/choose.rs#L97-L128>)、[保护只比较分数](<../../crates/subscribe/src/slot_replacement.rs#L19-L27>)、整组替换（历史源码 `git show aec73cc:crates/subscribe/src/collect.rs`，原定位`L247-L275`）。
 E1=2160p100分、E2缺失；合并1080p100分因E2获批，E1等分未挡，旧2160p也删。建议每个已拥有slot按实际ladder评估，不能仅分数。
 
 ### D03 P1 — 整季包每个无集号文件继承全部slots（S）
-证据：[file身份fallback](<../../crates/subscribe/src/file_identity.rs#L77-L90>)、[整季slots](<../../crates/subscribe/src/choose.rs#L229-L244>)、[facts更新](<../../crates/subscribe/src/collect.rs#L247-L254>)。
+证据：[file身份fallback](<../../crates/subscribe/src/file_identity.rs#L77-L90>)、[整季slots](<../../crates/subscribe/src/choose.rs#L229-L244>)、facts更新（历史源码 `git show aec73cc:crates/subscribe/src/collect.rs`，原定位`L247-L254`）。
 S1E1..2 full-season，torrent Test.Show.S01.1080p，files `01.1080p.mkv/02.1080p.mkv`；每个无episode文件当整包，首文件写两集facts、第二等分不更新，错误complete。纯`01.mkv`不是本报告证明输入。建议每文件不能猜全部coverage，无可靠身份进入Unidentified。
 
 ### D04 P2 — pending未按slot占位，多轮下载同集备选（S）
@@ -166,7 +166,7 @@ S02 torrent、E01.1080p.mkv解析season1覆盖torrent已知season2，合法包�
 “订阅并开始洗版”/普通Subscribe“洗一轮版”选新组，create不发wash_cut，upgrade仅报告当前策略；已入库单元被判at_cutoff，HTTP200未开始实际洗版。建议显式政策变更与执行命令区分。
 
 ### D09 P1 — UI保留旧版本选项未落地，仍可删旧文件（S）
-证据：[spec设置](<../../web/components/rule-sets-panel.tsx#L674>)、[serializer](<../../web/lib/api/subscriptions.ts#L1021-L1137>)、[删除条件](<../../crates/subscribe/src/collect.rs#L255-L264>)。
+证据：[spec设置](<../../web/components/rule-sets-panel.tsx#L674>)、[serializer](<../../web/lib/api/subscriptions.ts#L1021-L1137>)、删除条件（历史源码 `git show aec73cc:crates/subscribe/src/collect.rs`，原定位`L255-L264`）。
 upgrade_keep_old未序列化，也未绑定Subscribe.keep_old_versions；勾选承诺保留仍默认false。建议移到真实Subscribe policy或删除不可支持控件。
 
 ### D10 P2 — 本User/coverage预检被任意已有Subscribe挡住（S）

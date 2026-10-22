@@ -2,7 +2,7 @@
 
 - Status: Accepted design; implementation acceptance is tracked separately below.
 - Scope: approved Library deletion and NFO reimport plan, Tasks 1–7.
-- Current-layout note (2026-10-20): the design/history below uses “ledger” and `file_meta` terminology from its implementation period. Current persistent file facts are `library_files`, derived probe details are `file_details`, and Media/Playback now share `library.db`; `app.db`, `cache.db`, `subscribe.db` are separate Store files, with `jobs.db` outside Store. There is still no cross-file atomic transaction. Source: `crates/store/src/open.rs`, `schema/v1/library.sql`, `ledger_cleanup.rs`. Current cutover acceptance is [tracked in the storage plan](<../superpowers/plans/2026-10-20-storage-clean-cutover.md>), not inferred from this ADR.
+- Current-layout note (2026-10-20): the design/history below uses “ledger” and `file_meta` terminology from its implementation period. Current persistent file facts are `library_files`, derived probe details are `file_details`, and Media/Playback now share `library.db`; `app.db`, `cache.db`, `subscribe.db` are separate Store files, with `jobs.db` outside Store. There is still no cross-file atomic transaction. Source: `crates/store/src/open.rs`, `schema/v1/library.sql`, `ledger_cleanup.rs`. Current cutover acceptance is [tracked in the storage plan](<../superpowers/plans/2026-10-22-storage-repair-remediation.md>), not inferred from this ADR.
 
 ## Context
 
