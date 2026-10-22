@@ -8,7 +8,7 @@ license.workspace = true
 domain.workspace = true
 downloader.workspace = true
 library.workspace = true
-rusqlite.workspace = true
+rusqlite = { workspace = true, features = ["functions"] }
 media.workspace = true
 release.workspace = true
 subscribe.workspace = true

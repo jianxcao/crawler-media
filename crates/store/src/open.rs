@@ -251,6 +251,34 @@ fn apply_connection_policy(conn: &Connection) -> Result<(), StoreError> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "busy_timeout", "5000")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    register_casefold(conn)?;
+    Ok(())
+}
+
+/// `casefold(text)`: Unicode lower-casing with Rust's rules. SQLite's `lower()` only folds
+/// ASCII, so protocol search/sort/filter must use this on both the column and the needle
+/// (which Rust folds with `to_lowercase`) to stay symmetric (R23).
+pub(crate) fn register_casefold(conn: &Connection) -> Result<(), StoreError> {
+    use rusqlite::functions::FunctionFlags;
+    conn.create_scalar_function(
+        "casefold",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let value = ctx.get_raw(0);
+            Ok(match value {
+                rusqlite::types::ValueRef::Text(bytes) => {
+                    Some(String::from_utf8_lossy(bytes).to_lowercase())
+                }
+                rusqlite::types::ValueRef::Null => None,
+                other => Some(match other {
+                    rusqlite::types::ValueRef::Integer(i) => i.to_string(),
+                    rusqlite::types::ValueRef::Real(r) => r.to_string(),
+                    _ => String::new(),
+                }),
+            })
+        },
+    )?;
     Ok(())
 }
 

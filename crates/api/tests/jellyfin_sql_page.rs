@@ -550,3 +550,41 @@ fn played_filter_follows_the_newest_assertion() {
         .unwrap();
     assert!(rust.is_none_or(|a| !a.played), "Rust and SQL agree");
 }
+
+/// R23: search folds Unicode case the same way on both sides (ÉCOLE ↔ école).
+#[test]
+fn unicode_search_folds_case_like_the_display() {
+    let fx = Fx::new();
+    let ecole = fx.add_movie("ÉCOLE");
+    fx.add_movie("Other");
+    let mut query = base_query(ProtocolParent::Library(fx.alpha));
+    query.search_term = Some("école".into());
+    let unicode_page = fx.store.protocol_item_page(&query).unwrap();
+    assert_eq!(unicode_page.total, 1);
+    assert_eq!(unicode_page.items[0].item, TypedItemId::Work(ecole));
+}
+
+/// R23: titles equal under case folding are ordered by the *next* requested key
+/// (DateCreated desc), not by the raw title bytes.
+#[test]
+fn case_equal_names_fall_through_to_the_next_sort_key() {
+    let fx = Fx::new();
+    let upper_a_id = fx.add_movie("A");
+    let lower_a_id = fx.add_movie("a");
+    let db = rusqlite::Connection::open(fx._dir.path().join("data").join("library.db")).unwrap();
+    for (media, added) in [(upper_a_id, 100_i64), (lower_a_id, 200)] {
+        db.execute(
+            "UPDATE library_items SET added_at_sort = ?2 WHERE media_id = ?1",
+            rusqlite::params![media.to_string(), added],
+        )
+        .unwrap();
+    }
+    let mut query = base_query(ProtocolParent::Library(fx.alpha));
+    query.sort = vec![
+        ProtocolSort { key: ProtocolSortKey::Name, descending: false },
+        ProtocolSort { key: ProtocolSortKey::DateCreated, descending: true },
+    ];
+    let page = fx.store.protocol_item_page(&query).unwrap();
+    let case_tie_ids: Vec<_> = page.items.iter().map(|item| item.item.clone()).collect();
+    assert_eq!(case_tie_ids, vec![TypedItemId::Work(lower_a_id), TypedItemId::Work(upper_a_id)]);
+}

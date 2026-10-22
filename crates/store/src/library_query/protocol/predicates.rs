@@ -147,7 +147,7 @@ fn studio_clause(request: &ProtocolItemQuery, bindings: &mut Bindings, clauses: 
     let mut parts = vec![format!(
         "EXISTS (SELECT 1 FROM library_item_terms t \
            WHERE t.library_id = s.library_id AND t.media_id = s.media_id \
-             AND t.term_kind = 'studio' AND lower(t.term_value) IN ({list}))"
+             AND t.term_kind = 'studio' AND casefold(t.term_value) IN ({list}))"
     )];
     // NFO 输入存裸 `MetadataFields`（`{"state":"value","value":[…]}`），采纳元数据存
     // `{"fields":…}`；`record_scraped_display` 写的是裸数组。三种形状都要认，否则
@@ -159,7 +159,7 @@ fn studio_clause(request: &ProtocolItemQuery, bindings: &mut Bindings, clauses: 
     ] {
         parts.push(format!(
             "EXISTS (SELECT 1 FROM json_each({json}, '{path}') g \
-             WHERE lower(g.value) IN ({list}))"
+             WHERE casefold(g.value) IN ({list}))"
         ));
     }
     clauses.push(format!("({})", parts.join(" OR ")));
@@ -195,7 +195,7 @@ fn search_clause(request: &ProtocolItemQuery, bindings: &mut Bindings, clauses: 
     ];
     let parts: Vec<String> = fields
         .iter()
-        .map(|field| format!("instr(lower({field}), {needle}) > 0"))
+        .map(|field| format!("instr(casefold({field}), {needle}) > 0"))
         .collect();
     clauses.push(format!("({})", parts.join(" OR ")));
 }

@@ -72,7 +72,7 @@ pub(super) fn genre_clause(
     let sources = [
         "EXISTS (SELECT 1 FROM library_item_terms t \
            WHERE t.library_id = s.library_id AND t.media_id = s.media_id \
-             AND t.term_kind = 'genre' AND lower(t.term_value) IN ({list}))",
+             AND t.term_kind = 'genre' AND casefold(t.term_value) IN ({list}))",
         "EXISTS (SELECT 1 FROM json_each(COALESCE(s.adopted_genres, '[]')) g \
            WHERE {genre_expr} IN ({list}))",
         "EXISTS (SELECT 1 FROM json_each(COALESCE(s.nfo_json, '{}'), '$.genres.value') g \
@@ -91,7 +91,7 @@ pub(super) fn genre_clause(
 
 /// 流派元素既可能是 `{"name": ...}` 对象，也可能是裸字符串。
 fn genre_expr() -> &'static str {
-    "lower(CASE g.type WHEN 'object' THEN json_extract(g.value, '$.name') \
+    "casefold(CASE g.type WHEN 'object' THEN json_extract(g.value, '$.name') \
       WHEN 'text' THEN g.value END)"
 }
 
@@ -225,9 +225,9 @@ fn role_clause(role: &str, filter: &RoleFilter, bindings: &mut Bindings) -> Opti
         let list = lowercase_list(bindings, &filter.names);
         for (json, path, keyed) in role_sources(role) {
             let expr = if keyed {
-                "lower(json_extract(j.value, '$.name'))"
+                "casefold(json_extract(j.value, '$.name'))"
             } else {
-                "lower(j.value)"
+                "casefold(j.value)"
             };
             parts.push(format!(
                 "EXISTS (SELECT 1 FROM json_each({json}, '{path}') j WHERE {expr} IN ({list}))"
