@@ -527,3 +527,50 @@ fn publication_prefers_reserved_units_over_carried_ones() {
         vec![domain::UnitKey::new(1, 1)]
     );
 }
+
+/// A restarted round rebuilds its candidates with fresh UUIDs. Recovering the
+/// durable pending A must record A's persisted identity as this round's own
+/// write, so publishing A does not make the next file B look externally changed.
+#[test]
+fn restarted_pending_a_with_fresh_candidate_does_not_block_b() {
+    let (tmp, state, media, subscribe) = fixture();
+    let plan = resolve_transfer_plan(&state, &media, &subscribe).unwrap();
+    let source = tmp.path().join("downloads/The Matrix.mkv");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    std::fs::write(&source, b"matrix").unwrap();
+    let durable_a_id = {
+        let lease = state.acquire_library_work(&plan.library_id).unwrap();
+        let first = recorder(&state, &subscribe, &lease, &plan);
+        let a = candidate(&media, &plan, &source, library::TransferMode::Copy);
+        subscribe::TransferRecorder::prepare(&first, &a, &source, library::TransferMode::Copy)
+            .unwrap()
+            .file
+            .file_id
+    };
+
+    // Restart: the round re-plans against the durable pending A.
+    let plan = resolve_transfer_plan(&state, &media, &subscribe).unwrap();
+    let lease = state.acquire_library_work(&plan.library_id).unwrap();
+    let restarted = recorder(&state, &subscribe, &lease, &plan);
+    let fresh_a = candidate(&media, &plan, &source, library::TransferMode::Copy);
+    let fresh_candidate_id = fresh_a.file.file_id;
+    let recovered = subscribe::TransferRecorder::prepare(
+        &restarted, &fresh_a, &source, library::TransferMode::Copy,
+    )
+    .unwrap();
+    assert_eq!(recovered.file.file_id, durable_a_id);
+    assert_ne!(recovered.file.file_id, fresh_candidate_id);
+
+    std::fs::write(&recovered.file.path, b"matrix").unwrap();
+    let mut published = recovered.clone();
+    published.file.publication = domain::FilePublication::Published;
+    subscribe::TransferRecorder::published(&restarted, &published).unwrap();
+
+    let source_b = tmp.path().join("downloads/The Matrix B.mkv");
+    std::fs::write(&source_b, b"matrix-b").unwrap();
+    let mut b = candidate(&media, &plan, &source_b, library::TransferMode::Copy);
+    b.file.path = plan.root.join("The Matrix B.mkv");
+    let prepare_b =
+        subscribe::TransferRecorder::prepare(&restarted, &b, &source_b, library::TransferMode::Copy);
+    assert!(prepare_b.is_ok(), "B must not see A's own publication as external: {prepare_b:?}");
+}

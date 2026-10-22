@@ -148,8 +148,11 @@ impl subscribe::TransferRecorder for PlannedPublicationRecorder<'_> {
         let result =
             self.recorder
                 .prepare_with_plan(candidate, source, mode, Some(self.plan), &reserved);
-        if result.is_ok() {
-            reserved.insert(candidate.file.file_id.to_string());
+        // The returned coverage is the authoritative reservation: a restarted
+        // round recovering a durable pending row gets that row's identity back,
+        // not the fresh candidate UUID, so that is the id this round wrote.
+        if let Ok(reservation) = &result {
+            reserved.insert(reservation.file.file_id.to_string());
         }
         result
     }
