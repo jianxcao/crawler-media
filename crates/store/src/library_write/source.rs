@@ -26,6 +26,33 @@ impl Store {
         observation: &SourceObservation,
         now_ms: i64,
     ) -> Result<FileVersion, StoreError> {
+        self.advance_file_source(scope, file_id, expected, observation, now_ms, true)
+    }
+
+    /// Bind the first real observation to a freshly placed file whose reservation
+    /// version was only a placeholder. Facts already probed from these very bytes
+    /// (e.g. by Transfer) are kept; the revision still advances and Probe is
+    /// re-armed against the real source version.
+    pub fn bind_placed_file_source(
+        &self,
+        scope: &WriteScope,
+        file_id: LedgerId,
+        expected: &FileVersion,
+        observation: &SourceObservation,
+        now_ms: i64,
+    ) -> Result<FileVersion, StoreError> {
+        self.advance_file_source(scope, file_id, expected, observation, now_ms, false)
+    }
+
+    fn advance_file_source(
+        &self,
+        scope: &WriteScope,
+        file_id: LedgerId,
+        expected: &FileVersion,
+        observation: &SourceObservation,
+        now_ms: i64,
+        reset_facts: bool,
+    ) -> Result<FileVersion, StoreError> {
         let tx = self.library.unchecked_transaction()?;
         ensure_library_writable(&tx, &scope.library_id.to_string())?;
         ensure_config_revision(&tx, scope)?;
@@ -63,6 +90,27 @@ impl Store {
         let new_revision = cur_rev + 1;
         let new_source_version = observation.source_version.clone();
 
+        if !reset_facts {
+            tx.execute(
+                "UPDATE library_files SET file_revision = ?1, source_version = ?2,
+                    size_bytes = COALESCE(?3, size_bytes), mtime_ns = COALESCE(?4, mtime_ns),
+                    created_ns = COALESCE(?5, created_ns), source_digest = ?6, stat_known = 1
+                 WHERE file_id = ?7",
+                params![
+                    new_revision,
+                    new_source_version,
+                    observation.size_bytes.map(|s| s as i64),
+                    observation.modified_ns,
+                    observation.created_ns,
+                    observation.content_digest,
+                    file_id_str,
+                ],
+            )?;
+            super::publish::enqueue_probe(&tx, file_id, now_ms)?;
+            tx.commit()?;
+            return Ok(FileVersion { revision: new_revision, source_version: new_source_version });
+        }
+
         // Invalidate old probe, cold details, tracks, and hot probed quality
         tx.execute(
             "UPDATE library_files SET
@@ -90,11 +138,9 @@ impl Store {
             ],
         )?;
 
-        // Remove old cold details
-        tx.execute(
-            "DELETE FROM file_details WHERE file_id = ?1",
-            params![file_id_str],
-        )?;
+        // Remove every derived fact of the old bytes: cold details, fingerprints,
+        // probe stages and samples.
+        crate::library::delete_file_meta_for_ledger(&tx, &file_id_str)?;
 
         // Re-enqueue probe obligation
         super::publish::enqueue_probe(&tx, file_id, now_ms)?;

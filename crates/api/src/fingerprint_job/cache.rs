@@ -134,6 +134,16 @@ pub fn current_source_version(path: &Path) -> String {
     media_source_version(path)
 }
 
+/// Observe one source outside the Store lock for a FileVersion CAS: stat facts
+/// come from `library::observe_source`, the version string is the single
+/// production encoding [`current_source_version`] (Probe, fingerprints and
+/// subtitles compare against it; `.strm` includes its content digest).
+pub fn observe_source(path: &Path) -> Option<library::SourceObservation> {
+    let mut observation = library::observe_source(path).ok()?;
+    observation.source_version = current_source_version(path);
+    Some(observation)
+}
+
 async fn extract(
     engine: Arc<dyn FingerprintEngine>,
     path: PathBuf,

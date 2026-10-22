@@ -51,9 +51,15 @@ impl PublicationRecorder<'_> {
             // The reservation owns the pending row identity: an interrupted round
             // that left the same destination behind is recovered here rather than
             // re-created, and a conflicting owner/source/mode is refused.
+            let config_revision = match plan {
+                Some(plan) => plan.config_revision,
+                None => store
+                    .library_config_revision(self.lease.library_id())
+                    .map_err(|e| e.to_string())?,
+            };
             let scope = store::library_write::WriteScope {
                 library_id: candidate.file.library_id,
-                config_revision: plan.map_or(0, |plan| plan.config_revision),
+                config_revision,
             };
             store
                 .reserve_transfer(&scope, candidate, source, mode, crate::job_loop::unix_now() * 1000)
@@ -74,23 +80,27 @@ impl PublicationRecorder<'_> {
         candidate: &domain::FileCoverage,
         plan: Option<&TransferPlan>,
     ) -> Result<(), subscribe::SubscribeError> {
-        let scope = store::library_write::WriteScope {
-            library_id: candidate.file.library_id,
-            config_revision: plan.map_or(0, |plan| plan.config_revision),
+        let fail = |error: String| {
+            tracing::error!(path = %candidate.file.path.display(), %error, "Transfer publication completion failed");
+            subscribe::SubscribeError::Downloader(downloader::DownloaderError::Message(error))
         };
-        self.state
-            .store
-            .lock()
-            .finish_transfer(
-                &scope,
-                candidate,
-                &candidate.file.version,
-                crate::job_loop::unix_now() * 1000,
-            )
-            .map_err(|error| {
-                tracing::error!(path = %candidate.file.path.display(), %error, "Transfer publication completion failed");
-                subscribe::SubscribeError::Downloader(downloader::DownloaderError::Message(error.to_string()))
-            })
+        {
+            let store = self.state.store.lock();
+            let config_revision = match plan {
+                Some(plan) => plan.config_revision,
+                None => store
+                    .library_config_revision(self.lease.library_id())
+                    .map_err(|e| fail(e.to_string()))?,
+            };
+            let scope = store::library_write::WriteScope {
+                library_id: candidate.file.library_id,
+                config_revision,
+            };
+            store
+                .finish_transfer(&scope, candidate, &candidate.file.version, crate::job_loop::unix_now() * 1000)
+                .map_err(|error| fail(error.to_string()))
+        }?;
+        Ok(())
     }
 }
 

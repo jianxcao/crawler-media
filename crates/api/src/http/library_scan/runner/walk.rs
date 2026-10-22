@@ -207,7 +207,7 @@ impl ScanContext<'_> {
             .cloned()
             .collect();
         let (affected, failed_invalidations) =
-            match invalidate_changed_facts(self.state, &changed_in_scope) {
+            match invalidate_changed_facts(self.state, &changed_in_scope, false) {
                 Ok(res) => res,
                 Err(e) => {
                     let committed = ChunkTotals {
@@ -296,7 +296,7 @@ impl ScanContext<'_> {
         let mut uncheckpointed = failed_invalidations;
         if !changed_late.is_empty() {
             // 窗口内变化：派生事实可能来自已被替换的内容，必须失效并重挂处理义务。
-            match invalidate_changed_facts(self.state, &changed_late) {
+            match invalidate_changed_facts(self.state, &changed_late, true) {
                 Ok((_, failed)) => uncheckpointed.extend(failed),
                 Err(error) => {
                     tracing::error!(

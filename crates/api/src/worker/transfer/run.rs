@@ -86,6 +86,7 @@ pub(crate) fn publish_transfer_file(
     coverage: &FileCoverage,
     source_path: Option<&std::path::Path>,
     mode: &str,
+    observed_source: Option<&library::SourceObservation>,
 ) -> Result<domain::LibraryFile, StoreError> {
     let file_id = coverage.file.file_id;
     let observed = &coverage.file.version;
@@ -131,8 +132,35 @@ pub(crate) fn publish_transfer_file(
         }],
         store::unix_now() * 1000,
     )?;
+    // The reservation version is a placeholder for bytes that did not exist yet;
+    // the source observed (outside the Store lock) after placement advances it to
+    // the real production encoding by CAS, so Probe/fingerprints bind real bytes.
+    if let Some(observation) = observed_source
+        && observation.source_version != observed.source_version
+    {
+        file.version = store.bind_placed_file_source(
+            &WriteScope {
+                library_id: library_id.parse::<domain::LibraryId>()?,
+                config_revision,
+            },
+            file_id,
+            observed,
+            observation,
+            store::unix_now() * 1000,
+        )?;
+    }
     tracing::info!(file_id = %file_id, path = %coverage.file.path.display(), "Published Transfer file");
     Ok(file)
+}
+
+/// Observe each placed Transfer file's source outside the Store lock.
+pub(crate) fn observe_transfer_sources(
+    files: &[FileCoverage],
+) -> Vec<Option<library::SourceObservation>> {
+    files
+        .iter()
+        .map(|coverage| crate::fingerprint_job::observe_source(&coverage.file.path))
+        .collect()
 }
 
 fn commit_transfer_outcome(
@@ -149,6 +177,7 @@ fn commit_transfer_outcome(
 
     // Observe transfer modes outside Store lock
     let observed_modes = observe_transfer_modes(&outcome.files, &default_transfer_mode);
+    let observed_sources = observe_transfer_sources(&outcome.files);
 
     // Commit replacement file/source mapping and facts in a short Store section
     let mut published = Vec::with_capacity(outcome.files.len());
@@ -158,7 +187,9 @@ fn commit_transfer_outcome(
         // each reservation; the scoped fingerprint now reflects this round's
         // own published rows, so only the untouched plan parts are re-checked.
         validate_committed_transfer_plan(&store, subscribe, lease, plan)?;
-        for (coverage, mode) in outcome.files.iter().zip(observed_modes.iter()) {
+        for ((coverage, mode), observed_source) in
+            outcome.files.iter().zip(observed_modes.iter()).zip(observed_sources.iter())
+        {
             let path = coverage.file.path.to_string_lossy().to_string();
             let source_path = recorded_file_source(outcome, coverage.file.file_id)
                 .map(|source| source.display().to_string());
@@ -191,6 +222,7 @@ fn commit_transfer_outcome(
                     coverage,
                     source_path.as_deref().map(std::path::Path::new),
                     mode,
+                    observed_source.as_ref(),
                 )
                 .map_err(|e| e.to_string())?,
             );

@@ -361,6 +361,7 @@ fn publication_writes_confirmed_facts_mode_source_and_artwork() {
         &outcome.files[0],
         Some(&source),
         "hardlink",
+        None,
     )
     .unwrap();
 
@@ -428,6 +429,7 @@ fn publication_refuses_a_reservation_whose_version_moved() {
         &outcome.files[0],
         Some(&source),
         "hardlink",
+        None,
     )
     .unwrap_err();
     assert_reservation_changed(error);
@@ -452,6 +454,7 @@ fn publication_refuses_a_destination_without_a_reservation() {
         &outcome.files[0],
         Some(&source),
         "copy",
+        None,
     )
     .unwrap_err();
     assert_reservation_changed(error);
@@ -494,6 +497,7 @@ fn publication_keeps_carried_units_when_the_row_has_none() {
         &outcome.files[0],
         Some(&source),
         "copy",
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -520,6 +524,7 @@ fn publication_prefers_reserved_units_over_carried_ones() {
         &outcome.files[0],
         Some(&source),
         "copy",
+        None,
     )
     .unwrap();
     assert_eq!(

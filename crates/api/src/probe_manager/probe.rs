@@ -760,7 +760,7 @@ fn publish_probe_tracks(
     let Some(expected) = store.get_file_version(unit.row.file.file_id)? else {
         return Ok(false);
     };
-    if expected.source_version != source_version && expected.source_version != "v1" {
+    if expected.source_version != source_version {
         return Ok(false);
     }
     let (resolution, codec, hdr) = match tracks.video.as_ref() {

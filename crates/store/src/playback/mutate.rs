@@ -111,10 +111,13 @@ impl Store {
             self.best_source_for_unit(&allowed, media_id, unit, None)?
         }
         .ok_or_else(|| StoreError::Missing(format!("no playable source for unit {unit:?}")))?;
+        // The target is pinned to the source Library's real configuration revision.
+        let config_revision = self.library_config_revision(&source.file.library_id.to_string())?;
         Ok(resolve_resume(
             media_id,
             unit,
             source,
+            config_revision,
             stored,
             explicit_start_ms,
         ))
@@ -183,6 +186,7 @@ fn resolve_resume(
     media_id: MediaId,
     unit: UnitKey,
     source: PlaybackSource,
+    config_revision: i64,
     stored: Option<StoredResume>,
     explicit_start_ms: Option<i64>,
 ) -> ResolvedResume {
@@ -208,7 +212,7 @@ fn resolve_resume(
         media_id,
         unit,
         file: source.file,
-        config_revision: 0,
+        config_revision,
         timeline: TimelineMode::FullFile,
     };
     let changed_status = match binding {

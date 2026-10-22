@@ -495,6 +495,7 @@ fn persist(
     };
     let modes =
         crate::worker::transfer::observe_transfer_modes(&outcome.files, &default_transfer_mode);
+    let sources = crate::worker::transfer::observe_transfer_sources(&outcome.files);
     // Review N-1: capped wait for a source probe (outside the Store lock).
     let mut outcome = outcome;
     let exhausted =
@@ -519,7 +520,7 @@ fn persist(
         lease, plan,
     ).map_err(ApiError::internal)?;
     let mut published = Vec::with_capacity(outcome.files.len());
-    for (coverage, mode) in outcome.files.iter().zip(modes.iter()) {
+    for ((coverage, mode), source) in outcome.files.iter().zip(modes.iter()).zip(sources.iter()) {
         let path = coverage.file.path.to_string_lossy().to_string();
         let source_path = crate::worker::transfer::recorded_file_source(&outcome, coverage.file.file_id)
             .map(|source| source.display().to_string());
@@ -543,6 +544,7 @@ fn persist(
             coverage,
             source_path.as_deref().map(std::path::Path::new),
             mode,
+            source.as_ref(),
         )?);
     }
     let now = crate::job_loop::unix_now();

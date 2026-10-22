@@ -422,3 +422,46 @@ async fn unknown_root_does_not_publish_missing() {
 }
 
 
+
+/// R01: a real POST scan over a replaced source (STRM A → B with identical stat)
+/// advances the FileVersion through the production scan writer; an old Probe
+/// pinned to the previous version is then refused.
+#[tokio::test]
+async fn actual_rescan_replaces_physical_source() {
+    let fix = PresenceFixture::new();
+    let dir = fix.root.join("Film (2020)");
+    fs::create_dir_all(&dir).unwrap();
+    let strm = dir.join("Film.2020.strm");
+    fs::write(&strm, "http://example.com/aaaa").unwrap();
+    let mtime = fs::metadata(&strm).unwrap().modified().unwrap();
+    fix.scan_and_wait_completed(&fix.library_id).await;
+    let store_arc = fix.state.store();
+    let (file_id, before) = {
+        let store = store_arc.lock();
+        let file = store
+            .file_coverage_by_path(&strm.display().to_string())
+            .unwrap()
+            .expect("scanned row")
+            .file;
+        (file.file_id, store.get_file_version(file.file_id).unwrap().unwrap())
+    };
+
+    fs::write(&strm, "http://example.com/bbbb").unwrap();
+    fs::File::options().write(true).open(&strm).unwrap().set_modified(mtime).unwrap();
+    fix.scan_and_wait_completed(&fix.library_id).await;
+
+    let store = store_arc.lock();
+    let after = store.get_file_version(file_id).unwrap().unwrap();
+    assert_eq!(after.revision, before.revision + 1);
+    assert_ne!(after.source_version, before.source_version);
+    let old_probe = store::library_write::probe::ProbePublication {
+        expected: &before,
+        tracks_version: store::library_write::probe::CURRENT_TRACKS_VERSION,
+        resolution: Some("1080p"),
+        codec: None,
+        hdr: None,
+        duration_ms: Some(1),
+        details: None,
+    };
+    assert!(!store.publish_probe_result(file_id, &old_probe, 9_000).unwrap());
+}

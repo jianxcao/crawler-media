@@ -116,7 +116,7 @@ pub(crate) fn publish_claimed_file(
             let file_id = LedgerId::new();
             let version = FileVersion {
                 revision: 1,
-                source_version: format!("{}-{}", store::unix_now(), file_id),
+                source_version: crate::fingerprint_job::current_source_version(dest),
             };
             (file_id, version)
         }
