@@ -33,26 +33,97 @@ pub(crate) fn apply_root_batch(
     )?;
     ensure_root_rows(tx, library, &kind, requested)?;
 
-    let files = next_file_batch(tx, library, cursor.last_file_id.as_deref(), batch)?;
-    if files.is_empty() {
-        // No file left to move: drop the roots nothing points at, then the phase is done.
-        prune_unreferenced_roots(tx, library, requested)?;
-        return Ok(BatchOutcome::Done);
+    if !cursor.files_done {
+        let files = next_file_batch(tx, library, cursor.last_file_id.as_deref(), batch)?;
+        // Every file of the batch moves; stopping at the page's last id would leave the
+        // rest of the page on the previous root generation.
+        for file_id in &files {
+            reparent_file(tx, library, file_id, requested)?;
+        }
+        if let Some(last) = files.last() {
+            cursor.last_file_id = Some(last.clone());
+        }
+        let more = files.len() >= batch && has_more_files(tx, library, cursor.last_file_id.as_deref())?;
+        if more {
+            return Ok(BatchOutcome::More);
+        }
+        cursor.files_done = true;
     }
-    // Every file of the batch moves; stopping at the page's last id would leave the
-    // rest of the page on the previous root generation.
-    for file_id in &files {
-        reparent_file(tx, library, file_id, requested)?;
+    // Unidentified rows and metadata inputs are ownership facts of their own: one with no
+    // file under it (an unmatched folder, a sidecar whose video is gone) must still move.
+    if !cursor.unidentified_done {
+        let rows = next_path_batch(tx, "unidentified", "path", library, cursor.last_unidentified_path.as_deref(), batch)?;
+        reparent_paths(tx, "unidentified", "path", library, &rows, requested)?;
+        if rows.len() >= batch {
+            cursor.last_unidentified_path = rows.last().cloned();
+            return Ok(BatchOutcome::More);
+        }
+        cursor.unidentified_done = true;
     }
-    let last_file_id = files.last().cloned().expect("non-empty batch");
-    cursor.last_file_id = Some(last_file_id.clone());
-    let more = files.len() >= batch && has_more_files(tx, library, Some(&last_file_id))?;
-    Ok(if more {
-        BatchOutcome::More
-    } else {
-        prune_unreferenced_roots(tx, library, requested)?;
-        BatchOutcome::Done
-    })
+    let rows = next_path_batch(tx, "library_metadata_inputs", "path_key", library, cursor.last_input_path.as_deref(), batch)?;
+    reparent_paths(tx, "library_metadata_inputs", "path_key", library, &rows, requested)?;
+    if rows.len() >= batch {
+        cursor.last_input_path = rows.last().cloned();
+        return Ok(BatchOutcome::More);
+    }
+    prune_unreferenced_roots(tx, library, requested)?;
+    Ok(BatchOutcome::Done)
+}
+
+/// One keyset page of distinct path keys of `table` owned by the Library.
+fn next_path_batch(
+    tx: &Connection,
+    table: &str,
+    column: &str,
+    library: &str,
+    after: Option<&str>,
+    batch: usize,
+) -> Result<Vec<String>, StoreError> {
+    let sql = format!(
+        "SELECT DISTINCT {column} FROM {table}
+         WHERE library_id = ?1 AND (?2 IS NULL OR {column} > ?2)
+         ORDER BY {column} ASC LIMIT ?3"
+    );
+    let mut stmt = tx.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params![library, after, batch as i64], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Move each path row of `table` to its longest matching requested root.
+fn reparent_paths(
+    tx: &Connection,
+    table: &str,
+    column: &str,
+    library: &str,
+    paths: &[String],
+    requested: &[PathBuf],
+) -> Result<(), StoreError> {
+    let sql = format!("UPDATE {table} SET root_id = ?1 WHERE library_id = ?2 AND {column} = ?3");
+    for path in paths {
+        let Some(root) = longest_root(Path::new(path), requested) else {
+            continue;
+        };
+        let root_id = root_id_for(tx, library, root)?;
+        tx.execute(&sql, params![root_id, library, path])?;
+    }
+    Ok(())
+}
+
+pub(crate) fn longest_root<'a>(path: &Path, requested: &'a [PathBuf]) -> Option<&'a PathBuf> {
+    requested
+        .iter()
+        .filter(|root| path.starts_with(root))
+        .max_by_key(|root| root.components().count())
+}
+
+fn root_id_for(tx: &Connection, library: &str, root: &Path) -> Result<String, StoreError> {
+    Ok(tx.query_row(
+        "SELECT root_id FROM library_roots WHERE library_id = ?1 AND display_path = ?2",
+        params![library, root.to_string_lossy().to_string()],
+        |r| r.get(0),
+    )?)
 }
 
 /// Create the requested roots that do not exist yet, keeping existing ids stable.
@@ -157,24 +228,13 @@ fn reparent_file(
         "UPDATE library_files SET root_id = ?2 WHERE file_id = ?1",
         params![file_id, root_id],
     )?;
-    // Scoped metadata inputs and unidentified rows carry the same ownership fact.
+    // Scoped metadata inputs carry the same ownership fact; unidentified rows move in
+    // their own pass.
     tx.execute(
         "UPDATE library_metadata_inputs SET root_id = ?2
          WHERE library_id = ?3 AND path_key IN
              (SELECT path_key FROM library_files WHERE file_id = ?1)",
         params![file_id, root_id, library],
-    )?;
-    let path_prefix = format!("{display}/%");
-    tx.execute(
-        "UPDATE unidentified SET root_id = ?2
-         WHERE library_id = ?3 AND (path = ?4 OR path LIKE ?5)",
-        params![
-            file_id,
-            root_id,
-            library,
-            file_path.to_string_lossy().to_string(),
-            path_prefix
-        ],
     )?;
     Ok(())
 }

@@ -833,3 +833,58 @@ fn roots_and_locale_commit_together() {
         .unwrap();
     assert_eq!(finished_locale, "en-US");
 }
+
+/// R19: an unidentified row with no file under it still moves to its new root.
+#[test]
+fn unidentified_rows_without_files_move_to_the_new_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let library = store
+        .create_library(MediaKind::Tv, "TV", &["/tv"], "everyone", true, &[])
+        .unwrap();
+    let lib_id: domain::LibraryId = library.id.parse().unwrap();
+    let old_root = root_id_of(&store, &library.id, Path::new("/tv"));
+    let db = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
+    for path in ["/tv/anime/Unknown A", "/tv/anime/Unknown B", "/tv/Other"] {
+        db.execute(
+            "INSERT INTO unidentified (library_id, root_id, path, confidence)
+             VALUES (?1, ?2, ?3, 'low')",
+            rusqlite::params![library.id, old_root, path],
+        )
+        .unwrap();
+    }
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let requested = vec![PathBuf::from("/tv"), PathBuf::from("/tv/anime")];
+    store
+        .begin_library_reconfiguration(
+            &LibraryReconfiguration {
+                operation_id: operation_id.clone(),
+                library_id: lib_id,
+                expected_revision: store.library_config_revision(&library.id).unwrap(),
+                root_paths: Some(requested),
+                display_locale: None,
+            },
+            1_000,
+        )
+        .unwrap();
+    let mut state = String::new();
+    for step in 0..20 {
+        state = store.advance_library_operation(&operation_id, 1_100 + step, 1).unwrap().state;
+        if state == "succeeded" {
+            break;
+        }
+    }
+    assert_eq!(state, "succeeded");
+    let anime = root_id_of(&store, &library.id, Path::new("/tv/anime"));
+    let owner = |path: &str| -> String {
+        db.query_row(
+            "SELECT root_id FROM unidentified WHERE path = ?1",
+            rusqlite::params![path],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(owner("/tv/anime/Unknown A"), anime);
+    assert_eq!(owner("/tv/anime/Unknown B"), anime);
+    assert_eq!(owner("/tv/Other"), old_root);
+}

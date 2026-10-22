@@ -50,6 +50,16 @@ pub(crate) struct ReconfigurationPlan {
 pub(crate) struct OperationCursor {
     #[serde(default)]
     pub last_file_id: Option<String>,
+    /// Set once every file moved: unidentified rows and metadata inputs that no file
+    /// path covers are re-parented in their own keyset pass.
+    #[serde(default)]
+    pub files_done: bool,
+    #[serde(default)]
+    pub last_unidentified_path: Option<String>,
+    #[serde(default)]
+    pub unidentified_done: bool,
+    #[serde(default)]
+    pub last_input_path: Option<String>,
 }
 
 /// Read-only view of one persisted operation: its Library, kind, resumable cursor and
