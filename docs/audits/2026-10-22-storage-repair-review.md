@@ -372,3 +372,10 @@ Media／Library／Playback 放在同一 `library.db`、cache 按生命周期独�
 - **N04 已修（64db7ac）**：复核属实（A库无该用户季集仍报 missing，repair 后仍不 clean）。检测改为与 repair 共用同一“期望集合”：在回滚的 savepoint 中执行作用域归约，期望 item/用户行即归约结果，missing/orphan 为实际与期望之差，drift 为快照差；repair 后复核同一探针。测试：`library_integrity_sparse::{library_without_users_units_is_not_reported_missing, really_missing_user_row_is_found_and_repaired_stably}`（含 check→repair→check 稳定 clean、不为A库伪造行）。
 - **N05 已修（64d13a4）**：复核属实（150个坏 Media 时 missing_items=150）。五类样本统一 `sample()` 上限 `REPORT_CAP`，`IntegrityReport.totals` 记录精确分项总数，`truncated` 显式标记截断。测试：`library_integrity_report_cap::report_samples_are_capped_and_totals_exact_for_any_batch`（batch=1 与 100，cursor_json < 32KB）。剩余：未注入“中断续跑”专测（游标逻辑未改）。
 - **兼容残留已修（8d1e96a、e927e77）**：`publish_transfer_file` 持久与携带单元皆空时原样发布未知覆盖，不再补 WHOLE（测试 `worker::transfer::tests::publication_keeps_unknown_coverage_unknown`）；`media_server_provider::items::coverage_units` 只返回显式单元，未知覆盖不产生可播身份/人物图片候选（测试 `items::tests::unknown_coverage_yields_no_playable_units`）。Web `listUnidentifiedLibraryFiles`/`listMissingLibraryFiles` 只读后端实际字段（`key/label/total_size_bytes/files[].file_id/file_path`；`id/file_path/season_number/episode_number`），删除 path/file_path/file_id/season 等别名，非数组响应抛错而非空成功（`web/test/library-dto-contract.test.mjs` 3项）。剩余：协议层 movie whole / TV S00E00 / unknown / 合并集的“总数与页内一致”端到端验收未新增专测，仅由现有 api 全量测试覆盖。
+
+### 本轮最终验证（N01–N05 + 兼容残留合入后，N03 余量实施前）
+
+- `cargo test --workspace --no-fail-fast`（`/workspace/ws_final.log`）：**2535 passed、0 failed、11 ignored**（348 suites），`EXIT=0`。无挂起；曾有遗留并行 `ws_full.log` 进程争用 `target/`，已杀掉后本轮干净跑完。
+- Web：`npm test` **844 passed / 0 failed**；`npx tsc --noEmit` exit 0（Node 22 `/workspace/.node22`）。
+- `cargo fmt --all --check` exit 0。
+- 提交：`f479fdb`（本段登记）及既有 N01–N05/兼容修复哈希见上节。
