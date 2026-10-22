@@ -1,4 +1,4 @@
-use domain::{EntityScope, MetadataAdoption, MetadataPreferences};
+use domain::EntityScope;
 
 use crate::scrape_store::ScrapeStoreExt;
 use domain::Media;
@@ -6,52 +6,16 @@ use std::path::{Path, PathBuf};
 
 use super::series::PosterFetchCatalogGet;
 
-/// Persist validated TMDB data through normalized source snapshots, independent of NFO output.
+/// Persist the validated full TMDB response as a normalized source snapshot,
+/// independent of NFO output. See [`crate::metadata_service`].
 pub(crate) fn adopt_tmdb_metadata(
     state: &crate::management::ApiState,
     media: &Media,
     tmdb_id: &str,
     scope: EntityScope,
-    meta: &media::ItemMeta,
 ) {
-    let preferences = state.store.lock().get_scrape_config().ok()
-        .map(|config| MetadataPreferences {
-            language_priority: config.effective.language_priority,
-            cert_country_priority: config.effective.cert_country_priority,
-        })
-        .unwrap_or_else(|| MetadataPreferences {
-            language_priority: crate::scrape_config::default_language_priority(),
-            cert_country_priority: crate::scrape_config::default_cert_country_priority(),
-        });
-    let mut payload = serde_json::Map::new();
-    if let Some(value) = &meta.overview { payload.insert("overview".into(), value.clone().into()); }
-    if let Some(value) = &meta.tagline { payload.insert("tagline".into(), value.clone().into()); }
-    if let Some(value) = &meta.rating { if let Ok(value) = value.parse::<f64>() { payload.insert("vote_average".into(), value.into()); } }
-    if let Some(value) = meta.vote_count { payload.insert("vote_count".into(), value.into()); }
-    if let Some(value) = meta.runtime_minutes.as_deref().and_then(|value| value.parse::<u32>().ok()) { payload.insert("runtime".into(), value.into()); }
-    payload.insert("title".into(), media.title.clone().into());
-    if let Some(value) = &media.original_title { payload.insert("original_title".into(), value.clone().into()); }
-    let release_key = if media.kind == domain::MediaKind::Tv { "first_air_date" } else { "release_date" };
-    if let Some(value) = &meta.release_date { payload.insert(release_key.into(), value.clone().into()); }
-    if let Some(value) = &meta.last_air_date { payload.insert("last_air_date".into(), value.clone().into()); }
-    if let Some(value) = &meta.original_language { payload.insert("original_language".into(), value.clone().into()); }
-    if let Some(value) = &meta.status { payload.insert("status".into(), value.clone().into()); }
-    if !meta.studios.is_empty() { payload.insert("production_companies".into(), meta.studios.iter().map(|name| serde_json::json!({"name":name})).collect::<Vec<_>>().into()); }
-    if !meta.genres.is_empty() { payload.insert("genres".into(), meta.genres.iter().enumerate().map(|(index,name)| serde_json::json!({"id":meta.genre_ids.get(index),"name":name})).collect::<Vec<_>>().into()); }
-    if !meta.origin_countries.is_empty() { payload.insert("origin_country".into(), serde_json::json!(meta.origin_countries)); }
-    let normalized = match media::normalize_metadata("tmdb", scope, &serde_json::Value::Object(payload).to_string(), &preferences) {
-        Ok(normalized) => normalized,
-        Err(error) => { tracing::warn!(%error, media_id=%media.id, "TMDB metadata normalization failed"); return; }
-    };
-    let locale = preferred_language(state);
-    let fetched_at = crate::job_loop::unix_now() * 1000;
-    let adoption = MetadataAdoption {
-        media_id: media.id, scope, locale, source: "tmdb".into(),
-        provider_entity_id: tmdb_id.to_string(), provider_work_id: tmdb_id.to_string(),
-        fetched_at, normalized, expected_revision: None, preferences,
-    };
-    if let Err(error) = state.store.lock().adopt_metadata(&adoption, fetched_at) {
-        tracing::warn!(%error, media_id=%media.id, "TMDB metadata adoption failed");
+    if let Err(error) = crate::metadata_service::adopt_catalog_metadata(state, media, tmdb_id, scope) {
+        tracing::warn!(%error, media_id = %media.id, "TMDB metadata adoption failed");
     }
 }
 

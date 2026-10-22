@@ -380,6 +380,19 @@ impl Catalog for FanoutCatalog {
         }
         Ok(crate::catalog::ArtworkCandidates::default())
     }
+    fn normalized_metadata(
+        &self,
+        kind: MediaKind,
+        id: &str,
+        scope: domain::EntityScope,
+        preferences: &domain::MetadataPreferences,
+    ) -> Result<Option<domain::NormalizedMetadata>, String> {
+        // TMDB ids are the refresh target; only that child parses a TMDB response.
+        match self.source("tmdb") {
+            Some(tmdb) => tmdb.normalized_metadata(kind, id, scope, preferences),
+            None => Ok(None),
+        }
+    }
     fn metadata(&self, kind: MediaKind, tmdb_id: &str) -> Result<Option<media::ItemMeta>, String> {
         if let Some(tmdb) = self.source("tmdb") {
             return tmdb.metadata(kind, tmdb_id);

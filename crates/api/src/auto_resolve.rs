@@ -136,7 +136,7 @@ fn resolve_media(
     // through the adopted metadata; the affected cards are reduced in that transaction.
     if let Some(tmdb_id) = &updated.tmdb_id {
         if let Ok(Some(meta)) = crate::scrape_metadata::fetch_tmdb_metadata(state, updated.kind, tmdb_id) {
-            crate::scrape_metadata::adopt_tmdb_metadata(state, &updated, tmdb_id, domain::EntityScope::Work, &meta);
+            crate::scrape_metadata::adopt_tmdb_metadata(state, &updated, tmdb_id, domain::EntityScope::Work);
             crate::scrape_metadata::record_scraped_display(state, updated.id, &meta);
         }
     }
@@ -155,7 +155,7 @@ pub(crate) fn write_resolved_nfo(state: &ApiState, media: &Media, sample_path: &
         return;
     };
     let meta_service = crate::metadata_service::MetadataService::new(std::sync::Arc::new(state.clone()));
-    let _ = meta_service.refresh_media_metadata(media, "zh-CN");
+    let _ = meta_service.refresh_media_metadata(media);
 
     if media.kind == MediaKind::Tv {
         let (coverages, sample_coverage) = {

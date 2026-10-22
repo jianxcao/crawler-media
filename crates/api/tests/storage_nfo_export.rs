@@ -84,6 +84,28 @@ impl api::catalog::Catalog for ExportCatalog {
     ) -> Result<Option<media::ItemMeta>, String> {
         Ok(Some(item_meta(&self.overview.lock())))
     }
+
+    /// Production adoption reads the catalog's normalized snapshot of the full response.
+    fn normalized_metadata(
+        &self,
+        _kind: MediaKind,
+        _id: &str,
+        scope: domain::EntityScope,
+        preferences: &domain::MetadataPreferences,
+    ) -> Result<Option<domain::NormalizedMetadata>, String> {
+        let body = serde_json::json!({
+            "title": "Fixture Movie", "original_title": "Fixture Movie",
+            "overview": *self.overview.lock(), "release_date": "2020-05-01",
+            "runtime": 120, "vote_average": 8.5, "vote_count": 100,
+            "original_language": "en", "status": "Released",
+            "genres": [{"id": 18, "name": "Drama"}],
+            "production_companies": [{"name": "Fixture Studio"}],
+            "production_countries": [{"iso_3166_1": "US", "name": "United States"}],
+        });
+        media::normalize_metadata("tmdb", scope, &body.to_string(), preferences)
+            .map(Some)
+            .map_err(|error| error.to_string())
+    }
 }
 
 fn item_meta(overview: &str) -> media::ItemMeta {

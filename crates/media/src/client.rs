@@ -304,6 +304,35 @@ impl<H: CatalogGet> Tmdb<H> {
         })
     }
 
+    /// The validated full details response (same request and cache entry as
+    /// [`Self::details_with_meta_for`]) normalized into a source snapshot.
+    pub fn normalized_details(
+        &self,
+        kind: MediaKind,
+        tmdb_id: &str,
+        scope: domain::EntityScope,
+        preferences: &domain::MetadataPreferences,
+    ) -> Result<domain::NormalizedMetadata, TmdbError> {
+        let request_language = preferences
+            .language_priority
+            .iter()
+            .map(String::as_str)
+            .find(|language| !language.trim().is_empty())
+            .unwrap_or(self.language.as_str());
+        let path = match kind {
+            MediaKind::Movie | MediaKind::Video => {
+                format!("/movie/{tmdb_id}?append_to_response=credits,release_dates,translations")
+            }
+            MediaKind::Tv => format!(
+                "/tv/{tmdb_id}?append_to_response=aggregate_credits,content_ratings,translations"
+            ),
+        };
+        self.fetch_with_language(&path, request_language, |body| {
+            crate::contracts::metadata(body)?;
+            crate::normalized::normalize_metadata("tmdb", scope, body, preferences)
+        })
+    }
+
     /// TMDB configuration countries (cached via the normal body cache).
     pub fn configuration_countries(&self) -> Result<Vec<parse::CountryRow>, TmdbError> {
         self.fetch("/configuration/countries", parse::configuration_countries)

@@ -346,6 +346,21 @@ impl<H: media::CatalogGet + Send + Sync> Catalog for TmdbCatalog<H> {
             .map(|path| path.map(|path| format!("{TMDB_POSTER}{path}")))
             .map_err(|err| err.to_string())
     }
+    fn normalized_metadata(
+        &self,
+        kind: MediaKind,
+        id: &str,
+        scope: domain::EntityScope,
+        preferences: &domain::MetadataPreferences,
+    ) -> Result<Option<domain::NormalizedMetadata>, String> {
+        if scope != domain::EntityScope::Work {
+            return Ok(None);
+        }
+        self.inner
+            .normalized_details(kind, id, scope, preferences)
+            .map(Some)
+            .map_err(|err| err.to_string())
+    }
     fn metadata(&self, kind: MediaKind, tmdb_id: &str) -> Result<Option<media::ItemMeta>, String> {
         self.inner
             .details_with_meta(kind, tmdb_id)

@@ -365,7 +365,7 @@ fn refresh_item_metadata_inner(state: &ApiState, id: &str, item_id: &str) -> Res
         match crate::scrape_metadata::fetch_tmdb_metadata(&state, media.kind, tmdb_id) {
             Ok(Some(meta)) => {
                 let meta_service = crate::metadata_service::MetadataService::new(std::sync::Arc::new(state.clone()));
-                let _ = meta_service.refresh_media_metadata(&media, "zh-CN");
+                let _ = meta_service.refresh_media_metadata(&media);
 
                 let nfo = crate::scrape_metadata::nfo_from_tmdb(&media, &meta);
                 if media.kind == domain::MediaKind::Tv {

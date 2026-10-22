@@ -268,7 +268,7 @@ fn scrape_tv_episodes_and_nfos(
 ) -> Vec<(PathBuf, Option<String>)> {
     let tmdb_meta = fetch_tmdb_metadata(state, media.kind, tmdb_id).ok().flatten();
     if let Some(meta) = &tmdb_meta {
-        adopt_tmdb_metadata(state, media, tmdb_id, EntityScope::Work, meta);
+        adopt_tmdb_metadata(state, media, tmdb_id, EntityScope::Work);
         record_scraped_display(state, media.id, meta);
     }
     let show_nfo = tmdb_meta.as_ref().map(|meta| nfo_from_tmdb(media, meta)).unwrap_or_default();

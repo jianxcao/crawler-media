@@ -1,9 +1,69 @@
+//! The single production path that adopts provider metadata: the catalog parses its own
+//! validated full response into a normalized snapshot, and the Store recomposes the
+//! effective row from every current snapshot. No caller rebuilds a lossy payload.
 use std::sync::Arc;
+
 use domain::{EntityScope, Media, MetadataAdoption, MetadataPreferences};
+
 use crate::management::ApiState;
+use crate::scrape_store::ScrapeStoreExt;
 
 pub struct MetadataService {
     state: Arc<ApiState>,
+}
+
+/// Metadata language / certification preferences from the instance scrape config.
+pub(crate) fn metadata_preferences(state: &ApiState) -> MetadataPreferences {
+    state
+        .store
+        .lock()
+        .get_scrape_config()
+        .ok()
+        .map(|config| MetadataPreferences {
+            language_priority: config.effective.language_priority,
+            cert_country_priority: config.effective.cert_country_priority,
+        })
+        .unwrap_or_else(|| MetadataPreferences {
+            language_priority: crate::scrape_config::default_language_priority(),
+            cert_country_priority: crate::scrape_config::default_cert_country_priority(),
+        })
+}
+
+/// Fetch (outside the Store lock) and adopt the TMDB snapshot for one entity.
+/// Returns `Ok(false)` when the catalog has no normalized response for it.
+pub(crate) fn adopt_catalog_metadata(
+    state: &ApiState,
+    media: &Media,
+    tmdb_id: &str,
+    scope: EntityScope,
+) -> Result<bool, String> {
+    let preferences = metadata_preferences(state);
+    let locale = crate::scrape_metadata::preferred_language(state);
+    let Some(normalized) = state
+        .catalog
+        .normalized_metadata(media.kind, tmdb_id, scope, &preferences)?
+    else {
+        return Ok(false);
+    };
+    let fetched_at = crate::job_loop::unix_now() * 1000;
+    let adoption = MetadataAdoption {
+        media_id: media.id,
+        scope,
+        locale,
+        source: "tmdb".into(),
+        provider_entity_id: tmdb_id.to_string(),
+        provider_work_id: tmdb_id.to_string(),
+        fetched_at,
+        normalized,
+        expected_revision: None,
+        preferences,
+    };
+    state
+        .store
+        .lock()
+        .adopt_metadata(&adoption, fetched_at)
+        .map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 impl MetadataService {
@@ -11,61 +71,20 @@ impl MetadataService {
         Self { state }
     }
 
-    pub fn refresh_media_metadata(
-        &self,
-        media: &Media,
-        locale: &str,
-    ) -> Result<(), String> {
-        let store = self.state.store.lock();
-        let target = store
+    /// Refresh the work-level snapshot from the media's TMDB refresh target.
+    pub fn refresh_media_metadata(&self, media: &Media) -> Result<(), String> {
+        let target = self
+            .state
+            .store
+            .lock()
             .media_refresh_alias(media.id, "tmdb")
             .map_err(|e| e.to_string())?;
-        let Some(refresh_target) = target.or_else(|| {
-            media.tmdb_id.clone().map(|ext_id| domain::MediaAlias {
-                source: "tmdb".into(),
-                kind: media.kind,
-                external_id: ext_id,
-            })
-        }) else {
+        let Some(tmdb_id) = target
+            .map(|alias| alias.external_id)
+            .or_else(|| media.tmdb_id.clone())
+        else {
             return Ok(());
         };
-        let tmdb_id = refresh_target.external_id;
-        drop(store);
-
-        let preferences = MetadataPreferences {
-            language_priority: vec![locale.to_string()],
-            cert_country_priority: vec!["CN".into(), "US".into()],
-        };
-
-        let normalized = self
-            .state
-            .catalog
-            .normalized_metadata(media.kind, &tmdb_id, EntityScope::Work, &preferences)?;
-
-        if let Some(norm) = normalized {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as i64;
-            let adoption = MetadataAdoption {
-                media_id: media.id,
-                scope: EntityScope::Work,
-                locale: locale.to_string(),
-                source: "tmdb".into(),
-                provider_entity_id: tmdb_id.clone(),
-                provider_work_id: tmdb_id,
-                fetched_at: now,
-                normalized: norm,
-                expected_revision: None,
-                preferences,
-            };
-            self.state
-                .store
-                .lock()
-                .adopt_metadata(&adoption, now)
-                .map_err(|e| e.to_string())?;
-        }
-
-        Ok(())
+        adopt_catalog_metadata(&self.state, media, &tmdb_id, EntityScope::Work).map(|_| ())
     }
 }
