@@ -503,31 +503,46 @@ fn transmission_remove_ambiguous_matches_returns_error() {
 
 #[test]
 fn transmission_handles_409_session_challenge() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || {
-        for incoming in listener.incoming() {
-            let mut stream = incoming.unwrap();
-            let req = read_request(&mut stream);
-            let has_token = req.lines().any(|l| {
-                let lower = l.to_ascii_lowercase();
-                lower.starts_with("x-transmission-session-id:") && lower.contains("test-token-409")
-            });
-            let (status, body) = if has_token {
-                (
-                    "200 OK",
-                    r#"{"result":"success","arguments":{"rpc-version":16}}"#,
-                )
-            } else {
-                ("409 Conflict", "")
-            };
-            let response = format!(
-                "HTTP/1.1 {status}\r\nX-Transmission-Session-Id: test-token-409\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream.write_all(response.as_bytes()).ok();
-        }
-    });
+    let conflicts = Arc::new(AtomicUsize::new(0));
+    let authorized = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let server = {
+        let (conflicts, authorized, stop) = (conflicts.clone(), authorized.clone(), stop.clone());
+        thread::spawn(move || {
+            for incoming in listener.incoming() {
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                let mut stream = incoming.unwrap();
+                let req = read_request(&mut stream);
+                let has_token = req.lines().any(|l| {
+                    let lower = l.to_ascii_lowercase();
+                    lower.starts_with("x-transmission-session-id:")
+                        && lower.contains("test-token-409")
+                });
+                let (status, body) = if has_token {
+                    authorized.fetch_add(1, Ordering::SeqCst);
+                    (
+                        "200 OK",
+                        r#"{"result":"success","arguments":{"rpc-version":16}}"#,
+                    )
+                } else {
+                    conflicts.fetch_add(1, Ordering::SeqCst);
+                    ("409 Conflict", "")
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nX-Transmission-Session-Id: test-token-409\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).ok();
+            }
+        })
+    };
 
     let dl = TransmissionDownloader::connect(TransmissionConfig {
         url: format!("http://{addr}/transmission/rpc"),
@@ -536,8 +551,28 @@ fn transmission_handles_409_session_challenge() {
         path_maps: vec![],
     })
     .unwrap();
+    assert_eq!(
+        conflicts.load(Ordering::SeqCst),
+        1,
+        "connect answers exactly one 409"
+    );
+    let after_connect = authorized.load(Ordering::SeqCst);
+    assert!(
+        after_connect >= 1,
+        "connect must retry with the issued token"
+    );
     // 再次调用 rpc，必须复用 token，不触发第二次 409
     dl.add(&torrent()).unwrap();
+    assert_eq!(
+        conflicts.load(Ordering::SeqCst),
+        1,
+        "later RPCs must reuse the session token instead of hitting 409 again"
+    );
+    assert!(authorized.load(Ordering::SeqCst) > after_connect);
+
+    stop.store(true, Ordering::SeqCst);
+    let _ = std::net::TcpStream::connect(addr);
+    server.join().expect("409 server thread must exit");
 }
 
 #[test]
