@@ -407,3 +407,24 @@ Media／Library／Playback 放在同一 `library.db`、cache 按生命周期独�
 
 - `cargo test --workspace`（`/workspace/logs/final-cargo.log`）：**2557 passed、0 failed、11 ignored**（353 个 test result），`EXIT=0`。无挂起；`concurrent_scan_of_ten_thousand_episodes_keeps_heartbeat_write_scope_bounded` 单项 >60s 但正常结束（规模测试，非死锁）。
 - Web：`npm test` **844 passed / 0 failed**；`npx tsc --noEmit` exit 0；`cargo fmt --all --check` exit 0。
+
+## Round 2 — zero backward compatibility, optimal schema (2026-10-22)
+
+Decision: no compatibility with earlier databases or DTOs. No migrations, shims, dual reads or legacy aliases.
+
+| Item | Commit | Change | Perf impact |
+|---|---|---|---|
+| 1+2 | b5a87a2 | Removed the path_key migration, the dual `path_key = ? OR display_path = ?` lookups, LegacySnapshot, the serde default on SidecarMode and compat-only tests. `path_key` is computed once at write time: lexical clean-up plus NFC, with `..` kept so the CHECK rejects it, and roots canonicalized through symlinks. Schema CHECKs enforce the canonical form, and uniqueness is on the canonical key. Duplicate physical roots return 400. | Each lookup is one index probe; the OR plan is gone. `norm_path_key` only runs on constant arguments, once per statement. The scan_seen join uses its stored key, so no function runs per row. Each CHECK is a few O(len) string ops per write. |
+| 3 | 718b147 | Rename and re-parent no longer bump `file_revision`, so active sessions and resume bindings survive. The rebind module was deleted. | Rename does no session or resume rewrites. |
+| 4 | 0f05feb | Artwork sharing is rechecked under the Store lock when the rename executes. Prefixed artwork names (`season01-poster.jpg`, `*-poster`, `*-fanart`) are recognized. Destination exists with different bytes: copy, keep the source. Identical bytes: move, and queue the source for deletion. | One indexed range query plus one read_dir per rename. The byte compare happens only when a conflict exists. |
+| 5 | 2e521df | The Web organize dialog has a target-library picker (same kind, has roots). For a cross-library organize it re-roots `to` and sends `to_library_id`. | Client-side only. |
+
+Path-key rules: absolute; no `//`, `.` or `..` segments; no trailing `/` (except `/`); NFC. No case folding, because case-insensitive filesystems are not normalized.
+
+Remaining risks:
+- Case-insensitive filesystems: two spellings that differ only in case are different keys.
+- A root that does not exist yet is keyed lexically, without symlink resolution, until it is rewritten.
+- The root alias map is process-global and keyed by db path. A stale alias after a rolled-back root write is harmless; it is reloaded on the next write.
+- The same-bytes artwork compare reads both files in full. Artwork is small.
+- Cross-library organize uses the source library's naming template.
+- Flakes seen: `subtitle_runtime::both_waiters_cancelled…` failed once under full parallel load (timing) and passed on rerun. The 10k-episode scale test runs for more than 60s but completes; it is not a hang.
