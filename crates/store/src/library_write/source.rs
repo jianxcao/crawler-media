@@ -114,39 +114,7 @@ impl Store {
             });
         }
 
-        // Invalidate old probe, cold details, tracks, and hot probed quality
-        tx.execute(
-            "UPDATE library_files SET
-                file_revision = ?1,
-                source_version = ?2,
-                size_bytes = COALESCE(?3, size_bytes),
-                mtime_ns = COALESCE(?4, mtime_ns),
-                created_ns = COALESCE(?5, created_ns),
-                source_digest = ?6,
-                stat_known = 1,
-                quality_source = 'release',
-                tracks_version = 0,
-                duration_ms = NULL,
-                codec = NULL,
-                hdr = NULL
-             WHERE file_id = ?7",
-            params![
-                new_revision,
-                new_source_version,
-                observation.size_bytes.map(|s| s as i64),
-                observation.modified_ns,
-                observation.created_ns,
-                observation.content_digest,
-                file_id_str,
-            ],
-        )?;
-
-        // Remove every derived fact of the old bytes: cold details, fingerprints,
-        // probe stages and samples.
-        crate::library::delete_file_meta_for_ledger(&tx, &file_id_str)?;
-
-        // Re-enqueue probe obligation
-        super::publish::enqueue_probe(&tx, file_id, now_ms)?;
+        advance_to_new_content(&tx, file_id, new_revision, observation, now_ms)?;
 
         // Re-reduce library media
         reduce_library_media(&tx, scope.library_id, media_id)?;
@@ -158,4 +126,46 @@ impl Store {
             source_version: new_source_version,
         })
     }
+}
+
+/// The file now holds different content: advance to `new_revision` with the new
+/// token, reset hot probed facts and drop every derived fact of the old bytes
+/// (cold details, fingerprints, probe stages/contexts, samples), then re-arm
+/// Probe. Callers reduce the Library card and commit. One statement set, run
+/// inside the caller's transaction.
+pub(crate) fn advance_to_new_content(
+    tx: &rusqlite::Transaction<'_>,
+    file_id: LedgerId,
+    new_revision: i64,
+    observation: &SourceObservation,
+    now_ms: i64,
+) -> Result<(), StoreError> {
+    let file_id_str = file_id.to_string();
+    tx.execute(
+        "UPDATE library_files SET
+            file_revision = ?1,
+            source_version = ?2,
+            size_bytes = COALESCE(?3, size_bytes),
+            mtime_ns = COALESCE(?4, mtime_ns),
+            created_ns = COALESCE(?5, created_ns),
+            source_digest = ?6,
+            stat_known = 1,
+            quality_source = 'release',
+            tracks_version = 0,
+            duration_ms = NULL,
+            codec = NULL,
+            hdr = NULL
+         WHERE file_id = ?7",
+        params![
+            new_revision,
+            observation.source_version,
+            observation.size_bytes.map(|s| s as i64),
+            observation.modified_ns,
+            observation.created_ns,
+            observation.content_digest,
+            file_id_str,
+        ],
+    )?;
+    crate::library::delete_file_meta_for_ledger(tx, &file_id_str)?;
+    super::publish::enqueue_probe(tx, file_id, now_ms)
 }

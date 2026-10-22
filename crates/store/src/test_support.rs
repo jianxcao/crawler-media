@@ -159,7 +159,12 @@ fn place_fixture_file(store: &Store, spec: &FixtureFile) -> Result<LibraryFile, 
         }
         None => {
             let id = spec.file_id.unwrap_or_else(LedgerId::new);
-            (id, 1, format!("{}-{}", crate::unix_now(), id))
+            // Files that exist on disk carry the production content token, so
+            // fixture rows behave like scanned ones (rename, Probe, CAS).
+            let source_version = library::observe_source(Path::new(&spec.path))
+                .map(|observation| observation.source_version)
+                .unwrap_or_else(|_| format!("{}-{}", crate::unix_now(), id));
+            (id, 1, source_version)
         }
     };
 

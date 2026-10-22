@@ -15,7 +15,9 @@ mod probe_target;
 mod scrape;
 pub mod source_observation;
 pub mod subtitles;
-pub use source_observation::{SourceObservation, observe_source};
+pub use source_observation::{
+    MISSING_SOURCE_VERSION, SourceObservation, current_source_version, observe_source,
+};
 mod tracks;
 mod watch;
 mod work_control;

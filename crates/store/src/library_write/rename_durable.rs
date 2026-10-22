@@ -169,7 +169,7 @@ impl Store {
 
     /// CAS-publish path/root/library, migrate NFO inputs and scrape sidecars,
     /// rewrite subscribe facts, reduce affected Library cards, drop the intent.
-    pub fn complete_file_rename(&self, rename_id: &str, _now: i64) -> Result<(), StoreError> {
+    pub fn complete_file_rename(&self, rename_id: &str, now: i64) -> Result<(), StoreError> {
         let request = self.load_file_rename(rename_id)?;
         if request.phase != "disk_applied" && request.phase != "planned" {
             return Err(StoreError::Protected(format!(
@@ -184,6 +184,12 @@ impl Store {
                 request.to_path.display()
             )));
         }
+        // Content-token verification: one stat (one read for .strm) before the
+        // transaction. A rename keeps the token; a copy (cross-filesystem move)
+        // or changed bytes yield a new one and must advance the FileVersion.
+        let observed = library::observe_source(&request.to_path).map_err(|error| {
+            StoreError::Protected(format!("rename {rename_id}: observe destination: {error}"))
+        })?;
         let tx = self.library.unchecked_transaction()?;
         let id = request.file_id.to_string();
         let from_str = request.from_path.to_string_lossy().into_owned();
@@ -243,6 +249,15 @@ impl Store {
             return Err(StoreError::Protected(format!(
                 "file {id} changed during rename publish"
             )));
+        }
+        if observed.source_version != owned.source_version {
+            super::source::advance_to_new_content(
+                &tx,
+                request.file_id,
+                owned.revision + 1,
+                &observed,
+                now,
+            )?;
         }
         // Coverage rows carry composite FK (file_id, library_id, media_id).
         tx.execute(

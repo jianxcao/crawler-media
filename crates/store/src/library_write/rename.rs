@@ -8,11 +8,10 @@
 
 use std::path::{Path, PathBuf};
 
-use domain::{FileVersion, LedgerId, LibraryId, MediaId, MediaKind};
+use domain::{FileVersion, LedgerId, MediaId, MediaKind};
 use rusqlite::{OptionalExtension, params};
 
 use super::publish::{ensure_library_writable, ensure_media_writable};
-use super::reduce::reduce_library_media;
 use crate::library_paths::resolved_path;
 use crate::{Store, StoreError};
 
@@ -32,9 +31,9 @@ impl Store {
     /// expected version; the Library is writable and the Media is not frozen;
     /// `to` (after `..`/symlink resolution) stays under the file's own root and
     /// is strictly owned by the same Library (not a nested child Library); no
-    /// other file row occupies `to`. The row revision is bumped so later
-    /// version-checked writers observe the rename, and the Library card for the
-    /// Media is reduced again.
+    /// other file row occupies `to`. Then runs the one durable rename policy
+    /// (intent, disk move, content-token verification, CAS publish), so sync and
+    /// durable renames cannot diverge on source identity.
     pub fn rename_file_within_root(
         &self,
         file_id: LedgerId,
@@ -42,7 +41,13 @@ impl Store {
         from: &Path,
         to: &Path,
     ) -> Result<(), StoreError> {
-        self.rename_within_root(file_id, expected, from, to, true)
+        self.rename_within_root(file_id, expected, from, to)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        let request = self.begin_file_rename(file_id, expected, from, to, now)?;
+        self.apply_file_rename_disk(&request.rename_id, now)?;
+        self.complete_file_rename(&request.rename_id, now)
     }
 
     /// Run every [`Self::rename_file_within_root`] check without writing, so a
@@ -54,7 +59,7 @@ impl Store {
         from: &Path,
         to: &Path,
     ) -> Result<(), StoreError> {
-        self.rename_within_root(file_id, expected, from, to, false)
+        self.rename_within_root(file_id, expected, from, to)
     }
 
     fn rename_within_root(
@@ -63,7 +68,6 @@ impl Store {
         expected: &FileVersion,
         from: &Path,
         to: &Path,
-        commit: bool,
     ) -> Result<(), StoreError> {
         let tx = self.library.unchecked_transaction()?;
         let id = file_id.to_string();
@@ -88,23 +92,7 @@ impl Store {
                 "{to_str} is already recorded"
             )));
         }
-        if !commit {
-            return Ok(());
-        }
-        let changed = tx.execute(
-            "UPDATE library_files
-             SET path_key = norm_path_key(?2), display_path = ?2
-             WHERE file_id = ?1 AND file_revision = ?3 AND source_version = ?4",
-            params![id, to_str, owned.revision, owned.source_version],
-        )?;
-        if changed != 1 {
-            return Err(StoreError::Protected(format!(
-                "file {id} changed during rename"
-            )));
-        }
-        let library_id: LibraryId = owned.library_id.parse()?;
-        reduce_library_media(&tx, library_id, media_id)?;
-        tx.commit()?;
+        drop(tx);
         Ok(())
     }
 
