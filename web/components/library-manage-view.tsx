@@ -11,6 +11,8 @@ import { useConfirm, useToast } from "@/components/feedback";
 import { ChevronDownIcon, PlusIcon, SearchIcon, XIcon } from "@/components/icons";
 import { LibraryFormDialog } from "@/components/library-form-dialog";
 import { LibraryCoverModal } from "@/components/library-cover-modal";
+import { LibraryOrganizeDialog } from "@/components/library-organize-dialog";
+import type { OrganizeRenameRequest } from "@/lib/library-organize";
 import {
   type LibraryRowActions,
   type LibraryRowDrag,
@@ -29,6 +31,7 @@ import {
   applyRootConsolidations,
   startLibraryOrganize,
   type MediaLibrary,
+  type OrganizePreviewResult,
   deleteDuplicateFile,
   listLibraries,
   listLibraryDuplicates,
@@ -92,6 +95,10 @@ export function LibraryManageView() {
   const [editing, setEditing] = useState<MediaLibrary | "new" | null>(null);
   const [coverModalLibrary, setCoverModalLibrary] = useState<MediaLibrary | null>(null);
   const [reorderOpen, setReorderOpen] = useState(false);
+  const [organizing, setOrganizing] = useState<{
+    library: MediaLibrary;
+    preview: OrganizePreviewResult;
+  } | null>(null);
   // 新建成功后把新行滚进视野（纵向列表末尾可能在首屏外）
   const [revealId, setRevealId] = useState<string | null>(null);
 
@@ -249,7 +256,9 @@ export function LibraryManageView() {
         });
       },
       onOrganize: (library) => {
-        void organizeLibrary(library, toast, confirm);
+        void previewOrganize(library, toast).then((preview) => {
+          if (preview) setOrganizing({ library, preview });
+        });
       },
       onReconcile: (library) => {
         void reconcileLibrary(library, toast, confirm);
@@ -572,6 +581,19 @@ export function LibraryManageView() {
           onCoverUpdated={reload}
         />
       )}
+      {organizing && libraries && (
+        <LibraryOrganizeDialog
+          library={organizing.library}
+          libraries={libraries}
+          preview={organizing.preview}
+          onClose={() => setOrganizing(null)}
+          onSubmit={(renames) => {
+            const { library } = organizing;
+            setOrganizing(null);
+            void applyOrganize(library, renames, toast).then(reload);
+          }}
+        />
+      )}
       {libraries && (
         <ReorderDialog
           open={reorderOpen}
@@ -683,32 +705,34 @@ function ReorderDialog({
   );
 }
 
-/**
- * 整理文件名：预览按命名模板算出的目标名，确认后应用。
- */
-async function organizeLibrary(
+/** 整理文件名第一步：预览按命名模板算出的目标名；无可整理文件时直接提示。 */
+async function previewOrganize(
   library: MediaLibrary,
   toast: ReturnType<typeof useToast>,
-  confirm: ReturnType<typeof useConfirm>,
-) {
+): Promise<OrganizePreviewResult | null> {
   try {
     const preview = await previewLibraryOrganize(library.id);
     if (preview.renames.length === 0) {
       toast.success(
         preview.already_ok > 0 ? `「${library.name}」文件名已符合模板` : `「${library.name}」没有可整理的文件`,
       );
-      return;
+      return null;
     }
-    const ok = await confirm({
-      title: `整理「${library.name}」的 ${preview.renames.length} 个文件？`,
-      description: "按命名模板重命名；原有路径会同步到台账与订阅记录。",
-      confirmLabel: "开始整理",
-    });
-    if (!ok) return;
-    const result = await startLibraryOrganize(
-      library.id,
-      preview.renames.map((r) => ({ from: r.from, to: r.to })),
-    );
+    return preview;
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : "整理失败");
+    return null;
+  }
+}
+
+/** 整理文件名第二步：按所选目标库（可跨库）应用重命名。 */
+async function applyOrganize(
+  library: MediaLibrary,
+  renames: OrganizeRenameRequest[],
+  toast: ReturnType<typeof useToast>,
+) {
+  try {
+    const result = await startLibraryOrganize(library.id, renames);
     toast.success(`已整理 ${result.applied} 个文件${result.errors.length > 0 ? `，${result.errors.length} 个失败` : ""}`);
   } catch (error) {
     toast.error(error instanceof Error ? error.message : "整理失败");

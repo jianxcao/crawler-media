@@ -1404,7 +1404,7 @@ export async function previewLibraryOrganize(id: string): Promise<OrganizePrevie
 /** 开始整理（POST /libraries/{id}/organize：应用预览确认的重命名）。 */
 export async function startLibraryOrganize(
   id: string,
-  renames: { from: string; to: string }[],
+  renames: { from: string; to: string; to_library_id?: string }[],
 ): Promise<{ applied: number; skipped: string[]; errors: string[] }> {
   return unwrap(
     request<ApiEnvelope<{ applied: number; skipped: string[]; errors: string[] }>>(
