@@ -414,3 +414,29 @@ fn refresh_target_read_follows_the_media_kind() {
     assert_eq!(target.kind, MediaKind::Tv);
     assert_eq!(target.external_id, "100");
 }
+
+/// R22: a retained non-target alias (100, while the refresh target is 999) still identifies
+/// the Media when a scan reports tmdb=100; an unregistered different id still conflicts.
+#[test]
+fn registered_non_target_alias_resolves_scanned_media() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let db = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
+    let fixture = setup_alias_fixture(&store, &db);
+    let canonical_id = fixture.media.id;
+
+    let mut incoming = make_media("Before", Some(2020));
+    incoming.tmdb_id = Some("100".into());
+    let resolved_non_target = store.resolve_scanned_media(incoming).unwrap();
+    assert_eq!(resolved_non_target.id, canonical_id);
+    let target = store.media_refresh_alias(canonical_id, "tmdb").unwrap().unwrap();
+    assert_eq!(target.external_id, "999", "scan must not move the refresh target");
+
+    let mut foreign = make_media("Before", Some(2020));
+    foreign.tmdb_id = Some("100".into());
+    foreign.douban_id = Some("d-1".into());
+    store.add_media_alias(canonical_id, &MediaAlias {
+        source: "douban".into(), kind: MediaKind::Tv, external_id: "d-0".into(),
+    }).unwrap();
+    assert!(matches!(store.resolve_scanned_media(foreign), Err(StoreError::Protected(_))));
+}

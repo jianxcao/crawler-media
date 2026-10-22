@@ -345,6 +345,28 @@ impl Store {
         Ok(true)
     }
 
+    /// An incoming external id conflicts with `existing` only when `existing` has aliases for
+    /// that source/kind and none of them is the incoming id.
+    fn alias_set_conflicts(&self, existing: &Media, incoming: &Media) -> Result<bool, StoreError> {
+        let sources = ["tmdb", "douban", "tvdb", "bangumi", "anilist"];
+        for (source, incoming_id) in sources.into_iter().zip(aliases(incoming)) {
+            let Some(incoming_id) = incoming_id else { continue };
+            let mut stmt = self.library.prepare_cached(
+                "SELECT external_id FROM media_aliases WHERE media_id = ?1 AND source = ?2 AND kind = ?3",
+            )?;
+            let registered = stmt
+                .query_map(
+                    params![existing.id.to_string(), source, incoming.kind.as_str()],
+                    |r| r.get::<_, String>(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            if !registered.is_empty() && !registered.iter().any(|id| id == incoming_id) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub fn resolve_scanned_media(&self, incoming: Media) -> Result<Media, StoreError> {
         let mut matched_media_ids: std::collections::HashSet<MediaId> =
             std::collections::HashSet::new();
@@ -371,7 +393,9 @@ impl Store {
             let existing = self
                 .get_media(first_id)?
                 .ok_or_else(|| StoreError::Missing(format!("media {first_id}")))?;
-            if aliases_conflict(&existing, &incoming) {
+            // Ownership is decided by the full registered alias set: a retained non-target
+            // alias identifies the Media just as the refresh target does.
+            if self.alias_set_conflicts(&existing, &incoming)? {
                 return Err(identity_conflict(&incoming));
             }
             Some(existing)
