@@ -299,6 +299,8 @@ async fn person_filter_selects_before_paging() {
             "<tvshow><actor><name>Alice</name><role>Lead</role></actor></tvshow>",
         )
         .unwrap();
+        // R24: PersonIds reads observed local facts, never the live sidecar at query time.
+        store.reconcile_nfo_inputs(&row.file.path).unwrap();
         let key = format!("name:{}:{}", "alice", "Actor");
         (
             uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, key.as_bytes()).to_string(),

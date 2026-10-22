@@ -141,7 +141,7 @@ fn protocol_query(
         parent,
         series_id,
         season,
-        person_ids: Vec::new(),
+        person_ids: values(query.person_ids.as_deref()),
         studio_ids: values(query.studio_ids.as_deref()),
         search_term: query
             .search_term

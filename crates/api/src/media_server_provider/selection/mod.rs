@@ -83,11 +83,8 @@ fn select_items_blocking(
     user_id: UserId,
     query: ServerItemQuery,
 ) -> Result<ServerItemPage, String> {
-    // person 过滤要 catalog 参与成员判定、且 catalog 失败必须是硬失败，所以它留在
-    // 候选级路径；其余请求一律由 store 在分页前选页。
-    if query.person_ids.is_some() {
-        return select_candidates_blocking(state, user_id, query);
-    }
+    // PersonIds 与其余过滤一样由 store 在分页前按本地已采纳事实选页（R24）：
+    // 本地读取不依赖现场 Catalog，断网/清缓存不改变结果。
     select_page_blocking(state, user_id, query)
 }
 

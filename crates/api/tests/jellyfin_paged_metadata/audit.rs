@@ -112,37 +112,42 @@ async fn series_parent_does_not_scan_the_root_ledger() {
 }
 
 
+/// R24: PersonIds is answered from local observed facts; a failing catalog neither
+/// fails the request nor changes the result (replaces the old "catalog failure → 500").
 #[tokio::test]
-async fn person_filter_fails_when_required_catalog_fails() {
+async fn person_filter_is_local_and_survives_catalog_failure() {
     let fixture = tv_fixture(2, 1);
-    set_tmdb(&fixture.state, "Show000", "100");
-    set_tmdb(&fixture.state, "Show001", "200");
-    let state = fixture
-        .state
-        .clone()
-        .with_catalog(Arc::new(SelectiveCatalog {
-            fail: "200".into(),
-            actor: "Catalog Alice".into(),
-        }));
-    let app = router(state);
-    let person = uuid::Uuid::new_v5(
-        &uuid::Uuid::NAMESPACE_URL,
-        b"tmdb:42:Actor",
-    )
-    .to_string();
-    let (status, body) = get(
-        &app,
-        &format!(
-            "/Items?ParentId={}&Recursive=true&IncludeItemTypes=Series&PersonIds={person}",
-            fixture.library_id
-        ),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "必需的 catalog 失败不得变成更小的 200：{body}"
+    set_tmdb(&fixture.state, "Show000", "200");
+    {
+        let store = fixture.state.store();
+        let store = store.lock();
+        let row = store
+            .list_file_coverage()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.file.path.to_string_lossy().contains("Show000"))
+            .expect("Show000");
+        std::fs::write(
+            row.file.path.parent().unwrap().join("tvshow.nfo"),
+            "<tvshow><actor><name>Alice</name><role>Lead</role></actor></tvshow>",
+        )
+        .unwrap();
+        store.reconcile_nfo_inputs(&row.file.path).unwrap();
+    }
+    let person = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, b"name:alice:Actor").to_string();
+    let uri = format!(
+        "/Items?ParentId={}&Recursive=true&IncludeItemTypes=Series&PersonIds={person}",
+        fixture.library_id
     );
+    let online_person_page = get_json(&router(fixture.state.clone()), &uri).await;
+    let offline = fixture.state.clone().with_catalog(Arc::new(SelectiveCatalog {
+        fail: "200".into(),
+        actor: "Catalog Alice".into(),
+    }));
+    let (status, offline_person_page) = get(&router(offline), &uri).await;
+    assert_eq!(status, StatusCode::OK, "{offline_person_page}");
+    assert_eq!(offline_person_page, online_person_page);
+    assert_eq!(offline_person_page["TotalRecordCount"], 1, "{offline_person_page}");
 }
 
 #[tokio::test]
@@ -245,6 +250,8 @@ async fn person_filter_does_not_assess_probes_for_unselected_rows() {
             "<tvshow><actor><name>Alice</name><role>Lead</role></actor></tvshow>",
         )
         .unwrap();
+        // R24: PersonIds reads observed local facts, never the live sidecar at query time.
+        store.reconcile_nfo_inputs(&row.file.path).unwrap();
     }
     let person = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, b"name:alice:Actor").to_string();
     let listing = get_json(

@@ -238,9 +238,11 @@ async fn detail_fills_sparse_nfo_from_catalog_and_refresh_writes_rich_show_and_e
     assert_eq!(person_details["Id"], person_id);
     assert_eq!(person_details["ImageTags"]["Primary"], "profile");
 
-    let related_items = json_get(&app, &format!("/Items?PersonIds={person_id}")).await;
-    assert_eq!(related_items["TotalRecordCount"], 1);
-    assert_eq!(related_items["Items"][0]["Id"], work_id(media_id));
+    // R24: PersonIds reads local observed facts only; a person known solely to the live
+    // catalog does not match (local hits are covered by
+    // jellyfin_paged_metadata::audit::person_filter_is_local_and_survives_catalog_failure).
+    let before_adoption = json_get(&app, &format!("/Items?PersonIds={person_id}")).await;
+    assert_eq!(before_adoption["TotalRecordCount"], 0);
 
     for uri in [
         "/Persons/Catalog%20Only%20Actor/Images/Primary".to_string(),
