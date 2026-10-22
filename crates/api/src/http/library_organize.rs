@@ -237,6 +237,15 @@ fn apply_organize(store: &crate::Store, library: &store::Library, renames: &[Val
             errors.push(format!("{from}: 台账记录不属于当前媒体库"));
             continue;
         }
+        let (file_id, version) = (
+            source_ledger.file.file_id,
+            source_ledger.file.version.clone(),
+        );
+        if let Err(error) = store.check_file_rename(file_id, &version, from_path, to_path) {
+            tracing::warn!(from, to, %error, "整理目标未通过归属复核，拒绝改名");
+            errors.push(format!("{from} -> {to}: {error}"));
+            continue;
+        }
         if let Some(parent) = to_path.parent() {
             if let Err(error) = std::fs::create_dir_all(parent) {
                 tracing::error!(from, to, %error, "创建整理目标目录失败");
@@ -249,8 +258,8 @@ fn apply_organize(store: &crate::Store, library: &store::Library, renames: &[Val
             errors.push(format!("{from} 重命名失败: {error}"));
             continue;
         }
-        match store.rename_file_path(from, to) {
-            Ok(true) => {}
+        match store.rename_file_within_root(file_id, &version, from_path, to_path) {
+            Ok(()) => {}
             result => {
                 tracing::error!(?result, from, to, "整理文件更新台账失败，尝试回滚磁盘");
                 if let Err(rollback_err) = std::fs::rename(to, from) {
@@ -273,7 +282,10 @@ fn apply_organize(store: &crate::Store, library: &store::Library, renames: &[Val
                     }
                 }
                 // 归属订阅的事实路径同步（洗版替换仍能找到旧文件的位置）。
-                let _ = store.rewrite_fact_paths(coverage.file.media_id, from, to);
+                if let Err(error) = store.rewrite_fact_paths(coverage.file.media_id, from, to) {
+                    tracing::error!(from, to, %error, "整理后同步订阅事实路径失败");
+                    errors.push(format!("{to}: 订阅事实路径同步失败: {error}"));
+                }
             }
             Ok(None) => {}
             Err(error) => {

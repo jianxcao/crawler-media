@@ -70,10 +70,12 @@ fn deleting_strm_while_ledger_is_still_present_must_cancel_before_capture() {
     let renamed = old.to_string_lossy().replace(".mkv", ".strm");
     row.file.path = std::path::PathBuf::from(&renamed);
     std::fs::rename(&old, &row.file.path).unwrap();
-    f.store
-        .lock()
-        .rename_file_path(old.to_str().unwrap(), row.file.path.to_str().unwrap())
-        .unwrap();
+    store::test_support::force_file_path(
+        &f.store.lock(),
+        old.to_str().unwrap(),
+        row.file.path.to_str().unwrap(),
+    )
+    .unwrap();
     let capture = Arc::new(DeleteCapture {
         store: f.store.clone(),
         calls: AtomicUsize::new(0),

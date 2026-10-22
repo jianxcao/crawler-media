@@ -776,9 +776,12 @@ async fn same_count_strm_change_does_not_reuse_physical_bytes_as_fresh() {
     {
         let guard = store_arc.lock();
         assert!(
-            guard
-                .rename_file_path(&from.display().to_string(), &to.display().to_string())
-                .unwrap()
+            store::test_support::force_file_path(
+                &guard,
+                &from.display().to_string(),
+                &to.display().to_string()
+            )
+            .unwrap()
         );
         // 扫描器观察到指针文件后按新体积重发布同一文件（同一 revision）。
         let version = guard

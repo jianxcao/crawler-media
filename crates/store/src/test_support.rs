@@ -234,3 +234,15 @@ pub fn set_media_identity_state(
     )?;
     Ok(())
 }
+
+/// Overwrite a recorded path without any ownership checks, to simulate a
+/// legacy/corrupt row in tests. Production renames use
+/// [`Store::rename_file_within_root`].
+pub fn force_file_path(store: &Store, from: &str, to: &str) -> Result<bool, StoreError> {
+    let n = store.library.execute(
+        "UPDATE library_files SET path_key = ?2, display_path = ?2
+         WHERE path_key = ?1 OR display_path = ?1",
+        rusqlite::params![from, to],
+    )?;
+    Ok(n > 0)
+}

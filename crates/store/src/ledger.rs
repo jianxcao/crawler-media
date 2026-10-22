@@ -70,15 +70,6 @@ impl Store {
             .map_err(Into::into)
     }
 
-    /// Rename a file's recorded path (整理后落名一致；`path_key` 唯一约束保持）。
-    pub fn rename_file_path(&self, from: &str, to: &str) -> Result<bool, StoreError> {
-        let n = self.library.execute(
-            "UPDATE library_files SET path_key = ?2, display_path = ?2
-             WHERE path_key = ?1 OR display_path = ?1",
-            params![from, to],
-        )?;
-        Ok(n > 0)
-    }
     pub fn get_file_units(&self, file_id: LedgerId) -> Result<Vec<UnitKey>, StoreError> {
         let mut stmt = self.library.prepare(
             "SELECT season, episode FROM library_file_units WHERE file_id = ?1 ORDER BY season ASC, episode ASC",

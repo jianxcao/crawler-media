@@ -347,8 +347,13 @@ fn apply_reconciliation(
     if current.as_ref() != Some(source) || media.as_ref().map(|media| media.kind) != *kind {
         return Err(failure());
     }
-    match store.rename_file_path(&row.from, &row.to) {
-        Ok(true) => {
+    match store.rename_file_within_root(
+        source.file.file_id,
+        &source.file.version,
+        FsPath::new(&row.from),
+        FsPath::new(&row.to),
+    ) {
+        Ok(()) => {
             if let Err(error) = store.rewrite_fact_paths(source.file.media_id, &row.from, &row.to) {
                 tracing::error!(library_id = %library.id, %error, "Reconciliation fact path rewrite failed");
             }

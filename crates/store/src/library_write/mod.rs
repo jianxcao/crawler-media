@@ -9,6 +9,7 @@ pub mod publish;
 pub mod reassign;
 pub mod reduce;
 pub mod reduce_incremental;
+pub mod rename;
 pub mod source;
 pub mod transfer;
 
