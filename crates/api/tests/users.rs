@@ -57,6 +57,24 @@ async fn json_data(response: axum::response::Response) -> Value {
     b.get("data").cloned().unwrap_or(Value::Null)
 }
 
+/// Poll the admin status route until the removal leaves `pending`.
+async fn wait_removal(app: &axum::Router, operation_id: &str) -> Value {
+    for _ in 0..200 {
+        let response = app
+            .clone()
+            .oneshot(request("GET", &format!("/api/v1/users/removals/{operation_id}"), "admin-token", Value::Null))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let status = json_data(response).await;
+        if status["state"] != "pending" {
+            return status;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("removal {operation_id} stayed pending");
+}
+
 fn subscribe() -> Value {
     json!({
         "media": { "kind": "movie", "title": "The Matrix", "tmdb_id": "603" },
@@ -291,7 +309,8 @@ async fn interrupted_user_removal_stays_disabled_and_recovers() {
         .unwrap();
     assert_eq!(del_resp.status(), StatusCode::ACCEPTED);
     let del_body = body(del_resp).await;
-    assert!(del_body["data"]["operation_id"].as_str().is_some());
+    let accepted = del_body["data"]["operation_id"].as_str().unwrap().to_string();
+    assert_eq!(del_body["data"]["state"], "pending");
 
     // 5. Verification of required assertions:
     // a. Token is immediately revoked (401)
@@ -306,6 +325,9 @@ async fn interrupted_user_removal_stays_disabled_and_recovers() {
         .await
         .unwrap();
     assert_eq!(token_response.status(), StatusCode::UNAUTHORIZED);
+
+    let finished = wait_removal(&app, &accepted).await;
+    assert_eq!(finished["state"], "succeeded");
 
     // b. Alice's subscription was transferred to admin
     let admin_sub = app
@@ -375,6 +397,22 @@ async fn interrupted_removal_reuses_operation_and_reports_failure() {
         .unwrap();
     assert_eq!(repeated_delete.status(), StatusCode::ACCEPTED);
     assert_eq!(body(repeated_delete).await["data"]["operation_id"], accepted_operation);
+    let status_after_user_deleted = wait_removal(&app, accepted_operation).await;
+    assert_eq!(status_after_user_deleted["state"], "succeeded");
+    // Once finished, a repeated DELETE answers with the same operation, not a new one.
+    let again = app
+        .clone()
+        .oneshot(request("DELETE", &format!("/api/v1/users/{bob_id}"), "admin-token", Value::Null))
+        .await
+        .unwrap();
+    assert_eq!(again.status(), StatusCode::ACCEPTED);
+    assert_eq!(body(again).await["data"]["operation_id"], accepted_operation);
+    let unknown = app
+        .clone()
+        .oneshot(request("GET", "/api/v1/users/removals/nope", "admin-token", Value::Null))
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
     let pending_setting_remains_after_success = state.store().lock().get_setting(&key).unwrap().is_some();
     assert!(!pending_setting_remains_after_success);
 

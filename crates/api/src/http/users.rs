@@ -147,43 +147,58 @@ pub(crate) async fn delete_user(
     axum::Extension(_user_id): axum::Extension<domain::UserId>,
     Path(id): Path<String>,
 ) -> Response {
+    use crate::user_removal as removal;
     let id = match UserId::from_str(&id) {
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "user.invalid", "用户 id 无效"),
     };
-    let store = state.store.lock();
-    match store.get_user(id) {
-        Ok(Some(user)) if user.role == UserRole::Admin => {
-            return err(StatusCode::BAD_REQUEST, "user.protected", "不能删除管理员");
-        }
-        Ok(Some(_)) => {}
-        // A User already deleted by an interrupted removal still has its operation record;
-        // the request resumes that operation instead of reporting 404.
-        Ok(None)
-            if store
-                .get_setting(&format!("{}{id}", crate::user_removal::USER_REMOVAL_PREFIX))
-                .ok()
-                .flatten()
-                .is_some() => {}
-        Ok(None) => return err(StatusCode::NOT_FOUND, "user.missing", "用户不存在"),
-        Err(error) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            );
+    {
+        let store = state.store.lock();
+        match store.get_user(id) {
+            Ok(Some(user)) if user.role == UserRole::Admin => {
+                return err(StatusCode::BAD_REQUEST, "user.protected", "不能删除管理员");
+            }
+            Ok(Some(_)) => {}
+            // The User is already gone: answer with its pending or finished operation.
+            Ok(None) => match removal::pending_removal_of(&store, id) {
+                Ok(Some(_)) => {}
+                Ok(None) => match removal::finished_removal_of(&store, id) {
+                    Ok(Some(done)) => {
+                        return (StatusCode::ACCEPTED, ok(removal::status_dto(&done))).into_response();
+                    }
+                    Ok(None) => return err(StatusCode::NOT_FOUND, "user.missing", "用户不存在"),
+                    Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &e),
+                },
+                Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &e),
+            },
+            Err(error) => {
+                return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error.to_string());
+            }
         }
     }
-    let removal_service =
-        crate::user_removal::UserRemovalService::new(std::sync::Arc::new(state.clone()));
-    drop(store);
+    let service = removal::UserRemovalService::new(std::sync::Arc::new(state.clone()));
+    let record = match service.accept(id) {
+        Ok(record) => record,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "user.removal_failed", &e),
+    };
+    // The remaining phases run in the background; GET /users/removals/{operation_id}
+    // reports progress and a recorded failure, startup recovery and the job loop retry it.
+    tokio::task::spawn_blocking(move || {
+        if let Err(error) = service.continue_removal(id) {
+            tracing::error!(user_id = %id, %error, "用户删除后台阶段失败，等待重试");
+        }
+    });
+    (StatusCode::ACCEPTED, ok(removal::status_dto(&record))).into_response()
+}
 
-    match removal_service.start_removal(id) {
-        Ok(operation_id) => (
-            StatusCode::ACCEPTED,
-            ok(json!({ "operation_id": operation_id, "status": "accepted" })),
-        )
-            .into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, "user.removal_failed", &e),
+pub(crate) async fn removal_status(
+    State(state): State<ApiState>,
+    Path(operation_id): Path<String>,
+) -> Response {
+    let found = crate::user_removal::find_removal(&state.store.lock(), &operation_id);
+    match found {
+        Ok(Some(record)) => ok(crate::user_removal::status_dto(&record)).into_response(),
+        Ok(None) => err(StatusCode::NOT_FOUND, "user_removal.missing", "删除操作不存在"),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &e),
     }
 }

@@ -155,6 +155,9 @@ pub fn spawn_job_loop_with_control(
             {
                 tracing::error!(%error, "恢复未完成的用户删除操作失败");
             }
+            // A failed user removal keeps its record; retry it periodically (backoff) instead
+            // of only at the next lease acquisition.
+            let mut next_removal_retry = read_clock(&clock).saturating_add(USER_REMOVAL_RETRY_SECS);
             loop {
                 if loop_control.is_stopping() {
                     return;
@@ -167,6 +170,18 @@ pub fn spawn_job_loop_with_control(
                     continue 'lease;
                 }
                 let now = read_clock(&clock);
+                if now >= next_removal_retry {
+                    next_removal_retry = now.saturating_add(USER_REMOVAL_RETRY_SECS);
+                    let retry_state = state.clone();
+                    let retried = tokio::task::spawn_blocking(move || {
+                        crate::user_removal::UserRemovalService::new(std::sync::Arc::new(retry_state))
+                            .recover_pending_removals()
+                    })
+                    .await;
+                    if let Ok(Err(error)) = retried {
+                        tracing::error!(%error, "重试未完成的用户删除操作失败");
+                    }
+                }
                 if let Err(error) = state.probe.dispatch_due(now.saturating_mul(1000), 32) {
                     tracing::error!(%error, now, "【媒体探测】派发到期阶段失败");
                 }
@@ -416,3 +431,6 @@ fn read_clock(clock: &Arc<Mutex<Box<dyn Fn() -> i64 + Send>>>) -> i64 {
 pub fn unix_now() -> i64 {
     crate::store::unix_now()
 }
+
+/// Seconds between background retries of user removals that are still pending or failed.
+const USER_REMOVAL_RETRY_SECS: i64 = 60;

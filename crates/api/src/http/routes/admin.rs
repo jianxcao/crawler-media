@@ -21,6 +21,7 @@ pub(super) fn admin_core_routes() -> Router<ApiState> {
             "/users/{id}",
             patch(users::update_user).delete(users::delete_user),
         )
+        .route("/users/removals/{operation_id}", get(users::removal_status))
         // sites
         .route("/sites", post(sites::create_site))
         .route(
