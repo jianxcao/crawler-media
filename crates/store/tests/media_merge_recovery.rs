@@ -505,7 +505,7 @@ fn merge_moves_the_losers_nfo_inputs_and_keeps_the_survivors_row() {
         &lib,
         &loser,
         &root,
-        "loser/tvshow.nfo",
+        "/tv/loser/tvshow.nfo",
         "loser-digest",
         3,
     );
@@ -515,7 +515,7 @@ fn merge_moves_the_losers_nfo_inputs_and_keeps_the_survivors_row() {
         &lib,
         &survivor,
         &root,
-        "survivor/tvshow.nfo",
+        "/tv/survivor/tvshow.nfo",
         "survivor-digest",
         4,
     );
@@ -524,7 +524,7 @@ fn merge_moves_the_losers_nfo_inputs_and_keeps_the_survivors_row() {
         &lib,
         &loser,
         &root,
-        "survivor/tvshow.nfo",
+        "/tv/survivor/tvshow.nfo",
         "loser-digest",
         5,
     );
@@ -544,7 +544,7 @@ fn merge_moves_the_losers_nfo_inputs_and_keeps_the_survivors_row() {
     let adopted: (String, String, i64) = db
         .query_row(
             "SELECT media_id, export_digest, revision FROM library_metadata_inputs
-             WHERE input_key = 'loser/tvshow.nfo'",
+             WHERE input_key = '/tv/loser/tvshow.nfo'",
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
@@ -554,7 +554,7 @@ fn merge_moves_the_losers_nfo_inputs_and_keeps_the_survivors_row() {
     let contested: Vec<(String, String, i64)> = db
         .prepare(
             "SELECT media_id, export_digest, revision FROM library_metadata_inputs
-             WHERE input_key = 'survivor/tvshow.nfo'",
+             WHERE input_key = '/tv/survivor/tvshow.nfo'",
         )
         .unwrap()
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))

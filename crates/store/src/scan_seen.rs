@@ -66,8 +66,8 @@ impl Store {
         )?;
         for (path, mtime_ms, file_size, content_digest) in stamps {
             tx.execute(
-                "INSERT INTO scan_seen (operation_id, path, mtime_ms, file_size, content_digest)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
+                "INSERT INTO scan_seen (operation_id, path, path_key, mtime_ms, file_size, content_digest)
+                 VALUES (?1, ?2, norm_path_key(?2), ?3, ?4, ?5)
                  ON CONFLICT(operation_id, path)
                  DO UPDATE SET mtime_ms = excluded.mtime_ms, file_size = excluded.file_size,
                                content_digest = excluded.content_digest",
@@ -78,7 +78,7 @@ impl Store {
                 "UPDATE library_files
                     SET mtime_ns = ?2 * 1000000, size_bytes = ?3,
                         source_digest = ?4
-                  WHERE path_key = norm_path_key(?1) OR display_path = ?1",
+                  WHERE path_key = norm_path_key(?1)",
                 params![path, mtime_ms, file_size, content_digest],
             )?;
         }
@@ -158,8 +158,8 @@ impl Store {
         let placeholders: Vec<String> = (2..=paths.len() + 1).map(|i| format!("?{i}")).collect();
         let sql = format!(
             "SELECT s.path, s.mtime_ms, s.file_size, s.content_digest,
-                    EXISTS(SELECT 1 FROM library_files f WHERE f.path_key = norm_path_key(s.path) OR f.display_path = s.path) AS ledger_exists,
-                    (SELECT f.missing_at FROM library_files f WHERE f.path_key = norm_path_key(s.path) OR f.display_path = s.path LIMIT 1) AS missing_at
+                    EXISTS(SELECT 1 FROM library_files f WHERE f.path_key = s.path_key) AS ledger_exists,
+                    (SELECT f.missing_at FROM library_files f WHERE f.path_key = s.path_key LIMIT 1) AS missing_at
              FROM scan_seen s
              WHERE s.operation_id = ?1 AND s.path IN ({})",
             placeholders.join(",")

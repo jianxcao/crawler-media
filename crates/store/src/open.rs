@@ -148,7 +148,6 @@ impl Store {
             schema::layout::LIBRARY_APPLICATION_ID,
             schema::layout::V1_USER_VERSION,
         )?;
-        crate::path_key::migrate_library_keys(&self.library)?;
         schema::layout::initialize_or_validate(
             "subscribe",
             &self.subscribe,
@@ -157,6 +156,7 @@ impl Store {
             schema::layout::V1_USER_VERSION,
         )?;
         schema::seed_defaults(&self.app, &self.library, &self.data_dir)?;
+        crate::path_key::reload_root_aliases(&self.library)?;
         Ok(())
     }
 

@@ -21,6 +21,7 @@ sha2.workspace = true
 password-hash = { version = "0.5", features = ["rand_core"] }
 argon2 = { version = "0.5", features = ["std"] }
 tracing.workspace = true
+unicode-normalization.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

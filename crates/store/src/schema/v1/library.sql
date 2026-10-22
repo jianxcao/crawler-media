@@ -77,13 +77,13 @@ CREATE TABLE libraries (
 CREATE UNIQUE INDEX library_default ON libraries(kind) WHERE is_default=1;
 CREATE TABLE library_roots (
  root_id TEXT PRIMARY KEY NOT NULL, library_id TEXT NOT NULL REFERENCES libraries(library_id),
- path_key TEXT NOT NULL UNIQUE, display_path TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+ path_key TEXT NOT NULL UNIQUE CHECK(substr(path_key,1,1)='/' AND instr(path_key,'//')=0 AND instr(path_key,'/./')=0 AND instr(path_key,'/../')=0 AND path_key NOT LIKE '%/.' AND path_key NOT LIKE '%/..' AND (path_key='/' OR path_key NOT LIKE '%/')), display_path TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
  sort_order INTEGER NOT NULL DEFAULT 0, UNIQUE(root_id,library_id)
 );
 CREATE INDEX roots_library ON library_roots(library_id,sort_order,root_id);
 CREATE TABLE library_files (
  file_id TEXT PRIMARY KEY NOT NULL, library_id TEXT NOT NULL, root_id TEXT NOT NULL, media_id TEXT NOT NULL, kind TEXT NOT NULL,
- path_key TEXT NOT NULL UNIQUE, display_path TEXT NOT NULL, presence_state TEXT NOT NULL CHECK(presence_state IN ('present','missing','unknown')),
+ path_key TEXT NOT NULL UNIQUE CHECK(substr(path_key,1,1)='/' AND instr(path_key,'//')=0 AND instr(path_key,'/./')=0 AND instr(path_key,'/../')=0 AND path_key NOT LIKE '%/.' AND path_key NOT LIKE '%/..' AND (path_key='/' OR path_key NOT LIKE '%/')), display_path TEXT NOT NULL, presence_state TEXT NOT NULL CHECK(presence_state IN ('present','missing','unknown')),
  publication_state TEXT NOT NULL CHECK(publication_state IN ('pending','published')),
  file_revision INTEGER NOT NULL CHECK(file_revision>0), source_version TEXT NOT NULL,
  size_bytes INTEGER CHECK(size_bytes IS NULL OR size_bytes>=0), stat_known INTEGER NOT NULL DEFAULT 0,
@@ -129,7 +129,7 @@ CREATE INDEX units_media_scope ON library_units(media_id,season,episode,library_
 CREATE TABLE library_metadata_inputs (
  library_id TEXT NOT NULL, media_id TEXT NOT NULL REFERENCES media(media_id), entity_scope TEXT NOT NULL,
  season INTEGER NOT NULL, episode INTEGER NOT NULL, locale TEXT NOT NULL, input_key TEXT NOT NULL,
- root_id TEXT NOT NULL, path_key TEXT NOT NULL, parse_state TEXT NOT NULL CHECK(parse_state IN ('valid','invalid','unknown','missing')),
+ root_id TEXT NOT NULL, path_key TEXT NOT NULL CHECK(substr(path_key,1,1)='/' AND instr(path_key,'//')=0 AND instr(path_key,'/./')=0 AND instr(path_key,'/../')=0 AND path_key NOT LIKE '%/.' AND path_key NOT LIKE '%/..' AND (path_key='/' OR path_key NOT LIKE '%/')), parse_state TEXT NOT NULL CHECK(parse_state IN ('valid','invalid','unknown','missing')),
  source_version TEXT NOT NULL, fields_json TEXT NOT NULL CHECK(json_valid(fields_json)),
  present_fields_json TEXT NOT NULL CHECK(json_valid(present_fields_json)),
  provenance_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(provenance_json)),
@@ -294,7 +294,7 @@ CREATE TABLE scan_operations (
  scope_kind TEXT NOT NULL DEFAULT 'full' CHECK(scope_kind IN ('full','targeted')),dirty_rev INTEGER NOT NULL DEFAULT 0,consumed_rev INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX scan_library_status ON scan_operations(library_id,status);
-CREATE TABLE scan_seen (operation_id TEXT NOT NULL,path TEXT NOT NULL,mtime_ms INTEGER NOT NULL DEFAULT 0,file_size INTEGER NOT NULL DEFAULT 0,content_digest TEXT,PRIMARY KEY(operation_id,path));
+CREATE TABLE scan_seen (operation_id TEXT NOT NULL,path TEXT NOT NULL,path_key TEXT NOT NULL,mtime_ms INTEGER NOT NULL DEFAULT 0,file_size INTEGER NOT NULL DEFAULT 0,content_digest TEXT,PRIMARY KEY(operation_id,path));
 CREATE TABLE probe_jobs (
  id TEXT PRIMARY KEY NOT NULL,kind TEXT NOT NULL,media_id TEXT NOT NULL,season INTEGER,scope_key TEXT NOT NULL,status TEXT NOT NULL,
  total INTEGER NOT NULL,completed INTEGER NOT NULL DEFAULT 0,succeeded INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,partial INTEGER NOT NULL DEFAULT 0,error TEXT,

@@ -81,7 +81,9 @@ impl Store {
                     "file library_id does not match write scope".into(),
                 ));
             }
-            ensure_root_owns_path(&tx, file)?;
+            // A root-relative path is resolved once here; every key is absolute.
+            let absolutized = ensure_root_owns_path(&tx, file)?;
+            let file = absolutized.as_ref().unwrap_or(file);
             ensure_media_writable(&tx, file.media_id)?;
             let file_id = file.file_id.to_string();
             let before = read_file_summary_facts(&tx, &file_id)?;
@@ -235,17 +237,28 @@ impl Store {
 
         for obs in observations {
             let file_id_str = obs.file_id.to_string();
-            let existing: Option<(String, String, i64, String, String)> = tx
+            let existing: Option<(String, String, i64, String, String, String)> = tx
                 .query_row(
-                    "SELECT media_id, presence_state, file_revision, source_version, path_key
-                     FROM library_files
-                     WHERE file_id = ?1 AND library_id = ?2",
+                    "SELECT f.media_id, f.presence_state, f.file_revision, f.source_version,
+                            f.path_key, r.path_key
+                     FROM library_files f JOIN library_roots r ON r.root_id = f.root_id
+                     WHERE f.file_id = ?1 AND f.library_id = ?2",
                     params![file_id_str, scope.library_id.to_string()],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                        ))
+                    },
                 )
                 .optional()?;
 
-            let Some((media_id_str, current_state, cur_rev, cur_src_ver, cur_path)) = existing
+            let Some((media_id_str, current_state, cur_rev, cur_src_ver, cur_path, root_key)) =
+                existing
             else {
                 report.skipped += 1;
                 continue;
@@ -253,8 +266,11 @@ impl Store {
 
             if obs.observed_version.revision != cur_rev
                 || obs.observed_version.source_version != cur_src_ver
-                || crate::path_key::normalize_path_key(&obs.observed_path.to_string_lossy())
-                    != cur_path
+                || crate::path_key::normalize_path_key(
+                    &Path::new(&root_key)
+                        .join(&obs.observed_path)
+                        .to_string_lossy(),
+                ) != cur_path
             {
                 report.skipped += 1;
                 continue;
@@ -427,8 +443,12 @@ pub(crate) fn ensure_media_writable(tx: &Connection, media_id: MediaId) -> Resul
     }
 }
 
-/// The declared root must exist for this Library, and an absolute path must live under it.
-fn ensure_root_owns_path(tx: &Connection, file: &LibraryFile) -> Result<(), StoreError> {
+/// The declared root must exist for this Library and own the path. A root-relative
+/// path is joined onto the root (returned as an owned copy); `..` is never accepted.
+pub(crate) fn ensure_root_owns_path(
+    tx: &Connection,
+    file: &LibraryFile,
+) -> Result<Option<LibraryFile>, StoreError> {
     let root: Option<String> = tx
         .query_row(
             "SELECT display_path FROM library_roots WHERE root_id = ?1 AND library_id = ?2",
@@ -442,13 +462,28 @@ fn ensure_root_owns_path(tx: &Connection, file: &LibraryFile) -> Result<(), Stor
             file.root_id, file.library_id
         )));
     };
-    if file.path.is_absolute() && !file.path.starts_with(Path::new(&root)) {
+    if file
+        .path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(StoreError::Invalid(format!(
+            "path {} contains `..`",
+            file.path.display()
+        )));
+    }
+    if !file.path.is_absolute() {
+        let mut owned = file.clone();
+        owned.path = Path::new(&root).join(&file.path);
+        return Ok(Some(owned));
+    }
+    if !file.path.starts_with(Path::new(&root)) {
         return Err(StoreError::Invalid(format!(
             "path {} is outside root {root}",
             file.path.display()
         )));
     }
-    Ok(())
+    Ok(None)
 }
 
 fn upsert_file_row(

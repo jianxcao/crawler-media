@@ -346,44 +346,25 @@ async fn path_reconciliation_reports_and_applies_ledger_moves() {
 }
 
 #[tokio::test]
-async fn root_consolidation_accepts_duplicate_root_as_async_operation() {
+async fn duplicate_physical_root_is_rejected_up_front() {
     let tmp = tempfile::tempdir().unwrap();
     let app = app(&tmp);
     let movie = tmp.path().join("data/library/movies");
-    std::fs::create_dir_all(&movie).unwrap();
+    std::fs::create_dir_all(movie.join("same")).unwrap();
     let movie_id = movie_library_id(&app).await;
-
-    // 根目录归并：给库加一个指向同一物理目录的根。
+    // `movies/same/..` is the same directory: the canonical root key collides.
     let dup_root = movie.join("same").join("..");
-    std::fs::create_dir_all(&dup_root).unwrap();
-    patch_roots_and_wait(
-        &app,
-        &movie_id,
-        vec![movie.display().to_string(), dup_root.display().to_string()],
-    )
-    .await;
-
-    // 两个新根都已落库（同物理目录的第二个根留给归并处理）。
-    let listed = json_body(
-        app.clone()
-            .oneshot(request(
-                "GET",
-                "/api/v1/libraries",
-                Some("management-secret"),
-                Value::Null,
-            ))
-            .await
-            .unwrap(),
-    )
-    .await;
-    let library = listed["data"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|library| library["id"] == movie_id.as_str())
+    let patch = app
+        .clone()
+        .oneshot(request(
+            "PATCH",
+            &format!("/api/v1/libraries/{movie_id}"),
+            Some("management-secret"),
+            json!({ "root_paths": [movie.display().to_string(), dup_root.display().to_string()] }),
+        ))
+        .await
         .unwrap();
-    assert_eq!(library["root_paths"].as_array().unwrap().len(), 2);
-
+    assert!(patch.status().is_client_error(), "{}", patch.status());
     let dup = json_body(
         app.clone()
             .oneshot(request(
@@ -396,7 +377,7 @@ async fn root_consolidation_accepts_duplicate_root_as_async_operation() {
             .unwrap(),
     )
     .await;
-    assert_eq!(dup["data"]["duplicates"].as_array().unwrap().len(), 1);
+    assert_eq!(dup["data"]["duplicates"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]

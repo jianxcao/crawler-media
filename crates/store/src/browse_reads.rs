@@ -287,20 +287,30 @@ impl Store {
         let unique: Vec<&str> = unique.into_iter().collect();
         let mut missing = HashSet::new();
         for chunk in unique.chunks(MEDIA_BATCH_CHUNK) {
-            let placeholders = vec!["?"; chunk.len()].join(", ");
+            // Keys are canonical at write time; canonicalize the probes once here
+            // and hit the `path_key` UNIQUE index directly (no dual display read).
+            let mut by_key: std::collections::HashMap<String, Vec<&str>> =
+                std::collections::HashMap::new();
+            for path in chunk {
+                by_key
+                    .entry(crate::path_key::normalize_path_key(path))
+                    .or_default()
+                    .push(path);
+            }
+            let placeholders = vec!["?"; by_key.len()].join(", ");
             let sql = format!(
-                "SELECT display_path FROM library_files
-                 WHERE missing_at IS NOT NULL AND (display_path IN ({placeholders}) OR path_key IN ({placeholders}))"
+                "SELECT path_key FROM library_files
+                 WHERE missing_at IS NOT NULL AND path_key IN ({placeholders})"
             );
             let mut stmt = self.library.prepare(&sql)?;
-            let mut query_params: Vec<&str> = Vec::new();
-            query_params.extend(chunk.iter().copied());
-            query_params.extend(chunk.iter().copied());
-            let rows = stmt.query_map(rusqlite::params_from_iter(query_params), |row| {
+            let keys: Vec<&String> = by_key.keys().collect();
+            let rows = stmt.query_map(rusqlite::params_from_iter(keys), |row| {
                 row.get::<_, String>(0)
             })?;
             for row in rows {
-                missing.insert(row?);
+                for path in by_key.get(&row?).into_iter().flatten() {
+                    missing.insert((*path).to_string());
+                }
             }
         }
         Ok(missing)

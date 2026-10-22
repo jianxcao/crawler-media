@@ -28,7 +28,6 @@ pub struct RenameSidecar {
     pub from: PathBuf,
     pub to: PathBuf,
     /// Move when this video is the sole owner, copy when other media share it.
-    #[serde(default)]
     pub mode: SidecarMode,
 }
 
@@ -431,7 +430,7 @@ pub(crate) struct DestOwner {
 fn refuse_occupied(tx: &Connection, path: &str, file_id: &str) -> Result<(), StoreError> {
     let occupied: i64 = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM library_files
-                       WHERE (path_key = norm_path_key(?1) OR display_path = ?1) AND file_id <> ?2)",
+                       WHERE path_key = norm_path_key(?1) AND file_id <> ?2)",
         params![path, file_id],
         |r| r.get(0),
     )?;

@@ -97,8 +97,13 @@ fn seed_libraries_and_roots(
             let root_id = uuid::Uuid::new_v4().to_string();
             library.execute(
                 "INSERT INTO library_roots (root_id, library_id, path_key, display_path, enabled, sort_order)
-                 VALUES (?1, ?2, norm_path_key(?3), ?3, 1, 0)",
-                params![root_id, lib_id, root_str],
+                 VALUES (?1, ?2, ?4, ?3, 1, 0)",
+                params![
+                    root_id,
+                    lib_id,
+                    root_str,
+                    crate::path_key::canonical_root_key(&root_str)?
+                ],
             )?;
         }
     }

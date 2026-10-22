@@ -12,12 +12,10 @@ use serde::{Deserialize, Serialize};
 use super::rename_durable::RenameSidecar;
 use crate::StoreError;
 
-/// How a sidecar reaches the destination. Persisted in `sidecars_json`; intents
-/// written before this field existed decode as `Move`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// How a sidecar reaches the destination. Persisted in `sidecars_json` (required).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SidecarMode {
-    #[default]
     Move,
     Copy,
 }

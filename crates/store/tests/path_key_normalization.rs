@@ -115,49 +115,164 @@ fn root_paths_differing_only_by_spelling_are_duplicates() {
 }
 
 #[test]
-fn open_migrates_verbatim_keys_and_keeps_colliding_rows() {
+fn schema_rejects_non_canonical_keys_directly() {
     let (tmp, store, root) = setup();
     let media = movie(&store);
-    let a = root.join("A.mkv");
-    let b = root.join("B.mkv");
-    for p in [&a, &b] {
-        std::fs::write(p, b"m").unwrap();
-        publish_fixture_file(
-            &store,
-            &FixtureFile {
-                media_id: media,
-                path: p.display().to_string(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    }
+    let clean = root.join("A.mkv");
+    std::fs::write(&clean, b"m").unwrap();
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            media_id: media,
+            path: clean.display().to_string(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     drop(store);
-    let legacy_a = format!("{}//A.mkv", root.display());
-    {
-        let conn = raw(&tmp);
-        conn.execute(
-            "UPDATE library_files SET path_key = ?1, display_path = ?1 WHERE path_key = ?2",
-            [&legacy_a, &a.display().to_string()],
-        )
-        .unwrap();
-        // A legacy duplicate spelling of B that cannot be migrated without a collision.
-        let legacy_b = format!("{}/./A.mkv", root.display());
-        conn.execute(
-            "UPDATE library_files SET path_key = ?1, display_path = ?1 WHERE path_key = ?2",
-            [&legacy_b, &b.display().to_string()],
-        )
-        .unwrap();
+    let conn = raw(&tmp);
+    for bad in [
+        format!("{}//A.mkv", root.display()),
+        format!("{}/./A.mkv", root.display()),
+        format!("{}/x/../A.mkv", root.display()),
+        format!("{}/", root.display()),
+        "relative/A.mkv".to_string(),
+    ] {
+        let result = conn.execute("UPDATE library_files SET path_key = ?1", [&bad]);
+        assert!(
+            result.is_err(),
+            "schema must reject non-canonical key {bad:?}"
+        );
     }
-    let reopened = Store::open(tmp.path().join("data")).unwrap();
-    drop(reopened);
+}
+
+#[test]
+fn nfd_and_nfc_spellings_are_one_key() {
+    let (tmp, store, root) = setup();
+    let media = movie(&store);
+    let nfd = root.join("Cafe\u{301}.mkv");
+    std::fs::write(&nfd, b"m").unwrap();
+    let first = publish_fixture_file(
+        &store,
+        &FixtureFile {
+            media_id: media,
+            path: nfd.display().to_string(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let nfc = root.join("Caf\u{e9}.mkv");
+    let second = publish_fixture_file(
+        &store,
+        &FixtureFile {
+            media_id: media,
+            path: nfc.display().to_string(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(first.file_id, second.file_id);
     let rows = file_rows(&tmp);
-    assert_eq!(rows.len(), 2, "migration never drops rows");
-    let keys: Vec<&str> = rows.iter().map(|r| r.1.as_str()).collect();
-    assert!(keys.contains(&a.display().to_string().as_str()), "{keys:?}");
-    let migrated = rows
-        .iter()
-        .find(|r| r.1 == a.display().to_string())
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1, nfc.display().to_string(), "key is NFC");
+}
+
+#[test]
+fn symlinked_root_is_keyed_canonically_and_aliases_collide() {
+    let tmp = tempfile::tempdir().unwrap();
+    let real = tmp.path().join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    let alias = tmp.path().join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    store
+        .create_library(
+            MediaKind::Movie,
+            "A",
+            &[alias.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
         .unwrap();
-    assert_eq!(migrated.2, legacy_a, "display spelling survives migration");
+    let media = movie(&store);
+    let via_alias = alias.join("M.mkv");
+    std::fs::write(&via_alias, b"m").unwrap();
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            media_id: media,
+            path: via_alias.display().to_string(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let rows = file_rows(&tmp);
+    let real_key = std::fs::canonicalize(&real).unwrap().join("M.mkv");
+    assert_eq!(
+        rows[0].1,
+        real_key.display().to_string(),
+        "file keyed under canonical root"
+    );
+    assert_eq!(
+        rows[0].2,
+        via_alias.display().to_string(),
+        "display keeps alias spelling"
+    );
+    let dup = store.create_library(
+        MediaKind::Movie,
+        "B",
+        &[real.to_str().unwrap()],
+        "everyone",
+        true,
+        &[],
+    );
+    assert!(
+        dup.is_err(),
+        "the real path of an aliased root is the same root: {dup:?}"
+    );
+    let dotted = format!("{}/x/..", real.display());
+    std::fs::create_dir_all(real.join("x")).unwrap();
+    let dup = store.create_library(
+        MediaKind::Movie,
+        "C",
+        &[dotted.as_str()],
+        "everyone",
+        true,
+        &[],
+    );
+    assert!(
+        dup.is_err(),
+        "`..` spelling of an existing root resolves to it: {dup:?}"
+    );
+    let missing = format!("{}/nope/../y", tmp.path().display());
+    let bad = store.create_library(
+        MediaKind::Movie,
+        "D",
+        &[missing.as_str()],
+        "everyone",
+        true,
+        &[],
+    );
+    assert!(
+        bad.is_err(),
+        "`..` in a non-existent root is rejected: {bad:?}"
+    );
+}
+
+#[test]
+fn file_paths_with_parent_components_are_rejected() {
+    let (_tmp, store, root) = setup();
+    let media = movie(&store);
+    std::fs::write(root.join("A.mkv"), b"m").unwrap();
+    let dotted = format!("{}/sub/../A.mkv", root.display());
+    let result = publish_fixture_file(
+        &store,
+        &FixtureFile {
+            media_id: media,
+            path: dotted,
+            ..Default::default()
+        },
+    );
+    assert!(result.is_err(), "{result:?}");
 }

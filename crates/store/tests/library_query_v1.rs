@@ -227,8 +227,8 @@ fn library_file_page_paginates_files_deterministically() {
         .library_file_page(scope.library_id, media_id.parse().unwrap(), None, 3)
         .unwrap();
     assert_eq!(p1.files.len(), 3);
-    assert_eq!(p1.files[0].path.to_str().unwrap(), "Show/S01E01.mkv");
-    assert_eq!(p1.files[2].path.to_str().unwrap(), "Show/S01E03.mkv");
+    assert_eq!(p1.files[0].path.to_str().unwrap(), "/tv/Show/S01E01.mkv");
+    assert_eq!(p1.files[2].path.to_str().unwrap(), "/tv/Show/S01E03.mkv");
 
     // Query next page with limit 3 using cursor
     let cursor = p1.next_cursor.as_deref();
@@ -237,8 +237,8 @@ fn library_file_page_paginates_files_deterministically() {
         .library_file_page(scope.library_id, media_id.parse().unwrap(), cursor, 3)
         .unwrap();
     assert_eq!(p2.files.len(), 2);
-    assert_eq!(p2.files[0].path.to_str().unwrap(), "Show/S01E04.mkv");
-    assert_eq!(p2.files[1].path.to_str().unwrap(), "Show/S01E05.mkv");
+    assert_eq!(p2.files[0].path.to_str().unwrap(), "/tv/Show/S01E04.mkv");
+    assert_eq!(p2.files[1].path.to_str().unwrap(), "/tv/Show/S01E05.mkv");
 }
 
 #[test]

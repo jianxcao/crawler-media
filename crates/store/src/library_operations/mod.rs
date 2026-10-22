@@ -111,6 +111,20 @@ impl Store {
                 "library reconfiguration cannot drop every root".into(),
             ));
         }
+        if let Some(paths) = &request.root_paths {
+            // Two spellings of one physical directory are one root: refuse up front
+            // (canonical key; symlinks and `..` resolved) instead of failing mid-apply.
+            let mut keys = std::collections::HashSet::new();
+            for path in paths {
+                let key = crate::path_key::canonical_root_key(&path.to_string_lossy())?;
+                if !keys.insert(key.clone()) {
+                    return Err(StoreError::Invalid(format!(
+                        "root {} duplicates another requested root ({key})",
+                        path.display()
+                    )));
+                }
+            }
+        }
         if request
             .display_locale
             .as_deref()

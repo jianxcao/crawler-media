@@ -45,7 +45,7 @@ impl Store {
             .library
             .query_row(
                 "SELECT file_id FROM library_files
-                 WHERE path_key = norm_path_key(?1) OR display_path = ?1
+                 WHERE path_key = norm_path_key(?1)
                  LIMIT 1",
                 [path],
                 |row| row.get(0),
@@ -118,7 +118,7 @@ impl Store {
         Ok(self
             .library
             .query_row(
-                "SELECT file_id FROM library_files WHERE path_key = norm_path_key(?1) OR display_path = ?1 LIMIT 1",
+                "SELECT file_id FROM library_files WHERE path_key = norm_path_key(?1) LIMIT 1",
                 [path],
                 |row| row.get(0),
             )

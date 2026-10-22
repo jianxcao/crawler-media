@@ -29,13 +29,6 @@ struct Snapshot {
     rows: Vec<RemovalRow>,
 }
 
-/// Snapshot layout written before roots moved into `library_removal_roots`.
-#[derive(Deserialize)]
-struct LegacySnapshot {
-    #[serde(default)]
-    roots: Vec<PathBuf>,
-}
-
 #[derive(Serialize, Deserialize)]
 struct RemovalRow {
     ledger_id: String,

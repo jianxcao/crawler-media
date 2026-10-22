@@ -222,6 +222,11 @@ pub(crate) async fn patch_library(
             super::library_operations::reindexing_conflict(operation_id.as_deref())
         }
         Err(StorageOperationError::Store(StoreError::Missing(_))) => missing_library(),
+        Err(StorageOperationError::Store(StoreError::Invalid(message))) => err(
+            StatusCode::BAD_REQUEST,
+            "library.invalid_operation",
+            &message,
+        ),
         Err(StorageOperationError::Store(error)) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
             "store.error",

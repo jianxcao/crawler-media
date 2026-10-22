@@ -66,9 +66,10 @@ impl Store {
                 |row| row.get(0),
             )?;
             let changed = tx.execute(
-                "UPDATE library_roots SET path_key = norm_path_key(?2), display_path = ?2 WHERE root_id = ?1",
-                params![root_id, path],
+                "UPDATE library_roots SET path_key = ?3, display_path = ?2 WHERE root_id = ?1",
+                params![root_id, path, crate::path_key::canonical_root_key(path)?],
             )?;
+            crate::path_key::reload_root_aliases(&tx)?;
             if changed == 0 {
                 return Err(StoreError::Missing(format!("library root {root_id}")));
             }
