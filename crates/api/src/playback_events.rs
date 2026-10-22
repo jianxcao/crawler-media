@@ -57,7 +57,7 @@ pub fn classify_event_with_target(
     event: PlaybackEventKind,
 ) -> EventDecision {
     let Some(session_id) = identity.play_session_id.as_deref() else {
-        return classify_legacy(previous, ledger, event);
+        return classify_legacy(previous, ledger, target_unit, event);
     };
     // Unrecognized or forged session ID -> Ignore
     let Some(b) = binding else {
@@ -151,21 +151,33 @@ fn classify_with_session_id(
 fn classify_legacy(
     previous: Option<&SessionRow>,
     ledger: LedgerId,
+    target_unit: Option<domain::UnitKey>,
     event: PlaybackEventKind,
 ) -> EventDecision {
     match event {
         PlaybackEventKind::Start => EventDecision::Start,
         PlaybackEventKind::Progress => match previous {
-            Some(prev) if !legacy_target_matches(prev, ledger) => EventDecision::Ignore,
+            Some(prev) if !legacy_target_matches(prev, ledger, target_unit) => EventDecision::Ignore,
             _ => EventDecision::Update,
         },
         PlaybackEventKind::Stop => match previous {
-            Some(prev) if legacy_target_matches(prev, ledger) => EventDecision::Stop,
+            Some(prev) if legacy_target_matches(prev, ledger, target_unit) => EventDecision::Stop,
             _ => EventDecision::Ignore,
         },
     }
 }
 
-fn legacy_target_matches(prev: &SessionRow, ledger: LedgerId) -> bool {
-    prev.ledger_id.as_deref() == Some(&ledger.to_string()) || prev.ledger_id.is_none()
+/// A no-ID late event matches the live session only when it names the same
+/// physical file **and** the same logical unit: one file serving E01 and E02
+/// must not let an E01 event write through the active E02 session (R07).
+fn legacy_target_matches(
+    prev: &SessionRow,
+    ledger: LedgerId,
+    target_unit: Option<domain::UnitKey>,
+) -> bool {
+    let same_file = prev.ledger_id.as_deref() == Some(&ledger.to_string()) || prev.ledger_id.is_none();
+    let same_unit = target_unit.is_none_or(|unit| {
+        domain::UnitKey::new(prev.season.unwrap_or(-1), prev.episode.unwrap_or(-1)) == unit
+    });
+    same_file && same_unit
 }

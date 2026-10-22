@@ -281,3 +281,39 @@ async fn merged_e02_progress_touches_only_e02(
     };
     assert_eq!(e02_after.position_ms, 5000);
 }
+
+/// R07: with E02 live on `dev_tv`, a no-ID late E01 Progress/Stop from the same
+/// device names the same physical file but another unit: it must write nothing.
+#[tokio::test]
+async fn merged_no_id_other_unit_is_ignored() {
+    let fix = PresenceFixture::new();
+    let merged = merged_e02_fixture(&fix);
+    merged_e02_open_episode_sessions(&fix, &merged).await;
+    let read = |season, episode| {
+        let store_arc = fix.state.store();
+        let guard = store_arc.lock();
+        guard.unit_state(merged.user_id, merged.media_id, season, episode).unwrap()
+    };
+    let (e01_before, e02_before) = (read(1, 1), read(1, 2));
+    for event in ["progress", "stop"] {
+        let (status, _) = fix
+            .request_with_body(
+                "POST",
+                "/api/v1/playback/progress",
+                Some(&fix.admin_token),
+                json!({
+                    "device_id": "dev_tv",
+                    "media_item_id": merged.media_id.to_string(),
+                    "file_id": merged.file_id.to_string(),
+                    "season": 1,
+                    "episode": 1,
+                    "event": event,
+                    "position_ms": 5000,
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    assert_eq!(read(1, 1), e01_before, "E01 must not move through the E02 session");
+    assert_eq!(read(1, 2), e02_before);
+}

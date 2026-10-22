@@ -99,11 +99,12 @@ pub(super) fn report_event(
         PlaybackEvent::Stopped => crate::playback_events::PlaybackEventKind::Stop,
     };
 
-    let decision = crate::playback_events::classify_event(
+    let decision = crate::playback_events::classify_event_with_target(
         prior.as_ref(),
         binding.as_ref(),
         &shared_identity,
         target_ledger_id,
+        Some(domain::UnitKey::new(target.season, target.episode)),
         event_kind,
     );
     if decision == crate::playback_events::EventDecision::Ignore {

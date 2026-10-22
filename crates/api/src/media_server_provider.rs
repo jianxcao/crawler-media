@@ -29,6 +29,7 @@ struct ServerReadSnapshot {
 mod item_metadata;
 mod person_images;
 mod playback;
+mod stream_binding;
 use item_metadata::{
     backdrop_path, item_metadata, local_primary_image, merge_catalog_metadata, primary_image_url,
 };
@@ -501,8 +502,8 @@ impl MediaServerProvider for ApiServerProvider {
         user_id: UserId,
         id: &str,
         media_source_id: Option<&str>,
-        _play_session_id: Option<&str>,
-        _device_id: Option<&str>,
+        play_session_id: Option<&str>,
+        device_id: Option<&str>,
     ) -> Result<Option<(PathBuf, bool)>, String> {
         // Must not accept bare file UUID as a logical ID
         if id.len() == 36
@@ -520,31 +521,38 @@ impl MediaServerProvider for ApiServerProvider {
         };
 
         let file = if let Some(msid) = media_source_id {
-            let store = self.state.store.lock();
-            let parsed_id = msid.replace('-', "").parse::<domain::LedgerId>().ok();
-            let Some(source_file_id) = parsed_id else {
+            // Only the versioned `f1_<file>_<revision>` shape advertised by
+            // PlaybackInfo is accepted; a bare file UUID is not a MediaSourceId.
+            let Some(physical) = domain::PhysicalSourceId::from_wire_string(msid) else {
                 return Ok(None);
             };
+            let store = self.state.store.lock();
             let Some(file) = store
-                .visible_file(user_id, source_file_id)
+                .visible_file(user_id, physical.file_id)
                 .map_err(|e| e.to_string())?
             else {
                 return Ok(None);
             };
             let covers = store
                 .file_covers_unit(
-                    source_file_id,
+                    physical.file_id,
                     entry.media.id,
                     domain::UnitKey::new(entry.unit.0, entry.unit.1),
                 )
                 .map_err(|e| e.to_string())?;
-            if !covers || file.media_id != entry.media.id {
+            if !covers || file.media_id != entry.media.id || file.version.revision != physical.revision {
                 return Ok(None);
             }
             file
         } else {
-            entry.file
+            entry.file.clone()
         };
+        if let Some(session_id) = play_session_id
+            && !self.stream_matches_binding(user_id, device_id, session_id, &entry, &file)?
+        {
+            tracing::warn!(%user_id, item_id = %id, "Jellyfin 取流与签发的播放会话绑定不符，拒绝");
+            return Ok(None);
+        }
 
         let path = file.path.clone();
         let is_strm = path

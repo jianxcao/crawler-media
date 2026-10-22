@@ -421,7 +421,12 @@ pub async fn playback_info(
         .map(str::to_ascii_lowercase);
     let runtime_ticks = snapshot.metadata.runtime_ticks;
     let media_streams = dto::media_streams_with_item(&snapshot.metadata.tracks, Some(&id));
-    let source_id = snapshot.file.file_id.to_string();
+    // Versioned physical source: a bare file UUID is not a MediaSourceId.
+    let source_id = domain::PhysicalSourceId {
+        file_id: snapshot.file.file_id,
+        revision: snapshot.file.version.revision,
+    }
+    .to_wire_string();
     let mut source = json!({
         "Id": source_id,
         "Path": source_path,
