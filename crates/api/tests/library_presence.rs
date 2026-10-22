@@ -173,37 +173,26 @@ async fn root_failure_rejects_whole_request_without_writes() {
 }
 
 #[tokio::test]
-async fn ambiguous_scope_rejects_without_default_fallback() {
+async fn symlink_alias_of_owned_root_cannot_create_ambiguous_scope() {
     let fix = PresenceFixture::new();
-    // 新模型在 `library_roots.path_key` 上全局唯一，无法登记两个字面相同的根；
-    // 用指向同一目录的符号链接别名复现「两个 Library 拥有同一物理根」的歧义。
+    // 根以符号链接解析后的规范键全局唯一：同一物理根无法被第二个 Library 登记，
+    // 歧义所有权在写入时即被拒绝，而不是等到 verify 才发现。
     let (_, _row) = fix.insert_media_and_ledger("one.mkv");
     let alias = fix.dir.path().join("movies-alias");
     std::os::unix::fs::symlink(&fix.root, &alias).unwrap();
-    {
-        let store_arc = fix.state.store();
-        let guard = store_arc.lock();
-        guard
-            .create_library(
-                MediaKind::Movie,
-                "Movies Duplicate",
-                &[alias.to_str().unwrap()],
-                "everyone",
-                true,
-                &[],
-            )
-            .unwrap();
-    }
-
-    let (status, res) = fix
-        .request(
-            "POST",
-            &format!("/api/v1/libraries/{}/verify", fix.library_id),
-            Some(&fix.admin_token),
+    let store_arc = fix.state.store();
+    let guard = store_arc.lock();
+    let err = guard
+        .create_library(
+            MediaKind::Movie,
+            "Movies Duplicate",
+            &[alias.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
         )
-        .await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(res["error"]["code"], "library.ownership_ambiguous");
+        .unwrap_err();
+    assert!(err.to_string().contains("UNIQUE"), "{err}");
 }
 
 #[tokio::test]
