@@ -341,10 +341,10 @@ impl Store {
     ) -> Result<Option<NfoExportAnchor>, StoreError> {
         let (season, episode) = request.scope.season_episode();
         let key = request.path.to_string_lossy();
-        let row: Option<(Option<String>, Option<String>)> = self
+        let row: Option<Option<String>> = self
             .library
             .query_row(
-                "SELECT export_digest, export_fields_json FROM library_metadata_inputs
+                "SELECT export_fields_json FROM library_metadata_inputs
                  WHERE library_id = ?1 AND media_id = ?2 AND entity_scope = ?3
                    AND season = ?4 AND episode = ?5 AND locale = ?6 AND input_key = ?7",
                 params![
@@ -356,17 +356,17 @@ impl Store {
                     self.nfo_export_locale(request)?,
                     key.as_ref()
                 ],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
             )
             .optional()?;
-        let Some((digest, fields_json)) = row else {
+        let Some(fields_json) = row else {
             return Ok(None);
         };
         let fields = match fields_json {
             Some(json) => Some(serde_json::from_str::<MetadataFields>(&json)?),
             None => None,
         };
-        Ok(Some(NfoExportAnchor { digest, fields }))
+        Ok(Some(NfoExportAnchor { fields }))
     }
 
     pub(crate) fn tag_nfo_export(&self, request: &NfoExportRequest) -> Result<bool, StoreError> {
@@ -551,9 +551,8 @@ where
     )))
 }
 
-/// Baseline digest of the sidecar as this library last registered it.
+/// The last export this library registered for the sidecar.
 struct NfoExportAnchor {
-    digest: Option<String>,
     /// Fields of the last export: the three-way baseline an edit is measured against.
     fields: Option<MetadataFields>,
 }
