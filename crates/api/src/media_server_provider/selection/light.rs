@@ -338,58 +338,6 @@ pub(super) fn light_item(
     }
 }
 
-pub(super) fn needs_filter_facts(query: &ServerItemQuery, unknown_parent: bool) -> bool {
-    unknown_parent
-        || query
-            .search_term
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        || query
-            .genres
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        || query
-            .genre_ids
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        || query
-            .studio_ids
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        || query
-            .person_ids
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-}
-
-pub(super) fn merge_filter_facts(
-    mut metadata: MediaItemMetadata,
-    facts: MediaItemMetadata,
-) -> MediaItemMetadata {
-    metadata.overview = facts.overview;
-    metadata.genres = facts.genres;
-    metadata.studios = facts.studios;
-    metadata.original_title = facts.original_title;
-    metadata.people = facts.people;
-    metadata
-}
-
-pub(super) fn set_date_created(
-    browse: &dyn crate::browse_file_read::BrowseFileRead,
-    item: &mut LightItem,
-) {
-    let created = item_date_created(browse, item);
-    item.date_created = created;
-    item.snapshot.metadata.date_created = created.and_then(crate::compact_time::format_rfc3339_utc);
-}
-
-pub(super) fn item_date_created(
-    browse: &dyn crate::browse_file_read::BrowseFileRead,
-    item: &LightItem,
-) -> Option<SystemTime> {
-    paths_date_created(browse, item.snapshot.is_series, &item.stat_paths)
-}
-
 /// 非 series 取该文件的 stat 时间；series 取作用域内可见文件的 ingest 最大值
 /// （与旧 `latest_ingest_by_media` 同口径：旧实现每行入账一次，取最大值，
 /// 同一文件的多行对 `max` 无影响）。

@@ -13,10 +13,6 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use domain::{MediaId, MediaKind, UserId};
-use media_server::provider::query::{
-    ParentScope, classify_genre_or_studio_facts, default_sort_for_items,
-    item_matches_genre_or_studio, matches_query, sort_snapshots,
-};
 use media_server::provider::{MediaItemSnapshot, ServerItemPage, ServerItemQuery};
 
 use super::item_metadata;
@@ -28,13 +24,10 @@ mod page;
 mod resume;
 mod scope;
 
-use light::{
-    LightItem, build_light_items, merge_filter_facts, needs_filter_facts, paths_date_created,
-    set_date_created,
-};
+use light::{LightItem, build_light_items, paths_date_created};
 use page::PageSelection;
 pub(super) use resume::resumable_items;
-use scope::{ScopedRead, read_scope};
+use scope::read_scope;
 
 /// 选择阶段允许的 blocking 预算（与 `list_visible_items` 一致）。
 const SELECTION_DEADLINE: Duration = Duration::from_secs(30);
@@ -175,169 +168,6 @@ fn preferred_index(bucket: &[LightItem], preferred: Option<&domain::PhysicalSour
         .min_by_key(|(_, item)| source_preference(item))
         .map(|(index, _)| index)
         .unwrap_or(0)
-}
-
-/// 候选级路径（person 过滤）：轻候选 → 完整筛选/排序/计数 → 只为本页建重元数据。
-fn select_candidates_blocking(
-    state: &ApiState,
-    user_id: UserId,
-    query: ServerItemQuery,
-) -> Result<ServerItemPage, String> {
-    let browse = state.browse_files.clone();
-    let (scope, mut items) = candidate_scope(state, user_id, &query)?;
-    if scope.unresolved {
-        return Ok(ServerItemPage::default());
-    }
-    hydrate_filter_facts(state, &scope, &mut items, &query)?;
-    merge_person_metadata(state, &mut items, &query)?;
-    if scope.unknown_parent && !narrow_to_unknown_parent(&mut items, &query) {
-        return Ok(ServerItemPage::default());
-    }
-    let mut kept: Vec<LightItem> = items;
-    kept.retain(|item| matches_query(&item.snapshot, &query));
-    // 同一逻辑条目的多份物理版本（协议 id 相同）必须先折叠：否则 total 会被物理行数
-    // 放大，客户端还会收到重复 ItemId。折叠发生在排序/计数/分页之前。
-    let mut kept = dedupe_by_logical_item(kept);
-    let (sort_by, sort_order) = candidate_sort(&kept, &query);
-    if sort_by
-        .split(',')
-        .any(|key| key.trim().eq_ignore_ascii_case("datecreated"))
-    {
-        for item in &mut kept {
-            set_date_created(browse.as_ref(), item);
-        }
-    }
-    sort_snapshots(&mut kept, |item| &item.snapshot, &sort_by, &sort_order);
-    let total = kept.len();
-    let mut page_items = Vec::new();
-    for item in kept.into_iter().skip(query.offset).take(query.limit) {
-        let snapshot = heavy_snapshot(state, user_id, item)?;
-        count_heavy(state, 1);
-        page_items.push(snapshot);
-    }
-    Ok(ServerItemPage {
-        items: page_items,
-        total,
-    })
-}
-
-/// 候选级路径的作用域收敛：候选行的重读量要计入观测，失败也带上已读行数。
-fn candidate_scope(
-    state: &ApiState,
-    user_id: UserId,
-    query: &ServerItemQuery,
-) -> Result<(ScopedRead, Vec<LightItem>), String> {
-    let store = state.store.lock();
-    let scope = match read_scope(&store, user_id, query) {
-        Ok(scope) => scope,
-        Err(error) => {
-            count_candidates(state, error.rows_read);
-            return Err(error.to_string());
-        }
-    };
-    count_candidates(state, scope.rows_read);
-    let items = if scope.unresolved {
-        Vec::new()
-    } else {
-        build_light_items(&scope, query)
-    };
-    Ok((scope, items))
-}
-
-/// 过滤公共字段优先读已采纳的元数据（与 Web 浏览同一份口径）；只有没有采纳行的
-/// 媒体才回退到 NFO，所以冷启动成本不再是「每条候选一次 NFO 读」。
-fn hydrate_filter_facts(
-    state: &ApiState,
-    scope: &ScopedRead,
-    items: &mut [LightItem],
-    query: &ServerItemQuery,
-) -> Result<(), String> {
-    if !needs_filter_facts(query, scope.unknown_parent) {
-        return Ok(());
-    }
-    let adopted = adopted_filter_facts(state, scope, items)?;
-    tracing::debug!(
-        candidates = items.len(),
-        adopted = adopted.len(),
-        "Jellyfin 选择按查询需要读取过滤公共字段"
-    );
-    for item in items.iter_mut() {
-        let facts = item_metadata::filter_facts(
-            &item.coverage.file,
-            snapshot_unit_coords(item.snapshot.unit),
-            &item.snapshot.media,
-            item.snapshot.is_series,
-            adopted.get(&item.snapshot.media.id),
-        );
-        item.snapshot.metadata =
-            merge_filter_facts(std::mem::take(&mut item.snapshot.metadata), facts);
-    }
-    Ok(())
-}
-
-/// 轻筛字段必须完整后选页：person 过滤不允许「选页后再 enrich 再筛」，
-/// catalog 失败也不能当成「这个人没出现」从而缩成更小的一页。探测与
-/// person 成员无关，只在选中的页上、锁外安排。
-fn merge_person_metadata(
-    state: &ApiState,
-    items: &mut [LightItem],
-    query: &ServerItemQuery,
-) -> Result<(), String> {
-    if query.person_ids.is_none() {
-        return Ok(());
-    }
-    for item in items.iter_mut() {
-        let merge = super::enrichment::catalog_merge_required(state, &item.snapshot)?;
-        if let Some(merge) = merge.as_ref() {
-            let metadata = std::mem::take(&mut item.snapshot.metadata);
-            item.snapshot.metadata = merge.apply(metadata, &item.snapshot.media);
-        }
-        item.catalog = merge;
-    }
-    Ok(())
-}
-
-/// 未知 parent 只可能是 genre/studio 分类：认出来就按它收窄，认不出就整页为空，
-/// 绝不退化成整库。返回 `false` 表示调用方必须返回空页。
-fn narrow_to_unknown_parent(items: &mut Vec<LightItem>, query: &ServerItemQuery) -> bool {
-    let parent = query.parent_id.clone().unwrap_or_default();
-    let classification = classify_genre_or_studio_facts(
-        &parent,
-        items.iter().map(|item| {
-            (
-                item.snapshot.metadata.genres.as_slice(),
-                item.snapshot.metadata.studios.as_slice(),
-            )
-        }),
-    );
-    match classification {
-        ParentScope::Genre(target) | ParentScope::Studio(target) => {
-            items.retain(|item| {
-                item_matches_genre_or_studio(
-                    &target,
-                    item.snapshot.metadata.genres.as_slice(),
-                    item.snapshot.metadata.studios.as_slice(),
-                )
-            });
-            true
-        }
-        _ => false,
-    }
-}
-
-/// 显式 `SortBy`/`SortOrder` 优先，缺省按候选集自身推断（与协议端默认排序一致）。
-fn candidate_sort(kept: &[LightItem], query: &ServerItemQuery) -> (String, String) {
-    let (default_sort, default_order) =
-        default_sort_for_items(kept.iter().map(|item| &item.snapshot));
-    let sort_by = query
-        .sort_by
-        .clone()
-        .unwrap_or_else(|| default_sort.to_string());
-    let sort_order = query
-        .sort_order
-        .clone()
-        .unwrap_or_else(|| default_order.to_string());
-    (sort_by, sort_order)
 }
 
 fn next_up_blocking(
@@ -569,45 +399,4 @@ fn source_preference(item: &LightItem) -> (std::cmp::Reverse<i64>, uuid::Uuid) {
         std::cmp::Reverse(item.snapshot.file.version.revision),
         item.snapshot.file.file_id.as_uuid(),
     )
-}
-
-/// 过滤公共字段：一次批量读已采纳的元数据，按 Media 去重后交给 [`item_metadata::filter_facts`]。
-fn adopted_filter_facts(
-    state: &ApiState,
-    scope: &ScopedRead,
-    items: &[LightItem],
-) -> Result<HashMap<MediaId, store::library_query::AdoptedFilterFacts>, String> {
-    let mut media_ids: Vec<MediaId> = items.iter().map(|item| item.snapshot.media.id).collect();
-    media_ids.sort_by_key(|id| id.as_uuid());
-    media_ids.dedup();
-    if media_ids.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let store = state.store.lock();
-    let locale = filter_locale(&store, scope.requested_library.as_deref());
-    store
-        .adopted_filter_facts(&media_ids, &locale)
-        .map_err(|error| {
-            tracing::error!(%error, "failed to load adopted metadata for Jellyfin filter facts");
-            error.to_string()
-        })
-}
-
-/// 过滤口径的 locale：请求库的显示语言（已含实例默认回退），否则实例默认。
-fn filter_locale(store: &crate::Store, library: Option<&str>) -> String {
-    if let Some(locale) = library
-        .and_then(|id| id.parse::<domain::LibraryId>().ok())
-        .and_then(|id| {
-            store::library_query::library_display_locale(store, id)
-                .ok()
-                .flatten()
-        })
-    {
-        return locale;
-    }
-    store
-        .get_setting(crate::settings_keys::METADATA_LANGUAGE)
-        .ok()
-        .flatten()
-        .unwrap_or_default()
 }

@@ -10,7 +10,6 @@ mod people;
 
 pub(super) use artwork::{backdrop_path, local_primary_image, primary_image_url};
 use artwork::{primary_image_metadata, series_primary_image_tag};
-use nfo::file_nfo_metadata;
 pub(super) use people::{catalog_person_image_url, person_image_url, person_tmdb_id};
 use people::{merge_people, people_from_fields, people_from_nfo};
 
@@ -96,61 +95,6 @@ pub(super) fn item_db_facts(
     }
 }
 
-/// 过滤/排序需要的公共字段（genre/studio/person/search 命中）。
-///
-/// 已采纳的元数据（Web 浏览用的同一份 `media_metadata`）是首选口径：有采纳行时不再
-/// stat/读 NFO，只有没有采纳行的媒体才回退到 NFO。字段口径与 [`item_metadata`] 一致，
-/// 避免两套语义。
-pub(super) fn filter_facts(
-    file: &LibraryFile,
-    unit: (i32, i32),
-    media: &Media,
-    is_series: bool,
-    adopted: Option<&store::library_query::AdoptedFilterFacts>,
-) -> MediaItemMetadata {
-    if let Some(adopted) = adopted {
-        return MediaItemMetadata {
-            overview: adopted.overview.clone(),
-            genres: adopted.genres.clone(),
-            studios: adopted.studios.clone(),
-            original_title: media.original_title.clone(),
-            people: adopted
-                .people
-                .iter()
-                .map(|person| crate::media_server_provider::MediaPerson {
-                    id: person
-                        .tmdb_id
-                        .clone()
-                        .unwrap_or_else(|| person.name.clone()),
-                    name: person.name.clone(),
-                    role: person.role.clone(),
-                    person_type: "Actor".into(),
-                    tmdb_id: person.tmdb_id.clone(),
-                    primary_image_url: None,
-                })
-                .collect(),
-            ..Default::default()
-        };
-    }
-    let nfo = file_nfo_metadata(file, unit, media, is_series);
-    MediaItemMetadata {
-        overview: nfo.as_ref().and_then(|metadata| metadata.plot.clone()),
-        genres: nfo
-            .as_ref()
-            .map(|metadata| metadata.genres.clone())
-            .unwrap_or_default(),
-        studios: nfo
-            .as_ref()
-            .map(|metadata| metadata.studios.clone())
-            .unwrap_or_default(),
-        original_title: nfo
-            .as_ref()
-            .and_then(|metadata| metadata.original_title.clone())
-            .or_else(|| media.original_title.clone()),
-        people: people_from_nfo(nfo.as_ref()),
-        ..Default::default()
-    }
-}
 
 /// 锁外渲染：stat/外部字幕 IO 都在这里，调用方必须先释放 Store 锁。
 ///
