@@ -105,14 +105,22 @@ fn jobs_db_layout_gate_rejects_missing_tables_with_backup_guidance() {
 /// 未打标的 `jobs.db` 只被补写身份头。测试只读复制到临时目录，不碰原库。
 ///
 /// 路径用 `CARGO_MANIFEST_DIR` 解析（cargo 运行测试时的工作目录是包根，不是仓库根）。
-/// 没有 `data/live` 的检出（CI / 新克隆）显式跳过并打印原因，不假装通过。
+/// 需要真实实例数据，默认 ignore（不再在缺数据时静默算作通过）：
+/// `LIVE_DATA_DIR=/path/to/data/live cargo test -p api --test storage_cache_runtime -- --ignored`，
+/// 未设置时使用仓库内 `data/live`；目录缺失即失败。
 #[test]
+#[ignore = "needs a copy of a live instance's data/live (set LIVE_DATA_DIR); run with --ignored"]
 fn live_databases_copy_is_accepted_and_stamped_properly() {
-    let live_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/live");
-    if !live_dir.is_dir() {
-        eprintln!("SKIPPED: {} is absent in this checkout", live_dir.display());
-        return;
-    }
+    let live_dir = std::env::var_os("LIVE_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/live")
+        });
+    assert!(
+        live_dir.is_dir(),
+        "{} is absent: set LIVE_DATA_DIR to a live data directory",
+        live_dir.display()
+    );
 
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().join("data");
