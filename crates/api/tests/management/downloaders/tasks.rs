@@ -388,51 +388,58 @@ fn serve_fake_qbit(deletes: Arc<Mutex<Vec<String>>>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     thread::spawn(move || {
+        // One thread per connection with a read timeout: a serial blocking
+        // server lets one idle/slow connection stall every later request, which
+        // under full-workspace load surfaced as a client timeout (HTTP 500).
         for incoming in listener.incoming() {
-            let mut stream = incoming.unwrap();
-            let mut bytes = Vec::new();
-            let mut expected = None;
-            loop {
-                let mut chunk = [0; 4096];
-                let n = stream.read(&mut chunk).unwrap_or(0);
-                if n == 0 {
-                    break;
-                }
-                bytes.extend_from_slice(&chunk[..n]);
-                if expected.is_none() {
-                    if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
-                        let headers = String::from_utf8_lossy(&bytes[..end]);
-                        let length = headers
-                            .lines()
-                            .find_map(|line| {
-                                let (name, value) = line.split_once(':')?;
-                                name.eq_ignore_ascii_case("content-length")
-                                    .then(|| value.trim().parse::<usize>().ok())
-                                    .flatten()
-                            })
-                            .unwrap_or(0);
-                        expected = Some(end + 4 + length);
+            let Ok(mut stream) = incoming else { continue };
+            let deletes = deletes.clone();
+            thread::spawn(move || {
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let mut bytes = Vec::new();
+                let mut expected = None;
+                loop {
+                    let mut chunk = [0; 4096];
+                    let n = stream.read(&mut chunk).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&chunk[..n]);
+                    if expected.is_none() {
+                        if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&bytes[..end]);
+                            let length = headers
+                                .lines()
+                                .find_map(|line| {
+                                    let (name, value) = line.split_once(':')?;
+                                    name.eq_ignore_ascii_case("content-length")
+                                        .then(|| value.trim().parse::<usize>().ok())
+                                        .flatten()
+                                })
+                                .unwrap_or(0);
+                            expected = Some(end + 4 + length);
+                        }
+                    }
+                    if expected.is_some_and(|len| bytes.len() >= len) {
+                        break;
                     }
                 }
-                if expected.is_some_and(|len| bytes.len() >= len) {
-                    break;
+                let request = String::from_utf8_lossy(&bytes).into_owned();
+                if request.contains("/api/v2/torrents/delete") {
+                    deletes.lock().push(request.clone());
                 }
-            }
-            let request = String::from_utf8_lossy(&bytes).into_owned();
-            if request.contains("/api/v2/torrents/delete") {
-                deletes.lock().push(request.clone());
-            }
-            let extra = if request.contains("auth/login") {
-                "Set-Cookie: SID=test; HttpOnly\r\n"
-            } else {
-                ""
-            };
-            let body = "Ok.";
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
+                let extra = if request.contains("auth/login") {
+                    "Set-Cookie: SID=test; HttpOnly\r\n"
+                } else {
+                    ""
+                };
+                let body = "Ok.";
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            });
         }
     });
     format!("http://{addr}")
