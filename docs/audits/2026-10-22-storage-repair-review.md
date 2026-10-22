@@ -428,3 +428,65 @@ Remaining risks:
 - The same-bytes artwork compare reads both files in full. Artwork is small.
 - Cross-library organize uses the source library's naming template.
 - Flakes seen: `subtitle_runtime::both_waiters_cancelled…` failed once under full parallel load (timing) and passed on rerun. The 10k-episode scale test runs for more than 60s but completes; it is not a hang.
+
+## Probe 两项问题定向复审（2026-10-22，d2c0058）
+
+**结论：Request changes。** 本轮只审查与文档，不修改业务代码、测试或运行中的实例，不做数据修复。先 `git fetch origin`，从 `433c898` fast-forward 到 `d2c00582b3ebc936ed81e7cf2143e86c990b96a3`；比较 `git diff 433c898...d2c0058`。新增提交主要修 N01–N05、路径规范化和持久改名；`probe_state.rs`、重试派发/策略/阶段记账、Probe 写入和 source binding 在这个范围没有针对所报两项的修改。不能把其他修复的 workspace 历史绿测当这两项闭环。
+
+### Spec findings
+
+#### P01 / P1：旧 context 仍占用到期窗口，可饿死有效重试
+
+证据：`store/src/probe_state.rs:245-255` 仅按 failed/deadline/active_job_id 查询并 LIMIT，没有当前 context 条件；`api/src/probe_manager/retry.rs:7-43` 丢掉待重试记录的 context，重新按文件评估；评估 Complete/AlreadyRunning/Disabled 等结果不会使旧记录退出候选。`api/src/probe_manager/stages.rs:13-41` 只结算传入 cache_key，不收敛其他 context。
+
+已执行公开 seam 反例：复用 `probe_retry_support::ProbeScenario::cached_season` 的真实 Store/ProbeManager（外部声纹引擎为已有 fake）。E01 当前元数据/片头/片尾缓存均完整，插入32条更早到期的旧 context failed；E08保留同一当前context、只缺片尾并记录有效失败。连续调用两次生产 `dispatch_due(...,32)`：两次均0入队，窗口32条全部为旧context，E08不在窗口。输出：`OLD_CONTEXT_WITH_CURRENT_SUCCESS due=32`；`RETRY_STARVATION dispatch1=0 dispatch2=0 window=32 contains_valid=false`。不是“所有旧记录都会重复采样”，而是候选不收敛并能阻塞后面的真实重试。
+
+详细修复设计：
+
+1. 明确当前探测上下文的权威值：由当前持久 FileVersion、采样profile/算法、有效媒体时长计算；不要把任意最新 failed 行或当前缓存行当唯一权威（缓存可能缺失、属于旧源）。当前context的采用与旧context退役在同一个短事务完成。
+2. 在文件源变化、首次源绑定、profile/时长改变、当前context成功时，对同文件/同阶段的旧context执行显式 superseded/cancelled（或删除不再需要的瞬时重试状态）；清除其 deadline/active_job_id，使迟到 worker 的 job+context CAS 不能复活旧状态。新源和旧源的失败计数不得串用；同context失败次数不能因普通查询而重置。
+3. 派发必须在 LIMIT 之前限定当前context，或者通过持久 keyset 有界清退无效候选后推进游标；不能只在取前32条后跳过，也不能提高limit掩盖饥饿。以 `(deadline,file_id,context,stage)` 确定顺序，同一文件多个阶段合并入队；事务 claim 后再派发，避免每秒重复命中同批。
+4. 保留现有 backoff/5次终止与手动重试语义。开关关闭、文件删除/冻结、已运行任务的结果需区分，不将暂时 AlreadyRunning 当成功，也不把已过期任务重新延期伪装有效。关键退役与派发失败需结构化日志含context/原因。
+
+验收：旧A失败→新B成功后A不再入选；32/1000个旧context在前、真实当前失败在后，有限批次内真实任务能入队；profile/时长/源变化后新计数独立，旧worker迟到无效；重启后不复活；同context deadline前不重试，第5次停止；current缓存缺失时仍可重试，不能因拿cache做JOIN而漏调度。
+
+#### P02 / P1：改名保留源版本，但源观察仍包含路径，后续 Probe 必然认为版本不符
+
+证据：`api/src/fingerprint_job/cache_key.rs:6-19` 在普通视频/STRM分支前把完整path加入源hash；`store/src/library_write/rename_durable.rs:229-240` 及 `rename.rs:94-99` 改path但不改 source_version。`probe_manager/probe.rs:66-68` 按目标path重新计算hash，`:761-766` 与持久版本不符即返回false，`:443-454` 丢弃结果。此次改名不增加revision的动机（字节未变，保留session/resume）合理，但没有同步源身份政策。
+
+已执行真实持久改名 seam：源A绑定真实观测后执行 `begin_file_rename → apply_file_rename_disk → complete_file_rename` 到B；源字节未改，revision正确保持，持久source仍H(A)，生产 `current_source_version(B)` 为H(B)。输出：`RENAMED_SOURCE persisted_matches_observed=false revision_preserved=true`。现有改名Playback测试只比较保留的持久token，未跨到真实Probe观察。该问题是新改名流程的版本政策冲突，不等于先前live32行的历史来源已查清。
+
+详细修复设计：
+
+1. 分开内容代际token与路径/归属修订：改名/改挂不换内容token和file_revision；路径、Library/root、config及pending rename仍作为发布屏障。所有Probe、指纹、字幕、Playback源校验必须消费同一内容版本编码，不允许数据库保留旧编码、worker自行算另一种。
+2. 源观察从共享library层产生，Store/API不得各维护一份：STRM以准确目标字节摘要识别内容，路径作为locator而不是内容输入；普通文件使用既定stat/content证据并明确move/copy跨文件系统inode变化的含义，不能只删path却继续把copy导致的inode变化当换片。观察IO锁外，CAS事务内；无充分相同字节证据时保守判新源，不伪称无损改名。
+3. 同步改名、持久改名、重启恢复、re-parent采用同一策略；磁盘阶段记录必要的源/目标内容证据，完成阶段再次验证。内容不变无需批量重写session/resume；若确实变更内容，则必须推进FileVersion并失效旧详情/轨道/指纹，拒绝旧worker。
+4. 不增加旧path-hash兼容分支或双读；本分支无旧布局兼容要求。真实实例历史数据问题另走明确授权的离线审计/重建，不在普通读取时悄悄修复。
+
+验收：本地视频与STRM在同root改名、跨root、跨Library、跨文件系统copy和磁盘阶段后崩溃恢复，内容不变时观察token==持久token，既有详情可读、Probe可发布且缓存可复用、session/resume不丢；相同path换字节/STRM目标改变时token变化，旧结果严格拒绝。必须用生产 `current_source_version`/共享观察器，而非测试固定 `v1`。
+
+#### P03 / P2：首次绑定真实源时保留冷行，却未同步其版本
+
+证据：`store/src/library_write/source.rs:32-44` 承诺保留同字节已探测事实；`:93-114` 的 `reset_facts=false` 只更新library_files和probe obligation，没有更新/清理file_details。`store/src/library.rs:137-140,239-241` 按源版本相等读取，因此旧详情立即不可读。
+
+已执行公开Store反例：发布占位版本文件→`put_file_meta`（此时可读）→同文件 `bind_placed_file_source` 绑定真实观察。输出：`PLACED_SOURCE_BIND file_revision=2 detail_source_matches=false tracks_readable=false`。这证明当前API仍能制造file/details不一致；它的方向是file推进、cold仍旧，与先前实库 `file=v1/details=hash` 相反，不能冒称已经解释原32行根因。生产Transfer后置调用见 `api/src/worker/transfer/run.rs:138-153`；通常冷行可能尚不存在，但重入/恢复与既有同字节事实路径不能依赖这个偶然顺序。
+
+详细修复设计：首次绑定仅适用于有持久reservation证据且能证明同一放置字节的文件。事务先验证scope/config/lifecycle/media、pending/placement意图及expected版本，然后：同证据且冷行匹配旧expected时，原子更新其 source_revision/source_version并保留tracks/chapters；冷行不匹配或证据不足则明确失效并归约相应hot摘要，不能保留一份必定不可读的“有效”详情。指纹/阶段状态若在内容token之前产生，要按P01统一退出旧context或重新生成，不能只重标cache_key假称新采样。file、details、hot facts、必要摘要与probe义务一事务提交；任何失败回滚全体。
+
+验收：无冷行/同旧版本冷行/不匹配冷行三类首次绑定；同内容保留后get_file_meta/get_cached_chapters可读且revision/token一致；未知内容失效并重探测；绑定期间配置/源/身份变更拒绝；事务故障不留下半代际；重启重试幂等、不递增多次revision。
+
+### 原始第二项的证据修正
+
+本轮确认当前普通Probe主写路径有防护：`publish_probe_tracks` 要求 observed source == persisted source，再以persisted版本构造details；`publish_probe_result` 校验expected并拒绝details版本错配。`put_file_meta_versioned`也从file当前版本SELECT写入。它们在433c898已存在，不能把本次其他提交当作新修复，也不能声称普通Probe仍会直接重现原先 `file=v1/details=hash` 的方向。此前真实实例不一致是已观测事实；其产生来源及已存在数据的处置，本轮不访问/修改live目录，不能据此宣布已恢复。P02/P03为当前可复现的另外两条版本不闭合路径。
+
+### Standards（独立轴）
+
+未新增与上面根因独立的命名/抽象风格finding；不因格式、测试已通过或“零兼容”措辞给正确性背书。P01的无效候选每秒占据有界窗口属于已复现的Spec运行时缺陷，不再重复算一项性能finding。新增永久回归应检验公开返回/持久事实/任务是否得到调度，不固定实现SQL或日志文案。
+
+### 本轮执行与覆盖边界
+
+- `cargo test -p api --test probe_retry`：7 passed；`cargo test -p store --test probe_publication --test probe_stage_state`：9 passed。这些已有用例未覆盖context切换或真实路径改变的token计算。
+- 系统temp下临时crate通过path依赖本次d2c0058，调用真实Store/ProbeManager、复用已有fake声纹fixture，`cargo run --manifest-path <temp>/Cargo.toml --target-dir <repo>/target --offline --quiet` 实际输出上述4行，断言观察到缺陷而退出0；不是“产品合同已通过”。复现序列已在各finding列明，临时文件不入库。
+- 未跑完整workspace、Web/浏览器/NAS、真实FFmpeg或旧live库修复。本轮业务代码与测试零修改；文档记录需修复项，不自动迁移历史数据、不重启用户服务。
+
+Spec：3项（P1两项、P2一项）；Standards：0项独立finding。最严重的Spec风险是有效重试饥饿与改名后Probe版本拒绝，不能宣告两项问题已完整关闭。
