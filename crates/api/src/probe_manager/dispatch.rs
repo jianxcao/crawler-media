@@ -279,13 +279,9 @@ impl ProbeManager {
 
     fn release_unclaimed_window(&self) {
         let mut seen = self.seen.lock();
-        while let Ok(id) = self.metadata_tx.try_reserve() {
-            drop(id);
-            break;
-        }
-        // Receivers are gone with the workers. Drop whatever ids are still
-        // sitting in the channels by rebuilding is not available; the workers
-        // drain them. Clear the in-memory set so a later start refills.
+        // A sender cannot drain its own channel (reserving a permit and dropping it is a
+        // no-op), so ids still queued are drained by the workers. Clear the in-memory set
+        // so a later start refills.
         seen.clear();
         self.metadata_pending.store(0, Ordering::SeqCst);
     }
