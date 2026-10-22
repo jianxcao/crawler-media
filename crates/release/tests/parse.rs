@@ -195,3 +195,12 @@ fn ordinary_episode_tokens_still_parse() {
         (Some(1), Some(3), Some(4))
     );
 }
+
+/// `S00E00` is an explicit special coordinate; a bare `E00` elsewhere is not.
+#[test]
+fn explicit_s00e00_is_a_real_special_unit() {
+    let r = release::parse("Show.S00E00.mkv");
+    assert_eq!((r.season, r.episode), (Some(0), Some(0)));
+    let r = release::parse("Show.S01E00.mkv");
+    assert_eq!(r.episode, None);
+}

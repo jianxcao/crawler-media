@@ -407,3 +407,70 @@ impl api::PosterFetch for StaticPoster {
         Ok(b"poster-bytes".to_vec())
     }
 }
+
+/// The existing-Media claim route parses the real file name: a named
+/// multi-episode TV file keeps both units, S00E00 is a real special, and an
+/// unknown TV file asserts no coverage instead of a playable whole.
+#[tokio::test]
+async fn actual_claim_routes_preserve_tv_coverage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("tvroot");
+    fs::create_dir_all(root.join("Show")).unwrap();
+    let media = domain::Media {
+        id: domain::MediaId::new(),
+        kind: domain::MediaKind::Tv,
+        title: "Show".into(),
+        year: Some(2024),
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    let names = ["Show.S01E01-E02.mkv", "Show.S00E00.mkv", "Show.Extras.mkv"];
+    {
+        let store = Store::open(tmp.path().join("data")).unwrap();
+        store.insert_media(&media).unwrap();
+        store
+            .create_library(domain::MediaKind::Tv, "TV", &[root.to_str().unwrap()], "everyone", true, &[])
+            .unwrap();
+        for name in names {
+            let path = root.join("Show").join(name);
+            fs::write(&path, b"video").unwrap();
+            store
+                .insert_unidentified(path.display().to_string(), Confidence::Low)
+                .unwrap();
+        }
+    }
+    let app = router(state(
+        tmp.path(),
+        Arc::new(Fixtures { requests: Mutex::new(Vec::new()), bodies: HashMap::new() }),
+        Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
+    ));
+    for name in names {
+        let path = root.join("Show").join(name);
+        let claimed = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                &format!("/api/v1/unidentified/{}/claim", media.id),
+                Some("management-secret"),
+                json!({ "path": path.display().to_string() }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(claimed.status(), StatusCode::OK, "{name}");
+    }
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let units = |name: &str| {
+        let path = root.join("Show").join(name).display().to_string();
+        let file = store.file_coverage_by_path(&path).unwrap().unwrap().file;
+        store.get_file_units(file.file_id).unwrap()
+    };
+    use domain::UnitKey;
+    assert_eq!(units(names[0]), vec![UnitKey::new(1, 1), UnitKey::new(1, 2)]);
+    assert_eq!(units(names[1]), vec![UnitKey::new(0, 0)]);
+    assert!(units(names[2]).is_empty(), "unknown TV must not become a whole");
+}

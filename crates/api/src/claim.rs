@@ -553,6 +553,7 @@ mod tests {
             units(MediaKind::Tv, "Show.S01E01-E02.1080p.mkv"),
             vec![UnitKey::new(1, 1), UnitKey::new(1, 2)]
         );
+        assert_eq!(units(MediaKind::Tv, "Show.S00E00.mkv"), vec![UnitKey::new(0, 0)]);
         assert!(units(MediaKind::Tv, "Show.Behind.the.Scenes.mkv").is_empty());
         assert_eq!(units(MediaKind::Movie, "The Matrix.1999.mkv"), vec![UnitKey::WHOLE]);
     }

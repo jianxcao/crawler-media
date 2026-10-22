@@ -124,7 +124,9 @@ fn try_parse_s_followed(
         while m < len && bytes[m].is_ascii_digit() {
             m += 1;
         }
-        if m > e_start && plausible_episode(&upper[e_start..m]) {
+        // Explicit `S00E00` is a real special coordinate; elsewhere episode 0 stays implausible.
+        let special_zero = season == 0 && upper[e_start..m].parse::<u32>().ok() == Some(0);
+        if m > e_start && (plausible_episode(&upper[e_start..m]) || special_zero) {
             let ep = upper[e_start..m].parse::<u32>().ok()?;
             let (ep_to, _) = parse_episode_range(&upper[m..]);
             return Some((i, Some(season), Some(ep), ep_to));
