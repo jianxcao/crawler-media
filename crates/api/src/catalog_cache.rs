@@ -112,7 +112,13 @@ pub async fn delete_catalog_cache(
         .ok_or_else(|| ApiError::invalid("catalog.invalid", "cache_key is required".into()))?;
     let deleted = {
         let store = state.store.lock();
-        store.delete_catalog_cache(&query.source, &key)?
+        // An unknown source is a client error, not a server failure.
+        match store.delete_catalog_cache(&query.source, &key) {
+            Err(store::StoreError::Invalid(message)) => {
+                return Err(ApiError::invalid("catalog.invalid", message));
+            }
+            other => other?,
+        }
     };
     Ok(Json(json!({ "ok": true, "data": { "deleted": deleted } })))
 }

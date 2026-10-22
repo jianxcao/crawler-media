@@ -120,7 +120,13 @@ fn bearer_token(request: &Request) -> Option<String> {
 }
 
 fn query_token(request: &Request) -> Option<String> {
-    let path = request.uri().path();
+    // Inside a nested router `uri()` has the mount prefix stripped; match the
+    // allow-list against the URI the client actually requested.
+    let uri = request
+        .extensions()
+        .get::<axum::extract::OriginalUri>()
+        .map_or(request.uri(), |original| &original.0);
+    let path = uri.path();
     // 窄范围 query-token：仅允许视频取流、字幕取流和直读类播放资源路由
     let mut segments = path.split('/');
     let is_session_stream = matches!(
@@ -134,7 +140,7 @@ fn query_token(request: &Request) -> Option<String> {
     if !is_playback_resource {
         return None;
     }
-    request.uri().query().and_then(|query| {
+    uri.query().and_then(|query| {
         query.split('&').find_map(|pair| {
             let (key, value) = pair.split_once('=')?;
             (key.eq_ignore_ascii_case("api_key")

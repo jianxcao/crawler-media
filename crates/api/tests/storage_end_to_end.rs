@@ -698,3 +698,42 @@ async fn typed_item_ids_are_canonical_and_legacy_file_ids_are_refused() {
     .await;
     assert_eq!(canonical.status(), StatusCode::OK, "规范 typed id 必须可读");
 }
+
+/// Historical items re-verified in Task 13: an unknown cache source is a client error, and the
+/// Web session stream URL (which carries only `api_key`) authenticates by its query token.
+#[tokio::test]
+async fn unknown_cache_source_is_400_and_api_key_session_stream_authenticates() {
+    let fixture = Fixture::new();
+    let app = fixture.app.clone();
+    let unknown = send(
+        &app,
+        "DELETE",
+        "/api/v1/catalog/cache?source=unknown&cache_key=k",
+        Some(TOKEN),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+
+    let file_id = LedgerId::new();
+    let media_id = fixture.seed_episode(file_id);
+    // The seeded episode is a STRM; give it a real target so the stream resolves to a redirect.
+    std::fs::write(fixture.root.join(EPISODE_NAME), "http://media.example.invalid/e03.mkv").unwrap();
+    let psid = {
+        let handle = fixture.state.store();
+        let store = handle.lock();
+        let user = store.user_by_token(TOKEN).unwrap().unwrap().id;
+        let version = store.get_file_version(file_id).unwrap().unwrap();
+        store
+            .issue_play_session(user, "web-1", file_id, media_id, UnitKey::new(SEASON, EPISODE), &version, 1)
+            .unwrap()
+    };
+    let uri = format!("/api/v1/playback/sessions/{psid}/stream?device_id=web-1&api_key={TOKEN}");
+    let response = send(&app, "GET", &uri, None, Value::Null).await;
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED, "api_key-only stream must authenticate");
+    assert!(
+        response.status().is_success() || response.status().is_redirection(),
+        "issued api_key stream: {}",
+        response.status()
+    );
+}
