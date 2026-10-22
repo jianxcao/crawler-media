@@ -161,8 +161,22 @@ pub(super) fn merge_metadata(
     loser: MediaId,
 ) -> Result<(), StoreError> {
     let (survivor_str, loser_str) = (survivor.to_string(), loser.to_string());
-    // Source snapshots and overrides: the survivor's row wins on a shared key.
-    // A conflicting loser snapshot is superseded, not spliced field-by-field.
+    // Source snapshots: for the *same* provider entity the newer fetch wins as a whole
+    // snapshot (a tie keeps the survivor's). Otherwise the survivor's row wins on a shared
+    // key. A conflicting snapshot is superseded, never spliced field-by-field.
+    tx.execute(
+        "DELETE FROM media_metadata_sources WHERE media_id = ?1 AND EXISTS (
+             SELECT 1 FROM media_metadata_sources l
+             WHERE l.media_id = ?2
+               AND l.entity_scope = media_metadata_sources.entity_scope
+               AND l.season = media_metadata_sources.season
+               AND l.episode = media_metadata_sources.episode
+               AND l.source = media_metadata_sources.source
+               AND l.locale = media_metadata_sources.locale
+               AND l.provider_entity_id = media_metadata_sources.provider_entity_id
+               AND l.fetched_at > media_metadata_sources.fetched_at)",
+        params![survivor_str, loser_str],
+    )?;
     tx.execute(
         "DELETE FROM media_metadata_sources WHERE media_id = ?2 AND EXISTS (
              SELECT 1 FROM media_metadata_sources s
