@@ -274,16 +274,34 @@ fn mark_clauses(
 
 /// `played` 读的是**有效断言**（与 [`Store::effective_played_assertion`] 同一优先级）：
 /// 最新 `played_changed_at_ms` 胜，同一时刻再按 集 > 季 > 整个作品；没有任何断言行就是未看。所以未看不能用 `favorite` 那种"存在即真"。
+///
+/// 作品支上的剧（R12）按集归约，与展示侧 `unit_counts_from_snapshot` 一致：
+/// 本库每个已入库分集的有效断言都是已看，剧才算已看（没有分集时同样算已看）。
 fn played_clause(branch: Branch, user: &str, value: i64, bindings: &mut Bindings) -> String {
     let expected = bindings.push(SqlValue::Integer(value));
+    if branch.unit() {
+        return format!("{} = {expected}", effective_played_sql(user, Some("u")));
+    }
+    format!(
+        "(CASE WHEN s.kind = 'tv' THEN NOT EXISTS (SELECT 1 FROM library_units ue \
+           WHERE ue.library_id = s.library_id AND ue.media_id = s.media_id \
+             AND ue.season >= 0 AND ue.episode >= 0 AND {} = 0) \
+         ELSE {} END) = {expected}",
+        effective_played_sql(user, Some("ue")),
+        effective_played_sql(user, None)
+    )
+}
+
+/// 一个单元（`unit` 别名给出季/集，`None` 是整个作品）的有效已看值，0/1。
+fn effective_played_sql(user: &str, unit: Option<&str>) -> String {
     format!(
         "COALESCE((SELECT pu.played FROM playback_units pu \
            WHERE pu.user_id = {user} AND pu.media_id = s.media_id AND pu.has_played_assertion = 1 \
              AND ({}) \
            ORDER BY COALESCE(pu.played_changed_at_ms, 0) DESC, \
              CASE WHEN pu.episode >= 0 THEN 2 WHEN pu.season >= 0 THEN 1 ELSE 0 END DESC \
-           LIMIT 1), 0) = {expected}",
-        assertion_scopes(branch)
+           LIMIT 1), 0)",
+        assertion_scopes(unit)
     )
 }
 
@@ -306,14 +324,14 @@ fn favorite_clause(branch: Branch, user: &str, value: i64) -> String {
 }
 
 /// 一个单元能继承到的断言坐标，从最具体到整个作品。
-fn assertion_scopes(branch: Branch) -> String {
-    if branch.unit() {
-        "(pu.season = u.season AND pu.episode = u.episode) \
-         OR (pu.season = u.season AND pu.episode = -1) \
-         OR (pu.season = -1 AND pu.episode = -1)"
-            .to_string()
-    } else {
-        "pu.season = -1 AND pu.episode = -1".to_string()
+fn assertion_scopes(unit: Option<&str>) -> String {
+    match unit {
+        Some(u) => format!(
+            "(pu.season = {u}.season AND pu.episode = {u}.episode) \
+             OR (pu.season = {u}.season AND pu.episode = -1) \
+             OR (pu.season = -1 AND pu.episode = -1)"
+        ),
+        None => "pu.season = -1 AND pu.episode = -1".to_string(),
     }
 }
 

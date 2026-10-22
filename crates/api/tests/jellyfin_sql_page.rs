@@ -696,3 +696,60 @@ fn search_reads_the_library_display_locale() {
         "the lexically first locale must not stand in for the display locale"
     );
 }
+
+/// R12: a Series row's played filter is reduced per episode: the series is played
+/// only when every episode's effective assertion (newest wins, then the more
+/// specific scope) is played.
+#[test]
+fn series_played_filter_reduces_per_episode() {
+    let fx = Fx::new();
+    let dir = fx._dir.path().join("tv-series-played");
+    std::fs::create_dir_all(&dir).unwrap();
+    let library = create_library_tv(&fx.store, "Series Played", &dir);
+    let show = fx.add_show(&dir, &[(1, 1), (1, 2)]);
+    let user = UserId::new();
+    let mark = |scope: domain::UnitScope, played: bool, now: i64| {
+        fx.store
+            .mutate_playback(
+                show,
+                &store::playback::PlaybackMutation {
+                    user_id: user,
+                    scope,
+                    played: Some(played),
+                    favorite: None,
+                    expected_generation: None,
+                },
+                now,
+            )
+            .unwrap();
+    };
+    let total = |played: bool| {
+        let mut query = base_query(ProtocolParent::Library(library));
+        query.user_id = user;
+        query.include_types = vec![ProtocolItemType::Series];
+        query.is_played = Some(played);
+        fx.store.protocol_item_page(&query).unwrap().total
+    };
+    let episode = |episode: u32| domain::UnitScope::Episode { season: 1, episode };
+
+    mark(episode(1), true, 1_000);
+    assert_eq!(
+        total(true),
+        0,
+        "one of two episodes played is not a played series"
+    );
+    assert_eq!(total(false), 1);
+
+    mark(episode(2), true, 2_000);
+    assert_eq!(total(true), 1, "every episode played => played series");
+    assert_eq!(total(false), 0);
+
+    mark(domain::UnitScope::Whole, true, 3_000);
+    mark(episode(2), false, 4_000);
+    assert_eq!(
+        total(true),
+        0,
+        "a newer episode unplayed beats an older whole-series played"
+    );
+    assert_eq!(total(false), 1);
+}
