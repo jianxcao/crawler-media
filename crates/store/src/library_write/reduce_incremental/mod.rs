@@ -138,6 +138,20 @@ fn read_item_row(tx: &Connection, lib: &str, media: &str) -> Result<Option<ItemR
     Ok(row)
 }
 
+/// Summary rows a publication batch already rebuilt from the final file facts.
+///
+/// Every file of a batch is written before any delta is applied, so a row that
+/// had to be rebuilt from facts (a unit or card that did not exist yet) already
+/// counts the batch's later files; applying their deltas again would count
+/// them twice.
+#[derive(Default)]
+pub(crate) struct BatchSettled {
+    /// Units rebuilt from final facts during this batch.
+    pub(super) units: std::collections::BTreeSet<(i32, i32)>,
+    /// The whole card was rebuilt from final facts; later deltas must be skipped.
+    pub(crate) media: bool,
+}
+
 /// Apply one changed file to `(library_id, media_id)` without re-reading the other files.
 pub(crate) fn reduce_library_media_incremental(
     tx: &Connection,
@@ -145,11 +159,33 @@ pub(crate) fn reduce_library_media_incremental(
     media_id: MediaId,
     change: &ChangedFile<'_>,
 ) -> Result<(), StoreError> {
+    reduce_library_media_incremental_in_batch(
+        tx,
+        library_id,
+        media_id,
+        change,
+        &mut BatchSettled::default(),
+    )
+}
+
+/// [`reduce_library_media_incremental`] for one file of a multi-file batch whose
+/// facts are all already written; `settled` carries what this batch rebuilt.
+pub(crate) fn reduce_library_media_incremental_in_batch(
+    tx: &Connection,
+    library_id: LibraryId,
+    media_id: MediaId,
+    change: &ChangedFile<'_>,
+    settled: &mut BatchSettled,
+) -> Result<(), StoreError> {
+    if settled.media {
+        return Ok(());
+    }
     let lib = library_id.to_string();
     let media = media_id.to_string();
     let Some(mut item) = read_item_row(tx, &lib, &media)? else {
         if change.after.published {
             // A published file with no card is an inconsistent summary: repair it fully.
+            settled.media = true;
             return reduce_library_media(tx, library_id, media_id);
         }
         return Ok(());
@@ -162,7 +198,7 @@ pub(crate) fn reduce_library_media_incremental(
     }
     prune_unpublished_input(tx, &lib, &media, change.after)?;
     let (distinct_seasons, distinct_episodes) =
-        units::refresh_units(tx, &lib, &media, &mut item, change)?;
+        units::refresh_units(tx, &lib, &media, &mut item, change, &mut settled.units)?;
     let facts = facts_for(tx, &lib, &media, item.preferred.as_deref())?;
     upsert_item(
         tx,

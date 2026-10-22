@@ -566,3 +566,64 @@ fn publication_keeps_the_destination_identity_recorded_by_the_reservation() {
     assert_eq!(item.file_count, 1);
     assert_eq!(item.available_file_count, 1);
 }
+
+fn unit_rows(tmp: &std::path::Path) -> Vec<(i32, i32, i64, i64, Option<String>)> {
+    let conn = rusqlite::Connection::open(tmp.join("library.db")).unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT season, episode, file_count, available_file_count, preferred_file_id
+             FROM library_units ORDER BY season, episode",
+        )
+        .unwrap();
+    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// An existing card gains a new episode through two versions in one batch: the
+/// new unit is counted once per file, and the incremental result matches a
+/// full reduction of the same facts.
+#[test]
+fn existing_card_batch_two_versions_of_new_episode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let media_id = "00000000-0000-0000-0000-0000000000e2";
+    create_media(&store, media_id, "Batch Show", MediaKind::Tv);
+    let (lib, root_id) = create_library(&store, "TV", MediaKind::Tv, "/tv");
+    let scope = WriteScope { library_id: lib.id.parse().unwrap(), config_revision: 0 };
+    let e01 = make_file(
+        "00000000-0000-0000-0000-0000000000f1", &lib.id, &root_id, media_id,
+        "Batch/S01E01.mkv", MediaKind::Tv, 1_000,
+    );
+    let e01_units = [UnitKey::new(1, 1)];
+    let publication = |file, units| StorePublication {
+        file, units, expected_version: None, nfo_observation: None, probe_required: false,
+    };
+    store.publish_files(&scope, &[publication(&e01, &e01_units)], 1_000).unwrap();
+
+    let a = make_file(
+        "00000000-0000-0000-0000-0000000000f2", &lib.id, &root_id, media_id,
+        "Batch/S01E02.a.mkv", MediaKind::Tv, 2_000,
+    );
+    let b = make_file(
+        "00000000-0000-0000-0000-0000000000f3", &lib.id, &root_id, media_id,
+        "Batch/S01E02.b.mkv", MediaKind::Tv, 3_000,
+    );
+    let e02_units = [UnitKey::new(1, 2)];
+    store
+        .publish_files(&scope, &[publication(&a, &e02_units), publication(&b, &e02_units)], 2_000)
+        .unwrap();
+
+    let incremental = unit_rows(tmp.path());
+    let e02 = incremental.iter().find(|row| (row.0, row.1) == (1, 2)).unwrap();
+    assert_eq!((e02.2, e02.3), (2, 2));
+    let item = store
+        .get_library_item(scope.library_id, media_id.parse().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!((item.file_count, item.distinct_episode_count), (3, 2));
+
+    store.refresh_media_summaries(media_id.parse().unwrap(), 3_000).unwrap();
+    assert_eq!(unit_rows(tmp.path()), incremental, "incremental == full reduce");
+}

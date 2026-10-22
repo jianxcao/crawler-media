@@ -20,6 +20,7 @@ pub(super) fn refresh_units(
     media: &str,
     item: &mut ItemRow,
     change: &ChangedFile<'_>,
+    settled: &mut BTreeSet<(i32, i32)>,
 ) -> Result<(i64, i64), StoreError> {
     let before_published = change.before.is_some_and(|file| file.published);
     let after_published = change.after.published;
@@ -47,11 +48,16 @@ pub(super) fn refresh_units(
     for (season, episode) in &affected {
         let before_covers = before_published && change.before_units.contains(&(*season, *episode));
         let after_covers = after_published && change.after_units.contains(&(*season, *episode));
-        if !before_covers && !after_covers {
+        if (!before_covers && !after_covers) || settled.contains(&(*season, *episode)) {
             continue;
         }
         let current = read_unit_row(tx, lib, media, *season, *episode)?;
         let before_exists = current.is_some();
+        if !before_exists {
+            // Rebuilt from the batch's final facts below: later files of this
+            // batch are already counted in that row.
+            settled.insert((*season, *episode));
+        }
         let after_exists = apply_unit_delta(
             tx,
             lib,

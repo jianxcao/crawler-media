@@ -15,7 +15,7 @@ use super::super::{Store, StoreError};
 use super::reduce::{reduce_library_media, reduce_media_everywhere};
 use super::reduce_incremental::{
     ChangedFile, FileSummaryFacts, read_file_summary_facts, read_file_units,
-    reduce_library_media_incremental,
+    BatchSettled, reduce_library_media_incremental_in_batch,
 };
 use super::{FilePublication, PublishReport, WriteScope};
 
@@ -133,8 +133,13 @@ impl Store {
             // cost O(files x windows). Per-file deltas keep each window proportional to the
             // files it actually touched, and the totals end at the same place because the
             // deltas are applied in the same order the files were published.
+            //
+            // Every file of the batch is already written, so a unit (or card) that has
+            // to be rebuilt from facts already counts the later files of the batch:
+            // `settled` keeps those rows from receiving the same files again.
+            let mut settled = BatchSettled::default();
             for change in changes {
-                reduce_library_media_incremental(
+                reduce_library_media_incremental_in_batch(
                     &tx,
                     scope.library_id,
                     media_id,
@@ -144,6 +149,7 @@ impl Store {
                         after: &change.after,
                         after_units: &change.after_units,
                     },
+                    &mut settled,
                 )?;
             }
         }
