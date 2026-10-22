@@ -354,7 +354,7 @@ fn mark_does_not_advance_the_watch_clock() {
         .unit_state(user(), f.media_id, 1, 1)
         .unwrap()
         .unwrap();
-    assert_eq!(before.updated_at, 2_000, "progress set the activity clock");
+    assert_eq!(before.updated_at, 2, "progress at 2000 ms set the activity clock (seconds)");
 
     f.store
         .mutate_playback(
@@ -433,4 +433,55 @@ fn clear_history_removes_resume_and_assertions_keeps_favorite() {
     assert!(state.favorite, "the favourite is a library decision, not history");
     assert!(!state.played);
     assert_eq!(state.position_ms, 0);
+}
+
+/// Activity columns are seconds while the played clock is milliseconds: a
+/// heartbeat at 1700000010000 ms records activity at 1700000010 s.
+#[test]
+fn event_activity_clock_is_seconds_not_milliseconds() {
+    let (tmp, f) = seed(&[(1, 1)]);
+    let file = f.files[0].clone();
+    let session_id = f
+        .store
+        .issue_play_session(user(), "device_web", file.file_id, f.media_id, UnitKey::new(1, 1), &file.version, 1_000)
+        .unwrap();
+    let generation = f
+        .store
+        .play_session_binding(user(), "device_web", &session_id)
+        .unwrap()
+        .unwrap()
+        .generation;
+    let event = store::playback::BoundPlaybackEvent {
+        user_id: user(),
+        device_id: "device_web".into(),
+        session_id,
+        generation,
+        event_sequence: Some(1),
+        item: episode(&f, 1, 1),
+        source_id: PhysicalSourceId { file_id: file.file_id, revision: file.version.revision },
+        source_version: file.version.source_version.clone(),
+        position_ms: 2_600_000,
+        duration_ms: Some(2_700_000),
+        audio_track: None,
+        subtitle_track: None,
+        paused: false,
+        rate_bps: 0,
+        client: Some("Web".into()),
+        device_name: None,
+        client_version: None,
+        play_method: None,
+        event_type: PlaybackEventType::Progress,
+    };
+    f.store.commit_playback_event(&event, 1_700_000_010_000).unwrap();
+    let conn = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
+    let (activity, played_ms): (i64, Option<i64>) = conn
+        .query_row(
+            "SELECT watch_activity_at, played_changed_at_ms FROM playback_units
+             WHERE season = 1 AND episode = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(activity, 1_700_000_010);
+    assert_eq!(played_ms, Some(1_700_000_010_000));
 }

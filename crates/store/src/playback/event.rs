@@ -396,7 +396,7 @@ fn write_unit_facts(
              watch_activity_at, tracks_version, audio_track, subtitle_track)
          VALUES
             (?1, ?2, ?3, ?4, ?5, ?5, CASE WHEN ?5 = 1 THEN ?6 ELSE NULL END,
-             ?7, ?8, ?9, ?10, ?11, 'full_file', ?6, ?12,
+             ?7, ?8, ?9, ?10, ?11, 'full_file', ?15, ?12,
              CASE WHEN ?12 IS NULL THEN NULL ELSE ?13 END,
              CASE WHEN ?12 IS NULL THEN NULL ELSE ?14 END)
          ON CONFLICT(user_id, media_id, season, episode) DO UPDATE SET
@@ -409,7 +409,7 @@ fn write_unit_facts(
              resume_file_revision = ?10,
              resume_source_version = ?11,
              timeline_mode = 'full_file',
-             watch_activity_at = ?6,
+             watch_activity_at = ?15,
              tracks_version = ?12,
              audio_track = CASE WHEN ?12 IS NULL THEN playback_units.audio_track WHEN ?13 IS NOT NULL THEN ?13 ELSE playback_units.audio_track END,
              subtitle_track = CASE WHEN ?12 IS NULL THEN playback_units.subtitle_track WHEN ?14 IS NOT NULL THEN ?14 ELSE playback_units.subtitle_track END",
@@ -428,6 +428,8 @@ fn write_unit_facts(
             tracks_version,
             event.audio_track,
             event.subtitle_track,
+            // Activity columns are seconds; only the played clock is milliseconds.
+            now_ms / 1000,
         ],
     )?;
     Ok(())
