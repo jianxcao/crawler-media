@@ -159,8 +159,9 @@ pub(crate) fn apply_integrity_batch(
     let lib_id = library.parse::<LibraryId>()?;
     for media_str in &paged {
         let media_id = media_str.parse::<MediaId>()?;
-        let mut issues = inspect_media_integrity(tx, library, media_id, &mut state.report)?;
-        if derived_rows_drift(tx, lib_id, library, media_str)? {
+        let probe = probe_media(tx, lib_id, library, media_str)?;
+        let mut issues = record_presence_issues(&probe, media_id, &mut state.report);
+        if probe.drift() {
             if state.report.mismatched_media.len() < REPORT_CAP {
                 state.report.mismatched_media.push(media_id);
             }
@@ -170,8 +171,8 @@ pub(crate) fn apply_integrity_batch(
             state.issues_found += issues;
             if plan.repair {
                 reduce_library_media(tx, lib_id, media_id)?;
-                // Re-verify this Media against its raw facts, users included.
-                if derived_rows_drift(tx, lib_id, library, media_str)? {
+                // Re-verify with the same expected set the check used.
+                if probe_media(tx, lib_id, library, media_str)?.drift() {
                     state.unrepaired += 1;
                 } else {
                     state.issues_repaired += issues;
@@ -247,85 +248,113 @@ fn write_integrity_cursor(
     Ok(())
 }
 
-fn inspect_media_integrity(
+/// Actual derived rows of one Media next to what its raw facts reduce to.
+///
+/// The expected side is the scoped reduction itself (run in a rolled-back
+/// savepoint), so a Library that owns none of a user's seasons/episodes
+/// legally has no user row, and detection, repair and re-verification share
+/// one definition of "expected".
+struct MediaProbe {
+    actual: Vec<String>,
+    expected: Vec<String>,
+    actual_item: bool,
+    expected_item: bool,
+    actual_users: HashSet<String>,
+    expected_users: HashSet<String>,
+}
+
+impl MediaProbe {
+    fn drift(&self) -> bool {
+        self.actual != self.expected
+    }
+}
+
+fn probe_media(
+    tx: &Connection,
+    lib_id: LibraryId,
+    library: &str,
+    media: &str,
+) -> Result<MediaProbe, StoreError> {
+    let actual = derived_snapshot(tx, library, media)?;
+    let actual_item = has_item(tx, library, media)?;
+    let actual_users = summary_users(tx, library, media)?;
+    tx.execute_batch("SAVEPOINT integrity_probe")?;
+    let reduced = reduce_library_media(tx, lib_id, media.parse()?).and_then(|_| {
+        Ok((
+            derived_snapshot(tx, library, media)?,
+            has_item(tx, library, media)?,
+            summary_users(tx, library, media)?,
+        ))
+    });
+    tx.execute_batch("ROLLBACK TO integrity_probe; RELEASE integrity_probe")?;
+    let (expected, expected_item, expected_users) = reduced?;
+    Ok(MediaProbe {
+        actual,
+        expected,
+        actual_item,
+        expected_item,
+        actual_users,
+        expected_users,
+    })
+}
+
+fn has_item(tx: &Connection, library: &str, media: &str) -> Result<bool, StoreError> {
+    Ok(tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM library_items WHERE library_id = ?1 AND media_id = ?2)",
+        params![library, media],
+        |r| r.get(0),
+    )?)
+}
+
+fn summary_users(
     tx: &Connection,
     library: &str,
+    media: &str,
+) -> Result<HashSet<String>, StoreError> {
+    let mut stmt = tx.prepare(
+        "SELECT DISTINCT user_id FROM user_library_items WHERE library_id = ?1 AND media_id = ?2",
+    )?;
+    let rows = stmt.query_map(params![library, media], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Missing/orphan item and user rows, by comparing actual with expected.
+fn record_presence_issues(
+    probe: &MediaProbe,
     media_id: MediaId,
     report: &mut IntegrityReport,
-) -> Result<usize, StoreError> {
+) -> usize {
     let mut count = 0;
-    let m_str = media_id.to_string();
-
-    let has_files: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM library_files WHERE library_id = ?1 AND media_id = ?2 AND publication_state = 'published')",
-        params![library, m_str],
-        |r| r.get(0),
-    )?;
-
-    let has_item: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM library_items WHERE library_id = ?1 AND media_id = ?2)",
-        params![library, m_str],
-        |r| r.get(0),
-    )?;
-
-    if has_files && !has_item {
+    if probe.expected_item && !probe.actual_item {
         report.missing_items.push(media_id);
         count += 1;
-    } else if !has_files && has_item {
+    } else if !probe.expected_item && probe.actual_item {
         report.orphan_items.push(media_id);
         count += 1;
     }
-
-    // Check user_library_items
-    let users_with_playback: HashSet<String> = {
-        let mut set = HashSet::new();
-        let mut stmt =
-            tx.prepare("SELECT DISTINCT user_id FROM playback_units WHERE media_id = ?1")?;
-        let rows = stmt.query_map(params![m_str], |r| r.get::<_, String>(0))?;
-        for r in rows {
-            set.insert(r?);
-        }
-        set
-    };
-
-    if has_files {
-        for u in &users_with_playback {
-            let has_user_row: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM user_library_items WHERE user_id = ?1 AND library_id = ?2 AND media_id = ?3)",
-                params![u, library, m_str],
-                |r| r.get(0),
-            )?;
-            if !has_user_row {
-                if let Ok(user_id) = u.parse::<UserId>() {
-                    report.missing_user_items.push((user_id, media_id));
-                    count += 1;
-                }
-            }
+    let mut missing: Vec<_> = probe
+        .expected_users
+        .difference(&probe.actual_users)
+        .collect();
+    let mut orphan: Vec<_> = probe
+        .actual_users
+        .difference(&probe.expected_users)
+        .collect();
+    missing.sort();
+    orphan.sort();
+    for user in missing {
+        if let Ok(user_id) = user.parse::<UserId>() {
+            report.missing_user_items.push((user_id, media_id));
+            count += 1;
         }
     }
-
-    let users_with_summary: HashSet<String> = {
-        let mut set = HashSet::new();
-        let mut stmt = tx.prepare(
-            "SELECT DISTINCT user_id FROM user_library_items WHERE library_id = ?1 AND media_id = ?2",
-        )?;
-        let rows = stmt.query_map(params![library, m_str], |r| r.get::<_, String>(0))?;
-        for r in rows {
-            set.insert(r?);
-        }
-        set
-    };
-
-    for u in &users_with_summary {
-        if !has_files || !users_with_playback.contains(u) {
-            if let Ok(user_id) = u.parse::<UserId>() {
-                report.orphan_user_items.push((user_id, media_id));
-                count += 1;
-            }
+    for user in orphan {
+        if let Ok(user_id) = user.parse::<UserId>() {
+            report.orphan_user_items.push((user_id, media_id));
+            count += 1;
         }
     }
-
-    Ok(count)
+    count
 }
 
 /// One page of Media ids (after `after`) with any raw or derived row in the Library,
@@ -370,23 +399,6 @@ const DERIVED_TABLES: [&str; 4] = [
     "library_item_terms",
     "user_library_items",
 ];
-
-/// Whether this Media's derived rows differ from what its raw facts reduce to. The
-/// reduction runs inside a savepoint that is always rolled back, so a check never writes.
-/// Revision counters are excluded: a re-reduction may bump them without changing facts.
-fn derived_rows_drift(
-    tx: &Connection,
-    lib_id: LibraryId,
-    library: &str,
-    media: &str,
-) -> Result<bool, StoreError> {
-    let before = derived_snapshot(tx, library, media)?;
-    tx.execute_batch("SAVEPOINT integrity_probe")?;
-    let reduced = reduce_library_media(tx, lib_id, media.parse()?)
-        .and_then(|_| derived_snapshot(tx, library, media));
-    tx.execute_batch("ROLLBACK TO integrity_probe; RELEASE integrity_probe")?;
-    Ok(before != reduced?)
-}
 
 fn derived_snapshot(
     tx: &Connection,
