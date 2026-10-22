@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
+import ts from "typescript";
 
 import {
   collectAllFilePages,
@@ -99,5 +101,71 @@ test("缺失/未知文件可查看但不可作为可播版本", () => {
   assert.equal(isPlayableFile(dto("present")), true);
   assert.equal(isPlayableFile(dto("missing", { presence: "missing" })), false);
   assert.equal(isPlayableFile(dto("unknown", { presence: "unknown" })), false);
-  assert.equal(isPlayableFile({}), true, "旧响应没有 presence 时按可播处理");
+  assert.equal(isPlayableFile(dto("pending", { publication: "pending" })), false);
+  assert.equal(isPlayableFile({}), false, "缺字段不 fail-open：不可播");
+});
+
+/** 加载真实 `lib/api/libraries.ts`，注入真实分页 collector，只伪造 HTTP request。 */
+async function loadLibrariesApi(request) {
+  const source = await readFile(new URL("../lib/api/libraries.ts", import.meta.url), "utf8");
+  const js = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const module = { exports: {} };
+  const pages = await import("../lib/library-file-pages.ts");
+  new Function("require", "module", "exports", js)((name) => {
+    if (name === "@/lib/http") return { request, resolveRequestUrl: (path) => path };
+    if (name === "@/lib/library-file-pages") return pages;
+    if (name === "@/lib/library-removal") return { waitForLibraryRemoval: async () => {} };
+    if (name === "@/lib/library-operations") return { waitForLibraryOperation: async () => {} };
+    if (name === "@/lib/library-filter") return {};
+    throw new Error(`Unexpected import ${name}`);
+  }, module, module.exports);
+  return module.exports;
+}
+
+/** 服务端真实形状：首详情给 `next_file_cursor`，续页给 `next_cursor`。 */
+function serverFixture(total, limit) {
+  const rows = Array.from({ length: total }, (_, i) =>
+    dto(`f${String(i).padStart(3, "0")}`, i === 0
+      ? { units: [{ season: 1, episode: 1 }, { season: 1, episode: 2 }], presence: "missing" }
+      : {}),
+  );
+  const requests = [];
+  const request = async (path) => {
+    requests.push(path);
+    const match = path.match(/files\?after=([^&]+)/);
+    const offset = match ? Number(decodeURIComponent(match[1]).slice("c-".length)) : 0;
+    const slice = rows.slice(offset, offset + limit);
+    const next = offset + limit < rows.length ? `c-${offset + limit}` : null;
+    if (!match) {
+      return { ok: true, data: { media_item_id: "m", kind: "tv", title: "T", files: slice, next_file_cursor: next } };
+    }
+    return { ok: true, data: { files: slice, next_cursor: next } };
+  };
+  return { request, requests };
+}
+
+for (const [total, expectedRequests] of [[50, 1], [100, 2], [101, 3], [201, 5]]) {
+  test(`真实 adapter 读完 ${total} 个文件并保留覆盖与在位状态`, async () => {
+    const server = serverFixture(total, 50);
+    const api = await loadLibrariesApi(server.request);
+    const detail = await api.getLibraryItemDetail("lib", "m");
+    assert.equal(detail.files.length, total);
+    assert.equal(server.requests.length, expectedRequests);
+    assert.deepEqual(detail.files[0].units, [{ season: 1, episode: 1 }, { season: 1, episode: 2 }]);
+    assert.equal(detail.files[0].presence, "missing");
+    assert.equal(detail.files[0].publication, "published");
+    assert.equal(isPlayableFile(detail.files[0]), false);
+    assert.equal(isPlayableFile(detail.files[1]), true);
+  });
+}
+
+test("真实 adapter 对缺状态字段的文件不 fail-open", async () => {
+  const api = await loadLibrariesApi(async () => ({
+    ok: true,
+    data: { media_item_id: "m", kind: "movie", title: "T", files: [{ file_id: "x", path: "x.mkv" }], next_file_cursor: null },
+  }));
+  const detail = await api.getLibraryItemDetail("lib", "m");
+  assert.equal(isPlayableFile(detail.files[0]), false);
 });

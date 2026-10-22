@@ -104,10 +104,10 @@ export interface LibraryItemFile {
   file_id: string;
   path: string;
   /** 完整覆盖：一个物理文件可服务多集；`season`/`episode` 只是首个具体坐标。 */
-  units?: Array<{ season: number; episode: number }>;
+  units: Array<{ season: number; episode: number }>;
   /** 在位状态；missing/unknown 仍可查看但不可播放。 */
-  presence?: "present" | "missing" | "unknown";
-  publication?: "published" | "pending";
+  presence: "present" | "missing" | "unknown";
+  publication: "published" | "pending";
   season: number | null;
   episode: number | null;
   resolution: string | null;
@@ -1525,6 +1525,10 @@ function fileFrom(f: unknown): LibraryItemFile {
   return {
     file_id: str(fr.file_id),
     path: str(fr.path),
+    units: Array.isArray(fr.units) ? (fr.units as unknown[]).map(unitFrom) : [],
+    // 缺字段不再 fail-open：未知在位/发布状态一律视为不可播。
+    presence: presenceFrom(fr.presence),
+    publication: fr.publication === "published" ? "published" : "pending",
     season: fr.season == null ? null : num(fr.season),
     episode: fr.episode == null ? null : num(fr.episode),
     resolution: fr.resolution == null ? null : str(fr.resolution),
@@ -1538,6 +1542,15 @@ function fileFrom(f: unknown): LibraryItemFile {
     probe_queued: fr.probe_queued === true,
   };
 }
+function unitFrom(u: unknown): { season: number; episode: number } {
+  const ur = (u ?? {}) as Record<string, unknown>;
+  return { season: num(ur.season), episode: num(ur.episode) };
+}
+
+function presenceFrom(value: unknown): "present" | "missing" | "unknown" {
+  return value === "present" || value === "missing" ? value : "unknown";
+}
+
 /** One bounded page of a detail item's files (`GET .../files?after=`). */
 export async function getLibraryItemFiles(
   libraryId: string,
@@ -1552,7 +1565,8 @@ export async function getLibraryItemFiles(
   const r = (raw ?? {}) as Record<string, unknown>;
   return {
     files: Array.isArray(r.files) ? (r.files as unknown[]).map(fileFrom) : [],
-    next_cursor: r.next_file_cursor == null ? null : str(r.next_file_cursor),
+    // 续页 `GET .../files?after=` 的游标字段是 `next_cursor`；首详情页才叫 `next_file_cursor`。
+    next_cursor: r.next_cursor == null ? null : str(r.next_cursor),
   };
 }
 

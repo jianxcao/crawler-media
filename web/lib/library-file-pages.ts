@@ -42,9 +42,15 @@ export async function collectAllFilePages<T extends { file_id: string }>(
   }
 }
 
-/** 缺失/未知在位状态的文件可以查看，但不能当作可播版本。 */
-export function isPlayableFile(file: { presence?: string | null }): boolean {
-  return file.presence === undefined || file.presence === null || file.presence === "present";
+/**
+ * 只有已发布且在位的文件才是可播版本。缺失/未知在位或未发布（含缺字段）的
+ * 文件可以查看，但不能被选来播放：不对旧响应形状 fail-open。
+ */
+export function isPlayableFile(file: {
+  presence?: string | null;
+  publication?: string | null;
+}): boolean {
+  return file.publication === "published" && file.presence === "present";
 }
 
 /** 一个物理文件可能覆盖多集；`season`/`episode` 只是首个具体坐标。 */
