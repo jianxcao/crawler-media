@@ -397,16 +397,22 @@ fn scrape_library_metadata(
                     path,
                     domain::EntityScope::Work,
                 );
-                let write = || {
-                    crate::scrape_metadata::write_nfo(&target, media, &nfo);
-                    Ok(())
-                };
-                let _ = match &lease {
-                    Some(lease) => lease.publish(write),
-                    None => write(),
-                };
-                if let Some(request) = export {
-                    crate::scrape_metadata::export::finish_sidecar_export(state, request);
+                // A ledgered video is exported only through the driver (CAS + digest
+                // guard); the legacy in-place write is kept for unledgered files only.
+                match export {
+                    Some(request) => {
+                        crate::scrape_metadata::export::finish_sidecar_export(state, request)
+                    }
+                    None => {
+                        let write = || {
+                            crate::scrape_metadata::write_nfo(&target, media, &nfo);
+                            Ok(())
+                        };
+                        let _ = match &lease {
+                            Some(lease) => lease.publish(write),
+                            None => write(),
+                        };
+                    }
                 }
                 let movie_root = path.parent().unwrap_or(path);
                 crate::scrape_metadata::scrape_movie_fanart(state, media, movie_root);

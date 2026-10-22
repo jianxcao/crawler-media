@@ -385,12 +385,18 @@ fn refresh_item_metadata_inner(state: &ApiState, id: &str, item_id: &str) -> Res
                         &path,
                         domain::EntityScope::Work,
                     );
-                    let _ = lease.control().signal().publish(|| {
-                        crate::scrape_metadata::write_nfo(&target, &media, &nfo);
-                        Ok(())
-                    });
-                    if let Some(request) = export {
-                        crate::scrape_metadata::export::finish_sidecar_export(&state, request);
+                    // Ledgered videos go through the guarded export driver only; no
+                    // second, unguarded write of the same sidecar.
+                    match export {
+                        Some(request) => {
+                            crate::scrape_metadata::export::finish_sidecar_export(&state, request)
+                        }
+                        None => {
+                            let _ = lease.control().signal().publish(|| {
+                                crate::scrape_metadata::write_nfo(&target, &media, &nfo);
+                                Ok(())
+                            });
+                        }
                     }
                     let movie_root = path.parent().unwrap_or(&path);
                     crate::scrape_metadata::scrape_movie_fanart(&state, &media, movie_root);

@@ -136,6 +136,7 @@ impl Store {
             )));
         }
 
+        ensure_export_binding(&tx, request)?;
         let plan_json = encode_plan(request)?;
         for (operation_id, stale_json) in scrape_operations(&tx)? {
             let stale = decode_plan(&stale_json)?;
@@ -266,4 +267,50 @@ fn scrape_operations(tx: &rusqlite::Connection) -> Result<Vec<(String, String)>,
         operations.push(row?);
     }
     Ok(operations)
+}
+
+/// The export must still describe the file, Media and config it was planned against:
+/// a stale source version, a reconfigured Library or a reassigned file is refused (R17).
+fn ensure_export_binding(
+    tx: &rusqlite::Connection,
+    request: &NfoExportRequest,
+) -> Result<(), StoreError> {
+    let library = request.library_id.to_string();
+    let config: i64 = tx.query_row(
+        "SELECT config_revision FROM libraries WHERE library_id = ?1",
+        params![library],
+        |row| row.get(0),
+    )?;
+    if config != request.config_revision {
+        return Err(StoreError::Protected(format!(
+            "nfo export {}: library config revision {config}, planned {}",
+            request.export_id, request.config_revision
+        )));
+    }
+    let file: Option<(String, String, i64, Option<String>)> = tx
+        .query_row(
+            "SELECT library_id, media_id, file_revision, source_version
+             FROM library_files WHERE file_id = ?1",
+            params![request.file_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let Some((file_library, media, revision, source)) = file else {
+        return Err(StoreError::Protected(format!(
+            "nfo export {}: file {} is gone",
+            request.export_id, request.file_id
+        )));
+    };
+    let source = source.unwrap_or_default();
+    if file_library != library
+        || media != request.media_id.to_string()
+        || revision != request.expected_version.revision
+        || source != request.expected_version.source_version
+    {
+        return Err(StoreError::Protected(format!(
+            "nfo export {}: file {} no longer matches the planned version",
+            request.export_id, request.file_id
+        )));
+    }
+    Ok(())
 }

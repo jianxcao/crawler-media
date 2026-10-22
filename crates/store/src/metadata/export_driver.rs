@@ -192,11 +192,15 @@ impl Store {
         let action = if disk.as_deref() == Some(output_digest.as_str()) {
             NfoExportAction::Confirmed
         } else {
+            ensure_sidecar_replaceable(&plan, disk.as_deref())?;
             library::nfo::replace_nfo_atomically(&plan.path, &plan.body)?;
             NfoExportAction::Replaced
         };
-        self.complete_nfo_export(&plan.operation_id, &output_digest, now_ms)?;
+        // Register (input + export tag) before the operation turns terminal: a crash in
+        // between leaves a pending operation that recovery re-registers, never a
+        // succeeded export whose sidecar is not an input.
         self.register_nfo_export(&plan)?;
+        self.complete_nfo_export(&plan.operation_id, &output_digest, now_ms)?;
         tracing::info!(
             path = %plan.path.display(),
             media = %plan.media_id,
@@ -541,4 +545,36 @@ fn merge_overrides(target: &mut MetadataFields, diff: &MetadataFields) {
         genres,
         cast,
     );
+}
+
+/// Refuse to replace a sidecar that changed since the export snapshot, or one that is
+/// not a readable NFO: its bytes stay exactly as found (R17).
+fn ensure_sidecar_replaceable(plan: &NfoExportRequest, disk: Option<&str>) -> Result<(), StoreError> {
+    if disk != plan.expected_digest.as_deref() {
+        return Err(StoreError::Conflict(format!(
+            "nfo export {} refused: {} changed since the export snapshot",
+            plan.export_id,
+            plan.path.display()
+        )));
+    }
+    if disk.is_none() {
+        return Ok(());
+    }
+    let readable = std::fs::read_to_string(&plan.path)
+        .ok()
+        .is_some_and(|body| {
+            matches!(
+                library::nfo::parse_nfo_fields(&body, plan.scope),
+                library::nfo::NfoReadOutcome::Valid(_)
+            )
+        });
+    if !readable {
+        tracing::warn!(path = %plan.path.display(), "sidecar 不是可读 NFO，保留原字节不覆盖");
+        return Err(StoreError::Conflict(format!(
+            "nfo export {} refused to overwrite unreadable {}",
+            plan.export_id,
+            plan.path.display()
+        )));
+    }
+    Ok(())
 }

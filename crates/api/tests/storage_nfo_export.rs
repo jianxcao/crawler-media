@@ -24,9 +24,18 @@ const LOCALE: &str = "zh-CN";
 #[derive(Default)]
 struct ExportCatalog {
     overview: Mutex<String>,
+    title: Mutex<Option<String>>,
 }
 
 impl ExportCatalog {
+    fn set_title(&self, title: &str) {
+        *self.title.lock() = Some(title.to_string());
+    }
+
+    fn title(&self) -> String {
+        self.title.lock().clone().unwrap_or_else(|| "Fixture Movie".into())
+    }
+
     fn set_overview(&self, overview: &str) {
         *self.overview.lock() = overview.to_string();
     }
@@ -94,7 +103,7 @@ impl api::catalog::Catalog for ExportCatalog {
         preferences: &domain::MetadataPreferences,
     ) -> Result<Option<domain::NormalizedMetadata>, String> {
         let body = serde_json::json!({
-            "title": "Fixture Movie", "original_title": "Fixture Movie",
+            "title": self.title(), "original_title": "Fixture Movie",
             "overview": *self.overview.lock(), "release_date": "2020-05-01",
             "runtime": 120, "vote_average": 8.5, "vote_count": 100,
             "original_language": "en", "status": "Released",
@@ -462,4 +471,66 @@ async fn crash_recovery_refuses_to_overwrite_an_unreadable_sidecar() {
             .is_none(),
         "a refused export must not register"
     );
+}
+
+fn export_state(temp: &Path, catalog: Arc<ExportCatalog>) -> ApiState {
+    common::state(
+        temp,
+        Arc::new(common::Fixtures {
+            requests: Mutex::new(Vec::new()),
+            bodies: HashMap::new(),
+        }),
+        Arc::new(downloader::MemoryDownloader::new(temp.join("stage"))),
+    )
+    .with_catalog(catalog)
+}
+
+/// R17: a normal single-item refresh must not overwrite a sidecar it cannot read.
+#[tokio::test]
+async fn normal_refresh_preserves_invalid_external_sidecar() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog = Arc::new(ExportCatalog::default());
+    catalog.set_overview("V1");
+    let state = export_state(temp.path(), catalog.clone());
+    let (library_id, video, nfo) = movie_fixture(&state);
+    let app = api::router(state.clone());
+    common::scan_and_wait(&app, &library_id.to_string()).await;
+    let media = media_at(&state, &video);
+
+    let disk_before = "<movie><plot>half written".to_string();
+    std::fs::write(&nfo, &disk_before).unwrap();
+    catalog.set_overview("V2");
+    refresh_item(&app, library_id, media).await;
+    let disk_after_refused = std::fs::read_to_string(&nfo).unwrap();
+    assert_eq!(disk_after_refused, disk_before);
+}
+
+/// R18: an edit to the plot alone must not lock the title the provider later changes.
+#[tokio::test]
+#[ignore = "R18 fixed in the next commit"]
+async fn provider_title_changes_when_only_plot_was_edited() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog = Arc::new(ExportCatalog::default());
+    catalog.set_overview("PLOT V1");
+    catalog.set_title("TITLE V1");
+    let state = export_state(temp.path(), catalog.clone());
+    let (library_id, video, nfo) = movie_fixture(&state);
+    let app = api::router(state.clone());
+    common::scan_and_wait(&app, &library_id.to_string()).await;
+    let media = media_at(&state, &video);
+    assert!(std::fs::read_to_string(&nfo).unwrap().contains("TITLE V1"));
+
+    catalog.set_title("TITLE V2");
+    let edited = edit_plot(&std::fs::read_to_string(&nfo).unwrap(), "USER PLOT");
+    std::fs::write(&nfo, edited).unwrap();
+    refresh_item(&app, library_id, media).await;
+    let after = state
+        .store()
+        .lock()
+        .library_item_detail(library_id, media, LOCALE)
+        .unwrap()
+        .unwrap()
+        .metadata;
+    assert_eq!(after.title.value().map(String::as_str), Some("TITLE V2"));
+    assert_eq!(after.overview.value().map(String::as_str), Some("USER PLOT"));
 }
