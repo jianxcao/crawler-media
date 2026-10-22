@@ -645,6 +645,49 @@ fn publication_keeps_carried_units_when_the_row_has_none() {
     );
 }
 
+/// No-compat cutover: an unknown coverage is published as unknown, never
+/// inferred as the whole work.
+#[test]
+fn publication_keeps_unknown_coverage_unknown() {
+    let (tmp, state, media, subscribe) = fixture();
+    let plan = resolve_transfer_plan(&state, &media, &subscribe).unwrap();
+    let (reserved, mut confirmed) = reserved_round(&state, &media, &plan, &tmp);
+    let source = tmp.path().join("downloads/The Matrix.mkv");
+    state
+        .store
+        .lock()
+        .publish_files(
+            &write_scope(&plan),
+            &[store::library_write::FilePublication {
+                file: &reserved.file,
+                units: &[],
+                expected_version: Some(&reserved.file.version),
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            store::unix_now() * 1000,
+        )
+        .unwrap();
+    confirmed.units = Vec::new();
+    let outcome = outcome_of(confirmed, &source);
+    publish_transfer_file(
+        &state.store.lock(),
+        &plan.library_id,
+        plan.config_revision,
+        &outcome.files[0],
+        Some(&source),
+        "copy",
+        None,
+    )
+    .unwrap();
+    let units = state
+        .store
+        .lock()
+        .get_file_units(reserved.file.file_id)
+        .unwrap();
+    assert!(units.is_empty(), "unknown coverage became {units:?}");
+}
+
 /// The reservation is the source of truth for coverage: a narrower carried
 /// coverage never shrinks the units already committed with the row.
 #[test]

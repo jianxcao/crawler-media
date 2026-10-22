@@ -123,3 +123,18 @@ fn series_rollup_keeps_a_newer_episode_mark() {
     );
     assert_eq!(unplayed, Some(1));
 }
+
+#[test]
+fn unknown_coverage_yields_no_playable_units() {
+    let (_media, file) = fixture();
+    let unknown = domain::FileCoverage {
+        file: file.clone(),
+        units: Vec::new(),
+    };
+    assert!(coverage_units(&unknown).is_empty());
+    let whole = domain::FileCoverage {
+        file,
+        units: vec![domain::UnitKey::WHOLE, domain::UnitKey::new(0, 0)],
+    };
+    assert_eq!(coverage_units(&whole), vec![(-1, -1), (0, 0)]);
+}

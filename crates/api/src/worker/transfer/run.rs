@@ -104,14 +104,13 @@ pub(crate) fn publish_transfer_file(
         ));
     }
     // The reservation already wrote this file's units; the collected coverage is
-    // the fallback so a span is never narrowed back to its first episode.
+    // the fallback so a span is never narrowed back to its first episode. With
+    // neither, the coverage is unknown and is published as such (never WHOLE).
     let stored_units = store.get_file_units(file_id)?;
     let units: Vec<domain::UnitKey> = if !stored_units.is_empty() {
         stored_units
-    } else if !coverage.units.is_empty() {
-        coverage.units.clone()
     } else {
-        vec![domain::UnitKey::WHOLE]
+        coverage.units.clone()
     };
     let artwork = store::files::DiscoveredArtwork::discover(&coverage.file.path);
     let mut file = coverage.file.clone();

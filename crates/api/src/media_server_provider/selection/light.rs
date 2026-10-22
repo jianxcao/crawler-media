@@ -232,7 +232,7 @@ fn push_media_group(
 
 /// 一个 coverage 的每个单元各出一条轻候选：旧台账里它们是同一文件的多行。
 ///
-/// 单元集合由 [`coverage_units`] 给出（没有任何单元行 ⇒ 整片），因此候选的
+/// 单元集合由 [`coverage_units`] 给出（只含显式单元；未知覆盖不产生候选），候选的
 /// `(file_id, unit)` 集合与换型前逐行读取完全一致。
 #[allow(clippy::too_many_arguments)]
 fn push_units(

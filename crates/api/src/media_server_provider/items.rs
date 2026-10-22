@@ -45,23 +45,16 @@ pub(super) fn snapshot_unit_coords(unit: Option<domain::UnitKey>) -> (i32, i32) 
     }
 }
 
-/// 一个 coverage 的全部播放单元坐标，等价于旧台账里属于该文件的每一行。
+/// 一个 coverage 显式记录的全部播放单元坐标。
 ///
-/// 没有任何 unit 行的文件按 store 的 `group_file_coverage` 语义读作整片，
-/// 因此这里返回整片坐标而**不是** `(0, 0)`。
+/// 无兼容切换：没有任何 unit 行的文件是“未知覆盖”，不生成任何逻辑可播身份，
+/// 也不能被当成整片（work）借用人物图片等元数据。
 pub(super) fn coverage_units(coverage: &domain::FileCoverage) -> Vec<(i32, i32)> {
-    if coverage.units.is_empty() {
-        vec![(
-            domain::UnitKey::WHOLE.season,
-            domain::UnitKey::WHOLE.episode,
-        )]
-    } else {
-        coverage
-            .units
-            .iter()
-            .map(|unit| (unit.season, unit.episode))
-            .collect()
-    }
+    coverage
+        .units
+        .iter()
+        .map(|unit| (unit.season, unit.episode))
+        .collect()
 }
 
 /// Resolve a public item id (`w1_…` work, `s1_…` season, `u1_…` unit) inside the
