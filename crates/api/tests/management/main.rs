@@ -65,6 +65,7 @@ mod library_gaps;
 mod library_meta;
 mod library_operation_scope;
 mod library_organize;
+mod library_organize_cross;
 mod library_pagination_and_sorting;
 mod library_sidecar_cancellation;
 mod library_video;

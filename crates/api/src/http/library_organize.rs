@@ -132,7 +132,9 @@ fn preview_organize_inner(state: &ApiState, id: &str) -> Response {
 }
 
 /// POST /libraries/{id}/organize — apply the previewed renames. Body:
-/// `{"renames": [{"from","to"}, ...]}`.
+/// `{"renames": [{"from","to","to_library_id"?}, ...]}`. `from` must belong to
+/// `{id}`; `to` must belong to `{id}` unless the entry names another Library of the
+/// same kind in `to_library_id` (admin-only route; durable cross-Library re-parent).
 pub(crate) async fn organize(
     State(state): State<ApiState>,
     Path(id): Path<String>,
@@ -195,6 +197,19 @@ fn apply_organize(state: &ApiState, library: &store::Library, renames: &[Value])
         }
         let from_path = FsPath::new(from);
         let now_ms = crate::job_loop::unix_now();
+        // Cross-Library re-parent is opt-in per entry: the destination Library must be
+        // named, and its work lease is taken before the store mutex (lease acquisition
+        // reads the store) and held until the durable rename has completed.
+        let named_dest = entry["to_library_id"].as_str().filter(|d| *d != library.id);
+        let _dest_lease = match named_dest.map(|dest| state.acquire_library_work(dest)) {
+            Some(Err(error)) => {
+                errors.push(format!("{to}: 目标媒体库不可写: {error}"));
+                continue;
+            }
+            Some(Ok(lease)) => Some(lease),
+            None => None,
+        };
+        let expected_dest = named_dest.unwrap_or(library.id.as_str());
         let request = {
             let store = state.store.lock();
             let from_owner = store
@@ -209,7 +224,13 @@ fn apply_organize(state: &ApiState, library: &store::Library, renames: &[Value])
                 .library_for_path_strict(to_path, library.kind)
                 .ok()
                 .flatten();
-            if to_owner.as_ref().map(|l| &l.id) != Some(&library.id) {
+            if to_owner.as_ref().map(|l| l.id.as_str()) != Some(expected_dest) {
+                tracing::warn!(
+                    from,
+                    to,
+                    expected_dest,
+                    "整理目标不属于指定的媒体库，拒绝改挂"
+                );
                 errors.push(format!("{to}: 目标路径不属于当前媒体库范围"));
                 continue;
             }
