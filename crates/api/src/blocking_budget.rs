@@ -35,6 +35,17 @@ impl BlockingBudget {
         self.permits.available_permits()
     }
 
+    /// 立即预留一个 permit（拿不到即 `Busy`）。扇出调用方在派生任务**之前**预留，
+    /// 这样“窗口还能再开几个”只看真实剩余额度，不会把本请求已派生但尚未
+    /// 取到 permit 的任务重复扣减（否则窗口会随调度时序缩小）。
+    pub fn try_reserve(&self) -> Result<Reservation, BlockingError> {
+        self.permits
+            .clone()
+            .try_acquire_owned()
+            .map(|permit| Reservation { permit })
+            .map_err(|_| BlockingError::Busy)
+    }
+
     /// 在 blocking 线程上执行 `work`，最多等待 `deadline`。
     ///
     /// 超时不会中止 `work`（也不会提前释放 permit）；调用方必须把
@@ -76,5 +87,29 @@ impl BlockingBudget {
         })
         .await
         .map_err(|error| BlockingError::Worker(error.to_string()))
+    }
+}
+
+/// `BlockingBudget::try_reserve` 预留的一个 permit；`run` 语义与 `BlockingBudget::run` 相同。
+pub struct Reservation {
+    permit: OwnedSemaphorePermit,
+}
+
+impl Reservation {
+    pub async fn run<T: Send + 'static>(
+        self,
+        deadline: Duration,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, BlockingError> {
+        let permit = self.permit;
+        let task = tokio::task::spawn_blocking(move || {
+            let _permit: OwnedSemaphorePermit = permit;
+            work()
+        });
+        match tokio::time::timeout(deadline, task).await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => Err(BlockingError::Worker(error.to_string())),
+            Err(_) => Err(BlockingError::Timeout),
+        }
     }
 }

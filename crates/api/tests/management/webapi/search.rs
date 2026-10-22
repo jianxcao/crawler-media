@@ -336,12 +336,9 @@ async fn title_search_beyond_the_window_still_searches_every_source() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    assert_eq!(
-        started.lock().unwrap().len(),
-        4,
-        "窗口内只应开始 4 个源: {:?}",
-        started.lock().unwrap()
-    );
+    // 先取快照再断言：在断言消息里再次 lock 会与第一个 guard 自锁。
+    let started_now = started.lock().unwrap().clone();
+    assert_eq!(started_now.len(), 4, "窗口内只应开始 4 个源: {started_now:?}");
     // 放行：已完成 4 个之后，剩下 1 个必须补位；旧实现此时已把它判成过载。
     *gate.0.lock().unwrap() = true;
     gate.1.notify_all();
@@ -358,12 +355,8 @@ async fn title_search_beyond_the_window_still_searches_every_source() {
         failed.is_empty(),
         "同一请求内的数据源不得互相饿死: {failed:?}"
     );
-    assert_eq!(
-        started.lock().unwrap().len(),
-        5,
-        "5 个源都必须真的搜过: {:?}",
-        started.lock().unwrap()
-    );
+    let started_all = started.lock().unwrap().clone();
+    assert_eq!(started_all.len(), 5, "5 个源都必须真的搜过: {started_all:?}");
 }
 
 #[tokio::test]
