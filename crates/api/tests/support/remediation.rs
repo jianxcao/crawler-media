@@ -22,6 +22,13 @@ impl Gate {
         }
     }
 
+    /// Another handle to the same gate (released by the same guard).
+    pub fn clone_handle(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+        }
+    }
+
     pub fn release_guard(&self) -> GateRelease {
         GateRelease(self.state.clone())
     }
