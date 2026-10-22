@@ -388,3 +388,22 @@ Media／Library／Playback 放在同一 `library.db`、cache 按生命周期独�
 
 - `cargo test --workspace --no-fail-fast`（`/workspace/ws_n03.log`）：**2539 passed、0 failed、11 ignored**（349 suites），`EXIT=0`。无挂起。
 - 定向：`cargo test -p store --test file_rename --test file_rename_durable` 7 passed；`cargo fmt --all --check` exit 0；`cargo check -p api --lib --tests` clean。
+
+### N03 剩余风险收口（2026-10-22 晚）
+
+- **R1 path_key / display_path 拆分（ab4a66f）**：新增 `store::path_key::normalize_path_key`（纯词法、与文件系统等价：合并重复 `/`、去掉 `.` 段、去尾 `/`；`..` 原样保留，不做大小写/Unicode 折叠，所以 key 仍是同一字节的可用路径）。注册为 SQL 函数 `norm_path_key()`；`library_roots`/`library_files`/`library_metadata_inputs` 的写入一律 `path_key = norm_path_key(?)`、`display_path` 保留调用方拼写；所有 `path_key = ?` 查找改为比较规范 key。打开 library.db 时 `migrate_library_keys` 在单事务内逐行把遗留逐字 key 改写为规范形式；规范 key 已被另一行占用时跳过并 `warn!`（不合并、不删行、不阻止启动）。测试：`path_key_normalization::{equivalent_spellings_share_one_key_and_keep_display_spelling, root_paths_differing_only_by_spelling_are_duplicates, open_migrates_verbatim_keys_and_keeps_colliding_rows}`、`path_key::tests::lexical_and_filesystem_equivalent`。
+- **R2 跨库改挂与 playback 用户摘要（6f74d4d）**：复核：用户摘要行本就由两侧 `reduce_library_media` 按 N04 稀疏语义重建（新增测试确认源库行消失、目标库行出现、两库完整性检查均 clean）。真正的缺陷：改名/改挂会让 `file_revision` +1，而 `playback_units.resume_*` 仍指旧 revision，`resolve_playback` 返回 `SourceChanged`，续播位置与音轨丢失（字节并未改变）。修复：`rename_playback::carry_resume_bindings` 在同一事务内把与旧 revision+source_version 完全匹配的续播绑定跟随到新 revision（同步改名与持久改名两条路径），之后再归约。测试：`file_rename_playback_summary::{reparent_moves_sole_summary_to_destination_library, reparent_recomputes_both_sides_when_source_keeps_other_units, reparent_keeps_resume_binding_and_summary_resume_pointer}`（最后一项先红后绿）。
+- **R3 跨库整理（08095df）**：`POST /libraries/{id}/organize` 每个条目可带 `to_library_id`；源仍必须属于 `{id}`，目标必须属于所指定的库（同 kind，由 `library_for_path_strict` 保证），未指定时仍要求同库。目标库 work lease 在取 store 锁之前获取并持有到持久改名完成；冻结/删除中的目标库被拒绝。路由仍是 admin-only。测试：`management::library_organize_cross::{cross_library_organize_requires_named_destination, cross_library_organize_reparents_through_durable_rename, cross_library_organize_rejects_mismatched_or_other_kind_destination, cross_library_organize_requires_admin}`。
+- **R4 共享 artwork（47ec9e5）**：`RenameSidecar.mode`（`move`/`copy`，旧意图 JSON 缺省为 `move`）。视频换目录时观察目录级 artwork（`poster.jpg`/`fanart.jpg`/`folder.jpg`/`banner.jpg`/`clearlogo.png` 等）；在 begin 事务中判定：同目录还有其他已登记文件、或其他文件的 artwork/scrape 记录引用它，则 `copy`（临时名 + 原子 rename，源保留，且不进 `pending_file_deletions`），否则 `move`。同目录改名不触碰目录 artwork。测试：`file_rename_shared_artwork::{sole_owner_moves_directory_artwork, shared_artwork_is_copied_and_kept_for_remaining_media (含 begin 后崩溃→resume), same_directory_rename_leaves_directory_artwork_alone}`。
+- **R5 协议总数=分页（902c99b）**：新增 `crates/api/tests/protocol_paging_totals.rs` 4 项 HTTP 端到端：电影库（含多版本合并、跨库同片）、全局合并电影/剧集列表、剧集/分集（含跨库分季、双集文件）、`/Shows/{id}/Episodes`、未知 ParentId（total=0）、混合类型、收藏/已看/未看/搜索过滤。逐页断言 `TotalRecordCount` 不漂移、ID 不重复、分页并集 == total == 未分页条数。**未发现不一致**，无需改生产代码。
+
+**仍存在的风险（如实）：**
+- R1 规范化刻意只做词法：大小写不敏感文件系统、NFC/NFD 差异、符号链接别名、含 `..` 的拼写仍是不同 key；迁移冲突行只记日志保留原样，需人工合并。
+- R2 只跟随续播绑定；改名前已签发的播放会话（绑定旧 revision）在改名后会被拒绝，客户端需重新取会话。
+- R4 共享判定在 begin 时做；begin 与磁盘阶段之间若有新文件发布到源目录，`move` 仍会带走 artwork（窄竞态）。识别列表为固定文件名集合；季目录 `seasonNN-poster.jpg` 等非标准名不处理。目标已存在同名 artwork 时保留目标版本。
+- R3 Web 端整理 UI 未暴露 `to_library_id`（只开了 API）。
+
+### 本轮全量门（902c99b）
+
+- `cargo test --workspace`（`/workspace/logs/final-cargo.log`）：**2557 passed、0 failed、11 ignored**（353 个 test result），`EXIT=0`。无挂起；`concurrent_scan_of_ten_thousand_episodes_keeps_heartbeat_write_scope_bounded` 单项 >60s 但正常结束（规模测试，非死锁）。
+- Web：`npm test` **844 passed / 0 failed**；`npx tsc --noEmit` exit 0；`cargo fmt --all --check` exit 0。
