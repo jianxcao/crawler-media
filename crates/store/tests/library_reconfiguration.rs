@@ -772,3 +772,64 @@ fn initial_zero_scope_is_rejected_after_reconfiguration() {
         .unwrap();
     assert!(store.get_file_version(file.file_id).unwrap().is_some());
 }
+
+/// R19: one PATCH that changes both roots and locale commits both; the locale is never
+/// silently dropped because a roots branch ran. An empty locale is refused before freezing.
+#[test]
+fn roots_and_locale_commit_together() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let library = store
+        .create_library(MediaKind::Tv, "TV", &["/tv"], "everyone", true, &[])
+        .unwrap();
+    let lib_id: domain::LibraryId = library.id.parse().unwrap();
+    let requested_roots = vec![PathBuf::from("/tv"), PathBuf::from("/tv2")];
+
+    let expected_revision = store.library_config_revision(&library.id).unwrap();
+    let refused = store.begin_library_reconfiguration(
+        &LibraryReconfiguration {
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            library_id: lib_id,
+            expected_revision,
+            root_paths: Some(requested_roots.clone()),
+            display_locale: Some("  ".into()),
+        },
+        1_000,
+    );
+    assert!(refused.is_err());
+    assert_eq!(store.library_lifecycle_state(&library.id).unwrap(), "ready");
+
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    store
+        .begin_library_reconfiguration(
+            &LibraryReconfiguration {
+                operation_id: operation_id.clone(),
+                library_id: lib_id,
+                expected_revision,
+                root_paths: Some(requested_roots.clone()),
+                display_locale: Some("en-US".into()),
+            },
+            2_000,
+        )
+        .unwrap();
+    let mut status = store.advance_library_operation(&operation_id, 2_100, 100).unwrap();
+    for step in 0..10 {
+        if status.state == "succeeded" {
+            break;
+        }
+        status = store.advance_library_operation(&operation_id, 2_200 + step, 100).unwrap();
+    }
+    assert_eq!(status.state, "succeeded");
+    let finished = store.get_library(&library.id).unwrap().unwrap();
+    let finished_roots: Vec<PathBuf> = finished.root_paths.clone();
+    assert_eq!(finished_roots, requested_roots);
+    let finished_locale: String = rusqlite::Connection::open(tmp.path().join("library.db"))
+        .unwrap()
+        .query_row(
+            "SELECT display_locale FROM libraries WHERE library_id = ?1",
+            rusqlite::params![library.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(finished_locale, "en-US");
+}

@@ -101,6 +101,13 @@ impl Store {
                 "library reconfiguration cannot drop every root".into(),
             ));
         }
+        if request
+            .display_locale
+            .as_deref()
+            .is_some_and(|locale| locale.trim().is_empty())
+        {
+            return Err(StoreError::Invalid("display locale cannot be empty".into()));
+        }
         let library = request.library_id.to_string();
         // Step 3's first item: a pending removal owns the Library *before* it touches
         // `lifecycle_state`, so the removal row — not the lifecycle — is what refuses a
@@ -222,13 +229,21 @@ impl Store {
         let mut cursor = Self::read_operation_cursor(&tx, operation_id)?;
 
         let outcome = match kind.as_str() {
+            // A combined roots+locale request is one operation: the locale is applied in the
+            // same transaction that completes the last root batch, never dropped.
             "roots" => roots::apply_root_batch(
                 &tx,
                 &library,
                 plan.root_paths.as_deref().unwrap_or_default(),
                 &mut cursor,
                 batch,
-            ),
+            )
+            .and_then(|outcome| match outcome {
+                roots::BatchOutcome::Done => {
+                    locale::apply_locale(&tx, &library, plan.display_locale.as_deref())
+                }
+                more => Ok(more),
+            }),
             "locale" => locale::apply_locale(&tx, &library, plan.display_locale.as_deref()),
             "integrity" => {
                 let integrity_plan: integrity::IntegrityPlan = serde_json::from_str(&plan_json)
