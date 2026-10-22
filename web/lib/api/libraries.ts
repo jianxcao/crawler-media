@@ -1796,23 +1796,43 @@ export async function listUnidentifiedLibraryFiles(libraryId?: string): Promise<
 }
 
 function toUnidentifiedGroups(raw: unknown): UnidentifiedGroup[] {
-  if (!Array.isArray(raw)) return [];
+  if (!Array.isArray(raw)) throw new Error("待识别清单响应格式错误");
   return raw.map((entry) => {
     const r = (entry ?? {}) as Record<string, unknown>;
-    const key = str(r.key ?? r.path ?? r.file_path ?? "");
+    const libraryId = str(r.library_id);
+    const libraryName = str(r.library_name);
     return {
-      key,
-      label: str(r.label ?? r.file_name ?? r.path ?? r.file_path ?? "未识别文件"),
-      library_id: str(r.library_id),
-      library_name: str(r.library_name),
-      file_count: num(r.file_count ?? 1),
-      total_size_bytes: num(r.total_size_bytes ?? r.size_bytes),
+      key: str(r.key ?? ""),
+      label: str(r.label ?? "未识别文件"),
+      library_id: libraryId,
+      library_name: libraryName,
+      file_count: num(r.file_count),
+      total_size_bytes: num(r.total_size_bytes),
       reason: r.reason == null ? null : str(r.reason),
       code: (r.code as UnidentifiedCode) ?? null,
       candidates: Array.isArray(r.candidates) ? (r.candidates as UnidentifiedCandidate[]) : [],
-      files: Array.isArray(r.files) ? (r.files as UnidentifiedFile[]) : [],
+      files: Array.isArray(r.files)
+        ? (r.files as unknown[]).map((f) => toUnidentifiedFile(f, libraryId, libraryName))
+        : [],
     };
   });
+}
+
+/** 后端每个文件只给 `file_id` / `file_path`；其余字段来自分组或为空。 */
+function toUnidentifiedFile(raw: unknown, libraryId: string, libraryName: string): UnidentifiedFile {
+  const f = (raw ?? {}) as Record<string, unknown>;
+  return {
+    id: str(f.file_id ?? ""),
+    library_id: libraryId,
+    library_name: libraryName,
+    file_path: str(f.file_path ?? ""),
+    size_bytes: num(f.size_bytes),
+    season_number: num(f.season_number),
+    episode_number: num(f.episode_number),
+    reason: f.reason == null ? null : str(f.reason),
+    code: (f.code as UnidentifiedCode) ?? null,
+    candidates: Array.isArray(f.candidates) ? (f.candidates as UnidentifiedCandidate[]) : [],
+  };
 }
 
 
@@ -1881,7 +1901,7 @@ export function annotateMediaSource(
 /** 缺失清单（GET /libraries/{id}/missing），按条目聚合。 */
 export async function listMissingLibraryFiles(libraryId: string): Promise<MissingItem[]> {
   const raw = await unwrap(request<ApiEnvelope<unknown>>(`/libraries/${libraryId}/missing`));
-  if (!Array.isArray(raw)) return [];
+  if (!Array.isArray(raw)) throw new Error("缺失清单响应格式错误");
   return raw.map((entry) => {
     const r = (entry ?? {}) as Record<string, unknown>;
     return {
@@ -1896,10 +1916,10 @@ export async function listMissingLibraryFiles(libraryId: string): Promise<Missin
         ? (r.files as unknown[]).map((f) => {
             const fr = (f ?? {}) as Record<string, unknown>;
             return {
-              id: str(fr.id ?? fr.file_id),
-              file_path: str(fr.file_path ?? fr.path),
-              season_number: num(fr.season_number ?? fr.season),
-              episode_number: num(fr.episode_number ?? fr.episode),
+              id: str(fr.id ?? ""),
+              file_path: str(fr.file_path ?? ""),
+              season_number: num(fr.season_number),
+              episode_number: num(fr.episode_number),
               size_bytes: num(fr.size_bytes),
             };
           })
