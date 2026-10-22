@@ -539,3 +539,85 @@ async fn provider_title_changes_when_only_plot_was_edited() {
         Some("USER PLOT")
     );
 }
+
+/// S01: an export holds the Store mutex only for database phases. Every lock
+/// acquisition records whether the sidecar exists yet; the file must appear
+/// between two guards, never while one is alive.
+#[tokio::test]
+async fn phased_export_writes_the_sidecar_with_the_store_unlocked() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Tracked<'a> {
+        guard: parking_lot::MutexGuard<'a, store::Store>,
+        live: &'a AtomicUsize,
+    }
+    impl std::ops::Deref for Tracked<'_> {
+        type Target = store::Store;
+        fn deref(&self) -> &store::Store {
+            &self.guard
+        }
+    }
+    impl Drop for Tracked<'_> {
+        fn drop(&mut self) {
+            self.live.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let catalog = Arc::new(ExportCatalog::default());
+    catalog.set_overview("V1");
+    let state = export_state(temp.path(), catalog);
+    let (library_id, video, nfo) = movie_fixture(&state);
+    let app = api::router(state.clone());
+    common::scan_and_wait(&app, &library_id.to_string()).await;
+    let media = media_at(&state, &video);
+    std::fs::remove_file(&nfo).unwrap();
+    let request = export_request(
+        &state,
+        library_id,
+        media,
+        &video,
+        &nfo,
+        "op-phased",
+        "export-phased",
+        "P",
+    );
+
+    let shared = state.store();
+    let live = AtomicUsize::new(0);
+    let seen = Mutex::new(Vec::new());
+    let lock = || {
+        assert_eq!(
+            live.fetch_add(1, Ordering::SeqCst),
+            0,
+            "phases must not nest"
+        );
+        seen.lock().push(nfo.exists());
+        Tracked {
+            guard: shared.lock(),
+            live: &live,
+        }
+    };
+    let outcome =
+        store::metadata::export_driver::export_nfo_sidecar_phased(lock, &request, 5_000).unwrap();
+    assert_eq!(
+        outcome.action,
+        store::metadata::export_driver::NfoExportAction::Replaced
+    );
+    let seen = seen.into_inner();
+    assert!(seen.len() >= 3, "plan, registration plan, finish: {seen:?}");
+    assert!(!seen[0], "the plan phase runs before the write");
+    assert!(
+        seen[1..].iter().all(|exists| *exists),
+        "the write happened between guards: {seen:?}"
+    );
+    assert_eq!(live.load(Ordering::SeqCst), 0);
+    assert!(
+        shared
+            .lock()
+            .nfo_export_registration("op-phased")
+            .unwrap()
+            .is_some(),
+        "the final locked phase registers the export"
+    );
+}

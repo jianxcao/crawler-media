@@ -32,8 +32,24 @@ impl Store {
     /// 观察在写事务外完成，事务内用 `source_version` CAS 兜底：观察期间文件或 Library 配置变了
     /// 就整批放弃，绝不用过期观察覆盖新状态。
     pub fn reconcile_nfo_inputs(&self, path: &Path) -> Result<bool, StoreError> {
-        let Some(existing) = self.existing_file_for_path(path)? else {
+        let Some(plan) = self.plan_nfo_input_reconcile(path)? else {
             return Ok(false);
+        };
+        let observed = plan.observe();
+        self.apply_nfo_input_reconcile(observed)
+    }
+
+    /// Locked phase 1 of [`Self::reconcile_nfo_inputs`]: read the ownership keys.
+    ///
+    /// No file is touched. Callers that share the Store behind a mutex take the lock
+    /// only for this call, run [`NfoInputReconcilePlan::observe`] off-lock, then lock
+    /// again for [`Self::apply_nfo_input_reconcile`] (S01).
+    pub fn plan_nfo_input_reconcile(
+        &self,
+        path: &Path,
+    ) -> Result<Option<NfoInputReconcilePlan>, StoreError> {
+        let Some(existing) = self.existing_file_for_path(path)? else {
+            return Ok(None);
         };
         let locale = crate::library_query::library_display_locale(self, existing.library_id)?
             .unwrap_or_default();
@@ -49,17 +65,30 @@ impl Store {
                 source_version: existing.source_version,
             },
         };
-        let observations = super::observe_nfo_inputs(
-            path,
-            existing.kind,
-            &existing.units,
-            &locale,
-            &target.version,
+        Ok(Some(NfoInputReconcilePlan {
+            path: path.to_path_buf(),
+            kind: existing.kind,
+            units: existing.units,
+            locale,
             config_revision,
-        );
+            target,
+        }))
+    }
+
+    /// Locked phase 3: record what [`NfoInputReconcilePlan::observe`] saw.
+    ///
+    /// `record_nfo_observations` CASes `source_version`/config revision, so an
+    /// observation made stale while the lock was released is dropped, not written.
+    pub fn apply_nfo_input_reconcile(
+        &self,
+        observed: NfoInputReconcileObserved,
+    ) -> Result<bool, StoreError> {
+        let NfoInputReconcileObserved { plan, observations } = observed;
+        let path = plan.path.as_path();
+        let target = &plan.target;
         let tx = self.library.unchecked_transaction()?;
         let before = tx.total_changes();
-        if !record_nfo_observations(&tx, &target, &observations)? {
+        if !record_nfo_observations(&tx, target, &observations)? {
             tracing::warn!(
                 path = %path.display(),
                 "NFO sidecar 观察在落库前已过期：本次不更新输入，留待下一次扫描"
@@ -134,5 +163,41 @@ impl Store {
         } else {
             units
         })
+    }
+}
+
+/// Ownership keys of one ledgered video, read under the Store lock.
+#[derive(Clone, Debug)]
+pub struct NfoInputReconcilePlan {
+    path: std::path::PathBuf,
+    kind: MediaKind,
+    units: Vec<UnitKey>,
+    locale: String,
+    config_revision: i64,
+    target: NfoInputTarget,
+}
+
+/// Sidecar observations for a [`NfoInputReconcilePlan`], made without the Store.
+#[derive(Debug)]
+pub struct NfoInputReconcileObserved {
+    plan: NfoInputReconcilePlan,
+    observations: Vec<super::NfoObservation>,
+}
+
+impl NfoInputReconcilePlan {
+    /// Cold IO + parse of every sidecar candidate. Never touches the Store.
+    pub fn observe(self) -> NfoInputReconcileObserved {
+        let observations = super::observe_nfo_inputs(
+            &self.path,
+            self.kind,
+            &self.units,
+            &self.locale,
+            &self.target.version,
+            self.config_revision,
+        );
+        NfoInputReconcileObserved {
+            plan: self,
+            observations,
+        }
     }
 }

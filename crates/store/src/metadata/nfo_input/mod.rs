@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use domain::{EntityScope, FileVersion, MetadataFields};
 
 pub use observe::observe_nfo_inputs;
+pub use reconcile::{NfoInputReconcileObserved, NfoInputReconcilePlan};
 pub use record::{NfoInputTarget, record_nfo_observations};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

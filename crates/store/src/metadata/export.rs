@@ -214,6 +214,39 @@ impl Store {
         Ok(())
     }
 
+    /// Whether `operation_id` is still an unfinished NFO export.
+    pub fn nfo_export_pending(&self, operation_id: &str) -> Result<bool, StoreError> {
+        let state: Option<String> = self
+            .library
+            .query_row(
+                "SELECT state FROM library_operations WHERE operation_id = ?1 AND kind = ?2",
+                params![operation_id, NFO_EXPORT_KIND],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(state.is_some_and(|state| state != "succeeded" && state != "failed"))
+    }
+
+    /// Re-check the file/config/Media binding an export was planned against (R17 CAS).
+    pub fn nfo_export_binding_current(&self, request: &NfoExportRequest) -> Result<(), StoreError> {
+        ensure_export_binding(&self.library, request)
+    }
+
+    /// Turn an unfinished export terminal as failed; recovery no longer drives it.
+    pub fn fail_nfo_export(
+        &self,
+        operation_id: &str,
+        error: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.library.execute(
+            "UPDATE library_operations SET state = 'failed', error = ?2, updated_at_ms = ?3
+             WHERE operation_id = ?1 AND kind = ?4",
+            params![operation_id, error, now_ms, NFO_EXPORT_KIND],
+        )?;
+        Ok(())
+    }
+
     /// Registration of a completed export, or `None` while it is unfinished.
     pub fn nfo_export_registration(
         &self,

@@ -45,8 +45,16 @@ pub(crate) fn begin_sidecar_export(
 ) -> Option<NfoExportRequest> {
     let sidecar = sidecar_path(video)?;
     let (operation_id, export_id) = next_ids();
-    let store = state.store.lock();
-    let request = match store.nfo_export_target(video, &sidecar, scope, &operation_id, &export_id) {
+    // S01: the Store mutex is held only for database phases; the sidecar is read
+    // between them and every decision is re-made against current rows.
+    let target = state.store.lock().nfo_export_target_unobserved(
+        video,
+        &sidecar,
+        scope,
+        &operation_id,
+        &export_id,
+    );
+    let mut request = match target {
         Ok(Some(request)) => request,
         Ok(None) => return None,
         Err(error) => {
@@ -54,7 +62,19 @@ pub(crate) fn begin_sidecar_export(
             return None;
         }
     };
-    match store.capture_nfo_edits(&request) {
+    let observation = match store::metadata::export_driver::observe_nfo_sidecar(&sidecar, scope) {
+        Ok(observation) => observation,
+        Err(error) => {
+            tracing::warn!(%error, media_id = %media.id, path = %sidecar.display(), "NFO sidecar 无法读取");
+            return None;
+        }
+    };
+    request.expected_digest = observation.digest.clone();
+    let captured = state
+        .store
+        .lock()
+        .capture_nfo_edits_observed(&request, &observation);
+    match captured {
         Ok(true) => tracing::info!(
             media_id = %media.id,
             path = %request.path.display(),
@@ -72,9 +92,13 @@ pub(crate) fn begin_sidecar_export(
 }
 
 /// Project effective metadata onto the sidecar and register it as an input.
+///
+/// Disk reads/writes run with the Store mutex released; the final phase
+/// revalidates the operation and the file/config binding before registering.
 pub(crate) fn finish_sidecar_export(state: &ApiState, request: NfoExportRequest) {
     let now_ms = crate::job_loop::unix_now();
-    match state.store.lock().export_nfo_sidecar(&request, now_ms) {
+    let lock = || state.store.lock();
+    match store::metadata::export_driver::export_nfo_sidecar_phased(lock, &request, now_ms) {
         Ok(outcome) => tracing::info!(
             operation_id = %request.operation_id,
             media_id = %request.media_id,
@@ -94,22 +118,36 @@ pub(crate) fn finish_sidecar_export(state: &ApiState, request: NfoExportRequest)
 
 /// Drive every unfinished export now; returns how many were driven.
 pub(crate) fn resume_sidecar_exports(state: &ApiState, now_ms: i64) -> usize {
-    let outcomes = match state.store.lock().resume_pending_nfo_exports(now_ms) {
-        Ok(outcomes) => outcomes,
+    let pending = match state.store.lock().pending_nfo_exports() {
+        Ok(pending) => pending,
         Err(error) => {
             tracing::error!(%error, "恢复未完成的 NFO 导出失败");
             return 0;
         }
     };
-    for outcome in &outcomes {
-        tracing::info!(
-            export_id = %outcome.export_id,
-            action = ?outcome.action,
-            digest = %outcome.output_digest,
-            "中断的 NFO 导出已推进"
-        );
+    let mut driven = 0;
+    for request in pending {
+        let lock = || state.store.lock();
+        match store::metadata::export_driver::resume_nfo_export_phased(lock, &request, now_ms) {
+            Ok(outcome) => {
+                driven += 1;
+                tracing::info!(
+                    export_id = %outcome.export_id,
+                    action = ?outcome.action,
+                    digest = %outcome.output_digest,
+                    "中断的 NFO 导出已推进"
+                );
+            }
+            Err(error) => tracing::error!(
+                %error,
+                operation_id = %request.operation_id,
+                export_id = %request.export_id,
+                path = %request.path.display(),
+                "NFO 导出恢复失败；操作保持未完成，下一轮继续重试"
+            ),
+        }
     }
-    outcomes.len()
+    driven
 }
 
 fn next_ids() -> (String, String) {
