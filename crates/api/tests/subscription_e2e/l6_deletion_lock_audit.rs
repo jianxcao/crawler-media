@@ -22,17 +22,14 @@ fn subscription_paths_do_not_delete_files_under_the_store_lock() {
     }
     let queue = source("src/http/file_delete.rs");
     let body = queue
-        .split("pub(crate) fn retry_queued_deletions")
+        .split("fn process_queued_deletion")
         .nth(1)
         .and_then(|rest| rest.split("\n}\n").next())
-        .expect("retry_queued_deletions");
+        .expect("process_queued_deletion");
     let delete_at = body.find("remove_physical_file").expect("deletes files");
-    let lock_at = body[..delete_at]
-        .rfind("store.lock()")
-        .expect("lists queue");
     assert!(
-        body[lock_at..delete_at].contains("};"),
-        "the Store lock must be released before removing the file"
+        !body[..delete_at].contains("= store.lock()"),
+        "the Store lock must not be held while removing the file"
     );
 }
 

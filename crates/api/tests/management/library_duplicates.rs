@@ -477,3 +477,144 @@ async fn parent_library_duplicates_cannot_delete_nested_child_library_files() {
     assert_eq!(blocked.status(), StatusCode::NOT_FOUND);
     assert!(a.exists() && b.exists(), "父库 duplicates 绝不能删子库文件");
 }
+
+struct TvFixture {
+    app: axum::Router,
+    library_id: String,
+    media_id: MediaId,
+    root: std::path::PathBuf,
+}
+
+async fn tv_fixture(tmp: &tempfile::TempDir) -> TvFixture {
+    let root = tmp.path().join("data/library/tv");
+    std::fs::create_dir_all(&root).unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let media = Media {
+        id: MediaId::new(),
+        kind: MediaKind::Tv,
+        title: "Merged Show".into(),
+        year: Some(2020),
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&media).unwrap();
+    drop(store);
+    let app = app(tmp);
+    let libs = json_body(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                "/api/v1/libraries",
+                Some("management-secret"),
+                Value::Null,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let library_id = libs["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["kind"] == "tv")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    TvFixture {
+        app,
+        library_id,
+        media_id: media.id,
+        root,
+    }
+}
+
+fn publish_tv(
+    tmp: &tempfile::TempDir,
+    fx: &TvFixture,
+    name: &str,
+    bytes: Option<&[u8]>,
+    units: &[domain::UnitKey],
+) -> (LedgerId, std::path::PathBuf) {
+    let path = fx.root.join(name);
+    if let Some(bytes) = bytes {
+        std::fs::write(&path, bytes).unwrap();
+    }
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let file_id = LedgerId::new();
+    store::test_support::publish_fixture_file_units(
+        &store,
+        &FixtureFile {
+            file_id: Some(file_id),
+            media_id: fx.media_id,
+            path: path.display().to_string(),
+            ..Default::default()
+        },
+        units,
+    )
+    .unwrap();
+    (file_id, path)
+}
+
+async fn delete_dup(fx: &TvFixture, file_id: LedgerId) -> StatusCode {
+    fx.app
+        .clone()
+        .oneshot(request(
+            "DELETE",
+            &format!("/api/v1/libraries/{}/duplicates/{file_id}", fx.library_id),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap()
+        .status()
+}
+
+fn e(n: i32) -> domain::UnitKey {
+    domain::UnitKey::new(1, n)
+}
+
+#[tokio::test]
+async fn merged_episode_file_is_not_deletable_when_only_one_unit_is_covered_elsewhere() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fx = tv_fixture(&tmp).await;
+    let (merged, merged_path) = publish_tv(&tmp, &fx, "S01E01E02.mkv", Some(b"m"), &[e(1), e(2)]);
+    publish_tv(&tmp, &fx, "S01E01.mkv", Some(b"one"), &[e(1)]);
+    assert_eq!(delete_dup(&fx, merged).await, StatusCode::BAD_REQUEST);
+    assert_eq!(std::fs::read(&merged_path).unwrap(), b"m");
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    assert!(store.file_coverage_by_id(merged).unwrap().is_some());
+}
+
+#[tokio::test]
+async fn merged_episode_file_is_deletable_when_every_unit_has_an_independent_copy() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fx = tv_fixture(&tmp).await;
+    let (merged, merged_path) = publish_tv(&tmp, &fx, "S01E01E02.mkv", Some(b"m"), &[e(1), e(2)]);
+    publish_tv(&tmp, &fx, "S01E01.mkv", Some(b"one"), &[e(1)]);
+    publish_tv(&tmp, &fx, "S01E02.mkv", Some(b"two"), &[e(2)]);
+    assert_eq!(delete_dup(&fx, merged).await, StatusCode::OK);
+    assert!(!merged_path.exists());
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    assert!(store.file_coverage_by_id(merged).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn hardlinked_or_missing_copies_do_not_prove_unit_coverage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fx = tv_fixture(&tmp).await;
+    let (merged, merged_path) = publish_tv(&tmp, &fx, "S01E01E02.mkv", Some(b"m"), &[e(1), e(2)]);
+    publish_tv(&tmp, &fx, "S01E01.mkv", Some(b"one"), &[e(1)]);
+    let link = fx.root.join("S01E02.mkv");
+    std::fs::hard_link(&merged_path, &link).unwrap();
+    publish_tv(&tmp, &fx, "S01E02.mkv", None, &[e(2)]);
+    assert_eq!(delete_dup(&fx, merged).await, StatusCode::BAD_REQUEST);
+    std::fs::remove_file(&link).unwrap();
+    assert_eq!(delete_dup(&fx, merged).await, StatusCode::BAD_REQUEST);
+    assert_eq!(std::fs::read(&merged_path).unwrap(), b"m");
+}

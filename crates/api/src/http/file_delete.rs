@@ -64,28 +64,67 @@ pub(crate) fn retry_queued_deletions(
     // at the end of this statement, before any filesystem work below.
     let queued = { store.lock().list_due_file_deletions(now)? };
     for entry in queued {
-        let path = entry.path.as_str();
-        match queued_path_was_reused(store, &entry) {
-            Ok(true) => {
-                abandon_queued_deletion(store, path);
-                continue;
-            }
-            Ok(false) => {}
-            Err(error) => {
-                // Identity unknown: skip this path rather than delete bytes that
-                // may belong to a new import.
-                tracing::error!(path = %path, %error, "读取待删除文件身份失败，跳过本轮删除");
-                continue;
-            }
+        process_queued_deletion(store, &entry, now)?;
+    }
+    Ok(())
+}
+
+/// Execute one just-queued deletion intent now (off the Store lock). The
+/// intent stays queued on failure, so the periodic retry and restart recovery
+/// finish it. Returns an error message when the bytes are not yet gone.
+pub(crate) fn retry_queued_deletions_for(
+    store: &parking_lot::Mutex<Store>,
+    path: &str,
+) -> Result<(), String> {
+    let now = crate::job_loop::unix_now();
+    let entry = {
+        let guard = store.lock();
+        guard
+            .list_due_file_deletions(now)
+            .map_err(|e| e.to_string())?
+    }
+    .into_iter()
+    .find(|entry| entry.path == path)
+    .ok_or_else(|| format!("删除意图不存在 {path}"))?;
+    process_queued_deletion(store, &entry, now).map_err(|e| e.to_string())?;
+    let still_queued = {
+        let guard = store.lock();
+        guard
+            .list_pending_file_deletions()
+            .map_err(|e| e.to_string())?
+    }
+    .iter()
+    .any(|queued| queued == path);
+    if still_queued {
+        return Err(format!("删除文件失败 {path}，已保留删除意图"));
+    }
+    Ok(())
+}
+
+fn process_queued_deletion(
+    store: &parking_lot::Mutex<Store>,
+    entry: &store::QueuedFileDeletion,
+    now: i64,
+) -> Result<(), store::StoreError> {
+    let path = entry.path.as_str();
+    match queued_path_was_reused(store, entry) {
+        Ok(true) => {
+            abandon_queued_deletion(store, path);
+            return Ok(());
         }
-        let result = remove_physical_file(path);
-        let store = store.lock();
-        match &result {
-            Ok(()) => store.complete_file_deletion(path)?,
-            Err(error) => {
-                tracing::warn!(path = %path, %error, "删除被替换文件失败，保留在待删除队列稍后重试");
-                store.record_file_deletion_failure(path, now, error)?;
-            }
+        Ok(false) => {}
+        Err(error) => {
+            tracing::error!(path = %path, %error, "读取待删除文件身份失败，跳过本轮删除");
+            return Ok(());
+        }
+    }
+    let result = remove_physical_file(path);
+    let store = store.lock();
+    match &result {
+        Ok(()) => store.complete_file_deletion(path)?,
+        Err(error) => {
+            tracing::warn!(path = %path, %error, "删除文件失败，保留在待删除队列稍后重试");
+            store.record_file_deletion_failure(path, now, error)?;
         }
     }
     Ok(())

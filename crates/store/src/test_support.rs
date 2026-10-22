@@ -66,10 +66,30 @@ pub fn publish_fixture_files(
     }
 
     let mut results = Vec::with_capacity(specs.len());
-
     for spec in specs {
+        results.push(publish_with_units(store, spec, &fixture_units(spec))?);
+    }
+    Ok(results)
+}
+
+/// Publish one fixture file with an explicit coverage (e.g. a merged E01+E02
+/// episode file). `spec.season/episode` are ignored.
+pub fn publish_fixture_file_units(
+    store: &Store,
+    spec: &FixtureFile,
+    units: &[UnitKey],
+) -> Result<LibraryFile, StoreError> {
+    publish_with_units(store, spec, units)
+}
+
+fn publish_with_units(
+    store: &Store,
+    spec: &FixtureFile,
+    units: &[UnitKey],
+) -> Result<LibraryFile, StoreError> {
+    {
         let file = place_fixture_file(store, spec)?;
-        let units = fixture_units(spec);
+        let units = units.to_vec();
         let locale = crate::library_query::library_display_locale(store, file.library_id)
             .ok()
             .flatten()
@@ -101,10 +121,8 @@ pub fn publish_fixture_files(
             crate::unix_now() * 1000,
         )?;
 
-        results.push(file);
+        Ok(file)
     }
-
-    Ok(results)
 }
 
 fn fixture_units(spec: &FixtureFile) -> Vec<UnitKey> {
