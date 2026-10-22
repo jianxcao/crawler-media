@@ -171,24 +171,47 @@ fn pick_locale_row<'a>(
     rows.first()
 }
 
+/// Merge the persisted composed effective row into the NFO/base input fields.
+///
+/// Every composed field (not a short whitelist) fills a missing input field; a field whose
+/// effective origin is a manual override wins over the input as well, so details, cards and
+/// protocol hydration show the same value the composer persisted.
 pub(crate) fn fill_from_adopted(base: &mut MetadataFields, adopted: &EffectiveMetadata) {
-    fill(&mut base.title, Some(adopted.title.clone()));
-    fill(&mut base.original_title, adopted.original_title.clone());
-    fill(&mut base.overview, adopted.overview.clone());
-    fill(&mut base.release_date, adopted.release_date.clone());
-    fill(&mut base.language, adopted.language.clone());
-    fill(&mut base.year, adopted.year);
-    fill(&mut base.rating, adopted.rating);
-    fill(&mut base.runtime_minutes, adopted.runtime_minutes);
-    fill(&mut base.poster_url, adopted.poster_url.clone());
-    fill(&mut base.backdrop_url, adopted.backdrop_url.clone());
-    if base.genres.is_missing() {
-        if let Ok(genres) = serde_json::from_str::<Vec<domain::MetadataGenre>>(&adopted.genres_json)
-        {
-            if !genres.is_empty() {
-                base.genres = FieldValue::Value(genres);
-            }
+    fill(&mut base.title, Some(adopted.title.clone()).filter(|t| !t.is_empty()));
+    let composed = serde_json::from_str::<serde_json::Value>(&adopted.details_json)
+        .ok()
+        .and_then(|value| value.get("fields").cloned())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    let manual: Vec<String> = serde_json::from_str::<serde_json::Value>(&adopted.field_origins_json)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .map(|origins| {
+            origins
+                .into_iter()
+                .filter(|(_, origin)| origin.get("source").and_then(|s| s.as_str()) == Some("manual"))
+                .map(|(field, _)| field)
+                .collect()
+        })
+        .unwrap_or_default();
+    let Ok(serde_json::Value::Object(mut merged)) = serde_json::to_value(&*base) else {
+        return;
+    };
+    for (field, value) in composed {
+        let Some(current) = merged.get(&field) else {
+            continue; // display-only keys (e.g. studio_logo) are not MetadataFields
+        };
+        let missing = current.get("state").and_then(|s| s.as_str()) == Some("missing");
+        let is_missing_value = value.get("state").and_then(|s| s.as_str()) == Some("missing");
+        if is_missing_value {
+            continue;
         }
+        if missing || manual.contains(&field) {
+            merged.insert(field, value);
+        }
+    }
+    if let Ok(fields) = serde_json::from_value(serde_json::Value::Object(merged)) {
+        *base = fields;
     }
 }
 

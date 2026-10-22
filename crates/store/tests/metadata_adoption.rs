@@ -502,3 +502,96 @@ fn record_scraped_display_with_studio_updates_and_allows_library_reduction() {
     assert_eq!(media_facts.studios, vec!["Studio X".to_string()]);
 }
 
+
+fn movie_with_library(store: &Store, root: &std::path::Path) -> (domain::LibraryId, domain::Media) {
+    std::fs::create_dir_all(root).unwrap();
+    let library = store
+        .create_library(domain::MediaKind::Movie, "Movies", &[root.to_str().unwrap()], "everyone", true, &[])
+        .unwrap();
+    let media = domain::Media {
+        id: domain::MediaId::new(),
+        kind: domain::MediaKind::Movie,
+        title: "Base".into(),
+        year: None,
+        original_title: None,
+        aliases: vec![],
+        tmdb_id: Some("1".into()),
+        douban_id: Some("2".into()),
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&media).unwrap();
+    (library.id.parse().unwrap(), media)
+}
+
+/// R16: a successful TMDB refresh that no longer reports an overview stops contributing it;
+/// the persisted effective row is recomposed from the remaining (Douban) snapshot and agrees
+/// with the composer, value and origin alike.
+#[test]
+fn successful_missing_recomposes_from_remaining_sources() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let (library, media) = movie_with_library(&store, &tmp.path().join("m"));
+    store.adopt_metadata(&adoption(media.id, "tmdb", "OLD WINNER"), 1).unwrap();
+    store.adopt_metadata(&adoption(media.id, "douban", "BACKUP"), 1).unwrap();
+    let mut v2 = adoption(media.id, "tmdb", "unused");
+    v2.normalized.fields.overview = domain::FieldValue::Missing;
+    store.adopt_metadata(&v2, 2).unwrap();
+
+    let persisted = store.get_effective_metadata(media.id, "zh-CN").unwrap().unwrap();
+    assert_eq!(persisted.overview, Some("BACKUP".into()));
+    let composed = store
+        .effective_metadata_fields(library, media.id, EntityScope::Work, "zh-CN")
+        .unwrap();
+    assert_eq!(composed.fields.overview.value().map(String::as_str), Some("BACKUP"));
+    assert_eq!(composed.field_origins["overview"].source, "douban");
+    let persisted_origins: serde_json::Value =
+        serde_json::from_str(&persisted.field_origins_json).unwrap();
+    assert_eq!(persisted_origins["overview"]["source"], "douban");
+}
+
+/// Adoption order must not change the composed values or their origins.
+#[test]
+fn adoption_order_does_not_change_composition() {
+    let compose = |order: [&str; 2]| {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let (library, media) = movie_with_library(&store, &tmp.path().join("m"));
+        for source in order {
+            store.adopt_metadata(&adoption(media.id, source, &format!("{source} plot")), 1).unwrap();
+        }
+        let composed = store
+            .effective_metadata_fields(library, media.id, EntityScope::Work, "zh-CN")
+            .unwrap();
+        let persisted = store.get_effective_metadata(media.id, "zh-CN").unwrap().unwrap();
+        (composed.fields, persisted.overview, persisted.field_origins_json.replace(&media.id.to_string(), "M"))
+    };
+    assert_eq!(compose(["tmdb", "douban"]), compose(["douban", "tmdb"]));
+}
+
+/// R15: a manual override is composed into the persisted effective row.
+#[test]
+fn override_reaches_effective_row_and_detail() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let (library, media) = movie_with_library(&store, &tmp.path().join("m"));
+    store.adopt_metadata(&adoption(media.id, "tmdb", "V1"), 1).unwrap();
+    let mut fields = domain::MetadataFields::default();
+    fields.overview = domain::FieldValue::Value("MANUAL".into());
+    store
+        .set_metadata_overrides(media.id, EntityScope::Work, "zh-CN", &fields, 0)
+        .unwrap();
+    let persisted = store.get_effective_metadata(media.id, "zh-CN").unwrap().unwrap();
+    assert_eq!(persisted.overview, Some("MANUAL".into()));
+    let composed = store
+        .effective_metadata_fields(library, media.id, EntityScope::Work, "zh-CN")
+        .unwrap();
+    assert_eq!(composed.field_origins["overview"].source, "manual");
+
+    // A later provider refresh does not displace the override.
+    store.adopt_metadata(&adoption(media.id, "tmdb", "V2"), 2).unwrap();
+    let persisted = store.get_effective_metadata(media.id, "zh-CN").unwrap().unwrap();
+    assert_eq!(persisted.overview, Some("MANUAL".into()));
+
+}

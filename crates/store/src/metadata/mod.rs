@@ -1,5 +1,6 @@
 pub mod adopt;
 pub mod compose;
+mod effective;
 pub mod export;
 pub mod export_driver;
 pub mod nfo_input;

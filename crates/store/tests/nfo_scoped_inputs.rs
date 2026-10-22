@@ -412,3 +412,57 @@ fn episode_thumb_lands_in_observed_inputs_and_page_fact_but_work_thumb_does_not_
         "Work 作用域的 <thumb> 是海报语义，不得写进 still_url"
     );
 }
+
+/// R15: a manual override is part of composition and wins over the NFO input in the detail
+/// read; fields neither the NFO nor the override provide come from the adopted snapshot.
+#[test]
+fn manual_override_wins_over_nfo_input_in_detail() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let (library, root) = library_with_root(&store, &tmp.path().join("m"), "M", MediaKind::Movie);
+    let media = insert_media(&store, MediaKind::Movie, "Base");
+    let file = video_file(&library, &root, media, MediaKind::Movie, tmp.path().join("m/M.mkv"));
+    std::fs::write(&file.path, b"bytes").unwrap();
+    std::fs::write(file.path.with_extension("nfo"), "<movie><plot>NFO PLOT</plot></movie>").unwrap();
+    let scope = WriteScope { library_id: library.parse().unwrap(), config_revision: 0 };
+    publish(&store, &scope, &file, &[UnitKey::WHOLE], "zh-CN");
+    assert_eq!(overview_of(&store, &library, media, "zh-CN").as_deref(), Some("NFO PLOT"));
+
+    let mut fields = domain::MetadataFields::default();
+    fields.tagline = FieldValue::Value("PROVIDER TAGLINE".into());
+    fields.overview = FieldValue::Value("PROVIDER".into());
+    store
+        .adopt_metadata(
+            &domain::MetadataAdoption {
+                media_id: media,
+                scope: EntityScope::Work,
+                locale: "zh-CN".into(),
+                source: "tmdb".into(),
+                provider_entity_id: "1".into(),
+                provider_work_id: "1".into(),
+                fetched_at: 1,
+                normalized: domain::NormalizedMetadata { fields, field_origins: Default::default() },
+                expected_revision: None,
+                preferences: domain::MetadataPreferences {
+                    language_priority: vec!["zh-CN".into()],
+                    cert_country_priority: vec![],
+                },
+            },
+            1,
+        )
+        .unwrap();
+    let mut manual = domain::MetadataFields::default();
+    manual.overview = FieldValue::Value("MANUAL".into());
+    store.set_metadata_overrides(media, EntityScope::Work, "zh-CN", &manual, 0).unwrap();
+
+    let detail = store
+        .library_item_detail(library.parse().unwrap(), media, "zh-CN")
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.metadata.overview.value().map(String::as_str), Some("MANUAL"));
+    assert_eq!(
+        detail.metadata.tagline.value().map(String::as_str),
+        Some("PROVIDER TAGLINE"),
+        "detail must not restrict adopted fields to a short whitelist"
+    );
+}

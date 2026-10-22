@@ -1,4 +1,4 @@
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 use domain::{EntityScope, MediaId, MetadataFields};
 use crate::{Store, StoreError};
 
@@ -47,6 +47,9 @@ impl Store {
             params![media_str, scope_str, season, episode, locale, fields_json, next_rev],
         )?;
 
+        // Overrides take part in composition: recompose the effective row and cards now.
+        super::effective::write_effective(&tx, media, scope, locale)?;
+        crate::library_write::reduce::reduce_media_everywhere(&tx, media)?;
         tx.commit()?;
         Ok(next_rev)
     }
@@ -57,27 +60,6 @@ impl Store {
         scope: EntityScope,
         locale: &str,
     ) -> Result<Option<(MetadataFields, i64)>, StoreError> {
-        let (season, episode) = scope.season_episode();
-        let media_str = media.to_string();
-        let scope_str = scope.as_str();
-
-        let res: Option<(String, i64)> = self
-            .library
-            .query_row(
-                "SELECT fields_json, revision FROM media_metadata_overrides
-                 WHERE media_id = ?1 AND entity_scope = ?2 AND season = ?3 AND episode = ?4 AND locale = ?5",
-                params![media_str, scope_str, season, episode, locale],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
-            )
-            .optional()?;
-
-        match res {
-            Some((json, rev)) => {
-                let fields = serde_json::from_str(&json)?;
-                Ok(Some((fields, rev)))
-            }
-            None => Ok(None),
-        }
+        super::compose::load_overrides(&self.library, media, scope, locale)
     }
 }
-
