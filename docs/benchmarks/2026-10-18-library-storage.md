@@ -474,3 +474,17 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; fini
 ### 11.4 本节 `未跑`
 
 真实 NAS 写入、真实 Jellyfin/Infuse/VidHub 设备、真实浏览器人工浏览/seek、100k–1M 规模、fixture 的 DB/索引/WAL 字节与 page 利用率、VACUUM 锁时长、独立全分支 review、用户真实实例切换（停写/路径/DB-WAL-SHM 清单/授权核对）。
+
+### 11.5 优化后的端到端复跑（同一棵树）
+
+Task 19 的 `publish.rs`/`reduce/card.rs` 改动落在扫描与发布路径上，因此冒烟必须在新树上复跑，不能沿用优化前的证据。
+
+| 项 | 值 |
+|---|---|
+| 命令 | `bash /private/tmp/t17-step4-smoke.sh`（env 与计划 `:395` 逐字一致，仅去 `cargo run` 包装） |
+| 被测二进制 | `target/debug/crawler-media`，`mtime(UTC)=2026-10-22T02:22:24Z`（晚于两个被改源文件的 02:16:40Z / 02:07:20Z，确认含本轮改动） |
+| 时间窗 | 2026-10-22T02:39:15Z → 02:39:53Z |
+| 结果 | **通过 121 / 未通过 0 / 未跑 3**，22 步全达；`RAW_EXIT[script]=0` |
+| 日志 | `/private/tmp/t17-step4-smoke-driver10.log`（md5 `6c6346ab087055a6e309839dc6ad715f`） |
+
+3 条 `未跑` 与前次相同（真实浏览器人工操作、前端 UI 三门由本节 §9/§10 之外的门单独覆盖、真实 NAS/客户端写入）。本轮批次 2–4 未改 `web/`，前端三门沿用 2026-10-21 的实测（typecheck 0 错、830 pass / 0 fail、lint 130 problems = 既有基线）。
