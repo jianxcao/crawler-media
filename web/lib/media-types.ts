@@ -22,7 +22,7 @@ export type MediaSource = "tmdb" | "douban" | "tvdb" | "bangumi" | "anilist";
 
 /** 发现列表的轻量库存摘要；只用于入库标记，不携带文件详情。 */
 export interface MediaLibraryStatus {
-  mediaItemId: number;
+  mediaItemId: string;
   libraryCount: number;
   fileCount: number;
 }

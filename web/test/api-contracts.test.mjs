@@ -1,6 +1,39 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import ts from "typescript";
+
+async function loadApiModule(name, request) {
+  const source = await readFile(new URL(`../lib/api/${name}.ts`, import.meta.url), "utf8");
+  const js = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const module = { exports: {} };
+  new Function("require", "module", "exports", js)((dependency) => {
+    if (dependency === "@/lib/http") return { request };
+    if (dependency === "../downloader-verification" || dependency === "../subscription-form") return {};
+    throw new Error(`Unexpected import ${dependency}`);
+  }, module, module.exports);
+  return module.exports;
+}
+
+test("real routing and upgrade adapters preserve UUID identities", async () => {
+  const libraryId = "00000000-0000-4000-8000-000000000001";
+  const ruleSetId = "00000000-0000-4000-8000-000000000002";
+  const downloaders = await loadApiModule("downloaders", async (path) => {
+    assert.equal(path, "/subscriptions/download-routing-preview");
+    return { success: true, code: "ok", message: "", data: { ok: true, library_id: libraryId } };
+  });
+  const target = await downloaders.resolveManualDownloadTarget({ kind: "movie", title: "Movie", year: 2026 });
+  assert.equal(target.library_id, libraryId);
+  const subscriptions = await loadApiModule("subscriptions", async (path, options) => {
+    assert.equal(path, "/subscriptions/subscription-uuid/upgrade-runs");
+    assert.deepEqual(JSON.parse(options.body), { rule_set_id: ruleSetId });
+    return { success: true, code: "ok", message: "", data: { rule_set_id: ruleSetId, units: [] } };
+  });
+  const report = await subscriptions.runSubscriptionUpgradeRound("subscription-uuid", ruleSetId);
+  assert.equal(report.rule_set_id, ruleSetId);
+});
 
 const readWeb = (relativePath) =>
   readFile(new URL(`../${relativePath}`, import.meta.url), "utf8");

@@ -23,7 +23,7 @@ import type {
 // 组件引用的导出签名与 DTO 转换函数（search.ts 复用），其余拉取函数返回空数据。
 
 interface MediaLibraryStatusDto {
-  media_item_id: number;
+  media_item_id: string;
   library_count: number;
   file_count: number;
 }

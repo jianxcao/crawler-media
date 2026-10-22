@@ -1,8 +1,8 @@
 /**
  * 播放页地址与「退出回到哪」的约定（docs/design/web-player.md §6.10）。
  *
- * 地址就是分享凭证：只带 media_item_id（以 (kind, tmdb_id) 为锚，比库自增
- * id 稳定）+ sXXeYY 季集段 + 可选 `?t=` 秒。**导航状态（returnTo）永不进
+ * 地址只带 canonical Media UUID + sXXeYY 季集段 + 可选 `?t=` 秒。
+ * **导航状态（returnTo）永不进
  * 地址**——那是点进来的人的上下文，不是内容标识：分享出去的链接带着它，
  * 接收者退出播放会被送进分享者当时的页面（可能无权访问），地址还又长又丑。
  * 它走 sessionStorage：同一浏览器标签内有效，链接接收者自然回条目页兜底。
@@ -20,11 +20,9 @@ export function parseUnitSegment(segment: string | undefined): {
   return { season: Number(match[1]), episode: Number(match[2]) };
 }
 
-/** 生成播放页地址。季集号补零是媒体库的通用写法（s01e03），别自创。
- *  mediaItemId 兼容 string / number：新契约的条目 id 是字符串，播放页路由
- *  原本按数字写死，这里只把它当路径段拼进 URL。 */
+/** 生成播放页地址。Media 身份始终是 UUID，季集号补零（s01e03）。 */
 export function playHref(
-  mediaItemId: number | string,
+  mediaItemId: string,
   options?: { season?: number; episode?: number; tSeconds?: number; fileId?: string },
 ): string {
   const { season, episode, tSeconds, fileId } = options ?? {};

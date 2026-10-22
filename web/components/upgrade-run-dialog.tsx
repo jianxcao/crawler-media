@@ -82,7 +82,7 @@ export function UpgradeRunDialog({
       setReport(
         await runSubscriptionUpgradeRound(
           detail.id,
-          selectedRule.id !== detail.filter_id ? (selectedRule.id as unknown as number) : undefined,
+          selectedRule.id !== detail.filter_id ? (selectedRule.id) : undefined,
         ),
       );
     } catch (e) {

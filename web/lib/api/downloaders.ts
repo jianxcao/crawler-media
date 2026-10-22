@@ -81,7 +81,7 @@ export type DownloadTaskUnitStatus = "wanted" | "grabbed" | "downloaded" | "impo
 /** 任务关联的订阅引用（新契约恒为数组，可为空；元素形状由组件适配阶段收敛）。 */
 export interface DownloadTaskSubscription {
   id: string;
-  media_item_id: number;
+  media_item_id: string;
   media_title: string;
   media_kind: string;
   poster_url: string | null;
@@ -433,7 +433,7 @@ export interface DownloadSubmitPayload {
   /** 站点内种子 ID（TorrentHit.torrent_id）：任务中心据此提供「打开种子页」 */
   torrent_id?: string | null;
   /** 入库目标库（可选）：带上后保存目录由库推导（主根/标题 (年份)） */
-  library_id?: number | null;
+  library_id?: string | null;
   /** 种子体积（字节）；新契约 submit 接受，用于投递端展示/分流 */
   size_bytes?: number | null;
   /** 条目标题（推导条目子目录用；身份未确认时不要带） */
@@ -473,7 +473,7 @@ export interface ManualDownloadTarget {
   status: "ready" | "ambiguous" | "not_found";
   tmdb_id: number | null;
   candidates: ManualDownloadTargetCandidate[];
-  library_id: number | null;
+  library_id: string | null;
   library_name: string | null;
   mode: "watch" | "inplace" | "downloader_default" | null;
   path: string | null;
@@ -536,7 +536,7 @@ export function resolveManualDownloadTarget(payload: {
     status: data.ok ? ("ready" as const) : ("not_found" as const),
     tmdb_id: payload.selected_tmdb_id ?? null,
     candidates: [],
-    library_id: data.library_id != null ? Number(data.library_id) : null,
+    library_id: data.library_id,
     library_name: data.library_name,
     mode: data.mode,
     path: data.path,

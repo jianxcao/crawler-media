@@ -7,7 +7,7 @@
  */
 
 export interface LocalProgressUnit {
-  media_item_id: number | string;
+  media_item_id: string;
   season_number?: number;
   episode_number?: number;
 }

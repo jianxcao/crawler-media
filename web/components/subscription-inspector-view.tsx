@@ -91,8 +91,8 @@ export function SubscriptionInspectorView({
   id,
   autoOpenUpgradeRun = false,
 }: {
-  /** 订阅 id（新契约为字符串；路由层历史实现传数字，统一转字符串使用） */
-  id: string | number;
+  /** Canonical Subscribe UUID. */
+  id: string;
   /** 进入即打开「洗一轮版」弹层（库详情洗版入口跳转并轨到既有订阅，§13.4） */
   autoOpenUpgradeRun?: boolean;
 }) {
@@ -669,7 +669,7 @@ export function SubscriptionInspectorView({
                   )}
                 </div>
                 <Link
-                  to={playHref(detail.media.id as unknown as number, {
+                  to={playHref(detail.media.id, {
                     season: upNext.season_number,
                     episode: upNext.episode_number,
                     tSeconds: upNext.position_ms > 0 ? Math.floor(upNext.position_ms / 1000) : undefined,

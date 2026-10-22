@@ -69,8 +69,8 @@ interface ApiEnvelope<T> {
 }
 
 export interface UpNextItem {
-  media_item_id: number;
-  library_id: number;
+  media_item_id: string;
+  library_id: string;
   kind: MediaType;
   title: string;
   year: number | null;
@@ -187,9 +187,9 @@ export async function listFavoritesGallery(
 // ---------------------------------------------------------------------------
 
 export interface MediaActivityTarget {
-  media_item_id: number;
+  media_item_id: string;
   /** 详情页落点；作品没有在位文件时为 null（此时不渲染跳转）。 */
-  library_id: number | null;
+  library_id: string | null;
   /** 落点库是否在当前超管的可浏览范围内。「全部」口径下范围外记录照常出片名，
    *  但浏览类接口对范围外超管是 404，前端不渲染详情链接。 */
   browsable: boolean;
@@ -286,7 +286,7 @@ export interface PlaybackHistoryClearResult {
  */
 export async function clearPlaybackHistory(
   scope: "item" | "library" | "all",
-  target: { mediaItemId?: number; libraryId?: number; since?: Date } = {},
+  target: { mediaItemId?: string; libraryId?: string; since?: Date } = {},
 ): Promise<{ result: PlaybackHistoryClearResult; message: string }> {
   const params = new URLSearchParams({ scope });
   if (target.mediaItemId != null) params.set("media_item_id", String(target.mediaItemId));
@@ -498,7 +498,7 @@ export interface ClientCapability {
 
 /** 播放单元：电影通过缺省季集表达规范 whole-work 请求；可选显式版本 file_id。 */
 export interface PlaybackUnit {
-  media_item_id: number | string;
+  media_item_id: string;
   season_number?: number;
   episode_number?: number;
   file_id?: string;
@@ -835,9 +835,9 @@ export interface PlaybackWatchState {
 
 /** 播放页要的条目信息（§6.10）：路由只带 media_item_id，库归属服务端解析。 */
 export interface PlaybackItemInfo {
-  media_item_id: number;
+  media_item_id: string;
   /** 该条目对当前成员可见的库 id；退出播放跳回条目页用 */
-  library_id: number;
+  library_id: string;
   kind: "movie" | "tv";
   title: string;
   year: number | null;
@@ -845,7 +845,7 @@ export interface PlaybackItemInfo {
 }
 
 export async function getPlaybackItem(
-  mediaItemId: number | string,
+  mediaItemId: string,
   scope: PlaybackApiScope = DEFAULT_PLAYBACK_SCOPE,
 ): Promise<PlaybackItemInfo> {
   const response = await request<ApiEnvelope<PlaybackItemInfo>>(
@@ -856,7 +856,7 @@ export async function getPlaybackItem(
 
 /** 播放页一季的分集清单（切集/上一集下一集数据源），形状与库详情页同构。 */
 export async function getPlaybackItemEpisodes(
-  mediaItemId: number | string,
+  mediaItemId: string,
   seasonNumber: number,
   scope: PlaybackApiScope = DEFAULT_PLAYBACK_SCOPE,
 ): Promise<{ season_number: number; episodes: LibraryEpisode[] }> {
@@ -901,7 +901,7 @@ export async function fetchResumeState(
  * Episode 三级一一对应，后端落的是同一张表、同一套哨兵约定。
  */
 export interface PlaybackMarkTarget {
-  media_item_id: number | string;
+  media_item_id: string;
   season_number?: number;
   episode_number?: number;
 }

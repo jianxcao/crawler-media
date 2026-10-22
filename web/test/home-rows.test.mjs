@@ -21,16 +21,16 @@ const lib = (id, name, kind = "movie", extra = {}) => ({
   exclude_from_home: false,
   ...extra,
 });
-const LIBS = [lib(1, "电影"), lib(2, "剧集", "tv"), lib(3, "动漫", "tv")];
+const LIBS = [lib("00000000-0000-4000-8000-000000000001", "电影"), lib("00000000-0000-4000-8000-000000000002", "剧集", "tv"), lib("00000000-0000-4000-8000-000000000003", "动漫", "tv")];
 const COLS = [
-  { id: 7, name: "宫崎骏", library_id: 3, sort: "release_date_asc" },
-  { id: 8, name: "诺兰", library_id: 1, sort: "title" },
+  { id: 7, name: "宫崎骏", library_id: "00000000-0000-4000-8000-000000000003", sort: "release_date_asc" },
+  { id: 8, name: "诺兰", library_id: "00000000-0000-4000-8000-000000000001", sort: "title" },
 ];
 const ids = (rows) => rows.map((row) => row.id);
 
 test("空清单 = 出厂布局：三个内置行 + 每库一行最近添加且只看未观看", () => {
   const rows = buildHomeRows({ rows: [] }, LIBS, COLS);
-  assert.deepEqual(ids(rows), ["up-next", "favorites", "libraries", "lib:1", "lib:2", "lib:3"]);
+  assert.deepEqual(ids(rows), ["up-next", "favorites", "libraries", "lib:00000000-0000-4000-8000-000000000001", "lib:00000000-0000-4000-8000-000000000002", "lib:00000000-0000-4000-8000-000000000003"]);
   assert.equal(rowTitle(rows[3]), "最近添加的电影");
   assert.equal(rows[3].sort, "added_at");
   assert.equal(rows[3].unwatched, true);
@@ -39,12 +39,12 @@ test("空清单 = 出厂布局：三个内置行 + 每库一行最近添加且�
 
 test("存过的按存的顺序在前，没存过的内置行与默认库行补在后面", () => {
   const rows = buildHomeRows(
-    { rows: [{ id: "lib:2" }, { id: "up-next" }] },
+    { rows: [{ id: "lib:00000000-0000-4000-8000-000000000002" }, { id: "up-next" }] },
     LIBS,
     COLS,
   );
-  // lib:1 / lib:3 是没存过的库行：插在最后一条库行（lib:2）之后；内置行追加在末尾
-  assert.deepEqual(ids(rows), ["lib:2", "lib:1", "lib:3", "up-next", "favorites", "libraries"]);
+  // lib:00000000-0000-4000-8000-000000000001 / lib:00000000-0000-4000-8000-000000000003 是没存过的库行：插在最后一条库行（lib:00000000-0000-4000-8000-000000000002）之后；内置行追加在末尾
+  assert.deepEqual(ids(rows), ["lib:00000000-0000-4000-8000-000000000002", "lib:00000000-0000-4000-8000-000000000001", "lib:00000000-0000-4000-8000-000000000003", "up-next", "favorites", "libraries"]);
 });
 
 test("新库的默认行插在最后一条库行之后，不落到合集行后面", () => {
@@ -52,55 +52,55 @@ test("新库的默认行插在最后一条库行之后，不落到合集行后�
     {
       rows: [
         { id: "up-next" },
-        { id: "lib:1", sort: "release_date" },
+        { id: "lib:00000000-0000-4000-8000-000000000001", sort: "release_date" },
         { id: "row:c", collection_id: 7 },
       ],
     },
     LIBS,
     COLS,
   );
-  assert.deepEqual(ids(rows), ["up-next", "lib:1", "lib:2", "lib:3", "row:c", "favorites", "libraries"]);
+  assert.deepEqual(ids(rows), ["up-next", "lib:00000000-0000-4000-8000-000000000001", "lib:00000000-0000-4000-8000-000000000002", "lib:00000000-0000-4000-8000-000000000003", "row:c", "favorites", "libraries"]);
 });
 
 test("指向已删库 / 不可见合集 / 仅管理的库的行静默消失", () => {
   const rows = buildHomeRows(
     {
       rows: [
-        { id: "lib:99" },
-        { id: "row:a", library_id: 99 },
+        { id: "lib:00000000-0000-4000-8000-000000000099" },
+        { id: "row:a", library_id: "00000000-0000-4000-8000-000000000099" },
         { id: "row:b", collection_id: 404 },
         { id: "row:c", collection_id: 7 },
-        { id: "lib:4" },
+        { id: "lib:00000000-0000-4000-8000-000000000004" },
       ],
     },
-    [...LIBS, lib(4, "仅管理", "movie", { viewer_access: false })],
+    [...LIBS, lib("00000000-0000-4000-8000-000000000004", "仅管理", "movie", { viewer_access: false })],
     COLS,
   );
-  assert.deepEqual(ids(rows), ["row:c", "up-next", "favorites", "libraries", "lib:1", "lib:2", "lib:3"]);
+  assert.deepEqual(ids(rows), ["row:c", "up-next", "favorites", "libraries", "lib:00000000-0000-4000-8000-000000000001", "lib:00000000-0000-4000-8000-000000000002", "lib:00000000-0000-4000-8000-000000000003"]);
 });
 
 test("从首页排除的库不给默认行，也忽略用户自定义的库行", () => {
-  const libs = [lib(1, "电影"), lib(2, "家庭录像", "video", { exclude_from_home: true })];
+  const libs = [lib("00000000-0000-4000-8000-000000000001", "电影"), lib("00000000-0000-4000-8000-000000000002", "家庭录像", "video", { exclude_from_home: true })];
   assert.deepEqual(ids(buildHomeRows({ rows: [] }, libs, [])), [
     "up-next",
     "favorites",
     "libraries",
-    "lib:1",
+    "lib:00000000-0000-4000-8000-000000000001",
   ]);
-  const rows = buildHomeRows({ rows: [{ id: "row:v", library_id: 2 }] }, libs, []);
+  const rows = buildHomeRows({ rows: [{ id: "row:v", library_id: "00000000-0000-4000-8000-000000000002" }] }, libs, []);
   assert(!ids(rows).includes("row:v"));
 });
 
 test("旧偏好没有未观看字段时默认只显示未观看；显式 false 仍显示全部", () => {
   const rows = buildHomeRows(
-    { rows: [{ id: "lib:1" }, { id: "row:all", library_id: 2, unwatched: false }] },
+    { rows: [{ id: "lib:00000000-0000-4000-8000-000000000001" }, { id: "row:all", library_id: "00000000-0000-4000-8000-000000000002", unwatched: false }] },
     LIBS,
     COLS,
   );
   assert.equal(rows[0].unwatched, true);
   assert.equal(rows[1].unwatched, false);
   assert.deepEqual(rowsToPrefs([rows[1]]), [
-    { id: "row:all", library_id: 2, sort: "added_at", unwatched: false },
+    { id: "row:all", library_id: "00000000-0000-4000-8000-000000000002", sort: "added_at", unwatched: false },
   ]);
 });
 
@@ -109,8 +109,8 @@ test("隐藏保留位置；名字为空跟随排序推荐，手输过就不动",
     {
       rows: [
         { id: "up-next", hidden: true },
-        { id: "lib:1", sort: "rating", unwatched: true },
-        { id: "row:x", library_id: 3, sort: "rating", name: "周末补番" },
+        { id: "lib:00000000-0000-4000-8000-000000000001", sort: "rating", unwatched: true },
+        { id: "row:x", library_id: "00000000-0000-4000-8000-000000000003", sort: "rating", name: "周末补番" },
       ],
     },
     LIBS,
@@ -125,8 +125,8 @@ test("隐藏保留位置；名字为空跟随排序推荐，手输过就不动",
 test("排序档不在库 kind 的预设里时回落到最近添加", () => {
   // video 库的预设没有「评分最高」档：存了 rating 也要回落到最近添加
   const rows = buildHomeRows(
-    { rows: [{ id: "lib:5", sort: "rating" }] },
-    [...LIBS, lib(5, "家庭录像", "video")],
+    { rows: [{ id: "lib:00000000-0000-4000-8000-000000000005", sort: "rating" }] },
+    [...LIBS, lib("00000000-0000-4000-8000-000000000005", "家庭录像", "video")],
     [],
   );
   assert.equal(rows[0].sort, "added_at");
@@ -191,11 +191,11 @@ test("方向单独一个开关：推荐名跟着翻，写回只在反转自然�
   const rows = buildHomeRows(
     {
       rows: [
-        { id: "lib:1", sort: "added_at", order: "asc" },
-        { id: "lib:2", sort: "title", order: "desc" },
-        { id: "row:x", library_id: 1, sort: "rating", order: "desc" }, // 与自然方向相同 = 没反转
-        { id: "row:y", library_id: 1, sort: "release_date_asc" }, // 老取值
-        { id: "row:z", library_id: 1, sort: "random", order: "asc" }, // 随机没有方向
+        { id: "lib:00000000-0000-4000-8000-000000000001", sort: "added_at", order: "asc" },
+        { id: "lib:00000000-0000-4000-8000-000000000002", sort: "title", order: "desc" },
+        { id: "row:x", library_id: "00000000-0000-4000-8000-000000000001", sort: "rating", order: "desc" }, // 与自然方向相同 = 没反转
+        { id: "row:y", library_id: "00000000-0000-4000-8000-000000000001", sort: "release_date_asc" }, // 老取值
+        { id: "row:z", library_id: "00000000-0000-4000-8000-000000000001", sort: "random", order: "asc" }, // 随机没有方向
         { id: "favorites", sort: "favorited_at", order: "asc" },
       ],
     },
@@ -203,8 +203,8 @@ test("方向单独一个开关：推荐名跟着翻，写回只在反转自然�
     COLS,
   );
   const byId = (id) => rows.find((row) => row.id === id);
-  assert.equal(rowTitle(byId("lib:1")), "最早添加的电影");
-  assert.equal(rowTitle(byId("lib:2")), "剧集 Z–A");
+  assert.equal(rowTitle(byId("lib:00000000-0000-4000-8000-000000000001")), "最早添加的电影");
+  assert.equal(rowTitle(byId("lib:00000000-0000-4000-8000-000000000002")), "剧集 Z–A");
   assert.equal(byId("row:x").reversed, false);
   assert.equal(rowTitle(byId("row:x")), "评分最高的电影");
   assert.equal(byId("row:y").sort, "release_date");
@@ -213,13 +213,13 @@ test("方向单独一个开关：推荐名跟着翻，写回只在反转自然�
   assert.equal(byId("row:z").reversed, false);
   assert.equal(byId("favorites").reversed, true);
   assert.equal(rowMeta(byId("favorites")), "内置 · 最早收藏");
-  const picked = ["lib:1", "lib:2", "row:x", "row:y", "row:z", "favorites"].map(byId);
+  const picked = ["lib:00000000-0000-4000-8000-000000000001", "lib:00000000-0000-4000-8000-000000000002", "row:x", "row:y", "row:z", "favorites"].map(byId);
   assert.deepEqual(rowsToPrefs(picked), [
-    { id: "lib:1", sort: "added_at", order: "asc" },
-    { id: "lib:2", sort: "title", order: "desc" },
-    { id: "row:x", library_id: 1, sort: "rating" },
-    { id: "row:y", library_id: 1, sort: "release_date", order: "asc" },
-    { id: "row:z", library_id: 1, sort: "random" },
+    { id: "lib:00000000-0000-4000-8000-000000000001", sort: "added_at", order: "asc" },
+    { id: "lib:00000000-0000-4000-8000-000000000002", sort: "title", order: "desc" },
+    { id: "row:x", library_id: "00000000-0000-4000-8000-000000000001", sort: "rating" },
+    { id: "row:y", library_id: "00000000-0000-4000-8000-000000000001", sort: "release_date", order: "asc" },
+    { id: "row:z", library_id: "00000000-0000-4000-8000-000000000001", sort: "random" },
     { id: "favorites", sort: "favorited_at", order: "asc" },
   ]);
   // 下拉里不再有「最早上映」这一条：方向是开关，不是档位
@@ -236,19 +236,19 @@ test("写回时只存与默认不同的字段，默认库行不带来源", () =>
     {
       rows: [
         { id: "favorites", sort: "rating" },
-        { id: "lib:1", sort: "release_date", hidden: true },
-        { id: "row:x", library_id: 3, sort: "rating", unwatched: true, name: "周末补番" },
+        { id: "lib:00000000-0000-4000-8000-000000000001", sort: "release_date", hidden: true },
+        { id: "row:x", library_id: "00000000-0000-4000-8000-000000000003", sort: "rating", unwatched: true, name: "周末补番" },
         { id: "row:c", collection_id: 7 },
       ],
     },
     LIBS,
     COLS,
   );
-  const picked = ["favorites", "lib:1", "row:x", "row:c"].map((id) => rows.find((row) => row.id === id));
+  const picked = ["favorites", "lib:00000000-0000-4000-8000-000000000001", "row:x", "row:c"].map((id) => rows.find((row) => row.id === id));
   assert.deepEqual(rowsToPrefs(picked), [
     { id: "favorites", sort: "rating" },
-    { id: "lib:1", hidden: true, sort: "release_date" },
-    { id: "row:x", library_id: 3, sort: "rating", name: "周末补番" },
+    { id: "lib:00000000-0000-4000-8000-000000000001", hidden: true, sort: "release_date" },
+    { id: "row:x", library_id: "00000000-0000-4000-8000-000000000003", sort: "rating", name: "周末补番" },
     { id: "row:c", collection_id: 7, sort: "release_date", order: "asc" },
   ]);
 });
@@ -258,29 +258,29 @@ test("新行 id 是 row: 加 6 位 base36；拖到某一位越界原样返回", 
   assert.equal(newRowId(() => 0), "row:000000");
   const rows = buildHomeRows({ rows: [] }, LIBS, COLS);
   assert.deepEqual(ids(moveRowTo(rows, 0, -1)), ids(rows));
-  assert.deepEqual(ids(moveRowTo(rows, 5, 0)).slice(0, 3), ["lib:3", "up-next", "favorites"]);
-  assert.deepEqual(ids(moveRowTo(rows, 3, 2)).slice(0, 4), ["up-next", "favorites", "lib:1", "libraries"]);
+  assert.deepEqual(ids(moveRowTo(rows, 5, 0)).slice(0, 3), ["lib:00000000-0000-4000-8000-000000000003", "up-next", "favorites"]);
+  assert.deepEqual(ids(moveRowTo(rows, 3, 2)).slice(0, 4), ["up-next", "favorites", "lib:00000000-0000-4000-8000-000000000001", "libraries"]);
   assert.equal(newLibraryRow(LIBS[0], "row:abc").id, "row:abc");
 });
 
 test("管理员「从首页排除」的库：存过的默认行和自定义行都不出现", () => {
-  const libs = [lib(1, "电影"), lib(2, "家庭录像", "video", { exclude_from_home: true })];
+  const libs = [lib("00000000-0000-4000-8000-000000000001", "电影"), lib("00000000-0000-4000-8000-000000000002", "家庭录像", "video", { exclude_from_home: true })];
   const rows = buildHomeRows(
-    { rows: [{ id: "lib:2", sort: "title" }, { id: "row:v", library_id: 2 }, { id: "lib:1" }] },
+    { rows: [{ id: "lib:00000000-0000-4000-8000-000000000002", sort: "title" }, { id: "row:v", library_id: "00000000-0000-4000-8000-000000000002" }, { id: "lib:00000000-0000-4000-8000-000000000001" }] },
     libs,
     [],
   );
-  assert.deepEqual(ids(rows), ["lib:1", "up-next", "favorites", "libraries"]);
+  assert.deepEqual(ids(rows), ["lib:00000000-0000-4000-8000-000000000001", "up-next", "favorites", "libraries"]);
 });
 
 test("「最近观看」与「未看优先」互斥：以排序为准，开关作废", () => {
   const rows = buildHomeRows(
-    { rows: [{ id: "lib:1", sort: "last_played", unwatched: true }] },
+    { rows: [{ id: "lib:00000000-0000-4000-8000-000000000001", sort: "last_played", unwatched: true }] },
     LIBS,
     COLS,
   );
   assert.equal(rows[0].unwatched, false);
-  assert.deepEqual(rowsToPrefs([rows[0]]), [{ id: "lib:1", sort: "last_played" }]);
+  assert.deepEqual(rowsToPrefs([rows[0]]), [{ id: "lib:00000000-0000-4000-8000-000000000001", sort: "last_played" }]);
 });
 
 test("一条库行都没有时，新库的默认行插在「我的媒体库」之后，不落到合集行后面", () => {
@@ -289,7 +289,7 @@ test("一条库行都没有时，新库的默认行插在「我的媒体库」�
     LIBS,
     COLS,
   );
-  assert.deepEqual(ids(rows), ["up-next", "libraries", "lib:1", "lib:2", "lib:3", "row:c", "favorites"]);
+  assert.deepEqual(ids(rows), ["up-next", "libraries", "lib:00000000-0000-4000-8000-000000000001", "lib:00000000-0000-4000-8000-000000000002", "lib:00000000-0000-4000-8000-000000000003", "row:c", "favorites"]);
 });
 
 test("UUID 字符串格式库 id 存过的偏好不丢失，不退化为重加默认行", () => {

@@ -109,7 +109,7 @@ export function SubscriptionAdjustDialog({
     setPreview(null);
     previewSubscriptionDownloadRouting(
       detail.media.kind,
-      libraryId as unknown as number | null,
+      libraryId,
       detail.media.tmdb_id ?? null,
     )
       .then((p) => {

@@ -53,17 +53,11 @@ export function isPlayableFile(file: {
   return file.publication === "published" && file.presence === "present";
 }
 
-/** 一个物理文件可能覆盖多集；`season`/`episode` 只是首个具体坐标。 */
+/** Only recorded coverage establishes which logical units a physical file serves. */
 export function fileUnits(file: {
-  units?: Array<{ season: number; episode: number }>;
-  season?: number | null;
-  episode?: number | null;
+  units: Array<{ season: number; episode: number }>;
 }): Array<{ season: number; episode: number }> {
-  if (file.units && file.units.length > 0) return file.units;
-  if (typeof file.season === "number" && typeof file.episode === "number") {
-    return [{ season: file.season, episode: file.episode }];
-  }
-  return [];
+  return file.units;
 }
 
 /** 该文件是否服务某一集（按完整覆盖判断，而非只认首个 unit）。 */

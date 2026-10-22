@@ -289,12 +289,12 @@ export async function searchTitles(
 
 /** 媒体库内条目命中的一行（ledger 行 + 所属媒体）。 */
 export interface LibraryHit {
+  file_id: string;
   media_item_id: string;
   title: string;
   kind: MediaType;
   path: string;
-  season: number | null;
-  episode: number | null;
+  units: Array<{ season: number; episode: number }>;
 }
 
 /** 搜索本地全部可见媒体库中的已入库条目。 */

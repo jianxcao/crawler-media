@@ -56,7 +56,7 @@ interface DragState {
  */
 function toHomeLibraryLike(libraries: MediaLibrary[]): HomeLibraryLike[] {
   return libraries.map((lib) => ({
-    id: lib.id as unknown as number,
+    id: lib.id,
     name: lib.name,
     kind: lib.kind,
     viewer_access: true,

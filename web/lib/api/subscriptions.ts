@@ -334,11 +334,11 @@ export interface CreateSubscriptionPayload {
   source_title_ref?: string | null;
   selected_seasons?: number[];
   follow_future?: boolean;
-  rule_set_id?: number | null;
+  rule_set_id?: string | null;
   /** 入库目标库；缺省用该类型的默认库 */
-  library_id?: string | number | null;
+  library_id?: string | null;
   wash_cut?: boolean;
-  wash_cut_filter_id?: string | number | null;
+  wash_cut_filter_id?: string | null;
   keep_old_versions?: boolean;
 }
 
@@ -363,7 +363,7 @@ export interface DispatchPreview {
   /** 命中自定义目录规则时的整理落点：完成后整理到该目录（不直接入库），外部流转回库根后入账 */
   staging_path: string | null;
   /** 解析出的目标库（未选库时=收藏范围路由的结论，弹窗据此预选） */
-  library_id: number | null;
+  library_id: string | null;
   library_name: string | null;
   downloader_name: string | null;
   /** 收藏范围路由结论：true=命中声明库 / false=默认库兜底；未走路由为 null */
@@ -386,7 +386,7 @@ export interface DispatchPreview {
  */
 export function previewSubscriptionDownloadRouting(
   kind: string,
-  libraryId: number | null,
+  libraryId: string | null,
   tmdbId?: string | null,
   identity?: { title?: string | null; year?: number | null },
 ): Promise<DispatchPreview> {
@@ -419,7 +419,7 @@ export interface PipelineCheck {
 
 /** 一个库的完整入库链路结论。 */
 export interface LibraryPipeline {
-  library_id: number;
+  library_id: string;
   /** 新版响应字段；旧的 automation-readiness 响应使用 name。 */
   library_name?: string;
   name?: string;
@@ -591,9 +591,9 @@ export function updateSubscription(
   payload: {
     selected_seasons?: number[];
     follow_future?: boolean;
-    rule_set_id?: string | number | null;
+    rule_set_id?: string | null;
     /** 换入库目标库；显式传 null=清除指定、改回按默认库路由；缺省不变 */
-    library_id?: string | number | null;
+    library_id?: string | null;
   },
 ): Promise<SubscriptionDetail> {
   const body: Record<string, unknown> = {};
@@ -637,7 +637,7 @@ export interface UpgradeRunUnit {
 /** 一轮洗版的体检报告（见 schemas.subscription.UpgradeRunView）。 */
 export interface UpgradeRunReport {
   target_label: string;
-  rule_set_id: number;
+  rule_set_id: string | null;
   /** 中文整句摘要，直接展示 */
   summary: string;
   counts: Record<UpgradeRunUnit["state"], number>;
@@ -650,26 +650,14 @@ export interface UpgradeRunReport {
  */
 export function runSubscriptionUpgradeRound(
   id: string,
-  ruleSetId?: number | null,
+  ruleSetId?: string | null,
 ): Promise<UpgradeRunReport> {
   return unwrap(
     request<ApiEnvelope<UpgradeRunReport>>(`/subscriptions/${id}/upgrade-runs`, {
       method: "POST",
       body: JSON.stringify(ruleSetId != null ? { rule_set_id: ruleSetId } : {}),
     }),
-  ).then((report) => ({
-    target_label: report.target_label ?? "",
-    rule_set_id: Number(report.rule_set_id ?? 0) || 0,
-    summary: report.summary ?? "洗版轮已排队执行",
-    counts: {
-      upgradable: report.counts?.upgradable ?? 0,
-      at_cutoff: report.counts?.at_cutoff ?? 0,
-      in_flight: report.counts?.in_flight ?? 0,
-      not_comparable: report.counts?.not_comparable ?? 0,
-      missing: report.counts?.missing ?? 0,
-    },
-    units: report.units ?? [],
-  }));
+  );
 }
 
 /** 手动选种的种子字段（搜索结果行原样回传，attrs 即搜索链路的服务端解析）。 */

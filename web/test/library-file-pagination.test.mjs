@@ -97,6 +97,12 @@ test("多集文件按完整 units 判断服务哪一集，不只认首个坐标"
   ]);
 });
 
+test("empty coverage never revives the obsolete first-coordinate fields", () => {
+  const file = dto("unknown", { units: [], season: 1, episode: 2 });
+  assert.deepEqual(fileUnits(file), []);
+  assert.equal(fileServesEpisode(file, 1, 2), false);
+});
+
 test("缺失/未知文件可查看但不可作为可播版本", () => {
   assert.equal(isPlayableFile(dto("present")), true);
   assert.equal(isPlayableFile(dto("missing", { presence: "missing" })), false);

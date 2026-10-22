@@ -68,19 +68,19 @@ test("关联入库 Job 失败时算待办，被忽略后不再算", () => {
 
 test("分组按 infohash 反查入库 Job，任一任务待办则整组待办", () => {
   const groups = groupDownloadTasks([
-    task({ id: "1:a", info_hash: "AAA", media_item_id: 7, media_title: "剧" }),
-    task({ id: "1:b", info_hash: "BBB", media_item_id: 7, media_title: "剧", state: "error" }),
+    task({ id: "1:a", info_hash: "AAA", subscriptions: [{ media_item_id: "00000000-0000-4000-8000-000000000007" }], media_title: "剧" }),
+    task({ id: "1:b", info_hash: "BBB", subscriptions: [{ media_item_id: "00000000-0000-4000-8000-000000000007" }], media_title: "剧", state: "error" }),
     task({ id: "1:c", info_hash: "CCC", source: "external", state: "error" }),
   ]);
   assert.equal(groups.length, 2);
   const byKey = new Map(groups.map((group) => [group.key, group]));
-  assert.equal(downloadGroupNeedsAttention(byKey.get("media:7"), new Map()), true);
+  assert.equal(downloadGroupNeedsAttention(byKey.get("media:00000000-0000-4000-8000-000000000007"), new Map()), true);
   assert.equal(downloadGroupNeedsAttention(byKey.get("task:1:c"), new Map()), false);
   // 入库 Job 用小写 hash 建索引，任务侧的大写 hash 也要能命中
   const jobs = new Map([["aaa", { id: "job_2", status: "blocked", dismissed_at: null }]]);
   assert.equal(
     downloadGroupNeedsAttention(
-      groupDownloadTasks([task({ info_hash: "AAA", media_item_id: 8 })])[0],
+      groupDownloadTasks([task({ info_hash: "AAA", subscriptions: [{ media_item_id: "00000000-0000-4000-8000-000000000008" }] })])[0],
       jobs,
     ),
     true,

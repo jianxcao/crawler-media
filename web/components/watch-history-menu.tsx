@@ -177,12 +177,7 @@ function ClearLibraryHistoryDialog({
   const submit = () => {
     if (libraryId === null || busy) return;
     setBusy(true);
-    // 新契约 MediaLibrary.id 是 UUID 字符串；旧播放接口仍按数值型 library_id
-    // 声明，按原样透传（后端按字符串解析），这里只做类型收窄。
-    clearPlaybackHistory(
-      "library",
-      { libraryId: libraryId ?? undefined } as unknown as { libraryId?: number },
-    )
+    clearPlaybackHistory("library", { libraryId })
       .then(({ message }) => {
         toast.success(message);
         onCleared();

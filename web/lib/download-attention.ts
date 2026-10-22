@@ -17,7 +17,6 @@ interface LegacyDownloadTaskFields {
   can_replace?: boolean;
   landing_error?: string | null;
   rescue_message?: string | null;
-  media_item_id?: number | null;
   poster_url?: string | null;
 }
 
@@ -25,7 +24,7 @@ type DownloadTaskLike = DownloadTask & LegacyDownloadTaskFields;
 
 export interface DownloadTaskGroup {
   key: string;
-  mediaItemId: number | null;
+  mediaItemId: string | null;
   title: string;
   kind: string | null;
   posterUrl: string | null;
@@ -56,9 +55,9 @@ export function isSubscriptionTask(task: DownloadTask): boolean {
   return taskSourceOf(task) === "subscription";
 }
 
-/** 媒体条目主键：新契约挪进了 subscriptions[0]，旧形状仍在任务本体上。 */
-function mediaItemIdOf(task: DownloadTaskLike): number | null {
-  return task.subscriptions[0]?.media_item_id ?? task.media_item_id ?? null;
+/** Canonical Media identity from the task's subscription context. */
+function mediaItemIdOf(task: DownloadTaskLike): string | null {
+  return task.subscriptions[0]?.media_item_id ?? null;
 }
 
 function posterUrlOf(task: DownloadTaskLike): string | null {

@@ -14,9 +14,7 @@ import { useScrollRestoration } from "@/lib/use-scroll-restoration";
  * 页的选项卡下，回答的问题是「这部片我有没有」。数据全在本地（标题/原名
  * 子串匹配），毫秒级返回，没有快照与历史——搜自己的库是翻家底，不值得回放。
  *
- * 新契约 searchLibraryItems 返回扁平 LibraryHit（不再按库分组的
- * LibrarySearchGroup）：每行自带 media_item_id/title/kind/path/season/episode，
- * 没有库归属与海报信息，因此改为扁平行列表展示。
+ * 每个命中代表一个物理文件，units 是其真实逻辑覆盖；未知覆盖不冒充整片。
  *
  * 空态的出口指向「影视」垂直：库里没有 ≈ 想要但还没入手，下一步自然是
  * 去影视条目搜索并订阅/下载。
@@ -88,7 +86,7 @@ export function LibrarySearchResults({
         {items !== null && items.length > 0 && (
           <ul className="space-y-2">
             {items.map((hit) => (
-              <LibraryHitRow key={hit.media_item_id} hit={hit} />
+              <LibraryHitRow key={hit.file_id} hit={hit} />
             ))}
           </ul>
         )}
@@ -100,10 +98,8 @@ export function LibrarySearchResults({
 /** 一行命中：类型徽标 + 标题 + 季集定位 + 库内路径。 */
 function LibraryHitRow({ hit }: { hit: LibraryHit }) {
   const parts: string[] = [];
-  if (hit.kind === "tv" && hit.season != null) {
-    parts.push(
-      hit.episode != null ? `第 ${hit.season} 季 · 第 ${hit.episode} 集` : `第 ${hit.season} 季`,
-    );
+  if (hit.kind === "tv") {
+    parts.push(...hit.units.map((unit) => `第 ${unit.season} 季 · 第 ${unit.episode} 集`));
   }
   if (hit.path) parts.push(hit.path);
   return (

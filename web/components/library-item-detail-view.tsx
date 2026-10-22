@@ -202,7 +202,7 @@ export function LibraryItemDetailView({
     }
     if (!selectedSeriesEpisode) return null;
     return {
-      media_item_id: detail.media_item_id as unknown as number,
+      media_item_id: detail.media_item_id,
       season_number: selectedSeriesEpisode.seasonNumber,
       episode_number: selectedSeriesEpisode.episode.episode_number,
       file_id: selectedTrackFileId ?? undefined,
@@ -237,7 +237,7 @@ export function LibraryItemDetailView({
   useEffect(() => {
     let cancelled = false;
     setFavorite(null);
-    fetchPlaybackMarks({ media_item_id: mediaItemId as unknown as number })
+    fetchPlaybackMarks({ media_item_id: mediaItemId })
       .then((marks) => {
         if (!cancelled) setFavorite(marks.is_favorite);
       })
@@ -256,7 +256,7 @@ export function LibraryItemDetailView({
     setFavorite(next);
     try {
       const marks = await setPlaybackMarks(
-        { media_item_id: mediaItemId as unknown as number },
+        { media_item_id: mediaItemId },
         { favorite: next },
       );
       setFavorite(marks.is_favorite);
@@ -762,7 +762,7 @@ export function LibraryItemDetailView({
         }).then((ok) => {
           if (!ok) return;
           clearPlaybackHistory("item", {
-            mediaItemId: detail.media_item_id as unknown as number,
+            mediaItemId: detail.media_item_id,
           })
             .then(({ message }) => toast.success(message))
             .catch((e) => toast.error((e as Error).message));
@@ -952,7 +952,7 @@ export function LibraryItemDetailView({
                 // sessionStorage。读 location 而不是 useSearchParams()：
                 // 后者会把整页拖进「必须包 Suspense」的预渲染约束。
                 rememberPlayerReturnPath(window.location.pathname + window.location.search);
-                navigate(playHref(detail.media_item_id as unknown as number, {
+                navigate(playHref(detail.media_item_id, {
                     season:
                       !isMovie && selectedSeriesEpisode
                         ? selectedSeriesEpisode.seasonNumber
@@ -1057,7 +1057,7 @@ export function LibraryItemDetailView({
             onPlay={(chapter) => {
               rememberPlayerReturnPath(window.location.pathname + window.location.search);
               navigate(
-                playHref(detail.media_item_id as unknown as number, {
+                playHref(detail.media_item_id, {
                   season: !isMovie && selectedSeriesEpisode ? selectedSeriesEpisode.seasonNumber : undefined,
                   episode: !isMovie && selectedSeriesEpisode ? selectedSeriesEpisode.episode.episode_number : undefined,
                   tSeconds: Math.floor(chapter.start_ms / 1000),
