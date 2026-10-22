@@ -439,3 +439,38 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; fini
 | 工作区（与上轮同口径，带具名 10k skip） | `cargo test --workspace -- --skip concurrent_scan_of_ten_thousand_episodes_keeps_heartbeat_write_scope_bounded` | 02:27:07Z → 02:35:31Z（504 s） | **338 targets / 2467 passed / 0 failed / 10 ignored**；`RAW_EXIT[workspace]=0`、`WORKSPACE_EXIT=0` | `/private/tmp/task19-workspace-gate.log`（342,851 B，md5 `22e0b760566595ba5290064266257bcb`） |
 
 **一次抖动如实披露**：`cargo test -p api`（debug 全 crate，02:21:51Z→02:26:42Z）出现过 1 个失败——`request_admission::site_over_capacity_degrades_to_per_site_failure`（断言「占位请求应先占满 4 个搜索 permit」）。该用例与存储/发布路径无关，单独重跑 **3/3 通过**（每次 0.29 s），随后的工作区门同用例通过，判定为满载时序抖动，不记为代码缺陷，也不据此宣称「api 全绿」——api 的绿以上表工作区门为准。
+
+## 11. Task 20 索引/保留实测与索引审计（2026-10-22，本轮实测）
+
+### 11.1 Step 2 测量（release，命令与 `RAW_EXIT` 逐字）
+
+| 命令 | 时间窗（UTC） | 原始结果 | 日志 |
+|---|---|---|---|
+| `cargo test -p api --release --test maintenance_runtime --test data_retention_control -- --nocapture` | 2026-10-22T02:37:28Z → 02:37:39Z | `maintenance_runtime` 15 passed / 0 failed；`data_retention_control` 9 passed / 0 failed；`RAW_EXIT[api_retention]=0` | `/private/tmp/task20-step2.log` |
+| `cargo test -p store --release --test data_retention --test storage_work_bounds -- --nocapture` | 02:37:39Z → 02:37:58Z | `data_retention` 11 passed / 0 failed；`storage_work_bounds` 12 passed / 0 failed；`RAW_EXIT[store_retention]=0` | 同上 |
+
+**未测得**：fixture 的 DB/索引/WAL 字节、page 利用率、写吞吐、清理与 VACUUM 锁时长——计划 `:440` 点名要记录这些，本轮四条命令没有打印这些量，`--nocapture` 也没有输出，故记「未测得」，不填估算值。
+
+### 11.2 Step 3 索引审计（56 条全量枚举）
+
+方法与逐条结果见 `/private/tmp/task20-index-audit.md`（84 行，md5 `668bc3a367cd9951222744d8e29d84e4`）。要点：
+
+- 索引总数 **56**（`library.sql` 51 / `app.sql` 2 / `subscribe.sql` 3），从 DDL 正则枚举。
+- 源码 SQL 字面量 **703** 条参与匹配（`crates/**/*.rs`，长度 ≥20、含 `SELECT|INSERT|UPDATE|DELETE`）。
+- 判定 `direct+near+filelevel == 0` 的**零证据候选：0 条**——56 条索引全部至少有一条同文件消费痕迹。
+- 结论：依计划 `:446`「没有收益则记录不改」，本轮**不删除任何索引**、不改持久形状、不引入格式迁移；`crates/store/tests/schema_redundant_indexes.rs`（工作区门内 1/0/0）保持不变。
+- **方法学局限（与结论同读）**：SQL 大量由字符串拼接动态生成（如 `crates/store/src/playback/log_scope.rs:146` 的 `FROM playback_logs l WHERE 1=1` 后追加谓词），静态匹配只能证明「存在消费痕迹」，**不能**证明执行计划真的用了该索引；SQLite 无按索引使用计数器。因此本审计只用于排除「完全无证据」的索引，不用于声称「索引被实际使用」。
+- 证据最弱的 12 条（`terms_media`、`chapter_dispatch`、`sites_enabled_idx`、`season_model_lookup`、`sample_job`、`sample_lookup`、`session_id_expiry`、`model_file`、`probe_retry`、`session_generation`、`attempt_job_file`、`probe_obligation_dispatch`）列为未来若真要删索引时的优先复核对象（需 EXPLAIN + 读写对照）。
+
+### 11.3 Step 1 保护 case（本轮工作区门内的原始计数）
+
+| target | 结果 | 位置 |
+|---|---|---|
+| `backup_consistency` | 2 passed / 0 failed | `crates/store/tests/backup_consistency.rs`（受控停写快照 vs 直接复制活跃 WAL 的反例） |
+| `data_retention_control` | 9 passed / 0 failed | `crates/api/tests/data_retention_control.rs` |
+| `data_retention` | 11 passed / 0 failed | `crates/store/tests/data_retention.rs` |
+| `maintenance_runtime` | 15 passed / 0 failed | `crates/api/tests/maintenance_runtime.rs` |
+
+### 11.4 本节 `未跑`
+
+真实 NAS 写入、真实 Jellyfin/Infuse/VidHub 设备、真实浏览器人工浏览/seek、100k–1M 规模、fixture 的 DB/索引/WAL 字节与 page 利用率、VACUUM 锁时长、独立全分支 review、用户真实实例切换（停写/路径/DB-WAL-SHM 清单/授权核对）。
