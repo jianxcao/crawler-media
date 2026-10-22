@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use super::publish::{ensure_library_writable, ensure_media_writable};
 use super::reduce::reduce_library_media;
 use super::rename::{Owned, load_owned};
+pub use super::rename_sidecars::SidecarMode;
+use super::rename_sidecars::{apply_sidecar, classify_shared_sidecars, observe_directory_artwork};
 use crate::library_paths::resolved_path;
 use crate::pending_file_deletions::file_identity;
 use crate::{Store, StoreError};
@@ -25,6 +27,9 @@ pub struct RenameSidecar {
     pub kind: String,
     pub from: PathBuf,
     pub to: PathBuf,
+    /// Move when this video is the sole owner, copy when other media share it.
+    #[serde(default)]
+    pub mode: SidecarMode,
 }
 
 /// Persisted rename / re-parent intent.
@@ -64,12 +69,14 @@ impl Store {
             ));
         }
         let mut sidecars = observe_sidecars(from, to);
+        observe_directory_artwork(from, to, &mut sidecars);
         let identity = file_identity(&from.to_string_lossy());
         let tx = self.library.unchecked_transaction()?;
         let id = file_id.to_string();
         let from_str = from.to_string_lossy().into_owned();
         let owned = load_owned(&tx, &id, &from_str)?;
         merge_registered_sidecars(&tx, &id, from, to, &mut sidecars)?;
+        classify_shared_sidecars(&tx, &id, from, &mut sidecars)?;
         if owned.revision != expected.revision || owned.source_version != expected.source_version {
             return Err(StoreError::Protected(format!("file {id} version changed")));
         }
@@ -257,7 +264,7 @@ impl Store {
         let _ = self.rewrite_fact_paths(media_id, &from_str, &to_str);
         // Queue leftover source-side sidecar bytes (rename failed / copy case).
         for side in &request.sidecars {
-            if side.from.is_file() && side.from != side.to {
+            if side.mode == SidecarMode::Move && side.from.is_file() && side.from != side.to {
                 let _ = self.enqueue_file_deletion(
                     &side.from.to_string_lossy(),
                     "rename-left-behind-sidecar",
@@ -455,6 +462,7 @@ fn observe_sidecars(from: &Path, to: &Path) -> Vec<RenameSidecar> {
             kind: "nfo".into(),
             from: from_nfo,
             to: to_parent.join(format!("{to_stem}.nfo")),
+            mode: SidecarMode::Move,
         });
     }
     out
@@ -495,18 +503,9 @@ pub fn move_rename_bytes(request: &FileRenameRequest) -> Result<(), StoreError> 
 }
 
 fn apply_sidecar_moves(sidecars: &[RenameSidecar]) -> Result<(), StoreError> {
+    // Already moved / copied, or never present after a crash — skipped inside.
     for side in sidecars {
-        if !side.from.is_file() {
-            // Already moved, or never present after a crash — skip.
-            continue;
-        }
-        if side.to.exists() {
-            continue;
-        }
-        if let Some(parent) = side.to.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::rename(&side.from, &side.to)?;
+        apply_sidecar(side)?;
     }
     Ok(())
 }
@@ -615,7 +614,12 @@ fn merge_registered_sidecars(
         } else {
             to_parent.join(name)
         };
-        sidecars.push(RenameSidecar { kind, from, to });
+        sidecars.push(RenameSidecar {
+            kind,
+            from,
+            to,
+            mode: SidecarMode::Move,
+        });
     }
     Ok(())
 }
