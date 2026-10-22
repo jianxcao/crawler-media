@@ -37,14 +37,18 @@ struct StoredBinding {
 
 impl StoredBinding {
     /// R1: a stored position is reused only when the file, its revision, its
-    /// source version, the timeline mode and the track revision all still match
-    /// the source we are about to play.
-    fn matches(&self, source: &LibraryFile, tracks_version: i64) -> bool {
+    /// source version and the timeline mode still match the source we are about
+    /// to play. The track revision does not move the timeline (R13).
+    fn matches(&self, source: &LibraryFile) -> bool {
         self.file_id == source.file_id.to_string()
             && self.revision == source.version.revision
             && self.source_version == source.version.source_version
             && self.timeline_mode == TimelineMode::FullFile.as_str()
-            && self.tracks_version == tracks_version
+    }
+
+    /// Track selections are only valid for the track revision they were made on.
+    fn tracks_match(&self, tracks_version: i64) -> bool {
+        self.tracks_version == tracks_version
     }
 }
 
@@ -190,19 +194,20 @@ fn resolve_resume(
     stored: Option<StoredResume>,
     explicit_start_ms: Option<i64>,
 ) -> ResolvedResume {
-    let binding = match stored.as_ref().map(|resume| resume.binding.as_ref()) {
-        Some(Some(binding)) if binding.matches(&source.file, source.tracks_version) => {
-            Binding::Matches
-        }
-        Some(Some(_)) => Binding::Changed,
-        _ => Binding::Absent,
+    let stored_binding = stored.as_ref().and_then(|resume| resume.binding.as_ref());
+    let binding = match stored_binding {
+        Some(binding) if binding.matches(&source.file) => Binding::Matches,
+        Some(_) => Binding::Changed,
+        None => Binding::Absent,
     };
+    let tracks_match = stored_binding.is_some_and(|b| b.tracks_match(source.tracks_version));
     let (audio_track, subtitle_track, stored_duration) = match (binding, stored.as_ref()) {
-        (Binding::Matches, Some(resume)) => (
+        (Binding::Matches, Some(resume)) if tracks_match => (
             resume.audio_track.clone(),
             resume.subtitle_track.clone(),
             resume.duration_ms,
         ),
+        (Binding::Matches, Some(resume)) => (None, None, resume.duration_ms),
         _ => (None, None, None),
     };
     // The selected source decides the duration; a stored duration is only

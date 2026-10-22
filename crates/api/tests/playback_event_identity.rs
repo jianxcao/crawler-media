@@ -707,3 +707,34 @@ async fn start_without_position_does_not_rebind_old_source_resume() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(unit(&store_arc.lock()).position_ms, 0, "old-source resume must not be rebound");
 }
+
+/// R13: the historical movie 0/0 coordinates are no longer an alias of the whole movie.
+#[tokio::test]
+async fn movie_zero_coordinates_are_rejected_without_writes() {
+    let fix = PresenceFixture::new();
+    let (media_id, file) = fix.insert_media_and_ledger("movie_zero.mkv");
+    let store_arc = fix.state.store();
+    let user_id = store_arc.lock().user_by_token(&fix.admin_token).unwrap().unwrap().id;
+    let sid = support::session::issue_session(&store_arc.lock(), user_id, "dev1", file.file_id, 1000);
+    let (status, _) = fix
+        .request_with_body(
+            "POST",
+            "/api/v1/playback/progress",
+            Some(&fix.admin_token),
+            json!({
+                "device_id": "dev1",
+                "media_item_id": media_id.to_string(),
+                "file_id": file.file_id.to_string(),
+                "season": 0,
+                "episode": 0,
+                "event": "progress",
+                "position_ms": 5_000,
+                "play_session_id": sid,
+            }),
+        )
+        .await;
+    assert!(!status.is_success(), "movie 0/0 must be refused, got {status}");
+    let guard = store_arc.lock();
+    assert!(guard.unit_state(user_id, media_id, -1, -1).unwrap().is_none());
+    assert!(guard.unit_state(user_id, media_id, 0, 0).unwrap().is_none());
+}

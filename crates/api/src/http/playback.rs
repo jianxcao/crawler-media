@@ -62,7 +62,9 @@ pub(crate) fn effective_watch_state(
     season: i32,
     episode: i32,
 ) -> Result<Option<crate::store::UnitState>, crate::store::StoreError> {
-    let (season, episode) = selection::watch_unit(store, media_id, season, episode);
+    let Some((season, episode)) = selection::watch_unit(store, media_id, season, episode) else {
+        return Ok(None);
+    };
     store.unit_state(user_id, media_id, season, episode)
 }
 fn is_movie_media(

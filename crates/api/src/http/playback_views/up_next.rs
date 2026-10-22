@@ -337,13 +337,10 @@ pub(crate) async fn up_next(
             } else {
                 (plan.season as i32, plan.next_episode)
             };
-            let mut unit = store
+            let unit = store
                 .unit_state(user_id, media.id, target_season, target_episode)
                 .ok()
                 .flatten();
-            if unit.is_none() && is_movie {
-                unit = store.unit_state(user_id, media.id, 0, 0).ok().flatten();
-            }
             let rows: Vec<domain::FileCoverage> = all_rows
                 .iter()
                 .filter(|r| r.file.media_id == media.id)

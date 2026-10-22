@@ -108,7 +108,7 @@ async fn tv_special_zero_unit_is_not_aliased_to_whole_show() {
 }
 
 #[tokio::test]
-async fn canonical_zero_progress_overrides_historical_progress() {
+async fn movie_zero_progress_is_refused_and_keeps_historical_progress() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, mut target) = fixture(&tmp, false);
     let store = api::Store::open(tmp.path().join("data")).unwrap();
@@ -137,12 +137,13 @@ async fn canonical_zero_progress_overrides_historical_progress() {
     .await;
     target["play_session_id"] = json!(session);
     target["event"] = json!("start");
+    // R13: 0/0 is no longer an alias of the whole movie.
     assert_eq!(
         post(&app, "progress", target.clone()).await.status(),
-        StatusCode::OK
+        StatusCode::NOT_FOUND
     );
     let uri = format!(
-        "/api/v1/playback/resume?media_item_id={}&season_number=0&episode_number=0",
+        "/api/v1/playback/resume?media_item_id={}",
         target["media_item_id"].as_str().unwrap()
     );
     let response = app
@@ -154,7 +155,7 @@ async fn canonical_zero_progress_overrides_historical_progress() {
         ))
         .await
         .unwrap();
-    assert_eq!(json_data(response).await["position_ms"], 0);
+    assert_eq!(json_data(response).await["position_ms"], 600_000);
 }
 
 #[tokio::test]
@@ -305,7 +306,7 @@ async fn historical_movie_metadata_survives_first_canonical_progress() {
 }
 
 #[tokio::test]
-async fn historical_state_survives_first_favorite_mark_write() {
+async fn movie_zero_mark_is_refused_and_keeps_historical_state() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, mut target) = fixture(&tmp, false);
     let store = api::Store::open(tmp.path().join("data")).unwrap();
@@ -338,10 +339,11 @@ async fn historical_state_survives_first_favorite_mark_write() {
     target["favorite"] = json!(false);
     assert_eq!(
         post(&app, "marks", target.clone()).await.status(),
-        StatusCode::OK
+        StatusCode::BAD_REQUEST,
+        "R13: movie 0/0 marks are refused without writes"
     );
     let uri = format!(
-        "/api/v1/playback/resume?media_item_id={}&season_number=0&episode_number=0",
+        "/api/v1/playback/resume?media_item_id={}",
         target["media_item_id"].as_str().unwrap()
     );
     let resume = json_data(

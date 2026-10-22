@@ -340,8 +340,9 @@ fn tracks_version_bump_resets_track_selection() {
     assert!(published, "the probe result must be accepted");
 
     let res = f.store.resolve_playback(user(), &e01, None, None).unwrap();
-    assert_eq!(res.status, ResumeStatus::SourceChanged);
-    assert_eq!(res.start_ms, 0);
+    // R13: re-probing tracks of the same bytes keeps the timeline, only tracks reset.
+    assert_eq!(res.status, ResumeStatus::Compatible);
+    assert_eq!(res.start_ms, 300_000, "same-source track refresh keeps the position");
     assert_eq!(res.duration_ms, Some(5_400_000));
     assert_eq!(res.audio_track, None);
     assert_eq!(res.subtitle_track, None);

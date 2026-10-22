@@ -35,7 +35,14 @@ pub(crate) async fn resume(
         .and_then(|v| v.parse().ok())
         .unwrap_or(UNIT_WHOLE);
     let store = state.store.lock();
-    let (season, episode) = super::selection::watch_unit(&store, media_id, season, episode);
+    let Some((season, episode)) = super::selection::watch_unit(&store, media_id, season, episode)
+    else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "playback.invalid",
+            "电影只有整部单元，不接受季/集坐标",
+        );
+    };
     ok(super::effective_watch_json(
         &store, user_id, media_id, season, episode,
     ))
@@ -64,7 +71,14 @@ pub(crate) async fn marks(
         .and_then(|v| v.parse().ok())
         .unwrap_or(UNIT_WHOLE);
     let store = state.store.lock();
-    let (season, episode) = super::selection::watch_unit(&store, media_id, season, episode);
+    let Some((season, episode)) = super::selection::watch_unit(&store, media_id, season, episode)
+    else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "playback.invalid",
+            "电影只有整部单元，不接受季/集坐标",
+        );
+    };
     let rows = store.unit_rows(user_id, media_id).unwrap_or_default();
     let watch = super::effective_watch_json(&store, user_id, media_id, season, episode);
     ok(json!({
@@ -156,7 +170,14 @@ pub(crate) async fn set_marks(
     let season = body["season_number"].as_i64().unwrap_or(-1) as i32;
     let episode = body["episode_number"].as_i64().unwrap_or(-1) as i32;
     let store = state.store.lock();
-    let (season, episode) = super::selection::watch_unit(&store, media_id, season, episode);
+    let Some((season, episode)) = super::selection::watch_unit(&store, media_id, season, episode)
+    else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "playback.invalid",
+            "电影只有整部单元，不接受季/集坐标",
+        );
+    };
     let played = body["played"].as_bool();
     let favorite = body["favorite"].as_bool();
     // `playback_clock` 是毫秒时钟；`playback_units.updated_at` 存 unix 秒。
