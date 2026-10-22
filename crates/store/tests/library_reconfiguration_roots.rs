@@ -131,3 +131,59 @@ fn unidentified_rows_without_files_move_to_the_new_root() {
     assert_eq!(owner("/tv/anime/Unknown B"), anime);
     assert_eq!(owner("/tv/Other"), old_root);
 }
+
+/// R19: a failed root batch rolls back, and retrying the same operation finishes it.
+#[test]
+fn failed_root_batch_retries_the_same_operation_to_success() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let library = store
+        .create_library(MediaKind::Tv, "TV", &["/tv"], "everyone", true, &[])
+        .unwrap();
+    let lib_id: domain::LibraryId = library.id.parse().unwrap();
+    let old_root = root_id_of(&store, &library.id, Path::new("/tv"));
+    let db = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
+    db.execute(
+        "INSERT INTO unidentified (library_id, root_id, path, confidence)
+         VALUES (?1, ?2, '/tv/anime/X', 'low')",
+        rusqlite::params![library.id, old_root],
+    )
+    .unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER fail_move BEFORE UPDATE OF root_id ON unidentified
+         BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+    )
+    .unwrap();
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    store
+        .begin_library_reconfiguration(
+            &LibraryReconfiguration {
+                operation_id: operation_id.clone(),
+                library_id: lib_id,
+                expected_revision: store.library_config_revision(&library.id).unwrap(),
+                root_paths: Some(vec![PathBuf::from("/tv"), PathBuf::from("/tv/anime")]),
+                display_locale: Some("en-US".into()),
+            },
+            1_000,
+        )
+        .unwrap();
+    assert!(store.advance_library_operation(&operation_id, 1_100, 10).is_err());
+    assert_eq!(store.library_lifecycle_state(&library.id).unwrap(), "reindexing");
+    let locale_after_failure: String = db
+        .query_row(
+            "SELECT display_locale FROM libraries WHERE library_id = ?1",
+            rusqlite::params![library.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_ne!(locale_after_failure, "en-US", "nothing of the failed batch commits");
+
+    db.execute_batch("DROP TRIGGER fail_move;").unwrap();
+    let status = store.advance_library_operation(&operation_id, 1_200, 10).unwrap();
+    assert_eq!(status.state, "succeeded");
+    assert_eq!(store.library_lifecycle_state(&library.id).unwrap(), "ready");
+    let owner: String = db
+        .query_row("SELECT root_id FROM unidentified WHERE path = '/tv/anime/X'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(owner, root_id_of(&store, &library.id, Path::new("/tv/anime")));
+}

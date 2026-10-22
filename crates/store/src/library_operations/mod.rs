@@ -237,7 +237,10 @@ impl Store {
                 "library operation {operation_id}"
             )));
         };
-        if state == "succeeded" || state == "failed" {
+        // A failed reconfiguration keeps its freeze and is retried from its cursor; only
+        // a failed integrity check (issues found) is terminal.
+        let retryable = state == "failed" && (kind == "roots" || kind == "locale");
+        if state == "succeeded" || (state == "failed" && !retryable) {
             tx.commit()?;
             return Self::read_library_operation(&self.library, operation_id);
         }
@@ -281,7 +284,7 @@ impl Store {
             ))),
         };
 
-        Self::finish_library_batch(
+        self.finish_library_batch(
             tx,
             operation_id,
             &library,
@@ -296,10 +299,11 @@ impl Store {
 
     /// Persist one applied batch and commit it: record progress while Media remain, or
     /// finish the operation. A failed batch is recorded and committed too, and the Library
-    /// becomes writable again on the last applied generation, because a failed
-    /// reconfiguration must not freeze it forever.
+    /// stays frozen: the failed batch is rolled back, the operation is marked `failed`
+    /// with its cause, and a retry resumes from the persisted cursor.
     #[allow(clippy::too_many_arguments)]
     fn finish_library_batch(
+        &self,
         tx: rusqlite::Transaction<'_>,
         operation_id: &str,
         library: &str,
@@ -337,17 +341,16 @@ impl Store {
                 tx.commit()?;
             }
             Err(error) => {
-                tx.execute(
-                    "UPDATE libraries SET lifecycle_state = 'ready' WHERE library_id = ?1",
-                    params![library],
-                )?;
-                tx.execute(
+                // Nothing of the failed batch is committed: the Library stays frozen on
+                // the last applied generation and the operation keeps its cursor, so a
+                // retry (or the next startup) resumes instead of exposing a mixed state.
+                tx.rollback()?;
+                self.library.execute(
                     "UPDATE library_operations
                      SET state = 'failed', error = ?2, updated_at_ms = ?3
                      WHERE operation_id = ?1",
                     params![operation_id, error.to_string(), now_ms],
                 )?;
-                tx.commit()?;
                 tracing::error!(
                     operation_id,
                     library_id = %library,
@@ -378,7 +381,8 @@ impl Store {
     pub fn unfinished_library_operations(&self) -> Result<Vec<String>, StoreError> {
         let mut stmt = self.library.prepare(
             "SELECT operation_id FROM library_operations
-             WHERE state NOT IN ('succeeded', 'failed')
+             WHERE state <> 'succeeded'
+               AND (state <> 'failed' OR kind IN ('roots', 'locale'))
              ORDER BY updated_at_ms, operation_id",
         )?;
         let rows = stmt
@@ -459,7 +463,8 @@ impl Store {
         self.library
             .query_row(
                 "SELECT operation_id FROM library_operations
-                 WHERE library_id = ?1 AND state NOT IN ('succeeded', 'failed')
+                 WHERE library_id = ?1 AND state <> 'succeeded'
+                   AND (state <> 'failed' OR kind IN ('roots', 'locale'))
                  ORDER BY updated_at_ms DESC, operation_id
                  LIMIT 1",
                 params![library_id],

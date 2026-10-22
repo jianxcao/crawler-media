@@ -504,7 +504,7 @@ fn advance_refuses_a_batch_size_outside_the_interface_range() {
 }
 
 #[test]
-fn a_failed_batch_records_the_failure_and_releases_the_freeze() {
+fn a_failed_batch_rolls_back_keeps_the_freeze_and_stays_recoverable() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let movie = media(
@@ -548,17 +548,14 @@ fn a_failed_batch_records_the_failure_and_releases_the_freeze() {
     let failed = store.advance_library_operation(&operation_id, 3_100, 1);
     assert!(failed.is_err(), "a batch that cannot write must fail");
 
-    // A failed reconfiguration must not leave the Library frozen forever, and it must
-    // stop being offered to startup recovery.
-    assert_eq!(
-        store.library_lifecycle_state(&library.id).unwrap(),
-        "ready",
-        "the freeze is released on the last applied generation"
-    );
+    // R19: the failed batch commits nothing, the freeze stays, and the operation is
+    // still offered to startup recovery so it resumes instead of exposing a mixed state.
+    assert_eq!(store.library_lifecycle_state(&library.id).unwrap(), "reindexing");
     let status = store.get_library_operation(&operation_id).unwrap().unwrap();
     assert_eq!(status.state, "failed");
     assert!(status.error.is_some(), "the failure keeps its cause");
-    assert!(store.unfinished_library_operations().unwrap().is_empty());
+    assert_eq!(store.unfinished_library_operations().unwrap(), vec![operation_id.clone()]);
+    assert_eq!(store.active_library_operation(&library.id).unwrap(), Some(operation_id.clone()));
     assert_eq!(
         store.library_config_revision(&library.id).unwrap(),
         expected_revision + 1,
