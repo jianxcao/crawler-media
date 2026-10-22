@@ -381,39 +381,25 @@ async fn repeated_watch_event_for_same_target_is_consumed_with_cumulative_report
 #[tokio::test]
 async fn committed_chunk_prefix_survives_a_later_chunk_failure() {
     let fix = PresenceFixture::new();
-    // 给 Library A 增加一个指向 `sub` 的符号链接根：`library_roots.path_key`
-    // 全局唯一，无法再登记两个字面相同的根；链接别名解析后与 Library B 的
-    // `sub` 根同深度，sub 里的文件因此归属歧义，而 root 里的文件仍唯一归属 A，
-    // 于是第一个 chunk 提交、第二个 chunk 必然失败。
+    // 根键规范化后无法再构造「同一物理根两个 Library」的歧义；改用 library.db
+    // 触发器只拒绝 `sub/` 下文件的入账：root 里的 100 个文件构成第一个 chunk
+    // 并提交，sub 的文件落在第二个 chunk 并必然失败。
     let sub = fix.root.join("sub");
     std::fs::create_dir_all(&sub).unwrap();
-    let sub_alias = fix.root.join("sub-alias");
-    std::os::unix::fs::symlink(&sub, &sub_alias).unwrap();
-    for i in 0..101 {
+    for i in 0..100 {
         std::fs::write(fix.root.join(format!("Movie_{i:03} (2024).mkv")), b"x").unwrap();
     }
     std::fs::write(sub.join("Movie_sub (2024).mkv"), b"x").unwrap();
     {
-        let store = fix.state.store();
-        let guard = store.lock();
-        guard
-            .update_library(
-                &fix.library_id,
-                None,
-                Some(&[fix.root.to_str().unwrap(), sub_alias.to_str().unwrap()]),
-                None,
-            )
-            .unwrap();
-        guard
-            .create_library(
-                MediaKind::Movie,
-                "Nested",
-                &[sub.to_str().unwrap()],
-                "everyone",
-                true,
-                &[],
-            )
-            .unwrap();
+        let db_path = fix.state.store().lock().data_dir().join("library.db");
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        conn.execute(
+            "CREATE TRIGGER fail_sub_publish BEFORE INSERT ON library_files
+             WHEN NEW.path_key LIKE '%/sub/%'
+             BEGIN SELECT RAISE(ABORT, 'injected sub chunk failure'); END;",
+            [],
+        )
+        .unwrap();
     }
     let sig = fix.scope_signature();
     let op = {
