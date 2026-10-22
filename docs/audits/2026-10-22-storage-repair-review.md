@@ -358,4 +358,6 @@ Media／Library／Playback 放在同一 `library.db`、cache 按生命周期独�
 
 已实际执行：空覆盖/旧签名/未知Jobs/凭据公开 Store/Router 回归；Web 类型检查、841测试、生产构建；隔离生产进程 HTTP smoke（facets 无years、numeric member400、UUID member200、auth响应）；浏览器登录并点击UUID电影库成功。独立补丁审查发现并处理旧 Jobs 和 facets 测试契约残留。普通 Web lint 有15 errors/115 warnings（包括未改的 library-detail-view 空块和 request-signal 全局声明），普通 Clippy 有 release 布尔 lint 阻断；两者均不称全绿。全量 crate/workspace 结果另据本次最终执行输出登记，不把中途失败改写为通过。
 
+最终单 crate 门：`cargo test -p store` 395 passed、2 ignored；`cargo test -p api` 1507 passed、5 ignored；`cargo test -p library` 113 passed。新增严格边界定向门（schema/password/NFO及HTTP/cache/Subscribe/scan）19+23 passed、1 ignored。`cargo fmt --all --check`通过；最终 `cargo test --workspace`：2519 passed、11 ignored（344 suites），中途失败均已保留在执行证据，不冒充首次全绿。
+
 本轮不修改用户真实数据目录，不运行真实 Downloader/第三方 Catalog/NAS 压力验收。上列未修项保持 review/design 状态，不因已提交局部补丁宣称“所有旧逻辑已清除”或“系统不存在死锁”。
