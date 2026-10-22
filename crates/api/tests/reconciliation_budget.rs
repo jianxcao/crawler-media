@@ -321,7 +321,11 @@ impl api::browse_file_read::BrowseFileRead for ReconciliationFileRead {
     fn is_file(&self, path: &std::path::Path) -> bool {
         use std::sync::atomic::Ordering;
         self.entered.store(true, Ordering::SeqCst);
-        if let Some(store) = self.store.try_lock() {
+        // Background workers (probe-obligation dispatcher etc.) legitimately take
+        // the Store lock for short DB reads; a bare `try_lock` races them. Wait a
+        // bounded time instead: if the handler itself held the lock across this
+        // FS call, the wait still times out and `unlocked` stays false.
+        if let Some(store) = self.store.try_lock_for(Duration::from_secs(5)) {
             self.unlocked.store(true, Ordering::SeqCst);
             let library = store.get_library(&self.library_id).unwrap().unwrap();
             match self.change {
