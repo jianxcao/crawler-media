@@ -295,7 +295,12 @@ impl Downloader for GatedDownloader {
     fn add(&self, torrent: &domain::Torrent) -> Result<(), DownloaderError> {
         if let Some(started) = self.started.lock().take() {
             started.send(()).unwrap();
-            self.resume.lock().take().unwrap().recv().unwrap();
+            self.resume
+                .lock()
+                .take()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("test must resume the gated downloader");
         }
         self.inner.add(torrent)
     }
@@ -337,7 +342,9 @@ impl Fetcher for PauseGateFetcher {
     fn fetch(&self, _request: &FetchRequest) -> Result<String, IndexerError> {
         if let Some(resume) = self.resume.lock().take() {
             self.started.lock().take().unwrap().send(()).unwrap();
-            resume.recv().unwrap();
+            resume
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("test must resume the gated fetcher");
         }
         Ok(super::common::nexusphp().to_string())
     }

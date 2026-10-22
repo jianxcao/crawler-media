@@ -46,7 +46,11 @@ impl DatabaseExecutor for BlockingExecutor {
     ) -> Result<DatabaseReport, String> {
         if !self.blocked.swap(true, std::sync::atomic::Ordering::SeqCst) {
             self.entered.send(()).unwrap();
-            self.release.lock().unwrap().recv().unwrap();
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("test must release the blocked maintenance executor");
         }
         Ok(DatabaseReport {
             name: target.name.as_str().to_string(),
@@ -101,10 +105,10 @@ fn one_failed_database_fails_the_job_after_running_the_rest() {
     let error = run(&state, &job).expect_err("任一库 Failed 必须让整个 job 失败");
 
     assert!(error.contains("app"), "错误必须保留库名与上下文: {error}");
+    let attempted = executor.attempted.lock().clone();
     assert!(
-        executor.attempted.lock().len() > 1,
-        "其余库必须继续跑完再汇总: {:?}",
-        executor.attempted.lock()
+        attempted.len() > 1,
+        "其余库必须继续跑完再汇总: {attempted:?}"
     );
     let report = progress_of(&state, &job);
     assert_eq!(db_entry(&report, "app")["outcome"], "failed");

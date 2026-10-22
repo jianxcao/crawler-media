@@ -363,10 +363,10 @@ async fn cleanup_keeps_planned_client_after_default_downloader_switch() {
         1,
         "planned client must receive the delete"
     );
+    let first_delete = fixture.deletes_a.lock()[0].clone();
     assert!(
-        fixture.deletes_a.lock()[0].contains(fixture.hash_a),
-        "delete must use the hash proven at plan time: {}",
-        fixture.deletes_a.lock()[0]
+        first_delete.contains(fixture.hash_a),
+        "delete must use the hash proven at plan time: {first_delete}"
     );
     assert!(
         fixture

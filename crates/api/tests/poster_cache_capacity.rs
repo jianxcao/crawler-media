@@ -259,7 +259,12 @@ async fn cancelled_waiters_and_disk_double_check_leave_no_dead_gate() {
     let handle = tokio::spawn(async move { s.get(media_id).await });
 
     // Wait until worker is inside fetcher gate
+    let enter_deadline = std::time::Instant::now() + Duration::from_secs(10);
     while fetcher.active.load(Ordering::SeqCst) == 0 {
+        assert!(
+            std::time::Instant::now() < enter_deadline,
+            "the worker must enter the fetcher gate"
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
@@ -271,7 +276,12 @@ async fn cancelled_waiters_and_disk_double_check_leave_no_dead_gate() {
     gate.release();
 
     // Give worker a moment to finish disk write & complete
+    let exit_deadline = std::time::Instant::now() + Duration::from_secs(10);
     while fetcher.active.load(Ordering::SeqCst) > 0 {
+        assert!(
+            std::time::Instant::now() < exit_deadline,
+            "the worker must leave the fetcher gate after release"
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
