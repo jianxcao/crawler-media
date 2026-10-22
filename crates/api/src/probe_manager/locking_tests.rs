@@ -79,3 +79,45 @@ fn deleted_probe_cancellation_and_detail_enqueue_remain_responsive() {
         "authentication must retain Store access"
     );
 }
+
+#[test]
+fn discarded_dispatch_releases_store_before_waiting_for_seen() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let manager = Arc::new(ProbeManager::new(store.clone()));
+    // Forced enqueue owns seen before it persists a job. A discarded dispatch
+    // must not take the opposite order while removing its in-memory identity.
+    let seen = manager.seen.lock();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let worker_manager = manager.clone();
+    let worker = std::thread::spawn(move || {
+        entered_tx.send(()).unwrap();
+        worker_manager
+            .load_dispatch_unit_inner(
+                &store::ProbeDispatchId {
+                    job_id: "removed-job".into(),
+                    ledger_id: "removed-file".into(),
+                    stage: store::ProbeDispatchStage::Metadata,
+                },
+                true,
+            )
+            .is_none()
+    });
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let deadline = Instant::now() + Duration::from_millis(200);
+    let mut responsive = true;
+    while Instant::now() < deadline {
+        if store.try_lock_for(Duration::from_millis(20)).is_none() {
+            responsive = false;
+            break;
+        }
+        std::thread::yield_now();
+    }
+    // Release before asserting so a regression cannot hang the test process.
+    drop(seen);
+    assert!(worker.join().unwrap());
+    assert!(
+        responsive,
+        "discarding a dispatch held Store while waiting for seen"
+    );
+}

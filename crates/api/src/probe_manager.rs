@@ -358,7 +358,8 @@ impl ProbeManager {
 
     /// 是否已在排队/执行（前端「探测中」状态用）。
     pub fn is_queued(&self, ledger_id: &str) -> bool {
-        match self.store.lock().is_probe_queued(ledger_id) {
+        let queued = self.store.lock().is_probe_queued(ledger_id);
+        match queued {
             Ok(queued) => queued,
             Err(_) => self.seen.lock().contains(ledger_id),
         }

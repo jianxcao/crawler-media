@@ -281,3 +281,10 @@ node "$REVIEW_ROOT/web-review.mjs"
 | Task13历史项 | 已修（e2a1329） | unknown cache source 400、嵌套路由query api_key |
 
 全门（本轮）：`cargo test --workspace` 见提交说明；`api --test reconciliation_budget reconciliation_revalidates_off_lock_scope_freeze_and_source` 在基线2884348即6/6失败（既有问题，本分支间歇通过）；`subtitle_runtime both_waiters_cancelled…` 为偶发超时，单跑通过。Web `npm run typecheck`、`npm test`通过；lint/build未跑。
+
+## 本轮增量：锁风险修复（基线 999acdb）
+
+- 生产 Probe 派发丢弃路径曾在 `match store.lock().load_probe_dispatch_snapshot(...)` 的分支中取得 `seen`，与强制入队的 `seen -> Store` 构成反向锁序。现在先取 owned 查询结果并释放 Store，再处理 `seen`；`is_queued` 错误回退同样消除嵌套锁。新增竞争回归在修改前失败（持有 Store 等待 seen），修改后随 API 单元测试通过。
+- 历史 12 处锁跨 await 候选中，4 处代理配置测试确实跨异步挂起持有进程全局锁，改为同步测试持有隔离锁、在内部 runtime 驱动请求；其余8处显式 drop 改词法作用域，不将这些已提前 drop 的位置误报为已复现死锁。部分阻塞测试屏障/通道增加有界等待，失败不再无限拖住 runtime shutdown。
+- 验证：`cargo test -p library` 113 passed；`cargo test -p api --lib` 169 passed。workspace 全 target 锁专项 Clippy 通过：`cargo clippy --workspace --all-targets --locked -- -A clippy::overly_complex_bool_expr -D clippy::await_holding_lock`。未放宽锁 lint，也未在源码加 allow。普通 Clippy 被未修改的 `release/src/boundary.rs:119` 布尔表达式 lint 阻断；因此不声称普通 Clippy 全绿或其余警告归零。
+- 此记录只覆盖本轮锁补丁，不替代数据库重构全量审查；其他 cutover 改动另行验证。

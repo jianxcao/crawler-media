@@ -306,7 +306,8 @@ impl ProbeManager {
         id: &ProbeDispatchId,
         queued_only: bool,
     ) -> Option<(ProbeUnit, probe::FingerprintWork)> {
-        let snapshot = match self.store.lock().load_probe_dispatch_snapshot(id) {
+        let snapshot = self.store.lock().load_probe_dispatch_snapshot(id);
+        let snapshot = match snapshot {
             Ok(Some(snapshot)) => snapshot,
             Ok(None) => {
                 self.seen.lock().remove(&id.ledger_id);
