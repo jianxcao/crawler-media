@@ -250,13 +250,33 @@ node "$REVIEW_ROOT/web-review.mjs"
 
 ## 修复进度（2026-10-22，feat/storage-redesign）
 
-只记录已提交且有回归的部分；其余R/S项仍为**未修**，按计划Task顺序继续。
+只记录已提交且有回归的部分。“已修已验”=对应回归在本分支通过；“部分”列出剩余缺口。浏览器/真机/NAS/100k基准均Not run。
 
-| ID | 状态 | 回归入口 |
+| ID | 状态 | 提交 / 回归入口 |
 |---|---|---|
-| R02 | 已修（Store层已验证；claim改用当前revision） | `store --test library_reconfiguration initial_zero_scope_is_rejected_after_reconfiguration`；scan/Probe/fingerprint携真实版本属R01未做 |
-| R03 | 已修已验 | `store --test file_publication existing_card_batch_two_versions_of_new_episode`（修前(3,3)） |
-| R04 | 已修已验（recorder单元，Downloader端到端Not run） | `api --lib restarted_pending_a_with_fresh_candidate_does_not_block_b`（修前B被拒） |
-| R05 | 部分：两claim入口按文件名解析覆盖、未知TV空覆盖；HTTP route级回归与release解析器拒E00未处理 | `api --lib claim_coverage_follows_the_file_name_and_media_kind` |
-| R11 | 已修已验（下游up-next/历史窗口未复核） | `store --test playback_assertions event_activity_clock_is_seconds_not_milliseconds` |
-| R14 | 已修已验（浏览器Not run） | `node --test web/test/library-file-pagination.test.mjs` 真实adapter 50/100/101/201 |
+| R01 | 已修（d1c03de，生产scan/Probe接CAS） | `api --test storage_write_runtime` |
+| R02 | 已修已验 | `store --test library_reconfiguration initial_zero_scope_is_rejected_after_reconfiguration` |
+| R03 | 已修已验 | `store --test file_publication existing_card_batch_two_versions_of_new_episode` |
+| R04 | 已修已验（Downloader端到端Not run） | `api --lib restarted_pending_a_with_fresh_candidate_does_not_block_b` |
+| R05 | 已修（03de319补真实claim route与S00E00） | `api --lib claim_coverage_follows_the_file_name_and_media_kind` |
+| R06/R07 | 已修（95495b4） | `api --test review_remediation_playback`、`playback_event_identity` |
+| R08–R10 | 已修（dbce599） | `api --test playback_watch_time`、`review_remediation_playback` |
+| R11 | 已修已验 | `store --test playback_assertions event_activity_clock_is_seconds_not_milliseconds` |
+| R12 | 已修（3741bd4，Store/API决议）；Series协议筛选按集归约未单独回归 | `store --test playback_assertions` |
+| R13 | 已修（6b1f79d） | `api --test review_remediation_playback` |
+| R14 | 已修已验（浏览器Not run） | `node --test web/test/library-file-pagination.test.mjs` |
+| R15/R16 | 已修（36fe331、db1328a） | `api --test metadata_priority`、`store --test metadata_adoption` |
+| R17 | 已修（89cff86）：已入账视频只经driver导出，begin校验file/source/config/media，磁盘变化或无效XML拒写保字节，先register后终态；**未做**：锁外IO（S01导出侧） | `api --test storage_nfo_export normal_refresh_preserves_invalid_external_sidecar` |
+| R18 | 部分（e0c8d1f）：编辑按上次导出baseline三方比较；**未做**：局部(按Library/input)覆盖、删除NFO解除覆盖 | `api --test storage_nfo_export provider_title_changes_when_only_plot_was_edited` |
+| R19 | 已修已验（523cbcb、8bcfe2d、16b8689、5134ca8）：roots+locale同提交；unidentified/metadata inputs独立迁移；未覆盖文件预检拒绝；失败批回滚、保freeze、同operation可续 | `store --test library_reconfiguration_roots`、`library_reconfiguration a_failed_batch_rolls_back_keeps_the_freeze_and_stays_recoverable` |
+| R20/S02 | 已修已验（29a43ed）：每Media在savepoint内重归约对比items/units/terms/user行（排除*_revision），keyset分页≤batch，repair逐Media复核；100k测量Not run | `store --test library_integrity_facts missing_units_and_terms_are_detected` |
+| R21 | 部分（be68cd5、923e6c4、05200ce）：同实体新快照胜/tie留survivor；人工锁冲突拒绝、互不冲突合并；失败operation保freeze可续不被接管；**未做**：异实体目标季集校验、pending fallback逐字段决议 | `store --test media_merge_snapshots` |
+| R22 | 已修（5cbc133） | `store --test media_alias_updates` |
+| R23 | 部分（2013e93、7ccb7f7）：Unicode casefold（SQLite函数）、Name原串tie置于全部请求键后、genre id按原名解析；**未做**：episode/locale级谓词、missing选中行水合丢弃 | `api --test jellyfin_sql_page` |
+| R24 | 已修已验（9e49994、b09924c）：PersonIds走SQL本地事实，删除Catalog候选路径；替换“Catalog失败500”测试 | `api --test jellyfin_paged_metadata audit::person_filter_is_local_and_survives_catalog_failure` |
+| R25/S04 | 已修（2884348、37f4f73、e737e8e）：DELETE同步禁用/吊销后202，后台阶段驱动；`GET /users/removals/{op}`；终态结果保留7天；job loop 60s重试；Web适配器返回DTO、成员页仅succeeded移行 | `api --test users`、`node --test web/test/user-removal.test.mjs` |
+| S01 | 部分：观察侧（d1c03de）已锁外；NFO导出仍在Store锁内读盘/写盘 | — |
+| S03 | 已修（compose 36fe331；integrity拆分后各函数≤120行） | — |
+| Task13历史项 | 已修（e2a1329） | unknown cache source 400、嵌套路由query api_key |
+
+全门（本轮）：`cargo test --workspace` 见提交说明；`api --test reconciliation_budget reconciliation_revalidates_off_lock_scope_freeze_and_source` 在基线2884348即6/6失败（既有问题，本分支间歇通过）；`subtitle_runtime both_waiters_cancelled…` 为偶发超时，单跑通过。Web `npm run typecheck`、`npm test`通过；lint/build未跑。
