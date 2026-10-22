@@ -247,3 +247,16 @@ node "$REVIEW_ROOT/web-review.mjs"
 撤下旧`2026-10-20-storage-clean-cutover.md`执行文档：其原步骤/接口由Git保留，独有修复记录、决策及历史门禁迁入本目录历史归档，不删除反例或伪造闭环。规范、合同、benchmark、ADR、独立Subscribe/CDP/DB8要求保留。其他旧文档无充分证据可安全整篇删除，故不按年龄批量删除。
 
 旧执行记录已披露但未在本轮重放的`DELETE /catalog/cache?source=unknown`返回500、仅api_key的Web session stream返回401，仍保留历史未闭环，纳入新计划最后验收；不能标为本轮新发现。任何P1未通过公开生产seam前，不宣布clean cutover完成。
+
+## 修复进度（2026-10-22，feat/storage-redesign）
+
+只记录已提交且有回归的部分；其余R/S项仍为**未修**，按计划Task顺序继续。
+
+| ID | 状态 | 回归入口 |
+|---|---|---|
+| R02 | 已修（Store层已验证；claim改用当前revision） | `store --test library_reconfiguration initial_zero_scope_is_rejected_after_reconfiguration`；scan/Probe/fingerprint携真实版本属R01未做 |
+| R03 | 已修已验 | `store --test file_publication existing_card_batch_two_versions_of_new_episode`（修前(3,3)） |
+| R04 | 已修已验（recorder单元，Downloader端到端Not run） | `api --lib restarted_pending_a_with_fresh_candidate_does_not_block_b`（修前B被拒） |
+| R05 | 部分：两claim入口按文件名解析覆盖、未知TV空覆盖；HTTP route级回归与release解析器拒E00未处理 | `api --lib claim_coverage_follows_the_file_name_and_media_kind` |
+| R11 | 已修已验（下游up-next/历史窗口未复核） | `store --test playback_assertions event_activity_clock_is_seconds_not_milliseconds` |
+| R14 | 已修已验（浏览器Not run） | `node --test web/test/library-file-pagination.test.mjs` 真实adapter 50/100/101/201 |
