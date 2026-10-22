@@ -297,7 +297,10 @@ async fn both_waiters_cancelled_cancels_job_and_cleans_staging() {
     poll_once_joined(second.as_mut()).await;
 
     first.abort();
-    // 最后一个 waiter 离开才取消任务：直接 drop 第二个请求是确定性的。
+    // abort 是异步的：必须等第一个 waiter 真正被 drop，否则 drop(second) 时它可能
+    // 仍存活，任务不会被取消，放行后 runner 会合法发布 final（满载下偶发失败的根因）。
+    assert!(first.await.unwrap_err().is_cancelled());
+    // 最后一个 waiter 离开才取消任务：此时 drop 第二个请求是确定性的。
     drop(second);
     gate.release();
 
