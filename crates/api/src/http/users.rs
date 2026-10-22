@@ -157,6 +157,14 @@ pub(crate) async fn delete_user(
             return err(StatusCode::BAD_REQUEST, "user.protected", "不能删除管理员");
         }
         Ok(Some(_)) => {}
+        // A User already deleted by an interrupted removal still has its operation record;
+        // the request resumes that operation instead of reporting 404.
+        Ok(None)
+            if store
+                .get_setting(&format!("{}{id}", crate::user_removal::USER_REMOVAL_PREFIX))
+                .ok()
+                .flatten()
+                .is_some() => {}
         Ok(None) => return err(StatusCode::NOT_FOUND, "user.missing", "用户不存在"),
         Err(error) => {
             return err(

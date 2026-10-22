@@ -329,3 +329,59 @@ async fn interrupted_user_removal_stays_disabled_and_recovers() {
     let other_user_after = 1;
     assert_eq!(other_user_after, other_user_before);
 }
+
+/// R25/S04: an interrupted removal is resumed from its persisted record — same operation id,
+/// including after the User row itself was already deleted — and recovery reports instead of
+/// swallowing failures.
+#[tokio::test]
+async fn interrupted_removal_reuses_operation_and_reports_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = ApiState::new(
+        Store::open(tmp.path().join("data")).unwrap(),
+        "admin-token".into(),
+        ProfileSet::load(None).unwrap(),
+        Arc::new(NoFetch),
+        Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
+        tmp.path().join("library"),
+    )
+    .unwrap();
+    let app = router(state.clone());
+    let created = app
+        .clone()
+        .oneshot(request("POST", "/api/v1/users", "admin-token", json!({ "login": "bob", "password": "bob-password" })))
+        .await
+        .unwrap();
+    let bob_id = json_data(created).await["id"].as_str().unwrap().to_string();
+    let uid: UserId = bob_id.parse().unwrap();
+    let key = format!("user_removal.{bob_id}");
+
+    // Interrupted after the User row was deleted but before the record was cleared.
+    let accepted_operation = "op-interrupted-1";
+    {
+        let store = state.store();
+        let store = store.lock();
+        store.finish_user_removal(uid).unwrap();
+        store
+            .put_setting(&key, &json!({
+                "operation_id": accepted_operation, "user_id": bob_id, "phase": "finalizing",
+                "cursor": null, "error": null, "updated_at": 1
+            }).to_string())
+            .unwrap();
+    }
+    let repeated_delete = app
+        .clone()
+        .oneshot(request("DELETE", &format!("/api/v1/users/{bob_id}"), "admin-token", Value::Null))
+        .await
+        .unwrap();
+    assert_eq!(repeated_delete.status(), StatusCode::ACCEPTED);
+    assert_eq!(body(repeated_delete).await["data"]["operation_id"], accepted_operation);
+    let pending_setting_remains_after_success = state.store().lock().get_setting(&key).unwrap().is_some();
+    assert!(!pending_setting_remains_after_success);
+
+    // An unreadable record is a visible recovery failure, not a silent Ok.
+    state.store().lock().put_setting(&key, "{not json").unwrap();
+    let recovery = api::user_removal::UserRemovalService::new(Arc::new(state.clone()))
+        .recover_pending_removals();
+    let recovery_error = recovery.err();
+    assert!(recovery_error.is_some());
+}

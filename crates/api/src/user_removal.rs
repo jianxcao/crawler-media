@@ -25,98 +25,170 @@ impl UserRemovalService {
         Self { state }
     }
 
-    /// Public entry point for initiating or driving user removal.
-    /// Performs operations in order:
-    /// 1. Persist operation record in app.settings: `user_removal.<id>`
-    /// 2. Disable user and revoke all user tokens (immediately 401)
-    /// 3. Cross-database cleanup:
-    ///    - Transfer subscribes to admin
-    ///    - Transfer private collections to admin
-    ///    - Delete playback facts and user_library_items
-    /// 4. Delete user record and update/delete operation record
+    /// Accept (or resume) the removal of one User and drive it to completion.
+    ///
+    /// The persisted `user_removal.<id>` record is authoritative: a repeated request or a
+    /// restart resumes the same operation from its stored phase instead of starting a new
+    /// one. Each phase is idempotent; a failure is written back into the record (phase kept,
+    /// `error` set) and returned, never swallowed.
     pub fn start_removal(&self, user_id: UserId) -> Result<String, String> {
-        let store = self.state.store.lock();
-        let admin_id = store.admin_user_id().map_err(|e| e.to_string())?;
-        if user_id == admin_id {
-            return Err("Cannot delete admin user".into());
-        }
-
-        let user = store
-            .get_user(user_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "User not found".to_string())?;
-
-        let op_key = format!("{}{}", USER_REMOVAL_PREFIX, user_id);
-        let now = crate::job_loop::unix_now();
-        let operation_id = uuid::Uuid::new_v4().to_string();
-
-        let mut record = UserRemovalRecord {
-            operation_id: operation_id.clone(),
-            user_id: user_id.to_string(),
-            phase: "disabling".into(),
-            cursor: None,
-            error: None,
-            updated_at: now,
+        let record = {
+            let store = self.state.store.lock();
+            let admin_id = store.admin_user_id().map_err(|e| e.to_string())?;
+            if user_id == admin_id {
+                return Err("Cannot delete admin user".into());
+            }
+            match read_record(&store, user_id)? {
+                Some(record) => record,
+                None => {
+                    store
+                        .get_user(user_id)
+                        .map_err(|e| e.to_string())?
+                        .ok_or_else(|| "User not found".to_string())?;
+                    let record = UserRemovalRecord {
+                        operation_id: uuid::Uuid::new_v4().to_string(),
+                        user_id: user_id.to_string(),
+                        phase: "disabling".into(),
+                        cursor: None,
+                        error: None,
+                        updated_at: crate::job_loop::unix_now(),
+                    };
+                    write_record(&store, user_id, &record)?;
+                    record
+                }
+            }
         };
-
-        // Step 1: Persist initial operation state
-        let record_json = serde_json::to_string(&record).map_err(|e| e.to_string())?;
-        store
-            .put_setting(&op_key, &record_json)
-            .map_err(|e| e.to_string())?;
-
-        // Step 2: Disable user and revoke all tokens
-        let mut disabled_user = user.clone();
-        disabled_user.enabled = false;
-        store.save_user(&disabled_user).map_err(|e| e.to_string())?;
-        store
-            .revoke_user_tokens(user_id)
-            .map_err(|e| e.to_string())?;
-
-        record.phase = "cleaning".into();
-        record.updated_at = crate::job_loop::unix_now();
-        let record_json = serde_json::to_string(&record).map_err(|e| e.to_string())?;
-        store
-            .put_setting(&op_key, &record_json)
-            .map_err(|e| e.to_string())?;
-
-        // Step 3: Cross-database cleanup
-        // a. Transfer subscribes to admin
-        store
-            .transfer_user_subscribes(user_id, admin_id)
-            .map_err(|e| e.to_string())?;
-
-        // b. Transfer collections to admin & clear playback and user_library_items
-        store
-            .clean_user_library_data(user_id, admin_id)
-            .map_err(|e| e.to_string())?;
-
-        // Step 4: Finalize - delete user row and remove operation record
-        store
-            .finish_user_removal(user_id)
-            .map_err(|e| e.to_string())?;
-        let _ = store.delete_setting(&op_key);
-
-        tracing::info!(user_id = %user_id, operation_id = %operation_id, "User removal completed successfully");
-        Ok(operation_id)
+        self.drive(user_id, record)
     }
 
-    /// Startup recovery entry point: scans app.settings for `user_removal.<id>` records
-    /// and drives unfinished removals to completion.
-    pub fn recover_pending_removals(&self) -> Result<(), String> {
+    fn drive(&self, user_id: UserId, mut record: UserRemovalRecord) -> Result<String, String> {
+        let operation_id = record.operation_id.clone();
         let store = self.state.store.lock();
-        let keys = store
-            .list_setting_keys_with_prefix(USER_REMOVAL_PREFIX)
-            .map_err(|e| e.to_string())?;
-        drop(store);
-
-        for key in keys {
-            let user_id_str = key.trim_start_matches(USER_REMOVAL_PREFIX);
-            if let Ok(uid) = UserId::from_str(user_id_str) {
-                tracing::warn!(user_id = %uid, "Recovering pending user removal");
-                let _ = self.start_removal(uid);
+        loop {
+            let step = run_phase(&store, user_id, &record.phase);
+            match step {
+                Ok(Some(next)) => {
+                    record.phase = next.into();
+                    record.error = None;
+                    record.updated_at = crate::job_loop::unix_now();
+                    write_record(&store, user_id, &record)?;
+                }
+                Ok(None) => {
+                    store
+                        .delete_setting(&record_key(user_id))
+                        .map_err(|e| e.to_string())?;
+                    tracing::info!(%user_id, %operation_id, "User removal completed successfully");
+                    return Ok(operation_id);
+                }
+                Err(error) => {
+                    tracing::error!(%user_id, %operation_id, phase = %record.phase, %error, "User removal phase failed");
+                    record.error = Some(error.clone());
+                    record.updated_at = crate::job_loop::unix_now();
+                    write_record(&store, user_id, &record)?;
+                    return Err(error);
+                }
             }
         }
-        Ok(())
+    }
+
+    /// Startup recovery: resume every persisted removal from its stored phase.
+    /// Returns an error naming every removal that is still failing.
+    pub fn recover_pending_removals(&self) -> Result<(), String> {
+        let keys = self
+            .state
+            .store
+            .lock()
+            .list_setting_keys_with_prefix(USER_REMOVAL_PREFIX)
+            .map_err(|e| e.to_string())?;
+        let mut failures = Vec::new();
+        for key in keys {
+            let user_id_str = key.trim_start_matches(USER_REMOVAL_PREFIX);
+            let Ok(uid) = UserId::from_str(user_id_str) else {
+                failures.push(format!("{key}: invalid user id"));
+                continue;
+            };
+            let record = match read_record(&self.state.store.lock(), uid) {
+                Ok(Some(record)) => record,
+                Ok(None) => continue,
+                Err(error) => {
+                    failures.push(format!("{uid}: {error}"));
+                    continue;
+                }
+            };
+            tracing::warn!(user_id = %uid, operation_id = %record.operation_id, phase = %record.phase, "Recovering pending user removal");
+            if let Err(error) = self.drive(uid, record) {
+                failures.push(format!("{uid}: {error}"));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
+    }
+}
+
+fn record_key(user_id: UserId) -> String {
+    format!("{USER_REMOVAL_PREFIX}{user_id}")
+}
+
+fn read_record(
+    store: &store::Store,
+    user_id: UserId,
+) -> Result<Option<UserRemovalRecord>, String> {
+    let Some(raw) = store
+        .get_setting(&record_key(user_id))
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(None);
+    };
+    serde_json::from_str(&raw)
+        .map(Some)
+        .map_err(|e| format!("user removal record for {user_id} is unreadable: {e}"))
+}
+
+fn write_record(
+    store: &store::Store,
+    user_id: UserId,
+    record: &UserRemovalRecord,
+) -> Result<(), String> {
+    let json = serde_json::to_string(record).map_err(|e| e.to_string())?;
+    store
+        .put_setting(&record_key(user_id), &json)
+        .map_err(|e| e.to_string())
+}
+
+/// Run one idempotent phase; returns the next phase, or `None` when finished.
+fn run_phase(
+    store: &store::Store,
+    user_id: UserId,
+    phase: &str,
+) -> Result<Option<&'static str>, String> {
+    let admin_id = store.admin_user_id().map_err(|e| e.to_string())?;
+    match phase {
+        "disabling" => {
+            // The User may already be gone if a previous run finished the last phase.
+            if let Some(mut user) = store.get_user(user_id).map_err(|e| e.to_string())? {
+                user.enabled = false;
+                store.save_user(&user).map_err(|e| e.to_string())?;
+            }
+            store.revoke_user_tokens(user_id).map_err(|e| e.to_string())?;
+            Ok(Some("cleaning"))
+        }
+        "cleaning" => {
+            store
+                .transfer_user_subscribes(user_id, admin_id)
+                .map_err(|e| e.to_string())?;
+            store
+                .clean_user_library_data(user_id, admin_id)
+                .map_err(|e| e.to_string())?;
+            Ok(Some("finalizing"))
+        }
+        "finalizing" => {
+            // Idempotent: a User already deleted by an interrupted run is not an error.
+            store.finish_user_removal(user_id).map_err(|e| e.to_string())?;
+            Ok(None)
+        }
+        other => Err(format!("unknown user removal phase {other}")),
     }
 }
