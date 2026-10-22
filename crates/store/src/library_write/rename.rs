@@ -102,6 +102,12 @@ impl Store {
                 "file {id} changed during rename"
             )));
         }
+        super::rename_playback::carry_resume_bindings(
+            &tx,
+            &id,
+            owned.revision,
+            &owned.source_version,
+        )?;
         let library_id: LibraryId = owned.library_id.parse()?;
         reduce_library_media(&tx, library_id, media_id)?;
         tx.commit()?;

@@ -179,7 +179,7 @@ impl Store {
                     params![id],
                     |r| r.get(0),
                 )?;
-                if path == to_str {
+                if path == crate::path_key::normalize_path_key(&to_str) {
                     tx.execute(
                         "DELETE FROM pending_file_renames WHERE rename_id = ?1",
                         params![rename_id],
@@ -219,6 +219,12 @@ impl Store {
                 "file {id} changed during rename publish"
             )));
         }
+        super::rename_playback::carry_resume_bindings(
+            &tx,
+            &id,
+            owned.revision,
+            &owned.source_version,
+        )?;
         // Coverage rows carry composite FK (file_id, library_id, media_id).
         tx.execute(
             "UPDATE library_file_units SET library_id = ?2 WHERE file_id = ?1",
