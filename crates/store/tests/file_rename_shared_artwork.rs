@@ -150,3 +150,93 @@ fn same_directory_rename_leaves_directory_artwork_alone() {
     fx.store.complete_file_rename(&req.rename_id, 3).unwrap();
     assert!(src.join("poster.jpg").is_file());
 }
+
+#[test]
+fn sharing_is_rechecked_when_bytes_move() {
+    let fx = fixture();
+    let src = fx.a.join("Show");
+    let moved = episode(&fx, &src, 1);
+    std::fs::write(src.join("poster.jpg"), b"poster").unwrap();
+    let to = fx.b.join("Show").join("S01E01.mkv");
+    let req = begin(&fx, &moved, &to);
+    // A sibling is published after the intent was planned as a sole-owner move.
+    episode(&fx, &src, 2);
+    fx.store.apply_file_rename_disk(&req.rename_id, 2).unwrap();
+    fx.store.complete_file_rename(&req.rename_id, 3).unwrap();
+    assert!(
+        src.join("poster.jpg").is_file(),
+        "late sibling keeps the shared poster"
+    );
+    assert!(fx.b.join("Show/poster.jpg").is_file());
+}
+
+#[test]
+fn non_standard_artwork_names_follow_the_same_ownership_rules() {
+    let fx = fixture();
+    let src = fx.a.join("Show");
+    let file = episode(&fx, &src, 1);
+    for name in [
+        "season01-poster.jpg",
+        "show-fanart.png",
+        "season-specials-banner.jpg",
+        "S01E01-thumb.jpg",
+    ] {
+        std::fs::write(src.join(name), name).unwrap();
+    }
+    std::fs::write(src.join("notes.txt"), b"not artwork").unwrap();
+    let to = fx.b.join("Show").join("S01E01.mkv");
+    let req = begin(&fx, &file, &to);
+    fx.store.apply_file_rename_disk(&req.rename_id, 2).unwrap();
+    fx.store.complete_file_rename(&req.rename_id, 3).unwrap();
+    for name in [
+        "season01-poster.jpg",
+        "show-fanart.png",
+        "season-specials-banner.jpg",
+        "S01E01-thumb.jpg",
+    ] {
+        assert!(
+            fx.b.join("Show").join(name).is_file(),
+            "{name} follows its sole owner"
+        );
+        assert!(!src.join(name).exists(), "{name} moved");
+    }
+    assert!(
+        src.join("notes.txt").is_file(),
+        "non-artwork is never touched"
+    );
+}
+
+#[test]
+fn destination_artwork_conflict_policy_is_explicit() {
+    let fx = fixture();
+    let src = fx.a.join("Show");
+    let file = episode(&fx, &src, 1);
+    std::fs::write(src.join("poster.jpg"), b"source").unwrap();
+    std::fs::write(src.join("fanart.jpg"), b"same").unwrap();
+    let dest = fx.b.join("Show");
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("poster.jpg"), b"destination").unwrap();
+    std::fs::write(dest.join("fanart.jpg"), b"same").unwrap();
+    let req = begin(&fx, &file, &dest.join("S01E01.mkv"));
+    fx.store.apply_file_rename_disk(&req.rename_id, 2).unwrap();
+    fx.store.complete_file_rename(&req.rename_id, 3).unwrap();
+    assert_eq!(
+        std::fs::read(dest.join("poster.jpg")).unwrap(),
+        b"destination",
+        "destination wins"
+    );
+    assert_eq!(
+        std::fs::read(src.join("poster.jpg")).unwrap(),
+        b"source",
+        "differing source kept"
+    );
+    let queued = fx.store.list_pending_file_deletions().unwrap();
+    assert!(
+        !queued.iter().any(|p| p.ends_with("a/Show/poster.jpg")),
+        "{queued:?}"
+    );
+    assert!(
+        queued.iter().any(|p| p.ends_with("a/Show/fanart.jpg")) || !src.join("fanart.jpg").exists(),
+        "identical source counts as moved: {queued:?}"
+    );
+}

@@ -101,12 +101,14 @@ fn durable_same_root_rename_moves_sidecar_and_survives_crash_after_disk() {
     store::library_write::move_rename_bytes(&req).unwrap();
     assert!(to.is_file());
     assert!(!fx.file.path.is_file());
-    assert!(fx.a.join("Renamed.2000.nfo").is_file());
+    // Sidecars move only in the locked phase, after the ownership re-check.
+    assert!(fx.a.join("M.2000.nfo").is_file());
     // Crash window: disk done, ledger still at from. Resume finishes.
     assert_eq!(recorded(&fx.store, fx.file.file_id).path, fx.file.path);
     assert_eq!(fx.store.resume_pending_file_renames(2).unwrap(), 1);
     let after = recorded(&fx.store, fx.file.file_id);
     assert_eq!(after.path, to);
+    assert!(fx.a.join("Renamed.2000.nfo").is_file());
     assert!(fx.store.list_pending_file_rename_ids().unwrap().is_empty());
 }
 

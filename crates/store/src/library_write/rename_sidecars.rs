@@ -20,26 +20,44 @@ pub enum SidecarMode {
     Copy,
 }
 
-/// Directory artwork names media servers read from a video's folder.
-const DIRECTORY_ARTWORK: &[&str] = &[
-    "poster.jpg",
-    "poster.png",
-    "folder.jpg",
-    "folder.png",
-    "cover.jpg",
-    "fanart.jpg",
-    "fanart.png",
-    "backdrop.jpg",
-    "banner.jpg",
-    "landscape.jpg",
-    "thumb.jpg",
-    "clearlogo.png",
-    "logo.png",
-    "clearart.png",
-    "disc.png",
+/// Artwork kinds media servers read from a video's folder (`poster.jpg`) or as a
+/// prefixed variant (`season01-poster.jpg`, `show-fanart.png`, `<stem>-thumb.jpg`).
+const ARTWORK_KINDS: &[&str] = &[
+    "poster",
+    "folder",
+    "cover",
+    "fanart",
+    "backdrop",
+    "banner",
+    "landscape",
+    "thumb",
+    "clearlogo",
+    "logo",
+    "clearart",
+    "disc",
+    "discart",
+    "keyart",
 ];
+const ARTWORK_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif", "tbn"];
 
-/// Lock-free observation: directory artwork beside `from` when the video changes folder.
+fn is_artwork_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let Some((stem, ext)) = lower.rsplit_once('.') else {
+        return false;
+    };
+    if !ARTWORK_EXTS.contains(&ext) {
+        return false;
+    }
+    ARTWORK_KINDS.iter().any(|kind| {
+        stem == *kind
+            || stem
+                .strip_suffix(kind)
+                .is_some_and(|prefix| prefix.ends_with('-') && prefix.len() > 1)
+    })
+}
+
+/// Lock-free observation (one `read_dir`): artwork beside `from` when the video
+/// changes folder. Names prefixed with the video stem are renamed to the new stem.
 pub(crate) fn observe_directory_artwork(from: &Path, to: &Path, out: &mut Vec<RenameSidecar>) {
     let (Some(from_dir), Some(to_dir)) = (from.parent(), to.parent()) else {
         return;
@@ -47,17 +65,66 @@ pub(crate) fn observe_directory_artwork(from: &Path, to: &Path, out: &mut Vec<Re
     if from_dir == to_dir {
         return;
     }
-    for name in DIRECTORY_ARTWORK {
-        let source = from_dir.join(name);
-        if source.is_file() && !out.iter().any(|s| s.from == source) {
-            out.push(RenameSidecar {
-                kind: "artwork".into(),
-                from: source,
-                to: to_dir.join(name),
-                mode: SidecarMode::Move,
-            });
+    let from_stem = from.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let to_stem = to.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let Ok(entries) = std::fs::read_dir(from_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let source = from_dir.join(&name);
+        if !is_artwork_name(&name) || !source.is_file() || out.iter().any(|s| s.from == source) {
+            continue;
+        }
+        let target_name = match name.strip_prefix(from_stem) {
+            Some(rest) if !from_stem.is_empty() => format!("{to_stem}{rest}"),
+            _ => name.clone(),
+        };
+        out.push(RenameSidecar {
+            kind: "artwork".into(),
+            from: source,
+            to: to_dir.join(target_name),
+            mode: SidecarMode::Move,
+        });
+    }
+}
+
+/// Execution-time re-check, run under the Store lock immediately before sidecar
+/// bytes move: sharing is classified again (a file published after `begin` makes a
+/// planned move a copy), and the destination-exists policy is applied:
+/// - destination absent: move (sole owner) or copy (shared);
+/// - destination present with identical bytes: nothing to write; a sole-owned
+///   source counts as moved and is queued for deletion at completion;
+/// - destination present with different bytes: the destination wins and the source
+///   is kept (never overwritten, never deleted).
+pub(crate) fn recheck_for_execution(
+    tx: &Connection,
+    file_id: &str,
+    from_video: &Path,
+    sidecars: &mut [RenameSidecar],
+) -> Result<(), StoreError> {
+    classify_shared_sidecars(tx, file_id, from_video, sidecars)?;
+    for side in sidecars.iter_mut() {
+        if side.mode == SidecarMode::Move
+            && side.from.is_file()
+            && side.to.is_file()
+            && !same_bytes(&side.from, &side.to)
+        {
+            tracing::warn!(from = %side.from.display(), to = %side.to.display(),
+                "destination artwork differs; keeping both, destination wins");
+            side.mode = SidecarMode::Copy;
         }
     }
+    Ok(())
+}
+
+fn same_bytes(a: &Path, b: &Path) -> bool {
+    let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    ma.len() == mb.len() && std::fs::read(a).ok() == std::fs::read(b).ok()
 }
 
 /// In the `begin` transaction: directory-level sidecars still used by another

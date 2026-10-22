@@ -16,7 +16,9 @@ use super::publish::{ensure_library_writable, ensure_media_writable};
 use super::reduce::reduce_library_media;
 use super::rename::{Owned, load_owned};
 pub use super::rename_sidecars::SidecarMode;
-use super::rename_sidecars::{apply_sidecar, classify_shared_sidecars, observe_directory_artwork};
+use super::rename_sidecars::{
+    apply_sidecar, classify_shared_sidecars, observe_directory_artwork, recheck_for_execution,
+};
 use crate::library_paths::resolved_path;
 use crate::pending_file_deletions::file_identity;
 use crate::{Store, StoreError};
@@ -143,6 +145,24 @@ impl Store {
             return Ok(());
         }
         move_rename_bytes(&request)?;
+        // Sidecars move here, under the Store lock, after re-checking ownership so a
+        // file published since `begin` cannot lose shared artwork.
+        let mut sidecars = request.sidecars.clone();
+        let tx = self.library.unchecked_transaction()?;
+        recheck_for_execution(
+            &tx,
+            &request.file_id.to_string(),
+            &request.from_path,
+            &mut sidecars,
+        )?;
+        let sidecars_json = serde_json::to_string(&sidecars)
+            .map_err(|e| StoreError::Invalid(format!("sidecars json: {e}")))?;
+        tx.execute(
+            "UPDATE pending_file_renames SET sidecars_json = ?2 WHERE rename_id = ?1",
+            params![rename_id, sidecars_json],
+        )?;
+        tx.commit()?;
+        apply_sidecar_moves(&sidecars)?;
         self.mark_rename_disk_applied(rename_id, now)?;
         Ok(())
     }
@@ -460,14 +480,14 @@ fn observe_sidecars(from: &Path, to: &Path) -> Vec<RenameSidecar> {
     out
 }
 
-/// Lock-free disk phase: move the video and every recorded sidecar.
+/// Lock-free disk phase: move the video only. Sidecars move in
+/// [`Store::apply_file_rename_disk`] after an execution-time ownership re-check.
 pub fn move_rename_bytes(request: &FileRenameRequest) -> Result<(), StoreError> {
     let from = &request.from_path;
     let to = &request.to_path;
     let from_exists = from.is_file();
     let to_exists = to.exists();
     if !from_exists && to_exists {
-        apply_sidecar_moves(&request.sidecars)?;
         return Ok(());
     }
     if !from_exists && !to_exists {
@@ -490,7 +510,6 @@ pub fn move_rename_bytes(request: &FileRenameRequest) -> Result<(), StoreError> 
         std::fs::create_dir_all(parent)?;
     }
     std::fs::rename(from, to)?;
-    apply_sidecar_moves(&request.sidecars)?;
     Ok(())
 }
 
