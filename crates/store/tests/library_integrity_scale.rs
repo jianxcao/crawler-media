@@ -82,6 +82,9 @@ fn seed(store: &Store, n: usize) -> LibraryId {
         if files.len() == 100 {
             publish(store, library_id, &files);
             files.clear();
+            if (n + 1) % 5000 == 0 {
+                eprintln!("seed progress: {} Media", n + 1);
+            }
         }
     }
     publish(store, library_id, &files);
@@ -102,6 +105,7 @@ fn publish(store: &Store, library_id: LibraryId, files: &[LibraryFile]) {
             probe_required: false,
         })
         .collect();
+    let t = Instant::now();
     store
         .publish_files(
             &WriteScope {
@@ -112,6 +116,9 @@ fn publish(store: &Store, library_id: LibraryId, files: &[LibraryFile]) {
             1000,
         )
         .unwrap();
+    if std::env::var_os("INTEGRITY_SCALE_TRACE").is_some() {
+        eprintln!("publish {} files: {:?}", files.len(), t.elapsed());
+    }
 }
 
 #[test]
@@ -149,6 +156,12 @@ fn integrity_checker_batches_stay_bounded_at_scale() {
         last_ten.push_back(took);
         if last_ten.len() > 10 {
             last_ten.pop_front();
+        }
+        if batches % 100 == 0 {
+            eprintln!(
+                "batch {batches}: {took:?} (elapsed {:?})",
+                started.elapsed()
+            );
         }
         if status.state != "applying" {
             assert_eq!(status.state, "succeeded");

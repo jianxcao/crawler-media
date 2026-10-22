@@ -289,7 +289,7 @@ fn unit_preferred_query(
              JOIN library_files f ON f.file_id = u.file_id
              WHERE f.library_id = ?1 AND f.media_id = ?2
                AND u.season = ?3 AND u.episode = ?4
-               AND f.publication_state = 'published' AND f.presence_state = 'present'
+               AND f.publication_state = 'published' AND +f.presence_state = 'present'
              ORDER BY f.file_revision DESC, f.file_id ASC
              LIMIT 1",
             params![lib, media, season, episode],

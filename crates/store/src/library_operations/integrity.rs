@@ -337,14 +337,21 @@ fn next_media_page(
     batch: usize,
 ) -> Result<(Vec<String>, bool), StoreError> {
     let mut stmt = tx.prepare(
+        // Each arm walks its `(library_id, media_id, ...)` index from the cursor and stops
+        // after one page, so a page costs O(batch) rather than a whole-Library union.
         "SELECT media_id FROM (
-             SELECT media_id FROM library_files
-              WHERE library_id = ?1 AND publication_state = 'published'
-             UNION SELECT media_id FROM library_items WHERE library_id = ?1
-             UNION SELECT media_id FROM library_units WHERE library_id = ?1
-             UNION SELECT media_id FROM library_item_terms WHERE library_id = ?1
-             UNION SELECT media_id FROM user_library_items WHERE library_id = ?1)
-         WHERE ?2 IS NULL OR media_id > ?2
+             SELECT * FROM (SELECT DISTINCT media_id FROM library_files
+              WHERE library_id = ?1 AND media_id > coalesce(?2, '')
+                AND publication_state = 'published'
+              ORDER BY media_id LIMIT ?3)
+             UNION SELECT * FROM (SELECT DISTINCT media_id FROM library_items
+              WHERE library_id = ?1 AND media_id > coalesce(?2, '') ORDER BY media_id LIMIT ?3)
+             UNION SELECT * FROM (SELECT DISTINCT media_id FROM library_units
+              WHERE library_id = ?1 AND media_id > coalesce(?2, '') ORDER BY media_id LIMIT ?3)
+             UNION SELECT * FROM (SELECT DISTINCT media_id FROM library_item_terms
+              WHERE library_id = ?1 AND media_id > coalesce(?2, '') ORDER BY media_id LIMIT ?3)
+             UNION SELECT * FROM (SELECT DISTINCT media_id FROM user_library_items
+              WHERE library_id = ?1 AND media_id > coalesce(?2, '') ORDER BY media_id LIMIT ?3))
          ORDER BY media_id LIMIT ?3",
     )?;
     let mut ids = stmt

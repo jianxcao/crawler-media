@@ -217,7 +217,7 @@ fn rebuild_units(tx: &Connection, lib: &str, media: &str) -> Result<(i64, i64), 
                  WHERE f2.library_id = ?1 AND f2.media_id = ?2
                    AND u2.season = g.season AND u2.episode = g.episode
                    AND f2.publication_state = 'published'
-                   AND f2.presence_state = 'present'
+                   AND +f2.presence_state = 'present'
                  ORDER BY f2.file_revision DESC, f2.file_id ASC
                  LIMIT 1),
                 '{}', 1

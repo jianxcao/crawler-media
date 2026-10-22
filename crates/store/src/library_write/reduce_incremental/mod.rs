@@ -478,7 +478,7 @@ fn preferred_query(tx: &Connection, lib: &str, media: &str) -> Result<Option<Str
         .query_row(
             "SELECT file_id FROM library_files
              WHERE library_id = ?1 AND media_id = ?2
-               AND publication_state = 'published' AND presence_state = 'present'
+               AND publication_state = 'published' AND +presence_state = 'present'
              ORDER BY file_revision DESC, file_id ASC
              LIMIT 1",
             params![lib, media],
