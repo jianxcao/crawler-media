@@ -122,3 +122,4 @@ deferred_snapshot_write_error: SQLITE_BUSY_SNAPSHOT
 | A3 | done: store write_tx (IMMEDIATE) for all write txs, jobs IMMEDIATE, cache init under IMMEDIATE + WAL switch retry; tests write_transaction_contention, cache_writer_contention |
 | A3 | verified: media+jobs+api 1674 pass/0 fail; fanart shared cache 96579b9 |
 | A4 | Fixed: scoped marks via mutate_playback, favorite_at seconds clock, marks never move activity; tests playback_assertions + api playback_clock |
+| A5 | Fixed: duration reused only on same file/revision/source_version/full_file; one duration drives completion+play_count; tests playback_event_duration |

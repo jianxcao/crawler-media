@@ -98,9 +98,11 @@ impl Store {
             return Ok(EventOutcome::IgnoredStale);
         }
 
-        write_unit_facts(self, &tx, event, media_id, unit, now_ms)?;
+        let previous = super::event_duration::read_event_resume(&tx, event, media_id, unit)?;
+        let duration = super::event_duration::effective_event_duration(event, previous.as_ref());
+        write_unit_facts(self, &tx, event, media_id, unit, duration, now_ms)?;
         if event.event_type == PlaybackEventType::Stopped {
-            bump_play_count_for_completed_stop(self, &tx, event, media_id, unit)?;
+            bump_play_count_for_completed_stop(&tx, event, media_id, unit, duration)?;
         }
         advance_session_state(self, &tx, event, &binding, now_ms)?;
 
@@ -167,7 +169,9 @@ fn stage_unbound_event(
         session_id = %event.session_id,
         "unbound playback event: writing unit facts only"
     );
-    write_unit_facts(store, tx, event, media_id, unit, now_ms)?;
+    let previous = super::event_duration::read_event_resume(tx, event, media_id, unit)?;
+    let duration = super::event_duration::effective_event_duration(event, previous.as_ref());
+    write_unit_facts(store, tx, event, media_id, unit, duration, now_ms)?;
     store.refresh_user_library_summary(
         event.user_id,
         media_id,
@@ -224,16 +228,12 @@ fn archive_admin_ended_session(
 
 /// A completed stop is the only event that counts as one play.
 fn bump_play_count_for_completed_stop(
-    store: &Store,
     tx: &Transaction<'_>,
     event: &BoundPlaybackEvent,
     media_id: MediaId,
     unit: UnitKey,
+    duration: Option<i64>,
 ) -> Result<(), StoreError> {
-    let previous_unit = store.unit_state(event.user_id, media_id, unit.season, unit.episode)?;
-    let duration = event
-        .duration_ms
-        .or(previous_unit.as_ref().and_then(|u| u.duration_ms));
     if UnitState::playback_completed(event.position_ms, duration) {
         tx.execute(
             "UPDATE playback_units SET play_count = play_count + 1 WHERE user_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4",
@@ -379,14 +379,12 @@ fn write_unit_facts(
     event: &BoundPlaybackEvent,
     media_id: MediaId,
     unit: UnitKey,
+    duration: Option<i64>,
     now_ms: i64,
 ) -> Result<(), StoreError> {
     let tracks_version = store.file_tracks_version(event.source_id.file_id)?;
-    let played_threshold = event
-        .duration_ms
-        .map(|d| (d as f64 * 0.9) as i64)
-        .unwrap_or(i64::MAX);
-    let reached_played = event.position_ms >= played_threshold;
+    // One duration decides both the stored package and completion (C06).
+    let reached_played = UnitState::playback_completed(event.position_ms, duration);
 
     tx.execute(
         "INSERT INTO playback_units
@@ -421,7 +419,7 @@ fn write_unit_facts(
             if reached_played { 1 } else { 0 },
             now_ms,
             event.position_ms,
-            event.duration_ms,
+            duration,
             event.source_id.file_id.to_string(),
             event.source_id.revision,
             event.source_version,
