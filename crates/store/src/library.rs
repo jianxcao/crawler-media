@@ -4,7 +4,10 @@ use domain::{Confidence, MediaKind};
 use rusqlite::{OptionalExtension, params};
 
 pub mod markers;
-pub use markers::{MarkerResultReplacement, StoredMediaMarker};
+pub use markers::{
+    MarkerResultReplacement, SourceObservation, SourceSnapshot, StoredMediaMarker, observe_sources,
+    observe_sources_with,
+};
 
 pub(super) const CURRENT_TRACKS_VERSION: i64 = 1;
 const SETTING_TRANSFER_MODE: &str = "transfer_mode";

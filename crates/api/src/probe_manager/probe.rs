@@ -279,15 +279,18 @@ async fn probe_adaptive_season(
             Ok(replacement) => {
                 let chapter_updates_clone = replacement.chapter_updates.clone();
                 let markers_len = replacement.markers.len();
-                let publication = {
+                let members =
+                    super::markers::source_observations(mgr, std::slice::from_ref(&replacement));
+                let publication = members.and_then(|members| {
                     let store = mgr.store.lock();
                     let rows = season_units
                         .iter()
                         .map(|unit| unit.row.clone())
                         .collect::<Vec<_>>();
-                    super::markers::validate_publication_rows(&store, &rows)
-                        .and_then(|()| store.replace_marker_results_batch_checked(&[replacement]))
-                };
+                    super::markers::validate_publication_rows(&store, &rows).and_then(|()| {
+                        store.replace_marker_results_batch_checked(&[replacement], &members)
+                    })
+                });
                 if let Err(e) = publication {
                     if matches!(&e, crate::store::StoreError::Missing(reason) if crate::fingerprint_job::source::is_file_deleted(reason))
                     {
@@ -434,8 +437,11 @@ async fn probe_tracks_and_store(
     };
     let (tracks, duration_ms) = tracks;
     let published = {
+        if crate::fingerprint_job::source::observe_source(&unit.row).is_err() {
+            return Err(());
+        }
         let store = mgr.store.lock();
-        if crate::fingerprint_job::source::ensure_source_available(&store, &unit.row).is_err() {
+        if crate::fingerprint_job::source::ensure_source_recorded(&store, &unit.row).is_err() {
             return Err(());
         }
         publish_probe_tracks(&store, unit, &source_version, &tracks, duration_ms)
@@ -652,11 +658,12 @@ pub(super) async fn probe_fingerprint_and_store_detailed(
             };
         }
     };
-    let publication = {
-        let store = mgr.store.lock();
-        super::markers::validate_publication_rows(&store, std::slice::from_ref(&unit.row))
-            .and_then(|()| store.put_fingerprint_cache(&ledger_id, &outcome.cache))
-    };
+    let publication =
+        super::markers::observe_rows(std::slice::from_ref(&unit.row)).and_then(|()| {
+            let store = mgr.store.lock();
+            super::markers::validate_publication_rows(&store, std::slice::from_ref(&unit.row))
+                .and_then(|()| store.put_fingerprint_cache(&ledger_id, &outcome.cache))
+        });
     if let Err(error) = publication {
         if matches!(&error, crate::store::StoreError::Missing(reason) if crate::fingerprint_job::source::is_file_deleted(reason))
         {

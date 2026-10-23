@@ -91,10 +91,8 @@ pub async fn run_adaptive_season_pipeline(
     // 1. 种子单元优先处理，边采集边建模；2. 其余单元用已有模板验证。
     let mut state = SeasonPipelineState::default();
     for unit in order_seed_units_first(units, &seed_set) {
-        let availability = crate::fingerprint_job::source::ensure_source_available(
-            &pipeline.mgr.store.lock(),
-            &unit.row,
-        );
+        let availability =
+            crate::fingerprint_job::source::ensure_source_available(&pipeline.mgr.store, &unit.row);
         if let Err(error) = availability {
             if !crate::fingerprint_job::source::is_file_deleted(&error) {
                 return Err(error);
@@ -146,10 +144,8 @@ fn ensure_season_sources(pipeline: &SeasonPipeline<'_>, units: &[ProbeUnit]) -> 
         if pipeline.ctx.gate.work_control(&unit.row).is_cancelled() {
             return Err("Library probe source cancelled or changed".into());
         }
-        let availability = crate::fingerprint_job::source::ensure_source_available(
-            &pipeline.mgr.store.lock(),
-            &unit.row,
-        );
+        let availability =
+            crate::fingerprint_job::source::ensure_source_available(&pipeline.mgr.store, &unit.row);
         if let Err(error) = availability {
             if crate::fingerprint_job::source::is_file_deleted(&error) {
                 pipeline.mgr.cancel_unit(unit, "file_deleted");

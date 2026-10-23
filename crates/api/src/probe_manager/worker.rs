@@ -309,7 +309,7 @@ pub(super) fn source_ready(manager: &ProbeManager, unit: &ProbeUnit) -> bool {
         }
     }
     let availability =
-        crate::fingerprint_job::source::ensure_source_available(&manager.store.lock(), &unit.row);
+        crate::fingerprint_job::source::ensure_source_available(&manager.store, &unit.row);
     match availability {
         Ok(()) => true,
         Err(error) if crate::fingerprint_job::source::is_file_deleted(&error) => {

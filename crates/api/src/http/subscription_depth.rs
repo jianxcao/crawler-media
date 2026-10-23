@@ -534,7 +534,7 @@ pub(crate) async fn removal_preview(
         .collect();
     let bytes: u64 = files
         .iter()
-        .map(|coverage| row_bytes(&coverage.file.path))
+        .map(|coverage| coverage.file.size_bytes.unwrap_or(0))
         .sum();
     // In-flight torrents this Subscribe is still waiting on.
     let pending = store.load_pending(subscribe.id).unwrap_or_default();
@@ -584,10 +584,6 @@ pub(crate) async fn removal_preview(
         "torrent_titles": torrent_titles,
     }))
     .into_response()
-}
-
-fn row_bytes(path: &std::path::Path) -> u64 {
-    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
 #[derive(Deserialize)]

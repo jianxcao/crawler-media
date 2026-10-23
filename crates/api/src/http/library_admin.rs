@@ -35,6 +35,7 @@ pub(crate) async fn list_ledger(State(state): State<ApiState>) -> Response {
         }
     };
     let mut items: Vec<Value> = Vec::new();
+    let mut pending = Vec::with_capacity(rows_with_mode.len());
     for coverage in rows_with_mode {
         let file = coverage.file;
         let media = store.get_media(file.media_id).ok().flatten();
@@ -43,8 +44,6 @@ pub(crate) async fn list_ledger(State(state): State<ApiState>) -> Response {
         });
         let title = media.as_ref().map(|m| m.title.clone()).unwrap_or_default();
         let kind = media.as_ref().map(|m| m.kind.as_str()).unwrap_or("movie");
-        let meta = std::fs::metadata(&file.path).ok();
-        let file_size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
         let is_strm = file
             .path
             .extension()
@@ -55,25 +54,12 @@ pub(crate) async fn list_ledger(State(state): State<ApiState>) -> Response {
             .source_path
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned());
-        let saved_mode = file.transfer_mode.clone();
-
-        #[cfg(unix)]
-        let is_hardlink = {
-            use std::os::unix::fs::MetadataExt;
-            meta.as_ref().map(|m| m.nlink() > 1).unwrap_or(false)
-        };
-        #[cfg(not(unix))]
-        let is_hardlink =
-            saved_mode.as_deref() == Some("hardlink") || global_transfer_mode == "hardlink";
-
-        let mode_str = if is_strm {
-            "strm".to_string()
-        } else if is_hardlink {
-            "hardlink".to_string()
-        } else {
-            saved_mode.unwrap_or_else(|| global_transfer_mode.clone())
-        };
-
+        pending.push((
+            file.path.clone(),
+            is_strm,
+            file.transfer_mode.clone(),
+            file.size_bytes,
+        ));
         items.push(json!({
             "id": file.file_id.to_string(),
             "media_id": file.media_id.to_string(),
@@ -89,12 +75,52 @@ pub(crate) async fn list_ledger(State(state): State<ApiState>) -> Response {
             "quality_source": file.quality_source.as_str(),
             "confidence": file.confidence.as_str(),
             "filter_score": file.filter_score,
-            "transfer_mode": mode_str,
-            "file_size": file_size,
         }));
+    }
+    drop(store);
+    // Disk observation (hardlink count, unknown sizes) runs after the store lock is released.
+    for (item, (path, is_strm, saved_mode, size_bytes)) in items.iter_mut().zip(pending) {
+        let meta = (!is_strm || size_bytes.is_none())
+            .then(|| std::fs::metadata(&path).ok())
+            .flatten();
+        let file_size = size_bytes
+            .or_else(|| meta.as_ref().map(|m| m.len()))
+            .unwrap_or(0);
+        item["transfer_mode"] = json!(transfer_mode_label(
+            is_strm,
+            meta.as_ref(),
+            saved_mode,
+            &global_transfer_mode
+        ));
+        item["file_size"] = json!(file_size);
     }
     ok_list(items).into_response()
 }
+fn transfer_mode_label(
+    is_strm: bool,
+    meta: Option<&std::fs::Metadata>,
+    saved_mode: Option<String>,
+    global_transfer_mode: &str,
+) -> String {
+    #[cfg(unix)]
+    let is_hardlink = {
+        use std::os::unix::fs::MetadataExt;
+        meta.is_some_and(|m| m.nlink() > 1)
+    };
+    #[cfg(not(unix))]
+    let is_hardlink = {
+        let _ = meta;
+        saved_mode.as_deref() == Some("hardlink") || global_transfer_mode == "hardlink"
+    };
+    if is_strm {
+        "strm".to_string()
+    } else if is_hardlink {
+        "hardlink".to_string()
+    } else {
+        saved_mode.unwrap_or_else(|| global_transfer_mode.to_string())
+    }
+}
+
 #[derive(serde::Deserialize)]
 pub(crate) struct DeleteLedgerQuery {
     delete_file: Option<bool>,
@@ -243,12 +269,21 @@ pub(crate) async fn list_unidentified(
             "library_id": lib_id,
             "library_name": lib_name,
             "file_count": 1,
-            "total_size_bytes": std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
+            "total_size_bytes": 0,
             "files": [{
                 "file_id": path.clone(),
                 "file_path": path,
             }],
         }));
+    }
+    drop(store);
+    // Unidentified rows have no persisted size; stat them after releasing the store lock.
+    for item in &mut items {
+        let size = item["path"]
+            .as_str()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map_or(0, |m| m.len());
+        item["total_size_bytes"] = json!(size);
     }
     ok_list(items).into_response()
 }

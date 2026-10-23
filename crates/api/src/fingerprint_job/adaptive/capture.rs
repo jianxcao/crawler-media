@@ -10,7 +10,9 @@ use uuid::Uuid;
 use super::cache::{find_reusable_sample, stored_sample_to_evidence};
 use super::types::{AdaptiveCaptureContext, EpisodeCaptureRequest};
 use crate::fingerprint_job::episode_or_one;
-use crate::fingerprint_job::source::{ensure_source_available, is_file_deleted};
+use crate::fingerprint_job::source::{
+    ensure_source_available, ensure_source_recorded, is_file_deleted, observe_source,
+};
 
 pub async fn capture_or_reuse_segment_sample(
     ctx: &AdaptiveCaptureContext,
@@ -21,9 +23,10 @@ pub async fn capture_or_reuse_segment_sample(
     attempt_count: &mut usize,
     max_budget: usize,
 ) -> Result<EpisodeEvidence, String> {
+    observe_source(&request.row)?;
     {
         let store = ctx.store.lock();
-        ensure_source_available(&store, &request.row)?;
+        ensure_source_recorded(&store, &request.row)?;
         if let Some(cached) = find_reusable_sample(&store, request, kind, window) {
             if let Some(timings) = &ctx.timings {
                 match kind {
@@ -45,7 +48,7 @@ pub async fn capture_or_reuse_segment_sample(
     *attempt_count += 1;
     let mut attempt = begin_attempt(ctx, request, kind, window, phase)?;
     ctx.gate.wait_before_capture().await;
-    let availability = ensure_source_available(&ctx.store.lock(), &request.row);
+    let availability = ensure_source_available(&ctx.store, &request.row);
     if let Err(error) = availability {
         return finish_error(ctx, request, &mut attempt, error);
     }
@@ -62,7 +65,7 @@ pub async fn capture_or_reuse_segment_sample(
     })
     .await;
     // Recheck even when FFmpeg returned an error: a deletion is cancellation, not a retry.
-    let availability = ensure_source_available(&ctx.store.lock(), &request.row);
+    let availability = ensure_source_available(&ctx.store, &request.row);
     if let Err(error) = availability {
         return finish_error(ctx, request, &mut attempt, error);
     }
@@ -174,9 +177,9 @@ fn finish_capture(
     attempt.finished_at_ms = Some(sample.captured_at_ms);
     attempt.status = "succeeded".into();
     attempt.metrics_json = metrics_json;
-    let persisted = {
+    let persisted = observe_source(&request.row).and_then(|()| {
         let store = ctx.store.lock();
-        ensure_source_available(&store, &request.row).and_then(|()| {
+        ensure_source_recorded(&store, &request.row).and_then(|()| {
             store
                 .complete_fingerprint_attempt_for_source(
                     &attempt,
@@ -192,7 +195,7 @@ fn finish_capture(
                     }
                 })
         })
-    };
+    });
     if let Err(error) = persisted {
         return finish_error(ctx, request, &mut attempt, error);
     }

@@ -100,7 +100,10 @@ fn checked_publication_rejects_file_only_deletion_and_keeps_previous_result() {
     std::fs::remove_file(&row.path).unwrap();
     assert!(
         store
-            .replace_marker_results_batch_checked(std::slice::from_ref(&replacement))
+            .replace_marker_results_batch_checked(
+                std::slice::from_ref(&replacement),
+                &observed(&store, std::slice::from_ref(&replacement))
+            )
             .is_err()
     );
     assert_eq!(
@@ -120,7 +123,10 @@ fn checked_publication_rejects_file_only_deletion_and_keeps_previous_result() {
     // A valid source still commits markers and chapters together.
     std::fs::write(&row.path, b"restored").unwrap();
     store
-        .replace_marker_results_batch_checked(&[replacement])
+        .replace_marker_results_batch_checked(
+            std::slice::from_ref(&replacement),
+            &observed(&store, std::slice::from_ref(&replacement)),
+        )
         .unwrap();
     assert_eq!(
         store
@@ -289,7 +295,11 @@ fn refresh_cannot_publish_a_snapshot_that_omits_a_deleted_job_member() {
     };
     assert!(
         store
-            .complete_marker_refresh_checked("job", &[replacement])
+            .complete_marker_refresh_checked(
+                "job",
+                std::slice::from_ref(&replacement),
+                &observed(&store, std::slice::from_ref(&replacement))
+            )
             .is_err()
     );
     assert_eq!(
@@ -362,7 +372,11 @@ fn job_scoped_publication_publishes_rows_the_job_covers() {
         chapter_updates: vec![(id_a.clone(), expected_chapters_a.clone())],
     };
 
-    let result = store.complete_marker_refresh_checked("job", &[replacement]);
+    let result = store.complete_marker_refresh_checked(
+        "job",
+        std::slice::from_ref(&replacement),
+        &observed(&store, std::slice::from_ref(&replacement)),
+    );
     assert!(result.is_ok());
     assert_eq!(
         store.get_cached_chapters(&id_a).unwrap(),
@@ -478,7 +492,11 @@ fn cancelled_refresh_unit_cannot_be_published_as_success() {
     };
     assert!(
         store
-            .complete_marker_refresh_checked("job", &[replacement])
+            .complete_marker_refresh_checked(
+                "job",
+                std::slice::from_ref(&replacement),
+                &observed(&store, std::slice::from_ref(&replacement))
+            )
             .is_err()
     );
     assert!(store.get_probe_job("job").unwrap().unwrap().is_active());
@@ -559,4 +577,15 @@ fn independent_store_handles_cannot_reinsert_samples_while_ledger_is_deleted() {
                 .is_empty()
         );
     }
+}
+
+fn observed(
+    store: &store::Store,
+    replacements: &[store::MarkerResultReplacement],
+) -> Vec<store::SourceObservation> {
+    let ids: Vec<domain::LedgerId> = replacements
+        .iter()
+        .flat_map(|r| r.chapter_updates.iter().map(|(id, _)| id.parse().unwrap()))
+        .collect();
+    store::observe_sources(&store.source_snapshots(&ids).unwrap())
 }

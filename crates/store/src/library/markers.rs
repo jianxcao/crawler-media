@@ -1,5 +1,7 @@
 mod source_guard;
 
+pub use source_guard::{SourceObservation, SourceSnapshot, observe_sources, observe_sources_with};
+
 use rusqlite::{OptionalExtension, params, params_from_iter};
 use std::collections::BTreeSet;
 
@@ -76,7 +78,7 @@ impl Store {
         &self,
         replacements: &[MarkerResultReplacement],
     ) -> Result<(), StoreError> {
-        self.replace_marker_results_batch_inner(replacements, None, false)
+        self.replace_marker_results_batch_inner(replacements, None, None)
     }
 
     /// Commit all season results and the marker-refresh terminal state together.
@@ -85,27 +87,28 @@ impl Store {
         job_id: &str,
         replacements: &[MarkerResultReplacement],
     ) -> Result<(), StoreError> {
-        self.replace_marker_results_batch_inner(replacements, Some(job_id), false)
+        self.replace_marker_results_batch_inner(replacements, Some(job_id), None)
     }
 
     fn replace_marker_results_batch_inner(
         &self,
         replacements: &[MarkerResultReplacement],
         completed_job_id: Option<&str>,
-        check_sources: bool,
+        observed: Option<&[source_guard::SourceObservation]>,
     ) -> Result<(), StoreError> {
+        let check_sources = observed.is_some();
         let serialized = serialize_chapter_updates(replacements)?;
         let tx = crate::write_tx(&self.library)?;
-        if check_sources {
+        if let Some(members) = observed {
             match completed_job_id {
                 Some(job_id) => {
                     // A job-scoped refresh publishes exactly the members the job covered, so the
                     // season-wide membership equality does not apply. Each published file must still
-                    // exist in `library_files` and on disk, and the published set must equal the job's members.
-                    source_guard::validate_published_rows(&tx, replacements)?;
+                    // match its out-of-lock observation, and the published set must equal the job's members.
+                    source_guard::validate_published_rows(&tx, replacements, members)?;
                     source_guard::validate_job_members(&tx, job_id, replacements)?;
                 }
-                None => source_guard::validate_members(&tx, replacements)?,
+                None => source_guard::validate_members(&tx, replacements, members)?,
             }
         }
 

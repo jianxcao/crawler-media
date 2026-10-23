@@ -1,7 +1,8 @@
 use domain::{FileCoverage, UnitKey};
 use store::Store;
 
-pub(crate) fn ensure_source_available(store: &Store, row: &FileCoverage) -> Result<(), String> {
+/// Ledger-side source check (no IO); safe to run under the store lock.
+pub(crate) fn ensure_source_recorded(store: &Store, row: &FileCoverage) -> Result<(), String> {
     let current = store
         .file_coverage_by_id(row.file.file_id)
         .map_err(|error| {
@@ -41,6 +42,11 @@ pub(crate) fn ensure_source_available(store: &Store, row: &FileCoverage) -> Resu
             }
         }
     }
+    Ok(())
+}
+
+/// Disk-side source check. Must run without holding the store lock.
+pub(crate) fn observe_source(row: &FileCoverage) -> Result<(), String> {
     match row.file.path.try_exists() {
         Ok(true) => Ok(()),
         Ok(false) => Err(format!("file_deleted: {}", row.file.path.display())),
@@ -49,6 +55,15 @@ pub(crate) fn ensure_source_available(store: &Store, row: &FileCoverage) -> Resu
             Err(format!("source_check_failed: {error}"))
         }
     }
+}
+
+/// Ledger check under a short lock, then the disk observation outside it.
+pub(crate) fn ensure_source_available(
+    store: &parking_lot::Mutex<Store>,
+    row: &FileCoverage,
+) -> Result<(), String> {
+    ensure_source_recorded(&store.lock(), row)?;
+    observe_source(row)
 }
 
 pub(crate) fn is_file_deleted(error: &str) -> bool {

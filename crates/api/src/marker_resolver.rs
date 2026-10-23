@@ -104,8 +104,11 @@ pub async fn resolve_item_chapters(
         if !cached.is_empty() && !is_only_intro {
             return cached;
         }
+        if crate::fingerprint_job::source::observe_source(row).is_err() {
+            return Vec::new();
+        }
         let store = state.store.lock();
-        if crate::fingerprint_job::source::ensure_source_available(&store, row).is_err() {
+        if crate::fingerprint_job::source::ensure_source_recorded(&store, row).is_err() {
             return Vec::new();
         }
         // A read may reconstruct chapters from this episode's verified marker,
@@ -139,9 +142,12 @@ pub async fn resolve_item_chapters(
             }
         });
     let mut chapters = output.chapters;
+    if crate::fingerprint_job::source::observe_source(row).is_err() {
+        return Vec::new();
+    }
     {
         let store = state.store.lock();
-        if crate::fingerprint_job::source::ensure_source_available(&store, row).is_err() {
+        if crate::fingerprint_job::source::ensure_source_recorded(&store, row).is_err() {
             return Vec::new();
         }
         for marker in &output.markers {

@@ -160,7 +160,11 @@ fn deletion_between_analysis_and_publication_keeps_old_results() {
         .delete_ledger_path(row.file.path.to_str().unwrap())
         .unwrap();
     let store = f.store.lock();
-    let result = store.complete_marker_refresh_checked("review9-job", &[replacement]);
+    let result = store.complete_marker_refresh_checked(
+        "review9-job",
+        std::slice::from_ref(&replacement),
+        &observed(&store, std::slice::from_ref(&replacement)),
+    );
     assert!(result.is_err());
     let previous = store
         .get_media_marker(f.media_id, Some(1), Some(1))
@@ -262,4 +266,15 @@ async fn restarted_refresh_still_rejects_unresolved_results() {
             .source,
         "old"
     );
+}
+
+fn observed(
+    store: &api::store::Store,
+    replacements: &[api::store::MarkerResultReplacement],
+) -> Vec<api::store::SourceObservation> {
+    let ids: Vec<domain::LedgerId> = replacements
+        .iter()
+        .flat_map(|r| r.chapter_updates.iter().map(|(id, _)| id.parse().unwrap()))
+        .collect();
+    api::store::observe_sources(&store.source_snapshots(&ids).unwrap())
 }

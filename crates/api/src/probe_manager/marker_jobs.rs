@@ -60,7 +60,8 @@ pub(super) fn apply_marker_refresh(
             return;
         }
     };
-    let publication = {
+    let members = markers::source_observations(mgr, &replacements);
+    let publication = members.and_then(|members| {
         let store = mgr.store.lock();
         let rows = all_rows
             .iter()
@@ -71,9 +72,9 @@ pub(super) fn apply_marker_refresh(
             // Validate every original job member under this same lock, not just the
             // anchor or the expanded lease that ended during result preparation.
             validate_refresh_units(&store, &job.id)?;
-            store.complete_marker_refresh_checked(&job.id, &replacements)
+            store.complete_marker_refresh_checked(&job.id, &replacements, &members)
         })
-    };
+    });
     if let Err(error) = publication {
         if matches!(&error, crate::store::StoreError::Missing(reason) if crate::fingerprint_job::source::is_file_deleted(reason))
         {
@@ -122,15 +123,18 @@ fn marker_refresh_seasons(
     mgr: &ProbeManager,
     job: &crate::store::ProbeJob,
 ) -> Result<Vec<u32>, crate::store::StoreError> {
-    let store = mgr.store.lock();
-    let units = store.probe_job_units(&job.id)?;
-    let mut seasons = HashSet::new();
-    for unit in units {
-        let row = super::coverage_for_ledger_id(&store, &unit.ledger_id)?;
-        crate::fingerprint_job::source::ensure_source_available(&store, &row)
-            .map_err(crate::store::StoreError::Missing)?;
-        seasons.insert(projected_season(&row));
+    let mut rows = Vec::new();
+    {
+        let store = mgr.store.lock();
+        for unit in store.probe_job_units(&job.id)? {
+            let row = super::coverage_for_ledger_id(&store, &unit.ledger_id)?;
+            crate::fingerprint_job::source::ensure_source_recorded(&store, &row)
+                .map_err(crate::store::StoreError::Missing)?;
+            rows.push(row);
+        }
     }
+    markers::observe_rows(&rows)?;
+    let seasons: HashSet<u32> = rows.iter().map(projected_season).collect();
     let mut seasons = seasons.into_iter().collect::<Vec<_>>();
     seasons.sort_unstable();
     Ok(seasons)

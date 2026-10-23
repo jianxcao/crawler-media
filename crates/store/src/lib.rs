@@ -88,7 +88,10 @@ pub use fingerprint_cache::{FingerprintCacheEntry, MediaInfoCacheVersion};
 pub use fingerprint_models::{StoredFingerprintModel, StoredFingerprintModelMember};
 pub use fingerprint_samples::{FingerprintSampleQuery, StoredFingerprintSample};
 pub use libraries::Library;
-pub use library::{MarkerResultReplacement, StoredMediaMarker};
+pub use library::{
+    MarkerResultReplacement, SourceObservation, SourceSnapshot, StoredMediaMarker, observe_sources,
+    observe_sources_with,
+};
 pub use library_ownership::LibraryOwnership;
 pub use playback::{
     PlayLogRow, PlaySessionBinding, PlaySessionIdState, PlaybackLogPage, PlaybackLogScope,

@@ -435,13 +435,19 @@ impl ProbeManager {
         &self,
         job: &crate::store::ProbeJob,
     ) -> Result<ProbeUnit, crate::store::StoreError> {
+        let mut recorded = Vec::new();
+        {
+            let store = self.store.lock();
+            for unit in &store.probe_job_units(&job.id)? {
+                let row = super::coverage_for_ledger_id(&store, &unit.ledger_id)?;
+                crate::fingerprint_job::source::ensure_source_recorded(&store, &row)
+                    .map_err(crate::store::StoreError::Missing)?;
+                recorded.push(row);
+            }
+        }
+        super::markers::observe_rows(&recorded)?;
         let store = self.store.lock();
         let persisted_units = store.probe_job_units(&job.id)?;
-        for unit in &persisted_units {
-            let row = super::coverage_for_ledger_id(&store, &unit.ledger_id)?;
-            crate::fingerprint_job::source::ensure_source_available(&store, &row)
-                .map_err(crate::store::StoreError::Missing)?;
-        }
         let persisted = persisted_units.into_iter().next().ok_or_else(|| {
             crate::store::StoreError::Missing(format!("units for job {}", job.id))
         })?;
