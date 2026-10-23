@@ -17,8 +17,31 @@ use crate::directory::transfer_plan;
 use crate::management::{ApiError, ApiState};
 use crate::scrape_store::ScrapeStoreExt;
 
+/// The only claim body: the unidentified path plus one explicit action.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClaimBody {
+    path: String,
+    action: ClaimAction,
+}
+
+/// Bind to an existing Media in place, or identify a new title and Transfer.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum ClaimAction {
+    BindExisting {
+        media_id: String,
+    },
+    IdentifyAndTransfer {
+        title: String,
+        kind: String,
+        year: Option<u16>,
+        tmdb_id: Option<String>,
+    },
+}
+
+/// The identify-and-transfer use case's inputs.
+pub(crate) struct IdentifyClaim {
     path: String,
     title: String,
     kind: String,
@@ -231,7 +254,7 @@ struct ClaimPlan {
 
 fn plan_claim(
     state: &ApiState,
-    body: &ClaimBody,
+    body: &IdentifyClaim,
     kind: MediaKind,
     src: &Path,
 ) -> Result<ClaimPlan, ApiError> {
@@ -353,9 +376,9 @@ fn discard_rollback(rollback_dest: &Option<PathBuf>) {
     }
 }
 
-pub async fn claim_unidentified(
+async fn identify_and_transfer(
     State(state): State<ApiState>,
-    Json(body): Json<ClaimBody>,
+    Json(body): Json<IdentifyClaim>,
 ) -> Result<Json<Value>, ApiError> {
     if body.title.trim().is_empty() {
         return Err(ApiError::invalid(
@@ -402,14 +425,42 @@ pub async fn claim_unidentified(
     })))
 }
 
+/// POST /unidentified/claim — the single claim entry; dispatches on `action`.
+/// Any other body shape (including the retired flat one) is a 400.
 pub async fn claim_unidentified_v1(
     state: State<ApiState>,
-    body: Json<ClaimBody>,
+    Json(raw): Json<Value>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
-    match claim_unidentified(state, body).await {
-        Ok(Json(data)) => crate::http::ok(data).into_response(),
-        Err(error) => error.into_response(),
+    let body: ClaimBody = match serde_json::from_value(raw) {
+        Ok(body) => body,
+        Err(error) => {
+            return ApiError::invalid("unidentified.invalid", format!("claim body: {error}"))
+                .into_response();
+        }
+    };
+    match body.action {
+        ClaimAction::BindExisting { media_id } => {
+            crate::http::library_admin::bind_existing(&state.0, &media_id, &body.path)
+        }
+        ClaimAction::IdentifyAndTransfer {
+            title,
+            kind,
+            year,
+            tmdb_id,
+        } => {
+            let claim = IdentifyClaim {
+                path: body.path,
+                title,
+                kind,
+                year,
+                tmdb_id,
+            };
+            match identify_and_transfer(state, Json(claim)).await {
+                Ok(Json(data)) => crate::http::ok(data).into_response(),
+                Err(error) => error.into_response(),
+            }
+        }
     }
 }
 

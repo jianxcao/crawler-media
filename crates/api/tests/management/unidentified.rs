@@ -100,9 +100,12 @@ async fn claim_unidentified_transfers_into_library() {
             Some("management-secret"),
             json!({
                 "path": src.display().to_string(),
-                "title": "The Matrix",
-                "kind": "movie",
-                "year": 1999
+                "action": {
+                    "type": "identify_and_transfer",
+                    "title": "The Matrix",
+                    "kind": "movie",
+                    "year": 1999
+                }
             }),
         ))
         .await
@@ -184,10 +187,13 @@ async fn claim_writes_real_ids_and_downloads_poster() {
             Some("management-secret"),
             json!({
                 "path": src.display().to_string(),
-                "title": "The Matrix",
-                "kind": "movie",
-                "year": 1999,
-                "tmdb_id": "603"
+                "action": {
+                    "type": "identify_and_transfer",
+                    "title": "The Matrix",
+                    "kind": "movie",
+                    "year": 1999,
+                    "tmdb_id": "603"
+                }
             }),
         ))
         .await
@@ -319,10 +325,13 @@ async fn claim_rejects_overwriting_existing_ledger_file() {
             Some("management-secret"),
             json!({
                 "path": unknown_file.display().to_string(),
-                "title": "The Matrix",
-                "kind": "movie",
-                "year": 1999,
-                "tmdb_id": "603"
+                "action": {
+                    "type": "identify_and_transfer",
+                    "title": "The Matrix",
+                    "kind": "movie",
+                    "year": 1999,
+                    "tmdb_id": "603"
+                }
             }),
         ))
         .await
@@ -386,10 +395,13 @@ async fn claim_refuses_to_overwrite_an_unledgered_existing_file() {
             Some("management-secret"),
             json!({
                 "path": unknown_file.display().to_string(),
-                "title": "The Matrix",
-                "kind": "movie",
-                "year": 1999,
-                "tmdb_id": "603"
+                "action": {
+                    "type": "identify_and_transfer",
+                    "title": "The Matrix",
+                    "kind": "movie",
+                    "year": 1999,
+                    "tmdb_id": "603"
+                }
             }),
         ))
         .await
@@ -465,9 +477,12 @@ async fn actual_claim_routes_preserve_tv_coverage() {
             .clone()
             .oneshot(request(
                 "POST",
-                &format!("/api/v1/unidentified/{}/claim", media.id),
+                "/api/v1/unidentified/claim",
                 Some("management-secret"),
-                json!({ "path": path.display().to_string() }),
+                json!({
+                    "path": path.display().to_string(),
+                    "action": { "type": "bind_existing", "media_id": media.id.to_string() }
+                }),
             ))
             .await
             .unwrap();
@@ -489,4 +504,112 @@ async fn actual_claim_routes_preserve_tv_coverage() {
         units(names[2]).is_empty(),
         "unknown TV must not become a whole"
     );
+}
+
+/// One claim entry, two explicit actions: binding to an existing Media stays
+/// inside a Library root and never moves bytes; old shapes and the old
+/// per-Media route are gone.
+#[tokio::test]
+async fn claim_actions_are_explicit_and_bind_never_moves_bytes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("movroot");
+    fs::create_dir_all(&root).unwrap();
+    let inside = root.join("Bound.2001.mkv");
+    fs::write(&inside, b"video").unwrap();
+    let outside = tmp.path().join("elsewhere.mkv");
+    fs::write(&outside, b"video").unwrap();
+    let media = domain::Media {
+        id: domain::MediaId::new(),
+        kind: domain::MediaKind::Movie,
+        title: "Bound".into(),
+        year: Some(2001),
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    {
+        let store = Store::open(tmp.path().join("data")).unwrap();
+        store.insert_media(&media).unwrap();
+        store
+            .create_library(
+                domain::MediaKind::Movie,
+                "Bind Movies",
+                &[root.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+    }
+    let app = router(state(
+        tmp.path(),
+        Arc::new(Fixtures {
+            requests: Mutex::new(Vec::new()),
+            bodies: HashMap::new(),
+        }),
+        Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
+    ));
+    let post = |uri: &str, body: Value| request("POST", uri, Some("management-secret"), body);
+    let bind = |path: &std::path::Path| {
+        json!({
+            "path": path.display().to_string(),
+            "action": { "type": "bind_existing", "media_id": media.id.to_string() }
+        })
+    };
+
+    let res = app
+        .clone()
+        .oneshot(post("/api/v1/unidentified/claim", bind(&inside)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(inside.is_file(), "bind must not move the file");
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let bound = store
+        .file_coverage_by_path(&inside.display().to_string())
+        .unwrap()
+        .expect("bound file is recorded in place");
+    assert_eq!(bound.file.media_id, media.id);
+    drop(store);
+
+    let res = app
+        .clone()
+        .oneshot(post("/api/v1/unidentified/claim", bind(&outside)))
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::BAD_REQUEST,
+        "bind outside every root"
+    );
+
+    let legacy = json!({ "path": outside.display().to_string(), "title": "X", "kind": "movie" });
+    let res = app
+        .clone()
+        .oneshot(post("/api/v1/unidentified/claim", legacy))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST, "old flat body");
+    let unknown = json!({ "path": outside.display().to_string(), "action": { "type": "guess" } });
+    let res = app
+        .clone()
+        .oneshot(post("/api/v1/unidentified/claim", unknown))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST, "unknown action");
+
+    let old_route = format!("/api/v1/unidentified/{}/claim", media.id);
+    let res = app
+        .clone()
+        .oneshot(post(
+            &old_route,
+            json!({ "path": inside.display().to_string() }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND, "old per-Media route");
 }

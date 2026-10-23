@@ -1693,7 +1693,16 @@ export async function claimUnidentifiedFile(body: {
   return unwrap(
     request<ApiEnvelope<unknown>>("/unidentified/claim", {
       method: "POST",
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        path: body.path,
+        action: {
+          type: "identify_and_transfer",
+          title: body.title,
+          kind: body.kind,
+          year: body.year,
+          tmdb_id: body.tmdb_id,
+        },
+      }),
     }),
   );
 }

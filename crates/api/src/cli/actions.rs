@@ -178,14 +178,11 @@ pub async fn claim_unidentified(
     kind: &str,
     year: Option<u16>,
 ) -> Result<String, String> {
-    let mut body = json!({
-        "path": path,
-        "title": title,
-        "kind": kind,
-    });
+    let mut action = json!({ "type": "identify_and_transfer", "title": title, "kind": kind });
     if let Some(year) = year {
-        body["year"] = json!(year);
+        action["year"] = json!(year);
     }
+    let body = json!({ "path": path, "action": action });
     let (status, body) = transport
         .send("POST", "/api/v1/unidentified/claim", Some(body))
         .await?;

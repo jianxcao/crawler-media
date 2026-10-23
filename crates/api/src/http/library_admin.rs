@@ -1,5 +1,4 @@
 //! Library admin views: raw ledger rows and unidentified files.
-use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -438,16 +437,14 @@ pub(crate) async fn retransfer_ledger_row(
     }))
     .into_response()
 }
-pub(crate) async fn claim_unidentified(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-    Json(body): Json<Value>,
-) -> Response {
-    let path = body["path"].as_str().unwrap_or_default().trim();
+/// Bind an unidentified file to an existing Media in place (no bytes move);
+/// only a path strictly inside a Library root is accepted.
+pub(crate) fn bind_existing(state: &ApiState, id: &str, path: &str) -> Response {
+    let path = path.trim();
     if path.is_empty() {
         return err(StatusCode::BAD_REQUEST, "library.invalid", "path 必填");
     }
-    let media_id = match MediaId::from_str(&id) {
+    let media_id = match MediaId::from_str(id) {
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "media id 无效"),
     };
@@ -491,7 +488,7 @@ pub(crate) async fn claim_unidentified(
     };
     let _ = store.delete_unidentified(path);
     drop(store);
-    crate::http::library::enqueue_probes_for_files(&state, std::slice::from_ref(&file));
+    crate::http::library::enqueue_probes_for_files(state, std::slice::from_ref(&file));
     ok(json!({
         "media_item_id": media.id.to_string(),
         "path": path,

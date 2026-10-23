@@ -183,3 +183,26 @@ test("the edit dialog waits for the accepted operation and shows its phase", asy
   assert.match(source, /busy \? \(pending \?\? "保存中…"\) : "保存"/);
   assert.doesNotMatch(source, /\bupdateLibrary\(/, "the dialog must not use the fire-and-forget update");
 });
+
+test("unidentified claim sends only the explicit identify_and_transfer action", async () => {
+  const requests = [];
+  const api = await loadApi(async (path, init) => {
+    requests.push({ path, method: init.method, body: JSON.parse(init.body) });
+    return { ok: true, data: {} };
+  });
+  await api.claimUnidentifiedFile({
+    path: "/in/x.mkv",
+    title: "X",
+    kind: "movie",
+    year: 2001,
+    tmdb_id: "7",
+  });
+  assert.deepEqual(requests, [{
+    path: "/unidentified/claim",
+    method: "POST",
+    body: {
+      path: "/in/x.mkv",
+      action: { type: "identify_and_transfer", title: "X", kind: "movie", year: 2001, tmdb_id: "7" },
+    },
+  }]);
+});

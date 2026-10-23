@@ -223,10 +223,6 @@ pub(super) fn admin_metadata_routes() -> Router<ApiState> {
             post(library_artwork::upload_artwork),
         )
         .route(
-            "/unidentified/{id}/claim",
-            post(library_admin::claim_unidentified),
-        )
-        .route(
             "/unidentified/claim",
             post(crate::claim::claim_unidentified_v1),
         )
