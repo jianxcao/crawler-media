@@ -68,3 +68,27 @@ Logs: /workspace/logs/q3b-before.log, q3b-after.log.
 (new `fixed_buckets_keep_zero_counts_and_conditional_favorite`) passes on both old and new
 code; `store library_query_filters` 8/0. Per-statement VM steps were not captured
 (only wall time and statement count at request level).
+
+## Q4 — Jellyfin 协议分页（store 级，`crates/api/tests/jellyfin_page_perf.rs`）
+
+方法：release，`protocol_item_page` 直接调用（不含 HTTP），单库电影，每形状 7 次取中位数/最大值。
+根因（EXPLAIN QUERY PLAN）：选源子查询被规划到 `files_presence(library_id,presence_state)`，
+每个候选行扫整库文件；且 `source_file_id` 在外层被展开两次。修复：选源在 LIMIT 之后、
+`sourced AS MATERIALIZED`、状态列加一元 `+` 强制 `files_media_library`、修订号改 LEFT JOIN。
+
+| size | shape | before median ms | after median ms |
+|---|---|---|---|
+| 5000 | first_page | 7246.1 | 290.1 |
+| 5000 | deep_offset(40000,空页) | 6815.0 | 17.4 |
+| 5000 | genre Drama | 1279.3 | 383.6 |
+| 5000 | person | 195.4 | 206.8 |
+| 5000 | search | 100.7 | 112.0 |
+| 50000 | first_page | >20 min 未完成（中止） | 208.4 (p95 238.3) |
+| 50000 | deep_offset(40000) | 未测 | 289.8 (p95 439.9) |
+| 50000 | genre Drama | 未测 | 1269.6 (p95 1379.0) |
+| 50000 | person | 未测 | 1945.7 (p95 2165.2) |
+| 50000 | search | 未测 | 933.7 (p95 947.6) |
+
+20k 单语句（插桩）：page 3904 ms → 40 ms。
+注：5k 的"after"在中间版本（仅后置选源、未强制索引）测得；50k 为最终版本。
+剩余：genre/person/search 随行数线性增长，成本在逐行解析 NFO JSON 谓词（count 与 page 各一次），未在本项处理。

@@ -123,6 +123,9 @@ fn rows_ctes(
 ///
 /// 分集支按 `(season, episode)` 归属取文件；作品支只按媒体取，
 /// 因此两支并存时必须限定 `season = -1`，免得给某个具体分集配上别的集的文件。
+///
+/// 状态列前的一元 `+` 让规划器放弃 `files_presence(library_id, presence_state)`：
+/// 那条索引每行要扫整库文件（50k 库每页 ~13s），这里必须走 `files_library_media`。
 fn source_expr(scope: &Scope) -> String {
     let mut parts = Vec::new();
     if scope.granularity.wants_unit() {
@@ -131,7 +134,7 @@ fn source_expr(scope: &Scope) -> String {
                JOIN library_file_units fu ON fu.file_id = f.file_id \
                  AND fu.season = rows.season AND fu.episode = rows.episode \
                WHERE f.library_id = rows.library_id AND f.media_id = rows.media_id \
-                 AND f.publication_state = 'published' AND f.presence_state = 'present' \
+                 AND +f.publication_state = 'published' AND +f.presence_state = 'present' \
                ORDER BY f.file_revision DESC, f.file_id ASC LIMIT 1)"
                 .to_string(),
         );
@@ -145,8 +148,8 @@ fn source_expr(scope: &Scope) -> String {
         parts.push(format!(
             "(SELECT f.file_id FROM library_files f \
                WHERE f.library_id = rows.library_id AND f.media_id = rows.media_id \
-                 AND {unit_guard}f.publication_state = 'published' \
-                 AND f.presence_state = 'present' \
+                 AND {unit_guard}+f.publication_state = 'published' \
+                 AND +f.presence_state = 'present' \
                ORDER BY f.file_revision DESC, f.file_id ASC LIMIT 1)"
         ));
     }
@@ -187,16 +190,21 @@ pub(super) fn plan(
     let limit_placeholder = format!("?{}", filter_values.len() + 1);
     let offset_placeholder = format!("?{}", filter_values.len() + 2);
     let order_by = order::order_by_sql(request, scope.granularity.wants_unit(), "r");
+    // 授权去重与排序全部在 LIMIT 前完成；选源子查询只对本页行求值（late materialization），
+    // 外层按同一全序键重排，页内顺序与 LIMIT 选择一致。
     let page_sql = format!(
         "WITH {scoped}, {rows}, ranked AS (\
            SELECT rows.*, ROW_NUMBER() OVER (\
              PARTITION BY rows.media_id, rows.season, rows.episode \
-             ORDER BY (rows.kind = 'movie') DESC, rows.library_id ASC) AS rn, \
-             {} AS source_file_id \
-           FROM rows) \
+             ORDER BY (rows.kind = 'movie') DESC, rows.library_id ASC) AS rn \
+           FROM rows), \
+         page AS (SELECT r.* FROM ranked r WHERE r.rn = 1 ORDER BY {order_by} \
+           LIMIT {limit_placeholder} OFFSET {offset_placeholder}), \
+         sourced AS MATERIALIZED (SELECT rows.*, {} AS source_file_id FROM page AS rows) \
          SELECT r.library_id, r.media_id, r.season, r.episode, r.source_file_id, \
-           (SELECT f.file_revision FROM library_files f WHERE f.file_id = r.source_file_id) AS source_revision \
-         FROM ranked r WHERE r.rn = 1 ORDER BY {order_by} LIMIT {limit_placeholder} OFFSET {offset_placeholder}",
+           f.file_revision AS source_revision \
+         FROM sourced r LEFT JOIN library_files f ON f.file_id = r.source_file_id \
+         ORDER BY {order_by}",
         source_expr(scope)
     );
     let limit = i64::try_from(request.limit).unwrap_or(i64::MAX);

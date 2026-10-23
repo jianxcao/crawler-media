@@ -154,3 +154,5 @@ deferred_snapshot_write_error: SQLITE_BUSY_SNAPSHOT
 | up_next split | handler split into collect_plans/plan_from_activity/plan_from_subscribe/cached_episode_titles/materialize_candidates/render_item/blocking_failed; longest fn 87 lines; up-next tests green. |
 | B3 web list payloads | libraries/items/item-index throw on non-array payload (arrayPayload) instead of silently rendering empty; library-dto-contract RED->GREEN. |
 | A4 API RED | web_mark_persists_raw_clock_columns (management/playback_clock): on d8e9292^ RED 'played_changed_at_ms must be ms' left Some(1792754571) right Some(1792754571500); GREEN on HEAD. |
+| Q3b | Implemented: fixed-bucket dims one SELECT each (26->11 stmts); request-level endpoint_perf 50k movies facets median 428.5->237.0 ms, identical bytes; equivalence test green on old+new. |
+| Q4 | protocol page: source selection after LIMIT, forced files_media_library, materialized; 50k first_page 208ms (old >20min); predicate shapes still linear (NFO JSON parse) |
