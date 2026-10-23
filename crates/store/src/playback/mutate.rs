@@ -91,7 +91,25 @@ impl Store {
     ) -> Result<ResolvedResume, StoreError> {
         let (media_id, unit) = playback_unit(item);
         let allowed = self.authorized_library_ids(user)?;
-        let stored = self.stored_resume(user, media_id, unit)?;
+        let mut stored = self.stored_resume(user, media_id, unit)?;
+        // AlreadyPlayed follows the effective (scoped) assertion; the physical
+        // resume package still comes only from the unit's own row.
+        if let Some(assertion) = self.effective_played_assertion(user, media_id, unit)? {
+            match stored.as_mut() {
+                Some(resume) => resume.played = assertion.played,
+                None if assertion.played => {
+                    stored = Some(StoredResume {
+                        played: true,
+                        position_ms: 0,
+                        duration_ms: None,
+                        audio_track: None,
+                        subtitle_track: None,
+                        binding: None,
+                    })
+                }
+                None => {}
+            }
+        }
         let resume_preferred = stored
             .as_ref()
             .and_then(|s| s.binding.as_ref())
@@ -289,60 +307,72 @@ fn no_progress(
 }
 
 impl Store {
+    /// The only logical mark entry (C04/C05). `played` writes one assertion on
+    /// exactly the target scope (`played_changed_at_ms` in ms); `favorite`
+    /// stamps `favorite_at` in seconds (kept on a repeated favourite, 0 when
+    /// cleared; clearing the whole item clears every unit). A mark never moves
+    /// `watch_activity_at` or the resume package.
     pub fn mutate_playback(
         &self,
         media: MediaId,
         change: &PlaybackMutation,
         now_ms: i64,
     ) -> Result<(), StoreError> {
+        if change.played.is_none() && change.favorite.is_none() {
+            return Ok(());
+        }
         let tx = crate::write_tx(&self.library)?;
         let (season, episode) = match change.scope {
             UnitScope::Whole => (-1, -1),
             UnitScope::Season(s) => (s as i32, -1),
             UnitScope::Episode { season, episode } => (season as i32, episode as i32),
         };
-
-        let user_id_str = change.user_id.to_string();
-        let media_id_str = media.to_string();
-
-        let played_val = change.played.map(|p| if p { 1 } else { 0 });
-        let fav_val = change.favorite.map(|f| if f { 1 } else { 0 });
-
-        let sql = "INSERT INTO playback_units
-                    (user_id, media_id, season, episode, played, has_played_assertion,
-                     played_changed_at_ms, favorite, favorite_at, watch_activity_at)
-                   VALUES
-                    (?1, ?2, ?3, ?4, COALESCE(?5, 0), CASE WHEN ?5 IS NOT NULL THEN 1 ELSE 0 END,
-                     CASE WHEN ?5 IS NOT NULL THEN ?6 ELSE NULL END, COALESCE(?7, 0),
-                     CASE WHEN ?7 = 1 THEN ?6 ELSE 0 END, 0)
-                   ON CONFLICT(user_id, media_id, season, episode) DO UPDATE SET
-                     played = COALESCE(?5, playback_units.played),
-                     has_played_assertion = CASE WHEN ?5 IS NOT NULL THEN 1 ELSE playback_units.has_played_assertion END,
-                     played_changed_at_ms = CASE WHEN ?5 IS NOT NULL THEN ?6 ELSE playback_units.played_changed_at_ms END,
-                     favorite = COALESCE(?7, playback_units.favorite),
-                     favorite_at = CASE WHEN ?7 = 1 THEN ?6 ELSE playback_units.favorite_at END,
-                     -- A mark is a decision, not viewing: it must not move the activity clock.
-                     watch_activity_at = playback_units.watch_activity_at";
-
+        let user_id = change.user_id.to_string();
+        let media_id = media.to_string();
+        let played = change.played.map(i64::from);
+        let favorite = change.favorite.map(i64::from);
         tx.execute(
-            sql,
+            "INSERT INTO playback_units
+                (user_id, media_id, season, episode, played, has_played_assertion,
+                 played_changed_at_ms, favorite, favorite_at, watch_activity_at)
+             VALUES
+                (?1, ?2, ?3, ?4, COALESCE(?5, 0), ?5 IS NOT NULL,
+                 CASE WHEN ?5 IS NOT NULL THEN ?6 END, COALESCE(?7, 0),
+                 CASE WHEN ?7 = 1 THEN ?8 ELSE 0 END, 0)
+             ON CONFLICT(user_id, media_id, season, episode) DO UPDATE SET
+                played = COALESCE(?5, played),
+                has_played_assertion = CASE WHEN ?5 IS NOT NULL THEN 1 ELSE has_played_assertion END,
+                played_changed_at_ms = CASE WHEN ?5 IS NOT NULL THEN ?6 ELSE played_changed_at_ms END,
+                favorite = COALESCE(?7, favorite),
+                favorite_at = CASE
+                    WHEN ?7 = 1 AND favorite = 1 AND favorite_at != 0 THEN favorite_at
+                    WHEN ?7 = 1 THEN ?8
+                    WHEN ?7 = 0 THEN 0
+                    ELSE favorite_at END",
             params![
-                user_id_str,
-                media_id_str,
+                user_id,
+                media_id,
                 season,
                 episode,
-                played_val,
+                played,
                 now_ms,
-                fav_val,
+                favorite,
+                now_ms / 1000
             ],
         )?;
-
-        self.refresh_user_library_summary(
-            change.user_id,
-            media,
-            SummaryScope::for_unit(season, episode),
-        )?;
-
+        if change.favorite == Some(false) && change.scope == UnitScope::Whole {
+            tx.execute(
+                "UPDATE playback_units SET favorite = 0, favorite_at = 0
+                 WHERE user_id = ?1 AND media_id = ?2 AND favorite != 0",
+                params![user_id, media_id],
+            )?;
+        }
+        let summary = if change.favorite == Some(false) && change.scope == UnitScope::Whole {
+            SummaryScope::Whole
+        } else {
+            SummaryScope::for_unit(season, episode)
+        };
+        self.refresh_user_library_summary(change.user_id, media, summary)?;
         tx.commit()?;
         Ok(())
     }

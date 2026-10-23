@@ -227,7 +227,11 @@ fn favorite_only_update_preserves_played_activity_timestamp() {
         )
         .unwrap();
     store
-        .set_unit_favorite(user, media.id, 1, -1, true, 99)
+        .mutate_playback(
+            media.id,
+            &store::playback::PlaybackMutation::marks(user, 1, -1, None, Some(true)),
+            99_000,
+        )
         .unwrap();
     let state = store.unit_state(user, media.id, 1, -1).unwrap().unwrap();
     assert!(state.played);
@@ -292,7 +296,11 @@ fn whole_unit_unfavorite_preserves_other_units_activity_timestamps() {
         .unwrap();
 
     store
-        .set_unit_marks(user, media.id, -1, -1, None, Some(false), 99)
+        .mutate_playback(
+            media.id,
+            &store::playback::PlaybackMutation::marks(user, -1, -1, None, Some(false)),
+            99_000,
+        )
         .unwrap();
 
     assert_eq!(
@@ -371,7 +379,11 @@ fn favorite_activity_orders_independently_of_played_activity() {
         .unwrap();
 
     store
-        .set_unit_marks(user, newer.id, -1, -1, None, Some(true), 80)
+        .mutate_playback(
+            newer.id,
+            &store::playback::PlaybackMutation::marks(user, -1, -1, None, Some(true)),
+            80_000,
+        )
         .unwrap();
 
     let rows = store.favorite_rows(user).unwrap();
@@ -421,7 +433,11 @@ fn favorite_only_insert_does_not_materialize_inherited_played() {
         .unwrap();
 
     store
-        .set_unit_favorite(user, show.id, 1, 1, true, 20)
+        .mutate_playback(
+            show.id,
+            &store::playback::PlaybackMutation::marks(user, 1, 1, None, Some(true)),
+            20_000,
+        )
         .unwrap();
     store.clear_units(user, None, Some(1)).unwrap();
 

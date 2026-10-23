@@ -21,6 +21,7 @@ fn unit(
             subtitle_track: None,
             play_count: 0,
             updated_at,
+            played_assertion_at_ms: Some(updated_at),
         },
     }
 }

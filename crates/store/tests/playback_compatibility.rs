@@ -111,12 +111,20 @@ fn failed_movie_mark_does_not_hide_legacy_progress() {
         )
         .unwrap();
     let db = Connection::open(tmp.path().join("library.db")).unwrap();
-    db.execute_batch("CREATE TRIGGER review_mark_update_block BEFORE UPDATE ON playback_units BEGIN SELECT RAISE(ABORT,'review mark blocked'); END;").unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER review_mark_update_block BEFORE UPDATE ON playback_units BEGIN SELECT RAISE(ABORT,'review mark blocked'); END;
+         CREATE TRIGGER review_mark_insert_block BEFORE INSERT ON playback_units BEGIN SELECT RAISE(ABORT,'review mark blocked'); END;",
+    )
+    .unwrap();
     drop(db);
     let blocked = Store::open(tmp.path()).unwrap();
     assert!(
         blocked
-            .set_unit_marks(user, media, -1, -1, Some(true), None, 20)
+            .mutate_playback(
+                media,
+                &store::playback::PlaybackMutation::marks(user, -1, -1, Some(true), None),
+                20
+            )
             .is_err()
     );
     drop(blocked);
@@ -230,7 +238,11 @@ fn critical_unit_mark_cascade_failure_is_propagated_and_atomic() {
     db.execute_batch("CREATE TRIGGER block_mark BEFORE UPDATE ON playback_units WHEN OLD.season=1 BEGIN SELECT RAISE(ABORT,'mark blocked'); END;").unwrap();
     assert!(
         store
-            .set_unit_marks(user, media, -1, -1, None, Some(false), 2)
+            .mutate_playback(
+                media,
+                &store::playback::PlaybackMutation::marks(user, -1, -1, None, Some(false)),
+                2
+            )
             .is_err()
     );
     for (season, episode) in [(-1, -1), (1, 1)] {

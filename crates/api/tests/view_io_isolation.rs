@@ -171,13 +171,15 @@ fn seed_movie(state: &ApiState, tmp: &std::path::Path) -> (domain::UserId, Strin
     publish_fixture_file(&guard, &spec).unwrap();
 
     guard
-        .set_unit_marks(
-            user_id,
+        .mutate_playback(
             media_id,
-            UNIT_WHOLE,
-            UNIT_WHOLE,
-            None,
-            Some(true),
+            &store::playback::PlaybackMutation::marks(
+                user_id,
+                UNIT_WHOLE,
+                UNIT_WHOLE,
+                None,
+                Some(true),
+            ),
             1000,
         )
         .unwrap();

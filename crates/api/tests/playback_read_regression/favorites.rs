@@ -181,7 +181,11 @@ async fn newest_favorite_leads_without_reordering_played_marks() {
             )
             .unwrap();
         guard
-            .set_unit_marks(member, newer, -1, -1, None, Some(true), 80)
+            .mutate_playback(
+                newer,
+                &store::playback::PlaybackMutation::marks(member, -1, -1, None, Some(true)),
+                80_000,
+            )
             .unwrap();
         (older, newer)
     };
@@ -240,7 +244,11 @@ async fn playing_an_old_favorite_does_not_move_it_ahead_of_a_newer_one() {
             )
             .unwrap();
         guard
-            .set_unit_marks(member, recent, -1, -1, None, Some(true), 50)
+            .mutate_playback(
+                recent,
+                &store::playback::PlaybackMutation::marks(member, -1, -1, None, Some(true)),
+                50_000,
+            )
             .unwrap();
         (historical, recent)
     };

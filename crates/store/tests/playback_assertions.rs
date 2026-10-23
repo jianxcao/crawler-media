@@ -585,3 +585,111 @@ fn newer_season_assertion_overrides_older_episode_and_ties_go_to_episode() {
         "tie goes to the episode scope"
     );
 }
+
+fn favorite(f: &Fixture, scope: domain::UnitScope, value: bool, now_ms: i64) {
+    f.store
+        .mutate_playback(
+            f.media_id,
+            &store::playback::PlaybackMutation {
+                user_id: user(),
+                scope,
+                played: None,
+                favorite: Some(value),
+                expected_generation: None,
+            },
+            now_ms,
+        )
+        .unwrap();
+}
+
+const E11: domain::UnitScope = domain::UnitScope::Episode {
+    season: 1,
+    episode: 1,
+};
+
+#[test]
+fn favorite_only_row_reads_favorite_with_second_clock() {
+    let (_tmp, f) = seed(&[(1, 1)]);
+    favorite(&f, E11, true, 1_700_000_000_000);
+    let state = f
+        .store
+        .effective_unit_state(user(), f.media_id, UnitKey::new(1, 1))
+        .unwrap()
+        .expect("a favorite-only row is a fact");
+    assert!(state.favorite);
+    assert!(!state.played);
+    assert_eq!(state.favorite_at, 1_700_000_000, "favorite_at is seconds");
+    assert_eq!(state.updated_at, 0, "a favorite is not viewing activity");
+
+    favorite(&f, domain::UnitScope::Whole, true, 1_700_000_005_000);
+    favorite(&f, domain::UnitScope::Whole, false, 1_700_000_006_000);
+    let unfavorited = f
+        .store
+        .unit_state(user(), f.media_id, 1, 1)
+        .unwrap()
+        .unwrap();
+    assert!(!unfavorited.favorite, "whole unfavorite clears the media");
+    assert_eq!(unfavorited.favorite_at, 0);
+}
+
+#[test]
+fn scoped_marks_resolve_by_latest_and_keep_resume_package() {
+    let (_tmp, f) = seed(&[(1, 1), (1, 2), (2, 1)]);
+    commit_progress(&f, &f.files[0], 1, 1, 120_000, 2_700_000);
+    let resume_before = f
+        .store
+        .resolve_playback(user(), &episode(&f, 1, 1), None, None)
+        .unwrap();
+    let activity_before = f
+        .store
+        .unit_state(user(), f.media_id, 1, 1)
+        .unwrap()
+        .unwrap();
+
+    mark(&f, domain::UnitScope::Season(1), true, 1_700_000_000_000);
+    mark(&f, E11, false, 1_700_000_001_000);
+    let episode_after_later_false = f
+        .store
+        .effective_unit_state(user(), f.media_id, UnitKey::new(1, 1))
+        .unwrap()
+        .unwrap();
+    assert!(!episode_after_later_false.played);
+    let resume_package_after_mark = f
+        .store
+        .resolve_playback(user(), &episode(&f, 1, 1), None, None)
+        .unwrap();
+    assert_eq!(resume_package_after_mark.start_ms, resume_before.start_ms);
+    assert_eq!(resume_package_after_mark.status, ResumeStatus::Compatible);
+
+    mark(&f, domain::UnitScope::Season(1), true, 1_700_000_002_000);
+    let episode_after_latest_season_true = f
+        .store
+        .effective_unit_state(user(), f.media_id, UnitKey::new(1, 1))
+        .unwrap()
+        .unwrap();
+    assert!(episode_after_latest_season_true.played);
+    let resolved = f
+        .store
+        .resolve_playback(user(), &episode(&f, 1, 1), None, None)
+        .unwrap();
+    assert_eq!(
+        resolved.status,
+        ResumeStatus::AlreadyPlayed,
+        "the effective season assertion decides AlreadyPlayed"
+    );
+    let activity_after_mark = f
+        .store
+        .unit_state(user(), f.media_id, 1, 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(activity_after_mark.updated_at, activity_before.updated_at);
+    assert_eq!(activity_after_mark.position_ms, activity_before.position_ms);
+    assert_eq!(activity_after_mark.duration_ms, activity_before.duration_ms);
+    assert!(
+        f.store
+            .effective_unit_state(user(), f.media_id, UnitKey::new(2, 1))
+            .unwrap()
+            .is_none_or(|unit| !unit.played),
+        "an unrelated season is untouched"
+    );
+}

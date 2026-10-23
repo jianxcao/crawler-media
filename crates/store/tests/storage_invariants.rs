@@ -425,7 +425,11 @@ fn incremental_episode_add_refreshes_existing_user_summary() {
     let user_id = domain::UserId::new();
     // Mark Episode 1 as played
     store
-        .set_unit_marks(user_id, show.id, 1, 1, Some(true), None, 2_000)
+        .mutate_playback(
+            show.id,
+            &store::playback::PlaybackMutation::marks(user_id, 1, 1, Some(true), None),
+            2_000,
+        )
         .unwrap();
 
     let summary_before = store
@@ -519,13 +523,15 @@ fn reimport_restores_sparse_favorites() {
     let user_id = domain::UserId::new();
     // Mark as favorite
     store
-        .set_unit_marks(
-            user_id,
+        .mutate_playback(
             movie.id,
-            store::UNIT_WHOLE,
-            store::UNIT_WHOLE,
-            None,
-            Some(true),
+            &store::playback::PlaybackMutation::marks(
+                user_id,
+                store::UNIT_WHOLE,
+                store::UNIT_WHOLE,
+                None,
+                Some(true),
+            ),
             2_000,
         )
         .unwrap();

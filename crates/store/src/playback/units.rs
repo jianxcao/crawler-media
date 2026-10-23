@@ -57,7 +57,8 @@ impl Store {
         self.library
             .query_row(
                 "SELECT position_ms, played, favorite, duration_ms, audio_track,
-                        subtitle_track, play_count, watch_activity_at, favorite_at
+                        subtitle_track, play_count, watch_activity_at, favorite_at,
+                        CASE WHEN has_played_assertion = 1 THEN COALESCE(played_changed_at_ms, 0) END
                  FROM playback_units
                  WHERE user_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4",
                 params![user_id.to_string(), media_id.to_string(), season, episode],
@@ -72,84 +73,12 @@ impl Store {
                         play_count: row.get(6)?,
                         updated_at: row.get(7)?,
                         favorite_at: row.get(8)?,
+                        played_assertion_at_ms: row.get(9)?,
                     })
                 },
             )
             .optional()
             .map_err(Into::into)
-    }
-
-    pub fn set_unit_favorite(
-        &self,
-        user_id: UserId,
-        media_id: MediaId,
-        season: i32,
-        episode: i32,
-        favorite: bool,
-        now: i64,
-    ) -> Result<(), StoreError> {
-        self.playback_write(|store| {
-            // canonical whole unit (-1, -1)
-            store.set_unit_favorite_inner(user_id, media_id, season, episode, favorite, now)?;
-            store.refresh_user_library_summary(
-                user_id,
-                media_id,
-                SummaryScope::for_unit(season, episode),
-            )
-        })
-    }
-
-    fn set_unit_favorite_inner(
-        &self,
-        user_id: UserId,
-        media_id: MediaId,
-        season: i32,
-        episode: i32,
-        favorite: bool,
-        now: i64,
-    ) -> Result<(), StoreError> {
-        let existing = self.unit_state(user_id, media_id, season, episode)?;
-        let favorite_at = match existing {
-            Some(unit) if favorite && unit.favorite && unit.favorite_at != 0 => unit.favorite_at,
-            _ => {
-                if favorite {
-                    now
-                } else {
-                    0
-                }
-            }
-        };
-        // A missing unit is favourite-only: the UPDATE below leaves every other
-        // fact absent rather than materialising an inherited played mark.
-        let changed = self.library.execute(
-            "UPDATE playback_units SET favorite = ?5, favorite_at = ?6
-             WHERE user_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4",
-            params![
-                user_id.to_string(),
-                media_id.to_string(),
-                season,
-                episode,
-                favorite as i64,
-                favorite_at,
-            ],
-        )?;
-        if changed == 0 {
-            self.library.execute(
-                "INSERT INTO playback_units
-                    (user_id, media_id, season, episode, position_ms, played, favorite,
-                     duration_ms, audio_track, subtitle_track, play_count, watch_activity_at, favorite_at)
-                 VALUES (?1, ?2, ?3, ?4, 0, 0, ?5, NULL, NULL, NULL, 0, 0, ?6)",
-                params![
-                    user_id.to_string(),
-                    media_id.to_string(),
-                    season,
-                    episode,
-                    favorite as i64,
-                    favorite_at,
-                ],
-            )?;
-        }
-        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -574,127 +503,6 @@ impl Store {
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
-
-    /// Set played marks with cascade (whole/season marks every unit below);
-    /// favorite is stored on exactly the target unit (favorite level = the
-    /// most recent favorited unit).
-    #[allow(clippy::too_many_arguments)]
-    pub fn set_unit_marks(
-        &self,
-        user_id: UserId,
-        media_id: MediaId,
-        season: i32,
-        episode: i32,
-        played: Option<bool>,
-        favorite: Option<bool>,
-        now: i64,
-    ) -> Result<(), StoreError> {
-        self.playback_write(|store| {
-            // canonical whole unit (-1, -1)
-            store
-                .set_unit_marks_inner(user_id, media_id, season, episode, played, favorite, now)?;
-            store.refresh_user_library_summary(
-                user_id,
-                media_id,
-                SummaryScope::for_unit(season, episode),
-            )
-        })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn set_unit_marks_inner(
-        &self,
-        user_id: UserId,
-        media_id: MediaId,
-        season: i32,
-        episode: i32,
-        played: Option<bool>,
-        favorite: Option<bool>,
-        now: i64,
-    ) -> Result<(), StoreError> {
-        if let Some(favorite) = favorite {
-            // Favourite activity is its own clock. Playback fields stay on the
-            // row that already owns them; a missing unit is favourite-only.
-            if played.is_none() {
-                self.set_unit_favorite_inner(user_id, media_id, season, episode, favorite, now)?;
-            } else {
-                let existing = self.unit_state(user_id, media_id, season, episode)?;
-                self.upsert_unit_internal(
-                    user_id,
-                    media_id,
-                    season,
-                    episode,
-                    Some(existing.as_ref().map(|unit| unit.position_ms).unwrap_or(0)),
-                    played,
-                    Some(favorite),
-                    existing.as_ref().and_then(|unit| unit.duration_ms),
-                    existing
-                        .as_ref()
-                        .and_then(|unit| unit.audio_track.as_deref()),
-                    existing
-                        .as_ref()
-                        .and_then(|unit| unit.subtitle_track.as_deref()),
-                    false,
-                    now,
-                    None,
-                )?;
-            }
-            if !favorite && season == UNIT_WHOLE && episode == UNIT_WHOLE {
-                self.library.execute(
-                    "UPDATE playback_units SET favorite = 0, favorite_at = 0
-                     WHERE user_id = ?1 AND media_id = ?2",
-                    params![user_id.to_string(), media_id.to_string()],
-                )?;
-            }
-        }
-        if let Some(played) = played {
-            let (s_from, e_from) = match (season, episode) {
-                (UNIT_WHOLE, _) => (UNIT_WHOLE, UNIT_WHOLE),
-                (s, UNIT_WHOLE) => (s, UNIT_WHOLE),
-                (s, e) => (s, e),
-            };
-            let mut stmt = self.library.prepare(
-                "UPDATE playback_units
-                 SET played = ?3,
-                     has_played_assertion = 1,
-                     played_changed_at_ms = ?4,
-                     watch_activity_at = ?4
-                 WHERE user_id = ?1 AND media_id = ?2
-                   AND season >= ?5 AND episode >= ?6
-                   AND (?5 = -1 OR season = ?5)
-                   AND (?6 = -1 OR episode = ?6)",
-            )?;
-            let _ = stmt.execute(params![
-                user_id.to_string(),
-                media_id.to_string(),
-                if played { 1 } else { 0 },
-                now,
-                s_from,
-                e_from,
-            ])?;
-            drop(stmt);
-            // R05-C: Ensure target unit exists so unplayed/played assertion is persisted even if row was absent
-            let existing = self.unit_state(user_id, media_id, season, episode)?;
-            if existing.is_none() {
-                self.upsert_unit_internal(
-                    user_id,
-                    media_id,
-                    season,
-                    episode,
-                    None, // Mark-only
-                    Some(played),
-                    favorite,
-                    None,
-                    None,
-                    None,
-                    false,
-                    now,
-                    None,
-                )?;
-            }
-        }
-        Ok(())
     }
 
     /// Clear viewing facts, retaining favorites, duration and track preferences.

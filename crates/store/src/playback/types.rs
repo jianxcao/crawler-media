@@ -41,6 +41,33 @@ pub struct PlaybackMutation {
     pub expected_generation: Option<i64>,
 }
 
+impl PlaybackMutation {
+    /// A mark on unit coordinates (`-1` = whole item / whole season).
+    pub fn marks(
+        user_id: UserId,
+        season: i32,
+        episode: i32,
+        played: Option<bool>,
+        favorite: Option<bool>,
+    ) -> Self {
+        let scope = match (season, episode) {
+            (s, e) if s < 0 && e < 0 => UnitScope::Whole,
+            (s, e) if e < 0 => UnitScope::Season(s as u32),
+            (s, e) => UnitScope::Episode {
+                season: s.max(0) as u32,
+                episode: e as u32,
+            },
+        };
+        Self {
+            user_id,
+            scope,
+            played,
+            favorite,
+            expected_generation: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlaybackEventType {

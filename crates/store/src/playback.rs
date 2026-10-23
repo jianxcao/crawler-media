@@ -33,6 +33,9 @@ pub struct UnitState {
     /// historical favourite whose time is unknown. Callers must not substitute
     /// `updated_at`: that clock still moves on playback.
     pub favorite_at: i64,
+    /// `played_changed_at_ms` of an explicit played assertion on this exact
+    /// row; `None` when the row carries no assertion.
+    pub played_assertion_at_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

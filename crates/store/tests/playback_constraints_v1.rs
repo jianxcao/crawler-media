@@ -29,12 +29,20 @@ fn upsert_unit_and_set_unit_marks_satisfies_schema_check_constraints() {
 
     // 1. Favorite only episode (no played assertion, position 0) -> R01-A trigger
     store
-        .set_unit_favorite(user_id, media_id, 1, 1, true, 100)
+        .mutate_playback(
+            media_id,
+            &store::playback::PlaybackMutation::marks(user_id, 1, 1, None, Some(true)),
+            100,
+        )
         .unwrap();
 
     // 2. Mark unit played -> Should update has_played_assertion=1, played_changed_at_ms=101
     store
-        .set_unit_marks(user_id, media_id, 1, 1, Some(true), None, 101)
+        .mutate_playback(
+            media_id,
+            &store::playback::PlaybackMutation::marks(user_id, 1, 1, Some(true), None),
+            101,
+        )
         .unwrap();
 
     let state = store

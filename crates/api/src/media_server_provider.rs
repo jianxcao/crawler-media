@@ -38,7 +38,7 @@ mod enrichment;
 pub(crate) mod items;
 mod selection;
 mod user_marks;
-use user_marks::{persist_unplayed_override, resolve_mark_unit, write_favorite_mark};
+use user_marks::resolve_mark_unit;
 
 pub(crate) fn default_library_cover(kind: MediaKind) -> Result<Vec<u8>, String> {
     const DEFAULT_MOVIE_COVER: &[u8] = include_bytes!("../assets/covers/movie.jpg");
@@ -586,38 +586,15 @@ impl MediaServerProvider for ApiServerProvider {
         let Some((media_id, season, episode)) = resolve_mark_unit(&store, user_id, id)? else {
             return Ok(false);
         };
-        // 播放域时间走注入时钟；`playback_units.updated_at` 是**秒**。
-        let now = self.state.playback_clock.now_ms() / 1000;
-        if played.is_none() {
-            let Some(favorite) = favorite else {
-                return Ok(true);
-            };
-            write_favorite_mark(&store, user_id, media_id, season, episode, favorite, now)?;
-            if !favorite
-                && season == crate::store::UNIT_WHOLE
-                && episode == crate::store::UNIT_WHOLE
-            {
-                let _ = store.set_unit_marks(
-                    user_id,
-                    media_id,
-                    season,
-                    episode,
-                    None,
-                    Some(false),
-                    now,
-                );
-            }
-            return Ok(true);
-        }
+        let change = crate::store::playback::PlaybackMutation::marks(
+            user_id, season, episode, played, favorite,
+        );
         store
-            .set_unit_marks(user_id, media_id, season, episode, played, favorite, now)
+            .mutate_playback(media_id, &change, self.state.playback_clock.now_ms())
             .map_err(|error| {
                 tracing::error!(%error, %user_id, %media_id, season, episode, "failed to update Jellyfin user marks");
                 error.to_string()
             })?;
-        if let Some(false) = played {
-            persist_unplayed_override(&store, user_id, media_id, season, episode, favorite, now)?;
-        }
         Ok(true)
     }
 

@@ -46,7 +46,7 @@ pub struct EffectiveAssertion {
 impl Store {
     /// A unit's state with `played` resolved through the assertion hierarchy.
     ///
-    /// `None` means the user carries no fact at all for this unit (not "unplayed"): a reader
+    /// `None` means the user carries no fact at all (no own row and no assertion) for this unit (not "unplayed"): a reader
     /// that needs a default should use that default, not an invented row.
     pub fn effective_unit_state(
         &self,
@@ -54,10 +54,11 @@ impl Store {
         media: MediaId,
         unit: UnitKey,
     ) -> Result<Option<UnitState>, StoreError> {
-        let Some(assertion) = self.effective_played_assertion(user, media, unit)? else {
-            return Ok(None);
-        };
         let own = self.unit_state(user, media, unit.season, unit.episode)?;
+        let Some(assertion) = self.effective_played_assertion(user, media, unit)? else {
+            // A favourite-only or progress-only row is still a fact of this user.
+            return Ok(own);
+        };
         match own {
             Some(mut state) => {
                 // The row exists for progress/favourite; `played` comes from the assertion,

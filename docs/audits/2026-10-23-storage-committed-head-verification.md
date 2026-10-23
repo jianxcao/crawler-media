@@ -120,3 +120,5 @@ deferred_snapshot_write_error: SQLITE_BUSY_SNAPSHOT
 | C01 (A1) | 已修复：cancel 锁内置 cancelled 并克隆 controls，锁外 cancel。回归 `library_work_lifecycle::cancel_during_publication_allows_nested_lease_drop`（旧实现子进程 40s 锁环）。 |
 | C02 (A2) | 已修复：Transfer 锁外等待库 idle，重新加锁后重读订阅/目标并取 lease，目标变化或忙碌则重新等待；patch/search/missing handler 的 guard 工作进 http_work。回归 `management::subscribe_wait_liveness`（单 worker 饥饿、等待中删除）。 |
 | A3 | done: store write_tx (IMMEDIATE) for all write txs, jobs IMMEDIATE, cache init under IMMEDIATE + WAL switch retry; tests write_transaction_contention, cache_writer_contention |
+| A3 | verified: media+jobs+api 1674 pass/0 fail; fanart shared cache 96579b9 |
+| A4 | Fixed: scoped marks via mutate_playback, favorite_at seconds clock, marks never move activity; tests playback_assertions + api playback_clock |

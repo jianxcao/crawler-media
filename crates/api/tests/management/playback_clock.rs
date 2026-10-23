@@ -454,7 +454,7 @@ async fn heartbeat_persists_sub_second_report_time() {
 /// 假时钟 = 真实时钟 - 1 小时 + 500ms：回退到 `unix_now()` 会差 3600 秒，
 /// 直接把毫秒写进秒列会差 ~1.7e12，两者都会被下面的断言抓住。
 #[tokio::test]
-async fn web_marks_persist_injected_clock_seconds() {
+async fn web_marks_persist_injected_clock_units() {
     let tmp = tempfile::tempdir().unwrap();
     let base_ms = (api::job_loop::unix_now() - 3_600) * 1000 + 500;
     let env = ClockEnv::with_base_ms(&tmp, base_ms).await;
@@ -468,17 +468,19 @@ async fn web_marks_persist_injected_clock_seconds() {
     assert_eq!(marked.status(), StatusCode::OK);
 
     let media_id: domain::MediaId = env.media_id.parse().unwrap();
-    let rows = env.store.lock().unit_rows(env.user, media_id).unwrap();
-    let updated_at = rows
-        .iter()
-        .map(|row| row.updated_at)
-        .max()
+    let unit = env
+        .store
+        .lock()
+        .unit_state(env.user, media_id, -1, -1)
+        .unwrap()
         .expect("marks 必须写入 playback_units");
     assert_eq!(
-        updated_at,
-        base_ms / 1000,
-        "web marks 必须按注入时钟的秒值落库"
+        unit.played_assertion_at_ms,
+        Some(base_ms),
+        "played 断言时间是注入时钟的毫秒值"
     );
+    assert_eq!(unit.favorite_at, base_ms / 1000, "favorite_at 是秒");
+    assert_eq!(unit.updated_at, 0, "标记不是观看活动，不推进 activity");
 }
 
 /// `POST /playback/metrics` 落库的 `recorded_at` 必须是注入时钟的秒值。

@@ -135,14 +135,16 @@ pub fn add_ledger(store: &Store, media_id: MediaId, library_root: &Path, name: &
 
 pub fn favorite(store: &Store, user_id: domain::UserId, media_id: MediaId, favorite: bool) {
     store
-        .set_unit_marks(
-            user_id,
+        .mutate_playback(
             media_id,
-            api::store::UNIT_WHOLE,
-            api::store::UNIT_WHOLE,
-            None,
-            Some(favorite),
-            now_secs(),
+            &store::playback::PlaybackMutation::marks(
+                user_id,
+                api::store::UNIT_WHOLE,
+                api::store::UNIT_WHOLE,
+                None,
+                Some(favorite),
+            ),
+            now_secs() * 1000,
         )
         .unwrap();
 }

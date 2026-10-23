@@ -104,7 +104,11 @@ fn favouriting_one_episode_marks_the_media_favourite_in_its_library() {
     let user = UserId::new();
 
     store
-        .set_unit_favorite(user, media, 1, 1, true, 1_000)
+        .mutate_playback(
+            media,
+            &crate::playback::PlaybackMutation::marks(user, 1, 1, None, Some(true)),
+            1_000_000,
+        )
         .unwrap();
 
     let (_, row) =
@@ -126,7 +130,11 @@ fn season_mark_completes_the_owned_season_and_advances_next_up() {
     let user = UserId::new();
 
     store
-        .set_unit_marks(user, media, 1, UNIT_WHOLE, Some(true), None, 2_000)
+        .mutate_playback(
+            media,
+            &crate::playback::PlaybackMutation::marks(user, 1, UNIT_WHOLE, Some(true), None),
+            2_000,
+        )
         .unwrap();
 
     let (_, row) =
@@ -139,7 +147,7 @@ fn season_mark_completes_the_owned_season_and_advances_next_up() {
     assert!(row.seen);
     assert!(!row.played, "S02 is still unwatched");
     assert_eq!((row.next_season, row.next_episode), (Some(2), Some(1)));
-    assert_eq!(row.last_played_at, 2_000);
+    assert_eq!(row.last_played_at, 0, "a mark is not viewing activity");
 }
 
 #[test]
@@ -155,7 +163,11 @@ fn season_mark_leaves_libraries_owning_other_seasons_untouched() {
     // Give the S02 Library a row of its own, then plant a sentinel: a
     // season-1 write must not touch it at all.
     store
-        .set_unit_favorite(user, media, 2, 1, true, 1_000)
+        .mutate_playback(
+            media,
+            &crate::playback::PlaybackMutation::marks(user, 2, 1, None, Some(true)),
+            1_000,
+        )
         .unwrap();
     store
         .library
@@ -167,7 +179,11 @@ fn season_mark_leaves_libraries_owning_other_seasons_untouched() {
         .unwrap();
 
     store
-        .set_unit_marks(user, media, 1, UNIT_WHOLE, Some(true), None, 2_000)
+        .mutate_playback(
+            media,
+            &crate::playback::PlaybackMutation::marks(user, 1, UNIT_WHOLE, Some(true), None),
+            2_000,
+        )
         .unwrap();
 
     let (_, one) = summary_row(&store, user, &season_one, media).expect("S01 library updated");
@@ -188,11 +204,19 @@ fn replaying_the_same_write_is_a_no_op() {
     let user = UserId::new();
 
     store
-        .set_unit_marks(user, media, 1, 1, Some(true), Some(true), 3_000)
+        .mutate_playback(
+            media,
+            &crate::playback::PlaybackMutation::marks(user, 1, 1, Some(true), Some(true)),
+            3_000,
+        )
         .unwrap();
     let first = summary_row(&store, user, &library_id, media).unwrap();
     store
-        .set_unit_marks(user, media, 1, 1, Some(true), Some(true), 3_000)
+        .mutate_playback(
+            media,
+            &crate::playback::PlaybackMutation::marks(user, 1, 1, Some(true), Some(true)),
+            3_000,
+        )
         .unwrap();
     assert_eq!(
         summary_row(&store, user, &library_id, media).unwrap(),
@@ -251,13 +275,15 @@ fn a_library_that_does_not_own_the_media_gets_no_summary() {
     let user = UserId::new();
 
     store
-        .set_unit_marks(
-            user,
+        .mutate_playback(
             media,
-            UNIT_WHOLE,
-            UNIT_WHOLE,
-            Some(true),
-            Some(true),
+            &crate::playback::PlaybackMutation::marks(
+                user,
+                UNIT_WHOLE,
+                UNIT_WHOLE,
+                Some(true),
+                Some(true),
+            ),
             5_000,
         )
         .unwrap();

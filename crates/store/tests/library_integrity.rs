@@ -109,13 +109,15 @@ fn integrity_check_and_repair_lifecycle() {
         .unwrap();
 
     store
-        .set_unit_marks(
-            user_id,
+        .mutate_playback(
             media.id,
-            store::UNIT_WHOLE,
-            store::UNIT_WHOLE,
-            Some(true),
-            Some(true),
+            &store::playback::PlaybackMutation::marks(
+                user_id,
+                store::UNIT_WHOLE,
+                store::UNIT_WHOLE,
+                Some(true),
+                Some(true),
+            ),
             1000,
         )
         .unwrap();

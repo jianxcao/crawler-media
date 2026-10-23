@@ -204,11 +204,9 @@ pub(crate) async fn set_marks(
     };
     let played = body["played"].as_bool();
     let favorite = body["favorite"].as_bool();
-    // `playback_clock` 是毫秒时钟；`playback_units.updated_at` 存 unix 秒。
-    let now = state.playback_clock.now_ms() / 1000;
-    if let Err(error) =
-        store.set_unit_marks(user_id, media_id, season, episode, played, favorite, now)
-    {
+    let change =
+        crate::store::playback::PlaybackMutation::marks(user_id, season, episode, played, favorite);
+    if let Err(error) = store.mutate_playback(media_id, &change, state.playback_clock.now_ms()) {
         return err(
             StatusCode::INTERNAL_SERVER_ERROR,
             "store.error",

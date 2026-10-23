@@ -84,7 +84,11 @@ fn fixture(keep_source_episode: bool) -> Fx {
     }
     let user = UserId::new();
     store
-        .set_unit_favorite(user, media, 2, 1, true, 10)
+        .mutate_playback(
+            media,
+            &store::playback::PlaybackMutation::marks(user, 2, 1, None, Some(true)),
+            10,
+        )
         .unwrap();
     Fx {
         tmp,
