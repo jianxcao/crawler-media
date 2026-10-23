@@ -92,3 +92,17 @@ code; `store library_query_filters` 8/0. Per-statement VM steps were not capture
 20k 单语句（插桩）：page 3904 ms → 40 ms。
 注：5k 的"after"在中间版本（仅后置选源、未强制索引）测得；50k 为最终版本。
 剩余：genre/person/search 随行数线性增长，成本在逐行解析 NFO JSON 谓词（count 与 page 各一次），未在本项处理。
+
+### Q4b — 单次扫描得到页与总数（`COUNT(*) OVER ()`，页空才补跑 count）
+
+release，`jellyfin_page_perf`，median ms（基线 = Q4 提交 68e43bc 的 50k 数）：
+
+| size | first_page | deep_offset | genre | person | search |
+|---|---|---|---|---|---|
+| 5000 | 12.5 | 20.3 (空页) | 82.7 | 173.5 | 55.7 |
+| 20000 | 52.4 | 100.8 (空页) | 325.7 | 598.3 | 181.6 |
+| 50000 | 148.8 | 212.7 | 878.7 | 1741.0 | 531.5 |
+| 50000 基线 | 208.4 | 289.8 | 1269.6 | 1945.7 | 933.7 |
+
+仍线性：每行要算 `scoped` 的 NFO/采纳 JSON 并逐行求谓词；person 主要耗在请求 id → 名字的解析（扫描全部 NFO 演职员）。
+近乎恒定的扩展性要求写入期维护的 term（jellyfin_genre/person_id 已在 CHECK 中但无写入者）与标题 FTS5，并处理 display_locale 变更的失效——未实现。

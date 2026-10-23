@@ -161,3 +161,4 @@ deferred_snapshot_write_error: SQLITE_BUSY_SNAPSHOT
 | A7 | real cross-FS test added (ext4 /tmp → tmpfs /dev/shm, EXDEV copy path): record+complete and crash-before-record recovery green; copy bumps revision exactly once (new dev/ino), receipt replay idempotent. Sidecar IO inside record not moved (open). |
 | A8 | old-code RED attempt: file_rename_shared_artwork.rs at 98f7c91^ fails to compile (SidecarAction/record_rename_disk_observed/list_due_file_rename_ids absent) — compile-level RED only, no behavioral competitor-writer RED reproduced. |
 | A12 | nfo_export_failure_isolation at 87aaa0e^ PASSES (2/0, uid 1000, not skipped): EACCES sidecar also makes old write_nfo fallback fail, so the test does not discriminate; RED not reproduced. |
+| Q4b | page+total in one scan (window COUNT before LIMIT, count only for empty pages); 50k genre 1270→879, search 934→532, person 1946→1741, first 208→149 ms; still O(n), flat scaling needs write-time terms/FTS5 (not done) |

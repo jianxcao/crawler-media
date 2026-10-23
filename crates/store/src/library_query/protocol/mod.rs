@@ -67,21 +67,22 @@ impl Store {
             })
             .transpose()?;
         let plan = sql::plan(request, &scope, work.as_deref(), unit.as_deref(), &bindings);
-        let total: i64 = tx.query_row(
-            &plan.count_sql,
-            params_from_iter(plan.filter_values.iter().cloned()),
-            |row| row.get(0),
-        )?;
-        let items = if total > 0 {
-            let mut stmt = tx.prepare(&plan.page_sql)?;
-            let rows = stmt.query_map(
-                params_from_iter(plan.page_values.iter().cloned()),
-                sql::row_to_ref,
-            )?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        } else {
-            Vec::new()
+        // 一次扫描同时得到本页与总数；只有页为空（无匹配或 offset 越界）才补跑计数。
+        let mut stmt = tx.prepare(&plan.page_sql)?;
+        let rows = stmt.query_map(params_from_iter(plan.page_values.iter().cloned()), |row| {
+            Ok((sql::row_to_ref(row)?, sql::row_total(row)?))
+        })?;
+        let rows = rows.collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        let total: i64 = match rows.first() {
+            Some((_, total)) => *total,
+            None => tx.query_row(
+                &plan.count_sql,
+                params_from_iter(plan.filter_values.iter().cloned()),
+                |row| row.get(0),
+            )?,
         };
+        let items: Vec<_> = rows.into_iter().map(|(item, _)| item).collect();
         tx.commit()?;
         tracing::debug!(
             user = %request.user_id,

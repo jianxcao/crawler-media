@@ -198,11 +198,12 @@ pub(super) fn plan(
              PARTITION BY rows.media_id, rows.season, rows.episode \
              ORDER BY (rows.kind = 'movie') DESC, rows.library_id ASC) AS rn \
            FROM rows), \
-         page AS (SELECT r.* FROM ranked r WHERE r.rn = 1 ORDER BY {order_by} \
+         page AS (SELECT r.*, COUNT(*) OVER () AS total_rows FROM ranked r WHERE r.rn = 1 \
+           ORDER BY {order_by} \
            LIMIT {limit_placeholder} OFFSET {offset_placeholder}), \
          sourced AS MATERIALIZED (SELECT rows.*, {} AS source_file_id FROM page AS rows) \
          SELECT r.library_id, r.media_id, r.season, r.episode, r.source_file_id, \
-           f.file_revision AS source_revision \
+           f.file_revision AS source_revision, r.total_rows \
          FROM sourced r LEFT JOIN library_files f ON f.file_id = r.source_file_id \
          ORDER BY {order_by}",
         source_expr(scope)
@@ -224,6 +225,11 @@ pub(super) fn plan(
 ///
 /// 粒度直接读行里的季号：`season >= 0` 是分集单元，`-1` 是整个作品。混合页两支持
 /// 同一条语句，所以判定不能靠外部的"这次请求是不是分集请求"。
+/// 页内一行附带的去重后总数（窗口在 LIMIT 前求值，与 `count_sql` 同一分区键）。
+pub(super) fn row_total(row: &rusqlite::Row<'_>) -> rusqlite::Result<i64> {
+    row.get(6)
+}
+
 pub(super) fn row_to_ref(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProtocolItemRef> {
     let library_id = parse_id(row.get::<_, String>(0)?, 0)?;
     let media: MediaId = parse_id(row.get::<_, String>(1)?, 1)?;
