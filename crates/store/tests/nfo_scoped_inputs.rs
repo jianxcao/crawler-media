@@ -552,3 +552,77 @@ fn unnumbered_tv_file_does_not_create_subscription_coverage() {
         .unwrap();
     assert_eq!((item.file_count, item.distinct_episode_count), (1, 0));
 }
+
+/// R06: an NFO without its own language stays bound to the locale it was imported in.
+/// Rescans after a display-locale switch (same bytes or edited) keep that binding; only
+/// a sidecar seen for the first time adopts the current display locale.
+#[test]
+fn imported_nfo_keeps_its_locale_across_display_locale_switch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let (library, root) = library_with_root(&store, &tmp.path().join("m"), "M", MediaKind::Movie);
+    let media = insert_media(&store, MediaKind::Movie, "M");
+    let file = video_file(
+        &library,
+        &root,
+        media,
+        MediaKind::Movie,
+        tmp.path().join("m/M.mkv"),
+    );
+    std::fs::write(&file.path, b"bytes").unwrap();
+    let nfo = file.path.with_extension("nfo");
+    std::fs::write(&nfo, "<movie><plot>Plot zh</plot></movie>").unwrap();
+    let scope = WriteScope {
+        library_id: library.parse().unwrap(),
+        config_revision: 0,
+    };
+    publish(&store, &scope, &file, &[UnitKey::WHOLE], "zh-CN");
+    let db = tmp.path().join("library.db");
+    let locales = || -> Vec<String> {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT locale FROM library_metadata_inputs WHERE library_id = ?1")
+            .unwrap();
+        stmt.query_map([&library], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<Vec<String>, _>>()
+            .unwrap()
+    };
+    assert_eq!(locales(), vec!["zh-CN"], "the initial import is real");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE libraries SET display_locale = 'en-US' WHERE library_id = ?1",
+            [&library],
+        )
+        .unwrap();
+
+    store.reconcile_nfo_inputs(&file.path).unwrap();
+    assert_eq!(
+        locales(),
+        vec!["zh-CN"],
+        "same-bytes rescan keeps the import locale"
+    );
+    std::fs::write(&nfo, "<movie><plot>Plot zh edited</plot></movie>").unwrap();
+    store.reconcile_nfo_inputs(&file.path).unwrap();
+    assert_eq!(locales(), vec!["zh-CN"], "an edit keeps the import locale");
+    drop(store);
+    let store = Store::open(tmp.path()).unwrap();
+    store.reconcile_nfo_inputs(&file.path).unwrap();
+    assert_eq!(locales(), vec!["zh-CN"], "restart keeps the import locale");
+    assert_eq!(
+        overview_of(&store, &library, media, "zh-CN").as_deref(),
+        Some("Plot zh edited")
+    );
+
+    std::fs::remove_file(&nfo).unwrap();
+    store.reconcile_nfo_inputs(&file.path).unwrap();
+    assert!(locales().is_empty(), "a removed sidecar releases its input");
+    std::fs::write(&nfo, "<movie><plot>Plot en</plot></movie>").unwrap();
+    store.reconcile_nfo_inputs(&file.path).unwrap();
+    assert_eq!(
+        locales(),
+        vec!["en-US"],
+        "a new sidecar adopts the current locale"
+    );
+}

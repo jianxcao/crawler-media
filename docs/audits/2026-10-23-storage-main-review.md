@@ -122,6 +122,8 @@ locale 步骤只 UPDATE 配置并 count 输入，不重算 locale-dependent item
 
 修复：持久 locale operation 分批按 Media 重算 display 摘要/terms，完成复核前保持 reindexing；无语言 NFO 使用已持久导入 locale，普通重扫不重新解释。实体变化/显式语言变化按单独事实处理。
 
+**状态：已修复（Task7）。** locale 步骤持久化新 display_locale 后按 Media keyset（cursor `last_locale_media_id`，每批 `batch` 个）`reduce_library_media` 重算卡片/terms，最后一批之前 operation 保持 applying，不再仅改配置即 Done。NFO 语言在首次导入时绑定：`record_nfo_observations` 对已登记的 input_key 沿用其导入 locale（所有入口：复核、扫描发布、watch），只有首次出现的 sidecar 取当前 display locale；Invalid/Unknown 不写不删。回归 `library_reconfiguration::locale_change_rebuilds_cards_in_batches_before_success`（3 Media，batch=2，中途 reopen）与 `nfo_scoped_inputs::imported_nfo_keeps_its_locale_across_display_locale_switch`（同字节/编辑/重启保 zh，删除后新建取 en）。
+
 ### R07 [P2，实测] checker/repair 对反向孤儿用户摘要假 clean
 
 位置：`store/src/library_write/reduce/card.rs:61-69`；`library_operations/integrity.rs:308-320`。

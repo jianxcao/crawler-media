@@ -53,7 +53,17 @@ pub fn record_nfo_observations(
     }
     for observation in observations {
         match observation.state {
-            NfoParseState::Valid => upsert_valid_input(tx, target, observation)?,
+            NfoParseState::Valid => match bound_locale(tx, target, &observation.input_key)? {
+                // Import binding: a sidecar keeps the locale it was first recorded in.
+                Some(locale) if locale != observation.locale => {
+                    let bound = NfoObservation {
+                        locale,
+                        ..observation.clone()
+                    };
+                    upsert_valid_input(tx, target, &bound)?;
+                }
+                _ => upsert_valid_input(tx, target, observation)?,
+            },
             NfoParseState::Missing => {
                 // sidecar 已消失：解除它留下的所有输入（含旧 scope / 旧 locale 的行）。
                 tx.execute(
@@ -70,6 +80,29 @@ pub fn record_nfo_observations(
         }
     }
     Ok(true)
+}
+
+/// Locale a registered sidecar was imported in; `None` for a first-seen sidecar, which
+/// then adopts the observation's (current display) locale.
+fn bound_locale(
+    tx: &Connection,
+    target: &NfoInputTarget,
+    input_key: &str,
+) -> Result<Option<String>, StoreError> {
+    tx.prepare_cached(
+        "SELECT locale FROM library_metadata_inputs
+         WHERE library_id = ?1 AND media_id = ?2 AND input_key = ?3 LIMIT 1",
+    )?
+    .query_row(
+        params![
+            target.library_id.to_string(),
+            target.media_id.to_string(),
+            input_key
+        ],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 /// The observation is only publishable while the file source and Library config still match.
@@ -124,7 +157,8 @@ fn upsert_valid_input(
         observation.scope.season_episode().1,
     );
     // 一份 sidecar 只维护自己那一层、自己那一种语言：换了实体层（例如改成
-    // `<episodedetails>`）或导入时 Library locale 变了，旧行必须让位，否则它会一直挂在卡片上。
+    // `<episodedetails>`）时旧行必须让位。语言在首次导入时绑定（复核沿用已登记 locale），
+    // 切换 display locale 不会走到这里改写语言。
     tx.execute(
         "DELETE FROM library_metadata_inputs
          WHERE library_id = ?1 AND media_id = ?2 AND input_key = ?3
