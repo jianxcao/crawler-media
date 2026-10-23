@@ -59,10 +59,18 @@ pub(crate) fn refresh_affected_user_summaries(
     media_id: MediaId,
 ) -> Result<(), StoreError> {
     let users: Vec<String> = {
+        // Raw fact holders UNION users that still hold a derived summary for this
+        // Library/Media: a summary whose raw facts vanished must be recomputed (and so
+        // deleted), never left out of the candidate set.
         let mut stmt = tx.prepare(
-            "SELECT DISTINCT user_id FROM playback_units WHERE media_id = ?1 ORDER BY user_id",
+            "SELECT user_id FROM playback_units WHERE media_id = ?1
+             UNION
+             SELECT user_id FROM user_library_items WHERE library_id = ?2 AND media_id = ?1
+             ORDER BY 1",
         )?;
-        let rows = stmt.query_map([media_id.to_string()], |r| r.get::<_, String>(0))?;
+        let rows = stmt.query_map(params![media_id.to_string(), library_id.to_string()], |r| {
+            r.get::<_, String>(0)
+        })?;
         rows.collect::<Result<Vec<_>, _>>()?
     };
     if users.is_empty() {

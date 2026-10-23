@@ -137,3 +137,45 @@ fn really_missing_user_row_is_found_and_repaired_stably() {
         .unwrap();
     assert_eq!(rows, 1, "repair must not fabricate a row for library A");
 }
+
+/// R07: a derived summary whose raw playback facts were removed out of band is an orphan;
+/// check reports it, repair deletes it, and the recheck is clean.
+#[test]
+fn orphan_summary_without_raw_user_is_repaired() {
+    let fx = fixture();
+    let db = Connection::open(fx.tmp.path().join("data/library.db")).unwrap();
+    let removed = db
+        .execute(
+            "DELETE FROM playback_units WHERE user_id = ?1 AND media_id = ?2",
+            params![fx.user.to_string(), fx.media.to_string()],
+        )
+        .unwrap();
+    assert_eq!(removed, 1);
+    let unrelated = |db: &Connection| -> i64 {
+        db.query_row(
+            "SELECT COUNT(*) FROM user_library_items WHERE library_id = ?1",
+            params![fx.a.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    let unrelated_before = unrelated(&db);
+    let before = run(&fx.store, fx.b, false, "check");
+    assert!(
+        before.has_issues(),
+        "orphan summary must be reported: {before:?}"
+    );
+    run(&fx.store, fx.b, true, "repair");
+    let after_summary: Option<i64> = db
+        .query_row(
+            "SELECT summary_revision FROM user_library_items
+             WHERE library_id = ?1 AND media_id = ?2 AND user_id = ?3",
+            params![fx.b.to_string(), fx.media.to_string(), fx.user.to_string()],
+            |r| r.get(0),
+        )
+        .ok();
+    assert!(after_summary.is_none(), "repair deletes the orphan summary");
+    let recheck = run(&fx.store, fx.b, false, "recheck");
+    assert!(!recheck.has_issues(), "{recheck:?}");
+    assert_eq!(unrelated(&db), unrelated_before);
+}
