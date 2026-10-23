@@ -88,6 +88,7 @@ pub(crate) fn refresh_affected_user_summaries(
         let Ok(user_id) = user_str.parse::<domain::UserId>() else {
             continue;
         };
+        crate::work_counters::count_user_summary_write();
         let facts = crate::Store::summary_facts(tx, user_id, media_id)?;
         crate::Store::write_library_summary(tx, user_id, media_id, &lib_str, is_tv, &facts)?;
     }

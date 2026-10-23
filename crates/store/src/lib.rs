@@ -72,6 +72,7 @@ mod sites;
 mod subscribe_wanted;
 mod subscribes;
 mod users;
+pub mod work_counters;
 mod write_tx;
 pub(crate) use write_tx::write_tx;
 

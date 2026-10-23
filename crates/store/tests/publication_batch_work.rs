@@ -58,8 +58,8 @@ fn pubs(files: &[(LibraryFile, [UnitKey; 1])]) -> Vec<StorePublication<'_>> {
         .collect()
 }
 
-/// Returns (batch ms, owned_episode_count seen by the first user).
-fn batch(users: usize) -> (f64, i64) {
+/// Returns (summary writes during the batch, owned_episode_count of the first user).
+fn batch(users: usize) -> (u64, i64) {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let media = Media {
@@ -110,9 +110,9 @@ fn batch(users: usize) -> (f64, i64) {
             )
         })
         .collect();
-    let start = std::time::Instant::now();
+    let start = store::work_counters::user_summary_writes();
     store.publish_files(&scope, &pubs(&files), 3_000).unwrap();
-    let ms = start.elapsed().as_secs_f64() * 1000.0;
+    let ms = store::work_counters::user_summary_writes() - start;
     drop(store);
     let owned = ids
         .first()
@@ -134,12 +134,8 @@ fn batch(users: usize) -> (f64, i64) {
 fn batch_user_summary_cost_does_not_scale_with_files_times_users() {
     let (quiet, _) = batch(0);
     let (busy, owned) = batch(40);
-    println!("baseline 100-file batch: 0 users {quiet:.1} ms, 40 users {busy:.1} ms");
+    println!("summary writes for a 100-file batch: 0 users {quiet}, 40 users {busy}");
     assert_eq!(owned, 101, "summary reflects every file of the batch");
-    // 40 users x 100 files of per-file finalize dominates the batch; one finalize
-    // per user keeps the extra cost below one more empty batch.
-    assert!(
-        busy < quiet * 2.0 + 50.0,
-        "user summaries finalized per file: {busy:.1} ms vs {quiet:.1} ms"
-    );
+    assert_eq!(quiet, 0);
+    assert_eq!(busy, 40, "one finalize per user per Media per batch");
 }

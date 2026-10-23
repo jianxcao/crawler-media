@@ -21,6 +21,7 @@ both partial indexes cover only non-NULL rows.
 `crates/store/tests/publication_batch_work.rs` (release): 100-file batch onto an
 existing TV card. Before: 0 users 40.7 ms, 40 users 240.3 ms (summary refreshed
 per file). After: 0 users 39.5 ms, 40 users 41.4 ms (once per Media per batch).
+Deterministic gate: per-thread `store::work_counters::user_summary_writes()` — old code 4000 writes (40 users × 100 files), new 40.
 Prepared-statement caching for hot statements was not measured separately; not changed.
 
 ## Q3a / Q3b / Q4 / Q5: baseline only, no code change
