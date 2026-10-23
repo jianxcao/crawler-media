@@ -1,7 +1,7 @@
 mod alias;
 mod anilist;
 mod bangumi;
-mod cache;
+pub mod cache;
 mod client;
 mod contracts;
 mod douban;

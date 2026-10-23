@@ -65,6 +65,8 @@ pub struct ApiState {
     pub(crate) library_root: Arc<PathBuf>,
     pub(crate) catalog: Arc<dyn Catalog>,
     pub(crate) poster_fetch: Arc<dyn PosterFetch>,
+    /// Fanart cache connection opened once per service lifetime (C03).
+    pub(crate) fanart_cache: Arc<std::sync::OnceLock<Arc<media::cache::CatalogCache>>>,
     pub(crate) media_posters: Arc<dyn crate::media_posters::MediaPosterSource>,
     pub log_buffer: LogBuffer,
     pub obscura: Arc<crate::obscura_manager::ObscuraManager>,
@@ -125,6 +127,16 @@ fn apply_admin_bootstrap(
 }
 
 impl ApiState {
+    /// Shared Fanart cache: schema validation/initialization runs on first use only.
+    pub(crate) fn fanart_cache(&self) -> Result<Arc<media::cache::CatalogCache>, media::TmdbError> {
+        if let Some(cache) = self.fanart_cache.get() {
+            return Ok(cache.clone());
+        }
+        let path = self.store.lock().cache_db_path();
+        let cache = media::fanart::open_cache(&path)?;
+        Ok(self.fanart_cache.get_or_init(|| cache).clone())
+    }
+
     pub fn new<F>(
         store: Store,
         token: String,
@@ -293,6 +305,7 @@ impl ApiState {
             library_root: Arc::new(library_root),
             catalog: Arc::new(EmptyCatalog),
             poster_fetch: Arc::new(HttpPoster),
+            fanart_cache: Arc::default(),
             media_posters: Arc::new(crate::media_posters::service::MediaPosterService::new(
                 store.clone(),
                 Arc::new(EmptyCatalog),

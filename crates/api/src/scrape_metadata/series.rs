@@ -686,8 +686,10 @@ fn scrape_tv_fanart(
         lease: lease.as_ref(),
     };
     let getter = PosterFetchCatalogGet { fetch: &fetch };
-    let fanart_db = state.store.lock().cache_db_path();
-    match media::fanart::FanartClient::new(getter, &fanart_db, api_key) {
+    match state
+        .fanart_cache()
+        .map(|cache| media::fanart::FanartClient::with_cache(getter, cache, api_key))
+    {
         Ok(client) => {
             let lang_refs: Vec<&str> = fanart_lang.iter().map(|s| s.as_str()).collect();
             match client.tv(&tvdb_id, &lang_refs) {

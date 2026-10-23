@@ -180,17 +180,36 @@ impl<H: crate::client::CatalogGet> crate::client::CatalogGet for DirectGet<'_, H
 
 pub struct FanartClient<H> {
     http: H,
-    cache: crate::cache::CatalogCache,
+    cache: std::sync::Arc<crate::cache::CatalogCache>,
     api_key: String,
+}
+
+/// Opens (and on first use initializes) the shared Fanart cache connection.
+/// Long-lived services open it once and build light clients per request.
+pub fn open_cache(
+    catalog_db: &std::path::Path,
+) -> Result<std::sync::Arc<crate::cache::CatalogCache>, TmdbError> {
+    Ok(std::sync::Arc::new(
+        crate::cache::CatalogCache::open_source(catalog_db, 0, "fanart")?,
+    ))
 }
 
 impl<H: crate::client::CatalogGet> FanartClient<H> {
     pub fn new(http: H, catalog_db: &std::path::Path, api_key: &str) -> Result<Self, TmdbError> {
-        Ok(Self {
+        let cache = open_cache(catalog_db)?;
+        Ok(Self::with_cache(http, cache, api_key))
+    }
+
+    pub fn with_cache(
+        http: H,
+        cache: std::sync::Arc<crate::cache::CatalogCache>,
+        api_key: &str,
+    ) -> Self {
+        Self {
             http,
-            cache: crate::cache::CatalogCache::open_source(catalog_db, 0, "fanart")?,
+            cache,
             api_key: api_key.to_string(),
-        })
+        }
     }
 
     pub fn tv(&self, tvdb_id: &str, languages: &[&str]) -> Result<FanartSet, TmdbError> {
