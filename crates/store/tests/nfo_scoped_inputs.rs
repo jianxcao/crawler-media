@@ -626,3 +626,86 @@ fn imported_nfo_keeps_its_locale_across_display_locale_switch() {
         "a new sidecar adopts the current locale"
     );
 }
+
+/// C07: carving a nested Library out of a parent moves the sidecar inputs under the new
+/// root together with the files (keeping their imported locale), while a work-level
+/// tvshow.nfo shared with files that stay in the parent keeps its parent ownership.
+#[test]
+fn nested_library_carries_scoped_inputs_and_keeps_shared_parent_nfo() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let shows = tmp.path().join("shows");
+    let (parent, root_id) = library_with_root(&store, &shows, "Shows", MediaKind::Tv);
+    let media = insert_media(&store, MediaKind::Tv, "Show");
+    let show = shows.join("Show");
+    let season1 = show.join("Season 01");
+    let season2 = show.join("Season 02");
+    std::fs::create_dir_all(&season1).unwrap();
+    std::fs::create_dir_all(&season2).unwrap();
+    std::fs::write(
+        show.join("tvshow.nfo"),
+        "<tvshow><title>Work</title></tvshow>",
+    )
+    .unwrap();
+    std::fs::write(
+        season1.join("season.nfo"),
+        "<season><title>Season one</title></season>",
+    )
+    .unwrap();
+    let e01 = season1.join("Show.S01E01.mkv");
+    std::fs::write(&e01, b"e01").unwrap();
+    std::fs::write(
+        season1.join("Show.S01E01.nfo"),
+        "<episodedetails><season>1</season><episode>1</episode><title>One</title></episodedetails>",
+    )
+    .unwrap();
+    let e21 = season2.join("Show.S02E01.mkv");
+    std::fs::write(&e21, b"e21").unwrap();
+    let scope = WriteScope {
+        library_id: parent.parse().unwrap(),
+        config_revision: 0,
+    };
+    let first = video_file(&parent, &root_id, media, MediaKind::Tv, e01);
+    publish(&store, &scope, &first, &[UnitKey::new(1, 1)], "en-US");
+    let second = video_file(&parent, &root_id, media, MediaKind::Tv, e21);
+    publish(&store, &scope, &second, &[UnitKey::new(2, 1)], "en-US");
+
+    let nested = store
+        .create_library(
+            MediaKind::Tv,
+            "Season one",
+            &[season1.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+
+    let db = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
+    let inputs: Vec<(String, String, String)> = db
+        .prepare(
+            "SELECT library_id, entity_scope, locale FROM library_metadata_inputs
+             ORDER BY entity_scope",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let owner = |scope: &str| -> Vec<(String, String)> {
+        inputs
+            .iter()
+            .filter(|(_, s, _)| s == scope)
+            .map(|(l, _, locale)| (l.clone(), locale.clone()))
+            .collect()
+    };
+    assert_eq!(
+        owner("episode"),
+        vec![(nested.id.clone(), "en-US".to_string())]
+    );
+    assert_eq!(
+        owner("season"),
+        vec![(nested.id.clone(), "en-US".to_string())]
+    );
+    assert_eq!(owner("work"), vec![(parent.clone(), "en-US".to_string())]);
+}

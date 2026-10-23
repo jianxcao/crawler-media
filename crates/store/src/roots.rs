@@ -194,6 +194,16 @@ impl Store {
                 ));
             }
         }
+        // Sidecar inputs and unidentified rows under the root are ownership facts of
+        // their own: they move before either side is reduced, so the old Library's
+        // reduce cannot drop inputs that now belong to the new one (C07). Rows outside
+        // the root (a shared tvshow.nfo above it) keep their owner.
+        for (table, column) in [
+            ("library_metadata_inputs", "path_key"),
+            ("unidentified", "path"),
+        ] {
+            reparent_scoped_rows(tx, table, column, kind, (&low, &high), &roots)?;
+        }
         let mut affected = HashSet::new();
         for (file_id, old_library, media_id, root_id, new_library) in moves {
             tx.execute(
@@ -216,6 +226,46 @@ impl Store {
         }
         Ok(())
     }
+}
+
+/// Move every `table` row keyed inside `[low, high)` to the longest covering root.
+fn reparent_scoped_rows(
+    tx: &rusqlite::Connection,
+    table: &str,
+    column: &str,
+    kind: MediaKind,
+    (low, high): (&str, &str),
+    roots: &[(String, String, String)],
+) -> Result<(), StoreError> {
+    let rows: Vec<(String, String, String)> = {
+        let mut stmt = tx.prepare(&format!(
+            "SELECT DISTINCT {column}, library_id, root_id FROM {table}
+             WHERE {column} >= ?1 AND {column} < ?2
+               AND library_id IN (SELECT library_id FROM libraries WHERE kind = ?3)"
+        ))?;
+        stmt.query_map(params![low, high, kind.as_str()], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let update = format!(
+        "UPDATE {table} SET library_id = ?1, root_id = ?2
+         WHERE {column} = ?3 AND library_id = ?4"
+    );
+    for (key, library, root) in rows {
+        let path = Path::new(&key);
+        let best = roots
+            .iter()
+            .filter(|(_, _, candidate)| path.starts_with(Path::new(candidate)))
+            .max_by_key(|(_, _, candidate)| Path::new(candidate).components().count());
+        let Some((root_id, new_library, _)) = best else {
+            continue;
+        };
+        if *root_id != root || *new_library != library {
+            tx.execute(&update, params![new_library, root_id, key, library])?;
+        }
+    }
+    Ok(())
 }
 
 fn file_root_id_is(
