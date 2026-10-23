@@ -109,7 +109,12 @@ fn durable_same_root_rename_moves_sidecar_and_survives_crash_after_disk() {
     let after = recorded(&fx.store, fx.file.file_id);
     assert_eq!(after.path, to);
     assert!(fx.a.join("Renamed.2000.nfo").is_file());
-    assert!(fx.store.list_pending_file_rename_ids().unwrap().is_empty());
+    assert!(
+        fx.store
+            .list_due_file_rename_ids(i64::MAX)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -365,7 +370,7 @@ fn reference_failure_keeps_intent_and_restart_converges() {
     assert!(reference_failure.is_err());
     assert_eq!(recorded(&fx.store, fx.file.file_id).path, to);
     let pending_intent_after_failure =
-        fx.store.list_pending_file_rename_ids().unwrap() == vec![req.rename_id.clone()];
+        fx.store.list_due_file_rename_ids(i64::MAX).unwrap() == vec![req.rename_id.clone()];
     assert!(pending_intent_after_failure);
     assert_eq!(
         intent_phase(&fx, &req.rename_id).as_deref(),
@@ -376,9 +381,16 @@ fn reference_failure_keeps_intent_and_restart_converges() {
         .unwrap();
     // Restart: a fresh Store resumes from the durable phase.
     let reopened = Store::open(fx.tmp.join("data")).unwrap();
-    assert_eq!(reopened.resume_pending_file_renames(3).unwrap(), 1);
+    // The failure scheduled a 60 s back-off (unix seconds); resume once it is due.
+    assert_eq!(reopened.resume_pending_file_renames(3).unwrap(), 0);
+    assert_eq!(reopened.resume_pending_file_renames(62).unwrap(), 1);
     assert_eq!(fact_path(&fx, sub), to.display().to_string());
-    assert!(reopened.list_pending_file_rename_ids().unwrap().is_empty());
+    assert!(
+        reopened
+            .list_due_file_rename_ids(i64::MAX)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

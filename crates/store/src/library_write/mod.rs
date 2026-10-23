@@ -23,7 +23,7 @@ pub use presence::*;
 pub use publish::*;
 pub use reassign::*;
 pub use reduce::*;
-pub use rename_durable::{FileRenameRequest, RenameSidecar, RenameSourceEvidence};
+pub use rename_durable::{FileRenameRequest, RenameSidecar, RenameSourceEvidence, SidecarAction};
 pub use rename_receipt::{RenameDiskReceipt, execute_rename_disk, execute_rename_disk_copying};
 
 #[derive(Clone, Debug, PartialEq, Eq)]

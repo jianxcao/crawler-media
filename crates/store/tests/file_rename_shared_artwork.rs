@@ -260,3 +260,101 @@ fn destination_artwork_conflict_policy_is_explicit() {
         "identical source counts as moved: {queued:?}"
     );
 }
+
+fn execute(fx: &Fx, rename_id: &str) -> store::library_write::RenameDiskReceipt {
+    let request = fx.store.load_file_rename(rename_id).unwrap();
+    store::library_write::execute_rename_disk(&request).unwrap()
+}
+
+#[test]
+fn competitor_appearing_after_observation_is_never_overwritten() {
+    let fx = fixture();
+    let src = fx.a.join("Show");
+    let file = episode(&fx, &src, 1);
+    std::fs::write(src.join("poster.jpg"), b"source").unwrap();
+    let dest = fx.b.join("Show");
+    let req = begin(&fx, &file, &dest.join("S01E01.mkv"));
+    let receipt = execute(&fx, &req.rename_id);
+    let competitor = dest.join("poster.jpg");
+    fx.store
+        .record_rename_disk_observed(&receipt, 2, || {
+            std::fs::write(&competitor, b"competitor").unwrap();
+        })
+        .unwrap();
+    fx.store.complete_file_rename(&req.rename_id, 3).unwrap();
+    let destination_bytes = std::fs::read(&competitor).unwrap();
+    let retained_source_bytes = std::fs::read(src.join("poster.jpg")).unwrap();
+    let pending_deletion_paths = fx.store.list_pending_file_deletions().unwrap();
+    assert_eq!(destination_bytes, b"competitor");
+    assert_eq!(retained_source_bytes, b"source");
+    assert!(
+        !pending_deletion_paths
+            .iter()
+            .any(|p| p.ends_with("a/Show/poster.jpg")),
+        "{pending_deletion_paths:?}"
+    );
+}
+
+#[test]
+fn unreadable_destination_is_unknown_never_identical() {
+    let fx = fixture();
+    let src = fx.a.join("Show");
+    let file = episode(&fx, &src, 1);
+    std::fs::write(src.join("poster.jpg"), b"source").unwrap();
+    let dest = fx.b.join("Show");
+    // A directory at the target: stat succeeds, reading fails.
+    std::fs::create_dir_all(dest.join("poster.jpg")).unwrap();
+    let req = begin(&fx, &file, &dest.join("S01E01.mkv"));
+    let receipt = execute(&fx, &req.rename_id);
+    assert!(fx.store.record_rename_disk(&receipt, 2).is_err());
+    assert_eq!(std::fs::read(src.join("poster.jpg")).unwrap(), b"source");
+    assert_eq!(
+        fx.store.load_file_rename(&req.rename_id).unwrap().phase,
+        "planned",
+        "an unknown observation keeps the last durable decision"
+    );
+    assert!(fx.store.list_pending_file_deletions().unwrap().is_empty());
+}
+
+#[test]
+fn identical_destination_clears_sole_owned_source_and_keeps_references_consistent() {
+    let fx = fixture();
+    let src = fx.a.join("Show");
+    let file = episode(&fx, &src, 1);
+    std::fs::write(src.join("fanart.jpg"), b"same").unwrap();
+    let dest = fx.b.join("Show");
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("fanart.jpg"), b"same").unwrap();
+    let req = begin(&fx, &file, &dest.join("S01E01.mkv"));
+    let receipt = execute(&fx, &req.rename_id);
+    fx.store.record_rename_disk(&receipt, 2).unwrap();
+    let decided = fx.store.load_file_rename(&req.rename_id).unwrap();
+    assert_eq!(
+        decided.sidecars[0].action,
+        store::library_write::SidecarAction::AlreadyIdentical
+    );
+    fx.store.complete_file_rename(&req.rename_id, 3).unwrap();
+    let queued = fx.store.list_pending_file_deletions().unwrap();
+    assert!(
+        queued.iter().any(|p| p.ends_with("a/Show/fanart.jpg")),
+        "{queued:?}"
+    );
+}
+
+#[test]
+fn failed_rename_waits_for_its_retry_time_in_seconds() {
+    let fx = fixture();
+    let src = fx.a.join("Show");
+    let file = episode(&fx, &src, 1);
+    std::fs::write(src.join("poster.jpg"), b"source").unwrap();
+    let dest = fx.b.join("Show");
+    std::fs::create_dir_all(dest.join("poster.jpg")).unwrap();
+    let req = begin(&fx, &file, &dest.join("S01E01.mkv"));
+    assert_eq!(fx.store.resume_pending_file_renames(1_000).unwrap(), 0);
+    // Back-off is 60 s: not due one second later, due a minute later.
+    assert!(fx.store.list_due_file_rename_ids(1_001).unwrap().is_empty());
+    assert_eq!(
+        fx.store.list_due_file_rename_ids(1_060).unwrap(),
+        vec![req.rename_id.clone()]
+    );
+}

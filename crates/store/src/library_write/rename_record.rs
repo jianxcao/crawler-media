@@ -20,7 +20,7 @@ pub(super) struct RawRename {
     phase: String,
     evidence: (i64, i64, i64, i64),
     config: (i64, i64),
-    media_id: String,
+    media_id: Option<String>,
     receipt: (Option<i64>, Option<i64>, Option<i64>, Option<i64>),
 }
 
@@ -45,6 +45,11 @@ impl RawRename {
             media_id: r.get(17)?,
             receipt: (r.get(18)?, r.get(19)?, r.get(20)?, r.get(21)?),
         })
+    }
+
+    /// The intent's file row no longer exists (LEFT JOIN miss).
+    pub(super) fn file_vanished(&self) -> bool {
+        self.media_id.is_none()
     }
 
     pub(super) fn into_request(self, rename_id: &str) -> Result<FileRenameRequest, StoreError> {
@@ -73,7 +78,7 @@ impl RawRename {
             to_root_id: self.to_root_id,
             sidecars,
             phase: self.phase,
-            media_id: self.media_id.parse()?,
+            media_id: self.media_id.unwrap_or_default().parse()?,
             source_evidence: RenameSourceEvidence {
                 version: self.version,
                 size_bytes: size as u64,
@@ -104,7 +109,7 @@ pub(super) fn set_phase(
 ) -> Result<(), StoreError> {
     conn.execute(
         "UPDATE pending_file_renames
-         SET phase = ?2, last_completed_phase = ?2, last_error = NULL, updated_at_ms = ?3
+         SET phase = ?2, last_completed_phase = ?2, last_error = NULL, updated_at_ms = ?3 * 1000
          WHERE rename_id = ?1",
         params![rename_id, phase, now],
     )?;

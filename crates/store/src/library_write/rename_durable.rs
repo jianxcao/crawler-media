@@ -17,9 +17,10 @@ use super::reduce::reduce_library_media;
 use super::rename::{Owned, load_owned};
 pub use super::rename_disk::RenameSourceEvidence;
 use super::rename_record::{RawRename, config_revision, set_phase};
-pub use super::rename_sidecars::SidecarMode;
+pub use super::rename_sidecars::SidecarAction;
 use super::rename_sidecars::{
-    apply_sidecar, classify_shared_sidecars, observe_directory_artwork, recheck_for_execution,
+    apply_sidecar, classify_shared_sidecars, decide_for_execution, observe_directory_artwork,
+    observe_targets,
 };
 use crate::library_paths::resolved_path;
 use crate::{Store, StoreError};
@@ -30,8 +31,8 @@ pub struct RenameSidecar {
     pub kind: String,
     pub from: PathBuf,
     pub to: PathBuf,
-    /// Move when this video is the sole owner, copy when other media share it.
-    pub mode: SidecarMode,
+    /// Durable decision; see [`SidecarAction`].
+    pub action: SidecarAction,
 }
 
 /// Persisted rename / re-parent intent.
@@ -150,15 +151,14 @@ impl Store {
             refuse_occupied(&tx, &side_to, &id)?;
         }
         let rename_id = uuid::Uuid::new_v4().to_string();
-        let sidecars_json = serde_json::to_string(&sidecars)
-            .map_err(|e| StoreError::Invalid(format!("sidecars json: {e}")))?;
+        let sidecars_json = sidecars_json(&sidecars)?;
         tx.execute(
             "INSERT INTO pending_file_renames
                 (rename_id, file_id, from_path, to_path, expected_revision, expected_source_version,
                  from_library_id, from_root_id, to_library_id, to_root_id, sidecars_json, phase,
                  source_size, source_device, source_inode, source_mtime_ns,
                  from_config_revision, to_config_revision, created_at_ms, updated_at_ms)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'planned',?12,?13,?14,?15,?16,?17,?18,?18)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'planned',?12,?13,?14,?15,?16,?17,?18*1000,?18*1000)",
             params![
                 rename_id,
                 id,
@@ -210,6 +210,18 @@ impl Store {
         receipt: &super::RenameDiskReceipt,
         now: i64,
     ) -> Result<(), StoreError> {
+        self.record_rename_disk_observed(receipt, now, || {})
+    }
+
+    /// Test seam: `after_decision` runs after the decision commits and before any
+    /// sidecar byte is written (a competitor may appear there).
+    #[doc(hidden)]
+    pub fn record_rename_disk_observed(
+        &self,
+        receipt: &super::RenameDiskReceipt,
+        now: i64,
+        after_decision: impl FnOnce(),
+    ) -> Result<(), StoreError> {
         let rename_id = receipt.rename_id.as_str();
         let request = self.load_file_rename(rename_id)?;
         match request.phase.as_str() {
@@ -223,15 +235,16 @@ impl Store {
         }
         let destination = &receipt.destination;
         let mut sidecars = request.sidecars.clone();
+        // Byte comparison happens here, outside every transaction.
+        let observed = observe_targets(&sidecars);
         let tx = crate::write_tx(&self.library)?;
-        recheck_for_execution(
+        decide_for_execution(
             &tx,
             &request.file_id.to_string(),
             &request.from_path,
             &mut sidecars,
+            &observed,
         )?;
-        let sidecars_json = serde_json::to_string(&sidecars)
-            .map_err(|e| StoreError::Invalid(format!("sidecars json: {e}")))?;
         tx.execute(
             "UPDATE pending_file_renames
              SET sidecars_json = ?2, dest_size = ?3, dest_device = ?4, dest_inode = ?5,
@@ -239,7 +252,7 @@ impl Store {
              WHERE rename_id = ?1 AND phase = 'planned'",
             params![
                 rename_id,
-                sidecars_json,
+                sidecars_json(&sidecars)?,
                 destination.size_bytes as i64,
                 destination.device as i64,
                 destination.inode as i64,
@@ -247,8 +260,12 @@ impl Store {
             ],
         )?;
         tx.commit()?;
-        apply_sidecar_moves(&sidecars)?;
-        self.mark_rename_disk_applied(rename_id, now)?;
+        after_decision();
+        for side in sidecars.iter_mut() {
+            apply_sidecar(side)?;
+        }
+        // Competitor-driven downgrades are persisted with the phase change.
+        self.mark_rename_disk_applied(rename_id, &sidecars, now)?;
         super::rename_receipt::remove_staging(&request)
     }
 
@@ -362,6 +379,13 @@ impl Store {
             "UPDATE library_file_units SET library_id = ?2 WHERE file_id = ?1",
             params![id, to_library],
         )?;
+        // References follow only sidecars whose persisted decision placed them.
+        let placed: Vec<RenameSidecar> = request
+            .sidecars
+            .iter()
+            .filter(|side| side.action.migrates_references())
+            .cloned()
+            .collect();
         migrate_metadata_inputs(
             &tx,
             &from_library,
@@ -369,10 +393,10 @@ impl Store {
             &request.to_root_id,
             &from_str,
             &to_str,
-            &request.sidecars,
+            &placed,
         )?;
-        migrate_scrape_sidecars(&tx, &id, &request.sidecars)?;
-        rewrite_artwork_paths(&tx, &id, &request.sidecars)?;
+        migrate_scrape_sidecars(&tx, &id, &placed)?;
+        rewrite_artwork_paths(&tx, &id, &placed)?;
         reduce_library_media(&tx, request.from_library_id, request.media_id)?;
         if request.to_library_id != request.from_library_id {
             reduce_library_media(&tx, request.to_library_id, request.media_id)?;
@@ -404,9 +428,10 @@ impl Store {
             return Err(error);
         }
         set_phase(&self.library, rename_id, "references_applied", now)?;
-        // Queue leftover source-side sidecar bytes (rename failed / copy case).
+        // Queue left-over sole-owned source bytes (cross-device copy, identical
+        // destination). Shared and retained sources are never queued.
         for side in &request.sidecars {
-            if side.mode == SidecarMode::Move && side.from.is_file() && side.from != side.to {
+            if side.action.deletes_source() && side.from.is_file() && side.from != side.to {
                 if let Err(error) = self.enqueue_file_deletion(
                     &side.from.to_string_lossy(),
                     "rename-left-behind-sidecar",
@@ -423,8 +448,9 @@ impl Store {
     }
 
     /// Drive every unfinished rename from its last durable phase.
+    /// `now` is unix seconds (the unit of `next_retry_at`); only due intents run.
     pub fn resume_pending_file_renames(&self, now: i64) -> Result<usize, StoreError> {
-        let ids = self.list_pending_file_rename_ids()?;
+        let ids = self.list_due_file_rename_ids(now)?;
         let mut done = 0usize;
         for id in ids {
             match self.resume_one_file_rename(&id, now) {
@@ -454,13 +480,15 @@ impl Store {
         self.complete_file_rename(rename_id, now)
     }
 
-    pub fn list_pending_file_rename_ids(&self) -> Result<Vec<String>, StoreError> {
+    /// Unfinished intents whose retry time (unix seconds) has come.
+    pub fn list_due_file_rename_ids(&self, now: i64) -> Result<Vec<String>, StoreError> {
         let mut stmt = self.library.prepare(
             "SELECT rename_id FROM pending_file_renames
              WHERE phase IN ('planned','disk_applied','library_published','references_applied')
-             ORDER BY created_at_ms, rename_id",
+               AND next_retry_at <= ?1
+             ORDER BY next_retry_at, created_at_ms, rename_id",
         )?;
-        let rows = stmt.query_map([], |r| r.get(0))?;
+        let rows = stmt.query_map(params![now], |r| r.get(0))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -474,13 +502,20 @@ impl Store {
                         r.source_size, r.source_device, r.source_inode, r.source_mtime_ns,
                         r.from_config_revision, r.to_config_revision, f.media_id,
                         r.dest_size, r.dest_device, r.dest_inode, r.dest_mtime_ns
-                 FROM pending_file_renames r JOIN library_files f ON f.file_id = r.file_id
+                 FROM pending_file_renames r LEFT JOIN library_files f ON f.file_id = r.file_id
                  WHERE r.rename_id = ?1",
                 params![rename_id],
                 RawRename::read,
             )
             .optional()?
             .ok_or_else(|| StoreError::Missing(format!("rename {rename_id}")))?;
+        if raw.file_vanished() {
+            // The file row is gone: the intent can never complete. Keep it as a
+            // terminal audit record instead of retrying forever.
+            let error = format!("rename {rename_id}: file record vanished");
+            self.mark_file_rename_failed(rename_id, crate::unix_now(), &error)?;
+            return Err(StoreError::Missing(error));
+        }
         raw.into_request(rename_id)
     }
 
@@ -493,21 +528,26 @@ impl Store {
         tracing::error!(rename_id, error, "rename refused; intent marked failed");
         self.library.execute(
             "UPDATE pending_file_renames
-             SET last_completed_phase = phase, phase = 'failed', last_error = ?3,
-                 updated_at_ms = ?2
+             SET last_completed_phase = CASE WHEN phase = 'failed' THEN last_completed_phase ELSE phase END,
+                 phase = 'failed', last_error = ?3, updated_at_ms = ?2 * 1000
              WHERE rename_id = ?1 AND phase <> 'failed'",
             params![rename_id, now, error],
         )?;
         Ok(())
     }
 
-    fn mark_rename_disk_applied(&self, rename_id: &str, now: i64) -> Result<(), StoreError> {
+    fn mark_rename_disk_applied(
+        &self,
+        rename_id: &str,
+        sidecars: &[RenameSidecar],
+        now: i64,
+    ) -> Result<(), StoreError> {
         let n = self.library.execute(
             "UPDATE pending_file_renames
              SET phase = 'disk_applied', last_completed_phase = 'disk_applied',
-                 updated_at_ms = ?2, last_error = NULL
+                 sidecars_json = ?3, updated_at_ms = ?2 * 1000, last_error = NULL
              WHERE rename_id = ?1 AND phase IN ('planned','disk_applied')",
-            params![rename_id, now],
+            params![rename_id, now, sidecars_json(sidecars)?],
         )?;
         if n != 1 {
             return Err(StoreError::Protected(format!(
@@ -528,7 +568,7 @@ impl Store {
              SET attempts = attempts + 1,
                  next_retry_at = ?2 + MIN(86400, 60 * (1 << MIN(attempts, 10))),
                  last_error = ?3,
-                 updated_at_ms = ?2
+                 updated_at_ms = ?2 * 1000
              WHERE rename_id = ?1",
             params![rename_id, now, error],
         )?;
@@ -575,18 +615,14 @@ fn observe_sidecars(from: &Path, to: &Path) -> Vec<RenameSidecar> {
             kind: "nfo".into(),
             from: from_nfo,
             to: to_parent.join(format!("{to_stem}.nfo")),
-            mode: SidecarMode::Move,
+            action: SidecarAction::Move,
         });
     }
     out
 }
 
-fn apply_sidecar_moves(sidecars: &[RenameSidecar]) -> Result<(), StoreError> {
-    // Already moved / copied, or never present after a crash — skipped inside.
-    for side in sidecars {
-        apply_sidecar(side)?;
-    }
-    Ok(())
+fn sidecars_json(sidecars: &[RenameSidecar]) -> Result<String, StoreError> {
+    serde_json::to_string(sidecars).map_err(|e| StoreError::Invalid(format!("sidecars json: {e}")))
 }
 
 fn migrate_metadata_inputs(
@@ -697,7 +733,7 @@ fn merge_registered_sidecars(
             kind,
             from,
             to,
-            mode: SidecarMode::Move,
+            action: SidecarAction::Move,
         });
     }
     Ok(())
