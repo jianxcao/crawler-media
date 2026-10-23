@@ -11,6 +11,7 @@ async function loadLibraries(request) {
   const module = { exports: {} };
   new Function("require", "module", "exports", js)((dependency) => {
     if (dependency === "@/lib/http") return { request, resolveRequestUrl: (p) => p };
+    if (dependency.endsWith("library-filter")) return { filterQuery: () => undefined };
     return {};
   }, module, module.exports);
   return module.exports;
@@ -101,4 +102,11 @@ test("metadata refresh returns the synchronous refreshed count, not a fake job",
   assert.deepEqual(library, { refreshed: 3 });
   const item = await api.refreshItemMetadata("lib", "m");
   assert.deepEqual(item, { refreshed: 3 });
+});
+
+test("list endpoints reject a non-array payload instead of rendering empty", async () => {
+  const api = await loadLibraries(async () => envelope({ items: [] }));
+  await assert.rejects(api.listLibraries(), /响应格式错误/);
+  await assert.rejects(api.listLibraryItems("lib"), /响应格式错误/);
+  await assert.rejects(api.listLibraryItemIndex("lib"), /响应格式错误/);
 });

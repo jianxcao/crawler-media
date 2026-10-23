@@ -4,6 +4,12 @@ import { waitForLibraryRemoval, type RemovalWaitOptions } from "@/lib/library-re
 import { waitForLibraryOperation, type OperationWaitOptions } from "@/lib/library-operations";
 import { collectAllFilePages } from "@/lib/library-file-pages";
 
+/** 列表端点只接受数组载荷；其它形状是契约破坏，直接报错而不是渲染空态。 */
+function arrayPayload(raw: unknown, label: string): unknown[] {
+  if (!Array.isArray(raw)) throw new Error(`${label}响应格式错误`);
+  return raw;
+}
+
 export type { LibraryKind, MediaType };
 
 /** 后端统一响应信封（自有 API：{ ok, data }，见 docs/api-contracts/self.md） */
@@ -852,7 +858,7 @@ export function listLibraries(
   }
   const suffix = params.size > 0 ? `?${params}` : "";
   return unwrap(request<ApiEnvelope<unknown[]>>(`/libraries${suffix}`, init)).then((raw) =>
-    (Array.isArray(raw) ? raw : []).map(libraryFrom),
+    arrayPayload(raw, "媒体库列表").map(libraryFrom),
   );
 }
 
@@ -1059,7 +1065,7 @@ export function listLibraryItems(
   if (params?.unwatchedFirst) query.set("unwatched_first", "true");
   const suffix = query.size > 0 ? `?${query}` : "";
   return unwrap(request<ApiEnvelope<unknown[]>>(`/libraries/${id}/items${suffix}`)).then((raw) =>
-    (Array.isArray(raw) ? raw : []).map(itemFrom),
+    arrayPayload(raw, "媒体库条目").map(itemFrom),
   );
 }
 
@@ -1077,7 +1083,7 @@ export function listLibraryItemIndex(
   const suffix = query.size > 0 ? `?${query}` : "";
   return unwrap(request<ApiEnvelope<unknown[]>>(`/libraries/${id}/item-index${suffix}`)).then(
     (raw) =>
-      (Array.isArray(raw) ? raw : []).map((entry) => {
+      arrayPayload(raw, "首字母索引").map((entry) => {
         const r = (entry ?? {}) as Record<string, unknown>;
         return { initial: str(r.initial), count: num(r.count), offset: num(r.offset) };
       }),
