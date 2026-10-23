@@ -55,6 +55,18 @@ pub(crate) fn browse_filter_from_query(
             None => Ok(None),
         }
     };
+    const RETIRED: [&str; 7] = [
+        "genres",
+        "countries",
+        "decades",
+        "runtimes",
+        "languages",
+        "resolutions",
+        "watch",
+    ];
+    if let Some(key) = RETIRED.iter().find(|key| query.contains_key(**key)) {
+        return Err(format!("unknown filter key {key}; use g/c/d/rt/lang/res/w"));
+    }
     let rating = match query.get("rating_gte") {
         Some(raw) => {
             let value = raw
@@ -68,17 +80,17 @@ pub(crate) fn browse_filter_from_query(
         None => None,
     };
     Ok(library_query::BrowseFilter {
-        genres: list(&["genres", "g"]),
-        countries: list(&["countries", "c"]),
-        decades: list(&["decades", "d"]),
-        runtimes: list(&["runtimes", "rt"]),
-        languages: list(&["languages", "lang"]),
-        resolutions: list(&["resolutions", "res"]),
+        genres: list(&["g"]),
+        countries: list(&["c"]),
+        decades: list(&["d"]),
+        runtimes: list(&["rt"]),
+        languages: list(&["lang"]),
+        resolutions: list(&["res"]),
         stock: list(&["stock"]),
         hdr: flag("hdr")?,
         min_rating: rating,
         identity: query.get("identity").cloned(),
-        watch: query.get("watch").or_else(|| query.get("w")).cloned(),
+        watch: query.get("w").cloned(),
         unwatched_first: match query.get("unwatched_first") {
             None => false,
             Some(raw) if raw == "true" || raw == "1" => true,

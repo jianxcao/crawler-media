@@ -185,7 +185,7 @@ async fn wall_filter_and_relax_use_resolutions() {
         app.clone()
             .oneshot(request(
                 "GET",
-                &format!("/api/v1/libraries/{movie_id}/items?resolutions=2160p"),
+                &format!("/api/v1/libraries/{movie_id}/items?res=2160p"),
                 Some("management-secret"),
                 Value::Null,
             ))
@@ -199,6 +199,22 @@ async fn wall_filter_and_relax_use_resolutions() {
         "resolution filter applies"
     );
     assert_eq!(filtered["data"][0]["title"], "The Matrix");
+
+    let long_name = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("/api/v1/libraries/{movie_id}/items?resolutions=2160p"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        long_name.status(),
+        axum::http::StatusCode::BAD_REQUEST,
+        "long filter synonyms are not part of the contract"
+    );
 
     let relax = json_body(
         app.clone()

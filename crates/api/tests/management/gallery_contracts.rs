@@ -247,10 +247,7 @@ async fn library_gallery_and_wall_share_filter_and_sort() {
                 "{route} ignored {filter}"
             );
         }
-        for filter in [
-            "rating_gte=8&rt=90to120&lang=en",
-            "resolutions=1080p&d=2020s",
-        ] {
+        for filter in ["rating_gte=8&rt=90to120&lang=en", "res=1080p&d=2020s"] {
             let data = fetch_gallery_json(
                 &app,
                 &format!("/api/v1/libraries/{lib_id}/{route}?{filter}"),

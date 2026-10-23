@@ -543,7 +543,7 @@ async fn api_watch_filters_and_unwatched_first_over_http() {
             &api_items(
                 &app,
                 &token,
-                &format!("{base}?watch={watch}&sort=added_at&order=asc&limit=200"),
+                &format!("{base}?w={watch}&sort=added_at&order=asc&limit=200"),
             )
             .await,
         );

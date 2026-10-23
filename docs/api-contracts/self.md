@@ -113,7 +113,7 @@ Playback history/watch stats 的 `member_id` 只接受 User UUID；显式传入�
 `{total, genres, countries, decades, watch, ratings, runtimes, languages, resolutions, hdr, stock}`，每项 `{value, label, count}`。
 
 - **计数**：维度 D 的值 v 的 `count` = 满足「**除 D 以外**全部已选条件」且 D 取 v 的 **distinct Media** 数；`total` = 满足全部条件的 distinct Media 数（不是 ledger 行数）。候选全集来自该库全部可见 Media，含 `count: 0`（前端置灰）。
-- **查询键**：items/facets 共用 `browse_filter_from_query`。多值维度用逗号分隔，支持 `genres|g`、`countries|c`、`decades|d`（`2020s|2010s|2000s|1990s|earlier`）、`runtimes|rt`（`lte60|60to90|90to120|gt120`）、`languages|lang`、`resolutions|res`、`stock`（`missing|unscraped`），维内 OR、维间 AND。`watch|w` 是单值 `unwatched|watching|played|favorite`；`rating_gte` 接受有限 `0..=10` 数值（6/7/8/9 是 UI 档位），`hdr` 为 `true|false`，另有 `identity`。不能把 UI 预设档位当作 handler 全部接受范围（`http/library.rs`、`store/src/library_query/items.rs`）。
+- **查询键**：items/facets 共用 `browse_filter_from_query`。多值维度用逗号分隔，只接受短键 `g`、`c`、`d`（`2020s|2010s|2000s|1990s|earlier`）、`rt`（`lte60|60to90|90to120|gt120`）、`lang`、`res`、`stock`（`missing|unscraped`），维内 OR、维间 AND。`w` 是单值 `unwatched|watching|played|favorite`；`rating_gte` 接受有限 `0..=10` 数值（6/7/8/9 是 UI 档位），`hdr` 为 `true|false`，另有 `identity`。旧长键（genres/countries/decades/runtimes/languages/resolutions/watch）返回 400。不能把 UI 预设档位当作 handler 全部接受范围（`http/library.rs`、`store/src/library_query/items.rs`）。
 - **`tier`**：`primary` 只填 `genres/countries/decades/watch`，其余空数组；`all` 十维全填；**缺失或空串按 `all`**；其他非空值 → 400 `library.invalid`。
 - 未知年份与 `>=2030` 不归入任何 `decades` 档。
 
