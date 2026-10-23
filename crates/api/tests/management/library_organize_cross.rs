@@ -169,3 +169,36 @@ async fn cross_library_organize_requires_admin() {
     );
     assert!(fx.from.is_file() && !to.exists());
 }
+
+/// S02 over HTTP: a cross-Library organize racing the removal of its source
+/// Library both finish, and the bytes agree with what the ledger says.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cross_library_organize_racing_source_removal_finishes_consistently() {
+    let fx = fixture().await;
+    let to = fx.other_root.join("Matrix (1999).mkv");
+    let entry = json!({ "from": fx.from, "to": to, "to_library_id": fx.other_id });
+    let remove = fx.app.clone().oneshot(request(
+        "DELETE",
+        &format!("/api/v1/libraries/{}", fx.movie_id),
+        Some("management-secret"),
+        Value::Null,
+    ));
+    let raced = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::join!(organize(&fx, Some("management-secret"), entry), remove)
+    })
+    .await
+    .expect("organize and removal must both finish");
+    let (status, body) = raced.0;
+    assert!(raced.1.is_ok());
+    assert!(
+        status == StatusCode::OK || status == StatusCode::CONFLICT,
+        "{status} {body}"
+    );
+    // Exactly one copy of the bytes exists.
+    assert!(
+        fx.from.is_file() ^ to.is_file(),
+        "from={} to={}",
+        fx.from.is_file(),
+        to.is_file()
+    );
+}

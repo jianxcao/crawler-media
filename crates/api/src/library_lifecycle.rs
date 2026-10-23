@@ -233,11 +233,17 @@ impl LibraryWorkLease {
         &self.library_id
     }
     pub fn publish<T>(&self, publish: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-        let entries = self.registry.entries.lock();
-        if entries
+        // Lock order is registry → (released) → publication gate. The registry
+        // guard is dropped before entering the gate: a freeze that marks the
+        // entry after this check still cancels `self.control` under the gate, so
+        // the gate's own cancelled check refuses or the freeze waits for us.
+        let cancelled = self
+            .registry
+            .entries
+            .lock()
             .get(&self.library_id)
-            .is_none_or(|entry| entry.cancelled)
-        {
+            .is_none_or(|entry| entry.cancelled);
+        if cancelled {
             return Err("Library work cancelled".into());
         }
         self.control.publish(publish)
@@ -317,11 +323,19 @@ impl LibraryWorkRegistry {
         store: &Mutex<store::Store>,
         library_id: &str,
     ) -> Result<store::LibraryRemoval, store::StoreError> {
-        let mut entries = self.entries.lock();
-        let operation = store.lock().begin_library_removal(library_id)?;
-        let entry = entries.entry(library_id.into()).or_default();
-        entry.cancelled = true;
-        for control in entry.controls.values() {
+        let controls = {
+            let mut entries = self.entries.lock();
+            let operation = store.lock().begin_library_removal(library_id)?;
+            let entry = entries.entry(library_id.into()).or_default();
+            entry.cancelled = true;
+            let controls: Vec<_> = entry.controls.values().cloned().collect();
+            (operation, controls)
+        };
+        // Cancel outside the registry: `cancel` waits on each publication gate,
+        // and a publication may acquire or drop a lease (registry) inside it.
+        // No new lease can be added any more because `cancelled` is already set.
+        let (operation, controls) = controls;
+        for control in controls {
             control.cancel();
         }
         Ok(operation)
@@ -370,10 +384,14 @@ impl LibraryWorkRegistry {
     /// committed the freeze, and this only mirrors it in the registry so that
     /// in-process workers stop before touching a frozen generation.
     pub(crate) fn block(&self, library_id: &str, operation_id: &str) {
-        let mut entries = self.entries.lock();
-        let entry = entries.entry(library_id.into()).or_default();
-        entry.blocked_by = Some(operation_id.into());
-        for control in entry.controls.values() {
+        let controls: Vec<_> = {
+            let mut entries = self.entries.lock();
+            let entry = entries.entry(library_id.into()).or_default();
+            entry.blocked_by = Some(operation_id.into());
+            entry.controls.values().cloned().collect()
+        };
+        // Same order as `freeze`: never wait on a publication gate under the registry.
+        for control in controls {
             control.cancel();
         }
     }

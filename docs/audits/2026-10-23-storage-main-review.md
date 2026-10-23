@@ -48,6 +48,8 @@ organize 持源 publication gate 再 acquire 目标 registry；freeze/block 持 
 
 修复：外层持有全部源/目标 lease，gate 内不得 acquire/drop lease；按统一 registry→publication→Store 顺序做短发布，磁盘 IO 不包在整批 publication gate 内。回归使用独立子进程 watchdog，要求 organize 与 freeze 均结束或明确拒绝。
 
+**状态：已修复（Task2）。** 锁序固定为 registry →（释放）→ publication gate → Store：`freeze`/`block` 在 registry 内只置标记并复制 controls，释放后再逐个 `cancel`（等待 gate）；`LibraryWorkLease::publish` 检查后即释放 registry 再进 gate。organize 拆到 `http/library_organize_apply.rs`：源/目标 lease 全部在外层先取得并在外层析构；每项仅“校验+begin”和“apply+complete”两次短发布持 gate，字节移动与 NFO 写入不持 gate/Store。回归 `library_work_lifecycle::target_lease_inside_source_publication_does_not_deadlock_freeze`（子进程 watchdog；修复前 `LOCK_CYCLE organize_finished=false freeze_finished=false`）与 `management::…::cross_library_organize_racing_source_removal_finishes_consistently`（HTTP 并发 organize/DELETE 30s 内完成，字节恰一份）。
+
 **测试代码审查边界：** 未证明额外独立 fixture 死锁。BlockingBudget permit 随实际 blocking work 持有、wait_idle 先注册通知再检查且 await 前释放 guard、Job 执行在队列锁外；这些未发现本轮可证明的循环。测试绿不证明没有竞态；昂贵规模用例和时序抖动不应直接归类死锁。`media_reassign.rs:375` 另有固定错误产品行为的断言，见 R03。
 
 ## Spec findings

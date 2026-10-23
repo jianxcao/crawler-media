@@ -32,6 +32,7 @@ pub(crate) mod library_gallery;
 pub(crate) mod library_housekeeping;
 pub(crate) mod library_operations;
 pub(crate) mod library_organize;
+pub(crate) mod library_organize_apply;
 pub(crate) mod library_presence;
 pub(crate) mod library_scan;
 pub(crate) mod media;
