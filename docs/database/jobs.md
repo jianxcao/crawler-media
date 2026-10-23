@@ -2,9 +2,9 @@
 
 [返回数据库总览](README.md)
 
-结构源码基线：`1845dab`（2026-10-22）。Queue入口仍是[jobs::Queue::open](../../crates/jobs/src/queue.rs)，调用[store::migrate](../../crates/jobs/src/store.rs)、[change_state.rs](../../crates/jobs/src/change_state.rs)与[retention_cursor.rs](../../crates/jobs/src/retention_cursor.rs)初始化；API启动另先调用[Store布局闸门](../../crates/store/src/schema/layout.rs)的initialize_jobs_layout。这里是源码核对，不是本轮真实实例操作。
+结构/初始化源码核对：`8fbf81b`（2026-10-23）。Queue入口仍是[jobs::Queue::open](../../crates/jobs/src/queue.rs)，调用[store::migrate](../../crates/jobs/src/store.rs)、[change_state.rs](../../crates/jobs/src/change_state.rs)与[retention_cursor.rs](../../crates/jobs/src/retention_cursor.rs)初始化；API启动另先调用[Store布局闸门](../../crates/store/src/schema/layout.rs)的initialize_jobs_layout。这里是源码核对，不是本轮真实实例操作。
 
-共 **4张业务表、29字段、9个显式命名索引、6触发器**。API启动链当前标记 `application_id=1129139252 / user_version=1`，检查声明表/索引名称；全形状但0/0的已有Queue库会补身份头，不搬行或建兼容视图。独立Queue构造器自身仍不设该头，不能混淆这两个入口。旧合同“不另设Jobs编号”与实现已有偏差，事实记录于此，不因本文自动授权新的迁移/删队列。Queue仍用幂等CREATE，不宣称逐列完整schema验证。
+共 **4张业务表、29字段、9个显式命名索引、6触发器**。API启动链当前标记 `application_id=1129139252 / user_version=1`，检查声明表/索引名称；已有业务表却application_id/user_version为0/0时，Store启动预检会拒绝；仅无用户对象且0/0的空文件可初始化身份头，不补旧库身份。独立Queue构造器自身仍不设该头，不能混淆这两个入口。旧合同“不另设Jobs编号”与实现已有偏差，事实记录于此，不因本文自动授权新的迁移/删队列。Queue仍用幂等CREATE及旧jobs_live_def索引清理，不宣称逐列完整schema验证。Queue连接显式WAL/busy_timeout/FK，但尚未显式synchronous；Store连接FULL不能推广为Jobs也已显式FULL。
 
 本库没有声明外键。下表 NOT NULL 指显式声明：`job_defs.id`、`jobs.id` 与 `retention_cursors.def_id` 的 `TEXT PRIMARY KEY` 没有另写 NOT NULL，不能误报成显式非空。主键自动索引不计入命名索引。Job 状态枚举、payload JSON、enabled 的 0/1 都是业务约定，不是 DDL CHECK。
 

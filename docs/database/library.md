@@ -2,18 +2,17 @@
 
 [返回数据库总览](README.md)
 
-结构/行为复审：`1845dab`（2026-10-22）。`application_id=1129139249`，`user_version=1`。不可按缓存清空。
+结构核对：`8fbf81b`（2026-10-23）；行为边界见[当前复审](../audits/2026-10-23-storage-followup-review.md)。`application_id=1129139249`，`user_version=1`。不可按缓存清空。
 
-结构为 **45张业务表、519字段、51个显式命名索引、32组FK、0触发器**，不计SQLite自动索引。已移除两个与主键/UNIQUE重复的声明；历史53索引测量仍只对原版本有效。当前字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准，结构一致不等于业务不变量已验收。
+结构为 **47张业务表、553字段、57个显式命名索引、32组FK、0触发器**，不计SQLite自动索引。历史45表/519字段/51索引描述已撤下；当前统计来自生产DDL的内存SQLite执行结果。当前字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准，结构一致不等于业务不变量已验收。
 
 ## 实现边界
 
-- Media/Library/Collection/Playback已同库；旧ledger/file_meta/browse持久表及domain::LedgerRow载体已移除。部分movie00请求alias仍在（R13），不得作为兼容合同保留。
-- 完整与增量归约均已维护用户摘要；本轮实测已有卡片批内新增同unit两版本得到3而非2（R03）。真实重扫未推进源版本、pending恢复recorder记错返回ID（R01/R04），不能用直接Store方法测试关闭生产路径。
-- roots/locale/checker已有持久操作与HTTP恢复驱动；根+locale组合实测只应用根，config0仍可绕过代际，checker漏units/terms且每批全库提取。见R02/R19/R20，不再笼统称checker未实现或全部旧写被拒。
-- Media合并已有begin/advance/HTTP/Job收敛；同实体新快照仍无条件让survivor胜，人工锁冲突与failed恢复不闭合（R21）。别名编辑保留已修，但非target别名扫描冲突（R22）。
-- `library::observe_source`和`Store::replace_file_source`具备独立源CAS，但当前生产scan/watch/Probe链仍有旧观察算法，existing-path只复用行/清stat；实际重扫revision/source不变（R01），不得把方法存在写成生产已统一。
-- 元数据人工锁/来源冲突、合并冻结/恢复、协议生产接线见[当前计划](../superpowers/plans/2026-10-22-storage-repair-remediation.md)。
+- Media/Library/Collection/Playback同库；旧ledger/file_meta/browse持久表及domain::LedgerRow已移除，没有旧布局导入器或兼容视图。
+- 文件源CAS、元数据写屏障、用户摘要、严格重新识别和多数API切换已落地；本轮不沿用1845dab的缺陷列表作为当前事实。
+- `pending_file_renames`保存版本、源/目标磁盘证据、sidecar决议、已完成阶段与重试；正常organize已分出锁外观察/执行，housekeeping与启动恢复仍持Store锁执行磁盘IO。
+- `pending_root_reassignments`每次事务读取≤100个文件候选并提交游标；外层仍同步耗尽队列，关联输入迁移、冻结及恢复完整性尚未通过本轮复审，不能写成A6全部完成。
+- 当前缺陷、证据等级和待实现方案分别见[复审](../audits/2026-10-23-storage-followup-review.md)及[技术方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)。表存在不等于运行时已验收。
 
 ## 字段阅读规则
 
@@ -22,6 +21,9 @@
 用户/设置在 app、Subscribe 在 subscribe、通用 Job 在 jobs，跨库 ID 无 FK。playback 恢复包不引用 library_files 的 FK，以保留删除后的观看事实。秒/ms/ns 混用，以实际读写入口为准；`played_changed_at_ms` 与 watch/favorite 时钟不能互换。
 
 ## 表目录
+
+- [pending_root_reassignments](#pending_root_reassignments) — 3 字段；嵌套根归属迁移的持久路径游标；没有独立operation状态、配置版本或失败字段。
+- [pending_file_renames](#pending_file_renames) — 28 字段；文件改名/改挂持久意图：版本/磁盘证据、sidecar决议、跨分区引用恢复及重试。
 
 - [chapter_frame_tasks](#chapter_frame_tasks) — 10 字段；章节帧生成的源版本、目标与持久执行状态。
 - [collection_items](#collection_items) — 4 字段；以 canonical MediaId 保存成员关系与排序，不随单库文件删除而删除 Media 事实。
@@ -33,12 +35,12 @@
 - [fingerprint_model_members](#fingerprint_model_members) — 4 字段；模型到样本/物理文件源版本的成员；仅 model_id 声明 FK。
 - [fingerprint_samples](#fingerprint_samples) — 12 字段；按文件源版本、profile、kind、窗口去重的采样事实。
 - [fingerprint_season_models](#fingerprint_season_models) — 9 字段；季级指纹模型、成员/政策版本与模型体。
-- [libraries](#libraries) — 23 字段；Library 配置、显示语言、访问范围、生命周期与完整性状态；后两类 operation 合同不等于已实现。
+- [libraries](#libraries) — 23 字段；Library 配置、显示语言、访问范围、生命周期与完整性状态；操作状态需结合正式operation验收。
 - [library_file_units](#library_file_units) — 5 字段；文件到逻辑单元的覆盖事实；一文件可覆盖多集，同集可有多版本。
 - [library_files](#library_files) — 34 字段；权威物理文件台账；显式 Library/root/Media/kind 与源版本、在位/发布状态、热质量字段。
 - [library_item_terms](#library_item_terms) — 4 字段；公共卡片多值倒排；私有 Collection 不得混入公共 terms/facets。
-- [library_items](#library_items) — 34 字段；Library/Media 浏览摘要。依赖同事务维护，不保留完整文件数组或来源响应。
-- [library_metadata_inputs](#library_metadata_inputs) — 18 字段；Library 独立 NFO 候选、解析状态与导出来源字段；自产反馈/恢复目前未完整接通。
+- [library_items](#library_items) — 35 字段；Library/Media 浏览摘要。依赖同事务维护，不保留完整文件数组或来源响应。
+- [library_metadata_inputs](#library_metadata_inputs) — 18 字段；Library独立NFO输入及导出来源；路径归一化和批迁保留仍有缺口。
 - [library_operations](#library_operations) — 10 字段；roots/locale/integrity/scrape 操作载体。当前建表不代表完整运行处理器已交付。
 - [library_removal_roots](#library_removal_roots) — 2 字段；删除操作冻结的根路径范围；与持久文件归属需要一致。
 - [library_removals](#library_removals) — 8字段；持久freeze/drain/cleanup，删除安全须连同当前ownership与依赖核对。
@@ -62,9 +64,9 @@
 - [probe_job_units](#probe_job_units) — 12 字段；Probe 文件单元、阶段与输出；活动单元/派发索引控制工作窗口。
 - [probe_jobs](#probe_jobs) — 17 字段；专用 Probe 作业与单元计数、阶段策略和历史；不同于 jobs.db 的通用 Job。
 - [probe_season_comparison_history](#probe_season_comparison_history) — 4 字段；每 Media/季最近比较摘要与发布时间，不是完整历史集合。
-- [probe_stage_state](#probe_stage_state) — 10 字段；每文件/上下文/阶段的退避、错误与活动作业状态。
+- [probe_stage_state](#probe_stage_state) — 11 字段；每文件/上下文/阶段的退避、错误与活动作业状态。
 - [scan_operations](#scan_operations) — 11 字段；扫描作用域、generation、全量/定向意图与恢复报告。
-- [scan_seen](#scan_seen) — 5 字段；当前扫描 operation 已确认处理的路径版本；与源观察、物理 FileVersion 不是同一语义。
+- [scan_seen](#scan_seen) — 6 字段；当前扫描 operation 已确认处理的路径版本；与源观察、物理 FileVersion 不是同一语义。
 - [scrape_sidecars](#scrape_sidecars) — 3 字段；文件的 NFO/图片 sidecar 路径；登记不等于导出 provenance 合同已完成。
 - [unidentified](#unidentified) — 4 字段；带 Library/root 的低置信度待认领文件；删除 Library 前需显式清理，不能删磁盘字节。
 - [user_library_items](#user_library_items) — 15字段；用户/Library/Media稀疏摘要，卡片删除级联、重导入由原始用户事实恢复。完整/增量已有维护；当前具体一致性缺陷见R03/R12/R20，不沿用泛称“从未维护”。
@@ -471,6 +473,7 @@ CREATE INDEX coverage_media ON library_file_units(media_id,season,episode,librar
 **显式命名索引**
 
 ```sql
+CREATE INDEX files_kind_path ON library_files(kind,path_key);
 CREATE INDEX files_library_media ON library_files(library_id,media_id,file_id);
 CREATE INDEX files_media_library ON library_files(media_id,library_id,file_id);
 CREATE INDEX files_presence ON library_files(library_id,presence_state,file_id);
@@ -499,6 +502,7 @@ CREATE INDEX files_root_path ON library_files(root_id,path_key);
 
 ```sql
 CREATE INDEX terms_media ON library_item_terms(library_id,media_id,term_kind,term_value);
+CREATE INDEX terms_value ON library_item_terms(term_kind,term_value,library_id,media_id);
 ```
 
 ## library_items
@@ -541,6 +545,7 @@ Library/Media 浏览摘要。依赖同事务维护，不保留完整文件数组
 | `poster_ref` | `TEXT` | — | 否 | 无 |
 | `backdrop_ref` | `TEXT` | — | 否 | 无 |
 | `has_still` | `INTEGER` | — | 是 | `0` |
+| `search_text` | `TEXT` | — | 是 | `''` |
 
 **键与约束**
 
@@ -572,17 +577,16 @@ CREATE INDEX items_title ON library_items(library_id,title_sort,media_id);
 
 ## library_metadata_inputs
 
-Library 独立 NFO 候选、解析状态与导出来源字段。自产反馈/恢复目前未完整接通。
+Library独立NFO输入、解析状态与导出来源字段。导出已有意图/版本校验，失败路径的区分性回归仍缺，见当前复审A12；不能概括为整条链未接通。
 
-**写入方与生命周期（Task 8 落地）**
+**写入方与生命周期（8fbf81b）**
 
-- `input_key` 是 sidecar 的规范路径（`movie.nfo` / `tvshow.nfo` / `season.nfo` / `<视频名>.nfo`），**不是**视频路径；`path_key` 才是视频的绝对路径。
-- 一次观察覆盖视频同目录的每个候选，每候选一行：无 sidecar → `missing`（并删除该 `input_key` 的旧行）；XML 不可解析/根节点不受支持 → `unknown`（保留上一份输入，不改写）；解析成功 → `valid`（按同实体同 locale 精确 upsert）。
-- `entity_scope` 是 NFO 自身层级解析的结果（work/season/episode）；坐标无法确定时不升格为 work。同一 `input_key` 换 locale 时，旧 locale 的行由位移 DELETE 清理。
-- 写入前比对 `source_version` 与 `config_revision`：不一致即拒绝该次写入（fail-closed，卡片保留上一份输入）。
-- `locale` 取 NFO 声明的语言；没有声明就用导入时的 Library locale。读取链是**请求 locale → Library `display_locale` → 实例 `metadata.language`**（先精确匹配，再按 `-`/`_` 前缀匹配）；`''` 桶是链上都不命中时的显式兜底，任何其他已存 locale 都不会被隐式选中（禁止 `rows.first()` 任选语言）。
-- 当前只有 work 层 `valid` 行有公开读取路径（`library_item_detail` 的卡片字段）；season/episode 层行只落库。
-- 已有文件的复核在每次 fresh scan 的既有行分支触发（`Store::reconcile_nfo_inputs`），sidecar 的 X→Y→invalid/unknown→删除分别表现为：换成 Y、保留上一份值、保留上一份值、释放该输入。
+- `input_key`指sidecar，`path_key`指关联视频。当前观察/录入保留display路径拼写，未统一canonical；与文件canonical键混比会误删有效输入（F10），不能把字段命名当作已满足的保证。
+- 候选包括视频旁NFO及祖先`tvshow.nfo`等；观察不等于每个候选都会持久一行。Missing删除该输入，Invalid/Unknown保留上一份有效输入；Valid按实体/坐标/locale/input_key写入。
+- `entity_scope`来自NFO层级与可确定坐标，不能将未知TV升为work。已有sidecar沿用首次登记的locale；display_locale切换不重标输入语言。实体层级或坐标实际变化时，仅替换该sidecar对应旧行。
+- locale由观察调用参数提供，当前没有从NFO声明语言自动推导的保证。卡片/详情按明确语言选择规则读取；不能在无命中时任取一份外语输入。
+- 录入前验证观察source_version与Library config_revision，不符则拒绝这一组观察。已有文件fresh scan可经`reconcile_nfo_inputs`复核NFO，编辑/Unknown/删除各保留其语义。
+- work输入参与卡片/详情；season/episode输入也用于相应详情和协议读取，不再只落库。根批迁与共享输入生命周期仍有F02/F03缺口，不能据表存在关闭验收。
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|
@@ -701,7 +705,7 @@ Library freeze/drain/cleanup操作、快照和恢复状态；完整删除安全�
 
 ## library_roots
 
-根路径配置。path_key唯一；新增嵌套根已有文件/覆盖重归属，根替换仍可能先删被引用根导致FK失败，见当前计划Task13。
+根路径配置。path_key唯一；新增嵌套根通过pending_root_reassignments分批重归属。根替换另由library_operations驱动；两条入口不能混作同一恢复协议。
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|
@@ -791,6 +795,7 @@ CREATE INDEX units_media_scope ON library_units(media_id,season,episode,library_
 **显式命名索引**
 
 ```sql
+CREATE INDEX media_survivor ON media(survivor_id) WHERE survivor_id IS NOT NULL;
 CREATE INDEX media_title ON media(kind,title,year,media_id);
 ```
 
@@ -1396,6 +1401,7 @@ CREATE INDEX probe_terminal ON probe_jobs(finished_at_ms,id) WHERE status IN ('s
 | `error_kind` | `TEXT` | — | 否 | 无 |
 | `error` | `TEXT` | — | 否 | 无 |
 | `active_job_id` | `TEXT` | — | 否 | 无 |
+| `dispatched_until_ms` | `INTEGER` | — | 否 | 无 |
 | `updated_at_ms` | `INTEGER` | — | 是 | 无 |
 
 **键与约束**
@@ -1407,7 +1413,8 @@ CREATE INDEX probe_terminal ON probe_jobs(finished_at_ms,id) WHERE status IN ('s
 **显式命名索引**
 
 ```sql
-CREATE INDEX probe_retry ON probe_stage_state(status,next_retry_at_ms) WHERE status='failed' AND next_retry_at_ms IS NOT NULL;
+CREATE INDEX probe_retry ON probe_stage_state(next_retry_at_ms,file_id,context_key,stage) WHERE status='failed' AND next_retry_at_ms IS NOT NULL AND active_job_id IS NULL;
+CREATE INDEX probe_stage_active_job ON probe_stage_state(active_job_id) WHERE active_job_id IS NOT NULL;
 ```
 
 ## scan_operations
@@ -1448,6 +1455,7 @@ CREATE INDEX scan_library_status ON scan_operations(library_id,status);
 |---|---|---:|---|---|
 | `operation_id` | `TEXT` | 1 | 是 | 无 |
 | `path` | `TEXT` | 2 | 是 | 无 |
+| `path_key` | `TEXT` | — | 是 | 无 |
 | `mtime_ms` | `INTEGER` | — | 是 | `0` |
 | `file_size` | `INTEGER` | — | 是 | `0` |
 | `content_digest` | `TEXT` | — | 否 | 无 |
@@ -1501,7 +1509,9 @@ CREATE INDEX scan_library_status ON scan_operations(library_id,status);
 
 **显式命名索引**
 
-无；主键/UNIQUE 自动索引不重复列出。
+```sql
+CREATE INDEX unidentified_root ON unidentified(root_id,library_id);
+```
 
 ## user_library_items
 
@@ -1538,3 +1548,70 @@ CREATE INDEX scan_library_status ON scan_operations(library_id,status);
 CREATE INDEX user_items_activity ON user_library_items(user_id,library_id,last_played_at DESC,media_id);
 CREATE INDEX user_items_media ON user_library_items(library_id,media_id,user_id);
 ```
+
+## pending_file_renames
+
+文件改名/改挂持久意图：版本与磁盘证据、sidecar决议、跨分区引用恢复和重试。
+
+| 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
+|---|---|---:|---|---|
+| `rename_id` | `TEXT` | 1 | 是 | 无 |
+| `file_id` | `TEXT` | — | 是 | 无 |
+| `from_path` | `TEXT` | — | 是 | 无 |
+| `to_path` | `TEXT` | — | 是 | 无 |
+| `expected_revision` | `INTEGER` | — | 是 | 无 |
+| `expected_source_version` | `TEXT` | — | 是 | 无 |
+| `from_library_id` | `TEXT` | — | 是 | 无 |
+| `from_root_id` | `TEXT` | — | 是 | 无 |
+| `to_library_id` | `TEXT` | — | 是 | 无 |
+| `to_root_id` | `TEXT` | — | 是 | 无 |
+| `sidecars_json` | `TEXT` | — | 是 | `'[]'` |
+| `phase` | `TEXT` | — | 是 | 无 |
+| `last_completed_phase` | `TEXT` | — | 否 | 无 |
+| `source_size` | `INTEGER` | — | 是 | 无 |
+| `source_device` | `INTEGER` | — | 是 | 无 |
+| `source_inode` | `INTEGER` | — | 是 | 无 |
+| `source_mtime_ns` | `INTEGER` | — | 是 | 无 |
+| `dest_size` | `INTEGER` | — | 否 | 无 |
+| `dest_device` | `INTEGER` | — | 否 | 无 |
+| `dest_inode` | `INTEGER` | — | 否 | 无 |
+| `dest_mtime_ns` | `INTEGER` | — | 否 | 无 |
+| `from_config_revision` | `INTEGER` | — | 是 | 无 |
+| `to_config_revision` | `INTEGER` | — | 是 | 无 |
+| `attempts` | `INTEGER` | — | 是 | `0` |
+| `next_retry_at` | `INTEGER` | — | 是 | `0` |
+| `last_error` | `TEXT` | — | 否 | 无 |
+| `created_at_ms` | `INTEGER` | — | 是 | 无 |
+| `updated_at_ms` | `INTEGER` | — | 是 | 无 |
+
+**键与约束**
+
+- 主键：`(rename_id)`。
+- 无显式FK；引用与生命周期由业务阶段维护。
+- `sidecars_json`必须为合法JSON；`phase`限定为planned/disk_applied/library_published/references_applied/failed，`last_completed_phase`不含failed；目标device/inode必须同时为空或非空。
+- `created_at_ms/updated_at_ms`为毫秒，`next_retry_at`为秒，不能混比。
+
+**显式命名索引**
+
+```sql
+CREATE INDEX pending_file_renames_due ON pending_file_renames(next_retry_at, rename_id);
+```
+
+## pending_root_reassignments
+
+嵌套根归属迁移的持久路径游标；没有独立operation状态、配置版本或失败字段。
+
+| 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
+|---|---|---:|---|---|
+| `kind` | `TEXT` | 1 | 是 | 无 |
+| `root_key` | `TEXT` | 2 | 是 | 无 |
+| `cursor_key` | `TEXT` | — | 是 | 无 |
+
+**键与约束**
+
+- 主键：`(kind, root_key)`。
+- 无显式FK；引用与生命周期由业务阶段维护。
+
+**显式命名索引**
+
+无；主键/UNIQUE 自动索引不重复列出。

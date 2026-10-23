@@ -1,6 +1,8 @@
-# Storage Review：已提交 HEAD 核验与修复入口
+# Storage Review：572d4fa 历史核验与撤回记录
 
 日期：2026-10-23。状态：**仅核验与技术方案，未实施代码修复。**
+
+> 历史文件：证据仅对固定572d4fa负责。当前入口为[再次复审](2026-10-23-storage-followup-review.md)；下面的“当前”均指该历史版本，旧任务不得直接重演。
 
 ## 1. 固定范围、方法与证据等级
 
@@ -16,11 +18,7 @@
 
 **前述聊天报告包含明显误报，不能原样执行。** 优先修正确性，再做新读模型切换，最后按证据优化；不承诺未经测试的倍数收益。
 
-| 子计划 | 内容 | 依赖 |
-|---|---|---|
-| [运行时正确性](<../superpowers/plans/2026-10-23-storage-runtime-correctness.md>) | 锁、执行器、事务、Playback、root、rename、locale、测试防挂起 | A1 优先；持久写任务依 A3 |
-| [API 与新读模型切换](<../superpowers/plans/2026-10-23-storage-api-cutover.md>) | 定向查询、显式归属、前后端唯一契约、真实 DTO | 观看视图依 A4/A5 |
-| [查询与写成本优化](<../superpowers/plans/2026-10-23-storage-query-efficiency.md>) | 索引、批内归约、facet、冷字段、测量门禁 | 正确性先固定；共享 DDL 串行集成 |
+原运行时/API/查询三份分计划已合并至[唯一当前技术方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)，已完成项不再作为执行步骤。
 
 共同依据：[存储主规范](<../superpowers/specs/2026-10-18-library-storage-redesign.md>)、[自有 API 约定](<../api-contracts/self.md>)、[仓库规则](<../../AGENTS.md>)。本轮补充[旧计划](<../superpowers/plans/2026-10-23-storage-review-remediation.md>)，不重新执行旧计划已落地的任务。
 
@@ -113,59 +111,6 @@ deferred_snapshot_write_error: SQLITE_BUSY_SNAPSHOT
 
 本次验收仅为 Markdown 链接、基线/范围、任务覆盖、签名一致性、风险措辞与文档专属暂存/提交 diff。审查期间工作区代码仍有外部并行变更，整体代码差异指纹不稳定；这些变更不读取为修复证据、不覆盖、不回滚、不暂存。以本次提交相对审查 HEAD 的代码树完全相同证明没有夹带代码，而非声称外部工作区在时间上静止。未来实现需逐任务 RED→GREEN、触及 crate 独立测试、最终稳定树 workspace 测试，不把文档完成等同生产验收。
 
-## 8. 实施状态
+## 8. 后续实施状态已合并
 
-| ID | 状态 |
-|---|---|
-| C01 (A1) | 已修复：cancel 锁内置 cancelled 并克隆 controls，锁外 cancel。回归 `library_work_lifecycle::cancel_during_publication_allows_nested_lease_drop`（旧实现子进程 40s 锁环）。 |
-| C02 (A2) | 已修复：Transfer 锁外等待库 idle，重新加锁后重读订阅/目标并取 lease，目标变化或忙碌则重新等待；patch/search/missing handler 的 guard 工作进 http_work。回归 `management::subscribe_wait_liveness`（单 worker 饥饿、等待中删除）。 |
-| A3 | done: store write_tx (IMMEDIATE) for all write txs, jobs IMMEDIATE, cache init under IMMEDIATE + WAL switch retry; tests write_transaction_contention, cache_writer_contention |
-| A3 | verified: media+jobs+api 1674 pass/0 fail; fanart shared cache 96579b9 |
-| A4 | Fixed: scoped marks via mutate_playback, favorite_at seconds clock, marks never move activity; tests playback_assertions + api playback_clock |
-| A5 | Fixed: duration reused only on same file/revision/source_version/full_file; one duration drives completion+play_count; tests playback_event_duration |
-| A6 | Fixed: PreparedRoot canonical keys persisted in plan (C08); per-connection in-memory alias tables, publish after commit incl. root deletes (C09); scoped inputs/unidentified reparented before reduce (C07). Risk: shared work NFO not duplicated into nested library; root changes via create/insert not batched ≤100 |
-| A7 | Done: dest dev/ino receipt persisted; execute outside store lock, record idempotent; staging kept until recorded. Risk: real cross-FS not run; sidecar IO still in record (A8). |
-| A8 | Done: durable SidecarAction (Move/Copy/KeepSource/AlreadyIdentical) decided from lock-free streaming compare + short tx recheck, persisted; no-clobber hard-link publish (competitor→KeepSource); refs/deletion read persisted decision; unknown IO fails retryable; LEFT JOIN vanished file→failed; due-only resume (next_retry_at seconds, *_ms columns ms). RED for competitor test written alongside impl (not run on old code). store 454+, api 1549/0. |
-| A9 | Done: metadata/locale.rs select_locale (exact→prefix, sorted ties; AdoptedFirst/UnboundInputOnly) shared by reduce card + detail; update_media/update_media_if_matches reduce cards in-tx (+writable barrier). store 460/0 (includes A7/A8 fixes), api metadata_priority 3/0. |
-| A10 | DONE — shared tests/support/lifecycle.rs (FakeServer, ReleaseOnDrop); gated tests release on panic; management/subscription_e2e/downloader fake servers per-connection, read timeouts, stop+join on drop. fixture_lifecycle 3/3, management 589/0, subscription_e2e 75/0, downloader all green. |
-| A11 | Fixed: sources observed outside Store lock; marker publication CAS on SourceObservation (source_observation_liveness). store 460/0, api green. |
-| A12 | Fixed: begin_sidecar_export -> Result<ExportPreparation>; Err skips write_nfo (no unguarded fallback). Regression tests nfo_export_failure_isolation 2/2; RED not reproducible via IO (library::write_nfo already refuses unreadable sidecar). |
-| B1 | Partial: FileReadScope + file_coverage_in_library (SQL scope, persisted library_id); library_for_file by file.library_id (strict = owner AND strictly inside its roots); VisibleScope via DISTINCT library_items. Consumers not individually migrated to scoped helper. |
-| B5 | Fixed: typed MergePlan requires frozen with provisional/confirmed states; malformed plan -> Invalid, stays merging (malformed_frozen_plan_is_refused_and_stays_frozen). store 462/0. |
-| B3 | Partial: pinned ReidentifyRequest (typed, deny_unknown, preview exposes files+source_revision, stale -> 409, no server fill); episode DTO drops watched; alias source rejects *_id; web assignLibraryFilesToTitle(request). Not done: filter long-name aliases, logs/Subscribe legacy params, web envelope fallback sweep. |
-| B4 | Partial: unidentified claim is typed {path, action: bind_existing|identify_and_transfer}; bind never moves bytes; old /unidentified/{id}/claim removed; CLI+web migrated. Not done: sites/subscriptions receipts, downloader-task adapter, fake annotation adapter. |
-| B2 | Partial: favorites page selected in SQL (playback_favorite_page: authorized libs, cross-library dedupe before LIMIT, same-predicate total, unwatched_first tier from user summaries); handler no longer scans list_file_coverage. Deferred: up_next and gallery still scan list_file_coverage. |
-| Q1 | Done: EQP baseline showed full scans for probe active_job_id prune, unidentified root_id removal, media survivor_id FK check; added probe_stage_active_job, unidentified_root, media_survivor. Other candidates had no scanning real statement; not added. |
-| Q2 | Done: user summaries finalized once per Media at batch end (40 users x 100 files: 240 ms -> 41 ms). Statement caching not changed (not measured). |
-| Q3a | Baseline only: existing targets green; cost not measured at request level, so no code change (see docs/benchmarks/2026-10-23-storage-query-efficiency.md). |
-| Q3b | Baseline only: existing targets green; cost not measured at request level, so no code change (see docs/benchmarks/2026-10-23-storage-query-efficiency.md). |
-| Q4 | Baseline only: existing targets green; cost not measured at request level, so no code change (see docs/benchmarks/2026-10-23-storage-query-efficiency.md). |
-| Q5 | Baseline only: existing targets green; cost not measured at request level, so no code change (see docs/benchmarks/2026-10-23-storage-query-efficiency.md). |
-| Q2 | Done: finalize once per Media per batch; count-based gate (old 4000 summary writes, new 40). |
-| B2 | Done: favorites + gallery pages selected in SQL (playback_favorite_page); up next reads coverage by Media through VisibleLibraries (persisted library_id, exclude_from_home), no list_file_coverage in watch views; favorite coverage spans all visible libraries (API RED->GREEN). |
-| B1 | Done for request handlers: playback, title_ref, media links, subscription_depth (3), subscription snapshot (batch), arrivals (batch), collections, library_artwork (4, persisted library_id not library_for_path), probe, assets (file_coverage_in_library AllRecorded), library_chapters (4 + path ownership via file_coverage_by_path), playback_logs (media_ids_in_libraries), search (per visible library). Remaining list_file_coverage callers: library_admin ledger listing (whole-ledger admin view by design) and background maintenance. |
-| B3 filter keys | Long filter synonyms removed; only g/c/d/rt/lang/res/w accepted, long names 400 (API RED->GREEN). |
-| B3 legacy params | logs accept only target/q (module/keyword 400); upgrade-runs body deny_unknown_fields, rule_set_id removed, response key filter_id; PATCH selected_seasons removed in favor of coverage (same contract as create). API RED->GREEN. |
-| Q3a | Done: studio hydration projects 4 strings via json_extract; 100k walk 1614->991 ms, 604.6->1.1 MB (scripts/bench/q3a_studio_projection.py). |
-| Gate 21b2ac6 | Green: cargo test --workspace 2642/0, web npm test 0 fail, tsc clean, fmt clean. Still open: B3 web envelope sweep; B4 sites/subscriptions receipts + downloader-task/annotation adapters + stub removal; Q3b facet merge, Q4 late materialization, Q5 bounded long ops/durable cursor; A4 API RED; A6 NFO copy + batched durable reassign; A7 resume/rename IO out of lock + tmpfs test; A8 old-code run; A11 API liveness + version checks; A12 repro; up_next handler still >120 lines. |
-| B3 PATCH 400 | Subscription create/PATCH use StrictJson: unknown/obsolete fields are 400 request.invalid (RED 422 -> GREEN 400). |
-| B3 web envelope | Web fallbacks removed: metadata refresh returns real {refreshed} receipt (no fake job_id/started); job status reads only last_status (status/dismissed_at legacy shape removed); fake dismiss/undismiss/dismissAll/retry API stubs removed (dismiss is local mute, retry=runJob). |
-| B4 | ef465ff..HEAD: subscription receipts verbatim ({deleted},{queued}), mutations return Subscription without forged wanted, downloads scoped to wanted info_hashes (DownloadTask DTO, no request when empty), removed site protect/pause no-ops, fake sync-stats UI, always-reject annotation adapters + dialog. test/subscription-receipts.test.mjs; web 841/0, tsc clean. |
-| up_next split | handler split into collect_plans/plan_from_activity/plan_from_subscribe/cached_episode_titles/materialize_candidates/render_item/blocking_failed; longest fn 87 lines; up-next tests green. |
-| B3 web list payloads | libraries/items/item-index throw on non-array payload (arrayPayload) instead of silently rendering empty; library-dto-contract RED->GREEN. |
-| A4 API RED | web_mark_persists_raw_clock_columns (management/playback_clock): on d8e9292^ RED 'played_changed_at_ms must be ms' left Some(1792754571) right Some(1792754571500); GREEN on HEAD. |
-| Q3b | Implemented: fixed-bucket dims one SELECT each (26->11 stmts); request-level endpoint_perf 50k movies facets median 428.5->237.0 ms, identical bytes; equivalence test green on old+new. |
-| Q4 | protocol page: source selection after LIMIT, forced files_media_library, materialized; 50k first_page 208ms (old >20min); predicate shapes still linear (NFO JSON parse) |
-| Q5 | authoritative store connections force synchronous=FULL (RED from OFF→0, GREEN 2); media response cache left at build default (rebuildable, no A/B measured); mmap/cache_size/temp_store unchanged: not measured |
-| Q5 | library removal cleanup commits ≤100-file batches, remaining snapshot files are the durable cursor; RED 0 vs 150 remaining after first-batch crash, GREEN resume → succeeded/250; validate de-quadratic. Not measured: WITHOUT ROWID, cache NORMAL, mmap A/B |
-| A7 | real cross-FS test added (ext4 /tmp → tmpfs /dev/shm, EXDEV copy path): record+complete and crash-before-record recovery green; copy bumps revision exactly once (new dev/ino), receipt replay idempotent. Sidecar IO inside record not moved (open). |
-| A8 | old-code RED attempt: file_rename_shared_artwork.rs at 98f7c91^ fails to compile (SidecarAction/record_rename_disk_observed/list_due_file_rename_ids absent) — compile-level RED only, no behavioral competitor-writer RED reproduced. |
-| A12 | nfo_export_failure_isolation at 87aaa0e^ PASSES (2/0, uid 1000, not skipped): EACCES sidecar also makes old write_nfo fallback fail, so the test does not discriminate; RED not reproduced. |
-| Q4b | page+total in one scan (window COUNT before LIMIT, count only for empty pages); 50k genre 1270→879, search 934→532, person 1946→1741, first 208→149 ms; still O(n), flat scaling needs write-time terms/FTS5 (not done) |
-| Gate 5b0e8ab | Green: cargo test --workspace 2649/0 (12 ignored), web npm test 842/0, tsc clean, fmt clean. Still open: A6 shared work NFO copy into nested library + ≤100 batched durable root reassign; A7 sidecar IO inside record; A8 behavioral old-code RED (compile-level only); A11 API-level liveness/version checks for probe tracks + fingerprint cache; A12 RED not reproduced; protocol genre/person/search still O(n) (needs write-time terms/FTS5); Q5 cache NORMAL/mmap/WITHOUT ROWID not measured. |
-| A6 | Shared ancestor work/season NFO (tvshow.nfo above a nested root) is now copied into the nested Library on carve-out (locale/provenance/export digest verbatim); parent keeps its row while it still has files under the sidecar dir; has_uncovered_rows treats ancestor sidecars as covered. Test nfo_scoped_inputs::nested_library_carries_scoped_inputs_and_keeps_shared_parent_nfo RED→GREEN. |
-| A7 | sidecar IO moved out of the Store lock: record split into begin/decide/finish Store steps + lock-free plan.observe()/decided.apply(); organize apply drives phases with the mutex released; decide CAS-refuses a stale observation. Tests rename_phases_lock_free (RED was compile-level: phase API absent). Housekeeping reconciliation still records under its held guard. |
-| Q4c follow-up | OPEN: genre paging still scales linearly with matching rows: 21.3/85.4/221.0 ms at 5k/20k/50k (projected >300 ms near ~70k items). person 2.5/3.2/6.0 ms (flat), search 2.8/21.6/58.7 ms (linear, cheap). Needs a materialized genre->item ordering or keyset-on-term to go flat. |
-| Gate 05a7363 | Green: cargo test --workspace 2652/0 (12 ignored), web npm test 0 fail, tsc clean, fmt clean. Still open: A6 ≤100 batched durable root reassign; A11; A8 behavioural RED; A12 repro; Q5 pragma A/B; genre linear scaling; housekeeping reconcile records under held guard. |
-| A6 | DONE: nested-root reassignment now batched ≤100 files per transaction with durable cursor pending_root_reassignments; drained after root changes and on startup; test root_reassign_batched (crash after 1 batch → 100/150, resume → 250). Startup drain holds the Store lock for its duration. |
-| Open after A6 | OPEN (not started): A7 housekeeping reconciliation route still records under held Store guard; A11 API liveness/version checks for probe tracks + fingerprint cache; A8 behavioural competing-writer RED; A12 old-code repro; Q5 pragma A/B; genre linear scaling. No full gate after 05a7363. |
+原逐提交追加状态表已撤下：B3/A6/A7/A10等“完成”措辞被本轮实际反例收窄。当前缺陷和历史任务对账见[8fbf81b再次复审](2026-10-23-storage-followup-review.md)；剩余任务只维护[当前技术方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)。原完整记录可用`git show 8fbf81b:docs/audits/2026-10-23-storage-committed-head-verification.md`读取。上述C/O表仅描述572d4fa，不作为当前待办。

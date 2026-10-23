@@ -50,7 +50,7 @@
 插入 200k 行 725 → 799 ms（+10%），大小 16.49 → 18.28 MB（+11%），400 次反查 1642.5 → 1.5 ms。
 
 ## Q5 长操作与连接策略
-- 权威库显式 synchronous=FULL（耐久性修复）。
+- Store四连接显式synchronous=FULL（含cache）；独立Jobs Queue及media ResponseCache仍未显式设置该PRAGMA。
 - 删库清理按 ≤100 文件分批提交，崩溃后可续跑。
 - cache NORMAL / mmap / cache_size / temp_store / WITHOUT ROWID：**未做 A/B，默认值不变**。
 
@@ -58,12 +58,13 @@
 - 无关库文件 1k → 1M，vm_steps 恒为 1963。
 - 100k 完整性检查 1000 批共 122 s，最慢一批 215 ms，不随进度退化。
 
-## A 系列状态
-- A6：嵌套库共享 NFO 复制（fa05e9d）；根迁移 ≤100 分批 + 持久游标续跑（本提交）。
-- A7：跨文件系统重命名已测；sidecar IO 移出 Store 锁（95d77c7）；housekeeping 对账路径仍持锁记录（未完成）。
-- A8：只有编译期 RED，行为级未复现（未完成）。
-- A11：probe 与指纹缓存 API 级存活 / 版本校验（未完成）。
-- A12：旧代码上未复现失败（未完成）。
-- 真实 NAS、Jellyfin 真机、100k Media / 1M 文件整体规模均未测。
+## A 系列当前边界（8fbf81b复审纠正）
+- A6仅部分完成：已有≤100文件候选事务/游标，但跨批NFO丢失、冻结目标漏迁和符号链接输入归一化仍有本轮实测反例。
+- A7仅部分完成：organize receipt中段已锁外，begin/complete/finish及housekeeping/启动恢复仍有持锁IO。
+- A10仅部分完成：RAII gate已落地，但HTTP fixture存在join环和无写deadline，本机实测隐藏panic及等待peer关闭。
+- A11未闭环：计算时版本未端到端固定，发布前重新读取current不能证明旧结果有效；详见[当前复审](../audits/2026-10-23-storage-followup-review.md)。
+- A8只有编译期RED，竞争写者的行为级旧代码RED未复现；A12旧代码测试仍通过，尚无区分性失败复现。这两项是验收证据缺口，不能直接当作当前行为已坏。
+- genre仍线性；Q5 cache NORMAL/mmap/cache_size/temp_store/WITHOUT ROWID未做A/B，保持可选测量。
+- 真实NAS、Jellyfin真机、100k Media/1M文件整体规模均未测。本报告的历史性能数字本轮未重跑。
 
 最后一次完整门禁（05a7363）：cargo test --workspace 2652/0（12 忽略），web 842/0，tsc、fmt 干净。之后的提交只跑了受影响 crate。

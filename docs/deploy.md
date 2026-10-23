@@ -117,7 +117,7 @@ Site 凭证（cookie / API key / RSS URL）按 [ADR-0003](<adr/0003-plaintext-si
 
 默认注册数据库轻量 optimize（每6小时）、Jobs历史清理（每天、90天、启用）、Playback历史清理（每天、90天、**关闭**），以及分类历史保留 `data_retention`（默认关闭、dry_run=true，各窗口90天）。默认只在首次注册时应用，重启保留已有 def 配置。首个启用任务可能立即执行，Jobs超90天终态历史可能在首次后台调度即删除；各def保留latest/tie组，运行／排队行不删。VACUUM默认关闭，绝不因每次DELETE自动重建库。依据 `crates/api/src/maintenance/mod.rs`。
 
-维护控制以当前实现为准，不沿用 2026-10-13 审计中全部“当前缺陷”的措辞：`maintenance/runner.rs` 已在批/库边界检查禁用、取消与停机；`jobs::update_def_config_cas` 同事务保存 payload/可选周期并刷新 queued payload，running 保持快照；预览已通过 blocking budget 执行。仍需注意：payload token 不含周期版本，不能检测仅改周期的冲突；2 秒清理预算只在批间检查，不是单条 SQL 的硬时间上限；VACUUM 的部分页拷贝无法被 SQLite interrupt 硬停止。历史发现逐项验收不能仅凭代码存在判定关闭，见 [历史复核](<audits/2026-10-13-database-api-review.md>)；当前存储切换验收与优化顺序见 [执行计划](<superpowers/plans/2026-10-22-storage-repair-remediation.md>)。
+维护控制以当前实现为准，不沿用 2026-10-13 审计中全部“当前缺陷”的措辞：`maintenance/runner.rs` 已在批/库边界检查禁用、取消与停机；`jobs::update_def_config_cas` 同事务保存 payload/可选周期并刷新 queued payload，running 保持快照；预览已通过 blocking budget 执行。仍需注意：payload token 不含周期版本，不能检测仅改周期的冲突；2 秒清理预算只在批间检查，不是单条 SQL 的硬时间上限；VACUUM 的部分页拷贝无法被 SQLite interrupt 硬停止。历史发现逐项验收不能仅凭代码存在判定关闭，见 [历史复核](<audits/2026-10-13-database-api-review.md>)；当前存储切换验收与优化顺序见 [执行计划](<superpowers/plans/2026-10-23-storage-review-remediation.md>)。
 
 不要在运行时复制单个主体文件忽略WAL当备份；采用SQLite online backup或停机后对有关文件的一致备份。不要手工删除DB/WAL/SHM来缩空间。
 

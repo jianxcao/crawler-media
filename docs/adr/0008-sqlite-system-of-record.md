@@ -1,6 +1,6 @@
 # SQLite 是系统记录，按生命周期拆分
 
-> 本文保留原拆库决策与历史实现；第“四个文件”至2026-10-12后记都不是当前操作指南。当前五文件边界与未完成的生产切换见文末2026-10-20复审及[数据库文档](../database/README.md)。
+> 本文保留原拆库决策与历史实现；第“四个文件”至2026-10-12后记都不是当前操作指南。当前五文件边界见文末2026-10-23说明及[数据库文档](../database/README.md)。
 
 行存 SQLite。字节（视频、NFO、图、Indexer YAML、Chromium）留在磁盘。行中的路径指向这些字节。**Users**、**Sites**、**Filters**、**Subscribes**、**Media**、**Library** ledger、**Naming templates**、**Metadata source** 负载不存在 ad-hoc 文件的第二事实来源。
 
@@ -120,7 +120,7 @@ Jinja 模板：MoviePilot 的能力。v1 否决——封闭占位符集合对两
 
 跨文件仍然没有外键，也没有跨文件事务：这一点对这两个库同样成立。
 
-## 后记：五文件已建立，生产干净切换未完成（2026-10-20复审）
+## 后记：现行五文件与剩余验收（2026-10-23，8fbf81b）
 
 本节替代上面的历史文件归属。`feat/storage-redesign` 的生产 DDL 位于
 [`crates/store/src/schema/v1/`](../../crates/store/src/schema/v1/)，目标合同见
@@ -136,8 +136,8 @@ Jinja 模板：MoviePilot 的能力。v1 否决——封闭占位符集合对两
 
 Media 与 Playback 已迁入 `library.db`；旧浏览投影表/重建链已移除；`catalog.db`/`fanart.db` 由按来源分表的 `cache.db` 取代。Store 布局入口校验 `application_id` 与 `user_version`，没有旧数据库导入器或兼容视图；跨文件仍没有外键或原子事务。
 
-`bd6c3c8`复审否定“R1–R8已关闭全部阻塞”的旧状态，不否认对应提交和当时测试存在。真实Router/Store/前端函数烟测仍发现：合并文件E02心跳被误拒、旧会话写入新源版本、增量用户摘要漏维护、50/101文件分页错误、采用冷字段丢失、根替换FK失败；movie `(0,0)`边界alias、旧LedgerRow写适配和Jellyfin现场读取仍在。
+五文件、显式ownership、同库事实/摘要事务、冷详情及源版本分离方向保持。旧LedgerRow/浏览重建链和movie00别名已移除；旧版本的失败细节保留在固定SHA审计，不继续作为当前结论。
 
-决策不变：Media/Library/Playback同库，cache可弃，事实与摘要同事务，源版本/逻辑身份分离。2026-10-22已有根/locale/checker/合并管理与恢复入口，但仍有具体一致性缺陷；见[复审](../audits/2026-10-22-storage-repair-review.md)。历史通过和测量仍见[benchmark](../benchmarks/2026-10-18-library-storage.md)，不再将旧“未接通”概括当现状。
+当前47张library业务表包括持久rename与root迁移队列。IMMEDIATE写事务和Store四连接FULL已显式设置；Jobs Queue与独立media缓存连接尚未显式设置synchronous。A6/A7/A10/A11仍有输入保留、冻结/恢复、持锁IO、源版本绑定及测试退出缺口，见[当前复审](../audits/2026-10-23-storage-followup-review.md)。这些是实现/验收问题，不需要推翻五文件决策或新增兼容层。
 
-当前字段/键/索引见[数据库字典](../database/README.md)，唯一执行入口为[干净切换与优化计划](../superpowers/plans/2026-10-22-storage-repair-remediation.md)。先修正确性及迁完生产者消费者，再测NAS冷热缓存、100k Media/1M文件/1M Playback及扫描并发心跳，不恢复旧数据兼容、双读双写或跨库浏览journal。
+字段/键/索引见[数据库字典](../database/README.md)，剩余任务见[唯一当前技术方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)。真实NAS/客户端及完整100k Media/1M文件验收尚未在本轮运行；不恢复旧数据导入、双读双写或跨库浏览journal。

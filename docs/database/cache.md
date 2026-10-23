@@ -2,13 +2,13 @@
 
 [返回数据库总览](README.md)
 
-源码核对基线：`bd6c3c8`（2026-10-20）。唯一建表定义为 [media::response_cache::CACHE_SCHEMA_SQL](../../crates/media/src/response_cache/mod.rs)；[Store layout](../../crates/store/src/schema/layout.rs) 直接复用该常量及身份/校验函数。此前两份 SQL 附本已删除，不存在 Store 与 media 各维护一套索引的现行合同。
+结构核对基线：`8fbf81b`（2026-10-23）。唯一建表定义为 [media::response_cache::CACHE_SCHEMA_SQL](../../crates/media/src/response_cache/mod.rs)；[Store layout](../../crates/store/src/schema/layout.rs) 直接复用该常量及身份/校验函数。此前两份 SQL 附本已删除，不存在 Store 与 media 各维护一套索引的现行合同。
 
 文件身份：`application_id=1129139251`，`user_version=1`。共 **6 张业务表、30 个字段、12 个显式命名索引**；AUTOINCREMENT 的 `sqlite_sequence` 不计业务表。以下是源码 DDL 字典，不把历史初始化结果当成本轮应用验收。
 
 ## 职责与来源
 
-只保存外部响应，不保存 Media 身份、Library 文件、已采用元数据、观看状态或图片字节。正常清缓存不能修改这些事实；当前 Jellyfin 等生产消费者尚有请求时 NFO/catalog 读取缺口，见[干净切换计划](../superpowers/plans/2026-10-22-storage-repair-remediation.md)，不能由缓存表隔离推导全应用已经离线可用。
+只保存外部响应，不保存 Media 身份、Library 文件、已采用元数据、观看状态或图片字节。正常清缓存不能修改这些事实；当前协议分页读取持久采用元数据及输入，旧请求时NFO/catalog缺陷不能直接照搬为现状。清cache的完整现场验收与边界见[当前复审](../audits/2026-10-23-storage-followup-review.md)。
 
 来源是固定 [CacheSource](../../crates/media/src/response_cache/source.rs) 白名单，不是用户提供的 SQL 表名；表内没有 `source` 列。
 
@@ -40,7 +40,7 @@
 - Store 和 media 都只初始化空且未版本化的目标文件；DDL 和文件身份在事务内提交。
 - media `open`、Store preflight 先只读检查已有文件。旧布局、未知版本、必需 cache 表/索引缺失时拒绝，不创建兼容表或悄悄修复索引。
 - cache `validate_schema` 检查必需表/索引名称存在；不是逐列/索引定义的完整一致性审计，也不证明任意外部破坏可被识别。
-- 连接显式 WAL、5000ms busy timeout、`foreign_keys=ON`。同文件仍共享 SQLite 写锁，没有跨文件原子性。
+- 连接显式WAL、5000ms busy timeout、foreign_keys=ON。Store的cache连接显式synchronous=FULL；独立media ResponseCache连接未显式设置synchronous，不能将同文件连接策略混写。同文件仍共享SQLite写锁，没有跨文件原子性。
 - 受控清空走连接内删除；若要重建文件，先停写并关闭所有连接。不得 unlink 活跃 DB/WAL/SHM。空间复用不意味着文件立即缩小。
 
 ## 请求键、TTL 与读取边界

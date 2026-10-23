@@ -2,7 +2,7 @@
 
 [返回数据库总览](README.md)
 
-当前源码基线：`feat/storage-redesign@a3dab1b`。字段、类型、默认值、主键和命名索引逐项来自 [Store v1/subscribe.sql](../../crates/store/src/schema/v1/subscribe.sql)；文件身份来自 [schema/layout.rs](../../crates/store/src/schema/layout.rs)：`application_id = 1129139250`、`user_version = 1`。这是源码 DDL 字典，不是本次运行 Store 后提取的 schema，也不证明运行时调用者已完成切换。
+结构核对基线：`feat/storage-redesign@8fbf81b`。字段、类型、默认值、主键和命名索引逐项来自 [Store v1/subscribe.sql](../../crates/store/src/schema/v1/subscribe.sql)；文件身份来自 [schema/layout.rs](../../crates/store/src/schema/layout.rs)：`application_id = 1129139250`、`user_version = 1`。这是生产DDL字段字典，并经隔离内存SQLite核对，不是用户实例schema，也不证明运行时调用者已完成切换。
 
 共 **4 张业务表、47 个字段、3 个显式命名索引**。本库只保存 Subscribe 策略、覆盖/搜索事实和 pending 下载记录；不保存 Playback 会话、进度、历史或遥测。Playback 的存储边界见 [library.db](library.md)。Subscribe 是长期策略，不是 Job 执行队列；通用执行记录见 [jobs.db](jobs.md)。本库不可随意清空。
 

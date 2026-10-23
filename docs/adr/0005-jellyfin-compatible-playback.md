@@ -42,9 +42,9 @@ Authorization: MediaBrowser Client="VidHub", Device="iPhone", DeviceId="device-i
 代价（有意的）：客户端再没有开关能把已看完的藏掉——只有**显式**传 `IsPlayed=false` 才严格，而多数客户端不传。要做到"用户自己决定藏不藏"，得补用户配置表面（`UserConfiguration.HidePlayedInLatest` 与 `GET/POST /Users/{id}/Configuration`；Jellyfin Web 本来就读 `user.Configuration`），落地后可以按这个开关在"严格筛"与"只排不筛"之间切。这套表面目前**尚未实现**，`/Users/Me` 也不返回 `Configuration` 块。
 ## 播放会话代际与 PlaySessionId 目标（2026-10-13 Batch 2）
 
-2026-10-22复审：普通Items等已走生产protocol_item_page，Web/Jellyfin显式事件已接Store::commit_playback_event，旧“未统一写入”和“仅测试SQL”的广泛结论作废。剩余实测为Jellyfin流忽略session/device版本绑定、合并文件无ID跨集写、Start旧恢复包回填、首次Jellyfin完成/会话交接/秒毫秒错误；PersonIds仍旧候选Catalog旁路。详见[复审R06–R13/R23/R24](../audits/2026-10-22-storage-repair-review.md)和[当前方案](../superpowers/plans/2026-10-22-storage-repair-remediation.md)。旧证据保留在benchmark及执行历史，不用新方法存在关闭这些矩阵。
+2026-10-23（8fbf81b）当前边界：普通Items/PersonIds使用持久协议查询与写入期候选索引，Web/Jellyfin显式事件共用Store::commit_playback_event。此前R06–R13/R23/R24反例保留在[1845dab历史审查](../audits/2026-10-22-storage-repair-review.md)，不继续全部列成当前缺陷。源/会话隔离和完整设备验收仍需分别证明，当前新增问题见[再次复审](../audits/2026-10-23-storage-followup-review.md)。
 
-Jellyfin应在PlaybackInfo取得持久PlaySessionId（完整绑定User、Device、逻辑Media/unit、file/version/source及Library配置）；当前签发已存在，但协议取流未完整消费，见R06。
+PlaybackInfo签发持久PlaySessionId，取流使用版本化来源和User/Device/逻辑Media-unit/Library配置绑定。不要恢复历史裸file_id取流或忽略会话绑定；协议参数与真实客户端验收以当前handler/集成回归为准。
 
 - 客户端在 `/Sessions/Playing`、`/Sessions/Playing/Progress` 和 `/Sessions/Playing/Stopped` 中回传可选的 `PlaySessionId` 和 `EventSequence`。
 - 迟到的旧会话 Progress / Stop 事件（generation 低于当前会话）不会影响或关闭正在播放的新会话。

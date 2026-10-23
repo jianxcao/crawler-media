@@ -57,7 +57,7 @@
 - `adopt_metadata`已有部分生产Scrape调用，但经有损DTO重建来源且字段/读取不完整；`protocol_item_page`与`commit_playback_event`仍未成为统一生产入口。不能由方法或测试存在宣称完整协议SQL分页、字段采用、会话/历史原子提交已完成。
 - 旧浏览投影链已删除，不代表上述生产调用方和恢复/删除合同已全部切换。
 
-后续按[当前干净切换计划](../superpowers/plans/2026-10-22-storage-repair-remediation.md)补齐；有效需求保留于Spec/合同，10-18/10-19旧步骤由Git保留，不因旧步骤状态“完成”追认验收。
+后续按[当前干净切换计划](../superpowers/plans/2026-10-23-storage-review-remediation.md)补齐；有效需求保留于Spec/合同，10-18/10-19旧步骤由Git保留，不因旧步骤状态“完成”追认验收。
 
 ## 5. 未取得的完整验收
 
@@ -139,7 +139,7 @@
 
 源码还确认movie(0,0)前端生产者+边界alias、LedgerRow认领丢episode_to、NFO已有路径提前continue、Jellyfin现场NFO/catalog、持久操作无完整恢复链。不能把这些源码发现写成已运行对应全部场景。
 
-上一轮（2026-10-20）未重跑workspace、前端三门、真实浏览器播放、真实Jellyfin客户端、NAS并发或100k/1M规模；历史1.2/1.3通过保留，但不能抵消上述新反例。**本轮（2026-10-21）已补跑 `cargo test --workspace`、前端三门与本机端到端冒烟，实测见第 7 节；真机／规模项仍未跑，见 7.6。** 后续关闭条件/逐项回归见[当前计划](../superpowers/plans/2026-10-22-storage-repair-remediation.md)。
+上一轮（2026-10-20）未重跑workspace、前端三门、真实浏览器播放、真实Jellyfin客户端、NAS并发或100k/1M规模；历史1.2/1.3通过保留，但不能抵消上述新反例。**本轮（2026-10-21）已补跑 `cargo test --workspace`、前端三门与本机端到端冒烟，实测见第 7 节；真机／规模项仍未跑，见 7.6。** 后续关闭条件/逐项回归见[当前计划](../superpowers/plans/2026-10-23-storage-review-remediation.md)。
 
 ## 7. Task 17 整体门：干净切换的冻结、冒烟与测试证据（2026-10-21）
 

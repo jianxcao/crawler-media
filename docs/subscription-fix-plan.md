@@ -9,7 +9,7 @@
 - 现有公开回归入口：`crates/api/tests/subscription_e2e.rs` 和其同名目录；已有golden_path、fake_catalog、mock_qbit、mock_transmission、harness，不重复建第二套测试框架。
 - 源码可见 `pending_reconcile.rs`、`air_gate.rs`、`completion.rs`、`pack_fallback.rs`、`selective_files.rs`、`instance_lease.rs`，Subscribe的pending／absolute／slot_replacement，以及Store的pending_file_deletions。这只是实现线索，不是逐ID关闭证明。
 - 原G-M3／G-M4的auto_next_season／pack_fallback_after_days已在Subscribe创建／修改入口接线；原M5已有follow_future门控。仍需从真实HTTP→搜索→Downloader→Transfer→当前Store回读验证，不能保留“字段完全未使用”的现在时。
-- 当前文件／Media／播放权威与旧ledger/facts布局不同；存储正确性和事务边界见 [clean-cutover计划](<superpowers/plans/2026-10-22-storage-repair-remediation.md>)，不执行旧新增表／列或兼容迁移。搜索精度独立规则见 [搜索精度](<superpowers/plans/2026-10-16-subscribe-search-precision.md>)；Browser独立见 [CDP](<superpowers/plans/2026-10-16-cdp-obscura-managed-browser.md>)，不是本次存储优化的必跑前置。
+- 当前文件／Media／播放权威与旧ledger/facts布局不同；存储正确性和事务边界见 [clean-cutover计划](<superpowers/plans/2026-10-23-storage-review-remediation.md>)，不执行旧新增表／列或兼容迁移。搜索精度独立规则见 [搜索精度](<superpowers/plans/2026-10-16-subscribe-search-precision.md>)；Browser独立见 [CDP](<superpowers/plans/2026-10-16-cdp-obscura-managed-browser.md>)，不是本次存储优化的必跑前置。
 - 原计划的P0/P1/P2/P3是当时严重度排期，不是今天全部仍坏；未知状态按公开复现／代码与回归证据逐ID归类。禁止依据日期或旧unchecked全关／全开。
 
 ## 2. 逐ID保留合同与现有回归入口

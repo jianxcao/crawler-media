@@ -15,7 +15,7 @@
 
 - 前缀：自有 REST 挂 `/api/v1`。
 - 信封：成功 `{"ok": true, "data": ...}`；失败 `{"ok": false, "error": {"code": "...", "message": "..."}}`，HTTP status 4xx/5xx。
-- ID：领域实体用 **UUID 字符串**（`MediaId` / `SiteId` / `SubscribeId` / … 的 Display），不能当数字 hash。Jellyfin 协议 ID 与物理来源 ID 是独立表面：领域已有 `w1_` / `s1_` / `u1_` typed item 和 `f1_<file>_<revision>` source 格式（`crates/domain/src/library_storage.rs`），但生产协议调用方尚未全部切换；不能把“UUID 去连字符”当作所有现行协议 ID 的规范，也不能把新类型存在当作生产切换完成。
+- ID：领域实体用 **UUID 字符串**（`MediaId` / `SiteId` / `SubscribeId` / … 的 Display），不能当数字 hash。Jellyfin协议逻辑ID与物理来源ID是独立表面：当前使用 `w1_` / `s1_` / `u1_` typed item 和 `f1_<file>_<revision>` source格式（`crates/domain/src/library_storage.rs`）。不能用裸UUID替代版本化来源合同；具体会话与取流约束以handler及协议回归为准。
 - 认证：`Authorization: Bearer <token>`；`POST /auth/login` 返回 `{token, user}` 并设置 HttpOnly `mc_session` cookie，protected routes 也接受该 cookie（`http/auth.rs`）。静态图片（海报/背板/剧照/章节图/库封面）仍走 public 路由，不得因存在 cookie 而改成必须认证（见 `AGENTS.md`）。
 - 错误 code：`resource.action`，如 `subscribe.missing`、`site.invalid`。message 中文可读。
 - 枚举：`media.kind` = `movie|tv|video`（`video` 是「其他」库，不识别、不刮削）；`subscribe.fetch_mode` = `search|rss|both`。
@@ -41,7 +41,7 @@
 
 `{id, kind, title, year?, original_title?, tmdb_id?, douban_id?, tvdb_id?, bangumi_id?, anilist_id?, poster_url?}`
 
-Media 的权威身份与别名现存 `library.db.media` / `media_aliases`；别名键为 `(source, kind, external_id)`，同一来源可保留多个别名、至多一个 refresh target。上面的五个可空 `*_id` 仍是单值投影，不代表完整别名集合。现有 `Store::update_media` 先删后写单值别名，仍可能丢失多别名且未统一更新浏览摘要；这是待修切换缺口，不是允许的写入合同（`store/src/media.rs`、`schema/v1/library.sql`）。
+Media 的权威身份与别名现存 `library.db.media` / `media_aliases`；别名键为 `(source, kind, external_id)`，同一来源可保留多个别名、至多一个 refresh target。上面的五个可空 `*_id` 仍是单值投影，不代表完整别名集合。`Store::update_media`当前保留未被本次编辑替换的别名，并在事务中更新相关卡片；不得把旧“先删后写且不归约”的缺陷描述当现行合同。
 
 ### Subscription（CONTEXT：**Subscribe**）
 
@@ -151,7 +151,7 @@ Playback history/watch stats 的 `member_id` 只接受 User UUID；显式传入�
 - 未知 def → 404 `job.missing`；def 存在但非维护 kind → 400 `job.not_maintenance`；非法配置 → 400 `job.invalid_config`（且不落库）。
 - `interval_secs` 只对维护任务加范围 `3600..=31536000`，越界 → 400 `job.invalid_interval`；其他任务契约不变。
 - 返回 `{id, kind, payload, payload_token, schedule?}`。当前 `jobs::update_def_config_cas` 在**同一事务**比较 payload、更新 payload/可选周期并刷新 queued 子任务的 payload；running 保留执行快照。省略周期时 handler 回读实际 schedule。并发令牌仍仅覆盖 payload，**不能检测仅改周期的冲突**，不能称为完整配置 revision。
-- 原 F02 与 F04 的实现现状须区分：queued 刷新与配置同事务路径已经存在，但仅周期冲突检测仍缺少令牌覆盖。历史复核与执行计划不等于本次重新验收；当前存储切换任务见 [执行计划](<../superpowers/plans/2026-10-22-storage-repair-remediation.md>)。
+- 原 F02 与 F04 的实现现状须区分：queued 刷新与配置同事务路径已经存在，但仅周期冲突检测仍缺少令牌覆盖。历史复核与执行计划不等于本次重新验收；当前存储切换任务见 [执行计划](<../superpowers/plans/2026-10-23-storage-review-remediation.md>)。
 
 `POST /api/v1/jobs/{id}/maintenance-preview`（**仅管理员**，会员 403）：
 
@@ -173,15 +173,17 @@ Playback history/watch stats 的 `member_id` 只接受 User UUID；显式传入�
 
 2026-10-13 的 [总复核](<../audits/2026-10-13-database-api-review.md>) 保留为历史缺陷证据；不能将其所有“当前缺陷”直接搬到现行合同，也不能仅据后续代码存在就宣布所有回归通过。DB8 的 SQL 硬预算、VACUUM best-effort 边界及仅周期冲突检测仍须分别核对。
 
-## 当前存储切换的未闭合边界（2026-10-20）
+## 当前存储切换边界（2026-10-23，8fbf81b）
 
-四个 Store 文件为 `app.db`、`cache.db`、`library.db`、`subscribe.db`，队列另在 `jobs.db`。当前布局没有旧数据库迁移阶梯；DDL 不代表 API/消费者已全部切换。`commit_playback_event` 尚未形成所有生产调用方的统一路径；movie `(0,0)` 请求别名仍在前后端，目标存储整片坐标为 `(-1,-1)`。不得新增兼容建议来保留这些未切换路径。
+四个Store文件为app/cache/library/subscribe，队列另在jobs；无旧数据库迁移阶梯或兼容视图。旧LedgerRow、重新识别补当前版本、movie `(0,0)` alias等已移除，不重做旧缺陷清单。Jellyfin协议与公开静态图片保留其独立合同。
 
-Jellyfin普通Items等已有Store protocol_item_page生产选择；PersonIds仍走候选Catalog路径，这是待移除缺陷而非允许网络依赖的合同。当前Unicode搜索、genre ID roundtrip、多键排序、entity/locale、played及不可播放条目的count/page仍有不一致，见[复审R12/R23/R24](../audits/2026-10-22-storage-repair-review.md)。SQL存在与历史绿测不能证明所有谓词正确或成本不随命中数增长。
+**Subscribe唯一请求字段：** 创建/PATCH使用 `coverage` 和 `filter_id`；`POST /subscriptions/{id}/upgrade-runs` body为 `{filter_id?, wash_cut?}`，回执也返回 `filter_id`。当前PATCH/upgrade已拒旧字段，但Web的TV调整和换Filter操作仍发送 `selected_seasons` / `rule_set_id`；创建DTO又未拒未知字段。这是[复审F01](../audits/2026-10-23-storage-followup-review.md)确认的实现缺陷，不保留为兼容合同。
 
-`bd6c3c8`旧隔离复核作为历史保留于benchmark；2026-10-22已确认LedgerRow去除、显式session统一、管理路由挂载、增量用户摘要等修复，不沿用旧“全部仍坏”清单。新的真实Router/Store/实际Web adapter反例及证据级别见[本轮复审](../audits/2026-10-22-storage-repair-review.md)。
+**Playback marks目标：** 正式字段为 `season_number` / `episode_number`，需支持整项、整季与合法TV S00E00。当前GET错误坐标可被降为whole读取；POST错误类型、旧键或溢出可被降为whole并持久写入整项，见F05；严格拒绝与零写是待修目标，不能声称现有全部入口已验证。
 
-当前修复任务以[详细技术方案](../superpowers/plans/2026-10-22-storage-repair-remediation.md)为唯一执行入口；该方案不是实现或验收结果。
+成功信封应只使用 `{ok:true,data}`；当前Web HTTP层及部分adapter仍接纳旧success信封、裸数组/对象并伪空，见F08。明确204无body接口独立处理。
+
+普通协议分页已经使用写入期genre/person索引与search_text，页面选源已后置。50k genre仍随命中数增长，精确total与offset的成本见[性能报告](../benchmarks/2026-10-23-storage-redesign-report.md)，不因SQL存在承诺常量扩展性。当前问题及修复仅维护于[再次复审](../audits/2026-10-23-storage-followup-review.md)与[唯一方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)。
 
 ## 现行表面（去哪看）
 

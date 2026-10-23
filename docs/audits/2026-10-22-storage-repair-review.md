@@ -1,5 +1,7 @@
 # 存储修复复审：1845dab
 
+> 历史审查：仅对正文固定SHA负责；其问题/完成状态不能当作8fbf81b现状。当前问题、撤回与剩余方案见[再次复审](2026-10-23-storage-followup-review.md)。
+
 日期：2026-10-22。结论：**Request changes**。只复审/文档，不修业务、不操作真实实例。
 
 ## 范围与证据边界
@@ -240,7 +242,7 @@ cargo test --quiet --manifest-path "$REVIEW_ROOT/Cargo.toml" --target-dir target
 node "$REVIEW_ROOT/web-review.mjs"
 ```
 
-运行器组合中曾有缺临时依赖/import、scope编码与重复CAS的夹具错误；修正后取得上列反例，编译错误不计产品finding。`artifact://133`为Store9场景，`artifact://127`为真实Router/Catalog及多集/会话/扫描，`artifact://156`为旧源真实绑定后的source_changed→Start及正确Device header首次Jellyfin完成，`artifact://116`为SQL，JS输出为100/101与missing可播放。本页实际数值为持久证据；内部artifact不保证跨会话可用，永久回归按[详细技术方案](../superpowers/plans/2026-10-22-storage-repair-remediation.md)在现有fixture新增，不把临时runner提交为产品测试。
+运行器组合中曾有缺临时依赖/import、scope编码与重复CAS的夹具错误；修正后取得上列反例，编译错误不计产品finding。`artifact://133`为Store9场景，`artifact://127`为真实Router/Catalog及多集/会话/扫描，`artifact://156`为旧源真实绑定后的source_changed→Start及正确Device header首次Jellyfin完成，`artifact://116`为SQL，JS输出为100/101与missing可播放。本页实际数值为持久证据；内部artifact不保证跨会话可用，永久回归按[详细技术方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)在现有fixture新增，不把临时runner提交为产品测试。
 
 ## 文档处置与历史问题
 

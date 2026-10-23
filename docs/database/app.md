@@ -2,7 +2,7 @@
 
 [返回数据库总览](README.md)
 
-当前源码基线：`feat/storage-redesign@a3dab1b`。字段、类型、默认值、主键、唯一约束、CHECK 和命名索引逐项来自 [Store v1/app.sql](../../crates/store/src/schema/v1/app.sql)；文件身份来自 [schema/layout.rs](../../crates/store/src/schema/layout.rs)：`application_id = 1129139248`、`user_version = 1`。这是源码 DDL 字典，不是本次运行 Store 后提取的 schema，也不代表所有运行时调用者已经完成切换。
+结构核对基线：`feat/storage-redesign@8fbf81b`。字段、类型、默认值、主键、唯一约束、CHECK 和命名索引逐项来自 [Store v1/app.sql](../../crates/store/src/schema/v1/app.sql)；文件身份来自 [schema/layout.rs](../../crates/store/src/schema/layout.rs)：`application_id = 1129139248`、`user_version = 1`。这是生产DDL字段字典，并经隔离内存SQLite核对，不是用户实例schema，也不代表所有运行时调用者已经完成切换。
 
 共 **10 张业务表、50 个字段、2 个显式命名索引**，没有声明外键或触发器。`app.db` 保存实例配置、User 身份与凭证；**不保存 Media、Library 或 Playback 事实**。`playback_device_credentials` 仅是设备凭证关联，不是播放会话、进度或历史；这些事实的存储边界见 [library.db](library.md)。不能将本库整体当缓存清空。
 

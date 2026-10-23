@@ -1,5 +1,7 @@
 # Storage query efficiency measurements (2026-10-23)
 
+历史阶段测量，数值保留原版本边界。当前实现/剩余优化见[复审](../audits/2026-10-23-storage-followup-review.md)与[汇总报告](2026-10-23-storage-redesign-report.md)。各阶段“未改”不代表8fbf81b仍未实现。
+
 Bundled SQLite, fresh `library.db` from `Store::open`; plans captured by
 `crates/store/tests/cleanup_index_work.rs` (`-- --nocapture`).
 
@@ -29,7 +31,7 @@ per file). After: 0 users 39.5 ms, 40 users 41.4 ms (once per Media per batch).
 Deterministic gate: per-thread `store::work_counters::user_summary_writes()` — old code 4000 writes (40 users × 100 files), new 40.
 Prepared-statement caching for hot statements was not measured separately; not changed.
 
-## Q3a / Q3b / Q4 / Q5: baseline only, no code change
+## 7bee561历史基线：Q3a/Q3b/Q4/Q5当时未修改（后续结果见下文）
 
 Existing result targets all green on 7bee561 (logs under /workspace/logs):
 store library_query_filters, adopted_filter_facts, connection_policy,
@@ -69,7 +71,7 @@ Logs: /workspace/logs/q3b-before.log, q3b-after.log.
 code; `store library_query_filters` 8/0. Per-statement VM steps were not captured
 (only wall time and statement count at request level).
 
-## Q4 — Jellyfin 协议分页（store 级，`crates/api/tests/jellyfin_page_perf.rs`）
+## Q4历史阶段 — Jellyfin 协议分页（store 级，`crates/api/tests/jellyfin_page_perf.rs`）
 
 方法：release，`protocol_item_page` 直接调用（不含 HTTP），单库电影，每形状 7 次取中位数/最大值。
 根因（EXPLAIN QUERY PLAN）：选源子查询被规划到 `files_presence(library_id,presence_state)`，
@@ -93,7 +95,7 @@ code; `store library_query_filters` 8/0. Per-statement VM steps were not capture
 注：5k 的"after"在中间版本（仅后置选源、未强制索引）测得；50k 为最终版本。
 剩余：genre/person/search 随行数线性增长，成本在逐行解析 NFO JSON 谓词（count 与 page 各一次），未在本项处理。
 
-### Q4b — 单次扫描得到页与总数（`COUNT(*) OVER ()`，页空才补跑 count）
+### Q4b历史阶段 — 单次扫描得到页与总数（`COUNT(*) OVER ()`，页空才补跑 count）
 
 release，`jellyfin_page_perf`，median ms（基线 = Q4 提交 68e43bc 的 50k 数）：
 
