@@ -77,26 +77,48 @@ impl Store {
         let mut bindings = Bindings::new();
         let list =
             bindings.placeholders(media_ids.len(), |index| media_ids[index].to_string().into());
+        // Light projection: only the four studio strings leave SQLite, never the
+        // multi-KB `details_json` / `normalized_json` blobs (Q3a benchmark).
         let sql = format!(
-            "SELECT m.media_id, m.locale, m.details_json, s.normalized_json \
+            "SELECT m.media_id, m.locale, {d_studio}, {d_logo}, {n_studio}, {n_logo} \
              FROM media_metadata m \
              LEFT JOIN media_metadata_sources s \
                ON s.media_id = m.media_id AND s.entity_scope = 'work' AND s.season = -1 \
               AND s.episode = -1 AND s.locale = m.locale \
-             WHERE m.media_id IN ({list}) ORDER BY m.media_id, m.locale"
+             WHERE m.media_id IN ({list}) ORDER BY m.media_id, m.locale",
+            d_studio = format!(
+                "COALESCE({}, {})",
+                json_text("m.details_json", "$.studio"),
+                json_first("m.details_json", "$.studios")
+            ),
+            d_logo = json_text("m.details_json", "$.studio_logo"),
+            n_studio = format!(
+                "CASE WHEN json_type(s.normalized_json, '$.fields') IS NOT NULL THEN {} ELSE {} END",
+                json_first("s.normalized_json", "$.fields.studios"),
+                json_first("s.normalized_json", "$.studios")
+            ),
+            n_logo = format!(
+                "CASE WHEN json_type(s.normalized_json, '$.fields') IS NOT NULL THEN {} ELSE {} END",
+                json_text("s.normalized_json", "$.fields.studio_logo.value"),
+                json_text("s.normalized_json", "$.studio_logo.value")
+            ),
         );
         let mut statement = self.library.prepare(&sql)?;
         let rows = statement.query_map(params_from_iter(bindings.values()), |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
+                [
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ],
             ))
         })?;
         let mut picked: HashMap<MediaId, (String, Option<String>, Option<String>)> = HashMap::new();
         for row in rows {
-            let (media_id, locale, details, normalized) = row?;
+            let (media_id, locale, [d_studio, d_logo, n_studio, n_logo]) = row?;
             let Ok(media_id) = media_id.parse::<MediaId>() else {
                 continue;
             };
@@ -106,7 +128,11 @@ impl Store {
                 Some((kept, _, _)) => exact && preferred_locale.as_deref() != Some(kept.as_str()),
             };
             if replace {
-                let (studio, logo) = studio_fields(&details, normalized.as_deref());
+                let (studio, logo) = if d_studio.is_some() || d_logo.is_some() {
+                    (d_studio, d_logo)
+                } else {
+                    (n_studio, n_logo)
+                };
                 picked.insert(media_id, (locale, studio, logo));
             }
         }
@@ -210,44 +236,18 @@ impl Store {
 
 /// Studio name and logo of an item: the adopted row's `details_json` first, then the adopted
 /// source payload. `None` when the metadata carries neither.
-fn studio_fields(
-    details_json: &str,
-    normalized_json: Option<&str>,
-) -> (Option<String>, Option<String>) {
-    let details: serde_json::Value = serde_json::from_str(details_json).unwrap_or_default();
-    let studio = details
-        .get("studio")
-        .and_then(|value| value.as_str())
-        .map(str::to_string)
-        .or_else(|| first_string(details.get("studios")));
-    let logo = details
-        .get("studio_logo")
-        .and_then(|value| value.as_str())
-        .map(str::to_string);
-    if studio.is_some() || logo.is_some() {
-        return (studio, logo);
-    }
-    let Some(normalized) = normalized_json else {
-        return (None, None);
-    };
-    let fields: serde_json::Value = serde_json::from_str(normalized).unwrap_or_default();
-    let fields = fields.get("fields").cloned().unwrap_or(fields);
-    let studio = first_string(fields.get("studios"));
-    let logo = fields
-        .get("studio_logo")
-        .and_then(|value| value.get("value"))
-        .and_then(|value| value.as_str())
-        .map(str::to_string);
-    (studio, logo)
+/// SQL for "the JSON text at `path`, else NULL" (non-string values read as absent).
+fn json_text(column: &str, path: &str) -> String {
+    format!(
+        "CASE WHEN json_type({column}, '{path}') = 'text' THEN json_extract({column}, '{path}') END"
+    )
 }
 
-fn first_string(value: Option<&serde_json::Value>) -> Option<String> {
-    match value? {
-        serde_json::Value::Array(values) => values
-            .first()
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-        serde_json::Value::String(value) => Some(value.clone()),
-        _ => None,
-    }
+/// SQL for "a string at `path`, or the first element when it is an array".
+fn json_first(column: &str, path: &str) -> String {
+    format!(
+        "COALESCE({}, CASE WHEN json_type({column}, '{path}') = 'array' THEN {} END)",
+        json_text(column, path),
+        json_text(column, &format!("{path}[0]"))
+    )
 }

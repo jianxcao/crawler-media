@@ -41,3 +41,14 @@ connection_policy 6/0; api release storage_contention 4/0.
   The cost is bounded by the page size. No cold-field page budget has been measured, so the projection was not added.
 - Q3b / Q4: no per-request EQP/VM or person/genre JSON scan cost has been captured yet. Not measured, so nothing changed.
 - Q5: storage_contention reports `read_scope: None`, which counts as **Not measured**. PRAGMA, connection memory budgets and deletion batching are unchanged.
+
+## Q3a — studio light projection (measured 2026-10-23)
+
+Harness: `scripts/bench/q3a_studio_projection.py`. Synthetic data: 100k media, details_json about 3 KB, one work source row each. The harness walks every page of 200 items.
+
+| Variant | Full walk | Per page | Bytes leaving SQLite |
+|---|---|---|---|
+| Before: details_json + normalized_json blobs, parsed client-side | 1614 ms | 3.23 ms | 604.6 MB |
+| After: `json_type`/`json_extract` projection of 4 strings | 991 ms | 1.98 ms | 1.1 MB |
+
+Implemented in `library_query/items/hydration.rs::fill_studio`. The precedence rule is unchanged: details first, then normalized `fields`. The client-side parse in the harness is Python; the Rust serde parse it replaces is a lower absolute cost, but the blob transfer saving does not depend on the language.
