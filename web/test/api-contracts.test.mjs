@@ -55,9 +55,9 @@ test("job action callers refresh snapshots instead of upserting acknowledgements
 
   assert.doesNotMatch(jobCenter, /upsert\(await cancelJob/);
   assert.match(jobCenter, /await cancelJob\(job\.id\);\s*refresh\(\);/);
-  assert.doesNotMatch(taskCenter, /upsert\(await (?:cancelJob|retryJob)/);
+  assert.doesNotMatch(taskCenter, /upsert\(await (?:cancelJob|runJob)/);
   assert.match(taskCenter, /await cancelJob\(job\.id\);\s*refreshJobs\(\);/);
-  assert.match(taskCenter, /await retryJob\(job\.id\);\s*refreshJobs\(\);/);
+  assert.match(taskCenter, /await runJob\(job\.id\);\s*refreshJobs\(\);/);
 });
 
 test("active job cards never present a previous finish as the active run's end", async () => {

@@ -6,6 +6,7 @@ import {
   downloadTaskNeedsAttention,
   groupDownloadTasks,
 } from "../lib/download-attention.ts";
+import { markJobDismissed } from "../lib/job-attention.ts";
 
 function task(overrides = {}) {
   return {
@@ -58,12 +59,10 @@ test("正常下载中的任务不算待办", () => {
 });
 
 test("关联入库 Job 失败时算待办，被忽略后不再算", () => {
-  const failed = { id: "job_1", status: "failed", dismissed_at: null };
+  const failed = { id: "job_1", last_status: "failed" };
   assert.equal(downloadTaskNeedsAttention(task(), failed), true);
-  assert.equal(
-    downloadTaskNeedsAttention(task(), { ...failed, dismissed_at: "2026-09-05T00:00:00Z" }),
-    false,
-  );
+  markJobDismissed("job_1d");
+  assert.equal(downloadTaskNeedsAttention(task(), { ...failed, id: "job_1d" }), false);
 });
 
 test("分组按 infohash 反查入库 Job，任一任务待办则整组待办", () => {
@@ -77,7 +76,7 @@ test("分组按 infohash 反查入库 Job，任一任务待办则整组待办", 
   assert.equal(downloadGroupNeedsAttention(byKey.get("media:00000000-0000-4000-8000-000000000007"), new Map()), true);
   assert.equal(downloadGroupNeedsAttention(byKey.get("task:1:c"), new Map()), false);
   // 入库 Job 用小写 hash 建索引，任务侧的大写 hash 也要能命中
-  const jobs = new Map([["aaa", { id: "job_2", status: "blocked", dismissed_at: null }]]);
+  const jobs = new Map([["aaa", { id: "job_2", last_status: "blocked" }]]);
   assert.equal(
     downloadGroupNeedsAttention(
       groupDownloadTasks([task({ info_hash: "AAA", subscriptions: [{ media_item_id: "00000000-0000-4000-8000-000000000008" }] })])[0],

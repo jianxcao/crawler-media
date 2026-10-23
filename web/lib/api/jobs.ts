@@ -269,30 +269,6 @@ export function cancelJob(jobId: string): Promise<{ cancelled: number }> {
   );
 }
 
-/** 重新执行：新契约无 /retry 端点，等价于立即 run 一次。 */
-export function retryJob(jobId: string): Promise<{ queued: boolean }> {
-  return runJob(jobId);
-}
-
-/**
- * 忽略一条失败任务：新契约无 /dismiss 端点，退化为读取当前定义
- * （组件依赖的返回类型 JobView 不变；静音语义由组件适配阶段另行处理）。
- */
-export async function dismissJob(jobId: string, muteSource = false): Promise<JobView> {
-  return getJob(jobId);
-}
-
-/** 取消「已忽略」：同上，退化为读取当前定义。 */
-export async function undismissJob(jobId: string): Promise<JobView> {
-  return getJob(jobId);
-}
-
-/** 收口失败任务：无批量端点，返回当前处于 failed 的定义列表。 */
-export async function dismissAllFailedJobs(): Promise<JobView[]> {
-  const jobs = await listJobs();
-  return jobs.filter((job) => job.last_status === "failed");
-}
-
 /** 手动触发一次调度 tick（开发用）。 */
 export function tickJobs(): Promise<Record<string, unknown>> {
   return unwrap(

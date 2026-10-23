@@ -699,12 +699,9 @@ export interface ItemDeleteResult {
 }
 
 
-/** 后台任务的启动回执。 */
-export interface PersistentJobStart {
-  started: boolean;
-  message?: string;
-  job_id: string;
-  created: boolean;
+/** 元数据刷新是同步完成的：回执只有本次实际刷新的条目数。 */
+export interface MetadataRefreshReceipt {
+  refreshed: number;
 }
 
 // 筛选的纯逻辑放独立模块（lib/library-filter.ts）；这里原样再导出，
@@ -833,16 +830,9 @@ function itemFrom(raw: unknown): LibraryItem {
   };
 }
 
-function jobStartOf(data: Record<string, unknown>): PersistentJobStart {
-  return {
-    started: bool(data.started ?? data.created ?? data.accepted ?? true),
-    message: typeof data.message === "string" ? data.message : "",
-    job_id: str(data.job_id ?? data.id),
-    created: bool(data.created ?? data.started ?? true),
-  };
+function refreshReceiptOf(data: Record<string, unknown>): MetadataRefreshReceipt {
+  return { refreshed: num(data.refreshed) };
 }
-
-const EMPTY_JOB_START: PersistentJobStart = { started: false, message: "", job_id: "", created: false };
 
 
 
@@ -1248,27 +1238,27 @@ export async function startLibraryOrganize(
 }
 
 /** 整库刷新元数据（POST /libraries/{id}/metadata/refresh）。 */
-export async function startLibraryMetadataRefresh(id: string): Promise<PersistentJobStart> {
+export async function startLibraryMetadataRefresh(id: string): Promise<MetadataRefreshReceipt> {
   const data = await unwrap(
     request<ApiEnvelope<Record<string, unknown>>>(`/libraries/${id}/metadata/refresh`, {
       method: "POST",
     }),
   );
-  return jobStartOf(data ?? {});
+  return refreshReceiptOf(data ?? {});
 }
 
 /** 刷新单个条目的元数据（海报/背景/NFO；POST .../metadata/refresh）。 */
 export async function refreshItemMetadata(
   libraryId: string,
   mediaItemId: string,
-): Promise<PersistentJobStart> {
+): Promise<MetadataRefreshReceipt> {
   const data = await unwrap(
     request<ApiEnvelope<Record<string, unknown>>>(
       `/libraries/${libraryId}/items/${mediaItemId}/metadata/refresh`,
       { method: "POST" },
     ),
   );
-  return jobStartOf(data ?? {});
+  return refreshReceiptOf(data ?? {});
 }
 
 // ---------------------------------------------------------------------------

@@ -94,3 +94,11 @@ test("obsolete trash and duplicate adapters are gone", async () => {
     assert.equal(api[name], undefined, name);
   }
 });
+
+test("metadata refresh returns the synchronous refreshed count, not a fake job", async () => {
+  const api = await loadLibraries(async () => envelope({ refreshed: 3 }));
+  const library = await api.startLibraryMetadataRefresh("lib");
+  assert.deepEqual(library, { refreshed: 3 });
+  const item = await api.refreshItemMetadata("lib", "m");
+  assert.deepEqual(item, { refreshed: 3 });
+});
