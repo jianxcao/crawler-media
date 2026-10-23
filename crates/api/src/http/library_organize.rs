@@ -245,10 +245,14 @@ fn refresh_item_metadata_inner(state: &ApiState, id: &str, item_id: &str) -> Res
                     // Ledgered videos go through the guarded export driver only; no
                     // second, unguarded write of the same sidecar.
                     match export {
-                        Some(request) => {
+                        Ok(crate::scrape_metadata::export::ExportPreparation::Ledgered(
+                            request,
+                        )) => {
                             crate::scrape_metadata::export::finish_sidecar_export(&state, request)
                         }
-                        None => {
+                        // Preparation failed: already logged; this file's sidecar stays as is.
+                        Err(_) => {}
+                        Ok(crate::scrape_metadata::export::ExportPreparation::NotLedgered) => {
                             let _ = lease.control().signal().publish(|| {
                                 crate::scrape_metadata::write_nfo(&target, &media, &nfo);
                                 Ok(())

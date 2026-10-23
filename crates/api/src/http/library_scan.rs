@@ -416,10 +416,12 @@ fn scrape_library_metadata(
                 // A ledgered video is exported only through the driver (CAS + digest
                 // guard); the legacy in-place write is kept for unledgered files only.
                 match export {
-                    Some(request) => {
+                    Ok(crate::scrape_metadata::export::ExportPreparation::Ledgered(request)) => {
                         crate::scrape_metadata::export::finish_sidecar_export(state, request)
                     }
-                    None => {
+                    // Preparation failed: already logged; this file's sidecar stays as is.
+                    Err(_) => {}
+                    Ok(crate::scrape_metadata::export::ExportPreparation::NotLedgered) => {
                         let write = || {
                             crate::scrape_metadata::write_nfo(&target, media, &nfo);
                             Ok(())

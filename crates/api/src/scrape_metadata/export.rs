@@ -4,7 +4,7 @@
 //! scrape and the Store driver:
 //!
 //! * [`begin_sidecar_export`] runs **before** the caller rewrites the sidecar. It
-//!   records the export intent and keeps an edit found on disk as this
+//!   resolves the export target and keeps an edit found on disk as this
 //!   Library's local edit (R18, never a global override); `write_nfo` clobbers scalars in place, so an edit that is not
 //!   captured here is gone for good.
 //! * [`finish_sidecar_export`] runs **after** the rewrite and projects effective
@@ -31,19 +31,29 @@ pub(crate) fn sidecar_path(video: &Path) -> Option<PathBuf> {
     Some(video.with_file_name(format!("{stem}.nfo")))
 }
 
-/// Record the export intent for `video` and capture edits the sidecar holds.
+/// Outcome of preparing a guarded sidecar export.
+pub(crate) enum ExportPreparation {
+    /// The video is ledgered: export only through the CAS/digest driver.
+    Ledgered(NfoExportRequest),
+    /// The video is explicitly not in the ledger; the caller's authorized
+    /// unledgered write path applies.
+    NotLedgered,
+}
+
+/// Prepare the export for `video` and capture edits the sidecar holds.
 ///
-/// Returns `None` when the file is not in the ledger (nothing to mirror) or when
-/// the intent cannot be persisted; the caller then simply writes metadata the old
-/// way. Capture failures are logged and do not stop the export: losing an edit is
-/// bad, leaving the sidecar stale is worse.
+/// Any failure (intent lookup, sidecar read, local-edit capture) is an `Err`:
+/// the caller stops this file's export and never falls back to an unguarded
+/// write, because that would discard an edit the export could not capture.
 pub(crate) fn begin_sidecar_export(
     state: &ApiState,
     media: &Media,
     video: &Path,
     scope: EntityScope,
-) -> Option<NfoExportRequest> {
-    let sidecar = sidecar_path(video)?;
+) -> Result<ExportPreparation, store::StoreError> {
+    let Some(sidecar) = sidecar_path(video) else {
+        return Ok(ExportPreparation::NotLedgered);
+    };
     let (operation_id, export_id) = next_ids();
     // S01: the Store mutex is held only for database phases; the sidecar is read
     // between them and every decision is re-made against current rows.
@@ -56,44 +66,35 @@ pub(crate) fn begin_sidecar_export(
     );
     let mut request = match target {
         Ok(Some(request)) => request,
-        Ok(None) => return None,
+        Ok(None) => return Ok(ExportPreparation::NotLedgered),
         Err(error) => {
-            tracing::warn!(%error, media_id = %media.id, path = %video.display(), "NFO 导出意图无法建立");
-            return None;
+            tracing::error!(%error, media_id = %media.id, path = %video.display(), "NFO 导出意图无法建立，本文件不导出");
+            return Err(error);
         }
     };
-    let observation = match store::metadata::export_driver::observe_nfo_sidecar(&sidecar, scope) {
-        Ok(observation) => observation,
-        Err(error) => {
-            tracing::warn!(%error, media_id = %media.id, path = %sidecar.display(), "NFO sidecar 无法读取");
-            return None;
-        }
-    };
+    let observation = store::metadata::export_driver::observe_nfo_sidecar(&sidecar, scope)
+        .inspect_err(|error| {
+            tracing::error!(%error, media_id = %media.id, path = %sidecar.display(), "NFO sidecar 无法读取，本文件不导出");
+        })?;
     request.expected_digest = observation.digest.clone();
     let edits = state
         .store
         .lock()
-        .nfo_local_edits_observed(&request, &observation);
-    match edits {
-        Ok(Some(edits)) => {
-            if edits != domain::MetadataFields::default() {
-                tracing::info!(
-                    media_id = %media.id,
-                    path = %request.path.display(),
-                    "NFO sidecar edits kept as this Library's local edits"
-                );
-            }
-            request.local_edits = edits;
+        .nfo_local_edits_observed(&request, &observation)
+        .inspect_err(|error| {
+            tracing::error!(%error, media_id = %media.id, path = %request.path.display(), "NFO sidecar 本地编辑捕获失败，本文件不导出");
+        })?;
+    if let Some(edits) = edits {
+        if edits != domain::MetadataFields::default() {
+            tracing::info!(
+                media_id = %media.id,
+                path = %request.path.display(),
+                "NFO sidecar edits kept as this Library's local edits"
+            );
         }
-        Ok(None) => {}
-        Err(error) => tracing::warn!(
-            %error,
-            media_id = %media.id,
-            path = %request.path.display(),
-            "NFO sidecar edit capture failed"
-        ),
+        request.local_edits = edits;
     }
-    Some(request)
+    Ok(ExportPreparation::Ledgered(request))
 }
 
 /// Project effective metadata onto the sidecar and register it as an input.
