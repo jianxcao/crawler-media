@@ -156,3 +156,4 @@ deferred_snapshot_write_error: SQLITE_BUSY_SNAPSHOT
 | A4 API RED | web_mark_persists_raw_clock_columns (management/playback_clock): on d8e9292^ RED 'played_changed_at_ms must be ms' left Some(1792754571) right Some(1792754571500); GREEN on HEAD. |
 | Q3b | Implemented: fixed-bucket dims one SELECT each (26->11 stmts); request-level endpoint_perf 50k movies facets median 428.5->237.0 ms, identical bytes; equivalence test green on old+new. |
 | Q4 | protocol page: source selection after LIMIT, forced files_media_library, materialized; 50k first_page 208ms (old >20min); predicate shapes still linear (NFO JSON parse) |
+| Q5 | authoritative store connections force synchronous=FULL (RED from OFF→0, GREEN 2); media response cache left at build default (rebuildable, no A/B measured); mmap/cache_size/temp_store unchanged: not measured |

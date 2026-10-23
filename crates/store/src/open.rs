@@ -252,6 +252,8 @@ fn apply_connection_policy(conn: &Connection) -> Result<(), StoreError> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "busy_timeout", "5000")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    // 权威库显式 FULL：WAL 下 NORMAL 会在掉电时丢最近提交，不能依赖构建默认值。
+    conn.pragma_update(None, "synchronous", "FULL")?;
     register_casefold(conn)?;
     crate::path_key::register(conn)?;
     Ok(())
@@ -302,5 +304,17 @@ mod policy_tests {
             .unwrap();
         assert_eq!(timeout, 5000);
         assert_eq!(foreign_keys, 1);
+    }
+
+    /// 权威库耐久性不依赖构建默认值：即便连接先被降级，策略也必须把它拉回 FULL。
+    #[test]
+    fn connection_policy_forces_synchronous_full() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "synchronous", "OFF").unwrap();
+        apply_connection_policy(&conn).unwrap();
+        let sync: i64 = conn
+            .pragma_query_value(None, "synchronous", |row| row.get(0))
+            .unwrap();
+        assert_eq!(sync, 2, "SQLite FULL");
     }
 }
