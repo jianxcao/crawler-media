@@ -1,7 +1,7 @@
 //! 重新识别：把条目的身份（TMDB 锚点/标题）改挂到正确作品，或把文件拆出
 //! 为「非独立作品」（extras）。前端契约对齐 ReidentifyDialog / ClaimPanels。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path as FsPath;
 use std::str::FromStr;
 

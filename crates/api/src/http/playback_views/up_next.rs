@@ -89,7 +89,10 @@ pub(crate) async fn up_next(
 
     {
         let store = state.store.lock();
-        let ledger = store.list_file_coverage().unwrap_or_default();
+        let Ok(visible) = crate::visible_scope::VisibleLibraries::load(&store, Some(user_id))
+        else {
+            return store_failed();
+        };
 
         // 1. 优先读取当前用户的活跃播放记录 (playback_units)
         // 覆盖本地扫库作品和已有播放进度的条目（按最近活跃时间倒序）
@@ -103,22 +106,11 @@ pub(crate) async fn up_next(
             };
 
             // 检查该媒体在当前用户的库中是否可见、是否有文件，且库未被设置为 exclude_from_home
-            let media_rows: Vec<&domain::FileCoverage> = ledger
-                .iter()
-                .filter(|r| {
-                    r.file.media_id == media_id
-                        && crate::http::library::file_visible_to_user(
-                            &store,
-                            &r.file,
-                            &media,
-                            Some(user_id),
-                        )
-                        && crate::http::playback::library_id_for(&store, &media, &[&r.file])
-                            .and_then(|lib_id| store.get_library(&lib_id).ok().flatten())
-                            .map(|lib| !lib.exclude_from_home)
-                            .unwrap_or(true)
-                })
-                .collect();
+            let Ok(media_rows) =
+                visible.media_coverage(&store, media_id, |lib| !lib.exclude_from_home)
+            else {
+                return store_failed();
+            };
             if media_rows.is_empty() {
                 continue;
             }
@@ -228,24 +220,13 @@ pub(crate) async fn up_next(
                 .max();
             let last_activity = units.iter().map(|u| u.updated_at).max().unwrap_or(0);
             let start_from = last_played.map(|e| e + 1).unwrap_or(episode_from as i32);
-            let owned: HashSet<u32> = ledger
+            let Ok(home_rows) =
+                visible.media_coverage(&store, media.id, |lib| !lib.exclude_from_home)
+            else {
+                return store_failed();
+            };
+            let owned: HashSet<u32> = home_rows
                 .iter()
-                .filter(|r| {
-                    r.file.media_id == media.id
-                        && r.units
-                            .iter()
-                            .any(|u| !u.is_whole() && u.season.max(0) as u32 == season)
-                        && crate::http::library::file_visible_to_user(
-                            &store,
-                            &r.file,
-                            &media,
-                            Some(user_id),
-                        )
-                        && crate::http::playback::library_id_for(&store, &media, &[&r.file])
-                            .and_then(|lib_id| store.get_library(&lib_id).ok().flatten())
-                            .map(|lib| !lib.exclude_from_home)
-                            .unwrap_or(true)
-                })
                 .flat_map(|r| &r.units)
                 .filter(|u| !u.is_whole() && u.season.max(0) as u32 == season)
                 .map(|u| u.episode.max(0) as u32)
@@ -330,7 +311,10 @@ pub(crate) async fn up_next(
 
     let candidates: Vec<UpNextCandidate> = {
         let store = state.store.lock();
-        let all_rows = store.list_file_coverage().unwrap_or_default();
+        let Ok(visible) = crate::visible_scope::VisibleLibraries::load(&store, Some(user_id))
+        else {
+            return store_failed();
+        };
         let mut cands = Vec::new();
         for plan in plans {
             let Some(media) = store.get_media(plan.media_id).ok().flatten() else {
@@ -354,27 +338,13 @@ pub(crate) async fn up_next(
                 .unit_state(user_id, media.id, target_season, target_episode)
                 .ok()
                 .flatten();
-            let rows: Vec<domain::FileCoverage> = all_rows
-                .iter()
-                .filter(|r| r.file.media_id == media.id)
-                .filter(|r| {
-                    crate::http::library::file_visible_to_user(
-                        &store,
-                        &r.file,
-                        &media,
-                        Some(user_id),
-                    )
-                })
-                .cloned()
-                .collect();
+            let Ok(rows) = visible.media_coverage(&store, media.id, |_| true) else {
+                return store_failed();
+            };
             if rows.is_empty() {
                 continue;
             }
-            let library_id = rows
-                .first()
-                .and_then(|row| crate::http::library::library_for_file(&store, &row.file, &media))
-                .map(|library| library.id)
-                .unwrap_or_default();
+            let library_id = rows[0].file.library_id.to_string();
 
             let refs: Vec<&domain::FileCoverage> = rows.iter().collect();
             let preferred_coverage = crate::http::library::preferred_coverage(&refs).cloned();
@@ -620,4 +590,12 @@ mod tests {
             "an unexpired reservation must survive a full table"
         );
     }
+}
+
+fn store_failed() -> Response {
+    crate::http::err(
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        "up_next.store",
+        "接下来看读取失败",
+    )
 }

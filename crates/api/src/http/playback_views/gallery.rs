@@ -1,7 +1,7 @@
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Response};
-use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use serde_json::json;
+use std::collections::HashMap;
 
 use crate::http::ok_list;
 use crate::management::ApiState;
@@ -40,98 +40,52 @@ pub(crate) async fn favorites_gallery(
         owned_rows: Vec<domain::FileCoverage>,
     }
 
-    let candidates: Vec<MediaGalleryCandidate> = {
+    let order = if sort_key == "title" {
+        store::FavoriteOrder::Title
+    } else {
+        store::FavoriteOrder::FavoritedAt
+    };
+    let selected = {
         let store = state.store.lock();
-        let all_rows = store.list_file_coverage().unwrap_or_default();
-        let media_ids: HashSet<domain::MediaId> = all_rows
-            .iter()
-            .filter_map(|cov| {
-                let media = store.get_media(cov.file.media_id).ok().flatten()?;
-                crate::http::library::file_visible_to_user(&store, &cov.file, &media, Some(user_id))
-                    .then_some(cov.file.media_id)
-            })
-            .collect();
-        let mut by_media: HashMap<domain::MediaId, i64> = HashMap::new();
-        for media_id in media_ids {
-            for row in store.unit_rows(user_id, media_id).unwrap_or_default() {
-                if row.favorite {
-                    let favorited_at = row.favorite_at;
-                    let entry = by_media.entry(media_id).or_insert(0);
-                    if favorited_at > *entry {
-                        *entry = favorited_at;
-                    }
-                }
-            }
-        }
-
-        let mut list: Vec<(domain::MediaId, i64)> = by_media.into_iter().collect();
-        if sort_key == "title" {
-            list.sort_by(|(a_id, _), (b_id, _)| {
-                let a_title = store
-                    .get_media(*a_id)
-                    .ok()
-                    .flatten()
-                    .map(|m| m.title)
-                    .unwrap_or_default();
-                let b_title = store
-                    .get_media(*b_id)
-                    .ok()
-                    .flatten()
-                    .map(|m| m.title)
-                    .unwrap_or_default();
-                if is_desc {
-                    b_title.cmp(&a_title)
-                } else {
-                    a_title.cmp(&b_title)
-                }
-            });
-        } else {
-            list.sort_by(|(_, a_up), (_, b_up)| {
-                if is_desc {
-                    b_up.cmp(a_up)
-                } else {
-                    a_up.cmp(b_up)
-                }
-            });
-        }
-
-        list.into_iter()
-            .skip(offset)
-            .take(limit)
-            .filter_map(|(media_id, _)| {
-                let media = store.get_media(media_id).ok().flatten()?;
-                let owned: Vec<domain::FileCoverage> = all_rows
-                    .iter()
-                    .filter(|cov| cov.file.media_id == media_id)
-                    .filter(|cov| {
-                        crate::http::library::file_visible_to_user(
-                            &store,
-                            &cov.file,
-                            &media,
-                            Some(user_id),
-                        )
-                    })
-                    .cloned()
-                    .collect();
+        (|| -> Result<Vec<MediaGalleryCandidate>, store::StoreError> {
+            let visible = crate::visible_scope::VisibleLibraries::load(&store, Some(user_id))?;
+            let page = store.playback_favorite_page(&store::PlaybackViewQuery {
+                user: user_id,
+                libraries: visible.ids(),
+                limit,
+                offset,
+                order,
+                descending: is_desc,
+                unwatched_first: false,
+            })?;
+            let mut out = Vec::with_capacity(page.items.len());
+            for row in page.items {
+                let Some(media) = store.get_media(row.media_id)? else {
+                    continue;
+                };
+                let owned = visible.media_coverage(&store, row.media_id, |_| true)?;
                 if owned.is_empty() {
-                    return None;
+                    continue;
                 }
-                let library_id = owned
-                    .first()
-                    .and_then(|cov| {
-                        crate::http::library::library_for_file(&store, &cov.file, &media)
-                    })
-                    .map(|library| library.id)
-                    .unwrap_or_default();
-                let pref = crate::http::library::preferred_coverage(&owned).cloned();
-                Some(MediaGalleryCandidate {
+                out.push(MediaGalleryCandidate {
                     media,
-                    library_id,
-                    preferred_coverage: pref,
+                    library_id: row.library_id.to_string(),
+                    preferred_coverage: crate::http::library::preferred_coverage(&owned).cloned(),
                     owned_rows: owned,
-                })
-            })
-            .collect()
+                });
+            }
+            Ok(out)
+        })()
+    };
+    let candidates = match selected {
+        Ok(candidates) => candidates,
+        Err(e) => {
+            return crate::http::err(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "favorites_gallery.store",
+                &e.to_string(),
+            );
+        }
     };
 
     // Phase 2: Out-of-lock filesystem observation under http_work budget

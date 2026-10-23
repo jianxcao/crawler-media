@@ -55,7 +55,8 @@ pub(crate) async fn favorites(
     let selected = {
         let store = state.store.lock();
         (|| -> Result<_, store::StoreError> {
-            let libraries = crate::visible_scope::visible_library_ids(&store, user_id)?;
+            let visible = crate::visible_scope::VisibleLibraries::load(&store, Some(user_id))?;
+            let libraries = visible.ids();
             let page = store.playback_favorite_page(&store::PlaybackViewQuery {
                 user: user_id,
                 libraries,
@@ -70,11 +71,8 @@ pub(crate) async fn favorites(
                 let Some(media) = store.get_media(row.media_id)? else {
                     continue;
                 };
-                let owned = store.file_coverage_in_library(
-                    row.library_id,
-                    Some(row.media_id),
-                    store::FileReadScope::Published,
-                )?;
+                // Coverage spans every visible library holding the Media.
+                let owned = visible.media_coverage(&store, row.media_id, |_| true)?;
                 let units = || {
                     owned
                         .iter()

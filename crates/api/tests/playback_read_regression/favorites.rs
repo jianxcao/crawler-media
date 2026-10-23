@@ -303,3 +303,27 @@ async fn playing_an_old_favorite_does_not_move_it_ahead_of_a_newer_one() {
         "an unknown historical favourite time must stay unknown"
     );
 }
+
+#[tokio::test]
+async fn favorite_coverage_spans_every_visible_library_holding_the_media() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = make_state(tmp.path());
+    let app = router(state.clone());
+    let store = state.store();
+    let first = seed_library(&store.lock(), tmp.path(), "first");
+    let second = seed_library(&store.lock(), tmp.path(), "second");
+    let (member, token) = seed_member(&store.lock(), "carol");
+    let media = {
+        let guard = store.lock();
+        let media = seed_media(&guard, "Twice", Some(2020));
+        add_ledger(&guard, media, &first, "twice-a");
+        add_ledger(&guard, media, &second, "twice-b");
+        media
+    };
+    favorite(&store.lock(), member, media, true);
+    let data = get(&app, "/api/v1/playback/favorites", &token).await;
+    assert_eq!(data["total"], 1, "{data}");
+    assert_eq!(data["items"][0]["file_count"], 2, "{data}");
+    let gallery = get(&app, "/api/v1/playback/favorites/gallery", &token).await;
+    assert_eq!(gallery.as_array().map(Vec::len), Some(1), "{gallery}");
+}

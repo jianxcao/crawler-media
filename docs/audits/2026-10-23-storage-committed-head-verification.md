@@ -142,3 +142,4 @@ deferred_snapshot_write_error: SQLITE_BUSY_SNAPSHOT
 | Q4 | Baseline only: existing targets green; cost not measured at request level, so no code change (see docs/benchmarks/2026-10-23-storage-query-efficiency.md). |
 | Q5 | Baseline only: existing targets green; cost not measured at request level, so no code change (see docs/benchmarks/2026-10-23-storage-query-efficiency.md). |
 | Q2 | Done: finalize once per Media per batch; count-based gate (old 4000 summary writes, new 40). |
+| B2 | Done: favorites + gallery pages selected in SQL (playback_favorite_page); up next reads coverage by Media through VisibleLibraries (persisted library_id, exclude_from_home), no list_file_coverage in watch views; favorite coverage spans all visible libraries (API RED->GREEN). |
