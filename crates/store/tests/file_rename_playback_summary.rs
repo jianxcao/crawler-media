@@ -106,7 +106,15 @@ fn reparent(fx: &Fx) {
         .store
         .begin_file_rename(fx.moved.file_id, &fx.moved.version, &fx.moved.path, &to, 1)
         .unwrap();
-    fx.store.apply_file_rename_disk(&req.rename_id, 2).unwrap();
+    fx.store
+        .load_file_rename(&req.rename_id)
+        .and_then(|r| {
+            store::library_write::execute_rename_disk(&r).inspect_err(|e| {
+                let _ = fx.store.record_rename_refusal(&r.rename_id, 2, e);
+            })
+        })
+        .and_then(|rc| fx.store.record_rename_disk(&rc, 2))
+        .unwrap();
     fx.store.complete_file_rename(&req.rename_id, 3).unwrap();
 }
 

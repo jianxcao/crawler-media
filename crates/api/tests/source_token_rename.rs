@@ -129,7 +129,15 @@ fn rename(fx: &Fx, file: &domain::LibraryFile, to: &Path) -> domain::LibraryFile
         .store
         .begin_file_rename(file.file_id, &file.version, &file.path, to, 2)
         .unwrap();
-    fx.store.apply_file_rename_disk(&req.rename_id, 3).unwrap();
+    fx.store
+        .load_file_rename(&req.rename_id)
+        .and_then(|r| {
+            store::library_write::execute_rename_disk(&r).inspect_err(|e| {
+                let _ = fx.store.record_rename_refusal(&r.rename_id, 3, e);
+            })
+        })
+        .and_then(|rc| fx.store.record_rename_disk(&rc, 3))
+        .unwrap();
     fx.store.complete_file_rename(&req.rename_id, 4).unwrap();
     fx.store
         .file_coverage_by_id(file.file_id)
@@ -198,7 +206,15 @@ fn destination_with_new_identity_advances_version_and_invalidates() {
         .store
         .begin_file_rename(file.file_id, &file.version, &file.path, &to, 2)
         .unwrap();
-    fx.store.apply_file_rename_disk(&req.rename_id, 3).unwrap();
+    fx.store
+        .load_file_rename(&req.rename_id)
+        .and_then(|r| {
+            store::library_write::execute_rename_disk(&r).inspect_err(|e| {
+                let _ = fx.store.record_rename_refusal(&r.rename_id, 3, e);
+            })
+        })
+        .and_then(|rc| fx.store.record_rename_disk(&rc, 3))
+        .unwrap();
     // Cross-filesystem move is a copy: new inode (and here new bytes). Without
     // byte-identity evidence this must be treated as a new source.
     let copy = fx.b.join("copy.tmp");
@@ -254,7 +270,7 @@ fn crash_after_disk_stage_resumes_with_kept_token() {
         .store
         .begin_file_rename(file.file_id, &file.version, &file.path, &to, 2)
         .unwrap();
-    store::library_write::move_rename_bytes(&req).unwrap();
+    store::library_write::execute_rename_disk(&req).unwrap();
     // Crash: the ledger still points at `from`; restart drives the intent.
     assert_eq!(fx.store.resume_pending_file_renames(3).unwrap(), 1);
     let after = fx

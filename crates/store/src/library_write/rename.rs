@@ -46,7 +46,10 @@ impl Store {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
         let request = self.begin_file_rename(file_id, expected, from, to, now)?;
-        self.apply_file_rename_disk(&request.rename_id, now)?;
+        let receipt = super::execute_rename_disk(&request).inspect_err(|error| {
+            let _ = self.record_rename_refusal(&request.rename_id, now, error);
+        })?;
+        self.record_rename_disk(&receipt, now)?;
         self.complete_file_rename(&request.rename_id, now)
     }
 

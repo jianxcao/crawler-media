@@ -12,6 +12,7 @@ pub mod reduce_incremental;
 pub mod rename;
 pub mod rename_disk;
 mod rename_durable;
+mod rename_receipt;
 mod rename_record;
 pub mod rename_sidecars;
 pub mod source;
@@ -22,9 +23,8 @@ pub use presence::*;
 pub use publish::*;
 pub use reassign::*;
 pub use reduce::*;
-pub use rename_durable::{
-    FileRenameRequest, RenameSidecar, RenameSourceEvidence, move_rename_bytes,
-};
+pub use rename_durable::{FileRenameRequest, RenameSidecar, RenameSourceEvidence};
+pub use rename_receipt::{RenameDiskReceipt, execute_rename_disk, execute_rename_disk_copying};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WriteScope {

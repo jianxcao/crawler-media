@@ -283,13 +283,18 @@ CREATE TABLE pending_file_renames (
  source_device INTEGER NOT NULL,
  source_inode INTEGER NOT NULL,
  source_mtime_ns INTEGER NOT NULL,
+ dest_size INTEGER,
+ dest_device INTEGER,
+ dest_inode INTEGER,
+ dest_mtime_ns INTEGER,
  from_config_revision INTEGER NOT NULL,
  to_config_revision INTEGER NOT NULL,
  attempts INTEGER NOT NULL DEFAULT 0,
  next_retry_at INTEGER NOT NULL DEFAULT 0,
  last_error TEXT,
  created_at_ms INTEGER NOT NULL,
- updated_at_ms INTEGER NOT NULL
+ updated_at_ms INTEGER NOT NULL,
+ CHECK((dest_device IS NULL) = (dest_inode IS NULL))
 );
 CREATE INDEX pending_file_renames_due ON pending_file_renames(next_retry_at, rename_id);
 CREATE TABLE scrape_sidecars (file_id TEXT NOT NULL REFERENCES library_files(file_id) ON DELETE CASCADE,kind TEXT NOT NULL,path TEXT NOT NULL,PRIMARY KEY(file_id,kind));

@@ -360,9 +360,13 @@ fn apply_reconciliation(
             tracing::warn!(library_id = %library.id, %error, "Reconciliation begin rename failed");
             failure()
         })?;
-    // Disk already sits at `to` for reconciliation; apply marks disk_applied then complete CAS-publishes.
-    store
-        .apply_file_rename_disk(&request.rename_id, now)
+    // Disk already sits at `to` for reconciliation: the disk phase only proves the
+    // destination identity (no bytes move), then complete CAS-publishes.
+    store::library_write::execute_rename_disk(&request)
+        .inspect_err(|error| {
+            let _ = store.record_rename_refusal(&request.rename_id, now, error);
+        })
+        .and_then(|receipt| store.record_rename_disk(&receipt, now))
         .and_then(|_| store.complete_file_rename(&request.rename_id, now))
         .map_err(|error| {
             tracing::warn!(library_id = %library.id, %error, "Reconciliation durable rename failed");

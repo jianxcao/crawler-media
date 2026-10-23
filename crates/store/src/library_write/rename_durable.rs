@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use super::publish::{ensure_library_writable, ensure_media_writable};
 use super::reduce::reduce_library_media;
 use super::rename::{Owned, load_owned};
-pub use super::rename_disk::{RenameSourceEvidence, move_rename_bytes};
+pub use super::rename_disk::RenameSourceEvidence;
 use super::rename_record::{RawRename, config_revision, set_phase};
 pub use super::rename_sidecars::SidecarMode;
 use super::rename_sidecars::{
@@ -50,6 +50,8 @@ pub struct FileRenameRequest {
     pub phase: String,
     pub media_id: MediaId,
     pub source_evidence: RenameSourceEvidence,
+    /// Destination identity recorded from the disk receipt, once recorded.
+    pub disk_receipt: Option<RenameSourceEvidence>,
     pub from_config_revision: i64,
     pub to_config_revision: i64,
 }
@@ -193,34 +195,33 @@ impl Store {
             phase: "planned".into(),
             media_id,
             source_evidence: evidence,
+            disk_receipt: None,
             from_config_revision,
             to_config_revision,
         })
     }
 
-    /// Move video + sidecar bytes for a planned rename. Safe to call with the
-    /// Store lock released. Marks the intent `disk_applied` when the video is
-    /// at `to` (including the crash case where bytes already moved).
-    pub fn apply_file_rename_disk(&self, rename_id: &str, now: i64) -> Result<(), StoreError> {
+    /// Record a disk receipt from [`super::execute_rename_disk`] (run without the
+    /// Store): persist the destination identity and the re-checked sidecar
+    /// decisions in one short transaction, then mark `disk_applied` and drop the
+    /// staging link. Replaying a receipt for an already-applied intent is a no-op.
+    pub fn record_rename_disk(
+        &self,
+        receipt: &super::RenameDiskReceipt,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        let rename_id = receipt.rename_id.as_str();
         let request = self.load_file_rename(rename_id)?;
-        if request.phase != "planned" {
-            return match request.phase.as_str() {
-                "disk_applied" | "library_published" | "references_applied" => Ok(()),
-                phase => Err(StoreError::Protected(format!(
-                    "rename {rename_id} is {phase}; disk phase refused"
-                ))),
-            };
-        }
-        if let Err(error) = move_rename_bytes(&request) {
-            // A stale or foreign disk state is terminal: keep the recovery
-            // position and stop retrying. Plain IO errors stay retryable.
-            if matches!(error, StoreError::Protected(_) | StoreError::Missing(_)) {
-                self.mark_file_rename_failed(rename_id, now, &error.to_string())?;
+        match request.phase.as_str() {
+            "planned" => {}
+            "disk_applied" | "library_published" | "references_applied" => return Ok(()),
+            phase => {
+                return Err(StoreError::Protected(format!(
+                    "rename {rename_id} is {phase}; disk receipt refused"
+                )));
             }
-            return Err(error);
         }
-        // Sidecars move here, under the Store lock, after re-checking ownership so a
-        // file published since `begin` cannot lose shared artwork.
+        let destination = &receipt.destination;
         let mut sidecars = request.sidecars.clone();
         let tx = crate::write_tx(&self.library)?;
         recheck_for_execution(
@@ -232,12 +233,36 @@ impl Store {
         let sidecars_json = serde_json::to_string(&sidecars)
             .map_err(|e| StoreError::Invalid(format!("sidecars json: {e}")))?;
         tx.execute(
-            "UPDATE pending_file_renames SET sidecars_json = ?2 WHERE rename_id = ?1",
-            params![rename_id, sidecars_json],
+            "UPDATE pending_file_renames
+             SET sidecars_json = ?2, dest_size = ?3, dest_device = ?4, dest_inode = ?5,
+                 dest_mtime_ns = ?6
+             WHERE rename_id = ?1 AND phase = 'planned'",
+            params![
+                rename_id,
+                sidecars_json,
+                destination.size_bytes as i64,
+                destination.device as i64,
+                destination.inode as i64,
+                destination.mtime_ns
+            ],
         )?;
         tx.commit()?;
         apply_sidecar_moves(&sidecars)?;
         self.mark_rename_disk_applied(rename_id, now)?;
+        super::rename_receipt::remove_staging(&request)
+    }
+
+    /// A refused disk phase (stale or foreign disk state) is terminal: keep the
+    /// recovery position for diagnosis and stop retrying. IO errors stay retryable.
+    pub fn record_rename_refusal(
+        &self,
+        rename_id: &str,
+        now: i64,
+        error: &StoreError,
+    ) -> Result<(), StoreError> {
+        if matches!(error, StoreError::Protected(_) | StoreError::Missing(_)) {
+            self.mark_file_rename_failed(rename_id, now, &error.to_string())?;
+        }
         Ok(())
     }
 
@@ -420,7 +445,11 @@ impl Store {
     fn resume_one_file_rename(&self, rename_id: &str, now: i64) -> Result<(), StoreError> {
         let request = self.load_file_rename(rename_id)?;
         if request.phase == "planned" {
-            self.apply_file_rename_disk(rename_id, now)?;
+            // Startup recovery: the disk phase is idempotent and bounded to one file.
+            let receipt = super::execute_rename_disk(&request).inspect_err(|error| {
+                let _ = self.record_rename_refusal(rename_id, now, error);
+            })?;
+            self.record_rename_disk(&receipt, now)?;
         }
         self.complete_file_rename(rename_id, now)
     }
@@ -443,7 +472,8 @@ impl Store {
                         r.expected_source_version, r.from_library_id, r.from_root_id,
                         r.to_library_id, r.to_root_id, r.sidecars_json, r.phase,
                         r.source_size, r.source_device, r.source_inode, r.source_mtime_ns,
-                        r.from_config_revision, r.to_config_revision, f.media_id
+                        r.from_config_revision, r.to_config_revision, f.media_id,
+                        r.dest_size, r.dest_device, r.dest_inode, r.dest_mtime_ns
                  FROM pending_file_renames r JOIN library_files f ON f.file_id = r.file_id
                  WHERE r.rename_id = ?1",
                 params![rename_id],

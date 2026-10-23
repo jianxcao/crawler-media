@@ -124,3 +124,4 @@ deferred_snapshot_write_error: SQLITE_BUSY_SNAPSHOT
 | A4 | Fixed: scoped marks via mutate_playback, favorite_at seconds clock, marks never move activity; tests playback_assertions + api playback_clock |
 | A5 | Fixed: duration reused only on same file/revision/source_version/full_file; one duration drives completion+play_count; tests playback_event_duration |
 | A6 | Fixed: PreparedRoot canonical keys persisted in plan (C08); per-connection in-memory alias tables, publish after commit incl. root deletes (C09); scoped inputs/unidentified reparented before reduce (C07). Risk: shared work NFO not duplicated into nested library; root changes via create/insert not batched ≤100 |
+| A7 | Done: dest dev/ino receipt persisted; execute outside store lock, record idempotent; staging kept until recorded. Risk: real cross-FS not run; sidecar IO still in record (A8). |

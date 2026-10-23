@@ -124,18 +124,29 @@ pub(crate) fn apply_organize(
             }
         };
         // No gate, no Store: the durable intent is already committed.
-        if let Err(error) = store::library_write::move_rename_bytes(&request) {
-            tracing::error!(from, to, %error, "整理文件重命名失败");
-            errors.push(format!("{from} 重命名失败: {error}"));
-            continue;
-        }
+        let receipt = match store::library_write::execute_rename_disk(&request) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                tracing::error!(from, to, %error, "整理文件重命名失败");
+                if let Err(record) =
+                    state
+                        .store
+                        .lock()
+                        .record_rename_refusal(&request.rename_id, now_ms, &error)
+                {
+                    tracing::error!(%record, rename_id = %request.rename_id, "记录重命名拒绝失败");
+                }
+                errors.push(format!("{from} 重命名失败: {error}"));
+                continue;
+            }
+        };
         let completed = source_lease.publish(|| {
             if dest_lease.is_some_and(|d| d.control().is_cancelled()) {
                 return Err("目标媒体库正在删除".into());
             }
             let store = state.store.lock();
             store
-                .apply_file_rename_disk(&request.rename_id, now_ms)
+                .record_rename_disk(&receipt, now_ms)
                 .and_then(|_| store.complete_file_rename(&request.rename_id, now_ms))
                 .map_err(|error| error.to_string())?;
             Ok(store

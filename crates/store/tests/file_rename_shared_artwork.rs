@@ -93,7 +93,11 @@ fn sole_owner_moves_directory_artwork() {
     std::fs::write(src.join("fanart.jpg"), b"fanart").unwrap();
     let to = fx.b.join("Show").join("S01E01.mkv");
     let req = begin(&fx, &file, &to);
-    fx.store.apply_file_rename_disk(&req.rename_id, 2).unwrap();
+    fx.store
+        .load_file_rename(&req.rename_id)
+        .and_then(|r| store::library_write::execute_rename_disk(&r))
+        .and_then(|rc| fx.store.record_rename_disk(&rc, 2))
+        .unwrap();
     fx.store.complete_file_rename(&req.rename_id, 3).unwrap();
     for name in ["poster.jpg", "fanart.jpg"] {
         assert!(
@@ -146,7 +150,11 @@ fn same_directory_rename_leaves_directory_artwork_alone() {
     let file = episode(&fx, &src, 1);
     std::fs::write(src.join("poster.jpg"), b"poster").unwrap();
     let req = begin(&fx, &file, &src.join("Show S01E01.mkv"));
-    fx.store.apply_file_rename_disk(&req.rename_id, 2).unwrap();
+    fx.store
+        .load_file_rename(&req.rename_id)
+        .and_then(|r| store::library_write::execute_rename_disk(&r))
+        .and_then(|rc| fx.store.record_rename_disk(&rc, 2))
+        .unwrap();
     fx.store.complete_file_rename(&req.rename_id, 3).unwrap();
     assert!(src.join("poster.jpg").is_file());
 }
@@ -161,7 +169,11 @@ fn sharing_is_rechecked_when_bytes_move() {
     let req = begin(&fx, &moved, &to);
     // A sibling is published after the intent was planned as a sole-owner move.
     episode(&fx, &src, 2);
-    fx.store.apply_file_rename_disk(&req.rename_id, 2).unwrap();
+    fx.store
+        .load_file_rename(&req.rename_id)
+        .and_then(|r| store::library_write::execute_rename_disk(&r))
+        .and_then(|rc| fx.store.record_rename_disk(&rc, 2))
+        .unwrap();
     fx.store.complete_file_rename(&req.rename_id, 3).unwrap();
     assert!(
         src.join("poster.jpg").is_file(),
@@ -186,7 +198,11 @@ fn non_standard_artwork_names_follow_the_same_ownership_rules() {
     std::fs::write(src.join("notes.txt"), b"not artwork").unwrap();
     let to = fx.b.join("Show").join("S01E01.mkv");
     let req = begin(&fx, &file, &to);
-    fx.store.apply_file_rename_disk(&req.rename_id, 2).unwrap();
+    fx.store
+        .load_file_rename(&req.rename_id)
+        .and_then(|r| store::library_write::execute_rename_disk(&r))
+        .and_then(|rc| fx.store.record_rename_disk(&rc, 2))
+        .unwrap();
     fx.store.complete_file_rename(&req.rename_id, 3).unwrap();
     for name in [
         "season01-poster.jpg",
@@ -218,7 +234,11 @@ fn destination_artwork_conflict_policy_is_explicit() {
     std::fs::write(dest.join("poster.jpg"), b"destination").unwrap();
     std::fs::write(dest.join("fanart.jpg"), b"same").unwrap();
     let req = begin(&fx, &file, &dest.join("S01E01.mkv"));
-    fx.store.apply_file_rename_disk(&req.rename_id, 2).unwrap();
+    fx.store
+        .load_file_rename(&req.rename_id)
+        .and_then(|r| store::library_write::execute_rename_disk(&r))
+        .and_then(|rc| fx.store.record_rename_disk(&rc, 2))
+        .unwrap();
     fx.store.complete_file_rename(&req.rename_id, 3).unwrap();
     assert_eq!(
         std::fs::read(dest.join("poster.jpg")).unwrap(),

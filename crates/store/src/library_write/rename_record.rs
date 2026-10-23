@@ -21,6 +21,7 @@ pub(super) struct RawRename {
     evidence: (i64, i64, i64, i64),
     config: (i64, i64),
     media_id: String,
+    receipt: (Option<i64>, Option<i64>, Option<i64>, Option<i64>),
 }
 
 impl RawRename {
@@ -42,6 +43,7 @@ impl RawRename {
             evidence: (r.get(11)?, r.get(12)?, r.get(13)?, r.get(14)?),
             config: (r.get(15)?, r.get(16)?),
             media_id: r.get(17)?,
+            receipt: (r.get(18)?, r.get(19)?, r.get(20)?, r.get(21)?),
         })
     }
 
@@ -49,6 +51,16 @@ impl RawRename {
         let sidecars = serde_json::from_str(&self.sidecars_json)
             .map_err(|e| StoreError::Invalid(format!("sidecars json: {e}")))?;
         let (size, device, inode, mtime_ns) = self.evidence;
+        let disk_receipt = match self.receipt {
+            (Some(size), Some(device), Some(inode), Some(mtime_ns)) => Some(RenameSourceEvidence {
+                version: self.version.clone(),
+                size_bytes: size as u64,
+                device: device as u64,
+                inode: inode as u64,
+                mtime_ns,
+            }),
+            _ => None,
+        };
         Ok(FileRenameRequest {
             rename_id: rename_id.to_string(),
             file_id: self.file_id.parse()?,
@@ -69,6 +81,7 @@ impl RawRename {
                 inode: inode as u64,
                 mtime_ns,
             },
+            disk_receipt,
             from_config_revision: self.config.0,
             to_config_revision: self.config.1,
         })

@@ -98,7 +98,7 @@ fn durable_same_root_rename_moves_sidecar_and_survives_crash_after_disk() {
         .unwrap();
     assert_eq!(req.sidecars.len(), 1);
     assert_eq!(req.phase, "planned");
-    store::library_write::move_rename_bytes(&req).unwrap();
+    store::library_write::execute_rename_disk(&req).unwrap();
     assert!(to.is_file());
     assert!(!fx.file.path.is_file());
     // Sidecars move only in the locked phase, after the ownership re-check.
@@ -123,7 +123,15 @@ fn durable_cross_root_same_library_reparents_root_id() {
         .unwrap();
     assert_ne!(req.from_root_id, req.to_root_id);
     assert_eq!(req.from_library_id, req.to_library_id);
-    fx.store.apply_file_rename_disk(&req.rename_id, 2).unwrap();
+    fx.store
+        .load_file_rename(&req.rename_id)
+        .and_then(|r| {
+            store::library_write::execute_rename_disk(&r).inspect_err(|e| {
+                let _ = fx.store.record_rename_refusal(&r.rename_id, 2, e);
+            })
+        })
+        .and_then(|rc| fx.store.record_rename_disk(&rc, 2))
+        .unwrap();
     fx.store.complete_file_rename(&req.rename_id, 3).unwrap();
     let after = recorded(&fx.store, fx.file.file_id);
     assert_eq!(after.path, to);
@@ -143,7 +151,15 @@ fn durable_cross_library_reparent_updates_library_id() {
         .begin_file_rename(fx.file.file_id, &before.version, &before.path, &to, 1)
         .unwrap();
     assert_ne!(req.from_library_id, req.to_library_id);
-    fx.store.apply_file_rename_disk(&req.rename_id, 2).unwrap();
+    fx.store
+        .load_file_rename(&req.rename_id)
+        .and_then(|r| {
+            store::library_write::execute_rename_disk(&r).inspect_err(|e| {
+                let _ = fx.store.record_rename_refusal(&r.rename_id, 2, e);
+            })
+        })
+        .and_then(|rc| fx.store.record_rename_disk(&rc, 2))
+        .unwrap();
     fx.store.complete_file_rename(&req.rename_id, 3).unwrap();
     let after = recorded(&fx.store, fx.file.file_id);
     assert_eq!(after.path, to);
@@ -195,11 +211,21 @@ fn replaced_source_is_refused_and_not_moved() {
     let staged = fx.a.join(".replacement");
     std::fs::write(&staged, b"replacement").unwrap();
     std::fs::rename(&staged, &fx.file.path).unwrap();
-    let stale_disk_result = store::library_write::move_rename_bytes(&req);
+    let stale_disk_result = store::library_write::execute_rename_disk(&req);
     assert!(stale_disk_result.is_err());
     assert_eq!(std::fs::read(&fx.file.path).unwrap(), b"replacement");
     assert!(!to.exists());
-    assert!(fx.store.apply_file_rename_disk(&req.rename_id, 2).is_err());
+    assert!(
+        fx.store
+            .load_file_rename(&req.rename_id)
+            .and_then(
+                |r| store::library_write::execute_rename_disk(&r).inspect_err(|e| {
+                    let _ = fx.store.record_rename_refusal(&r.rename_id, 2, e);
+                })
+            )
+            .and_then(|rc| fx.store.record_rename_disk(&rc, 2))
+            .is_err()
+    );
     assert_eq!(intent_phase(&fx, &req.rename_id).as_deref(), Some("failed"));
     assert_eq!(fx.store.resume_pending_file_renames(3).unwrap(), 0);
     assert_eq!(recorded(&fx.store, fx.file.file_id).path, fx.file.path);
@@ -213,8 +239,18 @@ fn foreign_destination_after_source_vanished_is_not_adopted() {
     let req = begin(&fx, &to);
     std::fs::remove_file(&fx.file.path).unwrap();
     std::fs::write(&to, b"foreign").unwrap();
-    assert!(store::library_write::move_rename_bytes(&req).is_err());
-    assert!(fx.store.apply_file_rename_disk(&req.rename_id, 2).is_err());
+    assert!(store::library_write::execute_rename_disk(&req).is_err());
+    assert!(
+        fx.store
+            .load_file_rename(&req.rename_id)
+            .and_then(
+                |r| store::library_write::execute_rename_disk(&r).inspect_err(|e| {
+                    let _ = fx.store.record_rename_refusal(&r.rename_id, 2, e);
+                })
+            )
+            .and_then(|rc| fx.store.record_rename_disk(&rc, 2))
+            .is_err()
+    );
     assert!(fx.store.complete_file_rename(&req.rename_id, 2).is_err());
     assert_eq!(std::fs::read(&to).unwrap(), b"foreign");
     assert_eq!(recorded(&fx.store, fx.file.file_id).path, fx.file.path);
@@ -226,7 +262,7 @@ fn occupied_destination_is_never_clobbered() {
     let to = fx.a.join("Renamed.2000.mkv");
     let req = begin(&fx, &to);
     std::fs::write(&to, b"occupant").unwrap();
-    assert!(store::library_write::move_rename_bytes(&req).is_err());
+    assert!(store::library_write::execute_rename_disk(&req).is_err());
     assert_eq!(std::fs::read(&to).unwrap(), b"occupant");
     assert_eq!(std::fs::read(&fx.file.path).unwrap(), b"m");
 }
@@ -236,7 +272,7 @@ fn complete_requires_durable_disk_phase() {
     let fx = fixture();
     let to = fx.a.join("Renamed.2000.mkv");
     let req = begin(&fx, &to);
-    store::library_write::move_rename_bytes(&req).unwrap();
+    store::library_write::execute_rename_disk(&req).unwrap();
     // Bytes moved but the disk phase was never recorded: no publish yet.
     assert!(fx.store.complete_file_rename(&req.rename_id, 2).is_err());
     assert_eq!(recorded(&fx.store, fx.file.file_id).path, fx.file.path);
@@ -316,7 +352,15 @@ fn reference_failure_keeps_intent_and_restart_converges() {
         .unwrap();
     let to = fx.a.join("Renamed.2000.mkv");
     let req = begin(&fx, &to);
-    fx.store.apply_file_rename_disk(&req.rename_id, 2).unwrap();
+    fx.store
+        .load_file_rename(&req.rename_id)
+        .and_then(|r| {
+            store::library_write::execute_rename_disk(&r).inspect_err(|e| {
+                let _ = fx.store.record_rename_refusal(&r.rename_id, 2, e);
+            })
+        })
+        .and_then(|rc| fx.store.record_rename_disk(&rc, 2))
+        .unwrap();
     let reference_failure = fx.store.complete_file_rename(&req.rename_id, 2);
     assert!(reference_failure.is_err());
     assert_eq!(recorded(&fx.store, fx.file.file_id).path, to);
@@ -363,7 +407,7 @@ fn cross_filesystem_move_copies_and_recovers_by_evidence() {
     let to = dest_root.path().join("M.2000.mkv");
     let req = begin(&fx, &to);
     assert_eq!(req.to_library_id.to_string(), lib.id);
-    store::library_write::move_rename_bytes(&req).unwrap();
+    store::library_write::execute_rename_disk(&req).unwrap();
     assert_eq!(std::fs::read(&to).unwrap(), b"m");
     assert!(!fx.file.path.exists());
     // Recovery recognises the stamped copy on the other device.
