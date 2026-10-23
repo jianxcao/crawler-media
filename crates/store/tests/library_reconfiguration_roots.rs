@@ -213,3 +213,78 @@ fn failed_root_batch_retries_the_same_operation_to_success() {
         root_id_of(&store, &library.id, Path::new("/tv/anime"))
     );
 }
+
+/// C08: a reconfiguration spelled through a symlink is compared on canonical keys and
+/// component boundaries: the legal alias is accepted, rows move to the alias' nested
+/// root, and the sibling `anime-x` is not mistaken for `anime`.
+#[test]
+fn symlinked_reconfiguration_compares_canonical_keys() {
+    let tmp = tempfile::tempdir().unwrap();
+    let real = tmp.path().join("real");
+    std::fs::create_dir_all(real.join("anime")).unwrap();
+    std::fs::create_dir_all(real.join("anime-x")).unwrap();
+    let alias = tmp.path().join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let data = tmp.path().join("data");
+    let store = Store::open(&data).unwrap();
+    let real_key = std::fs::canonicalize(&real).unwrap();
+    let library = store
+        .create_library(
+            MediaKind::Tv,
+            "TV",
+            &[real_key.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let lib_id: domain::LibraryId = library.id.parse().unwrap();
+    let old_root = root_id_of(&store, &library.id, &real_key);
+    let db = rusqlite::Connection::open(data.join("library.db")).unwrap();
+    let nested = format!("{}/anime/Unknown", real_key.display());
+    let sibling = format!("{}/anime-x/Unknown", real_key.display());
+    for path in [&nested, &sibling] {
+        db.execute(
+            "INSERT INTO unidentified (library_id, root_id, path, confidence)
+             VALUES (?1, ?2, ?3, 'low')",
+            rusqlite::params![library.id, old_root, path],
+        )
+        .unwrap();
+    }
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    store
+        .begin_library_reconfiguration(
+            &LibraryReconfiguration {
+                operation_id: operation_id.clone(),
+                library_id: lib_id,
+                expected_revision: store.library_config_revision(&library.id).unwrap(),
+                root_paths: Some(vec![alias.clone(), alias.join("anime")]),
+                display_locale: None,
+            },
+            1_000,
+        )
+        .expect("a symlinked spelling of the covering root is legal");
+    let mut state = String::new();
+    for step in 0..20 {
+        state = store
+            .advance_library_operation(&operation_id, 1_100 + step, 1)
+            .unwrap()
+            .state;
+        if state == "succeeded" {
+            break;
+        }
+    }
+    assert_eq!(state, "succeeded");
+    let anime_root = root_id_of(&store, &library.id, &alias.join("anime"));
+    let alias_root = root_id_of(&store, &library.id, &alias);
+    let owner = |path: &str| -> String {
+        db.query_row(
+            "SELECT root_id FROM unidentified WHERE path = ?1",
+            [path],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(owner(&nested), anime_root);
+    assert_eq!(owner(&sibling), alias_root);
+}

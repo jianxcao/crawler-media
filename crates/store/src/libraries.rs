@@ -450,6 +450,7 @@ impl Store {
             Self::reassign_files_under_root(&tx, &id, kind, root)?;
         }
         tx.commit()?;
+        crate::path_key::reload_root_aliases(&self.library)?;
         Ok(self
             .get_library(&id)?
             .ok_or_else(|| StoreError::Missing(format!("library {id}")))?)
@@ -628,6 +629,7 @@ impl Store {
             )?;
         }
         tx.commit()?;
+        crate::path_key::reload_root_aliases(&self.library)?;
         Ok(self
             .get_library(id)?
             .ok_or_else(|| StoreError::Missing(format!("library {id}")))?)
@@ -711,7 +713,6 @@ impl Store {
                         crate::path_key::canonical_root_key(path)?
                     ],
                 )?;
-                crate::path_key::reload_root_aliases(conn)?;
             }
         }
         for (root_id, path) in existing {

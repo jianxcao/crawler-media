@@ -5,11 +5,10 @@
 //! rows by longest-prefix match. Old roots are only deleted once nothing references them,
 //! and no batch ever trusts an in-memory view of the previous pass.
 
-use std::path::{Path, PathBuf};
-
 use rusqlite::{Connection, params};
 
 use super::OperationCursor;
+use super::root_keys::{PreparedRoot, longest_root};
 use crate::StoreError;
 
 /// Whether the phase has more work after this batch.
@@ -22,16 +21,11 @@ pub(crate) enum BatchOutcome {
 pub(crate) fn apply_root_batch(
     tx: &Connection,
     library: &str,
-    requested: &[PathBuf],
+    requested: &[PreparedRoot],
     cursor: &mut OperationCursor,
     batch: usize,
 ) -> Result<BatchOutcome, StoreError> {
-    let kind: String = tx.query_row(
-        "SELECT kind FROM libraries WHERE library_id = ?1",
-        params![library],
-        |r| r.get(0),
-    )?;
-    ensure_root_rows(tx, library, &kind, requested)?;
+    ensure_root_rows(tx, library, requested)?;
 
     if !cursor.files_done {
         let files = next_file_batch(tx, library, cursor.last_file_id.as_deref(), batch)?;
@@ -122,68 +116,57 @@ fn reparent_paths(
     column: &str,
     library: &str,
     paths: &[String],
-    requested: &[PathBuf],
+    requested: &[PreparedRoot],
 ) -> Result<(), StoreError> {
     let sql = format!("UPDATE {table} SET root_id = ?1 WHERE library_id = ?2 AND {column} = ?3");
     for path in paths {
-        let Some(root) = longest_root(Path::new(path), requested) else {
+        let Some(root) = longest_root(path, requested) else {
             continue;
         };
-        let root_id = root_id_for(tx, library, root)?;
+        let root_id = root_id_for(tx, library, &root.path_key)?;
         tx.execute(&sql, params![root_id, library, path])?;
     }
     Ok(())
 }
 
-pub(crate) fn longest_root<'a>(path: &Path, requested: &'a [PathBuf]) -> Option<&'a PathBuf> {
-    requested
-        .iter()
-        .filter(|root| path.starts_with(root))
-        .max_by_key(|root| root.components().count())
-}
-
-fn root_id_for(tx: &Connection, library: &str, root: &Path) -> Result<String, StoreError> {
+fn root_id_for(tx: &Connection, library: &str, path_key: &str) -> Result<String, StoreError> {
     Ok(tx.query_row(
-        "SELECT root_id FROM library_roots WHERE library_id = ?1 AND display_path = ?2",
-        params![library, root.to_string_lossy().to_string()],
+        "SELECT root_id FROM library_roots WHERE library_id = ?1 AND path_key = ?2",
+        params![library, path_key],
         |r| r.get(0),
     )?)
 }
 
-/// Create the requested roots that do not exist yet, keeping existing ids stable.
+/// Create the requested roots that do not exist yet, keeping existing ids stable. A root
+/// already present under the same canonical key (another spelling of the same directory)
+/// keeps its id and adopts the requested display spelling and order.
 fn ensure_root_rows(
     tx: &Connection,
     library: &str,
-    kind: &str,
-    requested: &[PathBuf],
+    requested: &[PreparedRoot],
 ) -> Result<(), StoreError> {
-    let existing: Vec<(String, String)> = {
-        let mut stmt =
-            tx.prepare("SELECT root_id, display_path FROM library_roots WHERE library_id = ?1")?;
-        stmt.query_map(params![library], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    for (index, path) in requested.iter().enumerate() {
-        let display = path.to_string_lossy().to_string();
-        let already = existing.iter().any(|(_, candidate)| candidate == &display);
-        if already {
+    for (index, root) in requested.iter().enumerate() {
+        let display = root.display_path.to_string_lossy().to_string();
+        let updated = tx.execute(
+            "UPDATE library_roots SET display_path = ?3, sort_order = ?4
+             WHERE library_id = ?1 AND path_key = ?2",
+            params![library, root.path_key, display, index as i32],
+        )?;
+        if updated > 0 {
             continue;
         }
-        let root_id = uuid::Uuid::new_v4().to_string();
         tx.execute(
             "INSERT INTO library_roots
                 (root_id, library_id, path_key, display_path, enabled, sort_order)
-             VALUES (?1, ?2, ?5, ?3, 1, ?4)",
+             VALUES (?1, ?2, ?3, ?4, 1, ?5)",
             params![
-                root_id,
+                uuid::Uuid::new_v4().to_string(),
                 library,
+                root.path_key,
                 display,
-                index as i32,
-                crate::path_key::canonical_root_key(&display)?
+                index as i32
             ],
         )?;
-        crate::path_key::reload_root_aliases(tx)?;
-        let _ = kind;
     }
     Ok(())
 }
@@ -224,30 +207,20 @@ fn reparent_file(
     tx: &Connection,
     library: &str,
     file_id: &str,
-    requested: &[PathBuf],
+    requested: &[PreparedRoot],
 ) -> Result<(), StoreError> {
     let path_key: String = tx.query_row(
         "SELECT path_key FROM library_files WHERE file_id = ?1 AND library_id = ?2",
         params![file_id, library],
         |r| r.get(0),
     )?;
-    let file_path = Path::new(&path_key);
-    let best = requested
-        .iter()
-        .filter(|root| file_path.starts_with(root))
-        .max_by_key(|root| root.components().count());
-    let Some(root) = best else {
+    let Some(root) = longest_root(&path_key, requested) else {
         // A file outside every requested root keeps its current owner; the caller
         // decides later whether to remove it, so a reconfiguration never silently
         // deletes library facts.
         return Ok(());
     };
-    let display = root.to_string_lossy().to_string();
-    let root_id: String = tx.query_row(
-        "SELECT root_id FROM library_roots WHERE library_id = ?1 AND display_path = ?2",
-        params![library, display],
-        |r| r.get(0),
-    )?;
+    let root_id = root_id_for(tx, library, &root.path_key)?;
     tx.execute(
         "UPDATE library_files SET root_id = ?2 WHERE file_id = ?1",
         params![file_id, root_id],
@@ -268,20 +241,16 @@ fn reparent_file(
 fn prune_unreferenced_roots(
     tx: &Connection,
     library: &str,
-    requested: &[PathBuf],
+    requested: &[PreparedRoot],
 ) -> Result<(), StoreError> {
-    let keep: Vec<String> = requested
-        .iter()
-        .map(|path| path.to_string_lossy().to_string())
-        .collect();
     let existing: Vec<(String, String)> = {
         let mut stmt =
-            tx.prepare("SELECT root_id, display_path FROM library_roots WHERE library_id = ?1")?;
+            tx.prepare("SELECT root_id, path_key FROM library_roots WHERE library_id = ?1")?;
         stmt.query_map(params![library], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<Result<Vec<_>, _>>()?
     };
-    for (root_id, display) in existing {
-        if keep.iter().any(|path| path == &display) {
+    for (root_id, key) in existing {
+        if requested.iter().any(|root| root.path_key == key) {
             continue;
         }
         let referenced: i64 = tx.query_row(
@@ -307,11 +276,11 @@ fn prune_unreferenced_roots(
 pub(crate) fn has_uncovered_rows(
     tx: &Connection,
     library: &str,
-    requested: &[PathBuf],
+    requested: &[PreparedRoot],
 ) -> Result<bool, StoreError> {
     let roots: Vec<String> = requested
         .iter()
-        .map(|root| root.to_string_lossy().trim_end_matches('/').to_string())
+        .map(|root| root.path_key.trim_end_matches('/').to_string())
         .collect();
     for (table, column) in [
         ("library_files", "path_key"),

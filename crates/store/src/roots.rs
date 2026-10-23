@@ -88,9 +88,9 @@ impl Store {
                 crate::path_key::canonical_root_key(path)?
             ],
         )?;
-        crate::path_key::reload_root_aliases(&tx)?;
         Self::reassign_files_under_root(&tx, &library.id, kind, path)?;
         tx.commit()?;
+        crate::path_key::reload_root_aliases(&self.library)?;
         Ok(LibraryRoot {
             id,
             kind,
@@ -123,6 +123,7 @@ impl Store {
         let n = self
             .library
             .execute("DELETE FROM library_roots WHERE root_id = ?1", params![id])?;
+        crate::path_key::reload_root_aliases(&self.library)?;
         Ok(n > 0)
     }
 }

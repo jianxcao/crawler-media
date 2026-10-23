@@ -357,6 +357,7 @@ impl Store {
             ],
         )?;
         tx.commit()?;
+        crate::path_key::reload_root_aliases(&self.library)?;
         for prefix in LIBRARY_SETTING_KEY_PREFIXES {
             let _ = self.delete_setting(&format!("{prefix}{}", removal.library_id));
         }

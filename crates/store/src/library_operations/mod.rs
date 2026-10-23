@@ -24,6 +24,7 @@ use crate::{Store, StoreError};
 
 pub mod integrity;
 mod locale;
+mod root_keys;
 mod roots;
 
 /// A requested root set and/or display locale for one Library.
@@ -39,9 +40,7 @@ pub struct LibraryReconfiguration {
 /// Persisted plan, decoded from `library_operations.plan_json`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct ReconfigurationPlan {
-    #[serde(default)]
-    pub root_paths: Option<Vec<PathBuf>>,
-    #[serde(default)]
+    pub roots: Option<Vec<root_keys::PreparedRoot>>,
     pub display_locale: Option<String>,
 }
 
@@ -114,20 +113,13 @@ impl Store {
                 "library reconfiguration cannot drop every root".into(),
             ));
         }
-        if let Some(paths) = &request.root_paths {
-            // Two spellings of one physical directory are one root: refuse up front
-            // (canonical key; symlinks and `..` resolved) instead of failing mid-apply.
-            let mut keys = std::collections::HashSet::new();
-            for path in paths {
-                let key = crate::path_key::canonical_root_key(&path.to_string_lossy())?;
-                if !keys.insert(key.clone()) {
-                    return Err(StoreError::Invalid(format!(
-                        "root {} duplicates another requested root ({key})",
-                        path.display()
-                    )));
-                }
-            }
-        }
+        // Canonical keys are resolved once, before the write lock, and persisted with
+        // the plan; two spellings of one directory are refused here.
+        let prepared = request
+            .root_paths
+            .as_deref()
+            .map(root_keys::prepare_roots)
+            .transpose()?;
         if request
             .display_locale
             .as_deref()
@@ -163,18 +155,18 @@ impl Store {
                 "library {library} lifecycle is {lifecycle}"
             )));
         }
-        if let Some(paths) = &request.root_paths
-            && roots::has_uncovered_rows(&tx, &library, paths)?
+        if let Some(prepared) = &prepared
+            && roots::has_uncovered_rows(&tx, &library, prepared)?
         {
             return Err(StoreError::Invalid(format!(
                 "library {library} has files outside the requested roots; remove them first"
             )));
         }
         let plan = ReconfigurationPlan {
-            root_paths: request.root_paths.clone(),
+            roots: prepared,
             display_locale: request.display_locale.clone(),
         };
-        let kind = if plan.root_paths.is_some() {
+        let kind = if plan.roots.is_some() {
             "roots"
         } else {
             "locale"
@@ -271,7 +263,7 @@ impl Store {
             "roots" => roots::apply_root_batch(
                 &tx,
                 &library,
-                plan.root_paths.as_deref().unwrap_or_default(),
+                plan.roots.as_deref().unwrap_or_default(),
                 &mut cursor,
                 batch,
             )
@@ -321,6 +313,7 @@ impl Store {
             now_ms,
             outcome,
         )?;
+        crate::path_key::reload_root_aliases(&self.library)?;
         Self::read_library_operation(&self.library, operation_id)
     }
 

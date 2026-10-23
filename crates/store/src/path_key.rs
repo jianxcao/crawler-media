@@ -30,19 +30,47 @@ use crate::StoreError;
 pub(crate) type RootAliases = Arc<RwLock<Vec<(String, String)>>>;
 
 /// One alias table per library.db file, shared by every connection to it (several
-/// `Store`s may open the same data dir). Keyed by the connection's database path.
+/// `Store`s may open the same data dir). Keyed by the connection's database path; an
+/// in-memory database has no path and is keyed by its own connection handle, so two
+/// in-memory Stores never share aliases. Tables are only rebuilt from committed rows
+/// (writers call [`reload_root_aliases`] after `commit`).
 static TABLES: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, RootAliases>>,
 > = std::sync::LazyLock::new(Default::default);
 
+fn table_key(conn: &Connection) -> Option<String> {
+    conn.path()
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+}
+
+fn memory_key(conn: &Connection) -> String {
+    // SAFETY: the raw handle is only used as an identity, never dereferenced.
+    format!("memory:{:p}", unsafe { conn.handle() })
+}
+
 fn table_for(conn: &Connection) -> RootAliases {
-    let key = conn.path().unwrap_or("").to_string();
+    let key = table_key(conn).unwrap_or_else(|| memory_key(conn));
     TABLES
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .entry(key)
         .or_default()
         .clone()
+}
+
+/// A fresh table for a new in-memory connection: a reused handle address must not
+/// inherit a closed database's aliases.
+fn fresh_table(conn: &Connection) -> RootAliases {
+    if table_key(conn).is_some() {
+        return table_for(conn);
+    }
+    let table = RootAliases::default();
+    TABLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(memory_key(conn), table.clone());
+    table
 }
 
 /// Lexical + NFC canonical form (no root alias rewrite).
@@ -103,7 +131,7 @@ pub fn canonical_root_key(display: &str) -> Result<String, StoreError> {
 
 pub(crate) fn register(conn: &Connection) -> Result<(), StoreError> {
     use rusqlite::functions::FunctionFlags;
-    let aliases = table_for(conn);
+    let aliases = fresh_table(conn);
     conn.create_scalar_function(
         "norm_path_key",
         1,
@@ -122,8 +150,8 @@ pub(crate) fn register(conn: &Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// Rebuild the alias table from `library_roots` (small table; called after every root
-/// write, on the writing connection so an uncommitted root is already visible).
+/// Rebuild the alias table from committed `library_roots` (small table). Writers call it
+/// only after their transaction committed, so a rolled-back root is never published.
 pub(crate) fn reload_root_aliases(conn: &Connection) -> Result<(), StoreError> {
     let aliases = table_for(conn);
     let mut stmt = conn.prepare("SELECT display_path, path_key FROM library_roots")?;
@@ -150,5 +178,52 @@ mod tests {
         assert_eq!(n("/a/../b"), "/a/../b");
         assert_eq!(n("/Cafe\u{301}.mkv"), "/Caf\u{e9}.mkv");
         assert_eq!(n("/Movie.MKV"), "/Movie.MKV", "no case folding");
+    }
+}
+
+#[cfg(test)]
+mod alias_isolation {
+    use rusqlite::Connection;
+
+    fn conn_with_alias(display: &str, key: &str) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        super::register(&conn).unwrap();
+        conn.execute_batch("CREATE TABLE library_roots (display_path TEXT, path_key TEXT)")
+            .unwrap();
+        conn.execute("INSERT INTO library_roots VALUES (?1, ?2)", [display, key])
+            .unwrap();
+        super::reload_root_aliases(&conn).unwrap();
+        conn
+    }
+
+    fn key(conn: &Connection, raw: &str) -> String {
+        conn.query_row("SELECT norm_path_key(?1)", [raw], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// C09: two in-memory databases never share one alias table.
+    #[test]
+    fn in_memory_connections_keep_their_own_aliases() {
+        let a = conn_with_alias("/media/alias", "/real/a");
+        let b = conn_with_alias("/media/alias", "/real/b");
+        assert_eq!(key(&a, "/media/alias/f.mkv"), "/real/a/f.mkv");
+        assert_eq!(key(&b, "/media/alias/f.mkv"), "/real/b/f.mkv");
+    }
+
+    /// C09: a rolled-back root never reaches the alias table; publication happens
+    /// only from committed rows.
+    #[test]
+    fn rolled_back_root_is_not_published() {
+        let conn = conn_with_alias("/media/alias", "/real/a");
+        {
+            let tx = conn.unchecked_transaction().unwrap();
+            tx.execute(
+                "INSERT INTO library_roots VALUES ('/media/other', '/real/other')",
+                [],
+            )
+            .unwrap();
+        }
+        super::reload_root_aliases(&conn).unwrap();
+        assert_eq!(key(&conn, "/media/other/f.mkv"), "/media/other/f.mkv");
     }
 }
