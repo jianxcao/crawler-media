@@ -52,3 +52,19 @@ Harness: `scripts/bench/q3a_studio_projection.py`. Synthetic data: 100k media, d
 | After: `json_type`/`json_extract` projection of 4 strings | 991 ms | 1.98 ms | 1.1 MB |
 
 Implemented in `library_query/items/hydration.rs::fill_studio`. The precedence rule is unchanged: details first, then normalized `fields`. The client-side parse in the harness is Python; the Rust serde parse it replaces is a lower absolute cost, but the blob transfer saving does not depend on the language.
+
+## Q3b — merged fixed-bucket facet aggregation (measured 2026-10-23)
+
+Harness: request-level `crates/api/tests/endpoint_perf.rs` (release, axum router in-process,
+`PERF_SIZES=50000 PERF_MODES=movie PERF_ENDPOINTS=facets,items PERF_SAMPLES=7`).
+Logs: /workspace/logs/q3b-before.log, q3b-after.log.
+
+| `GET /libraries/{id}/facets` (tier all), 50k movies | statements | median | p95 | bytes |
+|---|---|---|---|---|
+| Before: one SELECT per fixed bucket | 26 | 428.5 ms | 488.1 ms | 1180 |
+| After: one SELECT per dimension (filtered SUM + candidate MAX per bucket) | 11 | 237.0 ms | 265.1 ms | 1180 |
+
+`items` unchanged (4.05 → 4.12 ms, noise). Equivalence: `facets_regression`
+(new `fixed_buckets_keep_zero_counts_and_conditional_favorite`) passes on both old and new
+code; `store library_query_filters` 8/0. Per-statement VM steps were not captured
+(only wall time and statement count at request level).

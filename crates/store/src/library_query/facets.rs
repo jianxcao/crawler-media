@@ -309,30 +309,46 @@ fn value_counts(
 /// Fixed-bucket dimensions: one count per documented value. `always` values are returned even
 /// when no item of the library satisfies their condition (count 0, the UI greys them); the
 /// others exist only while the condition matches at least one item in the library.
+///
+/// One statement per dimension: for each bucket a filtered SUM (the count) and a MAX of the
+/// bare condition (whether any library item is a candidate), over a single library scan.
 fn conditional_counts(
     store: &Store,
     base: &ItemQuerySql,
     values: &[(String, String, bool)],
 ) -> Result<Vec<(String, u64)>, StoreError> {
-    let mut counts = Vec::new();
-    for (value, condition, always) in values {
-        let bindings = Bindings::from_values(base.bindings.clone());
-        let sql = format!(
-            "SELECT SUM(CASE WHEN {where_sql} AND {condition} THEN 1 ELSE 0 END) \
-             FROM {from} WHERE i.library_id = ?1 AND {condition}",
-            where_sql = base.where_sql,
-            from = base.from,
-        );
-        let mut statement = store.library.prepare(&sql)?;
-        let total: Option<i64> =
-            statement.query_row(params_from_iter(bindings.values()), |row| row.get(0))?;
-        match (total, always) {
-            (Some(total), _) => counts.push((value.clone(), total.max(0) as u64)),
-            (None, true) => counts.push((value.clone(), 0)),
-            (None, false) => {}
-        }
+    if values.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(counts)
+    let columns = values
+        .iter()
+        .map(|(_, condition, _)| {
+            format!(
+                "COALESCE(SUM(CASE WHEN ({where_sql}) AND ({condition}) THEN 1 ELSE 0 END), 0), \
+                 COALESCE(MAX(CASE WHEN {condition} THEN 1 ELSE 0 END), 0)",
+                where_sql = base.where_sql,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT {columns} FROM {from} WHERE i.library_id = ?1",
+        from = base.from
+    );
+    let bindings = Bindings::from_values(base.bindings.clone());
+    let mut statement = store.library.prepare(&sql)?;
+    let cells: Vec<(i64, i64)> =
+        statement.query_row(params_from_iter(bindings.values()), |row| {
+            (0..values.len())
+                .map(|index| Ok((row.get(index * 2)?, row.get(index * 2 + 1)?)))
+                .collect()
+        })?;
+    Ok(values
+        .iter()
+        .zip(cells)
+        .filter(|((_, _, always), (_, candidate))| *always || *candidate == 1)
+        .map(|((value, _, _), (count, _))| (value.clone(), count.max(0) as u64))
+        .collect())
 }
 
 fn read_counts(

@@ -452,3 +452,55 @@ async fn hidden_library_does_not_contribute_candidates() {
         "隐藏库的条目不得进入候选：{visible}"
     );
 }
+
+/// Q3b equivalence: fixed buckets keep zero-count candidates, cumulative ratings, the
+/// exclude-own rule, and `favorite` only appears once some library item is a favourite.
+#[tokio::test]
+async fn fixed_buckets_keep_zero_counts_and_conditional_favorite() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = base_state(&tmp);
+    let (app, library_id) = seed_catalog(&state, &tmp);
+    let counts = |values: &Value, dimension: &str| -> Vec<(String, u64)> {
+        values[dimension]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                (
+                    e["value"].as_str().unwrap().to_string(),
+                    e["count"].as_u64().unwrap(),
+                )
+            })
+            .collect()
+    };
+    let owned = |pairs: &[(&str, u64)]| -> Vec<(String, u64)> {
+        pairs.iter().map(|(v, c)| (v.to_string(), *c)).collect()
+    };
+    let values = facets(
+        &app,
+        &format!("/api/v1/libraries/{library_id}/facets?g=28&d=2020s"),
+    )
+    .await;
+    assert_eq!(values["total"], 1);
+    assert_eq!(
+        counts(&values, "decades"),
+        owned(&[
+            ("earlier", 0),
+            ("1990s", 0),
+            ("2000s", 0),
+            ("2010s", 1),
+            ("2020s", 1)
+        ]),
+        "decades exclude their own filter and keep zero buckets"
+    );
+    assert_eq!(
+        counts(&values, "ratings"),
+        owned(&[("6", 1), ("7", 1), ("8", 1), ("9", 0)]),
+        "ratings are cumulative thresholds over g=28 + 2020s"
+    );
+    assert_eq!(
+        counts(&values, "watch"),
+        owned(&[("unwatched", 1), ("watching", 0), ("played", 0)]),
+        "favorite is absent while nothing is a favourite"
+    );
+}
