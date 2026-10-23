@@ -63,6 +63,8 @@ async fn frozen_library_rejects_organize_reidentify_and_sidecar_refresh() {
         },
     )
     .unwrap();
+    let version = store.get_file_version(file_id).unwrap().unwrap();
+    let source_revision = store.media_revision(media.id).unwrap().unwrap();
     store.begin_library_removal(&library.id).unwrap();
     let app = router(state);
     let destination = root.join("new/renamed.mkv");
@@ -73,7 +75,16 @@ async fn frozen_library_rejects_organize_reidentify_and_sidecar_refresh() {
         ),
         (
             "/api/v1/reidentify".into(),
-            json!({"file_ids":[file_id.to_string()],"title_ref":"tmdb:movie:123"}),
+            json!({
+                "media_item_id": media.id.to_string(),
+                "source_revision": source_revision,
+                "title_ref": "tmdb:movie:123",
+                "files": [{
+                    "file_id": file_id.to_string(),
+                    "revision": version.revision,
+                    "source_version": version.source_version,
+                }],
+            }),
         ),
         (
             "/api/v1/reidentify/extras".into(),

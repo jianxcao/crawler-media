@@ -567,7 +567,6 @@ pub(crate) async fn item_episodes(
                 "file_ids": episode.file_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
                 "position_ms": position_ms,
                 "played": played,
-                "watched": played,
                 "progress_percent": progress_percent,
                 "media_item_id": item_id,
                 "season_number": episode.season,

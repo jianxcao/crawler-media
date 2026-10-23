@@ -101,7 +101,7 @@ fn find_library_links(store: &crate::Store, media: &domain::Media) -> Vec<Value>
         .as_deref()
         .and_then(|id| {
             store
-                .get_media_by_alias_kind("tmdb_id", id, Some(media.kind))
+                .get_media_by_alias_kind("tmdb", id, Some(media.kind))
                 .ok()
                 .flatten()
         })
@@ -350,7 +350,7 @@ fn tmdb_id_for(
     }
     // Douban id: alias lookup in local media table, then catalog search.
     let store = state.store.lock();
-    if let Some(media) = store.get_media_by_alias("douban_id", &tid).ok().flatten() {
+    if let Some(media) = store.get_media_by_alias("douban", &tid).ok().flatten() {
         if let Some(tmdb) = media.tmdb_id {
             return Ok(Some(tmdb));
         }
@@ -507,7 +507,7 @@ fn douban_detail_blocking(state: &ApiState, id: &str) -> Response {
     // 优先本地 media 表映射（订阅/认领时 douban_id → tmdb_id 已入库）：
     // 有映射走完整 TMDB 详情。
     let store = state.store.lock();
-    let local_media = store.get_media_by_alias("douban_id", id).ok().flatten();
+    let local_media = store.get_media_by_alias("douban", id).ok().flatten();
     drop(store);
     if let Some(media) = local_media {
         if let Some(tmdb_id) = media.tmdb_id {

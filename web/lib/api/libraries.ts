@@ -646,7 +646,8 @@ export interface ReidentifyOutcome {
 export interface ReidentifyGroup {
   key: string;
   outcome: ReidentifyOutcome;
-  file_ids: string[];
+  /** 预览时的文件版本；提交时原样回传，服务器不补当前版本 */
+  files: ReidentifyFile[];
   file_count: number;
   total_size_bytes: number;
   sample_names: string[];
@@ -670,6 +671,23 @@ export interface ReidentifyPreview {
   pinned_identity: boolean;
   unreachable: boolean;
   search_seed: string;
+  media_item_id: string;
+  source_revision: number;
+}
+
+/** 预览时固定的一份文件版本。 */
+export interface ReidentifyFile {
+  file_id: string;
+  revision: number;
+  source_version: string;
+}
+
+/** 重新识别的唯一请求：文件与源条目都固定到预览版本。 */
+export interface ReidentifyRequest {
+  media_item_id: string;
+  source_revision: number;
+  title_ref: string;
+  files: ReidentifyFile[];
 }
 
 /** 条目真实删除的结论。 */
@@ -1654,13 +1672,28 @@ function toUnidentifiedFile(raw: unknown, libraryId: string, libraryName: string
 
 /** 把条目身份改挂到目标作品（POST .../reidentifications）。 */
 export async function assignLibraryFilesToTitle(
-  fileIds: string[],
-  titleRef: string,
+  body: ReidentifyRequest,
 ): Promise<{ claimed: number }> {
   return unwrap(
     request<ApiEnvelope<{ claimed: number }>>("/reidentify", {
       method: "POST",
-      body: JSON.stringify({ file_ids: fileIds, title_ref: titleRef }),
+      body: JSON.stringify(body),
+    }),
+  );
+}
+
+/** 认领一个未识别文件为新识别作品（POST /unidentified/claim）。 */
+export async function claimUnidentifiedFile(body: {
+  path: string;
+  title: string;
+  kind: "movie" | "tv";
+  year: number | null;
+  tmdb_id: string;
+}): Promise<unknown> {
+  return unwrap(
+    request<ApiEnvelope<unknown>>("/unidentified/claim", {
+      method: "POST",
+      body: JSON.stringify(body),
     }),
   );
 }
@@ -1678,19 +1711,6 @@ export async function markLibraryFilesAsExtras(fileIds: string[]): Promise<{ det
 
 
 
-
-/** 认领一个未识别文件为某 Media（POST /unidentified/{id}/claim，body {path}）。 */
-export function claimUnidentifiedFile(
-  id: string,
-  path: string,
-): Promise<Record<string, never>> {
-  return unwrap(
-    request<ApiEnvelope<Record<string, never>>>(`/unidentified/${id}/claim`, {
-      method: "POST",
-      body: JSON.stringify({ path }),
-    }),
-  );
-}
 
 // ---------------------------------------------------------------------------
 // 片源标注 / 缺失清单

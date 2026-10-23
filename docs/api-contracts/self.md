@@ -75,6 +75,8 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 
 前端 `web/lib/api/libraries.ts` 把 202 与 200 分成 `updateLibrary` 的 `{kind:"operation"}` / `{kind:"library"}` 两种结果；`updateLibraryAndWait` 负责轮询到终态。`assignLibraryFilesToTitle`（`POST /reidentify`）仍是单次同步 200，不参与这套轮询。
 
+**重新识别契约（唯一形状）**：`GET /libraries/{id}/items/{item_id}/reidentification-preview` 返回 `media_item_id`、`source_revision`，每组 `files: [{file_id, revision, source_version}]`（不再有 `file_ids`）。`POST /reidentify` 只接受 `{media_item_id, source_revision, title_ref, files:[{file_id, revision, source_version}]}`（未知字段 400）；files 非空、无重复、revision>0、source_version 非空、全属 `media_item_id`，否则 400；版本或 source_revision 过期返回 409 且不移动任何文件，服务器从不补当前版本。分集 DTO 只输出 `played`（已删 `watched`）。Media 别名查询的 source 只认 `tmdb|douban|tvdb|bangumi|anilist`，`*_id` 旧词报错。
+
 ### Media 合并操作
 
 `POST /media/merges`（`{request_id, survivor, loser, survivor_revision, loser_revision, refresh_targets?}`）返回 **202** `{operation_id}`，且 `operation_id == request_id`：同一份 payload 用同一个 `request_id` 重发返回同一个操作（幂等，不产生第二份冻结），同一 `request_id` 换 payload 返回 **409** `media.merge_conflict`。`GET /media/operations/{id}` 返回 `{operation_id, phase, state, error}`，未知 id **404** `media.operation_missing`。阶段推进由持有数据目录写租约的进程在 job loop 内驱动，GET/POST 都不推进；重启后未完成的操作继续推进。依据 `crates/api/src/http/media_operations.rs`、`crates/api/src/storage_operations.rs`、`crates/api/tests/storage_operations_runtime.rs`。

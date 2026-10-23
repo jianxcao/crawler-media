@@ -161,13 +161,19 @@ test("reidentify keeps its synchronous contract and is never polled", async () =
     requests.push({ path, method: init.method, body: JSON.parse(init.body) });
     return { ok: true, data: { claimed: 2 } };
   });
-  const result = await api.assignLibraryFilesToTitle(["f1", "f2"], "tmdb:1");
+  const pinned = {
+    media_item_id: "m1",
+    source_revision: 3,
+    title_ref: "tmdb:1",
+    files: [
+      { file_id: "f1", revision: 1, source_version: "v1" },
+      { file_id: "f2", revision: 2, source_version: "v2" },
+    ],
+  };
+  const result = await api.assignLibraryFilesToTitle(pinned);
   assert.equal(result.claimed, 2);
-  assert.deepEqual(requests, [{
-    path: "/reidentify",
-    method: "POST",
-    body: { file_ids: ["f1", "f2"], title_ref: "tmdb:1" },
-  }]);
+  // The previewed versions go out exactly; no bare file_ids list survives.
+  assert.deepEqual(requests, [{ path: "/reidentify", method: "POST", body: pinned }]);
 });
 
 test("the edit dialog waits for the accepted operation and shows its phase", async () => {

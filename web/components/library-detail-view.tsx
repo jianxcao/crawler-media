@@ -47,7 +47,7 @@ import {
   type MediaLibrary,
   type MissingItem,
   type UnidentifiedGroup,
-  assignLibraryFilesToTitle,
+  claimUnidentifiedFile,
   clearMissingLibraryRecords,
   listLibraries,
   listLibraryGallery,
@@ -2286,7 +2286,6 @@ function UnidentifiedGroupRow({
     { view: "confirm"; seed: ClaimSeed } | { view: "search" } | null
   >(null);
 
-  const fileIds = group.files.map((f) => f.id);
   const act = (fn: () => Promise<unknown>) => {
     setBusy(true);
     setError(null);
@@ -2421,12 +2420,18 @@ function UnidentifiedGroupRow({
           fileCount={group.file_count}
           busy={busy}
           onConfirm={() =>
-            act(() =>
-              assignLibraryFilesToTitle(
-                fileIds,
-                `tmdb:${movie ? "movie" : "tv"}:${panel.seed.tmdbId}`,
-              ),
-            )
+            act(async () => {
+              // 未识别文件按路径认领为新识别作品，逐个提交；任一失败即报错。
+              for (const f of group.files) {
+                await claimUnidentifiedFile({
+                  path: f.file_path,
+                  title: panel.seed.title,
+                  kind: movie ? "movie" : "tv",
+                  year: panel.seed.year ?? null,
+                  tmdb_id: String(panel.seed.tmdbId),
+                });
+              }
+            })
           }
           onCancel={() => setPanel(null)}
         />

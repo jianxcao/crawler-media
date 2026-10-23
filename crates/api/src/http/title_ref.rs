@@ -162,7 +162,7 @@ pub(crate) async fn preview(
             .as_deref()
             .and_then(|id| {
                 store
-                    .get_media_by_alias_kind("tmdb_id", id, Some(resolved.kind))
+                    .get_media_by_alias_kind("tmdb", id, Some(resolved.kind))
                     .ok()
                     .flatten()
             })

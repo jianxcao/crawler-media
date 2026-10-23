@@ -161,6 +161,8 @@ export function ReidentifyDialog({
                 key={group.key}
                 group={group}
                 movie={preview.movie}
+                mediaItemId={preview.media_item_id}
+                sourceRevision={preview.source_revision}
                 searchSeed={preview.search_seed}
                 settledMessage={settled[group.key]}
                 onSettled={(message) => settle(group.key, message)}
@@ -244,12 +246,16 @@ function CurrentIdentity({ preview }: { preview: ReidentifyPreview }) {
 function GroupRow({
   group,
   movie,
+  mediaItemId,
+  sourceRevision,
   searchSeed,
   settledMessage,
   onSettled,
 }: {
   group: ReidentifyGroup;
   movie: boolean;
+  mediaItemId: string;
+  sourceRevision: number;
   searchSeed: string;
   settledMessage?: string;
   onSettled: (message: string) => void;
@@ -290,7 +296,7 @@ function GroupRow({
     )
       return;
     act(
-      () => markLibraryFilesAsExtras(group.file_ids),
+      () => markLibraryFilesAsExtras(group.files.map((f) => f.file_id)),
       `${group.file_count} 个文件已标为非独立作品`,
     );
   };
@@ -465,10 +471,12 @@ function GroupRow({
           onConfirm={() =>
             act(
               () =>
-                assignLibraryFilesToTitle(
-                  group.file_ids,
-                  `tmdb:${movie ? "movie" : "tv"}:${panel.seed.tmdbId}`,
-                ),
+                assignLibraryFilesToTitle({
+                  media_item_id: mediaItemId,
+                  source_revision: sourceRevision,
+                  title_ref: `tmdb:${movie ? "movie" : "tv"}:${panel.seed.tmdbId}`,
+                  files: group.files,
+                }),
               `${group.file_count} 个文件已改挂为《${panel.seed.title}》`,
             )
           }

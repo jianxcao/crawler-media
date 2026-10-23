@@ -58,6 +58,30 @@ impl api::catalog::Catalog for FakeCatalog {
     }
 }
 
+/// The pinned request a client builds from the preview it showed.
+fn pinned(
+    state: &api::management::ApiState,
+    media: &Media,
+    files: &[LedgerId],
+    title_ref: &str,
+) -> Value {
+    let shared = state.store();
+    let store = shared.lock();
+    let files: Vec<Value> = files
+        .iter()
+        .map(|id| {
+            let v = store.get_file_version(*id).unwrap().unwrap();
+            json!({"file_id": id.to_string(), "revision": v.revision, "source_version": v.source_version})
+        })
+        .collect();
+    json!({
+        "media_item_id": media.id.to_string(),
+        "source_revision": store.media_revision(media.id).unwrap().unwrap(),
+        "title_ref": title_ref,
+        "files": files,
+    })
+}
+
 fn setup_fixture() -> (
     tempfile::TempDir,
     api::management::ApiState,
@@ -207,10 +231,7 @@ async fn reidentify_two_files_moves_only_listed_files_and_reports_honest_claimed
     };
     catalog.set(MediaKind::Movie, "2002", target_media.clone());
 
-    let req_body = json!({
-        "title_ref": "tmdb:movie:2002",
-        "file_ids": [f1.to_string(), f2.to_string()]
-    });
+    let req_body = pinned(&_state, &media, &[f1, f2], "tmdb:movie:2002");
 
     let uri = "/api/v1/reidentify";
     let req = common::request("POST", &uri, Some(&token), req_body);
@@ -254,13 +275,9 @@ async fn reidentify_stale_file_version_returns_conflict_and_zero_moved() {
     };
     catalog.set(MediaKind::Movie, "2002", target_media.clone());
 
-    let req_body = json!({
-        "title_ref": "tmdb:movie:2002",
-        "file_ids": [f1.to_string(), f2.to_string()],
-        "files": [
-            { "file_id": f1.to_string(), "revision": 99, "source_version": "v99" }
-        ]
-    });
+    let mut req_body = pinned(&_state, &media, &[f1, f2], "tmdb:movie:2002");
+    req_body["files"][0]["revision"] = json!(99);
+    req_body["files"][0]["source_version"] = json!("v99");
 
     let uri = "/api/v1/reidentify";
     let req = common::request("POST", &uri, Some(&token), req_body);
@@ -313,10 +330,7 @@ async fn reidentify_alias_conflict_returns_409_without_claimed() {
     };
     catalog.set(MediaKind::Movie, "2002", target_media);
 
-    let req_body = json!({
-        "title_ref": "tmdb:movie:2002",
-        "file_ids": [f1.to_string()]
-    });
+    let req_body = pinned(&_state, &media, &[f1], "tmdb:movie:2002");
 
     let uri = "/api/v1/reidentify";
     let req = common::request("POST", &uri, Some(&token), req_body);
@@ -340,19 +354,15 @@ async fn reidentify_invalid_or_cross_media_file_ids_returns_400() {
     let uri = "/api/v1/reidentify";
 
     // Empty file_ids
-    let empty_body = json!({
-        "title_ref": "tmdb:movie:2002",
-        "file_ids": []
-    });
+    let mut empty_body = pinned(&_state, &media, &[f1], "tmdb:movie:2002");
+    empty_body["files"] = json!([]);
     let req = common::request("POST", &uri, Some(&token), empty_body);
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
     // Invalid file_id
-    let invalid_body = json!({
-        "title_ref": "tmdb:movie:2002",
-        "file_ids": ["not-a-uuid"]
-    });
+    let mut invalid_body = pinned(&_state, &media, &[f1], "tmdb:movie:2002");
+    invalid_body["files"][0]["file_id"] = json!("not-a-uuid");
     let req = common::request("POST", &uri, Some(&token), invalid_body);
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
@@ -434,10 +444,11 @@ async fn reidentify_invalid_or_cross_media_file_ids_returns_400() {
             .unwrap();
     }
 
-    let cross_body = json!({
-        "title_ref": "tmdb:movie:2002",
-        "file_ids": [f1.to_string(), other_fid.to_string()]
-    });
+    let mut cross_body = pinned(&_state, &media, &[f1], "tmdb:movie:2002");
+    cross_body["files"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"file_id": other_fid.to_string(), "revision": 1, "source_version": "v1"}));
     let req = common::request("POST", &uri, Some(&token), cross_body);
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
@@ -463,10 +474,7 @@ async fn reidentify_already_in_place_returns_claimed_zero_and_no_writes() {
     };
     catalog.set(MediaKind::Movie, "1001", target_media);
 
-    let req_body = json!({
-        "title_ref": "tmdb:movie:1001",
-        "file_ids": [f1.to_string()]
-    });
+    let req_body = pinned(&_state, &media, &[f1], "tmdb:movie:1001");
 
     let uri = "/api/v1/reidentify";
     let req = common::request("POST", &uri, Some(&token), req_body);
@@ -508,7 +516,7 @@ async fn reidentify_inserts_the_tmdb_alias_for_a_media_matched_by_another_provid
         store.insert_media(&tvdb_only).unwrap();
         assert!(
             store
-                .get_media_by_alias_kind("tmdb_id", "2002", Some(MediaKind::Movie))
+                .get_media_by_alias_kind("tmdb", "2002", Some(MediaKind::Movie))
                 .unwrap()
                 .is_none(),
             "没有任何 Media 占有 tmdb 2002，前置检查必须放行"
@@ -530,10 +538,7 @@ async fn reidentify_inserts_the_tmdb_alias_for_a_media_matched_by_another_provid
     };
     catalog.set(MediaKind::Movie, "2002", target_media);
 
-    let req_body = json!({
-        "title_ref": "tmdb:movie:2002",
-        "file_ids": [f1.to_string()]
-    });
+    let req_body = pinned(&_state, &media, &[f1], "tmdb:movie:2002");
     let req = common::request("POST", "/api/v1/reidentify", Some(&token), req_body);
     let res = app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -543,7 +548,7 @@ async fn reidentify_inserts_the_tmdb_alias_for_a_media_matched_by_another_provid
     let shared = _state.store();
     let store = shared.lock();
     let by_new_alias = store
-        .get_media_by_alias_kind("tmdb_id", "2002", Some(MediaKind::Movie))
+        .get_media_by_alias_kind("tmdb", "2002", Some(MediaKind::Movie))
         .unwrap()
         .expect("reidentify 必须为目标媒体落下 tmdb 别名");
     assert_eq!(by_new_alias.id, tvdb_only.id);
@@ -584,4 +589,116 @@ async fn reidentify_inserts_the_tmdb_alias_for_a_media_matched_by_another_provid
             .media_id,
         media.id
     );
+}
+
+/// The preview pins every file version and the source revision; the POST
+/// accepts only that exact shape and never fills versions from the server.
+#[tokio::test]
+async fn reidentify_contract_is_pinned_by_the_preview() {
+    let (_tmp, state, app, token, lib_id, media, [f1, f2, f3], catalog) = setup_fixture();
+    let uri = format!(
+        "/api/v1/libraries/{lib_id}/items/{}/reidentification-preview",
+        media.id
+    );
+    let res = app
+        .clone()
+        .oneshot(common::request("GET", &uri, Some(&token), json!({})))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let preview: Value = common::json_data(res).await;
+    assert_eq!(preview["media_item_id"], media.id.to_string());
+    assert!(preview["source_revision"].is_i64());
+    let files = preview["groups"][0]["files"].as_array().unwrap();
+    assert_eq!(files.len(), 3);
+    assert!(preview["groups"][0].get("file_ids").is_none());
+    assert!(
+        files
+            .iter()
+            .all(|f| f["revision"].as_i64() == Some(1) && f["source_version"] == "v1")
+    );
+
+    let base = pinned(&state, &media, &[f1, f2], "tmdb:movie:2002");
+    let mut cases = Vec::new();
+    let mut legacy = base.clone();
+    legacy["file_ids"] = json!([f1.to_string()]);
+    cases.push(("legacy file_ids", legacy));
+    let mut no_rev = base.clone();
+    no_rev.as_object_mut().unwrap().remove("source_revision");
+    cases.push(("missing source_revision", no_rev));
+    let mut no_files = base.clone();
+    no_files.as_object_mut().unwrap().remove("files");
+    cases.push(("missing files", no_files));
+    let mut dup = base.clone();
+    dup["files"][1] = dup["files"][0].clone();
+    cases.push(("duplicate file", dup));
+    let mut zero = base.clone();
+    zero["files"][0]["revision"] = json!(0);
+    cases.push(("non-positive revision", zero));
+    let mut empty_ver = base.clone();
+    empty_ver["files"][0]["source_version"] = json!("");
+    cases.push(("empty source_version", empty_ver));
+    let mut no_version = base.clone();
+    no_version["files"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("source_version");
+    cases.push(("file without version", no_version));
+    for (name, body) in cases {
+        let res = app
+            .clone()
+            .oneshot(common::request(
+                "POST",
+                "/api/v1/reidentify",
+                Some(&token),
+                body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{name}");
+    }
+
+    catalog.set(
+        MediaKind::Movie,
+        "2002",
+        Media {
+            id: MediaId::new(),
+            kind: MediaKind::Movie,
+            title: "Target Title".into(),
+            year: Some(2021),
+            original_title: None,
+            aliases: vec![],
+            tmdb_id: Some("2002".into()),
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        },
+    );
+    let mut stale = base.clone();
+    stale["source_revision"] = json!(base["source_revision"].as_i64().unwrap() + 7);
+    let res = app
+        .clone()
+        .oneshot(common::request(
+            "POST",
+            "/api/v1/reidentify",
+            Some(&token),
+            stale,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT, "stale source revision");
+    let shared = state.store();
+    let store = shared.lock();
+    for id in [f1, f2, f3] {
+        assert_eq!(
+            store
+                .file_coverage_by_id(id)
+                .unwrap()
+                .unwrap()
+                .file
+                .media_id,
+            media.id
+        );
+    }
 }

@@ -43,7 +43,6 @@ pub fn format_episodes_json(episodes: &[EpisodeRow], media_item_id: &str) -> Vec
                 "file_ids": ep.file_ids,
                 "position_ms": ep.position_ms,
                 "played": ep.played,
-                "watched": ep.played,
                 "progress_percent": ep.progress_percent,
                 "media_item_id": media_item_id,
                 "season_number": ep.season,

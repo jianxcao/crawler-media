@@ -50,9 +50,12 @@ fn review_item(media: &domain::Media, poster_url: Option<String>) -> Value {
 /// 当前身份 + 文件名解析出的搜索种子（前端据此给候选）。
 pub(crate) async fn preview(
     State(state): State<ApiState>,
-    Path((_id, item_id)): Path<(String, String)>,
+    Path((library_id, item_id)): Path<(String, String)>,
 ) -> Response {
     let store = state.store.lock();
+    let Ok(library_id) = domain::LibraryId::from_str(&library_id) else {
+        return err(StatusCode::BAD_REQUEST, "library.invalid", "媒体库 id 无效");
+    };
     let media_id = match MediaId::from_str(&item_id) {
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
@@ -60,12 +63,31 @@ pub(crate) async fn preview(
     let Some(media) = store.get_media(media_id).ok().flatten() else {
         return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
     };
-    let coverages: Vec<domain::FileCoverage> = store
-        .list_file_coverage()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|coverage| coverage.file.media_id == media_id)
-        .collect();
+    let coverages = match store.file_coverage_in_library(
+        library_id,
+        Some(media_id),
+        store::FileReadScope::Published,
+    ) {
+        Ok(coverages) => coverages,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &e.to_string(),
+            );
+        }
+    };
+    let source_revision = match store.media_revision(media_id) {
+        Ok(Some(revision)) => revision,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在"),
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &e.to_string(),
+            );
+        }
+    };
     let search_seed = coverages
         .iter()
         .filter_map(|coverage| {
@@ -98,7 +120,11 @@ pub(crate) async fn preview(
                 "code": null,
                 "candidates": [],
             },
-            "file_ids": coverages.iter().map(|coverage| coverage.file.file_id.to_string()).collect::<Vec<_>>(),
+            "files": coverages.iter().map(|coverage| json!({
+                "file_id": coverage.file.file_id.to_string(),
+                "revision": coverage.file.version.revision,
+                "source_version": coverage.file.version.source_version,
+            })).collect::<Vec<_>>(),
             "file_count": coverages.len(),
             "total_size_bytes": 0,
             "sample_names": coverages.iter().take(3).filter_map(|coverage| {
@@ -114,6 +140,8 @@ pub(crate) async fn preview(
         "pinned_identity": false,
         "unreachable": false,
         "search_seed": search_seed,
+        "media_item_id": media.id.to_string(),
+        "source_revision": source_revision,
     }))
     .into_response()
 }
@@ -139,114 +167,97 @@ struct ParsedReidentifyRequest {
     source_revision: i64,
 }
 
-fn parse_file_targets(
-    store: &store::Store,
-    body: &Value,
-) -> Result<ParsedReidentifyRequest, (StatusCode, &'static str, String)> {
-    let raw_file_ids = body["file_ids"].as_array().ok_or((
-        StatusCode::BAD_REQUEST,
-        "reidentify.invalid",
-        "缺少 file_ids".into(),
-    ))?;
-    if raw_file_ids.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "reidentify.invalid",
-            "file_ids 不能为空".into(),
+/// The only accepted reidentification body: every file is pinned to the
+/// version the client previewed, and the source Media to its revision.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReidentifyRequest {
+    media_item_id: String,
+    source_revision: i64,
+    title_ref: String,
+    files: Vec<ReidentifyFile>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReidentifyFile {
+    file_id: String,
+    revision: i64,
+    source_version: String,
+}
+
+type ParseError = (StatusCode, &'static str, String);
+
+fn invalid(msg: impl Into<String>) -> ParseError {
+    (StatusCode::BAD_REQUEST, "reidentify.invalid", msg.into())
+}
+
+fn parse_pinned_files(
+    request: &ReidentifyRequest,
+) -> Result<Vec<(LedgerId, FileVersion)>, ParseError> {
+    if request.files.is_empty() {
+        return Err(invalid("files 不能为空"));
+    }
+    if request.source_revision < 0 {
+        return Err(invalid("source_revision 无效"));
+    }
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(request.files.len());
+    for file in &request.files {
+        let id = LedgerId::from_str(&file.file_id.replace('-', ""))
+            .map_err(|_| invalid(format!("无效的 file_id: {}", file.file_id)))?;
+        if !seen.insert(id) {
+            return Err(invalid(format!("重复的 file_id: {}", file.file_id)));
+        }
+        if file.revision <= 0 || file.source_version.is_empty() {
+            return Err(invalid(format!("file {} 版本无效", file.file_id)));
+        }
+        out.push((
+            id,
+            FileVersion {
+                revision: file.revision,
+                source_version: file.source_version.clone(),
+            },
         ));
     }
+    Ok(out)
+}
 
-    let mut parsed_ids = Vec::with_capacity(raw_file_ids.len());
-    for item in raw_file_ids {
-        let s = item.as_str().ok_or((
-            StatusCode::BAD_REQUEST,
-            "reidentify.invalid",
-            "file_id 必须是字符串".into(),
-        ))?;
-        let clean = s.replace('-', "");
-        let lid = LedgerId::from_str(&clean).map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                "reidentify.invalid",
-                format!("无效的 file_id: {s}"),
-            )
-        })?;
-        parsed_ids.push(lid);
-    }
-
-    let mut explicit_versions: HashMap<LedgerId, FileVersion> = HashMap::new();
-    if let Some(files_arr) = body["files"].as_array() {
-        for f in files_arr {
-            if let (Some(fid_str), Some(rev)) = (f["file_id"].as_str(), f["revision"].as_i64()) {
-                let clean = fid_str.replace('-', "");
-                if let Ok(lid) = LedgerId::from_str(&clean) {
-                    let s_ver = f["source_version"].as_str().unwrap_or("").to_string();
-                    explicit_versions.insert(
-                        lid,
-                        FileVersion {
-                            revision: rev,
-                            source_version: s_ver,
-                        },
-                    );
-                }
-            }
-        }
-    }
-
-    let mut from_media_id: Option<MediaId> = None;
-    let mut files_to_reassign = Vec::with_capacity(parsed_ids.len());
-    let mut rows_to_refresh = Vec::with_capacity(parsed_ids.len());
-
-    for lid in parsed_ids {
-        let coverage = store.file_coverage_by_id(lid).ok().flatten().ok_or((
-            StatusCode::NOT_FOUND,
-            "library.file_missing",
-            format!("文件不存在: {lid}"),
-        ))?;
-
-        match from_media_id {
-            None => from_media_id = Some(coverage.file.media_id),
-            Some(prev_mid) => {
-                if prev_mid != coverage.file.media_id {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        "reidentify.invalid",
-                        "file_ids 跨多个条目，需分别调用".into(),
-                    ));
-                }
-            }
-        }
-
-        let version = match explicit_versions.get(&lid) {
-            Some(v) => v.clone(),
-            None => store.get_file_version(lid).ok().flatten().ok_or((
+/// Validate the pinned request against current rows. Versions are never
+/// filled in from the server: a stale pin fails the write CAS with 409.
+fn parse_file_targets(
+    store: &store::Store,
+    request: &ReidentifyRequest,
+) -> Result<ParsedReidentifyRequest, ParseError> {
+    let from_media_id =
+        MediaId::from_str(&request.media_item_id).map_err(|_| invalid("media_item_id 无效"))?;
+    let files_to_reassign = parse_pinned_files(request)?;
+    let mut rows_to_refresh = Vec::with_capacity(files_to_reassign.len());
+    for (lid, _) in &files_to_reassign {
+        let coverage = store
+            .file_coverage_by_id(*lid)
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    e.to_string(),
+                )
+            })?
+            .ok_or((
                 StatusCode::NOT_FOUND,
                 "library.file_missing",
-                format!("文件版本不可读取: {lid}"),
-            ))?,
-        };
-
-        files_to_reassign.push((lid, version));
+                format!("文件不存在: {lid}"),
+            ))?;
+        if coverage.file.media_id != from_media_id {
+            return Err(invalid(format!("文件 {lid} 不属于条目 {from_media_id}")));
+        }
         rows_to_refresh.push(coverage);
     }
-
-    let from_media_id = from_media_id.ok_or((
-        StatusCode::BAD_REQUEST,
-        "reidentify.invalid",
-        "缺少有效文件".into(),
-    ))?;
-
-    let source_revision = store
-        .media_revision(from_media_id)
-        .ok()
-        .flatten()
-        .unwrap_or(0);
-
     Ok(ParsedReidentifyRequest {
         files_to_reassign,
         from_media_id,
         rows_to_refresh,
-        source_revision,
+        source_revision: request.source_revision,
     })
 }
 
@@ -285,9 +296,19 @@ fn acquire_file_leases(
 }
 
 fn reidentify_inner(state: &ApiState, body: &Value) -> Response {
+    let request: ReidentifyRequest = match serde_json::from_value(body.clone()) {
+        Ok(request) => request,
+        Err(error) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "reidentify.invalid",
+                &format!("请求不符合契约: {error}"),
+            );
+        }
+    };
     let parsed = {
         let store = state.store.lock();
-        match parse_file_targets(&store, body) {
+        match parse_file_targets(&store, &request) {
             Ok(p) => p,
             Err((status, code, msg)) => return err(status, code, &msg),
         }
@@ -300,13 +321,7 @@ fn reidentify_inner(state: &ApiState, body: &Value) -> Response {
         Err(response) => return response,
     };
 
-    let Some(title_ref) = body["title_ref"].as_str() else {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "reidentify.invalid",
-            "缺少 title_ref",
-        );
-    };
+    let title_ref = request.title_ref.as_str();
 
     let target_media = match resolve_title(state, title_ref) {
         Ok(Some(t)) => t,
@@ -335,7 +350,7 @@ fn reidentify_inner(state: &ApiState, body: &Value) -> Response {
     if !target_id.is_empty() {
         let store = state.store.lock();
         if let Ok(Some(existing_media)) =
-            store.get_media_by_alias_kind("tmdb_id", target_id, Some(target_media.kind))
+            store.get_media_by_alias_kind("tmdb", target_id, Some(target_media.kind))
         {
             if existing_media.id == parsed.from_media_id
                 && existing_media.title == target_media.title

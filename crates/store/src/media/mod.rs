@@ -275,26 +275,26 @@ impl Store {
     }
 
     pub fn get_media_by_tmdb(&self, tmdb_id: &str) -> Result<Option<Media>, StoreError> {
-        self.get_media_by_alias("tmdb_id", tmdb_id)
+        self.get_media_by_alias("tmdb", tmdb_id)
     }
 
-    pub fn get_media_by_alias(&self, column: &str, id: &str) -> Result<Option<Media>, StoreError> {
-        self.get_media_by_alias_kind(column, id, None)
+    pub fn get_media_by_alias(&self, source: &str, id: &str) -> Result<Option<Media>, StoreError> {
+        self.get_media_by_alias_kind(source, id, None)
     }
 
     pub fn get_media_by_alias_kind(
         &self,
-        column: &str,
+        source: &str,
         id: &str,
         kind: Option<domain::MediaKind>,
     ) -> Result<Option<Media>, StoreError> {
-        let source = match column {
-            "tmdb" | "tmdb_id" => "tmdb",
-            "douban" | "douban_id" => "douban",
-            "tvdb" | "tvdb_id" => "tvdb",
-            "bangumi" | "bangumi_id" => "bangumi",
-            "anilist" | "anilist_id" => "anilist",
-            _ => return Ok(None),
+        let source = match source {
+            "tmdb" | "douban" | "tvdb" | "bangumi" | "anilist" => source,
+            other => {
+                return Err(StoreError::Invalid(format!(
+                    "unknown alias source: {other}"
+                )));
+            }
         };
         let sql = match kind {
             Some(_) => format!(
@@ -491,11 +491,11 @@ impl Store {
         incoming: Media,
     ) -> Result<(Media, Option<Media>), StoreError> {
         let aliases = [
-            ("tmdb_id", incoming.tmdb_id.clone()),
-            ("douban_id", incoming.douban_id.clone()),
-            ("tvdb_id", incoming.tvdb_id.clone()),
-            ("bangumi_id", incoming.bangumi_id.clone()),
-            ("anilist_id", incoming.anilist_id.clone()),
+            ("tmdb", incoming.tmdb_id.clone()),
+            ("douban", incoming.douban_id.clone()),
+            ("tvdb", incoming.tvdb_id.clone()),
+            ("bangumi", incoming.bangumi_id.clone()),
+            ("anilist", incoming.anilist_id.clone()),
         ];
         for (column, id) in aliases {
             let Some(id) = id else { continue };
