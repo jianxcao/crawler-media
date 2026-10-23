@@ -44,6 +44,17 @@ async fn system_logs_flow() {
         .unwrap();
     assert_eq!(unauthed.status(), StatusCode::UNAUTHORIZED);
 
+    // Legacy aliases are gone: only target/q filter the log view.
+    for legacy in ["module=indexer", "keyword=cookie"] {
+        let req = Request::builder()
+            .uri(format!("/api/v1/system/logs?{legacy}"))
+            .header(header::AUTHORIZATION, "Bearer management-secret")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{legacy}");
+    }
+
     // 2. Authenticated as Admin -> 200 list
     let list_req = Request::builder()
         .uri("/api/v1/system/logs")

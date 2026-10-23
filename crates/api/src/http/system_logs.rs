@@ -20,15 +20,19 @@ pub(crate) async fn list_logs(
     State(state): State<ApiState>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
+    if let Some(key) = ["module", "keyword"]
+        .iter()
+        .find(|k| query.contains_key(**k))
+    {
+        return crate::http::err(
+            axum::http::StatusCode::BAD_REQUEST,
+            "logs.invalid_query",
+            &format!("unknown query key {key}; use target/q"),
+        );
+    }
     let level = query.get("level").map(String::as_str);
-    let target = query
-        .get("target")
-        .or_else(|| query.get("module"))
-        .map(String::as_str);
-    let keyword = query
-        .get("q")
-        .or_else(|| query.get("keyword"))
-        .map(String::as_str);
+    let target = query.get("target").map(String::as_str);
+    let keyword = query.get("q").map(String::as_str);
     let limit = query.get("limit").and_then(|l| l.parse::<usize>().ok());
 
     let entries = state.log_buffer.query(level, target, keyword, limit);

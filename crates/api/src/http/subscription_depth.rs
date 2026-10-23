@@ -26,9 +26,8 @@ pub(crate) use arrivals::today_arrivals;
 use super::subscriptions::{remove_torrents_from_client, resolve_subscribe, user_is_admin};
 
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RunUpgradeInput {
-    #[serde(default)]
-    pub(crate) rule_set_id: Option<String>,
     #[serde(default)]
     pub(crate) filter_id: Option<String>,
     #[serde(default)]
@@ -48,12 +47,18 @@ pub(crate) async fn run_upgrade(
     let (input, has_body) = if body_bytes.is_empty() || body_bytes.as_ref() == b"null" {
         (RunUpgradeInput::default(), false)
     } else {
-        (
-            serde_json::from_slice(&body_bytes).unwrap_or_default(),
-            true,
-        )
+        match serde_json::from_slice(&body_bytes) {
+            Ok(input) => (input, true),
+            Err(error) => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "subscription.invalid",
+                    &error.to_string(),
+                );
+            }
+        }
     };
-    let new_filter_str = input.rule_set_id.or(input.filter_id);
+    let new_filter_str = input.filter_id;
     let mut dirty = false;
     if let Some(fid_str) = new_filter_str {
         if let Ok(fid) = domain::FilterId::from_str(&fid_str) {
@@ -133,7 +138,7 @@ pub(crate) async fn run_upgrade(
     ok(json!({
         "summary": summary,
         "target_label": target_label,
-        "rule_set_id": subscribe.wash_cut_filter_id.or(Some(subscribe.filter_id)).map(|id| id.to_string()),
+        "filter_id": subscribe.wash_cut_filter_id.or(Some(subscribe.filter_id)).map(|id| id.to_string()),
         "counts": counts,
         "units": units,
     }))

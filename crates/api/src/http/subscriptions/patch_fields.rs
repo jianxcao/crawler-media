@@ -22,8 +22,8 @@ pub(super) fn apply_patch_fields(
     )?;
     update_downloader(store, subscribe, body.downloader_id.as_deref())?;
     update_tracking_fields(subscribe, &body)?;
-    update_selected_season(subscribe, body.selected_seasons)?;
     update_library_id(store, subscribe, body.library_id)?;
+    update_coverage(subscribe, body.coverage)?;
     subscribe
         .coverage
         .validate(subscribe.full_season_pack)
@@ -235,31 +235,33 @@ fn update_tracking_fields(
     Ok(())
 }
 
-fn update_selected_season(
+fn update_coverage(
     subscribe: &mut Subscribe,
-    seasons: Option<Vec<u32>>,
+    coverage: Option<super::types::CoverageInput>,
 ) -> Result<(), Response> {
-    let Some(seasons) = seasons else {
-        return Ok(());
+    let next = match (coverage, &subscribe.coverage) {
+        (None, _) => return Ok(()),
+        (Some(super::types::CoverageInput::Movie), Coverage::Movie) => Coverage::Movie,
+        (
+            Some(super::types::CoverageInput::Tv {
+                season,
+                episode_from,
+                episode_to,
+            }),
+            Coverage::Tv { .. },
+        ) if season > 0 => Coverage::Tv {
+            season,
+            episode_from,
+            episode_to,
+        },
+        _ => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "subscription.invalid",
+                "coverage 必须与订阅类型一致，且季号大于 0",
+            ));
+        }
     };
-    if seasons.len() != 1 || seasons[0] == 0 {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            "subscription.invalid",
-            "每个订阅只能对应一季；请为其他季分别创建订阅",
-        ));
-    }
-    if !matches!(subscribe.coverage, Coverage::Tv { .. }) {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            "subscription.invalid",
-            "selected_seasons 只对剧集订阅有效",
-        ));
-    }
-    subscribe.coverage = Coverage::Tv {
-        season: seasons[0],
-        episode_from: 1,
-        episode_to: None,
-    };
+    subscribe.coverage = next;
     Ok(())
 }

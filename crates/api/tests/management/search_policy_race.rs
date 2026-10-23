@@ -182,7 +182,7 @@ async fn season_policy_changed_during_search_is_reloaded_before_admission() {
             "PATCH",
             &format!("/api/v1/subscriptions/{sub_id}"),
             Some("management-secret"),
-            json!({ "selected_seasons": [2] }),
+            json!({ "coverage": {"kind": "tv", "season": 2, "episode_from": 1, "episode_to": null} }),
         ))
         .await
         .unwrap();

@@ -33,7 +33,7 @@ async fn create_long_watch_sub(app: &axum::Router) -> String {
 }
 
 #[tokio::test]
-async fn patch_selected_seasons_adjusts_tv_coverage() {
+async fn patch_coverage_adjusts_tv_season() {
     let tmp = tempfile::tempdir().unwrap();
     let app = authed_app(&tmp);
     let id = create_long_watch_sub(&app).await;
@@ -45,7 +45,7 @@ async fn patch_selected_seasons_adjusts_tv_coverage() {
                 "PATCH",
                 &format!("/api/v1/subscriptions/{id}"),
                 Some("management-secret"),
-                json!({ "selected_seasons": [2] }),
+                json!({ "coverage": {"kind": "tv", "season": 2, "episode_from": 1, "episode_to": null} }),
             ))
             .await
             .unwrap(),
@@ -77,7 +77,7 @@ async fn patch_selected_seasons_adjusts_tv_coverage() {
             "PATCH",
             &format!("/api/v1/subscriptions/{id}"),
             Some("management-secret"),
-            json!({ "selected_seasons": [2, 3] }),
+            json!({ "coverage": {"kind": "tv", "season": 0, "episode_from": 1, "episode_to": null} }),
         ))
         .await
         .unwrap();

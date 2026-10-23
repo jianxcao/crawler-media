@@ -474,6 +474,37 @@ async fn assert_upgrade_report_with_pending(app: &axum::Router, id: &str, tmp: &
 }
 
 async fn assert_upgrade_reports(app: &axum::Router, id: &str, tmp: &tempfile::TempDir) {
+    for legacy in [
+        json!({ "rule_set_id": "x" }),
+        json!({ "unknown_field": true }),
+    ] {
+        let rejected = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                &format!("/api/v1/subscriptions/{id}/upgrade-runs"),
+                Some("management-secret"),
+                legacy.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST, "{legacy}");
+    }
+    let patched = app
+        .clone()
+        .oneshot(request(
+            "PATCH",
+            &format!("/api/v1/subscriptions/{id}"),
+            Some("management-secret"),
+            json!({ "selected_seasons": [1] }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        patched.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "selected_seasons is not a field"
+    );
     let report = json_body(
         app.clone()
             .oneshot(request(
@@ -741,7 +772,7 @@ async fn run_upgrade_applies_new_ruleset_and_activates_wash_cut() {
                 &format!("/api/v1/subscriptions/{id}/upgrade-runs"),
                 Some("management-secret"),
                 json!({
-                    "rule_set_id": rule_id,
+                    "filter_id": rule_id,
                     "wash_cut": true
                 }),
             ))
@@ -751,7 +782,7 @@ async fn run_upgrade_applies_new_ruleset_and_activates_wash_cut() {
     .await;
 
     // 检验：规则组必须被应用，且原有 50 分单元成功判定为 upgradable（而不是误判为 at_cutoff）
-    assert_eq!(upgrade_res["data"]["rule_set_id"], rule_id);
+    assert_eq!(upgrade_res["data"]["filter_id"], rule_id);
     assert_eq!(
         upgrade_res["data"]["counts"]["upgradable"], 1,
         "在传递新规则组并开启洗版后，已有低分单元必须被标记为 upgradable 并开始洗版"
