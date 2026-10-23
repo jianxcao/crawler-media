@@ -652,3 +652,32 @@ async fn progress_heartbeats_do_not_increment_play_count() {
     assert_eq!(after_stop.play_count, 1, "真实 Stop 才 +1");
     assert_eq!((after_stop.logs, after_stop.entries), (1, 1));
 }
+
+/// A4 RED witness at the HTTP boundary: raw persisted clocks after a web mark.
+/// played_changed_at_ms is milliseconds, favorite_at seconds, and a mark never
+/// advances watch_activity_at.
+#[tokio::test]
+async fn web_mark_persists_raw_clock_columns() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base_ms = (api::job_loop::unix_now() - 3_600) * 1000 + 500;
+    let env = ClockEnv::with_base_ms(&tmp, base_ms).await;
+    let marked = post_async(
+        &env.app,
+        "/api/v1/playback/marks",
+        json!({ "media_item_id": env.media_id, "played": true, "favorite": true }),
+    )
+    .await;
+    assert_eq!(marked.status(), StatusCode::OK);
+    let db = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
+    let (changed_ms, activity, favorite_at): (Option<i64>, i64, i64) = db
+        .query_row(
+            "SELECT played_changed_at_ms, watch_activity_at, favorite_at FROM playback_units
+             WHERE media_id = ?1 AND season = -1 AND episode = -1",
+            rusqlite::params![env.media_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("mark row");
+    assert_eq!(changed_ms, Some(base_ms), "played_changed_at_ms must be ms");
+    assert_eq!(favorite_at, base_ms / 1000, "favorite_at must be seconds");
+    assert_eq!(activity, 0, "a mark is not watch activity");
+}
