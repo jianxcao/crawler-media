@@ -5,11 +5,10 @@
 //! under the mock save path so Transfer can import them.
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::thread;
 
 use parking_lot::Mutex;
 use serde_json::json;
@@ -53,49 +52,47 @@ pub struct MockQbit {
     /// (hash, file index) set to priority 0.
     pub skipped: Mutex<Vec<(String, usize)>>,
     next: AtomicU64,
+    /// Owned fake server: stops and joins when the mock is dropped.
+    server: Mutex<Option<crate::lifecycle::FakeServer>>,
 }
 
 impl MockQbit {
     pub fn start(save_root: &Path) -> Arc<Self> {
         std::fs::create_dir_all(save_root).unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mock = Arc::new(Self {
-            url: format!("http://{addr}"),
-            save_root: save_root.to_path_buf(),
-            tasks: Mutex::new(Vec::new()),
-            adds: Mutex::new(Vec::new()),
-            deletes: Mutex::new(Vec::new()),
-            logins: AtomicUsize::new(0),
-            info_calls: AtomicUsize::new(0),
-            unfiltered_info_calls: AtomicUsize::new(0),
-            forbid_next: AtomicUsize::new(0),
-            reject_login: std::sync::atomic::AtomicBool::new(false),
-            torrent_file: Mutex::new(None),
-            resumes: Mutex::new(Vec::new()),
-            add_tags: Mutex::new(Vec::new()),
-            next_files: Mutex::new(Vec::new()),
-            file_prios: Mutex::new(Vec::new()),
-            skipped: Mutex::new(Vec::new()),
-            next: AtomicU64::new(1),
-        });
-        let server = mock.clone();
-        thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
-                let server = server.clone();
-                thread::spawn(move || {
-                    let req = read_request(&mut stream);
-                    let (status, body, extra) = server.route(&req);
-                    let response = format!(
-                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n{extra}\r\n{body}",
-                        body.len()
-                    );
-                    let _ = stream.write_all(response.as_bytes());
-                });
+        // The handler holds a Weak, so dropping the last test handle stops the server.
+        Arc::new_cyclic(|weak: &std::sync::Weak<Self>| {
+            let weak = weak.clone();
+            let server = crate::lifecycle::FakeServer::start(move |request, stream| {
+                let Some(mock) = weak.upgrade() else { return };
+                let (status, body, extra) = mock.route(&request.raw);
+                drop(mock);
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n{extra}\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            });
+            Self {
+                url: server.url(),
+                save_root: save_root.to_path_buf(),
+                tasks: Mutex::new(Vec::new()),
+                adds: Mutex::new(Vec::new()),
+                deletes: Mutex::new(Vec::new()),
+                logins: AtomicUsize::new(0),
+                info_calls: AtomicUsize::new(0),
+                unfiltered_info_calls: AtomicUsize::new(0),
+                forbid_next: AtomicUsize::new(0),
+                reject_login: std::sync::atomic::AtomicBool::new(false),
+                torrent_file: Mutex::new(None),
+                resumes: Mutex::new(Vec::new()),
+                add_tags: Mutex::new(Vec::new()),
+                next_files: Mutex::new(Vec::new()),
+                file_prios: Mutex::new(Vec::new()),
+                skipped: Mutex::new(Vec::new()),
+                next: AtomicU64::new(1),
+                server: Mutex::new(Some(server)),
             }
-        });
-        mock
+        })
     }
 
     pub fn config(&self) -> downloader::QbitConfig {

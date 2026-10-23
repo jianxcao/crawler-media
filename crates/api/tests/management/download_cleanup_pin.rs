@@ -1,8 +1,6 @@
 //! Pin regressions: freeze the planned client/hash, and fail closed when a
 //! requested reference cannot be proven distinct from a shared task.
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -127,69 +125,36 @@ fn qbit_info(hash: &str, tags: &[&str]) -> String {
 fn qbit_fixture(
     info_body: String,
     on_info: impl Fn() + Send + 'static,
-) -> (String, Arc<Mutex<Vec<String>>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
+) -> (
+    String,
+    Arc<Mutex<Vec<String>>>,
+    crate::lifecycle::FakeServer,
+) {
     let deletes = Arc::new(Mutex::new(Vec::new()));
     let recorded = deletes.clone();
-    std::thread::spawn(move || {
-        for incoming in listener.incoming() {
-            let mut stream = incoming.unwrap();
-            let mut bytes = Vec::new();
-            loop {
-                let mut chunk = [0; 4096];
-                let n = stream.read(&mut chunk).unwrap();
-                if n == 0 {
-                    break;
-                }
-                bytes.extend_from_slice(&chunk[..n]);
-                if request_complete(&bytes) {
-                    break;
-                }
-            }
-            let request = String::from_utf8_lossy(&bytes).into_owned();
-            if request.contains("torrents/info") {
-                on_info();
-            }
-            if request.contains("torrents/delete") {
-                recorded.lock().push(request.clone());
-            }
-            let body = if request.contains("auth/login") {
-                "Ok.".into()
-            } else if request.contains("torrents/info") {
-                info_body.clone()
-            } else {
-                "Ok.".into()
-            };
-            let extra = if request.contains("auth/login") {
-                "Set-Cookie: SID=fixture\r\n"
-            } else {
-                ""
-            };
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
+    let on_info = Mutex::new(on_info);
+    let server = crate::lifecycle::FakeServer::start(move |request, stream| {
+        let request = &request.raw;
+        if request.contains("torrents/info") {
+            (on_info.lock())();
         }
+        if request.contains("torrents/delete") {
+            recorded.lock().push(request.clone());
+        }
+        let login = request.contains("auth/login");
+        let body = if !login && request.contains("torrents/info") {
+            info_body.clone()
+        } else {
+            "Ok.".into()
+        };
+        let extra = if login {
+            "Set-Cookie: SID=fixture\r\n"
+        } else {
+            ""
+        };
+        crate::lifecycle::respond(stream, "200 OK", extra, body.as_bytes());
     });
-    (url, deletes)
-}
-
-fn request_complete(bytes: &[u8]) -> bool {
-    let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") else {
-        return false;
-    };
-    let headers = String::from_utf8_lossy(&bytes[..end]);
-    let length = headers
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse::<usize>().unwrap())
-        })
-        .unwrap_or(0);
-    bytes.len() >= end + 4 + length
+    (server.url(), deletes, server)
 }
 
 #[tokio::test]
@@ -267,6 +232,7 @@ struct SwitchFixture {
     deletes_a: Arc<Mutex<Vec<String>>>,
     deletes_b: Arc<Mutex<Vec<String>>>,
     hash_a: &'static str,
+    _servers: [crate::lifecycle::FakeServer; 2],
 }
 
 fn switch_fixture(tmp: &tempfile::TempDir) -> SwitchFixture {
@@ -276,7 +242,7 @@ fn switch_fixture(tmp: &tempfile::TempDir) -> SwitchFixture {
     let hash_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let info_hits = Arc::new(AtomicUsize::new(0));
     let switch_store = store.clone();
-    let (url_a, deletes_a) = qbit_fixture(
+    let (url_a, deletes_a, server_a) = qbit_fixture(
         qbit_info(
             hash_a,
             &[
@@ -294,7 +260,7 @@ fn switch_fixture(tmp: &tempfile::TempDir) -> SwitchFixture {
             }
         },
     );
-    let (url_b, deletes_b) = qbit_fixture(
+    let (url_b, deletes_b, server_b) = qbit_fixture(
         qbit_info(
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             &[
@@ -336,6 +302,7 @@ fn switch_fixture(tmp: &tempfile::TempDir) -> SwitchFixture {
         deletes_a,
         deletes_b,
         hash_a,
+        _servers: [server_a, server_b],
     }
 }
 

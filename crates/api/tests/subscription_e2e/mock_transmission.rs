@@ -1,16 +1,12 @@
 //! Stateful Transmission RPC mock (rpc-version configurable; < 16 = no labels).
 
 use std::io::Write;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
 
 use parking_lot::Mutex;
 use serde_json::{Value, json};
-
-use super::mock_qbit::read_request;
 
 #[derive(Clone, Debug)]
 pub struct TrTask {
@@ -31,40 +27,38 @@ pub struct MockTransmission {
     /// F-1: file names (metadata) given to the next added task.
     pub next_files: Mutex<Vec<String>>,
     next: AtomicU64,
+    /// Owned fake server: stops and joins when the mock is dropped.
+    server: Mutex<Option<crate::lifecycle::FakeServer>>,
 }
 
 impl MockTransmission {
     pub fn start(download_dir: &Path, rpc_version: u64) -> Arc<Self> {
         std::fs::create_dir_all(download_dir).unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let mock = Arc::new(Self {
-            url: format!("http://{}/transmission/rpc", listener.local_addr().unwrap()),
-            download_dir: download_dir.to_path_buf(),
-            rpc_version,
-            tasks: Mutex::new(Vec::new()),
-            sets: Mutex::new(Vec::new()),
-            next_files: Mutex::new(Vec::new()),
-            next: AtomicU64::new(1),
-        });
-        let server = mock.clone();
-        thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
-                let server = server.clone();
-                thread::spawn(move || {
-                    let req = read_request(&mut stream);
-                    let body = req.split("\r\n\r\n").nth(1).unwrap_or("{}");
-                    let call: Value = serde_json::from_str(body).unwrap_or(json!({}));
-                    let reply = server.handle(&call).to_string();
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{reply}",
-                        reply.len()
-                    );
-                    let _ = stream.write_all(response.as_bytes());
-                });
+        Arc::new_cyclic(|weak: &std::sync::Weak<Self>| {
+            let weak = weak.clone();
+            let server = crate::lifecycle::FakeServer::start(move |request, stream| {
+                let Some(mock) = weak.upgrade() else { return };
+                let body = std::str::from_utf8(&request.body).unwrap_or("{}");
+                let call: Value = serde_json::from_str(body).unwrap_or(json!({}));
+                let reply = mock.handle(&call).to_string();
+                drop(mock);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            });
+            Self {
+                url: format!("{}/transmission/rpc", server.url()),
+                download_dir: download_dir.to_path_buf(),
+                rpc_version,
+                tasks: Mutex::new(Vec::new()),
+                sets: Mutex::new(Vec::new()),
+                next_files: Mutex::new(Vec::new()),
+                next: AtomicU64::new(1),
+                server: Mutex::new(Some(server)),
             }
-        });
-        mock
+        })
     }
 
     pub fn config(&self) -> downloader::TransmissionConfig {

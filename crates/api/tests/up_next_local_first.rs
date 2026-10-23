@@ -59,6 +59,15 @@ impl Gate {
     }
 }
 
+/// Releases the gate on every exit path (assert failure, panic, early return).
+struct ReleaseOnDrop(Arc<Gate>);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
 struct GatedCatalog {
     gate: Option<Arc<Gate>>,
     season_requests: Arc<std::sync::atomic::AtomicUsize>,
@@ -232,6 +241,7 @@ async fn blocked_metadata_does_not_delay_local_up_next() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join("app")).unwrap();
     let gate = Arc::new(Gate::default());
+    let _release = ReleaseOnDrop(gate.clone());
     let state = make_state(
         &tmp.path().join("app"),
         Arc::new(GatedCatalog {

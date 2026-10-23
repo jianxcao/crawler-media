@@ -6,6 +6,8 @@
 mod common;
 #[path = "subscription_e2e/harness.rs"]
 mod harness;
+#[path = "support/lifecycle.rs"]
+mod lifecycle;
 #[path = "subscription_e2e/mock_qbit.rs"]
 mod mock_qbit;
 #[path = "subscription_e2e/mock_transmission.rs"]

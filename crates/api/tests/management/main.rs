@@ -25,6 +25,8 @@ mod job_schedule_update;
 mod job_scope;
 mod jobs;
 mod legacy_run_parity;
+#[path = "../support/lifecycle.rs"]
+mod lifecycle;
 mod media_kind;
 mod missing_search;
 mod open_coverage;

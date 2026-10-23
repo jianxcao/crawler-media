@@ -1,5 +1,9 @@
-use std::io::{Read, Write};
-use std::net::TcpListener;
+#[path = "../../api/tests/support/lifecycle.rs"]
+#[allow(dead_code)]
+mod lifecycle;
+
+use lifecycle::FakeServer;
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use domain::{SiteId, Torrent};
@@ -53,67 +57,37 @@ fn unrelated_transmission_row() -> serde_json::Value {
     }])
 }
 
-fn fixture(transmission: bool, rows: serde_json::Value) -> (String, Arc<Mutex<Vec<String>>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
+fn fixture(
+    transmission: bool,
+    rows: serde_json::Value,
+) -> (String, Arc<Mutex<Vec<String>>>, FakeServer) {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let captured = requests.clone();
-    std::thread::spawn(move || {
-        for incoming in listener.incoming() {
-            let mut stream = incoming.unwrap();
-            let mut bytes = Vec::new();
-            loop {
-                let mut chunk = [0; 4096];
-                let n = stream.read(&mut chunk).unwrap();
-                if n == 0 {
-                    break;
-                }
-                bytes.extend_from_slice(&chunk[..n]);
-                if request_complete(&bytes) {
-                    break;
-                }
-            }
-            let request = String::from_utf8_lossy(&bytes).into_owned();
-            let body = if transmission {
-                if request.contains("session-get") {
-                    json!({"result":"success","arguments":{"rpc-version":16}})
-                } else {
-                    json!({"result":"success","arguments":{"torrents":rows}})
-                }
-                .to_string()
-            } else if request.contains("auth/login") {
-                "Ok.".into()
-            } else if request.contains("torrents/info") {
-                rows.to_string()
+    let server = FakeServer::start(move |incoming, stream| {
+        let request = incoming.raw.clone();
+        let body = if transmission {
+            if request.contains("session-get") {
+                json!({"result":"success","arguments":{"rpc-version":16}})
             } else {
-                "Ok.".into()
-            };
-            captured.lock().unwrap().push(request);
-            write!(stream, "HTTP/1.1 200 OK\r\nSet-Cookie: SID=fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-        }
+                json!({"result":"success","arguments":{"torrents":rows}})
+            }
+            .to_string()
+        } else if request.contains("auth/login") {
+            "Ok.".into()
+        } else if request.contains("torrents/info") {
+            rows.to_string()
+        } else {
+            "Ok.".into()
+        };
+        captured.lock().unwrap().push(request);
+        write!(stream, "HTTP/1.1 200 OK\r\nSet-Cookie: SID=fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
     });
-    (url, requests)
-}
-
-fn request_complete(bytes: &[u8]) -> bool {
-    let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") else {
-        return false;
-    };
-    let headers = String::from_utf8_lossy(&bytes[..end]);
-    let length = headers
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse::<usize>().unwrap())
-        })
-        .unwrap_or(0);
-    bytes.len() >= end + 4 + length
+    (server.url(), requests, server)
 }
 
 #[test]
 fn qbit_original_absent_identical_unrelated_release_is_never_deleted() {
-    let (url, requests) = fixture(false, unrelated_qbit_row());
+    let (url, requests, _server) = fixture(false, unrelated_qbit_row());
     let dl = QbitDownloader::connect(QbitConfig {
         url,
         username: "u".into(),
@@ -134,7 +108,7 @@ fn qbit_original_absent_identical_unrelated_release_is_never_deleted() {
 
 #[test]
 fn transmission_original_absent_identical_unrelated_release_is_never_deleted() {
-    let (url, requests) = fixture(true, unrelated_transmission_row());
+    let (url, requests, _server) = fixture(true, unrelated_transmission_row());
     let dl = TransmissionDownloader::connect(TransmissionConfig {
         url,
         username: None,
@@ -155,7 +129,7 @@ fn transmission_original_absent_identical_unrelated_release_is_never_deleted() {
 #[test]
 fn qbit_magnet_hash_does_not_delete_same_title_different_hash() {
     let magnet = torrent_with("magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-    let (url, requests) = fixture(false, unrelated_qbit_row());
+    let (url, requests, _server) = fixture(false, unrelated_qbit_row());
     let dl = QbitDownloader::connect(QbitConfig {
         url,
         username: "u".into(),
@@ -177,7 +151,7 @@ fn qbit_magnet_hash_does_not_delete_same_title_different_hash() {
 #[test]
 fn transmission_magnet_hash_does_not_delete_same_title_different_hash() {
     let magnet = torrent_with("magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-    let (url, requests) = fixture(true, unrelated_transmission_row());
+    let (url, requests, _server) = fixture(true, unrelated_transmission_row());
     let dl = TransmissionDownloader::connect(TransmissionConfig {
         url,
         username: None,
@@ -200,7 +174,7 @@ fn qbit_marked_http_task_survives_restart_and_deletes_exact_hash() {
     let original = torrent();
     let hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let tag = downloader::ownership_tag(&original.enclosure);
-    let (url, requests) = fixture(
+    let (url, requests, _server) = fixture(
         false,
         json!([
             {"hash": hash, "name":"Renamed", "size":999, "progress":1, "save_path":"/downloads", "tags":tag},
@@ -229,7 +203,7 @@ fn transmission_labeled_http_task_survives_restart_and_deletes_hash_not_reused_i
     let original = torrent();
     let hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let tag = downloader::ownership_tag(&original.enclosure);
-    let (url, requests) = fixture(
+    let (url, requests, _server) = fixture(
         true,
         json!([
             {"id":1, "hashString":hash, "name":"Renamed", "labels":[tag]},

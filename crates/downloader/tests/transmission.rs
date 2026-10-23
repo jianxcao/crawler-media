@@ -1,7 +1,10 @@
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+#[path = "../../api/tests/support/lifecycle.rs"]
+#[allow(dead_code)]
+mod lifecycle;
+
+use lifecycle::FakeServer;
+use std::io::Write;
 use std::sync::Arc;
-use std::thread;
 
 use parking_lot::Mutex;
 
@@ -48,91 +51,55 @@ fn torrent() -> Torrent {
     }
 }
 
-fn read_request(stream: &mut TcpStream) -> String {
-    let mut request = Vec::new();
-    let mut expected = None;
-    loop {
-        let mut buf = [0u8; 4096];
-        let n = stream.read(&mut buf).unwrap_or(0);
-        if n == 0 {
-            break;
+fn serve(capture: Arc<Capture>, save_path: String) -> (String, FakeServer) {
+    let server = FakeServer::start(move |request, stream| {
+        let req = request.raw.clone();
+        let method = if req.contains("session-get") {
+            "session-get"
+        } else if req.contains("torrent-add") {
+            "torrent-add"
+        } else if req.contains("torrent-get") {
+            "torrent-get"
+        } else if req.contains("torrent-remove") {
+            "torrent-remove"
+        } else if req.contains("torrent-set") {
+            "torrent-set"
+        } else {
+            "unknown"
+        };
+        capture.methods.lock().push(method.into());
+        if method == "torrent-add" || method == "torrent-remove" || method == "torrent-set" {
+            capture.requests.lock().push(req.clone());
         }
-        request.extend_from_slice(&buf[..n]);
-        if expected.is_none() {
-            if let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
-                let headers = String::from_utf8_lossy(&request[..header_end]);
-                let content_length = headers.lines().find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().ok())
-                        .flatten()
-                });
-                expected = Some(header_end + 4 + content_length.unwrap_or(0));
-            }
-        }
-        if expected.is_some_and(|length| request.len() >= length) {
-            break;
-        }
-    }
-    String::from_utf8_lossy(&request).into_owned()
-}
-
-fn serve(capture: Arc<Capture>, save_path: String) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    thread::spawn(move || {
-        for incoming in listener.incoming() {
-            let mut stream = incoming.unwrap();
-            let req = read_request(&mut stream);
-            let method = if req.contains("session-get") {
-                "session-get"
-            } else if req.contains("torrent-add") {
-                "torrent-add"
-            } else if req.contains("torrent-get") {
-                "torrent-get"
-            } else if req.contains("torrent-remove") {
-                "torrent-remove"
-            } else if req.contains("torrent-set") {
-                "torrent-set"
-            } else {
-                "unknown"
-            };
-            capture.methods.lock().push(method.into());
-            if method == "torrent-add" || method == "torrent-remove" || method == "torrent-set" {
-                capture.requests.lock().push(req.clone());
-            }
-            let body = match method {
-                "session-get" => {
-                    r#"{"result":"success","arguments":{"rpc-version":16}}"#.to_string()
+        let body = match method {
+            "session-get" => r#"{"result":"success","arguments":{"rpc-version":16}}"#.to_string(),
+            "torrent-add" => capture
+                .injected_add
+                .lock()
+                .clone()
+                .unwrap_or_else(|| r#"{"result":"success","arguments":{}}"#.to_string()),
+            "torrent-set" => r#"{"result":"success","arguments":{}}"#.to_string(),
+            "torrent-get" => {
+                let injected = capture.injected_torrents.lock().clone();
+                if let Some(custom) = injected {
+                    custom
+                } else {
+                    format!(
+                        r#"{{"result":"success","arguments":{{"torrents":[{{"id":1,"name":"The.Matrix.1999.2160p.BluRay.x265-GROUP","hashString":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sizeWhenDone":1,"percentDone":1.0,"downloadDir":"{save_path}","labels":["crawler-media","{}"],"files":[{{"name":"matrix.mkv"}}]}}]}}}}"#,
+                        downloader::ownership_tag("https://pt.example/download.php?id=1")
+                    )
                 }
-                "torrent-add" => capture
-                    .injected_add
-                    .lock()
-                    .clone()
-                    .unwrap_or_else(|| r#"{"result":"success","arguments":{}}"#.to_string()),
-                "torrent-set" => r#"{"result":"success","arguments":{}}"#.to_string(),
-                "torrent-get" => {
-                    let injected = capture.injected_torrents.lock().clone();
-                    if let Some(custom) = injected {
-                        custom
-                    } else {
-                        format!(
-                            r#"{{"result":"success","arguments":{{"torrents":[{{"id":1,"name":"The.Matrix.1999.2160p.BluRay.x265-GROUP","hashString":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sizeWhenDone":1,"percentDone":1.0,"downloadDir":"{save_path}","labels":["crawler-media","{}"],"files":[{{"name":"matrix.mkv"}}]}}]}}}}"#,
-                            downloader::ownership_tag("https://pt.example/download.php?id=1")
-                        )
-                    }
-                }
-                "torrent-remove" => r#"{"result":"success","arguments":{}}"#.to_string(),
-                _ => r#"{"result":"failure"}"#.to_string(),
-            };
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nX-Transmission-Session-Id: abc\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream.write_all(response.as_bytes()).ok();
-        }
+            }
+            "torrent-remove" => r#"{"result":"success","arguments":{}}"#.to_string(),
+            _ => r#"{"result":"failure"}"#.to_string(),
+        };
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nX-Transmission-Session-Id: abc\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).ok();
     });
-    format!("http://{addr}/transmission/rpc")
+    (format!("{}/transmission/rpc", server.url()), server)
 }
 
 #[test]
@@ -153,8 +120,9 @@ fn transmission_snapshots_preserve_metrics_and_only_mark_owned_tasks() {
         })
         .to_string(),
     );
+    let (url, _server) = serve(capture, "/downloads".into());
     let dl = TransmissionDownloader::connect(TransmissionConfig {
-        url: serve(capture, "/downloads".into()),
+        url,
         username: None,
         password: None,
         path_maps: vec![],
@@ -193,8 +161,9 @@ fn transmission_snapshots_expose_per_torrent_ownership_labels() {
         })
         .to_string(),
     );
+    let (url, _server) = serve(capture, "/downloads".into());
     let dl = TransmissionDownloader::connect(TransmissionConfig {
-        url: serve(capture, "/downloads".into()),
+        url,
         username: None,
         password: None,
         path_maps: vec![],
@@ -209,7 +178,7 @@ fn transmission_snapshots_expose_per_torrent_ownership_labels() {
 #[test]
 fn transmission_adds_enclosure_over_rpc() {
     let capture = Capture::new();
-    let url = serve(capture.clone(), "/downloads".into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = TransmissionDownloader::connect(TransmissionConfig {
         url,
         username: None,
@@ -226,7 +195,7 @@ fn transmission_adds_enclosure_over_rpc() {
 #[test]
 fn transmission_completed_files_from_rpc() {
     let capture = Capture::new();
-    let url = serve(capture, "/downloads".into());
+    let (url, _server) = serve(capture, "/downloads".into());
     let dl = TransmissionDownloader::connect(TransmissionConfig {
         url,
         username: None,
@@ -241,7 +210,7 @@ fn transmission_completed_files_from_rpc() {
 #[test]
 fn same_name_different_hash_is_not_collected_or_removed() {
     let capture = Capture::new();
-    let url = serve(capture.clone(), "/downloads".into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = TransmissionDownloader::connect(TransmissionConfig {
         url,
         username: None,
@@ -282,7 +251,7 @@ fn same_name_different_hash_is_not_collected_or_removed() {
 #[test]
 fn completed_files_rejects_known_size_conflict() {
     let capture = Capture::new();
-    let url = serve(capture.clone(), "/downloads".into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = TransmissionDownloader::connect(TransmissionConfig {
         url,
         username: None,
@@ -306,7 +275,7 @@ fn completed_files_rejects_known_size_conflict() {
 #[test]
 fn completed_files_rejects_ambiguous_identity() {
     let capture = Capture::new();
-    let url = serve(capture.clone(), "/downloads".into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = TransmissionDownloader::connect(TransmissionConfig {
         url,
         username: None,
@@ -334,7 +303,7 @@ fn completed_files_rejects_ambiguous_identity() {
 #[test]
 fn transmission_adds_to_an_explicit_download_directory() {
     let capture = Capture::new();
-    let url = serve(capture.clone(), "/downloads".into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = TransmissionDownloader::connect(TransmissionConfig {
         url,
         username: None,
@@ -379,7 +348,7 @@ fn mixed_instances_coexist_and_optional_id_picks_default() {
 #[test]
 fn transmission_removes_matching_task() {
     let capture = Capture::new();
-    let url = serve(capture.clone(), "/downloads".into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = TransmissionDownloader::connect(TransmissionConfig {
         url,
         username: None,
@@ -399,7 +368,7 @@ fn transmission_removes_matching_task() {
 #[test]
 fn transmission_removes_matching_task_with_delete_local_data() {
     let capture = Capture::new();
-    let url = serve(capture.clone(), "/downloads".into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = TransmissionDownloader::connect(TransmissionConfig {
         url,
         username: None,
@@ -419,7 +388,7 @@ fn transmission_removes_matching_task_with_delete_local_data() {
 #[test]
 fn transmission_remove_only_removes_uniquely_matched_torrent() {
     let capture = Capture::new();
-    let url = serve(capture.clone(), "/downloads".into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = TransmissionDownloader::connect(TransmissionConfig {
         url,
         username: None,
@@ -464,7 +433,7 @@ fn transmission_remove_only_removes_uniquely_matched_torrent() {
 #[test]
 fn transmission_remove_ambiguous_matches_returns_error() {
     let capture = Capture::new();
-    let url = serve(capture.clone(), "/downloads".into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = TransmissionDownloader::connect(TransmissionConfig {
         url,
         username: None,
@@ -504,48 +473,38 @@ fn transmission_remove_ambiguous_matches_returns_error() {
 #[test]
 fn transmission_handles_409_session_challenge() {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
     let conflicts = Arc::new(AtomicUsize::new(0));
     let authorized = Arc::new(AtomicUsize::new(0));
-    let stop = Arc::new(AtomicBool::new(false));
     let server = {
-        let (conflicts, authorized, stop) = (conflicts.clone(), authorized.clone(), stop.clone());
-        thread::spawn(move || {
-            for incoming in listener.incoming() {
-                if stop.load(Ordering::SeqCst) {
-                    break;
-                }
-                let mut stream = incoming.unwrap();
-                let req = read_request(&mut stream);
-                let has_token = req.lines().any(|l| {
-                    let lower = l.to_ascii_lowercase();
-                    lower.starts_with("x-transmission-session-id:")
-                        && lower.contains("test-token-409")
-                });
-                let (status, body) = if has_token {
-                    authorized.fetch_add(1, Ordering::SeqCst);
-                    (
-                        "200 OK",
-                        r#"{"result":"success","arguments":{"rpc-version":16}}"#,
-                    )
-                } else {
-                    conflicts.fetch_add(1, Ordering::SeqCst);
-                    ("409 Conflict", "")
-                };
-                let response = format!(
-                    "HTTP/1.1 {status}\r\nX-Transmission-Session-Id: test-token-409\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                stream.write_all(response.as_bytes()).ok();
-            }
+        let (conflicts, authorized) = (conflicts.clone(), authorized.clone());
+        FakeServer::start(move |request, stream| {
+            let req = &request.raw;
+            let has_token = req.lines().any(|l| {
+                let lower = l.to_ascii_lowercase();
+                lower.starts_with("x-transmission-session-id:") && lower.contains("test-token-409")
+            });
+            let (status, body) = if has_token {
+                authorized.fetch_add(1, Ordering::SeqCst);
+                (
+                    "200 OK",
+                    r#"{"result":"success","arguments":{"rpc-version":16}}"#,
+                )
+            } else {
+                conflicts.fetch_add(1, Ordering::SeqCst);
+                ("409 Conflict", "")
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\nX-Transmission-Session-Id: test-token-409\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).ok();
         })
     };
 
     let dl = TransmissionDownloader::connect(TransmissionConfig {
-        url: format!("http://{addr}/transmission/rpc"),
+        url: format!("{}/transmission/rpc", server.url()),
         username: None,
         password: None,
         path_maps: vec![],
@@ -570,35 +529,28 @@ fn transmission_handles_409_session_challenge() {
     );
     assert!(authorized.load(Ordering::SeqCst) > after_connect);
 
-    stop.store(true, Ordering::SeqCst);
-    let _ = std::net::TcpStream::connect(addr);
-    server.join().expect("409 server thread must exit");
+    drop(server);
 }
 
 #[test]
 fn transmission_pause_and_resume_task_sends_torrent_stop_and_start() {
     let capture = Capture::new();
     let cap = capture.clone();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    thread::spawn(move || {
-        for incoming in listener.incoming() {
-            let mut stream = incoming.unwrap();
-            let req = read_request(&mut stream);
-            if let Some(body) = req.split("\r\n\r\n").nth(1) {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
-                    if let Some(m) = v["method"].as_str() {
-                        cap.methods.lock().push(m.to_string());
-                    }
+    let server = FakeServer::start(move |request, stream| {
+        let req = request.raw.clone();
+        if let Some(body) = req.split("\r\n\r\n").nth(1) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+                if let Some(m) = v["method"].as_str() {
+                    cap.methods.lock().push(m.to_string());
                 }
             }
-            let res = "HTTP/1.1 200 OK\r\nX-Transmission-Session-Id: test\r\nContent-Type: application/json\r\nContent-Length: 20\r\n\r\n{\"result\":\"success\"}";
-            stream.write_all(res.as_bytes()).ok();
         }
+        let res = "HTTP/1.1 200 OK\r\nX-Transmission-Session-Id: test\r\nContent-Type: application/json\r\nContent-Length: 20\r\n\r\n{\"result\":\"success\"}";
+        stream.write_all(res.as_bytes()).ok();
     });
 
     let dl = TransmissionDownloader::connect(TransmissionConfig {
-        url: format!("http://{addr}/transmission/rpc"),
+        url: format!("{}/transmission/rpc", server.url()),
         username: None,
         password: None,
         path_maps: vec![],
@@ -616,12 +568,9 @@ fn transmission_pause_and_resume_task_sends_torrent_stop_and_start() {
 #[test]
 fn transmission_completed_files_skips_deselected_or_incomplete_files() {
     let _capture = Capture::new();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    thread::spawn(move || {
-        for incoming in listener.incoming() {
-            let mut stream = incoming.unwrap();
-            let req = read_request(&mut stream);
+    let server = FakeServer::start(move |request, stream| {
+        {
+            let req = request.raw.clone();
             let body = if req.contains("torrent-get") {
                 // 模拟 1 个种子包含 2 个文件：
                 // file 0: 完成，wanted=true
@@ -660,7 +609,7 @@ fn transmission_completed_files_skips_deselected_or_incomplete_files() {
     });
 
     let dl = TransmissionDownloader::connect(TransmissionConfig {
-        url: format!("http://{addr}/transmission/rpc"),
+        url: format!("{}/transmission/rpc", server.url()),
         username: None,
         password: None,
         path_maps: vec![],
@@ -685,8 +634,9 @@ fn transmission_duplicate_is_claimed_with_merged_labels() {
     *capture.injected_torrents.lock() = Some(
         r#"{"result":"success","arguments":{"torrents":[{"id":7,"hashString":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","labels":["mine"]}]}}"#.into(),
     );
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = TransmissionDownloader::connect(TransmissionConfig {
-        url: serve(capture.clone(), "/downloads".into()),
+        url,
         username: None,
         password: None,
         path_maps: vec![],

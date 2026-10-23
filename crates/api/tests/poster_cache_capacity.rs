@@ -116,6 +116,15 @@ impl TestGate {
     }
 }
 
+/// Releases the gate on every exit path (assert failure, panic, early return).
+struct ReleaseOnDrop(Arc<TestGate>);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
 struct GatedFetcher {
     gate: Arc<TestGate>,
     pub active: AtomicUsize,
@@ -250,6 +259,7 @@ async fn distinct_negative_keys_are_bounded_and_expire_without_revisit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancelled_waiters_and_disk_double_check_leave_no_dead_gate() {
     let gate = Arc::new(TestGate::new());
+    let _release = ReleaseOnDrop(gate.clone());
     let fetcher = Arc::new(GatedFetcher::new(gate.clone()));
     let (_tmp, store, service) = create_store_and_service(fetcher.clone());
     let service = Arc::new(service.with_wait_deadline(Duration::from_millis(100)));
