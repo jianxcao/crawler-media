@@ -468,18 +468,72 @@ fn load_pending_transfer(
     Ok(Some((subscribe, pending)))
 }
 
+/// Outcome of one guarded Transfer attempt.
+enum Attempt {
+    Done,
+    /// The target Library changed or became busy after we waited for it idle.
+    Retarget,
+}
+
+/// Blocking-context entry: wait for the target Library to go idle **without** any
+/// Subscribe/Store lock held, then re-lock, re-read and re-validate before acting.
 pub fn transfer_one(state: &ApiState, subscribe_id: SubscribeId) -> Result<(), String> {
+    for _ in 0..3 {
+        let Some(library_id) = prepare_transfer_target(state, subscribe_id)? else {
+            return Ok(());
+        };
+        if !wait_for_transfer_library(state, &library_id)? {
+            return Ok(());
+        }
+        match transfer_after_idle(state, subscribe_id, &library_id)? {
+            Attempt::Done => return Ok(()),
+            Attempt::Retarget => continue,
+        }
+    }
+    tracing::warn!(%subscribe_id, "Transfer 目标库持续变化或忙碌，保留待处理下载供下一轮重试");
+    Ok(())
+}
+
+/// Lock-free pre-read of the Library the Transfer would publish into.
+fn prepare_transfer_target(
+    state: &ApiState,
+    subscribe_id: SubscribeId,
+) -> Result<Option<String>, String> {
+    let Some(subscribe) = state
+        .store
+        .lock()
+        .get_subscribe(subscribe_id)
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(None);
+    };
+    let media = state
+        .store
+        .lock()
+        .get_media(subscribe.media_id)
+        .map_err(|error| error.to_string())?
+        .ok_or("Media not found")?;
+    Ok(Some(
+        resolve_transfer_plan(state, &media, &subscribe)?.library_id,
+    ))
+}
+
+fn transfer_after_idle(
+    state: &ApiState,
+    subscribe_id: SubscribeId,
+    waited_library: &str,
+) -> Result<Attempt, String> {
     let guard = state.subscribe_guard(subscribe_id);
     let _guard = guard.lock();
 
     if state.subscribe_is_deleting(subscribe_id) {
         tracing::info!(subscribe_id = %subscribe_id, "订阅正在删除中，跳过 Transfer");
-        return Ok(());
+        return Ok(Attempt::Done);
     }
     crate::http::file_delete::retry_queued_deletions(&state.store).map_err(|e| e.to_string())?;
 
     let Some((subscribe, pending)) = load_pending_transfer(state, subscribe_id)? else {
-        return Ok(());
+        return Ok(Attempt::Done);
     };
 
     let media = state
@@ -489,8 +543,8 @@ pub fn transfer_one(state: &ApiState, subscribe_id: SubscribeId) -> Result<(), S
         .map_err(|error| error.to_string())?
         .ok_or("Media not found")?;
     let plan = resolve_transfer_plan(state, &media, &subscribe)?;
-    if !wait_for_transfer_library(state, &plan.library_id)? {
-        return Ok(());
+    if plan.library_id != waited_library {
+        return Ok(Attempt::Retarget);
     }
     let (media, filter, facts, wash_filter, observation_fingerprint) =
         load_transfer_context(state, &subscribe)?;
@@ -503,7 +557,9 @@ pub fn transfer_one(state: &ApiState, subscribe_id: SubscribeId) -> Result<(), S
     );
     let chosen = filter_matched_pending(&subscribe, &media, pending, absolute.as_ref());
 
-    let library_lease = state.acquire_library_work(&plan.library_id)?;
+    let Ok(library_lease) = state.acquire_library_work(&plan.library_id) else {
+        return Ok(Attempt::Retarget);
+    };
     library_lease.control().check().map_err(|e| e.to_string())?;
     tracing::info!(%subscribe_id, pending_count = chosen.len(), "Transfer 开始");
     let destination_library: domain::LibraryId = plan
@@ -540,22 +596,14 @@ pub fn transfer_one(state: &ApiState, subscribe_id: SubscribeId) -> Result<(), S
     // M7: do not start writing library files for a subscription being deleted.
     if state.subscribe_is_deleting(subscribe_id) {
         tracing::warn!(subscribe_id = %subscribe_id, "订阅已被预留删除，跳过 Transfer");
-        return Ok(());
+        return Ok(Attempt::Done);
     }
     let known: std::collections::HashSet<std::path::PathBuf> = destinations
         .iter()
         .map(|m| m.destination_path.clone())
         .collect();
     // D-M2: hardlink fallback policy and fallback counting for this round.
-    let fallback_copy = state
-        .store
-        .lock()
-        .get_setting(crate::settings_keys::LIBRARY_HARDLINK_FALLBACK)
-        .ok()
-        .flatten()
-        .is_none_or(|value| value.trim() != "fail");
-    library::set_hardlink_fallback_copy(fallback_copy);
-    let fallbacks_before = library::hardlink_fallback_count();
+    let fallbacks_before = arm_hardlink_fallback(state);
     let recorder = PlannedPublicationRecorder::new(
         PublicationRecorder {
             state,
@@ -584,6 +632,20 @@ pub fn transfer_one(state: &ApiState, subscribe_id: SubscribeId) -> Result<(), S
         &known,
         fallbacks_before,
     )
+    .map(|()| Attempt::Done)
+}
+
+/// D-M2: apply this round's hardlink fallback policy; returns the counter baseline.
+fn arm_hardlink_fallback(state: &ApiState) -> u64 {
+    let fallback_copy = state
+        .store
+        .lock()
+        .get_setting(crate::settings_keys::LIBRARY_HARDLINK_FALLBACK)
+        .ok()
+        .flatten()
+        .is_none_or(|value| value.trim() != "fail");
+    library::set_hardlink_fallback_copy(fallback_copy);
+    library::hardlink_fallback_count()
 }
 
 /// Finish a collected round: abandon it if the subscription or its lease is

@@ -15,6 +15,14 @@ pub(crate) async fn run_missing_search(
     axum::Extension(user_id): axum::Extension<domain::UserId>,
     Path(id): Path<String>,
 ) -> Response {
+    let blocking = state.clone();
+    super::subscriptions::guarded_blocking(&blocking, move || {
+        missing_search_blocking(state, user_id, id)
+    })
+    .await
+}
+
+fn missing_search_blocking(state: ApiState, user_id: domain::UserId, id: String) -> Response {
     let (initial, _) = match super::subscriptions::resolve_subscribe(&state, &id, user_id) {
         Ok(pair) => pair,
         Err(response) => return response,

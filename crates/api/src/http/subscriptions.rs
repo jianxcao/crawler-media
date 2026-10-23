@@ -395,11 +395,46 @@ pub(crate) async fn get_subscription(
     ok(body).into_response()
 }
 
+/// Run a handler body that takes the Subscribe guard (a parking_lot lock that a
+/// Transfer may hold across downloader IO) on the bounded blocking budget, never on
+/// an async core thread (C02).
+pub(crate) async fn guarded_blocking(
+    state: &ApiState,
+    work: impl FnOnce() -> Response + Send + 'static,
+) -> Response {
+    match state.http_work.run_to_completion(work).await {
+        Ok(response) => response,
+        Err(crate::blocking_budget::BlockingError::Busy) => err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "runtime.busy",
+            "服务繁忙，请重试",
+        ),
+        Err(error) => {
+            tracing::error!(%error, "订阅操作的阻塞工作失败");
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "runtime.worker_failed",
+                &error.to_string(),
+            )
+        }
+    }
+}
+
 pub(crate) async fn run_subscription_search(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<UserId>,
     Path(id): Path<String>,
 ) -> Response {
+    let blocking = state.clone();
+    guarded_blocking(&blocking, move || {
+        subscription_search_blocking(&state, user_id, &id)
+    })
+    .await
+}
+
+fn subscription_search_blocking(state: &ApiState, user_id: UserId, id: &str) -> Response {
+    let state = state.clone();
+    let id = id.to_string();
     let (initial, _) = match resolve_subscribe(&state, &id, user_id) {
         Ok(pair) => pair,
         Err(response) => return response,

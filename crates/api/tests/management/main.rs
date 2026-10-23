@@ -97,6 +97,7 @@ mod strm_directory_deletion;
 mod strm_grace;
 mod subscribe_atomicity;
 mod subscribe_schedule_sync;
+mod subscribe_wait_liveness;
 mod subscribes;
 mod subscription_cascade;
 mod subscription_cleanup_security;

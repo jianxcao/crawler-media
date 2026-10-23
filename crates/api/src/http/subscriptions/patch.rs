@@ -18,6 +18,19 @@ pub(crate) async fn patch_subscription(
     Path(id): Path<String>,
     Json(body): Json<PatchSubscriptionInput>,
 ) -> Response {
+    let blocking = state.clone();
+    crate::http::subscriptions::guarded_blocking(&blocking, move || {
+        patch_blocking(state, user_id, id, body)
+    })
+    .await
+}
+
+fn patch_blocking(
+    state: ApiState,
+    user_id: UserId,
+    id: String,
+    body: PatchSubscriptionInput,
+) -> Response {
     let sid = match parse_subscribe_id(&id) {
         Ok(id) => id,
         Err(response) => return response,
