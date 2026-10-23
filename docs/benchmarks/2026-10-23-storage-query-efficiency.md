@@ -13,8 +13,13 @@ Bundled SQLite, fresh `library.db` from `Store::open`; plans captured by
 
 Not added (no real statement filters by the key; FK checks already searched):
 `fingerprint_attempts(file_id)`, `metadata_inputs(media_id)`, `library_operations_scope`,
-playback logs/metrics user/media, search_snapshots. Write/size cost not measured;
-both partial indexes cover only non-NULL rows.
+playback logs/metrics user/media, search_snapshots. Write/size cost (`scripts/bench/q1_cleanup_index_cost.py`, system SQLite, 100k probe_stage_state
+rows with 10% active jobs + 100k unidentified rows across 20 roots):
+
+| | insert 200k rows | DB after VACUUM | 400 reverse lookups |
+|---|---|---|---|
+| without the 3 indexes | 725 ms | 16.49 MB | 1642.5 ms |
+| with them | 799 ms (+10%) | 18.28 MB (+11%) | 1.5 ms |
 
 ## Q2 batch-end user summary finalization
 
