@@ -204,11 +204,15 @@ library提交删除intent后，`rewrite_fact_paths` 写subscribe.db失败被 `le
 
 约200倍是这组SQL的VM工作量差，不是API/NAS耗时承诺。FullscanStep=0本身不能证明深seek有界。修复同向标量排序用tuple，保留混合watch-tier方向的合法实现及NULL/tie语义；复用现有8个排序索引，不先加索引。
 
+**状态：已修复（Task12）。** 同向排序用行值比较 `(sort_expr, media_id) >/< (?, ?)`，每键只绑定一次；混合 watch-tier 方向保留字典序 OR 形式。回归 `seek_scale::deep_cursor_work_matches_first_page_work`（50k，ASC/DESC，重复标题）：首屏 vm=1538，第25000项后 deep vm=1759（修复前 5147@第500项，随深度线性增长）。
+
 ### O02 [源码确认额外工作，耗时未测] 元数据 scope 与归约范围不匹配
 
 `metadata/adopt.rs:35`、`overrides.rs:60` 对每个work/season/episode更新均调用全Media归约；`reduce/card.rs:13-34` 重建units并刷新所有用户。`api/src/scrape_metadata/series.rs:200-236` 还按文件版本重复adopt同一episode。
 
 方案：entity/locale采用按键去重；work展示变更只重合成展示列/terms，season/episode只更新对应事实及真实依赖字段。不重建未变化coverage或用户状态。先记录SQL/修改行数/WAL/事务时长，保留冷详情与卡片一致性，不以拆表掩盖多次归约。
+
+**状态：未改（Task12）。** 未做 release 基线测量，按计划“未证实收益则记录不改”；保持现有全 Media 归约。
 
 ### O03 [源码确认成本，优化收益未测] 心跳与协议过滤仍有整作品/冷JSON成本
 
@@ -216,6 +220,8 @@ library提交删除intent后，`rewrite_fact_paths` 写subscribe.db失败被 `le
 - `library_query/protocol/facts.rs:110-163,172-199` 在LIMIT前枚举授权scope的cast/genre冷JSON并在Rust匹配。用已有terms模型在写路径维护**有效locale/NFO决议后的**人物/流派协议键，查询索引筛选；先证明语义与写成本，不缓存整库JSON或建立第二完整投影。
 
 以上两项无本轮延迟/吞吐数字，只列后续有条件优化，不把静态复杂度说成已测性能事故。精确count/facets/包含搜索/深offset本来允许按scope增长，不删能力达标。
+
+**状态：部分（Task12）。** `summarize` membership 改 HashSet（O(1)）；精确 episode 增量与 protocol facts 写时 term 未做（未测基线，不改）。
 
 ## 修复优先级与验证门
 

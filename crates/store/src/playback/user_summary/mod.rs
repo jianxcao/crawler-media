@@ -482,6 +482,8 @@ fn summarize(
         .filter(|(season, episode)| *season >= 0 && *episode >= 0)
         .collect();
     let seasons: HashSet<i32> = episodes.iter().map(|(season, _)| *season).collect();
+    // O03: O(1) membership instead of a linear scan per fact.
+    let episode_set: HashSet<(i32, i32)> = episodes.iter().copied().collect();
     let applies = |fact: &PlaybackFact| -> bool {
         if !is_tv {
             return true;
@@ -489,7 +491,7 @@ fn summarize(
         match (fact.season, fact.episode) {
             (UNIT_WHOLE, UNIT_WHOLE) => true,
             (season, UNIT_WHOLE) => seasons.contains(&season),
-            (season, episode) => episodes.contains(&(season, episode)),
+            (season, episode) => episode_set.contains(&(season, episode)),
         }
     };
 

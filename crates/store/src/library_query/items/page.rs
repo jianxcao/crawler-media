@@ -116,6 +116,27 @@ fn seek_clause(
     let mut values = cursor.keys.clone();
     values.push(CursorKey::Text(cursor.media_id.clone()));
 
+    // Same-direction keys: one row-value comparison lets SQLite seek the composite
+    // index range directly (O01). Each key is bound once.
+    if spec
+        .iter()
+        .all(|term| term.descending == spec[0].descending)
+    {
+        let operator = if spec[0].descending { "<" } else { ">" };
+        let exprs = spec
+            .iter()
+            .map(|term| term.expr)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let placeholders = values
+            .iter()
+            .map(|value| bindings.push(value.to_sql()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Ok(format!("(({exprs}) {operator} ({placeholders}))"));
+    }
+
+    // Mixed directions (watch tier ASC before a DESC sort) keep the lexicographic form.
     let mut groups = Vec::with_capacity(spec.len());
     for index in 0..spec.len() {
         let mut parts = Vec::with_capacity(index + 1);
