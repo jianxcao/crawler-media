@@ -222,51 +222,12 @@ impl Store {
         now: i64,
         after_decision: impl FnOnce(),
     ) -> Result<(), StoreError> {
-        let rename_id = receipt.rename_id.as_str();
-        let request = self.load_file_rename(rename_id)?;
-        match request.phase.as_str() {
-            "planned" => {}
-            "disk_applied" | "library_published" | "references_applied" => return Ok(()),
-            phase => {
-                return Err(StoreError::Protected(format!(
-                    "rename {rename_id} is {phase}; disk receipt refused"
-                )));
-            }
-        }
-        let destination = &receipt.destination;
-        let mut sidecars = request.sidecars.clone();
-        // Byte comparison happens here, outside every transaction.
-        let observed = observe_targets(&sidecars);
-        let tx = crate::write_tx(&self.library)?;
-        decide_for_execution(
-            &tx,
-            &request.file_id.to_string(),
-            &request.from_path,
-            &mut sidecars,
-            &observed,
-        )?;
-        tx.execute(
-            "UPDATE pending_file_renames
-             SET sidecars_json = ?2, dest_size = ?3, dest_device = ?4, dest_inode = ?5,
-                 dest_mtime_ns = ?6
-             WHERE rename_id = ?1 AND phase = 'planned'",
-            params![
-                rename_id,
-                sidecars_json(&sidecars)?,
-                destination.size_bytes as i64,
-                destination.device as i64,
-                destination.inode as i64,
-                destination.mtime_ns
-            ],
-        )?;
-        tx.commit()?;
+        let Some(plan) = self.begin_rename_disk_record(receipt)? else {
+            return Ok(());
+        };
+        let decided = self.decide_rename_disk(plan.observe())?;
         after_decision();
-        for side in sidecars.iter_mut() {
-            apply_sidecar(side)?;
-        }
-        // Competitor-driven downgrades are persisted with the phase change.
-        self.mark_rename_disk_applied(rename_id, &sidecars, now)?;
-        super::rename_receipt::remove_staging(&request)
+        self.finish_rename_disk(decided.apply()?, now)
     }
 
     /// A refused disk phase (stale or foreign disk state) is terminal: keep the
@@ -536,7 +497,7 @@ impl Store {
         Ok(())
     }
 
-    fn mark_rename_disk_applied(
+    pub(super) fn mark_rename_disk_applied(
         &self,
         rename_id: &str,
         sidecars: &[RenameSidecar],
@@ -621,7 +582,7 @@ fn observe_sidecars(from: &Path, to: &Path) -> Vec<RenameSidecar> {
     out
 }
 
-fn sidecars_json(sidecars: &[RenameSidecar]) -> Result<String, StoreError> {
+pub(super) fn sidecars_json(sidecars: &[RenameSidecar]) -> Result<String, StoreError> {
     serde_json::to_string(sidecars).map_err(|e| StoreError::Invalid(format!("sidecars json: {e}")))
 }
 

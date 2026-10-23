@@ -144,10 +144,11 @@ pub(crate) fn apply_organize(
             if dest_lease.is_some_and(|d| d.control().is_cancelled()) {
                 return Err("目标媒体库正在删除".into());
             }
+            record_rename_disk_unlocked(&state.store, &receipt, now_ms)
+                .map_err(|error| error.to_string())?;
             let store = state.store.lock();
             store
-                .record_rename_disk(&receipt, now_ms)
-                .and_then(|_| store.complete_file_rename(&request.rename_id, now_ms))
+                .complete_file_rename(&request.rename_id, now_ms)
                 .map_err(|error| error.to_string())?;
             Ok(store
                 .file_coverage_by_path(&to)
@@ -247,4 +248,20 @@ fn prepare_rename(
             Prepared::Failed(format!("{from} -> {to}: {error}"))
         }
     }
+}
+
+/// Record a disk receipt taking the Store lock only for the short DB steps; sidecar
+/// observation and moves run with the lock released (A7).
+pub(crate) fn record_rename_disk_unlocked(
+    store: &parking_lot::Mutex<store::Store>,
+    receipt: &store::library_write::RenameDiskReceipt,
+    now_ms: i64,
+) -> Result<(), store::StoreError> {
+    let Some(plan) = store.lock().begin_rename_disk_record(receipt)? else {
+        return Ok(());
+    };
+    let observed = plan.observe();
+    let decided = store.lock().decide_rename_disk(observed)?;
+    let applied = decided.apply()?;
+    store.lock().finish_rename_disk(applied, now_ms)
 }

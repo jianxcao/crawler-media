@@ -12,6 +12,7 @@ pub mod reduce_incremental;
 pub mod rename;
 pub mod rename_disk;
 mod rename_durable;
+mod rename_phases;
 mod rename_receipt;
 mod rename_record;
 pub mod rename_sidecars;
@@ -24,6 +25,9 @@ pub use publish::*;
 pub use reassign::*;
 pub use reduce::*;
 pub use rename_durable::{FileRenameRequest, RenameSidecar, RenameSourceEvidence, SidecarAction};
+pub use rename_phases::{
+    AppliedRenameSidecars, DecidedRenameSidecars, ObservedRenameSidecars, RenameSidecarPlan,
+};
 pub use rename_receipt::{RenameDiskReceipt, execute_rename_disk, execute_rename_disk_copying};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
