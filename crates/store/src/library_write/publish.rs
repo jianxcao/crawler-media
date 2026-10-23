@@ -134,10 +134,9 @@ impl Store {
             }
             // Apply one delta per changed file. A media that appears in several windows of a
             // scan used to fall back to a full `reduce_library_media` per window, which
-            // re-reads every published file of that media: a 10k-episode series therefore
-            // cost O(files x windows). Per-file deltas keep each window proportional to the
-            // files it actually touched, and the totals end at the same place because the
-            // deltas are applied in the same order the files were published.
+            // re-reads every published file of that media (O(files x windows)). Per-file
+            // deltas keep each window proportional to the files it touched; totals match
+            // because deltas apply in publication order.
             //
             // Every file of the batch is already written, so a unit (or card) that has
             // to be rebuilt from facts already counts the later files of the batch:
