@@ -5,31 +5,35 @@ use std::path::PathBuf;
 use crate::http::err;
 use crate::store::Library;
 
-/// Resolve one file's recorded path to exactly one Library. The longest matching root
-/// wins, so a nested Library does not leak through a broader parent root. Two
-/// Libraries with equally-specific roots are ambiguous and therefore own
-/// nothing until the configuration is fixed.
+/// The Library that persistently owns `file` (its `library_id`), never inferred
+/// from path roots or defaulted. A failed lookup is logged and owns nothing.
 pub(crate) fn library_for_file(
     store: &crate::Store,
     file: &domain::LibraryFile,
-    media: &domain::Media,
+    _media: &domain::Media,
 ) -> Option<Library> {
-    store
-        .library_for_path(&file.path, media.kind)
-        .ok()
-        .flatten()
+    match store.get_library(&file.library_id.to_string()) {
+        Ok(library) => library,
+        Err(error) => {
+            tracing::error!(%error, file_id = %file.file_id, "file owner library lookup failed");
+            None
+        }
+    }
 }
 
-/// Destructive file operations must not fall back to the default Library.
+/// Destructive file operations need the persisted owner *and* a path that still
+/// lies strictly inside that owner's roots; there is no default fallback.
 pub(crate) fn library_for_file_strict(
     store: &crate::Store,
     file: &domain::LibraryFile,
     media: &domain::Media,
 ) -> Option<Library> {
-    store
+    let owner = library_for_file(store, file, media)?;
+    let by_path = store
         .library_for_path_strict(&file.path, media.kind)
         .ok()
-        .flatten()
+        .flatten()?;
+    (by_path.id == owner.id).then_some(owner)
 }
 
 pub(crate) fn file_visible_to_user(

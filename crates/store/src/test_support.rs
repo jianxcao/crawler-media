@@ -251,3 +251,17 @@ pub fn force_file_path(store: &Store, from: &str, to: &str) -> Result<bool, Stor
     )?;
     Ok(n > 0)
 }
+
+/// Force a file's presence/publication to exercise read scopes.
+pub fn force_file_states(
+    store: &Store,
+    file_id: LedgerId,
+    presence: FilePresence,
+    publication: FilePublication,
+) -> Result<(), StoreError> {
+    store.library.execute(
+        "UPDATE library_files SET presence_state = ?2, publication_state = ?3 WHERE file_id = ?1",
+        rusqlite::params![file_id.to_string(), presence.as_str(), publication.as_str()],
+    )?;
+    Ok(())
+}

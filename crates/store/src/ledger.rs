@@ -10,6 +10,17 @@ use rusqlite::{OptionalExtension, params};
 use super::maps::{LIBRARY_FILE_COLUMNS, group_file_coverage, map_file_unit};
 use super::{Store, StoreError};
 
+/// Which recorded files a request read sees.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileReadScope {
+    /// Published and present on disk.
+    Playable,
+    /// Published, including missing/unknown presence.
+    Published,
+    /// Every recorded file, including pending publication.
+    AllRecorded,
+}
+
 /// File facts plus the joined unit coordinate; callers group the rows into coverage.
 fn coverage_sql(filter: &str) -> String {
     format!(
@@ -120,6 +131,65 @@ impl Store {
             .read_coverage(&sql, [file_id.to_string()])?
             .into_iter()
             .next())
+    }
+
+    /// Files persisted as owned by `library` (optionally one Media) in `scope`.
+    ///
+    /// Ownership is the row's `library_id`; the scope predicate runs in SQL.
+    pub fn file_coverage_in_library(
+        &self,
+        library: LibraryId,
+        media: Option<MediaId>,
+        scope: FileReadScope,
+    ) -> Result<Vec<FileCoverage>, StoreError> {
+        let predicate = match scope {
+            FileReadScope::Playable => {
+                " AND f.publication_state = 'published' AND f.presence_state = 'present'"
+            }
+            FileReadScope::Published => " AND f.publication_state = 'published'",
+            FileReadScope::AllRecorded => "",
+        };
+        let media_filter = if media.is_some() {
+            " AND f.media_id = ?2"
+        } else {
+            ""
+        };
+        let sql = coverage_sql(&format!("WHERE f.library_id = ?1{media_filter}{predicate}"));
+        match media {
+            Some(media) => {
+                self.read_coverage(&sql, params![library.to_string(), media.to_string()])
+            }
+            None => self.read_coverage(&sql, params![library.to_string()]),
+        }
+    }
+
+    /// Distinct Media holding an item in any of `libraries`.
+    pub fn media_ids_in_libraries(
+        &self,
+        libraries: &[LibraryId],
+    ) -> Result<Vec<MediaId>, StoreError> {
+        let mut out = Vec::new();
+        for chunk in libraries.chunks(500) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let mut stmt = self.library.prepare(&format!(
+                "SELECT DISTINCT media_id FROM library_items WHERE library_id IN ({placeholders})"
+            ))?;
+            let rows = stmt.query_map(
+                rusqlite::params_from_iter(chunk.iter().map(LibraryId::to_string)),
+                |row| row.get::<_, String>(0),
+            )?;
+            for row in rows {
+                out.push(row?.parse::<MediaId>().map_err(|_| {
+                    StoreError::Invalid("library_items.media_id is not a Media id".into())
+                })?);
+            }
+        }
+        out.sort_by_key(MediaId::to_string);
+        out.dedup();
+        Ok(out)
     }
 
     /// Every file with its unit coverage, plus the unfiltered-scan work the read cost.

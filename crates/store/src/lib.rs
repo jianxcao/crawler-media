@@ -17,6 +17,7 @@ mod fingerprint_cache;
 mod fingerprint_models;
 mod fingerprint_samples;
 mod ledger;
+pub use ledger::FileReadScope;
 mod ledger_cleanup;
 mod ledger_presence;
 mod ledger_quality;
