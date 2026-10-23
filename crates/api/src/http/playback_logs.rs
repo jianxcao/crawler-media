@@ -274,24 +274,19 @@ fn resolve_history_media_ids(
                     )
                 })?
                 .ok_or_else(|| err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在"))?;
-            let mut ids = Vec::new();
-            let ledger = store.list_file_coverage().map_err(|e: store::StoreError| {
-                err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "store.error",
-                    &e.to_string(),
-                )
-            })?;
-            for row in ledger {
-                if library
-                    .root_paths
-                    .iter()
-                    .any(|root| row.file.path.starts_with(root))
-                    && !ids.contains(&row.file.media_id)
-                {
-                    ids.push(row.file.media_id);
-                }
-            }
+            let Ok(library_id) = library.id.parse() else {
+                return Ok(Some(Vec::new()));
+            };
+            let ids =
+                store
+                    .media_ids_in_libraries(&[library_id])
+                    .map_err(|e: store::StoreError| {
+                        err(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "store.error",
+                            &e.to_string(),
+                        )
+                    })?;
             Ok(Some(ids))
         }
         _ => Err(err(

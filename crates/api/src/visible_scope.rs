@@ -32,6 +32,7 @@ pub fn visible_library_ids(store: &Store, user_id: UserId) -> Result<Vec<Library
 }
 
 /// Libraries a user may read, keyed by persisted id, loaded once per request.
+#[derive(Default)]
 pub struct VisibleLibraries {
     libraries: std::collections::HashMap<LibraryId, store::Library>,
 }

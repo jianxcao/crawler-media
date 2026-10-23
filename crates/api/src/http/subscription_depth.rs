@@ -258,7 +258,7 @@ pub(crate) fn wanted_json_with_air_dates(
     let pending = store.load_pending(subscribe.id).unwrap_or_default();
     let history = store.load_wanted_history(subscribe.id).unwrap_or_default();
     let (target_score, target_label) = wash_target(store, subscribe);
-    let ledger = store.list_file_coverage().unwrap_or_default();
+    let ledger = store.file_coverage_for_media(media.id).unwrap_or_default();
     let context = WantedUnitContext {
         media,
         subscribe,
@@ -523,7 +523,9 @@ pub(crate) async fn removal_preview(
         Err(response) => return response,
     };
     let store = state.store.lock();
-    let ledger = store.list_file_coverage().unwrap_or_default();
+    let ledger = store
+        .file_coverage_for_media(subscribe.media_id)
+        .unwrap_or_default();
     // 读 shape 就是每文件一条 `FileCoverage`，不再投影回旧的 `(file × unit)` 行：
     // `library_file_count` 因此是**文件数**（与 `file_delete::remove_rows` 的落地口径一致，
     // preview 与 apply 必须同口径）。`library_bytes` 相应按文件路径累加一次；只有「同一
@@ -623,14 +625,13 @@ pub(crate) async fn season_cleanup(
             .delete_library_files
             .then(|| {
                 store
-                    .list_file_coverage()
+                    .file_coverage_for_media(subscribe.media_id)
                     .unwrap_or_default()
                     .into_iter()
                     .filter(|coverage| {
-                        coverage.file.media_id == subscribe.media_id
-                            && coverage.units.iter().any(|unit| {
-                                !unit.is_whole() && body.seasons.contains(&(unit.season as u32))
-                            })
+                        coverage.units.iter().any(|unit| {
+                            !unit.is_whole() && body.seasons.contains(&(unit.season as u32))
+                        })
                     })
                     .collect()
             })

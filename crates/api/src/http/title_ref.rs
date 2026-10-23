@@ -188,7 +188,7 @@ pub(crate) async fn preview(
             })
             .map(|s| s.id.to_string());
 
-        let ledger = store.list_file_coverage().unwrap_or_default();
+        let ledger = store.file_coverage_for_media(media_id).unwrap_or_default();
         let (owned_seasons, has_owned) = owned_episode_counts(&ledger, media_id);
         let movie_owned = media.kind == MediaKind::Movie && has_owned;
         (media, existing, owned_seasons, movie_owned)

@@ -38,7 +38,8 @@ pub(crate) fn load_arrivals(
         store.list_subscribes_for_user(user_id)?
     };
     let mut rows_by_media: HashMap<domain::MediaId, Vec<domain::FileCoverage>> = HashMap::new();
-    for coverage in store.list_file_coverage()? {
+    let media_ids: Vec<domain::MediaId> = subscribes.iter().map(|s| s.media_id).collect();
+    for coverage in store.file_coverage_for_media_batch(&media_ids)? {
         rows_by_media
             .entry(coverage.file.media_id)
             .or_default()

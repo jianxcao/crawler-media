@@ -108,8 +108,11 @@ fn find_library_links(store: &crate::Store, media: &domain::Media) -> Vec<Value>
         .map(|m| m.id)
         .unwrap_or(media.id);
     let mut links = Vec::new();
-    for row in store.list_file_coverage().unwrap_or_default() {
-        if row.file.media_id == canonical_id || row.file.media_id == media.id {
+    for row in store
+        .file_coverage_for_media_batch(&[canonical_id, media.id])
+        .unwrap_or_default()
+    {
+        {
             if let Some(owner) = store
                 .get_media(row.file.media_id)
                 .ok()

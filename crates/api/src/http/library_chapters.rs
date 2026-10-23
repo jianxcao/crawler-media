@@ -24,14 +24,7 @@ pub(crate) fn auto_generate_chapters(state: &ApiState, path: &std::path::Path) {
         tracing::debug!(path = %path.display(), "媒体库已关闭章节场景图提取，跳过自动抓帧");
         return;
     }
-    let kind = state
-        .store
-        .lock()
-        .list_libraries()
-        .unwrap_or_default()
-        .into_iter()
-        .find(|owner| owner.root_paths.iter().any(|root| path.starts_with(root)))
-        .map(|owner| owner.kind);
+    let kind = owning_library(&state.store.lock(), path).map(|owner| owner.kind);
     let lease = match kind
         .map(|kind| state.acquire_path_work(path, kind))
         .transpose()
@@ -53,27 +46,22 @@ pub(crate) fn auto_generate_chapters(state: &ApiState, path: &std::path::Path) {
     }
 }
 
-/// 最长根目录前缀所属媒体库的「生成章节」开关。路径不落在任何库时默认开启，
+/// 文件持久化归属库（`library_id`）的「生成章节」开关。未入账文件默认开启，
 /// 与入库自动抓帧的历史行为一致。
 pub(crate) fn chapter_images_enabled(store: &crate::Store, path: &std::path::Path) -> bool {
-    store
-        .list_libraries()
+    owning_library(store, path).is_none_or(|lib| lib.extract_chapter_images)
+}
+
+/// The library persisted as owning the file at `path` (its row's `library_id`).
+fn owning_library(store: &crate::Store, path: &std::path::Path) -> Option<store::Library> {
+    let coverage = store
+        .file_coverage_by_path(&path.to_string_lossy())
         .ok()
-        .and_then(|libraries| {
-            libraries
-                .into_iter()
-                .filter(|lib| lib.root_paths.iter().any(|root| path.starts_with(root)))
-                .max_by_key(|lib| {
-                    lib.root_paths
-                        .iter()
-                        .filter(|root| path.starts_with(root))
-                        .map(|root| root.components().count())
-                        .max()
-                        .unwrap_or(0)
-                })
-                .map(|lib| lib.extract_chapter_images)
-        })
-        .unwrap_or(true)
+        .flatten()?;
+    store
+        .get_library(&coverage.file.library_id.to_string())
+        .ok()
+        .flatten()
 }
 
 pub(crate) fn trigger_scene_frames_for_chapter_updates(
@@ -201,14 +189,10 @@ pub(crate) async fn chapters(
             return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
         };
         let rows: Vec<domain::FileCoverage> = store
-            .list_file_coverage()
+            .file_coverage_for_media(media_id)
             .unwrap_or_default()
             .into_iter()
-            .filter(|row| row.file.media_id == media_id)
-            .filter(|row| {
-                library_for_file(&store, &row.file, &media)
-                    .is_some_and(|owner| owner.id == library.id)
-            })
+            .filter(|row| row.file.library_id.to_string() == library.id)
             .collect();
         let Some(row) = selected_row(&rows, query) else {
             return err(
@@ -283,14 +267,10 @@ pub(crate) async fn refresh_item_chapters(
             return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
         };
         let rows: Vec<domain::FileCoverage> = store
-            .list_file_coverage()
+            .file_coverage_for_media(media_id)
             .unwrap_or_default()
             .into_iter()
-            .filter(|row| row.file.media_id == media_id)
-            .filter(|row| {
-                library_for_file(&store, &row.file, &media)
-                    .is_some_and(|owner| owner.id == library.id)
-            })
+            .filter(|row| row.file.library_id.to_string() == library.id)
             .collect();
         let Some(row) = selected_row(&rows, query) else {
             return err(
@@ -435,14 +415,11 @@ pub(crate) async fn probe_status(
             return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
         };
         let visible = store
-            .list_file_coverage()
+            .file_coverage_for_media(media_id)
             .unwrap_or_default()
             .iter()
             .any(|row| {
-                row.file.media_id == media_id
-                    && row.season_or_one() == season
-                    && library_for_file(&store, &row.file, &media)
-                        .is_some_and(|owner| owner.id == library.id)
+                row.season_or_one() == season && row.file.library_id.to_string() == library.id
             });
         if !visible {
             return err(
@@ -523,14 +500,10 @@ pub(crate) async fn generate_chapters(
             return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
         };
         let rows: Vec<domain::FileCoverage> = store
-            .list_file_coverage()
+            .file_coverage_for_media(media_id)
             .unwrap_or_default()
             .into_iter()
-            .filter(|row| row.file.media_id == media_id)
-            .filter(|row| {
-                library_for_file(&store, &row.file, &media)
-                    .is_some_and(|owner| owner.id == library.id)
-            })
+            .filter(|row| row.file.library_id.to_string() == library.id)
             .collect();
         let Some(row) = selected_row(&rows, query) else {
             return err(

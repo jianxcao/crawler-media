@@ -161,7 +161,7 @@ pub(crate) async fn item(
         let Some(media) = store.get_media(media_id).ok().flatten() else {
             return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
         };
-        let all_coverages = store.list_file_coverage().unwrap_or_default();
+        let all_coverages = store.file_coverage_for_media(media.id).unwrap_or_default();
         let coverages = visible_coverages_for_media(&store, &media, &all_coverages, user_id);
         if coverages.is_empty() {
             return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
@@ -247,7 +247,7 @@ pub(crate) async fn episodes(
         let Some(media) = store.get_media(media_id).ok().flatten() else {
             return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
         };
-        let all_coverages = store.list_file_coverage().unwrap_or_default();
+        let all_coverages = store.file_coverage_for_media(media.id).unwrap_or_default();
         let visible_covs = visible_coverages_for_media(&store, &media, &all_coverages, user_id);
         if visible_covs.is_empty() {
             return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
@@ -611,7 +611,7 @@ fn metric_media_id(
     }
     let id = explicit?;
     let media = store.get_media(id).ok().flatten()?;
-    let rows = store.list_file_coverage().ok()?;
+    let rows = store.file_coverage_for_media(id).ok()?;
     (!visible_coverages_for_media(store, &media, &rows, Some(user_id)).is_empty()).then_some(id)
 }
 

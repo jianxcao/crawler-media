@@ -43,19 +43,14 @@ fn visible_collection_item(
     user_id: domain::UserId,
 ) -> Option<VisibleCollectionItem> {
     let media = store.get_media(media_id).ok().flatten()?;
-    let coverages = store.list_file_coverage().ok()?;
+    let coverages = store.file_coverage_for_media(media_id).ok()?;
     let library = coverages
         .iter()
-        .filter(|coverage| coverage.file.media_id == media_id)
         .filter_map(|coverage| library_for_file(store, &coverage.file, &media))
         .find(|library| library_visible(store, library, Some(user_id)))?;
     let coverages = coverages
         .into_iter()
-        .filter(|coverage| {
-            coverage.file.media_id == media_id
-                && library_for_file(store, &coverage.file, &media)
-                    .is_some_and(|owner| owner.id == library.id)
-        })
+        .filter(|coverage| coverage.file.library_id.to_string() == library.id)
         .collect();
     Some(VisibleCollectionItem {
         media,

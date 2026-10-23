@@ -61,15 +61,8 @@ pub(crate) async fn artwork_candidates(
             let Some(media) = store.get_media(media_id).ok().flatten() else {
                 return Err(err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在"));
             };
-            let rows: Vec<domain::FileCoverage> = store
-                .list_file_coverage()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|coverage| coverage.file.media_id == media_id)
-                .filter(|coverage| {
-                    library_for_file(&store, &coverage.file, &media)
-                        .is_some_and(|owner| owner.id == library.id)
-                })
+            let rows: Vec<domain::FileCoverage> = store.file_coverage_for_media(media_id).unwrap_or_default().into_iter()
+                .filter(|coverage| coverage.file.library_id.to_string() == library.id)
                 .collect();
             if rows.is_empty() {
                 return Err(err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在"));
@@ -149,22 +142,15 @@ fn artwork_target(
     is_backdrop: bool,
 ) -> Result<std::path::PathBuf, Response> {
     let all_rows: Vec<domain::FileCoverage> = store
-        .list_file_coverage()
+        .file_coverage_for_media(media_id)
         .unwrap_or_default()
         .into_iter()
-        .filter(|coverage| coverage.file.media_id == media_id)
         .collect();
     let media = store.get_media(media_id).ok().flatten();
-    let rows: Vec<domain::FileCoverage> = if let (Some(lib_id), Some(m)) = (library_id, &media) {
+    let rows: Vec<domain::FileCoverage> = if let Some(lib_id) = library_id {
         all_rows
             .into_iter()
-            .filter(|coverage| {
-                store
-                    .library_for_path(std::path::Path::new(&coverage.file.path), m.kind)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|l| l.id == lib_id)
-            })
+            .filter(|coverage| coverage.file.library_id.to_string() == lib_id)
             .collect()
     } else {
         all_rows
@@ -263,10 +249,9 @@ pub(crate) async fn select_artwork(
     };
     let preferred_path = preferred_coverage(
         &store
-            .list_file_coverage()
+            .file_coverage_for_media(media_id)
             .unwrap_or_default()
-            .iter()
-            .filter(|row| row.file.media_id == media_id)
+            .into_iter()
             .collect::<Vec<_>>(),
     )
     .map(|row| row.file.path.clone());
@@ -363,10 +348,9 @@ pub(crate) async fn upload_artwork(
         };
         let preferred = preferred_coverage(
             &store
-                .list_file_coverage()
+                .file_coverage_for_media(media_id)
                 .unwrap_or_default()
-                .iter()
-                .filter(|row| row.file.media_id == media_id)
+                .into_iter()
                 .collect::<Vec<_>>(),
         )
         .map(|row| row.file.path.clone());

@@ -1,7 +1,6 @@
 use serde_json::{Value, json};
 use std::path::{Path as FsPath, PathBuf};
 
-use super::library_for_file;
 use crate::store::{Library, LibraryRemoval};
 
 /// Files whose recorded path falls under any root of the library.
@@ -20,18 +19,12 @@ pub(crate) fn coverages_in_library(
     store: &crate::Store,
     library: &Library,
 ) -> Vec<domain::FileCoverage> {
+    let Ok(id) = library.id.parse() else {
+        return Vec::new();
+    };
     store
-        .list_file_coverage()
+        .file_coverage_in_library(id, None, store::FileReadScope::AllRecorded)
         .unwrap_or_default()
-        .into_iter()
-        .filter(|coverage| {
-            let Some(media) = store.get_media(coverage.file.media_id).ok().flatten() else {
-                return false;
-            };
-            library_for_file(store, &coverage.file, &media)
-                .is_some_and(|owner| owner.id == library.id)
-        })
-        .collect()
 }
 
 /// 封面决策的路径输入：只有显式配置路径，没有 legacy 固定路径候选。

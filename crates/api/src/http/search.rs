@@ -351,8 +351,14 @@ pub(crate) async fn search_library_items(
         .search_work
         .run(fanout::SEARCH_DEADLINE, move || {
             let store = state.store.lock();
-            let rows = store.list_file_coverage().unwrap_or_default();
+            let visible =
+                crate::visible_scope::VisibleLibraries::load(&store, user_id).unwrap_or_default();
             let mut items = Vec::new();
+            let rows = visible.ids().into_iter().flat_map(|lib| {
+                store
+                    .file_coverage_in_library(lib, None, store::FileReadScope::Published)
+                    .unwrap_or_default()
+            });
             for row in rows {
                 let Some(media) = store.get_media(row.file.media_id).ok().flatten() else {
                     continue;

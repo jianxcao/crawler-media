@@ -116,10 +116,9 @@ pub(crate) async fn probe_item(
             return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
         };
         let all_rows: Vec<domain::FileCoverage> = store
-            .list_file_coverage()
+            .file_coverage_for_media(media_id)
             .unwrap_or_default()
             .into_iter()
-            .filter(|row| row.file.media_id == media_id)
             .collect();
         if !all_rows.iter().any(|row| {
             library_for_file(&store, &row.file, &media).is_some_and(|owner| owner.id == library.id)

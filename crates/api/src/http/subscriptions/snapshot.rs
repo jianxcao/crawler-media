@@ -72,7 +72,10 @@ pub(crate) fn load_visible_subscription_views(
     };
 
     // 预批量提取所有相关 ledger 覆盖，按 media_id 分组
-    let all_ledger = store.list_file_coverage().unwrap_or_default();
+    let media_ids: Vec<MediaId> = subscribes.iter().map(|sub| sub.media_id).collect();
+    let all_ledger = store
+        .file_coverage_for_media_batch(&media_ids)
+        .unwrap_or_default();
     let mut ledger_by_media: HashMap<MediaId, Vec<FileCoverage>> = HashMap::new();
     for coverage in all_ledger {
         ledger_by_media
@@ -131,10 +134,9 @@ pub(crate) fn load_single_subscription_view(
     let (total, imported) = super::views::progress(store, sub, media, facts);
 
     let rows: Vec<FileCoverage> = store
-        .list_file_coverage()
+        .file_coverage_for_media(media.id)
         .unwrap_or_default()
         .into_iter()
-        .filter(|coverage| coverage.file.media_id == media.id)
         .collect();
 
     let library_poster_candidate = select_preferred_library_poster(&rows);
