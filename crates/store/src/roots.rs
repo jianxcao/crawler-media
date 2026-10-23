@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use domain::MediaKind;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 use super::{Store, StoreError};
 use std::collections::HashSet;
@@ -91,6 +91,7 @@ impl Store {
         Self::reassign_files_under_root(&tx, &library.id, kind, path)?;
         tx.commit()?;
         crate::path_key::reload_root_aliases(&self.library)?;
+        self.drain_root_reassignments()?;
         Ok(LibraryRoot {
             id,
             kind,
@@ -129,117 +130,212 @@ impl Store {
 }
 
 impl Store {
+    /// Record that files under `root_path` must be re-homed to their longest covering root.
+    /// Scoped sidecar inputs and unidentified rows move here (before any reduce, C07); the
+    /// files themselves move in bounded batches via [`Store::drain_root_reassignments`],
+    /// each its own transaction, resuming from the durable cursor after a crash (A6).
     pub(crate) fn reassign_files_under_root(
         tx: &rusqlite::Connection,
         _library_id: &str,
         kind: MediaKind,
         root_path: &str,
     ) -> Result<(), StoreError> {
-        // Ownership is decided on canonical keys only: the root's `path_key` and the file's
-        // `path_key`, compared on whole path components. Display spellings never take part.
         let root_key = crate::path_key::canonical_root_key(root_path)?;
-        let roots = {
-            let mut stmt = tx.prepare(
-                "SELECT r.root_id, r.library_id, r.path_key
-                 FROM library_roots r JOIN libraries l ON l.library_id = r.library_id
-                 WHERE l.kind = ?1 AND l.lifecycle_state = 'ready'
-                   AND r.enabled = 1
-                   AND NOT EXISTS (SELECT 1 FROM library_removals m
-                                   WHERE m.library_id = r.library_id AND m.state <> 'succeeded')",
-            )?;
-            stmt.query_map(params![kind.as_str()], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-        };
-        // Bounded component range on the `files_kind_path` index: `root/` .. `root0`
-        // (`'0'` is the byte after `'/'`), so a sibling such as `root-x` is never read.
+        let roots = ready_roots(tx, kind)?;
         let (low, high) = component_range(&root_key);
-        let candidates = {
-            let mut stmt = tx.prepare(
-                "SELECT file_id, library_id, media_id, path_key FROM library_files
-                 WHERE kind = ?1 AND path_key >= ?2 AND path_key < ?3",
-            )?;
-            stmt.query_map(params![kind.as_str(), low, high], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-        };
-        let mut moves = Vec::new();
-        for (file_id, old_library, media_id, path) in candidates {
-            let file_path = Path::new(&path);
-            let best = roots
-                .iter()
-                .filter(|(_, _, candidate)| file_path.starts_with(Path::new(candidate)))
-                .max_by_key(|(_, _, candidate)| Path::new(candidate).components().count());
-            let Some((root_id, new_library, _)) = best else {
-                continue;
-            };
-            if old_library != *new_library || !file_root_id_is(tx, &file_id, root_id)? {
-                moves.push((
-                    file_id,
-                    old_library,
-                    media_id,
-                    root_id.clone(),
-                    new_library.clone(),
-                ));
-            }
-        }
-        // Sidecar inputs and unidentified rows under the root are ownership facts of
-        // their own: they move before either side is reduced, so the old Library's
-        // reduce cannot drop inputs that now belong to the new one (C07). Rows outside
-        // the root (a shared tvshow.nfo above it) keep their owner.
         for (table, column) in [
             ("library_metadata_inputs", "path_key"),
             ("unidentified", "path"),
         ] {
             reparent_scoped_rows(tx, table, column, kind, (&low, &high), &roots)?;
         }
-        let mut affected = HashSet::new();
-        let mut shared = HashSet::new();
-        for (_, old_library, media_id, root_id, new_library) in &moves {
-            if old_library != new_library {
-                shared.insert((
-                    old_library.clone(),
-                    new_library.clone(),
-                    media_id.clone(),
-                    root_id.clone(),
-                ));
-            }
-        }
-        for (old_library, new_library, media_id, root_id) in &shared {
-            copy_shared_ancestor_inputs(tx, old_library, new_library, media_id, root_id)?;
-        }
-        for (file_id, old_library, media_id, root_id, new_library) in moves {
-            tx.execute(
-                "UPDATE library_files SET library_id = ?2, root_id = ?3 WHERE file_id = ?1",
-                params![file_id, new_library, root_id],
-            )?;
-            tx.execute(
-                "UPDATE library_file_units SET library_id = ?2 WHERE file_id = ?1",
-                params![file_id, new_library],
-            )?;
-            affected.insert((old_library, media_id.clone()));
-            affected.insert((new_library, media_id));
-        }
-        for (library, media) in affected {
-            super::library_write::reduce::reduce_library_media(
-                tx,
-                library.parse()?,
-                media.parse()?,
-            )?;
-        }
+        tx.execute(
+            "INSERT INTO pending_root_reassignments (kind, root_key, cursor_key)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(kind, root_key) DO UPDATE SET cursor_key = excluded.cursor_key",
+            params![kind.as_str(), root_key, low],
+        )?;
         Ok(())
     }
+
+    /// Drain every pending root reassignment in batches of at most
+    /// [`REASSIGN_BATCH`] files, one transaction per batch. Returns batches committed.
+    pub fn drain_root_reassignments(&self) -> Result<usize, StoreError> {
+        let pending: Vec<(String, String)> = {
+            let mut stmt = self
+                .library
+                .prepare("SELECT kind, root_key FROM pending_root_reassignments ORDER BY rowid")?;
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut batches = 0;
+        for (kind, root_key) in pending {
+            let kind: MediaKind = kind
+                .parse()
+                .map_err(|_| StoreError::Invalid(format!("reassignment kind {kind}")))?;
+            loop {
+                if !take_batch_budget() {
+                    return Ok(batches);
+                }
+                let tx = crate::write_tx(&self.library)?;
+                let done = reassign_root_batch(&tx, kind, &root_key)?;
+                tx.commit()?;
+                batches += 1;
+                if done {
+                    break;
+                }
+            }
+        }
+        Ok(batches)
+    }
+}
+
+/// Files moved per reassignment transaction.
+pub const REASSIGN_BATCH: usize = 100;
+
+thread_local! {
+    static BATCH_BUDGET: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Test seam: allow only `budget` more batches on this thread (simulates a crash).
+pub(crate) fn set_batch_budget(budget: Option<usize>) {
+    BATCH_BUDGET.with(|b| b.set(budget));
+}
+
+fn take_batch_budget() -> bool {
+    BATCH_BUDGET.with(|b| match b.get() {
+        None => true,
+        Some(0) => false,
+        Some(n) => {
+            b.set(Some(n - 1));
+            true
+        }
+    })
+}
+
+fn ready_roots(
+    tx: &rusqlite::Connection,
+    kind: MediaKind,
+) -> Result<Vec<(String, String, String)>, StoreError> {
+    let mut stmt = tx.prepare(
+        "SELECT r.root_id, r.library_id, r.path_key
+         FROM library_roots r JOIN libraries l ON l.library_id = r.library_id
+         WHERE l.kind = ?1 AND l.lifecycle_state = 'ready'
+           AND r.enabled = 1
+           AND NOT EXISTS (SELECT 1 FROM library_removals m
+                           WHERE m.library_id = r.library_id AND m.state <> 'succeeded')",
+    )?;
+    Ok(stmt
+        .query_map(params![kind.as_str()], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
+type Move = (String, String, String, String, String);
+
+/// One bounded batch after the durable cursor. Returns `true` (and deletes the cursor
+/// row) once the root's range is exhausted.
+fn reassign_root_batch(
+    tx: &rusqlite::Connection,
+    kind: MediaKind,
+    root_key: &str,
+) -> Result<bool, StoreError> {
+    let cursor: Option<String> = tx
+        .query_row(
+            "SELECT cursor_key FROM pending_root_reassignments WHERE kind = ?1 AND root_key = ?2",
+            params![kind.as_str(), root_key],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(cursor) = cursor else {
+        return Ok(true);
+    };
+    let roots = ready_roots(tx, kind)?;
+    // Bounded component range on the `files_kind_path` index: `root/` .. `root0`
+    // (`'0'` is the byte after `'/'`), so a sibling such as `root-x` is never read.
+    let (_, high) = component_range(root_key);
+    let candidates: Vec<(String, String, String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT file_id, library_id, media_id, path_key FROM library_files
+             WHERE kind = ?1 AND path_key > ?2 AND path_key < ?3
+             ORDER BY path_key LIMIT ?4",
+        )?;
+        stmt.query_map(
+            params![kind.as_str(), cursor, high, REASSIGN_BATCH as i64],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let exhausted = candidates.len() < REASSIGN_BATCH;
+    let last = candidates.last().map(|c| c.3.clone());
+    let mut moves: Vec<Move> = Vec::new();
+    for (file_id, old_library, media_id, path) in candidates {
+        let file_path = Path::new(&path);
+        let best = roots
+            .iter()
+            .filter(|(_, _, candidate)| file_path.starts_with(Path::new(candidate)))
+            .max_by_key(|(_, _, candidate)| Path::new(candidate).components().count());
+        let Some((root_id, new_library, _)) = best else {
+            continue;
+        };
+        if old_library != *new_library || !file_root_id_is(tx, &file_id, root_id)? {
+            moves.push((
+                file_id,
+                old_library,
+                media_id,
+                root_id.clone(),
+                new_library.clone(),
+            ));
+        }
+    }
+    apply_moves(tx, moves)?;
+    if exhausted {
+        tx.execute(
+            "DELETE FROM pending_root_reassignments WHERE kind = ?1 AND root_key = ?2",
+            params![kind.as_str(), root_key],
+        )?;
+    } else if let Some(last) = last {
+        tx.execute(
+            "UPDATE pending_root_reassignments SET cursor_key = ?3 WHERE kind = ?1 AND root_key = ?2",
+            params![kind.as_str(), root_key, last],
+        )?;
+    }
+    Ok(exhausted)
+}
+
+fn apply_moves(tx: &rusqlite::Connection, moves: Vec<Move>) -> Result<(), StoreError> {
+    let mut affected = HashSet::new();
+    let mut shared = HashSet::new();
+    for (_, old_library, media_id, root_id, new_library) in &moves {
+        if old_library != new_library {
+            shared.insert((
+                old_library.clone(),
+                new_library.clone(),
+                media_id.clone(),
+                root_id.clone(),
+            ));
+        }
+    }
+    for (old_library, new_library, media_id, root_id) in &shared {
+        copy_shared_ancestor_inputs(tx, old_library, new_library, media_id, root_id)?;
+    }
+    for (file_id, old_library, media_id, root_id, new_library) in moves {
+        tx.execute(
+            "UPDATE library_files SET library_id = ?2, root_id = ?3 WHERE file_id = ?1",
+            params![file_id, new_library, root_id],
+        )?;
+        tx.execute(
+            "UPDATE library_file_units SET library_id = ?2 WHERE file_id = ?1",
+            params![file_id, new_library],
+        )?;
+        affected.insert((old_library, media_id.clone()));
+        affected.insert((new_library, media_id));
+    }
+    for (library, media) in affected {
+        crate::library_write::reduce::reduce_library_media(tx, library.parse()?, media.parse()?)?;
+    }
+    Ok(())
 }
 
 /// Copy the old Library's work/season inputs whose sidecar sits **above** the new root

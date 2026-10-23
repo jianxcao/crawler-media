@@ -451,6 +451,7 @@ impl Store {
         }
         tx.commit()?;
         crate::path_key::reload_root_aliases(&self.library)?;
+        self.drain_root_reassignments()?;
         Ok(self
             .get_library(&id)?
             .ok_or_else(|| StoreError::Missing(format!("library {id}")))?)
@@ -630,6 +631,7 @@ impl Store {
         }
         tx.commit()?;
         crate::path_key::reload_root_aliases(&self.library)?;
+        self.drain_root_reassignments()?;
         Ok(self
             .get_library(id)?
             .ok_or_else(|| StoreError::Missing(format!("library {id}")))?)

@@ -57,6 +57,7 @@ pub const LIBRARY_TABLES: &[&str] = &[
     "library_removal_roots",
     "pending_file_deletions",
     "pending_file_renames",
+    "pending_root_reassignments",
     "scrape_sidecars",
     "unidentified",
     "scan_operations",

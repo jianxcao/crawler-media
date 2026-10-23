@@ -265,3 +265,33 @@ pub fn force_file_states(
     )?;
     Ok(())
 }
+
+/// Allow only `budget` more root-reassignment batches on this thread (`None` = unbounded);
+/// the remaining work stays in `pending_root_reassignments`, as after a crash.
+pub fn set_root_reassign_batch_budget(budget: Option<usize>) {
+    crate::roots::set_batch_budget(budget);
+}
+
+/// Pending root reassignment cursors, as `(kind, root_key, cursor_key)`.
+pub fn pending_root_reassignments(store: &Store) -> Vec<(String, String, String)> {
+    let mut stmt = store
+        .library
+        .prepare("SELECT kind, root_key, cursor_key FROM pending_root_reassignments")
+        .unwrap();
+    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+/// Number of ledger files owned by `library_id`.
+pub fn library_file_count(store: &Store, library_id: &str) -> usize {
+    store
+        .library
+        .query_row(
+            "SELECT COUNT(*) FROM library_files WHERE library_id = ?1",
+            [library_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap() as usize
+}

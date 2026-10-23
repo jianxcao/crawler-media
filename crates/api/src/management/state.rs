@@ -340,6 +340,11 @@ impl ApiState {
                 Ok(_) => {}
                 Err(e) => tracing::error!(%e, "恢复未完成的扫描操作失败"),
             }
+            match state.store.lock().drain_root_reassignments() {
+                Ok(n) if n > 0 => tracing::info!(batches = n, "已恢复未完成的根目录归属迁移"),
+                Ok(_) => {}
+                Err(e) => tracing::error!(%e, "恢复根目录归属迁移失败"),
+            }
             match state
                 .store
                 .lock()

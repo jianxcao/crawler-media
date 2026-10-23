@@ -268,6 +268,7 @@ CREATE TABLE library_removals (
 );
 CREATE TABLE library_removal_roots (operation_id TEXT NOT NULL REFERENCES library_removals(operation_id),path TEXT NOT NULL,PRIMARY KEY(operation_id,path));
 CREATE TABLE pending_file_deletions (path TEXT PRIMARY KEY NOT NULL,reason TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_retry_at INTEGER NOT NULL DEFAULT 0,last_error TEXT,file_id TEXT,file_size INTEGER,file_inode INTEGER);
+CREATE TABLE pending_root_reassignments (kind TEXT NOT NULL, root_key TEXT NOT NULL, cursor_key TEXT NOT NULL, PRIMARY KEY(kind, root_key));
 CREATE TABLE pending_file_renames (
  rename_id TEXT PRIMARY KEY NOT NULL,
  file_id TEXT NOT NULL,
