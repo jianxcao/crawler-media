@@ -18,6 +18,7 @@ fn adopt_tmdb_episode(
     episode_number: u32,
     episode: &media::EpisodeMeta,
     locale: &str,
+    expected_revision: i64,
 ) {
     let preferences = MetadataPreferences {
         language_priority: vec![locale.to_string()],
@@ -75,7 +76,7 @@ fn adopt_tmdb_episode(
         provider_work_id: tmdb_id.to_string(),
         fetched_at,
         normalized,
-        expected_revision: None,
+        expected_revision: Some(expected_revision),
         preferences,
     };
     if let Err(error) = state.store.lock().adopt_metadata(&adoption, fetched_at) {
@@ -89,6 +90,7 @@ fn adopt_tmdb_season(
     tmdb_id: &str,
     season: &media::TvSeason,
     locale: &str,
+    expected_revision: i64,
 ) {
     let preferences = MetadataPreferences {
         language_priority: vec![locale.to_string()],
@@ -131,7 +133,7 @@ fn adopt_tmdb_season(
         provider_work_id: tmdb_id.to_string(),
         fetched_at,
         normalized,
-        expected_revision: None,
+        expected_revision: Some(expected_revision),
         preferences,
     };
     if let Err(error) = state.store.lock().adopt_metadata(&adoption, fetched_at) {
@@ -169,6 +171,9 @@ pub(crate) fn write_series_nfos(
             .collect()
     };
     let catalog = state.catalog.as_ref();
+    let Ok(captured) = crate::metadata_service::capture_metadata_revision(state, media.id) else {
+        return Vec::new();
+    };
     if lease
         .publish(|| Ok(write_nfo(&target, media, show_metadata)))
         .is_err()
@@ -233,6 +238,7 @@ pub(crate) fn write_series_nfos(
                     episode_number,
                     &episode,
                     language,
+                    captured,
                 );
                 let episode_coverage = domain::FileCoverage {
                     file: row.file.clone(),
@@ -379,6 +385,7 @@ fn scrape_tv_episodes_and_nfos(
     rows: &[domain::FileCoverage],
     mirror_nfo: bool,
 ) -> Vec<(PathBuf, Option<String>)> {
+    let captured = crate::metadata_service::capture_metadata_revision(state, media.id).ok();
     let tmdb_meta = fetch_tmdb_metadata(state, media.kind, tmdb_id)
         .ok()
         .flatten();
@@ -408,7 +415,16 @@ fn scrape_tv_episodes_and_nfos(
         .collect();
     for season_meta in &tv_seasons {
         if owned_seasons.contains(&season_meta.season_number) {
-            adopt_tmdb_season(state, media, tmdb_id, season_meta, &preferred_lang);
+            if let Some(captured) = captured {
+                adopt_tmdb_season(
+                    state,
+                    media,
+                    tmdb_id,
+                    season_meta,
+                    &preferred_lang,
+                    captured,
+                );
+            }
         }
     }
     let season_artworks: Vec<crate::fanart_artwork::SeasonArtwork> = tv_seasons

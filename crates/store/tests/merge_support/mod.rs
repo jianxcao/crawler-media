@@ -440,20 +440,20 @@ fn setup_merge_inner(advance: bool) -> MergeFixture {
         &library_db,
         survivor_id,
         "zh-CN",
-        r#"{"title":"survivor override"}"#,
+        r#"{"title":{"state":"value","value":"survivor override"}}"#,
     );
     insert_metadata_override(
         &library_db,
         loser_id,
         "zh-CN",
         // Same lock as the survivor: a conflicting lock is refused (R21), not dropped.
-        r#"{"title":"survivor override"}"#,
+        r#"{"title":{"state":"value","value":"survivor override"}}"#,
     );
     insert_metadata_override(
         &library_db,
         loser_id,
         "en-US",
-        r#"{"title":"loser en override"}"#,
+        r#"{"title":{"state":"value","value":"loser en override"}}"#,
     );
     insert_season(&library_db, survivor_id, 1, "zh-CN", "Survivor S1");
     insert_season(&library_db, loser_id, 1, "zh-CN", "Loser S1");

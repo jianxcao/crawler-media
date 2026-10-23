@@ -380,7 +380,10 @@ fn reassignment_ends_bound_sessions_and_keeps_the_history_binding() {
         .unit_state(user, a, -1, -1)
         .expect("read A unit")
         .expect("A unit exists");
-    assert_eq!(after_a, before_a, "A's resume package is a fact, not a cache");
+    assert_eq!(
+        after_a, before_a,
+        "A's resume package is a fact, not a cache"
+    );
     assert_eq!(after_a.position_ms, 5_000);
     assert_eq!(after_a.duration_ms, Some(120_000));
     assert!(after_a.favorite, "favourite survives");
@@ -425,9 +428,16 @@ fn reassignment_ends_bound_sessions_and_keeps_the_history_binding() {
             30,
         )
         .expect("late event");
-    assert_eq!(late, EventOutcome::IgnoredStale, "closed session writes nothing");
     assert_eq!(
-        store.unit_state(user, a, -1, -1).expect("read A").expect("A"),
+        late,
+        EventOutcome::IgnoredStale,
+        "closed session writes nothing"
+    );
+    assert_eq!(
+        store
+            .unit_state(user, a, -1, -1)
+            .expect("read A")
+            .expect("A"),
         before_a
     );
 }

@@ -471,7 +471,7 @@ fn manual_override_wins_over_nfo_input_in_detail() {
                     fields,
                     field_origins: Default::default(),
                 },
-                expected_revision: None,
+                expected_revision: Some(0),
                 preferences: domain::MetadataPreferences {
                     language_priority: vec!["zh-CN".into()],
                     cert_country_priority: vec![],

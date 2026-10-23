@@ -134,8 +134,12 @@ fn conflicting_override_begin_is_refused_and_disjoint_overrides_merge() {
     create_media(&store, SURVIVOR, "Survivor", MediaKind::Movie);
     create_media(&store, LOSER, "Loser", MediaKind::Movie);
     let db = Connection::open(tmp.path().join("library.db")).unwrap();
-    override_row(&db, SURVIVOR, r#"{"title":"S"}"#);
-    override_row(&db, LOSER, r#"{"title":"L","overview":"LO"}"#);
+    override_row(&db, SURVIVOR, r#"{"title":{"state":"value","value":"S"}}"#);
+    override_row(
+        &db,
+        LOSER,
+        r#"{"title":{"state":"value","value":"L"},"overview":{"state":"value","value":"LO"}}"#,
+    );
     let req = MediaMergeRequest {
         request_id: "00000000-0000-0000-0001-0000000000c1".into(),
         survivor: SURVIVOR.parse().unwrap(),
@@ -155,7 +159,7 @@ fn conflicting_override_begin_is_refused_and_disjoint_overrides_merge() {
     );
 
     db.execute(
-        "UPDATE media_metadata_overrides SET fields_json = '{\"overview\":\"LO\"}' WHERE media_id = ?1",
+        "UPDATE media_metadata_overrides SET fields_json = '{\"overview\":{\"state\":\"value\",\"value\":\"LO\"}}' WHERE media_id = ?1",
         params![LOSER],
     )
     .unwrap();
@@ -172,7 +176,10 @@ fn conflicting_override_begin_is_refused_and_disjoint_overrides_merge() {
         )
         .unwrap();
     let merged: serde_json::Value = serde_json::from_str(&merged).unwrap();
-    assert_eq!(merged, serde_json::json!({"title": "S", "overview": "LO"}));
+    assert_eq!(
+        merged,
+        serde_json::json!({"title": {"state": "value", "value": "S"}, "overview": {"state": "value", "value": "LO"}})
+    );
 }
 
 fn scoped_snapshot(
@@ -351,4 +358,128 @@ fn cross_entity_target_with_foreign_episode_snapshot_is_refused() {
         )
         .unwrap();
     assert_ne!(state, "merging", "a refused merge writes nothing");
+}
+
+fn adopt(store: &Store, media: &str, scope: domain::EntityScope, title: &str, fetched_at: i64) {
+    let mut fields = domain::MetadataFields::default();
+    fields.title = domain::FieldValue::Value(title.into());
+    fields.overview = if title.ends_with('B') {
+        domain::FieldValue::Empty
+    } else {
+        domain::FieldValue::Value(format!("{title} overview"))
+    };
+    let media_id: domain::MediaId = media.parse().unwrap();
+    let entity = match scope {
+        domain::EntityScope::Work => media.to_string(),
+        domain::EntityScope::Season(s) => format!("{media}:{s}"),
+        domain::EntityScope::Episode { season, episode } => format!("{media}:{season}:{episode}"),
+    };
+    store
+        .adopt_metadata(
+            &domain::MetadataAdoption {
+                media_id,
+                scope,
+                locale: "zh-CN".into(),
+                source: "tmdb".into(),
+                provider_entity_id: entity,
+                provider_work_id: media.to_string(),
+                fetched_at,
+                normalized: domain::NormalizedMetadata {
+                    fields,
+                    field_origins: Default::default(),
+                },
+                expected_revision: Some(store.media_revision(media_id).unwrap().unwrap()),
+                preferences: domain::MetadataPreferences {
+                    language_priority: vec!["zh-CN".into()],
+                    cert_country_priority: vec![],
+                },
+            },
+            fetched_at,
+        )
+        .unwrap();
+}
+
+/// R05: the merge picks the loser's snapshot (refresh target) and the persisted effective
+/// rows — work, season and episode — are recomposed from it, not kept from the survivor.
+#[test]
+fn merge_recomposes_effective_rows_from_selected_snapshots() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    create_media(&store, SURVIVOR, "Survivor", MediaKind::Tv);
+    create_media(&store, LOSER, "Loser", MediaKind::Tv);
+    let episode = domain::EntityScope::Episode {
+        season: 1,
+        episode: 2,
+    };
+    for scope in [
+        domain::EntityScope::Work,
+        domain::EntityScope::Season(1),
+        episode,
+    ] {
+        adopt(&store, SURVIVOR, scope, "Adopted A", 1000);
+        adopt(&store, LOSER, scope, "Adopted B", 2000);
+    }
+    let req = MediaMergeRequest {
+        request_id: "00000000-0000-0000-0001-0000000000d1".into(),
+        survivor: SURVIVOR.parse().unwrap(),
+        loser: LOSER.parse().unwrap(),
+        survivor_revision: 0,
+        loser_revision: 0,
+        refresh_targets: BTreeMap::from([("tmdb".to_string(), LOSER.to_string())]),
+    };
+    let op = store.begin_media_merge(&req, 3000).unwrap();
+    assert_eq!(
+        store.advance_media_merge(&op, 3000).unwrap().state,
+        "succeeded"
+    );
+    let survivor: domain::MediaId = SURVIVOR.parse().unwrap();
+    let work = store
+        .get_effective_metadata(survivor, "zh-CN")
+        .unwrap()
+        .unwrap();
+    assert_eq!(work.title, "Adopted B");
+    assert!(
+        work.overview.is_none(),
+        "explicit empty from the selected snapshot stays empty"
+    );
+    let db = Connection::open(tmp.path().join("library.db")).unwrap();
+    let media_title: String = db
+        .query_row(
+            "SELECT title FROM media WHERE media_id = ?1",
+            params![SURVIVOR],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(media_title, "Adopted B");
+    let season: String = db
+        .query_row(
+            "SELECT title FROM media_seasons WHERE media_id = ?1 AND season = 1",
+            params![SURVIVOR],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(season, "Adopted B");
+    let episode_title: String = db
+        .query_row(
+            "SELECT title FROM media_episodes WHERE media_id = ?1 AND season = 1 AND episode = 2",
+            params![SURVIVOR],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(episode_title, "Adopted B");
+    let origins_before = work.field_origins_json.clone();
+    drop(store);
+    let reopened = Store::open(tmp.path()).unwrap();
+    assert_eq!(
+        reopened.advance_media_merge(&op, 4000).unwrap().state,
+        "succeeded"
+    );
+    let after = reopened
+        .get_effective_metadata(survivor, "zh-CN")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.field_origins_json, origins_before,
+        "repeat advance is idempotent"
+    );
 }

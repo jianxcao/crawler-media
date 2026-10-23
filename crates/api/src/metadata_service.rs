@@ -29,6 +29,20 @@ pub(crate) fn metadata_preferences(state: &ApiState) -> MetadataPreferences {
         })
 }
 
+/// The Media metadata revision a provider fetch is bound to, read under the Store lock
+/// before the network call.
+pub(crate) fn capture_metadata_revision(
+    state: &ApiState,
+    media: domain::MediaId,
+) -> Result<i64, String> {
+    state
+        .store
+        .lock()
+        .media_revision(media)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("media {media} not found"))
+}
+
 /// Fetch (outside the Store lock) and adopt the TMDB snapshot for one entity.
 /// Returns `Ok(false)` when the catalog has no normalized response for it.
 pub(crate) fn adopt_catalog_metadata(
@@ -39,6 +53,8 @@ pub(crate) fn adopt_catalog_metadata(
 ) -> Result<bool, String> {
     let preferences = metadata_preferences(state);
     let locale = crate::scrape_metadata::preferred_language(state);
+    // Capture the identity before the network call; the Store CAS refuses a late response.
+    let expected_revision = capture_metadata_revision(state, media.id)?;
     let Some(normalized) =
         state
             .catalog
@@ -56,7 +72,7 @@ pub(crate) fn adopt_catalog_metadata(
         provider_work_id: tmdb_id.to_string(),
         fetched_at,
         normalized,
-        expected_revision: None,
+        expected_revision: Some(expected_revision),
         preferences,
     };
     state

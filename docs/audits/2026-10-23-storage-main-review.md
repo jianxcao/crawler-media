@@ -98,6 +98,8 @@ files 读 canonical path_key，root_path/候选根却取 display_path。A 的根
 
 修复：事务开头统一校验可写身份；adopt 同事务校验捕获的 metadata revision、source/kind/provider_work/current target。捕获→网络→CAS，旧响应拒绝且零写。retired 仅报明确错误/survivor，不重定向或继续写入。
 
+**状态：已修复（Task5）。** `MetadataAdoption.expected_revision` 必填（None→Invalid）；`ensure_adoption_current` 在写事务内拒绝缺失 Media、merging/retired（Protected）、revision 不等或 refresh target≠provider_work_id（Conflict）。scraped display 与 override 写者统一走 `ensure_media_writable`。api 在网络请求前 `capture_metadata_revision`，剧集/季采纳携带该 revision。回归 `metadata_adoption::{retired_and_merging_media_refuse_metadata_writes, stale_revision_or_target_adoption_writes_nothing}`。
+
 ### R05 [P1，实测] merge 选中了快照，但未重合成有效元数据
 
 位置：`store/src/media_operations/references.rs:108-120,164-167,183-209,228-230`。
@@ -105,6 +107,8 @@ files 读 canonical path_key，root_path/候选根却取 display_path。A 的根
 来源快照按目标选定，但 adopted work 仍优先保留 survivor，season/episode 碰撞也直接保 survivor。真实 A采用p2/A、B采用p3/B，合并选p3：`MERGE_EFFECTIVE composed_title=Some("Adopted B") persisted_title=Adopted A`（artifact://66）。同一事实的实时合成与落盘/卡片不一致。
 
 修复：merge 事务固定 entity/locale 决议，归并来源及 overrides 后，对受影响键调用同一 write_effective，再更新卡片/terms。目标无快照时仍遵守规范 pending fallback，不把普通 survivor 优先伪装成目标快照。
+
+**状态：已修复（Task5）。** merge 收集 loser 快照与 override 的键，搬迁后仅对仍有快照或 override 的键在 survivor 上 `write_effective` 重合成（否则保持 pending 回退），陈旧的 NFO 合成行不再整行搬迁。回归 `media_merge_snapshots::merge_recomposes_effective_rows_from_selected_snapshots`（work/season/episode，refresh target=loser，显式空值保持，reopen 后幂等推进）；`media_merge_recovery` 断言改为重合成语义。附带修复 Task3 回退：路径对账（磁盘已在 `to`）改用 `begin_file_reconciliation`，evidence 取自 `to` 且要求 `from` 不存在。
 
 ### R06 [P2，实测] locale operation 成功但卡片仍旧语言；重扫会重新标记 NFO 语言
 

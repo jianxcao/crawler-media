@@ -155,6 +155,11 @@ fn work_fields(
 /// Adopt metadata before publishing: the reducer reads the adopted row when it builds the
 /// `library_items` summary, exactly like the real pipeline does.
 fn adopt(store: &Store, media_id: MediaId, locale: &str, fields: MetadataFields) {
+    // The adoption belongs to the Media's current refresh target, as in production.
+    let target = store
+        .media_refresh_alias(media_id, "tmdb")
+        .unwrap()
+        .map_or_else(|| "1".to_string(), |alias| alias.external_id);
     store
         .adopt_metadata(
             &MetadataAdoption {
@@ -162,14 +167,14 @@ fn adopt(store: &Store, media_id: MediaId, locale: &str, fields: MetadataFields)
                 scope: EntityScope::Work,
                 locale: locale.to_string(),
                 source: "tmdb".into(),
-                provider_entity_id: "1".into(),
-                provider_work_id: "1".into(),
+                provider_entity_id: target.clone(),
+                provider_work_id: target,
                 fetched_at: 1000,
                 normalized: NormalizedMetadata {
                     fields,
                     field_origins: std::collections::BTreeMap::new(),
                 },
-                expected_revision: None,
+                expected_revision: Some(0),
                 preferences: MetadataPreferences {
                     language_priority: vec![locale.to_string()],
                     cert_country_priority: vec!["US".into()],

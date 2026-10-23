@@ -349,7 +349,7 @@ fn apply_reconciliation(
     }
     let now = crate::job_loop::unix_now();
     let request = store
-        .begin_file_rename(
+        .begin_file_reconciliation(
             source.file.file_id,
             &source.file.version,
             FsPath::new(&row.from),

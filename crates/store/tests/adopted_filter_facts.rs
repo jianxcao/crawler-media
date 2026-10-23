@@ -58,7 +58,7 @@ fn adopt(store: &Store, media_id: MediaId, locale: &str, fields: MetadataFields)
                     fields,
                     field_origins: std::collections::BTreeMap::new(),
                 },
-                expected_revision: None,
+                expected_revision: Some(0),
                 preferences: MetadataPreferences {
                     language_priority: vec![locale.to_string()],
                     cert_country_priority: vec!["US".into()],

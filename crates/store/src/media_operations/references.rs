@@ -3,7 +3,7 @@
 //! caller's `library.db` transaction and is deterministic from the surviving
 //! rows, so re-running a phase after a crash cannot duplicate or double-count.
 
-use domain::MediaId;
+use domain::{EntityScope, MediaId};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use serde_json::{Map, Value};
@@ -161,6 +161,7 @@ pub(super) fn merge_metadata(
     loser: MediaId,
 ) -> Result<(), StoreError> {
     let (survivor_str, loser_str) = (survivor.to_string(), loser.to_string());
+    let affected = loser_metadata_keys(tx, &loser_str)?;
     merge_source_snapshots(tx, &survivor_str, &loser_str)?;
     // Shared override keys: preflight refused conflicting fields, so the loser's fields
     // the survivor lacks are folded into the survivor's row before the loser row goes.
@@ -233,6 +234,74 @@ pub(super) fn merge_metadata(
                     params![loser_str, locale],
                 )?;
             }
+        }
+    }
+    recompose_selected(tx, survivor, &affected)
+}
+
+/// One metadata entity/locale the loser contributed a snapshot or override to.
+type MetadataKey = (String, i64, i64, String);
+
+/// The entity/locale keys the loser holds source snapshots or overrides for: only these can
+/// change the survivor's composition, so only these are recomposed.
+fn loser_metadata_keys(tx: &Connection, loser: &str) -> Result<Vec<MetadataKey>, StoreError> {
+    let mut stmt = tx.prepare(
+        "SELECT entity_scope, season, episode, locale FROM media_metadata_sources WHERE media_id = ?1
+         UNION
+         SELECT entity_scope, season, episode, locale FROM media_metadata_overrides WHERE media_id = ?1",
+    )?;
+    let keys = stmt
+        .query_map(params![loser], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(keys)
+}
+
+fn scope_of(scope: &str, season: i64, episode: i64) -> Result<EntityScope, StoreError> {
+    let coordinate = |value: i64| {
+        u32::try_from(value)
+            .map_err(|_| StoreError::Invalid(format!("metadata coordinate {value} out of range")))
+    };
+    match scope {
+        "work" => Ok(EntityScope::Work),
+        "season" => Ok(EntityScope::Season(coordinate(season)?)),
+        "episode" => Ok(EntityScope::Episode {
+            season: coordinate(season)?,
+            episode: coordinate(episode)?,
+        }),
+        other => Err(StoreError::Invalid(format!("metadata scope {other}"))),
+    }
+}
+
+/// After the entity/locale decisions are fixed (selected snapshots, merged overrides), the
+/// survivor's effective rows for every affected key are recomposed by the same
+/// `write_effective` adoption uses. A key with neither snapshot nor override keeps the
+/// pending fallback row folded above instead of being blanked.
+fn recompose_selected(
+    tx: &Connection,
+    survivor: MediaId,
+    keys: &[MetadataKey],
+) -> Result<(), StoreError> {
+    let media = survivor.to_string();
+    for (scope, season, episode, locale) in keys {
+        let has_input: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM media_metadata_sources
+                           WHERE media_id = ?1 AND entity_scope = ?2 AND season = ?3
+                             AND episode = ?4 AND locale = ?5)
+                 OR EXISTS(SELECT 1 FROM media_metadata_overrides
+                           WHERE media_id = ?1 AND entity_scope = ?2 AND season = ?3
+                             AND episode = ?4 AND locale = ?5)",
+            params![media, scope, season, episode, locale],
+            |r| r.get(0),
+        )?;
+        if has_input {
+            crate::metadata::effective::write_effective(
+                tx,
+                survivor,
+                scope_of(scope, *season, *episode)?,
+                locale,
+            )?;
         }
     }
     Ok(())

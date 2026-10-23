@@ -195,7 +195,7 @@ async fn genre_and_studio_filters_read_adopted_metadata_instead_of_nfo() {
                     fields,
                     field_origins: std::collections::BTreeMap::new(),
                 },
-                expected_revision: None,
+                expected_revision: Some(0),
                 preferences: domain::MetadataPreferences {
                     language_priority: vec!["en-US".into()],
                     cert_country_priority: vec!["US".into()],
@@ -247,7 +247,7 @@ async fn search_and_people_filters_read_adopted_metadata_instead_of_nfo() {
                     fields,
                     field_origins: std::collections::BTreeMap::new(),
                 },
-                expected_revision: None,
+                expected_revision: Some(0),
                 preferences: domain::MetadataPreferences {
                     language_priority: vec!["en-US".into()],
                     cert_country_priority: vec!["US".into()],

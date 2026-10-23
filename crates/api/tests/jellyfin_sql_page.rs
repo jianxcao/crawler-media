@@ -193,7 +193,7 @@ fn adopt_studio(fx: &Fx, media: MediaId, studio: &str) {
             fields,
             field_origins: BTreeMap::new(),
         },
-        expected_revision: None,
+        expected_revision: Some(0),
         preferences: MetadataPreferences {
             language_priority: vec!["zh-CN".into()],
             cert_country_priority: Vec::new(),

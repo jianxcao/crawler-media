@@ -221,20 +221,18 @@ fn assert_metadata_merge(f: &MergeFixture, db: &Connection) {
         .get_effective_metadata(f.survivor, "zh-CN")
         .unwrap()
         .expect("survivor zh-CN metadata");
-    assert_eq!(zh.title, "Survivor Show");
-    assert_eq!(zh.overview.as_deref(), Some("loser overview"));
-    assert_eq!(
-        zh.language.as_deref(),
-        Some(""),
-        "explicit empty stays empty"
-    );
-    assert_eq!(zh.genres_json, r#"["drama"]"#);
+    // R05: effective rows are recomposed from the selected snapshots and overrides;
+    // the fixture's snapshots carry no fields, so only override values survive and
+    // the losers' stale NFO-composed rows are not carried over.
+    assert_eq!(zh.title, "survivor override");
+    assert_eq!(zh.overview, None);
+    assert_eq!(zh.genres_json, "[]");
     let en = f
         .store
         .get_effective_metadata(f.survivor, "en-US")
         .unwrap()
-        .expect("loser-only locale moved whole");
-    assert_eq!(en.title, "Loser Show EN");
+        .expect("loser-only locale recomposed on the survivor");
+    assert_eq!(en.title, "loser en override");
     assert!(
         f.store
             .get_effective_metadata(f.loser, "en-US")
@@ -290,11 +288,11 @@ fn assert_metadata_merge(f: &MergeFixture, db: &Connection) {
         vec![
             (
                 "en-US".to_string(),
-                r#"{"title":"loser en override"}"#.to_string()
+                r#"{"title":{"state":"value","value":"loser en override"}}"#.to_string()
             ),
             (
                 "zh-CN".to_string(),
-                r#"{"title":"survivor override"}"#.to_string()
+                r#"{"title":{"state":"value","value":"survivor override"}}"#.to_string()
             ),
         ]
     );

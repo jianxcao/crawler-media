@@ -51,7 +51,7 @@ fn metadata_adoption_persists_source_snapshot_and_effective_row() {
         provider_work_id: "100".into(),
         fetched_at: 1000,
         normalized,
-        expected_revision: None,
+        expected_revision: Some(0),
         preferences: pref,
     };
 
@@ -140,7 +140,7 @@ fn complete_source_metadata_survives_adoption_and_detail_read() {
         provider_work_id: "100".into(),
         fetched_at: 1000,
         normalized,
-        expected_revision: None,
+        expected_revision: Some(0),
         preferences: pref,
     };
 
@@ -173,6 +173,11 @@ fn complete_source_metadata_survives_adoption_and_detail_read() {
     );
 }
 
+/// The fixtures' refresh targets: tmdb `1`, douban `2`.
+fn provider_id(source: &str) -> &'static str {
+    if source == "douban" { "2" } else { "1" }
+}
+
 fn adoption(media: domain::MediaId, source: &str, overview: &str) -> MetadataAdoption {
     let mut fields = domain::MetadataFields::default();
     fields.title = domain::FieldValue::Value("Priority Title".into());
@@ -182,14 +187,14 @@ fn adoption(media: domain::MediaId, source: &str, overview: &str) -> MetadataAdo
         scope: EntityScope::Work,
         locale: "zh-CN".into(),
         source: source.into(),
-        provider_entity_id: "1".into(),
-        provider_work_id: "1".into(),
+        provider_entity_id: provider_id(source).into(),
+        provider_work_id: provider_id(source).into(),
         fetched_at: 1000,
         normalized: domain::NormalizedMetadata {
             fields,
             field_origins: Default::default(),
         },
-        expected_revision: None,
+        expected_revision: Some(0),
         preferences: MetadataPreferences {
             language_priority: vec!["zh-CN".into()],
             cert_country_priority: vec!["CN".into()],
@@ -630,4 +635,131 @@ fn override_reaches_effective_row_and_detail() {
         .unwrap()
         .unwrap();
     assert_eq!(persisted.overview, Some("MANUAL".into()));
+}
+
+fn identity_fixture() -> (tempfile::TempDir, Store, domain::Media, domain::Media) {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let make = |id: &str, title: &str| domain::Media {
+        id: id.parse().unwrap(),
+        kind: domain::MediaKind::Movie,
+        title: title.into(),
+        year: Some(2024),
+        original_title: None,
+        aliases: vec![],
+        tmdb_id: Some(id.into()),
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    let a = make("00000000-0000-0000-0000-0000000000e1", "A");
+    let b = make("00000000-0000-0000-0000-0000000000e2", "B");
+    store.insert_media(&a).unwrap();
+    store.insert_media(&b).unwrap();
+    (tmp, store, a, b)
+}
+
+fn targeted(media: &domain::Media, title: &str, expected: Option<i64>) -> MetadataAdoption {
+    let mut input = adoption(media.id, "tmdb", "o");
+    input.normalized.fields.title = domain::FieldValue::Value(title.into());
+    input.provider_entity_id = media.id.to_string();
+    input.provider_work_id = media.id.to_string();
+    input.expected_revision = expected;
+    input
+}
+
+fn merge_request(a: &domain::Media, b: &domain::Media) -> store::playback::MediaMergeRequest {
+    store::playback::MediaMergeRequest {
+        request_id: "00000000-0000-0000-0001-0000000000e9".into(),
+        survivor: a.id,
+        loser: b.id,
+        survivor_revision: 0,
+        loser_revision: 0,
+        refresh_targets: std::collections::BTreeMap::from([("tmdb".into(), a.id.to_string())]),
+    }
+}
+
+/// R04: a retired tombstone or a frozen (merging) Media accepts no metadata write.
+#[test]
+fn retired_and_merging_media_refuse_metadata_writes() {
+    let (_tmp, store, a, b) = identity_fixture();
+    let op = store.begin_media_merge(&merge_request(&a, &b), 10).unwrap();
+    let frozen = store.adopt_metadata(&targeted(&b, "late", Some(0)), 11);
+    assert!(
+        matches!(frozen, Err(store::StoreError::Protected(_))),
+        "got {frozen:?}"
+    );
+    assert_eq!(
+        store.advance_media_merge(&op, 12).unwrap().state,
+        "succeeded"
+    );
+    let before = store.get_effective_metadata(b.id, "zh-CN").unwrap();
+    let retired_write = store.adopt_metadata(&targeted(&b, "late", Some(0)), 13);
+    assert!(
+        matches!(retired_write, Err(store::StoreError::Protected(_))),
+        "got {retired_write:?}"
+    );
+    let mut fields = domain::MetadataFields::default();
+    fields.title = domain::FieldValue::Value("locked".into());
+    let retired_override =
+        store.set_metadata_overrides(b.id, EntityScope::Work, "zh-CN", &fields, 0);
+    assert!(
+        matches!(retired_override, Err(store::StoreError::Protected(_))),
+        "got {retired_override:?}"
+    );
+    assert_eq!(store.get_effective_metadata(b.id, "zh-CN").unwrap(), before);
+    assert!(
+        store
+            .get_metadata_overrides(b.id, EntityScope::Work, "zh-CN")
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// R04: adoption is a CAS on the captured Media revision and the current refresh target.
+#[test]
+fn stale_revision_or_target_adoption_writes_nothing() {
+    let (_tmp, store, a, _b) = identity_fixture();
+    let missing = store.adopt_metadata(&targeted(&a, "x", None), 1);
+    assert!(
+        matches!(missing, Err(store::StoreError::Invalid(_))),
+        "got {missing:?}"
+    );
+
+    let captured = store.media_revision(a.id).unwrap().unwrap();
+    let mut renamed = a.clone();
+    renamed.title = "A2".into();
+    store.update_media_identity(captured, &renamed).unwrap();
+    let stale = store.adopt_metadata(&targeted(&a, "stale", Some(captured)), 2);
+    assert!(
+        matches!(stale, Err(store::StoreError::Conflict(_))),
+        "got {stale:?}"
+    );
+
+    let current = store.media_revision(a.id).unwrap().unwrap();
+    let mut foreign = targeted(&a, "foreign", Some(current));
+    foreign.provider_work_id = "999".into();
+    foreign.provider_entity_id = "999".into();
+    let wrong_target = store.adopt_metadata(&foreign, 3);
+    assert!(
+        matches!(wrong_target, Err(store::StoreError::Conflict(_))),
+        "got {wrong_target:?}"
+    );
+    assert!(
+        store
+            .get_effective_metadata(a.id, "zh-CN")
+            .unwrap()
+            .is_none(),
+        "zero writes"
+    );
+
+    store
+        .adopt_metadata(&targeted(&a, "fresh", Some(current)), 4)
+        .unwrap();
+    let effective = store
+        .get_effective_metadata(a.id, "zh-CN")
+        .unwrap()
+        .unwrap();
+    assert_eq!(effective.title, "fresh");
 }

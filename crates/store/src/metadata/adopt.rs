@@ -25,7 +25,13 @@ impl Store {
                 "metadata adoption requires a source and provider entity id".into(),
             ));
         }
+        let Some(expected) = input.expected_revision else {
+            return Err(StoreError::Invalid(
+                "metadata adoption requires the captured Media metadata revision".into(),
+            ));
+        };
         let tx = self.library.unchecked_transaction()?;
+        ensure_adoption_current(&tx, input, expected)?;
         upsert_source_snapshot(&tx, input)?;
         // Recompose from every current snapshot plus overrides: a source that now reports a
         // field as Missing stops contributing, and adoption order cannot change the result.
@@ -96,6 +102,7 @@ impl Store {
             return Ok(());
         }
         let tx = self.library.unchecked_transaction()?;
+        crate::library_write::publish::ensure_media_writable(&tx, media_id)?;
         let media = media_id.to_string();
         let existing: Option<String> = tx
             .query_row(
@@ -164,6 +171,56 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+}
+
+/// The adoption was fetched for a Media identity captured before the network call. Refuse
+/// it (zero writes) unless that identity is still writable, its metadata revision is the
+/// captured one, and the response belongs to the Media's current refresh target.
+fn ensure_adoption_current(
+    tx: &Connection,
+    input: &MetadataAdoption,
+    expected: i64,
+) -> Result<(), StoreError> {
+    let media = input.media_id.to_string();
+    let row: Option<(String, String, i64)> = tx
+        .query_row(
+            "SELECT identity_state, kind, metadata_revision FROM media WHERE media_id = ?1",
+            params![media],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((state, kind, revision)) = row else {
+        return Err(StoreError::Missing(format!("media {}", input.media_id)));
+    };
+    if state == "merging" || state == "retired" {
+        return Err(StoreError::Protected(format!(
+            "media {} identity is frozen ({state})",
+            input.media_id
+        )));
+    }
+    if revision != expected {
+        return Err(StoreError::Conflict(format!(
+            "media {} metadata revision moved: captured {expected}, current {revision}",
+            input.media_id
+        )));
+    }
+    let target: Option<String> = tx
+        .query_row(
+            "SELECT external_id FROM media_aliases
+             WHERE media_id = ?1 AND source = ?2 AND kind = ?3 AND is_refresh_target = 1",
+            params![media, input.source, kind],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(target) = target
+        && target != input.provider_work_id
+    {
+        return Err(StoreError::Conflict(format!(
+            "media {} refresh target for {} is {target}, not {}",
+            input.media_id, input.source, input.provider_work_id
+        )));
+    }
+    Ok(())
 }
 
 /// Insert or replace this source's snapshot for the entity/locale, bumping its revision.

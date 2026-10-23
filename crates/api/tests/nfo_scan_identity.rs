@@ -225,7 +225,7 @@ fn adopt_provider_overview(store: &Store, media_id: MediaId) {
             fields,
             field_origins: Default::default(),
         },
-        expected_revision: None,
+        expected_revision: Some(0),
         preferences: domain::MetadataPreferences {
             language_priority: vec!["zh-CN".into()],
             cert_country_priority: vec!["CN".into()],

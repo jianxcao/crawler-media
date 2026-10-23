@@ -469,7 +469,7 @@ fn adopt_show_metadata(state: &ApiState, media: MediaId) {
             fields,
             field_origins: std::collections::BTreeMap::new(),
         },
-        expected_revision: None,
+        expected_revision: Some(0),
         preferences: domain::MetadataPreferences {
             language_priority: vec!["zh-CN".into()],
             cert_country_priority: Vec::new(),

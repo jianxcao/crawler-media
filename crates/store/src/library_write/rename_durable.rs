@@ -68,6 +68,38 @@ impl Store {
         to: &Path,
         now: i64,
     ) -> Result<FileRenameRequest, StoreError> {
+        self.begin_rename_observed_at(file_id, expected, from, to, None, now)
+    }
+
+    /// Ledger-only reconciliation: the bytes already sit at `to` and `from` is gone.
+    /// Evidence is observed at `to`, so the disk phase verifies the moved inode
+    /// instead of moving anything.
+    pub fn begin_file_reconciliation(
+        &self,
+        file_id: LedgerId,
+        expected: &FileVersion,
+        from: &Path,
+        to: &Path,
+        now: i64,
+    ) -> Result<FileRenameRequest, StoreError> {
+        if std::fs::symlink_metadata(from).is_ok() {
+            return Err(StoreError::Protected(format!(
+                "reconciliation source {} still exists",
+                from.display()
+            )));
+        }
+        self.begin_rename_observed_at(file_id, expected, from, to, Some(to), now)
+    }
+
+    fn begin_rename_observed_at(
+        &self,
+        file_id: LedgerId,
+        expected: &FileVersion,
+        from: &Path,
+        to: &Path,
+        moved_to: Option<&Path>,
+        now: i64,
+    ) -> Result<FileRenameRequest, StoreError> {
         if !from.is_absolute() || !to.is_absolute() {
             return Err(StoreError::Protected(
                 "rename paths must be absolute".into(),
@@ -76,11 +108,18 @@ impl Store {
         let mut sidecars = observe_sidecars(from, to);
         observe_directory_artwork(from, to, &mut sidecars);
         // Native identity of the planned source, observed before the transaction.
-        let evidence = RenameSourceEvidence::observe(from, expected.clone())?;
-        let observed = library::observe_source(from).map_err(|error| {
-            StoreError::Protected(format!("rename source {}: {error}", from.display()))
-        })?;
-        if observed.source_version != expected.source_version {
+        let at = moved_to.unwrap_or(from);
+        let evidence = RenameSourceEvidence::observe(at, expected.clone())?;
+        // A reconciled move changes ctime, so its recorded version cannot match at
+        // `to`; the moved inode at `to` is the evidence instead.
+        if moved_to.is_none()
+            && library::observe_source(from)
+                .map_err(|error| {
+                    StoreError::Protected(format!("rename source {}: {error}", from.display()))
+                })?
+                .source_version
+                != expected.source_version
+        {
             return Err(StoreError::Protected(format!(
                 "file {file_id} on disk no longer matches its recorded version"
             )));
