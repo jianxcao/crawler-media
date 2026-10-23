@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-import { MediaSourceAnnotationDialog } from "@/components/media-source-annotation-dialog";
 import { Modal } from "@/components/modal";
 import { RuleSetEditorDialog } from "@/components/rule-sets-panel";
 import {
@@ -14,7 +13,6 @@ import {
   type UpgradeRunReport,
   type UpgradeRunUnit,
 } from "@/lib/api/subscriptions";
-import { seasonsNeedingAnnotation } from "@/lib/media-source-annotation";
 import { usePermissions } from "@/lib/permissions";
 
 /**
@@ -107,13 +105,6 @@ export function UpgradeRunDialog({
             title={detail.media.title}
             isMovie={isMovie}
             report={report}
-            mediaItemId={
-              detail.media.tmdb_id ?? undefined
-            }
-            onAnnotated={async () => {
-              // 标注已刷新快照：重跑一轮体检，报告当场翻新（排期一并完成）
-              setReport(await runSubscriptionUpgradeRound(detail.id));
-            }}
             onClose={onFinished}
           />
         </div>
@@ -285,32 +276,19 @@ export function UpgradeRunReportView({
   title,
   isMovie,
   report,
-  mediaItemId,
-  onAnnotated,
   onClose,
 }: {
   title: string;
   isMovie: boolean;
   report: UpgradeRunReport;
-  /** 有值且调用方提供 onAnnotated 时，「无法确认」的季显示「标注片源」入口 */
-  mediaItemId?: string | null;
-  /** 片源标注成功后回调（通常重跑一轮体检刷新报告） */
-  onAnnotated?: (message: string) => void | Promise<void>;
   onClose: () => void;
 }) {
-  const { isAdmin } = usePermissions();
-  const [annotateSeason, setAnnotateSeason] = useState<number | null>(null);
   const seasons = new Map<number, UpgradeRunUnit[]>();
   for (const u of report.units) {
     const list = seasons.get(u.season_number) ?? [];
     list.push(u);
     seasons.set(u.season_number, list);
   }
-  // 标注是库数据纠错（管理员动作）：入口条件与后端 require_admin 对齐
-  const annotatable =
-    mediaItemId != null && onAnnotated && isAdmin
-      ? seasonsNeedingAnnotation(report.units)
-      : new Set<number>();
   return (
     <>
       <h2 className="text-title font-bold text-white">洗版体检报告</h2>
@@ -329,20 +307,11 @@ export function UpgradeRunReportView({
               key={season}
               className="overflow-hidden rounded-xl border border-white/[0.07] bg-white/[0.02]"
             >
-              {(!isMovie || annotatable.has(season)) && (
+              {!isMovie && (
                 <p className="flex items-center border-b border-white/[0.06] px-4 py-2 text-sub font-semibold text-white/80">
                   <span className="min-w-0 flex-1">
                     {isMovie ? "正片" : season === 0 ? "特别篇" : `第 ${season} 季`}
                   </span>
-                  {annotatable.has(season) && (
-                    <button
-                      type="button"
-                      onClick={() => setAnnotateSeason(season)}
-                      className="shrink-0 rounded-md border border-white/[0.12] px-2 py-0.5 text-caption font-medium text-white/75 transition hover:bg-white/[0.07] hover:text-white"
-                    >
-                      标注片源
-                    </button>
-                  )}
                 </p>
               )}
               <ul className="divide-y divide-white/[0.05]">
@@ -385,20 +354,6 @@ export function UpgradeRunReportView({
           完成
         </button>
       </div>
-
-      {annotateSeason !== null && mediaItemId != null && (
-        <MediaSourceAnnotationDialog
-          mediaItemId={mediaItemId}
-          seasonNumber={annotateSeason}
-          isMovie={isMovie}
-          raised
-          onClose={() => setAnnotateSeason(null)}
-          onApplied={async (message) => {
-            setAnnotateSeason(null);
-            await onAnnotated?.(message);
-          }}
-        />
-      )}
     </>
   );
 }

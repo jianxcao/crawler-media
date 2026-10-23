@@ -23,25 +23,20 @@ import {
   type CatalogItem,
   type SiteBoostStats,
   type SiteConfigPayload,
-  type SiteSyncStats,
   configureSite,
   deleteSite,
   listConfiguredSites,
   listSiteBoostStats,
   listSiteCatalog,
-  listSiteSyncStats,
   reverifySite,
-  setSiteBoostPaused,
   setSiteEnabled,
-  setSiteProtection,
   setSiteRatioBoost,
   updateSite,
 } from "@/lib/api/sites";
 import { Link } from "react-router-dom";
 
 import { useDownloadTasks } from "@/lib/download-tasks";
-import { formatBytes, formatDuration } from "@/lib/format";
-import { formatRelativeTime } from "@/lib/time";
+import { formatBytes } from "@/lib/format";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
 
 /*
@@ -152,7 +147,6 @@ export function SiteConfigSection() {
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   const [configured, setConfigured] = useState<ConfiguredSite[]>([]);
   // 各站点的种子缓存统计（定时同步任务维护），key 为 site_id；从未同步过的站点没有条目
-  const [syncStats, setSyncStats] = useState<Record<string, SiteSyncStats>>({});
   // 各站点的刷流运行统计；从未刷流且未开启刷流的站点没有条目
   const [boostStats, setBoostStats] = useState<Record<string, SiteBoostStats>>({});
   const [loading, setLoading] = useState(true);
@@ -179,15 +173,13 @@ export function SiteConfigSection() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [cat, cfg, stats, boost] = await Promise.all([
+      const [cat, cfg, boost] = await Promise.all([
         listSiteCatalog(),
         listConfiguredSites(),
-        listSiteSyncStats(),
         listSiteBoostStats(),
       ]);
       setCatalog(cat);
       setConfigured(cfg);
-      setSyncStats(stats);
       setBoostStats(boost);
     } catch (e) {
       setError((e as Error).message);
@@ -211,11 +203,6 @@ export function SiteConfigSection() {
         .then(setBoostStats)
         .catch(() => {
           /* 轮询失败静默重试，不打断页面 */
-        });
-      void listSiteSyncStats()
-        .then(setSyncStats)
-        .catch(() => {
-          /* 同上 */
         });
     },
     anyBoosting ? 30000 : null,
@@ -342,7 +329,6 @@ export function SiteConfigSection() {
                   key={site.id}
                   item={catalogMap.get(site.profile_id) ?? fallbackItem(site.profile_id)}
                   site={site}
-                  stats={syncStats[site.id]}
                   boost={boostStats[site.id]}
                   expanded={expandedSite === site.id}
                   onToggle={() =>
@@ -482,7 +468,6 @@ function AddSitePanel({ available, onCreated, onCancel, onError }: AddSitePanelP
 interface SiteRowProps {
   item: CatalogItem;
   site: ConfiguredSite;
-  stats?: SiteSyncStats;
   boost?: SiteBoostStats;
   expanded: boolean;
   onToggle: () => void;
@@ -496,7 +481,6 @@ interface SiteRowProps {
 function SiteRow({
   item,
   site,
-  stats,
   boost,
   expanded,
   onToggle,
@@ -651,7 +635,6 @@ function SiteRow({
         <SiteDetail
           item={item}
           site={site}
-          stats={stats}
           boost={boost}
           busy={busy}
           guard={guard}
@@ -669,7 +652,6 @@ function SiteRow({
 interface SiteDetailProps {
   item: CatalogItem;
   site: ConfiguredSite;
-  stats?: SiteSyncStats;
   boost?: SiteBoostStats;
   busy: boolean;
   guard: (fn: () => Promise<void>) => Promise<void>;
@@ -682,7 +664,6 @@ interface SiteDetailProps {
 function SiteDetail({
   item,
   site,
-  stats,
   boost,
   busy,
   guard,
@@ -708,25 +689,6 @@ function SiteDetail({
         </DetailSection>
       )}
 
-      {/* ─ 索引 ─ */}
-      {stats && (
-        <DetailSection label="索引">
-          <StatGrid>
-            <DetailStat
-              label="已缓存种子"
-              value={stats.torrent_count.toLocaleString("zh-CN")}
-            />
-            <DetailStat label="上次同步" value={formatRelativeTime(stats.last_sync_at)} />
-            <DetailStat label="下次同步" value={nextSyncLabel(stats.next_sync_at)} />
-            {stats.sync_interval_seconds != null && (
-              <DetailStat label="同步间隔" value={formatDuration(stats.sync_interval_seconds)} />
-            )}
-          </StatGrid>
-          {stats.last_error && (
-            <p className="text-caption leading-5 text-[#ff6b6b]">上次同步失败：{stats.last_error}</p>
-          )}
-        </DetailSection>
-      )}
 
       {/* ─ 授权 ─ 编辑入口在 ⋯ 菜单（编辑授权），这里默认只读展示 */}
       <DetailSection label="授权">
@@ -1057,13 +1019,6 @@ function DetailStat({ label, value }: { label: string; value: string }) {
       </p>
     </div>
   );
-}
-
-/** 「下次同步」文案：null（立即到期）或时刻已过（等待 tick 扫描）都显示「即将开始」，
- *  避免出现"下次同步：3 分钟前"这种矛盾表述。 */
-function nextSyncLabel(iso: string | null): string {
-  if (!iso || new Date(iso).getTime() <= Date.now()) return "即将开始";
-  return formatRelativeTime(iso);
 }
 
 /* —— 站点操作折叠菜单：启停 / 保护 / 刷流 / 编辑授权 / 重验 / 删除 全部收口于此 —— */

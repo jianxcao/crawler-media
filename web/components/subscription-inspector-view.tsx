@@ -17,7 +17,6 @@ import {
   RefreshIcon,
   SearchIcon,
 } from "@/components/icons";
-import { MediaSourceAnnotationDialog } from "@/components/media-source-annotation-dialog";
 import { Modal } from "@/components/modal";
 import { NetflixBackButton } from "@/components/netflix/back-button";
 import { PageNav } from "@/components/page-nav";
@@ -57,7 +56,6 @@ import {
 import { listUpNext, setPlaybackMarks, type UpNextItem } from "@/lib/api/playback";
 import { playHref, rememberPlayerReturnPath } from "@/lib/player/play-links";
 import { formatBytes, formatDuration } from "@/lib/format";
-import { seasonsWithIndeterminate } from "@/lib/media-source-annotation";
 import { shouldShowResourceTiming } from "@/lib/resource-timing";
 import { subscriptionStatus, subscriptionStatusMeta } from "@/lib/subscription-ui";
 import { targetLibraryNotice } from "@/lib/subscription-target-library";
@@ -193,7 +191,9 @@ export function SubscriptionInspectorView({
     () => {
       if (downloadsPending.current) return;
       downloadsPending.current = true;
-      listActiveSubscriptionDownloads(String(id))
+      listActiveSubscriptionDownloads(
+        (detail?.wanted ?? []).flatMap((w) => (w.info_hash ? [w.info_hash] : [])),
+      )
         .then(setDownloads)
         .catch(() => undefined)
         .finally(() => {
@@ -429,13 +429,9 @@ export function SubscriptionInspectorView({
   const confirmRemoval = async (options: SubscriptionRemovalOptions) => {
     setBusy(true);
     try {
-      const { cleanup_job_id } = await deleteSubscriptionPermanently(detail.id, options);
+      await deleteSubscriptionPermanently(detail.id, options);
       setCancelling(false);
-      toast.success(
-        cleanup_job_id
-          ? "已取消订阅，正在后台清理关联内容（可在任务中心查看进度）"
-          : "已取消订阅",
-      );
+      toast.success("已取消订阅");
       afterRemoved();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "取消订阅失败，请稍后重试");
@@ -799,18 +795,6 @@ export function SubscriptionInspectorView({
           isMovie={isMovie}
           downloads={downloadByHash}
           failures={pendingFailures(activities)}
-          mediaItemId={detail.media.tmdb_id ?? null}
-          canAnnotate={isAdmin}
-          onAnnotated={async (message) => {
-            // 标注已刷新快照：顺手重跑一轮体检完成排期（幂等），再刷新详情
-            try {
-              await runSubscriptionUpgradeRound(String(id));
-              toast.success(`${message}，已重新体检并排期洗版`);
-            } catch {
-              toast.success(message);
-            }
-            reload();
-          }}
         />
         <ActivityLogSection activities={activities} />
       </div>
@@ -1524,9 +1508,6 @@ function WantedBreakdown({
   isMovie,
   downloads,
   failures,
-  mediaItemId,
-  canAnnotate,
-  onAnnotated,
 }: {
   wanted: WantedItem[];
   isMovie: boolean;
@@ -1534,15 +1515,7 @@ function WantedBreakdown({
   downloads: Map<string, SubscriptionDownload>;
   /** 工单 id → 仍未解决的失败活动（pendingFailures） */
   failures: Map<string, SubscriptionActivity>;
-  /** 片源标注的媒体引用（新契约用 TMDB 数字 id；非 TMDB 条目无值则隐藏入口） */
-  mediaItemId: string | null;
-  /** 片源标注是库数据纠错（管理员动作），与后端 require_admin 对齐 */
-  canAnnotate: boolean;
-  /** 片源标注成功后回调（父组件重跑体检 + 刷新 + toast） */
-  onAnnotated: (message: string) => void | Promise<void>;
 }) {
-  // 「无法确认档位」季的标注弹窗（docs/design/media-source-annotation.md §5.1）
-  const [annotateSeason, setAnnotateSeason] = useState<number | null>(null);
   // 惰性初始化只在挂载时算一次：详情每 30s 静默刷新一遍，若跟着 wanted 重算，
   // 用户手动展开的季会被刷回去。代价是自动续订新增的季不会自动展开——
   // 折叠行本身就写着进度，不算信息丢失。
@@ -1572,8 +1545,6 @@ function WantedBreakdown({
     list.push(w);
     seasons.set(w.season_number, list);
   }
-  const annotatable =
-    canAnnotate && mediaItemId != null ? seasonsWithIndeterminate(wanted) : new Set<number>();
   // 只有一组时折叠没有意义（电影、单季剧），维持原来的常展开形态
   const collapsible = !isMovie && seasons.size > 1;
 
@@ -1590,7 +1561,7 @@ function WantedBreakdown({
               key={season}
               className="overflow-hidden rounded-2xl border border-white/[0.07] bg-[rgba(14,16,22,0.45)] backdrop-blur-xl"
             >
-              {(!isMovie || annotatable.has(season)) && (
+              {!isMovie && (
                 /* 折叠热区用 role="button" 的 div 而不是 <button>：季头行里还有
                    「标注片源」按钮，button 套 button 是非法嵌套。与站点配置行
                    （site-config-section.tsx）同一套写法。 */
@@ -1657,19 +1628,6 @@ function WantedBreakdown({
                       />
                     </span>
                   )}
-                  {annotatable.has(season) && (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        // 整行是折叠热区，标注按钮不能顺带把这一季折起来
-                        e.stopPropagation();
-                        setAnnotateSeason(season);
-                      }}
-                      className="shrink-0 rounded-md border border-white/[0.12] px-2 py-0.5 text-caption font-medium text-white/75 transition hover:bg-white/[0.07] hover:text-white"
-                    >
-                      标注片源
-                    </button>
-                  )}
                 </div>
               )}
               {open && (
@@ -1692,19 +1650,6 @@ function WantedBreakdown({
             </div>
           );
         })}
-
-      {annotateSeason !== null && mediaItemId != null && (
-        <MediaSourceAnnotationDialog
-          mediaItemId={mediaItemId}
-          seasonNumber={annotateSeason}
-          isMovie={isMovie}
-          onClose={() => setAnnotateSeason(null)}
-          onApplied={async (message) => {
-            setAnnotateSeason(null);
-            await onAnnotated(message);
-          }}
-        />
-      )}
     </div>
   );
 }

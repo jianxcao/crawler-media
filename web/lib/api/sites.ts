@@ -91,19 +91,6 @@ export interface SiteBoostStats {
   boost: BoostConfig;
 }
 
-/** 站点种子缓存同步节奏统计。新后端已删除对应端点，保留类型供兼容。 */
-export interface SiteSyncStats {
-  torrent_count: number;
-  tracking_since: string | null;
-  last_sync_at: string | null;
-  last_success_at: string | null;
-  next_sync_at: string | null;
-  sync_interval_seconds: number | null;
-  last_new_count: number | null;
-  last_error: string | null;
-  consecutive_failures: number;
-}
-
 // ---------------------------------------------------------------------------
 // 端点函数
 // ---------------------------------------------------------------------------
@@ -202,30 +189,12 @@ export async function setSiteRatioBoost(
   return getConfiguredSite(siteId);
 }
 
-/** 打开 / 关闭站点保护。新后端无保护端点：no-op，返回当前站点。 */
-export function setSiteProtection(siteId: string, isProtected: boolean): Promise<ConfiguredSite> {
-  void isProtected;
-  return getConfiguredSite(siteId);
-}
-
-/** 暂停 / 恢复站点刷流。新后端无暂停端点：no-op，返回当前站点。 */
-export function setSiteBoostPaused(siteId: string, paused: boolean): Promise<ConfiguredSite> {
-  void paused;
-  return getConfiguredSite(siteId);
-}
-
 /** 各站点的刷流运行统计，按 site_id 索引（从未刷流且未开启的站点没有条目）。 */
 export async function listSiteBoostStats(
   init?: RequestInit,
 ): Promise<Record<string, SiteBoostStats>> {
   const rows = await unwrap(request<ApiEnvelope<SiteBoostStats[]>>("/sites/boost-stats", init));
   return Object.fromEntries(rows.map((row) => [row.site_id, row]));
-}
-
-/** 站点种子缓存同步统计。新后端已删除该端点：返回空表。 */
-export function listSiteSyncStats(init?: RequestInit): Promise<Record<string, SiteSyncStats>> {
-  void init;
-  return Promise.resolve({});
 }
 
 /** 删除站点配置。 */

@@ -1,5 +1,6 @@
 import { request } from "@/lib/http";
 import type { MediaType } from "@/lib/media-types";
+import type { DownloadTask } from "./downloaders";
 
 /** 后端统一响应信封 */
 interface ApiEnvelope<T> {
@@ -242,7 +243,7 @@ export interface WantedItem {
   upgrade: WantedUpgrade | null;
 }
 
-/** 订阅详情 = 订阅 + 工单明细（新契约详情接口不再带 wanted 列表，兼容字段为空数组）。 */
+/** 订阅详情 = 订阅 + 工单明细（GET /subscriptions/{id} 现算的 wanted）。 */
 export interface SubscriptionDetail extends Subscription {
   wanted: WantedItem[];
 }
@@ -514,14 +515,14 @@ import { createSubscriptionBody } from "../subscription-form";
 /** 创建订阅（同条目重复订阅幂等返回已有）。后端接受 title_ref 直接解析。 */
 export function createSubscription(
   payload: CreateSubscriptionPayload,
-): Promise<SubscriptionDetail> {
+): Promise<Subscription> {
   const body = createSubscriptionBody(payload);
   return unwrap(
     request<ApiEnvelope<Subscription>>("/subscriptions", {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  ).then((sub) => ({ ...sub, wanted: [] }));
+  );
 }
 
 /** 订阅列表（含工单进度）。kind 缺省返回全部。 */
@@ -578,9 +579,7 @@ interface TodayArrivalItem {
 
 /** 订阅详情（含工单明细 wanted：单元状态 + 履历，后端现算）。 */
 export function getSubscription(id: string): Promise<SubscriptionDetail> {
-  return unwrap(request<ApiEnvelope<Subscription & { wanted?: WantedItem[] }>>(`/subscriptions/${id}`)).then(
-    (sub) => ({ ...sub, wanted: sub.wanted ?? [] }),
-  );
+  return unwrap(request<ApiEnvelope<SubscriptionDetail>>(`/subscriptions/${id}`));
 }
 
 /** 修改订阅（季选择/自动续订/规则组，后端 diff 重算工单）。
@@ -595,7 +594,7 @@ export function updateSubscription(
     /** 换入库目标库；显式传 null=清除指定、改回按默认库路由；缺省不变 */
     library_id?: string | null;
   },
-): Promise<SubscriptionDetail> {
+): Promise<Subscription> {
   const body: Record<string, unknown> = {};
   if (payload.selected_seasons) body.selected_seasons = payload.selected_seasons;
   if (payload.rule_set_id != null) body.filter_id = String(payload.rule_set_id);
@@ -608,7 +607,7 @@ export function updateSubscription(
       method: "PATCH",
       body: JSON.stringify(body),
     }),
-  ).then((sub) => ({ ...sub, wanted: [] }));
+  );
 }
 
 /** 立即搜索：缺口工单跳过冷却重新排队（暂停中/无可搜缺口时后端报可读错误）。 */
@@ -710,37 +709,37 @@ export function downloadSelectedTorrentForSubscription(
 export function setSubscriptionTrackingState(
   id: string,
   state: "active" | "paused",
-): Promise<SubscriptionDetail> {
+): Promise<Subscription> {
   return unwrap(
     request<ApiEnvelope<Subscription>>(`/subscriptions/${id}`, {
       method: "PATCH",
       body: JSON.stringify({ tracking_state: state }),
     }),
-  ).then((sub) => ({ ...sub, wanted: [] }));
+  );
 }
 
 export function setSubscriptionFetchMode(
   id: string,
   fetch_mode: FetchMode,
-): Promise<SubscriptionDetail> {
+): Promise<Subscription> {
   return unwrap(
     request<ApiEnvelope<Subscription>>(`/subscriptions/${id}`, {
       method: "PATCH",
       body: JSON.stringify({ fetch_mode }),
     }),
-  ).then((sub) => ({ ...sub, wanted: [] }));
+  );
 }
 
 export function setSubscriptionSearchInterval(
   id: string,
   search_interval_secs: number,
-): Promise<SubscriptionDetail> {
+): Promise<Subscription> {
   return unwrap(
     request<ApiEnvelope<Subscription>>(`/subscriptions/${id}`, {
       method: "PATCH",
       body: JSON.stringify({ search_interval_secs }),
     }),
-  ).then((sub) => ({ ...sub, wanted: [] }));
+  );
 }
 
 /**
@@ -749,26 +748,26 @@ export function setSubscriptionSearchInterval(
 export function setSubscriptionKeepOldVersions(
   id: string,
   enabled: boolean,
-): Promise<SubscriptionDetail> {
+): Promise<Subscription> {
   return unwrap(
     request<ApiEnvelope<Subscription>>(`/subscriptions/${id}`, {
       method: "PATCH",
       body: JSON.stringify({ keep_old_versions: enabled }),
     }),
-  ).then((sub) => ({ ...sub, wanted: [] }));
+  );
 }
 
 /** 剧集自动续订：PATCH /subscriptions/{id} `{follow_future}`。 */
 export function setSubscriptionFollowFuture(
   id: string,
   enabled: boolean,
-): Promise<SubscriptionDetail> {
+): Promise<Subscription> {
   return unwrap(
     request<ApiEnvelope<Subscription>>(`/subscriptions/${id}`, {
       method: "PATCH",
       body: JSON.stringify({ follow_future: enabled }),
     }),
-  ).then((sub) => ({ ...sub, wanted: [] }));
+  );
 }
 
 /**
@@ -841,13 +840,13 @@ export function getSubscriptionRemovalPreview(
  *
  * 订阅不会被删——它还在追别的季。后端会拒绝仍在范围内的季，并把退出那几季
  * 已入库的单元退回缺口（以后重新勾选该季会重新下载）。
- * 新契约只回执 `{queued}`，旧 cleanup_job_id 兼容字段置 null。
+ * 回执即服务端的 `{queued}`。
  */
 export function cleanupSubscriptionSeasons(
   id: string,
   seasons: number[],
   options: SubscriptionRemovalOptions,
-): Promise<{ cleanup_job_id: string | null }> {
+): Promise<{ queued: boolean }> {
   return unwrap(
     request<ApiEnvelope<{ queued: boolean }>>(`/subscriptions/${id}/season-cleanup`, {
       method: "POST",
@@ -857,20 +856,18 @@ export function cleanupSubscriptionSeasons(
         delete_library_files: options.deleteLibraryFiles,
       }),
     }),
-  ).then(() => ({ cleanup_job_id: null }));
+  );
 }
 
 /**
  * 管理员永久删除订阅与追踪工单。
  *
- * 默认不动任何已有内容；勾了联动清理时后端立刻返回并把删种子/回收文件交给
- * 后台任务（cleanup_job_id 可在任务中心查看进度）。
- * 新契约 DELETE 只回 `{deleted}`，无清理任务概念，cleanup_job_id 恒为 null。
+ * 默认不动任何已有内容；勾了联动清理时由服务端同一请求完成。回执即 `{deleted}`。
  */
 export function deleteSubscriptionPermanently(
   id: string,
   options?: SubscriptionRemovalOptions,
-): Promise<{ cleanup_job_id: string | null }> {
+): Promise<{ deleted: boolean }> {
   const query = new URLSearchParams({
     delete_torrents: String(options?.deleteTorrents ?? false),
     delete_library_files: String(options?.deleteLibraryFiles ?? false),
@@ -879,7 +876,7 @@ export function deleteSubscriptionPermanently(
     request<ApiEnvelope<{ deleted: boolean }>>(`/subscriptions/${id}?${query}`, {
       method: "DELETE",
     }),
-  ).then(() => ({ cleanup_job_id: null }));
+  );
 }
 
 /** 订阅在途种子的实时下载快照（详情页轮询展示进度/速度/ETA）。 */
@@ -901,43 +898,32 @@ export interface SubscriptionDownload {
 }
 
 /**
- * 订阅在途种子的实时下载进度（纯读快照，逐个查询下载器）。
- * 旧端点 `/subscriptions/{id}/active-downloads` 已下线，改读 `/downloaders/tasks`
- * 的待投递快照作为近似。
+ * 订阅在途种子的实时下载进度：读全局 `/downloaders/tasks`（DownloadTask DTO），
+ * 只保留该订阅 wanted 单元锚定的 info_hash。没有在途 hash 时不发请求。
  */
-export function listActiveSubscriptionDownloads(
-  id: string,
+export async function listActiveSubscriptionDownloads(
+  wantedHashes: readonly string[],
   init?: RequestInit,
 ): Promise<SubscriptionDownload[]> {
-  void id;
-  return unwrap(
-    request<ApiEnvelope<{ items: DownloadTaskShim[] }>>("/downloaders/tasks", init),
-  ).then((snapshot) =>
-    (snapshot.items ?? []).map((task) => ({
-      info_hash: task.info_hash ?? "",
+  const wanted = new Set(wantedHashes.filter((hash) => hash.length > 0));
+  if (wanted.size === 0) return [];
+  const snapshot = await unwrap(
+    request<ApiEnvelope<{ items: DownloadTask[] }>>("/downloaders/tasks", init),
+  );
+  return snapshot.items
+    .filter((task) => task.info_hash != null && wanted.has(task.info_hash))
+    .map((task) => ({
+      info_hash: task.info_hash as string,
       name: task.name,
       progress: task.progress,
       size_bytes: task.size_bytes,
       dlspeed_bytes: task.dlspeed_bytes,
       eta_seconds: null,
-      state: (task.state ?? "unknown") as SubscriptionDownload["state"],
+      state: task.state as SubscriptionDownload["state"],
       error_message: task.error_message ?? null,
       downloader_name: task.downloader_name,
       units: [],
-    })),
-  );
-}
-
-/** /downloaders/tasks 条目的最小切片（避免与 downloaders.ts 类型耦合）。 */
-interface DownloadTaskShim {
-  info_hash?: string | null;
-  name: string | null;
-  progress: number | null;
-  size_bytes: number | null;
-  dlspeed_bytes: number | null;
-  state: string | null;
-  error_message?: string | null;
-  downloader_name: string | null;
+    }));
 }
 
 /** 订阅活动记录：message 是完整中文句子，时间线直接展示。 */

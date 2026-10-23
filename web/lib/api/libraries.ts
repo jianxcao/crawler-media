@@ -618,16 +618,6 @@ export interface LibraryChapter {
   image_url: string | null;
 }
 
-/** 片源标注预览的一行。 */
-export interface MediaSourceAnnotationCandidate {
-  file_id: string;
-  file_name: string;
-  episode_number: number;
-  size_bytes: number;
-  media_source: string | null;
-  media_source_manual: boolean;
-}
-
 /** 「修正识别结果」预览里一组文件的识别结论。 */
 export interface ReidentifyOutcome {
   media_item_id: string | null;
@@ -1714,23 +1704,6 @@ export async function markLibraryFilesAsExtras(fileIds: string[]): Promise<{ det
 // ---------------------------------------------------------------------------
 // 片源标注 / 缺失清单
 // ---------------------------------------------------------------------------
-
-/** 列出整季片源标注将影响的文件（当前版本服务端未开启手动标注接口）。 */
-export function listMediaSourceAnnotationCandidates(
-  _mediaItemId: string,
-  _seasonNumber: number,
-): Promise<MediaSourceAnnotationCandidate[]> {
-  return Promise.reject(new Error("服务端未开启手动片源标注，系统已由元数据与文件名解析自动管理"));
-}
-
-/** 整季人工标注片源（当前版本服务端未开启手动标注接口）。 */
-export function annotateMediaSource(
-  _mediaItemId: string,
-  _seasonNumber: number,
-  _mediaSource: string,
-): Promise<{ files: number; snapshots: number }> {
-  return Promise.reject(new Error("服务端未开启手动片源标注，系统已由元数据与文件名解析自动管理"));
-}
 
 /** 缺失清单（GET /libraries/{id}/missing），按条目聚合。 */
 export async function listMissingLibraryFiles(libraryId: string): Promise<MissingItem[]> {
