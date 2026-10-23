@@ -8,6 +8,7 @@
 //! and recovery views, but it must not create a card, count towards size, or become a
 //! playback source.
 
+use crate::metadata::locale::{LocaleFallback, select_locale};
 use std::collections::HashSet;
 
 use domain::{LibraryId, MediaId, MetadataFields};
@@ -356,8 +357,8 @@ pub(super) fn facts_for(
     })
 }
 
-/// The Library's valid work-scope NFO fields: resolved locale first, then the preferred
-/// file's sidecar, then the deterministic `(locale, input_key)` order.
+/// The Library's valid work-scope NFO fields for the locale chosen by the shared
+/// selector (Library locale, else only the unbound bucket), preferred file first.
 fn nfo_fields_for(
     tx: &Connection,
     lib: &str,
@@ -381,14 +382,19 @@ fn nfo_fields_for(
             .optional()?,
         None => None,
     };
+    let available = valid_work_input_locales(tx, lib, media)?;
+    let chain: Vec<String> = locale.into_iter().collect();
+    let Some(chosen) = select_locale(&available, &chain, LocaleFallback::UnboundInputOnly) else {
+        return Ok(MetadataFields::default());
+    };
     let fields_json: Option<String> = tx
         .query_row(
             "SELECT fields_json FROM library_metadata_inputs
              WHERE library_id = ?1 AND media_id = ?2 AND entity_scope = 'work'
-               AND parse_state = 'valid'
-             ORDER BY (locale = ?3) DESC, (path_key = norm_path_key(?4)) DESC, locale, input_key
+               AND parse_state = 'valid' AND locale = ?3
+             ORDER BY (path_key = norm_path_key(?4)) DESC, input_key
              LIMIT 1",
-            params![lib, media, locale, preferred_key],
+            params![lib, media, chosen, preferred_key],
             |r| r.get(0),
         )
         .optional()?;
@@ -447,25 +453,34 @@ fn adopted_for_library(
             fields,
         })
     };
-    if let Some(locale) = locale {
-        let exact = tx
-            .query_row(
-                &format!("{COLS} AND locale = ?2"),
-                params![media, locale],
-                read,
-            )
-            .optional()?;
-        if exact.is_some() {
-            return Ok(exact);
-        }
-    }
+    let mut stmt = tx.prepare("SELECT locale FROM media_metadata WHERE media_id = ?1")?;
+    let available = stmt
+        .query_map(params![media], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let chain: Vec<String> = locale.into_iter().collect();
+    let Some(chosen) = select_locale(&available, &chain, LocaleFallback::AdoptedFirst) else {
+        return Ok(None);
+    };
     Ok(tx
         .query_row(
-            &format!("{COLS} ORDER BY locale LIMIT 1"),
-            params![media],
+            &format!("{COLS} AND locale = ?2"),
+            params![media, chosen],
             read,
         )
         .optional()?)
+}
+
+fn valid_work_input_locales(
+    tx: &Connection,
+    lib: &str,
+    media: &str,
+) -> Result<Vec<String>, StoreError> {
+    let mut stmt = tx.prepare(
+        "SELECT DISTINCT locale FROM library_metadata_inputs
+         WHERE library_id = ?1 AND media_id = ?2 AND entity_scope = 'work' AND parse_state = 'valid'",
+    )?;
+    let rows = stmt.query_map(params![lib, media], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 fn genre_keys(raw: &str) -> Vec<String> {

@@ -1,4 +1,5 @@
 use crate::metadata::EffectiveMetadata;
+use crate::metadata::locale::{LocaleFallback, select_locale};
 use crate::{Store, StoreError};
 use domain::{FieldValue, LibraryId, MediaId, MetadataFields};
 use rusqlite::OptionalExtension;
@@ -62,28 +63,19 @@ impl Store {
         if locales.is_empty() {
             return Ok(None);
         }
-        let requested = requested.trim();
-        let library = library_display_locale(self, library_id)?;
-        let instance = instance_default_locale(self)?;
-        for candidate in [
-            Some(requested).filter(|l| !l.is_empty()),
-            library.as_deref(),
-            instance.as_deref(),
-        ] {
-            if let Some(candidate) = candidate {
-                if let Some(exact) = locales.iter().find(|l| l.as_str() == candidate) {
-                    return Ok(Some(exact.clone()));
-                }
-                let prefix = candidate.split(['-', '_']).next().unwrap_or(candidate);
-                if let Some(prefix_match) = locales
-                    .iter()
-                    .find(|l| l.split(['-', '_']).next().unwrap_or(l) == prefix)
-                {
-                    return Ok(Some(prefix_match.clone()));
-                }
-            }
-        }
-        Ok(locales.first().cloned())
+        let chain: Vec<String> = [
+            Some(requested.to_string()),
+            library_display_locale(self, library_id)?,
+            instance_default_locale(self)?,
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        Ok(select_locale(
+            &locales,
+            &chain,
+            LocaleFallback::AdoptedFirst,
+        ))
     }
 
     pub fn adopted_filter_facts_for_media(

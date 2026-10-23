@@ -3,6 +3,7 @@ pub mod compose;
 pub(crate) mod effective;
 pub mod export;
 pub mod export_driver;
+pub mod locale;
 pub mod nfo_input;
 pub mod overrides;
 pub mod types;

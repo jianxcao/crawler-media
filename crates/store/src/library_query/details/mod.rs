@@ -1,6 +1,7 @@
 use crate::library_query::items::{ITEM_COLUMNS, item_from_row};
 use crate::library_query::types::LibraryItemDetail;
 use crate::metadata::EffectiveMetadata;
+use crate::metadata::locale::{LocaleFallback, select_locale};
 use crate::{Store, StoreError};
 use domain::{LedgerId, LibraryId, MediaId, MetadataFields, UnitKey};
 use rusqlite::{OptionalExtension, params};
@@ -155,28 +156,19 @@ impl Store {
         if locales.is_empty() {
             return Ok(None);
         }
-        let chain = [
+        let chain: Vec<String> = [
             requested.map(str::to_string),
             library_display_locale(self, library_id)?,
             metadata::instance_default_locale(self)?,
-        ];
-        for candidate in chain.into_iter().flatten() {
-            let candidate = candidate.trim();
-            if candidate.is_empty() {
-                continue;
-            }
-            if let Some(exact) = locales.iter().find(|stored| stored.as_str() == candidate) {
-                return Ok(Some(exact.clone()));
-            }
-            let prefix = candidate.split(['-', '_']).next().unwrap_or(candidate);
-            if let Some(prefix_match) = locales
-                .iter()
-                .find(|stored| stored.split(['-', '_']).next().unwrap_or(stored) == prefix)
-            {
-                return Ok(Some(prefix_match.clone()));
-            }
-        }
-        Ok(locales.into_iter().find(|stored| stored.is_empty()))
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        Ok(select_locale(
+            &locales,
+            &chain,
+            LocaleFallback::UnboundInputOnly,
+        ))
     }
 
     pub(crate) fn library_seasons(

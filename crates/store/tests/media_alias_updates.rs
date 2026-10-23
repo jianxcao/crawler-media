@@ -577,3 +577,39 @@ fn registered_non_target_alias_resolves_scanned_media() {
         Err(StoreError::Protected(_))
     ));
 }
+
+/// C13: a base title/year edit of Media without adopted metadata reaches the card in
+/// the same transaction.
+#[test]
+fn base_identity_update_reaches_cards_without_adopted_metadata() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let root = tmp.path().join("tv");
+    std::fs::create_dir_all(&root).unwrap();
+    let (lib, _) = create_library(&store, "TV", MediaKind::Tv, root.to_str().unwrap());
+    let mut media = make_media("Before", Some(2020));
+    store.insert_media(&media).unwrap();
+    store::test_support::publish_fixture_file(
+        &store,
+        &store::test_support::FixtureFile {
+            media_id: media.id,
+            path: root.join("S01E01.mkv").display().to_string(),
+            season: Some(1),
+            episode: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    media.title = "After".into();
+    media.year = Some(2021);
+    store.update_media(&media).unwrap();
+    let library_id: domain::LibraryId = lib.id.parse().unwrap();
+    let item = store
+        .library_item_detail(library_id, media.id, "")
+        .unwrap()
+        .unwrap()
+        .item;
+    let updated_base_card_title = item.title;
+    let expected_base_title = "After";
+    assert_eq!(updated_base_card_title, expected_base_title);
+}

@@ -763,3 +763,84 @@ fn stale_revision_or_target_adoption_writes_nothing() {
         .unwrap();
     assert_eq!(effective.title, "fresh");
 }
+
+fn set_display_locale(store: &Store, library: domain::LibraryId, locale: &str, now: i64) {
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    store
+        .begin_library_reconfiguration(
+            &store::LibraryReconfiguration {
+                operation_id: operation_id.clone(),
+                library_id: library,
+                expected_revision: store.library_config_revision(&library.to_string()).unwrap(),
+                root_paths: None,
+                display_locale: Some(locale.into()),
+            },
+            now,
+        )
+        .unwrap();
+    for step in 0..20 {
+        let status = store
+            .advance_library_operation(&operation_id, now + 1 + step, 100)
+            .unwrap();
+        if status.state == "succeeded" {
+            return;
+        }
+    }
+    panic!("reconfiguration did not finish");
+}
+
+fn localized(media: domain::MediaId, locale: &str, title: &str) -> MetadataAdoption {
+    let mut adoption = adoption(media, "tmdb", "plot");
+    adoption.locale = locale.into();
+    adoption.normalized.fields.title = domain::FieldValue::Value(title.into());
+    adoption
+}
+
+/// C12: card and default detail resolve the Library locale by the same rule
+/// (exact, then language prefix); an explicit request still wins for the detail.
+#[test]
+fn card_and_default_detail_share_the_scoped_locale_rule() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let root = tmp.path().join("m");
+    let (library, media) = movie_with_library(&store, &root);
+    store::test_support::publish_fixture_file(
+        &store,
+        &store::test_support::FixtureFile {
+            media_id: media.id,
+            path: root.join("Base.mkv").display().to_string(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    std::fs::write(root.join("Base.mkv"), b"x").unwrap();
+    store
+        .adopt_metadata(&localized(media.id, "en-US", "English"), 1)
+        .unwrap();
+    store
+        .adopt_metadata(&localized(media.id, "zh-CN", "中文"), 2)
+        .unwrap();
+    set_display_locale(&store, library, "zh", 10);
+    let detail = |locale: &str| {
+        store
+            .library_item_detail(library, media.id, locale)
+            .unwrap()
+            .unwrap()
+    };
+    let default_card_title = detail("").item.title;
+    let default_detail_title = detail("")
+        .metadata
+        .title
+        .value()
+        .cloned()
+        .unwrap_or_default();
+    let explicit_english_detail_title = detail("en-US")
+        .metadata
+        .title
+        .value()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(default_card_title, "中文");
+    assert_eq!(default_card_title, default_detail_title);
+    assert_eq!(explicit_english_detail_title, "English");
+}

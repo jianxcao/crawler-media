@@ -316,9 +316,13 @@ impl Store {
         }
     }
 
+    /// Base identity edit; cards and terms of every owning Library are reduced in
+    /// the same transaction (reduction keeps lock/NFO/adopted precedence).
     pub fn update_media(&self, media: &Media) -> Result<(), StoreError> {
         let tx = crate::write_tx(&self.library)?;
+        crate::library_write::publish::ensure_media_writable(&tx, media.id)?;
         write_media(&tx, media)?;
+        crate::library_write::reduce::reduce_media_everywhere(&tx, media.id)?;
         tx.commit()?;
         Ok(())
     }
@@ -328,10 +332,7 @@ impl Store {
         expected: &Media,
         replacement: &Media,
     ) -> Result<bool, StoreError> {
-        let tx = rusqlite::Transaction::new_unchecked(
-            &self.library,
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
+        let tx = crate::write_tx(&self.library)?;
         let current = media_row(&tx, expected.id)?;
         if current.as_ref() != Some(expected) {
             tracing::debug!(media_id = %expected.id, "Media changed since it was written; skipping revert");
@@ -341,6 +342,7 @@ impl Store {
         // a Media that is being merged into a survivor or already retired.
         crate::library_write::publish::ensure_media_writable(&tx, replacement.id)?;
         write_media(&tx, replacement)?;
+        crate::library_write::reduce::reduce_media_everywhere(&tx, replacement.id)?;
         tx.commit()?;
         Ok(true)
     }
