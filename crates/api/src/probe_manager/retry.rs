@@ -66,7 +66,10 @@ impl ProbeManager {
             retire("unparsable_ledger_id");
             return false;
         };
-        let row = match self.store.lock().file_coverage_by_id(file_id) {
+        // Owned lookup first: the Store guard must be gone before any arm can
+        // retire (which locks the same non-reentrant mutex again).
+        let loaded = { self.store.lock().file_coverage_by_id(file_id) };
+        let row = match loaded {
             Ok(Some(row)) => row,
             Ok(None) => {
                 retire("file_deleted");

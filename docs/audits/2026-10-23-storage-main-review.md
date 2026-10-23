@@ -36,6 +36,8 @@
 
 修复：先在独立语句/词法 scope 得到 owned lookup result，释放 guard 后 match。保留 `dispatch_due(&self, i64, usize)->Result<usize,StoreError>`；回归要求返回0、阶段退役、Store可重新获取；再补 claim→删除真实文件竞态。不能增加 timeout 掩盖自锁。
 
+**状态：已修复（Task1）。** lookup 在独立块内取得 owned 结果后再 match，退役在 guard 外。回归 `api/tests/probe_retry_deleted_file.rs`（子进程+60s 外部 watchdog）：缺失 UUID、文件删除后残留重试两例；修复前两例均被 watchdog 判定自锁，修复后 0.06s 通过、dispatch 返回0、Store 1s 内可再锁、阶段已退役。claim 与删除的精确交错用“删除后残留阶段”表示，未加入生产检查点。
+
 ### S02 [P1，实测] 跨 Library organize 与 freeze 构成 ABBA
 
 位置：`api/src/http/library_organize.rs:175-178,203-211`；`api/src/library_lifecycle.rs:260-265,315-325,372-377`；`marker/src/work_control.rs:14-29`。
