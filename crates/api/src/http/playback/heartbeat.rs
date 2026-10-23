@@ -88,8 +88,9 @@ pub(crate) async fn progress(
             Ok(false) => {}
             Err(error) => return persistence_error(&error, user_id, device_id),
         }
-        let Some((file, media, season, episode)) = row_for(&store, &body, Some(user_id)) else {
-            return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
+        let (file, media, season, episode) = match row_for(&store, &body, Some(user_id)) {
+            Ok(row) => row,
+            Err(error) => return error.response(),
         };
         let Some(source) = store.visible_file(user_id, file.file_id).ok().flatten() else {
             return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");

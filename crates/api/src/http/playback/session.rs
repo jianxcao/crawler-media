@@ -10,6 +10,7 @@ use crate::http::{err, ok};
 use crate::management::ApiState;
 
 use super::direct_decision;
+use super::request::parse_selection;
 use super::selection::resolve_playback_for;
 
 /// POST /playback/sessions — direct decision with session_id null (tier 0).
@@ -19,50 +20,15 @@ pub(crate) async fn start_session(
     axum::Extension(token): axum::Extension<String>,
     Json(body): Json<Value>,
 ) -> Response {
-    if let Some(value) = body.get("start_ms") {
-        if !value.as_i64().is_some_and(|start| start >= 0) {
-            return err(
-                StatusCode::BAD_REQUEST,
-                "playback.invalid",
-                "start_ms 必须是非负整数",
-            );
-        }
-    }
-
-    // Validate coordinates: movie cannot have explicit coordinates (even 0, 0 is invalid now);
-    // TV S00E00 (season 0 episode 0) is valid.
-    {
-        let store = state.store.lock();
-        if let Some(media_id) = body
-            .get("media_item_id")
-            .and_then(|v| v.as_str())
-            .and_then(super::resolve_media_id)
-        {
-            if let Ok(Some(media)) = store.get_media(media_id) {
-                if media.kind != domain::MediaKind::Tv {
-                    let has_season = body
-                        .get("season_number")
-                        .or_else(|| body.get("season"))
-                        .is_some();
-                    let has_episode = body
-                        .get("episode_number")
-                        .or_else(|| body.get("episode"))
-                        .is_some();
-                    if has_season || has_episode {
-                        return err(
-                            StatusCode::BAD_REQUEST,
-                            "playback.invalid",
-                            "电影不能包含季集坐标",
-                        );
-                    }
-                }
-            }
-        }
-    }
+    let selection = match parse_selection(&body) {
+        Ok(selection) => selection,
+        Err(error) => return error.response(),
+    };
     let (file, media, resolved, tracks) = {
         let store = state.store.lock();
-        let Some((file, media, resolved)) = resolve_playback_for(&store, &body, user_id) else {
-            return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
+        let (file, media, resolved) = match resolve_playback_for(&store, &selection, user_id) {
+            Ok(resolved) => resolved,
+            Err(error) => return error.response(),
         };
         let tracks = store
             .get_file_meta(&file.file_id.to_string())
@@ -137,12 +103,7 @@ pub(crate) async fn start_session(
                 .collect()
         })
         .unwrap_or_default();
-    let resume_status = match resolved.status {
-        crate::store::ResumeStatus::Compatible => "compatible",
-        crate::store::ResumeStatus::SourceChanged => "source_changed",
-        crate::store::ResumeStatus::NoProgress => "no_progress",
-        crate::store::ResumeStatus::AlreadyPlayed => "already_played",
-    };
+    let resume_status = resume_status_name(resolved.status);
     let watch = json!({
         "position_ms": resolved.start_ms,
         "played": resolved.status == crate::store::ResumeStatus::AlreadyPlayed,
@@ -389,4 +350,13 @@ pub(crate) async fn session_stream(
         axum::body::Body::from_stream(stream),
     )
         .into_response())
+}
+
+pub(super) fn resume_status_name(status: crate::store::ResumeStatus) -> &'static str {
+    match status {
+        crate::store::ResumeStatus::Compatible => "compatible",
+        crate::store::ResumeStatus::SourceChanged => "source_changed",
+        crate::store::ResumeStatus::NoProgress => "no_progress",
+        crate::store::ResumeStatus::AlreadyPlayed => "already_played",
+    }
 }

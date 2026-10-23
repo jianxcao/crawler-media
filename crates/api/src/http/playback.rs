@@ -19,6 +19,7 @@ use crate::store::{UNIT_WHOLE, UnitState};
 mod chapter_cache;
 pub(crate) mod episodes;
 mod heartbeat;
+mod request;
 mod selection;
 mod session;
 pub(crate) use heartbeat::progress;
@@ -529,8 +530,9 @@ pub(crate) async fn decide(
     Json(body): Json<Value>,
 ) -> Response {
     let store = state.store.lock();
-    let Some((file, _media, _, _)) = row_for(&store, &body, user_id) else {
-        return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
+    let (file, _media, _, _) = match row_for(&store, &body, user_id) {
+        Ok(row) => row,
+        Err(error) => return error.response(),
     };
     let tracks = store
         .get_file_meta(&file.file_id.to_string())

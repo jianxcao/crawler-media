@@ -340,8 +340,8 @@ async fn up_next_lists_next_episode_for_tv_subscription() {
         "/api/v1/playback/progress",
         json!({
             "media_item_id": media_id,
-            "season": 1,
-            "episode": 1,
+            "season_number": 1,
+            "episode_number": 1,
             "play_session_id": session,
             "event": "start",
             "position_ms": 120_000,

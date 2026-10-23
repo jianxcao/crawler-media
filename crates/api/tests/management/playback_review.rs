@@ -215,13 +215,93 @@ async fn invalid_start_is_rejected_instead_of_silently_starting_at_zero() {
 }
 
 #[tokio::test]
-async fn partial_coordinates_select_only_matching_season() {
+async fn partial_coordinates_are_rejected() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, mut target) = fixture(&tmp, true);
     target.as_object_mut().unwrap().remove("file_id");
-    target["season"] = json!(99);
+    target["season_number"] = json!(99);
     assert_eq!(
         post(&app, "sessions", target).await.status(),
-        StatusCode::NOT_FOUND
+        StatusCode::BAD_REQUEST,
+        "a lone season coordinate names no unit"
+    );
+}
+
+fn session_rows(tmp: &tempfile::TempDir) -> i64 {
+    rusqlite::Connection::open(tmp.path().join("data/library.db"))
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM playback_sessions", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// R08: an explicit source is honoured or refused, never swapped for another file;
+/// obsolete `season`/`episode` keys are a contract error.
+#[tokio::test]
+async fn explicit_invalid_sources_are_refused_without_a_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, target) = fixture(&tmp, false);
+    let media_id: domain::MediaId = target["media_item_id"].as_str().unwrap().parse().unwrap();
+    let b_id = domain::LedgerId::new();
+    {
+        let store = api::Store::open(tmp.path().join("data")).unwrap();
+        publish_fixture_file(
+            &store,
+            &FixtureFile {
+                file_id: Some(b_id),
+                media_id,
+                path: tmp
+                    .path()
+                    .join("data/library/movies/movie-b.mkv")
+                    .to_string_lossy()
+                    .into(),
+                quality_source: domain::QualitySource::Probe,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let before = session_rows(&tmp);
+    let with = |key: &str, value: Value| {
+        let mut body = target.clone();
+        body[key] = value;
+        body["device_id"] = json!("strict-device");
+        body
+    };
+    for (body, status) in [
+        (with("file_id", json!(7)), StatusCode::BAD_REQUEST),
+        (
+            with("file_id", json!("not-a-uuid")),
+            StatusCode::BAD_REQUEST,
+        ),
+        (with("season", json!(1)), StatusCode::BAD_REQUEST),
+        (with("season_number", json!(0)), StatusCode::BAD_REQUEST),
+        (
+            with("file_id", json!(domain::LedgerId::new().to_string())),
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        for route in ["decide", "sessions"] {
+            assert_eq!(
+                post(&app, route, body.clone()).await.status(),
+                status,
+                "{route} {body}"
+            );
+        }
+    }
+    assert_eq!(
+        session_rows(&tmp),
+        before,
+        "a refused selection opens no session"
+    );
+
+    let explicit_b =
+        json_data(post(&app, "sessions", with("file_id", json!(b_id.to_string()))).await).await;
+    assert_eq!(explicit_b["file_id"], b_id.to_string());
+    let mut automatic = target.clone();
+    automatic.as_object_mut().unwrap().remove("file_id");
+    automatic["device_id"] = json!("strict-device");
+    assert_eq!(
+        post(&app, "sessions", automatic).await.status(),
+        StatusCode::OK
     );
 }

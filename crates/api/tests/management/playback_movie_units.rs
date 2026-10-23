@@ -137,10 +137,10 @@ async fn movie_zero_progress_is_refused_and_keeps_historical_progress() {
     .await;
     target["play_session_id"] = json!(session);
     target["event"] = json!("start");
-    // R13: 0/0 is no longer an alias of the whole movie.
+    // R13/R08: movie coordinates are a contract error, never an alias of the whole movie.
     assert_eq!(
         post(&app, "progress", target.clone()).await.status(),
-        StatusCode::NOT_FOUND
+        StatusCode::BAD_REQUEST
     );
     let uri = format!(
         "/api/v1/playback/resume?media_item_id={}",
