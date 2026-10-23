@@ -54,6 +54,7 @@ pub(crate) mod scrape_settings;
 pub(crate) mod search;
 pub(crate) mod settings;
 pub(crate) mod sites;
+pub(crate) mod strict_json;
 pub(crate) mod subscribe_schedule;
 pub(crate) mod subscription_depth;
 pub(crate) mod subscription_missing;

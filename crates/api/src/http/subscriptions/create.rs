@@ -1,6 +1,5 @@
 use std::str::FromStr;
 
-use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -16,7 +15,9 @@ use crate::management::ApiState;
 pub(crate) async fn create_subscription(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<UserId>,
-    Json(body): Json<CreateSubscriptionInput>,
+    crate::http::strict_json::StrictJson(body): crate::http::strict_json::StrictJson<
+        CreateSubscriptionInput,
+    >,
 ) -> Response {
     let (media_input, kind_hint) = match resolve_media_input(&state, &body) {
         Ok(result) => result,

@@ -128,8 +128,5 @@ async fn patch_subscription_filter_id_updates_store_and_rejects_invalid() {
         ))
         .await
         .unwrap();
-    assert_eq!(
-        unknown_field_patch.status(),
-        StatusCode::UNPROCESSABLE_ENTITY
-    );
+    assert_eq!(unknown_field_patch.status(), StatusCode::BAD_REQUEST);
 }

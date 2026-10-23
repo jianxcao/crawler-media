@@ -1,6 +1,5 @@
 use std::str::FromStr;
 
-use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -16,7 +15,9 @@ pub(crate) async fn patch_subscription(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<UserId>,
     Path(id): Path<String>,
-    Json(body): Json<PatchSubscriptionInput>,
+    crate::http::strict_json::StrictJson(body): crate::http::strict_json::StrictJson<
+        PatchSubscriptionInput,
+    >,
 ) -> Response {
     let blocking = state.clone();
     crate::http::subscriptions::guarded_blocking(&blocking, move || {

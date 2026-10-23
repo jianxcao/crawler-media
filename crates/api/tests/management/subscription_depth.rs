@@ -502,7 +502,7 @@ async fn assert_upgrade_reports(app: &axum::Router, id: &str, tmp: &tempfile::Te
         .unwrap();
     assert_eq!(
         patched.status(),
-        StatusCode::UNPROCESSABLE_ENTITY,
+        StatusCode::BAD_REQUEST,
         "selected_seasons is not a field"
     );
     let report = json_body(
