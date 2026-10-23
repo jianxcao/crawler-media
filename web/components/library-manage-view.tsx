@@ -85,7 +85,7 @@ export function LibraryManageView() {
   const isMobile = useIsMobile();
 
   // 页面只保留「媒体库」列表：回收站 / 重复文件 / 分享的端点与组件已随新契约
-  // 一并删除（listTrashedFiles / listDuplicateFiles / listShares 返回空数据），
+  // 一并删除（listShares 返回空数据），
   // 对应标签与计数在组件适配阶段整体移除。
   const [tab, setTab] = useState<"libraries" | "duplicates">("libraries");
   const [libraries, setLibraries] = useState<MediaLibrary[] | null>(null);

@@ -680,190 +680,6 @@ export interface ItemDeleteResult {
   errors: string[];
 }
 
-/** 回收站里的一个待回收文件。 */
-export interface TrashedFile {
-  id: string;
-  file_name: string;
-  file_path: string;
-  trash_original_path: string | null;
-  kept_in_place: boolean;
-  size_bytes: number;
-  resolution: string | null;
-  media_source: string | null;
-  hdr: string | null;
-  video_codec: string | null;
-  bit_depth: number | null;
-  audio_label: string | null;
-  release_group: string | null;
-  season_number: number;
-  episode_number: number;
-  episode_title: string | null;
-  trashed_at: string | null;
-  purge_after: string | null;
-  reason: string | null;
-  note: string | null;
-  last_error: string | null;
-}
-
-export interface TrashedQuality {
-  tiers: Record<string, number>;
-  hdr: string[];
-  video_codecs: string[];
-  audio_labels: string[];
-  release_groups: string[];
-}
-
-/** 回收站列表的一行。 */
-export interface TrashedItem {
-  key: string;
-  library: { id: string; name: string };
-  media_item: {
-    id: string;
-    title: string;
-    year: number | null;
-    kind: MediaType;
-    poster_url: string | null;
-  } | null;
-  seasons: number[];
-  file_count: number;
-  total_bytes: number;
-  earliest_purge_after: string | null;
-  latest_purge_after: string | null;
-  reasons: Record<string, number>;
-  note: string | null;
-  trigger_label: string | null;
-  latest_trashed_at: string | null;
-  quality: TrashedQuality;
-  files: TrashedFile[];
-}
-
-export interface TrashedFilesData {
-  total_files: number;
-  total_items: number;
-  total_bytes: number;
-  due_within_24h: number;
-  kept_in_place: number;
-  by_library: { library_id: string; name: string; count: number }[];
-  by_reason: { reason: string; count: number }[];
-  items: TrashedItem[];
-}
-
-export interface TrashedFilter {
-  q?: string;
-  library_id?: string | null;
-  reason?: string | null;
-}
-
-export interface TrashedBatchResult {
-  done: number;
-  failed: { id: string; file_name: string; error: string }[];
-  remaining: number;
-}
-
-export type DuplicateBucket = "identical" | "versions";
-
-/** 一个多文件单元里的一个文件。 */
-export interface DuplicateFile {
-  id: string;
-  file_name: string;
-  file_path: string;
-  quality_label: string;
-  size_bytes: number;
-  bit_rate: number | null;
-  resolution: string | null;
-  media_source: string | null;
-  hdr: string | null;
-  video_codec: string | null;
-  audio_label: string | null;
-  origin: FileOrigin;
-  version_key: string;
-  suggested: boolean;
-  suggest_reason: string | null;
-  kept_at: string | null;
-}
-
-/** 一个单元（电影 = 条目；剧集 = 某季某集）。 */
-export interface DuplicateUnit {
-  season_number: number;
-  episode_number: number;
-  bucket: DuplicateBucket;
-  files: DuplicateFile[];
-}
-
-/** 同构季的一个版本行。 */
-export interface DuplicateVersion {
-  key: string;
-  quality_label: string;
-  origin_label: string;
-  episodes: number[];
-  bytes: number;
-  suggested: boolean;
-}
-
-/** 一个条目的一季在某一堆里的块。 */
-export interface DuplicateSeason {
-  season_number: number;
-  bucket: DuplicateBucket;
-  uniform: boolean;
-  versions: DuplicateVersion[];
-  units: DuplicateUnit[];
-}
-
-export interface DuplicateItem {
-  library: { id: string; name: string };
-  media_item: {
-    id: string;
-    title: string;
-    year: number | null;
-    kind: MediaType;
-    poster_url: string | null;
-  };
-  seasons: DuplicateSeason[];
-}
-
-/** 三档：放心清 / 建议清 / 要你决定。 */
-export type DuplicateTier = "safe" | "suggested" | "review";
-export type DuplicateReviewKind = "resolution" | "hdr" | "unknown" | "same_tier";
-
-/** 一档、或「需要你决定」里的一组。 */
-export interface DuplicateGroup {
-  key: DuplicateTier | DuplicateReviewKind;
-  label: string;
-  hint: string;
-  units: number;
-  files: number;
-  bytes: number;
-}
-
-/** 扫描本身的状态。 */
-export interface DuplicateScanState {
-  status: string | null;
-  job_id: string | null;
-  message: string | null;
-  percent: number | null;
-  scanned_at: string | null;
-  upgrading_units: number;
-  keep_old_items: number;
-}
-
-export interface DuplicateFilesData {
-  scan: DuplicateScanState;
-  tiers: DuplicateGroup[];
-  review_groups: DuplicateGroup[];
-  total_units: number;
-  total_files: number;
-  total_bytes: number;
-  total_items: number;
-  items: DuplicateItem[];
-}
-
-export interface DuplicateFilter {
-  tier?: DuplicateTier | null;
-  review_kind?: DuplicateReviewKind | null;
-  q?: string;
-  library_id?: string | null;
-  media_item_id?: string | null;
-}
 
 /** 后台任务的启动回执。 */
 export interface PersistentJobStart {
@@ -1011,7 +827,6 @@ function jobStartOf(data: Record<string, unknown>): PersistentJobStart {
 const EMPTY_JOB_START: PersistentJobStart = { started: false, message: "", job_id: "", created: false };
 
 
-const EMPTY_TRASH_BATCH: TrashedBatchResult = { done: 0, failed: [], remaining: 0 };
 
 // ---------------------------------------------------------------------------
 // 媒体库列表与条目
@@ -1938,93 +1753,6 @@ export async function clearMissingLibraryRecords(
 }
 
 // ---------------------------------------------------------------------------
-// 回收站：后端没有独立 trash 列表（删除走 delay/ledger）。重复文件见 GET /libraries/{id}/duplicates。
-// ---------------------------------------------------------------------------
-
-/** 回收站列表。后端无独立 trash 资源，返回空清单。 */
-export function listTrashedFiles(
-  filter: TrashedFilter,
-  page: { limit: number; offset: number },
-  init?: RequestInit,
-): Promise<TrashedFilesData> {
-  return Promise.resolve({
-    total_files: 0,
-    total_items: 0,
-    total_bytes: 0,
-    due_within_24h: 0,
-    kept_in_place: 0,
-    by_library: [],
-    by_reason: [],
-    items: [],
-  });
-}
-
-/** 批量立即清理。后端无独立 trash 资源。 */
-export function purgeTrashedFiles(
-  scope: { ids: string[] } | { filter: TrashedFilter },
-): Promise<TrashedBatchResult> {
-  return Promise.resolve(EMPTY_TRASH_BATCH);
-}
-
-/** 批量恢复为在位版本。后端无独立 trash 资源。 */
-export function restoreTrashedFiles(ids: string[]): Promise<TrashedBatchResult> {
-  return Promise.resolve(EMPTY_TRASH_BATCH);
-}
-
-/** 重复文件（请用 listLibraryDuplicates；本函数保留旧形状，返回空）。 */
-export function listDuplicateFiles(
-  filter: DuplicateFilter,
-  page: { limit: number; offset: number },
-  init?: RequestInit,
-): Promise<DuplicateFilesData> {
-  return Promise.resolve({
-    scan: {
-      status: null,
-      job_id: null,
-      message: null,
-      percent: null,
-      scanned_at: null,
-      upgrading_units: 0,
-      keep_old_items: 0,
-    },
-    tiers: [],
-    review_groups: [],
-    total_units: 0,
-    total_files: 0,
-    total_bytes: 0,
-    total_items: 0,
-    items: [],
-  });
-}
-
-/** 开始扫描重复文件。无独立 scan job，重复列表由 GET /duplicates 即时计算。 */
-export function startDuplicateScan(): Promise<{ started: boolean; job_id: string; created: boolean }> {
-  return Promise.resolve({ started: false, job_id: "", created: false });
-}
-
-/** 一个单元 / 一季的决定。请用 deleteLibraryDuplicate。 */
-export function resolveDuplicates(payload: {
-  media_item_id: string;
-  season_number: number;
-  episode_number?: number | null;
-  keep_file_id?: string;
-  keep_version?: string;
-  keep_all?: boolean;
-}): Promise<TrashedBatchResult> {
-  return Promise.resolve(EMPTY_TRASH_BATCH);
-}
-
-/** 一整档 / 一组一起决定。无批量 resolve 端点。 */
-export function resolveAllDuplicates(payload: {
-  tier: DuplicateTier;
-  review_kind?: DuplicateReviewKind | null;
-  library_id?: string | null;
-  keep_all?: boolean;
-}): Promise<TrashedBatchResult> {
-  return Promise.resolve(EMPTY_TRASH_BATCH);
-}
-
-// ---------------------------------------------------------------------------
 // 收藏范围可选项 / ledger / 海报
 // ---------------------------------------------------------------------------
 
@@ -2122,14 +1850,15 @@ export async function refreshItemChapters(
   target?: ChapterTarget,
 ): Promise<RefreshedItemChapters> {
   const data = await unwrap(
-    request<ApiEnvelope<RefreshedItemChapters | ItemChapter[]>>(
+    request<ApiEnvelope<RefreshedItemChapters>>(
       chapterPath(libraryId, mediaItemId, "/refresh", target),
       { method: "POST" },
     ),
   );
-  return Array.isArray(data)
-    ? { chapters: data, fingerprint_refresh_queued: false }
-    : data;
+  if (!data || Array.isArray(data) || !Array.isArray(data.chapters)) {
+    throw new Error("chapter refresh contract violation: expected { chapters, fingerprint_refresh_queued }");
+  }
+  return data;
 }
 
 export async function fetchItemProbeStatus(

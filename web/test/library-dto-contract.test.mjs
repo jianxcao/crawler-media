@@ -76,3 +76,21 @@ test("non-array payloads are schema errors, not empty success", async () => {
   await assert.rejects(api.listUnidentifiedLibraryFiles("lib"));
   await assert.rejects(api.listMissingLibraryFiles("lib"));
 });
+
+test("chapter refresh keeps the canonical object and rejects the legacy array", async () => {
+  const canonicalPayload = { chapters: [{ title: "Intro", start_ms: 0 }], fingerprint_refresh_queued: true };
+  const ok = await loadLibraries(async () => envelope(canonicalPayload));
+  assert.deepEqual(await ok.refreshItemChapters("lib", "m"), canonicalPayload);
+  const legacy = await loadLibraries(async () => envelope([{ title: "Intro", start_ms: 0 }]));
+  await assert.rejects(legacy.refreshItemChapters("lib", "m"), /contract/i);
+});
+
+test("obsolete trash and duplicate adapters are gone", async () => {
+  const api = await loadLibraries(async () => envelope(null));
+  for (const name of [
+    "listTrashedFiles", "purgeTrashedFiles", "restoreTrashedFiles", "listDuplicateFiles",
+    "startDuplicateScan", "resolveDuplicates", "resolveAllDuplicates",
+  ]) {
+    assert.equal(api[name], undefined, name);
+  }
+});

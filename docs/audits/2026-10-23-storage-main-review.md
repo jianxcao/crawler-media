@@ -185,6 +185,8 @@ library提交删除intent后，`rewrite_fact_paths` 写subscribe.db失败被 `le
 
 这些是用户“所有旧逻辑清零”的验收项，单列而不冒充全部为本分支新增回归。历史注释、合法磁盘布局、正常可选字段、retired拒绝墓碑不自动算兼容层。
 
+**状态：已修复（Task9+Task11）。** 坐标旧键 400（Task9）；`refreshItemChapters` 只接受 canonical 对象，旧数组抛合同错误；trash/旧duplicate 假成功导出、专属DTO及仅服务它们的 `library-duplicates.ts` 已删除；后端无 fonts/trickplay 端点，删除猜数字 file ID 的 `fetchEmbeddedFonts/fetchTrickplay` 及调用（ASS 只用兜底字体、无缩略图预览）。回归 `web/test/library-dto-contract.test.mjs`。
+
 ## 数据库优化
 
 ### O01 [P2，当前实测] 深cursor的OR绑定不能使用完整复合范围

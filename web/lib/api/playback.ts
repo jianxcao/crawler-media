@@ -1,6 +1,5 @@
 import { publicEnv } from "@/lib/env";
 import { getPlayerDeviceId } from "@/lib/player/device";
-import type { TrickplayIndex } from "@/lib/player/trickplay";
 import { HttpError, getAuthToken, request, resolveRequestUrl } from "@/lib/http";
 import type {
   LibraryEpisode,
@@ -1063,46 +1062,6 @@ export async function savePlaybackPolicy(
     method: "PUT",
     body: JSON.stringify(changes),
   });
-  return response.data;
-}
-
-
-/**
- * ASS 字幕依赖的内嵌字体地址。
- *
- * 番剧的 ASS 把字体作为附件放在 MKV 里，不喂给 JASSUB 就会回退成默认字体，
- * 排版、字号、描边全走样——这是「ASS 能播」和「ASS 播得对」的差距。
- *
- * 懒加载：抽取要通读整个容器，只在真的要渲染 ASS 轨时才调。失败不是灾难，
- * JASSUB 还有兜底字体，所以调用方一律吞掉异常。
- */
-export async function fetchEmbeddedFonts(subtitleUrl: string): Promise<string[]> {
-  // 复用字幕地址上的签名 token：两者是同一个文件的同一份授权
-  const url = new URL(subtitleUrl, "http://placeholder");
-  const token = url.searchParams.get("token");
-  const fileId = url.pathname.match(/\/files\/(\d+)\//)?.[1];
-  if (!token || !fileId) return [];
-  const response = await request<ApiEnvelope<{ fonts: string[] }>>(
-    `/playback/files/${fileId}/fonts?token=${encodeURIComponent(token)}`,
-  );
-  return response.data.fonts;
-}
-
-
-/**
- * 进度条缩略图索引。
- *
- * 生成要通读整个容器，是开会话时在服务端后台起的——没就绪就是 `ready:false`，
- * 表现为没有预览，不影响播放。所以调用方轮询几次即可，失败一律吞掉。
- */
-export async function fetchTrickplay(subtitleOrStreamUrl: string): Promise<TrickplayIndex | null> {
-  const url = new URL(subtitleOrStreamUrl, "http://placeholder");
-  const token = url.searchParams.get("token");
-  const fileId = url.pathname.match(/\/files\/(\d+)\//)?.[1];
-  if (!token || !fileId) return null;
-  const response = await request<ApiEnvelope<TrickplayIndex>>(
-    `/playback/files/${fileId}/trickplay?token=${encodeURIComponent(token)}`,
-  );
   return response.data;
 }
 
