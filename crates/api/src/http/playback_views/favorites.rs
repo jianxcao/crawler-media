@@ -1,23 +1,11 @@
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Response};
-use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use serde_json::json;
+use std::collections::HashMap;
 
-use crate::http::library::{self, poster_path};
+use crate::http::library;
 use crate::http::ok;
 use crate::management::ApiState;
-use ::library::WatchTier;
-
-/// 收藏行的一条：作品 + 收藏所在的层级（最近一次收藏动作的单元）。
-struct FavoriteEntry {
-    media_id: domain::MediaId,
-    /// 最近一次收藏动作的时间（默认档按它排）
-    updated_at: i64,
-    season: i32,
-    episode: i32,
-    /// 未看优先才填：未看 → 在看 → 已看完
-    tier: Option<WatchTier>,
-}
 
 /// GET /playback/favorites?limit&offset&unwatched_first&sort&order
 /// — distinct favorited media from `playback_units`, level = most recent unit.
@@ -59,67 +47,63 @@ pub(crate) async fn favorites(
         favorite_episode_number: Option<i32>,
     }
 
-    let (candidates, total) = {
+    let order = match sort_key {
+        "title" => store::FavoriteOrder::Title,
+        "release_date" | "year" => store::FavoriteOrder::Year,
+        _ => store::FavoriteOrder::FavoritedAt,
+    };
+    let selected = {
         let store = state.store.lock();
-        let all_rows = store.list_file_coverage().unwrap_or_default();
-        let mut list = favorite_entries(&store, user_id, &all_rows, unwatched_first);
-        sort_favorite_entries(&store, &mut list, sort_key, is_desc, unwatched_first);
-        let total = list.len();
-        let cands: Vec<FavoriteCandidate> = list
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .filter_map(|entry| {
-                let media_id = entry.media_id;
-                let media = store.get_media(media_id).ok().flatten()?;
-                let owned: Vec<domain::FileCoverage> = all_rows
-                    .iter()
-                    .filter(|cov| cov.file.media_id == media_id)
-                    .filter(|cov| {
-                        crate::http::library::file_visible_to_user(
-                            &store,
-                            &cov.file,
-                            &media,
-                            Some(user_id),
-                        )
-                    })
-                    .cloned()
-                    .collect();
-                if owned.is_empty() {
-                    return None;
-                }
-                let library_id = owned
-                    .first()
-                    .and_then(|cov| {
-                        crate::http::library::library_for_file(&store, &cov.file, &media)
-                    })
-                    .map(|library| library.id)
-                    .unwrap_or_default();
-                let pref = crate::http::library::preferred_coverage(&owned).cloned();
-                let seasons = owned
-                    .iter()
-                    .flat_map(|cov| &cov.units)
-                    .filter(|u| !u.is_whole())
-                    .map(|u| u.season.max(0) as u32)
-                    .collect::<std::collections::BTreeSet<_>>();
-                let episode_count = owned
-                    .iter()
-                    .flat_map(|cov| &cov.units)
-                    .filter(|u| !u.is_whole())
-                    .count() as i64;
-                Some(FavoriteCandidate {
-                    media,
-                    library_id,
-                    preferred_coverage: pref,
+        (|| -> Result<_, store::StoreError> {
+            let libraries = crate::visible_scope::visible_library_ids(&store, user_id)?;
+            let page = store.playback_favorite_page(&store::PlaybackViewQuery {
+                user: user_id,
+                libraries,
+                limit,
+                offset,
+                order,
+                descending: is_desc,
+                unwatched_first,
+            })?;
+            let mut cands = Vec::with_capacity(page.items.len());
+            for row in page.items {
+                let Some(media) = store.get_media(row.media_id)? else {
+                    continue;
+                };
+                let owned = store.file_coverage_in_library(
+                    row.library_id,
+                    Some(row.media_id),
+                    store::FileReadScope::Published,
+                )?;
+                let units = || {
+                    owned
+                        .iter()
+                        .flat_map(|cov| &cov.units)
+                        .filter(|u| !u.is_whole())
+                };
+                cands.push(FavoriteCandidate {
+                    library_id: row.library_id.to_string(),
+                    preferred_coverage: library::preferred_coverage(&owned).cloned(),
                     file_count: owned.len(),
-                    seasons,
-                    episode_count,
-                    favorite_season_number: (entry.season >= 0).then_some(entry.season),
-                    favorite_episode_number: (entry.episode >= 0).then_some(entry.episode),
-                })
-            })
-            .collect();
-        (cands, total)
+                    seasons: units().map(|u| u.season.max(0) as u32).collect(),
+                    episode_count: units().count() as i64,
+                    favorite_season_number: (row.unit.season >= 0).then_some(row.unit.season),
+                    favorite_episode_number: (row.unit.episode >= 0).then_some(row.unit.episode),
+                    media,
+                });
+            }
+            Ok((cands, page.total))
+        })()
+    };
+    let (candidates, total) = match selected {
+        Ok(selected) => selected,
+        Err(e) => {
+            return crate::http::err(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "favorites.store",
+                &e.to_string(),
+            );
+        }
     };
 
     let files = state.browse_files.clone();
@@ -181,134 +165,4 @@ pub(crate) async fn favorites(
         }
     };
     ok(json!({ "items": page, "total": total })).into_response()
-}
-
-/// 当前身份可见的收藏作品；`with_tier` 决定要不要顺带算未看优先用的观看分级
-/// （那一趟是逐单元的存储读取，只有开了未看优先才付这份钱）。
-fn favorite_entries(
-    store: &crate::Store,
-    user_id: domain::UserId,
-    all_rows: &[domain::FileCoverage],
-    with_tier: bool,
-) -> Vec<FavoriteEntry> {
-    let media_ids: HashSet<domain::MediaId> = all_rows
-        .iter()
-        .filter_map(|row| {
-            let media = store.get_media(row.file.media_id).ok().flatten()?;
-            crate::http::library::file_visible_to_user(store, &row.file, &media, Some(user_id))
-                .then_some(row.file.media_id)
-        })
-        .collect();
-    let mut by_media: HashMap<domain::MediaId, (i64, i32, i32)> = HashMap::new();
-    for media_id in media_ids {
-        for row in store.unit_rows(user_id, media_id).unwrap_or_default() {
-            if !row.favorite {
-                continue;
-            }
-            let favorited_at = row.favorite_at;
-            let entry = by_media
-                .entry(media_id)
-                .or_insert((0, row.season, row.episode));
-            if favorited_at > entry.0 {
-                *entry = (favorited_at, row.season, row.episode);
-            }
-        }
-    }
-    by_media
-        .into_iter()
-        .map(|(media_id, (updated_at, season, episode))| FavoriteEntry {
-            media_id,
-            updated_at,
-            season,
-            episode,
-            tier: with_tier.then(|| favorite_tier(store, user_id, all_rows, media_id)),
-        })
-        .collect()
-}
-
-/// 一部作品的观看分级。与库行、筛选条共用 `selection::watch_state_for`：同一部作品
-/// 不该在两处被分到不同的档（比如这里"在看"、筛选条里"未观看"）。
-fn favorite_tier(
-    store: &crate::Store,
-    user_id: domain::UserId,
-    all_rows: &[domain::FileCoverage],
-    media_id: domain::MediaId,
-) -> WatchTier {
-    let Some(media) = store.get_media(media_id).ok().flatten() else {
-        return WatchTier::default();
-    };
-    let mut seen = false;
-    let mut played = false;
-    if let Ok(Some(whole)) = store.unit_state(
-        user_id,
-        media.id,
-        crate::store::UNIT_WHOLE,
-        crate::store::UNIT_WHOLE,
-    ) {
-        played |= whole.played;
-        seen |= whole.played || whole.position_ms > 0 || whole.play_count > 0;
-    }
-    for row in all_rows.iter().filter(|row| row.file.media_id == media_id) {
-        for unit in &row.units {
-            let (Ok(season), Ok(episode)) =
-                (u32::try_from(unit.season), u32::try_from(unit.episode))
-            else {
-                continue;
-            };
-            if let Ok(Some(unit)) =
-                store.unit_state(user_id, media.id, season as i32, episode as i32)
-            {
-                seen |= unit.played || unit.position_ms > 0 || unit.play_count > 0;
-            }
-        }
-    }
-    WatchTier::of(seen, played)
-}
-
-/// 排序。`unwatched_first` 开着时先按观看分级（未看 → 在看 → 已看完），段内仍是这一档
-/// 自己的排序；关掉时与加这个开关之前逐字相同。末位一律用 id 兜底，保证翻页不重不漏。
-///
-/// title/year 比较键在排序前一次物化，比较器内不再查库。
-fn sort_favorite_entries(
-    store: &crate::Store,
-    list: &mut [FavoriteEntry],
-    sort_key: &str,
-    is_desc: bool,
-    unwatched_first: bool,
-) {
-    let keys: HashMap<domain::MediaId, (String, Option<u16>)> = list
-        .iter()
-        .map(|entry| {
-            let media = store.get_media(entry.media_id).ok().flatten();
-            let title = media
-                .as_ref()
-                .map(|media| media.title.clone())
-                .unwrap_or_default();
-            let year = media.and_then(|media| media.year);
-            (entry.media_id, (title, year))
-        })
-        .collect();
-    let title = |id: &domain::MediaId| {
-        keys.get(id)
-            .map(|(title, _)| title.clone())
-            .unwrap_or_default()
-    };
-    let year = |id: &domain::MediaId| keys.get(id).and_then(|(_, year)| *year);
-    list.sort_by(|a, b| {
-        let tier = if unwatched_first {
-            a.tier.unwrap_or_default().cmp(&b.tier.unwrap_or_default())
-        } else {
-            std::cmp::Ordering::Equal
-        };
-        let primary = match sort_key {
-            "title" if is_desc => title(&b.media_id).cmp(&title(&a.media_id)),
-            "title" => title(&a.media_id).cmp(&title(&b.media_id)),
-            "release_date" | "year" if is_desc => year(&b.media_id).cmp(&year(&a.media_id)),
-            "release_date" | "year" => year(&a.media_id).cmp(&year(&b.media_id)),
-            _ if is_desc => b.updated_at.cmp(&a.updated_at),
-            _ => a.updated_at.cmp(&b.updated_at),
-        };
-        tier.then(primary)
-            .then_with(|| a.media_id.to_string().cmp(&b.media_id.to_string()))
-    });
 }

@@ -18,6 +18,7 @@ mod fingerprint_models;
 mod fingerprint_samples;
 mod ledger;
 pub use ledger::FileReadScope;
+pub use library_query::{FavoriteOrder, PlaybackViewPage, PlaybackViewQuery, PlaybackViewRow};
 mod ledger_cleanup;
 mod ledger_presence;
 mod ledger_quality;
