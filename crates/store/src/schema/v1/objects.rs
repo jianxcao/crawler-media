@@ -122,12 +122,15 @@ pub const LIBRARY_INDEXES: &[&str] = &[
     "probe_unit_status",
     "probe_obligation_dispatch",
     "probe_retry",
+    "probe_stage_active_job",
     "chapter_dispatch",
     "sample_lookup",
     "sample_job",
     "season_model_lookup",
     "model_file",
     "attempt_job_file",
+    "media_survivor",
+    "unidentified_root",
 ];
 
 pub const JOBS_TABLES: &[&str] = &["job_defs", "jobs", "retention_cursors", "job_change_state"];

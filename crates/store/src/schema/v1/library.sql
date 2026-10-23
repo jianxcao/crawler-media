@@ -7,6 +7,7 @@ CREATE TABLE media (
  UNIQUE(media_id,kind), CHECK((identity_state='retired')=(survivor_id IS NOT NULL)), CHECK(survivor_id IS NULL OR survivor_id<>media_id)
 );
 CREATE INDEX media_title ON media(kind,title,year,media_id);
+CREATE INDEX media_survivor ON media(survivor_id) WHERE survivor_id IS NOT NULL;
 CREATE TABLE media_aliases (
  source TEXT NOT NULL CHECK(source IN ('tmdb','douban','tvdb','bangumi','anilist')),
  kind TEXT NOT NULL, external_id TEXT NOT NULL, media_id TEXT NOT NULL,
@@ -299,6 +300,7 @@ CREATE TABLE pending_file_renames (
 CREATE INDEX pending_file_renames_due ON pending_file_renames(next_retry_at, rename_id);
 CREATE TABLE scrape_sidecars (file_id TEXT NOT NULL REFERENCES library_files(file_id) ON DELETE CASCADE,kind TEXT NOT NULL,path TEXT NOT NULL,PRIMARY KEY(file_id,kind));
 CREATE TABLE unidentified (library_id TEXT NOT NULL,root_id TEXT NOT NULL,path TEXT NOT NULL,confidence TEXT NOT NULL,PRIMARY KEY(library_id,path),FOREIGN KEY(root_id,library_id) REFERENCES library_roots(root_id,library_id));
+CREATE INDEX unidentified_root ON unidentified(root_id,library_id);
 CREATE TABLE scan_operations (
  id TEXT PRIMARY KEY NOT NULL,library_id TEXT NOT NULL,scope_signature TEXT NOT NULL,status TEXT NOT NULL,generation INTEGER NOT NULL,
  created_at_ms INTEGER NOT NULL,report_json TEXT NOT NULL DEFAULT '{}',targets_json TEXT NOT NULL DEFAULT '[]',
@@ -327,6 +329,7 @@ CREATE INDEX probe_unit_status ON probe_job_units(job_id,status);
 CREATE TABLE file_probe_obligations (file_id TEXT PRIMARY KEY NOT NULL REFERENCES library_files(file_id) ON DELETE CASCADE,created_at_ms INTEGER NOT NULL,reason TEXT NOT NULL);
 CREATE INDEX probe_obligation_dispatch ON file_probe_obligations(created_at_ms,file_id);
 CREATE TABLE probe_stage_state (file_id TEXT NOT NULL,context_key TEXT NOT NULL,stage TEXT NOT NULL,status TEXT NOT NULL,failure_count INTEGER NOT NULL DEFAULT 0,next_retry_at_ms INTEGER,error_kind TEXT,error TEXT,active_job_id TEXT,dispatched_until_ms INTEGER,updated_at_ms INTEGER NOT NULL,PRIMARY KEY(file_id,context_key,stage));
+CREATE INDEX probe_stage_active_job ON probe_stage_state(active_job_id) WHERE active_job_id IS NOT NULL;
 CREATE INDEX probe_retry ON probe_stage_state(next_retry_at_ms,file_id,context_key,stage) WHERE status='failed' AND next_retry_at_ms IS NOT NULL AND active_job_id IS NULL;
 CREATE TABLE probe_season_comparison_history (media_id TEXT NOT NULL,season INTEGER NOT NULL,comparison_digest TEXT NOT NULL,published_at_ms INTEGER NOT NULL,PRIMARY KEY(media_id,season));
 CREATE TABLE chapter_frame_tasks (id TEXT PRIMARY KEY NOT NULL,file_id TEXT NOT NULL,source_version TEXT NOT NULL,targets_json TEXT NOT NULL,targets_hash TEXT NOT NULL,status TEXT NOT NULL,error TEXT,created_at_ms INTEGER NOT NULL,started_at_ms INTEGER,finished_at_ms INTEGER,UNIQUE(file_id,source_version,targets_hash));
