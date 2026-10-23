@@ -195,7 +195,7 @@ pub fn initialize_or_validate(
 ) -> Result<(), StoreError> {
     if is_uninitialized(conn)? {
         conn.execute("PRAGMA foreign_keys = ON;", [])?;
-        let tx = conn.unchecked_transaction()?;
+        let tx = crate::write_tx(conn)?;
         tx.execute_batch(ddl)?;
         tx.pragma_update(None, "application_id", expected_app_id)?;
         tx.pragma_update(None, "user_version", expected_user_ver)?;

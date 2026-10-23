@@ -126,7 +126,7 @@ impl Store {
         request: &NfoExportRequest,
         now_ms: i64,
     ) -> Result<OperationStatus, StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let library = request.library_id.to_string();
         let lifecycle: Option<String> = tx
             .query_row(
@@ -186,7 +186,7 @@ impl Store {
         observed_digest: &str,
         now_ms: i64,
     ) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let plan_json: Option<String> = tx
             .query_row(
                 "SELECT plan_json FROM library_operations
@@ -284,7 +284,7 @@ impl Store {
 
     /// Exports whose intent is durable but whose file may not be registered.
     pub fn pending_nfo_exports(&self) -> Result<Vec<NfoExportRequest>, StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let mut requests = Vec::new();
         for (_, plan_json) in scrape_operations(&tx)? {
             requests.push(decode_plan(&plan_json)?);

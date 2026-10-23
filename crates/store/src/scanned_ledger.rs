@@ -16,7 +16,7 @@ impl Store {
         ledger_id: LedgerId,
         media_id: MediaId,
     ) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let file_id = ledger_id.to_string();
         let current: Option<(String, String, String)> = tx
             .query_row(

@@ -38,7 +38,7 @@ impl Store {
     ) -> Result<(ProbeJob, bool, bool, i64), StoreError> {
         let started_at = std::time::Instant::now();
         let mut vm_steps = 0_i64;
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let existing = {
             let mut statement = tx.prepare(
                 "SELECT total, kind, completed, succeeded, failed, partial
@@ -131,7 +131,7 @@ impl Store {
     }
 
     pub(super) fn reconcile_job_counts(&self, job_id: &str) -> Result<ProbeJob, StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         reconcile_counts_in_transaction(&tx, job_id)?;
         tx.commit()?;
         self.get_probe_job(job_id)?

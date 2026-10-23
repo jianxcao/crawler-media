@@ -77,7 +77,7 @@ impl Store {
                 "exceeded {MAX_SCAN_BATCH} files per scan batch"
             )));
         }
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let mut affected: HashMap<(String, MediaId), BatchChange> = HashMap::new();
         for scanned in rows {
             let kind = media_kind(&tx, scanned.media_id)?;

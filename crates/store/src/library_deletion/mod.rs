@@ -177,7 +177,7 @@ impl Store {
             }
         }
         let operation_id = uuid::Uuid::new_v4().to_string();
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         tx.execute(
             "INSERT INTO library_removals (operation_id, library_id, state, snapshot_json,
              removed_ledger_count, created_at_ms, updated_at_ms)
@@ -319,7 +319,7 @@ impl Store {
             .map_err(|error| StoreError::Protected(format!("清理 Library 台账失败: {error}")))?;
         #[cfg(test)]
         removal_cleanup_failpoint()?;
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         tx.execute(
             "DELETE FROM unidentified WHERE library_id=?1",
             [&removal.library_id],
@@ -442,7 +442,7 @@ impl Store {
         // point at `library_files` rows, so a bare row delete would abort the commit.
         // Everything stays in this one transaction, so any failure rolls back the
         // whole cleanup instead of leaving a partially reduced Library.
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let removed = crate::library_write::delete::delete_files_in_tx(&tx, library_id, &file_ids)?;
         let mut unit_rows = std::collections::HashSet::new();
         for row in &snapshot.rows {

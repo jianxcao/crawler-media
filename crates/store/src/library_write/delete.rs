@@ -25,7 +25,7 @@ impl super::super::Store {
         if file_ids.is_empty() {
             return Ok(0);
         }
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let removed = delete_files_in_tx(&tx, library_id, file_ids)?;
         tx.commit()?;
         Ok(removed)

@@ -76,7 +76,7 @@ impl Store {
         self.ensure_library_mutable(&library.id)?;
         self.ensure_removal_roots_available(&[path])?;
         let sort_order = self.roots_of(&library.id)?.len() as i32;
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         tx.execute(
             "INSERT INTO library_roots (root_id, library_id, path_key, display_path, enabled, sort_order)
              VALUES (?1, ?2, ?5, ?3, 1, ?4)",

@@ -86,7 +86,7 @@ impl Store {
         let NfoInputReconcileObserved { plan, observations } = observed;
         let path = plan.path.as_path();
         let target = &plan.target;
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let before = tx.total_changes();
         if !record_nfo_observations(&tx, target, &observations)? {
             tracing::warn!(

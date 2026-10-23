@@ -151,7 +151,7 @@ fn prune_qoe(
     let cursor_secs = cursor.map(|cursor| cursor.at_ms.div_euclid(1000));
     let cursor_id = cursor.map(|cursor| cursor.id.as_str());
 
-    let tx = store.library.unchecked_transaction()?;
+    let tx = crate::write_tx(&store.library)?;
     let mut rows = Vec::with_capacity(limit.saturating_add(1));
     {
         let mut stmt = tx.prepare(
@@ -279,7 +279,7 @@ fn prune_transient_catalog(
          LIMIT ?6"
     );
 
-    let tx = store.cache.unchecked_transaction()?;
+    let tx = crate::write_tx(&store.cache)?;
     let mut rows: Vec<(String, i64, String, i64)> = Vec::with_capacity(limit.saturating_add(1));
     {
         let mut stmt = tx.prepare(&sql)?;
@@ -368,7 +368,7 @@ fn prune_probe_history(
     let cursor_at = cursor.map(|cursor| cursor.at_ms);
     let cursor_id = cursor.map(|cursor| cursor.id.as_str());
 
-    let tx = store.library.unchecked_transaction()?;
+    let tx = crate::write_tx(&store.library)?;
     let mut rows = Vec::with_capacity(limit.saturating_add(1));
     {
         let sql = format!(

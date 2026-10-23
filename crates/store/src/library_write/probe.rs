@@ -68,7 +68,7 @@ impl Store {
         p: &ProbePublication<'_>,
         _now_ms: i64,
     ) -> Result<bool, StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let id = file_id.to_string();
         let Some((library_id, media_id)) = file_owner_tx(&tx, &id)? else {
             return Ok(false);

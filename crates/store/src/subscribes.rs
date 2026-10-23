@@ -371,7 +371,7 @@ impl Store {
     }
 
     pub fn delete_subscribe(&self, id: SubscribeId) -> Result<bool, StoreError> {
-        let tx = self.subscribe.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.subscribe)?;
         for table in ["pending_downloads", "subscribe_facts", "subscribe_wanted"] {
             tx.execute(
                 &format!("DELETE FROM {table} WHERE subscribe_id = ?1"),
@@ -679,7 +679,7 @@ impl Store {
         facts: &SubscribeFacts,
     ) -> Result<(), StoreError> {
         self.persist_owned_quality(facts)?;
-        let tx = self.subscribe.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.subscribe)?;
         let mut statement = tx.prepare(
             "INSERT INTO subscribe_facts (subscribe_id, season, episode, score, path)
              VALUES (?1, ?2, ?3, ?4, ?5)

@@ -55,7 +55,7 @@ impl Store {
         now_ms: i64,
         reset_facts: bool,
     ) -> Result<FileVersion, StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         ensure_library_writable(&tx, &scope.library_id.to_string())?;
         ensure_config_revision(&tx, scope)?;
 

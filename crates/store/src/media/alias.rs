@@ -19,7 +19,7 @@ impl Store {
     /// Add an alias to a media. First alias for (source, kind) becomes the refresh target.
     /// Subsequent aliases do not silently switch the refresh target.
     pub fn add_media_alias(&self, media_id: MediaId, alias: &MediaAlias) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         crate::library_write::publish::ensure_media_writable(&tx, media_id)?;
 
         let id_str = media_id.to_string();
@@ -119,7 +119,7 @@ impl Store {
         expected_revision: i64,
         media: &Media,
     ) -> Result<i64, StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let id_str = media.id.to_string();
 
         let current_state_and_rev: Option<(String, i64)> = tx

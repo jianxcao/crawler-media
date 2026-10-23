@@ -236,7 +236,7 @@ impl Store {
         request: &MediaMergeRequest,
         now_ms: i64,
     ) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let survivor_kind = media_kind(&tx, survivor)?;
         let loser_kind = media_kind(&tx, loser)?;
         if survivor_kind != loser_kind {
@@ -287,7 +287,7 @@ impl Store {
         loser: MediaId,
         now_ms: i64,
     ) -> Result<(), StoreError> {
-        let tx = self.subscribe.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.subscribe)?;
         let moved = tx.execute(
             "UPDATE subscribes SET media_id = ?1 WHERE media_id = ?2",
             params![survivor.to_string(), loser.to_string()],
@@ -321,7 +321,7 @@ impl Store {
         frozen: &crate::media_operations::FrozenPair,
         now_ms: i64,
     ) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         ensure_loser_has_no_references(&tx, loser)?;
         tx.execute(
             "UPDATE media SET identity_state = 'retired', survivor_id = ?1

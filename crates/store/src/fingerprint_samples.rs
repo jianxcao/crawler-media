@@ -113,7 +113,7 @@ impl Store {
     }
 
     pub fn delete_fingerprint_samples_for_ledger(&self, ledger_id: &str) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         delete_samples_for_ledger(&tx, ledger_id)?;
         tx.commit()?;
         Ok(())

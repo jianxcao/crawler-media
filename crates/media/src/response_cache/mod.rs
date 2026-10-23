@@ -98,6 +98,7 @@ pub fn open(path: impl AsRef<Path>) -> Result<Connection, CacheDbError> {
             path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
+        ro.busy_timeout(std::time::Duration::from_secs(5))?;
         let app_id: u32 = ro.query_row("PRAGMA application_id", [], |r| r.get(0))?;
         let user_ver: u32 = ro.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         let has_tables: bool = ro.query_row(
@@ -174,8 +175,11 @@ pub fn validate_schema(conn: &Connection) -> Result<(), CacheDbError> {
 }
 
 pub fn initialize(conn: &Connection) -> Result<(), CacheDbError> {
-    let current_app_id: u32 = conn.query_row("PRAGMA application_id", [], |r| r.get(0))?;
-    let current_user_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    // Inspect and initialize under one IMMEDIATE lock so concurrent first opens
+    // serialize: the loser re-reads the committed identity instead of racing DDL.
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let current_app_id: u32 = tx.query_row("PRAGMA application_id", [], |r| r.get(0))?;
+    let current_user_version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
 
     if current_app_id != 0 && current_app_id != CACHE_APPLICATION_ID {
         return Err(CacheDbError::LegacyFormat(format!(
@@ -188,32 +192,50 @@ pub fn initialize(conn: &Connection) -> Result<(), CacheDbError> {
             supported: CACHE_USER_VERSION as i64,
         });
     }
-
-    let has_objects: bool = conn.query_row(
+    if current_app_id == CACHE_APPLICATION_ID && current_user_version == CACHE_USER_VERSION as i64 {
+        validate_schema(&tx)?;
+        return Ok(());
+    }
+    let has_objects: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%')",
         [],
         |r| r.get(0),
     )?;
-    if current_app_id == CACHE_APPLICATION_ID && current_user_version == CACHE_USER_VERSION as i64 {
-        validate_schema(conn)?;
-        return Ok(());
-    }
     if has_objects {
         return Err(CacheDbError::LegacyFormat(
             "unversioned cache database contains schema objects".into(),
         ));
     }
 
-    // Apply DDL and identity atomically; only an empty, unversioned file is initialized.
-    conn.execute_batch(&format!(
-        "BEGIN IMMEDIATE;\n{CACHE_SCHEMA_SQL}\nPRAGMA application_id = {CACHE_APPLICATION_ID};\nPRAGMA user_version = {CACHE_USER_VERSION};\nCOMMIT;"
+    tx.execute_batch(&format!(
+        "{CACHE_SCHEMA_SQL}\nPRAGMA application_id = {CACHE_APPLICATION_ID};\nPRAGMA user_version = {CACHE_USER_VERSION};"
     ))?;
+    tx.commit()?;
     Ok(())
 }
 
+/// The rollback→WAL switch needs an exclusive lock and SQLite reports BUSY
+/// without consulting the busy handler when concurrent first opens hold shared
+/// locks, so retry within the same 5s budget as `busy_timeout`.
+fn enable_wal(conn: &Connection) -> Result<(), CacheDbError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match conn.pragma_update(None, "journal_mode", "WAL") {
+            Ok(()) => return Ok(()),
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::DatabaseBusy
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
 fn apply_connection_policy(conn: &Connection) -> Result<(), CacheDbError> {
-    conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "busy_timeout", "5000")?;
+    enable_wal(conn)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     Ok(())
 }

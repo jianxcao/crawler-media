@@ -427,7 +427,7 @@ impl Store {
         let match_rules_json = serde_json::to_string(match_rules)?;
         // The library row and its roots commit together: a rejected root must
         // not leave behind a Library the caller never successfully created.
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         tx.execute(
             "INSERT INTO libraries
                 (library_id, kind, name, is_default, sort_order, access_mode, admin_visible, member_ids_json, match_rules_json, default_filter_id)
@@ -583,7 +583,7 @@ impl Store {
         }
         // One transaction for the row updates and the root replacement, so a
         // rejected root cannot leave a partially updated Library behind.
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         if let Some(name) = name {
             if !name.trim().is_empty() {
                 tx.execute(

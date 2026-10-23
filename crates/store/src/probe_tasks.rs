@@ -73,7 +73,7 @@ impl Store {
         if units.is_empty() {
             return Ok(false);
         }
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let inserted = tx.execute(
             "INSERT INTO probe_jobs (
                  id, kind, media_id, season, scope_key, status, total, created_at_ms
@@ -127,7 +127,7 @@ impl Store {
     /// windows decide what runs next, and the SQL here only repairs durable
     /// status/counters for active jobs.
     pub fn reset_running_probe_units(&self) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         tx.execute(
             "UPDATE probe_job_units SET status = 'queued'
              WHERE status = 'running' AND job_id IN (
@@ -226,7 +226,7 @@ impl Store {
         // never requeue a running unit: drain and retry assessment must observe
         // the job the live worker is finishing, not reset it back to queued.
         {
-            let tx = self.library.unchecked_transaction()?;
+            let tx = crate::write_tx(&self.library)?;
             let ids: Vec<String> = {
                 let mut statement = tx.prepare(
                     "SELECT id FROM probe_jobs WHERE status IN ('queued', 'running')
@@ -289,7 +289,7 @@ impl Store {
     }
 
     pub fn start_probe_unit(&self, job_id: &str, ledger_id: &str) -> Result<bool, StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let changed = tx.execute(
             "UPDATE probe_job_units SET status = 'running'
              WHERE job_id = ?1 AND file_id = ?2 AND status = 'queued'
@@ -364,7 +364,7 @@ impl Store {
 
     /// Cancel an atomic refresh, terminalizing pending units and releasing the scope together.
     pub fn cancel_probe_job(&self, job_id: &str, reason: &str) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         tx.execute(
             "UPDATE probe_job_units SET status = 'cancelled', error = ?2
              WHERE job_id = ?1 AND status IN ('queued', 'running')

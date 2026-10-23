@@ -138,7 +138,7 @@ impl Store {
         job_id: &str,
         now_ms: i64,
     ) -> Result<bool, StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let claimed = claim_probe_stage_tx(&tx, key, job_id, now_ms)?;
         if claimed {
             tx.commit()?;
@@ -153,7 +153,7 @@ impl Store {
         completion: &ProbeStageCompletion,
         now_ms: i64,
     ) -> Result<bool, StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let (status, err_kind, err_msg, next_retry, inc_fail) = match completion {
             ProbeStageCompletion::Succeeded => {
                 (ProbeStageStatus::Succeeded, None, None, None, false)
@@ -255,7 +255,7 @@ impl Store {
         lease_ms: i64,
         limit: usize,
     ) -> Result<Vec<ProbeStageState>, StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let rows = {
             let mut stmt = tx.prepare(
                 "SELECT file_id, context_key, stage, status, failure_count, next_retry_at_ms, error_kind, error, active_job_id

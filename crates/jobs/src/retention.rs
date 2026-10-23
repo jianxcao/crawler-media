@@ -46,7 +46,7 @@ pub(crate) fn prune_terminal_jobs(
     if batch_size == 0 {
         return Ok(RetentionBatch::default());
     }
-    let tx = conn.unchecked_transaction()?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     let window = candidate_window(&tx, cutoff, batch_size)?;
     let has_more = window.len() > batch_size;
     let candidates: Vec<&str> = window.iter().take(batch_size).map(String::as_str).collect();

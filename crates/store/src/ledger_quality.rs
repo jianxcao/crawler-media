@@ -41,7 +41,7 @@ impl Store {
     /// Persist provenance dimensions that stream probing cannot recover.
     /// The Library row owns this quality, so a later Subscribe can reuse it.
     pub(crate) fn persist_owned_quality(&self, facts: &SubscribeFacts) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         for (_, fact) in facts.entries() {
             let Some(path) = fact.path.as_deref() else {
                 continue;

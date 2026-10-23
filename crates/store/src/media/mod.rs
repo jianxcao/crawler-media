@@ -105,7 +105,7 @@ fn write_media(conn: &rusqlite::Connection, media: &Media) -> Result<(), StoreEr
 
 impl Store {
     pub fn insert_media(&self, media: &Media) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let has_external = media.tmdb_id.is_some()
             || media.douban_id.is_some()
             || media.tvdb_id.is_some()
@@ -317,7 +317,7 @@ impl Store {
     }
 
     pub fn update_media(&self, media: &Media) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         write_media(&tx, media)?;
         tx.commit()?;
         Ok(())
@@ -525,7 +525,7 @@ impl Store {
     }
 
     pub fn delete_media(&self, id: MediaId) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         tx.execute(
             "DELETE FROM media_aliases WHERE media_id = ?1",
             params![id.to_string()],

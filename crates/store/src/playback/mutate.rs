@@ -295,7 +295,7 @@ impl Store {
         change: &PlaybackMutation,
         now_ms: i64,
     ) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let (season, episode) = match change.scope {
             UnitScope::Whole => (-1, -1),
             UnitScope::Season(s) => (s as i32, -1),

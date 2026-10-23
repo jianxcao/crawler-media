@@ -28,7 +28,7 @@ impl Store {
         mode: library::TransferMode,
         _now_ms: i64,
     ) -> Result<FileCoverage, StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         ensure_library_writable(&tx, &scope.library_id.to_string())?;
         ensure_config_revision(&tx, scope)?;
         ensure_media_writable(&tx, candidate.file.media_id)?;
@@ -146,7 +146,7 @@ impl Store {
         expected: &FileVersion,
         now_ms: i64,
     ) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         ensure_library_writable(&tx, &scope.library_id.to_string())?;
         ensure_config_revision(&tx, scope)?;
 

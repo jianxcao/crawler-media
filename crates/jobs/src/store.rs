@@ -308,7 +308,7 @@ pub fn update_def_config_cas(
     new_payload: &str,
     new_schedule: Option<Option<&Schedule>>,
 ) -> Result<PayloadUpdate, JobError> {
-    let tx = conn.unchecked_transaction()?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     let current: Option<String> = tx
         .query_row(
             "SELECT payload FROM job_defs WHERE id = ?1",

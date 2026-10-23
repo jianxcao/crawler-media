@@ -55,7 +55,7 @@ impl Store {
             }
         }
         self.ensure_removal_roots_available(&paths)?;
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         for (kind, path) in roots {
             let root_id: String = tx.query_row(
                 "SELECT r.root_id FROM library_roots r
@@ -272,7 +272,7 @@ impl Store {
     }
 
     pub fn delete_file_meta_by_ledger_id(&self, ledger_id: &str) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         delete_file_meta_for_ledger(&tx, ledger_id)?;
         tx.commit()?;
         Ok(())
@@ -447,7 +447,7 @@ impl Store {
 
     /// 文件重新入库后清除缺失标记（摘要随事实在同一事务里重算）。
     pub fn clear_ledger_missing(&self, path: &str) -> Result<bool, StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let mut owners = Vec::new();
         {
             let mut stmt = tx.prepare(
@@ -520,7 +520,7 @@ impl Store {
         if targets.is_empty() {
             return Ok(0);
         }
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         for file in targets {
             tx.execute(
                 "DELETE FROM library_files WHERE file_id = ?1",

@@ -124,7 +124,7 @@ impl Store {
                 "file {file_id} on disk no longer matches its recorded version"
             )));
         }
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let id = file_id.to_string();
         let from_str = from.to_string_lossy().into_owned();
         let owned = load_owned(&tx, &id, &from_str)?;
@@ -222,7 +222,7 @@ impl Store {
         // Sidecars move here, under the Store lock, after re-checking ownership so a
         // file published since `begin` cannot lose shared artwork.
         let mut sidecars = request.sidecars.clone();
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         recheck_for_execution(
             &tx,
             &request.file_id.to_string(),
@@ -280,7 +280,7 @@ impl Store {
         let observed = library::observe_source(&request.to_path).map_err(|error| {
             StoreError::Protected(format!("rename {rename_id}: observe destination: {error}"))
         })?;
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let id = request.file_id.to_string();
         let from_str = request.from_path.to_string_lossy().into_owned();
         let to_str = request.to_path.to_string_lossy().into_owned();

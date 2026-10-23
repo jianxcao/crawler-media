@@ -162,7 +162,7 @@ impl Store {
         if !self.library.is_autocommit() {
             return operation(self);
         }
-        let transaction = self.library.unchecked_transaction()?;
+        let transaction = crate::write_tx(&self.library)?;
         let result = operation(self)?;
         transaction.commit()?;
         Ok(result)

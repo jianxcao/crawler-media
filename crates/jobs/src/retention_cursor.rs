@@ -123,7 +123,7 @@ pub fn prune_terminal_window(
     dry_run: bool,
 ) -> Result<RetentionWindow, JobError> {
     let limit = limit.clamp(1, 500);
-    let tx = conn.unchecked_transaction()?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
 
     let cursor_opt: Option<(i64, i64, i64)> = match tx.query_row(
         "SELECT finished_at, last_rowid, cutoff FROM retention_cursors WHERE def_id = ?1",

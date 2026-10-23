@@ -69,7 +69,7 @@ impl Store {
                 "exceeded 100 files per publication batch".into(),
             ));
         }
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         ensure_library_writable(&tx, &scope.library_id.to_string())?;
         ensure_config_revision(&tx, scope)?;
         let mut report = PublishReport::default();
@@ -168,7 +168,7 @@ impl Store {
         media_id: MediaId,
         _now_ms: i64,
     ) -> Result<usize, StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let reduced = reduce_media_everywhere(&tx, media_id)?;
         tx.commit()?;
         Ok(reduced)
@@ -229,7 +229,7 @@ impl Store {
         mode: super::PresenceMode,
         now_ms: i64,
     ) -> Result<super::PresenceReport, StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         ensure_library_writable(&tx, &scope.library_id.to_string())?;
         ensure_config_revision(&tx, scope)?;
         let mut report = super::PresenceReport::default();
@@ -330,7 +330,7 @@ impl Store {
         details: &super::super::files::FileDetails,
         _now_ms: i64,
     ) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let file_id_str = file_id.to_string();
         ensure_file_version(&tx, &file_id_str, expected)?;
         upsert_file_details(&tx, &file_id_str, details)?;

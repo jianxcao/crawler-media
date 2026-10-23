@@ -141,7 +141,7 @@ impl Store {
         // second owner. Without this, a Library being deleted is frozen again for a
         // migration that then fights the removal for the same files.
         self.ensure_library_mutable(&library)?;
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let current: Option<(i64, String)> = tx
             .query_row(
                 "SELECT config_revision, lifecycle_state FROM libraries WHERE library_id = ?1",
@@ -240,7 +240,7 @@ impl Store {
             )));
         }
         let batch = max_media;
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let row: Option<(String, String, String, String, i64)> = tx
             .query_row(
                 "SELECT library_id, kind, state, plan_json, expected_revision

@@ -33,7 +33,7 @@ impl Store {
         if !self.subscribe.is_autocommit() {
             return operation(self);
         }
-        let transaction = self.subscribe.unchecked_transaction()?;
+        let transaction = crate::write_tx(&self.subscribe)?;
         let result = operation(self)?;
         transaction.commit()?;
         Ok(result)

@@ -31,7 +31,7 @@ impl Store {
         marker: &str,
     ) -> Result<bool, StoreError> {
         self.ensure_library_mutable(id)?;
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let changed = tx.execute(
             "UPDATE libraries SET cover_path = ?1, cover_revision = cover_revision + 1
              WHERE library_id = ?2 AND cover_revision = ?3",

@@ -29,7 +29,7 @@ impl Store {
         model: &StoredFingerprintModel,
         members: &[StoredFingerprintModelMember],
     ) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
 
         tx.execute(
             "INSERT INTO fingerprint_season_models (
@@ -107,7 +107,7 @@ impl Store {
     }
 
     pub fn delete_fingerprint_model(&self, model_id: &str) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         tx.execute(
             "DELETE FROM fingerprint_model_members WHERE model_id = ?1",
             params![model_id],

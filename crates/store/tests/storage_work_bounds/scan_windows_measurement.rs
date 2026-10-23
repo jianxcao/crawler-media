@@ -194,8 +194,8 @@ fn window_commit_under_write_lock_contention() {
     );
 
     // Mechanism probe: a deferred transaction that has already read cannot upgrade to a
-    // writer while another connection holds the lock. `insert_scanned_files` opens its
-    // window transaction this way (its first statements are reads).
+    // writer while another connection holds the lock. `insert_scanned_files` takes the
+    // write lock at BEGIN (IMMEDIATE) so it waits instead.
     let deferred = rusqlite::Connection::open(&db).unwrap();
     deferred.busy_timeout(Duration::from_secs(5)).unwrap();
     deferred.execute_batch("BEGIN DEFERRED").unwrap();
@@ -223,17 +223,14 @@ fn window_commit_under_write_lock_contention() {
         upgrade_wait.as_millis(),
         store_wait.as_millis()
     );
-    assert_eq!(
-        outcome.is_err(),
+    assert!(
         upgrade.is_err(),
-        "the window must surface contention like its deferred read-then-write shape"
+        "probe: a deferred read-then-write cannot upgrade past another writer"
     );
-
-    if outcome.is_err() {
-        store
-            .insert_scanned_files(&rows, 1_001)
-            .expect("a retried window commits");
-    }
+    assert!(
+        outcome.is_ok(),
+        "C03: the IMMEDIATE window waits out the writer instead, got {outcome:?}"
+    );
     let key = media.id.to_string();
     assert_eq!(count_in(&data_dir, "library_files", &lib.id), 1);
     assert_eq!(count_in(&data_dir, "file_probe_obligations", &lib.id), 1);
@@ -241,6 +238,6 @@ fn window_commit_under_write_lock_contention() {
     assert_eq!(summaries[&key].file_count, 1);
     assert_eq!(
         summaries[&key].item_revision, 1,
-        "one committed window reduces this Media once; a failed window contributes none"
+        "one committed window reduces this Media once"
     );
 }

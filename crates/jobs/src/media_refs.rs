@@ -17,7 +17,7 @@ pub fn rewrite_media_refs(
         return Ok(0);
     }
 
-    let tx = conn.unchecked_transaction()?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     let mut updated_count = 0;
 
     // 1. Process job_defs

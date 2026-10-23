@@ -48,7 +48,7 @@ impl Store {
     /// 先计算哈希，并在单一事务中原子插入用户及其密码；失败则全部回滚。
     pub fn insert_user_with_password(&self, user: &User, password: &str) -> Result<(), StoreError> {
         let hashed = crate::password::hash_password(password).map_err(StoreError::PasswordHash)?;
-        let tx = self.app.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.app)?;
         tx.execute(
             "INSERT INTO users (id, login, password, enabled, role) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
@@ -66,7 +66,7 @@ impl Store {
     /// 在单一事务中原子更新用户信息、更新哈希密码并撤销历史会话 Token（系统当前配置的 CLI token 保留）。
     pub fn update_user_and_password(&self, user: &User, password: &str) -> Result<(), StoreError> {
         let hashed = crate::password::hash_password(password).map_err(StoreError::PasswordHash)?;
-        let tx = self.app.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.app)?;
         let cli_token: Option<String> = tx
             .query_row(
                 "SELECT value FROM settings WHERE key = ?1",
@@ -162,7 +162,7 @@ impl Store {
         admin_id: UserId,
         token: &str,
     ) -> Result<(), StoreError> {
-        let tx = self.app.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.app)?;
         apply_cli_token_tx(&tx, admin_id, token)?;
         tx.commit()?;
         Ok(())
@@ -180,7 +180,7 @@ impl Store {
             tracing::error!(%user_id, error = %e, "种子管理员密码哈希失败");
             StoreError::PasswordHash(e)
         })?;
-        let tx = self.app.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.app)?;
         tx.execute(
             "INSERT INTO users (id, login, password, enabled, role) VALUES (?1, 'admin', ?2, 1, 'admin')
              ON CONFLICT(id) DO UPDATE SET password = excluded.password, enabled = 1, role = 'admin'",
@@ -227,7 +227,7 @@ impl Store {
             tracing::error!(%user_id, error = %e, "管理员密码轮换哈希失败");
             StoreError::PasswordHash(e)
         })?;
-        let tx = self.app.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.app)?;
         tx.execute(
             "UPDATE users SET password = ?1 WHERE id = ?2",
             params![hashed, user_id.to_string()],
@@ -388,7 +388,7 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        let tx = self.app.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.app)?;
         let mut deleted = 0;
         for token in tokens {
             if cli_token.as_deref() == Some(token) {
@@ -422,7 +422,7 @@ impl Store {
     }
 
     pub fn save_user(&self, user: &User) -> Result<(), StoreError> {
-        let tx = self.app.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.app)?;
         tx.execute(
             "UPDATE users SET login = ?1, enabled = ?2, role = ?3 WHERE id = ?4",
             params![
@@ -464,7 +464,7 @@ impl Store {
     }
 
     pub fn transfer_user_subscribes(&self, from: UserId, to: UserId) -> Result<(), StoreError> {
-        let tx = self.subscribe.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.subscribe)?;
         tx.execute(
             "UPDATE subscribes SET user_id = ?1 WHERE user_id = ?2",
             params![to.to_string(), from.to_string()],
@@ -478,7 +478,7 @@ impl Store {
         user_id: UserId,
         admin_id: UserId,
     ) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         tx.execute(
             "UPDATE collections SET user_id = ?1 WHERE user_id = ?2",
             params![admin_id.to_string(), user_id.to_string()],
@@ -501,7 +501,7 @@ impl Store {
     }
 
     pub fn finish_user_removal(&self, user_id: UserId) -> Result<bool, StoreError> {
-        let tx = self.app.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.app)?;
         tx.execute(
             "DELETE FROM user_tokens WHERE user_id = ?1",
             params![user_id.to_string()],
@@ -651,7 +651,7 @@ impl Store {
             tracing::warn!(user_id = %user_id, "非 Argon2 观测凭据拒绝签发会话 token");
             return Ok(None);
         }
-        let tx = self.app.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.app)?;
         let active = tx
             .query_row(
                 "SELECT 1 FROM users WHERE id = ?1 AND password = ?2 AND enabled = 1",

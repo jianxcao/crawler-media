@@ -15,7 +15,7 @@ impl Store {
         let media_str = media.to_string();
         let scope_str = scope.as_str();
 
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         crate::library_write::publish::ensure_media_writable(&tx, media)?;
 
         let cur_rev: Option<i64> = tx

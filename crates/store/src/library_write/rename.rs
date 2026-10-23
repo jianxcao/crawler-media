@@ -69,7 +69,7 @@ impl Store {
         from: &Path,
         to: &Path,
     ) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let id = file_id.to_string();
         let from_str = from.to_string_lossy().into_owned();
         let owned = load_owned(&tx, &id, &from_str)?;

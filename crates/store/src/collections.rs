@@ -101,7 +101,7 @@ impl Store {
     }
 
     pub fn delete_collection(&self, id: &str) -> Result<bool, StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         tx.execute(
             "DELETE FROM collection_items WHERE collection_id = ?1",
             params![id],
@@ -169,7 +169,7 @@ impl Store {
         collection_id: &str,
         media_item_ids: &[String],
     ) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         for (index, media_item_id) in media_item_ids.iter().enumerate() {
             tx.execute(
                 "UPDATE collection_items SET sort_order = ?3

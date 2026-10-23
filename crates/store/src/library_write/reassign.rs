@@ -42,7 +42,7 @@ impl Store {
         now_ms: i64,
     ) -> Result<usize, StoreError> {
         validate_request(request)?;
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         ensure_target_accepts_reassign(&tx, request.to)?;
         ensure_source_revision(&tx, request.from, request.expected_media_revision)?;
         let target_kind: String = media_kind(&tx, request.to)?;

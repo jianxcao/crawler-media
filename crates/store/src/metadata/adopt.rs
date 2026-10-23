@@ -30,7 +30,7 @@ impl Store {
                 "metadata adoption requires the captured Media metadata revision".into(),
             ));
         };
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         ensure_adoption_current(&tx, input, expected)?;
         upsert_source_snapshot(&tx, input)?;
         // Recompose from every current snapshot plus overrides: a source that now reports a
@@ -101,7 +101,7 @@ impl Store {
         if rating.is_none() && release_date.is_none() && studio.is_none() && studio_logo.is_none() {
             return Ok(());
         }
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         crate::library_write::publish::ensure_media_writable(&tx, media_id)?;
         let media = media_id.to_string();
         let existing: Option<String> = tx

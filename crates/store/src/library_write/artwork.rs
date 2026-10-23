@@ -43,7 +43,7 @@ impl Store {
         expected: &FileVersion,
         artwork: &FileArtwork<'_>,
     ) -> Result<bool, StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let changed = record_file_artwork_in(&tx, file_id, expected, artwork)?;
         tx.commit()?;
         Ok(changed)

@@ -100,7 +100,7 @@ impl Store {
         operation_id: &str,
         now_ms: i64,
     ) -> Result<OperationStatus, StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let lib_str = library.to_string();
 
         let current: Option<(i64, String)> = tx

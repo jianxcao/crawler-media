@@ -218,7 +218,7 @@ impl Store {
             return Err(StoreError::Invalid("cannot merge media with itself".into()));
         }
         let operation_id = canonical_operation_id(&request.request_id)?;
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
 
         let stored: Option<String> = tx
             .query_row(

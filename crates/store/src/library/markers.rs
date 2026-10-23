@@ -95,7 +95,7 @@ impl Store {
         check_sources: bool,
     ) -> Result<(), StoreError> {
         let serialized = serialize_chapter_updates(replacements)?;
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         if check_sources {
             match completed_job_id {
                 Some(job_id) => {
