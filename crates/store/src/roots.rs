@@ -134,9 +134,12 @@ impl Store {
         kind: MediaKind,
         root_path: &str,
     ) -> Result<(), StoreError> {
+        // Ownership is decided on canonical keys only: the root's `path_key` and the file's
+        // `path_key`, compared on whole path components. Display spellings never take part.
+        let root_key = crate::path_key::canonical_root_key(root_path)?;
         let roots = {
             let mut stmt = tx.prepare(
-                "SELECT r.root_id, r.library_id, r.display_path
+                "SELECT r.root_id, r.library_id, r.path_key
                  FROM library_roots r JOIN libraries l ON l.library_id = r.library_id
                  WHERE l.kind = ?1 AND l.lifecycle_state = 'ready'
                    AND r.enabled = 1
@@ -152,13 +155,15 @@ impl Store {
             })?
             .collect::<Result<Vec<_>, _>>()?
         };
-        let root = Path::new(root_path);
+        // Bounded component range on the `files_kind_path` index: `root/` .. `root0`
+        // (`'0'` is the byte after `'/'`), so a sibling such as `root-x` is never read.
+        let (low, high) = component_range(&root_key);
         let candidates = {
             let mut stmt = tx.prepare(
                 "SELECT file_id, library_id, media_id, path_key FROM library_files
-                 WHERE kind = ?1",
+                 WHERE kind = ?1 AND path_key >= ?2 AND path_key < ?3",
             )?;
-            stmt.query_map(params![kind.as_str()], |row| {
+            stmt.query_map(params![kind.as_str(), low, high], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -171,9 +176,6 @@ impl Store {
         let mut moves = Vec::new();
         for (file_id, old_library, media_id, path) in candidates {
             let file_path = Path::new(&path);
-            if !file_path.starts_with(root) {
-                continue;
-            }
             let best = roots
                 .iter()
                 .filter(|(_, _, candidate)| file_path.starts_with(Path::new(candidate)))
@@ -226,4 +228,11 @@ fn file_root_id_is(
         |row| row.get(0),
     )?;
     Ok(current == root_id)
+}
+
+/// Half-open key range holding every path strictly below `root_key` on a component
+/// boundary.
+fn component_range(root_key: &str) -> (String, String) {
+    let base = root_key.trim_end_matches('/');
+    (format!("{base}/"), format!("{base}0"))
 }

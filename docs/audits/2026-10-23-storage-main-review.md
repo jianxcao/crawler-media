@@ -76,6 +76,8 @@ files 读 canonical path_key，root_path/候选根却取 display_path。A 的根
 
 修复：全部归属比较使用同一 canonical key + 目录组件边界；display 仅展示/实际定位。新增更深根也走可恢复、限定受影响范围的归属操作，更新 files/coverage/NFO/摘要，避免同步读取同 kind 全部文件。
 
+**状态：已修复（Task6，范围收窄）。** `reassign_files_under_root` 以 canonical `path_key` 比较根与文件，按组件范围 `[key/, key0)` 走新索引 `files_kind_path(kind, path_key)` 有界查询，不再与 display 根混比。回归 `path_key_normalization::nested_symlink_root_reassigns_existing_files`。剩余：仍为单事务内重归属，计划中的 ≤100 行分批 + 可重启持久 operation 未实现。
+
 ### R03 [P1，实测] 文件重新识别清除了原 Media 进度
 
 位置：`store/src/library_write/reassign.rs:186-211`；`store/tests/media_reassign.rs:371-375`。
@@ -129,6 +131,8 @@ locale 步骤只 UPDATE 配置并 count 输入，不重算 locale-dependent item
 公开 favorite 建摘要后外部删除其 raw facts，check→repair→check 均：`has_issues=false orphan_count=0 stale_favorite_survives=true`（artifact://42）。这是规范要求 checker 可修外部破坏的反例，不声称正常 API 一定生成该破坏。
 
 修复：候选用户取当前 raw 用户 UNION 当前 library/media 的 derived 用户；期望为空则删孤儿，其他用户/库不受影响；保留合法稀疏行缺省及报告cap。
+
+**状态：已修复（Task8）。** 摘要修复的用户集合 = 该库该 Media 的 `playback_units` ∪ `user_library_items`，无剩余播放事实的孤儿摘要会被删除/重算。回归 `library_integrity_sparse::orphan_summary_without_raw_user_is_repaired`。
 
 ### R08 [P2，实测] 显式无效 file_id 被降级为自动选其他版本
 

@@ -101,6 +101,7 @@ CREATE TABLE library_files (
 CREATE INDEX files_library_media ON library_files(library_id,media_id,file_id);
 CREATE INDEX files_media_library ON library_files(media_id,library_id,file_id);
 CREATE INDEX files_root_path ON library_files(root_id,path_key);
+CREATE INDEX files_kind_path ON library_files(kind,path_key);
 CREATE INDEX files_presence ON library_files(library_id,presence_state,file_id);
 CREATE TABLE file_details (
  file_id TEXT PRIMARY KEY NOT NULL REFERENCES library_files(file_id) ON DELETE CASCADE,

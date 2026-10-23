@@ -276,3 +276,91 @@ fn file_paths_with_parent_components_are_rejected() {
     );
     assert!(result.is_err(), "{result:?}");
 }
+
+/// R02: a nested Library added through a symlink alias takes over the files it now owns.
+/// Ownership compares the canonical `path_key` on component boundaries; display spelling
+/// never decides, and a sibling directory sharing a name prefix stays put.
+#[test]
+fn nested_symlink_root_reassigns_existing_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let real = tmp.path().join("real");
+    std::fs::create_dir_all(real.join("nested")).unwrap();
+    std::fs::create_dir_all(real.join("nested-sibling")).unwrap();
+    let alias = tmp.path().join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let a = store
+        .create_library(
+            MediaKind::Movie,
+            "A",
+            &[alias.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let media = movie(&store);
+    let nested_file = alias.join("nested").join("N.mkv");
+    let sibling_file = alias.join("nested-sibling").join("S.mkv");
+    std::fs::write(&nested_file, b"nested bytes").unwrap();
+    std::fs::write(&sibling_file, b"sibling").unwrap();
+    for path in [&nested_file, &sibling_file] {
+        publish_fixture_file(
+            &store,
+            &FixtureFile {
+                media_id: media,
+                path: path.display().to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let bytes_before = std::fs::read(&nested_file).unwrap();
+    let nested_root = alias.join("nested");
+    let b = store
+        .create_library(
+            MediaKind::Movie,
+            "B",
+            &[nested_root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+
+    let conn = raw(&tmp);
+    let owner = |name: &str| -> String {
+        conn.query_row(
+            "SELECT library_id FROM library_files WHERE display_path LIKE ?1",
+            [format!("%/{name}")],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    let strict_owner = store
+        .library_for_path_strict(&nested_file, MediaKind::Movie)
+        .unwrap()
+        .expect("strict resolver owner");
+    assert_eq!(strict_owner.id, b.id);
+    assert_eq!(
+        owner("N.mkv"),
+        strict_owner.id,
+        "persisted owner matches resolver"
+    );
+    assert_eq!(
+        owner("S.mkv"),
+        a.id,
+        "prefix sibling is not under the nested root"
+    );
+    let card_count = |library: &str| -> i64 {
+        conn.query_row(
+            "SELECT COALESCE(SUM(file_count), 0) FROM library_items WHERE library_id = ?1",
+            [library],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(card_count(&b.id), 1);
+    assert_eq!(card_count(&a.id), 1);
+    assert_eq!(std::fs::read(&nested_file).unwrap(), bytes_before);
+}
