@@ -200,17 +200,25 @@ pub(crate) fn apply_sidecar(side: &RenameSidecar) -> Result<(), StoreError> {
         std::fs::create_dir_all(parent)?;
     }
     match side.mode {
-        SidecarMode::Move => std::fs::rename(&side.from, &side.to)?,
-        SidecarMode::Copy => {
-            let name = side
-                .to
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("sidecar");
-            let temp = side.to.with_file_name(format!(".{name}.partial.tmp"));
-            std::fs::copy(&side.from, &temp)?;
-            std::fs::rename(&temp, &side.to)?;
-        }
+        SidecarMode::Move => match std::fs::rename(&side.from, &side.to) {
+            // Another filesystem: copy; the left-behind source is queued for
+            // deletion once the rename is acknowledged.
+            Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => copy_sidecar(side)?,
+            other => other?,
+        },
+        SidecarMode::Copy => copy_sidecar(side)?,
     }
+    Ok(())
+}
+
+fn copy_sidecar(side: &RenameSidecar) -> Result<(), StoreError> {
+    let name = side
+        .to
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("sidecar");
+    let temp = side.to.with_file_name(format!(".{name}.partial.tmp"));
+    std::fs::copy(&side.from, &temp)?;
+    std::fs::rename(&temp, &side.to)?;
     Ok(())
 }

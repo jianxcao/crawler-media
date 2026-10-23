@@ -78,7 +78,7 @@ fn begin(
     fx: &Fx,
     file: &domain::LibraryFile,
     to: &Path,
-) -> store::library_write::rename_durable::FileRenameRequest {
+) -> store::library_write::FileRenameRequest {
     fx.store
         .begin_file_rename(file.file_id, &file.version, &file.path, to, 1)
         .unwrap()

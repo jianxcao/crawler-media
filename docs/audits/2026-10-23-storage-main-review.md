@@ -64,6 +64,8 @@ begin 记录 size/inode，但 `move_rename_bytes` 不校验；源 A 被原子替
 
 修复：持久 intent 捕获完整源 identity/content token、目标和 config；锁外磁盘执行必须重验源，拒绝旧意图，目标已存在的恢复也必须验证它属于原意图，不能仅 `!from && to_exists` 成功。使用受控 no-clobber 发布，保持恢复幂等。跨文件系统 copy 如无字节同一性证据保守新源，不能将任意替换冒充合法 copy。
 
+**状态：已修复（Task3）。** intent 持久化源 evidence（size/dev/inode/mtime_ns）与 from/to config revision；begin 要求 `observe_source` token 等于期望 source_version。磁盘移动前重验源，同 FS 用 no-clobber `hard_link`+`unlink`，跨 FS 复制到临时文件、盖源 mtime 后 no-clobber 链接；恢复仅在目标与 evidence 吻合（同 dev+inode，或异设备同 size+mtime）时采纳，否则 intent 置 `failed` 并记录 `last_completed_phase`。sidecar 跨设备改为复制回退。回归 `store/tests/file_rename_durable.rs`：`replaced_source_is_refused_and_not_moved`、`foreign_destination_after_source_vanished_is_not_adopted`、`occupied_destination_is_never_clobbered`、`complete_requires_durable_disk_phase`、`cross_filesystem_move_copies_and_recovers_by_evidence`（/dev/shm 异设备实测）。
+
 ### R02 [P1，实测] canonical path_key 与 display 根混比，嵌套库重归属漏文件
 
 位置：`store/src/roots.rs:155-180`；`store/src/libraries.rs:448-450`。
@@ -153,6 +155,8 @@ fileId 从 URL 持续进入每个 unit，next/prev 只改坐标。HTTP实测 E01
 library提交删除intent后，`rewrite_fact_paths` 写subscribe.db失败被 `let _` 吞掉，返回成功。重启无intent可继续，路径事实永久旧。不是要求跨文件原子事务，而是要求明确持久阶段。
 
 修复：intent保留 library_published→references_applied→done 阶段；library CAS提交后继续幂等收敛subscribe引用，失败保留intent并报错/记录恢复状态；仅所有阶段完成后ACK。磁盘/源/目标证据不因重试丢失。
+
+**状态：已修复（Task3）。** 阶段为 planned→disk_applied→library_published→references_applied→删除(ACK)；complete 要求 `disk_applied`，library CAS（文件版本+两侧 config revision）后只推进到 `library_published` 不删 intent；`rewrite_fact_paths` 失败记录错误、结构化日志并返回 Err，intent 保留，重启 resume 继续收敛。回归 `reference_failure_keeps_intent_and_restart_converges`（subscribe.db trigger 注入失败）。
 
 ### R12 [P2，当前残留，部分 main 已存在] 零兼容验收仍未满足
 
