@@ -60,6 +60,9 @@ pub(crate) struct OperationCursor {
     pub unidentified_done: bool,
     #[serde(default)]
     pub last_input_path: Option<String>,
+    /// Locale rebuild keyset: the last Media whose card was recomposed.
+    #[serde(default)]
+    pub last_locale_media_id: Option<String>,
 }
 
 /// Read-only view of one persisted operation: its Library, kind, resumable cursor and
@@ -273,12 +276,22 @@ impl Store {
                 batch,
             )
             .and_then(|outcome| match outcome {
-                roots::BatchOutcome::Done => {
-                    locale::apply_locale(&tx, &library, plan.display_locale.as_deref())
-                }
+                roots::BatchOutcome::Done => locale::apply_locale(
+                    &tx,
+                    &library,
+                    plan.display_locale.as_deref(),
+                    &mut cursor,
+                    batch,
+                ),
                 more => Ok(more),
             }),
-            "locale" => locale::apply_locale(&tx, &library, plan.display_locale.as_deref()),
+            "locale" => locale::apply_locale(
+                &tx,
+                &library,
+                plan.display_locale.as_deref(),
+                &mut cursor,
+                batch,
+            ),
             "integrity" => {
                 let integrity_plan: integrity::IntegrityPlan = serde_json::from_str(&plan_json)
                     .map_err(|e| StoreError::Invalid(format!("integrity plan: {e}")))?;
