@@ -328,13 +328,11 @@ impl Store {
              WHERE media_id = ?2",
             params![survivor.to_string(), loser.to_string()],
         )?;
-        if !frozen.survivor_before.is_empty() {
-            tx.execute(
-                "UPDATE media SET identity_state = ?2
-                 WHERE media_id = ?1 AND identity_state = 'merging'",
-                params![survivor.to_string(), frozen.survivor_before],
-            )?;
-        }
+        tx.execute(
+            "UPDATE media SET identity_state = ?2
+             WHERE media_id = ?1 AND identity_state = 'merging'",
+            params![survivor.to_string(), frozen.survivor_before],
+        )?;
         tx.execute(
             "UPDATE media_operations
              SET state = 'succeeded', phase_cursor = ?2, error = NULL, updated_at_ms = ?3

@@ -369,3 +369,60 @@ fn frozen_survivor_held_by_another_incomplete_operation_returns_protected() {
     let status = store.advance_media_merge(&op, 1000).unwrap();
     assert_eq!(status.state, "succeeded");
 }
+
+/// A stored plan missing its freeze record, or carrying an unrecoverable
+/// state, is refused: the merge stays frozen and is never reported succeeded.
+#[test]
+fn malformed_frozen_plan_is_refused_and_stays_frozen() {
+    for (n, mutation) in [
+        "json_remove(plan_json, '$.frozen')",
+        "json_remove(plan_json, '$.frozen.survivor_before')",
+        "json_set(plan_json, '$.frozen.survivor_before', 'retired')",
+        "json_set(plan_json, '$.frozen.loser_before', '')",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path()).unwrap();
+        let survivor = "00000000-0000-0000-0000-0000000000b1";
+        let loser = "00000000-0000-0000-0000-0000000000b2";
+        create_media(&store, survivor, "Frozen Survivor", MediaKind::Tv);
+        create_media(&store, loser, "Frozen Loser", MediaKind::Tv);
+        let request = MediaMergeRequest {
+            request_id: format!("00000000-0000-0000-0004-00000000000{n}"),
+            survivor: survivor.parse().unwrap(),
+            loser: loser.parse().unwrap(),
+            survivor_revision: 0,
+            loser_revision: 0,
+            refresh_targets: BTreeMap::from([("tmdb".to_string(), survivor.to_string())]),
+        };
+        let operation = store.begin_media_merge(&request, 1000).unwrap();
+        // Idempotent replay compares only the request, never the server freeze record.
+        assert_eq!(store.begin_media_merge(&request, 1001).unwrap(), operation);
+        let db = Connection::open(temp.path().join("library.db")).unwrap();
+        db.execute(
+            &format!("UPDATE media_operations SET plan_json = {mutation}"),
+            [],
+        )
+        .unwrap();
+
+        let result = store.advance_media_merge(&operation, 2000);
+        assert!(
+            result.is_err(),
+            "{mutation} must be refused, got {result:?}"
+        );
+        let state: String = db
+            .query_row(
+                "SELECT identity_state FROM media WHERE media_id = ?1",
+                params![survivor],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "merging", "{mutation}");
+        let op_state: String = db
+            .query_row("SELECT state FROM media_operations", [], |r| r.get(0))
+            .unwrap();
+        assert_ne!(op_state, "succeeded", "{mutation}");
+    }
+}

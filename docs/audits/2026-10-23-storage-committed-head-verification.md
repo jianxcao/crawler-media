@@ -131,3 +131,4 @@ deferred_snapshot_write_error: SQLITE_BUSY_SNAPSHOT
 | A11 | Fixed: sources observed outside Store lock; marker publication CAS on SourceObservation (source_observation_liveness). store 460/0, api green. |
 | A12 | Fixed: begin_sidecar_export -> Result<ExportPreparation>; Err skips write_nfo (no unguarded fallback). Regression tests nfo_export_failure_isolation 2/2; RED not reproducible via IO (library::write_nfo already refuses unreadable sidecar). |
 | B1 | Partial: FileReadScope + file_coverage_in_library (SQL scope, persisted library_id); library_for_file by file.library_id (strict = owner AND strictly inside its roots); VisibleScope via DISTINCT library_items. Consumers not individually migrated to scoped helper. |
+| B5 | Fixed: typed MergePlan requires frozen with provisional/confirmed states; malformed plan -> Invalid, stays merging (malformed_frozen_plan_is_refused_and_stays_frozen). store 462/0. |

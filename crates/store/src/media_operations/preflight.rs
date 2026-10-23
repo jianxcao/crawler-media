@@ -16,14 +16,26 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::playback::MediaMergeRequest;
 use crate::{Store, StoreError};
 
-/// Identity states to restore once the operation finishes. Empty for rows that
-/// predate the freeze record.
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+/// Identity states to restore once the operation finishes. Both are required
+/// and must be a recoverable state.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct FrozenPair {
-    #[serde(default)]
     pub survivor_before: String,
-    #[serde(default)]
     pub loser_before: String,
+}
+
+/// The persisted merge plan: the flat request plus the required freeze record.
+#[derive(serde::Deserialize)]
+struct MergePlan {
+    #[serde(flatten)]
+    #[allow(dead_code)]
+    request: MediaMergeRequest,
+    frozen: FrozenPair,
+}
+
+fn recoverable(state: &str) -> bool {
+    matches!(state, "provisional" | "confirmed")
 }
 
 /// A `(source, kind)` alias pair that both sides claim as their refresh target.
@@ -47,18 +59,23 @@ pub(crate) fn canonical_operation_id(request_id: &str) -> Result<String, StoreEr
     Ok(parsed.to_string())
 }
 
-/// The unfrozen identity states of an operation, read back from its plan.
+/// The unfrozen identity states of an operation, decoded from its typed plan.
+/// A missing or unrecoverable freeze record is a storage error; the operation
+/// is kept frozen for repair.
 pub(crate) fn frozen_of_plan(plan_json: &str) -> Result<FrozenPair, StoreError> {
-    let value: serde_json::Value = serde_json::from_str(plan_json)?;
-    match value.get("frozen") {
-        Some(frozen) => Ok(serde_json::from_value(frozen.clone())?),
-        None => Ok(FrozenPair::default()),
+    let plan: MergePlan = serde_json::from_str(plan_json)
+        .map_err(|e| StoreError::Invalid(format!("merge plan is malformed: {e}")))?;
+    if !recoverable(&plan.frozen.survivor_before) || !recoverable(&plan.frozen.loser_before) {
+        return Err(StoreError::Invalid(format!(
+            "merge plan freeze record has unrecoverable states: {:?}",
+            plan.frozen
+        )));
     }
+    Ok(plan.frozen)
 }
 
 /// The stored plan is the request plus the freeze record. Keeping it flat leaves
-/// `json_extract(plan_json, '$.request_id')` and `MediaMergeRequest` decoding of
-/// older rows working unchanged.
+/// `json_extract(plan_json, '$.request_id')` working; decoding requires `frozen`.
 fn encode_plan(request: &MediaMergeRequest, frozen: &FrozenPair) -> Result<String, StoreError> {
     let mut value = serde_json::to_value(request)?;
     if let Some(object) = value.as_object_mut() {
