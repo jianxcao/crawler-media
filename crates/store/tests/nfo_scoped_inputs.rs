@@ -707,5 +707,28 @@ fn nested_library_carries_scoped_inputs_and_keeps_shared_parent_nfo() {
         owner("season"),
         vec![(nested.id.clone(), "en-US".to_string())]
     );
-    assert_eq!(owner("work"), vec![(parent.clone(), "en-US".to_string())]);
+    // The shared tvshow.nfo still describes the files that stay in the parent, so the
+    // parent keeps it; the nested Library gets its own copy (same locale) because its
+    // files are described by it too (A6).
+    let mut work = owner("work");
+    work.sort();
+    let mut expected = vec![
+        (parent.clone(), "en-US".to_string()),
+        (nested.id.clone(), "en-US".to_string()),
+    ];
+    expected.sort();
+    assert_eq!(work, expected);
+    let title = |library: &str| -> String {
+        db.query_row(
+            "SELECT title FROM library_items WHERE library_id = ?1",
+            [library],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        title(&nested.id),
+        title(&parent),
+        "nested card is composed from the same work facts as the parent"
+    );
 }

@@ -290,7 +290,19 @@ pub(crate) fn has_uncovered_rows(
         let covered: Vec<String> = (0..roots.len())
             .map(|i| {
                 let n = i + 2;
-                format!("({column} = ?{n} OR substr({column}, 1, length(?{n}) + 1) = ?{n} || '/')")
+                let mut cover = format!(
+                    "({column} = ?{n} OR substr({column}, 1, length(?{n}) + 1) = ?{n} || '/')"
+                );
+                if table == "library_metadata_inputs" {
+                    // A shared ancestor sidecar (tvshow.nfo above a nested root) is covered by
+                    // the root it describes.
+                    cover = format!(
+                        "({cover} OR (length(rtrim(input_key, replace(input_key, '/', ''))) > 0 \
+                           AND substr(?{n} || '/', 1, length(rtrim(input_key, replace(input_key, '/', '')))) \
+                             = rtrim(input_key, replace(input_key, '/', ''))))"
+                    );
+                }
+                cover
             })
             .collect();
         let sql = format!(

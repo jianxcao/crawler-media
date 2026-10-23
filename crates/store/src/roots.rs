@@ -205,6 +205,20 @@ impl Store {
             reparent_scoped_rows(tx, table, column, kind, (&low, &high), &roots)?;
         }
         let mut affected = HashSet::new();
+        let mut shared = HashSet::new();
+        for (_, old_library, media_id, root_id, new_library) in &moves {
+            if old_library != new_library {
+                shared.insert((
+                    old_library.clone(),
+                    new_library.clone(),
+                    media_id.clone(),
+                    root_id.clone(),
+                ));
+            }
+        }
+        for (old_library, new_library, media_id, root_id) in &shared {
+            copy_shared_ancestor_inputs(tx, old_library, new_library, media_id, root_id)?;
+        }
         for (file_id, old_library, media_id, root_id, new_library) in moves {
             tx.execute(
                 "UPDATE library_files SET library_id = ?2, root_id = ?3 WHERE file_id = ?1",
@@ -226,6 +240,41 @@ impl Store {
         }
         Ok(())
     }
+}
+
+/// Copy the old Library's work/season inputs whose sidecar sits **above** the new root
+/// (a shared `tvshow.nfo`) into the new Library: those sidecars describe the moved files
+/// too, so the nested card must not lose them. The parent keeps its row while it still has
+/// files under the sidecar's directory (`prune_nfo_inputs` decides on reduce). Provenance,
+/// export digest and the imported locale are copied verbatim.
+fn copy_shared_ancestor_inputs(
+    tx: &rusqlite::Connection,
+    old_library: &str,
+    new_library: &str,
+    media_id: &str,
+    root_id: &str,
+) -> Result<(), StoreError> {
+    const DIR: &str = "rtrim(mi.input_key, replace(mi.input_key, '/', ''))";
+    tx.execute(
+        &format!(
+            "INSERT OR IGNORE INTO library_metadata_inputs
+                (library_id, media_id, entity_scope, season, episode, locale, input_key, root_id,
+                 path_key, parse_state, source_version, fields_json, present_fields_json,
+                 provenance_json, export_id, export_digest, export_fields_json, revision)
+             SELECT ?2, mi.media_id, mi.entity_scope, mi.season, mi.episode, mi.locale,
+                    mi.input_key, ?4, mi.path_key, mi.parse_state, mi.source_version,
+                    mi.fields_json, mi.present_fields_json, mi.provenance_json, mi.export_id,
+                    mi.export_digest, mi.export_fields_json, mi.revision
+             FROM library_metadata_inputs mi, library_roots r
+             WHERE mi.library_id = ?1 AND mi.media_id = ?3
+               AND mi.entity_scope IN ('work', 'season')
+               AND r.root_id = ?4 AND length({DIR}) > 0
+               AND length({DIR}) <= length(r.path_key) + 1
+               AND substr(r.path_key || '/', 1, length({DIR})) = {DIR}"
+        ),
+        params![old_library, new_library, media_id, root_id],
+    )?;
+    Ok(())
 }
 
 /// Move every `table` row keyed inside `[low, high)` to the longest covering root.
