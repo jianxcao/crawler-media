@@ -137,3 +137,7 @@ deferred_snapshot_write_error: SQLITE_BUSY_SNAPSHOT
 | B2 | Partial: favorites page selected in SQL (playback_favorite_page: authorized libs, cross-library dedupe before LIMIT, same-predicate total, unwatched_first tier from user summaries); handler no longer scans list_file_coverage. Deferred: up_next and gallery still scan list_file_coverage. |
 | Q1 | Done: EQP baseline showed full scans for probe active_job_id prune, unidentified root_id removal, media survivor_id FK check; added probe_stage_active_job, unidentified_root, media_survivor. Other candidates had no scanning real statement; not added. |
 | Q2 | Done: user summaries finalized once per Media at batch end (40 users x 100 files: 240 ms -> 41 ms). Statement caching not changed (not measured). |
+| Q3a | Baseline only: existing targets green; cost not measured at request level, so no code change (see docs/benchmarks/2026-10-23-storage-query-efficiency.md). |
+| Q3b | Baseline only: existing targets green; cost not measured at request level, so no code change (see docs/benchmarks/2026-10-23-storage-query-efficiency.md). |
+| Q4 | Baseline only: existing targets green; cost not measured at request level, so no code change (see docs/benchmarks/2026-10-23-storage-query-efficiency.md). |
+| Q5 | Baseline only: existing targets green; cost not measured at request level, so no code change (see docs/benchmarks/2026-10-23-storage-query-efficiency.md). |

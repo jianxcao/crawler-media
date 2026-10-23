@@ -22,3 +22,16 @@ both partial indexes cover only non-NULL rows.
 existing TV card. Before: 0 users 40.7 ms, 40 users 240.3 ms (summary refreshed
 per file). After: 0 users 39.5 ms, 40 users 41.4 ms (once per Media per batch).
 Prepared-statement caching for hot statements was not measured separately; not changed.
+
+## Q3a / Q3b / Q4 / Q5: baseline only, no code change
+
+Existing result targets all green on 7bee561 (logs under /workspace/logs):
+store library_query_filters, adopted_filter_facts, connection_policy,
+library_removal_recovery, data_retention 26/0; api facets_regression,
+jellyfin_sql_page, jellyfin_paged_metadata 49/0; media source_cache +
+connection_policy 6/0; api release storage_contention 4/0.
+
+- Q3a: `fill_studio` still reads `details_json` + work-scope `normalized_json` for each page Media.
+  The cost is bounded by the page size. No cold-field page budget has been measured, so the projection was not added.
+- Q3b / Q4: no per-request EQP/VM or person/genre JSON scan cost has been captured yet. Not measured, so nothing changed.
+- Q5: storage_contention reports `read_scope: None`, which counts as **Not measured**. PRAGMA, connection memory budgets and deletion batching are unchanged.
