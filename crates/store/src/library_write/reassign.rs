@@ -183,9 +183,11 @@ fn ensure_file_movable(
     Ok(library)
 }
 
-/// End live playback bound to files that are changing owner, and drop resume bindings that
-/// would point at a file the old Media no longer owns. Session *history* is left intact so
-/// the original binding stays auditable.
+/// End live playback bound to files that are changing owner. The old Media's resume package
+/// (position, duration, source binding, tracks) is a user fact and stays untouched: an
+/// unrecoverable position is not a deleted one. Source selection reports the binding as
+/// unavailable once the file no longer covers that Media; the new Media inherits nothing.
+/// Session *history* is left intact so the original binding stays auditable.
 fn terminate_bound_playback(
     tx: &Connection,
     files: &[(LedgerId, FileVersion)],
@@ -200,14 +202,6 @@ fn terminate_bound_playback(
         )?;
         ended += tx.execute(
             "DELETE FROM playback_sessions WHERE file_id = ?1",
-            params![id],
-        )?;
-        tx.execute(
-            "UPDATE playback_units SET
-                 resume_file_id = NULL, resume_file_revision = NULL, resume_source_version = NULL,
-                 timeline_mode = NULL, position_ms = 0, duration_ms = NULL, tracks_version = NULL,
-                 audio_track = NULL, subtitle_track = NULL
-             WHERE resume_file_id = ?1",
             params![id],
         )?;
     }

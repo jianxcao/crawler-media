@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 
 use domain::{
     Confidence, LedgerId, LibraryFile, Media, MediaId, MediaKind, PhysicalSourceId, QualitySource,
-    UnitKey, UserId,
+    TypedItemId, UnitKey, UserId,
 };
 use store::library_write::ReassignFiles;
-use store::playback::MediaMergeRequest;
+use store::playback::{BoundPlaybackEvent, EventOutcome, MediaMergeRequest, PlaybackEventType};
 use store::test_support::FixtureFile;
 use store::{PlaySessionIdState, SessionRow, Store, StoreError};
 
@@ -321,9 +321,9 @@ fn reassignment_ends_bound_sessions_and_keeps_the_history_binding() {
             UnitKey::WHOLE,
             source_of(store, moved),
             5_000,
+            None,
             Some(true),
-            None,
-            None,
+            Some(120_000),
             None,
             None,
             true,
@@ -331,6 +331,14 @@ fn reassignment_ends_bound_sessions_and_keeps_the_history_binding() {
         )
         .expect("seed resume on moved file");
     let session = issue_session(store, user, "dev-1", moved, 10);
+    let before_a = store
+        .unit_state(user, a, -1, -1)
+        .expect("read A unit")
+        .expect("A unit exists");
+    let issued = store
+        .play_session_binding(user, "dev-1", &session)
+        .expect("read session id")
+        .expect("issued session");
     assert_eq!(
         store
             .sessions_for_device("dev-1")
@@ -368,12 +376,60 @@ fn reassignment_ends_bound_sessions_and_keeps_the_history_binding() {
         "history keeps its original binding"
     );
     assert_eq!(binding.file_id.as_deref(), Some(moved.to_string().as_str()));
-    let state = store
+    let after_a = store
         .unit_state(user, a, -1, -1)
         .expect("read A unit")
         .expect("A unit exists");
-    assert_eq!(state.position_ms, 0, "stale resume pointer is dropped");
-    assert_eq!(state.play_count, 1, "watch history survives");
+    assert_eq!(after_a, before_a, "A's resume package is a fact, not a cache");
+    assert_eq!(after_a.position_ms, 5_000);
+    assert_eq!(after_a.duration_ms, Some(120_000));
+    assert!(after_a.favorite, "favourite survives");
+    assert_eq!(after_a.play_count, 1, "watch history survives");
+    match store.resolve_playback(user, &TypedItemId::Work(a), None, None) {
+        Ok(resolved) => assert_ne!(
+            resolved.target.file.file_id, moved,
+            "A's preserved binding never selects a file A no longer owns"
+        ),
+        Err(_) => {} // A has no source left: unavailable, but the fact remains.
+    }
+    let b_progress = store.unit_state(user, b, -1, -1).expect("read B unit");
+    assert!(b_progress.is_none(), "B never inherits A's progress");
+
+    let moved_file = file(store, moved);
+    let late = store
+        .commit_playback_event(
+            &BoundPlaybackEvent {
+                user_id: user,
+                device_id: "dev-1".into(),
+                session_id: session.clone(),
+                generation: issued.generation,
+                event_sequence: Some(2),
+                item: TypedItemId::Work(a),
+                source_id: PhysicalSourceId {
+                    file_id: moved,
+                    revision: moved_file.version.revision,
+                },
+                source_version: moved_file.version.source_version.clone(),
+                position_ms: 90_000,
+                duration_ms: Some(120_000),
+                audio_track: None,
+                subtitle_track: None,
+                paused: false,
+                rate_bps: 0,
+                client: Some("fixture".into()),
+                device_name: None,
+                client_version: None,
+                play_method: None,
+                event_type: PlaybackEventType::Progress,
+            },
+            30,
+        )
+        .expect("late event");
+    assert_eq!(late, EventOutcome::IgnoredStale, "closed session writes nothing");
+    assert_eq!(
+        store.unit_state(user, a, -1, -1).expect("read A").expect("A"),
+        before_a
+    );
 }
 
 /// Validation and compatibility guards.

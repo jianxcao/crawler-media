@@ -86,6 +86,8 @@ files 读 canonical path_key，root_path/候选根却取 display_path。A 的根
 
 修复：关闭相关活动会话，保留 A 原始恢复包/收藏/历史；B 不继承。选源依照新覆盖决定是否可复用，不能破坏事实防止不合法选源。删除错误归零断言，改为完整包保留及旧会话拒绝。
 
+**状态：已修复（Task4）。** `terminate_bound_playback` 只关闭会话（session id→closed、删除 live session 行），不再 UPDATE `playback_units`：不可恢复位置不等于删除恢复事实。A 的完整恢复包（5000ms/120000ms/收藏/播放次数）原样保留，B 无继承，旧会话迟到事件 `IgnoredStale` 零写，A 选源不会返回已改挂文件。回归 `media_reassign::reassignment_ends_bound_sessions_and_keeps_the_history_binding`（修复前 position=0、duration=None）。
+
 ### R04 [P1，实测及源码] 元数据写者绕过 merging/retired 屏障
 
 位置：`store/src/metadata/adopt.rs:28-35,170-188`；`metadata/overrides.rs:18-60`；`api/src/http/media.rs:771-778`。
