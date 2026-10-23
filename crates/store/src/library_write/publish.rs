@@ -142,7 +142,10 @@ impl Store {
             // Every file of the batch is already written, so a unit (or card) that has
             // to be rebuilt from facts already counts the later files of the batch:
             // `settled` keeps those rows from receiving the same files again.
-            let mut settled = BatchSettled::default();
+            let mut settled = BatchSettled {
+                defer_user_summaries: true,
+                ..BatchSettled::default()
+            };
             for change in changes {
                 reduce_library_media_incremental_in_batch(
                     &tx,
@@ -156,6 +159,9 @@ impl Store {
                     },
                     &mut settled,
                 )?;
+            }
+            if settled.user_summaries_dirty && !settled.media {
+                super::reduce::refresh_affected_user_summaries(&tx, scope.library_id, media_id)?;
             }
         }
         tx.commit()?;

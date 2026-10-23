@@ -150,6 +150,10 @@ pub(crate) struct BatchSettled {
     pub(super) units: std::collections::BTreeSet<(i32, i32)>,
     /// The whole card was rebuilt from final facts; later deltas must be skipped.
     pub(crate) media: bool,
+    /// Defer user summary finalization to the batch end (once per Media).
+    pub(crate) defer_user_summaries: bool,
+    /// A deferred finalization is owed for this Media.
+    pub(crate) user_summaries_dirty: bool,
 }
 
 /// Apply one changed file to `(library_id, media_id)` without re-reading the other files.
@@ -211,7 +215,11 @@ pub(crate) fn reduce_library_media_incremental_in_batch(
         &facts,
     )?;
     terms::sync_terms_delta(tx, &lib, &media, &facts, change)?;
-    super::reduce::refresh_affected_user_summaries(tx, library_id, media_id)?;
+    if settled.defer_user_summaries {
+        settled.user_summaries_dirty = true;
+    } else {
+        super::reduce::refresh_affected_user_summaries(tx, library_id, media_id)?;
+    }
     Ok(())
 }
 

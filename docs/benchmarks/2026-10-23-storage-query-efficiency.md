@@ -15,3 +15,10 @@ Not added (no real statement filters by the key; FK checks already searched):
 `fingerprint_attempts(file_id)`, `metadata_inputs(media_id)`, `library_operations_scope`,
 playback logs/metrics user/media, search_snapshots. Write/size cost not measured;
 both partial indexes cover only non-NULL rows.
+
+## Q2 batch-end user summary finalization
+
+`crates/store/tests/publication_batch_work.rs` (release): 100-file batch onto an
+existing TV card. Before: 0 users 40.7 ms, 40 users 240.3 ms (summary refreshed
+per file). After: 0 users 39.5 ms, 40 users 41.4 ms (once per Media per batch).
+Prepared-statement caching for hot statements was not measured separately; not changed.
