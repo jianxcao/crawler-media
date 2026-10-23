@@ -84,186 +84,207 @@ pub(crate) async fn up_next(
         .unwrap_or(20)
         .clamp(1, 100);
     // 阶段一：锁内只做快 DB 读，收集每条的 (media_id, season, next_episode)。
+    let Ok(plans) = collect_plans(&state, user_id, limit) else {
+        return store_failed();
+    };
+    // 阶段二：本地缓存补集名；未命中后台补全。
+    let titles = cached_episode_titles(&state, &plans);
+    // 阶段三：锁内物化行与状态（纯 DB 读，无 IO）。
+    let Ok(candidates) = materialize_candidates(&state, user_id, plans, &titles, limit) else {
+        return store_failed();
+    };
+    // 阶段四：有界 blocking 观测 artwork
+    let files = state.browse_files.clone();
+    let state_for_work = state.clone();
+    let items_res = state
+        .http_work
+        .run(std::time::Duration::from_secs(30), move || {
+            candidates
+                .into_iter()
+                .map(|cand| render_item(&state_for_work, files.as_ref(), cand))
+                .collect::<Vec<_>>()
+        })
+        .await;
+    match items_res {
+        Ok(items) => ok(json!({ "items": items })).into_response(),
+        Err(error) => blocking_failed(error),
+    }
+}
+
+struct StoreFailed;
+
+fn collect_plans(
+    state: &ApiState,
+    user_id: domain::UserId,
+    limit: usize,
+) -> Result<Vec<UpNextPlan>, StoreFailed> {
+    let store = state.store.lock();
+    let visible = crate::visible_scope::VisibleLibraries::load(&store, Some(user_id))
+        .map_err(|_| StoreFailed)?;
     let mut plans: Vec<UpNextPlan> = Vec::new();
     let mut seen_media: HashSet<domain::MediaId> = HashSet::new();
-
-    {
-        let store = state.store.lock();
-        let Ok(visible) = crate::visible_scope::VisibleLibraries::load(&store, Some(user_id))
-        else {
-            return store_failed();
-        };
-
-        // 1. 优先读取当前用户的活跃播放记录 (playback_units)
-        // 覆盖本地扫库作品和已有播放进度的条目（按最近活跃时间倒序）
-        let active_media = store.user_active_media_ids(user_id).unwrap_or_default();
-        for (media_id, last_activity) in active_media {
-            if seen_media.contains(&media_id) {
-                continue;
-            }
-            let Some(media) = store.get_media(media_id).ok().flatten() else {
-                continue;
-            };
-
-            // 检查该媒体在当前用户的库中是否可见、是否有文件，且库未被设置为 exclude_from_home
-            let Ok(media_rows) =
-                visible.media_coverage(&store, media_id, |lib| !lib.exclude_from_home)
-            else {
-                return store_failed();
-            };
-            if media_rows.is_empty() {
-                continue;
-            }
-
-            let units = store.unit_rows(user_id, media.id).unwrap_or_default();
-
-            if media.kind == domain::MediaKind::Movie || media.kind == domain::MediaKind::Video {
-                // 电影 / 单片：如果已标记完全播放（played == true），则不需要在「接下来看」出现；
-                // 只有看了一部分（!played && position_ms > 0）时进入「接下来看」
-                let whole_unit = store.unit_state(user_id, media.id, -1, -1).ok().flatten();
-                if let Some(ref u) = whole_unit {
-                    if !u.played && u.position_ms > 0 {
-                        seen_media.insert(media.id);
-                        plans.push(UpNextPlan {
-                            media_id: media.id,
-                            kind: media.kind,
-                            tmdb_id: media.tmdb_id.clone(),
-                            season: 0,
-                            next_episode: 0,
-                            advanced: false,
-                            last_activity,
-                        });
-                    }
-                }
-            } else if media.kind == domain::MediaKind::Tv {
-                // 电视剧：找出用户最后播放或最后标记看过的季和集
-                // 查找该媒体库在位的所有集数 (season, episode)
-                let owned_units: HashSet<(u32, u32)> = media_rows
-                    .iter()
-                    .flat_map(|r| &r.units)
-                    .filter(|u| !u.is_whole())
-                    .map(|u| (u.season.max(0) as u32, u.episode.max(0) as u32))
-                    .collect();
-
-                // 用户最近更新过的播放记录
-                let latest_unit = units.iter().max_by_key(|u| u.updated_at);
-                if let Some(unit) = latest_unit {
-                    let s = if unit.season >= 0 {
-                        unit.season as u32
-                    } else {
-                        1
-                    };
-                    let e = if unit.episode >= 0 {
-                        unit.episode as u32
-                    } else {
-                        1
-                    };
-
-                    let (target_s, target_e, is_advanced) = if !unit.played {
-                        // 当前集还没看完，继续看当前集
-                        (s, e, false)
-                    } else {
-                        // 当前集看完了，找下一集
-                        let mut next_s = s;
-                        let mut next_e = e + 1;
-                        if !owned_units.contains(&(next_s, next_e)) {
-                            // 尝试下一季第 1 集
-                            if owned_units.contains(&(next_s + 1, 1)) {
-                                next_s += 1;
-                                next_e = 1;
-                            }
-                        }
-                        (next_s, next_e, true)
-                    };
-
-                    if owned_units.contains(&(target_s, target_e)) {
-                        seen_media.insert(media.id);
-                        plans.push(UpNextPlan {
-                            media_id: media.id,
-                            kind: media.kind,
-                            tmdb_id: media.tmdb_id.clone(),
-                            season: target_s,
-                            next_episode: target_e as i32,
-                            advanced: is_advanced,
-                            last_activity,
-                        });
-                    }
-                }
-            }
-
-            if plans.len() >= limit * 2 {
-                break;
-            }
+    // 1. 当前用户的活跃播放记录（本地扫库作品与已有进度的条目，按最近活跃倒序）
+    for (media_id, last_activity) in store.user_active_media_ids(user_id).unwrap_or_default() {
+        if seen_media.contains(&media_id) {
+            continue;
         }
-
-        // 2. 补充尚未开播、但在追的电视剧订阅 (Coverage::Tv)
-        for subscribe in store.list_subscribes_for_user(user_id).unwrap_or_default() {
-            if seen_media.contains(&subscribe.media_id) {
-                continue;
-            }
-            let Some(media) = store.get_media(subscribe.media_id).ok().flatten() else {
-                continue;
-            };
-            let domain::Coverage::Tv {
-                season,
-                episode_from,
-                episode_to,
-            } = subscribe.coverage
-            else {
-                continue;
-            };
-            let units = store.unit_rows(user_id, media.id).unwrap_or_default();
-            let last_played = units
-                .iter()
-                .filter(|u| u.season == season as i32 && u.episode >= 0 && u.played)
-                .map(|u| u.episode)
-                .max();
-            let last_activity = units.iter().map(|u| u.updated_at).max().unwrap_or(0);
-            let start_from = last_played.map(|e| e + 1).unwrap_or(episode_from as i32);
-            let Ok(home_rows) =
-                visible.media_coverage(&store, media.id, |lib| !lib.exclude_from_home)
-            else {
-                return store_failed();
-            };
-            let owned: HashSet<u32> = home_rows
-                .iter()
-                .flat_map(|r| &r.units)
-                .filter(|u| !u.is_whole() && u.season.max(0) as u32 == season)
-                .map(|u| u.episode.max(0) as u32)
-                .collect();
-            let cap = start_from.saturating_add(domain::Coverage::MAX_EPISODES as i32 - 1);
-            let window_to = owned
-                .iter()
-                .copied()
-                .max()
-                .map(|m| m as i32)
-                .unwrap_or_else(|| episode_to.map(|t| t as i32).unwrap_or(start_from))
-                .min(cap)
-                .max(start_from);
-            let Some(next_episode) =
-                (start_from..=window_to).find(|ep| owned.contains(&(*ep as u32)))
-            else {
-                continue;
-            };
-            seen_media.insert(media.id);
-            plans.push(UpNextPlan {
-                media_id: media.id,
-                kind: media.kind,
-                tmdb_id: media.tmdb_id.clone(),
-                season,
-                next_episode,
-                advanced: last_played.is_some(),
-                last_activity,
-            });
-            if plans.len() >= limit * 2 {
-                break;
-            }
+        if let Some(plan) = plan_from_activity(&store, &visible, user_id, media_id, last_activity)?
+        {
+            seen_media.insert(plan.media_id);
+            plans.push(plan);
+        }
+        if plans.len() >= limit * 2 {
+            break;
         }
     }
+    // 2. 补充尚未开播、但在追的电视剧订阅 (Coverage::Tv)
+    for subscribe in store.list_subscribes_for_user(user_id).unwrap_or_default() {
+        if seen_media.contains(&subscribe.media_id) {
+            continue;
+        }
+        if let Some(plan) = plan_from_subscribe(&store, &visible, user_id, &subscribe)? {
+            seen_media.insert(plan.media_id);
+            plans.push(plan);
+        }
+        if plans.len() >= limit * 2 {
+            break;
+        }
+    }
+    Ok(plans)
+}
 
-    // A local cache hit may supply the episode name; misses are refreshed asynchronously.
-    let mut titles: HashMap<EpisodeTitleKey, Option<String>> = HashMap::new();
-    for plan in &plans {
+fn plan_from_activity(
+    store: &store::Store,
+    visible: &crate::visible_scope::VisibleLibraries,
+    user_id: domain::UserId,
+    media_id: domain::MediaId,
+    last_activity: i64,
+) -> Result<Option<UpNextPlan>, StoreFailed> {
+    let Some(media) = store.get_media(media_id).ok().flatten() else {
+        return Ok(None);
+    };
+    // 媒体须在当前用户可见、未设 exclude_from_home 的库里有文件
+    let media_rows = visible
+        .media_coverage(store, media_id, |lib| !lib.exclude_from_home)
+        .map_err(|_| StoreFailed)?;
+    if media_rows.is_empty() {
+        return Ok(None);
+    }
+    let plan = |season, next_episode, advanced| UpNextPlan {
+        media_id: media.id,
+        kind: media.kind,
+        tmdb_id: media.tmdb_id.clone(),
+        season,
+        next_episode,
+        advanced,
+        last_activity,
+    };
+    match media.kind {
+        // 电影 / 单片：只有看了一部分（!played && position_ms > 0）时进入「接下来看」
+        domain::MediaKind::Movie | domain::MediaKind::Video => {
+            let whole = store.unit_state(user_id, media.id, -1, -1).ok().flatten();
+            Ok(whole
+                .filter(|u| !u.played && u.position_ms > 0)
+                .map(|_| plan(0, 0, false)))
+        }
+        domain::MediaKind::Tv => {
+            let owned: HashSet<(u32, u32)> = media_rows
+                .iter()
+                .flat_map(|r| &r.units)
+                .filter(|u| !u.is_whole())
+                .map(|u| (u.season.max(0) as u32, u.episode.max(0) as u32))
+                .collect();
+            let units = store.unit_rows(user_id, media.id).unwrap_or_default();
+            let Some(unit) = units.iter().max_by_key(|u| u.updated_at) else {
+                return Ok(None);
+            };
+            let s = if unit.season >= 0 {
+                unit.season as u32
+            } else {
+                1
+            };
+            let e = if unit.episode >= 0 {
+                unit.episode as u32
+            } else {
+                1
+            };
+            let (target_s, target_e, advanced) = if !unit.played {
+                (s, e, false)
+            } else if !owned.contains(&(s, e + 1)) && owned.contains(&(s + 1, 1)) {
+                (s + 1, 1, true)
+            } else {
+                (s, e + 1, true)
+            };
+            Ok(owned
+                .contains(&(target_s, target_e))
+                .then(|| plan(target_s, target_e as i32, advanced)))
+        }
+    }
+}
+
+fn plan_from_subscribe(
+    store: &store::Store,
+    visible: &crate::visible_scope::VisibleLibraries,
+    user_id: domain::UserId,
+    subscribe: &domain::Subscribe,
+) -> Result<Option<UpNextPlan>, StoreFailed> {
+    let Some(media) = store.get_media(subscribe.media_id).ok().flatten() else {
+        return Ok(None);
+    };
+    let domain::Coverage::Tv {
+        season,
+        episode_from,
+        episode_to,
+    } = subscribe.coverage
+    else {
+        return Ok(None);
+    };
+    let units = store.unit_rows(user_id, media.id).unwrap_or_default();
+    let last_played = units
+        .iter()
+        .filter(|u| u.season == season as i32 && u.episode >= 0 && u.played)
+        .map(|u| u.episode)
+        .max();
+    let last_activity = units.iter().map(|u| u.updated_at).max().unwrap_or(0);
+    let start_from = last_played.map(|e| e + 1).unwrap_or(episode_from as i32);
+    let home_rows = visible
+        .media_coverage(store, media.id, |lib| !lib.exclude_from_home)
+        .map_err(|_| StoreFailed)?;
+    let owned: HashSet<u32> = home_rows
+        .iter()
+        .flat_map(|r| &r.units)
+        .filter(|u| !u.is_whole() && u.season.max(0) as u32 == season)
+        .map(|u| u.episode.max(0) as u32)
+        .collect();
+    let cap = start_from.saturating_add(domain::Coverage::MAX_EPISODES as i32 - 1);
+    let window_to = owned
+        .iter()
+        .copied()
+        .max()
+        .map(|m| m as i32)
+        .unwrap_or_else(|| episode_to.map(|t| t as i32).unwrap_or(start_from))
+        .min(cap)
+        .max(start_from);
+    Ok((start_from..=window_to)
+        .find(|ep| owned.contains(&(*ep as u32)))
+        .map(|next_episode| UpNextPlan {
+            media_id: media.id,
+            kind: media.kind,
+            tmdb_id: media.tmdb_id.clone(),
+            season,
+            next_episode,
+            advanced: last_played.is_some(),
+            last_activity,
+        }))
+}
+
+/// A local cache hit may supply the episode name; misses are refreshed asynchronously.
+fn cached_episode_titles(
+    state: &ApiState,
+    plans: &[UpNextPlan],
+) -> HashMap<EpisodeTitleKey, Option<String>> {
+    let mut titles = HashMap::new();
+    for plan in plans {
         if plan.kind != domain::MediaKind::Tv {
             continue;
         }
@@ -277,11 +298,11 @@ pub(crate) async fn up_next(
                     .find(|episode| episode.episode_number == plan.next_episode as u32)
                     .and_then(|episode| episode.name);
                 if title.is_none() {
-                    schedule_season_enrichment(&state, tmdb_id, plan.season);
+                    schedule_season_enrichment(state, tmdb_id, plan.season);
                 }
                 titles.insert((tmdb_id.to_owned(), plan.season, plan.next_episode), title);
             }
-            Ok(None) => schedule_season_enrichment(&state, tmdb_id, plan.season),
+            Ok(None) => schedule_season_enrichment(state, tmdb_id, plan.season),
             Err(error) => {
                 tracing::warn!(
                     kind = "tv",
@@ -289,238 +310,201 @@ pub(crate) async fn up_next(
                     error_type = error_type(&error),
                     "up-next cached season lookup failed"
                 );
-                schedule_season_enrichment(&state, tmdb_id, plan.season);
+                schedule_season_enrichment(state, tmdb_id, plan.season);
             }
         }
     }
-    // 阶段三：锁内物化行与状态（纯 DB 读，无 IO）。
-    struct UpNextCandidate {
-        media: domain::Media,
-        library_id: String,
-        preferred_coverage: Option<domain::FileCoverage>,
-        next_row: Option<domain::FileCoverage>,
-        plan_season: u32,
-        plan_next_episode: i32,
-        episode_title: Option<String>,
-        position: i64,
-        duration: Option<i64>,
-        progress: Option<i64>,
-        advanced: bool,
-        last_played_at: String,
-    }
+    titles
+}
 
-    let candidates: Vec<UpNextCandidate> = {
-        let store = state.store.lock();
-        let Ok(visible) = crate::visible_scope::VisibleLibraries::load(&store, Some(user_id))
-        else {
-            return store_failed();
+struct UpNextCandidate {
+    media: domain::Media,
+    library_id: String,
+    preferred_coverage: Option<domain::FileCoverage>,
+    next_row: Option<domain::FileCoverage>,
+    plan_season: u32,
+    plan_next_episode: i32,
+    episode_title: Option<String>,
+    position: i64,
+    duration: Option<i64>,
+    progress: Option<i64>,
+    advanced: bool,
+    last_played_at: String,
+}
+
+fn materialize_candidates(
+    state: &ApiState,
+    user_id: domain::UserId,
+    plans: Vec<UpNextPlan>,
+    titles: &HashMap<EpisodeTitleKey, Option<String>>,
+    limit: usize,
+) -> Result<Vec<UpNextCandidate>, StoreFailed> {
+    let store = state.store.lock();
+    let visible = crate::visible_scope::VisibleLibraries::load(&store, Some(user_id))
+        .map_err(|_| StoreFailed)?;
+    let mut cands = Vec::new();
+    for plan in plans {
+        let Some(media) = store.get_media(plan.media_id).ok().flatten() else {
+            continue;
         };
-        let mut cands = Vec::new();
-        for plan in plans {
-            let Some(media) = store.get_media(plan.media_id).ok().flatten() else {
-                continue;
-            };
-            let episode_title = plan
-                .tmdb_id
-                .as_ref()
-                .and_then(|tmdb_id| titles.get(&(tmdb_id.clone(), plan.season, plan.next_episode)))
+        let rows = visible
+            .media_coverage(&store, media.id, |_| true)
+            .map_err(|_| StoreFailed)?;
+        if rows.is_empty() {
+            continue;
+        }
+        let is_movie = matches!(
+            media.kind,
+            domain::MediaKind::Movie | domain::MediaKind::Video
+        );
+        let (target_season, target_episode) = if is_movie {
+            (-1, -1)
+        } else {
+            (plan.season as i32, plan.next_episode)
+        };
+        let unit = store
+            .unit_state(user_id, media.id, target_season, target_episode)
+            .ok()
+            .flatten();
+        let episode_title = plan
+            .tmdb_id
+            .as_ref()
+            .and_then(|tmdb_id| titles.get(&(tmdb_id.clone(), plan.season, plan.next_episode)))
+            .cloned()
+            .flatten();
+        let library_id = rows[0].file.library_id.to_string();
+        let refs: Vec<&domain::FileCoverage> = rows.iter().collect();
+        let preferred_coverage = crate::http::library::preferred_coverage(&refs).cloned();
+        let next_row = if media.kind == domain::MediaKind::Tv {
+            rows.iter()
+                .find(|r| {
+                    r.units.iter().any(|u| {
+                        !u.is_whole()
+                            && u.season.max(0) as u32 == plan.season
+                            && u.episode.max(0) as i32 == plan.next_episode
+                    })
+                })
                 .cloned()
-                .flatten();
+        } else {
+            rows.first().cloned()
+        };
+        let position = unit.as_ref().map(|u| u.position_ms).unwrap_or(0);
+        let duration = unit.as_ref().and_then(|u| u.duration_ms);
+        let progress = duration
+            .filter(|d| *d > 0)
+            .map(|d| ((position as f64 / d as f64) * 100.0).round() as i64)
+            .filter(|p| (0..=100).contains(p));
+        let last_played_at = if plan.last_activity > 0 {
+            millis(plan.last_activity)
+        } else {
+            String::new()
+        };
+        cands.push(UpNextCandidate {
+            media,
+            library_id,
+            preferred_coverage,
+            next_row,
+            plan_season: plan.season,
+            plan_next_episode: plan.next_episode,
+            episode_title,
+            position,
+            duration,
+            progress,
+            advanced: plan.advanced,
+            last_played_at,
+        });
+        if cands.len() >= limit {
+            break;
+        }
+    }
+    Ok(cands)
+}
 
-            let is_movie =
-                media.kind == domain::MediaKind::Movie || media.kind == domain::MediaKind::Video;
-            let (target_season, target_episode) = if is_movie {
-                (-1, -1)
-            } else {
-                (plan.season as i32, plan.next_episode)
-            };
-            let unit = store
-                .unit_state(user_id, media.id, target_season, target_episode)
-                .ok()
-                .flatten();
-            let Ok(rows) = visible.media_coverage(&store, media.id, |_| true) else {
-                return store_failed();
-            };
-            if rows.is_empty() {
-                continue;
-            }
-            let library_id = rows[0].file.library_id.to_string();
-
-            let refs: Vec<&domain::FileCoverage> = rows.iter().collect();
-            let preferred_coverage = crate::http::library::preferred_coverage(&refs).cloned();
-
-            let next_row = if media.kind == domain::MediaKind::Tv {
-                rows.iter()
-                    .find(|r| {
-                        r.units.iter().any(|u| {
-                            !u.is_whole()
-                                && u.season.max(0) as u32 == plan.season
-                                && u.episode.max(0) as i32 == plan.next_episode
-                        })
-                    })
-                    .cloned()
-            } else {
-                rows.first().cloned()
-            };
-
-            let position = unit.as_ref().map(|u| u.position_ms).unwrap_or(0);
-            let duration = unit.as_ref().and_then(|u| u.duration_ms);
-            let progress = duration
-                .filter(|d| *d > 0)
-                .map(|d| ((position as f64 / d as f64) * 100.0).round() as i64)
-                .filter(|p| (0..=100).contains(p));
-            let last_played_at = if plan.last_activity > 0 {
-                millis(plan.last_activity)
-            } else {
-                String::new()
-            };
-
-            cands.push(UpNextCandidate {
-                media,
-                library_id,
-                preferred_coverage,
-                next_row,
-                plan_season: plan.season,
-                plan_next_episode: plan.next_episode,
-                episode_title,
-                position,
-                duration,
-                progress,
-                advanced: plan.advanced,
-                last_played_at,
+fn render_item(
+    state: &ApiState,
+    files: &dyn crate::browse_file_read::BrowseFileRead,
+    cand: UpNextCandidate,
+) -> serde_json::Value {
+    use crate::http::library::artwork_url;
+    let preferred = cand.preferred_coverage.as_ref();
+    let poster = preferred
+        .filter(|row| crate::http::library::poster_path_with(&row.file, files).is_some())
+        .map(|row| artwork_url("posters", row.file.file_id));
+    let observed_backdrop = preferred
+        .filter(|row| crate::http::library::backdrop_path_with(&row.file, files).is_some())
+        .map(|row| artwork_url("fanart", row.file.file_id));
+    if observed_backdrop.is_none() {
+        if let Some(preferred) = preferred {
+            let state_clone = state.clone();
+            let media_clone = cand.media.clone();
+            let pref_path = preferred.file.path.clone();
+            tokio::spawn(async move {
+                let _ =
+                    crate::poster_fetch::attach_backdrop(&state_clone, &media_clone, &pref_path);
             });
-            if cands.len() >= limit {
-                break;
-            }
         }
-        cands
-    };
-
-    // 阶段四：有界 blocking 观测 artwork
-    let files = state.browse_files.clone();
-    let state_for_work = state.clone();
-    let items_res = state
-        .http_work
-        .run(std::time::Duration::from_secs(30), move || {
-            let mut items = Vec::new();
-            for cand in candidates {
-                let poster = cand
-                    .preferred_coverage
-                    .as_ref()
-                    .and_then(|row| {
-                        crate::http::library::poster_path_with(&row.file, files.as_ref())
-                    })
-                    .map(|_| {
-                        let row = cand.preferred_coverage.as_ref().expect("checked");
-                        crate::http::library::artwork_url("posters", row.file.file_id)
-                    });
-                let mut backdrop = cand
-                    .preferred_coverage
-                    .as_ref()
-                    .and_then(|row| {
-                        crate::http::library::backdrop_path_with(&row.file, files.as_ref())
-                    })
-                    .map(|_| {
-                        let row = cand.preferred_coverage.as_ref().expect("checked");
-                        crate::http::library::artwork_url("fanart", row.file.file_id)
-                    });
-                if backdrop.is_none() {
-                    if let Some(preferred) = &cand.preferred_coverage {
-                        let state_clone = state_for_work.clone();
-                        let media_clone = cand.media.clone();
-                        let pref_path = preferred.file.path.clone();
-                        tokio::spawn(async move {
-                            let _ = crate::poster_fetch::attach_backdrop(
-                                &state_clone,
-                                &media_clone,
-                                &pref_path,
-                            );
-                        });
-                    }
-                }
-                let still = cand
-                    .next_row
-                    .as_ref()
-                    .and_then(|row| {
-                        crate::episode_still::existing_with(row.file.path.as_path(), files.as_ref())
-                            .map(|_| crate::http::library::artwork_url("stills", row.file.file_id))
-                    })
-                    .or_else(|| backdrop.clone())
-                    .or_else(|| {
-                        cand.preferred_coverage.as_ref().map(|row| {
-                            crate::http::library::artwork_url("fanart", row.file.file_id)
-                        })
-                    });
-                if backdrop.is_none() {
-                    backdrop = cand
-                        .preferred_coverage
-                        .as_ref()
-                        .map(|row| crate::http::library::artwork_url("fanart", row.file.file_id));
-                }
-
-                items.push(json!({
-                    "media_item_id": cand.media.id.to_string(),
-                    "library_id": cand.library_id,
-                    "kind": cand.media.kind.as_str(),
-                    "title": cand.media.title,
-                    "year": cand.media.year,
-                    "poster_url": poster,
-                    "poster_aspect": 0.667,
-                    "backdrop_url": backdrop,
-                    "episode_still_url": still,
-                    "season_number": cand.plan_season,
-                    "episode_number": cand.plan_next_episode,
-                    "episode_title": if cand.media.kind == domain::MediaKind::Tv {
-                        // 台账行路径是视频文件；集名要从**该集自己的** `.nfo` 同名字节读，
-                        // 与库内其它 NFO 读取约定一致（`path.with_extension("nfo")`）。
-                        cand.next_row.as_ref()
-                            .and_then(|row| {
-                                let nfo = row.file.path.with_extension("nfo");
-                                files.read_nfo(&nfo)
-                            })
-                            .and_then(|nfo| nfo.title)
-                            .or(cand.episode_title)
-                    } else {
-                        // 电影/视频的 `next_row` 就是媒体自身，不是集行：不做 NFO 标题回落。
-                        cand.episode_title
-                    },
-                    "unwatched_ahead_count": 0,
-                    "position_ms": cand.position,
-                    "duration_ms": cand.duration,
-                    "progress_percent": cand.progress,
-                    "advanced": cand.advanced,
-                    "last_played_at": cand.last_played_at,
-                }));
-            }
-            items
+    }
+    let fanart_fallback = preferred.map(|row| artwork_url("fanart", row.file.file_id));
+    let still = cand
+        .next_row
+        .as_ref()
+        .and_then(|row| {
+            crate::episode_still::existing_with(row.file.path.as_path(), files)
+                .map(|_| artwork_url("stills", row.file.file_id))
         })
-        .await;
-
-    let items = match items_res {
-        Ok(items) => items,
-        Err(crate::blocking_budget::BlockingError::Busy) => {
-            return crate::http::err(
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "runtime.busy",
-                "服务繁忙，请重试",
-            );
-        }
-        Err(crate::blocking_budget::BlockingError::Timeout) => {
-            return crate::http::err(
-                axum::http::StatusCode::GATEWAY_TIMEOUT,
-                "up_next.timeout",
-                "待播列表加载超时",
-            );
-        }
-        Err(crate::blocking_budget::BlockingError::Worker(msg)) => {
-            return crate::http::err(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                "up_next.worker",
-                &msg,
-            );
-        }
+        .or_else(|| observed_backdrop.clone())
+        .or_else(|| fanart_fallback.clone());
+    let backdrop = observed_backdrop.or(fanart_fallback);
+    let episode_title = if cand.media.kind == domain::MediaKind::Tv {
+        // 集名从**该集自己的** `.nfo` 读（`path.with_extension("nfo")`），再回落缓存集名。
+        cand.next_row
+            .as_ref()
+            .and_then(|row| files.read_nfo(&row.file.path.with_extension("nfo")))
+            .and_then(|nfo| nfo.title)
+            .or(cand.episode_title)
+    } else {
+        // 电影/视频的 `next_row` 就是媒体自身，不是集行：不做 NFO 标题回落。
+        cand.episode_title
     };
-    ok(json!({ "items": items })).into_response()
+    json!({
+        "media_item_id": cand.media.id.to_string(),
+        "library_id": cand.library_id,
+        "kind": cand.media.kind.as_str(),
+        "title": cand.media.title,
+        "year": cand.media.year,
+        "poster_url": poster,
+        "poster_aspect": 0.667,
+        "backdrop_url": backdrop,
+        "episode_still_url": still,
+        "season_number": cand.plan_season,
+        "episode_number": cand.plan_next_episode,
+        "episode_title": episode_title,
+        "unwatched_ahead_count": 0,
+        "position_ms": cand.position,
+        "duration_ms": cand.duration,
+        "progress_percent": cand.progress,
+        "advanced": cand.advanced,
+        "last_played_at": cand.last_played_at,
+    })
+}
+
+fn blocking_failed(error: crate::blocking_budget::BlockingError) -> Response {
+    use axum::http::StatusCode;
+    match error {
+        crate::blocking_budget::BlockingError::Busy => crate::http::err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "runtime.busy",
+            "服务繁忙，请重试",
+        ),
+        crate::blocking_budget::BlockingError::Timeout => crate::http::err(
+            StatusCode::GATEWAY_TIMEOUT,
+            "up_next.timeout",
+            "待播列表加载超时",
+        ),
+        crate::blocking_budget::BlockingError::Worker(msg) => {
+            crate::http::err(StatusCode::INTERNAL_SERVER_ERROR, "up_next.worker", &msg)
+        }
+    }
 }
 
 fn millis(unix_secs: i64) -> String {
