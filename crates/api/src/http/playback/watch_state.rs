@@ -13,40 +13,64 @@ use crate::http::{err, ok};
 use crate::management::ApiState;
 use crate::store::{UNIT_WHOLE, UnitRow};
 
-/// GET /playback/resume — per-unit resume state.
+/// GET /playback/resume — source-aware resume preview. Interprets the same optional
+/// source preference as `POST /playback/sessions` through `Store::resolve_playback`,
+/// without opening a session.
 pub(crate) async fn resume(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    let Some(media_id) = query.get("media_item_id").and_then(|v| resolve_media_id(v)) else {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "playback.invalid",
-            "media_item_id 无效",
-        );
+    let mut body = serde_json::Map::new();
+    for key in ["media_item_id", "file_id", "season", "episode"] {
+        if let Some(value) = query.get(key) {
+            body.insert(key.into(), Value::String(value.clone()));
+        }
+    }
+    for key in ["season_number", "episode_number"] {
+        if let Some(value) = query.get(key) {
+            let Ok(number) = value.parse::<u64>() else {
+                return super::request::SelectionError::Invalid.response();
+            };
+            body.insert(key.into(), json!(number));
+        }
+    }
+    let selection = match super::request::parse_selection(&Value::Object(body)) {
+        Ok(selection) => selection,
+        Err(error) => return error.response(),
     };
-    let season = query
-        .get("season_number")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(UNIT_WHOLE);
-    let episode = query
-        .get("episode_number")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(UNIT_WHOLE);
     let store = state.store.lock();
-    let Some((season, episode)) = super::selection::watch_unit(&store, media_id, season, episode)
-    else {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "playback.invalid",
-            "电影只有整部单元，不接受季/集坐标",
-        );
-    };
-    ok(super::effective_watch_json(
-        &store, user_id, media_id, season, episode,
-    ))
-    .into_response()
+    let (file, _media, resolved) =
+        match super::selection::resolve_playback_for(&store, &selection, user_id) {
+            Ok(resolved) => resolved,
+            // 无显式源时，没有可播文件的单元（含 TV whole 单元）仍返回已记录的进度
+            Err(super::request::SelectionError::Unavailable) if selection.file_id.is_none() => {
+                let season = selection.season_number.map_or(UNIT_WHOLE, |v| v as i32);
+                let episode = selection.episode_number.map_or(UNIT_WHOLE, |v| v as i32);
+                return ok(super::effective_watch_json(
+                    &store,
+                    user_id,
+                    selection.media_item_id,
+                    season,
+                    episode,
+                ))
+                .into_response();
+            }
+            Err(error) => return error.response(),
+        };
+    let unit = resolved.target.unit;
+    let mut watch = super::effective_watch_json(
+        &store,
+        user_id,
+        selection.media_item_id,
+        unit.season,
+        unit.episode,
+    );
+    watch["file_id"] = json!(file.file_id.to_string());
+    watch["start_ms"] = json!(resolved.start_ms);
+    watch["duration_ms"] = json!(resolved.duration_ms);
+    watch["resume_status"] = json!(super::session::resume_status_name(resolved.status));
+    ok(watch).into_response()
 }
 
 /// GET /playback/marks — played/favorite + unplayed_count for a target.

@@ -1,5 +1,6 @@
 "use client";
 
+import { playLinkFileId } from "@/lib/player/active-target";
 import type { ReactNode } from "react";
 import { Children, Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -961,7 +962,12 @@ export function LibraryItemDetailView({
                       !isMovie && selectedSeriesEpisode
                         ? selectedSeriesEpisode.episode.episode_number
                         : undefined,
-                    fileId: selectedTrackFile?.file_id,
+                    // 只有用户真的选过版本才带 file_id；默认展示的文件不是显式选择 (R10)
+                    fileId: playLinkFileId(
+                      availableTrackFiles.some((file) => file.file_id === selectedTrackFileId)
+                        ? selectedTrackFileId
+                        : null,
+                    ),
                   }),);
               }}
             />

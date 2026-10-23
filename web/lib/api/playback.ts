@@ -831,6 +831,10 @@ export interface PlaybackWatchState {
   subtitle_track: string | null;
   /** 管理员已在活动页结束了这台浏览器的播放：播放器收到后退出，不再重开 */
   ended_by_admin?: boolean;
+  /** 源感知续播（登录态）：与开播同一解析；本地分享进度没有这些字段 */
+  file_id?: string;
+  start_ms?: number;
+  resume_status?: "compatible" | "source_changed" | "no_progress" | "already_played";
 }
 
 /** 播放页要的条目信息（§6.10）：路由只带 media_item_id，库归属服务端解析。 */
@@ -888,6 +892,8 @@ export async function fetchResumeState(
     ...(unit.season_number == null && unit.episode_number == null
       ? {}
       : { season_number: String(unit.season_number), episode_number: String(unit.episode_number) }),
+    // 同一份可选显式源偏好，由服务端 canonical resolver 解释 (R10)
+    ...(unit.file_id ? { file_id: String(unit.file_id) } : {}),
   });
   const response = await request<ApiEnvelope<PlaybackWatchState>>(
     `/playback/resume?${params}`,

@@ -15,6 +15,12 @@ import type { LibraryEpisode } from "@/lib/api/libraries";
 import { imageUrl } from "@/lib/image-proxy";
 import { playerReturnPath } from "@/lib/player/play-links";
 import {
+  type ActiveTarget,
+  initialTarget,
+  navigateTarget,
+  sessionUnit,
+} from "@/lib/player/active-target";
+import {
   nextOwnedEpisode,
   prevOwnedEpisode,
 } from "@/lib/player/episode-navigation";
@@ -64,18 +70,19 @@ export function PlayerPage({
   const navigate = useNavigate();
   const [info, setInfo] = useState<PlaybackItemInfo | null>(null);
   const [episodes, setEpisodes] = useState<LibraryEpisode[]>([]);
-  const [current, setCurrent] = useState<{ season: number; episode: number } | null>(
-    season !== undefined && episode !== undefined ? { season, episode } : null,
+  // One active target: coordinates + the URL's explicit source, replaced as a whole.
+  const [target, setTarget] = useState<ActiveTarget>(() =>
+    initialTarget({ season, episode, fileId }),
   );
+  const current =
+    target.season !== undefined && target.episode !== undefined
+      ? { season: target.season, episode: target.episode }
+      : null;
   const [failed, setFailed] = useState<string | null>(null);
 
   useEffect(() => {
-    if (season !== undefined && episode !== undefined) {
-      setCurrent({ season, episode });
-    } else {
-      setCurrent(null);
-    }
-  }, [season, episode]);
+    setTarget(initialTarget({ season, episode, fileId }));
+  }, [season, episode, fileId]);
 
   useEffect(() => {
     setInfo(null);
@@ -114,16 +121,8 @@ export function PlayerPage({
     };
   }, [mediaItemId, activeSeason, api]);
 
-  const unit = useMemo(
-    () => ({
-      media_item_id: mediaItemId,
-      // 电影省略坐标；剧集带季集
-      season_number: current?.season,
-      episode_number: current?.episode,
-      file_id: fileId,
-    }),
-    [mediaItemId, current?.season, current?.episode, fileId],
-  );
+  // 电影省略坐标；剧集带季集；file_id 只来自当前目标的显式选择
+  const unit = useMemo(() => sessionUnit(mediaItemId, target), [mediaItemId, target]);
 
   const currentEpisode = current
     ? (episodes.find((item) => item.episode_number === current.episode) ?? null)
@@ -165,18 +164,22 @@ export function PlayerPage({
 
   const playNext = useCallback(() => {
     if (!next) return;
-    setCurrent({
-      season: next.unit.season_number ?? 0,
-      episode: next.unit.episode_number ?? 0,
-    });
+    setTarget((previous) =>
+      navigateTarget(previous, {
+        season: next.unit.season_number ?? 0,
+        episode: next.unit.episode_number ?? 0,
+      }),
+    );
   }, [next]);
 
   const playPrev = useCallback(() => {
     if (!prev) return;
-    setCurrent({
-      season: prev.unit.season_number ?? 0,
-      episode: prev.unit.episode_number ?? 0,
-    });
+    setTarget((previous) =>
+      navigateTarget(previous, {
+        season: prev.unit.season_number ?? 0,
+        episode: prev.unit.episode_number ?? 0,
+      }),
+    );
   }, [prev]);
 
   const exit = useCallback(() => {

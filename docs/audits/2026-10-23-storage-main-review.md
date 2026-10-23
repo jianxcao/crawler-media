@@ -144,6 +144,8 @@ locale 步骤只 UPDATE 配置并 count 输入，不重算 locale-dependent item
 
 修复：区分省略与无效/不可用的显式选择；坏类型/UUID返回400，缺失/无权/不在位/不覆盖目标拒绝且不签发session。只有省略或明确允许的 null 自动选源，不泄漏隐藏库信息。
 
+**状态：已修复（Task9）。** `parse_selection` 严格解析：畸形字段、旧 `season`/`episode`、半 TV 坐标、电影带坐标 → 400；显式 file_id 未知/不可见/不覆盖目标 → 404 且不建会话、不回退。回归 `playback_review::explicit_invalid_sources_are_refused_without_a_session`、`partial_coordinates_are_rejected`。
+
 ### R09 [P1，源码+Router请求实测] 下一集保留上一集物理 file_id
 
 位置：`web/components/player/player-page.tsx:117-125,166-179`。
@@ -152,6 +154,8 @@ fileId 从 URL 持续进入每个 unit，next/prev 只改坐标。HTTP实测 E01
 
 修复：活动目标成套保存逻辑坐标和可选显式源；next/prev/autoplay 用新目标替换，清除初始物理偏好。合并文件E01/E02仍需独立逻辑身份，不推断分段。
 
+**状态：已修复（Task10）。** 播放器持有单一 active target，next/prev 生成不带 fileId 的新 target（`web/lib/player/active-target.ts`）。回归 `web/test/player-source-transitions.test.mjs`。浏览器按钮回放未跑。
+
 ### R10 [P2，源码证明] 默认展示文件被误当用户显式选源，破坏自动继续观看
 
 位置：`web/components/library-item-detail-view.tsx:571-574,955-964`；`store/src/playback/mutate.rs:95-109`。
@@ -159,6 +163,8 @@ fileId 从 URL 持续进入每个 unit，next/prev 只改坐标。HTTP实测 E01
 未操作选择器时 selectedTrackFileId=null，但 selectedTrackFile回退第一文件A；播放链接仍强制携A。已有恢复包指B时，自动继续被转换成显式换A，从0/source_changed开始。
 
 修复：默认展示与显式选择分离，只为真实选择传file_id；resume预览与开播共用源感知解析。`web/lib/api/playback.ts:886-894` 的resume查询还丢弃file_id，一并对齐。不用把所有版本进度视作相同时间轴。
+
+**状态：已修复（Task10）。** 详情页仅在用户选中的轨道文件存在时写 fileId（`playLinkFileId`）；`GET /playback/resume` 与开播共用 `resolve_playback`，返回 `file_id/start_ms/duration_ms/resume_status`，不写会话；web `fetchResumeState` 透传 file_id。
 
 ### R11 [P1，源码证明] rename 提前删除 durable intent，跨库引用失败无恢复
 
