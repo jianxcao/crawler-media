@@ -372,20 +372,19 @@ impl Store {
         snapshot: &Snapshot,
         library_id: &str,
     ) -> Result<(), StoreError> {
-        let mut seen_files =
-            std::collections::HashMap::<&str, std::collections::BTreeSet<(i32, i32)>>::new();
+        // 每个台账记首行与合并覆盖：线性一遍，避免逐台账回扫快照（O(n²)）。
+        let mut seen_files = std::collections::HashMap::<
+            &str,
+            (&RemovalRow, std::collections::BTreeSet<(i32, i32)>),
+        >::new();
         for row in &snapshot.rows {
             seen_files
                 .entry(row.ledger_id.as_str())
-                .or_default()
+                .or_insert_with(|| (row, Default::default()))
+                .1
                 .extend(row.coverage.iter().copied());
         }
-        for (ledger_id, snapshot_units) in seen_files {
-            let first = snapshot
-                .rows
-                .iter()
-                .find(|row| row.ledger_id == ledger_id)
-                .ok_or_else(|| StoreError::Protected("删除快照台账身份无效".into()))?;
+        for (ledger_id, (first, snapshot_units)) in seen_files {
             let current: Option<(String, String)> = self
                 .library
                 .query_row(
@@ -425,52 +424,38 @@ impl Store {
         Ok(())
     }
 
+    /// 按 [`REMOVAL_BATCH_FILES`] 个文件一批各自提交：每批的文件删除、摘要归约与该批覆盖
+    /// 单元的标记清理同事务。快照不变，已删文件在下次续跑时自然跳过，
+    /// 所以"库里还剩哪些快照文件"就是持久游标；删除期间该库不接受工作也不对外可见。
     fn clean_removal_rows(&self, snapshot: &Snapshot, library_id: &str) -> Result<(), StoreError> {
         let library_id: domain::LibraryId = library_id
             .parse()
             .map_err(|_| StoreError::Protected("删除快照 Library 身份无效".into()))?;
-        let file_ids = snapshot
-            .rows
-            .iter()
-            .map(|row| row.ledger_id.parse::<domain::LedgerId>())
-            .collect::<Result<std::collections::HashSet<_>, _>>()
-            .map_err(|_| StoreError::Protected("删除快照台账身份无效".into()))?
-            .into_iter()
-            .collect::<Vec<_>>();
-        tracing::info!(library_id = %library_id, files = file_ids.len(), "开始清理 Library 台账行");
-        // Removing a file must go through the summary-maintaining path: the deferred
-        // `preferred_file_id` composite foreign keys from `library_units`/`library_items`
-        // point at `library_files` rows, so a bare row delete would abort the commit.
-        // Everything stays in this one transaction, so any failure rolls back the
-        // whole cleanup instead of leaving a partially reduced Library.
-        let tx = crate::write_tx(&self.library)?;
-        let removed = crate::library_write::delete::delete_files_in_tx(&tx, library_id, &file_ids)?;
-        let mut unit_rows = std::collections::HashSet::new();
+        let mut order = Vec::new();
+        let mut by_file = std::collections::HashMap::<domain::LedgerId, Vec<&RemovalRow>>::new();
         for row in &snapshot.rows {
-            for (season, episode) in &row.coverage {
-                if !unit_rows.insert((&row.media_id, *season, *episode)) {
-                    continue;
-                }
-                tx.execute(
-                    "DELETE FROM media_markers WHERE media_id=?1 AND season IS ?2 AND episode IS ?3
-                     AND locked=0
-                     AND NOT EXISTS (
-                         SELECT 1 FROM library_file_units u JOIN library_files f ON f.file_id = u.file_id
-                         WHERE u.media_id=?1 AND u.season IS ?2 AND u.episode IS ?3)",
-                    params![&row.media_id, season, episode],
-                )?;
-                if *season >= 0 {
-                    tx.execute(
-                        "DELETE FROM probe_season_comparison_history WHERE media_id=?1 AND season=?2
-                         AND NOT EXISTS (
-                             SELECT 1 FROM library_file_units u JOIN library_files f ON f.file_id = u.file_id
-                             WHERE u.media_id=?1 AND u.season=?2)",
-                        params![&row.media_id, season],
-                    )?;
-                }
+            let id = row
+                .ledger_id
+                .parse::<domain::LedgerId>()
+                .map_err(|_| StoreError::Protected("删除快照台账身份无效".into()))?;
+            let rows = by_file.entry(id).or_default();
+            if rows.is_empty() {
+                order.push(id);
             }
+            rows.push(row);
         }
-        tx.commit()?;
+        tracing::info!(library_id = %library_id, files = order.len(), "开始清理 Library 台账行");
+        let mut removed = 0;
+        for batch in order.chunks(REMOVAL_BATCH_FILES) {
+            // 删除必须走维护摘要的路径：`preferred_file_id` 延迟外键指向 `library_files`。
+            let tx = crate::write_tx(&self.library)?;
+            removed += crate::library_write::delete::delete_files_in_tx(&tx, library_id, batch)?;
+            let rows = batch.iter().flat_map(|id| by_file[id].iter().copied());
+            clean_unit_facts(&tx, rows)?;
+            tx.commit()?;
+            #[cfg(test)]
+            removal_batch_failpoint()?;
+        }
         tracing::info!(library_id = %library_id, removed, "Library 台账行清理完成");
         Ok(())
     }
@@ -570,6 +555,63 @@ fn delete_library_scoped_settings(
 #[cfg(test)]
 std::thread_local! {
     static INTERRUPT_AFTER_LIBRARY_COMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 单批最多处理的快照文件数（计划 Q5：长操作批次 ≤100 个输入实体）。
+const REMOVAL_BATCH_FILES: usize = 100;
+
+/// 本批文件覆盖的单元：没有任何剩余文件时，清掉未锁定标记与季对比历史。
+fn clean_unit_facts<'a>(
+    tx: &rusqlite::Connection,
+    rows: impl Iterator<Item = &'a RemovalRow>,
+) -> Result<(), StoreError> {
+    let mut unit_rows = std::collections::HashSet::new();
+    for row in rows {
+        for (season, episode) in &row.coverage {
+            if !unit_rows.insert((&row.media_id, *season, *episode)) {
+                continue;
+            }
+            tx.execute(
+                "DELETE FROM media_markers WHERE media_id=?1 AND season IS ?2 AND episode IS ?3
+                 AND locked=0
+                 AND NOT EXISTS (
+                     SELECT 1 FROM library_file_units u JOIN library_files f ON f.file_id = u.file_id
+                     WHERE u.media_id=?1 AND u.season IS ?2 AND u.episode IS ?3)",
+                params![&row.media_id, season, episode],
+            )?;
+            if *season >= 0 {
+                tx.execute(
+                    "DELETE FROM probe_season_comparison_history WHERE media_id=?1 AND season=?2
+                     AND NOT EXISTS (
+                         SELECT 1 FROM library_file_units u JOIN library_files f ON f.file_id = u.file_id
+                         WHERE u.media_id=?1 AND u.season=?2)",
+                    params![&row.media_id, season],
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static INTERRUPT_AFTER_BATCHES: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// 每批提交后调用：计数归零时模拟崩溃，用来证明批次各自持久且可续跑。
+#[cfg(test)]
+fn removal_batch_failpoint() -> Result<(), StoreError> {
+    INTERRUPT_AFTER_BATCHES.with(|slot| match slot.get() {
+        Some(0) | Some(1) => {
+            slot.set(None);
+            Err(StoreError::Protected("simulated batch interruption".into()))
+        }
+        Some(n) => {
+            slot.set(Some(n - 1));
+            Ok(())
+        }
+        None => Ok(()),
+    })
 }
 
 #[cfg(test)]

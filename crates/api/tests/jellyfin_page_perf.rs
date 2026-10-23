@@ -176,9 +176,5 @@ fn harness_shapes_return_expected_counts() {
         results[3].1, 1,
         "Actor 7 is cast only in movie 1 at this size"
     );
-    assert_eq!(
-        results[4],
-        ("search", 10),
-        "Perf 000010..Perf 000019"
-    );
+    assert_eq!(results[4], ("search", 10), "Perf 000010..Perf 000019");
 }

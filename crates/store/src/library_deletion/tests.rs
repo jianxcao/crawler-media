@@ -259,3 +259,50 @@ fn summary_rows(store: &Store, library_id: &str, media_id: MediaId) -> (i64, i64
     };
     (count("library_items"), count("library_units"))
 }
+
+/// 大删除按 ≤100 文件一批各自提交：第一批后崩溃只留下其余文件，重启续跑完成且计数不变。
+#[test]
+fn large_removal_commits_bounded_batches_and_resumes() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("data");
+    let store = Store::open(&data).unwrap();
+    let (library, first) = fixture(&store, &temp.path().join("tv"));
+    let root = temp.path().join("tv");
+    for episode in 2..=250 {
+        let row = FixtureFile {
+            file_id: Some(LedgerId::new()),
+            media_id: first.media_id,
+            path: root
+                .join(format!("E{episode:03}.strm"))
+                .display()
+                .to_string(),
+            season: Some(1),
+            episode: Some(episode),
+            ..FixtureFile::default()
+        };
+        crate::test_support::publish_fixture_file(&store, &row).unwrap();
+    }
+    let removal = store.begin_library_removal(&library.id).unwrap();
+    store
+        .set_removal_state(&removal.operation_id, "cleaning", None)
+        .unwrap();
+    INTERRUPT_AFTER_BATCHES.with(|slot| slot.set(Some(1)));
+    assert!(store.clean_library_removal(&removal.operation_id).is_err());
+    let remaining: i64 = store
+        .library
+        .query_row(
+            "SELECT COUNT(*) FROM library_files WHERE library_id=?1",
+            [&library.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        remaining, 150,
+        "first batch of 100 must be durable on its own"
+    );
+    drop(store);
+    let store = Store::open(&data).unwrap();
+    let done = store.clean_library_removal(&removal.operation_id).unwrap();
+    assert_eq!(done.state, "succeeded");
+    assert_eq!(done.removed_ledger_count, 250);
+}
