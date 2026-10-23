@@ -435,10 +435,15 @@ impl LibraryWorkRegistry {
     }
 
     pub fn cancel(&self, library_id: &str) {
-        let mut entries = self.entries.lock();
-        let entry = entries.entry(library_id.into()).or_default();
-        entry.cancelled = true;
-        for control in entry.controls.values() {
+        let controls: Vec<library::WorkControl> = {
+            let mut entries = self.entries.lock();
+            let entry = entries.entry(library_id.into()).or_default();
+            entry.cancelled = true;
+            entry.controls.values().cloned().collect()
+        };
+        // Same order as `freeze`/`block`: a control may wait on its publication gate,
+        // and that publication may take the registry to acquire/drop another lease.
+        for control in controls {
             control.cancel();
         }
     }

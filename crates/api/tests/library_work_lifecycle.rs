@@ -154,3 +154,61 @@ fn target_lease_inside_source_publication_does_not_deadlock_freeze() {
     assert!(registry.acquire(&store, &source.id).is_err());
     assert!(registry.acquire(&store, &target.id).is_ok());
 }
+
+/// C01: `cancel` must not wait on a publication gate while it holds the registry;
+/// the publication acquires and drops a target lease (registry) inside the gate.
+#[test]
+fn cancel_during_publication_allows_nested_lease_drop() {
+    const NAME: &str = "cancel_during_publication_allows_nested_lease_drop";
+    if watched(NAME) {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let store = Arc::new(Mutex::new(store::Store::open(temp.path()).unwrap()));
+    let (source, target) = two_libraries(&store, temp.path());
+    let registry = Arc::new(LibraryWorkRegistry::default());
+    let lease = registry.acquire(&store, &source.id).unwrap();
+    let old_control = lease.control().clone();
+
+    let (in_gate_tx, in_gate_rx) = std::sync::mpsc::channel();
+    let (cancel_tx, cancel_rx) = std::sync::mpsc::channel();
+    let (publish_tx, publish_rx) = std::sync::mpsc::channel();
+    let canceller = {
+        let (registry, id) = (registry.clone(), source.id.clone());
+        std::thread::spawn(move || {
+            in_gate_rx.recv().unwrap();
+            registry.cancel(&id);
+            let _ = cancel_tx.send(());
+        })
+    };
+    let publisher = {
+        let (registry, store, target_id) = (registry.clone(), store.clone(), target.id.clone());
+        std::thread::spawn(move || {
+            let _ = lease.control().publish(|| {
+                in_gate_tx.send(()).unwrap();
+                // Scheduling checkpoint: let the canceller take the registry first.
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                drop(registry.acquire(&store, &target_id));
+                Ok(())
+            });
+            drop(lease);
+            let _ = publish_tx.send(());
+        })
+    };
+    let deadline = std::time::Duration::from_secs(20);
+    let publisher_finished = publish_rx.recv_timeout(deadline).is_ok();
+    let cancellation_finished = cancel_rx.recv_timeout(deadline).is_ok();
+    if !(publisher_finished && cancellation_finished) {
+        eprintln!("LOCK_CYCLE publisher={publisher_finished} cancel={cancellation_finished}");
+        std::process::exit(3);
+    }
+    publisher.join().unwrap();
+    canceller.join().unwrap();
+    assert!(old_control.is_cancelled());
+    assert!(registry.acquire(&store, &source.id).is_err());
+
+    // A cancel with no entry still forbids a later acquire.
+    let fresh = Arc::new(LibraryWorkRegistry::default());
+    fresh.cancel(&target.id);
+    assert!(fresh.acquire(&store, &target.id).is_err());
+}

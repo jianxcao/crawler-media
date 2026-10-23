@@ -112,3 +112,9 @@ deferred_snapshot_write_error: SQLITE_BUSY_SNAPSHOT
 快照 wc 确认8个 `.rs` 超800行：[references](<../../crates/store/src/media_operations/references.rs>)879、[http/playback](<../../crates/api/src/http/playback.rs>)837、[units](<../../crates/store/src/playback/units.rs>)810、[event binding tests](<../../crates/store/tests/playback_event_binding.rs>)1105、[reconfiguration tests](<../../crates/store/tests/library_reconfiguration.rs>)917、[seek scale](<../../crates/store/tests/storage_work_bounds/seek_scale.rs>)860、[identity tests](<../../crates/api/tests/playback_event_identity.rs>)857、[statistics tests](<../../crates/api/tests/library_statistics_scale.rs>)826。[store/lib.rs](<../../crates/store/src/lib.rs>)261行超150软限制但未超800硬限制，其 Store/构造器定义不符合仅模块/导出形状。触及即按职责拆分，测试逻辑也受800/120硬限制；不做无意义转发层。
 
 本次验收仅为 Markdown 链接、基线/范围、任务覆盖、签名一致性、风险措辞与文档专属暂存/提交 diff。审查期间工作区代码仍有外部并行变更，整体代码差异指纹不稳定；这些变更不读取为修复证据、不覆盖、不回滚、不暂存。以本次提交相对审查 HEAD 的代码树完全相同证明没有夹带代码，而非声称外部工作区在时间上静止。未来实现需逐任务 RED→GREEN、触及 crate 独立测试、最终稳定树 workspace 测试，不把文档完成等同生产验收。
+
+## 8. 实施状态
+
+| ID | 状态 |
+|---|---|
+| C01 (A1) | 已修复：cancel 锁内置 cancelled 并克隆 controls，锁外 cancel。回归 `library_work_lifecycle::cancel_during_publication_allows_nested_lease_drop`（旧实现子进程 40s 锁环）。 |
