@@ -54,7 +54,7 @@ pub(super) fn scoped_cte(scope: &Scope) -> String {
            {NFO_JSON} AS nfo_json, \
            mm.details_json AS adopted_json, mm.genres_json AS adopted_genres, \
            mm.overview AS adopted_overview, mm.original_title AS adopted_original, \
-           i.pref_locale AS pref_locale \
+           i.pref_locale AS pref_locale, i.search_text AS search_text \
          FROM {items} \
          LEFT JOIN media_metadata mm ON mm.media_id = i.media_id \
            AND mm.locale = COALESCE(\

@@ -305,5 +305,6 @@ fn sync_terms(tx: &Connection, lib: &str, media: &str, facts: &Facts) -> Result<
          WHERE ci.media_id = ?2 AND c.visibility = 'public' AND c.user_id IS NULL",
         params![lib, media],
     )?;
+    crate::protocol_index::sync_card(tx, lib, media)?;
     Ok(())
 }

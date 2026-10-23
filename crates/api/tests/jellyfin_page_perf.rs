@@ -140,7 +140,11 @@ fn protocol_page_latency() {
         .collect();
     println!("size\tshape\ttotal\tpage\tmedian_ms\tp95_ms");
     for size in sizes {
-        let (_dir, store, library) = seed(size);
+        let (dir, store, library) = seed(size);
+        if std::env::var_os("PERF_KEEP").is_some() {
+            println!("kept\t{}", dir.path().display());
+            std::mem::forget(dir);
+        }
         for (name, q) in shapes(library, UserId::new()) {
             let mut times: Vec<Duration> = Vec::new();
             let mut last = None;

@@ -686,6 +686,14 @@ fn search_reads_the_library_display_locale() {
         rusqlite::params![fx.alpha.to_string()],
     )
     .unwrap();
+    // Raw-SQL fixture bypasses the card reduction, so write the cross-locale haystack
+    // the reduction would have stored; the locale chain itself is still the query's job.
+    db.execute(
+        "UPDATE library_items SET search_text = 'localized' || char(31) || 'english plot' \
+           || char(31) || 'chinese plot' WHERE media_id = ?1",
+        rusqlite::params![movie.to_string()],
+    )
+    .unwrap();
     let mut query = base_query(ProtocolParent::Library(fx.alpha));
     query.search_term = Some("chinese".into());
     assert_eq!(fx.store.protocol_item_page(&query).unwrap().total, 1);

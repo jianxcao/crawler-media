@@ -235,7 +235,13 @@ fn search_clause(
         .iter()
         .map(|field| format!("instr(casefold({field}), {needle}) > 0"))
         .collect();
-    clauses.push(format!("({})", parts.join(" OR ")));
+    // 作品支先用写入期 `search_text`（跨语言的折叠干草堆）收窄，再跑按语言链的精确判断。
+    let prefilter = if branch.unit() {
+        String::new()
+    } else {
+        format!("instr(s.search_text, {needle}) > 0 AND ")
+    };
+    clauses.push(format!("({prefilter}({}))", parts.join(" OR ")));
 }
 
 /// `Filters`/`IsFavorite`/`IsPlayed`：用户标记直接查 `playback_units`。

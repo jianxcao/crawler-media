@@ -8,6 +8,7 @@ mod chapter_frame_tasks;
 mod instance_lock;
 mod pending_file_deletions;
 mod pending_progress;
+mod protocol_index;
 pub use chapter_frame_tasks::{ChapterFrameTask, ChapterFrameTaskCounts};
 mod collections;
 mod data_retention;

@@ -107,6 +107,7 @@ pub(super) fn sync_terms_delta(
             )?;
         }
     }
+    crate::protocol_index::sync_card(tx, lib, media)?;
     Ok(())
 }
 

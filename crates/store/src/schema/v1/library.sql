@@ -153,6 +153,7 @@ CREATE TABLE library_items (
  missing_file_count INTEGER NOT NULL DEFAULT 0, unknown_file_count INTEGER NOT NULL DEFAULT 0,
  distinct_episode_count INTEGER NOT NULL DEFAULT 0, distinct_season_count INTEGER NOT NULL DEFAULT 0,
  preferred_file_id TEXT, poster_ref TEXT, backdrop_ref TEXT, has_still INTEGER NOT NULL DEFAULT 0,
+ search_text TEXT NOT NULL DEFAULT '',
  PRIMARY KEY(library_id,media_id),
  FOREIGN KEY(preferred_file_id,library_id,media_id) REFERENCES library_files(file_id,library_id,media_id) DEFERRABLE INITIALLY DEFERRED,
  CHECK(available_file_count>=0 AND missing_file_count>=0 AND unknown_file_count>=0),
@@ -174,6 +175,7 @@ CREATE TABLE library_item_terms (
  FOREIGN KEY(library_id,media_id) REFERENCES library_items(library_id,media_id) ON DELETE CASCADE
 );
 CREATE INDEX terms_media ON library_item_terms(library_id,media_id,term_kind,term_value);
+CREATE INDEX terms_value ON library_item_terms(term_kind,term_value,library_id,media_id);
 CREATE TABLE collections (
  id TEXT PRIMARY KEY NOT NULL, user_id TEXT, visibility TEXT NOT NULL CHECK(visibility IN ('private','public')),
  name TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,

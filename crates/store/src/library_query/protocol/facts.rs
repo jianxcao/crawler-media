@@ -20,6 +20,7 @@ use super::scope::Scope;
 use super::sql::scoped_cte;
 use crate::StoreError;
 use crate::library_query::items::Bindings;
+use crate::protocol_index::{compact_id, person_wire_id, requested_genre_keys, role_from_wire};
 
 /// 一个角色上解析出的命中集合：名字按小写比较，`tmdb` 只对演员有效。
 #[derive(Default)]
@@ -39,7 +40,8 @@ pub(super) fn people_clause(
         return Ok(None);
     }
     let wanted: BTreeSet<String> = request.person_ids.iter().map(|id| compact_id(id)).collect();
-    let roles = resolve_people(conn, scope, &wanted)?;
+    let keys: Vec<String> = wanted.iter().cloned().collect();
+    let roles = resolve_people(conn, scope, &wanted, &keys)?;
     let mut clauses = Vec::new();
     for (role, filter) in roles {
         if let Some(clause) = role_clause(role, &filter, bindings) {
@@ -50,8 +52,12 @@ pub(super) fn people_clause(
         // 请求里的人物一条都没落在范围内：命中集合为空，与旧实现的 any() 语义一致。
         return Ok(Some("1 = 0".to_string()));
     }
-    // 旧实现是「任一元数据人物命中请求集合」，跨角色取并集。
-    Ok(Some(format!("({})", clauses.join(" OR "))))
+    let prefilter = index_prefilter(PERSON_KINDS, &string_list(bindings, &keys));
+    // 旧实现是「任一元数据人物命中请求集合」，跨角色取并集；写入期索引先把候选收窄。
+    Ok(Some(format!(
+        "({prefilter} AND ({}))",
+        clauses.join(" OR ")
+    )))
 }
 
 /// 流派谓词；`requested` 已由调用方合并 `genres`/`genre_ids`/`Genre` 父级。
@@ -64,10 +70,15 @@ pub(super) fn genre_clause(
     if requested.is_empty() {
         return Ok(None);
     }
-    let matched = resolve_genres(conn, requested, scope)?;
+    let keys: Vec<String> = requested
+        .iter()
+        .flat_map(|wanted| requested_genre_keys(wanted))
+        .collect();
+    let matched = resolve_genres(conn, requested, scope, &keys)?;
     if matched.is_empty() {
         return Ok(Some("1 = 0".to_string()));
     }
+    let prefilter = index_prefilter(GENRE_KINDS, &string_list(bindings, &keys));
     let list = lowercase_list(bindings, &matched);
     let sources = [
         "EXISTS (SELECT 1 FROM library_item_terms t \
@@ -86,7 +97,41 @@ pub(super) fn genre_clause(
                 .replace("{list}", &list),
         );
     }
-    Ok(Some(format!("({})", clauses.join(" OR "))))
+    Ok(Some(format!(
+        "({prefilter} AND ({}))",
+        clauses.join(" OR ")
+    )))
+}
+
+const GENRE_KINDS: &str = "'jellyfin_genre'";
+const PERSON_KINDS: &str = "'person_id', 'person_tmdb_id'";
+
+/// 写入期协议索引（`crate::protocol_index`）上的候选集：跨所有语言收录，是精确谓词的
+/// 必要条件，所以先用它收窄，再对少量候选跑按语言链取值的精确判断。
+fn index_prefilter(kinds: &str, list: &str) -> String {
+    format!(
+        "(s.library_id, s.media_id) IN (SELECT t.library_id, t.media_id FROM library_item_terms t \
+           WHERE t.term_kind IN ({kinds}) AND t.term_value IN ({list}))"
+    )
+}
+
+/// 解析查询专用：`scoped` 再按索引候选收窄，占位符接在作用域参数之后。
+fn candidates_cte(scope: &Scope, kinds: &str, keys: &[String]) -> (String, Vec<SqlValue>) {
+    let mut values = scope.values.clone();
+    let list = keys
+        .iter()
+        .map(|key| {
+            values.push(SqlValue::Text(key.clone()));
+            format!("?{}", values.len())
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "WITH {}, cand AS (SELECT * FROM scoped s WHERE {})",
+        scoped_cte(scope),
+        index_prefilter(kinds, &list)
+    );
+    (sql, values)
 }
 
 /// 流派元素既可能是 `{"name": ...}` 对象，也可能是裸字符串；比较用折叠形。
@@ -106,37 +151,35 @@ fn resolve_people(
     conn: &Connection,
     scope: &Scope,
     wanted: &BTreeSet<String>,
+    keys: &[String],
 ) -> Result<BTreeMap<&'static str, RoleFilter>, StoreError> {
+    let (with, values) = candidates_cte(scope, PERSON_KINDS, keys);
     let sql = format!(
-        "WITH {scoped} \
+        "{with} \
          SELECT ptype, name, tmdb FROM (\
            SELECT 'Actor' AS ptype, json_extract(j.value, '$.name') AS name, \
              json_extract(j.value, '$.tmdb_id') AS tmdb \
-             FROM scoped s, json_each(COALESCE(s.nfo_json, '{{}}'), '$.cast.value') j \
+             FROM cand s, json_each(COALESCE(s.nfo_json, '{{}}'), '$.cast.value') j \
            UNION SELECT 'Actor', json_extract(j.value, '$.name'), json_extract(j.value, '$.tmdb_id') \
-             FROM scoped s, json_each(COALESCE(s.adopted_json, '{{}}'), '$.fields.cast.value') j \
+             FROM cand s, json_each(COALESCE(s.adopted_json, '{{}}'), '$.fields.cast.value') j \
            UNION SELECT 'Director', j.value, NULL \
-             FROM scoped s, json_each(COALESCE(s.nfo_json, '{{}}'), '$.directors.value') j \
+             FROM cand s, json_each(COALESCE(s.nfo_json, '{{}}'), '$.directors.value') j \
            UNION SELECT 'Director', j.value, NULL \
-             FROM scoped s, json_each(COALESCE(s.adopted_json, '{{}}'), '$.fields.directors.value') j \
+             FROM cand s, json_each(COALESCE(s.adopted_json, '{{}}'), '$.fields.directors.value') j \
            UNION SELECT 'Writer', j.value, NULL \
-             FROM scoped s, json_each(COALESCE(s.nfo_json, '{{}}'), '$.creators.value') j \
+             FROM cand s, json_each(COALESCE(s.nfo_json, '{{}}'), '$.creators.value') j \
            UNION SELECT 'Writer', j.value, NULL \
-             FROM scoped s, json_each(COALESCE(s.adopted_json, '{{}}'), '$.fields.creators.value') j\
-         )",
-        scoped = scoped_cte(scope)
+             FROM cand s, json_each(COALESCE(s.adopted_json, '{{}}'), '$.fields.creators.value') j\
+         )"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(
-        rusqlite::params_from_iter(scope.values.iter().cloned()),
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
-        },
-    )?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(values), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+        ))
+    })?;
     let mut resolved: BTreeMap<&'static str, RoleFilter> = BTreeMap::new();
     for row in rows {
         let (role, name, tmdb) = row?;
@@ -168,27 +211,27 @@ fn resolve_genres(
     conn: &Connection,
     requested: &[String],
     scope: &Scope,
+    keys: &[String],
 ) -> Result<Vec<String>, StoreError> {
+    let (with, values) = candidates_cte(scope, GENRE_KINDS, keys);
     let sql = format!(
-        "WITH {scoped} \
+        "{with} \
          SELECT name FROM (\
            SELECT t.term_value AS name \
              FROM library_item_terms t \
-             JOIN scoped s ON s.library_id = t.library_id AND s.media_id = t.media_id \
+             JOIN cand s ON s.library_id = t.library_id AND s.media_id = t.media_id \
              WHERE t.term_kind = 'genre' \
            UNION SELECT {expr} \
-             FROM scoped s, json_each(COALESCE(s.adopted_genres, '[]')) g \
+             FROM cand s, json_each(COALESCE(s.adopted_genres, '[]')) g \
            UNION SELECT {expr} \
-             FROM scoped s, json_each(COALESCE(s.nfo_json, '{{}}'), '$.genres.value') g\
+             FROM cand s, json_each(COALESCE(s.nfo_json, '{{}}'), '$.genres.value') g\
          ) WHERE name IS NOT NULL AND trim(name) != ''",
-        scoped = scoped_cte(scope),
         expr = genre_raw_expr()
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(
-        rusqlite::params_from_iter(scope.values.iter().cloned()),
-        |row| row.get::<_, String>(0),
-    )?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(values), |row| {
+        row.get::<_, String>(0)
+    })?;
     let mut matched = Vec::new();
     for row in rows {
         let name = row?;
@@ -285,27 +328,6 @@ fn role_sources(role: &str) -> Vec<(&'static str, &'static str, bool)> {
             ),
         ],
     }
-}
-
-/// 与 `item_metadata::people_from_nfo` 完全一致的派生规则。
-fn person_wire_id(role: &str, name: &str, tmdb: Option<&str>) -> String {
-    let key = tmdb
-        .map(|id| format!("tmdb:{id}:{role}"))
-        .unwrap_or_else(|| format!("name:{}:{role}", name.to_lowercase()));
-    Uuid::new_v5(&Uuid::NAMESPACE_URL, key.as_bytes()).to_string()
-}
-
-fn role_from_wire(role: &str) -> Option<&'static str> {
-    match role {
-        "Actor" => Some("Actor"),
-        "Director" => Some("Director"),
-        "Writer" => Some("Writer"),
-        _ => None,
-    }
-}
-
-fn compact_id(id: &str) -> String {
-    id.replace('-', "").to_ascii_lowercase()
 }
 
 fn push_unique(values: &mut Vec<String>, value: String) {

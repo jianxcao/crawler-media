@@ -106,3 +106,22 @@ release，`jellyfin_page_perf`，median ms（基线 = Q4 提交 68e43bc 的 50k 
 
 仍线性：每行要算 `scoped` 的 NFO/采纳 JSON 并逐行求谓词；person 主要耗在请求 id → 名字的解析（扫描全部 NFO 演职员）。
 近乎恒定的扩展性要求写入期维护的 term（jellyfin_genre/person_id 已在 CHECK 中但无写入者）与标题 FTS5，并处理 display_locale 变更的失效——未实现。
+
+## Q4c — write-time protocol index (genre / person / search)
+
+Card reduction now stores `jellyfin_genre` (`id:`/`name:` keys), `person_id`/`person_tmdb_id`
+terms and `library_items.search_text` (casefolded, every stored locale). The page uses them as a
+sound prefilter (`terms_value(term_kind,term_value,library_id,media_id)` index) and keeps the exact
+locale-chained predicate on the candidates only. Store-level `protocol_item_page`, release, median
+of 7 (ms); same harness as Q4/Q4b, same box.
+
+| size | genre before→after | person before→after | search before→after |
+|---|---|---|---|
+| 5k | 82.7 → 21.3 | 173.5 → 2.5 | 55.7 → 2.8 |
+| 20k | 325.7 → 85.4 | 598.3 → 3.2 | 181.6 → 21.6 |
+| 50k | 878.7 → 221.0 | 1741.0 → 6.0 | 531.5 → 58.7 |
+
+person is flat; search scans one column (linear, ~1.2 µs/row); genre remains proportional to
+matches (Drama = 1/6 of the library → 8334 rows sorted and counted at 50k). Without the
+`terms_value` index the IN-list scanned the whole term table (~20 ms × 7 statements at 20k).
+FTS5 not used: the single-column `instr` already meets the target and keeps substring semantics.
