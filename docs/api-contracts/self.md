@@ -173,17 +173,17 @@ Playback history/watch stats 的 `member_id` 只接受 User UUID；显式传入�
 
 2026-10-13 的 [总复核](<../audits/2026-10-13-database-api-review.md>) 保留为历史缺陷证据；不能将其所有“当前缺陷”直接搬到现行合同，也不能仅据后续代码存在就宣布所有回归通过。DB8 的 SQL 硬预算、VACUUM best-effort 边界及仅周期冲突检测仍须分别核对。
 
-## 当前存储切换边界（2026-10-23，8fbf81b）
+## 当前存储切换边界（2026-10-24，5bd696e）
 
-四个Store文件为app/cache/library/subscribe，队列另在jobs；无旧数据库迁移阶梯或兼容视图。旧LedgerRow、重新识别补当前版本、movie `(0,0)` alias等已移除，不重做旧缺陷清单。Jellyfin协议与公开静态图片保留其独立合同。
+四个Store文件为app/cache/library/subscribe，队列另在jobs；无旧数据库迁移阶梯或兼容视图。旧LedgerRow、重新识别补当前版本、movie `(0,0)` alias等已移除。Jellyfin协议与公开静态图片保留独立合同。
 
-**Subscribe唯一请求字段：** 创建/PATCH使用 `coverage` 和 `filter_id`；`POST /subscriptions/{id}/upgrade-runs` body为 `{filter_id?, wash_cut?}`，回执也返回 `filter_id`。当前PATCH/upgrade已拒旧字段，但Web的TV调整和换Filter操作仍发送 `selected_seasons` / `rule_set_id`；创建DTO又未拒未知字段。这是[复审F01](../audits/2026-10-23-storage-followup-review.md)确认的实现缺陷，不保留为兼容合同。
+**Subscribe唯一请求字段：** 创建/PATCH使用 `coverage` 和 `filter_id`；`POST /subscriptions/{id}/upgrade-runs` body为 `{filter_id?, wash_cut?}`，回执也返回 `filter_id`。本轮已核对实际Web调用者和create严格拒旧，原F01生产问题关闭；部分Rust共享测试fixture仍发旧inline filter，须迁移测试而非恢复兼容（当前复核R09）。
 
-**Playback marks目标：** 正式字段为 `season_number` / `episode_number`，需支持整项、整季与合法TV S00E00。当前GET错误坐标可被降为whole读取；POST错误类型、旧键或溢出可被降为whole并持久写入整项，见F05；严格拒绝与零写是待修目标，不能声称现有全部入口已验证。
+**Playback marks目标：** 字段为 `season_number` / `episode_number`，支持整项、整季与合法TV S00E00。POST已拒显式旧season/episode与坏类型，但i32越界被饱和、未知坐标键仍可能whole写入，GET旧键也仍被忽略。严格字段/实际存储范围与坏请求零写仍是待修合同，见R03。Web当前多发的device_id也应同步收敛。
 
-成功信封应只使用 `{ok:true,data}`；当前Web HTTP层及部分adapter仍接纳旧success信封、裸数组/对象并伪空，见F08。明确204无body接口独立处理。
+成功信封只使用 `{ok:true,data}`。实际Web HTTP、catalog/health及消费data回执的组件已切换；旧success、裸数组/对象与缺data被拒。明确204无body单独处理，保留合法业务空值。
 
-普通协议分页已经使用写入期genre/person索引与search_text，页面选源已后置。50k genre仍随命中数增长，精确total与offset的成本见[性能报告](../benchmarks/2026-10-23-storage-redesign-report.md)，不因SQL存在承诺常量扩展性。当前问题及修复仅维护于[再次复审](../audits/2026-10-23-storage-followup-review.md)与[唯一方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)。
+普通协议分页使用写入期genre/person索引与search_text，页面选源已后置。50k genre随命中数增长，精确total与offset成本见[历史性能报告](../benchmarks/2026-10-23-storage-redesign-report.md)。当前证据见[修复复核](../audits/2026-10-24-storage-fix-review.md)，待办仅维护于[唯一方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)。
 
 ## 现行表面（去哪看）
 

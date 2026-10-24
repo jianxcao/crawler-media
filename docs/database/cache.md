@@ -8,7 +8,7 @@
 
 ## 职责与来源
 
-只保存外部响应，不保存 Media 身份、Library 文件、已采用元数据、观看状态或图片字节。正常清缓存不能修改这些事实；当前协议分页读取持久采用元数据及输入，旧请求时NFO/catalog缺陷不能直接照搬为现状。清cache的完整现场验收与边界见[当前复审](../audits/2026-10-23-storage-followup-review.md)。
+只保存外部响应，不保存 Media 身份、Library 文件、已采用元数据、观看状态或图片字节。正常清缓存不能修改这些事实；当前协议分页读取持久采用元数据及输入，旧请求时NFO/catalog缺陷不能直接照搬为现状。清cache的完整现场验收与边界见[当前复核](../audits/2026-10-24-storage-fix-review.md)。
 
 来源是固定 [CacheSource](../../crates/media/src/response_cache/source.rs) 白名单，不是用户提供的 SQL 表名；表内没有 `source` 列。
 

@@ -1,6 +1,6 @@
 # Storage query efficiency measurements (2026-10-23)
 
-历史阶段测量，数值保留原版本边界。当前实现/剩余优化见[复审](../audits/2026-10-23-storage-followup-review.md)与[汇总报告](2026-10-23-storage-redesign-report.md)。各阶段“未改”不代表8fbf81b仍未实现。
+历史阶段测量，数值保留原版本边界。当前实现/剩余优化见[复核](../audits/2026-10-24-storage-fix-review.md)与[汇总报告](2026-10-23-storage-redesign-report.md)。各阶段“未改”不代表8fbf81b仍未实现。
 
 Bundled SQLite, fresh `library.db` from `Store::open`; plans captured by
 `crates/store/tests/cleanup_index_work.rs` (`-- --nocapture`).

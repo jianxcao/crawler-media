@@ -2,7 +2,7 @@
 
 [返回数据库总览](README.md)
 
-结构核对：`8fbf81b`（2026-10-23）；行为边界见[当前复审](../audits/2026-10-23-storage-followup-review.md)。`application_id=1129139249`，`user_version=1`。不可按缓存清空。
+结构核对：`5bd696e`（2026-10-24，本轮无DDL变更）；行为边界见[当前复核](../audits/2026-10-24-storage-fix-review.md)。`application_id=1129139249`，`user_version=1`。不可按缓存清空。
 
 结构为 **47张业务表、553字段、57个显式命名索引、32组FK、0触发器**，不计SQLite自动索引。历史45表/519字段/51索引描述已撤下；当前统计来自生产DDL的内存SQLite执行结果。当前字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准，结构一致不等于业务不变量已验收。
 
@@ -12,7 +12,7 @@
 - 文件源CAS、元数据写屏障、用户摘要、严格重新识别和多数API切换已落地；本轮不沿用1845dab的缺陷列表作为当前事实。
 - `pending_file_renames`保存版本、源/目标磁盘证据、sidecar决议、已完成阶段与重试；正常organize已分出锁外观察/执行，housekeeping与启动恢复仍持Store锁执行磁盘IO。
 - `pending_root_reassignments`每次事务读取≤100个文件候选并提交游标；外层仍同步耗尽队列，关联输入迁移、冻结及恢复完整性尚未通过本轮复审，不能写成A6全部完成。
-- 当前缺陷、证据等级和待实现方案分别见[复审](../audits/2026-10-23-storage-followup-review.md)及[技术方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)。表存在不等于运行时已验收。
+- 当前缺陷、证据等级和待实现方案分别见[复核](../audits/2026-10-24-storage-fix-review.md)及[技术方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)。表存在不等于运行时已验收。
 
 ## 字段阅读规则
 
@@ -579,14 +579,14 @@ CREATE INDEX items_title ON library_items(library_id,title_sort,media_id);
 
 Library独立NFO输入、解析状态与导出来源字段。导出已有意图/版本校验，失败路径的区分性回归仍缺，见当前复审A12；不能概括为整条链未接通。
 
-**写入方与生命周期（8fbf81b）**
+**写入方与生命周期（5bd696e）**
 
-- `input_key`指sidecar，`path_key`指关联视频。当前观察/录入保留display路径拼写，未统一canonical；与文件canonical键混比会误删有效输入（F10），不能把字段命名当作已满足的保证。
+- `input_key`指sidecar，`path_key`指关联视频，当前NFO观察/录入已统一canonical，原alias首次输入误删已有通过回归。display保留IO拼写；不能外推其他路径消费者正确，rename共享图片仍有复核R04问题。
 - 候选包括视频旁NFO及祖先`tvshow.nfo`等；观察不等于每个候选都会持久一行。Missing删除该输入，Invalid/Unknown保留上一份有效输入；Valid按实体/坐标/locale/input_key写入。
 - `entity_scope`来自NFO层级与可确定坐标，不能将未知TV升为work。已有sidecar沿用首次登记的locale；display_locale切换不重标输入语言。实体层级或坐标实际变化时，仅替换该sidecar对应旧行。
 - locale由观察调用参数提供，当前没有从NFO声明语言自动推导的保证。卡片/详情按明确语言选择规则读取；不能在无命中时任取一份外语输入。
 - 录入前验证观察source_version与Library config_revision，不符则拒绝这一组观察。已有文件fresh scan可经`reconcile_nfo_inputs`复核NFO，编辑/Unknown/删除各保留其语义。
-- work输入参与卡片/详情；season/episode输入也用于相应详情和协议读取，不再只落库。根批迁与共享输入生命周期仍有F02/F03缺口，不能据表存在关闭验收。
+- work输入参与卡片/详情；season/episode输入也用于相应详情和协议读取。输入已随文件batch迁移/复制，原跨目录丢失回归通过；根operation、完整跨批重启/来源守恒仍须按当前方案验收。
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|

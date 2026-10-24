@@ -1,6 +1,6 @@
 # Media / Library 存储重设计：单表浏览与独立响应缓存
 
-状态（2026-10-23，源码8fbf81b）：本页第3–10节仍定义目标合同。五文件与多数新读写路径已落地，但根迁移、API严格性、Probe版本和测试生命周期尚有已确认缺口，见[当前复审](../../audits/2026-10-23-storage-followup-review.md)。唯一剩余[技术方案](../plans/2026-10-23-storage-review-remediation.md)不重复旧已完成步骤；本轮只review/文档。
+状态（2026-10-24，源码5bd696e）：本页第3–10节仍定义目标合同。多项原反例已修，根归属、marks严格性、共享图片、Probe版本和测试生命周期仍有缺口，见[当前复核](../../audits/2026-10-24-storage-fix-review.md)。唯一剩余[技术方案](../plans/2026-10-23-storage-review-remediation.md)不重复旧已完成步骤；本轮只review/文档。
 
 本文第3–10节保留规范性目标与验收要求，不因部分实现而放宽。设计阶段历轮审核补齐F1–F5、R1–R3；最后两项played断言三元组和目标无快照fallback经GPT-6.1 Sol限定范围复核，结论 `ready_for_implementation_plan`。该历史设计结论不是完整DDL、运行时切换、恢复/协议或性能验收，也不提供无缺陷保证；第8节设计原型均按原证据边界保留。
 

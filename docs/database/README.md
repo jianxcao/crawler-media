@@ -1,6 +1,6 @@
 # 当前数据库设计与数据字典
 
-结构核对：`8fbf81b`（2026-10-23）。比较基线为`main@86122d7`；当前行为缺口见[再次复审](../audits/2026-10-23-storage-followup-review.md)，未来修复见[唯一当前技术方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)。旧1845dab缺陷表已撤下，不把历史失败或历史绿测作为当前结论。
+结构核对：`5bd696e`（2026-10-24，本轮无DDL变更）。比较基线为`main@86122d7`；当前行为缺口见[修复复核](../audits/2026-10-24-storage-fix-review.md)，未来修复见[唯一当前技术方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)。旧1845dab缺陷表已撤下，不把历史失败或历史绿测作为当前结论。
 
 ## 权威来源
 
@@ -21,7 +21,7 @@
 
 合计71张业务表、709字段，不计SQLite内部表。Store四文件74个显式命名索引（library57、app2、subscribe3、cache12），32组FK、0触发器；Jobs另9命名索引/6触发器。app/library/subscribe统计来自Python SQLite 3.54.0执行当前生产DDL的内存核对；cache/Jobs统计与其生产建表声明对账。没有跨文件FK或原子提交。
 
-`Store::open_at`只允许app另选路径；Jobs由Queue打开。正常启动不自动清库、不导入旧layout；错误/未知布局拒绝。连接显式WAL、5000ms busy_timeout、foreign_keys=ON；Store四连接（含cache）显式synchronous=FULL；独立Jobs Queue与media ResponseCache连接未显式设置synchronous，保留各自构建默认。必需表/索引名称检查不等于逐列/约束完整校验。
+`Store::open_at`只允许app另选路径；Jobs由Queue打开。正常启动不自动清库、不导入旧layout；错误/未知布局拒绝。连接显式WAL、5000ms busy_timeout、foreign_keys=ON；Store四连接（含cache）与独立Jobs Queue均显式synchronous=FULL；Jobs已有OFF→实际policy→FULL的连接级回归。独立media ResponseCache连接未显式设置synchronous，保留其构建默认。必需表/索引名称检查不等于逐列/约束完整校验。
 
 ## library.db事实与摘要
 
@@ -45,12 +45,12 @@ flowchart TD
 
 写事务统一IMMEDIATE；文件发布在同一library事务维护覆盖、卡片、terms与摘要。100文件批次的当前用户摘要已按Media批末合并；协议索引在写入时维护genre/person及search_text，精确语言谓词仍在候选上执行。rename意图保存版本、源/目标磁盘证据与阶段，跨subscribe引用按持久阶段恢复。
 
-嵌套根迁移现有≤100文件候选事务和持久游标，但关联输入提前迁移、临时冻结目标和全局Store锁仍有缺口，见复审F02/F03/F07。不能由“有cursor”推断迁移安全或请求并发有界。
+嵌套根迁移已有≤100文件事务/持久游标、NFO按批迁移与冻结目标暂停。旧父WriteScope仍可写回错误归属，新建嵌套库漏迁Unidentified，完整operation屏障与锁边界未闭环，见复核R02/R05/R08。初始化默认Library/root的故障原子性见R06。
 
 ## 运维与性能边界
 
-- 当前无ledger/file_meta/browse journal持久表，不建兼容表/视图，不双读双写。Web仍有旧请求字段与宽松回包处理，见F01/F05/F08。
+- 当前无ledger/file_meta/browse journal持久表，不建兼容表/视图，不双读双写。Web Subscribe字段和成功信封已切换；marks严格目标仍有R03缺口，不恢复旧兼容。
 - 精确count/facets、任意子串搜索、深offset与大命中genre仍可线性增长；不会因多加索引自动变成常量成本。真实历史数字见[性能报告](../benchmarks/2026-10-23-storage-redesign-report.md)。
-- 事务分批不等于释放外层Mutex；housekeeping、启动恢复和Probe仍有持锁IO。没有本轮证据证明全部生产路径无死锁，测试fixture已发现确定join环。
+- 启动root恢复已逐批释放Mutex；housekeeping、rename/Probe等仍有持锁IO，SQL路径归一化新增realpath亦在锁内。未确认新生产锁环，测试fixture仍有join环与隐藏panic，见R07/R08。
 - cache清空只允许连接内受控删除，或停写关闭全部连接后重建；备份不能直接复制活跃文件冒充跨文件一致快照。`request_visible_media`是TEMP表，WAL/SHM不是额外业务分区。
 - 本轮不访问真实实例，不部署、不重建数据库。媒体/字幕/NFO/图片/下载目录保留；NAS、真实Jellyfin客户端、100k Media/1M文件完整规模尚未在本轮运行。

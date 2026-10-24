@@ -1,11 +1,11 @@
 # 文档入口、权威层级与清理记录
 
-更新：2026-10-24（复审始于10-23）；比较 `main@86122d7` → `feat/storage-redesign@8fbf81b`。五文件与多数新读写路径已落地；本轮确认前后端合同断链、根迁移数据丢失/漏迁、Probe版本守卫与测试生命周期缺口。当前结论与证据见[再次复审](audits/2026-10-23-storage-followup-review.md)。本轮只修改文档，不实施修复。
+更新：2026-10-24；比较本地 `main@86122d7` → `feat/storage-redesign@5bd696e`，重点复核上次审查后的13个修复提交。Subscribe生产字段/成功信封、原NFO输入丢失和正常重开默认根已有修复；仍有Probe版本、根归属、marks、共享图片、测试退出与持锁IO缺口，当前Rust门禁未通过。证据和逐项关闭见[修复复核](audits/2026-10-24-storage-fix-review.md)。本轮只review和文档，未实施代码修复。
 
 ## 当前先读
 
 1. 术语：[CONTEXT](../CONTEXT.md)；工程约束：[AGENTS](../AGENTS.md)。当前用户请求是工作单元，不主动创建/关闭issue。
-2. **唯一当前存储修复方案：** [剩余修复技术方案](superpowers/plans/2026-10-23-storage-review-remediation.md)。仅覆盖本轮确认的未完项；不重做已关闭步骤，不表示已实施。历史审查固定在各自SHA，不能当作当前缺陷清单。
+2. **唯一当前存储修复方案：** [剩余修复技术方案](superpowers/plans/2026-10-23-storage-review-remediation.md)。已移除本轮确认完成的步骤，仅保留尚需整改和验收的任务；不表示已实施。历史审查固定在各自SHA，不能当作当前缺陷清单。
 3. **目标合同：** [存储设计](superpowers/specs/2026-10-18-library-storage-redesign.md)、[接口/字段合同](superpowers/plans/2026-10-18-library-storage-contracts.md)、[来源缓存合同](superpowers/specs/2026-10-18-source-separated-cache.md)。规范不因未实现而放宽，不与当前事实混写。
 4. **现行结构：** [五文件数据库字典](database/README.md)。唯一可执行DDL在生产源码，docs不保留第二份SQL草案。
 5. **证据：** [存储复审与历史烟测](benchmarks/2026-10-18-library-storage.md)；旧审计/benchmark只对其明确版本和场景负责。
@@ -80,9 +80,9 @@ Agent导航：[domain](agents/domain.md)；[issue tracker](agents/issue-tracker.
 
 ## 2026-10-22修复复审与旧计划撤下
 
-- 删除`superpowers/plans/2026-10-20-storage-clean-cutover.md`：已执行步骤、新建文件建议、历史“已完成”表与后续更正混在同一执行入口，已被当前13任务技术方案取代。
+- 删除`superpowers/plans/2026-10-20-storage-clean-cutover.md`：已执行步骤、新建文件建议、历史“已完成”表与后续更正混在同一执行入口，已被当时13任务技术方案取代；现行剩余任务见本页当前入口。
 - 原完整文件可用`git show 1845dab:docs/superpowers/plans/2026-10-20-storage-clean-cutover.md`读取；独有修复记录及R15/R19决策原样迁入[历史归档](audits/2026-10-22-storage-cutover-execution-history.md)，benchmark测量未删除/重写。
-- 当时的问题报告保留为[1845dab历史审查](audits/2026-10-22-storage-repair-review.md)；当前以[8fbf81b再次复审](audits/2026-10-23-storage-followup-review.md)和[剩余技术方案](superpowers/plans/2026-10-23-storage-review-remediation.md)为准。其他历史文档有独有要求/证据，不按年龄删除。
+- 当时的问题报告保留为[1845dab历史审查](audits/2026-10-22-storage-repair-review.md)；当前以[5bd696e修复复核](audits/2026-10-24-storage-fix-review.md)和[剩余技术方案](superpowers/plans/2026-10-23-storage-review-remediation.md)为准。其他历史文档有独有要求/证据，不按年龄删除。
 - 本轮仅docs变更；隔离Store/Router/实际Web adapter烟测，不修改Rust/TS，不操作真实实例。
 
 ## 2026-10-23 再次复审与方案合并
@@ -90,4 +90,10 @@ Agent导航：[domain](agents/domain.md)；[issue tracker](agents/issue-tracker.
 - 删除已被替代的四份步骤文档：`2026-10-22-storage-repair-remediation.md`、`2026-10-23-storage-runtime-correctness.md`、`2026-10-23-storage-api-cutover.md`、`2026-10-23-storage-query-efficiency.md`（均原在`docs/superpowers/plans/`）。它们的已完成步骤不再作为待办；未闭环A6/A7/A8/A10/A11/A12、B3和性能/现场验收门已迁入唯一当前方案。
 - 原版本可用`git show 8fbf81b:docs/superpowers/plans/<文件名>`取回。两份旧复审与核验保留固定版本反例、撤回理由、历史测量，不再维护互相冲突的当前状态表。
 - 更新数据库字典遗漏的rename/root队列、三个字段、索引和实际统计；纠正Spec/ADR/API及测试文档把旧缺陷当现状的表述。历史benchmark数值保留，仅注明阶段与当前剩余限制。
-- 本轮发现和未来验收均以[再次复审](audits/2026-10-23-storage-followup-review.md)为入口；当前Web测试通过不能消除已实测的合同断链。
+- 当轮发现保留于[8fbf81b历史复审](audits/2026-10-23-storage-followup-review.md)，不作为新版本仍坏的依据。
+
+## 2026-10-24 修复复核与当前入口
+
+- 新增[5bd696e复核](audits/2026-10-24-storage-fix-review.md)，逐项关闭已修反例，记录9项当前问题和真实生产seam探针。
+- 唯一方案已删除完成步骤并收敛为7项剩余任务；上一轮全文留Git，不新增互相覆盖的执行计划。
+- 同步API约定、数据库生命周期、ADR/Spec状态及测试入口；旧审计与benchmark独有数字保留固定版本。当前workspace/store失败，Jobs和Web通过；不再把旧测试全绿写成当前验收。

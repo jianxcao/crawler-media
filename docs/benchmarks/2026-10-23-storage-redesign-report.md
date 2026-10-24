@@ -1,6 +1,6 @@
 # 存储重构性能报告（feat/storage-redesign）
 
-只收录日志与基准文档里的真实数字；未测项单独标出。在线页面：https://cursor.com/canvas/store-d2860fd7-7b74-430e-9855-1a3525523fbe/e3dea255-fc03-4210-9944-cbc78ac2e26b
+本页性能数字为历史阶段测量，本轮未重跑。当前实现/正确性及门禁见[5bd696e修复复核](../audits/2026-10-24-storage-fix-review.md)。只收录日志与基准文档里的真实数字；未测项单独标出。在线页面：https://cursor.com/canvas/store-d2860fd7-7b74-430e-9855-1a3525523fbe/e3dea255-fc03-4210-9944-cbc78ac2e26b
 
 ## 结论
 - Jellyfin 协议首页（50k 电影）从 >20 分钟未完成降到 148.8 ms；根因是选源子查询走错索引。
@@ -50,7 +50,7 @@
 插入 200k 行 725 → 799 ms（+10%），大小 16.49 → 18.28 MB（+11%），400 次反查 1642.5 → 1.5 ms。
 
 ## Q5 长操作与连接策略
-- Store四连接显式synchronous=FULL（含cache）；独立Jobs Queue及media ResponseCache仍未显式设置该PRAGMA。
+- 当轮Store四连接显式synchronous=FULL（含cache）。截至5bd696e，Jobs Queue也已显式FULL并通过OFF→policy→FULL回归；独立media ResponseCache仍未显式设置该PRAGMA。
 - 删库清理按 ≤100 文件分批提交，崩溃后可续跑。
 - cache NORMAL / mmap / cache_size / temp_store / WITHOUT ROWID：**未做 A/B，默认值不变**。
 
@@ -58,13 +58,14 @@
 - 无关库文件 1k → 1M，vm_steps 恒为 1963。
 - 100k 完整性检查 1000 批共 122 s，最慢一批 215 ms，不随进度退化。
 
-## A 系列当前边界（8fbf81b复审纠正）
-- A6仅部分完成：已有≤100文件候选事务/游标，但跨批NFO丢失、冻结目标漏迁和符号链接输入归一化仍有本轮实测反例。
-- A7仅部分完成：organize receipt中段已锁外，begin/complete/finish及housekeeping/启动恢复仍有持锁IO。
-- A10仅部分完成：RAII gate已落地，但HTTP fixture存在join环和无写deadline，本机实测隐藏panic及等待peer关闭。
-- A11未闭环：计算时版本未端到端固定，发布前重新读取current不能证明旧结果有效；详见[当前复审](../audits/2026-10-23-storage-followup-review.md)。
-- A8只有编译期RED，竞争写者的行为级旧代码RED未复现；A12旧代码测试仍通过，尚无区分性失败复现。这两项是验收证据缺口，不能直接当作当前行为已坏。
-- genre仍线性；Q5 cache NORMAL/mmap/cache_size/temp_store/WITHOUT ROWID未做A/B，保持可选测量。
-- 真实NAS、Jellyfin真机、100k Media/1M文件整体规模均未测。本报告的历史性能数字本轮未重跑。
+## 当前边界（2026-10-24，5bd696e修复复核）
 
-最后一次完整门禁（05a7363）：cargo test --workspace 2652/0（12 忽略），web 842/0，tsc、fmt 干净。之后的提交只跑了受影响 crate。
+- 原NFO跨批丢失、冻结目标推进cursor、alias NFO首次采用及正常重开默认根的具体反例已修；根operation/旧scope屏障和Unidentified仍开，rename共享图片还有alias反例。
+- 启动root恢复已逐batch释放Store；完整rename/Probe/NFO出锁仍未完成，SQL路径normalizer还新增锁内realpath。没有本轮新生产锁环证据。
+- fixture新增写timeout和部分panic传播，但完成线程丢handle、最后owner join环和总退出deadline仍未闭环。
+- tracks已绑定queued version；实际Marker/capture生产链仍能将旧结果写入换源后的状态。具体复现与方案见[本轮复核](../audits/2026-10-24-storage-fix-review.md)。
+- A8竞争写者行为RED、A12 NFO export区分性失败RED仍缺；不能据此直接判当前行为坏。
+- genre仍线性；约70k超300ms是外推，非实测。cache NORMAL/mmap/cache_size/temp_store/WITHOUT ROWID未做A/B。
+- NAS、Jellyfin真机、100k Media/1M文件整体规模均Not run，历史性能数字没有被本轮验证为当前性能。
+
+历史完整门禁（05a7363）：workspace 2652/0（12忽略）、Web842/0、tsc/fmt干净。**当前5bd696e**：workspace停于jellyfin_sql_page两个FK失败，Store停于shared artwork失败；Jobs55通过/1忽略、Web842通过和typecheck通过。详见本轮复核，不将历史绿测写成当前通过。
