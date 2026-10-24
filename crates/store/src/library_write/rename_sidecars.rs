@@ -265,12 +265,10 @@ pub(crate) fn classify_shared_sidecars(
 }
 
 fn sibling_files(tx: &Connection, file_id: &str, dir: &Path) -> Result<bool, StoreError> {
-    let prefix = format!(
-        "{}/",
-        crate::path_key::normalize_path_key(&dir.to_string_lossy()).trim_end_matches('/')
-    );
+    let dir_key = crate::path_key::canonical_existing_key(&dir.to_string_lossy());
+    let prefix = format!("{}/", dir_key.trim_end_matches('/'));
     // `'/' + 1 == '0'`: the half-open range covers every key under `prefix`.
-    let upper = format!("{}0", prefix.trim_end_matches('/'));
+    let upper = format!("{}0", dir_key.trim_end_matches('/'));
     let mut stmt = tx.prepare(
         "SELECT path_key FROM library_files WHERE file_id <> ?1 AND path_key >= ?2 AND path_key < ?3",
     )?;
@@ -284,7 +282,7 @@ fn sibling_files(tx: &Connection, file_id: &str, dir: &Path) -> Result<bool, Sto
 }
 
 fn referenced_elsewhere(tx: &Connection, file_id: &str, path: &Path) -> Result<bool, StoreError> {
-    let path = path.to_string_lossy();
+    let path = crate::path_key::canonical_existing_key(&path.to_string_lossy());
     let used: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM library_files WHERE file_id <> ?1
                         AND (poster_path = ?2 OR backdrop_path = ?2 OR still_path = ?2))
