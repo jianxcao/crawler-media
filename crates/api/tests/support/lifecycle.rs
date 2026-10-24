@@ -133,6 +133,7 @@ impl FakeServer {
                 let handler = handler.clone();
                 connections.push(std::thread::spawn(move || {
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
                     if let Some(request) = read_request(&mut stream) {
                         handler(&request, &mut stream);
                     }
@@ -140,7 +141,7 @@ impl FakeServer {
                 connections.retain(|c: &JoinHandle<()>| !c.is_finished());
             }
             for connection in connections {
-                let _ = connection.join();
+                resume_join(connection);
             }
         });
         Self {
@@ -165,7 +166,13 @@ impl Drop for FakeServer {
         // Wake the blocking accept so the loop observes the stop flag.
         let _ = TcpStream::connect_timeout(&self.addr, Duration::from_secs(1));
         if let Some(accept) = self.accept.take() {
-            let _ = accept.join();
+            resume_join(accept);
         }
+    }
+}
+
+fn resume_join(handle: JoinHandle<()>) {
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
     }
 }

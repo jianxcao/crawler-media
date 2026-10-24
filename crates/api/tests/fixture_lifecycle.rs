@@ -103,3 +103,18 @@ fn idle_connection_does_not_block_others_and_drop_joins_the_server() {
     let server_thread_joined = joined_rx.recv_timeout(Duration::from_secs(10)).is_ok();
     assert!(server_thread_joined);
 }
+
+#[test]
+fn handler_panic_surfaces_when_the_server_stops() {
+    let server = FakeServer::start(|_, _| {
+        std::thread::sleep(Duration::from_millis(200));
+        panic!("handler blew up");
+    });
+    let mut stream = TcpStream::connect(server.addr()).unwrap();
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(server)));
+    assert!(result.is_err(), "a handler panic must not disappear inside join");
+}
