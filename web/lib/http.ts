@@ -146,9 +146,13 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
       throw new HttpError(message || `Request failed with status ${response.status}`, response.status, payload);
     }
 
-    // Success: return the full envelope; callers unwrap `.data` themselves
-    // (both the legacy `{success, code, message, data}` and the self API
-    // `{ok, data}` shapes carry `data`, so existing unwrap() calls keep working).
+    if (!isJson || !payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new HttpError("响应不是 {ok:true, data} 信封", response.status, payload);
+    }
+    const envelope = payload as { ok?: unknown; data?: unknown };
+    if (envelope.ok !== true || !("data" in envelope)) {
+      throw new HttpError("响应不是 {ok:true, data} 信封", response.status, payload);
+    }
     return payload as T;
   } finally {
     lease.release();

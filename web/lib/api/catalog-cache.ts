@@ -28,12 +28,11 @@ export interface MediaCacheItem {
 }
 
 export async function listCatalogCache(): Promise<MediaCacheItem[]> {
-  const res = await request<ApiEnvelope<MediaCacheItem[]> | MediaCacheItem[]>("/catalog/cache?view=aggregate");
-  if (Array.isArray(res)) return res;
-  if (res && Array.isArray((res as ApiEnvelope<MediaCacheItem[]>).data)) {
-    return (res as ApiEnvelope<MediaCacheItem[]>).data;
+  const items = await unwrap(request<ApiEnvelope<MediaCacheItem[]>>("/catalog/cache?view=aggregate"));
+  if (!Array.isArray(items)) {
+    throw new Error("catalog cache contract: data must be an array");
   }
-  return [];
+  return items;
 }
 
 export async function deleteMediaCache(

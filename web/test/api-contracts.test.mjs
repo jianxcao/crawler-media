@@ -22,14 +22,14 @@ test("real routing and upgrade adapters preserve UUID identities", async () => {
   const ruleSetId = "00000000-0000-4000-8000-000000000002";
   const downloaders = await loadApiModule("downloaders", async (path) => {
     assert.equal(path, "/subscriptions/download-routing-preview");
-    return { success: true, code: "ok", message: "", data: { ok: true, library_id: libraryId } };
+    return { ok: true, data: { ok: true, library_id: libraryId } };
   });
   const target = await downloaders.resolveManualDownloadTarget({ kind: "movie", title: "Movie", year: 2026 });
   assert.equal(target.library_id, libraryId);
   const subscriptions = await loadApiModule("subscriptions", async (path, options) => {
     assert.equal(path, "/subscriptions/subscription-uuid/upgrade-runs");
     assert.deepEqual(JSON.parse(options.body), { filter_id: ruleSetId });
-    return { success: true, code: "ok", message: "", data: { filter_id: ruleSetId, units: [] } };
+    return { ok: true, data: { filter_id: ruleSetId, units: [] } };
   });
   const report = await subscriptions.runSubscriptionUpgradeRound("subscription-uuid", ruleSetId);
   assert.equal(report.filter_id, ruleSetId);

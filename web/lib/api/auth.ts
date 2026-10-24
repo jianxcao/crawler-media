@@ -8,7 +8,9 @@ interface ApiEnvelope<T> {
 }
 
 async function unwrap<T>(promise: Promise<ApiEnvelope<T>>): Promise<T> {
-  return (await promise).data;
+  const envelope = await promise;
+  if (envelope.ok !== true) throw new Error("响应不是 {ok:true, data} 信封");
+  return envelope.data;
 }
 
 /** 能力开关快照：前端据此裁剪入口；安全边界仍在后端 403。 */

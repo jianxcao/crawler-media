@@ -15,7 +15,7 @@ async function load(request) {
   }, module, module.exports);
   return module.exports;
 }
-const envelope = (data) => ({ success: true, code: "ok", message: "", data });
+const envelope = (data) => ({ ok: true, data });
 
 test("removal and season cleanup return the server receipts verbatim", async () => {
   const api = await load(async (path) =>

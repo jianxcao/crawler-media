@@ -61,9 +61,7 @@ export function resolveStreamUrl(path: string): string {
 }
 
 interface ApiEnvelope<T> {
-  success: boolean;
-  code: string;
-  message: string;
+  ok: boolean;
   data: T;
 }
 

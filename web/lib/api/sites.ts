@@ -2,9 +2,7 @@ import { request } from "@/lib/http";
 
 /** 后端统一响应信封（见 docs/api-contracts/self.md） */
 interface ApiEnvelope<T> {
-  success: boolean;
-  code: string;
-  message: string;
+  ok: boolean;
   data: T;
 }
 

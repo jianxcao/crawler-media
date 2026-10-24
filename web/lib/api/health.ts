@@ -8,17 +8,8 @@ export interface HealthResponse {
   environment: string;
 }
 
-/**
- * 读取健康状态（GET /health 保留）。
- * 兼容两种信封：自有 API 返回 { ok, data }，直接形态则原样返回。
- */
+/** 读取健康状态（GET /health）。只接受当前 `{ ok: true, data }` 信封。 */
 export async function getHealth(init?: RequestInit): Promise<HealthResponse> {
-  const payload = await request<HealthResponse | { ok: boolean; data: HealthResponse }>(
-    "/health",
-    init,
-  );
-  if (payload && typeof payload === "object" && "data" in payload) {
-    return (payload as { ok: boolean; data: HealthResponse }).data;
-  }
-  return payload as HealthResponse;
+  const payload = await request<{ ok: boolean; data: HealthResponse }>("/health", init);
+  return payload.data;
 }

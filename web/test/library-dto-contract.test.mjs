@@ -17,7 +17,7 @@ async function loadLibraries(request) {
   return module.exports;
 }
 
-const envelope = (data) => ({ success: true, code: "ok", message: "", data });
+const envelope = (data) => ({ ok: true, data });
 
 test("unidentified groups read only the backend DTO fields", async () => {
   const api = await loadLibraries(async () =>

@@ -4,7 +4,7 @@ import type { DownloadTask } from "./downloaders";
 
 /** 后端统一响应信封 */
 interface ApiEnvelope<T> {
-  success: boolean;
+  ok: boolean;
   code: string;
   message: string;
   data: T;
