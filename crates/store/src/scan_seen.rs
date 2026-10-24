@@ -128,15 +128,18 @@ impl Store {
                 placeholders.join(",")
             );
             let mut stmt = self.library.prepare(&sql)?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+            let keys: Vec<String> = chunk.iter().map(|path| path_lookup_key(path)).collect();
+            let rows = stmt.query_map(rusqlite::params_from_iter(keys.iter()), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    (row.get(1)?, row.get(2)?, row.get(3)?),
+                    (row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get(3)?),
                 ))
             })?;
-            for row in rows {
-                let (path, version) = row?;
-                versions.insert(path, version);
+            let by_key: HashMap<String, (i64, i64, Option<String>)> = rows.collect::<Result<_, _>>()?;
+            for path in chunk {
+                if let Some(version) = by_key.get(&path_lookup_key(path)) {
+                    versions.insert(path.clone(), version.clone());
+                }
             }
         }
         Ok(versions)
@@ -157,18 +160,19 @@ impl Store {
         }
         let placeholders: Vec<String> = (2..=paths.len() + 1).map(|i| format!("?{i}")).collect();
         let sql = format!(
-            "SELECT s.path, s.mtime_ms, s.file_size, s.content_digest,
+            "SELECT s.path_key, s.mtime_ms, s.file_size, s.content_digest,
                     EXISTS(SELECT 1 FROM library_files f WHERE f.path_key = s.path_key) AS ledger_exists,
                     (SELECT f.missing_at FROM library_files f WHERE f.path_key = s.path_key LIMIT 1) AS missing_at
              FROM scan_seen s
-             WHERE s.operation_id = ?1 AND s.path IN ({})",
+             WHERE s.operation_id = ?1 AND s.path_key IN ({})",
             placeholders.join(",")
         );
         let mut stmt = self.library.prepare(&sql)?;
+        let keys: Vec<String> = paths.iter().map(|path| path_lookup_key(path)).collect();
         let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(paths.len() + 1);
         params.push(&operation_id);
-        for path in paths {
-            params.push(path);
+        for key in &keys {
+            params.push(key);
         }
         let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
             let path: String = row.get(0)?;
@@ -177,16 +181,19 @@ impl Store {
             Ok((
                 path,
                 (
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                     ledger_exists && missing_at.is_none(),
                 ),
             ))
         })?;
-        for row in rows {
-            let (path, checkpoint) = row?;
-            checkpoints.insert(path, checkpoint);
+        let by_key: HashMap<String, (i64, i64, Option<String>, bool)> =
+            rows.collect::<Result<_, _>>()?;
+        for path in paths {
+            if let Some(checkpoint) = by_key.get(&path_lookup_key(path)) {
+                checkpoints.insert(path.clone(), checkpoint.clone());
+            }
         }
         Ok(checkpoints)
     }
@@ -246,6 +253,10 @@ impl Store {
         )?;
         Ok(())
     }
+}
+
+fn path_lookup_key(path: &str) -> String {
+    crate::path_key::canonical_existing_key(path)
 }
 
 /// 文件版本：mtime 毫秒 + 字节数；读不到时返回 0/0（视为「版本未知」）。

@@ -112,8 +112,11 @@ pub(crate) fn publish_transfer_file(
     } else {
         coverage.units.clone()
     };
-    let artwork = store::files::DiscoveredArtwork::discover(&coverage.file.path);
     let mut file = coverage.file.clone();
+    if let Ok(resolved) = file.path.canonicalize() {
+        file.path = resolved;
+    }
+    let artwork = store::files::DiscoveredArtwork::discover(&file.path);
     file.presence = domain::FilePresence::Present;
     file.publication = domain::FilePublication::Published;
     file.source_path = source_path.map(std::path::PathBuf::from);
