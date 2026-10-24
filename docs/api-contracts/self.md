@@ -177,6 +177,8 @@ Playback history/watch stats 的 `member_id` 只接受 User UUID；显式传入�
 
 四个Store文件为app/cache/library/subscribe，队列另在jobs；无旧数据库迁移阶梯或兼容视图。旧LedgerRow、重新识别补当前版本、movie `(0,0)` alias等已移除。Jellyfin协议与公开静态图片保留独立合同。
 
+**cf7fb70 切换偏差（尚未修复）：** 旧 `/directory` 聚合写仍被 Web Transfer/Watch 设置调用，可直接换根而不推进 config revision，Watch 的 null 也未清空；自有 `/playback/progress` 仍接受无签发 session 的旧事件并补当前源版本；默认 Downloader 仍回读 settings JSON；Unidentified 列表仍猜 Library 归属。这些是应删除/迁移的当前实现缺口，不是新增兼容合同。后续新设置 DTO、必填会话及消费者迁移见[唯一技术方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)，真实反例见[复审](../audits/2026-10-24-storage-rereview.md)。
+
 **Subscribe唯一请求字段：** 创建/PATCH使用 `coverage` 和 `filter_id`；`POST /subscriptions/{id}/upgrade-runs` body为 `{filter_id?, wash_cut?}`，回执也返回 `filter_id`。本轮已核对实际Web调用者和create严格拒旧，原F01生产问题关闭；Rust共享fixture已使用当前字段；不恢复旧inline filter兼容。
 
 **Playback marks目标：** 字段为 `season_number` / `episode_number`，支持整项、整季与合法TV S00E00。GET/POST严格拒未知/旧键、重复坐标与坏类型；坐标按0..2147483647 checked conversion，越界400，不饱和或截断。坏请求不写playback_units；Web已移除无用途的device_id。合法whole/整季/S00E00继续支持。

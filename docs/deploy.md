@@ -49,6 +49,8 @@ docker compose up --build
 
 干净切换还包括持久工作与凭据：已存在且无布局标记的 Jobs 数据库不会被认领为当前布局；旧扫描 scope 签名不会自动升级，旧 operation 会取消且不登记文件。非空明文/损坏管理员凭据使启动失败，即使设置新的启动密码也不隐式导入或轮换；保留原库并使用上述停机备份/干净切换流程。当前合法哈希凭据与 CLI Bearer 的安全分离检查仍保留。
 
+`cf7fb70` 还有新库初始化的实现缺口：Jobs 身份头与 DDL 分开提交，中断后下一次启动可报缺 job_defs；这不表示队列是可删缓存。后续统一原子初始化方案见[当前复审 S01](audits/2026-10-24-storage-rereview.md)。本轮没有修代码、操作现有队列或提供自动认领旧布局的路径。
+
 **受管 Obscura 启动条件**：开关开启、未配置 `cdp.url`、至少有一个启用的 Site 选择浏览器登录/签到且没有自己的 `cdp_url`、二进制可用。不满足时设置页显示未启动原因（`no_managed_browser_sites`、`not_installed` 等）。受管 daemon 每次启动使用随机空闲端口并只绑定 `127.0.0.1`；只管理本进程拉起的 daemon，关闭开关或应用退出会停止它，外部服务不受影响。
 
 **安装策略**（`obscura.install`，启动默认值 `CRAWLER_MEDIA_OBSCURA_INSTALL`）：

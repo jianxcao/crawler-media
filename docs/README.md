@@ -1,11 +1,11 @@
 # 文档入口、权威层级与清理记录
 
-更新：2026-10-24；比较 `main@86122d7`，本轮从 `feat/storage-redesign@3ba25fb` 继续复核并按用户授权补修。源版本、根归属、共享图片、初始化、测试退出及主要冷 IO 路径的修复和验证见[再次复核](audits/2026-10-24-storage-fix-followup.md)。当前入口只保留剩余性能优化与现场验收，不将固定版本的旧失败当作现状。
+更新：2026-10-24；只读复审 `feat/storage-redesign@cf7fb70`，比较本地 `main@86122d7` 与远端 `origin/main@14fdbb6`（生产代码基线相同，前者另有设计文档）。[当前复审](audits/2026-10-24-storage-rereview.md)确认仍有 Jobs 初始化、根迁移活性、旧配置/Playback 入口等正确性缺口，不能概括为只剩性能。本轮仅文档变更，未修改代码或操作实例。
 
 ## 当前先读
 
 1. 术语：[CONTEXT](../CONTEXT.md)；工程约束：[AGENTS](../AGENTS.md)。当前用户请求是工作单元，不主动创建/关闭issue。
-2. **唯一当前存储修复方案：** [剩余修复技术方案](superpowers/plans/2026-10-23-storage-review-remediation.md)。已剔除完成步骤，仅保留尚需优化和验收的任务。历史审查固定在各自SHA，不能当作当前缺陷清单。
+2. **唯一当前存储修复方案：** [剩余修复技术方案](superpowers/plans/2026-10-23-storage-review-remediation.md)。按当前反例重排优先级；先修正确性与旧路径，再做查询/写入优化和验收。历史审查固定在各自 SHA，不能当作当前缺陷清单。
 3. **目标合同：** [存储设计](superpowers/specs/2026-10-18-library-storage-redesign.md)、[接口/字段合同](superpowers/plans/2026-10-18-library-storage-contracts.md)、[来源缓存合同](superpowers/specs/2026-10-18-source-separated-cache.md)。规范不因未实现而放宽，不与当前事实混写。
 4. **现行结构：** [五文件数据库字典](database/README.md)。唯一可执行DDL在生产源码，docs不保留第二份SQL草案。
 5. **证据：** [存储复审与历史烟测](benchmarks/2026-10-18-library-storage.md)；旧审计/benchmark只对其明确版本和场景负责。
@@ -100,6 +100,12 @@ Agent导航：[domain](agents/domain.md)；[issue tracker](agents/issue-tracker.
 
 ## 2026-10-24 再次复核与补修
 
-- 新增[当前补修报告](audits/2026-10-24-storage-fix-followup.md)，将5bd696e审查标为历史，保留逐R编号证据。
+- 新增[cf7fb70 补修报告](audits/2026-10-24-storage-fix-followup.md)，将5bd696e审查标为历史，保留逐R编号证据。
 - 唯一计划剔除已完成的实施步骤，剩余为根操作调度、Unidentified候选工作量、查询/连接策略测量及现场验收；旧步骤从Git读取。
 - 同步数据库字典、scan_seen主键、NFO身份校验、API marks合同与回归入口。历史性能数字不重写，最终门禁以本次报告为准。
+
+## 2026-10-24 cf7fb70 只读复审与文档收敛
+
+- 当前发现只维护在[本轮复审](audits/2026-10-24-storage-rereview.md)，技术任务更新原唯一方案，不创建第二套执行步骤。
+- 删除数据库字典的来源合成/override 冲突/played 时钟等过时缺陷描述，修正“已全部无兼容/仅剩性能”的结论；ADR-0008 去除旧四文件、导入器及重复旧 SQL 正文，保留历史 Git 定位和决策理由。
+- 上一轮补修、历史审计与 benchmark 保留独有反例/数字并固定版本；当前测量见[查询与写入复测](benchmarks/2026-10-24-storage-query-rereview.md)。不因绿色测试保留旧协议，不以旧失败覆盖当前证据。

@@ -2,7 +2,7 @@
 
 [返回数据库总览](README.md)
 
-结构核对：2026-10-24，本轮从`3ba25fb`补修并调整scan_seen主键，表/字段数不变；行为边界见[再次复核](../audits/2026-10-24-storage-fix-followup.md)。`application_id=1129139249`，`user_version=1`。不可按缓存清空。
+结构核对：2026-10-24，review `cf7fb70`，本轮无 DDL 变更；行为边界及未完项见[当前复审](../audits/2026-10-24-storage-rereview.md)。`application_id=1129139249`，`user_version=1`。不可按缓存清空。
 
 结构为 **47张业务表、553字段、57个显式命名索引、32组FK、0触发器**，不计SQLite自动索引。历史45表/519字段/51索引描述已撤下；当前统计来自生产DDL的内存SQLite执行结果。当前字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准，结构一致不等于业务不变量已验收。
 
@@ -12,7 +12,7 @@
 - 文件源CAS、元数据写屏障、用户摘要、严格重新识别和多数API切换已落地；本轮不沿用1845dab的缺陷列表作为当前事实。
 - `pending_file_renames`保存版本、源/目标磁盘证据、sidecar决议、已完成阶段与重试；organize/housekeeping/启动恢复均使用owned plan将磁盘观察、执行与staging清理移出Store锁，锁内提交DB/CAS。
 - `pending_root_reassignments`每次事务读取≤100个文件候选并提交游标；源/目标冻结时暂停，关联NFO按批迁移。Unidentified另有≤100行移动阶段；候选选择工作量和外层同步耗尽队列仍需优化，不把A6全部验收视为完成。
-- 当前缺陷、证据等级和待实现方案分别见[再次复核](../audits/2026-10-24-storage-fix-followup.md)及[技术方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)。表存在不等于运行时已验收。
+- 当前缺陷、证据等级和待实现方案分别见[当前复审](../audits/2026-10-24-storage-rereview.md)及[技术方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)。表存在不等于运行时已验收。
 
 ## 字段阅读规则
 
@@ -40,18 +40,18 @@
 - [library_files](#library_files) — 34 字段；权威物理文件台账；显式 Library/root/Media/kind 与源版本、在位/发布状态、热质量字段。
 - [library_item_terms](#library_item_terms) — 4 字段；公共卡片多值倒排；私有 Collection 不得混入公共 terms/facets。
 - [library_items](#library_items) — 35 字段；Library/Media 浏览摘要。依赖同事务维护，不保留完整文件数组或来源响应。
-- [library_metadata_inputs](#library_metadata_inputs) — 18 字段；Library独立NFO输入及导出来源；路径归一化和批迁保留仍有缺口。
+- [library_metadata_inputs](#library_metadata_inputs) — 18 字段；Library 独立 NFO 输入及导出来源；alias/登记身份和按批迁移原反例已修，完整守恒及 export 故障验收见当前方案。
 - [library_operations](#library_operations) — 10 字段；roots/locale/integrity/scrape 操作载体。当前建表不代表完整运行处理器已交付。
 - [library_removal_roots](#library_removal_roots) — 2 字段；删除操作冻结的根路径范围；与持久文件归属需要一致。
 - [library_removals](#library_removals) — 8字段；持久freeze/drain/cleanup，删除安全须连同当前ownership与依赖核对。
-- [library_roots](#library_roots) — 6字段；path_key唯一，新增嵌套根已有重归属代码，根替换和NFO/Unidentified从属关系完整迁移仍需操作化。
+- [library_roots](#library_roots) — 6字段；path_key 唯一；根替换已有持久重配置，新增嵌套根队列仍缺冻结解除后的持续恢复驱动。
 - [library_units](#library_units) — 9 字段；Library/Media/单元级去重摘要和首选文件。whole=(-1,-1)，TV S00E00 合法。
 - [media](#media) — 9 字段；规范 Media 身份；可无文件存在。retired 墓碑不是可继续写的兼容实体。
 - [media_aliases](#media_aliases) — 5 字段；来源别名归属及每来源唯一刷新目标；不把来源 ID 当内部身份。
 - [media_episodes](#media_episodes) — 13 字段；已采用分集详情；拥有事实来自文件覆盖。
 - [media_markers](#media_markers) — 10 字段；Media/单元的片头片尾标记及人工锁；不是观看或文件覆盖事实。
-- [media_metadata](#media_metadata) — 17 字段；work 级已采用元数据；当前采用入口尚未完整实现来源合成与生产接线。
-- [media_metadata_overrides](#media_metadata_overrides) — 7 字段；实体/locale 人工字段覆盖。当前合并冲突保护未完整实现，不能以有表作为保证。
+- [media_metadata](#media_metadata) — 17 字段；work 级已采用元数据；effective/compose 已实现来源合成并维护字段 provenance，当前缺口按具体入口/验收记录，不再沿用旧“未接线”结论。
+- [media_metadata_overrides](#media_metadata_overrides) — 7 字段；实体/locale 人工字段覆盖；写入后同事务重合成/归约，Media merge 预检已有人工锁冲突拒绝。
 - [media_metadata_sources](#media_metadata_sources) — 14 字段；每实体/locale/来源的当前规范化快照与选择来源；不是响应缓存或历史表。
 - [media_operations](#media_operations) — 10 字段；Media 合并/改挂持久计划与阶段。冲突/冻结在 Store 内落库，HTTP（`POST /media/merges`、`GET /media/operations/{id}`）与 job loop 推进已接线；改挂仍非独立操作类型。
 - [media_seasons](#media_seasons) — 10 字段；已采用季详情；不是新的 Media 身份，不代表拥有该季。
@@ -60,7 +60,7 @@
 - [playback_metrics](#playback_metrics) — 13 字段；Playback QoE 指标；仅按明确保留策略清理，不作为用户播放次数来源。
 - [playback_session_ids](#playback_session_ids) — 16 字段；签发会话的逻辑目标、物理源、生命周期与 generation。`Store::commit_playback_event` 写入前校验 `(user, device, session)` 的 generation/目标单元/文件版本/source_version 与库 `lifecycle_state`+`config_revision`+ACL，不匹配一律 `IgnoredStale` 不落事实；`pending` 会话的首个 progress 视为 Start 原子激活；`Stop` 只关闭上报会话并归档一条 play log，重复 Stop 因会话已 `closed` 而幂等。
 - [playback_sessions](#playback_sessions) — 31 字段；每用户/设备活动会话及源绑定、事件顺序、传输/观看统计。
-- [playback_units](#playback_units) — 20字段；用户逻辑观看/收藏事实及源绑定恢复包，不FK到物理文件。未完成Progress保留既有played断言；达到已知源时长90%阈值会写true及毫秒断言时钟，人工mark/unmark写显式true/false。目标按最新时钟、同时间episode>season>whole决议；当前部分生产read/mark及新resolver仍未统一/未按时间排序（R12），不能声称全部读取已走effective_unit_state或人工mark不改活动。清历史清完整resume与断言、favorite保留。
+- [playback_units](#playback_units) — 20字段；用户逻辑观看/收藏事实及源绑定恢复包，不FK到物理文件。未完成Progress保留既有played断言；达到已知源时长90%阈值会写true及毫秒断言时钟，人工mark/unmark写显式true/false。目标按最新时钟、同时间episode>season>whole决议；effective assertion 与协议 SQL 已按该规则决议；无 session 的旧 progress 入口另有换源污染缺口（当前复审 S04），不能混为旧 R12。清历史清完整resume与断言、favorite保留。
 - [probe_job_units](#probe_job_units) — 12 字段；Probe 文件单元、阶段与输出；活动单元/派发索引控制工作窗口。
 - [probe_jobs](#probe_jobs) — 17 字段；专用 Probe 作业与单元计数、阶段策略和历史；不同于 jobs.db 的通用 Job。
 - [probe_season_comparison_history](#probe_season_comparison_history) — 4 字段；每 Media/季最近比较摘要与发布时间，不是完整历史集合。
@@ -69,7 +69,7 @@
 - [scan_seen](#scan_seen) — 6 字段；当前扫描 operation 已确认处理的路径版本；与源观察、物理 FileVersion 不是同一语义。
 - [scrape_sidecars](#scrape_sidecars) — 3 字段；文件的 NFO/图片 sidecar 路径；登记不等于导出 provenance 合同已完成。
 - [unidentified](#unidentified) — 4 字段；带 Library/root 的低置信度待认领文件；删除 Library 前需显式清理，不能删磁盘字节。
-- [user_library_items](#user_library_items) — 15字段；用户/Library/Media稀疏摘要，卡片删除级联、重导入由原始用户事实恢复。完整/增量已有维护；当前具体一致性缺陷见R03/R12/R20，不沿用泛称“从未维护”。
+- [user_library_items](#user_library_items) — 15字段；用户/Library/Media稀疏摘要，卡片删除级联、重导入由原始用户事实恢复。完整/增量已有维护，批量发布已合并当前用户摘要写入；当前风险以本轮具体反例为准，不引用旧 R03/R12/R20 为现状。
 
 ## chapter_frame_tasks
 
@@ -889,7 +889,7 @@ Media/单元的片头片尾标记及人工锁；不是观看或文件覆盖事�
 
 ## media_metadata
 
-work 级已采用元数据；当前采用入口尚未完整实现来源合成与生产接线。
+work 级已采用元数据；effective/compose 已实现来源合成并维护字段 provenance，当前缺口按具体入口/验收记录，不再沿用旧“未接线”结论。
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|
@@ -930,7 +930,7 @@ work 级已采用元数据；当前采用入口尚未完整实现来源合成与
 
 ## media_metadata_overrides
 
-实体/locale 人工字段覆盖。当前合并冲突保护未完整实现，不能以有表作为保证。
+实体/locale 人工字段覆盖；写入后同事务重合成/归约，Media merge 预检已有人工锁冲突拒绝。
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|
@@ -1152,7 +1152,7 @@ CREATE INDEX metrics_recorded ON playback_metrics(recorded_at,id);
 
 ## playback_session_ids
 
-签发会话的逻辑目标、物理源、生命周期与 generation。生产消费者仍未完整消费绑定字段。
+签发会话的逻辑目标、物理源、生命周期与 generation。已签发事件在 Store 提交校验绑定；自有无 ID 旧事件仍可绕开签发合同，见当前复审 S04。
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|
