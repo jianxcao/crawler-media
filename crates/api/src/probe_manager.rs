@@ -44,6 +44,8 @@ mod worker;
 #[cfg(test)]
 mod locking_tests;
 #[cfg(test)]
+mod publish_version_tests;
+#[cfg(test)]
 mod test_support;
 
 /// 一个待探测单元（对应一个文件的覆盖事实 `FileCoverage`：文件 + 单元）。

@@ -5,15 +5,12 @@ use std::time::Instant;
 use domain::MediaKind;
 use marker::FingerprintEngine;
 
-use super::{ProbeManager, ProbeUnit};
-use super::{projected_episode, projected_season};
+use super::{ProbeManager, ProbeUnit, projected_episode, projected_season};
 use crate::scrape_store::ScrapeStoreExt;
 
 fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as i64)
-        .unwrap_or_default()
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64).unwrap_or_default()
 }
 
 pub(super) struct FingerprintWork {
@@ -754,21 +751,22 @@ fn log_fingerprint_publication(
     );
 }
 
-/// Publish the probed stream facts for one file.
-///
-/// `Ok(false)` means the file row no longer carries the version this worker probed (a rescan
-/// replaced the file while it was being probed), so the result describes bytes that are gone.
-fn publish_probe_tracks(
+/// Publish stream facts pinned to the queued version. `Ok(false)`: a rescan replaced it.
+pub(super) fn publish_probe_tracks(
     store: &crate::Store,
     unit: &ProbeUnit,
     source_version: &str,
     tracks: &library::Tracks,
     duration_ms: Option<i64>,
 ) -> Result<bool, crate::store::StoreError> {
-    let Some(expected) = store.get_file_version(unit.row.file.file_id)? else {
-        return Ok(false);
-    };
+    let expected = unit.row.file.version.clone();
     if expected.source_version != source_version {
+        tracing::warn!(
+            ledger_id = %unit.row.file.file_id,
+            queued = %expected.source_version,
+            probed = %source_version,
+            "探测结果的来源版本与入队版本不一致，拒绝发布"
+        );
         return Ok(false);
     }
     let (resolution, codec, hdr) = match tracks.video.as_ref() {
@@ -785,9 +783,7 @@ fn publish_probe_tracks(
             .and_then(|video| serde_json::to_string(video).ok()),
         audio_json: serde_json::to_string(&tracks.audio)?,
         subtitle_json: serde_json::to_string(&tracks.subtitles)?,
-        chapters_json: None,
-        fingerprint_json: None,
-        outro_fingerprint_json: None,
+        chapters_json: None, fingerprint_json: None, outro_fingerprint_json: None,
         format_duration_ms: duration_ms,
     };
     let publication = store::library_write::probe::ProbePublication {
@@ -801,3 +797,4 @@ fn publish_probe_tracks(
     };
     store.publish_probe_result(unit.row.file.file_id, &publication, now_ms())
 }
+
