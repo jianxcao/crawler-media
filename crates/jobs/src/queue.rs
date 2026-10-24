@@ -341,6 +341,9 @@ fn apply_connection_policy(conn: &Connection) -> Result<(), JobError> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "busy_timeout", "5000")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    // FULL is durability, not a tuning choice: WAL + NORMAL drops the last commit
+    // on power loss, so the queue must not depend on the bundled default.
+    conn.pragma_update(None, "synchronous", "FULL")?;
     Ok(())
 }
 
@@ -361,5 +364,18 @@ mod policy_tests {
             .unwrap();
         assert_eq!(timeout, 5000);
         assert_eq!(foreign_keys, 1);
+    }
+
+    /// Durability must not ride the bundled default: a connection lowered to OFF
+    /// is pulled back to FULL by the queue policy.
+    #[test]
+    fn queue_connection_policy_forces_synchronous_full() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "synchronous", "OFF").unwrap();
+        apply_connection_policy(&conn).unwrap();
+        let sync: i64 = conn
+            .pragma_query_value(None, "synchronous", |row| row.get(0))
+            .unwrap();
+        assert_eq!(sync, 2, "SQLite FULL");
     }
 }
