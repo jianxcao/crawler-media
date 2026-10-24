@@ -13,92 +13,11 @@ use support::library_presence::PresenceFixture;
 async fn recovered_pending_a_does_not_block_b() {
     let fix = PresenceFixture::new();
     let store_arc = fix.state.store();
-    let (tv_lib, root_id) = {
-        let store = store_arc.lock();
-        let lib = store
-            .create_library(
-                MediaKind::Tv,
-                "TV Shows",
-                &["/tv_shows"],
-                "everyone",
-                true,
-                &[],
-            )
-            .unwrap();
-        let root = store
-            .list_library_roots()
-            .unwrap()
-            .into_iter()
-            .find(|r| r.library_id.as_deref() == Some(&lib.id))
-            .map(|r| r.id)
-            .unwrap();
-        (lib, root)
-    };
-
-    let lib_id: LibraryId = tv_lib.id.parse().unwrap();
-    let scope = WriteScope {
-        library_id: lib_id,
-        config_revision: 0,
-    };
-
-    let media_id = MediaId::new();
-    let media = Media {
-        id: media_id,
-        kind: MediaKind::Tv,
-        title: "Test Show".into(),
-        year: Some(2024),
-        original_title: None,
-        aliases: Vec::new(),
-        tmdb_id: None,
-        douban_id: None,
-        tvdb_id: None,
-        bangumi_id: None,
-        anilist_id: None,
-    };
-
-    {
-        let store = store_arc.lock();
-        store.insert_media(&media).unwrap();
-    }
-
-    let reserved_a_id = LedgerId::new();
-    let candidate_a = FileCoverage {
-        path_key: String::new(),
-        file: LibraryFile {
-            file_id: reserved_a_id,
-            library_id: lib_id,
-            root_id: root_id.clone(),
-            media_id,
-            kind: MediaKind::Tv,
-            path: PathBuf::from("Test Show/S01E01-E02.mkv"),
-            version: FileVersion {
-                revision: 1,
-                source_version: "v1".into(),
-            },
-            presence: FilePresence::Present,
-            publication: FilePublication::Pending,
-            size_bytes: Some(1024),
-            stat_known: true,
-            created_ns: None,
-            modified_ns: None,
-            source_digest: None,
-            source_path: Some(PathBuf::from("/downloads/source_a.mkv")),
-            transfer_mode: Some("hardlink".into()),
-            resolution: None,
-            codec: None,
-            hdr: None,
-            quality_source: QualitySource::Release,
-            confidence: Confidence::High,
-            filter_score: None,
-            release_quality: None,
-            duration_ms: None,
-            tracks_version: 0,
-            poster_path: None,
-            backdrop_path: None,
-            still_path: None,
-        },
-        units: vec![UnitKey::new(1, 1), UnitKey::new(1, 2)],
-    };
+    let (scope, candidate_a) = seed_pending_transfer(&store_arc.lock());
+    let reserved_a_id = candidate_a.file.file_id;
+    let lib_id = scope.library_id;
+    let media_id = candidate_a.file.media_id;
+    let root_id = candidate_a.file.root_id.clone();
 
     // Step 1: reserve A in pending state
     {
@@ -195,4 +114,91 @@ async fn recovered_pending_a_does_not_block_b() {
 
         assert!(store.get_file_version(published_b_id).unwrap().is_some());
     }
+}
+
+fn seed_pending_transfer(store: &api::Store) -> (WriteScope, FileCoverage) {
+    let (tv_lib, root_id) = {
+        let store = &store;
+        let lib = store
+            .create_library(
+                MediaKind::Tv,
+                "TV Shows",
+                &["/tv_shows"],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+        let root = store
+            .list_library_roots()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.library_id.as_str() == lib.id.as_str())
+            .map(|r| r.id)
+            .unwrap();
+        (lib, root)
+    };
+
+    let lib_id: LibraryId = tv_lib.id.parse().unwrap();
+    let scope = WriteScope {
+        library_id: lib_id,
+        config_revision: 0,
+    };
+
+    let media_id = MediaId::new();
+    let media = Media {
+        id: media_id,
+        kind: MediaKind::Tv,
+        title: "Test Show".into(),
+        year: Some(2024),
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+
+    store.insert_media(&media).unwrap();
+
+    let reserved_a_id = LedgerId::new();
+    let candidate_a = FileCoverage {
+        path_key: String::new(),
+        file: LibraryFile {
+            file_id: reserved_a_id,
+            library_id: lib_id,
+            root_id: root_id.clone(),
+            media_id,
+            kind: MediaKind::Tv,
+            path: PathBuf::from("Test Show/S01E01-E02.mkv"),
+            version: FileVersion {
+                revision: 1,
+                source_version: "v1".into(),
+            },
+            presence: FilePresence::Present,
+            publication: FilePublication::Pending,
+            size_bytes: Some(1024),
+            stat_known: true,
+            created_ns: None,
+            modified_ns: None,
+            source_digest: None,
+            source_path: Some(PathBuf::from("/downloads/source_a.mkv")),
+            transfer_mode: Some("hardlink".into()),
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: QualitySource::Release,
+            confidence: Confidence::High,
+            filter_score: None,
+            release_quality: None,
+            duration_ms: None,
+            tracks_version: 0,
+            poster_path: None,
+            backdrop_path: None,
+            still_path: None,
+        },
+        units: vec![UnitKey::new(1, 1), UnitKey::new(1, 2)],
+    };
+    (scope, candidate_a)
 }

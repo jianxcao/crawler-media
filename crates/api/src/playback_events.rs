@@ -34,10 +34,6 @@ pub enum EventDecision {
 ///   * Progress / Stop only updates an active session matching the exact session ID.
 ///   * EventSequence if present must be strictly greater than last_event_sequence.
 ///   * Unknown, closed, or mismatched ID events are ignored (return Ignore).
-/// - Without PlaySessionId (Legacy client):
-///   * Start creates/replaces legacy session for matching or new target.
-///   * Progress / Stop only allowed if current active session matches the exact LedgerId.
-///     If target differs or no current session, returns Ignore.
 pub fn classify_event(
     previous: Option<&SessionRow>,
     binding: Option<&PlaySessionBinding>,
@@ -57,7 +53,7 @@ pub fn classify_event_with_target(
     event: PlaybackEventKind,
 ) -> EventDecision {
     let Some(session_id) = identity.play_session_id.as_deref() else {
-        return classify_legacy(previous, ledger, target_unit, event);
+        return EventDecision::Ignore;
     };
     // Unrecognized or forged session ID -> Ignore
     let Some(b) = binding else {
@@ -136,51 +132,4 @@ fn classify_with_session_id(
             _ => EventDecision::Ignore,
         },
     }
-}
-
-/// Plan Task 4 Step 3: No-ID legacy playback session contract.
-/// 首个 no-id `progress`(设备上没有任何 live 会话 ⇒ `previous == None`)判 `Update`:
-/// 这就是 §16.3 ①「unbound 分支仍要写单元事实」① 的入口。canonical 的 unbound 分支
-/// (`store/src/playback/event.rs:68-74` + `stage_unbound_event:144-177`)只写单元事实、不签发会话、不写播放日志,
-/// 因此它既不伪造会话,也不让「进度事件」变成一次播放。
-/// 判 `Ignore` 会让 `persist_heartbeat`(`http/playback/heartbeat.rs:254`)整段短路 ⇒
-/// 心跳零写入,直接顶掉 `storage_contention` 的写作用域正控制
-/// (`tests/storage_contention.rs:156`「基线心跳必须真的写库」)。
-/// 跨目标陈旧保护不变:`previous` 存在但目标不匹配时仍是 `Ignore`。
-/// stop 保持 `Ignore`(没有活动会话的 stop 不得伪造会话/日志)。
-fn classify_legacy(
-    previous: Option<&SessionRow>,
-    ledger: LedgerId,
-    target_unit: Option<domain::UnitKey>,
-    event: PlaybackEventKind,
-) -> EventDecision {
-    match event {
-        PlaybackEventKind::Start => EventDecision::Start,
-        PlaybackEventKind::Progress => match previous {
-            Some(prev) if !legacy_target_matches(prev, ledger, target_unit) => {
-                EventDecision::Ignore
-            }
-            _ => EventDecision::Update,
-        },
-        PlaybackEventKind::Stop => match previous {
-            Some(prev) if legacy_target_matches(prev, ledger, target_unit) => EventDecision::Stop,
-            _ => EventDecision::Ignore,
-        },
-    }
-}
-
-/// A no-ID late event matches the live session only when it names the same
-/// physical file **and** the same logical unit: one file serving E01 and E02
-/// must not let an E01 event write through the active E02 session (R07).
-fn legacy_target_matches(
-    prev: &SessionRow,
-    ledger: LedgerId,
-    target_unit: Option<domain::UnitKey>,
-) -> bool {
-    let same_file =
-        prev.ledger_id.as_deref() == Some(&ledger.to_string()) || prev.ledger_id.is_none();
-    let same_unit = target_unit.is_none_or(|unit| {
-        domain::UnitKey::new(prev.season.unwrap_or(-1), prev.episode.unwrap_or(-1)) == unit
-    });
-    same_file && same_unit
 }

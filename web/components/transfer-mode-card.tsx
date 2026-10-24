@@ -6,11 +6,11 @@ import { DirectoryPicker } from "@/components/directory-picker";
 import { FolderIcon, XIcon } from "@/components/icons";
 import { useToast } from "@/components/feedback";
 import {
-  getDirectory,
-  setTransferMode,
-  setWatchIntake,
+  getTransferSettings,
+  patchTransferSettings,
+  type TransferSettings,
   type TransferMode,
-} from "@/lib/api/directory";
+} from "@/lib/api/transfer-settings";
 
 const OPTIONS: { value: TransferMode; label: string; hint: string }[] = [
   { value: "hardlink", label: "硬链接", hint: "同盘默认，做种文件保留" },
@@ -21,30 +21,36 @@ const OPTIONS: { value: TransferMode; label: string; hint: string }[] = [
 /** Instance-wide Transfer mode and external Watch Intake. */
 export function TransferModeCard() {
   const toast = useToast();
+  const [settings, setSettings] = useState<TransferSettings | null>(null);
   const [mode, setMode] = useState<TransferMode>("hardlink");
   const [intakePath, setIntakePath] = useState("");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [busyMode, setBusyMode] = useState(false);
   const [busyIntake, setBusyIntake] = useState(false);
 
+  const applySettings = (current: TransferSettings) => {
+    setSettings(current);
+    setMode(current.transfer_mode);
+    setIntakePath(current.watch_intake ?? "");
+  };
+
   useEffect(() => {
-    void getDirectory()
-      .then((directory) => {
-        setMode(directory.transfer_mode);
-        setIntakePath(directory.watch_intake ?? "");
-      })
+    void getTransferSettings()
+      .then(applySettings)
       .catch(() => {
         /* keep defaults */
       });
   }, []);
 
   const handleSaveIntake = async (path: string | null) => {
+    if (!settings || busyMode || busyIntake) return;
     setBusyIntake(true);
     try {
-      const res = await setWatchIntake(path);
-      setIntakePath(res.watch_intake ?? "");
+      const res = await patchTransferSettings(settings.revision, { watch_intake: path?.trim() || null });
+      applySettings(res);
       toast.success(res.watch_intake ? "已更新监控入库目录" : "已停用监控入库");
     } catch (error: unknown) {
+      void getTransferSettings().then(applySettings).catch(() => undefined);
       toast.error(error instanceof Error ? error.message : "保存失败");
     } finally {
       setBusyIntake(false);
@@ -61,16 +67,18 @@ export function TransferModeCard() {
         <select
           className="mt-3 h-9 w-full rounded-lg border border-white/10 bg-white/[0.04] px-2 text-ui text-white"
           value={mode}
-          disabled={busyMode}
+          disabled={!settings || busyMode || busyIntake}
           onChange={(event) => {
+            if (!settings) return;
             const next = event.target.value as TransferMode;
             setBusyMode(true);
-            void setTransferMode(next)
+            void patchTransferSettings(settings.revision, { transfer_mode: next })
               .then((directory) => {
-                setMode(directory.transfer_mode);
+                applySettings(directory);
                 toast.success("已更新入库方式");
               })
               .catch((error: unknown) => {
+                void getTransferSettings().then(applySettings).catch(() => undefined);
                 toast.error(error instanceof Error ? error.message : "保存失败");
               })
               .finally(() => setBusyMode(false));
@@ -90,7 +98,7 @@ export function TransferModeCard() {
           {intakePath && (
             <button
               type="button"
-              disabled={busyIntake}
+              disabled={!settings || busyMode || busyIntake}
               onClick={() => void handleSaveIntake(null)}
               className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-caption text-red-400/80 transition hover:bg-red-500/10 hover:text-red-300 disabled:opacity-40"
             >
@@ -112,7 +120,7 @@ export function TransferModeCard() {
             className="h-9 flex-1 rounded-lg border border-white/10 bg-white/[0.04] px-3 font-mono text-ui text-white outline-none placeholder:text-white/30 focus:border-white/25"
             placeholder="留空表示不启用（例如 /downloads/incoming）"
             value={intakePath}
-            disabled={busyIntake}
+            disabled={!settings || busyMode || busyIntake}
             onChange={(e) => setIntakePath(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
@@ -123,7 +131,7 @@ export function TransferModeCard() {
           />
           <button
             type="button"
-            disabled={busyIntake}
+            disabled={!settings || busyMode || busyIntake}
             onClick={() => setPickerOpen(true)}
             className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.06] px-3 text-ui text-white/90 transition hover:bg-white/[0.1] active:scale-[0.98] disabled:opacity-50"
           >
@@ -132,7 +140,7 @@ export function TransferModeCard() {
           </button>
           <button
             type="button"
-            disabled={busyIntake}
+            disabled={!settings || busyMode || busyIntake}
             onClick={() => void handleSaveIntake(intakePath)}
             className="inline-flex h-9 shrink-0 items-center rounded-lg bg-[var(--accent)] px-3.5 text-ui font-medium text-black transition hover:opacity-90 active:scale-[0.98] disabled:opacity-50"
           >

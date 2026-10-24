@@ -22,8 +22,7 @@ async fn test_directory_deletion_removes_nested_strm_and_cleans_up_media() {
     std::fs::write(&strm_file, "https://example.com/video.mkv").unwrap();
 
     let store = api::Store::open(temp.path().join("data")).unwrap();
-    store
-        .set_library_root(domain::MediaKind::Movie, library_root.to_str().unwrap())
+    store::test_support::reconfigure_default_root(&store, domain::MediaKind::Movie, &library_root)
         .unwrap();
 
     let state = api::management::ApiState::new(
@@ -37,32 +36,7 @@ async fn test_directory_deletion_removes_nested_strm_and_cleans_up_media() {
     .unwrap();
 
     // 1. 入账并关联媒体
-    let media = domain::Media {
-        id: domain::MediaId::new(),
-        kind: domain::MediaKind::Movie,
-        title: "“骗骗”喜欢你".into(),
-        year: Some(2024),
-        original_title: None,
-        aliases: Vec::new(),
-        tmdb_id: Some("12345".into()),
-        douban_id: None,
-        tvdb_id: None,
-        bangumi_id: None,
-        anilist_id: None,
-    };
-    state.store().lock().insert_media(&media).unwrap();
-
-    publish_fixture_file(
-        &state.store().lock(),
-        &FixtureFile {
-            file_id: Some(domain::LedgerId::new()),
-            media_id: media.id,
-            path: strm_file.display().to_string(),
-            resolution: Some("2160p".into()),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let media = seed_movie_strm(&state, &strm_file);
 
     // 校验入账成功
     let rows = state.store().lock().list_file_coverage().unwrap();
@@ -133,6 +107,37 @@ async fn test_directory_deletion_removes_nested_strm_and_cleans_up_media() {
         restored_rows[0].file.path.to_string_lossy().into_owned(),
         strm_file.display().to_string()
     );
+}
+
+fn seed_movie_strm(state: &api::management::ApiState, path: &std::path::Path) -> domain::Media {
+    let media = domain::Media {
+        id: domain::MediaId::new(),
+        kind: domain::MediaKind::Movie,
+        title: "“骗骗”喜欢你".into(),
+        year: Some(2024),
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: Some("12345".into()),
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    state.store().lock().insert_media(&media).unwrap();
+
+    publish_fixture_file(
+        &state.store().lock(),
+        &FixtureFile {
+            file_id: Some(domain::LedgerId::new()),
+            media_id: media.id,
+            path: path.display().to_string(),
+            resolution: Some("2160p".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    media
 }
 
 fn episode_spec(
@@ -492,9 +497,7 @@ async fn restoring_one_episode_after_grace_requeues_probe() {
             .missing_at_by_path()
             .unwrap()
             .keys()
-            .any(|key| {
-                key.ends_with(fixture.episode.file_name().unwrap().to_str().unwrap())
-            }),
+            .any(|key| { key.ends_with(fixture.episode.file_name().unwrap().to_str().unwrap()) }),
         "宽限期过后这一集应被标记缺失"
     );
     assert!(
@@ -644,6 +647,30 @@ fn episode_fixture() -> EpisodeFixture {
         },
     )
     .unwrap();
+    seed_episode_probe_facts(&state, media_id, ledger_id);
+    let user_id = domain::UserId::new();
+    state
+        .store()
+        .lock()
+        .upsert_unit(
+            user_id, media_id, 1, 2, 12_000, None, None, None, None, None, false, 1,
+        )
+        .unwrap();
+    std::mem::forget(temp);
+    EpisodeFixture {
+        state,
+        episode,
+        media_id,
+        ledger_id,
+        user_id,
+    }
+}
+
+fn seed_episode_probe_facts(
+    state: &api::management::ApiState,
+    media_id: domain::MediaId,
+    ledger_id: domain::LedgerId,
+) {
     let tracks = library::Tracks {
         video: Some(library::VideoTrack {
             codec: Some("h264".into()),
@@ -690,22 +717,6 @@ fn episode_fixture() -> EpisodeFixture {
             updated_at: 0,
         })
         .unwrap();
-    let user_id = domain::UserId::new();
-    state
-        .store()
-        .lock()
-        .upsert_unit(
-            user_id, media_id, 1, 2, 12_000, None, None, None, None, None, false, 1,
-        )
-        .unwrap();
-    std::mem::forget(temp);
-    EpisodeFixture {
-        state,
-        episode,
-        media_id,
-        ledger_id,
-        user_id,
-    }
 }
 
 #[tokio::test]

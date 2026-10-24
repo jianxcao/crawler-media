@@ -8,11 +8,11 @@ use marker::fingerprint::{
 };
 use marker::{CommonSegment, FingerprintEngine};
 use parking_lot::Mutex;
-use store::test_support::{publish_fixture_file, FixtureFile};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 struct FixtureEngine {
     case: &'static str,
@@ -196,11 +196,7 @@ fn setup_with_digest_versions(case: &'static str, episodes: &[u32]) -> Fixture {
     setup_with_versions(case, episodes, true)
 }
 
-fn setup_with_versions(
-    case: &'static str,
-    episodes: &[u32],
-    digest_versions: bool,
-) -> Fixture {
+fn setup_with_versions(case: &'static str, episodes: &[u32], digest_versions: bool) -> Fixture {
     let tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
     let media_id = MediaId::new();
@@ -337,7 +333,7 @@ fn publish_row_with_version(
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .filter(|root| root.library_id.as_deref() == Some(library.id.as_str()))
+        .filter(|root| root.library_id.as_str() == library.id.as_str())
         .filter(|root| path.starts_with(&root.path))
         .max_by_key(|root| root.path.components().count())
         .expect("fixture path must sit inside a Library root");

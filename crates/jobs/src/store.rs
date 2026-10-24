@@ -8,64 +8,6 @@ use crate::types::{Job, JobDef, JobError, JobStatus};
 
 mod lifecycle;
 pub use lifecycle::{fail, fail_claimed, finish_claimed, recover, recover_except};
-pub fn migrate(conn: &Connection) -> Result<(), JobError> {
-    conn.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS job_defs (
-            id TEXT PRIMARY KEY,
-            kind TEXT NOT NULL,
-            name TEXT NOT NULL,
-            enabled INTEGER NOT NULL,
-            schedule TEXT,
-            payload TEXT NOT NULL,
-            timeout_secs INTEGER,
-            concurrency_key TEXT
-        );
-        CREATE TABLE IF NOT EXISTS jobs (
-            id TEXT PRIMARY KEY,
-            def_id TEXT,
-            kind TEXT NOT NULL,
-            payload TEXT NOT NULL,
-            status TEXT NOT NULL,
-            attempt INTEGER NOT NULL DEFAULT 0,
-            run_after INTEGER NOT NULL,
-            started_at INTEGER,
-            finished_at INTEGER,
-            error TEXT,
-            progress TEXT,
-            concurrency_key TEXT,
-            timeout_secs INTEGER
-        );
-        DROP INDEX IF EXISTS jobs_live_def;
-        CREATE UNIQUE INDEX IF NOT EXISTS jobs_running_def
-            ON jobs(def_id) WHERE def_id IS NOT NULL AND status = 'running';
-        CREATE UNIQUE INDEX IF NOT EXISTS jobs_queued_def
-            ON jobs(def_id) WHERE def_id IS NOT NULL AND status = 'queued';
-        CREATE INDEX IF NOT EXISTS jobs_status_run_after_idx
-            ON jobs(status, run_after) WHERE status = 'queued';
-        CREATE INDEX IF NOT EXISTS jobs_payload_idx ON jobs(payload);
-        CREATE INDEX IF NOT EXISTS jobs_finished_idx ON jobs(finished_at)
-            WHERE finished_at IS NOT NULL;
-        -- DB5：热查询索引。20 万行合成数据 + ANALYZE 的 before/after EQP 与耗时见
-        -- docs/audits/2026-10-12-remediation-review-repro/jobs-query-plans.md。
-        -- 现有 jobs_running_def/jobs_queued_def 是部分**唯一**索引，status IN (...)
-        -- 不蕴含 status='queued'，帮不上 live/last child；两者都必须保留。
-        CREATE INDEX IF NOT EXISTS jobs_running_status_idx
-            ON jobs(status) WHERE status = 'running';
-        CREATE INDEX IF NOT EXISTS jobs_running_key_idx
-            ON jobs(concurrency_key) WHERE status = 'running';
-        CREATE INDEX IF NOT EXISTS jobs_live_def_idx
-            ON jobs(def_id, status, run_after) WHERE status IN ('queued','running');
-        CREATE INDEX IF NOT EXISTS jobs_last_def_idx
-            ON jobs(def_id, finished_at DESC, run_after DESC)
-            WHERE status IN ('succeeded','failed','cancelled');
-        "#,
-    )?;
-    crate::retention_cursor::migrate_retention_cursors(conn)?;
-    crate::change_state::migrate_job_change_state(conn)?;
-    Ok(())
-}
-
 pub fn insert_job(
     conn: &Connection,
     def_id: Option<JobDefId>,

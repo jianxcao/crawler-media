@@ -256,3 +256,84 @@ async fn metrics_are_best_effort_but_do_not_accept_invalid_identity() {
         0
     );
 }
+
+#[tokio::test]
+async fn protocol_without_session_id_rebinds_after_source_replacement() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, media, item) = app(tmp.path());
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let initial_version = store
+        .file_coverage_by_id(file_id(&store, media))
+        .unwrap()
+        .unwrap()
+        .file
+        .version;
+    for replacement in [false, true] {
+        if replacement {
+            let old = store
+                .file_coverage_by_id(file_id(&store, media))
+                .unwrap()
+                .unwrap()
+                .file;
+            let mut next = old.clone();
+            next.version.revision += 1;
+            next.version.source_version = "replacement-source".into();
+            store
+                .publish_files(
+                    &store::library_write::WriteScope {
+                        library_id: old.library_id,
+                        config_revision: store
+                            .library_config_revision(&old.library_id.to_string())
+                            .unwrap(),
+                    },
+                    &[store::library_write::FilePublication {
+                        file: &next,
+                        units: &[domain::UnitKey::WHOLE],
+                        expected_version: Some(&old.version),
+                        nfo_observation: None,
+                        probe_required: false,
+                    }],
+                    2,
+                )
+                .unwrap();
+        }
+        let response = send(
+            &app,
+            "POST",
+            "/Sessions/Playing",
+            "Bearer admin-token",
+            json!({"ItemId":item,"PositionTicks":0}),
+            Some("protocol-device"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let session = store
+            .get_session(admin(), "protocol-device")
+            .unwrap()
+            .unwrap();
+        let binding = store
+            .play_session_binding(
+                admin(),
+                "protocol-device",
+                session.play_session_id.as_deref().unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            binding.file_revision,
+            Some(if replacement {
+                initial_version.revision + 1
+            } else {
+                initial_version.revision
+            })
+        );
+        assert_eq!(
+            binding.source_version.as_deref(),
+            Some(if replacement {
+                "replacement-source"
+            } else {
+                initial_version.source_version.as_str()
+            })
+        );
+    }
+}

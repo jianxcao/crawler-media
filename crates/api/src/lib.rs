@@ -61,6 +61,7 @@ mod poster;
 mod poster_fetch;
 pub(crate) mod probe_wait;
 mod rename_work;
+mod root_reassign_work;
 pub mod runtime_browser;
 mod runtime_downloader;
 pub mod scan_operations;

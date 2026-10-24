@@ -41,6 +41,7 @@ struct CoverInput {
 pub(crate) struct LibraryFacts {
     pub(crate) library: Library,
     removal: Option<LibraryRemoval>,
+    root_reassignments: Vec<store::RootReassignment>,
     cover: CoverInput,
 }
 
@@ -56,6 +57,10 @@ pub(crate) fn library_facts(store: &crate::Store, library: &Library) -> LibraryF
     LibraryFacts {
         library: library.clone(),
         removal: store.removal_for_library(&library.id).ok().flatten(),
+        root_reassignments: store.root_reassignments_for_library(&library.id).unwrap_or_else(|error| {
+            tracing::error!(library_id=library.id,%error,"Failed to read root reassignment lifecycle");
+            Vec::new()
+        }),
         cover,
     }
 }
@@ -93,6 +98,7 @@ pub(crate) fn library_json_from_facts(
     json!({
         "id": library.id,
         "removal": facts.removal,
+        "root_reassignments": facts.root_reassignments,
         "kind": library.kind.as_str(),
         "name": library.name,
         "root_paths": library.root_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),

@@ -298,28 +298,11 @@ fn removal_closes_playback_sessions_for_removed_files_and_preserves_other_librar
     let session_b = store::SessionRow {
         device_id: device_b.into(),
         user_id: user_b,
-        media_id: media.id,
-        season: Some(1),
-        episode: Some(1),
-        client: Some("web".into()),
-        device_name: Some("browser".into()),
-        client_version: Some("1.0".into()),
-        play_method: "direct".into(),
         position_ms: 50_000,
-        start_position_ms: 0,
-        duration_ms: Some(100_000),
-        paused: false,
         watched_ms: 50_000,
-        rate_bps: 0,
-        bytes_sent: 0,
-        connections: 1,
-        admin_ended: false,
-        started_at: 100,
-        last_report_at: 200,
         ledger_id: Some(b_row.file_id.expect("fixture file id").to_string()),
         play_session_id: Some(play_session_b),
-        last_report_at_ms: 200_000,
-        last_event_sequence: None,
+        ..session_a.clone()
     };
     store.upsert_session(&session_a).unwrap();
     store.upsert_session(&session_b).unwrap();
@@ -376,14 +359,14 @@ fn removal_cleans_unidentified_rows_and_allows_multi_coverage_files() {
     // 1. Park an unidentified row inside A's root.
     let un_path = root.join("unknown.mp4").display().to_string();
     store.insert_unidentified(un_path, Confidence::Low).unwrap();
-    assert!(!store.list_unidentified().unwrap().is_empty());
+    assert!(!store.list_unidentified(None).unwrap().is_empty());
 
     // 2. Publish one physical file covering two episodes.
     let root_id = store
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|candidate| candidate.library_id.as_deref() == Some(&a.id))
+        .find(|candidate| candidate.library_id.as_str() == a.id.as_str())
         .unwrap()
         .id;
     let multi_path = root.join("S01E01-E02.mkv");
@@ -447,6 +430,6 @@ fn removal_cleans_unidentified_rows_and_allows_multi_coverage_files() {
     assert_eq!(done.state, "succeeded");
 
     // 4. Unidentified rows are gone; the Library row is deleted without an FK error.
-    assert!(store.list_unidentified().unwrap().is_empty());
+    assert!(store.list_unidentified(None).unwrap().is_empty());
     assert!(store.get_library(&a.id).unwrap().is_none());
 }

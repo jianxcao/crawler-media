@@ -37,32 +37,19 @@ fn scrape_dir(state: &ApiState, path: PathBuf, nfo: bool) -> Result<(), String> 
     if path.as_os_str().is_empty() || !path.is_dir() {
         return Ok(());
     }
-    let owner = {
-        let store = state.store.lock();
-        let mut owners = Vec::new();
-        for kind in [MediaKind::Movie, MediaKind::Tv, MediaKind::Video] {
-            if let Some(owner) = store
-                .library_for_path_strict(&path, kind)
-                .map_err(|e| e.to_string())?
-            {
-                owners.push(owner);
-            }
-        }
-        owners.into_iter().max_by_key(|library| {
-            library
-                .root_paths
-                .iter()
-                .filter(|root| path.starts_with(root))
-                .map(|root| root.components().count())
-                .max()
-                .unwrap_or(0)
-        })
-    };
+    let snapshot = state
+        .store
+        .lock()
+        .library_ownership()
+        .map_err(|e| e.to_string())?;
+    let scope = store::LibraryPathScope::resolve(snapshot).map_err(|e| e.to_string())?;
+    let resolved = store::LibraryPathScope::resolve_path(&path).map_err(|e| e.to_string())?;
+    let owner = watch_owner(&scope, &resolved)?;
     if owner.is_none()
         && state
             .store
             .lock()
-            .path_in_removal_scope(&path)
+            .path_key_in_removal_scope(&resolved)
             .map_err(|e| e.to_string())?
     {
         return Ok(());
@@ -106,8 +93,14 @@ fn scrape_dir(state: &ApiState, path: PathBuf, nfo: bool) -> Result<(), String> 
             "已记录目录中新增刮削的媒体路径"
         );
     }
+    let resolved_files = outcome
+        .transferred
+        .iter()
+        .map(|file| store::LibraryPathScope::resolve_path(&file.path).map_err(|e| e.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
     let plan = {
         let store = state.store.lock();
+        validate_scope(&store, &scope)?;
         if let Some(lease) = &lease {
             lease.control().check().map_err(|e| e.to_string())?;
             if !store
@@ -116,23 +109,27 @@ fn scrape_dir(state: &ApiState, path: PathBuf, nfo: bool) -> Result<(), String> 
             {
                 return Ok(());
             }
-            outcome.transferred.retain(|file| {
-                store
-                    .library_for_path_strict(&file.path, kind)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|owner| owner.id == lease.library_id())
+            let mut resolved = resolved_files.iter();
+            outcome.transferred.retain(|_| {
+                matches!(
+                    scope.owner(resolved.next().expect("one resolved path per file"),kind),
+                    store::StrictOwner::Owned(owner) if owner.id == lease.library_id()
+                )
             });
         } else {
-            outcome
-                .transferred
-                .retain(|file| !store.path_in_removal_scope(&file.path).unwrap_or(true));
+            let mut resolved = resolved_files.iter();
+            outcome.transferred.retain(|_| {
+                !store
+                    .path_key_in_removal_scope(resolved.next().expect("one resolved path per file"))
+                    .unwrap_or(true)
+            });
         }
         crate::watch_ledger::plan_paths(&store, outcome.transferred.clone())?
     };
     let observed = plan.observe()?;
     let inserted = {
         let store = state.store.lock();
+        validate_scope(&store, &scope)?;
         if let Some(lease) = &lease {
             lease.control().check().map_err(|e| e.to_string())?;
             if !store
@@ -149,6 +146,28 @@ fn scrape_dir(state: &ApiState, path: PathBuf, nfo: bool) -> Result<(), String> 
     crate::http::library::enqueue_probes_for_paths(state, inserted);
     attach_missing_posters(state, &job.path);
     Ok(())
+}
+
+fn validate_scope(store: &crate::Store, scope: &store::LibraryPathScope) -> Result<(), String> {
+    let current = store.library_ownership().map_err(|e| e.to_string())?;
+    if !scope.matches(&current) {
+        return Err("Library Watch scope changed during filesystem observation".into());
+    }
+    Ok(())
+}
+
+fn watch_owner(
+    scope: &store::LibraryPathScope,
+    path: &std::path::Path,
+) -> Result<Option<store::Library>, String> {
+    match scope.owner_any(path) {
+        store::StrictOwner::Owned(owner) => Ok(Some(owner.clone())),
+        store::StrictOwner::Unmatched => Ok(None),
+        store::StrictOwner::Ambiguous => Err(format!(
+            "Ambiguous Library Watch scope for {}",
+            path.display()
+        )),
+    }
 }
 
 fn resolve_scanned_files(

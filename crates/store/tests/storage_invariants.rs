@@ -33,7 +33,7 @@ fn library(store: &Store, name: &str, kind: MediaKind, root: &str) -> (store::Li
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|candidate| candidate.library_id == Some(lib.id.clone()))
+        .find(|candidate| candidate.library_id == lib.id.clone())
         .map(|candidate| candidate.id)
         .unwrap();
     (lib, root_id)

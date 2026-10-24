@@ -55,7 +55,7 @@ fn create_library(
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|candidate| candidate.library_id == Some(library.id.clone()))
+        .find(|candidate| candidate.library_id == library.id.clone())
         .expect("library root");
     (library, root.id)
 }

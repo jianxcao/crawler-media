@@ -67,7 +67,7 @@ pub(super) async fn post_event(
     position_ms: i64,
     duration_ms: Option<i64>,
 ) -> StatusCode {
-    let mut body = json!({ "media_item_id": media_id, "event": event, "device_id": device,
+    let mut body = json!({ "event_sequence": crate::common::next_playback_sequence(), "media_item_id": media_id, "event": event, "device_id": device,
                           "play_session_id": session, "position_ms": position_ms });
     if let Some(duration_ms) = duration_ms {
         body["duration_ms"] = json!(duration_ms);
@@ -91,7 +91,7 @@ pub(super) async fn beat(
     post_async(
         app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "progress", "device_id": "web-1",
+        json!({ "event_sequence": crate::common::next_playback_sequence(), "media_item_id": media_id, "event": "progress", "device_id": "web-1",
                 "play_session_id": session,
                 "position_ms": step * 20_000, "paused": false }),
     )
@@ -192,7 +192,7 @@ impl ClockEnv {
         let response = post_async(
             &self.app,
             "/api/v1/playback/progress",
-            json!({ "media_item_id": self.media_id, "event": "start", "device_id": "web-1", "play_session_id": session, "position_ms": 0 }),
+            json!({ "event_sequence": crate::common::next_playback_sequence(), "media_item_id": self.media_id, "event": "start", "device_id": "web-1", "play_session_id": session, "position_ms": 0 }),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);

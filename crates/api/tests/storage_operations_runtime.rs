@@ -95,7 +95,7 @@ fn root_id_of(store: &store::Store, library_id: &str, path: &Path) -> String {
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|root| root.library_id.as_deref() == Some(library_id) && root.path == path)
+        .find(|root| root.library_id.as_str() == library_id && root.path == path)
         .unwrap_or_else(|| panic!("root {path:?} must exist"))
         .id
 }

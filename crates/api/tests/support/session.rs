@@ -37,3 +37,9 @@ pub fn issue_session(
         )
         .expect("issue fixture play session")
 }
+
+/// Monotonic client event numbers across fixture sessions.
+pub fn next_sequence() -> i64 {
+    static NEXT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+}

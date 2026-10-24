@@ -76,13 +76,7 @@ pub(super) fn report_event(
 ) -> Result<(), String> {
     let target = resolve_target(provider, user_id, id)?
         .ok_or_else(|| format!("Jellyfin playback item {id} is missing or not visible"))?;
-    let target_ledger_id = target
-        .ledger_id
-        .parse::<domain::LedgerId>()
-        .map_err(|e| e.to_string())?;
     let now_ms = provider.state.playback_clock.now_ms();
-    let now = now_ms / 1000;
-    let position_ms = position_ms.max(0);
     let store = provider.state.store.lock();
     if store
         .is_device_revoked(user_id, &client.device_id)
@@ -90,219 +84,209 @@ pub(super) fn report_event(
     {
         return Err("device revoked".into());
     }
-
-    // Classify event using shared logic
-    let prior = store
-        .get_session(user_id, &client.device_id)
-        .map_err(|e| e.to_string())?;
-    let binding = if let Some(ref sid) = identity.play_session_id {
-        store
-            .play_session_binding(user_id, &client.device_id, sid)
-            .map_err(|e| e.to_string())?
-    } else {
-        None
-    };
-
-    let shared_identity = crate::playback_events::PlaybackEventIdentity {
-        play_session_id: identity.play_session_id.clone(),
-        event_sequence: identity.event_sequence,
-    };
-
-    let event_kind = match event {
-        PlaybackEvent::Playing => crate::playback_events::PlaybackEventKind::Start,
-        PlaybackEvent::Progress => crate::playback_events::PlaybackEventKind::Progress,
-        PlaybackEvent::Stopped => crate::playback_events::PlaybackEventKind::Stop,
-    };
-
-    let decision = crate::playback_events::classify_event_with_target(
-        prior.as_ref(),
-        binding.as_ref(),
-        &shared_identity,
-        target_ledger_id,
-        Some(domain::UnitKey::new(target.season, target.episode)),
-        event_kind,
-    );
-    if decision == crate::playback_events::EventDecision::Ignore {
-        return Ok(());
-    }
-    // Legacy clients omit `PlaySessionId`. Keep their historical semantics for
-    // classification (the no-id branch above), but persist through a real
-    // issued id: reuse the active session for this target, else issue one.
-    // Clients that do send an id are never rewritten here, so an unknown id is
-    // still rejected by classification.
-    let reused = prior
-        .as_ref()
-        .filter(|session| same_target(session, &target))
-        .and_then(|session| session.play_session_id.clone());
-    let session = effective_session_id(
-        &store,
+    let request = ProtocolEvent {
         user_id,
-        &client,
-        &target,
-        target_ledger_id,
-        identity.play_session_id.clone(),
-        reused,
-        binding.as_ref(),
+        target: &target,
+        client: &client,
         event,
-        now,
-    )?;
-
-    // Commit through canonical bound playback event for unit fact synchronization
-    let item = if target.season == UNIT_WHOLE {
-        domain::TypedItemId::Work(target.media.id)
-    } else {
-        domain::TypedItemId::Unit {
-            media: target.media.id,
-            key: domain::UnitKey::new(target.season, target.episode),
-        }
+        identity: &identity,
+        now: now_ms / 1000,
     };
-    let event_type = match event {
-        PlaybackEvent::Playing => store::playback::PlaybackEventType::Playing,
-        PlaybackEvent::Stopped => store::playback::PlaybackEventType::Stopped,
-        PlaybackEvent::Progress => store::playback::PlaybackEventType::Progress,
+    let Some((sid, binding)) = request.bound_session(&store)? else {
+        return Ok(());
     };
-    let sid = session.id;
-    // 无 id 的旧客户端：本次事件用的 session 由上面刚签发/复用，代际只有绑定里才有。
-    // 声明正确的 generation，事件才属于这个已签发代际，而不是被当成过期事件丢弃。
-    let generation = session.generation;
-    let bound_source = if let Some(ref b) = binding {
-        domain::PhysicalSourceId {
-            file_id: b.ledger_id,
-            revision: b.file_revision.unwrap_or(target.file.version.revision),
-        }
-    } else {
-        domain::PhysicalSourceId {
-            file_id: target.file.file_id,
-            revision: target.file.version.revision,
-        }
+    let Some(bound) = request.bound_event(sid, binding, position_ms, paused) else {
+        return Ok(());
     };
-    let bound_event = store::playback::BoundPlaybackEvent {
-        user_id,
-        device_id: client.device_id.clone(),
-        session_id: sid.clone(),
-        generation,
-        event_sequence: identity.event_sequence,
-        item,
-        source_id: bound_source,
-        source_version: binding
-            .as_ref()
-            .and_then(|b| b.source_version.clone())
-            .unwrap_or_else(|| target.file.version.source_version.clone()),
-        position_ms,
-        duration_ms: target.duration_ms,
-        audio_track: None,
-        subtitle_track: None,
-        paused,
-        rate_bps: 0,
-        client: client.client.clone(),
-        device_name: client.device_name.clone(),
-        client_version: client.client_version.clone(),
-        play_method: Some("DirectPlay".to_string()),
-        event_type,
-    };
-    match store.commit_playback_event(&bound_event, now_ms) {
+    match store.commit_playback_event(&bound, now_ms) {
         Ok(store::playback::EventOutcome::Applied) => {
-            tracing::debug!(session_id = %sid, "Jellyfin commit_playback_event applied");
+            tracing::debug!(session_id=%bound.session_id,"Jellyfin Playback event committed");
         }
         Ok(store::playback::EventOutcome::IgnoredStale) => {
-            tracing::warn!(session_id = %sid, "Jellyfin commit_playback_event ignored as stale");
+            tracing::warn!(session_id=%bound.session_id,"Stale Jellyfin Playback event ignored");
         }
-        Err(e) => {
-            tracing::error!(session_id = %sid, error = %e, "Jellyfin commit_playback_event failed");
-            return Err(e.to_string());
+        Err(error) => {
+            tracing::error!(session_id=%bound.session_id,%error,"Jellyfin Playback event failed");
+            return Err(error.to_string());
         }
     }
-
     Ok(())
 }
 
-/// 本次事件真正落库的 play session 及其代际。
-///
-/// 代际必须来自签发/复用得到的绑定行：canonical 的 `binding_matches`
-/// （`crates/store/src/playback/event.rs:225`）逐字比对 `generation`，
-/// 用默认值声明会让本次事件被判为过期事件而零写入。
-struct EffectivePlaySession {
-    id: String,
-    generation: i64,
-}
-
-/// 决定本次事件真正落库的 play session：显式 id 原样透传，不带 id 的旧客户端
-/// 复用活跃 session，只有 Playing 才新开一个；无 id 可复用也不签发时返回空 id
-/// （canonical 的 unbound 分支只写单元事实，不签发会话、不写播放日志）。
-#[allow(clippy::too_many_arguments)]
-fn effective_session_id(
-    store: &Store,
+struct ProtocolEvent<'a> {
     user_id: UserId,
-    client: &PlaybackClientInfo,
-    target: &PlaybackTarget,
-    target_ledger_id: domain::LedgerId,
-    explicit: Option<String>,
-    reused: Option<String>,
-    binding: Option<&crate::store::PlaySessionBinding>,
+    target: &'a PlaybackTarget,
+    client: &'a PlaybackClientInfo,
     event: PlaybackEvent,
+    identity: &'a media_server::provider::PlaybackEventIdentity,
     now: i64,
-) -> Result<EffectivePlaySession, String> {
-    if let Some(sid) = explicit {
-        return Ok(EffectivePlaySession {
-            generation: binding.map(|b| b.generation).unwrap_or(0),
-            id: sid,
-        });
-    }
-    if let Some(sid) = reused {
-        return Ok(EffectivePlaySession {
-            generation: bound_generation(store, user_id, &client.device_id, &sid)?,
-            id: sid,
-        });
-    }
-    if event != PlaybackEvent::Playing {
-        tracing::warn!(
-            user_id = %user_id,
-            device_id = %client.device_id,
-            "Progress/Stop without active or explicit play session: ignoring fabricated session issuance"
-        );
-        return Ok(EffectivePlaySession {
-            id: String::new(),
-            generation: 0,
-        });
-    }
-    let sid = store
-        .issue_play_session(
-            user_id,
-            &client.device_id,
-            target_ledger_id,
-            target.media.id,
-            domain::UnitKey::new(target.season, target.episode),
-            &target.file.version,
-            now,
-        )
-        .map_err(|error| error.to_string())?;
-    Ok(EffectivePlaySession {
-        generation: bound_generation(store, user_id, &client.device_id, &sid)?,
-        id: sid,
-    })
 }
 
-/// 绑定行声明的代际。没有绑定行时返回 0：canonical 的绑定比对会把这个事件判为
-/// 过期（`IgnoredStale`，零写入），而不是无绑定地接受它。
-fn bound_generation(
-    store: &Store,
-    user_id: UserId,
-    device_id: &str,
-    play_session_id: &str,
-) -> Result<i64, String> {
-    Ok(store
-        .play_session_binding(user_id, device_id, play_session_id)
-        .map_err(|error| error.to_string())?
-        .map(|binding| binding.generation)
-        .unwrap_or(0))
+impl ProtocolEvent<'_> {
+    fn bound_session(
+        &self,
+        store: &Store,
+    ) -> Result<Option<(String, store::PlaySessionBinding)>, String> {
+        let prior = store
+            .get_session(self.user_id, &self.client.device_id)
+            .map_err(|error| error.to_string())?;
+        let binding = match &self.identity.play_session_id {
+            Some(id) => store
+                .play_session_binding(self.user_id, &self.client.device_id, id)
+                .map_err(|error| error.to_string())?,
+            None => None,
+        };
+        let kind = match self.event {
+            PlaybackEvent::Playing => crate::playback_events::PlaybackEventKind::Start,
+            PlaybackEvent::Progress => crate::playback_events::PlaybackEventKind::Progress,
+            PlaybackEvent::Stopped => crate::playback_events::PlaybackEventKind::Stop,
+        };
+        let decision = if self.identity.play_session_id.is_none() {
+            classify_protocol_event(prior.as_ref(), self.target, self.event)
+        } else {
+            crate::playback_events::classify_event_with_target(
+                prior.as_ref(),
+                binding.as_ref(),
+                &crate::playback_events::PlaybackEventIdentity {
+                    play_session_id: self.identity.play_session_id.clone(),
+                    event_sequence: self.identity.event_sequence,
+                },
+                self.target.file.file_id,
+                Some(domain::UnitKey::new(
+                    self.target.season,
+                    self.target.episode,
+                )),
+                kind,
+            )
+        };
+        if decision == crate::playback_events::EventDecision::Ignore {
+            return Ok(None);
+        }
+        let id = if let Some(id) = &self.identity.play_session_id {
+            id.clone()
+        } else if let Some(id) = self.reusable_session(store, prior.as_ref())? {
+            id
+        } else if self.event == PlaybackEvent::Playing {
+            store
+                .issue_play_session(
+                    self.user_id,
+                    &self.client.device_id,
+                    self.target.file.file_id,
+                    self.target.media.id,
+                    domain::UnitKey::new(self.target.season, self.target.episode),
+                    &self.target.file.version,
+                    self.now,
+                )
+                .map_err(|error| error.to_string())?
+        } else {
+            return Ok(None);
+        };
+        // All protocol events commit a real binding, including clients that omit PlaySessionId.
+        let binding = store
+            .play_session_binding(self.user_id, &self.client.device_id, &id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "issued Jellyfin Playback binding disappeared".to_string())?;
+        Ok(Some((id, binding)))
+    }
+
+    fn reusable_session(
+        &self,
+        store: &Store,
+        prior: Option<&SessionRow>,
+    ) -> Result<Option<String>, String> {
+        let Some(prior) = prior.filter(|session| same_target(session, self.target)) else {
+            return Ok(None);
+        };
+        let Some(id) = &prior.play_session_id else {
+            return Ok(None);
+        };
+        let binding = store
+            .play_session_binding(self.user_id, &self.client.device_id, id)
+            .map_err(|error| error.to_string())?;
+        Ok(binding
+            .filter(|binding| {
+                binding.ledger_id == self.target.file.file_id
+                    && binding.file_revision == Some(self.target.file.version.revision)
+                    && binding.source_version.as_deref()
+                        == Some(self.target.file.version.source_version.as_str())
+                    && binding.state != store::PlaySessionIdState::Closed
+            })
+            .map(|_| id.clone()))
+    }
+
+    fn bound_event(
+        &self,
+        id: String,
+        binding: store::PlaySessionBinding,
+        position_ms: i64,
+        paused: bool,
+    ) -> Option<store::playback::BoundPlaybackEvent> {
+        let (Some(revision), Some(source_version)) =
+            (binding.file_revision, binding.source_version)
+        else {
+            return None;
+        };
+        let item = if self.target.season == UNIT_WHOLE {
+            domain::TypedItemId::Work(self.target.media.id)
+        } else {
+            domain::TypedItemId::Unit {
+                media: self.target.media.id,
+                key: domain::UnitKey::new(self.target.season, self.target.episode),
+            }
+        };
+        let event_type = match self.event {
+            PlaybackEvent::Playing => store::playback::PlaybackEventType::Playing,
+            PlaybackEvent::Progress => store::playback::PlaybackEventType::Progress,
+            PlaybackEvent::Stopped => store::playback::PlaybackEventType::Stopped,
+        };
+        Some(store::playback::BoundPlaybackEvent {
+            user_id: self.user_id,
+            device_id: self.client.device_id.clone(),
+            session_id: id,
+            generation: binding.generation,
+            event_sequence: self.identity.event_sequence,
+            item,
+            source_id: domain::PhysicalSourceId {
+                file_id: binding.ledger_id,
+                revision,
+            },
+            source_version,
+            position_ms: position_ms.max(0),
+            duration_ms: self.target.duration_ms,
+            audio_track: None,
+            subtitle_track: None,
+            paused,
+            rate_bps: 0,
+            client: self.client.client.clone(),
+            device_name: self.client.device_name.clone(),
+            client_version: self.client.client_version.clone(),
+            play_method: Some("DirectPlay".into()),
+            event_type,
+        })
+    }
 }
 
 fn same_target(session: &SessionRow, target: &PlaybackTarget) -> bool {
     session.media_id == target.media.id
-        && session.season.unwrap_or(UNIT_WHOLE) == unit_value(target.season).unwrap_or(UNIT_WHOLE)
-        && session.episode.unwrap_or(UNIT_WHOLE) == unit_value(target.episode).unwrap_or(UNIT_WHOLE)
+        && session.ledger_id.as_deref() == Some(target.ledger_id.as_str())
+        && session.season.unwrap_or(UNIT_WHOLE) == target.season
+        && session.episode.unwrap_or(UNIT_WHOLE) == target.episode
 }
 
-fn unit_value(value: i32) -> Option<i32> {
-    (value != UNIT_WHOLE).then_some(value)
+fn classify_protocol_event(
+    previous: Option<&SessionRow>,
+    target: &PlaybackTarget,
+    event: PlaybackEvent,
+) -> crate::playback_events::EventDecision {
+    use crate::playback_events::EventDecision;
+    match event {
+        PlaybackEvent::Playing => EventDecision::Start,
+        PlaybackEvent::Progress if previous.is_some_and(|session| same_target(session, target)) => {
+            EventDecision::Update
+        }
+        PlaybackEvent::Stopped if previous.is_some_and(|session| same_target(session, target)) => {
+            EventDecision::Stop
+        }
+        _ => EventDecision::Ignore,
+    }
 }

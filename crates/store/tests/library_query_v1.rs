@@ -36,7 +36,7 @@ fn create_library(
     let roots = store.list_library_roots().unwrap();
     let root = roots
         .into_iter()
-        .find(|r| r.library_id == Some(lib.id.clone()))
+        .find(|r| r.library_id == lib.id.clone())
         .unwrap();
     (lib, root.id)
 }
@@ -379,12 +379,9 @@ fn library_item_detail_hydrates_item_metadata_and_bounded_files() {
     );
 }
 
-#[test]
-fn protocol_item_page_pagination_and_wire_ids() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Store::open(tmp.path()).unwrap();
+fn seed_protocol_movies(store: &Store) -> (WriteScope, [&'static str; 2]) {
     let (lib, root_id) =
-        create_library(&store, "Protocol Movies", MediaKind::Movie, "/media/movies");
+        create_library(store, "Protocol Movies", MediaKind::Movie, "/media/movies");
     let scope = WriteScope {
         library_id: lib.id.parse().unwrap(),
         config_revision: 0,
@@ -392,8 +389,8 @@ fn protocol_item_page_pagination_and_wire_ids() {
 
     let media_id1 = "00000000-0000-0000-0000-000000000001";
     let media_id2 = "00000000-0000-0000-0000-000000000002";
-    create_media(&store, media_id1, "Alien", MediaKind::Movie, 1979);
-    create_media(&store, media_id2, "Blade Runner", MediaKind::Movie, 1982);
+    create_media(store, media_id1, "Alien", MediaKind::Movie, 1979);
+    create_media(store, media_id2, "Blade Runner", MediaKind::Movie, 1982);
 
     let file1 = make_file(
         "00000000-0000-0000-0000-000000000011",
@@ -436,6 +433,15 @@ fn protocol_item_page_pagination_and_wire_ids() {
             1000,
         )
         .unwrap();
+
+    (scope, [media_id1, media_id2])
+}
+
+#[test]
+fn protocol_item_page_pagination_and_wire_ids() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let (scope, [media_id1, media_id2]) = seed_protocol_movies(&store);
 
     let user_id = UserId::new();
     let query = domain::ProtocolItemQuery {

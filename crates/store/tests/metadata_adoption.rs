@@ -268,7 +268,7 @@ fn invalid_nfo_keeps_the_last_valid_metadata_input() {
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|candidate| candidate.library_id.as_deref() == Some(&library.id))
+        .find(|candidate| candidate.library_id.as_str() == library.id.as_str())
         .unwrap()
         .id;
     let media = domain::Media {
@@ -372,7 +372,7 @@ fn record_scraped_display_with_studio_updates_and_allows_library_reduction() {
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|candidate| candidate.library_id.as_deref() == Some(&library.id))
+        .find(|candidate| candidate.library_id.as_str() == library.id.as_str())
         .unwrap()
         .id;
     let media = domain::Media {

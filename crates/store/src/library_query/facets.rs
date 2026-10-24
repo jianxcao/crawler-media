@@ -8,13 +8,11 @@
 
 use std::collections::BTreeMap;
 
-use rusqlite::params_from_iter;
-
 use super::super::{Store, StoreError};
-use super::items::{Bindings, ItemQuerySql, WATCH_TIER_SQL, filter_clauses};
-use super::types::{
-    BrowseFilter, FacetCount, FacetRequest, FacetTier, LibraryFacets, LibraryQuery,
-};
+use super::items::WATCH_TIER_SQL;
+
+mod matrix;
+use super::types::{BrowseFilter, FacetCount, FacetRequest, FacetTier, LibraryFacets};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Dimension {
@@ -218,34 +216,33 @@ fn without(filter: &BrowseFilter, dimension: Dimension) -> BrowseFilter {
 impl Store {
     /// Ten facet dimensions plus the total of the fully applied filter.
     pub fn library_facets(&self, request: &FacetRequest) -> Result<LibraryFacets, StoreError> {
+        self.library_facets_inner(request)
+    }
+
+    pub fn library_facets_with_stats(
+        &self,
+        request: &FacetRequest,
+    ) -> Result<(LibraryFacets, super::items::QueryWorkStats), StoreError> {
+        let observer = super::items::stats::QueryWorkScope::new(&[&self.app, &self.library]);
+        let facets = self.library_facets_inner(request)?;
+        let rows = facets.groups.values().map(Vec::len).sum::<usize>() as u64;
+        Ok((facets, observer.stats(rows)))
+    }
+
+    fn library_facets_inner(&self, request: &FacetRequest) -> Result<LibraryFacets, StoreError> {
         request.filter.validate()?;
-        let total_query = LibraryQuery {
-            library_id: request.library_id,
-            user_id: request.user_id,
-            filter: request.filter.clone(),
-            order: super::types::BrowseOrder::Title,
-            descending: false,
-            page: super::types::BrowsePage::Offset { start: 0, limit: 0 },
-            include_total: false,
-        };
-        let total = self.library_item_count(&total_query)?;
         let dimensions: &[Dimension] = match request.tier {
             FacetTier::Primary => &PRIMARY,
             FacetTier::All => &ALL,
         };
-        let mut groups = BTreeMap::new();
-        for dimension in dimensions {
-            let scoped = without(&request.filter, *dimension);
-            let base = ItemQuerySql::build(request.library_id, &scoped, request.user_id)?;
-            let counts = match dimension.term_kind() {
-                Some(kind) => term_counts(self, &base, kind)?,
-                None => match dimension.value_expr() {
-                    Some(expr) => value_counts(self, &base, expr)?,
-                    None => conditional_counts(self, &base, &dimension.conditional_values())?,
-                },
-            };
-            groups.insert(dimension.key().to_string(), sort_counts(*dimension, counts));
-        }
+        let (total, mut counts) = matrix::read(self, request, dimensions)?;
+        let groups = dimensions
+            .iter()
+            .map(|dimension| {
+                let values = counts.remove(dimension.key()).unwrap_or_default();
+                (dimension.key().to_string(), sort_counts(*dimension, values))
+            })
+            .collect();
         Ok(LibraryFacets { total, groups })
     }
 }
@@ -266,109 +263,6 @@ fn sort_counts(dimension: Dimension, mut counts: Vec<(String, u64)>) -> Vec<Face
             count,
         })
         .collect()
-}
-
-/// Multi-valued dimensions: every value a term carries, counted over the base filter.
-fn term_counts(
-    store: &Store,
-    base: &ItemQuerySql,
-    kind: &str,
-) -> Result<Vec<(String, u64)>, StoreError> {
-    let mut bindings = Bindings::from_values(base.bindings.clone());
-    let kind_placeholder = bindings.push(kind.to_string().into());
-    let sql = format!(
-        "SELECT t.term_value, SUM(CASE WHEN {where_sql} THEN 1 ELSE 0 END) \
-         FROM library_item_terms t, {from} \
-         WHERE i.library_id = ?1 AND t.library_id = i.library_id AND t.media_id = i.media_id \
-           AND t.term_kind = {kind_placeholder} \
-         GROUP BY t.term_value ORDER BY t.term_value",
-        where_sql = base.where_sql,
-        from = base.from,
-    );
-    read_counts(store, &sql, bindings)
-}
-
-/// Scalar dimensions: one row per value present anywhere in the library, counted over the
-/// base filter (a value nobody matches under the other dimensions still returns count 0).
-fn value_counts(
-    store: &Store,
-    base: &ItemQuerySql,
-    expr: &str,
-) -> Result<Vec<(String, u64)>, StoreError> {
-    let bindings = Bindings::from_values(base.bindings.clone());
-    let sql = format!(
-        "SELECT {expr}, SUM(CASE WHEN {where_sql} THEN 1 ELSE 0 END) \
-         FROM {from} WHERE i.library_id = ?1 AND {expr} IS NOT NULL \
-         GROUP BY 1 ORDER BY 1",
-        where_sql = base.where_sql,
-        from = base.from,
-    );
-    read_counts(store, &sql, bindings)
-}
-
-/// Fixed-bucket dimensions: one count per documented value. `always` values are returned even
-/// when no item of the library satisfies their condition (count 0, the UI greys them); the
-/// others exist only while the condition matches at least one item in the library.
-///
-/// One statement per dimension: for each bucket a filtered SUM (the count) and a MAX of the
-/// bare condition (whether any library item is a candidate), over a single library scan.
-fn conditional_counts(
-    store: &Store,
-    base: &ItemQuerySql,
-    values: &[(String, String, bool)],
-) -> Result<Vec<(String, u64)>, StoreError> {
-    if values.is_empty() {
-        return Ok(Vec::new());
-    }
-    let columns = values
-        .iter()
-        .map(|(_, condition, _)| {
-            format!(
-                "COALESCE(SUM(CASE WHEN ({where_sql}) AND ({condition}) THEN 1 ELSE 0 END), 0), \
-                 COALESCE(MAX(CASE WHEN {condition} THEN 1 ELSE 0 END), 0)",
-                where_sql = base.where_sql,
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT {columns} FROM {from} WHERE i.library_id = ?1",
-        from = base.from
-    );
-    let bindings = Bindings::from_values(base.bindings.clone());
-    let mut statement = store.library.prepare(&sql)?;
-    let cells: Vec<(i64, i64)> =
-        statement.query_row(params_from_iter(bindings.values()), |row| {
-            (0..values.len())
-                .map(|index| Ok((row.get(index * 2)?, row.get(index * 2 + 1)?)))
-                .collect()
-        })?;
-    Ok(values
-        .iter()
-        .zip(cells)
-        .filter(|((_, _, always), (_, candidate))| *always || *candidate == 1)
-        .map(|((value, _, _), (count, _))| (value.clone(), count.max(0) as u64))
-        .collect())
-}
-
-fn read_counts(
-    store: &Store,
-    sql: &str,
-    bindings: Bindings,
-) -> Result<Vec<(String, u64)>, StoreError> {
-    let mut statement = store.library.prepare(sql)?;
-    let rows = statement.query_map(params_from_iter(bindings.values()), |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
-    })?;
-    let mut counts = Vec::new();
-    for row in rows {
-        let (value, count) = row?;
-        if value.trim().is_empty() {
-            continue;
-        }
-        counts.push((value, count.unwrap_or(0).max(0) as u64));
-    }
-    Ok(counts)
 }
 
 fn lookup(table: &[(&str, &str)], value: &str) -> String {

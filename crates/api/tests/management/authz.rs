@@ -109,7 +109,7 @@ async fn member_is_forbidden_on_the_admin_surface() {
             "/api/v1/libraries",
             json!({ "kind": "movie", "name": "n", "root_paths": ["/tmp/x"] }),
         ),
-        ("PUT", "/api/v1/directory", json!({})),
+        ("PATCH", "/api/v1/settings/transfer", json!({})),
         ("POST", "/api/v1/jobs/tick", json!({})),
     ];
     for (method, uri, body) in admin_only {

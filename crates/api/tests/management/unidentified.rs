@@ -163,22 +163,7 @@ async fn claim_writes_real_ids_and_downloads_poster() {
         .with_catalog(Arc::new(super::catalog::PosterCatalog))
         .with_poster_fetch(Arc::new(StaticPoster)),
     );
-    app.clone()
-        .oneshot(request(
-            "PUT",
-            "/api/v1/directory",
-            Some("management-secret"),
-            json!({
-                "movie_root": tmp.path().join("movies").display().to_string(),
-                "tv_root": tmp.path().join("tv").display().to_string(),
-                "transfer_mode": "copy",
-                "movie_naming": "{title} ({year})",
-                "tv_naming": "{title}/Season {season:02}/{title} - S{season:02}E{episode:02}",
-                "scrape": true
-            }),
-        ))
-        .await
-        .unwrap();
+    set_transfer_settings(&app, json!({"transfer_mode":"copy","scrape":true})).await;
     let claimed = app
         .clone()
         .oneshot(request(
@@ -250,22 +235,7 @@ async fn claim_rejects_overwriting_existing_ledger_file() {
     let movie_root = tmp.path().join("movies");
     std::fs::create_dir_all(&movie_root).unwrap();
 
-    let _ = app
-        .clone()
-        .oneshot(request(
-            "PUT",
-            "/api/v1/directory",
-            Some("management-secret"),
-            json!({
-                "movie_root": movie_root.display().to_string(),
-                "tv_root": tmp.path().join("tv").display().to_string(),
-                "transfer_mode": "copy",
-                "movie_naming": "{title} ({year})",
-                "scrape": false
-            }),
-        ))
-        .await
-        .unwrap();
+    let _ = set_transfer_settings(&app, json!({"transfer_mode":"copy","scrape":false})).await;
 
     // 准备一个未识别文件，尝试认领
     let unknown_file = tmp.path().join("stage/other.mkv");
@@ -553,6 +523,14 @@ async fn claim_actions_are_explicit_and_bind_never_moves_bytes() {
                 &[],
             )
             .unwrap();
+    }
+    {
+        let store = Store::open(tmp.path().join("data")).unwrap();
+        for path in [&inside, &outside] {
+            store
+                .insert_unidentified(path.display().to_string(), Confidence::Low)
+                .unwrap();
+        }
     }
     let app = router(state(
         tmp.path(),

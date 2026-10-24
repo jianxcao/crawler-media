@@ -148,7 +148,7 @@ async fn send_playback(
             "POST",
             "/api/v1/playback/progress",
             Some(token),
-            json!({"media_item_id":media_id.to_string(),"event":event,"device_id":"shared-device",
+            json!({ "event_sequence": crate::common::next_playback_sequence(),"media_item_id":media_id.to_string(),"event":event,"device_id":"shared-device",
                    "play_session_id": session}),
         ))
         .await

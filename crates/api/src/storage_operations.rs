@@ -106,18 +106,21 @@ pub fn begin_library_reconfiguration(
     // 一律按“不存在”回答，绝不 panic。
     let library_ref = domain::LibraryId::from_str(library_id)
         .map_err(|_| StorageOperationError::MissingLibrary)?;
-    let started = state.store.lock().begin_library_reconfiguration(
-        &LibraryReconfiguration {
-            operation_id: operation_id.clone(),
-            library_id: library_ref,
-            expected_revision,
-            root_paths: root_paths
-                .clone()
-                .map(|roots| roots.into_iter().map(std::path::PathBuf::from).collect()),
-            display_locale: request.display_locale.clone(),
-        },
-        now_ms,
-    );
+    let prepared = LibraryReconfiguration {
+        operation_id: operation_id.clone(),
+        library_id: library_ref,
+        expected_revision,
+        root_paths: root_paths
+            .clone()
+            .map(|roots| roots.into_iter().map(std::path::PathBuf::from).collect()),
+        display_locale: request.display_locale.clone(),
+    }
+    .prepare()
+    .map_err(StorageOperationError::Store)?;
+    let started = state
+        .store
+        .lock()
+        .begin_library_reconfiguration_prepared(&prepared, now_ms);
     let status = match started {
         Ok(status) => status,
         // Another request began between the check above and the CAS (or the revision moved
@@ -420,6 +423,7 @@ fn spawn_driver(state: &ApiState, operation_id: &str, library_id: &str) {
         }
         state.library_work.release(&library_id, &operation_id);
         state.library_work.release_driver(&operation_id);
+        crate::root_reassign_work::notify(&state);
     });
 }
 

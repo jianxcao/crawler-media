@@ -95,14 +95,14 @@ fn jobs_db_layout_gate_rejects_missing_tables_with_backup_guidance() {
         Err(e) => e,
     };
     let err_str = err.to_string();
-    assert!(err_str.contains("jobs database layout mismatch"));
-    assert!(err_str.contains("jobs.db is an active queue database"));
-    assert!(err_str.contains("Do not delete or recreate automatically"));
+    assert!(err_str.contains("jobs layout mismatch"));
+    assert!(err_str.contains("jobs.db contains durable Job definitions and states"));
+    assert!(err_str.contains("Do not delete or recreate it automatically"));
     assert!(err_str.contains("back up data/jobs.db"));
 }
 
-/// 干净切换的验收面：既有实例（`data/live` 的五个库）必须能被启动校验接受，且既有
-/// 未打标的 `jobs.db` 只被补写身份头。测试只读复制到临时目录，不碰原库。
+/// Copy a current instance into a temporary directory and validate its complete layout.
+/// Populated unstamped queues are refused; this fixture performs no automatic adoption.
 ///
 /// 路径用 `CARGO_MANIFEST_DIR` 解析（cargo 运行测试时的工作目录是包根，不是仓库根）。
 /// 需要真实实例数据，默认 ignore（不再在缺数据时静默算作通过）：
@@ -165,37 +165,15 @@ fn live_databases_copy_is_accepted_and_stamped_properly() {
     )
     .expect("live databases copy must be accepted and successfully initialized");
 
-    // 原库 jobs.db 只允许两种合法态：`(0,0)`（未切换的检出），或被启动闸门压印成
-    // `(JOBS_APPLICATION_ID, JOBS_USER_VERSION)`（本机真实实例已被一次真实启动消耗）。
-    // 依据：计划 `docs/superpowers/plans/2026-10-20-storage-clean-cutover.md:600` 已把
-    // 「`data/live/jobs.db` 无身份闸门」记为**已加**——`crates/api/src/management/state.rs:233`
-    // 在 `jobs::Queue::open` 之前调用 `store::schema::layout::initialize_jobs_layout`，
-    // 压印点是 `crates/store/src/schema/layout.rs:88-89`。其它任何取值都意味着外来写入或串库，
-    // 必须 panic；「未打标 → 补写身份头」路径本身由本文件下方 `unstamped_jobs_db_*` 两个用例覆盖。
-    let unstamped = (0, 0);
-    let stamped = (
-        store::schema::layout::JOBS_APPLICATION_ID,
-        store::schema::layout::JOBS_USER_VERSION,
-    );
+    // A copied current queue must retain the identity owned by the Jobs crate.
     for db_name in db_names {
         let conn = rusqlite::Connection::open_with_flags(
             live_dir.join(db_name),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .unwrap();
-        let app_id: u32 = conn
-            .pragma_query_value(None, "application_id", |r| r.get(0))
-            .unwrap();
-        let user_ver: i64 = conn
-            .pragma_query_value(None, "user_version", |r| r.get(0))
-            .unwrap();
-        eprintln!("live/{db_name}: application_id={app_id} user_version={user_ver}");
         if db_name == "jobs.db" {
-            assert!(
-                (app_id, user_ver) == unstamped || (app_id, user_ver) == stamped,
-                "live/jobs.db must be unstamped {unstamped:?} or startup-stamped {stamped:?}, \
-                 got ({app_id}, {user_ver})"
-            );
+            jobs::schema::validate_layout(&conn).unwrap();
         }
     }
 
@@ -206,8 +184,8 @@ fn live_databases_copy_is_accepted_and_stamped_properly() {
     let user_ver: i64 = jobs_conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(app_id, store::schema::layout::JOBS_APPLICATION_ID);
-    assert_eq!(user_ver, store::schema::layout::JOBS_USER_VERSION);
+    assert_eq!(app_id, jobs::schema::JOBS_APPLICATION_ID);
+    assert_eq!(user_ver, jobs::schema::JOBS_USER_VERSION);
 }
 
 #[test]
@@ -288,18 +266,10 @@ fn stamped_jobs_db_missing_declared_index_is_rejected() {
     {
         drop(jobs::Queue::open(&jobs_path).unwrap());
         let conn = rusqlite::Connection::open(&jobs_path).unwrap();
-        conn.pragma_update(
-            None,
-            "application_id",
-            store::schema::layout::JOBS_APPLICATION_ID,
-        )
-        .unwrap();
-        conn.pragma_update(
-            None,
-            "user_version",
-            store::schema::layout::JOBS_USER_VERSION,
-        )
-        .unwrap();
+        conn.pragma_update(None, "application_id", jobs::schema::JOBS_APPLICATION_ID)
+            .unwrap();
+        conn.pragma_update(None, "user_version", jobs::schema::JOBS_USER_VERSION)
+            .unwrap();
         conn.execute("DROP INDEX jobs_last_def_idx;", []).unwrap();
     }
 
@@ -342,6 +312,6 @@ fn stamped_jobs_db_missing_declared_index_is_rejected() {
     let user_ver: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(app_id, store::schema::layout::JOBS_APPLICATION_ID);
-    assert_eq!(user_ver, store::schema::layout::JOBS_USER_VERSION);
+    assert_eq!(app_id, jobs::schema::JOBS_APPLICATION_ID);
+    assert_eq!(user_ver, jobs::schema::JOBS_USER_VERSION);
 }

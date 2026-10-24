@@ -1,3 +1,9 @@
+#[path = "scan_fixture.rs"]
+mod scan_fixture;
+pub(crate) use scan_fixture::finish_scan;
+#[path = "config_fixture.rs"]
+mod config_fixture;
+pub(crate) use self::config_fixture::{add_default_root, set_default_root, set_transfer_settings};
 use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
@@ -138,7 +144,10 @@ pub(crate) async fn create_rule_set(app: &axum::Router) -> String {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
-    json_data(response).await["id"].as_str().unwrap().to_string()
+    json_data(response).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
 pub(crate) async fn create_site(app: &axum::Router) -> Value {
@@ -337,4 +346,10 @@ fn seal_executable(path: &std::path::Path) {
         .expect("spawn cp to seal test executable");
     assert!(status.success(), "cp failed sealing {}", path.display());
     std::fs::rename(&sealed, path).expect("rename sealed test executable");
+}
+
+/// Client event numbers remain monotonic when a fixture loops over heartbeats.
+pub fn next_playback_sequence() -> i64 {
+    static NEXT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
 }

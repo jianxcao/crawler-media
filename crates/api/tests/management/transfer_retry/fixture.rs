@@ -55,31 +55,27 @@ impl TransferFixture {
             downloader.clone(),
         );
         let app = router(state.clone());
-        // `/directory` decomposes both patterns into one shared `naming_entry_dir`,
-        // so the kind that is not under test must reuse the same entry segment or
-        // it would silently overwrite the tested pattern's directory level.
-        let entry = naming.split('/').next().unwrap_or("{title}");
-        let tv_naming = if tv {
-            naming.to_string()
+        super::super::common::set_default_root(&app, "movie", &tmp.path().join("movies")).await;
+        super::super::common::set_default_root(&app, "tv", &tmp.path().join("tv")).await;
+        let response = super::super::common::set_transfer_settings(
+            &app,
+            json!({"transfer_mode":"copy","scrape":false}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let segments: Vec<&str> = naming.split('/').collect();
+        let setting = if tv {
+            json!({"naming_entry_dir":segments[0],"naming_season_dir":segments[1],"naming_episode_file":segments[2]})
         } else {
-            format!("{entry}/{{season}}/{{episode}}{{ext}}")
-        };
-        let movie_naming = if tv {
-            format!("{entry}/{{title}} ({{year}}){{ext}}")
-        } else {
-            naming.to_string()
+            json!({"naming_entry_dir":segments[0],"naming_movie_file":segments[1]})
         };
         let response = app
             .clone()
             .oneshot(request(
                 "PUT",
-                "/api/v1/directory",
+                "/api/v1/settings/scrape",
                 Some("management-secret"),
-                json!({
-                    "movie_root": tmp.path().join("movies"), "tv_root": tmp.path().join("tv"),
-                    "transfer_mode": "copy", "movie_naming": movie_naming, "tv_naming": tv_naming,
-                    "scrape": false,
-                }),
+                json!({"setting":setting}),
             ))
             .await
             .unwrap();

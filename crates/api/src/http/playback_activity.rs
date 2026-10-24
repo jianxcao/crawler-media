@@ -237,10 +237,7 @@ pub(crate) async fn devices(
         entry["active_sessions"] = json!(entry["active_sessions"].as_i64().unwrap_or(0) + 1);
     }
     for log in logs {
-        let device_id = log
-            .device_id
-            .clone()
-            .unwrap_or_else(|| format!("legacy-log:{}", log.id));
+        let device_id = log.device_id.clone();
         let key = format!("{}:{device_id}", log.user_id);
         seen.entry(key).or_insert_with(|| {
             json!({

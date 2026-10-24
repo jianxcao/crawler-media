@@ -1,5 +1,6 @@
 //! Library-scoped work leases. Registry -> Store is the only permitted lock order.
 use crate::management::ApiState;
+mod removal;
 
 #[derive(Debug)]
 pub(crate) enum ProjectionLeaseError {
@@ -13,14 +14,15 @@ impl ApiState {
         path: &std::path::Path,
         kind: domain::MediaKind,
     ) -> Result<Option<LibraryWorkLease>, String> {
+        let resolved = store::LibraryPathScope::resolve_path(path).map_err(|e| e.to_string())?;
         let owner = {
             let store = self.store.lock();
             let owner = store
-                .library_for_path_strict(path, kind)
+                .library_owning_key(&resolved, kind)
                 .map_err(|e| e.to_string())?;
             if owner.is_none()
                 && store
-                    .path_in_removal_scope(path)
+                    .path_key_in_removal_scope(&resolved)
                     .map_err(|e| e.to_string())?
             {
                 return Err("Library 已删除，拒绝旧目录工作".into());
@@ -28,7 +30,7 @@ impl ApiState {
             owner
         };
         owner
-            .map(|owner| self.acquire_library_work(&owner.id))
+            .map(|owner| self.acquire_library_work(&owner))
             .transpose()
     }
     pub fn acquire_library_work(&self, library_id: &str) -> Result<LibraryWorkLease, String> {
@@ -100,7 +102,7 @@ pub(crate) fn launch_library_removal(
     let state = state.clone();
     let operation_id = operation.operation_id.clone();
     handle.spawn(async move {
-        if let Err(error) = drain_removal(&state, &operation_id).await {
+        if let Err(error) = removal::drain(&state, &operation_id).await {
             tracing::error!(%operation_id, %error, "Library 删除失败，保持冻结");
             if let Err(persist_error) =
                 state
@@ -112,69 +114,9 @@ pub(crate) fn launch_library_removal(
             }
         }
         state.library_work.removals.lock().remove(&operation_id);
+        crate::root_reassign_work::notify(&state);
     });
     Ok(operation)
-}
-
-async fn drain_removal(state: &ApiState, operation_id: &str) -> Result<(), String> {
-    let (library_id, ledger_ids) = {
-        let store = state.store.lock();
-        let operation = store
-            .library_removal(operation_id)
-            .map_err(|e| e.to_string())?
-            .ok_or("Library removal missing")?;
-        if operation.state == "succeeded" {
-            return Ok(());
-        }
-        store
-            .set_removal_state(operation_id, "draining", None)
-            .map_err(|e| e.to_string())?;
-        (
-            operation.library_id,
-            store
-                .removal_ledger_ids(operation_id)
-                .map_err(|e| e.to_string())?,
-        )
-    };
-    tracing::info!(%operation_id, %library_id, total_ledgers = ledger_ids.len(), "开始排空 Library 关联任务与活跃会话");
-    state.library_work.cancel(&library_id);
-    state
-        .probe
-        .cancel_ledger_work(&ledger_ids, "Library removed")
-        .map_err(|e| e.to_string())?;
-
-    {
-        let store = state.store.lock();
-        store
-            .close_playback_sessions_for_removal(operation_id)
-            .map_err(|e| format!("关闭待删除媒体库播放会话失败: {e}"))?;
-    }
-
-    if let Err(_) = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        state.library_work.wait_idle(&library_id),
-    )
-    .await
-    {
-        tracing::error!(%operation_id, %library_id, "等待 Library 工作租约释放超时 (30s)，删除操作失败并保持冻结");
-        return Err("Library work did not stop within 30 seconds".to_string());
-    }
-    tracing::info!(%operation_id, %library_id, "Library 任务已全部排空，进入清理阶段");
-    let covers_dir = {
-        let store = state.store.lock();
-        store
-            .set_removal_state(operation_id, "cleaning", None)
-            .map_err(|e| e.to_string())?;
-        store
-            .clean_library_removal(operation_id)
-            .map_err(|e| e.to_string())?;
-        store.library_covers_dir()
-    };
-    // 封面文件无法进 DB 事务：此时 Library 已冻结且行已删除，没有并发发布能重建它；
-    // 启动时的对账（purge_removed_library_covers）负责补做崩溃窗口内漏掉的那次删除。
-    crate::library_cover_service::remove_library_cover_files(&covers_dir, &library_id);
-    tracing::info!(%operation_id, %library_id, "Library 索引清理完成，删除操作成功");
-    Ok(())
 }
 
 pub fn resume_library_removals(state: &ApiState) -> Result<(), String> {
@@ -209,6 +151,8 @@ pub struct LibraryWorkRegistry {
     /// reconfiguration is driven once per process; startup recovery and a new 202
     /// can both ask for the same operation.
     drivers: Mutex<std::collections::HashSet<String>>,
+    pub(crate) root_changed: Arc<Notify>,
+    pub(crate) root_driver: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]

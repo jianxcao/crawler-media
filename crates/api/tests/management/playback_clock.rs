@@ -56,7 +56,7 @@ async fn progress_lifecycle_writes_session_log_and_unit() {
     let start = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "start", "device_id": "web-1", "play_session_id": session, "position_ms": 0 }),
+        json!({ "event_sequence": crate::common::next_playback_sequence(), "media_item_id": media_id, "event": "start", "device_id": "web-1", "play_session_id": session, "position_ms": 0 }),
     )
     .await;
     assert_eq!(start.status(), StatusCode::OK);
@@ -98,7 +98,7 @@ async fn progress_lifecycle_writes_session_log_and_unit() {
     let stop = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "stop", "device_id": "web-1", "play_session_id": session, "position_ms": 300_000 }),
+        json!({ "event_sequence": crate::common::next_playback_sequence(), "media_item_id": media_id, "event": "stop", "device_id": "web-1", "play_session_id": session, "position_ms": 300_000 }),
     )
     .await;
     assert_eq!(stop.status(), StatusCode::OK);
@@ -185,6 +185,14 @@ async fn injected_clock_drives_revoke_device() {
     }
     let beat_ms = env.start_web_session().await;
 
+    let session_id = env
+        .store
+        .lock()
+        .get_session(env.user, "web-1")
+        .unwrap()
+        .unwrap()
+        .play_session_id
+        .unwrap();
     // 注销用注入时钟关闭会话：落库日志的 ended_at 决定 devices 的 last_seen_at。
     let revoke = env
         .app
@@ -215,7 +223,8 @@ async fn injected_clock_drives_revoke_device() {
     let blocked = post_async(
         &env.app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": env.media_id, "event": "progress", "device_id": "web-1", "position_ms": 10 }),
+        json!({ "media_item_id": env.media_id, "event": "progress", "device_id": "web-1", "position_ms": 10,
+            "play_session_id":session_id,"event_sequence":crate::common::next_playback_sequence() }),
     )
     .await;
     assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
@@ -234,7 +243,7 @@ async fn stats_aggregate_and_policy_round_trip() {
     let start = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "start", "device_id": "web-1", "play_session_id": session, "position_ms": 0 }),
+        json!({ "event_sequence": crate::common::next_playback_sequence(), "media_item_id": media_id, "event": "start", "device_id": "web-1", "play_session_id": session, "position_ms": 0 }),
     )
     .await;
     assert_eq!(start.status(), StatusCode::OK);
@@ -250,7 +259,7 @@ async fn stats_aggregate_and_policy_round_trip() {
     let stop = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "stop", "device_id": "web-1", "play_session_id": session, "position_ms": 60_000 }),
+        json!({ "event_sequence": crate::common::next_playback_sequence(), "media_item_id": media_id, "event": "stop", "device_id": "web-1", "play_session_id": session, "position_ms": 60_000 }),
     )
     .await;
     assert_eq!(stop.status(), StatusCode::OK);
@@ -417,7 +426,7 @@ async fn heartbeat_persists_sub_second_report_time() {
     let start = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "start", "device_id": "web-ms", "play_session_id": session, "position_ms": 0 }),
+        json!({ "event_sequence": crate::common::next_playback_sequence(), "media_item_id": media_id, "event": "start", "device_id": "web-ms", "play_session_id": session, "position_ms": 0 }),
     )
     .await;
     assert_eq!(start.status(), StatusCode::OK);
@@ -427,7 +436,7 @@ async fn heartbeat_persists_sub_second_report_time() {
     let beat = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "progress", "device_id": "web-ms", "play_session_id": session, "position_ms": 0, "paused": false }),
+        json!({ "event_sequence": crate::common::next_playback_sequence(), "media_item_id": media_id, "event": "progress", "device_id": "web-ms", "play_session_id": session, "position_ms": 0, "paused": false }),
     )
     .await;
     assert_eq!(beat.status(), StatusCode::OK);

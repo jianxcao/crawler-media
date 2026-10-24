@@ -66,11 +66,7 @@ impl Store {
         // the IMMEDIATE lock directly instead of `Connection::transaction_with_behavior`.
         let tx = Transaction::new_unchecked(&self.library, TransactionBehavior::Immediate)?;
         let Some(binding) = read_binding(&tx, event)? else {
-            if !stage_unbound_event(self, &tx, event, media_id, unit, now_ms)? {
-                return Ok(EventOutcome::IgnoredStale);
-            }
-            tx.commit()?;
-            return Ok(EventOutcome::Applied);
+            return Ok(EventOutcome::IgnoredStale);
         };
         if stale_bound_event(self, &tx, event, &binding, media_id, unit)? {
             return Ok(EventOutcome::IgnoredStale);
@@ -135,49 +131,6 @@ impl Store {
         }
         Ok(())
     }
-}
-
-/// Legacy clients never issued a session id: they still report progress, so the unit facts are
-/// written, but no session state is invented for them. Once a session *was* issued, the bound
-/// guards decide and a mismatch writes nothing.
-///
-/// Returns `true` when the caller must commit, `false` when the event is stale and nothing was
-/// written.
-fn stage_unbound_event(
-    store: &Store,
-    tx: &Transaction<'_>,
-    event: &BoundPlaybackEvent,
-    media_id: MediaId,
-    unit: UnitKey,
-    now_ms: i64,
-) -> Result<bool, StoreError> {
-    if !source_still_current(tx, event)? {
-        return Ok(false);
-    }
-    // Same admin-ended invariant, but an unbound event has no issued binding to archive the
-    // live row with, so it only refuses to write.
-    if admin_ended_session(store, event, now_ms)? {
-        tracing::debug!(
-            device_id = %event.device_id,
-            "unbound playback event for an admin-ended session ignored"
-        );
-        return Ok(false);
-    }
-    tracing::debug!(
-        user_id = %event.user_id,
-        device_id = %event.device_id,
-        session_id = %event.session_id,
-        "unbound playback event: writing unit facts only"
-    );
-    let previous = super::event_duration::read_event_resume(tx, event, media_id, unit)?;
-    let duration = super::event_duration::effective_event_duration(event, previous.as_ref());
-    write_unit_facts(store, tx, event, media_id, unit, duration, now_ms)?;
-    store.refresh_user_library_summary(
-        event.user_id,
-        media_id,
-        SummaryScope::for_unit(unit.season, unit.episode),
-    )?;
-    Ok(true)
 }
 
 /// Guards for an event whose session id was issued: it must describe the generation, unit and
@@ -555,7 +508,7 @@ fn close_live_session(
         media_id: session.media_id,
         season: session.season,
         episode: session.episode,
-        device_id: Some(session.device_id),
+        device_id: session.device_id,
         client: session.client,
         device_name: session.device_name,
         play_method: session.play_method,

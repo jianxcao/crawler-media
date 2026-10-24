@@ -2,12 +2,11 @@
 
 [返回数据库总览](README.md)
 
-结构/初始化源码核对：`cf7fb70`（2026-10-24，本轮无 DDL 变更）。Queue入口仍是[jobs::Queue::open](../../crates/jobs/src/queue.rs)，调用[store::migrate](../../crates/jobs/src/store.rs)、[change_state.rs](../../crates/jobs/src/change_state.rs)与[retention_cursor.rs](../../crates/jobs/src/retention_cursor.rs)初始化；API启动另先调用[Store布局闸门](../../crates/store/src/schema/layout.rs)的initialize_jobs_layout。这里是源码核对，不是本轮真实实例操作。
+结构核对：2026-10-24 修复工作树。Jobs crate 的 [schema.sql](../../crates/jobs/src/schema.sql) 是唯一 DDL；[schema.rs](../../crates/jobs/src/schema.rs)拥有身份、只读预检、对象定义验证与原子初始化；独立 Queue 和 API 都使用 [Queue::open](../../crates/jobs/src/queue.rs)。Store 不再定义 Jobs 布局，也不依赖 Jobs 生产代码。
 
-共 **4张业务表、29字段、9个显式命名索引、6触发器**。API启动链当前标记 `application_id=1129139252 / user_version=1`，检查声明表/索引名称；已有业务表却application_id/user_version为0/0时，Store启动预检会拒绝；仅无用户对象且0/0的空文件可初始化身份头，不补旧库身份。独立Queue构造器自身仍不设该头，不能混淆这两个入口。旧合同“不另设Jobs编号”与实现已有偏差，事实记录于此，不因本文自动授权新的迁移/删队列。Queue仍用幂等CREATE及旧jobs_live_def索引清理，不宣称逐列完整schema验证。Queue连接显式WAL/busy_timeout/FK/synchronous=FULL；`967f817`及同连接OFF→实际policy→FULL=2回归已核验。历史 Jobs 全套 55 通过/1 忽略属于原报告，不冒充本轮单 crate 结果；不把 media 独立缓存连接也宣称为 FULL。
+共 **4 张业务表、29 字段、9 个显式命名索引、6 触发器**。身份为 `application_id=1129139252 / user_version=1`。仅真正空的 0/0 文件在一个 IMMEDIATE 事务创建全部表、索引、触发器、初始计数单例与两个身份头；故障整体回滚。当前文件重开只校验，已填充的无头文件、旧/未知/未来布局或当前头却缺失/错误对象均拒绝且不修复。对象定义和非 sqlite 内部对象全集直接与唯一 DDL 的隔离内存执行结果比较，额外旧索引也拒绝；未维护第二份表/索引清单。
 
-
-**当前初始化缺口（S01/P1）：** API 先单独写身份头，再另开 Queue 建表；停在两者之间后重开会报缺 job_defs。独立 Queue 创建的新库又保持 0/0 头，不能通过 API 预检。后续统一由 Jobs crate 一次事务创建 DDL/触发器/头，重开只验证，并删除旧索引升级步骤；本轮只记录，不认领旧布局或自动修复事实库。证据见[当前复审](../audits/2026-10-24-storage-rereview.md)。
+Queue 连接明确设置 WAL、busy_timeout、FK 和 synchronous=FULL。Jobs 是持久执行事实，拒绝时提示先备份；启动不会删除队列。初始化各阶段故障、独立 Queue→ApiState 重开、损坏布局零写拒绝已有回归，详见[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)。
 
 本库没有声明外键。下表 NOT NULL 指显式声明：`job_defs.id`、`jobs.id` 与 `retention_cursors.def_id` 的 `TEXT PRIMARY KEY` 没有另写 NOT NULL，不能误报成显式非空。主键自动索引不计入命名索引。Job 状态枚举、payload JSON、enabled 的 0/1 都是业务约定，不是 DDL CHECK。
 
@@ -40,7 +39,7 @@ Job 更新流用的单例修订/终态计数，避免每次订阅更新都全表
 
 无额外命名索引；主键/UNIQUE 的 SQLite 自动索引不重复列出。
 
-**使用注意**：单例 id=1（CHECK）。首次初始化从 jobs 的 `finished_at IS NOT NULL AND finished_at > 0` 行数建立计数。revision 同时由 jobs 和 job_defs 的 INSERT/UPDATE/DELETE 推进，即使 UPDATE 未改变业务值也会增加；finished_count 随删除回减。它不是按终态 status 聚合，也不等于历史累计完成次数。retention_cursors 变化不推进该修订号。
+**使用注意**：单例 id=1（CHECK）。新库事务写入 revision=0、finished_count=0；重开不重建计数。revision 同时由 jobs 和 job_defs 的 INSERT/UPDATE/DELETE 推进，即使 UPDATE 未改变业务值也会增加；finished_count 随删除回减。它不是按终态 status 聚合，也不等于历史累计完成次数。retention_cursors 变化不推进该修订号。
 
 ## job_defs
 

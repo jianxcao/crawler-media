@@ -230,7 +230,10 @@ async fn marks_cascade_and_favorites_list() {
             .unwrap(),
     )
     .await;
-    assert_eq!(unchanged["data"]["played"], true, "a refused mark writes nothing");
+    assert_eq!(
+        unchanged["data"]["played"], true,
+        "a refused mark writes nothing"
+    );
     assert_eq!(marks["data"]["is_favorite"], true);
 
     // If an episode is favorited, query for whole show must also reflect is_favorite = true
@@ -360,7 +363,7 @@ async fn up_next_lists_next_episode_for_tv_subscription() {
     let progress_res = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({
+        json!({ "event_sequence": crate::common::next_playback_sequence(),
             "media_item_id": media_id,
             "season_number": 1,
             "episode_number": 1,
@@ -407,7 +410,7 @@ async fn end_web_session_and_reject_unsupported_revoke() {
     let start = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "start", "device_id": "tv-1", "play_session_id": session }),
+        json!({ "event_sequence": crate::common::next_playback_sequence(), "media_item_id": media_id, "event": "start", "device_id": "tv-1", "play_session_id": session }),
     )
     .await;
     assert_eq!(start.status(), StatusCode::OK);
@@ -439,7 +442,7 @@ async fn end_web_session_and_reject_unsupported_revoke() {
     let start2 = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "start", "device_id": "blocked-1", "play_session_id": session2 }),
+        json!({ "event_sequence": crate::common::next_playback_sequence(), "media_item_id": media_id, "event": "start", "device_id": "blocked-1", "play_session_id": session2 }),
     )
     .await;
     assert_eq!(start2.status(), StatusCode::OK);
@@ -457,7 +460,7 @@ async fn end_web_session_and_reject_unsupported_revoke() {
     let blocked = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "progress", "device_id": "blocked-1", "position_ms": 10 }),
+        json!({ "media_item_id": media_id, "event": "progress", "device_id": "blocked-1", "play_session_id": session2, "event_sequence": next_playback_sequence(), "position_ms": 10 }),
     )
     .await;
     assert_eq!(blocked.status(), StatusCode::OK);

@@ -69,6 +69,8 @@ pub struct JobDef {
 
 #[derive(Debug, thiserror::Error)]
 pub enum JobError {
+    #[error("invalid jobs database: {0}")]
+    Layout(String),
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]

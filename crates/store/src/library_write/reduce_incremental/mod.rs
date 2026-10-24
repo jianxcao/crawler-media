@@ -154,6 +154,8 @@ pub(crate) struct BatchSettled {
     pub(crate) defer_user_summaries: bool,
     /// A deferred finalization is owed for this Media.
     pub(crate) user_summaries_dirty: bool,
+    /// Protocol terms/search are published once, after the last file delta.
+    pub(crate) protocol_index_dirty: bool,
 }
 
 /// Apply one changed file to `(library_id, media_id)` without re-reading the other files.
@@ -196,6 +198,14 @@ pub(crate) fn reduce_library_media_incremental_in_batch(
     };
 
     apply_delta(tx, &lib, &media, &mut item, change)?;
+    if item.counts.available > 0 && item.preferred.is_none() {
+        // All file facts of a publication batch are already final. Its early
+        // deltas may still count later files whose final state is now pending
+        // or missing; no present file can satisfy that intermediate card. Read
+        // the final facts once and skip the remaining deltas for this Media.
+        settled.media = true;
+        return reduce_library_media(tx, library_id, media_id);
+    }
     if item.counts.file == 0 {
         clear_summaries(tx, &lib, &media)?;
         return Ok(());
@@ -217,7 +227,9 @@ pub(crate) fn reduce_library_media_incremental_in_batch(
     terms::sync_terms_delta(tx, &lib, &media, &facts, change)?;
     if settled.defer_user_summaries {
         settled.user_summaries_dirty = true;
+        settled.protocol_index_dirty = true;
     } else {
+        crate::protocol_index::sync_card(tx, &lib, &media)?;
         super::reduce::refresh_affected_user_summaries(tx, library_id, media_id)?;
     }
     Ok(())

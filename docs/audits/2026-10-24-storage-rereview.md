@@ -1,5 +1,8 @@
 # 数据库重构复审：cf7fb70
 
+> 本文固定审查 `cf7fb70` 的修复前证据。2026-10-24 后续实施已落入同分支，当前状态见[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)及[新测量](../benchmarks/2026-10-24-storage-query-rereview.md)。下文“当前/尚未”只指所审查版本。已删除代码的历史原文可用 `git show cf7fb70:<路径>` 读取。
+
+
 日期：2026-10-24。结论：**Request changes**。五文件及同库事实/摘要的方向合理，但优先修复尚未闭环，旧自有接口和配置回退也没有全部清除。本轮仅 review、隔离验证及维护文档，未修改 Rust、TS、DDL、测试或实例数据。
 
 ## 基线与证据范围
@@ -50,7 +53,7 @@ P1 优先于吞吐调优。P2 中 S05 是本次“无旧版兼容”的交付门
 
 ### S03：删除旧目录聚合写入口，并同步迁移 Web
 
-[web/lib/api/directory.ts](../../web/lib/api/directory.ts#L34)的 `setTransferMode/setWatchIntake` 先 GET 全部配置，再把 root、Naming template、Scrape 等一起 PUT；[transfer-mode-card](../../web/components/transfer-mode-card.tsx#L10)仍消费它。[put_directory](../../crates/api/src/http/directory.rs#L68)写 app 设置后直接 [set_library_roots](../../crates/api/src/http/directory.rs#L133)，返回同步 200，没有新 Library 重配置的 revision/operation 合同，还调用 [apply_legacy_naming](../../crates/api/src/scrape_store.rs#L71)反拆旧组合字符串。
+`web/lib/api/directory.ts:34`（`cf7fb70`）的 `setTransferMode/setWatchIntake` 先 GET 全部配置，再把 root、Naming template、Scrape 等一起 PUT；[transfer-mode-card](../../web/components/transfer-mode-card.tsx#L10)仍消费它。`crates/api/src/http/directory.rs:68`（`cf7fb70`）写 app 设置后直接 `crates/api/src/http/directory.rs:133`（`cf7fb70`），返回同步 200，没有新 Library 重配置的 revision/operation 合同，还调用 [apply_legacy_naming](../../crates/api/src/scrape_store.rs#L71)反拆旧组合字符串。
 
 真实 Router 探针在默认 Movie Library 登记文件后 PUT 新根：200，config_revision 仍 0→0，原文件保留却在新声明根之外，strict owner 为 None。另一真实请求先保存 Watch intake，再传 null，两次 200，最终旧路径仍在，因为 handler 只在 Some 时写值。过期 GET 整份回写还会携带过期根；跨 app/library 提交间退出也不能原子恢复。
 

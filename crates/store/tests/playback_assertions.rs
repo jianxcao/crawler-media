@@ -49,7 +49,7 @@ fn seed(episodes: &[(i32, i32)]) -> (tempfile::TempDir, Fixture) {
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|root| root.library_id == Some(library.id.clone()))
+        .find(|root| root.library_id == library.id.clone())
         .unwrap()
         .id;
     let scope = WriteScope {

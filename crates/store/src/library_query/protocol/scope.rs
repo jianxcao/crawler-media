@@ -119,6 +119,19 @@ fn visible_libraries(
             .filter(|id| !blocked.contains(id))
             .collect(),
     };
+    let mut statement = store
+        .library
+        .prepare("SELECT library_id, kind FROM libraries")?;
+    let kinds = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
+    ids.retain(|id| {
+        kinds
+            .get(id)
+            .is_some_and(|kind| requested_kind(request, kind))
+    });
     ids.sort_unstable();
     ids.dedup();
     Ok(ids)
@@ -171,4 +184,27 @@ pub(super) fn granularity(request: &ProtocolItemQuery) -> Granularity {
         (false, false) if pinned_media(request).is_some() => Granularity::Unit,
         (false, false) => Granularity::Work,
     }
+}
+
+/// Remove impossible Libraries before touching their item rows. The two branches
+/// use the same kind/folder rules as predicates::kind_clauses, including mixed pages.
+fn requested_kind(request: &ProtocolItemQuery, kind: &str) -> bool {
+    use domain::ProtocolItemType as Type;
+    let granularity = granularity(request);
+    let unit = granularity.wants_unit() && kind == "tv" && request.is_folder != Some(true);
+    let folder = match request.is_folder {
+        Some(true) => kind == "tv",
+        Some(false) => kind != "tv",
+        None => true,
+    };
+    let explicit = request.include_types.is_empty()
+        || request.include_types.iter().any(|ty| {
+            matches!(
+                (ty, kind),
+                (Type::Movie, "movie")
+                    | (Type::Series | Type::Season, "tv")
+                    | (Type::Video, "video")
+            )
+        });
+    unit || (granularity.wants_work() && folder && explicit)
 }

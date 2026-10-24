@@ -37,7 +37,7 @@ fn create_library(
     let roots = store.list_library_roots().unwrap();
     let root = roots
         .into_iter()
-        .find(|r| r.library_id == Some(lib.id.clone()))
+        .find(|r| r.library_id == lib.id.clone())
         .unwrap();
     (lib, root.id)
 }
@@ -122,21 +122,21 @@ fn integrity_check_and_repair_lifecycle() {
         )
         .unwrap();
 
+    let query = LibraryQuery {
+        library_id,
+        user_id: None,
+        filter: Default::default(),
+        order: store::library_query::BrowseOrder::Title,
+        descending: false,
+        page: store::library_query::BrowsePage::Offset {
+            start: 0,
+            limit: 10,
+        },
+        include_total: true,
+    };
+
     // Snapshot expected facts before tampering
-    let expected_item_page = store
-        .library_item_page(&LibraryQuery {
-            library_id,
-            user_id: None,
-            filter: Default::default(),
-            order: store::library_query::BrowseOrder::Title,
-            descending: false,
-            page: store::library_query::BrowsePage::Offset {
-                start: 0,
-                limit: 10,
-            },
-            include_total: true,
-        })
-        .unwrap();
+    let expected_item_page = store.library_item_page(&query).unwrap();
     let expected_from_original_facts = expected_item_page.items[0].clone();
     let expected_user_summary = store
         .get_user_library_summary(user_id, library_id, media.id)
@@ -171,20 +171,7 @@ fn integrity_check_and_repair_lifecycle() {
     assert!(report.missing_user_items.contains(&(user_id, media.id)));
 
     // Failed check blocks reading items
-    let read_err = store
-        .library_item_page(&LibraryQuery {
-            library_id,
-            user_id: None,
-            filter: Default::default(),
-            order: store::library_query::BrowseOrder::Title,
-            descending: false,
-            page: store::library_query::BrowsePage::Offset {
-                start: 0,
-                limit: 10,
-            },
-            include_total: true,
-        })
-        .unwrap_err();
+    let read_err = store.library_item_page(&query).unwrap_err();
     assert!(matches!(&read_err, StoreError::Protected(msg) if msg.contains("library.integrity")));
 
     // 2. Begin integrity repair
@@ -199,20 +186,7 @@ fn integrity_check_and_repair_lifecycle() {
         .unwrap();
     assert_eq!(r_res.state, "succeeded");
 
-    let after_repair_page = store
-        .library_item_page(&LibraryQuery {
-            library_id,
-            user_id: None,
-            filter: Default::default(),
-            order: store::library_query::BrowseOrder::Title,
-            descending: false,
-            page: store::library_query::BrowsePage::Offset {
-                start: 0,
-                limit: 10,
-            },
-            include_total: true,
-        })
-        .unwrap();
+    let after_repair_page = store.library_item_page(&query).unwrap();
     let after_repair = after_repair_page.items[0].clone();
     assert_eq!(after_repair, expected_from_original_facts);
 

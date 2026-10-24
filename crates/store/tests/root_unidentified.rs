@@ -63,7 +63,7 @@ fn nested_library_reassigns_unidentified_without_files_in_resumable_batches() {
     store.drain_root_reassignments().unwrap();
     assert_eq!(count(&db, &nested), 251);
     assert_eq!(count(&db, &parent), 0);
-    assert_eq!(store.list_unidentified().unwrap().len(), 251);
+    assert_eq!(store.list_unidentified(None).unwrap().len(), 251);
     assert!(pending_root_reassignments(&store).is_empty());
     let wrong_roots: i64 = db
         .query_row(
@@ -102,7 +102,7 @@ fn inserting_an_extra_root_reassigns_unidentified_to_its_default_library() {
         )
         .unwrap();
     assert_ne!(library, parent);
-    assert_eq!(Some(library), root.library_id);
+    assert_eq!(library, root.library_id);
     assert_eq!(root_id, root.id);
 }
 

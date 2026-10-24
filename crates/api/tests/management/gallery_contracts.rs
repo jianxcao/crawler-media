@@ -29,7 +29,7 @@ fn movie_root(api_state: &ApiState, lib_id: &str) -> (String, std::path::PathBuf
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|root| root.library_id.as_deref() == Some(lib_id) && root.enabled)
+        .find(|root| root.library_id.as_str() == lib_id && root.enabled)
         .expect("movie library root");
     (root.id, root.path)
 }

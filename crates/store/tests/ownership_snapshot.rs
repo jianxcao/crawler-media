@@ -188,9 +188,9 @@ fn blocked_library_rejects_work_even_when_removal_succeeded() {
     let conn = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
     conn.execute(
         "INSERT INTO library_removals
-            (operation_id, library_id, state, snapshot_json, removed_ledger_count,
+            (operation_id, library_id, state, config_revision, removed_ledger_count,
              created_at_ms, updated_at_ms)
-         VALUES ('op-succeeded', ?1, 'succeeded', '{\"roots\":[],\"rows\":[]}', 0, 0, 0)",
+         VALUES ('op-succeeded', ?1, 'succeeded', 1, 0, 0, 0)",
         rusqlite::params![lib.id],
     )
     .unwrap();

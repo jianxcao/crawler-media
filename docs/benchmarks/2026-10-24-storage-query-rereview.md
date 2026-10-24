@@ -1,6 +1,76 @@
-# cf7fb70 查询与写入工作量复测
+# 存储查询修复验证与原复测证据
 
-日期：2026-10-24；被测 `feat/storage-redesign@cf7fb70`，审查基线本地 main=86122d7 / origin/main=14fdbb6。发现与后续方案见[复审](../audits/2026-10-24-storage-rereview.md)、[唯一方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)。本轮没有修改源码、DDL 或仓库测试。
+日期：2026-10-24。原问题基线为 `cf7fb70`，本次实施基线为 `96f7445`；以下新结果与本文件同提交发布。历史反例见[复审](../audits/2026-10-24-storage-rereview.md)，实施与验收见[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)。
+
+## 当前实施结果
+
+同一卡片批末同步协议 terms/search：公开 `publish_files` 的 100 文件/100 演员回归中，person terms INSERT 从 10000 变为 100，DELETE 从 9900 变为 0；最终人物集合相同，更新仍在文件事务内。补齐最后可用文件转为 pending 的整卡摘要边界，避免 preferred_file 与 available_file_count 失配。
+
+固定 12 个 Movie、增加 2000 无关 TV 的工作量回归中，Root Movie 完整 SQL VM 从旧实现的 2889→12906 改为 2899→2913。授权 roster 先按可能的 Media kind 收窄，仍由行谓词精确判断混合请求。400 条事实的多维 facets 回归由 11 statement/305383 VM 改为 1 statement/154509 VM，保留排除自身维度计数、零值候选、favorite 与精确 total。
+
+### Release 5k–100k
+
+复跑：
+
+```sh
+PERF_SIZES=5000,20000,50000,100000 cargo test --release -p store --test query_work_perf -- --ignored --nocapture
+```
+
+Bundled SQLite **3.50.2**，release 每形状同进程 7 次调用（含首轮，无单独预热），表格为中位数/最大值 ms；7 次最大值不代表可靠 p95。显式 `with_stats` trace 成本包含在计时中，统计覆盖授权、page、exact count 和其他辅助 statement。普通查询不安装该 trace。原始运行日志为 `/tmp/storage-s08-s09-release.log`；可复跑 harness 已入库，不依赖临时数据。
+
+数据形状：每 Media 一个 published/present 文件，年份 2024，Drama/Comedy 各半，All 命中所有，无 adopted metadata；multi=Drama+2020s+unscraped。kind 固定 1000 Movie，增加无关 TV。此形状与下文原 debug 复测不同，不能据此计算前后倍数。
+
+| Shape | 5k | 20k | 50k | 100k |
+|---|---:|---:|---:|---:|
+|items_none|0.376/0.613|1.141/1.658|3.641/4.082|7.072/7.450|
+|facets_none|10.274/10.843|45.559/47.211|163.108/201.285|297.062/305.538|
+|items_drama|2.150/2.250|9.618/9.750|36.859/43.673|53.904/54.365|
+|facets_drama|12.017/12.282|55.108/58.149|174.675/194.355|342.269/386.132|
+|items_multi|3.063/3.719|22.055/24.838|74.326/83.127|141.474/145.027|
+|facets_multi|12.562/12.835|56.470/59.507|184.910/461.154|342.315/353.268|
+|protocol_movie|6.645/7.155|36.325/48.734|113.236/204.718|248.232/261.261|
+|protocol_drama|8.198/8.284|36.951/37.448|111.306/176.819|225.262/239.022|
+|protocol_all|13.730/14.190|69.707/74.087|205.545/230.894|426.287/451.724|
+|kind_library|1.837/2.197|1.841/2.402|1.807/2.531|1.857/2.444|
+|kind_root|1.883/2.019|1.859/1.923|2.078/2.421|2.031/2.325|
+
+### 100k 完整 SQL 工作量
+
+|Shape|Exact total|Stats|
+|---|---:|---|
+|items_none|100000|`QueryWorkStats { fullscan_steps: 0, vm_steps: 1503174, rows_returned: 100, sql_rows: 102, statements: 3 }`|
+|facets_none|100000|`QueryWorkStats { fullscan_steps: 299997, vm_steps: 43400522, rows_returned: 23, sql_rows: 24, statements: 1 }`|
+|items_drama|50000|`QueryWorkStats { fullscan_steps: 0, vm_steps: 2456656, rows_returned: 100, sql_rows: 102, statements: 3 }`|
+|facets_drama|50000|`QueryWorkStats { fullscan_steps: 299997, vm_steps: 42000522, rows_returned: 23, sql_rows: 24, statements: 1 }`|
+|items_multi|50000|`QueryWorkStats { fullscan_steps: 0, vm_steps: 3157857, rows_returned: 100, sql_rows: 102, statements: 3 }`|
+|facets_multi|50000|`QueryWorkStats { fullscan_steps: 299997, vm_steps: 43200524, rows_returned: 23, sql_rows: 24, statements: 1 }`|
+|protocol_movie|100000|`QueryWorkStats { fullscan_steps: 103, vm_steps: 13314304, rows_returned: 100, sql_rows: 106, statements: 8 }`|
+|protocol_drama|50000|`QueryWorkStats { fullscan_steps: 103, vm_steps: 11113978, rows_returned: 100, sql_rows: 106, statements: 8 }`|
+|protocol_all|100000|`QueryWorkStats { fullscan_steps: 103, vm_steps: 21714379, rows_returned: 100, sql_rows: 106, statements: 8 }`|
+|kind_library|1000|`QueryWorkStats { fullscan_steps: 105, vm_steps: 144131, rows_returned: 100, sql_rows: 108, statements: 8 }`|
+|kind_root|1000|`QueryWorkStats { fullscan_steps: 105, vm_steps: 159151, rows_returned: 100, sql_rows: 108, statements: 8 }`|
+
+物理 PRAGMA 未调整。精确 total、facets 和 genre 大命中仍随有效事实规模增长；本轮不以 release/debug 或不同分布作耗时比值。真实 NAS、完整 100k Media/1M 文件/1M Playback 组合、RSS/WAL/busy 和浏览器/设备验收另列现场门。
+
+### Unidentified 深游标与无关数据
+
+```sh
+cargo test -p store --lib measure_unidentified_drain_work -- --ignored --nocapture
+```
+
+Bundled SQLite 3.50.2，debug，公开 `drain_one_root_batch` 的全部 SQL VM 工作量，单窗口 100 个 Unidentified 候选，事实已经归属正确，须继续推进游标。每形状同时有同范围游标前记录和范围外无关记录：
+
+| 游标前行数 | 无关行数 | 单窗口 VM |
+|---:|---:|---:|
+| 5000 | 5000 | 10154 |
+| 50000 | 50000 | 10154 |
+| 100000 | 100000 | 10154 |
+
+这是全部窗口 SQL 的计数，不仅是返回行数。修复中追加的反例曾在 100000 条游标前记录下达到 1204488 VM（独立 Python SQLite 3.54.0 candidate 语句），原因是优化器仍选择固定根下界；现显式使用 `max(root 下界, cursor)`。候选按不可变 `(path_key, unidentified_id)` 索引 seek，归属改变不会改变游标排序；最多 100 行 materialize 后才求最深根；根范围内游标前的错归属来源才会重置游标，正确新增记录不倒退进度。352 行分批/重开/游标前新增守恒与 Movie 停放→TV 明确认领另有行为回归。
+
+## 历史基线：cf7fb70
+
+下面保留 96f7445 文档提交中记录的原始版本测量。它描述修复前行为，不是当前缺陷清单；时间、分布和构建方式保留原样。
 
 ## 方法与限制
 

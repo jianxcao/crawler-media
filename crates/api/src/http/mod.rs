@@ -12,7 +12,6 @@
 pub(crate) mod auth;
 pub(crate) mod browser_settings;
 pub(crate) mod collections;
-pub(crate) mod directory;
 pub(crate) mod discover;
 pub(crate) mod downloaders;
 pub(crate) mod file_delete;
@@ -61,6 +60,7 @@ pub(crate) mod subscription_missing;
 pub(crate) mod subscriptions;
 pub(crate) mod system_logs;
 pub(crate) mod title_ref;
+pub(crate) mod transfer_settings;
 pub(crate) mod users;
 
 mod request_logging;

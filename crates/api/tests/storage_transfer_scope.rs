@@ -28,7 +28,7 @@ fn library(fix: &PresenceFixture, name: &str, root: &str) -> (LibraryId, String)
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|r| r.library_id.as_deref() == Some(&lib.id))
+        .find(|r| r.library_id.as_str() == lib.id.as_str())
         .map(|r| r.id)
         .unwrap();
     (lib.id.parse().unwrap(), root_id)

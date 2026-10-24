@@ -222,7 +222,7 @@ fn export_request(
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|root| root.library_id.as_deref() == Some(library.to_string().as_str()))
+        .find(|root| root.library_id.as_str() == library.to_string().as_str())
         .expect("library root")
         .id;
     let (file_id, expected_version) = store

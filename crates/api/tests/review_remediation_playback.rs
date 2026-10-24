@@ -177,15 +177,9 @@ async fn jellyfin_completion_marks_watched() {
     .await;
     assert_eq!(result["TotalRecordCount"], 0);
 }
-/// 卡 必做#2 / 缺陷 A：没有绑定的 Progress 事件**只**写播放单元事实，绝不伪造
-/// `playback_sessions` 行，也绝不让事件整体失败。legacy Jellyfin 客户端不带
-/// `PlaySessionId`，canonical 的无绑定分支只写单元事实；旧
-/// `media_server_provider/playback.rs:170-193` 的遗留叠加块先开一个 IMMEDIATE
-/// 事务调 `store.upsert_session`，而该 seam 拒绝没有 `play_session_id` 的会话行
-/// （`playback session ... has no play_session_id`）⇒ 事务回滚、单元事实丢失、
-/// 整个请求 500，canonical 根本没机会跑。
+/// A protocol Progress without a preceding Playing cannot invent a binding.
 #[tokio::test]
-async fn unbound_jellyfin_progress_never_fabricates_a_live_session() {
+async fn unbound_jellyfin_progress_is_ignored_without_fabricating_facts() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, media, id) = app(tmp.path());
     let store = Store::open(tmp.path().join("data")).unwrap();
@@ -208,12 +202,7 @@ async fn unbound_jellyfin_progress_never_fabricates_a_live_session() {
         );
     }
 
-    // 正控制：事件确实被提交，单元事实必须落库。
-    let unit = store
-        .unit_state(admin(), media, -1, -1)
-        .unwrap()
-        .expect("未绑定 Progress 必须写播放单元事实");
-    assert_eq!(unit.position_ms, 5_000);
+    assert!(store.unit_state(admin(), media, -1, -1).unwrap().is_none());
 
     assert!(
         store
@@ -345,7 +334,7 @@ async fn unit_write_failure_returns_error() {
     let session = issue_session(&store, "browser", media);
     let db = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
     db.execute_batch("CREATE TRIGGER review_access_tmp_block BEFORE INSERT ON playback_units BEGIN SELECT RAISE(ABORT,'review write blocked'); END;").unwrap();
-    let response=send(&app,"POST","/api/v1/playback/progress","Bearer admin-token",json!({"media_item_id":media.to_string(),"event":"start","device_id":"browser","position_ms":30000,"play_session_id":session}),None).await;
+    let response=send(&app,"POST","/api/v1/playback/progress","Bearer admin-token",json!({ "event_sequence": crate::support::session::next_sequence(),"media_item_id":media.to_string(),"event":"start","device_id":"browser","position_ms":30000,"play_session_id":session}),None).await;
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert!(json(response).await["data"].is_null());
     assert!(store.unit_state(admin(), media, -1, -1).unwrap().is_none());
@@ -417,7 +406,7 @@ async fn web_revoke_is_explicitly_unsupported() {
     let (app, media, id) = app(tmp.path());
     let store = Store::open(tmp.path().join("data")).unwrap();
     let session = issue_session(&store, "browser", media);
-    let body = json!({"media_item_id":media.to_string(),"event":"start","device_id":"browser","position_ms":30000,"play_session_id":session});
+    let body = json!({ "event_sequence": crate::support::session::next_sequence(),"media_item_id":media.to_string(),"event":"start","device_id":"browser","position_ms":30000,"play_session_id":session});
     assert_eq!(
         send(
             &app,

@@ -210,7 +210,7 @@ impl Store {
             media_id: session.media_id,
             season: session.season,
             episode: session.episode,
-            device_id: Some(session.device_id),
+            device_id: session.device_id,
             client: session.client,
             device_name: session.device_name,
             play_method: session.play_method,

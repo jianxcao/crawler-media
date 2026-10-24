@@ -44,7 +44,7 @@ async fn api_query_scale_page_and_cursor() {
         let roots = state.store().lock().list_library_roots().unwrap();
         let root = roots
             .into_iter()
-            .find(|r| r.library_id.as_deref() == Some(&library_id.to_string()))
+            .find(|r| r.library_id.as_str() == library_id.to_string().as_str())
             .unwrap();
 
         for i in 0..100 {
@@ -143,7 +143,7 @@ fn lib_coords_for(state: &api::ApiState, library_id: &str) -> LibCoords {
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|root| root.library_id.as_deref() == Some(library_id))
+        .find(|root| root.library_id.as_str() == library_id)
         .unwrap();
     LibCoords {
         root_path: root.path.display().to_string(),

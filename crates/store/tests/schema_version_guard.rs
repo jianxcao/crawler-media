@@ -102,32 +102,18 @@ fn each_newer_database_is_rejected_individually() {
 }
 
 #[test]
-fn unstamped_populated_jobs_layout_is_rejected_without_adopting_it() {
-    use store::schema::{layout, v1};
-
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
-    for table in v1::JOBS_TABLES {
-        conn.execute_batch(&format!("CREATE TABLE {table} (id TEXT);"))
-            .unwrap();
-    }
-    for index in v1::JOBS_INDEXES {
-        conn.execute_batch(&format!("CREATE INDEX {index} ON jobs(id);"))
-            .unwrap();
-    }
-    conn.execute("INSERT INTO jobs(id) VALUES ('preserve')", [])
+fn app_database_with_retired_tables_is_rejected_without_repair() {
+    let tmp = tempfile::tempdir().unwrap();
+    drop(Store::open(tmp.path()).unwrap());
+    let path = tmp.path().join("app.db");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch("CREATE TABLE naming_templates(kind TEXT PRIMARY KEY,pattern TEXT NOT NULL)")
         .unwrap();
-
-    let error = layout::initialize_jobs_layout(&conn).unwrap_err();
-    assert!(error.to_string().contains("layout mismatch"), "{error}");
-    let application_id: i64 = conn
-        .pragma_query_value(None, "application_id", |row| row.get(0))
-        .unwrap();
-    let version: i64 = conn
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .unwrap();
-    assert_eq!((application_id, version), (0, 0));
-    let preserved: String = conn
-        .query_row("SELECT id FROM jobs", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(preserved, "preserve");
+    drop(db);
+    let before = std::fs::read(&path).unwrap();
+    assert!(
+        Store::open(tmp.path()).is_err(),
+        "retired table must not be accepted as the current layout"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }

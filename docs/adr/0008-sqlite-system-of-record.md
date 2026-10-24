@@ -1,6 +1,6 @@
 # SQLite 是系统记录，按生命周期拆分
 
-状态：接受；现行五文件边界核对至 `cf7fb70`（2026-10-24）。本轮只整理文档，不改变 DDL 或实施切换。当前缺口见[复审](../audits/2026-10-24-storage-rereview.md)，字段/索引见[数据库字典](../database/README.md)。
+状态：接受；现行五文件边界及修复核对至 2026-10-24 本次实现。原问题版本 `cf7fb70`，实施与验证见[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)，字段/索引见[数据库字典](../database/README.md)。
 
 ## 决策
 
@@ -26,15 +26,15 @@ Media 身份、采用元数据、Library/根、文件事实、覆盖、卡片、
 
 ## 初始化与连接
 
-生产 DDL 只有 [Store v1](../../crates/store/src/schema/v1/)、[ResponseCache](../../crates/media/src/response_cache/mod.rs) 和 [Jobs](../../crates/jobs/src/store.rs)；本文不复制第二套 SQL 或模板字段列表。
+生产 DDL 只有 [Store v1](../../crates/store/src/schema/v1/)、[ResponseCache](../../crates/media/src/response_cache/mod.rs) 和 [Jobs 唯一 DDL](../../crates/jobs/src/schema.sql)；本文不复制第二套 SQL 或模板字段列表。
 
-Store 对空库原子创建当前结构和身份头，当前布局可重开，旧/未知/未来布局拒绝；不导入旧数据、不建兼容视图、不双读双写。application_id/user_version 和必需表/索引名校验不是完整逐列约束验证。新默认 Library/root 已同事务初始化，正常重开不会复活用户移除的默认根。
+Store 对空库原子创建当前结构和身份头，当前布局可重开，旧/未知/未来布局拒绝；不导入旧数据、不建兼容视图、不双读双写。Store 的 application_id/user_version 和必需表/索引名校验不是完整逐列约束验证；Jobs 从唯一 DDL 校验对象定义和单例。新默认 Library/root 已同事务初始化，正常重开不会复活用户移除的默认根。
 
 连接显式 WAL、5000ms busy_timeout、foreign_keys=ON。Store 四连接及 Jobs Queue 显式 synchronous=FULL；独立 media ResponseCache 未显式指定 synchronous。NORMAL/mmap/cache_size/temp_store/WITHOUT ROWID 需测量后决策，不把构建默认当耐久性合同。
 
-**Jobs 当前有偏差：** API 预写身份头与 Queue DDL 分开提交，独立 Queue 又不设置该头；初始化中断可阻止下次启动。后续由 Jobs 统一原子建库/重开校验，删除旧升级分支。此缺口不授权自动认领或删除现有队列。
+Jobs crate 拥有唯一布局入口，真正空文件在一个 IMMEDIATE 事务内创建全部对象、单例和身份头；独立 Queue 与 API 共用。已有非空文件只读预检，旧/未知/未来或损坏当前布局拒绝且不修补；保留事实队列及备份提示。没有 Store→Jobs 生产依赖。
 
-**调用方当前有偏差：** 旧 `/directory` 写、无签发 session 的自有 Playback、Downloader settings JSON 回退，以及删除/Unidentified 的路径归属猜测仍未清完。它们不属于本决策允许的兼容政策；修复顺序见[唯一方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)。
+旧 `/directory` 聚合/roots 写、组合 Naming 拆解、Downloader JSON 回退和自有无签发会话 Playback 已删除；前端与 CLI 同批迁移。Transfer/Watch 设置独立 revision CAS，根替换只走 Library operation，Claim/Unidentified 消费登记归属。Jellyfin 按协议建立有效绑定，静态图片保持 public。
 
 ## 运维边界
 

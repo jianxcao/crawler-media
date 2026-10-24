@@ -372,8 +372,6 @@ async fn parent_library_duplicates_cannot_delete_nested_child_library_files() {
     std::fs::create_dir_all(&child_root).unwrap();
     let a = child_root.join("Show.2160p.mkv");
     let b = child_root.join("Show.1080p.mkv");
-    std::fs::write(&a, b"aaa").unwrap();
-    std::fs::write(&b, b"bbb").unwrap();
     let app = app(&tmp);
     let parent = json_body(
         app.clone()
@@ -407,6 +405,10 @@ async fn parent_library_duplicates_cannot_delete_nested_child_library_files() {
             .unwrap(),
     )
     .await;
+    finish_scan(&app, parent["data"]["id"].as_str().unwrap()).await;
+    finish_scan(&app, child["data"]["id"].as_str().unwrap()).await;
+    std::fs::write(&a, b"aaa").unwrap();
+    std::fs::write(&b, b"bbb").unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let media = Media {
         id: MediaId::new(),

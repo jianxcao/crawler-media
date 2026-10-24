@@ -11,7 +11,7 @@ fn root_id_of(store: &Store, library_id: &str, path: &Path) -> String {
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|root| root.library_id.as_deref() == Some(library_id) && root.path == path)
+        .find(|root| root.library_id.as_str() == library_id && root.path == path)
         .unwrap_or_else(|| panic!("root {path:?} must exist"))
         .id
 }
@@ -94,8 +94,8 @@ fn unidentified_rows_without_files_move_to_the_new_root() {
     let db = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
     for path in ["/tv/anime/Unknown A", "/tv/anime/Unknown B", "/tv/Other"] {
         db.execute(
-            "INSERT INTO unidentified (library_id, root_id, path, confidence)
-             VALUES (?1, ?2, ?3, 'low')",
+            "INSERT INTO unidentified (library_id, root_id, path, path_key, confidence, unidentified_id)
+             VALUES (?1, ?2, ?3, ?3, 'low', ?3)",
             rusqlite::params![library.id, old_root, path],
         )
         .unwrap();
@@ -151,8 +151,8 @@ fn failed_root_batch_retries_the_same_operation_to_success() {
     let old_root = root_id_of(&store, &library.id, Path::new("/tv"));
     let db = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
     db.execute(
-        "INSERT INTO unidentified (library_id, root_id, path, confidence)
-         VALUES (?1, ?2, '/tv/anime/X', 'low')",
+        "INSERT INTO unidentified (library_id, root_id, path, path_key, confidence, unidentified_id)
+         VALUES (?1, ?2, '/tv/anime/X', '/tv/anime/X', 'low', 'fixture-x')",
         rusqlite::params![library.id, old_root],
     )
     .unwrap();
@@ -245,8 +245,8 @@ fn symlinked_reconfiguration_compares_canonical_keys() {
     let sibling = format!("{}/anime-x/Unknown", real_key.display());
     for path in [&nested, &sibling] {
         db.execute(
-            "INSERT INTO unidentified (library_id, root_id, path, confidence)
-             VALUES (?1, ?2, ?3, 'low')",
+            "INSERT INTO unidentified (library_id, root_id, path, path_key, confidence, unidentified_id)
+             VALUES (?1, ?2, ?3, ?3, 'low', ?3)",
             rusqlite::params![library.id, old_root, path],
         )
         .unwrap();
@@ -296,13 +296,11 @@ fn root_snapshot(store: &Store) -> Vec<(String, String, bool, i32, i64)> {
         .into_iter()
         .map(|root| {
             (
-                root.library_id.clone().unwrap_or_default(),
+                root.library_id.clone(),
                 root.path.display().to_string(),
                 root.is_default,
                 root.sort_order,
-                store
-                    .library_config_revision(root.library_id.as_deref().unwrap_or_default())
-                    .unwrap(),
+                store.library_config_revision(&root.library_id).unwrap(),
             )
         })
         .collect()
@@ -338,12 +336,17 @@ fn replaced_builtin_root_survives_reopen() {
         )
         .unwrap();
     assert_eq!(
-        store.advance_library_operation(&operation, 100, 2).unwrap().state,
+        store
+            .advance_library_operation(&operation, 100, 2)
+            .unwrap()
+            .state,
         "succeeded"
     );
     let before = root_snapshot(&store);
     assert!(
-        !before.iter().any(|root| root.1 == builtin.display().to_string()),
+        !before
+            .iter()
+            .any(|root| root.1 == builtin.display().to_string()),
         "the built-in root is gone before reopen"
     );
     drop(store);

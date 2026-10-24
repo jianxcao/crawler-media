@@ -20,9 +20,13 @@ async fn web_movie_zero_unit_keeps_resume_and_completed_marks() {
     let session = json_data(post(&app, "sessions", target.clone()).await).await;
     assert_eq!(session["start_ms"], 600_000);
     assert_eq!(
-        post(&app, "marks", super::playback_review::mark_body(&target, true))
-            .await
-            .status(),
+        post(
+            &app,
+            "marks",
+            super::playback_review::mark_body(&target, true)
+        )
+        .await
+        .status(),
         StatusCode::OK
     );
     let session = json_data(post(&app, "sessions", target).await).await;
@@ -60,9 +64,13 @@ async fn frontend_movie_marks_query_reads_saved_progress_as_played_state() {
     target.as_object_mut().unwrap().remove("episode_number");
     save_position(&app, &target).await;
     assert_eq!(
-        post(&app, "marks", super::playback_review::mark_body(&target, true))
-            .await
-            .status(),
+        post(
+            &app,
+            "marks",
+            super::playback_review::mark_body(&target, true)
+        )
+        .await
+        .status(),
         StatusCode::OK
     );
     let uri = format!(
@@ -102,6 +110,11 @@ async fn frontend_movie_marks_query_reads_saved_progress_as_played_state() {
 async fn tv_special_zero_unit_is_not_aliased_to_whole_show() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, mut target) = fixture(&tmp, true);
+    target["device_id"] = json!("special-device");
+    let session = super::playback_review::open_session(&app, &target).await;
+    target["play_session_id"] = json!(session);
+    target["event"] = json!("progress");
+    target["event_sequence"] = json!(super::common::next_playback_sequence());
     target.as_object_mut().unwrap().remove("file_id");
     target["season_number"] = json!(0);
     target["episode_number"] = json!(0);
@@ -143,6 +156,7 @@ async fn movie_zero_progress_is_refused_and_keeps_historical_progress() {
     .await;
     target["play_session_id"] = json!(session);
     target["event"] = json!("start");
+    target["event_sequence"] = json!(super::common::next_playback_sequence());
     // R13/R08: movie coordinates are a contract error, never an alias of the whole movie.
     assert_eq!(
         post(&app, "progress", target.clone()).await.status(),

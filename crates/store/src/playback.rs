@@ -84,7 +84,7 @@ pub struct PlayLogRow {
     pub media_id: MediaId,
     pub season: Option<i32>,
     pub episode: Option<i32>,
-    pub device_id: Option<String>,
+    pub device_id: String,
     pub client: Option<String>,
     pub device_name: Option<String>,
     pub play_method: String,
@@ -113,6 +113,7 @@ mod log_scope;
 mod logs;
 mod retention;
 mod sessions;
+mod unit_resume;
 mod units;
 mod user_summary;
 mod watch_aggregate;
@@ -151,9 +152,7 @@ impl SessionRow {
 
 impl PlayLogRow {
     pub fn revocable(&self) -> bool {
-        self.device_id
-            .as_deref()
-            .is_some_and(|id| revocable_identity(id, &self.play_method))
+        revocable_identity(&self.device_id, &self.play_method)
     }
 }
 

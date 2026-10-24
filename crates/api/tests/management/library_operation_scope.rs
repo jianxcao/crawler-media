@@ -37,10 +37,12 @@ async fn seed_test_library(app: &axum::Router, name: &str, dir: &std::path::Path
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    json_body(res).await["data"]["id"]
+    let id = json_body(res).await["data"]["id"]
         .as_str()
         .unwrap()
-        .to_string()
+        .to_string();
+    finish_scan(app, &id).await;
+    id
 }
 
 fn seed_parent_and_nested_ledgers(

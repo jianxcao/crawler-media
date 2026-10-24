@@ -279,6 +279,7 @@ fn read_page(
         fullscan_steps,
         vm_steps,
         rows_returned,
+        ..Default::default()
     };
     Ok((
         PageRows {
@@ -292,11 +293,19 @@ fn read_page(
 
 impl Store {
     pub fn library_item_page(&self, query: &LibraryQuery) -> Result<ItemPage, StoreError> {
-        self.library_item_page_with_stats(query)
-            .map(|(page, _)| page)
+        self.library_item_page_inner(query).map(|(page, _)| page)
     }
 
     pub fn library_item_page_with_stats(
+        &self,
+        query: &LibraryQuery,
+    ) -> Result<(ItemPage, super::stats::QueryWorkStats), StoreError> {
+        let observer = super::stats::QueryWorkScope::new(&[&self.app, &self.library]);
+        let (page, page_stats) = self.library_item_page_inner(query)?;
+        Ok((page, observer.stats(page_stats.rows_returned)))
+    }
+
+    fn library_item_page_inner(
         &self,
         query: &LibraryQuery,
     ) -> Result<(ItemPage, super::stats::QueryWorkStats), StoreError> {

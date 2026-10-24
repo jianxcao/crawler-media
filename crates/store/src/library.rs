@@ -10,21 +10,10 @@ pub use markers::{
 };
 
 pub(super) const CURRENT_TRACKS_VERSION: i64 = 1;
-const SETTING_TRANSFER_MODE: &str = "transfer_mode";
 
 use super::{Store, StoreError};
 
 impl Store {
-    pub fn naming_template(&self, kind: MediaKind) -> Result<String, StoreError> {
-        self.app
-            .query_row(
-                "SELECT pattern FROM naming_templates WHERE kind = ?1",
-                params![kind.as_str()],
-                |row| row.get(0),
-            )
-            .map_err(Into::into)
-    }
-
     /// Primary root of the kind's default library — where new content lands.
     pub fn library_root(&self, kind: MediaKind) -> Result<PathBuf, StoreError> {
         let path: String = self.library.query_row(
@@ -36,98 +25,6 @@ impl Store {
             |row| row.get(0),
         )?;
         Ok(PathBuf::from(path))
-    }
-
-    /// Replace the primary root of the kind's default library.
-    pub fn set_library_root(&self, kind: MediaKind, path: &str) -> Result<(), StoreError> {
-        self.set_library_roots(&[(kind, path)])
-    }
-
-    /// Replace the primary roots of several default libraries in one transaction.
-    ///
-    /// A directory edit writes Movie and TV together; a failure on the second
-    /// root must not leave the first one replaced.
-    pub fn set_library_roots(&self, roots: &[(MediaKind, &str)]) -> Result<(), StoreError> {
-        if roots.is_empty() {
-            return Ok(());
-        }
-        let paths: Vec<&str> = roots.iter().map(|(_, path)| *path).collect();
-        for (kind, _) in roots {
-            if let Some(library) = self.default_library(*kind)? {
-                self.ensure_library_mutable(&library.id)?;
-            }
-        }
-        self.ensure_removal_roots_available(&paths)?;
-        let tx = crate::write_tx(&self.library)?;
-        for (kind, path) in roots {
-            let root_id: String = tx.query_row(
-                "SELECT r.root_id FROM library_roots r
-                 JOIN libraries l ON l.library_id = r.library_id
-                 WHERE l.kind = ?1 AND l.is_default = 1
-                 ORDER BY r.sort_order, r.display_path LIMIT 1",
-                params![kind.as_str()],
-                |row| row.get(0),
-            )?;
-            let changed = tx.execute(
-                "UPDATE library_roots SET path_key = ?3, display_path = ?2 WHERE root_id = ?1",
-                params![root_id, path, crate::path_key::canonical_root_key(path)?],
-            )?;
-            if changed == 0 {
-                return Err(StoreError::Missing(format!("library root {root_id}")));
-            }
-        }
-        tx.commit()?;
-        crate::path_key::reload_root_aliases(&self.library)?;
-        Ok(())
-    }
-
-    pub fn set_naming_template(&self, kind: MediaKind, pattern: &str) -> Result<(), StoreError> {
-        self.app.execute(
-            "UPDATE naming_templates SET pattern = ?2 WHERE kind = ?1",
-            params![kind.as_str(), pattern],
-        )?;
-        Ok(())
-    }
-
-    pub fn transfer_mode(&self) -> Result<String, StoreError> {
-        Ok(self
-            .get_setting(SETTING_TRANSFER_MODE)?
-            .unwrap_or_else(|| "hardlink".into()))
-    }
-
-    pub fn set_transfer_mode(&self, mode: &str) -> Result<(), StoreError> {
-        self.put_setting(SETTING_TRANSFER_MODE, mode)
-    }
-
-    pub fn scrape_enabled(&self) -> Result<bool, StoreError> {
-        Ok(self
-            .get_setting("scrape")?
-            .map(|value| value == "1" || value == "true")
-            .unwrap_or(false))
-    }
-
-    pub fn set_scrape_enabled(&self, enabled: bool) -> Result<(), StoreError> {
-        self.put_setting("scrape", if enabled { "1" } else { "0" })
-    }
-
-    pub fn watch_intake(&self) -> Result<Option<String>, StoreError> {
-        Ok(self
-            .get_setting("watch_intake")?
-            .filter(|path| !path.is_empty()))
-    }
-
-    pub fn set_watch_intake(&self, path: &str) -> Result<(), StoreError> {
-        self.put_setting("watch_intake", path.trim())
-    }
-
-    pub fn watch_inplace(&self) -> Result<Option<String>, StoreError> {
-        Ok(self
-            .get_setting("watch_inplace")?
-            .filter(|path| !path.is_empty()))
-    }
-
-    pub fn set_watch_inplace(&self, path: &str) -> Result<(), StoreError> {
-        self.put_setting("watch_inplace", path.trim())
     }
 
     /// 读取文件的流信息缓存（探测任务写入）。
@@ -279,78 +176,6 @@ impl Store {
         delete_file_meta_for_ledger(&tx, ledger_id)?;
         tx.commit()?;
         Ok(())
-    }
-
-    pub fn insert_unidentified(
-        &self,
-        path: String,
-        confidence: Confidence,
-    ) -> Result<(), StoreError> {
-        // v1 scopes the parked row to a Library root. Files parked by intake may
-        // still sit outside every root, so fall back to the default Movie root:
-        // that is the Library they would be claimed into.
-        let (library_id, root_id) = self.unidentified_scope(&path)?;
-        self.library.execute(
-            "INSERT INTO unidentified (library_id, root_id, path, confidence)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(library_id, path) DO UPDATE SET
-                 root_id = excluded.root_id,
-                 confidence = excluded.confidence",
-            params![library_id, root_id, path, confidence.as_str()],
-        )?;
-        Ok(())
-    }
-
-    fn unidentified_scope(&self, path: &str) -> Result<(String, String), StoreError> {
-        let resolved = crate::library_paths::resolved_path(Path::new(path))?;
-        let roots = self.list_library_roots()?;
-        // A root that cannot be resolved is an error, not a silent miss: falling
-        // back to the default root would park the file under the wrong Library.
-        let mut best: Option<(usize, String, String)> = None;
-        for root in &roots {
-            let root_path = crate::library_paths::resolved_path(&root.path)?;
-            let Some(library_id) = root.library_id.clone() else {
-                continue;
-            };
-            if !resolved.starts_with(&root_path) {
-                continue;
-            }
-            let depth = root_path.components().count();
-            if best
-                .as_ref()
-                .is_none_or(|(best_depth, _, _)| depth > *best_depth)
-            {
-                best = Some((depth, library_id, root.id.clone()));
-            }
-        }
-        if let Some((_, library_id, root_id)) = best {
-            return Ok((library_id, root_id));
-        }
-        let default_root = roots
-            .iter()
-            .find(|root| root.is_default && root.kind == domain::MediaKind::Movie)
-            .and_then(|root| root.library_id.clone().map(|id| (id, root.id.clone())))
-            .ok_or_else(|| {
-                StoreError::Missing(format!(
-                    "no Movie Library root to park unidentified path {path}"
-                ))
-            })?;
-        Ok(default_root)
-    }
-
-    pub fn list_unidentified(&self) -> Result<Vec<(String, String)>, StoreError> {
-        let mut stmt = self
-            .library
-            .prepare("SELECT path, confidence FROM unidentified ORDER BY path, library_id")?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
-
-    pub fn delete_unidentified(&self, path: &str) -> Result<bool, StoreError> {
-        let n = self
-            .library
-            .execute("DELETE FROM unidentified WHERE path = ?1", params![path])?;
-        Ok(n > 0)
     }
 }
 

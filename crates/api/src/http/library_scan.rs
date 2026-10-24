@@ -591,7 +591,7 @@ pub(crate) async fn facets(
     Path(id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    // tier：缺失/空串按 all（旧调用方仍能拿到 resolutions）；其余非法值 400。
+    // Missing/empty tier selects all ten dimensions; unknown values are rejected.
     let tier = match query.get("tier").map(String::as_str) {
         None | Some("") | Some("all") => library_query::FacetTier::All,
         Some("primary") => library_query::FacetTier::Primary,
@@ -607,12 +607,6 @@ pub(crate) async fn facets(
         Ok(lib_id) => lib_id,
         Err(_) => return missing_library(),
     };
-    {
-        let store = state.store.lock();
-        if let Err(response) = require_visible_library(&store, &id, user_id) {
-            return response;
-        }
-    }
     let filter = match browse_filter_from_query(&query) {
         Ok(filter) => filter,
         Err(message) => return err(StatusCode::BAD_REQUEST, "library.invalid", &message),
@@ -623,12 +617,44 @@ pub(crate) async fn facets(
         filter,
         tier,
     };
-    let facets = {
-        let store = state.store.lock();
-        match store.library_facets(&request) {
-            Ok(facets) => facets,
-            Err(error) => return browse_store_error(error),
-        }
+    let shared = state.store.clone();
+    let started = std::time::Instant::now();
+    let result = state
+        .http_work
+        .run(super::library::BROWSE_DEADLINE, move || {
+            let remaining = super::library::BROWSE_DEADLINE.saturating_sub(started.elapsed());
+            let Some(store) = shared.try_lock_for(remaining) else {
+                return Err(super::library::browse_work_error(
+                    crate::blocking_budget::BlockingError::Timeout,
+                ));
+            };
+            let lock_wait = started.elapsed();
+            let held = std::time::Instant::now();
+            require_visible_library(&store, &id, user_id)?;
+            let query_started = std::time::Instant::now();
+            let (facets, work) = store.library_facets_with_stats(&request).map_err(|error| {
+                tracing::error!(library_id=id, %error, "Library facets query failed");
+                browse_store_error(error)
+            })?;
+            tracing::debug!(
+                library_id = id,
+                lock_wait_ms = lock_wait.as_secs_f64() * 1000.0,
+                lock_held_ms = held.elapsed().as_secs_f64() * 1000.0,
+                query_ms = query_started.elapsed().as_secs_f64() * 1000.0,
+                elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+                vm_steps = work.vm_steps,
+                fullscan_steps = work.fullscan_steps,
+                statements = work.statements,
+                sql_rows = work.sql_rows,
+                "Library facets request completed"
+            );
+            Ok(facets)
+        })
+        .await;
+    let facets = match result {
+        Ok(Ok(facets)) => facets,
+        Ok(Err(response)) => return response,
+        Err(error) => return super::library::browse_work_error(error),
     };
     let mut body = serde_json::Map::new();
     body.insert("total".into(), json!(facets.total));

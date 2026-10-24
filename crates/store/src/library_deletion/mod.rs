@@ -5,11 +5,11 @@
 //! - `library_removal_roots` is the permanent boundary. A removed root keeps
 //!   rejecting work from stale paths after the operation succeeds, and the hot
 //!   `path_in_removal_scope` check reads only that small table.
-//! - `snapshot_json` exists to recover an interrupted removal (ledger identity
-//!   and ownership), so it is pruned to `{"rows":[]}` once the operation succeeds.
+//! - Indexed removal-file rows preserve the frozen identity in bounded windows.
+//!   A restart continues the snapshot/cleanup without decoding the entire Library.
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{Store, StoreError};
@@ -23,19 +23,11 @@ pub struct LibraryRemoval {
     pub error: Option<String>,
 }
 
-/// Per-file rows of a removal, needed for validation/recovery until it succeeds.
-#[derive(Serialize, Deserialize)]
-struct Snapshot {
-    rows: Vec<RemovalRow>,
-}
+mod cleanup;
+mod sessions;
+mod snapshot;
 
-#[derive(Serialize, Deserialize)]
-struct RemovalRow {
-    ledger_id: String,
-    path: String,
-    media_id: String,
-    coverage: Vec<(i32, i32)>,
-}
+use snapshot::RemovalRow;
 
 const COLS: &str = "operation_id, library_id, state, removed_ledger_count, error";
 
@@ -62,6 +54,11 @@ impl Store {
     /// deserializes a snapshot that lists every removed file.
     pub fn path_in_removal_scope(&self, path: &Path) -> Result<bool, StoreError> {
         let path = crate::library_paths::resolved_path(path)?;
+        self.path_key_in_removal_scope(&path)
+    }
+
+    /// Compare a path resolved by the caller before taking the Store lock.
+    pub fn path_key_in_removal_scope(&self, path: &Path) -> Result<bool, StoreError> {
         let mut statement = self
             .library
             .prepare("SELECT path FROM library_removal_roots")?;
@@ -84,18 +81,21 @@ impl Store {
     }
 
     pub(crate) fn ensure_removal_roots_available(&self, paths: &[&str]) -> Result<(), StoreError> {
-        let pending = self.pending_library_removals()?;
-        if pending.is_empty() {
-            return Ok(());
-        }
         let proposed = paths
             .iter()
             .filter(|path| !path.trim().is_empty())
             .map(|path| crate::library_paths::resolved_path(Path::new(path.trim())))
             .collect::<Result<Vec<_>, _>>()?;
-        for removal in pending {
+        self.ensure_removal_keys_available(proposed.iter().filter_map(|p| p.to_str()))
+    }
+
+    pub(crate) fn ensure_removal_keys_available<'a>(
+        &self,
+        keys: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), StoreError> {
+        let proposed = keys.into_iter().map(Path::new).collect::<Vec<_>>();
+        for removal in self.pending_library_removals()? {
             for root in self.removal_roots(&removal.operation_id)? {
-                let root = crate::library_paths::resolved_path(&root)?;
                 if proposed
                     .iter()
                     .any(|path| path.starts_with(&root) || root.starts_with(path))
@@ -109,95 +109,51 @@ impl Store {
         Ok(())
     }
 
+    /// Freeze before observing any file. The first indexed snapshot window shares
+    /// this transaction; later windows cannot race a writer past the persisted barrier.
     pub fn begin_library_removal(&self, id: &str) -> Result<LibraryRemoval, StoreError> {
-        if let Some(existing) = self.removal_for_library(id)? {
+        let tx = crate::write_tx(&self.library)?;
+        let existing = tx
+            .query_row(
+                &format!("SELECT {COLS} FROM library_removals WHERE library_id=?1"),
+                [id],
+                map_removal,
+            )
+            .optional()?;
+        if let Some(existing) = existing {
             return Ok(existing);
         }
-        let library = self
-            .get_library(id)?
+        let (kind, revision): (String, i64) = tx
+            .query_row(
+                "SELECT kind,config_revision FROM libraries WHERE library_id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
             .ok_or_else(|| StoreError::Missing(format!("library {id}")))?;
-        let mut count = 0;
-        for item in self.list_libraries()? {
-            if item.kind == library.kind && self.library_accepts_work(&item.id)? {
-                count += 1;
-            }
-        }
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM libraries l WHERE kind=?1 AND NOT EXISTS
+             (SELECT 1 FROM library_removals r WHERE r.library_id=l.library_id)",
+            [&kind],
+            |row| row.get(0),
+        )?;
         if count <= 1 {
             return Err(StoreError::Protected("每种类型的媒体库至少保留一个".into()));
         }
-        let roots = self
-            .roots_of(id)?
-            .iter()
-            .map(|root| crate::library_paths::resolved_path(root))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut rows = Vec::new();
-        let mut seen_files = std::collections::HashSet::new();
-        for observed in self.list_file_coverage()? {
-            let file = &observed.file;
-            if !seen_files.insert(file.file_id) {
-                continue;
-            }
-            let Some(media) = self.get_media(file.media_id)? else {
-                continue;
-            };
-            if media.kind != library.kind {
-                continue;
-            }
-            let path = Path::new(&file.path);
-            let resolved = crate::library_paths::resolved_path(path)?;
-            let under_root = roots
-                .iter()
-                .map(|root| crate::library_paths::resolved_path(root))
-                .collect::<Result<Vec<_>, _>>()?
-                .iter()
-                .any(|root| resolved.starts_with(root));
-            if !under_root {
-                continue;
-            }
-            match self.library_for_path_strict(path, media.kind)? {
-                Some(owner) if owner.id == id => {
-                    let coverage = self
-                        .get_file_units(file.file_id)?
-                        .into_iter()
-                        .map(|unit| (unit.season, unit.episode))
-                        .collect();
-                    rows.push(RemovalRow {
-                        ledger_id: file.file_id.to_string(),
-                        path: file.path.to_string_lossy().into_owned(),
-                        media_id: media.id.to_string(),
-                        coverage,
-                    });
-                }
-                Some(_) => {}
-                None => {
-                    return Err(StoreError::Protected(
-                        "Library 文件归属不唯一，不能安全删除".into(),
-                    ));
-                }
-            }
-        }
         let operation_id = uuid::Uuid::new_v4().to_string();
-        let tx = crate::write_tx(&self.library)?;
         tx.execute(
-            "INSERT INTO library_removals (operation_id, library_id, state, snapshot_json,
-             removed_ledger_count, created_at_ms, updated_at_ms)
-             VALUES (?1, ?2, 'frozen', ?3, ?4, ?5, ?5)",
-            params![
-                operation_id,
-                id,
-                serde_json::to_string(&Snapshot { rows })?,
-                0,
-                crate::unix_now() * 1000
-            ],
+            "INSERT INTO library_removals(operation_id,library_id,state,config_revision,
+             created_at_ms,updated_at_ms) VALUES(?1,?2,'frozen',?3,?4,?4)",
+            params![operation_id, id, revision, crate::unix_now() * 1000],
         )?;
-        for root in &roots {
-            tx.execute(
-                "INSERT OR IGNORE INTO library_removal_roots (operation_id, path) VALUES (?1, ?2)",
-                params![operation_id, root.to_string_lossy()],
-            )?;
-        }
+        tx.execute(
+            "INSERT INTO library_removal_roots(operation_id,path)
+             SELECT ?1,path_key FROM library_roots WHERE library_id=?2",
+            params![operation_id, id],
+        )?;
+        snapshot::capture_batch(&tx, &operation_id)?;
         tx.commit()?;
-        tracing::info!(library_id = id, %operation_id, "Library 删除已冻结");
+        tracing::info!(library_id=id,%operation_id,"Library 删除已冻结");
         self.library_removal(&operation_id)?
             .ok_or_else(|| StoreError::Missing(operation_id))
     }
@@ -263,22 +219,37 @@ impl Store {
         Ok(self.get_library(id)?.is_some() && self.removal_for_library(id)?.is_none())
     }
 
-    fn removal_snapshot(&self, id: &str) -> Result<Snapshot, StoreError> {
-        let json: String = self.library.query_row(
-            "SELECT snapshot_json FROM library_removals WHERE operation_id=?1",
-            [id],
-            |row| row.get(0),
-        )?;
-        Ok(serde_json::from_str(&json)?)
+    /// Capture at most 100 target files. `true` means the snapshot is complete.
+    pub fn capture_library_removal_batch(&self, id: &str) -> Result<bool, StoreError> {
+        let tx = crate::write_tx(&self.library)?;
+        let done = snapshot::capture_batch(&tx, id)?;
+        tx.commit()?;
+        Ok(done)
     }
 
     pub fn removal_ledger_ids(&self, id: &str) -> Result<Vec<String>, StoreError> {
-        Ok(self
-            .removal_snapshot(id)?
-            .rows
-            .into_iter()
-            .map(|row| row.ledger_id)
-            .collect())
+        while !self.capture_library_removal_batch(id)? {}
+        let mut statement = self.library.prepare(
+            "SELECT file_id FROM library_removal_files WHERE operation_id=?1 ORDER BY file_id",
+        )?;
+        Ok(statement
+            .query_map([id], |row| row.get(0))?
+            .collect::<Result<_, _>>()?)
+    }
+
+    /// One indexed cancellation window; callers release their Store guard between pages.
+    pub fn removal_ledger_ids_after(
+        &self,
+        id: &str,
+        after: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let mut statement = self.library.prepare(
+            "SELECT file_id FROM library_removal_files WHERE operation_id=?1 AND file_id>?2
+             ORDER BY file_id LIMIT 100",
+        )?;
+        Ok(statement
+            .query_map(params![id, after], |row| row.get(0))?
+            .collect::<Result<_, _>>()?)
     }
 
     pub fn set_removal_state(
@@ -303,252 +274,22 @@ impl Store {
         Ok(())
     }
 
+    /// Standalone convenience driver. API uses `clean_library_removal_batch` and
+    /// releases its outer Store guard between calls.
     pub fn clean_library_removal(&self, id: &str) -> Result<LibraryRemoval, StoreError> {
-        let removal = self
-            .library_removal(id)?
-            .ok_or_else(|| StoreError::Missing(id.into()))?;
-        if removal.state == "succeeded" {
-            return Ok(removal);
-        }
-        if removal.state != "cleaning" {
-            return Err(StoreError::Protected("Library 工作尚未排空".into()));
-        }
-        let snapshot = self.removal_snapshot(id)?;
-        self.validate_removal_rows(&snapshot, &removal.library_id)?;
-        self.clean_removal_rows(&snapshot, &removal.library_id)
-            .map_err(|error| StoreError::Protected(format!("清理 Library 台账失败: {error}")))?;
-        #[cfg(test)]
-        removal_cleanup_failpoint()?;
-        let tx = crate::write_tx(&self.library)?;
-        tx.execute(
-            "DELETE FROM unidentified WHERE library_id=?1",
-            [&removal.library_id],
-        )?;
-        tx.execute(
-            "DELETE FROM library_roots WHERE library_id=?1",
-            [&removal.library_id],
-        )
-        .map_err(|error| StoreError::Protected(format!("删除 Library 根失败: {error}")))?;
-        tx.execute(
-            "DELETE FROM libraries WHERE library_id=?1",
-            [&removal.library_id],
-        )
-        .map_err(|error| StoreError::Protected(format!("删除 Library 配置失败: {error}")))?;
-        tx.execute(
-            "UPDATE libraries SET is_default=1 WHERE library_id IN (
-            SELECT l.library_id FROM libraries l WHERE NOT EXISTS (
-                SELECT 1 FROM libraries d WHERE d.kind=l.kind AND d.is_default=1)
-            AND NOT EXISTS (SELECT 1 FROM library_removals r
-                WHERE r.library_id=l.library_id AND r.state != 'succeeded')
-            AND l.library_id=(SELECT c.library_id FROM libraries c WHERE c.kind=l.kind
-                AND NOT EXISTS (SELECT 1 FROM library_removals r
-                    WHERE r.library_id=c.library_id AND r.state != 'succeeded')
-                ORDER BY c.sort_order, c.library_id LIMIT 1))",
-            [],
-        )?;
-        tx.execute(
-            "UPDATE library_removals SET state='succeeded', error=NULL,
-            removed_ledger_count=?2, snapshot_json=?3, updated_at_ms=?4 WHERE operation_id=?1",
-            params![
-                id,
-                snapshot.rows.len(),
-                serde_json::to_string(&Snapshot { rows: Vec::new() })?,
-                crate::unix_now() * 1000
-            ],
-        )?;
-        tx.commit()?;
-        crate::path_key::reload_root_aliases(&self.library)?;
-        for prefix in LIBRARY_SETTING_KEY_PREFIXES {
-            let _ = self.delete_setting(&format!("{prefix}{}", removal.library_id));
-        }
-        tracing::info!(operation_id=id, library_id=%removal.library_id,
-            removed_ledger_count=snapshot.rows.len(), "Library 索引删除完成，磁盘文件保留");
-        self.library_removal(id)?
-            .ok_or_else(|| StoreError::Missing(id.into()))
-    }
-
-    fn validate_removal_rows(
-        &self,
-        snapshot: &Snapshot,
-        library_id: &str,
-    ) -> Result<(), StoreError> {
-        // 每个台账记首行与合并覆盖：线性一遍，避免逐台账回扫快照（O(n²)）。
-        let mut seen_files = std::collections::HashMap::<
-            &str,
-            (&RemovalRow, std::collections::BTreeSet<(i32, i32)>),
-        >::new();
-        for row in &snapshot.rows {
-            seen_files
-                .entry(row.ledger_id.as_str())
-                .or_insert_with(|| (row, Default::default()))
-                .1
-                .extend(row.coverage.iter().copied());
-        }
-        for (ledger_id, (first, snapshot_units)) in seen_files {
-            let current: Option<(String, String)> = self
-                .library
-                .query_row(
-                    "SELECT display_path, media_id FROM library_files WHERE file_id = ?1",
-                    [ledger_id],
-                    |record| Ok((record.get::<_, String>(0)?, record.get::<_, String>(1)?)),
-                )
-                .optional()?;
-            // Absent rows are expected after an interrupted library.db commit.
-            let Some((path, media_id)) = current else {
-                continue;
-            };
-            let mut stmt = self
-                .library
-                .prepare("SELECT season, episode FROM library_file_units WHERE file_id = ?1")?;
-            let rows = stmt.query_map([ledger_id], |record| {
-                Ok((record.get::<_, i32>(0)?, record.get::<_, i32>(1)?))
-            })?;
-            let current_units: std::collections::BTreeSet<(i32, i32)> =
-                rows.collect::<Result<_, _>>()?;
-            let unchanged = path == first.path && media_id == first.media_id;
-            let media_id = first
-                .media_id
-                .parse()
-                .map_err(|_| StoreError::Protected("删除快照 Media 身份无效".into()))?;
-            let owned = match self.get_media(media_id)? {
-                Some(media) => self
-                    .library_for_path_strict(Path::new(&first.path), media.kind)?
-                    .is_some_and(|owner| owner.id == library_id),
-                None => false,
-            };
-            if !unchanged || current_units != snapshot_units || !owned {
-                tracing::error!(%library_id, %ledger_id, "删除快照台账身份或归属已改变");
-                return Err(StoreError::Protected("删除快照台账身份或归属已改变".into()));
+        while !self.capture_library_removal_batch(id)? {}
+        loop {
+            let operation = self.clean_library_removal_batch(id)?;
+            if operation.state == "succeeded" {
+                return Ok(operation);
             }
         }
-        Ok(())
     }
 
-    /// 按 [`REMOVAL_BATCH_FILES`] 个文件一批各自提交：每批的文件删除、摘要归约与该批覆盖
-    /// 单元的标记清理同事务。快照不变，已删文件在下次续跑时自然跳过，
-    /// 所以"库里还剩哪些快照文件"就是持久游标；删除期间该库不接受工作也不对外可见。
-    fn clean_removal_rows(&self, snapshot: &Snapshot, library_id: &str) -> Result<(), StoreError> {
-        let library_id: domain::LibraryId = library_id
-            .parse()
-            .map_err(|_| StoreError::Protected("删除快照 Library 身份无效".into()))?;
-        let mut order = Vec::new();
-        let mut by_file = std::collections::HashMap::<domain::LedgerId, Vec<&RemovalRow>>::new();
-        for row in &snapshot.rows {
-            let id = row
-                .ledger_id
-                .parse::<domain::LedgerId>()
-                .map_err(|_| StoreError::Protected("删除快照台账身份无效".into()))?;
-            let rows = by_file.entry(id).or_default();
-            if rows.is_empty() {
-                order.push(id);
-            }
-            rows.push(row);
-        }
-        tracing::info!(library_id = %library_id, files = order.len(), "开始清理 Library 台账行");
-        let mut removed = 0;
-        for batch in order.chunks(REMOVAL_BATCH_FILES) {
-            // 删除必须走维护摘要的路径：`preferred_file_id` 延迟外键指向 `library_files`。
-            let tx = crate::write_tx(&self.library)?;
-            removed += crate::library_write::delete::delete_files_in_tx(&tx, library_id, batch)?;
-            let rows = batch.iter().flat_map(|id| by_file[id].iter().copied());
-            clean_unit_facts(&tx, rows)?;
-            tx.commit()?;
-            #[cfg(test)]
-            removal_batch_failpoint()?;
-        }
-        tracing::info!(library_id = %library_id, removed, "Library 台账行清理完成");
-        Ok(())
+    /// One transaction of at most 100 frozen files, or bounded finalization.
+    pub fn clean_library_removal_batch(&self, id: &str) -> Result<LibraryRemoval, StoreError> {
+        cleanup::advance(self, id)
     }
-
-    /// Close active playback sessions matching files being removed, preserving last progress.
-    /// Sessions for the same Media hosted in another active Library are unaffected.
-    pub fn close_playback_sessions_for_removal(&self, id: &str) -> Result<usize, StoreError> {
-        let snapshot = self.removal_snapshot(id)?;
-        if snapshot.rows.is_empty() {
-            return Ok(0);
-        }
-        let removal_ledger_ids: std::collections::HashSet<&str> =
-            snapshot.rows.iter().map(|r| r.ledger_id.as_str()).collect();
-
-        let mut session_stmt = self.library.prepare(
-            "SELECT user_id, device_id, media_id, season, episode, file_id FROM playback_sessions",
-        )?;
-        let sessions = session_stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<i32>>(3)?,
-                    row.get::<_, Option<i32>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let mut closed = 0;
-        let now = crate::unix_now();
-        for (user_id_str, device_id, media_id, season, episode, session_ledger_id) in sessions {
-            let matches_removal = if let Some(ref lid) = session_ledger_id {
-                removal_ledger_ids.contains(lid.as_str())
-            } else {
-                let in_snapshot = snapshot.rows.iter().any(|row| {
-                    row.media_id == media_id
-                        && row.coverage.contains(&(
-                            season.unwrap_or(crate::UNIT_WHOLE),
-                            episode.unwrap_or(crate::UNIT_WHOLE),
-                        ))
-                });
-                if !in_snapshot {
-                    false
-                } else {
-                    let mut ledger_stmt = self.library.prepare(
-                        "SELECT u.file_id FROM library_file_units u
-                         JOIN library_files f ON f.file_id = u.file_id
-                         WHERE u.media_id=?1 AND u.season IS ?2 AND u.episode IS ?3",
-                    )?;
-                    let mut rows_cursor = ledger_stmt.query(params![media_id, season, episode])?;
-                    let mut other_exists = false;
-                    while let Some(row) = rows_cursor.next()? {
-                        let row_id: String = row.get(0)?;
-                        if !removal_ledger_ids.contains(row_id.as_str()) {
-                            other_exists = true;
-                            break;
-                        }
-                    }
-                    !other_exists
-                }
-            };
-
-            if !matches_removal {
-                continue;
-            }
-
-            let user_id = user_id_str
-                .parse::<domain::UserId>()
-                .map_err(|e| StoreError::Protected(format!("会话用户 ID 无效: {e}")))?;
-            if self.close_session(user_id, &device_id, now)?.is_some() {
-                tracing::info!(%device_id, %media_id, "已关闭待删除媒体库相关的活跃播放会话");
-                closed += 1;
-            }
-        }
-        Ok(closed)
-    }
-}
-
-/// Delete every `settings` row owned by `library_id`, per the prefix registry.
-fn delete_library_scoped_settings(
-    conn: &Connection,
-    library_id: &str,
-) -> Result<usize, StoreError> {
-    let mut deleted = 0;
-    for prefix in LIBRARY_SETTING_KEY_PREFIXES {
-        deleted += conn.execute(
-            "DELETE FROM settings WHERE key = ?1",
-            [format!("{prefix}{library_id}")],
-        )?;
-    }
-    Ok(deleted)
 }
 
 // Thread-local, unit-test-only injection: never exposed through production configuration.
@@ -558,7 +299,6 @@ std::thread_local! {
 }
 
 /// 单批最多处理的快照文件数（计划 Q5：长操作批次 ≤100 个输入实体）。
-const REMOVAL_BATCH_FILES: usize = 100;
 
 /// 本批文件覆盖的单元：没有任何剩余文件时，清掉未锁定标记与季对比历史。
 fn clean_unit_facts<'a>(

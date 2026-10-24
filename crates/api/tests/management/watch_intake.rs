@@ -21,27 +21,8 @@ fn app(tmp: &tempfile::TempDir) -> axum::Router {
     ))
 }
 
-async fn put_intake(app: &axum::Router, tmp: &tempfile::TempDir, intake: &std::path::Path) {
-    let movie = tmp.path().join("data/library/movies");
-    let tv = tmp.path().join("data/library/tv");
-    let saved = app
-        .clone()
-        .oneshot(request(
-            "PUT",
-            "/api/v1/directory",
-            Some("management-secret"),
-            json!({
-                "movie_root": movie.display().to_string(),
-                "tv_root": tv.display().to_string(),
-                "transfer_mode": "copy",
-                "movie_naming": "{title}{ext}",
-                "tv_naming": "{title} - {season_episode}{ext}",
-                "scrape": false,
-                "watch_intake": intake.display().to_string()
-            }),
-        ))
-        .await
-        .unwrap();
+async fn put_intake(app: &axum::Router, _tmp: &tempfile::TempDir, intake: &std::path::Path) {
+    let saved = set_transfer_settings(&app, json!({"transfer_mode": "copy", "scrape": false, "watch_intake": intake.display().to_string()})).await;
     assert_eq!(saved.status(), StatusCode::OK);
 }
 

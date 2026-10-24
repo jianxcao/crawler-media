@@ -36,7 +36,7 @@ fn destination_root_id(
         .list_library_roots()
         .map_err(|error| error.to_string())?
     {
-        if root.library_id.as_deref() != Some(library_id) || !root.enabled {
+        if root.library_id.as_str() != library_id || !root.enabled {
             continue;
         }
         if destination.strip_prefix(&root.path).is_err() {

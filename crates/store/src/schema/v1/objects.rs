@@ -8,7 +8,6 @@ pub const APP_TABLES: &[&str] = &[
     "settings",
     "search_snapshots",
     "downloaders",
-    "naming_templates",
 ];
 
 pub const APP_INDEXES: &[&str] = &["sites_enabled_idx", "user_tokens_user_idx"];
@@ -55,9 +54,11 @@ pub const LIBRARY_TABLES: &[&str] = &[
     "library_operations",
     "library_removals",
     "library_removal_roots",
+    "library_removal_files",
     "pending_file_deletions",
     "pending_file_renames",
     "pending_root_reassignments",
+    "root_reassignment_state",
     "scrape_sidecars",
     "unidentified",
     "scan_operations",
@@ -83,6 +84,7 @@ pub const LIBRARY_INDEXES: &[&str] = &[
     "library_default",
     "roots_library",
     "files_library_media",
+    "files_library_file",
     "files_media_library",
     "files_root_path",
     "files_presence",
@@ -112,6 +114,9 @@ pub const LIBRARY_INDEXES: &[&str] = &[
     "logs_ended",
     "metrics_recorded",
     "library_operation_dispatch",
+    "playback_session_file",
+    "root_reassignment_dispatch",
+    "root_reassignment_library",
     "pending_file_renames_due",
     "scan_library_status",
     "probe_active_scope",
@@ -132,18 +137,6 @@ pub const LIBRARY_INDEXES: &[&str] = &[
     "attempt_job_file",
     "media_survivor",
     "unidentified_root",
-];
-
-pub const JOBS_TABLES: &[&str] = &["job_defs", "jobs", "retention_cursors", "job_change_state"];
-
-pub const JOBS_INDEXES: &[&str] = &[
-    "jobs_running_def",
-    "jobs_queued_def",
-    "jobs_status_run_after_idx",
-    "jobs_payload_idx",
-    "jobs_finished_idx",
-    "jobs_running_status_idx",
-    "jobs_running_key_idx",
-    "jobs_live_def_idx",
-    "jobs_last_def_idx",
+    "unidentified_path_seek",
+    "unidentified_identity",
 ];

@@ -164,7 +164,7 @@ async fn default_library_cannot_delete_or_retransfer_orphaned_outside_root() {
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|root| root.library_id.as_deref() == Some(default_lib.id.as_str()))
+        .find(|root| root.library_id.as_str() == default_lib.id.as_str())
         .expect("default movie root")
         .id;
     drop(store);

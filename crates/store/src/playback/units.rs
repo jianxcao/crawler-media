@@ -2,6 +2,7 @@ use domain::{MediaId, PhysicalSourceId, TypedItemId, UnitKey, UserId};
 use rusqlite::{OptionalExtension, params};
 use std::str::FromStr;
 
+use super::unit_resume::{ResumeProgress, UnitIdentity};
 use super::user_summary::SummaryScope;
 use super::{Store, StoreError};
 use super::{UNIT_WHOLE, UnitRow, UnitState};
@@ -227,7 +228,6 @@ impl Store {
         source: Option<domain::PhysicalSourceId>,
     ) -> Result<UnitState, StoreError> {
         let played_input = played;
-        let position_ms = position_input.unwrap_or(0);
         let existing = self.unit_state(user_id, media_id, season, episode)?;
         let played = played_input.unwrap_or(existing.as_ref().map(|u| u.played).unwrap_or(false));
         let favorite_at = match favorite {
@@ -246,98 +246,24 @@ impl Store {
             .map(str::to_string)
             .or_else(|| existing.as_ref().and_then(|u| u.subtitle_track.clone()));
 
-        // R04-A: Retain original Option<bool> for explicit played assertions.
-        let (has_played_assertion, played_changed_at) = match played_input {
-            Some(_) => (1, Some(now)),
-            None => {
-                let existing_assertion: Option<(i64, Option<i64>)> = self
-                    .library
-                    .query_row(
-                        "SELECT has_played_assertion, played_changed_at_ms FROM playback_units
-                         WHERE user_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4",
-                        params![user_id.to_string(), media_id.to_string(), season, episode],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
-                    )
-                    .optional()?;
-                match existing_assertion {
-                    Some((h, t)) => (h, t),
-                    None => (0, None),
-                }
-            }
+        let identity = UnitIdentity {
+            user: user_id,
+            media: media_id,
+            season,
+            episode,
         };
-
-        // R04-B & R04-C: Check existing resume package first before overwriting
-        let existing_resume: Option<(Option<String>, Option<i64>, Option<String>, Option<String>, Option<i64>, i64, Option<i64>, Option<String>, Option<String>)> = self.library
-            .query_row(
-                "SELECT resume_file_id, resume_file_revision, resume_source_version, timeline_mode, tracks_version,
-                        position_ms, duration_ms, audio_track, subtitle_track
-                 FROM playback_units
-                 WHERE user_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4",
-                params![user_id.to_string(), media_id.to_string(), season, episode],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)),
-            )
-            .optional()?;
-
-        let is_mark_only = position_input.is_none();
-        let (
-            bound_file_id,
-            bound_rev,
-            bound_src_ver,
-            bound_timeline,
-            bound_tracks_ver,
-            pos_val,
-            dur_val,
-            aud_val,
-            sub_val,
-        ) = if is_mark_only {
-            match existing_resume {
-                Some((Some(fid), Some(rev), Some(sver), Some(tmode), tracks_ver, p, d, a, s)) => (
-                    Some(fid),
-                    Some(rev),
-                    Some(sver),
-                    Some(tmode),
-                    tracks_ver,
-                    p,
-                    d,
-                    a,
-                    s,
-                ),
-                _ => (None, None, None, None, None, 0, None, None, None),
-            }
-        } else {
-            // Every real playback write is a complete resume package for the
-            // currently preferred physical source, not an update to a stale binding.
-            let file_binding: Option<(String, i64, String, i64)> = self.library
-                    .query_row(
-                        "SELECT f.file_id, f.file_revision, f.source_version, COALESCE(d.tracks_version, f.tracks_version)
-                         FROM library_files f
-                         JOIN library_file_units u ON f.file_id = u.file_id
-                         LEFT JOIN file_details d ON d.file_id = f.file_id
-                         WHERE u.media_id = ?1 AND u.season = ?2 AND u.episode = ?3
-                           AND f.presence_state = 'present' AND f.publication_state = 'published'
-                           AND (?4 IS NULL OR f.file_id = ?4) AND (?5 IS NULL OR f.file_revision = ?5)
-                         ORDER BY f.file_revision DESC, f.file_id ASC LIMIT 1",
-                        params![media_id.to_string(), season, episode,
-                            source.as_ref().map(|selected| selected.file_id.to_string()),
-                            source.as_ref().map(|selected| selected.revision)],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                    )
-                    .optional()?;
-            match file_binding {
-                Some((fid, rev, sver, tver)) => (
-                    Some(fid),
-                    Some(rev),
-                    Some(sver),
-                    Some("full_file".into()),
-                    Some(tver),
-                    position_ms,
-                    duration_ms,
-                    audio_track.clone(),
-                    subtitle_track.clone(),
-                ),
-                None => (None, None, None, None, None, 0, None, None, None),
-            }
-        };
+        let (has_played_assertion, played_changed_at) =
+            self.played_assertion(&identity, played_input, now)?;
+        let resume = self.resume_for_unit(
+            &identity,
+            position_input.map(|position| ResumeProgress {
+                position,
+                duration: duration_ms,
+                audio: audio_track,
+                subtitle: subtitle_track,
+            }),
+            source,
+        )?;
 
         self.library.execute(
             "INSERT INTO playback_units
@@ -368,22 +294,22 @@ impl Store {
                 media_id.to_string(),
                 season,
                 episode,
-                pos_val,
+                resume.position,
                 if played { 1 } else { 0 },
                 if favorite { 1 } else { 0 },
-                dur_val,
-                aud_val,
-                sub_val,
+                resume.duration,
+                resume.audio,
+                resume.subtitle,
                 play_count,
                 now,
                 favorite_at,
                 has_played_assertion,
                 played_changed_at,
-                bound_file_id,
-                bound_rev,
-                bound_src_ver,
-                bound_timeline,
-                bound_tracks_ver,
+                resume.file_id,
+                resume.revision,
+                resume.source_version,
+                resume.timeline,
+                resume.tracks_version,
             ],
         )?;
         self.unit_state(user_id, media_id, season, episode)?
@@ -421,8 +347,7 @@ impl Store {
     ///
     /// This is the raw unit only. A newer season or show mark can still make
     /// the episode effectively played, so callers that page a resume list must
-    /// apply that check before taking `limit` rows. A copied non-TV `(0, 0)`
-    /// row is retired with its canonical copy, so it cannot take a second slot.
+    /// apply that check before taking `limit` rows.
     pub fn user_resumable_units(
         &self,
         user_id: UserId,

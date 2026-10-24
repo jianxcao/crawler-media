@@ -45,7 +45,7 @@ fn create_library(store: &Store, root: &Path) -> (store::Library, String) {
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|candidate| candidate.library_id.as_deref() == Some(library.id.as_str()))
+        .find(|candidate| candidate.library_id.as_str() == library.id.as_str())
         .unwrap()
         .id;
     (library, root_id)

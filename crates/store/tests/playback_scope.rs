@@ -240,7 +240,7 @@ fn log_id(store: &Store, device: &str) -> PlayLogRow {
         .list_logs(10_000, None, None, None, 0, None)
         .unwrap()
         .into_iter()
-        .find(|row| row.device_id.as_deref() == Some(device))
+        .find(|row| row.device_id == device)
         .expect("log row for device")
 }
 

@@ -27,7 +27,7 @@ fn seed(store: &Store, n: usize) -> LibraryId {
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|r| r.library_id.as_deref() == Some(lib.id.as_str()))
+        .find(|r| r.library_id.as_str() == lib.id.as_str())
         .unwrap()
         .id;
     let mut files = Vec::with_capacity(100);

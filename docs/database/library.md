@@ -2,17 +2,17 @@
 
 [返回数据库总览](README.md)
 
-结构核对：2026-10-24，review `cf7fb70`，本轮无 DDL 变更；行为边界及未完项见[当前复审](../audits/2026-10-24-storage-rereview.md)。`application_id=1129139249`，`user_version=1`。不可按缓存清空。
+结构核对：2026-10-24 修复工作树；原问题基线 `cf7fb70`，修复与验证见[当前执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)。`application_id=1129139249`，`user_version=1`。不可按缓存清空。
 
-结构为 **47张业务表、553字段、57个显式命名索引、32组FK、0触发器**，不计SQLite自动索引。历史45表/519字段/51索引描述已撤下；当前统计来自生产DDL的内存SQLite执行结果。当前字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准，结构一致不等于业务不变量已验收。
+结构为 **49张业务表、580字段、63个显式命名索引、34组FK、0触发器**，不计SQLite自动索引。历史45表/519字段/51索引描述已撤下；当前统计来自生产DDL的内存SQLite执行结果。当前字段以[生产DDL](../../crates/store/src/schema/v1/library.sql)为准，结构一致不等于业务不变量已验收。
 
 ## 实现边界
 
 - Media/Library/Collection/Playback同库；旧ledger/file_meta/browse持久表及domain::LedgerRow已移除，没有旧布局导入器或兼容视图。
 - 文件源CAS、元数据写屏障、用户摘要、严格重新识别和多数API切换已落地；本轮不沿用1845dab的缺陷列表作为当前事实。
 - `pending_file_renames`保存版本、源/目标磁盘证据、sidecar决议、已完成阶段与重试；organize/housekeeping/启动恢复均使用owned plan将磁盘观察、执行与staging清理移出Store锁，锁内提交DB/CAS。
-- `pending_root_reassignments`每次事务读取≤100个文件候选并提交游标；源/目标冻结时暂停，关联NFO按批迁移。Unidentified另有≤100行移动阶段；候选选择工作量和外层同步耗尽队列仍需优化，不把A6全部验收视为完成。
-- 当前缺陷、证据等级和待实现方案分别见[当前复审](../audits/2026-10-24-storage-rereview.md)及[技术方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)。表存在不等于运行时已验收。
+- 根迁移每窗口≤100文件/Unidentified 候选，持久游标、公平轮转和状态可查询；API driver 批间放锁并在解冻后自动继续。关联 NFO 与文件同批迁移。Unidentified 的索引 seek 不重扫游标前记录。
+- 原问题证据保留在[版本固定复审](../audits/2026-10-24-storage-rereview.md)，本次实施与剩余现场验收见[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)。
 
 ## 字段阅读规则
 
@@ -22,7 +22,7 @@
 
 ## 表目录
 
-- [pending_root_reassignments](#pending_root_reassignments) — 3 字段；嵌套根归属迁移的持久路径游标；没有独立operation状态、配置版本或失败字段。
+- [pending_root_reassignments](#pending_root_reassignments) — 6 个字段
 - [pending_file_renames](#pending_file_renames) — 28 字段；文件改名/改挂持久意图：版本/磁盘证据、sidecar决议、跨分区引用恢复及重试。
 
 - [chapter_frame_tasks](#chapter_frame_tasks) — 10 字段；章节帧生成的源版本、目标与持久执行状态。
@@ -43,7 +43,7 @@
 - [library_metadata_inputs](#library_metadata_inputs) — 18 字段；Library 独立 NFO 输入及导出来源；alias/登记身份和按批迁移原反例已修，完整守恒及 export 故障验收见当前方案。
 - [library_operations](#library_operations) — 10 字段；roots/locale/integrity/scrape 操作载体。当前建表不代表完整运行处理器已交付。
 - [library_removal_roots](#library_removal_roots) — 2 字段；删除操作冻结的根路径范围；与持久文件归属需要一致。
-- [library_removals](#library_removals) — 8字段；持久freeze/drain/cleanup，删除安全须连同当前ownership与依赖核对。
+- [library_removals](#library_removals) — 11 个字段
 - [library_roots](#library_roots) — 6字段；path_key 唯一；根替换已有持久重配置，新增嵌套根队列仍缺冻结解除后的持续恢复驱动。
 - [library_units](#library_units) — 9 字段；Library/Media/单元级去重摘要和首选文件。whole=(-1,-1)，TV S00E00 合法。
 - [media](#media) — 9 字段；规范 Media 身份；可无文件存在。retired 墓碑不是可继续写的兼容实体。
@@ -68,8 +68,10 @@
 - [scan_operations](#scan_operations) — 11 字段；扫描作用域、generation、全量/定向意图与恢复报告。
 - [scan_seen](#scan_seen) — 6 字段；当前扫描 operation 已确认处理的路径版本；与源观察、物理 FileVersion 不是同一语义。
 - [scrape_sidecars](#scrape_sidecars) — 3 字段；文件的 NFO/图片 sidecar 路径；登记不等于导出 provenance 合同已完成。
-- [unidentified](#unidentified) — 4 字段；带 Library/root 的低置信度待认领文件；删除 Library 前需显式清理，不能删磁盘字节。
+- [unidentified](#unidentified) — 7 个字段
 - [user_library_items](#user_library_items) — 15字段；用户/Library/Media稀疏摘要，卡片删除级联、重导入由原始用户事实恢复。完整/增量已有维护，批量发布已合并当前用户摘要写入；当前风险以本轮具体反例为准，不引用旧 R03/R12/R20 为现状。
+- [library_removal_files](#library_removal_files) — 9 个字段
+- [root_reassignment_state](#root_reassignment_state) — 9 个字段
 
 ## chapter_frame_tasks
 
@@ -480,6 +482,12 @@ CREATE INDEX files_presence ON library_files(library_id,presence_state,file_id);
 CREATE INDEX files_root_path ON library_files(root_id,path_key);
 ```
 
+新增索引：
+
+```sql
+CREATE INDEX files_library_file ON library_files(library_id,file_id);
+```
+
 ## library_item_terms
 
 公共卡片多值倒排；私有 Collection 不得混入公共 terms/facets。
@@ -680,14 +688,17 @@ CREATE INDEX library_operation_dispatch ON library_operations(state,updated_at_m
 
 ## library_removals
 
-Library freeze/drain/cleanup操作、快照和恢复状态；完整删除安全由文件/覆盖、NFO/Unidentified归属及原始用户事实保留共同决定，不以本表存在证明全部边界验收。
+Library 删除先原子冻结配置，再按目标 Library 的文件索引逐 100 行捕获快照；snapshot_cursor/snapshot_done 记录进度。API 在快照和清理窗口之间真正释放 Store。原始 Media/Playback/Collection 与磁盘字节保留。
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|
 | `operation_id` | `TEXT` | 1 | 是 | 无 |
 | `library_id` | `TEXT` | — | 是 | 无 |
 | `state` | `TEXT` | — | 是 | 无 |
-| `snapshot_json` | `TEXT` | — | 是 | 无 |
+| `config_revision` | `INTEGER` | — | 是 | 无 |
+| `snapshot_cursor` | `TEXT` | — | 是 | `''` |
+| `snapshot_done` | `INTEGER` | — | 是 | `0` |
+| `total_files` | `INTEGER` | — | 是 | `0` |
 | `removed_ledger_count` | `INTEGER` | — | 是 | `0` |
 | `error` | `TEXT` | — | 否 | 无 |
 | `created_at_ms` | `INTEGER` | — | 是 | 无 |
@@ -696,8 +707,7 @@ Library freeze/drain/cleanup操作、快照和恢复状态；完整删除安全�
 **键与约束**
 
 - 主键：`(operation_id)`。
-- `library_id: NOT NULL UNIQUE`。
-- 无显式 FK；其他 ID 由业务写入/清理入口维护。
+- 完整 UNIQUE/CHECK/FK 声明见 [library.sql](../../crates/store/src/schema/v1/library.sql)。
 
 **显式命名索引**
 
@@ -1243,6 +1253,12 @@ CREATE INDEX session_id_expiry ON playback_session_ids(issued_at);
 
 无；主键/UNIQUE 自动索引不重复列出。
 
+新增索引：
+
+```sql
+CREATE INDEX playback_session_file ON playback_sessions(file_id,user_id,device_id);
+```
+
 ## playback_units
 
 用户逻辑观看/收藏事实及一套源绑定恢复包；不 FK 到物理文件，删文件保留原始事实。
@@ -1492,30 +1508,34 @@ CREATE INDEX scan_library_status ON scan_operations(library_id,status);
 
 ## unidentified
 
-带 Library/root 的低置信度待认领文件；删除 Library 前需显式清理，不能删磁盘字节。
+登记的待认领来源身份。unidentified_id 是每次新停放生成的唯一 ID，删除再停放不复用；root 移动保留身份，合并保留目标身份并推进 revision。path 是显示路径，path_key 是持久规范键；列表按 library_id SQL 过滤。Claim 固定原 library/root/revision/config，在同一个文件发布事务中 CAS 删除来源；明确的 IdentifyAndTransfer 可以将 Movie 停放来源转入 TV。
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|
+| `unidentified_id` | `TEXT` | — | 是 | 无 |
 | `library_id` | `TEXT` | 1 | 是 | 无 |
 | `root_id` | `TEXT` | — | 是 | 无 |
-| `path` | `TEXT` | 2 | 是 | 无 |
+| `path` | `TEXT` | — | 是 | 无 |
+| `path_key` | `TEXT` | 2 | 是 | 无 |
 | `confidence` | `TEXT` | — | 是 | 无 |
+| `revision` | `INTEGER` | — | 是 | `1` |
 
 **键与约束**
 
-- 主键：`(library_id, path)`。
-- `PRIMARY KEY(library_id,path)`。
-- `FOREIGN KEY(root_id,library_id) REFERENCES library_roots(root_id,library_id)`。
+- 主键：`(library_id, path_key)`。
+- 完整 UNIQUE/CHECK/FK 声明见 [library.sql](../../crates/store/src/schema/v1/library.sql)。
 
 **显式命名索引**
 
 ```sql
+CREATE UNIQUE INDEX unidentified_identity ON unidentified(unidentified_id);
+CREATE INDEX unidentified_path_seek ON unidentified(path_key,unidentified_id);
 CREATE INDEX unidentified_root ON unidentified(root_id,library_id);
 ```
 
 ## user_library_items
 
-用户/Library/Media 稀疏摘要；卡片删除会级联清理，重导入需要从原始用户事实重算。当前此写链存在漏维护。
+用户/Library/Media 稀疏摘要；卡片删除会级联清理，重导入需要从原始用户事实重算。写事务原子维护，重发布与重新归属使用当前事实重算。
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|
@@ -1599,19 +1619,76 @@ CREATE INDEX pending_file_renames_due ON pending_file_renames(next_retry_at, ren
 
 ## pending_root_reassignments
 
-嵌套根归属迁移的持久路径游标；没有独立operation状态、配置版本或失败字段。
+嵌套根迁移的持久待处理队列。文件与 Unidentified 各有游标；Unidentified 用不可变的 `(path_key, unidentified_id)` 排序，归属变更不会倒退次序。dispatch_order 公平轮转冻结根。Unidentified 查询下界是 max(root 范围下界, 已提交游标)，先选最多 100 行再求目标根；游标前出现错归属来源时重置游标；正确新记录不回退已完成窗口。完成时删除队列行，状态留在 root_reassignment_state。
 
 | 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
 |---|---|---:|---|---|
 | `kind` | `TEXT` | 1 | 是 | 无 |
 | `root_key` | `TEXT` | 2 | 是 | 无 |
 | `cursor_key` | `TEXT` | — | 是 | 无 |
+| `unidentified_cursor_key` | `TEXT` | — | 是 | `''` |
+| `unidentified_cursor_id` | `TEXT` | — | 是 | `''` |
+| `dispatch_order` | `INTEGER` | — | 是 | `0` |
 
 **键与约束**
 
 - 主键：`(kind, root_key)`。
-- 无显式FK；引用与生命周期由业务阶段维护。
+- 完整 UNIQUE/CHECK/FK 声明见 [library.sql](../../crates/store/src/schema/v1/library.sql)。
+
+**显式命名索引**
+
+```sql
+CREATE INDEX root_reassignment_dispatch ON pending_root_reassignments(dispatch_order,kind,root_key);
+```
+
+## library_removal_files
+
+冻结后的持久文件快照。每行固定 root/path/Media/file revision/source version 与覆盖；清理前逐项校验，完成窗口后删除快照行。工作量不依赖无关 Library 的文件或磁盘路径。
+
+| 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
+|---|---|---:|---|---|
+| `operation_id` | `TEXT` | 1 | 是 | 无 |
+| `file_id` | `TEXT` | 2 | 是 | 无 |
+| `root_id` | `TEXT` | — | 是 | 无 |
+| `path_key` | `TEXT` | — | 是 | 无 |
+| `display_path` | `TEXT` | — | 是 | 无 |
+| `media_id` | `TEXT` | — | 是 | 无 |
+| `file_revision` | `INTEGER` | — | 是 | 无 |
+| `source_version` | `TEXT` | — | 是 | 无 |
+| `units_json` | `TEXT` | — | 是 | 无 |
+
+**键与约束**
+
+- 主键：`(operation_id, file_id)`。
+- 完整 UNIQUE/CHECK/FK 声明见 [library.sql](../../crates/store/src/schema/v1/library.sql)。
 
 **显式命名索引**
 
 无；主键/UNIQUE 自动索引不重复列出。
+
+## root_reassignment_state
+
+按 kind/root_key 保留最近一次根归属工作的稳定 operation_id、目标 Library/config revision、状态、单调 revision 和错误；Library DTO 的 root_reassignments 可查询。周期 driver 使用通知和定期兜底，每窗口释放 Store、yield；完成后状态保留 succeeded。
+
+| 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT |
+|---|---|---:|---|---|
+| `kind` | `TEXT` | 1 | 是 | 无 |
+| `root_key` | `TEXT` | 2 | 是 | 无 |
+| `operation_id` | `TEXT` | — | 是 | 无 |
+| `library_id` | `TEXT` | — | 是 | 无 |
+| `config_revision` | `INTEGER` | — | 是 | 无 |
+| `state` | `TEXT` | — | 是 | 无 |
+| `revision` | `INTEGER` | — | 是 | 无 |
+| `error` | `TEXT` | — | 否 | 无 |
+| `updated_at_ms` | `INTEGER` | — | 是 | 无 |
+
+**键与约束**
+
+- 主键：`(kind, root_key)`。
+- 完整 UNIQUE/CHECK/FK 声明见 [library.sql](../../crates/store/src/schema/v1/library.sql)。
+
+**显式命名索引**
+
+```sql
+CREATE INDEX root_reassignment_library ON root_reassignment_state(library_id,root_key);
+```

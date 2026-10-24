@@ -43,7 +43,7 @@ fn create_library(store: &Store, root: &Path) -> (store::Library, String) {
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|candidate| candidate.library_id.as_deref() == Some(library.id.as_str()))
+        .find(|candidate| candidate.library_id.as_str() == library.id.as_str())
         .unwrap()
         .id;
     (library, root_id)
@@ -112,8 +112,6 @@ fn publish_file(
 
 #[test]
 fn tv_library_removal_recovers_empty_coverage_and_preserves_file_bytes() {
-    use domain::{FileVersion, LibraryFile};
-
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().join("data");
     let root = temp.path().join("tv");
@@ -155,23 +153,53 @@ fn tv_library_removal_recovers_empty_coverage_and_preserves_file_bytes() {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
+    let path = root.join("uncovered.mkv");
+    let bytes = b"video facts must survive library deletion";
+    let file = publish_uncovered_tv_file(&store, &library, media.id, &path, bytes);
+    assert!(store.get_file_units(file.file_id).unwrap().is_empty());
+
+    let removal = store.begin_library_removal(&library.id).unwrap();
+    store
+        .set_removal_state(&removal.operation_id, "cleaning", None)
+        .unwrap();
+    drop(store);
+
+    let store = Store::open(&data).unwrap();
+    let done = store.clean_library_removal(&removal.operation_id).unwrap();
+    assert_eq!(done.state, "succeeded");
+    assert_eq!(done.removed_ledger_count, 1);
+    assert!(store.get_library(&library.id).unwrap().is_none());
+    assert!(store.file_coverage_by_id(file.file_id).unwrap().is_none());
+    assert!(store.get_media(media.id).unwrap().is_some());
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
+    assert_eq!(
+        store.clean_library_removal(&removal.operation_id).unwrap(),
+        done
+    );
+}
+
+fn publish_uncovered_tv_file(
+    store: &Store,
+    library: &store::Library,
+    media_id: MediaId,
+    path: &Path,
+    bytes: &[u8],
+) -> LibraryFile {
     let root_id = store
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|candidate| candidate.library_id.as_deref() == Some(library.id.as_str()))
+        .find(|candidate| candidate.library_id.as_str() == library.id.as_str())
         .unwrap()
         .id;
-    let path = root.join("uncovered.mkv");
-    let bytes = b"video facts must survive library deletion";
     std::fs::write(&path, bytes).unwrap();
     let file = LibraryFile {
         file_id: LedgerId::new(),
         library_id: library.id.parse().unwrap(),
         root_id,
-        media_id: media.id,
+        media_id,
         kind: MediaKind::Tv,
-        path: path.clone(),
+        path: path.to_path_buf(),
         version: FileVersion {
             revision: 1,
             source_version: "v1".into(),
@@ -214,26 +242,7 @@ fn tv_library_removal_recovers_empty_coverage_and_preserves_file_bytes() {
             1,
         )
         .unwrap();
-    assert!(store.get_file_units(file.file_id).unwrap().is_empty());
-
-    let removal = store.begin_library_removal(&library.id).unwrap();
-    store
-        .set_removal_state(&removal.operation_id, "cleaning", None)
-        .unwrap();
-    drop(store);
-
-    let store = Store::open(&data).unwrap();
-    let done = store.clean_library_removal(&removal.operation_id).unwrap();
-    assert_eq!(done.state, "succeeded");
-    assert_eq!(done.removed_ledger_count, 1);
-    assert!(store.get_library(&library.id).unwrap().is_none());
-    assert!(store.file_coverage_by_id(file.file_id).unwrap().is_none());
-    assert!(store.get_media(media.id).unwrap().is_some());
-    assert_eq!(std::fs::read(path).unwrap(), bytes);
-    assert_eq!(
-        store.clean_library_removal(&removal.operation_id).unwrap(),
-        done
-    );
+    file
 }
 
 fn observation(
@@ -281,7 +290,12 @@ fn unpublished_transfer_survives_presence_and_present_publication_publishes_it()
     for mode in [LedgerPresenceMode::Verify, LedgerPresenceMode::Prune] {
         let result = store
             .apply_ledger_presence(
-                &[observation(&store, row.clone(), None, ObservedPresence::Missing)],
+                &[observation(
+                    &store,
+                    row.clone(),
+                    None,
+                    ObservedPresence::Missing,
+                )],
                 mode,
                 100,
             )
@@ -293,7 +307,12 @@ fn unpublished_transfer_survives_presence_and_present_publication_publishes_it()
 
     let result = store
         .apply_ledger_presence(
-            &[observation(&store, row.clone(), None, ObservedPresence::Present)],
+            &[observation(
+                &store,
+                row.clone(),
+                None,
+                ObservedPresence::Present,
+            )],
             LedgerPresenceMode::Verify,
             200,
         )
@@ -378,19 +397,29 @@ fn restored_file_clears_flag_without_replacing_identity() {
 
     store
         .apply_ledger_presence(
-            &[observation(&store, row.clone(), None, ObservedPresence::Missing)],
+            &[observation(
+                &store,
+                row.clone(),
+                None,
+                ObservedPresence::Missing,
+            )],
             LedgerPresenceMode::Verify,
             1000,
         )
         .unwrap();
     assert_eq!(
-        store.missing_at_by_path().unwrap().get(&row.path_key).copied(),
+        store
+            .missing_at_by_path()
+            .unwrap()
+            .get(&row.path_key)
+            .copied(),
         Some(1000)
     );
 
     let result = store
         .apply_ledger_presence(
-            &[observation(&store, 
+            &[observation(
+                &store,
                 row.clone(),
                 Some(1000),
                 ObservedPresence::Present,
@@ -402,7 +431,11 @@ fn restored_file_clears_flag_without_replacing_identity() {
     assert_eq!(result.restored, 1);
     assert_eq!(result.missing, 0);
     assert_eq!(
-        store.missing_at_by_path().unwrap().get(&row.path_key).copied(),
+        store
+            .missing_at_by_path()
+            .unwrap()
+            .get(&row.path_key)
+            .copied(),
         None
     );
     let fetched = store.file_coverage_by_id(file.file_id).unwrap().unwrap();
@@ -432,7 +465,12 @@ fn unknown_observation_preserves_prior_state() {
 
     store
         .apply_ledger_presence(
-            &[observation(&store, row.clone(), None, ObservedPresence::Missing)],
+            &[observation(
+                &store,
+                row.clone(),
+                None,
+                ObservedPresence::Missing,
+            )],
             LedgerPresenceMode::Verify,
             1000,
         )
@@ -441,7 +479,8 @@ fn unknown_observation_preserves_prior_state() {
     // A permission/IO error is reported as Unknown and must not change state.
     let result = store
         .apply_ledger_presence(
-            &[observation(&store, 
+            &[observation(
+                &store,
                 row.clone(),
                 Some(1000),
                 ObservedPresence::Unknown,
@@ -454,7 +493,11 @@ fn unknown_observation_preserves_prior_state() {
     assert_eq!(result.missing, 0);
     assert_eq!(result.restored, 0);
     assert_eq!(
-        store.missing_at_by_path().unwrap().get(&row.path_key).copied(),
+        store
+            .missing_at_by_path()
+            .unwrap()
+            .get(&row.path_key)
+            .copied(),
         Some(1000)
     );
 }
@@ -513,8 +556,18 @@ fn prune_rolls_back_whole_batch_on_derived_error() {
         .unwrap();
 
     let prune = vec![
-        observation(&store, first_row.clone(), Some(1000), ObservedPresence::Missing),
-        observation(&store, second_row.clone(), Some(1000), ObservedPresence::Missing),
+        observation(
+            &store,
+            first_row.clone(),
+            Some(1000),
+            ObservedPresence::Missing,
+        ),
+        observation(
+            &store,
+            second_row.clone(),
+            Some(1000),
+            ObservedPresence::Missing,
+        ),
     ];
     let result = store.apply_ledger_presence(&prune, LedgerPresenceMode::Prune, 2000);
     assert!(result.is_err(), "batch prune must fail due to trigger");

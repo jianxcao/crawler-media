@@ -13,7 +13,7 @@ use crate::management::{ApiError, ApiState};
 use crate::scrape_store::ScrapeStoreExt;
 
 mod publication;
-pub(crate) use publication::publish_claimed_file;
+pub(crate) use publication::{publish_claimed_file, publish_unidentified};
 
 /// The only claim body: the unidentified path plus one explicit action.
 #[derive(Deserialize)]
@@ -106,6 +106,8 @@ impl ClaimedFacts {
 }
 
 struct ClaimPlan {
+    source: store::UnidentifiedRow,
+    source_version: String,
     media: Media,
     release: Release,
     dest: PathBuf,
@@ -120,6 +122,16 @@ fn plan_claim(
     kind: MediaKind,
     src: &Path,
 ) -> Result<ClaimPlan, ApiError> {
+    let source = state
+        .store
+        .lock()
+        .get_unidentified(&body.path)?
+        .ok_or_else(|| {
+            ApiError::missing("unidentified.missing", "Unidentified not found".into())
+        })?;
+    let source_version = library::observe_source(src)
+        .map_err(|error| ApiError::invalid("unidentified.source", error.to_string()))?
+        .source_version;
     let media = Media {
         id: MediaId::new(),
         kind,
@@ -146,16 +158,6 @@ fn plan_claim(
     };
     let (root, mode, scrape) = {
         let store = state.store.lock();
-        if !store
-            .list_unidentified()?
-            .iter()
-            .any(|(path, _)| path == &body.path)
-        {
-            return Err(ApiError::missing(
-                "unidentified.missing",
-                "Unidentified not found".into(),
-            ));
-        }
         transfer_plan(&store, kind)?
     };
     let mirror_nfo = {
@@ -184,6 +186,8 @@ fn plan_claim(
     }
     let requested = library::resolve_mode(src, dest.parent().unwrap_or(Path::new(".")), mode);
     Ok(ClaimPlan {
+        source,
+        source_version,
         media,
         release,
         dest,
@@ -193,48 +197,98 @@ fn plan_claim(
     })
 }
 
-/// Move 先复制、库记录成功后再删源。中途失败时源还在，同一请求可以重试。
-/// 返回 Move 需要清理的目标副本。
+struct StagedClaim {
+    rollback_dest: Option<PathBuf>,
+    destination_version: String,
+}
+
+fn check_claim_source(plan: &ClaimPlan, src: &Path) -> Result<(), ApiError> {
+    if library::current_source_version(src) != plan.source_version {
+        tracing::warn!(path=%src.display(),"Claim input source changed during Transfer");
+        return Err(ApiError::with(
+            StatusCode::CONFLICT,
+            "unidentified.source_changed",
+            "Unidentified source changed during Transfer".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Move stages a Copy; the original is removed only after publication and source validation.
 fn stage_claim_file(
     state: &ApiState,
     plan: &ClaimPlan,
     src: &Path,
-) -> Result<Option<PathBuf>, ApiError> {
+) -> Result<StagedClaim, ApiError> {
+    check_claim_source(plan, src)?;
     let staged = if plan.requested == library::TransferMode::Move {
         library::TransferMode::Copy
     } else {
         plan.requested
     };
     library::transfer_file(src, &plan.dest, staged)
-        .map_err(|err| ApiError::invalid("unidentified.invalid", err.to_string()))?;
-    let rollback_dest = (plan.requested == library::TransferMode::Move && plan.dest != src)
-        .then(|| plan.dest.clone());
+        .map_err(|error| ApiError::invalid("unidentified.invalid", error.to_string()))?;
+    let receipt = StagedClaim {
+        rollback_dest: (plan.dest != src).then(|| plan.dest.clone()),
+        destination_version: library::current_source_version(&plan.dest),
+    };
     let _ = library::scrape_beside(&plan.dest, &plan.media, plan.mirror_nfo, None);
     if plan.scrape {
         crate::poster_fetch::attach_poster(state, &plan.media, &plan.dest);
     }
-    Ok(rollback_dest)
+    if let Err(error) = check_claim_source(plan, src) {
+        discard_rollback(&receipt);
+        return Err(error);
+    }
+    Ok(receipt)
 }
 
-/// Publish the staged file and retire the Unidentified record.
+/// The original parked identity is consumed by the same transaction as publication.
 fn commit_claim(
     state: &ApiState,
-    unidentified: &str,
     media: &Media,
     plan: &ClaimPlan,
+    src: &Path,
+    staged: &StagedClaim,
 ) -> Result<LibraryFile, ApiError> {
+    check_claim_source(plan, src)?;
     let facts = ClaimedFacts::from_release(plan.media.kind, &plan.release);
-    let file = publish_claimed_file(&state.store, media, &plan.dest, &facts)?;
-    let store = state.store.lock();
-    if let Err(error) = store.delete_unidentified(unidentified) {
-        tracing::warn!(path = %unidentified, %error, "认领已入账，但未识别记录清理失败");
-    }
-    Ok(file)
+    Ok(publication::publish_staged_unidentified(
+        &state.store,
+        media,
+        &plan.dest,
+        &facts,
+        &plan.source,
+        &staged.destination_version,
+    )?)
 }
 
-fn discard_rollback(rollback_dest: &Option<PathBuf>) {
-    if let Some(path) = rollback_dest {
-        let _ = std::fs::remove_file(path);
+fn discard_rollback(staged: &StagedClaim) {
+    if let Some(path) = &staged.rollback_dest {
+        if library::current_source_version(path) == staged.destination_version {
+            if let Err(error) = std::fs::remove_file(path) {
+                tracing::warn!(path=%path.display(),%error,"Claim staged Copy cleanup failed");
+            }
+        }
+    }
+}
+
+fn remove_moved_source(state: &ApiState, plan: &ClaimPlan, src: &Path) {
+    if plan.requested != library::TransferMode::Move || plan.dest == src {
+        return;
+    }
+    if check_claim_source(plan, src).is_err() {
+        if let Err(error) = state
+            .store
+            .lock()
+            .insert_unidentified(src.display().to_string(), Confidence::Low)
+        {
+            tracing::error!(path=%src.display(),%error,"Changed Claim input retained but could not be parked");
+        }
+        return;
+    }
+    if let Err(error) = std::fs::remove_file(src) {
+        tracing::warn!(path=%src.display(),%error,"Claim published but Move input cleanup failed");
     }
 }
 
@@ -259,26 +313,22 @@ async fn identify_and_transfer(
         ));
     }
     let plan = plan_claim(&state, &body, kind, &src)?;
-    let rollback_dest = stage_claim_file(&state, &plan, &src)?;
+    let staged = stage_claim_file(&state, &plan, &src)?;
     let media = match state.store.lock().ensure_media(plan.media.clone()) {
         Ok(media) => media,
         Err(error) => {
-            discard_rollback(&rollback_dest);
+            discard_rollback(&staged);
             return Err(error.into());
         }
     };
-    let file = match commit_claim(&state, &body.path, &media, &plan) {
+    let file = match commit_claim(&state, &media, &plan, &src, &staged) {
         Ok(file) => file,
         Err(error) => {
-            discard_rollback(&rollback_dest);
+            discard_rollback(&staged);
             return Err(error);
         }
     };
-    if plan.requested == library::TransferMode::Move && plan.dest != src {
-        if let Err(error) = std::fs::remove_file(&src) {
-            tracing::warn!(src = %src.display(), %error, "认领已入账，但 Move 源文件清理失败");
-        }
-    }
+    remove_moved_source(&state, &plan, &src);
     crate::http::library::enqueue_probes_for_files(&state, std::slice::from_ref(&file));
     Ok(Json(json!({
         "path": file.path.display().to_string(),

@@ -33,6 +33,23 @@ impl Store {
         &self,
         request: &ProtocolItemQuery,
     ) -> Result<ProtocolItemPage, StoreError> {
+        self.protocol_item_page_inner(request)
+    }
+
+    pub fn protocol_item_page_with_stats(
+        &self,
+        request: &ProtocolItemQuery,
+    ) -> Result<(ProtocolItemPage, super::items::QueryWorkStats), StoreError> {
+        let observer = super::items::stats::QueryWorkScope::new(&[&self.app, &self.library]);
+        let page = self.protocol_item_page_inner(request)?;
+        let stats = observer.stats(page.items.len() as u64);
+        Ok((page, stats))
+    }
+
+    fn protocol_item_page_inner(
+        &self,
+        request: &ProtocolItemQuery,
+    ) -> Result<ProtocolItemPage, StoreError> {
         let tx = self.library.unchecked_transaction()?;
         let Some(scope) = scope::Scope::resolve(self, &tx, request)? else {
             tx.commit()?;

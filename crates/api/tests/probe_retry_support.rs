@@ -95,7 +95,7 @@ fn publish_row(store: &Store, spec: &FixtureFile, source_version: &str) -> FileC
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .filter(|root| root.library_id.as_deref() == Some(library.id.as_str()))
+        .filter(|root| root.library_id.as_str() == library.id.as_str())
         .filter(|root| path.starts_with(&root.path))
         .max_by_key(|root| root.path.components().count())
         .expect("fixture path must sit inside a Library root");
@@ -153,7 +153,11 @@ fn publish_row(store: &Store, spec: &FixtureFile, source_version: &str) -> FileC
             1000,
         )
         .unwrap();
-    FileCoverage { path_key: String::new(), file, units }
+    FileCoverage {
+        path_key: String::new(),
+        file,
+        units,
+    }
 }
 
 pub struct ProbeScenario {

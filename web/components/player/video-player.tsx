@@ -1007,7 +1007,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
           }
           return;
         }
-        playSessionIdRef.current = session.play_session_id ?? null;
+        playSessionIdRef.current = session.play_session_id;
         eventSequenceRef.current = 0;
         if (session.decision.outcome === "consent") {
           // 刚点过「开启并播放」、开关也保存成功，服务端却仍要求同意：这是
@@ -1451,6 +1451,8 @@ export function VideoPlayer(props: VideoPlayerProps) {
   /** 一次进度心跳；响应里带着「已被管理员结束」就退出。 */
   const sendProgress = useCallback(
     (paused: boolean | undefined) => {
+      const playSessionId = playSessionIdRef.current;
+      if (!playSessionId) return;
       eventSequenceRef.current += 1;
       void reportPlaybackProgress(
         {
@@ -1458,7 +1460,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
           event: "progress",
           position_ms: positionRef.current,
           paused,
-          play_session_id: playSessionIdRef.current,
+          play_session_id: playSessionId,
           event_sequence: eventSequenceRef.current,
           ...trackRefsRef.current(),
         },
@@ -1478,6 +1480,8 @@ export function VideoPlayer(props: VideoPlayerProps) {
 
   useEffect(() => {
     if (state.phase !== "playing") return;
+    const playSessionId = playSessionIdRef.current;
+    if (!playSessionId) return;
     const startKey = `${unitKey}:${playSessionIdRef.current ?? ""}`;
     if (reportedStartRef.current !== startKey) {
       reportedStartRef.current = startKey;
@@ -1486,7 +1490,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
         {
           ...unit,
           event: "start",
-          play_session_id: playSessionIdRef.current,
+          play_session_id: playSessionId,
           event_sequence: eventSequenceRef.current,
           ...trackRefs(),
         },
@@ -1513,7 +1517,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
   useEffect(() => {
     if (!video) return;
     const report = (paused: boolean) => {
-      if (reportedStartRef.current !== unitKey) return;
+      if (reportedStartRef.current !== `${unitKey}:${playSessionIdRef.current ?? ""}`) return;
       sendProgressRef.current(paused);
     };
     const onPlaying = () => report(false);
@@ -1551,7 +1555,8 @@ export function VideoPlayer(props: VideoPlayerProps) {
   useEffect(() => {
     const snapshot = { ...unit };
     return () => {
-      if (reportedStartRef.current === null) return;
+      const playSessionId = playSessionIdRef.current;
+      if (reportedStartRef.current === null || !playSessionId) return;
       // 停止之后再到的暂停 / 心跳不能再上报：服务端会把刚结束的会话重建回来
       reportedStartRef.current = null;
       eventSequenceRef.current += 1;
@@ -1560,7 +1565,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
           ...snapshot,
           event: "stop",
           position_ms: positionRef.current,
-          play_session_id: playSessionIdRef.current,
+          play_session_id: playSessionId,
           event_sequence: eventSequenceRef.current,
           ...trackRefsRef.current(),
         },
@@ -1576,14 +1581,15 @@ export function VideoPlayer(props: VideoPlayerProps) {
   /** 关标签页/切走：进度用 sendBeacon 补发，会话用 keepalive 掐掉。 */
   useEffect(() => {
     const onPageHide = () => {
-      if (reportedStartRef.current !== null) {
+      const playSessionId = playSessionIdRef.current;
+      if (reportedStartRef.current !== null && playSessionId) {
         eventSequenceRef.current += 1;
         reportPlaybackProgressOnUnload(
           {
             ...unit,
             event: "stop",
             position_ms: positionRef.current,
-            play_session_id: playSessionIdRef.current,
+            play_session_id: playSessionId,
             event_sequence: eventSequenceRef.current,
             ...trackRefsRef.current(),
           },

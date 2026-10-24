@@ -22,27 +22,8 @@ fn app(tmp: &tempfile::TempDir) -> axum::Router {
     ))
 }
 
-async fn put_inplace(app: &axum::Router, tmp: &tempfile::TempDir, watch: &std::path::Path) {
-    let movie = tmp.path().join("data/library/movies");
-    let tv = tmp.path().join("data/library/tv");
-    let saved = app
-        .clone()
-        .oneshot(request(
-            "PUT",
-            "/api/v1/directory",
-            Some("management-secret"),
-            json!({
-                "movie_root": movie.display().to_string(),
-                "tv_root": tv.display().to_string(),
-                "transfer_mode": "hardlink",
-                "movie_naming": "{title} ({year})/{title} ({year}){ext}",
-                "tv_naming": "{title} - {season_episode}{ext}",
-                "scrape": true,
-                "watch_inplace": watch.display().to_string()
-            }),
-        ))
-        .await
-        .unwrap();
+async fn put_inplace(app: &axum::Router, _tmp: &tempfile::TempDir, watch: &std::path::Path) {
+    let saved = set_transfer_settings(&app, json!({"transfer_mode": "hardlink", "scrape": true, "watch_inplace": watch.display().to_string()})).await;
     assert_eq!(saved.status(), StatusCode::OK);
 }
 
@@ -71,7 +52,7 @@ async fn directory_round_trips_watch_inplace() {
     let body = json_data(
         app.oneshot(request(
             "GET",
-            "/api/v1/directory",
+            "/api/v1/settings/transfer",
             Some("management-secret"),
             Value::Null,
         ))
@@ -92,17 +73,7 @@ async fn scrape_job_does_not_write_placeholder_nfo_before_identification() {
     let app = app(&tmp);
     put_inplace(&app, &tmp, &watch).await;
     // v1 只登记 Library 根内的文件：watch_inplace 目录必须同时是一个根。
-    let added = app
-        .clone()
-        .oneshot(request(
-            "POST",
-            "/api/v1/directory/roots",
-            Some("management-secret"),
-            json!({ "kind": "movie", "path": watch.display().to_string() }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(added.status(), StatusCode::CREATED);
+    add_default_root(&app, "movie", &watch).await;
     tick(&app, 1).await;
 
     assert_eq!(std::fs::read(&video).unwrap(), b"stay");
@@ -167,44 +138,18 @@ async fn scrape_job_scans_extra_library_root_into_ledger() {
     let video = extra.join("The.Matrix.1999.2160p.BluRay.mkv");
     std::fs::write(&video, b"stay").unwrap();
     let app = app(&tmp);
-    let movie = tmp.path().join("data/library/movies");
-    let tv = tmp.path().join("data/library/tv");
-    let saved = app
-        .clone()
-        .oneshot(request(
-            "PUT",
-            "/api/v1/directory",
-            Some("management-secret"),
-            json!({
-                "movie_root": movie.display().to_string(),
-                "tv_root": tv.display().to_string(),
-                "transfer_mode": "hardlink",
-                "movie_naming": "{title} ({year})/{title} ({year}){ext}",
-                "tv_naming": "{title} - {season_episode}{ext}",
-                "scrape": true
-            }),
-        ))
-        .await
-        .unwrap();
+    let saved =
+        set_transfer_settings(&app, json!({"transfer_mode": "hardlink", "scrape": true})).await;
     assert_eq!(saved.status(), StatusCode::OK);
-    let added = app
-        .clone()
-        .oneshot(request(
-            "POST",
-            "/api/v1/directory/roots",
-            Some("management-secret"),
-            json!({
-                "kind": "movie",
-                "path": extra.display().to_string()
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(added.status(), StatusCode::CREATED);
+    add_default_root(&app, "movie", &extra).await;
     tick(&app, 1).await;
 
     assert_eq!(std::fs::read(&video).unwrap(), b"stay");
-    assert!(!movie.join("The.Matrix.1999.2160p.BluRay.mkv").exists());
+    assert!(
+        !tmp.path()
+            .join("data/library/movies/The.Matrix.1999.2160p.BluRay.mkv")
+            .exists()
+    );
 
     let listed = app
         .clone()
@@ -262,44 +207,18 @@ async fn scrape_job_scans_extra_tv_root_for_strm_into_ledger() {
     let video = nested.join("The Long Watch - S01E01 - 第 1 集.strm");
     std::fs::write(&video, b"stay").unwrap();
     let app = app(&tmp);
-    let movie = tmp.path().join("data/library/movies");
-    let tv = tmp.path().join("data/library/tv");
-    let saved = app
-        .clone()
-        .oneshot(request(
-            "PUT",
-            "/api/v1/directory",
-            Some("management-secret"),
-            json!({
-                "movie_root": movie.display().to_string(),
-                "tv_root": tv.display().to_string(),
-                "transfer_mode": "hardlink",
-                "movie_naming": "{title} ({year})/{title} ({year}){ext}",
-                "tv_naming": "{title} - {season_episode}{ext}",
-                "scrape": true
-            }),
-        ))
-        .await
-        .unwrap();
+    let saved =
+        set_transfer_settings(&app, json!({"transfer_mode": "hardlink", "scrape": true})).await;
     assert_eq!(saved.status(), StatusCode::OK);
-    let added = app
-        .clone()
-        .oneshot(request(
-            "POST",
-            "/api/v1/directory/roots",
-            Some("management-secret"),
-            json!({
-                "kind": "tv",
-                "path": extra.display().to_string()
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(added.status(), StatusCode::CREATED);
+    add_default_root(&app, "tv", &extra).await;
     tick(&app, 1).await;
 
     assert_eq!(std::fs::read(&video).unwrap(), b"stay");
-    assert!(!tv.join("The.Long.Watch.S01E01.1080p.mkv").exists());
+    assert!(
+        !tmp.path()
+            .join("data/library/tv/The.Long.Watch.S01E01.1080p.mkv")
+            .exists()
+    );
     assert!(
         !nested
             .join("The Long Watch - S01E01 - 第 1 集.nfo")
@@ -322,6 +241,55 @@ async fn scrape_job_scans_extra_tv_root_for_strm_into_ledger() {
     assert_eq!(row["path"], video.display().to_string());
 }
 
+struct OrbitCatalog(media::CatalogHit);
+impl api::catalog::Catalog for OrbitCatalog {
+    fn search_movie(&self, _query: &str) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn search_tv(&self, _query: &str) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(vec![self.0.clone()])
+    }
+    fn popular_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn popular_tv(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(Vec::new())
+    }
+    fn details(
+        &self,
+        _kind: domain::MediaKind,
+        _id: &str,
+    ) -> Result<Option<domain::Media>, String> {
+        Ok(Some(self.0.media.clone()))
+    }
+    fn metadata(
+        &self,
+        _kind: domain::MediaKind,
+        _id: &str,
+    ) -> Result<Option<media::ItemMeta>, String> {
+        Ok(Some(media::ItemMeta {
+            overview: Some("Show summary".into()),
+            ..Default::default()
+        }))
+    }
+    fn season_details(&self, _id: &str, _season: u32) -> Result<Vec<media::EpisodeMeta>, String> {
+        Ok(vec![
+            media::EpisodeMeta {
+                episode_number: 1,
+                name: Some("Pilot Episode".into()),
+                overview: Some("Episode summary".into()),
+                ..Default::default()
+            },
+            media::EpisodeMeta {
+                episode_number: 2,
+                name: Some("Second Episode".into()),
+                overview: Some("Episode 2 summary".into()),
+                ..Default::default()
+            },
+        ])
+    }
+}
+
 #[tokio::test]
 async fn watch_scrape_job_rebinds_incoming_rows_to_canonical_media_identity() {
     let tmp = tempfile::tempdir().unwrap();
@@ -338,58 +306,6 @@ async fn watch_scrape_job_rebinds_incoming_rows_to_canonical_media_identity() {
         bangumi_id: None,
         anilist_id: None,
     };
-    struct OrbitCatalog(media::CatalogHit);
-    impl api::catalog::Catalog for OrbitCatalog {
-        fn search_movie(&self, _query: &str) -> Result<Vec<media::CatalogHit>, String> {
-            Ok(Vec::new())
-        }
-        fn search_tv(&self, _query: &str) -> Result<Vec<media::CatalogHit>, String> {
-            Ok(vec![self.0.clone()])
-        }
-        fn popular_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
-            Ok(Vec::new())
-        }
-        fn popular_tv(&self) -> Result<Vec<media::CatalogHit>, String> {
-            Ok(Vec::new())
-        }
-        fn details(
-            &self,
-            _kind: domain::MediaKind,
-            _id: &str,
-        ) -> Result<Option<domain::Media>, String> {
-            Ok(Some(self.0.media.clone()))
-        }
-        fn metadata(
-            &self,
-            _kind: domain::MediaKind,
-            _id: &str,
-        ) -> Result<Option<media::ItemMeta>, String> {
-            Ok(Some(media::ItemMeta {
-                overview: Some("Show summary".into()),
-                ..Default::default()
-            }))
-        }
-        fn season_details(
-            &self,
-            _id: &str,
-            _season: u32,
-        ) -> Result<Vec<media::EpisodeMeta>, String> {
-            Ok(vec![
-                media::EpisodeMeta {
-                    episode_number: 1,
-                    name: Some("Pilot Episode".into()),
-                    overview: Some("Episode summary".into()),
-                    ..Default::default()
-                },
-                media::EpisodeMeta {
-                    episode_number: 2,
-                    name: Some("Second Episode".into()),
-                    overview: Some("Episode 2 summary".into()),
-                    ..Default::default()
-                },
-            ])
-        }
-    }
     let hit = media::CatalogHit {
         media: domain::Media {
             id: domain::MediaId::new(),
@@ -460,36 +376,9 @@ async fn watch_scrape_job_rebinds_incoming_rows_to_canonical_media_identity() {
         b"<tvshow><title>Orbit</title></tvshow>",
     )
     .unwrap();
-    let directory = app
-        .clone()
-        .oneshot(request(
-            "PUT",
-            "/api/v1/directory",
-            Some("management-secret"),
-            json!({
-                "movie_root":tmp.path().join("data/library/movies").display().to_string(),
-                "tv_root":tmp.path().join("data/library/tv").display().to_string(),
-                "transfer_mode":"hardlink", "movie_naming":"{title} ({year})/{title}{ext}",
-                "tv_naming":"{title} - {season_episode}{ext}", "scrape":true,
-                "watch_inplace":tmp.path().join("empty-watch").display().to_string()
-            }),
-        ))
-        .await
-        .unwrap();
+    let directory = set_transfer_settings(&app, json!({"transfer_mode": "hardlink", "scrape": true, "watch_inplace": tmp.path().join("empty-watch").display().to_string()})).await;
     assert_eq!(directory.status(), StatusCode::OK);
-    let added = app
-        .clone()
-        .oneshot(request(
-            "POST",
-            "/api/v1/directory/roots",
-            Some("management-secret"),
-            json!({
-                "kind":"tv", "path":watch.display().to_string()
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(added.status(), StatusCode::CREATED);
+    add_default_root(&app, "tv", &watch).await;
     tick(&app, 1).await;
 
     let store_arc = state.store();

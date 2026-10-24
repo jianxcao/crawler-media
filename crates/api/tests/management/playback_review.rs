@@ -98,6 +98,7 @@ pub(super) async fn save_position(app: &axum::Router, target: &Value) {
     // `playback_sessions` 现在绑定签发的 `play_session_id`：progress 之前必须先
     // 走公开的 sessions 端点签发。
     body["play_session_id"] = json!(open_session(app, &body).await);
+    body["event_sequence"] = json!(next_playback_sequence());
     assert_eq!(post(app, "progress", body).await.status(), StatusCode::OK);
 }
 
@@ -159,6 +160,9 @@ async fn omitted_tv_coordinates_infer_selected_file_unit() {
     assert_eq!(session["start_ms"], 600_000);
     target["device_id"] = json!("inferred-device");
     target["position_ms"] = json!(700_000);
+    target["play_session_id"] = json!(open_session(&app, &target).await);
+    target["event"] = json!("progress");
+    target["event_sequence"] = json!(next_playback_sequence());
     assert_eq!(
         post(&app, "progress", target.clone()).await.status(),
         StatusCode::OK
@@ -171,10 +175,14 @@ async fn omitted_tv_coordinates_infer_selected_file_unit() {
 async fn missing_exact_episode_never_falls_back_to_another_file() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, mut target) = fixture(&tmp, true);
+    target["device_id"] = json!("missing-device");
+    let session = open_session(&app, &target).await;
     target.as_object_mut().unwrap().remove("file_id");
     target["season_number"] = json!(2);
     target["episode_number"] = json!(99);
-    target["device_id"] = json!("missing-device");
+    target["play_session_id"] = json!(session);
+    target["event"] = json!("progress");
+    target["event_sequence"] = json!(next_playback_sequence());
     for route in ["decide", "sessions", "progress"] {
         assert_eq!(
             post(&app, route, target.clone()).await.status(),
@@ -188,11 +196,17 @@ async fn missing_exact_episode_never_falls_back_to_another_file() {
 async fn file_id_with_inconsistent_unit_is_rejected() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, target) = fixture(&tmp, true);
+    let mut signed = target.clone();
+    signed["device_id"] = json!("mismatch-device");
+    let session = open_session(&app, &signed).await;
     for (season, episode) in [(1, 3), (2, 99)] {
         let mut body = target.clone();
         body["season_number"] = json!(season);
         body["episode_number"] = json!(episode);
         body["device_id"] = json!("mismatch-device");
+        body["play_session_id"] = json!(session);
+        body["event"] = json!("progress");
+        body["event_sequence"] = json!(next_playback_sequence());
         for route in ["decide", "sessions", "progress"] {
             assert_eq!(
                 post(&app, route, body.clone()).await.status(),

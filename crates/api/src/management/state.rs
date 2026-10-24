@@ -329,24 +329,7 @@ impl ApiState {
                 Ok(_) => {}
                 Err(e) => tracing::error!(%e, "恢复未完成的扫描操作失败"),
             }
-            let mut root_batches = 0;
-            loop {
-                match self.store.lock().drain_one_root_batch() {
-                    Ok(Some(true)) => root_batches += 1,
-                    Ok(Some(false)) => break,
-                    Ok(None) => {
-                        tracing::warn!("根目录归属迁移暂停：目标 Library 尚未就绪");
-                        break;
-                    }
-                    Err(e) => {
-                        tracing::error!(%e, "恢复根目录归属迁移失败");
-                        break;
-                    }
-                }
-            }
-            if root_batches > 0 {
-                tracing::info!(batches = root_batches, "已恢复未完成的根目录归属迁移");
-            }
+            crate::root_reassign_work::start(self);
             crate::rename_work::resume_startup(self.clone());
         }
         Ok(())
@@ -664,23 +647,8 @@ pub enum ApiStateError {
 }
 
 fn open_jobs(jobs_path: &std::path::Path) -> Result<jobs::Queue, ApiStateError> {
-    // 布局闸门必须排在 `jobs::Queue::open` **之前**：open 会执行队列 DDL 迁移，
-    // 形状不符的 jobs.db 不允许先被写入。全新 data 目录此刻还没有 jobs.db，
-    // 这里先写定身份头，open 之后再校验队列实际建出的形状（见下）。
-    {
-        let conn = rusqlite::Connection::open(jobs_path)
-            .map_err(|err| std::io::Error::other(err.to_string()))?;
-        store::schema::layout::initialize_jobs_layout(&conn)
-            .map_err(|err| std::io::Error::other(err.to_string()))?;
-    }
     let jobs =
-        jobs::Queue::open(jobs_path).map_err(|err| std::io::Error::other(err.to_string()))?;
-    {
-        let conn = rusqlite::Connection::open(jobs_path)
-            .map_err(|err| std::io::Error::other(err.to_string()))?;
-        store::schema::layout::validate_jobs_layout(&conn)
-            .map_err(|err| std::io::Error::other(err.to_string()))?;
-    }
+        jobs::Queue::open(jobs_path).map_err(|error| std::io::Error::other(error.to_string()))?;
     crate::jobs_api::seed_instance_defs(&jobs)
         .map_err(|err| std::io::Error::other(err.to_string()))?;
     // 维护任务默认 def：幂等注册，用户改过的开关/频率/payload 原样保留。

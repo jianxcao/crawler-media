@@ -12,8 +12,15 @@ pub async fn dispatch_once(state: ApiState) -> Result<usize, String> {
 }
 
 fn dispatch_once_sync(state: &ApiState) -> Result<usize, String> {
+    dispatch_obligations(&state.store, &state.probe)
+}
+
+fn dispatch_obligations(
+    shared: &parking_lot::Mutex<store::Store>,
+    probe: &crate::probe_manager::ProbeManager,
+) -> Result<usize, String> {
     let obligations = {
-        let store = state.store.lock();
+        let store = shared.lock();
         store
             .scan_probe_obligations(100)
             .map_err(|e| e.to_string())?
@@ -26,7 +33,7 @@ fn dispatch_once_sync(state: &ApiState) -> Result<usize, String> {
     let mut acked = 0;
     for ob in obligations {
         let row_opt = {
-            let store = state.store.lock();
+            let store = shared.lock();
             store
                 .file_coverage_by_id(ob.ledger_id)
                 .map_err(|e| e.to_string())?
@@ -34,7 +41,7 @@ fn dispatch_once_sync(state: &ApiState) -> Result<usize, String> {
 
         let Some(row) = row_opt else {
             // Ledger row no longer exists (pruned/deleted), ack obligation immediately
-            let store = state.store.lock();
+            let store = shared.lock();
             match store.ack_scan_probe_obligation(ob.ledger_id) {
                 Ok(()) => acked += 1,
                 Err(error) => {
@@ -48,12 +55,12 @@ fn dispatch_once_sync(state: &ApiState) -> Result<usize, String> {
             continue;
         };
 
-        let enqueued_or_active = match state.probe.request_probe(
+        let enqueued_or_active = match probe.request_probe(
             &row,
             crate::probe_manager::policy::ProbeRequestOrigin::Detail,
         ) {
             Ok(crate::probe_manager::policy::ProbeRequestResult::Queued { .. }) => {
-                state.probe.holds_dispatch_id(&row.file.file_id.to_string())
+                probe.holds_dispatch_id(&row.file.file_id.to_string())
             }
             Ok(
                 crate::probe_manager::policy::ProbeRequestResult::AlreadyRunning
@@ -63,7 +70,7 @@ fn dispatch_once_sync(state: &ApiState) -> Result<usize, String> {
         };
 
         if enqueued_or_active {
-            let store = state.store.lock();
+            let store = shared.lock();
             match store.ack_scan_probe_obligation(ob.ledger_id) {
                 Ok(()) => acked += 1,
                 Err(error) => {
@@ -82,16 +89,27 @@ fn dispatch_once_sync(state: &ApiState) -> Result<usize, String> {
 
 /// Start background dispatcher task checking obligations every 5 seconds.
 pub fn start_dispatcher(state: ApiState) {
+    let shared = std::sync::Arc::downgrade(&state.store);
+    let probe = std::sync::Arc::downgrade(&state.probe);
+    let instance = std::sync::Arc::downgrade(&state.instance_writable);
     tokio::spawn(async move {
-        // Initial dispatch on startup
-        if let Err(error) = dispatch_once(state.clone()).await {
-            tracing::error!(%error, "探测义务调度器启动首轮派发失败");
-        }
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            if let Err(e) = dispatch_once(state.clone()).await {
-                tracing::error!(error = %e, "Probe obligation dispatcher failed");
+            if instance.upgrade().is_none() {
+                break;
             }
+            let (Some(shared), Some(probe)) = (shared.upgrade(), probe.upgrade()) else {
+                break;
+            };
+            let result =
+                tokio::task::spawn_blocking(move || dispatch_obligations(&shared, &probe)).await;
+            match result {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => tracing::error!(%error,"Probe obligation dispatcher failed"),
+                Err(error) => tracing::error!(%error,"Probe obligation dispatcher worker failed"),
+            }
+            // The sleep retains Weak handles only; dropping an ApiState can stop
+            // its drivers and release its per-instance blocking budgets.
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     });
 }

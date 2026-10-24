@@ -65,7 +65,7 @@ impl Fixture {
             .list_library_roots()
             .unwrap()
             .into_iter()
-            .find(|root| root.library_id.as_deref() == Some(library.id.as_str()))
+            .find(|root| root.library_id.as_str() == library.id.as_str())
             .unwrap()
             .id;
         Fixture {

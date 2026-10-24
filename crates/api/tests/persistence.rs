@@ -186,21 +186,13 @@ fn media_round_trips_year_and_original_title() {
 }
 
 #[test]
-fn naming_templates_and_library_roots_have_defaults() {
+fn current_naming_and_library_roots_have_defaults() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    assert!(
-        store
-            .naming_template(MediaKind::Movie)
-            .unwrap()
-            .contains("{title}")
-    );
-    assert!(
-        store
-            .naming_template(MediaKind::Tv)
-            .unwrap()
-            .contains("Season")
-    );
+    use api::scrape_store::ScrapeStoreExt;
+    let config = store.get_scrape_config().unwrap();
+    assert!(config.effective.compose_movie_pattern().contains("{title}"));
+    assert!(config.effective.compose_tv_pattern().contains("Season"));
     assert!(
         store
             .library_root(MediaKind::Movie)

@@ -375,6 +375,7 @@ pub(crate) async fn hammer_while_scanning(
     app: &Router,
     series: MediaId,
     device: &str,
+    session: &str,
     scanner: &JoinHandle<ScanReport>,
 ) -> (Vec<Duration>, BTreeMap<u16, usize>) {
     let mut latencies = Vec::new();
@@ -388,7 +389,7 @@ pub(crate) async fn hammer_while_scanning(
                 "POST",
                 "/api/v1/playback/progress",
                 Some(TOKEN),
-                heartbeat_body(series, position, device),
+                heartbeat_body(series, position, device, session),
             ))
             .await
             .unwrap();

@@ -4,7 +4,7 @@ use std::path::Path;
 use store::Store;
 use store::schema::layout::{
     APP_APPLICATION_ID, LIBRARY_APPLICATION_ID, SUBSCRIBE_APPLICATION_ID, V1_USER_VERSION,
-    initialize_jobs_layout, validate_cache_layout, validate_database_layout, validate_jobs_layout,
+    validate_cache_layout, validate_database_layout,
 };
 
 #[path = "support/mod.rs"]
@@ -57,55 +57,18 @@ fn seed_five_database_cluster(dir: &Path) -> (domain::UserId, domain::MediaId, d
         .unwrap();
     }
 
-    // Initialize jobs.db (the 5th database)
-    {
-        let jobs_conn = Connection::open(dir.join("jobs.db")).unwrap();
-        initialize_jobs_layout(&jobs_conn).unwrap();
-        jobs_conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS job_defs (
-                id TEXT PRIMARY KEY,
-                kind TEXT NOT NULL,
-                schedule_cron TEXT,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                payload TEXT NOT NULL DEFAULT '{}'
-            );
-            CREATE TABLE IF NOT EXISTS jobs (
-                id TEXT PRIMARY KEY,
-                def_id TEXT,
-                kind TEXT NOT NULL,
-                status TEXT NOT NULL,
-                run_after INTEGER NOT NULL,
-                started_at INTEGER,
-                finished_at INTEGER,
-                error TEXT,
-                retry_count INTEGER NOT NULL DEFAULT 0,
-                payload TEXT NOT NULL DEFAULT '{}',
-                progress_json TEXT
-            );
-            CREATE TABLE IF NOT EXISTS retention_cursors (
-                def_id TEXT PRIMARY KEY,
-                cursor_key TEXT NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS job_change_state (
-                def_id TEXT PRIMARY KEY,
-                last_change_id INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS jobs_running_def ON jobs (def_id, status) WHERE status = 'running';
-            CREATE INDEX IF NOT EXISTS jobs_queued_def ON jobs (def_id, status) WHERE status = 'queued';
-            CREATE INDEX IF NOT EXISTS jobs_status_run_after_idx ON jobs (status, run_after);
-            CREATE INDEX IF NOT EXISTS jobs_payload_idx ON jobs (kind, status, payload);
-            CREATE INDEX IF NOT EXISTS jobs_finished_idx ON jobs (kind, status, finished_at);
-            CREATE INDEX IF NOT EXISTS jobs_running_status_idx ON jobs (status, started_at);
-            CREATE INDEX IF NOT EXISTS jobs_running_key_idx ON jobs (def_id, status);
-            CREATE INDEX IF NOT EXISTS jobs_live_def_idx ON jobs (def_id, status);
-            CREATE INDEX IF NOT EXISTS jobs_last_def_idx ON jobs (def_id, status, run_after);"
-        ).unwrap();
-        jobs_conn.execute(
-            "INSERT INTO job_defs (id, kind, schedule_cron, enabled, payload) VALUES ('def-1', 'data_retention', '* * * * *', 1, '{}')",
-            [],
-        ).unwrap();
-    }
+    let queue = jobs::Queue::open(dir.join("jobs.db")).unwrap();
+    queue
+        .upsert_def(jobs::NewDef {
+            kind: jobs::JobKind::DataRetention,
+            name: "retention".into(),
+            enabled: true,
+            schedule: None,
+            payload: "{}".into(),
+            timeout_secs: None,
+            concurrency_key: None,
+        })
+        .unwrap();
 
     (user_id, media_id, ledger_id)
 }
@@ -158,7 +121,7 @@ fn validate_cluster_layout_and_consistency(dir: &Path) -> (usize, usize, usize) 
     validate_cache_layout(&cache_conn).unwrap();
 
     let jobs_conn = Connection::open(dir.join("jobs.db")).unwrap();
-    validate_jobs_layout(&jobs_conn).unwrap();
+    jobs::schema::validate_layout(&jobs_conn).unwrap();
 
     let items_count: usize = lib_conn
         .query_row("SELECT COUNT(*) FROM library_items", [], |r| r.get(0))

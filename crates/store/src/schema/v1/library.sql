@@ -100,6 +100,7 @@ CREATE TABLE library_files (
  FOREIGN KEY(library_id,kind) REFERENCES libraries(library_id,kind), FOREIGN KEY(media_id,kind) REFERENCES media(media_id,kind)
 );
 CREATE INDEX files_library_media ON library_files(library_id,media_id,file_id);
+CREATE INDEX files_library_file ON library_files(library_id,file_id);
 CREATE INDEX files_media_library ON library_files(media_id,library_id,file_id);
 CREATE INDEX files_root_path ON library_files(root_id,path_key);
 CREATE INDEX files_kind_path ON library_files(kind,path_key);
@@ -263,12 +264,29 @@ CREATE TABLE library_operations (
 );
 CREATE INDEX library_operation_dispatch ON library_operations(state,updated_at_ms,operation_id);
 CREATE TABLE library_removals (
- operation_id TEXT PRIMARY KEY NOT NULL, library_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL, snapshot_json TEXT NOT NULL,
+ operation_id TEXT PRIMARY KEY NOT NULL, library_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL,
+ config_revision INTEGER NOT NULL, snapshot_cursor TEXT NOT NULL DEFAULT '', snapshot_done INTEGER NOT NULL DEFAULT 0, total_files INTEGER NOT NULL DEFAULT 0,
  removed_ledger_count INTEGER NOT NULL DEFAULT 0, error TEXT, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL
 );
 CREATE TABLE library_removal_roots (operation_id TEXT NOT NULL REFERENCES library_removals(operation_id),path TEXT NOT NULL,PRIMARY KEY(operation_id,path));
+CREATE TABLE library_removal_files (
+ operation_id TEXT NOT NULL REFERENCES library_removals(operation_id), file_id TEXT NOT NULL,
+ root_id TEXT NOT NULL, path_key TEXT NOT NULL, display_path TEXT NOT NULL, media_id TEXT NOT NULL,
+ file_revision INTEGER NOT NULL, source_version TEXT NOT NULL, units_json TEXT NOT NULL CHECK(json_valid(units_json)),
+ PRIMARY KEY(operation_id,file_id)
+);
+CREATE INDEX playback_session_file ON playback_sessions(file_id,user_id,device_id);
 CREATE TABLE pending_file_deletions (path TEXT PRIMARY KEY NOT NULL,reason TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_retry_at INTEGER NOT NULL DEFAULT 0,last_error TEXT,file_id TEXT,file_size INTEGER,file_inode INTEGER);
-CREATE TABLE pending_root_reassignments (kind TEXT NOT NULL, root_key TEXT NOT NULL, cursor_key TEXT NOT NULL, PRIMARY KEY(kind, root_key));
+CREATE TABLE pending_root_reassignments (kind TEXT NOT NULL, root_key TEXT NOT NULL, cursor_key TEXT NOT NULL, unidentified_cursor_key TEXT NOT NULL DEFAULT '', unidentified_cursor_id TEXT NOT NULL DEFAULT '', dispatch_order INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(kind, root_key));
+CREATE INDEX root_reassignment_dispatch ON pending_root_reassignments(dispatch_order,kind,root_key);
+CREATE TABLE root_reassignment_state (
+ kind TEXT NOT NULL, root_key TEXT NOT NULL, operation_id TEXT NOT NULL UNIQUE,
+ library_id TEXT NOT NULL REFERENCES libraries(library_id) ON DELETE CASCADE, config_revision INTEGER NOT NULL, state TEXT NOT NULL,
+ revision INTEGER NOT NULL, error TEXT, updated_at_ms INTEGER NOT NULL,
+ PRIMARY KEY(kind,root_key)
+);
+CREATE INDEX root_reassignment_library ON root_reassignment_state(library_id,root_key);
+
 CREATE TABLE pending_file_renames (
  rename_id TEXT PRIMARY KEY NOT NULL,
  file_id TEXT NOT NULL,
@@ -302,7 +320,9 @@ CREATE TABLE pending_file_renames (
 );
 CREATE INDEX pending_file_renames_due ON pending_file_renames(next_retry_at, rename_id);
 CREATE TABLE scrape_sidecars (file_id TEXT NOT NULL REFERENCES library_files(file_id) ON DELETE CASCADE,kind TEXT NOT NULL,path TEXT NOT NULL,PRIMARY KEY(file_id,kind));
-CREATE TABLE unidentified (library_id TEXT NOT NULL,root_id TEXT NOT NULL,path TEXT NOT NULL,confidence TEXT NOT NULL,PRIMARY KEY(library_id,path),FOREIGN KEY(root_id,library_id) REFERENCES library_roots(root_id,library_id));
+CREATE TABLE unidentified (unidentified_id TEXT NOT NULL,library_id TEXT NOT NULL,root_id TEXT NOT NULL,path TEXT NOT NULL,path_key TEXT NOT NULL,confidence TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 1,PRIMARY KEY(library_id,path_key),FOREIGN KEY(root_id,library_id) REFERENCES library_roots(root_id,library_id));
+CREATE UNIQUE INDEX unidentified_identity ON unidentified(unidentified_id);
+CREATE INDEX unidentified_path_seek ON unidentified(path_key,unidentified_id);
 CREATE INDEX unidentified_root ON unidentified(root_id,library_id);
 CREATE TABLE scan_operations (
  id TEXT PRIMARY KEY NOT NULL,library_id TEXT NOT NULL,scope_signature TEXT NOT NULL,status TEXT NOT NULL,generation INTEGER NOT NULL,

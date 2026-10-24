@@ -74,7 +74,21 @@ pub(super) fn genre_clause(
         .iter()
         .flat_map(|wanted| requested_genre_keys(wanted))
         .collect();
-    let matched = resolve_genres(conn, requested, scope, &keys)?;
+    // A display name already is the exact predicate value. Only wire UUIDs
+    // need resolving against stored metadata; avoid parsing every matching
+    // Media's JSON twice for ordinary named genre requests.
+    let wire_values: Vec<String> = requested
+        .iter()
+        .filter(|wanted| {
+            let normalized = wanted.trim().to_lowercase();
+            Uuid::parse_str(normalized.strip_prefix("genre_").unwrap_or(&normalized)).is_ok()
+        })
+        .cloned()
+        .collect();
+    let mut matched = requested.to_vec();
+    if !wire_values.is_empty() {
+        matched.extend(resolve_genres(conn, &wire_values, scope, &keys)?);
+    }
     if matched.is_empty() {
         return Ok(Some("1 = 0".to_string()));
     }

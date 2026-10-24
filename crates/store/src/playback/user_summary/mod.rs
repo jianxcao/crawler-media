@@ -214,8 +214,7 @@ impl Store {
         is_tv: bool,
     ) -> Result<Vec<String>, StoreError> {
         let media = media_id.to_string();
-        // A movie/video has one logical unit: any write to one of its units is a
-        // whole-media write, including a legacy `(0, 0)` favourite.
+        // A movie/video has one logical whole unit.
         let (sql, values): (&str, Vec<rusqlite::types::Value>) = if !is_tv {
             (
                 "SELECT library_id FROM library_items WHERE media_id = ?1 ORDER BY library_id",
@@ -427,8 +426,7 @@ fn map_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<Summary> {
 ///
 /// A `played` assertion inherits from the season mark and the whole mark; the
 /// most recent assertion wins and an equal timestamp prefers the more specific
-/// coordinate (episode, then season, then whole). A movie's legacy `(0, 0)`
-/// row is considered alongside its canonical `(-1, -1)` row.
+/// coordinate (episode, then season, then whole). Movies use only `(-1, -1)`.
 pub(crate) fn effective_played(
     is_tv: bool,
     facts: &HashMap<(i32, i32), PlaybackFact>,
@@ -486,7 +484,7 @@ fn summarize(
     let episode_set: HashSet<(i32, i32)> = episodes.iter().copied().collect();
     let applies = |fact: &PlaybackFact| -> bool {
         if !is_tv {
-            return true;
+            return (fact.season, fact.episode) == (UNIT_WHOLE, UNIT_WHOLE);
         }
         match (fact.season, fact.episode) {
             (UNIT_WHOLE, UNIT_WHOLE) => true,

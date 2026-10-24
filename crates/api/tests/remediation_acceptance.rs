@@ -101,6 +101,9 @@ async fn slow_io_and_maintenance_keep_auth_and_heartbeat_available() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
+    let play_session =
+        fixtures::open_play_session(&app, fixture.series.id, "dev-remediation").await;
+
     // Slow maintenance: a claimed DatabaseMaintenance job parked inside its executor.
     let job = {
         let queue = state.jobs();
@@ -140,13 +143,25 @@ async fn slow_io_and_maintenance_keep_auth_and_heartbeat_available() {
     assert_eq!(status_within(&app, None).await, StatusCode::UNAUTHORIZED);
     tokio::time::timeout(
         Duration::from_secs(5),
-        fixtures::beat_start(&app, fixture.series.id, 1_000, "dev-remediation"),
+        fixtures::beat_start(
+            &app,
+            fixture.series.id,
+            1_000,
+            "dev-remediation",
+            &play_session,
+        ),
     )
     .await
     .expect("heartbeat start must answer while slow IO and maintenance run");
     tokio::time::timeout(
         Duration::from_secs(5),
-        fixtures::beat(&app, fixture.series.id, 30_000, "dev-remediation"),
+        fixtures::beat(
+            &app,
+            fixture.series.id,
+            30_000,
+            "dev-remediation",
+            &play_session,
+        ),
     )
     .await
     .expect("heartbeat progress must answer while slow IO and maintenance run");

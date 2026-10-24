@@ -26,11 +26,55 @@ pub(crate) fn publish_claimed_file(
     dest: &Path,
     facts: &ClaimedFacts,
 ) -> Result<LibraryFile, StoreError> {
+    publish_claim(shared, media, dest, facts, None, None)
+}
+
+pub(crate) fn publish_unidentified(
+    shared: &Mutex<Store>,
+    media: &Media,
+    dest: &Path,
+    facts: &ClaimedFacts,
+    source: &store::UnidentifiedRow,
+) -> Result<LibraryFile, StoreError> {
+    publish_claim(shared, media, dest, facts, Some(source), None)
+}
+
+pub(crate) fn publish_staged_unidentified(
+    shared: &Mutex<Store>,
+    media: &Media,
+    dest: &Path,
+    facts: &ClaimedFacts,
+    source: &store::UnidentifiedRow,
+    destination_version: &str,
+) -> Result<LibraryFile, StoreError> {
+    publish_claim(
+        shared,
+        media,
+        dest,
+        facts,
+        Some(source),
+        Some(destination_version),
+    )
+}
+
+fn publish_claim(
+    shared: &Mutex<Store>,
+    media: &Media,
+    dest: &Path,
+    facts: &ClaimedFacts,
+    source: Option<&store::UnidentifiedRow>,
+    destination_version: Option<&str>,
+) -> Result<LibraryFile, StoreError> {
     let result = (|| {
         let path = std::fs::canonicalize(dest)?;
-        let source = library::observe_source(&path)
+        let observed = library::observe_source(&path)
             .map_err(|error| StoreError::Io(std::io::Error::other(error)))?;
-        let mut prepared = prepare_claim(&shared.lock(), media, &path, &source, facts)?;
+        if destination_version.is_some_and(|expected| expected != observed.source_version) {
+            return Err(StoreError::Protected(
+                "staged Claim destination changed".into(),
+            ));
+        }
+        let mut prepared = prepare_claim(&shared.lock(), media, &path, &observed, facts)?;
         let observations = prepared.observer.observe(
             &path,
             media.kind,
@@ -49,18 +93,29 @@ pub(crate) fn publish_claimed_file(
             ));
         }
         let store = shared.lock();
-        store.publish_file_checked_context(
-            &prepared.scope,
-            &PublicationRequest {
-                file: &prepared.file,
-                units: &facts.units,
-                expected_version: Some(&prepared.file.version),
-                nfo_observation: Some(&observations),
-                probe_required: false,
-            },
-            prepared.expected.as_ref(),
-            store::unix_now() * 1000,
-        )?;
+        let publication = PublicationRequest {
+            file: &prepared.file,
+            units: &facts.units,
+            expected_version: Some(&prepared.file.version),
+            nfo_observation: Some(&observations),
+            probe_required: false,
+        };
+        if let Some(source) = source {
+            store.publish_unidentified_checked_context(
+                &prepared.scope,
+                &publication,
+                prepared.expected.as_ref(),
+                source,
+                store::unix_now() * 1000,
+            )?;
+        } else {
+            store.publish_file_checked_context(
+                &prepared.scope,
+                &publication,
+                prepared.expected.as_ref(),
+                store::unix_now() * 1000,
+            )?;
+        }
         tracing::info!(file_id = %prepared.file.file_id, path = %path.display(), "Published claimed file");
         Ok(prepared.file)
     })();

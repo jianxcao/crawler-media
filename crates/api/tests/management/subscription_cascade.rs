@@ -206,9 +206,6 @@ async fn cancel_season_one_does_not_delete_other_season_or_library_files() {
     let s1 = tv_a.join("S01E01.mkv");
     let s2 = tv_a.join("S02E01.mkv");
     let other_lib = tv_b.join("S01E01.mkv");
-    std::fs::write(&s1, b"s1").unwrap();
-    std::fs::write(&s2, b"s2").unwrap();
-    std::fs::write(&other_lib, b"other").unwrap();
 
     let created_lib = json_body(
         app.clone()
@@ -228,6 +225,10 @@ async fn cancel_season_one_does_not_delete_other_season_or_library_files() {
     .await;
     let other_library_id = created_lib["data"]["id"].as_str().unwrap().to_string();
 
+    finish_scan(&app, &other_library_id).await;
+    std::fs::write(&s1, b"s1").unwrap();
+    std::fs::write(&s2, b"s2").unwrap();
+    std::fs::write(&other_lib, b"other").unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let media = tv_media();
     store.insert_media(&media).unwrap();

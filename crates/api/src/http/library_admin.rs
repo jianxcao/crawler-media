@@ -220,7 +220,7 @@ pub(crate) async fn list_unidentified(
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     let store = state.store.lock();
-    let rows = match store.list_unidentified() {
+    let rows = match store.list_unidentified(query.get("library_id").map(String::as_str)) {
         Ok(rows) => rows,
         Err(error) => {
             return err(
@@ -230,51 +230,17 @@ pub(crate) async fn list_unidentified(
             );
         }
     };
-    let target_lib_id = query.get("library_id").map(|s| s.as_str());
-    let mut items: Vec<Value> = Vec::new();
-
-    for (path, confidence) in rows {
-        let fspath = std::path::Path::new(&path);
-        let lib_match = store
-            .library_for_path(fspath, domain::MediaKind::Movie)
-            .ok()
-            .flatten()
-            .or_else(|| {
-                store
-                    .library_for_path(fspath, domain::MediaKind::Tv)
-                    .ok()
-                    .flatten()
-            });
-        let lib_id = lib_match.as_ref().map(|l| l.id.clone()).unwrap_or_default();
-        let lib_name = lib_match
-            .as_ref()
-            .map(|l| l.name.clone())
-            .unwrap_or_default();
-        if let Some(target_id) = target_lib_id {
-            if lib_id != target_id {
-                continue;
-            }
-        }
-        let file_name = fspath
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(&path)
-            .to_string();
-        items.push(json!({
-            "key": path.clone(),
-            "path": path.clone(),
-            "confidence": confidence,
-            "label": file_name,
-            "library_id": lib_id,
-            "library_name": lib_name,
-            "file_count": 1,
-            "total_size_bytes": 0,
-            "files": [{
-                "file_id": path.clone(),
-                "file_path": path,
-            }],
-        }));
-    }
+    let mut items: Vec<Value> = rows.into_iter().map(|row| {
+        let file_name = std::path::Path::new(&row.path).file_name()
+            .and_then(|name| name.to_str()).unwrap_or(&row.path).to_string();
+        json!({
+            "key": row.unidentified_id, "unidentified_id":row.unidentified_id, "path": row.path, "confidence": row.confidence,
+            "label": file_name, "library_id": row.library_id, "root_id": row.root_id,
+            "library_name": row.library_name, "revision": row.revision,
+            "file_count": 1, "total_size_bytes": 0,
+            "files": [{ "file_id": row.unidentified_id, "file_path": row.path }],
+        })
+    }).collect();
     drop(store);
     // Unidentified rows have no persisted size; stat them after releasing the store lock.
     for item in &mut items {
@@ -455,12 +421,30 @@ pub(crate) fn bind_existing(state: &ApiState, id: &str, path: &str) -> Response 
             "影视条目不存在",
         );
     };
+    let source = match state.store.lock().get_unidentified(path) {
+        Ok(Some(source)) => source,
+        Ok(None) => {
+            return err(
+                StatusCode::NOT_FOUND,
+                "unidentified.missing",
+                "Unidentified not found",
+            );
+        }
+        Err(error) => {
+            return err(
+                StatusCode::CONFLICT,
+                "unidentified.identity",
+                &error.to_string(),
+            );
+        }
+    };
     let facts = crate::claim::ClaimedFacts::for_path(media.kind, std::path::Path::new(path));
-    let file = match crate::claim::publish_claimed_file(
+    let file = match crate::claim::publish_unidentified(
         &state.store,
         &media,
         std::path::Path::new(path),
         &facts,
+        &source,
     ) {
         Ok(file) => file,
         Err(store::StoreError::Invalid(message)) => {
@@ -477,9 +461,6 @@ pub(crate) fn bind_existing(state: &ApiState, id: &str, path: &str) -> Response 
             );
         }
     };
-    if let Err(error) = state.store.lock().delete_unidentified(path) {
-        tracing::warn!(path, %error, "Claim published but Unidentified cleanup failed");
-    }
     crate::http::library::enqueue_probes_for_files(state, std::slice::from_ref(&file));
     ok(json!({
         "media_item_id": media.id.to_string(),

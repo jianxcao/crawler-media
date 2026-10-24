@@ -52,15 +52,16 @@ async fn unrelated_user_growth_does_not_expand_heartbeat_write_scope() {
     let fixture = fixture("Contention Series");
     let db = fixture.dir.path().join("data/library.db");
     let device = "dev-growth";
+    let session = open_play_session(&fixture.app, fixture.series.id, device).await;
 
     // 预热：第一次心跳会建会话、插摘要行；先做一次，让基线与增长后都是「更新型」提交。
     // 首个事件必须是 `start`（生产客户端顺序），`progress` 是后续心跳的形状。
-    beat_start(&fixture.app, fixture.series.id, 1_000, device).await;
+    beat_start(&fixture.app, fixture.series.id, 1_000, device, &session).await;
     println!("[diag:beat] #1 预热(1000ms) start HTTP 200");
 
     let watch = DbWatch::open(&db);
     let counters_pre_baseline_beat = read_counters(&fixture.state);
-    beat(&fixture.app, fixture.series.id, 30_000, device).await;
+    beat(&fixture.app, fixture.series.id, 30_000, device, &session).await;
     println!("[diag:beat] #2 基线(30000ms) HTTP 200");
     let baseline = watch.finish();
     // 正控制：仪器必须看得见一次真实心跳的写入，否则后面的「相等」毫无意义。
@@ -93,7 +94,7 @@ async fn unrelated_user_growth_does_not_expand_heartbeat_write_scope() {
 
     watch.snapshot().unwrap();
     let counters_pre_growth_beat = read_counters(&fixture.state);
-    beat(&fixture.app, fixture.series.id, 60_000, device).await;
+    beat(&fixture.app, fixture.series.id, 60_000, device, &session).await;
     println!("[diag:beat] #3 增长后(60000ms) HTTP 200");
     let after_growth = watch.finish();
     let unowned_library_revision_after = revision(&fixture.state, &fixture.unowned_library);
@@ -153,10 +154,11 @@ async fn concurrent_scan_of_ten_thousand_episodes_keeps_heartbeat_write_scope_bo
     let db = fixture.dir.path().join("data/library.db");
     let wal = PathBuf::from(format!("{}-wal", db.display()));
     let device = "dev-scan";
+    let session = open_play_session(&fixture.app, fixture.series.id, device).await;
 
-    beat(&fixture.app, fixture.series.id, 1_000, device).await;
+    beat(&fixture.app, fixture.series.id, 1_000, device, &session).await;
     let watch = DbWatch::open(&db);
-    beat(&fixture.app, fixture.series.id, 30_000, device).await;
+    beat(&fixture.app, fixture.series.id, 30_000, device, &session).await;
     let baseline = watch.finish();
     assert!(
         baseline.write_scope > 0,
@@ -183,7 +185,7 @@ async fn concurrent_scan_of_ten_thousand_episodes_keeps_heartbeat_write_scope_bo
         move || run_scan(store, plan)
     });
     let (latencies, statuses) =
-        hammer_while_scanning(&fixture.app, fixture.series.id, device, &scanner).await;
+        hammer_while_scanning(&fixture.app, fixture.series.id, device, &session, &scanner).await;
     let report = scanner.join().unwrap();
     let (wal_after, rss_after) = (file_len(&wal), rss_kb());
 
@@ -201,7 +203,7 @@ async fn concurrent_scan_of_ten_thousand_episodes_keeps_heartbeat_write_scope_bo
     );
 
     watch.snapshot().unwrap();
-    beat(&fixture.app, fixture.series.id, 40_000, device).await;
+    beat(&fixture.app, fixture.series.id, 40_000, device, &session).await;
     let after_scan = watch.finish();
     assert_eq!(
         after_scan.write_scope, baseline.write_scope,
@@ -234,30 +236,8 @@ fn rollback_and_cancelled_scan_keep_facts_and_summary_consistent_across_restart(
     let db = data.join("library.db");
     let store = Store::open(&data).unwrap();
 
-    let library = store
-        .create_library(
-            MediaKind::Tv,
-            "Rollback Series",
-            &[temp.path().join("series").to_str().unwrap()],
-            "everyone",
-            true,
-            &[],
-        )
-        .unwrap();
+    let (library, template, root_path) = seed_rollback_series(&store, temp.path());
     let library_id: LibraryId = library.id.parse().unwrap();
-    let (root_id, root_path) = root_of(&store, &library.id);
-    let series = media(MediaKind::Tv, "Rollback Series");
-    store.insert_media(&series).unwrap();
-    let template = file_template(library_id, &root_id, series.id, MediaKind::Tv);
-    let episode_one = episode_file(&template, &root_path, 1, 1);
-    publish(
-        &store,
-        &library_id,
-        &[episode_one],
-        &[UnitKey::new(1, 1)],
-        1_000,
-    )
-    .unwrap();
 
     // 一条被取消的扫描 + 一条 running 的扫描：只有后者允许在重启后被重新排队。
     let cancelled = store
@@ -279,7 +259,7 @@ fn rollback_and_cancelled_scan_keep_facts_and_summary_consistent_across_restart(
     );
     assert_eq!(scan_status(&db, &interrupted.id), "running");
 
-    let media_id = series.id.to_string();
+    let media_id = template.media_id.to_string();
     let summary_before = summary_tuple(&db, &library.id, &media_id);
     assert!(summary_before.is_some(), "setup 必须已经生成摘要行");
     let watch = DbWatch::open(&db);
@@ -437,4 +417,36 @@ fn write_scope_instrument_detects_row_changes() {
         facts.write_scope, 1,
         "一行 DELETE 的写作用域是 1: {facts:?}"
     );
+}
+
+fn seed_rollback_series(
+    store: &Store,
+    root: &std::path::Path,
+) -> (store::Library, LibraryFile, PathBuf) {
+    let library = store
+        .create_library(
+            MediaKind::Tv,
+            "Rollback Series",
+            &[root.join("series").to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let library_id: LibraryId = library.id.parse().unwrap();
+    let (root_id, root_path) = root_of(&store, &library.id);
+    let series = media(MediaKind::Tv, "Rollback Series");
+    store.insert_media(&series).unwrap();
+    let template = file_template(library_id, &root_id, series.id, MediaKind::Tv);
+    let episode_one = episode_file(&template, &root_path, 1, 1);
+    publish(
+        &store,
+        &library_id,
+        &[episode_one],
+        &[UnitKey::new(1, 1)],
+        1_000,
+    )
+    .unwrap();
+
+    (library, template, root_path)
 }

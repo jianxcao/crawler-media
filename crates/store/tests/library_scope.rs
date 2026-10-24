@@ -109,3 +109,21 @@ fn scope_is_stale_after_root_kind_or_freeze_change() {
     let snapshot2 = store.library_ownership().unwrap();
     assert!(!scope.matches(&snapshot2));
 }
+
+#[test]
+fn watch_owner_compares_only_roots_covering_the_observed_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let parent = tmp.path().join("parent");
+    let nested = parent.join("nested");
+    let unrelated = tmp.path().join("far/deep/unrelated/path");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir_all(&unrelated).unwrap();
+    create(&store, MediaKind::Movie, &[&parent, &unrelated]);
+    let target = create(&store, MediaKind::Tv, &[&nested]);
+    let scope = store::LibraryPathScope::resolve(store.library_ownership().unwrap()).unwrap();
+    let path = store::LibraryPathScope::resolve_path(&nested.join("episode.mkv")).unwrap();
+    assert!(
+        matches!(scope.owner_any(&path),store::StrictOwner::Owned(owner) if owner.id==target.id)
+    );
+}

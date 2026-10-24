@@ -35,7 +35,7 @@ fn create_library(
     let roots = store.list_library_roots().unwrap();
     let root = roots
         .into_iter()
-        .find(|r| r.library_id == Some(lib.id.clone()))
+        .find(|r| r.library_id == lib.id.clone())
         .unwrap();
     (lib, root.id)
 }

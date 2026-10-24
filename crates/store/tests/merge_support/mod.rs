@@ -41,7 +41,7 @@ pub fn create_library(
     let roots = store.list_library_roots().unwrap();
     let root = roots
         .into_iter()
-        .find(|r| r.library_id == Some(lib.id.clone()))
+        .find(|r| r.library_id == lib.id.clone())
         .unwrap();
     (lib, root.id)
 }
@@ -299,6 +299,48 @@ pub fn setup_pending_merge() -> MergeFixture {
 }
 
 fn setup_merge_inner(advance: bool) -> MergeFixture {
+    let (tmp, store, library) = seed_merge_files();
+    let library_db = Connection::open(tmp.path().join("library.db")).unwrap();
+    seed_merge_playback(&library_db);
+    seed_merge_metadata(&library_db);
+    seed_merge_relations(&library_db);
+    seed_merge_subscribe(tmp.path());
+    drop(library_db);
+    let survivor_id = "00000000-0000-0000-0000-0000000000a1";
+    let loser_id = "00000000-0000-0000-0000-0000000000a2";
+    let survivor = survivor_id.parse().unwrap();
+    let loser = loser_id.parse().unwrap();
+    let canonical_req_id = "00000000-0000-0000-0005-000000000001".to_string();
+    let request = MediaMergeRequest {
+        request_id: canonical_req_id,
+        survivor,
+        loser,
+        survivor_revision: 0,
+        loser_revision: 0,
+        refresh_targets: BTreeMap::new(),
+    };
+    let op = store
+        .begin_media_merge(&request, 1000)
+        .expect("begin_media_merge");
+    if advance {
+        let status = store
+            .advance_media_merge(&op, 1000)
+            .expect("advance_media_merge");
+        assert_eq!(status.state, "succeeded");
+    }
+
+    MergeFixture {
+        tmp,
+        store,
+        survivor,
+        loser,
+        library,
+        loser_file: "00000000-0000-0000-0001-0000000000a2".into(),
+        op,
+    }
+}
+
+fn seed_merge_files() -> (tempfile::TempDir, Store, LibraryId) {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
 
@@ -306,8 +348,6 @@ fn setup_merge_inner(advance: bool) -> MergeFixture {
     let loser_id = "00000000-0000-0000-0000-0000000000a2";
     create_media(&store, survivor_id, "Survivor Show", MediaKind::Tv);
     create_media(&store, loser_id, "Loser Show Duplicate", MediaKind::Tv);
-    let survivor: MediaId = survivor_id.parse().unwrap();
-    let loser: MediaId = loser_id.parse().unwrap();
 
     let (lib, root_id) = create_library(&store, "TV", MediaKind::Tv, "/tv");
     let library: LibraryId = lib.id.parse().unwrap();
@@ -345,11 +385,18 @@ fn setup_merge_inner(advance: bool) -> MergeFixture {
             .unwrap();
     }
 
+    (tmp, store, library)
+}
+
+fn seed_merge_playback(library_db: &Connection) {
+    let survivor_id = "00000000-0000-0000-0000-0000000000a1";
+    let loser_id = "00000000-0000-0000-0000-0000000000a2";
+    let survivor_file = "00000000-0000-0000-0001-0000000000a1".to_string();
+    let loser_file = "00000000-0000-0000-0001-0000000000a2".to_string();
     let user_a = "00000000-0000-0000-0002-000000000001";
     let user_b = "00000000-0000-0000-0002-000000000002";
-    let library_db = Connection::open(tmp.path().join("library.db")).unwrap();
     insert_playback(
-        &library_db,
+        library_db,
         survivor_id,
         &PlaybackSeed {
             user: user_a,
@@ -365,7 +412,7 @@ fn setup_merge_inner(advance: bool) -> MergeFixture {
         },
     );
     insert_playback(
-        &library_db,
+        library_db,
         loser_id,
         &PlaybackSeed {
             user: user_a,
@@ -381,7 +428,7 @@ fn setup_merge_inner(advance: bool) -> MergeFixture {
         },
     );
     insert_playback(
-        &library_db,
+        library_db,
         loser_id,
         &PlaybackSeed {
             user: user_b,
@@ -396,9 +443,13 @@ fn setup_merge_inner(advance: bool) -> MergeFixture {
             resume: None,
         },
     );
+}
 
+fn seed_merge_metadata(library_db: &Connection) {
+    let survivor_id = "00000000-0000-0000-0000-0000000000a1";
+    let loser_id = "00000000-0000-0000-0000-0000000000a2";
     insert_metadata(
-        &library_db,
+        library_db,
         survivor_id,
         "zh-CN",
         "Survivor Show",
@@ -408,7 +459,7 @@ fn setup_merge_inner(advance: bool) -> MergeFixture {
         r#"{"title":"nfo","language":"nfo"}"#,
     );
     insert_metadata(
-        &library_db,
+        library_db,
         loser_id,
         "zh-CN",
         "Loser Show Duplicate",
@@ -418,7 +469,7 @@ fn setup_merge_inner(advance: bool) -> MergeFixture {
         r#"{"title":"nfo","overview":"nfo","language":"nfo","genres":"nfo"}"#,
     );
     insert_metadata(
-        &library_db,
+        library_db,
         loser_id,
         "en-US",
         "Loser Show EN",
@@ -428,48 +479,53 @@ fn setup_merge_inner(advance: bool) -> MergeFixture {
         r#"{"title":"nfo","overview":"nfo"}"#,
     );
     insert_metadata_source(
-        &library_db,
+        library_db,
         survivor_id,
         "tmdb",
         "zh-CN",
         "survivor-snapshot",
     );
-    insert_metadata_source(&library_db, loser_id, "tmdb", "zh-CN", "loser-snapshot");
-    insert_metadata_source(&library_db, loser_id, "tvdb", "zh-CN", "loser-tvdb");
+    insert_metadata_source(library_db, loser_id, "tmdb", "zh-CN", "loser-snapshot");
+    insert_metadata_source(library_db, loser_id, "tvdb", "zh-CN", "loser-tvdb");
     insert_metadata_override(
-        &library_db,
+        library_db,
         survivor_id,
         "zh-CN",
         r#"{"title":{"state":"value","value":"survivor override"}}"#,
     );
     insert_metadata_override(
-        &library_db,
+        library_db,
         loser_id,
         "zh-CN",
         // Same lock as the survivor: a conflicting lock is refused (R21), not dropped.
         r#"{"title":{"state":"value","value":"survivor override"}}"#,
     );
     insert_metadata_override(
-        &library_db,
+        library_db,
         loser_id,
         "en-US",
         r#"{"title":{"state":"value","value":"loser en override"}}"#,
     );
-    insert_season(&library_db, survivor_id, 1, "zh-CN", "Survivor S1");
-    insert_season(&library_db, loser_id, 1, "zh-CN", "Loser S1");
-    insert_season(&library_db, loser_id, 2, "zh-CN", "Loser S2");
-    insert_episode(&library_db, survivor_id, 1, 1, "zh-CN", "Survivor E1");
-    insert_episode(&library_db, loser_id, 1, 1, "zh-CN", "Loser E1");
-    insert_episode(&library_db, loser_id, 2, 1, "zh-CN", "Loser E2");
+    insert_season(library_db, survivor_id, 1, "zh-CN", "Survivor S1");
+    insert_season(library_db, loser_id, 1, "zh-CN", "Loser S1");
+    insert_season(library_db, loser_id, 2, "zh-CN", "Loser S2");
+    insert_episode(library_db, survivor_id, 1, 1, "zh-CN", "Survivor E1");
+    insert_episode(library_db, loser_id, 1, 1, "zh-CN", "Loser E1");
+    insert_episode(library_db, loser_id, 2, 1, "zh-CN", "Loser E2");
+}
 
+fn seed_merge_relations(library_db: &Connection) {
+    let survivor_id = "00000000-0000-0000-0000-0000000000a1";
+    let loser_id = "00000000-0000-0000-0000-0000000000a2";
+    let user_a = "00000000-0000-0000-0002-000000000001";
     library_db
         .execute(
             "DELETE FROM media_aliases WHERE media_id IN (?1, ?2)",
             params![survivor_id, loser_id],
         )
         .unwrap();
-    insert_alias(&library_db, survivor_id, "tmdb", "survivor-tmdb", 0);
-    insert_alias(&library_db, loser_id, "tmdb", "loser-tmdb", 1);
+    insert_alias(library_db, survivor_id, "tmdb", "survivor-tmdb", 0);
+    insert_alias(library_db, loser_id, "tmdb", "loser-tmdb", 1);
 
     for collection in ["col1", "col2"] {
         library_db
@@ -480,11 +536,15 @@ fn setup_merge_inner(advance: bool) -> MergeFixture {
             )
             .unwrap();
     }
-    insert_collection_item(&library_db, "col1", survivor_id, 5, "2024-01-02");
-    insert_collection_item(&library_db, "col1", loser_id, 2, "2024-01-01");
-    insert_collection_item(&library_db, "col2", loser_id, 1, "2024-01-03");
+    insert_collection_item(library_db, "col1", survivor_id, 5, "2024-01-02");
+    insert_collection_item(library_db, "col1", loser_id, 2, "2024-01-01");
+    insert_collection_item(library_db, "col2", loser_id, 1, "2024-01-03");
+}
 
-    let subscribe_db = Connection::open(tmp.path().join("subscribe.db")).unwrap();
+fn seed_merge_subscribe(data_dir: &std::path::Path) {
+    let loser_id = "00000000-0000-0000-0000-0000000000a2";
+    let user_a = "00000000-0000-0000-0002-000000000001";
+    let subscribe_db = Connection::open(data_dir.join("subscribe.db")).unwrap();
     subscribe_db
         .execute(
             "INSERT INTO subscribes
@@ -499,36 +559,6 @@ fn setup_merge_inner(advance: bool) -> MergeFixture {
         )
         .unwrap();
     drop(subscribe_db);
-    drop(library_db);
-
-    let canonical_req_id = "00000000-0000-0000-0005-000000000001".to_string();
-    let request = MediaMergeRequest {
-        request_id: canonical_req_id,
-        survivor,
-        loser,
-        survivor_revision: 0,
-        loser_revision: 0,
-        refresh_targets: BTreeMap::new(),
-    };
-    let op = store
-        .begin_media_merge(&request, 1000)
-        .expect("begin_media_merge");
-    if advance {
-        let status = store
-            .advance_media_merge(&op, 1000)
-            .expect("advance_media_merge");
-        assert_eq!(status.state, "succeeded");
-    }
-
-    MergeFixture {
-        tmp,
-        store,
-        survivor,
-        loser,
-        library,
-        loser_file,
-        op,
-    }
 }
 
 pub type SummaryRow = (

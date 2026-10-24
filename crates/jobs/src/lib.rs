@@ -7,6 +7,7 @@ mod read;
 mod retention;
 mod rows;
 mod schedule;
+pub mod schema;
 mod store;
 mod types;
 

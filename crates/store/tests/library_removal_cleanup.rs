@@ -213,3 +213,38 @@ fn removal_boundary_survives_reopen_without_the_per_file_snapshot() {
     assert_eq!(reopened.removal_roots(&done.operation_id).unwrap().len(), 1);
     assert!(reopened.get_library(&library_id).unwrap().is_none());
 }
+
+#[test]
+fn removal_cannot_succeed_before_library_app_settings_are_cleaned() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    let store = Store::open(&data).unwrap();
+    let library = store
+        .create_library(MediaKind::Tv, "Target", &[], "everyone", true, &[])
+        .unwrap();
+    let key = format!("library_cover_checked.{}", library.id);
+    store.put_setting(&key, "true").unwrap();
+    let removal = store.begin_library_removal(&library.id).unwrap();
+    store
+        .set_removal_state(&removal.operation_id, "cleaning", None)
+        .unwrap();
+    let app = rusqlite::Connection::open(data.join("app.db")).unwrap();
+    app.execute_batch("CREATE TRIGGER fail_removal_settings BEFORE DELETE ON settings BEGIN SELECT RAISE(ABORT,'injected app cleanup'); END;").unwrap();
+    assert!(store.clean_library_removal(&removal.operation_id).is_err());
+    assert_eq!(
+        store
+            .library_removal(&removal.operation_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        "cleaning"
+    );
+    assert!(store.get_library(&library.id).unwrap().is_some());
+    assert_eq!(store.get_setting(&key).unwrap(), Some("true".into()));
+    app.execute_batch("DROP TRIGGER fail_removal_settings")
+        .unwrap();
+    let done = store.clean_library_removal(&removal.operation_id).unwrap();
+    assert_eq!(done.operation_id, removal.operation_id);
+    assert_eq!(done.state, "succeeded");
+    assert!(store.get_setting(&key).unwrap().is_none());
+}

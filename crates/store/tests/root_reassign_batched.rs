@@ -149,7 +149,7 @@ fn batched_reassign_keeps_nfo_inputs_of_later_files() {
         "<season><seasonnumber>2</seasonnumber><title>Season two</title><plot>Season plot</plot></season>",
     )
     .unwrap();
-    publish_season(&store, media_id, &dir_a, 1, 100);
+    publish_season(&store, media_id, &dir_a, 1, 300);
     let episode_b = dir_b.join("Show.S02E01.mkv");
     std::fs::write(&episode_b, b"b").unwrap();
     std::fs::write(
@@ -188,7 +188,7 @@ fn batched_reassign_keeps_nfo_inputs_of_later_files() {
         .unwrap();
     set_root_reassign_batch_budget(None);
     assert_eq!(owned_by(&store, &nested_lib.id), 100);
-    assert_eq!(owned_by(&store, &lib.id), 1);
+    assert_eq!(owned_by(&store, &lib.id), 201);
     assert_eq!(
         nfo_rows(&data, "episode"),
         before_episode,
@@ -198,7 +198,7 @@ fn batched_reassign_keeps_nfo_inputs_of_later_files() {
 
     let store = Store::open(&data).unwrap();
     store.drain_root_reassignments().unwrap();
-    assert_eq!(owned_by(&store, &nested_lib.id), 101);
+    assert_eq!(owned_by(&store, &nested_lib.id), 301);
     assert_eq!(owned_by(&store, &lib.id), 0);
     assert_eq!(nfo_rows(&data, "episode"), before_episode);
     assert_eq!(nfo_rows(&data, "work"), before_work);

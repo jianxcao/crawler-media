@@ -54,10 +54,7 @@ fn season_refresh_does_not_overwrite_recapture_policy() {
 
     let tv_root = tmp.path().join("tv");
     std::fs::create_dir_all(&tv_root).unwrap();
-    store
-        .lock()
-        .set_library_root(MediaKind::Tv, tv_root.to_str().unwrap())
-        .unwrap();
+    store::test_support::reconfigure_default_root(&store.lock(), MediaKind::Tv, &tv_root).unwrap();
     let row = publish_coverage(&store.lock(), media_id, &tv_root.join("Test.S01E01.mkv"), 1);
 
     let mgr = ProbeManager::new(store.clone());
@@ -116,10 +113,7 @@ fn database_failure_rolls_back_markers_chapters_and_job_terminal() {
 
     let tv_root = tmp.path().join("tv");
     std::fs::create_dir_all(&tv_root).unwrap();
-    store
-        .lock()
-        .set_library_root(MediaKind::Tv, tv_root.to_str().unwrap())
-        .unwrap();
+    store::test_support::reconfigure_default_root(&store.lock(), MediaKind::Tv, &tv_root).unwrap();
     let row = publish_coverage(
         &store.lock(),
         media_id,
@@ -198,86 +192,13 @@ async fn seed_episodes_retain_markers_after_season_template_built() {
 
     let tv_root = tmp.path().join("tv");
     std::fs::create_dir_all(&tv_root).unwrap();
-    store
-        .lock()
-        .set_library_root(MediaKind::Tv, tv_root.to_str().unwrap())
-        .unwrap();
+    store::test_support::reconfigure_default_root(&store.lock(), MediaKind::Tv, &tv_root).unwrap();
     let ep1_path = tv_root.join("Test.Retain.S01E01.mkv");
     let ep2_path = tv_root.join("Test.Retain.S01E02.mkv");
     std::fs::write(&ep1_path, b"dummy").unwrap();
     std::fs::write(&ep2_path, b"dummy").unwrap();
     let row1 = publish_coverage(&store.lock(), media_id, &ep1_path, 1);
     let row2 = publish_coverage(&store.lock(), media_id, &ep2_path, 2);
-
-    struct SharedMatchEngine;
-    impl marker::fingerprint::capture_types::FingerprintCaptureEngine for SharedMatchEngine {
-        fn capture_window(
-            &self,
-            request: &marker::fingerprint::capture_types::CaptureRequest,
-        ) -> Result<
-            marker::fingerprint::capture_types::CapturedFingerprint,
-            marker::fingerprint::capture_types::CaptureFailure,
-        > {
-            let dur_ms = request.window.duration_ms();
-            // Generate identical fingerprint pattern so both seeds match each other
-            let num_words = (dur_ms / 128).max(1) as usize;
-            let words = (0..num_words).map(|i| (i as u32) + 42).collect();
-            Ok(marker::fingerprint::capture_types::CapturedFingerprint {
-                window: request.window.clone(),
-                words,
-                pcm_duration_ms: Some(dur_ms),
-                metrics: marker::fingerprint::capture_types::CaptureMetrics {
-                    elapsed_ms: 10,
-                    pcm_bytes: (num_words * 4) as u64,
-                    ..Default::default()
-                },
-            })
-        }
-    }
-
-    impl marker::FingerprintEngine for SharedMatchEngine {
-        fn extract_at(
-            &self,
-            _path: &std::path::Path,
-            _start_secs: u32,
-            _duration_secs: u32,
-        ) -> Result<marker::AudioFingerprint, String> {
-            Ok(vec![42; 100])
-        }
-
-        fn find_common_segment(
-            &self,
-            first: &[u32],
-            second: &[u32],
-            _min_duration_secs: f32,
-            _max_duration_secs: f32,
-        ) -> Option<marker::CommonSegment> {
-            if !first.is_empty() && !second.is_empty() {
-                Some(marker::CommonSegment {
-                    start1_sec: 10.0,
-                    end1_sec: 90.0,
-                    start2_sec: 10.0,
-                    end2_sec: 90.0,
-                    duration_sec: 80.0,
-                    score: 0.95,
-                })
-            } else {
-                None
-            }
-        }
-
-        fn find_common_segments(
-            &self,
-            first: &[u32],
-            second: &[u32],
-            min_duration_secs: f32,
-            max_duration_secs: f32,
-        ) -> Vec<marker::CommonSegment> {
-            self.find_common_segment(first, second, min_duration_secs, max_duration_secs)
-                .into_iter()
-                .collect()
-        }
-    }
 
     let shared_engine = Arc::new(SharedMatchEngine);
     let mgr = ProbeManager::with_engines(store.clone(), shared_engine.clone(), shared_engine);
@@ -355,4 +276,74 @@ async fn seed_episodes_retain_markers_after_season_template_built() {
         ep2.intro_end_ms.is_some(),
         "Episode 2 intro end must be populated!"
     );
+}
+
+struct SharedMatchEngine;
+impl marker::fingerprint::capture_types::FingerprintCaptureEngine for SharedMatchEngine {
+    fn capture_window(
+        &self,
+        request: &marker::fingerprint::capture_types::CaptureRequest,
+    ) -> Result<
+        marker::fingerprint::capture_types::CapturedFingerprint,
+        marker::fingerprint::capture_types::CaptureFailure,
+    > {
+        let dur_ms = request.window.duration_ms();
+        // Generate identical fingerprint pattern so both seeds match each other
+        let num_words = (dur_ms / 128).max(1) as usize;
+        let words = (0..num_words).map(|i| (i as u32) + 42).collect();
+        Ok(marker::fingerprint::capture_types::CapturedFingerprint {
+            window: request.window.clone(),
+            words,
+            pcm_duration_ms: Some(dur_ms),
+            metrics: marker::fingerprint::capture_types::CaptureMetrics {
+                elapsed_ms: 10,
+                pcm_bytes: (num_words * 4) as u64,
+                ..Default::default()
+            },
+        })
+    }
+}
+
+impl marker::FingerprintEngine for SharedMatchEngine {
+    fn extract_at(
+        &self,
+        _path: &std::path::Path,
+        _start_secs: u32,
+        _duration_secs: u32,
+    ) -> Result<marker::AudioFingerprint, String> {
+        Ok(vec![42; 100])
+    }
+
+    fn find_common_segment(
+        &self,
+        first: &[u32],
+        second: &[u32],
+        _min_duration_secs: f32,
+        _max_duration_secs: f32,
+    ) -> Option<marker::CommonSegment> {
+        if !first.is_empty() && !second.is_empty() {
+            Some(marker::CommonSegment {
+                start1_sec: 10.0,
+                end1_sec: 90.0,
+                start2_sec: 10.0,
+                end2_sec: 90.0,
+                duration_sec: 80.0,
+                score: 0.95,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn find_common_segments(
+        &self,
+        first: &[u32],
+        second: &[u32],
+        min_duration_secs: f32,
+        max_duration_secs: f32,
+    ) -> Vec<marker::CommonSegment> {
+        self.find_common_segment(first, second, min_duration_secs, max_duration_secs)
+            .into_iter()
+            .collect()
+    }
 }

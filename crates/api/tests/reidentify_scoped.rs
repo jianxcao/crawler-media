@@ -119,7 +119,7 @@ fn setup_fixture() -> (
         let roots = store.list_library_roots().unwrap();
         let root = roots
             .into_iter()
-            .find(|r| r.library_id.as_deref() == Some(&lib.id))
+            .find(|r| r.library_id.as_str() == lib.id.as_str())
             .unwrap();
         let root_path = root.path.display().to_string();
 
@@ -389,7 +389,7 @@ async fn reidentify_invalid_or_cross_media_file_ids_returns_400() {
         let roots = store.list_library_roots().unwrap();
         let root = roots
             .into_iter()
-            .find(|r| r.library_id == Some(lib_id.to_string()))
+            .find(|r| r.library_id == lib_id.to_string())
             .unwrap();
         let scope = WriteScope {
             library_id: lib_id,

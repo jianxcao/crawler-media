@@ -14,7 +14,7 @@ pub mod layout;
 #[path = "schema/v1/objects.rs"]
 pub mod v1;
 
-/// Insert the built-in naming templates, the default Filter and the default
+/// Insert the default Filter and the default
 /// Libraries with their roots. Idempotent: existing rows are kept.
 pub fn seed_defaults(
     app: &Connection,
@@ -25,20 +25,6 @@ pub fn seed_defaults(
     let tv_root = data_dir.join("library/tv");
     std::fs::create_dir_all(&movie_root)?;
     std::fs::create_dir_all(&tv_root)?;
-    app.execute(
-        "INSERT OR IGNORE INTO naming_templates (kind, pattern) VALUES (?1, ?2)",
-        params![
-            "movie",
-            "{title} ({year})/{title} ({year}){part} - {resolution}{ext}"
-        ],
-    )?;
-    app.execute(
-        "INSERT OR IGNORE INTO naming_templates (kind, pattern) VALUES (?1, ?2)",
-        params![
-            "tv",
-            "{title} ({year})/Season {season}/{title} - {season_episode}{part}{ext}"
-        ],
-    )?;
     let filter_id = uuid::Uuid::new_v4().to_string();
     // JSON atom form only (see maps::serialize_atoms): rows in the older DSL shape are refused.
     let atoms = r#"[{"priority":100,"rule":"resolution","exclude":false,"value":"2160p"},{"priority":50,"rule":"resolution","exclude":false,"value":"1080p"}]"#;

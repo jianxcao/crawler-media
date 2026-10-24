@@ -67,7 +67,7 @@ fn seed_fixture(store: &Store, dir: &std::path::Path, kind: MediaKind) -> Fixtur
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|entry| entry.library_id.as_deref() == Some(library.id.as_str()))
+        .find(|entry| entry.library_id.as_str() == library.id.as_str())
         .map(|entry| entry.id)
         .unwrap();
     Fixture {

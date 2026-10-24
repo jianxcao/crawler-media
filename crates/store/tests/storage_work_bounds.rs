@@ -119,7 +119,7 @@ fn create_action_movies_library(store: &Store) -> (LibraryId, String) {
     let roots = store.list_library_roots().unwrap();
     let root = roots
         .into_iter()
-        .find(|r| r.library_id == Some(lib.id.clone()))
+        .find(|r| r.library_id == lib.id.clone())
         .unwrap();
     (lib.id.parse().unwrap(), root.id)
 }
@@ -325,7 +325,7 @@ fn create_named_library(store: &Store, name: &str, root_path: &str) -> (LibraryI
     let roots = store.list_library_roots().unwrap();
     let root = roots
         .iter()
-        .find(|r| r.library_id.as_deref() == Some(&lib.id))
+        .find(|r| r.library_id.as_str() == lib.id.as_str())
         .unwrap();
     (lib_id, root.id.clone())
 }

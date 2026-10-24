@@ -165,7 +165,7 @@ pub(crate) fn root_of(store: &Store, library_id: &str) -> (String, PathBuf) {
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|root| root.library_id.as_deref() == Some(library_id))
+        .find(|root| root.library_id.as_str() == library_id)
         .expect("Library 必须有一条根");
     (root.id, root.path)
 }
@@ -255,15 +255,33 @@ pub(crate) fn publish(
     )
 }
 
-pub(crate) fn heartbeat_body(series: MediaId, position_ms: i64, device: &str) -> Value {
+pub(crate) fn heartbeat_body(
+    series: MediaId,
+    position_ms: i64,
+    device: &str,
+    session: &str,
+) -> Value {
     json!({
         "device_id": device,
+        "play_session_id": session,
+        "event_sequence": crate::common::next_playback_sequence(),
+        "event": "progress",
         "media_item_id": series.to_string(),
         "season_number": 1,
         "episode_number": 1,
         "position_ms": position_ms,
         "duration_ms": SERIES_DURATION_MS,
     })
+}
+
+/// The benchmark client obtains its real binding before measuring heartbeat work.
+pub(crate) async fn open_play_session(app: &Router, series: MediaId, device: &str) -> String {
+    let response = app.clone().oneshot(crate::common::request(
+        "POST", "/api/v1/playback/sessions", Some(TOKEN),
+        json!({"media_item_id":series.to_string(),"season_number":1,"episode_number":1,"device_id":device}),
+    )).await.unwrap();
+    let body = crate::common::json_data(response).await;
+    body["play_session_id"].as_str().unwrap().to_string()
 }
 
 /// 打真实路由：`/api/v1/playback/heartbeat` 不存在，真实路径是 `/playback/progress`。
@@ -289,20 +307,32 @@ pub(crate) async fn progress(app: &Router, body: Value) -> Value {
     payload
 }
 
-pub(crate) async fn beat(app: &Router, series: MediaId, position_ms: i64, device: &str) {
-    progress(app, heartbeat_body(series, position_ms, device)).await;
+pub(crate) async fn beat(
+    app: &Router,
+    series: MediaId,
+    position_ms: i64,
+    device: &str,
+    session: &str,
+) {
+    progress(app, heartbeat_body(series, position_ms, device, session)).await;
 }
 
 /// 首个事件的 `start` 形状：生产客户端先开播放会话再发 `start`；`progress` 是后续心跳的形状。
 /// 预热心跳必须用这一形状，否则「无会话的首次 progress」不是真实生产序列。
-pub(crate) fn start_body(series: MediaId, position_ms: i64, device: &str) -> Value {
-    let mut body = heartbeat_body(series, position_ms, device);
+pub(crate) fn start_body(series: MediaId, position_ms: i64, device: &str, session: &str) -> Value {
+    let mut body = heartbeat_body(series, position_ms, device, session);
     body["event"] = Value::String("start".to_string());
     body
 }
 
-pub(crate) async fn beat_start(app: &Router, series: MediaId, position_ms: i64, device: &str) {
-    progress(app, start_body(series, position_ms, device)).await;
+pub(crate) async fn beat_start(
+    app: &Router,
+    series: MediaId,
+    position_ms: i64,
+    device: &str,
+    session: &str,
+) {
+    progress(app, start_body(series, position_ms, device, session)).await;
 }
 
 pub(crate) fn revision(state: &ApiState, library_id: &str) -> i64 {

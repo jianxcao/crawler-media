@@ -100,15 +100,13 @@ async fn empty_library_history_clear_preserves_other_library() {
             "POST",
             "/api/v1/playback/progress",
             Some("management-secret"),
-            serde_json::json!({
+            serde_json::json!({ "event_sequence": crate::common::next_playback_sequence(),
                 "device_id": "test-device-1",
                 "media_item_id": media_id.to_string(),
                 "play_session_id": session,
                 "event": "start",
-                "media_kind": "movie",
                 "position_ms": 120000,
                 "duration_ms": 7200000,
-                "action": "progress",
             }),
         ))
         .await

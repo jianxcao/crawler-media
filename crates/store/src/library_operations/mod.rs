@@ -24,7 +24,9 @@ use crate::{Store, StoreError};
 
 pub mod integrity;
 mod locale;
+mod preparation;
 mod root_keys;
+pub use preparation::PreparedLibraryReconfiguration;
 mod roots;
 
 /// A requested root set and/or display locale for one Library.
@@ -101,32 +103,17 @@ impl Store {
         request: &LibraryReconfiguration,
         now_ms: i64,
     ) -> Result<OperationStatus, StoreError> {
-        if request.root_paths.is_none() && request.display_locale.is_none() {
-            return Err(StoreError::Invalid(
-                "library reconfiguration needs a root set or a locale".into(),
-            ));
-        }
-        if let Some(paths) = &request.root_paths
-            && paths.is_empty()
-        {
-            return Err(StoreError::Invalid(
-                "library reconfiguration cannot drop every root".into(),
-            ));
-        }
-        // Canonical keys are resolved once, before the write lock, and persisted with
-        // the plan; two spellings of one directory are refused here.
-        let prepared = request
-            .root_paths
-            .as_deref()
-            .map(root_keys::prepare_roots)
-            .transpose()?;
-        if request
-            .display_locale
-            .as_deref()
-            .is_some_and(|locale| locale.trim().is_empty())
-        {
-            return Err(StoreError::Invalid("display locale cannot be empty".into()));
-        }
+        self.begin_library_reconfiguration_prepared(&request.prepare()?, now_ms)
+    }
+
+    /// Commit an intent whose filesystem observations were made without Store.
+    pub fn begin_library_reconfiguration_prepared(
+        &self,
+        prepared: &PreparedLibraryReconfiguration,
+        now_ms: i64,
+    ) -> Result<OperationStatus, StoreError> {
+        let request = &prepared.request;
+        let prepared = prepared.roots.clone();
         let library = request.library_id.to_string();
         // Step 3's first item: a pending removal owns the Library *before* it touches
         // `lifecycle_state`, so the removal row — not the lifecycle — is what refuses a
@@ -134,6 +121,9 @@ impl Store {
         // migration that then fights the removal for the same files.
         self.ensure_library_mutable(&library)?;
         let tx = crate::write_tx(&self.library)?;
+        if let Some(roots) = &prepared {
+            self.ensure_removal_keys_available(roots.iter().map(|root| root.path_key.as_str()))?;
+        }
         let current: Option<(i64, String)> = tx
             .query_row(
                 "SELECT config_revision, lifecycle_state FROM libraries WHERE library_id = ?1",

@@ -268,11 +268,8 @@ fn is_path_in_watch_intake(state: &ApiState, path: &Path) -> bool {
 
 pub(crate) fn realtime_library_root_for_path(state: &ApiState, path: &Path) -> Option<PathBuf> {
     let resolved_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    state
-        .store
-        .lock()
-        .list_libraries()
-        .ok()?
+    let libraries = { state.store.lock().list_libraries().ok()? };
+    libraries
         .into_iter()
         .filter(|library| library.realtime_watch)
         .flat_map(|library| library.root_paths)

@@ -35,6 +35,7 @@ async fn progress(
     position_ms: i64,
 ) -> (StatusCode, Value) {
     let mut body = json!({
+        "event_sequence": support::session::next_sequence(),
         "device_id": device,
         "media_item_id": row.media_id.to_string(),
         "file_id": row.file_id.to_string(),
@@ -167,32 +168,33 @@ async fn watched_time_accumulates_correctly_and_ignores_seeks() {
 }
 
 #[tokio::test]
-async fn legacy_client_without_session_id_seek_does_not_accumulate_watch_time() {
+async fn missing_session_events_do_not_create_watch_time_or_resume_facts() {
     let (fix, clock) = clocked_fixture(1_000_000);
-    let (_, row) = fix.insert_media_and_ledger("legacy_seek.mkv");
-    let user_id = admin_user(&fix);
-
-    let (status, _) = progress(&fix, &row, "legacy_dev", None, "start", 0).await;
-    assert_eq!(status, StatusCode::OK);
-
-    // 先正常播放 10 秒拿到非零基线。
-    clock.0.fetch_add(10_000, Ordering::SeqCst);
-    let (status, _) = progress(&fix, &row, "legacy_dev", None, "progress", 10_000).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        session_state(&fix, user_id, "legacy_dev"),
-        (10_000, 10_000),
-        "旧客户端正常播放同样进账 10_000ms"
+    let (_, row) = fix.insert_media_and_ledger("unbound_seek.mkv");
+    let user = admin_user(&fix);
+    for (event, position) in [
+        ("start", 0),
+        ("progress", 10_000),
+        ("progress", 600_000),
+        ("stop", 600_000),
+    ] {
+        clock.0.fetch_add(10_000, Ordering::SeqCst);
+        let (status, _) = progress(&fix, &row, "unbound", None, event, position).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    let shared = fix.state.store();
+    let store = shared.lock();
+    assert!(store.get_session(user, "unbound").unwrap().is_none());
+    assert!(
+        store
+            .unit_state(user, row.media_id, -1, -1)
+            .unwrap()
+            .is_none()
     );
-
-    // 旧客户端不带 `play_session_id`：路由复用 Start 签发的会话，事件仍在 canonical
-    // 写路径上落库（位置推进到 600_000），但 600 秒跳变距离不进账。
-    clock.0.fetch_add(10_000, Ordering::SeqCst);
-    let (status, _) = progress(&fix, &row, "legacy_dev", None, "progress", 600_000).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        session_state(&fix, user_id, "legacy_dev"),
-        (10_000, 600_000),
-        "legacy seek 落库新位置，但不得把跳变距离计入观看时间"
+    assert!(
+        store
+            .list_logs(10, None, None, None, i64::MAX / 2, None)
+            .unwrap()
+            .is_empty()
     );
 }

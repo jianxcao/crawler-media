@@ -7,7 +7,9 @@ use rusqlite::{OptionalExtension, params};
 use super::{Store, StoreError};
 use std::collections::HashSet;
 
+mod status;
 mod unidentified;
+pub use status::RootReassignment;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LibraryRoot {
@@ -19,8 +21,8 @@ pub struct LibraryRoot {
     /// non-default Library, are reported as `false` (the directory surface's
     /// "extra roots").
     pub is_default: bool,
-    /// Owning library id (null until backfilled / assigned).
-    pub library_id: Option<String>,
+    /// Persisted owning Library; every current root has exactly one owner.
+    pub library_id: String,
     /// Position within the owning library; 0 = primary root.
     pub sort_order: i32,
     /// Only enabled roots participate in path ownership.
@@ -43,7 +45,7 @@ impl Store {
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, i64>(3)? != 0,
-                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(4)?,
                 row.get::<_, i32>(5)?,
                 row.get::<_, i64>(6)? != 0,
             ))
@@ -76,7 +78,8 @@ impl Store {
             .default_library(kind)?
             .ok_or_else(|| StoreError::Missing(format!("default {} library", kind.as_str())))?;
         self.ensure_library_mutable(&library.id)?;
-        self.ensure_removal_roots_available(&[path])?;
+        let key = crate::path_key::canonical_root_key(path)?;
+        self.ensure_removal_keys_available([key.as_str()])?;
         let sort_order = self.roots_of(&library.id)?.len() as i32;
         let tx = crate::write_tx(&self.library)?;
         tx.execute(
@@ -87,19 +90,19 @@ impl Store {
                 library.id,
                 path,
                 sort_order,
-                crate::path_key::canonical_root_key(path)?
+                key
             ],
         )?;
-        Self::reassign_files_under_root(&tx, &library.id, kind, path)?;
+        Self::reassign_files_under_root(&tx, &library.id, kind, &key)?;
         tx.commit()?;
         crate::path_key::reload_root_aliases(&self.library)?;
-        self.drain_root_reassignments()?;
+        let _ = self.drain_one_root_batch()?;
         Ok(LibraryRoot {
             id,
             kind,
             path: PathBuf::from(path),
             is_default: false,
-            library_id: Some(library.id),
+            library_id: library.id,
             sort_order,
             enabled: true,
         })
@@ -120,9 +123,7 @@ impl Store {
         if root.is_default {
             return Ok(false);
         }
-        if let Some(owner) = &root.library_id {
-            self.ensure_library_mutable(owner)?;
-        }
+        self.ensure_library_mutable(&root.library_id)?;
         let n = self
             .library
             .execute("DELETE FROM library_roots WHERE root_id = ?1", params![id])?;
@@ -137,12 +138,12 @@ impl Store {
     /// a separate bounded pass before the durable work is acknowledged.
     pub(crate) fn reassign_files_under_root(
         tx: &rusqlite::Connection,
-        _library_id: &str,
+        library_id: &str,
         kind: MediaKind,
-        root_path: &str,
+        root_key: &str,
     ) -> Result<(), StoreError> {
-        let root_key = crate::path_key::canonical_root_key(root_path)?;
-        let (low, _high) = component_range(&root_key);
+        let (low, _high) = component_range(root_key);
+        status::register(tx, library_id, kind, root_key)?;
         // NFO inputs move with the file batch that still covers them. Moving every
         // input here lets the first reduce delete sidecars whose files are still queued.
         tx.execute(
@@ -170,42 +171,80 @@ impl Store {
         Ok(batches)
     }
 
-    /// One batch, then return. `None` means a frozen destination stopped the drain;
-    /// `Some(false)` means nothing was pending. The caller can drop the Store lock
-    /// between calls.
+    /// One file window. Paused roots rotate behind other work, and only a finite
+    /// dispatch window is inspected while the caller holds the Store.
     pub fn drain_one_root_batch(&self) -> Result<Option<bool>, StoreError> {
         let pending: Vec<(String, String)> = {
-            let mut stmt = self
-                .library
-                .prepare("SELECT kind, root_key FROM pending_root_reassignments ORDER BY length(root_key) DESC, root_key")?;
-            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<Result<Vec<_>, _>>()?
+            let mut statement = self.library.prepare(
+                "SELECT kind,root_key FROM pending_root_reassignments
+                 ORDER BY dispatch_order,kind,root_key LIMIT 1",
+            )?;
+            statement
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<_, _>>()?
         };
-        let Some((kind, root_key)) = pending.into_iter().next() else {
+        if pending.is_empty() {
             return Ok(Some(false));
-        };
-        let kind: MediaKind = kind
-            .parse()
-            .map_err(|_| StoreError::Invalid(format!("reassignment kind {kind}")))?;
-        if !take_batch_budget() {
-            return Ok(None);
         }
-        let tx = crate::write_tx(&self.library)?;
-        let done = reassign_root_batch(&tx, kind, &root_key)?;
-        tx.commit()?;
-        match done {
-            None => {
-                tracing::warn!(
-                    kind = kind.as_str(),
-                    root_key,
-                    "根迁移暂停：目标 Library 尚未就绪"
-                );
-                Ok(None)
+        for (kind, root_key) in pending {
+            if !take_batch_budget() {
+                return Ok(None);
             }
-            // Both an advanced cursor and an exhausted range committed one batch.
-            Some(_) => Ok(Some(true)),
+            let parsed: MediaKind = kind
+                .parse()
+                .map_err(|_| StoreError::Invalid(format!("reassignment kind {kind}")))?;
+            let started = std::time::Instant::now();
+            let tx = crate::write_tx(&self.library)?;
+            let done = match reassign_root_batch(&tx, parsed, &root_key) {
+                Ok(done) => done,
+                Err(error) => {
+                    tx.rollback()?;
+                    let tx = crate::write_tx(&self.library)?;
+                    status::update(&tx, parsed, &root_key, "failed", Some(&error.to_string()))?;
+                    rotate_root(&tx, &kind, &root_key)?;
+                    tx.commit()?;
+                    tracing::error!(kind,root_key,%error,"Root reassignment window rejected; retained for retry");
+                    return Err(error);
+                }
+            };
+            let state = if done == Some(true) {
+                "succeeded"
+            } else if done.is_some() {
+                "running"
+            } else {
+                "blocked"
+            };
+            status::update(&tx, parsed, &root_key, state, None)?;
+            rotate_root(&tx, &kind, &root_key)?;
+            tx.commit()?;
+            if done.is_some() {
+                tracing::debug!(
+                    kind,
+                    root_key,
+                    elapsed_ms = started.elapsed().as_millis(),
+                    state,
+                    "Root reassignment window committed"
+                );
+                return Ok(Some(true));
+            }
+            tracing::debug!(
+                kind,
+                root_key,
+                "Root reassignment paused; rotating other roots"
+            );
         }
+        Ok(None)
     }
+}
+
+fn rotate_root(tx: &rusqlite::Connection, kind: &str, root: &str) -> Result<(), StoreError> {
+    tx.execute(
+        "UPDATE pending_root_reassignments SET dispatch_order=
+         (SELECT COALESCE(MAX(dispatch_order),0)+1 FROM pending_root_reassignments)
+         WHERE kind=?1 AND root_key=?2",
+        params![kind, root],
+    )?;
+    Ok(())
 }
 
 /// Files moved per reassignment transaction.
@@ -323,7 +362,7 @@ fn reassign_root_batch(
         }
     }
     let unidentified_done = if exhausted {
-        let Some(done) = unidentified::reassign_batch(tx, root_key)? else {
+        let Some(done) = unidentified::reassign_batch(tx, kind, root_key)? else {
             return Ok(None);
         };
         done

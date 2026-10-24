@@ -24,8 +24,8 @@ mod assets;
 mod cover;
 pub(crate) mod page;
 pub(crate) use assets::{
-    coverages_in_library, files_in_library, library_json, poster_path, poster_path_with,
-    preferred_coverage,
+    coverages_in_library, files_in_library, library_facts, library_json, library_json_from_facts,
+    poster_path, poster_path_with, preferred_coverage,
 };
 pub(crate) use cover::{default_cover_options, render_cover_jpeg};
 

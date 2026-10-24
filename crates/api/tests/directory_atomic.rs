@@ -1,126 +1,22 @@
-//! `PUT /api/v1/directory` must apply every app.db write atomically: a failing
-//! later write must roll back the roots/naming/mode/watch writes before it.
-
-use std::path::Path;
-use std::sync::Arc;
-
-use api::{ApiState, Store, router};
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use domain::MediaKind;
-use downloader::MemoryDownloader;
-use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
-use serde_json::{Value, json};
-use tower::ServiceExt;
-
-struct NoFetch;
-
-impl Fetcher for NoFetch {
-    fn fetch(&self, _request: &FetchRequest) -> Result<String, IndexerError> {
-        Err(IndexerError::Fetch("offline".into()))
-    }
-}
-
-fn state(root: &Path) -> ApiState {
-    ApiState::new(
-        Store::open(root.join("data")).unwrap(),
-        "management-secret".into(),
-        ProfileSet::load(None).unwrap(),
-        Arc::new(NoFetch),
-        Arc::new(MemoryDownloader::new(root.join("stage"))),
-        root.join("library"),
-    )
-    .unwrap()
-}
-
-fn request(body: Value) -> Request<Body> {
-    Request::builder()
-        .method("PUT")
-        .uri("/api/v1/directory")
-        .header("content-type", "application/json")
-        .header("authorization", "Bearer management-secret")
-        .body(Body::from(body.to_string()))
-        .unwrap()
-}
-
-fn app_connection(root: &Path) -> rusqlite::Connection {
-    rusqlite::Connection::open(root.join("data").join("app.db")).unwrap()
-}
-
-fn library_connection(root: &Path) -> rusqlite::Connection {
-    rusqlite::Connection::open(root.join("data").join("library.db")).unwrap()
-}
-
-fn payload(tmp: &tempfile::TempDir) -> Value {
-    json!({
-        "movie_root": tmp.path().join("new-movies").display().to_string(),
-        "tv_root": tmp.path().join("new-tv").display().to_string(),
-        "movie_naming": "{title}/{title}{ext}",
-        "tv_naming": "{title}/Season {season}/{title}{ext}",
-        "transfer_mode": "copy",
-        "scrape": true,
-        "watch_intake": tmp.path().join("intake").display().to_string(),
-        "watch_inplace": tmp.path().join("inplace").display().to_string(),
-    })
-}
+//! The current Transfer setting is one atomic, revisioned app.db fact.
+#[path = "support/library_presence.rs"]
+mod fixture;
+use axum::http::StatusCode;
+use fixture::PresenceFixture;
+use serde_json::json;
 
 #[tokio::test]
-async fn directory_tv_root_failure_rolls_back_movie_root() {
-    let tmp = tempfile::tempdir().unwrap();
-    let state = state(tmp.path());
-    let old_movie = state.store().lock().library_root(MediaKind::Movie).unwrap();
-    let old_tv = state.store().lock().library_root(MediaKind::Tv).unwrap();
-    library_connection(tmp.path())
-        .execute_batch(
-            "CREATE TRIGGER reject_tv BEFORE UPDATE OF path_key ON library_roots
-             WHEN OLD.kind = 'tv' BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;",
-        )
-        .unwrap();
-
-    let response = router(state.clone())
-        .oneshot(request(payload(&tmp)))
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+async fn failed_transfer_setting_write_preserves_snapshot_and_roots() {
+    let f = PresenceFixture::new();
+    let roots = f.state.store().lock().list_library_roots().unwrap();
+    let previous = f.state.store().lock().transfer_settings().unwrap();
+    let db = rusqlite::Connection::open(f.dir.path().join("data/app.db")).unwrap();
+    db.execute_batch("CREATE TRIGGER reject_transfer BEFORE INSERT ON settings WHEN NEW.key='transfer.settings' BEGIN SELECT RAISE(ABORT,'fixture failure'); END;").unwrap();
+    let (status, _) = f.request_with_body("PATCH", "/api/v1/settings/transfer", Some(&f.admin_token), json!({"expected_revision":0,"transfer_mode":"copy","watch_intake":"/incoming","scrape":true})).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(
-        state.store().lock().library_root(MediaKind::Movie).unwrap(),
-        old_movie,
-        "movie root must not persist when the tv root write fails"
+        f.state.store().lock().transfer_settings().unwrap(),
+        previous
     );
-    assert_eq!(
-        state.store().lock().library_root(MediaKind::Tv).unwrap(),
-        old_tv
-    );
-}
-
-#[tokio::test]
-async fn directory_scrape_config_failure_keeps_roots_mode_and_watch() {
-    let tmp = tempfile::tempdir().unwrap();
-    let state = state(tmp.path());
-    let old_movie = state.store().lock().library_root(MediaKind::Movie).unwrap();
-    let old_tv = state.store().lock().library_root(MediaKind::Tv).unwrap();
-    app_connection(tmp.path())
-        .execute_batch(
-            "CREATE TRIGGER reject_scrape BEFORE INSERT ON settings
-             WHEN NEW.key = 'metadata.scrape'
-             BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;",
-        )
-        .unwrap();
-
-    let response = router(state.clone())
-        .oneshot(request(payload(&tmp)))
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let store = state.store();
-    assert_eq!(
-        store.lock().library_root(MediaKind::Movie).unwrap(),
-        old_movie
-    );
-    assert_eq!(store.lock().library_root(MediaKind::Tv).unwrap(), old_tv);
-    assert_eq!(store.lock().transfer_mode().unwrap(), "hardlink");
-    assert_eq!(store.lock().watch_intake().unwrap(), None);
-    assert_eq!(store.lock().watch_inplace().unwrap(), None);
+    assert_eq!(f.state.store().lock().list_library_roots().unwrap(), roots);
 }

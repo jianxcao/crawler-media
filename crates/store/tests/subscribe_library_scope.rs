@@ -118,7 +118,7 @@ impl Fixture {
         let roots = self.store.list_library_roots().unwrap();
         let root_id = roots
             .into_iter()
-            .find(|r| r.library_id == Some(target.id.clone()))
+            .find(|r| r.library_id == target.id.clone())
             .unwrap()
             .id;
 

@@ -100,7 +100,7 @@ fn seed(dir: &Path) -> Fixture {
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|entry| entry.library_id.as_deref() == Some(library.id.as_str()))
+        .find(|entry| entry.library_id.as_str() == library.id.as_str())
         .unwrap()
         .id;
     let file = make_file(

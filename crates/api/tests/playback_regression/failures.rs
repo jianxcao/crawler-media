@@ -11,7 +11,7 @@ async fn web_event(
     position: i64,
     session: Option<&str>,
 ) -> axum::response::Response {
-    let mut body = json!({"media_item_id":media.to_string(),"device_id":"browser","event":event,"position_ms":position});
+    let mut body = json!({"event_sequence": crate::support::session::next_sequence(),"media_item_id":media.to_string(),"device_id":"browser","event":event,"position_ms":position});
     if let Some(session) = session {
         body["play_session_id"] = json!(session);
     }
@@ -89,12 +89,11 @@ async fn stop_log_failure_retains_session_and_prior_unit() {
 }
 
 #[tokio::test]
-async fn legacy_migration_failure_returns_error_without_shadowing() {
+async fn playback_failure_does_not_shadow_a_different_unit() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, media, id) = app(tmp.path());
     let store = Store::open(tmp.path().join("data")).unwrap();
-    // 预迁移的 (0, 0) 单元必须有一个覆盖该单元的已发布源，resume 事实才写得进去。
-    // 只追加覆盖行，保留 ledger 行「整媒体」的 (-1, -1) 身份。
+    // A separate covered unit keeps its own marks when the whole-file write fails.
     let db = database(tmp.path());
     let (file_id, library_id): (String, String) = db
         .query_row(
@@ -127,8 +126,11 @@ async fn legacy_migration_failure_returns_error_without_shadowing() {
         .unwrap();
     let db = database(tmp.path());
     db.execute_batch("CREATE TRIGGER block_copy BEFORE INSERT ON playback_units WHEN NEW.season=-1 BEGIN SELECT RAISE(ABORT,'copy blocked'); END;").unwrap();
+    let session = issue_session(&store, "browser", media);
     assert_eq!(
-        web_event(&app, media, "start", 45000, None).await.status(),
+        web_event(&app, media, "start", 45000, Some(&session))
+            .await
+            .status(),
         StatusCode::INTERNAL_SERVER_ERROR
     );
     assert_eq!(

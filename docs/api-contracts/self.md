@@ -177,7 +177,13 @@ Playback history/watch stats 的 `member_id` 只接受 User UUID；显式传入�
 
 四个Store文件为app/cache/library/subscribe，队列另在jobs；无旧数据库迁移阶梯或兼容视图。旧LedgerRow、重新识别补当前版本、movie `(0,0)` alias等已移除。Jellyfin协议与公开静态图片保留独立合同。
 
-**cf7fb70 切换偏差（尚未修复）：** 旧 `/directory` 聚合写仍被 Web Transfer/Watch 设置调用，可直接换根而不推进 config revision，Watch 的 null 也未清空；自有 `/playback/progress` 仍接受无签发 session 的旧事件并补当前源版本；默认 Downloader 仍回读 settings JSON；Unidentified 列表仍猜 Library 归属。这些是应删除/迁移的当前实现缺口，不是新增兼容合同。后续新设置 DTO、必填会话及消费者迁移见[唯一技术方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)，真实反例见[复审](../audits/2026-10-24-storage-rereview.md)。
+**Transfer/Watch：** `GET /settings/transfer` 返回 `{revision,transfer_mode,scrape,watch_intake,watch_inplace}`；`PATCH` 必填 `expected_revision`，其他字段可选。Watch 缺失=不改、null/空白=清空、值=替换；transfer_mode/scrape 不接受 null；未知字段或坏类型 400，过期 revision 409，均不写。提交仅在 app 单事务修改目标设置，不写 Library 根或 Naming。旧 `/directory` 与 `/directory/roots` 写路由删除，不转发。
+
+**Library 根：** `PATCH /libraries/{id}` 的 root_paths/display_locale 返回 202 operation，按 `/libraries/{id}/operations/{operation_id}` 查询至 state=succeeded；新增嵌套根的归属收敛状态在 Library DTO 的 root_reassignments 可查询（operation_id/state/revision/config_revision/error）。Naming 仅走 `/settings/scrape` 当前 setting 的 naming_entry_dir/naming_movie_file/naming_season_dir/naming_episode_file 四段字段。
+
+**Playback 事件：** 自有 `POST /playback/progress` 必须提交签发的 play_session_id、非负 event_sequence、device_id 和 start/progress/stop event；缺失、空白、伪造或跨用户/设备绑定 400 且不写播放事实。签发绑定固定 target/file/revision/source/config/generation；已签发但过期事件按 IgnoredStale 合同处理，不能补当前源身份。`POST /playback/sessions` 签发失败返回500；成功回执的 play_session_id 必填，流地址仅由签发绑定生成，保留合法STRM直接URL。Web 显式签发后上报，Jellyfin adapter 按协议建立绑定后复用 Store 提交。
+
+**Unidentified/Downloader：** Unidentified 列表从登记的 library_id/root_id 返回并在 SQL 按 library_id 过滤，不按路径猜 Movie/TV。Claim 的独立 unidentified_id/source revision 在文件发布事务内 CAS 消费（删除再停放不会复用身份）；明确 IdentifyAndTransfer 允许改变最终 kind/Library。默认 Downloader 仅从当前 downloaders 行及明确支持的环境覆盖选择，旧 settings JSON 不再读取。修复前反例保留于[固定版本复审](../audits/2026-10-24-storage-rereview.md)，当前验证见[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)。
 
 **Subscribe唯一请求字段：** 创建/PATCH使用 `coverage` 和 `filter_id`；`POST /subscriptions/{id}/upgrade-runs` body为 `{filter_id?, wash_cut?}`，回执也返回 `filter_id`。本轮已核对实际Web调用者和create严格拒旧，原F01生产问题关闭；Rust共享fixture已使用当前字段；不恢复旧inline filter兼容。
 
@@ -185,7 +191,7 @@ Playback history/watch stats 的 `member_id` 只接受 User UUID；显式传入�
 
 成功信封只使用 `{ok:true,data}`。实际Web HTTP、catalog/health及消费data回执的组件已切换；旧success、裸数组/对象与缺data被拒。明确204无body单独处理，保留合法业务空值。
 
-普通协议分页使用写入期genre/person索引与search_text，页面选源已后置。50k genre随命中数增长，精确total与offset成本见[历史性能报告](../benchmarks/2026-10-23-storage-redesign-report.md)。当前证据见[再次复核](../audits/2026-10-24-storage-fix-followup.md)，待办仅维护于[唯一方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)。
+普通协议分页使用写入期genre/person索引与search_text，页面选源已后置。50k genre随命中数增长，精确total与offset成本见[历史性能报告](../benchmarks/2026-10-23-storage-redesign-report.md)。当前实现与验收见[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)，最新数据形状及结果见[测量记录](../benchmarks/2026-10-24-storage-query-rereview.md)。
 
 ## 现行表面（去哪看）
 

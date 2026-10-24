@@ -26,39 +26,7 @@ async fn admin_ended_session_does_not_resurrect_on_subsequent_progress_heartbeat
     let tmp = tempfile::tempdir().unwrap();
     let app = app(&tmp);
 
-    let store = api::Store::open(tmp.path().join("data")).unwrap();
-    let media = store
-        .ensure_media(Media {
-            id: MediaId::new(),
-            kind: MediaKind::Movie,
-            title: "TestMovie".into(),
-            year: Some(2023),
-            original_title: None,
-            aliases: Vec::new(),
-            tmdb_id: Some("11111".into()),
-            douban_id: None,
-            tvdb_id: None,
-            bangumi_id: None,
-            anilist_id: None,
-        })
-        .unwrap();
-
-    let movie_file = tmp.path().join("data/library/movies/TestMovie.mkv");
-    std::fs::create_dir_all(movie_file.parent().unwrap()).unwrap();
-    std::fs::write(&movie_file, b"video").unwrap();
-
-    let file_id = LedgerId::new();
-    publish_fixture_file(
-        &store,
-        &FixtureFile {
-            file_id: Some(file_id),
-            media_id: media.id,
-            path: movie_file.display().to_string(),
-            resolution: Some("1080p".into()),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let (store, media, file_id) = seed_movie(&tmp);
     let user_id = store.admin_user_id().unwrap();
     let device_id = "device-to-end";
     let session = super::playback::open_play_session(&app, &media.id.to_string(), device_id).await;
@@ -70,7 +38,7 @@ async fn admin_ended_session_does_not_resurrect_on_subsequent_progress_heartbeat
             "POST",
             "/api/v1/playback/progress",
             Some("management-secret"),
-            json!({
+            json!({ "event_sequence": crate::common::next_playback_sequence(),
                 "media_item_id": media.id.to_string(),
                 "file_id": file_id.to_string(),
                 "device_id": device_id,
@@ -115,7 +83,9 @@ async fn admin_ended_session_does_not_resurrect_on_subsequent_progress_heartbeat
                 "media_item_id": media.id.to_string(),
                 "file_id": file_id.to_string(),
                 "device_id": device_id,
-                "event": "timeupdate",
+                "event": "progress",
+                "play_session_id": session,
+                "event_sequence": next_playback_sequence(),
                 "position_ms": 2000,
                 "duration_ms": 100000
             }),
@@ -140,7 +110,9 @@ async fn admin_ended_session_does_not_resurrect_on_subsequent_progress_heartbeat
                 "media_item_id": media.id.to_string(),
                 "file_id": file_id.to_string(),
                 "device_id": device_id,
-                "event": "timeupdate",
+                "event": "progress",
+                "play_session_id": session,
+                "event_sequence": next_playback_sequence(),
                 "position_ms": 3000,
                 "duration_ms": 100000
             }),
@@ -272,4 +244,41 @@ async fn borrowed_marker_clears_outro_and_does_not_cache_permanently() {
         .unwrap()
         .unwrap();
     assert_eq!(ep2_persisted.len(), 1, "借用的暂态章节标记不应永久覆盖缓存");
+}
+
+fn seed_movie(tmp: &tempfile::TempDir) -> (api::Store, Media, LedgerId) {
+    let store = api::Store::open(tmp.path().join("data")).unwrap();
+    let media = store
+        .ensure_media(Media {
+            id: MediaId::new(),
+            kind: MediaKind::Movie,
+            title: "TestMovie".into(),
+            year: Some(2023),
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: Some("11111".into()),
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+
+    let movie_file = tmp.path().join("data/library/movies/TestMovie.mkv");
+    std::fs::create_dir_all(movie_file.parent().unwrap()).unwrap();
+    std::fs::write(&movie_file, b"video").unwrap();
+
+    let file_id = LedgerId::new();
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(file_id),
+            media_id: media.id,
+            path: movie_file.display().to_string(),
+            resolution: Some("1080p".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    (store, media, file_id)
 }

@@ -209,7 +209,7 @@ fn root_for_path(store: &Store, library_id: &str, path: &str) -> Result<String, 
     let resolved_key = crate::path_key::normalize_path_key(&resolved.to_string_lossy());
     let mut best: Option<(usize, String)> = None;
     for root in store.list_library_roots()? {
-        if root.library_id.as_deref() != Some(library_id) {
+        if root.library_id.as_str() != library_id {
             continue;
         }
         let normalized = crate::library_paths::resolved_path(&root.path)?;
@@ -296,4 +296,38 @@ pub fn library_file_count(store: &Store, library_id: &str) -> usize {
             |r| r.get::<_, i64>(0),
         )
         .unwrap() as usize
+}
+
+/// Test setup through the same durable reconfiguration operation as the API.
+pub fn reconfigure_default_root(
+    store: &Store,
+    kind: domain::MediaKind,
+    path: &Path,
+) -> Result<(), StoreError> {
+    let library = store
+        .default_library(kind)?
+        .ok_or_else(|| StoreError::Missing("default Library".into()))?;
+    let operation = uuid::Uuid::new_v4().to_string();
+    let mut status = store.begin_library_reconfiguration(
+        &crate::LibraryReconfiguration {
+            operation_id: operation.clone(),
+            library_id: library.id.parse()?,
+            expected_revision: store.library_config_revision(&library.id)?,
+            root_paths: Some(vec![path.to_path_buf()]),
+            display_locale: None,
+        },
+        1,
+    )?;
+    for step in 2..1002 {
+        if status.state == "succeeded" {
+            return Ok(());
+        }
+        if status.state == "failed" {
+            return Err(StoreError::Protected(status.error.unwrap_or_default()));
+        }
+        status = store.advance_library_operation(&operation, step, 100)?;
+    }
+    Err(StoreError::Protected(
+        "fixture root operation exceeded its finite budget".into(),
+    ))
 }

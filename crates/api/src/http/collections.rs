@@ -323,7 +323,7 @@ pub(crate) async fn collection_gallery(
                     }
                 }
             }
-            // 真实收藏态：whole unit；movie 沿用既有 legacy (0,0) 兜底。
+            // 收藏态来自当前 whole unit。
             let is_favorite = crate::http::playback::effective_watch_state(
                 &store,
                 user_id,

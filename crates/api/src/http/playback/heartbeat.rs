@@ -1,14 +1,15 @@
 //! Device-scoped Playback heartbeats.
 use axum::{
-    Json,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde_json::Value;
 
+use super::heartbeat_input::HeartbeatInput;
 use super::{effective_watch_state, row_for, watch_state_json};
-use crate::store::{SessionRow, StoreError, UNIT_WHOLE, UnitState};
+use crate::http::strict_json::StrictJson;
+use crate::store::{StoreError, UNIT_WHOLE, UnitState};
 use crate::{
     http::{err, ok},
     job_loop::unix_now,
@@ -19,73 +20,53 @@ struct Heartbeat<'a> {
     body: &'a Value,
     user_id: domain::UserId,
     media_id: domain::MediaId,
-    kind: domain::MediaKind,
-    ledger_id: String,
+    ledger_id: domain::LedgerId,
     season: i32,
     episode: i32,
     duration_ms: Option<i64>,
     now: i64,
     now_ms: i64,
     source: domain::PhysicalSourceId,
-    /// 当前物理源的 `source_version`,与 `source` 同一次读取得到。
-    /// 未绑定会话的事件用它做 unit-only 提交(canonical 会自行复核)。
-    source_version: String,
 }
-
-/// 未绑定会话的事件所用的哨兵会话 id。它不可能出现在 `playback_session_ids` 里,
-/// 因此 canonical 的 `read_binding` 查空,事件只能落进 unit-only 提交路径:
-/// 恰好一个 IMMEDIATE 事务、只写播放单元事实、绝不写 `playback_sessions`。
-const UNBOUND_SESSION_ID: &str = "__unbound_playback_event__";
 
 pub(crate) async fn progress(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
-    Json(body): Json<Value>,
+    StrictJson(input): StrictJson<HeartbeatInput>,
 ) -> Response {
+    if let Err(message) = input.validate() {
+        tracing::warn!(message, "Playback heartbeat rejected");
+        return err(StatusCode::BAD_REQUEST, "playback.invalid", message);
+    }
+    let body = match serde_json::to_value(input) {
+        Ok(body) => body,
+        Err(error) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "playback.invalid",
+                &error.to_string(),
+            );
+        }
+    };
     let device_id = body["device_id"].as_str().unwrap_or_default();
-    if device_id.is_empty() {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "playback.invalid",
-            "缺少 device_id",
-        );
-    }
-    if let Some(rate_val) = body.get("rate") {
-        if let Some(r) = rate_val.as_f64() {
-            if !r.is_finite() || r < 0.25 || r > 4.0 {
-                return err(
-                    StatusCode::BAD_REQUEST,
-                    "playback.invalid_rate",
-                    "播放倍率必须在 0.25 到 4.0 之间",
-                );
-            }
-        }
-    }
-    let play_session_id = body["play_session_id"].as_str().map(str::to_string);
-    let event_sequence = body["event_sequence"].as_i64();
-    if let Some(ref sid) = play_session_id {
-        if sid.len() > 128 {
-            return err(
-                StatusCode::BAD_REQUEST,
-                "playback.invalid",
-                "play_session_id 超长",
-            );
-        }
-    }
-    if let Some(seq) = event_sequence {
-        if seq < 0 {
-            return err(
-                StatusCode::BAD_REQUEST,
-                "playback.invalid",
-                "event_sequence 必须非负",
-            );
-        }
-    }
-    let (file, media, season, episode, duration_ms, source, source_version) = {
+    let (file, media, season, episode, duration_ms, source) = {
         let store = state.store.lock();
         match store.is_device_revoked(user_id, device_id) {
             Ok(true) => return err(StatusCode::FORBIDDEN, "playback.revoked", "该设备已被注销"),
             Ok(false) => {}
+            Err(error) => return persistence_error(&error, user_id, device_id),
+        }
+        let session_id = body["play_session_id"].as_str().unwrap_or_default();
+        match store.play_session_binding(user_id, device_id, session_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                tracing::warn!(%user_id, device_id, "Playback heartbeat rejected: unissued session identity");
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "playback.invalid",
+                    "play_session_id 未由此用户和设备签发",
+                );
+            }
             Err(error) => return persistence_error(&error, user_id, device_id),
         }
         let (file, media, season, episode) = match row_for(&store, &body, Some(user_id)) {
@@ -99,7 +80,6 @@ pub(crate) async fn progress(
             Ok(duration) => body["duration_ms"].as_i64().filter(|d| *d > 0).or(duration),
             Err(error) => return persistence_error(&error, user_id, device_id),
         };
-        let source_version = source.version.source_version.clone();
         (
             file,
             media,
@@ -110,7 +90,6 @@ pub(crate) async fn progress(
                 file_id: source.file_id,
                 revision: source.version.revision,
             },
-            source_version,
         )
     };
     if duration_ms.is_none() {
@@ -126,15 +105,13 @@ pub(crate) async fn progress(
         body: &body,
         user_id,
         media_id: media.id,
-        kind: media.kind,
-        ledger_id: file.file_id.to_string(),
+        ledger_id: file.file_id,
         season,
         episode,
         duration_ms,
         now: now_ms / 1000,
         now_ms,
         source,
-        source_version,
     };
     apply_heartbeat(&state.store.lock(), &heartbeat, device_id)
 }
@@ -167,139 +144,97 @@ fn unit_duration(
         .map(|seconds| (seconds * 1000.0) as i64))
 }
 
-fn session_matches_heartbeat(session: &SessionRow, heartbeat: &Heartbeat<'_>) -> bool {
-    session.media_id == heartbeat.media_id
-        && session.season.unwrap_or(UNIT_WHOLE) == heartbeat.season
-        && session.episode.unwrap_or(UNIT_WHOLE) == heartbeat.episode
+fn current_unit(store: &crate::Store, heartbeat: &Heartbeat<'_>) -> Result<UnitState, StoreError> {
+    Ok(store
+        .unit_state(
+            heartbeat.user_id,
+            heartbeat.media_id,
+            heartbeat.season,
+            heartbeat.episode,
+        )?
+        .unwrap_or_default())
 }
 
-fn persist_heartbeat(
+fn target_is_stale(store: &crate::Store, heartbeat: &Heartbeat<'_>) -> Result<bool, StoreError> {
+    let Some(file) = store.visible_file(heartbeat.user_id, heartbeat.ledger_id)? else {
+        return Ok(true);
+    };
+    if file.media_id != heartbeat.media_id
+        || !store.file_covers_unit(
+            heartbeat.ledger_id,
+            heartbeat.media_id,
+            domain::UnitKey::new(heartbeat.season, heartbeat.episode),
+        )?
+    {
+        return Ok(true);
+    }
+    match store.file_owner_library(heartbeat.ledger_id)? {
+        Some(owner) => Ok(!store.library_accepts_work(&owner.id)?),
+        None => Ok(false),
+    }
+}
+
+struct HeartbeatDecision {
+    binding: Option<store::PlaySessionBinding>,
+    admin_ended: bool,
+}
+
+fn classify_heartbeat(
     store: &crate::Store,
     heartbeat: &Heartbeat<'_>,
     device: &str,
-    resolved_session_id: Option<&str>,
-) -> Result<(UnitState, bool), StoreError> {
-    let unit_key = domain::UnitKey::new(heartbeat.season, heartbeat.episode);
-    let ledger_id = match heartbeat.ledger_id.parse::<domain::LedgerId>() {
-        Ok(id) => id,
-        Err(_) => {
-            return Ok((
-                store
-                    .unit_state(
-                        heartbeat.user_id,
-                        heartbeat.media_id,
-                        heartbeat.season,
-                        heartbeat.episode,
-                    )?
-                    .unwrap_or_default(),
-                true,
-            ));
-        }
-    };
-
-    // Never persist an event against a stale target: the physical file must still exist,
-    // still belong to this Media and still cover the reported unit. Coverage membership is
-    // the ownership fact, so a merged file serving E01/E02 is judged per unit.
-    let stale = || -> Result<bool, StoreError> {
-        let Some(file) = store.visible_file(heartbeat.user_id, ledger_id)? else {
-            return Ok(true);
-        };
-        if file.media_id != heartbeat.media_id {
-            return Ok(true);
-        }
-        if !store.file_covers_unit(ledger_id, heartbeat.media_id, unit_key)? {
-            return Ok(true);
-        }
-        match store.file_owner_library(ledger_id)? {
-            Some(owner) => Ok(!store.library_accepts_work(&owner.id)?),
-            None => Ok(false),
-        }
-    };
-    if stale()? {
-        tracing::warn!(ledger_id = %heartbeat.ledger_id, media_id = %heartbeat.media_id,
-            "Ignoring stale Playback heartbeat: target or coverage changed");
-        return Ok((
-            store
-                .unit_state(
-                    heartbeat.user_id,
-                    heartbeat.media_id,
-                    heartbeat.season,
-                    heartbeat.episode,
-                )?
-                .unwrap_or_default(),
-            true,
-        ));
-    }
-
+) -> Result<HeartbeatDecision, StoreError> {
     let event = heartbeat.body["event"].as_str().unwrap_or("progress");
     let previous = store.get_session(heartbeat.user_id, device)?;
-    let play_session_id = heartbeat.body["play_session_id"]
+    let session_id = heartbeat.body["play_session_id"]
         .as_str()
         .map(str::to_string);
-    let event_sequence = heartbeat.body["event_sequence"].as_i64();
-
-    // 生效会话 id:客户端显式携带的优先,否则用事务外已签发(或本次签发)的 id。
-    // 必须用「生效 id」查绑定,否则 legacy 无 id 客户端签发出来的会话不会流经
-    // canonical,源被替换后就没人能判 IgnoredStale。
-    let session_id = play_session_id
-        .clone()
-        .or_else(|| resolved_session_id.map(str::to_string));
     let binding = match &session_id {
-        Some(sid) => store.play_session_binding(heartbeat.user_id, device, sid)?,
+        Some(id) => store.play_session_binding(heartbeat.user_id, device, id)?,
         None => None,
     };
-
+    let session_ended = previous.as_ref().is_some_and(|session| session.admin_ended);
+    let admin_ended = session_ended
+        || (event != "start"
+            && store.device_was_admin_ended(heartbeat.user_id, device, heartbeat.now, 10)?);
     let identity = crate::playback_events::PlaybackEventIdentity {
-        play_session_id: play_session_id.clone(),
-        event_sequence,
+        play_session_id: session_id,
+        event_sequence: heartbeat.body["event_sequence"].as_i64(),
     };
-
-    let event_kind = match event {
+    let kind = match event {
         "start" => crate::playback_events::PlaybackEventKind::Start,
         "stop" => crate::playback_events::PlaybackEventKind::Stop,
         _ => crate::playback_events::PlaybackEventKind::Progress,
     };
-
-    let unit = unit_key;
-    // 只读判定:管理员是否已结束本设备的播放。真正的收尾(归档 live 行、置
-    // `playback_session_ids.state = 'closed'`)由 canonical 在自己的事务里做
-    // (见 store `commit_playback_event` 的 admin-ended 守卫);这里只用于回包。
-    let session_admin_ended = previous.as_ref().is_some_and(|p| p.admin_ended);
-    let was_admin_ended = if event != "start" {
-        session_admin_ended
-            || store
-                .device_was_admin_ended(heartbeat.user_id, device, heartbeat.now, 10)
-                .unwrap_or(false)
-    } else {
-        false
-    };
-    // 回包口径与旧实现一致:`session_admin_ended` 覆盖 start(管理员结束后的 start 由
-    // canonical 收尾),`was_admin_ended` 覆盖结束后的非 start 心跳。
-    let admin_ended = session_admin_ended || was_admin_ended;
-
     let decision = crate::playback_events::classify_event_with_target(
         previous.as_ref(),
         binding.as_ref(),
         &identity,
-        ledger_id,
-        Some(unit),
-        event_kind,
+        heartbeat.ledger_id,
+        Some(domain::UnitKey::new(heartbeat.season, heartbeat.episode)),
+        kind,
     );
+    Ok(HeartbeatDecision {
+        binding: if decision == crate::playback_events::EventDecision::Ignore {
+            None
+        } else {
+            binding
+        },
+        admin_ended,
+    })
+}
 
-    if decision == crate::playback_events::EventDecision::Ignore {
-        let current = store
-            .unit_state(
-                heartbeat.user_id,
-                heartbeat.media_id,
-                heartbeat.season,
-                heartbeat.episode,
-            )?
-            .unwrap_or_default();
-        return Ok((current, admin_ended));
-    }
-    // canonical 是这次事件的唯一写路径:它自己开一个 IMMEDIATE 事务,并在事务内
-    // 复核会话绑定、物理源版本、Library 可达性与播放单元坐标。API 层不再叠加任何
-    // 写操作,也不再开第二个事务。
+fn bound_event(
+    store: &crate::Store,
+    heartbeat: &Heartbeat<'_>,
+    device: &str,
+    binding: store::PlaySessionBinding,
+) -> Result<Option<store::playback::BoundPlaybackEvent>, StoreError> {
+    let (Some(revision), Some(source_version)) = (binding.file_revision, binding.source_version)
+    else {
+        return Ok(None);
+    };
+    let event = heartbeat.body["event"].as_str().unwrap_or("progress");
     let item = if heartbeat.season == UNIT_WHOLE {
         domain::TypedItemId::Work(heartbeat.media_id)
     } else {
@@ -308,8 +243,7 @@ fn persist_heartbeat(
             key: domain::UnitKey::new(heartbeat.season, heartbeat.episode),
         }
     };
-    // The saved resume point / duration are only valid for the physical source they were
-    // recorded against: resolve them for *this* source instead of reading the bare unit row.
+    // Resume values are valid only for the source observed by this request.
     let resolved =
         store.resolve_playback(heartbeat.user_id, &item, Some(&heartbeat.source), None)?;
     let same_source = resolved.target.file.file_id == heartbeat.source.file_id
@@ -319,45 +253,30 @@ fn persist_heartbeat(
         .or_else(|| (event == "start" && same_source).then_some(resolved.start_ms))
         .unwrap_or(0)
         .max(0);
-    let duration_ms = heartbeat
-        .duration_ms
-        .or(same_source.then_some(resolved.duration_ms).flatten());
     let event_type = match event {
         "start" => store::playback::PlaybackEventType::Playing,
         "stop" => store::playback::PlaybackEventType::Stopped,
         _ => store::playback::PlaybackEventType::Progress,
     };
-    // 有绑定时交签发时记录的源事实:源被替换后 canonical 判 IgnoredStale。
-    // 没有绑定时交本次读到的当前源事实,canonical 走 unit-only 分支:只写播放
-    // 单元事实,绝不写 `playback_sessions`。
-    let (event_session_id, source_id, source_version, generation) = match &binding {
-        Some(b) => (
-            session_id.clone().unwrap_or_default(),
-            domain::PhysicalSourceId {
-                file_id: b.ledger_id,
-                revision: b.file_revision.unwrap_or_default(),
-            },
-            b.source_version.clone().unwrap_or_default(),
-            b.generation,
-        ),
-        None => (
-            UNBOUND_SESSION_ID.to_string(),
-            heartbeat.source.clone(),
-            heartbeat.source_version.clone(),
-            0,
-        ),
-    };
-    let bound_event = store::playback::BoundPlaybackEvent {
+    Ok(Some(store::playback::BoundPlaybackEvent {
         user_id: heartbeat.user_id,
-        device_id: device.to_string(),
-        session_id: event_session_id.clone(),
-        generation,
-        event_sequence,
+        device_id: device.into(),
+        session_id: heartbeat.body["play_session_id"]
+            .as_str()
+            .unwrap_or_default()
+            .into(),
+        generation: binding.generation,
+        event_sequence: heartbeat.body["event_sequence"].as_i64(),
         item,
-        source_id,
+        source_id: domain::PhysicalSourceId {
+            file_id: binding.ledger_id,
+            revision,
+        },
         source_version,
         position_ms,
-        duration_ms,
+        duration_ms: heartbeat
+            .duration_ms
+            .or(same_source.then_some(resolved.duration_ms).flatten()),
         audio_track: heartbeat.body["audio_track"].as_str().map(str::to_string),
         subtitle_track: heartbeat.body["subtitle_track"]
             .as_str()
@@ -371,80 +290,38 @@ fn persist_heartbeat(
             .map(str::to_string),
         play_method: None,
         event_type,
-    };
+    }))
+}
 
-    match store.commit_playback_event(&bound_event, heartbeat.now_ms)? {
-        store::playback::EventOutcome::Applied => {
-            tracing::debug!(session_id = %event_session_id, "commit_playback_event applied");
-        }
-        store::playback::EventOutcome::IgnoredStale => {
-            // 卡 必做#2:判 IgnoredStale 后不得再有任何会话、位置或单元写入。
-            tracing::warn!(session_id = %event_session_id, "commit_playback_event ignored as stale");
+fn persist_heartbeat(
+    store: &crate::Store,
+    heartbeat: &Heartbeat<'_>,
+    device: &str,
+) -> Result<(UnitState, bool), StoreError> {
+    if target_is_stale(store, heartbeat)? {
+        tracing::warn!(file_id = %heartbeat.ledger_id, media_id = %heartbeat.media_id,
+            "Ignoring stale Playback heartbeat: target or coverage changed");
+        return Ok((current_unit(store, heartbeat)?, true));
+    }
+    let decision = classify_heartbeat(store, heartbeat, device)?;
+    let Some(binding) = decision.binding else {
+        return Ok((current_unit(store, heartbeat)?, decision.admin_ended));
+    };
+    if let Some(event) = bound_event(store, heartbeat, device, binding)? {
+        match store.commit_playback_event(&event, heartbeat.now_ms)? {
+            store::playback::EventOutcome::Applied => {
+                tracing::debug!(session_id = %event.session_id, "Playback heartbeat committed");
+            }
+            store::playback::EventOutcome::IgnoredStale => {
+                tracing::warn!(session_id = %event.session_id, "Stale Playback heartbeat ignored");
+            }
         }
     }
-    let current = store
-        .unit_state(
-            heartbeat.user_id,
-            heartbeat.media_id,
-            heartbeat.season,
-            heartbeat.episode,
-        )?
-        .unwrap_or_default();
-    Ok((current, admin_ended))
+    Ok((current_unit(store, heartbeat)?, decision.admin_ended))
 }
 
 fn apply_heartbeat(store: &crate::Store, heartbeat: &Heartbeat<'_>, device: &str) -> Response {
-    // 会话签发必须发生在 `commit_playback_event` 的 IMMEDIATE 事务之外:签发自己
-    // 开一个 immediate 事务,嵌进去就是 SQLite 的 cannot-start-a-transaction-in-
-    // a-transaction。
-    let resolved_session_id = if heartbeat.body["play_session_id"].as_str().is_some() {
-        None
-    } else {
-        let reusable = store
-            .get_session(heartbeat.user_id, device)
-            .ok()
-            .flatten()
-            .filter(|session| session_matches_heartbeat(session, heartbeat))
-            .and_then(|session| session.play_session_id);
-        match reusable {
-            Some(sid) => Some(sid),
-            None => {
-                // plan:135 stop/progress 不伪造签发新的 Pending session，仅 start 允许按需签发
-                let event = heartbeat.body["event"].as_str().unwrap_or("progress");
-                if event == "start" {
-                    heartbeat
-                        .ledger_id
-                        .parse::<domain::LedgerId>()
-                        .ok()
-                        .and_then(|ledger_id| {
-                            store
-                                .visible_file(heartbeat.user_id, ledger_id)
-                                .ok()
-                                .flatten()
-                                .and_then(|file| {
-                                    store
-                                        .issue_play_session(
-                                            heartbeat.user_id,
-                                            device,
-                                            ledger_id,
-                                            heartbeat.media_id,
-                                            domain::UnitKey::new(
-                                                heartbeat.season,
-                                                heartbeat.episode,
-                                            ),
-                                            &file.version,
-                                            heartbeat.now,
-                                        )
-                                        .ok()
-                                })
-                        })
-                } else {
-                    None
-                }
-            }
-        }
-    };
-    match persist_heartbeat(store, heartbeat, device, resolved_session_id.as_deref()) {
+    match persist_heartbeat(store, heartbeat, device) {
         Ok((unit, ended)) => ok(watch_state_json(&unit, ended)).into_response(),
         Err(error) => persistence_error(&error, heartbeat.user_id, device),
     }
@@ -525,21 +402,19 @@ mod tests {
             body: &body,
             user_id,
             media_id: provisional.id,
-            kind: domain::MediaKind::Movie,
-            ledger_id: file_id.to_string(),
+            ledger_id: file_id,
             season: UNIT_WHOLE,
             episode: UNIT_WHOLE,
             duration_ms: Some(1000),
             now: 10,
             now_ms: 10_000,
-            source_version: file.version.source_version.clone(),
             source: domain::PhysicalSourceId {
                 file_id: file.file_id,
                 revision: file.version.revision,
             },
         };
 
-        let (_, ended) = persist_heartbeat(&store, &heartbeat, "race", None).unwrap();
+        let (_, ended) = persist_heartbeat(&store, &heartbeat, "race").unwrap();
 
         assert!(ended);
         assert!(

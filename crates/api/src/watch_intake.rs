@@ -167,20 +167,17 @@ fn finish_intake_metadata(
                     .file_coverage_by_path(&t.path.display().to_string())
                     .ok()
                     .flatten()?;
-                let missing_poster = t
-                    .path
-                    .parent()
-                    .map(|dir| !dir.join("poster.jpg").is_file())
-                    .unwrap_or(false);
-                if missing_poster {
-                    Some((row.file.media_id, t.path.clone()))
-                } else {
-                    None
-                }
+                Some((row.file.media_id, t.path.clone()))
             })
             .collect()
     };
     for (media_id, row_path) in targets {
+        if row_path
+            .parent()
+            .is_none_or(|dir| dir.join("poster.jpg").is_file())
+        {
+            continue;
+        }
         check_intake_libraries(&state.store.lock(), movie_lease, tv_lease)?;
         let Some(real) = state.store.lock().get_media(media_id).ok().flatten() else {
             continue;

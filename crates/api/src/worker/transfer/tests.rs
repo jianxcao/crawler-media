@@ -144,19 +144,25 @@ fn changed_root_is_rejected_before_reservation_even_with_a_new_facts_snapshot() 
     let (tmp, state, media, subscribe) = fixture();
     let plan = resolve_transfer_plan(&state, &media, &subscribe).unwrap();
     let lease = state.acquire_library_work(&plan.library_id).unwrap();
-    state
-        .store
-        .lock()
-        .set_library_root(media.kind, tmp.path().join("new-root").to_str().unwrap())
-        .unwrap();
+    store::test_support::reconfigure_default_root(
+        &state.store.lock(),
+        media.kind,
+        &tmp.path().join("new-root"),
+    )
+    .unwrap();
     let fingerprint = state
         .store
         .lock()
         .read_fingerprint(&plan.library_id, media.id)
         .unwrap();
     assert_eq!(
-        fingerprint, plan.fingerprint,
-        "root writes evade the scoped fingerprint"
+        fingerprint.files, plan.fingerprint.files,
+        "root reconfiguration preserves file facts"
+    );
+    assert_eq!(
+        fingerprint.config_revision,
+        plan.fingerprint.config_revision + 1,
+        "a formal root operation advances the configuration revision"
     );
     let recorder = PlannedPublicationRecorder::new(
         PublicationRecorder {

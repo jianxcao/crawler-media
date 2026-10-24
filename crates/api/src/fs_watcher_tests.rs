@@ -65,9 +65,7 @@ fn realtime_library_root_matches_nested_strm_path() {
     std::fs::write(&episode, "https://example.test/episode.mkv").unwrap();
 
     let store = crate::Store::open(temp.path().join("data")).unwrap();
-    store
-        .set_library_root(domain::MediaKind::Tv, root.to_str().unwrap())
-        .unwrap();
+    store::test_support::reconfigure_default_root(&store, domain::MediaKind::Tv, &root).unwrap();
     let state = crate::management::ApiState::new(
         store,
         "test-token".into(),
@@ -111,9 +109,7 @@ fn rescanning_a_show_queues_only_the_new_episode() {
     std::fs::write(&episode_one, "https://example.test/e01.mkv").unwrap();
 
     let store = crate::Store::open(temp.path().join("data")).unwrap();
-    store
-        .set_library_root(domain::MediaKind::Tv, root.to_str().unwrap())
-        .unwrap();
+    store::test_support::reconfigure_default_root(&store, domain::MediaKind::Tv, &root).unwrap();
     let state = crate::management::ApiState::new(
         store,
         "test-token".into(),
@@ -374,9 +370,7 @@ async fn watch_event_enqueues_a_targeted_scan_through_the_coordinator() {
     std::fs::write(&episode, "https://example.test/e01.mkv").unwrap();
 
     let store = crate::Store::open(temp.path().join("data")).unwrap();
-    store
-        .set_library_root(domain::MediaKind::Tv, root.to_str().unwrap())
-        .unwrap();
+    store::test_support::reconfigure_default_root(&store, domain::MediaKind::Tv, &root).unwrap();
     let library_id = store.list_libraries().unwrap()[0].id.clone();
     let state = crate::management::ApiState::new(
         store,

@@ -22,7 +22,7 @@ fn library_with_root(store: &Store, dir: &Path, name: &str, kind: MediaKind) -> 
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|root| root.library_id.as_deref() == Some(&library.id))
+        .find(|root| root.library_id.as_str() == library.id.as_str())
         .unwrap()
         .id;
     (library.id, root_id)

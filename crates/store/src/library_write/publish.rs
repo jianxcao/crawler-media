@@ -136,45 +136,7 @@ impl Store {
                     after_units,
                 });
         }
-        for (media_id, changes) in affected {
-            // A media without a card yet cannot be moved by deltas: the incremental path
-            // repairs it with a full reduce, and applying the remaining deltas afterwards
-            // would count those files twice. Do the full reduce once and skip the rest.
-            if !item_card_exists(&tx, scope.library_id, media_id)? {
-                reduce_library_media(&tx, scope.library_id, media_id)?;
-                continue;
-            }
-            // Apply one delta per changed file. A media that appears in several windows of a
-            // scan used to fall back to a full `reduce_library_media` per window, which
-            // re-reads every published file of that media (O(files x windows)). Per-file
-            // deltas keep each window proportional to the files it touched; totals match
-            // because deltas apply in publication order.
-            //
-            // Every file of the batch is already written, so a unit (or card) that has
-            // to be rebuilt from facts already counts the later files of the batch:
-            // `settled` keeps those rows from receiving the same files again.
-            let mut settled = BatchSettled {
-                defer_user_summaries: true,
-                ..BatchSettled::default()
-            };
-            for change in changes {
-                reduce_library_media_incremental_in_batch(
-                    &tx,
-                    scope.library_id,
-                    media_id,
-                    &ChangedFile {
-                        before: change.before.as_ref(),
-                        before_units: &change.before_units,
-                        after: &change.after,
-                        after_units: &change.after_units,
-                    },
-                    &mut settled,
-                )?;
-            }
-            if settled.user_summaries_dirty && !settled.media {
-                super::reduce::refresh_affected_user_summaries(&tx, scope.library_id, media_id)?;
-            }
-        }
+        reduce_publication_batch(&tx, scope.library_id, affected)?;
         tx.commit()?;
         Ok(report)
     }
@@ -767,5 +729,57 @@ pub(super) fn upsert_file_details(
             details.format_duration_ms,
         ],
     )?;
+    Ok(())
+}
+
+/// All file facts have been written; reduce each card and publish its protocol
+/// index/user summaries once, before this publication transaction commits.
+fn reduce_publication_batch(
+    tx: &Connection,
+    library_id: LibraryId,
+    affected: HashMap<MediaId, Vec<PendingChange>>,
+) -> Result<(), StoreError> {
+    for (media_id, changes) in affected {
+        // A media without a card yet cannot be moved by deltas: the incremental path
+        // repairs it with a full reduce, and applying the remaining deltas afterwards
+        // would count those files twice. Do the full reduce once and skip the rest.
+        if !item_card_exists(tx, library_id, media_id)? {
+            reduce_library_media(tx, library_id, media_id)?;
+            continue;
+        }
+        // Apply one delta per changed file. A media that appears in several windows of a
+        // scan used to fall back to a full `reduce_library_media` per window, which
+        // re-reads every published file of that media (O(files x windows)). Per-file
+        // deltas keep each window proportional to the files it touched; totals match
+        // because deltas apply in publication order.
+        //
+        // Every file of the batch is already written, so a unit (or card) that has
+        // to be rebuilt from facts already counts the later files of the batch:
+        // `settled` keeps those rows from receiving the same files again.
+        let mut settled = BatchSettled {
+            defer_user_summaries: true,
+            ..BatchSettled::default()
+        };
+        for change in changes {
+            reduce_library_media_incremental_in_batch(
+                tx,
+                library_id,
+                media_id,
+                &ChangedFile {
+                    before: change.before.as_ref(),
+                    before_units: &change.before_units,
+                    after: &change.after,
+                    after_units: &change.after_units,
+                },
+                &mut settled,
+            )?;
+        }
+        if settled.user_summaries_dirty && !settled.media {
+            super::reduce::refresh_affected_user_summaries(tx, library_id, media_id)?;
+        }
+        if settled.protocol_index_dirty && !settled.media {
+            crate::protocol_index::sync_card(tx, &library_id.to_string(), &media_id.to_string())?;
+        }
+    }
     Ok(())
 }

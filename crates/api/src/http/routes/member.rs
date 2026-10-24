@@ -4,11 +4,11 @@ use axum::Router;
 use axum::routing::{delete, get, post, put};
 
 use crate::http::{
-    auth, collections, directory, discover, downloaders, jobs, library, library_artwork,
-    library_chapters, library_gallery, library_organize, library_scan, media, notify, playback,
-    playback_activity, playback_logs, playback_stats, playback_views, routing_preview, rule_sets,
-    scrape_settings, search, sites, subscription_depth, subscription_missing, subscriptions,
-    title_ref,
+    auth, collections, discover, downloaders, jobs, library, library_artwork, library_chapters,
+    library_gallery, library_organize, library_scan, media, notify, playback, playback_activity,
+    playback_logs, playback_stats, playback_views, routing_preview, rule_sets, scrape_settings,
+    search, sites, subscription_depth, subscription_missing, subscriptions, title_ref,
+    transfer_settings,
 };
 use crate::management::ApiState;
 
@@ -188,7 +188,7 @@ pub(super) fn member_library_routes() -> Router<ApiState> {
         .route("/jobs/{id}", get(jobs::get_job))
         .route("/jobs/stream", get(jobs::job_stream))
         // directory + settings + notify（读取；写入在 admin 层）
-        .route("/directory", get(directory::get_directory))
+        .route("/settings/transfer", get(transfer_settings::get))
         .route("/notify/config", get(notify::get_config))
         .route(
             "/ui/preferences",

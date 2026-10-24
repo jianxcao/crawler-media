@@ -2,9 +2,9 @@
 
 [返回数据库总览](README.md)
 
-结构核对基线：`feat/storage-redesign@8fbf81b`。字段、类型、默认值、主键、唯一约束、CHECK 和命名索引逐项来自 [Store v1/app.sql](../../crates/store/src/schema/v1/app.sql)；文件身份来自 [schema/layout.rs](../../crates/store/src/schema/layout.rs)：`application_id = 1129139248`、`user_version = 1`。这是生产DDL字段字典，并经隔离内存SQLite核对，不是用户实例schema，也不代表所有运行时调用者已经完成切换。
+结构核对：2026-10-24 修复工作树。字段、类型、默认值、主键、唯一约束、CHECK 和命名索引逐项来自 [Store v1/app.sql](../../crates/store/src/schema/v1/app.sql)；文件身份来自 [schema/layout.rs](../../crates/store/src/schema/layout.rs)：`application_id = 1129139248`、`user_version = 1`。这是生产DDL字段字典，并经隔离内存SQLite核对，不是用户实例schema，也不代表所有运行时调用者已经完成切换。
 
-共 **10 张业务表、50 个字段、2 个显式命名索引**，没有声明外键或触发器。`app.db` 保存实例配置、User 身份与凭证；**不保存 Media、Library 或 Playback 事实**。`playback_device_credentials` 仅是设备凭证关联，不是播放会话、进度或历史；这些事实的存储边界见 [library.db](library.md)。不能将本库整体当缓存清空。
+共 **9 张业务表、48 个字段、2 个显式命名索引**，没有声明外键或触发器。`app.db` 保存实例配置、User 身份与凭证；**不保存 Media、Library 或 Playback 事实**。`playback_device_credentials` 仅是设备凭证关联，不是播放会话、进度或历史；这些事实的存储边界见 [library.db](library.md)。不能将本库整体当缓存清空。
 
 下表的 NOT NULL 指 DDL 是否显式声明；`INTEGER PRIMARY KEY` 自带 rowid 主键语义，即使未另写 NOT NULL。除逐表列出的约束外，不把业务枚举、JSON 形状或 0/1 约定误写为数据库 CHECK。自动主键/UNIQUE 索引不计入命名索引。
 
@@ -19,7 +19,6 @@
 - [settings](#settings) — 2 个字段
 - [search_snapshots](#search_snapshots) — 5 个字段
 - [downloaders](#downloaders) — 10 个字段
-- [naming_templates](#naming_templates) — 2 个字段
 
 ## instance_lock
 
@@ -189,15 +188,7 @@ Downloader 连接、启用开关、默认选择和路径映射配置。
 
 **索引**：无额外命名索引。
 
-## naming_templates
 
-实例级 Naming template，按 Media kind 保存 Transfer 相对路径模式；不是 Library 文件事实。
+实例 Transfer/Watch 设置保存在 `settings['transfer.settings']` 的严格 revisioned DTO；PATCH 在 app 单事务比较 expected_revision，仅改目标字段。Naming template 只保存在当前 Scrape 设置 `metadata.scrape` 的四个分段字段；已删除重复 naming_templates 表及旧组合字符串反拆。Downloader 只从当前 downloaders 行和受支持环境覆盖选择，旧 settings['downloader'] 不再读取。
 
-| 字段 | SQLite 类型 | 主键顺位 | NOT NULL 声明 | DEFAULT | 含义 |
-|---|---|---:|---|---|---|
-| `kind` | `TEXT` | 1 | 是 | 无 | 模板适用类型，业务使用 movie/tv；DDL 无枚举 CHECK。 |
-| `pattern` | `TEXT` | — | 是 | 无 | 带占位符的相对路径模式。 |
-
-**键与约束**：主键 `(kind)`；没有额外 UNIQUE、CHECK 或外键。
-
-**索引**：无额外命名索引。
+app 的只读布局预检比较当前表集合；保留额外退役表的文件被拒绝，不删除该表、不读取旧命名、不认领旧布局。

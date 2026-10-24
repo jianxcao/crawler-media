@@ -2139,6 +2139,7 @@ dependencies = [
  "argon2",
  "domain",
  "downloader",
+ "jobs",
  "library",
  "media",
  "password-hash",

@@ -14,19 +14,6 @@ pub struct RetentionWindow {
     pub cycle_complete: bool,
 }
 
-pub fn migrate_retention_cursors(conn: &Connection) -> Result<(), JobError> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS retention_cursors (
-             def_id TEXT PRIMARY KEY,
-             cutoff INTEGER NOT NULL,
-             finished_at INTEGER NOT NULL,
-             last_rowid INTEGER NOT NULL,
-             cycle_started_at INTEGER NOT NULL
-         );",
-    )?;
-    Ok(())
-}
-
 struct RawRow {
     rowid: i64,
     id: String,

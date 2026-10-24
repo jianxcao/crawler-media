@@ -39,43 +39,6 @@ pub fn is_uninitialized(conn: &Connection) -> Result<bool, StoreError> {
     Ok(object_count == 0)
 }
 
-pub const JOBS_APPLICATION_ID: u32 = 1129139252;
-pub const JOBS_USER_VERSION: i64 = 1;
-
-const JOBS_REPAIR_HINT: &str = "jobs.db is an active queue database containing durable job definitions and states, not a disposable cache. \
-Do not delete or recreate automatically; please back up data/jobs.db before repairing or running migrations.";
-
-fn jobs_layout_error(error: StoreError) -> StoreError {
-    StoreError::Invalid(format!("{error}. {JOBS_REPAIR_HINT}"))
-}
-
-pub fn validate_jobs_layout(conn: &Connection) -> Result<(), StoreError> {
-    let app_id = read_application_id(conn)?;
-    let user_ver = read_user_version(conn)?;
-    if app_id != JOBS_APPLICATION_ID || user_ver != JOBS_USER_VERSION {
-        return Err(StoreError::Invalid(format!(
-            "jobs database layout mismatch: expected application_id {JOBS_APPLICATION_ID}, user_version {JOBS_USER_VERSION}, found application_id {app_id}, user_version {user_ver}. {JOBS_REPAIR_HINT}"
-        )));
-    }
-    validate_schema_objects(
-        "jobs",
-        conn,
-        crate::schema::v1::JOBS_TABLES,
-        crate::schema::v1::JOBS_INDEXES,
-    )
-    .map_err(jobs_layout_error)
-}
-
-pub fn initialize_jobs_layout(conn: &Connection) -> Result<(), StoreError> {
-    if is_uninitialized(conn)? {
-        conn.pragma_update(None, "application_id", JOBS_APPLICATION_ID)?;
-        conn.pragma_update(None, "user_version", JOBS_USER_VERSION)?;
-    } else {
-        validate_jobs_layout(conn)?;
-    }
-    Ok(())
-}
-
 pub fn validate_schema_objects(
     name: &str,
     conn: &Connection,
@@ -123,12 +86,15 @@ pub fn validate_database_layout(
         )));
     }
     match name {
-        "app" => validate_schema_objects(
-            name,
-            conn,
-            crate::schema::v1::APP_TABLES,
-            crate::schema::v1::APP_INDEXES,
-        )?,
+        "app" => {
+            validate_schema_objects(
+                name,
+                conn,
+                crate::schema::v1::APP_TABLES,
+                crate::schema::v1::APP_INDEXES,
+            )?;
+            validate_app_tables(conn)?;
+        }
         "library" => validate_schema_objects(
             name,
             conn,
@@ -142,6 +108,22 @@ pub fn validate_database_layout(
             crate::schema::v1::SUBSCRIBE_INDEXES,
         )?,
         _ => {}
+    }
+    Ok(())
+}
+
+/// Retired app tables belong to another layout; never silently adopt them.
+fn validate_app_tables(conn: &Connection) -> Result<(), StoreError> {
+    let mut statement = conn.prepare(
+        "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+    )?;
+    for table in statement.query_map([], |row| row.get::<_, String>(0))? {
+        let table = table?;
+        if !crate::schema::v1::APP_TABLES.contains(&table.as_str()) {
+            return Err(StoreError::Invalid(format!(
+                "app database has unsupported table {table}"
+            )));
+        }
     }
     Ok(())
 }

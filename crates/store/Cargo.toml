@@ -8,7 +8,7 @@ license.workspace = true
 domain.workspace = true
 downloader.workspace = true
 library.workspace = true
-rusqlite = { workspace = true, features = ["functions"] }
+rusqlite = { workspace = true, features = ["functions", "trace"] }
 media.workspace = true
 release.workspace = true
 subscribe.workspace = true
@@ -24,5 +24,6 @@ tracing.workspace = true
 unicode-normalization.workspace = true
 
 [dev-dependencies]
+jobs.workspace = true
 tempfile.workspace = true
 rusqlite = { workspace = true, features = ["hooks"] }

@@ -168,7 +168,7 @@ async fn playback_heartbeat_at_90_percent_sets_played_true() {
             "POST",
             "/api/v1/playback/progress",
             Some("management-secret"),
-            json!({
+            json!({ "event_sequence": crate::common::next_playback_sequence(),
                 "media_item_id": media.id.to_string(),
                 "file_id": file_id.to_string(),
                 "device_id": "test-device",

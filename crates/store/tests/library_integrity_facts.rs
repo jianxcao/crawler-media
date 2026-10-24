@@ -27,7 +27,7 @@ fn setup() -> (tempfile::TempDir, Store, LibraryId, Vec<String>) {
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|r| r.library_id.as_deref() == Some(lib.id.as_str()))
+        .find(|r| r.library_id.as_str() == lib.id.as_str())
         .unwrap()
         .id;
     let mut ids = Vec::new();

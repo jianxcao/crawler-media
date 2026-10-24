@@ -223,28 +223,9 @@ pub(crate) fn reload_root_aliases(conn: &Connection) -> Result<(), StoreError> {
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
-        .flat_map(|(display, key)| {
-            let display_key = normalize_path_key(&display);
-            // The root key is `fs::canonicalize` at registration. A later lookup of the
-            // same directory can still spell a platform alias (`/var` vs `/private/var`)
-            // that is not the registered display path. Both spellings name `key`.
-            let resolved = std::fs::canonicalize(&key)
-                .ok()
-                .map(|path| normalize_path_key(&path.to_string_lossy()))
-                .filter(|resolved| resolved != &key);
-            // The stored key can be a platform alias of the real directory. Always
-            // point the shorter spelling at the realpath, never the other way around.
-            let (alias, canonical) = match &resolved {
-                Some(real) if key == *real => (display_key.clone(), key.clone()),
-                Some(real) => (key.clone(), real.clone()),
-                None => (display_key.clone(), key.clone()),
-            };
-            [
-                Some((display_key, canonical.clone())),
-                Some((alias, canonical)),
-            ]
-        })
-        .flatten()
+        // Registration already resolved each key. Reloading facts must not
+        // reinterpret a later symlink, or observe slow mounts under Store.
+        .map(|(display, key)| (normalize_path_key(&display), key))
         .filter(|(alias, key)| alias != key)
         .collect();
     rows.sort_by(|a, b| b.0.len().cmp(&a.0.len()));

@@ -37,7 +37,7 @@ async fn scan_and_transfer_publication_atomic_file_writes() {
         let roots = store.list_library_roots().unwrap();
         roots
             .into_iter()
-            .find(|r| r.library_id.as_deref() == Some(&fix.library_id))
+            .find(|r| r.library_id.as_str() == fix.library_id.as_str())
             .map(|r| r.id)
             .unwrap_or_else(|| "test_root".into())
     };
@@ -141,7 +141,7 @@ async fn claim_multi_episode_preserves_all_units() {
             .list_library_roots()
             .unwrap()
             .into_iter()
-            .find(|r| r.library_id.as_deref() == Some(&lib.id))
+            .find(|r| r.library_id.as_str() == lib.id.as_str())
             .map(|r| r.id)
             .unwrap();
         (lib, root)
@@ -242,91 +242,9 @@ async fn claim_multi_episode_preserves_all_units() {
 async fn replacement_scan_advances_version_and_rejects_old_probe() {
     let fix = PresenceFixture::new();
     let store_arc = fix.state.store();
-    let media_id = MediaId::new();
-    let media = Media {
-        id: media_id,
-        kind: MediaKind::Movie,
-        title: "Test Movie 2".into(),
-        year: Some(2024),
-        original_title: None,
-        aliases: Vec::new(),
-        tmdb_id: None,
-        douban_id: None,
-        tvdb_id: None,
-        bangumi_id: None,
-        anilist_id: None,
-    };
-
-    let lib_id: LibraryId = fix.library_id.parse().unwrap();
-    let root_id = {
-        let store = store_arc.lock();
-        store.insert_media(&media).unwrap();
-        let roots = store.list_library_roots().unwrap();
-        roots
-            .into_iter()
-            .find(|r| r.library_id.as_deref() == Some(&fix.library_id))
-            .map(|r| r.id)
-            .unwrap_or_else(|| "test_root".into())
-    };
-
-    let scope = WriteScope {
-        library_id: lib_id,
-        config_revision: 0,
-    };
-
-    let file_id = LedgerId::new();
-    let rel_path = std::path::PathBuf::from("Test Movie 2/movie.mkv");
-    let before = FileVersion {
-        revision: 1,
-        source_version: "stat:100:1000".into(),
-    };
-    let file = LibraryFile {
-        file_id,
-        library_id: lib_id,
-        root_id,
-        media_id,
-        kind: MediaKind::Movie,
-        path: rel_path,
-        version: before.clone(),
-        presence: FilePresence::Present,
-        publication: FilePublication::Published,
-        size_bytes: Some(100),
-        stat_known: true,
-        created_ns: None,
-        modified_ns: Some(1000),
-        source_digest: None,
-        source_path: None,
-        transfer_mode: None,
-        resolution: Some("720p".into()),
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: Some(100),
-        release_quality: None,
-        duration_ms: None,
-        tracks_version: 0,
-        poster_path: None,
-        backdrop_path: None,
-        still_path: None,
-    };
-
-    {
-        let store = store_arc.lock();
-        store
-            .publish_files(
-                &scope,
-                &[StorePublication {
-                    file: &file,
-                    units: &[UnitKey::WHOLE],
-                    expected_version: None,
-                    nfo_observation: None,
-                    probe_required: false,
-                }],
-                1000,
-            )
-            .unwrap();
-    }
+    let (scope, file) = seed_replaceable_movie(&fix);
+    let file_id = file.file_id;
+    let before = file.version.clone();
 
     // Now observe a replaced source B
     let observation = library::SourceObservation {
@@ -472,4 +390,95 @@ async fn actual_rescan_replaces_physical_source() {
             .publish_probe_result(file_id, &old_probe, 9_000)
             .unwrap()
     );
+}
+
+fn seed_replaceable_movie(fix: &PresenceFixture) -> (WriteScope, LibraryFile) {
+    let shared = fix.state.store();
+    let store = shared.lock();
+    let media_id = MediaId::new();
+    let media = Media {
+        id: media_id,
+        kind: MediaKind::Movie,
+        title: "Test Movie 2".into(),
+        year: Some(2024),
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+
+    let lib_id: LibraryId = fix.library_id.parse().unwrap();
+    let root_id = {
+        let store = &store;
+        store.insert_media(&media).unwrap();
+        let roots = store.list_library_roots().unwrap();
+        roots
+            .into_iter()
+            .find(|r| r.library_id.as_str() == fix.library_id.as_str())
+            .map(|r| r.id)
+            .expect("fixture Library owns a root")
+    };
+
+    let scope = WriteScope {
+        library_id: lib_id,
+        config_revision: 0,
+    };
+
+    let file_id = LedgerId::new();
+    let rel_path = std::path::PathBuf::from("Test Movie 2/movie.mkv");
+    let before = FileVersion {
+        revision: 1,
+        source_version: "stat:100:1000".into(),
+    };
+    let file = LibraryFile {
+        file_id,
+        library_id: lib_id,
+        root_id,
+        media_id,
+        kind: MediaKind::Movie,
+        path: rel_path,
+        version: before.clone(),
+        presence: FilePresence::Present,
+        publication: FilePublication::Published,
+        size_bytes: Some(100),
+        stat_known: true,
+        created_ns: None,
+        modified_ns: Some(1000),
+        source_digest: None,
+        source_path: None,
+        transfer_mode: None,
+        resolution: Some("720p".into()),
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: Some(100),
+        release_quality: None,
+        duration_ms: None,
+        tracks_version: 0,
+        poster_path: None,
+        backdrop_path: None,
+        still_path: None,
+    };
+
+    {
+        let store = &store;
+        store
+            .publish_files(
+                &scope,
+                &[StorePublication {
+                    file: &file,
+                    units: &[UnitKey::WHOLE],
+                    expected_version: None,
+                    nfo_observation: None,
+                    probe_required: false,
+                }],
+                1000,
+            )
+            .unwrap();
+    }
+    (scope, file)
 }

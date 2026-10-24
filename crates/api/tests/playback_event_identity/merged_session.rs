@@ -56,7 +56,7 @@ fn merged_e02_fixture(fix: &PresenceFixture) -> MergedE02Fixture {
         let roots = guard.list_library_roots().unwrap();
         roots
             .into_iter()
-            .find(|r| r.library_id.as_deref() == Some(&tv_lib.id))
+            .find(|r| r.library_id.as_str() == tv_lib.id.as_str())
             .expect("tv root")
             .id
     };
@@ -162,7 +162,7 @@ async fn merged_e02_open_episode_sessions(
         "POST",
         "/api/v1/playback/progress",
         Some(&fix.admin_token),
-        json!({
+        json!({ "event_sequence": crate::support::session::next_sequence(),
             "device_id": "dev_tv",
             "media_item_id": media_id.to_string(),
             "file_id": file_id.to_string(),
@@ -251,7 +251,7 @@ async fn merged_e02_progress_touches_only_e02(
             "POST",
             "/api/v1/playback/progress",
             Some(&fix.admin_token),
-            json!({
+            json!({ "event_sequence": crate::support::session::next_sequence(),
                 "device_id": "dev_tv",
                 "media_item_id": media_id.to_string(),
                 "file_id": file_id.to_string(),
@@ -314,7 +314,7 @@ async fn merged_no_id_other_unit_is_ignored() {
                 }),
             )
             .await;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
     assert_eq!(
         read(1, 1),

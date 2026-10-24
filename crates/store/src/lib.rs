@@ -2,6 +2,8 @@
 //! Backed by 4 SQLite files in the data directory.
 
 mod app_write;
+mod transfer_settings;
+pub use transfer_settings::{TransferSettings, TransferSettingsPatch};
 mod browse_reads;
 mod catalog;
 mod chapter_frame_tasks;
@@ -31,6 +33,8 @@ mod library_stats;
 pub use library_stats::LibraryRosterStats;
 pub mod files;
 mod library;
+mod unidentified;
+pub use unidentified::UnidentifiedRow;
 mod library_covers;
 mod library_deletion;
 pub mod library_query;
@@ -60,6 +64,7 @@ pub use probe_dispatch::{ProbeDispatchId, ProbeDispatchSnapshot, ProbeDispatchSt
 pub mod library_operations;
 mod roots;
 pub use library_operations::LibraryReconfiguration;
+pub use roots::RootReassignment;
 mod scan_context;
 mod scan_operations;
 mod scan_probe_obligations;
@@ -94,7 +99,7 @@ pub use fingerprint_attempts::StoredFingerprintAttempt;
 pub use fingerprint_cache::{FingerprintCacheEntry, MediaInfoCacheVersion};
 pub use fingerprint_models::{StoredFingerprintModel, StoredFingerprintModelMember};
 pub use fingerprint_samples::{FingerprintSampleQuery, StoredFingerprintSample};
-pub use libraries::Library;
+pub use libraries::{Library, PreparedLibraryRoots};
 pub use library::{
     MarkerResultReplacement, SourceObservation, SourceSnapshot, StoredMediaMarker, observe_sources,
     observe_sources_with,

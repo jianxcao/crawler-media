@@ -59,7 +59,7 @@ fn pubs(files: &[(LibraryFile, [UnitKey; 1])]) -> Vec<StorePublication<'_>> {
 }
 
 /// Returns (summary writes during the batch, owned_episode_count of the first user).
-fn batch(users: usize) -> (u64, i64) {
+fn batch(users: usize, protocol: bool) -> (u64, i64) {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let media = Media {
@@ -83,7 +83,7 @@ fn batch(users: usize) -> (u64, i64) {
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|r| r.library_id == Some(lib.id.clone()))
+        .find(|r| r.library_id == lib.id.clone())
         .unwrap()
         .id;
     let scope = WriteScope {
@@ -102,6 +102,7 @@ fn batch(users: usize) -> (u64, i64) {
             )
             .unwrap();
     }
+    let db = measure_protocol_writes(tmp.path().join("library.db"), media.id, protocol);
     let files: Vec<_> = (1..=100)
         .map(|ep| {
             (
@@ -113,6 +114,15 @@ fn batch(users: usize) -> (u64, i64) {
     let start = store::work_counters::user_summary_writes();
     store.publish_files(&scope, &pubs(&files), 3_000).unwrap();
     let ms = store::work_counters::user_summary_writes() - start;
+    check_protocol_writes(&db, media.id, protocol);
+    if protocol {
+        check_indexed_queries(&store, lib.id.parse().unwrap());
+        store
+            .delete_files(scope.library_id, &[first[0].0.file_id])
+            .unwrap();
+        demote_batch(&store, &scope, files.clone(), media.id);
+    }
+    drop(db);
     drop(store);
     let owned = ids
         .first()
@@ -132,10 +142,116 @@ fn batch(users: usize) -> (u64, i64) {
 
 #[test]
 fn batch_user_summary_cost_does_not_scale_with_files_times_users() {
-    let (quiet, _) = batch(0);
-    let (busy, owned) = batch(40);
+    let (quiet, _) = batch(0, false);
+    let (busy, owned) = batch(40, false);
     println!("summary writes for a 100-file batch: 0 users {quiet}, 40 users {busy}");
     assert_eq!(owned, 101, "summary reflects every file of the batch");
     assert_eq!(quiet, 0);
     assert_eq!(busy, 40, "one finalize per user per Media per batch");
+}
+
+#[test]
+fn batch_protocol_index_cost_tracks_cards_instead_of_files_times_people() {
+    batch(0, true);
+}
+
+fn measure_protocol_writes(
+    path: std::path::PathBuf,
+    media: MediaId,
+    protocol: bool,
+) -> rusqlite::Connection {
+    let db = rusqlite::Connection::open(path).unwrap();
+    if protocol {
+        let cast: Vec<_> = (0..100)
+            .map(|i| serde_json::json!({"name": format!("Actor {i}")}))
+            .collect();
+        let fields = serde_json::json!({"fields": {"cast": {"state": "value", "value": cast}}});
+        db.execute(
+            "INSERT INTO media_metadata(media_id,locale,title,details_json,revision)
+                    VALUES(?1,'zh-CN','Show',?2,1)",
+            rusqlite::params![media.to_string(), fields.to_string()],
+        )
+        .unwrap();
+        db.execute_batch("CREATE TABLE measured_protocol_writes(kind TEXT);
+            CREATE TRIGGER measured_person_insert AFTER INSERT ON library_item_terms
+            WHEN new.term_kind='person_id' BEGIN INSERT INTO measured_protocol_writes VALUES('insert'); END;
+            CREATE TRIGGER measured_person_delete AFTER DELETE ON library_item_terms
+            WHEN old.term_kind='person_id' BEGIN INSERT INTO measured_protocol_writes VALUES('delete'); END;").unwrap();
+    }
+    db
+}
+
+fn check_protocol_writes(db: &rusqlite::Connection, media: MediaId, protocol: bool) {
+    if protocol {
+        let inserts: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM measured_protocol_writes WHERE kind='insert'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let deletes: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM measured_protocol_writes WHERE kind='delete'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let terms: i64 = db.query_row("SELECT COUNT(*) FROM library_item_terms WHERE media_id=?1 AND term_kind='person_id'", [media.to_string()], |r|r.get(0)).unwrap();
+        assert_eq!(terms, 100);
+        assert_eq!(
+            inserts, 100,
+            "one protocol index publication per Media per batch"
+        );
+        assert_eq!(deletes, 0, "no intermediate unpublished protocol indexes");
+    }
+}
+
+fn check_indexed_queries(store: &Store, library: domain::LibraryId) {
+    let mut query = domain::ProtocolItemQuery {
+        user_id: UserId::new(),
+        parent: domain::ProtocolParent::Library(library),
+        series_id: None,
+        season: None,
+        person_ids: vec![],
+        studio_ids: vec![],
+        search_term: None,
+        genres: vec![],
+        genre_ids: vec![],
+        filters: vec![],
+        is_favorite: None,
+        is_played: None,
+        include_types: vec![domain::ProtocolItemType::Series],
+        recursive: true,
+        is_folder: None,
+        sort: vec![],
+        offset: 0,
+        limit: 10,
+    };
+    let plain = store.protocol_item_page(&query).unwrap();
+    query.person_ids =
+        vec![uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, b"name:actor 0:Actor").to_string()];
+    assert_eq!(store.protocol_item_page(&query).unwrap(), plain);
+    query.person_ids.clear();
+    query.search_term = Some("show".into());
+    assert_eq!(store.protocol_item_page(&query).unwrap(), plain);
+}
+
+fn demote_batch(
+    store: &Store,
+    scope: &WriteScope,
+    mut files: Vec<(LibraryFile, [UnitKey; 1])>,
+    media: MediaId,
+) {
+    for (file, _) in &mut files {
+        file.publication = FilePublication::Pending;
+    }
+    store.publish_files(scope, &pubs(&files), 4_000).unwrap();
+    assert!(
+        store
+            .get_library_item(scope.library_id, media)
+            .unwrap()
+            .is_none(),
+        "a pending-only batch removes the last card and its protocol index"
+    );
 }

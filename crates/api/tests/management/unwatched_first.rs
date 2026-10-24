@@ -122,7 +122,7 @@ async fn mark_watching(app: &axum::Router, media_item_id: &str) {
     let response = post(
         app,
         "/api/v1/playback/progress",
-        json!({
+        json!({ "event_sequence": crate::common::next_playback_sequence(),
             "media_item_id": media_item_id,
             "event": "start",
             "device_id": "web-1",

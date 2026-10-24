@@ -29,12 +29,17 @@ pub struct Queue {
 impl Queue {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, JobError> {
         let path = path.as_ref();
+        crate::schema::preflight(path).inspect_err(|error| {
+            tracing::error!(path = %path.display(), %error, "Jobs layout preflight rejected");
+        })?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path)?;
         apply_connection_policy(&conn)?;
-        store::migrate(&conn)?;
+        crate::schema::initialize_or_validate(&conn).inspect_err(|error| {
+            tracing::error!(path = %path.display(), %error, "Jobs initialization rejected");
+        })?;
         Ok(Self { conn })
     }
 

@@ -74,6 +74,11 @@ fn fixture() -> ClaimFixture {
             .unwrap()
             .id
     };
+    state
+        .store()
+        .lock()
+        .insert_unidentified(path.display().to_string(), domain::Confidence::Low)
+        .unwrap();
     ClaimFixture {
         _tmp: tmp,
         state,
@@ -263,6 +268,44 @@ fn reconfigured_library_during_claim_nfo_read_rejects_the_original_context() {
     assert!(
         shared
             .lock()
+            .file_coverage_by_path(fixture.path.to_str().unwrap())
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn updated_parked_identity_during_claim_keeps_new_record_and_rejects_file() {
+    let fixture = fixture();
+    let mut gate = NfoGate::new(&fixture.path);
+    let result = start_claim(&fixture);
+    gate.wait_for_reader();
+    let shared = fixture.state.store();
+    let changed = if let Some(store) = shared.try_lock_for(Duration::from_millis(250)) {
+        store
+            .insert_unidentified(fixture.path.display().to_string(), domain::Confidence::High)
+            .unwrap();
+        true
+    } else {
+        false
+    };
+    gate.release().unwrap();
+    assert!(changed, "Claim observation must release Store");
+    assert_eq!(
+        result.recv_timeout(Duration::from_secs(5)).unwrap(),
+        StatusCode::CONFLICT
+    );
+    let store = shared.lock();
+    assert_eq!(
+        store
+            .get_unidentified(fixture.path.to_str().unwrap())
+            .unwrap()
+            .unwrap()
+            .confidence,
+        "high"
+    );
+    assert!(
+        store
             .file_coverage_by_path(fixture.path.to_str().unwrap())
             .unwrap()
             .is_none()

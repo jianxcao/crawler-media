@@ -73,7 +73,7 @@ fn publish_unit(
 }
 
 #[test]
-fn failed_movie_mark_does_not_hide_legacy_progress() {
+fn failed_movie_mark_preserves_whole_progress() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user = UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap();
@@ -82,7 +82,7 @@ fn failed_movie_mark_does_not_hide_legacy_progress() {
         .insert_media(&domain::Media {
             id: media,
             kind: domain::MediaKind::Movie,
-            title: "Legacy".into(),
+            title: "Whole".into(),
             year: None,
             original_title: None,
             aliases: Vec::new(),
@@ -93,13 +93,13 @@ fn failed_movie_mark_does_not_hide_legacy_progress() {
             anilist_id: None,
         })
         .unwrap();
-    publish_unit(&store, &tmp.path().join("media"), media, 0, 0);
+    support::publish_file(&store, &tmp.path().join("media"), media, "whole");
     store
         .upsert_unit(
             user,
             media,
-            0,
-            0,
+            -1,
+            -1,
             45000,
             Some(false),
             Some(true),
@@ -129,10 +129,9 @@ fn failed_movie_mark_does_not_hide_legacy_progress() {
     );
     drop(blocked);
     let reopened = Store::open(tmp.path()).unwrap();
-    let legacy = reopened.unit_state(user, media, 0, 0).unwrap().unwrap();
-    assert_eq!(legacy.position_ms, 45000);
-    assert!(legacy.favorite);
-    assert!(reopened.unit_state(user, media, -1, -1).unwrap().is_none());
+    let whole = reopened.unit_state(user, media, -1, -1).unwrap().unwrap();
+    assert_eq!(whole.position_ms, 45000);
+    assert!(whole.favorite);
 }
 
 #[test]

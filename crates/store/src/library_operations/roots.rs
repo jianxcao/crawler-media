@@ -50,12 +50,12 @@ pub(crate) fn apply_root_batch(
         let rows = next_path_batch(
             tx,
             "unidentified",
-            "path",
+            "path_key",
             library,
             cursor.last_unidentified_path.as_deref(),
             batch,
         )?;
-        reparent_paths(tx, "unidentified", "path", library, &rows, requested)?;
+        reparent_paths(tx, "unidentified", "path_key", library, &rows, requested)?;
         if rows.len() >= batch {
             cursor.last_unidentified_path = rows.last().cloned();
             return Ok(BatchOutcome::More);
@@ -118,7 +118,14 @@ fn reparent_paths(
     paths: &[String],
     requested: &[PreparedRoot],
 ) -> Result<(), StoreError> {
-    let sql = format!("UPDATE {table} SET root_id = ?1 WHERE library_id = ?2 AND {column} = ?3");
+    let revision = if table == "unidentified" {
+        ", revision=revision+1"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "UPDATE {table} SET root_id = ?1{revision} WHERE library_id = ?2 AND {column} = ?3 AND root_id<>?1"
+    );
     for path in paths {
         let Some(root) = longest_root(path, requested) else {
             continue;
@@ -167,6 +174,17 @@ fn ensure_root_rows(
                 display,
                 index as i32
             ],
+        )?;
+        let kind: String = tx.query_row(
+            "SELECT kind FROM libraries WHERE library_id=?1",
+            [library],
+            |row| row.get(0),
+        )?;
+        crate::Store::reassign_files_under_root(
+            tx,
+            library,
+            kind.parse().map_err(StoreError::MediaKind)?,
+            &root.path_key,
         )?;
     }
     Ok(())
@@ -258,9 +276,10 @@ fn prune_unreferenced_roots(
     };
     for (root_id, key) in existing {
         let recorded = crate::path_key::canonical_recorded_key(tx, &key);
-        if requested.iter().any(|root| {
-            crate::path_key::canonical_recorded_key(tx, &root.path_key) == recorded
-        }) {
+        if requested
+            .iter()
+            .any(|root| crate::path_key::canonical_recorded_key(tx, &root.path_key) == recorded)
+        {
             continue;
         }
 
@@ -300,7 +319,7 @@ pub(crate) fn has_uncovered_rows(
         .collect();
     for (table, column) in [
         ("library_files", "path_key"),
-        ("unidentified", "path"),
+        ("unidentified", "path_key"),
         ("library_metadata_inputs", "path_key"),
     ] {
         let covered: Vec<String> = (0..roots.len())

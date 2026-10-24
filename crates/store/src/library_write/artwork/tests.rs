@@ -93,7 +93,7 @@ fn scanned_artwork_reaches_the_card() {
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|root| root.library_id.as_deref() == Some(library.id.as_str()))
+        .find(|root| root.library_id.as_str() == library.id.as_str())
         .unwrap();
     let media = movie_media(&store, "Scanned");
 
@@ -133,7 +133,7 @@ fn recorded_artwork_updates_the_card_and_stale_versions_are_rejected() {
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|root| root.library_id.as_deref() == Some(library.id.as_str()))
+        .find(|root| root.library_id.as_str() == library.id.as_str())
         .unwrap();
     let media = movie_media(&store, "Recorded");
 

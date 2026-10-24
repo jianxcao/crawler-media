@@ -5,11 +5,11 @@ use axum::Router;
 use axum::routing::{delete, get, patch, post, put};
 
 use crate::http::{
-    directory, downloaders, file_delete, fs, job_maintenance, jobs, library, library_admin,
-    library_artwork, library_chapters, library_config, library_delete, library_deletion,
-    library_duplicates, library_housekeeping, library_operations, library_organize,
-    library_presence, library_scan, media, media_operations, notify, playback, reidentify,
-    rule_sets, scrape_settings, settings, sites, system_logs, users,
+    downloaders, file_delete, fs, job_maintenance, jobs, library, library_admin, library_artwork,
+    library_chapters, library_config, library_delete, library_deletion, library_duplicates,
+    library_housekeeping, library_operations, library_organize, library_presence, library_scan,
+    media, media_operations, notify, playback, reidentify, rule_sets, scrape_settings, settings,
+    sites, system_logs, transfer_settings, users,
 };
 use crate::management::ApiState;
 
@@ -274,9 +274,7 @@ pub(super) fn admin_ops_routes() -> Router<ApiState> {
         )
         .route("/playback/policy", put(playback::put_policy))
         // directory + settings + notify（写入）
-        .route("/directory", put(directory::put_directory))
-        .route("/directory/roots", post(directory::add_root))
-        .route("/directory/roots/{id}", delete(directory::delete_root))
+        .route("/settings/transfer", patch(transfer_settings::patch))
         .route("/notify/config", put(notify::put_config))
         .route("/notify/test", post(notify::test))
         .route(

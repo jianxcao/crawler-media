@@ -53,41 +53,22 @@ pub(crate) async fn start_session(
             resolved.target.unit.episode,
         )],
     };
-    let _ = crate::http::library::ensure_probe_enqueued(&state, &coverage);
     let device_id = body
         .get("device_id")
         .and_then(|v| v.as_str())
         .unwrap_or("web-player");
-    // 播放域时间一律走注入时钟。`issue_play_session` 的 `issued_at` 是**秒**
-    // （Store 内部按 30 天秒数清理过期会话）。
-    let issued_at = state.playback_clock.now_ms() / 1000;
-    let play_session_id = {
-        let store = state.store.lock();
-        store
-            .issue_play_session(
-                user_id,
-                device_id,
-                file.file_id,
-                resolved.target.media_id,
-                resolved.target.unit,
-                &resolved.target.file.version,
-                issued_at,
-            )
-            .ok()
+    let play_session_id = match issue_binding(&state, user_id, device_id, &resolved) {
+        Ok(id) => id,
+        Err(response) => return response,
     };
+    let _ = crate::http::library::ensure_probe_enqueued(&state, &coverage);
     tracing::info!(media_id = %media.id, file_id = %file.file_id, %user_id, start_ms, ?play_session_id, "Playback session selected");
     let is_strm = file
         .path
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("strm"));
-    let stream_url = session_stream_url(
-        &file,
-        play_session_id.as_deref(),
-        device_id,
-        &token,
-        is_strm,
-    );
+    let stream_url = session_stream_url(&file, &play_session_id, device_id, &token, is_strm);
     let (chapters, chapters_pending) = session_chapters(&state, &file, &media);
     let source = session_source(&file, is_strm);
     let subtitle_urls: Vec<String> = decision
@@ -146,9 +127,31 @@ fn session_source(file: &domain::LibraryFile, is_strm: bool) -> Value {
     })
 }
 
+fn issue_binding(
+    state: &ApiState,
+    user: domain::UserId,
+    device: &str,
+    resolved: &crate::store::ResolvedResume,
+) -> Result<String, Response> {
+    let file = &resolved.target.file;
+    let result = state.store.lock().issue_play_session(
+        user,
+        device,
+        file.file_id,
+        resolved.target.media_id,
+        resolved.target.unit,
+        &file.version,
+        state.playback_clock.now_ms() / 1000,
+    );
+    result.map_err(|error| {
+        tracing::error!(%error,%user,device,file_id=%file.file_id,"Playback session issuance failed");
+        err(StatusCode::INTERNAL_SERVER_ERROR,"store.error","无法签发播放会话")
+    })
+}
+
 fn session_stream_url(
     file: &domain::LibraryFile,
-    play_session_id: Option<&str>,
+    play_session_id: &str,
     device_id: &str,
     token: &str,
     is_strm: bool,
@@ -159,12 +162,9 @@ fn session_stream_url(
             return direct_url;
         }
     }
-    if let Some(psid) = play_session_id {
-        format!("/api/v1/playback/sessions/{psid}/stream?device_id={device_id}&api_key={token}")
-    } else {
-        let stream_id = file.file_id.to_string().replace('-', "");
-        format!("/Videos/{stream_id}/stream?api_key={token}")
-    }
+    format!(
+        "/api/v1/playback/sessions/{play_session_id}/stream?device_id={device_id}&api_key={token}"
+    )
 }
 
 fn session_chapters(
@@ -205,33 +205,28 @@ pub(crate) struct SessionStreamQuery {
     pub device_id: String,
 }
 
-pub(crate) async fn session_stream(
-    State(state): State<ApiState>,
-    axum::Extension(user_id): axum::Extension<domain::UserId>,
-    axum::extract::Path(play_session_id): axum::extract::Path<String>,
-    axum::extract::Query(query): axum::extract::Query<SessionStreamQuery>,
-    headers: axum::http::HeaderMap,
-) -> Result<Response, StatusCode> {
-    let binding = {
-        let store = state.store.lock();
-        match store.play_session_binding(user_id, &query.device_id, &play_session_id) {
-            Ok(Some(b))
-                if matches!(
-                    b.state,
-                    crate::store::PlaySessionIdState::Pending
-                        | crate::store::PlaySessionIdState::Active
-                ) =>
-            {
-                b
-            }
-            _ => return Err(StatusCode::NOT_FOUND),
+fn session_source_path(
+    store: &crate::Store,
+    user_id: domain::UserId,
+    device_id: &str,
+    play_session_id: &str,
+) -> Result<(std::path::PathBuf, bool), StatusCode> {
+    let binding = match store.play_session_binding(user_id, device_id, play_session_id) {
+        Ok(Some(b))
+            if matches!(
+                b.state,
+                crate::store::PlaySessionIdState::Pending
+                    | crate::store::PlaySessionIdState::Active
+            ) =>
+        {
+            b
         }
+        _ => return Err(StatusCode::NOT_FOUND),
     };
     let Some(file_id_str) = binding.file_id.as_deref() else {
         return Err(StatusCode::NOT_FOUND);
     };
     let (path, is_strm) = {
-        let store = state.store.lock();
         let Ok(file_id) = file_id_str.parse::<domain::LedgerId>() else {
             return Err(StatusCode::NOT_FOUND);
         };
@@ -248,9 +243,7 @@ pub(crate) async fn session_stream(
                 .get_file_units(file_id)
                 .ok()
                 .is_some_and(|units| units.contains(&binding.unit))
-            || store
-                .is_device_revoked(user_id, &query.device_id)
-                .unwrap_or(true)
+            || store.is_device_revoked(user_id, device_id).unwrap_or(true)
             || !store.library_accepts_work(&library_id).unwrap_or(false)
         {
             return Err(StatusCode::NOT_FOUND);
@@ -261,6 +254,21 @@ pub(crate) async fn session_stream(
             .and_then(|ext| ext.to_str())
             .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"));
         (file.path, is_strm)
+    };
+
+    Ok((path, is_strm))
+}
+
+pub(crate) async fn session_stream(
+    State(state): State<ApiState>,
+    axum::Extension(user_id): axum::Extension<domain::UserId>,
+    axum::extract::Path(play_session_id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<SessionStreamQuery>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, StatusCode> {
+    let (path, is_strm) = {
+        let store = state.store.lock();
+        session_source_path(&store, user_id, &query.device_id, &play_session_id)?
     };
 
     if is_strm {

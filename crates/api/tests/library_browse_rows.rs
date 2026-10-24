@@ -256,7 +256,7 @@ fn library_root_id(api_state: &ApiState, library_id: &str) -> String {
         .list_library_roots()
         .unwrap()
         .into_iter()
-        .find(|root| root.library_id.as_deref() == Some(library_id))
+        .find(|root| root.library_id.as_str() == library_id)
         .map(|root| root.id)
         .expect("library root")
 }

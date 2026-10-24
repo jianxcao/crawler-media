@@ -101,10 +101,24 @@ impl LibraryPathScope {
     /// Equal depth reached by two different libraries is ambiguous.
     /// Miss returns Unmatched (NEVER falls back to default).
     pub fn owner(&self, resolved_path: &Path, kind: MediaKind) -> StrictOwner<'_> {
+        self.owner_matching(resolved_path, Some(kind))
+    }
+
+    /// An in-place Watch observes a directory before its Media kind is known.
+    /// Compare the matching roots across kinds, not unrelated roots of their owners.
+    pub fn owner_any(&self, resolved_path: &Path) -> StrictOwner<'_> {
+        self.owner_matching(resolved_path, None)
+    }
+
+    fn owner_matching(&self, resolved_path: &Path, kind: Option<MediaKind>) -> StrictOwner<'_> {
         let mut best: Option<(usize, &Library)> = None;
         let mut ambiguous = false;
 
-        for res in self.libraries.iter().filter(|r| r.library.kind == kind) {
+        for res in self
+            .libraries
+            .iter()
+            .filter(|r| kind.is_none_or(|kind| r.library.kind == kind))
+        {
             let Some(depth) = res
                 .resolved_roots
                 .iter()

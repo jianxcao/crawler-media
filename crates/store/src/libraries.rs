@@ -12,6 +12,8 @@ use rusqlite::params;
 
 use super::library_ownership::{LibraryOwnership, owner_with_default};
 use super::{Store, StoreError};
+mod root_config;
+pub use root_config::PreparedLibraryRoots;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Library {
     pub id: String,
@@ -405,7 +407,32 @@ impl Store {
         match_rules: &[serde_json::Value],
         default_filter_id: Option<&str>,
     ) -> Result<Library, StoreError> {
-        self.ensure_removal_roots_available(root_paths)?;
+        let roots = PreparedLibraryRoots::observe(root_paths)?;
+        self.create_library_full_prepared(
+            kind,
+            name,
+            &roots,
+            access_mode,
+            admin_visible,
+            member_ids,
+            match_rules,
+            default_filter_id,
+        )
+    }
+
+    /// Create from root observations made outside the caller's Store guard.
+    pub fn create_library_full_prepared(
+        &self,
+        kind: MediaKind,
+        name: &str,
+        roots: &PreparedLibraryRoots,
+        access_mode: &str,
+        admin_visible: bool,
+        member_ids: &[domain::UserId],
+        match_rules: &[serde_json::Value],
+        default_filter_id: Option<&str>,
+    ) -> Result<Library, StoreError> {
+        self.ensure_removal_keys_available(roots.entries.iter().map(|(_, key)| key.as_str()))?;
         let id = uuid::Uuid::new_v4().to_string();
         let sort_order = self.next_sort_order()?;
         let has_default: bool = self
@@ -445,13 +472,15 @@ impl Store {
                 default_filter_id,
             ],
         )?;
-        Self::replace_roots(&tx, &id, kind, root_paths)?;
-        for root in root_paths {
-            Self::reassign_files_under_root(&tx, &id, kind, root)?;
+        Self::replace_roots(&tx, &id, roots)?;
+        for (_, key) in &roots.entries {
+            Self::reassign_files_under_root(&tx, &id, kind, key)?;
         }
         tx.commit()?;
         crate::path_key::reload_root_aliases(&self.library)?;
-        self.drain_root_reassignments()?;
+        if let Err(error) = self.drain_one_root_batch() {
+            tracing::error!(%error,library_id=id,"Root reassignment queued after a failed initial window");
+        }
         Ok(self
             .get_library(&id)?
             .ok_or_else(|| StoreError::Missing(format!("library {id}")))?)
@@ -556,6 +585,7 @@ impl Store {
         default_filter_id: Option<Option<&str>>,
     ) -> Result<Library, StoreError> {
         self.ensure_library_mutable(id)?;
+        let prepared_roots = root_paths.map(PreparedLibraryRoots::observe).transpose()?;
         let Some(library) = self.get_library(id)? else {
             return Err(StoreError::Missing(format!("library {id}")));
         };
@@ -594,10 +624,10 @@ impl Store {
                 )?;
             }
         }
-        if let Some(root_paths) = root_paths {
-            Self::replace_roots(&tx, id, library.kind, root_paths)?;
-            for root in root_paths {
-                Self::reassign_files_under_root(&tx, id, library.kind, root)?;
+        if let Some(roots) = &prepared_roots {
+            Self::replace_roots(&tx, id, roots)?;
+            for (_, key) in &roots.entries {
+                Self::reassign_files_under_root(&tx, id, library.kind, key)?;
             }
         }
         if let Some((access_mode, admin_visible, member_ids)) = access {
@@ -631,7 +661,9 @@ impl Store {
         }
         tx.commit()?;
         crate::path_key::reload_root_aliases(&self.library)?;
-        self.drain_root_reassignments()?;
+        if let Err(error) = self.drain_one_root_batch() {
+            tracing::error!(%error,library_id=id,"Root reassignment queued after a failed initial window");
+        }
         Ok(self
             .get_library(id)?
             .ok_or_else(|| StoreError::Missing(format!("library {id}")))?)
@@ -676,54 +708,6 @@ impl Store {
                 "UPDATE libraries SET sort_order = ?1 WHERE library_id = ?2",
                 params![index as i32, id],
             )?;
-        }
-        Ok(())
-    }
-
-    fn replace_roots(
-        conn: &rusqlite::Connection,
-        library_id: &str,
-        _kind: MediaKind,
-        root_paths: &[&str],
-    ) -> Result<(), StoreError> {
-        let mut stmt =
-            conn.prepare("SELECT root_id, display_path FROM library_roots WHERE library_id = ?1")?;
-        let existing = stmt
-            .query_map(params![library_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        for (index, path) in root_paths.iter().enumerate() {
-            let path = path.trim();
-            if path.is_empty() {
-                continue;
-            }
-            if let Some((root_id, _)) = existing.iter().find(|(_, p)| p == path) {
-                conn.execute(
-                    "UPDATE library_roots SET sort_order = ?1 WHERE root_id = ?2",
-                    params![index as i32, root_id],
-                )?;
-            } else {
-                conn.execute(
-                    "INSERT INTO library_roots (root_id, library_id, path_key, display_path, enabled, sort_order)
-                     VALUES (?1, ?2, ?5, ?3, 1, ?4)",
-                    params![
-                        uuid::Uuid::new_v4().to_string(),
-                        library_id,
-                        path,
-                        index as i32,
-                        crate::path_key::canonical_root_key(path)?
-                    ],
-                )?;
-            }
-        }
-        for (root_id, path) in existing {
-            if !root_paths.iter().any(|p| p.trim() == path) {
-                conn.execute(
-                    "DELETE FROM library_roots WHERE root_id = ?1",
-                    params![root_id],
-                )?;
-            }
         }
         Ok(())
     }
