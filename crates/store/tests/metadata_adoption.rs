@@ -330,7 +330,7 @@ fn invalid_nfo_keeps_the_last_valid_metadata_input() {
         config_revision: 0,
     };
     let observe = |file: &LibraryFile| {
-        store::metadata::observe_nfo_inputs(
+        store.observe_nfo_inputs(
             &file.path,
             file.kind,
             &[UnitKey::WHOLE],

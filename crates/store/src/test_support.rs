@@ -97,7 +97,7 @@ fn publish_with_units(
         let config_revision = store
             .library_config_revision(&file.library_id.to_string())
             .unwrap_or(0);
-        let observations = crate::metadata::observe_nfo_inputs(
+        let observations = store.observe_nfo_inputs(
             &file.path,
             file.kind,
             &units,

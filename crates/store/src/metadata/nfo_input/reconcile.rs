@@ -21,6 +21,7 @@ struct ExistingFile {
     file_id: LedgerId,
     kind: MediaKind,
     path_key: String,
+    file_revision: i64,
     source_version: String,
     units: Vec<UnitKey>,
 }
@@ -61,10 +62,11 @@ impl Store {
             path_key: existing.path_key,
             file_id: existing.file_id,
             version: FileVersion {
-                revision: 1,
+                revision: existing.file_revision,
                 source_version: existing.source_version,
             },
-        };
+        }
+        .with_canonical_path(&self.library);
         Ok(Some(NfoInputReconcilePlan {
             path: path.to_path_buf(),
             kind: existing.kind,
@@ -72,6 +74,15 @@ impl Store {
             locale,
             config_revision,
             target,
+            key_of: {
+                let aliases = crate::path_key::alias_snapshot(&self.library);
+                std::sync::Arc::new(move |raw: &str| {
+                    crate::path_key::canonical_key(
+                        &crate::path_key::canonical_existing_key(raw),
+                        &aliases,
+                    )
+                })
+            },
         }))
     }
 
@@ -110,13 +121,13 @@ impl Store {
     }
 
     fn existing_file_for_path(&self, path: &Path) -> Result<Option<ExistingFile>, StoreError> {
-        let key = path.to_string_lossy();
+        let key = crate::path_key::canonical_existing_key(&path.to_string_lossy());
         let row = self
             .library
             .query_row(
-                "SELECT file_id, library_id, media_id, root_id, kind, source_version, path_key
+                "SELECT file_id, library_id, media_id, root_id, kind, file_revision, source_version, path_key
                  FROM library_files WHERE path_key = norm_path_key(?1) LIMIT 1",
-                params![key.as_ref()],
+                params![key],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -124,13 +135,23 @@ impl Store {
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                        row.get::<_, String>(6)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, String>(7)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((file_id, library_id, media_id, root_id, kind, source_version, path_key)) = row
+        let Some((
+            file_id,
+            library_id,
+            media_id,
+            root_id,
+            kind,
+            file_revision,
+            source_version,
+            path_key,
+        )) = row
         else {
             return Ok(None);
         };
@@ -140,6 +161,7 @@ impl Store {
             media_id: media_id.parse()?,
             root_id,
             kind: kind.parse().map_err(StoreError::MediaKind)?,
+            file_revision,
             source_version: source_version.unwrap_or_default(),
             units: self.units_of_file(file_id)?,
             file_id,
@@ -163,7 +185,7 @@ impl Store {
 }
 
 /// Ownership keys of one ledgered video, read under the Store lock.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct NfoInputReconcilePlan {
     path: std::path::PathBuf,
     kind: MediaKind,
@@ -171,10 +193,10 @@ pub struct NfoInputReconcilePlan {
     locale: String,
     config_revision: i64,
     target: NfoInputTarget,
+    key_of: std::sync::Arc<dyn Fn(&str) -> String + Send + Sync>,
 }
 
 /// Sidecar observations for a [`NfoInputReconcilePlan`], made without the Store.
-#[derive(Debug)]
 pub struct NfoInputReconcileObserved {
     plan: NfoInputReconcilePlan,
     observations: Vec<super::NfoObservation>,
@@ -183,13 +205,14 @@ pub struct NfoInputReconcileObserved {
 impl NfoInputReconcilePlan {
     /// Cold IO + parse of every sidecar candidate. Never touches the Store.
     pub fn observe(self) -> NfoInputReconcileObserved {
-        let observations = super::observe_nfo_inputs(
+        let observations = super::observe_nfo_inputs_with_key(
             &self.path,
             self.kind,
             &self.units,
             &self.locale,
             &self.target.version,
             self.config_revision,
+            |raw| (self.key_of)(raw),
         );
         NfoInputReconcileObserved {
             plan: self,

@@ -95,7 +95,7 @@ fn publish(
     units: &[UnitKey],
     locale: &str,
 ) -> Vec<store::metadata::NfoObservation> {
-    let observations = store::metadata::observe_nfo_inputs(
+    let observations = store.observe_nfo_inputs(
         &file.path,
         file.kind,
         units,
@@ -730,5 +730,124 @@ fn nested_library_carries_scoped_inputs_and_keeps_shared_parent_nfo() {
         title(&nested.id),
         title(&parent),
         "nested card is composed from the same work facts as the parent"
+    );
+}
+
+/// F10: a root registered through a symlink alias must persist the sidecar under the
+/// same canonical key as the video `path_key`. Display spelling is for IO only — the
+/// first full reduce must not treat a real input as an orphan.
+#[test]
+fn aliased_root_persists_canonical_nfo_input_and_detail() {
+    let tmp = tempfile::tempdir().unwrap();
+    let real = tmp.path().join("real");
+    let alias = tmp.path().join("alias");
+    std::fs::create_dir_all(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let (library, root_id) = library_with_root(&store, &alias, "Aliased", MediaKind::Movie);
+    let media = insert_media(&store, MediaKind::Movie, "Aliased");
+    let video = alias.join("A.mkv");
+    std::fs::write(&video, b"bytes").unwrap();
+    std::fs::write(
+        alias.join("A.nfo"),
+        "<movie><plot>Alias plot</plot></movie>",
+    )
+    .unwrap();
+    let file = video_file(&library, &root_id, media, MediaKind::Movie, video.clone());
+    let scope = WriteScope {
+        library_id: library.parse().unwrap(),
+        config_revision: 0,
+    };
+    let observations = publish(&store, &scope, &file, &[UnitKey::WHOLE], "zh-CN");
+    let valid: Vec<_> = observations
+        .iter()
+        .filter(|observation| observation.state == store::metadata::NfoParseState::Valid)
+        .collect();
+    assert_eq!(valid.len(), 1, "{observations:#?}");
+
+    let db = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
+    let (input_key, path_key, video_key): (String, String, String) = db
+        .query_row(
+            "SELECT i.input_key, i.path_key, f.path_key
+             FROM library_metadata_inputs i
+             JOIN library_files f ON f.library_id = i.library_id AND f.media_id = i.media_id
+             WHERE i.parse_state = 'valid'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("aliased publish must persist the valid NFO input");
+    let real_prefix = std::fs::canonicalize(tmp.path()).unwrap();
+    assert!(
+        input_key.starts_with(real_prefix.to_str().unwrap()),
+        "input_key must be canonical, got {input_key}"
+    );
+    assert!(
+        !input_key.contains("/alias/"),
+        "input_key must not keep the alias spelling: {input_key}"
+    );
+    assert!(
+        path_key.starts_with(real_prefix.to_str().unwrap()),
+        "video path_key on the input row must be canonical, got {path_key} vs {video_key}"
+    );
+    assert_eq!(
+        overview_of(&store, &library, media, "zh-CN").as_deref(),
+        Some("Alias plot")
+    );
+
+    std::fs::write(
+        alias.join("A.nfo"),
+        "<movie><plot>Alias plot edited</plot></movie>",
+    )
+    .unwrap();
+    assert!(store.reconcile_nfo_inputs(&video).unwrap());
+    assert_eq!(
+        overview_of(&store, &library, media, "zh-CN").as_deref(),
+        Some("Alias plot edited")
+    );
+    let persisted: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM library_metadata_inputs WHERE parse_state = 'valid'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(persisted, 1, "an edit keeps one canonical input");
+
+    std::fs::remove_file(alias.join("A.nfo")).unwrap();
+    assert!(
+        store.reconcile_nfo_inputs(&video).unwrap(),
+        "deleting through the alias spelling releases the input"
+    );
+    assert_eq!(overview_of(&store, &library, media, "zh-CN"), None);
+    let persisted: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM library_metadata_inputs",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(persisted, 0);
+
+    std::fs::write(
+        real.join("A.nfo"),
+        "<movie><plot>Real plot</plot></movie>",
+    )
+    .unwrap();
+    let real_video = real.join("A.mkv");
+    assert!(
+        store.reconcile_nfo_inputs(&real_video).unwrap(),
+        "the real spelling of the same file must record the new sidecar"
+    );
+    assert_eq!(
+        overview_of(&store, &library, media, "zh-CN").as_deref(),
+        Some("Real plot")
+    );
+    assert!(
+        !store.reconcile_nfo_inputs(&video).unwrap(),
+        "rescanning the alias spelling of an unchanged sidecar is the same input"
+    );
+    assert_eq!(
+        overview_of(&store, &library, media, "zh-CN").as_deref(),
+        Some("Real plot")
     );
 }

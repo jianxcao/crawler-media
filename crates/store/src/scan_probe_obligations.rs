@@ -125,7 +125,8 @@ impl Store {
                 scanned.units.clone()
             };
             sync_coverage(&tx, &file, &units)?;
-            let target = crate::metadata::nfo_input::NfoInputTarget::from_file(&file);
+            let target =
+                crate::metadata::nfo_input::NfoInputTarget::from_file(&file).with_canonical_path(&tx);
             if !crate::metadata::nfo_input::record_nfo_observations(
                 &tx,
                 &target,

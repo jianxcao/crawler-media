@@ -152,7 +152,7 @@ pub(crate) fn publish_claimed_file(
         .ok()
         .flatten()
         .unwrap_or_default();
-    let observations = store::metadata::observe_nfo_inputs(
+    let observations = store.observe_nfo_inputs(
         dest,
         media.kind,
         &facts.units,

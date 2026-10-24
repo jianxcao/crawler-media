@@ -113,7 +113,7 @@ fn seed_movie_with_artwork(
         library_id: lib_id.parse().unwrap(),
         config_revision: 0,
     };
-    let observations = store::metadata::observe_nfo_inputs(
+    let observations = api_state.store().lock().observe_nfo_inputs(
         &video_file,
         MediaKind::Movie,
         &[UnitKey::WHOLE],

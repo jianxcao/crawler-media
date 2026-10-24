@@ -81,7 +81,7 @@ pub fn record_paths(
         // The sidecars are the scan's own observation input: read them here, before the
         // publication transaction, and hand the result to the writer.
         let observations = match nfo_observation_context(store, &dest, media.kind) {
-            Some((locale, config_revision)) => store::metadata::observe_nfo_inputs(
+            Some((locale, config_revision)) => store.observe_nfo_inputs(
                 &dest,
                 media.kind,
                 &units,

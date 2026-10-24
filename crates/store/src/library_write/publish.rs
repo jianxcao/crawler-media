@@ -95,7 +95,8 @@ impl Store {
             }
             sync_coverage(&tx, file, pub_item.units)?;
             if let Some(observations) = pub_item.nfo_observation {
-                let target = crate::metadata::nfo_input::NfoInputTarget::from_file(file);
+                let target = crate::metadata::nfo_input::NfoInputTarget::from_file(file)
+                    .with_canonical_path(&tx);
                 if !crate::metadata::nfo_input::record_nfo_observations(&tx, &target, observations)?
                 {
                     return Err(StoreError::Protected(format!(
@@ -579,19 +580,20 @@ pub(crate) fn insert_file_row(tx: &Connection, file: &LibraryFile) -> Result<(),
              filter_score, release_quality, duration_ms, tracks_version,
              poster_path, backdrop_path, still_path, has_poster, has_backdrop, has_still)
          VALUES
-            (?1, ?2, ?3, ?4, ?5, norm_path_key(?6), ?6,
-             ?7, ?8, ?9, ?10,
-             ?11, ?12, ?13, ?14, ?15,
-             ?16, ?17, ?18, ?19, ?20, ?21, ?22,
-             ?23, ?24, ?25, ?26,
-             ?27, ?28, ?29, ?30, ?31, ?32)",
+            (?1, ?2, ?3, ?4, ?5, norm_path_key(?6), ?7,
+             ?8, ?9, ?10, ?11,
+             ?12, ?13, ?14, ?15, ?16,
+             ?17, ?18, ?19, ?20, ?21, ?22, ?23,
+             ?24, ?25, ?26, ?27,
+             ?28, ?29, ?30, ?31, ?32, ?33)",
         params![
             file.file_id.to_string(),
             file.library_id.to_string(),
             file.root_id,
             file.media_id.to_string(),
             file.kind.as_str(),
-            file.path.to_string_lossy(),
+            crate::path_key::canonical_existing_key(&file.path.to_string_lossy()),
+            file.path.to_string_lossy().to_string(),
             file.presence.as_str(),
             file.publication.as_str(),
             file.version.revision,
@@ -636,27 +638,28 @@ fn update_file_row(tx: &Connection, file: &LibraryFile, revision: i64) -> Result
     // and a stat observation never overwrites a known value with NULL.
     tx.execute(
         "UPDATE library_files SET
-            path_key = norm_path_key(?1), display_path = ?1,
-            presence_state = ?2, publication_state = ?3, file_revision = ?4, source_version = ?5,
-            size_bytes = COALESCE(?6, size_bytes), stat_known = MAX(stat_known, ?7),
-            mtime_ns = COALESCE(?8, mtime_ns), created_ns = COALESCE(?9, created_ns),
-            source_digest = COALESCE(?10, source_digest),
-            source_path = COALESCE(?11, source_path),
-            transfer_mode = COALESCE(?12, transfer_mode),
-            resolution = COALESCE(?13, resolution), codec = COALESCE(?14, codec),
-            hdr = COALESCE(?15, hdr), quality_source = ?16, confidence = ?17,
-            filter_score = COALESCE(?18, filter_score),
-            release_quality = COALESCE(?19, release_quality),
-            duration_ms = COALESCE(?20, duration_ms), tracks_version = ?21,
-            poster_path = COALESCE(?22, poster_path),
-            backdrop_path = COALESCE(?23, backdrop_path),
-            still_path = COALESCE(?24, still_path),
-            has_poster = MAX(has_poster, ?25),
-            has_backdrop = MAX(has_backdrop, ?26),
-            has_still = MAX(has_still, ?27)
-         WHERE file_id = ?28",
+            path_key = norm_path_key(?1), display_path = ?2,
+            presence_state = ?3, publication_state = ?4, file_revision = ?5, source_version = ?6,
+            size_bytes = COALESCE(?7, size_bytes), stat_known = MAX(stat_known, ?8),
+            mtime_ns = COALESCE(?9, mtime_ns), created_ns = COALESCE(?10, created_ns),
+            source_digest = COALESCE(?11, source_digest),
+            source_path = COALESCE(?12, source_path),
+            transfer_mode = COALESCE(?13, transfer_mode),
+            resolution = COALESCE(?14, resolution), codec = COALESCE(?15, codec),
+            hdr = COALESCE(?16, hdr), quality_source = ?17, confidence = ?18,
+            filter_score = COALESCE(?19, filter_score),
+            release_quality = COALESCE(?20, release_quality),
+            duration_ms = COALESCE(?21, duration_ms), tracks_version = ?22,
+            poster_path = COALESCE(?23, poster_path),
+            backdrop_path = COALESCE(?24, backdrop_path),
+            still_path = COALESCE(?25, still_path),
+            has_poster = MAX(has_poster, ?26),
+            has_backdrop = MAX(has_backdrop, ?27),
+            has_still = MAX(has_still, ?28)
+         WHERE file_id = ?29",
         params![
-            file.path.to_string_lossy(),
+            crate::path_key::canonical_existing_key(&file.path.to_string_lossy()),
+            file.path.to_string_lossy().to_string(),
             file.presence.as_str(),
             file.publication.as_str(),
             revision,

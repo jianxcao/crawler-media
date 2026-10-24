@@ -34,6 +34,15 @@ impl NfoInputTarget {
             version: file.version.clone(),
         }
     }
+
+    /// Rewrite the video key through the same root-alias snapshot the sidecar uses.
+    pub fn with_canonical_path(mut self, conn: &Connection) -> Self {
+        self.path_key = crate::path_key::canonical_path_key(
+            conn,
+            &crate::path_key::canonical_existing_key(&self.path_key),
+        );
+        self
+    }
 }
 
 /// Publish one file's observations; returns false for stale ones (caller reobserves).

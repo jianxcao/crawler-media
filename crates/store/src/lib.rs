@@ -267,4 +267,30 @@ impl Store {
     pub fn cache_db_path(&self) -> PathBuf {
         self.data_dir.join("cache.db")
     }
+
+    /// Observe NFO sidecars with one committed root-alias snapshot.
+    ///
+    /// Display paths stay on the observation for IO. `input_key` is canonical, matching
+    /// `library_files.path_key`, so a symlink root does not persist a key the reducer
+    /// later treats as an orphan.
+    pub fn observe_nfo_inputs(
+        &self,
+        path: &std::path::Path,
+        kind: domain::MediaKind,
+        units: &[domain::UnitKey],
+        locale: &str,
+        version: &domain::FileVersion,
+        config_revision: i64,
+    ) -> Vec<crate::metadata::NfoObservation> {
+        let aliases = crate::path_key::alias_snapshot(&self.library);
+        crate::metadata::nfo_input::observe_nfo_inputs_with_aliases(
+            &aliases,
+            path,
+            kind,
+            units,
+            locale,
+            version,
+            config_revision,
+        )
+    }
 }

@@ -29,6 +29,12 @@ use crate::StoreError;
 /// `(alias prefix, canonical root key)`, longest alias first.
 pub(crate) type RootAliases = Arc<RwLock<Vec<(String, String)>>>;
 
+/// Fixed alias snapshot for one observation plan. IO stays outside the Store lock;
+/// every sidecar key in that plan uses this snapshot, not a later reload.
+pub(crate) fn alias_snapshot(conn: &Connection) -> RootAliases {
+    table_for(conn)
+}
+
 /// One alias table per library.db file, shared by every connection to it (several
 /// `Store`s may open the same data dir). Keyed by the connection's database path; an
 /// in-memory database has no path and is keyed by its own connection handle, so two
@@ -73,6 +79,23 @@ fn fresh_table(conn: &Connection) -> RootAliases {
     table
 }
 
+/// Lexical + NFC form, then the platform realpath when the path exists.
+///
+/// Existing paths go through `fs::canonicalize` so `/var` and `/private/var` (and any
+/// other symlink spelling of the same file) share one key without waiting for a root
+/// alias reload. Missing paths stay lexical: a deleted sidecar must still name the row
+/// it is releasing. `..` is never resolved lexically.
+pub fn canonical_existing_key(raw: &str) -> String {
+    let lexical = normalize_path_key(raw);
+    let resolved = match std::fs::canonicalize(&lexical) {
+        Ok(real) => real.to_string_lossy().into_owned(),
+        Err(_) => return lexical,
+    };
+    // macOS realpath returns NFD. NFC is applied again so Café and Cafe+combining
+    // accent stay one key after the symlink rewrite.
+    normalize_path_key(&resolved)
+}
+
 /// Lexical + NFC canonical form (no root alias rewrite).
 pub fn normalize_path_key(raw: &str) -> String {
     let nfc: String = raw.nfc().collect();
@@ -87,6 +110,14 @@ pub fn normalize_path_key(raw: &str) -> String {
         (false, true) => ".".to_string(),
         (false, false) => joined,
     }
+}
+
+/// Canonical form of one path against the aliases committed on `conn`.
+///
+/// Display spelling stays with the caller for IO. Persistence, deletion and reduction
+/// must all use this key so a symlink root and its real path name the same sidecar.
+pub(crate) fn canonical_path_key(conn: &Connection, raw: &str) -> String {
+    canonical_key(raw, &table_for(conn))
 }
 
 /// Canonical form with the root alias table applied.
@@ -159,7 +190,18 @@ pub(crate) fn reload_root_aliases(conn: &Connection) -> Result<(), StoreError> {
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
-        .map(|(display, key)| (normalize_path_key(&display), key))
+        .flat_map(|(display, key)| {
+            let display_key = normalize_path_key(&display);
+            // The root key is `fs::canonicalize` at registration. A later lookup of the
+            // same directory can still spell a platform alias (`/var` vs `/private/var`)
+            // that is not the registered display path. Both spellings name `key`.
+            let resolved = std::fs::canonicalize(&key)
+                .ok()
+                .map(|path| normalize_path_key(&path.to_string_lossy()))
+                .filter(|resolved| resolved != &key);
+            [Some((display_key, key.clone())), resolved.map(|alias| (alias, key))]
+        })
+        .flatten()
         .filter(|(alias, key)| alias != key)
         .collect();
     rows.sort_by(|a, b| b.0.len().cmp(&a.0.len()));

@@ -77,7 +77,12 @@ fn equivalent_spellings_share_one_key_and_keep_display_spelling() {
     .unwrap();
     let rows = file_rows(&tmp);
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].1, clean.display().to_string(), "key is normalized");
+    let canonical_clean = std::fs::canonicalize(&clean).unwrap();
+    assert_eq!(
+        rows[0].1,
+        canonical_clean.display().to_string(),
+        "key is the canonical root prefix plus the normalized relative path"
+    );
     assert_eq!(rows[0].2, odd, "display keeps the caller spelling");
 
     let second = publish_fixture_file(
@@ -174,7 +179,11 @@ fn nfd_and_nfc_spellings_are_one_key() {
     assert_eq!(first.file_id, second.file_id);
     let rows = file_rows(&tmp);
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].1, nfc.display().to_string(), "key is NFC");
+    let canonical_dir = std::fs::canonicalize(&root).unwrap();
+    let expected = store::path_key::normalize_path_key(
+        &canonical_dir.join("Caf\u{e9}.mkv").to_string_lossy(),
+    );
+    assert_eq!(rows[0].1, expected, "key is NFC under the canonical root");
 }
 
 #[test]
