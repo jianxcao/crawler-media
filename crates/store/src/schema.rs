@@ -62,50 +62,36 @@ fn seed_libraries_and_roots(
 ) -> Result<(), StoreError> {
     for (kind, name, root_path) in [("movie", "电影库", movie_root), ("tv", "剧集库", tv_root)]
     {
-        let existing: Option<String> = library
+        let exists: bool = library
             .query_row(
-                "SELECT library_id FROM libraries WHERE kind = ?1 LIMIT 1",
+                "SELECT 1 FROM libraries WHERE kind = ?1 LIMIT 1",
                 params![kind],
-                |row| row.get(0),
-            )
-            .optional()?;
-
-        let lib_id = match existing {
-            Some(id) => id,
-            None => {
-                let id = uuid::Uuid::new_v4().to_string();
-                library.execute(
-                    "INSERT INTO libraries (library_id, kind, name, is_default, sort_order)
-                     VALUES (?1, ?2, ?3, 1, 0)",
-                    params![id, kind, name],
-                )?;
-                id
-            }
-        };
-
-        let root_str = root_path.display().to_string();
-        let has_root: bool = library
-            .query_row(
-                "SELECT 1 FROM library_roots WHERE path_key = norm_path_key(?1)",
-                params![root_str],
                 |_| Ok(()),
             )
             .optional()?
             .is_some();
-
-        if !has_root {
-            let root_id = uuid::Uuid::new_v4().to_string();
-            library.execute(
-                "INSERT INTO library_roots (root_id, library_id, path_key, display_path, enabled, sort_order)
-                 VALUES (?1, ?2, ?4, ?3, 1, 0)",
-                params![
-                    root_id,
-                    lib_id,
-                    root_str,
-                    crate::path_key::canonical_root_key(&root_str)?
-                ],
-            )?;
+        if exists {
+            // A kind that already has a Library keeps the roots an operator saved.
+            // Re-adding the built-in path here would undo a deletion or replacement (F09).
+            continue;
         }
+        let lib_id = uuid::Uuid::new_v4().to_string();
+        library.execute(
+            "INSERT INTO libraries (library_id, kind, name, is_default, sort_order)
+             VALUES (?1, ?2, ?3, 1, 0)",
+            params![lib_id, kind, name],
+        )?;
+        let root_str = root_path.display().to_string();
+        library.execute(
+            "INSERT INTO library_roots (root_id, library_id, path_key, display_path, enabled, sort_order)
+             VALUES (?1, ?2, ?4, ?3, 1, 0)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                lib_id,
+                root_str,
+                crate::path_key::canonical_root_key(&root_str)?
+            ],
+        )?;
     }
     Ok(())
 }

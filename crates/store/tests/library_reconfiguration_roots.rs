@@ -288,3 +288,65 @@ fn symlinked_reconfiguration_compares_canonical_keys() {
     assert_eq!(owner(&nested), anime_root);
     assert_eq!(owner(&sibling), alias_root);
 }
+
+fn root_snapshot(store: &Store) -> Vec<(String, String, bool, i32, i64)> {
+    store
+        .list_library_roots()
+        .unwrap()
+        .into_iter()
+        .map(|root| {
+            (
+                root.library_id.clone().unwrap_or_default(),
+                root.path.display().to_string(),
+                root.is_default,
+                root.sort_order,
+                store
+                    .library_config_revision(root.library_id.as_deref().unwrap_or_default())
+                    .unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// F09: replacing the built-in root survives reopen. Seeding must not put it back.
+#[test]
+fn replaced_builtin_root_survives_reopen() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    let store = Store::open(&data).unwrap();
+    let movies = store
+        .list_libraries()
+        .unwrap()
+        .into_iter()
+        .find(|library| library.kind == MediaKind::Movie)
+        .unwrap();
+    let builtin = movies.root_paths[0].clone();
+    let replacement = tmp.path().join("custom-movies");
+    std::fs::create_dir_all(&replacement).unwrap();
+    let revision = store.library_config_revision(&movies.id).unwrap();
+    let operation = uuid::Uuid::new_v4().to_string();
+    store
+        .begin_library_reconfiguration(
+            &LibraryReconfiguration {
+                operation_id: operation.clone(),
+                library_id: movies.id.parse().unwrap(),
+                expected_revision: revision,
+                root_paths: Some(vec![replacement.clone()]),
+                display_locale: None,
+            },
+            1,
+        )
+        .unwrap();
+    assert_eq!(
+        store.advance_library_operation(&operation, 100, 2).unwrap().state,
+        "succeeded"
+    );
+    let before = root_snapshot(&store);
+    assert!(
+        !before.iter().any(|root| root.1 == builtin.display().to_string()),
+        "the built-in root is gone before reopen"
+    );
+    drop(store);
+    let reopened = Store::open(&data).unwrap();
+    assert_eq!(root_snapshot(&reopened), before);
+}
