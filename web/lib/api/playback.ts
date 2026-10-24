@@ -940,7 +940,7 @@ export async function setPlaybackMarks(
 ): Promise<PlaybackMarks> {
   const response = await request<ApiEnvelope<PlaybackMarks>>("/playback/marks", {
     method: "POST",
-    body: JSON.stringify({ ...target, ...change, device_id: getPlayerDeviceId() }),
+    body: JSON.stringify({ ...target, ...change }),
   });
   return response.data;
 }

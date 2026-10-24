@@ -78,9 +78,9 @@ pub(crate) async fn resume(
 pub(crate) async fn marks(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
-    Query(query): Query<HashMap<String, String>>,
+    Query(query): Query<MarkQuery>,
 ) -> Response {
-    let Some(media_id) = query.get("media_item_id").and_then(|v| resolve_media_id(v)) else {
+    let Some(media_id) = query.media_item_id.as_deref().and_then(resolve_media_id) else {
         return err(
             StatusCode::BAD_REQUEST,
             "playback.invalid",
@@ -88,8 +88,8 @@ pub(crate) async fn marks(
         );
     };
     let (season, episode) = match mark_target(
-        query.get("season_number").map(|value| query_coordinate(value)),
-        query.get("episode_number").map(|value| query_coordinate(value)),
+        query.season_number.as_deref().map(query_coordinate),
+        query.episode_number.as_deref().map(query_coordinate),
     ) {
         Ok(target) => target,
         Err(response) => return response,
@@ -145,7 +145,13 @@ fn coordinate(name: &str, raw: Option<Result<u64, ()>>) -> Result<Option<i32>, R
             &format!("{name} 必须是 0 到 4294967295 的整数"),
         ));
     };
-    Ok(Some(i32::try_from(value).unwrap_or(i32::MAX)))
+    i32::try_from(value).map(Some).map_err(|_| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "playback.invalid",
+            &format!("{name} 超出可存储范围"),
+        )
+    })
 }
 
 fn json_coordinate(value: Option<&Value>) -> Option<Result<u64, ()>> {
@@ -157,6 +163,15 @@ fn json_coordinate(value: Option<&Value>) -> Option<Result<u64, ()>> {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MarkQuery {
+    media_item_id: Option<String>,
+    season_number: Option<String>,
+    episode_number: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MarkInput {
     media_item_id: Option<String>,
     #[serde(default)]

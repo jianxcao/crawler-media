@@ -19,9 +19,12 @@ async fn web_movie_zero_unit_keeps_resume_and_completed_marks() {
     );
     let session = json_data(post(&app, "sessions", target.clone()).await).await;
     assert_eq!(session["start_ms"], 600_000);
-    let mut mark = target.clone();
-    mark["played"] = json!(true);
-    assert_eq!(post(&app, "marks", mark).await.status(), StatusCode::OK);
+    assert_eq!(
+        post(&app, "marks", super::playback_review::mark_body(&target, true))
+            .await
+            .status(),
+        StatusCode::OK
+    );
     let session = json_data(post(&app, "sessions", target).await).await;
     assert_eq!(session["start_ms"], 0);
 }
@@ -56,9 +59,12 @@ async fn frontend_movie_marks_query_reads_saved_progress_as_played_state() {
     target.as_object_mut().unwrap().remove("season_number");
     target.as_object_mut().unwrap().remove("episode_number");
     save_position(&app, &target).await;
-    let mut mark = target.clone();
-    mark["played"] = json!(true);
-    assert_eq!(post(&app, "marks", mark).await.status(), StatusCode::OK);
+    assert_eq!(
+        post(&app, "marks", super::playback_review::mark_body(&target, true))
+            .await
+            .status(),
+        StatusCode::OK
+    );
     let uri = format!(
         "/api/v1/playback/marks?media_item_id={}",
         target["media_item_id"].as_str().unwrap()
@@ -380,8 +386,10 @@ async fn tv_whole_mark_must_not_migrate_special_zero_progress() {
             user, media, -1, -1, 600_000, None, None, None, None, None, false, 1,
         )
         .unwrap();
-    target["favorite"] = json!(true);
-    assert_eq!(post(&app, "marks", target).await.status(), StatusCode::OK);
+    let mut mark = super::playback_review::mark_body(&target, false);
+    mark["favorite"] = json!(true);
+    mark.as_object_mut().unwrap().remove("played");
+    assert_eq!(post(&app, "marks", mark).await.status(), StatusCode::OK);
     let uri = format!("/api/v1/playback/resume?media_item_id={media}");
     let resume = json_data(
         app.oneshot(request(

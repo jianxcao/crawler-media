@@ -68,6 +68,15 @@ pub(super) fn fixture(tmp: &tempfile::TempDir, tv: bool) -> (axum::Router, Value
     )
 }
 
+pub(super) fn mark_body(target: &Value, played: bool) -> Value {
+    json!({
+        "media_item_id": target["media_item_id"],
+        "season_number": target.get("season_number").cloned().unwrap_or(Value::Null),
+        "episode_number": target.get("episode_number").cloned().unwrap_or(Value::Null),
+        "played": played,
+    })
+}
+
 pub(super) async fn post(app: &axum::Router, route: &str, body: Value) -> axum::response::Response {
     app.clone()
         .oneshot(request(
@@ -129,9 +138,10 @@ async fn completed_movie_replays_from_zero() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, target) = fixture(&tmp, false);
     save_position(&app, &target).await;
-    let mut mark = target.clone();
-    mark["played"] = json!(true);
-    assert_eq!(post(&app, "marks", mark).await.status(), StatusCode::OK);
+    assert_eq!(
+        post(&app, "marks", mark_body(&target, true)).await.status(),
+        StatusCode::OK
+    );
     let session = json_data(post(&app, "sessions", target).await).await;
     assert_eq!(session["start_ms"], 0);
 }
