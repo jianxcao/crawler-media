@@ -86,6 +86,7 @@ async fn scan_and_transfer_publication_atomic_file_writes() {
 
     let units = vec![UnitKey::WHOLE];
     let coverage = FileCoverage {
+        path_key: String::new(),
         file: file.clone(),
         units: units.clone(),
     };
@@ -174,6 +175,7 @@ async fn claim_multi_episode_preserves_all_units() {
 
     let file_id = LedgerId::new();
     let multi_coverage = FileCoverage {
+        path_key: String::new(),
         file: LibraryFile {
             file_id,
             library_id: lib_id,

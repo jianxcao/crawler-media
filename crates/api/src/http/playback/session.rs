@@ -46,6 +46,7 @@ pub(crate) async fn start_session(
     }
     let start_ms = resolved.start_ms;
     let coverage = domain::FileCoverage {
+        path_key: String::new(),
         file: file.clone(),
         units: vec![domain::UnitKey::new(
             resolved.target.unit.season,
@@ -184,6 +185,7 @@ fn session_chapters(
         let media = media.clone();
         tokio::spawn(async move {
             let coverage = domain::FileCoverage {
+                path_key: String::new(),
                 file,
                 units: Vec::new(),
             };

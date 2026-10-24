@@ -113,9 +113,6 @@ pub(crate) fn publish_transfer_file(
         coverage.units.clone()
     };
     let mut file = coverage.file.clone();
-    if let Ok(resolved) = file.path.canonicalize() {
-        file.path = resolved;
-    }
     let artwork = store::files::DiscoveredArtwork::discover(&file.path);
     file.presence = domain::FilePresence::Present;
     file.publication = domain::FilePublication::Published;
@@ -212,17 +209,13 @@ fn commit_transfer_outcome(
             let existing = store
                 .file_coverage_by_path(&path)
                 .map_err(|e| e.to_string())?;
-            if existing.as_ref().map(|existing| {
-                (
-                    existing.file.file_id,
-                    existing.file.media_id,
-                    existing.file.path.to_string_lossy().into_owned(),
-                )
-            }) != Some((coverage.file.file_id, coverage.file.media_id, path.clone()))
-                || !store
-                    .ledger_source_path_matches(&path, source_path.as_deref())
-                    .map_err(|e| e.to_string())?
-            {
+            let identity_ok = existing.as_ref().map(|existing| {
+                (existing.file.file_id, existing.file.media_id)
+            }) == Some((coverage.file.file_id, coverage.file.media_id));
+            let source_ok = store
+                .ledger_source_path_matches(&path, source_path.as_deref())
+                .map_err(|e| e.to_string())?;
+            if !identity_ok || !source_ok {
                 return Err(format!("Transfer reservation missing or replaced: {path}"));
             }
             published.push(

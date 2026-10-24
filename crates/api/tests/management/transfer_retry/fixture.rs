@@ -12,7 +12,7 @@ use parking_lot::Mutex;
 use serde_json::json;
 use tower::ServiceExt;
 
-use super::super::common::{Fixtures, json_data, request, state, subscribe_payload};
+use super::super::common::{Fixtures, json_data, request, state, subscribe_payload_with_filter};
 
 #[derive(Default)]
 pub(super) struct CompletedFiles(Mutex<HashMap<String, Vec<PathBuf>>>);
@@ -84,11 +84,8 @@ impl TransferFixture {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let mut body = subscribe_payload("search");
-        body["filter"] = json!({
-            "name": "retry-1080p",
-            "atoms": [{ "kind": "resolution", "value": "1080p", "priority": 100 }]
-        });
+        let filter_id = super::super::common::create_rule_set(&app).await;
+        let mut body = subscribe_payload_with_filter("search", Some(&filter_id));
         body["media"] = if tv {
             json!({"kind": "tv", "title": "The Long Watch"})
         } else {

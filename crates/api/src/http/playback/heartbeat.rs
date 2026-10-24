@@ -115,6 +115,7 @@ pub(crate) async fn progress(
     };
     if duration_ms.is_none() {
         let coverage = domain::FileCoverage {
+            path_key: String::new(),
             file: file.clone(),
             units: vec![domain::UnitKey::new(season, episode)],
         };

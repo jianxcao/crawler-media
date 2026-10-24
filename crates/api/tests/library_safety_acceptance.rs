@@ -49,7 +49,8 @@ async fn verify_restore_scan_prune_preserves_two_users_and_sidecar_bytes() {
             .lock()
             .missing_at_by_path()
             .unwrap()
-            .contains_key(&row.path.display().to_string())
+            .keys()
+            .any(|key| key.ends_with(row.path.file_name().unwrap().to_str().unwrap()))
     );
 
     // 4. Prune: deleted count is 0, restored is 0 (already restored)

@@ -420,6 +420,7 @@ async fn pending_files_and_multi_unit_coverage_are_state_aware() {
 
     // A pending reservation on the same item must stay out of browse.
     let pending = domain::FileCoverage {
+        path_key: String::new(),
         file: domain::LibraryFile {
             publication: domain::FilePublication::Pending,
             path: PathBuf::from("Paged/pending.mkv"),

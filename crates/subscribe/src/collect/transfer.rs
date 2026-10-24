@@ -84,7 +84,7 @@ pub(super) fn reserve_and_publish<D: Downloader + ?Sized>(
         backdrop_path: None,
         still_path: None,
     };
-    let mut candidate = FileCoverage { file, units };
+    let mut candidate = FileCoverage { file, path_key: String::new(), units };
     if let Some(recorder) = recorder {
         candidate = recorder.prepare(&candidate, src, mode)?;
     }

@@ -30,6 +30,7 @@ pub(super) fn coverage_with_id(
     episode: Option<u32>,
 ) -> FileCoverage {
     FileCoverage {
+        path_key: String::new(),
         file: library_file(file_id, media_id, path),
         units: units_for(season, episode),
     }
@@ -51,6 +52,7 @@ pub(super) fn publish(store: &Store, cov: &FileCoverage) -> FileCoverage {
     let spec = fixture_spec(cov);
     let file = publish_fixture_file(store, &spec).expect("publish fixture file");
     FileCoverage {
+        path_key: String::new(),
         file,
         units: units_for(spec.season, spec.episode),
     }

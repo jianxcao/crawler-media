@@ -131,7 +131,7 @@ pub(super) fn map_library_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<Libr
 /// part of the row is decoded by exactly one function.
 pub(super) fn map_file_unit(
     row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<(LibraryFile, Option<UnitKey>)> {
+) -> rusqlite::Result<(LibraryFile, String, Option<UnitKey>)> {
     let season: Option<i32> = row.get(30)?;
     let episode: Option<i32> = row.get(31)?;
     let unit = match (season, episode) {
@@ -139,23 +139,24 @@ pub(super) fn map_file_unit(
         (None, None) => None,
         _ => return Err(rusqlite::Error::InvalidQuery),
     };
-    Ok((map_library_file(row)?, unit))
+    Ok((map_library_file(row)?, row.get(5)?, unit))
 }
 
 /// Fold `(file, unit)` rows into one [`FileCoverage`] per file: first-seen file
 /// order is preserved and each file lists its units as `(season ASC, episode ASC)`
 /// with duplicates removed, so a file's coverage never depends on join order.
 pub(super) fn group_file_coverage(
-    rows: impl IntoIterator<Item = (LibraryFile, Option<UnitKey>)>,
+    rows: impl IntoIterator<Item = (LibraryFile, String, Option<UnitKey>)>,
 ) -> Vec<FileCoverage> {
     let mut slots: HashMap<LedgerId, usize> = HashMap::new();
     let mut coverage: Vec<FileCoverage> = Vec::new();
-    for (file, unit) in rows {
+    for (file, path_key, unit) in rows {
         let slot = match slots.get(&file.file_id) {
             Some(slot) => *slot,
             None => {
                 slots.insert(file.file_id, coverage.len());
                 coverage.push(FileCoverage {
+                    path_key,
                     file,
                     units: Vec::new(),
                 });

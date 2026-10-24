@@ -235,6 +235,7 @@ fn setup(case: &'static str, episodes: &[u32]) -> Fixture {
             };
             let published = publish_fixture_file(&store.lock(), &fixture).unwrap();
             let coverage = FileCoverage {
+        path_key: String::new(),
                 file: published,
                 units: vec![domain::UnitKey::new(1, episode as i32)],
             };

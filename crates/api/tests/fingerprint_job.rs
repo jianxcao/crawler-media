@@ -9,6 +9,7 @@ use std::path::PathBuf;
 /// fact cannot come from `publish_fixture_file`.
 fn coverage(media_id: MediaId, episode: u32) -> FileCoverage {
     FileCoverage {
+        path_key: String::new(),
         file: LibraryFile {
             file_id: LedgerId::new(),
             library_id: LibraryId::new(),

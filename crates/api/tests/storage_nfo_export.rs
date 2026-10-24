@@ -525,7 +525,7 @@ async fn provider_title_changes_when_only_plot_was_edited() {
 
     catalog.set_title("TITLE V2");
     let edited = edit_plot(&std::fs::read_to_string(&nfo).unwrap(), "USER PLOT");
-    std::fs::write(&nfo, edited).unwrap();
+    std::fs::write(&nfo, &edited).unwrap();
     refresh_item(&app, library_id, media).await;
     let after = state
         .store()

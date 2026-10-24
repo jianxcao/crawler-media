@@ -9,36 +9,12 @@ use super::harness::*;
 const PACK: &str = "The.Long.Watch.S01.1080p.WEB-DL.x264-GRP";
 
 async fn tv_subscribe(h: &Harness, full_season_pack: bool) -> SubscribeId {
-    let response = tower::ServiceExt::oneshot(
-        h.app.clone(),
-        super::common::request(
-            "POST",
-            "/api/v1/subscriptions",
-            Some(TOKEN),
-            json!({
-                "media": { "kind": "tv", "title": "The Long Watch" },
-                "coverage": { "kind": "tv", "season": 1, "episode_from": 1, "episode_to": 3 },
-                "fetch_mode": "search",
-                "filter": {
-                    "name": "long-watch-1080p",
-                    "atoms": [
-                        { "kind": "resolution", "value": "1080p", "priority": 100 },
-                        { "kind": "title_match", "value": "Long", "priority": 80 }
-                    ]
-                },
-                "wash_cut": false,
-                "full_season_pack": full_season_pack
-            }),
-        ),
+    super::fake_catalog::tv_subscribe(
+        h,
+        json!({ "kind": "tv", "season": 1, "episode_from": 1, "episode_to": 3 }),
+        json!({ "full_season_pack": full_season_pack }),
     )
     .await
-    .unwrap();
-    assert_eq!(response.status(), axum::http::StatusCode::CREATED);
-    super::common::json_data(response).await["id"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap()
 }
 
 async fn pack_in_flight_blocks_more_downloads(full_season_pack: bool) {

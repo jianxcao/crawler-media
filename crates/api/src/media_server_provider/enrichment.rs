@@ -100,6 +100,7 @@ pub(super) fn enrich_snapshot_blocking(state: &ApiState, snapshot: &mut MediaIte
         // 旧路径交出的就是快照自身那一行 `(file, unit)`；新载体按同一事实构造覆盖：
         // 整片快照（`unit == None`）等价于「该文件没有 unit 行」，不是 `(0, 0)`。
         let coverage = domain::FileCoverage {
+        path_key: String::new(),
             file: snapshot.file.clone(),
             units: snapshot.unit.into_iter().collect(),
         };

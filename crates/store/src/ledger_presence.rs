@@ -18,6 +18,8 @@ pub use domain::FilePresence;
 #[derive(Clone, Debug)]
 pub struct LedgerPresenceObservation {
     pub file: FileCoverage,
+    /// Canonical identity captured with the observation, before the store lock.
+    pub path_key: String,
     pub missing_at: Option<i64>,
     pub presence: FilePresence,
 }
@@ -62,6 +64,11 @@ impl crate::Store {
     ///
     /// A `pending` file observed as present is the crash-recovery case: its bytes
     /// completed Transfer, so it becomes published content.
+    /// Canonical identity of a path that may no longer exist. No filesystem IO.
+    pub fn recorded_path_key(&self, path: &str) -> String {
+        crate::path_key::canonical_recorded_key(&self.library, path)
+    }
+
     pub fn apply_ledger_presence(
         &self,
         observations: &[LedgerPresenceObservation],
@@ -111,13 +118,12 @@ fn apply_observation(
         result.skipped += 1;
         return Ok(None);
     };
-    // 与既有行为一致：库里存的是 `path_key`，观察值来自 `display_path`；
-    // 两者在规范化/大小写不同的场景下本来就可能不等（已记录的容忍项，本轮不统一）。
-    let observed_path = obs.file.file.path.to_string_lossy();
-    if path != observed_path.as_ref()
+    if path != obs.path_key
         || media_id != obs.file.file.media_id.to_string()
         || missing_at != obs.missing_at
     {
+
+
         result.skipped += 1;
         return Ok(None);
     }

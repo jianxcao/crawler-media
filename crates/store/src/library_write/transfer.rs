@@ -42,11 +42,13 @@ impl Store {
         // Root-relative destinations resolve once, here; keys are always absolute.
         let absolutized =
             super::root_ownership::ensure_root_owns_path(&tx, &candidate.file)?.map(|file| FileCoverage {
+                path_key: candidate.path_key.clone(),
                 file,
                 units: candidate.units.clone(),
             });
         let candidate = absolutized.as_ref().unwrap_or(candidate);
         let dest_path_str = candidate.file.path.to_string_lossy().to_string();
+        let dest_key = crate::path_key::canonical_recorded_key(&tx, &dest_path_str);
 
         let existing: Option<(
             String,
@@ -60,7 +62,7 @@ impl Store {
                 "SELECT file_id, media_id, root_id, publication_state, source_path, transfer_mode
                  FROM library_files
                  WHERE library_id = ?1 AND path_key = norm_path_key(?2)",
-                params![scope.library_id.to_string(), dest_path_str],
+                params![scope.library_id.to_string(), dest_key],
                 |r| {
                     Ok((
                         r.get(0)?,

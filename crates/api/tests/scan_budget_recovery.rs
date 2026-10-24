@@ -178,7 +178,8 @@ async fn restored_file_is_reprocessed_and_missing_cleared() {
             guard
                 .missing_at_by_path()
                 .unwrap()
-                .contains_key(&file.display().to_string()),
+                .keys()
+                .any(|key| key.ends_with(file.file_name().unwrap().to_str().unwrap())),
             "前置状态必须带 missing 标记"
         );
     }

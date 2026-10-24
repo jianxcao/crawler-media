@@ -37,10 +37,7 @@ impl NfoInputTarget {
 
     /// Rewrite the video key through the same root-alias snapshot the sidecar uses.
     pub fn with_canonical_path(mut self, conn: &Connection) -> Self {
-        self.path_key = crate::path_key::canonical_path_key(
-            conn,
-            &crate::path_key::canonical_existing_key(&self.path_key),
-        );
+        self.path_key = crate::path_key::canonical_recorded_key(conn, &self.path_key);
         self
     }
 }

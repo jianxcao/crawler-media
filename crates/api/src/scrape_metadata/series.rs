@@ -241,6 +241,7 @@ pub(crate) fn write_series_nfos(
                     captured,
                 );
                 let episode_coverage = domain::FileCoverage {
+        path_key: String::new(),
                     file: row.file.clone(),
                     units: vec![*unit],
                 };

@@ -505,6 +505,7 @@ fn seed_store(
         std::fs::write(&row.path, b"dummy").unwrap();
         let file = publish_fixture_file(&st, row).unwrap();
         let coverage = domain::FileCoverage {
+            path_key: String::new(),
             file,
             units: match (row.season, row.episode) {
                 (Some(s), Some(e)) => vec![domain::UnitKey::new(s as i32, e as i32)],

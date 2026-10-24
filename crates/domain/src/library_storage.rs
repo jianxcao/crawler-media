@@ -186,6 +186,9 @@ pub struct LibraryFile {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FileCoverage {
     pub file: LibraryFile,
+    /// Canonical identity captured by a coverage read. Empty before the row is read.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path_key: String,
     pub units: Vec<UnitKey>,
 }
 

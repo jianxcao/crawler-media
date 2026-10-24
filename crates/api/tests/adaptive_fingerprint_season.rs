@@ -24,6 +24,7 @@ fn publish_coverage(
     };
     let file = publish_fixture_file(store, &spec).unwrap();
     FileCoverage {
+        path_key: String::new(),
         file,
         units: vec![UnitKey::new(1, episode as i32)],
     }

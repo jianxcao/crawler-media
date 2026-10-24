@@ -153,7 +153,7 @@ fn publish_row(store: &Store, spec: &FixtureFile, source_version: &str) -> FileC
             1000,
         )
         .unwrap();
-    FileCoverage { file, units }
+    FileCoverage { path_key: String::new(), file, units }
 }
 
 pub struct ProbeScenario {

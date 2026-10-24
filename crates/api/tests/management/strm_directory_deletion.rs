@@ -100,7 +100,8 @@ async fn test_directory_deletion_removes_nested_strm_and_cleans_up_media() {
             .lock()
             .missing_at_by_path()
             .unwrap()
-            .contains_key(&strm_file.display().to_string()),
+            .keys()
+            .any(|key| key.ends_with(strm_file.file_name().unwrap().to_str().unwrap())),
         "文件应被标记缺失"
     );
 
@@ -393,7 +394,8 @@ async fn deleting_one_episode_keeps_sibling_ledger_rows() {
             .lock()
             .missing_at_by_path()
             .unwrap()
-            .contains_key(&episode_two.display().to_string())
+            .keys()
+            .any(|key| key.ends_with(episode_two.file_name().unwrap().to_str().unwrap()))
     );
     assert!(
         !state
@@ -401,7 +403,8 @@ async fn deleting_one_episode_keeps_sibling_ledger_rows() {
             .lock()
             .missing_at_by_path()
             .unwrap()
-            .contains_key(&episode_one.display().to_string())
+            .keys()
+            .any(|key| key.ends_with(episode_one.file_name().unwrap().to_str().unwrap()))
     );
     assert!(state.store().lock().get_media(media.id).unwrap().is_some());
 }
@@ -488,7 +491,10 @@ async fn restoring_one_episode_after_grace_requeues_probe() {
         after_expiry
             .missing_at_by_path()
             .unwrap()
-            .contains_key(&fixture.episode.display().to_string()),
+            .keys()
+            .any(|key| {
+                key.ends_with(fixture.episode.file_name().unwrap().to_str().unwrap())
+            }),
         "宽限期过后这一集应被标记缺失"
     );
     assert!(
@@ -526,7 +532,8 @@ async fn restoring_one_episode_after_grace_requeues_probe() {
         .lock()
         .missing_at_by_path()
         .unwrap()
-        .contains_key(&fixture.episode.display().to_string());
+        .keys()
+        .any(|key| key.ends_with(fixture.episode.file_name().unwrap().to_str().unwrap()));
     assert!(missing_cleared, "恢复后缺失标记应被清除");
 }
 

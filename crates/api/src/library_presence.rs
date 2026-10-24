@@ -203,23 +203,21 @@ fn collect_presence_observations(
 
         // 旧行模型的 `path` 是库里的 TEXT；`missing_at` 索引仍按同一个键取，
         // `PathBuf` 由该 TEXT 构造，`display()` 往返逐字节一致。
-        let path_key = coverage.file.path.display().to_string();
-        let missing_at = missing_map.get(&path_key).copied();
-        let Ok(resolved) = LibraryPathScope::resolve_path(coverage.file.path.as_path()) else {
-            observations.push(LedgerPresenceObservation {
-                file: coverage,
-                missing_at,
-                presence: FilePresence::Unknown,
-            });
-            continue;
+        let path_key = if coverage.path_key.is_empty() {
+            let store = state.store.lock();
+            store.recorded_path_key(&coverage.file.path.to_string_lossy())
+        } else {
+            coverage.path_key.clone()
         };
-
-        match candidate_scope.owner(&resolved, real_kind) {
-            StrictOwner::Owned(owner) if owner.id == library_id => {
-                // Eligible row
+        let missing_at = missing_map.get(&path_key).copied();
+        // A missing file cannot be canonicalized. Keep the library that recorded it
+        // instead of treating the failed resolution as an unknown presence.
+        if let Ok(resolved) = LibraryPathScope::resolve_path(coverage.file.path.as_path()) {
+            match candidate_scope.owner(&resolved, real_kind) {
+                StrictOwner::Owned(owner) if owner.id == library_id => {}
+                StrictOwner::Ambiguous => return Err(PresenceError::Ambiguous),
+                _ => continue,
             }
-            StrictOwner::Ambiguous => return Err(PresenceError::Ambiguous),
-            _ => continue,
         }
 
         let presence = match state.library_files.presence(coverage.file.path.as_path()) {
@@ -232,6 +230,7 @@ fn collect_presence_observations(
         };
 
         observations.push(LedgerPresenceObservation {
+            path_key,
             file: coverage,
             missing_at,
             presence,

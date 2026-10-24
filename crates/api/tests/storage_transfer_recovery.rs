@@ -63,6 +63,7 @@ async fn recovered_pending_a_does_not_block_b() {
 
     let reserved_a_id = LedgerId::new();
     let candidate_a = FileCoverage {
+        path_key: String::new(),
         file: LibraryFile {
             file_id: reserved_a_id,
             library_id: lib_id,
@@ -139,6 +140,7 @@ async fn recovered_pending_a_does_not_block_b() {
     // Step 3: publish B, which must not be blocked or rejected
     let published_b_id = LedgerId::new();
     let candidate_b = FileCoverage {
+        path_key: String::new(),
         file: LibraryFile {
             file_id: published_b_id,
             library_id: lib_id,

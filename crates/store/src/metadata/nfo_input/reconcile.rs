@@ -26,6 +26,15 @@ struct ExistingFile {
     units: Vec<UnitKey>,
 }
 
+fn file_key_exists(conn: &rusqlite::Connection, key: &str) -> Result<bool, StoreError> {
+    let exists: i64 = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM library_files WHERE path_key = norm_path_key(?1))",
+        params![key],
+        |row| row.get(0),
+    )?;
+    Ok(exists != 0)
+}
+
 impl Store {
     /// 重新观察 `path` 旁边的所有 NFO 候选，并把变化落到该文件所在的媒体卡上。
     ///
@@ -65,8 +74,7 @@ impl Store {
                 revision: existing.file_revision,
                 source_version: existing.source_version,
             },
-        }
-        .with_canonical_path(&self.library);
+        };
         Ok(Some(NfoInputReconcilePlan {
             path: path.to_path_buf(),
             kind: existing.kind,
@@ -121,7 +129,14 @@ impl Store {
     }
 
     fn existing_file_for_path(&self, path: &Path) -> Result<Option<ExistingFile>, StoreError> {
-        let key = crate::path_key::canonical_existing_key(&path.to_string_lossy());
+        let recorded =
+            crate::path_key::canonical_recorded_key(&self.library, &path.to_string_lossy());
+        let existing = crate::path_key::canonical_existing_key(&path.to_string_lossy());
+        let key = if file_key_exists(&self.library, &recorded)? {
+            recorded
+        } else {
+            existing
+        };
         let row = self
             .library
             .query_row(

@@ -68,6 +68,7 @@ fn scope(lib: &(LibraryId, String)) -> WriteScope {
 
 fn candidate(fx: &Fx, lib: &(LibraryId, String), path: &str, file_id: LedgerId) -> FileCoverage {
     FileCoverage {
+        path_key: String::new(),
         file: LibraryFile {
             file_id,
             library_id: lib.0,

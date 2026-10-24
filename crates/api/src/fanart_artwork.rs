@@ -444,6 +444,7 @@ mod tests {
 
     pub(super) fn ledger_row(path: &str, season: u32) -> domain::FileCoverage {
         domain::FileCoverage {
+            path_key: String::new(),
             file: domain::LibraryFile {
                 file_id: domain::LedgerId::new(),
                 library_id: domain::LibraryId::new(),

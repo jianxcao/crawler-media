@@ -237,12 +237,19 @@ fn tv_library_removal_recovers_empty_coverage_and_preserves_file_bytes() {
 }
 
 fn observation(
+    store: &Store,
     row: domain::FileCoverage,
     missing_at: Option<i64>,
     presence: FilePresence,
 ) -> LedgerPresenceObservation {
+    let path_key = if row.path_key.is_empty() {
+        store.recorded_path_key(&row.file.path.to_string_lossy())
+    } else {
+        row.path_key.clone()
+    };
     LedgerPresenceObservation {
         file: row,
+        path_key,
         missing_at,
         presence,
     }
@@ -274,7 +281,7 @@ fn unpublished_transfer_survives_presence_and_present_publication_publishes_it()
     for mode in [LedgerPresenceMode::Verify, LedgerPresenceMode::Prune] {
         let result = store
             .apply_ledger_presence(
-                &[observation(row.clone(), None, ObservedPresence::Missing)],
+                &[observation(&store, row.clone(), None, ObservedPresence::Missing)],
                 mode,
                 100,
             )
@@ -286,7 +293,7 @@ fn unpublished_transfer_survives_presence_and_present_publication_publishes_it()
 
     let result = store
         .apply_ledger_presence(
-            &[observation(row.clone(), None, ObservedPresence::Present)],
+            &[observation(&store, row.clone(), None, ObservedPresence::Present)],
             LedgerPresenceMode::Verify,
             200,
         )
@@ -336,7 +343,7 @@ fn stale_observation_does_not_delete_replacement_file() {
     assert_ne!(replacement.file_id, old.file_id);
 
     // A stale prune observation still holding the old identity.
-    let stale = observation(old_row, Some(1000), ObservedPresence::Missing);
+    let stale = observation(&store, old_row, Some(1000), ObservedPresence::Missing);
     let result = store
         .apply_ledger_presence(&[stale], LedgerPresenceMode::Prune, 1050)
         .unwrap();
@@ -371,19 +378,19 @@ fn restored_file_clears_flag_without_replacing_identity() {
 
     store
         .apply_ledger_presence(
-            &[observation(row.clone(), None, ObservedPresence::Missing)],
+            &[observation(&store, row.clone(), None, ObservedPresence::Missing)],
             LedgerPresenceMode::Verify,
             1000,
         )
         .unwrap();
     assert_eq!(
-        store.missing_at_by_path().unwrap().get(&path).copied(),
+        store.missing_at_by_path().unwrap().get(&row.path_key).copied(),
         Some(1000)
     );
 
     let result = store
         .apply_ledger_presence(
-            &[observation(
+            &[observation(&store, 
                 row.clone(),
                 Some(1000),
                 ObservedPresence::Present,
@@ -395,7 +402,7 @@ fn restored_file_clears_flag_without_replacing_identity() {
     assert_eq!(result.restored, 1);
     assert_eq!(result.missing, 0);
     assert_eq!(
-        store.missing_at_by_path().unwrap().get(&path).copied(),
+        store.missing_at_by_path().unwrap().get(&row.path_key).copied(),
         None
     );
     let fetched = store.file_coverage_by_id(file.file_id).unwrap().unwrap();
@@ -425,7 +432,7 @@ fn unknown_observation_preserves_prior_state() {
 
     store
         .apply_ledger_presence(
-            &[observation(row.clone(), None, ObservedPresence::Missing)],
+            &[observation(&store, row.clone(), None, ObservedPresence::Missing)],
             LedgerPresenceMode::Verify,
             1000,
         )
@@ -434,7 +441,7 @@ fn unknown_observation_preserves_prior_state() {
     // A permission/IO error is reported as Unknown and must not change state.
     let result = store
         .apply_ledger_presence(
-            &[observation(
+            &[observation(&store, 
                 row.clone(),
                 Some(1000),
                 ObservedPresence::Unknown,
@@ -447,7 +454,7 @@ fn unknown_observation_preserves_prior_state() {
     assert_eq!(result.missing, 0);
     assert_eq!(result.restored, 0);
     assert_eq!(
-        store.missing_at_by_path().unwrap().get(&path).copied(),
+        store.missing_at_by_path().unwrap().get(&row.path_key).copied(),
         Some(1000)
     );
 }
@@ -484,8 +491,8 @@ fn prune_rolls_back_whole_batch_on_derived_error() {
     let second_row = store.file_coverage_by_path(&second_path).unwrap().unwrap();
 
     let mark_missing = vec![
-        observation(first_row.clone(), None, ObservedPresence::Missing),
-        observation(second_row.clone(), None, ObservedPresence::Missing),
+        observation(&store, first_row.clone(), None, ObservedPresence::Missing),
+        observation(&store, second_row.clone(), None, ObservedPresence::Missing),
     ];
     store
         .apply_ledger_presence(&mark_missing, LedgerPresenceMode::Verify, 1000)
@@ -506,8 +513,8 @@ fn prune_rolls_back_whole_batch_on_derived_error() {
         .unwrap();
 
     let prune = vec![
-        observation(first_row.clone(), Some(1000), ObservedPresence::Missing),
-        observation(second_row.clone(), Some(1000), ObservedPresence::Missing),
+        observation(&store, first_row.clone(), Some(1000), ObservedPresence::Missing),
+        observation(&store, second_row.clone(), Some(1000), ObservedPresence::Missing),
     ];
     let result = store.apply_ledger_presence(&prune, LedgerPresenceMode::Prune, 2000);
     assert!(result.is_err(), "batch prune must fail due to trigger");

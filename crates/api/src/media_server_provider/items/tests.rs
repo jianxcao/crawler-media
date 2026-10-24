@@ -129,11 +129,13 @@ fn series_rollup_keeps_a_newer_episode_mark() {
 fn unknown_coverage_yields_no_playable_units() {
     let (_media, file) = fixture();
     let unknown = domain::FileCoverage {
+        path_key: String::new(),
         file: file.clone(),
         units: Vec::new(),
     };
     assert!(coverage_units(&unknown).is_empty());
     let whole = domain::FileCoverage {
+        path_key: String::new(),
         file,
         units: vec![domain::UnitKey::WHOLE, domain::UnitKey::new(0, 0)],
     };

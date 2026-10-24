@@ -296,7 +296,14 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        Ok(actual.flatten().as_deref() == expected)
+        let actual = actual.flatten();
+        Ok(match (actual.as_deref(), expected) {
+            (None, None) => true,
+            (Some(actual), Some(expected)) => {
+                self.recorded_path_key(actual) == self.recorded_path_key(expected)
+            }
+            _ => false,
+        })
     }
 
     /// Rewrite every fact path equal to `from` into `to` for a media's
@@ -453,5 +460,5 @@ mod batch_tests {
 }
 
 fn stored_path_key(path: &str) -> String {
-    crate::path_key::canonical_existing_key(path)
+    crate::path_key::normalize_path_key(path)
 }

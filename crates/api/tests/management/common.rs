@@ -103,20 +103,42 @@ pub(crate) fn site_payload() -> Value {
 }
 
 pub(crate) fn subscribe_payload(fetch_mode: &str) -> Value {
-    json!({
+    subscribe_payload_with_filter(fetch_mode, None)
+}
+
+pub(crate) fn subscribe_payload_with_filter(fetch_mode: &str, filter_id: Option<&str>) -> Value {
+    let mut body = json!({
         "media": { "kind": "movie", "title": "The Matrix" },
         "coverage": { "kind": "movie" },
         "fetch_mode": fetch_mode,
-        "filter": {
-            "name": "matrix-uhd",
-            "atoms": [
-                { "kind": "resolution", "value": "2160p", "priority": 100 },
-                { "kind": "title_match", "value": "Matrix", "priority": 80 }
-            ]
-        },
         "wash_cut": false,
         "full_season_pack": false
-    })
+    });
+    if let Some(filter_id) = filter_id {
+        body["filter_id"] = json!(filter_id);
+    }
+    body
+}
+
+pub(crate) async fn create_rule_set(app: &axum::Router) -> String {
+    let response = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/rule-sets",
+            Some("management-secret"),
+            json!({
+                "name": "matrix-uhd",
+                "atoms": [
+                    { "kind": "resolution", "value": "2160p", "priority": 100 },
+                    { "kind": "title_match", "value": "Matrix", "priority": 80 }
+                ]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    json_data(response).await["id"].as_str().unwrap().to_string()
 }
 
 pub(crate) async fn create_site(app: &axum::Router) -> Value {
@@ -135,13 +157,14 @@ pub(crate) async fn create_site(app: &axum::Router) -> Value {
 }
 
 pub(crate) async fn create_subscribe(app: &axum::Router, fetch_mode: &str) -> Value {
+    let filter_id = create_rule_set(app).await;
     let response = app
         .clone()
         .oneshot(request(
             "POST",
             "/api/v1/subscriptions",
             Some("management-secret"),
-            subscribe_payload(fetch_mode),
+            subscribe_payload_with_filter(fetch_mode, Some(&filter_id)),
         ))
         .await
         .unwrap();

@@ -97,7 +97,7 @@ impl Store {
             let root_id: String = r.get(2)?;
             let media_id: MediaId = r.get::<_, String>(3)?.parse().unwrap();
             let kind: MediaKind = r.get::<_, String>(4)?.parse().unwrap_or(MediaKind::Movie);
-            let path_key: String = r.get(5)?;
+            let display_path: String = r.get(6)?;
             let presence_str: String = r.get(7)?;
             let pub_str: String = r.get(8)?;
             let size_i: Option<i64> = r.get(11)?;
@@ -149,7 +149,7 @@ impl Store {
                 root_id,
                 media_id,
                 kind,
-                path: path_key.into(),
+                path: display_path.into(),
                 version: FileVersion {
                     revision: r.get(9)?,
                     source_version: r.get(10)?,

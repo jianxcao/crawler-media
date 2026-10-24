@@ -120,15 +120,21 @@ async fn rescanning_restored_movie_clears_missing_without_overwriting_probe_qual
 
     // Mark missing
     let store_arc = fix.state.store();
-    {
+    let path_key = {
         let guard = store_arc.lock();
         let coverage = guard
             .file_coverage_by_id(row.file_id)
             .unwrap()
             .expect("fixture coverage");
+        let path_key = if coverage.path_key.is_empty() {
+            guard.recorded_path_key(&coverage.file.path.to_string_lossy())
+        } else {
+            coverage.path_key.clone()
+        };
         guard
             .apply_ledger_presence(
                 &[store::LedgerPresenceObservation {
+                    path_key: path_key.clone(),
                     file: coverage,
                     missing_at: None,
                     presence: store::FilePresence::Missing,
@@ -137,13 +143,9 @@ async fn rescanning_restored_movie_clears_missing_without_overwriting_probe_qual
                 1000,
             )
             .unwrap();
-        assert!(
-            guard
-                .missing_at_by_path()
-                .unwrap()
-                .contains_key(row.path.to_str().unwrap())
-        );
-    }
+        assert!(guard.missing_at_by_path().unwrap().contains_key(&path_key));
+        path_key
+    };
 
     // Restore file on disk
     std::fs::write(&row.path, b"restored bytes").unwrap();
@@ -158,7 +160,7 @@ async fn rescanning_restored_movie_clears_missing_without_overwriting_probe_qual
         !guard
             .missing_at_by_path()
             .unwrap()
-            .contains_key(row.path.to_str().unwrap())
+            .contains_key(&path_key)
     );
     let loaded = guard.file_coverage_by_id(row.file_id).unwrap().unwrap();
     assert_eq!(loaded.file.file_id, row.file_id);

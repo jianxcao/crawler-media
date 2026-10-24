@@ -439,6 +439,7 @@ fn seed_store(
             publish_fixture_file(&st, spec).unwrap()
         };
         let coverage = FileCoverage {
+            path_key: String::new(),
             file,
             units: spec_units(spec),
         };

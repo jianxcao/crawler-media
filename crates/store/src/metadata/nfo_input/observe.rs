@@ -28,7 +28,7 @@ pub fn observe_nfo_inputs(
     config_revision: i64,
 ) -> Vec<NfoObservation> {
     observe_nfo_inputs_with_key(path, kind, units, locale, version, config_revision, |raw| {
-        crate::path_key::canonical_existing_key(raw)
+        crate::path_key::normalize_path_key(raw)
     })
 }
 
@@ -43,7 +43,7 @@ pub(crate) fn observe_nfo_inputs_with_aliases(
     config_revision: i64,
 ) -> Vec<NfoObservation> {
     observe_nfo_inputs_with_key(path, kind, units, locale, version, config_revision, |raw| {
-        crate::path_key::canonical_key(&crate::path_key::canonical_existing_key(raw), aliases)
+        crate::path_key::canonical_key(&crate::path_key::normalize_path_key(raw), aliases)
     })
 }
 

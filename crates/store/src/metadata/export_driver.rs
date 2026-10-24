@@ -74,13 +74,13 @@ impl Store {
         operation_id: &str,
         export_id: &str,
     ) -> Result<Option<NfoExportRequest>, StoreError> {
-        let key = video.to_string_lossy();
+        let key = crate::path_key::canonical_recorded_key(&self.library, &video.to_string_lossy());
         let row: Option<(String, String, String, String, i64, String)> = self
             .library
             .query_row(
                 "SELECT media_id, library_id, root_id, file_id, file_revision, source_version
                  FROM library_files WHERE path_key = norm_path_key(?1) LIMIT 1",
-                params![key.as_ref()],
+                params![key],
                 |row| {
                     Ok((
                         row.get(0)?,
@@ -340,7 +340,10 @@ impl Store {
         request: &NfoExportRequest,
     ) -> Result<Option<NfoExportAnchor>, StoreError> {
         let (season, episode) = request.scope.season_episode();
-        let key = request.path.to_string_lossy();
+        let key = crate::path_key::canonical_recorded_key(
+            &self.library,
+            &request.path.to_string_lossy(),
+        );
         let row: Option<Option<String>> = self
             .library
             .query_row(
@@ -354,7 +357,7 @@ impl Store {
                     season,
                     episode,
                     self.nfo_export_locale(request)?,
-                    key.as_ref()
+                    key
                 ],
                 |row| row.get(0),
             )
@@ -372,7 +375,10 @@ impl Store {
     pub(crate) fn tag_nfo_export(&self, request: &NfoExportRequest) -> Result<bool, StoreError> {
         let (season, episode) = request.scope.season_episode();
         let fields_json = serde_json::to_string(&request.fields)?;
-        let key = request.path.to_string_lossy();
+        let key = crate::path_key::canonical_recorded_key(
+            &self.library,
+            &request.path.to_string_lossy(),
+        );
         let affected = self.library.execute(
             "UPDATE library_metadata_inputs
              SET export_id = ?1, export_digest = ?2, export_fields_json = ?3
@@ -388,7 +394,7 @@ impl Store {
                 season,
                 episode,
                 self.nfo_export_locale(request)?,
-                key.as_ref()
+                key
             ],
         )?;
         if affected == 0 {
@@ -418,10 +424,12 @@ pub fn observe_nfo_sidecar(
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+
             return Ok(NfoSidecarObservation::default());
         }
         Err(error) => return Err(error.into()),
     };
+
     let Ok(body) = String::from_utf8(bytes) else {
         return Ok(NfoSidecarObservation {
             digest: library::nfo::nfo_digest(path)?,

@@ -39,11 +39,8 @@ pub(crate) fn ensure_root_owns_path(
         owned.path = Path::new(&root).join(&file.path);
         return Ok(Some(owned));
     }
-    let file_key = crate::path_key::canonical_path_key(
-        tx,
-        &crate::path_key::canonical_existing_key(&file.path.to_string_lossy()),
-    );
-    let root_key = crate::path_key::canonical_existing_key(&root);
+    let file_key = crate::path_key::canonical_recorded_key(tx, &file.path.to_string_lossy());
+    let root_key = crate::path_key::canonical_key(&root, &crate::path_key::table_for(tx));
     let under_root = file_key == root_key || file_key.starts_with(&(root_key.clone() + "/"));
     if !under_root {
         return Err(StoreError::Invalid(format!(

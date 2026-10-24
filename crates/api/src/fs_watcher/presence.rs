@@ -58,7 +58,12 @@ fn collect_event_observations(
             continue;
         }
 
-        let path_key = coverage.file.path.display().to_string();
+        let path_key = if coverage.path_key.is_empty() {
+            let store = state.store.lock();
+            store.recorded_path_key(&coverage.file.path.to_string_lossy())
+        } else {
+            coverage.path_key.clone()
+        };
         let presence = match state.library_files.presence(file_path) {
             Ok(true) => FilePresence::Present,
             Ok(false) => FilePresence::Missing,
@@ -72,6 +77,7 @@ fn collect_event_observations(
             .entry(owner_lib.id.clone())
             .or_default()
             .push(LedgerPresenceObservation {
+                path_key: path_key.clone(),
                 file: coverage,
                 missing_at: missing_map.get(&path_key).copied(),
                 presence,

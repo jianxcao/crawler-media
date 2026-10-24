@@ -549,7 +549,7 @@ pub(crate) fn insert_file_row(tx: &Connection, file: &LibraryFile) -> Result<(),
             file.root_id,
             file.media_id.to_string(),
             file.kind.as_str(),
-            crate::path_key::canonical_existing_key(&file.path.to_string_lossy()),
+            crate::path_key::canonical_recorded_key(tx, &file.path.to_string_lossy()),
             file.path.to_string_lossy().to_string(),
             file.presence.as_str(),
             file.publication.as_str(),
@@ -615,7 +615,7 @@ fn update_file_row(tx: &Connection, file: &LibraryFile, revision: i64) -> Result
             has_still = MAX(has_still, ?28)
          WHERE file_id = ?29",
         params![
-            crate::path_key::canonical_existing_key(&file.path.to_string_lossy()),
+            crate::path_key::canonical_recorded_key(tx, &file.path.to_string_lossy()),
             file.path.to_string_lossy().to_string(),
             file.presence.as_str(),
             file.publication.as_str(),

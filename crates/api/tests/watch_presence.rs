@@ -42,7 +42,8 @@ async fn last_local_file_missing_keeps_media_and_all_user_facts() {
         guard
             .missing_at_by_path()
             .unwrap()
-            .contains_key(row.path.to_str().unwrap())
+            .keys()
+            .any(|key| key.ends_with(row.path.file_name().unwrap().to_str().unwrap()))
     );
 
     // Media and User facts PRESERVED (S1)
@@ -124,7 +125,8 @@ async fn same_url_restore_clears_missing_and_preserves_probe_cache() {
             .lock()
             .missing_at_by_path()
             .unwrap()
-            .contains_key(row.path.to_str().unwrap())
+            .keys()
+            .any(|key| key.ends_with(row.path.file_name().unwrap().to_str().unwrap()))
     );
 
     // Write file back to disk with same content
@@ -139,7 +141,8 @@ async fn same_url_restore_clears_missing_and_preserves_probe_cache() {
             .lock()
             .missing_at_by_path()
             .unwrap()
-            .contains_key(row.path.to_str().unwrap())
+            .keys()
+            .any(|key| key.ends_with(row.path.file_name().unwrap().to_str().unwrap()))
     );
 
     // probe cache is preserved

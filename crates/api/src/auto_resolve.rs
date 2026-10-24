@@ -242,6 +242,7 @@ fn synthetic_coverage(
         _ => vec![domain::UnitKey::WHOLE],
     };
     domain::FileCoverage {
+        path_key: String::new(),
         file: domain::LibraryFile {
             file_id: domain::LedgerId::new(),
             library_id: domain::LibraryId::new(),

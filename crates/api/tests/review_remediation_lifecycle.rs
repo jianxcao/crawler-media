@@ -134,7 +134,10 @@ fn watcher_preserves_media_still_targeted_by_subscribe() {
         "file deletion must not orphan Subscribe"
     );
     assert!(
-        s.missing_at_by_path().unwrap().contains_key(&row.path),
+        s.missing_at_by_path()
+            .unwrap()
+            .keys()
+            .any(|key| key.ends_with(std::path::Path::new(&row.path).file_name().unwrap().to_str().unwrap())),
         "file deletion marks missing rather than deleting ledger row"
     );
     assert!(

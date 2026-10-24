@@ -99,8 +99,7 @@ async fn default_filter_is_used_when_subscribe_omits_atoms() {
     let set_body = json_data(set_default).await;
     assert_eq!(set_body["default_rule_set_id"], filter["id"]);
 
-    let mut body = subscribe_payload("search");
-    body.as_object_mut().unwrap().remove("filter");
+    let body = subscribe_payload("search");
     let created = app
         .clone()
         .oneshot(request(

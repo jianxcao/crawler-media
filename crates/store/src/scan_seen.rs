@@ -64,22 +64,23 @@ impl Store {
             &self.library,
             rusqlite::TransactionBehavior::Immediate,
         )?;
-        for (path, mtime_ms, file_size, content_digest) in stamps {
+        let keys: Vec<String> = stamps.iter().map(|(path, _, _, _)| path_lookup_key(path)).collect();
+        for ((path, mtime_ms, file_size, content_digest), path_key) in stamps.iter().zip(keys.iter()) {
             tx.execute(
                 "INSERT INTO scan_seen (operation_id, path, path_key, mtime_ms, file_size, content_digest)
-                 VALUES (?1, ?2, norm_path_key(?2), ?3, ?4, ?5)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(operation_id, path)
                  DO UPDATE SET mtime_ms = excluded.mtime_ms, file_size = excluded.file_size,
                                content_digest = excluded.content_digest",
-                params![operation_id, path, mtime_ms, file_size, content_digest],
+                params![operation_id, path, path_key, mtime_ms, file_size, content_digest],
             )?;
             // 只有已登记的台账行才有 durable 源版本；没有台账行的路径这里是空操作。
             tx.execute(
                 "UPDATE library_files
                     SET mtime_ns = ?2 * 1000000, size_bytes = ?3,
                         source_digest = ?4
-                  WHERE path_key = norm_path_key(?1)",
-                params![path, mtime_ms, file_size, content_digest],
+                  WHERE path_key = ?1",
+                params![path_key, mtime_ms, file_size, content_digest],
             )?;
         }
         tx.commit()?;
@@ -158,23 +159,14 @@ impl Store {
         if paths.is_empty() {
             return Ok(checkpoints);
         }
-        let placeholders: Vec<String> = (2..=paths.len() + 1).map(|i| format!("?{i}")).collect();
-        let sql = format!(
+        let mut stmt = self.library.prepare(
             "SELECT s.path_key, s.mtime_ms, s.file_size, s.content_digest,
                     EXISTS(SELECT 1 FROM library_files f WHERE f.path_key = s.path_key) AS ledger_exists,
                     (SELECT f.missing_at FROM library_files f WHERE f.path_key = s.path_key LIMIT 1) AS missing_at
              FROM scan_seen s
-             WHERE s.operation_id = ?1 AND s.path_key IN ({})",
-            placeholders.join(",")
-        );
-        let mut stmt = self.library.prepare(&sql)?;
-        let keys: Vec<String> = paths.iter().map(|path| path_lookup_key(path)).collect();
-        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(paths.len() + 1);
-        params.push(&operation_id);
-        for key in &keys {
-            params.push(key);
-        }
-        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+             WHERE s.operation_id = ?1",
+        )?;
+        let rows = stmt.query_map([operation_id], |row| {
             let path: String = row.get(0)?;
             let ledger_exists: bool = row.get(4)?;
             let missing_at: Option<i64> = row.get(5)?;

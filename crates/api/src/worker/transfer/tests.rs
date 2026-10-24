@@ -112,6 +112,7 @@ fn candidate(
         still_path: None,
     };
     domain::FileCoverage {
+        path_key: String::new(),
         file,
         units: vec![domain::UnitKey::WHOLE],
     }

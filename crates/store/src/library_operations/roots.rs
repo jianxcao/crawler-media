@@ -147,10 +147,11 @@ fn ensure_root_rows(
 ) -> Result<(), StoreError> {
     for (index, root) in requested.iter().enumerate() {
         let display = root.display_path.to_string_lossy().to_string();
+        let recorded = crate::path_key::canonical_recorded_key(tx, &root.path_key);
         let updated = tx.execute(
-            "UPDATE library_roots SET display_path = ?3, sort_order = ?4
-             WHERE library_id = ?1 AND path_key = ?2",
-            params![library, root.path_key, display, index as i32],
+            "UPDATE library_roots SET display_path = ?3, sort_order = ?4, path_key = ?5
+             WHERE library_id = ?1 AND (path_key = ?2 OR path_key = ?5)",
+            params![library, root.path_key, display, index as i32, recorded],
         )?;
         if updated > 0 {
             continue;
@@ -214,6 +215,11 @@ fn reparent_file(
         params![file_id, library],
         |r| r.get(0),
     )?;
+    let previous: String = tx.query_row(
+        "SELECT root_id FROM library_files WHERE file_id = ?1",
+        params![file_id],
+        |row| row.get(0),
+    )?;
     let Some(root) = longest_root(&path_key, requested) else {
         // A file outside every requested root keeps its current owner; the caller
         // decides later whether to remove it, so a reconfiguration never silently
@@ -229,9 +235,10 @@ fn reparent_file(
     // their own pass.
     tx.execute(
         "UPDATE library_metadata_inputs SET root_id = ?2
-         WHERE library_id = ?3 AND path_key IN
-             (SELECT path_key FROM library_files WHERE file_id = ?1)",
-        params![file_id, root_id, library],
+         WHERE library_id = ?3 AND (path_key IN
+             (SELECT path_key FROM library_files WHERE file_id = ?1)
+             OR root_id = ?4)",
+        params![file_id, root_id, library, previous],
     )?;
     Ok(())
 }
@@ -250,9 +257,13 @@ fn prune_unreferenced_roots(
             .collect::<Result<Vec<_>, _>>()?
     };
     for (root_id, key) in existing {
-        if requested.iter().any(|root| root.path_key == key) {
+        let recorded = crate::path_key::canonical_recorded_key(tx, &key);
+        if requested.iter().any(|root| {
+            crate::path_key::canonical_recorded_key(tx, &root.path_key) == recorded
+        }) {
             continue;
         }
+
         let referenced: i64 = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM library_files WHERE root_id = ?1)
                  OR EXISTS(SELECT 1 FROM library_metadata_inputs WHERE root_id = ?1)
@@ -260,6 +271,7 @@ fn prune_unreferenced_roots(
             params![root_id],
             |r| r.get(0),
         )?;
+
         if referenced == 0 {
             tx.execute(
                 "DELETE FROM library_roots WHERE root_id = ?1",
@@ -280,7 +292,11 @@ pub(crate) fn has_uncovered_rows(
 ) -> Result<bool, StoreError> {
     let roots: Vec<String> = requested
         .iter()
-        .map(|root| root.path_key.trim_end_matches('/').to_string())
+        .map(|root| {
+            crate::path_key::canonical_recorded_key(tx, &root.path_key)
+                .trim_end_matches('/')
+                .to_string()
+        })
         .collect();
     for (table, column) in [
         ("library_files", "path_key"),
@@ -291,7 +307,7 @@ pub(crate) fn has_uncovered_rows(
             .map(|i| {
                 let n = i + 2;
                 let mut cover = format!(
-                    "({column} = ?{n} OR substr({column}, 1, length(?{n}) + 1) = ?{n} || '/')"
+                    "(norm_path_key({column}) = ?{n} OR substr(norm_path_key({column}), 1, length(?{n}) + 1) = ?{n} || '/')"
                 );
                 if table == "library_metadata_inputs" {
                     // A shared ancestor sidecar (tvshow.nfo above a nested root) is covered by

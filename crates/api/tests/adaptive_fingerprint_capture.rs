@@ -136,6 +136,7 @@ fn dummy_row(store: &Store, ledger_id: &str, ep: u32) -> FileCoverage {
     // is only known after publication, so read it back instead of inventing one.
     let file = publish_fixture_file(store, &spec).unwrap();
     FileCoverage {
+        path_key: String::new(),
         file,
         units: vec![UnitKey::new(1, ep as i32)],
     }

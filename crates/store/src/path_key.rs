@@ -55,7 +55,7 @@ fn memory_key(conn: &Connection) -> String {
     format!("memory:{:p}", unsafe { conn.handle() })
 }
 
-fn table_for(conn: &Connection) -> RootAliases {
+pub(crate) fn table_for(conn: &Connection) -> RootAliases {
     let key = table_key(conn).unwrap_or_else(|| memory_key(conn));
     TABLES
         .lock()
@@ -116,6 +116,28 @@ pub fn normalize_path_key(raw: &str) -> String {
 ///
 /// Display spelling stays with the caller for IO. Persistence, deletion and reduction
 /// must all use this key so a symlink root and its real path name the same sidecar.
+/// Identity of a path that may already be gone. Uses the committed root aliases and
+/// does not touch the filesystem, so a missing file keeps the key it was stored with.
+pub(crate) fn canonical_recorded_key(conn: &Connection, raw: &str) -> String {
+    let mut aliases = table_for(conn).read().unwrap_or_else(|e| e.into_inner()).clone();
+    if aliases.is_empty() {
+        if let Ok(mut stmt) = conn.prepare("SELECT display_path, path_key FROM library_roots") {
+            if let Ok(rows) = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            }) {
+                for row in rows.flatten() {
+                    let display = normalize_path_key(&row.0);
+                    if display != row.1 {
+                        aliases.push((display, row.1));
+                    }
+                }
+            }
+        }
+    }
+    aliases.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    canonical_key(raw, &Arc::new(RwLock::new(aliases)))
+}
+
 pub(crate) fn canonical_path_key(conn: &Connection, raw: &str) -> String {
     canonical_key(raw, &table_for(conn))
 }
@@ -199,7 +221,17 @@ pub(crate) fn reload_root_aliases(conn: &Connection) -> Result<(), StoreError> {
                 .ok()
                 .map(|path| normalize_path_key(&path.to_string_lossy()))
                 .filter(|resolved| resolved != &key);
-            [Some((display_key, key.clone())), resolved.map(|alias| (alias, key))]
+            // The stored key can be a platform alias of the real directory. Always
+            // point the shorter spelling at the realpath, never the other way around.
+            let (alias, canonical) = match &resolved {
+                Some(real) if key == *real => (display_key.clone(), key.clone()),
+                Some(real) => (key.clone(), real.clone()),
+                None => (display_key.clone(), key.clone()),
+            };
+            [
+                Some((display_key, canonical.clone())),
+                Some((alias, canonical)),
+            ]
         })
         .flatten()
         .filter(|(alias, key)| alias != key)
