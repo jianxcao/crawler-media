@@ -141,14 +141,9 @@ impl Store {
         root_path: &str,
     ) -> Result<(), StoreError> {
         let root_key = crate::path_key::canonical_root_key(root_path)?;
-        let roots = ready_roots(tx, kind)?;
-        let (low, high) = component_range(&root_key);
-        for (table, column) in [
-            ("library_metadata_inputs", "path_key"),
-            ("unidentified", "path"),
-        ] {
-            reparent_scoped_rows(tx, table, column, kind, (&low, &high), &roots)?;
-        }
+        let (low, _high) = component_range(&root_key);
+        // NFO inputs move with the file batch that still covers them. Moving every
+        // input here lets the first reduce delete sidecars whose files are still queued.
         tx.execute(
             "INSERT INTO pending_root_reassignments (kind, root_key, cursor_key)
              VALUES (?1, ?2, ?3)
@@ -270,8 +265,8 @@ fn reassign_root_batch(
     let exhausted = candidates.len() < REASSIGN_BATCH;
     let last = candidates.last().map(|c| c.3.clone());
     let mut moves: Vec<Move> = Vec::new();
-    for (file_id, old_library, media_id, path) in candidates {
-        let file_path = Path::new(&path);
+    for (file_id, old_library, media_id, path) in &candidates {
+        let file_path = Path::new(path);
         let best = roots
             .iter()
             .filter(|(_, _, candidate)| file_path.starts_with(Path::new(candidate)))
@@ -279,16 +274,17 @@ fn reassign_root_batch(
         let Some((root_id, new_library, _)) = best else {
             continue;
         };
-        if old_library != *new_library || !file_root_id_is(tx, &file_id, root_id)? {
+        if old_library != new_library || !file_root_id_is(tx, file_id, root_id)? {
             moves.push((
-                file_id,
-                old_library,
-                media_id,
+                file_id.clone(),
+                old_library.clone(),
+                media_id.clone(),
                 root_id.clone(),
                 new_library.clone(),
             ));
         }
     }
+    move_inputs_for_batch(tx, &candidates, &moves, &roots)?;
     apply_moves(tx, moves)?;
     if exhausted {
         tx.execute(
@@ -302,6 +298,102 @@ fn reassign_root_batch(
         )?;
     }
     Ok(exhausted)
+}
+
+/// Move sidecar inputs that belong to this batch's files, in the same transaction.
+///
+/// A work/season sidecar that still describes a file staying behind is copied, not moved.
+/// Inputs whose files are past the cursor stay where they are so a later reduce cannot
+/// treat them as orphans.
+fn move_inputs_for_batch(
+    tx: &rusqlite::Connection,
+    candidates: &[(String, String, String, String)],
+    moves: &[Move],
+    roots: &[(String, String, String)],
+) -> Result<(), StoreError> {
+    let destination = |path: &str| -> Option<&(String, String, String)> {
+        Path::new(path);
+        roots
+            .iter()
+            .filter(|(_, _, candidate)| Path::new(path).starts_with(Path::new(candidate)))
+            .max_by_key(|(_, _, candidate)| Path::new(candidate).components().count())
+    };
+    let mut moved_files: HashSet<String> = HashSet::new();
+    for (file_id, _, _, _, _) in moves {
+        moved_files.insert(file_id.clone());
+    }
+    let mut directories: HashSet<(String, String)> = HashSet::new();
+    for (file_id, library_id, _, path) in candidates {
+        if !moved_files.contains(file_id) {
+            continue;
+        }
+        if let Some(parent) = Path::new(path).parent() {
+            directories.insert((library_id.clone(), parent.to_string_lossy().into_owned()));
+        }
+    }
+    for (library_id, directory) in directories {
+        let prefix = format!("{directory}/");
+        let rows: Vec<(String, String, String, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT input_key, path_key, root_id, media_id FROM library_metadata_inputs
+                 WHERE library_id = ?1 AND (input_key = ?2 OR input_key LIKE ?3 OR path_key = ?2 OR path_key LIKE ?3)",
+            )?;
+            stmt.query_map(params![library_id, directory, format!("{prefix}%")], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+        for (input_key, path_key, root_id, media_id) in rows {
+            let Some((new_root, new_library, _)) = destination(&path_key).or(destination(&input_key))
+            else {
+                continue;
+            };
+            if new_library == &library_id && new_root == &root_id {
+                continue;
+            }
+            let still_covered: bool = tx.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM library_files
+                    WHERE library_id = ?1 AND media_id = ?2 AND publication_state = 'published'
+                      AND path_key LIKE ?3
+                 )",
+                params![library_id, media_id, format!("{prefix}%")],
+                |row| row.get(0),
+            )?;
+            if still_covered {
+                copy_input_row(tx, &library_id, &input_key, new_library, new_root)?;
+            } else {
+                tx.execute(
+                    "UPDATE library_metadata_inputs SET library_id = ?1, root_id = ?2
+                     WHERE library_id = ?3 AND input_key = ?4",
+                    params![new_library, new_root, library_id, input_key],
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn copy_input_row(
+    tx: &rusqlite::Connection,
+    old_library: &str,
+    input_key: &str,
+    new_library: &str,
+    root_id: &str,
+) -> Result<(), StoreError> {
+    tx.execute(
+        "INSERT OR IGNORE INTO library_metadata_inputs
+            (library_id, media_id, entity_scope, season, episode, locale, input_key, root_id,
+             path_key, parse_state, source_version, fields_json, present_fields_json,
+             provenance_json, export_id, export_digest, export_fields_json, revision)
+         SELECT ?2, media_id, entity_scope, season, episode, locale, input_key, ?4,
+                path_key, parse_state, source_version, fields_json, present_fields_json,
+                provenance_json, export_id, export_digest, export_fields_json, revision
+         FROM library_metadata_inputs
+         WHERE library_id = ?1 AND input_key = ?3",
+        params![old_library, new_library, input_key, root_id],
+    )?;
+    Ok(())
 }
 
 fn apply_moves(tx: &rusqlite::Connection, moves: Vec<Move>) -> Result<(), StoreError> {
@@ -370,46 +462,6 @@ fn copy_shared_ancestor_inputs(
         ),
         params![old_library, new_library, media_id, root_id],
     )?;
-    Ok(())
-}
-
-/// Move every `table` row keyed inside `[low, high)` to the longest covering root.
-fn reparent_scoped_rows(
-    tx: &rusqlite::Connection,
-    table: &str,
-    column: &str,
-    kind: MediaKind,
-    (low, high): (&str, &str),
-    roots: &[(String, String, String)],
-) -> Result<(), StoreError> {
-    let rows: Vec<(String, String, String)> = {
-        let mut stmt = tx.prepare(&format!(
-            "SELECT DISTINCT {column}, library_id, root_id FROM {table}
-             WHERE {column} >= ?1 AND {column} < ?2
-               AND library_id IN (SELECT library_id FROM libraries WHERE kind = ?3)"
-        ))?;
-        stmt.query_map(params![low, high, kind.as_str()], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?
-    };
-    let update = format!(
-        "UPDATE {table} SET library_id = ?1, root_id = ?2
-         WHERE {column} = ?3 AND library_id = ?4"
-    );
-    for (key, library, root) in rows {
-        let path = Path::new(&key);
-        let best = roots
-            .iter()
-            .filter(|(_, _, candidate)| path.starts_with(Path::new(candidate)))
-            .max_by_key(|(_, _, candidate)| Path::new(candidate).components().count());
-        let Some((root_id, new_library, _)) = best else {
-            continue;
-        };
-        if *root_id != root || *new_library != library {
-            tx.execute(&update, params![new_library, root_id, key, library])?;
-        }
-    }
     Ok(())
 }
 

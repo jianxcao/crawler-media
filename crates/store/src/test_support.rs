@@ -206,16 +206,20 @@ fn place_fixture_file(store: &Store, spec: &FixtureFile) -> Result<LibraryFile, 
 
 fn root_for_path(store: &Store, library_id: &str, path: &str) -> Result<String, StoreError> {
     let resolved = crate::library_paths::resolved_path(Path::new(path))?;
+    let resolved_key = crate::path_key::normalize_path_key(&resolved.to_string_lossy());
     let mut best: Option<(usize, String)> = None;
     for root in store.list_library_roots()? {
         if root.library_id.as_deref() != Some(library_id) {
             continue;
         }
         let normalized = crate::library_paths::resolved_path(&root.path)?;
-        if !resolved.starts_with(&normalized) {
+        let root_key = crate::path_key::normalize_path_key(&normalized.to_string_lossy());
+        if !(resolved_key == root_key
+            || resolved_key.starts_with(&(root_key.clone() + "/")))
+        {
             continue;
         }
-        let depth = normalized.components().count();
+        let depth = Path::new(&root_key).components().count();
         if best
             .as_ref()
             .is_none_or(|(best_depth, _)| *best_depth < depth)

@@ -82,7 +82,7 @@ impl Store {
                 ));
             }
             // A root-relative path is resolved once here; every key is absolute.
-            let absolutized = ensure_root_owns_path(&tx, file)?;
+            let absolutized = super::root_ownership::ensure_root_owns_path(&tx, file)?;
             let file = absolutized.as_ref().unwrap_or(file);
             ensure_media_writable(&tx, file.media_id)?;
             let file_id = file.file_id.to_string();
@@ -447,49 +447,6 @@ pub(crate) fn ensure_media_writable(tx: &Connection, media_id: MediaId) -> Resul
         ))),
         _ => Ok(()),
     }
-}
-
-/// The declared root must exist for this Library and own the path. A root-relative
-/// path is joined onto the root (returned as an owned copy); `..` is never accepted.
-pub(crate) fn ensure_root_owns_path(
-    tx: &Connection,
-    file: &LibraryFile,
-) -> Result<Option<LibraryFile>, StoreError> {
-    let root: Option<String> = tx
-        .query_row(
-            "SELECT display_path FROM library_roots WHERE root_id = ?1 AND library_id = ?2",
-            params![file.root_id, file.library_id.to_string()],
-            |r| r.get(0),
-        )
-        .optional()?;
-    let Some(root) = root else {
-        return Err(StoreError::Invalid(format!(
-            "root {} does not belong to library {}",
-            file.root_id, file.library_id
-        )));
-    };
-    if file
-        .path
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return Err(StoreError::Invalid(format!(
-            "path {} contains `..`",
-            file.path.display()
-        )));
-    }
-    if !file.path.is_absolute() {
-        let mut owned = file.clone();
-        owned.path = Path::new(&root).join(&file.path);
-        return Ok(Some(owned));
-    }
-    if !file.path.starts_with(Path::new(&root)) {
-        return Err(StoreError::Invalid(format!(
-            "path {} is outside root {root}",
-            file.path.display()
-        )));
-    }
-    Ok(None)
 }
 
 fn upsert_file_row(

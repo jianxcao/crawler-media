@@ -41,7 +41,7 @@ impl Store {
 
         // Root-relative destinations resolve once, here; keys are always absolute.
         let absolutized =
-            super::publish::ensure_root_owns_path(&tx, &candidate.file)?.map(|file| FileCoverage {
+            super::root_ownership::ensure_root_owns_path(&tx, &candidate.file)?.map(|file| FileCoverage {
                 file,
                 units: candidate.units.clone(),
             });

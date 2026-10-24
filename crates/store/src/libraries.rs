@@ -318,7 +318,7 @@ impl Store {
             let mut depth = None;
             for root in &library.root_paths {
                 let norm_root = crate::library_paths::resolved_path(root)?;
-                if norm_path.starts_with(&norm_root) {
+                if crate::library_paths::component_prefix(&norm_path, &norm_root) {
                     depth = Some(depth.unwrap_or(0).max(norm_root.components().count()));
                 }
             }

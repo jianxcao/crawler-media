@@ -270,8 +270,12 @@ fn prune_nfo_inputs(tx: &Connection, lib: &str, media: &str) -> Result<(), Store
                   AND f.publication_state = 'published'
                   AND (f.path_key = library_metadata_inputs.path_key
                        OR (length({SIDECAR_DIR}) > 0
-                           AND substr(f.path_key, 1, length({SIDECAR_DIR})) = {SIDECAR_DIR}))
-           )"
+                           AND (
+                               substr(f.path_key, 1, length({SIDECAR_DIR})) = {SIDECAR_DIR}
+                               OR substr({SIDECAR_DIR}, 1, length(rtrim(f.path_key, replace(f.path_key, '/', ''))))
+                                  = rtrim(f.path_key, replace(f.path_key, '/', ''))
+                           )))
+            )"
     );
     tx.execute(&sql, params![lib, media])?;
     Ok(())

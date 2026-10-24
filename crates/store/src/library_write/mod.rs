@@ -16,6 +16,7 @@ mod rename_phases;
 mod rename_receipt;
 mod rename_record;
 pub mod rename_sidecars;
+mod root_ownership;
 pub mod source;
 pub mod transfer;
 

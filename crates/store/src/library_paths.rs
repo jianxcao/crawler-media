@@ -29,3 +29,11 @@ pub(crate) fn resolved_path(path: &Path) -> std::io::Result<PathBuf> {
     }
     Ok(result)
 }
+
+/// `path` is `root` or a descendant. A string prefix is not enough: `shows` must not own
+/// `shows-extra`, and the comparison uses path components after both sides are resolved.
+pub(crate) fn component_prefix(path: &Path, root: &Path) -> bool {
+    let path = crate::path_key::normalize_path_key(&path.to_string_lossy());
+    let root = crate::path_key::normalize_path_key(&root.to_string_lossy());
+    path == root || path.starts_with(&(root + "/"))
+}
