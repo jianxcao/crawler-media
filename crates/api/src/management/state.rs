@@ -340,10 +340,23 @@ impl ApiState {
                 Ok(_) => {}
                 Err(e) => tracing::error!(%e, "恢复未完成的扫描操作失败"),
             }
-            match state.store.lock().drain_root_reassignments() {
-                Ok(n) if n > 0 => tracing::info!(batches = n, "已恢复未完成的根目录归属迁移"),
-                Ok(_) => {}
-                Err(e) => tracing::error!(%e, "恢复根目录归属迁移失败"),
+            let mut root_batches = 0;
+            loop {
+                match state.store.lock().drain_one_root_batch() {
+                    Ok(Some(true)) => root_batches += 1,
+                    Ok(Some(false)) => break,
+                    Ok(None) => {
+                        tracing::warn!("根目录归属迁移暂停：目标 Library 尚未就绪");
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::error!(%e, "恢复根目录归属迁移失败");
+                        break;
+                    }
+                }
+            }
+            if root_batches > 0 {
+                tracing::info!(batches = root_batches, "已恢复未完成的根目录归属迁移");
             }
             match state
                 .store

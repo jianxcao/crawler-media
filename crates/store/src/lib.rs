@@ -37,6 +37,7 @@ pub mod library_query;
 pub mod library_write;
 pub use library_deletion::LibraryRemoval;
 mod library_ownership;
+mod library_key_owner;
 mod library_paths;
 mod library_scope;
 pub use library_scope::{LibraryPathResolver, LibraryPathScope, StrictOwner};

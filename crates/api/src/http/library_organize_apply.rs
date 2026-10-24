@@ -197,14 +197,14 @@ fn prepare_rename(
         from_path.display().to_string(),
         to_path.display().to_string(),
     );
+    if !from_path.is_file() {
+        return Prepared::Skipped(format!("源文件不存在 {from}"));
+    }
+    if to_path.exists() {
+        return Prepared::Skipped(format!("目标已存在 {to}"));
+    }
     let store = state.store.lock();
-    let owner = |path: &FsPath| {
-        store
-            .library_for_path_strict(path, library.kind)
-            .ok()
-            .flatten()
-            .map(|l| l.id)
-    };
+    let owner = |path: &FsPath| store.library_owning_key(path, library.kind).ok().flatten();
     if owner(from_path).as_deref() != Some(library.id.as_str()) {
         return Prepared::Failed(format!("{from}: 源文件不属于当前媒体库"));
     }
@@ -217,12 +217,6 @@ fn prepare_rename(
             "整理目标不属于指定的媒体库，拒绝改挂"
         );
         return Prepared::Failed(format!("{to}: 目标路径不属于当前媒体库范围"));
-    }
-    if !from_path.is_file() {
-        return Prepared::Skipped(format!("源文件不存在 {from}"));
-    }
-    if to_path.exists() {
-        return Prepared::Skipped(format!("目标已存在 {to}"));
     }
     if store.file_coverage_by_path(&to).ok().flatten().is_some() {
         return Prepared::Failed(format!("{to}: 目标路径已在台账中存在"));

@@ -147,47 +147,57 @@ impl Store {
         tx.execute(
             "INSERT INTO pending_root_reassignments (kind, root_key, cursor_key)
              VALUES (?1, ?2, ?3)
-             ON CONFLICT(kind, root_key) DO UPDATE SET cursor_key = excluded.cursor_key",
+             ON CONFLICT(kind, root_key) DO NOTHING",
             params![kind.as_str(), root_key, low],
         )?;
         Ok(())
     }
 
-    /// Drain every pending root reassignment in batches of at most
-    /// [`REASSIGN_BATCH`] files, one transaction per batch. Returns batches committed.
+    /// Drain every pending root reassignment. Each batch is its own transaction;
+    /// callers that hold the Store lock across this call keep it for the whole drain.
     pub fn drain_root_reassignments(&self) -> Result<usize, StoreError> {
-        let pending: Vec<(String, String)> = {
-            let mut stmt = self
-                .library
-                .prepare("SELECT kind, root_key FROM pending_root_reassignments ORDER BY rowid")?;
-            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<Result<Vec<_>, _>>()?
-        };
         let mut batches = 0;
-        for (kind, root_key) in pending {
-            let kind: MediaKind = kind
-                .parse()
-                .map_err(|_| StoreError::Invalid(format!("reassignment kind {kind}")))?;
-            loop {
-                if !take_batch_budget() {
-                    return Ok(batches);
-                }
-                let tx = crate::write_tx(&self.library)?;
-                let done = reassign_root_batch(&tx, kind, &root_key)?;
-                tx.commit()?;
-                if done.is_none() {
-                    // The chosen destination is frozen. The cursor stayed put; retrying now
-                    // would spin until that Library is ready again.
-                    tracing::warn!(kind = kind.as_str(), root_key, "根迁移暂停：目标 Library 尚未就绪");
-                    break;
-                }
-                batches += 1;
-                if done == Some(true) {
-                    break;
-                }
+        loop {
+            if !pending_root_work(self)? { break; }
+            match self.drain_one_root_batch()? {
+                Some(true) => batches += 1,
+                _ => break,
             }
         }
         Ok(batches)
+    }
+
+    /// One batch, then return. `None` means a frozen destination stopped the drain;
+    /// `Some(false)` means nothing was pending. The caller can drop the Store lock
+    /// between calls.
+    pub fn drain_one_root_batch(&self) -> Result<Option<bool>, StoreError> {
+        let pending: Vec<(String, String)> = {
+            let mut stmt = self
+                .library
+                .prepare("SELECT kind, root_key FROM pending_root_reassignments ORDER BY length(root_key) DESC, root_key")?;
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let Some((kind, root_key)) = pending.into_iter().next() else {
+            return Ok(Some(false));
+        };
+        let kind: MediaKind = kind
+            .parse()
+            .map_err(|_| StoreError::Invalid(format!("reassignment kind {kind}")))?;
+        if !take_batch_budget() {
+            return Ok(None);
+        }
+        let tx = crate::write_tx(&self.library)?;
+        let done = reassign_root_batch(&tx, kind, &root_key)?;
+        tx.commit()?;
+        match done {
+            None => {
+                tracing::warn!(kind = kind.as_str(), root_key, "根迁移暂停：目标 Library 尚未就绪");
+                Ok(None)
+            }
+            // Both an advanced cursor and an exhausted range committed one batch.
+            Some(_) => Ok(Some(true)),
+        }
     }
 }
 
@@ -201,6 +211,14 @@ thread_local! {
 /// Test seam: allow only `budget` more batches on this thread (simulates a crash).
 pub(crate) fn set_batch_budget(budget: Option<usize>) {
     BATCH_BUDGET.with(|b| b.set(budget));
+}
+
+fn pending_root_work(store: &Store) -> Result<bool, StoreError> {
+    Ok(store.library.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pending_root_reassignments)",
+        [],
+        |row| row.get::<_, i64>(0),
+    )? == 1)
 }
 
 fn take_batch_budget() -> bool {
@@ -302,6 +320,16 @@ fn reassign_root_batch(
     }
     move_inputs_for_batch(tx, &candidates, &moves, &roots)?;
     apply_moves(tx, moves)?;
+    if candidates.is_empty() {
+        // The cursor is already past this root's files. Delete it so the next batch
+        // starts the following pending root instead of rereading this empty range.
+        // `false` keeps the caller's batch count for ranges that actually moved files.
+        tx.execute(
+            "DELETE FROM pending_root_reassignments WHERE kind = ?1 AND root_key = ?2",
+            params![kind.as_str(), root_key],
+        )?;
+        return Ok(Some(false));
+    }
     if exhausted {
         tx.execute(
             "DELETE FROM pending_root_reassignments WHERE kind = ?1 AND root_key = ?2",
