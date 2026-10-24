@@ -175,8 +175,14 @@ impl Store {
                 let tx = crate::write_tx(&self.library)?;
                 let done = reassign_root_batch(&tx, kind, &root_key)?;
                 tx.commit()?;
+                if done.is_none() {
+                    // The chosen destination is frozen. The cursor stayed put; retrying now
+                    // would spin until that Library is ready again.
+                    tracing::warn!(kind = kind.as_str(), root_key, "根迁移暂停：目标 Library 尚未就绪");
+                    break;
+                }
                 batches += 1;
-                if done {
+                if done == Some(true) {
                     break;
                 }
             }
@@ -215,7 +221,7 @@ fn ready_roots(
     let mut stmt = tx.prepare(
         "SELECT r.root_id, r.library_id, r.path_key
          FROM library_roots r JOIN libraries l ON l.library_id = r.library_id
-         WHERE l.kind = ?1 AND l.lifecycle_state = 'ready'
+         WHERE l.kind = ?1 AND l.lifecycle_state <> 'removed'
            AND r.enabled = 1
            AND NOT EXISTS (SELECT 1 FROM library_removals m
                            WHERE m.library_id = r.library_id AND m.state <> 'succeeded')",
@@ -229,13 +235,15 @@ fn ready_roots(
 
 type Move = (String, String, String, String, String);
 
-/// One bounded batch after the durable cursor. Returns `true` (and deletes the cursor
-/// row) once the root's range is exhausted.
+/// One bounded batch after the durable cursor.
+///
+/// `Some(true)` deletes the cursor because the range is exhausted. `Some(false)` advanced
+/// it. `None` means the chosen destination is frozen: the cursor stays and the caller stops.
 fn reassign_root_batch(
     tx: &rusqlite::Connection,
     kind: MediaKind,
     root_key: &str,
-) -> Result<bool, StoreError> {
+) -> Result<Option<bool>, StoreError> {
     let cursor: Option<String> = tx
         .query_row(
             "SELECT cursor_key FROM pending_root_reassignments WHERE kind = ?1 AND root_key = ?2",
@@ -244,7 +252,7 @@ fn reassign_root_batch(
         )
         .optional()?;
     let Some(cursor) = cursor else {
-        return Ok(true);
+        return Ok(Some(true));
     };
     let roots = ready_roots(tx, kind)?;
     // Bounded component range on the `files_kind_path` index: `root/` .. `root0`
@@ -272,9 +280,17 @@ fn reassign_root_batch(
             .filter(|(_, _, candidate)| file_path.starts_with(Path::new(candidate)))
             .max_by_key(|(_, _, candidate)| Path::new(candidate).components().count());
         let Some((root_id, new_library, _)) = best else {
+            if file_needs_nested_root(tx, kind, path)? {
+                return Ok(None);
+            }
             continue;
         };
         if old_library != new_library || !file_root_id_is(tx, file_id, root_id)? {
+            if !library_is_ready(tx, new_library)? {
+                // The chosen destination is frozen or otherwise not writable. Leaving the
+                // file here and advancing the cursor would permanently skip it (F03).
+                return Ok(None);
+            }
             moves.push((
                 file_id.clone(),
                 old_library.clone(),
@@ -297,7 +313,7 @@ fn reassign_root_batch(
             params![kind.as_str(), root_key, last],
         )?;
     }
-    Ok(exhausted)
+    Ok(Some(exhausted))
 }
 
 /// Move sidecar inputs that belong to this batch's files, in the same transaction.
@@ -463,6 +479,35 @@ fn copy_shared_ancestor_inputs(
         params![old_library, new_library, media_id, root_id],
     )?;
     Ok(())
+}
+
+fn file_needs_nested_root(
+    tx: &rusqlite::Connection,
+    kind: MediaKind,
+    path: &str,
+) -> Result<bool, StoreError> {
+    let mut stmt = tx.prepare(
+        "SELECT r.path_key FROM library_roots r
+         JOIN libraries l ON l.library_id = r.library_id
+         WHERE l.kind = ?1 AND r.enabled = 1 AND l.lifecycle_state <> 'ready'",
+    )?;
+    let roots: Vec<String> = stmt
+        .query_map(params![kind.as_str()], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(roots
+        .iter()
+        .any(|root| Path::new(path).starts_with(Path::new(root))))
+}
+
+fn library_is_ready(tx: &rusqlite::Connection, library_id: &str) -> Result<bool, StoreError> {
+    let state: Option<String> = tx
+        .query_row(
+            "SELECT lifecycle_state FROM libraries WHERE library_id = ?1",
+            params![library_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(state.as_deref() == Some("ready"))
 }
 
 fn file_root_id_is(

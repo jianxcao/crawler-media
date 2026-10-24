@@ -149,21 +149,7 @@ fn batched_reassign_keeps_nfo_inputs_of_later_files() {
         "<season><seasonnumber>2</seasonnumber><title>Season two</title><plot>Season plot</plot></season>",
     )
     .unwrap();
-    for i in 0..100 {
-        let path = dir_a.join(format!("Show.S01E{i:03}.mkv"));
-        std::fs::write(&path, b"a").unwrap();
-        publish_fixture_file(
-            &store,
-            &FixtureFile {
-                media_id,
-                path: path.display().to_string(),
-                season: Some(1),
-                episode: Some(i + 1),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    }
+    publish_season(&store, media_id, &dir_a, 1, 100);
     let episode_b = dir_b.join("Show.S02E01.mkv");
     std::fs::write(&episode_b, b"b").unwrap();
     std::fs::write(
@@ -238,6 +224,89 @@ fn nfo_rows(data: &std::path::Path, scope: &str) -> Vec<(String, String, Option<
         .unwrap()
         .map(Result::unwrap)
         .collect()
+}
+
+/// F03: freezing the destination must not confirm a cursor over files that stayed
+/// in the parent. Resuming after the freeze finishes the move.
+#[test]
+fn frozen_destination_does_not_confirm_unmoved_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
+    let parent = std::fs::canonicalize(tmp.path()).unwrap().join("p");
+    let nested = parent.join("n");
+    std::fs::create_dir_all(&nested).unwrap();
+    let store = Store::open(&data).unwrap();
+    let parent_lib = movie_library(&store, "Parent", &parent);
+    let media_id = media(&store);
+    for i in 0..150 {
+        let path = nested.join(format!("m{i:03}.mkv"));
+        std::fs::write(&path, b"x").unwrap();
+        publish_fixture_file(
+            &store,
+            &FixtureFile {
+                media_id,
+                path: path.display().to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    set_root_reassign_batch_budget(Some(1));
+    let nested_lib = movie_library(&store, "Nested", &nested);
+    set_root_reassign_batch_budget(None);
+    assert_eq!(owned_by(&store, &nested_lib.id), 100);
+    assert_eq!(owned_by(&store, &parent_lib.id), 50);
+    let revision = store.library_config_revision(&nested_lib.id).unwrap();
+    store
+        .begin_library_reconfiguration(
+            &store::library_operations::LibraryReconfiguration {
+                operation_id: "locale-freeze".into(),
+                library_id: nested_lib.id.parse().unwrap(),
+                expected_revision: revision,
+                root_paths: None,
+                display_locale: Some("en-US".into()),
+            },
+            1,
+        )
+        .unwrap();
+    store.drain_root_reassignments().unwrap();
+    assert_eq!(
+        pending_root_reassignments(&store).len(),
+        1,
+        "a frozen destination must keep the cursor"
+    );
+    assert_eq!(owned_by(&store, &parent_lib.id), 50);
+    store
+        .advance_library_operation("locale-freeze", 100, 2)
+        .unwrap();
+    store.drain_root_reassignments().unwrap();
+    assert_eq!(owned_by(&store, &nested_lib.id), 150);
+    assert_eq!(owned_by(&store, &parent_lib.id), 0);
+    assert!(pending_root_reassignments(&store).is_empty());
+}
+
+fn publish_season(store: &Store, media_id: MediaId, dir: &std::path::Path, season: u32, count: u32) {
+    for i in 0..count {
+        let path = dir.join(format!("Show.S{season:02}E{i:03}.mkv"));
+        std::fs::write(&path, b"a").unwrap();
+        publish_fixture_file(
+            store,
+            &FixtureFile {
+                media_id,
+                path: path.display().to_string(),
+                season: Some(season),
+                episode: Some(i + 1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+}
+
+fn movie_library(store: &Store, name: &str, root: &std::path::Path) -> store::Library {
+    store
+        .create_library(MediaKind::Movie, name, &[root.to_str().unwrap()], "everyone", true, &[])
+        .unwrap()
 }
 
 fn nfo_owner(data: &std::path::Path, scope: &str) -> Vec<String> {
