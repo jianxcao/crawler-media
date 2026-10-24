@@ -171,10 +171,7 @@ pub(crate) fn register(conn: &Connection) -> Result<(), StoreError> {
             Ok(match ctx.get_raw(0) {
                 rusqlite::types::ValueRef::Text(bytes) => {
                     let text = String::from_utf8_lossy(bytes);
-                    rusqlite::types::Value::Text(canonical_key(
-                        &canonical_existing_key(&text),
-                        &aliases,
-                    ))
+                    rusqlite::types::Value::Text(canonical_key(&text, &aliases))
                 }
                 rusqlite::types::ValueRef::Null => rusqlite::types::Value::Null,
                 other => rusqlite::types::Value::from(other),
