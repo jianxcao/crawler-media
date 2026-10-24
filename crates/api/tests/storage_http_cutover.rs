@@ -205,3 +205,64 @@ async fn playback_member_filters_accept_canonical_user_uuid() {
         assert_eq!(response.status(), StatusCode::OK, "{route}");
     }
 }
+
+#[tokio::test]
+async fn marks_reject_overflow_unknown_and_duplicate_coordinates_without_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_state, app, media, _) = fixture(temp.path());
+    for extra in [
+        json!({"season_number": 2147483648_u64}),
+        json!({"season_number": 4294967295_u64}),
+        json!({"season_number": 4294967296_u64}),
+        json!({"season_number": -1}),
+        json!({"season_number": "1"}),
+        json!({"season_number": 1.5}),
+        json!({"seasonNumber": 1}),
+        json!({"device_id": "unused"}),
+        json!({"season": 1}),
+    ] {
+        let mut body = json!({"media_item_id": media.to_string(), "favorite": true});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let response = app
+            .clone()
+            .oneshot(common::request(
+                "POST",
+                "/api/v1/playback/marks",
+                Some("management-secret"),
+                body.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
+    for extra in [
+        "season=1",
+        "seasonNumber=1",
+        "season_number=4294967295",
+        "season_number=1&season_number=2",
+        "episode_number=1",
+    ] {
+        let uri = format!("/api/v1/playback/marks?media_item_id={media}&{extra}");
+        let response = app
+            .clone()
+            .oneshot(common::request(
+                "GET",
+                &uri,
+                Some("management-secret"),
+                json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+    }
+    let conn = rusqlite::Connection::open(temp.path().join("data/library.db")).unwrap();
+    let units: i64 = conn
+        .query_row("SELECT count(*) FROM playback_units", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        units, 0,
+        "rejected marks must not create whole or clamped unit facts"
+    );
+}

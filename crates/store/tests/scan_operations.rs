@@ -213,6 +213,18 @@ fn scan_seen_requires_current_ledger_and_file_version() {
     let file = root.join("Movie (2024).mkv");
     std::fs::write(&file, b"one").unwrap();
     let path = file.display().to_string();
+    // A scan has a configured root before it records checkpoints, even while a
+    // particular file has no ledger row yet.
+    store
+        .create_library(
+            MediaKind::Movie,
+            "Scan root",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
 
     let op = store.enqueue_scan("lib1", "sig1", &[], 1000).unwrap();
     assert!(

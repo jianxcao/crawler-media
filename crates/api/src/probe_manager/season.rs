@@ -330,22 +330,8 @@ fn persist_season_model(pipeline: &SeasonPipeline<'_>, model: &TemplateModel) {
         super::ledger_id(&member.ledger_id)
             .and_then(|file_id| store.file_coverage_by_id(file_id).ok().flatten())
             .is_none_or(|row| {
-                store
-                    .get_media(row.file.media_id)
-                    .ok()
-                    .flatten()
-                    .is_none_or(|media| {
-                        store
-                            .library_for_path_strict(
-                                std::path::Path::new(&row.file.path),
-                                media.kind,
-                            )
-                            .ok()
-                            .flatten()
-                            .is_some_and(|owner| {
-                                !store.library_accepts_work(&owner.id).unwrap_or(false)
-                            })
-                    })
+                row.file.version.source_version != member.source_version
+                    || crate::fingerprint_job::source::ensure_source_recorded(&store, &row).is_err()
             })
     }) {
         tracing::warn!(

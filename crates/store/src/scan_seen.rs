@@ -7,6 +7,9 @@ use rusqlite::params;
 
 use super::{Store, StoreError};
 
+#[cfg(test)]
+mod tests;
+
 impl Store {
     /// 采集文件版本事实：`(mtime_ms, file_size, content_digest)`。
     ///
@@ -64,13 +67,19 @@ impl Store {
             &self.library,
             rusqlite::TransactionBehavior::Immediate,
         )?;
-        let keys: Vec<String> = stamps.iter().map(|(path, _, _, _)| path_lookup_key(path)).collect();
-        for ((path, mtime_ms, file_size, content_digest), path_key) in stamps.iter().zip(keys.iter()) {
+        let aliases = crate::path_key::alias_snapshot(&self.library);
+        let keys: Vec<String> = stamps
+            .iter()
+            .map(|(path, _, _, _)| crate::path_key::canonical_key(path, &aliases))
+            .collect();
+        for ((path, mtime_ms, file_size, content_digest), path_key) in
+            stamps.iter().zip(keys.iter())
+        {
             tx.execute(
                 "INSERT INTO scan_seen (operation_id, path, path_key, mtime_ms, file_size, content_digest)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(operation_id, path)
-                 DO UPDATE SET mtime_ms = excluded.mtime_ms, file_size = excluded.file_size,
+                 ON CONFLICT(operation_id, path_key)
+                 DO UPDATE SET path = excluded.path, mtime_ms = excluded.mtime_ms, file_size = excluded.file_size,
                                content_digest = excluded.content_digest",
                 params![operation_id, path, path_key, mtime_ms, file_size, content_digest],
             )?;
@@ -120,7 +129,8 @@ impl Store {
         if paths.is_empty() {
             return Ok(versions);
         }
-        // 分块：复用 ledger.path 索引，同时不触碰 SQLite 的变量上限。
+        let aliases = crate::path_key::alias_snapshot(&self.library);
+        // 分块：复用 library_files.path_key 索引，同时不触碰 SQLite 的变量上限。
         for chunk in paths.chunks(500) {
             let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
             let sql = format!(
@@ -129,16 +139,20 @@ impl Store {
                 placeholders.join(",")
             );
             let mut stmt = self.library.prepare(&sql)?;
-            let keys: Vec<String> = chunk.iter().map(|path| path_lookup_key(path)).collect();
+            let keys: Vec<String> = chunk
+                .iter()
+                .map(|path| crate::path_key::canonical_key(path, &aliases))
+                .collect();
             let rows = stmt.query_map(rusqlite::params_from_iter(keys.iter()), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     (row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get(3)?),
                 ))
             })?;
-            let by_key: HashMap<String, (i64, i64, Option<String>)> = rows.collect::<Result<_, _>>()?;
-            for path in chunk {
-                if let Some(version) = by_key.get(&path_lookup_key(path)) {
+            let by_key: HashMap<String, (i64, i64, Option<String>)> =
+                rows.collect::<Result<_, _>>()?;
+            for (path, key) in chunk.iter().zip(keys.iter()) {
+                if let Some(version) = by_key.get(key) {
                     versions.insert(path.clone(), version.clone());
                 }
             }
@@ -159,32 +173,40 @@ impl Store {
         if paths.is_empty() {
             return Ok(checkpoints);
         }
-        let mut stmt = self.library.prepare(
-            "SELECT s.path_key, s.mtime_ms, s.file_size, s.content_digest,
-                    EXISTS(SELECT 1 FROM library_files f WHERE f.path_key = s.path_key) AS ledger_exists,
-                    (SELECT f.missing_at FROM library_files f WHERE f.path_key = s.path_key LIMIT 1) AS missing_at
-             FROM scan_seen s
-             WHERE s.operation_id = ?1",
-        )?;
-        let rows = stmt.query_map([operation_id], |row| {
-            let path: String = row.get(0)?;
-            let ledger_exists: bool = row.get(4)?;
-            let missing_at: Option<i64> = row.get(5)?;
-            Ok((
-                path,
-                (
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    ledger_exists && missing_at.is_none(),
+        let aliases = crate::path_key::alias_snapshot(&self.library);
+        for chunk in paths.chunks(500) {
+            let keys: Vec<String> = chunk
+                .iter()
+                .map(|path| crate::path_key::canonical_key(path, &aliases))
+                .collect();
+            let placeholders = (2..=keys.len() + 1)
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT s.path_key, s.mtime_ms, s.file_size, s.content_digest,
+                        f.file_id IS NOT NULL AND f.missing_at IS NULL
+                 FROM scan_seen s LEFT JOIN library_files f ON f.path_key = s.path_key
+                 WHERE s.operation_id = ?1 AND s.path_key IN ({placeholders})"
+            );
+            let mut stmt = self.library.prepare(&sql)?;
+            let rows = stmt.query_map(
+                rusqlite::params_from_iter(
+                    std::iter::once(operation_id).chain(keys.iter().map(String::as_str)),
                 ),
-            ))
-        })?;
-        let by_key: HashMap<String, (i64, i64, Option<String>, bool)> =
-            rows.collect::<Result<_, _>>()?;
-        for path in paths {
-            if let Some(checkpoint) = by_key.get(&path_lookup_key(path)) {
-                checkpoints.insert(path.clone(), checkpoint.clone());
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        (row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?),
+                    ))
+                },
+            )?;
+            let by_key: HashMap<String, (i64, i64, Option<String>, bool)> =
+                rows.collect::<Result<_, _>>()?;
+            for (path, key) in chunk.iter().zip(keys.iter()) {
+                if let Some(checkpoint) = by_key.get(key) {
+                    checkpoints.insert(path.clone(), checkpoint.clone());
+                }
             }
         }
         Ok(checkpoints)
@@ -212,8 +234,8 @@ impl Store {
     /// Check if path has been seen by this operation.
     pub fn is_scan_seen(&self, operation_id: &str, path: &str) -> Result<bool, StoreError> {
         let found: bool = self.library.query_row(
-            "SELECT EXISTS(SELECT 1 FROM scan_seen WHERE operation_id = ?1 AND path = ?2)",
-            params![operation_id, path],
+            "SELECT EXISTS(SELECT 1 FROM scan_seen WHERE operation_id = ?1 AND path_key = ?2)",
+            params![operation_id, self.recorded_path_key(path)],
             |r| r.get(0),
         )?;
         Ok(found)
@@ -245,10 +267,6 @@ impl Store {
         )?;
         Ok(())
     }
-}
-
-fn path_lookup_key(path: &str) -> String {
-    crate::path_key::canonical_existing_key(path)
 }
 
 /// 文件版本：mtime 毫秒 + 字节数；读不到时返回 0/0（视为「版本未知」）。

@@ -10,6 +10,35 @@ use sha2::{Digest, Sha256};
 
 use super::{NfoObservation, NfoParseState};
 
+/// Owned, fixed root identities for observing sidecars without a Store guard.
+#[derive(Clone)]
+pub struct NfoInputObserver {
+    pub(crate) aliases: crate::path_key::RootAliases,
+}
+
+impl NfoInputObserver {
+    /// Read and parse sidecars. Call after releasing the Store mutex.
+    pub fn observe(
+        &self,
+        path: &Path,
+        kind: MediaKind,
+        units: &[UnitKey],
+        locale: &str,
+        version: &FileVersion,
+        config_revision: i64,
+    ) -> Vec<NfoObservation> {
+        observe_nfo_inputs_with_aliases(
+            &self.aliases,
+            path,
+            kind,
+            units,
+            locale,
+            version,
+            config_revision,
+        )
+    }
+}
+
 /// Observe every NFO sidecar of one video file, one [`NfoObservation`] per candidate.
 ///
 /// `input_key` is the canonical sidecar path from the same [`crate::path_key::RootAliases`]

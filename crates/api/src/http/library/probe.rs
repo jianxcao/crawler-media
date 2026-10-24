@@ -222,8 +222,9 @@ mod tests {
                     &[],
                 )
                 .unwrap();
+            drop(guard);
             crate::claim::publish_claimed_file(
-                &guard,
+                &store,
                 &media,
                 &dest,
                 &crate::claim::ClaimedFacts::for_path(media.kind, &dest),

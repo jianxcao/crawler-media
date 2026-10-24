@@ -6,12 +6,15 @@ pub mod delete;
 pub mod presence;
 pub mod probe;
 pub mod publish;
+pub(crate) mod publish_checked;
 pub mod reassign;
 pub mod reduce;
 pub mod reduce_incremental;
 pub mod rename;
+mod rename_completion;
 pub mod rename_disk;
 mod rename_durable;
+mod rename_intent;
 mod rename_phases;
 mod rename_receipt;
 mod rename_record;
@@ -25,7 +28,9 @@ pub use presence::*;
 pub use publish::*;
 pub use reassign::*;
 pub use reduce::*;
+pub use rename_completion::{ObservedRenameCompletion, RenameCompletionPlan};
 pub use rename_durable::{FileRenameRequest, RenameSidecar, RenameSourceEvidence, SidecarAction};
+pub use rename_intent::{ObservedRenameIntent, RenameIntentPlan};
 pub use rename_phases::{
     AppliedRenameSidecars, DecidedRenameSidecars, ObservedRenameSidecars, RenameSidecarPlan,
 };

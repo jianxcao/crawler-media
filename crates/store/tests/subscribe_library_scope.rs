@@ -114,6 +114,68 @@ impl Fixture {
         store::test_support::publish_fixture_file(&self.store, &row).unwrap();
     }
 
+    fn publish_probed_movie(&self, target: &Library, file_path: &Path) {
+        let roots = self.store.list_library_roots().unwrap();
+        let root_id = roots
+            .into_iter()
+            .find(|r| r.library_id == Some(target.id.clone()))
+            .unwrap()
+            .id;
+
+        let file_id = LedgerId::new();
+        let file = domain::LibraryFile {
+            file_id,
+            library_id: target.id.parse().unwrap(),
+            root_id,
+            media_id: self.subscribe.media_id,
+            kind: MediaKind::Movie,
+            path: file_path.to_path_buf(),
+            version: domain::FileVersion {
+                revision: 1,
+                source_version: "v1".into(),
+            },
+            presence: domain::FilePresence::Present,
+            publication: domain::FilePublication::Published,
+            size_bytes: Some(1_000_000),
+            stat_known: true,
+            created_ns: None,
+            modified_ns: None,
+            source_digest: None,
+            source_path: None,
+            transfer_mode: None,
+            resolution: Some("2160p".into()),
+            codec: Some("hevc".into()),
+            hdr: Some("HDR10".into()),
+            quality_source: QualitySource::Probe,
+            confidence: Confidence::High,
+            filter_score: Some(100),
+            release_quality: None,
+            duration_ms: Some(7_200_000),
+            tracks_version: 1,
+            poster_path: None,
+            backdrop_path: None,
+            still_path: None,
+        };
+
+        let scope = store::library_write::WriteScope {
+            library_id: target.id.parse().unwrap(),
+            config_revision: 0,
+        };
+        self.store
+            .publish_files(
+                &scope,
+                &[store::library_write::FilePublication {
+                    file: &file,
+                    units: &[domain::UnitKey::WHOLE],
+                    expected_version: None,
+                    nfo_observation: None,
+                    probe_required: false,
+                }],
+                1000,
+            )
+            .unwrap();
+    }
+
     fn load(&self) -> SubscribeFacts {
         self.store
             .load_library_subscribe_facts(&self.subscribe, MediaKind::Movie)
@@ -260,7 +322,7 @@ fn root_resolution_failure_is_returned_not_treated_as_ownership() {
     f.save(&path, 80);
     // A dangling root gives deterministic IO failure, including when run as root.
     let broken = f.root("broken");
-    std::os::unix::fs::symlink(f.root("never-created"), &broken).unwrap();
+    std::fs::create_dir_all(&broken).unwrap();
     f.store
         .create_library(
             MediaKind::Movie,
@@ -271,6 +333,9 @@ fn root_resolution_failure_is_returned_not_treated_as_ownership() {
             &[],
         )
         .unwrap();
+    // The root becomes unreachable after valid configuration was recorded.
+    std::fs::remove_dir(&broken).unwrap();
+    std::os::unix::fs::symlink(f.root("never-created"), &broken).unwrap();
 
     assert!(
         f.store
@@ -351,65 +416,7 @@ fn subscribe_quality_evaluation_overlays_probe_fields_for_published_file() {
     let path_str = file_path.to_str().unwrap().to_string();
     std::fs::write(&file_path, b"content").unwrap();
 
-    let roots = f.store.list_library_roots().unwrap();
-    let root_id = roots
-        .into_iter()
-        .find(|r| r.library_id == Some(target.id.clone()))
-        .unwrap()
-        .id;
-
-    let file_id = LedgerId::new();
-    let file = domain::LibraryFile {
-        file_id,
-        library_id: target.id.parse().unwrap(),
-        root_id,
-        media_id: f.subscribe.media_id,
-        kind: MediaKind::Movie,
-        path: file_path.clone(),
-        version: domain::FileVersion {
-            revision: 1,
-            source_version: "v1".into(),
-        },
-        presence: domain::FilePresence::Present,
-        publication: domain::FilePublication::Published,
-        size_bytes: Some(1_000_000),
-        stat_known: true,
-        created_ns: None,
-        modified_ns: None,
-        source_digest: None,
-        source_path: None,
-        transfer_mode: None,
-        resolution: Some("2160p".into()),
-        codec: Some("hevc".into()),
-        hdr: Some("HDR10".into()),
-        quality_source: QualitySource::Probe,
-        confidence: Confidence::High,
-        filter_score: Some(100),
-        release_quality: None,
-        duration_ms: Some(7_200_000),
-        tracks_version: 1,
-        poster_path: None,
-        backdrop_path: None,
-        still_path: None,
-    };
-
-    let scope = store::library_write::WriteScope {
-        library_id: target.id.parse().unwrap(),
-        config_revision: 0,
-    };
-    f.store
-        .publish_files(
-            &scope,
-            &[store::library_write::FilePublication {
-                file: &file,
-                units: &[domain::UnitKey::WHOLE],
-                expected_version: None,
-                nfo_observation: None,
-                probe_required: false,
-            }],
-            1000,
-        )
-        .unwrap();
+    f.publish_probed_movie(&target, &file_path);
 
     // Record quality in SubscribeFacts with release dimensions
     let mut facts = SubscribeFacts::default();

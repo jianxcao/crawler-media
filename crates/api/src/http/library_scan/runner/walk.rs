@@ -184,6 +184,17 @@ impl ScanContext<'_> {
             .filter_transferred(files)
             .map_err(presence_failure)?;
         let scanned = filtered.len();
+        let plan = self
+            .lease
+            .publish(|| {
+                let store = self.state.store.lock();
+                self.scan_scope
+                    .validate(&store)
+                    .map_err(|e| format!("{e:?}"))?;
+                self.plan_chunk(&store, &filtered)
+            })
+            .map_err(publish_failure)?;
+        let observed = plan.observe().map_err(publish_failure)?;
         let inserted = self
             .lease
             .publish(|| {
@@ -191,7 +202,7 @@ impl ScanContext<'_> {
                 self.scan_scope
                     .validate(&store)
                     .map_err(|e| format!("{e:?}"))?;
-                self.register_chunk(&store, &filtered)
+                observed.record(&store)
             })
             .map_err(publish_failure)?;
         // 版本变化的文件：派生探测事实必须失效，并按 durable obligation 合同重排探测。
@@ -319,18 +330,18 @@ impl ScanContext<'_> {
 
     /// 按库类型登记 chunk：Video 走「每个视频文件一个 Media」，Movie/TV 走 Release
     /// 识别 + NFO 身份。两条路径都只登记，不做识别（识别在 `process_chunk` 后半段）。
-    fn register_chunk(
+    fn plan_chunk(
         &self,
         store: &crate::Store,
         filtered: &[library::TransferredFile],
-    ) -> Result<Vec<PathBuf>, String> {
+    ) -> Result<crate::watch_ledger::ScanLedgerPlan, String> {
         if self.kind == domain::MediaKind::Video {
-            crate::watch_ledger::record_video_paths(
+            crate::watch_ledger::plan_video_paths(
                 store,
                 filtered.iter().map(|file| file.path.clone()),
             )
         } else {
-            crate::watch_ledger::record_paths(store, filtered.to_vec())
+            crate::watch_ledger::plan_paths(store, filtered.to_vec())
         }
     }
 

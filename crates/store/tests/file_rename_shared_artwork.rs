@@ -16,9 +16,23 @@ struct Fx {
 }
 
 fn fixture() -> Fx {
+    fixture_with_alias(false)
+}
+
+fn fixture_with_alias(alias: bool) -> Fx {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
-    let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+    let a = if alias {
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let real = base.join("real-a");
+        std::fs::create_dir_all(&real).unwrap();
+        let alias = base.join("alias-a");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        alias
+    } else {
+        tmp.path().join("a")
+    };
+    let b = tmp.path().join("b");
     for (name, root) in [("A", &a), ("B", &b)] {
         std::fs::create_dir_all(root).unwrap();
         store
@@ -141,6 +155,67 @@ fn shared_artwork_is_copied_and_kept_for_remaining_media() {
         .collect();
     assert!(leftovers.is_empty(), "no temp copies left: {leftovers:?}");
     let _ = req;
+}
+
+#[test]
+fn explicit_alias_root_keeps_artwork_used_by_a_sibling_file() {
+    let fx = fixture_with_alias(true);
+    let src = fx.a.join("Media");
+    let moved = episode(&fx, &src, 1);
+    episode(&fx, &src, 2);
+    std::fs::write(src.join("poster.jpg"), b"poster").unwrap();
+    begin(&fx, &moved, &fx.b.join("Media/S01E01.mkv"));
+    assert_eq!(fx.store.resume_pending_file_renames(2).unwrap(), 1);
+    assert_eq!(std::fs::read(src.join("poster.jpg")).unwrap(), b"poster");
+    assert_eq!(
+        std::fs::read(fx.b.join("Media/poster.jpg")).unwrap(),
+        b"poster"
+    );
+}
+
+#[test]
+fn alias_artwork_reference_from_another_directory_keeps_the_source() {
+    use store::library_write::{FilePublication, WriteScope};
+
+    let fx = fixture_with_alias(true);
+    let src = fx.a.join("Media");
+    let moved = episode(&fx, &src, 1);
+    let poster = src.join("poster.jpg");
+    std::fs::write(&poster, b"shared poster").unwrap();
+    let mut other = episode(&fx, &fx.a.join("Other"), 2);
+    other.poster_path = Some(poster.clone());
+    fx.store
+        .publish_files(
+            &WriteScope {
+                library_id: other.library_id,
+                config_revision: fx
+                    .store
+                    .library_config_revision(&other.library_id.to_string())
+                    .unwrap(),
+            },
+            &[FilePublication {
+                file: &other,
+                units: &[domain::UnitKey::new(1, 2)],
+                expected_version: Some(&other.version),
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            1,
+        )
+        .unwrap();
+    begin(&fx, &moved, &fx.b.join("Media/S01E01.mkv"));
+    assert_eq!(fx.store.resume_pending_file_renames(2).unwrap(), 1);
+    assert_eq!(std::fs::read(&poster).unwrap(), b"shared poster");
+    let remaining = fx
+        .store
+        .file_coverage_by_id(other.file_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(remaining.file.poster_path, Some(poster));
+    assert_eq!(
+        std::fs::read(fx.b.join("Media/poster.jpg")).unwrap(),
+        b"shared poster"
+    );
 }
 
 #[test]

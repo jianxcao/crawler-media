@@ -247,9 +247,7 @@ fn lower_priority_source_does_not_overwrite_higher_priority_fields() {
 
 #[test]
 fn invalid_nfo_keeps_the_last_valid_metadata_input() {
-    use domain::{
-        Confidence, FilePresence, FilePublication, FileVersion, LibraryFile, QualitySource, UnitKey,
-    };
+    use domain::{LibraryFile, UnitKey};
     use store::library_write::{FilePublication as StorePublication, WriteScope};
 
     let tmp = tempfile::tempdir().unwrap();
@@ -292,45 +290,13 @@ fn invalid_nfo_keeps_the_last_valid_metadata_input() {
     std::fs::write(&video, b"bytes").unwrap();
     let nfo = video.with_extension("nfo");
     std::fs::write(&nfo, "<movie><plot>Keep me</plot></movie>").unwrap();
-    let file = LibraryFile {
-        file_id: domain::LedgerId::new(),
-        library_id: library.id.parse().unwrap(),
-        root_id,
-        media_id: media.id,
-        kind: domain::MediaKind::Movie,
-        path: video,
-        version: FileVersion {
-            revision: 1,
-            source_version: "v1".into(),
-        },
-        presence: FilePresence::Present,
-        publication: FilePublication::Published,
-        size_bytes: Some(5),
-        stat_known: true,
-        created_ns: None,
-        modified_ns: None,
-        source_digest: None,
-        source_path: None,
-        transfer_mode: None,
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-        release_quality: None,
-        duration_ms: None,
-        tracks_version: 0,
-        poster_path: None,
-        backdrop_path: None,
-        still_path: None,
-    };
+    let file = metadata_file(&library.id, root_id, media.id, video);
     let scope = WriteScope {
         library_id: library.id.parse().unwrap(),
         config_revision: 0,
     };
     let observe = |file: &LibraryFile| {
-        store.observe_nfo_inputs(
+        store.nfo_input_observer().observe(
             &file.path,
             file.kind,
             &[UnitKey::WHOLE],
@@ -384,10 +350,7 @@ fn invalid_nfo_keeps_the_last_valid_metadata_input() {
 
 #[test]
 fn record_scraped_display_with_studio_updates_and_allows_library_reduction() {
-    use domain::{
-        Confidence, FilePresence, FilePublication, FileVersion, LibraryFile, MediaKind,
-        QualitySource, UnitKey,
-    };
+    use domain::{MediaKind, UnitKey};
     use store::library_write::{FilePublication as StorePublication, WriteScope};
     use store::metadata::ScrapedDisplay;
 
@@ -429,39 +392,7 @@ fn record_scraped_display_with_studio_updates_and_allows_library_reduction() {
 
     let video = root.join("Movie.mkv");
     std::fs::write(&video, b"bytes").unwrap();
-    let file = LibraryFile {
-        file_id: domain::LedgerId::new(),
-        library_id: library.id.parse().unwrap(),
-        root_id,
-        media_id: media.id,
-        kind: MediaKind::Movie,
-        path: video,
-        version: FileVersion {
-            revision: 1,
-            source_version: "v1".into(),
-        },
-        presence: FilePresence::Present,
-        publication: FilePublication::Published,
-        size_bytes: Some(5),
-        stat_known: true,
-        created_ns: None,
-        modified_ns: None,
-        source_digest: None,
-        source_path: None,
-        transfer_mode: None,
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-        release_quality: None,
-        duration_ms: None,
-        tracks_version: 0,
-        poster_path: None,
-        backdrop_path: None,
-        still_path: None,
-    };
+    let file = metadata_file(&library.id, root_id, media.id, video);
     let scope = WriteScope {
         library_id: library.id.parse().unwrap(),
         config_revision: 0,
@@ -507,3 +438,43 @@ fn record_scraped_display_with_studio_updates_and_allows_library_reduction() {
     assert_eq!(media_facts.studios, vec!["Studio X".to_string()]);
 }
 
+fn metadata_file(
+    library: &str,
+    root_id: String,
+    media_id: domain::MediaId,
+    video: std::path::PathBuf,
+) -> domain::LibraryFile {
+    domain::LibraryFile {
+        file_id: domain::LedgerId::new(),
+        library_id: library.parse().unwrap(),
+        root_id,
+        media_id,
+        kind: domain::MediaKind::Movie,
+        path: video,
+        version: domain::FileVersion {
+            revision: 1,
+            source_version: "v1".into(),
+        },
+        presence: domain::FilePresence::Present,
+        publication: domain::FilePublication::Published,
+        size_bytes: Some(5),
+        stat_known: true,
+        created_ns: None,
+        modified_ns: None,
+        source_digest: None,
+        source_path: None,
+        transfer_mode: None,
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: domain::QualitySource::Release,
+        confidence: domain::Confidence::High,
+        filter_score: None,
+        release_quality: None,
+        duration_ms: None,
+        tracks_version: 0,
+        poster_path: None,
+        backdrop_path: None,
+        still_path: None,
+    }
+}

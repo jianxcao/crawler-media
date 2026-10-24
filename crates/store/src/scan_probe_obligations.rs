@@ -8,8 +8,8 @@ use rusqlite::{OptionalExtension, params};
 /// One file observed by a scan, before it becomes a `library_files` row.
 ///
 /// The scan only asserts what it measured: identity, path, unit coordinates and the
-/// probe-ish labels. Ownership is not part of the input — [`Store::insert_scanned_files`]
-/// derives `library_id`/`root_id` with `resolve_owned_root`, so a caller cannot forge
+/// probe-ish labels. Ownership is captured separately before disk IO, then validated in the
+/// transaction by [`Store::insert_scanned_files_in_contexts`], so a caller cannot forge
 /// presence, publication or version state.
 #[derive(Clone, Debug)]
 pub struct ScannedLedger {
@@ -28,6 +28,8 @@ pub struct ScannedLedger {
     pub size_bytes: Option<i64>,
     pub created_ns: Option<i64>,
     pub modified_ns: Option<i64>,
+    /// Artwork already observed before acquiring the Store mutex.
+    pub artwork: crate::files::DiscoveredArtwork,
     /// 该文件的全部 NFO 候选观察（每份存在的 sidecar 一条；不存在的候选也会出现，用来解除旧输入）。
     pub observations: Vec<crate::metadata::NfoObservation>,
 }
@@ -36,8 +38,7 @@ use super::library_write::reduce_incremental::{
     ChangedFile, read_file_summary_facts, reduce_library_media_incremental,
 };
 use super::library_write::{
-    enqueue_probe, ensure_library_writable, ensure_media_writable, insert_file_row,
-    reduce_library_media, sync_coverage,
+    enqueue_probe, ensure_media_writable, insert_file_row, reduce_library_media, sync_coverage,
 };
 use super::{Store, StoreError};
 
@@ -69,6 +70,35 @@ impl Store {
         rows: &[ScannedLedger],
         now_ms: i64,
     ) -> Result<(), StoreError> {
+        if rows.len() > MAX_SCAN_BATCH {
+            return Err(StoreError::Invalid(format!(
+                "exceeded {MAX_SCAN_BATCH} files per scan batch"
+            )));
+        }
+        let contexts = rows
+            .iter()
+            .map(|row| {
+                self.scan_write_context(
+                    Path::new(&row.path),
+                    media_kind(&self.library, row.media_id)?,
+                )
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        self.insert_scanned_files_in_contexts(rows, &contexts, now_ms)
+    }
+
+    /// Publish only into the exact roots and configurations captured before disk IO.
+    pub fn insert_scanned_files_in_contexts(
+        &self,
+        rows: &[ScannedLedger],
+        contexts: &[crate::ScanWriteContext],
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        if rows.len() != contexts.len() {
+            return Err(StoreError::Invalid(
+                "scan context count does not match files".into(),
+            ));
+        }
         if rows.is_empty() {
             return Ok(());
         }
@@ -79,45 +109,12 @@ impl Store {
         }
         let tx = crate::write_tx(&self.library)?;
         let mut affected: HashMap<(String, MediaId), BatchChange> = HashMap::new();
-        for scanned in rows {
+        for (scanned, context) in rows.iter().zip(contexts) {
             let kind = media_kind(&tx, scanned.media_id)?;
-            let (library_id, root_id) = resolve_owned_root(&tx, Path::new(&scanned.path), kind)?;
-            ensure_library_writable(&tx, &library_id)?;
+            context.validate(&tx, Path::new(&scanned.path), kind)?;
+            let library_id = context.library_id.to_string();
             ensure_media_writable(&tx, scanned.media_id)?;
-            let artwork = crate::files::DiscoveredArtwork::discover(Path::new(&scanned.path));
-            let file = domain::LibraryFile {
-                file_id: scanned.file_id,
-                library_id: library_id.parse::<LibraryId>()?,
-                root_id,
-                media_id: scanned.media_id,
-                kind,
-                path: Path::new(&scanned.path).to_path_buf(),
-                version: domain::FileVersion {
-                    revision: 1,
-                    source_version: scanned.source_version.clone(),
-                },
-                presence: domain::FilePresence::Present,
-                publication: domain::FilePublication::Published,
-                size_bytes: scanned.size_bytes.and_then(|size| u64::try_from(size).ok()),
-                stat_known: scanned.modified_ns.is_some(),
-                created_ns: scanned.created_ns,
-                modified_ns: scanned.modified_ns,
-                source_digest: scanned.source_digest.clone(),
-                source_path: None,
-                transfer_mode: None,
-                resolution: scanned.resolution.clone(),
-                codec: scanned.codec.clone(),
-                hdr: scanned.hdr.clone(),
-                quality_source: scanned.quality_source,
-                confidence: scanned.confidence,
-                filter_score: scanned.filter_score,
-                release_quality: None,
-                duration_ms: None,
-                tracks_version: 0,
-                poster_path: artwork.poster,
-                backdrop_path: artwork.backdrop,
-                still_path: artwork.still,
-            };
+            let file = scanned_file(scanned, context);
             insert_file_row(&tx, &file)?;
             let units = if kind == MediaKind::Video {
                 vec![UnitKey::WHOLE]
@@ -125,8 +122,8 @@ impl Store {
                 scanned.units.clone()
             };
             sync_coverage(&tx, &file, &units)?;
-            let target =
-                crate::metadata::nfo_input::NfoInputTarget::from_file(&file).with_canonical_path(&tx);
+            let target = crate::metadata::nfo_input::NfoInputTarget::from_file(&file)
+                .with_canonical_path(&tx);
             if !crate::metadata::nfo_input::record_nfo_observations(
                 &tx,
                 &target,
@@ -230,62 +227,39 @@ fn media_kind(
     kind.parse::<MediaKind>().map_err(StoreError::MediaKind)
 }
 
-/// Longest enabled root that component-wise contains `path` for this kind of Library.
-///
-/// Equal-depth candidates are ambiguous and therefore rejected; a path outside every
-/// root is rejected too. Never falls back to an arbitrary Library.
-fn resolve_owned_root(
-    tx: &rusqlite::Connection,
-    path: &Path,
-    kind: MediaKind,
-) -> Result<(String, String), StoreError> {
-    let mut stmt = tx.prepare(
-        "SELECT r.root_id, r.library_id, r.display_path
-         FROM library_roots r
-         JOIN libraries l ON l.library_id = r.library_id
-         WHERE l.kind = ?1 AND l.lifecycle_state = 'ready'
-           AND NOT EXISTS (SELECT 1 FROM library_removals m
-                           WHERE m.library_id = r.library_id AND m.state <> 'succeeded')",
-    )?;
-    let rows = stmt
-        .query_map(params![kind.as_str()], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let mut best: Option<(usize, String, String)> = None;
-    let mut ambiguous = false;
-    for (root_id, library_id, display) in rows {
-        let root = Path::new(&display);
-        if !path.starts_with(root) {
-            continue;
-        }
-        let depth = root.components().count();
-        match &best {
-            Some((best_depth, _, _)) if *best_depth > depth => {}
-            Some((best_depth, _, _)) if *best_depth == depth => ambiguous = true,
-            _ => {
-                best = Some((depth, root_id, library_id));
-                ambiguous = false;
-            }
-        }
+fn scanned_file(scanned: &ScannedLedger, context: &crate::ScanWriteContext) -> domain::LibraryFile {
+    let artwork = &scanned.artwork;
+    domain::LibraryFile {
+        file_id: scanned.file_id,
+        library_id: context.library_id,
+        root_id: context.root_id.clone(),
+        media_id: scanned.media_id,
+        kind: context.kind,
+        path: Path::new(&scanned.path).to_path_buf(),
+        version: domain::FileVersion {
+            revision: 1,
+            source_version: scanned.source_version.clone(),
+        },
+        presence: domain::FilePresence::Present,
+        publication: domain::FilePublication::Published,
+        size_bytes: scanned.size_bytes.and_then(|size| u64::try_from(size).ok()),
+        stat_known: scanned.modified_ns.is_some(),
+        created_ns: scanned.created_ns,
+        modified_ns: scanned.modified_ns,
+        source_digest: scanned.source_digest.clone(),
+        source_path: None,
+        transfer_mode: None,
+        resolution: scanned.resolution.clone(),
+        codec: scanned.codec.clone(),
+        hdr: scanned.hdr.clone(),
+        quality_source: scanned.quality_source,
+        confidence: scanned.confidence,
+        filter_score: scanned.filter_score,
+        release_quality: None,
+        duration_ms: None,
+        tracks_version: 0,
+        poster_path: artwork.poster.clone(),
+        backdrop_path: artwork.backdrop.clone(),
+        still_path: artwork.still.clone(),
     }
-    if ambiguous {
-        return Err(StoreError::Protected(format!(
-            "path {} has ambiguous library ownership",
-            path.display()
-        )));
-    }
-    best.map(|(_, root_id, library_id)| (library_id, root_id))
-        .ok_or_else(|| {
-            StoreError::Protected(format!(
-                "path {} is outside every {} library root",
-                path.display(),
-                kind.as_str()
-            ))
-        })
 }

@@ -81,10 +81,16 @@ pub fn run(state: &ApiState) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
         }
     }
+    let plan = {
+        let store = state.store.lock();
+        check_intake_libraries(&store, &movie_lease, tv_lease.as_ref())?;
+        crate::watch_ledger::plan_paths(&store, transferred.clone())?
+    };
+    let observed = plan.observe()?;
     let inserted = {
         let store = state.store.lock();
         check_intake_libraries(&store, &movie_lease, tv_lease.as_ref())?;
-        crate::watch_ledger::record_paths(&store, transferred.clone())?
+        observed.record(&store)?
     };
 
     finish_intake_metadata(

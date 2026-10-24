@@ -2,9 +2,9 @@
 //!
 //! `path_key` is the identity used for uniqueness and lookup and is computed **once
 //! at write time**; `display_path` keeps the caller's spelling and is never used to
-//! find a row. Lookups canonicalize their probe once per statement (constant
-//! argument of the deterministic `norm_path_key()` function, so SQLite evaluates it
-//! once and still seeks the UNIQUE index).
+//! find a row. SQL lookups normalize the probe and rewrite registered root aliases
+//! without filesystem IO. Unregistered caller spellings must be resolved before
+//! taking a shared Store lock; indexed probes use the recorded key.
 //!
 //! Policy:
 //! - absolute paths only; repeated `/` and `.` segments are collapsed, a trailing
@@ -13,7 +13,7 @@
 //!   writers return `Invalid`): resolving it lexically is wrong across symlinks;
 //! - Unicode is normalized to NFC, so macOS-style NFD names and NFC names are one key;
 //! - a Library root is keyed by `fs::canonicalize` (symlinks and `..` resolved) when
-//!   it exists; a file under any spelling of that root is keyed under the canonical
+//!   it exists, resolving existing ancestors for missing descendants; files use the canonical
 //!   root prefix via the per-Store root alias table;
 //! - **no case folding**: the deployment target (Linux ext4/xfs/btrfs, Docker) is
 //!   case-sensitive, and folding there would merge distinct files.
@@ -32,7 +32,11 @@ pub(crate) type RootAliases = Arc<RwLock<Vec<(String, String)>>>;
 /// Fixed alias snapshot for one observation plan. IO stays outside the Store lock;
 /// every sidecar key in that plan uses this snapshot, not a later reload.
 pub(crate) fn alias_snapshot(conn: &Connection) -> RootAliases {
-    table_for(conn)
+    let aliases = table_for(conn)
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    Arc::new(RwLock::new(aliases))
 }
 
 /// One alias table per library.db file, shared by every connection to it (several
@@ -119,7 +123,10 @@ pub fn normalize_path_key(raw: &str) -> String {
 /// Identity of a path that may already be gone. Uses the committed root aliases and
 /// does not touch the filesystem, so a missing file keeps the key it was stored with.
 pub(crate) fn canonical_recorded_key(conn: &Connection, raw: &str) -> String {
-    let mut aliases = table_for(conn).read().unwrap_or_else(|e| e.into_inner()).clone();
+    let mut aliases = table_for(conn)
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     if aliases.is_empty() {
         if let Ok(mut stmt) = conn.prepare("SELECT display_path, path_key FROM library_roots") {
             if let Ok(rows) = stmt.query_map([], |row| {
@@ -159,7 +166,7 @@ pub(crate) fn canonical_key(raw: &str, aliases: &RootAliases) -> String {
 }
 
 /// Key for a Library root: absolute, no `..` in the request, symlinks resolved when the
-/// directory exists (otherwise the lexical canonical form).
+/// directory exists; missing descendants retain the resolved ancestor identity.
 pub fn canonical_root_key(display: &str) -> Result<String, StoreError> {
     let path = Path::new(display);
     if !path.is_absolute() {
@@ -176,7 +183,11 @@ pub fn canonical_root_key(display: &str) -> Result<String, StoreError> {
             {
                 return Err(StoreError::Invalid(format!("root {display} contains `..`")));
             }
-            display.to_string()
+            // Resolve the existing ancestors too. A not-yet-created root below
+            // a symlink must keep this identity once its directory appears.
+            crate::library_paths::resolved_path(path)?
+                .to_string_lossy()
+                .into_owned()
         }
     };
     Ok(normalize_path_key(&resolved))

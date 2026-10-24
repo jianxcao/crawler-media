@@ -236,28 +236,7 @@ impl ApiState {
             }
         };
         let jobs_path = store.lock().data_dir().join("jobs.db");
-        // 布局闸门必须排在 `jobs::Queue::open` **之前**：open 会执行队列 DDL 迁移，
-        // 形状不符的 jobs.db 不允许先被写入。全新 data 目录此刻还没有 jobs.db，
-        // 这里先写定身份头，open 之后再校验队列实际建出的形状（见下）。
-        {
-            let conn = rusqlite::Connection::open(&jobs_path)
-                .map_err(|err| std::io::Error::other(err.to_string()))?;
-            store::schema::layout::initialize_jobs_layout(&conn)
-                .map_err(|err| std::io::Error::other(err.to_string()))?;
-        }
-        let jobs =
-            jobs::Queue::open(&jobs_path).map_err(|err| std::io::Error::other(err.to_string()))?;
-        {
-            let conn = rusqlite::Connection::open(&jobs_path)
-                .map_err(|err| std::io::Error::other(err.to_string()))?;
-            store::schema::layout::validate_jobs_layout(&conn)
-                .map_err(|err| std::io::Error::other(err.to_string()))?;
-        }
-        crate::jobs_api::seed_instance_defs(&jobs)
-            .map_err(|err| std::io::Error::other(err.to_string()))?;
-        // 维护任务默认 def：幂等注册，用户改过的开关/频率/payload 原样保留。
-        crate::maintenance::seed_maintenance_defs(&jobs)
-            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        let jobs = open_jobs(&jobs_path)?;
         let data_dir = store.lock().data_dir().to_path_buf();
         // 异步探测队列：ApiState 创建时启动 worker（生产在 Tokio main 内，
         // 有 runtime 才真正 spawn；测试路径仅创建队列不启动）。
@@ -327,22 +306,32 @@ impl ApiState {
         if let Some(error) = startup_browser.1 {
             state.obscura.set_last_error(Some(error));
         }
-        if tokio::runtime::Handle::try_current().is_ok() {
-            crate::http::browser_settings::spawn_reconcile(&state);
-            crate::library_lifecycle::resume_library_removals(&state)
+        state.start_runtime()?;
+        // 幂等对账：崩溃可能停在「DB 已提交、封面文件还没删」之间，每次启动重试。
+        crate::library_cover_service::purge_removed_library_covers(&state);
+        Ok(state)
+    }
+
+    fn start_runtime(&self) -> Result<(), ApiStateError> {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return Ok(());
+        }
+        {
+            crate::http::browser_settings::spawn_reconcile(self);
+            crate::library_lifecycle::resume_library_removals(self)
                 .map_err(std::io::Error::other)?;
-            state.probe.try_start_workers();
-            state.chapter_frames.start();
-            crate::scan_probe_dispatch::start_dispatcher(state.clone());
+            self.probe.try_start_workers();
+            self.chapter_frames.start();
+            crate::scan_probe_dispatch::start_dispatcher(self.clone());
             // T11: Old browse projection periodic refresh is obsolete with library_items single table
-            match state.store.lock().recover_orphaned_scans() {
+            match self.store.lock().recover_orphaned_scans() {
                 Ok(n) if n > 0 => tracing::info!(count = n, "已恢复未完成的扫描操作"),
                 Ok(_) => {}
                 Err(e) => tracing::error!(%e, "恢复未完成的扫描操作失败"),
             }
             let mut root_batches = 0;
             loop {
-                match state.store.lock().drain_one_root_batch() {
+                match self.store.lock().drain_one_root_batch() {
                     Ok(Some(true)) => root_batches += 1,
                     Ok(Some(false)) => break,
                     Ok(None) => {
@@ -358,20 +347,9 @@ impl ApiState {
             if root_batches > 0 {
                 tracing::info!(batches = root_batches, "已恢复未完成的根目录归属迁移");
             }
-            match state
-                .store
-                .lock()
-                .resume_pending_file_renames(crate::store::unix_now())
-            {
-                Ok(n) if n > 0 => tracing::info!(count = n, "已恢复未完成的文件改名/改挂"),
-                Ok(_) => {}
-                Err(e) => tracing::error!(%e, "恢复未完成的文件改名/改挂失败"),
-            }
-            state.scan_coordinator.trigger_next(&state);
+            crate::rename_work::resume_startup(self.clone());
         }
-        // 幂等对账：崩溃可能停在「DB 已提交、封面文件还没删」之间，每次启动重试。
-        crate::library_cover_service::purge_removed_library_covers(&state);
-        Ok(state)
+        Ok(())
     }
 
     pub fn with_log_buffer(mut self, log_buffer: LogBuffer) -> Self {
@@ -683,4 +661,30 @@ pub enum ApiStateError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Store(#[from] StoreError),
+}
+
+fn open_jobs(jobs_path: &std::path::Path) -> Result<jobs::Queue, ApiStateError> {
+    // 布局闸门必须排在 `jobs::Queue::open` **之前**：open 会执行队列 DDL 迁移，
+    // 形状不符的 jobs.db 不允许先被写入。全新 data 目录此刻还没有 jobs.db，
+    // 这里先写定身份头，open 之后再校验队列实际建出的形状（见下）。
+    {
+        let conn = rusqlite::Connection::open(jobs_path)
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        store::schema::layout::initialize_jobs_layout(&conn)
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+    }
+    let jobs =
+        jobs::Queue::open(jobs_path).map_err(|err| std::io::Error::other(err.to_string()))?;
+    {
+        let conn = rusqlite::Connection::open(jobs_path)
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        store::schema::layout::validate_jobs_layout(&conn)
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+    }
+    crate::jobs_api::seed_instance_defs(&jobs)
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    // 维护任务默认 def：幂等注册，用户改过的开关/频率/payload 原样保留。
+    crate::maintenance::seed_maintenance_defs(&jobs)
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    Ok(jobs)
 }

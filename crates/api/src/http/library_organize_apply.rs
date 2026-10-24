@@ -28,7 +28,7 @@ pub(crate) struct PreparedOrganizeEntry {
 }
 
 enum Prepared {
-    Begun(store::library_write::FileRenameRequest),
+    Planned(store::library_write::RenameIntentPlan),
     Skipped(String),
     Failed(String),
 }
@@ -76,6 +76,12 @@ pub(crate) fn organize_inner(state: &ApiState, id: &str, body: &Value) -> Respon
     response
 }
 
+enum OrganizeOutcome {
+    Applied,
+    Skipped(String),
+    Failed(String),
+}
+
 pub(crate) fn apply_organize(
     state: &ApiState,
     library: &store::Library,
@@ -87,90 +93,114 @@ pub(crate) fn apply_organize(
     let mut skipped = Vec::new();
     let mut errors = Vec::new();
     for entry in entries {
-        let (from, to) = (
-            entry.from.display().to_string(),
-            entry.to.display().to_string(),
-        );
-        if entry.to == entry.from {
-            applied += 1;
-            continue;
+        match apply_entry(state, library, source_lease, destinations, entry) {
+            OrganizeOutcome::Applied => applied += 1,
+            OrganizeOutcome::Skipped(reason) => skipped.push(reason),
+            OrganizeOutcome::Failed(reason) => errors.push(reason),
         }
-        let dest = destinations.get(&entry.destination_library_id);
-        if let Some(Err(error)) = dest {
-            errors.push(format!("{to}: 目标媒体库不可写: {error}"));
-            continue;
-        }
-        let dest_lease = dest.and_then(|d| d.as_ref().ok());
-        let now_ms = crate::job_loop::unix_now();
-        let prepared = source_lease.publish(|| {
-            if dest_lease.is_some_and(|d| d.control().is_cancelled()) {
-                return Err("目标媒体库正在删除".into());
-            }
-            Ok(prepare_rename(state, library, entry, now_ms))
-        });
-        let request = match prepared {
-            Ok(Prepared::Begun(request)) => request,
-            Ok(Prepared::Skipped(reason)) => {
-                skipped.push(reason);
-                continue;
-            }
-            Ok(Prepared::Failed(reason)) => {
-                errors.push(reason);
-                continue;
-            }
-            Err(error) => {
-                errors.push(format!("{from}: 媒体库工作已取消: {error}"));
-                continue;
-            }
-        };
-        // No gate, no Store: the durable intent is already committed.
-        let receipt = match store::library_write::execute_rename_disk(&request) {
-            Ok(receipt) => receipt,
-            Err(error) => {
-                tracing::error!(from, to, %error, "整理文件重命名失败");
-                if let Err(record) =
-                    state
-                        .store
-                        .lock()
-                        .record_rename_refusal(&request.rename_id, now_ms, &error)
-                {
-                    tracing::error!(%record, rename_id = %request.rename_id, "记录重命名拒绝失败");
-                }
-                errors.push(format!("{from} 重命名失败: {error}"));
-                continue;
-            }
-        };
-        let completed = source_lease.publish(|| {
-            if dest_lease.is_some_and(|d| d.control().is_cancelled()) {
-                return Err("目标媒体库正在删除".into());
-            }
-            record_rename_disk_unlocked(&state.store, &receipt, now_ms)
-                .map_err(|error| error.to_string())?;
-            let store = state.store.lock();
-            store
-                .complete_file_rename(&request.rename_id, now_ms)
-                .map_err(|error| error.to_string())?;
-            Ok(store
-                .file_coverage_by_path(&to)
-                .ok()
-                .flatten()
-                .and_then(|c| store.get_media(c.file.media_id).ok().flatten()))
-        });
-        let media = match completed {
-            Ok(media) => media,
-            Err(error) => {
-                // The intent stays pending; startup recovery finishes it.
-                tracing::error!(from, to, %error, rename_id = %request.rename_id, "整理文件更新台账失败");
-                errors.push(format!("{from} -> {to}: 台账记录更新失败: {error}"));
-                continue;
-            }
-        };
-        if let Some(media) = media {
-            write_missing_nfo(&entry.to, &media);
-        }
-        applied += 1;
     }
     ok(json!({ "applied": applied, "skipped": skipped, "errors": errors })).into_response()
+}
+
+fn apply_entry(
+    state: &ApiState,
+    library: &store::Library,
+    source_lease: &LibraryWorkLease,
+    destinations: &HashMap<String, Result<LibraryWorkLease, String>>,
+    entry: &PreparedOrganizeEntry,
+) -> OrganizeOutcome {
+    let (from, to) = (
+        entry.from.display().to_string(),
+        entry.to.display().to_string(),
+    );
+    if entry.to == entry.from {
+        return OrganizeOutcome::Applied;
+    }
+    let dest = destinations.get(&entry.destination_library_id);
+    if let Some(Err(error)) = dest {
+        return OrganizeOutcome::Failed(format!("{to}: 目标媒体库不可写: {error}"));
+    }
+    let dest_lease = dest.and_then(|d| d.as_ref().ok());
+    let now = crate::job_loop::unix_now();
+    let observed = match prepare_rename(state, library, entry) {
+        Prepared::Planned(plan) => match plan.observe() {
+            Ok(observed) => observed,
+            Err(error) => return OrganizeOutcome::Failed(format!("{from} -> {to}: {error}")),
+        },
+        Prepared::Skipped(reason) => return OrganizeOutcome::Skipped(reason),
+        Prepared::Failed(reason) => return OrganizeOutcome::Failed(reason),
+    };
+    let request = match source_lease.publish(|| {
+        if dest_lease.is_some_and(|d| d.control().is_cancelled()) {
+            return Err("目标媒体库正在删除".into());
+        }
+        state
+            .store
+            .lock()
+            .begin_observed_file_rename(observed, now)
+            .map_err(|e| e.to_string())
+    }) {
+        Ok(request) => request,
+        Err(error) => return OrganizeOutcome::Failed(format!("{from}: 媒体库工作已取消: {error}")),
+    };
+    let observed = match apply_disk_and_observe(state, &request, now) {
+        Ok(observed) => observed,
+        Err(error) => {
+            tracing::error!(from, to, %error, rename_id = %request.rename_id, "整理文件重命名失败");
+            return OrganizeOutcome::Failed(format!("{from} -> {to}: {error}"));
+        }
+    };
+    let completed = source_lease.publish(|| {
+        if dest_lease.is_some_and(|d| d.control().is_cancelled()) {
+            return Err("目标媒体库正在删除".into());
+        }
+        let store = state.store.lock();
+        store
+            .complete_observed_file_rename(observed, now)
+            .map_err(|e| e.to_string())?;
+        Ok(store
+            .file_coverage_by_path(&to)
+            .ok()
+            .flatten()
+            .and_then(|c| store.get_media(c.file.media_id).ok().flatten()))
+    });
+    match completed {
+        Ok(media) => {
+            if let Some(media) = media {
+                write_missing_nfo(&entry.to, &media);
+            }
+            OrganizeOutcome::Applied
+        }
+        Err(error) => {
+            // The durable intent remains resumable after cancellation or failure.
+            tracing::error!(from, to, %error, rename_id = %request.rename_id, "整理文件更新台账失败");
+            OrganizeOutcome::Failed(format!("{from} -> {to}: 台账记录更新失败: {error}"))
+        }
+    }
+}
+
+fn apply_disk_and_observe(
+    state: &ApiState,
+    request: &store::library_write::FileRenameRequest,
+    now: i64,
+) -> Result<store::library_write::ObservedRenameCompletion, store::StoreError> {
+    // The intent is committed; every disk phase runs outside Store and publication.
+    let receipt = store::library_write::execute_rename_disk(request).inspect_err(|error| {
+        if let Err(record) =
+            state
+                .store
+                .lock()
+                .record_rename_refusal(&request.rename_id, now, error)
+        {
+            tracing::error!(%record, rename_id = %request.rename_id, "记录重命名拒绝失败");
+        }
+    })?;
+    crate::rename_work::record_disk(&state.store, &receipt, now)?;
+    let plan = state
+        .store
+        .lock()
+        .plan_file_rename_completion(&request.rename_id)?;
+    plan.observe()
 }
 
 fn write_missing_nfo(to: &FsPath, media: &domain::Media) {
@@ -185,12 +215,11 @@ fn write_missing_nfo(to: &FsPath, media: &domain::Media) {
     }
 }
 
-/// Ownership checks and durable intent; runs inside the source publication.
+/// Snapshot recorded ownership and file version; filesystem observation follows without a guard.
 fn prepare_rename(
     state: &ApiState,
     library: &store::Library,
     entry: &PreparedOrganizeEntry,
-    now_ms: i64,
 ) -> Prepared {
     let (from_path, to_path) = (entry.from.as_path(), entry.to.as_path());
     let (from, to) = (
@@ -235,27 +264,11 @@ fn prepare_rename(
         return Prepared::Failed(format!("{from}: 台账记录不属于当前媒体库"));
     }
     let (file_id, version) = (source.file.file_id, source.file.version.clone());
-    match store.begin_file_rename(file_id, &version, from_path, to_path, now_ms) {
-        Ok(request) => Prepared::Begun(request),
+    match store.plan_file_rename(file_id, &version, from_path, to_path) {
+        Ok(plan) => Prepared::Planned(plan),
         Err(error) => {
             tracing::warn!(from, to, %error, "整理目标未通过归属复核，拒绝改名");
             Prepared::Failed(format!("{from} -> {to}: {error}"))
         }
     }
-}
-
-/// Record a disk receipt taking the Store lock only for the short DB steps; sidecar
-/// observation and moves run with the lock released (A7).
-pub(crate) fn record_rename_disk_unlocked(
-    store: &parking_lot::Mutex<store::Store>,
-    receipt: &store::library_write::RenameDiskReceipt,
-    now_ms: i64,
-) -> Result<(), store::StoreError> {
-    let Some(plan) = store.lock().begin_rename_disk_record(receipt)? else {
-        return Ok(());
-    };
-    let observed = plan.observe();
-    let decided = store.lock().decide_rename_disk(observed)?;
-    let applied = decided.apply()?;
-    store.lock().finish_rename_disk(applied, now_ms)
 }

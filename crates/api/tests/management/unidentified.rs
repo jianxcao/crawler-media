@@ -198,7 +198,16 @@ async fn claim_writes_real_ids_and_downloads_poster() {
         ))
         .await
         .unwrap();
-    assert_eq!(claimed.status(), StatusCode::OK);
+    let status = claimed.status();
+    let response = axum::body::to_bytes(claimed.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&response)
+    );
     let ledger = app
         .oneshot(request(
             "GET",

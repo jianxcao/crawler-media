@@ -310,7 +310,7 @@ CREATE TABLE scan_operations (
  scope_kind TEXT NOT NULL DEFAULT 'full' CHECK(scope_kind IN ('full','targeted')),dirty_rev INTEGER NOT NULL DEFAULT 0,consumed_rev INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX scan_library_status ON scan_operations(library_id,status);
-CREATE TABLE scan_seen (operation_id TEXT NOT NULL,path TEXT NOT NULL,path_key TEXT NOT NULL,mtime_ms INTEGER NOT NULL DEFAULT 0,file_size INTEGER NOT NULL DEFAULT 0,content_digest TEXT,PRIMARY KEY(operation_id,path));
+CREATE TABLE scan_seen (operation_id TEXT NOT NULL,path TEXT NOT NULL,path_key TEXT NOT NULL,mtime_ms INTEGER NOT NULL DEFAULT 0,file_size INTEGER NOT NULL DEFAULT 0,content_digest TEXT,PRIMARY KEY(operation_id,path_key));
 CREATE TABLE probe_jobs (
  id TEXT PRIMARY KEY NOT NULL,kind TEXT NOT NULL,media_id TEXT NOT NULL,season INTEGER,scope_key TEXT NOT NULL,status TEXT NOT NULL,
  total INTEGER NOT NULL,completed INTEGER NOT NULL DEFAULT 0,succeeded INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,partial INTEGER NOT NULL DEFAULT 0,error TEXT,

@@ -450,3 +450,23 @@ fn seal_executable(path: &std::path::Path) {
     assert!(status.success(), "cp failed sealing {}", path.display());
     std::fs::rename(&sealed, path).expect("rename sealed test executable");
 }
+
+#[test]
+fn automatic_marker_and_chapters_rollback_as_one_publication() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (store, media_id, row, _) = tv_episode(&tmp);
+    let conn = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER reject_chapters BEFORE INSERT ON file_details
+        BEGIN SELECT RAISE(ABORT, 'chapter write rejected'); END",
+    )
+    .unwrap();
+    assert!(persist_marker(&store, &[row], fingerprint_marker(media_id), false).is_err());
+    assert!(
+        store
+            .get_media_marker(media_id, Some(1), Some(1))
+            .unwrap()
+            .is_none(),
+        "chapter failure must roll back the automatic marker too"
+    );
+}

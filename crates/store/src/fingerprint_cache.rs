@@ -2,6 +2,10 @@ use rusqlite::{OptionalExtension, params};
 
 use super::{Store, StoreError};
 
+#[cfg(test)]
+#[path = "fingerprint_cache_tests.rs"]
+mod tests;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FingerprintCacheEntry {
     pub cache_key: String,
@@ -83,9 +87,11 @@ impl Store {
         expected: Option<&domain::FileVersion>,
         cache: &FingerprintCacheEntry,
     ) -> Result<(), StoreError> {
+        // Reserve the writer before reading the expected version. A second Store
+        // can publish a new source while our API's in-process mutex is held.
+        let tx = crate::write_tx(&self.library)?;
         if let Some(expected) = expected {
-            let current: Option<(i64, String)> = self
-                .library
+            let current: Option<(i64, String)> = tx
                 .query_row(
                     "SELECT file_revision, source_version FROM library_files WHERE file_id = ?1",
                     [ledger_id],
@@ -101,7 +107,7 @@ impl Store {
                 )));
             }
         }
-        self.library.execute(
+        tx.execute(
             "INSERT INTO fingerprint_cache (
                  file_id, cache_key, algorithm_version, sample_duration_secs,
                  media_duration_ms, intro_json, outro_json, captured_at_ms
@@ -129,6 +135,7 @@ impl Store {
                 super::unix_now() * 1000,
             ],
         )?;
+        tx.commit()?;
         Ok(())
     }
 

@@ -43,6 +43,7 @@ pub(crate) fn scanned_row(
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        artwork: Default::default(),
         observations: Vec::new(),
     }
 }

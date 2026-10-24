@@ -106,7 +106,7 @@ fn scrape_dir(state: &ApiState, path: PathBuf, nfo: bool) -> Result<(), String> 
             "已记录目录中新增刮削的媒体路径"
         );
     }
-    let inserted = {
+    let plan = {
         let store = state.store.lock();
         if let Some(lease) = &lease {
             lease.control().check().map_err(|e| e.to_string())?;
@@ -128,14 +128,40 @@ fn scrape_dir(state: &ApiState, path: PathBuf, nfo: bool) -> Result<(), String> 
                 .transferred
                 .retain(|file| !store.path_in_removal_scope(&file.path).unwrap_or(true));
         }
-        crate::watch_ledger::record_paths(&store, outcome.transferred.clone())?
+        crate::watch_ledger::plan_paths(&store, outcome.transferred.clone())?
+    };
+    let observed = plan.observe()?;
+    let inserted = {
+        let store = state.store.lock();
+        if let Some(lease) = &lease {
+            lease.control().check().map_err(|e| e.to_string())?;
+            if !store
+                .library_accepts_work(lease.library_id())
+                .map_err(|e| e.to_string())?
+            {
+                return Ok(());
+            }
+        }
+        observed.record(&store)?
     };
 
+    resolve_scanned_files(state, &outcome.transferred, &inserted, nfo)?;
+    crate::http::library::enqueue_probes_for_paths(state, inserted);
+    attach_missing_posters(state, &job.path);
+    Ok(())
+}
+
+fn resolve_scanned_files(
+    state: &ApiState,
+    transferred: &[library::TransferredFile],
+    inserted: &[PathBuf],
+    nfo: bool,
+) -> Result<(), String> {
     // MovieClaw / MoviePilot 模式：扫描入库后，为没有 TMDB ID 的影视条目自动匹配 TMDB 元数据与海报
     let unresolved_media = {
         let store = state.store.lock();
         let mut map = std::collections::HashMap::new();
-        for dest in &outcome.transferred {
+        for dest in transferred {
             if let Ok(Some(row)) = store.file_coverage_by_path(&dest.path.display().to_string()) {
                 if let Ok(Some(m)) = store.get_media(row.file.media_id) {
                     if m.tmdb_id.is_none() && m.kind != domain::MediaKind::Video {
@@ -149,7 +175,7 @@ fn scrape_dir(state: &ApiState, path: PathBuf, nfo: bool) -> Result<(), String> 
     for (_, (media, dest)) in unresolved_media {
         let resolved = crate::auto_resolve::resolve_scanned_media(state, &media, &dest);
         let active_media = if let Some(canonical) = resolved {
-            crate::auto_resolve::rebind_scan_rows(state, media.id, canonical.id, &inserted)?;
+            crate::auto_resolve::rebind_scan_rows(state, media.id, canonical.id, inserted)?;
             canonical
         } else {
             media
@@ -160,8 +186,6 @@ fn scrape_dir(state: &ApiState, path: PathBuf, nfo: bool) -> Result<(), String> 
             crate::auto_resolve::write_resolved_nfo(state, &active_media, &dest);
         }
     }
-    crate::http::library::enqueue_probes_for_paths(state, inserted);
-    attach_missing_posters(state, &job.path);
     Ok(())
 }
 
@@ -173,16 +197,16 @@ fn attach_missing_posters(state: &ApiState, dir_to_scan: &std::path::Path) {
             .unwrap_or_default()
             .into_iter()
             .filter(|row| std::path::Path::new(&row.file.path).starts_with(dir_to_scan))
-            .filter(|row| {
-                std::path::Path::new(&row.file.path)
-                    .parent()
-                    .map(|dir| !dir.join("poster.jpg").is_file())
-                    .unwrap_or(false)
-            })
             .map(|row| (row.file.media_id, row.file.path.clone()))
             .collect()
     };
     for (media_id, row_path) in targets {
+        if row_path
+            .parent()
+            .is_none_or(|dir| dir.join("poster.jpg").is_file())
+        {
+            continue;
+        }
         let Some(real) = state.store.lock().get_media(media_id).ok().flatten() else {
             continue;
         };

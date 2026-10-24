@@ -4,7 +4,7 @@
 //! the download lifecycle with [`MockQbit::complete`] which writes real files
 //! under the mock save path so Transfer can import them.
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -29,6 +29,20 @@ pub struct Task {
 
 pub struct MockQbit {
     pub url: String,
+    state: Arc<MockQbitState>,
+    // The handler owns only state, so it can never drop and join its own server.
+    _server: crate::lifecycle::FakeServer,
+}
+
+impl std::ops::Deref for MockQbit {
+    type Target = MockQbitState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+pub struct MockQbitState {
     pub save_root: PathBuf,
     pub tasks: Mutex<Vec<Task>>,
     pub adds: Mutex<Vec<String>>,
@@ -52,46 +66,51 @@ pub struct MockQbit {
     /// (hash, file index) set to priority 0.
     pub skipped: Mutex<Vec<(String, usize)>>,
     next: AtomicU64,
-    /// Owned fake server: stops and joins when the mock is dropped.
-    server: Mutex<Option<crate::lifecycle::FakeServer>>,
 }
 
 impl MockQbit {
     pub fn start(save_root: &Path) -> Arc<Self> {
+        Self::start_with_handler_hook(save_root, || {})
+    }
+
+    pub fn start_with_handler_hook(
+        save_root: &Path,
+        before_request: impl Fn() + Send + Sync + 'static,
+    ) -> Arc<Self> {
         std::fs::create_dir_all(save_root).unwrap();
-        // The handler holds a Weak, so dropping the last test handle stops the server.
-        Arc::new_cyclic(|weak: &std::sync::Weak<Self>| {
-            let weak = weak.clone();
-            let server = crate::lifecycle::FakeServer::start(move |request, stream| {
-                let Some(mock) = weak.upgrade() else { return };
-                let (status, body, extra) = mock.route(&request.raw);
-                drop(mock);
-                let response = format!(
-                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n{extra}\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.write_all(response.as_bytes());
-            });
-            Self {
-                url: server.url(),
-                save_root: save_root.to_path_buf(),
-                tasks: Mutex::new(Vec::new()),
-                adds: Mutex::new(Vec::new()),
-                deletes: Mutex::new(Vec::new()),
-                logins: AtomicUsize::new(0),
-                info_calls: AtomicUsize::new(0),
-                unfiltered_info_calls: AtomicUsize::new(0),
-                forbid_next: AtomicUsize::new(0),
-                reject_login: std::sync::atomic::AtomicBool::new(false),
-                torrent_file: Mutex::new(None),
-                resumes: Mutex::new(Vec::new()),
-                add_tags: Mutex::new(Vec::new()),
-                next_files: Mutex::new(Vec::new()),
-                file_prios: Mutex::new(Vec::new()),
-                skipped: Mutex::new(Vec::new()),
-                next: AtomicU64::new(1),
-                server: Mutex::new(Some(server)),
-            }
+        let state = Arc::new(MockQbitState {
+            save_root: save_root.to_path_buf(),
+            tasks: Mutex::new(Vec::new()),
+            adds: Mutex::new(Vec::new()),
+            deletes: Mutex::new(Vec::new()),
+            logins: AtomicUsize::new(0),
+            info_calls: AtomicUsize::new(0),
+            unfiltered_info_calls: AtomicUsize::new(0),
+            forbid_next: AtomicUsize::new(0),
+            reject_login: std::sync::atomic::AtomicBool::new(false),
+            torrent_file: Mutex::new(None),
+            resumes: Mutex::new(Vec::new()),
+            add_tags: Mutex::new(Vec::new()),
+            next_files: Mutex::new(Vec::new()),
+            file_prios: Mutex::new(Vec::new()),
+            skipped: Mutex::new(Vec::new()),
+            next: AtomicU64::new(1),
+        });
+        let shared = state.clone();
+        let server = crate::lifecycle::FakeServer::start(move |request, stream| {
+            before_request();
+            let (status, body, extra) = shared.route(&request.raw);
+            crate::lifecycle::respond(
+                stream,
+                status,
+                &format!("Content-Type: text/plain\r\n{extra}"),
+                body.as_bytes(),
+            );
+        });
+        Arc::new(Self {
+            url: server.url(),
+            state,
+            _server: server,
         })
     }
 
@@ -170,7 +189,9 @@ impl MockQbit {
         task.size = size;
         written
     }
+}
 
+impl MockQbitState {
     fn route(&self, req: &str) -> (&'static str, String, &'static str) {
         if req.starts_with("POST /api/v2/auth/login") {
             self.logins.fetch_add(1, Ordering::SeqCst);
@@ -196,6 +217,19 @@ impl MockQbit {
         {
             return ("403 Forbidden", "Forbidden".into(), "");
         }
+        if let Some(response) = self
+            .create_torrent(req)
+            .or_else(|| self.read_torrents(req))
+            .or_else(|| self.control_torrent(req))
+        {
+            return response;
+        }
+        if req.contains("/api/v2/app/preferences") {
+            return ("200 OK", r#"{"dl_limit":0,"up_limit":0}"#.into(), "");
+        }
+        ("200 OK", "Ok.".into(), "")
+    }
+    fn create_torrent(&self, req: &str) -> Option<(&'static str, String, &'static str)> {
         if req.starts_with("POST /api/v2/torrents/add ")
             || req.starts_with("POST /api/v2/torrents/add?")
         {
@@ -225,7 +259,7 @@ impl MockQbit {
                 state: "downloading".into(),
                 source,
             });
-            return ("200 OK", "Ok.".into(), "");
+            return Some(("200 OK", "Ok.".into(), ""));
         }
         if req.contains("/api/v2/torrents/addTags") {
             self.add_tags.lock().push(req.to_string());
@@ -245,8 +279,12 @@ impl MockQbit {
                     }
                 }
             }
-            return ("200 OK", "Ok.".into(), "");
+            return Some(("200 OK", "Ok.".into(), ""));
         }
+        None
+    }
+
+    fn read_torrents(&self, req: &str) -> Option<(&'static str, String, &'static str)> {
         if req.contains("/api/v2/torrents/info") {
             self.info_calls.fetch_add(1, Ordering::SeqCst);
             let tag = query_param(req, "tag").map(|t| percent_decode(&t));
@@ -275,7 +313,7 @@ impl MockQbit {
                     })
                 })
                 .collect();
-            return ("200 OK", serde_json::to_string(&body).unwrap(), "");
+            return Some(("200 OK", serde_json::to_string(&body).unwrap(), ""));
         }
         if req.contains("/api/v2/torrents/files") {
             let hash = query_param(req, "hash").unwrap_or_default();
@@ -291,8 +329,12 @@ impl MockQbit {
                     })
                 })
                 .collect();
-            return ("200 OK", serde_json::to_string(&body).unwrap(), "");
+            return Some(("200 OK", serde_json::to_string(&body).unwrap(), ""));
         }
+        None
+    }
+
+    fn control_torrent(&self, req: &str) -> Option<(&'static str, String, &'static str)> {
         if req.contains("/api/v2/torrents/filePrio") {
             self.file_prios.lock().push(req.to_string());
             let hash = form_field(req, "hash").unwrap_or_default();
@@ -302,7 +344,7 @@ impl MockQbit {
             for id in ids.split('|').filter_map(|i| i.parse::<usize>().ok()) {
                 self.skipped.lock().push((hash.to_lowercase(), id));
             }
-            return ("200 OK", "".into(), "");
+            return Some(("200 OK", "".into(), ""));
         }
         if req.contains("/api/v2/torrents/resume") || req.contains("/api/v2/torrents/start") {
             self.resumes.lock().push(req.to_string());
@@ -316,7 +358,7 @@ impl MockQbit {
                     }
                 }
             }
-            return ("200 OK", "Ok.".into(), "");
+            return Some(("200 OK", "Ok.".into(), ""));
         }
         if req.contains("/api/v2/torrents/delete") {
             self.deletes.lock().push(req.to_string());
@@ -325,12 +367,9 @@ impl MockQbit {
                     .lock()
                     .retain(|t| !hashes.split('|').any(|h| h.eq_ignore_ascii_case(&t.hash)));
             }
-            return ("200 OK", "Ok.".into(), "");
+            return Some(("200 OK", "Ok.".into(), ""));
         }
-        if req.contains("/api/v2/app/preferences") {
-            return ("200 OK", r#"{"dl_limit":0,"up_limit":0}"#.into(), "");
-        }
-        ("200 OK", "Ok.".into(), "")
+        None
     }
 }
 

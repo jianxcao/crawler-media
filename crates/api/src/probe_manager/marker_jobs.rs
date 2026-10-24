@@ -60,15 +60,14 @@ pub(super) fn apply_marker_refresh(
             return;
         }
     };
-    let members = markers::source_observations(mgr, Some(&job.id), &replacements);
+    let rows = all_rows
+        .into_iter()
+        .filter(|row| row.file.media_id == media_id && seasons.contains(&projected_season(row)))
+        .collect::<Vec<_>>();
+    let members = markers::source_observations(&rows);
     let publication = members.and_then(|members| {
         let store = mgr.store.lock();
-        let rows = all_rows
-            .iter()
-            .filter(|row| row.file.media_id == media_id && seasons.contains(&projected_season(row)))
-            .cloned()
-            .collect::<Vec<_>>();
-        markers::validate_publication_rows(&store, &rows).and_then(|()| {
+        markers::validate_season_rows(&store, &rows).and_then(|()| {
             // Validate every original job member under this same lock, not just the
             // anchor or the expanded lease that ended during result preparation.
             validate_refresh_units(&store, &job.id)?;

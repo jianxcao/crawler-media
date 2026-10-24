@@ -1,6 +1,6 @@
 # 存储重构性能报告（feat/storage-redesign）
 
-本页性能数字为历史阶段测量，本轮未重跑。当前实现/正确性及门禁见[5bd696e修复复核](../audits/2026-10-24-storage-fix-review.md)。只收录日志与基准文档里的真实数字；未测项单独标出。在线页面：https://cursor.com/canvas/store-d2860fd7-7b74-430e-9855-1a3525523fbe/e3dea255-fc03-4210-9944-cbc78ac2e26b
+本页性能数字为历史阶段测量，本轮未重跑。当前实现/正确性及门禁见[再次复核](../audits/2026-10-24-storage-fix-followup.md)。只收录日志与基准文档里的真实数字；未测项单独标出。在线页面：https://cursor.com/canvas/store-d2860fd7-7b74-430e-9855-1a3525523fbe/e3dea255-fc03-4210-9944-cbc78ac2e26b
 
 ## 结论
 - Jellyfin 协议首页（50k 电影）从 >20 分钟未完成降到 148.8 ms；根因是选源子查询走错索引。
@@ -58,14 +58,13 @@
 - 无关库文件 1k → 1M，vm_steps 恒为 1963。
 - 100k 完整性检查 1000 批共 122 s，最慢一批 215 ms，不随进度退化。
 
-## 当前边界（2026-10-24，5bd696e修复复核）
+## 当前边界（2026-10-24补修）
 
-- 原NFO跨批丢失、冻结目标推进cursor、alias NFO首次采用及正常重开默认根的具体反例已修；根operation/旧scope屏障和Unidentified仍开，rename共享图片还有alias反例。
-- 启动root恢复已逐batch释放Store；完整rename/Probe/NFO出锁仍未完成，SQL路径normalizer还新增锁内realpath。没有本轮新生产锁环证据。
-- fixture新增写timeout和部分panic传播，但完成线程丢handle、最后owner join环和总退出deadline仍未闭环。
-- tracks已绑定queued version；实际Marker/capture生产链仍能将旧结果写入换源后的状态。具体复现与方案见[本轮复核](../audits/2026-10-24-storage-fix-review.md)。
-- A8竞争写者行为RED、A12 NFO export区分性失败RED仍缺；不能据此直接判当前行为坏。
-- genre仍线性；约70k超300ms是外推，非实测。cache NORMAL/mmap/cache_size/temp_store/WITHOUT ROWID未做A/B。
+- 归属/源版本、初始化原子性、Unidentified漏迁、alias共享图片和测试退出的具体反例已修；扫描断点以登记path_key为主键，只查询当前请求窗口，不反复读取整个operation历史。
+- Probe/Claim/scan NFO与artwork、rename主要磁盘阶段已出Store锁；rename恢复每100条用blocking worker调度。root外层同步drain、配置路径IO和部分Watch路径检查仍需优化。没有本轮新生产锁环证据。
+- Unidentified每事务移动≤100行；候选SQL仍可能重复扫描历史，没有VM steps严格有界的测量证明。
+- A8竞争写者行为RED、A12 NFO export区分性失败RED仍需单独补验收；不能据此直接判当前行为坏。
+- genre仍线性；约70k超300ms是历史外推，非实测。cache NORMAL/mmap/cache_size/temp_store/WITHOUT ROWID未做A/B。
 - NAS、Jellyfin真机、100k Media/1M文件整体规模均Not run，历史性能数字没有被本轮验证为当前性能。
 
-历史完整门禁（05a7363）：workspace 2652/0（12忽略）、Web842/0、tsc/fmt干净。**当前5bd696e**：workspace停于jellyfin_sql_page两个FK失败，Store停于shared artwork失败；Jobs55通过/1忽略、Web842通过和typecheck通过。详见本轮复核，不将历史绿测写成当前通过。
+历史门禁固定保留：05a7363 workspace2652/0（12忽略）、Web842/0；5bd696e workspace停于jellyfin_sql_page两个FK失败、Store停于shared artwork失败，Jobs55/0（1忽略）、Web842/0。本次最终门禁见[补修报告](../audits/2026-10-24-storage-fix-followup.md)，不以历史红绿代替当前结果。

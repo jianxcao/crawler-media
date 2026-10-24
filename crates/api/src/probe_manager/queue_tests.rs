@@ -647,22 +647,12 @@ fn forced_tv_voiceprint_ignores_library_fingerprint_toggle() {
     let manager = ProbeManager::new(store);
 
     assert_eq!(
-        fingerprint_duration(
-            &manager,
-            &PathBuf::from("/unconfigured-library/Show.S01E01.mkv"),
-            MediaKind::Tv,
-            true,
-        ),
+        fingerprint_duration(&manager, "unconfigured-library", MediaKind::Tv, true,),
         Some(180),
         "an explicit refresh must run voiceprint analysis even when the opt-in toggle is off"
     );
     assert_eq!(
-        fingerprint_duration(
-            &manager,
-            &PathBuf::from("/unconfigured-library/movie.mkv"),
-            MediaKind::Movie,
-            true,
-        ),
+        fingerprint_duration(&manager, "unconfigured-library", MediaKind::Movie, true,),
         None,
         "voiceprint extraction remains TV-only"
     );

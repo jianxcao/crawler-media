@@ -114,8 +114,8 @@ pub(crate) async fn marks(
 }
 
 /// A mark names one of three targets: the whole item, one season, or one episode.
-/// A missing coordinate is whole (`-1`); a present one must be a `u32`, including the
-/// legal TV special `0`. Strings, negatives, and values above `u32::MAX` are refused.
+/// A missing coordinate is whole (`-1`); a present one must fit a nonnegative i32,
+/// including the legal TV special `0`. Strings, negatives and overflow are refused.
 fn mark_target(
     season: Option<Result<u64, ()>>,
     episode: Option<Result<u64, ()>>,
@@ -138,20 +138,14 @@ fn query_coordinate(raw: &str) -> Result<u64, ()> {
 
 fn coordinate(name: &str, raw: Option<Result<u64, ()>>) -> Result<Option<i32>, Response> {
     let Some(raw) = raw else { return Ok(None) };
-    let Ok(value) = raw.and_then(|value| u32::try_from(value).map_err(|_| ())) else {
+    let Ok(value) = raw.and_then(|value| i32::try_from(value).map_err(|_| ())) else {
         return Err(err(
             StatusCode::BAD_REQUEST,
             "playback.invalid",
-            &format!("{name} 必须是 0 到 4294967295 的整数"),
+            &format!("{name} 必须是 0 到 2147483647 的整数"),
         ));
     };
-    i32::try_from(value).map(Some).map_err(|_| {
-        err(
-            StatusCode::BAD_REQUEST,
-            "playback.invalid",
-            &format!("{name} 超出可存储范围"),
-        )
-    })
+    Ok(Some(value))
 }
 
 fn json_coordinate(value: Option<&Value>) -> Option<Result<u64, ()>> {
@@ -257,12 +251,20 @@ pub(crate) async fn set_marks(
             .keys()
             .any(|key| matches!(key.as_str(), "season" | "episode"))
     }) {
-        return err(StatusCode::BAD_REQUEST, "playback.invalid", "marks 不接受旧坐标字段");
+        return err(
+            StatusCode::BAD_REQUEST,
+            "playback.invalid",
+            "marks 不接受旧坐标字段",
+        );
     }
     let body: MarkInput = match serde_json::from_value(body) {
         Ok(body) => body,
         Err(error) => {
-            return err(StatusCode::BAD_REQUEST, "playback.invalid", &error.to_string());
+            return err(
+                StatusCode::BAD_REQUEST,
+                "playback.invalid",
+                &error.to_string(),
+            );
         }
     };
     let Some(media_id) = body

@@ -390,6 +390,79 @@ fn job_scoped_publication_publishes_rows_the_job_covers() {
     );
 }
 
+#[test]
+fn partial_refresh_rejects_a_changed_comparison_source_outside_its_lease() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    let media_id = MediaId::new();
+    let first = row(&store, temp.path(), media_id);
+    let first_file = store::test_support::publish_fixture_file(&store, &first).unwrap();
+    let mut other = row(&store, &temp.path().join("other"), media_id);
+    other.episode = Some(2);
+    let other_file = store::test_support::publish_fixture_file(&store, &other).unwrap();
+    store.put_media_marker(&marker(&first, "old")).unwrap();
+    let id = first_file.file_id.to_string();
+    store
+        .create_probe_job(
+            "job",
+            "marker_refresh",
+            &media_id.to_string(),
+            Some(1),
+            "scope",
+            &[ProbeJobUnitSpec {
+                ledger_id: &id,
+                kind: "tv",
+                force_fingerprint: true,
+                reuse_fingerprint_cache: false,
+                overwrite_markers: true,
+                reuse_media_info_cache: true,
+            }],
+        )
+        .unwrap();
+    store.start_probe_unit("job", &id).unwrap();
+    store.finish_probe_unit("job", &id, true, None).unwrap();
+    let snapshots = store
+        .source_snapshots(&[first_file.file_id, other_file.file_id])
+        .unwrap();
+    let members = store::observe_sources(&snapshots);
+    let conn = rusqlite::Connection::open(
+        store
+            .db_paths()
+            .into_iter()
+            .find(|path| path.ends_with("library.db"))
+            .unwrap(),
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE library_files SET file_revision = file_revision + 1 WHERE file_id = ?1",
+        [other_file.file_id.to_string()],
+    )
+    .unwrap();
+    let result = store.complete_marker_refresh_checked(
+        "job",
+        &[MarkerResultReplacement {
+            media_id,
+            season: 1,
+            markers: vec![marker(&first, "new")],
+            chapter_updates: vec![(id, vec![])],
+        }],
+        &members,
+    );
+    assert!(
+        result.is_err(),
+        "every comparison dependency must keep its original version"
+    );
+    assert_eq!(
+        store
+            .get_media_marker(media_id, Some(1), Some(1))
+            .unwrap()
+            .unwrap()
+            .source,
+        "old"
+    );
+    assert!(store.get_probe_job("job").unwrap().unwrap().is_active());
+}
+
 fn capture_result(row: &FixtureFile) -> (StoredFingerprintAttempt, StoredFingerprintSample) {
     let mut attempt = StoredFingerprintAttempt {
         attempt_id: format!("capture-{}", row.file_id.expect("fixture file id")),
@@ -588,4 +661,92 @@ fn observed(
         .flat_map(|r| r.chapter_updates.iter().map(|(id, _)| id.parse().unwrap()))
         .collect();
     store::observe_sources(&store.source_snapshots(&ids).unwrap())
+}
+
+#[test]
+fn automatic_marker_merge_rejects_a_second_connections_new_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    let fixture = row(&store, temp.path(), MediaId::new());
+    let file = store::test_support::publish_fixture_file(&store, &fixture).unwrap();
+    let coverage = store.file_coverage_by_id(file.file_id).unwrap().unwrap();
+    let members = store::observe_sources(&store.source_snapshots(&[file.file_id]).unwrap());
+    let conn = rusqlite::Connection::open(temp.path().join("library.db")).unwrap();
+    conn.execute(
+        "UPDATE library_files SET file_revision=file_revision+1,source_version='replacement'
+        WHERE file_id=?1",
+        [file.file_id.to_string()],
+    )
+    .unwrap();
+    let result = store.merge_marker_results_checked(
+        &[coverage],
+        &members,
+        &[marker(&fixture, "stale")],
+        false,
+    );
+    assert!(result.is_err());
+    assert!(
+        store
+            .get_media_marker(file.media_id, Some(1), Some(1))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get_cached_chapters(&file.file_id.to_string())
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn automatic_marker_merge_keeps_the_comparisons_first_unit_coordinates() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(temp.path()).unwrap();
+    let fixture = row(&store, temp.path(), MediaId::new());
+    let file = store::test_support::publish_fixture_file(&store, &fixture).unwrap();
+    let scope = store::library_write::WriteScope {
+        library_id: file.library_id,
+        config_revision: store
+            .library_config_revision(&file.library_id.to_string())
+            .unwrap(),
+    };
+    store
+        .publish_files(
+            &scope,
+            &[store::library_write::FilePublication {
+                file: &file,
+                units: &[domain::UnitKey::WHOLE, domain::UnitKey::new(2, 3)],
+                expected_version: Some(&file.version),
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            0,
+        )
+        .unwrap();
+    let coverage = store.file_coverage_by_id(file.file_id).unwrap().unwrap();
+    assert_eq!(coverage.units.first(), Some(&domain::UnitKey::WHOLE));
+    let members = store::observe_sources(&store.source_snapshots(&[file.file_id]).unwrap());
+    let updates = store
+        .merge_marker_results_checked(&[coverage], &members, &[marker(&fixture, "fresh")], false)
+        .unwrap();
+    assert_eq!(
+        updates.len(),
+        1,
+        "publish the compared unit's chapter timeline"
+    );
+    assert!(
+        store
+            .get_cached_chapters(&file.file_id.to_string())
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        store
+            .get_media_marker(file.media_id, Some(1), Some(1))
+            .unwrap()
+            .unwrap()
+            .source,
+        "fresh"
+    );
 }

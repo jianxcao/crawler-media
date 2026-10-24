@@ -51,23 +51,11 @@ impl MetadataPriorityGate {
             units
                 .iter()
                 .map(|unit| {
-                    let current = store
-                        .file_coverage_by_id(unit.row.file.file_id)
-                        .map_err(|e| e.to_string())?
-                        .ok_or("file_deleted: probe ledger missing")?;
-                    if current.file.path != unit.row.file.path
-                        || current.file.media_id != unit.row.file.media_id
-                    {
-                        return Err("Library probe source identity changed".to_string());
-                    }
-                    let owner = store
-                        .library_for_path_strict(
-                            std::path::Path::new(&unit.row.file.path),
-                            unit.kind,
-                        )
-                        .map_err(|e| e.to_string())?
-                        .ok_or("Library no longer owns probe source")?;
-                    Ok((unit.row.file.file_id.to_string(), owner.id))
+                    crate::fingerprint_job::source::ensure_source_recorded(&store, &unit.row)?;
+                    Ok((
+                        unit.row.file.file_id.to_string(),
+                        unit.row.file.library_id.to_string(),
+                    ))
                 })
                 .collect::<Result<Vec<_>, String>>()?
         };
@@ -184,18 +172,9 @@ impl CaptureGate for MetadataPriorityGate {
     fn work_control(&self, row: &domain::FileCoverage) -> marker::WorkControl {
         let owner = {
             let store = self.store.lock();
-            let current = store.file_coverage_by_id(row.file.file_id).ok().flatten();
-            current
-                .filter(|current| {
-                    current.file.path == row.file.path && current.file.media_id == row.file.media_id
-                })
-                .and_then(|_| store.get_media(row.file.media_id).ok().flatten())
-                .and_then(|media| {
-                    store
-                        .library_for_path_strict(std::path::Path::new(&row.file.path), media.kind)
-                        .ok()
-                        .flatten()
-                })
+            crate::fingerprint_job::source::ensure_source_recorded(&store, row)
+                .ok()
+                .map(|()| row.file.library_id.to_string())
         };
         // A registry-backed capture without an active original lease fails closed.
         // Never switch an old pipeline to a new Library at the same path.
@@ -204,14 +183,14 @@ impl CaptureGate for MetadataPriorityGate {
         }
         if let Some(owners) = &self.owners {
             if let Some((original, control)) = owners.get(&row.file.file_id.to_string()) {
-                if owner.as_ref().is_some_and(|owner| &owner.id == original) {
+                if owner.as_ref().is_some_and(|owner| owner == original) {
                     return control.clone();
                 }
             }
         } else if let Some(control) = owner.and_then(|owner| {
             self.registry
                 .as_ref()
-                .and_then(|registry| registry.active_control(&owner.id))
+                .and_then(|registry| registry.active_control(&owner))
         }) {
             return control.signal().clone();
         }

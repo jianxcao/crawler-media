@@ -1,3 +1,4 @@
+mod merge;
 mod source_guard;
 
 pub use source_guard::{SourceObservation, SourceSnapshot, observe_sources, observe_sources_with};

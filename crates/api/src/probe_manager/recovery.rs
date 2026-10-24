@@ -329,14 +329,11 @@ impl ProbeManager {
             .filter(|unit| {
                 let row = super::ledger_id(&unit.ledger_id)
                     .and_then(|file_id| store.file_coverage_by_id(file_id).ok().flatten());
-                row.and_then(|row| {
-                    let media = store.get_media(row.file.media_id).ok().flatten()?;
-                    store
-                        .library_for_path_strict(std::path::Path::new(&row.file.path), media.kind)
-                        .ok()
-                        .flatten()
+                row.is_some_and(|row| {
+                    !store
+                        .library_accepts_work(&row.file.library_id.to_string())
+                        .unwrap_or(false)
                 })
-                .is_some_and(|owner| !store.library_accepts_work(&owner.id).unwrap_or(false))
             })
             .map(|unit| unit.ledger_id.clone())
             .collect()

@@ -27,6 +27,7 @@ fn scanned_row(media_id: MediaId, path: &str, season: u32, episode: u32) -> crat
         size_bytes: None,
         created_ns: None,
         modified_ns: None,
+        artwork: Default::default(),
         observations: Vec::new(),
     }
 }

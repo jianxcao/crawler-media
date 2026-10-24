@@ -285,7 +285,66 @@ fn frozen_destination_does_not_confirm_unmoved_files() {
     assert!(pending_root_reassignments(&store).is_empty());
 }
 
-fn publish_season(store: &Store, media_id: MediaId, dir: &std::path::Path, season: u32, count: u32) {
+#[test]
+fn frozen_source_keeps_its_files_until_its_operation_finishes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let parent = std::fs::canonicalize(tmp.path()).unwrap().join("parent");
+    let nested = parent.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let source = movie_library(&store, "Source", &parent);
+    let media_id = media(&store);
+    for index in 0..101 {
+        let path = nested.join(format!("m{index:03}.mkv"));
+        std::fs::write(&path, b"x").unwrap();
+        publish_fixture_file(
+            &store,
+            &FixtureFile {
+                media_id,
+                path: path.display().to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    set_root_reassign_batch_budget(Some(1));
+    let destination = movie_library(&store, "Destination", &nested);
+    set_root_reassign_batch_budget(None);
+    store
+        .begin_library_reconfiguration(
+            &store::LibraryReconfiguration {
+                operation_id: "source-locale".into(),
+                library_id: source.id.parse().unwrap(),
+                expected_revision: store.library_config_revision(&source.id).unwrap(),
+                root_paths: None,
+                display_locale: Some("en-US".into()),
+            },
+            1,
+        )
+        .unwrap();
+    store.drain_root_reassignments().unwrap();
+    assert_eq!(
+        owned_by(&store, &source.id),
+        1,
+        "the frozen source must not change"
+    );
+    assert_eq!(pending_root_reassignments(&store).len(), 1);
+    store
+        .advance_library_operation("source-locale", 2, 100)
+        .unwrap();
+    store.drain_root_reassignments().unwrap();
+    assert_eq!(owned_by(&store, &source.id), 0);
+    assert_eq!(owned_by(&store, &destination.id), 101);
+    assert!(pending_root_reassignments(&store).is_empty());
+}
+
+fn publish_season(
+    store: &Store,
+    media_id: MediaId,
+    dir: &std::path::Path,
+    season: u32,
+    count: u32,
+) {
     for i in 0..count {
         let path = dir.join(format!("Show.S{season:02}E{i:03}.mkv"));
         std::fs::write(&path, b"a").unwrap();
@@ -305,7 +364,14 @@ fn publish_season(store: &Store, media_id: MediaId, dir: &std::path::Path, seaso
 
 fn movie_library(store: &Store, name: &str, root: &std::path::Path) -> store::Library {
     store
-        .create_library(MediaKind::Movie, name, &[root.to_str().unwrap()], "everyone", true, &[])
+        .create_library(
+            MediaKind::Movie,
+            name,
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
         .unwrap()
 }
 

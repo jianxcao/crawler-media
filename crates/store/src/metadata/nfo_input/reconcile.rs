@@ -26,15 +26,6 @@ struct ExistingFile {
     units: Vec<UnitKey>,
 }
 
-fn file_key_exists(conn: &rusqlite::Connection, key: &str) -> Result<bool, StoreError> {
-    let exists: i64 = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM library_files WHERE path_key = norm_path_key(?1))",
-        params![key],
-        |row| row.get(0),
-    )?;
-    Ok(exists != 0)
-}
-
 impl Store {
     /// 重新观察 `path` 旁边的所有 NFO 候选，并把变化落到该文件所在的媒体卡上。
     ///
@@ -42,7 +33,10 @@ impl Store {
     /// 观察在写事务外完成，事务内用 `source_version` CAS 兜底：观察期间文件或 Library 配置变了
     /// 就整批放弃，绝不用过期观察覆盖新状态。
     pub fn reconcile_nfo_inputs(&self, path: &Path) -> Result<bool, StoreError> {
-        let Some(plan) = self.plan_nfo_input_reconcile(path)? else {
+        // Standalone convenience: resolve an existing caller spelling before the
+        // DB-only plan. Shared Store callers use prepare/observe/apply separately.
+        let key = crate::path_key::canonical_existing_key(&path.to_string_lossy());
+        let Some(plan) = self.plan_nfo_input_reconcile(Path::new(&key))? else {
             return Ok(false);
         };
         let observed = plan.observe();
@@ -84,12 +78,7 @@ impl Store {
             target,
             key_of: {
                 let aliases = crate::path_key::alias_snapshot(&self.library);
-                std::sync::Arc::new(move |raw: &str| {
-                    crate::path_key::canonical_key(
-                        &crate::path_key::canonical_existing_key(raw),
-                        &aliases,
-                    )
-                })
+                std::sync::Arc::new(move |raw: &str| crate::path_key::canonical_key(raw, &aliases))
             },
         }))
     }
@@ -129,14 +118,7 @@ impl Store {
     }
 
     fn existing_file_for_path(&self, path: &Path) -> Result<Option<ExistingFile>, StoreError> {
-        let recorded =
-            crate::path_key::canonical_recorded_key(&self.library, &path.to_string_lossy());
-        let existing = crate::path_key::canonical_existing_key(&path.to_string_lossy());
-        let key = if file_key_exists(&self.library, &recorded)? {
-            recorded
-        } else {
-            existing
-        };
+        let key = crate::path_key::canonical_recorded_key(&self.library, &path.to_string_lossy());
         let row = self
             .library
             .query_row(
@@ -233,5 +215,12 @@ impl NfoInputReconcilePlan {
             plan: self,
             observations,
         }
+    }
+}
+
+impl NfoInputReconcileObserved {
+    /// Consume the observations for a caller that commits them with file presence.
+    pub fn into_observations(self) -> Vec<super::NfoObservation> {
+        self.observations
     }
 }

@@ -114,7 +114,7 @@ impl Store {
 }
 
 /// Compare one published file against its out-of-lock observation.
-fn check_observed(
+pub(super) fn check_observed(
     tx: &Transaction<'_>,
     file_id: &str,
     members: &[SourceObservation],
@@ -196,6 +196,11 @@ pub(super) fn validate_job_members(
         .collect::<Result<_, _>>()?;
     for id in &leased {
         check_observed(tx, id, members)?;
+    }
+    // A partial refresh can use cached samples outside its write lease. They
+    // remain dependencies of the result and must be checked in this transaction.
+    for observation in members {
+        check_observed(tx, &observation.file_id.to_string(), members)?;
     }
     let published: BTreeSet<_> = replacements
         .iter()

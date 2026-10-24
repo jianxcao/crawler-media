@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use domain::{FileVersion, LedgerId, LibraryId, MediaId, MediaKind};
+use domain::{FileVersion, LedgerId, LibraryId, MediaId};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
@@ -18,11 +18,6 @@ use super::rename::{Owned, load_owned};
 pub use super::rename_disk::RenameSourceEvidence;
 use super::rename_record::{RawRename, config_revision, set_phase};
 pub use super::rename_sidecars::SidecarAction;
-use super::rename_sidecars::{
-    apply_sidecar, classify_shared_sidecars, decide_for_execution, observe_directory_artwork,
-    observe_targets,
-};
-use crate::library_paths::resolved_path;
 use crate::{Store, StoreError};
 
 /// One sidecar that must move with the video (NFO / scrape-registered path).
@@ -58,149 +53,6 @@ pub struct FileRenameRequest {
 }
 
 impl Store {
-    /// Observe sidecars beside `from` (lock-free) and persist a rename intent.
-    ///
-    /// Destination ownership is decided here: same root, same-Library other
-    /// root, or another Library. Nested child Libraries and symlink escapes are
-    /// rejected. Disk bytes are not touched.
-    pub fn begin_file_rename(
-        &self,
-        file_id: LedgerId,
-        expected: &FileVersion,
-        from: &Path,
-        to: &Path,
-        now: i64,
-    ) -> Result<FileRenameRequest, StoreError> {
-        self.begin_rename_observed_at(file_id, expected, from, to, None, now)
-    }
-
-    /// Ledger-only reconciliation: the bytes already sit at `to` and `from` is gone.
-    /// Evidence is observed at `to`, so the disk phase verifies the moved inode
-    /// instead of moving anything.
-    pub fn begin_file_reconciliation(
-        &self,
-        file_id: LedgerId,
-        expected: &FileVersion,
-        from: &Path,
-        to: &Path,
-        now: i64,
-    ) -> Result<FileRenameRequest, StoreError> {
-        if std::fs::symlink_metadata(from).is_ok() {
-            return Err(StoreError::Protected(format!(
-                "reconciliation source {} still exists",
-                from.display()
-            )));
-        }
-        self.begin_rename_observed_at(file_id, expected, from, to, Some(to), now)
-    }
-
-    fn begin_rename_observed_at(
-        &self,
-        file_id: LedgerId,
-        expected: &FileVersion,
-        from: &Path,
-        to: &Path,
-        moved_to: Option<&Path>,
-        now: i64,
-    ) -> Result<FileRenameRequest, StoreError> {
-        if !from.is_absolute() || !to.is_absolute() {
-            return Err(StoreError::Protected(
-                "rename paths must be absolute".into(),
-            ));
-        }
-        let mut sidecars = observe_sidecars(from, to);
-        observe_directory_artwork(from, to, &mut sidecars);
-        // Native identity of the planned source, observed before the transaction.
-        let at = moved_to.unwrap_or(from);
-        let evidence = RenameSourceEvidence::observe(at, expected.clone())?;
-        // A reconciled move changes ctime, so its recorded version cannot match at
-        // `to`; the moved inode at `to` is the evidence instead.
-        if moved_to.is_none()
-            && library::observe_source(from)
-                .map_err(|error| {
-                    StoreError::Protected(format!("rename source {}: {error}", from.display()))
-                })?
-                .source_version
-                != expected.source_version
-        {
-            return Err(StoreError::Protected(format!(
-                "file {file_id} on disk no longer matches its recorded version"
-            )));
-        }
-        let tx = crate::write_tx(&self.library)?;
-        let id = file_id.to_string();
-        let from_str = from.to_string_lossy().into_owned();
-        let owned = load_owned(&tx, &id, &from_str)?;
-        merge_registered_sidecars(&tx, &id, from, to, &mut sidecars)?;
-        classify_shared_sidecars(&tx, &id, from, &mut sidecars)?;
-        if owned.revision != expected.revision || owned.source_version != expected.source_version {
-            return Err(StoreError::Protected(format!("file {id} version changed")));
-        }
-        ensure_library_writable(&tx, &owned.library_id)?;
-        let media_id: MediaId = owned.media_id.parse()?;
-        ensure_media_writable(&tx, media_id)?;
-        let dest = resolve_destination_owner(self, &tx, &owned, to)?;
-        ensure_library_writable(&tx, &dest.library_id)?;
-        let to_str = to.to_string_lossy().into_owned();
-        refuse_occupied(&tx, &to_str, &id)?;
-        let from_config_revision = config_revision(&tx, &owned.library_id)?;
-        let to_config_revision = config_revision(&tx, &dest.library_id)?;
-        // Destination sidecar targets must also be free of recorded files.
-        for side in &sidecars {
-            let side_to = side.to.to_string_lossy().into_owned();
-            refuse_occupied(&tx, &side_to, &id)?;
-        }
-        let rename_id = uuid::Uuid::new_v4().to_string();
-        let sidecars_json = sidecars_json(&sidecars)?;
-        tx.execute(
-            "INSERT INTO pending_file_renames
-                (rename_id, file_id, from_path, to_path, expected_revision, expected_source_version,
-                 from_library_id, from_root_id, to_library_id, to_root_id, sidecars_json, phase,
-                 source_size, source_device, source_inode, source_mtime_ns,
-                 from_config_revision, to_config_revision, created_at_ms, updated_at_ms)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'planned',?12,?13,?14,?15,?16,?17,?18*1000,?18*1000)",
-            params![
-                rename_id,
-                id,
-                from_str,
-                to_str,
-                owned.revision,
-                owned.source_version,
-                owned.library_id,
-                owned.root_id,
-                dest.library_id,
-                dest.root_id,
-                sidecars_json,
-                evidence.size_bytes as i64,
-                evidence.device as i64,
-                evidence.inode as i64,
-                evidence.mtime_ns,
-                from_config_revision,
-                to_config_revision,
-                now,
-            ],
-        )?;
-        tx.commit()?;
-        Ok(FileRenameRequest {
-            rename_id,
-            file_id,
-            expected: expected.clone(),
-            from_path: from.to_path_buf(),
-            to_path: to.to_path_buf(),
-            from_library_id: owned.library_id.parse()?,
-            from_root_id: owned.root_id,
-            to_library_id: dest.library_id.parse()?,
-            to_root_id: dest.root_id,
-            sidecars,
-            phase: "planned".into(),
-            media_id,
-            source_evidence: evidence,
-            disk_receipt: None,
-            from_config_revision,
-            to_config_revision,
-        })
-    }
-
     /// Record a disk receipt from [`super::execute_rename_disk`] (run without the
     /// Store): persist the destination identity and the re-checked sidecar
     /// decisions in one short transaction, then mark `disk_applied` and drop the
@@ -252,37 +104,45 @@ impl Store {
     /// the intent acknowledged (deleted). A reference failure is recorded and
     /// returned, and the intent remains resumable from `library_published`.
     pub fn complete_file_rename(&self, rename_id: &str, now: i64) -> Result<(), StoreError> {
-        let request = self.load_file_rename(rename_id)?;
-        match request.phase.as_str() {
-            "disk_applied" => self.publish_rename_library(&request, now)?,
-            "library_published" | "references_applied" => {}
-            phase => {
-                return Err(StoreError::Protected(format!(
-                    "rename {rename_id} phase {phase} cannot complete; apply disk first"
-                )));
-            }
+        self.complete_observed_file_rename(
+            self.plan_file_rename_completion(rename_id)?.observe()?,
+            now,
+        )
+    }
+
+    /// Publish already-observed bytes with fresh durable phase and version checks.
+    pub fn complete_observed_file_rename(
+        &self,
+        observed: super::rename_completion::ObservedRenameCompletion,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        let super::rename_completion::ObservedRenameCompletion {
+            request,
+            source,
+            leftovers,
+        } = observed;
+        if self.load_file_rename(&request.rename_id)? != request {
+            return Err(StoreError::Conflict(format!(
+                "rename {} changed during completion observation",
+                request.rename_id
+            )));
         }
-        self.apply_rename_references(&request, now)
+        if request.phase == "disk_applied" {
+            let source = source.ok_or_else(|| {
+                StoreError::Protected("missing rename destination observation".into())
+            })?;
+            self.publish_rename_library(&request, &source, now)?;
+        }
+        self.apply_rename_references(&request, &leftovers, now)
     }
 
     fn publish_rename_library(
         &self,
         request: &FileRenameRequest,
+        observed: &library::SourceObservation,
         now: i64,
     ) -> Result<(), StoreError> {
         let rename_id = request.rename_id.as_str();
-        if !request.to_path.is_file() {
-            return Err(StoreError::Protected(format!(
-                "rename {rename_id}: destination {} missing",
-                request.to_path.display()
-            )));
-        }
-        // Content-token verification: one stat (one read for .strm) before the
-        // transaction. A rename keeps the token; a copy (cross-filesystem move)
-        // or changed bytes yield a new one and must advance the FileVersion.
-        let observed = library::observe_source(&request.to_path).map_err(|error| {
-            StoreError::Protected(format!("rename {rename_id}: observe destination: {error}"))
-        })?;
         let tx = crate::write_tx(&self.library)?;
         let id = request.file_id.to_string();
         let from_str = request.from_path.to_string_lossy().into_owned();
@@ -331,7 +191,7 @@ impl Store {
                 &tx,
                 request.file_id,
                 owned.revision + 1,
-                &observed,
+                observed,
                 now,
             )?;
         }
@@ -371,6 +231,7 @@ impl Store {
     fn apply_rename_references(
         &self,
         request: &FileRenameRequest,
+        leftovers: &[PathBuf],
         now: i64,
     ) -> Result<(), StoreError> {
         let rename_id = request.rename_id.as_str();
@@ -391,14 +252,11 @@ impl Store {
         set_phase(&self.library, rename_id, "references_applied", now)?;
         // Queue left-over sole-owned source bytes (cross-device copy, identical
         // destination). Shared and retained sources are never queued.
-        for side in &request.sidecars {
-            if side.action.deletes_source() && side.from.is_file() && side.from != side.to {
-                if let Err(error) = self.enqueue_file_deletion(
-                    &side.from.to_string_lossy(),
-                    "rename-left-behind-sidecar",
-                ) {
-                    tracing::warn!(rename_id, path = %side.from.display(), %error, "enqueue left-behind sidecar failed");
-                }
+        for path in leftovers {
+            if let Err(error) =
+                self.enqueue_file_deletion(&path.to_string_lossy(), "rename-left-behind-sidecar")
+            {
+                tracing::warn!(rename_id, path = %path.display(), %error, "enqueue left-behind sidecar failed");
             }
         }
         self.library.execute(
@@ -443,13 +301,23 @@ impl Store {
 
     /// Unfinished intents whose retry time (unix seconds) has come.
     pub fn list_due_file_rename_ids(&self, now: i64) -> Result<Vec<String>, StoreError> {
+        self.list_due_file_rename_ids_limited(now, usize::MAX)
+    }
+
+    /// A bounded recovery window; release the Store between windows and disk work.
+    pub fn list_due_file_rename_ids_limited(
+        &self,
+        now: i64,
+        limit: usize,
+    ) -> Result<Vec<String>, StoreError> {
         let mut stmt = self.library.prepare(
             "SELECT rename_id FROM pending_file_renames
              WHERE phase IN ('planned','disk_applied','library_published','references_applied')
                AND next_retry_at <= ?1
-             ORDER BY next_retry_at, created_at_ms, rename_id",
+             ORDER BY next_retry_at, created_at_ms, rename_id LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![now], |r| r.get(0))?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = stmt.query_map(params![now, limit], |r| r.get(0))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -518,7 +386,7 @@ impl Store {
         Ok(())
     }
 
-    fn record_file_rename_failure(
+    pub fn record_file_rename_failure(
         &self,
         rename_id: &str,
         now: i64,
@@ -542,7 +410,11 @@ pub(crate) struct DestOwner {
     pub root_id: String,
 }
 
-fn refuse_occupied(tx: &Connection, path: &str, file_id: &str) -> Result<(), StoreError> {
+pub(super) fn refuse_occupied(
+    tx: &Connection,
+    path: &str,
+    file_id: &str,
+) -> Result<(), StoreError> {
     let occupied: i64 = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM library_files
                        WHERE path_key = norm_path_key(?1) AND file_id <> ?2)",
@@ -555,7 +427,7 @@ fn refuse_occupied(tx: &Connection, path: &str, file_id: &str) -> Result<(), Sto
     Ok(())
 }
 
-fn observe_sidecars(from: &Path, to: &Path) -> Vec<RenameSidecar> {
+pub(super) fn observe_sidecars(from: &Path, to: &Path) -> Vec<RenameSidecar> {
     let mut out = Vec::new();
     let Some(from_stem) = from.file_stem().and_then(|s| s.to_str()) else {
         return out;
@@ -637,24 +509,17 @@ fn migrate_metadata_inputs(
     Ok(())
 }
 
-fn merge_registered_sidecars(
-    tx: &Connection,
-    file_id: &str,
+pub(super) fn merge_registered_sidecars(
+    rows: &[(String, String)],
     from_video: &Path,
     to_video: &Path,
     sidecars: &mut Vec<RenameSidecar>,
-) -> Result<(), StoreError> {
-    let mut stmt = tx.prepare("SELECT kind, path FROM scrape_sidecars WHERE file_id = ?1")?;
-    let rows = stmt
-        .query_map(params![file_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+) {
     let Some(from_parent) = from_video.parent() else {
-        return Ok(());
+        return;
     };
     let Some(to_parent) = to_video.parent() else {
-        return Ok(());
+        return;
     };
     let from_stem = from_video
         .file_stem()
@@ -662,7 +527,7 @@ fn merge_registered_sidecars(
         .unwrap_or("");
     let to_stem = to_video.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     for (kind, path) in rows {
-        let from = PathBuf::from(&path);
+        let from = PathBuf::from(path);
         if sidecars.iter().any(|s| s.from == from) {
             continue;
         }
@@ -691,13 +556,12 @@ fn merge_registered_sidecars(
             to_parent.join(name)
         };
         sidecars.push(RenameSidecar {
-            kind,
+            kind: kind.clone(),
             from,
             to,
             action: SidecarAction::Move,
         });
     }
-    Ok(())
 }
 
 fn migrate_scrape_sidecars(
@@ -739,52 +603,38 @@ fn rewrite_artwork_paths(
 /// Resolve which Library/root owns `to`. Allows same-Library cross-root and
 /// cross-Library destinations; rejects nested child ownership and symlink escape
 /// outside the destination root.
-pub(crate) fn resolve_destination_owner(
-    store: &Store,
+pub(super) fn resolve_destination_owner(
     tx: &Connection,
     owned: &Owned,
     to: &Path,
 ) -> Result<DestOwner, StoreError> {
-    let outside = || {
+    let key = crate::path_key::normalize_path_key(&to.to_string_lossy());
+    let mut statement = tx.prepare("SELECT r.root_id,r.library_id,r.path_key FROM library_roots r JOIN libraries l ON l.library_id=r.library_id WHERE r.enabled=1 AND l.kind=?1")?;
+    let roots: Vec<(String, String, String)> = statement
+        .query_map([&owned.kind], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    let mut best: Option<(DestOwner, usize)> = None;
+    for (root_id, library_id, root) in roots {
+        if !Path::new(&key).starts_with(Path::new(&root)) {
+            continue;
+        }
+        let depth = Path::new(&root).components().count();
+        if best.as_ref().is_none_or(|(_, previous)| depth > *previous) {
+            best = Some((
+                DestOwner {
+                    library_id,
+                    root_id,
+                },
+                depth,
+            ));
+        }
+    }
+    best.map(|(owner, _)| owner).ok_or_else(|| {
         StoreError::Protected(format!(
             "{} is outside any writable Library root (nested/symlink rejected)",
             to.display()
         ))
-    };
-    if !to.is_absolute() {
-        return Err(outside());
-    }
-    let kind: MediaKind = owned
-        .kind
-        .parse()
-        .map_err(|_| StoreError::Invalid(format!("kind {}", owned.kind)))?;
-    let Some(library) = store.library_for_path_strict(to, kind)? else {
-        return Err(outside());
-    };
-    let resolved_to = resolved_path(to)?;
-    // Pick the longest matching root of that Library.
-    let roots: Vec<(String, String)> = {
-        let mut stmt = tx.prepare(
-            "SELECT root_id, display_path FROM library_roots WHERE library_id = ?1 AND enabled = 1",
-        )?;
-        stmt.query_map(params![library.id], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    let mut best: Option<(String, usize)> = None;
-    for (root_id, display) in &roots {
-        let root_resolved = resolved_path(Path::new(display))?;
-        if resolved_to.starts_with(&root_resolved) {
-            let depth = root_resolved.components().count();
-            if best.as_ref().is_none_or(|(_, d)| depth > *d) {
-                best = Some((root_id.clone(), depth));
-            }
-        }
-    }
-    let Some((root_id, _)) = best else {
-        return Err(outside());
-    };
-    Ok(DestOwner {
-        library_id: library.id,
-        root_id,
     })
 }

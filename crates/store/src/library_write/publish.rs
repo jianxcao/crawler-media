@@ -61,6 +61,16 @@ impl Store {
         files: &[FilePublication<'_>],
         now_ms: i64,
     ) -> Result<PublishReport, StoreError> {
+        self.publish_files_with_validation(scope, files, now_ms, |_| Ok(()))
+    }
+
+    pub(super) fn publish_files_with_validation(
+        &self,
+        scope: &WriteScope,
+        files: &[FilePublication<'_>],
+        now_ms: i64,
+        validate: impl FnOnce(&Connection) -> Result<(), StoreError>,
+    ) -> Result<PublishReport, StoreError> {
         if files.is_empty() {
             return Ok(PublishReport::default());
         }
@@ -72,6 +82,7 @@ impl Store {
         let tx = crate::write_tx(&self.library)?;
         ensure_library_writable(&tx, &scope.library_id.to_string())?;
         ensure_config_revision(&tx, scope)?;
+        validate(&tx)?;
         let mut report = PublishReport::default();
         let mut affected: HashMap<MediaId, Vec<PendingChange>> = HashMap::new();
         for pub_item in files {

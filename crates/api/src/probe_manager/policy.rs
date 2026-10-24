@@ -180,16 +180,6 @@ fn retry_gate(
 }
 
 fn matching_library(store: &Store, path: &Path, kind: MediaKind) -> Option<store::Library> {
-    store
-        .library_for_path(path, kind)
-        .ok()
-        .flatten()
-        .or_else(|| {
-            store.list_libraries().ok().and_then(|libraries| {
-                libraries.into_iter().find(|library| {
-                    library.kind == kind
-                        && library.root_paths.iter().any(|root| path.starts_with(root))
-                })
-            })
-        })
+    let owner = store.library_owning_key(path, kind).ok().flatten()?;
+    store.get_library(&owner).ok().flatten()
 }

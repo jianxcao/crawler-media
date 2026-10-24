@@ -147,12 +147,18 @@ pub(crate) fn scan_library_subdir(
         .filter_transferred(outcome.transferred)
         .map_err(|e| format!("{:?}", e))?;
 
-    let inserted = lease.publish(|| {
+    let plan = lease.publish(|| {
         let store = state.store.lock();
         scan_scope
             .validate(&store)
             .map_err(|e| format!("{:?}", e))?;
-        crate::watch_ledger::record_paths(&store, filtered_transferred.clone())
+        crate::watch_ledger::plan_paths(&store, filtered_transferred.clone())
+    })?;
+    let observed = plan.observe()?;
+    let inserted = lease.publish(|| {
+        let store = state.store.lock();
+        scan_scope.validate(&store).map_err(|e| format!("{e:?}"))?;
+        observed.record(&store)
     })?;
 
     let scan_media = {
@@ -204,12 +210,18 @@ fn scan_video_subdir(
     let filtered_files = scan_scope
         .filter_paths(files)
         .map_err(|e| format!("{:?}", e))?;
-    let inserted = lease.publish(|| {
+    let plan = lease.publish(|| {
         let store = state.store.lock();
         scan_scope
             .validate(&store)
             .map_err(|e| format!("{:?}", e))?;
-        crate::watch_ledger::record_video_paths(&store, filtered_files)
+        crate::watch_ledger::plan_video_paths(&store, filtered_files)
+    })?;
+    let observed = plan.observe()?;
+    let inserted = lease.publish(|| {
+        let store = state.store.lock();
+        scan_scope.validate(&store).map_err(|e| format!("{e:?}"))?;
+        observed.record(&store)
     })?;
     tracing::info!(root = %root.display(), target_dir = %target_dir.display(),
         inserted = inserted.len(), "实时 Video Library 扫描完成，不进行 Movie/TV 识别");

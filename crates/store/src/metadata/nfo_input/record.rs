@@ -130,14 +130,33 @@ fn observation_is_current(
     if config_revision != Some(observation.expected_config_revision) {
         return Ok(false);
     }
-    let current_source: Option<String> = tx
+    let current_kind: Option<String> = tx
         .query_row(
-            "SELECT source_version FROM library_files WHERE file_id = ?1 AND library_id = ?2",
-            params![target.file_id.to_string(), target.library_id.to_string()],
+            "SELECT kind FROM library_files WHERE file_id=?1 AND library_id=?2
+             AND root_id=?3 AND media_id=?4 AND path_key=?5 AND file_revision=?6
+             AND source_version=?7",
+            params![
+                target.file_id.to_string(),
+                target.library_id.to_string(),
+                target.root_id,
+                target.media_id.to_string(),
+                target.path_key,
+                target.version.revision,
+                observation.expected_source_version
+            ],
             |row| row.get(0),
         )
         .optional()?;
-    Ok(current_source.as_deref() == Some(observation.expected_source_version.as_str()))
+    let Some(kind) = current_kind else {
+        return Ok(false);
+    };
+    let kind = kind.parse().map_err(StoreError::MediaKind)?;
+    let owner = crate::library_key_owner::owning_root_key(
+        tx,
+        std::path::Path::new(&target.path_key),
+        kind,
+    )?;
+    Ok(owner == Some((target.library_id.to_string(), target.root_id.clone())))
 }
 
 /// Upsert one sidecar's valid fields under its exact entity + locale + input_key.

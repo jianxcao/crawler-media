@@ -4,18 +4,16 @@ use std::str::FromStr;
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use domain::{
-    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, LibraryId,
-    Media, MediaId, MediaKind, QualitySource, Release, UnitKey,
-};
+use domain::{Confidence, LibraryFile, Media, MediaId, MediaKind, QualitySource, Release, UnitKey};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use store::StoreError;
-use store::library_write::{FilePublication as PublicationRequest, WriteScope};
 
 use crate::directory::transfer_plan;
 use crate::management::{ApiError, ApiState};
 use crate::scrape_store::ScrapeStoreExt;
+
+mod publication;
+pub(crate) use publication::publish_claimed_file;
 
 /// The only claim body: the unidentified path plus one explicit action.
 #[derive(Deserialize)]
@@ -105,142 +103,6 @@ impl ClaimedFacts {
     pub(crate) fn units(&self) -> &[UnitKey] {
         &self.units
     }
-}
-
-/// Resolve the owning Library, the existing identity at the destination and the
-/// NFO context observed before publication, then commit one published file.
-///
-/// Mirrors the canonical publication path: the root comes from the destination
-/// path, an existing row at that path keeps its file identity, and the NFO
-/// sidecars observed here are recorded with the same transaction as the row.
-pub(crate) fn publish_claimed_file(
-    store: &store::Store,
-    media: &Media,
-    dest: &Path,
-    facts: &ClaimedFacts,
-) -> Result<LibraryFile, StoreError> {
-    let owner = store
-        .library_for_path_strict(dest, media.kind)?
-        .ok_or_else(|| {
-            StoreError::Invalid(format!(
-                "path is outside every Library root: {}",
-                dest.display()
-            ))
-        })?;
-    let library_id = owner.id.parse::<LibraryId>()?;
-    let root_id = owning_root_id(store, &owner.id, dest)?;
-    let path = dest.display().to_string();
-    let (file_id, version) = match store.file_coverage_by_path(&path)? {
-        Some(row) => {
-            let file_id = row.file.file_id;
-            let version = store
-                .get_file_version(file_id)?
-                .ok_or_else(|| StoreError::Missing(format!("file {}", file_id)))?;
-            (file_id, version)
-        }
-        None => {
-            let file_id = LedgerId::new();
-            let version = FileVersion {
-                revision: 1,
-                source_version: crate::fingerprint_job::current_source_version(dest),
-            };
-            (file_id, version)
-        }
-    };
-    let config_revision = store.library_config_revision(&owner.id)?;
-    let locale = store::library_query::library_display_locale(store, library_id)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    let observations = store.observe_nfo_inputs(
-        dest,
-        media.kind,
-        &facts.units,
-        &locale,
-        &version,
-        config_revision,
-    );
-    let artwork = store::files::DiscoveredArtwork::discover(dest);
-    let file = LibraryFile {
-        file_id,
-        library_id,
-        root_id,
-        media_id: media.id,
-        kind: media.kind,
-        path: dest.to_path_buf(),
-        version: version.clone(),
-        presence: FilePresence::Present,
-        publication: FilePublication::Published,
-        size_bytes: None,
-        stat_known: false,
-        created_ns: None,
-        modified_ns: None,
-        source_digest: None,
-        source_path: None,
-        transfer_mode: None,
-        resolution: facts.resolution.clone(),
-        codec: facts.codec.clone(),
-        hdr: facts.hdr.clone(),
-        quality_source: facts.quality_source,
-        confidence: facts.confidence,
-        filter_score: facts.filter_score,
-        release_quality: None,
-        duration_ms: None,
-        tracks_version: 0,
-        poster_path: artwork.poster,
-        backdrop_path: artwork.backdrop,
-        still_path: artwork.still,
-    };
-    store.publish_files(
-        &WriteScope {
-            library_id,
-            config_revision,
-        },
-        &[PublicationRequest {
-            file: &file,
-            units: &facts.units,
-            expected_version: Some(&version),
-            nfo_observation: Some(&observations),
-            probe_required: false,
-        }],
-        store::unix_now() * 1000,
-    )?;
-    tracing::info!(file_id = %file_id, path = %path, "Published claimed file");
-    Ok(file)
-}
-
-/// The deepest root of `library_id` whose path contains `dest`.
-///
-/// Lexical containment: `store::library_paths::resolved_path` is crate-private, so
-/// the API cannot normalize symlinks the way the legacy writer did. The two agree
-/// whenever the roots and the destination are already in the same normalized form.
-fn owning_root_id(
-    store: &store::Store,
-    library_id: &str,
-    dest: &Path,
-) -> Result<String, StoreError> {
-    let mut best: Option<(usize, String)> = None;
-    for root in store.list_library_roots()? {
-        if root.library_id.as_deref() != Some(library_id) {
-            continue;
-        }
-        if !dest.starts_with(&root.path) {
-            continue;
-        }
-        let depth = root.path.components().count();
-        if best
-            .as_ref()
-            .is_none_or(|(best_depth, _)| *best_depth < depth)
-        {
-            best = Some((depth, root.id.clone()));
-        }
-    }
-    best.map(|(_, id)| id).ok_or_else(|| {
-        StoreError::Invalid(format!(
-            "no root of library {library_id} contains {}",
-            dest.display()
-        ))
-    })
 }
 
 struct ClaimPlan {
@@ -362,8 +224,8 @@ fn commit_claim(
     plan: &ClaimPlan,
 ) -> Result<LibraryFile, ApiError> {
     let facts = ClaimedFacts::from_release(plan.media.kind, &plan.release);
+    let file = publish_claimed_file(&state.store, media, &plan.dest, &facts)?;
     let store = state.store.lock();
-    let file = publish_claimed_file(&store, media, &plan.dest, &facts)?;
     if let Err(error) = store.delete_unidentified(unidentified) {
         tracing::warn!(path = %unidentified, %error, "认领已入账，但未识别记录清理失败");
     }
@@ -467,6 +329,8 @@ pub async fn claim_unidentified_v1(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use domain::{FilePresence, FilePublication, LibraryId};
+    use parking_lot::Mutex;
 
     fn media() -> Media {
         Media {
@@ -485,7 +349,7 @@ mod tests {
     }
 
     /// A store with one claimed media and a Library registered over `roots`.
-    fn fixture(tmp: &Path, roots: &[&Path]) -> (store::Store, Media, store::Library) {
+    fn fixture(tmp: &Path, roots: &[&Path]) -> (Mutex<store::Store>, Media, store::Library) {
         let store = store::Store::open(tmp).unwrap();
         let media = media();
         store.insert_media(&media).unwrap();
@@ -496,7 +360,7 @@ mod tests {
         let library = store
             .create_library(MediaKind::Movie, "Movies", &paths, "everyone", true, &[])
             .unwrap();
-        (store, media, library)
+        (Mutex::new(store), media, library)
     }
 
     /// Roots nest: the deepest root of the owning Library owns the claimed path.
@@ -507,6 +371,7 @@ mod tests {
         let inner = outer.join("Anime");
         let (store, media, library) = fixture(tmp.path(), &[&outer, &inner]);
         let inner_root = store
+            .lock()
             .list_library_roots()
             .unwrap()
             .into_iter()
@@ -553,6 +418,7 @@ mod tests {
         let file = publish_claimed_file(&store, &media, &dest, &facts).unwrap();
         let library_id: LibraryId = library.id.parse().unwrap();
         let files = store
+            .lock()
             .library_file_page(library_id, media.id, None, 100)
             .unwrap()
             .files;
@@ -569,13 +435,14 @@ mod tests {
         assert_eq!(published.presence, FilePresence::Present);
         assert_eq!(published.publication, FilePublication::Published);
         assert_eq!(
-            store.get_file_units(file.file_id).unwrap(),
+            store.lock().get_file_units(file.file_id).unwrap(),
             vec![UnitKey::new(1, 2)]
         );
-        let locale = store::library_query::library_display_locale(&store, library_id)
+        let locale = store::library_query::library_display_locale(&store.lock(), library_id)
             .unwrap()
             .unwrap_or_default();
         let detail = store
+            .lock()
             .library_item_detail(library_id, media.id, &locale)
             .unwrap()
             .unwrap();
@@ -585,41 +452,92 @@ mod tests {
         );
     }
 
-    /// Known deviation: the strict Library lookup resolves `dest`, the root
-    /// selection here stays lexical, so a destination reached through a symlink
-    /// is refused where the legacy writer (`Store::root_for_path`, which
-    /// resolved both sides) accepted it. Observation: this call never invokes
-    /// `resolved_path`, so the two agree only while `dest` and the roots are
-    /// already in the same normalized form.
+    /// Ownership and publication use the canonical locator of a symlinked path.
     #[cfg(unix)]
     #[test]
-    fn claim_refuses_a_symlinked_destination_the_legacy_writer_accepted() {
+    fn claim_accepts_a_symlinked_destination_inside_the_owning_root() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("media");
-        let (store, media, _library) = fixture(tmp.path(), &[&root]);
+        let (store, media, library) = fixture(tmp.path(), &[&root]);
         let link = tmp.path().join("link");
         std::os::unix::fs::symlink(&root, &link).unwrap();
         let dest = link.join("The Matrix.1999.mkv");
         std::fs::write(&dest, b"matrix").unwrap();
         assert!(
             store
+                .lock()
                 .library_for_path_strict(&dest, MediaKind::Movie)
                 .unwrap()
                 .is_some(),
             "the strict owner lookup resolves the symlink and does find the Library"
         );
 
-        match publish_claimed_file(
+        let file = publish_claimed_file(
             &store,
             &media,
             &dest,
             &ClaimedFacts::for_path(media.kind, &dest),
-        ) {
-            Err(StoreError::Invalid(message)) => {
-                assert!(message.contains("contains"), "{message}")
-            }
-            other => panic!("expected the lexical root selection to refuse, got {other:?}"),
-        }
+        )
+        .unwrap();
+        assert_eq!(file.library_id.to_string(), library.id);
+        assert_eq!(file.path, std::fs::canonicalize(dest).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claim_through_a_registered_root_alias_keeps_one_file_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let physical = tmp.path().join("physical");
+        let alias = tmp.path().join("alias");
+        std::fs::create_dir_all(&physical).unwrap();
+        std::os::unix::fs::symlink(&physical, &alias).unwrap();
+        let (store, media, _) = fixture(tmp.path(), &[&alias]);
+        let dest = alias.join("The Matrix.1999.mkv");
+        std::fs::write(&dest, b"matrix").unwrap();
+        let facts = ClaimedFacts::for_path(media.kind, &dest);
+        let first = publish_claimed_file(&store, &media, &dest, &facts).unwrap();
+        let physical_path = std::fs::canonicalize(&dest).unwrap();
+        let second = publish_claimed_file(&store, &media, &physical_path, &facts).unwrap();
+        assert_eq!(first.file_id, second.file_id);
+        assert_eq!(
+            store
+                .lock()
+                .file_coverage_by_path(dest.to_str().unwrap())
+                .unwrap()
+                .unwrap()
+                .file
+                .file_id,
+            first.file_id
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claim_rejects_a_symlink_escaping_the_owning_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("media");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let (store, media, _) = fixture(tmp.path(), &[&root]);
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+        let dest = root.join("escape/The Matrix.1999.mkv");
+        std::fs::write(&dest, b"matrix").unwrap();
+        assert!(
+            publish_claimed_file(
+                &store,
+                &media,
+                &dest,
+                &ClaimedFacts::for_path(media.kind, &dest)
+            )
+            .is_err()
+        );
+        assert!(
+            store
+                .lock()
+                .file_coverage_by_path(dest.to_str().unwrap())
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// Administrator claims parse the real file name: a named multi-episode TV
@@ -647,8 +565,7 @@ mod tests {
         );
     }
 
-    /// A Library reconfigured away from revision 0 accepts a claim published
-    /// under its current revision (0 is no longer a wildcard scope).
+    /// Claim publication uses the owning Library's current configuration revision.
     #[test]
     fn claim_publishes_under_the_current_config_revision() {
         let tmp = tempfile::tempdir().unwrap();
@@ -656,7 +573,33 @@ mod tests {
         let (store, media, library) = fixture(tmp.path(), &[&root]);
         let dest = root.join("The Matrix.1999.mkv");
         std::fs::write(&dest, b"matrix").unwrap();
-        assert_eq!(store.library_config_revision(&library.id).unwrap(), 0);
+        {
+            let store = store.lock();
+            store
+                .begin_library_reconfiguration(
+                    &store::library_operations::LibraryReconfiguration {
+                        operation_id: "claim-current-config".into(),
+                        library_id: library.id.parse().unwrap(),
+                        expected_revision: 0,
+                        root_paths: None,
+                        display_locale: Some("ja-JP".into()),
+                    },
+                    1_000,
+                )
+                .unwrap();
+            for _ in 0..10 {
+                if store
+                    .advance_library_operation("claim-current-config", 1_100, 100)
+                    .unwrap()
+                    .state
+                    == "succeeded"
+                {
+                    break;
+                }
+            }
+            assert_eq!(store.library_config_revision(&library.id).unwrap(), 1);
+            assert_eq!(store.library_lifecycle_state(&library.id).unwrap(), "ready");
+        }
         let file = publish_claimed_file(
             &store,
             &media,
@@ -665,7 +608,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            store.get_file_units(file.file_id).unwrap(),
+            store.lock().get_file_units(file.file_id).unwrap(),
             vec![UnitKey::WHOLE]
         );
     }

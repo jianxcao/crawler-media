@@ -25,3 +25,4 @@ unicode-normalization.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+rusqlite = { workspace = true, features = ["hooks"] }

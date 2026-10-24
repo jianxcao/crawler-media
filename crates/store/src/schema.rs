@@ -62,7 +62,12 @@ fn seed_libraries_and_roots(
 ) -> Result<(), StoreError> {
     for (kind, name, root_path) in [("movie", "电影库", movie_root), ("tv", "剧集库", tv_root)]
     {
-        let exists: bool = library
+        let root_str = root_path.display().to_string();
+        let root_key = crate::path_key::canonical_root_key(&root_str)?;
+        // The existence check and both rows share the write lock. A failed root
+        // insert must not leave a Library that makes every later open skip this kind.
+        let tx = crate::write_tx(library)?;
+        let exists: bool = tx
             .query_row(
                 "SELECT 1 FROM libraries WHERE kind = ?1 LIMIT 1",
                 params![kind],
@@ -76,22 +81,24 @@ fn seed_libraries_and_roots(
             continue;
         }
         let lib_id = uuid::Uuid::new_v4().to_string();
-        library.execute(
+        tx.execute(
             "INSERT INTO libraries (library_id, kind, name, is_default, sort_order)
              VALUES (?1, ?2, ?3, 1, 0)",
             params![lib_id, kind, name],
         )?;
-        let root_str = root_path.display().to_string();
-        library.execute(
+        tx.execute(
             "INSERT INTO library_roots (root_id, library_id, path_key, display_path, enabled, sort_order)
              VALUES (?1, ?2, ?4, ?3, 1, 0)",
             params![
                 uuid::Uuid::new_v4().to_string(),
                 lib_id,
                 root_str,
-                crate::path_key::canonical_root_key(&root_str)?
+                root_key
             ],
         )?;
+        tx.commit()?;
+        tracing::info!(library_id = %lib_id, kind, root = %root_str,
+            "default Library and root initialized");
     }
     Ok(())
 }

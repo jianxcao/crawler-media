@@ -39,7 +39,9 @@ mod retry;
 pub mod season;
 pub mod stages;
 pub(crate) mod timings;
+mod tracks;
 mod worker;
+pub use tracks::TracksProbe;
 
 #[cfg(test)]
 mod locking_tests;
@@ -75,6 +77,7 @@ pub struct ProbeManager {
     chapter_frames: Mutex<Option<Arc<crate::chapter_frame_service::ChapterFrameService>>>,
     fingerprint_engine: Arc<dyn FingerprintEngine>,
     capture_engine: Arc<dyn FingerprintCaptureEngine>,
+    tracks_probe: Arc<dyn TracksProbe>,
     metadata_tx: mpsc::Sender<store::ProbeDispatchId>,
     fingerprint_tx: mpsc::Sender<(store::ProbeDispatchId, probe::FingerprintWork)>,
     /// 幂等去重：窗口内或执行中的 ledger_id，不是全量积压。
@@ -127,6 +130,7 @@ impl ProbeManager {
             chapter_frames: Mutex::new(None),
             fingerprint_engine,
             capture_engine,
+            tracks_probe: Arc::new(tracks::FfprobeTracks),
             metadata_tx: channels.metadata_tx,
             fingerprint_tx: channels.fingerprint_tx,
             seen: Mutex::new(HashSet::new()),
@@ -149,6 +153,12 @@ impl ProbeManager {
         };
         manager.recover_pending_jobs();
         manager
+    }
+
+    /// Replace stream IO while retaining the same queue and publication pipeline.
+    pub fn with_tracks_probe(mut self, probe: Arc<dyn TracksProbe>) -> Self {
+        self.tracks_probe = probe;
+        self
     }
 
     pub(crate) fn set_library_registry(

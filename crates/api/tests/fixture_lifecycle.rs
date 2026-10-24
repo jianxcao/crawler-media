@@ -1,6 +1,16 @@
 //! C18: test fixtures release gates and stop fake servers on every exit path.
 #[path = "support/lifecycle.rs"]
 mod lifecycle;
+#[path = "support/lifecycle_connections.rs"]
+mod lifecycle_connections;
+#[path = "support/lifecycle_mock_owners.rs"]
+mod lifecycle_mock_owners;
+#[allow(dead_code)]
+#[path = "subscription_e2e/mock_qbit.rs"]
+mod mock_qbit;
+#[allow(dead_code)]
+#[path = "subscription_e2e/mock_transmission.rs"]
+mod mock_transmission;
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -106,15 +116,19 @@ fn idle_connection_does_not_block_others_and_drop_joins_the_server() {
 
 #[test]
 fn handler_panic_surfaces_when_the_server_stops() {
-    let server = FakeServer::start(|_, _| {
-        std::thread::sleep(Duration::from_millis(200));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let server = FakeServer::start(move |_, _| {
+        entered_tx.send(()).unwrap();
         panic!("handler blew up");
     });
     let mut stream = TcpStream::connect(server.addr()).unwrap();
     stream
         .write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
         .unwrap();
-    std::thread::sleep(Duration::from_millis(50));
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(server)));
-    assert!(result.is_err(), "a handler panic must not disappear inside join");
+    assert!(
+        result.is_err(),
+        "a handler panic must not disappear inside join"
+    );
 }

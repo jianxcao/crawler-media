@@ -142,6 +142,7 @@ fn publish_scanned(store: &Store, spec: FixtureFile) {
                     .and_then(|size| i64::try_from(size).ok()),
                 created_ns: observation.created_ns,
                 modified_ns: observation.modified_ns,
+                artwork: Default::default(),
                 observations: Vec::new(),
             }],
             1_000,

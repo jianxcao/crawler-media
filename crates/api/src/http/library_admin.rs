@@ -448,36 +448,27 @@ pub(crate) fn bind_existing(state: &ApiState, id: &str, path: &str) -> Response 
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "media id 无效"),
     };
-    let store = state.store.lock();
-    let Some(media) = store.get_media(media_id).ok().flatten() else {
+    let Some(media) = state.store.lock().get_media(media_id).ok().flatten() else {
         return err(
             StatusCode::NOT_FOUND,
             "library.item_missing",
             "影视条目不存在",
         );
     };
-    // 只登记确实在某个 Library 根下的文件。任意路径写成台账后，订阅删除
-    // 会把它当成库内文件物理删掉。
-    if store
-        .library_for_path_strict(std::path::Path::new(path), media.kind)
-        .ok()
-        .flatten()
-        .is_none()
-    {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "library.path_outside",
-            "只能认领媒体库根目录内的文件",
-        );
-    }
     let facts = crate::claim::ClaimedFacts::for_path(media.kind, std::path::Path::new(path));
     let file = match crate::claim::publish_claimed_file(
-        &store,
+        &state.store,
         &media,
         std::path::Path::new(path),
         &facts,
     ) {
         Ok(file) => file,
+        Err(store::StoreError::Invalid(message)) => {
+            return err(StatusCode::BAD_REQUEST, "library.path_outside", &message);
+        }
+        Err(store::StoreError::Protected(message)) => {
+            return err(StatusCode::CONFLICT, "library.write_conflict", &message);
+        }
         Err(error) => {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -486,8 +477,9 @@ pub(crate) fn bind_existing(state: &ApiState, id: &str, path: &str) -> Response 
             );
         }
     };
-    let _ = store.delete_unidentified(path);
-    drop(store);
+    if let Err(error) = state.store.lock().delete_unidentified(path) {
+        tracing::warn!(path, %error, "Claim published but Unidentified cleanup failed");
+    }
     crate::http::library::enqueue_probes_for_files(state, std::slice::from_ref(&file));
     ok(json!({
         "media_item_id": media.id.to_string(),

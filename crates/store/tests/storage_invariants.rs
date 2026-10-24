@@ -267,6 +267,7 @@ fn scan_ownership_prefers_real_component_root() {
         size_bytes: None,
         created_ns: None,
         modified_ns: None,
+        artwork: Default::default(),
         observations: Vec::new(),
     };
     store.insert_scanned_files(&[row], 1_000).unwrap();

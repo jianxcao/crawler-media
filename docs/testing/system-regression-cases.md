@@ -4,7 +4,7 @@
 
 从用户可见的入口和工作流检查 Web 工作台，以及 VidHub 通过 Jellyfin-compatible API 访问本系统时的页面呈现、图片加载、播放和进度同步。本文覆盖当前 Web 路由、设置分区和关键跨页流程；用例以可观察结果为准。
 
-“预期结果”是待验收合同，不是已实现/已通过的功能声明。2026-10-24（5bd696e）仍有归属/版本/marks/共享图片与测试生命周期缺口，当前Rust门禁未通过；历史测试与本文件列出的自动化源代码不能替代本构建实测。当前 DDL/布局见 `crates/store/src/schema/layout.rs` 与 `schema/v1/*.sql`，执行顺序见 [存储切换计划](<../superpowers/plans/2026-10-23-storage-review-remediation.md>)。
+“预期结果”是待验收合同，不是已实现/已通过的功能声明。2026-10-24本次补修的归属/版本/marks/共享图片与测试退出反例及门禁结果见[再次复核](../audits/2026-10-24-storage-fix-followup.md)；历史测试与本文件列出的自动化源代码不能替代本构建实测。当前 DDL/布局见 `crates/store/src/schema/layout.rs` 与 `schema/v1/*.sql`，执行顺序见 [存储切换计划](<../superpowers/plans/2026-10-23-storage-review-remediation.md>)。
 
 测试环境必须是隔离实例，数据写入临时目录和测试数据库。不得用生产 Site、真实 Downloader、真实 Library 文件目录或真实 User 的观看记录执行有写入的流程。
 
@@ -250,22 +250,17 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 | STORAGE-07 | 同来源多个别名的 Media 更新后，全部历史别名保留，refresh target 唯一且卡片立即同步 | 已观察别名丢失/卡片陈旧；本轮 store 部分实测：`media_alias_updates` 在本轮 store 套件内通过；按 target 的实际刷新请求与卡片同步仍 Not run |
 | STORAGE-08 | 管理完整性检查与 Media 合并公开路径可用并有最终状态，失败不改身份；协议浏览与事件提交生产接线真实覆盖 | 已观察管理端点 404 与 protocol_item_page / commit_playback_event 未统一接线；本轮更正：浏览入口已统一（`485e36f`，`jellyfin_paged_metadata` 25、`jellyfin_sql_page` 9 全绿，冒烟 Recursive 分页返回规范 `w1_…` Series+Movie），`Store::commit_playback_event` 的生产写入统一仍未验证；管理侧仍缺 scrape 类 `library_operations`（`crates/store/src/library_operations/mod.rs:226-228` 对非 reconfiguration 的 kind 返回 `Invalid`） |
 
-movie持久whole=(-1,-1)，TV S00E00合法；movie00旧alias已移除。marks已拒显式旧POST键与坏类型，但i32越界被饱和、未知字段仍可whole写入、GET旧键被忽略，须补严格目标与零写（当前复核R03）。真实浏览器/客户端/NAS尚未在本轮运行；上轮1M只测无关Library文件增长，不等于100k Media/1M Playback完整验收。按[当前方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)新增真实consumer回归，历史数值见benchmark。
+movie持久whole=(-1,-1)，TV S00E00合法；movie00旧alias已移除。marks已严格拒旧/未知键、重复坐标、i32越界和错误类型；storage_http_cutover保存真实Router及原始playback_units零写回归。真实浏览器/客户端/NAS尚未在本轮运行；上轮1M只测无关Library文件增长，不等于100k Media/1M Playback完整验收。按[当前方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)新增真实consumer回归，历史数值见benchmark。
 
 ## 当前限制
 
 本文件是可评审的回归用例基线，不代表这些流程已执行。当前仓库有前端逻辑/契约测试，但没有浏览器 E2E runner；VidHub 也需要隔离实例和 app 实测。下一步应先用真实浏览器和 VidHub app 执行 P0 用例，逐项保留结果与失败原因，再将高频浏览器流程落成可重放的 E2E，并将 VH 用例保留为每次发布的设备验收清单。
 
-## 2026-10-24 剩余自动化验收
+## 2026-10-24 补修自动化与剩余验收
 
-已修具体反例和当前实测见[5bd696e修复复核](../audits/2026-10-24-storage-fix-review.md)。下列是仍需补验收的合同，不能当作已运行结果：
+本提交的实际命令与结果见[再次复核](../audits/2026-10-24-storage-fix-followup.md)，不能将本文历史表的旧“本轮”数值当作当前门禁。
 
-- marks原4294967295/i32越界、camelCase等未知键、GET旧键和重复查询参数400且零写；保留合法whole/season/S00E00；同步真实Web字段。
-- alias根迁移共享图片时仍有兄弟文件则源图片保留；显式软链/canonical对照、竞争目标和崩溃恢复。
-- 实际ProbeManager在comparison/capture内换源后，旧Marker/章节/cache零发布，新源任务正常完成；成员校验不依赖chapter_updates。
-- 根变更后旧父WriteScope不能写回嵌套范围；source/target freeze、cursor前新写入、locale/removal和每批重启不漏迁；create嵌套库的Unidentified有界迁移正确。
-- 新kind的Library/root初始化故障原子回滚、重试可完成；正常重开不复活旧根的现有回归保持GREEN。
-- fixture已完成handler panic、最后owner、慢header、peer不读与多失败：完整join、无隐藏panic/self-join，子进程watchdog内退出。
-- 门控真实realpath/NFO/rename磁盘阶段，并行Store读/心跳仍限时完成；不以stamp观察测试替代新增路径IO。
-- 迁移旧Subscribe共享fixture和A/a排序用例的磁盘文件名，修复shared artwork生产错误后重跑crate/workspace；保存严格HTTP信封与实际data回执的持久回归。
-- 同Media至少301文件、多目录/season与各层NFO，逐批重启守恒；NAS/真实客户端和完整100k/1M规模、性能A/B单独记录Not run或实测证据。
+- 已保存并验证的回归：marks边界/未知键/重复坐标零写；alias共享图片与显式引用；真实ProbeManager比较/采集/tracks换源；旧父scope/root-relative路径、新增嵌套根期间的扫描观察、Claim跨连接改名/删除；Unidentified逐批重开；seed故障回滚与重试；测试server最后owner/多panic/慢peer；真实NFO读取期间Store可读；rename阶段及启动恢复；checkpoint登记身份与5k无关行下的VM预算。
+- 旧Subscribe fixture和A/a物理文件名冲突已在分支修复，超大NFO测试文件已拆分，本次触及的函数按职责缩至上限内。
+- 仍需扩展：根配置/Watch剩余真实路径IO的心跳与最大持锁时间；Unidentified选择SQL的5k/50k/100k工作量；同Media至少301文件、多目录/season及各层NFO每批重开守恒；A8竞争写者、A12 export失败区分性回归。
+- 真实浏览器/Jellyfin设备、NAS及完整100k Media/1M文件/1M Playback组合验收：Not run。性能A/B与现场用例不由单元/契约测试代替。

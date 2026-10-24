@@ -175,59 +175,25 @@ pub(crate) async fn path_reconciliations(
         };
         (library, ownership, rows)
     };
-    let files = state.browse_files.clone();
-    let work = state
+    let worker = state.clone();
+    let result = state
         .http_work
-        .run(HOUSEKEEPING_DEADLINE, move || {
-            observe_reconciliations(&library, ownership, rows, files.as_ref())
+        .run_to_completion(move || {
+            let (scope, rows) =
+                observe_reconciliations(&library, ownership, rows, worker.browse_files.as_ref());
+            apply_reconciliations(&worker, &library, scope.as_ref(), rows)
         })
         .await;
-    let (scope, rows) = match work {
-        Ok(observed) => observed,
+    match result {
+        Ok((reconciled, errors)) => {
+            tracing::debug!(library_id = %id, reconciled, errors = errors.len(), "Reconciliation applied");
+            ok(json!({ "reconciled": reconciled, "errors": errors })).into_response()
+        }
         Err(error) => {
-            tracing::warn!(%error, "Reconciliation observation failed");
-            return reconciliation_error(error);
-        }
-    };
-    let mut reconciled = 0usize;
-    let mut errors = Vec::new();
-    let store = state.store.lock();
-    let Some(current_library) = store.get_library(&id).ok().flatten() else {
-        return missing_library();
-    };
-    let current = match store.library_ownership() {
-        Ok(current) => current,
-        Err(error) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store.error",
-                &error.to_string(),
-            );
-        }
-    };
-    let valid = scope.as_ref().is_some_and(|scope| {
-        scope.matches(&current) && scope.accepts_work(&id) && current.accepts_work(&id)
-    });
-    for row in rows {
-        let row = match row {
-            Ok(row) => row,
-            Err(error) => {
-                errors.push(error);
-                continue;
-            }
-        };
-        if !valid {
-            tracing::warn!(library_id = %id, "Reconciliation scope changed or frozen");
-            errors.push(format!("{} 不属于当前媒体库范围", row.to));
-            continue;
-        }
-        match apply_reconciliation(&store, &current_library, &row) {
-            Ok(()) => reconciled += 1,
-            Err(error) => errors.push(error),
+            tracing::warn!(%error, "Reconciliation worker failed");
+            reconciliation_error(error)
         }
     }
-    tracing::debug!(library_id = %id, reconciled, errors = errors.len(), "Reconciliation applied");
-    ok(json!({ "reconciled": reconciled, "errors": errors })).into_response()
 }
 
 fn reconciliation_rows(
@@ -327,51 +293,115 @@ fn strictly_owned(
     }
 }
 
-fn apply_reconciliation(
-    store: &store::Store,
+fn apply_reconciliations(
+    state: &ApiState,
     library: &store::Library,
+    scope: Option<&store::LibraryPathScope>,
+    rows: Vec<Result<Reconciliation, String>>,
+) -> (usize, Vec<String>) {
+    // Acquire the registry lease before taking Store or any publication gate.
+    let lease = state.acquire_library_work(&library.id);
+    let mut reconciled = 0;
+    let mut errors = Vec::new();
+    for row in rows {
+        let result = row.and_then(|row| {
+            let lease = lease.as_ref().map_err(Clone::clone)?;
+            apply_reconciliation(state, library, scope, lease, &row)
+        });
+        match result {
+            Ok(()) => reconciled += 1,
+            Err(error) => errors.push(error),
+        }
+    }
+    (reconciled, errors)
+}
+
+fn reconciliation_plan(
+    state: &ApiState,
+    library: &store::Library,
+    scope: Option<&store::LibraryPathScope>,
+    row: &Reconciliation,
+) -> Result<store::library_write::RenameIntentPlan, store::StoreError> {
+    let store = state.store.lock();
+    let current = store.library_ownership()?;
+    if !scope.is_some_and(|scope| {
+        scope.matches(&current)
+            && scope.accepts_work(&library.id)
+            && current.accepts_work(&library.id)
+    }) {
+        return Err(store::StoreError::Conflict(
+            "Reconciliation scope changed or frozen".into(),
+        ));
+    }
+    let Some((source, kind)) = row.source.as_ref() else {
+        return Err(store::StoreError::Missing(format!(
+            "{} is not recorded",
+            row.from
+        )));
+    };
+    let current = store.file_coverage_by_path(&row.from)?;
+    let media = store.get_media(source.file.media_id)?;
+    if current.as_ref() != Some(source) || media.as_ref().map(|media| media.kind) != *kind {
+        return Err(store::StoreError::Conflict(
+            "Reconciliation source changed".into(),
+        ));
+    }
+    store.plan_file_reconciliation(
+        source.file.file_id,
+        &source.file.version,
+        FsPath::new(&row.from),
+        FsPath::new(&row.to),
+    )
+}
+
+fn apply_reconciliation(
+    state: &ApiState,
+    library: &store::Library,
+    scope: Option<&store::LibraryPathScope>,
+    lease: &crate::library_lifecycle::LibraryWorkLease,
     row: &Reconciliation,
 ) -> Result<(), String> {
-    let failure = || format!("{} -> {} 台账重命名失败", row.from, row.to);
-    let Some((source, kind)) = row.source.as_ref() else {
-        return Err(failure());
-    };
-    let current = store.file_coverage_by_path(&row.from).map_err(|error| {
-        tracing::warn!(%error, "Reconciliation source revalidation failed");
-        failure()
-    })?;
-    let media = store.get_media(source.file.media_id).map_err(|error| {
-        tracing::warn!(%error, "Reconciliation media revalidation failed");
-        failure()
-    })?;
-    if current.as_ref() != Some(source) || media.as_ref().map(|media| media.kind) != *kind {
-        return Err(failure());
-    }
-    let now = crate::job_loop::unix_now();
-    let request = store
-        .begin_file_reconciliation(
-            source.file.file_id,
-            &source.file.version,
-            FsPath::new(&row.from),
-            FsPath::new(&row.to),
-            now,
-        )
-        .map_err(|error| {
-            tracing::warn!(library_id = %library.id, %error, "Reconciliation begin rename failed");
-            failure()
-        })?;
-    // Disk already sits at `to` for reconciliation: the disk phase only proves the
-    // destination identity (no bytes move), then complete CAS-publishes.
-    store::library_write::execute_rename_disk(&request)
-        .inspect_err(|error| {
-            let _ = store.record_rename_refusal(&request.rename_id, now, error);
-        })
-        .and_then(|receipt| store.record_rename_disk(&receipt, now))
-        .and_then(|_| store.complete_file_rename(&request.rename_id, now))
-        .map_err(|error| {
-            tracing::warn!(library_id = %library.id, %error, "Reconciliation durable rename failed");
-            failure()
-        })
+    let result = (|| {
+        let plan = reconciliation_plan(state, library, scope, row)?;
+        let observed = plan.observe()?;
+        let now = crate::job_loop::unix_now();
+        let request = lease
+            .publish(|| {
+                state
+                    .store
+                    .lock()
+                    .begin_observed_file_rename(observed, now)
+                    .map_err(|e| e.to_string())
+            })
+            .map_err(store::StoreError::Conflict)?;
+        // The destination already owns the bytes. Receipt and completion observations
+        // still run outside the Store and publication gate, as for a physical move.
+        let receipt = store::library_write::execute_rename_disk(&request)
+            .inspect_err(|error| {
+                if let Err(record) = state.store.lock().record_rename_refusal(&request.rename_id, now, error) {
+                    tracing::error!(%record, rename_id = %request.rename_id, "Recording reconciliation refusal failed");
+                }
+            })?;
+        crate::rename_work::record_disk(&state.store, &receipt, now)?;
+        let completion = state
+            .store
+            .lock()
+            .plan_file_rename_completion(&request.rename_id)?;
+        let observed = completion.observe()?;
+        lease
+            .publish(|| {
+                state
+                    .store
+                    .lock()
+                    .complete_observed_file_rename(observed, now)
+                    .map_err(|e| e.to_string())
+            })
+            .map_err(store::StoreError::Conflict)
+    })();
+    result.map_err(|error: store::StoreError| {
+        tracing::warn!(library_id = %library.id, from = %row.from, to = %row.to, %error, "Reconciliation durable rename failed");
+        format!("{} -> {} 台账重命名失败: {error}", row.from, row.to)
+    })
 }
 
 /// POST /libraries/{id}/root-consolidation-preview — 物理目录去重。

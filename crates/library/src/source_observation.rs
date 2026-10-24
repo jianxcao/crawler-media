@@ -74,7 +74,11 @@ pub fn observe_source(path: &Path) -> Result<SourceObservation, LibraryError> {
         source_version,
         size_bytes: Some(metadata.len()),
         modified_ns: Some(modified_ns(&metadata)),
-        created_ns: None,
+        created_ns: metadata
+            .created()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|duration| i64::try_from(duration.as_nanos()).ok()),
         content_digest,
     })
 }

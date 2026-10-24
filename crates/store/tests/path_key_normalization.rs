@@ -1,6 +1,6 @@
 //! Risk 1: `path_key` is the stable normalized identity used for uniqueness and
-//! lookup; `display_path` keeps the caller's spelling. Existing rows whose key was
-//! written verbatim are migrated on open without losing data.
+//! lookup; `display_path` keeps the caller's spelling. The fresh schema rejects
+//! noncanonical identities; opening does not migrate old rows.
 use domain::{Media, MediaId, MediaKind};
 use std::path::PathBuf;
 use store::Store;
@@ -180,9 +180,8 @@ fn nfd_and_nfc_spellings_are_one_key() {
     let rows = file_rows(&tmp);
     assert_eq!(rows.len(), 1);
     let canonical_dir = std::fs::canonicalize(&root).unwrap();
-    let expected = store::path_key::normalize_path_key(
-        &canonical_dir.join("Caf\u{e9}.mkv").to_string_lossy(),
-    );
+    let expected =
+        store::path_key::normalize_path_key(&canonical_dir.join("Caf\u{e9}.mkv").to_string_lossy());
     assert_eq!(rows[0].1, expected, "key is NFC under the canonical root");
 }
 

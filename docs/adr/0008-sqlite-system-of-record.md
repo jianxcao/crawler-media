@@ -120,7 +120,7 @@ Jinja 模板：MoviePilot 的能力。v1 否决——封闭占位符集合对两
 
 跨文件仍然没有外键，也没有跨文件事务：这一点对这两个库同样成立。
 
-## 后记：现行五文件与剩余验收（2026-10-24，5bd696e）
+## 后记：现行五文件与剩余验收（2026-10-24补修）
 
 本节替代上面的历史文件归属。`feat/storage-redesign` 的生产 DDL 位于
 [`crates/store/src/schema/v1/`](../../crates/store/src/schema/v1/)，目标合同见
@@ -138,6 +138,6 @@ Media 与 Playback 已迁入 `library.db`；旧浏览投影表/重建链已移�
 
 五文件、显式ownership、同库事实/摘要事务、冷详情及源版本分离方向保持。旧LedgerRow/浏览重建链和movie00别名已移除；旧版本的失败细节保留在固定SHA审计，不继续作为当前结论。
 
-当前47张library业务表包括持久rename与root迁移队列。IMMEDIATE写事务、Store四连接与Jobs Queue的FULL已显式设置；独立media缓存连接尚未显式设置synchronous。原NFO输入丢失和正常重开默认根已有修复；归属屏障、共享图片、持锁IO、源版本绑定及测试退出仍有缺口，见[当前复核](../audits/2026-10-24-storage-fix-review.md)。这些是实现/验收问题，不需要推翻五文件决策或新增兼容层。
+当前47张library业务表包括持久rename与root迁移队列。IMMEDIATE写事务、Store四连接与Jobs Queue的FULL已显式设置；独立media缓存连接尚未显式设置synchronous。原NFO输入丢失、正常重开默认根、发布归属屏障、共享图片、源版本绑定、初始化原子性及测试退出的具体反例均已修复；主要Probe/Claim/scan/rename冷IO已出锁，根操作调度与候选选择工作量仍需优化，见[再次复核](../audits/2026-10-24-storage-fix-followup.md)。这些是实现/验收问题，不需要推翻五文件决策或新增兼容层。
 
 字段/键/索引见[数据库字典](../database/README.md)，剩余任务见[唯一当前技术方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)。真实NAS/客户端及完整100k Media/1M文件验收尚未在本轮运行；不恢复旧数据导入、双读双写或跨库浏览journal。

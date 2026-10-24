@@ -148,3 +148,31 @@ pub fn stage_completion_from_outcome(
         },
     }
 }
+
+/// Preserve partial intro captures while reporting the missing outro separately.
+pub(super) fn capture_outcome(
+    unit: &super::ProbeUnit,
+    error: Option<String>,
+    require_complete_markers: bool,
+) -> FingerprintRunOutcome {
+    match error {
+        Some(error) => {
+            tracing::warn!(
+                %error,
+                ledger_id = %unit.row.file.file_id,
+                media_id = %unit.row.file.media_id,
+                season = super::projected_season(&unit.row),
+                episode = super::projected_episode(&unit.row),
+                require_complete_markers,
+                "【声纹】片尾指纹暂不可用，保留片头缓存并允许下次只重试片尾"
+            );
+            let error_kind = classify_fingerprint_error(&error).to_string();
+            if require_complete_markers {
+                FingerprintRunOutcome::Failed { error_kind, error }
+            } else {
+                FingerprintRunOutcome::Partial { error_kind, error }
+            }
+        }
+        None => FingerprintRunOutcome::Complete,
+    }
+}

@@ -95,7 +95,7 @@ fn publish(
     units: &[UnitKey],
     locale: &str,
 ) -> Vec<store::metadata::NfoObservation> {
-    let observations = store.observe_nfo_inputs(
+    let observations = store.nfo_input_observer().observe(
         &file.path,
         file.kind,
         units,
@@ -245,6 +245,7 @@ fn tv_sidecar_layers_are_observed_and_do_not_leak_across_layers() {
     };
     let observations = publish(&store, &scope, &file, &units, "zh-CN");
 
+    assert_layer_keys(&observations, &file.path);
     assert_eq!(observations.len(), 3, "{observations:#?}");
     let scoped = |scope: EntityScope| {
         observations
@@ -252,30 +253,6 @@ fn tv_sidecar_layers_are_observed_and_do_not_leak_across_layers() {
             .find(|observation| observation.scope == scope)
             .unwrap_or_else(|| panic!("缺少 {scope:?} 的观察结果：{observations:#?}"))
     };
-    // input_key 取 sidecar 的规范路径，不是视频路径。
-    assert!(
-        scoped(EntityScope::Work)
-            .input_key
-            .ends_with("Show/tvshow.nfo")
-    );
-    assert!(
-        scoped(EntityScope::Season(1))
-            .input_key
-            .ends_with("Season 01/season.nfo")
-    );
-    assert!(
-        scoped(EntityScope::Episode {
-            season: 1,
-            episode: 1
-        })
-        .input_key
-        .ends_with("Show.S01E01.nfo")
-    );
-    for observation in &observations {
-        assert_eq!(observation.state, store::metadata::NfoParseState::Valid);
-        assert_ne!(observation.input_key, file.path.to_string_lossy());
-    }
-
     // 作品卡片只显示 work 层的值：season/episode 层的 title/plot/studio 都不能漏上来。
     let detail = store
         .library_item_detail(scope.library_id, media, "zh-CN")
@@ -501,3 +478,35 @@ fn manual_override_wins_over_nfo_input_in_detail() {
     );
 }
 
+fn assert_layer_keys(observations: &[store::metadata::NfoObservation], video_path: &Path) {
+    assert_eq!(observations.len(), 3, "{observations:#?}");
+    let scoped = |scope: EntityScope| {
+        observations
+            .iter()
+            .find(|observation| observation.scope == scope)
+            .unwrap_or_else(|| panic!("缺少 {scope:?} 的观察结果：{observations:#?}"))
+    };
+    // input_key 取 sidecar 的规范路径，不是视频路径。
+    assert!(
+        scoped(EntityScope::Work)
+            .input_key
+            .ends_with("Show/tvshow.nfo")
+    );
+    assert!(
+        scoped(EntityScope::Season(1))
+            .input_key
+            .ends_with("Season 01/season.nfo")
+    );
+    assert!(
+        scoped(EntityScope::Episode {
+            season: 1,
+            episode: 1
+        })
+        .input_key
+        .ends_with("Show.S01E01.nfo")
+    );
+    for observation in observations {
+        assert_eq!(observation.state, store::metadata::NfoParseState::Valid);
+        assert_ne!(observation.input_key, video_path.to_string_lossy());
+    }
+}

@@ -36,8 +36,8 @@ mod library_deletion;
 pub mod library_query;
 pub mod library_write;
 pub use library_deletion::LibraryRemoval;
-mod library_ownership;
 mod library_key_owner;
+mod library_ownership;
 mod library_paths;
 mod library_scope;
 pub use library_scope::{LibraryPathResolver, LibraryPathScope, StrictOwner};
@@ -60,9 +60,11 @@ pub use probe_dispatch::{ProbeDispatchId, ProbeDispatchSnapshot, ProbeDispatchSt
 pub mod library_operations;
 mod roots;
 pub use library_operations::LibraryReconfiguration;
+mod scan_context;
 mod scan_operations;
 mod scan_probe_obligations;
 mod scan_seen;
+pub use scan_context::ScanWriteContext;
 mod scanned_ledger;
 pub mod schema;
 pub use scan_operations::{ScanOperation, ScanOperationStatus};
@@ -269,29 +271,10 @@ impl Store {
         self.data_dir.join("cache.db")
     }
 
-    /// Observe NFO sidecars with one committed root-alias snapshot.
-    ///
-    /// Display paths stay on the observation for IO. `input_key` is canonical, matching
-    /// `library_files.path_key`, so a symlink root does not persist a key the reducer
-    /// later treats as an orphan.
-    pub fn observe_nfo_inputs(
-        &self,
-        path: &std::path::Path,
-        kind: domain::MediaKind,
-        units: &[domain::UnitKey],
-        locale: &str,
-        version: &domain::FileVersion,
-        config_revision: i64,
-    ) -> Vec<crate::metadata::NfoObservation> {
-        let aliases = crate::path_key::alias_snapshot(&self.library);
-        crate::metadata::nfo_input::observe_nfo_inputs_with_aliases(
-            &aliases,
-            path,
-            kind,
-            units,
-            locale,
-            version,
-            config_revision,
-        )
+    /// Freeze committed root aliases; the returned observer performs IO without Store.
+    pub fn nfo_input_observer(&self) -> crate::metadata::nfo_input::NfoInputObserver {
+        crate::metadata::nfo_input::NfoInputObserver {
+            aliases: crate::path_key::alias_snapshot(&self.library),
+        }
     }
 }

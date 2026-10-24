@@ -9,43 +9,118 @@ use store::library_write::{FilePublication as StorePublication, WriteScope};
 
 fn library_with_root(store: &Store, dir: &Path, name: &str, kind: MediaKind) -> (String, String) {
     std::fs::create_dir_all(dir).unwrap();
-    let library = store.create_library(kind, name, &[dir.to_str().unwrap()], "everyone", true, &[]).unwrap();
-    let root_id = store.list_library_roots().unwrap().into_iter()
-        .find(|root| root.library_id.as_deref() == Some(&library.id)).unwrap().id;
+    let library = store
+        .create_library(kind, name, &[dir.to_str().unwrap()], "everyone", true, &[])
+        .unwrap();
+    let root_id = store
+        .list_library_roots()
+        .unwrap()
+        .into_iter()
+        .find(|root| root.library_id.as_deref() == Some(&library.id))
+        .unwrap()
+        .id;
     (library.id, root_id)
 }
 
 fn insert_media(store: &Store, kind: MediaKind, title: &str) -> MediaId {
     let media = domain::Media {
-        id: MediaId::new(), kind, title: title.into(), year: None, original_title: None,
-        aliases: vec![], tmdb_id: None, douban_id: None, tvdb_id: None, bangumi_id: None, anilist_id: None,
+        id: MediaId::new(),
+        kind,
+        title: title.into(),
+        year: None,
+        original_title: None,
+        aliases: vec![],
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
     };
     store.insert_media(&media).unwrap();
     media.id
 }
 
-fn video_file(library_id: &str, root_id: &str, media_id: MediaId, kind: MediaKind, path: PathBuf) -> LibraryFile {
+fn video_file(
+    library_id: &str,
+    root_id: &str,
+    media_id: MediaId,
+    kind: MediaKind,
+    path: PathBuf,
+) -> LibraryFile {
     LibraryFile {
-        file_id: domain::LedgerId::new(), library_id: library_id.parse::<LibraryId>().unwrap(),
-        root_id: root_id.to_string(), media_id, kind, path,
-        version: FileVersion { revision: 1, source_version: "v1".into() },
-        presence: FilePresence::Present, publication: FilePublication::Published,
-        size_bytes: Some(5), stat_known: true, created_ns: None, modified_ns: None,
-        source_digest: None, source_path: None, transfer_mode: None, resolution: None,
-        codec: None, hdr: None, quality_source: QualitySource::Release, confidence: Confidence::High,
-        filter_score: None, release_quality: None, duration_ms: None, tracks_version: 0,
-        poster_path: None, backdrop_path: None, still_path: None,
+        file_id: domain::LedgerId::new(),
+        library_id: library_id.parse::<LibraryId>().unwrap(),
+        root_id: root_id.to_string(),
+        media_id,
+        kind,
+        path,
+        version: FileVersion {
+            revision: 1,
+            source_version: "v1".into(),
+        },
+        presence: FilePresence::Present,
+        publication: FilePublication::Published,
+        size_bytes: Some(5),
+        stat_known: true,
+        created_ns: None,
+        modified_ns: None,
+        source_digest: None,
+        source_path: None,
+        transfer_mode: None,
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: None,
+        release_quality: None,
+        duration_ms: None,
+        tracks_version: 0,
+        poster_path: None,
+        backdrop_path: None,
+        still_path: None,
     }
 }
 
 fn overview_of(store: &Store, library: &str, media: MediaId, locale: &str) -> Option<String> {
-    store.library_item_detail(library.parse().unwrap(), media, locale).unwrap().unwrap()
-        .metadata.overview.value().cloned()
+    store
+        .library_item_detail(library.parse().unwrap(), media, locale)
+        .unwrap()
+        .unwrap()
+        .metadata
+        .overview
+        .value()
+        .cloned()
 }
 
-fn publish(store: &Store, scope: &WriteScope, file: &LibraryFile, units: &[UnitKey], locale: &str) -> Vec<store::metadata::NfoObservation> {
-    let observations = store.observe_nfo_inputs(&file.path, file.kind, units, locale, &file.version, scope.config_revision);
-    store.publish_files(scope, &[StorePublication { file, units, expected_version: None, nfo_observation: Some(&observations), probe_required: false }], scope.config_revision).unwrap();
+fn publish(
+    store: &Store,
+    scope: &WriteScope,
+    file: &LibraryFile,
+    units: &[UnitKey],
+    locale: &str,
+) -> Vec<store::metadata::NfoObservation> {
+    let observations = store.nfo_input_observer().observe(
+        &file.path,
+        file.kind,
+        units,
+        locale,
+        &file.version,
+        scope.config_revision,
+    );
+    store
+        .publish_files(
+            scope,
+            &[StorePublication {
+                file,
+                units,
+                expected_version: None,
+                nfo_observation: Some(&observations),
+                probe_required: false,
+            }],
+            scope.config_revision,
+        )
+        .unwrap();
     observations
 }
 
@@ -368,19 +443,13 @@ fn aliased_root_persists_canonical_nfo_input_and_detail() {
     );
     assert_eq!(overview_of(&store, &library, media, "zh-CN"), None);
     let persisted: i64 = db
-        .query_row(
-            "SELECT COUNT(*) FROM library_metadata_inputs",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM library_metadata_inputs", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(persisted, 0);
 
-    std::fs::write(
-        real.join("A.nfo"),
-        "<movie><plot>Real plot</plot></movie>",
-    )
-    .unwrap();
+    std::fs::write(real.join("A.nfo"), "<movie><plot>Real plot</plot></movie>").unwrap();
     let real_video = real.join("A.mkv");
     assert!(
         store.reconcile_nfo_inputs(&real_video).unwrap(),

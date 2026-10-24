@@ -1,6 +1,6 @@
 # 当前数据库设计与数据字典
 
-结构核对：`5bd696e`（2026-10-24，本轮无DDL变更）。比较基线为`main@86122d7`；当前行为缺口见[修复复核](../audits/2026-10-24-storage-fix-review.md)，未来修复见[唯一当前技术方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)。旧1845dab缺陷表已撤下，不把历史失败或历史绿测作为当前结论。
+结构核对：2026-10-24，本轮从 `3ba25fb` 补修，`scan_seen` 主键调整为 `(operation_id,path_key)`，表/字段/命名索引数量不变。比较基线为 `main@86122d7`；当前证据见[再次复核](../audits/2026-10-24-storage-fix-followup.md)，剩余优化见[唯一方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)。
 
 ## 权威来源
 
@@ -45,12 +45,12 @@ flowchart TD
 
 写事务统一IMMEDIATE；文件发布在同一library事务维护覆盖、卡片、terms与摘要。100文件批次的当前用户摘要已按Media批末合并；协议索引在写入时维护genre/person及search_text，精确语言谓词仍在候选上执行。rename意图保存版本、源/目标磁盘证据与阶段，跨subscribe引用按持久阶段恢复。
 
-嵌套根迁移已有≤100文件事务/持久游标、NFO按批迁移与冻结目标暂停。旧父WriteScope仍可写回错误归属，新建嵌套库漏迁Unidentified，完整operation屏障与锁边界未闭环，见复核R02/R05/R08。初始化默认Library/root的故障原子性见R06。
+嵌套根迁移使用≤100文件事务/持久游标，NFO按批迁移，源/目标冻结均暂停；发布重验当前最深根，扫描保留观察前的Library/root/config。Unidentified有独立≤100行移动阶段并支持重开，但候选SQL工作量未证明严格有界。每个缺失kind的默认Library/root原子初始化；根操作外层同步drain及剩余锁内路径IO见当前方案。
 
 ## 运维与性能边界
 
-- 当前无ledger/file_meta/browse journal持久表，不建兼容表/视图，不双读双写。Web Subscribe字段和成功信封已切换；marks严格目标仍有R03缺口，不恢复旧兼容。
+- 当前无ledger/file_meta/browse journal持久表，不建兼容表/视图，不双读双写。Web Subscribe字段和成功信封已切换；marks严格拒未知/旧字段、重复坐标、越界与错误类型，坏请求零写，不恢复旧兼容。
 - 精确count/facets、任意子串搜索、深offset与大命中genre仍可线性增长；不会因多加索引自动变成常量成本。真实历史数字见[性能报告](../benchmarks/2026-10-23-storage-redesign-report.md)。
-- 启动root恢复已逐批释放Mutex；housekeeping、rename/Probe等仍有持锁IO，SQL路径归一化新增realpath亦在锁内。未确认新生产锁环，测试fixture仍有join环与隐藏panic，见R07/R08。
+- SQL路径归一化纯计算；Probe、Claim、扫描NFO/artwork与rename磁盘阶段已分离Store锁，rename恢复每100条在blocking worker执行。root配置/同步drain、部分Watch路径检查等仍需优化。未确认新生产锁环；测试fixture owner/join与panic传播反例已修。
 - cache清空只允许连接内受控删除，或停写关闭全部连接后重建；备份不能直接复制活跃文件冒充跨文件一致快照。`request_visible_media`是TEMP表，WAL/SHM不是额外业务分区。
 - 本轮不访问真实实例，不部署、不重建数据库。媒体/字幕/NFO/图片/下载目录保留；NAS、真实Jellyfin客户端、100k Media/1M文件完整规模尚未在本轮运行。

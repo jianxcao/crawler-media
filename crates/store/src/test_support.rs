@@ -97,7 +97,7 @@ fn publish_with_units(
         let config_revision = store
             .library_config_revision(&file.library_id.to_string())
             .unwrap_or(0);
-        let observations = store.observe_nfo_inputs(
+        let observations = store.nfo_input_observer().observe(
             &file.path,
             file.kind,
             &units,
@@ -214,9 +214,7 @@ fn root_for_path(store: &Store, library_id: &str, path: &str) -> Result<String, 
         }
         let normalized = crate::library_paths::resolved_path(&root.path)?;
         let root_key = crate::path_key::normalize_path_key(&normalized.to_string_lossy());
-        if !(resolved_key == root_key
-            || resolved_key.starts_with(&(root_key.clone() + "/")))
-        {
+        if !(resolved_key == root_key || resolved_key.starts_with(&(root_key.clone() + "/"))) {
             continue;
         }
         let depth = Path::new(&root_key).components().count();

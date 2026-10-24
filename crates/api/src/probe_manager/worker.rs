@@ -282,12 +282,9 @@ pub(super) fn work_lease(
     };
     let library_id = {
         let store = manager.store.lock();
-        store
-            .library_for_path_strict(std::path::Path::new(&unit.row.file.path), unit.kind)
-            .map_err(|e| e.to_string())?
-            .map(|library| library.id)
-    }
-    .ok_or("Library no longer owns probe source")?;
+        crate::fingerprint_job::source::ensure_source_recorded(&store, &unit.row)?;
+        unit.row.file.library_id.to_string()
+    };
     registry.acquire(&manager.store, &library_id).map(Some)
 }
 

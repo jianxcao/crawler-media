@@ -7,6 +7,8 @@ use rusqlite::{OptionalExtension, params};
 use super::{Store, StoreError};
 use std::collections::HashSet;
 
+mod unidentified;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LibraryRoot {
     pub id: String,
@@ -131,9 +133,8 @@ impl Store {
 
 impl Store {
     /// Record that files under `root_path` must be re-homed to their longest covering root.
-    /// Scoped sidecar inputs and unidentified rows move here (before any reduce, C07); the
-    /// files themselves move in bounded batches via [`Store::drain_root_reassignments`],
-    /// each its own transaction, resuming from the durable cursor after a crash (A6).
+    /// Files and their sidecar inputs move in bounded batches. Unidentified facts have
+    /// a separate bounded pass before the durable work is acknowledged.
     pub(crate) fn reassign_files_under_root(
         tx: &rusqlite::Connection,
         _library_id: &str,
@@ -158,7 +159,9 @@ impl Store {
     pub fn drain_root_reassignments(&self) -> Result<usize, StoreError> {
         let mut batches = 0;
         loop {
-            if !pending_root_work(self)? { break; }
+            if !pending_root_work(self)? {
+                break;
+            }
             match self.drain_one_root_batch()? {
                 Some(true) => batches += 1,
                 _ => break,
@@ -192,7 +195,11 @@ impl Store {
         tx.commit()?;
         match done {
             None => {
-                tracing::warn!(kind = kind.as_str(), root_key, "根迁移暂停：目标 Library 尚未就绪");
+                tracing::warn!(
+                    kind = kind.as_str(),
+                    root_key,
+                    "根迁移暂停：目标 Library 尚未就绪"
+                );
                 Ok(None)
             }
             // Both an advanced cursor and an exhausted range committed one batch.
@@ -239,10 +246,7 @@ fn ready_roots(
     let mut stmt = tx.prepare(
         "SELECT r.root_id, r.library_id, r.path_key
          FROM library_roots r JOIN libraries l ON l.library_id = r.library_id
-         WHERE l.kind = ?1 AND l.lifecycle_state <> 'removed'
-           AND r.enabled = 1
-           AND NOT EXISTS (SELECT 1 FROM library_removals m
-                           WHERE m.library_id = r.library_id AND m.state <> 'succeeded')",
+         WHERE l.kind = ?1 AND r.enabled = 1",
     )?;
     Ok(stmt
         .query_map(params![kind.as_str()], |row| {
@@ -304,7 +308,7 @@ fn reassign_root_batch(
             continue;
         };
         if old_library != new_library || !file_root_id_is(tx, file_id, root_id)? {
-            if !library_is_ready(tx, new_library)? {
+            if !library_is_ready(tx, old_library)? || !library_is_ready(tx, new_library)? {
                 // The chosen destination is frozen or otherwise not writable. Leaving the
                 // file here and advancing the cursor would permanently skip it (F03).
                 return Ok(None);
@@ -318,19 +322,17 @@ fn reassign_root_batch(
             ));
         }
     }
+    let unidentified_done = if exhausted {
+        let Some(done) = unidentified::reassign_batch(tx, root_key)? else {
+            return Ok(None);
+        };
+        done
+    } else {
+        false
+    };
     move_inputs_for_batch(tx, &candidates, &moves, &roots)?;
     apply_moves(tx, moves)?;
-    if candidates.is_empty() {
-        // The cursor is already past this root's files. Delete it so the next batch
-        // starts the following pending root instead of rereading this empty range.
-        // `false` keeps the caller's batch count for ranges that actually moved files.
-        tx.execute(
-            "DELETE FROM pending_root_reassignments WHERE kind = ?1 AND root_key = ?2",
-            params![kind.as_str(), root_key],
-        )?;
-        return Ok(Some(false));
-    }
-    if exhausted {
+    if exhausted && unidentified_done {
         tx.execute(
             "DELETE FROM pending_root_reassignments WHERE kind = ?1 AND root_key = ?2",
             params![kind.as_str(), root_key],
@@ -341,7 +343,7 @@ fn reassign_root_batch(
             params![kind.as_str(), root_key, last],
         )?;
     }
-    Ok(Some(exhausted))
+    Ok(Some(exhausted && unidentified_done))
 }
 
 /// Move sidecar inputs that belong to this batch's files, in the same transaction.
@@ -382,13 +384,15 @@ fn move_inputs_for_batch(
                 "SELECT input_key, path_key, root_id, media_id FROM library_metadata_inputs
                  WHERE library_id = ?1 AND (input_key = ?2 OR input_key LIKE ?3 OR path_key = ?2 OR path_key LIKE ?3)",
             )?;
-            stmt.query_map(params![library_id, directory, format!("{prefix}%")], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })?
+            stmt.query_map(
+                params![library_id, directory, format!("{prefix}%")],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?
             .collect::<Result<Vec<_>, _>>()?
         };
         for (input_key, path_key, root_id, media_id) in rows {
-            let Some((new_root, new_library, _)) = destination(&path_key).or(destination(&input_key))
+            let Some((new_root, new_library, _)) =
+                destination(&path_key).or(destination(&input_key))
             else {
                 continue;
             };
@@ -535,7 +539,16 @@ fn library_is_ready(tx: &rusqlite::Connection, library_id: &str) -> Result<bool,
             |row| row.get(0),
         )
         .optional()?;
-    Ok(state.as_deref() == Some("ready"))
+    if state.as_deref() != Some("ready") {
+        return Ok(false);
+    }
+    let removing: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM library_removals
+                       WHERE library_id=?1 AND state<>'succeeded')",
+        params![library_id],
+        |row| row.get(0),
+    )?;
+    Ok(!removing)
 }
 
 fn file_root_id_is(

@@ -63,6 +63,9 @@ impl DecidedRenameSidecars {
         for side in self.sidecars.iter_mut() {
             apply_sidecar(side)?;
         }
+        // `decide_rename_disk` already persisted the receipt identity. Recovery
+        // can prove the destination even if we crash before the phase update.
+        super::rename_receipt::remove_staging(&self.request)?;
         Ok(AppliedRenameSidecars {
             request: self.request,
             sidecars: self.sidecars,
@@ -132,13 +135,12 @@ impl Store {
         Ok(DecidedRenameSidecars { request, sidecars })
     }
 
-    /// Mark the intent `disk_applied` and drop the staging link.
+    /// Mark the intent `disk_applied`; staging cleanup was applied without the Store.
     pub fn finish_rename_disk(
         &self,
         applied: AppliedRenameSidecars,
         now: i64,
     ) -> Result<(), StoreError> {
-        self.mark_rename_disk_applied(&applied.request.rename_id, &applied.sidecars, now)?;
-        super::rename_receipt::remove_staging(&applied.request)
+        self.mark_rename_disk_applied(&applied.request.rename_id, &applied.sidecars, now)
     }
 }

@@ -54,6 +54,7 @@ fn scanned(spec: &FixtureFile) -> crate::ScannedLedger {
         size_bytes: None,
         created_ns: None,
         modified_ns: None,
+        artwork: crate::files::DiscoveredArtwork::discover(Path::new(&spec.path)),
         observations: Vec::new(),
     }
 }

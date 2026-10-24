@@ -2,8 +2,7 @@
 //!
 //! 扫描路径先在事务外观察（`observe_nfo_inputs`，冷 IO/解析不进 `BEGIN IMMEDIATE`），再把结果交给
 //! `record_nfo_observations` 在同一事务里按 CAS 校验后落库；已有文件的复核
-//! （[`crate::Store::reconcile_nfo_inputs`]）由调用方在 Store 之外触发，sidecar 的 IO/解析仍在
-//! Store 互斥锁内完成，这是当前已知的取舍。
+//! 使用 owned observation/reconcile plan 在 Store 互斥锁外完成 sidecar IO/解析。
 //!
 //! 一个视频文件旁边可能同时存在多份 NFO，各自描述不同的实体层：整部作品
 //! （`tvshow.nfo` / `movie.nfo`）、某一季（`season.nfo`）、某一集（与视频同名的 `.nfo`）。
@@ -18,7 +17,7 @@ use std::path::PathBuf;
 
 use domain::{EntityScope, FileVersion, MetadataFields};
 
-pub use observe::observe_nfo_inputs;
+pub use observe::{NfoInputObserver, observe_nfo_inputs};
 pub(crate) use observe::{observe_nfo_inputs_with_aliases, observe_nfo_inputs_with_key};
 pub use reconcile::{NfoInputReconcileObserved, NfoInputReconcilePlan};
 pub use record::{NfoInputTarget, record_nfo_observations};

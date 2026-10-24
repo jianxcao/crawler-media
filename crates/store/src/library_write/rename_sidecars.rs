@@ -265,7 +265,7 @@ pub(crate) fn classify_shared_sidecars(
 }
 
 fn sibling_files(tx: &Connection, file_id: &str, dir: &Path) -> Result<bool, StoreError> {
-    let dir_key = crate::path_key::canonical_existing_key(&dir.to_string_lossy());
+    let dir_key = crate::path_key::canonical_recorded_key(tx, &dir.to_string_lossy());
     let prefix = format!("{}/", dir_key.trim_end_matches('/'));
     // `'/' + 1 == '0'`: the half-open range covers every key under `prefix`.
     let upper = format!("{}0", dir_key.trim_end_matches('/'));
@@ -282,11 +282,13 @@ fn sibling_files(tx: &Connection, file_id: &str, dir: &Path) -> Result<bool, Sto
 }
 
 fn referenced_elsewhere(tx: &Connection, file_id: &str, path: &Path) -> Result<bool, StoreError> {
-    let path = crate::path_key::canonical_existing_key(&path.to_string_lossy());
+    let path = crate::path_key::canonical_recorded_key(tx, &path.to_string_lossy());
     let used: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM library_files WHERE file_id <> ?1
-                        AND (poster_path = ?2 OR backdrop_path = ?2 OR still_path = ?2))
-             OR EXISTS(SELECT 1 FROM scrape_sidecars WHERE file_id <> ?1 AND path = ?2)",
+                        AND (norm_path_key(poster_path) = ?2 OR norm_path_key(backdrop_path) = ?2
+                             OR norm_path_key(still_path) = ?2))
+             OR EXISTS(SELECT 1 FROM scrape_sidecars
+                       WHERE file_id <> ?1 AND norm_path_key(path) = ?2)",
         params![file_id, path],
         |r| r.get(0),
     )?;

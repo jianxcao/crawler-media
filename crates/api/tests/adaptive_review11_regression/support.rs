@@ -6,11 +6,11 @@ use marker::fingerprint::{
 };
 use marker::{CommonSegment, FingerprintEngine};
 use parking_lot::Mutex;
-use store::test_support::{publish_fixture_file, FixtureFile};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 struct FixtureEngine {
     case: &'static str,
@@ -235,7 +235,7 @@ fn setup(case: &'static str, episodes: &[u32]) -> Fixture {
             };
             let published = publish_fixture_file(&store.lock(), &fixture).unwrap();
             let coverage = FileCoverage {
-        path_key: String::new(),
+                path_key: String::new(),
                 file: published,
                 units: vec![domain::UnitKey::new(1, episode as i32)],
             };
@@ -310,9 +310,7 @@ fn final_intro_outcome(f: &Fixture, episode: u32) -> marker::adaptive::Verificat
         let samples = st
             .find_covering_fingerprint_samples(&api::store::FingerprintSampleQuery {
                 ledger_id: unit.row.file.file_id.to_string(),
-                source_version: api::fingerprint_job::current_source_version(
-                    &unit.row.file.path,
-                ),
+                source_version: api::fingerprint_job::current_source_version(&unit.row.file.path),
                 capture_profile_key: profile.clone(),
                 kind: "intro".into(),
                 window_start_ms: 0,
@@ -326,7 +324,12 @@ fn final_intro_outcome(f: &Fixture, episode: u32) -> marker::adaptive::Verificat
         {
             evidence.push(api::fingerprint_job::adaptive::stored_sample_to_evidence(
                 sample,
-                unit.row.units.iter().find(|u| !u.is_whole()).map(|u| u.episode.max(0) as u32).unwrap(),
+                unit.row
+                    .units
+                    .iter()
+                    .find(|u| !u.is_whole())
+                    .map(|u| u.episode.max(0) as u32)
+                    .unwrap(),
                 SegmentKind::Intro,
                 Some(1_000_000),
             ));
@@ -391,7 +394,9 @@ fn seed_probe(store: &Store, row: &FileCoverage, duration_ms: Option<i64>) {
         details: Some(&details),
     };
     assert!(
-        store.publish_probe_result(row.file.file_id, &publication, 0).unwrap(),
+        store
+            .publish_probe_result(row.file.file_id, &publication, 0)
+            .unwrap(),
         "probe publication must be accepted for a freshly published row"
     );
 }
@@ -399,8 +404,12 @@ fn seed_probe(store: &Store, row: &FileCoverage, duration_ms: Option<i64>) {
 fn seed_store(store: &Arc<Mutex<Store>>, media_id: MediaId, rows: &[FileCoverage]) {
     let st = store.lock();
     for row in rows {
-        std::fs::write(&row.file.path, b"dummy").unwrap();
-        let episode = row.units.iter().find(|u| !u.is_whole()).map(|u| u.episode.max(0) as u32).unwrap();
+        let episode = row
+            .units
+            .iter()
+            .find(|u| !u.is_whole())
+            .map(|u| u.episode.max(0) as u32)
+            .unwrap();
         st.put_media_marker(&api::store::StoredMediaMarker {
             media_id,
             season: 1,
@@ -415,7 +424,10 @@ fn seed_store(store: &Arc<Mutex<Store>>, media_id: MediaId, rows: &[FileCoverage
         })
         .unwrap();
     }
-    let keys: Vec<_> = rows.iter().map(|row| row.file.file_id.to_string()).collect();
+    let keys: Vec<_> = rows
+        .iter()
+        .map(|row| row.file.file_id.to_string())
+        .collect();
     let specs: Vec<_> = keys
         .iter()
         .map(|key| api::store::ProbeJobUnitSpec {
