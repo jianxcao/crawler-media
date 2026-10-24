@@ -60,7 +60,7 @@ pub(super) fn apply_marker_refresh(
             return;
         }
     };
-    let members = markers::source_observations(mgr, &replacements);
+    let members = markers::source_observations(mgr, Some(&job.id), &replacements);
     let publication = members.and_then(|members| {
         let store = mgr.store.lock();
         let rows = all_rows

@@ -66,7 +66,7 @@ pub(super) fn compare_and_store_markers(
         let chapter_count = replacement.chapter_updates.len();
         let chapter_updates_clone = replacement.chapter_updates.clone();
         observe_rows(std::slice::from_ref(&unit.row))?;
-        let members = source_observations(mgr, std::slice::from_ref(&replacement))?;
+        let members = source_observations(mgr, None, std::slice::from_ref(&replacement))?;
         {
             let store = mgr.store.lock();
             validate_publication_rows(&store, std::slice::from_ref(&unit.row))?;
@@ -152,13 +152,23 @@ fn rows_present_on_disk(
 /// Snapshot published members under a short read, then observe them outside the lock.
 pub(super) fn source_observations(
     mgr: &ProbeManager,
+    job_id: Option<&str>,
     replacements: &[MarkerResultReplacement],
 ) -> Result<Vec<crate::store::SourceObservation>, crate::store::StoreError> {
-    let ids = replacements
+    let mut ids = replacements
         .iter()
         .flat_map(|replacement| replacement.chapter_updates.iter())
         .filter_map(|(id, _)| id.parse::<domain::LedgerId>().ok())
         .collect::<Vec<_>>();
+    if let Some(job_id) = job_id {
+        ids.extend(
+            mgr.store
+                .lock()
+                .probe_job_units(job_id)?
+                .iter()
+                .filter_map(|unit| unit.ledger_id.parse::<domain::LedgerId>().ok()),
+        );
+    }
     let snapshots = mgr.store.lock().source_snapshots(&ids)?;
     Ok(crate::store::observe_sources(&snapshots))
 }

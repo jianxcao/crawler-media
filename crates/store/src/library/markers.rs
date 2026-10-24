@@ -106,7 +106,7 @@ impl Store {
                     // season-wide membership equality does not apply. Each published file must still
                     // match its out-of-lock observation, and the published set must equal the job's members.
                     source_guard::validate_published_rows(&tx, replacements, members)?;
-                    source_guard::validate_job_members(&tx, job_id, replacements)?;
+                    source_guard::validate_job_members(&tx, job_id, replacements, members)?;
                 }
                 None => source_guard::validate_members(&tx, replacements, members)?,
             }

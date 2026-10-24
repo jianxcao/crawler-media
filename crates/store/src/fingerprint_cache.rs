@@ -71,6 +71,36 @@ impl Store {
         ledger_id: &str,
         cache: &FingerprintCacheEntry,
     ) -> Result<(), StoreError> {
+        self.put_fingerprint_cache_checked(ledger_id, None, cache)
+    }
+
+    /// Persist a cache captured from `expected`. `None` keeps the unchecked write
+    /// for callers that have no pinned version; a pinned version that no longer
+    /// matches is refused and writes nothing.
+    pub fn put_fingerprint_cache_checked(
+        &self,
+        ledger_id: &str,
+        expected: Option<&domain::FileVersion>,
+        cache: &FingerprintCacheEntry,
+    ) -> Result<(), StoreError> {
+        if let Some(expected) = expected {
+            let current: Option<(i64, String)> = self
+                .library
+                .query_row(
+                    "SELECT file_revision, source_version FROM library_files WHERE file_id = ?1",
+                    [ledger_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((revision, source_version)) = current else {
+                return Err(StoreError::Missing(format!("file_deleted: {ledger_id}")));
+            };
+            if revision != expected.revision || source_version != expected.source_version {
+                return Err(StoreError::Protected(format!(
+                    "fingerprint source changed: {ledger_id}"
+                )));
+            }
+        }
         self.library.execute(
             "INSERT INTO fingerprint_cache (
                  file_id, cache_key, algorithm_version, sample_duration_secs,

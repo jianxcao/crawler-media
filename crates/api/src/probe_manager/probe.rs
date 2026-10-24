@@ -277,7 +277,7 @@ async fn probe_adaptive_season(
                 let chapter_updates_clone = replacement.chapter_updates.clone();
                 let markers_len = replacement.markers.len();
                 let members =
-                    super::markers::source_observations(mgr, std::slice::from_ref(&replacement));
+                    super::markers::source_observations(mgr, None, std::slice::from_ref(&replacement));
                 let publication = members.and_then(|members| {
                     let store = mgr.store.lock();
                     let rows = season_units
@@ -659,7 +659,13 @@ pub(super) async fn probe_fingerprint_and_store_detailed(
         super::markers::observe_rows(std::slice::from_ref(&unit.row)).and_then(|()| {
             let store = mgr.store.lock();
             super::markers::validate_publication_rows(&store, std::slice::from_ref(&unit.row))
-                .and_then(|()| store.put_fingerprint_cache(&ledger_id, &outcome.cache))
+                .and_then(|()| {
+                    store.put_fingerprint_cache_checked(
+                        &ledger_id,
+                        Some(&unit.row.file.version),
+                        &outcome.cache,
+                    )
+                })
         });
     if let Err(error) = publication {
         if matches!(&error, crate::store::StoreError::Missing(reason) if crate::fingerprint_job::source::is_file_deleted(reason))
@@ -675,7 +681,7 @@ pub(super) async fn probe_fingerprint_and_store_detailed(
             error: error.to_string(),
         };
     }
-    log_fingerprint_publication(
+    super::stages::log_fingerprint_publication(
         unit,
         &ledger_id,
         &fp_path,
@@ -720,35 +726,6 @@ pub(super) async fn probe_fingerprint_and_store_detailed(
         }
         None => super::stages::FingerprintRunOutcome::Complete,
     }
-}
-
-fn log_fingerprint_publication(
-    unit: &ProbeUnit,
-    ledger_id: &str,
-    fp_path: &std::path::Path,
-    source_version: &str,
-    outcome: &crate::fingerprint_job::FingerprintCaptureOutcome,
-    started: Instant,
-) {
-    tracing::info!(
-        ledger_id,
-        media_id = %unit.row.file.media_id,
-        season = projected_season(&unit.row),
-        episode = projected_episode(&unit.row),
-        path = %fp_path.display(),
-        source_version,
-        cache_key = outcome.cache.cache_key,
-        intro_cache_hit = outcome.intro_cache_hit,
-        outro_cache_hit = outcome.outro_cache_hit,
-        intro_words = outcome.cache.intro.len(),
-        outro_words = outcome.cache.outro.as_ref().map(Vec::len).unwrap_or_default(),
-        intro_elapsed_ms = outcome.intro_elapsed_ms,
-        outro_elapsed_ms = outcome.outro_elapsed_ms,
-        media_duration_ms = ?outcome.cache.media_duration_ms,
-        refresh_id = ?unit.marker_refresh_id,
-        elapsed_ms = started.elapsed().as_millis() as u64,
-        "【声纹】版本化指纹缓存已持久化"
-    );
 }
 
 /// Publish stream facts pinned to the queued version. `Ok(false)`: a rescan replaced it.

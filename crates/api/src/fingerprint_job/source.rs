@@ -15,6 +15,7 @@ pub(crate) fn ensure_source_recorded(store: &Store, row: &FileCoverage) -> Resul
     let carried = current.as_ref().is_some_and(|current| {
         current.file.path == row.file.path
             && current.file.media_id == row.file.media_id
+            && current.file.version == row.file.version
             && (current.units.contains(&target) || (target.is_whole() && !current.is_episodic()))
     });
     if !carried {

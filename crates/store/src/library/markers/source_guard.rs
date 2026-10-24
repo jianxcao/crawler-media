@@ -185,7 +185,18 @@ pub(super) fn validate_job_members(
     tx: &Transaction<'_>,
     job_id: &str,
     replacements: &[MarkerResultReplacement],
+    members: &[SourceObservation],
 ) -> Result<(), StoreError> {
+    // Chapter updates are a subset of the files compared. Every file the job leased
+    // must still match the observation pinned before comparison, whether or not it
+    // produced a chapter update.
+    let mut leased = tx.prepare("SELECT file_id FROM probe_job_units WHERE job_id = ?1")?;
+    let leased: Vec<String> = leased
+        .query_map([job_id], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    for id in &leased {
+        check_observed(tx, id, members)?;
+    }
     let published: BTreeSet<_> = replacements
         .iter()
         .flat_map(|replacement| replacement.chapter_updates.iter().map(|(id, _)| id.clone()))
