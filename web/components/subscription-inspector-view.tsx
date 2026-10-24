@@ -877,7 +877,7 @@ export function SubscriptionInspectorView({
           onClose={() => setSwitchingRule(false)}
           onPick={async (ruleSetId) => {
             await updateSubscription(detail.id, {
-              rule_set_id: String(ruleSetId),
+              filter_id: String(ruleSetId),
             });
             setSwitchingRule(false);
             reload();

@@ -333,9 +333,10 @@ export interface CreateSubscriptionPayload {
   title_ref: string;
   /** 从豆瓣候选改选 TMDB 条目时保留原始豆瓣身份 */
   source_title_ref?: string | null;
-  selected_seasons?: number[];
+  /** 剧集订阅范围；电影省略。一季一条订阅。 */
+  coverage?: { kind: "tv"; season: number; episode_from: number };
   follow_future?: boolean;
-  rule_set_id?: string | null;
+  filter_id?: string | null;
   /** 入库目标库；缺省用该类型的默认库 */
   library_id?: string | null;
   wash_cut?: boolean;
@@ -582,22 +583,20 @@ export function getSubscription(id: string): Promise<SubscriptionDetail> {
   return unwrap(request<ApiEnvelope<SubscriptionDetail>>(`/subscriptions/${id}`));
 }
 
-/** 修改订阅（季选择/自动续订/规则组，后端 diff 重算工单）。
- *  新契约 PATCH 只接受 fetch_mode/wash_cut/full_season_pack/downloader_id；
- *  旧字段按语义映射（rule_set_id→filter_id），其余被后端忽略。 */
+/** 修改订阅。PATCH 只接受当前合同字段；旧的 selected_seasons / rule_set_id 不再发送。 */
 export function updateSubscription(
   id: string,
   payload: {
-    selected_seasons?: number[];
+    coverage?: { kind: "tv"; season: number; episode_from: number };
     follow_future?: boolean;
-    rule_set_id?: string | null;
+    filter_id?: string | null;
     /** 换入库目标库；显式传 null=清除指定、改回按默认库路由；缺省不变 */
     library_id?: string | null;
   },
 ): Promise<Subscription> {
   const body: Record<string, unknown> = {};
-  if (payload.selected_seasons) body.selected_seasons = payload.selected_seasons;
-  if (payload.rule_set_id != null) body.filter_id = String(payload.rule_set_id);
+  if (payload.coverage) body.coverage = payload.coverage;
+  if (payload.filter_id != null) body.filter_id = String(payload.filter_id);
   if (payload.follow_future !== undefined) body.follow_future = payload.follow_future;
   if (payload.library_id !== undefined) {
     body.library_id = payload.library_id === null ? null : String(payload.library_id);
@@ -636,7 +635,7 @@ export interface UpgradeRunUnit {
 /** 一轮洗版的体检报告（见 schemas.subscription.UpgradeRunView）。 */
 export interface UpgradeRunReport {
   target_label: string;
-  rule_set_id: string | null;
+  filter_id: string | null;
   /** 中文整句摘要，直接展示 */
   summary: string;
   counts: Record<UpgradeRunUnit["state"], number>;
@@ -654,7 +653,7 @@ export function runSubscriptionUpgradeRound(
   return unwrap(
     request<ApiEnvelope<UpgradeRunReport>>(`/subscriptions/${id}/upgrade-runs`, {
       method: "POST",
-      body: JSON.stringify(ruleSetId != null ? { rule_set_id: ruleSetId } : {}),
+      body: JSON.stringify(ruleSetId != null ? { filter_id: ruleSetId } : {}),
     }),
   );
 }

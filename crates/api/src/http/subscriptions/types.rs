@@ -1,6 +1,7 @@
 use serde::Deserialize;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CreateSubscriptionInput {
     /// 稳定引用（`tmdb:movie:603` / `tmdb:603` / 裸标题）。提供时后端解析出
     /// Media 身份，`media` 字段可省略。

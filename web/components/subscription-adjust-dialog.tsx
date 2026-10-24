@@ -156,7 +156,7 @@ export function SubscriptionAdjustDialog({
     try {
       await updateSubscription(detail.id, {
         ...(changed.seasons
-          ? { selected_seasons: [...selectedSeasons].sort((a, b) => a - b) }
+          ? { coverage: { kind: "tv" as const, season: [...selectedSeasons].sort((a, b) => a - b)[0], episode_from: 1 } }
           : {}),
         // 显式带上 null 即「清除指定库、改回默认库路由」（后端区分未传与 null）
         ...(canManageSubscriptions ? libraryPatch(initialLibraryId, libraryId) : {}),

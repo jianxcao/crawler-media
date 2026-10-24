@@ -250,9 +250,9 @@ export function SubscribeDialog({
               target.titleRef.startsWith("douban:") && selectedTitleRef !== target.titleRef
                 ? target.titleRef
                 : null,
-            selected_seasons: [s],
+            coverage: { kind: "tv", season: s, episode_from: 1 },
             follow_future: followFuture,
-            rule_set_id: canManageSubscriptions ? (ruleSetId) : null,
+            filter_id: canManageSubscriptions ? (ruleSetId) : null,
             library_id: canManageSubscriptions ? libraryId : null,
             ...(keepOldFromSpec ? { keep_old_versions: true } : {}),
           });
@@ -265,9 +265,8 @@ export function SubscribeDialog({
             target.titleRef.startsWith("douban:") && selectedTitleRef !== target.titleRef
               ? target.titleRef
               : null,
-          selected_seasons: [],
           follow_future: followFuture,
-          rule_set_id: canManageSubscriptions ? (ruleSetId) : null,
+          filter_id: canManageSubscriptions ? (ruleSetId) : null,
           library_id: canManageSubscriptions ? libraryId : null,
           ...(keepOldFromSpec ? { keep_old_versions: true } : {}),
         }));

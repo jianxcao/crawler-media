@@ -200,3 +200,22 @@ async fn patch_rejects_malformed_downloader_reference() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn create_rejects_legacy_selected_seasons_without_writing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let response = app(&tmp)
+        .oneshot(request(
+            "POST",
+            "/api/v1/subscriptions",
+            Some("management-secret"),
+            json!({
+                "media": { "kind": "tv", "title": "Legacy" },
+                "selected_seasons": [1]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(rows(&tmp, "subscribe.db", "subscribes"), 0);
+}

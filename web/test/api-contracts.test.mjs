@@ -28,11 +28,11 @@ test("real routing and upgrade adapters preserve UUID identities", async () => {
   assert.equal(target.library_id, libraryId);
   const subscriptions = await loadApiModule("subscriptions", async (path, options) => {
     assert.equal(path, "/subscriptions/subscription-uuid/upgrade-runs");
-    assert.deepEqual(JSON.parse(options.body), { rule_set_id: ruleSetId });
-    return { success: true, code: "ok", message: "", data: { rule_set_id: ruleSetId, units: [] } };
+    assert.deepEqual(JSON.parse(options.body), { filter_id: ruleSetId });
+    return { success: true, code: "ok", message: "", data: { filter_id: ruleSetId, units: [] } };
   });
   const report = await subscriptions.runSubscriptionUpgradeRound("subscription-uuid", ruleSetId);
-  assert.equal(report.rule_set_id, ruleSetId);
+  assert.equal(report.filter_id, ruleSetId);
 });
 
 const readWeb = (relativePath) =>
