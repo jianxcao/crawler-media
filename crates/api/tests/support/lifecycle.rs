@@ -125,23 +125,32 @@ impl FakeServer {
         let flag = stop.clone();
         let accept = std::thread::spawn(move || {
             let mut connections = Vec::new();
+            let mut panicked = Vec::new();
             for stream in listener.incoming() {
                 if flag.load(Ordering::SeqCst) {
                     break;
                 }
                 let Ok(mut stream) = stream else { continue };
                 let handler = handler.clone();
+                let stop = flag.clone();
                 connections.push(std::thread::spawn(move || {
-                    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-                    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                    let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
+                    if stop.load(Ordering::SeqCst) {
+                        return;
+                    }
                     if let Some(request) = read_request(&mut stream) {
                         handler(&request, &mut stream);
                     }
                 }));
-                connections.retain(|c: &JoinHandle<()>| !c.is_finished());
             }
             for connection in connections {
-                resume_join(connection);
+                if let Err(panic) = connection.join() {
+                    panicked.push(panic);
+                }
+            }
+            if let Some(panic) = panicked.pop() {
+                std::panic::resume_unwind(panic);
             }
         });
         Self {
@@ -163,7 +172,6 @@ impl FakeServer {
 impl Drop for FakeServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        // Wake the blocking accept so the loop observes the stop flag.
         let _ = TcpStream::connect_timeout(&self.addr, Duration::from_secs(1));
         if let Some(accept) = self.accept.take() {
             resume_join(accept);
