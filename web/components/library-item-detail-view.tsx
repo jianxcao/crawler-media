@@ -765,7 +765,7 @@ export function LibraryItemDetailView({
           clearPlaybackHistory("item", {
             mediaItemId: detail.media_item_id,
           })
-            .then(({ message }) => toast.success(message))
+            .then((cleared) => toast.success(`已清除 ${cleared.deleted_states} 条观看记录`))
             .catch((e) => toast.error((e as Error).message));
         });
       }}

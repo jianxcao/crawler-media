@@ -284,7 +284,7 @@ export interface PlaybackHistoryClearResult {
 export async function clearPlaybackHistory(
   scope: "item" | "library" | "all",
   target: { mediaItemId?: string; libraryId?: string; since?: Date } = {},
-): Promise<{ result: PlaybackHistoryClearResult; message: string }> {
+): Promise<PlaybackHistoryClearResult> {
   const params = new URLSearchParams({ scope });
   if (target.mediaItemId != null) params.set("media_item_id", String(target.mediaItemId));
   if (target.libraryId != null) params.set("library_id", String(target.libraryId));
@@ -293,7 +293,7 @@ export async function clearPlaybackHistory(
     `/playback/history?${params}`,
     { method: "DELETE" },
   );
-  return { result: response.data, message: response.message };
+  return response.data;
 }
 
 /** 活动页「观看」视角的实时快照：正在播放与正在下载。 */
@@ -308,15 +308,13 @@ export async function fetchMediaActivity(
 
 /** 结束一台设备本次播放：不动凭据，设备下次亲手点播放即可继续。 */
 export async function endDevicePlayback(userId: string, deviceId: string): Promise<string> {
-  const response = await request<ApiEnvelope<null>>(
+  const response = await request<ApiEnvelope<{ ended: number }>>(
     `/playback/activity/sessions/${encodeURIComponent(deviceId)}/end?user_id=${encodeURIComponent(userId)}`,
     { method: "POST" },
   );
-  return response.message;
+  if (response.data?.ended !== 1) throw new Error("结束播放没有确认");
+  return "已结束该设备的播放";
 }
-
-// ---------------------------------------------------------------------------
-// 播放日志：播放记录与观看统计（docs/design/activity.md「播放日志与统计」）
 // ---------------------------------------------------------------------------
 
 export interface PlaybackLogEntry {
@@ -461,11 +459,12 @@ export async function fetchPlaybackWatchStats(
 
 /** 注销一台播放器设备：凭据即刻失效，其正在进行的播放与取流一并停止。 */
 export async function revokePlaybackDevice(userId: string, deviceId: string): Promise<string> {
-  const response = await request<ApiEnvelope<null>>(
+  const response = await request<ApiEnvelope<{ revoked: boolean }>>(
     `/playback/devices/${encodeURIComponent(deviceId)}?user_id=${encodeURIComponent(userId)}`,
     { method: "DELETE" },
   );
-  return response.message;
+  if (response.data?.revoked !== true) throw new Error("注销设备没有确认");
+  return "已注销该设备";
 }
 
 // ---------------------------------------------------------------------------

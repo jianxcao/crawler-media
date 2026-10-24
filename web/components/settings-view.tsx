@@ -338,8 +338,8 @@ function WatchHistoryCard() {
     if (!ok) return;
     setBusy(true);
     try {
-      const { message } = await clearPlaybackHistory("all");
-      toast.success(message);
+      const cleared = await clearPlaybackHistory("all");
+      toast.success(`已清除 ${cleared.deleted_states} 条观看记录`);
     } catch (e) {
       toast.error((e as Error).message);
     } finally {
