@@ -51,7 +51,10 @@ impl Store {
             "WHERE f.file_id = (SELECT file_id FROM library_files
                                 WHERE path_key = norm_path_key(?1) LIMIT 1)",
         );
-        Ok(self.read_coverage(&sql, [path])?.into_iter().next())
+        Ok(self
+            .read_coverage(&sql, [stored_path_key(path)])?
+            .into_iter()
+            .next())
     }
 
     /// The file recorded at `path` and its version, for version-checked artwork publication.
@@ -59,12 +62,13 @@ impl Store {
         &self,
         path: &str,
     ) -> Result<Option<(LedgerId, FileVersion)>, StoreError> {
+        let key = stored_path_key(path);
         self.library
             .query_row(
                 "SELECT file_id, file_revision, source_version FROM library_files
                  WHERE path_key = norm_path_key(?1)
                  LIMIT 1",
-                [path],
+                [key],
                 |row| {
                     let id: String = row.get(0)?;
                     Ok((
@@ -223,7 +227,7 @@ impl Store {
                 "SELECT file_id, library_id FROM library_files
                  WHERE path_key = norm_path_key(?1)
                  LIMIT 1",
-                [path],
+                [stored_path_key(path)],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
@@ -270,7 +274,7 @@ impl Store {
                 "SELECT publication_state = 'pending' FROM library_files
                  WHERE path_key = norm_path_key(?1)
                  LIMIT 1",
-                [path],
+                [stored_path_key(path)],
                 |row| row.get(0),
             )
             .optional()?;
@@ -288,7 +292,7 @@ impl Store {
                 "SELECT source_path FROM library_files
                  WHERE path_key = norm_path_key(?1)
                  LIMIT 1",
-                [path],
+                [stored_path_key(path)],
                 |row| row.get(0),
             )
             .optional()?;
@@ -446,4 +450,8 @@ mod batch_tests {
         let deduped = store.file_coverage_for_media_batch(&duplicated).unwrap();
         assert_eq!(deduped.len(), 501);
     }
+}
+
+fn stored_path_key(path: &str) -> String {
+    crate::path_key::canonical_existing_key(path)
 }

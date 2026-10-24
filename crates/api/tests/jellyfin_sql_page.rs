@@ -52,10 +52,10 @@ impl Fx {
 
     fn add_in(&self, root: &Path, title: &str, nfo: Option<&str>) -> MediaId {
         let media = insert_media(&self.store, title, MediaKind::Movie);
-        let path = root.join(format!("{title}.mkv"));
+        let path = root.join(format!("{title}-{}.mkv", uuid::Uuid::new_v4()));
         std::fs::write(&path, b"payload").unwrap();
         if let Some(body) = nfo {
-            std::fs::write(root.join(format!("{title}.nfo")), body).unwrap();
+            std::fs::write(path.with_extension("nfo"), body).unwrap();
         }
         publish_fixture(&self.store, media, &path, None, None);
         media
@@ -71,7 +71,7 @@ impl Fx {
 
     /// 同一逻辑作品的另一个版本：换一个库根写文件，但沿用同一个 `MediaId`。
     fn add_version(&self, root: &Path, media: MediaId, title: &str) {
-        let path = root.join(format!("{title}.mkv"));
+        let path = root.join(format!("{title}-{}.mkv", uuid::Uuid::new_v4()));
         std::fs::write(&path, b"payload").unwrap();
         publish_fixture(&self.store, media, &path, None, None);
     }
