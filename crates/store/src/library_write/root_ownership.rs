@@ -51,6 +51,22 @@ pub(crate) fn ensure_root_owns_path(
             file.path.display()
         )));
     }
+    // A nested root created after this scope was prepared owns the path now.
+    // The declared root still contains it, but publication must follow the longest one.
+    let mut statement = tx.prepare(
+        "SELECT path_key FROM library_roots WHERE enabled = 1 AND length(path_key) > length(?1)",
+    )?;
+    let longer: Vec<String> = statement
+        .query_map([&root_key], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    if longer.iter().any(|candidate| {
+        file_key == *candidate || file_key.starts_with(&(candidate.clone() + "/"))
+    }) {
+        return Err(StoreError::Protected(format!(
+            "path {} belongs to a nested root",
+            file.path.display()
+        )));
+    }
     Ok(None)
 }
 
