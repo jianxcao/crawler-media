@@ -209,6 +209,28 @@ async fn marks_cascade_and_favorites_list() {
     )
     .await;
     assert_eq!(marks["data"]["played"], true);
+    for body in [
+        json!({ "media_item_id": media_id, "season": 1, "played": false }),
+        json!({ "media_item_id": media_id, "season_number": "1", "played": false }),
+        json!({ "media_item_id": media_id, "season_number": 4294967296_u64, "played": false }),
+        json!({ "media_item_id": media_id, "episode_number": 1, "played": false }),
+    ] {
+        let rejected = post_async(&app, "/api/v1/playback/marks", body.clone()).await;
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
+    let unchanged = json_body(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                &format!("/api/v1/playback/marks?media_item_id={media_id}"),
+                Some("management-secret"),
+                Value::Null,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(unchanged["data"]["played"], true, "a refused mark writes nothing");
     assert_eq!(marks["data"]["is_favorite"], true);
 
     // If an episode is favorited, query for whole show must also reflect is_favorite = true
