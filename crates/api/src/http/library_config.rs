@@ -38,7 +38,7 @@ fn paths_from(body: &Value) -> Vec<String> {
 }
 
 /// POST /libraries — create a library with one or more ordered roots
-/// (first = primary). Payload fields beyond name/kind/root_paths are ignored.
+/// (first = primary). Detection defaults off unless explicitly enabled.
 pub(crate) async fn create_library(
     State(state): State<ApiState>,
     Json(body): Json<Value>,
@@ -91,10 +91,11 @@ pub(crate) async fn create_library(
     ) {
         Ok(library) => {
             let lib_id = library.id.clone();
-            let _json_resp = library_json(&store, &library);
-            if let Err(error) =
-                store.set_library_intro_settings(&library.id, false, false)
-            {
+            if let Err(error) = store.set_library_intro_settings(
+                &library.id,
+                body["detect_intros"].as_bool().unwrap_or(false),
+                body["enable_fingerprint"].as_bool().unwrap_or(false),
+            ) {
                 tracing::warn!(%error, "保存新建媒体库片头片尾开关失败");
             }
             if let Err(error) = store.set_library_switch_settings(
@@ -262,13 +263,22 @@ pub(crate) async fn delete_library(
     let preflight = state.library_work.freeze(&state.store, &id);
     match preflight {
         Ok(operation) => match crate::library_lifecycle::launch_library_removal(
-            &state, operation, tokio::runtime::Handle::current()) {
+            &state,
+            operation,
+            tokio::runtime::Handle::current(),
+        ) {
             Ok(operation) => (StatusCode::ACCEPTED, ok(json!(operation))).into_response(),
             Err(error) => err(StatusCode::INTERNAL_SERVER_ERROR, "library.removal", &error),
         },
         Err(StoreError::Missing(_)) => missing_library(),
-        Err(StoreError::Protected(message)) => err(StatusCode::CONFLICT, "library.protected", &message),
-        Err(error) => err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error.to_string()),
+        Err(StoreError::Protected(message)) => {
+            err(StatusCode::CONFLICT, "library.protected", &message)
+        }
+        Err(error) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store.error",
+            &error.to_string(),
+        ),
     }
 }
 

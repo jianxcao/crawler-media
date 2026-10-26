@@ -10,7 +10,9 @@ pub(crate) mod diagnostics;
 pub(crate) mod pcm;
 pub(crate) mod timing;
 
-pub(crate) use diagnostics::{CapturedStderr, parse_benchmark, read_stderr_tail, sanitized_excerpt};
+pub(crate) use diagnostics::{
+    CapturedStderr, parse_benchmark, read_stderr_tail, sanitized_excerpt,
+};
 pub(crate) use pcm::consume_pcm;
 pub(crate) use timing::{ExtractionTimings, log_extraction_timings};
 
@@ -19,6 +21,7 @@ pub(super) fn extract(
     start_secs: u32,
     duration_secs: u32,
 ) -> Result<Vec<u32>, String> {
+    let _permit = crate::media_read::acquire_media_read(path, &crate::WorkControl::default())?;
     let started = Instant::now();
     let source = match ProbeTarget::from_path(path) {
         ProbeTarget::Local(_) => "local",

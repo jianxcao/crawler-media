@@ -139,12 +139,12 @@ mod tests {
     #[test]
     fn local_date_differs_from_utc_when_offset_crosses_midnight() {
         // 2023-11-14T22:13:20Z: in UTC+8 this is already 2023-11-15.
-        let Ok(out) = std::process::Command::new("date")
-            .args(["-d", "@1700000000", "+%F"])
-            .output()
-        else {
-            return;
-        };
+        #[cfg(target_os = "macos")]
+        let args = ["-r", "1700000000", "+%F"];
+        #[cfg(not(target_os = "macos"))]
+        let args = ["-d", "@1700000000", "+%F"];
+        let out = std::process::Command::new("date").args(args).output().unwrap();
+        assert!(out.status.success(), "date failed: {:?}", out.stderr);
         let system = String::from_utf8_lossy(&out.stdout).trim().to_string();
         assert_eq!(local_date(1_700_000_000), system);
     }

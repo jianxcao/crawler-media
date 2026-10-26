@@ -10,7 +10,7 @@ use std::process::Command;
 
 use library::{ProbeTarget, WorkControl};
 
-use super::{chapter_frame_path, ChapterFrameRequest, ChapterFrameRunner, ChapterFrameStaged};
+use super::{ChapterFrameRequest, ChapterFrameRunner, ChapterFrameStaged, chapter_frame_path};
 use crate::library_lifecycle::LibraryWorkLease;
 
 pub struct FfmpegChapterFrameRunner {
@@ -82,6 +82,7 @@ fn extract_frame(
     target: &Path,
     control: &WorkControl,
 ) -> Result<ChapterFrameStaged, String> {
+    let _permit = marker::media_read::acquire_media_read(video, control.signal())?;
     let staged = target.with_file_name(format!(".chapter-{}.jpg", uuid::Uuid::new_v4()));
     let mut command = Command::new(ffmpeg);
     command.args(["-y", "-ss", &format!("{:.3}", midpoint as f64 / 1000.0)]);

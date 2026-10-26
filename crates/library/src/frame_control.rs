@@ -22,6 +22,7 @@ fn extract_with_program(
     program: &std::ffi::OsStr,
 ) -> Result<(), String> {
     control.check().map_err(|error| error.to_string())?;
+    let _permit = marker::media_read::acquire_media_read(path, control.signal())?;
     let staging = Staging::new(
         out.parent()
             .filter(|p| !p.as_os_str().is_empty())

@@ -2,6 +2,7 @@ pub mod adaptive;
 pub mod chapter;
 pub mod fingerprint;
 pub mod matcher;
+pub mod media_read;
 pub mod target;
 pub mod types;
 mod work_control;

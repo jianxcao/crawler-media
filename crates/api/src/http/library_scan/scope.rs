@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 
 use store::{LibraryPathScope, Store, StrictOwner};
 
+mod ownership;
+use ownership::{relevant_snapshot, same_kind_snapshot_matches};
+
 use crate::library_presence::PresenceError;
 pub fn walk_video_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -36,6 +39,7 @@ pub struct ScanScope {
     pub library_id: String,
     pub kind: domain::MediaKind,
     scope: LibraryPathScope,
+    resolved_roots: Vec<PathBuf>,
     /// 捕获时的 Library scope 指纹：发布前用它复核持久化 signature（P2-4）。
     signature: String,
 }
@@ -58,7 +62,15 @@ impl ScanScope {
             (snapshot, kind, signature)
         };
 
-        let scope = LibraryPathScope::resolve(snapshot)?;
+        let resolved_roots = snapshot
+            .library(library_id)
+            .ok_or(PresenceError::Missing)?
+            .root_paths
+            .iter()
+            .map(|root| LibraryPathScope::resolve_path(root))
+            .collect::<Result<Vec<_>, _>>()?;
+        let relevant = relevant_snapshot(&snapshot, library_id, kind, &resolved_roots)?;
+        let scope = LibraryPathScope::resolve(relevant)?;
         if !scope.accepts_work(library_id) {
             return Err(PresenceError::Deleting);
         }
@@ -67,6 +79,7 @@ impl ScanScope {
             library_id: library_id.to_string(),
             kind,
             scope,
+            resolved_roots,
             signature,
         })
     }
@@ -115,15 +128,48 @@ impl ScanScope {
         Ok(admitted)
     }
 
-    /// Validate in-lock that the library is still active and matches the captured scope.
-    pub fn validate(&self, store: &Store) -> Result<(), PresenceError> {
-        let current_snapshot = store.library_ownership()?;
-        if !current_snapshot.accepts_work(&self.library_id) {
-            return Err(PresenceError::Deleting);
+    /// Resolve changed ownership outside Store locks, then publish only if the
+    /// configuration still matches that observation. Unrelated changes retry the
+    /// short observation window; overlapping changes invalidate the scan.
+    pub fn publish<T>(
+        &self,
+        state: &ApiState,
+        lease: &crate::library_lifecycle::LibraryWorkLease,
+        operation: impl FnOnce(&Store) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut operation = Some(operation);
+        for _ in 0..3 {
+            let observed = state
+                .store
+                .lock()
+                .library_ownership()
+                .map_err(|e| e.to_string())?;
+            if !observed.accepts_work(&self.library_id) {
+                return Err(format!("{:?}", PresenceError::Deleting));
+            }
+            let relevant =
+                relevant_snapshot(&observed, &self.library_id, self.kind, &self.resolved_roots)
+                    .map_err(|e| format!("{e:?}"))?;
+            if !self.scope.matches(&relevant) {
+                tracing::warn!(library_id = %self.library_id, "扫描归属边界变化，拒绝过期发布");
+                return Err(format!("{:?}", PresenceError::ScopeChanged));
+            }
+            let published = lease.publish(|| {
+                let store = state.store.lock();
+                let current = store.library_ownership().map_err(|e| e.to_string())?;
+                if !same_kind_snapshot_matches(&observed, &current, self.kind) {
+                    return Ok(None);
+                }
+                let publish = operation
+                    .take()
+                    .ok_or("scan publication already consumed")?;
+                publish(&store).map(Some)
+            })?;
+            if let Some(value) = published {
+                return Ok(value);
+            }
         }
-        if !self.scope.matches(&current_snapshot) {
-            return Err(PresenceError::ScopeChanged);
-        }
-        Ok(())
+        tracing::warn!(library_id = %self.library_id, "扫描发布期间配置持续变化，已达复核重试上限");
+        Err(format!("{:?}", PresenceError::ScopeChanged))
     }
 }

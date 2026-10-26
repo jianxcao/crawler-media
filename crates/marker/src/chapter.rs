@@ -70,7 +70,11 @@ pub fn probe_chapters(path: &Path) -> Option<Vec<Chapter>> {
     probe_chapters_controlled(path, &crate::WorkControl::default())
 }
 
-pub fn probe_chapters_controlled(path: &Path, control: &crate::WorkControl) -> Option<Vec<Chapter>> {
+pub fn probe_chapters_controlled(
+    path: &Path,
+    control: &crate::WorkControl,
+) -> Option<Vec<Chapter>> {
+    let _permit = crate::media_read::acquire_media_read(path, control).ok()?;
     let target = ProbeTarget::from_path(path);
     let mut cmd = Command::new("ffprobe");
     cmd.args(["-v", "error", "-show_chapters", "-of", "json"]);

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use notify::RecursiveMode;
@@ -10,6 +10,7 @@ use parking_lot::Mutex;
 
 use crate::management::ApiState;
 
+mod directory;
 pub(crate) mod presence;
 /// STRM 延迟删除条目：记录删除时间戳与删除前的流媒体 URL。
 #[derive(Clone, Debug)]
@@ -323,7 +324,7 @@ pub(crate) fn entry_scan_target_dir(root: &Path, file_path: &Path) -> PathBuf {
 pub fn relevant_fs_events(events: &[DebouncedEvent]) -> Vec<DebouncedEvent> {
     events
         .iter()
-        .filter(|event| !is_ignored_filesystem_metadata(&event.path))
+        .filter(|event| is_relevant_media_entry(&event.path))
         .cloned()
         .collect()
 }
@@ -350,6 +351,7 @@ fn is_ignored_filesystem_metadata(path: &Path) -> bool {
                 | "recycle_bin"
                 | ".recycle"
         ) || name.starts_with("._")
+            || name.starts_with(".frame-staging-")
             || name.eq_ignore_ascii_case("thumbs.db")
             || name.eq_ignore_ascii_case("desktop.ini")
     })
@@ -359,6 +361,9 @@ fn is_ignored_filesystem_metadata(path: &Path) -> bool {
 /// 仅允许视频/STRM格式或目录变动向下传递，彻底屏蔽图片、NFO、字幕、文本、临时文件等非媒体侧车变动，
 /// 防止刮削与元数据写入引发死循环，并统一使用完整的视频格式白名单。
 pub(crate) fn is_relevant_media_entry(path: &Path) -> bool {
+    if is_ignored_filesystem_metadata(path) {
+        return false;
+    }
     if path.exists() {
         path.is_dir() || library::is_video_file(path)
     } else {
@@ -510,10 +515,22 @@ fn note_present_path(
         *intake_changed = true;
     }
     if path.is_dir() {
-        if let Some(root) = realtime_library_root_for_path(state, path) {
-            let target_dir = entry_scan_target_dir(&root, path);
-            tracing::info!(root = %root.display(), target_dir = %target_dir.display(), "目录新增/还原，加入扫描目标");
-            scan_targets.insert((root, target_dir));
+        if realtime_library_root_for_path(state, path).is_none() {
+            return;
+        }
+        for media in directory::changed_media_files(state, path) {
+            let is_strm = media
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"));
+            note_present_path(
+                state,
+                tracker,
+                &media,
+                is_strm,
+                intake_changed,
+                scrape_needed,
+                scan_targets,
+            );
         }
         return;
     }
@@ -634,7 +651,11 @@ impl FsWatcherState {
     /// - desired: 期望监听的目录集合
     /// - watch 失败或目录不存在时不加入 active，保留下次刷新重试
     /// - unwatch 失败保留在 active，下次刷新重试
-    pub(crate) fn reconcile<W: FsWatcherSession>(&mut self, watcher: &mut W, desired: &HashSet<PathBuf>) {
+    pub(crate) fn reconcile<W: FsWatcherSession>(
+        &mut self,
+        watcher: &mut W,
+        desired: &HashSet<PathBuf>,
+    ) {
         // 新增监听：desired - active
         let to_add: Vec<PathBuf> = desired.difference(&self.active).cloned().collect();
         for dir in to_add {

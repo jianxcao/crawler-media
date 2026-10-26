@@ -63,11 +63,7 @@ pub fn attach_poster_outcome_if_missing(
     attach_poster_outcome_opts(state, media, video, false)
 }
 
-pub fn attach_backdrop_outcome(
-    state: &ApiState,
-    media: &Media,
-    video: &Path,
-) -> ArtworkOutcome {
+pub fn attach_backdrop_outcome(state: &ApiState, media: &Media, video: &Path) -> ArtworkOutcome {
     attach_backdrop_outcome_opts(state, media, video, false)
 }
 
@@ -165,9 +161,7 @@ fn attach_poster_catalog(
         language_poster(state, media, tmdb_id, config.as_ref())
     } else {
         match state.catalog.poster_url(media.kind, tmdb_id) {
-            Ok(Some(url)) => {
-                fetch_artwork(state, media, "海报", &poster_url_at_size(&url, size))
-            }
+            Ok(Some(url)) => fetch_artwork(state, media, "海报", &poster_url_at_size(&url, size)),
             Ok(None) => {
                 tracing::warn!(media = %media.title, tmdb_id, "目录没有海报地址");
                 None
@@ -394,8 +388,13 @@ fn write_artwork(media: &Media, target: &Path, kind: &str, bytes: &[u8]) -> Opti
     }
 }
 
-fn publish_artwork(lease: Option<&crate::library_lifecycle::LibraryWorkLease>, media: &Media,
-    target: &Path, kind: &str, bytes: &[u8]) -> Option<Vec<u8>> {
+fn publish_artwork(
+    lease: Option<&crate::library_lifecycle::LibraryWorkLease>,
+    media: &Media,
+    target: &Path,
+    kind: &str,
+    bytes: &[u8],
+) -> Option<Vec<u8>> {
     match lease {
         Some(lease) => lease.publish(|| Ok(write_artwork(media, target, kind, bytes))).ok().flatten(),
         None => write_artwork(media, target, kind, bytes),
@@ -411,8 +410,12 @@ pub fn frame_poster(video: &Path) -> Result<Vec<u8>, String> {
     frame_poster_controlled(video, &library::WorkControl::default())
 }
 
-fn frame_poster_controlled(video: &Path, control: &library::WorkControl) -> Result<Vec<u8>, String> {
+fn frame_poster_controlled(
+    video: &Path,
+    control: &library::WorkControl,
+) -> Result<Vec<u8>, String> {
     use std::process::Command;
+    let _permit = marker::media_read::acquire_media_read(video, control.signal())?;
     let out = tempfile_posters_dir()?.join(format!(
         "frame-{}-{}.jpg",
         std::process::id(),
@@ -422,12 +425,17 @@ fn frame_poster_controlled(video: &Path, control: &library::WorkControl) -> Resu
             .unwrap_or(0)
     ));
     let mut command = Command::new("ffmpeg");
+    command.args(["-y", "-ss", "60"]);
+    library::ProbeTarget::from_path(video).apply_ffmpeg_input(&mut command);
     command.args([
-            "-y", "-ss", "60", "-i", &video.display().to_string(),
-            "-frames:v", "1",
-            "-vf", "scale=342:513:force_original_aspect_ratio=decrease,pad=342:513:(ow-iw)/2:(oh-ih)/2:black",
-            "-q:v", "2", &out.display().to_string(),
-        ]);
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale=342:513:force_original_aspect_ratio=decrease,pad=342:513:(ow-iw)/2:(oh-ih)/2:black",
+        "-q:v",
+        "2",
+        &out.display().to_string(),
+    ]);
     let output = control.output(&mut command).map_err(|e| e.to_string())?;
     if !output.status.success() {
         return Err("ffmpeg frame extraction failed".into());

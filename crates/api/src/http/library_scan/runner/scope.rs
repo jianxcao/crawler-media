@@ -29,7 +29,7 @@ pub(super) fn capture_and_verify_scope(
 /// 准入（`scan_admission`）释放 Store 锁之后、`ScanScope::capture` 之前，配置可能被
 /// PATCH；此时旧 operation 绝不能拿新 roots 登记文件。
 ///
-/// 读不到 operation 或 operation 已消失时必须**失败关闭**（P2-4）：`ScanScope::validate`
+/// 读不到 operation 或 operation 已消失时必须**失败关闭**（P2-4）：`ScanScope::publish`
 /// 只能证明捕获 scope 与当前配置一致，不能替代「捕获 scope == 持久化 signature」，
 /// 放行等于让一个无法对账的 operation 继续登记文件。
 fn verify_captured_scope(

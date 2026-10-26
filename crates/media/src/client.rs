@@ -50,7 +50,13 @@ impl<H: CatalogGet> Tmdb<H> {
     }
 
     pub fn with_language(mut self, language: &str) -> Self {
-        self.language = language.to_string();
+        let language = language.trim();
+        self.language = if language.is_empty() {
+            "zh-CN"
+        } else {
+            language
+        }
+        .to_string();
         self
     }
 

@@ -1,6 +1,9 @@
 //! Auto-resolve media metadata against TMDB/Catalog during library scans.
 //! Inspired by MovieClaw & MoviePilot two-stage identification.
 
+mod matching;
+use matching::{find_catalog_match, search_queries};
+
 use crate::management::ApiState;
 use crate::scrape_store::ScrapeStoreExt;
 use domain::{Media, MediaKind};
@@ -55,13 +58,19 @@ fn resolve_media(
     let mut best_hit = None;
     for query in &queries {
         let hits = match media.kind {
-            MediaKind::Movie => state.catalog.search_movie(query).ok(),
-            MediaKind::Tv => state.catalog.search_tv_year(query, media.year).ok(),
-            MediaKind::Video => None,
+            MediaKind::Movie => state.catalog.search_movie(query),
+            MediaKind::Tv => state.catalog.search_tv_year(query, media.year),
+            MediaKind::Video => continue,
         };
-        let Some(hits) = hits else { continue };
-        if let Some(hit) = find_best_catalog_match(query, media.year, &hits) {
-            best_hit = Some(hit.clone());
+        let hits = match hits {
+            Ok(hits) => hits,
+            Err(error) => {
+                tracing::error!(%error, %query, kind = ?media.kind, "扫描媒体目录搜索失败");
+                continue;
+            }
+        };
+        if let Some(hit) = find_catalog_match(state.catalog.as_ref(), media, query, &hits) {
+            best_hit = Some(hit);
             break;
         }
     }
@@ -183,12 +192,7 @@ pub(crate) fn write_resolved_nfo(state: &ApiState, media: &Media, sample_path: &
         } else {
             rows
         };
-        crate::scrape_metadata::scrape_tv_sidecars(
-            state,
-            media,
-            &show_root,
-            &rows_to_write,
-        );
+        crate::scrape_metadata::scrape_tv_sidecars(state, media, &show_root, &rows_to_write);
     } else {
         let nfo_enabled = state
             .store
@@ -204,8 +208,14 @@ pub(crate) fn write_resolved_nfo(state: &ApiState, media: &Media, sample_path: &
                 let nfo = crate::scrape_metadata::nfo_from_tmdb(media, &metadata);
                 if let Some(stem) = sample_path.file_stem().and_then(|value| value.to_str()) {
                     let target = sample_path.with_file_name(format!("{stem}.nfo"));
-                    let write = || { crate::scrape_metadata::write_nfo(&target, media, &nfo); Ok(()) };
-                    let _ = match &lease { Some(lease) => lease.publish(write), None => write() };
+                    let write = || {
+                        crate::scrape_metadata::write_nfo(&target, media, &nfo);
+                        Ok(())
+                    };
+                    let _ = match &lease {
+                        Some(lease) => lease.publish(write),
+                        None => write(),
+                    };
                 }
             }
         }
@@ -256,87 +266,6 @@ fn attach_episode_frames(state: &ApiState, media: &Media, sample_path: &std::pat
             tracing::warn!(path = %path.display(), %error, "匹配失败后分集抓帧失败");
         }
     }
-}
-
-fn find_best_catalog_match<'a>(
-    title: &str,
-    year: Option<u16>,
-    hits: &'a [media::CatalogHit],
-) -> Option<&'a media::CatalogHit> {
-    if hits.is_empty() {
-        return None;
-    }
-
-    let norm_target = normalize_title(title);
-    let eligible: Vec<_> = hits
-        .iter()
-        .filter(|hit| year.is_none_or(|target| hit.media.year.is_none_or(|found| found == target)))
-        .collect();
-
-    // 1. Exact title match + year match
-    if let Some(target_year) = year {
-        for hit in &eligible {
-            if hit.media.year == Some(target_year)
-                && normalize_title(&hit.media.title) == norm_target
-            {
-                return Some(hit);
-            }
-        }
-    }
-
-    // 2. Exact title match (regardless of year)
-    for hit in &eligible {
-        if normalize_title(&hit.media.title) == norm_target {
-            return Some(hit);
-        }
-    }
-
-    // 3. If only 1 hit returned and title contains target or target contains title
-    if eligible.len() == 1 {
-        let hit_title = normalize_title(&eligible[0].media.title);
-        if hit_title.contains(&norm_target) || norm_target.contains(&hit_title) {
-            return Some(eligible[0]);
-        }
-    }
-
-    None
-}
-
-/// 文件名标题优先；上层目录里和它不同的标题（常见是中文别名）作为后续搜索词。
-fn search_queries(title: &str, sample_path: &std::path::Path) -> Vec<String> {
-    let mut queries = vec![title.to_string()];
-    let mut current = sample_path.parent();
-    let mut depth = 0;
-    while let Some(dir) = current {
-        if depth >= 4 {
-            break;
-        }
-        depth += 1;
-        if let Some(name) = dir.file_name().and_then(|name| name.to_str()) {
-            let parsed = release::parse(name);
-            let candidate = parsed.title.trim();
-            if parsed.confidence != domain::Confidence::Low
-                && !candidate.is_empty()
-                && normalize_title(candidate) != normalize_title(title)
-                && !queries
-                    .iter()
-                    .any(|query| normalize_title(query) == normalize_title(candidate))
-            {
-                queries.push(candidate.to_string());
-            }
-        }
-        current = dir.parent();
-    }
-    queries
-}
-
-fn normalize_title(t: &str) -> String {
-    t.chars()
-        .filter(|c| {
-            !c.is_whitespace() && *c != '.' && *c != '-' && *c != '_' && *c != ':' && *c != '：'
-        })
-        .collect::<String>()
-        .to_lowercase()
 }
 
 /// Complete local identity and a display title are enough; missing plot/cast

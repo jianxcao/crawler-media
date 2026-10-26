@@ -103,6 +103,7 @@ fn probe_chapter_targets(
     path: &std::path::Path,
     control: &library::WorkControl,
 ) -> Option<Vec<(i64, i64)>> {
+    let _permit = marker::media_read::acquire_media_read(path, control.signal()).ok()?;
     let mut command = std::process::Command::new("ffprobe");
     command.args(["-v", "error", "-show_chapters", "-of", "json"]);
     library::ProbeTarget::from_path(path).apply_input(&mut command);
@@ -225,7 +226,12 @@ pub(crate) async fn chapters(
     if resolved.is_empty() {
         return ok_list(Vec::new()).into_response();
     }
-    let items: Vec<Value> = resolved
+    let items = chapters_json(&row, &resolved);
+    ok_list(items).into_response()
+}
+
+fn chapters_json(row: &domain::LedgerRow, chapters: &[library::ChapterMarker]) -> Vec<Value> {
+    chapters
         .iter()
         .enumerate()
         .map(|(index, chapter)| {
@@ -248,8 +254,51 @@ pub(crate) async fn chapters(
             }
             obj
         })
-        .collect();
-    ok_list(items).into_response()
+        .collect()
+}
+
+fn enqueue_season_fingerprint_refresh(
+    state: &ApiState,
+    media: &domain::Media,
+    season: u32,
+    rows: &[domain::LedgerRow],
+) -> (usize, bool) {
+    let season_probe_was_active = rows
+        .iter()
+        .any(|candidate| state.probe.is_queued(&candidate.id.to_string()));
+    let mut probe_queued = 0;
+    if should_queue_voiceprint_refresh(media.kind) && !season_probe_was_active {
+        let units = rows
+            .iter()
+            .map(|candidate_row| crate::probe_manager::ProbeUnit {
+                row: candidate_row.clone(),
+                kind: media.kind,
+                force_fingerprint: true,
+                reuse_fingerprint_cache: false,
+                overwrite_markers: true,
+                reuse_media_info_cache: true,
+                marker_refresh_id: None,
+                job_id: None,
+            })
+            .collect();
+        probe_queued = state.probe.enqueue_marker_refresh(units);
+        tracing::info!(
+            media = %media.title,
+            season,
+            rows = rows.len(),
+            queued = probe_queued,
+            "【片头片尾】用户强制刷新，已排队同季完整声纹探测"
+        );
+    } else if season_probe_was_active {
+        tracing::info!(
+            media = %media.title,
+            season,
+            rows = rows.len(),
+            "【片头片尾】该剧该季已有探测任务，跳过重复刷新"
+        );
+    }
+
+    (probe_queued, season_probe_was_active)
 }
 
 /// POST /libraries/{id}/items/{item_id}/chapters/refresh — force clear cached
@@ -313,65 +362,10 @@ pub(crate) async fn refresh_item_chapters(
         .filter(|candidate| candidate.season.unwrap_or(1) == season)
         .cloned()
         .collect();
-    let season_probe_was_active = fingerprint_rows
-        .iter()
-        .any(|candidate| state.probe.is_queued(&candidate.id.to_string()));
-    let mut probe_queued = 0;
-    if should_queue_voiceprint_refresh(media.kind) && !season_probe_was_active {
-        let units = fingerprint_rows
-            .iter()
-            .map(|candidate_row| crate::probe_manager::ProbeUnit {
-                row: candidate_row.clone(),
-                kind: media.kind,
-                force_fingerprint: true,
-                reuse_fingerprint_cache: false,
-                overwrite_markers: true,
-                reuse_media_info_cache: true,
-                marker_refresh_id: None,
-                job_id: None,
-            })
-            .collect();
-        probe_queued = state.probe.enqueue_marker_refresh(units);
-        tracing::info!(
-            media = %media.title,
-            season,
-            rows = fingerprint_rows.len(),
-            queued = probe_queued,
-            "【片头片尾】用户强制刷新，已排队同季完整声纹探测"
-        );
-    } else if season_probe_was_active {
-        tracing::info!(
-            media = %media.title,
-            season,
-            rows = fingerprint_rows.len(),
-            "【片头片尾】该剧该季已有探测任务，跳过重复刷新"
-        );
-    }
+    let (probe_queued, season_probe_was_active) =
+        enqueue_season_fingerprint_refresh(&state, &media, season, &fingerprint_rows);
 
-    let items: Vec<Value> = refreshed
-        .iter()
-        .enumerate()
-        .map(|(index, chapter)| {
-            let image_url = chapter_image_path(std::path::Path::new(&row.path), index)
-                .is_file()
-                .then(|| format!("/chapters/{}/{index}", row.id));
-            let mut obj = json!({
-                "start_ms": chapter.start_ms,
-                "end_ms": chapter.end_ms,
-                "title": chapter.title,
-                "image_url": image_url,
-            });
-            if let Some(mt) = chapter.marker_type {
-                let tag = match mt {
-                    library::MarkerType::IntroStart => "IntroStart",
-                    library::MarkerType::IntroEnd => "IntroEnd",
-                    library::MarkerType::CreditsStart => "CreditsStart",
-                };
-                obj["marker_type"] = json!(tag);
-            }
-            obj
-        })
-        .collect();
+    let items = chapters_json(&row, &refreshed);
     let marker_job = match state.probe.marker_refresh_job(media_id, season) {
         Ok(job) => job,
         Err(error) => {

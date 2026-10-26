@@ -12,18 +12,18 @@ use crate::http::{err, ok, ok_list};
 use crate::management::ApiState;
 use crate::scrape_store::ScrapeStoreExt;
 
-pub(crate) mod scope;
 pub(crate) mod operations;
 pub(crate) mod report;
 pub(crate) mod runner;
+pub(crate) mod scope;
 pub(crate) mod video;
-pub(crate) use runner::scan_library_leased_resumable;
-#[cfg(test)]
-pub(crate) use runner::checkpoint_fresh;
-use scope::{ScanScope, walk_video_files};
 use super::library::{
     facets, missing_library, preferred_row, require_visible_library, rows_in_library, selection,
 };
+#[cfg(test)]
+pub(crate) use runner::checkpoint_fresh;
+pub(crate) use runner::scan_library_leased_resumable;
+use scope::{ScanScope, walk_video_files};
 
 /// POST /libraries/{id}/scan — walk every root of the library and ledger
 /// high-confidence video files in place.
@@ -148,10 +148,8 @@ pub(crate) fn scan_library_subdir(
         .filter_transferred(outcome.transferred)
         .map_err(|e| format!("{:?}", e))?;
 
-    let inserted = lease.publish(|| {
-        let store = state.store.lock();
-        scan_scope.validate(&store).map_err(|e| format!("{:?}", e))?;
-        crate::watch_ledger::record_paths(&store, filtered_transferred.clone())
+    let inserted = scan_scope.publish(state, &lease, |store| {
+        crate::watch_ledger::record_paths(store, filtered_transferred.clone())
     })?;
 
     let scan_media = {
@@ -202,11 +200,11 @@ fn scan_video_subdir(
     let mut files = Vec::new();
     walk_video_files(target_dir, &mut files);
     let scan_scope = ScanScope::capture(state, library_id).map_err(|e| format!("{:?}", e))?;
-    let filtered_files = scan_scope.filter_paths(files).map_err(|e| format!("{:?}", e))?;
-    let inserted = lease.publish(|| {
-        let store = state.store.lock();
-        scan_scope.validate(&store).map_err(|e| format!("{:?}", e))?;
-        crate::watch_ledger::record_video_paths(&store, filtered_files)
+    let filtered_files = scan_scope
+        .filter_paths(files)
+        .map_err(|e| format!("{:?}", e))?;
+    let inserted = scan_scope.publish(state, lease, |store| {
+        crate::watch_ledger::record_video_paths(store, filtered_files)
     })?;
     tracing::info!(root = %root.display(), target_dir = %target_dir.display(),
         inserted = inserted.len(), "实时 Video Library 扫描完成，不进行 Movie/TV 识别");

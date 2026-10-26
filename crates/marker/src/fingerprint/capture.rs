@@ -25,10 +25,21 @@ pub fn capture_window_controlled(
 ) -> Result<CapturedFingerprint, CaptureFailure> {
     let started = Instant::now();
     if control.is_cancelled() {
-        return Err(CaptureFailure { kind: CaptureFailureKind::Cancelled,
-            message: "Library work cancelled".into(), metrics: CaptureMetrics::default() });
+        return Err(CaptureFailure {
+            kind: CaptureFailureKind::Cancelled,
+            message: "Library work cancelled".into(),
+            metrics: CaptureMetrics::default(),
+        });
     }
     request.window.validate()?;
+    let _permit =
+        crate::media_read::acquire_media_read(&request.path, control).map_err(|message| {
+            CaptureFailure {
+                kind: CaptureFailureKind::Cancelled,
+                message,
+                metrics: CaptureMetrics::default(),
+            }
+        })?;
 
     let mut timings = ExtractionTimings::default();
     timings.ffmpeg_log_level = ffmpeg_log_level().to_string();
@@ -166,16 +177,7 @@ fn build_capture_ffmpeg_command(request: &CaptureRequest, log_level: &str) -> Co
         command.args(["-map", &format!("0:{stream_idx}")]);
     }
 
-    command.args([
-        "-vn",
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-f",
-        "s16le",
-        "-",
-    ]);
+    command.args(["-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"]);
 
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     command
@@ -190,7 +192,10 @@ fn spawn_ffmpeg(mut command: Command, timings: &mut ExtractionTimings) -> Result
 
 fn spawn_stdout_reader(
     stdout: std::process::ChildStdout,
-) -> (mpsc::Receiver<Vec<u8>>, std::thread::JoinHandle<Result<(), String>>) {
+) -> (
+    mpsc::Receiver<Vec<u8>>,
+    std::thread::JoinHandle<Result<(), String>>,
+) {
     let (tx, rx) = mpsc::channel();
     let handle = std::thread::spawn(move || {
         use std::io::Read;
@@ -279,9 +284,8 @@ fn run_ffmpeg_with_deadline(
         metrics: build_metrics(timings, process_started, None),
     })?;
 
-    let stderr_reader = std::thread::spawn(move || {
-        super::chromaprint::diagnostics::read_stderr_tail(stderr)
-    });
+    let stderr_reader =
+        std::thread::spawn(move || super::chromaprint::diagnostics::read_stderr_tail(stderr));
 
     let (rx, stdout_join) = spawn_stdout_reader(stdout);
 
@@ -350,7 +354,13 @@ fn run_ffmpeg_with_deadline(
 
     let _ = stdout_join.join();
 
-    finalize_ffmpeg_exit(child, stderr_reader, timings, pending_low_byte, process_started)
+    finalize_ffmpeg_exit(
+        child,
+        stderr_reader,
+        timings,
+        pending_low_byte,
+        process_started,
+    )
 }
 
 fn decode_pcm_chunk_ref(bytes: &[u8], pending_low_byte: &mut Option<u8>, samples: &mut Vec<i16>) {

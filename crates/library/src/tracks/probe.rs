@@ -97,6 +97,8 @@ fn probe_tracks_controlled_program(
     control: &crate::WorkControl,
 ) -> Result<(Tracks, Option<i64>), LibraryError> {
     let target = crate::ProbeTarget::from_path(path);
+    let _permit = marker::media_read::acquire_media_read(path, control.signal())
+        .map_err(|_| LibraryError::Cancelled)?;
     let mut command = Command::new(program);
     command.args([
         "-v",

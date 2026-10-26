@@ -5,6 +5,9 @@ use store::ScanOperation;
 
 use super::*;
 
+#[path = "scope_changes.rs"]
+mod scope_changes;
+
 struct NoFetch;
 
 impl indexer::Fetcher for NoFetch {
@@ -242,14 +245,7 @@ fn single_root_v1_encoding_is_provably_equivalent_even_with_comma() {
     let dir = tempfile::tempdir().unwrap();
     let store = crate::Store::open(dir.path().join("data")).unwrap();
     let library = store
-        .create_library(
-            MediaKind::Movie,
-            "A",
-            &["/x/a,b"],
-            "everyone",
-            true,
-            &[],
-        )
+        .create_library(MediaKind::Movie, "A", &["/x/a,b"], "everyone", true, &[])
         .unwrap();
     let legacy = legacy_scope_signature(&library);
     assert_eq!(legacy, "movie:1:/x/a,b");
