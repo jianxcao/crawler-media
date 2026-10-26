@@ -16,6 +16,12 @@ pub(crate) fn ensure_source_available(store: &Store, row: &LedgerRow) -> Result<
             row.id
         ));
     }
+    if store.ledger_is_missing(&row.id.to_string()).map_err(|error| {
+        tracing::error!(%error, ledger_id = %row.id, "读取声纹源文件缺失标记失败");
+        format!("source_check_failed: {error}")
+    })? {
+        return Err(format!("file_deleted: ledger {} is marked missing", row.id));
+    }
     if let Some(media) = store.get_media(row.media_id).map_err(|e| e.to_string())? {
         if let Some(owner) = store.library_for_path_strict(std::path::Path::new(&row.path), media.kind)
             .map_err(|e| e.to_string())?

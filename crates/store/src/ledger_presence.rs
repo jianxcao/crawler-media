@@ -1,9 +1,12 @@
 //! Ledger presence types and transactional updates for safe verification and pruning.
 
-use domain::{LedgerId, LedgerRow, MediaId};
-use rusqlite::Transaction;
+use domain::LedgerRow;
+use rusqlite::{OptionalExtension, Transaction};
 
 use crate::StoreError;
+
+mod probe_work;
+pub(crate) use probe_work::repair_missing_probe_work;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FilePresence {
@@ -34,6 +37,36 @@ pub struct LedgerPresenceResult {
 }
 
 impl crate::Store {
+    /// Clear a restored source's missing marker and schedule its unfinished probe work atomically.
+    pub fn clear_ledger_missing(&self, path: &str) -> Result<bool, StoreError> {
+        let tx = self.library.unchecked_transaction()?;
+        let id: Option<String> = tx
+            .query_row(
+                "SELECT id FROM ledger WHERE path = ?1 AND missing_at IS NOT NULL",
+                [path],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(id) = id else {
+            return Ok(false);
+        };
+        tx.execute("UPDATE ledger SET missing_at = NULL WHERE id = ?1", [&id])?;
+        probe_work::restore_probe_obligation(&tx, &id, crate::unix_now() * 1000)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Whether this ledger source has been confirmed missing by presence reconciliation.
+    pub fn ledger_is_missing(&self, ledger_id: &str) -> Result<bool, StoreError> {
+        self.library
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM ledger WHERE id = ?1 AND missing_at IS NOT NULL)",
+                [ledger_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     /// Apply presence observations within a single Immediate transaction in library.db.
     ///
     /// For each observation, checks whether the current database row still matches
@@ -70,7 +103,7 @@ impl crate::Store {
                     [&obs.row.id.to_string()],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
-                .rusqlite_optional()?;
+                .optional()?;
 
             let Some((cur_path, cur_media_id, cur_missing_at, pending)) = current else {
                 result.skipped += 1;
@@ -90,59 +123,15 @@ impl crate::Store {
                     result.skipped += 1;
                     continue;
                 }
-                tx.execute("UPDATE ledger SET transfer_pending = 0 WHERE id = ?1",
-                    [obs.row.id.to_string()])?;
+                tx.execute(
+                    "UPDATE ledger SET transfer_pending = 0 WHERE id = ?1",
+                    [obs.row.id.to_string()],
+                )?;
                 tracing::info!(ledger_id = %obs.row.id, path = %obs.row.path,
                     "Recovered completed Transfer publication");
             }
 
-            match mode {
-                LedgerPresenceMode::Verify => match obs.presence {
-                    FilePresence::Missing => {
-                        if cur_missing_at.is_none() {
-                            tx.execute(
-                                "UPDATE ledger SET missing_at = ?1 WHERE id = ?2",
-                                rusqlite::params![now, obs.row.id.to_string()],
-                            )?;
-                            result.missing += 1;
-                        }
-                    }
-                    FilePresence::Present => {
-                        if cur_missing_at.is_some() {
-                            tx.execute(
-                                "UPDATE ledger SET missing_at = NULL WHERE id = ?1",
-                                rusqlite::params![obs.row.id.to_string()],
-                            )?;
-                            result.restored += 1;
-                        }
-                    }
-                    FilePresence::Unknown => {
-                        result.skipped += 1;
-                    }
-                },
-                LedgerPresenceMode::Prune => match obs.presence {
-                    FilePresence::Missing => {
-                        if cur_missing_at.is_some() {
-                            crate::ledger_cleanup::delete_ledger_in_tx(&tx, obs.row.id)?;
-                            result.deleted += 1;
-                        } else {
-                            result.skipped += 1;
-                        }
-                    }
-                    FilePresence::Present => {
-                        if cur_missing_at.is_some() {
-                            tx.execute(
-                                "UPDATE ledger SET missing_at = NULL WHERE id = ?1",
-                                rusqlite::params![obs.row.id.to_string()],
-                            )?;
-                            result.restored += 1;
-                        }
-                    }
-                    FilePresence::Unknown => {
-                        result.skipped += 1;
-                    }
-                },
-            }
+            apply_presence_change(&tx, obs, mode, now, &mut result)?;
         }
 
         tx.commit()?;
@@ -150,16 +139,41 @@ impl crate::Store {
     }
 }
 
-trait RusqliteOptionalExt<T> {
-    fn rusqlite_optional(self) -> Result<Option<T>, StoreError>;
-}
-
-impl<T> RusqliteOptionalExt<T> for Result<T, rusqlite::Error> {
-    fn rusqlite_optional(self) -> Result<Option<T>, StoreError> {
-        match self {
-            Ok(val) => Ok(Some(val)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(err) => Err(err.into()),
+fn apply_presence_change(
+    tx: &Transaction<'_>,
+    obs: &LedgerPresenceObservation,
+    mode: LedgerPresenceMode,
+    now: i64,
+    result: &mut LedgerPresenceResult,
+) -> Result<(), StoreError> {
+    let id = obs.row.id.to_string();
+    match (mode, obs.presence) {
+        (_, FilePresence::Present) => {
+            if obs.missing_at.is_some() {
+                tx.execute("UPDATE ledger SET missing_at = NULL WHERE id = ?1", [&id])?;
+                probe_work::restore_probe_obligation(tx, &id, now * 1000)?;
+                result.restored += 1;
+            }
+        }
+        (_, FilePresence::Unknown) => result.skipped += 1,
+        (LedgerPresenceMode::Verify, FilePresence::Missing) => {
+            if obs.missing_at.is_none() {
+                tx.execute(
+                    "UPDATE ledger SET missing_at = ?1 WHERE id = ?2",
+                    rusqlite::params![now, id],
+                )?;
+                result.missing += 1;
+            }
+            probe_work::cancel_missing_probe_work(tx, &id)?;
+        }
+        (LedgerPresenceMode::Prune, FilePresence::Missing) => {
+            if obs.missing_at.is_some() {
+                crate::ledger_cleanup::delete_ledger_in_tx(tx, obs.row.id)?;
+                result.deleted += 1;
+            } else {
+                result.skipped += 1;
+            }
         }
     }
+    Ok(())
 }

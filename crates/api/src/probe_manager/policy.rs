@@ -131,6 +131,14 @@ fn retry_gate(
     outro_missing: bool,
     now_ms: i64,
 ) -> ProbeRequestResult {
+    match store.ledger_is_missing(ledger_id) {
+        Ok(true) => return ProbeRequestResult::Cancelled,
+        Ok(false) => {}
+        Err(error) => {
+            tracing::error!(%error, ledger_id, "读取探测源文件缺失标记失败，暂停入队");
+            return ProbeRequestResult::Cancelled;
+        }
+    }
     if store
         .active_probe_unit_for_ledger(ledger_id)
         .ok()

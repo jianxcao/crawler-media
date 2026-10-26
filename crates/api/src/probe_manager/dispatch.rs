@@ -4,13 +4,14 @@
 //! store; workers load one snapshot, claim it, and refill the window. A full
 //! fingerprint window leaves the unit queued instead of finishing it failed.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use store::{ProbeDispatchId, ProbeDispatchStage};
 use tokio::sync::mpsc;
 
 use super::{ProbeManager, ProbeUnit, probe};
+use crate::scrape_store::ScrapeStoreExt;
 
 pub(super) const METADATA_WINDOW: usize = 64;
 pub(super) const FINGERPRINT_WINDOW: usize = 16;
@@ -119,7 +120,8 @@ impl ProbeManager {
                 self.seen.lock().remove(&ledger_id);
                 return false;
             }
-            let Some(fingerprint_job_id) = self.persist_single_unit(&work.unit, "fingerprint_probe")
+            let Some(fingerprint_job_id) =
+                self.persist_single_unit(&work.unit, "fingerprint_probe")
             else {
                 tracing::error!(ledger_id, "创建声纹任务失败，工作保持可恢复");
                 self.seen.lock().remove(&ledger_id);
@@ -182,19 +184,21 @@ impl ProbeManager {
         id: ProbeDispatchId,
         unit: ProbeUnit,
     ) -> Result<(), ProbeUnit> {
+        self.metadata_pending.fetch_add(1, Ordering::AcqRel);
         match tx.try_send(id) {
-            Ok(()) => {
-                self.metadata_pending.fetch_add(1, Ordering::AcqRel);
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => {
+                self.metadata_pending.fetch_sub(1, Ordering::AcqRel);
                 tracing::info!(
                     ledger_id = %unit.row.id,
                     "探测窗口已满，任务保持数据库排队"
                 );
                 Err(unit)
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => Err(unit),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.metadata_pending.fetch_sub(1, Ordering::AcqRel);
+                Err(unit)
+            }
         }
     }
 
@@ -229,11 +233,12 @@ impl ProbeManager {
             if !seen.insert(id.ledger_id.clone()) {
                 continue;
             }
+            self.metadata_pending.fetch_add(1, Ordering::AcqRel);
             if tx.try_send(id.clone()).is_err() {
+                self.metadata_pending.fetch_sub(1, Ordering::AcqRel);
                 seen.remove(&id.ledger_id);
                 break;
             }
-            self.metadata_pending.fetch_add(1, Ordering::AcqRel);
         }
     }
 
@@ -309,7 +314,10 @@ impl ProbeManager {
         id: &ProbeDispatchId,
         queued_only: bool,
     ) -> Option<(ProbeUnit, probe::FingerprintWork)> {
-        let snapshot = match self.store.lock().load_probe_dispatch_snapshot(id) {
+        // Admission takes seen before Store. Release Store before any error
+        // branch removes a stale dispatch ID from seen.
+        let snapshot = self.store.lock().load_probe_dispatch_snapshot(id);
+        let snapshot = match snapshot {
             Ok(Some(snapshot)) => snapshot,
             Ok(None) => {
                 self.seen.lock().remove(&id.ledger_id);
@@ -358,15 +366,34 @@ impl ProbeManager {
             }),
             job_id: Some(snapshot.job.id),
         };
+        let settings = {
+            let store = self.store.lock();
+            store
+                .get_media_info_cache_version(&id.ledger_id)
+                .and_then(|version| {
+                    let duration = version
+                        .filter(|version| version.source_version == snapshot.source_version)
+                        .and_then(|version| version.format_duration_ms);
+                    store
+                        .get_scrape_config()
+                        .map(|config| (duration, config.effective.fingerprint_duration_secs))
+                })
+        };
+        let (media_duration_ms, duration_secs) = match settings {
+            Ok(settings) => settings,
+            Err(error) => {
+                tracing::error!(%error, ledger_id = %id.ledger_id, "恢复派发单元的时长或声纹配置失败，保留持久任务");
+                self.seen.lock().remove(&id.ledger_id);
+                return None;
+            }
+        };
         let work = probe::FingerprintWork {
             unit: unit.clone(),
-            media_duration_ms: None,
+            media_duration_ms,
             source_version: snapshot.source_version,
-            duration_secs: 180,
+            duration_secs,
             start_job: true,
         };
         Some((unit, work))
     }
 }
-
-

@@ -127,6 +127,9 @@ impl Store {
     /// windows decide what runs next, and the SQL here only repairs durable
     /// status/counters for active jobs.
     pub fn reset_running_probe_units(&self) -> Result<(), StoreError> {
+        // Also retire work admitted concurrently with an earlier presence
+        // snapshot, before any recovered worker can read a missing source.
+        crate::ledger_presence::repair_missing_probe_work(&self.library)?;
         let tx = self.library.unchecked_transaction()?;
         tx.execute(
             "UPDATE probe_job_units SET status = 'queued'

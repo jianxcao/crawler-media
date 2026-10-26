@@ -29,7 +29,9 @@ fn dispatch_once_sync(state: &ApiState) -> Result<usize, String> {
     for ob in obligations {
         let row_opt = {
             let store = state.store.lock();
-            store.get_ledger(&ob.ledger_id.to_string()).map_err(|e| e.to_string())?
+            store
+                .get_ledger(&ob.ledger_id.to_string())
+                .map_err(|e| e.to_string())?
         };
 
         let Some(row) = row_opt else {
@@ -48,32 +50,32 @@ fn dispatch_once_sync(state: &ApiState) -> Result<usize, String> {
             continue;
         };
 
-        let enqueued_or_active = match state
-            .probe
-            .request_probe(&row, crate::probe_manager::policy::ProbeRequestOrigin::Detail)
-        {
-            Ok(crate::probe_manager::policy::ProbeRequestResult::Queued { .. }) => {
-                state.probe.holds_dispatch_id(&row.id.to_string())
+        let result = state.probe.request_probe(
+            &row,
+            crate::probe_manager::policy::ProbeRequestOrigin::Detail,
+        );
+        // Keep acceptance and ACK under one Store lock so presence cannot cancel
+        // accepted work and restore a new obligation between these two writes.
+        let store = state.store.lock();
+        let acknowledged = match result {
+            Ok(crate::probe_manager::policy::ProbeRequestResult::Queued { job_id }) => store
+                .ack_scan_probe_obligation_for_work(&ob, Some(&job_id))
+                .map_err(|error| error.to_string())?,
+            Ok(crate::probe_manager::policy::ProbeRequestResult::AlreadyRunning) => store
+                .ack_scan_probe_obligation_for_work(&ob, None)
+                .map_err(|error| error.to_string())?,
+            Ok(crate::probe_manager::policy::ProbeRequestResult::Complete) => store
+                .ack_scan_probe_obligation_if_current(&ob)
+                .map_err(|error| error.to_string())?,
+            Err(error) => {
+                tracing::error!(%error, ledger_id = %row.id, "扫描探测义务派发失败，保留义务等待重试");
+                false
             }
-            Ok(
-                crate::probe_manager::policy::ProbeRequestResult::AlreadyRunning
-                | crate::probe_manager::policy::ProbeRequestResult::Complete,
-            ) => true,
             _ => false,
         };
 
-        if enqueued_or_active {
-            let store = state.store.lock();
-            match store.ack_scan_probe_obligation(ob.ledger_id) {
-                Ok(()) => acked += 1,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        ledger_id = %ob.ledger_id,
-                        "确认探测义务失败（该义务将被反复重派）"
-                    );
-                }
-            }
+        if acknowledged {
+            acked += 1;
         }
     }
 

@@ -17,11 +17,7 @@ pub struct ScanProbeObligation {
 impl Store {
     /// Atomically insert a scanned ledger row and record its probe obligation
     /// in a single Immediate transaction in library.db.
-    pub fn insert_scanned_ledger(
-        &self,
-        row: &LedgerRow,
-        now_ms: i64,
-    ) -> Result<(), StoreError> {
+    pub fn insert_scanned_ledger(&self, row: &LedgerRow, now_ms: i64) -> Result<(), StoreError> {
         let tx = rusqlite::Transaction::new_unchecked(
             &self.library,
             rusqlite::TransactionBehavior::Immediate,
@@ -60,7 +56,10 @@ impl Store {
     }
 
     /// Retrieve up to `limit` (clamped 1..=100) pending probe obligations in deterministic order.
-    pub fn scan_probe_obligations(&self, limit: usize) -> Result<Vec<ScanProbeObligation>, StoreError> {
+    pub fn scan_probe_obligations(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ScanProbeObligation>, StoreError> {
         self.scan_probe_obligations_with_vm_steps(limit)
             .map(|(obligations, _)| obligations)
     }
@@ -103,5 +102,54 @@ impl Store {
             params![ledger_id.to_string()],
         )?;
         Ok(())
+    }
+
+    /// A completed assessment can only acknowledge the obligation it read.
+    pub fn ack_scan_probe_obligation_if_current(
+        &self,
+        obligation: &ScanProbeObligation,
+    ) -> Result<bool, StoreError> {
+        let changed = self.library.execute(
+            "DELETE FROM ledger_probe_obligations
+             WHERE ledger_id = ?1 AND created_at_ms = ?2 AND reason = ?3
+               AND EXISTS (SELECT 1 FROM ledger WHERE id = ?1 AND missing_at IS NULL)",
+            params![
+                obligation.ledger_id.to_string(),
+                obligation.created_at_ms,
+                obligation.reason
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Atomically acknowledge an unchanged obligation after durable acceptance.
+    /// A known job may have already finished; an unspecified job must still be active.
+    pub fn ack_scan_probe_obligation_for_work(
+        &self,
+        obligation: &ScanProbeObligation,
+        job_id: Option<&str>,
+    ) -> Result<bool, StoreError> {
+        let changed = self.library.execute(
+            "DELETE FROM ledger_probe_obligations
+             WHERE ledger_id = ?1 AND created_at_ms = ?2 AND reason = ?3
+               AND EXISTS (SELECT 1 FROM ledger WHERE id = ?1 AND missing_at IS NULL)
+               AND EXISTS (
+                   SELECT 1 FROM probe_job_units u JOIN probe_jobs j ON j.id = u.job_id
+                   WHERE u.ledger_id = ?1 AND (
+                       (?4 IS NOT NULL AND u.job_id = ?4
+                        AND u.status IN ('queued', 'running', 'succeeded', 'failed', 'partial')
+                        AND j.status IN ('queued', 'running', 'succeeded', 'failed', 'partial'))
+                       OR (?4 IS NULL AND u.status IN ('queued', 'running')
+                           AND j.status IN ('queued', 'running'))
+                   )
+               )",
+            params![
+                obligation.ledger_id.to_string(),
+                obligation.created_at_ms,
+                obligation.reason,
+                job_id
+            ],
+        )?;
+        Ok(changed > 0)
     }
 }

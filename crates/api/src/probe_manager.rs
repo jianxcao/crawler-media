@@ -18,6 +18,7 @@ use marker::{ChromaprintEngine, FingerprintEngine};
 use crate::scrape_store::ScrapeStoreExt;
 use crate::Store;
 
+mod admission;
 pub mod clock;
 mod dispatch;
 mod marker_jobs;
@@ -158,152 +159,6 @@ impl ProbeManager {
 
     pub fn priority_gate(&self) -> Arc<dyn crate::fingerprint_job::CaptureGate> {
         Arc::new(progress::MetadataPriorityGate::from_manager(self))
-    }
-
-    pub fn request_probe(
-        &self,
-        row: &domain::LedgerRow,
-        origin: policy::ProbeRequestOrigin,
-    ) -> Result<policy::ProbeRequestResult, store::StoreError> {
-        let now_ms = self.clock.lock().now_ms();
-        self.assessments.fetch_add(1, Ordering::SeqCst);
-        let source_version = crate::fingerprint_job::current_source_version(std::path::Path::new(&row.path));
-        let need = {
-            let store = self.store.lock();
-            policy::assess_probe_need(&store, row, origin, now_ms, source_version)
-        };
-        if !matches!(need.retry, policy::ProbeRequestResult::Complete) {
-            return Ok(need.retry);
-        }
-        if need.metadata_valid && !need.intro_missing && !need.outro_missing {
-            return Ok(policy::ProbeRequestResult::Complete);
-        }
-        let unit = ProbeUnit {
-            row: row.clone(),
-            kind: need.kind,
-            force_fingerprint: need.fingerprint_enabled,
-            reuse_fingerprint_cache: true,
-            overwrite_markers: false,
-            reuse_media_info_cache: true,
-            marker_refresh_id: None,
-            job_id: None,
-        };
-        if need.metadata_valid && need.fingerprint_enabled && (need.intro_missing || need.outro_missing)
-        {
-            return Ok(match self.enqueue_direct_fingerprint(
-                unit,
-                need.media_duration_ms,
-                need.source_version,
-                need.sample_duration_secs,
-            ) {
-                Some(job_id) => policy::ProbeRequestResult::Queued { job_id },
-                None => policy::ProbeRequestResult::AlreadyRunning,
-            });
-        }
-        let ledger_id = unit.row.id.to_string();
-        if self.enqueue(unit) {
-            Ok(policy::ProbeRequestResult::Queued {
-                job_id: self.active_probe_job_id(&ledger_id).unwrap_or_default(),
-            })
-        } else {
-            Ok(policy::ProbeRequestResult::AlreadyRunning)
-        }
-    }
-
-    pub fn enqueue_direct_fingerprint(
-        &self,
-        mut unit: ProbeUnit,
-        media_duration_ms: Option<i64>,
-        source_version: String,
-        duration_secs: u32,
-    ) -> Option<String> {
-        let ledger_id = unit.row.id.to_string();
-        let mut seen = self.seen.lock();
-        if !seen.insert(ledger_id.clone()) {
-            return None;
-        }
-        let job_id = self.persist_single_unit(&unit, "fingerprint_probe")?;
-        unit.job_id = Some(job_id.clone());
-        let work = probe::FingerprintWork {
-            unit: unit.clone(),
-            media_duration_ms,
-            source_version,
-            duration_secs,
-            start_job: true,
-        };
-        let id = store::ProbeDispatchId {
-            job_id: job_id.clone(),
-            ledger_id,
-            stage: store::ProbeDispatchStage::Fingerprint,
-        };
-        if self.fingerprint_tx.try_send((id, work)).is_err() {
-            seen.remove(&unit.row.id.to_string());
-            tracing::info!(job_id, "声纹窗口已满，直接声纹任务保持数据库排队");
-            self.wake.notify_waiters();
-        }
-        Some(job_id)
-    }
-
-    /// 入队探测（幂等：已在队列/执行中的跳过）。
-    pub fn enqueue(&self, mut unit: ProbeUnit) -> bool {
-        unit.reuse_fingerprint_cache = true;
-        unit.reuse_media_info_cache = true;
-        let ledger_id = unit.row.id.to_string();
-        let mut seen = self.seen.lock();
-        if seen.contains(&ledger_id) {
-            return false;
-        }
-        if self
-            .last_failure
-            .lock()
-            .get(&ledger_id)
-            .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
-        {
-            return false;
-        }
-        self.last_failure.lock().remove(&ledger_id);
-        drop(seen);
-        let Some(job_id) = self.persist_single_unit(&unit, "media_probe") else {
-            return false;
-        };
-        unit.job_id = Some(job_id.clone());
-        tracing::info!(
-            path = %unit.row.path,
-            job_id,
-            "【媒体信息】已进入高优先级探测队列；声纹将在媒体信息写入后另行排队"
-        );
-        if self.queue_metadata(unit).is_err() {
-            tracing::info!(ledger_id, job_id, "媒体信息窗口已满，取消本次入队并保持可恢复");
-            self.store.lock().cancel_probe_unit(&job_id, &ledger_id, "dispatch window full").ok();
-            return false;
-        }
-        self.seen.lock().insert(ledger_id);
-        true
-    }
-
-
-    /// 强制探测：同一文件已有任务时拒绝重复排队；终态后用户可重试。
-    pub fn enqueue_force(&self, mut unit: ProbeUnit) -> bool {
-        unit.reuse_fingerprint_cache = false;
-        unit.reuse_media_info_cache = false;
-        let ledger_id = unit.row.id.to_string();
-        let mut seen = self.seen.lock();
-        self.last_failure.lock().remove(&ledger_id);
-        if !seen.insert(ledger_id.clone()) {
-            tracing::info!(ledger_id, "已有媒体探测任务，跳过重复强制探测");
-            return false;
-        }
-        let Some(job_id) = self.persist_single_unit(&unit, "media_probe") else {
-            seen.remove(&ledger_id);
-            return false;
-        };
-        unit.job_id = Some(job_id.clone());
-        if self.queue_metadata(unit).is_err() {
-            seen.remove(&ledger_id);
-            tracing::info!(ledger_id, job_id, "强制探测窗口已满，任务保持数据库排队");
-            self.wake.notify_waiters();
-        }
-        true
     }
 
     /// Force a complete season refresh while leaving its current markers and
@@ -519,7 +374,8 @@ impl ProbeManager {
 
     /// 是否已在排队/执行（前端「探测中」状态用）。
     pub fn is_queued(&self, ledger_id: &str) -> bool {
-        match self.store.lock().is_probe_queued(ledger_id) {
+        let queued = self.store.lock().is_probe_queued(ledger_id);
+        match queued {
             Ok(queued) => queued,
             Err(_) => self.seen.lock().contains(ledger_id),
         }
@@ -777,35 +633,6 @@ impl ProbeManager {
                 }
             }
             timings::log_terminal_job(&self.store, &self.timings, &job);
-        }
-    }
-
-    fn persist_single_unit(&self, unit: &ProbeUnit, kind: &str) -> Option<String> {
-        let job_id = uuid::Uuid::new_v4().to_string();
-        let ledger_id = unit.row.id.to_string();
-        let scope = format!("ledger:{ledger_id}");
-        let spec = crate::store::ProbeJobUnitSpec {
-            ledger_id: &ledger_id,
-            kind: unit.kind.as_str(),
-            force_fingerprint: unit.force_fingerprint,
-            reuse_fingerprint_cache: unit.reuse_fingerprint_cache,
-            overwrite_markers: unit.overwrite_markers,
-            reuse_media_info_cache: unit.reuse_media_info_cache,
-        };
-        match self.store.lock().create_probe_job(
-            &job_id,
-            kind,
-            &unit.row.media_id.to_string(),
-            unit.row.season,
-            &scope,
-            &[spec],
-        ) {
-            Ok(true) => Some(job_id),
-            Ok(false) => None,
-            Err(error) => {
-                tracing::error!(%error, ledger_id, "无法持久化探测任务");
-                None
-            }
         }
     }
 

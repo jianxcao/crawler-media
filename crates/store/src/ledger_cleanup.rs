@@ -11,7 +11,7 @@ use rusqlite::Transaction;
 use crate::StoreError;
 
 mod probe_unit_retirement;
-pub(crate) use probe_unit_retirement::repair_orphan_probe_units;
+pub(crate) use probe_unit_retirement::{repair_orphan_probe_units, resync_probe_job};
 
 /// Delete all file-derived facts and the ledger row itself for `id` within `tx`.
 ///

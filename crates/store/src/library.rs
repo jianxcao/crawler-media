@@ -426,14 +426,6 @@ impl Store {
             .is_some())
     }
 
-    /// 文件重新入库后清除缺失标记。
-    pub fn clear_ledger_missing(&self, path: &str) -> Result<bool, StoreError> {
-        let changed = self.library.execute(
-            "UPDATE ledger SET missing_at = NULL WHERE path = ?1 AND missing_at IS NOT NULL",
-            params![path],
-        )?;
-        Ok(changed > 0)
-    }
 }
 
 /// Remove all caches in the same transaction as ledger deletion when applicable.

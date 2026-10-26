@@ -6,6 +6,7 @@ mod chapter_frame_tasks;
 mod fingerprint;
 mod library_deletion;
 mod probe_state;
+mod probe_backpressure;
 mod tables;
 mod browse_changes;
 mod browse_page_facts;
@@ -18,7 +19,7 @@ mod scan_operations;
 /// The version is stored via `PRAGMA user_version` on each database file.
 pub const APP_SCHEMA_VERSION: i64 = 8;
 pub const CATALOG_SCHEMA_VERSION: i64 = 3;
-pub const LIBRARY_SCHEMA_VERSION: i64 = 17;
+pub const LIBRARY_SCHEMA_VERSION: i64 = 18;
 pub const SUBSCRIBE_SCHEMA_VERSION: i64 = 8;
 
 /// Read the current schema version from a database file.
@@ -333,6 +334,10 @@ pub fn migrate_library(conn: &Connection) -> Result<(), StoreError> {
     // 空掉的活动任务收尾，避免旧库残留悬空 ledger 引用。
     if previous < 10 {
         crate::ledger_cleanup::repair_orphan_probe_units(conn)?;
+    }
+    if previous < 18 {
+        crate::ledger_presence::repair_missing_probe_work(conn)?;
+        probe_backpressure::repair_capacity_cancelled_obligations(conn)?;
     }
     read_revisions::migrate_read_revisions("library", conn)?;
     read_revisions::create_revision_trigger(conn, "ledger", "lib_ledger")?;

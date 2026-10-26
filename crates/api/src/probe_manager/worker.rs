@@ -146,6 +146,16 @@ impl Drop for MetadataStageGuard {
     }
 }
 
+struct FingerprintWindowGuard(Arc<ProbeManager>);
+
+impl Drop for FingerprintWindowGuard {
+    fn drop(&mut self) {
+        // This worker can be the only remaining consumer after metadata drains.
+        // Refill on every outcome, including cancelled sources and stale claims.
+        self.0.fill_dispatch_windows();
+    }
+}
+
 async fn run_fingerprint_worker(manager: Arc<ProbeManager>) {
     loop {
         let recovered = {
@@ -182,6 +192,7 @@ async fn run_fingerprint_worker(manager: Arc<ProbeManager>) {
             message
         };
         let Some((id, work)) = message else { break };
+        let _window = FingerprintWindowGuard(manager.clone());
         if manager.shutting_down.load(std::sync::atomic::Ordering::SeqCst) {
             manager.seen.lock().remove(&id.ledger_id);
             continue;
