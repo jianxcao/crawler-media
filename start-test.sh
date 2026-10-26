@@ -9,7 +9,7 @@
 #   ./start-test.sh stop           停止全部服务
 #   ./start-test.sh status         查看各服务状态
 #   ./start-test.sh logs           跟随查看后端日志（终端实时输出）
-#   ./start-test.sh clean-logs     清空全部测试日志（.test-logs/*.log）
+#   ./start-test.sh clean-logs     清空全部测试日志（$MEDIA_HOME/logs/test-env/*.log）
 #
 # 选项:
 #   --clean / --clean-logs         显式指定清除日志（start/restart 已默认自动清理）
@@ -24,26 +24,31 @@ BACKEND_PORT="${BACKEND_PORT:-18765}"
 FRONTEND_PORT="${FRONTEND_PORT:-3334}"
 QB_PORT="${QB_PORT:-8080}"
 MOCK_PORT="${MOCK_PORT:-18090}"
-DATA_DIR="${DATA_DIR:-data/live}"
+MEDIA_HOME="${MEDIA_HOME:-/Users/jianxcao/Downloads/crawler-media}"
+DATA_DIR="${DATA_DIR:-$MEDIA_HOME/data}"
 TOKEN="${TOKEN:-changeme}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-test-admin-secret-password}"
 QB_USER="${QB_USER:-admin}"
 QB_PASS="${QB_PASS:-adminadmin}"
 QB_DOCKER="${QB_DOCKER:-crawler-media-qb}"
-QB_HOST_DOWNLOADS="${QB_HOST_DOWNLOADS:-$HOME/Downloads/crawler-media-test/qb}"
+QB_HOST_DOWNLOADS="${QB_HOST_DOWNLOADS:-$MEDIA_HOME/downloads/qb}"
 MOCK_SITE_PY="${MOCK_SITE_PY:-/tmp/mock-site/server.py}"
 
 # 仓库根目录（脚本所在位置）
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_BIN="$ROOT_DIR/target/debug/crawler-media"
 FRONTEND_DIR="$ROOT_DIR/web"
+LOG_DIR="${LOG_DIR:-$MEDIA_HOME/logs/test-env}"
+case "$DATA_DIR" in
+  /*) DATA_PATH="$DATA_DIR" ;;
+  *) DATA_PATH="$ROOT_DIR/$DATA_DIR" ;;
+esac
 
 # 非交互 shell 常缺的 PATH：rustup cargo + homebrew node + docker
 export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 command -v cargo >/dev/null 2>&1 || { echo "[!!] 找不到 cargo，请先安装 Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"; exit 1; }
 
 # 日志文件
-LOG_DIR="$ROOT_DIR/.test-logs"
 mkdir -p "$LOG_DIR"
 BACKEND_LOG="$LOG_DIR/backend.log"
 FRONTEND_LOG="$LOG_DIR/frontend.log"
@@ -167,7 +172,8 @@ start_backend() {
   launch backend env \
     RUST_LOG="${RUST_LOG:-info,api=debug,crawler_media=debug,domain=debug,indexer=debug,media=debug,downloader=debug,library=debug,subscribe=debug,filter=debug,release=debug,hooks=debug,jobs=debug,playback=debug,marker=debug,html5ever=off,selectors=warn}" \
     CRAWLER_MEDIA_FFMPEG_LOG_LEVEL="${CRAWLER_MEDIA_FFMPEG_LOG_LEVEL:-verbose}" \
-    CRAWLER_MEDIA_DATA="$ROOT_DIR/$DATA_DIR" \
+    CRAWLER_MEDIA_DATA="$DATA_PATH" \
+    CRAWLER_MEDIA_TMDB_KEY="${CRAWLER_MEDIA_TMDB_KEY:-}" \
     CRAWLER_MEDIA_TOKEN="$TOKEN" \
     CRAWLER_MEDIA_ADMIN_PASSWORD="${ADMIN_PASSWORD:-test-admin-secret-password}" \
     CRAWLER_MEDIA_QB_URL="http://localhost:$QB_PORT" \
