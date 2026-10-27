@@ -42,7 +42,9 @@ impl crate::catalog::Catalog for ArtworkCatalog {
         Ok(None)
     }
     fn poster_url(&self, _: MediaKind, _: &str) -> Result<Option<String>, String> {
-        Ok(Some("https://image.tmdb.org/t/p/w342/clip-poster.jpg".into()))
+        Ok(Some(
+            "https://image.tmdb.org/t/p/w342/clip-poster.jpg".into(),
+        ))
     }
     fn image_candidates(
         &self,
@@ -128,7 +130,12 @@ fn cancelled_video_scan_fails_without_ledgering() {
     assert_eq!(failure.totals.scanned, 0);
     assert_eq!(failure.totals.inserted, 0);
     assert!(
-        state.store().lock().list_ledger().unwrap().is_empty(),
+        state
+            .store()
+            .lock()
+            .list_file_coverage()
+            .unwrap()
+            .is_empty(),
         "取消的 Video 扫描不得登记任何文件"
     );
 }
@@ -141,9 +148,14 @@ fn set_mirror_images(state: &ApiState, enabled: bool) {
     guard.save_scrape_config(&setting).unwrap();
 }
 
-fn walk_once(state: &ApiState, library_id: &str, root: &std::path::Path) -> super::walk::ChunkTotals {
+fn walk_once(
+    state: &ApiState,
+    library_id: &str,
+    root: &std::path::Path,
+) -> super::walk::ChunkTotals {
     let lease = state.acquire_library_work(library_id).unwrap();
-    let scan_scope = crate::http::library_scan::scope::ScanScope::capture(state, library_id).unwrap();
+    let scan_scope =
+        crate::http::library_scan::scope::ScanScope::capture(state, library_id).unwrap();
     let ctx = super::walk::ScanContext {
         state,
         id: library_id,
@@ -181,10 +193,10 @@ fn unchanged_video_file_is_artwork_attempted_without_reregistration() {
         let store = state.store();
         let guard = store.lock();
         let row = guard
-            .ledger_by_path(&clip.display().to_string())
+            .file_coverage_by_path(&clip.display().to_string())
             .unwrap()
             .expect("clip 必须已入账");
-        let mut media = guard.get_media(row.media_id).unwrap().expect("media");
+        let mut media = guard.get_media(row.file.media_id).unwrap().expect("media");
         media.tmdb_id = Some("603".into());
         guard.update_media(&media).unwrap();
     }
@@ -224,7 +236,9 @@ fn checkpoint_fault_fixture() -> CheckpointFaultFixture {
 
     let media = domain::Media {
         id: domain::MediaId::new(),
-        kind: MediaKind::Movie,
+        // `library_files` 的 (media_id, kind) 外键要求文件 kind 与所属库 kind 一致；
+        // `video_fixture` 建的是 Video 库。
+        kind: MediaKind::Video,
         title: "Test Movie".into(),
         year: Some(2024),
         original_title: None,
@@ -239,20 +253,20 @@ fn checkpoint_fault_fixture() -> CheckpointFaultFixture {
         let store = state.store();
         let guard = store.lock();
         guard.insert_media(&media).unwrap();
-        guard.insert_ledger(&domain::LedgerRow {
-            id: domain::LedgerId::new(),
+        // 夹具直接用 `FixtureFile`（规则 §2③）：season/episode 皆 None ⇒ 落 `UnitKey::WHOLE`，
+        // 与旧台账行「season、episode 都是 None」逐字等价。
+        let spec = store::test_support::FixtureFile {
             media_id: media.id,
             path: key.clone(),
-            season: None,
-            episode: None,
-            resolution: None,
-            codec: None,
-            hdr: None,
-            quality_source: domain::QualitySource::Release,
-            confidence: domain::Confidence::High,
-            filter_score: None,
-        }).unwrap();
-        guard.record_scan_seen_stamps(op_id, &[(key, current_stamp.0, current_stamp.1, current_stamp.2)]).unwrap();
+            ..Default::default()
+        };
+        store::test_support::publish_fixture_file(&guard, &spec).unwrap();
+        guard
+            .record_scan_seen_stamps(
+                op_id,
+                &[(key, current_stamp.0, current_stamp.1, current_stamp.2)],
+            )
+            .unwrap();
     }
     let db_path = dir.path().join("data").join("library.db");
     CheckpointFaultFixture {
@@ -268,26 +282,28 @@ fn checkpoint_fault_fixture() -> CheckpointFaultFixture {
 fn set_scan_seen_disabled(db_path: &std::path::Path, disabled: bool) {
     let conn = rusqlite::Connection::open(db_path).unwrap();
     if disabled {
-        conn.execute("ALTER TABLE scan_seen RENAME TO scan_seen_disabled", []).unwrap();
+        conn.execute("ALTER TABLE scan_seen RENAME TO scan_seen_disabled", [])
+            .unwrap();
     } else {
-        conn.execute("ALTER TABLE scan_seen_disabled RENAME TO scan_seen", []).unwrap();
+        conn.execute("ALTER TABLE scan_seen_disabled RENAME TO scan_seen", [])
+            .unwrap();
     }
 }
 
-/// 只让 durable 源版本查询失败：重命名 `ledger.source_version_ms`。
-/// `scan_seen_checkpoints` 不读该列，因此断点查询仍然成功——这是真实 SQL 故障，
-/// 不需要在生产代码里留测试钩子（也不会有跨测试的全局状态）。
+/// 只让 durable 源版本查询失败：重命名 `library_files.source_digest`。
+/// `scan_seen_checkpoints` 只读 `scan_seen`，不读该列，因此断点查询仍然成功——
+/// 这是真实 SQL 故障，不需要在生产代码里留测试钩子（也不会有跨测试的全局状态）。
 fn set_durable_disabled(db_path: &std::path::Path, disabled: bool) {
     let conn = rusqlite::Connection::open(db_path).unwrap();
     if disabled {
         conn.execute(
-            "ALTER TABLE ledger RENAME COLUMN source_version_ms TO source_version_ms_disabled",
+            "ALTER TABLE library_files RENAME COLUMN source_digest TO source_digest_disabled",
             [],
         )
         .unwrap();
     } else {
         conn.execute(
-            "ALTER TABLE ledger RENAME COLUMN source_version_ms_disabled TO source_version_ms",
+            "ALTER TABLE library_files RENAME COLUMN source_digest_disabled TO source_digest",
             [],
         )
         .unwrap();
@@ -329,7 +345,11 @@ fn checkpoint_decision_checkpoint_err_durable_ok() {
     let dec_changed = super::checkpoint_fresh(&fix.state, Some(fix.op_id), vec![changed_file]);
     assert!(!dec_changed.checkpoints_ok);
     assert!(dec_changed.durable_ok);
-    assert_eq!(dec_changed.changed.len(), 1, "断点失败但 durable 成功必须检测到变化");
+    assert_eq!(
+        dec_changed.changed.len(),
+        1,
+        "断点失败但 durable 成功必须检测到变化"
+    );
     assert_eq!(dec_changed.changed[0], fix.file_path);
 
     set_scan_seen_disabled(&fix.db_path, false);
@@ -348,7 +368,11 @@ fn checkpoint_decision_checkpoint_hit_durable_err() {
     assert!(!dec.durable_ok, "durable 查询必须失败");
     assert_eq!(dec.skipped, 0, "durable 失败时断点命中也不得跳过");
     assert_eq!(dec.fresh.len(), 1, "durable 失败全部进入 fresh");
-    assert_eq!(dec.changed.len(), 1, "durable 失败必须 fail-closed 全部列入 changed");
+    assert_eq!(
+        dec.changed.len(),
+        1,
+        "durable 失败必须 fail-closed 全部列入 changed"
+    );
     assert_eq!(dec.changed[0], fix.file_path);
 }
 
@@ -367,7 +391,11 @@ fn checkpoint_decision_both_err() {
     assert!(!dec.durable_ok, "durable 查询必须失败");
     assert_eq!(dec.skipped, 0, "两者均失败不得跳过");
     assert_eq!(dec.fresh.len(), 1);
-    assert_eq!(dec.changed.len(), 1, "两者同时失败必须 fail-closed 全部列入 changed");
+    assert_eq!(
+        dec.changed.len(),
+        1,
+        "两者同时失败必须 fail-closed 全部列入 changed"
+    );
     assert_eq!(dec.changed[0], fix.file_path);
 }
 
@@ -379,7 +407,8 @@ fn walk_with_op(
     op_id: &str,
 ) -> (library::ScanRootReport, super::walk::ChunkTotals) {
     let lease = state.acquire_library_work(library_id).unwrap();
-    let scan_scope = crate::http::library_scan::scope::ScanScope::capture(state, library_id).unwrap();
+    let scan_scope =
+        crate::http::library_scan::scope::ScanScope::capture(state, library_id).unwrap();
     let ctx = super::walk::ScanContext {
         state,
         id: library_id,
@@ -425,12 +454,15 @@ fn assert_not_confirmed(state: &ApiState, op_id: &str, path: &std::path::Path) {
         Some((0, 0, None)),
         "窗口内变化的路径不得推进 durable 源版本"
     );
-    let row = guard.ledger_by_path(&key).unwrap().expect("路径必须已入账");
+    let row = guard
+        .file_coverage_by_path(&key)
+        .unwrap()
+        .expect("路径必须已入账");
     let obligation = guard
         .scan_probe_obligations(100)
         .unwrap()
         .into_iter()
-        .find(|obligation| obligation.ledger_id == row.id)
+        .find(|obligation| obligation.ledger_id == row.file.file_id)
         .expect("窗口内变化的路径必须重挂处理义务");
     assert_eq!(obligation.reason, "scan_changed");
 }
@@ -486,7 +518,10 @@ fn unchanged_sibling_keeps_checkpoint_while_changed_file_is_reprocessed() {
     std::fs::write(&edit, b"v1").unwrap();
     set_mtime_ms(&edit, edit_observed.0);
     let (second_report, second) = walk_with_op(&state, &library_id, &root, "toctou-mixed");
-    assert_eq!(second_report.skipped, 1, "未变化的兄弟文件必须命中断点被跳过");
+    assert_eq!(
+        second_report.skipped, 1,
+        "未变化的兄弟文件必须命中断点被跳过"
+    );
     assert_eq!(second.scanned, 1, "只有窗口内变化的文件需要重做");
 }
 
@@ -521,10 +556,17 @@ fn file_changed_during_processing_is_not_checkpointed_and_is_reprocessed() {
     // 文件回到观察时的版本：被错误推进的断点会让第二轮把它当成已完成而跳过。
     std::fs::write(&clip, b"v1").unwrap();
     set_mtime_ms(&clip, observed.0);
-    assert_eq!(store::Store::scan_seen_stamp(&clip), observed, "测试前提：版本已复原");
+    assert_eq!(
+        store::Store::scan_seen_stamp(&clip),
+        observed,
+        "测试前提：版本已复原"
+    );
 
     let (second_report, second) = walk_with_op(&state, &library_id, &root, "toctou-file");
-    assert_eq!(second_report.skipped, 0, "窗口内变化的文件不得被当成已完成跳过");
+    assert_eq!(
+        second_report.skipped, 0,
+        "窗口内变化的文件不得被当成已完成跳过"
+    );
     assert_eq!(second.scanned, 1, "第二轮必须重新处理该文件");
 }
 
@@ -562,6 +604,9 @@ fn strm_url_changed_during_processing_is_not_checkpointed_and_is_reprocessed() {
     std::fs::write(&strm, "https://a/video").unwrap();
     set_mtime_ms(&strm, observed.0);
     let (second_report, second) = walk_with_op(&state, &library_id, &root, "toctou-strm");
-    assert_eq!(second_report.skipped, 0, "窗口内变化的 .strm 不得被当成已完成跳过");
+    assert_eq!(
+        second_report.skipped, 0,
+        "窗口内变化的 .strm 不得被当成已完成跳过"
+    );
     assert_eq!(second.scanned, 1, "第二轮必须重新处理该 .strm");
 }

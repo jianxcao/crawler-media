@@ -54,7 +54,7 @@ async fn run_socket(
             changed = changes.recv() => match changed {
                 Ok((event_user, event)) if event_user == user_id => {
                     // 检查 token 是否仍有效（logout 或改密后断开）
-                    if provider.user_id_by_token(&user.token).await.ok().flatten() != Some(user_id) {
+                    if provider.user_id_by_token(&user.token, None).await.ok().flatten() != Some(user_id) {
                         tracing::info!(%user_id, "Token revoked or password changed, closing WebSocket");
                         break;
                     }
@@ -83,7 +83,7 @@ async fn run_socket(
                 Some(Ok(_)) => {}
             },
             _ = keepalive.tick() => {
-                if provider.user_id_by_token(&user.token).await.ok().flatten() != Some(user_id) {
+                if provider.user_id_by_token(&user.token, None).await.ok().flatten() != Some(user_id) {
                     tracing::info!(%user_id, "Token revoked or password changed on keepalive tick, closing WebSocket");
                     break;
                 }
@@ -138,14 +138,13 @@ pub(super) async fn publish_user_data_changed(
                 None
             }
         };
-        if let Some(parent) = parent {
-            if let Some(entry) = user_data_entry(&crate::dto::item_dto_json(parent))
-                && !user_data
-                    .iter()
-                    .any(|existing| existing["ItemId"] == entry["ItemId"])
-            {
-                user_data.push(entry);
-            }
+        if let Some(parent) = parent
+            && let Some(entry) = user_data_entry(&crate::dto::item_dto_json(parent))
+            && !user_data
+                .iter()
+                .any(|existing| existing["ItemId"] == entry["ItemId"])
+        {
+            user_data.push(entry);
         }
     }
 

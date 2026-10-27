@@ -50,17 +50,29 @@ impl Gate {
     fn enter_and_wait(&self) {
         *self.entered.lock().unwrap() = true;
         self.entered_cv.notify_all();
-        let mut open = self.open.lock().unwrap();
-        while !*open {
-            open = self.open_cv.wait(open).unwrap();
-        }
+        let released = *self
+            .open_cv
+            .wait_timeout_while(
+                self.open.lock().unwrap(),
+                std::time::Duration::from_secs(30),
+                |open| !*open,
+            )
+            .unwrap()
+            .0;
+        assert!(released, "test must release the subtitle gate");
     }
 
     fn wait_entered(&self) {
-        let mut entered = self.entered.lock().unwrap();
-        while !*entered {
-            entered = self.entered_cv.wait(entered).unwrap();
-        }
+        let entered = *self
+            .entered_cv
+            .wait_timeout_while(
+                self.entered.lock().unwrap(),
+                std::time::Duration::from_secs(10),
+                |entered| !*entered,
+            )
+            .unwrap()
+            .0;
+        assert!(entered, "worker must enter the subtitle gate");
     }
 
     fn release(&self) {
@@ -285,7 +297,10 @@ async fn both_waiters_cancelled_cancels_job_and_cleans_staging() {
     poll_once_joined(second.as_mut()).await;
 
     first.abort();
-    // 最后一个 waiter 离开才取消任务：直接 drop 第二个请求是确定性的。
+    // abort 是异步的：必须等第一个 waiter 真正被 drop，否则 drop(second) 时它可能
+    // 仍存活，任务不会被取消，放行后 runner 会合法发布 final（满载下偶发失败的根因）。
+    assert!(first.await.unwrap_err().is_cancelled());
+    // 最后一个 waiter 离开才取消任务：此时 drop 第二个请求是确定性的。
     drop(second);
     gate.release();
 
@@ -378,11 +393,7 @@ async fn source_replaced_after_key_capture_does_not_return_stale_warm_cache() {
         matches!(result, Err(SubtitleServiceError::Cancelled)),
         "源文件已变时必须取消，而不是返回旧暖缓存: {result:?}"
     );
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        0,
-        "暖缓存路径不应触发提取"
-    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "暖缓存路径不应触发提取");
 }
 
 #[tokio::test]

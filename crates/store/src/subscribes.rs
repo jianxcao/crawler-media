@@ -295,20 +295,6 @@ impl Store {
         Ok(out)
     }
 
-    /// 删除条目/单集时清理该 Media 的 imported 源链接：删除就是删除，
-    /// 不留任何可被重新收集的尾巴。
-    pub fn delete_imported_pending_for_media(
-        &self,
-        media_id: MediaId,
-    ) -> Result<usize, StoreError> {
-        let n = self.subscribe.execute(
-            "DELETE FROM pending_downloads WHERE state = 'imported' AND subscribe_id IN
-               (SELECT id FROM subscribes WHERE media_id = ?1)",
-            params![media_id.to_string()],
-        )?;
-        Ok(n)
-    }
-
     /// 转存成功后把 pending 标记为 imported（不删除）——保留「哪个种子 → 哪个库文件」
     /// 的源链接（当前仅作留档，不自动重新收集）。
     pub fn mark_pending_imported(
@@ -371,7 +357,7 @@ impl Store {
     }
 
     pub fn delete_subscribe(&self, id: SubscribeId) -> Result<bool, StoreError> {
-        let tx = self.subscribe.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.subscribe)?;
         for table in ["pending_downloads", "subscribe_facts", "subscribe_wanted"] {
             tx.execute(
                 &format!("DELETE FROM {table} WHERE subscribe_id = ?1"),
@@ -476,7 +462,7 @@ impl Store {
         let s: i32 = season.map(|v| v as i32).unwrap_or(-1);
         let e: i32 = episode.map(|v| v as i32).unwrap_or(-1);
         let pos = self
-            .subscribe
+            .library
             .query_row(
                 "SELECT position_ms FROM playback_units
                  WHERE user_id = ?1 AND media_id = ?2 AND season = ?3 AND episode = ?4",
@@ -495,7 +481,7 @@ impl Store {
         media_id: MediaId,
     ) -> Result<Option<i64>, StoreError> {
         let max = self
-            .subscribe
+            .library
             .query_row(
                 "SELECT MAX(position_ms) FROM playback_units
                  WHERE user_id = ?1 AND media_id = ?2",
@@ -507,32 +493,22 @@ impl Store {
         Ok(max.flatten())
     }
 
-    /// All playback progress rows `(user_id, media_id, position_ms)`.
-    pub fn list_playback_progress(&self) -> Result<Vec<(UserId, MediaId, i64)>, StoreError> {
-        let mut stmt = self.subscribe.prepare(
-            "SELECT user_id, media_id, MAX(position_ms) FROM playback_units
-             GROUP BY user_id, media_id ORDER BY MAX(position_ms) DESC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let user = UserId::from_str(&row.get::<_, String>(0)?).map_err(|err| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(err),
-                )
-            })?;
-            let media = MediaId::from_str(&row.get::<_, String>(1)?).map_err(|err| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    1,
-                    rusqlite::types::Type::Text,
-                    Box::new(err),
-                )
-            })?;
-            Ok((user, media, row.get::<_, i64>(2)?))
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
     pub fn insert_subscribe(&self, subscribe: &Subscribe) -> Result<(), StoreError> {
+        let state: Option<String> = self
+            .library
+            .query_row(
+                "SELECT identity_state FROM media WHERE media_id = ?1",
+                params![subscribe.media_id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(state) = state.as_deref()
+            && (state == "merging" || state == "retired") {
+                return Err(StoreError::Protected(format!(
+                    "media {} identity is frozen ({state})",
+                    subscribe.media_id
+                )));
+            }
         let (coverage_kind, season, episode_from, episode_to) = match &subscribe.coverage {
             Coverage::Movie => ("movie", None, None, None),
             Coverage::Tv {
@@ -637,18 +613,15 @@ impl Store {
         Ok(())
     }
 
-    /// `(created_at, updated_at)` RFC3339 for a Subscribe; `("", "")` when the
-    /// row predates the timestamp migration and was never touched.
+    /// `(created_at, updated_at)` RFC3339 for an existing Subscribe.
     pub fn subscribe_times(&self, id: SubscribeId) -> Result<(String, String), StoreError> {
-        let row = self
-            .subscribe
+        self.subscribe
             .query_row(
                 "SELECT created_at, updated_at FROM subscribes WHERE id = ?1",
                 params![id.to_string()],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
-            .optional()?;
-        Ok(row.unwrap_or_default())
+            .map_err(Into::into)
     }
 
     /// 把内存里的订阅事实写回 DB。内存层已是唯一判定点：`upsert` 只接受
@@ -663,7 +636,7 @@ impl Store {
         facts: &SubscribeFacts,
     ) -> Result<(), StoreError> {
         self.persist_owned_quality(facts)?;
-        let tx = self.subscribe.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.subscribe)?;
         let mut statement = tx.prepare(
             "INSERT INTO subscribe_facts (subscribe_id, season, episode, score, path)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -712,11 +685,10 @@ impl Store {
         let mut facts = SubscribeFacts::default();
         for row in rows {
             let (season, episode, fact) = row?;
-            if let Some(path) = fact.path.as_deref() {
-                if let Some(ledger) = self.ledger_by_path(path)? {
-                    facts.set_quality(path.to_string(), self.owned_quality(&ledger)?);
+            if let Some(path) = fact.path.as_deref()
+                && let Some(coverage) = self.file_coverage_by_path(path)? {
+                    facts.set_quality(path.to_string(), self.owned_quality(&coverage)?);
                 }
-            }
             facts.upsert(season, episode, fact);
         }
         Ok(facts)

@@ -1,7 +1,5 @@
-use marker::adaptive::{
-    verify_template_window, EpisodeEvidence, VerificationOutcome,
-};
 use marker::FingerprintEngine;
+use marker::adaptive::{EpisodeEvidence, VerificationOutcome, verify_template_window};
 
 use super::types::EpisodeCaptureRequest;
 

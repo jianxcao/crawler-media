@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use domain::{MediaId, MediaKind};
 
+use super::projected_season;
 use super::{ProbeManager, ProbeUnit, markers};
 
 pub(super) fn apply_marker_refresh(
@@ -35,7 +36,7 @@ pub(super) fn apply_marker_refresh(
             return;
         }
     };
-    let all_rows = mgr.store.lock().list_ledger();
+    let all_rows = mgr.store.lock().list_file_coverage();
     let all_rows = match all_rows {
         Ok(rows) => rows,
         Err(error) => {
@@ -59,20 +60,20 @@ pub(super) fn apply_marker_refresh(
             return;
         }
     };
-    let publication = {
+    let rows = all_rows
+        .into_iter()
+        .filter(|row| row.file.media_id == media_id && seasons.contains(&projected_season(row)))
+        .collect::<Vec<_>>();
+    let members = markers::source_observations(&rows);
+    let publication = members.and_then(|members| {
         let store = mgr.store.lock();
-        let rows = all_rows
-            .iter()
-            .filter(|row| row.media_id == media_id && seasons.contains(&row.season.unwrap_or(1)))
-            .cloned()
-            .collect::<Vec<_>>();
-        markers::validate_publication_rows(&store, &rows).and_then(|()| {
+        markers::validate_season_rows(&store, &rows).and_then(|()| {
             // Validate every original job member under this same lock, not just the
             // anchor or the expanded lease that ended during result preparation.
             validate_refresh_units(&store, &job.id)?;
-            store.complete_marker_refresh_checked(&job.id, &replacements)
+            store.complete_marker_refresh_checked(&job.id, &replacements, &members)
         })
-    };
+    });
     if let Err(error) = publication {
         if matches!(&error, crate::store::StoreError::Missing(reason) if crate::fingerprint_job::source::is_file_deleted(reason))
         {
@@ -99,14 +100,7 @@ fn validate_refresh_units(
     job_id: &str,
 ) -> Result<(), crate::store::StoreError> {
     for unit in store.probe_job_units(job_id)? {
-        let row = store
-            .get_ledger(&unit.ledger_id.replace('-', ""))?
-            .ok_or_else(|| {
-                crate::store::StoreError::Missing(format!(
-                    "file_deleted: ledger {}",
-                    unit.ledger_id
-                ))
-            })?;
+        let row = super::coverage_for_ledger_id(store, &unit.ledger_id)?;
         markers::validate_publication_rows(store, &[row])?;
     }
     Ok(())
@@ -128,22 +122,18 @@ fn marker_refresh_seasons(
     mgr: &ProbeManager,
     job: &crate::store::ProbeJob,
 ) -> Result<Vec<u32>, crate::store::StoreError> {
-    let store = mgr.store.lock();
-    let units = store.probe_job_units(&job.id)?;
-    let mut seasons = HashSet::new();
-    for unit in units {
-        let row = store
-            .get_ledger(&unit.ledger_id.replace('-', ""))?
-            .ok_or_else(|| {
-                crate::store::StoreError::Missing(format!(
-                    "file_deleted: ledger {}",
-                    unit.ledger_id
-                ))
-            })?;
-        crate::fingerprint_job::source::ensure_source_available(&store, &row)
-            .map_err(crate::store::StoreError::Missing)?;
-        seasons.insert(row.season.unwrap_or(1));
+    let mut rows = Vec::new();
+    {
+        let store = mgr.store.lock();
+        for unit in store.probe_job_units(&job.id)? {
+            let row = super::coverage_for_ledger_id(&store, &unit.ledger_id)?;
+            crate::fingerprint_job::source::ensure_source_recorded(&store, &row)
+                .map_err(crate::store::StoreError::Missing)?;
+            rows.push(row);
+        }
     }
+    markers::observe_rows(&rows)?;
+    let seasons: HashSet<u32> = rows.iter().map(projected_season).collect();
     let mut seasons = seasons.into_iter().collect::<Vec<_>>();
     seasons.sort_unstable();
     Ok(seasons)
@@ -155,7 +145,7 @@ fn prepare_season_replacements(
     unit: &ProbeUnit,
     media_id: MediaId,
     seasons: &[u32],
-    all_rows: &[domain::LedgerRow],
+    all_rows: &[domain::FileCoverage],
 ) -> Result<Vec<crate::store::MarkerResultReplacement>, (u32, crate::store::StoreError)> {
     let sampling_mode = {
         let store = mgr.store.lock();
@@ -169,7 +159,7 @@ fn prepare_season_replacements(
     for season in seasons {
         let row = all_rows
             .iter()
-            .find(|row| row.media_id == media_id && row.season.unwrap_or(1) == *season)
+            .find(|row| row.file.media_id == media_id && projected_season(row) == *season)
             .cloned()
             .ok_or_else(|| {
                 (
@@ -182,7 +172,7 @@ fn prepare_season_replacements(
             if sampling_mode == "adaptive" && tokio::runtime::Handle::try_current().is_ok() {
                 let season_units: Vec<ProbeUnit> = all_rows
                     .iter()
-                    .filter(|r| r.media_id == media_id && r.season.unwrap_or(1) == *season)
+                    .filter(|r| r.file.media_id == media_id && projected_season(r) == *season)
                     .map(|r| {
                         let mut u = unit.clone();
                         u.row = r.clone();
@@ -222,8 +212,7 @@ fn prepare_season_replacements(
 
         // The job's membership is what the caller leased and validated, so the
         // publication must cover exactly those rows.
-        scope_replacement_to_job(mgr, job, &mut replacement)
-            .map_err(|error| (*season, error))?;
+        scope_replacement_to_job(mgr, job, &mut replacement).map_err(|error| (*season, error))?;
 
         tracing::info!(
             job_id = %job.id,

@@ -151,12 +151,12 @@ async fn path_reconciliations_rejects_outside_missing_source_in_default_library(
     // prevent that Library from adopting the external row.
     let store = Store::open(tmp.path().join("data")).unwrap();
     assert!(
-        store
-            .rename_ledger_path(
-                fixture.source.to_str().unwrap(),
-                missing_source.to_str().unwrap(),
-            )
-            .unwrap()
+        store::test_support::force_file_path(
+            &store,
+            fixture.source.to_str().unwrap(),
+            missing_source.to_str().unwrap(),
+        )
+        .unwrap()
     );
     drop(store);
     let before = ledger(&fixture.app).await;

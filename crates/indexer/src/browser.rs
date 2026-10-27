@@ -17,14 +17,12 @@ pub trait PageSession: Send + Sync {
     fn content(&self) -> Result<String, IndexerError>;
     fn cookie_header(&self, page_url: &str) -> Result<String, IndexerError> {
         let _ = page_url;
-        Err(IndexerError::BrowserSetup("Browser cookie readback unsupported".into()))
+        Err(IndexerError::BrowserSetup(
+            "Browser cookie readback unsupported".into(),
+        ))
     }
     fn set_deadline(&self, deadline: Instant) {
         let _ = deadline;
-    }
-    #[deprecated(note = "use set_site_cookies")]
-    fn set_cookie_header(&self, _header: &str) -> Result<(), IndexerError> {
-        Ok(())
     }
 }
 
@@ -70,7 +68,9 @@ impl BrowserConfig {
             .parse::<tungstenite::http::Uri>()
             .map_err(|_| IndexerError::BrowserSetup("Browser requires a valid HTTP CDP discovery URL; only http scheme is supported without credentials or query".into()))?;
         if uri.scheme_str() != Some("http") {
-            return Err(IndexerError::BrowserSetup("仅支持 http CDP discovery（建议仅回环或受信内网）".into()));
+            return Err(IndexerError::BrowserSetup(
+                "仅支持 http CDP discovery（建议仅回环或受信内网）".into(),
+            ));
         }
         if uri.host().is_none_or(|host| host.is_empty())
             || uri.authority().is_some_and(|a| a.as_str().contains('@'))
@@ -91,7 +91,9 @@ impl BrowserConfig {
         if let Some(site_url) = site {
             let trimmed = site_url.trim();
             if trimmed.is_empty() {
-                return Err(IndexerError::BrowserSetup("Site CDP URL cannot be empty".into()));
+                return Err(IndexerError::BrowserSetup(
+                    "Site CDP URL cannot be empty".into(),
+                ));
             }
             Self::validate_endpoint(trimmed)?;
             return Ok(Some((trimmed.to_string(), BrowserRoute::Site)));
@@ -110,7 +112,9 @@ impl BrowserConfig {
                 return Ok(Some((trimmed.to_string(), BrowserRoute::Managed)));
             }
         }
-        Err(IndexerError::BrowserSetup("CDP 已开启但没有可用端点".into()))
+        Err(IndexerError::BrowserSetup(
+            "CDP 已开启但没有可用端点".into(),
+        ))
     }
 }
 
@@ -254,23 +258,28 @@ impl Browser {
         tracing::debug!(?route, endpoint = %endpoint, "Opening external Browser session");
         let session = match &self.opener {
             Some(opener) => opener(Some(&endpoint)),
-            None => crate::cdp_page::open_cdp_session_until(&endpoint, deadline, self.target_close_cap)
-                .map(|session| Arc::new(session) as Arc<dyn PageSession>),
+            None => {
+                crate::cdp_page::open_cdp_session_until(&endpoint, deadline, self.target_close_cap)
+                    .map(|session| Arc::new(session) as Arc<dyn PageSession>)
+            }
         };
         session.inspect_err(|error| {
-            if let IndexerError::BrowserSetup(message) = error {
-                if message.starts_with(crate::cdp_page::INCOMPATIBLE_PREFIX) {
+            if let IndexerError::BrowserSetup(message) = error
+                && message.starts_with(crate::cdp_page::INCOMPATIBLE_PREFIX) {
                     tracing::error!(endpoint = %endpoint, %message, "Marking Browser endpoint incompatible");
                     self.incompatible.lock().insert(endpoint.clone(), message.clone());
                 }
-            }
             tracing::error!(%error, ?route, "Browser session open failed");
         })
     }
 
     pub fn render(&self, request: &FetchRequest) -> Result<RenderedPage, IndexerError> {
         self.validate_timing()?;
-        if request.proxy.as_deref().is_some_and(|p| !p.trim().is_empty()) {
+        if request
+            .proxy
+            .as_deref()
+            .is_some_and(|p| !p.trim().is_empty())
+        {
             return Err(IndexerError::BrowserSetup(
                 "Browser 不支持站点代理（proxy 与 browser 互斥）".into(),
             ));
@@ -307,7 +316,10 @@ impl Browser {
                 })
                 .ok()
                 .filter(|s| !s.is_empty());
-            Ok(RenderedPage { html, cookie_header })
+            Ok(RenderedPage {
+                html,
+                cookie_header,
+            })
         })();
 
         drop(page);

@@ -37,11 +37,10 @@ fn validate(setting: &ScrapeConfigSetting) -> Result<(), String> {
     if !matches!(setting.poster_mode.as_str(), "" | "default" | "language") {
         return Err("海报模式必须是 default 或 language".into());
     }
-    if let Some(secs) = setting.fingerprint_duration_secs {
-        if secs < 30 || secs > 3600 {
+    if let Some(secs) = setting.fingerprint_duration_secs
+        && !(30..=3600).contains(&secs) {
             return Err("声纹采样时长需要在 30~3600 秒之间".into());
         }
-    }
     if let Some(mode) = &setting.fingerprint_sampling_mode {
         let trimmed = mode.trim();
         if !trimmed.is_empty() && trimmed != "full_window" && trimmed != "adaptive" {

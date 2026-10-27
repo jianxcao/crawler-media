@@ -15,6 +15,12 @@ import type { LibraryEpisode } from "@/lib/api/libraries";
 import { imageUrl } from "@/lib/image-proxy";
 import { playerReturnPath } from "@/lib/player/play-links";
 import {
+  type ActiveTarget,
+  initialTarget,
+  navigateTarget,
+  sessionUnit,
+} from "@/lib/player/active-target";
+import {
   nextOwnedEpisode,
   prevOwnedEpisode,
 } from "@/lib/player/episode-navigation";
@@ -38,9 +44,10 @@ export interface PlayerPageProps {
   /** 剧集的起播季集；电影两者都不给 */
   season?: number;
   episode?: number;
+  fileId?: string;
   /** 分享链接的 `?t=` 起播覆盖（毫秒）；不给 = 服务端接各自的续播点 */
   startMsOverride?: number;
-  /** 播放接口作用域（影片分享页传 sharePlaybackScope(slug)）；缺省 = 登录态 */
+  /** 播放接口作用域；缺省 = 登录态 */
   api?: PlaybackApiScope;
   /** 退出播放的固定落点（影片分享页回 /s/{slug}）；缺省按登录态的优先级算 */
   exitHref?: string;
@@ -55,6 +62,7 @@ export function PlayerPage({
   mediaItemId,
   season,
   episode,
+  fileId,
   startMsOverride,
   api = DEFAULT_PLAYBACK_SCOPE,
   exitHref,
@@ -62,18 +70,19 @@ export function PlayerPage({
   const navigate = useNavigate();
   const [info, setInfo] = useState<PlaybackItemInfo | null>(null);
   const [episodes, setEpisodes] = useState<LibraryEpisode[]>([]);
-  const [current, setCurrent] = useState<{ season: number; episode: number } | null>(
-    season !== undefined && episode !== undefined ? { season, episode } : null,
+  // One active target: coordinates + the URL's explicit source, replaced as a whole.
+  const [target, setTarget] = useState<ActiveTarget>(() =>
+    initialTarget({ season, episode, fileId }),
   );
+  const current =
+    target.season !== undefined && target.episode !== undefined
+      ? { season: target.season, episode: target.episode }
+      : null;
   const [failed, setFailed] = useState<string | null>(null);
 
   useEffect(() => {
-    if (season !== undefined && episode !== undefined) {
-      setCurrent({ season, episode });
-    } else {
-      setCurrent(null);
-    }
-  }, [season, episode]);
+    setTarget(initialTarget({ season, episode, fileId }));
+  }, [season, episode, fileId]);
 
   useEffect(() => {
     setInfo(null);
@@ -112,15 +121,8 @@ export function PlayerPage({
     };
   }, [mediaItemId, activeSeason, api]);
 
-  const unit = useMemo(
-    () => ({
-      media_item_id: mediaItemId,
-      // 电影用 (0, 0) 哨兵，与台账、playback_state 的约定一致
-      season_number: current?.season ?? 0,
-      episode_number: current?.episode ?? 0,
-    }),
-    [mediaItemId, current?.season, current?.episode],
-  );
+  // 电影省略坐标；剧集带季集；file_id 只来自当前目标的显式选择
+  const unit = useMemo(() => sessionUnit(mediaItemId, target), [mediaItemId, target]);
 
   const currentEpisode = current
     ? (episodes.find((item) => item.episode_number === current.episode) ?? null)
@@ -162,18 +164,22 @@ export function PlayerPage({
 
   const playNext = useCallback(() => {
     if (!next) return;
-    setCurrent({
-      season: next.unit.season_number ?? 0,
-      episode: next.unit.episode_number ?? 0,
-    });
+    setTarget((previous) =>
+      navigateTarget(previous, {
+        season: next.unit.season_number ?? 0,
+        episode: next.unit.episode_number ?? 0,
+      }),
+    );
   }, [next]);
 
   const playPrev = useCallback(() => {
     if (!prev) return;
-    setCurrent({
-      season: prev.unit.season_number ?? 0,
-      episode: prev.unit.episode_number ?? 0,
-    });
+    setTarget((previous) =>
+      navigateTarget(previous, {
+        season: prev.unit.season_number ?? 0,
+        episode: prev.unit.episode_number ?? 0,
+      }),
+    );
   }, [prev]);
 
   const exit = useCallback(() => {

@@ -144,57 +144,30 @@ async fn preview_naming_renders_sample_paths() {
 }
 
 #[tokio::test]
-async fn directory_naming_round_trips_through_scrape_config() {
+async fn naming_segments_round_trip_without_combined_template_conversion() {
     let tmp = tempfile::tempdir().unwrap();
     let app = app(&tmp);
-    let saved = app
-        .clone()
-        .oneshot(request(
-            "PUT",
-            "/api/v1/directory",
-            Some("management-secret"),
-            json!({
-                "movie_root": tmp.path().join("m").display().to_string(),
-                "tv_root": tmp.path().join("t").display().to_string(),
-                "transfer_mode": "hardlink",
-                "movie_naming": "{title}{ext}",
-                "tv_naming": "{title} - {season_episode}{ext}",
-                "scrape": false
-            }),
-        ))
-        .await
-        .unwrap();
+    let saved = app.clone().oneshot(request("PUT", "/api/v1/settings/scrape", Some("management-secret"), json!({"setting": {
+        "naming_entry_dir":"{title} ({year})", "naming_movie_file":"{title}{ext}",
+        "naming_season_dir":"Season {season}", "naming_episode_file":"{title} - {season_episode}{ext}"
+    }}))).await.unwrap();
     assert_eq!(saved.status(), StatusCode::OK);
-    let body = get_json(&app, "/api/v1/directory").await;
-    let body = body["data"].clone();
-    assert_eq!(body["movie_naming"], "{title}{ext}");
-    assert_eq!(body["tv_naming"], "{title} - {season_episode}{ext}");
-
-    let saved = app
-        .clone()
-        .oneshot(request(
-            "PUT",
-            "/api/v1/directory",
-            Some("management-secret"),
-            json!({
-                "movie_root": tmp.path().join("m").display().to_string(),
-                "tv_root": tmp.path().join("t").display().to_string(),
-                "transfer_mode": "hardlink",
-                "movie_naming": "{title} ({year})/{title}{ext}",
-                "tv_naming": "{title} ({year})/Season {season}/{title} - {season_episode}{ext}",
-                "scrape": false
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(saved.status(), StatusCode::OK);
-    let body = get_json(&app, "/api/v1/directory").await;
-    let body = body["data"].clone();
-    assert_eq!(body["movie_naming"], "{title} ({year})/{title}{ext}");
+    let body = get_json(&app, "/api/v1/settings/scrape").await;
     assert_eq!(
-        body["tv_naming"],
-        "{title} ({year})/Season {season}/{title} - {season_episode}{ext}"
+        body["data"]["setting"]["naming_entry_dir"],
+        "{title} ({year})"
     );
+    assert_eq!(body["data"]["setting"]["naming_movie_file"], "{title}{ext}");
+    let rejected = app
+        .oneshot(request(
+            "PUT",
+            "/api/v1/settings/scrape",
+            Some("management-secret"),
+            json!({"setting":{"naming_movie_file":"{title}/{title}{ext}"}}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -227,10 +200,7 @@ async fn member_reading_scrape_settings_redacts_theintrodb_api_key() {
         admin_read["data"]["setting"]["fanart_api_key"],
         "fanart-secret"
     );
-    assert_eq!(
-        admin_read["data"]["effective"]["fanart_configured"],
-        true
-    );
+    assert_eq!(admin_read["data"]["effective"]["fanart_configured"], true);
 
     // 2. 创建一个普通成员用户
     let create_user_res = app
@@ -292,8 +262,5 @@ async fn member_reading_scrape_settings_redacts_theintrodb_api_key() {
         Value::Null,
         "普通成员读取 scrape settings 时必须脱敏 Fanart API key"
     );
-    assert_eq!(
-        member_read["data"]["effective"]["fanart_configured"],
-        true
-    );
+    assert_eq!(member_read["data"]["effective"]["fanart_configured"], true);
 }

@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 use crate::http::playback::session_timeout_secs;
 use crate::http::playback_device_target::{DeviceTargetQuery, resolve_device_target};
+use crate::http::store_wait::store_read;
 use crate::http::{err, ok, ok_list};
 use crate::management::ApiState;
 use crate::playback_read::PlaybackRead;
@@ -71,57 +72,67 @@ pub(crate) async fn activity(
     axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    let scope = query.get("scope").map(String::as_str).unwrap_or("visible");
+    let scope = query
+        .get("scope")
+        .cloned()
+        .unwrap_or_else(|| "visible".to_string());
     let now = playback_now(&state);
-    let store = state.store.lock();
-    let admin = user_id
-        .and_then(|id| store.user_role(id).ok())
-        .is_some_and(|role| role == "admin");
-    let sessions: Vec<SessionRow> = store
-        .active_sessions(now, session_timeout_secs())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|session| !session.admin_ended)
-        .filter(|session| admin || user_id == Some(session.user_id))
-        .collect();
-    let media_ids: Vec<domain::MediaId> = sessions.iter().map(|session| session.media_id).collect();
-    let user_ids: Vec<domain::UserId> = sessions.iter().map(|session| session.user_id).collect();
-    let read = load_read(&store, &media_ids, &user_ids);
-    let mut hidden = 0usize;
-    let items: Vec<Value> = sessions
-        .iter()
-        .filter_map(|session| {
-            let visible = session_library_visible(
-                &read,
-                &store,
-                session,
-                user_id,
-                if admin { scope } else { "visible" },
-            );
-            if visible {
-                Some(session_json(
+    // Review L2: session/read snapshots are Store work; keep the executor free.
+    match store_read(&state, move |store| -> Response {
+        let admin = user_id
+            .and_then(|id| store.user_role(id).ok())
+            .is_some_and(|role| role == "admin");
+        let sessions: Vec<SessionRow> = store
+            .active_sessions(now, session_timeout_secs())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|session| !session.admin_ended)
+            .filter(|session| admin || user_id == Some(session.user_id))
+            .collect();
+        let media_ids: Vec<domain::MediaId> = sessions.iter().map(|session| session.media_id).collect();
+        let user_ids: Vec<domain::UserId> = sessions.iter().map(|session| session.user_id).collect();
+        let read = load_read(store, &media_ids, &user_ids);
+        let mut hidden = 0usize;
+        let items: Vec<Value> = sessions
+            .iter()
+            .filter_map(|session| {
+                let visible = session_library_visible(
+                    &read,
+                    store,
                     session,
-                    crate::playback_read::media_target(
-                        &read,
-                        session.media_id,
-                        session.season,
-                        session.episode,
-                    ),
-                    &read.member_name(session.user_id),
-                ))
-            } else {
-                hidden += 1;
-                None
-            }
-        })
-        .collect();
-    ok(json!({
-        "sessions": items,
-        "downloads": [],
-        "hidden_session_count": hidden,
-        "hidden_download_count": 0,
-    }))
-    .into_response()
+                    user_id,
+                    if admin { &scope } else { "visible" },
+                );
+                if visible {
+                    Some(session_json(
+                        session,
+                        crate::playback_read::media_target(
+                            &read,
+                            session.media_id,
+                            session.season,
+                            session.episode,
+                        ),
+                        &read.member_name(session.user_id),
+                    ))
+                } else {
+                    hidden += 1;
+                    None
+                }
+            })
+            .collect();
+        ok(json!({
+            "sessions": items,
+            "downloads": [],
+            "hidden_session_count": hidden,
+            "hidden_download_count": 0,
+        }))
+        .into_response()
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => error.response(),
+    }
 }
 
 fn load_read(
@@ -151,9 +162,9 @@ fn session_library_visible(
     let Some(media) = read.media(session.media_id) else {
         return false;
     };
-    read.rows_for(session.media_id)
-        .iter()
-        .any(|row| crate::http::library::row_visible_to_user(store, row, media, user_id))
+    read.rows_for(session.media_id).iter().any(|coverage| {
+        crate::http::library::file_visible_to_user(store, &coverage.file, media, user_id)
+    })
 }
 
 /// POST /playback/activity/sessions/{device_id}/end?user_id=... — mark one
@@ -165,29 +176,35 @@ pub(crate) async fn end_session(
     Query(query): Query<DeviceTargetQuery>,
 ) -> Response {
     let now = playback_now(&state);
-    let store = state.store.lock();
-    let target_user = match resolve_device_target(&store, user_id, &device_id, &query) {
-        Ok(target_user) => target_user,
-        Err(response) => return response,
-    };
-    let Some(mut session) = store.get_session(target_user, &device_id).ok().flatten() else {
-        return err(
-            StatusCode::NOT_FOUND,
-            "playback.session_missing",
-            "没有该设备的活跃会话",
-        );
-    };
-    session.admin_ended = true;
-    session.last_report_at = now;
-    if let Err(error) = store.upsert_session(&session) {
-        tracing::error!(%error, %target_user, device_id, "结束设备会话失败");
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            "结束播放会话失败，请稍后重试",
-        );
+    match store_read(&state, move |store| -> Response {
+        let target_user = match resolve_device_target(store, user_id, &device_id, &query) {
+            Ok(target_user) => target_user,
+            Err(response) => return response,
+        };
+        let Some(mut session) = store.get_session(target_user, &device_id).ok().flatten() else {
+            return err(
+                StatusCode::NOT_FOUND,
+                "playback.session_missing",
+                "没有该设备的活跃会话",
+            );
+        };
+        session.admin_ended = true;
+        session.last_report_at = now;
+        if let Err(error) = store.upsert_session(&session) {
+            tracing::error!(%error, %target_user, device_id, "结束设备会话失败");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                "结束播放会话失败，请稍后重试",
+            );
+        }
+        ok(json!({ "ended": 1 })).into_response()
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => error.response(),
     }
-    ok(json!({ "ended": 1 })).into_response()
 }
 
 /// GET /playback/devices — distinct devices from sessions + play logs.
@@ -196,70 +213,73 @@ pub(crate) async fn devices(
     axum::Extension(user_id): axum::Extension<domain::UserId>,
 ) -> Response {
     let now = playback_now(&state);
-    let store = state.store.lock();
-    let admin = store
-        .user_role(user_id)
-        .map(|role| role == "admin")
-        .unwrap_or(false);
-    let target_user = (!admin).then_some(user_id);
-    let sessions: Vec<SessionRow> = store
-        .active_sessions(now, session_timeout_secs())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|session| !session.admin_ended)
-        .filter(|session| admin || session.user_id == user_id)
-        .collect();
-    let logs = store
-        .list_logs(500, None, None, None, now, target_user)
-        .unwrap_or_default();
-    let user_ids: Vec<domain::UserId> = sessions
-        .iter()
-        .map(|session| session.user_id)
-        .chain(logs.iter().map(|log| log.user_id))
-        .collect();
-    let names = load_read(&store, &[], &user_ids);
-    let mut seen: HashMap<String, Value> = HashMap::new();
-    for session in &sessions {
-        let key = format!("{}:{}", session.user_id, session.device_id);
-        let entry = seen.entry(key).or_insert_with(|| {
-            json!({
-                "user_id": session.user_id.to_string(),
-                "device_id": session.device_id,
-                "member_name": names.member_name(session.user_id),
-                "client": session.client,
-                "device_name": session.device_name,
-                "client_version": session.client_version,
-                "revocable": session.revocable() && store.device_is_revocable(session.user_id, &session.device_id).unwrap_or(false),
-                "active_sessions": 0,
-                "last_seen_at": iso(session.last_report_at),
-            })
-        });
-        entry["active_sessions"] = json!(entry["active_sessions"].as_i64().unwrap_or(0) + 1);
+    match store_read(&state, move |store| -> Response {
+        let admin = store
+            .user_role(user_id)
+            .map(|role| role == "admin")
+            .unwrap_or(false);
+        let target_user = (!admin).then_some(user_id);
+        let sessions: Vec<SessionRow> = store
+            .active_sessions(now, session_timeout_secs())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|session| !session.admin_ended)
+            .filter(|session| admin || session.user_id == user_id)
+            .collect();
+        let logs = store
+            .list_logs(500, None, None, None, now, target_user)
+            .unwrap_or_default();
+        let user_ids: Vec<domain::UserId> = sessions
+            .iter()
+            .map(|session| session.user_id)
+            .chain(logs.iter().map(|log| log.user_id))
+            .collect();
+        let names = load_read(store, &[], &user_ids);
+        let mut seen: HashMap<String, Value> = HashMap::new();
+        for session in &sessions {
+            let key = format!("{}:{}", session.user_id, session.device_id);
+            let entry = seen.entry(key).or_insert_with(|| {
+                json!({
+                    "user_id": session.user_id.to_string(),
+                    "device_id": session.device_id,
+                    "member_name": names.member_name(session.user_id),
+                    "client": session.client,
+                    "device_name": session.device_name,
+                    "client_version": session.client_version,
+                    "revocable": session.revocable() && store.device_is_revocable(session.user_id, &session.device_id).unwrap_or(false),
+                    "active_sessions": 0,
+                    "last_seen_at": iso(session.last_report_at),
+                })
+            });
+            entry["active_sessions"] = json!(entry["active_sessions"].as_i64().unwrap_or(0) + 1);
+        }
+        for log in logs {
+            let device_id = log.device_id.clone();
+            let key = format!("{}:{device_id}", log.user_id);
+            seen.entry(key).or_insert_with(|| {
+                json!({
+                    "user_id": log.user_id.to_string(),
+                    "device_id": device_id,
+                    "member_name": names.member_name(log.user_id),
+                    "client": log.client,
+                    "device_name": log.device_name,
+                    "client_version": null,
+                    "revocable": log.revocable() && store.device_is_revocable(log.user_id, &device_id).unwrap_or(false),
+                    "active_sessions": 0,
+                    "last_seen_at": iso(log.ended_at),
+                })
+            });
+        }
+        let mut items: Vec<Value> = seen.into_values().collect();
+        items.sort_by_key(|v| v["last_seen_at"].as_str().unwrap_or("0").to_string());
+        items.reverse();
+        ok_list(items).into_response()
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => error.response(),
     }
-    for log in logs {
-        let device_id = log
-            .device_id
-            .clone()
-            .unwrap_or_else(|| format!("legacy-log:{}", log.id));
-        let key = format!("{}:{device_id}", log.user_id);
-        seen.entry(key).or_insert_with(|| {
-            json!({
-                "user_id": log.user_id.to_string(),
-                "device_id": device_id,
-                "member_name": names.member_name(log.user_id),
-                "client": log.client,
-                "device_name": log.device_name,
-                "client_version": null,
-                "revocable": log.revocable() && store.device_is_revocable(log.user_id, &device_id).unwrap_or(false),
-                "active_sessions": 0,
-                "last_seen_at": iso(log.ended_at),
-            })
-        });
-    }
-    let mut items: Vec<Value> = seen.into_values().collect();
-    items.sort_by_key(|v| v["last_seen_at"].as_str().unwrap_or("0").to_string());
-    items.reverse();
-    ok_list(items).into_response()
 }
 
 /// DELETE /playback/devices/{device_id}?user_id=... — revoke one user's device:
@@ -271,45 +291,51 @@ pub(crate) async fn revoke_device(
     Query(query): Query<DeviceTargetQuery>,
 ) -> Response {
     let now = playback_now(&state);
-    let store = state.store.lock();
-    let target_user = match resolve_device_target(&store, user_id, &device_id, &query) {
-        Ok(target_user) => target_user,
-        Err(response) => return response,
-    };
-    match store.device_is_revocable(target_user, &device_id) {
-        Ok(true) => {}
-        Ok(false) => {
-            tracing::error!(%target_user, device_id, "Playback device credential revocation unsupported");
-            return err(
-                StatusCode::BAD_REQUEST,
-                "playback.unsupported",
-                "该设备仅使用系统 CLI 凭据或尚无已绑定的会话凭据，不能安全注销，仅可结束当前播放",
-            );
+    match store_read(&state, move |store| -> Response {
+        let target_user = match resolve_device_target(store, user_id, &device_id, &query) {
+            Ok(target_user) => target_user,
+            Err(response) => return response,
+        };
+        match store.device_is_revocable(target_user, &device_id) {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::error!(%target_user, device_id, "Playback device credential revocation unsupported");
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "playback.unsupported",
+                    "该设备仅使用系统 CLI 凭据或尚无已绑定的会话凭据，不能安全注销，仅可结束当前播放",
+                );
+            }
+            Err(error) => {
+                tracing::error!(%error, %target_user, device_id, "Playback device identity lookup failed");
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    "查询设备状态失败",
+                );
+            }
         }
-        Err(error) => {
-            tracing::error!(%error, %target_user, device_id, "Playback device identity lookup failed");
+        if let Err(error) = store.end_device_session(target_user, &device_id, now) {
+            tracing::error!(%error, %target_user, device_id, "注销设备前结束会话失败");
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "store.error",
-                "查询设备状态失败",
+                "注销设备失败，请稍后重试",
             );
         }
+        if let Err(error) = store.revoke_device(target_user, &device_id) {
+            tracing::error!(%error, %target_user, device_id, "撤销设备凭据失败");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                "注销设备失败，请稍后重试",
+            );
+        }
+        ok(json!({ "revoked": true })).into_response()
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => error.response(),
     }
-    if let Err(error) = store.end_device_session(target_user, &device_id, now) {
-        tracing::error!(%error, %target_user, device_id, "注销设备前结束会话失败");
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            "注销设备失败，请稍后重试",
-        );
-    }
-    if let Err(error) = store.revoke_device(target_user, &device_id) {
-        tracing::error!(%error, %target_user, device_id, "撤销设备凭据失败");
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            "注销设备失败，请稍后重试",
-        );
-    }
-    ok(json!({ "revoked": true })).into_response()
 }

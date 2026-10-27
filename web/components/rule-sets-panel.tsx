@@ -14,7 +14,7 @@ import {
   type RuleSet,
   type RuleSetSpec,
 } from "@/lib/api/subscriptions";
-import { type ConfiguredSite, listConfiguredSites } from "@/lib/api/sites";
+import { type Site, listConfiguredSites } from "@/lib/api/sites";
 import { PLATFORM_OPTIONS, platformLabel } from "@/lib/platforms";
 import { ruleSetSpecFromAtoms } from "@/lib/subscription-ui";
 import { ruleSetEditAtoms } from "@/lib/rule-set-edit";
@@ -273,26 +273,6 @@ const mediaSourceLabel = (value: string): string =>
 const HDR_OPTIONS = ["DV", "HDR10+", "HDR10", "HLG", "SDR"];
 
 /**
- * 旧三态字段 → (白名单, 黑名单)。与后端 models._hdr_from_legacy 同一张表，
- * 属兼容层：存量规则组保存过一次后就带上新键了，旧键退休时这段一起删。
- */
-function hdrFromLegacy(spec: RuleSetSpec): { levels: string[]; block: string[] } {
-  if (spec.hdr_levels?.length || spec.hdr_block?.length) {
-    return { levels: spec.hdr_levels ?? [], block: spec.hdr_block ?? [] };
-  }
-  const family = HDR_OPTIONS.filter((v) => v !== "SDR");
-  if (spec.hdr === "forbid") return { levels: ["SDR"], block: [] };
-  if (spec.dv === "require") return { levels: ["DV"], block: [] };
-  if (spec.hdr === "require") {
-    return spec.dv === "forbid"
-      ? { levels: family.filter((v) => v !== "DV"), block: ["DV"] }
-      : { levels: family, block: [] };
-  }
-  if (spec.dv === "forbid") return { levels: [], block: ["DV"] };
-  return { levels: [], block: [] };
-}
-
-/**
  * HDR 白名单 → 摘要文案。整族与纯 SDR 这两种最常见的配置（也是旧 hdr 三态
  * 换算出来的形态）说人话，避免清单里出现 "HDR DV/HDR10+/HDR10/HLG" 这种
  * 又长又没信息量的芯片。
@@ -365,7 +345,8 @@ export function specSummary(
   if (spec.platforms_block?.length) {
     chips.push(`排除平台: ${spec.platforms_block.map(platformLabel).join("/")}`);
   }
-  const { levels: hdrLevels, block: hdrBlock } = hdrFromLegacy(spec);
+  const hdrLevels = spec.hdr_levels ?? [];
+  const hdrBlock = spec.hdr_block ?? [];
   if (hdrLevels.length) chips.push(hdrChipText(hdrLevels));
   if (hdrBlock.length) chips.push(`排除 ${hdrBlock.join("/")}`);
   if (spec.subtitle_languages_require?.length)
@@ -442,7 +423,7 @@ export function RuleSetEditorDialog({
     (spec.platforms_block ?? []).filter((v) => PLATFORM_OPTIONS.includes(v)),
   );
   const [mediaSources, setMediaSources] = useState<string[]>(spec.media_sources ?? []);
-  const [configuredSites, setConfiguredSites] = useState<ConfiguredSite[]>([]);
+  const [configuredSites, setConfiguredSites] = useState<Site[]>([]);
   const [preferredSites, setPreferredSites] = useState<string[]>(spec.sites ?? []);
   useEffect(() => {
     listConfiguredSites().then(setConfiguredSites).catch(() => setConfiguredSites([]));
@@ -465,8 +446,8 @@ export function RuleSetEditorDialog({
   const [upgradeLadder, setUpgradeLadder] = useState<string[]>(
     () => spec.upgrade_ladder ?? [...DEFAULT_LADDER],
   );
-  const [hdrLevels, setHdrLevels] = useState<string[]>(() => hdrFromLegacy(spec).levels);
-  const [hdrBlock, setHdrBlock] = useState<string[]>(() => hdrFromLegacy(spec).block);
+  const [hdrLevels, setHdrLevels] = useState<string[]>(() => spec.hdr_levels ?? []);
+  const [hdrBlock, setHdrBlock] = useState<string[]>(() => spec.hdr_block ?? []);
   const [subLangs, setSubLangs] = useState<string[]>(
     spec.subtitle_languages_require ?? [],
   );

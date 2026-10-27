@@ -26,14 +26,14 @@ impl Store {
     /// 让「24 集」只有一次提交、失败时整体回滚。调用方已经在事务里时
     /// （`!is_autocommit()`）直接执行——与 `playback_write` 同一约定，
     /// 不嵌套开事务。
-    fn wanted_write<T>(
+    pub fn wanted_write<T>(
         &self,
         operation: impl FnOnce(&Self) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
         if !self.subscribe.is_autocommit() {
             return operation(self);
         }
-        let transaction = self.subscribe.unchecked_transaction()?;
+        let transaction = crate::write_tx(&self.subscribe)?;
         let result = operation(self)?;
         transaction.commit()?;
         Ok(result)
@@ -176,14 +176,5 @@ impl Store {
             out.insert((season, episode), history);
         }
         Ok(out)
-    }
-
-    /// 退订：连同工单历史一起清理。
-    pub fn delete_wanted(&self, subscribe_id: SubscribeId) -> Result<(), StoreError> {
-        self.subscribe.execute(
-            "DELETE FROM subscribe_wanted WHERE subscribe_id = ?1",
-            params![subscribe_id.to_string()],
-        )?;
-        Ok(())
     }
 }

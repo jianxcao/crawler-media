@@ -1,3 +1,4 @@
+use store::test_support::FixtureFile;
 use store::{ProbeJobUnitSpec, Store};
 
 fn finish_workload(units: usize) -> (usize, usize, usize, usize, i64) {
@@ -22,9 +23,7 @@ fn finish_workload(units: usize) -> (usize, usize, usize, usize, i64) {
     let mut last_job = None;
     for ledger_id in &ledger_ids {
         let (job, changed, _, steps) = store
-            .finish_probe_unit_with_status_and_vm_steps(
-                "job", ledger_id, "succeeded", None, None,
-            )
+            .finish_probe_unit_with_status_and_vm_steps("job", ledger_id, "succeeded", None, None)
             .unwrap();
         assert!(changed);
         vm_steps += steps;
@@ -35,7 +34,13 @@ fn finish_workload(units: usize) -> (usize, usize, usize, usize, i64) {
         .unwrap();
     assert!(!duplicate.1);
     let job = last_job.unwrap();
-    (job.completed, job.succeeded, job.failed, job.partial, vm_steps)
+    (
+        job.completed,
+        job.succeeded,
+        job.failed,
+        job.partial,
+        vm_steps,
+    )
 }
 
 #[test]
@@ -47,7 +52,6 @@ fn large_probe_job_finish_work_is_near_linear() {
     assert_eq!(succeeded + failed + partial, completed_1_000);
     assert!(vm_for_1_000 <= vm_for_100 * 15);
 }
-
 
 #[test]
 fn cancelling_the_last_probe_unit_cancels_the_job() {
@@ -61,7 +65,9 @@ fn cancelling_the_last_probe_unit_cancels_the_job() {
         overwrite_markers: false,
         reuse_media_info_cache: false,
     }];
-    store.create_probe_job("cancelled", "scan", "media", None, "scope", &spec).unwrap();
+    store
+        .create_probe_job("cancelled", "scan", "media", None, "scope", &spec)
+        .unwrap();
 
     let (job, changed, all_done) = store
         .cancel_probe_unit("cancelled", "missing-ledger", "file_deleted")
@@ -70,7 +76,10 @@ fn cancelling_the_last_probe_unit_cancels_the_job() {
     assert!(changed);
     assert!(all_done);
     assert_eq!(job.status, "cancelled");
-    assert_eq!(store.get_probe_job("cancelled").unwrap().unwrap().status, "cancelled");
+    assert_eq!(
+        store.get_probe_job("cancelled").unwrap().unwrap().status,
+        "cancelled"
+    );
 }
 #[test]
 fn transitions_reconcile_and_reject_late_messages() {
@@ -84,25 +93,52 @@ fn transitions_reconcile_and_reject_late_messages() {
         overwrite_markers: false,
         reuse_media_info_cache: false,
     });
-    store.create_probe_job("job", "scan", "media", None, "scope", &specs).unwrap();
-    store.finish_probe_unit_with_status("job", "success", "succeeded", None, None).unwrap();
-    store.finish_probe_unit_with_status("job", "partial", "partial", None, None).unwrap();
-    store.finish_probe_unit_with_status("job", "failed", "failed", None, Some("failure")).unwrap();
+    store
+        .create_probe_job("job", "scan", "media", None, "scope", &specs)
+        .unwrap();
+    store
+        .finish_probe_unit_with_status("job", "success", "succeeded", None, None)
+        .unwrap();
+    store
+        .finish_probe_unit_with_status("job", "partial", "partial", None, None)
+        .unwrap();
+    store
+        .finish_probe_unit_with_status("job", "failed", "failed", None, Some("failure"))
+        .unwrap();
     store.cancel_probe_job("job", "cancelled").unwrap();
     let before = store.get_probe_job("job").unwrap().unwrap();
-    let late = store.finish_probe_unit_with_status("job", "cancelled", "succeeded", None, None).unwrap();
+    let late = store
+        .finish_probe_unit_with_status("job", "cancelled", "succeeded", None, None)
+        .unwrap();
     assert!(!late.1);
     assert_eq!(late.0.status, "cancelled");
-    assert_eq!(store.get_probe_job("job").unwrap().unwrap().completed, before.completed);
-    let library_path = store.db_paths().into_iter().find(|path| path.ends_with("library.db")).unwrap();
+    assert_eq!(
+        store.get_probe_job("job").unwrap().unwrap().completed,
+        before.completed
+    );
+    let library_path = store
+        .db_paths()
+        .into_iter()
+        .find(|path| path.ends_with("library.db"))
+        .unwrap();
     let connection = rusqlite::Connection::open(library_path).unwrap();
-    connection.execute(
-        "UPDATE probe_jobs SET completed=0, succeeded=0, failed=0, partial=0 WHERE id='job'",
-        [],
-    ).unwrap();
+    connection
+        .execute(
+            "UPDATE probe_jobs SET completed=0, succeeded=0, failed=0, partial=0 WHERE id='job'",
+            [],
+        )
+        .unwrap();
     drop(connection);
     let reconciled = store.reconcile_probe_job_counts("job").unwrap();
-    assert_eq!((reconciled.completed, reconciled.succeeded, reconciled.failed, reconciled.partial), (4, 1, 1, 1));
+    assert_eq!(
+        (
+            reconciled.completed,
+            reconciled.succeeded,
+            reconciled.failed,
+            reconciled.partial
+        ),
+        (4, 1, 1, 1)
+    );
     assert_eq!(reconciled.status, "cancelled");
 }
 #[test]
@@ -117,17 +153,35 @@ fn public_reconciliation_repairs_corrupted_counts() {
         overwrite_markers: false,
         reuse_media_info_cache: false,
     });
-    store.create_probe_job("repair", "scan", "media", None, "repair", &specs).unwrap();
-    store.finish_probe_unit_with_status("repair", "one", "partial", None, None).unwrap();
-    let library_path = store.db_paths().into_iter().find(|path| path.ends_with("library.db")).unwrap();
+    store
+        .create_probe_job("repair", "scan", "media", None, "repair", &specs)
+        .unwrap();
+    store
+        .finish_probe_unit_with_status("repair", "one", "partial", None, None)
+        .unwrap();
+    let library_path = store
+        .db_paths()
+        .into_iter()
+        .find(|path| path.ends_with("library.db"))
+        .unwrap();
     let connection = rusqlite::Connection::open(library_path).unwrap();
-    connection.execute(
-        "UPDATE probe_jobs SET completed=0, succeeded=0, failed=0, partial=0 WHERE id='repair'",
-        [],
-    ).unwrap();
+    connection
+        .execute(
+            "UPDATE probe_jobs SET completed=0, succeeded=0, failed=0, partial=0 WHERE id='repair'",
+            [],
+        )
+        .unwrap();
     drop(connection);
     let repaired = store.reconcile_probe_job_counts("repair").unwrap();
-    assert_eq!((repaired.completed, repaired.succeeded, repaired.failed, repaired.partial), (1, 0, 0, 1));
+    assert_eq!(
+        (
+            repaired.completed,
+            repaired.succeeded,
+            repaired.failed,
+            repaired.partial
+        ),
+        (1, 0, 0, 1)
+    );
     assert_eq!(repaired.status, "running");
 }
 
@@ -143,16 +197,37 @@ fn startup_recovery_reconciles_active_job_counts_once() {
         overwrite_markers: false,
         reuse_media_info_cache: false,
     });
-    store.create_probe_job("recover", "scan", "media", None, "recover", &specs).unwrap();
-    store.finish_probe_unit_with_status("recover", "done", "partial", None, None).unwrap();
-    let library_path = store.db_paths().into_iter().find(|path| path.ends_with("library.db")).unwrap();
+    store
+        .create_probe_job("recover", "scan", "media", None, "recover", &specs)
+        .unwrap();
+    store
+        .finish_probe_unit_with_status("recover", "done", "partial", None, None)
+        .unwrap();
+    let library_path = store
+        .db_paths()
+        .into_iter()
+        .find(|path| path.ends_with("library.db"))
+        .unwrap();
     let connection = rusqlite::Connection::open(library_path).unwrap();
-    connection.execute("UPDATE probe_jobs SET completed=0, partial=0 WHERE id='recover'", []).unwrap();
+    connection
+        .execute(
+            "UPDATE probe_jobs SET completed=0, partial=0 WHERE id='recover'",
+            [],
+        )
+        .unwrap();
     drop(connection);
     let recovered = store.recover_probe_jobs().unwrap();
     assert_eq!(recovered.len(), 1);
     assert_eq!((recovered[0].0.completed, recovered[0].0.partial), (1, 1));
-    assert_eq!(recovered[0].1.iter().find(|unit| unit.ledger_id == "done").unwrap().status, "partial");
+    assert_eq!(
+        recovered[0]
+            .1
+            .iter()
+            .find(|unit| unit.ledger_id == "done")
+            .unwrap()
+            .status,
+        "partial"
+    );
 }
 
 /// 台账行被删除后，退役的 `partial` 单元不得再计入任务计数。
@@ -174,8 +249,18 @@ fn retiring_a_partial_unit_keeps_the_job_counters_honest() {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
-    let rows = ["a", "b"].map(|suffix| domain::LedgerRow {
-        id: domain::LedgerId::new(),
+    store
+        .create_library(
+            domain::MediaKind::Movie,
+            "Probe",
+            &["/library"],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let rows = ["a", "b"].map(|suffix| FixtureFile {
+        file_id: Some(domain::LedgerId::new()),
         media_id: media.id,
         path: format!("/library/{suffix}.mkv"),
         season: None,
@@ -186,11 +271,15 @@ fn retiring_a_partial_unit_keeps_the_job_counters_honest() {
         quality_source: domain::QualitySource::Probe,
         confidence: domain::Confidence::High,
         filter_score: None,
+        ..Default::default()
     });
     for row in &rows {
-        store.insert_ledger(row).unwrap();
+        store::test_support::publish_fixture_file(&store, row).unwrap();
     }
-    let ids: Vec<String> = rows.iter().map(|row| row.id.to_string()).collect();
+    let ids: Vec<String> = rows
+        .iter()
+        .map(|row| row.file_id.expect("fixture file id").to_string())
+        .collect();
     let specs: Vec<_> = ids
         .iter()
         .map(|ledger_id| ProbeJobUnitSpec {
@@ -202,7 +291,9 @@ fn retiring_a_partial_unit_keeps_the_job_counters_honest() {
             reuse_media_info_cache: false,
         })
         .collect();
-    store.create_probe_job("job", "scan", "media", None, "scope", &specs).unwrap();
+    store
+        .create_probe_job("job", "scan", "media", None, "scope", &specs)
+        .unwrap();
     let (job, changed, _, _) = store
         .finish_probe_unit_with_status_and_vm_steps("job", &ids[0], "partial", None, None)
         .unwrap();
@@ -216,7 +307,10 @@ fn retiring_a_partial_unit_keeps_the_job_counters_honest() {
         .finish_probe_unit_with_status_and_vm_steps("job", &ids[1], "succeeded", None, None)
         .unwrap();
     assert!(changed);
-    assert_eq!(job.partial, 0, "retired partial unit must stop being counted");
+    assert_eq!(
+        job.partial, 0,
+        "retired partial unit must stop being counted"
+    );
     assert_eq!(
         (job.total, job.completed, job.succeeded, job.failed),
         (1, 1, 1, 0)

@@ -14,17 +14,18 @@ use std::time::Instant;
 use jobs::Job;
 use store::{DataRetentionCursor, RetentionClass};
 
-use super::policy::{BATCH_SIZE, DataRetentionPolicy, MAX_BATCHES, MAX_BATCH_BUDGET};
+use super::policy::{BATCH_SIZE, DataRetentionPolicy, MAX_BATCH_BUDGET, MAX_BATCHES};
 use super::report::{DataRetentionClassReport, MaintenanceReport};
 use super::runner::MaintenanceStop;
 use crate::management::ApiState;
 
 const DAY_MS: i64 = 86_400_000;
 
-pub const DATA_RETENTION_CLASSES: [RetentionClass; 3] = [
+pub const DATA_RETENTION_CLASSES: [RetentionClass; 4] = [
     RetentionClass::Qoe,
     RetentionClass::TransientCatalog,
     RetentionClass::ProbeHistory,
+    RetentionClass::Operations,
 ];
 
 pub fn cutoff_ms_for_days(now_secs: i64, days: u32) -> Result<i64, String> {
@@ -37,14 +38,6 @@ pub fn cutoff_ms_for_days(now_secs: i64, days: u32) -> Result<i64, String> {
     now_ms
         .checked_sub(span)
         .ok_or_else(|| format!("保留窗口下界溢出: now_ms={now_ms} span_ms={span}"))
-}
-
-fn class_days(policy: &DataRetentionPolicy, class: RetentionClass) -> u32 {
-    match class {
-        RetentionClass::Qoe => policy.qoe_days,
-        RetentionClass::TransientCatalog => policy.transient_cache_days,
-        RetentionClass::ProbeHistory => policy.probe_days,
-    }
 }
 
 fn cursor_key(class: RetentionClass) -> String {
@@ -74,7 +67,10 @@ pub(crate) fn load_cursor(
         return (requested_cutoff_ms, None);
     };
     let Ok(stored) = serde_json::from_str::<StoredCursor>(&raw) else {
-        tracing::warn!(class = class.as_str(), "数据保留游标损坏，本轮从新 cutoff 开始");
+        tracing::warn!(
+            class = class.as_str(),
+            "数据保留游标损坏，本轮从新 cutoff 开始"
+        );
         return (requested_cutoff_ms, None);
     };
     if stored.cutoff_ms <= requested_cutoff_ms {
@@ -141,7 +137,7 @@ pub fn run_data_retention(
     let mut finished_classes = 0usize;
 
     for (index, class) in DATA_RETENTION_CLASSES.iter().enumerate() {
-        let requested_cutoff = cutoff_ms_for_days(now, class_days(policy, *class))?;
+        let requested_cutoff = cutoff_ms_for_days(now, policy.days_for(*class))?;
         let (active_cutoff, mut cursor) = load_cursor(state, *class, requested_cutoff);
         let mut class_report = DataRetentionClassReport {
             class: class.as_str().to_string(),
@@ -153,6 +149,7 @@ pub fn run_data_retention(
             resume_after: cursor.clone(),
         };
 
+        let class_started = Instant::now();
         let outcome = loop {
             let stop = check_stop();
             if let Some(note) = stop.stop_note("批") {
@@ -214,6 +211,16 @@ pub fn run_data_retention(
             class_report.incomplete = true;
         };
 
+        tracing::info!(
+            category = class_report.class.as_str(),
+            cutoff_ms = class_report.cutoff_ms,
+            examined = class_report.examined,
+            deleted = class_report.deleted,
+            protected = class_report.protected,
+            incomplete = class_report.incomplete,
+            elapsed_ms = class_started.elapsed().as_millis() as u64,
+            "数据保留类别已完成"
+        );
         report.classes.push(class_report);
         finished_classes = index + 1;
         if let ClassOutcome::Stop(note) = outcome {
@@ -225,7 +232,7 @@ pub fn run_data_retention(
     // 预算/停止导致尚未开始的类别：显式报告 incomplete，而不是假装已经检查过。
     if finished_classes < DATA_RETENTION_CLASSES.len() {
         for class in &DATA_RETENTION_CLASSES[finished_classes..] {
-            let cutoff = cutoff_ms_for_days(now, class_days(policy, *class))?;
+            let cutoff = cutoff_ms_for_days(now, policy.days_for(*class))?;
             report.classes.push(DataRetentionClassReport {
                 class: class.as_str().to_string(),
                 cutoff_ms: cutoff,

@@ -4,13 +4,35 @@ use api::probe_manager::{
     ProbeManager, ProbeUnit,
     policy::{ProbeRequestOrigin, ProbeRequestResult},
 };
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{
+    Confidence, FileCoverage, LedgerId, Media, MediaId, MediaKind, QualitySource, UnitKey,
+};
 use parking_lot::Mutex;
-use store::{FilePresence, LedgerPresenceMode, LedgerPresenceObservation, Store};
+use store::{FilePresence, LedgerPresenceMode, LedgerPresenceObservation, ScannedLedger, Store};
 
-fn fixture() -> (tempfile::TempDir, Arc<Mutex<Store>>, LedgerRow) {
+struct Fixture {
+    _temp: tempfile::TempDir,
+    store: Arc<Mutex<Store>>,
+    /// The scanned file after presence verification marked its source missing.
+    row: FileCoverage,
+}
+
+/// One scanned file whose bytes were removed and whose presence is recorded as missing.
+fn fixture() -> Fixture {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path().join("data")).unwrap();
+    let root = temp.path().join("movies");
+    std::fs::create_dir_all(&root).unwrap();
+    store
+        .create_library(
+            MediaKind::Movie,
+            "Movies",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
     let media = Media {
         id: MediaId::new(),
         kind: MediaKind::Movie,
@@ -25,29 +47,41 @@ fn fixture() -> (tempfile::TempDir, Arc<Mutex<Store>>, LedgerRow) {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
-    let row = LedgerRow {
-        id: LedgerId::new(),
-        media_id: media.id,
-        path: temp
-            .path()
-            .join("movie.strm")
-            .to_string_lossy()
-            .into_owned(),
-        season: None,
-        episode: None,
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
-    std::fs::write(&row.path, b"http://fixture.invalid/movie").unwrap();
-    store.insert_ledger(&row).unwrap();
+    let path = root.join("movie.strm");
+    std::fs::write(&path, b"http://fixture.invalid/movie").unwrap();
+    store
+        .insert_scanned_files(
+            &[ScannedLedger {
+                file_id: LedgerId::new(),
+                media_id: media.id,
+                path: path.to_string_lossy().into_owned(),
+                units: vec![UnitKey::WHOLE],
+                resolution: None,
+                codec: None,
+                hdr: None,
+                quality_source: QualitySource::Release,
+                confidence: Confidence::High,
+                filter_score: None,
+                source_version: "fixture-v1".into(),
+                source_digest: None,
+                size_bytes: None,
+                created_ns: None,
+                modified_ns: None,
+                artwork: Default::default(),
+                observations: Vec::new(),
+            }],
+            100,
+        )
+        .unwrap();
+    let row = store
+        .file_coverage_by_path(&path.to_string_lossy())
+        .unwrap()
+        .expect("scanned file row");
     store
         .apply_ledger_presence(
             &[LedgerPresenceObservation {
-                row: row.clone(),
+                file: row.clone(),
+                path_key: row.path_key.clone(),
                 missing_at: None,
                 presence: FilePresence::Missing,
             }],
@@ -55,12 +89,18 @@ fn fixture() -> (tempfile::TempDir, Arc<Mutex<Store>>, LedgerRow) {
             100,
         )
         .unwrap();
-    (temp, Arc::new(Mutex::new(store)), row)
+    Fixture {
+        _temp: temp,
+        store: Arc::new(Mutex::new(store)),
+        row,
+    }
 }
 
 #[test]
 fn missing_source_is_not_admitted_even_when_file_reappears_before_reconciliation() {
-    let (_temp, store, row) = fixture();
+    let fixture = fixture();
+    let store = &fixture.store;
+    let row = &fixture.row;
     let manager = ProbeManager::new(store.clone());
     for origin in [
         ProbeRequestOrigin::Detail,
@@ -70,22 +110,28 @@ fn missing_source_is_not_admitted_even_when_file_reappears_before_reconciliation
         ProbeRequestOrigin::ManualRetry,
     ] {
         assert_eq!(
-            manager.request_probe(&row, origin).unwrap(),
+            manager.request_probe(row, origin).unwrap(),
             ProbeRequestResult::Cancelled
         );
     }
+    let file_id = row.file.file_id.to_string();
     assert!(
         store
             .lock()
-            .active_probe_unit_for_ledger(&row.id.to_string())
+            .active_probe_unit_for_ledger(&file_id)
             .unwrap()
             .is_none()
     );
     assert_eq!(manager.queued_ledger_count(), 0);
-    assert!(store.lock().clear_ledger_missing(&row.path).unwrap());
+    assert!(
+        store
+            .lock()
+            .clear_ledger_missing(&row.file.path.to_string_lossy())
+            .unwrap()
+    );
     assert!(matches!(
         manager
-            .request_probe(&row, ProbeRequestOrigin::Filesystem)
+            .request_probe(row, ProbeRequestOrigin::Filesystem)
             .unwrap(),
         ProbeRequestResult::Queued { .. }
     ));
@@ -93,18 +139,19 @@ fn missing_source_is_not_admitted_even_when_file_reappears_before_reconciliation
 
 #[test]
 fn recovery_retires_missing_source_queued_after_presence_snapshot() {
-    let (_temp, store, row) = fixture();
-    let ledger_id = row.id.to_string();
+    let fixture = fixture();
+    let store = &fixture.store;
+    let file_id = fixture.row.file.file_id.to_string();
     store
         .lock()
         .create_probe_job(
             "late",
             "media_probe",
-            &row.media_id.to_string(),
+            &fixture.row.file.media_id.to_string(),
             None,
             "late",
             &[store::ProbeJobUnitSpec {
-                ledger_id: &ledger_id,
+                ledger_id: &file_id,
                 kind: "movie",
                 force_fingerprint: false,
                 reuse_fingerprint_cache: true,
@@ -118,16 +165,23 @@ fn recovery_retires_missing_source_queued_after_presence_snapshot() {
         store.lock().get_probe_job("late").unwrap().unwrap().status,
         "cancelled"
     );
-    assert!(!manager.is_queued(&ledger_id));
-    assert!(store.lock().get_ledger(&ledger_id).unwrap().is_some());
+    assert!(!manager.is_queued(&file_id));
+    assert!(
+        store
+            .lock()
+            .file_coverage_by_id(fixture.row.file.file_id)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
 fn missing_source_cannot_be_persisted_by_any_admission_path() {
-    let (_temp, store, row) = fixture();
+    let fixture = fixture();
+    let store = &fixture.store;
     let manager = ProbeManager::new(store.clone());
     let unit = ProbeUnit {
-        row: row.clone(),
+        row: fixture.row.clone(),
         kind: MediaKind::Movie,
         force_fingerprint: false,
         reuse_fingerprint_cache: true,
@@ -147,7 +201,7 @@ fn missing_source_cannot_be_persisted_by_any_admission_path() {
     assert!(
         store
             .lock()
-            .active_probe_unit_for_ledger(&row.id.to_string())
+            .active_probe_unit_for_ledger(&fixture.row.file.file_id.to_string())
             .unwrap()
             .is_none()
     );

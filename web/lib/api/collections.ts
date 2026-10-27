@@ -43,15 +43,6 @@ export function createCollection(name: string): Promise<{ id: string }> {
   );
 }
 
-export function renameCollection(id: string, name: string): Promise<{ renamed: boolean }> {
-  return unwrap(
-    request<ApiEnvelope<{ renamed: boolean }>>(`/collections/${id}`, {
-      method: "PATCH",
-      body: JSON.stringify({ name }),
-    }),
-  );
-}
-
 export function deleteCollection(id: string): Promise<{ deleted: boolean }> {
   return unwrap(
     request<ApiEnvelope<{ deleted: boolean }>>(`/collections/${id}`, { method: "DELETE" }),

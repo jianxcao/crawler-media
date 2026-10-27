@@ -10,8 +10,8 @@ pub mod worker;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use parking_lot::Mutex;
@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
 use crate::Store;
+use crate::http::store_wait::{STORE_WRITE_WAIT, store_read_handle};
 use crate::library_lifecycle::{LibraryWorkLease, LibraryWorkRegistry};
 use crate::store::ChapterFrameTask;
 use library::WorkControl;
@@ -33,7 +34,7 @@ const POLL: Duration = Duration::from_millis(25);
 
 #[derive(Clone, Debug)]
 pub struct ChapterFrameRequest {
-    pub ledger_id: domain::LedgerId,
+    pub file_id: domain::LedgerId,
     pub video: PathBuf,
     pub source_version: String,
     pub targets: Vec<(i64, i64)>,
@@ -135,66 +136,56 @@ impl ChapterFrameService {
         self.notify.notify_waiters();
     }
 
-    /// Persist one obligation for a ledger and wake the workers.
-    pub fn enqueue_ledger(
-        &self,
-        ledger_id: &str,
-        targets: Vec<(i64, i64)>,
-    ) -> Result<bool, String> {
+    /// Persist one obligation for a file and wake the workers.
+    pub fn enqueue_ledger(&self, file_id: &str, targets: Vec<(i64, i64)>) -> Result<bool, String> {
         if targets.is_empty() {
             return Ok(false);
         }
-        let compact = ledger_id.replace('-', "");
+        let file_id = file_id_from_str(file_id)?;
         let (path, enabled) = {
             let store = self.store.lock();
-            let Some(row) = store.get_ledger(&compact).map_err(|error| error.to_string())? else {
+            let Some((path, _library_id)) = store
+                .get_file_path_and_library(file_id)
+                .map_err(|error| error.to_string())?
+            else {
                 return Ok(false);
             };
-            let path = PathBuf::from(&row.path);
-            (
-                path.clone(),
-                crate::http::library_chapters::chapter_images_enabled(&store, &path),
-            )
+            let enabled = crate::http::library_chapters::chapter_images_enabled(&store, &path);
+            (path, enabled)
         };
         if !enabled {
             return Ok(false);
         }
-        self.enqueue_path_inner(&compact, &path, targets)
+        self.enqueue_path_inner(file_id, &path, targets)
     }
 
-    /// Persist one obligation resolved from a ledger path.
-    pub fn enqueue_path(
-        &self,
-        path: &Path,
-        targets: Vec<(i64, i64)>,
-    ) -> Result<bool, String> {
+    /// Persist one obligation resolved from a file path.
+    pub fn enqueue_path(&self, path: &Path, targets: Vec<(i64, i64)>) -> Result<bool, String> {
         if targets.is_empty() {
             return Ok(false);
         }
-        let ledger_id = {
+        let file_id = {
             let store = self.store.lock();
             store
-                .ledger_by_path(&path.to_string_lossy())
+                .file_id_at_path(&path.to_string_lossy())
                 .map_err(|error| error.to_string())?
-                .map(|row| row.id.to_string())
         };
-        match ledger_id {
-            Some(ledger_id) => self.enqueue_ledger(&ledger_id, targets),
+        match file_id {
+            Some(file_id) => self.enqueue_path_inner(file_id_from_str(&file_id)?, path, targets),
             None => Ok(false),
         }
     }
 
     fn enqueue_path_inner(
         &self,
-        ledger_id: &str,
+        file_id: domain::LedgerId,
         path: &Path,
         targets: Vec<(i64, i64)>,
     ) -> Result<bool, String> {
         let source_version = crate::fingerprint_job::current_source_version(path);
         let task = ChapterFrameTask {
             id: uuid::Uuid::new_v4().to_string(),
-            ledger_id: domain::LedgerId::from_str(ledger_id)
-                .map_err(|error| format!("invalid ledger id: {error}"))?,
+            file_id,
             source_version,
             targets_hash: targets_hash(&targets),
             targets,
@@ -212,11 +203,11 @@ impl ChapterFrameService {
 
     /// Claim queued obligations up to the in-memory window. Returns how many
     /// were newly claimed.
-    pub async fn dispatch_once(&self) -> Result<usize, String> {
+    pub async fn dispatch_once(self: &Arc<Self>) -> Result<usize, String> {
         if self.shutting_down.load(Ordering::SeqCst) {
             return Err("chapter frame service is shut down".into());
         }
-        let claimed = self.fill_window()?;
+        let claimed = self.fill_window().await?;
         if claimed > 0 {
             self.notify.notify_waiters();
         }
@@ -269,7 +260,31 @@ impl ChapterFrameService {
         Ok(())
     }
 
-    fn fill_window(&self) -> Result<usize, String> {
+    /// Run one driver step on the blocking pool.
+    ///
+    /// Review L2 / Task 22: a driver is a task on the request runtime, so a
+    /// `Store` lock taken in its async body parks a worker and stalls every other
+    /// task — including `/health`, which touches no store at all. Waiting on a
+    /// blocking thread costs one thread, never the executor.
+    async fn blocking_step<T, F>(service: Arc<Self>, work: F) -> Result<T, String>
+    where
+        F: FnOnce(&Self) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        tokio::task::spawn_blocking(move || work(&service))
+            .await
+            .map_err(|error| format!("chapter frame worker failed: {error}"))
+    }
+
+    async fn fill_window(self: &Arc<Self>) -> Result<usize, String> {
+        let service = self.clone();
+        Self::blocking_step(service, |service| service.fill_window_sync()).await?
+    }
+
+    /// Claim pending obligations into the in-memory window.
+    ///
+    /// Sync by design: the caller runs it on the blocking pool (see [`Self::fill_window`]).
+    fn fill_window_sync(&self) -> Result<usize, String> {
         let _fill = self.fill_lock.lock();
         let capacity = {
             let inner = self.inner.lock();
@@ -320,7 +335,7 @@ impl ChapterFrameService {
             let notified = self.notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if let Err(error) = self.fill_window() {
+            if let Err(error) = self.fill_window().await {
                 tracing::warn!(%error, "章节帧任务派发失败");
             }
             match self.take_next() {
@@ -331,17 +346,17 @@ impl ChapterFrameService {
     }
 
     async fn run_task(self: &Arc<Self>, task: ChapterFrameTask) {
-        let resolved = self.resolve_target(&task);
+        let resolved = self.resolve_target(&task).await;
         let (video, lease) = match resolved {
             Ok(resolved) => resolved,
             Err(error) => {
-                self.finish_task(&task, false, Some(&error));
+                self.finish_task(&task, false, Some(&error)).await;
                 self.finish_memory();
                 return;
             }
         };
         let request = ChapterFrameRequest {
-            ledger_id: task.ledger_id,
+            file_id: task.file_id,
             video: video.clone(),
             source_version: task.source_version.clone(),
             targets: task.targets.clone(),
@@ -383,41 +398,44 @@ impl ChapterFrameService {
             match outcome {
                 Ok(Ok(published)) => {
                     self.published_images.fetch_add(published, Ordering::SeqCst);
-                    self.finish_task(&task, true, None);
+                    self.finish_task(&task, true, None).await;
                 }
-                Ok(Err(error)) => self.finish_task(&task, false, Some(&error)),
-                Err(join) => self.finish_task(
-                    &task,
-                    false,
-                    Some(&format!("chapter frame worker failed: {join}")),
-                ),
+                Ok(Err(error)) => self.finish_task(&task, false, Some(&error)).await,
+                Err(join) => {
+                    self.finish_task(
+                        &task,
+                        false,
+                        Some(&format!("chapter frame worker failed: {join}")),
+                    )
+                    .await
+                }
             }
         }
         self.finish_memory();
     }
 
-    fn resolve_target(
+    async fn resolve_target(
+        self: &Arc<Self>,
+        task: &ChapterFrameTask,
+    ) -> Result<(PathBuf, Option<Arc<LibraryWorkLease>>), String> {
+        let service = self.clone();
+        let task = task.clone();
+        Self::blocking_step(service, move |service| service.resolve_target_sync(&task)).await?
+    }
+
+    fn resolve_target_sync(
         &self,
         task: &ChapterFrameTask,
     ) -> Result<(PathBuf, Option<Arc<LibraryWorkLease>>), String> {
-        let compact = task.ledger_id.to_string().replace('-', "");
         let (path, library_id) = {
             let store = self.store.lock();
-            let Some(row) = store.get_ledger(&compact).map_err(|error| error.to_string())? else {
-                return Err("file_deleted: ledger row missing".into());
+            let Some((path, lid)) = store
+                .get_file_path_and_library(task.file_id)
+                .map_err(|e| e.to_string())?
+            else {
+                return Err("file_deleted: library file row missing".into());
             };
-            let path = PathBuf::from(&row.path);
-            let library_id = store
-                .get_media(row.media_id)
-                .map_err(|error| error.to_string())?
-                .and_then(|media| {
-                    store
-                        .library_for_path_strict(&path, media.kind)
-                        .ok()
-                        .flatten()
-                })
-                .map(|library| library.id);
-            (path, library_id)
+            (path, Some(lid))
         };
         let lease = match library_id {
             Some(library_id) => Some(Arc::new(
@@ -430,13 +448,25 @@ impl ChapterFrameService {
         Ok((path, lease))
     }
 
-    fn finish_task(&self, task: &ChapterFrameTask, succeeded: bool, error: Option<&str>) {
-        if let Err(error) = self
-            .store
-            .lock()
-            .finish_chapter_frame_task(&task.id, succeeded, error)
-        {
-            tracing::error!(%error, task = %task.id, "章节帧任务终态写入失败");
+    /// Write the task's terminal state off the executor. A contended lock keeps the
+    /// task un-finished (the durable row is recovered on the next start), so this is
+    /// logged, never retried in a loop that would hold the worker.
+    async fn finish_task(&self, task: &ChapterFrameTask, succeeded: bool, error: Option<&str>) {
+        let id = task.id.clone();
+        let error = error.map(str::to_string);
+        let logged = id.clone();
+        let outcome = store_read_handle(self.store.clone(), STORE_WRITE_WAIT, move |store| {
+            store.finish_chapter_frame_task(&id, succeeded, error.as_deref())
+        })
+        .await;
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::error!(%error, task = %logged, "章节帧任务终态写入失败");
+            }
+            Err(error) => {
+                tracing::warn!(?error, task = %logged, "章节帧任务终态未写入：Store 繁忙");
+            }
         }
     }
 }
@@ -448,4 +478,10 @@ fn targets_hash(targets: &[(i64, i64)]) -> String {
         digest.update(end.to_le_bytes());
     }
     format!("{:x}", digest.finalize())
+}
+
+/// A chapter obligation is keyed by the file id (`library_files.file_id`).
+fn file_id_from_str(value: &str) -> Result<domain::LedgerId, String> {
+    domain::LedgerId::from_str(&value.replace('-', ""))
+        .map_err(|error| format!("invalid file id: {error}"))
 }

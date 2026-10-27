@@ -1,6 +1,7 @@
-use domain::{LedgerRow, Media, MediaKind, UserId};
+use domain::{LibraryFile, Media, MediaKind, TypedItemId, UnitKey, UserId};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 pub mod query;
 
@@ -44,9 +45,14 @@ pub struct PlaybackEventIdentity {
     pub event_sequence: Option<i64>,
 }
 
+/// One library entry as the protocol layer sees it: the selected source file,
+/// the row view its artwork/NFO helpers consume, and the media it belongs to.
 #[derive(Clone, Debug)]
 pub struct MediaItemSnapshot {
-    pub row: LedgerRow,
+    /// The published, present source file this entry plays. Public item
+    /// identity is the logical target, never this file id.
+    pub file: LibraryFile,
+    pub unit: Option<UnitKey>,
     pub media: Media,
     pub ticks: i64,
     pub play_count: i64,
@@ -95,12 +101,34 @@ impl UserItemData {
 }
 
 impl MediaItemSnapshot {
+    /// Logical identity of this entry: its work for movies, videos and series,
+    /// and the exact unit for a TV episode. This is what the protocol exposes as
+    /// the item id — the physical file id is never an item identity.
+    pub fn item_identity(&self) -> TypedItemId {
+        match (self.media.kind, self.is_series) {
+            (MediaKind::Tv, false) => match self.unit {
+                Some(key) => TypedItemId::Unit {
+                    media: self.media.id,
+                    key,
+                },
+                // Degenerate TV row without unit coverage: the whole work unit,
+                // never a fabricated `(0, 0)` coordinate.
+                None => TypedItemId::Unit {
+                    media: self.media.id,
+                    key: UnitKey::WHOLE,
+                },
+            },
+            _ => TypedItemId::Work(self.media.id),
+        }
+    }
+
+    /// Public protocol id of this entry (`w1_…` work, `u1_…` unit).
+    pub fn protocol_id(&self) -> String {
+        self.item_identity().to_wire_string()
+    }
+
     pub fn user_item_data(&self) -> UserItemData {
-        let item_id = if self.is_series {
-            self.media.id.to_string().replace('-', "")
-        } else {
-            self.row.id.to_string().replace('-', "")
-        };
+        let item_id = self.protocol_id();
         let playback_position_ticks = if self.is_series { 0 } else { self.ticks };
         let played_percentage = if let Some(unplayed) = self.unplayed_item_count {
             self.metadata
@@ -197,9 +225,73 @@ pub enum SubtitleDeliveryError {
     Failed(String),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum QueryError {
+    #[error("unauthorized query")]
+    Unauthorized,
+    #[error("query temporarily unavailable")]
+    Unavailable,
+    #[error("{0}")]
+    Internal(String),
+}
+impl From<String> for QueryError {
+    fn from(value: String) -> Self {
+        Self::Internal(value)
+    }
+}
+impl QueryError {
+    pub fn status_code(&self) -> axum::http::StatusCode {
+        match self {
+            Self::Unauthorized => axum::http::StatusCode::UNAUTHORIZED,
+            Self::Unavailable => axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Self::Internal(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+/// Original request credential and one absolute budget for a covered query.
+#[derive(Clone)]
+pub struct QueryPrincipal {
+    pub user_id: UserId,
+    pub token: String,
+    pub deadline: std::time::Instant,
+}
+impl std::fmt::Debug for QueryPrincipal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QueryPrincipal")
+            .field("user_id", &self.user_id)
+            .field("token", &"<redacted>")
+            .field("deadline", &self.deadline)
+            .finish()
+    }
+}
+
+/// Timing is created before authentication; tests may inject a shorter deadline.
+#[derive(Clone, Copy, Debug)]
+pub struct QueryTiming {
+    pub started: std::time::Instant,
+    pub deadline: std::time::Instant,
+}
+/// Injected short timing used by Router tests; promoted only by a covered route layer.
+#[derive(Clone, Copy, Debug)]
+pub struct QueryTimingSeed(pub QueryTiming);
+
+impl QueryTiming {
+    pub fn start() -> Self {
+        let started = std::time::Instant::now();
+        Self {
+            started,
+            deadline: started + Duration::from_secs(30),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait MediaServerProvider: Send + Sync + 'static {
     fn server_id(&self) -> String;
+
+    /// Optional actual HTTP encoding boundary used by the release harness.
+    fn record_query_phase(&self, _phase: &'static str, _duration: Duration) {}
 
     async fn authenticate_password(
         &self,
@@ -207,7 +299,11 @@ pub trait MediaServerProvider: Send + Sync + 'static {
         password: &str,
     ) -> Result<Option<(String, ServerUser)>, AuthenticateError>;
 
-    async fn user_id_by_token(&self, token: &str) -> Result<Option<UserId>, String>;
+    async fn user_id_by_token(
+        &self,
+        token: &str,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Option<UserId>, QueryError>;
 
     /// 通过共享 single-flight 服务交付字幕轨。
     ///
@@ -230,14 +326,25 @@ pub trait MediaServerProvider: Send + Sync + 'static {
         _user_id: UserId,
         _device_id: &str,
         _token: &str,
-    ) -> Result<(), String> {
+        _deadline: Option<std::time::Instant>,
+    ) -> Result<(), QueryError> {
         Ok(())
     }
 
     async fn get_user(&self, user_id: UserId) -> Result<Option<ServerUser>, String>;
+    /// Covered query route user-path lookup uses the same absolute budget.
+    async fn get_user_for_query(
+        &self,
+        principal: QueryPrincipal,
+    ) -> Result<Option<ServerUser>, QueryError>;
 
     /// Lists libraries visible specifically to this user
     async fn list_visible_libraries(&self, user_id: UserId) -> Result<Vec<ServerLibrary>, String>;
+    /// Covered catalog parent classification uses the request budget.
+    async fn list_visible_libraries_for_query(
+        &self,
+        principal: QueryPrincipal,
+    ) -> Result<Vec<ServerLibrary>, QueryError>;
 
     /// Lists media item snapshots visible to this user
     async fn list_visible_items(
@@ -256,49 +363,49 @@ pub trait MediaServerProvider: Send + Sync + 'static {
         self.list_visible_items(user_id, parent_id).await
     }
 
-    /// Typed 条目查询：筛选/排序/计数在**选择页之前**完整执行，返回的一页条目
-    /// 必须已经带上该页所需的全部 metadata（tracks/chapters/NFO 细节）。
-    ///
-    /// 默认实现按旧方法等价过滤，**不承诺有界**（分集展开仍是逐 series 查询）；
-    /// 生产 provider 必须覆盖它，用轻候选先选页、再只为该页构建重元数据。
+    /// Complete selection must preserve typed availability and authorization errors.
     async fn query_visible_items(
         &self,
-        user_id: UserId,
+        principal: QueryPrincipal,
         query: ServerItemQuery,
-    ) -> Result<ServerItemPage, String> {
-        query::legacy_select(self, user_id, query).await
-    }
+    ) -> Result<ServerItemPage, QueryError>;
+
+    /// Complete Latest composition, including both playback segments, must share
+    /// one authorization/retry boundary and the original principal deadline.
+    async fn query_latest_items(
+        &self,
+        principal: QueryPrincipal,
+        query: ServerItemQuery,
+    ) -> Result<Vec<MediaItemSnapshot>, QueryError>;
 
     /// NextUp：一次候选读 + 按 Media 分组选第一条未看，再整体分页。
     ///
-    /// 默认实现用一次 `list_visible_items` 做聚合；旧式（只返回 series 级快照）
-    /// provider 会退回逐 series 查询，因此**不承诺有界**。生产 provider 覆盖它。
+    /// Required, not defaulted: a fallback built from full snapshots is unbounded
+    /// and would silently become the behaviour of every new provider.
     async fn next_up_items(
         &self,
         user_id: UserId,
         series_id: Option<&str>,
         offset: usize,
         limit: usize,
-    ) -> Result<ServerItemPage, String> {
-        query::legacy_next_up(self, user_id, series_id, offset, limit).await
-    }
+    ) -> Result<ServerItemPage, String>;
 
-    async fn list_resumable_items(
+    /// 续播页：按「最近观看倒序、每个 Media 只出第一条」选出完整条数与请求页。
+    ///
+    /// 默认实现用一次 `list_visible_items` 过滤后取页，**不承诺有界**；生产 provider
+    /// 覆盖它，在 store 的一次短读里完成过滤与分页。
+    async fn resumable_items_page(
         &self,
         user_id: UserId,
+        offset: usize,
         limit: usize,
-    ) -> Result<Vec<MediaItemSnapshot>, String> {
+    ) -> Result<ServerItemPage, String> {
         let items = self.list_visible_items(user_id, None).await?;
-        let mut resumable = Vec::new();
-        for item in items {
-            if item.ticks > 0 && !item.played {
-                resumable.push(item);
-                if resumable.len() >= limit {
-                    break;
-                }
-            }
-        }
-        Ok(resumable)
+        let resumable: Vec<MediaItemSnapshot> = items
+            .into_iter()
+            .filter(|item| item.ticks > 0 && !item.played)
+            .collect();
+        Ok(ServerItemPage::from_rows(resumable, offset, limit))
     }
     async fn resolve_single_item(
         &self,
@@ -387,6 +494,20 @@ pub trait MediaServerProvider: Send + Sync + 'static {
         id: &str,
     ) -> Result<Option<(PathBuf, bool)>, String>;
 
+    /// Resolve a stream source for a specific requested physical source (MediaSourceId)
+    /// and/or play session id. Default implementation forwards to `resolve_stream_source`.
+    async fn resolve_stream_source_bound(
+        &self,
+        user_id: UserId,
+        id: &str,
+        media_source_id: Option<&str>,
+        _play_session_id: Option<&str>,
+        _device_id: Option<&str>,
+    ) -> Result<Option<(PathBuf, bool)>, String> {
+        let _ = media_source_id;
+        self.resolve_stream_source(user_id, id).await
+    }
+
     /// A05: 检查特定设备是否已被用户撤销
     async fn is_device_revoked(&self, _user_id: UserId, _device_id: &str) -> Result<bool, String> {
         Ok(false)
@@ -400,22 +521,14 @@ pub trait MediaServerProvider: Send + Sync + 'static {
         favorite: Option<bool>,
     ) -> Result<bool, String>;
 
-    async fn update_progress(
-        &self,
-        user_id: UserId,
-        id: &str,
-        position_ms: i64,
-        paused: bool,
-    ) -> Result<(), String>;
     async fn issue_play_session(
         &self,
-        _user_id: UserId,
-        _device_id: &str,
-        _item_id: &str,
-    ) -> Result<String, String> {
-        Ok(uuid::Uuid::new_v4().to_string())
-    }
+        user_id: UserId,
+        device_id: &str,
+        item_id: &str,
+    ) -> Result<String, String>;
 
+    #[allow(clippy::too_many_arguments)]
     async fn report_playback_event(
         &self,
         user_id: UserId,
@@ -425,7 +538,5 @@ pub trait MediaServerProvider: Send + Sync + 'static {
         _client: PlaybackClientInfo,
         _event: PlaybackEvent,
         _identity: PlaybackEventIdentity,
-    ) -> Result<(), String> {
-        self.update_progress(user_id, id, position_ms, paused).await
-    }
+    ) -> Result<(), String>;
 }

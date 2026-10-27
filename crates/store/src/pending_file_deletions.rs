@@ -1,5 +1,5 @@
-//! M6: Library files whose physical deletion must be retried. The ledger row
-//! stays until the file is really gone.
+//! M6: Library files whose physical deletion must be retried. The file row
+//! stays until the bytes are really gone.
 
 use rusqlite::{OptionalExtension, params};
 
@@ -14,7 +14,7 @@ pub const MAX_FILE_DELETION_ATTEMPTS: i64 = 20;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedFileDeletion {
     pub path: String,
-    pub ledger_id: Option<String>,
+    pub file_id: Option<String>,
     pub file_size: Option<u64>,
     pub file_inode: Option<u64>,
 }
@@ -37,25 +37,29 @@ pub fn file_identity(path: &str) -> Option<(u64, Option<u64>)> {
 }
 
 impl Store {
-    /// Queue `path` for deletion (idempotent). Records the ledger id and the
+    /// Queue `path` for deletion (idempotent). Records the file id and the
     /// file's size/inode so a later retry never deletes a different file that
     /// was placed at the same path (review M-3).
     pub fn enqueue_file_deletion(&self, path: &str, reason: &str) -> Result<(), StoreError> {
-        let ledger_id: Option<String> = self
+        let file_id: Option<String> = self
             .library
-            .query_row("SELECT id FROM ledger WHERE path = ?1", [path], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT file_id FROM library_files
+                 WHERE path_key = norm_path_key(?1)
+                 LIMIT 1",
+                [path],
+                |row| row.get(0),
+            )
             .optional()?;
         let identity = file_identity(path);
         self.library.execute(
-            "INSERT INTO pending_file_deletions (path, reason, ledger_id, file_size, file_inode)
+            "INSERT INTO pending_file_deletions (path, reason, file_id, file_size, file_inode)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(path) DO NOTHING",
             params![
                 path,
                 reason,
-                ledger_id,
+                file_id,
                 identity.map(|(size, _)| size as i64),
                 identity.and_then(|(_, ino)| ino).map(|ino| ino as i64),
             ],
@@ -64,15 +68,21 @@ impl Store {
     }
 
     /// Review M-3: deletions whose backoff has expired (`next_retry_at <= now`).
+    ///
+    /// The rows are independent and the caller handles the whole list, so the
+    /// order only sets the processing sequence: oldest backoff first. Ordering by
+    /// `rowid` here would forbid `pending_deletions_due` (SQLite will not pay for
+    /// a sort it can get for free from a scan) and turn the window into a full
+    /// scan of the queue; `tests/library_query_plans.rs` pins the plan.
     pub fn list_due_file_deletions(&self, now: i64) -> Result<Vec<QueuedFileDeletion>, StoreError> {
         let mut stmt = self.library.prepare(
-            "SELECT path, ledger_id, file_size, file_inode FROM pending_file_deletions
-             WHERE next_retry_at <= ?1 AND attempts < ?2 ORDER BY rowid",
+            "SELECT path, file_id, file_size, file_inode FROM pending_file_deletions
+             WHERE next_retry_at <= ?1 AND attempts < ?2 ORDER BY next_retry_at",
         )?;
         let rows = stmt.query_map(params![now, MAX_FILE_DELETION_ATTEMPTS], |row| {
             Ok(QueuedFileDeletion {
                 path: row.get(0)?,
-                ledger_id: row.get(1)?,
+                file_id: row.get(1)?,
                 file_size: row.get::<_, Option<i64>>(2)?.map(|v| v as u64),
                 file_inode: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
             })
@@ -81,7 +91,7 @@ impl Store {
     }
 
     /// The queued identity no longer matches what is at the path (the path
-    /// was reused): drop the queue row and keep the file and its ledger row.
+    /// was reused): drop the queue row and keep the file and its file row.
     pub fn abandon_file_deletion(&self, path: &str) -> Result<(), StoreError> {
         self.library
             .execute("DELETE FROM pending_file_deletions WHERE path = ?1", [path])?;
@@ -109,13 +119,15 @@ impl Store {
         Ok(())
     }
 
-    /// Current ledger id at `path`, if any.
-    pub fn ledger_id_at_path(&self, path: &str) -> Result<Option<String>, StoreError> {
+    /// Current file id at `path`, if any.
+    pub fn file_id_at_path(&self, path: &str) -> Result<Option<String>, StoreError> {
         Ok(self
             .library
-            .query_row("SELECT id FROM ledger WHERE path = ?1", [path], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT file_id FROM library_files WHERE path_key = norm_path_key(?1) LIMIT 1",
+                [path],
+                |row| row.get(0),
+            )
             .optional()?)
     }
 
@@ -146,7 +158,7 @@ impl Store {
         Ok(())
     }
 
-    /// The file is gone: drop the queue row and its ledger row.
+    /// The file is gone: drop the queue row and its file row.
     pub fn complete_file_deletion(&self, path: &str) -> Result<(), StoreError> {
         self.delete_ledger_path(path)?;
         self.library

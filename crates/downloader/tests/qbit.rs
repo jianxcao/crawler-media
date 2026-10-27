@@ -1,7 +1,10 @@
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+#[path = "../../api/tests/support/lifecycle.rs"]
+#[allow(dead_code)]
+mod lifecycle;
+
+use lifecycle::FakeServer;
+use std::io::Write;
 use std::sync::Arc;
-use std::thread;
 
 use parking_lot::Mutex;
 
@@ -25,35 +28,6 @@ impl Capture {
             injected_infos: Mutex::new(None),
         })
     }
-}
-
-fn read_request(stream: &mut TcpStream) -> String {
-    let mut request = Vec::new();
-    let mut expected = None;
-    loop {
-        let mut buf = [0u8; 4096];
-        let n = stream.read(&mut buf).unwrap_or(0);
-        if n == 0 {
-            break;
-        }
-        request.extend_from_slice(&buf[..n]);
-        if expected.is_none() {
-            if let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
-                let headers = String::from_utf8_lossy(&request[..header_end]);
-                let content_length = headers.lines().find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().ok())
-                        .flatten()
-                });
-                expected = Some(header_end + 4 + content_length.unwrap_or(0));
-            }
-        }
-        if expected.is_some_and(|length| request.len() >= length) {
-            break;
-        }
-    }
-    String::from_utf8_lossy(&request).into_owned()
 }
 
 fn match_fake_qbit_route(
@@ -112,22 +86,16 @@ fn match_fake_qbit_route(
     }
 }
 
-fn serve(capture: Arc<Capture>, save_path: String) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    thread::spawn(move || {
-        for stream in listener.incoming() {
-            let mut stream = stream.unwrap();
-            let req = read_request(&mut stream);
-            let (status, body, extra) = match_fake_qbit_route(&req, &capture, &save_path);
-            let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n{extra}\r\n{body}",
-                body.len()
-            );
-            let _ = stream.write_all(response.as_bytes());
-        }
+fn serve(capture: Arc<Capture>, save_path: String) -> (String, FakeServer) {
+    let server = FakeServer::start(move |request, stream| {
+        let (status, body, extra) = match_fake_qbit_route(&request.raw, &capture, &save_path);
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n{extra}\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
     });
-    format!("http://{addr}")
+    (server.url(), server)
 }
 
 /// Connect to a fake qBittorrent at `url` with test credentials.
@@ -165,7 +133,7 @@ fn torrent() -> Torrent {
 #[test]
 fn adds_enclosure_as_qbittorrent_task_with_stopped_semantics() {
     let capture = Capture::new();
-    let url = serve(capture.clone(), "/downloads".into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = QbitDownloader::connect(QbitConfig {
         url,
         username: "admin".into(),
@@ -193,7 +161,7 @@ fn adds_enclosure_as_qbittorrent_task_with_stopped_semantics() {
 #[test]
 fn explicit_save_path_is_sent_to_qbittorrent() {
     let capture = Capture::new();
-    let url = serve(capture.clone(), "/downloads".into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = connect(&url);
     dl.add_with_options(
         &torrent(),
@@ -209,7 +177,7 @@ fn explicit_save_path_is_sent_to_qbittorrent() {
 #[test]
 fn resolved_download_uses_signed_file_and_stable_torrent_tag() {
     let capture = Capture::new();
-    let url = serve(capture.clone(), "/downloads".into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = connect(&url);
     let torrent = torrent();
     dl.add_resolved(&torrent, &format!("{url}/signed.torrent"))
@@ -224,7 +192,7 @@ fn resolved_download_uses_signed_file_and_stable_torrent_tag() {
 #[test]
 fn add_is_skipped_when_qbittorrent_already_has_the_torrent() {
     let capture = Capture::new();
-    let url = serve(capture.clone(), "/downloads".into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = QbitDownloader::connect(QbitConfig {
         url,
         username: "admin".into(),
@@ -245,7 +213,7 @@ fn completed_task_exposes_files_for_transfer() {
     let file = dir.path().join("movie.mkv");
     std::fs::write(&file, b"bytes").unwrap();
     let capture = Capture::new();
-    let url = serve(capture, dir.path().display().to_string().replace('\\', "/"));
+    let (url, _server) = serve(capture, dir.path().display().to_string().replace('\\', "/"));
     let dl = QbitDownloader::connect(QbitConfig {
         url,
         username: "admin".into(),
@@ -288,7 +256,7 @@ fn live_qbittorrent_add_is_manual() {
 #[test]
 fn remove_deletes_task_by_hash_keeping_files() {
     let capture = Capture::new();
-    let url = serve(capture.clone(), "/downloads".into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = QbitDownloader::connect(QbitConfig {
         url,
         username: "admin".into(),
@@ -314,7 +282,7 @@ fn remove_deletes_task_by_hash_keeping_files() {
 #[test]
 fn delete_task_removes_by_hash_and_honours_delete_files() {
     let capture = Capture::new();
-    let url = serve(capture.clone(), "/downloads".into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = connect(&url);
 
     dl.delete_task("deadbeef", true).unwrap();
@@ -331,7 +299,7 @@ fn delete_task_removes_by_hash_and_honours_delete_files() {
 #[test]
 fn pause_and_resume_target_the_hash() {
     let capture = Capture::new();
-    let url = serve(capture.clone(), "/downloads".into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = connect(&url);
 
     dl.pause_task("abc").unwrap();
@@ -354,7 +322,7 @@ fn pause_and_resume_target_the_hash() {
 #[test]
 fn speed_limits_read_from_preferences() {
     let capture = Capture::new();
-    let url = serve(capture.clone(), "/downloads".into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = connect(&url);
 
     let (dl_limit, ul_limit) = dl.get_speed_limits().unwrap();
@@ -365,7 +333,7 @@ fn speed_limits_read_from_preferences() {
 #[test]
 fn set_speed_limits_uses_form_encoded_set_preferences() {
     let capture = Capture::new();
-    let url = serve(capture.clone(), "/downloads".into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = connect(&url);
 
     dl.set_speed_limits(2_097_152, 524_288).unwrap();
@@ -385,7 +353,7 @@ fn set_speed_limits_uses_form_encoded_set_preferences() {
 #[test]
 fn task_snapshots_extract_our_tag_and_live_state() {
     let capture = Capture::new();
-    let url = serve(capture.clone(), "/downloads".into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = connect(&url);
     // The fake only reports tasks once something has been added.
     dl.add(&torrent()).unwrap();
@@ -399,7 +367,9 @@ fn task_snapshots_extract_our_tag_and_live_state() {
     );
     assert_eq!(
         snapshot.owned_tags,
-        vec![downloader::ownership_tag("https://pt.example/download.php?id=1")],
+        vec![downloader::ownership_tag(
+            "https://pt.example/download.php?id=1"
+        )],
         "D-S1: per-torrent ownership tag must be exposed for HTTP identity"
     );
     assert_eq!(snapshot.state, "stalledDL");
@@ -420,7 +390,7 @@ fn task_snapshots_of_foreign_torrents_carry_no_tag() {
     // With nothing added the fake reports no tasks at all, which is the
     // "client unreachable / empty" shape callers must tolerate.
     let capture = Capture::new();
-    let url = serve(capture.clone(), "/downloads".into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = connect(&url);
     assert!(dl.task_snapshots().unwrap().is_empty());
 }
@@ -428,13 +398,11 @@ fn task_snapshots_of_foreign_torrents_carry_no_tag() {
 #[test]
 fn same_size_unrelated_torrent_does_not_match() {
     let capture = Capture::new();
-    let url = serve(capture.clone(), "/downloads".into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = connect(&url);
 
     // 客户端内存在一个同体积(1000字节)但标题完全不相关的已完成任务
-    *capture.injected_infos.lock() = Some(format!(
-        r#"[{{"hash":"unrelated-hash","name":"Other.Movie.2024.1080p","progress":1.0,"save_path":"/downloads","state":"uploading","tags":"crawler-media","size":1000,"downloaded":1000,"uploaded":7,"dlspeed":0,"upspeed":0}}]"#
-    ));
+    *capture.injected_infos.lock() = Some(r#"[{"hash":"unrelated-hash","name":"Other.Movie.2024.1080p","progress":1.0,"save_path":"/downloads","state":"uploading","tags":"crawler-media","size":1000,"downloaded":1000,"uploaded":7,"dlspeed":0,"upspeed":0}]"#.to_string());
 
     let mut target = torrent();
     target.title = "The.Matrix.1999.2160p".into();
@@ -466,7 +434,7 @@ fn same_size_unrelated_torrent_does_not_match() {
 #[test]
 fn same_name_different_hash_is_not_treated_as_owned() {
     let capture = Capture::new();
-    let url = serve(capture.clone(), "/downloads".into());
+    let (url, _server) = serve(capture.clone(), "/downloads".into());
     let dl = connect(&url);
     let magnet = "magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     *capture.injected_infos.lock() = Some(

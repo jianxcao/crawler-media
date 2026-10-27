@@ -21,8 +21,16 @@ pub(crate) async fn get_scan_operation(
             "report": op.report,
         }))
         .into_response(),
-        Ok(Some(_)) | Ok(None) => err(StatusCode::NOT_FOUND, "scan_operation.missing", "扫描操作不存在"),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &e.to_string()),
+        Ok(Some(_)) | Ok(None) => err(
+            StatusCode::NOT_FOUND,
+            "scan_operation.missing",
+            "扫描操作不存在",
+        ),
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store.error",
+            &e.to_string(),
+        ),
     }
 }
 
@@ -35,13 +43,27 @@ pub(crate) async fn cancel_scan_operation(
         let store = state.store.lock();
         let op_opt = match store.scan_operation(&op_id) {
             Ok(opt) => opt,
-            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &e.to_string()),
+            Err(e) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &e.to_string(),
+                );
+            }
         };
         let Some(op) = op_opt else {
-            return err(StatusCode::NOT_FOUND, "scan_operation.missing", "未找到可取消的扫描操作");
+            return err(
+                StatusCode::NOT_FOUND,
+                "scan_operation.missing",
+                "未找到可取消的扫描操作",
+            );
         };
         if op.library_id != lib_id {
-            return err(StatusCode::NOT_FOUND, "scan_operation.missing", "未找到可取消的扫描操作");
+            return err(
+                StatusCode::NOT_FOUND,
+                "scan_operation.missing",
+                "未找到可取消的扫描操作",
+            );
         }
         store.cancel_scan(&op_id, now_ms)
     };
@@ -66,9 +88,17 @@ pub(crate) async fn cancel_scan_operation(
                     "scan_operation.missing",
                     "未找到可取消的扫描操作",
                 ),
-                Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &e.to_string()),
+                Err(e) => err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &e.to_string(),
+                ),
             }
         }
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &e.to_string()),
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store.error",
+            &e.to_string(),
+        ),
     }
 }

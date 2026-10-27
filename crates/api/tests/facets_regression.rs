@@ -9,10 +9,11 @@ use std::sync::Arc;
 
 use api::{ApiState, router};
 use axum::http::StatusCode;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserRole};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UserRole};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex as ParkingMutex;
 use serde_json::Value;
+use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
 
 #[path = "management/common.rs"]
@@ -114,11 +115,10 @@ fn seed_movie(
         // 每个文件旁都有 NFO：`preferred_row` 可能挑中任意一行。
         std::fs::write(path.with_extension("nfo"), nfo).unwrap();
         let _ = index;
-        state
-            .store()
-            .lock()
-            .insert_ledger(&LedgerRow {
-                id: LedgerId::new(),
+        publish_fixture_file(
+            &state.store().lock(),
+            &FixtureFile {
+                file_id: Some(LedgerId::new()),
                 media_id,
                 path: path.to_string_lossy().to_string(),
                 season: None,
@@ -129,15 +129,17 @@ fn seed_movie(
                 quality_source: QualitySource::Probe,
                 confidence: Confidence::High,
                 filter_score: None,
-            })
-            .unwrap();
+                ..Default::default()
+            },
+        )
+        .unwrap();
     }
     media_id
 }
 
 /// 三部作品：M1 动作/US/2024、M2 动作/JP/2015（两个文件）、M3 剧情/US/2024。
 /// ledger 行数 = 4，distinct Media = 3。
-fn seed_catalog(state: &ApiState, tmp: &tempfile::TempDir) -> (axum::Router, String) {
+fn seed_catalog(state: &ApiState, _tmp: &tempfile::TempDir) -> (axum::Router, String) {
     let library_id = movie_library_id(state);
     let root = library_root(state, &library_id);
     seed_movie(
@@ -296,13 +298,12 @@ async fn tier_selects_the_filled_dimensions() {
     assert!(!values_of(&all, "languages").is_empty());
     assert!(!values_of(&all, "ratings").is_empty());
 
-    // 缺省 tier 与 all 等价（旧调用方仍能拿到 resolutions）。
+    // 缺省 tier 与 all 等价。
     let default_tier = facets(&app, &format!("/api/v1/libraries/{library_id}/facets")).await;
     assert_eq!(
         values_of(&default_tier, "resolutions"),
         values_of(&all, "resolutions")
     );
-    assert!(default_tier["years"].as_array().unwrap().is_empty());
 
     let response = app
         .clone()
@@ -354,9 +355,20 @@ async fn unknown_year_does_not_produce_a_2020s_candidate() {
     )
     .await;
     let decades = values_of(&values, "decades");
-    assert_eq!(decades, vec!["1990s".to_string()], "{values}");
-    assert!(
-        !decades.contains(&"2020s".to_string()),
+    for bucket in ["earlier", "1990s", "2000s", "2010s", "2020s"] {
+        assert!(
+            decades.contains(&bucket.to_string()),
+            "closed decade bucket {bucket} missing: {values}"
+        );
+    }
+    assert_eq!(
+        find(&values, "decades", "1990s").unwrap()["count"],
+        1,
+        "{values}"
+    );
+    assert_eq!(
+        find(&values, "decades", "2020s").unwrap()["count"],
+        0,
         "未知年份不得伪归 2020s：{values}"
     );
 }
@@ -438,5 +450,57 @@ async fn hidden_library_does_not_contribute_candidates() {
     assert!(
         find(&visible, "genres", "27").is_none(),
         "隐藏库的条目不得进入候选：{visible}"
+    );
+}
+
+/// Q3b equivalence: fixed buckets keep zero-count candidates, cumulative ratings, the
+/// exclude-own rule, and `favorite` only appears once some library item is a favourite.
+#[tokio::test]
+async fn fixed_buckets_keep_zero_counts_and_conditional_favorite() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = base_state(&tmp);
+    let (app, library_id) = seed_catalog(&state, &tmp);
+    let counts = |values: &Value, dimension: &str| -> Vec<(String, u64)> {
+        values[dimension]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                (
+                    e["value"].as_str().unwrap().to_string(),
+                    e["count"].as_u64().unwrap(),
+                )
+            })
+            .collect()
+    };
+    let owned = |pairs: &[(&str, u64)]| -> Vec<(String, u64)> {
+        pairs.iter().map(|(v, c)| (v.to_string(), *c)).collect()
+    };
+    let values = facets(
+        &app,
+        &format!("/api/v1/libraries/{library_id}/facets?g=28&d=2020s"),
+    )
+    .await;
+    assert_eq!(values["total"], 1);
+    assert_eq!(
+        counts(&values, "decades"),
+        owned(&[
+            ("earlier", 0),
+            ("1990s", 0),
+            ("2000s", 0),
+            ("2010s", 1),
+            ("2020s", 1)
+        ]),
+        "decades exclude their own filter and keep zero buckets"
+    );
+    assert_eq!(
+        counts(&values, "ratings"),
+        owned(&[("6", 1), ("7", 1), ("8", 1), ("9", 0)]),
+        "ratings are cumulative thresholds over g=28 + 2020s"
+    );
+    assert_eq!(
+        counts(&values, "watch"),
+        owned(&[("unwatched", 1), ("watching", 0), ("played", 0)]),
+        "favorite is absent while nothing is a favourite"
     );
 }

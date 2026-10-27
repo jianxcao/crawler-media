@@ -42,13 +42,13 @@ fn ensure_media_keeps_movie_and_tv_with_same_tmdb_id_separate() {
     // 各自仍能按 (tmdb_id + kind) 找回。
     assert!(
         store
-            .get_media_by_alias_kind("tmdb_id", "603", Some(MediaKind::Movie))
+            .get_media_by_alias_kind("tmdb", "603", Some(MediaKind::Movie))
             .unwrap()
             .is_some()
     );
     assert!(
         store
-            .get_media_by_alias_kind("tmdb_id", "603", Some(MediaKind::Tv))
+            .get_media_by_alias_kind("tmdb", "603", Some(MediaKind::Tv))
             .unwrap()
             .is_some()
     );
@@ -67,7 +67,7 @@ fn merge_pending_keeps_existing_downloads_across_search_rounds() {
             exclude: false,
         }],
         keep_old_versions: false,
-};
+    };
     store.insert_filter(&filter).unwrap();
     let subscribe = Subscribe {
         id: SubscribeId::new(),

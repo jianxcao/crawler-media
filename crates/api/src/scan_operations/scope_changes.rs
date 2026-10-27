@@ -44,9 +44,9 @@ async fn another_kind_library_does_not_interrupt_running_scan() {
         "{}",
         done.report
     );
-    let rows = fix.state.store().lock().list_ledger().unwrap();
+    let rows = fix.state.store().lock().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].path, episode.display().to_string());
+    assert_eq!(rows[0].file.path, episode);
 }
 
 #[tokio::test]
@@ -90,9 +90,9 @@ async fn disjoint_same_kind_library_does_not_interrupt_running_scan() {
         "{}",
         done.report
     );
-    let rows = fix.state.store().lock().list_ledger().unwrap();
+    let rows = fix.state.store().lock().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].path, movie.display().to_string());
+    assert_eq!(rows[0].file.path, movie);
 }
 
 #[tokio::test]
@@ -148,7 +148,7 @@ async fn disjoint_same_kind_root_update_does_not_interrupt_running_scan() {
         fix.state
             .store()
             .lock()
-            .ledger_by_path(&movie.display().to_string())
+            .file_coverage_by_path(&movie.display().to_string())
             .unwrap()
             .is_some()
     );
@@ -198,7 +198,7 @@ async fn symlinked_nested_library_prevents_stale_publication() {
         "{}",
         done.report
     );
-    assert!(fix.state.store().lock().list_ledger().unwrap().is_empty());
+    assert!(fix.state.store().lock().list_file_coverage().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -234,7 +234,7 @@ async fn frozen_library_prevents_scan_publication() {
         "{}",
         done.report
     );
-    assert!(fix.state.store().lock().list_ledger().unwrap().is_empty());
+    assert!(fix.state.store().lock().list_file_coverage().unwrap().is_empty());
 }
 
 /// Same-kind ownership changes still invalidate the original publication scope.
@@ -279,5 +279,5 @@ async fn nested_library_created_during_scan_prevents_stale_publication() {
         "{}",
         done.report
     );
-    assert!(fix.state.store().lock().list_ledger().unwrap().is_empty());
+    assert!(fix.state.store().lock().list_file_coverage().unwrap().is_empty());
 }

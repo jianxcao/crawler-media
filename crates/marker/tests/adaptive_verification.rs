@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{make_target_evidence, MockVerificationEngine};
+use common::{MockVerificationEngine, make_target_evidence};
 use marker::{
     CommonSegment, SamplingPolicy, SegmentKind, TemplateContext, TemplateModel, TemplateReference,
     VerificationOutcome, verify_template_window,
@@ -60,7 +60,9 @@ fn center_only_match_requires_full_window() {
         duration_sec: 20.0,
         score: 1.0,
     };
-    engine.returns.insert((3000, 1000), vec![center_seg.clone()]);
+    engine
+        .returns
+        .insert((3000, 1000), vec![center_seg.clone()]);
     engine.returns.insert((3000, 2000), vec![center_seg]);
 
     let outcome = verify_template_window(&engine, &target, &templates, &policy);
@@ -189,7 +191,9 @@ fn window_edge_match_is_not_a_complete_template() {
         duration_sec: 85.0,
         score: 1.0,
     };
-    engine.returns.insert((3000, 1000), vec![clipped_seg.clone()]);
+    engine
+        .returns
+        .insert((3000, 1000), vec![clipped_seg.clone()]);
     engine.returns.insert((3000, 2000), vec![clipped_seg]);
 
     let outcome = verify_template_window(&engine, &target, &templates, &policy);

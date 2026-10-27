@@ -10,6 +10,10 @@
 //! iterating; the published table in
 //! `docs/audits/2026-10-12-remediation-review-repro/endpoint-perf.md` uses the
 //! defaults. No network, no Chromium, no ffmpeg.
+use store::test_support::{FixtureFile, publish_fixture_file};
+
+#[path = "support/mod.rs"]
+mod support;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -18,10 +22,10 @@ use std::time::{Duration, Instant};
 use api::{ApiState, Store, router};
 use axum::body::{Body, to_bytes};
 use axum::http::Request;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserId};
-use store::SessionRow;
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UserId};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use store::SessionRow;
 use tower::ServiceExt;
 
 const DEFAULT_SIZES: &[usize] = &[100, 500, 2_000, 10_000];
@@ -135,19 +139,22 @@ fn seed_media(
     store.insert_media(&media).unwrap();
     // 「同一 Media 多文件」+「多 Library」两种形状。
     let files = 1 + (rng.next() % 2) as usize;
-    let dir = if index % 3 == 0 {
+    let dir = if index.is_multiple_of(3) {
         second_root.join(format!("show-{index:06}"))
     } else {
         primary_root.join(format!("title-{index:06}"))
     };
     std::fs::create_dir_all(&dir).unwrap();
+    let mut playable = None;
     for file_index in 0..files {
         let path = dir.join(format!("file-{file_index}.mkv"));
         std::fs::write(&path, b"perf-fixture-payload").unwrap();
         std::fs::write(dir.join(format!("file-{file_index}.nfo")), nfo(&media, tv)).unwrap();
-        store
-            .insert_ledger(&LedgerRow {
-                id: LedgerId::new(),
+        let file_id = LedgerId::new();
+        publish_fixture_file(
+            store,
+            &FixtureFile {
+                file_id: Some(file_id),
                 media_id: media.id,
                 path: path.display().to_string(),
                 season: tv.then_some(1),
@@ -158,20 +165,30 @@ fn seed_media(
                 quality_source: QualitySource::Release,
                 confidence: Confidence::High,
                 filter_score: None,
-            })
-            .unwrap();
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        playable.get_or_insert(file_id);
     }
     std::fs::write(dir.join("poster.jpg"), JPEG).unwrap();
 
     let device = format!("dev-{index}");
     let started = now - (index as i64 % 30) * 86_400 - 60;
+    let play_session_id = support::session::issue_session(
+        store,
+        admin,
+        &device,
+        playable.expect("fixture publishes at least one file"),
+        started,
+    );
     store
         .upsert_session(&SessionRow {
             device_id: device.clone(),
             user_id: admin,
             media_id: media.id,
-            season: tv.then_some(1),
-            episode: tv.then_some(1),
+            season: Some(if tv { 1 } else { -1 }),
+            episode: Some(if tv { 1 } else { -1 }),
             client: Some("perf-client".into()),
             device_name: None,
             client_version: None,
@@ -188,7 +205,7 @@ fn seed_media(
             started_at: started,
             last_report_at: started,
             ledger_id: None,
-            play_session_id: None,
+            play_session_id: Some(play_session_id),
             last_report_at_ms: started * 1000,
             last_event_sequence: None,
         })
@@ -303,7 +320,10 @@ async fn measure(app: &axum::Router, uri: &str, samples: usize) -> Vec<Sample> {
         let start = Instant::now();
         let response = app.clone().oneshot(request).await.unwrap();
         let status = response.status().as_u16();
-        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap().len();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .len();
         out.push(Sample {
             status,
             bytes,
@@ -330,7 +350,10 @@ fn env_list(name: &str, default: &[usize]) -> Vec<usize> {
 
 fn env_modes(default: &[&str]) -> Vec<String> {
     match std::env::var("PERF_MODES") {
-        Ok(raw) => raw.split(',').map(|value| value.trim().to_string()).collect(),
+        Ok(raw) => raw
+            .split(',')
+            .map(|value| value.trim().to_string())
+            .collect(),
         Err(_) => default.iter().map(|value| (*value).to_string()).collect(),
     }
 }
@@ -341,7 +364,7 @@ fn env_endpoints(default: &[&'static str]) -> Vec<String> {
             .split(',')
             .map(|value| {
                 let trimmed = value.trim();
-                if !default.iter().any(|&d| d == trimmed) {
+                if !default.contains(&trimmed) {
                     panic!("unknown endpoint in PERF_ENDPOINTS: {trimmed}");
                 }
                 trimmed.to_string()

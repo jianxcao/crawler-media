@@ -1,3 +1,5 @@
+type SeasonEpisodeBoundary = (usize, Option<u32>, Option<u32>, Option<u32>);
+
 /// 剥离段首的发布标签，如 [中字] 或 【肥猫发布】
 pub(super) fn strip_leading_brackets(s: &str) -> &str {
     let mut cur = s.trim();
@@ -50,7 +52,7 @@ pub(super) fn extract_boundary_season_episode(
 
 fn normalized_boundary_title(raw: &str) -> String {
     let mut words: Vec<&str> = raw
-        .split(|c: char| matches!(c, '.' | '_' | ' ' | '[' | ']' | '(' | ')'))
+        .split(['.', '_', ' ', '[', ']', '(', ')'])
         .filter(|word| !word.is_empty() && *word != "-")
         .collect();
     if words
@@ -88,7 +90,9 @@ fn is_calendar_date(digits: &str) -> bool {
     let year = &digits[..4];
     let month: u32 = digits[4..6].parse().unwrap_or(0);
     let day: u32 = digits[6..8].parse().unwrap_or(0);
-    crate::attributes::parse_year(year).is_some() && (1..=12).contains(&month) && (1..=31).contains(&day)
+    crate::attributes::parse_year(year).is_some()
+        && (1..=12).contains(&month)
+        && (1..=31).contains(&day)
 }
 
 fn is_likely_resolution(bytes: &[u8], ep: u32, m: usize) -> bool {
@@ -101,7 +105,7 @@ fn try_parse_s_followed(
     bytes: &[u8],
     len: usize,
     i: usize,
-) -> Option<(usize, Option<u32>, Option<u32>, Option<u32>)> {
+) -> Option<SeasonEpisodeBoundary> {
     let mut j = i + 1;
     while j < len && bytes[j].is_ascii_digit() {
         j += 1;
@@ -124,7 +128,9 @@ fn try_parse_s_followed(
         while m < len && bytes[m].is_ascii_digit() {
             m += 1;
         }
-        if m > e_start && plausible_episode(&upper[e_start..m]) {
+        // Explicit `S00E00` is a real special coordinate; elsewhere episode 0 stays implausible.
+        let special_zero = season == 0 && upper[e_start..m].parse::<u32>().ok() == Some(0);
+        if m > e_start && (plausible_episode(&upper[e_start..m]) || special_zero) {
             let ep = upper[e_start..m].parse::<u32>().ok()?;
             let (ep_to, _) = parse_episode_range(&upper[m..]);
             return Some((i, Some(season), Some(ep), ep_to));
@@ -135,13 +141,12 @@ fn try_parse_s_followed(
         while m < len && bytes[m].is_ascii_digit() {
             m += 1;
         }
-        if plausible_episode(&upper[k..m]) {
-            if let Ok(ep) = upper[k..m].parse::<u32>() {
-                if !is_likely_resolution(bytes, ep, m) {
-                    let (ep_to, _) = parse_episode_range(&upper[m..]);
-                    return Some((i, Some(season), Some(ep), ep_to));
-                }
-            }
+        if plausible_episode(&upper[k..m])
+            && let Ok(ep) = upper[k..m].parse::<u32>()
+            && !is_likely_resolution(bytes, ep, m)
+        {
+            let (ep_to, _) = parse_episode_range(&upper[m..]);
+            return Some((i, Some(season), Some(ep), ep_to));
         }
     }
     if j == len || !bytes[j].is_ascii_alphanumeric() {
@@ -151,19 +156,20 @@ fn try_parse_s_followed(
 }
 
 /// 查找 SxxExx、Sxx Exx、Sxx、Exx
-pub(super) fn find_s_e_pattern(
-    upper: &str,
-) -> Option<(usize, Option<u32>, Option<u32>, Option<u32>)> {
+pub(super) fn find_s_e_pattern(upper: &str) -> Option<SeasonEpisodeBoundary> {
     let bytes = upper.as_bytes();
     let len = bytes.len();
     let mut i = 0;
 
     while i < len {
         let is_start = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
-        if is_start && bytes[i] == b'S' && i + 1 < len && bytes[i + 1].is_ascii_digit() {
-            if let Some(res) = try_parse_s_followed(upper, bytes, len, i) {
-                return Some(res);
-            }
+        if is_start
+            && bytes[i] == b'S'
+            && i + 1 < len
+            && bytes[i + 1].is_ascii_digit()
+            && let Some(res) = try_parse_s_followed(upper, bytes, len, i)
+        {
+            return Some(res);
         }
 
         // 单独以 E01 开头
@@ -215,18 +221,16 @@ fn parse_episode_range(after: &str) -> (Option<u32>, usize) {
     while k < bytes.len() && bytes[k].is_ascii_digit() {
         k += 1;
     }
-    if k > digit_start {
-        if let Ok(to) = after[digit_start..k].parse::<u32>() {
-            return (Some(to), k);
-        }
+    if k > digit_start
+        && let Ok(to) = after[digit_start..k].parse::<u32>()
+    {
+        return (Some(to), k);
     }
     (None, 0)
 }
 
 /// 解析中文季集如 "第 2 季 第 5 集"、"第二季 第01-04集"
-pub(super) fn find_chinese_season_episode(
-    s: &str,
-) -> Option<(usize, Option<u32>, Option<u32>, Option<u32>)> {
+pub(super) fn find_chinese_season_episode(s: &str) -> Option<SeasonEpisodeBoundary> {
     let mut pos = None;
     let mut season = None;
     let mut episode = None;
@@ -237,15 +241,15 @@ pub(super) fn find_chinese_season_episode(
         let after = &s[p + '第'.len_utf8()..];
 
         // 检查是否是第x季
-        if let Some(j_pos) = after.find('季') {
-            if j_pos <= 10 {
-                let season_str = after[..j_pos].trim();
-                if let Some(s_num) = parse_cn_or_arabic_num(season_str) {
-                    if pos.is_none() || p < pos.unwrap() {
-                        pos = Some(p);
-                    }
-                    season = Some(s_num);
+        if let Some(j_pos) = after.find('季')
+            && j_pos <= 10
+        {
+            let season_str = after[..j_pos].trim();
+            if let Some(s_num) = parse_cn_or_arabic_num(season_str) {
+                if pos.is_none() || p < pos.unwrap() {
+                    pos = Some(p);
                 }
+                season = Some(s_num);
             }
         }
 
@@ -254,17 +258,16 @@ pub(super) fn find_chinese_season_episode(
             .find('集')
             .or_else(|| after.find('话'))
             .or_else(|| after.find('話'))
+            && end_pos <= 20
         {
-            if end_pos <= 20 {
-                let ep_str = after[..end_pos].trim();
-                let (from, to) = parse_chinese_ep_range(ep_str);
-                if from.is_some() {
-                    if pos.is_none() || p < pos.unwrap() {
-                        pos = Some(p);
-                    }
-                    episode = from;
-                    episode_to = to;
+            let ep_str = after[..end_pos].trim();
+            let (from, to) = parse_chinese_ep_range(ep_str);
+            if from.is_some() {
+                if pos.is_none() || p < pos.unwrap() {
+                    pos = Some(p);
                 }
+                episode = from;
+                episode_to = to;
             }
         }
     }
@@ -277,9 +280,7 @@ pub(super) fn find_chinese_season_episode(
 }
 
 fn parse_chinese_ep_range(s: &str) -> (Option<u32>, Option<u32>) {
-    let parts: Vec<&str> = s
-        .split(|c: char| c == '-' || c == '~' || c == '—')
-        .collect();
+    let parts: Vec<&str> = s.split(['-', '~', '—']).collect();
     match parts.as_slice() {
         [single] => (parse_cn_or_arabic_num(single.trim()), None),
         [from, to] => {

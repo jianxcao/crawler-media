@@ -68,9 +68,14 @@ fn verified_archive_is_installed_atomically() {
     let size = archive.len() as u64;
 
     let hash_leaked = Box::leak(hash.into_boxed_str()) as &'static str;
-    let custom_asset: &'static [(&'static str, &'static str, &'static str, &'static str, u64)] = Box::leak(Box::new([
-        (std::env::consts::OS, std::env::consts::ARCH, "asset.tar.gz", hash_leaked, size),
-    ]));
+    let custom_asset: &'static [(&'static str, &'static str, &'static str, &'static str, u64)] =
+        Box::leak(Box::new([(
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            "asset.tar.gz",
+            hash_leaked,
+            size,
+        )]));
 
     // Serve archive over local HTTP server
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -108,16 +113,25 @@ fn verified_archive_is_installed_atomically() {
     assert!(bin_dir.join("obscura").is_file());
     assert!(bin_dir.join("obscura-worker").is_file());
     let marker = fs::read_to_string(bin_dir.join(".obscura.sha256")).unwrap();
-    assert!(marker.contains(&format!("archive={}", hash_leaked.to_ascii_lowercase())), "{marker}");
+    assert!(
+        marker.contains(&format!("archive={}", hash_leaked.to_ascii_lowercase())),
+        "{marker}"
+    );
     assert!(marker.contains("obscura-worker="), "{marker}");
 
     // Verified fast path: untouched binaries are accepted without the archive.
-    assert!(installer.ensure_installed(&bin_dir, InstallPolicy::PreinstalledOnly).is_ok());
+    assert!(
+        installer
+            .ensure_installed(&bin_dir, InstallPolicy::PreinstalledOnly)
+            .is_ok()
+    );
 
     // A tampered binary next to a correct marker must not be trusted.
     fs::write(bin_dir.join("obscura"), b"tampered").unwrap();
     assert!(
-        installer.ensure_installed(&bin_dir, InstallPolicy::PreinstalledOnly).is_err(),
+        installer
+            .ensure_installed(&bin_dir, InstallPolicy::PreinstalledOnly)
+            .is_err(),
         "tampered binary must fail re-verification"
     );
 }
@@ -128,9 +142,14 @@ fn hash_mismatch_rejects_and_leaves_no_files() {
     let bin_dir = tmp.path().join("bin");
 
     let archive = make_tar_gz(&[("obscura", b"corrupted"), ("obscura-worker", b"worker")]);
-    let custom_asset: &'static [(&'static str, &'static str, &'static str, &'static str, u64)] = Box::leak(Box::new([
-        (std::env::consts::OS, std::env::consts::ARCH, "asset.tar.gz", "wrong_hash", archive.len() as u64),
-    ]));
+    let custom_asset: &'static [(&'static str, &'static str, &'static str, &'static str, u64)] =
+        Box::leak(Box::new([(
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            "asset.tar.gz",
+            "wrong_hash",
+            archive.len() as u64,
+        )]));
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -174,14 +193,23 @@ fn archive_with_unexpected_or_symlink_entries_is_rejected() {
     let bin_dir = tmp.path().join("bin");
 
     // Contains malicious/unexpected entry "hacked.sh"
-    let archive = make_tar_gz(&[("obscura", b"bin"), ("obscura-worker", b"worker"), ("hacked.sh", b"rm -rf /")]);
+    let archive = make_tar_gz(&[
+        ("obscura", b"bin"),
+        ("obscura-worker", b"worker"),
+        ("hacked.sh", b"rm -rf /"),
+    ]);
     let hash = sha256_hex(&archive);
     let size = archive.len() as u64;
 
     let hash_leaked = Box::leak(hash.into_boxed_str()) as &'static str;
-    let custom_asset: &'static [(&'static str, &'static str, &'static str, &'static str, u64)] = Box::leak(Box::new([
-        (std::env::consts::OS, std::env::consts::ARCH, "asset.tar.gz", hash_leaked, size),
-    ]));
+    let custom_asset: &'static [(&'static str, &'static str, &'static str, &'static str, u64)] =
+        Box::leak(Box::new([(
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            "asset.tar.gz",
+            hash_leaked,
+            size,
+        )]));
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -229,9 +257,14 @@ fn oversized_download_is_rejected_before_writing_everything() {
     let size = archive.len() as u64;
 
     let hash_leaked = Box::leak(hash.into_boxed_str()) as &'static str;
-    let custom_asset: &'static [(&'static str, &'static str, &'static str, &'static str, u64)] = Box::leak(Box::new([
-        (std::env::consts::OS, std::env::consts::ARCH, "asset.tar.gz", hash_leaked, size),
-    ]));
+    let custom_asset: &'static [(&'static str, &'static str, &'static str, &'static str, u64)] =
+        Box::leak(Box::new([(
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            "asset.tar.gz",
+            hash_leaked,
+            size,
+        )]));
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -278,9 +311,16 @@ fn content_length_mismatch_is_rejected() {
     let hash = sha256_hex(&archive);
 
     let hash_leaked = Box::leak(hash.into_boxed_str()) as &'static str;
-    let custom_asset: &'static [(&'static str, &'static str, &'static str, &'static str, u64)] = Box::leak(Box::new([
-        (std::env::consts::OS, std::env::consts::ARCH, "asset.tar.gz", hash_leaked, 999999), // expected size 999999
-    ]));
+    let custom_asset: &'static [(&'static str, &'static str, &'static str, &'static str, u64)] =
+        Box::leak(Box::new([
+            (
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                "asset.tar.gz",
+                hash_leaked,
+                999999,
+            ), // expected size 999999
+        ]));
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -325,13 +365,24 @@ fn archive_entries_must_match_full_top_level_path() {
     let archive = make_tar_gz(&[("nested/obscura", b"bin"), ("obscura-worker", b"worker")]);
     let hash = Box::leak(sha256_hex(&archive).into_boxed_str()) as &'static str;
     let size = archive.len() as u64;
-    let custom_asset: &'static [(&'static str, &'static str, &'static str, &'static str, u64)] = Box::leak(Box::new([
-        (std::env::consts::OS, std::env::consts::ARCH, "asset.tar.gz", hash, size),
-    ]));
+    let custom_asset: &'static [(&'static str, &'static str, &'static str, &'static str, u64)] =
+        Box::leak(Box::new([(
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            "asset.tar.gz",
+            hash,
+            size,
+        )]));
     fs::write(bin_dir.join("obscura.tar.gz"), &archive).unwrap();
     let installer = ReleaseInstaller::new().with_assets(custom_asset);
     let res = installer.ensure_installed(&bin_dir, InstallPolicy::PreinstalledOnly);
-    assert!(matches!(res, Err(api::obscura_manager::InstallError::InvalidArchive(_))), "{res:?}");
+    assert!(
+        matches!(
+            res,
+            Err(api::obscura_manager::InstallError::InvalidArchive(_))
+        ),
+        "{res:?}"
+    );
     assert!(!bin_dir.join("obscura").exists());
 }
 
@@ -344,26 +395,54 @@ fn preinstalled_binaries_require_a_matching_manifest() {
     fs::write(bin_dir.join("obscura-worker"), b"worker").unwrap();
     let installer = ReleaseInstaller::new();
     // No archive and no manifest: not installed.
-    assert!(installer.ensure_installed(&bin_dir, InstallPolicy::PreinstalledOnly).is_err());
+    assert!(
+        installer
+            .ensure_installed(&bin_dir, InstallPolicy::PreinstalledOnly)
+            .is_err()
+    );
     // Wrong manifest: rejected.
     fs::write(
         bin_dir.join(api::obscura_manager::PREINSTALLED_MANIFEST),
-        format!("{}  obscura\n{}  obscura-worker\n", sha256_hex(b"other"), sha256_hex(b"worker")),
+        format!(
+            "{}  obscura\n{}  obscura-worker\n",
+            sha256_hex(b"other"),
+            sha256_hex(b"worker")
+        ),
     )
     .unwrap();
-    assert!(installer.ensure_installed(&bin_dir, InstallPolicy::PreinstalledOnly).is_err());
+    assert!(
+        installer
+            .ensure_installed(&bin_dir, InstallPolicy::PreinstalledOnly)
+            .is_err()
+    );
     // Matching manifest: accepted, and the verified fast path keeps working.
     fs::write(
         bin_dir.join(api::obscura_manager::PREINSTALLED_MANIFEST),
-        format!("{}  obscura\n{}  obscura-worker\n", sha256_hex(b"bin"), sha256_hex(b"worker")),
+        format!(
+            "{}  obscura\n{}  obscura-worker\n",
+            sha256_hex(b"bin"),
+            sha256_hex(b"worker")
+        ),
     )
     .unwrap();
-    assert!(installer.ensure_installed(&bin_dir, InstallPolicy::PreinstalledOnly).is_ok());
-    assert!(installer.ensure_installed(&bin_dir, InstallPolicy::PreinstalledOnly).is_ok());
+    assert!(
+        installer
+            .ensure_installed(&bin_dir, InstallPolicy::PreinstalledOnly)
+            .is_ok()
+    );
+    assert!(
+        installer
+            .ensure_installed(&bin_dir, InstallPolicy::PreinstalledOnly)
+            .is_ok()
+    );
     // Manifest-installed binaries are never accepted under the Download policy marker check
     // without re-verification; tampering is caught.
     fs::write(bin_dir.join("obscura"), b"tampered").unwrap();
-    assert!(installer.ensure_installed(&bin_dir, InstallPolicy::PreinstalledOnly).is_err());
+    assert!(
+        installer
+            .ensure_installed(&bin_dir, InstallPolicy::PreinstalledOnly)
+            .is_err()
+    );
 }
 
 #[test]

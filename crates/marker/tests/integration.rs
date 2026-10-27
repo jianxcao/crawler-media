@@ -219,7 +219,7 @@ fn test_build_complete_timeline_chapters() {
 
     // 情况 1：片头从 0 开始到 104 秒，没有片尾，总时长 43 分钟 (2580 秒)
     // 应该切成：[0~104s] 片头 + [104s~2580s] 正片
-    let segs = build_complete_timeline_chapters(&[], Some((0, 104_000)), None, Some(2580_000));
+    let segs = build_complete_timeline_chapters(&[], Some((0, 104_000)), None, Some(2_580_000));
     assert_eq!(segs.len(), 2);
     assert_eq!(segs[0].title.as_deref(), Some("片头"));
     assert_eq!(segs[0].start_ms, 0);
@@ -228,7 +228,7 @@ fn test_build_complete_timeline_chapters() {
 
     assert_eq!(segs[1].title.as_deref(), Some("正片"));
     assert_eq!(segs[1].start_ms, 104_000);
-    assert_eq!(segs[1].end_ms, 2580_000);
+    assert_eq!(segs[1].end_ms, 2_580_000);
     assert_eq!(segs[1].marker_type, None);
 
     // 情况 2：冷开场 2 分钟，接着片头 90 秒，片尾在最后 2 分钟，总时长 45 分钟 (2700 秒)
@@ -236,8 +236,8 @@ fn test_build_complete_timeline_chapters() {
     let segs2 = build_complete_timeline_chapters(
         &[],
         Some((120_000, 210_000)),
-        Some((2580_000, 2700_000)),
-        Some(2700_000),
+        Some((2_580_000, 2_700_000)),
+        Some(2_700_000),
     );
     assert_eq!(segs2.len(), 4);
     assert_eq!(segs2[0].title.as_deref(), Some("序幕"));
@@ -251,30 +251,28 @@ fn test_build_complete_timeline_chapters() {
 
     assert_eq!(segs2[2].title.as_deref(), Some("正片"));
     assert_eq!(segs2[2].start_ms, 210_000);
-    assert_eq!(segs2[2].end_ms, 2580_000);
+    assert_eq!(segs2[2].end_ms, 2_580_000);
 
     assert_eq!(segs2[3].title.as_deref(), Some("片尾"));
-    assert_eq!(segs2[3].start_ms, 2580_000);
-    assert_eq!(segs2[3].end_ms, 2700_000);
+    assert_eq!(segs2[3].start_ms, 2_580_000);
+    assert_eq!(segs2[3].end_ms, 2_700_000);
     assert_eq!(segs2[3].marker_type, Some(MarkerType::CreditsStart));
 }
 
 #[test]
-fn rebuilding_a_generated_timeline_drops_old_prelude_and_feature_chapters() {
+fn rebuilding_a_generated_timeline_keeps_its_synthetic_chapters_out_of_the_source() {
     use marker::build_complete_timeline_chapters;
 
+    // A timeline this module generated is marked `synthetic`; feeding it back in
+    // must not promote those chapters into source chapters, otherwise every
+    // re-probe would stack another 序幕/正片 pair on top of the previous one.
     let previous = build_complete_timeline_chapters(
         &[],
         Some((11_885, 34_976)),
         Some((2_438_948, 2_590_058)),
         Some(2_592_763),
-    )
-    .into_iter()
-    .map(|mut chapter| {
-        chapter.synthetic = false;
-        chapter
-    })
-    .collect::<Vec<_>>();
+    );
+    assert!(previous.iter().all(|chapter| chapter.synthetic));
 
     let rebuilt = build_complete_timeline_chapters(
         &previous,

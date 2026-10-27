@@ -30,13 +30,12 @@ pub(crate) fn snapshot_matches_pending(
     if let Some(hash) = downloader::magnet_info_hash(&torrent.enclosure) {
         return !snapshot.info_hash.is_empty() && snapshot.info_hash.eq_ignore_ascii_case(&hash);
     }
-    // HTTP enclosures are identified only by their per-torrent ownership tag.
-    // Real clients report it in `owned_tags` (`tag` keeps the generic marker);
-    // `tag` is still checked for legacy / in-memory snapshots.
+    // HTTP enclosures are identified only by their per-torrent ownership tag,
+    // and `owned_tags` is the one place clients report it. `tag` carries the
+    // generic task marker, so matching on it would claim a torrent from a marker
+    // spelling instead of from proven ownership.
     let owned = downloader::ownership_tag(&torrent.enclosure);
     snapshot.owned_tags.iter().any(|tag| tag == &owned)
-        || snapshot.tag == owned
-        || snapshot.tag.split(',').any(|item| item.trim() == owned)
 }
 
 /// Whether absence of `torrent` among `snapshots` is evidence it is gone.

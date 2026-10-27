@@ -1,6 +1,6 @@
 # DB5：jobs 热查询的查询计划与索引证据
 
-> **历史证据，2026-10-12，非本次重新测量。** 这里只覆盖所列热查询；不证明批量children_for_defs会避免全历史解码，当前剩余缺口见 [总复核F07](<../audits/2026-10-13-database-api-review.md>)。
+> **历史证据，2026-10-12，非本次重新测量。** 索引/测量记录来源为 `86310bc`；正文 SQL 与结论限定于当时实现及 fixture，不保证今天查询逐字一致。这里只覆盖所列热查询；不证明批量 children_for_defs 会避免全历史解码，历史缺口见 [2026-10-13 总复核 F07](<../audits/2026-10-13-database-api-review.md>)，该发现未在此重验为当前 bug 或已关闭。
 
 范围：`crates/jobs` 的四条热查询。目标是在**代表性合成数据**上用**项目实际依赖的
 bundled SQLite** 拿到 before/after 的 `EXPLAIN QUERY PLAN` 与同进程实测耗时，

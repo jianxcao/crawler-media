@@ -1,115 +1,49 @@
-# DB8 数据库维护与历史保留：现行合同、实现状态与剩余门
+# DB8 数据库维护与历史保留合同
 
-**状态：主功能已实现，控制／报告／有界性存在待修项，尚未完整验收。** 代码快照 `723394e`（2026-10-13）。本页取代此前“待 review、仅文档”与“全部完成”并存的状态；不是重跑旧六任务的执行指令。
+**2026-10-20 文档整理，源码基线 `bd6c3c8`。** 主功能与后续控制修复已经存在；本页不再把 2026-10-13 的全部偏差描述为当前事实，也不宣布发布验收完成。历史发现见 [10-13 review](<../../audits/2026-10-13-database-api-review.md>)，未关闭门见 [follow-up](<2026-10-13-database-api-followup.md>)。数据库边界见 [ADR-0008](<../../adr/0008-sqlite-system-of-record.md>)，调度见 [ADR-0009](<../../adr/0009-job-queue.md>)。
 
-权威状态：[数据库／接口总复核](<../../audits/2026-10-13-database-api-review.md>)；唯一后续任务：[T1–T9](<2026-10-13-database-api-followup.md>)。数据库职责：[ADR-0008](<../../adr/0008-sqlite-system-of-record.md>)；Job 调度：[ADR-0009](<../../adr/0009-job-queue.md>)；API：[约定](<../../api-contracts/self.md>)。
+## 默认定义与安全边界
 
-## 1. 已确定的范围与默认值
+策略只在 `job_defs.payload` 保存一份，enabled/schedule 沿用 Jobs；按 kind＋concurrency_key 幂等注册，重启不覆盖用户设置。调度只有 Interval，不是固定凌晨／cron。
 
-复用 Jobs：enabled/schedule 在 job_defs，维护策略只存带版本 payload，不在 settings 再存一份。冷却时间是执行元数据，不是策略副本。
-
-| kind | 首次注册 enabled | interval | 默认 payload |
+| kind | 首次 enabled | interval 秒 | 默认 payload |
 |---|---|---|---|
-| database_maintenance | true | 21600s | `{version:1,vacuum_enabled:false}` |
-| jobs_retention | true | 86400s | `{version:1,retention_days:90,dry_run:false}` |
-| playback_history_retention | **false** | 86400s | `{version:1,retention_days:90,dry_run:false}` |
-| data_retention（DB-05） | **false** | 86400s | `{version:1,dry_run:true,qoe_days:90,transient_cache_days:90,probe_days:90}` |
+| database_maintenance | true | 21600 | `{version:1,vacuum_enabled:false}` |
+| jobs_retention | true | 86400 | `{version:1,retention_days:90,dry_run:false}` |
+| playback_history_retention | false | 86400 | `{version:1,retention_days:90,dry_run:false}` |
+| data_retention | false | 86400 | `{version:1,dry_run:true,qoe_days:90,transient_cache_days:90,probe_days:90}` |
 
-已有定义以 kind＋concurrency_key 命中即保留，不因重启覆盖用户配置。关闭仍保留 schedule，现有定时任务页可见。调度只支持 Interval，未实现 cron／固定凌晨时间。
+来源：`crates/api/src/maintenance/mod.rs`、`policy.rs`。首次默认开启任务可能立即入队，Jobs超90天历史可能在首次后台执行被清理；DELETE不可撤销，恢复依赖一致备份。本次整理未执行真实清理。
 
-**升级警告：首个默认开启任务可能立即入队，不等满一个周期；Jobs 历史超过90天可能在首次后台执行时清理。** DELETE 不可撤销，恢复依赖一致备份；本轮文档整理没有运行真实清理。
+- 未知version／字段／损坏JSON拒绝；retention_days=1..36500，永久保留用禁用，不用0。维护interval=3600..31536000秒。
+- cutoff固定本轮started_at（缺省now）减保留天数，checked算术；严格小于cutoff，边界保留。每批500、最多20批／2秒预算；行数／批边界预算不保证单SQL扫描和持锁硬上限。
+- Jobs只删有finished_at的 succeeded/failed/cancelled，不删queued/running/job_defs。每个非NULL def_id保留最新终态并列组，已删def仍保护；NULL独立按龄。每批独立事务，失败整批回滚，跨批不全局回滚。
+- Playback现在删 **library.db.playback_logs** 的超龄已结束行，候选按ended_at/started_at/id读取；不删进度、收藏、session、QoE或文件。来源：`crates/store/src/playback/retention.rs`。删除后历史页／统计窗口收缩，无全时期汇总归档。
+- 分类retention仅QoE、已分类transient cache、受保护Probe终态历史；默认关闭＋dry-run。详情／未知cache stale-if-error不按TTL删，Probe每scope保留最新3及ties并保护sample引用，不删模型／样本。具体保留合同见 [整改总表](<2026-10-15-performance-resource-remediation.md>)。
 
-`data_retention` 是独立、默认关闭且默认 dry_run 的类别：QoE 只删 `playback_metrics`；catalog 只删 URL path 白名单内的 transient search/discover/trending 缓存（详情/未知 key 仍承担 stale-if-error）；Probe 只删终态 job，每 scope 保留最新 3 条并保护 sample 引用。fanart/subtitle cache、fingerprint samples/models/model_members、封面版本文件本轮仍不自动删除。TTL 是 freshness，不等于可删期限。
+## 当前控制、API与报告
 
-## 2. 数据与输入合同
+- `maintenance/runner.rs::check_maintenance_stop` 在每批／每库前检查def.enabled、status/attempt与shutdown；读状态失败保守停止。当前已提交批不回滚；取消／关闭不等于进行中的SQL立即停止。
+- 管理员PUT `/api/v1/jobs/{id}/maintenance-config` 使用 `expected_payload`，缺令牌400、冲突409。`jobs/src/store.rs::update_def_config_cas` 在同事务保存payload／可选周期、刷新未运行queued快照，running保留旧快照；省略周期返回实际保留值。
+- **尚存控制缺口：token只覆盖payload，不覆盖schedule。** 两个只改周期的writer不能靠该token检测冲突。原T2要求全配置CAS仍需完成，不把“同事务”当并发合同全部成立。
+- POST maintenance-preview经blocking budget执行一批只读窗口，不创建Job／改配置／写游标，不返回播放明细；Jobs与实跑使用同一含保护行keyset窗口。`truncated`、`protected_is_lower_bound`／`incomplete`是下界信号，不是全量精确计数。
+- 报告存job.progress，含kind/version/cutoff/dry_run、计数、批数、预算、elapsed与每库outcome；scanned/examined是应用窗口计数，不是SQLite实际examined行。dry-run只检视一批，不重复累加同一批制造总数。
+- 开发tick跳过维护，不取消后台维护子任务；手动触发与UI异步preview／报告的完整门继续见follow-up，不能凭历史修复提交猜测所有时序都通过。
 
-- version=1，unknown version/unknown字段/损坏 JSON 拒绝，不能回落更激进策略。
-- retention_days=1..=36500，0 不代表永久保留；永久保留通过禁用任务表达。
-- 维护 interval=3600..=31536000 秒；维护配置端点与旧 schedule 端点均检查。非维护任务旧范围不在本页收紧。
-- 固定 cutoff=本次 started_at（缺省 now）−retention_days×86400，checked 运算；严格小于，等于边界保留。
-- batch_size=500，max_batches=20，实删每轮最多10000行。**这只证明返回／删除行数预算，不证明 SQL 扫描或持锁时间有界。**
+## 连接、VACUUM与停止保证
 
-### Jobs
+当前allowlist为Store真实app_path以及data_dir下 **cache/library/subscribe/jobs.db**（`maintenance/database.rs::database_targets`），不再维护旧catalog/fanart文件。Queue生产构造固定jobs.db；不宣称支持任意自定义Queue路径。
 
-仅 succeeded/failed/cancelled 且 finished_at 非NULL、超龄。queued/running（包括重试排队）绝不删；不删 job_defs。
+独立READ_WRITE连接，不带CREATE、不重复migration/seed/WAL设置，busy_timeout250ms、请求FK ON；不删除／搬移DB/WAL/SHM，不自动TRUNCATE checkpoint。默认仅PRAGMA optimize，允许no-op；DELETE页可重用，文件不缩小不是删除无效。
 
-每个非NULL def_id 保留最新 terminal，排序 finished_at DESC/run_after DESC；完全并列整组保留。已删除 def 的历史仍保最后组。def_id=NULL 独立行按龄处理，不把全部NULL分成同一保护组。每批事务内选择与删除，失败整批回滚；跨批不全局回滚。
+VACUUM必须显式开、成功冷却≥604800秒、free页≥64MiB且≥20%、可用磁盘≥主体2倍＋64MiB。Library工作活跃跳过重型路径但可optimize；预检是快照，不构成扫描互斥。busy/locked为skip，IO/corrupt/full为fail，冷却读取失败保守skip。
 
-`d1c8205` 已把可删谓词放入候选窗口，解决“最旧500行全被保护导致永远不推进”。它**没有**解决扫描量和保护报告：protected 独立诊断最多501，preview 未标其截断，runner 跨批重复累加。不得按当前数值声称精确保护总数，见 F03。
+**30秒interrupt是best-effort，不是硬停止。** SQLite backup-copy／阻塞FS阶段可能不响应；必须等真实执行器结束再join，不能以900秒Job timeout或丢JoinHandle宣称停止。当前执行器如实保留超限elapsed，重型发布方案仍需独立决策／实测。进程内shared mutex避免不同维护def重叠；各def保留独立key，不擅改key造成幂等seed重复。
 
-### Playback
+## 历史证据与未关闭门
 
-只删 subscribe.db.playback_logs 的 ended_at<cutoff，不删 playback_units（进度／收藏）、playback_sessions、设备凭据、QoE metrics、Media、ledger。历史页与依赖日志的统计窗口会随删除收缩；未做汇总归档，不保留被删日志的全时期统计。
+原实现：`c03f39c`策略、`cbc98bb`／`7ce1c60`事务批次、`dd5e009`执行器／注册、`48d6efa`API/UI、`b06eb9a` StateRunner验收、`d1c8205`保护前缀推进。后续T1–T9提交与剩余门保留在follow-up。
 
-候选按 started_at/id 排序但 ended_at 过滤，现有索引并不保证无过期数据时短扫描；整改见 F05。
+2026-10-13原review记录workspace **226套件／1666 passed／0 failed／4 ignored**、web typecheck exit0；历史Playback fixture 200001超龄行，run1=20批／10000删除／45ms，run2再10000。这些记录保持历史含义：不是真实background loop、不是维护并发HTTP p95，不证明全保护Jobs扫描有界或当前新模型已验收。
 
-## 3. 维护连接与 VACUUM
-
-[实现](<../../../crates/api/src/maintenance/database.rs>)使用内部 allowlist：真实 Store app_path，data_dir 下 catalog/library/subscribe/jobs.db，已存在 fanart.db。当前 Queue 生产构造固定 jobs.db，所以推导路径正确；尚未提供 Queue 真实路径 accessor，不宣称支持任意可配置 jobs 路径。
-
-独立连接 READ_WRITE、不带 CREATE，不重复迁移／seed／设置 WAL；busy_timeout250ms、请求 FK ON；不开缺失可选 fanart，报告 skipped。不删除/搬移 DB/WAL/SHM，不自动 TRUNCATE checkpoint。
-
-默认仅 `PRAGMA optimize`，允许 no-op，不默认全量 ANALYZE/VACUUM。没有显式 ANALYZE 不等于索引不用；DELETE 后页可重用，文件不缩小不等于删除无效。
-
-VACUUM 需用户显式开＋距每库上次成功≥604800s＋free页≥64MiB＋free占比≥20%＋可用磁盘≥2×主体大小＋64MiB。Library 工作预检活跃时跳过 VACUUM、仍可 optimize；磁盘／忙碌预检是快照，不与新扫描构成互斥。busy/locked skipped，IO/corrupt/full failed。
-
-**期限偏差尚未验收：** 30s interrupt 看门狗只能尽力中断可响应阶段，SQLite backup-copy 及阻塞文件系统不保证响应。执行器真实结束后才 join；拷贝超限可能仍报 Vacuumed＋超限elapsed。900s Job timeout 不是强制停止机制，active attempt 会排除 recovery。不能继续写“每库硬30s已实现”；重型路径的发布合同须按 T4 单独确认。
-
-三个维护 def 当前使用独立 key（maintenance:database/jobs_retention/playback_history），进程内 shared mutex 避免彼此重叠，但冲突会失败重试。旧规格“全部共享 maintenance:database”**未实现**；不未经兼容迁移直接改key，否则幂等seed可能重复注册已有def。
-
-## 4. API/UI：目标合同与当前偏差必须分开
-
-端点均为管理员管理路由：
-
-- PUT `/api/v1/jobs/{id}/maintenance-config`：typed payload，expected_payload CAS（不是schema version）；缺token400，冲突409，非维护400，未知404。
-- POST `/api/v1/jobs/{id}/maintenance-preview`：只读，不创建Job／更新配置／返回播放明细。仅一批匹配候选；不是全量精确规模。
-- GET `/jobs` 与单定义：maintenance摘要、payload_token、last_report，非维护DTO兼容。
-- run disabled409；运行中不误报新实例；现有queued child短路当前未提前run_after，故“立即执行”尚有缺陷。
-
-**已确认偏差：**
-
-| 期望 | 当前实现 | 后续 |
-|---|---|---|
-| 关闭后不启动下一批／下一库 | 只查running status/attempt，不查def.enabled；仍可继续删 | F01/T1 |
-| 更安全配置用于尚未运行的下次任务，running保留快照 | def更新但future queued payload不变；可能仍实删旧策略 | F02/T2 |
-| 全配置CAS原子，失败全回滚 | payload事务先提交，schedule后写；仅payload token不覆盖周期 | F04/T2 |
-| 省略周期返回实际保留值 | handler响应schedule=null，DB未清空 | F04/T2 |
-| 有预算预览标全部截断 | 仅可删has_more决定truncated，保护窗口截断遗漏；SQL工作未有界 | F03/F05 |
-| UI显示本策略预览与最近报告 | 编辑不清旧预览／晚响应未绑定；last_report未渲染 | F12/T5 |
-| DevHttp tick跳过维护且不动后台任务 | 会取消queued维护子任务、遮盖最近报告；后台可立即补任务 | F12/T5 |
-
-当前界面“关闭只阻止后续批次”“配置只影响下次执行”的文案是**预期合同而非已成立保证**。不得通过把合同改成允许继续删，来假装修复实现；发布前修控制边界。临时规避不要仅凭UI关闭判断工作停止，应确认running Job已实际结束，修改安全策略后核验queued快照。
-
-## 5. 报告与停止
-
-报告存job.progress：kind/version/cutoff/dry_run/scanned/candidates/deleted/protected/batches/budget_exhausted/elapsed_ms；数据库另含每库outcome/free_pages/page_size/size_before/after/skip_reason。
-
-- dry_run不删除，只检视一批；更多可删候选时budget_exhausted=true＋note，不重复检视同一批制造候选总数。
-- scanned/candidates当前是匹配窗口计数，不是SQLite实际examined行；protected不可用于完整总量判断（F03）。
-- SSE count_finished_since(0)可因清理下降，watcher按变化而非单调增长推送，已有回归。
-- 每批各自Queue或Store锁，不同时持两者；每轮runner在blocking工作运行。preview仍直接同步执行SQL，尚不满足同等线程隔离。
-- Job状态／attempt改变会在边界停止；**禁用def、shutdown不是当前已接入的停止信号**。取消只在边界检查，已提交批不回滚。
-- Queue持锁路径通过100ms try_lock探测拒绝维护，这是启发式并会误判其他线程占锁；需显式执行来源。
-
-## 6. 实施／验收证据
-
-| 提交 | 已交付 |
-|---|---|
-| c03f39c | typed策略＋默认定义 |
-| cbc98bb / 7ce1c60 | Playback／Jobs事务批次 |
-| dd5e009 | 执行器＋runner＋启动seed |
-| 48d6efa | config/preview/DTO/UI |
-| b06eb9a | ApiState＋StateRunner验收（**不是真实background loop**） |
-| d1c8205 | 保护前缀推进、dry_run更多信号、旧schedule端点范围＋saturating next_after |
-
-本次review新跑workspace：226套件1666passed/0failed/4ignored；web typecheck exit0。它没有覆盖F01/F02/F03等新发现的时序。
-
-历史大Playback fixture：200001超龄行，run1=20批/10000删除/预算耗尽/45ms（debug本机历史记录），run2再10000。不是维护并发HTTP p95、不是全部保护的Jobs历史、不证明SQL扫描有界、不是实机SLA。
-
-仍未完成：真实job_loop与shutdown/drain端到端、禁用边界／queued策略更新／原子config／报告截断／preview线程预算／legacy影响；DB8开关前后HTTP median/p95、锁等待、DB/WAL大小矩阵；VACUUM停止保证决策。按 [后续计划](<2026-10-13-database-api-followup.md>)执行，不再用旧六任务全部unchecked或“主功能在”代替验收结果。
-
-## 7. 参考与非目标
-
-Jellyfin的独立维护任务只作为设计启发；此前参考master的ActivityLogRetentionDays／OptimizeDatabaseTask没有固定上游commit，不把其默认值当本项目规范或已验证发行版事实。本项目默认值见§1；不需要借外部主分支行为证明本地删除安全。
-
-不自动实现cache orphan GC、所有表retention、连接池／跨文件事务、默认分页迁移、所有时间戳重写、全局唯一alias/rootpath或Jellyfin全协议。必须先有各自迁移／兼容／安全证据。
+尚需：全配置CAS、真实job_loop与shutdown/drain、重型终止保证、DB8开关前后HTTP median/p95／锁等待／DB-WAL矩阵和设备门。旧稿完整细节可由 `git show bd6c3c8:docs/superpowers/plans/2026-10-12-db8-maintenance-retention.md` 追溯；不恢复旧库布局或兼容升级，也不据本页自动开启清理。

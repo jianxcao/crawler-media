@@ -6,7 +6,7 @@ impl ProbeManager {
     pub fn metadata_stage_finished(&self) {
         match self
             .metadata_pending
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
                 pending.checked_sub(1)
             }) {
             Ok(1) => {

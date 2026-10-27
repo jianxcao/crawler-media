@@ -1,7 +1,8 @@
 //! `GET /libraries/{id}/items` 与 `/gallery` 的显式分页校验。
 //!
-//! 越界的显式 `limit`/`offset` 必须 400，不再静默 clamp；`offset + limit` 不得
-//! 溢出；**省略 `limit` 仍返回全部**（默认分页迁移是独立决策，本任务不动）。
+//! 越界的显式 `limit` 必须 400，不再静默 clamp；`offset` 已删除（改用
+//! `cursor`，见 library_cursor_paging.rs），任何取值一律 400；省略 `limit`
+//! 时按默认上限返回一页。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -10,10 +11,11 @@ use std::sync::Arc;
 use api::ApiState;
 use api::router;
 use axum::http::StatusCode;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::Value;
+use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
 
 #[path = "management/common.rs"]
@@ -65,11 +67,10 @@ fn seed_movie(state: &ApiState, title: &str, root: &Path, with_poster: bool) {
     if with_poster {
         std::fs::write(dir.join("poster.jpg"), b"poster").unwrap();
     }
-    state
-        .store()
-        .lock()
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_fixture_file(
+        &state.store().lock(),
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id: media.id,
             path: file.to_string_lossy().to_string(),
             season: None,
@@ -80,8 +81,10 @@ fn seed_movie(state: &ApiState, title: &str, root: &Path, with_poster: bool) {
             quality_source: QualitySource::Probe,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
 }
 
 async fn get(app: &axum::Router, url: &str) -> (StatusCode, Value) {
@@ -108,37 +111,54 @@ fn fixture() -> (tempfile::TempDir, axum::Router, String) {
 #[tokio::test]
 async fn invalid_explicit_paging_is_rejected_on_both_paths() {
     let (_tmp, app, library_id) = fixture();
-    for bad in ["limit=0", "limit=201", "limit=-1", "limit=abc", "limit="] {
-        let (status, body) = get(&app, &format!("/api/v1/libraries/{library_id}/items?{bad}")).await;
+    for bad in ["limit=0", "limit=501", "limit=-1", "limit=abc", "limit="] {
+        let (status, body) =
+            get(&app, &format!("/api/v1/libraries/{library_id}/items?{bad}")).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "items {bad}: {body}");
         assert_eq!(body["error"]["code"], "library.invalid");
-        let (status, body) =
-            get(&app, &format!("/api/v1/libraries/{library_id}/gallery?{bad}")).await;
+        let (status, body) = get(
+            &app,
+            &format!("/api/v1/libraries/{library_id}/gallery?{bad}"),
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "gallery {bad}: {body}");
     }
-    for bad in ["offset=-1", "offset=abc", "offset="] {
+    // offset 整个参数已删除：合法取值也一律 400（不留兼容分支）。
+    for bad in [
+        "offset=-1",
+        "offset=abc",
+        "offset=",
+        "offset=0",
+        "offset=2",
+        "offset=18446744073709551615",
+    ] {
         let (status, _) = get(&app, &format!("/api/v1/libraries/{library_id}/items?{bad}")).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "items {bad}");
-        let (status, _) = get(&app, &format!("/api/v1/libraries/{library_id}/gallery?{bad}")).await;
+        let (status, _) = get(
+            &app,
+            &format!("/api/v1/libraries/{library_id}/gallery?{bad}"),
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "gallery {bad}");
     }
 }
 
 #[tokio::test]
-async fn huge_offset_does_not_overflow_or_panic() {
+async fn huge_offset_is_rejected_instead_of_overflowing() {
     let (_tmp, app, library_id) = fixture();
-    let offset = usize::MAX;
     for path in ["items", "gallery"] {
         let (status, body) = get(
             &app,
-            &format!("/api/v1/libraries/{library_id}/{path}?offset={offset}&limit=10"),
+            &format!(
+                "/api/v1/libraries/{library_id}/{path}?offset={}&limit=10",
+                usize::MAX
+            ),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{path}: {body}");
         assert_eq!(
-            body["data"].as_array().unwrap().len(),
-            0,
-            "{path} 的 offset 超出长度应返回空列表"
+            status,
+            StatusCode::BAD_REQUEST,
+            "{path}: offset 已删除，任何取值都要 400: {body}"
         );
     }
 }
@@ -154,28 +174,80 @@ async fn explicit_limit_returns_the_requested_page() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["data"].as_array().unwrap().len(), 5);
 
-    let (status, body) = get(&app, &format!("/api/v1/libraries/{library_id}/items?limit=1")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["data"].as_array().unwrap().len(), 1);
-
     let (status, body) = get(
         &app,
-        &format!("/api/v1/libraries/{library_id}/items?offset=2&limit=2"),
+        &format!("/api/v1/libraries/{library_id}/items?limit=1"),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["data"].as_array().unwrap().len(), 2);
+    assert_eq!(body["data"].as_array().unwrap().len(), 1);
+
+    // 第二页走游标：第一页的 next_cursor 原样带回来。
+    let (status, first) = get(
+        &app,
+        &format!("/api/v1/libraries/{library_id}/items?limit=2"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let cursor = first["next_cursor"]
+        .as_str()
+        .expect("第一页应给出 next_cursor");
+    assert_eq!(first["total"].as_u64(), Some(5), "第一页带总数");
+    let (status, second) = get(
+        &app,
+        &format!(
+            "/api/v1/libraries/{library_id}/items?limit=2&cursor={}",
+            urlencode(cursor)
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second["data"].as_array().unwrap().len(), 2);
+    assert!(
+        second["total"].is_null(),
+        "续页不重复算总数，total 必须是 null"
+    );
+    let first_ids: Vec<&str> = first["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["media_item_id"].as_str().unwrap())
+        .collect();
+    let second_ids: Vec<&str> = second["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["media_item_id"].as_str().unwrap())
+        .collect();
+    assert!(
+        first_ids.iter().all(|id| !second_ids.contains(id)),
+        "两页不能重叠"
+    );
+}
+
+/// 游标是 JSON，必须整体转义后再拼进查询串。
+fn urlencode(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for byte in raw.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 #[tokio::test]
-async fn omitted_limit_still_returns_everything() {
+async fn omitted_limit_returns_the_default_page() {
     let (_tmp, app, library_id) = fixture();
     let (status, body) = get(&app, &format!("/api/v1/libraries/{library_id}/items")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body["data"].as_array().unwrap().len(),
         5,
-        "省略 limit 的既有行为是返回全部"
+        "默认页上限大于本 fixture 的条目数，应全部返回"
     );
 
     // gallery：5 个 Media 里只有 2 个有图，空图组先被剔除，再分页。
@@ -183,15 +255,63 @@ async fn omitted_limit_still_returns_everything() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["data"].as_array().unwrap().len(), 2);
 
-    let (status, body) = get(
+    // gallery 的分页发生在剔除空图组之后：limit=1 拿第一组，游标拿第二组。
+    let (status, first) = get(
         &app,
-        &format!("/api/v1/libraries/{library_id}/gallery?offset=1&limit=5"),
+        &format!("/api/v1/libraries/{library_id}/gallery?limit=1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["data"].as_array().unwrap().len(), 1);
+    let cursor = first["next_cursor"]
+        .as_str()
+        .expect("还有下一组时应给出 next_cursor");
+    let (status, second) = get(
+        &app,
+        &format!(
+            "/api/v1/libraries/{library_id}/gallery?limit=5&cursor={}",
+            urlencode(cursor)
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        body["data"].as_array().unwrap().len(),
+        second["data"].as_array().unwrap().len(),
         1,
-        "gallery 的分页发生在剔除空图组之后"
+        "第二页只剩那一组"
     );
+}
+
+/// A JSON-shaped but useless cursor reaches the store's cursor decoder. That
+/// rejection is a client error: it must be the same 400 `library.invalid` the
+/// handler gives a non-JSON cursor, never a 500 (`library.read`) — a 500 for bad
+/// input pollutes the error budget and hides the real ones.
+#[tokio::test]
+async fn malformed_json_cursor_is_a_client_error() {
+    let (_tmp, app, library_id) = fixture();
+    for cursor in ["{}", r#"{"keys":[]}"#] {
+        let (status, body) = get(
+            &app,
+            &format!(
+                "/api/v1/libraries/{library_id}/items?cursor={}",
+                urlencode(cursor)
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "cursor={cursor} must be a client error: {body}"
+        );
+        assert_eq!(body["error"]["code"], "library.invalid", "{body}");
+    }
+
+    // A non-JSON cursor never reaches a read: the handler rejects it first.
+    let (status, body) = get(
+        &app,
+        &format!("/api/v1/libraries/{library_id}/items?cursor=not-a-cursor"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "library.invalid", "{body}");
 }

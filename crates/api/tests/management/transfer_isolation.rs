@@ -116,15 +116,15 @@ async fn transfer_continues_to_later_subscribe_and_keeps_job_failed() {
             .get_live_child(transfer_def.id)
             .unwrap()
             .is_some_and(|job| job.error.as_deref() == Some("1 Subscribe Transfer failed"));
-        if failed && store.list_ledger().unwrap().len() == 1 {
+        if failed && store.list_file_coverage().unwrap().len() == 1 {
             break;
         }
     }
     assert!(failed, "Transfer Job should report the per-Subscribe error");
-    let ledger = store.list_ledger().unwrap();
+    let ledger = store.list_file_coverage().unwrap();
     assert_eq!(ledger.len(), 1);
     assert_eq!(
-        ledger[0].media_id,
+        ledger[0].file.media_id,
         second["media"]["id"].as_str().unwrap().parse().unwrap()
     );
     assert_eq!(

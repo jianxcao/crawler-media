@@ -110,7 +110,10 @@ pub fn scan_watch_reported(
     }
 }
 
-fn in_place_reported(job: &WatchJob, kind: MediaKind) -> Result<(WatchOutcome, report::ScanRootReport), LibraryError> {
+fn in_place_reported(
+    job: &WatchJob,
+    kind: MediaKind,
+) -> Result<(WatchOutcome, report::ScanRootReport), LibraryError> {
     let mut outcome = WatchOutcome::default();
     let mut report = report::ScanRootReport {
         root: job.path.clone(),
@@ -124,7 +127,14 @@ fn in_place_reported(job: &WatchJob, kind: MediaKind) -> Result<(WatchOutcome, r
         report.status = report::ScanRootStatus::Unreachable;
         return Ok((outcome, report));
     }
-    walk_in_place_reported(&job.path, &job.library_root, kind, job.scrape, &mut outcome, &mut report)?;
+    walk_in_place_reported(
+        &job.path,
+        &job.library_root,
+        kind,
+        job.scrape,
+        &mut outcome,
+        &mut report,
+    )?;
     if report.error_count > 0 && report.status != report::ScanRootStatus::Unreachable {
         report.status = report::ScanRootStatus::Partial;
     }
@@ -231,7 +241,11 @@ fn walk_in_place_reported(
 
 /// 文件名已经能确定剧名时，仍从上层目录补年份和别名。
 /// 文件名本身是 Low 时，才用父目录标题替换；NFO 在单独的有界步骤处理。
-pub(crate) fn enrich_from_ancestors(parsed: &mut Release, start: &std::path::Path, root: &std::path::Path) {
+pub(crate) fn enrich_from_ancestors(
+    parsed: &mut Release,
+    start: &std::path::Path,
+    root: &std::path::Path,
+) {
     let mut current = Some(start);
     let mut depth = 0;
     while let Some(dir) = current {
@@ -286,7 +300,6 @@ pub(crate) fn identify_local(
     identity
 }
 
-
 fn intake(job: &WatchJob, media: &Media) -> Result<WatchOutcome, LibraryError> {
     let mut outcome = WatchOutcome::default();
     walk_intake(&job.path, job, media, &mut outcome, None)?;
@@ -294,7 +307,10 @@ fn intake(job: &WatchJob, media: &Media) -> Result<WatchOutcome, LibraryError> {
 }
 
 pub fn scan_watch_intake_controlled(
-    job: &WatchJob, media: &Media, movie: &crate::WorkControl, tv: Option<&crate::WorkControl>,
+    job: &WatchJob,
+    media: &Media,
+    movie: &crate::WorkControl,
+    tv: Option<&crate::WorkControl>,
 ) -> Result<WatchOutcome, LibraryError> {
     movie.check()?;
     let mut outcome = WatchOutcome::default();
@@ -329,7 +345,9 @@ fn walk_intake(
     for entry in fs::read_dir(current_dir)? {
         if let Some((movie, tv)) = controls {
             movie.check()?;
-            if let Some(tv) = tv { tv.check()?; }
+            if let Some(tv) = tv {
+                tv.check()?;
+            }
         }
         let path = entry?.path();
         let meta = match fs::symlink_metadata(&path) {
@@ -364,7 +382,9 @@ fn walk_intake(
         }
         let is_tv = parsed.season.is_some() || parsed.episode.is_some();
         let control = match controls {
-            Some((_, None)) if is_tv => return Err(LibraryError::Naming("TV Library is not configured".into())),
+            Some((_, None)) if is_tv => {
+                return Err(LibraryError::Naming("TV Library is not configured".into()));
+            }
             Some((_, Some(tv))) if is_tv => tv.clone(),
             Some((movie, _)) => movie.clone(),
             None => crate::WorkControl::default(),
@@ -384,12 +404,19 @@ fn walk_intake(
         if dest.exists() {
             if same_entity(&path, &dest) {
                 outcome.transferred.push(TransferredFile {
-                    path: dest, identified_release: Some(parsed), nfo_identity,
+                    path: dest,
+                    identified_release: Some(parsed),
+                    nfo_identity,
                 });
             } else {
                 tracing::error!(src=%path.display(), dest=%dest.display(), "Watch intake 目标冲突，拒绝覆盖");
-                outcome.errors.push(FileError { path: path.clone(),
-                    error: format!("watch intake destination already exists: {}", dest.display()) });
+                outcome.errors.push(FileError {
+                    path: path.clone(),
+                    error: format!(
+                        "watch intake destination already exists: {}",
+                        dest.display()
+                    ),
+                });
             }
             continue;
         }
@@ -407,14 +434,15 @@ fn walk_intake(
             });
             continue;
         }
-        if job.scrape {
-            if let Err(err) = control.publish(|| scrape_beside(&dest, media, true, None).map_err(|e| e.to_string())) {
-                tracing::warn!(
-                    dest = %dest.display(),
-                    error = %err,
-                    "Watch intake scrape beside failed"
-                );
-            }
+        if job.scrape
+            && let Err(err) = control
+                .publish(|| scrape_beside(&dest, media, true, None).map_err(|e| e.to_string()))
+        {
+            tracing::warn!(
+                dest = %dest.display(),
+                error = %err,
+                "Watch intake scrape beside failed"
+            );
         }
         outcome.transferred.push(TransferredFile {
             path: dest,

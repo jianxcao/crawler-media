@@ -3,6 +3,260 @@
 use super::*;
 
 #[tokio::test]
+async fn http_page_does_not_load_unselected_ledger_or_metadata() {
+    for count in [1000, 10000] {
+        let fixture = tv_fixture(count, 1);
+        let candidates = fixture.state.jellyfin_candidates();
+        let app = router(fixture.state.clone());
+        let listing = get_json(
+            &app,
+            &format!(
+                "/Items?ParentId={}&Recursive=true&Limit=10&SortBy=SortName",
+                fixture.library_id
+            ),
+        )
+        .await;
+        assert_eq!(listing["TotalRecordCount"], count);
+        assert_eq!(items(&listing).len(), 10);
+        assert_eq!(candidates.load(Ordering::SeqCst), 10);
+        assert_eq!(
+            fixture
+                .state
+                .jellyfin_hydrated_rows()
+                .load(Ordering::SeqCst),
+            30,
+            "selected facts must be page bounded at {count}"
+        );
+        assert_eq!(fixture.files.subtitles(), 10);
+    }
+}
+
+#[tokio::test]
+async fn selected_reference_failure_never_returns_a_short_success_page() {
+    let mut fixture = tv_fixture(2, 1);
+    let path = fixture.dir.path().join("data/library.db");
+    fixture.state = fixture
+        .state
+        .with_protocol_selection_barrier(Arc::new(move |page| {
+            if let Some(source) = page
+                .items
+                .first()
+                .and_then(|item| item.preferred_source.as_ref())
+            {
+                let conn = rusqlite::Connection::open(&path).unwrap();
+                conn.execute(
+                    "UPDATE library_files SET file_revision=file_revision+1 WHERE file_id=?1",
+                    [source.file_id.to_string()],
+                )
+                .unwrap();
+            }
+        }));
+    let app = router(fixture.state.clone());
+    let (status, _) = get(
+        &app,
+        &format!(
+            "/Items?ParentId={}&Recursive=true&IncludeItemTypes=Episode&Limit=1",
+            fixture.library_id,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn selected_source_outside_roots_keeps_its_recorded_library() {
+    let mut fixture = tv_fixture(1, 1);
+    let database = fixture.dir.path().join("data/library.db");
+    let outside = fixture.dir.path().join("outside.mkv");
+    std::fs::write(&outside, b"fixture").unwrap();
+    fixture.state = fixture
+        .state
+        .with_protocol_selection_barrier(Arc::new(move |page| {
+            let source = page.items[0].preferred_source.as_ref().unwrap();
+            let conn = rusqlite::Connection::open(&database).unwrap();
+            conn.execute(
+                "UPDATE library_files SET path_key=?1,display_path=?1 WHERE file_id=?2",
+                rusqlite::params![outside.display().to_string(), source.file_id.to_string()],
+            )
+            .unwrap();
+        }));
+    let (status, body) = get(
+        &router(fixture.state.clone()),
+        &format!(
+            "/Items?ParentId={}&Recursive=true&Limit=1",
+            fixture.library_id,
+        ),
+    )
+    .await;
+    // Published ownership is library_id, independent of the current path roots.
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["TotalRecordCount"], 1);
+    assert_eq!(items(&body).len(), 1);
+    assert_eq!(items(&body)[0]["ParentId"], fixture.library_id);
+}
+
+#[tokio::test]
+async fn selected_source_recorded_library_change_is_rejected() {
+    let mut fixture = tv_fixture(1, 1);
+    let database = fixture.dir.path().join("data/library.db");
+    let other = fixture
+        .state
+        .store()
+        .lock()
+        .default_library(MediaKind::Tv)
+        .unwrap()
+        .unwrap()
+        .id;
+    assert_ne!(other, fixture.library_id);
+    fixture.state = fixture
+        .state
+        .with_protocol_selection_barrier(Arc::new(move |page| {
+            let source = page.items[0].preferred_source.as_ref().unwrap();
+            rusqlite::Connection::open(&database)
+                .unwrap()
+                .execute(
+                    "UPDATE library_files SET library_id=?1,
+                root_id=(SELECT root_id FROM library_roots WHERE library_id=?1 LIMIT 1)
+             WHERE file_id=?2",
+                    rusqlite::params![other, source.file_id.to_string()],
+                )
+                .unwrap();
+        }));
+    let (status, _) = get(
+        &router(fixture.state.clone()),
+        &format!(
+            "/Items?ParentId={}&Recursive=true&Limit=1",
+            fixture.library_id
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn selected_library_freeze_returns_unavailable() {
+    let mut fixture = tv_fixture(1, 1);
+    let database = fixture.dir.path().join("data/library.db");
+    let library = fixture.library_id.clone();
+    fixture.state = fixture
+        .state
+        .with_protocol_selection_barrier(Arc::new(move |_| {
+            let conn = rusqlite::Connection::open(&database).unwrap();
+            conn.execute(
+                "UPDATE libraries SET lifecycle_state='reindexing' WHERE library_id=?1",
+                [&library],
+            )
+            .unwrap();
+        }));
+    let (status, _) = get(
+        &router(fixture.state.clone()),
+        &format!(
+            "/Items?ParentId={}&Recursive=true&Limit=1",
+            fixture.library_id,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn selected_library_visibility_change_does_not_leak_page() {
+    let mut fixture = tv_fixture(1, 1);
+    let database = fixture.dir.path().join("data/library.db");
+    let library = fixture.library_id.clone();
+    fixture.state = fixture
+        .state
+        .with_protocol_selection_barrier(Arc::new(move |_| {
+            let conn = rusqlite::Connection::open(&database).unwrap();
+            conn.execute(
+                "UPDATE libraries SET admin_visible=0 WHERE library_id=?1",
+                [&library],
+            )
+            .unwrap();
+        }));
+    let (status, _) = get(
+        &router(fixture.state.clone()),
+        &format!(
+            "/Items?ParentId={}&Recursive=true&Limit=1",
+            fixture.library_id,
+        ),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn hydrated_rows_include_selected_playback_assertions() {
+    let fixture = tv_fixture(1, 1);
+    let media = media_for_title(&fixture.state, "Show000").to_string();
+    let user = {
+        let store = fixture.state.store();
+        let store = store.lock();
+        store
+            .list_users()
+            .unwrap()
+            .into_iter()
+            .find(|user| store.user_role(user.id).unwrap() == "admin")
+            .unwrap()
+            .id
+    };
+    let conn = rusqlite::Connection::open(fixture.dir.path().join("data/library.db")).unwrap();
+    for (season, episode, played, asserted, at, favorite) in [
+        (1, 1, 0, 0, None, 0),
+        (1, -1, 1, 1, Some(10_i64), 0),
+        (-1, -1, 0, 0, None, 1),
+    ] {
+        conn.execute(
+            "INSERT INTO playback_units (user_id,media_id,season,episode,played,has_played_assertion,played_changed_at_ms,favorite)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            rusqlite::params![user.to_string(), media, season, episode, played, asserted, at, favorite],
+        ).unwrap();
+    }
+    let rows = fixture.state.jellyfin_hydrated_rows();
+    let app = router(fixture.state.clone());
+    let page = get_json(
+        &app,
+        &format!(
+            "/Items?ParentId={}&Recursive=true&IncludeItemTypes=Episode&Limit=1",
+            fixture.library_id,
+        ),
+    )
+    .await;
+    assert_eq!(items(&page).len(), 1);
+    assert_eq!(
+        rows.load(Ordering::SeqCst),
+        6,
+        "file + coverage + Media + three Playback rows"
+    );
+    assert_eq!(items(&page)[0]["UserData"]["Played"], true);
+}
+
+#[tokio::test]
+async fn success_pages_have_exact_lengths_at_boundaries() {
+    let fixture = tv_fixture(4, 1);
+    let app = router(fixture.state.clone());
+    // The HTTP route clamps raw Limit=0 to 1 before this selector sees it.
+    for (offset, limit, expected) in [(0, 0, 1), (0, 2, 2), (3, 2, 1), (4, 2, 0), (8, 2, 0)] {
+        let page = get_json(
+            &app,
+            &format!(
+                "/Items?ParentId={}&Recursive=true&Limit={limit}&StartIndex={offset}",
+                fixture.library_id,
+            ),
+        )
+        .await;
+        let total = page["TotalRecordCount"].as_u64().unwrap() as usize;
+        assert_eq!(total, 4);
+        assert_eq!(
+            items(&page).len(),
+            limit.clamp(1, 200).min(total.saturating_sub(offset)),
+            "offset={offset} limit={limit} page={page}"
+        );
+        assert_eq!(items(&page).len(), expected);
+    }
+}
+
+#[tokio::test]
 async fn jellyfin_limit_one_builds_one_heavy_snapshot() {
     let fixture = tv_fixture(200, 10);
     let app = router(fixture.state.clone());
@@ -51,20 +305,31 @@ async fn corrupted_heavy_facts_outside_the_page_do_not_fail_the_page() {
     let out_of_page = {
         let store = fixture.state.store();
         let store = store.lock();
-        let row = store
-            .list_ledger()
+        let rows: Vec<_> = store
+            .list_file_coverage()
             .unwrap()
             .into_iter()
-            .find(|row| row.path.contains("Show000"))
-            .expect("Show000 row");
+            .filter(|row| row.file.path.to_string_lossy().contains("Show000"))
+            .collect();
+        assert!(!rows.is_empty(), "Show000 rows");
         let conn = rusqlite::Connection::open(fixture.dir.path().join("data/library.db")).unwrap();
+        for row in &rows {
+            conn.execute(
+                "INSERT INTO file_details
+                     (file_id, source_revision, source_version, tracks_version,
+                      audio_json, subtitle_json, chapters_json)
+                 SELECT file_id, file_revision, source_version, 0, '[]', '[]', x'5b5d'
+                 FROM library_files WHERE file_id = ?1",
+                [row.file.file_id.to_string()],
+            )
+            .unwrap();
+        }
         conn.execute(
-            "INSERT INTO file_meta (ledger_id, audio_json, subtitle_json, chapters_json)
-             VALUES (?1, '[]', '[]', x'0102')",
-            [row.id.to_string()],
+            "UPDATE library_files SET display_path=CAST(x'80' AS TEXT) WHERE file_id=?1",
+            [rows[0].file.file_id.to_string()],
         )
         .unwrap();
-        row.id
+        rows[0].file.file_id
     };
     assert!(!out_of_page.to_string().is_empty());
     let listing = get_json(
@@ -85,7 +350,11 @@ async fn corrupted_heavy_facts_outside_the_page_do_not_fail_the_page() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "选中损坏行必须失败：{body}");
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "选中损坏行必须失败：{body}"
+    );
 }
 
 /// SCOPE-6-01：库作用域 + `SeriesId` 就是「列这部剧的分集」，与 `IncludeItemTypes`
@@ -93,26 +362,21 @@ async fn corrupted_heavy_facts_outside_the_page_do_not_fail_the_page() {
 
 #[tokio::test]
 async fn filter_before_paging_keeps_names_order_and_count() {
-    let fixture = tv_fixture(6, 2);
+    // genre/studio 是库内合成的 NFO 事实，sidecar 必须在发布前就位。
+    let fixture = tv_fixture_seeded(6, 2, |show_dir| {
+        let name = show_dir.file_name().unwrap().to_str().unwrap();
+        let genre = if name.ends_with('0') || name.ends_with('2') {
+            "Drama"
+        } else {
+            "Comedy"
+        };
+        std::fs::write(
+            show_dir.join("tvshow.nfo"),
+            format!("<tvshow><genre>{genre}</genre><studio>Studio X</studio></tvshow>"),
+        )
+        .unwrap();
+    });
     let app = router(fixture.state.clone());
-    {
-        let store = fixture.state.store();
-        let store = store.lock();
-        for row in store.list_ledger().unwrap() {
-            let media = store.get_media(row.media_id).unwrap().expect("media");
-            let genre = if media.title.ends_with('0') || media.title.ends_with('2') {
-                "Drama"
-            } else {
-                "Comedy"
-            };
-            let dir = Path::new(&row.path).parent().unwrap();
-            std::fs::write(
-                dir.join("tvshow.nfo"),
-                format!("<tvshow><genre>{genre}</genre><studio>Studio X</studio></tvshow>"),
-            )
-            .unwrap();
-        }
-    }
     let drama = get_json(
         &app,
         &format!(
@@ -166,7 +430,7 @@ async fn episode_expansion_stays_inside_the_folder() {
     let root_b = dir.path().join("folder-b");
     std::fs::create_dir_all(&root_a).unwrap();
     std::fs::create_dir_all(&root_b).unwrap();
-    let (episode_a, episode_b, show_media) = {
+    let show_media = {
         let store = state.store();
         let store = store.lock();
         store
@@ -180,11 +444,9 @@ async fn episode_expansion_stays_inside_the_folder() {
             )
             .unwrap();
         let media_id = new_media(&store, "Folder show");
-        (
-            insert_episode(&store, &root_a, media_id, 1, 1),
-            insert_episode(&store, &root_b, media_id, 1, 2),
-            media_id,
-        )
+        insert_episode(&store, &root_a, media_id, 1, 1);
+        insert_episode(&store, &root_b, media_id, 1, 2);
+        media_id
     };
     let app = router(state);
     let listing = get_json(
@@ -196,11 +458,15 @@ async fn episode_expansion_stays_inside_the_folder() {
     )
     .await;
     assert_eq!(listing["TotalRecordCount"], 1, "{listing}");
-    assert_eq!(items(&listing)[0]["Id"], episode_b.to_string().replace('-', ""));
+    assert_eq!(items(&listing)[0]["Id"], unit_wire_id(show_media, 1, 2));
 
     let whole = get_json(&app, "/Items?Recursive=true&IncludeItemTypes=Episode").await;
     assert_eq!(whole["TotalRecordCount"], 2);
-    assert!(items(&whole).iter().any(|item| item["Id"] == episode_a.to_string().replace('-', "")));
+    assert!(
+        items(&whole)
+            .iter()
+            .any(|item| item["Id"] == unit_wire_id(show_media, 1, 1))
+    );
 
     // 剧 parent（不给 IncludeItemTypes）就是「列这部剧的分集」：一行一条，不折叠成剧。
     let by_show = get_json(
@@ -252,18 +518,36 @@ async fn latest_items_keeps_played_last_by_default_and_filters_when_asked() {
         let store = fixture.state.store();
         let store = store.lock();
         let row = store
-            .list_ledger()
+            .list_file_coverage()
             .unwrap()
             .into_iter()
-            .find(|row| row.path.contains("Show000"))
+            .find(|row| row.file.path.to_string_lossy().contains("Show000"))
             .expect("Show000 row");
-        store.upsert_unit(user, row.media_id, -1, -1, 0, Some(true), None, None, None, None, false, 10).unwrap();
-        row.media_id
+        store
+            .upsert_unit(
+                user,
+                row.file.media_id,
+                -1,
+                -1,
+                0,
+                Some(true),
+                None,
+                None,
+                None,
+                None,
+                false,
+                10,
+            )
+            .unwrap();
+        row.file.media_id
     };
     let latest = get_json(&app, "/Users/me/Items/Latest").await;
     let listed = latest.as_array().expect("latest array");
     assert_eq!(listed.len(), 3);
-    let ids: Vec<&str> = listed.iter().map(|item| item["Id"].as_str().unwrap()).collect();
+    let ids: Vec<&str> = listed
+        .iter()
+        .map(|item| item["Id"].as_str().unwrap())
+        .collect();
     let unique = {
         let mut copy = ids.clone();
         copy.sort_unstable();
@@ -273,7 +557,7 @@ async fn latest_items_keeps_played_last_by_default_and_filters_when_asked() {
     assert_eq!(unique, ids.len(), "最新列表不得重复：{ids:?}");
     assert_eq!(
         listed.last().unwrap()["Id"],
-        first_show.to_string().replace('-', ""),
+        work_wire_id(first_show),
         "缺省：已看完沉底"
     );
     let played = get_json(&app, "/Users/me/Items/Latest?IsPlayed=true").await;
@@ -289,17 +573,19 @@ async fn person_filter_selects_before_paging() {
         let store = fixture.state.store();
         let store = store.lock();
         let row = store
-            .list_ledger()
+            .list_file_coverage()
             .unwrap()
             .into_iter()
-            .find(|row| row.path.contains("Show000"))
+            .find(|row| row.file.path.to_string_lossy().contains("Show000"))
             .expect("Show000 row");
-        let dir = Path::new(&row.path).parent().unwrap();
+        let dir = row.file.path.parent().unwrap();
         std::fs::write(
             dir.join("tvshow.nfo"),
             "<tvshow><actor><name>Alice</name><role>Lead</role></actor></tvshow>",
         )
         .unwrap();
+        // R24: PersonIds reads observed local facts, never the live sidecar at query time.
+        store.reconcile_nfo_inputs(&row.file.path).unwrap();
         let key = format!("name:{}:{}", "alice", "Actor");
         (
             uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, key.as_bytes()).to_string(),
@@ -363,25 +649,29 @@ async fn name_ties_keep_a_stable_order() {
                 anilist_id: None,
             };
             store.insert_media(&media).unwrap();
-            let ledger_id = LedgerId::from_uuid(uuid::Uuid::parse_str(&format!("00000000-0000-0000-0000-00000000000{}", 3 - index)).unwrap());
+            let ledger_id = LedgerId::from_uuid(
+                uuid::Uuid::parse_str(&format!("00000000-0000-0000-0000-00000000000{}", 3 - index))
+                    .unwrap(),
+            );
             let show_dir = root.join(format!("same-{index}"));
             std::fs::create_dir_all(&show_dir).unwrap();
             let path = show_dir.join("01x01.mkv");
             std::fs::write(&path, b"episode").unwrap();
-            store.insert_ledger(&LedgerRow {
-                id: ledger_id,
-                media_id,
-                path: path.display().to_string(),
-                season: Some(1),
-                episode: Some(1),
-                resolution: None,
-                codec: None,
-                hdr: None,
-                quality_source: QualitySource::Probe,
-                confidence: Confidence::High,
-                filter_score: None,
-            }).unwrap();
-            expected.push(media_id.to_string().replace('-', ""));
+            store::test_support::publish_fixture_file(
+                &store,
+                &store::test_support::FixtureFile {
+                    media_id,
+                    path: path.display().to_string(),
+                    season: Some(1),
+                    episode: Some(1),
+                    quality_source: QualitySource::Probe,
+                    confidence: Confidence::High,
+                    file_id: Some(ledger_id),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            expected.push(work_wire_id(media_id));
         }
         expected.sort();
         (library.id, expected)
@@ -411,4 +701,83 @@ async fn name_ties_keep_a_stable_order() {
         ids, expected,
         "同名次序必须是 ledger id 升序；去掉 tie-break 或先排序再断言都会放过错误实现"
     );
+}
+
+/// 一部剧的已采纳元数据（Task 7 采纳面）：简介/工作室/类型三个字段。
+fn adopt_show_metadata(state: &ApiState, media: MediaId) {
+    let fields = domain::MetadataFields {
+        overview: domain::FieldValue::Value("adopted plot".into()),
+        studios: domain::FieldValue::Value(vec!["Studio X".into()]),
+        genres: domain::FieldValue::Value(vec![domain::MetadataGenre {
+            source: "tmdb".into(),
+            source_id: None,
+            name: "Drama".into(),
+            filter_key: "drama".into(),
+        }]),
+        ..Default::default()
+    };
+    let adoption = domain::MetadataAdoption {
+        media_id: media,
+        scope: domain::EntityScope::Work,
+        locale: "zh-CN".into(),
+        source: "tmdb".into(),
+        provider_entity_id: "100".into(),
+        provider_work_id: "100".into(),
+        fetched_at: 1,
+        normalized: domain::NormalizedMetadata {
+            fields,
+            field_origins: std::collections::BTreeMap::new(),
+        },
+        expected_revision: Some(0),
+        preferences: domain::MetadataPreferences {
+            language_priority: vec!["zh-CN".into()],
+            cert_country_priority: Vec::new(),
+        },
+    };
+    let store = state.store();
+    let store = store.lock();
+    store.adopt_metadata(&adoption, 1).unwrap();
+}
+
+/// 页内元数据取库内快照（Task 8 观测 + Task 7 采纳），现场 NFO 不参与渲染。
+///
+/// 观测输入只在 `publish_fixture_file` 时采集，所以 `publish_fixture_file` 之后写下的 sidecar 只可能
+/// 被「现场读 NFO」看到；坏 sidecar 也不得改变同一页的响应。
+#[tokio::test]
+async fn page_metadata_uses_composed_snapshot_and_ignores_live_nfo() {
+    let fixture = tv_fixture(1, 1);
+    let media = media_for_title(&fixture.state, "Show000");
+    adopt_show_metadata(&fixture.state, media);
+    let sidecar = fixture.roots[0].join("Show000").join("tvshow.nfo");
+    std::fs::write(
+        &sidecar,
+        b"<tvshow><plot>live plot</plot><studio>Live Studio</studio><genre>Comedy</genre></tvshow>",
+    )
+    .unwrap();
+    let app = router(fixture.state.clone());
+    let uri = format!(
+        "/Items?ParentId={}&Recursive=true&IncludeItemTypes=Series&SortBy=SortName",
+        fixture.library_id
+    );
+    let listing = get_json(&app, &uri).await;
+    assert_eq!(items(&listing).len(), 1, "{listing}");
+    assert_eq!(
+        items(&listing)[0]["Overview"],
+        "adopted plot",
+        "页内简介必须用库内合成值：{listing}"
+    );
+    assert_eq!(
+        items(&listing)[0]["Studios"][0]["Name"],
+        "Studio X",
+        "页内工作室必须用库内合成值：{listing}"
+    );
+    assert_eq!(
+        items(&listing)[0]["Genres"][0],
+        "Drama",
+        "页内类型必须用库内合成值：{listing}"
+    );
+
+    std::fs::write(&sidecar, b"<tvshow><plot>broken").unwrap();
+    let after = get_json(&app, &uri).await;
+    assert_eq!(after, listing, "坏 NFO 不得改变页内元数据");
 }

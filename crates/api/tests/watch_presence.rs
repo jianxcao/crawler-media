@@ -1,9 +1,9 @@
 #[path = "support/mod.rs"]
 mod support;
 
+use notify_debouncer_mini::{DebouncedEvent, DebouncedEventKind};
 use std::path::PathBuf;
 use std::sync::Arc;
-use notify_debouncer_mini::{DebouncedEvent, DebouncedEventKind};
 use support::library_presence::PresenceFixture;
 
 fn event(path: PathBuf) -> DebouncedEvent {
@@ -31,18 +31,20 @@ async fn last_local_file_missing_keeps_media_and_all_user_facts() {
     // Trigger watcher missing event for the file
     let path = PathBuf::from(&row.path);
     let tracker = Arc::new(api::fs_watcher::StrmGraceTracker::default());
-    api::fs_watcher::handle_fs_events(
-        &fix.state,
-        &tracker,
-        vec![event(path.clone())],
-    );
+    api::fs_watcher::handle_fs_events(&fix.state, &tracker, vec![event(path.clone())]);
 
     // Ledger row still exists, but missing_at is set!
     let store_arc = fix.state.store();
     let guard = store_arc.lock();
-    let loaded = guard.get_ledger(&row.id.to_string()).unwrap().unwrap();
-    assert_eq!(loaded.id, row.id);
-    assert!(guard.missing_at_by_path().unwrap().contains_key(&row.path));
+    let loaded = guard.file_coverage_by_id(row.file_id).unwrap().unwrap();
+    assert_eq!(loaded.file.file_id, row.file_id);
+    assert!(
+        guard
+            .missing_at_by_path()
+            .unwrap()
+            .keys()
+            .any(|key| key.ends_with(row.path.file_name().unwrap().to_str().unwrap()))
+    );
 
     // Media and User facts PRESERVED (S1)
     assert!(guard.get_media(media_id).unwrap().is_some());
@@ -71,11 +73,7 @@ async fn last_strm_missing_after_45_seconds_keeps_ledger_and_history() {
     tracker.set_now(1000);
 
     // Event at t = 1000
-    api::fs_watcher::handle_fs_events(
-        &fix.state,
-        &tracker,
-        vec![event(path.clone())],
-    );
+    api::fs_watcher::handle_fs_events(&fix.state, &tracker, vec![event(path.clone())]);
 
     // Advance time past 45 seconds (t = 1050) and trigger handle_fs_events
     tracker.set_now(1050);
@@ -84,7 +82,7 @@ async fn last_strm_missing_after_45_seconds_keeps_ledger_and_history() {
     // Ledger row and user facts MUST STILL EXIST!
     let store_arc = fix.state.store();
     let guard = store_arc.lock();
-    assert!(guard.get_ledger(&row.id.to_string()).unwrap().is_some());
+    assert!(guard.file_coverage_by_id(row.file_id).unwrap().is_some());
     assert!(guard.get_media(media_id).unwrap().is_some());
     assert_eq!(
         guard.playback_progress(user_id, media_id).unwrap(),
@@ -97,25 +95,29 @@ async fn same_url_restore_clears_missing_and_preserves_probe_cache() {
     let fix = PresenceFixture::new();
     let (_media_id, row) = fix.insert_media_and_ledger("video.strm");
 
-    // Populate file_meta
-    let lib_conn = rusqlite::Connection::open(fix.dir.path().join("data/library.db")).unwrap();
-    lib_conn
-        .execute(
-            "INSERT INTO file_meta (ledger_id, audio_json, subtitle_json, video_json, tracks_version, format_duration_ms)
-             VALUES (?1, '[]', '[]', '{}', 2, 80000)",
-            [&row.id.to_string()],
-        )
-        .unwrap();
+    // Populate the probe cache through the public writer: the fixture is a probed file.
+    {
+        let store_arc = fix.state.store();
+        let guard = store_arc.lock();
+        guard
+            .put_file_meta_versioned(
+                &row.file_id.to_string(),
+                &library::Tracks {
+                    video: Some(library::VideoTrack::default()),
+                    audio: Vec::new(),
+                    subtitles: Vec::new(),
+                },
+                None,
+                Some(80_000),
+            )
+            .unwrap();
+    }
 
     // Mark missing
     let path = PathBuf::from(&row.path);
     let tracker = Arc::new(api::fs_watcher::StrmGraceTracker::default());
     tracker.on_created_or_modified(&path, Some("http://example.com/video.m3u8"));
-    api::fs_watcher::handle_fs_events(
-        &fix.state,
-        &tracker,
-        vec![event(path.clone())],
-    );
+    api::fs_watcher::handle_fs_events(&fix.state, &tracker, vec![event(path.clone())]);
 
     let store_arc = fix.state.store();
     assert!(
@@ -123,18 +125,15 @@ async fn same_url_restore_clears_missing_and_preserves_probe_cache() {
             .lock()
             .missing_at_by_path()
             .unwrap()
-            .contains_key(&row.path)
+            .keys()
+            .any(|key| key.ends_with(row.path.file_name().unwrap().to_str().unwrap()))
     );
 
     // Write file back to disk with same content
     std::fs::write(&path, b"http://example.com/video.m3u8").unwrap();
 
     // Event present
-    api::fs_watcher::handle_fs_events(
-        &fix.state,
-        &tracker,
-        vec![event(path.clone())],
-    );
+    api::fs_watcher::handle_fs_events(&fix.state, &tracker, vec![event(path.clone())]);
 
     // missing_at is cleared
     assert!(
@@ -142,14 +141,15 @@ async fn same_url_restore_clears_missing_and_preserves_probe_cache() {
             .lock()
             .missing_at_by_path()
             .unwrap()
-            .contains_key(&row.path)
+            .keys()
+            .any(|key| key.ends_with(row.path.file_name().unwrap().to_str().unwrap()))
     );
 
-    // file_meta is preserved
+    // probe cache is preserved
     assert!(
         store_arc
             .lock()
-            .get_file_meta(&row.id.to_string())
+            .get_file_meta(&row.file_id.to_string())
             .unwrap()
             .is_some()
     );

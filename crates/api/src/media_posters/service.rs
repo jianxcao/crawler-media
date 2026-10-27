@@ -1,19 +1,19 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use domain::MediaId;
 use parking_lot::Mutex;
 use tokio::sync::Semaphore;
 
-use crate::catalog::Catalog;
-use crate::Store;
 use super::cache::{DiskPosterCache, NEGATIVE_TTL};
 use super::http::{ImageFetcher, RestricedImageFetcher};
-use super::inflight::{wait_poster, InflightMap, PosterInflight, PosterWorkerGuard};
+use super::inflight::{InflightMap, PosterInflight, PosterWorkerGuard, wait_poster};
 use super::negative_cache::{NegativePosterCache, PosterClock, SystemPosterClock};
 use super::{MediaPosterSource, PosterBytes, PosterError, PosterResourceCounts};
+use crate::Store;
+use crate::catalog::Catalog;
 
 const NEGATIVE_CACHE_CAPACITY: usize = 4_096;
 const GATE_REGISTRY_CAPACITY: usize = 4_096;
@@ -122,7 +122,9 @@ impl MediaPosterService {
     /// Test helper to insert a weak inflight gate without exposing the internal map.
     #[doc(hidden)]
     pub fn insert_inflight_for_test(&self, media_id: MediaId, entry: &Arc<PosterInflight>) {
-        self.in_flight.lock().insert(media_id, Arc::downgrade(entry));
+        self.in_flight
+            .lock()
+            .insert(media_id, Arc::downgrade(entry));
     }
 
     /// Test helper to check if a key is present in the negative cache.
@@ -186,7 +188,8 @@ impl MediaPosterService {
 
                     let (kind, tmdb_id) = {
                         let s = store.lock();
-                        let media = s.get_media(media_id)
+                        let media = s
+                            .get_media(media_id)
                             .map_err(|e| PosterError::Io(e.to_string()))?
                             .ok_or(PosterError::NotFound)?;
                         let tmdb_id = media.tmdb_id.clone().ok_or(PosterError::NotFound)?;

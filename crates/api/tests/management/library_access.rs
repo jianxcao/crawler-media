@@ -65,6 +65,7 @@ async fn member_only_sees_visible_libraries() {
                 "root_paths": [tmp.path().join("kids").display().to_string()],
                 "access_mode": "selected",
                 "admin_visible": true,
+                "detect_intros": false,
                 "member_ids": [member_id],
             }),
         ))

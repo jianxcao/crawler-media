@@ -10,13 +10,16 @@ use std::sync::Arc;
 #[path = "maintenance_support/mod.rs"]
 mod support;
 
+#[path = "support/mod.rs"]
+mod api_support;
+
+use api::ApiState;
 use api::maintenance::{MaintenancePolicy, SqliteExecutor};
 use api::worker::StateRunner;
-use api::ApiState;
 use domain::{MediaId, UserId};
 use jobs::{JobKind, Runner, Schedule};
 use store::{SessionRow, Store};
-use support::{build_state, KEEP, DAY};
+use support::{DAY, KEEP, build_state, seed_published_file};
 
 /// 真实执行器 + 真实 Store；`ApiState::new` 会在构造时 seed 维护 def。
 fn real_state(root: &Path) -> ApiState {
@@ -82,7 +85,10 @@ fn fresh_state_registers_the_four_maintenance_defs_with_documented_defaults() {
     );
 
     let data = by_kind(JobKind::DataRetention);
-    assert!(!data.enabled, "分类历史保留默认关闭，生产启用需用户显式确认");
+    assert!(
+        !data.enabled,
+        "分类历史保留默认关闭，生产启用需用户显式确认"
+    );
     assert_eq!(
         data.schedule,
         Some(Schedule::Interval { secs: 86_400 }),
@@ -96,8 +102,9 @@ fn fresh_state_registers_the_four_maintenance_defs_with_documented_defaults() {
             qoe_days: 90,
             transient_cache_days: 90,
             probe_days: 90,
+            operations_days: 30,
         }),
-        "新类别默认 dry_run + 90 天窗口"
+        "新类别默认 dry_run；历史窗口 90 天，operation 记录 30 天"
     );
 }
 
@@ -176,13 +183,22 @@ fn user_changes_survive_a_restart() {
     );
 }
 
-fn session(user: UserId, media: MediaId, device: &str, started: i64) -> SessionRow {
+fn session(
+    store: &Store,
+    user: UserId,
+    media: MediaId,
+    file_id: domain::LedgerId,
+    device: &str,
+    started: i64,
+) -> SessionRow {
+    let play_session_id =
+        api_support::session::issue_session(store, user, device, file_id, started);
     SessionRow {
         device_id: device.into(),
         user_id: user,
         media_id: media,
-        season: None,
-        episode: None,
+        season: Some(-1),
+        episode: Some(-1),
         client: Some("acceptance".into()),
         device_name: None,
         client_version: None,
@@ -200,7 +216,7 @@ fn session(user: UserId, media: MediaId, device: &str, started: i64) -> SessionR
         last_report_at: started,
         last_report_at_ms: started * 1000,
         ledger_id: None,
-        play_session_id: None,
+        play_session_id: Some(play_session_id),
         last_event_sequence: None,
     }
 }
@@ -216,23 +232,57 @@ fn playback_retention_prunes_only_logs_and_keeps_playback_state() {
     {
         let store_handle = state.store();
         let store = store_handle.lock();
+        // `playback_units.media_id` 现在有真实外键：先登记 Media 身份。
+        store
+            .insert_media(&domain::Media {
+                id: media,
+                kind: domain::MediaKind::Movie,
+                title: "Retention Fixture".into(),
+                original_title: None,
+                aliases: Vec::new(),
+                year: None,
+                tmdb_id: None,
+                douban_id: None,
+                tvdb_id: None,
+                bangumi_id: None,
+                anilist_id: None,
+            })
+            .unwrap();
+        let file_id = seed_published_file(&store, tmp.path(), media);
         // 两条超龄历史 + 一条近期历史。
         for (index, started) in [(0, now - 40 * DAY), (1, now - 30 * DAY), (2, now - 60)].iter() {
             store
-                .upsert_session(&session(user, media, &format!("device-{index}"), *started))
+                .upsert_session(&session(
+                    &store,
+                    user,
+                    media,
+                    file_id,
+                    &format!("device-{index}"),
+                    *started,
+                ))
                 .unwrap();
             store
                 .close_session(user, &format!("device-{index}"), *started + 60)
                 .unwrap();
         }
         // 一条活跃会话 + 进度/收藏：清理不得碰它们。
-        let mut live = session(user, media, "live-device", now - 30);
+        let mut live = session(&store, user, media, file_id, "live-device", now - 30);
         live.position_ms = 12_345;
         store.upsert_session(&live).unwrap();
         store
             .upsert_unit(
-                user, media, -1, -1, 42_000, Some(false), Some(true), Some(100_000), None, None,
-                false, 100,
+                user,
+                media,
+                -1,
+                -1,
+                42_000,
+                Some(false),
+                Some(true),
+                Some(100_000),
+                None,
+                None,
+                false,
+                100,
             )
             .unwrap();
     }
@@ -297,7 +347,8 @@ fn large_history_prune_stops_at_the_budget_and_resumes_next_run() {
 
     // test-only：单事务原始 SQL 造历史（断言仍走公开 seam）。
     {
-        let conn = rusqlite::Connection::open(support::data_dir(&state).join("subscribe.db")).unwrap();
+        let conn =
+            rusqlite::Connection::open(support::data_dir(&state).join("subscribe.db")).unwrap();
         let tx = conn.unchecked_transaction().unwrap();
         {
             let mut stmt = tx
@@ -325,19 +376,33 @@ fn large_history_prune_stops_at_the_budget_and_resumes_next_run() {
 
     let first = support::enqueue_claim(&state, JobKind::PlaybackHistoryRetention, KEEP, now);
     let started = std::time::Instant::now();
-    StateRunner { state: state.clone() }.run(&first).unwrap();
+    StateRunner {
+        state: state.clone(),
+    }
+    .run(&first)
+    .unwrap();
     let first_elapsed = started.elapsed();
     let report = support::progress_of(&state, &first);
     println!(
         "large-history run#1: batches={} deleted={} budget_exhausted={} elapsed_ms={}",
-        report["batches"], report["deleted"], report["budget_exhausted"], first_elapsed.as_millis()
+        report["batches"],
+        report["deleted"],
+        report["budget_exhausted"],
+        first_elapsed.as_millis()
     );
     assert_eq!(report["batches"], 20, "单次运行受 MAX_BATCHES 限制");
-    assert_eq!(report["deleted"], 10_000, "单次最多删 MAX_BATCHES*BATCH_SIZE 行");
+    assert_eq!(
+        report["deleted"], 10_000,
+        "单次最多删 MAX_BATCHES*BATCH_SIZE 行"
+    );
     assert_eq!(report["budget_exhausted"], true);
 
     let second = support::enqueue_claim(&state, JobKind::PlaybackHistoryRetention, KEEP, now);
-    StateRunner { state: state.clone() }.run(&second).unwrap();
+    StateRunner {
+        state: state.clone(),
+    }
+    .run(&second)
+    .unwrap();
     let report = support::progress_of(&state, &second);
     println!("large-history run#2: deleted={}", report["deleted"]);
     assert_eq!(report["deleted"], 10_000, "下一次运行继续推进，不是死循环");
@@ -351,7 +416,11 @@ async fn real_job_loop_executes_maintenance_with_shutdown_and_updates() {
 
     // 塞入一条超龄 scrape 终态
     let stale = support::enqueue_claim(&state, JobKind::Scrape, "{}", now - 100 * DAY);
-    state.jobs().lock().succeed_claimed(&stale, now - 100 * DAY).unwrap();
+    state
+        .jobs()
+        .lock()
+        .succeed_claimed(&stale, now - 100 * DAY)
+        .unwrap();
 
     let def = maintenance_defs(&state)
         .into_iter()

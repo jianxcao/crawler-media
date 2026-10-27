@@ -73,7 +73,7 @@ impl Store {
         if units.is_empty() {
             return Ok(false);
         }
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let inserted = tx.execute(
             "INSERT INTO probe_jobs (
                  id, kind, media_id, season, scope_key, status, total, created_at_ms
@@ -97,7 +97,7 @@ impl Store {
         for unit in units {
             if let Err(error) = tx.execute(
                 "INSERT INTO probe_job_units (
-                     job_id, ledger_id, kind, force_fingerprint,
+                     job_id, file_id, kind, force_fingerprint,
                      reuse_fingerprint_cache, overwrite_markers, status,
                      reuse_media_info_cache, stage
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7, ?8)",
@@ -127,10 +127,7 @@ impl Store {
     /// windows decide what runs next, and the SQL here only repairs durable
     /// status/counters for active jobs.
     pub fn reset_running_probe_units(&self) -> Result<(), StoreError> {
-        // Also retire work admitted concurrently with an earlier presence
-        // snapshot, before any recovered worker can read a missing source.
-        crate::ledger_presence::repair_missing_probe_work(&self.library)?;
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         tx.execute(
             "UPDATE probe_job_units SET status = 'queued'
              WHERE status = 'running' AND job_id IN (
@@ -187,10 +184,7 @@ impl Store {
     }
 
     /// Active non-marker jobs whose units are all terminal.
-    pub fn active_completed_probe_jobs(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<ProbeJob>, StoreError> {
+    pub fn active_completed_probe_jobs(&self, limit: usize) -> Result<Vec<ProbeJob>, StoreError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -216,16 +210,17 @@ impl Store {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        // `job_id` order is the order the queued-unit index already has, and — unlike
+        // `rowid` — it survives the table becoming `WITHOUT ROWID`. Recovery takes the first
+        // page of whichever queued units come back; it is a repair sweep, not a FIFO queue.
         let mut statement = self.library.prepare(
-            "SELECT u.job_id, u.ledger_id
+            "SELECT u.job_id, u.file_id
              FROM probe_job_units u
              JOIN probe_jobs j ON j.id = u.job_id
              WHERE u.status = 'queued' AND j.status IN ('queued', 'running')
-             ORDER BY u.rowid LIMIT ?1",
+             ORDER BY u.job_id LIMIT ?1",
         )?;
-        let rows = statement.query_map([limit as i64], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?;
+        let rows = statement.query_map([limit as i64], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -234,7 +229,7 @@ impl Store {
         // never requeue a running unit: drain and retry assessment must observe
         // the job the live worker is finishing, not reset it back to queued.
         {
-            let tx = self.library.unchecked_transaction()?;
+            let tx = crate::write_tx(&self.library)?;
             let ids: Vec<String> = {
                 let mut statement = tx.prepare(
                     "SELECT id FROM probe_jobs WHERE status IN ('queued', 'running')
@@ -255,20 +250,25 @@ impl Store {
              FROM probe_jobs WHERE status IN ('queued', 'running')
              ORDER BY created_at_ms, id",
         )?;
-        let jobs = statement.query_map([], map_probe_job)?.collect::<Result<Vec<_>, _>>()?;
-        jobs.into_iter().map(|job| {
-            let units = self.probe_job_units(&job.id)?;
-            Ok((job, units))
-        }).collect()
+        let jobs = statement
+            .query_map([], map_probe_job)?
+            .collect::<Result<Vec<_>, _>>()?;
+        jobs.into_iter()
+            .map(|job| {
+                let units = self.probe_job_units(&job.id)?;
+                Ok((job, units))
+            })
+            .collect()
     }
-
 
     pub fn probe_job_units(&self, job_id: &str) -> Result<Vec<ProbeJobUnit>, StoreError> {
         let mut statement = self.library.prepare(
-            "SELECT job_id, ledger_id, kind, force_fingerprint,
+            // `file_id` is the second key column, so this order comes straight from the
+            // primary-key index; `rowid` would sort the job's units instead.
+            "SELECT job_id, file_id, kind, force_fingerprint,
                     reuse_fingerprint_cache, overwrite_markers, status, error,
                     sampling_plan_json, detection_outcome_json, reuse_media_info_cache, stage
-             FROM probe_job_units WHERE job_id = ?1 ORDER BY rowid",
+             FROM probe_job_units WHERE job_id = ?1 ORDER BY file_id",
         )?;
         let rows = statement.query_map([job_id], |row| {
             Ok(ProbeJobUnit {
@@ -294,10 +294,10 @@ impl Store {
     }
 
     pub fn start_probe_unit(&self, job_id: &str, ledger_id: &str) -> Result<bool, StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         let changed = tx.execute(
             "UPDATE probe_job_units SET status = 'running'
-             WHERE job_id = ?1 AND ledger_id = ?2 AND status = 'queued'
+             WHERE job_id = ?1 AND file_id = ?2 AND status = 'queued'
              AND EXISTS (SELECT 1 FROM probe_jobs WHERE id = ?1 AND status IN ('queued', 'running'))",
             params![job_id, ledger_id],
         )?;
@@ -321,7 +321,7 @@ impl Store {
     ) -> Result<bool, StoreError> {
         let changed = self.library.execute(
             "UPDATE probe_job_units SET sampling_plan_json = ?3
-             WHERE job_id = ?1 AND ledger_id = ?2",
+             WHERE job_id = ?1 AND file_id = ?2",
             params![job_id, ledger_id, sampling_plan_json],
         )?;
         Ok(changed > 0)
@@ -335,7 +335,7 @@ impl Store {
     ) -> Result<bool, StoreError> {
         let changed = self.library.execute(
             "UPDATE probe_job_units SET detection_outcome_json = ?3
-             WHERE job_id = ?1 AND ledger_id = ?2",
+             WHERE job_id = ?1 AND file_id = ?2",
             params![job_id, ledger_id, detection_outcome_json],
         )?;
         Ok(changed > 0)
@@ -358,12 +358,18 @@ impl Store {
         ledger_id: &str,
         reason: &str,
     ) -> Result<(ProbeJob, bool, bool), StoreError> {
-        self.finish_probe_unit_with_status(job_id, ledger_id, "cancelled", Some("cancelled"), Some(reason))
+        self.finish_probe_unit_with_status(
+            job_id,
+            ledger_id,
+            "cancelled",
+            Some("cancelled"),
+            Some(reason),
+        )
     }
 
     /// Cancel an atomic refresh, terminalizing pending units and releasing the scope together.
     pub fn cancel_probe_job(&self, job_id: &str, reason: &str) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.library)?;
         tx.execute(
             "UPDATE probe_job_units SET status = 'cancelled', error = ?2
              WHERE job_id = ?1 AND status IN ('queued', 'running')
@@ -388,7 +394,8 @@ impl Store {
         _error_kind: Option<&str>,
         error: Option<&str>,
     ) -> Result<(ProbeJob, bool, bool), StoreError> {
-        let (job, changed, all_done, _) = self.finish_probe_transition(job_id, ledger_id, status, error)?;
+        let (job, changed, all_done, _) =
+            self.finish_probe_transition(job_id, ledger_id, status, error)?;
         Ok((job, changed, all_done))
     }
 
@@ -501,7 +508,7 @@ impl Store {
     pub fn is_probe_queued(&self, ledger_id: &str) -> Result<bool, StoreError> {
         let active = self.library.query_row(
             "SELECT EXISTS(SELECT 1 FROM probe_job_units
-             WHERE ledger_id = ?1 AND status IN ('queued', 'running'))",
+             WHERE file_id = ?1 AND status IN ('queued', 'running'))",
             [ledger_id],
             |row| row.get(0),
         )?;
@@ -515,7 +522,7 @@ impl Store {
     /// 时序当成业务结果。
     pub fn probe_unit_recorded_for_ledger(&self, ledger_id: &str) -> Result<bool, StoreError> {
         let recorded = self.library.query_row(
-            "SELECT EXISTS(SELECT 1 FROM probe_job_units WHERE ledger_id = ?1)",
+            "SELECT EXISTS(SELECT 1 FROM probe_job_units WHERE file_id = ?1)",
             [ledger_id],
             |row| row.get(0),
         )?;
@@ -528,10 +535,10 @@ impl Store {
     ) -> Result<Option<ProbeJobUnit>, StoreError> {
         self.library
             .query_row(
-                "SELECT job_id, ledger_id, kind, force_fingerprint,
+                "SELECT job_id, file_id, kind, force_fingerprint,
                         reuse_fingerprint_cache, overwrite_markers, status, error,
                         sampling_plan_json, detection_outcome_json, reuse_media_info_cache, stage
-                 FROM probe_job_units WHERE ledger_id = ?1 AND status IN ('queued', 'running')
+                 FROM probe_job_units WHERE file_id = ?1 AND status IN ('queued', 'running')
                  ORDER BY rowid DESC LIMIT 1",
                 [ledger_id],
                 |row| {

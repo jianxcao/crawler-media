@@ -411,10 +411,10 @@ export function MediaTransferView() {
       ) : (
         <div className="mt-4 space-y-3">
           {filtered.map((item) => {
-            const epTag =
-              item.season != null && item.episode != null
-                ? `S${String(item.season).padStart(2, "0")}E${String(item.episode).padStart(2, "0")}`
-                : null;
+            const epTag = item.units
+              .filter((unit) => unit.season >= 0 && unit.episode >= 0)
+              .map((unit) => `S${String(unit.season).padStart(2, "0")}E${String(unit.episode).padStart(2, "0")}`)
+              .join(" · ") || null;
             const isHardlink = item.transfer_mode === "hardlink";
             const isMove = item.transfer_mode === "move";
             const isStrm = item.transfer_mode === "strm";

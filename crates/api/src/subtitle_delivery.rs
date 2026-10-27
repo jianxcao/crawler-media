@@ -117,8 +117,9 @@ struct FinishOnDrop(Arc<InFlight>);
 
 impl Drop for FinishOnDrop {
     fn drop(&mut self) {
-        self.0
-            .finish(Err(SubtitleServiceError::Worker("subtitle worker dropped".into())));
+        self.0.finish(Err(SubtitleServiceError::Worker(
+            "subtitle worker dropped".into(),
+        )));
     }
 }
 
@@ -501,9 +502,8 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let observed = runtime.block_on(async {
-            tokio::time::timeout(Duration::from_secs(2), waiter.wait()).await
-        });
+        let observed = runtime
+            .block_on(async { tokio::time::timeout(Duration::from_secs(2), waiter.wait()).await });
         let observed = observed.expect("晚注册的 waiter 必须观察到已保留的终态");
         assert!(matches!(observed, Err(SubtitleServiceError::Busy)));
     }

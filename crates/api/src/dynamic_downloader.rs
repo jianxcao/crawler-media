@@ -39,11 +39,10 @@ impl DynamicDownloader {
     fn client(&self) -> Result<Arc<dyn Downloader>, DownloaderError> {
         let chosen = choose_downloader(&self.store.lock(), &self.env)
             .map_err(|error| DownloaderError::Message(error.to_string()))?;
-        if let Some((cached_config, client)) = self.cached.lock().as_ref() {
-            if cached_config == &chosen {
+        if let Some((cached_config, client)) = self.cached.lock().as_ref()
+            && cached_config == &chosen {
                 return Ok(client.clone());
             }
-        }
         let client = connect_chosen(&chosen, self.memory.clone())?;
         *self.cached.lock() = Some((chosen, client.clone()));
         Ok(client)

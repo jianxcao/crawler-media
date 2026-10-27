@@ -24,11 +24,120 @@ pub(super) fn routes(provider: Arc<dyn MediaServerProvider>) -> Router {
             "/Videos/{id}/Subtitles/{index}/Stream.{codec}",
             get(subtitle_stream),
         )
+        .route("/playback/files/{id}/fonts", get(file_fonts))
+        .route("/playback/files/{id}/trickplay", get(file_trickplay))
         .route_layer(axum::middleware::from_fn(move |req, next| {
             let provider = stream_provider.clone();
             authenticate(provider, req, next)
         }))
         .with_state(AppState::new(provider))
+}
+
+async fn file_fonts(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    check_device_revocation(state.provider.as_ref(), &user, &headers, "内嵌字体").await?;
+    tracing::info!(user_id = %user.id, file_id = %id, "读取内嵌字体附件");
+    let (path, is_strm) = state
+        .provider
+        .resolve_stream_source(user.id, &id)
+        .await
+        .map_err(|e| {
+            tracing::error!(%e, user_id = %user.id, file_id = %id, "解析字体文件源失败");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if is_strm {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    if !path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // 尝试寻找同目录下的字体附件或同名字体目录
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    let parent = path.parent().unwrap_or(FsPath::new(""));
+    let font_dir = parent.join(format!("{stem}.fonts"));
+    if font_dir.is_dir() {
+        let mut fonts = Vec::new();
+        if let Ok(mut dir) = tokio::fs::read_dir(&font_dir).await {
+            while let Ok(Some(entry)) = dir.next_entry().await {
+                if let Some(name) = entry.file_name().to_str()
+                    && (name.ends_with(".ttf")
+                        || name.ends_with(".otf")
+                        || name.ends_with(".woff2"))
+                {
+                    fonts.push(name.to_string());
+                }
+            }
+        }
+        if !fonts.is_empty() {
+            return Ok(Json(json!({ "fonts": fonts })).into_response());
+        }
+    }
+
+    // 字体文件存在时返回可用字体列表（JASSUB 消费），缺失返回 404
+    Err(StatusCode::NOT_FOUND)
+}
+
+async fn file_trickplay(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    check_device_revocation(state.provider.as_ref(), &user, &headers, "缩略图索引").await?;
+    tracing::info!(user_id = %user.id, file_id = %id, "读取 trickplay 缩略图");
+    let (path, is_strm) = state
+        .provider
+        .resolve_stream_source(user.id, &id)
+        .await
+        .map_err(|e| {
+            tracing::error!(%e, user_id = %user.id, file_id = %id, "解析缩略图文件源失败");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if is_strm {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    if !path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // 尝试寻找同目录下的 trickplay 缩略图文件（如 .jpg / .webp）
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    let parent = path.parent().unwrap_or(FsPath::new(""));
+    let candidates = [
+        parent.join(format!("{stem}.trickplay.jpg")),
+        parent.join(format!("{stem}.trickplay.webp")),
+        parent.join(format!("{stem}-trickplay.jpg")),
+    ];
+    for cand in candidates {
+        if cand.exists() {
+            let content_type = match cand.extension().and_then(|e| e.to_str()) {
+                Some("webp") => "image/webp",
+                _ => "image/jpeg",
+            };
+            if let Ok(bytes) = tokio::fs::read(&cand).await {
+                return Ok(([(header::CONTENT_TYPE, content_type)], bytes).into_response());
+            }
+        }
+    }
+
+    Err(StatusCode::NOT_FOUND)
 }
 
 /// 会话 token 的日志占位：日志里永不出现 token 原文。
@@ -147,17 +256,34 @@ async fn subtitle_stream(
     }
 }
 
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+struct StreamQuery {
+    media_source_id: Option<String>,
+    play_session_id: Option<String>,
+    device_id: Option<String>,
+}
+
 async fn stream(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<StreamQuery>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
     check_device_revocation(state.provider.as_ref(), &user, &headers, "Jellyfin 取流").await?;
 
+    let device_id = query.device_id.as_deref().or(user.device_id.as_deref());
+
     let (path, is_strm) = state
         .provider
-        .resolve_stream_source(user.id, &id)
+        .resolve_stream_source_bound(
+            user.id,
+            &id,
+            query.media_source_id.as_deref(),
+            query.play_session_id.as_deref(),
+            device_id,
+        )
         .await
         .map_err(|error| {
             tracing::error!(%error, user_id = %user.id, item_id = %id, "failed to resolve Jellyfin stream source");
@@ -167,11 +293,11 @@ async fn stream(
 
     if is_strm {
         // Enforce 64KiB limit on STRM files (65536 bytes)
-        if let Ok(meta) = std::fs::metadata(&path) {
-            if meta.len() > 65_536 {
-                tracing::warn!(path = %path.display(), len = meta.len(), "STRM file exceeds 64KiB limit");
-                return Err(StatusCode::BAD_GATEWAY);
-            }
+        if let Ok(meta) = std::fs::metadata(&path)
+            && meta.len() > 65_536
+        {
+            tracing::warn!(path = %path.display(), len = meta.len(), "STRM file exceeds 64KiB limit");
+            return Err(StatusCode::BAD_GATEWAY);
         }
         return match library::read_strm_url(&path) {
             Some(direct_url) => {
@@ -193,7 +319,7 @@ async fn stream_file(
     path: &FsPath,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    let content_type = video_content_type(&path);
+    let content_type = video_content_type(path);
     let file_size = file
         .metadata()
         .await
@@ -278,14 +404,15 @@ pub async fn playback_info(
             StatusCode::INTERNAL_SERVER_ERROR
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
-    let is_strm = snapshot.row.path.to_ascii_lowercase().ends_with(".strm");
+    let path_str = snapshot.file.path.to_string_lossy();
+    let is_strm = path_str.to_ascii_lowercase().ends_with(".strm");
     let direct_url = is_strm
-        .then(|| library::read_strm_url(FsPath::new(&snapshot.row.path)))
+        .then(|| library::read_strm_url(FsPath::new(path_str.as_ref())))
         .flatten();
     if is_strm && direct_url.is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
-    let source_path = direct_url.as_deref().unwrap_or(snapshot.row.path.as_str());
+    let source_path = direct_url.as_deref().unwrap_or(path_str.as_ref());
     let protocol = if source_path.starts_with("http://") || source_path.starts_with("https://") {
         "Http"
     } else {
@@ -299,8 +426,14 @@ pub async fn playback_info(
         .map(str::to_ascii_lowercase);
     let runtime_ticks = snapshot.metadata.runtime_ticks;
     let media_streams = dto::media_streams_with_item(&snapshot.metadata.tracks, Some(&id));
+    // Versioned physical source: a bare file UUID is not a MediaSourceId.
+    let source_id = domain::PhysicalSourceId {
+        file_id: snapshot.file.file_id,
+        revision: snapshot.file.version.revision,
+    }
+    .to_wire_string();
     let mut source = json!({
-        "Id": id,
+        "Id": source_id,
         "Path": source_path,
         "Protocol": protocol,
         "Container": container,
@@ -319,7 +452,10 @@ pub async fn playback_info(
         .provider
         .issue_play_session(user.id, &client.device_id, &id)
         .await
-        .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
+        .map_err(|error| {
+            tracing::error!(%error, user_id = %user.id, item_id = %id, "failed to issue playback session");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     Ok(Json(json!({
         "MediaSources": [source],
         "PlaySessionId": play_session_id,
@@ -335,7 +471,10 @@ mod tests {
 
     #[test]
     fn log_device_id_keeps_a_real_user_device_id() {
-        assert_eq!(log_device_id(Some("living-room-tv"), None, TOKEN), "living-room-tv");
+        assert_eq!(
+            log_device_id(Some("living-room-tv"), None, TOKEN),
+            "living-room-tv"
+        );
     }
 
     #[test]
@@ -348,8 +487,14 @@ mod tests {
         // 没有 DeviceId 时撤销检查回退到 token：日志必须脱敏。
         assert_eq!(log_device_id(None, None, TOKEN), SESSION_TOKEN_PLACEHOLDER);
         assert_ne!(log_device_id(None, None, TOKEN), TOKEN);
-        assert_eq!(log_device_id(Some(TOKEN), None, TOKEN), SESSION_TOKEN_PLACEHOLDER);
-        assert_eq!(log_device_id(None, Some(TOKEN), TOKEN), SESSION_TOKEN_PLACEHOLDER);
+        assert_eq!(
+            log_device_id(Some(TOKEN), None, TOKEN),
+            SESSION_TOKEN_PLACEHOLDER
+        );
+        assert_eq!(
+            log_device_id(None, Some(TOKEN), TOKEN),
+            SESSION_TOKEN_PLACEHOLDER
+        );
     }
 
     #[test]

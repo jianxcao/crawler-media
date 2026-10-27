@@ -75,6 +75,9 @@ fn run_live() -> Result<(), Box<dyn std::error::Error>> {
             facts: SubscribeFacts::default(),
             downloader: &qb,
             library_root: &library_root,
+            library_id: None,
+            root_id: None,
+            config_revision: None,
             transfer_mode: Some(TransferMode::Copy),
             scrape: true,
             hooks: None,
@@ -84,18 +87,29 @@ fn run_live() -> Result<(), Box<dyn std::error::Error>> {
             absolute: None,
         })?;
         println!(
-            "run ledger={} completed={}",
-            outcome.ledger.len(),
+            "run files={} completed={}",
+            outcome.files.len(),
             outcome.completed
         );
-        if !outcome.ledger.is_empty() {
-            for row in &outcome.ledger {
+        if !outcome.files.is_empty() {
+            for coverage in &outcome.files {
+                let units = coverage
+                    .units
+                    .iter()
+                    .map(|unit| {
+                        if unit.is_whole() {
+                            "whole".to_string()
+                        } else {
+                            format!("S{}E{}", unit.season, unit.episode)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
                 println!(
-                    "ledger {} S{:?}E{:?} {}",
-                    row.path,
-                    row.season,
-                    row.episode,
-                    row.confidence.as_str()
+                    "file {} units=[{}] {}",
+                    coverage.file.path.display(),
+                    units,
+                    coverage.file.confidence.as_str()
                 );
             }
             return Ok(());

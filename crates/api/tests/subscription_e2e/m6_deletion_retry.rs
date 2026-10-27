@@ -4,9 +4,10 @@
 
 use std::os::unix::fs::PermissionsExt;
 
-use domain::{Confidence, LedgerId, LedgerRow, QualitySource, SubscribeId};
+use domain::{LedgerId, QualitySource, SubscribeId};
 
 use super::harness::*;
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 async fn wash_owning_locked_1080p(h: &Harness) -> (SubscribeId, std::path::PathBuf) {
     h.create_site().await;
@@ -27,35 +28,36 @@ async fn wash_owning_locked_1080p(h: &Harness) -> (SubscribeId, std::path::PathB
         .join("The Matrix (1999) - 1080p.mkv");
     std::fs::create_dir_all(owned.parent().unwrap()).unwrap();
     std::fs::write(&owned, probed_video(1080, "h264", false)).unwrap();
-    let row = LedgerRow {
-        id: LedgerId::new(),
-        media_id,
-        path: owned.display().to_string(),
-        season: None,
-        episode: None,
-        resolution: Some("1080p".into()),
-        codec: Some("h264".into()),
-        hdr: None,
-        quality_source: QualitySource::Probe,
-        confidence: Confidence::High,
-        filter_score: Some(1),
-    };
+    let owned_path = owned.display().to_string();
     let mut facts = subscribe::SubscribeFacts::default();
     facts.replace(
         None,
         None,
         subscribe::QualityFact {
             score: 1,
-            path: Some(row.path.clone()),
+            path: Some(owned_path.clone()),
         },
     );
     facts.set_quality(
-        row.path.clone(),
+        owned_path.clone(),
         release::parse("The.Matrix.1999.1080p.WEB-DL.x264"),
     );
     let store = h.state.store();
     let store = store.lock();
-    store.insert_ledger(&row).unwrap();
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
+            media_id,
+            path: owned_path,
+            resolution: Some("1080p".into()),
+            codec: Some("h264".into()),
+            quality_source: QualitySource::Probe,
+            filter_score: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     store.save_subscribe_facts(id, &facts).unwrap();
     (id, owned)
 }

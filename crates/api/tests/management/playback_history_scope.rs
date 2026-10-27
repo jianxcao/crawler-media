@@ -10,6 +10,7 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 use super::common::*;
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 fn app(tmp: &tempfile::TempDir) -> axum::Router {
     let fetcher = Arc::new(Fixtures {
@@ -59,9 +60,10 @@ fn seed_test_ledger(tmp: &tempfile::TempDir, lib_dir: &std::path::Path) -> domai
             tvdb_id: None,
         })
         .unwrap();
-    store
-        .insert_ledger(&domain::LedgerRow {
-            id: domain::LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(domain::LedgerId::new()),
             media_id,
             path: lib_dir.join("Movie.A.1999.mkv").to_str().unwrap().into(),
             season: None,
@@ -72,8 +74,10 @@ fn seed_test_ledger(tmp: &tempfile::TempDir, lib_dir: &std::path::Path) -> domai
             quality_source: domain::QualitySource::Probe,
             confidence: domain::Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     media_id
 }
 
@@ -88,19 +92,21 @@ async fn empty_library_history_clear_preserves_other_library() {
     let lib_b_id = seed_test_library(&app, "Movie Library B", &tmp.path().join("lib_b")).await;
 
     // 2. 模拟用户上报该属于 lib_a 的媒体播放进度
+    let session =
+        super::playback::open_play_session(&app, &media_id.to_string(), "test-device-1").await;
     let progress_res = app
         .clone()
         .oneshot(request(
             "POST",
             "/api/v1/playback/progress",
             Some("management-secret"),
-            serde_json::json!({
+            serde_json::json!({ "event_sequence": crate::common::next_playback_sequence(),
                 "device_id": "test-device-1",
                 "media_item_id": media_id.to_string(),
-                "media_kind": "movie",
+                "play_session_id": session,
+                "event": "start",
                 "position_ms": 120000,
                 "duration_ms": 7200000,
-                "action": "progress",
             }),
         ))
         .await

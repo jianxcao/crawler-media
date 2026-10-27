@@ -44,7 +44,7 @@ impl Store {
     }
 
     pub fn revoke_device(&self, user_id: UserId, device_id: &str) -> Result<(), StoreError> {
-        let tx = self.app.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.app)?;
         let tokens = {
             let mut stmt = tx.prepare(
                 "SELECT c.token FROM playback_device_credentials c JOIN user_tokens t

@@ -38,17 +38,12 @@ fn test_generate_cover_solid_and_auto() {
     }
     let poster_img = DynamicImage::ImageRgba8(poster);
 
-    // 使用系统自带的一个有效 TTF 字体，或者内置测试用的简单字体
-    // macOS 上必有 /System/Library/Fonts/Helvetica.ttc 或 Arial
-    let font_bytes = std::fs::read("/System/Library/Fonts/Helvetica.ttc")
-        .or_else(|_| std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf"))
-        .or_else(|_| std::fs::read("/Library/Fonts/Arial.ttf"))
-        .unwrap_or_else(|_| vec![]);
-
-    if font_bytes.is_empty() {
-        eprintln!("Skipping full cover render due to no local font in test runner");
-        return;
-    }
+    // 仓库自带的字体：任何平台上都跑完整渲染，不再因找不到系统字体而静默跳过。
+    let font_bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/fonts/chaohei.ttf"
+    ))
+    .expect("bundled test font must exist");
 
     let options = CoverOptions {
         title_zh: "华语电影".into(),
@@ -62,7 +57,12 @@ fn test_generate_cover_solid_and_auto() {
         },
     };
 
-    let result = generate_cover(&[poster_img.clone()], &options, &font_bytes, None);
+    let result = generate_cover(
+        std::slice::from_ref(&poster_img),
+        &options,
+        &font_bytes,
+        None,
+    );
     assert!(
         result.is_ok(),
         "Failed to generate cover: {:?}",

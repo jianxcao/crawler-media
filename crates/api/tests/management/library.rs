@@ -523,6 +523,8 @@ async fn created_library_keeps_intro_and_fingerprint_off_until_edited() {
                     "name": "儿童剧",
                     "kind": "tv",
                     "root_paths": [root.display().to_string()],
+                    "detect_intros": false,
+                    "enable_fingerprint": false,
                 }),
             ))
             .await
@@ -596,7 +598,9 @@ async fn library_list_file_io_runs_under_the_bounded_budget() {
             budget
                 .run_to_completion(move || {
                     let _ = entered_tx.send(());
-                    let _ = release_rx.recv();
+                    release_rx
+                        .recv_timeout(std::time::Duration::from_secs(30))
+                        .expect("test must release the library budget holder");
                 })
                 .await
         }

@@ -8,6 +8,7 @@ use marker::adaptive::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::projected_episode;
 use super::{ProbeManager, ProbeUnit};
 use crate::fingerprint_job::{
     AdaptiveCaptureContext, CapturePolicy, EpisodeCaptureRequest, EpisodeDetection,
@@ -90,10 +91,8 @@ pub async fn run_adaptive_season_pipeline(
     // 1. 种子单元优先处理，边采集边建模；2. 其余单元用已有模板验证。
     let mut state = SeasonPipelineState::default();
     for unit in order_seed_units_first(units, &seed_set) {
-        let availability = crate::fingerprint_job::source::ensure_source_available(
-            &pipeline.mgr.store.lock(),
-            &unit.row,
-        );
+        let availability =
+            crate::fingerprint_job::source::ensure_source_available(&pipeline.mgr.store, &unit.row);
         if let Err(error) = availability {
             if !crate::fingerprint_job::source::is_file_deleted(&error) {
                 return Err(error);
@@ -101,7 +100,7 @@ pub async fn run_adaptive_season_pipeline(
             pipeline.mgr.cancel_unit(unit, "file_deleted");
             return Err(error);
         }
-        let is_seed = seed_set.contains(&unit.row.id.to_string());
+        let is_seed = seed_set.contains(&unit.row.file.file_id.to_string());
         match run_season_unit(&pipeline, unit, is_seed, &mut state).await {
             Ok(()) => {}
             Err(e) if e.starts_with("file_deleted") => {
@@ -145,10 +144,8 @@ fn ensure_season_sources(pipeline: &SeasonPipeline<'_>, units: &[ProbeUnit]) -> 
         if pipeline.ctx.gate.work_control(&unit.row).is_cancelled() {
             return Err("Library probe source cancelled or changed".into());
         }
-        let availability = crate::fingerprint_job::source::ensure_source_available(
-            &pipeline.mgr.store.lock(),
-            &unit.row,
-        );
+        let availability =
+            crate::fingerprint_job::source::ensure_source_available(&pipeline.mgr.store, &unit.row);
         if let Err(error) = availability {
             if crate::fingerprint_job::source::is_file_deleted(&error) {
                 pipeline.mgr.cancel_unit(unit, "file_deleted");
@@ -173,11 +170,11 @@ fn collect_episode_descriptors(mgr: &ProbeManager, units: &[ProbeUnit]) -> Vec<E
     units
         .iter()
         .map(|unit| {
-            let ledger_id = unit.row.id.to_string();
-            let path = std::path::Path::new(&unit.row.path);
+            let ledger_id = unit.row.file.file_id.to_string();
+            let path = std::path::Path::new(&unit.row.file.path);
             EpisodeDescriptor {
                 ledger_id: ledger_id.clone(),
-                episode: unit.row.episode.unwrap_or(1),
+                episode: projected_episode(&unit.row),
                 source_version: crate::fingerprint_job::current_source_version(path),
                 duration_ms: known_media_duration(&store, &ledger_id).unwrap_or(0),
             }
@@ -210,7 +207,7 @@ fn order_seed_units_first<'a>(
     units: &'a [ProbeUnit],
     seed_set: &HashSet<String>,
 ) -> Vec<&'a ProbeUnit> {
-    let is_seed = |unit: &ProbeUnit| seed_set.contains(&unit.row.id.to_string());
+    let is_seed = |unit: &ProbeUnit| seed_set.contains(&unit.row.file.file_id.to_string());
     units
         .iter()
         .filter(|unit| is_seed(unit))
@@ -224,8 +221,8 @@ async fn run_season_unit(
     is_seed: bool,
     state: &mut SeasonPipelineState,
 ) -> Result<(), String> {
-    let ledger_id = unit.row.id.to_string();
-    let path = std::path::Path::new(&unit.row.path);
+    let ledger_id = unit.row.file.file_id.to_string();
+    let path = std::path::Path::new(&unit.row.file.path);
     let capture_policy = if unit.reuse_fingerprint_cache {
         CapturePolicy::ReuseValid
     } else {
@@ -330,24 +327,11 @@ fn persist_season_model(pipeline: &SeasonPipeline<'_>, model: &TemplateModel) {
 
     let store = pipeline.mgr.store.lock();
     if members.iter().any(|member| {
-        store
-            .get_ledger(&member.ledger_id)
-            .ok()
-            .flatten()
+        super::ledger_id(&member.ledger_id)
+            .and_then(|file_id| store.file_coverage_by_id(file_id).ok().flatten())
             .is_none_or(|row| {
-                store
-                    .get_media(row.media_id)
-                    .ok()
-                    .flatten()
-                    .is_none_or(|media| {
-                        store
-                            .library_for_path_strict(std::path::Path::new(&row.path), media.kind)
-                            .ok()
-                            .flatten()
-                            .is_some_and(|owner| {
-                                !store.library_accepts_work(&owner.id).unwrap_or(false)
-                            })
-                    })
+                row.file.version.source_version != member.source_version
+                    || crate::fingerprint_job::source::ensure_source_recorded(&store, &row).is_err()
             })
     }) {
         tracing::warn!(
@@ -441,8 +425,8 @@ fn build_marker_replacement(
     let store = pipeline.mgr.store.lock();
 
     for unit in units {
-        let ledger_id = unit.row.id.to_string();
-        let episode = unit.row.episode.unwrap_or(1);
+        let ledger_id = unit.row.file.file_id.to_string();
+        let episode = projected_episode(&unit.row);
         let detection = find_detection(detections, &ledger_id, episode);
         let previous = store
             .get_media_marker(pipeline.media_id, Some(pipeline.season), Some(episode))
@@ -610,8 +594,8 @@ fn has_truncated_unmatched(
     kind: SegmentKind,
 ) -> bool {
     units.iter().any(|unit| {
-        let episode = unit.row.episode.unwrap_or(1);
-        let ledger_id = unit.row.id.to_string();
+        let episode = projected_episode(&unit.row);
+        let ledger_id = unit.row.file.file_id.to_string();
         let detection = find_detection(detections, &ledger_id, episode);
         let has_detection = match kind {
             SegmentKind::Intro => detection.and_then(|d| d.intro_match.as_ref()).is_some(),

@@ -48,7 +48,9 @@ impl Catalog for ArtworkCatalog {
         Ok(None)
     }
     fn poster_url(&self, _: MediaKind, _: &str) -> Result<Option<String>, String> {
-        Ok(Some("https://image.tmdb.org/t/p/w342/clip-poster.jpg".into()))
+        Ok(Some(
+            "https://image.tmdb.org/t/p/w342/clip-poster.jpg".into(),
+        ))
     }
     fn image_candidates(&self, _: MediaKind, _: &str) -> Result<ArtworkCandidates, String> {
         Ok(ArtworkCandidates {
@@ -126,9 +128,10 @@ fn media_id_for(state: &ApiState, path: &std::path::Path) -> domain::MediaId {
     let store = state.store();
     let guard = store.lock();
     guard
-        .ledger_by_path(&path.display().to_string())
+        .file_coverage_by_path(&path.display().to_string())
         .unwrap()
         .expect("path must be ledgered")
+        .file
         .media_id
 }
 
@@ -155,20 +158,20 @@ async fn video_artwork_fixture() -> VideoArtworkFixture {
     let library_id = create_video_library(&app, &root).await;
     put_scrape_setting(&app, false).await;
     scan_and_wait(&app, &library_id).await;
-    assert!(
-        !root.join("poster.jpg").exists(),
-        "镜像关闭时不得写封面"
-    );
+    assert!(!root.join("poster.jpg").exists(), "镜像关闭时不得写封面");
 
     put_scrape_setting(&app, true).await;
     {
         let store = state.store();
         let guard = store.lock();
-        let row = guard
-            .ledger_by_path(&clip.display().to_string())
+        let coverage = guard
+            .file_coverage_by_path(&clip.display().to_string())
             .unwrap()
             .expect("clip 必须已入账");
-        let mut media = guard.get_media(row.media_id).unwrap().expect("media");
+        let mut media = guard
+            .get_media(coverage.file.media_id)
+            .unwrap()
+            .expect("media");
         media.tmdb_id = Some("603".into());
         guard.update_media(&media).unwrap();
     }
@@ -319,19 +322,19 @@ async fn video_scan_clears_only_the_retryable_cover_marker() {
     };
     let marker = || state.store().lock().get_setting(&key).unwrap();
 
-    set_marker("auto-v2");
+    set_marker("auto");
     scan_and_wait(&app, &id).await;
     assert_ne!(
         marker().as_deref(),
-        Some("auto-v2"),
+        Some("auto"),
         "扫描必须清掉可重试的封面标记"
     );
 
-    set_marker("checked-v2");
+    set_marker("checked");
     scan_and_wait(&app, &id).await;
     assert_eq!(
         marker().as_deref(),
-        Some("checked-v2"),
+        Some("checked"),
         "已发布的封面标记不得被扫描清掉"
     );
 }

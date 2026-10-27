@@ -1,6 +1,8 @@
 # Browser 走 CDP：单一开关、仅用于登录与签到、受管 Obscura 兜底、导航前失败回退 HTTP
 
-**Browser**（CDP 会话）只用于 Site 的登录与 **Check-in**，二者是该会话上的第一方插件。**搜索与 RSS 永远走 HTTP，不使用 CDP**（2026-10-16 r4 范围调整：删除 Profile `render` 搜索路径）。默认 Docker 镜像不打包 Chromium 或 Obscura；受管 Obscura 默认只用预置二进制，Admin 显式允许后才下载。这不是 Windows RDP。
+> 当前操作边界以本 ADR 的 2026-10-20 更正及 `docs/deploy.md` 为准。r9/T0 保留为 2026-10-16 的历史版本证据，不代表所有能力已验证；旧目录原地升级说法已被当前 Store 的无迁移布局入口取代。
+
+**Browser**（CDP 会话）只用于 Site 的登录与 **Check-in**，二者是该会话上的第一方插件。**搜索与 RSS 永远走 HTTP，不使用 CDP**（2026-10-16 r4 范围调整：删除 Profile `render` 搜索路径）。默认 Docker 镜像不打包 Chromium 或 Obscura；受管 Obscura 默认使用预置归档或带部署者清单的二进制，Admin 显式允许后才下载。这不是 Windows RDP。
 
 ## 决策（2026-10-16，r2 按计划修订同步）
 
@@ -27,11 +29,11 @@
 
 - **登录 / Check-in**：只有**导航之前**的失败（端点不可用〔CDP 关闭或无可用端点〕、排队超时 `BrowserBusy`、target / WebSocket 建立、cookie 注入失败——服务端尚未收到请求）才回退 HTTP，并 `warn!`（Site、route、原因）。**端点配置非法**（设置读取失败、URL 不合法等）不回退，直接报错，以便尽早暴露配置问题。**导航已发出之后**的失败不回退，直接报错，避免重复签到或重复登录请求。
 - 回退不等于成功；HTTP 遇到质询照常报错，不重试浏览器路径。
-- 单个浏览器会话有总时限（默认 30s，可配置，含排队），各步骤共用剩余时间；排队另有独立上限（默认 15s），拿到名额后剩余时间不足 10s 即在导航前返回 busy（可回退 HTTP）。关闭 CDP target 有独立上限（默认 2s），超时只 `warn!`，单会话最多额外占用该清理上限。cookie 不做 session-end 清理。
+- 单个浏览器会话有总时限（默认 30s，可配置，含排队），各步骤共用剩余时间；排队另有独立上限（默认 15s），拿到名额后剩余时间不足 10s 即在导航前返回 busy（可回退 HTTP）。清理时 `Target.closeTarget` 与 `Target.disposeBrowserContext` 当前各自获得独立默认 2s 上限，可能累计两个清理窗口，超时只 `warn!`；不能把它写成整个清理必定只额外占 2s。cookie 不发删除命令。依据 `crates/indexer/src/cdp_page.rs` 的 Drop 实现。
 
 ### 并发与 cookie 隔离
 
-- **多标签并发**：同一 CDP endpoint 的 tab 共用 cookie jar；实例全局并发上限默认 3（1–8 可配），同一可注册域串行以避免同一 cookie 范围内的并发覆盖。外部/第三方 Browser 的 cookie jar 不视为应用私有数据。
+- **多会话并发**：实例全局并发上限默认 3（1–8 可配）；同一可注册域串行。r9 后每个会话使用独立 BrowserContext，不再依赖多个 tab 共用默认 cookie jar；外部/第三方 Browser 的默认上下文不视为应用私有数据。
 - **会话隔离而非删除**（r9）：不调用 `Network.deleteCookies`、`Network.clearBrowserCookies` 或 `Storage.clearCookies`；每个会话在独立 BrowserContext 中运行，结束即 dispose，第三方 Browser 默认上下文的 cookie 不受影响，会话 cookie 不跨会话残留。
 - **host-only 注入与定向回读**：Site 已配置的 cookie 只经 `Network.setCookies` 使用当前 Site URL 做 host-only 注入；不得使用 `Network.setExtraHTTPHeaders`（会发给第三方主机）。读取 cookie 只发 `Network.getCookies{urls:[当前 Site URL]}`，结果按 name 去重后合并回该 Site 的 cookie 字段；不读取或回写无关域的 cookie。
 - **host 规范化**：Site URL host 用于 cookie host-only 注入与并发分组时统一小写、去尾点、IDNA 转 ASCII、IPv6 去方括号并规范化；不遍历或归类 cookie domain。
@@ -39,7 +41,7 @@
 - IP 地址规范化为标准写法（如 `2001:db8::1`），按整个 IP 分组。
 - **跳转 host**：不扫描、不回写、不删除跳转到的 SSO/质询 host cookie；`cookie_header` 只读取当前 Site URL 可见的 cookie，因此跨 host SSO 的认证状态不保证合并回 Site。
 - **有界 FIFO 排队**：拿不到全局名额或分组时按票号先来先服务排队，超过排队上限或剩余时间不足即返回 busy（导航前失败，可回退 HTTP）。
-- 运行前提仅为 `Network.setCookies` 和 `Network.getCookies{urls}`。不要求 `Network.getAllCookies` / `Storage.getCookies` / `Network.deleteCookies`；浏览器 target 关闭不改变 cookie jar。
+- 运行前提包括 `Target.createBrowserContext`、上下文内 target 创建/attach、`Network.setCookies` 和 `Network.getCookies{urls}`。不要求 `Network.getAllCookies` / `Storage.getCookies` / cookie 删除方法；结束时 dispose 本会话上下文，而非清空共享 jar。实现见 `crates/indexer/src/cdp_page.rs`。
 
 ### 受管 Obscura 生命周期
 
@@ -50,18 +52,18 @@
 - **端口与绑定**：每次启动选随机空闲端口，并以 `--host 127.0.0.1` 绑定回环（以 Task 0 实测为准；无法保证回环绑定则拒绝启用受管模式）。就绪与身份以 `/json/version` 加本进程子进程存活判定。端口竞争导致启动失败时换端口重试至多 2 次。
 - **进程身份**：pidfile `<data>/run/obscura.pid`（pid、端口、nonce）。启动时只回收 exe 指向 `<data>/bin/obscura` 的旧进程；其它进程只删 pidfile，不杀。应用正常退出时停止受管 daemon。
 - 安装与启动在 Job（`BrowserReconcile`）中执行，保存设置不等待下载。下载或启动失败记 `error!` 并写入状态 `last_error`；开关保持开启，请求按上节回退。
-- 版本以 `/json/version` 上报为准，代码常量只是期望值，不一致 `warn!`。
+- 版本核对来自 `obscura --version`；`/json/version` 用于 CDP 就绪发现，其 Browser 字段不是 Obscura 版本。版本不一致记 `warn!` / `last_error`（`crates/api/src/obscura_manager.rs`）。
 
 ### 信任模型（受管二进制）
 
-- 信任根是**代码中写死的各平台资产 SHA-256 与大小**，随 `OBSCURA_VERSION`（当前 `v0.2.3`）一起更新。我们信任的是「这几个具体文件」，不是 `h4ckf0r0day/obscura` 仓库本身——该仓库为第三方维护、自述为防检测浏览器，上游不提供签名。
+- 发布归档的信任根是**代码中写死的各平台资产 SHA-256 与大小**，随 `OBSCURA_VERSION`（当前 `v0.2.3`）一起更新；不是无条件信任 `h4ckf0r0day/obscura` 仓库。`preinstalled` 另接受部署者提供 `obscura.sha256sums` 的二进制目录，该方式只校验与清单一致，不具有固定归档哈希同等的来源保证（`crates/api/src/obscura_install.rs`）。
 - 下载先写临时文件，边写边计算哈希；大小上限 200 MiB，`Content-Length` 必须与表一致；不符即删除并报错。归档只接受 `obscura`、`obscura-worker` 两个普通文件，校验通过后原子 rename 到 `<data>/bin/`。
 - 预置二进制同样必须通过哈希校验（见 deploy 文档的预置规则）。
 - 升级版本：人工下载、核对哈希、改表、重新跑计划 Task 0 兼容性检查。
 
 ### 端点与协议约束
 
-- 只接受 **`http` CDP discovery URL**（`/json/version`、`/json/new`）；不接受 `https`（当前 transport 只支持 `ws`，`wss` 为后续工作），也不接受直接 `ws`/`wss` 调试 WebSocket。
+- 只接受 **`http` CDP discovery URL**，通过 `/json/version` 发现 Browser WebSocket，再用 Target 命令创建上下文和页面；不依赖 Obscura 不支持的 `/json/new`、`/json/close`。不接受 `https`，也不接受直接 `ws`/`wss` 调试 WebSocket。
 - discovery 返回的 `webSocketDebuggerUrl` 的 host:port 必须与端点一致。
 - 端点不接受内嵌凭据与 query string；空/非法端点写入时 400 拒绝，不静默 fallback。
 - 启动构造与每次真实请求共用同一配置入口：API 以 provider closure 从 Store 读取实时设置，Indexer 不依赖 API/Store。保存后立即生效。
@@ -70,9 +72,9 @@
 
 ### Fresh-start 数据边界（不做兼容迁移）
 
-- （r9）存量数据目录原地增量升级，存量 Site 维护方式为 `http`；应用**不得自动删除**用户数据。
+- **2026-10-20 当前布局更正**：Store 仅初始化空文件或重开当前 `application_id` / `user_version`，没有旧布局迁移阶梯；旧库不能原地升级。应用不得自动删除用户数据，部署者应保留原目录和一致备份，在独立新目录验证；生产切换须另行批准。依据 `crates/store/src/open.rs`、`schema/layout.rs`。
 - 新建数据库的 `sites` 基表包含 `maintenance_via TEXT NOT NULL DEFAULT 'http'`；所有新 Site 默认 HTTP。新设置只读写 `cdp.enabled`、`cdp.url` 与 `obscura.install`，不读取、不迁移、不兼容 `cdp.sync.enabled`、`obscura.enabled`、`obscura.url`。
-- 旧 schema/旧数据目录不受支持。启动时应在任何 schema 写入前明确报错并提示删除旧数据目录；不自动 ALTER/backfill 旧 Site、不自动改变 `maintenance_via`，不因旧 `cdp_url` 或 Profile `render: true` 自动开启 CDP。
+- 当前启动先只读检查已存在的四个 Store 文件，布局不匹配时报 layout mismatch；不自动 ALTER/backfill 旧 Site，不因旧 `cdp_url` 或 Profile `render: true` 自动开启 CDP。不得把拒绝启动写成应用已自动重置目录。
 - Profile 中遗留的 `render: true` 不再控制搜索，加载时忽略并 `warn!`；不创建旧 Site 的 `legacy_site_notices`、旧端点扫描或兼容迁移 API。
 - 新写入的实例/Site 端点只接受 `http`；内嵌凭据、query、`https`、`ws`/`wss` 在写入时 400 拒绝。无需扫描或修复旧端点，因为旧数据目录不受支持。
 
@@ -87,8 +89,8 @@
 - 默认镜像仍不带 Chromium，也不带 Obscura。离线或默认（`preinstalled`）部署须按 deploy 文档预置二进制，或配置外部 `cdp.url`。
 - `CRAWLER_MEDIA_BROWSER` 只设置开关的启动默认值（仅在 `cdp.enabled` 未设置时写入），不再导致启动失败；它**不**决定是否下载，也不保证启动浏览器（见上方启动条件）。
 
-## r9 修订（2026-10-16，取代 r8 中的 fresh-start 与"不删 cookie"）
-- **数据升级**：不要求空数据目录。v7 库增量补 `sites.maintenance_via`（默认 `http`），已有数据全部保留。
+## r9 修订历史（2026-10-16）
+- **当时的数据升级方案（现已取代）**：r9 曾允许 v7 库增量补 `sites.maintenance_via`（默认 `http`）并保留已有数据。此处仅保留历史，当前入口拒绝旧布局，不应据此执行升级。
 - **会话隔离**：每个 Browser 会话使用独立的 BrowserContext（`Target.createBrowserContext` → `createTarget{browserContextId}` → `disposeBrowserContext`）。本应用不调用任何 cookie 删除命令，也不会碰到其他上下文里的 cookie；会话结束后，该会话的 cookie 随上下文一起销毁，因此不会串号，也不会残留凭据。不支持 BrowserContext 的端点标记为不兼容，登录/签到在导航前回退 HTTP。
 - **回退边界**：只有导航前失败（BrowserSetup/BrowserBusy）才回退 HTTP，且回退时不重复发 Hook 事件；导航后的失败原样报告。
 - **T0 验证表**：2026-10-16 在 box 上用 Obscura v0.2.3（x86_64-linux，sha256 `1534d1e6…eec` 校验通过）实测。前 6 项结果出自本仓库测试（`crates/indexer/tests/obscura_t0.rs`、`crates/api/tests/management/obscura_lifecycle.rs`，均为 `#[ignore]`），其余出自复审 r2 的 Node 探针：
@@ -117,7 +119,7 @@
 
 回归测试注入 PageSession/opener 与受管生命周期 seam（installer/launcher），断言路由选择、回退确实发生、以及回退时请求确实走了 HTTP。不下载或启动真实 Obscura，不启动 Chromium，不访问实网（localhost 假 CDP 服务是允许的，仓库已有先例）。
 
-**Obscura 实测兼容性**：待计划 Task 0 填写（方法 → 支持/不支持 → 降级方式；监听地址；`--port 0`；浏览器 GET 签到是否生效）。在此之前，受管 Obscura 的 CDP 兼容性**未经验证**。
+**实测边界**：r9 的 T0 表是当时 Obscura v0.2.3 的局部实测记录，保留其原通过/不支持/未测结果。公共后缀 cookie 拒收仍为未测；表中通过项不覆盖所有端点、平台或当前全流程，也不能作为生产切换完成证据。
 
 ## 理由与备选方案
 

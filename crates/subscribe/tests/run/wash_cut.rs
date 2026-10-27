@@ -39,14 +39,14 @@ fn wash_cut_replaces_only_when_score_strictly_greater() {
 
     let outcome = subscribe::run_with_probe(
         run_input(
-        &sub,
-        &media,
-        &filter,
-        vec![worse, better],
-        facts,
-        &dl,
-        &tmp.path().join("lib"),
-    ),
+            &sub,
+            &media,
+            &filter,
+            vec![worse, better],
+            facts,
+            &dl,
+            &tmp.path().join("lib"),
+        ),
         &FileProbe,
     )
     .unwrap();
@@ -145,8 +145,15 @@ fn assert_rejected_probe_preserves_owned(old_score: i32, resolution: &str, codec
     );
     assert_eq!(outcome.facts.movie().unwrap().score, old_score);
     // Review N-1: a non-upgrade is probed at the source and never published.
-    assert!(outcome.ledger.is_empty(), "rejected alternate is not recorded");
-    assert!(outcome.removed_paths.is_empty(), "{:?}", outcome.removed_paths);
+    assert!(
+        outcome.files.is_empty(),
+        "rejected alternate is not recorded"
+    );
+    assert!(
+        outcome.removed_paths.is_empty(),
+        "{:?}",
+        outcome.removed_paths
+    );
     assert_eq!(outcome.rejected_enclosures.len(), 1);
     assert!(
         old_lib.exists(),
@@ -234,17 +241,17 @@ fn wash_cut_preserve_removed_keeps_old_file() {
 
     let outcome = subscribe::run_with_probe(
         RunInput {
-        preserve_removed: true,
-        ..run_input(
-            &sub,
-            &media,
-            &filter,
-            vec![better],
-            facts,
-            &dl,
-            &tmp.path().join("lib"),
-        )
-    },
+            preserve_removed: true,
+            ..run_input(
+                &sub,
+                &media,
+                &filter,
+                vec![better],
+                facts,
+                &dl,
+                &tmp.path().join("lib"),
+            )
+        },
         &FileProbe,
     )
     .unwrap();
@@ -351,15 +358,18 @@ fn wash_cut_keep_old_versions_keeps_both_files() {
     let dl = MemoryDownloader::new(tmp.path().join("stage"));
     map_file(&dl, &better, src);
 
-    let outcome = subscribe::run_with_probe(run_input(
-        &sub,
-        &media,
-        &filter,
-        vec![better],
-        facts,
-        &dl,
-        &tmp.path().join("lib"),
-    ), &FileProbe)
+    let outcome = subscribe::run_with_probe(
+        run_input(
+            &sub,
+            &media,
+            &filter,
+            vec![better],
+            facts,
+            &dl,
+            &tmp.path().join("lib"),
+        ),
+        &FileProbe,
+    )
     .unwrap();
 
     assert!(
@@ -371,14 +381,16 @@ fn wash_cut_keep_old_versions_keeps_both_files() {
         "no removed paths reported"
     );
     // 旧台账行由 api 层保留（removed_paths 为空 → 不删 ledger 行）。
-    assert_eq!(outcome.ledger.len(), 1, "outcome carries only the new row");
+    assert_eq!(outcome.files.len(), 1, "outcome carries only the new file");
 }
 
 struct FailingProbe;
 
 impl library::MediaProbe for FailingProbe {
     fn probe(&self, _: &std::path::Path) -> Result<library::FileQuality, library::LibraryError> {
-        Err(library::LibraryError::Probe("Invalid data found when processing input".into()))
+        Err(library::LibraryError::Probe(
+            "Invalid data found when processing input".into(),
+        ))
     }
 }
 
@@ -393,33 +405,66 @@ fn wash_cut_probe_failure_keeps_owned_file_and_fact() {
     fs::create_dir_all(old_lib.parent().unwrap()).unwrap();
     write_probed(&old_lib, "1080p", "h264", "");
     let mut facts = SubscribeFacts::default();
-    facts.upsert(None, None, QualityFact { score: 50, path: Some(old_lib.display().to_string()) });
-    facts.set_quality(old_lib.display().to_string(), release::parse("The.Matrix.1999.1080p.BluRay.x264"));
-    let better = torrent("The.Matrix.1999.2160p.BluRay.x265-NEW", "https://pt.example/dl/better");
+    facts.upsert(
+        None,
+        None,
+        QualityFact {
+            score: 50,
+            path: Some(old_lib.display().to_string()),
+        },
+    );
+    facts.set_quality(
+        old_lib.display().to_string(),
+        release::parse("The.Matrix.1999.1080p.BluRay.x264"),
+    );
+    let better = torrent(
+        "The.Matrix.1999.2160p.BluRay.x265-NEW",
+        "https://pt.example/dl/better",
+    );
     let src = tmp.path().join("better.mkv");
     fs::write(&src, b"garbage").unwrap();
     let dl = MemoryDownloader::new(tmp.path().join("stage"));
     map_file(&dl, &better, src);
 
     let outcome = subscribe::run_with_probe(
-        run_input(&sub, &media, &filter, vec![better], facts, &dl, &tmp.path().join("lib")),
+        run_input(
+            &sub,
+            &media,
+            &filter,
+            vec![better],
+            facts,
+            &dl,
+            &tmp.path().join("lib"),
+        ),
         &FailingProbe,
     )
     .unwrap();
 
-    assert_eq!(dl.added().len(), 1, "title looks like an upgrade, so it is downloaded");
-    assert!(old_lib.exists(), "unprobed replacement must not delete the owned file");
+    assert_eq!(
+        dl.added().len(),
+        1,
+        "title looks like an upgrade, so it is downloaded"
+    );
+    assert!(
+        old_lib.exists(),
+        "unprobed replacement must not delete the owned file"
+    );
     // Review M-4: only the unapproved new copy is withdrawn; the row stays
     // active (neither transferred nor rejected) until a probe decides.
     assert!(
-        !outcome.removed_paths.contains(&old_lib.display().to_string()),
+        !outcome
+            .removed_paths
+            .contains(&old_lib.display().to_string()),
         "{:?}",
         outcome.removed_paths
     );
     assert!(outcome.transferred_enclosures.is_empty());
     assert!(outcome.rejected_enclosures.is_empty());
     let fact = outcome.facts.movie().unwrap();
-    assert_eq!(fact.path.as_deref(), Some(old_lib.display().to_string().as_str()));
+    assert_eq!(
+        fact.path.as_deref(),
+        Some(old_lib.display().to_string().as_str())
+    );
     assert_eq!(fact.score, 50);
 }
 
@@ -431,17 +476,39 @@ fn in_flight_upgrade_blocks_more_upgrades_for_that_slot() {
     let filter = movie_filter();
     let sub = movie_sub(&media, &filter, true);
     let mut facts = SubscribeFacts::default();
-    facts.replace(None, None, QualityFact { score: 1, path: Some("/lib/old.mkv".into()) });
-    facts.set_quality("/lib/old.mkv".into(), release::parse("The.Matrix.1999.1080p.WEB-DL.x264"));
+    facts.replace(
+        None,
+        None,
+        QualityFact {
+            score: 1,
+            path: Some("/lib/old.mkv".into()),
+        },
+    );
+    facts.set_quality(
+        "/lib/old.mkv".into(),
+        release::parse("The.Matrix.1999.1080p.WEB-DL.x264"),
+    );
     let title = "The.Matrix.1999.2160p.BluRay.x265-OTHER";
     let candidate = filter::ScoredTorrent {
         release: release::parse(title),
         torrent: torrent(title, "https://pt.example/dl/other"),
         score: 100,
     };
-    assert_eq!(subscribe::choose(&sub, Some(&filter), &[candidate.clone()], &facts).len(), 1);
+    assert_eq!(
+        subscribe::choose(
+            &sub,
+            Some(&filter),
+            std::slice::from_ref(&candidate),
+            &facts
+        )
+        .len(),
+        1
+    );
     facts.mark_in_flight(None, None);
     assert!(subscribe::choose(&sub, Some(&filter), &[candidate], &facts).is_empty());
     facts.retain_owned();
-    assert!(!facts.is_in_flight(None, None), "in-flight marks are transient");
+    assert!(
+        !facts.is_in_flight(None, None),
+        "in-flight marks are transient"
+    );
 }

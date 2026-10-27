@@ -1,13 +1,13 @@
+use axum::Router;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
-use axum::Router;
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use crate::auth::authenticate;
-use crate::provider::MediaServerProvider;
+use crate::provider::{MediaServerProvider, QueryTiming};
 
 mod catalog;
 mod media;
@@ -19,8 +19,6 @@ mod system;
 mod user_data;
 mod users;
 mod websocket;
-
-pub(super) use crate::provider::query::parse_season_id;
 
 use catalog::{
     genre_by_name, genres, item_by_id, items, latest_items, resume_items, search_hints,
@@ -93,11 +91,29 @@ pub struct ItemsQuery {
     pub is_folder: Option<bool>,
     #[serde(default, rename = "SearchTerm", alias = "searchTerm")]
     pub search_term: Option<String>,
-    #[serde(default, rename = "Genres", alias = "genres", alias = "Genre", alias = "genre")]
+    #[serde(
+        default,
+        rename = "Genres",
+        alias = "genres",
+        alias = "Genre",
+        alias = "genre"
+    )]
     pub genres: Option<String>,
-    #[serde(default, rename = "GenreIds", alias = "genreIds", alias = "GenreId", alias = "genreId")]
+    #[serde(
+        default,
+        rename = "GenreIds",
+        alias = "genreIds",
+        alias = "GenreId",
+        alias = "genreId"
+    )]
     pub genre_ids: Option<String>,
-    #[serde(default, rename = "StudioIds", alias = "studioIds", alias = "Studios", alias = "studios")]
+    #[serde(
+        default,
+        rename = "StudioIds",
+        alias = "studioIds",
+        alias = "Studios",
+        alias = "studios"
+    )]
     pub studio_ids: Option<String>,
 }
 #[derive(Deserialize)]
@@ -115,7 +131,7 @@ async fn item_id_for_user(
     path: UserItemPath,
     user_id: domain::UserId,
 ) -> Result<String, StatusCode> {
-    parent_scope::require_user_path(provider, user_id, path.user_id.as_deref()).await?;
+    parent_scope::require_user_path(provider, user_id, path.user_id.as_deref(), None).await?;
     Ok(path.id)
 }
 pub fn routes(provider: Arc<dyn MediaServerProvider>) -> Router {
@@ -175,6 +191,7 @@ pub fn routes(provider: Arc<dyn MediaServerProvider>) -> Router {
             let p = provider.clone();
             authenticate(p, req, next)
         }))
+        .route_layer(axum::middleware::from_fn(query_timing))
         .with_state(state.clone());
 
     let public = Router::new()
@@ -186,6 +203,30 @@ pub fn routes(provider: Arc<dyn MediaServerProvider>) -> Router {
 
     let root = Router::new().merge(public).merge(protected);
     Router::new().merge(root.clone()).nest("/emby", root)
+}
+
+async fn query_timing(
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let path = request.uri().path();
+    let path = path.strip_prefix("/emby").unwrap_or(path);
+    let covered = matches!(
+        *request.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    ) && (path == "/Items"
+        || (path.starts_with("/Users/")
+            && (path.ends_with("/Items") || path.ends_with("/Items/Latest")))
+        || (path.starts_with("/Shows/") && path.ends_with("/Episodes")));
+    if covered && request.extensions().get::<QueryTiming>().is_none() {
+        let timing = request
+            .extensions_mut()
+            .remove::<crate::provider::QueryTimingSeed>()
+            .map(|seed| seed.0)
+            .unwrap_or_else(QueryTiming::start);
+        request.extensions_mut().insert(timing);
+    }
+    crate::query_metrics::observe_request(request, next).await
 }
 
 pub fn media_routes(provider: Arc<dyn MediaServerProvider>) -> Router {

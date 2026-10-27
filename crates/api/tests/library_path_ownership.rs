@@ -1,43 +1,51 @@
+//! Library ownership boundaries that survive a root rewrite or a Library
+//! deletion. A published file's owner is its recorded `library_files.library_id`;
+//! these tests pin the guards that keep that record from being stranded.
+
 use api::Store;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 #[test]
-fn more_specific_root_wins_even_after_ambiguous_parent_roots() {
+fn root_path_is_globally_unique_across_libraries() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
-    let parent = tmp.path().join("media");
-    let child = parent.join("tv");
-    let parent_path = parent.to_str().unwrap();
-    let child_path = child.to_str().unwrap();
-    store
+    let shared = tmp.path().join("media");
+    let shared_path = shared.to_str().unwrap();
+    let owner = store
         .create_library(
             MediaKind::Tv,
-            "parent-a",
-            &[parent_path],
+            "owner",
+            &[shared_path],
             "everyone",
             true,
             &[],
         )
-        .unwrap();
-    store
-        .create_library(
-            MediaKind::Tv,
-            "parent-b",
-            &[parent_path],
-            "everyone",
-            true,
-            &[],
-        )
-        .unwrap();
-    let expected = store
-        .create_library(MediaKind::Tv, "child", &[child_path], "everyone", true, &[])
         .unwrap();
 
-    let owner = store
-        .library_for_path(&child.join("episode.mkv"), MediaKind::Tv)
-        .unwrap()
-        .unwrap();
-    assert_eq!(owner.id, expected.id);
+    // `library_roots.path_key TEXT NOT NULL UNIQUE`: a root belongs to exactly
+    // one Library, so a second Library cannot claim the same path and no file
+    // can have two candidate owners.
+    let duplicate = store.create_library(
+        MediaKind::Tv,
+        "duplicate",
+        &[shared_path],
+        "everyone",
+        true,
+        &[],
+    );
+    assert!(
+        matches!(duplicate, Err(api::store::StoreError::Sqlite(_))),
+        "two Libraries must not share a root path"
+    );
+    assert_eq!(
+        store
+            .library_for_path_strict(&shared.join("episode.mkv"), MediaKind::Tv)
+            .unwrap()
+            .map(|library| library.id),
+        Some(owner.id),
+        "a new file is still classified by root path at admission"
+    );
 }
 
 #[test]
@@ -71,9 +79,10 @@ fn restricted_root_cannot_move_while_owned_ledger_rows_remain() {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    let published = publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id: media.id,
             path: path.display().to_string(),
             season: None,
@@ -84,16 +93,11 @@ fn restricted_root_cannot_move_while_owned_ledger_rows_remain() {
             quality_source: QualitySource::Probe,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
-    assert_eq!(
-        store
-            .library_for_path(&path, MediaKind::Movie)
-            .unwrap()
-            .unwrap()
-            .id,
-        restricted.id
-    );
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(published.library_id.to_string(), restricted.id);
 
     let update = store.update_library(
         &restricted.id,
@@ -103,12 +107,9 @@ fn restricted_root_cannot_move_while_owned_ledger_rows_remain() {
     );
     assert!(matches!(update, Err(api::store::StoreError::Protected(_))));
 
+    let recorded = store.file_coverage_by_id(published.file_id).unwrap().unwrap();
     assert_eq!(
-        store
-            .library_for_path(&path, MediaKind::Movie)
-            .unwrap()
-            .unwrap()
-            .id,
+        recorded.file.library_id.to_string(),
         restricted.id,
         "the failed root update must preserve the row's restricted owner"
     );
@@ -133,11 +134,26 @@ async fn deleting_library_with_owned_ledger_is_blocked_with_conflict() {
         )
         .unwrap();
 
-    let media_id = domain::MediaId::new();
+    let media = Media {
+        id: MediaId::new(),
+        kind: MediaKind::Movie,
+        title: "Restricted".into(),
+        year: None,
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&media).unwrap();
+    let media_id = media.id;
     let path = restricted_root.join("secret.mkv");
-    store
-        .insert_ledger(&LedgerRow {
-            id: domain::LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(domain::LedgerId::new()),
             media_id,
             path: path.to_str().unwrap().into(),
             season: None,
@@ -148,8 +164,10 @@ async fn deleting_library_with_owned_ledger_is_blocked_with_conflict() {
             quality_source: domain::QualitySource::Probe,
             confidence: domain::Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     // 尝试删除仍有台账文件的媒体库：必须返回 409 Conflict 或 Protected Error
     let err = store.delete_library(&restricted.id);

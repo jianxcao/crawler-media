@@ -1,16 +1,16 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use domain::{Media, MediaId, MediaKind};
 use media::CatalogHit;
 use parking_lot::{Condvar, Mutex};
 
+use api::Store;
 use api::catalog::Catalog;
 use api::media_posters::http::ImageFetcher;
 use api::media_posters::service::MediaPosterService;
 use api::media_posters::{MediaPosterSource, PosterError};
-use api::Store;
 
 struct MockCatalog {
     poster_calls: AtomicUsize,
@@ -39,7 +39,9 @@ impl Catalog for MockCatalog {
         } else if tmdb_id == "err" {
             Ok(Some("https://image.tmdb.org/t/p/w500/err.jpg".into()))
         } else {
-            Ok(Some(format!("https://image.tmdb.org/t/p/w500/{tmdb_id}.jpg")))
+            Ok(Some(format!(
+                "https://image.tmdb.org/t/p/w500/{tmdb_id}.jpg"
+            )))
         }
     }
 }
@@ -59,9 +61,11 @@ impl TestGate {
 
     fn wait(&self) {
         let mut rel = self.released.lock();
-        while !*rel {
-            self.cvar.wait(&mut rel);
-        }
+        self.cvar
+            .wait_while_for(&mut rel, |released| !*released, Duration::from_secs(30));
+        let released = *rel;
+        drop(rel);
+        assert!(released, "test must release the poster worker gate");
     }
 
     fn release(&self) {
@@ -121,20 +125,19 @@ fn setup_service_and_store(
     fetcher: Arc<dyn ImageFetcher>,
     catalog: Arc<dyn Catalog>,
     deadline: Duration,
-) -> (tempfile::TempDir, Arc<Mutex<Store>>, Arc<MediaPosterService>) {
+) -> (
+    tempfile::TempDir,
+    Arc<Mutex<Store>>,
+    Arc<MediaPosterService>,
+) {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().join("data");
     let cache_dir = tmp.path().join("cache");
     let store = Arc::new(Mutex::new(Store::open(&data_dir).unwrap()));
 
     let service = Arc::new(
-        MediaPosterService::with_custom_fetcher(
-            store.clone(),
-            catalog,
-            cache_dir,
-            fetcher,
-        )
-        .with_wait_deadline(deadline),
+        MediaPosterService::with_custom_fetcher(store.clone(), catalog, cache_dir, fetcher)
+            .with_wait_deadline(deadline),
     );
 
     (tmp, store, service)
@@ -180,11 +183,8 @@ async fn cancelling_requests_does_not_release_upstream_slots() {
         poster_calls: AtomicUsize::new(0),
     });
 
-    let (_tmp, store, service) = setup_service_and_store(
-        fetcher.clone(),
-        catalog.clone(),
-        Duration::from_secs(10),
-    );
+    let (_tmp, store, service) =
+        setup_service_and_store(fetcher.clone(), catalog.clone(), Duration::from_secs(10));
 
     let m1 = insert_media(&store.lock(), "m1");
     let m2 = insert_media(&store.lock(), "m2");
@@ -201,7 +201,8 @@ async fn cancelling_requests_does_not_release_upstream_slots() {
     // Wait until 4 are active in fetcher
     wait_until("4 workers active in fetcher", || {
         fetcher.active.load(Ordering::SeqCst) >= 4
-    }).await;
+    })
+    .await;
 
     // Abort all 4 client requests
     for h in handles {
@@ -232,7 +233,9 @@ async fn cancelling_requests_does_not_release_upstream_slots() {
         let active = fetcher.active.load(Ordering::SeqCst);
         let max_active = fetcher.max_active.load(Ordering::SeqCst);
         if active > 4 || max_active > 4 {
-            panic!("concurrency bound violated: active={active}, max_active={max_active} (must be <= 4)");
+            panic!(
+                "concurrency bound violated: active={active}, max_active={max_active} (must be <= 4)"
+            );
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
@@ -244,21 +247,30 @@ async fn cancelling_requests_does_not_release_upstream_slots() {
     gate.release();
     for h in second_handles {
         let res = h.await.unwrap();
-        assert!(res.is_ok(), "second batch request should succeed: {:?}", res.err());
+        assert!(
+            res.is_ok(),
+            "second batch request should succeed: {:?}",
+            res.err()
+        );
     }
 
     // Wait for all active to reach 0
     wait_until("all workers finished", || {
         fetcher.active.load(Ordering::SeqCst) == 0
-    }).await;
+    })
+    .await;
 
     // Wait for all inflight entries to be retired
     wait_until("all inflight entries retired", || {
         service.inflight_entries() == 0
-    }).await;
+    })
+    .await;
     assert_eq!(service.inflight_entries(), 0);
 
-    assert_eq!(active_before_release, 4, "4 initial workers should still hold slots");
+    assert_eq!(
+        active_before_release, 4,
+        "4 initial workers should still hold slots"
+    );
     assert_eq!(
         max_active_before_release, 4,
         "max_active must NOT exceed 4 even when cancelled callers abort"
@@ -290,7 +302,8 @@ async fn same_media_after_timeout_joins_running_fetch() {
     // Ensure worker 1 is actively inside fetcher
     wait_until("worker 1 active in fetcher", || {
         fetcher.active.load(Ordering::SeqCst) == 1
-    }).await;
+    })
+    .await;
 
     // While worker is still gated and running, entry must be retained
     assert_eq!(fetcher.fetch_calls.load(Ordering::SeqCst), 1);
@@ -302,7 +315,8 @@ async fn same_media_after_timeout_joins_running_fetch() {
 
     wait_until("follower waiting or finished", || {
         service.inflight_waiters(m1) >= 1 || handle2.is_finished()
-    }).await;
+    })
+    .await;
     assert_eq!(
         fetcher.fetch_calls.load(Ordering::SeqCst),
         1,
@@ -315,7 +329,8 @@ async fn same_media_after_timeout_joins_running_fetch() {
 
     wait_until("worker completed and retired inflight", || {
         fetcher.active.load(Ordering::SeqCst) == 0 && service.inflight_entries() == 0
-    }).await;
+    })
+    .await;
     assert_eq!(
         fetcher.fetch_calls.load(Ordering::SeqCst),
         1,
@@ -332,11 +347,8 @@ async fn follower_after_cancelled_leader_receives_outcome() {
         poster_calls: AtomicUsize::new(0),
     });
 
-    let (_tmp, store, service) = setup_service_and_store(
-        fetcher.clone(),
-        catalog.clone(),
-        Duration::from_secs(10),
-    );
+    let (_tmp, store, service) =
+        setup_service_and_store(fetcher.clone(), catalog.clone(), Duration::from_secs(10));
 
     let m1 = insert_media(&store.lock(), "follower_outcome_test");
 
@@ -345,7 +357,8 @@ async fn follower_after_cancelled_leader_receives_outcome() {
 
     wait_until("leader active in fetcher", || {
         fetcher.active.load(Ordering::SeqCst) == 1
-    }).await;
+    })
+    .await;
 
     // Abort leader task and await it; worker must keep running and entry must stay
     h_leader.abort();
@@ -356,14 +369,16 @@ async fn follower_after_cancelled_leader_receives_outcome() {
     let s2 = service.clone();
     let h_follower = tokio::spawn(async move { s2.get(m1).await });
 
-    wait_until("follower waiting", || {
-        service.inflight_waiters(m1) >= 1
-    }).await;
+    wait_until("follower waiting", || service.inflight_waiters(m1) >= 1).await;
 
     gate.release();
 
     let follower_res = h_follower.await.unwrap();
-    assert!(follower_res.is_ok(), "follower must succeed: {:?}", follower_res.err());
+    assert!(
+        follower_res.is_ok(),
+        "follower must succeed: {:?}",
+        follower_res.err()
+    );
     assert_eq!(
         fetcher.fetch_calls.load(Ordering::SeqCst),
         1,
@@ -386,7 +401,6 @@ async fn follower_after_cancelled_leader_receives_outcome() {
     );
 }
 
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn leader_and_follower_share_one_published_outcome() {
     let catalog = Arc::new(MockCatalog {
@@ -408,20 +422,35 @@ async fn leader_and_follower_share_one_published_outcome() {
     let h_leader = tokio::spawn(async move { s_leader.get(m_long).await });
     wait_until("leader active in fetcher", || {
         fetcher_long.active.load(Ordering::SeqCst) == 1
-    }).await;
+    })
+    .await;
 
     let s_follower = service_long.clone();
     let h_follower = tokio::spawn(async move { s_follower.get(m_long).await });
     wait_until("leader and follower waiting and fetcher gated", || {
-        service_long.inflight_waiters(m_long) >= 2 && fetcher_long.active.load(Ordering::SeqCst) == 1
-    }).await;
+        service_long.inflight_waiters(m_long) >= 2
+            && fetcher_long.active.load(Ordering::SeqCst) == 1
+    })
+    .await;
 
     gate_long.release();
     let leader_res = h_leader.await.unwrap();
     let follower_res = h_follower.await.unwrap();
-    assert!(leader_res.is_ok(), "leader must succeed: {:?}", leader_res.err());
-    assert!(follower_res.is_ok(), "follower must succeed: {:?}", follower_res.err());
-    assert_eq!(fetcher_long.fetch_calls.load(Ordering::SeqCst), 1, "fetch count must stay 1");
+    assert!(
+        leader_res.is_ok(),
+        "leader must succeed: {:?}",
+        leader_res.err()
+    );
+    assert!(
+        follower_res.is_ok(),
+        "follower must succeed: {:?}",
+        follower_res.err()
+    );
+    assert_eq!(
+        fetcher_long.fetch_calls.load(Ordering::SeqCst),
+        1,
+        "fetch count must stay 1"
+    );
     let leader_bytes = leader_res.unwrap();
     let follower_bytes = follower_res.unwrap();
     assert_eq!(leader_bytes.bytes, follower_bytes.bytes);
@@ -462,20 +491,38 @@ async fn cache_write_failure_fails_leader_and_follower() {
     let h_fail_leader = tokio::spawn(async move { s_fail_leader.get(m_fail).await });
     wait_until("fail leader active in fetcher", || {
         fetcher_fail.active.load(Ordering::SeqCst) == 1
-    }).await;
+    })
+    .await;
 
     let s_fail_follower = service_fail.clone();
     let h_fail_follower = tokio::spawn(async move { s_fail_follower.get(m_fail).await });
-    wait_until("fail leader and follower waiting and fetcher still gated", || {
-        service_fail.inflight_waiters(m_fail) >= 2 && fetcher_fail.active.load(Ordering::SeqCst) == 1
-    }).await;
+    wait_until(
+        "fail leader and follower waiting and fetcher still gated",
+        || {
+            service_fail.inflight_waiters(m_fail) >= 2
+                && fetcher_fail.active.load(Ordering::SeqCst) == 1
+        },
+    )
+    .await;
 
     gate_fail.release();
     let res_leader = h_fail_leader.await.unwrap();
     let res_follower = h_fail_follower.await.unwrap();
-    assert!(matches!(res_leader, Err(PosterError::Io(_))), "leader must see Io error on unwritable cache: {:?}", res_leader);
-    assert!(matches!(res_follower, Err(PosterError::Io(_))), "follower must see Io error on unwritable cache: {:?}", res_follower);
-    assert_eq!(fetcher_fail.fetch_calls.load(Ordering::SeqCst), 1, "fetch count must stay 1");
+    assert!(
+        matches!(res_leader, Err(PosterError::Io(_))),
+        "leader must see Io error on unwritable cache: {:?}",
+        res_leader
+    );
+    assert!(
+        matches!(res_follower, Err(PosterError::Io(_))),
+        "follower must see Io error on unwritable cache: {:?}",
+        res_follower
+    );
+    assert_eq!(
+        fetcher_fail.fetch_calls.load(Ordering::SeqCst),
+        1,
+        "fetch count must stay 1"
+    );
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn error_outcome_replays_and_releases_permits() {
@@ -486,11 +533,8 @@ async fn error_outcome_replays_and_releases_permits() {
         poster_calls: AtomicUsize::new(0),
     });
 
-    let (_tmp, store, service) = setup_service_and_store(
-        fetcher.clone(),
-        catalog.clone(),
-        Duration::from_secs(5),
-    );
+    let (_tmp, store, service) =
+        setup_service_and_store(fetcher.clone(), catalog.clone(), Duration::from_secs(5));
 
     let m_err = insert_media(&store.lock(), "err");
 
@@ -501,14 +545,16 @@ async fn error_outcome_replays_and_releases_permits() {
     // Wait until in fetcher
     wait_until("leader in fetcher", || {
         fetcher.active.load(Ordering::SeqCst) >= 1
-    }).await;
+    })
+    .await;
 
     let s2 = service.clone();
     let h2 = tokio::spawn(async move { s2.get(m_err).await });
 
     wait_until("leader and follower waiting", || {
         service.inflight_waiters(m_err) >= 2
-    }).await;
+    })
+    .await;
     gate.release();
     let r1 = h1.await.unwrap();
     let r2 = h2.await.unwrap();
@@ -535,7 +581,8 @@ async fn error_outcome_replays_and_releases_permits() {
 
     wait_until("4 distinct media active in fetcher", || {
         fetcher.active.load(Ordering::SeqCst) == 4
-    }).await;
+    })
+    .await;
     assert_eq!(fetcher.active.load(Ordering::SeqCst), 4);
     assert_eq!(fetcher.max_active.load(Ordering::SeqCst), 4);
 
@@ -546,11 +593,13 @@ async fn error_outcome_replays_and_releases_permits() {
 
     wait_until("all capacity workers drained", || {
         fetcher.active.load(Ordering::SeqCst) == 0
-    }).await;
+    })
+    .await;
 
     wait_until("error media inflight entry retired", || {
         service.inflight_entries() == 0
-    }).await;
+    })
+    .await;
 
     let calls_before = fetcher.fetch_calls.load(Ordering::SeqCst);
     let r3 = service.get(m_err).await;
@@ -571,11 +620,8 @@ async fn worker_panic_releases_resources_and_replays_failure() {
         poster_calls: AtomicUsize::new(0),
     });
 
-    let (_tmp, store, service) = setup_service_and_store(
-        fetcher.clone(),
-        catalog.clone(),
-        Duration::from_secs(5),
-    );
+    let (_tmp, store, service) =
+        setup_service_and_store(fetcher.clone(), catalog.clone(), Duration::from_secs(5));
 
     let m_panic = insert_media(&store.lock(), "panic");
 
@@ -584,14 +630,16 @@ async fn worker_panic_releases_resources_and_replays_failure() {
 
     wait_until("leader in fetcher", || {
         fetcher.active.load(Ordering::SeqCst) >= 1
-    }).await;
+    })
+    .await;
 
     let s2 = service.clone();
     let h2 = tokio::spawn(async move { s2.get(m_panic).await });
 
     wait_until("leader and follower waiting", || {
         service.inflight_waiters(m_panic) >= 2
-    }).await;
+    })
+    .await;
 
     // Release gate
     gate.release();
@@ -600,12 +648,17 @@ async fn worker_panic_releases_resources_and_replays_failure() {
 
     assert!(matches!(r1, Err(PosterError::Io(_))));
     assert!(matches!(r2, Err(PosterError::Io(_))));
-    assert_eq!(fetcher.fetch_calls.load(Ordering::SeqCst), 1, "fetch_calls must be 1 (no second fetch)");
+    assert_eq!(
+        fetcher.fetch_calls.load(Ordering::SeqCst),
+        1,
+        "fetch_calls must be 1 (no second fetch)"
+    );
 
     // Wait until worker completely finishes and permit is released
     wait_until("panic worker finished and slot released", || {
         fetcher.active.load(Ordering::SeqCst) == 0
-    }).await;
+    })
+    .await;
 
     // Assert capacity is intact on the SAME service by submitting four distinct new media
     // and observing active == 4 with max_active == 4 while gated
@@ -627,7 +680,8 @@ async fn worker_panic_releases_resources_and_replays_failure() {
 
     wait_until("4 distinct media active in fetcher", || {
         fetcher.active.load(Ordering::SeqCst) == 4
-    }).await;
+    })
+    .await;
 
     assert_eq!(fetcher.active.load(Ordering::SeqCst), 4);
     assert_eq!(fetcher.max_active.load(Ordering::SeqCst), 4);
@@ -639,12 +693,14 @@ async fn worker_panic_releases_resources_and_replays_failure() {
 
     wait_until("all capacity workers drained", || {
         fetcher.active.load(Ordering::SeqCst) == 0
-    }).await;
+    })
+    .await;
 
     // Assert panic entry itself was retired on the SAME service
     wait_until("panic entry retired on original service", || {
         service.inflight_entries() == 0
-    }).await;
+    })
+    .await;
     assert_eq!(service.inflight_entries(), 0);
 
     // Requesting the panic media again on that service after the drain triggers a new fetch
@@ -653,21 +709,22 @@ async fn worker_panic_releases_resources_and_replays_failure() {
     let h_panic_retry = tokio::spawn(async move { s_retry_panic.get(m_panic).await });
     wait_until("panic media re-request active in fetcher", || {
         fetcher.fetch_calls.load(Ordering::SeqCst) > fetch_calls_before
-    }).await;
+    })
+    .await;
     gate2.release();
     let r_panic_retry = h_panic_retry.await.unwrap();
     assert!(matches!(r_panic_retry, Err(PosterError::Io(_))));
-    assert_eq!(fetcher.fetch_calls.load(Ordering::SeqCst), fetch_calls_before + 1);
+    assert_eq!(
+        fetcher.fetch_calls.load(Ordering::SeqCst),
+        fetch_calls_before + 1
+    );
     // Retirement assertion using a fresh service and successful media:
     // after the entry retires, removing the disk cache entry forces a new fetch.
     let gate3 = Arc::new(TestGate::new());
     let _guard3 = GateReleaseGuard(gate3.clone());
     let fetcher3 = Arc::new(GatedFetcher::new(gate3.clone()));
-    let (_tmp3, store3, service3) = setup_service_and_store(
-        fetcher3.clone(),
-        catalog.clone(),
-        Duration::from_secs(5),
-    );
+    let (_tmp3, store3, service3) =
+        setup_service_and_store(fetcher3.clone(), catalog.clone(), Duration::from_secs(5));
     let m_retry = insert_media(&store3.lock(), "retry_test");
     gate3.release();
 
@@ -677,7 +734,8 @@ async fn worker_panic_releases_resources_and_replays_failure() {
 
     wait_until("worker retired inflight entry", || {
         service3.inflight_entries() == 0
-    }).await;
+    })
+    .await;
 
     // Now remove from disk cache to test retirement of inflight entry
     let cache_file = _tmp3.path().join("cache").join(format!("{m_retry}.img"));

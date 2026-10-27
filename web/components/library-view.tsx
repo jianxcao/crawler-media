@@ -532,14 +532,18 @@ function rowFetches(
   for (const row of rows) {
     if (row.kind === "library") {
       fetches.set(rowFetchKey(row), () =>
-        listLibraryItems(String(row.library.id), rowItemQuery(row, RECENT_COUNT)),
+        listLibraryItems(String(row.library.id), rowItemQuery(row, RECENT_COUNT)).then(
+          (page) => page.items,
+        ),
       );
     } else if (row.kind === "libraries") {
       for (const library of libraries) {
         const key = coverFetchKey(library.id);
         if (!fetches.has(key)) {
           fetches.set(key, () =>
-            listLibraryItems(library.id, { sort: "added_at", limit: RECENT_COUNT }),
+            listLibraryItems(library.id, { sort: "added_at", limit: RECENT_COUNT }).then(
+              (page) => page.items,
+            ),
           );
         }
       }

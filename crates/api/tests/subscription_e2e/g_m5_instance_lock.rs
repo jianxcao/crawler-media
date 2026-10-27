@@ -140,11 +140,20 @@ async fn lease_loss_stops_jobs_and_gates_manual_run() {
     ] {
         let response = tower::ServiceExt::oneshot(
             h.app.clone(),
-            super::common::request(method, &path, Some(super::harness::TOKEN), serde_json::json!({})),
+            super::common::request(
+                method,
+                &path,
+                Some(super::harness::TOKEN),
+                serde_json::json!({}),
+            ),
         )
         .await
         .unwrap();
-        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT, "{method} {path}");
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::CONFLICT,
+            "{method} {path}"
+        );
     }
     let response = tower::ServiceExt::oneshot(
         h.app.clone(),
@@ -157,7 +166,14 @@ async fn lease_loss_stops_jobs_and_gates_manual_run() {
     )
     .await
     .unwrap();
-    assert_eq!(response.status(), axum::http::StatusCode::OK, "reads stay available");
-    assert!(h.state.store().lock().get_subscribe(id).unwrap().is_some(), "not deleted");
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::OK,
+        "reads stay available"
+    );
+    assert!(
+        h.state.store().lock().get_subscribe(id).unwrap().is_some(),
+        "not deleted"
+    );
     handle.shutdown().await.unwrap();
 }

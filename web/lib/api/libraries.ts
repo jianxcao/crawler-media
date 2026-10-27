@@ -1,6 +1,14 @@
 import { request, resolveRequestUrl } from "@/lib/http";
 import type { LibraryKind, MediaType } from "@/lib/media-types";
 import { waitForLibraryRemoval, type RemovalWaitOptions } from "@/lib/library-removal";
+import { waitForLibraryOperation, type OperationWaitOptions } from "@/lib/library-operations";
+import { collectAllFilePages } from "@/lib/library-file-pages";
+
+/** 列表端点只接受数组载荷；其它形状是契约破坏，直接报错而不是渲染空态。 */
+function arrayPayload(raw: unknown, label: string): unknown[] {
+  if (!Array.isArray(raw)) throw new Error(`${label}响应格式错误`);
+  return raw;
+}
 
 export type { LibraryKind, MediaType };
 
@@ -71,8 +79,24 @@ export interface MediaLibrary {
   auto_series_collections?: boolean;
   /** 持久化删除状态；刷新或重新进入页面后继续跟踪。 */
   removal?: LibraryRemoval | null;
+  /** 每个根目录最近一次改指操作的状态（建库/换根后由驱动推进）。 */
+  root_reassignments?: RootReassignment[];
   /** 库存统计快照 */
   stats: LibraryStats;
+}
+
+/** 一次根目录改指的持久状态（对齐后端 `store::RootReassignment` 的投影）。 */
+export interface RootReassignment {
+  operation_id: string;
+  library_id: string;
+  /** 根目录的规范化 key（不是展示用的路径） */
+  root_key: string;
+  config_revision: number;
+  /** queued / running / succeeded / failed / cancelled */
+  state: string;
+  revision: number;
+  error: string | null;
+  updated_at_ms: number;
 }
 
 /** 库内一个媒体条目的库存聚合（单库海报墙的一格）。 */
@@ -83,6 +107,9 @@ export interface LibraryItem {
   library_id: string;
   title: string;
   year: number | null;
+  rating?: number | null;
+  studio?: string | null;
+  studio_logo?: string | null;
   poster_url: string | null;
   backdrop_url?: string | null;
   file_count: number;
@@ -94,44 +121,35 @@ export interface LibraryItem {
   missing: boolean;
 }
 
-/** 条目详情里的一个物理文件（一个版本 / 一集）。 */
+/** One physical file, with cached probe data when available. */
 export interface LibraryItemFile {
   file_id: string;
   path: string;
+  /** 完整覆盖：一个物理文件可服务多集；`season`/`episode` 只是首个具体坐标。 */
+  units: Array<{ season: number; episode: number }>;
+  /** 在位状态；missing/unknown 仍可查看但不可播放。 */
+  presence: "present" | "missing" | "unknown";
+  publication: "published" | "pending";
   season: number | null;
   episode: number | null;
   resolution: string | null;
   codec: string | null;
   hdr: string | null;
   quality_source: string | null;
-  /** ffprobe 抽取的音轨 / 字幕轨（file_meta 缓存；未探测为空数组） */
+  /** ffprobe 抽取的音轨 / 字幕轨（file_details 缓存；未探测为空数组） */
   audio_tracks?: AudioStream[];
   subtitle_tracks?: SubtitleStream[];
-  /** ffprobe 抽取的主视频流信息（file_meta 缓存；未探测为 null） */
+  /** ffprobe 抽取的主视频流信息（file_details 缓存；未探测为 null） */
   video_track?: VideoTrackInfo | null;
   /** 是否已探测完成（false = 后台探测中，前端显示「探测中」并轮询） */
   probed?: boolean;
   /** 后台仍在排队或探测，包括流信息完成后的声纹阶段。 */
   probe_queued?: boolean;
-  probe_stages?: {
-    metadata?: ProbeStageView | null;
-    intro?: ProbeStageView | null;
-    outro?: ProbeStageView | null;
-  } | null;
 }
 
-export interface ProbeStageView {
-  status:
-    | "pending"
-    | "queued"
-    | "running"
-    | "succeeded"
-    | "failed"
-    | "not_applicable"
-    | "cancelled";
-  failure_count: number;
-  next_retry_at_ms: number | null;
-  error_kind: string | null;
+export interface LibraryItemFilePage {
+  files: LibraryItemFile[];
+  next_cursor: string | null;
 }
 
 /** 条目详情：基本信息 + 逐文件真实介质规格。 */
@@ -155,12 +173,14 @@ export interface LibraryItemDetail {
   /** 条目目录 NFO 刮削产物（overview/评分/片长/类型/演职员），缺失为 null/空 */
   overview: string | null;
   rating: string | null;
+  content_rating?: string | null;
   runtime_minutes: string | null;
   genres: string[];
   cast: LibraryItemCastMember[];
   /** 本地 fanart.jpg 背景图（/fanart/{ledgerId}） */
   backdrop_url: string | null;
   files: LibraryItemFile[];
+  seasons: number[];
 }
 
 /** 剧集分集区的一集。 */
@@ -193,8 +213,14 @@ export interface LibraryIndexEntry {
   /** 档名：按标题排序是首字母 A-Z；按内容时间排序是月份；按评分排序是评分档 */
   initial: string;
   count: number;
-  /** 该档第一格的位置——即 listLibraryItems 的 offset 取值 */
-  offset: number;
+  /**
+   * 直达这一档第一格的**不透明游标**（服务端签发，客户端不得解析/构造）。
+   * 第一档为 `null`：它从第 0 条开始，用没有 cursor 的首页即可。
+   *
+   * 线上不带绝对下标（Task 26）：档位位置由 `count` 前缀和还原，
+   * 见 `lib/library-wall-index.ts` 的 `wallBucketOffsets`。
+   */
+  cursor: string | null;
 }
 
 /** 筛选面板里的一个候选值（计数已排除本维自身的条件）。 */
@@ -312,11 +338,6 @@ export interface UnidentifiedGroup {
   files: UnidentifiedFile[];
 }
 
-/** 全部 ledger 行（管理视图，GET /ledger）。 */
-export interface LedgerRow {
-  [key: string]: unknown;
-}
-
 // ---------------------------------------------------------------------------
 // 保留的旧领域类型（组件引用；对应端点已删除，仅作类型契约保留）
 // ---------------------------------------------------------------------------
@@ -326,18 +347,6 @@ export interface MatchRule {
   field: "genres" | "origin_countries";
   op: "any_of";
   values: (number | string)[];
-}
-
-/** 库的能力位（旧 LibraryProfile 投影；新契约无此字段，类型保留供组件引用）。 */
-export interface LibraryCapabilities {
-  scraped: boolean;
-  episodic: boolean;
-  naming: boolean;
-  subscribable: boolean;
-  write_nfo: boolean;
-  default_aspect: number;
-  playable: boolean;
-  jellyfin_collection: string;
 }
 
 /** 库的可见范围模式。 */
@@ -364,6 +373,32 @@ export interface LibraryPayload {
   realtime_watch?: boolean;
   scrape_overrides?: Record<string, unknown>;
 }
+
+/**
+ * 更新库的请求体：`root_paths` 省略表示不改目录。
+ *
+ * 改目录会冻结整库并异步迁移文件归属（202 + operation），只改其它字段仍是同步
+ * 200；因此更新体必须允许省略 `root_paths`，否则「改名」会被后端当成换根。
+ */
+export type LibraryUpdatePayload = Omit<LibraryPayload, "root_paths"> & {
+  root_paths?: string[];
+};
+
+/** 换根/换语言的异步操作（GET /libraries/{id}/operations/{operation_id}）。 */
+export interface LibraryOperation {
+  operation_id: string;
+  kind: "roots" | "locale" | string;
+  /** 后端把持久 state 当 phase 返回：`planned → applying → succeeded|failed`（冻结由 `reindexing` 生命周期表达，不是独立 state）。 */
+  state: "planned" | "frozen" | "applying" | "succeeded" | "failed" | string;
+  phase?: string;
+  cursor?: string | null;
+  error: string | null;
+}
+
+/** PATCH 结果：同步字段直接返回最新库；换根返回 202 受理的操作。 */
+export type LibraryUpdate =
+  | { kind: "library"; library: MediaLibrary }
+  | { kind: "operation"; operation: LibraryOperation };
 
 /** 收藏范围的可选项（GET /libraries/routing-options）。 */
 export interface RoutingOptions {
@@ -520,21 +555,6 @@ export interface LastOrganize {
   errors: string[];
 }
 
-/** 整库刷新中正在处理的一部片。 */
-
-/** 整库元数据刷新的实时状态（端点已删，类型保留供组件引用）。 */
-
-/** 整库生成章节的作业状态。 */
-export interface ChapterJobProgress {
-  job_id: string;
-  status: string;
-  processed: number;
-  total: number;
-  failed: number;
-  percent: number | null;
-  stopping: boolean;
-}
-
 /** 一条音轨。 */
 export interface AudioStream {
   codec: string | null;
@@ -607,20 +627,6 @@ export interface LibraryChapter {
   image_url: string | null;
 }
 
-/** 片源标注预览的一行。 */
-export interface MediaSourceAnnotationCandidate {
-  file_id: string;
-  file_name: string;
-  episode_number: number;
-  size_bytes: number;
-  media_source: string | null;
-  media_source_manual: boolean;
-}
-
-/** 身份复核里的一方（现身份 / 建议身份）。 */
-
-/** 身份复核清单的一组。 */
-
 /** 「修正识别结果」预览里一组文件的识别结论。 */
 export interface ReidentifyOutcome {
   media_item_id: string | null;
@@ -639,7 +645,8 @@ export interface ReidentifyOutcome {
 export interface ReidentifyGroup {
   key: string;
   outcome: ReidentifyOutcome;
-  file_ids: string[];
+  /** 预览时的文件版本；提交时原样回传，服务器不补当前版本 */
+  files: ReidentifyFile[];
   file_count: number;
   total_size_bytes: number;
   sample_names: string[];
@@ -663,6 +670,23 @@ export interface ReidentifyPreview {
   pinned_identity: boolean;
   unreachable: boolean;
   search_seed: string;
+  media_item_id: string;
+  source_revision: number;
+}
+
+/** 预览时固定的一份文件版本。 */
+export interface ReidentifyFile {
+  file_id: string;
+  revision: number;
+  source_version: string;
+}
+
+/** 重新识别的唯一请求：文件与源条目都固定到预览版本。 */
+export interface ReidentifyRequest {
+  media_item_id: string;
+  source_revision: number;
+  title_ref: string;
+  files: ReidentifyFile[];
 }
 
 /** 条目真实删除的结论。 */
@@ -673,197 +697,10 @@ export interface ItemDeleteResult {
   errors: string[];
 }
 
-/** 回收站里的一个待回收文件。 */
-export interface TrashedFile {
-  id: string;
-  file_name: string;
-  file_path: string;
-  trash_original_path: string | null;
-  kept_in_place: boolean;
-  size_bytes: number;
-  resolution: string | null;
-  media_source: string | null;
-  hdr: string | null;
-  video_codec: string | null;
-  bit_depth: number | null;
-  audio_label: string | null;
-  release_group: string | null;
-  season_number: number;
-  episode_number: number;
-  episode_title: string | null;
-  trashed_at: string | null;
-  purge_after: string | null;
-  reason: string | null;
-  note: string | null;
-  last_error: string | null;
-}
 
-export interface TrashedQuality {
-  tiers: Record<string, number>;
-  hdr: string[];
-  video_codecs: string[];
-  audio_labels: string[];
-  release_groups: string[];
-}
-
-/** 回收站列表的一行。 */
-export interface TrashedItem {
-  key: string;
-  library: { id: string; name: string };
-  media_item: {
-    id: string;
-    title: string;
-    year: number | null;
-    kind: MediaType;
-    poster_url: string | null;
-  } | null;
-  seasons: number[];
-  file_count: number;
-  total_bytes: number;
-  earliest_purge_after: string | null;
-  latest_purge_after: string | null;
-  reasons: Record<string, number>;
-  note: string | null;
-  trigger_label: string | null;
-  latest_trashed_at: string | null;
-  quality: TrashedQuality;
-  files: TrashedFile[];
-}
-
-export interface TrashedFilesData {
-  total_files: number;
-  total_items: number;
-  total_bytes: number;
-  due_within_24h: number;
-  kept_in_place: number;
-  by_library: { library_id: string; name: string; count: number }[];
-  by_reason: { reason: string; count: number }[];
-  items: TrashedItem[];
-}
-
-export interface TrashedFilter {
-  q?: string;
-  library_id?: string | null;
-  reason?: string | null;
-}
-
-export interface TrashedBatchResult {
-  done: number;
-  failed: { id: string; file_name: string; error: string }[];
-  remaining: number;
-}
-
-export type DuplicateBucket = "identical" | "versions";
-
-/** 一个多文件单元里的一个文件。 */
-export interface DuplicateFile {
-  id: string;
-  file_name: string;
-  file_path: string;
-  quality_label: string;
-  size_bytes: number;
-  bit_rate: number | null;
-  resolution: string | null;
-  media_source: string | null;
-  hdr: string | null;
-  video_codec: string | null;
-  audio_label: string | null;
-  origin: FileOrigin;
-  version_key: string;
-  suggested: boolean;
-  suggest_reason: string | null;
-  kept_at: string | null;
-}
-
-/** 一个单元（电影 = 条目；剧集 = 某季某集）。 */
-export interface DuplicateUnit {
-  season_number: number;
-  episode_number: number;
-  bucket: DuplicateBucket;
-  files: DuplicateFile[];
-}
-
-/** 同构季的一个版本行。 */
-export interface DuplicateVersion {
-  key: string;
-  quality_label: string;
-  origin_label: string;
-  episodes: number[];
-  bytes: number;
-  suggested: boolean;
-}
-
-/** 一个条目的一季在某一堆里的块。 */
-export interface DuplicateSeason {
-  season_number: number;
-  bucket: DuplicateBucket;
-  uniform: boolean;
-  versions: DuplicateVersion[];
-  units: DuplicateUnit[];
-}
-
-export interface DuplicateItem {
-  library: { id: string; name: string };
-  media_item: {
-    id: string;
-    title: string;
-    year: number | null;
-    kind: MediaType;
-    poster_url: string | null;
-  };
-  seasons: DuplicateSeason[];
-}
-
-/** 三档：放心清 / 建议清 / 要你决定。 */
-export type DuplicateTier = "safe" | "suggested" | "review";
-export type DuplicateReviewKind = "resolution" | "hdr" | "unknown" | "same_tier";
-
-/** 一档、或「需要你决定」里的一组。 */
-export interface DuplicateGroup {
-  key: DuplicateTier | DuplicateReviewKind;
-  label: string;
-  hint: string;
-  units: number;
-  files: number;
-  bytes: number;
-}
-
-/** 扫描本身的状态。 */
-export interface DuplicateScanState {
-  status: string | null;
-  job_id: string | null;
-  message: string | null;
-  percent: number | null;
-  scanned_at: string | null;
-  upgrading_units: number;
-  keep_old_items: number;
-}
-
-export interface DuplicateFilesData {
-  scan: DuplicateScanState;
-  tiers: DuplicateGroup[];
-  review_groups: DuplicateGroup[];
-  total_units: number;
-  total_files: number;
-  total_bytes: number;
-  total_items: number;
-  items: DuplicateItem[];
-}
-
-export interface DuplicateFilter {
-  tier?: DuplicateTier | null;
-  review_kind?: DuplicateReviewKind | null;
-  q?: string;
-  library_id?: string | null;
-  media_item_id?: string | null;
-}
-
-/** 后台任务的启动回执。 */
-export interface PersistentJobStart {
-  started: boolean;
-  message?: string;
-  job_id: string;
-  created: boolean;
+/** 元数据刷新是同步完成的：回执只有本次实际刷新的条目数。 */
+export interface MetadataRefreshReceipt {
+  refreshed: number;
 }
 
 // 筛选的纯逻辑放独立模块（lib/library-filter.ts）；这里原样再导出，
@@ -918,6 +755,26 @@ function emptyLibrary(partial: { name?: string; kind?: LibraryKind; root_paths?:
   };
 }
 
+/**
+ * 从 PATCH 响应里认出「这是 202 受理的操作」而不是库详情。
+ *
+ * 判别只认 `operation_id`（同步更新返回的库投影没有这个字段），避免把库当成操作。
+ */
+function libraryOperationFrom(raw: unknown): LibraryOperation | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const operationId = typeof r.operation_id === "string" && r.operation_id ? r.operation_id : null;
+  if (!operationId) return null;
+  const state = typeof r.state === "string" && r.state ? r.state : typeof r.phase === "string" ? r.phase : "planned";
+  return {
+    operation_id: operationId,
+    kind: typeof r.kind === "string" ? r.kind : "roots",
+    state,
+    phase: typeof r.phase === "string" ? r.phase : undefined,
+    cursor: typeof r.cursor === "string" ? r.cursor : null,
+    error: typeof r.error === "string" ? r.error : null,
+  };
+}
+
 function libraryFrom(raw: unknown): MediaLibrary {
   const r = (raw ?? {}) as Record<string, unknown>;
   const stats = (r.stats ?? {}) as Record<string, unknown>;
@@ -928,6 +785,9 @@ function libraryFrom(raw: unknown): MediaLibrary {
     root_paths: Array.isArray(r.root_paths) ? (r.root_paths as string[]) : [],
     root_missing: r.root_missing == null ? false : bool(r.root_missing),
     removal: r.removal == null ? null : r.removal as LibraryRemoval,
+    root_reassignments: Array.isArray(r.root_reassignments)
+      ? (r.root_reassignments as RootReassignment[])
+      : [],
     is_default: bool(r.is_default),
     access_mode: (r.access_mode as LibraryAccessMode) ?? "everyone",
     admin_visible: r.admin_visible == null ? true : bool(r.admin_visible),
@@ -960,6 +820,9 @@ function itemFrom(raw: unknown): LibraryItem {
     library_id: str(r.library_id),
     title: str(r.title),
     year: r.year == null ? null : num(r.year),
+    rating: r.rating == null ? null : num(r.rating),
+    studio: r.studio == null ? null : str(r.studio),
+    studio_logo: r.studio_logo == null ? null : str(r.studio_logo),
     poster_url: r.poster_url == null ? null : str(r.poster_url),
     backdrop_url: r.backdrop_url == null ? null : str(r.backdrop_url),
     file_count: num(r.file_count),
@@ -969,19 +832,11 @@ function itemFrom(raw: unknown): LibraryItem {
   };
 }
 
-function jobStartOf(data: Record<string, unknown>): PersistentJobStart {
-  return {
-    started: bool(data.started ?? data.created ?? data.accepted ?? true),
-    message: typeof data.message === "string" ? data.message : "",
-    job_id: str(data.job_id ?? data.id),
-    created: bool(data.created ?? data.started ?? true),
-  };
+function refreshReceiptOf(data: Record<string, unknown>): MetadataRefreshReceipt {
+  return { refreshed: num(data.refreshed) };
 }
 
-const EMPTY_JOB_START: PersistentJobStart = { started: false, message: "", job_id: "", created: false };
 
-
-const EMPTY_TRASH_BATCH: TrashedBatchResult = { done: 0, failed: [], remaining: 0 };
 
 // ---------------------------------------------------------------------------
 // 媒体库列表与条目
@@ -1009,7 +864,7 @@ export function listLibraries(
   }
   const suffix = params.size > 0 ? `?${params}` : "";
   return unwrap(request<ApiEnvelope<unknown[]>>(`/libraries${suffix}`, init)).then((raw) =>
-    (Array.isArray(raw) ? raw : []).map(libraryFrom),
+    arrayPayload(raw, "媒体库列表").map(libraryFrom),
   );
 }
 
@@ -1026,11 +881,66 @@ export function createLibrary(payload: LibraryPayload): Promise<MediaLibrary> {
   );
 }
 
-/** 更新媒体库（PATCH /libraries/{id}；只改传入的字段）。 */
-export function updateLibrary(id: string, payload: LibraryPayload): Promise<MediaLibrary> {
-  return unwrap(request<ApiEnvelope<unknown>>(`/libraries/${id}`, { method: "PATCH", body: JSON.stringify(payload) })).then(
-    (raw) => libraryFrom(raw),
+/**
+ * 更新媒体库（PATCH /libraries/{id}；只发要改的字段）。
+ *
+ * 换根会返回 202 + `{operation_id}`（不是库详情），调用方必须区分两种结果；
+ * 同步字段更新返回 200 + 最新库。
+ */
+export async function updateLibrary(
+  id: string,
+  payload: LibraryUpdatePayload,
+  signal?: AbortSignal,
+): Promise<LibraryUpdate> {
+  signal?.throwIfAborted();
+  const raw = await unwrap(
+    request<ApiEnvelope<unknown>>(`/libraries/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+      signal,
+    }),
   );
+  const operation = libraryOperationFrom(raw);
+  return operation
+    ? { kind: "operation", operation }
+    : { kind: "library", library: libraryFrom(raw) };
+}
+
+/** 轮询一个已受理的换根操作（GET /libraries/{id}/operations/{operation_id}）。 */
+export function getLibraryOperation(
+  libraryId: string,
+  operationId: string,
+  signal?: AbortSignal,
+): Promise<LibraryOperation> {
+  return unwrap(
+    request<ApiEnvelope<unknown>>(
+      `/libraries/${libraryId}/operations/${encodeURIComponent(operationId)}`,
+      { signal },
+    ),
+  ).then((raw) => {
+    const operation = libraryOperationFrom(raw);
+    if (!operation) throw new Error("媒体库操作状态缺失");
+    return operation;
+  });
+}
+
+/**
+ * 更新并等到真正生效：换目录的 202 只表示「已受理并冻结」，必须轮询到 succeeded，
+ * 再用列表里的最新事实重新读库（没有 GET /libraries/{id}）。
+ */
+export async function updateLibraryAndWait(
+  id: string,
+  payload: LibraryUpdatePayload,
+  options: OperationWaitOptions = {},
+): Promise<MediaLibrary> {
+  const accepted = await updateLibrary(id, payload, options.signal);
+  if (accepted.kind === "library") return accepted.library;
+  await waitForLibraryOperation(
+    accepted.operation,
+    (operationId, signal) => getLibraryOperation(id, operationId, signal),
+    options,
+  );
+  return getLibrary(id);
 }
 
 /** 设为该类型的默认库（PUT /libraries/{id}/default）。 */
@@ -1132,37 +1042,75 @@ export async function deleteDuplicateFile(libraryId: string, fileId: string): Pr
   );
 }
 
+/** 浏览列表的一页查询参数。 */
+export interface BrowseQueryParams {
+  sort?: LibraryItemSort;
+  order?: LibraryItemOrder;
+  /** 每页条数；省略 = 服务端默认上限 */
+  limit?: number;
+  /** 键集游标（上一页的 `next_cursor`）；首屏不传 */
+  cursor?: string | null;
+  identity?: LibraryItemIdentity;
+  filter?: LibraryFilter;
+  /** 未看优先：观看分级参与排序（只排不筛，口径见 library::latest） */
+  unwatchedFirst?: boolean;
+}
+
+/**
+ * 浏览列表的查询串。
+ *
+ * 分页只有 `cursor`：`offset` 已从契约里删除，后端对任何 `offset` 都回 400
+ * （按 offset 逐行跳过、每页可能带 COUNT，越深越慢）。这里因此**绝不**写
+ * `offset`——真正被删掉的东西不该留一个前端兜底。
+ */
+export function buildBrowseQuery(params: BrowseQueryParams = {}): URLSearchParams {
+  const query = new URLSearchParams();
+  if (params.sort) query.set("sort", params.sort);
+  if (params.order) query.set("order", params.order);
+  if (params.identity) query.set("identity", params.identity);
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.cursor) query.set("cursor", params.cursor);
+  filterQuery(params.filter, query);
+  // 与 /playback/favorites 同一个参数名：两处的「未看优先」是同一条规则
+  if (params.unwatchedFirst) query.set("unwatched_first", "true");
+  return query;
+}
+
+/** 一页浏览结果：`data` 是条目数组，游标与总数在信封上。 */
+export interface LibraryItemPage {
+  items: LibraryItem[];
+  /** 下一页游标；null = 已经到末页 */
+  next_cursor: string | null;
+  /** 总条目数；只有第一页（没有 cursor 的那页）才有，续页为 null */
+  total: number | null;
+}
+
 /**
  * 库内媒体条目的库存聚合（单库海报墙数据源）。
- * GET /libraries/{id}/items → [{media_item_id, kind, library_id, title, year,
- * poster_url?, file_count, seasons, episode_count}]
+ * GET /libraries/{id}/items → data: [{media_item_id, kind, library_id, title, year,
+ * poster_url?, file_count, seasons, episode_count}]，信封另有 `next_cursor` / `total`
  */
-export function listLibraryItems(
+export async function listLibraryItems(
   id: string,
-  params?: {
-    sort?: LibraryItemSort;
-    order?: LibraryItemOrder;
-    limit?: number;
-    offset?: number;
-    identity?: LibraryItemIdentity;
-    filter?: LibraryFilter;
-    /** 未看优先：观看分级参与排序（只排不筛，口径见 library::latest） */
-    unwatchedFirst?: boolean;
-  },
-): Promise<LibraryItem[]> {
-  const query = new URLSearchParams();
-  if (params?.sort) query.set("sort", params.sort);
-  if (params?.order) query.set("order", params.order);
-  if (params?.identity) query.set("identity", params.identity);
-  if (params?.limit !== undefined) query.set("limit", String(params.limit));
-  if (params?.offset) query.set("offset", String(params.offset));
-  filterQuery(params?.filter, query);
-  // 与 /playback/favorites 同一个参数名：两处的「未看优先」是同一条规则
-  if (params?.unwatchedFirst) query.set("unwatched_first", "true");
+  params?: BrowseQueryParams,
+): Promise<LibraryItemPage> {
+  const query = buildBrowseQuery(params);
   const suffix = query.size > 0 ? `?${query}` : "";
-  return unwrap(request<ApiEnvelope<unknown[]>>(`/libraries/${id}/items${suffix}`)).then((raw) =>
-    (Array.isArray(raw) ? raw : []).map(itemFrom),
+  // 不能过 unwrap：它只把 `data` 取出来，而游标与总数挂在信封上。
+  const envelope = await request<ApiEnvelope<unknown[]> & PageEnvelopeMeta>(
+    `/libraries/${id}/items${suffix}`,
   );
+  return {
+    items: arrayPayload(envelope.data, "媒体库条目").map(itemFrom),
+    next_cursor: envelope.next_cursor ?? null,
+    total: envelope.total ?? null,
+  };
+}
+
+/** 列表信封上的分页元数据（`data` 仍是数组，游标/总数挂在信封上）。 */
+interface PageEnvelopeMeta {
+  next_cursor?: string | null;
+  total?: number | null;
 }
 
 /** 海报墙的首字母索引（GET /libraries/{id}/item-index）。 */
@@ -1179,9 +1127,13 @@ export function listLibraryItemIndex(
   const suffix = query.size > 0 ? `?${query}` : "";
   return unwrap(request<ApiEnvelope<unknown[]>>(`/libraries/${id}/item-index${suffix}`)).then(
     (raw) =>
-      (Array.isArray(raw) ? raw : []).map((entry) => {
+      arrayPayload(raw, "首字母索引").map((entry) => {
         const r = (entry ?? {}) as Record<string, unknown>;
-        return { initial: str(r.initial), count: num(r.count), offset: num(r.offset) };
+        return {
+          initial: str(r.initial),
+          count: num(r.count),
+          cursor: r.cursor == null ? null : str(r.cursor),
+        };
       }),
   );
 }
@@ -1227,25 +1179,24 @@ export async function getLibraryFacets(
   };
 }
 
+/** 一页图廊：`data` 是图组数组，游标在信封上（图廊不报总数）。 */
+export interface LibraryGalleryPage {
+  groups: LibraryGalleryGroup[];
+  /** 下一页游标；null = 已经到末页 */
+  next_cursor: string | null;
+}
+
 /** 图廊按条目浏览（GET /libraries/{id}/gallery：每部作品的海报/背景/分集剧照）。 */
 export async function listLibraryGallery(
   id: string,
-  params?: {
-    limit?: number;
-    offset?: number;
-    sort?: LibraryItemSort;
-    order?: LibraryItemOrder;
-    filter?: LibraryFilter;
-  },
-): Promise<LibraryGalleryGroup[]> {
-  const query = new URLSearchParams();
-  if (params?.limit != null) query.set("limit", String(params.limit));
-  if (params?.offset != null) query.set("offset", String(params.offset));
-  if (params?.sort) query.set("sort", params.sort);
-  if (params?.order) query.set("order", params.order);
-  filterQuery(params?.filter, query);
+  params?: Omit<BrowseQueryParams, "identity" | "unwatchedFirst">,
+): Promise<LibraryGalleryPage> {
+  const query = buildBrowseQuery(params);
   const suffix = query.size > 0 ? `?${query}` : "";
-  return unwrap(request<ApiEnvelope<LibraryGalleryGroup[]>>(`/libraries/${id}/gallery${suffix}`));
+  const envelope = await request<ApiEnvelope<LibraryGalleryGroup[]> & PageEnvelopeMeta>(
+    `/libraries/${id}/gallery${suffix}`,
+  );
+  return { groups: envelope.data, next_cursor: envelope.next_cursor ?? null };
 }
 
 // ---------------------------------------------------------------------------
@@ -1259,6 +1210,7 @@ export interface ScanOperationResponse {
   transferred: boolean;
 }
 
+/** 扫描操作的进度与报告（前端只消费 202 受理的响应，这里保留契约形状）。 */
 export interface ScanOperationDetails {
   operation_id: string;
   status: string;
@@ -1272,26 +1224,6 @@ export async function startLibraryScan(
 ): Promise<ScanOperationResponse> {
   return unwrap(
     request<ApiEnvelope<ScanOperationResponse>>(`/libraries/${id}/scan`, { method: "POST" }),
-  );
-}
-
-/** 获取扫描操作的最新状态与报告。 */
-export async function fetchScanOperation(
-  libraryId: string,
-  operationId: string,
-): Promise<ScanOperationDetails> {
-  return unwrap(
-    request<ApiEnvelope<ScanOperationDetails>>(`/libraries/${libraryId}/scan-operations/${encodeURIComponent(operationId)}`),
-  );
-}
-
-/** 取消在途扫描操作。 */
-export async function cancelScanOperation(
-  libraryId: string,
-  operationId: string,
-): Promise<{ cancelled: boolean }> {
-  return unwrap(
-    request<ApiEnvelope<{ cancelled: boolean }>>(`/libraries/${libraryId}/scan-operations/${encodeURIComponent(operationId)}/cancel`, { method: "POST" }),
   );
 }
 
@@ -1319,7 +1251,7 @@ export async function previewLibraryOrganize(id: string): Promise<OrganizePrevie
 /** 开始整理（POST /libraries/{id}/organize：应用预览确认的重命名）。 */
 export async function startLibraryOrganize(
   id: string,
-  renames: { from: string; to: string }[],
+  renames: { from: string; to: string; to_library_id?: string }[],
 ): Promise<{ applied: number; skipped: string[]; errors: string[] }> {
   return unwrap(
     request<ApiEnvelope<{ applied: number; skipped: string[]; errors: string[] }>>(
@@ -1330,32 +1262,27 @@ export async function startLibraryOrganize(
 }
 
 /** 整库刷新元数据（POST /libraries/{id}/metadata/refresh）。 */
-export async function startLibraryMetadataRefresh(id: string): Promise<PersistentJobStart> {
+export async function startLibraryMetadataRefresh(id: string): Promise<MetadataRefreshReceipt> {
   const data = await unwrap(
     request<ApiEnvelope<Record<string, unknown>>>(`/libraries/${id}/metadata/refresh`, {
       method: "POST",
     }),
   );
-  return jobStartOf(data ?? {});
+  return refreshReceiptOf(data ?? {});
 }
 
-
-
-
-
-/** 刷新单个条目的元数据（端点已删）。 */
 /** 刷新单个条目的元数据（海报/背景/NFO；POST .../metadata/refresh）。 */
 export async function refreshItemMetadata(
   libraryId: string,
   mediaItemId: string,
-): Promise<PersistentJobStart> {
+): Promise<MetadataRefreshReceipt> {
   const data = await unwrap(
     request<ApiEnvelope<Record<string, unknown>>>(
       `/libraries/${libraryId}/items/${mediaItemId}/metadata/refresh`,
       { method: "POST" },
     ),
   );
-  return jobStartOf(data ?? {});
+  return refreshReceiptOf(data ?? {});
 }
 
 // ---------------------------------------------------------------------------
@@ -1404,15 +1331,21 @@ export async function getLibraryItemDetail(
     request<ApiEnvelope<unknown>>(`/libraries/${libraryId}/items/${mediaItemId}`),
   );
   const r = (raw ?? {}) as Record<string, unknown>;
+  const firstPage = {
+    files: Array.isArray(r.files) ? r.files.map(fileFrom) : [],
+    next_cursor: r.next_file_cursor == null ? null : str(r.next_file_cursor),
+  };
+  const files = await getAllLibraryItemFiles(libraryId, mediaItemId, firstPage);
   return {
-    media_item_id: str(r.media_item_id) || mediaItemId,
-    kind: (r.kind as LibraryKind) ?? "movie",
+    media_item_id: str(r.media_item_id),
+    kind: r.kind as LibraryKind,
     title: str(r.title),
     year: r.year == null ? null : num(r.year),
     original_title: r.original_title == null ? null : str(r.original_title),
     tmdb_id: r.tmdb_id == null ? null : str(r.tmdb_id),
     overview: r.overview == null ? null : str(r.overview),
     rating: r.rating == null ? null : str(r.rating),
+    content_rating: r.content_rating == null ? null : str(r.content_rating),
     runtime_minutes: r.runtime_minutes == null ? null : str(r.runtime_minutes),
     genres: Array.isArray(r.genres) ? (r.genres as unknown[]).map((g) => str(g)) : [],
     cast: Array.isArray(r.cast)
@@ -1428,27 +1361,74 @@ export async function getLibraryItemDetail(
       : [],
     poster_url: r.poster_url == null ? null : str(r.poster_url),
     backdrop_url: r.backdrop_url == null ? null : str(r.backdrop_url),
-    files: Array.isArray(r.files)
-      ? (r.files as unknown[]).map((f) => {
-          const fr = (f ?? {}) as Record<string, unknown>;
-          return {
-            file_id: str(fr.file_id),
-            path: str(fr.path),
-            season: fr.season == null ? null : num(fr.season),
-            episode: fr.episode == null ? null : num(fr.episode),
-            resolution: fr.resolution == null ? null : str(fr.resolution),
-            codec: fr.codec == null ? null : str(fr.codec),
-            hdr: fr.hdr == null ? null : str(fr.hdr),
-            quality_source: fr.quality_source == null ? null : str(fr.quality_source),
-            audio_tracks: Array.isArray(fr.audio_tracks) ? (fr.audio_tracks as unknown[]).map(trackFrom) : [],
-            subtitle_tracks: Array.isArray(fr.subtitle_tracks) ? (fr.subtitle_tracks as unknown[]).map(trackFrom) : [],
-            video_track: fr.video_track == null ? null : videoTrackFrom(fr.video_track),
-            probed: fr.probed === true,
-            probe_queued: fr.probe_queued === true,
-          };
-        })
-      : [],
+    seasons: Array.isArray(r.seasons) ? r.seasons.map(num) : [],
+    files,
   };
+
+}
+
+function fileFrom(f: unknown): LibraryItemFile {
+  const fr = (f ?? {}) as Record<string, unknown>;
+  return {
+    file_id: str(fr.file_id),
+    path: str(fr.path),
+    units: Array.isArray(fr.units) ? (fr.units as unknown[]).map(unitFrom) : [],
+    // 缺字段不再 fail-open：未知在位/发布状态一律视为不可播。
+    presence: presenceFrom(fr.presence),
+    publication: fr.publication === "published" ? "published" : "pending",
+    season: fr.season == null ? null : num(fr.season),
+    episode: fr.episode == null ? null : num(fr.episode),
+    resolution: fr.resolution == null ? null : str(fr.resolution),
+    codec: fr.codec == null ? null : str(fr.codec),
+    hdr: fr.hdr == null ? null : str(fr.hdr),
+    quality_source: fr.quality_source == null ? null : str(fr.quality_source),
+    audio_tracks: Array.isArray(fr.audio_tracks) ? (fr.audio_tracks as unknown[]).map(trackFrom) : [],
+    subtitle_tracks: Array.isArray(fr.subtitle_tracks) ? (fr.subtitle_tracks as unknown[]).map(trackFrom) : [],
+    video_track: fr.video_track == null ? null : videoTrackFrom(fr.video_track),
+    probed: fr.probed === true,
+    probe_queued: fr.probe_queued === true,
+  };
+}
+function unitFrom(u: unknown): { season: number; episode: number } {
+  const ur = (u ?? {}) as Record<string, unknown>;
+  return { season: num(ur.season), episode: num(ur.episode) };
+}
+
+function presenceFrom(value: unknown): "present" | "missing" | "unknown" {
+  return value === "present" || value === "missing" ? value : "unknown";
+}
+
+/** One bounded page of a detail item's files (`GET .../files?after=`). */
+export async function getLibraryItemFiles(
+  libraryId: string,
+  mediaItemId: string,
+  after: string,
+): Promise<LibraryItemFilePage> {
+  const raw = await unwrap(
+    request<ApiEnvelope<unknown>>(
+      `/libraries/${libraryId}/items/${mediaItemId}/files?after=${encodeURIComponent(after)}`,
+    ),
+  );
+  const r = (raw ?? {}) as Record<string, unknown>;
+  return {
+    files: Array.isArray(r.files) ? (r.files as unknown[]).map(fileFrom) : [],
+    // 续页 `GET .../files?after=` 的游标字段是 `next_cursor`；首详情页才叫 `next_file_cursor`。
+    next_cursor: r.next_cursor == null ? null : str(r.next_cursor),
+  };
+}
+
+export async function getAllLibraryItemFiles(
+  libraryId: string,
+  mediaItemId: string,
+  firstPage: LibraryItemFilePage,
+): Promise<LibraryItemFile[]> {
+  // 分页遍历只有一处实现：`lib/library-file-pages.ts` 负责不重不漏与末页判定，
+  // 这里只注入「按 cursor 取下一页」。
+  return collectAllFilePages(firstPage, async (after) => {
+    const page = await getLibraryItemFiles(libraryId, mediaItemId, after);
+    if (page.files.length === 0) throw new Error("文件分页 cursor 未推进");
+    return page;
+  });
 }
 
 /** 剧集条目一季的分集清单（GET /libraries/{id}/items/{itemId}/episodes?season=）。 */
@@ -1457,19 +1437,13 @@ export async function getItemEpisodes(
   mediaItemId: string,
   seasonNumber: number,
 ): Promise<SeasonEpisodes> {
-  const data = await unwrap(
-    request<ApiEnvelope<SeasonEpisodes | unknown[]>>(
+  const episodes = await unwrap(
+    request<ApiEnvelope<LibraryEpisode[]>>(
       `/libraries/${libraryId}/items/${mediaItemId}/episodes?season=${seasonNumber}`,
     ),
   );
-  if (Array.isArray(data)) {
-    const list = (data as LibraryEpisode[]).sort((a, b) => a.episode_number - b.episode_number);
-    return { season_number: seasonNumber, episodes: list };
-  }
-  if (data && Array.isArray((data as SeasonEpisodes).episodes)) {
-    (data as SeasonEpisodes).episodes.sort((a, b) => a.episode_number - b.episode_number);
-  }
-  return data as SeasonEpisodes;
+  episodes.sort((a, b) => a.episode_number - b.episode_number);
+  return { season_number: seasonNumber, episodes };
 }
 
 /** 手动触发完整探测：清空条目所有文件的流信息/章节/片头片尾缓存并重新入队
@@ -1669,36 +1643,80 @@ export async function listUnidentifiedLibraryFiles(libraryId?: string): Promise<
 }
 
 function toUnidentifiedGroups(raw: unknown): UnidentifiedGroup[] {
-  if (!Array.isArray(raw)) return [];
+  if (!Array.isArray(raw)) throw new Error("待识别清单响应格式错误");
   return raw.map((entry) => {
     const r = (entry ?? {}) as Record<string, unknown>;
-    const key = str(r.key ?? r.path ?? r.file_path ?? "");
+    const libraryId = str(r.library_id);
+    const libraryName = str(r.library_name);
     return {
-      key,
-      label: str(r.label ?? r.file_name ?? r.path ?? r.file_path ?? "未识别文件"),
-      library_id: str(r.library_id),
-      library_name: str(r.library_name),
-      file_count: num(r.file_count ?? 1),
-      total_size_bytes: num(r.total_size_bytes ?? r.size_bytes),
+      key: str(r.key ?? ""),
+      label: str(r.label ?? "未识别文件"),
+      library_id: libraryId,
+      library_name: libraryName,
+      file_count: num(r.file_count),
+      total_size_bytes: num(r.total_size_bytes),
       reason: r.reason == null ? null : str(r.reason),
       code: (r.code as UnidentifiedCode) ?? null,
       candidates: Array.isArray(r.candidates) ? (r.candidates as UnidentifiedCandidate[]) : [],
-      files: Array.isArray(r.files) ? (r.files as UnidentifiedFile[]) : [],
+      files: Array.isArray(r.files)
+        ? (r.files as unknown[]).map((f) => toUnidentifiedFile(f, libraryId, libraryName))
+        : [],
     };
   });
+}
+
+/** 后端每个文件只给 `file_id` / `file_path`；其余字段来自分组或为空。 */
+function toUnidentifiedFile(raw: unknown, libraryId: string, libraryName: string): UnidentifiedFile {
+  const f = (raw ?? {}) as Record<string, unknown>;
+  return {
+    id: str(f.file_id ?? ""),
+    library_id: libraryId,
+    library_name: libraryName,
+    file_path: str(f.file_path ?? ""),
+    size_bytes: num(f.size_bytes),
+    season_number: num(f.season_number),
+    episode_number: num(f.episode_number),
+    reason: f.reason == null ? null : str(f.reason),
+    code: (f.code as UnidentifiedCode) ?? null,
+    candidates: Array.isArray(f.candidates) ? (f.candidates as UnidentifiedCandidate[]) : [],
+  };
 }
 
 
 
 /** 把条目身份改挂到目标作品（POST .../reidentifications）。 */
 export async function assignLibraryFilesToTitle(
-  fileIds: string[],
-  titleRef: string,
+  body: ReidentifyRequest,
 ): Promise<{ claimed: number }> {
   return unwrap(
     request<ApiEnvelope<{ claimed: number }>>("/reidentify", {
       method: "POST",
-      body: JSON.stringify({ file_ids: fileIds, title_ref: titleRef }),
+      body: JSON.stringify(body),
+    }),
+  );
+}
+
+/** 认领一个未识别文件为新识别作品（POST /unidentified/claim）。 */
+export async function claimUnidentifiedFile(body: {
+  path: string;
+  title: string;
+  kind: "movie" | "tv";
+  year: number | null;
+  tmdb_id: string;
+}): Promise<unknown> {
+  return unwrap(
+    request<ApiEnvelope<unknown>>("/unidentified/claim", {
+      method: "POST",
+      body: JSON.stringify({
+        path: body.path,
+        action: {
+          type: "identify_and_transfer",
+          title: body.title,
+          kind: body.kind,
+          year: body.year,
+          tmdb_id: body.tmdb_id,
+        },
+      }),
     }),
   );
 }
@@ -1717,44 +1735,14 @@ export async function markLibraryFilesAsExtras(fileIds: string[]): Promise<{ det
 
 
 
-/** 认领一个未识别文件为某 Media（POST /unidentified/{id}/claim，body {path}）。 */
-export function claimUnidentifiedFile(
-  id: string,
-  path: string,
-): Promise<Record<string, never>> {
-  return unwrap(
-    request<ApiEnvelope<Record<string, never>>>(`/unidentified/${id}/claim`, {
-      method: "POST",
-      body: JSON.stringify({ path }),
-    }),
-  );
-}
-
 // ---------------------------------------------------------------------------
 // 片源标注 / 缺失清单
 // ---------------------------------------------------------------------------
 
-/** 列出整季片源标注将影响的文件（当前版本服务端未开启手动标注接口）。 */
-export function listMediaSourceAnnotationCandidates(
-  _mediaItemId: string,
-  _seasonNumber: number,
-): Promise<MediaSourceAnnotationCandidate[]> {
-  return Promise.reject(new Error("服务端未开启手动片源标注，系统已由元数据与文件名解析自动管理"));
-}
-
-/** 整季人工标注片源（当前版本服务端未开启手动标注接口）。 */
-export function annotateMediaSource(
-  _mediaItemId: string,
-  _seasonNumber: number,
-  _mediaSource: string,
-): Promise<{ files: number; snapshots: number }> {
-  return Promise.reject(new Error("服务端未开启手动片源标注，系统已由元数据与文件名解析自动管理"));
-}
-
 /** 缺失清单（GET /libraries/{id}/missing），按条目聚合。 */
 export async function listMissingLibraryFiles(libraryId: string): Promise<MissingItem[]> {
   const raw = await unwrap(request<ApiEnvelope<unknown>>(`/libraries/${libraryId}/missing`));
-  if (!Array.isArray(raw)) return [];
+  if (!Array.isArray(raw)) throw new Error("缺失清单响应格式错误");
   return raw.map((entry) => {
     const r = (entry ?? {}) as Record<string, unknown>;
     return {
@@ -1769,10 +1757,10 @@ export async function listMissingLibraryFiles(libraryId: string): Promise<Missin
         ? (r.files as unknown[]).map((f) => {
             const fr = (f ?? {}) as Record<string, unknown>;
             return {
-              id: str(fr.id ?? fr.file_id),
-              file_path: str(fr.file_path ?? fr.path),
-              season_number: num(fr.season_number ?? fr.season),
-              episode_number: num(fr.episode_number ?? fr.episode),
+              id: str(fr.id ?? ""),
+              file_path: str(fr.file_path ?? ""),
+              season_number: num(fr.season_number),
+              episode_number: num(fr.episode_number),
               size_bytes: num(fr.size_bytes),
             };
           })
@@ -1791,104 +1779,12 @@ export async function clearMissingLibraryRecords(
 }
 
 // ---------------------------------------------------------------------------
-// 回收站：后端没有独立 trash 列表（删除走 delay/ledger）。重复文件见 GET /libraries/{id}/duplicates。
-// ---------------------------------------------------------------------------
-
-/** 回收站列表。后端无独立 trash 资源，返回空清单。 */
-export function listTrashedFiles(
-  filter: TrashedFilter,
-  page: { limit: number; offset: number },
-  init?: RequestInit,
-): Promise<TrashedFilesData> {
-  return Promise.resolve({
-    total_files: 0,
-    total_items: 0,
-    total_bytes: 0,
-    due_within_24h: 0,
-    kept_in_place: 0,
-    by_library: [],
-    by_reason: [],
-    items: [],
-  });
-}
-
-/** 批量立即清理。后端无独立 trash 资源。 */
-export function purgeTrashedFiles(
-  scope: { ids: string[] } | { filter: TrashedFilter },
-): Promise<TrashedBatchResult> {
-  return Promise.resolve(EMPTY_TRASH_BATCH);
-}
-
-/** 批量恢复为在位版本。后端无独立 trash 资源。 */
-export function restoreTrashedFiles(ids: string[]): Promise<TrashedBatchResult> {
-  return Promise.resolve(EMPTY_TRASH_BATCH);
-}
-
-/** 重复文件（请用 listLibraryDuplicates；本函数保留旧形状，返回空）。 */
-export function listDuplicateFiles(
-  filter: DuplicateFilter,
-  page: { limit: number; offset: number },
-  init?: RequestInit,
-): Promise<DuplicateFilesData> {
-  return Promise.resolve({
-    scan: {
-      status: null,
-      job_id: null,
-      message: null,
-      percent: null,
-      scanned_at: null,
-      upgrading_units: 0,
-      keep_old_items: 0,
-    },
-    tiers: [],
-    review_groups: [],
-    total_units: 0,
-    total_files: 0,
-    total_bytes: 0,
-    total_items: 0,
-    items: [],
-  });
-}
-
-/** 开始扫描重复文件。无独立 scan job，重复列表由 GET /duplicates 即时计算。 */
-export function startDuplicateScan(): Promise<{ started: boolean; job_id: string; created: boolean }> {
-  return Promise.resolve({ started: false, job_id: "", created: false });
-}
-
-/** 一个单元 / 一季的决定。请用 deleteLibraryDuplicate。 */
-export function resolveDuplicates(payload: {
-  media_item_id: string;
-  season_number: number;
-  episode_number?: number | null;
-  keep_file_id?: string;
-  keep_version?: string;
-  keep_all?: boolean;
-}): Promise<TrashedBatchResult> {
-  return Promise.resolve(EMPTY_TRASH_BATCH);
-}
-
-/** 一整档 / 一组一起决定。无批量 resolve 端点。 */
-export function resolveAllDuplicates(payload: {
-  tier: DuplicateTier;
-  review_kind?: DuplicateReviewKind | null;
-  library_id?: string | null;
-  keep_all?: boolean;
-}): Promise<TrashedBatchResult> {
-  return Promise.resolve(EMPTY_TRASH_BATCH);
-}
-
-// ---------------------------------------------------------------------------
 // 收藏范围可选项 / ledger / 海报
 // ---------------------------------------------------------------------------
 
 /** 收藏范围可选项（GET /libraries/routing-options）。 */
 export function listLibraryRoutingOptions(): Promise<RoutingOptions> {
   return unwrap(request<ApiEnvelope<RoutingOptions>>("/libraries/routing-options"));
-}
-
-/** 全部 ledger 行（管理视图，GET /ledger）。 */
-export function getLedger(): Promise<LedgerRow[]> {
-  return unwrap(request<ApiEnvelope<LedgerRow[]>>("/ledger"));
 }
 
 /** 海报图片地址（GET /posters/{ledger_id}，按库可见性鉴权）。 */
@@ -1980,14 +1876,15 @@ export async function refreshItemChapters(
   target?: ChapterTarget,
 ): Promise<RefreshedItemChapters> {
   const data = await unwrap(
-    request<ApiEnvelope<RefreshedItemChapters | ItemChapter[]>>(
+    request<ApiEnvelope<RefreshedItemChapters>>(
       chapterPath(libraryId, mediaItemId, "/refresh", target),
       { method: "POST" },
     ),
   );
-  return Array.isArray(data)
-    ? { chapters: data, fingerprint_refresh_queued: false }
-    : data;
+  if (!data || Array.isArray(data) || !Array.isArray(data.chapters)) {
+    throw new Error("chapter refresh contract violation: expected { chapters, fingerprint_refresh_queued }");
+  }
+  return data;
 }
 
 export async function fetchItemProbeStatus(
@@ -1997,25 +1894,6 @@ export async function fetchItemProbeStatus(
 ): Promise<ItemProbeStatus> {
   const path = `/libraries/${libraryId}/items/${mediaItemId}/probe-status?${new URLSearchParams({ season: String(season) })}`;
   return unwrap(request<ApiEnvelope<ItemProbeStatus>>(path));
-}
-
-export interface RelaxSuggestion {
-  field: string;
-  label: string;
-  detail: string;
-  count: number;
-}
-
-export async function relaxLibraryFilter(
-  libraryId: string,
-  filter: LibraryFilter,
-): Promise<{ total_without_filter: number; active: boolean; suggestions: RelaxSuggestion[] }> {
-  return unwrap(
-    request<ApiEnvelope<{ total_without_filter: number; active: boolean; suggestions: RelaxSuggestion[] }>>(
-      `/libraries/${libraryId}/items/relax-filter`,
-      { method: "POST", body: JSON.stringify(filter) },
-    ),
-  );
 }
 
 export interface SimilarHit {

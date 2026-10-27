@@ -107,7 +107,7 @@ export function SubscribeDialog({
     // 带上条目身份：后端据此渲染条目目录预览（entry_dir），前端不自己拼名字
     previewSubscriptionDownloadRouting(
       routingKind,
-      libraryId as unknown as number | null,
+      libraryId,
       prepared?.media?.tmdb_id,
       {
         title: prepared?.media?.title,
@@ -250,9 +250,9 @@ export function SubscribeDialog({
               target.titleRef.startsWith("douban:") && selectedTitleRef !== target.titleRef
                 ? target.titleRef
                 : null,
-            selected_seasons: [s],
+            coverage: { kind: "tv", season: s, episode_from: 1 },
             follow_future: followFuture,
-            rule_set_id: canManageSubscriptions ? (ruleSetId as unknown as number) : null,
+            filter_id: canManageSubscriptions ? (ruleSetId) : null,
             library_id: canManageSubscriptions ? libraryId : null,
             ...(keepOldFromSpec ? { keep_old_versions: true } : {}),
           });
@@ -265,9 +265,8 @@ export function SubscribeDialog({
             target.titleRef.startsWith("douban:") && selectedTitleRef !== target.titleRef
               ? target.titleRef
               : null,
-          selected_seasons: [],
           follow_future: followFuture,
-          rule_set_id: canManageSubscriptions ? (ruleSetId as unknown as number) : null,
+          filter_id: canManageSubscriptions ? (ruleSetId) : null,
           library_id: canManageSubscriptions ? libraryId : null,
           ...(keepOldFromSpec ? { keep_old_versions: true } : {}),
         }));
@@ -278,7 +277,7 @@ export function SubscribeDialog({
           const outcomes = await Promise.allSettled(createdSubscriptions.map((created) =>
             runSubscriptionUpgradeRound(
               created.id,
-              ruleSetId != null ? (ruleSetId as unknown as number) : undefined,
+              ruleSetId != null ? (ruleSetId) : undefined,
             ),
           ));
           const reports = outcomes.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);

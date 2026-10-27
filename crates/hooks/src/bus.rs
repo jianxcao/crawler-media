@@ -18,9 +18,11 @@ pub struct HookEvent {
     pub step: Step,
 }
 
+type HookHandler = dyn Fn(&HookEvent) -> Result<(), PluginError> + Send + Sync;
+
 pub struct Hook {
     step: Step,
-    run: Box<dyn Fn(&HookEvent) -> Result<(), PluginError> + Send + Sync>,
+    run: Box<HookHandler>,
 }
 
 impl Hook {

@@ -62,7 +62,11 @@ async function loadApi(request) {
   new Function("require", "module", "exports", js)((name) => {
     if (name === "@/lib/http") return { request };
     if (name === "@/lib/library-removal") return { waitForLibraryRemoval };
+    if (name === "@/lib/library-operations") return { waitForLibraryOperation: async (op) => op };
     if (name === "@/lib/library-filter") return {};
+    if (name === "@/lib/library-file-pages") {
+      return { collectAllFilePages: async (firstPage) => firstPage.files };
+    }
     throw new Error(`Unexpected import ${name}`);
   }, module, module.exports);
   return module.exports;

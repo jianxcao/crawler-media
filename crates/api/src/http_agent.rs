@@ -96,7 +96,7 @@ pub fn sync_from_store(store: &Store) {
         .ok()
         .flatten()
         .map(|raw| {
-            raw.split(|c| c == ',' || c == '\n' || c == ';')
+            raw.split([',', '\n', ';'])
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_ascii_lowercase())
@@ -130,8 +130,8 @@ pub fn build_agent(proxy_url: Option<&str>, family: IpFamily) -> ureq::Agent {
         let trimmed = url.trim();
         // 关键优化：对于 socks5://，自动转换为 socks5h://
         // 这样 SOCKS5 代理会在远端解析域名，彻底解决本地 DNS 污染（如 api.bgm.tv 被国内 DNS 投毒到 Facebook IP 导致证书不匹配）
-        let remote_dns_url = if trimmed.starts_with("socks5://") {
-            format!("socks5h://{}", &trimmed["socks5://".len()..])
+        let remote_dns_url = if let Some(stripped) = trimmed.strip_prefix("socks5://") {
+            format!("socks5h://{stripped}")
         } else {
             trimmed.to_string()
         };
@@ -290,7 +290,10 @@ mod mask_tests {
             mask_proxy_url("http://bob:pw@host:1"),
             domain::mask_proxy_url("http://bob:pw@host:1")
         );
-        assert_eq!(mask_proxy_url("http://bob:pw@host:1"), "http://bob:***@host:1");
+        assert_eq!(
+            mask_proxy_url("http://bob:pw@host:1"),
+            "http://bob:***@host:1"
+        );
     }
 
     /// 旧 api 实现遇到没有 scheme 的 `user:pass@host` 会原样返回（等于把口令

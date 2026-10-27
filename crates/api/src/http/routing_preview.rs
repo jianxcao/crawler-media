@@ -145,15 +145,14 @@ fn select_library<'a>(
     if let Some(id) = library_id {
         return (libraries.iter().find(|lib| lib.id == id), false, None);
     }
-    if let Some(meta) = meta {
-        if let Some((library, reason)) = libraries
+    if let Some(meta) = meta
+        && let Some((library, reason)) = libraries
             .iter()
             .filter(|lib| lib.kind == kind && !lib.match_rules.is_empty())
             .find_map(|lib| library_match_reason(lib, meta).map(|reason| (lib, reason)))
         {
             return (Some(library), true, Some(reason));
         }
-    }
     (
         libraries
             .iter()

@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,13 +117,19 @@ pub trait FingerprintCaptureEngine: Send + Sync {
         control: &crate::WorkControl,
     ) -> Result<CapturedFingerprint, CaptureFailure> {
         if control.is_cancelled() {
-            return Err(CaptureFailure { kind: CaptureFailureKind::Cancelled,
-                message: "Library work cancelled".into(), metrics: CaptureMetrics::default() });
+            return Err(CaptureFailure {
+                kind: CaptureFailureKind::Cancelled,
+                message: "Library work cancelled".into(),
+                metrics: CaptureMetrics::default(),
+            });
         }
         let result = self.capture_window(request);
         if control.is_cancelled() {
-            return Err(CaptureFailure { kind: CaptureFailureKind::Cancelled,
-                message: "Library work cancelled".into(), metrics: CaptureMetrics::default() });
+            return Err(CaptureFailure {
+                kind: CaptureFailureKind::Cancelled,
+                message: "Library work cancelled".into(),
+                metrics: CaptureMetrics::default(),
+            });
         }
         result
     }

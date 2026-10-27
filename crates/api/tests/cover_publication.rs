@@ -10,9 +10,10 @@ use std::time::Duration;
 use api::library_cover_service::{CoverRenderer, LibraryCoverService};
 use api::{ApiState, Store, router};
 use cover_generator::CoverOptions;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 struct NoFetch;
 impl Fetcher for NoFetch {
@@ -53,10 +54,16 @@ impl Gate {
     fn enter_and_wait(&self) {
         *self.entered.lock().unwrap() = true;
         self.entered_cv.notify_all();
-        let mut open = self.open.lock().unwrap();
-        while !*open {
-            open = self.open_cv.wait(open).unwrap();
-        }
+        let released = *self
+            .open_cv
+            .wait_timeout_while(
+                self.open.lock().unwrap(),
+                std::time::Duration::from_secs(30),
+                |open| !*open,
+            )
+            .unwrap()
+            .0;
+        assert!(released, "test must release the cover gate");
     }
 
     fn entered(&self) -> bool {
@@ -79,7 +86,7 @@ impl CoverRenderer for GatedRenderer {
     fn render(
         &self,
         _library: &store::Library,
-        _rows: &[domain::LedgerRow],
+        _rows: &[domain::LibraryFile],
         _options: &CoverOptions,
     ) -> Result<Option<Vec<u8>>, String> {
         self.gate.enter_and_wait();
@@ -94,7 +101,7 @@ impl CoverRenderer for FixedRenderer {
     fn render(
         &self,
         _library: &store::Library,
-        _rows: &[domain::LedgerRow],
+        _rows: &[domain::LibraryFile],
         _options: &CoverOptions,
     ) -> Result<Option<Vec<u8>>, String> {
         Ok(Some(self.0.clone()))
@@ -109,6 +116,16 @@ async fn wait_entered(gate: &Arc<Gate>) {
     })
     .await;
     assert!(entered.is_ok(), "cover renderer was never invoked");
+}
+
+/// 测试 panic 时必须放行渲染线程：渲染跑在 tokio 的 blocking pool 上，若它仍卡在
+/// `Gate::enter_and_wait`，runtime 关闭 blocking pool 会无限等待，测试进程永不退出。
+struct ReleaseOnDrop<'a>(&'a Arc<Gate>);
+
+impl Drop for ReleaseOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.release();
+    }
 }
 
 fn seed_library(state: &ApiState, root: &Path) -> String {
@@ -143,9 +160,10 @@ fn seed_library(state: &ApiState, root: &Path) -> String {
         anilist_id: None,
     };
     guard.insert_media(&media).unwrap();
-    guard
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_fixture_file(
+        &guard,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id: media.id,
             path: file.display().to_string(),
             season: None,
@@ -156,8 +174,10 @@ fn seed_library(state: &ApiState, root: &Path) -> String {
             quality_source: QualitySource::Probe,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     library.id
 }
 
@@ -199,6 +219,7 @@ fn gated_state(root: &Path, rendered: &[u8]) -> (ApiState, Arc<Gate>) {
 async fn late_auto_render_does_not_overwrite_manual_cover() {
     let tmp = tempfile::tempdir().unwrap();
     let (state, gate) = gated_state(tmp.path(), b"auto-rendered-cover");
+    let _release = ReleaseOnDrop(&gate);
     let library_id = seed_library(&state, tmp.path());
 
     let auto_state = state.clone();
@@ -242,6 +263,7 @@ async fn late_auto_render_does_not_overwrite_manual_cover() {
 async fn deleted_cover_is_not_republished_by_late_render() {
     let tmp = tempfile::tempdir().unwrap();
     let (state, gate) = gated_state(tmp.path(), b"auto-rendered-cover");
+    let _release = ReleaseOnDrop(&gate);
     let library_id = seed_library(&state, tmp.path());
 
     let auto_state = state.clone();
@@ -280,6 +302,7 @@ async fn deleted_cover_is_not_republished_by_late_render() {
 async fn frozen_library_does_not_publish_late_render() {
     let tmp = tempfile::tempdir().unwrap();
     let (state, gate) = gated_state(tmp.path(), b"auto-rendered-cover");
+    let _release = ReleaseOnDrop(&gate);
     let library_id = seed_library(&state, tmp.path());
 
     let auto_state = state.clone();
@@ -315,11 +338,12 @@ async fn db_failure_keeps_previous_cover_and_drops_new_version() {
         .unwrap();
     let before = cover_dir_files(&state);
 
-    // DB 写失败：cover_path 更新被 trigger 拒绝。
+    // DB 写失败：cover_path 更新被 trigger 拒绝。`libraries` 表在 library.db，
+    // trigger 必须建在同一个连接能看到的库里才会生效。
     let db_path = {
         let store = state.store();
         let guard = store.lock();
-        guard.sqlite_path().to_path_buf()
+        guard.data_dir().join("library.db")
     };
     let connection = rusqlite::Connection::open(&db_path).unwrap();
     connection

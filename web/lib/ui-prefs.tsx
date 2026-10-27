@@ -10,13 +10,13 @@ import {
 } from "react";
 
 import {
+  DEFAULT_UI_PREFS,
   fetchUiPreferences,
-  normalizeUiPreferences,
   updateUiPreferences,
   type UiPreferences,
 } from "@/lib/api/ui";
 import { DEFAULT_THEME_ID, normalizeThemeId, themeMeta, type ThemeMeta } from "@/lib/themes";
-import { readUiPrefsCache, writeUiPrefsCache } from "@/lib/ui-prefs-cache";
+import { normalizeUiPrefs, readUiPrefsCache, writeUiPrefsCache } from "@/lib/ui-prefs-cache";
 
 /**
  * 界面偏好（按页面分组的样式设定）的全局状态。
@@ -65,10 +65,9 @@ const THEME_BROWSER_CHROME: Record<string, string> = {
 export function UiPrefsProvider({ children }: { children: React.ReactNode }) {
   // 惰性初始化读缓存：本 Provider 只在 AuthGate 确认登录后于客户端渲染
   // （见 components/app-shell.tsx），不参与 SSR，故可直接读 localStorage。
-  // 缓存内容不可信，统一过一遍 normalizeUiPreferences 补齐缺项（无缓存时
-  // 它补出来的就是 DEFAULT_UI_PREFS，与改动前的初始值完全一致）。
-  const [prefs, setPrefs] = useState<UiPreferences>(() =>
-    normalizeUiPreferences(readUiPrefsCache()),
+  // 无缓存（或缓存被写坏）时用内置默认，与首次安装的观感一致。
+  const [prefs, setPrefs] = useState<UiPreferences>(
+    () => readUiPrefsCache() ?? DEFAULT_UI_PREFS,
   );
   const [preview, setPreview] = useState<UiPreferences | null>(null);
   const [loading, setLoading] = useState(true);
@@ -78,9 +77,10 @@ export function UiPrefsProvider({ children }: { children: React.ReactNode }) {
     fetchUiPreferences()
       .then((data) => {
         if (cancelled) return;
-        setPrefs(data);
+        const normalized = normalizeUiPrefs(data);
+        setPrefs(normalized);
         // 服务端值即下次启动的首帧值
-        writeUiPrefsCache(data);
+        writeUiPrefsCache(normalized);
       })
       .catch((err) => {
         // 拉取失败不致命：静默沿用首帧缓存里的偏好（没有缓存时即内置默认样式）
@@ -95,7 +95,7 @@ export function UiPrefsProvider({ children }: { children: React.ReactNode }) {
   // 蒙版是全局 CSS（.page-scrim 的底色 + backdrop-filter），不像侧栏玻璃那样
   // 逐组件传参，因此这里把生效值（含预览草稿）写到 <html> 的 --scrim-blur /
   // --scrim-dark 变量上，全站蒙版即时跟随；调节滑杆时也走预览草稿，拖动即预览。
-  const effectiveScrim = (preview ?? prefs).scrim;
+  const effectiveScrim = (preview ?? prefs)?.scrim ?? DEFAULT_UI_PREFS.scrim;
   useEffect(() => {
     const root = document.documentElement;
     root.style.setProperty("--scrim-blur", `${effectiveScrim.blur}px`);

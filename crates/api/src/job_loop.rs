@@ -109,6 +109,7 @@ pub fn spawn_job_loop_with_control(
     // (a crashed holder's lease expires), and an instance whose lease was
     // taken over stops its jobs and goes back to retrying.
     let writable = state.instance_writable.clone();
+    // 启动路径：一次性拿租约（含开 app.db 心跳连接），此刻还没有请求在跑。
     let first = crate::instance_lease::acquire(&state.store);
     writable.store(first.is_ok(), std::sync::atomic::Ordering::SeqCst);
     if let Err(error) = &first {
@@ -117,76 +118,192 @@ pub fn spawn_job_loop_with_control(
     let clock: Arc<Mutex<Box<dyn Fn() -> i64 + Send>>> = Arc::new(Mutex::new(Box::new(clock)));
     let loop_control = control.clone();
     let loop_writable = writable.clone();
-    let loop_task = tokio::spawn(async move {
-        let mut next = Some(first);
-        'lease: loop {
-            let attempt = match next.take() {
-                Some(attempt) => attempt,
-                None => crate::instance_lease::acquire(&state.store),
-            };
-            let lease = match attempt {
-                Ok(lease) => lease,
-                Err(_) => {
-                    loop_writable.store(false, std::sync::atomic::Ordering::SeqCst);
-                    if loop_control.is_stopping() {
-                        return;
-                    }
-                    tokio::time::sleep(crate::instance_lease::retry_interval()).await;
-                    continue 'lease;
-                }
-            };
-            if !loop_writable.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                tracing::info!("已获取实例锁，恢复后台任务");
-            }
-            loop {
-                if loop_control.is_stopping() {
-                    return;
-                }
-                if lease.as_ref().is_some_and(|lease| lease.is_lost()) {
-                    loop_writable.store(false, std::sync::atomic::Ordering::SeqCst);
-                    loop_control.drain().await;
-                    drop(lease);
-                    tokio::time::sleep(crate::instance_lease::retry_interval()).await;
-                    continue 'lease;
-                }
-            let now = read_clock(&clock);
-            if let Err(error) = state.probe.dispatch_due(now.saturating_mul(1000), 32) {
-                tracing::error!(%error, now, "【媒体探测】派发到期阶段失败");
-            }
-            // tick 内 runner 会同步执行 worker（订阅搜索 → Indexer 抓 PT 站点，
-            // 同步 ureq 阻塞 1-8s）。直接在 async 任务里跑会占满 tokio 工作
-            // 线程，导致所有 HTTP 请求（含无锁的 /health）排队超时——
-            // 表现就是「正在连接服务…」+ me 不返回。挪到 spawn_blocking 池。
-            let state_clone = state.clone();
-            let completion_clock = Arc::clone(&clock);
-            let worker_handle = tokio::task::spawn_blocking(move || {
-                if state_clone.job_loop_control().is_stopping() {
-                    return;
-                }
-                if let Err(error) = run_pending_jobs_with_clock(
-                    &state_clone,
-                    now,
-                    || read_clock(&completion_clock),
-                    TickSource::Background,
-                ) {
-                    tracing::error!(%error, now, "后台任务轮询失败");
-                }
-                // 播放会话心跳超时回收：停止上报的会话落成播放记录。
-                let _ = state_clone
-                    .store
-                    .lock()
-                    .sweep_stale_sessions(now, crate::http::playback::session_timeout_secs());
-            });
-            loop_control.track_worker(worker_handle);
-            tokio::time::sleep(interval).await;
-            }
-        }
-    });
+    let loop_task = tokio::spawn(lease_loop(
+        state,
+        loop_control,
+        loop_writable,
+        first,
+        clock,
+        interval,
+    ));
 
     let mut handle = JobLoopHandle::new(loop_task, control);
     handle.writable = writable;
     handle
 }
+
+/// 租约得而复失的两种收尾。
+enum RoundEnd {
+    /// 正在停机：结束整个 loop。
+    Stop,
+    /// 租约被别的实例接管（或本实例降级为只读）：释放后重新排队等锁。
+    Reacquire,
+}
+
+/// 外层：拿到数据目录租约 → 补做上个进程的收尾 → 跑自有轮次，直到停机或失锁。
+///
+/// Review L2: 拿租约、补做收尾、释放租约都要拿进程级 `Store` 锁，全部经
+/// [`off_executor`] 落到 blocking 池，绝不占用 async 执行器。
+async fn lease_loop(
+    state: ApiState,
+    loop_control: Arc<JobLoopControl>,
+    loop_writable: Arc<std::sync::atomic::AtomicBool>,
+    first: std::io::Result<Option<Arc<crate::instance_lease::InstanceLease>>>,
+    clock: Arc<Mutex<Box<dyn Fn() -> i64 + Send>>>,
+    interval: Duration,
+) {
+    let mut next = Some(first);
+    loop {
+        let attempt = match next.take() {
+            Some(attempt) => attempt,
+            None => {
+                let lease_state = state.clone();
+                off_executor("instance_lease_acquire", move || {
+                    crate::instance_lease::acquire(&lease_state.store)
+                })
+                .await
+                .unwrap_or_else(|| {
+                    Err(std::io::Error::other(
+                        "实例锁获取步骤未能完成（blocking 池拒绝任务）",
+                    ))
+                })
+            }
+        };
+        let mut lease = match attempt {
+            Ok(lease) => lease,
+            Err(_) => {
+                loop_writable.store(false, std::sync::atomic::Ordering::SeqCst);
+                if loop_control.is_stopping() {
+                    return;
+                }
+                tokio::time::sleep(crate::instance_lease::retry_interval()).await;
+                continue;
+            }
+        };
+        if !loop_writable.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            tracing::info!("已获取实例锁，恢复后台任务");
+        }
+        recover_startup_work(&state).await;
+        match owner_round(&state, &loop_control, &mut lease, &clock, interval).await {
+            RoundEnd::Stop => return,
+            RoundEnd::Reacquire => {
+                loop_writable.store(false, std::sync::atomic::Ordering::SeqCst);
+                loop_control.drain().await;
+                // Review L2: `Drop for InstanceLease` 要拿 `Store` 锁释放租约行。
+                if let Some(lease) = lease.take() {
+                    off_executor("instance_lease_release", move || drop(lease)).await;
+                }
+                tokio::time::sleep(crate::instance_lease::retry_interval()).await;
+            }
+        }
+    }
+}
+
+/// 上个进程留下的分阶段工作，拿到租约后先补到终态（只有持租约者会驱动）。
+async fn recover_startup_work(state: &ApiState) {
+    // 未完成的 Library 重配置：只有这里（和启动路径）会把它们推进到终态。
+    let resume_state = state.clone();
+    if let Some(Err(error)) = off_executor("resume_library_reconfigurations", move || {
+        crate::storage_operations::resume_library_reconfigurations(&resume_state)
+    })
+    .await
+    {
+        tracing::error!(%error, "恢复未完成的 Library 重配置操作失败");
+    }
+    // 上个进程可能正好停在「合并事务已落库、job 引用还没收敛」之间：此时
+    // `unfinished_media_merges()` 已经为空，tick 里的 `if advanced` 分支永远不会
+    // 再触发，孤儿引用就会一直指向已退休的 Media。开机无条件补一次（幂等）。
+    let converge_state = state.clone();
+    off_executor("converge_retired_media_refs", move || {
+        crate::storage_operations::converge_retired_media_refs(&converge_state)
+    })
+    .await;
+    // 用户删除同样是分阶段落库的，重启后要把没走完的清理接着走完。
+    let removal_state = state.clone();
+    if let Some(Err(error)) = off_executor("recover_pending_removals", move || {
+        crate::user_removal::UserRemovalService::new(std::sync::Arc::new(removal_state))
+            .recover_pending_removals()
+    })
+    .await
+    {
+        tracing::error!(%error, "恢复未完成的用户删除操作失败");
+    }
+}
+
+/// 持租约期间的轮次：每 `interval` 推进一次后台工作，直到停机或失锁。
+async fn owner_round(
+    state: &ApiState,
+    loop_control: &JobLoopControl,
+    lease: &mut Option<Arc<crate::instance_lease::InstanceLease>>,
+    clock: &Arc<Mutex<Box<dyn Fn() -> i64 + Send>>>,
+    interval: Duration,
+) -> RoundEnd {
+    // A failed user removal keeps its record; retry it periodically (backoff) instead
+    // of only at the next lease acquisition.
+    let mut next_removal_retry = read_clock(clock).saturating_add(USER_REMOVAL_RETRY_SECS);
+    loop {
+        if loop_control.is_stopping() {
+            return RoundEnd::Stop;
+        }
+        if lease.as_ref().is_some_and(|lease| lease.is_lost()) {
+            return RoundEnd::Reacquire;
+        }
+        let now = read_clock(clock);
+        if now >= next_removal_retry {
+            next_removal_retry = now.saturating_add(USER_REMOVAL_RETRY_SECS);
+            let retry_state = state.clone();
+            let retried = tokio::task::spawn_blocking(move || {
+                crate::user_removal::UserRemovalService::new(std::sync::Arc::new(retry_state))
+                    .recover_pending_removals()
+            })
+            .await;
+            if let Ok(Err(error)) = retried {
+                tracing::error!(%error, "重试未完成的用户删除操作失败");
+            }
+        }
+        // Review L2: 到期阶段派发要读写 probe 表，同样不在执行器上做。
+        let probe = state.probe.clone();
+        let now_ms = now.saturating_mul(1000);
+        if let Some(Err(error)) =
+            off_executor("probe_dispatch_due", move || probe.dispatch_due(now_ms, 32)).await
+        {
+            tracing::error!(%error, now, "【媒体探测】派发到期阶段失败");
+        }
+        // tick 内 runner 会同步执行 worker（订阅搜索 → Indexer 抓 PT 站点，
+        // 同步 ureq 阻塞 1-8s）。直接在 async 任务里跑会占满 tokio 工作
+        // 线程，导致所有 HTTP 请求（含无锁的 /health）排队超时——
+        // 表现就是「正在连接服务…」+ me 不返回。挪到 spawn_blocking 池。
+        let state_clone = state.clone();
+        let completion_clock = Arc::clone(clock);
+        let worker_handle = tokio::task::spawn_blocking(move || {
+            if state_clone.job_loop_control().is_stopping() {
+                return;
+            }
+            if let Err(error) = run_pending_jobs_with_clock(
+                &state_clone,
+                now,
+                || read_clock(&completion_clock),
+                TickSource::Background,
+            ) {
+                tracing::error!(%error, now, "后台任务轮询失败");
+            }
+            // 播放会话心跳超时回收：停止上报的会话落成播放记录。
+            let _ = state_clone
+                .store
+                .lock()
+                .sweep_stale_sessions(now, crate::http::playback::session_timeout_secs());
+            // Media 合并的持久阶段同样按轮推进（本人持有租约，别处不会驱动）；
+            // 单条失败只告警，不停整轮后台工作。
+            crate::storage_operations::advance_media_merges(
+                &state_clone,
+                read_clock(&completion_clock),
+            );
+        });
+        loop_control.track_worker(worker_handle);
+        tokio::time::sleep(interval).await;
+    }
+}
+
 
 /// 一轮 tick 的来源：决定维护任务是否参与本轮调度。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -390,6 +507,28 @@ fn read_clock(clock: &Arc<Mutex<Box<dyn Fn() -> i64 + Send>>>) -> i64 {
     (clock.lock())()
 }
 
+/// 在 blocking 池上跑一个同步 Store / 恢复步骤，绝不在 async 执行器上阻塞。
+///
+/// Review L2: 这些步骤会拿进程级 `Store` 锁（`instance_lease::acquire` 还会在锁内
+/// 打开一条 app.db 连接）。直接在 `tokio::spawn` 的任务里跑，长批持锁期间整个
+/// runtime 都会被卡住。`None` 表示 blocking 任务没能执行完（池拒绝或 panic），
+/// 已按 `error!` 记录。
+async fn off_executor<T: Send + 'static>(
+    step: &'static str,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(value) => Some(value),
+        Err(error) => {
+            tracing::error!(step, %error, "后台阻塞步骤未能完成");
+            None
+        }
+    }
+}
+
 pub fn unix_now() -> i64 {
     crate::store::unix_now()
 }
+
+/// Seconds between background retries of user removals that are still pending or failed.
+const USER_REMOVAL_RETRY_SECS: i64 = 60;

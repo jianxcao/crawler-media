@@ -105,7 +105,7 @@ pub trait Downloader: Send + Sync {
     }
 
     /// Destructive Subscribe cleanup must prove exact identity. Never falls back
-    /// to `remove`, whose legacy implementations may match names and sizes.
+    /// to `remove`, whose implementations may match names and sizes.
     fn remove_owned(&self, _torrent: &Torrent, _delete_files: bool) -> Result<(), DownloaderError> {
         Err(DownloaderError::Message(
             "exact owned removal unsupported; refusing unsafe cleanup".into(),
@@ -125,7 +125,7 @@ pub trait Downloader: Send + Sync {
     }
 
     /// Canonical actual task identity, not a title-derived snapshot match.
-    /// None means ownership cannot be proven (including legacy HTTP deliveries).
+    /// None means ownership cannot be proven (an HTTP delivery has no info hash).
     fn owned_identity(&self, torrent: &Torrent) -> Result<Option<String>, DownloaderError> {
         Ok(magnet_info_hash(&torrent.enclosure))
     }
@@ -193,11 +193,10 @@ pub trait Downloader: Send + Sync {
 /// One client-side task as reported by [`Downloader::task_snapshots`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TaskSnapshot {
-    /// Our marker tag in the client: the constant [`TASK_TAG`], or a legacy
-    /// per-torrent `crawler-media-*` tag still present from earlier builds.
-    /// Non-empty only for crawler-media deliveries — the task center uses it
-    /// to filter foreign torrents out. Per-torrent identity is established by
-    /// normalized title + size, not by this tag.
+    /// Our marker tag in the client: exactly [`TASK_TAG`], empty for anything
+    /// else. Non-empty only for crawler-media deliveries — the task center uses
+    /// it to filter foreign torrents out. Per-torrent identity comes from
+    /// [`TaskSnapshot::owned_tags`], never from this marker.
     pub tag: String,
     /// Client-side task name (the torrent title).
     pub name: String,
@@ -342,7 +341,7 @@ mod owned_tag_tests {
     #[test]
     fn owned_tags_are_collected_and_generic_tags_ignored() {
         let owned = super::ownership_tag("https://pt.example/a");
-        let raw = format!("other, crawler-media ,{owned}, crawler-media-legacy");
+        let raw = format!("other, crawler-media ,{owned}, crawler-media-unknown");
         assert_eq!(super::owned_tags_from(raw.split(',')), vec![owned]);
         assert!(super::owned_tags_from(["crawler-media", ""]).is_empty());
     }

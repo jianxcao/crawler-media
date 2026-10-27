@@ -1257,7 +1257,6 @@ html.immersive-route .page-solid {
 .btn-accent:active {
   transform: scale(0.96);
 }
-
 /*
  * 次级玻璃胶囊按钮：设置页的「编辑 / 刷新 / 取消」等次要操作。
  * 与侧栏「新任务」同一语言：极暗半透填充 + 发丝描边 + 一线内高光，
@@ -1278,10 +1277,6 @@ html.immersive-route .page-solid {
     background 150ms ease,
     border-color 150ms ease,
     color 150ms ease;
-}
-.btn-glass:hover {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.15);
 }
 .btn-glass:disabled {
   opacity: 0.5;

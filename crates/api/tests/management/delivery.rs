@@ -91,7 +91,7 @@ async fn auto_route_save_path_is_translated_into_downloader_namespace() {
 #[tokio::test]
 async fn legacy_subscribe_run_keeps_the_site_downloader_for_transfer() {
     let tmp = tempfile::tempdir().unwrap();
-    let (url, calls) = transmission_fixture();
+    let (url, calls, _url_server) = transmission_fixture();
     let fetcher = Arc::new(Fixtures {
         requests: Mutex::new(Vec::new()),
         bodies: HashMap::from([("search", nexusphp())]),
@@ -214,7 +214,7 @@ async fn mteam_manual_delivery_resolves_signed_url_but_keeps_stable_pending_iden
 #[tokio::test]
 async fn explicitly_selected_downloader_owns_pending_task_and_its_removal() {
     let tmp = tempfile::tempdir().unwrap();
-    let (url, calls) = transmission_fixture();
+    let (url, calls, _url_server) = transmission_fixture();
     let fetcher = Arc::new(Fixtures {
         requests: Mutex::new(Vec::new()),
         bodies: HashMap::new(),
@@ -292,8 +292,8 @@ async fn explicitly_selected_downloader_owns_pending_task_and_its_removal() {
 #[tokio::test]
 async fn changing_default_does_not_move_an_existing_pending_task() {
     let tmp = tempfile::tempdir().unwrap();
-    let (first_url, first_calls) = transmission_fixture();
-    let (second_url, second_calls) = transmission_fixture();
+    let (first_url, first_calls, _first_url_server) = transmission_fixture();
+    let (second_url, second_calls, _second_url_server) = transmission_fixture();
     let store = Arc::new(Mutex::new(Store::open(tmp.path().join("data")).unwrap()));
     let first_id = domain::DownloaderId::new();
     let second_id = domain::DownloaderId::new();
@@ -547,7 +547,7 @@ async fn transfer_does_not_ledger_a_stale_mismatched_pending_torrent() {
         }
     }
     assert!(transfer_ran);
-    assert!(store.list_ledger().unwrap().is_empty());
+    assert!(store.list_file_coverage().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -613,7 +613,7 @@ async fn valid_manual_movie_and_tv_submissions_enter_their_own_library_media() {
         assert_eq!(response.status(), StatusCode::OK);
         if Store::open(tmp.path().join("data"))
             .unwrap()
-            .list_ledger()
+            .list_file_coverage()
             .unwrap()
             .len()
             == 2
@@ -623,10 +623,10 @@ async fn valid_manual_movie_and_tv_submissions_enter_their_own_library_media() {
     }
     let rows = Store::open(tmp.path().join("data"))
         .unwrap()
-        .list_ledger()
+        .list_file_coverage()
         .unwrap();
     assert_eq!(rows.len(), 2);
-    assert_ne!(rows[0].media_id, rows[1].media_id);
+    assert_ne!(rows[0].file.media_id, rows[1].file.media_id);
 }
 
 fn seed_transmission_downloader(store: &Store, url: String) -> domain::DownloaderId {
@@ -671,7 +671,7 @@ fn make_test_delivery_torrent() -> domain::Torrent {
 #[tokio::test]
 async fn deleting_subscription_removes_torrent_from_specific_downloader() {
     let tmp = tempfile::tempdir().unwrap();
-    let (url, calls) = transmission_fixture();
+    let (url, calls, _url_server) = transmission_fixture();
     let fetcher = Arc::new(Fixtures {
         requests: Mutex::new(Vec::new()),
         bodies: HashMap::new(),

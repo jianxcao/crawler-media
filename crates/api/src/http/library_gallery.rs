@@ -1,70 +1,131 @@
+//! GET /libraries/{id}/gallery — one image group per item, read from the `library_items`
+//! summary and the published file facts. No projection, no filesystem observation.
+
 use std::collections::HashMap;
 
+use crate::http::library::{
+    BrowseWindow, browse_filter_from_query, browse_order_from_query, browse_response,
+    missing_library,
+};
+use crate::http::err;
+use crate::management::ApiState;
+use crate::store::library_query;
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
-
-use crate::http::library::{page, preferred_row, require_visible_library, selection};
-use crate::http::{err, ok_list};
-use crate::management::ApiState;
 
 pub(crate) async fn gallery(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
+    axum::Extension(credential): axum::Extension<store::ReadCredential>,
     Path(id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
+    axum::Extension(timing): axum::Extension<media_server::provider::QueryTiming>,
 ) -> Response {
-    // 显式分页参数先校验：越界直接 400；省略 limit 仍是"返回全部"。
-    if let Err(message) = page::PageWindow::parse(&query) {
-        return err(
-            axum::http::StatusCode::BAD_REQUEST,
-            "library.invalid",
-            &message,
-        );
-    }
-    // 授权从当前配置判定；热页先按图片存在性从投影轻候选剔除空组、再取本页，
-    // 且只为本页构建图片 JSON（零文件 IO）。投影不可用/省略 limit 时回退旧全量路径。
-    let library = {
-        let store = state.store.lock();
-        match require_visible_library(&store, &id, user_id) {
-            Ok(library) => library,
-            Err(response) => return response,
-        }
+    // 游标分页：`cursor` 续页，`offset` 已删除；显式 limit 越界仍 400。
+    let window = match BrowseWindow::parse(&query) {
+        Ok(window) => window,
+        Err(message) => return err(StatusCode::BAD_REQUEST, "library.invalid", &message),
     };
-    let (items, artwork) =
-        match selection::load_browse_gallery_page(&state, &library, user_id, &query).await {
-            Ok(loaded) => loaded,
-            Err(response) => return response,
-        };
-    let files = state.browse_files.clone();
-    let expansions = state.gallery_expansions.clone();
-    let library_id = library.id.clone();
-    let work = state
-        .http_work
-        .run(selection::BROWSE_DEADLINE, move || {
-            let art = selection::BrowseArtwork::new(Some(&artwork), files.as_ref());
-            let mut groups = Vec::with_capacity(items.len());
-            for item in &items {
-                expansions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let images = gallery_images(&library_id, &item.media, &item.rows, &art);
-                if images.is_empty() {
-                    continue;
-                }
-                groups.push(json!({
-                    "library_id": library_id,
-                    "media_item_id": item.media.id.to_string(),
-                    "title": item.media.title,
-                    "is_favorite": item.favorite,
-                    "images": images,
-                }));
-            }
-            ok_list(groups).into_response()
-        })
-        .await;
-    match work {
-        Ok(response) => response,
-        Err(error) => selection::browse_work_error(error),
+    let lib_id = match id.parse::<domain::LibraryId>() {
+        Ok(lib_id) => lib_id,
+        Err(_) => return missing_library(),
+    };
+    let mut filter = match browse_filter_from_query(&query) {
+        Ok(filter) => filter,
+        Err(message) => return err(StatusCode::BAD_REQUEST, "library.invalid", &message),
+    };
+    // 空图组不入页：图片存在性是投影里的过滤条件，这里落在同一套 SQL 谓词上，
+    // 先按「有条目图或任一单元剧照」筛，再取本页。
+    filter.require_image = true;
+    let (order, descending) = browse_order_from_query(&query);
+    let lib_q = library_query::LibraryQuery {
+        library_id: lib_id,
+        user_id,
+        filter,
+        order,
+        descending,
+        page: window.page(),
+        // 图廊不带总数：空图组先被剔除再分页，COUNT 口径与「有图的作品数」不同，
+        // 报了反而误导；只有 `next_cursor` 决定还有没有下一页。
+        include_total: false,
+    };
+    let selected = crate::library_read_work::run_self_library_read(
+        &state,
+        credential,
+        lib_id,
+        store::LibraryReadRequest::Browse(lib_q),
+        timing.deadline,
+    )
+    .await;
+    let (page_items, facts, stills) = match selected {
+        Ok(store::LibraryReadResult::Browse {
+            page,
+            facts,
+            stills,
+        }) => (page, facts, stills),
+        Ok(_) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "library.read",
+                "查询类型错误",
+            );
+        }
+        Err(response) => return response,
+    };
+    let library_id = lib_id.to_string();
+    let mut groups = Vec::with_capacity(page_items.items.len());
+    for item in &page_items.items {
+        let facts = facts.get(&item.media_id).cloned().unwrap_or_default();
+        let mut images = Vec::new();
+        if let Some(file_id) = item.poster_ref {
+            images.push(image_json(
+                &library_id,
+                &item.title,
+                GalleryImageKind::Poster,
+                file_id,
+                None,
+                None,
+            ));
+        }
+        if let Some(file_id) = item.backdrop_ref {
+            images.push(image_json(
+                &library_id,
+                &item.title,
+                GalleryImageKind::Backdrop,
+                file_id,
+                None,
+                None,
+            ));
+        }
+        for still in stills
+            .iter()
+            .filter(|still| still.media_id == item.media_id)
+        {
+            images.push(image_json(
+                &library_id,
+                &item.title,
+                GalleryImageKind::Still,
+                still.file_id,
+                still.season,
+                still.episode,
+            ));
+        }
+        if images.is_empty() {
+            continue;
+        }
+        groups.push(json!({
+            "library_id": library_id,
+            "media_item_id": item.media_id.to_string(),
+            "kind": item.kind.as_str(),
+            "title": item.title,
+            "year": item.year,
+            "is_favorite": facts.favorite,
+            "images": images,
+        }));
     }
+    browse_response(groups, page_items.next_cursor, None).into_response()
 }
 
 /// 图组里的一类图片。每类自带 URL 前缀、宽高比与展示名，调用方不必再传一
@@ -101,68 +162,14 @@ impl GalleryImageKind {
     }
 }
 
-fn gallery_images(
+fn image_json(
     library_id: &str,
-    media: &domain::Media,
-    rows: &[domain::LedgerRow],
-    art: &selection::BrowseArtwork<'_>,
-) -> Vec<Value> {
-    let refs: Vec<&domain::LedgerRow> = rows.iter().collect();
-    let Some(pref_row) = preferred_row(&refs) else {
-        return Vec::new();
-    };
-    let facts = art.media(media.id, rows);
-    let mut images = Vec::new();
-
-    if facts.has_poster {
-        push_image(
-            &mut images,
-            library_id,
-            media,
-            pref_row,
-            GalleryImageKind::Poster,
-            None,
-            None,
-        );
-    }
-    if facts.has_backdrop {
-        push_image(
-            &mut images,
-            library_id,
-            media,
-            pref_row,
-            GalleryImageKind::Backdrop,
-            None,
-            None,
-        );
-    }
-
-    // 遍历所有有剧照的单元（剧照存在性来自投影 / 注入 seam，不再现场 stat）。
-    for row in rows {
-        if art.has_still(row) {
-            push_image(
-                &mut images,
-                library_id,
-                media,
-                row,
-                GalleryImageKind::Still,
-                row.season,
-                row.episode,
-            );
-        }
-    }
-    images
-}
-
-fn push_image(
-    images: &mut Vec<Value>,
-    library_id: &str,
-    media: &domain::Media,
-    row: &domain::LedgerRow,
+    title: &str,
     kind: GalleryImageKind,
+    file_id: domain::LedgerId,
     season: Option<u32>,
     episode: Option<u32>,
-) {
+) -> Value {
     let label = match kind {
         GalleryImageKind::Poster => "海报".to_string(),
         GalleryImageKind::Backdrop => "背景".to_string(),
@@ -171,16 +178,15 @@ fn push_image(
             _ => "剧照".to_string(),
         },
     };
-    images.push(json!({
-        "url": crate::http::library::artwork_url(kind.url_kind(), row.id),
+    json!({
+        "url": crate::http::library::artwork_url(kind.url_kind(), file_id),
         "aspect": kind.aspect(),
         "kind": kind.name(),
-        "alt": media.title,
-        "media_item_id": media.id.to_string(),
+        "alt": title,
         "library_id": library_id,
         "season": season,
         "episode": episode,
         "label": label,
         "t_seconds": Value::Null,
-    }));
+    })
 }

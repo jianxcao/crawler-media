@@ -34,7 +34,7 @@ async fn jellyfin_playback_info_and_items_include_chapters_with_markers() {
     let strm_file = tv_dir.join("Frieren.S01E01.strm");
     std::fs::write(&strm_file, "https://cdn.example.com/frieren/ep01.mkv\n").unwrap();
 
-    // 1. Manually add Media and LedgerRow
+    // 1. Manually add Media and its Library file
     let media = domain::Media {
         id: domain::MediaId::new(),
         kind: domain::MediaKind::Tv,
@@ -50,8 +50,7 @@ async fn jellyfin_playback_info_and_items_include_chapters_with_markers() {
     };
     let media = store.ensure_media(media).unwrap();
 
-    let row = domain::LedgerRow {
-        id: domain::LedgerId::new(),
+    let spec = store::test_support::FixtureFile {
         media_id: media.id,
         path: strm_file.display().to_string(),
         season: Some(1),
@@ -62,8 +61,11 @@ async fn jellyfin_playback_info_and_items_include_chapters_with_markers() {
         quality_source: domain::QualitySource::Release,
         confidence: domain::Confidence::High,
         filter_score: None,
+        transfer_mode: None,
+        source_path: None,
+        file_id: None,
     };
-    store.insert_ledger(&row).unwrap();
+    store::test_support::publish_fixture_file(&store, &spec).unwrap();
 
     // 2. Add an intro marker in media_markers table (simulate TheIntroDB or previous scan)
     let marker = api::store::StoredMediaMarker {

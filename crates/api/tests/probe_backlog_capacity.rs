@@ -3,19 +3,20 @@
 //! terminal, and refuse a second worker start in the same runtime. Capture is
 //! a gated fake; no chromaprint process starts.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::{Condvar, Mutex};
 
-use api::probe_manager::ProbeManager;
 use api::Store;
+use api::probe_manager::ProbeManager;
 use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use marker::fingerprint::capture_types::{
     CaptureFailure, CaptureMetrics, CaptureRequest, CapturedFingerprint, FingerprintCaptureEngine,
 };
 use marker::{AudioFingerprint, CommonSegment, FingerprintEngine};
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 const METADATA_PENDING: usize = 100_000;
 const FINGERPRINT_PENDING: usize = 100_000;
@@ -95,9 +96,14 @@ impl FingerprintCaptureEngine for GatedCapture {
             let mut state = self.gate.state.lock();
             state.0 += 1;
             self.gate.changed.notify_all();
-            while !state.1 {
-                self.gate.changed.wait(&mut state);
-            }
+            self.gate.changed.wait_while_for(
+                &mut state,
+                |state| !state.1,
+                std::time::Duration::from_secs(30),
+            );
+            let released = state.1;
+            drop(state);
+            assert!(released, "test must release the probe capture gate");
         }
         self.active.fetch_sub(1, Ordering::SeqCst);
         let duration_ms = request.window.duration_ms();
@@ -226,9 +232,10 @@ async fn full_fingerprint_window_does_not_lose_metadata_completion() {
         store
             .set_library_intro_settings(&library.id, true, true)
             .unwrap();
-        store
-            .insert_ledger(&domain::LedgerRow {
-                id: ledger_id,
+        publish_fixture_file(
+            &store,
+            &FixtureFile {
+                file_id: Some(ledger_id),
                 media_id,
                 path: video.to_string_lossy().into_owned(),
                 season: Some(1),
@@ -239,8 +246,10 @@ async fn full_fingerprint_window_does_not_lose_metadata_completion() {
                 quality_source: QualitySource::Release,
                 confidence: Confidence::High,
                 filter_score: None,
-            })
-            .unwrap();
+                ..Default::default()
+            },
+        )
+        .unwrap();
         store
             .put_file_meta_versioned(
                 &ledger_id.to_string(),
@@ -292,7 +301,10 @@ async fn full_fingerprint_window_does_not_lose_metadata_completion() {
         workers_after_first,
         "a second start in the same runtime must not add workers"
     );
-    assert!(workers_after_first >= 2, "metadata and fingerprint workers start");
+    assert!(
+        workers_after_first >= 2,
+        "metadata and fingerprint workers start"
+    );
 
     // Fill the fingerprint window, then release it. A completed metadata unit
     // must stay durable (queued for fingerprint, or terminal) — never dropped

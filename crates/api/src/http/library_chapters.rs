@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::http::library::{library_for_row, preferred_row, require_visible_library};
+use crate::http::library::{preferred_coverage, require_visible_library};
 use crate::http::{err, ok, ok_list};
 use crate::management::ApiState;
 use crate::scrape_store::ScrapeStoreExt;
@@ -24,14 +24,7 @@ pub(crate) fn auto_generate_chapters(state: &ApiState, path: &std::path::Path) {
         tracing::debug!(path = %path.display(), "媒体库已关闭章节场景图提取，跳过自动抓帧");
         return;
     }
-    let kind = state
-        .store
-        .lock()
-        .list_libraries()
-        .unwrap_or_default()
-        .into_iter()
-        .find(|owner| owner.root_paths.iter().any(|root| path.starts_with(root)))
-        .map(|owner| owner.kind);
+    let kind = owning_library(&state.store.lock(), path).map(|owner| owner.kind);
     let lease = match kind
         .map(|kind| state.acquire_path_work(path, kind))
         .transpose()
@@ -46,34 +39,28 @@ pub(crate) fn auto_generate_chapters(state: &ApiState, path: &std::path::Path) {
         .as_ref()
         .map(|lease| lease.control().clone())
         .unwrap_or_default();
-    if let Some(targets) = probe_chapter_targets(path, &control) {
-        if let Err(error) = state.chapter_frames.enqueue_path(path, targets) {
+    if let Some(targets) = probe_chapter_targets(path, &control)
+        && let Err(error) = state.chapter_frames.enqueue_path(path, targets) {
             tracing::debug!(%error, path = %path.display(), "章节帧任务入队失败");
         }
-    }
 }
 
-/// 最长根目录前缀所属媒体库的「生成章节」开关。路径不落在任何库时默认开启，
+/// 文件持久化归属库（`library_id`）的「生成章节」开关。未入账文件默认开启，
 /// 与入库自动抓帧的历史行为一致。
 pub(crate) fn chapter_images_enabled(store: &crate::Store, path: &std::path::Path) -> bool {
-    store
-        .list_libraries()
+    owning_library(store, path).is_none_or(|lib| lib.extract_chapter_images)
+}
+
+/// The library persisted as owning the file at `path` (its row's `library_id`).
+fn owning_library(store: &crate::Store, path: &std::path::Path) -> Option<store::Library> {
+    let coverage = store
+        .file_coverage_by_path(&path.to_string_lossy())
         .ok()
-        .and_then(|libraries| {
-            libraries
-                .into_iter()
-                .filter(|lib| lib.root_paths.iter().any(|root| path.starts_with(root)))
-                .max_by_key(|lib| {
-                    lib.root_paths
-                        .iter()
-                        .filter(|root| path.starts_with(root))
-                        .map(|root| root.components().count())
-                        .max()
-                        .unwrap_or(0)
-                })
-                .map(|lib| lib.extract_chapter_images)
-        })
-        .unwrap_or(true)
+        .flatten()?;
+    store
+        .get_library(&coverage.file.library_id.to_string())
+        .ok()
+        .flatten()
 }
 
 pub(crate) fn trigger_scene_frames_for_chapter_updates(
@@ -103,7 +90,6 @@ fn probe_chapter_targets(
     path: &std::path::Path,
     control: &library::WorkControl,
 ) -> Option<Vec<(i64, i64)>> {
-    let _permit = marker::media_read::acquire_media_read(path, control.signal()).ok()?;
     let mut command = std::process::Command::new("ffprobe");
     command.args(["-v", "error", "-show_chapters", "-of", "json"]);
     library::ProbeTarget::from_path(path).apply_input(&mut command);
@@ -162,13 +148,21 @@ pub(crate) struct ChapterQuery {
     episode: Option<u32>,
 }
 
-fn selected_row(rows: &[domain::LedgerRow], query: ChapterQuery) -> Option<domain::LedgerRow> {
+fn selected_row(
+    rows: &[domain::FileCoverage],
+    query: ChapterQuery,
+) -> Option<domain::FileCoverage> {
     match (query.season, query.episode) {
         (Some(season), Some(episode)) => rows
             .iter()
-            .find(|row| row.season == Some(season) && row.episode == Some(episode))
+            .find(|row| {
+                row.units.iter().any(|unit| {
+                    u32::try_from(unit.season).ok() == Some(season)
+                        && u32::try_from(unit.episode).ok() == Some(episode)
+                })
+            })
             .cloned(),
-        _ => preferred_row(rows).cloned(),
+        _ => preferred_coverage(rows).cloned(),
     }
 }
 
@@ -193,14 +187,11 @@ pub(crate) async fn chapters(
         let Some(media) = store.get_media(media_id).ok().flatten() else {
             return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
         };
-        let rows: Vec<domain::LedgerRow> = store
-            .list_ledger()
+        let rows: Vec<domain::FileCoverage> = store
+            .file_coverage_for_media(media_id)
             .unwrap_or_default()
             .into_iter()
-            .filter(|row| row.media_id == media_id)
-            .filter(|row| {
-                library_for_row(&store, row, &media).is_some_and(|owner| owner.id == library.id)
-            })
+            .filter(|row| row.file.library_id.to_string() == library.id)
             .collect();
         let Some(row) = selected_row(&rows, query) else {
             return err(
@@ -226,18 +217,13 @@ pub(crate) async fn chapters(
     if resolved.is_empty() {
         return ok_list(Vec::new()).into_response();
     }
-    let items = chapters_json(&row, &resolved);
-    ok_list(items).into_response()
-}
-
-fn chapters_json(row: &domain::LedgerRow, chapters: &[library::ChapterMarker]) -> Vec<Value> {
-    chapters
+    let items: Vec<Value> = resolved
         .iter()
         .enumerate()
         .map(|(index, chapter)| {
-            let image_url = chapter_image_path(std::path::Path::new(&row.path), index)
+            let image_url = chapter_image_path(&row.file.path, index)
                 .is_file()
-                .then(|| format!("/chapters/{}/{index}", row.id));
+                .then(|| format!("/chapters/{}/{index}", row.file.file_id));
             let mut obj = json!({
                 "start_ms": chapter.start_ms,
                 "end_ms": chapter.end_ms,
@@ -254,51 +240,8 @@ fn chapters_json(row: &domain::LedgerRow, chapters: &[library::ChapterMarker]) -
             }
             obj
         })
-        .collect()
-}
-
-fn enqueue_season_fingerprint_refresh(
-    state: &ApiState,
-    media: &domain::Media,
-    season: u32,
-    rows: &[domain::LedgerRow],
-) -> (usize, bool) {
-    let season_probe_was_active = rows
-        .iter()
-        .any(|candidate| state.probe.is_queued(&candidate.id.to_string()));
-    let mut probe_queued = 0;
-    if should_queue_voiceprint_refresh(media.kind) && !season_probe_was_active {
-        let units = rows
-            .iter()
-            .map(|candidate_row| crate::probe_manager::ProbeUnit {
-                row: candidate_row.clone(),
-                kind: media.kind,
-                force_fingerprint: true,
-                reuse_fingerprint_cache: false,
-                overwrite_markers: true,
-                reuse_media_info_cache: true,
-                marker_refresh_id: None,
-                job_id: None,
-            })
-            .collect();
-        probe_queued = state.probe.enqueue_marker_refresh(units);
-        tracing::info!(
-            media = %media.title,
-            season,
-            rows = rows.len(),
-            queued = probe_queued,
-            "【片头片尾】用户强制刷新，已排队同季完整声纹探测"
-        );
-    } else if season_probe_was_active {
-        tracing::info!(
-            media = %media.title,
-            season,
-            rows = rows.len(),
-            "【片头片尾】该剧该季已有探测任务，跳过重复刷新"
-        );
-    }
-
-    (probe_queued, season_probe_was_active)
+        .collect();
+    ok_list(items).into_response()
 }
 
 /// POST /libraries/{id}/items/{item_id}/chapters/refresh — force clear cached
@@ -322,14 +265,11 @@ pub(crate) async fn refresh_item_chapters(
         let Some(media) = store.get_media(media_id).ok().flatten() else {
             return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
         };
-        let rows: Vec<domain::LedgerRow> = store
-            .list_ledger()
+        let rows: Vec<domain::FileCoverage> = store
+            .file_coverage_for_media(media_id)
             .unwrap_or_default()
             .into_iter()
-            .filter(|row| row.media_id == media_id)
-            .filter(|row| {
-                library_for_row(&store, row, &media).is_some_and(|owner| owner.id == library.id)
-            })
+            .filter(|row| row.file.library_id.to_string() == library.id)
             .collect();
         let Some(row) = selected_row(&rows, query) else {
             return err(
@@ -356,16 +296,71 @@ pub(crate) async fn refresh_item_chapters(
             .await
     };
 
-    let season = row.season.unwrap_or(1);
+    let season = row.season_or_one();
     let fingerprint_rows: Vec<_> = rows
         .iter()
-        .filter(|candidate| candidate.season.unwrap_or(1) == season)
+        .filter(|candidate| candidate.season_or_one() == season)
         .cloned()
         .collect();
-    let (probe_queued, season_probe_was_active) =
-        enqueue_season_fingerprint_refresh(&state, &media, season, &fingerprint_rows);
+    let season_probe_was_active = fingerprint_rows
+        .iter()
+        .any(|candidate| state.probe.is_queued(&candidate.file.file_id.to_string()));
+    let mut probe_queued = 0;
+    if should_queue_voiceprint_refresh(media.kind) && !season_probe_was_active {
+        let units = fingerprint_rows
+            .iter()
+            .map(|candidate_row| crate::probe_manager::ProbeUnit {
+                row: candidate_row.clone(),
+                kind: media.kind,
+                force_fingerprint: true,
+                reuse_fingerprint_cache: false,
+                overwrite_markers: true,
+                reuse_media_info_cache: true,
+                marker_refresh_id: None,
+                job_id: None,
+            })
+            .collect();
+        probe_queued = state.probe.enqueue_marker_refresh(units);
+        tracing::info!(
+            media = %media.title,
+            season,
+            rows = fingerprint_rows.len(),
+            queued = probe_queued,
+            "【片头片尾】用户强制刷新，已排队同季完整声纹探测"
+        );
+    } else if season_probe_was_active {
+        tracing::info!(
+            media = %media.title,
+            season,
+            rows = fingerprint_rows.len(),
+            "【片头片尾】该剧该季已有探测任务，跳过重复刷新"
+        );
+    }
 
-    let items = chapters_json(&row, &refreshed);
+    let items: Vec<Value> = refreshed
+        .iter()
+        .enumerate()
+        .map(|(index, chapter)| {
+            let image_url = chapter_image_path(&row.file.path, index)
+                .is_file()
+                .then(|| format!("/chapters/{}/{index}", row.file.file_id));
+            let mut obj = json!({
+                "start_ms": chapter.start_ms,
+                "end_ms": chapter.end_ms,
+                "title": chapter.title,
+                "image_url": image_url,
+            });
+            if let Some(mt) = chapter.marker_type {
+                let tag = match mt {
+                    library::MarkerType::IntroStart => "IntroStart",
+                    library::MarkerType::IntroEnd => "IntroEnd",
+                    library::MarkerType::CreditsStart => "CreditsStart",
+                };
+                obj["marker_type"] = json!(tag);
+            }
+            obj
+        })
+        .collect();
     let marker_job = match state.probe.marker_refresh_job(media_id, season) {
         Ok(job) => job,
         Err(error) => {
@@ -381,7 +376,7 @@ pub(crate) async fn refresh_item_chapters(
     let marker_job_active = marker_job.as_ref().is_some_and(|job| job.is_active());
     let active_after_enqueue = fingerprint_rows
         .iter()
-        .any(|candidate| state.probe.is_queued(&candidate.id.to_string()));
+        .any(|candidate| state.probe.is_queued(&candidate.file.file_id.to_string()));
     let already_running =
         probe_queued == 0 && (marker_job_active || season_probe_was_active || active_after_enqueue);
     let enqueue_failed =
@@ -415,14 +410,16 @@ pub(crate) async fn probe_status(
             Ok(library) => library,
             Err(response) => return response,
         };
-        let Some(media) = store.get_media(media_id).ok().flatten() else {
+        let Some(_media) = store.get_media(media_id).ok().flatten() else {
             return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
         };
-        let visible = store.list_ledger().unwrap_or_default().iter().any(|row| {
-            row.media_id == media_id
-                && row.season.unwrap_or(1) == season
-                && library_for_row(&store, row, &media).is_some_and(|owner| owner.id == library.id)
-        });
+        let visible = store
+            .file_coverage_for_media(media_id)
+            .unwrap_or_default()
+            .iter()
+            .any(|row| {
+                row.season_or_one() == season && row.file.library_id.to_string() == library.id
+            });
         if !visible {
             return err(
                 StatusCode::NOT_FOUND,
@@ -501,14 +498,11 @@ pub(crate) async fn generate_chapters(
         let Some(media) = store.get_media(media_id).ok().flatten() else {
             return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
         };
-        let rows: Vec<domain::LedgerRow> = store
-            .list_ledger()
+        let rows: Vec<domain::FileCoverage> = store
+            .file_coverage_for_media(media_id)
             .unwrap_or_default()
             .into_iter()
-            .filter(|row| row.media_id == media_id)
-            .filter(|row| {
-                library_for_row(&store, row, &media).is_some_and(|owner| owner.id == library.id)
-            })
+            .filter(|row| row.file.library_id.to_string() == library.id)
             .collect();
         let Some(row) = selected_row(&rows, query) else {
             return err(
@@ -519,22 +513,19 @@ pub(crate) async fn generate_chapters(
         };
         (row, media)
     };
-    let path = std::path::PathBuf::from(row.path.clone());
+    let path = row.file.path.clone();
     let probe_lease = match state.acquire_library_work(&id) {
         Ok(lease) => lease,
         Err(error) => return err(StatusCode::CONFLICT, "library.frozen", &error),
     };
-    let mut targets: Vec<(i64, i64)> = match tokio::task::spawn_blocking({
+    let mut targets: Vec<(i64, i64)> = tokio::task::spawn_blocking({
         let path = path.clone();
         move || probe_chapter_targets(&path, probe_lease.control())
     })
     .await
     .ok()
     .flatten()
-    {
-        Some(targets) => targets,
-        None => Vec::new(),
-    };
+    .unwrap_or_default();
 
     if targets.is_empty() {
         let theintrodb_client = {
@@ -576,10 +567,12 @@ pub(crate) async fn chapter_image(
     State(state): State<ApiState>,
     Path((ledger_id, index)): Path<(String, String)>,
 ) -> Response {
-    let compact = ledger_id.replace('-', "");
+    let Ok(file_id) = domain::LedgerId::from_str(&ledger_id) else {
+        return err(StatusCode::NOT_FOUND, "chapters.missing", "章节帧不存在");
+    };
     let row = {
         let store = state.store.lock();
-        match store.get_ledger(&compact) {
+        match store.file_coverage_by_id(file_id) {
             Ok(Some(row)) => row,
             _ => return err(StatusCode::NOT_FOUND, "chapters.missing", "章节帧不存在"),
         }
@@ -588,7 +581,7 @@ pub(crate) async fn chapter_image(
         Ok(index) => index,
         Err(_) => return err(StatusCode::BAD_REQUEST, "chapters.invalid", "章节下标无效"),
     };
-    let frame = chapter_image_path(std::path::Path::new(&row.path), index);
+    let frame = chapter_image_path(&row.file.path, index);
     let frame = frame.is_file().then_some(frame);
     let Some(frame) = frame else {
         return err(StatusCode::NOT_FOUND, "chapters.missing", "章节帧不存在");

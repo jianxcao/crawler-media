@@ -1,4 +1,4 @@
-use api::cli::{Command, Transport, run};
+use api::cli::{Command, run};
 use axum::http::StatusCode;
 use serde_json::json;
 use tower::ServiceExt;
@@ -132,8 +132,8 @@ async fn cli_directory_prints_default_library_roots() {
     let tmp = tempfile::tempdir().unwrap();
     let t = transport(&tmp);
     let out = run(Command::Directory, &t).await.unwrap();
-    assert!(out.contains("movie_root="), "{out}");
-    assert!(out.contains("tv_root="), "{out}");
+    assert!(out.contains("kind=movie"), "{out}");
+    assert!(out.contains("kind=tv"), "{out}");
     assert!(out.contains("movies"), "{out}");
 }
 
@@ -142,15 +142,13 @@ async fn cli_directory_prints_extra_library_root() {
     let tmp = tempfile::tempdir().unwrap();
     let t = transport(&tmp);
     let extra = tmp.path().join("disk2/movies");
-    let listed = t.send("GET", "/api/v1/directory", None).await.unwrap();
-    assert_eq!(listed.0, 200);
-    t.send(
-        "POST",
-        "/api/v1/directory/roots",
-        Some(json!({
-            "kind": "movie",
-            "path": extra.display().to_string()
-        })),
+    let library = default_movie_library(&t).await;
+    run(
+        Command::DirectoryAddRoot {
+            id: library,
+            path: extra.display().to_string(),
+        },
+        &t,
     )
     .await
     .unwrap();
@@ -165,7 +163,7 @@ async fn cli_directory_add_root_prints_extra_path() {
     let extra = tmp.path().join("disk2/movies");
     let out = run(
         Command::DirectoryAddRoot {
-            kind: "movie".into(),
+            id: default_movie_library(&t).await,
             path: extra.display().to_string(),
         },
         &t,
@@ -184,20 +182,24 @@ async fn cli_directory_remove_root_drops_extra_path() {
     let extra = tmp.path().join("disk2/movies");
     run(
         Command::DirectoryAddRoot {
-            kind: "movie".into(),
+            id: default_movie_library(&t).await,
             path: extra.display().to_string(),
         },
         &t,
     )
     .await
     .unwrap();
-    let listed = t.send("GET", "/api/v1/directory", None).await.unwrap();
-    let id = listed.1["extra_roots"][0]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let out = run(Command::DirectoryRemoveRoot { id }, &t).await.unwrap();
-    assert!(out.contains("deleted="), "{out}");
+    let id = default_movie_library(&t).await;
+    let out = run(
+        Command::DirectoryRemoveRoot {
+            id,
+            path: extra.display().to_string(),
+        },
+        &t,
+    )
+    .await
+    .unwrap();
+    assert!(out.contains("added=false"), "{out}");
     let after = run(Command::Directory, &t).await.unwrap();
     assert!(!after.contains(&extra.display().to_string()), "{after}");
 }
@@ -284,22 +286,17 @@ async fn cli_directory_sets_movie_naming() {
     let tmp = tempfile::tempdir().unwrap();
     let t = transport(&tmp);
     let out = run(
-        Command::DirectoryMovieNaming {
-            pattern: "{title} ({year})/{title}".into(),
+        Command::DirectoryNaming {
+            field: "naming_movie_file".into(),
+            pattern: "{title}".into(),
         },
         &t,
     )
     .await
     .unwrap();
-    assert!(
-        out.contains("movie_naming={title} ({year})/{title}"),
-        "{out}"
-    );
+    assert!(out.contains("naming_movie_file={title}"), "{out}");
     let listed = run(Command::Directory, &t).await.unwrap();
-    assert!(
-        listed.contains("movie_naming={title} ({year})/{title}"),
-        "{listed}"
-    );
+    assert!(listed.contains("naming_movie_file={title}"), "{listed}");
 }
 
 #[tokio::test]
@@ -307,20 +304,35 @@ async fn cli_directory_sets_tv_naming() {
     let tmp = tempfile::tempdir().unwrap();
     let t = transport(&tmp);
     let out = run(
-        Command::DirectoryTvNaming {
-            pattern: "{title}/Season {season}/{title} - S{season}E{episode}".into(),
+        Command::DirectoryNaming {
+            field: "naming_episode_file".into(),
+            pattern: "{title} - S{season}E{episode}".into(),
         },
         &t,
     )
     .await
     .unwrap();
     assert!(
-        out.contains("tv_naming={title}/Season {season}/{title} - S{season}E{episode}"),
+        out.contains("naming_episode_file={title} - S{season}E{episode}"),
         "{out}"
     );
     let listed = run(Command::Directory, &t).await.unwrap();
     assert!(
-        listed.contains("tv_naming={title}/Season {season}/{title} - S{season}E{episode}"),
+        listed.contains("naming_episode_file={title} - S{season}E{episode}"),
         "{listed}"
     );
+}
+
+async fn default_movie_library(t: &impl api::cli::Transport) -> String {
+    let (status, libraries) = t.send("GET", "/api/v1/libraries", None).await.unwrap();
+    assert_eq!(status, 200);
+    libraries
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|library| library["kind"] == "movie")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .into()
 }

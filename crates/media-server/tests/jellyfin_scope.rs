@@ -2,16 +2,24 @@
 //!
 //! 全部使用假 provider，不访问真实数据/网络。
 
+#[path = "support/mod.rs"]
+mod support;
+use support::fixture_provider;
+
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserId};
+use domain::{
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, LibraryId,
+    Media, MediaId, MediaKind, QualitySource, TypedItemId, UserId,
+};
+use media_server::provider::query::series_media_id;
 use media_server::provider::{
-    AuthenticateError, MediaItemMetadata, MediaItemSnapshot, MediaServerProvider, ServerLibrary,
-    ServerUser,
+    AuthenticateError, MediaItemMetadata, MediaItemSnapshot, MediaServerProvider,
+    PlaybackClientInfo, PlaybackEvent, PlaybackEventIdentity, ServerLibrary, ServerUser,
 };
 use serde_json::Value;
 use tower::ServiceExt;
@@ -21,25 +29,23 @@ const USER_B: &str = "00000000-0000-0000-0000-0000000000b2";
 const SERIES: &str = "00000000-0000-0000-0000-0000000000c3";
 const MOVIE_ROOT: &str = "/media/movies";
 const TV_ROOT: &str = "/media/tv";
+const MOVIES_LIBRARY: &str = "00000000-0000-0000-0000-0000000000f1";
+const TV_LIBRARY: &str = "00000000-0000-0000-0000-0000000000f2";
+
+fn library(raw: &str) -> LibraryId {
+    LibraryId::from_str(raw).unwrap()
+}
+
+fn series_media() -> MediaId {
+    MediaId::from_str(SERIES).unwrap()
+}
+
+fn series_wire() -> String {
+    TypedItemId::Work(series_media()).to_wire_string()
+}
 
 fn user(raw: &str) -> UserId {
     UserId::from_str(raw).unwrap()
-}
-
-fn ledger(media_id: MediaId, path: &str) -> LedgerRow {
-    LedgerRow {
-        id: LedgerId::new(),
-        media_id,
-        path: path.into(),
-        season: None,
-        episode: None,
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    }
 }
 
 fn media(raw_id: &str, kind: MediaKind, title: &str) -> Media {
@@ -58,10 +64,62 @@ fn media(raw_id: &str, kind: MediaKind, title: &str) -> Media {
     }
 }
 
+fn fake_file(
+    file_id: LedgerId,
+    library_id: LibraryId,
+    root_id: &str,
+    media_id: MediaId,
+    kind: MediaKind,
+    path: &str,
+) -> LibraryFile {
+    LibraryFile {
+        file_id,
+        library_id,
+        root_id: root_id.to_string(),
+        media_id,
+        kind,
+        path: PathBuf::from(path),
+        version: FileVersion {
+            revision: 1,
+            source_version: "v1".to_string(),
+        },
+        presence: FilePresence::Present,
+        publication: FilePublication::Published,
+        size_bytes: Some(1_000_000),
+        stat_known: true,
+        created_ns: Some(100),
+        modified_ns: Some(200),
+        source_digest: Some("hash".to_string()),
+        source_path: None,
+        transfer_mode: None,
+        resolution: Some("1080p".to_string()),
+        codec: Some("h264".to_string()),
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: None,
+        release_quality: None,
+        duration_ms: Some(7_200_000),
+        tracks_version: 1,
+        poster_path: None,
+        backdrop_path: None,
+        still_path: None,
+    }
+}
+
 fn movie(title: &str, path: &str, genres: &[&str], studios: &[&str]) -> MediaItemSnapshot {
     let media = media(&MediaId::new().to_string(), MediaKind::Movie, title);
+    let file = fake_file(
+        LedgerId::new(),
+        library(MOVIES_LIBRARY),
+        "root-movies",
+        media.id,
+        MediaKind::Movie,
+        path,
+    );
     MediaItemSnapshot {
-        row: ledger(media.id, path),
+        file,
+        unit: None,
         media,
         ticks: 0,
         play_count: 0,
@@ -84,8 +142,17 @@ fn movie(title: &str, path: &str, genres: &[&str], studios: &[&str]) -> MediaIte
 
 fn series(title: &str, path: &str) -> MediaItemSnapshot {
     let media = media(SERIES, MediaKind::Tv, title);
+    let file = fake_file(
+        LedgerId::new(),
+        library(TV_LIBRARY),
+        "root-tv",
+        media.id,
+        MediaKind::Tv,
+        path,
+    );
     MediaItemSnapshot {
-        row: ledger(media.id, path),
+        file,
+        unit: None,
         media,
         ticks: 0,
         play_count: 0,
@@ -121,6 +188,42 @@ impl FakeProvider {
 
 #[async_trait::async_trait]
 impl MediaServerProvider for FakeProvider {
+
+    async fn next_up_items(
+        &self,
+        user_id: domain::UserId,
+        series_id: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<media_server::provider::ServerItemPage, String> {
+        fixture_provider::next_up_items(self, user_id, series_id, offset, limit).await
+    }
+    async fn query_latest_items(
+        &self,
+        _principal: media_server::provider::QueryPrincipal,
+        _query: media_server::provider::ServerItemQuery,
+    ) -> Result<Vec<MediaItemSnapshot>, media_server::provider::QueryError> {
+        Ok(Vec::new())
+    }
+
+    async fn query_visible_items(
+        &self,
+        principal: media_server::provider::QueryPrincipal,
+        query: media_server::provider::ServerItemQuery,
+    ) -> Result<media_server::provider::ServerItemPage, media_server::provider::QueryError> {
+        fixture_provider::select_items(self, principal.user_id, query)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn issue_play_session(
+        &self,
+        _user_id: UserId,
+        _device_id: &str,
+        _item_id: &str,
+    ) -> Result<String, String> {
+        Ok(uuid::Uuid::new_v4().to_string())
+    }
     fn server_id(&self) -> String {
         "scope-server".into()
     }
@@ -133,7 +236,11 @@ impl MediaServerProvider for FakeProvider {
         Ok(None)
     }
 
-    async fn user_id_by_token(&self, token: &str) -> Result<Option<UserId>, String> {
+    async fn user_id_by_token(
+        &self,
+        token: &str,
+        _deadline: Option<std::time::Instant>,
+    ) -> Result<Option<UserId>, media_server::provider::QueryError> {
         Ok(match token {
             "token-a" => Some(user(USER_A)),
             "token-b" => Some(user(USER_B)),
@@ -141,6 +248,22 @@ impl MediaServerProvider for FakeProvider {
         })
     }
 
+    async fn get_user_for_query(
+        &self,
+        principal: media_server::provider::QueryPrincipal,
+    ) -> Result<Option<ServerUser>, media_server::provider::QueryError> {
+        self.get_user(principal.user_id)
+            .await
+            .map_err(media_server::provider::QueryError::Internal)
+    }
+    async fn list_visible_libraries_for_query(
+        &self,
+        principal: media_server::provider::QueryPrincipal,
+    ) -> Result<Vec<ServerLibrary>, media_server::provider::QueryError> {
+        self.list_visible_libraries(principal.user_id)
+            .await
+            .map_err(media_server::provider::QueryError::Internal)
+    }
     async fn get_user(&self, user_id: UserId) -> Result<Option<ServerUser>, String> {
         Ok(match user_id {
             id if id == user(USER_A) => Some(ServerUser {
@@ -196,7 +319,7 @@ impl MediaServerProvider for FakeProvider {
                 .filter(|item| !item.is_series)
                 .cloned()
                 .collect(),
-            Some(id) if id.replace('-', "") == SERIES.replace('-', "") => self
+            Some(id) if series_media_id(id) == Some(series_media()) => self
                 .items
                 .iter()
                 .filter(|item| item.is_series)
@@ -211,9 +334,11 @@ impl MediaServerProvider for FakeProvider {
         _user_id: UserId,
         id: &str,
     ) -> Result<Option<MediaItemSnapshot>, String> {
-        Ok(self.items.iter().find(|item| {
-            item.is_series && item.media.id.to_string().replace('-', "") == id.replace('-', "")
-        }).cloned())
+        Ok(self
+            .items
+            .iter()
+            .find(|item| item.is_series && series_media_id(id) == Some(item.media.id))
+            .cloned())
     }
 
     async fn resolve_cover_bytes(
@@ -250,12 +375,15 @@ impl MediaServerProvider for FakeProvider {
         Ok(true)
     }
 
-    async fn update_progress(
+    async fn report_playback_event(
         &self,
         _user_id: UserId,
         _id: &str,
         _position_ms: i64,
         _paused: bool,
+        _client: PlaybackClientInfo,
+        _event: PlaybackEvent,
+        _identity: PlaybackEventIdentity,
     ) -> Result<(), String> {
         Ok(())
     }
@@ -300,7 +428,11 @@ fn item_count(body: &Value) -> usize {
 async fn unknown_parent_returns_an_empty_page_instead_of_the_whole_library() {
     let (status, body) = get(&app(false), "/Items?ParentId=does-not-exist", "token-a").await;
     assert_eq!(status, StatusCode::OK, "未知 ParentId 不能变成 404：{body}");
-    assert_eq!(body["Items"].as_array().map(Vec::len), Some(0), "body={body}");
+    assert_eq!(
+        body["Items"].as_array().map(Vec::len),
+        Some(0),
+        "body={body}"
+    );
     assert_eq!(body["TotalRecordCount"], 0, "body={body}");
 }
 
@@ -322,7 +454,12 @@ async fn library_parent_keeps_its_items() {
 
 #[tokio::test]
 async fn series_parent_keeps_its_episodes() {
-    let (status, body) = get(&app(false), &format!("/Items?ParentId={SERIES}"), "token-a").await;
+    let (status, body) = get(
+        &app(false),
+        &format!("/Items?ParentId={}", series_wire()),
+        "token-a",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(item_count(&body), 1, "body={body}");
     assert_eq!(body["Items"][0]["Name"], "Beta");
@@ -374,10 +511,7 @@ async fn user_profile_accepts_self_and_rejects_other_users() {
         assert_eq!(expected, 200);
     }
 
-    for uri in [
-        format!("/Users/{USER_B}"),
-        "/Users/bob".to_string(),
-    ] {
+    for uri in [format!("/Users/{USER_B}"), "/Users/bob".to_string()] {
         let (status, _) = get(&app, &uri, "token-a").await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{uri} 必须 404");
     }

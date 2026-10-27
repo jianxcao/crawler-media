@@ -169,8 +169,8 @@ fn no_redirect_agent(url: &str) -> ureq::Agent {
         });
         if let Some(proxy_url) = proxy_opt {
             let trimmed = proxy_url.trim();
-            let remote_dns_url = if trimmed.starts_with("socks5://") {
-                format!("socks5h://{}", &trimmed["socks5://".len()..])
+            let remote_dns_url = if let Some(stripped) = trimmed.strip_prefix("socks5://") {
+                format!("socks5h://{stripped}")
             } else {
                 trimmed.to_string()
             };

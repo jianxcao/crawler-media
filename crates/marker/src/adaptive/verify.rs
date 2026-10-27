@@ -100,14 +100,18 @@ fn resolve_verified_models(
             interval.start_ms.abs_diff(other.start_ms) > tolerance
                 || interval.end_ms.abs_diff(other.end_ms) > tolerance
         }) {
-            tracing::warn!(models = outcomes.len(), "有效片头片尾模型区间冲突，保持未决");
+            tracing::warn!(
+                models = outcomes.len(),
+                "有效片头片尾模型区间冲突，保持未决"
+            );
             return VerificationOutcome::NeedsFullWindow {
                 reason: "conflicting_verified_templates".into(),
             };
         }
     }
     outcomes.sort_by(|a, b| {
-        b.supporting_episodes.cmp(&a.supporting_episodes)
+        b.supporting_episodes
+            .cmp(&a.supporting_episodes)
             .then(a.score.total_cmp(&b.score))
             .then(b.coverage.total_cmp(&a.coverage))
             .then(a.start_ms.cmp(&b.start_ms))
@@ -116,7 +120,9 @@ fn resolve_verified_models(
     // Called only for a nonempty list; avoid an unchecked unwrap nevertheless.
     match outcomes.into_iter().next() {
         Some(interval) => VerificationOutcome::Verified(interval),
-        None => VerificationOutcome::NeedsFullWindow { reason: "no_verified_templates".into() },
+        None => VerificationOutcome::NeedsFullWindow {
+            reason: "no_verified_templates".into(),
+        },
     }
 }
 
@@ -249,7 +255,7 @@ fn collect_reference_matches(
 
         let (tpl_start, tpl_end) = r.match_interval_ms;
         for s in segs {
-            if (s.score as f64) > policy.max_score {
+            if s.score > policy.max_score {
                 continue;
             }
 
@@ -344,18 +350,18 @@ fn build_clusters<'a>(
     } else {
         for i in 0..candidates.len() {
             let mut cluster = vec![&candidates[i]];
-            for j in 0..candidates.len() {
+            for (j, candidate) in candidates.iter().enumerate() {
                 if i == j {
                     continue;
                 }
                 let matches_all = cluster.iter().all(|c| {
-                    (c.target_start - candidates[j].target_start).abs()
+                    (c.target_start - candidate.target_start).abs()
                         <= policy.max_reference_boundary_delta_ms
-                        && (c.target_end - candidates[j].target_end).abs()
+                        && (c.target_end - candidate.target_end).abs()
                             <= policy.max_reference_boundary_delta_ms
                 });
                 if matches_all {
-                    cluster.push(&candidates[j]);
+                    cluster.push(candidate);
                 }
             }
             cluster.sort_by(|a, b| a.sample_id.cmp(&b.sample_id));

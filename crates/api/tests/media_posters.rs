@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::http::{Request, StatusCode};
 use domain::{Media, MediaId, MediaKind, Torrent};
@@ -8,12 +8,12 @@ use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use media::CatalogHit;
 use tower::ServiceExt;
 
+use api::Store;
 use api::catalog::Catalog;
 use api::management::ApiState;
+use api::media_posters::PosterError;
 use api::media_posters::http::ImageFetcher;
 use api::media_posters::service::MediaPosterService;
-use api::media_posters::PosterError;
-use api::Store;
 
 struct MockCatalog {
     poster_calls: AtomicUsize,

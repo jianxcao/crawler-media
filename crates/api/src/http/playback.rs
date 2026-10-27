@@ -12,18 +12,25 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 use std::str::FromStr;
 
+use super::store_wait::store_read;
 use crate::http::{err, ok};
 use crate::management::ApiState;
-use crate::store::{UNIT_WHOLE, UnitState};
+use crate::store::UnitState;
 
 mod chapter_cache;
+mod direct;
+use direct::direct_decision;
+mod episode_listing;
+pub(crate) use episode_listing::episodes;
 pub(crate) mod episodes;
 mod heartbeat;
+mod heartbeat_input;
+mod request;
 mod selection;
 mod session;
 pub(crate) use heartbeat::progress;
-use selection::{row_for, start_position};
-pub(crate) use session::start_session;
+use selection::row_for;
+pub(crate) use session::{session_stream, start_session};
 mod watch_state;
 pub(crate) use chapter_cache::cached_chapters;
 pub(crate) use watch_state::{marks, resume, set_marks};
@@ -38,14 +45,14 @@ fn resolve_media_id(raw: &str) -> Option<domain::MediaId> {
     domain::MediaId::from_str(raw).ok()
 }
 
-pub(super) fn movie_compatible_unit(
+pub(super) fn effective_watch_json(
     store: &crate::Store,
     user_id: domain::UserId,
     media_id: domain::MediaId,
     season: i32,
     episode: i32,
 ) -> Value {
-    match movie_compatible_state(store, user_id, media_id, season, episode) {
+    match effective_watch_state(store, user_id, media_id, season, episode) {
         Ok(Some(unit)) => unit_json(&unit),
         Ok(None) => unit_for_unit(store, user_id, media_id, season, episode),
         Err(error) => {
@@ -55,30 +62,17 @@ pub(super) fn movie_compatible_unit(
     }
 }
 
-pub(crate) fn movie_compatible_state(
+pub(crate) fn effective_watch_state(
     store: &crate::Store,
     user_id: domain::UserId,
     media_id: domain::MediaId,
     season: i32,
     episode: i32,
 ) -> Result<Option<crate::store::UnitState>, crate::store::StoreError> {
-    let (season, episode) = selection::watch_unit(store, media_id, season, episode);
-    if let Some(unit) = store.unit_state(user_id, media_id, season, episode)? {
-        return Ok(Some(unit));
-    }
-    if !is_movie_media(store, media_id)? || (season, episode) != (UNIT_WHOLE, UNIT_WHOLE) {
+    let Some((season, episode)) = selection::watch_unit(store, media_id, season, episode) else {
         return Ok(None);
-    }
-    store.unit_state(user_id, media_id, 0, 0)
-}
-
-fn is_movie_media(
-    store: &crate::Store,
-    media_id: domain::MediaId,
-) -> Result<bool, crate::store::StoreError> {
-    Ok(store
-        .get_media(media_id)?
-        .is_some_and(|media| media.kind != domain::MediaKind::Tv))
+    };
+    store.unit_state(user_id, media_id, season, episode)
 }
 
 /// Library attribution for an item: the library whose roots contain an owned
@@ -86,25 +80,28 @@ fn is_movie_media(
 pub(crate) fn library_id_for(
     store: &crate::Store,
     media: &domain::Media,
-    rows: &[&domain::LedgerRow],
+    files: &[&domain::LibraryFile],
 ) -> Option<String> {
-    let mut ids = rows
+    let mut ids = files
         .iter()
-        .filter_map(|row| crate::http::library::library_for_row(store, row, media))
+        .filter_map(|file| crate::http::library::library_for_file(store, file, media))
         .map(|library| library.id);
     let first = ids.next()?;
     ids.all(|id| id == first).then_some(first)
 }
 
-fn visible_rows_for_media<'a>(
+fn visible_coverages_for_media<'a>(
     store: &crate::Store,
     media: &domain::Media,
-    rows: &'a [domain::LedgerRow],
+    coverages: &'a [domain::FileCoverage],
     user_id: Option<domain::UserId>,
-) -> Vec<&'a domain::LedgerRow> {
-    rows.iter()
-        .filter(|row| row.media_id == media.id)
-        .filter(|row| crate::http::library::row_visible_to_user(store, row, media, user_id))
+) -> Vec<&'a domain::FileCoverage> {
+    coverages
+        .iter()
+        .filter(|coverage| coverage.file.media_id == media.id)
+        .filter(|coverage| {
+            crate::http::library::file_visible_to_user(store, &coverage.file, media, user_id)
+        })
         .collect()
 }
 
@@ -154,46 +151,79 @@ pub(crate) async fn item(
     axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response {
-    let (media, library_id, preferred_row) = {
-        let store = state.store.lock();
-        let Some(media_id) = resolve_media_id(&id) else {
-            return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
-        };
-        let Some(media) = store.get_media(media_id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
-        };
-        let all_rows = store.list_ledger().unwrap_or_default();
-        let rows = visible_rows_for_media(&store, &media, &all_rows, user_id);
-        if rows.is_empty() {
-            return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
-        }
-        let library_id = library_id_for(&store, &media, &rows).unwrap_or_default();
-        let preferred_row = crate::http::library::preferred_row(&rows).cloned();
-        (media, library_id, preferred_row)
+    // Review L2: the item's ledger facts are read off the executor; a contended
+    // lock is answered with "busy, retry" instead of parking a worker.
+    let (media, library_id, preferred_coverage) = match store_read(&state, move |store| {
+            let Some(media_id) = resolve_media_id(&id) else {
+                return Err(err(
+                    StatusCode::NOT_FOUND,
+                    "playback.item_missing",
+                    "条目不存在",
+                ));
+            };
+            let Some(media) = store.get_media(media_id).ok().flatten() else {
+                return Err(err(
+                    StatusCode::NOT_FOUND,
+                    "playback.item_missing",
+                    "条目不存在",
+                ));
+            };
+            let all_coverages = store.file_coverage_for_media(media.id).unwrap_or_default();
+            let coverages = visible_coverages_for_media(store, &media, &all_coverages, user_id);
+            if coverages.is_empty() {
+                return Err(err(
+                    StatusCode::NOT_FOUND,
+                    "playback.item_missing",
+                    "条目不存在",
+                ));
+            }
+            let files: Vec<&domain::LibraryFile> =
+                coverages.iter().map(|coverage| &coverage.file).collect();
+            let library_id = library_id_for(store, &media, &files).unwrap_or_default();
+            let preferred_coverage = crate::http::library::preferred_coverage(&coverages).cloned();
+            Ok((media, library_id, preferred_coverage))
+    })
+    .await
+    {
+        Ok(Ok(value)) => value,
+        Ok(Err(response)) => return response,
+        Err(error) => return error.response(),
     };
-    let files = state.browse_files.clone();
+    let files = state.file_stats.clone();
     let poster_url = match state
         .http_work
         .run(std::time::Duration::from_secs(30), move || {
-            preferred_row
+            preferred_coverage
                 .as_ref()
-                .filter(|row| {
-                    crate::http::library::poster_path_with(row, files.as_ref()).is_some()
+                .filter(|coverage| {
+                    crate::http::library::poster_path_with(&coverage.file, files.as_ref()).is_some()
                 })
-                .map(|row| crate::http::library::artwork_url("posters", row.id))
+                .map(|coverage| crate::http::library::artwork_url("posters", coverage.file.file_id))
         })
         .await
     {
         Ok(url) => url,
         Err(crate::blocking_budget::BlockingError::Busy) => {
-            return err(StatusCode::SERVICE_UNAVAILABLE, "runtime.busy", "服务繁忙，请重试");
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "runtime.busy",
+                "服务繁忙，请重试",
+            );
         }
         Err(crate::blocking_budget::BlockingError::Timeout) => {
-            return err(StatusCode::GATEWAY_TIMEOUT, "playback.timeout", "加载条目超时");
+            return err(
+                StatusCode::GATEWAY_TIMEOUT,
+                "playback.timeout",
+                "加载条目超时",
+            );
         }
         Err(crate::blocking_budget::BlockingError::Worker(message)) => {
             tracing::error!(%message, media_id = %media.id, "读取播放条目海报失败");
-            return err(StatusCode::INTERNAL_SERVER_ERROR, "runtime.worker", "加载条目失败");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "runtime.worker",
+                "加载条目失败",
+            );
         }
     };
     ok(json!({
@@ -207,294 +237,27 @@ pub(crate) async fn item(
     .into_response()
 }
 
-pub(crate) async fn episodes(
-    State(state): State<ApiState>,
-    axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
-    axum::extract::Path(id): axum::extract::Path<String>,
-    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> Response {
-    let season_number = match query.get("season_number") {
-        Some(s) => match s.parse::<u32>() {
-            Ok(num) => Some(num),
-            Err(_) => {
-                return err(
-                    StatusCode::BAD_REQUEST,
-                    "playback.invalid",
-                    "season_number 无效",
-                );
-            }
-        },
-        None => None,
-    };
-    let (media, visible_cloned, unit_states) = {
-        let store = state.store.lock();
-        let Some(media_id) = resolve_media_id(&id) else {
-            return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
-        };
-        let Some(media) = store.get_media(media_id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
-        };
-        let all_rows = store.list_ledger().unwrap_or_default();
-        let visible_rows = visible_rows_for_media(&store, &media, &all_rows, user_id);
-        if visible_rows.is_empty() {
-            return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
-        }
-        let visible_cloned: Vec<domain::LedgerRow> = visible_rows.into_iter().cloned().collect();
-        let mut unit_states = std::collections::HashMap::new();
-        if let Some(uid) = user_id {
-            for row in &visible_cloned {
-                let Some(e) = row.episode else { continue };
-                let s = row.season.unwrap_or(1);
-                if let Ok(st) = store.unit_state(uid, media.id, s as i32, e as i32) {
-                    unit_states.insert((s, e), st);
-                }
-            }
-        }
-        (media, visible_cloned, unit_states)
-    };
-
-    let files = state.browse_files.clone();
-    let id_clone = id.clone();
-    let rows_res = state
-        .http_work
-        .run(std::time::Duration::from_secs(30), move || {
-            let mut grouped: std::collections::HashMap<
-                (u32, u32),
-                (Vec<String>, String, Option<String>, Option<String>),
-            > = std::collections::HashMap::new();
-
-            for row in &visible_cloned {
-                let Some(ep_num) = row.episode else {
-                    continue;
-                };
-                let season_num = row.season.unwrap_or(1);
-                if let Some(target) = season_number {
-                    if season_num != target {
-                        continue;
-                    }
-                }
-
-                let file_path = std::path::Path::new(&row.path);
-                let file_name = file_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default()
-                    .to_string();
-
-                let local_still = crate::episode_still::existing_with(file_path, files.as_ref())
-                    .map(|_| crate::http::library::artwork_url("stills", row.id));
-                let backdrop = if row.season.is_some()
-                    && crate::http::library::backdrop_path_with(row, files.as_ref()).is_some()
-                {
-                    Some(crate::http::library::artwork_url("fanart", row.id))
-                } else {
-                    None
-                };
-
-                let entry = grouped
-                    .entry((season_num, ep_num))
-                    .or_insert_with(|| (Vec::new(), file_name, local_still, backdrop));
-                entry.0.push(row.id.to_string());
-            }
-
-            let mut keys: Vec<(u32, u32)> = grouped.keys().copied().collect();
-            keys.sort();
-
-            let episode_rows: Vec<episodes::EpisodeRow> = keys
-                .into_iter()
-                .map(|(season, episode)| {
-                    let (file_ids, file_name, local_still, backdrop) =
-                        grouped.remove(&(season, episode)).unwrap();
-
-                    let (position_ms, played, progress_percent) = match unit_states.get(&(season, episode)).and_then(|state| state.as_ref()) {
-                        Some(ps) => {
-                            let percent = if !ps.played {
-                                ps.duration_ms.and_then(|d| {
-                                    if d > 0 {
-                                        Some(((ps.position_ms * 100) / d).clamp(0, 100))
-                                    } else {
-                                        None
-                                    }
-                                })
-                            } else {
-                                None
-                            };
-                            (ps.position_ms, ps.played, percent)
-                        }
-                        None => (0, false, None),
-                    };
-
-                    episodes::EpisodeRow {
-                        season,
-                        episode,
-                        file_ids,
-                        file_name,
-                        local_still,
-                        tmdb_still: None,
-                        backdrop,
-                        name: None,
-                        overview: None,
-                        position_ms,
-                        played,
-                        progress_percent,
-                    }
-                })
-                .collect();
-            episodes::format_episodes_json(&episode_rows, &id_clone)
-        })
-        .await;
-
-    let rows = match rows_res {
-        Ok(rows) => rows,
-        Err(crate::blocking_budget::BlockingError::Busy) => {
-            return err(StatusCode::SERVICE_UNAVAILABLE, "runtime.busy", "服务繁忙，请重试");
-        }
-        Err(crate::blocking_budget::BlockingError::Timeout) => {
-            return err(StatusCode::GATEWAY_TIMEOUT, "playback.timeout", "加载集列表超时");
-        }
-        Err(crate::blocking_budget::BlockingError::Worker(message)) => {
-            tracing::error!(%message, media_id = %media.id, "读取播放集列表 blocking worker 失败");
-            return err(StatusCode::INTERNAL_SERVER_ERROR, "runtime.worker", "加载集列表失败");
-        }
-    };
-    ok(json!({ "season_number": season_number, "episodes": rows })).into_response()
-}
-
-fn direct_decision(
-    row: &domain::LedgerRow,
-    body: &Value,
-    tracks: Option<&library::Tracks>,
-) -> Value {
-    let failed_tiers = body["failed_tiers"].as_array();
-    let tier_0_failed = failed_tiers.is_some_and(|arr| arr.iter().any(|v| v.as_i64() == Some(0)));
-    if tier_0_failed {
-        return json!({
-            "outcome": "rejected",
-            "tier": null,
-            "file_id": null,
-            "container": null,
-            "video": null,
-            "audio": null,
-            "audio_tracks": [],
-            "subtitles": [],
-            "degraded_from": null,
-            "cost_hint": null,
-            "can_self_enable": false,
-            "setting_namespace": null,
-            "setting_key": null,
-            "reason": "设备不支持直接播放该视频编码，当前服务未配置实时转码",
-            "suggestion": "请更换支持相应格式的播放器",
-            "capability": body["capability"],
-        });
-    }
-    let path = std::path::Path::new(&row.path);
-    let is_strm = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("strm"));
-
-    // 对于 STRM 虚拟流，前端直接以直通格式播放（统一按通用容器 mp4 处理）
-    let container = if is_strm {
-        "mp4".to_string()
-    } else {
-        path.extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("mkv")
-            .to_string()
-    };
-    let (audio_tracks, subtitles) = match tracks {
-        Some(t) => {
-            let a = t
-                .audio
-                .iter()
-                .enumerate()
-                .map(|(idx, a)| {
-                    let stream_idx = a.stream_index.unwrap_or(idx as u32);
-                    json!({
-                        "index": stream_idx,
-                        "ref": format!("embedded:{stream_idx}"),
-                        "codec": a.codec,
-                        "language": a.language,
-                        "title": a.title,
-                        "channels": a.channels,
-                        "is_default": a.is_default,
-                    })
-                })
-                .collect();
-            let s = t
-                .subtitles
-                .iter()
-                .enumerate()
-                .map(|(idx, s)| {
-                    let stream_idx = library::subtitle_index(t, idx);
-                    let track_ref = if s.is_external {
-                        let fname = s
-                            .path
-                            .as_ref()
-                            .and_then(|p| std::path::Path::new(p).file_name())
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("subtitle");
-                        format!("external:{fname}")
-                    } else {
-                        format!("embedded:{stream_idx}")
-                    };
-                    let kind = match s.codec.as_deref().unwrap_or("srt").to_lowercase().as_str() {
-                        "ass" | "ssa" => "ass",
-                        "pgs" | "sup" => "pgs",
-                        _ => "vtt",
-                    };
-                    json!({
-                        "index": stream_idx,
-                        "track_ref": track_ref,
-                        "kind": kind,
-                        "codec": s.codec,
-                        "language": s.language,
-                        "title": s.title,
-                        "is_default": s.is_default,
-                        "forced": s.forced,
-                        "is_external": s.is_external,
-                        "delivery_url": format!("/api/v1/playback/subtitles/{}/{}", row.id, stream_idx),
-                    })
-                })
-                .collect();
-            (a, s)
-        }
-        None => (Vec::new(), Vec::new()),
-    };
-    json!({
-        "outcome": "plan",
-        "tier": 0,
-        "file_id": row.id.to_string(),
-        "container": container,
-        "video": { "action": "copy", "codec": row.codec, "height": null, "tone_map": false, "burn_subtitle": null },
-        "audio": { "action": "copy", "track_ref": null, "codec": null, "channels": null, "downmix": false },
-        // 直出整份文件时浏览器只放容器默认音轨，请求里的 audio_track 不会生效。
-        // 不把探测到的多条轨交给菜单，避免用户点了之后白重启、仍听到默认轨。
-        "audio_tracks": if audio_tracks.len() < 2 { audio_tracks } else { Vec::<Value>::new() },
-        "subtitles": subtitles,
-        "degraded_from": null,
-        "cost_hint": null,
-        "can_self_enable": false,
-        "setting_namespace": null,
-        "setting_key": null,
-        "reason": "",
-        "suggestion": null,
-        "capability": body["capability"],
-    })
-}
-
 /// POST /playback/decide — tier-0 direct decision only (no transcode).
 pub(crate) async fn decide(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
     Json(body): Json<Value>,
 ) -> Response {
-    let store = state.store.lock();
-    let Some((row, _media, _, _)) = row_for(&store, &body, user_id) else {
-        return err(StatusCode::NOT_FOUND, "playback.item_missing", "条目不存在");
-    };
-    let tracks = store.get_file_meta(&row.id.to_string()).ok().flatten();
-    ok(direct_decision(&row, &body, tracks.as_ref())).into_response()
+    // Review L2: the tier-0 decision reads the ledger; take the Store lock off the
+    // executor and answer "busy, retry" instead of parking a worker on a batch.
+    match store_read(&state, move |store| -> Response {
+            let (file, _media, _, _) = match row_for(store, &body, user_id) {
+                Ok(row) => row,
+                Err(error) => return error.response(),
+            };
+            let tracks = store.get_file_meta(&file.file_id.to_string()).ok().flatten();
+            ok(direct_decision(&file, &body, tracks.as_ref())).into_response()
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => error.response(),
+    }
 }
 
 pub(super) fn unit_for_unit(
@@ -525,31 +288,38 @@ pub(crate) async fn metrics(
 ) -> Response {
     // `playback_clock` 是毫秒时钟；`playback_metrics.recorded_at` 存 unix 秒。
     let now = state.playback_clock.now_ms() / 1000;
-    let store = state.store.lock();
-    let media_id = metric_media_id(&store, user_id, &body);
-    match media_id {
-        Some(media_id) => {
-            if let Err(error) = store.insert_metric(
-                user_id,
-                media_id,
-                body["tier"].as_i64().unwrap_or(0) as i32,
-                body["engine"].as_str(),
-                body["ttff_ms"].as_i64(),
-                body["rebuffer_ms"].as_i64().unwrap_or(0),
-                body["rebuffer_count"].as_i64().unwrap_or(0),
-                body["seek_count"].as_i64().unwrap_or(0),
-                body["dropped_frames"].as_i64(),
-                body["total_frames"].as_i64(),
-                body["watched_ms"].as_i64().unwrap_or(0),
-                now,
-            ) {
-                tracing::warn!(%error, %user_id, %media_id, "Playback quality metric persistence failed");
+    // Review L2: metric persistence is a Store write; keep it off the executor.
+    let result = store_read(&state, move |store| -> Response {
+        let media_id = metric_media_id(store, user_id, &body);
+        match media_id {
+            Some(media_id) => {
+                if let Err(error) = store.insert_metric(
+                    user_id,
+                    media_id,
+                    body["tier"].as_i64().unwrap_or(0) as i32,
+                    body["engine"].as_str(),
+                    body["ttff_ms"].as_i64(),
+                    body["rebuffer_ms"].as_i64().unwrap_or(0),
+                    body["rebuffer_count"].as_i64().unwrap_or(0),
+                    body["seek_count"].as_i64().unwrap_or(0),
+                    body["dropped_frames"].as_i64(),
+                    body["total_frames"].as_i64(),
+                    body["watched_ms"].as_i64().unwrap_or(0),
+                    now,
+                ) {
+                    tracing::warn!(%error, %user_id, %media_id, "Playback quality metric persistence failed");
+                }
             }
+            None => tracing::warn!(%user_id, library_file_id = ?body.get("library_file_id"),
+                media_item_id = ?body.get("media_item_id"), "Playback quality metric identity is invalid or not visible"),
         }
-        None => tracing::warn!(%user_id, library_file_id = ?body.get("library_file_id"),
-            media_item_id = ?body.get("media_item_id"), "Playback quality metric identity is invalid or not visible"),
+        ok(json!({ "ok": true })).into_response()
+    })
+    .await;
+    match result {
+        Ok(response) => response,
+        Err(error) => error.response(),
     }
-    ok(json!({ "ok": true })).into_response()
 }
 
 fn metric_media_id(
@@ -559,72 +329,83 @@ fn metric_media_id(
 ) -> Option<domain::MediaId> {
     let explicit = body["media_item_id"].as_str().and_then(resolve_media_id);
     if let Some(file) = body.get("library_file_id").filter(|file| !file.is_null()) {
-        let row = crate::http::media_visibility::resolve_visible_row(
-            store,
-            file.as_str()?,
-            Some(user_id),
-        )?;
+        let file_id = file.as_str()?.parse::<domain::LedgerId>().ok()?;
+        let file = store.visible_file(user_id, file_id).ok().flatten()?;
         return explicit
-            .is_none_or(|id| id == row.media_id)
-            .then_some(row.media_id);
+            .is_none_or(|id| id == file.media_id)
+            .then_some(file.media_id);
     }
     let id = explicit?;
     let media = store.get_media(id).ok().flatten()?;
-    let rows = store.list_ledger().ok()?;
-    (!visible_rows_for_media(store, &media, &rows, Some(user_id)).is_empty()).then_some(id)
+    let rows = store.file_coverage_for_media(id).ok()?;
+    (!visible_coverages_for_media(store, &media, &rows, Some(user_id)).is_empty()).then_some(id)
 }
 
 /// GET/PUT /playback/policy — direct-play only; transcode flags persist in KV.
 pub(crate) async fn get_policy(State(state): State<ApiState>) -> Response {
-    let store = state.store.lock();
-    let prefs = store
-        .get_setting("playback.policy")
-        .ok()
-        .flatten()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .unwrap_or_else(|| json!({}));
-    ok(json!({
-        "software_transcode_enabled": prefs["software_transcode_enabled"].as_bool().unwrap_or(false),
-        "trickplay_enabled": prefs["trickplay_enabled"].as_bool().unwrap_or(false),
-        "transcode_cache_enabled": prefs["transcode_cache_enabled"].as_bool().unwrap_or(false),
-        "hardware_available": false,
-        "hw_backends": [],
-    }))
-    .into_response()
+    // Review L2: policy lives in the KV table; read it off the executor.
+    let result = store_read(&state, |store| -> Response {
+        let prefs = store
+            .get_setting("playback.policy")
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .unwrap_or_else(|| json!({}));
+        ok(json!({
+            "software_transcode_enabled": prefs["software_transcode_enabled"].as_bool().unwrap_or(false),
+            "trickplay_enabled": prefs["trickplay_enabled"].as_bool().unwrap_or(false),
+            "transcode_cache_enabled": prefs["transcode_cache_enabled"].as_bool().unwrap_or(false),
+            "hardware_available": false,
+            "hw_backends": [],
+        }))
+        .into_response()
+    })
+    .await;
+    match result {
+        Ok(response) => response,
+        Err(error) => error.response(),
+    }
 }
 
 pub(crate) async fn put_policy(State(state): State<ApiState>, Json(body): Json<Value>) -> Response {
-    let store = state.store.lock();
-    let mut prefs = store
-        .get_setting("playback.policy")
-        .ok()
-        .flatten()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .unwrap_or_else(|| json!({}));
-    for key in [
-        "software_transcode_enabled",
-        "trickplay_enabled",
-        "transcode_cache_enabled",
-    ] {
-        if let Some(value) = body.get(key) {
-            prefs[key] = value.clone();
+    // Review L2: a KV write; keep the executor free while it waits for the lock.
+    let result = store_read(&state, move |store| -> Response {
+        let mut prefs = store
+            .get_setting("playback.policy")
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .unwrap_or_else(|| json!({}));
+        for key in [
+            "software_transcode_enabled",
+            "trickplay_enabled",
+            "transcode_cache_enabled",
+        ] {
+            if let Some(value) = body.get(key) {
+                prefs[key] = value.clone();
+            }
         }
+        if let Err(error) = store.put_setting("playback.policy", &prefs.to_string()) {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
+        ok(json!({
+            "software_transcode_enabled": prefs["software_transcode_enabled"].as_bool().unwrap_or(false),
+            "trickplay_enabled": prefs["trickplay_enabled"].as_bool().unwrap_or(false),
+            "transcode_cache_enabled": prefs["transcode_cache_enabled"].as_bool().unwrap_or(false),
+            "hardware_available": false,
+            "hw_backends": [],
+        }))
+        .into_response()
+    })
+    .await;
+    match result {
+        Ok(response) => response,
+        Err(error) => error.response(),
     }
-    if let Err(error) = store.put_setting("playback.policy", &prefs.to_string()) {
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        );
-    }
-    ok(json!({
-        "software_transcode_enabled": prefs["software_transcode_enabled"].as_bool().unwrap_or(false),
-        "trickplay_enabled": prefs["trickplay_enabled"].as_bool().unwrap_or(false),
-        "transcode_cache_enabled": prefs["transcode_cache_enabled"].as_bool().unwrap_or(false),
-        "hardware_available": false,
-        "hw_backends": [],
-    }))
-    .into_response()
 }
 
 /// POST /playback/client-log — best-effort client telemetry sink.
@@ -647,15 +428,21 @@ pub(crate) async fn get_ui_prefs(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
 ) -> Response {
-    let store = state.store.lock();
-    let raw = store
-        .get_setting(&ui_preferences_key(user_id))
-        .ok()
-        .flatten();
-    let prefs = raw
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .unwrap_or_else(|| json!({}));
-    ok(prefs).into_response()
+    match store_read(&state, move |store| {
+            let raw = store
+                .get_setting(&ui_preferences_key(user_id))
+                .ok()
+                .flatten();
+            let prefs = raw
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .unwrap_or_else(|| json!({}));
+            ok(prefs).into_response()
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => error.response(),
+    }
 }
 
 pub(crate) async fn put_ui_prefs(
@@ -663,25 +450,31 @@ pub(crate) async fn put_ui_prefs(
     axum::Extension(user_id): axum::Extension<domain::UserId>,
     Json(body): Json<Value>,
 ) -> Response {
-    let store = state.store.lock();
-    let key = ui_preferences_key(user_id);
-    let raw = store.get_setting(&key).ok().flatten();
-    let mut prefs = raw
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .unwrap_or_else(|| json!({}));
-    if let (Some(obj), Some(new_obj)) = (prefs.as_object_mut(), body.as_object()) {
-        for (k, v) in new_obj {
-            obj.insert(k.clone(), v.clone());
+    let result = store_read(&state, move |store| -> Response {
+        let key = ui_preferences_key(user_id);
+        let raw = store.get_setting(&key).ok().flatten();
+        let mut prefs = raw
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .unwrap_or_else(|| json!({}));
+        if let (Some(obj), Some(new_obj)) = (prefs.as_object_mut(), body.as_object()) {
+            for (k, v) in new_obj {
+                obj.insert(k.clone(), v.clone());
+            }
         }
+        if let Err(error) = store.put_setting(&key, &prefs.to_string()) {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
+        ok(prefs).into_response()
+    })
+    .await;
+    match result {
+        Ok(response) => response,
+        Err(error) => error.response(),
     }
-    if let Err(error) = store.put_setting(&key, &prefs.to_string()) {
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        );
-    }
-    ok(prefs).into_response()
 }
 
 pub(crate) fn session_timeout_secs() -> i64 {
@@ -704,37 +497,44 @@ pub(crate) async fn get_subtitle_file(
     axum::extract::Path((ledger_id, index)): axum::extract::Path<(String, u32)>,
     axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    let (row, media_title, media_kind, tracks) = {
-        let store = state.store.lock();
-        // G07: 先校验该 ledger 行对当前用户可见，防止普通成员跨 Library 读取字幕。
-        let Some(row) =
-            crate::http::media_visibility::resolve_visible_row(&store, &ledger_id, Some(user_id))
-        else {
-            return err(StatusCode::NOT_FOUND, "subtitle.not_found", "字幕未找到");
-        };
-        let Some(media) = store.get_media(row.media_id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "subtitle.not_found", "字幕未找到");
-        };
-        // canonical ledger row id（不是 URL 原文）才是 cache 维度与 file_meta key。
-        let Ok(Some(tracks)) = store.get_file_meta(&row.id.to_string()) else {
-            return err(StatusCode::NOT_FOUND, "subtitle.not_found", "字幕未找到");
-        };
-        (row, media.title, media.kind, tracks)
-    };
-    let wants_vtt = query
-        .get("format")
-        .map(|f| f.eq_ignore_ascii_case("vtt"))
-        .unwrap_or(false);
-    let request = crate::subtitle_delivery::SubtitleRequest {
-        ledger_id: row.id,
-        source_path: std::path::PathBuf::from(&row.path),
-        kind: media_kind,
-        tracks,
-        index,
-        wants_vtt,
+    let (row, media_title, file_path, file_id) = match store_read(&state, move |store| {
+            let not_found = || err(StatusCode::NOT_FOUND, "subtitle.not_found", "字幕未找到");
+            let Ok(file_id) = ledger_id.parse::<domain::LedgerId>() else {
+                return Err(not_found());
+            };
+            // G07: 先校验该文件对当前用户可见，防止普通成员跨 Library 读取字幕。
+            let Some(file) = store.visible_file(user_id, file_id).ok().flatten() else {
+                return Err(not_found());
+            };
+            let Some(media) = store.get_media(file.media_id).ok().flatten() else {
+                return Err(not_found());
+            };
+            let Ok(Some(tracks)) = store.get_file_meta(&file.file_id.to_string()) else {
+                return Err(not_found());
+            };
+            let row = crate::subtitle_delivery::SubtitleRequest {
+                ledger_id: file.file_id,
+                source_path: file.path.clone(),
+                kind: media.kind,
+                tracks,
+                index,
+                wants_vtt: query
+                    .get("format")
+                    .map(|f| f.eq_ignore_ascii_case("vtt"))
+                    .unwrap_or(false),
+            };
+            let file_path = file.path.display().to_string();
+            let fid = file.file_id;
+            Ok((row, media.title, file_path, fid))
+    })
+    .await
+    {
+        Ok(Ok(value)) => value,
+        Ok(Err(response)) => return response,
+        Err(error) => return error.response(),
     };
 
-    match state.subtitle_delivery.deliver(&state, request).await {
+    match state.subtitle_delivery.deliver(&state, row).await {
         Ok(payload) => (
             [(axum::http::header::CONTENT_TYPE, payload.content_type)],
             payload.bytes,
@@ -743,8 +543,8 @@ pub(crate) async fn get_subtitle_file(
         Err(error) => {
             tracing::error!(
                 media = %media_title,
-                path = %row.path,
-                ledger_id = %ledger_id,
+                path = %file_path,
+                ledger_id = %file_id,
                 index,
                 %error,
                 "交付字幕文件失败"

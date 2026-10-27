@@ -35,6 +35,16 @@ impl BlockingBudget {
         self.permits.available_permits()
     }
 
+    /// 立即预留一个 permit（拿不到即 `Busy`）。扇出调用方在派生任务**之前**预留，
+    /// 这样“窗口还能再开几个”只看真实剩余额度，不会把本请求已派生但尚未
+    /// 取到 permit 的任务重复扣减（否则窗口会随调度时序缩小）。
+    pub fn try_reserve(&self) -> Result<Reservation, BlockingError> {
+        self.permits
+            .clone()
+            .try_acquire_owned()
+            .map(|permit| Reservation { permit })
+            .map_err(|_| BlockingError::Busy)
+    }
 
     /// 在 blocking 线程上执行 `work`，最多等待 `deadline`。
     ///
@@ -77,5 +87,36 @@ impl BlockingBudget {
         })
         .await
         .map_err(|error| BlockingError::Worker(error.to_string()))
+    }
+}
+
+/// `BlockingBudget::try_reserve` 预留的一个 permit；`run` 语义与 `BlockingBudget::run` 相同。
+pub struct Reservation {
+    permit: OwnedSemaphorePermit,
+}
+
+impl Reservation {
+    /// 在 blocking 线程上执行 `work`，最多等待 `deadline`。
+    ///
+    /// Review L4 约定：`deadline` 到期**不会**中止已经在跑的闭包，所以闭包必须
+    /// 1. 在每次拿到进程级 `Store` 锁之前调用 `budget.check()`，超时就不要再去拿锁；
+    /// 2. 锁内只做 SQL——文件 IO / HTTP / 渲染留在拿锁之前或放锁之后；
+    /// 3. 等锁写成有界等待（如 `try_lock_for`），并把超时分类成「繁忙、稍后重试」，
+    ///    而不是把 worker 无限期挂在锁上。
+    pub async fn run<T: Send + 'static>(
+        self,
+        deadline: Duration,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, BlockingError> {
+        let permit = self.permit;
+        let task = tokio::task::spawn_blocking(move || {
+            let _permit: OwnedSemaphorePermit = permit;
+            work()
+        });
+        match tokio::time::timeout(deadline, task).await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => Err(BlockingError::Worker(error.to_string())),
+            Err(_) => Err(BlockingError::Timeout),
+        }
     }
 }

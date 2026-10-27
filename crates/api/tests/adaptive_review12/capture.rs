@@ -48,7 +48,7 @@ impl FingerprintCaptureEngine for DeleteCapture {
         })
     }
 }
-fn capture_request(row: LedgerRow) -> api::fingerprint_job::EpisodeCaptureRequest {
+fn capture_request(row: FileCoverage) -> api::fingerprint_job::EpisodeCaptureRequest {
     api::fingerprint_job::EpisodeCaptureRequest {
         job_id: "delete-job".into(),
         row,
@@ -66,10 +66,16 @@ fn capture_request(row: LedgerRow) -> api::fingerprint_job::EpisodeCaptureReques
 fn deleting_strm_while_ledger_is_still_present_must_cancel_before_capture() {
     let f = setup("uniform", &[1, 2, 3]);
     let mut row = f.units[0].row.clone();
-    let old = row.path.clone();
-    row.path = row.path.replace(".mkv", ".strm");
-    std::fs::rename(&old, &row.path).unwrap();
-    f.store.lock().rename_ledger_path(&old, &row.path).unwrap();
+    let old = row.file.path.clone();
+    let renamed = old.to_string_lossy().replace(".mkv", ".strm");
+    row.file.path = std::path::PathBuf::from(&renamed);
+    std::fs::rename(&old, &row.file.path).unwrap();
+    store::test_support::force_file_path(
+        &f.store.lock(),
+        old.to_str().unwrap(),
+        row.file.path.to_str().unwrap(),
+    )
+    .unwrap();
     let capture = Arc::new(DeleteCapture {
         store: f.store.clone(),
         calls: AtomicUsize::new(0),
@@ -81,7 +87,7 @@ fn deleting_strm_while_ledger_is_still_present_must_cancel_before_capture() {
         matcher: f.engine.clone(),
         capture: capture.clone(),
         gate: Arc::new(DeleteGate {
-            path: row.path.clone(),
+            path: row.file.path.to_string_lossy().into_owned(),
             store: f.store.clone(),
             remove_ledger: false,
         }),
@@ -118,7 +124,7 @@ fn control_deleting_file_and_ledger_before_capture_cancels() {
         matcher: f.engine.clone(),
         capture: capture.clone(),
         gate: Arc::new(DeleteGate {
-            path: row.path.clone(),
+            path: row.file.path.to_string_lossy().into_owned(),
             store: f.store.clone(),
             remove_ledger: true,
         }),
@@ -157,7 +163,7 @@ fn deleting_source_during_capture_must_not_reinsert_sample() {
     let st = f.store.lock();
     let samples = st
         .find_covering_fingerprint_samples(&api::store::FingerprintSampleQuery {
-            ledger_id: row.id.to_string(),
+            ledger_id: row.file.file_id.to_string(),
             source_version: "source".into(),
             capture_profile_key: "profile".into(),
             kind: "intro".into(),
@@ -168,7 +174,7 @@ fn deleting_source_during_capture_must_not_reinsert_sample() {
         .unwrap();
     println!(
         "deleted ledger={:?}; result={res:?}; resurrected samples={}",
-        st.get_ledger(&row.id.to_string()).unwrap(),
+        st.file_coverage_by_id(row.file.file_id).unwrap(),
         samples.len()
     );
     assert!(

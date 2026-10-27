@@ -21,27 +21,8 @@ fn app(tmp: &tempfile::TempDir) -> axum::Router {
     ))
 }
 
-async fn put_intake(app: &axum::Router, tmp: &tempfile::TempDir, intake: &std::path::Path) {
-    let movie = tmp.path().join("data/library/movies");
-    let tv = tmp.path().join("data/library/tv");
-    let saved = app
-        .clone()
-        .oneshot(request(
-            "PUT",
-            "/api/v1/directory",
-            Some("management-secret"),
-            json!({
-                "movie_root": movie.display().to_string(),
-                "tv_root": tv.display().to_string(),
-                "transfer_mode": "copy",
-                "movie_naming": "{title}{ext}",
-                "tv_naming": "{title} - {season_episode}{ext}",
-                "scrape": false,
-                "watch_intake": intake.display().to_string()
-            }),
-        ))
-        .await
-        .unwrap();
+async fn put_intake(app: &axum::Router, _tmp: &tempfile::TempDir, intake: &std::path::Path) {
+    let saved = set_transfer_settings(app, json!({"transfer_mode": "copy", "scrape": false, "watch_intake": intake.display().to_string()})).await;
     assert_eq!(saved.status(), StatusCode::OK);
 }
 
@@ -136,7 +117,10 @@ async fn watch_intake_partial_success_records_non_conflicting_files() {
     tick(&app, 1).await;
 
     // 冲突文件不能覆盖已有文件
-    assert_eq!(std::fs::read(&conflict_dest).unwrap(), b"existing-inception");
+    assert_eq!(
+        std::fs::read(&conflict_dest).unwrap(),
+        b"existing-inception"
+    );
 
     // 正常文件成功进入 ledger
     let listed = app
@@ -161,8 +145,16 @@ async fn watch_intake_transfers_nested_tv_show_subdirectories() {
     let intake = tmp.path().join("intake");
     let show_dir = intake.join("法医秦明之龙番往事");
     std::fs::create_dir_all(&show_dir).unwrap();
-    std::fs::write(show_dir.join("法医秦明之龙番往事.S01E01.1080p.mkv"), b"tv-data-ep1").unwrap();
-    std::fs::write(show_dir.join("法医秦明之龙番往事.S01E02.1080p.mkv"), b"tv-data-ep2").unwrap();
+    std::fs::write(
+        show_dir.join("法医秦明之龙番往事.S01E01.1080p.mkv"),
+        b"tv-data-ep1",
+    )
+    .unwrap();
+    std::fs::write(
+        show_dir.join("法医秦明之龙番往事.S01E02.1080p.mkv"),
+        b"tv-data-ep2",
+    )
+    .unwrap();
 
     let app = app(&tmp);
     put_intake(&app, &tmp, &intake).await;

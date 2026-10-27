@@ -7,7 +7,9 @@ interface ApiEnvelope<T> {
 }
 
 async function unwrap<T>(promise: Promise<ApiEnvelope<T>>): Promise<T> {
-  return (await promise).data;
+  const envelope = await promise;
+  if (envelope.ok !== true) throw new Error("响应不是 {ok:true, data} 信封");
+  return envelope.data;
 }
 
 /** 能力开关快照：前端据此裁剪入口；安全边界仍在后端 403。 */
@@ -34,11 +36,6 @@ export interface UserView {
 }
 
 const TOKEN_KEY = "mc_token";
-
-export function getStoredToken(): string | null {
-  if (typeof window === "undefined") return null;
-  return window.localStorage.getItem(TOKEN_KEY);
-}
 
 function persistToken(token: string | null): void {
   if (typeof window === "undefined") return;
@@ -109,39 +106,3 @@ export async function getSession(): Promise<SessionView> {
   return sessionFromUser(user);
 }
 
-/** 列出用户（家庭成员）。 */
-export function listUsers(): Promise<UserView[]> {
-  return unwrap(request<ApiEnvelope<UserView[]>>("/users"));
-}
-
-/** 创建家庭成员。 */
-export function createUser(loginName: string, password: string): Promise<UserView> {
-  return unwrap(
-    request<ApiEnvelope<UserView>>("/users", {
-      method: "POST",
-      body: JSON.stringify({ login: loginName, password }),
-    }),
-  );
-}
-
-/** 更新成员（登录名或密码）。 */
-export function updateUser(
-  id: string,
-  body: { login?: string; password?: string },
-): Promise<UserView> {
-  return unwrap(
-    request<ApiEnvelope<UserView>>(`/users/${id}`, {
-      method: "PATCH",
-      body: JSON.stringify(body),
-    }),
-  );
-}
-
-/** 删除成员（admin 不可删）。 */
-export function deleteUser(id: string): Promise<{ deleted: boolean }> {
-  return unwrap(
-    request<ApiEnvelope<{ deleted: boolean }>>(`/users/${id}`, {
-      method: "DELETE",
-    }),
-  );
-}

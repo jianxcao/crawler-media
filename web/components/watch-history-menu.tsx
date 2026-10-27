@@ -67,14 +67,10 @@ export function WatchHistoryMenu({
     }).then((ok) => {
       if (!ok) return;
       clearPlaybackHistory("all", since ? { since } : {})
-        .then(({ result, message }) => {
+        .then((result) => {
           // 时间窗口的回执由前端组句：服务端不知道「这段时间」是今天还是一周
           toast.success(
-            since
-              ? result.deleted_states > 0
-                ? `已清空${label}`
-                : `${label}里没有可清除的记录`
-              : message,
+            result.deleted_states > 0 ? `已清空${label}` : `${label}里没有可清除的记录`,
           );
           onCleared();
         })
@@ -177,14 +173,9 @@ function ClearLibraryHistoryDialog({
   const submit = () => {
     if (libraryId === null || busy) return;
     setBusy(true);
-    // 新契约 MediaLibrary.id 是 UUID 字符串；旧播放接口仍按数值型 library_id
-    // 声明，按原样透传（后端按字符串解析），这里只做类型收窄。
-    clearPlaybackHistory(
-      "library",
-      { libraryId: libraryId ?? undefined } as unknown as { libraryId?: number },
-    )
-      .then(({ message }) => {
-        toast.success(message);
+    clearPlaybackHistory("library", { libraryId })
+      .then((cleared) => {
+        toast.success(`已清除 ${cleared.deleted_states} 条观看记录`);
         onCleared();
         onClose();
       })

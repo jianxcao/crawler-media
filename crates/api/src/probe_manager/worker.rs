@@ -1,5 +1,5 @@
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use super::{ProbeManager, ProbeUnit, probe};
 
@@ -40,6 +40,8 @@ pub(super) fn try_start(manager: &Arc<ProbeManager>) -> bool {
     }
     let fingerprint = manager.clone();
     workers.push(tokio::spawn(run_fingerprint_worker(fingerprint)));
+    let dispatcher = manager.clone();
+    workers.push(tokio::spawn(run_window_dispatcher(dispatcher)));
     drop(workers);
     manager.fill_dispatch_windows();
     manager.wake.notify_waiters();
@@ -49,6 +51,24 @@ pub(super) fn try_start(manager: &Arc<ProbeManager>) -> bool {
         "【媒体探测】高优先级媒体信息队列与低优先级声纹队列已启动"
     );
     true
+}
+
+/// Run one driver step on the blocking pool (Task 22 / Review L2).
+///
+/// The probe workers are tasks on the request runtime, so a `Store` lock taken in
+/// their async bodies parks a worker and stalls every other task — `/health`
+/// included, which touches no store at all. Waiting on a blocking thread costs a
+/// thread, never the executor. `Err` is a worker panic; the durable dispatch row is
+/// untouched either way, so the unit is simply retried by the next window.
+async fn step<T, F>(manager: &Arc<ProbeManager>, work: F) -> Result<T, String>
+where
+    F: FnOnce(&ProbeManager) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let manager = manager.clone();
+    tokio::task::spawn_blocking(move || work(&manager))
+        .await
+        .map_err(|error| format!("probe worker step failed: {error}"))
 }
 
 async fn run_metadata_worker(manager: Arc<ProbeManager>) {
@@ -61,28 +81,69 @@ async fn run_metadata_worker(manager: Arc<ProbeManager>) {
             manager.metadata_stage_finished();
             continue;
         }
-        let Some((unit, _)) = manager.load_dispatch_unit(&id) else {
-            cancel_deleted_dispatch(&manager, &id);
+        let loaded = step(&manager, {
+            let id = id.clone();
+            move |manager| manager.load_dispatch_unit(&id)
+        })
+        .await;
+        let Some((unit, _)) = loaded.ok().flatten() else {
+            let _ = step(&manager, {
+                let id = id.clone();
+                move |manager| cancel_deleted_dispatch(manager, &id)
+            })
+            .await;
             manager.metadata_stage_finished();
-            manager.fill_dispatch_windows();
+            let _ = step(&manager, |manager| manager.refill_drained_windows()).await;
             continue;
         };
         let pending = MetadataStageGuard(manager.clone());
-        let _lease = match work_lease(&manager, &unit) {
-            Ok(lease) => lease,
-            Err(reason) => {
-                manager.cancel_unit(&unit, &reason);
+        let leased = step(&manager, {
+            let unit = unit.clone();
+            move |manager| work_lease(manager, &unit)
+        })
+        .await;
+        let _lease = match leased {
+            Ok(Ok(lease)) => lease,
+            Ok(Err(reason)) => {
+                let _ = step(&manager, {
+                    let unit = unit.clone();
+                    let reason = reason.clone();
+                    move |manager| manager.cancel_unit(&unit, &reason)
+                })
+                .await;
+                continue;
+            }
+            Err(error) => {
+                tracing::error!(%error, "探测工作租约步骤失败，单元留在持久队列");
                 continue;
             }
         };
-        if !source_ready(&manager, &unit) || !start_persisted_unit(&manager, &unit) {
+        let ready = step(&manager, {
+            let unit = unit.clone();
+            move |manager| source_ready(manager, &unit) && start_persisted_unit(manager, &unit)
+        })
+        .await;
+        if !ready.unwrap_or(false) {
             continue;
         }
         let _refresh_leases = if unit.marker_refresh_id.is_some() {
-            match refresh_leases(&manager, &unit) {
-                Ok(leases) => leases,
-                Err(reason) => {
-                    manager.cancel_unit(&unit, &reason);
+            let leases = step(&manager, {
+                let unit = unit.clone();
+                move |manager| refresh_leases(manager, &unit)
+            })
+            .await;
+            match leases {
+                Ok(Ok(leases)) => leases,
+                Ok(Err(reason)) => {
+                    let _ = step(&manager, {
+                        let unit = unit.clone();
+                        move |manager| manager.cancel_unit(&unit, &reason)
+                    })
+                    .await;
+                    continue;
+                }
+                Err(error) => {
+                    tracing::error!(%error, "探测刷新租约步骤失败，单元留在持久队列");
                     continue;
                 }
             }
@@ -91,34 +152,59 @@ async fn run_metadata_worker(manager: Arc<ProbeManager>) {
         };
         let outcome = probe::probe_metadata(&manager, &unit).await;
         drop(pending);
-        manager.fill_dispatch_windows();
-        if !source_ready(&manager, &unit) {
+        let _ = step(&manager, |manager| manager.refill_drained_windows()).await;
+        let still_ready = step(&manager, {
+            let unit = unit.clone();
+            move |manager| source_ready(manager, &unit)
+        })
+        .await
+        .unwrap_or(false);
+        if !still_ready {
             continue;
         }
         match outcome {
-            probe::MetadataOutcome::Complete => manager.finish(&unit, true),
-            probe::MetadataOutcome::Failed => manager.finish(&unit, false),
+            probe::MetadataOutcome::Complete => {
+                let _ = step(&manager, {
+                    let unit = unit.clone();
+                    move |manager| manager.finish(&unit, true)
+                })
+                .await;
+            }
+            probe::MetadataOutcome::Failed => {
+                let _ = step(&manager, {
+                    let unit = unit.clone();
+                    move |manager| manager.finish(&unit, false)
+                })
+                .await;
+            }
             probe::MetadataOutcome::Fingerprint(work) => {
-                manager.enqueue_fingerprint_after_metadata(work);
+                let _ = step(&manager, move |manager| {
+                    manager.enqueue_fingerprint_after_metadata(work)
+                })
+                .await;
             }
         }
     }
 }
 fn cancel_deleted_dispatch(manager: &ProbeManager, id: &store::ProbeDispatchId) {
-    let missing = manager
-        .store
-        .lock()
-        .get_ledger(&id.ledger_id)
-        .ok()
-        .flatten()
+    let missing = super::ledger_id(&id.ledger_id)
+        .and_then(|file_id| {
+            manager
+                .store
+                .lock()
+                .file_coverage_by_id(file_id)
+                .ok()
+                .flatten()
+        })
         .is_none();
     if !missing {
         return;
     }
-    if let Err(error) = manager
-        .store
-        .lock()
-        .cancel_probe_unit(&id.job_id, &id.ledger_id, "file_deleted")
+    if let Err(error) =
+        manager
+            .store
+            .lock()
+            .cancel_probe_unit(&id.job_id, &id.ledger_id, "file_deleted")
     {
         tracing::error!(%error, job_id = %id.job_id, ledger_id = %id.ledger_id, "删除文件后取消探测单元失败");
         return;
@@ -130,11 +216,14 @@ fn cancel_deleted_dispatch(manager: &ProbeManager, id: &store::ProbeDispatchId) 
         .ok()
         .flatten()
         .is_some_and(|job| job.kind == "marker_refresh" && job.is_active());
-    if refresh {
-        if let Err(error) = manager.store.lock().cancel_probe_job(&id.job_id, "file_deleted") {
+    if refresh
+        && let Err(error) = manager
+            .store
+            .lock()
+            .cancel_probe_job(&id.job_id, "file_deleted")
+        {
             tracing::error!(%error, job_id = %id.job_id, "删除文件后取消刷新任务失败");
         }
-    }
     manager.seen.lock().remove(&id.ledger_id);
 }
 
@@ -146,13 +235,31 @@ impl Drop for MetadataStageGuard {
     }
 }
 
+/// Refill both durable windows after every fingerprint outcome.
+///
+/// This worker can be the only remaining consumer once metadata drains, so a slot freed
+/// here must be offered the next durable id: otherwise work that hit a full fingerprint
+/// window at admission time would never drain without a restart.
 struct FingerprintWindowGuard(Arc<ProbeManager>);
 
 impl Drop for FingerprintWindowGuard {
     fn drop(&mut self) {
-        // This worker can be the only remaining consumer after metadata drains.
-        // Refill on every outcome, including cancelled sources and stale claims.
-        self.0.fill_dispatch_windows();
+        self.0.refill_drained_windows();
+        self.0.wake.notify_waiters();
+    }
+}
+
+/// Await the manager's wake signal, then refill the dispatch windows.
+///
+/// Every `wake.notify_waiters()` call site (window full, recovery, page admission) means
+/// "durable ids may now fit again"; without a consumer those signals were dead code.
+async fn run_window_dispatcher(manager: Arc<ProbeManager>) {
+    loop {
+        manager.wake.notified().await;
+        if manager.shutting_down.load(Ordering::SeqCst) {
+            break;
+        }
+        manager.refill_drained_windows();
     }
 }
 
@@ -193,7 +300,10 @@ async fn run_fingerprint_worker(manager: Arc<ProbeManager>) {
         };
         let Some((id, work)) = message else { break };
         let _window = FingerprintWindowGuard(manager.clone());
-        if manager.shutting_down.load(std::sync::atomic::Ordering::SeqCst) {
+        if manager
+            .shutting_down
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
             manager.seen.lock().remove(&id.ledger_id);
             continue;
         }
@@ -258,11 +368,11 @@ fn refresh_leases(
     let rows = manager
         .store
         .lock()
-        .list_ledger()
+        .list_file_coverage()
         .map_err(|e| e.to_string())?;
     let units: Vec<_> = rows
         .into_iter()
-        .filter(|row| row.media_id == unit.row.media_id)
+        .filter(|row| row.file.media_id == unit.row.file.media_id)
         .map(|row| {
             let mut expanded = unit.clone();
             expanded.row = row;
@@ -282,18 +392,15 @@ pub(super) fn work_lease(
     };
     let library_id = {
         let store = manager.store.lock();
-        store
-            .library_for_path_strict(std::path::Path::new(&unit.row.path), unit.kind)
-            .map_err(|e| e.to_string())?
-            .map(|library| library.id)
-    }
-    .ok_or("Library no longer owns probe source")?;
+        crate::fingerprint_job::source::ensure_source_recorded(&store, &unit.row)?;
+        unit.row.file.library_id.to_string()
+    };
     registry.acquire(&manager.store, &library_id).map(Some)
 }
 
 pub(super) fn source_ready(manager: &ProbeManager, unit: &ProbeUnit) -> bool {
-    if let Some(id) = &unit.job_id {
-        if manager
+    if let Some(id) = &unit.job_id
+        && manager
             .store
             .lock()
             .get_probe_job(id)
@@ -301,12 +408,14 @@ pub(super) fn source_ready(manager: &ProbeManager, unit: &ProbeUnit) -> bool {
             .flatten()
             .is_some_and(|job| !job.is_active())
         {
-            manager.seen.lock().remove(&unit.row.id.to_string());
+            manager
+                .seen
+                .lock()
+                .remove(&unit.row.file.file_id.to_string());
             return false;
         }
-    }
     let availability =
-        crate::fingerprint_job::source::ensure_source_available(&manager.store.lock(), &unit.row);
+        crate::fingerprint_job::source::ensure_source_available(&manager.store, &unit.row);
     match availability {
         Ok(()) => true,
         Err(error) if crate::fingerprint_job::source::is_file_deleted(&error) => {
@@ -314,7 +423,7 @@ pub(super) fn source_ready(manager: &ProbeManager, unit: &ProbeUnit) -> bool {
             false
         }
         Err(error) => {
-            tracing::error!(%error, ledger_id = %unit.row.id, "检查探测源文件失败");
+            tracing::error!(%error, ledger_id = %unit.row.file.file_id, "检查探测源文件失败");
             manager.finish(unit, false);
             false
         }
@@ -326,7 +435,10 @@ pub(super) async fn wait_for_metadata_idle(manager: &ProbeManager) {
         .metadata_idle_generation
         .load(std::sync::atomic::Ordering::Acquire);
     loop {
-        if manager.metadata_pending.load(std::sync::atomic::Ordering::Acquire) == 0
+        if manager
+            .metadata_pending
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
             || manager
                 .metadata_idle_generation
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -337,7 +449,10 @@ pub(super) async fn wait_for_metadata_idle(manager: &ProbeManager) {
         let notified = manager.metadata_idle.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        if manager.metadata_pending.load(std::sync::atomic::Ordering::Acquire) == 0
+        if manager
+            .metadata_pending
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
             || manager
                 .metadata_idle_generation
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -350,7 +465,7 @@ pub(super) async fn wait_for_metadata_idle(manager: &ProbeManager) {
 }
 
 fn start_persisted_unit(manager: &ProbeManager, unit: &ProbeUnit) -> bool {
-    let ledger_id = unit.row.id.to_string();
+    let ledger_id = unit.row.file.file_id.to_string();
     let started = match unit.job_id.as_deref() {
         Some(job_id) => manager.store.lock().start_probe_unit(job_id, &ledger_id),
         None => {

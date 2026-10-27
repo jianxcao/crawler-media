@@ -4,20 +4,33 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Test-only seams (`src/test_support`) are compiled only for this crate's tests or
+# when a dependent enables this feature from its `[dev-dependencies]`.
+test-support = []
+
 [dependencies]
 domain.workspace = true
 downloader.workspace = true
 library.workspace = true
+rusqlite = { workspace = true, features = ["functions", "trace", "hooks"] }
 media.workspace = true
+release.workspace = true
 subscribe.workspace = true
-rusqlite.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-argon2 = { version = "0.5", features = ["std"] }
+roxmltree.workspace = true
+sha2.workspace = true
 password-hash = { version = "0.5", features = ["rand_core"] }
+argon2 = { version = "0.5", features = ["std"] }
 tracing.workspace = true
+unicode-normalization.workspace = true
 
 [dev-dependencies]
+jobs.workspace = true
 tempfile.workspace = true
+# Integration tests are separate crates and cannot see `#[cfg(test)]` items, so the
+# package enables its own test-support seam for them.
+store = { path = ".", features = ["test-support"] }

@@ -33,9 +33,7 @@ pub fn magnet_info_hash(enclosure: &str) -> Option<String> {
         {
             continue;
         }
-        let Some(hash) = normalize_hash(&value[9..]) else {
-            return None;
-        };
+        let hash = normalize_hash(&value[9..])?;
         if found.as_ref().is_some_and(|existing| existing != &hash) {
             return None;
         }

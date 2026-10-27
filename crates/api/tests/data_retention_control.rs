@@ -3,118 +3,24 @@
 
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use api::ApiState;
 use api::maintenance::{MaintenancePolicy, run, seed_maintenance_defs};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use jobs::{JobKind, PayloadUpdate};
+use jobs::JobKind;
 use rusqlite::params;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 #[path = "maintenance_support/mod.rs"]
 mod support;
-use support::{DAY, temp_state, unix_now};
+use support::{temp_state, unix_now};
 
-fn data_dir(state: &ApiState) -> std::path::PathBuf {
-    support::data_dir(state)
-}
+#[path = "data_retention_control/fixtures.rs"]
+mod fixtures;
 
-fn retention_def(state: &ApiState) -> jobs::JobDef {
-    state
-        .jobs()
-        .lock()
-        .list_defs()
-        .unwrap()
-        .into_iter()
-        .find(|def| def.kind == JobKind::DataRetention)
-        .expect("默认注册必须包含 data_retention")
-}
-
-fn enable_with_payload(state: &ApiState, def: &jobs::JobDef, payload: &Value) {
-    let queue = state.jobs();
-    let guard = queue.lock();
-    assert_eq!(
-        guard
-            .set_def_payload_cas(def.id, &def.payload, &payload.to_string())
-            .unwrap(),
-        PayloadUpdate::Updated
-    );
-    guard.set_def_enabled_by_id(def.id, true).unwrap();
-}
-
-fn insert_old_metrics(state: &ApiState, count: usize, recorded_at: i64) {
-    let conn = rusqlite::Connection::open(data_dir(state).join("subscribe.db")).unwrap();
-    conn.execute_batch("BEGIN").unwrap();
-    {
-        let mut stmt = conn
-            .prepare(
-                "INSERT INTO playback_metrics
-                    (id, user_id, media_id, tier, engine, ttff_ms, rebuffer_ms,
-                     rebuffer_count, seek_count, dropped_frames, total_frames,
-                     watched_ms, recorded_at)
-                 VALUES (?1, 'user-1', 'media-1', 0, NULL, NULL, 0, 0, 0, NULL, NULL, 0, ?2)",
-            )
-            .unwrap();
-        for index in 0..count {
-            stmt.execute(params![format!("old-{index:06}"), recorded_at])
-                .unwrap();
-        }
-    }
-    conn.execute_batch("COMMIT").unwrap();
-}
-
-fn metric_count(state: &ApiState) -> i64 {
-    rusqlite::Connection::open(data_dir(state).join("subscribe.db"))
-        .unwrap()
-        .query_row("SELECT COUNT(*) FROM playback_metrics", [], |row| row.get(0))
-        .unwrap()
-}
-
-fn table_count(state: &ApiState, db: &str, table: &str) -> i64 {
-    rusqlite::Connection::open(data_dir(state).join(db))
-        .unwrap()
-        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
-        .unwrap()
-}
-
-fn cursor_settings(state: &ApiState) -> i64 {
-    rusqlite::Connection::open(data_dir(state).join("app.db"))
-        .unwrap()
-        .query_row(
-            "SELECT COUNT(*) FROM settings WHERE key LIKE 'maintenance.data_retention.cursor.%'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap()
-}
-
-fn claim_for(state: &ApiState, def_id: domain::JobDefId, now: i64) -> jobs::Job {
-    let queue = state.jobs();
-    let guard = queue.lock();
-    // 首次调用会新建 child；后续调用会复用上一次成功时生成的 follow-up（run_after
-    // 被 ensure_scheduled_for(0) 提前到 0）。两条路径都通过 claim 取 running job。
-    let created = guard.ensure_scheduled_for(0, def_id).unwrap();
-    let claimed = guard.claim(now, 1).unwrap();
-    assert_eq!(claimed.len(), 1, "必须正好领取一个维护任务");
-    assert_eq!(claimed[0].kind, JobKind::DataRetention);
-    if let Some(expected) = created.first() {
-        assert_eq!(claimed[0].id, expected.id);
-    }
-    claimed.into_iter().next().unwrap()
-}
-
-fn real_payload() -> Value {
-    json!({
-        "version": 1,
-        "dry_run": false,
-        "qoe_days": 90,
-        "transient_cache_days": 90,
-        "probe_days": 90,
-    })
-}
+use fixtures::*;
 
 #[test]
 fn new_data_retention_is_disabled_and_dry_run() {
@@ -124,7 +30,10 @@ fn new_data_retention_is_disabled_and_dry_run() {
     assert!(!def.enabled, "新类别默认关闭，生产启用需用户显式确认");
     assert_eq!(def.kind.as_str(), "data_retention");
     assert!(def.kind.is_maintenance());
-    assert_eq!(def.schedule, Some(jobs::Schedule::Interval { secs: 86_400 }));
+    assert_eq!(
+        def.schedule,
+        Some(jobs::Schedule::Interval { secs: 86_400 })
+    );
 
     match MaintenancePolicy::parse(def.kind, &def.payload).unwrap() {
         MaintenancePolicy::DataRetention(policy) => {
@@ -187,7 +96,29 @@ fn restart_does_not_overwrite_user_config() {
         custom,
         "重启不得覆盖用户策略"
     );
-    assert_eq!(after.schedule, Some(jobs::Schedule::Interval { secs: 86_400 }));
+    assert_eq!(
+        after.schedule,
+        Some(jobs::Schedule::Interval { secs: 86_400 })
+    );
+}
+
+#[test]
+fn transient_report_examined_bounded_by_500() {
+    let (_tmp, state) = temp_state(Arc::new(api::maintenance::SqliteExecutor));
+    let now = unix_now();
+    let def = retention_def(&state);
+    enable_with_payload(&state, &def, &real_payload());
+
+    let job = claim_for(&state, def.id, now);
+    run(&state, &job).unwrap();
+    let report = support::progress_of(&state, &job);
+
+    for class_report in report["classes"].as_array().unwrap() {
+        if class_report["class"] == "transient_catalog" {
+            let examined = class_report["examined"].as_u64().unwrap();
+            assert!(examined <= 500, "examined must be <= 500 per batch");
+        }
+    }
 }
 
 #[test]
@@ -201,8 +132,7 @@ fn disable_after_first_batch_stops_second() {
     let job = claim_for(&state, def.id, now);
     let state_clone = state.clone();
     let monitor = thread::spawn(move || {
-        let conn =
-            rusqlite::Connection::open(data_dir(&state_clone).join("subscribe.db")).unwrap();
+        let conn = rusqlite::Connection::open(data_dir(&state_clone).join("library.db")).unwrap();
         for _ in 0..5_000 {
             let count: i64 = conn
                 .query_row(
@@ -258,8 +188,14 @@ fn two_hundred_thousand_qoe_history_reports_bounded_batches_and_resumes() {
     assert_eq!(report["batches"], 20, "单轮批数上限 20: {report}");
     assert_eq!(report["examined"], 10_000, "20 × 500 窗口: {report}");
     assert_eq!(report["deleted"], 10_000, "20 × 500 删除: {report}");
-    assert_eq!(report["incomplete"], true, "200k 历史不可能一轮完成: {report}");
-    assert_eq!(report["remaining"], true, "预算不足必须显式 remaining: {report}");
+    assert_eq!(
+        report["incomplete"], true,
+        "200k 历史不可能一轮完成: {report}"
+    );
+    assert_eq!(
+        report["remaining"], true,
+        "预算不足必须显式 remaining: {report}"
+    );
     assert_eq!(report["budget_exhausted"], true);
     let qoe = &report["classes"][0];
     assert_eq!(qoe["class"], "qoe");
@@ -271,7 +207,10 @@ fn two_hundred_thousand_qoe_history_reports_bounded_batches_and_resumes() {
     let second = claim_for(&state, def.id, now);
     run(&state, &second).unwrap();
     let report = support::progress_of(&state, &second);
-    assert_eq!(report["deleted"], 10_000, "持久游标必须继续下一窗口: {report}");
+    assert_eq!(
+        report["deleted"], 10_000,
+        "持久游标必须继续下一窗口: {report}"
+    );
     assert_eq!(metric_count(&state), 180_000);
 }
 
@@ -284,7 +223,13 @@ async fn preview_is_read_only_and_reports_classes() {
         let store = state.store();
         let store = store.lock();
         store
-            .put_catalog_cache("tmdb", "/search/movie?query=avatar", "{}", now - 100 * DAY, None)
+            .put_catalog_cache(
+                "tmdb",
+                "/search/movie?query=avatar",
+                "{}",
+                now - 100 * DAY,
+                None,
+            )
             .unwrap();
     }
     {
@@ -331,10 +276,19 @@ async fn preview_is_read_only_and_reports_classes() {
     let data = &envelope["data"];
     assert_eq!(data["examined"], 8, "3 QoE + 1 catalog + 4 probe: {data}");
     assert_eq!(data["truncated"], false);
-    assert_eq!(data["classes"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        data["classes"].as_array().unwrap().len(),
+        4,
+        "预览必须覆盖每个已启用类别（含 operations）: {data}"
+    );
+    let operations = class_report(data, "operations");
+    assert_eq!(
+        operations["examined"], 0,
+        "该 fixture 没有 operation 行，operations 窗口应为空: {operations}"
+    );
 
     assert_eq!(metric_count(&state), 3, "预览不得删除 QoE 行");
-    assert_eq!(table_count(&state, "catalog.db", "catalog_cache"), 1);
+    assert_eq!(table_count(&state, "cache.db", "tmdb_cache"), 1);
     assert_eq!(table_count(&state, "library.db", "probe_jobs"), 4);
     assert_eq!(cursor_settings(&state), 0, "预览不得写游标");
 }
@@ -405,4 +359,85 @@ async fn maintenance_config_accepts_data_retention_and_enforces_cas() {
     }))
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn retention_preserves_active_operations_and_local_facts() {
+    let (tmp, state) = temp_state(Arc::new(api::maintenance::SqliteExecutor));
+    let now = unix_now();
+    let (user_id, media_id) = seed_local_facts(&state, tmp.path());
+    seed_active_merge(&state, media_id);
+    seed_probe_history(&state, now);
+
+    // 本地事实（条目/进度/活动操作）先经公开 seam 快照，之后逐条对比。
+    let stats_before = library_stats(&state);
+    let playback_before = playback_count(&state, user_id, media_id);
+    let operations_before = active_operations(&state);
+    assert_eq!(stats_before.item_count, 1, "夹具必须真的落了本地条目");
+    assert_eq!(stats_before.file_count, 1, "夹具必须真的落了已发布文件");
+    assert_eq!(playback_before, 1, "夹具必须真的留下播放进度");
+    assert_eq!(operations_before, 1, "夹具必须真的留下一个活动操作");
+
+    // 10 万行缓存更新 + 逐键清空：真库、真规模，只走 media 公开 API。
+    let churn = churn_cache(&state);
+    assert_eq!(churn.0, CACHE_ROWS, "缓存必须真的写入 10 万行");
+    assert_eq!(response_cache_rows(&state), 0, "清空必须真的删掉每一行");
+    assert_eq!(
+        library_stats(&state),
+        stats_before,
+        "缓存 10 万次更新/清空不得改动本地条目"
+    );
+    assert_eq!(
+        playback_count(&state, user_id, media_id),
+        playback_before,
+        "缓存变更不得改动播放进度"
+    );
+
+    // 清理目标：超龄瞬态搜索键（必须删）+ 详情键（必须保护）。
+    seed_catalog_keys(&state, now);
+    let def = retention_def(&state);
+    enable_with_payload(&state, &def, &real_payload());
+
+    let started = Instant::now();
+    let job = claim_for(&state, def.id, now);
+    run(&state, &job).unwrap();
+    let elapsed = started.elapsed();
+    let report = support::progress_of(&state, &job);
+
+    let catalog = class_report(&report, "transient_catalog");
+    let probe = class_report(&report, "probe_history");
+    assert_eq!(catalog["deleted"], 1, "超龄瞬态搜索键必须被真删: {report}");
+    assert_eq!(catalog["protected"], 1, "详情键必须受保护: {report}");
+    assert_eq!(probe["deleted"], 1, "最旧的 Probe 历史必须被真删: {report}");
+    assert_eq!(
+        probe["protected"], 3,
+        "最新 3 条 Probe 历史必须留下: {report}"
+    );
+    assert!(
+        !probe_job_exists(&state, "retention-oldest"),
+        "超龄 Probe 历史必须真的删掉: {report}"
+    );
+    for kept in ["retention-mid", "retention-new", "retention-newest"] {
+        assert!(probe_job_exists(&state, kept), "{kept} 必须留下: {report}");
+    }
+    assert!(
+        !cached(&state, "/search/movie?page=0"),
+        "超龄瞬态键不得残留"
+    );
+    assert!(cached(&state, "/movie/12345"), "详情键不得被清理掉");
+
+    // 清理后本地事实必须逐条不变。
+    assert_eq!(library_stats(&state), stats_before, "清理不得改动本地条目");
+    assert_eq!(
+        playback_count(&state, user_id, media_id),
+        playback_before,
+        "清理不得改动播放进度"
+    );
+    assert_eq!(
+        active_operations(&state),
+        operations_before,
+        "活动操作不得被清理带走"
+    );
+
+    report_measurements(&state, churn, elapsed, &report);
 }

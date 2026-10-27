@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { MetadataLanguageSetting } from "@/components/metadata-language-setting";
 import { BrandLoader } from "@/components/brand-loader";
 import { useToast } from "@/components/feedback";
 import { GearIcon, PhotoIcon, RefreshIcon } from "@/components/icons";
@@ -257,6 +258,7 @@ export function MetadataSettingsSection() {
 
   return (
     <div className="space-y-8">
+      <MetadataLanguageSetting />
       <div className="css-glass rounded-2xl p-6">
         <div className="flex items-start gap-4">
           <span className="icon-chip size-11 shrink-0 !rounded-2xl">

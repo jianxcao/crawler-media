@@ -3,6 +3,8 @@
 //! 站点搜索是 blocking HTTP，测试用一个受闸门的 `Fetcher` 占住搜索 permit，
 //! 从 HTTP 响应观察“超预算站点降级为单站失败”和“客户端断开后不再排新站点”。
 
+#![allow(dead_code, unused_imports)]
+
 use std::sync::{Arc, Condvar, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -69,10 +71,14 @@ impl GatedSearchFetcher {
 impl Fetcher for GatedSearchFetcher {
     fn fetch(&self, request: &FetchRequest) -> Result<String, IndexerError> {
         self.started.lock().unwrap().push(request.url.clone());
-        let mut open = self.open.lock().unwrap();
-        while !*open {
-            open = self.open_cv.wait(open).unwrap();
-        }
+        let released = *self
+            .open_cv
+            .wait_timeout_while(self.open.lock().unwrap(), Duration::from_secs(30), |open| {
+                !*open
+            })
+            .unwrap()
+            .0;
+        assert!(released, "test must release the search admission gate");
         *self.completed.lock().unwrap() += 1;
         // 合法的空列表页：站点成功返回 0 条，不制造额外失败。
         Ok("<html><body></body></html>".to_string())

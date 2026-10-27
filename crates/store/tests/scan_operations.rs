@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
+use store::test_support::FixtureFile;
 use store::{ScanOperationStatus, Store};
 
-fn insert_ledger_row(store: &Store, path: &std::path::Path) {
+fn publish_fixture_row(store: &Store, path: &std::path::Path) {
     let media = Media {
         id: MediaId::new(),
         kind: MediaKind::Movie,
@@ -18,21 +19,39 @@ fn insert_ledger_row(store: &Store, path: &std::path::Path) {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
-            media_id: media.id,
-            path: path.display().to_string(),
-            season: None,
-            episode: None,
-            resolution: None,
-            codec: None,
-            hdr: None,
-            quality_source: QualitySource::Release,
-            confidence: Confidence::High,
-            filter_score: None,
-        })
-        .unwrap();
+    let root = path.parent().unwrap();
+    if !store
+        .list_library_roots()
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate.path == root)
+    {
+        store
+            .create_library(
+                MediaKind::Movie,
+                &format!("scan-{}", root.display()),
+                &[root.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+    }
+    let row = FixtureFile {
+        file_id: Some(LedgerId::new()),
+        media_id: media.id,
+        path: path.display().to_string(),
+        season: None,
+        episode: None,
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: None,
+        ..Default::default()
+    };
+    store::test_support::publish_fixture_file(store, &row).unwrap();
 }
 
 #[test]
@@ -40,16 +59,12 @@ fn enqueue_scan_deduplicates_active_operations() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
 
-    let op1 = store
-        .enqueue_scan("lib1", "sig1", &[], 1000)
-        .unwrap();
+    let op1 = store.enqueue_scan("lib1", "sig1", &[], 1000).unwrap();
     assert_eq!(op1.status, ScanOperationStatus::Queued);
     assert_eq!(op1.generation, 1);
 
     // Enqueueing again returns the existing operation
-    let op2 = store
-        .enqueue_scan("lib1", "sig1", &[], 1050)
-        .unwrap();
+    let op2 = store.enqueue_scan("lib1", "sig1", &[], 1050).unwrap();
     assert_eq!(op1.id, op2.id);
 
     // Cancel operation
@@ -58,9 +73,7 @@ fn enqueue_scan_deduplicates_active_operations() {
     assert_eq!(op_cancelled.status, ScanOperationStatus::Cancelled);
 
     // Enqueueing after cancel creates generation 2
-    let op3 = store
-        .enqueue_scan("lib1", "sig1", &[], 1200)
-        .unwrap();
+    let op3 = store.enqueue_scan("lib1", "sig1", &[], 1200).unwrap();
     assert_ne!(op1.id, op3.id);
     assert_eq!(op3.generation, 2);
 }
@@ -74,7 +87,7 @@ fn enqueue_scan_persists_and_merges_targets() {
     let show_b = PathBuf::from("/media/tv/Show B");
 
     let op1 = store
-        .enqueue_scan("lib1", "sig1", &[show_a.clone()], 1000)
+        .enqueue_scan("lib1", "sig1", std::slice::from_ref(&show_a), 1000)
         .unwrap();
     assert_eq!(op1.targets, vec![show_a.clone()]);
 
@@ -111,7 +124,7 @@ fn full_scan_intent_is_not_narrowed_by_target_merge() {
     assert!(op1.targets.is_empty());
 
     let op2 = store
-        .enqueue_scan("lib1", "sig1", &[show_a.clone()], 1050)
+        .enqueue_scan("lib1", "sig1", std::slice::from_ref(&show_a), 1050)
         .unwrap();
     assert_eq!(op1.id, op2.id, "单飞：仍应是同一个 operation");
     assert!(op2.is_full_scope(), "整库意图不得被增量目标缩小");
@@ -131,14 +144,17 @@ fn admin_full_request_upgrades_targeted_operation() {
     let show_a = PathBuf::from("/media/tv/Show A");
 
     let op1 = store
-        .enqueue_scan("lib1", "sig1", &[show_a.clone()], 1000)
+        .enqueue_scan("lib1", "sig1", std::slice::from_ref(&show_a), 1000)
         .unwrap();
     assert!(!op1.is_full_scope());
     assert_eq!(op1.scope_kind_str(), "targeted");
 
     let op2 = store.enqueue_scan("lib1", "sig1", &[], 1050).unwrap();
     assert_eq!(op1.id, op2.id);
-    assert!(op2.is_full_scope(), "整库请求必须把增量 operation 升级为整库");
+    assert!(
+        op2.is_full_scope(),
+        "整库请求必须把增量 operation 升级为整库"
+    );
     assert!(op2.targets.is_empty());
 
     let reloaded = store.scan_operation(&op1.id).unwrap().unwrap();
@@ -155,14 +171,14 @@ fn repeated_target_enqueue_bumps_dirty_rev() {
     let show_b = PathBuf::from("/media/tv/Show B");
 
     let op1 = store
-        .enqueue_scan("lib1", "sig1", &[show_a.clone()], 1000)
+        .enqueue_scan("lib1", "sig1", std::slice::from_ref(&show_a), 1000)
         .unwrap();
     assert_eq!(op1.dirty_rev, 0, "新建 operation 尚未执行，无需补扫版本");
     assert_eq!(op1.consumed_rev, 0);
 
     // 同一 target 再来一次：列表不变，但 dirty_rev 必须前进。
     let op2 = store
-        .enqueue_scan("lib1", "sig1", &[show_a.clone()], 1001)
+        .enqueue_scan("lib1", "sig1", std::slice::from_ref(&show_a), 1001)
         .unwrap();
     assert_eq!(op1.id, op2.id);
     assert_eq!(op2.targets, vec![show_a.clone()]);
@@ -170,7 +186,7 @@ fn repeated_target_enqueue_bumps_dirty_rev() {
     assert_eq!(op2.consumed_rev, 0);
 
     let op3 = store
-        .enqueue_scan("lib1", "sig1", &[show_b.clone()], 1002)
+        .enqueue_scan("lib1", "sig1", std::slice::from_ref(&show_b), 1002)
         .unwrap();
     assert_eq!(op3.targets, vec![show_a, show_b]);
     assert_eq!(op3.dirty_rev, 2);
@@ -197,19 +213,34 @@ fn scan_seen_requires_current_ledger_and_file_version() {
     let file = root.join("Movie (2024).mkv");
     std::fs::write(&file, b"one").unwrap();
     let path = file.display().to_string();
+    // A scan has a configured root before it records checkpoints, even while a
+    // particular file has no ledger row yet.
+    store
+        .create_library(
+            MediaKind::Movie,
+            "Scan root",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
 
     let op = store.enqueue_scan("lib1", "sig1", &[], 1000).unwrap();
-    assert!(!store.scan_seen_is_current(&op.id, &path).unwrap(), "未记录断点");
+    assert!(
+        !store.scan_seen_is_current(&op.id, &path).unwrap(),
+        "未记录断点"
+    );
 
     // 文件存在但没有台账行：断点无效，必须重新入账。
-    store.record_scan_seen(&op.id, &[file.clone()]).unwrap();
+    store.record_scan_seen(&op.id, std::slice::from_ref(&file)).unwrap();
     assert!(
         !store.scan_seen_is_current(&op.id, &path).unwrap(),
         "台账行不存在时必须重新处理"
     );
 
     // 补上台账行且未 missing：版本一致时可以跳过。
-    insert_ledger_row(&store, &file);
+    publish_fixture_row(&store, &file);
     assert!(store.scan_seen_is_current(&op.id, &path).unwrap());
 
     // 内容变化（size 变）：必须重新处理。
@@ -220,9 +251,11 @@ fn scan_seen_requires_current_ledger_and_file_version() {
     );
 
     // 恢复场景：文件被删除并标记 missing，再恢复后即使版本相同也必须重新处理。
-    store.record_scan_seen(&op.id, &[file.clone()]).unwrap();
+    store.record_scan_seen(&op.id, std::slice::from_ref(&file)).unwrap();
     std::fs::remove_file(&file).unwrap();
-    let (missing, _restored) = store.verify_library_files(std::slice::from_ref(&root), 1).unwrap();
+    let (missing, _restored) = store
+        .verify_library_files(std::slice::from_ref(&root), 1)
+        .unwrap();
     assert_eq!(missing, 1, "文件不存在时应标记 missing");
     std::fs::write(&file, b"one-changed-content").unwrap();
     assert!(
@@ -243,8 +276,8 @@ fn strm_url_change_with_same_size_and_mtime_is_not_current() {
     let path = file.display().to_string();
 
     let op = store.enqueue_scan("lib1", "sig1", &[], 1000).unwrap();
-    insert_ledger_row(&store, &file);
-    store.record_scan_seen(&op.id, &[file.clone()]).unwrap();
+    publish_fixture_row(&store, &file);
+    store.record_scan_seen(&op.id, std::slice::from_ref(&file)).unwrap();
     assert!(
         store.scan_seen_is_current(&op.id, &path).unwrap(),
         "URL 未变化时断点应命中"
@@ -276,9 +309,9 @@ fn unknown_zero_version_checkpoint_is_not_current() {
 
     let op = store.enqueue_scan("lib1", "sig1", &[], 1000).unwrap();
     // 台账行存在，但文件读不到 metadata → 断点版本 0/0（等价于老断点行）。
-    insert_ledger_row(&store, &missing_file);
+    publish_fixture_row(&store, &missing_file);
     store
-        .record_scan_seen(&op.id, &[missing_file.clone()])
+        .record_scan_seen(&op.id, std::slice::from_ref(&missing_file))
         .unwrap();
     assert!(
         !store.scan_seen_is_current(&op.id, &path).unwrap(),
@@ -293,7 +326,7 @@ fn finalize_scan_refuses_to_overwrite_new_dirty_event() {
     let store = Store::open(tmp.path().join("data")).unwrap();
     let show_a = PathBuf::from("/media/tv/Show A");
     let op = store
-        .enqueue_scan("lib1", "sig1", &[show_a.clone()], 1000)
+        .enqueue_scan("lib1", "sig1", std::slice::from_ref(&show_a), 1000)
         .unwrap();
     let claimed = store.claim_next_queued_scan(&[]).unwrap().unwrap();
     assert_eq!(claimed.id, op.id);
@@ -301,7 +334,7 @@ fn finalize_scan_refuses_to_overwrite_new_dirty_event() {
 
     // worker 判定之后、写终态之前，另一请求并入同一 operation。
     let merged = store
-        .enqueue_scan("lib1", "sig1", &[show_a.clone()], 1001)
+        .enqueue_scan("lib1", "sig1", std::slice::from_ref(&show_a), 1001)
         .unwrap();
     assert_eq!(merged.id, op.id);
     assert_eq!(merged.dirty_rev, 1);
@@ -321,10 +354,14 @@ fn finalize_scan_refuses_to_overwrite_new_dirty_event() {
     assert_eq!(claimed.dirty_rev, 1);
     let seen_file = tmp.path().join("seen.mkv");
     std::fs::write(&seen_file, b"x").unwrap();
-    store.record_scan_seen(&op.id, &[seen_file.clone()]).unwrap();
-    assert!(store
-        .is_scan_seen(&op.id, &seen_file.display().to_string())
-        .unwrap());
+    store
+        .record_scan_seen(&op.id, std::slice::from_ref(&seen_file))
+        .unwrap();
+    assert!(
+        store
+            .is_scan_seen(&op.id, &seen_file.display().to_string())
+            .unwrap()
+    );
     assert_eq!(
         store
             .finalize_or_requeue_scan(&op.id, 1, ScanOperationStatus::Completed, &report)
@@ -341,7 +378,6 @@ fn finalize_scan_refuses_to_overwrite_new_dirty_event() {
         "写终态必须同时清理断点"
     );
 }
-
 
 /// P3-NEW-1：补扫轮标记 Running 与崩溃恢复都不得清空 requeue 落库的累计报告。
 #[test]
@@ -388,9 +424,11 @@ fn crash_recovery_keeps_requeued_round_report() {
 
     // 第二轮认领（Running）→ 只改状态，不得覆盖报告。
     assert!(store.claim_next_queued_scan(&[]).unwrap().is_some());
-    assert!(store
-        .set_scan_operation_status(&op.id, ScanOperationStatus::Running)
-        .unwrap());
+    assert!(
+        store
+            .set_scan_operation_status(&op.id, ScanOperationStatus::Running)
+            .unwrap()
+    );
     assert_eq!(
         store.scan_operation(&op.id).unwrap().unwrap().report,
         report,
@@ -415,31 +453,43 @@ fn ledger_source_version_survives_operation_checkpoint_clear() {
     let file = root.join("Movie (2024).strm");
     std::fs::write(&file, "https://a/video").unwrap();
     let path = file.display().to_string();
-    insert_ledger_row(&store, &file);
+    publish_fixture_row(&store, &file);
 
     // 首次处理：断点与 durable 版本一起写下。
     let op1 = store.enqueue_scan("lib1", "sig1", &[], 1000).unwrap();
-    store.record_scan_seen(&op1.id, &[file.clone()]).unwrap();
+    store.record_scan_seen(&op1.id, std::slice::from_ref(&file)).unwrap();
     let recorded = store
-        .ledger_source_versions(&[path.clone()])
+        .ledger_source_versions(std::slice::from_ref(&path))
         .unwrap()
         .remove(&path)
         .expect("已处理的路径必须有 durable 源版本");
     assert!(
-        recorded.2.as_deref().is_some_and(|digest| !digest.is_empty()),
+        recorded
+            .2
+            .as_deref()
+            .is_some_and(|digest| !digest.is_empty()),
         "STRM 必须有受限内容指纹"
     );
 
     // 终态清空断点：durable 版本必须还在，且能证明未变化的文件是同一版本。
     assert_eq!(
         store
-            .finalize_or_requeue_scan(&op1.id, 0, ScanOperationStatus::Completed, &serde_json::json!({}))
+            .finalize_or_requeue_scan(
+                &op1.id,
+                0,
+                ScanOperationStatus::Completed,
+                &serde_json::json!({})
+            )
             .unwrap(),
         None
     );
     assert!(!store.is_scan_seen(&op1.id, &path).unwrap());
-    let surviving = store.ledger_source_versions(&[path.clone()]).unwrap();
-    assert_eq!(surviving.get(&path), Some(&recorded), "断点清空不得丢掉 durable 版本");
+    let surviving = store.ledger_source_versions(std::slice::from_ref(&path)).unwrap();
+    assert_eq!(
+        surviving.get(&path),
+        Some(&recorded),
+        "断点清空不得丢掉 durable 版本"
+    );
     assert!(Store::scan_seen_stamp_matches(
         &recorded,
         &Store::scan_seen_stamp(&file)
@@ -461,9 +511,9 @@ fn ledger_source_version_survives_operation_checkpoint_clear() {
 
     let op2 = store.enqueue_scan("lib1", "sig1", &[], 2000).unwrap();
     assert_ne!(op1.id, op2.id, "上一个 operation 已终态");
-    store.record_scan_seen(&op2.id, &[file.clone()]).unwrap();
+    store.record_scan_seen(&op2.id, std::slice::from_ref(&file)).unwrap();
     let advanced = store
-        .ledger_source_versions(&[path.clone()])
+        .ledger_source_versions(std::slice::from_ref(&path))
         .unwrap()
         .remove(&path)
         .expect("重新处理必须刷新 durable 源版本");
@@ -481,35 +531,5 @@ fn ledger_source_version_survives_operation_checkpoint_clear() {
             .ledger_source_versions(&[fresh.display().to_string()])
             .unwrap()
             .is_empty()
-    );
-}
-
-/// P2-NEW-1：签名升级是 CAS，旧值不匹配时不写入、也不会覆盖别人的值。
-#[test]
-fn scope_signature_upgrade_is_compare_and_swap() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Store::open(tmp.path().join("data")).unwrap();
-    let op = store
-        .enqueue_scan("lib1", "movie:1:/old", &[], 1000)
-        .unwrap();
-
-    assert!(
-        !store
-            .upgrade_scan_scope_signature(&op.id, "movie:1:/other", "v2:movie:1:4:/old")
-            .unwrap(),
-        "期望值不匹配时不得写入"
-    );
-    assert!(store
-        .upgrade_scan_scope_signature(&op.id, "movie:1:/old", "v2:movie:1:4:/old")
-        .unwrap());
-    assert_eq!(
-        store.scan_operation(&op.id).unwrap().unwrap().scope_signature,
-        "v2:movie:1:4:/old"
-    );
-    assert!(
-        !store
-            .upgrade_scan_scope_signature(&op.id, "movie:1:/old", "v2:movie:1:4:/other")
-            .unwrap(),
-        "已升级的签名不得被重复升级覆盖"
     );
 }

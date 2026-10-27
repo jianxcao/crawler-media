@@ -4,7 +4,6 @@
 //! store; workers load one snapshot, claim it, and refill the window. A full
 //! fingerprint window leaves the unit queued instead of finishing it failed.
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use store::{ProbeDispatchId, ProbeDispatchStage};
@@ -71,7 +70,7 @@ impl ProbeManager {
         };
         let id = ProbeDispatchId {
             job_id,
-            ledger_id: unit.row.id.to_string(),
+            ledger_id: unit.row.file.file_id.to_string(),
             stage: ProbeDispatchStage::Metadata,
         };
         self.offer(self.metadata_tx.clone(), id, unit)
@@ -85,7 +84,7 @@ impl ProbeManager {
         &self,
         mut work: probe::FingerprintWork,
     ) -> bool {
-        let ledger_id = work.unit.row.id.to_string();
+        let ledger_id = work.unit.row.file.file_id.to_string();
         let Some(current_job_id) = work.unit.job_id.clone() else {
             tracing::error!(ledger_id, "媒体信息已完成，但声纹任务缺少持久化任务 ID");
             self.seen.lock().remove(&ledger_id);
@@ -184,21 +183,19 @@ impl ProbeManager {
         id: ProbeDispatchId,
         unit: ProbeUnit,
     ) -> Result<(), ProbeUnit> {
-        self.metadata_pending.fetch_add(1, Ordering::AcqRel);
         match tx.try_send(id) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.metadata_pending.fetch_add(1, Ordering::AcqRel);
+                Ok(())
+            }
             Err(mpsc::error::TrySendError::Full(_)) => {
-                self.metadata_pending.fetch_sub(1, Ordering::AcqRel);
                 tracing::info!(
-                    ledger_id = %unit.row.id,
+                    ledger_id = %unit.row.file.file_id,
                     "探测窗口已满，任务保持数据库排队"
                 );
                 Err(unit)
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                self.metadata_pending.fetch_sub(1, Ordering::AcqRel);
-                Err(unit)
-            }
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(unit),
         }
     }
 
@@ -209,6 +206,24 @@ impl ProbeManager {
         }
         self.fill_metadata();
         self.fill_fingerprint();
+    }
+
+    /// Top up a window only once it is fully drained.
+    ///
+    /// Every refill runs one `pending_probe_dispatch_ids` query over the queued set, so
+    /// refilling after *each* completed unit turns a drain of N units into N queries. The
+    /// natural batching point is an empty window: that is exactly when the worker would
+    /// otherwise block, and a full `WINDOW` batch of ids is offered in a single query.
+    pub(super) fn refill_drained_windows(&self) {
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
+        if self.metadata_tx.capacity() == METADATA_WINDOW {
+            self.fill_metadata();
+        }
+        if self.fingerprint_tx.capacity() == FINGERPRINT_WINDOW {
+            self.fill_fingerprint();
+        }
     }
 
     fn fill_metadata(&self) {
@@ -233,12 +248,11 @@ impl ProbeManager {
             if !seen.insert(id.ledger_id.clone()) {
                 continue;
             }
-            self.metadata_pending.fetch_add(1, Ordering::AcqRel);
             if tx.try_send(id.clone()).is_err() {
-                self.metadata_pending.fetch_sub(1, Ordering::AcqRel);
                 seen.remove(&id.ledger_id);
                 break;
             }
+            self.metadata_pending.fetch_add(1, Ordering::AcqRel);
         }
     }
 
@@ -281,19 +295,6 @@ impl ProbeManager {
         }
     }
 
-    fn release_unclaimed_window(&self) {
-        let mut seen = self.seen.lock();
-        while let Ok(id) = self.metadata_tx.try_reserve() {
-            drop(id);
-            break;
-        }
-        // Receivers are gone with the workers. Drop whatever ids are still
-        // sitting in the channels by rebuilding is not available; the workers
-        // drain them. Clear the in-memory set so a later start refills.
-        seen.clear();
-        self.metadata_pending.store(0, Ordering::SeqCst);
-    }
-
     pub(super) fn load_dispatch_unit(
         &self,
         id: &ProbeDispatchId,
@@ -301,6 +302,7 @@ impl ProbeManager {
         self.materialize_dispatch(id, true)
     }
 
+    #[cfg(test)]
     pub(super) fn load_dispatch_unit_inner(
         &self,
         id: &ProbeDispatchId,
@@ -314,8 +316,6 @@ impl ProbeManager {
         id: &ProbeDispatchId,
         queued_only: bool,
     ) -> Option<(ProbeUnit, probe::FingerprintWork)> {
-        // Admission takes seen before Store. Release Store before any error
-        // branch removes a stale dispatch ID from seen.
         let snapshot = self.store.lock().load_probe_dispatch_snapshot(id);
         let snapshot = match snapshot {
             Ok(Some(snapshot)) => snapshot,
@@ -366,34 +366,45 @@ impl ProbeManager {
             }),
             job_id: Some(snapshot.job.id),
         };
-        let settings = {
-            let store = self.store.lock();
-            store
-                .get_media_info_cache_version(&id.ledger_id)
-                .and_then(|version| {
-                    let duration = version
-                        .filter(|version| version.source_version == snapshot.source_version)
-                        .and_then(|version| version.format_duration_ms);
-                    store
-                        .get_scrape_config()
-                        .map(|config| (duration, config.effective.fingerprint_duration_secs))
-                })
-        };
-        let (media_duration_ms, duration_secs) = match settings {
-            Ok(settings) => settings,
-            Err(error) => {
-                tracing::error!(%error, ledger_id = %id.ledger_id, "恢复派发单元的时长或声纹配置失败，保留持久任务");
-                self.seen.lock().remove(&id.ledger_id);
-                return None;
-            }
-        };
+        let (media_duration_ms, sample_duration_secs) =
+            match self.dispatch_timings(&id.ledger_id, &snapshot.source_version) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    tracing::error!(%error, ledger_id = %id.ledger_id, "恢复派发单元的时长或声纹配置失败，保留持久任务");
+                    self.seen.lock().remove(&id.ledger_id);
+                    return None;
+                }
+            };
         let work = probe::FingerprintWork {
             unit: unit.clone(),
             media_duration_ms,
             source_version: snapshot.source_version,
-            duration_secs,
+            duration_secs: sample_duration_secs,
             start_job: true,
         };
         Some((unit, work))
+    }
+
+    /// The sampling configuration a recovered fingerprint unit must reuse.
+    ///
+    /// A hardcoded window would sample the wrong span and invalidate the cache key, so a
+    /// unit refilled from the durable backlog must derive the same `(media_duration_ms,
+    /// sample_duration_secs)` pair the original admission used: the cached duration only
+    /// counts while it was measured for this exact source version.
+    fn dispatch_timings(
+        &self,
+        ledger_id: &str,
+        source_version: &str,
+    ) -> Result<(Option<i64>, u32), store::StoreError> {
+        let store = self.store.lock();
+        let media_duration_ms = store
+            .get_media_info_cache_version(ledger_id)?
+            .filter(|version| version.source_version == source_version)
+            .and_then(|version| version.format_duration_ms);
+        let sample_duration_secs = store
+            .get_scrape_config()?
+            .effective
+            .fingerprint_duration_secs;
+        Ok((media_duration_ms, sample_duration_secs))
     }
 }

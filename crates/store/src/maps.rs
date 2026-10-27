@@ -1,8 +1,11 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use domain::{
-    Confidence, Coverage, FilterAtom, LedgerRow, Media, QualitySource, Site, SiteId, Subscribe,
-    Torrent,
+    Confidence, Coverage, FileCoverage, FilePresence, FilePublication, FileVersion, FilterAtom,
+    LedgerId, LibraryFile, Media, MediaKind, QualitySource, Site, SiteId, Subscribe, Torrent,
+    UnitKey,
 };
 
 use super::StoreError;
@@ -60,18 +63,51 @@ pub(super) fn map_media(row: &rusqlite::Row<'_>) -> rusqlite::Result<Media> {
     })
 }
 
-pub(super) fn map_ledger(row: &rusqlite::Row<'_>) -> rusqlite::Result<LedgerRow> {
-    let quality_source: String = row.get(8)?;
-    let confidence: String = row.get(9)?;
-    Ok(LedgerRow {
-        id: parse_id(row.get(0)?, 0)?,
-        media_id: parse_id(row.get(1)?, 1)?,
-        path: row.get(2)?,
-        season: row.get::<_, Option<i64>>(3)?.map(|v| v as u32),
-        episode: row.get::<_, Option<i64>>(4)?.map(|v| v as u32),
-        resolution: row.get(5)?,
-        codec: row.get(6)?,
-        hdr: row.get(7)?,
+/// The 30-column file-fact projection behind [`map_library_file`] (indices 0..=29).
+///
+/// Every read that returns a [`LibraryFile`] or a [`FileCoverage`] selects exactly
+/// this list (plus `u.season, u.episode` when it joins units), so the file fact has
+/// a single mapping site and a new column is added here once.
+pub(super) const LIBRARY_FILE_COLUMNS: &str = "f.file_id, f.library_id, f.root_id, f.media_id, f.kind, \
+     f.path_key, f.display_path, f.presence_state, f.publication_state, f.file_revision, \
+     f.source_version, f.size_bytes, f.stat_known, f.mtime_ns, f.created_ns, f.source_digest, \
+     f.source_path, f.transfer_mode, f.resolution, f.codec, f.hdr, f.quality_source, \
+     f.confidence, f.filter_score, f.release_quality, f.duration_ms, f.tracks_version, \
+     f.poster_path, f.backdrop_path, f.still_path";
+
+pub(super) fn map_library_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryFile> {
+    let kind: String = row.get(4)?;
+    let presence: String = row.get(7)?;
+    let publication: String = row.get(8)?;
+    let stat_known: i64 = row.get(12)?;
+    let quality_source: String = row.get(21)?;
+    let confidence: String = row.get(22)?;
+    let size_bytes: Option<i64> = row.get(11)?;
+    Ok(LibraryFile {
+        file_id: parse_id(row.get(0)?, 0)?,
+        library_id: parse_id(row.get(1)?, 1)?,
+        root_id: row.get(2)?,
+        media_id: parse_id(row.get(3)?, 3)?,
+        kind: kind.parse().unwrap_or(MediaKind::Movie),
+        // The read shape exposes the display spelling; `path_key` remains the
+        // lookup key used by [`Store::file_coverage_by_path`].
+        path: row.get::<_, String>(6)?.into(),
+        version: FileVersion {
+            revision: row.get(9)?,
+            source_version: row.get(10)?,
+        },
+        presence: FilePresence::from_str(&presence).unwrap_or(FilePresence::Present),
+        publication: FilePublication::from_str(&publication).unwrap_or(FilePublication::Published),
+        size_bytes: size_bytes.and_then(|size| u64::try_from(size).ok()),
+        stat_known: stat_known != 0,
+        created_ns: row.get(14)?,
+        modified_ns: row.get(13)?,
+        source_digest: row.get(15)?,
+        source_path: row.get::<_, Option<String>>(16)?.map(PathBuf::from),
+        transfer_mode: row.get(17)?,
+        resolution: row.get(18)?,
+        codec: row.get(19)?,
+        hdr: row.get(20)?,
         quality_source: match quality_source.as_str() {
             "probe" => QualitySource::Probe,
             _ => QualitySource::Release,
@@ -80,8 +116,63 @@ pub(super) fn map_ledger(row: &rusqlite::Row<'_>) -> rusqlite::Result<LedgerRow>
             "low" => Confidence::Low,
             _ => Confidence::High,
         },
-        filter_score: row.get(10)?,
+        filter_score: row.get(23)?,
+        release_quality: row.get(24)?,
+        duration_ms: row.get(25)?,
+        tracks_version: row.get(26)?,
+        poster_path: row.get::<_, Option<String>>(27)?.map(PathBuf::from),
+        backdrop_path: row.get::<_, Option<String>>(28)?.map(PathBuf::from),
+        still_path: row.get::<_, Option<String>>(29)?.map(PathBuf::from),
     })
+}
+
+/// A file row plus the unit coordinate selected from the joined `library_file_units`
+/// columns (indices 30 and 31). Reads that join units map through here, so the file
+/// part of the row is decoded by exactly one function.
+pub(super) fn map_file_unit(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(LibraryFile, String, Option<UnitKey>)> {
+    let season: Option<i32> = row.get(30)?;
+    let episode: Option<i32> = row.get(31)?;
+    let unit = match (season, episode) {
+        (Some(season), Some(episode)) => Some(UnitKey::new(season, episode)),
+        (None, None) => None,
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    };
+    Ok((map_library_file(row)?, row.get(5)?, unit))
+}
+
+/// Fold `(file, unit)` rows into one [`FileCoverage`] per file: first-seen file
+/// order is preserved and each file lists its units as `(season ASC, episode ASC)`
+/// with duplicates removed, so a file's coverage never depends on join order.
+pub(super) fn group_file_coverage(
+    rows: impl IntoIterator<Item = (LibraryFile, String, Option<UnitKey>)>,
+) -> Vec<FileCoverage> {
+    let mut slots: HashMap<LedgerId, usize> = HashMap::new();
+    let mut coverage: Vec<FileCoverage> = Vec::new();
+    for (file, path_key, unit) in rows {
+        let slot = match slots.get(&file.file_id) {
+            Some(slot) => *slot,
+            None => {
+                slots.insert(file.file_id, coverage.len());
+                coverage.push(FileCoverage {
+                    path_key,
+                    file,
+                    units: Vec::new(),
+                });
+                coverage.len() - 1
+            }
+        };
+        if let Some(unit) = unit {
+            coverage[slot].units.push(unit);
+        }
+    }
+    for file in &mut coverage {
+        file.units
+            .sort_unstable_by_key(|unit| (unit.season, unit.episode));
+        file.units.dedup();
+    }
+    coverage
 }
 
 pub(super) fn map_subscribe(row: &rusqlite::Row<'_>) -> rusqlite::Result<Subscribe> {
@@ -151,9 +242,9 @@ pub(super) fn map_site(row: &rusqlite::Row<'_>) -> rusqlite::Result<Site> {
 
 /// Serialize filter atoms as a JSON array.
 ///
-/// This replaced the legacy compact DSL (`100:resolution=2160p|50:source=bluray`).
-/// `parse_atoms` still reads the old form so existing rows keep working; every
-/// write after this migration produces JSON.
+/// This replaced the compact DSL (`100:resolution=2160p|50:source=bluray`).
+/// Storage is JSON-only: `parse_atoms` refuses the old form rather than decoding
+/// it, so every read and write after the cutover speaks the same shape.
 pub(super) fn serialize_atoms(atoms: &[FilterAtom]) -> String {
     let values: Vec<serde_json::Value> = atoms
         .iter()
@@ -197,17 +288,22 @@ pub(super) fn serialize_atoms(atoms: &[FilterAtom]) -> String {
 
 /// Parse filter atoms from storage.
 ///
-/// Accepts both the JSON form written since this migration and the legacy
-/// compact DSL, so a database written by an older build still loads.
-pub(super) fn parse_atoms(raw: &str) -> Vec<FilterAtom> {
+/// Storage only holds the JSON array form written by `serialize_atoms`. Any
+/// other shape (the pre-cutover compact DSL included) is rejected instead of
+/// being decoded on a best-effort basis, so a stale row surfaces as an error
+/// rather than as a silently different rule set.
+pub(super) fn parse_atoms(raw: &str) -> Result<Vec<FilterAtom>, StoreError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    if trimmed.starts_with('[') {
-        return parse_atoms_json(trimmed);
+    if !trimmed.starts_with('[') {
+        return Err(StoreError::Invalid(
+            "filter atoms are not a JSON array".into(),
+        ));
     }
-    parse_atoms_dsl(trimmed)
+    parse_atoms_json(trimmed)
+        .ok_or_else(|| StoreError::Invalid("filter atoms JSON array is malformed".into()))
 }
 
 /// Text value of a JSON atom payload; accepts a string or a number.
@@ -219,97 +315,48 @@ fn atom_text(value: &serde_json::Value) -> String {
     }
 }
 
-fn parse_atoms_json(raw: &str) -> Vec<FilterAtom> {
-    let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(raw) else {
-        return Vec::new();
+fn parse_atoms_json(raw: &str) -> Option<Vec<FilterAtom>> {
+    let serde_json::Value::Array(items) = serde_json::from_str::<serde_json::Value>(raw).ok()?
+    else {
+        return None;
     };
-    items
-        .into_iter()
-        .filter_map(|item| {
-            let priority = item["priority"].as_i64()? as i32;
-            let kind = item["rule"].as_str()?;
-            let exclude = item["exclude"].as_bool().unwrap_or(false);
-            let value = item.get("value").unwrap_or(&serde_json::Value::Null);
-            let text = atom_text(value);
-            let rule = match kind {
-                "resolution" => domain::AtomRule::Resolution(text),
-                "source" => domain::AtomRule::Source(text),
-                "video_codec" => domain::AtomRule::Codec(text),
-                "free" => domain::AtomRule::Free,
-                "hr" => domain::AtomRule::Hr,
-                "title" => domain::AtomRule::TitleMatch(text),
-                "hdr" => domain::AtomRule::Hdr(text),
-                "size" => domain::AtomRule::Size {
-                    min_mb: value["min_mb"].as_u64().filter(|m| *m > 0),
-                    max_mb: value["max_mb"].as_u64().filter(|m| *m > 0),
-                },
-                "min_seeders" => domain::AtomRule::MinSeeders(text.parse().ok()?),
-                "subtitle" => domain::AtomRule::SubtitleLanguage(text),
-                "audio" => domain::AtomRule::AudioLanguage(text),
-                "site" => domain::AtomRule::Site(text),
-                "wash_target" => domain::AtomRule::WashTarget(text),
-                "upgrade_ladder" => domain::AtomRule::UpgradeLadder(text),
-                _ => return None,
-            };
-            Some(FilterAtom {
-                priority,
-                rule,
-                exclude,
+    Some(
+        items
+            .into_iter()
+            .filter_map(|item| {
+                let priority = item["priority"].as_i64()? as i32;
+                let kind = item["rule"].as_str()?;
+                let exclude = item["exclude"].as_bool().unwrap_or(false);
+                let value = item.get("value").unwrap_or(&serde_json::Value::Null);
+                let text = atom_text(value);
+                let rule = match kind {
+                    "resolution" => domain::AtomRule::Resolution(text),
+                    "source" => domain::AtomRule::Source(text),
+                    "video_codec" => domain::AtomRule::Codec(text),
+                    "free" => domain::AtomRule::Free,
+                    "hr" => domain::AtomRule::Hr,
+                    "title" => domain::AtomRule::TitleMatch(text),
+                    "hdr" => domain::AtomRule::Hdr(text),
+                    "size" => domain::AtomRule::Size {
+                        min_mb: value["min_mb"].as_u64().filter(|m| *m > 0),
+                        max_mb: value["max_mb"].as_u64().filter(|m| *m > 0),
+                    },
+                    "min_seeders" => domain::AtomRule::MinSeeders(text.parse().ok()?),
+                    "subtitle" => domain::AtomRule::SubtitleLanguage(text),
+                    "audio" => domain::AtomRule::AudioLanguage(text),
+                    "site" => domain::AtomRule::Site(text),
+                    "wash_target" => domain::AtomRule::WashTarget(text),
+                    "upgrade_ladder" => domain::AtomRule::UpgradeLadder(text),
+                    _ => return None,
+                };
+                Some(FilterAtom {
+                    priority,
+                    rule,
+                    exclude,
+                })
             })
-        })
-        .collect()
-}
-
-/// Legacy compact DSL: `100:resolution=2160p|50:!source=cam`.
-fn parse_atoms_dsl(raw: &str) -> Vec<FilterAtom> {
-    raw.split('|')
-        .filter_map(|part| {
-            let (priority, rule) = part.split_once(':')?;
-            let priority = priority.parse().ok()?;
-            let (exclude, rule) = match rule.strip_prefix('!') {
-                Some(rest) => (true, rest),
-                None => (false, rule),
-            };
-            let rule = if let Some(v) = rule.strip_prefix("resolution=") {
-                domain::AtomRule::Resolution(v.to_string())
-            } else if let Some(v) = rule.strip_prefix("source=") {
-                domain::AtomRule::Source(v.to_string())
-            } else if rule == "free" {
-                domain::AtomRule::Free
-            } else if rule == "hr" {
-                domain::AtomRule::Hr
-            } else if let Some(v) = rule.strip_prefix("title=") {
-                domain::AtomRule::TitleMatch(v.to_string())
-            } else if let Some(v) = rule.strip_prefix("hdr=") {
-                domain::AtomRule::Hdr(v.to_string())
-            } else if let Some(v) = rule.strip_prefix("size=") {
-                let (min, max) = v.split_once('-').unwrap_or((v, ""));
-                domain::AtomRule::Size {
-                    min_mb: min.parse().ok().filter(|m| *m > 0),
-                    max_mb: max.parse().ok().filter(|m| *m > 0),
-                }
-            } else if let Some(v) = rule.strip_prefix("min_seeders=") {
-                domain::AtomRule::MinSeeders(v.parse().ok()?)
-            } else if let Some(v) = rule.strip_prefix("subtitle=") {
-                domain::AtomRule::SubtitleLanguage(v.to_string())
-            } else if let Some(v) = rule.strip_prefix("audio=") {
-                domain::AtomRule::AudioLanguage(v.to_string())
-            } else if let Some(v) = rule.strip_prefix("site=") {
-                domain::AtomRule::Site(v.to_string())
-            } else if let Some(v) = rule.strip_prefix("wash_target=") {
-                domain::AtomRule::WashTarget(v.to_string())
-            } else if let Some(v) = rule.strip_prefix("upgrade_ladder=") {
-                domain::AtomRule::UpgradeLadder(v.to_string())
-            } else {
-                return None;
-            };
-            Some(FilterAtom {
-                priority,
-                rule,
-                exclude,
-            })
-        })
-        .collect()
+            .collect(),
+    )
 }
 
 pub(super) fn torrent_from_json(value: &serde_json::Value) -> Result<Torrent, StoreError> {

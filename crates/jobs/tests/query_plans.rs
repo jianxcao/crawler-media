@@ -37,8 +37,7 @@ const LAST_CHILD_SQL: &str = "SELECT id, def_id, kind, payload, status, attempt,
      WHERE def_id = ?1 AND status IN ('succeeded','failed','cancelled')
      ORDER BY finished_at DESC, run_after DESC LIMIT 1";
 
-const LIST_RUNNING_SQL: &str =
-    "SELECT id, def_id, kind, payload, status, attempt, run_after, started_at, finished_at, \
+const LIST_RUNNING_SQL: &str = "SELECT id, def_id, kind, payload, status, attempt, run_after, started_at, finished_at, \
      error, progress, concurrency_key, timeout_secs FROM jobs WHERE status = 'running'";
 
 /// 候选索引：只保留有实测收益的（见归档文档）。
@@ -69,7 +68,8 @@ const CANDIDATE_INDEXES: &[(&str, &str)] = &[
 fn open_raw(path: &Path) -> Connection {
     let conn = Connection::open(path).unwrap();
     conn.pragma_update(None, "journal_mode", "WAL").unwrap();
-    conn.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+    conn.busy_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
     conn
 }
 
@@ -87,7 +87,11 @@ fn seed_dataset(conn: &Connection, jobs: i64) {
             .unwrap();
         // JOBS_DENSE_RUNNING=1 是敏感性检查：把 running 从 200 提到 10_000，
         // 观察 OR 形状随 running 集合增大的退化（见归档文档）。
-        let stride = if std::env::var("JOBS_DENSE_RUNNING").is_ok() { 20 } else { 1000 };
+        let stride = if std::env::var("JOBS_DENSE_RUNNING").is_ok() {
+            20
+        } else {
+            1000
+        };
         for i in 0..jobs {
             let running = i % stride == 0;
             let queued = !running && i % 100 == 0;
@@ -140,14 +144,13 @@ fn seed_dataset(conn: &Connection, jobs: i64) {
 
 fn eqp(conn: &Connection, sql: &str, args: Vec<rusqlite::types::Value>) -> Vec<String> {
     let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
-    let rows = stmt
-        .query_map(rusqlite::params_from_iter(args), |row| {
-            row.get::<_, String>(3)
-        })
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    rows
+
+    stmt.query_map(rusqlite::params_from_iter(args), |row| {
+        row.get::<_, String>(3)
+    })
+    .unwrap()
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap()
 }
 
 fn text(value: &str) -> rusqlite::types::Value {
@@ -297,7 +300,8 @@ fn print_state(label: &str, conn: &Connection, timings: &[(&'static str, (f64, f
 
 fn drop_candidates(conn: &Connection) {
     for (name, _) in CANDIDATE_INDEXES {
-        conn.execute_batch(&format!("DROP INDEX IF EXISTS {name};")).unwrap();
+        conn.execute_batch(&format!("DROP INDEX IF EXISTS {name};"))
+            .unwrap();
     }
 }
 
@@ -327,7 +331,10 @@ fn measure_jobs_query_plans() {
     )
     .unwrap();
     println!("sqlite version: {}", sqlite_version(&conn));
-    println!("seed: 200000 jobs in {:.2}s", started.elapsed().as_secs_f64());
+    println!(
+        "seed: 200000 jobs in {:.2}s",
+        started.elapsed().as_secs_f64()
+    );
 
     drop_candidates(&conn);
     conn.execute_batch("ANALYZE;").unwrap();
@@ -448,14 +455,20 @@ fn key_busy_truth_table_via_claim() {
     let (_tmp, queue, conn) = setup();
     insert_job(&conn, Some(&new_def_id()), "running", 0, Some("k1"), None);
     insert_job(&conn, None, "queued", 0, Some("k1"), None);
-    assert!(queue.claim(100, 10).unwrap().is_empty(), "同 key 的 running 必须阻塞");
+    assert!(
+        queue.claim(100, 10).unwrap().is_empty(),
+        "同 key 的 running 必须阻塞"
+    );
 
     // 2) def_id 命中 → 忙，不领取。
     let (_tmp, queue, conn) = setup();
     let shared_def = new_def_id();
     insert_job(&conn, Some(&shared_def), "running", 0, None, None);
     insert_job(&conn, Some(&shared_def), "queued", 0, None, None);
-    assert!(queue.claim(100, 10).unwrap().is_empty(), "同 def 的 running 必须阻塞");
+    assert!(
+        queue.claim(100, 10).unwrap().is_empty(),
+        "同 def 的 running 必须阻塞"
+    );
 
     // 3) key / def 都是 NULL → 不忙，正常领取。
     let (_tmp, queue, conn) = setup();

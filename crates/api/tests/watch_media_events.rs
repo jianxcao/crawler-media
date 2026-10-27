@@ -87,7 +87,7 @@ fn directory_only_event_ingests_a_new_strm_and_then_settles() {
             fix.state
                 .store()
                 .lock()
-                .ledger_by_path(new_media.to_str().unwrap())
+                .file_coverage_by_path(new_media.to_str().unwrap())
                 .unwrap()
                 .is_some()
         );
@@ -110,14 +110,14 @@ fn directory_only_deletion_and_restore_preserve_the_ledger_and_user_facts() {
             .state
             .store()
             .lock()
-            .ledger_by_path(media.to_str().unwrap())
+            .file_coverage_by_path(media.to_str().unwrap())
             .unwrap()
-            .unwrap();
+            .expect("scanned STRM is a recorded file");
         let user = domain::UserId::new();
         fix.state
             .store()
             .lock()
-            .set_playback_progress(user, row.media_id, 12_345)
+            .set_playback_progress(user, row.file.media_id, 12_345)
             .unwrap();
         std::fs::remove_file(&media).unwrap();
         handle_fs_events(&fix.state, &tracker, vec![event(media.parent().unwrap())]);
@@ -127,16 +127,25 @@ fn directory_only_deletion_and_restore_preserve_the_ledger_and_user_facts() {
                 .lock()
                 .missing_at_by_path()
                 .unwrap()
-                .contains_key(&row.path)
+                .contains_key(&row.path_key)
         );
         std::fs::write(&media, "https://example.invalid/first.mkv").unwrap();
         handle_fs_events(&fix.state, &tracker, vec![event(media.parent().unwrap())]);
         let store = fix.state.store();
         let store = store.lock();
-        assert!(!store.missing_at_by_path().unwrap().contains_key(&row.path));
-        assert_eq!(store.ledger_by_path(&row.path).unwrap().unwrap().id, row.id);
+        assert!(
+            !store
+                .missing_at_by_path()
+                .unwrap()
+                .contains_key(&row.path_key)
+        );
+        let restored = store
+            .file_coverage_by_path(&row.file.path.to_string_lossy())
+            .unwrap()
+            .expect("restored STRM keeps its file row");
+        assert_eq!(restored.file.file_id, row.file.file_id);
         assert_eq!(
-            store.playback_progress(user, row.media_id).unwrap(),
+            store.playback_progress(user, row.file.media_id).unwrap(),
             Some(12_345)
         );
     });

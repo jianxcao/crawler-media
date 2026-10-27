@@ -2,12 +2,13 @@
 
 - Status: Accepted design; implementation acceptance is tracked separately below.
 - Scope: approved Library deletion and NFO reimport plan, Tasks 1–7.
+- Current-layout note (2026-10-20): the design/history below uses “ledger” and `file_meta` terminology from its implementation period. Current persistent file facts are `library_files`, derived probe details are `file_details`, and Media/Playback now share `library.db`; `app.db`, `cache.db`, `subscribe.db` are separate Store files, with `jobs.db` outside Store. There is still no cross-file atomic transaction. Source: `crates/store/src/open.rs`, `schema/v1/library.sql`, `ledger_cleanup.rs`. Current cutover acceptance is [tracked in the storage plan](<../superpowers/plans/2026-10-23-storage-review-remediation.md>), not inferred from this ADR.
 
 ## Context
 
 A Library configuration, its ledger/file-derived facts, a canonical Media, and a User's Playback history have different lifetimes. Removing a configured root must not mean deleting disk content or forgetting the Media identity used by Playback. Recreating a root creates a new Library and new ledger rows; matching only a filename or reusing an old path is not sufficient to recover identity safely.
 
-Store uses four independent SQLite connections/files. An ordinary transaction on one connection does not atomically commit all four databases. Cancellation notification alone also does not prove an old worker has stopped publishing: blocking scans and child processes can outlive the requesting future.
+Store uses four independent SQLite connections/files, plus a separate Jobs queue connection/file. An ordinary transaction on one connection does not atomically commit the others. Cancellation notification alone also does not prove an old worker has stopped publishing: blocking scans and child processes can outlive the requesting future.
 
 ## Decision
 
@@ -46,7 +47,7 @@ NFO metadata is not stream-probe output. Reimport must schedule fresh media prob
 - Failed removal may require retry and stays frozen; this is preferable to apparent success with a live publisher.
 - No path-cache migration, unowned-ledger adoption or history-clearing option is introduced.
 
-The public API regression in `crates/api/tests/library_delete_reimport.rs` covers TV S01E03 positions 750000/120000 ms with distinct favorite/watched states, whole-movie positions, fresh ledger identity, old file-meta/fingerprint/stage cleanup, preserved sidecar bytes, an independent Library's same-Media file/cache, default-off detection switches, and a different-alias negative case. It constructs ApiState before entering Tokio so probe workers are not started, and injects an offline Catalog. This checks cache non-reuse, **not** successful fresh probe execution, real streaming or child-process cancellation. Creation also schedules an automatic scan; the explicit public scan is intentionally idempotent with that path.
+The public API regression source in `crates/api/tests/library_delete_reimport.rs` contains cases for TV S01E03 positions 750000/120000 ms with distinct favorite/watched states, whole-movie positions, fresh ledger identity, old file-meta/fingerprint/stage cleanup, preserved sidecar bytes, an independent Library's same-Media file/cache, default-off detection switches, and a different-alias negative case. These describe assertions, **not a fresh pass result**. It constructs ApiState before entering Tokio so probe workers are not started, and injects an offline Catalog. This checks cache non-reuse, **not** successful fresh probe execution, real streaming or child-process cancellation. Creation also schedules an automatic scan; the explicit public scan is intentionally idempotent with that path.
 
 Restart-mid-clean, restart-draining, canceled-job recovery, lease/publication races, ambiguous no-ID reimport, nested-root ownership, member visibility, Subscribe-target handling and actual fake-probe completion require the corresponding focused suites and/or UI regression cases. This ADR is not proof those checks passed. Browser/VidHub cases remain Not run unless actually executed.
 
@@ -58,7 +59,7 @@ The approved plan cites these user-facing removal discussions:
 - [Emby: delete library](https://emby.media/community/topic/117044-delete-library/)
 
 They are reference leads for the narrow distinction between removing a library configuration and deleting media files, not evidence about either project's internal caches, cancellation or Playback identity retention. During this implementation both URLs could not be fetched because the tool resolved their hosts to non-public addresses. Their contents were therefore **not independently verified** here; no stronger external compatibility claim is made.
-## Batch 1: Missing file lifecycle and presence safety (2026-10-13)
+## Batch 1: Missing file lifecycle and presence safety (2026-10-13 historical decision; not a current acceptance result)
 
 ### Decision
 

@@ -44,19 +44,22 @@ fn same_numeric_alias_across_kinds_stays_separate() {
     store.insert_media(&tv).unwrap();
 
     let found_movie = store
-        .get_media_by_alias_kind("tmdb_id", "603", Some(MediaKind::Movie))
+        .get_media_by_alias_kind("tmdb", "603", Some(MediaKind::Movie))
         .unwrap()
         .expect("movie by alias+kind");
     let found_tv = store
-        .get_media_by_alias_kind("tmdb_id", "603", Some(MediaKind::Tv))
+        .get_media_by_alias_kind("tmdb", "603", Some(MediaKind::Tv))
         .unwrap()
         .expect("tv by alias+kind");
     assert_eq!(found_movie.id, movie.id);
     assert_eq!(found_tv.id, tv.id);
-    assert_ne!(found_movie.id, found_tv.id, "数字别名相同不得合并成同一 Media");
+    assert_ne!(
+        found_movie.id, found_tv.id,
+        "数字别名相同不得合并成同一 Media"
+    );
 
     // 不带 kind 的旧查找仍能命中其中之一，且两个 Media 都还在。
-    let any = store.get_media_by_alias("tmdb_id", "603").unwrap();
+    let any = store.get_media_by_alias("tmdb", "603").unwrap();
     assert!(any.is_some());
     assert!(store.get_media(movie.id).unwrap().is_some());
     assert!(store.get_media(tv.id).unwrap().is_some());
@@ -139,17 +142,17 @@ fn alias_whitelist_still_rejects_unknown_columns() {
     assert!(
         store
             .get_media_by_alias_kind("title", "X", Some(MediaKind::Movie))
-            .unwrap()
-            .is_none(),
-        "非别名列必须被白名单拒绝"
+            .is_err(),
+        "非别名来源必须被明确拒绝"
     );
     assert!(
         store
             .get_media_by_alias("1=1; DROP TABLE media", "30")
-            .unwrap()
-            .is_none(),
+            .is_err(),
         "未知列名不得进入 SQL"
     );
+    // 旧 *_id 同义词不再是来源名。
+    assert!(store.get_media_by_alias("tmdb_id", "30").is_err());
     // 表还在，说明上面的调用没有拼接出可执行 SQL。
     assert!(store.get_media(inserted.id).unwrap().is_some());
 }

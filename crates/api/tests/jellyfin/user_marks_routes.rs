@@ -21,13 +21,13 @@ async fn favorite_and_played_routes_update_the_authenticated_users_marks() {
         ),
         (
             "POST",
-            format!("/UserPlayedItems/{media_id}"),
+            format!("/UserPlayedItems/{item_id}"),
             None,
             Some(true),
         ),
         (
             "DELETE",
-            format!("/Users/{user_id}/PlayedItems/{media_id}"),
+            format!("/Users/{user_id}/PlayedItems/{item_id}"),
             None,
             Some(false),
         ),

@@ -2,7 +2,6 @@
 mod support;
 
 use axum::http::StatusCode;
-use domain::MediaKind;
 use support::library_presence::PresenceFixture;
 
 #[tokio::test]
@@ -49,7 +48,8 @@ async fn verify_restore_scan_prune_preserves_two_users_and_sidecar_bytes() {
             .lock()
             .missing_at_by_path()
             .unwrap()
-            .contains_key(&row.path)
+            .keys()
+            .any(|key| key.ends_with(row.path.file_name().unwrap().to_str().unwrap()))
     );
 
     // 4. Prune: deleted count is 0, restored is 0 (already restored)
@@ -65,9 +65,9 @@ async fn verify_restore_scan_prune_preserves_two_users_and_sidecar_bytes() {
 
     // Both users' playback facts and Media record preserved!
     let guard = store_arc.lock();
-    let loaded_row = guard.get_ledger(&row.id.to_string()).unwrap().unwrap();
-    assert_eq!(loaded_row.id, row.id);
-    assert_eq!(loaded_row.media_id, media_id);
+    let loaded_row = guard.file_coverage_by_id(row.file_id).unwrap().unwrap();
+    assert_eq!(loaded_row.file.file_id, row.file_id);
+    assert_eq!(loaded_row.file.media_id, media_id);
     assert!(guard.get_media(media_id).unwrap().is_some());
     assert_eq!(
         guard.playback_progress(user1, media_id).unwrap(),

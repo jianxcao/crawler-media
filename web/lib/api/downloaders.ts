@@ -2,9 +2,7 @@ import { request } from "@/lib/http";
 
 /** 后端统一响应信封 */
 interface ApiEnvelope<T> {
-  success: boolean;
-  code: string;
-  message: string;
+  ok: boolean;
   data: T;
 }
 
@@ -40,9 +38,6 @@ export interface Downloader {
   status: DownloaderStatus;
   last_error?: string | null;
 }
-
-/** 兼容导出名：组件 import type { ConfiguredDownloader }。 */
-export type ConfiguredDownloader = Downloader;
 
 /**
  * 一条路径映射（表单编辑用）：本机视角的目录前缀 → 下载器视角的对应前缀。
@@ -81,7 +76,7 @@ export type DownloadTaskUnitStatus = "wanted" | "grabbed" | "downloaded" | "impo
 /** 任务关联的订阅引用（新契约恒为数组，可为空；元素形状由组件适配阶段收敛）。 */
 export interface DownloadTaskSubscription {
   id: string;
-  media_item_id: number;
+  media_item_id: string;
   media_title: string;
   media_kind: string;
   poster_url: string | null;
@@ -198,7 +193,7 @@ function toDownloaderInput(payload: DownloaderPayload): Record<string, unknown> 
 }
 
 /** 列出所有已配置的下载器及连接状态。 */
-export function listDownloaders(init?: RequestInit): Promise<ConfiguredDownloader[]> {
+export function listDownloaders(init?: RequestInit): Promise<Downloader[]> {
   return unwrap(request<ApiEnvelope<Downloader[]>>("/downloaders", init));
 }
 
@@ -258,12 +253,12 @@ export function replaceDownloadTask(
 }
 
 /** 获取保存的下载器配置；GET 不执行测试，也不持久化手动测试结果。 */
-export function getDownloader(id: string, init?: RequestInit): Promise<ConfiguredDownloader> {
+function getDownloader(id: string, init?: RequestInit): Promise<Downloader> {
   return unwrap(request<ApiEnvelope<Downloader>>(`/downloaders/${id}`, init));
 }
 
 /** 添加下载器配置，不自动测试连接。 */
-export function createDownloader(payload: DownloaderPayload): Promise<ConfiguredDownloader> {
+export function createDownloader(payload: DownloaderPayload): Promise<Downloader> {
   return unwrap(
     request<ApiEnvelope<Downloader>>("/downloaders", {
       method: "POST",
@@ -276,7 +271,7 @@ export function createDownloader(payload: DownloaderPayload): Promise<Configured
 export function updateDownloader(
   id: string,
   payload: DownloaderPayload,
-): Promise<ConfiguredDownloader> {
+): Promise<Downloader> {
   return unwrap(
     request<ApiEnvelope<Downloader>>(`/downloaders/${id}`, {
       method: "PATCH",
@@ -349,30 +344,8 @@ export function setDownloaderLimits(
   }));
 }
 
-/**
- * 启用 / 停用下载器。停用后该下载器不再参与自动投递（手动提交仍可用）。
- */
-export function setDownloaderEnabled(id: string, enabled: boolean): Promise<ConfiguredDownloader> {
-  return getDownloader(id).then((downloader) =>
-    unwrap(
-      request<ApiEnvelope<Downloader>>(`/downloaders/${id}`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          name: downloader.name,
-          kind: downloader.kind,
-          url: downloader.url,
-          ...(downloader.username ? { username: downloader.username } : {}),
-          ...(downloader.category ? { category: downloader.category } : {}),
-          path_maps: downloader.path_maps,
-          enabled,
-        }),
-      }),
-    ),
-  );
-}
-
 /** 设为默认下载器。注意：其他条目的 is_default 会随之变化，调用后应整体刷新列表。 */
-export function setDefaultDownloader(id: string): Promise<ConfiguredDownloader> {
+export function setDefaultDownloader(id: string): Promise<Downloader> {
   return getDownloader(id).then((downloader) =>
     unwrap(
       request<ApiEnvelope<Downloader>>(`/downloaders/${id}`, {
@@ -396,8 +369,8 @@ import { verificationState } from "../downloader-verification";
 /** 手动测试已保存配置。结果仅用于当前页面，不能用 GET 的未测试状态回读覆盖。 */
 export async function reverifyDownloader(
   id: string,
-  downloader: ConfiguredDownloader,
-): Promise<ConfiguredDownloader> {
+  downloader: Downloader,
+): Promise<Downloader> {
   try {
     const result = await unwrap(
       request<ApiEnvelope<{ ok: boolean; error?: string | null }>>(`/downloaders/${id}/verify`, {
@@ -433,7 +406,7 @@ export interface DownloadSubmitPayload {
   /** 站点内种子 ID（TorrentHit.torrent_id）：任务中心据此提供「打开种子页」 */
   torrent_id?: string | null;
   /** 入库目标库（可选）：带上后保存目录由库推导（主根/标题 (年份)） */
-  library_id?: number | null;
+  library_id?: string | null;
   /** 种子体积（字节）；新契约 submit 接受，用于投递端展示/分流 */
   size_bytes?: number | null;
   /** 条目标题（推导条目子目录用；身份未确认时不要带） */
@@ -473,7 +446,7 @@ export interface ManualDownloadTarget {
   status: "ready" | "ambiguous" | "not_found";
   tmdb_id: number | null;
   candidates: ManualDownloadTargetCandidate[];
-  library_id: number | null;
+  library_id: string | null;
   library_name: string | null;
   mode: "watch" | "inplace" | "downloader_default" | null;
   path: string | null;
@@ -536,7 +509,7 @@ export function resolveManualDownloadTarget(payload: {
     status: data.ok ? ("ready" as const) : ("not_found" as const),
     tmdb_id: payload.selected_tmdb_id ?? null,
     candidates: [],
-    library_id: data.library_id != null ? Number(data.library_id) : null,
+    library_id: data.library_id,
     library_name: data.library_name,
     mode: data.mode,
     path: data.path,

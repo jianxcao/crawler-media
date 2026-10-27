@@ -1,7 +1,6 @@
 import { publicEnv } from "@/lib/env";
 import { getPlayerDeviceId } from "@/lib/player/device";
-import type { TrickplayIndex } from "@/lib/player/trickplay";
-import { HttpError, getAuthToken, request, resolveRequestUrl } from "@/lib/http";
+import { getAuthToken, request, resolveRequestUrl } from "@/lib/http";
 import type {
   LibraryEpisode,
   LibraryGalleryGroup,
@@ -10,25 +9,20 @@ import type {
   LibraryItemSort,
 } from "@/lib/api/libraries";
 import type { LibraryKind, MediaType } from "@/lib/media-types";
-import { readLocalProgress, writeLocalProgress } from "@/lib/player/local-progress";
 
 /**
- * 播放接口的作用域（docs/design/media-share.md §5.3）。
+ * 播放接口的作用域。
  *
- * 播放器对后端地址原本写死 `/playback/…`；影片分享的访客走的是
- * `/share/{slug}/playback/…` 这条按 slug 收窄的公开通道，且没有成员身份：
- * 进度不能落成员表（记本浏览器）、遥测不上报。默认值等于今天登录态的行为，
+ * 播放器对后端地址原本写死 `/playback/…`；默认值等于今天登录态的行为，
  * 既有调用点零改动。
  */
 export interface PlaybackApiScope {
-  /** 接口前缀：`/playback` 或 `/share/{slug}/playback` */
+  /** 接口前缀 */
   base: string;
-  /** 进度落服务端成员表，还是只记本浏览器 */
+  /** 进度落服务端成员表 */
   progress: "server" | "local";
   /** metrics / client-log 是否上报 */
   telemetry: boolean;
-  /** progress=local 时本地记录的命名空间（= slug） */
-  localKey?: string;
 }
 
 export const DEFAULT_PLAYBACK_SCOPE: PlaybackApiScope = {
@@ -36,15 +30,6 @@ export const DEFAULT_PLAYBACK_SCOPE: PlaybackApiScope = {
   progress: "server",
   telemetry: true,
 };
-
-export function sharePlaybackScope(slug: string): PlaybackApiScope {
-  return {
-    base: `/share/${encodeURIComponent(slug)}/playback`,
-    progress: "local",
-    telemetry: false,
-    localKey: slug,
-  };
-}
 
 /**
  * 取流/字幕地址的最终解析。
@@ -62,15 +47,13 @@ export function resolveStreamUrl(path: string): string {
 }
 
 interface ApiEnvelope<T> {
-  success: boolean;
-  code: string;
-  message: string;
+  ok: boolean;
   data: T;
 }
 
 export interface UpNextItem {
-  media_item_id: number;
-  library_id: number;
+  media_item_id: string;
+  library_id: string;
   kind: MediaType;
   title: string;
   year: number | null;
@@ -187,9 +170,9 @@ export async function listFavoritesGallery(
 // ---------------------------------------------------------------------------
 
 export interface MediaActivityTarget {
-  media_item_id: number;
+  media_item_id: string;
   /** 详情页落点；作品没有在位文件时为 null（此时不渲染跳转）。 */
-  library_id: number | null;
+  library_id: string | null;
   /** 落点库是否在当前超管的可浏览范围内。「全部」口径下范围外记录照常出片名，
    *  但浏览类接口对范围外超管是 404，前端不渲染详情链接。 */
   browsable: boolean;
@@ -286,8 +269,8 @@ export interface PlaybackHistoryClearResult {
  */
 export async function clearPlaybackHistory(
   scope: "item" | "library" | "all",
-  target: { mediaItemId?: number; libraryId?: number; since?: Date } = {},
-): Promise<{ result: PlaybackHistoryClearResult; message: string }> {
+  target: { mediaItemId?: string; libraryId?: string; since?: Date } = {},
+): Promise<PlaybackHistoryClearResult> {
   const params = new URLSearchParams({ scope });
   if (target.mediaItemId != null) params.set("media_item_id", String(target.mediaItemId));
   if (target.libraryId != null) params.set("library_id", String(target.libraryId));
@@ -296,7 +279,7 @@ export async function clearPlaybackHistory(
     `/playback/history?${params}`,
     { method: "DELETE" },
   );
-  return { result: response.data, message: response.message };
+  return response.data;
 }
 
 /** 活动页「观看」视角的实时快照：正在播放与正在下载。 */
@@ -311,15 +294,13 @@ export async function fetchMediaActivity(
 
 /** 结束一台设备本次播放：不动凭据，设备下次亲手点播放即可继续。 */
 export async function endDevicePlayback(userId: string, deviceId: string): Promise<string> {
-  const response = await request<ApiEnvelope<null>>(
+  const response = await request<ApiEnvelope<{ ended: number }>>(
     `/playback/activity/sessions/${encodeURIComponent(deviceId)}/end?user_id=${encodeURIComponent(userId)}`,
     { method: "POST" },
   );
-  return response.message;
+  if (response.data?.ended !== 1) throw new Error("结束播放没有确认");
+  return "已结束该设备的播放";
 }
-
-// ---------------------------------------------------------------------------
-// 播放日志：播放记录与观看统计（docs/design/activity.md「播放日志与统计」）
 // ---------------------------------------------------------------------------
 
 export interface PlaybackLogEntry {
@@ -464,11 +445,12 @@ export async function fetchPlaybackWatchStats(
 
 /** 注销一台播放器设备：凭据即刻失效，其正在进行的播放与取流一并停止。 */
 export async function revokePlaybackDevice(userId: string, deviceId: string): Promise<string> {
-  const response = await request<ApiEnvelope<null>>(
+  const response = await request<ApiEnvelope<{ revoked: boolean }>>(
     `/playback/devices/${encodeURIComponent(deviceId)}?user_id=${encodeURIComponent(userId)}`,
     { method: "DELETE" },
   );
-  return response.message;
+  if (response.data?.revoked !== true) throw new Error("注销设备没有确认");
+  return "已注销该设备";
 }
 
 // ---------------------------------------------------------------------------
@@ -496,11 +478,12 @@ export interface ClientCapability {
   native_hls: boolean;
 }
 
-/** 播放单元：电影用 (0, 0) 哨兵，与台账、playback_state 的约定一致。 */
+/** 播放单元：电影通过缺省季集表达规范 whole-work 请求；可选显式版本 file_id。 */
 export interface PlaybackUnit {
-  media_item_id: number | string;
+  media_item_id: string;
   season_number?: number;
   episode_number?: number;
+  file_id?: string;
 }
 
 export interface VideoPlan {
@@ -553,7 +536,7 @@ export interface SubtitlePlan {
 export interface PlaybackDecision {
   outcome: "plan" | "consent" | "rejected";
   tier: number | null;
-  file_id: number | null;
+  file_id: string | null;
   container: string | null;
   video: VideoPlan | null;
   audio: AudioPlan | null;
@@ -647,15 +630,13 @@ export interface PlaybackSession {
   decision: PlaybackDecision;
   /** 档 0 没有会话（原文件直出），此处为 null */
   session_id: string | null;
-  play_session_id?: string | null;
+  play_session_id: string;
   /** 可直接喂给 <video src> 或 hls.js 的地址，已带签名 token */
   stream_url: string | null;
-  /** 会话时间轴的零点在文件里的位置。**文件时间 = start_ms + currentTime**。
-   * timeline="file"（VOD 预生成列表）时它只是建议起播位置：分片时间戳
-   * 本身是文件绝对时间，currentTime 即文件时间，换算参照点为 0 */
+  /** 会话时间轴的零点在文件里的位置。**文件时间 = start_ms + currentTime**。 */
   start_ms: number;
-  /** 时间轴语义：session = 会话相对（旧）；file = 文件绝对（VOD，§12） */
-  timeline?: "session" | "file";
+  /** 续播状态：compatible | source_changed | no_progress | already_played */
+  resume_status?: "compatible" | "source_changed" | "no_progress" | "already_played";
   /** master 播放列表（带 WEBVTT 字幕组），仅 VOD 会话有——iOS 原生 HLS 用 */
   master_url?: string | null;
   /** 旁挂字幕地址（已带 token），与 decision.subtitles 一一对应 */
@@ -675,7 +656,7 @@ export interface PlaybackSession {
 }
 
 interface DecideBody extends PlaybackUnit {
-  file_id?: number;
+  file_id?: string;
   capability: ClientCapability;
   /** 运行期降档回路：带上已失败的档位，服务端跳过它们（§6.3） */
   failed_tiers?: number[];
@@ -699,18 +680,6 @@ interface DecideBody extends PlaybackUnit {
    * 用它压码率、必要时降高度；手动选了画质上限时服务端忽略。样本不够时省略。
    */
   downlink_bps?: number;
-}
-
-/** 只问「该怎么放」，不起会话。用于播放前的档位预览与诊断。 */
-export async function decidePlayback(
-  body: DecideBody,
-  scope: PlaybackApiScope = DEFAULT_PLAYBACK_SCOPE,
-): Promise<PlaybackDecision> {
-  const response = await request<ApiEnvelope<PlaybackDecision>>(`${scope.base}/decide`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
-  return response.data;
 }
 
 /**
@@ -742,54 +711,6 @@ export async function fetchPlaybackChapters(
   return response.data;
 }
 
-/** 读取当前会话诊断；从播放 URL 复用已有取流 token，不另发放凭据。 */
-export async function fetchPlaybackDiagnostics(
-  sessionId: string,
-  streamUrl: string,
-  scope: PlaybackApiScope = DEFAULT_PLAYBACK_SCOPE,
-): Promise<PlaybackDiagnostics> {
-  const resolvedUrl = new URL(
-    resolveStreamUrl(streamUrl),
-    typeof window === "undefined" ? "http://localhost" : window.location.origin,
-  );
-  const token = resolvedUrl.searchParams.get("token");
-  if (!token) {
-    throw new Error("播放地址缺少诊断凭据");
-  }
-  const response = await request<ApiEnvelope<PlaybackDiagnostics>>(
-    `${scope.base}/sessions/${encodeURIComponent(sessionId)}/diagnostics?token=${encodeURIComponent(token)}`,
-  );
-  return response.data;
-}
-
-/**
- * 会话续命，兼探活。用户关页面不会发任何信号，服务端的超时回收是唯一可靠
- * 兜底，所以播放中必须定时喂这个。
- *
- * 返回值分三态，**调用方必须区分**：
- *
- * - `true`  —— 会话还在；
- * - `false` —— 服务端明确说它没了（404，多半是页面被浏览器冻在后台、心跳
- *   被节流到喂不上，会话让巡检回收了）。此时继续放下去只会卡在「正在缓冲」，
- *   要原地重开一个会话；
- * - `null`  —— 这次请求本身没成功（断网、超时、服务端 5xx）。**不能当成
- *   会话没了**：网络抖一下就把流掐掉重开，代价比多等一轮心跳大得多。
- */
-export async function pingPlaybackSession(
-  sessionId: string,
-  scope: PlaybackApiScope = DEFAULT_PLAYBACK_SCOPE,
-): Promise<boolean | null> {
-  try {
-    await request<ApiEnvelope<unknown>>(
-      `${scope.base}/sessions/${encodeURIComponent(sessionId)}/ping`,
-      { method: "POST" },
-    );
-    return true;
-  } catch (error) {
-    return error instanceof HttpError && error.status === 404 ? false : null;
-  }
-}
-
 /**
  * 播放器客户端事件上报：把浏览器侧现场（MediaError 详情、播放器状态）落
  * 服务端日志。iPhone 上没有可看的控制台，这是拿到客户端真相的唯一通道。
@@ -807,41 +728,6 @@ export function reportPlaybackClientLog(
   }).catch(() => undefined);
 }
 
-/** 结束会话，掐断 ffmpeg 并清掉临时分片。 */
-export async function stopPlaybackSession(
-  sessionId: string,
-  scope: PlaybackApiScope = DEFAULT_PLAYBACK_SCOPE,
-): Promise<void> {
-  await request<ApiEnvelope<unknown>>(
-    `${scope.base}/sessions/${encodeURIComponent(sessionId)}`,
-    { method: "DELETE" },
-  );
-}
-
-/**
- * 页面卸载时结束会话。
- *
- * 普通 fetch 在 pagehide 之后会被浏览器直接取消，请求根本发不出去；
- * `keepalive` 让它脱离文档生命周期继续发完。sendBeacon 在这里不可用——
- * 它只能发 POST，而结束会话是 DELETE。
- *
- * 这条链路失败也不是灾难：服务端有心跳超时回收兜底（§4.1），这里只是让
- * 转码进程早几十秒结束、少占一次并发额度。因此异常一律吞掉。
- */
-export function stopPlaybackSessionOnUnload(
-  sessionId: string,
-  scope: PlaybackApiScope = DEFAULT_PLAYBACK_SCOPE,
-): void {
-  try {
-    void fetch(
-      resolveRequestUrl(`${scope.base}/sessions/${encodeURIComponent(sessionId)}`),
-      { method: "DELETE", keepalive: true },
-    );
-  } catch {
-    // 卸载路径上无处呈现错误，静默即可
-  }
-}
-
 export interface PlaybackWatchState {
   position_ms: number;
   played: boolean;
@@ -852,13 +738,17 @@ export interface PlaybackWatchState {
   subtitle_track: string | null;
   /** 管理员已在活动页结束了这台浏览器的播放：播放器收到后退出，不再重开 */
   ended_by_admin?: boolean;
+  /** 源感知续播（登录态）：与开播同一解析；本地分享进度没有这些字段 */
+  file_id?: string;
+  start_ms?: number;
+  resume_status?: "compatible" | "source_changed" | "no_progress" | "already_played";
 }
 
 /** 播放页要的条目信息（§6.10）：路由只带 media_item_id，库归属服务端解析。 */
 export interface PlaybackItemInfo {
-  media_item_id: number;
+  media_item_id: string;
   /** 该条目对当前成员可见的库 id；退出播放跳回条目页用 */
-  library_id: number;
+  library_id: string;
   kind: "movie" | "tv";
   title: string;
   year: number | null;
@@ -866,7 +756,7 @@ export interface PlaybackItemInfo {
 }
 
 export async function getPlaybackItem(
-  mediaItemId: number | string,
+  mediaItemId: string,
   scope: PlaybackApiScope = DEFAULT_PLAYBACK_SCOPE,
 ): Promise<PlaybackItemInfo> {
   const response = await request<ApiEnvelope<PlaybackItemInfo>>(
@@ -877,7 +767,7 @@ export async function getPlaybackItem(
 
 /** 播放页一季的分集清单（切集/上一集下一集数据源），形状与库详情页同构。 */
 export async function getPlaybackItemEpisodes(
-  mediaItemId: number | string,
+  mediaItemId: string,
   seasonNumber: number,
   scope: PlaybackApiScope = DEFAULT_PLAYBACK_SCOPE,
 ): Promise<{ season_number: number; episodes: LibraryEpisode[] }> {
@@ -887,30 +777,33 @@ export async function getPlaybackItemEpisodes(
   return response.data;
 }
 
+/** 续播查询的入参：一个播放单元坐标。 */
+export type ResumeParams = PlaybackUnit;
+
+/**
+ * 续播查询串。
+ *
+ * 季集是**一对**坐标：只有季号或只有集号都不是合法单元，缺一半时两个都不发
+ * （旧实现会把缺的那半序列化成字符串 "undefined" 发给服务端）。
+ */
+export function buildResumeQuery(params: ResumeParams): URLSearchParams {
+  const query = new URLSearchParams({ media_item_id: String(params.media_item_id) });
+  if (params.season_number != null && params.episode_number != null) {
+    query.set("season_number", String(params.season_number));
+    query.set("episode_number", String(params.episode_number));
+  }
+  // 同一份可选显式源偏好，由服务端 canonical resolver 解释 (R10)
+  if (params.file_id) query.set("file_id", String(params.file_id));
+  return query;
+}
+
 /** 起播前问「上次看到哪、用的哪条轨」。从未播过返回全零，不是错误。 */
 export async function fetchResumeState(
   unit: PlaybackUnit,
   scope: PlaybackApiScope = DEFAULT_PLAYBACK_SCOPE,
 ): Promise<PlaybackWatchState> {
-  if (scope.progress === "local") {
-    // 分享访客：进度只在本浏览器（media-share.md §1.2），没有已看 / 次数
-    const local = readLocalProgress(scope.localKey ?? "", unit);
-    return {
-      position_ms: local?.position_ms ?? 0,
-      played: false,
-      play_count: 0,
-      duration_ms: null,
-      audio_track: local?.audio_track ?? null,
-      subtitle_track: local?.subtitle_track ?? null,
-    };
-  }
-  const params = new URLSearchParams({
-    media_item_id: String(unit.media_item_id),
-    season_number: String(unit.season_number ?? 0),
-    episode_number: String(unit.episode_number ?? 0),
-  });
   const response = await request<ApiEnvelope<PlaybackWatchState>>(
-    `/playback/resume?${params}`,
+    `${scope.base}/resume?${buildResumeQuery(unit)}`,
   );
   return response.data;
 }
@@ -921,7 +814,7 @@ export async function fetchResumeState(
  * Episode 三级一一对应，后端落的是同一张表、同一套哨兵约定。
  */
 export interface PlaybackMarkTarget {
-  media_item_id: number | string;
+  media_item_id: string;
   season_number?: number;
   episode_number?: number;
 }
@@ -958,7 +851,7 @@ export async function setPlaybackMarks(
 ): Promise<PlaybackMarks> {
   const response = await request<ApiEnvelope<PlaybackMarks>>("/playback/marks", {
     method: "POST",
-    body: JSON.stringify({ ...target, ...change, device_id: getPlayerDeviceId() }),
+    body: JSON.stringify({ ...target, ...change }),
   });
   return response.data;
 }
@@ -971,8 +864,8 @@ export interface PlaybackProgressBody extends PlaybackUnit {
   subtitle_track?: string;
   /** 暂停态；不报 = 实时会话保持原值 */
   paused?: boolean;
-  play_session_id?: string | null;
-  event_sequence?: number;
+  play_session_id: string;
+  event_sequence: number;
 }
 /** 进度上报体统一带上浏览器设备标识（活动页「正在播放」按它区分会话）。 */
 function withDevice(body: PlaybackProgressBody): PlaybackProgressBody & { device_id: string } {
@@ -984,29 +877,7 @@ export async function reportPlaybackProgress(
   body: PlaybackProgressBody,
   scope: PlaybackApiScope = DEFAULT_PLAYBACK_SCOPE,
 ): Promise<PlaybackWatchState> {
-  if (scope.progress === "local") {
-    // 分享访客：位置记本浏览器；服务端只收一份「谁在播」的心跳给活动页
-    //（不落成员表），超管在活动页结束播放时靠响应里的 ended_by_admin 退出
-    const record = writeLocalProgress(scope.localKey ?? "", body, body);
-    const local: PlaybackWatchState = {
-      position_ms: record?.position_ms ?? 0,
-      played: false,
-      play_count: 0,
-      duration_ms: null,
-      audio_track: record?.audio_track ?? null,
-      subtitle_track: record?.subtitle_track ?? null,
-    };
-    try {
-      const live = await request<ApiEnvelope<PlaybackWatchState>>(`${scope.base}/progress`, {
-        method: "POST",
-        body: JSON.stringify(withDevice(body)),
-      });
-      return { ...local, ended_by_admin: live.data.ended_by_admin };
-    } catch {
-      return local;
-    }
-  }
-  const response = await request<ApiEnvelope<PlaybackWatchState>>("/playback/progress", {
+  const response = await request<ApiEnvelope<PlaybackWatchState>>(`${scope.base}/progress`, {
     method: "POST",
     body: JSON.stringify(withDevice(body)),
   });
@@ -1016,7 +887,7 @@ export async function reportPlaybackProgress(
 /**
  * 页面卸载时上报最后位置。
  *
- * 与结束会话不同，这一条**不能丢**——丢了用户下次续播就会回到十几秒前，
+ * 这一条**不能丢**——丢了用户下次续播就会回到十几秒前，
  * 是最容易被察觉的体验缺陷。`sendBeacon` 是唯一能在卸载路径上活下来的
  * 通道（普通 fetch 会被直接取消），它发的是 POST，正合进度接口。
  * Blob 必须带 `application/json` 类型，否则 FastAPI 会因 Content-Type
@@ -1026,7 +897,6 @@ export function reportPlaybackProgressOnUnload(
   body: PlaybackProgressBody,
   scope: PlaybackApiScope = DEFAULT_PLAYBACK_SCOPE,
 ): void {
-  if (scope.progress === "local") writeLocalProgress(scope.localKey ?? "", body, body);
   const payload = JSON.stringify(withDevice(body));
   const url = resolveRequestUrl(`${scope.base}/progress`);
   const token = getAuthToken();
@@ -1063,12 +933,6 @@ export interface PlaybackPolicy {
   hw_backends: string[];
 }
 
-/** 读取播放策略当前取值（设置页「播放」分区展示用）。 */
-export async function fetchPlaybackPolicy(): Promise<PlaybackPolicy> {
-  const response = await request<ApiEnvelope<PlaybackPolicy>>("/playback/policy");
-  return response.data;
-}
-
 /** 按字段增量保存：没给的项保持原值，不会覆盖别处刚改的设置。 */
 export async function savePlaybackPolicy(
   changes: Partial<Omit<PlaybackPolicy, "hardware_available" | "hw_backends">>,
@@ -1081,51 +945,11 @@ export async function savePlaybackPolicy(
 }
 
 
-/**
- * ASS 字幕依赖的内嵌字体地址。
- *
- * 番剧的 ASS 把字体作为附件放在 MKV 里，不喂给 JASSUB 就会回退成默认字体，
- * 排版、字号、描边全走样——这是「ASS 能播」和「ASS 播得对」的差距。
- *
- * 懒加载：抽取要通读整个容器，只在真的要渲染 ASS 轨时才调。失败不是灾难，
- * JASSUB 还有兜底字体，所以调用方一律吞掉异常。
- */
-export async function fetchEmbeddedFonts(subtitleUrl: string): Promise<string[]> {
-  // 复用字幕地址上的签名 token：两者是同一个文件的同一份授权
-  const url = new URL(subtitleUrl, "http://placeholder");
-  const token = url.searchParams.get("token");
-  const fileId = url.pathname.match(/\/files\/(\d+)\//)?.[1];
-  if (!token || !fileId) return [];
-  const response = await request<ApiEnvelope<{ fonts: string[] }>>(
-    `/playback/files/${fileId}/fonts?token=${encodeURIComponent(token)}`,
-  );
-  return response.data.fonts;
-}
-
-
-/**
- * 进度条缩略图索引。
- *
- * 生成要通读整个容器，是开会话时在服务端后台起的——没就绪就是 `ready:false`，
- * 表现为没有预览，不影响播放。所以调用方轮询几次即可，失败一律吞掉。
- */
-export async function fetchTrickplay(subtitleOrStreamUrl: string): Promise<TrickplayIndex | null> {
-  const url = new URL(subtitleOrStreamUrl, "http://placeholder");
-  const token = url.searchParams.get("token");
-  const fileId = url.pathname.match(/\/files\/(\d+)\//)?.[1];
-  if (!token || !fileId) return null;
-  const response = await request<ApiEnvelope<TrickplayIndex>>(
-    `/playback/files/${fileId}/trickplay?token=${encodeURIComponent(token)}`,
-  );
-  return response.data;
-}
-
-
 export interface PlaybackMetricPayload {
   /** Canonical Media identity; a UUID string, not a numeric UI index. */
   media_item_id: string;
-  /** Visible Library ledger identity, including UUID-backed direct play. */
-  library_file_id: number | string | null;
+  /** Visible Library ledger identity, including UUID-backed direct play; a UUID string, not a numeric UI index. */
+  library_file_id: string | null;
   tier: number;
   degraded_from: number | null;
   engine: string;

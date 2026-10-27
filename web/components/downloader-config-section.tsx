@@ -18,7 +18,7 @@ import { useBackdrop } from "@/lib/backdrop";
 import { Modal } from "@/components/modal";
 import { TransferModeCard } from "@/components/transfer-mode-card";
 import {
-  type ConfiguredDownloader,
+  type Downloader,
   type DownloaderClientType,
   type DownloaderLimits,
   type DownloaderPayload,
@@ -70,7 +70,7 @@ const URL_PLACEHOLDER: Record<DownloaderClientType, string> = {
  * 手动测试结果仅在当前页面展示，不轮询 GET 覆盖。搜索结果里的"提交下载"以这里配置的实例为目标。
  */
 export function DownloaderConfigSection() {
-  const [downloaders, setDownloaders] = useState<ConfiguredDownloader[]>([]);
+  const [downloaders, setDownloaders] = useState<Downloader[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // 是否展开「添加下载器」面板
@@ -120,7 +120,7 @@ export function DownloaderConfigSection() {
   }, []);
 
   // 原地替换已有条目、新条目追加到末尾（保持列表顺序稳定，避免操作后跳位）
-  const upsert = useCallback((next: ConfiguredDownloader) => {
+  const upsert = useCallback((next: Downloader) => {
     setDownloaders((prev) => {
       const idx = prev.findIndex((d) => d.id === next.id);
       if (idx === -1) return [...prev, next];
@@ -244,7 +244,7 @@ export function DownloaderConfigSection() {
    视觉不用玻璃质感与 WebGL 开关，配置页要的是轻和稳。 */
 
 interface DownloaderRowProps {
-  downloader: ConfiguredDownloader;
+  downloader: Downloader;
   /** 体检跳转建议预填的映射本机侧路径（无建议时为 null） */
   suggestMapping: string | null;
   /** 拥堵提示跳转（?limits=<id>）：挂载后自动打开「限速与队列」弹窗 */
@@ -256,7 +256,7 @@ interface DownloaderRowProps {
   /** 确保展开并亮出编辑表单（菜单「编辑配置」） */
   onEdit: () => void;
   onCloseEdit: () => void;
-  onChanged: (downloader: ConfiguredDownloader) => void;
+  onChanged: (downloader: Downloader) => void;
   onDeleted: (id: string) => void;
   /** 需要整体刷新列表的操作（如设默认会同时改动其他条目）之后调用 */
   onRefresh: () => void;
@@ -668,7 +668,7 @@ function DownloaderLimitsModal({
   onClose,
 }: {
   open: boolean;
-  downloader: ConfiguredDownloader;
+  downloader: Downloader;
   onClose: () => void;
 }) {
   const { backdrop } = useBackdrop();
@@ -933,7 +933,7 @@ function LimitInput({
 /* —— 下载器操作折叠菜单（与站点卡片同款 Radix DropdownMenu） —— */
 
 interface DownloaderActionsMenuProps {
-  downloader: ConfiguredDownloader;
+  downloader: Downloader;
   busy: boolean;
   /** 编辑表单已亮出时菜单项变成「收起编辑」 */
   editing: boolean;
@@ -1019,7 +1019,7 @@ function DownloaderActionsMenu({
 
 interface DownloaderFormProps {
   /** 编辑对象；null 表示新增 */
-  downloader: ConfiguredDownloader | null;
+  downloader: Downloader | null;
   /** 体检跳转建议预填的映射本机侧路径（无建议时不传） */
   suggestMapping?: string | null;
   onSubmit: (payload: DownloaderPayload) => Promise<void>;

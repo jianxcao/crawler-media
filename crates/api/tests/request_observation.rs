@@ -137,13 +137,15 @@ async fn export_returns_the_latest_log_file_byte_for_byte_with_headers() {
         response.headers().get("content-type").unwrap(),
         "text/plain; charset=utf-8"
     );
-    assert!(response
-        .headers()
-        .get("content-disposition")
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .starts_with("attachment; filename=\"crawler-media-logs-"));
+    assert!(
+        response
+            .headers()
+            .get("content-disposition")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("attachment; filename=\"crawler-media-logs-")
+    );
     assert_eq!(
         response
             .headers()
@@ -198,10 +200,11 @@ async fn sites_route_is_logged_with_the_matched_template() {
         .await
         .unwrap();
     assert_eq!(created.status(), StatusCode::CREATED);
-    let site_id = serde_json::from_slice::<Value>(&body_bytes(created).await).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let site_id =
+        serde_json::from_slice::<Value>(&body_bytes(created).await).unwrap()["data"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
     let captured = capture_logs(|| async {
         let response = app
@@ -335,7 +338,11 @@ fn observed_router(slow_after: std::time::Duration) -> axum::Router {
 }
 
 fn plain_get(uri: &str) -> Request<Body> {
-    Request::builder().method("GET").uri(uri).body(Body::empty()).unwrap()
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap()
 }
 
 #[tokio::test]

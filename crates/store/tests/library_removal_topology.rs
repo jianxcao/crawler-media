@@ -1,4 +1,5 @@
 use domain::MediaKind;
+use std::path::Path;
 use store::{Store, StoreError};
 
 fn protected<T: std::fmt::Debug>(result: Result<T, StoreError>) {
@@ -113,20 +114,31 @@ fn pending_snapshot_blocks_symlink_and_lexical_aliases() {
         )
         .unwrap();
     store.begin_library_removal(&a.id).unwrap();
-    for candidate in [alias.join("nested"), root.join("other/../nested")] {
-        protected(store.create_library(
-            MediaKind::Tv,
-            "Blocked",
-            &[candidate.to_str().unwrap()],
-            "everyone",
-            true,
-            &[],
-        ));
-    }
+    protected(store.create_library(
+        MediaKind::Tv,
+        "Blocked",
+        &[alias.join("nested").to_str().unwrap()],
+        "everyone",
+        true,
+        &[],
+    ));
+    let invalid = store.create_library(
+        MediaKind::Tv,
+        "Blocked",
+        &[root.join("other/../nested").to_str().unwrap()],
+        "everyone",
+        true,
+        &[],
+    );
+    assert!(
+        matches!(invalid, Err(StoreError::Invalid(_))),
+        "parent segments are invalid before lifecycle checks: {invalid:?}"
+    );
+    assert_eq!(store.list_libraries().unwrap().len(), 3);
 }
 
 #[test]
-fn legacy_root_configuration_respects_frozen_owner_and_snapshot_overlap() {
+fn root_operations_respect_frozen_owner_and_snapshot_overlap() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path().join("data")).unwrap();
     let a = store.default_library(MediaKind::Tv).unwrap().unwrap();
@@ -137,11 +149,42 @@ fn legacy_root_configuration_respects_frozen_owner_and_snapshot_overlap() {
         .create_library(MediaKind::Tv, "B", &[], "everyone", true, &[])
         .unwrap();
     store.begin_library_removal(&a.id).unwrap();
-    protected(store.set_library_root(MediaKind::Tv, "/changed"));
+    protected(store::test_support::reconfigure_default_root(
+        &store,
+        MediaKind::Tv,
+        Path::new("/changed"),
+    ));
     protected(store.insert_library_root(MediaKind::Tv, "/new-root"));
-    protected(store.delete_extra_library_root(&root.id));
+
+    // An extra root of a frozen non-default Library is owned by that Library, so
+    // the removal freeze protects it.
+    let owned = temp.path().join("owned");
+    let extra = owned.join("extra");
+    let frozen = store
+        .create_library(
+            MediaKind::Movie,
+            "C",
+            &[owned.to_str().unwrap(), extra.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let frozen_extra = store
+        .list_library_roots()
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.path == extra)
+        .unwrap();
+    store.begin_library_removal(&frozen.id).unwrap();
+    protected(store.delete_extra_library_root(&frozen_extra.id));
+
     for path in &a.root_paths {
-        protected(store.set_library_root(MediaKind::Movie, path.to_str().unwrap()));
+        protected(store::test_support::reconfigure_default_root(
+            &store,
+            MediaKind::Movie,
+            path,
+        ));
         protected(store.insert_library_root(MediaKind::Movie, path.to_str().unwrap()));
     }
     assert_eq!(

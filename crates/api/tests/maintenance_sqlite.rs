@@ -2,6 +2,8 @@
 //!
 //! 全部用临时目录里的真实 SQLite 文件，不碰 live 数据。
 
+#![allow(deprecated)]
+
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,7 +17,7 @@ use jobs::JobKind;
 #[path = "maintenance_support/mod.rs"]
 mod support;
 use support::{
-    DB_LIGHT, DB_VACUUM, build_state, data_dir, db_entry, enqueue_claim, progress_of, temp_state,
+    DB_LIGHT, DB_VACUUM, data_dir, db_entry, enqueue_claim, progress_of, temp_state,
     unix_now,
 };
 

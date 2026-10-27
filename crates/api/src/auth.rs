@@ -14,7 +14,7 @@ pub struct AuthUser {
     pub id: UserId,
 }
 
-/// legacy / Jellyfin 路由的身份解析：client token → AuthUser（并同步注入
+/// Jellyfin 路由的身份解析：client token → AuthUser（并同步注入
 /// UserId，使 `http::auth::require_admin` 这类中间件对两套路由都可用）。
 pub async fn authenticate(
     State(store): State<Arc<Mutex<Store>>>,

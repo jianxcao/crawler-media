@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { HttpError, request } from "@/lib/http";
+import { HttpError } from "@/lib/http";
 
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 
@@ -14,34 +14,38 @@ import {
   ServerIcon,
   ShieldIcon,
 } from "@/components/icons";
+import {
+  type ObscuraStatusData,
+  type SyncCdpData,
+  fetchBrowserSettings,
+  fetchObscuraStatus,
+  startObscura,
+  stopObscura,
+  syncCdp,
+  updateBrowserSettings,
+} from "@/lib/api/browser-settings";
 // ExtensionCard removed
 import { SearchSection } from "@/components/search-settings";
 import { useTabParam } from "@/lib/use-tab-param";
-import type { ConfiguredSite, SiteAuthType } from "@/lib/api/sites";
+import type { Site, SiteAuthType } from "@/lib/api/sites";
 import {
-  type AuthTypeRequirement,
   type CatalogItem,
   type SiteBoostStats,
   type SiteConfigPayload,
-  type SiteSyncStats,
   configureSite,
   deleteSite,
   listConfiguredSites,
   listSiteBoostStats,
   listSiteCatalog,
-  listSiteSyncStats,
   reverifySite,
-  setSiteBoostPaused,
   setSiteEnabled,
-  setSiteProtection,
   setSiteRatioBoost,
   updateSite,
 } from "@/lib/api/sites";
 import { Link } from "react-router-dom";
 
 import { useDownloadTasks } from "@/lib/download-tasks";
-import { formatBytes, formatDuration } from "@/lib/format";
-import { formatRelativeTime } from "@/lib/time";
+import { formatBytes } from "@/lib/format";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
 
 /*
@@ -115,7 +119,7 @@ function fallbackItem(siteId: string): CatalogItem {
  * 回落功能介绍文案（fallback），此时统计没有意义、介绍才有引导价值。
  */
 export function SitesSectionSubtitle({ fallback }: { fallback: string }) {
-  const [sites, setSites] = useState<ConfiguredSite[] | null>(null);
+  const [sites, setSites] = useState<Site[] | null>(null);
   useEffect(() => {
     let alive = true;
     listConfiguredSites()
@@ -150,9 +154,8 @@ export function SiteConfigSection() {
     "sites",
   );
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
-  const [configured, setConfigured] = useState<ConfiguredSite[]>([]);
+  const [configured, setConfigured] = useState<Site[]>([]);
   // 各站点的种子缓存统计（定时同步任务维护），key 为 site_id；从未同步过的站点没有条目
-  const [syncStats, setSyncStats] = useState<Record<string, SiteSyncStats>>({});
   // 各站点的刷流运行统计；从未刷流且未开启刷流的站点没有条目
   const [boostStats, setBoostStats] = useState<Record<string, SiteBoostStats>>({});
   const [loading, setLoading] = useState(true);
@@ -179,15 +182,13 @@ export function SiteConfigSection() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [cat, cfg, stats, boost] = await Promise.all([
+      const [cat, cfg, boost] = await Promise.all([
         listSiteCatalog(),
         listConfiguredSites(),
-        listSiteSyncStats(),
         listSiteBoostStats(),
       ]);
       setCatalog(cat);
       setConfigured(cfg);
-      setSyncStats(stats);
       setBoostStats(boost);
     } catch (e) {
       setError((e as Error).message);
@@ -212,18 +213,13 @@ export function SiteConfigSection() {
         .catch(() => {
           /* 轮询失败静默重试，不打断页面 */
         });
-      void listSiteSyncStats()
-        .then(setSyncStats)
-        .catch(() => {
-          /* 同上 */
-        });
     },
     anyBoosting ? 30000 : null,
   );
 
   // 原地替换已有站点、新站点追加到末尾。
   // 注意：菜单里的启停等操作也走这里，保持列表基础顺序稳定，避免被操作的站点跳位。
-  const upsertConfigured = useCallback((next: ConfiguredSite) => {
+  const upsertConfigured = useCallback((next: Site) => {
     setConfigured((prev) => {
       const idx = prev.findIndex((s) => s.id === next.id);
       if (idx === -1) return [...prev, next];
@@ -342,7 +338,6 @@ export function SiteConfigSection() {
                   key={site.id}
                   item={catalogMap.get(site.profile_id) ?? fallbackItem(site.profile_id)}
                   site={site}
-                  stats={syncStats[site.id]}
                   boost={boostStats[site.id]}
                   expanded={expandedSite === site.id}
                   onToggle={() =>
@@ -370,7 +365,7 @@ export function SiteConfigSection() {
 
 interface AddSitePanelProps {
   available: CatalogItem[];
-  onCreated: (site: ConfiguredSite) => void;
+  onCreated: (site: Site) => void;
   onCancel: () => void;
   onError: (message: string) => void;
 }
@@ -481,14 +476,13 @@ function AddSitePanel({ available, onCreated, onCancel, onError }: AddSitePanelP
 
 interface SiteRowProps {
   item: CatalogItem;
-  site: ConfiguredSite;
-  stats?: SiteSyncStats;
+  site: Site;
   boost?: SiteBoostStats;
   expanded: boolean;
   onToggle: () => void;
   /** 确保展开（不切换）：菜单里的「编辑授权」需要先展开详情再亮出表单 */
   onOpen: () => void;
-  onChanged: (site: ConfiguredSite) => void;
+  onChanged: (site: Site) => void;
   onDeleted: (siteId: string) => void;
   onError: (message: string) => void;
 }
@@ -496,7 +490,6 @@ interface SiteRowProps {
 function SiteRow({
   item,
   site,
-  stats,
   boost,
   expanded,
   onToggle,
@@ -651,7 +644,6 @@ function SiteRow({
         <SiteDetail
           item={item}
           site={site}
-          stats={stats}
           boost={boost}
           busy={busy}
           guard={guard}
@@ -668,12 +660,11 @@ function SiteRow({
 
 interface SiteDetailProps {
   item: CatalogItem;
-  site: ConfiguredSite;
-  stats?: SiteSyncStats;
+  site: Site;
   boost?: SiteBoostStats;
   busy: boolean;
   guard: (fn: () => Promise<void>) => Promise<void>;
-  onChanged: (site: ConfiguredSite) => void;
+  onChanged: (site: Site) => void;
   /** 授权表单展开态由行持有（菜单「编辑授权」可在未展开时触发） */
   editingAuth: boolean;
   onCloseEditAuth: () => void;
@@ -682,7 +673,6 @@ interface SiteDetailProps {
 function SiteDetail({
   item,
   site,
-  stats,
   boost,
   busy,
   guard,
@@ -708,25 +698,6 @@ function SiteDetail({
         </DetailSection>
       )}
 
-      {/* ─ 索引 ─ */}
-      {stats && (
-        <DetailSection label="索引">
-          <StatGrid>
-            <DetailStat
-              label="已缓存种子"
-              value={stats.torrent_count.toLocaleString("zh-CN")}
-            />
-            <DetailStat label="上次同步" value={formatRelativeTime(stats.last_sync_at)} />
-            <DetailStat label="下次同步" value={nextSyncLabel(stats.next_sync_at)} />
-            {stats.sync_interval_seconds != null && (
-              <DetailStat label="同步间隔" value={formatDuration(stats.sync_interval_seconds)} />
-            )}
-          </StatGrid>
-          {stats.last_error && (
-            <p className="text-caption leading-5 text-[#ff6b6b]">上次同步失败：{stats.last_error}</p>
-          )}
-        </DetailSection>
-      )}
 
       {/* ─ 授权 ─ 编辑入口在 ⋯ 菜单（编辑授权），这里默认只读展示 */}
       <DetailSection label="授权">
@@ -767,11 +738,11 @@ function BoostSettingsModal({
   /** enable=开启前的二次确认（讲清将发生什么），adjust=运行中调整 */
   mode: "enable" | "adjust";
   siteName: string;
-  site: ConfiguredSite;
+  site: Site;
   /** 当前刷流配置（新契约 Site 视图不携带，从刷流统计接口读） */
   boost?: SiteBoostStats;
   onClose: () => void;
-  onChanged: (site: ConfiguredSite) => void;
+  onChanged: (site: Site) => void;
 }) {
   const confirm = useConfirm();
   const [busy, setBusy] = useState(false);
@@ -1059,17 +1030,10 @@ function DetailStat({ label, value }: { label: string; value: string }) {
   );
 }
 
-/** 「下次同步」文案：null（立即到期）或时刻已过（等待 tick 扫描）都显示「即将开始」，
- *  避免出现"下次同步：3 分钟前"这种矛盾表述。 */
-function nextSyncLabel(iso: string | null): string {
-  if (!iso || new Date(iso).getTime() <= Date.now()) return "即将开始";
-  return formatRelativeTime(iso);
-}
-
 /* —— 站点操作折叠菜单：启停 / 保护 / 刷流 / 编辑授权 / 重验 / 删除 全部收口于此 —— */
 
 interface SiteActionsMenuProps {
-  site: ConfiguredSite;
+  site: Site;
   busy: boolean;
   /** 刷流是否开启（新契约从刷流统计接口读，Site 视图不携带） */
   boosting: boolean;
@@ -1165,14 +1129,14 @@ function SiteActionsMenu({
 
 interface SiteFormProps {
   item: CatalogItem;
-  site: ConfiguredSite | null;
+  site: Site | null;
   busy: boolean;
   onSubmit: (payload: SiteConfigPayload) => void;
 }
 
 function SiteForm({ item, site, busy, onSubmit }: SiteFormProps) {
-  // 新契约目录只回 auth_types（SiteAuthType[]），必填字段按类型本地展开
-  const options: AuthTypeRequirement[] = item.auth_types.map((authType) => ({
+  // 目录只回 auth_types（SiteAuthType[]），必填字段按类型本地展开
+  const options = item.auth_types.map((authType) => ({
     auth_type: authType,
     required_fields: AUTH_TYPE_FIELDS[authType],
   }));
@@ -1243,7 +1207,7 @@ function SiteForm({ item, site, busy, onSubmit }: SiteFormProps) {
             授权方式
           </label>
           <div className="flex flex-wrap gap-2">
-            {options.map((opt: AuthTypeRequirement) => (
+            {options.map((opt) => (
               <button
                 key={opt.auth_type}
                 type="button"
@@ -1325,38 +1289,6 @@ function SiteForm({ item, site, busy, onSubmit }: SiteFormProps) {
 }
 
 /* —— CDP 与 Obscura 浏览器控制面板 —— */
-type Envelope<T> = { ok: boolean; data: T };
-
-interface BrowserSettingsData {
-  cdp?: { enabled?: boolean; url?: string };
-  obscura?: { install?: "download" | "preinstalled" };
-  user_agent?: string;
-  browser_sites?: number;
-  managed_browser_sites?: number;
-  incompatible_endpoints?: Record<string, string>;
-}
-
-interface ObscuraStatusData {
-  installed: boolean;
-  running: boolean;
-  downloading: boolean;
-  port: number;
-  cdp_url: string | null;
-  expected_version: string;
-  reported_version: string | null;
-  binary_path: string;
-  install_policy: string;
-  last_error: string | null;
-  not_started_reason: string | null;
-}
-
-interface SyncCdpData {
-  total_cookies_scanned: number;
-  updated_sites: number;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  candidate_sites?: Array<Record<string, any>>;
-}
-
 const NOT_STARTED_REASON_LABELS: Record<string, string> = {
   switch_off: "Browser 开关未开启",
   instance_endpoint_configured: "已配置实例 CDP 端点，不需要受管 Obscura",
@@ -1389,22 +1321,22 @@ function CdpBrowserSection() {
 
   async function loadData() {
     try {
-      const [bData, oData] = await Promise.all([
-        request<Envelope<BrowserSettingsData>>("/api/v1/settings/browser"),
-        request<Envelope<ObscuraStatusData>>("/api/v1/settings/browser/obscura"),
+      const [settings, status] = await Promise.all([
+        fetchBrowserSettings(),
+        fetchObscuraStatus(),
       ]);
-      if (bData.ok && bData.data) {
-        setCdpEnabled(bData.data.cdp?.enabled ?? false);
-        setCdpUrl(bData.data.cdp?.url ?? "");
-        setUserAgent(bData.data.user_agent ?? "crawler-media/0.1.0");
-        setManagedBrowserSites(bData.data.managed_browser_sites ?? null);
-        setIncompatible(bData.data.incompatible_endpoints ?? {});
-        if (bData.data.obscura?.install) {
-          setObscuraInstall(bData.data.obscura.install);
+      if (settings) {
+        setCdpEnabled(settings.cdp?.enabled ?? false);
+        setCdpUrl(settings.cdp?.url ?? "");
+        setUserAgent(settings.user_agent ?? "crawler-media/0.1.0");
+        setManagedBrowserSites(settings.managed_browser_sites ?? null);
+        setIncompatible(settings.incompatible_endpoints ?? {});
+        if (settings.obscura?.install) {
+          setObscuraInstall(settings.obscura.install);
         }
       }
-      if (oData.ok && oData.data) {
-        setObscuraStatus(oData.data);
+      if (status) {
+        setObscuraStatus(status);
       }
     } catch (e) {
       setMsg({ tone: "error", text: `加载配置失败: ${errorText(e)}` });
@@ -1421,16 +1353,13 @@ function CdpBrowserSection() {
     setSaving(true);
     setMsg(null);
     try {
-      const data = await request<Envelope<BrowserSettingsData>>("/api/v1/settings/browser", {
-        method: "PUT",
-        body: JSON.stringify({
-          cdp: { enabled: cdpEnabled, url: cdpUrl.trim() },
-          obscura: { install: obscuraInstall },
-          user_agent: userAgent,
-        }),
+      const data = await updateBrowserSettings({
+        cdp: { enabled: cdpEnabled, url: cdpUrl.trim() },
+        obscura: { install: obscuraInstall },
+        user_agent: userAgent,
       });
       setMsg({ tone: "success", text: "浏览器配置已保存，受管 Obscura 将按需在后台启停" });
-      if (data.data?.user_agent) setUserAgent(data.data.user_agent);
+      if (data?.user_agent) setUserAgent(data.user_agent);
       await loadData();
     } catch (e) {
       setMsg({ tone: "error", text: errorText(e) || "保存失败" });
@@ -1443,15 +1372,12 @@ function CdpBrowserSection() {
     setObscuraActing(true);
     setMsg(null);
     try {
-      const data = await request<Envelope<ObscuraStatusData>>(
-        `/api/v1/settings/browser/obscura/${action}`,
-        { method: "POST" },
-      );
+      const data = action === "start" ? await startObscura() : await stopObscura();
       setMsg({
         tone: "success",
         text: action === "start" ? "已提交启动，Obscura 正在后台安装/启动" : "已停止 Obscura 浏览器服务",
       });
-      setObscuraStatus(data.data);
+      setObscuraStatus(data);
     } catch (e) {
       setMsg({ tone: "error", text: errorText(e) || "操作失败" });
     } finally {
@@ -1464,13 +1390,11 @@ function CdpBrowserSection() {
     setMsg(null);
     setSyncResult(null);
     try {
-      const data = await request<Envelope<SyncCdpData>>("/api/v1/settings/browser/sync-cdp", {
-        method: "POST",
-      });
-      setSyncResult(data.data);
+      const data = await syncCdp();
+      setSyncResult(data);
       setMsg({
         tone: "success",
-        text: `CDP 凭据同步成功：共扫描 ${data.data.total_cookies_scanned} 个 Cookie，更新已配置站点 ${data.data.updated_sites} 个！`,
+        text: `CDP 凭据同步成功：共扫描 ${data.total_cookies_scanned} 个 Cookie，更新已配置站点 ${data.updated_sites} 个！`,
       });
     } catch (e) {
       setMsg({ tone: "error", text: errorText(e) || "同步失败" });

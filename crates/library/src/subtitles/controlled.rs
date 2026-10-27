@@ -110,17 +110,29 @@ fn is_usable_cache(path: &Path) -> bool {
             .unwrap_or(false)
 }
 
+/// The embedded stream, requested format, and destination for one extraction.
+pub(super) struct EmbeddedSubtitleRequest<'a> {
+    pub media_path: &'a Path,
+    pub stream_index: u32,
+    pub codec: Option<&'a str>,
+    pub wants_vtt: bool,
+    pub cache_dir: &'a Path,
+}
+
 /// 锁内/锁外都安全的受控提取：取消时只清理自己的 staging，不触碰 final。
-pub(crate) fn extract_embedded_controlled(
-    media_path: &Path,
-    stream_index: u32,
-    codec: Option<&str>,
-    wants_vtt: bool,
-    cache_dir: &Path,
+pub(super) fn extract_embedded_controlled(
+    request: EmbeddedSubtitleRequest<'_>,
     program: &OsStr,
     control: &WorkControl,
     runner: &dyn SubtitleRunner,
 ) -> Result<(PathBuf, &'static str), DeliveryError> {
+    let EmbeddedSubtitleRequest {
+        media_path,
+        stream_index,
+        codec,
+        wants_vtt,
+        cache_dir,
+    } = request;
     control.check().map_err(|_| cancelled())?;
     let format = subtitle_format(codec, wants_vtt);
     let final_path = cache_dir.join(format!("sub_{stream_index}.{}", format.ext));
@@ -214,11 +226,13 @@ pub fn deliver_subtitle_controlled(
     };
     let stream_index = sub.stream_index.unwrap_or(index);
     let (extracted_file, content_type) = extract_embedded_controlled(
-        source_path,
-        stream_index,
-        sub.codec.as_deref(),
-        wants_vtt,
-        cache_path,
+        EmbeddedSubtitleRequest {
+            media_path: source_path,
+            stream_index,
+            codec: sub.codec.as_deref(),
+            wants_vtt,
+            cache_dir: cache_path,
+        },
         OsStr::new("ffmpeg"),
         control,
         runner,

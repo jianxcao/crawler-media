@@ -1,5 +1,4 @@
 use std::fs;
-use std::path::Path;
 
 use domain::{
     AtomRule, Coverage, FetchMode, Filter, FilterAtom, FilterId, Media, MediaId, MediaKind, SiteId,
@@ -7,7 +6,7 @@ use domain::{
 };
 use downloader::MemoryDownloader;
 use library::TransferMode;
-use subscribe::{RunInput, SubscribeFacts, run};
+use subscribe::{RunInput, RunOutcome, SubscribeFacts, run};
 
 fn movie_filter() -> Filter {
     Filter {
@@ -19,7 +18,7 @@ fn movie_filter() -> Filter {
             exclude: false,
         }],
         keep_old_versions: false,
-}
+    }
 }
 
 fn media_movie() -> Media {
@@ -107,6 +106,9 @@ fn collect_transfers_subtitle_sidecar_beside_video() {
         facts: SubscribeFacts::default(),
         downloader: &dl,
         library_root: &library_root,
+        library_id: Some(domain::LibraryId::new()),
+        root_id: Some("test-root".into()),
+        config_revision: None,
         transfer_mode: Some(TransferMode::Copy),
         scrape: false,
         hooks: None,
@@ -117,8 +119,8 @@ fn collect_transfers_subtitle_sidecar_beside_video() {
     })
     .unwrap();
 
-    assert_eq!(outcome.ledger.len(), 1);
-    let video_dest = Path::new(&outcome.ledger[0].path);
+    assert_eq!(outcome.files.len(), 1);
+    let video_dest = outcome.files[0].file.path.as_path();
     assert!(video_dest.is_file());
     assert_eq!(video_dest.extension().and_then(|e| e.to_str()), Some("mkv"));
     let srt_dest = video_dest.with_extension("srt");
@@ -149,6 +151,9 @@ fn subtitle_only_torrent_does_not_enter_library() {
         facts: SubscribeFacts::default(),
         downloader: &dl,
         library_root: &library_root,
+        library_id: Some(domain::LibraryId::new()),
+        root_id: Some("test-root".into()),
+        config_revision: None,
         transfer_mode: Some(TransferMode::Copy),
         scrape: false,
         hooks: None,
@@ -159,13 +164,12 @@ fn subtitle_only_torrent_does_not_enter_library() {
     })
     .unwrap();
 
-    assert!(outcome.ledger.is_empty());
-    assert!(
-        library_root
-            .exists()
-            .then(|| fs::read_dir(&library_root).unwrap().next().is_none())
-            .unwrap_or(true)
-    );
+    assert!(outcome.files.is_empty());
+    assert!(if library_root.exists() {
+        fs::read_dir(&library_root).unwrap().next().is_none()
+    } else {
+        true
+    });
 }
 
 fn create_test_tv_sub(media_id: MediaId, filter_id: FilterId) -> Subscribe {
@@ -256,7 +260,7 @@ fn multi_episode_subtitles_match_respective_episodes_without_overwriting() {
             exclude: false,
         }],
         keep_old_versions: false,
-};
+    };
     let sub = create_test_tv_sub(media.id, filter.id);
     let t = create_test_pack_torrent();
     let (v1, v2, s1, s2) = create_test_pack_files(&tmp);
@@ -274,6 +278,9 @@ fn multi_episode_subtitles_match_respective_episodes_without_overwriting() {
         facts: SubscribeFacts::default(),
         downloader: &dl,
         library_root: &tmp.path().join("lib"),
+        library_id: Some(domain::LibraryId::new()),
+        root_id: Some("test-root".into()),
+        config_revision: None,
         transfer_mode: Some(TransferMode::Copy),
         scrape: false,
         hooks: None,
@@ -284,23 +291,9 @@ fn multi_episode_subtitles_match_respective_episodes_without_overwriting() {
     })
     .unwrap();
 
-    assert_eq!(outcome.ledger.len(), 2, "两集都应成功入库");
-    let p1 = Path::new(
-        &outcome
-            .ledger
-            .iter()
-            .find(|r| r.episode == Some(1))
-            .unwrap()
-            .path,
-    );
-    let p2 = Path::new(
-        &outcome
-            .ledger
-            .iter()
-            .find(|r| r.episode == Some(2))
-            .unwrap()
-            .path,
-    );
+    assert_eq!(outcome.files.len(), 2, "两集都应成功入库");
+    let p1 = file_for_episode(&outcome, 1).file.path.as_path();
+    let p2 = file_for_episode(&outcome, 2).file.path.as_path();
 
     let srt1 = p1.with_extension("zh.srt");
     assert!(
@@ -317,4 +310,13 @@ fn multi_episode_subtitles_match_respective_episodes_without_overwriting() {
         srt2.display()
     );
     assert_eq!(fs::read_to_string(&srt2).unwrap(), "E02 subtitle content");
+}
+
+/// The published file whose units cover `episode`.
+fn file_for_episode(outcome: &RunOutcome, episode: i32) -> &domain::FileCoverage {
+    outcome
+        .files
+        .iter()
+        .find(|coverage| coverage.units.iter().any(|unit| unit.episode == episode))
+        .expect("no published file covers this episode")
 }

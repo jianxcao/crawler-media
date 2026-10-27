@@ -11,6 +11,7 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 use super::common::*;
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 fn app(tmp: &tempfile::TempDir) -> (axum::Router, api::Store) {
     let fetcher = Arc::new(Fixtures {
@@ -49,20 +50,22 @@ async fn force_refresh_item_chapters_keeps_old_result_until_background_replaceme
     };
     let media = store.ensure_media(media).unwrap();
 
-    let row = domain::LedgerRow {
-        id: domain::LedgerId::new(),
-        media_id: media.id,
-        path: strm_file.display().to_string(),
-        season: Some(1),
-        episode: Some(1),
-        resolution: Some("1080p".into()),
-        codec: Some("hevc".into()),
-        hdr: None,
-        quality_source: domain::QualitySource::Release,
-        confidence: domain::Confidence::High,
-        filter_score: None,
-    };
-    store.insert_ledger(&row).unwrap();
+    let file_id = domain::LedgerId::new();
+    let strm_path = strm_file.display().to_string();
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(file_id),
+            media_id: media.id,
+            path: strm_path,
+            season: Some(1),
+            episode: Some(1),
+            resolution: Some("1080p".into()),
+            codec: Some("hevc".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     // 1. Manually populate cached marker with old/wrong timestamp
     let old_marker = api::store::StoredMediaMarker {
@@ -179,22 +182,32 @@ async fn force_refresh_item_chapters_keeps_old_result_until_background_replaceme
 
     let second_path = tv_dir.join("Frieren.S01E02.strm");
     std::fs::write(&second_path, "https://cdn.example.com/frieren/ep02.mkv\n").unwrap();
-    let mut second = row.clone();
-    second.id = domain::LedgerId::new();
-    second.path = second_path.display().to_string();
-    second.episode = Some(2);
-    store.insert_ledger(&second).unwrap();
+    let second_id = domain::LedgerId::new();
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(second_id),
+            media_id: media.id,
+            path: second_path.display().to_string(),
+            season: Some(1),
+            episode: Some(2),
+            resolution: Some("1080p".into()),
+            codec: Some("hevc".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     std::fs::write(tv_dir.join("Frieren.S01E01-chapter_0.jpg"), b"episode one").unwrap();
     std::fs::write(tv_dir.join("Frieren.S01E02-chapter_0.jpg"), b"episode two").unwrap();
-    for (row, expected) in [
-        (&row, b"episode one".as_slice()),
-        (&second, b"episode two".as_slice()),
+    for (file_id, expected) in [
+        (&file_id, b"episode one".as_slice()),
+        (&second_id, b"episode two".as_slice()),
     ] {
         let response = app
             .clone()
             .oneshot(request(
                 "GET",
-                &format!("/api/v1/chapters/{}/0", row.id),
+                &format!("/api/v1/chapters/{}/0", file_id),
                 None,
                 Value::Null,
             ))

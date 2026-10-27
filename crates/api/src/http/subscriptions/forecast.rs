@@ -68,11 +68,10 @@ pub(crate) async fn release_forecast(
 pub(crate) fn parse_upload_time(raw: &str) -> Option<i64> {
     let raw = raw.trim();
     // RFC3339: 2026-09-20T12:00:00Z / +08:00
-    if let Some((date, _time)) = raw.split_once('T') {
-        if let Some(unix) = parse_date(date) {
+    if let Some((date, _time)) = raw.split_once('T')
+        && let Some(unix) = parse_date(date) {
             return Some(unix);
         }
-    }
     if raw.len() == 10 && raw.as_bytes()[4] == b'-' && raw.as_bytes()[7] == b'-' {
         return parse_date(raw);
     }

@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { fetchEmbeddedFonts } from "@/lib/api/playback";
 import { plainCueText } from "@/lib/player/subtitles";
 import type { SubtitleOption, SubtitleStyle } from "@/lib/player/subtitles";
 
@@ -237,12 +236,9 @@ function useJassub(
     let disposed = false;
 
     // 动态 import：只有真的遇到 ASS 轨才付这几 MB 的 WASM 代价（§6.1 打包预算）
-    // 内嵌字体与 WASM 并行拿：字体抽取要通读整个容器，串行会让字幕晚出来。
-    // 字体拿不到不是灾难——JASSUB 还有兜底字体，只是排版会走样，所以吞掉异常。
-    void Promise.all([
-      import("jassub"),
-      fetchEmbeddedFonts(track.url).catch(() => [] as string[]),
-    ]).then(([{ default: JASSUB }, embeddedFonts]) => {
+    // 后端没有内嵌字体抽取端点：只用兜底字体，不伪造能力。
+    const embeddedFonts: string[] = [];
+    void import("jassub").then(({ default: JASSUB }) => {
       if (disposed) return;
       const created = new JASSUB({
         video,

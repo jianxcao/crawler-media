@@ -24,7 +24,11 @@ fn sub(media: &domain::Media, full_season_pack: bool) -> domain::Subscribe {
         id: domain::SubscribeId::new(),
         user_id: domain::UserId::new(),
         media_id: media.id,
-        coverage: Coverage::Tv { season: 1, episode_from: 1, episode_to: Some(3) },
+        coverage: Coverage::Tv {
+            season: 1,
+            episode_from: 1,
+            episode_to: Some(3),
+        },
         fetch_mode: domain::FetchMode::Search,
         filter_id: domain::FilterId::new(),
         wash_cut: false,
@@ -47,11 +51,17 @@ fn pure_season_pack_covers_the_whole_window_in_both_modes() {
         let subscribe = sub(&media, fsp);
         let slots = pending_slots(&subscribe, &pack);
         for ep in 1..=3 {
-            assert!(slots.contains(&(Some(1), Some(ep))), "fsp={fsp} E{ep}: {slots:?}");
+            assert!(
+                slots.contains(&(Some(1), Some(ep))),
+                "fsp={fsp} E{ep}: {slots:?}"
+            );
         }
         let facts = facts_with_pending(SubscribeFacts::default(), [&pack], &subscribe, &media);
         for ep in 1..=3 {
-            assert!(facts.get(Some(1), Some(ep)).is_some(), "fsp={fsp} placeholder E{ep}");
+            assert!(
+                facts.get(Some(1), Some(ep)).is_some(),
+                "fsp={fsp} placeholder E{ep}"
+            );
         }
     }
 }
@@ -60,7 +70,10 @@ fn pure_season_pack_covers_the_whole_window_in_both_modes() {
 fn other_season_pack_and_episodes_keep_their_own_slots() {
     let media = media();
     let subscribe = sub(&media, true);
-    assert_eq!(pending_slots(&subscribe, &release::parse("Test.Show.S02.1080p")), vec![(Some(2), None)]);
+    assert_eq!(
+        pending_slots(&subscribe, &release::parse("Test.Show.S02.1080p")),
+        vec![(Some(2), None)]
+    );
     assert_eq!(
         pending_slots(&subscribe, &release::parse("Test.Show.S01E02.1080p")),
         vec![(Some(1), Some(2))]
@@ -73,9 +86,19 @@ fn owned_slot_with_pending_is_marked_in_flight_not_overwritten() {
     let mut subscribe = sub(&media, false);
     subscribe.wash_cut = true;
     let mut facts = SubscribeFacts::default();
-    facts.replace(Some(1), Some(1), QualityFact { score: 5, path: Some("/lib/e1.mkv".into()) });
+    facts.replace(
+        Some(1),
+        Some(1),
+        QualityFact {
+            score: 5,
+            path: Some("/lib/e1.mkv".into()),
+        },
+    );
     let ep = release::parse("Test.Show.S01E01.2160p");
     let facts = facts_with_pending(facts, [&ep], &subscribe, &media);
     assert!(facts.is_in_flight(Some(1), Some(1)));
-    assert_eq!(facts.get(Some(1), Some(1)).unwrap().path.as_deref(), Some("/lib/e1.mkv"));
+    assert_eq!(
+        facts.get(Some(1), Some(1)).unwrap().path.as_deref(),
+        Some("/lib/e1.mkv")
+    );
 }

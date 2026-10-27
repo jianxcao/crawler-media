@@ -38,6 +38,14 @@ pub const KNOWN_ENV_VARS: &[&str] = &[
     "CRAWLER_MEDIA_URL", // CLI-only
     // Read by other crates in the same process (marker/fingerprint).
     "CRAWLER_MEDIA_FFMPEG_LOG_LEVEL",
+    // Read in-process by sibling modules (not parsed into [`ServerConfig`]):
+    // the instance lease and the obscura installer. Listed here so a legitimate
+    // setting never trips the typo warning.
+    "CRAWLER_MEDIA_ALLOW_MULTI_INSTANCE",
+    "CRAWLER_MEDIA_LEASE_HEARTBEAT_MS",
+    "CRAWLER_MEDIA_LEASE_RETRY_MS",
+    "CRAWLER_MEDIA_LEASE_TTL_MS",
+    "CRAWLER_MEDIA_OBSCURA_ALLOW_PRIVATE_NETWORK",
     // Secret-file variants (Docker/K8s secret volumes).
     "CRAWLER_MEDIA_TOKEN_FILE",
     "CRAWLER_MEDIA_ADMIN_PASSWORD_FILE",
@@ -163,9 +171,9 @@ impl ServerConfig {
     /// Unknown `CRAWLER_MEDIA_*` variables are logged as warnings to catch
     /// typos (e.g. `CRAWLER_MEDIA_TMDB_KET` instead of `_KEY`).
     pub fn from_env() -> Self {
-        for key in unknown_env_keys(
-            std::env::vars_os().filter_map(|(key, _)| key.into_string().ok()),
-        ) {
+        for key in
+            unknown_env_keys(std::env::vars_os().filter_map(|(key, _)| key.into_string().ok()))
+        {
             tracing::warn!(
                 env = %key,
                 "unrecognized CRAWLER_MEDIA_* environment variable (typo?)"
@@ -211,7 +219,11 @@ pub fn parse_slow_request_ms(raw: Option<&str>) -> u64 {
 /// Read the slow-request threshold once at startup. The HTTP middleware takes
 /// it as injected layer state and never reads the environment itself.
 pub fn slow_request_ms() -> u64 {
-    parse_slow_request_ms(std::env::var("CRAWLER_MEDIA_SLOW_REQUEST_MS").ok().as_deref())
+    parse_slow_request_ms(
+        std::env::var("CRAWLER_MEDIA_SLOW_REQUEST_MS")
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// Environment lookup seam.
@@ -309,10 +321,7 @@ impl std::fmt::Debug for ProxyEnv {
         f.debug_struct("ProxyEnv")
             .field(
                 "url",
-                &self
-                    .url
-                    .as_deref()
-                    .map(crate::http_agent::mask_proxy_url),
+                &self.url.as_deref().map(crate::http_agent::mask_proxy_url),
             )
             .field("username", &self.username)
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
@@ -398,9 +407,7 @@ pub fn env_pinned_message(settings_key: &str) -> Option<String> {
 /// `CRAWLER_MEDIA_*` names in `keys` that [`KNOWN_ENV_VARS`] does not list.
 pub fn unknown_env_keys(keys: impl IntoIterator<Item = String>) -> Vec<String> {
     keys.into_iter()
-        .filter(|key| {
-            key.starts_with("CRAWLER_MEDIA_") && !KNOWN_ENV_VARS.contains(&key.as_str())
-        })
+        .filter(|key| key.starts_with("CRAWLER_MEDIA_") && !KNOWN_ENV_VARS.contains(&key.as_str()))
         .collect()
 }
 
@@ -477,6 +484,24 @@ mod tests {
         assert_eq!(
             read_secret_file("/nonexistent/definitely-missing", "X_FILE"),
             None
+        );
+    }
+
+    /// Env vars read by sibling modules must stay whitelisted, or every real
+    /// start logs a bogus "typo?" warning for a supported setting.
+    #[test]
+    fn in_process_env_overrides_are_whitelisted() {
+        let in_process = [
+            crate::instance_lease::ALLOW_MULTI_INSTANCE_ENV,
+            crate::instance_lease::LEASE_RETRY_ENV,
+            crate::instance_lease::LEASE_HEARTBEAT_ENV,
+            crate::instance_lease::LEASE_TTL_ENV,
+            crate::obscura_manager::ALLOW_PRIVATE_NETWORK_ENV,
+        ];
+        assert_eq!(
+            unknown_env_keys(in_process.iter().map(|key| (*key).to_string())),
+            Vec::<String>::new(),
+            "在进程内读取的变量必须列入 KNOWN_ENV_VARS"
         );
     }
 }

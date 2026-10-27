@@ -78,7 +78,8 @@ fn failing_unit_rolls_back_the_earlier_units() {
 
     let rows = history(&store, id);
     assert_eq!(
-        rows[&(Some(1), Some(1))].search_attempts, 1,
+        rows[&(Some(1), Some(1))].search_attempts,
+        1,
         "the first unit's update must roll back"
     );
     assert_eq!(rows[&(Some(1), Some(1))].last_search_at, Some(100));
@@ -95,10 +96,10 @@ fn batch_inside_an_existing_transaction_does_not_nest() {
     let id = SubscribeId::new();
     let units: Units = vec![(Some(2), Some(1)), (Some(2), Some(2))];
 
-    // playback_write 在 subscribe 连接上已经开了事务；批量方法必须沿用而不是
+    // wanted_write 在 subscribe 连接上已经开了事务；批量方法必须沿用而不是
     // 嵌套开事务（嵌套会直接报错），并且仍在同一事务里生效。
     store
-        .playback_write(|store| {
+        .wanted_write(|store| {
             store.touch_wanted_searches(id, &units, 10)?;
             store.reset_wanted_search_cooldowns(id, &units)?;
             Ok(())

@@ -40,10 +40,9 @@ impl ProbeTarget {
             .extension()
             .and_then(|ext| ext.to_str())
             .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"))
+            && let Some(url) = read_strm_url(path)
         {
-            if let Some(url) = read_strm_url(path) {
-                return Self::Remote(url);
-            }
+            return Self::Remote(url);
         }
         Self::Local(path.to_path_buf())
     }

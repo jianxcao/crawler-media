@@ -1,5 +1,6 @@
 "use client";
 
+import { playLinkFileId } from "@/lib/player/active-target";
 import type { ReactNode } from "react";
 import { Children, Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -8,7 +9,7 @@ import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Link } from "react-router-dom";
 import { useNavigate } from "react-router-dom";
 
-import { shouldPollProbeDetails } from "@/lib/probe-status";
+import { isPlayableFile } from "@/lib/library-file-pages";
 import { ArtworkPickerDialog } from "@/components/artwork-picker-dialog";
 import { BrandLoader } from "@/components/brand-loader";
 import { CastRow, type CastRowPerson } from "@/components/cast-row";
@@ -53,6 +54,7 @@ import {
   getItemEpisodes,
   getLibrary,
   getLibraryItemDetail,
+  getAllLibraryItemFiles,
   listLibraries,
   refreshItemMetadata,
 } from "@/lib/api/libraries";
@@ -91,6 +93,8 @@ export interface SelectedEpisodeContext<F = LibraryItemFile> {
 /** 分集区需要的条目最小形状（详情视图与分享页的访客视图都满足）。 */
 export interface EpisodeSectionItem<F extends { file_id: string; season: number | null }> {
   media_item_id: string;
+  /** 在库的季号列表（剧集区季选择器；电影为空） */
+  seasons: number[];
   files: F[];
 }
 
@@ -191,22 +195,19 @@ export function LibraryItemDetailView({
   const playUnit = useMemo<PlaybackUnit | null>(() => {
     if (!detail) return null;
     if (detail.kind !== "tv") {
-      // 电影与其他库条目都是单一播放单元 (0, 0)
       return {
-        // lib/api/playback 的播放单元仍按 number 声明，条目 id 是 UUID 字符串，
-        // 这里仅做类型投影，运行期原样传给播放器
-        media_item_id: detail.media_item_id as unknown as number,
-        season_number: 0,
-        episode_number: 0,
+        media_item_id: detail.media_item_id,
+        file_id: selectedTrackFileId ?? undefined,
       };
     }
     if (!selectedSeriesEpisode) return null;
     return {
-      media_item_id: detail.media_item_id as unknown as number,
+      media_item_id: detail.media_item_id,
       season_number: selectedSeriesEpisode.seasonNumber,
       episode_number: selectedSeriesEpisode.episode.episode_number,
+      file_id: selectedTrackFileId ?? undefined,
     };
-  }, [detail, selectedSeriesEpisode]);
+  }, [detail, selectedSeriesEpisode, selectedTrackFileId]);
 
   // 单元三元组的字符串形式：detail 每次轮询都是新对象，直接依赖 playUnit
   // 会让刮削期间每两秒重查一次续播点。
@@ -236,7 +237,7 @@ export function LibraryItemDetailView({
   useEffect(() => {
     let cancelled = false;
     setFavorite(null);
-    fetchPlaybackMarks({ media_item_id: mediaItemId as unknown as number })
+    fetchPlaybackMarks({ media_item_id: mediaItemId })
       .then((marks) => {
         if (!cancelled) setFavorite(marks.is_favorite);
       })
@@ -255,7 +256,7 @@ export function LibraryItemDetailView({
     setFavorite(next);
     try {
       const marks = await setPlaybackMarks(
-        { media_item_id: mediaItemId as unknown as number },
+        { media_item_id: mediaItemId },
         { favorite: next },
       );
       setFavorite(marks.is_favorite);
@@ -320,17 +321,8 @@ export function LibraryItemDetailView({
   // 这样媒体流信息和声纹结果会在任务完成后及时显示。
   useEffect(() => {
     if (!detail || detail.files.length === 0) return;
-    const stages = detail.files.flatMap((file) =>
-      file.probe_stages
-        ? [file.probe_stages.metadata, file.probe_stages.intro, file.probe_stages.outro].filter(
-            (stage): stage is NonNullable<typeof stage> => stage != null,
-          )
-        : [],
-    );
-    const active = stages.length > 0
-      ? shouldPollProbeDetails(stages)
-      : detail.files.some((file) => file.probe_queued);
-    if (!active) return;
+    // 探测还在排队/进行中（流信息 + 声纹两段都算）就继续轮询，终态即停。
+    if (!detail.files.some((file) => file.probe_queued)) return;
     const timer = window.setInterval(() => {
       reload();
     }, 5000);
@@ -482,7 +474,7 @@ export function LibraryItemDetailView({
       : undefined;
     void fetchItemChapters(libraryId, detail.media_item_id, target)
       .then((list) => {
-        if (!cancelled && list.length > 0) setChapters(list);
+        if (!cancelled) setChapters(list);
       })
       .catch(() => undefined);
     return () => {
@@ -501,7 +493,7 @@ export function LibraryItemDetailView({
         if (cancelled) return;
         setSimilar(
           hits.map((hit) => ({
-            id: hit.tmdb_id ?? hit.id ?? "",
+            id: hit.tmdb_id ?? "",
             title: hit.title,
             type: hit.kind === "tv" ? "tv" : "movie",
             year: hit.year ?? undefined,
@@ -565,8 +557,8 @@ export function LibraryItemDetailView({
   const trackFiles = isMovie
     ? detail.files
     : (selectedSeriesEpisode?.files ?? []);
-  // 新契约的详情文件没有 state 字段：返回的文件都是可播在位文件
-  const availableTrackFiles = trackFiles;
+  // 缺失/未知的文件仍可查看（保留在列表里说明「文件不在位」），但不作为可播版本。
+  const availableTrackFiles = trackFiles.filter(isPlayableFile);
   const selectedTrackFile =
     availableTrackFiles.find((file) => file.file_id === selectedTrackFileId) ??
     availableTrackFiles[0] ??
@@ -600,6 +592,7 @@ export function LibraryItemDetailView({
   const itemFacts = [
     detail.year ? String(detail.year) : null,
     detail.rating ? `评分 ${detail.rating}` : null,
+    detail.content_rating ? `分级 ${detail.content_rating}` : null,
     detail.runtime_minutes ? `${detail.runtime_minutes} 分钟` : null,
   ].filter((fact): fact is string => Boolean(fact));
   const itemPlot =
@@ -760,9 +753,9 @@ export function LibraryItemDetailView({
         }).then((ok) => {
           if (!ok) return;
           clearPlaybackHistory("item", {
-            mediaItemId: detail.media_item_id as unknown as number,
+            mediaItemId: detail.media_item_id,
           })
-            .then(({ message }) => toast.success(message))
+            .then((cleared) => toast.success(`已清除 ${cleared.deleted_states} 条观看记录`))
             .catch((e) => toast.error((e as Error).message));
         });
       }}
@@ -950,7 +943,7 @@ export function LibraryItemDetailView({
                 // sessionStorage。读 location 而不是 useSearchParams()：
                 // 后者会把整页拖进「必须包 Suspense」的预渲染约束。
                 rememberPlayerReturnPath(window.location.pathname + window.location.search);
-                navigate(playHref(detail.media_item_id as unknown as number, {
+                navigate(playHref(detail.media_item_id, {
                     season:
                       !isMovie && selectedSeriesEpisode
                         ? selectedSeriesEpisode.seasonNumber
@@ -959,6 +952,12 @@ export function LibraryItemDetailView({
                       !isMovie && selectedSeriesEpisode
                         ? selectedSeriesEpisode.episode.episode_number
                         : undefined,
+                    // 只有用户真的选过版本才带 file_id；默认展示的文件不是显式选择 (R10)
+                    fileId: playLinkFileId(
+                      availableTrackFiles.some((file) => file.file_id === selectedTrackFileId)
+                        ? selectedTrackFileId
+                        : null,
+                    ),
                   }),);
               }}
             />
@@ -1054,7 +1053,7 @@ export function LibraryItemDetailView({
             onPlay={(chapter) => {
               rememberPlayerReturnPath(window.location.pathname + window.location.search);
               navigate(
-                playHref(detail.media_item_id as unknown as number, {
+                playHref(detail.media_item_id, {
                   season: !isMovie && selectedSeriesEpisode ? selectedSeriesEpisode.seasonNumber : undefined,
                   episode: !isMovie && selectedSeriesEpisode ? selectedSeriesEpisode.episode.episode_number : undefined,
                   tSeconds: Math.floor(chapter.start_ms / 1000),
@@ -1661,19 +1660,8 @@ export function SeasonEpisodesSection<F extends { file_id: string; season: numbe
   /** 变化即静默重拉本季分集（页面内改了观看状态后），不重置选中集与滚动位置 */
   refreshKey?: number;
 }) {
-  // 季清单：新契约详情不下发 seasons，从文件里实有的季号推导
-  const seasons = useMemo(() => {
-    const set = new Set<number>();
-    for (const f of detail.files) {
-      if (f.season != null) set.add(f.season);
-    }
-    return [...set].sort((a, b) => a - b);
-  }, [detail.files]);
-  // 哪些季真在库——台账文件的季号集合（这里与 seasons 同源）
-  const ownedSeasons = useMemo(
-    () => new Set(detail.files.map((f) => f.season).filter((v): v is number => v != null)),
-    [detail.files],
-  );
+  const seasons = detail.seasons;
+  const ownedSeasons = useMemo(() => new Set(detail.seasons), [detail.seasons]);
   // 默认落在第一个在库的季，而不是季号最小的那一季：只存了第 5、6 季的剧，
   // 打开详情页就停在满屏置灰的第 1 季，第一眼像"我的片子没了"
   const defaultSeason = seasons.find((s) => ownedSeasons.has(s)) ?? seasons[0];
@@ -1773,7 +1761,7 @@ export function SeasonEpisodesSection<F extends { file_id: string; season: numbe
     [detail.files],
   );
   const current =
-    data?.season_number === season
+    data !== null && data.season_number === season
       ? (data.episodes.find((e) => e.episode_number === selected) ?? null)
       : null;
   const currentFiles = useMemo(

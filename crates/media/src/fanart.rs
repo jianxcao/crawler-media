@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
 use serde_json::Value;
 use sha2::Digest;
+use std::collections::BTreeMap;
 
 use crate::client::TmdbError;
 
@@ -48,17 +48,13 @@ fn parse_images_from_value(val: Option<&Value>) -> Vec<FanartImage> {
             .and_then(|l| l.as_str())
             .map(|s| s.to_string());
         let likes = parse_likes(item.get("likes"));
-        let season = item
-            .get("season")
-            .and_then(|s| {
-                if let Some(str_val) = s.as_str() {
-                    str_val.parse::<u32>().ok()
-                } else if let Some(num_val) = s.as_u64() {
-                    Some(num_val as u32)
-                } else {
-                    None
-                }
-            });
+        let season = item.get("season").and_then(|s| {
+            if let Some(str_val) = s.as_str() {
+                str_val.parse::<u32>().ok()
+            } else {
+                s.as_u64().map(|num_val| num_val as u32)
+            }
+        });
 
         result.push(FanartImage {
             url: url.to_string(),
@@ -98,13 +94,13 @@ fn pick_best_image(candidates: &[FanartImage], languages: &[&str]) -> Option<Fan
             .collect();
 
         if !matched.is_empty() {
-            matched.sort_by(|a, b| b.likes.cmp(&a.likes));
+            matched.sort_by_key(|image| std::cmp::Reverse(image.likes));
             return Some((*matched[0]).clone());
         }
     }
 
     let mut all: Vec<&FanartImage> = candidates.iter().collect();
-    all.sort_by(|a, b| b.likes.cmp(&a.likes));
+    all.sort_by_key(|image| std::cmp::Reverse(image.likes));
     Some((*all[0]).clone())
 }
 
@@ -182,17 +178,36 @@ impl<H: crate::client::CatalogGet> crate::client::CatalogGet for DirectGet<'_, H
 
 pub struct FanartClient<H> {
     http: H,
-    cache: crate::cache::CatalogCache,
+    cache: std::sync::Arc<crate::cache::CatalogCache>,
     api_key: String,
+}
+
+/// Opens (and on first use initializes) the shared Fanart cache connection.
+/// Long-lived services open it once and build light clients per request.
+pub fn open_cache(
+    catalog_db: &std::path::Path,
+) -> Result<std::sync::Arc<crate::cache::CatalogCache>, TmdbError> {
+    Ok(std::sync::Arc::new(
+        crate::cache::CatalogCache::open_source(catalog_db, 0, "fanart")?,
+    ))
 }
 
 impl<H: crate::client::CatalogGet> FanartClient<H> {
     pub fn new(http: H, catalog_db: &std::path::Path, api_key: &str) -> Result<Self, TmdbError> {
-        Ok(Self {
+        let cache = open_cache(catalog_db)?;
+        Ok(Self::with_cache(http, cache, api_key))
+    }
+
+    pub fn with_cache(
+        http: H,
+        cache: std::sync::Arc<crate::cache::CatalogCache>,
+        api_key: &str,
+    ) -> Self {
+        Self {
             http,
-            cache: crate::cache::CatalogCache::open_source(catalog_db, 0, "fanart")?,
+            cache,
             api_key: api_key.to_string(),
-        })
+        }
     }
 
     pub fn tv(&self, tvdb_id: &str, languages: &[&str]) -> Result<FanartSet, TmdbError> {
@@ -205,7 +220,8 @@ impl<H: crate::client::CatalogGet> FanartClient<H> {
             inner: &self.http,
             url: &url,
         };
-        self.cache.get_or_fetch(&direct, &key, |body| parse_fanart(body, languages))
+        self.cache
+            .get_or_fetch(&direct, &key, |body| parse_fanart(body, languages))
     }
 
     pub fn movie(&self, tmdb_id: &str, languages: &[&str]) -> Result<FanartSet, TmdbError> {
@@ -218,7 +234,8 @@ impl<H: crate::client::CatalogGet> FanartClient<H> {
             inner: &self.http,
             url: &url,
         };
-        self.cache.get_or_fetch(&direct, &key, |body| parse_fanart(body, languages))
+        self.cache
+            .get_or_fetch(&direct, &key, |body| parse_fanart(body, languages))
     }
 }
 

@@ -57,7 +57,7 @@ fn one_failed_file_does_not_discard_successful_files_from_same_torrent() {
             exclude: false,
         }],
         keep_old_versions: false,
-};
+    };
     let subscribe = Subscribe {
         id: SubscribeId::new(),
         user_id: UserId::new(),
@@ -111,6 +111,9 @@ fn one_failed_file_does_not_discard_successful_files_from_same_torrent() {
             facts: SubscribeFacts::default(),
             downloader: &downloader,
             library_root: &tmp.path().join("library"),
+            library_id: Some(domain::LibraryId::new()),
+            root_id: Some("test-root".into()),
+            config_revision: None,
             transfer_mode: Some(TransferMode::Copy),
             scrape: false,
             hooks: None,
@@ -143,8 +146,8 @@ fn one_failed_file_does_not_discard_successful_files_from_same_torrent() {
         rejected: vec![],
         outcome: RunOutcome {
             facts: SubscribeFacts::default(),
-            ledger: vec![],
-            ledger_sources: vec![],
+            files: vec![],
+            file_sources: vec![],
             removed_paths: vec![],
             completed: false,
             transferred_enclosures: vec![],
@@ -160,11 +163,10 @@ fn one_failed_file_does_not_discard_successful_files_from_same_torrent() {
     let outcome = collect_completed(added, &Probe)
         .expect("partial collection should return persistable results");
 
-    assert_eq!(outcome.ledger.len(), 1);
-    assert_eq!(outcome.ledger[0].season, Some(1));
-    assert_eq!(outcome.ledger[0].episode, Some(1));
+    assert_eq!(outcome.files.len(), 1);
+    assert_eq!(outcome.files[0].units, vec![domain::UnitKey::new(1, 1)]);
     assert_eq!(outcome.collection_errors.len(), 1);
     assert!(outcome.transferred_enclosures.is_empty());
-    assert_eq!(outcome.ledger[0].quality_source, QualitySource::Probe);
-    assert_ne!(outcome.ledger[0].id, LedgerId::new());
+    assert_eq!(outcome.files[0].file.quality_source, QualitySource::Probe);
+    assert_ne!(outcome.files[0].file.file_id, LedgerId::new());
 }

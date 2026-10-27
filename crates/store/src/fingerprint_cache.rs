@@ -2,6 +2,10 @@ use rusqlite::{OptionalExtension, params};
 
 use super::{Store, StoreError};
 
+#[cfg(test)]
+#[path = "fingerprint_cache_tests.rs"]
+mod tests;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FingerprintCacheEntry {
     pub cache_key: String,
@@ -28,7 +32,7 @@ impl Store {
             .query_row(
                 "SELECT cache_key, algorithm_version, sample_duration_secs,
                         media_duration_ms, intro_json, outro_json
-                 FROM fingerprint_cache WHERE ledger_id = ?1",
+                 FROM fingerprint_cache WHERE file_id = ?1",
                 params![ledger_id],
                 |row| {
                     Ok((
@@ -71,12 +75,44 @@ impl Store {
         ledger_id: &str,
         cache: &FingerprintCacheEntry,
     ) -> Result<(), StoreError> {
-        self.library.execute(
+        self.put_fingerprint_cache_checked(ledger_id, None, cache)
+    }
+
+    /// Persist a cache captured from `expected`. `None` keeps the unchecked write
+    /// for callers that have no pinned version; a pinned version that no longer
+    /// matches is refused and writes nothing.
+    pub fn put_fingerprint_cache_checked(
+        &self,
+        ledger_id: &str,
+        expected: Option<&domain::FileVersion>,
+        cache: &FingerprintCacheEntry,
+    ) -> Result<(), StoreError> {
+        // Reserve the writer before reading the expected version. A second Store
+        // can publish a new source while our API's in-process mutex is held.
+        let tx = crate::write_tx(&self.library)?;
+        if let Some(expected) = expected {
+            let current: Option<(i64, String)> = tx
+                .query_row(
+                    "SELECT file_revision, source_version FROM library_files WHERE file_id = ?1",
+                    [ledger_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((revision, source_version)) = current else {
+                return Err(StoreError::Missing(format!("file_deleted: {ledger_id}")));
+            };
+            if revision != expected.revision || source_version != expected.source_version {
+                return Err(StoreError::Protected(format!(
+                    "fingerprint source changed: {ledger_id}"
+                )));
+            }
+        }
+        tx.execute(
             "INSERT INTO fingerprint_cache (
-                 ledger_id, cache_key, algorithm_version, sample_duration_secs,
+                 file_id, cache_key, algorithm_version, sample_duration_secs,
                  media_duration_ms, intro_json, outro_json, captured_at_ms
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(ledger_id) DO UPDATE SET
+             ON CONFLICT(file_id) DO UPDATE SET
                cache_key = excluded.cache_key,
                algorithm_version = excluded.algorithm_version,
                sample_duration_secs = excluded.sample_duration_secs,
@@ -99,6 +135,7 @@ impl Store {
                 super::unix_now() * 1000,
             ],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -108,8 +145,8 @@ impl Store {
     ) -> Result<Option<MediaInfoCacheVersion>, StoreError> {
         self.library
             .query_row(
-                "SELECT source_version, format_duration_ms FROM file_meta
-                 WHERE ledger_id = ?1 AND tracks_version >= ?2 AND video_json IS NOT NULL
+                "SELECT source_version, format_duration_ms FROM file_details
+                 WHERE file_id = ?1 AND tracks_version >= ?2 AND video_json IS NOT NULL
                    AND source_version IS NOT NULL",
                 params![ledger_id, super::library::CURRENT_TRACKS_VERSION],
                 |row| {
@@ -125,7 +162,7 @@ impl Store {
 
     pub fn delete_fingerprint_cache(&self, ledger_id: &str) -> Result<(), StoreError> {
         self.library.execute(
-            "DELETE FROM fingerprint_cache WHERE ledger_id = ?1",
+            "DELETE FROM fingerprint_cache WHERE file_id = ?1",
             params![ledger_id],
         )?;
         Ok(())

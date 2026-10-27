@@ -10,6 +10,14 @@ use super::{Store, StoreError};
 
 pub mod session_ids;
 pub use session_ids::{PlaySessionBinding, PlaySessionIdState};
+mod assertions;
+mod event;
+mod event_duration;
+pub mod mutate;
+pub mod source;
+pub use source::PlaybackSource;
+pub mod types;
+pub use types::*;
 pub const UNIT_WHOLE: i32 = -1;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -26,6 +34,9 @@ pub struct UnitState {
     /// historical favourite whose time is unknown. Callers must not substitute
     /// `updated_at`: that clock still moves on playback.
     pub favorite_at: i64,
+    /// `played_changed_at_ms` of an explicit played assertion on this exact
+    /// row; `None` when the row carries no assertion.
+    pub played_assertion_at_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,7 +84,7 @@ pub struct PlayLogRow {
     pub media_id: MediaId,
     pub season: Option<i32>,
     pub episode: Option<i32>,
-    pub device_id: Option<String>,
+    pub device_id: String,
     pub client: Option<String>,
     pub device_name: Option<String>,
     pub play_method: String,
@@ -102,11 +113,15 @@ mod log_scope;
 mod logs;
 mod retention;
 mod sessions;
+mod unit_resume;
 mod units;
+mod user_summary;
 mod watch_aggregate;
 
+pub use assertions::{EffectiveAssertion, PlayedAssertionScope};
 pub use log_scope::{PlaybackLogPage, PlaybackLogScope};
 pub use retention::{PlaybackRetentionBatch, PlaybackRetentionPreview};
+pub use user_summary::UserLibrarySummary;
 pub use watch_aggregate::{
     WatchClient, WatchDay, WatchMedia, WatchMember, WatchReport, WatchTotals, WatchWindow,
 };
@@ -137,9 +152,7 @@ impl SessionRow {
 
 impl PlayLogRow {
     pub fn revocable(&self) -> bool {
-        self.device_id
-            .as_deref()
-            .is_some_and(|id| revocable_identity(id, &self.play_method))
+        revocable_identity(&self.device_id, &self.play_method)
     }
 }
 
@@ -149,10 +162,10 @@ impl Store {
         &self,
         operation: impl FnOnce(&Self) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
-        if !self.subscribe.is_autocommit() {
+        if !self.library.is_autocommit() {
             return operation(self);
         }
-        let transaction = self.subscribe.unchecked_transaction()?;
+        let transaction = crate::write_tx(&self.library)?;
         let result = operation(self)?;
         transaction.commit()?;
         Ok(result)

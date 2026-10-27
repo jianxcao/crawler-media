@@ -4,12 +4,12 @@
 use domain::LedgerId;
 use store::{ChapterFrameTask, Store};
 
-fn task(ledger: LedgerId, version: &str, hash: &str) -> ChapterFrameTask {
+fn task(file: LedgerId, version: &str, hash: &str) -> ChapterFrameTask {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     ChapterFrameTask {
         id: format!("task-{id:08}"),
-        ledger_id: ledger,
+        file_id: file,
         source_version: version.into(),
         targets: vec![(0, 10_000), (10_000, 20_000)],
         targets_hash: hash.into(),
@@ -24,23 +24,29 @@ fn counts(store: &Store) -> store::ChapterFrameTaskCounts {
 fn duplicate_version_and_targets_are_idempotent() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path()).unwrap();
-    let ledger = LedgerId::new();
+    let file = LedgerId::new();
 
-    assert!(store
-        .enqueue_chapter_frame_task(&task(ledger, "v1", "hash-a"))
-        .unwrap());
+    assert!(
+        store
+            .enqueue_chapter_frame_task(&task(file, "v1", "hash-a"))
+            .unwrap()
+    );
     assert!(
         !store
-            .enqueue_chapter_frame_task(&task(ledger, "v1", "hash-a"))
+            .enqueue_chapter_frame_task(&task(file, "v1", "hash-a"))
             .unwrap(),
         "same version/hash must not create a second obligation"
     );
-    assert!(store
-        .enqueue_chapter_frame_task(&task(ledger, "v1", "hash-b"))
-        .unwrap());
-    assert!(store
-        .enqueue_chapter_frame_task(&task(ledger, "v2", "hash-a"))
-        .unwrap());
+    assert!(
+        store
+            .enqueue_chapter_frame_task(&task(file, "v1", "hash-b"))
+            .unwrap()
+    );
+    assert!(
+        store
+            .enqueue_chapter_frame_task(&task(file, "v2", "hash-a"))
+            .unwrap()
+    );
 
     let pending = store.pending_chapter_frame_tasks(10).unwrap();
     assert_eq!(pending.len(), 3);
@@ -72,8 +78,8 @@ fn pending_is_fifo_and_bounded_by_limit() {
 fn claim_is_cas_and_terminal_ack_is_visible() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path()).unwrap();
-    let ledger = LedgerId::new();
-    let entry = task(ledger, "v1", "hash");
+    let file = LedgerId::new();
+    let entry = task(file, "v1", "hash");
     store.enqueue_chapter_frame_task(&entry).unwrap();
 
     assert!(store.claim_chapter_frame_task(&entry.id).unwrap());

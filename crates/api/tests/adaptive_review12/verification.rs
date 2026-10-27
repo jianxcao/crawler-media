@@ -16,7 +16,7 @@ fn a_version_with_neither_segment_must_conflict_with_shared_episode_markers() {
         let ch = &rep
             .chapter_updates
             .iter()
-            .find(|(id, _)| id == &b.id.to_string())
+            .find(|(id, _)| id == &b.file.file_id.to_string())
             .unwrap()
             .1;
         println!(

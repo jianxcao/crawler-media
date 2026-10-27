@@ -120,7 +120,8 @@ pub fn has_explicit_season(raw: &str) -> bool {
         let at_word = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
         at_word
             && bytes[i] == b'S'
-            && (bytes.get(i + 1).is_some_and(u8::is_ascii_digit) || upper[i..].starts_with("SEASON"))
+            && (bytes.get(i + 1).is_some_and(u8::is_ascii_digit)
+                || upper[i..].starts_with("SEASON"))
     })
 }
 
@@ -198,11 +199,12 @@ fn scan_tokens_for_season_episode(tokens: &[String]) -> (Option<u32>, Option<u32
         // 1. Season xx
         if last_was_season_word {
             last_was_season_word = false;
-            if let Ok(s) = token.parse::<u32>() {
-                if season.is_none() && s < 100 {
-                    season = Some(s);
-                    continue;
-                }
+            if let Ok(s) = token.parse::<u32>()
+                && season.is_none()
+                && s < 100
+            {
+                season = Some(s);
+                continue;
             }
         }
         if upper == "SEASON" {
@@ -213,16 +215,15 @@ fn scan_tokens_for_season_episode(tokens: &[String]) -> (Option<u32>, Option<u32
         // 2. Episode xx
         if last_was_episode_word {
             last_was_episode_word = false;
-            if plausible_episode(token) {
-                if let Ok(e) = token.parse::<u32>() {
-                    if episode.is_none() {
-                        episode = Some(e);
-                        if season.is_none() {
-                            season = Some(1);
-                        }
-                        continue;
-                    }
+            if plausible_episode(token)
+                && let Ok(e) = token.parse::<u32>()
+                && episode.is_none()
+            {
+                episode = Some(e);
+                if season.is_none() {
+                    season = Some(1);
                 }
+                continue;
             }
         }
         if upper == "EPISODE" {
@@ -231,7 +232,7 @@ fn scan_tokens_for_season_episode(tokens: &[String]) -> (Option<u32>, Option<u32
         }
 
         // 3. S01E01 或 S01E01-E04
-        if upper.starts_with('S') {
+        if let Some(after_season) = upper.strip_prefix('S') {
             if let Some(e_pos) = upper.find('E') {
                 if e_pos > 1 {
                     let s_str = &upper[1..e_pos];
@@ -250,14 +251,15 @@ fn scan_tokens_for_season_episode(tokens: &[String]) -> (Option<u32>, Option<u32
                 }
             } else {
                 // S01 (单季无集)
-                let s_str = &upper[1..];
-                if !s_str.is_empty() && s_str.chars().all(|c| c.is_ascii_digit()) {
-                    if let Ok(s) = s_str.parse::<u32>() {
-                        if season.is_none() && s < 100 {
-                            season = Some(s);
-                            continue;
-                        }
-                    }
+                let s_str = after_season;
+                if !s_str.is_empty()
+                    && s_str.chars().all(|c| c.is_ascii_digit())
+                    && let Ok(s) = s_str.parse::<u32>()
+                    && season.is_none()
+                    && s < 100
+                {
+                    season = Some(s);
+                    continue;
                 }
             }
         }
@@ -297,12 +299,12 @@ fn parse_ep_numbers(ep_part: &str) -> (Option<u32>, Option<u32>) {
         .split(|c: char| !c.is_ascii_digit())
         .filter(|text| plausible_episode(text))
         .collect();
-    if digits.is_empty() {
-        if let Some(token) = ep_part.split(|c: char| !c.is_ascii_digit()).find(|text| {
-            text.len() == 8 && boundary::is_calendar_date_text(text)
-        }) {
-            boundary::reject_date_token(token);
-        }
+    if digits.is_empty()
+        && let Some(token) = ep_part
+            .split(|c: char| !c.is_ascii_digit())
+            .find(|text| text.len() == 8 && boundary::is_calendar_date_text(text))
+    {
+        boundary::reject_date_token(token);
     }
     match digits.as_slice() {
         [from] => (from.parse().ok(), None),
@@ -323,7 +325,10 @@ mod season_inferred_tests {
     #[test]
     fn missing_season_marker_is_flagged_as_inferred() {
         let r = super::parse("Show Episode 13 1080p WEB-DL");
-        assert_eq!((r.season, r.episode, r.season_inferred), (Some(1), Some(13), true));
+        assert_eq!(
+            (r.season, r.episode, r.season_inferred),
+            (Some(1), Some(13), true)
+        );
         assert!(super::parse("Show E05 1080p").season_inferred);
         assert!(!super::parse("Show.S01E05.1080p").season_inferred);
         assert!(!super::parse("Show Season 2 Episode 3").season_inferred);

@@ -101,32 +101,33 @@ fn find_library_links(store: &crate::Store, media: &domain::Media) -> Vec<Value>
         .as_deref()
         .and_then(|id| {
             store
-                .get_media_by_alias_kind("tmdb_id", id, Some(media.kind))
+                .get_media_by_alias_kind("tmdb", id, Some(media.kind))
                 .ok()
                 .flatten()
         })
         .map(|m| m.id)
         .unwrap_or(media.id);
     let mut links = Vec::new();
-    for row in store.list_ledger().unwrap_or_default() {
-        if row.media_id == canonical_id || row.media_id == media.id {
+    for row in store
+        .file_coverage_for_media_batch(&[canonical_id, media.id])
+        .unwrap_or_default()
+    {
+        {
             if let Some(owner) = store
-                .get_media(row.media_id)
+                .get_media(row.file.media_id)
                 .ok()
                 .flatten()
-                .and_then(|m| crate::http::library::library_for_row(store, &row, &m))
-            {
-                if !links
+                .and_then(|m| crate::http::library::library_for_file(store, &row.file, &m))
+                && !links
                     .iter()
                     .any(|link: &Value| link["library_id"] == owner.id)
                 {
                     links.push(json!({
                         "library_id": owner.id,
                         "library_name": owner.name,
-                        "media_item_id": row.media_id.to_string(),
+                        "media_item_id": row.file.media_id.to_string(),
                     }));
                 }
-            }
         }
     }
     links
@@ -350,11 +351,10 @@ fn tmdb_id_for(
     }
     // Douban id: alias lookup in local media table, then catalog search.
     let store = state.store.lock();
-    if let Some(media) = store.get_media_by_alias("douban_id", &tid).ok().flatten() {
-        if let Some(tmdb) = media.tmdb_id {
+    if let Some(media) = store.get_media_by_alias("douban", &tid).ok().flatten()
+        && let Some(tmdb) = media.tmdb_id {
             return Ok(Some(tmdb));
         }
-    }
     drop(store);
     match kind {
         domain::MediaKind::Movie => catalog.search_movie(raw).map(|hits| {
@@ -507,10 +507,10 @@ fn douban_detail_blocking(state: &ApiState, id: &str) -> Response {
     // 优先本地 media 表映射（订阅/认领时 douban_id → tmdb_id 已入库）：
     // 有映射走完整 TMDB 详情。
     let store = state.store.lock();
-    let local_media = store.get_media_by_alias("douban_id", id).ok().flatten();
+    let local_media = store.get_media_by_alias("douban", id).ok().flatten();
     drop(store);
-    if let Some(media) = local_media {
-        if let Some(tmdb_id) = media.tmdb_id {
+    if let Some(media) = local_media
+        && let Some(tmdb_id) = media.tmdb_id {
             let kind = if media.kind == domain::MediaKind::Tv {
                 "tv"
             } else {
@@ -518,7 +518,6 @@ fn douban_detail_blocking(state: &ApiState, id: &str) -> Response {
             };
             return media_detail_inner(state, kind, &tmdb_id);
         }
-    }
 
     // 豆瓣 Rexxar 移动 API：实时拉取该条目详情与演职员表（带头像）
     let (douban_rexxar, douban_celebrities) = {
@@ -749,4 +748,40 @@ fn fetch_douban_celebrities(id: &str) -> Option<Value> {
     .ok()?;
     let body = response.into_body().read_to_string().ok()?;
     serde_json::from_str(&body).ok()
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PutMetadataOverridesRequest {
+    pub scope: domain::EntityScope,
+    pub locale: String,
+    pub fields: domain::MetadataFields,
+    pub expected_revision: i64,
+}
+
+pub(crate) async fn put_metadata_overrides(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    axum::Json(payload): axum::Json<PutMetadataOverridesRequest>,
+) -> Response {
+    let Ok(media_id) = id.parse::<domain::MediaId>() else {
+        return err(StatusCode::BAD_REQUEST, "invalid_id", "Invalid media ID");
+    };
+
+    let result = state.store.lock().set_metadata_overrides(
+        media_id,
+        payload.scope,
+        &payload.locale,
+        &payload.fields,
+        payload.expected_revision,
+    );
+
+    match result {
+        Ok(rev) => ok(json!({ "revision": rev })).into_response(),
+        Err(store::StoreError::Conflict(msg)) => err(StatusCode::CONFLICT, "conflict", &msg),
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store_error",
+            &e.to_string(),
+        ),
+    }
 }

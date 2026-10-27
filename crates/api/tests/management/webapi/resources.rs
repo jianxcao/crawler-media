@@ -40,7 +40,7 @@ async fn rule_sets_lists_seeded_default() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = json_body(response).await;
     let sets = body["data"].as_array().unwrap();
-    assert!(sets.len() >= 1);
+    assert!(!sets.is_empty());
     assert!(sets.iter().any(|set| set["is_default"] == true));
 }
 

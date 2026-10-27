@@ -90,21 +90,18 @@ impl LogBuffer {
         let level_norm = level.map(|l| l.to_ascii_uppercase());
 
         let iter = lock.entries.iter().rev().filter(|entry| {
-            if let Some(ref l) = level_norm {
-                if !l.is_empty() && &entry.level != l {
+            if let Some(ref l) = level_norm
+                && !l.is_empty() && &entry.level != l {
                     return false;
                 }
-            }
-            if let Some(ref t) = target_norm {
-                if !t.is_empty() && !entry.target.to_ascii_lowercase().contains(t) {
+            if let Some(ref t) = target_norm
+                && !t.is_empty() && !entry.target.to_ascii_lowercase().contains(t) {
                     return false;
                 }
-            }
-            if let Some(ref k) = keyword_norm {
-                if !k.is_empty() && !entry.message.to_ascii_lowercase().contains(k) {
+            if let Some(ref k) = keyword_norm
+                && !k.is_empty() && !entry.message.to_ascii_lowercase().contains(k) {
                     return false;
                 }
-            }
             true
         });
 

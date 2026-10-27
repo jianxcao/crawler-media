@@ -1,5 +1,4 @@
 use super::*;
-use media_server::provider::MediaServerProvider;
 
 fn standard_auth(device: &str) -> String {
     format!(
@@ -10,17 +9,20 @@ fn standard_auth(device: &str) -> String {
 #[tokio::test]
 async fn standard_identity_metadata_and_stop_are_independent() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, _, id) = app(tmp.path());
+    let (app, media, id) = app(tmp.path());
     let store = Store::open(tmp.path().join("data")).unwrap();
     for device in ["bedroom", "living-room"] {
-        store.set_user_token(admin(), &format!("{device}-token")).unwrap();
+        store
+            .set_user_token(admin(), &format!("{device}-token"))
+            .unwrap();
+        let session = issue_session(&store, device, media);
         assert_eq!(
             send(
                 &app,
                 "POST",
                 "/Sessions/Playing",
                 &standard_auth(device),
-                json!({"ItemId":id,"PositionTicks":0}),
+                json!({"ItemId":id,"PositionTicks":0,"PlaySessionId":session}),
                 None
             )
             .await
@@ -28,18 +30,18 @@ async fn standard_identity_metadata_and_stop_are_independent() {
             StatusCode::NO_CONTENT
         );
     }
-    let store = Store::open(tmp.path().join("data")).unwrap();
     let bedroom = store.get_session(admin(), "bedroom").unwrap().unwrap();
     assert_eq!(bedroom.device_name.as_deref(), Some("Same Name"));
     assert_eq!(bedroom.client_version.as_deref(), Some("7.1"));
     assert!(bedroom.revocable());
+    let bedroom_session = bedroom.play_session_id.clone().unwrap();
     assert_eq!(
         send(
             &app,
             "POST",
             "/Sessions/Playing/Stopped",
             &standard_auth("bedroom"),
-            json!({"ItemId":id,"PositionTicks":10000000}),
+            json!({"ItemId":id,"PositionTicks":10000000,"PlaySessionId":bedroom_session}),
             None
         )
         .await
@@ -173,6 +175,7 @@ async fn missing_protocol_identity_is_correlated_but_not_revocable() {
     }
 }
 
+#[allow(dead_code)]
 fn provider(root: &Path) -> api::media_server_provider::ApiServerProvider {
     api::media_server_provider::ApiServerProvider::new(
         ApiState::new(
@@ -188,88 +191,16 @@ fn provider(root: &Path) -> api::media_server_provider::ApiServerProvider {
 }
 
 #[tokio::test]
-async fn direct_jellyfin_progress_preserves_legacy_preferences_and_completion() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (_, media, id) = app(tmp.path());
-    let store = Store::open(tmp.path().join("data")).unwrap();
-    store
-        .upsert_unit(
-            admin(),
-            media,
-            0,
-            0,
-            45000,
-            Some(false),
-            Some(true),
-            Some(120000),
-            Some("embedded:1"),
-            Some("off"),
-            true,
-            1,
-        )
-        .unwrap();
-    provider(tmp.path())
-        .update_progress(admin(), &id, 120000, false)
-        .await
-        .unwrap();
-    let unit = store.unit_state(admin(), media, -1, -1).unwrap().unwrap();
-    assert!(unit.played);
-    assert!(unit.favorite);
-    assert_eq!(unit.duration_ms, Some(120000));
-    assert_eq!(unit.audio_track.as_deref(), Some("embedded:1"));
-    assert_eq!(unit.subtitle_track.as_deref(), Some("off"));
-    assert_eq!(unit.play_count, 1);
-}
-
-#[tokio::test]
-async fn direct_jellyfin_progress_migration_failure_does_not_shadow_state() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (_, media, id) = app(tmp.path());
-    let provider = provider(tmp.path());
-    let store = Store::open(tmp.path().join("data")).unwrap();
-    store
-        .upsert_unit(
-            admin(),
-            media,
-            0,
-            0,
-            45000,
-            Some(true),
-            Some(true),
-            Some(120000),
-            None,
-            None,
-            true,
-            1,
-        )
-        .unwrap();
-    let db = rusqlite::Connection::open(tmp.path().join("data/subscribe.db")).unwrap();
-    db.execute_batch("CREATE TRIGGER block_direct_copy BEFORE INSERT ON playback_units WHEN NEW.season=-1 BEGIN SELECT RAISE(ABORT,'migration blocked'); END;").unwrap();
-    assert!(
-        provider
-            .update_progress(admin(), &id, 45000, false)
-            .await
-            .is_err()
-    );
-    assert!(store.unit_state(admin(), media, -1, -1).unwrap().is_none());
-    assert!(
-        store
-            .unit_state(admin(), media, 0, 0)
-            .unwrap()
-            .unwrap()
-            .favorite
-    );
-}
-
-#[tokio::test]
 async fn artwork_remains_public_and_streams_require_authentication() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, _, id) = app(tmp.path());
-    std::fs::write(tmp.path().join("poster.jpg"), b"poster").unwrap();
+    let (app, media, id) = app(tmp.path());
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let compact = file_id(&store, media).to_string().replace('-', "");
+    std::fs::write(tmp.path().join("data/library/movies/poster.jpg"), b"poster").unwrap();
     let poster = app
         .clone()
         .oneshot(
-            Request::get(format!("/api/v1/posters/{id}"))
+            Request::get(format!("/api/v1/posters/{compact}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -290,7 +221,9 @@ async fn artwork_remains_public_and_streams_require_authentication() {
 #[tokio::test]
 async fn metrics_are_best_effort_but_do_not_accept_invalid_identity() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, _, id) = app(tmp.path());
+    let (app, media, _) = app(tmp.path());
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let file = file_id(&store, media);
     let invalid = send(
         &app,
         "POST",
@@ -301,7 +234,7 @@ async fn metrics_are_best_effort_but_do_not_accept_invalid_identity() {
     )
     .await;
     assert_eq!(invalid.status(), StatusCode::OK);
-    let db = rusqlite::Connection::open(tmp.path().join("data/subscribe.db")).unwrap();
+    let db = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
     db.execute_batch("CREATE TRIGGER block_metric BEFORE INSERT ON playback_metrics BEGIN SELECT RAISE(ABORT,'metric blocked'); END;").unwrap();
     assert_eq!(
         send(
@@ -309,7 +242,7 @@ async fn metrics_are_best_effort_but_do_not_accept_invalid_identity() {
             "POST",
             "/api/v1/playback/metrics",
             "Bearer admin-token",
-            json!({"library_file_id":id,"watched_ms":1000}),
+            json!({"library_file_id":file.to_string(),"watched_ms":1000}),
             None
         )
         .await
@@ -322,4 +255,85 @@ async fn metrics_are_best_effort_but_do_not_accept_invalid_identity() {
             .unwrap(),
         0
     );
+}
+
+#[tokio::test]
+async fn protocol_without_session_id_rebinds_after_source_replacement() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, media, item) = app(tmp.path());
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let initial_version = store
+        .file_coverage_by_id(file_id(&store, media))
+        .unwrap()
+        .unwrap()
+        .file
+        .version;
+    for replacement in [false, true] {
+        if replacement {
+            let old = store
+                .file_coverage_by_id(file_id(&store, media))
+                .unwrap()
+                .unwrap()
+                .file;
+            let mut next = old.clone();
+            next.version.revision += 1;
+            next.version.source_version = "replacement-source".into();
+            store
+                .publish_files(
+                    &store::library_write::WriteScope {
+                        library_id: old.library_id,
+                        config_revision: store
+                            .library_config_revision(&old.library_id.to_string())
+                            .unwrap(),
+                    },
+                    &[store::library_write::FilePublication {
+                        file: &next,
+                        units: &[domain::UnitKey::WHOLE],
+                        expected_version: Some(&old.version),
+                        nfo_observation: None,
+                        probe_required: false,
+                    }],
+                    2,
+                )
+                .unwrap();
+        }
+        let response = send(
+            &app,
+            "POST",
+            "/Sessions/Playing",
+            "Bearer admin-token",
+            json!({"ItemId":item,"PositionTicks":0}),
+            Some("protocol-device"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let session = store
+            .get_session(admin(), "protocol-device")
+            .unwrap()
+            .unwrap();
+        let binding = store
+            .play_session_binding(
+                admin(),
+                "protocol-device",
+                session.play_session_id.as_deref().unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            binding.file_revision,
+            Some(if replacement {
+                initial_version.revision + 1
+            } else {
+                initial_version.revision
+            })
+        );
+        assert_eq!(
+            binding.source_version.as_deref(),
+            Some(if replacement {
+                "replacement-source"
+            } else {
+                initial_version.source_version.as_str()
+            })
+        );
+    }
 }

@@ -1,7 +1,7 @@
 //! SQL aggregation for the playback watch-statistics report.
 //!
 //! Replaces the two full `list_logs(200_000, ..)` scans plus in-Rust grouping
-//! with one windowed aggregation on the subscribe connection. Visibility reuses
+//! with one windowed aggregation on the library connection. Visibility reuses
 //! the TEMP visible-set pattern from `playback::log_scope`.
 
 use std::collections::HashMap;
@@ -131,13 +131,12 @@ impl Store {
         // 与 log_scope 同一套做法：SAVEPOINT 之外先清空 TEMP 可见集合，
         // 错误路径回滚后再清一次，保证 scope 行不会残留给下一次调用。
         self.reset_watch_visible_media()?;
-        self.subscribe.execute_batch("SAVEPOINT watch_aggregate")?;
-        let result = self.watch_report_inner(
-            &user_text, visible, now, days, tz_secs, today, window,
-        );
+        self.library.execute_batch("SAVEPOINT watch_aggregate")?;
+        let result =
+            self.watch_report_inner(&user_text, visible, now, days, tz_secs, today, window);
         match result {
             Ok(report) => {
-                self.subscribe.execute_batch("RELEASE watch_aggregate")?;
+                self.library.execute_batch("RELEASE watch_aggregate")?;
                 Ok(report)
             }
             Err(error) => {
@@ -163,7 +162,11 @@ impl Store {
         if let Some(ids) = visible {
             self.fill_watch_visible_media(ids)?;
         }
-        let visibility = if visible.is_some() { VISIBLE_CLAUSE } else { "" };
+        let visibility = if visible.is_some() {
+            VISIBLE_CLAUSE
+        } else {
+            ""
+        };
         let current = self.window_report(
             user,
             now - window,
@@ -183,8 +186,11 @@ impl Store {
             visibility,
         )?;
         let hidden_titles = if visible.is_some() {
-            let sql = format!("{} SELECT COUNT(DISTINCT media_id) FROM scoped", scoped_cte(HIDDEN_CLAUSE));
-            let mut stmt = self.subscribe.prepare(&sql)?;
+            let sql = format!(
+                "{} SELECT COUNT(DISTINCT media_id) FROM scoped",
+                scoped_cte(HIDDEN_CLAUSE)
+            );
+            let mut stmt = self.library.prepare(&sql)?;
             let count: i64 = stmt.query_row(
                 named_params! { ":tz": tz_secs, ":start": now - window, ":end": i64::MAX, ":user": user },
                 |row| row.get(0),
@@ -234,7 +240,7 @@ impl Store {
             "{cte} SELECT COUNT(*), COALESCE(SUM(watched_ms), 0),
                     COALESCE(SUM(completed), 0), COUNT(DISTINCT user_id) FROM scoped"
         );
-        let mut stmt = self.subscribe.prepare(&sql)?;
+        let mut stmt = self.library.prepare(&sql)?;
         Ok(stmt.query_row(
             named_params! { ":tz": tz_secs, ":start": start, ":end": end, ":user": user },
             |row| {
@@ -264,7 +270,7 @@ impl Store {
                     COALESCE(SUM(completed), 0), COUNT(DISTINCT user_id)
              FROM scoped GROUP BY day"
         );
-        let mut stmt = self.subscribe.prepare(&sql)?;
+        let mut stmt = self.library.prepare(&sql)?;
         let rows = stmt.query_map(
             named_params! { ":tz": tz_secs, ":start": start, ":end": end, ":user": user },
             |row| {
@@ -308,10 +314,16 @@ impl Store {
                     COALESCE(SUM(watched_ms), 0)
              FROM scoped GROUP BY weekday, hour"
         );
-        let mut stmt = self.subscribe.prepare(&sql)?;
+        let mut stmt = self.library.prepare(&sql)?;
         let rows = stmt.query_map(
             named_params! { ":tz": tz_secs, ":start": start, ":end": end, ":user": user },
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
         )?;
         let mut hours = vec![vec![0i64; 24]; 7];
         for row in rows {
@@ -336,7 +348,7 @@ impl Store {
                     COALESCE(SUM(completed), 0)
              FROM scoped GROUP BY user_id ORDER BY user_id"
         );
-        let mut stmt = self.subscribe.prepare(&sql)?;
+        let mut stmt = self.library.prepare(&sql)?;
         let rows = stmt.query_map(
             named_params! { ":tz": tz_secs, ":start": start, ":end": end, ":user": user },
             |row| {
@@ -370,7 +382,7 @@ impl Store {
             "{cte} SELECT COALESCE(client, '直连'), COUNT(*), COALESCE(SUM(watched_ms), 0)
              FROM scoped GROUP BY 1 ORDER BY 1"
         );
-        let mut stmt = self.subscribe.prepare(&sql)?;
+        let mut stmt = self.library.prepare(&sql)?;
         let rows = stmt.query_map(
             named_params! { ":tz": tz_secs, ":start": start, ":end": end, ":user": user },
             |row| {
@@ -401,7 +413,7 @@ impl Store {
                     COUNT(DISTINCT user_id)
              FROM scoped GROUP BY media_id ORDER BY media_id"
         );
-        let mut stmt = self.subscribe.prepare(&sql)?;
+        let mut stmt = self.library.prepare(&sql)?;
         let rows = stmt.query_map(
             named_params! { ":tz": tz_secs, ":start": start, ":end": end, ":user": user },
             |row| {
@@ -422,7 +434,7 @@ impl Store {
 
     /// TEMP 可见集合：清空 + 建表（TEMP 表随连接存在，故每次调用都要清）。
     fn reset_watch_visible_media(&self) -> Result<(), StoreError> {
-        self.subscribe.execute_batch(
+        self.library.execute_batch(
             "CREATE TEMP TABLE IF NOT EXISTS request_visible_media (id TEXT PRIMARY KEY);
              DELETE FROM request_visible_media;",
         )?;
@@ -435,7 +447,7 @@ impl Store {
             let placeholders = vec!["(?)"; chunk.len()].join(",");
             let sql =
                 format!("INSERT OR IGNORE INTO request_visible_media (id) VALUES {placeholders}");
-            self.subscribe.execute(
+            self.library.execute(
                 &sql,
                 rusqlite::params_from_iter(chunk.iter().map(MediaId::to_string)),
             )?;

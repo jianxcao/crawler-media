@@ -101,7 +101,7 @@ fn spawn_site_search(
     budget: Duration,
     unreported: &Arc<UnreportedSites>,
 ) {
-    let pool = Arc::clone(&state.search_work);
+    let reservation = state.search_work.try_reserve();
     let indexer = Arc::clone(&state.indexer);
     let keyword = keyword.to_string();
     let categories = categories.to_vec();
@@ -112,16 +112,21 @@ fn spawn_site_search(
     unreported.mark_spawned(&site_id, &site_name);
     tasks.spawn(async move {
         let started = Instant::now();
-        let outcome = pool
-            .run(budget, move || {
-                indexer.search_page_categories(
-                    std::slice::from_ref(&site_for_search),
-                    &keyword,
-                    page,
-                    &categories,
-                )
-            })
-            .await;
+        let outcome = match reservation {
+            Err(error) => Err(error),
+            Ok(reservation) => {
+                reservation
+                    .run(budget, move || {
+                        indexer.search_page_categories(
+                            std::slice::from_ref(&site_for_search),
+                            &keyword,
+                            page,
+                            &categories,
+                        )
+                    })
+                    .await
+            }
+        };
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -216,7 +221,9 @@ pub(super) async fn collect_site_results(
         // 跨请求语义：permit 是全局共享的，本请求只承诺「用此刻能拿到的额度补位」；
         // 一个站点若此刻拿不到 permit 仍立即降级为单站失败，不排队等待
         // （见 tests/request_admission.rs::site_over_capacity_degrades_to_per_site_failure）。
-        while tasks.len() < state.search_work.available_permits().max(1) {
+        // 派生时就预留 permit（见 `spawn_site_search`），所以“还能补几个”就是此刻的
+        // 剩余 permit；窗口空时仍派生一个，让拿不到额度的站点立即降级为单站失败。
+        while tasks.is_empty() || state.search_work.available_permits() > 0 {
             let Some(site) = pending.next() else { break };
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -339,17 +346,22 @@ fn spawn_title_source(
     keyword: &str,
     budget: Duration,
 ) {
-    let pool = Arc::clone(&state.search_work);
+    let reservation = state.search_work.try_reserve();
     let catalog = Arc::clone(&state.catalog);
     let keyword = keyword.to_string();
     set.spawn(async move {
         let searched = source.clone();
-        match pool
-            .run(budget, move || {
-                search_catalog_source(catalog.as_ref(), &searched, &keyword)
-            })
-            .await
-        {
+        let outcome = match reservation {
+            Err(error) => Err(error),
+            Ok(reservation) => {
+                reservation
+                    .run(budget, move || {
+                        search_catalog_source(catalog.as_ref(), &searched, &keyword)
+                    })
+                    .await
+            }
+        };
+        match outcome {
             Ok((hits, ok, count, err_msg)) => Ok((source, hits, ok, count, err_msg)),
             Err(error) => {
                 tracing::warn!(
@@ -412,7 +424,7 @@ pub(super) async fn search_title_sources(
     let mut titles = Vec::new();
     let mut providers = Vec::new();
     loop {
-        while set.len() < state.search_work.available_permits().max(1) {
+        while set.is_empty() || state.search_work.available_permits() > 0 {
             let Some(source) = pending.next() else { break };
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -445,12 +457,14 @@ mod tests {
         let mut out = Vec::new();
         let mut i = 0;
         while i < bytes.len() {
-            if bytes[i] == b'\\' && i + 3 < bytes.len() && bytes[i + 1] == b'x' {
-                if let Ok(byte) = u8::from_str_radix(&rendered[i + 2..i + 4], 16) {
-                    out.push(byte);
-                    i += 4;
-                    continue;
-                }
+            if bytes[i] == b'\\'
+                && i + 3 < bytes.len()
+                && bytes[i + 1] == b'x'
+                && let Ok(byte) = u8::from_str_radix(&rendered[i + 2..i + 4], 16)
+            {
+                out.push(byte);
+                i += 4;
+                continue;
             }
             out.push(bytes[i]);
             i += 1;

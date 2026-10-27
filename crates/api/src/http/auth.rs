@@ -93,13 +93,10 @@ pub(crate) async fn logout(State(state): State<ApiState>, request: Request) -> R
     tokens.sort();
     tokens.dedup();
 
-    if let Err(error) = state.store.lock().delete_session_tokens(&tokens) {
-        tracing::error!(%error, "撤销会话失败");
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        );
+    // Review L2: 撤销会话要写 app.db，走 blocking 池而不是在执行器上拿锁。
+    match auth_store_write(&state, move |store| store.delete_session_tokens(&tokens)).await {
+        Ok(revoked_tokens) => tracing::debug!(revoked_tokens, "已撤销会话 token"),
+        Err(response) => return response,
     }
 
     let mut response = ok(Value::Null).into_response();
@@ -120,15 +117,27 @@ fn bearer_token(request: &Request) -> Option<String> {
 }
 
 fn query_token(request: &Request) -> Option<String> {
-    let path = request.uri().path();
+    // Inside a nested router `uri()` has the mount prefix stripped; match the
+    // allow-list against the URI the client actually requested.
+    let uri = request
+        .extensions()
+        .get::<axum::extract::OriginalUri>()
+        .map_or(request.uri(), |original| &original.0);
+    let path = uri.path();
     // 窄范围 query-token：仅允许视频取流、字幕取流和直读类播放资源路由
+    let mut segments = path.split('/');
+    let is_session_stream = matches!(
+        (segments.next(), segments.next(), segments.next(), segments.next(), segments.next(), segments.next(), segments.next()),
+        (Some(""), Some("api"), Some("v1"), Some("playback"), Some("sessions"), Some(id), Some("stream")) if !id.is_empty()
+    ) && segments.next().is_none();
     let is_playback_resource = path.starts_with("/api/v1/playback/subtitles/")
+        || is_session_stream
         || path.starts_with("/Videos/")
         || path.starts_with("/playback/subtitles/");
     if !is_playback_resource {
         return None;
     }
-    request.uri().query().and_then(|query| {
+    uri.query().and_then(|query| {
         query.split('&').find_map(|pair| {
             let (key, value) = pair.split_once('=')?;
             (key.eq_ignore_ascii_case("api_key")
@@ -161,9 +170,105 @@ fn cookie_token(request: &Request) -> Option<String> {
         .map(str::to_string)
 }
 
+/// 身份 / 角色查询的绝对预算。
+///
+/// 生产上这是一次 app.db 单行读（几十微秒），走的是**专用读连接**
+/// （[`store::AppReader`]，Task 27）：长写事务期间读者读的是 WAL 的最后提交快照，
+/// 不必排在进程级 `Store` 锁后面。因此 1 s 现在只兜底两种情况——读连接拿不到
+/// 一致快照（WAL checkpoint / `busy_timeout` 用尽），或 blocking worker 卡住；
+/// 两者都给 503 `runtime.busy` + `Retry-After`，让客户端重试，而不是重建会话。
+const AUTH_READ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// 「服务繁忙，稍后重试」——**不是**身份问题。
+///
+/// 身份查询读不到一致快照（读连接 `busy`）或超过 [`AUTH_READ_DEADLINE`] 时，
+/// 请求本身并不该被判定为凭据失败：客户端应当重试，而不是重建会话或重新登录。
+/// code 用 blocking 预算同一套 `runtime.busy`，并带 `Retry-After`。
+fn auth_busy_response() -> Response {
+    let mut response = err(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "runtime.busy",
+        "服务繁忙，请稍后重试",
+    );
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    response
+}
+
+/// `auth.error` 只留给真正的读取失败（存储错误、worker panic）。
+fn auth_error_response() -> Response {
+    err(StatusCode::INTERNAL_SERVER_ERROR, "auth.error", "身份读取失败")
+}
+
+/// 库浏览端点（自带请求预算）走的 Library 读阶段失败分类。
+fn auth_stage_response(error: &store::LibraryReadError) -> Response {
+    if crate::library_read_work::error_is_unavailable(error) {
+        tracing::warn!(%error, "身份查询未在预算内完成，请求按繁忙重试");
+        auth_busy_response()
+    } else {
+        tracing::error!(%error, "身份查询失败");
+        auth_error_response()
+    }
+}
+
+/// 身份读：app.db 的专用读连接，**不拿 `Store` 锁**（Task 27）。
+///
+/// 唯一的读路径：认证、管理员角色、`/auth/me` 都从这里走，因为三者读的都是 app.db
+/// 的单行。预算内的失败一律交给 [`auth_stage_response`] 分类（繁忙→503，真错→500）。
+async fn auth_app_read<T, F>(state: &ApiState, work: F) -> Result<T, Response>
+where
+    F: FnOnce(&store::AppReader) -> Result<T, store::StoreError> + Send + 'static,
+    T: Send + 'static,
+{
+    let deadline = std::time::Instant::now() + AUTH_READ_DEADLINE;
+    crate::library_read_work::run_app_read_stage_named(state, deadline, "auth", work)
+        .await
+        .map_err(|error| auth_stage_response(&error))
+}
+
+/// 会写 app.db 的身份操作（注销会话）仍然走 `Store` 写连接。
+///
+/// 写必须与其它写者串行——那正是 `Store` 锁的职责。等不到锁时同样给繁忙（一次性
+/// 动作，重试成本低），不把写挤进读连接。
+async fn auth_store_write<T, F>(state: &ApiState, work: F) -> Result<T, Response>
+where
+    F: FnOnce(&crate::Store) -> Result<T, store::StoreError> + Send + 'static,
+    T: Send + 'static,
+{
+    let store = state.store();
+    let task = tokio::task::spawn_blocking(move || match store.try_lock_for(AUTH_READ_DEADLINE) {
+        Some(guard) => work(&guard).map_err(Some),
+        None => Err(None),
+    });
+    match tokio::time::timeout(AUTH_READ_DEADLINE, task).await {
+        Ok(Ok(Ok(value))) => Ok(value),
+        Ok(Ok(Err(Some(error)))) => {
+            tracing::error!(%error, "会话撤销失败");
+            Err(auth_error_response())
+        }
+        Ok(Ok(Err(None))) => {
+            tracing::warn!("会话撤销等不到 Store 锁，请求按繁忙重试");
+            Err(auth_busy_response())
+        }
+        Ok(Err(error)) => {
+            tracing::error!(%error, "会话撤销 worker 失败");
+            Err(auth_error_response())
+        }
+        Err(_) => {
+            tracing::warn!("会话撤销超过预算，请求按繁忙重试");
+            Err(auth_busy_response())
+        }
+    }
+}
+
 /// Resolve the acting user from the bearer token (or session cookie).
+///
+/// Review L2: 身份查询不在执行器线程上拿 `store.lock()`。库浏览端点自带请求预算
+/// （`QueryTiming`），其余端点用 [`AUTH_STORE_DEADLINE`]；两条路径共用同一段
+/// off-executor 查询，避免再分叉出另一条「直接拿锁」的捷径。
 pub(crate) async fn authenticate(
-    State(store): State<std::sync::Arc<parking_lot::Mutex<crate::Store>>>,
+    State(state): State<ApiState>,
     mut request: Request,
     next: Next,
 ) -> Response {
@@ -174,13 +279,38 @@ pub(crate) async fn authenticate(
             "未登录或会话已过期",
         );
     };
-    let Some(user_id) = store.lock().user_id_by_token(&token).ok().flatten() else {
-        return err(
-            StatusCode::UNAUTHORIZED,
-            "auth.required",
-            "未登录或会话已过期",
-        );
+    // 库浏览端点自带请求预算（`QueryTiming`），其余端点用 [`AUTH_READ_DEADLINE`]；
+    // 两条路径都是同一次 app.db 读 → 同一条专用读连接，不再分叉出「直接拿锁」的捷径。
+    let scoped_deadline = request
+        .extensions()
+        .get::<media_server::provider::QueryTiming>()
+        .map(|timing| timing.deadline);
+    let owned = token.clone();
+    let deadline = scoped_deadline.unwrap_or_else(|| std::time::Instant::now() + AUTH_READ_DEADLINE);
+    let lookup = crate::library_read_work::run_app_read_stage_named(
+        &state,
+        deadline,
+        "auth",
+        move |reader| reader.user_id_by_token(&owned),
+    )
+    .await
+    .map_err(|error| auth_stage_response(&error));
+    let user_id = match lookup {
+        Ok(Some(user_id)) => user_id,
+        Ok(None) => {
+            return err(
+                StatusCode::UNAUTHORIZED,
+                "auth.required",
+                "未登录或会话已过期",
+            );
+        }
+        Err(response) => return response,
     };
+    if scoped_deadline.is_some() {
+        request
+            .extensions_mut()
+            .insert(store::ReadCredential::new(user_id, token.clone()));
+    }
     request.extensions_mut().insert(user_id);
     request.extensions_mut().insert(token);
     // 可选身份提取：库浏览等端点对“匿名可读”与“成员可见范围”共用同一 handler。
@@ -189,9 +319,12 @@ pub(crate) async fn authenticate(
 }
 
 /// 管理员授权层：必须挂在 `authenticate` 之后（内层），读取其注入的身份。
-/// 对两套路由通吃：/api/v1 注入 `UserId`，legacy/Jellyfin 注入 `AuthUser`。
+/// 对两套路由通吃：/api/v1 注入 `UserId`，Jellyfin 协议路由注入 `AuthUser`。
+///
+/// Review L2: 角色查询同样不在执行器线程上拿 `store.lock()`；读不到角色时
+/// 区分「稍后重试」（503）与真正的内部错误（500），不再把繁忙误报成 403。
 pub(crate) async fn require_admin(
-    State(store): State<std::sync::Arc<parking_lot::Mutex<crate::Store>>>,
+    State(state): State<ApiState>,
     request: Request,
     next: Next,
 ) -> Response {
@@ -207,12 +340,13 @@ pub(crate) async fn require_admin(
             "未登录或会话已过期",
         );
     };
-    let admin = store
-        .lock()
-        .user_role(user_id)
-        .map(|role| role == "admin")
-        .unwrap_or(false);
-    if admin {
+    // 读不到角色时区分「稍后重试」（503 runtime.busy）与真正的读失败（500），
+    // 不再把繁忙误报成 403「你不是管理员」。
+    let role = match auth_app_read(&state, move |reader| reader.user_role(user_id)).await {
+        Ok(role) => role,
+        Err(response) => return response,
+    };
+    if role == "admin" {
         next.run(request).await
     } else {
         err(
@@ -227,9 +361,12 @@ pub(crate) async fn me(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
 ) -> Response {
-    let store = state.store.lock();
-    let Some(user) = store.get_user(user_id).ok().flatten() else {
-        return err(StatusCode::UNAUTHORIZED, "auth.required", "用户不存在");
+    // Review L2: 当前用户是 app.db 单行读，走 blocking 池而不是在执行器上拿锁；
+    // Task 27 起它读的是专用读连接，不再排在长写事务后面。
+    let user = match auth_app_read(&state, move |reader| reader.get_user(user_id)).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return err(StatusCode::UNAUTHORIZED, "auth.required", "用户不存在"),
+        Err(response) => return response,
     };
     ok(json!({
         "id": user.id.to_string(),
@@ -239,3 +376,6 @@ pub(crate) async fn me(
     }))
     .into_response()
 }
+
+#[cfg(test)]
+mod tests;

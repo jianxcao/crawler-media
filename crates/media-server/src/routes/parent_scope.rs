@@ -14,6 +14,7 @@ pub(super) async fn require_user_path(
     provider: &dyn MediaServerProvider,
     actual: UserId,
     path_user: Option<&str>,
+    principal: Option<crate::provider::QueryPrincipal>,
 ) -> Result<(), StatusCode> {
     let Some(path_user) = path_user else {
         return Ok(());
@@ -24,13 +25,18 @@ pub(super) async fn require_user_path(
     if matches_id || path_user.eq_ignore_ascii_case("me") {
         return Ok(());
     }
-    let user = provider
-        .get_user(actual)
-        .await
-        .map_err(|error| {
+    let user =
+        if let Some(principal) = principal {
+            provider.get_user_for_query(principal).await.map_err(|error| {
             tracing::error!(%error, user_id = %actual, "failed to resolve Jellyfin user path");
-            StatusCode::INTERNAL_SERVER_ERROR
+            error.status_code()
         })?
+        } else {
+            provider.get_user(actual).await.map_err(|error| {
+                tracing::error!(%error, user_id = %actual, "failed to resolve Jellyfin user path");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+        }
         .ok_or(StatusCode::NOT_FOUND)?;
     if user.login.eq_ignore_ascii_case(path_user) {
         Ok(())

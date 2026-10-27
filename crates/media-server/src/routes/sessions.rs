@@ -31,15 +31,15 @@ async fn report_session_event(
     paused: bool,
 ) -> StatusCode {
     // Validate session ID length and sequence if provided
-    if let Some(sid) = &body.play_session_id {
-        if sid.len() > 128 {
-            return StatusCode::BAD_REQUEST;
-        }
+    if let Some(sid) = &body.play_session_id
+        && sid.len() > 128
+    {
+        return StatusCode::BAD_REQUEST;
     }
-    if let Some(seq) = body.event_sequence {
-        if seq < 0 {
-            return StatusCode::BAD_REQUEST;
-        }
+    if let Some(seq) = body.event_sequence
+        && seq < 0
+    {
+        return StatusCode::BAD_REQUEST;
     }
     let identity = crate::provider::PlaybackEventIdentity {
         play_session_id: body.play_session_id,
@@ -65,7 +65,15 @@ async fn report_session_event(
     }
     match state
         .provider
-        .report_playback_event(user.id, item_id, position_ms, paused, client, event, identity)
+        .report_playback_event(
+            user.id,
+            item_id,
+            position_ms,
+            paused,
+            client,
+            event,
+            identity,
+        )
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT,

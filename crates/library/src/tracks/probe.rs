@@ -70,6 +70,7 @@ pub fn probe_tracks_and_duration(path: &Path) -> Result<(Tracks, Option<i64>), L
     probe_tracks_and_duration_with_program(path, "ffprobe")
 }
 
+#[cfg(test)]
 fn probe_tracks_with_program(
     path: &Path,
     program: impl AsRef<std::ffi::OsStr>,

@@ -11,21 +11,9 @@ import type { JobView } from "@/lib/api/jobs";
 // 值导入必须带 .ts 后缀的相对路径：本模块要进 node --test（见 tsconfig 注释）
 import { jobNeedsAttention } from "./job-attention.ts";
 
-/** 旧 DownloadTask 的兼容字段：新契约已删除（见 lib/api/downloaders.ts）。 */
-interface LegacyDownloadTaskFields {
-  source?: "subscription" | "manual" | "boost" | "external" | null;
-  can_replace?: boolean;
-  landing_error?: string | null;
-  rescue_message?: string | null;
-  media_item_id?: number | null;
-  poster_url?: string | null;
-}
-
-type DownloadTaskLike = DownloadTask & LegacyDownloadTaskFields;
-
 export interface DownloadTaskGroup {
   key: string;
-  mediaItemId: number | null;
+  mediaItemId: string | null;
   title: string;
   kind: string | null;
   posterUrl: string | null;
@@ -33,22 +21,27 @@ export interface DownloadTaskGroup {
 }
 
 /**
- * 任务来源的组件层派生。新契约 DownloadTask 不再下发 source 字段，按订阅上下文
- * 与媒体身份归类：有订阅引用的是订阅投递，有媒体身份（手动下载）的是 manual，
- * 两者皆无的视为刷流做种；旧形状仍优先读 source 字段。
+ * 任务来源的组件层派生。DownloadTask 不下发 source 字段，一律按 DTO 里的真实
+ * 事实归类：有订阅引用的是订阅投递，有媒体身份（手动下载）的是 manual，有来源
+ * 站点的是刷流做种，什么都没有的就是下载器里的外部种子（用户在客户端自己加的，
+ * crawler-media 没投递过），见 `site_id` 的字段说明。
  */
 export function taskSourceOf(
-  task: DownloadTaskLike,
+  task: DownloadTask,
 ): "subscription" | "manual" | "boost" | "external" {
-  if (task.source) return task.source;
   if (task.subscriptions.length > 0) return "subscription";
   if (task.media_title || task.media_kind) return "manual";
-  return "boost";
+  if (task.site_id) return "boost";
+  return "external";
 }
 
-/** 刷流做种：无媒体身份与入库流转（订阅/手动投递才有），折叠为独立分组。 */
+/**
+ * 刷流做种与下载器里的外部种子：都没有 crawler-media 的入库流转（订阅/手动投递
+ * 才有），折叠为独立分组，不计入「需要处理」也不占进行中列表的版面。
+ */
 export function isBoostTask(task: DownloadTask): boolean {
-  return taskSourceOf(task) === "boost";
+  const source = taskSourceOf(task);
+  return source === "boost" || source === "external";
 }
 
 /** 订阅投递的任务（新契约以 subscriptions 非空标识）。 */
@@ -56,13 +49,13 @@ export function isSubscriptionTask(task: DownloadTask): boolean {
   return taskSourceOf(task) === "subscription";
 }
 
-/** 媒体条目主键：新契约挪进了 subscriptions[0]，旧形状仍在任务本体上。 */
-function mediaItemIdOf(task: DownloadTaskLike): number | null {
-  return task.subscriptions[0]?.media_item_id ?? task.media_item_id ?? null;
+/** Canonical Media identity from the task's subscription context. */
+function mediaItemIdOf(task: DownloadTask): string | null {
+  return task.subscriptions[0]?.media_item_id ?? null;
 }
 
-function posterUrlOf(task: DownloadTaskLike): string | null {
-  return task.subscriptions[0]?.poster_url ?? task.poster_url ?? null;
+function posterUrlOf(task: DownloadTask): string | null {
+  return task.subscriptions[0]?.poster_url ?? null;
 }
 
 export function groupDownloadTasks(tasks: DownloadTask[]): DownloadTaskGroup[] {
@@ -125,14 +118,10 @@ export function downloadTaskNeedsAttention(
   task: DownloadTask,
   ingestJob: JobView | null | undefined,
 ): boolean {
-  const legacy = task as DownloadTaskLike;
-  if (taskSourceOf(legacy) === "external") return false;
+  if (taskSourceOf(task) === "external") return false;
   return (
-    legacy.can_replace === true ||
     task.state === "error" ||
     task.state === "missing" ||
-    // 下载完成但 crawler-media 看不到文件：侧栏红灯亮着，卡片不能还写"等待入库"
-    legacy.landing_error != null ||
     contentMissingLabel(task) != null ||
     (ingestJob != null && jobNeedsAttention(ingestJob))
   );

@@ -1,6 +1,39 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import ts from "typescript";
+
+async function loadApiModule(name, request) {
+  const source = await readFile(new URL(`../lib/api/${name}.ts`, import.meta.url), "utf8");
+  const js = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const module = { exports: {} };
+  new Function("require", "module", "exports", js)((dependency) => {
+    if (dependency === "@/lib/http") return { request };
+    if (dependency === "../downloader-verification" || dependency === "../subscription-form") return {};
+    throw new Error(`Unexpected import ${dependency}`);
+  }, module, module.exports);
+  return module.exports;
+}
+
+test("real routing and upgrade adapters preserve UUID identities", async () => {
+  const libraryId = "00000000-0000-4000-8000-000000000001";
+  const ruleSetId = "00000000-0000-4000-8000-000000000002";
+  const downloaders = await loadApiModule("downloaders", async (path) => {
+    assert.equal(path, "/subscriptions/download-routing-preview");
+    return { ok: true, data: { ok: true, library_id: libraryId } };
+  });
+  const target = await downloaders.resolveManualDownloadTarget({ kind: "movie", title: "Movie", year: 2026 });
+  assert.equal(target.library_id, libraryId);
+  const subscriptions = await loadApiModule("subscriptions", async (path, options) => {
+    assert.equal(path, "/subscriptions/subscription-uuid/upgrade-runs");
+    assert.deepEqual(JSON.parse(options.body), { filter_id: ruleSetId });
+    return { ok: true, data: { filter_id: ruleSetId, units: [] } };
+  });
+  const report = await subscriptions.runSubscriptionUpgradeRound("subscription-uuid", ruleSetId);
+  assert.equal(report.filter_id, ruleSetId);
+});
 
 const readWeb = (relativePath) =>
   readFile(new URL(`../${relativePath}`, import.meta.url), "utf8");
@@ -22,9 +55,9 @@ test("job action callers refresh snapshots instead of upserting acknowledgements
 
   assert.doesNotMatch(jobCenter, /upsert\(await cancelJob/);
   assert.match(jobCenter, /await cancelJob\(job\.id\);\s*refresh\(\);/);
-  assert.doesNotMatch(taskCenter, /upsert\(await (?:cancelJob|retryJob)/);
+  assert.doesNotMatch(taskCenter, /upsert\(await (?:cancelJob|runJob)/);
   assert.match(taskCenter, /await cancelJob\(job\.id\);\s*refreshJobs\(\);/);
-  assert.match(taskCenter, /await retryJob\(job\.id\);\s*refreshJobs\(\);/);
+  assert.match(taskCenter, /await runJob\(job\.id\);\s*refreshJobs\(\);/);
 });
 
 test("active job cards never present a previous finish as the active run's end", async () => {

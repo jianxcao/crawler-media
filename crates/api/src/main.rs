@@ -134,10 +134,11 @@ fn load_catalog_sources(
     let mut sources: Vec<Arc<dyn api::catalog::Catalog>> = Vec::new();
     let metadata_language = store
         .lock()
-        .get_setting(api::settings_keys::METADATA_LANGUAGE)
+        .metadata_language()
         .ok()
-        .flatten()
-        .unwrap_or_default();
+        .map(|state| state.language)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "zh-CN".to_string());
     match media::Tmdb::new(TmdbHttp::new(store.clone()), catalog_db) {
         Ok(tmdb) => sources.push(TmdbCatalog::new(tmdb.with_language(&metadata_language))),
         Err(error) => tracing::error!(%error, "跳过 TMDB：无法打开 catalog 缓存"),
@@ -222,7 +223,7 @@ fn create_api_state(
         DownloaderEnv::from_server_config(config),
         data_dir,
     ));
-    let browser = api::runtime_browser::production_browser(store.clone(), config.browser_enabled)?;
+    let browser = api::runtime_browser::production_browser(store.clone())?;
     let mut state = ApiState::new_arc_with_admin_bootstrap(
         store.clone(),
         ProfileSet::load(Some(overlay_dir))?,
@@ -236,7 +237,7 @@ fn create_api_state(
 
     let sources = load_catalog_sources(
         &store,
-        &data_dir.join("catalog.db"),
+        &data_dir.join("cache.db"),
         config.tvdb_key.as_deref(),
     );
     if !sources.is_empty() {
@@ -298,7 +299,7 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
 
     let jobs = spawn_background_services(&state, address);
 
-    let app = api::ui::attach_ui(router(state), config.ui_dir.clone());
+    let app = api::ui::attach_ui(router(state.clone()), config.ui_dir.clone());
     // Graceful shutdown waits for open connections (SSE streams can stay
     // open); give them 10 s after the signal, then stop anyway.
     let (signalled_tx, signalled_rx) = tokio::sync::watch::channel(false);
@@ -315,6 +316,7 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         result = serve => result?,
         _ = grace => tracing::warn!("连接未在 10 秒内关闭，强制退出"),
     }
+    state.close_library_reads();
     // Review N-2: stopping the job loop drops its instance lease, which
     // deletes the lock row, so an immediate restart is writable.
     if let Err(error) =

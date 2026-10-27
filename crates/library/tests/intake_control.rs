@@ -5,11 +5,26 @@ fn fixture() -> (tempfile::TempDir, WatchJob, Media) {
     let temp = tempfile::tempdir().unwrap();
     let intake = temp.path().join("intake");
     std::fs::create_dir_all(&intake).unwrap();
-    let job = WatchJob { kind: WatchKind::Intake, path: intake,
-        library_root: temp.path().join("movies"), tv_library_root: Some(temp.path().join("tv")), scrape: true };
-    let media = Media { id: MediaId::new(), kind: MediaKind::Movie, title: "Fixture".into(),
-        year: None, original_title: None, aliases: Vec::new(), tmdb_id: Some("123".into()), douban_id: None,
-        tvdb_id: None, bangumi_id: None, anilist_id: None };
+    let job = WatchJob {
+        kind: WatchKind::Intake,
+        path: intake,
+        library_root: temp.path().join("movies"),
+        tv_library_root: Some(temp.path().join("tv")),
+        scrape: true,
+    };
+    let media = Media {
+        id: MediaId::new(),
+        kind: MediaKind::Movie,
+        title: "Fixture".into(),
+        year: None,
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: Some("123".into()),
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
     (temp, job, media)
 }
 
@@ -40,8 +55,17 @@ fn active_tv_control_routes_to_tv_destination() {
     let (_temp, job, media) = fixture();
     let name = "Fixture.S01E01.mkv";
     std::fs::write(job.path.join(name), b"source").unwrap();
-    let outcome = scan_watch_intake_controlled(&job, &media, &WorkControl::default(), Some(&WorkControl::default())).unwrap();
+    let outcome = scan_watch_intake_controlled(
+        &job,
+        &media,
+        &WorkControl::default(),
+        Some(&WorkControl::default()),
+    )
+    .unwrap();
     assert_eq!(outcome.transferred.len(), 1);
-    assert_eq!(std::fs::read(job.tv_library_root.unwrap().join(name)).unwrap(), b"source");
+    assert_eq!(
+        std::fs::read(job.tv_library_root.unwrap().join(name)).unwrap(),
+        b"source"
+    );
     assert!(!job.library_root.join(name).exists());
 }

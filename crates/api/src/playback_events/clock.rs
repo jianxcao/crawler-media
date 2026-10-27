@@ -19,6 +19,6 @@ pub fn clamp_elapsed(now_ms: i64, last_report_at_ms: i64) -> i64 {
     if last_report_at_ms <= 0 || now_ms <= last_report_at_ms {
         0
     } else {
-        (now_ms - last_report_at_ms).min(30_000).max(0)
+        (now_ms - last_report_at_ms).clamp(0, 30_000)
     }
 }

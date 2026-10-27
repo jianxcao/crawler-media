@@ -47,7 +47,7 @@ async fn seed(tmp: &tempfile::TempDir, app: &axum::Router) -> (String, String) {
         .as_str()
         .unwrap()
         .to_string();
-    scan_and_wait(&app, &movie_id).await;
+    scan_and_wait(app, &movie_id).await;
     let ledger = json_body(
         app.clone()
             .oneshot(request(
@@ -104,8 +104,7 @@ async fn chapters_endpoints_respond_without_embedded_chapters() {
     );
     let error_body = json_body(generate).await;
     assert_eq!(
-        error_body["error"]["code"],
-        "chapters.none",
+        error_body["error"]["code"], "chapters.none",
         "error code should be chapters.none"
     );
 }
@@ -128,18 +127,20 @@ async fn chapters_generate_with_voiceprint_markers() {
     {
         let store_arc = api_state.store();
         let store = store_arc.lock();
-        store.put_media_marker(&api::store::StoredMediaMarker {
-            media_id: m_id,
-            season: 1,
-            episode: 1,
-            intro_start_ms: Some(10_000),
-            intro_end_ms: Some(90_000),
-            outro_start_ms: Some(1_200_000),
-            outro_end_ms: Some(1_300_000),
-            source: "voiceprint".into(),
-            locked: false,
-            updated_at: 1,
-        }).unwrap();
+        store
+            .put_media_marker(&api::store::StoredMediaMarker {
+                media_id: m_id,
+                season: 1,
+                episode: 1,
+                intro_start_ms: Some(10_000),
+                intro_end_ms: Some(90_000),
+                outro_start_ms: Some(1_200_000),
+                outro_end_ms: Some(1_300_000),
+                source: "voiceprint".into(),
+                locked: false,
+                updated_at: 1,
+            })
+            .unwrap();
     }
 
     let generate = app
@@ -184,7 +185,7 @@ async fn wall_filter_and_relax_use_resolutions() {
         app.clone()
             .oneshot(request(
                 "GET",
-                &format!("/api/v1/libraries/{movie_id}/items?resolutions=2160p"),
+                &format!("/api/v1/libraries/{movie_id}/items?res=2160p"),
                 Some("management-secret"),
                 Value::Null,
             ))
@@ -198,6 +199,22 @@ async fn wall_filter_and_relax_use_resolutions() {
         "resolution filter applies"
     );
     assert_eq!(filtered["data"][0]["title"], "The Matrix");
+
+    let long_name = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("/api/v1/libraries/{movie_id}/items?resolutions=2160p"),
+            Some("management-secret"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        long_name.status(),
+        axum::http::StatusCode::BAD_REQUEST,
+        "long filter synonyms are not part of the contract"
+    );
 
     let relax = json_body(
         app.clone()

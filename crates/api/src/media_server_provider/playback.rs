@@ -1,15 +1,16 @@
-use domain::{LedgerRow, Media, MediaKind, UserId};
+use domain::{Media, UserId};
 use media_server::provider::{PlaybackClientInfo, PlaybackEvent};
 
-use crate::store::{SessionRow, Store, StoreError, UNIT_WHOLE, UnitState};
+use crate::store::{SessionRow, Store, UNIT_WHOLE};
 
 use super::ApiServerProvider;
 
 pub(super) struct PlaybackTarget {
     pub(super) media: Media,
     pub(super) ledger_id: String,
-    season: i32,
-    episode: i32,
+    pub(crate) season: i32,
+    pub(crate) episode: i32,
+    pub(crate) file: domain::LibraryFile,
     duration_ms: Option<i64>,
 }
 
@@ -18,82 +19,49 @@ pub(super) fn resolve_target(
     user_id: UserId,
     id: &str,
 ) -> Result<Option<PlaybackTarget>, String> {
-    let store = provider.state.store.lock();
-    let Some(row) = crate::http::media_visibility::resolve_visible_row(&store, id, Some(user_id))
-    else {
+    let entry = {
+        let store = provider.state.store.lock();
+        super::items::resolve_entry(&store, Some(user_id), id)?
+    };
+    let Some(entry) = entry else {
         return Ok(None);
     };
-    let media = store
-        .get_media(row.media_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("media {} is missing", row.media_id))?;
-    let (season, episode) = playback_unit(&media, &row);
-    let duration_ms =
-        crate::http::playback::movie_compatible_state(&store, user_id, media.id, season, episode)
-            .map_err(|error| error.to_string())?
-            .and_then(|unit| unit.duration_ms)
-            .or_else(|| {
-                store
-                    .get_file_meta(&row.id.to_string())
-                    .ok()
-                    .flatten()
-                    .and_then(|tracks| tracks.video.and_then(|video| video.duration_secs))
-                    .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
-                    .map(|seconds| (seconds * 1000.0) as i64)
-            });
+    let (season, episode) = (entry.unit.0, entry.unit.1);
+    // Duration belongs to the physical source: prefer the probed duration of this file and
+    // only fall back to a stored user value recorded against the same source.
+    let duration_ms = match entry.file.duration_ms.filter(|d| *d > 0) {
+        Some(duration) => Some(duration),
+        None => {
+            let item = if season == crate::store::UNIT_WHOLE {
+                domain::TypedItemId::Work(entry.media.id)
+            } else {
+                domain::TypedItemId::Unit {
+                    media: entry.media.id,
+                    key: domain::UnitKey::new(season, episode),
+                }
+            };
+            let source = domain::PhysicalSourceId {
+                file_id: entry.file.file_id,
+                revision: entry.file.version.revision,
+            };
+            let store = provider.state.store.lock();
+            let resolved = store
+                .resolve_playback(user_id, &item, Some(&source), None)
+                .map_err(|error| error.to_string())?;
+            (resolved.target.file.file_id == source.file_id
+                && resolved.target.file.version.revision == source.revision)
+                .then_some(resolved.duration_ms)
+                .flatten()
+        }
+    };
     Ok(Some(PlaybackTarget {
-        media,
-        ledger_id: row.id.to_string(),
+        media: entry.media,
+        ledger_id: entry.file.file_id.to_string(),
         season,
         episode,
+        file: entry.file,
         duration_ms,
     }))
-}
-
-fn playback_unit(media: &Media, row: &LedgerRow) -> (i32, i32) {
-    if media.kind == MediaKind::Tv {
-        if let (Some(season), Some(episode)) = (row.season, row.episode) {
-            return (season as i32, episode as i32);
-        }
-    }
-    (UNIT_WHOLE, UNIT_WHOLE)
-}
-
-fn persist_position(
-    provider: &ApiServerProvider,
-    user_id: UserId,
-    target: &PlaybackTarget,
-    position_ms: i64,
-    increment_play_count: bool,
-    now: i64,
-) -> Result<(), String> {
-    provider
-        .state
-        .store
-        .lock()
-        .playback_write(|store| {
-            persist_event_position(
-                store,
-                user_id,
-                target,
-                position_ms.max(0),
-                increment_play_count,
-                now,
-            )
-        })
-        .map_err(|error| error.to_string())
-}
-
-pub(super) fn update_progress(
-    provider: &ApiServerProvider,
-    user_id: UserId,
-    id: &str,
-    position_ms: i64,
-) -> Result<(), String> {
-    let target = resolve_target(provider, user_id, id)?
-        .ok_or_else(|| format!("Jellyfin playback item {id} is missing or not visible"))?;
-    let now = provider.state.playback_clock.now_ms() / 1000;
-    persist_position(provider, user_id, &target, position_ms, false, now)
 }
 
 pub(super) fn report_event(
@@ -108,10 +76,7 @@ pub(super) fn report_event(
 ) -> Result<(), String> {
     let target = resolve_target(provider, user_id, id)?
         .ok_or_else(|| format!("Jellyfin playback item {id} is missing or not visible"))?;
-    let target_ledger_id = target.ledger_id.parse::<domain::LedgerId>().map_err(|e| e.to_string())?;
     let now_ms = provider.state.playback_clock.now_ms();
-    let now = now_ms / 1000;
-    let position_ms = position_ms.max(0);
     let store = provider.state.store.lock();
     if store
         .is_device_revoked(user_id, &client.device_id)
@@ -119,321 +84,209 @@ pub(super) fn report_event(
     {
         return Err("device revoked".into());
     }
-
-    // Classify event using shared logic
-    let prior = store.get_session(user_id, &client.device_id).map_err(|e| e.to_string())?;
-    let binding = if let Some(ref sid) = identity.play_session_id {
-        store.play_session_binding(user_id, &client.device_id, sid).map_err(|e| e.to_string())?
-    } else {
-        None
+    let request = ProtocolEvent {
+        user_id,
+        target: &target,
+        client: &client,
+        event,
+        identity: &identity,
+        now: now_ms / 1000,
     };
-
-    let shared_identity = crate::playback_events::PlaybackEventIdentity {
-        play_session_id: identity.play_session_id.clone(),
-        event_sequence: identity.event_sequence,
+    let Some((sid, binding)) = request.bound_session(&store)? else {
+        return Ok(());
     };
-
-    let event_kind = match event {
-        PlaybackEvent::Playing => crate::playback_events::PlaybackEventKind::Start,
-        PlaybackEvent::Progress => crate::playback_events::PlaybackEventKind::Progress,
-        PlaybackEvent::Stopped => crate::playback_events::PlaybackEventKind::Stop,
+    let Some(bound) = request.bound_event(sid, binding, position_ms, paused) else {
+        return Ok(());
     };
-
-    let decision = crate::playback_events::classify_event(
-        prior.as_ref(),
-        binding.as_ref(),
-        &shared_identity,
-        target_ledger_id,
-        event_kind,
-    );
-
-    store
-        .playback_write(|store| {
-            match decision {
-                crate::playback_events::EventDecision::Ignore => return Ok(()),
-                crate::playback_events::EventDecision::Start => {
-                    if let Some(ref sid) = identity.play_session_id {
-                        store.activate_play_session(user_id, &client.device_id, sid)?;
-                    }
-                }
-                crate::playback_events::EventDecision::Stop => {
-                    if let Some(ref sid) = identity.play_session_id {
-                        store.close_play_session_id(user_id, &client.device_id, sid)?;
-                    }
-                }
-                crate::playback_events::EventDecision::Update => {}
-            }
-
-            persist_event(
-                store,
-                user_id,
-                &target,
-                position_ms,
-                paused,
-                &client,
-                event,
-                identity.play_session_id.as_deref(),
-                identity.event_sequence,
-                now,
-                now_ms,
-            )
-        })
-        .map_err(|error| error.to_string())
+    match store.commit_playback_event(&bound, now_ms) {
+        Ok(store::playback::EventOutcome::Applied) => {
+            tracing::debug!(session_id=%bound.session_id,"Jellyfin Playback event committed");
+        }
+        Ok(store::playback::EventOutcome::IgnoredStale) => {
+            tracing::warn!(session_id=%bound.session_id,"Stale Jellyfin Playback event ignored");
+        }
+        Err(error) => {
+            tracing::error!(session_id=%bound.session_id,%error,"Jellyfin Playback event failed");
+            return Err(error.to_string());
+        }
+    }
+    Ok(())
 }
-#[allow(clippy::too_many_arguments)]
-fn persist_event(
-    store: &Store,
+
+struct ProtocolEvent<'a> {
     user_id: UserId,
-    target: &PlaybackTarget,
-    position_ms: i64,
-    paused: bool,
-    client: &PlaybackClientInfo,
+    target: &'a PlaybackTarget,
+    client: &'a PlaybackClientInfo,
     event: PlaybackEvent,
-    play_session_id: Option<&str>,
-    event_sequence: Option<i64>,
+    identity: &'a media_server::provider::PlaybackEventIdentity,
     now: i64,
-    now_ms: i64,
-) -> Result<(), StoreError> {
-    let current = current_session(store, user_id, &client.device_id, target, play_session_id, now)?;
-    if current.as_ref().is_some_and(|s| s.admin_ended) {
-        return Ok(());
-    }
-    // 会话已被管理员结束（此时 current 为 None）时，迟到的 Progress/Stopped 不得
-    // 把会话复活；只有客户端显式重新起播（Playing）才允许新建会话。与 web 心跳
-    // 路径的 `device_was_admin_ended` 守卫保持同一语义。
-    if current.is_none() && event != PlaybackEvent::Playing {
-        match store.device_was_admin_ended(user_id, &client.device_id, now, 10) {
-            Ok(true) => {
-                tracing::debug!(
-                    %user_id,
-                    device_id = %client.device_id,
-                    "管理员已结束该设备会话，忽略迟到事件"
-                );
-                return Ok(());
-            }
-            Ok(false) => {}
-            Err(error) => {
-                tracing::warn!(%error, %user_id, device_id = %client.device_id, "查询管理员结束标记失败");
-            }
+}
+
+impl ProtocolEvent<'_> {
+    fn bound_session(
+        &self,
+        store: &Store,
+    ) -> Result<Option<(String, store::PlaySessionBinding)>, String> {
+        let prior = store
+            .get_session(self.user_id, &self.client.device_id)
+            .map_err(|error| error.to_string())?;
+        let binding = match &self.identity.play_session_id {
+            Some(id) => store
+                .play_session_binding(self.user_id, &self.client.device_id, id)
+                .map_err(|error| error.to_string())?,
+            None => None,
+        };
+        let kind = match self.event {
+            PlaybackEvent::Playing => crate::playback_events::PlaybackEventKind::Start,
+            PlaybackEvent::Progress => crate::playback_events::PlaybackEventKind::Progress,
+            PlaybackEvent::Stopped => crate::playback_events::PlaybackEventKind::Stop,
+        };
+        let decision = if self.identity.play_session_id.is_none() {
+            classify_protocol_event(prior.as_ref(), self.target, self.event)
+        } else {
+            crate::playback_events::classify_event_with_target(
+                prior.as_ref(),
+                binding.as_ref(),
+                &crate::playback_events::PlaybackEventIdentity {
+                    play_session_id: self.identity.play_session_id.clone(),
+                    event_sequence: self.identity.event_sequence,
+                },
+                self.target.file.file_id,
+                Some(domain::UnitKey::new(
+                    self.target.season,
+                    self.target.episode,
+                )),
+                kind,
+            )
+        };
+        if decision == crate::playback_events::EventDecision::Ignore {
+            return Ok(None);
         }
-    }
-    // 验证目标所属媒体库未处于删除冻结中且台账未被清理，防止已删除文件在心跳中复活
-    if let Some(row) = store.get_ledger(&target.ledger_id)? {
-        if let Some(owner) = store.library_for_path_strict(std::path::Path::new(&row.path), target.media.kind)? {
-            if !store.library_accepts_work(&owner.id)? {
-                return Ok(());
-            }
-        }
-    } else {
-        return Ok(());
+        let id = if let Some(id) = &self.identity.play_session_id {
+            id.clone()
+        } else if let Some(id) = self.reusable_session(store, prior.as_ref())? {
+            id
+        } else if self.event == PlaybackEvent::Playing {
+            store
+                .issue_play_session(
+                    self.user_id,
+                    &self.client.device_id,
+                    self.target.file.file_id,
+                    self.target.media.id,
+                    domain::UnitKey::new(self.target.season, self.target.episode),
+                    &self.target.file.version,
+                    self.now,
+                )
+                .map_err(|error| error.to_string())?
+        } else {
+            return Ok(None);
+        };
+        // All protocol events commit a real binding, including clients that omit PlaySessionId.
+        let binding = store
+            .play_session_binding(self.user_id, &self.client.device_id, &id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "issued Jellyfin Playback binding disappeared".to_string())?;
+        Ok(Some((id, binding)))
     }
 
-    persist_event_position(
-        store,
-        user_id,
-        target,
-        position_ms,
-        event == PlaybackEvent::Playing && current.is_none(),
-        now,
-    )?;
-    let watched_ms = accumulated_watch_time(
-        current.as_ref(),
-        position_ms,
-        paused,
-        event == PlaybackEvent::Stopped,
-        now_ms,
-    );
-    if event == PlaybackEvent::Stopped {
-        return stop_session(
-            store,
-            client,
-            user_id,
-            target,
-            position_ms,
-            watched_ms,
-            current.as_ref(),
-            now,
-            now_ms,
-        );
+    fn reusable_session(
+        &self,
+        store: &Store,
+        prior: Option<&SessionRow>,
+    ) -> Result<Option<String>, String> {
+        let Some(prior) = prior.filter(|session| same_target(session, self.target)) else {
+            return Ok(None);
+        };
+        let Some(id) = &prior.play_session_id else {
+            return Ok(None);
+        };
+        let binding = store
+            .play_session_binding(self.user_id, &self.client.device_id, id)
+            .map_err(|error| error.to_string())?;
+        Ok(binding
+            .filter(|binding| {
+                binding.ledger_id == self.target.file.file_id
+                    && binding.file_revision == Some(self.target.file.version.revision)
+                    && binding.source_version.as_deref()
+                        == Some(self.target.file.version.source_version.as_str())
+                    && binding.state != store::PlaySessionIdState::Closed
+            })
+            .map(|_| id.clone()))
     }
-    store.upsert_session(&session_row(
-        client,
-        user_id,
-        target,
-        position_ms,
-        paused,
-        watched_ms,
-        current.as_ref(),
-        play_session_id,
-        event_sequence,
-        now,
-        now_ms,
-    ))
-}
-fn current_session(
-    store: &Store,
-    user_id: UserId,
-    device_id: &str,
-    target: &PlaybackTarget,
-    play_session_id: Option<&str>,
-    now: i64,
-) -> Result<Option<SessionRow>, StoreError> {
-    let prior = store.get_session(user_id, device_id)?;
-    if prior
-        .as_ref()
-        .is_some_and(|session| {
-            same_target(session, target)
-                && match (session.play_session_id.as_deref(), play_session_id) {
-                    (Some(prior_id), Some(new_id)) => prior_id == new_id,
-                    _ => true,
-                }
+
+    fn bound_event(
+        &self,
+        id: String,
+        binding: store::PlaySessionBinding,
+        position_ms: i64,
+        paused: bool,
+    ) -> Option<store::playback::BoundPlaybackEvent> {
+        let (Some(revision), Some(source_version)) =
+            (binding.file_revision, binding.source_version)
+        else {
+            return None;
+        };
+        let item = if self.target.season == UNIT_WHOLE {
+            domain::TypedItemId::Work(self.target.media.id)
+        } else {
+            domain::TypedItemId::Unit {
+                media: self.target.media.id,
+                key: domain::UnitKey::new(self.target.season, self.target.episode),
+            }
+        };
+        let event_type = match self.event {
+            PlaybackEvent::Playing => store::playback::PlaybackEventType::Playing,
+            PlaybackEvent::Progress => store::playback::PlaybackEventType::Progress,
+            PlaybackEvent::Stopped => store::playback::PlaybackEventType::Stopped,
+        };
+        Some(store::playback::BoundPlaybackEvent {
+            user_id: self.user_id,
+            device_id: self.client.device_id.clone(),
+            session_id: id,
+            generation: binding.generation,
+            event_sequence: self.identity.event_sequence,
+            item,
+            source_id: domain::PhysicalSourceId {
+                file_id: binding.ledger_id,
+                revision,
+            },
+            source_version,
+            position_ms: position_ms.max(0),
+            duration_ms: self.target.duration_ms,
+            audio_track: None,
+            subtitle_track: None,
+            paused,
+            rate_bps: 0,
+            client: self.client.client.clone(),
+            device_name: self.client.device_name.clone(),
+            client_version: self.client.client_version.clone(),
+            play_method: Some("DirectPlay".into()),
+            event_type,
         })
-    {
-        return Ok(prior);
     }
-    if prior.is_some() {
-        store.close_session(user_id, device_id, now)?;
-    }
-    Ok(None)
 }
 
 fn same_target(session: &SessionRow, target: &PlaybackTarget) -> bool {
     session.media_id == target.media.id
-        && session.season == unit_value(target.season)
-        && session.episode == unit_value(target.episode)
+        && session.ledger_id.as_deref() == Some(target.ledger_id.as_str())
+        && session.season.unwrap_or(UNIT_WHOLE) == target.season
+        && session.episode.unwrap_or(UNIT_WHOLE) == target.episode
 }
 
-fn persist_event_position(
-    store: &Store,
-    user_id: UserId,
+fn classify_protocol_event(
+    previous: Option<&SessionRow>,
     target: &PlaybackTarget,
-    position_ms: i64,
-    increment_play_count: bool,
-    now: i64,
-) -> Result<(), StoreError> {
-    if (target.season, target.episode) == (UNIT_WHOLE, UNIT_WHOLE) {
-        store.copy_legacy_movie_unit_if_missing(user_id, target.media.id)?;
-    }
-    let duration = target.duration_ms.or(store
-        .unit_state(user_id, target.media.id, target.season, target.episode)?
-        .and_then(|unit| unit.duration_ms));
-    store.upsert_unit(
-        user_id,
-        target.media.id,
-        target.season,
-        target.episode,
-        position_ms,
-        UnitState::playback_completed(position_ms, duration).then_some(true),
-        None,
-        duration,
-        None,
-        None,
-        increment_play_count,
-        now,
-    )?;
-    Ok(())
-}
-
-fn accumulated_watch_time(
-    current: Option<&SessionRow>,
-    position_ms: i64,
-    paused: bool,
-    stopped: bool,
-    now_ms: i64,
-) -> i64 {
-    let Some(session) = current else {
-        return 0;
-    };
-    let delta = crate::playback_events::watched_increment(session, position_ms, paused, stopped, now_ms, 1.0);
-    session.watched_ms.saturating_add(delta)
-}
-
-fn stop_session(
-    store: &Store,
-    client: &PlaybackClientInfo,
-    user_id: UserId,
-    target: &PlaybackTarget,
-    position_ms: i64,
-    watched_ms: i64,
-    existing: Option<&SessionRow>,
-    now: i64,
-    now_ms: i64,
-) -> Result<(), StoreError> {
-    if existing.is_none() {
-        return Ok(());
-    }
-    store.upsert_session(&session_row(
-        client,
-        user_id,
-        target,
-        position_ms,
-        true,
-        watched_ms,
-        existing,
-        existing.and_then(|s| s.play_session_id.as_deref()),
-        existing.and_then(|s| s.last_event_sequence),
-        now,
-        now_ms,
-    ))?;
-    store.close_session(user_id, &client.device_id, now)?;
-    Ok(())
-}
-
-fn unit_value(value: i32) -> Option<i32> {
-    (value != UNIT_WHOLE).then_some(value)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn session_row(
-    client: &PlaybackClientInfo,
-    user_id: UserId,
-    target: &PlaybackTarget,
-    position_ms: i64,
-    paused: bool,
-    watched_ms: i64,
-    existing: Option<&SessionRow>,
-    play_session_id: Option<&str>,
-    event_sequence: Option<i64>,
-    now: i64,
-    now_ms: i64,
-) -> SessionRow {
-    SessionRow {
-        device_id: client.device_id.clone(),
-        user_id,
-        media_id: target.media.id,
-        season: unit_value(target.season),
-        episode: unit_value(target.episode),
-        client: client
-            .client
-            .clone()
-            .or_else(|| existing.and_then(|session| session.client.clone())),
-        device_name: client
-            .device_name
-            .clone()
-            .or_else(|| existing.and_then(|session| session.device_name.clone())),
-        client_version: client
-            .client_version
-            .clone()
-            .or_else(|| existing.and_then(|session| session.client_version.clone())),
-        play_method: "DirectPlay".to_string(),
-        position_ms,
-        start_position_ms: existing
-            .map(|session| session.start_position_ms)
-            .unwrap_or(position_ms),
-        duration_ms: target
-            .duration_ms
-            .or_else(|| existing.and_then(|session| session.duration_ms)),
-        paused,
-        watched_ms,
-        rate_bps: existing.map(|session| session.rate_bps).unwrap_or(0),
-        bytes_sent: existing.map(|session| session.bytes_sent).unwrap_or(0),
-        connections: existing.map(|session| session.connections).unwrap_or(1),
-        admin_ended: existing.map(|session| session.admin_ended).unwrap_or(false),
-        started_at: existing.map(|session| session.started_at).unwrap_or(now),
-        last_report_at: now,
-        ledger_id: Some(target.ledger_id.clone()),
-        play_session_id: play_session_id.map(str::to_string).or_else(|| existing.and_then(|s| s.play_session_id.clone())),
-        last_report_at_ms: now_ms,
-        last_event_sequence: event_sequence.or_else(|| existing.and_then(|s| s.last_event_sequence)),
+    event: PlaybackEvent,
+) -> crate::playback_events::EventDecision {
+    use crate::playback_events::EventDecision;
+    match event {
+        PlaybackEvent::Playing => EventDecision::Start,
+        PlaybackEvent::Progress if previous.is_some_and(|session| same_target(session, target)) => {
+            EventDecision::Update
+        }
+        PlaybackEvent::Stopped if previous.is_some_and(|session| same_target(session, target)) => {
+            EventDecision::Stop
+        }
+        _ => EventDecision::Ignore,
     }
 }

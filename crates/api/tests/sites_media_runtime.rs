@@ -12,10 +12,11 @@ use std::time::Duration;
 use api::{ApiState, Store, router};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use serde_json::{Value, json};
+use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
 
 const TOKEN: &str = "management-secret";
@@ -49,10 +50,16 @@ impl Gate {
     fn enter_and_wait(&self) {
         *self.entered.lock().unwrap() = true;
         self.entered_cv.notify_all();
-        let mut open = self.open.lock().unwrap();
-        while !*open {
-            open = self.open_cv.wait(open).unwrap();
-        }
+        let released = *self
+            .open_cv
+            .wait_timeout_while(
+                self.open.lock().unwrap(),
+                std::time::Duration::from_secs(30),
+                |open| !*open,
+            )
+            .unwrap()
+            .0;
+        assert!(released, "test must release the media gate");
     }
 
     fn entered(&self) -> bool {
@@ -183,7 +190,13 @@ async fn blocked_site_verify_keeps_health_responsive() {
     let fetcher = Arc::new(GatedFetcher::new(gate.clone()));
     let state = state(tmp.path(), fetcher.clone());
     let app = router(state);
-    let id = create_site(&app, "pterclub", "http://127.0.0.1:9/", Some("uid=1; pass=abc")).await;
+    let id = create_site(
+        &app,
+        "pterclub",
+        "http://127.0.0.1:9/",
+        Some("uid=1; pass=abc"),
+    )
+    .await;
 
     let target = tokio::spawn({
         let app = app.clone();
@@ -240,7 +253,10 @@ async fn blocked_site_verify_keeps_health_responsive() {
     let response = target.await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = json_body(response).await;
-    assert_eq!(body["data"]["ok"], false, "gated upstream must report failure");
+    assert_eq!(
+        body["data"]["ok"], false,
+        "gated upstream must report failure"
+    );
 }
 
 #[tokio::test]
@@ -274,12 +290,15 @@ async fn site_action_status_contracts_are_unchanged() {
     let nexus = create_site(&app, "pterclub", "http://127.0.0.1:9/", None).await;
     let response = site_action(&app, &nexus.to_string(), "login").await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(json_body(response).await["error"]["code"], "site.login_failed");
+    assert_eq!(
+        json_body(response).await["error"]["code"],
+        "site.login_failed"
+    );
 }
 
-fn ledger_row(media_id: MediaId, path: &Path) -> LedgerRow {
-    LedgerRow {
-        id: LedgerId::new(),
+fn fixture_file(media_id: MediaId, path: &Path) -> FixtureFile {
+    FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id,
         path: path.display().to_string(),
         season: None,
@@ -290,6 +309,7 @@ fn ledger_row(media_id: MediaId, path: &Path) -> LedgerRow {
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     }
 }
 
@@ -333,7 +353,7 @@ async fn organize_side_effect_really_renames_on_disk() {
         let store = state.store();
         let store = store.lock();
         store.insert_media(&media).unwrap();
-        store.insert_ledger(&ledger_row(media.id, &old)).unwrap();
+        publish_fixture_file(&store, &fixture_file(media.id, &old)).unwrap();
     }
 
     let app = router(state.clone());
@@ -350,13 +370,16 @@ async fn organize_side_effect_really_renames_on_disk() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = json_body(response).await;
     assert_eq!(body["data"]["applied"], 1, "body={body}");
-    assert!(new.is_file(), "side-effect rename must have really executed");
+    assert!(
+        new.is_file(),
+        "side-effect rename must have really executed"
+    );
     assert!(!old.exists(), "source file must be gone after organize");
     let store = state.store();
     let store = store.lock();
     assert!(
         store
-            .ledger_by_path(&new.display().to_string())
+            .file_coverage_by_path(&new.display().to_string())
             .unwrap()
             .is_some(),
         "ledger must follow the renamed file"

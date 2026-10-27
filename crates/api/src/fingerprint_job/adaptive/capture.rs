@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::time::SystemTime;
 
 use marker::adaptive::{EpisodeEvidence, SegmentKind};
@@ -10,7 +9,10 @@ use uuid::Uuid;
 
 use super::cache::{find_reusable_sample, stored_sample_to_evidence};
 use super::types::{AdaptiveCaptureContext, EpisodeCaptureRequest};
-use crate::fingerprint_job::source::{ensure_source_available, is_file_deleted};
+use crate::fingerprint_job::episode_or_one;
+use crate::fingerprint_job::source::{
+    ensure_source_available, ensure_source_recorded, is_file_deleted, observe_source,
+};
 
 pub async fn capture_or_reuse_segment_sample(
     ctx: &AdaptiveCaptureContext,
@@ -21,9 +23,10 @@ pub async fn capture_or_reuse_segment_sample(
     attempt_count: &mut usize,
     max_budget: usize,
 ) -> Result<EpisodeEvidence, String> {
+    observe_source(&request.row)?;
     {
         let store = ctx.store.lock();
-        ensure_source_available(&store, &request.row)?;
+        ensure_source_recorded(&store, &request.row)?;
         if let Some(cached) = find_reusable_sample(&store, request, kind, window) {
             if let Some(timings) = &ctx.timings {
                 match kind {
@@ -31,7 +34,7 @@ pub async fn capture_or_reuse_segment_sample(
                     SegmentKind::Outro => timings.record_outro_cache_hit(Some(&request.job_id)),
                 }
             }
-            tracing::info!(job_id = %request.job_id, ledger_id = %request.row.id, ?kind,
+            tracing::info!(job_id = %request.job_id, file_id = %request.row.file.file_id, ?kind,
                 "复用有效声纹缓存");
             return Ok(cached);
         }
@@ -45,21 +48,24 @@ pub async fn capture_or_reuse_segment_sample(
     *attempt_count += 1;
     let mut attempt = begin_attempt(ctx, request, kind, window, phase)?;
     ctx.gate.wait_before_capture().await;
-    let availability = ensure_source_available(&ctx.store.lock(), &request.row);
+    let availability = ensure_source_available(&ctx.store, &request.row);
     if let Err(error) = availability {
         return finish_error(ctx, request, &mut attempt, error);
     }
     let capture_req = CaptureRequest {
-        path: PathBuf::from(&request.row.path),
+        path: request.row.file.path.clone(),
         window: window.clone(),
         audio_stream_index: request.audio_stream_index,
         process_deadline_ms: request.policy.process_deadline_ms,
     };
     let capture = ctx.capture.clone();
     let control = ctx.gate.work_control(&request.row);
-    let result = tokio::task::spawn_blocking(move || capture.capture_window_controlled(&capture_req, &control)).await;
+    let result = tokio::task::spawn_blocking(move || {
+        capture.capture_window_controlled(&capture_req, &control)
+    })
+    .await;
     // Recheck even when FFmpeg returned an error: a deletion is cancellation, not a retry.
-    let availability = ensure_source_available(&ctx.store.lock(), &request.row);
+    let availability = ensure_source_available(&ctx.store, &request.row);
     if let Err(error) = availability {
         return finish_error(ctx, request, &mut attempt, error);
     }
@@ -94,7 +100,7 @@ fn begin_attempt(
     let attempt = StoredFingerprintAttempt {
         attempt_id: format!("att-{}", Uuid::new_v4()),
         job_id: request.job_id.clone(),
-        ledger_id: request.row.id.to_string(),
+        ledger_id: request.row.file.file_id.to_string(),
         kind: kind_name(kind).into(),
         window_start_ms: window.start_ms,
         window_end_ms: window.end_ms,
@@ -132,12 +138,12 @@ fn finish_error(
         tracing::error!(%store_error, job_id = %request.job_id, "声纹采集结束状态写入失败");
     }
     if cancelled {
-        tracing::info!(job_id = %request.job_id, ledger_id = %request.row.id,
-            path = %request.row.path, stage = %attempt.phase, elapsed_ms, reason = "file_deleted",
+        tracing::info!(job_id = %request.job_id, file_id = %request.row.file.file_id,
+            path = %request.row.file.path.display(), stage = %attempt.phase, elapsed_ms, reason = "file_deleted",
             "文件已删除，取消声纹采集");
     } else {
-        tracing::error!(%error, job_id = %request.job_id, ledger_id = %request.row.id,
-            path = %request.row.path, stage = %attempt.phase, elapsed_ms, "声纹采集失败");
+        tracing::error!(%error, job_id = %request.job_id, file_id = %request.row.file.file_id,
+            path = %request.row.file.path.display(), stage = %attempt.phase, elapsed_ms, "声纹采集失败");
     }
     Err(error)
 }
@@ -156,7 +162,7 @@ fn finish_capture(
     let metrics_json = serde_json::to_string(&metrics).map_err(|error| error.to_string())?;
     let sample = StoredFingerprintSample {
         sample_id: format!("samp-{}", Uuid::new_v4()),
-        ledger_id: request.row.id.to_string(),
+        ledger_id: request.row.file.file_id.to_string(),
         source_version: request.source_version.clone(),
         capture_profile_key: request.capture_profile_key.clone(),
         kind: kind_name(kind).into(),
@@ -171,11 +177,15 @@ fn finish_capture(
     attempt.finished_at_ms = Some(sample.captured_at_ms);
     attempt.status = "succeeded".into();
     attempt.metrics_json = metrics_json;
-    let persisted = {
+    let persisted = observe_source(&request.row).and_then(|()| {
         let store = ctx.store.lock();
-        ensure_source_available(&store, &request.row).and_then(|()| {
+        ensure_source_recorded(&store, &request.row).and_then(|()| {
             store
-                .complete_fingerprint_attempt_for_source(&attempt, &sample, &request.row.path)
+                .complete_fingerprint_attempt_for_source(
+                    &attempt,
+                    &sample,
+                    &request.row.file.path.to_string_lossy(),
+                )
                 .map_err(|error| format!("Store error completing attempt: {error}"))
                 .and_then(|accepted| {
                     if accepted {
@@ -185,16 +195,16 @@ fn finish_capture(
                     }
                 })
         })
-    };
+    });
     if let Err(error) = persisted {
         return finish_error(ctx, request, &mut attempt, error);
     }
-    tracing::info!(job_id = %request.job_id, ledger_id = %request.row.id, ?kind,
+    tracing::info!(job_id = %request.job_id, file_id = %request.row.file.file_id, ?kind,
         stage = %attempt.phase, elapsed_ms = now_ms().saturating_sub(attempt.started_at_ms),
         "声纹采集成功并已写入数据库");
     Ok(stored_sample_to_evidence(
         &sample,
-        request.row.episode.unwrap_or(1),
+        episode_or_one(&request.row),
         kind,
         request.media_duration_ms,
     ))

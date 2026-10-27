@@ -418,12 +418,10 @@ fn parse_subject_collection(kind: MediaKind, body: &str) -> Result<Vec<CatalogHi
 }
 
 fn matches_kind(kind: MediaKind, raw: Option<&str>) -> bool {
-    match (kind, raw) {
-        (MediaKind::Movie, Some("tv")) => false,
-        (MediaKind::Tv, Some("movie")) => false,
-        (MediaKind::Tv, None) => false,
-        _ => true,
-    }
+    !matches!(
+        (kind, raw),
+        (MediaKind::Movie, Some("tv")) | (MediaKind::Tv, Some("movie") | None)
+    )
 }
 
 fn to_hit(

@@ -8,6 +8,11 @@ impl ByteRange {
     pub fn len(self) -> u64 {
         self.end.saturating_sub(self.start) + 1
     }
+
+    /// Inclusive byte ranges always represent at least one byte.
+    pub fn is_empty(self) -> bool {
+        false
+    }
 }
 
 pub fn parse_range(header: &str, size: u64) -> Option<ByteRange> {
@@ -53,6 +58,15 @@ pub fn parse_range(header: &str, size: u64) -> Option<ByteRange> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inclusive_ranges_always_contain_bytes() {
+        for (header, length) in [("bytes=0-0", 1), ("bytes=4-7", 4)] {
+            let range = parse_range(header, 16).unwrap();
+            assert_eq!(range.len(), length);
+            assert!(!range.is_empty());
+        }
+    }
 
     #[test]
     fn suffix_and_open_ended_ranges_follow_http_byte_semantics() {

@@ -13,10 +13,10 @@ pub fn release_units_agree(left: &Release, right: &Release) -> bool {
     if left.episode_to != right.episode_to {
         return false;
     }
-    if let (Some(y1), Some(y2)) = (left.year, right.year) {
-        if y1 != y2 {
-            return false;
-        }
+    if let (Some(y1), Some(y2)) = (left.year, right.year)
+        && y1 != y2
+    {
+        return false;
     }
     true
 }
@@ -52,7 +52,7 @@ fn valid_bilingual_or_version_superset(
         return false;
     }
     let extra: Vec<&String> = superset.difference(subset).collect();
-    let has_non_ascii = extra.iter().any(|tok| tok.chars().any(|c| !c.is_ascii()));
+    let has_non_ascii = extra.iter().any(|tok| !tok.is_ascii());
     let all_modifiers = extra.iter().all(|tok| is_version_modifier(tok));
     has_non_ascii || all_modifiers
 }

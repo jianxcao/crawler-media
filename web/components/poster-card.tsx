@@ -88,6 +88,7 @@ export interface PosterVisualItem {
   year?: number;
   genres?: string[];
   extent?: string;
+  studioLogo?: string;
   badges?: string[];
   /** 海报角上的斜向常显标签（如「自动续订」「已订阅」）；
    *  「已入库」不必显式传，由 libraryStatus 自动派生（见 resolveRibbon）。 */
@@ -356,14 +357,7 @@ function PosterCardContent({
           />
         )}
 
-        {/* 左上：资源最高清晰度徽章（无资源信息时不渲染）。
-            徽章不用 backdrop-blur：海报墙每张卡 2~3 个模糊合成层会显著放大
-            滚动时的 GPU 压力（几百张卡叠加），加实底色观感几乎无差 */}
-        {badges[0] && (
-          <span className="absolute left-2 top-2 rounded-md bg-black/70 px-1.5 py-0.5 text-micro font-bold tracking-wide text-[var(--accent)]">
-            {badges[0]}
-          </span>
-        )}
+        {/* 左上角清晰度徽章按需求移除，保持海报纯净 */}
         {/* 作品状态用紧凑左上斜标，宽度随海报缩放且不遮评分；其余调用方
             沿用右侧规格。无状态不渲染，避免海报墙过吵。 */}
         {ribbon && (
@@ -391,23 +385,44 @@ function PosterCardContent({
             洗版 {item.posterFooter.upgradingCount}
           </span>
         )}
-        {/* 右上角状态位：收藏的心 + 评分徽章（评分为 0 不渲染，避免展示 0.0）。
-            两者排一行，谁都没有就不占位——库存墙不给评分、只可能有心，发现页
-            只可能有评分，订阅墙两者都没有（右上角让给上面的洗版徽标） */}
-        {(item.favorite || item.rating > 0) && (
+        {/* 右上角状态位：仅保留收藏的心 */}
+        {item.favorite && (
           <div
             className={`absolute right-2 flex items-center gap-1 ${ribbon && !ribbon.compactLeft ? "top-12" : "top-2"}`}
           >
-            {item.favorite && (
-              <span
-                aria-label="已收藏"
-                className="flex items-center rounded-md bg-black/70 px-1 py-0.5 text-[var(--danger)]"
-              >
-                <HeartIcon className="size-3.5" fill="currentColor" />
-              </span>
-            )}
+            <span
+              aria-label="已收藏"
+              className="flex items-center rounded-md bg-black/70 px-1 py-0.5 text-[var(--danger)]"
+            >
+              <HeartIcon className="size-3.5" fill="currentColor" />
+            </span>
+          </div>
+        )}
+
+        {/* 海报底部角标层：左下角平台Logo，右下角评分徽章 */}
+        {(!item.posterFooter && (item.studioLogo || item.extent || item.rating > 0)) && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex items-center justify-between px-2 pb-2 pt-6 bg-gradient-to-t from-black/85 via-black/40 to-transparent">
+            {/* 左下角：播放平台 Logo */}
+            <div className="flex items-center">
+              {item.studioLogo ? (
+                <div className="flex h-4 max-w-[64px] items-center rounded bg-black/60 px-1 py-0.5 backdrop-blur-sm">
+                  <img
+                    src={item.studioLogo}
+                    alt={item.extent ?? "平台"}
+                    className="max-h-3 w-auto object-contain brightness-0 invert drop-shadow"
+                    loading="lazy"
+                  />
+                </div>
+              ) : item.extent ? (
+                <span className="rounded bg-black/60 px-1.5 py-0.5 text-[9px] font-semibold text-white/90 backdrop-blur-sm">
+                  {item.extent}
+                </span>
+              ) : null}
+            </div>
+
+            {/* 右下角：评分徽章 */}
             {item.rating > 0 && (
-              <span className="tnum flex items-center gap-1 rounded-md bg-black/70 px-1.5 py-0.5 text-caption font-semibold text-white">
+              <span className="tnum flex items-center gap-1 rounded bg-black/75 px-1.5 py-0.5 text-caption font-semibold text-white backdrop-blur-sm">
                 <StarIcon className="size-3 text-[var(--warn)]" />
                 {item.rating.toFixed(1)}
               </span>
@@ -487,17 +502,13 @@ function PosterCardContent({
         )}
       </div>
 
-      {/* 文字区：常显标题 + 元信息（压在背景大图上，需 text-on-image 投影保证可读） */}
+      {/* 文字区：常显标题 + 年份 */}
       <div className="mt-2">
         <p className="text-on-image truncate text-ui font-semibold text-[var(--text)]">
           {item.title}
         </p>
-        {/* 始终保留一行元信息，避免缺失年份让同一海报墙的卡片高低跳动。
-            在库与否不在这里表达——它已由海报左上角的「已入库」斜标承担。 */}
         <p className="text-on-image tnum mt-0.5 flex min-h-4 items-center gap-1.5 truncate text-caption text-[var(--text-muted)]">
           {!!item.year && <span>{item.year}</span>}
-          {!!item.year && item.extent && <span>·</span>}
-          {item.extent && <span>{item.extent}</span>}
         </p>
       </div>
     </>

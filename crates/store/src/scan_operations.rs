@@ -32,6 +32,7 @@ impl ScanOperationStatus {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "queued" => Some(Self::Queued),
@@ -48,6 +49,33 @@ impl ScanOperationStatus {
     pub fn is_active(&self) -> bool {
         matches!(self, Self::Queued | Self::Running | Self::Yielded)
     }
+
+    /// Every variant, so callers derive a state set instead of copying literals.
+    pub const ALL: [Self; 7] = [
+        Self::Queued,
+        Self::Running,
+        Self::Yielded,
+        Self::Completed,
+        Self::Partial,
+        Self::Cancelled,
+        Self::Failed,
+    ];
+
+    /// A finished operation: no worker can still resume it, so retention may drop the row.
+    pub fn is_terminal(&self) -> bool {
+        !self.is_active()
+    }
+}
+
+/// `scan_operations.status IN (...)` for the terminal variants, derived from
+/// [`ScanOperationStatus`] so a new status can never be silently treated as terminal.
+pub(crate) fn terminal_status_predicate() -> String {
+    let values: Vec<String> = ScanOperationStatus::ALL
+        .iter()
+        .filter(|status| status.is_terminal())
+        .map(|status| format!("'{}'", status.as_str()))
+        .collect();
+    format!("status IN ({})", values.join(","))
 }
 
 /// 扫描意图：`full` 表示走完整库根，`targeted` 表示只走 `targets`。
@@ -143,8 +171,7 @@ fn map_scan_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScanOperation
         id: row.get(0)?,
         library_id: row.get(1)?,
         scope_signature: row.get(2)?,
-        status: ScanOperationStatus::from_str(&status_str)
-            .unwrap_or(ScanOperationStatus::Queued),
+        status: ScanOperationStatus::from_str(&status_str).unwrap_or(ScanOperationStatus::Queued),
         generation: row.get(4)?,
         report: serde_json::from_str(&report_json).unwrap_or_default(),
         targets: parse_targets(&targets_raw),
@@ -156,8 +183,7 @@ fn map_scan_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScanOperation
 }
 
 /// 所有 `ScanOperation` 查询共用的列清单。
-const SCAN_OPERATION_COLUMNS: &str =
-    "id, library_id, scope_signature, status, generation, report_json, targets_json, \
+const SCAN_OPERATION_COLUMNS: &str = "id, library_id, scope_signature, status, generation, report_json, targets_json, \
      scope_kind, dirty_rev, consumed_rev";
 
 impl Store {
@@ -264,30 +290,6 @@ impl Store {
         Ok(changed > 0)
     }
 
-    /// 原子升级持久化的 `scope_signature`（P2-NEW-1）。
-    ///
-    /// 旧构建写下的签名（`kind:count:root1,root2,...`）在新编码下会被误判为配置变化；
-    /// 语义一致时用 CAS 就地把行升级成新编码，而不是取消 operation。只有当前值仍等于
-    /// `expected` 才写入，因此与并发配置变更不会互相覆盖。
-    pub fn upgrade_scan_scope_signature(
-        &self,
-        id: &str,
-        expected: &str,
-        upgraded: &str,
-    ) -> Result<bool, StoreError> {
-        let tx = rusqlite::Transaction::new_unchecked(
-            &self.library,
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
-        let changed = tx.execute(
-            "UPDATE scan_operations SET scope_signature = ?1
-             WHERE id = ?2 AND scope_signature = ?3",
-            params![upgraded, id, expected],
-        )?;
-        tx.commit()?;
-        Ok(changed > 0)
-    }
-
     /// 终态 CAS：只有 `dirty_rev` 仍等于本轮开始时消费的版本才写终态；否则补扫重排（P3-1）。
     ///
     /// 判定与写入在同一个 IMMEDIATE 事务里完成：另一连接在 worker 判定之后、写终态之前
@@ -316,7 +318,8 @@ impl Store {
         let Some((status_raw, dirty_rev, consumed_rev)) = current else {
             return Ok(None);
         };
-        let status = ScanOperationStatus::from_str(&status_raw).unwrap_or(ScanOperationStatus::Queued);
+        let status =
+            ScanOperationStatus::from_str(&status_raw).unwrap_or(ScanOperationStatus::Queued);
         if !status.is_active() {
             return Ok(None);
         }
@@ -360,9 +363,9 @@ impl Store {
         reason: &str,
     ) -> Result<(), StoreError> {
         self.library.execute(
-            "INSERT INTO ledger_probe_obligations (ledger_id, created_at_ms, reason)
+            "INSERT INTO file_probe_obligations (file_id, created_at_ms, reason)
              VALUES (?1, ?2, ?3)
-             ON CONFLICT(ledger_id) DO UPDATE SET
+             ON CONFLICT(file_id) DO UPDATE SET
                  created_at_ms = excluded.created_at_ms, reason = excluded.reason",
             params![ledger_id, now_ms, reason],
         )?;
@@ -373,7 +376,10 @@ impl Store {
     ///
     /// 用 `BEGIN IMMEDIATE`：SELECT 与 UPDATE 必须在同一个写事务里，否则多连接下
     /// 两个 worker 可以同时读到同一行 queued（B3 §6）。
-    pub fn claim_next_queued_scan(&self, excluding: &[String]) -> Result<Option<ScanOperation>, StoreError> {
+    pub fn claim_next_queued_scan(
+        &self,
+        excluding: &[String],
+    ) -> Result<Option<ScanOperation>, StoreError> {
         let tx = rusqlite::Transaction::new_unchecked(
             &self.library,
             rusqlite::TransactionBehavior::Immediate,
@@ -384,7 +390,8 @@ impl Store {
              WHERE status = 'queued'"
         );
         if !excluding.is_empty() {
-            let placeholders: Vec<String> = (1..=excluding.len()).map(|i| format!("?{}", i)).collect();
+            let placeholders: Vec<String> =
+                (1..=excluding.len()).map(|i| format!("?{}", i)).collect();
             query.push_str(&format!(" AND id NOT IN ({})", placeholders.join(",")));
         }
         query.push_str(" ORDER BY created_at_ms ASC, rowid ASC LIMIT 1");
@@ -417,9 +424,9 @@ impl Store {
     /// if deleted/deleting, marks cancelled, otherwise re-queues.
     pub fn recover_orphaned_scans(&self) -> Result<usize, StoreError> {
         let running: Vec<(String, String)> = {
-            let mut stmt = self.library.prepare(
-                "SELECT id, library_id FROM scan_operations WHERE status = 'running'",
-            )?;
+            let mut stmt = self
+                .library
+                .prepare("SELECT id, library_id FROM scan_operations WHERE status = 'running'")?;
             let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
             let mut list = Vec::new();
             for r in rows {

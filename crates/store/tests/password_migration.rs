@@ -95,34 +95,26 @@ fn passwords_generate_different_salts() {
 }
 
 #[test]
-fn upgrade_failure_fails_closed_and_rolls_back_token() {
+fn plaintext_credentials_are_rejected_without_upgrade_or_token() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let user_id = UserId::new();
     let conn = Connection::open(tmp.path().join("app.db")).unwrap();
 
-    // 插入旧明文用户
     conn.execute(
-        "INSERT INTO users (id, login, password, enabled, role) VALUES (?1, 'failing_user', 'plain-secret-1', 1, 'member')",
+        "INSERT INTO users (id, login, password, enabled, role) VALUES (?1, 'legacy_user', 'plain-secret-1', 1, 'member')",
         params![user_id.to_string()],
     )
     .unwrap();
 
-    // 安装触发器注入更新失败
-    conn.execute(
-        "CREATE TRIGGER reject_password_upgrade BEFORE UPDATE OF password ON users
-         BEGIN
-             SELECT RAISE(FAIL, 'reject upgrade');
-         END;",
-        [],
-    )
-    .unwrap();
-
-    // 登录必须返回 Err（fail closed），绝不能静默成功并放行明文
-    let verify_result = store.verify_user_password("failing_user", "plain-secret-1");
-    assert!(verify_result.is_err(), "upgrade failure must return Err");
-
-    // 验证数据库中未签发 token
+    // 明文行既不能登录，也不能被透明升级改写。
+    assert!(
+        store
+            .verify_user_password("legacy_user", "plain-secret-1")
+            .unwrap()
+            .is_none(),
+        "plaintext credential must not authenticate"
+    );
     let token_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM user_tokens WHERE user_id = ?1",
@@ -130,26 +122,15 @@ fn upgrade_failure_fails_closed_and_rolls_back_token() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(
-        token_count, 0,
-        "no token should be issued when upgrade fails"
-    );
-
-    // 移除触发器后，登录成功且升级
-    conn.execute("DROP TRIGGER reject_password_upgrade", [])
-        .unwrap();
-    let success_login = store
-        .verify_user_password("failing_user", "plain-secret-1")
-        .unwrap();
-    assert!(success_login.is_some());
-    let upgraded_pw: String = conn
+    assert_eq!(token_count, 0, "no token may be issued for plaintext rows");
+    let stored_pw: String = conn
         .query_row(
             "SELECT password FROM users WHERE id = ?1",
             params![user_id.to_string()],
             |r| r.get(0),
         )
         .unwrap();
-    assert!(upgraded_pw.starts_with("$argon2id$"));
+    assert_eq!(stored_pw, "plain-secret-1", "row must stay untouched");
 }
 
 #[test]
@@ -158,26 +139,31 @@ fn concurrent_password_change_causes_cas_rejection_without_token() {
     let store1 = Store::open(tmp.path()).unwrap();
     let store2 = Store::open(tmp.path()).unwrap();
     let user_id = UserId::new();
-    let conn = Connection::open(tmp.path().join("app.db")).unwrap();
+    let _conn = Connection::open(tmp.path().join("app.db")).unwrap();
 
-    // 插入旧明文用户
-    conn.execute(
-        "INSERT INTO users (id, login, password, enabled, role) VALUES (?1, 'cas_user', 'old-password', 1, 'member')",
-        params![user_id.to_string()],
-    )
-    .unwrap();
+    store2
+        .insert_user_with_password(
+            &User {
+                id: user_id,
+                login: "cas_user".into(),
+                enabled: true,
+                role: UserRole::Member,
+            },
+            "old-password",
+        )
+        .unwrap();
 
-    // 模拟连接 A 读到旧密码后，连接 B 并发修改了密码
+    // 连接 A 读到的观测口令（Argon2 PHC 字符串）之后，连接 B 并发修改了密码。
+    let observed = store1
+        .login_credential("cas_user")
+        .unwrap()
+        .expect("credential snapshot")
+        .observed_password;
     store2.set_password(user_id, "new-password-from-b").unwrap();
 
-    // 此时尝试用连接 A 传入已失效的 observed_password 'old-password' 执行登录升级
-    // 应该因为 CAS 匹配不满足返回 None，并且不签发 token
+    // 用已失效的 observed_password 走 finalizer 必须因 CAS 不满足返回 None 且不签发 token。
     let finish_res = store1
-        .finish_verified_login(
-            &user_id.to_string(),
-            "old-password",
-            Some("$argon2id$some-new-hash"),
-        )
+        .finish_verified_login(&user_id.to_string(), &observed)
         .unwrap();
     assert!(finish_res.is_none(), "stale login must be rejected by CAS");
 
@@ -189,7 +175,7 @@ fn concurrent_password_change_causes_cas_rejection_without_token() {
 }
 
 #[test]
-fn rotate_admin_password_rolls_back_when_token_insert_fails() {
+fn seed_admin_recovery_rolls_back_when_token_insert_fails() {
     use std::str::FromStr;
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
@@ -202,63 +188,27 @@ fn rotate_admin_password_rolls_back_when_token_insert_fails() {
             role: UserRole::Admin,
         })
         .unwrap();
-    store.set_password(id, "old-token").unwrap();
-    store.set_user_token(id, "old-token").unwrap();
+    store
+        .register_current_cli_token(id, "old-cli-token")
+        .unwrap();
+    store.set_user_token(id, "ordinary-session").unwrap();
     let conn = Connection::open(tmp.path().join("app.db")).unwrap();
     conn.execute(
         "CREATE TRIGGER reject_token BEFORE INSERT ON user_tokens BEGIN SELECT RAISE(FAIL, 'no token'); END;",
         [],
     ).unwrap();
-    let err = store.rotate_admin_password_keeping_cli_token(id, "new-admin-pass", "old-token");
+    let err = store.seed_admin_with_credentials(id, "new-admin-pass", "new-cli-token");
     assert!(err.is_err());
-    assert!(
+    assert!(!store.admin_password_is_set(id).unwrap());
+    assert!(store.user_by_token("old-cli-token").unwrap().is_some());
+    assert!(store.user_by_token("ordinary-session").unwrap().is_some());
+    assert!(store.user_by_token("new-cli-token").unwrap().is_none());
+    assert_eq!(
         store
-            .password_matches_without_session("admin", "old-token")
+            .get_setting("auth.cli_token.current")
             .unwrap()
-    );
-    assert!(
-        !store
-            .password_matches_without_session("admin", "new-admin-pass")
-            .unwrap()
-    );
-}
-
-#[test]
-fn rotate_admin_password_revokes_old_cli_bearer() {
-    use std::str::FromStr;
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Store::open(tmp.path()).unwrap();
-    let id = UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap();
-    store
-        .insert_user(&User {
-            id,
-            login: "admin".into(),
-            enabled: true,
-            role: UserRole::Admin,
-        })
-        .unwrap();
-    store
-        .register_current_cli_token(id, "old-bearer-a")
-        .unwrap();
-    store.set_user_token(id, "ordinary-session-xyz").unwrap();
-
-    // 旋转密码并同时换新 CLI Token 为 new-bearer-b
-    store
-        .rotate_admin_password_keeping_cli_token(id, "new-secure-pass", "new-bearer-b")
-        .unwrap();
-
-    // 断言：new-bearer-b 生效，old-bearer-a 和普通会话必须被立即撤销！
-    assert!(store.user_by_token("new-bearer-b").unwrap().is_some());
-    assert!(
-        store.user_by_token("old-bearer-a").unwrap().is_none(),
-        "Rotate 时必须原子撤销旧 CLI Bearer"
-    );
-    assert!(
-        store
-            .user_by_token("ordinary-session-xyz")
-            .unwrap()
-            .is_none(),
-        "密码轮换时必须撤销管理员名下普通历史会话"
+            .as_deref(),
+        Some("old-cli-token")
     );
 }
 
@@ -304,7 +254,7 @@ fn cli_token_collision_with_member_session_fails_closed() {
 }
 
 #[test]
-fn seed_admin_recovery_revokes_legacy_ordinary_sessions() {
+fn seed_admin_recovery_revokes_old_cli_bearer_and_ordinary_sessions() {
     use std::str::FromStr;
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
@@ -312,7 +262,7 @@ fn seed_admin_recovery_revokes_legacy_ordinary_sessions() {
 
     // 预先建立旧 marker
     store
-        .register_current_cli_token(admin_id, "cli-token")
+        .register_current_cli_token(admin_id, "old-cli-token")
         .unwrap();
 
     // 模拟管理员密码被清空损坏，但残留了一个普通会话
@@ -329,11 +279,12 @@ fn seed_admin_recovery_revokes_legacy_ordinary_sessions() {
 
     // 重新 Seed 恢复初始密码
     store
-        .seed_admin_with_credentials(admin_id, "brand-new-pass", "cli-token")
+        .seed_admin_with_credentials(admin_id, "brand-new-pass", "new-cli-token")
         .unwrap();
 
-    // 验证：cli-token 可用，但旧残留会话必须被彻底撤销！
-    assert!(store.user_by_token("cli-token").unwrap().is_some());
+    // 恢复后只有新的 CLI token 可用，旧 CLI token 与普通会话必须被撤销。
+    assert!(store.user_by_token("new-cli-token").unwrap().is_some());
+    assert!(store.user_by_token("old-cli-token").unwrap().is_none());
     assert!(
         store.user_by_token("stale-session-123").unwrap().is_none(),
         "密码重设恢复必须撤销旧残留会话"
@@ -378,4 +329,45 @@ fn delete_session_tokens_is_atomic_and_protects_cli() {
         "回滚后 token-1 必须保留，不能部分生效"
     );
     assert!(store.user_by_token("token-2").unwrap().is_some());
+}
+
+#[test]
+fn admin_password_configuration_rejects_unsupported_credentials_without_rewriting_them() {
+    use std::str::FromStr;
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let admin_id = UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap();
+    store
+        .insert_user(&User {
+            id: admin_id,
+            login: "admin".into(),
+            enabled: true,
+            role: UserRole::Admin,
+        })
+        .unwrap();
+
+    assert!(!store.admin_password_is_set(admin_id).unwrap());
+
+    let conn = Connection::open(tmp.path().join("app.db")).unwrap();
+    for unsupported in ["plain-legacy-secret", "$argon2id$malformed"] {
+        conn.execute(
+            "UPDATE users SET password = ?2 WHERE id = ?1",
+            params![admin_id.to_string(), unsupported],
+        )
+        .unwrap();
+        assert!(store.admin_password_is_set(admin_id).is_err());
+        let retained: String = conn
+            .query_row(
+                "SELECT password FROM users WHERE id = ?1",
+                [admin_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained, unsupported);
+    }
+
+    store
+        .set_password(admin_id, "independent-password")
+        .unwrap();
+    assert!(store.admin_password_is_set(admin_id).unwrap());
 }

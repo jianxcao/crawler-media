@@ -136,16 +136,31 @@ mod tests {
         }
     }
 
+    /// 用系统 `date` 求出某个 epoch 秒的本地日期。GNU date 用 `-d @epoch`，
+    /// BSD date（macOS）没有 `-d`，用 `-r epoch`；两者都不可用时返回 None。
+    fn system_local_date(epoch: i64) -> Option<String> {
+        let gnu = std::process::Command::new("date")
+            .args(["-d", &format!("@{epoch}"), "+%F"])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&gnu.stdout).trim().to_string();
+        if !text.is_empty() {
+            return Some(text);
+        }
+        let bsd = std::process::Command::new("date")
+            .args(["-r", &epoch.to_string(), "+%F"])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&bsd.stdout).trim().to_string();
+        (!text.is_empty()).then_some(text)
+    }
+
     #[test]
     fn local_date_differs_from_utc_when_offset_crosses_midnight() {
         // 2023-11-14T22:13:20Z: in UTC+8 this is already 2023-11-15.
-        #[cfg(target_os = "macos")]
-        let args = ["-r", "1700000000", "+%F"];
-        #[cfg(not(target_os = "macos"))]
-        let args = ["-d", "@1700000000", "+%F"];
-        let out = std::process::Command::new("date").args(args).output().unwrap();
-        assert!(out.status.success(), "date failed: {:?}", out.stderr);
-        let system = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let Some(system) = system_local_date(1_700_000_000) else {
+            return;
+        };
         assert_eq!(local_date(1_700_000_000), system);
     }
 

@@ -20,7 +20,10 @@ fn fanart_prefers_zh_then_keeps_season_images_and_drops_background() {
         set.season_posters[0].url,
         "https://assets.fanart.tv/s1-zh.jpg"
     );
-    assert_eq!(set.season_thumbs[0].url, "https://assets.fanart.tv/s1-thumb.jpg");
+    assert_eq!(
+        set.season_thumbs[0].url,
+        "https://assets.fanart.tv/s1-thumb.jpg"
+    );
     assert_eq!(set.season_banners[0].season, Some(0));
 }
 
@@ -53,7 +56,8 @@ fn fanart_client_requests_the_tv_url_without_putting_the_key_in_the_cache_key() 
         body: include_str!("fixtures/fanart_tv.json").to_string(),
         seen: std::sync::Mutex::new(Vec::new()),
     };
-    let client = media::fanart::FanartClient::new(http, &tmp.path().join("cache.db"), "secret").unwrap();
+    let client =
+        media::fanart::FanartClient::new(http, &tmp.path().join("cache.db"), "secret").unwrap();
     let set = client.tv("425039", &["zh"]).unwrap();
     assert!(set.logo.is_some());
 }

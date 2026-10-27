@@ -45,10 +45,10 @@ pub fn transfer_file_controlled(
     if src == dest {
         return Ok(());
     }
-    if let (Ok(src_canon), Ok(dest_canon)) = (src.canonicalize(), dest.canonicalize()) {
-        if src_canon == dest_canon {
-            return Ok(());
-        }
+    if let (Ok(src_canon), Ok(dest_canon)) = (src.canonicalize(), dest.canonicalize())
+        && src_canon == dest_canon
+    {
+        return Ok(());
     }
     if same_inode(src, dest) {
         // `dest` already is this very file (e.g. a hardlink from a previous run).
@@ -112,11 +112,11 @@ pub fn transfer_file_controlled(
             clobber = Some(error);
             return Err(message);
         }
-        if mode == TransferMode::Move {
-            if let Err(error) = fs::remove_file(src) {
-                tracing::warn!(src = %src.display(), dest = %dest.display(), %error,
+        if mode == TransferMode::Move
+            && let Err(error) = fs::remove_file(src)
+        {
+            tracing::warn!(src = %src.display(), dest = %dest.display(), %error,
                     "文件已发布，但清理源文件失败");
-            }
         }
         Ok(())
     });

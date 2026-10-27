@@ -17,7 +17,10 @@ fn normalize_host_canonicalizes_ip_literals() {
 
 #[test]
 fn normalize_host_converts_idn_to_punycode() {
-    assert_eq!(normalize_host("例子.中国").unwrap(), "xn--fsqu00a.xn--fiqs8s");
+    assert_eq!(
+        normalize_host("例子.中国").unwrap(),
+        "xn--fsqu00a.xn--fiqs8s"
+    );
 }
 
 #[test]
@@ -28,8 +31,14 @@ fn group_key_cases() {
     assert_eq!(group_key("a.b.co.uk"), group_key("c.b.co.uk"));
     assert_eq!(group_key("a.b.co.uk"), group_key("b.co.uk"));
     assert_eq!(group_key("x.a.example.org"), group_key("y.b.example.org"));
-    assert_eq!(group_key("tracker.example.org"), group_key("x.forum.example.org"));
-    assert_eq!(group_key("a.example.com.cn"), group_key("x.b.example.com.cn"));
+    assert_eq!(
+        group_key("tracker.example.org"),
+        group_key("x.forum.example.org")
+    );
+    assert_eq!(
+        group_key("a.example.com.cn"),
+        group_key("x.b.example.com.cn")
+    );
     assert_eq!(group_key("Example.ORG"), group_key("example.org"));
     assert_eq!(group_key("example.org."), group_key("example.org"));
     assert_eq!(group_key("例子.中国"), group_key("xn--fsqu00a.xn--fiqs8s"));

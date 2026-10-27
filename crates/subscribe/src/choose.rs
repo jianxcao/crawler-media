@@ -180,11 +180,10 @@ pub(crate) fn should_replace_slots(
                     {
                         tracing::error!(target_value = %target_value, "WashTarget 配置非法或无法解析有效维度");
                     } else {
-                        if let Some(existing_q) = old_quality.as_ref() {
-                            if target_reached(existing_q, &target_release) {
+                        if let Some(existing_q) = old_quality.as_ref()
+                            && target_reached(existing_q, &target_release) {
                                 return false;
                             }
-                        }
                     }
                     // 无法确定现有质量时继续尝试升级
                 }
@@ -371,12 +370,14 @@ fn ladder_compare(new: &Release, old: &Release, ladder: &[String]) -> Option<std
     Some(result)
 }
 
+type QualityDimension<'a> = (Option<&'a str>, Option<&'a str>, fn(&str) -> i32);
+
 /// M9: default `resolution,hdr,codec,source` ordering used when no
 /// UpgradeLadder is configured. Dimensions unknown on either side are skipped;
 /// any known downgrade makes the candidate worse.
 fn default_ladder_compare(new: &Release, old: &Release) -> std::cmp::Ordering {
     use std::cmp::Ordering;
-    let dims: [(Option<&str>, Option<&str>, fn(&str) -> i32); 4] = [
+    let dims: [QualityDimension<'_>; 4] = [
         (
             new.resolution.as_deref(),
             old.resolution.as_deref(),
@@ -578,10 +579,10 @@ pub(crate) fn pending_matches_subscribe(
 }
 
 fn release_matches_subscribe(subscribe: &Subscribe, media: &Media, release: &Release) -> bool {
-    if let (Some(want), Some(got)) = (media.year, release.year) {
-        if want != got {
-            return false;
-        }
+    if let (Some(want), Some(got)) = (media.year, release.year)
+        && want != got
+    {
+        return false;
     }
     match (&subscribe.coverage, media.kind) {
         (Coverage::Movie, MediaKind::Movie) => {

@@ -1,7 +1,6 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use domain::UserId;
 use support::library_presence::PresenceFixture;
 
 #[tokio::test]

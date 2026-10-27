@@ -1,15 +1,15 @@
 //! Jellyfin 条目选择的共享语义：parent 分类、过滤、排序、计数与分页。
 //!
-//! 这里只放**纯**逻辑，以及基于 trait 的旧式（全量快照）选择：协议路由与
-//! provider 的默认实现复用同一份语义，provider 不必依赖 routes 的私有模块，
-//! 也不会出现两份规则。生产 provider 覆盖
+//! 这里只放**纯**逻辑（parent 分类、过滤、排序、计数与分页）：协议路由、生产
+//! provider 与测试 fixture 复用同一份语义，provider 不必依赖 routes 的私有模块，
+//! 也不会出现两份规则。生产 provider 自行实现
 //! [`MediaServerProvider::query_visible_items`]，用轻候选先选页、再只为该页构建
-//! tracks/chapters/NFO 细节；默认实现按旧方法等价过滤，**不承诺有界**。
+//! tracks/chapters/NFO 细节。
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use domain::{MediaKind, UserId};
+use domain::{MediaKind, TypedItemId, UserId};
 
 use super::{MediaItemSnapshot, MediaServerProvider, ServerLibrary};
 
@@ -42,9 +42,7 @@ impl ServerItemQuery {
     /// 就锁定了 Series/Season（`SeriesId`/`SeasonId` 是列分集的请求，与
     /// `IncludeItemTypes` 无关）。
     pub fn wants_episodes(&self) -> bool {
-        self.series_id.is_some()
-            || self.season_id.is_some()
-            || self.item_types_contain("Episode")
+        self.series_id.is_some() || self.season_id.is_some() || self.item_types_contain("Episode")
     }
 
     /// 这次请求要不要「剧」条目：`IncludeItemTypes` 里有 Series，或者没给类型
@@ -59,7 +57,11 @@ impl ServerItemQuery {
     fn item_types_contain(&self, kind: &str) -> bool {
         self.include_item_types
             .as_deref()
-            .map(|types| types.split(',').any(|item| item.trim().eq_ignore_ascii_case(kind)))
+            .map(|types| {
+                types
+                    .split(',')
+                    .any(|item| item.trim().eq_ignore_ascii_case(kind))
+            })
             .unwrap_or(false)
     }
 }
@@ -96,7 +98,11 @@ pub enum ParentScope {
 pub fn folder_id_for_root(root: &Path) -> String {
     format!(
         "folder_{}",
-        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, root.to_string_lossy().as_bytes()).simple()
+        uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            root.to_string_lossy().as_bytes()
+        )
+        .simple()
     )
 }
 
@@ -168,9 +174,12 @@ pub async fn resolve_parent_scope(
 pub fn classify_genre_or_studio(parent: &str, items: &[MediaItemSnapshot]) -> ParentScope {
     classify_genre_or_studio_facts(
         parent,
-        items
-            .iter()
-            .map(|item| (item.metadata.genres.as_slice(), item.metadata.studios.as_slice())),
+        items.iter().map(|item| {
+            (
+                item.metadata.genres.as_slice(),
+                item.metadata.studios.as_slice(),
+            )
+        }),
     )
 }
 
@@ -183,8 +192,12 @@ pub fn classify_genre_or_studio_facts<'a>(
     let mut genre = false;
     let mut studio = false;
     for (genres, studios) in items {
-        genre |= genres.iter().any(|value| matches_genre_or_studio(parent, value));
-        studio |= studios.iter().any(|value| matches_genre_or_studio(parent, value));
+        genre |= genres
+            .iter()
+            .any(|value| matches_genre_or_studio(parent, value));
+        studio |= studios
+            .iter()
+            .any(|value| matches_genre_or_studio(parent, value));
     }
     if genre {
         ParentScope::Genre(parent.to_string())
@@ -219,15 +232,31 @@ pub fn item_matches_genre_or_studio(target: &str, genres: &[String], studios: &[
             .any(|value| matches_genre_or_studio(target, value))
 }
 
-/// `SeasonId` 去掉 `SeriesId` 前缀后的季号。
+/// Season number carried by a `SeasonId`, validated against the `SeriesId` it
+/// was requested with. Both are protocol wire ids (`s1_…`, `w1_…`); the bare
+/// media id is accepted as the work spelling internal callers use.
 pub fn parse_season_id(series_id: &str, season_id: &str) -> Option<u32> {
-    let series_id = series_id.replace('-', "");
-    let season_id = season_id.replace('-', "");
-    let suffix = season_id.get(series_id.len()..)?;
-    if !season_id[..series_id.len()].eq_ignore_ascii_case(&series_id) {
-        return None;
+    let media = series_media_id(series_id)?;
+    match TypedItemId::from_wire_string(season_id) {
+        Some(TypedItemId::Season {
+            media: season_media,
+            season,
+        }) if season_media == media => Some(season),
+        _ => None,
     }
-    suffix.parse().ok()
+}
+
+/// The work a `SeriesId` names: its typed work id, or its media id.
+pub fn series_media_id(series_id: &str) -> Option<domain::MediaId> {
+    domain::TypedItemId::protocol_media_id(series_id)
+}
+
+/// Whether `requested` names this item's work.
+///
+/// Shares [`series_media_id`]'s spelling set: typed wire ids (`w1_…`), hyphenated
+/// uuids and compact undashed uuids all name the same work.
+pub fn work_matches(requested: &str, media: domain::MediaId) -> bool {
+    series_media_id(requested) == Some(media)
 }
 
 /// 过滤 + 排序 + 计数 + 取页（旧式全量快照语义）。
@@ -321,15 +350,15 @@ fn matches_search_term(item: &MediaItemSnapshot, search_term: Option<&str>) -> b
     if item.media.title.to_lowercase().contains(&term_lower) {
         return true;
     }
-    if let Some(orig) = &item.metadata.original_title {
-        if orig.to_lowercase().contains(&term_lower) {
-            return true;
-        }
+    if let Some(orig) = &item.metadata.original_title
+        && orig.to_lowercase().contains(&term_lower)
+    {
+        return true;
     }
-    if let Some(overview) = &item.metadata.overview {
-        if overview.to_lowercase().contains(&term_lower) {
-            return true;
-        }
+    if let Some(overview) = &item.metadata.overview
+        && overview.to_lowercase().contains(&term_lower)
+    {
+        return true;
     }
     false
 }
@@ -337,15 +366,11 @@ fn matches_search_term(item: &MediaItemSnapshot, search_term: Option<&str>) -> b
 fn matches_genres(item: &MediaItemSnapshot, genres: Option<&str>, genre_ids: Option<&str>) -> bool {
     let mut target_genres: Vec<&str> = Vec::new();
     if let Some(g) = genres {
-        target_genres.extend(
-            g.split(|c| c == ',' || c == '|')
-                .map(str::trim)
-                .filter(|s| !s.is_empty()),
-        );
+        target_genres.extend(g.split([',', '|']).map(str::trim).filter(|s| !s.is_empty()));
     }
     if let Some(gid) = genre_ids {
         target_genres.extend(
-            gid.split(|c| c == ',' || c == '|')
+            gid.split([',', '|'])
                 .map(str::trim)
                 .filter(|s| !s.is_empty()),
         );
@@ -377,16 +402,19 @@ fn matches_studios(item: &MediaItemSnapshot, studio_ids: Option<&str>) -> bool {
         return true;
     };
     let targets: Vec<&str> = studios
-        .split(|c| c == ',' || c == '|')
+        .split([',', '|'])
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect();
     if targets.is_empty() {
         return true;
     }
-    targets
-        .iter()
-        .any(|ts| item.metadata.studios.iter().any(|s| s.eq_ignore_ascii_case(ts)))
+    targets.iter().any(|ts| {
+        item.metadata
+            .studios
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(ts))
+    })
 }
 
 pub fn sort_items(
@@ -424,8 +452,14 @@ pub fn sort_snapshots<T>(
                         .title
                         .to_lowercase()
                         .cmp(&right.media.title.to_lowercase()),
-                    "parentindexnumber" => left.row.season.cmp(&right.row.season),
-                    "indexnumber" => left.row.episode.cmp(&right.row.episode),
+                    "parentindexnumber" => left
+                        .unit
+                        .map(|u| u.season)
+                        .cmp(&right.unit.map(|u| u.season)),
+                    "indexnumber" => left
+                        .unit
+                        .map(|u| u.episode)
+                        .cmp(&right.unit.map(|u| u.episode)),
                     _ => std::cmp::Ordering::Equal,
                 };
                 let order = sort_orders
@@ -464,7 +498,7 @@ fn matches_include_item_types(item: &MediaItemSnapshot, include_item_types: Opti
 }
 
 fn matches_bool(actual: bool, expected: Option<bool>) -> bool {
-    expected.map_or(true, |expected| actual == expected)
+    expected.is_none_or(|expected| actual == expected)
 }
 
 fn matches_user_marks(item: &MediaItemSnapshot, filters: Option<&str>) -> bool {
@@ -495,18 +529,16 @@ fn matches_series(item: &MediaItemSnapshot, series_id: Option<&str>) -> bool {
     let Some(series_id) = series_id else {
         return true;
     };
-    !item.is_series
-        && item.media.kind == MediaKind::Tv
-        && compact_id(&item.media.id.to_string()) == compact_id(series_id)
+    !item.is_series && item.media.kind == MediaKind::Tv && work_matches(series_id, item.media.id)
 }
 
 fn matches_season(item: &MediaItemSnapshot, season_id: Option<&str>) -> bool {
     let Some(season_id) = season_id else {
         return true;
     };
-    let series_id = compact_id(&item.media.id.to_string());
+    let series_id = TypedItemId::Work(item.media.id).to_wire_string();
     parse_season_id(&series_id, season_id)
-        .is_some_and(|season| !item.is_series && item.row.season == Some(season))
+        .is_some_and(|season| !item.is_series && item.unit.map(|u| u.season as u32) == Some(season))
 }
 
 fn matches_people(item: &MediaItemSnapshot, person_ids: Option<&HashSet<String>>) -> bool {
@@ -524,172 +556,6 @@ fn matches_people(item: &MediaItemSnapshot, person_ids: Option<&HashSet<String>>
 
 fn compact_id(id: &str) -> String {
     id.replace('-', "").to_ascii_lowercase()
-}
-
-/// 默认实现（未迁移 provider）的条目选择：按旧方法取快照，再做纯过滤/排序/分页。
-///
-/// 分集展开仍按「每个 series 再查一次」的方式做，所以**不承诺有界**；生产
-/// provider 必须覆盖 [`MediaServerProvider::query_visible_items`]。这里已经修正
-/// 的三件事与生产路径一致：folder 归属在折叠 series 之前确定、`SeriesId`/
-/// `SeasonId` 本身就是列分集的请求、任何读取失败都向上抛（绝不退化成空页）。
-pub async fn legacy_select(
-    provider: &(impl MediaServerProvider + ?Sized),
-    user: UserId,
-    query: ServerItemQuery,
-) -> Result<ServerItemPage, String> {
-    let libraries = provider.list_visible_libraries(user).await?;
-    let parent = query.parent_id.as_deref();
-    let series = query.series_id.as_deref();
-    let scope = resolve_parent_scope(provider, user, parent, series, &libraries).await?;
-    let is_folder_id = parent
-        .map(|value| value.starts_with("folder_"))
-        .unwrap_or(false);
-    if is_folder_id && !matches!(scope, ParentScope::Folder(_)) {
-        // 认不出的 folder 既不是可见库根、也不是 genre/studio：空集合，绝不整库。
-        return Ok(ServerItemPage::default());
-    }
-    let needs_items = matches!(scope, ParentScope::Unknown);
-    let parent_id_for_provider = match &scope {
-        ParentScope::Library(id) | ParentScope::Series(id) => Some(id.as_str()),
-        _ => None,
-    };
-    let mut rows = provider.list_visible_items(user, parent_id_for_provider).await?;
-    let wants_episodes = query.wants_episodes();
-    let wants_series = query.wants_series();
-    // folder 归属必须先于折叠：代表行在别的根下不能决定整个 series 是否属于
-    // 这个 folder。先取未折叠的分集，再用 folder 内的行重建剧快照。
-    if let ParentScope::Folder(root) = &scope {
-        if rows.iter().any(|row| row.is_series) {
-            let mut expanded = Vec::new();
-            for item in rows {
-                if item.is_series {
-                    let series_id = item.media.id.to_string().replace('-', "");
-                    let episodes = provider.list_visible_items(user, Some(&series_id)).await?;
-                    let in_folder: Vec<MediaItemSnapshot> = episodes
-                        .into_iter()
-                        .filter(|episode| Path::new(&episode.row.path).starts_with(root))
-                        .collect();
-                    if wants_series {
-                        if let Some(representative) = in_folder.first() {
-                            let mut series = item;
-                            series.row = representative.row.clone();
-                            series.metadata.child_count = Some(in_folder.len());
-                            series.metadata.season_count = Some(
-                                in_folder.iter().filter_map(|episode| episode.row.season).collect::<HashSet<_>>().len(),
-                            );
-                            series.unplayed_item_count = Some(in_folder.iter().filter(|episode| !episode.played).count());
-                            series.played = in_folder.iter().all(|episode| episode.played);
-                            expanded.push(series);
-                        }
-                    }
-                    if wants_episodes {
-                        expanded.extend(in_folder);
-                    }
-                } else if Path::new(&item.row.path).starts_with(root)
-                    && (item.media.kind != MediaKind::Tv
-                        || item.is_series && wants_series
-                        || !item.is_series && wants_episodes)
-                {
-                    expanded.push(item);
-                }
-            }
-            rows = expanded;
-        } else {
-            rows.retain(|item| {
-                Path::new(&item.row.path).starts_with(root)
-                    && (item.is_series && wants_series || !item.is_series && wants_episodes)
-            });
-        }
-    } else if wants_episodes && rows.iter().any(|row| row.is_series) {
-        let mut expanded = Vec::new();
-        for item in rows {
-            if item.is_series {
-                let series_id = item.media.id.to_string().replace('-', "");
-                let episodes = match &scope {
-                    ParentScope::Library(library_id) => {
-                        provider.list_visible_items_in_library(user, Some(&series_id), library_id).await?
-                    }
-                    _ => provider.list_visible_items(user, Some(&series_id)).await?,
-                };
-                if wants_episodes {
-                    expanded.extend(episodes);
-                }
-                if wants_series {
-                    expanded.push(item);
-                }
-            } else if item.is_series && wants_series || !item.is_series && wants_episodes {
-                expanded.push(item);
-            }
-        }
-        rows = expanded;
-    }
-    let genre_target = if needs_items {
-        match classify_genre_or_studio(parent.unwrap_or_default(), &rows) {
-            ParentScope::Genre(id) | ParentScope::Studio(id) => Some(id),
-            _ => None,
-        }
-    } else {
-        None
-    };
-    if let Some(target_id) = genre_target {
-        rows.retain(|item| {
-            item_matches_genre_or_studio(
-                &target_id,
-                item.metadata.genres.as_slice(),
-                item.metadata.studios.as_slice(),
-            )
-        });
-    } else if needs_items {
-        return Ok(ServerItemPage::default());
-    }
-    if query.person_ids.is_some() {
-        let mut enriched = Vec::with_capacity(rows.len());
-        for row in rows {
-            enriched.push(provider.enrich_visible_item(row).await);
-        }
-        rows = enriched;
-    }
-    Ok(select_page(rows, &query))
-}
-
-/// 默认实现的 NextUp：一次候选读 + 按 Media 分组选第一条未看。
-///
-/// provider 的根列表如果只有 series 级快照（旧式 provider），这里退回逐 series
-/// 查询，因此**不承诺有界**；生产 provider 覆盖
-/// [`MediaServerProvider::next_up_items`] 后一次聚合。
-pub async fn legacy_next_up(
-    provider: &(impl MediaServerProvider + ?Sized),
-    user: UserId,
-    series_id: Option<&str>,
-    offset: usize,
-    limit: usize,
-) -> Result<ServerItemPage, String> {
-    let requested = series_id.map(|id| id.replace('-', ""));
-    let candidates = provider
-        .list_visible_items(user, requested.as_deref())
-        .await?;
-    // 显式 SeriesId 与生产路径一致：不限制种类（电影也能返回）。缺省才只要 TV。
-    let restrict_kind = series_id.is_none();
-    let mut episodes = Vec::new();
-    let mut expanded_media = HashSet::new();
-    for item in candidates {
-        if !item.is_series {
-            if !restrict_kind || item.media.kind == MediaKind::Tv {
-                expanded_media.insert(item.media.id);
-                episodes.push(item);
-            }
-            continue;
-        }
-        if !expanded_media.insert(item.media.id) {
-            continue;
-        }
-        let series_id = item.media.id.to_string().replace('-', "");
-        let expanded = provider.list_visible_items(user, Some(&series_id)).await?;
-        episodes.extend(expanded.into_iter().filter(|episode| {
-            !episode.is_series && (!restrict_kind || episode.media.kind == MediaKind::Tv)
-        }));
-    }
-    Ok(first_unwatched_per_media(episodes, offset, limit))
 }
 
 /// 候选按 Media 分组（保持候选顺序），每个 Media 取 (季, 集) 最小的未看条目，
@@ -718,8 +584,8 @@ pub fn first_unwatched_per_media(
         let mut group = groups.remove(&media_id).unwrap_or_default();
         group.sort_by_key(|item| {
             (
-                item.row.season.unwrap_or_default(),
-                item.row.episode.unwrap_or_default(),
+                item.unit.map(|u| u.season).unwrap_or_default(),
+                item.unit.map(|u| u.episode).unwrap_or_default(),
             )
         });
         if let Some(episode) = group.into_iter().find(|item| !item.played) {

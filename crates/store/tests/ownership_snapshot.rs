@@ -1,10 +1,12 @@
-//! Request-local Library ownership snapshot: longest-root prefix rules,
-//! equal-depth ambiguity without default fallback, and parity with
-//! `Store::library_for_path` / `Store::library_accepts_work`.
+//! Admission-time classification of a NEW file (`classify_new_file` /
+//! `Store::library_for_path_strict`): longest-root prefix, no default fallback.
+//! A published file's owner is its recorded `library_files.library_id`, never a
+//! path; that rule lives in `library_explicit_ownership` in the api crate.
 
 use std::path::{Path, PathBuf};
 
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
+use store::test_support::FixtureFile;
 use store::{Library, Store};
 
 fn create(store: &Store, name: &str, roots: &[&Path]) -> Library {
@@ -14,9 +16,9 @@ fn create(store: &Store, name: &str, roots: &[&Path]) -> Library {
         .unwrap()
 }
 
-fn ledger_row(media_id: MediaId, path: &Path) -> LedgerRow {
-    LedgerRow {
-        id: LedgerId::new(),
+fn ledger_row(media_id: MediaId, path: &Path) -> FixtureFile {
+    FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id,
         path: path.display().to_string(),
         season: None,
@@ -27,6 +29,7 @@ fn ledger_row(media_id: MediaId, path: &Path) -> LedgerRow {
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     }
 }
 
@@ -55,47 +58,55 @@ fn nested_root_wins_over_parent_root() {
     let parent = create(&store, "parent", &[&parent_root]);
     let child = create(&store, "child", &[&child_root]);
 
-    let view = store.library_ownership().unwrap();
+    let libraries = store.list_libraries().unwrap();
     let parent_path = parent_root.join("one.mkv");
     let child_path = child_root.join("two.mkv");
+    assert!(
+        child_path.starts_with(&parent_root),
+        "the nested path lies under the parent root too, so the longest root has to decide"
+    );
 
-    assert_eq!(view.owner(&parent_path, MediaKind::Movie).unwrap().id, parent.id);
-    assert_eq!(view.owner(&child_path, MediaKind::Movie).unwrap().id, child.id);
     assert_eq!(
-        store.library_for_path(&child_path, MediaKind::Movie).unwrap().unwrap().id,
+        store::classify_new_file(&libraries, &parent_path, MediaKind::Movie).map(|owner| &owner.id),
+        Some(&parent.id)
+    );
+    assert_eq!(
+        store::classify_new_file(&libraries, &child_path, MediaKind::Movie).map(|owner| &owner.id),
+        Some(&child.id),
+        "a nested root wins over its parent root"
+    );
+    assert_eq!(
+        store
+            .library_for_path_strict(&child_path, MediaKind::Movie)
+            .unwrap()
+            .unwrap()
+            .id,
         child.id
     );
 }
 
 #[test]
-fn equal_depth_across_libraries_is_ambiguous_and_does_not_fall_back() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Store::open(tmp.path().join("data")).unwrap();
-    let shared = tmp.path().join("dup");
-    let a = create(&store, "a", &[&shared]);
-    let b = create(&store, "b", &[&shared]);
-    assert_ne!(a.id, b.id);
-    assert!(store.default_library(MediaKind::Movie).unwrap().is_some());
-
-    let view = store.library_ownership().unwrap();
-    let path = shared.join("x.mkv");
-    assert!(view.owner(&path, MediaKind::Movie).is_none());
-    assert!(store.library_for_path(&path, MediaKind::Movie).unwrap().is_none());
-}
-
-#[test]
-fn unmatched_path_falls_back_to_kind_default() {
+fn unmatched_path_is_unclassified_without_a_default_fallback() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let default = store.default_library(MediaKind::Movie).unwrap().unwrap();
     let outside = tmp.path().join("elsewhere/one.mkv");
 
     let view = store.library_ownership().unwrap();
+    // The snapshot still names the kind's default Library for "no Library bound
+    // yet" callers (a Subscribe without a Library), but classification never
+    // reaches for it.
     assert_eq!(view.default_for(MediaKind::Movie).unwrap().id, default.id);
-    assert_eq!(view.owner(&outside, MediaKind::Movie).unwrap().id, default.id);
-    assert_eq!(
-        store.library_for_path(&outside, MediaKind::Movie).unwrap().unwrap().id,
-        default.id
+    let libraries = store.list_libraries().unwrap();
+    assert!(
+        store::classify_new_file(&libraries, &outside, MediaKind::Movie).is_none(),
+        "a path outside every root has no Library"
+    );
+    assert!(
+        store
+            .library_for_path_strict(&outside, MediaKind::Movie)
+            .unwrap()
+            .is_none()
     );
 }
 
@@ -106,11 +117,13 @@ fn sibling_prefix_path_does_not_match_root() {
     let owned_root = tmp.path().join("owned");
     let lib = create(&store, "owned", &[&owned_root]);
 
-    let view = store.library_ownership().unwrap();
+    let libraries = store.list_libraries().unwrap();
     let sibling = tmp.path().join("owned-other/one.mkv");
-    let owner = view.owner(&sibling, MediaKind::Movie).unwrap();
-    assert_ne!(owner.id, lib.id);
-    assert_eq!(owner.id, view.default_for(MediaKind::Movie).unwrap().id);
+    assert!(
+        store::classify_new_file(&libraries, &sibling, MediaKind::Movie).is_none(),
+        "a sibling directory is not inside the root, and nothing defaults to {}",
+        lib.id
+    );
 }
 
 #[test]
@@ -125,20 +138,32 @@ fn same_media_in_two_libraries_owns_each_path_separately() {
     store.insert_media(&media).unwrap();
     let parent_path = parent_root.join("one.mkv");
     let child_path = child_root.join("two.mkv");
-    store.insert_ledger(&ledger_row(media.id, &parent_path)).unwrap();
-    store.insert_ledger(&ledger_row(media.id, &child_path)).unwrap();
+    let r1 = ledger_row(media.id, &parent_path);
+    let r2 = ledger_row(media.id, &child_path);
+    let published_parent = store::test_support::publish_fixture_file(&store, &r1).unwrap();
+    let published_child = store::test_support::publish_fixture_file(&store, &r2).unwrap();
 
-    let view = store.library_ownership().unwrap();
-    assert_eq!(view.owner(&parent_path, MediaKind::Movie).unwrap().id, parent.id);
-    assert_eq!(view.owner(&child_path, MediaKind::Movie).unwrap().id, child.id);
-    assert_eq!(
-        store.library_for_path(&parent_path, MediaKind::Movie).unwrap().unwrap().id,
-        parent.id
-    );
-    assert_eq!(
-        store.library_for_path(&child_path, MediaKind::Movie).unwrap().unwrap().id,
-        child.id
-    );
+    assert_eq!(published_parent.library_id.to_string(), parent.id);
+    assert_eq!(published_child.library_id.to_string(), child.id);
+
+    let in_parent = store
+        .file_coverage_in_library(
+            parent.id.parse().unwrap(),
+            Some(media.id),
+            store::FileReadScope::AllRecorded,
+        )
+        .unwrap();
+    assert_eq!(in_parent.len(), 1);
+    assert_eq!(in_parent[0].file.path, parent_path);
+    let in_child = store
+        .file_coverage_in_library(
+            child.id.parse().unwrap(),
+            Some(media.id),
+            store::FileReadScope::AllRecorded,
+        )
+        .unwrap();
+    assert_eq!(in_child.len(), 1);
+    assert_eq!(in_child[0].file.path, child_path);
 }
 
 #[test]
@@ -166,12 +191,12 @@ fn blocked_library_rejects_work_even_when_removal_succeeded() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();
     let lib = create(&store, "frozen", &[&tmp.path().join("frozen")]);
-    let conn = rusqlite::Connection::open(tmp.path().join("data/app.db")).unwrap();
+    let conn = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
     conn.execute(
         "INSERT INTO library_removals
-            (operation_id, library_id, state, snapshot_json, removed_ledger_count,
+            (operation_id, library_id, state, config_revision, removed_ledger_count,
              created_at_ms, updated_at_ms)
-         VALUES ('op-succeeded', ?1, 'succeeded', '{\"roots\":[],\"rows\":[]}', 0, 0, 0)",
+         VALUES ('op-succeeded', ?1, 'succeeded', 1, 0, 0, 0)",
         rusqlite::params![lib.id],
     )
     .unwrap();

@@ -61,6 +61,7 @@ pub fn save_config(
 
 /// Post a message to the notify service. Errors are returned but callers
 /// should treat them as best-effort (never block the loop).
+#[allow(dead_code)]
 pub fn send(store: &crate::Store, title: &str, content: &str) -> Result<(), String> {
     let base = notify_url(store).unwrap_or_default();
     let token = notify_token(store).unwrap_or_default();

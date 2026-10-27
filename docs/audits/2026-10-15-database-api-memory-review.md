@@ -1,5 +1,7 @@
 # 数据库、接口性能与内存资源审查（2026-10-15）
 
+> **历史审查与分层证据，不是当前待修清单。** 第 1–7.4 节记录 2026-10-15 的提交加未提交工作树；7.5 是 2026-10-17 X1 当时追加的状态，未覆盖后续实现。原通过/失败和 ID 全部保留，不因今天代码不同而改写。文档整理未重跑实验，也未逐 ID 重新判定关闭。当前存储模型已移除部分 projection/schema 文件（`07726b7`），旧路径仅作为历史定位，不能据旧路径缺失直接认定原 bug 已修复。
+
 ## 1. 范围与结论
 
 用户要求三个独立 agent 分别审查 SQLite、HTTP 接口扩展性、内存与资源生命周期；Lead 复核重点调用链并执行隔离实验。审查未改应用源码、未写生产数据库、未创建 GitHub issue。
@@ -37,7 +39,7 @@
 
 ### DB-01 · 返回定向，但 SQLite 工作量不定向
 
-**证据：** [catalog_details_for_prefixes](<../../crates/store/src/browse_projection.rs#L341-L365>)；消费者 [load_catalog_rows](<../../crates/api/src/browse_projection/builder.rs#L130-L149>) 持 Store 锁。
+**历史证据路径：** `crates/store/src/browse_projection.rs:341–365`（catalog_details_for_prefixes）、`crates/api/src/browse_projection/builder.rs:130–149`（持 Store 锁的消费者）。文件已移除；按本文第 1 节版本边界追溯 git 历史，不是现行源码链接。
 
 `source=? AND (cache_key=? OR cache_key LIKE ?)` 的默认 LIKE 与 BINARY 主键不匹配，OR 未实现完整键 seek。每批至多 400 前缀，成本可随缓存行数×前缀数增长。不是旧的“全部 body 返回”，而是数据库内部无关工作仍多。
 
@@ -55,7 +57,7 @@ Lead 用相同 DDL、ANALYZE、单来源内存 Python SQLite 独立复验，始�
 
 ### DB-02 · 探测义务缺排序索引
 
-**证据：** [查询](<../../crates/store/src/scan_probe_obligations.rs#L63-L83>)、[DDL](<../../crates/store/src/schema/tables.rs#L213-L217>)、[调度锁](<../../crates/api/src/scan_probe_dispatch.rs#L16-L22>)。
+**证据：** [历史查询位置](<../../crates/store/src/scan_probe_obligations.rs#L63-L83>)、历史 DDL 路径 `crates/store/src/schema/tables.rs:213–217`（文件已移除）、[历史调度锁位置](<../../crates/api/src/scan_probe_dispatch.rs#L16-L22>)。
 
 每 5 秒 `ORDER BY created_at_ms,ledger_id LIMIT 100`，仅 ledger_id 主键；大量扫描积压下每轮重扫全队列。
 
@@ -77,7 +79,7 @@ Lead 用相同 DDL、ANALYZE、单来源内存 Python SQLite 独立复验，始�
 
 ### DB-04 · 粗失效与整代写入放大
 
-**证据：** [revision triggers](<../../crates/store/src/schema/read_revisions.rs#L21-L35>)、[公共比较](<../../crates/api/src/browse_projection.rs#L493-L518>)、[60 秒标脏](<../../crates/api/src/browse_projection.rs#L441-L451>)、[整代发布](<../../crates/store/src/browse_projection.rs#L133-L172>)。
+**历史证据路径：** `crates/store/src/schema/read_revisions.rs:21–35`（revision triggers）、`crates/api/src/browse_projection.rs:493–518,441–451`（比较与 60 秒标脏）、`crates/store/src/browse_projection.rs:133–172`（整代发布）。文件已移除；按第 1 节版本边界追溯 git 历史。
 
 无关搜索缓存、其他库的 ledger/file_meta/marker 写会让目标投影 stale；周期全部 visited 标脏。发布全量 DELETE/INSERT，持锁序列化。已有单飞/容量只限制并发，不消除无关重建。
 
@@ -85,7 +87,7 @@ Lead 用相同 DDL、ANALYZE、单来源内存 Python SQLite 独立复验，始�
 
 ### DB-05 · TTL/VACUUM 不等于清理存活历史
 
-**证据：** [维护类别](<../../crates/api/src/maintenance/policy.rs#L64-L69>)、[QoE 插入](<../../crates/store/src/playback/logs.rs#L141-L176>)、[fresh/stale](<../../crates/media/src/cache.rs#L142-L162>)、[fingerprint 历史](<../../crates/store/src/schema/fingerprint.rs#L8-L68>)。
+**证据：** [历史维护类别位置](<../../crates/api/src/maintenance/policy.rs#L64-L69>)、[历史 QoE 插入位置](<../../crates/store/src/playback/logs.rs#L141-L176>)、[历史 fresh/stale 位置](<../../crates/media/src/cache.rs#L142-L162>)；fingerprint 历史路径 `crates/store/src/schema/fingerprint.rs:8–68` 已移除，按第 1 节版本边界追溯 git 历史。
 
 jobs/playback_logs 已有 retention，不能报“完全没有清理”。QoE、不同 catalog 查询键、Probe/attempt 历史仍增长。过期仅变 stale，VACUUM 不删除存活行。
 
@@ -133,7 +135,7 @@ jobs/playback_logs 已有 retention，不能报“完全没有清理”。QoE、
 
 ### API-04 · REST 热页仍全目标库装载
 
-**证据：** [整库投影](<../../crates/store/src/browse_projection.rs#L225-L265>)、[typed 快照](<../../crates/api/src/http/library/selection/projected.rs#L66-L151>)、[最终切页](<../../crates/api/src/http/library.rs#L262-L283>)。
+**历史证据路径：** `crates/store/src/browse_projection.rs:225–265`（整库投影）、`crates/api/src/http/library/selection/projected.rs:66–151`（typed 快照），均已移除；[当时最终切页位置](<../../crates/api/src/http/library.rs#L262-L283>)。这些定位不证明后续 production query 的接线或边界正确。
 
 每页全部 files/media JSON、groups、相关用户 units，过滤排序后分页，约 O(F+M logM+U)、内存 O(F+M+U)。limit 只限响应；省略 limit 仍全返回。
 
@@ -236,9 +238,9 @@ cargo test -p api --lib probe_manager::tests::marker_refresh_lifecycle::tmp_repr
 
 生产规模盘点、release 前后接口矩阵、heap/RSS 长稳、慢 NAS 故障注入、真实 ffmpeg 大批量、VidHub/Infuse 设备验证均未做。计划目标是验收门，不是结果。
 
-### 7.5 X1 closure evidence (2026-10-17)
+### 7.5 X1 status evidence (2026-10-17 historical snapshot)
 
-Additive status evidence only; original experiments above are unchanged. No X1 commit SHA was observed (uncommitted working tree). See [acceptance matrix](<../benchmarks/2026-10-15-performance-resource-acceptance.md>) for the complete per-ID matrix.
+Additive status evidence only; original experiments above are unchanged. No X1 commit SHA was observed for the initial uncommitted run. The table below preserves that initial X1 snapshot, not a current closure ledger. The [acceptance record](<../benchmarks/2026-10-15-performance-resource-acceptance.md>) also contains later per-ID commit/test claims; those are separate evidence layers and do not retroactively change the original run or establish today's runtime behavior.
 
 | ID | Status | Closure evidence |
 |---|---|---|
@@ -262,10 +264,7 @@ Additive status evidence only; original experiments above are unchanged. No X1 c
 
 ## 8. 文档与授权边界
 
-- [修复设计与硬约束](<../superpowers/specs/2026-10-15-performance-resource-remediation.md>)。
-- [总执行计划](<../superpowers/plans/2026-10-15-performance-resource-remediation.md>)。
-- [数据库计划](<../superpowers/plans/2026-10-15-database-remediation.md>)。
-- [接口计划](<../superpowers/plans/2026-10-15-api-performance-remediation.md>)。
-- [内存资源计划](<../superpowers/plans/2026-10-15-memory-resource-remediation.md>)。
+- 剩余合同与原 ID 映射已收敛到[性能与资源整改总计划](<../superpowers/plans/2026-10-15-performance-resource-remediation.md>)；它不改写上述历史实验结果。
+- 原设计与三份分区计划已从工作树移除。历史全文可用 `git show bd6c3c8:<path>` 读取，路径分别为 `docs/superpowers/specs/2026-10-15-performance-resource-remediation.md`、`docs/superpowers/plans/2026-10-15-database-remediation.md`、`docs/superpowers/plans/2026-10-15-api-performance-remediation.md`、`docs/superpowers/plans/2026-10-15-memory-resource-remediation.md`。
 
 新计划不自动关闭 [旧收敛计划](<../superpowers/plans/2026-10-13-database-api-followup.md>) 的验收/T10，不重跑旧 unchecked 实现步骤。用户本轮只授权保存文档，**未授权修复执行或启用清理**。

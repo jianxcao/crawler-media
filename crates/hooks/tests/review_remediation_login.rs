@@ -200,9 +200,6 @@ impl PageSession for Page {
     fn goto(&self, _: &str) -> Result<(), IndexerError> {
         Ok(())
     }
-    fn set_cookie_header(&self, _: &str) -> Result<(), IndexerError> {
-        Ok(())
-    }
     fn content(&self) -> Result<String, IndexerError> {
         Ok(self.0.into())
     }

@@ -115,6 +115,15 @@ pub trait Catalog: Send + Sync {
         Ok(Vec::new())
     }
     fn details(&self, kind: MediaKind, tmdb_id: &str) -> Result<Option<Media>, String>;
+    fn normalized_metadata(
+        &self,
+        _kind: MediaKind,
+        _id: &str,
+        _scope: domain::EntityScope,
+        _preferences: &domain::MetadataPreferences,
+    ) -> Result<Option<domain::NormalizedMetadata>, String> {
+        Ok(None)
+    }
     fn poster_url(&self, kind: MediaKind, tmdb_id: &str) -> Result<Option<String>, String> {
         let _ = (kind, tmdb_id);
         Ok(None)
@@ -335,6 +344,21 @@ impl<H: media::CatalogGet + Send + Sync> Catalog for TmdbCatalog<H> {
         self.inner
             .details_poster(kind, tmdb_id)
             .map(|path| path.map(|path| format!("{TMDB_POSTER}{path}")))
+            .map_err(|err| err.to_string())
+    }
+    fn normalized_metadata(
+        &self,
+        kind: MediaKind,
+        id: &str,
+        scope: domain::EntityScope,
+        preferences: &domain::MetadataPreferences,
+    ) -> Result<Option<domain::NormalizedMetadata>, String> {
+        if scope != domain::EntityScope::Work {
+            return Ok(None);
+        }
+        self.inner
+            .normalized_details(kind, id, scope, preferences)
+            .map(Some)
             .map_err(|err| err.to_string())
     }
     fn metadata(&self, kind: MediaKind, tmdb_id: &str) -> Result<Option<media::ItemMeta>, String> {

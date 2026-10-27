@@ -15,24 +15,19 @@ import {
   type PlaybackApiScope,
   type PlaybackChapterMark,
   fetchPlaybackChapters,
-  fetchPlaybackDiagnostics,
   type PlaybackUnit,
-  type PlaybackDiagnostics,
   type PlaybackWatchState,
-  pingPlaybackSession,
   reportPlaybackClientLog,
   reportPlaybackProgress,
   reportPlaybackProgressOnUnload,
   resolveStreamUrl,
   startPlaybackSession,
   type PlaybackMetricPayload,
-  fetchTrickplay,
   reportPlaybackMetric,
   reportPlaybackMetricOnUnload,
-  stopPlaybackSession,
-  stopPlaybackSessionOnUnload,
 } from "@/lib/api/playback";
 import { type AutoplayOutcome, attemptAutoplay, shouldAttemptAutoplay } from "@/lib/player/autoplay";
+import { shouldHeartbeat } from "@/lib/player/heartbeat";
 import {
   DIRECT_SHORTFALL_SAMPLES,
   bandwidthDegradeWanted,
@@ -76,7 +71,6 @@ import {
   shouldApplyPostAttachSeek,
 } from "@/lib/player/playback-mode";
 import { loadQualityPreference, saveQualityPreference } from "@/lib/player/quality";
-import { createSessionReleaser } from "@/lib/player/session-release";
 import {
   type QoeEvent,
   initialQoe,
@@ -166,8 +160,7 @@ export interface VideoPlayerProps {
   onPlayPrev: () => void;
   onExit: () => void;
   /**
-   * 播放接口作用域（docs/design/media-share.md §5.3）：影片分享的访客走
-   * `/share/{slug}/playback`、进度只记本浏览器、不上报遥测。缺省 = 登录态。
+   * 播放接口作用域：接口前缀与上报开关。缺省 = 登录态。
    * 组件生命周期内视为常量（换作用域就换 key 重挂）。
    */
   api?: PlaybackApiScope;
@@ -175,8 +168,6 @@ export interface VideoPlayerProps {
 
 /** 进度心跳间隔。服务端另有节流，这里给足密度即可。 */
 const PROGRESS_INTERVAL_MS = 10_000;
-/** 会话续命间隔。必须明显短于服务端的空闲回收窗口。 */
-const PING_INTERVAL_MS = 15_000;
 /**
  * 松手提交排在在途 seek 后面最多等多久（player-feel.md §19.5）。远端一次 seek
  * 一两秒是常态，五秒还没落地就当它挂了，照旧发提交把它掐掉——掐掉的代价是
@@ -324,7 +315,6 @@ export function VideoPlayer(props: VideoPlayerProps) {
   // 直接闭包会拿到过期的会话，上报到错误的档位上。
   const qoeSnapshotRef = useRef<() => PlaybackMetricPayload | null>(() => null);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
-  const [serverDiagnostics, setServerDiagnostics] = useState<PlaybackDiagnostics | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   /** 指针正按在进度条上：按住不动时也要把控制条钉住（lib/player/chrome.ts） */
   const [scrubbing, setScrubbing] = useState(false);
@@ -728,25 +718,8 @@ export function VideoPlayer(props: VideoPlayerProps) {
   const wantsPlayRef = useRef(true);
   const autoplayAttemptsRef = useRef(0);
   const autoplayLastRef = useRef<AutoplayOutcome | null>(null);
-  /** 供心跳探活读当前阶段：重开已经在路上时绝不能再触发一次重开 */
-  const phaseRef = useRef(initialPlayerState.phase);
-  /**
-   * 供心跳探活确认「404 说的还是不是当前会话」。
-   *
-   * 换字幕（PGS 烧录）/换音轨/换画质会重开会话，而服务端开新会话的第一步
-   * 就是杀掉同文件的旧会话（stop_for_file）。若旧定时器的那拍探活恰好在
-   * 新会话落地之后才拿到 404，此刻 phase 已经是 buffering——只靠 phase
-   * 守卫会放行一次多余的 restart，其 stop_for_file 又把刚起好的新会话
-   * 杀掉，播放器随即撞上 404 的 playlist，报「浏览器不支持这个格式」。
-   */
+  /** 当前会话的服务端 id；诊断面板据此区分「有会话」与「档 0 直出」。 */
   const sessionIdRef = useRef<string | null>(null);
-  /**
-   * 会话已被服务端回收、但用户正暂停着，我们**没有**代他重开。
-   *
-   * 暂停中替他拉起一路 ffmpeg 是浪费（他可能再也不回来了），所以只立这个
-   * 标记，等他点播放的那一刻再原地重开——那一下点击就是「我还要看」。
-   */
-  const deadSessionRef = useRef(false);
   /**
    * 按下的那一刻控制条在不在。
    *
@@ -758,14 +731,6 @@ export function VideoPlayer(props: VideoPlayerProps) {
   /** 最近一次按下的指针类型：dblclick 事件不带 pointerType，双击全屏靠它
    * 判定「只属于鼠标」——触屏双击是两次控制层开关，不该顺带进全屏 */
   const lastPointerTypeRef = useRef("");
-  // 会话释放器：区分「真的离开了」与「StrictMode 把同一个会话重新挂了一遍」。
-  const sessionReleaser = useMemo(
-    () =>
-      createSessionReleaser((id) => {
-        void stopPlaybackSession(id, apiRef.current).catch(() => undefined);
-      }),
-    [],
-  );
 
   /**
    * 本次会话的播放模式：引擎/地址/时间轴参照/字幕渲染器，一次算清、处处
@@ -805,20 +770,18 @@ export function VideoPlayer(props: VideoPlayerProps) {
   }
   startMsRef.current = mode?.originMs ?? 0;
   positionRef.current = positionMs;
-  phaseRef.current = state.phase;
 
   const failedKey = state.failedTiers.join(",");
   const sessionId = state.session?.session_id ?? null;
   sessionIdRef.current = sessionId;
 
   // 片长：服务端算的真值优先。**旧会话相对制**里 video.duration 只到「已经
-  // 转出来的那一段」，拿它当分母会让进度条一路自己缩放；VOD 全片列表
-  // （timeline="file"）和档 0 直出的 video.duration 都是真片长，可以兜底。
+  // 转出来的那一段」，拿它当分母会让进度条一路自己缩放；档 0 直出的
+  // video.duration 是真片长，可以兜底。
   const durationMs = useMemo(() => {
     if (resume?.duration_ms) return resume.duration_ms;
-    if (state.session?.timeline === "file") return videoDurationMs;
     return sessionId ? null : videoDurationMs;
-  }, [resume?.duration_ms, state.session?.timeline, sessionId, videoDurationMs]);
+  }, [resume?.duration_ms, sessionId, videoDurationMs]);
   const durationMsRef = useRef<number | null>(null);
   durationMsRef.current = durationMs;
 
@@ -942,9 +905,6 @@ export function VideoPlayer(props: VideoPlayerProps) {
     wantsPlayRef.current = true;
     autoplayAttemptsRef.current = 0;
     autoplayLastRef.current = null;
-    // 上一集的「会话已死」标记不能带进新的一集：带着的话，起播完成前用户点
-    // 播放会被当成「重开死会话」，凭空多拉一次决策
-    deadSessionRef.current = false;
     endedByAdminRef.current = false;
     consentGrantedRef.current = false;
     setAutoplay(null);
@@ -1002,17 +962,12 @@ export function VideoPlayer(props: VideoPlayerProps) {
         );
         if (cancelled) {
           // 请求已被超越（退出播放器/切集/换参数重发）：响应里可能带着一个
-          // 刚拉起的转码会话，此后没有任何代码会认领它——心跳、释放器都只认
-          // 落进状态机的会话。不当场掐掉的话，这路 ffmpeg 会占着转码并发
-          // 名额空烧三分钟 CPU，直到服务端超时回收（「关了播放 ffmpeg 还在
-          // 跑」的主要来路；同文件重开有 stop_for_file 兜底，这里补上退出与
-          // 跨文件切换的口子）。
-          if (session.session_id) {
-            void stopPlaybackSession(session.session_id, apiRef.current).catch(() => undefined);
-          }
+          // 刚拉起的转码会话，此后没有任何代码会认领它——心跳只认落进状态机
+          // 的会话。后端没有「结束会话」路由，这路 ffmpeg 只能等服务端空闲
+          // 回收（同文件重开有 stop_for_file 兜底），这里不做额外处理。
           return;
         }
-        playSessionIdRef.current = session.play_session_id ?? null;
+        playSessionIdRef.current = session.play_session_id;
         eventSequenceRef.current = 0;
         if (session.decision.outcome === "consent") {
           // 刚点过「开启并播放」、开关也保存成功，服务端却仍要求同意：这是
@@ -1031,14 +986,26 @@ export function VideoPlayer(props: VideoPlayerProps) {
         } else {
           consentGrantedRef.current = false;
         }
-        if (state.startMs === null) {
-          // 起点是服务端定的（续播点）：seek 目标与时间轴预填都跟上，
-          // 不填的话起播那几秒进度条停在 00:00，看起来像「时间没加载出来」
+        if (session.resume_status === "source_changed") {
+          // 源已发生替换或重转：必须使用服务端的 start_ms/duration_ms/tracks，
+          // 绝不能沿用之前保存的片长（例如 90 分钟合并集片长泄露到 45 分钟独立源）。
           pendingFileMsRef.current = session.start_ms;
           setPositionMs(session.start_ms);
+          if (session.watch) {
+            setResume(session.watch);
+          } else {
+            setResume(null);
+          }
+        } else {
+          if (state.startMs === null) {
+            // 起点是服务端定的（续播点）：seek 目标与时间轴预填都跟上，
+            // 不填的话起播那几秒进度条停在 00:00，看起来像「时间没加载出来」
+            pendingFileMsRef.current = session.start_ms;
+            setPositionMs(session.start_ms);
+          }
+          // 观看状态随响应带回：时间轴兜底片长、字幕记忆轨都从这里来
+          if (session.watch) setResume(session.watch);
         }
-        // 观看状态随响应带回：时间轴兜底片长、字幕记忆轨都从这里来
-        if (session.watch) setResume(session.watch);
         dispatch({ type: "session", session });
       } catch (error) {
         if (cancelled) return;
@@ -1246,42 +1213,8 @@ export function VideoPlayer(props: VideoPlayerProps) {
     clearPendingCommit();
     autoplayAttemptsRef.current = 0;
     autoplayLastRef.current = null;
-    deadSessionRef.current = false;
     setAutoplay(null);
   }, [state.session, clearPendingCommit]);
-
-  /** 诊断面板打开时轮询服务端会话，关闭后不额外占用 NAS 请求。 */
-  const diagnosticsSessionId = state.session?.session_id;
-  const diagnosticsStreamUrl = state.session?.stream_url;
-  useEffect(() => {
-    if (!diagnosticsOpen || !diagnosticsSessionId || !diagnosticsStreamUrl) {
-      setServerDiagnostics(null);
-      return;
-    }
-    let cancelled = false;
-    let timer: number | null = null;
-
-    const poll = async () => {
-      try {
-        const snapshot = await fetchPlaybackDiagnostics(
-          diagnosticsSessionId,
-          diagnosticsStreamUrl,
-          apiRef.current,
-        );
-        if (!cancelled) setServerDiagnostics(snapshot);
-      } catch {
-        // 诊断是旁路信息，服务端瞬时不可用时保留上一份快照，不影响播放。
-      }
-      if (!cancelled) timer = window.setTimeout(poll, 2_000);
-    };
-
-    setServerDiagnostics(null);
-    void poll();
-    return () => {
-      cancelled = true;
-      if (timer !== null) window.clearTimeout(timer);
-    };
-  }, [diagnosticsOpen, diagnosticsSessionId, diagnosticsStreamUrl]);
 
   /**
    * 取流速度读数：每秒问一次引擎，格式化后进 state（docs/design/player-feel.md §2.G3）。
@@ -1477,6 +1410,8 @@ export function VideoPlayer(props: VideoPlayerProps) {
   /** 一次进度心跳；响应里带着「已被管理员结束」就退出。 */
   const sendProgress = useCallback(
     (paused: boolean | undefined) => {
+      const playSessionId = playSessionIdRef.current;
+      if (!playSessionId) return;
       eventSequenceRef.current += 1;
       void reportPlaybackProgress(
         {
@@ -1484,7 +1419,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
           event: "progress",
           position_ms: positionRef.current,
           paused,
-          play_session_id: playSessionIdRef.current,
+          play_session_id: playSessionId,
           event_sequence: eventSequenceRef.current,
           ...trackRefsRef.current(),
         },
@@ -1502,17 +1437,26 @@ export function VideoPlayer(props: VideoPlayerProps) {
   const sendProgressRef = useRef(sendProgress);
   sendProgressRef.current = sendProgress;
 
+  /**
+   * 进度心跳：既是观看进度，也是**唯一的会话保活信号**。
+   *
+   * `start` 只在进入播放阶段时补一次；之后按 `shouldHeartbeat` 决定这一拍要不要
+   * 发。暂停中照样发（`paused: true` + 不变的位置，后端不计观看时长），否则会话
+   * 会被服务端按空闲窗口回收，用户回来点播放只会一直转圈——暂停期间拖动/卡住
+   * 会把阶段顶到 seeking / buffering 上，正是最容易断的那一档。
+   */
   useEffect(() => {
-    if (state.phase !== "playing") return;
-    const startKey = `${unitKey}:${playSessionIdRef.current ?? ""}`;
-    if (reportedStartRef.current !== startKey) {
+    const playSessionId = playSessionIdRef.current;
+    if (!playSessionId) return;
+    const startKey = `${unitKey}:${playSessionId}`;
+    if (state.phase === "playing" && reportedStartRef.current !== startKey) {
       reportedStartRef.current = startKey;
       eventSequenceRef.current += 1;
       void reportPlaybackProgress(
         {
           ...unit,
           event: "start",
-          play_session_id: playSessionIdRef.current,
+          play_session_id: playSessionId,
           event_sequence: eventSequenceRef.current,
           ...trackRefs(),
         },
@@ -1523,13 +1467,20 @@ export function VideoPlayer(props: VideoPlayerProps) {
         })
         .catch(() => undefined);
     }
+    const keepAlive = shouldHeartbeat({
+      phase: state.phase,
+      announced: reportedStartRef.current === startKey,
+      paused: video?.paused === true,
+    });
+    if (!keepAlive) return;
     const timer = window.setInterval(
       () => sendProgress(video?.paused ?? undefined),
       PROGRESS_INTERVAL_MS,
     );
     return () => window.clearInterval(timer);
+    // unit 是对象字面量，按内容比较
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.phase, unitKey, trackRefs, sendProgress]);
+  }, [state.phase, video, unitKey, trackRefs, sendProgress]);
 
   /**
    * 暂停 / 恢复即时上报，不等下一次心跳：活动页「正在播放」的暂停徽标滞后
@@ -1539,7 +1490,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
   useEffect(() => {
     if (!video) return;
     const report = (paused: boolean) => {
-      if (reportedStartRef.current !== unitKey) return;
+      if (reportedStartRef.current !== `${unitKey}:${playSessionIdRef.current ?? ""}`) return;
       sendProgressRef.current(paused);
     };
     const onPlaying = () => report(false);
@@ -1577,7 +1528,8 @@ export function VideoPlayer(props: VideoPlayerProps) {
   useEffect(() => {
     const snapshot = { ...unit };
     return () => {
-      if (reportedStartRef.current === null) return;
+      const playSessionId = playSessionIdRef.current;
+      if (reportedStartRef.current === null || !playSessionId) return;
       // 停止之后再到的暂停 / 心跳不能再上报：服务端会把刚结束的会话重建回来
       reportedStartRef.current = null;
       eventSequenceRef.current += 1;
@@ -1586,7 +1538,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
           ...snapshot,
           event: "stop",
           position_ms: positionRef.current,
-          play_session_id: playSessionIdRef.current,
+          play_session_id: playSessionId,
           event_sequence: eventSequenceRef.current,
           ...trackRefsRef.current(),
         },
@@ -1599,38 +1551,31 @@ export function VideoPlayer(props: VideoPlayerProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unitKey]);
 
-  /** 关标签页/切走：进度用 sendBeacon 补发，会话用 keepalive 掐掉。 */
+  /** 关标签页/切走：进度用 sendBeacon 补发。 */
   useEffect(() => {
     const onPageHide = () => {
-      if (reportedStartRef.current !== null) {
+      const playSessionId = playSessionIdRef.current;
+      if (reportedStartRef.current !== null && playSessionId) {
         eventSequenceRef.current += 1;
         reportPlaybackProgressOnUnload(
           {
             ...unit,
             event: "stop",
             position_ms: positionRef.current,
-            play_session_id: playSessionIdRef.current,
+            play_session_id: playSessionId,
             event_sequence: eventSequenceRef.current,
             ...trackRefsRef.current(),
           },
           apiRef.current,
         );
       }
-      // iOS 切后台也触发 pagehide——画中画还播着呢，这时杀掉转码会话，
-      // 小窗播完缓冲就断流。PiP 中不杀，真关页面后由服务端超时回收兜底。
-      const webkitMode = (video as { webkitPresentationMode?: string } | null)
-        ?.webkitPresentationMode;
-      const inPip =
-        (video && document.pictureInPictureElement === video) ||
-        webkitMode === "picture-in-picture";
-      if (sessionId && !inPip) stopPlaybackSessionOnUnload(sessionId, apiRef.current);
       const metric = qoeSnapshotRef.current();
       if (metric) reportPlaybackMetricOnUnload(metric, apiRef.current);
     };
     window.addEventListener("pagehide", onPageHide);
     return () => window.removeEventListener("pagehide", onPageHide);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [unitKey, sessionId]);
+  }, [unitKey]);
 
   /**
    * 首帧只能用 `requestVideoFrameCallback` 量。
@@ -1692,112 +1637,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
     };
   }, [video, qoe, state.session]);
 
-  /**
-   * 进度条缩略图：服务端在开会话时后台生成，这里轮询到就绪为止。
-   *
-   * 轮询而不是等推送：生成时长取决于片长与磁盘，几秒到几十秒都有可能，为它
-   * 拉一条长连接不值当。没就绪就是没有预览，不影响播放，所以失败一律吞掉；
-   * 试满十次（约两分钟）还拿不到就是这部片生成不了，别一直打服务端。
-   */
-  useEffect(() => {
-    const source = state.session?.stream_url;
-    if (!source) return;
-    let cancelled = false;
-    let attempts = 0;
-    let timer = 0;
-    const tick = async () => {
-      attempts += 1;
-      try {
-        const index = await fetchTrickplay(source);
-        if (cancelled) return;
-        if (index?.ready) {
-          setTrickplay(index);
-          return;
-        }
-      } catch {
-        // 预览不是关键路径，静默重试
-      }
-      if (!cancelled && attempts < 10) timer = window.setTimeout(tick, 12_000);
-    };
-    timer = window.setTimeout(tick, 1_000);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [state.session?.stream_url]);
-
-  /**
-   * 会话续命 + 掉线自愈 + 离开时显式收尾。
-   *
-   * 心跳：用户关页面不会发任何信号，服务端的超时回收是唯一可靠兜底。
-   *
-   * **自愈**：心跳并不总喂得上——页面切到后台后浏览器会把定时器节流到一分钟
-   * 一次，挂久了干脆整页冻结（Chrome 的 tab freezing），暂停着离开一会儿再
-   * 回来，服务端那边的会话早被巡检回收了。此时流的地址还在、取流 token 也
-   * 没过期（有效期 12 小时），但分片已经不存在，表现就是**一直转圈**，只能
-   * 刷新页面——这次修的就是它。
-   *
-   * 做法是把心跳同时当探活用：服务端明确说会话没了（404）就带着当前位置原地
-   * 重开一个（`restart`，与换音轨/换画质同一条路），而不是走降档回路——这一
-   * 档并没有失败，只是流没了，白降一档反而会把画质压下去。用户自己按过暂停
-   * 的话新会话不会自动续播（`wantsPlayRef` 说了算），他回来点播放即可。
-   *
-   * 页面在后台时只探不修：那时重开会话等于替一个没人看的页面拉起一路 ffmpeg，
-   * 留到 `visibilitychange` 回前台再修。
-   *
-   * 收尾：`pagehide` 只在真正卸载文档时触发，SPA 内部返回媒体库、切下一集
-   * 都不会触发。释放的时机与 StrictMode 规避都在 `createSessionReleaser` 里，
-   * 那边有单测；这里只负责「什么时候调它」。
-   */
-  useEffect(() => {
-    if (!sessionId) return;
-    sessionReleaser.acquire(sessionId);
-    // 一次探活没回来之前不发下一次：回前台那一下与定时器可能撞在一起，
-    // 两次都判定「没了」就会连开两个会话，其中一个当场变成孤儿
-    let probing = false;
-    const beat = async () => {
-      if (probing) return;
-      probing = true;
-      try {
-        const alive = await pingPlaybackSession(sessionId, apiRef.current);
-        // null = 这次请求本身失败（断网/5xx），不能据此判定会话没了
-        if (alive !== false) return;
-        // 探活途中会话已经换了（换字幕烧录/换音轨/换画质重开）：这个 404
-        // 说的是上一个会话，拿它去 restart 会让服务端 stop_for_file 把刚
-        // 起好的新会话一起杀掉（见 sessionIdRef 的注释）
-        if (sessionIdRef.current !== sessionId) return;
-        if (document.visibilityState !== "visible") return;
-        // 只在「确实在播/该播」的阶段重开。重开路上（deciding /
-        // session-starting / degrading，此时 state.session 还是旧会话）再触发
-        // 一次会形成风暴：新会话没就绪前每次心跳都 404，而每次重开都会让
-        // 服务端把上一次刚起的会话杀掉（stop_for_file），永远收敛不了。
-        // 报错 / 同意弹窗 / 播完同理——那些界面正等用户拍板，别在背后换流。
-        const phase = phaseRef.current;
-        if (phase !== "playing" && phase !== "buffering" && phase !== "seeking") return;
-        if (video?.paused && !wantsPlayRef.current) {
-          // 用户自己暂停着：不替他白烧一路转码，等他点播放再重开
-          deadSessionRef.current = true;
-          return;
-        }
-        // 客户端缓冲里可能还有几十秒余粮在放，先停住：换流期间进度条不该
-        // 继续跳（与换音轨/换画质同一处理）。这次暂停是我们造成的，不算
-        // 用户表态——wantsPlay 保持原值，新会话就位后自动续播。
-        video?.pause();
-        pendingFileMsRef.current = positionRef.current;
-        dispatch({ type: "restart", startMs: positionRef.current });
-      } finally {
-        probing = false;
-      }
-    };
-    const timer = window.setInterval(() => void beat(), PING_INTERVAL_MS);
-    const onVisibility = () => void beat();
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisibility);
-      sessionReleaser.release(sessionId);
-    };
-  }, [sessionId, sessionReleaser, video]);
+  // 后端没有缩略图索引端点：trickplay 保持 null（无预览），不轮询不存在的 API。
 
   // ---------------------------------------------------------------------
   // 播放控制
@@ -1810,14 +1650,6 @@ export function VideoPlayer(props: VideoPlayerProps) {
       wantsPlayRef.current = true;
       autoplayLastRef.current = null;
       setAutoplay(null);
-      if (deadSessionRef.current) {
-        // 暂停期间会话已被服务端回收（见心跳探活）：流是死的，play() 只会
-        // 永远转圈。带着当前位置原地重开，新会话就位后自动续播。
-        deadSessionRef.current = false;
-        pendingFileMsRef.current = positionRef.current;
-        dispatch({ type: "restart", startMs: positionRef.current });
-        return;
-      }
       void video.play().catch(() => undefined);
     } else {
       // 用户主动暂停：从这一刻起不再替他自动续播
@@ -3736,7 +3568,7 @@ export function VideoPlayer(props: VideoPlayerProps) {
             engine={engineRef.current}
             qoe={() => liveStats(qoeRef.current)}
             landscape={landscape}
-            diagnostics={serverDiagnostics}
+            diagnostics={null}
             onClose={() => setDiagnosticsOpen(false)}
           />
         ) : null}

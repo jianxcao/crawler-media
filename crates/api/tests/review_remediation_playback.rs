@@ -1,7 +1,11 @@
+use store::test_support::{FixtureFile, publish_fixture_file};
+#[path = "support/mod.rs"]
+mod support;
+
 use api::{ApiState, Store, router};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use serde_json::{Value, json};
@@ -33,10 +37,12 @@ fn app(root: &Path) -> (axum::Router, MediaId, String) {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
-    let file = root.join("matrix.mkv");
+    let library_root = root.join("data/library/movies");
+    std::fs::create_dir_all(&library_root).unwrap();
+    let file = library_root.join("matrix.mkv");
     std::fs::write(&file, b"0123456789abcdef").unwrap();
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let spec = FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id: media.id,
         path: file.display().to_string(),
         season: None,
@@ -47,9 +53,10 @@ fn app(root: &Path) -> (axum::Router, MediaId, String) {
         quality_source: QualitySource::Probe,
         confidence: Confidence::High,
         filter_score: Some(100),
+        ..Default::default()
     };
-    store.insert_ledger(&row).unwrap();
-    let compact = row.id.to_string().replace('-', "");
+    publish_fixture_file(&store, &spec).unwrap();
+    let item_id = domain::TypedItemId::Work(media.id).to_wire_string();
     let router = router(
         ApiState::new(
             store,
@@ -61,7 +68,7 @@ fn app(root: &Path) -> (axum::Router, MediaId, String) {
         )
         .unwrap(),
     );
-    (router, media.id, compact)
+    (router, media.id, item_id)
 }
 
 async fn json(response: axum::response::Response) -> Value {
@@ -72,6 +79,22 @@ async fn json(response: axum::response::Response) -> Value {
 fn admin() -> domain::UserId {
     domain::UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap()
 }
+
+/// The published file behind the fixture movie.
+fn file_id(store: &Store, media: MediaId) -> domain::LedgerId {
+    store
+        .file_coverage_for_media(media)
+        .unwrap()
+        .remove(0)
+        .file
+        .file_id
+}
+
+/// Issue the play session that protocol events must carry.
+fn issue_session(store: &Store, device: &str, media: MediaId) -> String {
+    support::session::issue_session(store, admin(), device, file_id(store, media), 1)
+}
+
 async fn send(
     app: &axum::Router,
     method: &str,
@@ -101,6 +124,7 @@ async fn jellyfin_completion_marks_watched() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, media, id) = app(tmp.path());
     let store = Store::open(tmp.path().join("data")).unwrap();
+    let session = issue_session(&store, "actual-device", media);
     store
         .upsert_unit(
             admin(),
@@ -128,7 +152,7 @@ async fn jellyfin_completion_marks_watched() {
                 "POST",
                 route,
                 "Bearer admin-token",
-                json!({"ItemId":id,"PositionTicks":ticks}),
+                json!({"ItemId":id,"PositionTicks":ticks,"PlaySessionId":session}),
                 Some("actual-device")
             )
             .await
@@ -153,11 +177,49 @@ async fn jellyfin_completion_marks_watched() {
     .await;
     assert_eq!(result["TotalRecordCount"], 0);
 }
+/// A protocol Progress without a preceding Playing cannot invent a binding.
+#[tokio::test]
+async fn unbound_jellyfin_progress_is_ignored_without_fabricating_facts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, media, id) = app(tmp.path());
+    let store = Store::open(tmp.path().join("data")).unwrap();
+
+    let response = send(
+        &app,
+        "POST",
+        "/Sessions/Playing/Progress",
+        "Bearer admin-token",
+        json!({"ItemId":id,"PositionTicks":50000000}),
+        Some("unbound-device"),
+    )
+    .await;
+    let status = response.status();
+    if status != StatusCode::NO_CONTENT {
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        panic!(
+            "未绑定 Progress 应答 {status}: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    assert!(store.unit_state(admin(), media, -1, -1).unwrap().is_none());
+
+    assert!(
+        store
+            .get_session(admin(), "unbound-device")
+            .unwrap()
+            .is_none(),
+        "未绑定 Progress 不得伪造 live 会话行"
+    );
+}
+
 #[tokio::test]
 async fn standard_authorization_isolates_devices() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, _, id) = app(tmp.path());
+    let (app, media, id) = app(tmp.path());
+    let store = Store::open(tmp.path().join("data")).unwrap();
     for device in ["bedroom", "living-room"] {
+        let session = issue_session(&store, device, media);
         let auth =
             format!("MediaBrowser Token=\"admin-token\", DeviceId=\"{device}\", Client=\"Infuse\"");
         assert_eq!(
@@ -166,7 +228,7 @@ async fn standard_authorization_isolates_devices() {
                 "POST",
                 "/Sessions/Playing",
                 &auth,
-                json!({"ItemId":id,"PositionTicks":0}),
+                json!({"ItemId":id,"PositionTicks":0,"PlaySessionId":session}),
                 None
             )
             .await
@@ -174,7 +236,6 @@ async fn standard_authorization_isolates_devices() {
             StatusCode::NO_CONTENT
         );
     }
-    let store = Store::open(tmp.path().join("data")).unwrap();
     let sessions = store.active_sessions(i64::MAX / 2, i64::MAX / 2).unwrap();
     assert_eq!(sessions.len(), 2);
     assert_eq!(
@@ -191,8 +252,10 @@ async fn standard_authorization_isolates_devices() {
 #[tokio::test]
 async fn stopped_device_retains_revocable_identity() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, _, id) = app(tmp.path());
-    Store::open(tmp.path().join("data")).unwrap().set_user_token(admin(), "device-token").unwrap();
+    let (app, media, id) = app(tmp.path());
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    store.set_user_token(admin(), "device-token").unwrap();
+    let session = issue_session(&store, "actual-device", media);
     for route in ["/Sessions/Playing", "/Sessions/Playing/Stopped"] {
         assert_eq!(
             send(
@@ -200,7 +263,7 @@ async fn stopped_device_retains_revocable_identity() {
                 "POST",
                 route,
                 "Bearer device-token",
-                json!({"ItemId":id,"PositionTicks":10000000}),
+                json!({"ItemId":id,"PositionTicks":10000000,"PlaySessionId":session}),
                 Some("actual-device")
             )
             .await
@@ -267,27 +330,44 @@ async fn stopped_device_retains_revocable_identity() {
 async fn unit_write_failure_returns_error() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, media, _) = app(tmp.path());
-    let db = rusqlite::Connection::open(tmp.path().join("data/subscribe.db")).unwrap();
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let session = issue_session(&store, "browser", media);
+    let db = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
     db.execute_batch("CREATE TRIGGER review_access_tmp_block BEFORE INSERT ON playback_units BEGIN SELECT RAISE(ABORT,'review write blocked'); END;").unwrap();
-    let response=send(&app,"POST","/api/v1/playback/progress","Bearer admin-token",json!({"media_item_id":media.to_string(),"event":"start","device_id":"browser","position_ms":30000}),None).await;
+    let response=send(&app,"POST","/api/v1/playback/progress","Bearer admin-token",json!({ "event_sequence": crate::support::session::next_sequence(),"media_item_id":media.to_string(),"event":"start","device_id":"browser","position_ms":30000,"play_session_id":session}),None).await;
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert!(json(response).await["data"].is_null());
-    let store = Store::open(tmp.path().join("data")).unwrap();
     assert!(store.unit_state(admin(), media, -1, -1).unwrap().is_none());
 }
 #[tokio::test]
 async fn zero_playback_limits_return_a_bounded_page() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, media, _) = app(tmp.path());
-    send(&app, "POST", "/api/v1/playback/marks", "Bearer admin-token",
-        json!({"media_item_id": media.to_string(), "favorite": true}), None).await;
-    for route in ["/api/v1/playback/favorites?limit=0", "/api/v1/playback/favorites/gallery?limit=0"] {
+    send(
+        &app,
+        "POST",
+        "/api/v1/playback/marks",
+        "Bearer admin-token",
+        json!({"media_item_id": media.to_string(), "favorite": true}),
+        None,
+    )
+    .await;
+    for route in [
+        "/api/v1/playback/favorites?limit=0",
+        "/api/v1/playback/favorites/gallery?limit=0",
+    ] {
         let response = send(&app, "GET", route, "Bearer admin-token", json!({}), None).await;
         assert_eq!(response.status(), StatusCode::OK, "{route}");
         let body = json(response).await;
-        let items = body["data"]["items"].as_array().or_else(|| body["data"].as_array())
+        let items = body["data"]["items"]
+            .as_array()
+            .or_else(|| body["data"].as_array())
             .unwrap_or_else(|| panic!("{route} missing bounded collection: {body}"));
-        assert_eq!(items.len(), 1, "{route} did not clamp limit=0 to one existing item");
+        assert_eq!(
+            items.len(),
+            1,
+            "{route} did not clamp limit=0 to one existing item"
+        );
     }
 }
 
@@ -324,7 +404,9 @@ async fn zero_history_limit_is_safe() {
 async fn web_revoke_is_explicitly_unsupported() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, media, id) = app(tmp.path());
-    let body = json!({"media_item_id":media.to_string(),"event":"start","device_id":"browser","position_ms":30000});
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let session = issue_session(&store, "browser", media);
+    let body = json!({ "event_sequence": crate::support::session::next_sequence(),"media_item_id":media.to_string(),"event":"start","device_id":"browser","position_ms":30000,"play_session_id":session});
     assert_eq!(
         send(
             &app,
@@ -383,18 +465,20 @@ async fn web_revoke_is_explicitly_unsupported() {
 #[tokio::test]
 async fn frontend_metrics_persist() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, media, id) = app(tmp.path());
+    let (app, media, _) = app(tmp.path());
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let file = file_id(&store, media);
     let response = send(
         &app,
         "POST",
         "/api/v1/playback/metrics",
         "Bearer admin-token",
-        json!({"library_file_id":id,"tier":0,"engine":"native","watched_ms":60000}),
+        json!({"library_file_id":file.to_string(),"tier":0,"engine":"native","watched_ms":60000}),
         None,
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    let db = rusqlite::Connection::open(tmp.path().join("data/subscribe.db")).unwrap();
+    let db = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
     let row = db
         .query_row(
             "SELECT user_id,media_id,engine,watched_ms FROM playback_metrics",
@@ -471,77 +555,24 @@ async fn clear_history_preserves_favorites_and_preferences() {
         (state.position_ms, state.played, state.play_count),
         (0, false, 0)
     );
+    // The favourite is a library decision and survives; the resume package (position,
+    // duration, source binding and the track selection bound to it) goes with the history.
+    assert!(state.favorite, "the favourite survives clearing history");
     assert_eq!(
         (
-            state.favorite,
             state.audio_track.as_deref(),
-            state.subtitle_track.as_deref()
+            state.subtitle_track.as_deref(),
+            state.duration_ms
         ),
-        (true, Some("embedded:1"), Some("off"))
+        (None, None, None),
+        "the resume package is cleared with the history"
     );
     assert!(store.user_active_media_ids(admin()).unwrap().is_empty());
 }
 
-#[tokio::test]
-async fn jellyfin_preserves_legacy_movie_marks() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (app, media, id) = app(tmp.path());
-    let store = Store::open(tmp.path().join("data")).unwrap();
-    store
-        .upsert_unit(
-            admin(),
-            media,
-            0,
-            0,
-            45000,
-            Some(true),
-            Some(true),
-            Some(120000),
-            Some("embedded:1"),
-            Some("off"),
-            true,
-            1,
-        )
-        .unwrap();
-    assert_eq!(
-        send(
-            &app,
-            "POST",
-            "/Sessions/Playing",
-            "Bearer admin-token",
-            json!({"ItemId":id,"PositionTicks":450000000}),
-            Some("actual-device")
-        )
-        .await
-        .status(),
-        StatusCode::NO_CONTENT
-    );
-    let state = store.unit_state(admin(), media, -1, -1).unwrap().unwrap();
-    assert!(state.played);
-    assert!(state.favorite);
-    assert_eq!(state.duration_ms, Some(120000));
-    assert_eq!(state.audio_track.as_deref(), Some("embedded:1"));
-    assert_eq!(state.subtitle_track.as_deref(), Some("off"));
-    assert_eq!(state.play_count, 2);
-    let body = json(
-        send(
-            &app,
-            "GET",
-            &format!("/api/v1/playback/resume?media_item_id={media}"),
-            "Bearer admin-token",
-            json!({}),
-            None,
-        )
-        .await,
-    )
-    .await;
-    assert_eq!(body["data"]["played"], true);
-    assert_eq!(body["data"]["is_favorite"], true);
-}
-
+#[path = "playback_regression/credentials.rs"]
+mod credentials;
 #[path = "playback_regression/failures.rs"]
 mod failures;
 #[path = "playback_regression/protocol.rs"]
 mod protocol;
-#[path = "playback_regression/credentials.rs"]
-mod credentials;

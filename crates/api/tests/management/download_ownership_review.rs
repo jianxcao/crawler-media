@@ -13,6 +13,7 @@ use tower::ServiceExt;
 
 use super::common::*;
 #[path = "delivery/fixture.rs"]
+#[allow(clippy::duplicate_mod)]
 mod fixture;
 
 #[derive(Default)]
@@ -25,11 +26,10 @@ struct OwnedDownloads {
 impl OwnedDownloads {
     fn record_removal(&self, enclosure: &str, delete_files: bool) -> Result<(), DownloaderError> {
         self.removed.lock().push(enclosure.to_string());
-        if delete_files {
-            if let Some(path) = self.files.lock().get(enclosure) {
+        if delete_files
+            && let Some(path) = self.files.lock().get(enclosure) {
                 std::fs::remove_file(path)?;
             }
-        }
         Ok(())
     }
 }
@@ -175,7 +175,7 @@ fn duplicate(store: &Store, original: SubscribeId) -> domain::Subscribe {
 async fn imported_pending_cleanup_uses_exact_persisted_downloader_route() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, store, downloads) = setup(&tmp);
-    let (url, calls) = fixture::transmission_fixture();
+    let (url, calls, _url_server) = fixture::transmission_fixture();
     let route = DownloaderId::new();
     store
         .insert_downloader(&api::store::DownloaderRow {
@@ -297,7 +297,7 @@ async fn shared_reference_survives(imported: bool) {
     }
     if imported {
         store
-            .mark_pending_imported(other.id, &[shared.torrent.enclosure.clone()])
+            .mark_pending_imported(other.id, std::slice::from_ref(&shared.torrent.enclosure))
             .unwrap();
     }
     let file = tmp.path().join("shared.mkv");
@@ -327,7 +327,7 @@ async fn cleanup_preserves_task_referenced_by_another_imported_subscribe() {
 async fn cleanup_preserves_task_referenced_by_another_subscribe_via_downloader_alias() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, store, _downloads) = setup(&tmp);
-    let (url, calls) = fixture::transmission_fixture();
+    let (url, calls, _url_server) = fixture::transmission_fixture();
     let route_a = DownloaderId::new();
     let route_b = DownloaderId::new();
     for (id, name) in [(route_a, "trans-a"), (route_b, "trans-b")] {
@@ -555,7 +555,7 @@ async fn absent_magnet_cleanup_is_a_safe_noop() {
 #[tokio::test]
 async fn production_dynamic_downloader_delegates_owned_removal_to_the_selected_client() {
     let tmp = tempfile::tempdir().unwrap();
-    let (url, calls) = fixture::transmission_fixture();
+    let (url, calls, _url_server) = fixture::transmission_fixture();
     let store = Store::open(tmp.path().join("data")).unwrap();
     store
         .insert_downloader(&api::store::DownloaderRow {
@@ -671,11 +671,11 @@ async fn tick(app: &axum::Router, now: i64) {
 async fn transfer_until(app: &axum::Router, store: &Store, count: usize, start: i64) {
     for now in (start..start + 300).step_by(30) {
         tick(app, now).await;
-        if store.list_ledger().unwrap().len() == count {
+        if store.list_file_coverage().unwrap().len() == count {
             return;
         }
     }
-    assert_eq!(store.list_ledger().unwrap().len(), count);
+    assert_eq!(store.list_file_coverage().unwrap().len(), count);
 }
 
 #[tokio::test]
@@ -704,16 +704,16 @@ async fn same_media_source_transfers_to_two_libraries_but_is_idempotent_in_each(
         .record_pending_submission(original, 80, &owned)
         .unwrap();
     transfer_until(&app, &store, 1, 1).await;
-    let first_row = store.list_ledger().unwrap().remove(0);
-    assert!(std::path::Path::new(&first_row.path).starts_with(&first_root));
+    let first_coverage = store.list_file_coverage().unwrap().remove(0);
+    assert!(first_coverage.file.path.starts_with(&first_root));
     store
         .record_pending_submission(second.id, 80, &owned)
         .unwrap();
     transfer_until(&app, &store, 2, 301).await;
-    let rows = store.list_ledger().unwrap();
+    let rows = store.list_file_coverage().unwrap();
     assert!(
         rows.iter()
-            .any(|row| std::path::Path::new(&row.path).starts_with(&second_root))
+            .any(|coverage| coverage.file.path.starts_with(&second_root))
     );
     let repeated = duplicate(&store, original);
     store
@@ -722,14 +722,16 @@ async fn same_media_source_transfers_to_two_libraries_but_is_idempotent_in_each(
     for now in [601, 631, 661] {
         tick(&app, now).await;
     }
-    assert_eq!(store.list_ledger().unwrap().len(), 2);
+    assert_eq!(store.list_file_coverage().unwrap().len(), 2);
     assert_eq!(
-        store.ledger_by_path(&first_row.path).unwrap().unwrap().id,
-        first_row.id
+        store
+            .file_coverage_by_path(&first_coverage.file.path.to_string_lossy())
+            .unwrap()
+            .unwrap()
+            .file
+            .file_id,
+        first_coverage.file.file_id
     );
-    assert!(
-        rows.iter()
-            .all(|row| std::path::Path::new(&row.path).exists())
-    );
+    assert!(rows.iter().all(|coverage| coverage.file.path.exists()));
     assert!(source.exists());
 }

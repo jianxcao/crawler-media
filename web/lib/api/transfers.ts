@@ -17,8 +17,7 @@ export interface LedgerItem {
   media_kind: "movie" | "tv";
   path: string;
   source_path?: string | null;
-  season: number | null;
-  episode: number | null;
+  units: Array<{ season: number; episode: number }>;
   resolution: string | null;
   codec: string | null;
   hdr: string | null;

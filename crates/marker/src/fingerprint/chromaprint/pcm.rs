@@ -54,7 +54,7 @@ fn decode_pcm_chunk(bytes: &[u8], pending_low_byte: &mut Option<u8>, samples: &m
         start = 1;
     }
     let aligned_length = (bytes.len() - start) & !1;
-    for sample in bytes[start..start + aligned_length].chunks_exact(2) {
+    for sample in bytes[start..start + aligned_length].as_chunks::<2>().0 {
         samples.push(i16::from_le_bytes([sample[0], sample[1]]));
     }
     if start + aligned_length < bytes.len() {

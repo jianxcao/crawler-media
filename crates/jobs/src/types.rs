@@ -69,10 +69,14 @@ pub struct JobDef {
 
 #[derive(Debug, thiserror::Error)]
 pub enum JobError {
+    #[error("invalid jobs database: {0}")]
+    Layout(String),
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
     #[error("unknown Job {0}")]
     UnknownJob(JobId),
     #[error("invalid job kind: {0}")]

@@ -132,9 +132,10 @@ async fn items_sort_by_date_created_descending_and_emit_date_created() {
     store.insert_media(&recent_media).unwrap();
     let recent_file = tmp.path().join("recent.mkv");
     std::fs::write(&recent_file, b"new movie").unwrap();
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_scanned(
+        &store,
+        FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id: recent_media.id,
             path: recent_file.display().to_string(),
             season: None,
@@ -145,8 +146,9 @@ async fn items_sort_by_date_created_descending_and_emit_date_created() {
             quality_source: QualitySource::Probe,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    );
 
     let body = json(
         get(
@@ -247,21 +249,22 @@ fn seed_library_items(store: &Store, movie_root: &PathBuf, tv_root: &PathBuf) {
         store.insert_media(&media).unwrap();
         let file = root.join(format!("{title}.mkv"));
         std::fs::write(&file, b"video").unwrap();
-        store
-            .insert_ledger(&LedgerRow {
-                id: LedgerId::new(),
-                media_id: media.id,
-                path: file.display().to_string(),
-                season,
-                episode,
-                resolution: None,
-                codec: None,
-                hdr: None,
-                quality_source: QualitySource::Probe,
-                confidence: Confidence::High,
-                filter_score: None,
-            })
-            .unwrap();
+        let spec = store::test_support::FixtureFile {
+            media_id: media.id,
+            path: file.display().to_string(),
+            season,
+            episode,
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: QualitySource::Probe,
+            confidence: Confidence::High,
+            filter_score: None,
+            transfer_mode: None,
+            source_path: None,
+            file_id: None,
+        };
+        store::test_support::publish_fixture_file(store, &spec).unwrap();
         if kind == MediaKind::Tv {
             seed_second_episode(store, tv_root, media.id);
         }
@@ -271,21 +274,22 @@ fn seed_library_items(store: &Store, movie_root: &PathBuf, tv_root: &PathBuf) {
 fn seed_second_episode(store: &Store, tv_root: &Path, media_id: MediaId) {
     let second_episode = tv_root.join("A Show S02E01.mkv");
     std::fs::write(&second_episode, b"episode two").unwrap();
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
-            media_id,
-            path: second_episode.display().to_string(),
-            season: Some(2),
-            episode: Some(1),
-            resolution: None,
-            codec: None,
-            hdr: None,
-            quality_source: QualitySource::Probe,
-            confidence: Confidence::High,
-            filter_score: None,
-        })
-        .unwrap();
+    let spec = store::test_support::FixtureFile {
+        media_id,
+        path: second_episode.display().to_string(),
+        season: Some(2),
+        episode: Some(1),
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Probe,
+        confidence: Confidence::High,
+        filter_score: None,
+        transfer_mode: None,
+        source_path: None,
+        file_id: None,
+    };
+    store::test_support::publish_fixture_file(store, &spec).unwrap();
 }
 
 async fn assert_movie_parent(app: &axum::Router, movie_id: &str, movie_root: &Path) {
@@ -315,12 +319,12 @@ async fn assert_movie_parent(app: &axum::Router, movie_id: &str, movie_root: &Pa
 }
 
 async fn assert_series_details(app: &axum::Router, series_id: &str) {
-    let episodes = json(get(&app, format!("/Items?ParentId={series_id}")).await).await;
+    let episodes = json(get(app, format!("/Items?ParentId={series_id}")).await).await;
     assert_eq!(episodes["Items"][0]["Type"], "Episode");
     assert_eq!(episodes["Items"][0]["SeriesId"], series_id);
     assert_eq!(episodes["Items"][0]["IndexNumber"], 1);
     assert_eq!(episodes["Items"][0]["Name"], "S01E01");
-    let series_detail = json(get(&app, format!("/Items/{series_id}")).await).await;
+    let series_detail = json(get(app, format!("/Items/{series_id}")).await).await;
     assert_eq!(series_detail["Type"], "Series");
     let user_id = "00000000-0000-0000-0000-000000000001";
     let user_series_detail = app
@@ -340,20 +344,20 @@ async fn assert_series_details(app: &axum::Router, series_id: &str) {
     assert_eq!(user_series_detail["Type"], "Series");
     assert_eq!(user_series_detail["Id"], series_id);
     let episode_id = episodes["Items"][0]["Id"].as_str().unwrap();
-    let episode_detail = json(get(&app, format!("/Items/{episode_id}")).await).await;
+    let episode_detail = json(get(app, format!("/Items/{episode_id}")).await).await;
     assert_eq!(episode_detail["Type"], "Episode");
 }
 
 async fn assert_user_routes(app: &axum::Router, movie_id: &str) {
     // VidHub 常用格式测试：带 /Users/{userId}/ 前缀的 API
     let user_id = "00000000-0000-0000-0000-000000000001";
-    let user_views = json(get(&app, format!("/Users/{user_id}/Views")).await).await;
+    let user_views = json(get(app, format!("/Users/{user_id}/Views")).await).await;
     // 默认库 2 个 + 上面创建的 2 个 = 4 个库
     assert_eq!(user_views["Items"].as_array().unwrap().len(), 4);
 
     let user_items = json(
         get(
-            &app,
+            app,
             format!("/Users/{user_id}/Items?ParentId={}", movie_id),
         )
         .await,
@@ -362,25 +366,25 @@ async fn assert_user_routes(app: &axum::Router, movie_id: &str) {
     assert_eq!(user_items["Items"].as_array().unwrap().len(), 1);
     assert_eq!(user_items["Items"][0]["Name"], "A Film");
 
-    let user_profile = json(get(&app, format!("/Users/{user_id}")).await).await;
+    let user_profile = json(get(app, format!("/Users/{user_id}")).await).await;
     assert_eq!(user_profile["Id"], user_id);
     assert_eq!(user_profile["Policy"]["IsAdministrator"], true);
 }
 
 async fn assert_season_routes(app: &axum::Router, series_id: &str) -> Value {
     // VidHub 统计与分季端点测试：
-    let counts = json(get(&app, "/Items/Counts").await).await;
+    let counts = json(get(app, "/Items/Counts").await).await;
     // fixture 包含 initial seed 电影 Matrix (1) + 测试自建 A Film (1) = 2
     assert_eq!(counts["MovieCount"], 2);
     assert_eq!(counts["SeriesCount"], 1);
     assert_eq!(counts["EpisodeCount"], 2);
 
-    let seasons = json(get(&app, format!("/Shows/{series_id}/Seasons")).await).await;
+    let seasons = json(get(app, format!("/Shows/{series_id}/Seasons")).await).await;
     assert_eq!(seasons["Items"].as_array().unwrap().len(), 2);
     assert_eq!(seasons["Items"][0]["IndexNumber"], 1);
     assert_eq!(seasons["Items"][1]["IndexNumber"], 2);
 
-    let show_episodes = json(get(&app, format!("/Shows/{series_id}/Episodes")).await).await;
+    let show_episodes = json(get(app, format!("/Shows/{series_id}/Episodes")).await).await;
     assert_eq!(show_episodes["TotalRecordCount"], 2);
     assert_eq!(show_episodes["Items"][0]["IndexNumber"], 1);
     assert_eq!(show_episodes["Items"][1]["IndexNumber"], 1);
@@ -389,7 +393,7 @@ async fn assert_season_routes(app: &axum::Router, series_id: &str) -> Value {
 
     let episode_page = json(
         get(
-            &app,
+            app,
             format!("/Shows/{series_id}/Episodes?StartIndex=1&Limit=1"),
         )
         .await,
@@ -418,7 +422,7 @@ async fn assert_season_routes(app: &axum::Router, series_id: &str) -> Value {
 }
 
 async fn assert_next_up_and_streams(app: &axum::Router, show_episodes: &Value) {
-    let next_up = json(get(&app, "/Shows/NextUp").await).await;
+    let next_up = json(get(app, "/Shows/NextUp").await).await;
     let episodes = show_episodes["Items"].as_array().unwrap();
     let first_episode = episodes
         .iter()
@@ -450,7 +454,7 @@ async fn assert_next_up_and_streams(app: &axum::Router, show_episodes: &Value) {
         .unwrap();
     assert_eq!(mark_played.status(), StatusCode::OK);
 
-    let next_up_after_play = json(get(&app, "/Shows/NextUp").await).await;
+    let next_up_after_play = json(get(app, "/Shows/NextUp").await).await;
     assert_eq!(next_up_after_play["Items"].as_array().unwrap().len(), 1);
     assert_eq!(next_up_after_play["Items"][0]["Id"], second_episode["Id"]);
 }

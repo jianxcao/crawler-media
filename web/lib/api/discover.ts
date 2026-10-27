@@ -23,7 +23,7 @@ import type {
 // 组件引用的导出签名与 DTO 转换函数（search.ts 复用），其余拉取函数返回空数据。
 
 interface MediaLibraryStatusDto {
-  media_item_id: number;
+  media_item_id: string;
   library_count: number;
   file_count: number;
 }
@@ -59,18 +59,8 @@ interface TitleSearchProviderStatusDto {
   message: string | null;
 }
 
-export interface MediaSearchItemDto {
-  id: string;
-  source: MediaSource;
-  title: string;
-  year?: number | null;
-  type?: MediaType | null;
-  rating: number;
-  poster_url: string;
-}
-
 // ---------------------------------------------------------------------------
-// 前端渲染模型（组件引用；旧发现页编排字段保留以兼容导入面）
+// 前端渲染模型（组件引用）
 // ---------------------------------------------------------------------------
 
 export type DiscoveryPresentation = "hero" | "ranked-row" | "poster-row";
@@ -254,32 +244,6 @@ function toItem(dto: DiscoveredTitleDto): MediaItem {
     posterUrl: cachedImageUrl(dto.poster_url),
     backdropUrl: dto.backdrop_url ? cachedImageUrl(dto.backdrop_url) : undefined,
     libraryStatus: toLibraryStatus(dto.library_status),
-  };
-}
-
-export function toDiscoveredSearchItem(dto: DiscoveredTitleDto): MediaSearchItem {
-  return {
-    titleRef: dto.title_ref,
-    id: dto.external_id,
-    source: dto.provider,
-    title: dto.title,
-    year: dto.release_year ?? undefined,
-    type: dto.media_type ?? undefined,
-    rating: dto.provider_rating,
-    posterUrl: cachedImageUrl(dto.poster_url),
-  };
-}
-
-/** 旧媒体搜索快照 DTO → 前端视图；快照在迁移前已落库，因此继续兼容。 */
-export function toSearchItem(item: MediaSearchItemDto): MediaSearchItem {
-  return {
-    id: item.id,
-    source: item.source,
-    title: item.title,
-    year: item.year ?? undefined,
-    type: item.type ?? undefined,
-    rating: item.rating,
-    posterUrl: cachedImageUrl(item.poster_url),
   };
 }
 

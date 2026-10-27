@@ -226,7 +226,7 @@ function UpNextCard({ item, onCleared }: { item: UpNextItem; onCleared?: () => v
                   <DropdownMenu.Item
                     onSelect={() => {
                       clearPlaybackHistory("item", {
-                        mediaItemId: item.media_item_id as unknown as number,
+                        mediaItemId: item.media_item_id,
                       })
                         .then(() => {
                           toast.success(`已移出《${item.title}》`);

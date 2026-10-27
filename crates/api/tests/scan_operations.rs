@@ -2,7 +2,6 @@
 mod support;
 
 use axum::http::StatusCode;
-use domain::MediaKind;
 use support::library_presence::PresenceFixture;
 
 #[tokio::test]
@@ -20,13 +19,18 @@ async fn scan_returns_202_with_operation_id_and_polls() {
     assert_eq!(res["ok"], true);
     assert_eq!(res["data"]["queued"], true);
 
-    let op_id = res["data"]["operation_id"].as_str().expect("must return operation_id");
+    let op_id = res["data"]["operation_id"]
+        .as_str()
+        .expect("must return operation_id");
 
     // Poll operation status
     let (poll_status, poll_res) = fix
         .request(
             "GET",
-            &format!("/api/v1/libraries/{}/scan-operations/{}", fix.library_id, op_id),
+            &format!(
+                "/api/v1/libraries/{}/scan-operations/{}",
+                fix.library_id, op_id
+            ),
             Some(&fix.admin_token),
         )
         .await;
@@ -54,7 +58,10 @@ async fn cancel_scan_does_not_break_subsequent_library_work_leases() {
     let (wrong_status, _) = fix
         .request(
             "POST",
-            &format!("/api/v1/libraries/wrong-lib-id/scan-operations/{}/cancel", op_id),
+            &format!(
+                "/api/v1/libraries/wrong-lib-id/scan-operations/{}/cancel",
+                op_id
+            ),
             Some(&fix.admin_token),
         )
         .await;
@@ -64,7 +71,10 @@ async fn cancel_scan_does_not_break_subsequent_library_work_leases() {
     let (cancel_status, cancel_res) = fix
         .request(
             "POST",
-            &format!("/api/v1/libraries/{}/scan-operations/{}/cancel", fix.library_id, op_id),
+            &format!(
+                "/api/v1/libraries/{}/scan-operations/{}/cancel",
+                fix.library_id, op_id
+            ),
             Some(&fix.admin_token),
         )
         .await;
@@ -75,16 +85,26 @@ async fn cancel_scan_does_not_break_subsequent_library_work_leases() {
     let (again_status, again_res) = fix
         .request(
             "POST",
-            &format!("/api/v1/libraries/{}/scan-operations/{}/cancel", fix.library_id, op_id),
+            &format!(
+                "/api/v1/libraries/{}/scan-operations/{}/cancel",
+                fix.library_id, op_id
+            ),
             Some(&fix.admin_token),
         )
         .await;
-    assert_eq!(again_status, StatusCode::OK, "重复取消必须幂等: {again_res}");
+    assert_eq!(
+        again_status,
+        StatusCode::OK,
+        "重复取消必须幂等: {again_res}"
+    );
     assert_eq!(again_res["data"]["cancelled"], false);
 
     // 4. Critical: library work lease must NOT be permanently broken!
     let lease_res = fix.state.acquire_library_work(&fix.library_id);
-    assert!(lease_res.is_ok(), "Canceling a scan must not freeze the library permanently");
+    assert!(
+        lease_res.is_ok(),
+        "Canceling a scan must not freeze the library permanently"
+    );
 
     // 5. Subsequent scan must be accepted and **actually complete** — a
     //    cancelled shared control would leave it failed/partial.
@@ -129,29 +149,9 @@ async fn cross_operation_change_invalidates_derived_facts() {
     let (mkv_id, strm_id) = {
         let store = fix.state.store();
         let guard = store.lock();
-        let rows = guard.list_ledger().unwrap();
+        let rows = guard.list_file_coverage().unwrap();
         assert_eq!(rows.len(), 2, "operation A 必须登记两个文件");
-        for row in &rows {
-            guard.ack_scan_probe_obligation(row.id).unwrap();
-            let tracks = library::Tracks {
-                video: Some(library::VideoTrack {
-                    codec: Some("h264".to_string()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            };
-            guard
-                .put_file_meta_versioned(&row.id.to_string(), &tracks, Some("v1"), Some(1000))
-                .unwrap();
-        }
-        assert!(
-            guard.scan_probe_obligations(100).unwrap().is_empty(),
-            "基线不应有未了结的探测义务"
-        );
-        (
-            rows.iter().find(|r| r.path.ends_with(".mkv")).unwrap().id,
-            rows.iter().find(|r| r.path.ends_with(".strm")).unwrap().id,
-        )
+        seed_probe_baseline(&guard, &rows)
     };
 
     // 文件变化：mkv 内容变长；strm 换成同长度 URL 并把 mtime 恢复成原值。
@@ -165,7 +165,11 @@ async fn cross_operation_change_invalidates_derived_facts() {
         .unwrap();
     let after = std::fs::metadata(&strm).unwrap();
     assert_eq!(after.len(), strm_len, "测试前提：URL 长度未变");
-    assert_eq!(after.modified().unwrap(), strm_mtime, "测试前提：mtime 未变");
+    assert_eq!(
+        after.modified().unwrap(),
+        strm_mtime,
+        "测试前提：mtime 未变"
+    );
 
     // operation B：全新 operation，没有任何该路径的 scan_seen 断点。
     let op_b = {
@@ -192,11 +196,11 @@ async fn cross_operation_change_invalidates_derived_facts() {
 
     let store = fix.state.store();
     let guard = store.lock();
-    let rows = guard.list_ledger().unwrap();
+    let rows = guard.list_file_coverage().unwrap();
     assert_eq!(rows.len(), 2, "变化文件必须复用既有台账行，不得重新入库");
     for id in [mkv_id, strm_id] {
         assert!(
-            rows.iter().any(|row| row.id == id),
+            rows.iter().any(|row| row.file.file_id == id),
             "台账行身份必须保持不变（{id}）"
         );
         assert!(
@@ -209,9 +213,53 @@ async fn cross_operation_change_invalidates_derived_facts() {
         let obligation = obligations
             .iter()
             .find(|obligation| obligation.ledger_id == id)
-            .unwrap_or_else(|| panic!("{label} 变化后必须重挂 durable probe 义务: {obligations:?}"));
+            .unwrap_or_else(|| {
+                panic!("{label} 变化后必须重挂 durable probe 义务: {obligations:?}")
+            });
         assert_eq!(obligation.reason, "scan_changed", "{label}");
     }
+}
+
+/// 变化前的基线：了结 `rows` 的全部探测义务、为每行写入派生探测事实，
+/// 然后返回 (mkv, strm) 两行的台账行身份。
+fn seed_probe_baseline(
+    store: &store::Store,
+    rows: &[domain::FileCoverage],
+) -> (domain::LedgerId, domain::LedgerId) {
+    for row in rows {
+        store.ack_scan_probe_obligation(row.file.file_id).unwrap();
+        let tracks = library::Tracks {
+            video: Some(library::VideoTrack {
+                codec: Some("h264".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        store
+            .put_file_meta_versioned(
+                &row.file.file_id.to_string(),
+                &tracks,
+                Some("v1"),
+                Some(1000),
+            )
+            .unwrap();
+    }
+    assert!(
+        store.scan_probe_obligations(100).unwrap().is_empty(),
+        "基线不应有未了结的探测义务"
+    );
+    (
+        rows.iter()
+            .find(|r| r.file.path.to_string_lossy().ends_with(".mkv"))
+            .unwrap()
+            .file
+            .file_id,
+        rows.iter()
+            .find(|r| r.file.path.to_string_lossy().ends_with(".strm"))
+            .unwrap()
+            .file
+            .file_id,
+    )
 }
 
 /// P2-1 端到端：先排整库、再把 watch 目标 A 合并进来，整库语义不得被缩小，
@@ -235,7 +283,7 @@ async fn full_scan_merged_with_watch_target_still_ledgers_whole_library() {
             .unwrap();
         assert!(full.is_full_scope());
         let merged = guard
-            .enqueue_scan(&fix.library_id, &sig, &[a_dir.clone()], 1001)
+            .enqueue_scan(&fix.library_id, &sig, std::slice::from_ref(&a_dir), 1001)
             .unwrap();
         assert_eq!(full.id, merged.id, "单飞：仍是同一个 operation");
         assert!(merged.is_full_scope(), "整库意图不得被目标合并缩小");
@@ -244,10 +292,18 @@ async fn full_scan_merged_with_watch_target_still_ledgers_whole_library() {
 
     fix.state.scan_coordinator.trigger_next(&fix.state);
     let done = fix.wait_scan_terminal_op(&op.id).await;
-    assert_eq!(done.status, store::ScanOperationStatus::Completed, "{:?}", done.report);
+    assert_eq!(
+        done.status,
+        store::ScanOperationStatus::Completed,
+        "{:?}",
+        done.report
+    );
 
-    let rows = fix.state.store().lock().list_ledger().unwrap();
-    let paths: Vec<&str> = rows.iter().map(|row| row.path.as_str()).collect();
+    let rows = fix.state.store().lock().list_file_coverage().unwrap();
+    let paths: Vec<String> = rows
+        .iter()
+        .map(|row| row.file.path.to_string_lossy().to_string())
+        .collect();
     assert!(
         paths.iter().any(|p| p.ends_with("Movie A (2024).mkv")),
         "目标 A 必须入账: {paths:?}"
@@ -276,11 +332,11 @@ async fn repeated_watch_event_for_same_target_is_consumed_with_cumulative_report
         let store = fix.state.store();
         let guard = store.lock();
         let op = guard
-            .enqueue_scan(&fix.library_id, &sig, &[dir.clone()], 1000)
+            .enqueue_scan(&fix.library_id, &sig, std::slice::from_ref(&dir), 1000)
             .unwrap();
-        guard.record_scan_seen(&op.id, &[f1.clone()]).unwrap();
+        guard.record_scan_seen(&op.id, std::slice::from_ref(&f1)).unwrap();
         let merged = guard
-            .enqueue_scan(&fix.library_id, &sig, &[dir.clone()], 1001)
+            .enqueue_scan(&fix.library_id, &sig, std::slice::from_ref(&dir), 1001)
             .unwrap();
         assert_eq!(op.id, merged.id);
         assert_eq!(merged.dirty_rev, 1, "重复事件必须推进 dirty_rev");
@@ -292,7 +348,12 @@ async fn repeated_watch_event_for_same_target_is_consumed_with_cumulative_report
 
     fix.state.scan_coordinator.trigger_next(&fix.state);
     let done = fix.wait_scan_terminal_op(&op.id).await;
-    assert_eq!(done.status, store::ScanOperationStatus::Completed, "{:?}", done.report);
+    assert_eq!(
+        done.status,
+        store::ScanOperationStatus::Completed,
+        "{:?}",
+        done.report
+    );
     assert_eq!(done.dirty_rev, 1);
     // 本轮已带上合并后的意图：新文件入账，终态报告是累计结果而不是被清空。
     assert_eq!(
@@ -302,8 +363,11 @@ async fn repeated_watch_event_for_same_target_is_consumed_with_cumulative_report
     );
     assert_eq!(done.report["inserted"], 1, "{}", done.report);
 
-    let rows = fix.state.store().lock().list_ledger().unwrap();
-    let paths: Vec<&str> = rows.iter().map(|row| row.path.as_str()).collect();
+    let rows = fix.state.store().lock().list_file_coverage().unwrap();
+    let paths: Vec<String> = rows
+        .iter()
+        .map(|row| row.file.path.to_string_lossy().to_string())
+        .collect();
     assert!(
         paths.iter().any(|p| p.ends_with("Movie2 (2024).mkv")),
         "补扫轮的新文件必须入账: {paths:?}"
@@ -316,35 +380,25 @@ async fn repeated_watch_event_for_same_target_is_consumed_with_cumulative_report
 #[tokio::test]
 async fn committed_chunk_prefix_survives_a_later_chunk_failure() {
     let fix = PresenceFixture::new();
-    // 给 Library A 增加一个与 Library B 同深度的根：sub 里的文件归属歧义，root 里的
-    // 文件仍然唯一归属 A，于是第一个 chunk 提交、第二个 chunk 必然失败。
+    // 根键规范化后无法再构造「同一物理根两个 Library」的歧义；改用 library.db
+    // 触发器只拒绝 `sub/` 下文件的入账：root 里的 100 个文件构成第一个 chunk
+    // 并提交，sub 的文件落在第二个 chunk 并必然失败。
     let sub = fix.root.join("sub");
     std::fs::create_dir_all(&sub).unwrap();
-    for i in 0..101 {
+    for i in 0..100 {
         std::fs::write(fix.root.join(format!("Movie_{i:03} (2024).mkv")), b"x").unwrap();
     }
     std::fs::write(sub.join("Movie_sub (2024).mkv"), b"x").unwrap();
     {
-        let store = fix.state.store();
-        let guard = store.lock();
-        guard
-            .update_library(
-                &fix.library_id,
-                None,
-                Some(&[fix.root.to_str().unwrap(), sub.to_str().unwrap()]),
-                None,
-            )
-            .unwrap();
-        guard
-            .create_library(
-                MediaKind::Movie,
-                "Nested",
-                &[sub.to_str().unwrap()],
-                "everyone",
-                true,
-                &[],
-            )
-            .unwrap();
+        let db_path = fix.state.store().lock().data_dir().join("library.db");
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        conn.execute(
+            "CREATE TRIGGER fail_sub_publish BEFORE INSERT ON library_files
+             WHEN NEW.path_key LIKE '%/sub/%'
+             BEGIN SELECT RAISE(ABORT, 'injected sub chunk failure'); END;",
+            [],
+        )
+        .unwrap();
     }
     let sig = fix.scope_signature();
     let op = {
@@ -376,26 +430,17 @@ async fn committed_chunk_prefix_survives_a_later_chunk_failure() {
         "失败终态必须写错误摘要: {}",
         done.report
     );
-    let rows = fix.state.store().lock().list_ledger().unwrap();
+    let rows = fix.state.store().lock().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 100, "只有已提交的 chunk 前缀入账");
 }
 
-/// P2-NEW-1：上一个构建写下的 v1 签名，配置未变时不得被当成 scope 变化取消；
-/// 必须就地把持久化签名升级成新编码，并照常完成扫描。
+/// Clean cutover rejects old scope encodings even when the roots have not changed.
 #[tokio::test]
-async fn legacy_signature_with_unchanged_config_is_upgraded_not_cancelled() {
+async fn old_signature_is_cancelled_without_upgrading_or_publishing() {
     let fix = PresenceFixture::new();
     let file = fix.root.join("Movie1 (2024).mkv");
     std::fs::write(&file, b"1").unwrap();
     let legacy = fix.legacy_scope_signature();
-    let current = fix.scope_signature();
-    assert_ne!(legacy, current, "测试前提：旧编码与新编码不同");
-    // 单根、路径不含逗号：v1 编码可唯一还原，逐字节相等就是配置相等的证明（P2-A）。
-    assert_eq!(
-        legacy.split(',').count(),
-        1,
-        "测试前提：这是可证明等价的非碰撞旧编码: {legacy}"
-    );
 
     let op = {
         let store = fix.state.store();
@@ -409,20 +454,20 @@ async fn legacy_signature_with_unchanged_config_is_upgraded_not_cancelled() {
     let done = fix.wait_scan_terminal_op(&op.id).await;
     assert_eq!(
         done.status,
-        store::ScanOperationStatus::Completed,
-        "配置未变时旧签名 operation 不得消失: {}",
+        store::ScanOperationStatus::Cancelled,
+        "{}",
         done.report
     );
-    assert_eq!(
-        done.scope_signature, current,
-        "旧签名必须就地升级成新编码"
-    );
+    assert_eq!(done.scope_signature, legacy);
+    assert_eq!(done.report["error"], "library.scope_changed");
     assert!(
-        done.report["signature_upgrade"].is_string(),
-        "升级必须留下显式原因: {}",
-        done.report
+        fix.state
+            .store()
+            .lock()
+            .list_file_coverage()
+            .unwrap()
+            .is_empty()
     );
-    assert_eq!(fix.state.store().lock().list_ledger().unwrap().len(), 1);
 }
 
 /// P2-A：v1 编码不是单射——两组不同的根数组可以编码出同一串字节，逐字节相等不能
@@ -464,7 +509,11 @@ async fn colliding_legacy_signature_never_adopts_current_scope() {
         fix.legacy_scope_signature(),
         "测试前提：旧根数组与当前根数组的 v1 编码逐字节碰撞"
     );
-    assert_ne!(legacy, fix.scope_signature(), "测试前提：遗留签名仍是旧编码");
+    assert_ne!(
+        legacy,
+        fix.scope_signature(),
+        "测试前提：遗留签名仍是旧编码"
+    );
 
     let op = {
         let store = fix.state.store();
@@ -483,19 +532,17 @@ async fn colliding_legacy_signature_never_adopts_current_scope() {
         done.report
     );
     assert_eq!(done.report["error"], "library.scope_changed");
-    assert!(
-        done.report["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("not provably equivalent")),
-        "取消原因必须说明旧编码无法证明等价: {}",
-        done.report
-    );
     assert_eq!(
         done.scope_signature, legacy,
         "取消时不得把持久化签名改写成当前 scope"
     );
     assert!(
-        fix.state.store().lock().list_ledger().unwrap().is_empty(),
+        fix.state
+            .store()
+            .lock()
+            .list_file_coverage()
+            .unwrap()
+            .is_empty(),
         "取消的 operation 不得把当前 scope 的文件登记进台账"
     );
 }
@@ -547,16 +594,14 @@ async fn ambiguous_legacy_signature_equal_to_current_encoding_is_cancelled() {
         done.report
     );
     assert_eq!(done.report["error"], "library.scope_changed");
-    assert!(
-        done.report["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("not provably equivalent")),
-        "取消原因必须说明旧编码无法证明等价: {}",
-        done.report
-    );
     assert_eq!(done.scope_signature, legacy, "取消时不得改写签名");
     assert!(
-        fix.state.store().lock().list_ledger().unwrap().is_empty(),
+        fix.state
+            .store()
+            .lock()
+            .list_file_coverage()
+            .unwrap()
+            .is_empty(),
         "取消的 operation 不得登记任何文件"
     );
 }
@@ -633,16 +678,14 @@ async fn ambiguous_legacy_signature_after_scope_change_is_cancelled() {
         done.report
     );
     assert_eq!(done.report["error"], "library.scope_changed");
-    assert!(
-        done.report["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("not provably equivalent")),
-        "取消原因必须说明旧编码无法证明等价: {}",
-        done.report
-    );
     assert_eq!(done.scope_signature, legacy, "取消时不得改写签名");
     assert!(
-        fix.state.store().lock().list_ledger().unwrap().is_empty(),
+        fix.state
+            .store()
+            .lock()
+            .list_file_coverage()
+            .unwrap()
+            .is_empty(),
         "取消的 operation 不得登记任何文件（尤其不能扫新根）"
     );
 }

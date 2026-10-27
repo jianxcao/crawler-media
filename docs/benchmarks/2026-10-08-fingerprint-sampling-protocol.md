@@ -2,7 +2,7 @@
 
 > **历史状态（2026-10-13 整理）：** benchmark 协议/报告支持已随 b7730be 实现；本文是度量约束，不是整季优化已达标的结果报告。fixture、报告测试和缓存再分析不能替代真实 STRM 冷采三组配对、人工真值和准确性/性能门槛。
 >
-> 原设计/ID/测试记录保留；旧执行、清理和提交命令不是当前执行授权，不应直接重跑。当前依据：[数据库/API review](<../audits/2026-10-13-database-api-review.md>) 与 [剩余计划](<../superpowers/plans/2026-10-13-database-api-followup.md>)；未覆盖的历史发现仍须独立对账。
+> 原设计/ID/测试记录保留；协议支持对应历史实现 `b7730be`，正文命令是该协议的复现入口，不是本次已执行结果。[2026-10-13 数据库/API review](<../audits/2026-10-13-database-api-review.md>) 与[当时的剩余计划](<../superpowers/plans/2026-10-13-database-api-followup.md>)只提供历史线索，不负责当前声纹性能验收。尚无本文所需真实整季配对测量时，不得宣布性能/准确性目标通过。
 
 ## Protocol Overview
 The adaptive fingerprint sampling protocol evaluates the performance, accuracy, and network/disk byte reduction achieved by adaptive window probing vs. full-window extraction across entire seasons.

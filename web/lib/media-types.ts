@@ -22,7 +22,7 @@ export type MediaSource = "tmdb" | "douban" | "tvdb" | "bangumi" | "anilist";
 
 /** 发现列表的轻量库存摘要；只用于入库标记，不携带文件详情。 */
 export interface MediaLibraryStatus {
-  mediaItemId: number;
+  mediaItemId: string;
   libraryCount: number;
   fileCount: number;
 }
@@ -72,7 +72,7 @@ export interface MediaItem {
   posterUrl: string;
   /** 仅 Hero 精选项需要的宽幅背景图 */
   backdropUrl?: string;
-  /** 有在位文件时的库存摘要；无匹配或旧接口响应时为空。 */
+  /** 有在位文件时的库存摘要；无匹配时为空。 */
   libraryStatus?: MediaLibraryStatus | null;
 }
 

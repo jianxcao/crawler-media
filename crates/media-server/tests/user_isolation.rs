@@ -1,11 +1,20 @@
+#[path = "support/mod.rs"]
+mod support;
+use support::fixture_provider;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use domain::{LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserId};
+use domain::{
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, LibraryId,
+    Media, MediaId, MediaKind, QualitySource, TypedItemId, UnitKey, UserId,
+};
 use media_server::provider::{
-    AuthenticateError, MediaItemSnapshot, MediaServerProvider, ServerLibrary, ServerUser,
+    AuthenticateError, MediaItemSnapshot, MediaServerProvider, PlaybackClientInfo, PlaybackEvent,
+    PlaybackEventIdentity, ServerLibrary, ServerUser,
 };
 use serde_json::Value;
 use std::net::{SocketAddr, TcpStream};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -17,14 +26,52 @@ struct FakeProvider {
     user_b: UserId,
     media_a: Media,
     media_b: Media,
-    row_a: LedgerRow,
-    row_b: LedgerRow,
+    unit_a: Option<UnitKey>,
+    unit_b: Option<UnitKey>,
+    file_a: LibraryFile,
+    file_b: LibraryFile,
     favorite_a: Arc<AtomicBool>,
+    favorite_b: Arc<AtomicBool>,
     token_a_valid: Arc<AtomicBool>,
 }
 
 #[async_trait::async_trait]
 impl MediaServerProvider for FakeProvider {
+    async fn next_up_items(
+        &self,
+        user_id: domain::UserId,
+        series_id: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<media_server::provider::ServerItemPage, String> {
+        fixture_provider::next_up_items(self, user_id, series_id, offset, limit).await
+    }
+    async fn query_latest_items(
+        &self,
+        _principal: media_server::provider::QueryPrincipal,
+        _query: media_server::provider::ServerItemQuery,
+    ) -> Result<Vec<MediaItemSnapshot>, media_server::provider::QueryError> {
+        Ok(Vec::new())
+    }
+
+    async fn query_visible_items(
+        &self,
+        principal: media_server::provider::QueryPrincipal,
+        query: media_server::provider::ServerItemQuery,
+    ) -> Result<media_server::provider::ServerItemPage, media_server::provider::QueryError> {
+        fixture_provider::select_items(self, principal.user_id, query)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn issue_play_session(
+        &self,
+        _user_id: UserId,
+        _device_id: &str,
+        _item_id: &str,
+    ) -> Result<String, String> {
+        Ok(uuid::Uuid::new_v4().to_string())
+    }
     fn server_id(&self) -> String {
         "test-server-id".into()
     }
@@ -57,7 +104,11 @@ impl MediaServerProvider for FakeProvider {
         }
     }
 
-    async fn user_id_by_token(&self, token: &str) -> Result<Option<UserId>, String> {
+    async fn user_id_by_token(
+        &self,
+        token: &str,
+        _deadline: Option<std::time::Instant>,
+    ) -> Result<Option<UserId>, media_server::provider::QueryError> {
         if token == "token_a" {
             if self.token_a_valid.load(Ordering::SeqCst) {
                 Ok(Some(self.user_a))
@@ -71,6 +122,22 @@ impl MediaServerProvider for FakeProvider {
         }
     }
 
+    async fn get_user_for_query(
+        &self,
+        principal: media_server::provider::QueryPrincipal,
+    ) -> Result<Option<ServerUser>, media_server::provider::QueryError> {
+        self.get_user(principal.user_id)
+            .await
+            .map_err(media_server::provider::QueryError::Internal)
+    }
+    async fn list_visible_libraries_for_query(
+        &self,
+        principal: media_server::provider::QueryPrincipal,
+    ) -> Result<Vec<ServerLibrary>, media_server::provider::QueryError> {
+        self.list_visible_libraries(principal.user_id)
+            .await
+            .map_err(media_server::provider::QueryError::Internal)
+    }
     async fn get_user(&self, user_id: UserId) -> Result<Option<ServerUser>, String> {
         if user_id == self.user_a {
             Ok(Some(ServerUser {
@@ -118,7 +185,8 @@ impl MediaServerProvider for FakeProvider {
     ) -> Result<Vec<MediaItemSnapshot>, String> {
         if user_id == self.user_a {
             Ok(vec![MediaItemSnapshot {
-                row: self.row_a.clone(),
+                file: self.file_a.clone(),
+                unit: self.unit_a,
                 media: self.media_a.clone(),
                 ticks: 120_000_000,
                 play_count: 0,
@@ -138,7 +206,8 @@ impl MediaServerProvider for FakeProvider {
             }])
         } else {
             Ok(vec![MediaItemSnapshot {
-                row: self.row_b.clone(),
+                file: self.file_b.clone(),
+                unit: self.unit_b,
                 media: self.media_b.clone(),
                 ticks: 0,
                 play_count: 0,
@@ -151,7 +220,10 @@ impl MediaServerProvider for FakeProvider {
                 intro_end_ms: None,
                 outro_start_ms: None,
                 outro_end_ms: None,
-                metadata: Default::default(),
+                metadata: media_server::provider::MediaItemMetadata {
+                    is_favorite: self.favorite_b.load(Ordering::SeqCst),
+                    ..Default::default()
+                },
             }])
         }
     }
@@ -163,12 +235,14 @@ impl MediaServerProvider for FakeProvider {
     ) -> Result<Option<MediaItemSnapshot>, String> {
         let items = self.list_visible_items(user_id, None).await?;
         Ok(items.into_iter().find(|it| {
-            let item_id = if it.is_series {
-                it.media.id.to_string()
-            } else {
-                it.row.id.to_string()
-            };
-            item_id == id || item_id.replace('-', "").eq_ignore_ascii_case(id)
+            it.protocol_id() == id
+                || it.media.id.to_string() == id
+                || it
+                    .media
+                    .id
+                    .to_string()
+                    .replace('-', "")
+                    .eq_ignore_ascii_case(id)
         }))
     }
 
@@ -203,28 +277,42 @@ impl MediaServerProvider for FakeProvider {
         _played: Option<bool>,
         favorite: Option<bool>,
     ) -> Result<bool, String> {
-        if user_id == self.user_a
-            && (id == self.row_a.id.to_string()
-                || id.eq_ignore_ascii_case(&self.row_a.id.to_string().replace('-', ""))
-                || id == self.media_a.id.to_string()
-                || id.eq_ignore_ascii_case(&self.media_a.id.to_string().replace('-', "")))
+        let target = if user_id == self.user_a {
+            Some((self.media_a.id, self.file_a.file_id, &self.favorite_a))
+        } else if user_id == self.user_b {
+            Some((self.media_b.id, self.file_b.file_id, &self.favorite_b))
+        } else {
+            None
+        };
+        if let Some((media, row, favorite_state)) = target
+            && item_matches(id, media, row)
+            && let Some(favorite) = favorite
         {
-            if let Some(favorite) = favorite {
-                self.favorite_a.store(favorite, Ordering::SeqCst);
-            }
+            favorite_state.store(favorite, Ordering::SeqCst);
         }
         Ok(true)
     }
 
-    async fn update_progress(
+    async fn report_playback_event(
         &self,
         _user_id: UserId,
         _id: &str,
         _position_ms: i64,
         _paused: bool,
+        _client: PlaybackClientInfo,
+        _event: PlaybackEvent,
+        _identity: PlaybackEventIdentity,
     ) -> Result<(), String> {
         Ok(())
     }
+}
+
+fn item_matches(id: &str, media: MediaId, row: LedgerId) -> bool {
+    TypedItemId::from_wire_string(id).map(|typed| typed.media_id()) == Some(media)
+        || id == row.to_string()
+        || id.eq_ignore_ascii_case(&row.to_string().replace('-', ""))
+        || id == media.to_string()
+        || id.eq_ignore_ascii_case(&media.to_string().replace('-', ""))
 }
 
 fn test_provider(user_a_kind: MediaKind) -> Arc<FakeProvider> {
@@ -256,27 +344,54 @@ fn test_provider(user_a_kind: MediaKind) -> Arc<FakeProvider> {
         bangumi_id: None,
         anilist_id: None,
     };
-    let row = |media_id, path: &str, is_tv: bool| LedgerRow {
-        id: LedgerId::new(),
+    let make_file = |file_id, media_id, kind: MediaKind, path: &str| LibraryFile {
+        file_id,
+        library_id: LibraryId::from_str("00000000-0000-0000-0000-0000000000f1").unwrap(),
+        root_id: "root-test".to_string(),
         media_id,
-        path: path.into(),
-        season: is_tv.then_some(1),
-        episode: is_tv.then_some(1),
-        resolution: None,
-        codec: None,
+        kind,
+        path: std::path::PathBuf::from(path),
+        version: FileVersion {
+            revision: 1,
+            source_version: "v1".to_string(),
+        },
+        presence: FilePresence::Present,
+        publication: FilePublication::Published,
+        size_bytes: Some(1_000_000),
+        stat_known: true,
+        created_ns: Some(100),
+        modified_ns: Some(200),
+        source_digest: Some("hash".to_string()),
+        source_path: None,
+        transfer_mode: None,
+        resolution: Some("1080p".to_string()),
+        codec: Some("h264".to_string()),
         hdr: None,
-        quality_source: QualitySource::Probe,
-        confidence: domain::Confidence::High,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
         filter_score: None,
+        release_quality: None,
+        duration_ms: Some(2_400_000),
+        tracks_version: 1,
+        poster_path: None,
+        backdrop_path: None,
+        still_path: None,
     };
+    let unit_a = (user_a_kind == MediaKind::Tv).then_some(UnitKey::new(1, 1));
+    let unit_b = None;
+    let file_a = make_file(LedgerId::new(), media_a.id, media_a.kind, "/path/a.mkv");
+    let file_b = make_file(LedgerId::new(), media_b.id, media_b.kind, "/path/b.mkv");
     Arc::new(FakeProvider {
         user_a,
         user_b,
-        row_a: row(media_a.id, "/path/a.mkv", user_a_kind == MediaKind::Tv),
-        row_b: row(media_b.id, "/path/b.mkv", false),
+        unit_a,
+        unit_b,
+        file_a,
+        file_b,
         media_a,
         media_b,
         favorite_a: Arc::new(AtomicBool::new(false)),
+        favorite_b: Arc::new(AtomicBool::new(false)),
         token_a_valid: Arc::new(AtomicBool::new(true)),
     })
 }
@@ -311,7 +426,7 @@ async fn websocket_json(mut socket: WebSocket<TcpStream>) -> (Value, WebSocket<T
 async fn favorite_mutations_notify_connected_jellyfin_clients() {
     let provider = test_provider(MediaKind::Tv);
     let user_id = provider.user_a;
-    let item_id = provider.media_a.id.to_string().replace('-', "");
+    let item_id = TypedItemId::Work(provider.media_a.id).to_wire_string();
     let app = media_server::routes(provider);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -439,11 +554,11 @@ async fn websocket_disconnects_when_token_revoked() {
     provider.token_a_valid.store(false, Ordering::SeqCst);
 
     // 触发一个事件，服务端在发送前复验 token 发现已失效，主动断开 WebSocket
-    let item_id = provider.media_a.id.to_string().replace('-', "");
+    let item_id = TypedItemId::Work(provider.media_a.id).to_wire_string();
     let _ = app_request_favorite(&app, "POST", &item_id).await;
 
     // 客户端读取，预期得到关闭或断开连接
-    let read_result = tokio::task::spawn_blocking(move || socket.read())
+    let read_result = tokio::task::spawn_blocking(move || socket.read().map_err(Box::new))
         .await
         .unwrap();
     assert!(

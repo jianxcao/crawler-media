@@ -3,8 +3,27 @@ use std::path::Path;
 use domain::{MediaKind, Subscribe};
 use subscribe::{QualityFact, SubscribeFacts};
 
-use crate::library_scope::{LibraryPathScope, StrictOwner};
 use super::{Store, StoreError};
+use crate::library_scope::{LibraryPathScope, StrictOwner};
+
+/// Only recorded coverage contributes ownership facts. Unnumbered TV files remain
+/// visible in the Library without claiming a whole work or any episode.
+fn coverage_coordinates(coverage: &domain::FileCoverage) -> Vec<(Option<u32>, Option<u32>)> {
+    coverage
+        .units
+        .iter()
+        .map(|unit| {
+            if unit.is_whole() {
+                (None, None)
+            } else {
+                (
+                    u32::try_from(unit.season).ok(),
+                    u32::try_from(unit.episode).ok(),
+                )
+            }
+        })
+        .collect()
+}
 
 impl Store {
     /// Coordinate a Subscribe's local facts with the selected shared Library.
@@ -29,14 +48,27 @@ impl Store {
         kind: MediaKind,
     ) -> Result<SubscribeFacts, StoreError> {
         let snapshot = self.subscribe_library_snapshot(subscribe, kind)?;
-        evaluate_subscribe_facts_pure(&snapshot)
+        evaluate_subscribe_facts(&snapshot, &|_| true)
     }
 }
 
-/// Pure evaluation of SubscribeFacts given a SubscribeLibrarySnapshot.
-/// This evaluation is purely database-backed and does NOT perform filesystem I/O.
+/// Evaluation of SubscribeFacts from an owned snapshot, with every recorded file
+/// treated as present. Database facts only; no filesystem I/O.
 pub fn evaluate_subscribe_facts_pure(
     snapshot: &super::subscribe_library_snapshot::SubscribeLibrarySnapshot,
+) -> Result<SubscribeFacts, StoreError> {
+    evaluate_subscribe_facts(snapshot, &|_| true)
+}
+
+/// The single implementation of SubscribeFact evaluation.
+///
+/// A recorded file belongs to the Library in `library_files.library_id`; the path
+/// is never asked which Library it starts with, so a renamed or removed root
+/// cannot retarget an owned episode. `is_file` is the caller's presence seam; it
+/// keeps filesystem IO outside the Store lock.
+pub fn evaluate_subscribe_facts(
+    snapshot: &super::subscribe_library_snapshot::SubscribeLibrarySnapshot,
+    is_file: &dyn Fn(&Path) -> bool,
 ) -> Result<SubscribeFacts, StoreError> {
     let target_library_id = match snapshot.subscribe.library_id {
         Some(id) => id.to_string(),
@@ -61,6 +93,9 @@ pub fn evaluate_subscribe_facts_pure(
 
     let mut facts = SubscribeFacts::default();
 
+    // Saved facts are the Subscribe's own download destinations, not ledgered
+    // ownership: they carry no `library_files` row, so the destination path is the
+    // only fact available and a strict root match is the admission-time rule.
     for ((season, episode), fact) in snapshot.saved.entries() {
         let Some(path) = fact.path.as_deref() else {
             continue;
@@ -87,33 +122,48 @@ pub fn evaluate_subscribe_facts_pure(
         }
     }
 
-    for row in &snapshot.rows {
-        let p = Path::new(&row.path);
-        let resolved = LibraryPathScope::resolve_path(p)?;
-        if !matches!(scope.owner(&resolved, snapshot.kind), StrictOwner::Owned(owner) if owner.id == target_library.id) {
+    for coverage in &snapshot.rows {
+        // Ownership is the recorded Library, not a root-prefix guess.
+        if coverage.file.library_id.to_string() != target_library.id {
+            continue;
+        }
+        let path = coverage.file.path.to_string_lossy().into_owned();
+        if !is_file(Path::new(&path)) {
             continue;
         }
         let fact = QualityFact {
-            score: row.filter_score.unwrap_or(0),
-            path: Some(row.path.clone()),
+            score: coverage.file.filter_score.unwrap_or(0),
+            path: Some(path.clone()),
         };
-        let key = (row.season, row.episode);
-        let stale = facts
-            .get(key.0, key.1)
-            .and_then(|f| f.path.as_deref())
-            .map(|old| !snapshot.rows.iter().any(|r| r.path == old))
-            .unwrap_or(false);
+        // A physical file contributes each explicitly recorded logical unit.
+        let coordinates = coverage_coordinates(coverage);
+        for (season, episode) in coordinates {
+            let stale = facts
+                .get(season, episode)
+                .and_then(|f| f.path.as_deref())
+                .map(|old| {
+                    !snapshot
+                        .rows
+                        .iter()
+                        .any(|c| c.file.path.to_string_lossy().as_ref() == old)
+                })
+                .unwrap_or(false);
 
-        if stale {
-            facts.replace(key.0, key.1, fact);
-        } else {
-            facts.upsert(key.0, key.1, fact);
+            if stale {
+                facts.replace(season, episode, fact.clone());
+            } else {
+                facts.upsert(season, episode, fact.clone());
+            }
         }
 
-        if let Some(quality_res) = snapshot.qualities.get(&row.id) {
+        if let Some(quality_res) = snapshot.qualities.get(&coverage.file.file_id) {
             match quality_res {
-                Ok(quality) => facts.set_quality(row.path.clone(), quality.clone()),
-                Err(e) => return Err(StoreError::Invalid(format!("corrupt persisted quality: {e}"))),
+                Ok(quality) => facts.set_quality(path.clone(), quality.clone()),
+                Err(e) => {
+                    return Err(StoreError::Invalid(format!(
+                        "corrupt persisted quality: {e}"
+                    )));
+                }
             }
         }
     }
@@ -121,11 +171,10 @@ pub fn evaluate_subscribe_facts_pure(
     let mut scoped = SubscribeFacts::default();
     for ((season, episode), fact) in facts.entries() {
         scoped.replace(season, episode, fact.clone());
-        if let Some(path) = fact.path.as_deref() {
-            if let Some(quality) = facts.quality(path) {
+        if let Some(path) = fact.path.as_deref()
+            && let Some(quality) = facts.quality(path) {
                 scoped.set_quality(path.to_string(), quality.clone());
             }
-        }
     }
     Ok(scoped)
 }

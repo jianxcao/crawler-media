@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 
 use domain::{
     AtomRule, Coverage, FetchMode, Filter, FilterAtom, FilterId, Media, MediaId, MediaKind, Site,

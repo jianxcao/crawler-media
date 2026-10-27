@@ -37,7 +37,7 @@ pub(crate) fn title_matches(wanted: &str, release_title: &str) -> bool {
         return true;
     }
 
-    let contains_non_ascii = wanted.chars().any(|ch| !ch.is_ascii());
+    let contains_non_ascii = !wanted.is_ascii();
     let enough_identity = wanted_normalized.chars().count() >= 8
         || (contains_non_ascii && wanted_normalized.chars().count() >= 2);
     enough_identity && release_normalized.contains(&wanted_normalized)

@@ -129,11 +129,12 @@ export const InventoryCell = memo(function InventoryCell({
     type: item.kind === "video" ? undefined : item.kind,
     title: item.title,
     year: item.year ?? undefined,
-    rating: 0,
+    rating: item.rating ?? 0,
     // 框比例按分区锁死（竖版 2:3 / 横版 16:9），同一分区里每格等高、片名一条线；
     // 主图真实比例新契约不下发，直接按框比例铺满
     aspect: frame,
-    extent: undefined,
+    extent: item.studio ?? undefined,
+    studioLogo: item.studio_logo ? imageUrl(item.studio_logo) : undefined,
     favorite: undefined,
     // 海报可能是本地刮削资产的相对路径（断网可用），也可能是 TMDB 图床地址。
     // 与首页海报墙同样取派生图（竖版 poster-card / 横版 landscape-card）：海报墙

@@ -1,4 +1,5 @@
 //! B6：`GET /playback/stats/watch` 改为 Store SQL 聚合后，HTTP DTO 与统计语义不变。
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 #[path = "management/common.rs"]
 mod common;
@@ -7,9 +8,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use api::{ApiState, Store, router};
+use api::{ApiState, router};
 use axum::http::StatusCode;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserId};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UserId};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -64,9 +65,9 @@ fn media(title: &str) -> Media {
     }
 }
 
-fn ledger_row(media_id: MediaId, path: &Path) -> LedgerRow {
-    LedgerRow {
-        id: LedgerId::new(),
+fn fixture_file(media_id: MediaId, path: &Path) -> FixtureFile {
+    FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id,
         path: path.display().to_string(),
         season: None,
@@ -77,10 +78,11 @@ fn ledger_row(media_id: MediaId, path: &Path) -> LedgerRow {
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     }
 }
 
-/// 直接写 subscribe.db：HTTP 层没有公开的 insert_log。
+/// 直接写 library.db：HTTP 层没有公开的 insert_log。
 fn insert_log(
     root: &Path,
     user: UserId,
@@ -90,17 +92,23 @@ fn insert_log(
     client: Option<&str>,
     completed: bool,
 ) {
-    let conn = rusqlite::Connection::open(root.join("data/subscribe.db")).unwrap();
-    conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+    let conn = rusqlite::Connection::open(root.join("data/library.db")).unwrap();
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
     conn.execute(
         "INSERT INTO playback_logs
-            (id, user_id, media_id, client, started_at, ended_at, watched_ms, completed)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            (id, user_id, media_id, client, device_id, play_session_id, generation,
+             file_id, file_revision, source_version, timeline_mode,
+             started_at, ended_at, watched_ms, completed)
+         VALUES (?1, ?2, ?3, ?4, 'watch-stats-device', ?5, 1,
+                 ?6, 1, 'v1', 'full_file', ?7, ?8, ?9, ?10)",
         rusqlite::params![
             uuid::Uuid::new_v4().to_string(),
             user.to_string(),
             media.to_string(),
             client,
+            uuid::Uuid::new_v4().to_string(),
+            media.to_string(),
             started,
             started + 1,
             watched,
@@ -136,8 +144,8 @@ fn seed(state: &ApiState, tmp: &tempfile::TempDir) -> Fixture {
         for item in [&media_a, &media_b, &media_hidden] {
             store.insert_media(item).unwrap();
         }
-        store.insert_ledger(&ledger_row(media_a.id, &path_a)).unwrap();
-        store.insert_ledger(&ledger_row(media_b.id, &path_b)).unwrap();
+        publish_fixture_file(&store, &fixture_file(media_a.id, &path_a)).unwrap();
+        publish_fixture_file(&store, &fixture_file(media_b.id, &path_b)).unwrap();
     }
     let now = unix_now();
     Fixture {
@@ -155,13 +163,53 @@ async fn watch_stats_dto_matches_existing_semantics() {
     let (app, state) = app(&tmp);
     let f = seed(&state, &tmp);
 
-    insert_log(&tmp.path(), f.user, f.media_a.id, f.now - 60, 1_000, Some("web"), true);
-    insert_log(&tmp.path(), f.user, f.media_a.id, f.now - 120, 2_000, Some("web"), false);
-    insert_log(&tmp.path(), f.user, f.media_b.id, f.now - 180, 4_000, None, true);
+    insert_log(
+        tmp.path(),
+        f.user,
+        f.media_a.id,
+        f.now - 60,
+        1_000,
+        Some("web"),
+        true,
+    );
+    insert_log(
+        tmp.path(),
+        f.user,
+        f.media_a.id,
+        f.now - 120,
+        2_000,
+        Some("web"),
+        false,
+    );
+    insert_log(
+        tmp.path(),
+        f.user,
+        f.media_b.id,
+        f.now - 180,
+        4_000,
+        None,
+        true,
+    );
     // 上一窗口 [now-14d, now-7d)。
-    insert_log(&tmp.path(), f.user, f.media_a.id, f.now - 8 * DAY, 5_000, Some("web"), true);
+    insert_log(
+        tmp.path(),
+        f.user,
+        f.media_a.id,
+        f.now - 8 * DAY,
+        5_000,
+        Some("web"),
+        true,
+    );
     // 当前窗口内没有台账的 Media → hidden。
-    insert_log(&tmp.path(), f.user, f.media_hidden.id, f.now - 240, 8_000, None, false);
+    insert_log(
+        tmp.path(),
+        f.user,
+        f.media_hidden.id,
+        f.now - 240,
+        8_000,
+        None,
+        false,
+    );
 
     let stats = common::json_data(
         app.oneshot(common::request(
@@ -185,24 +233,37 @@ async fn watch_stats_dto_matches_existing_semantics() {
     assert_eq!(stats["previous"]["completed"], 1);
     assert_eq!(stats["previous"]["active_members"], 1);
     assert_eq!(stats["previous_available"], true);
-    assert_eq!(stats["hidden_title_count"], 1, "没有台账的 Media 对 visible scope 不可见");
+    assert_eq!(
+        stats["hidden_title_count"], 1,
+        "没有台账的 Media 对 visible scope 不可见"
+    );
 
     let by_day = stats["by_day"].as_array().unwrap();
     assert_eq!(by_day.len(), 7);
     assert_eq!(
-        by_day.iter().map(|day| day["plays"].as_i64().unwrap()).sum::<i64>(),
+        by_day
+            .iter()
+            .map(|day| day["plays"].as_i64().unwrap())
+            .sum::<i64>(),
         3
     );
     let previous_by_day = stats["previous_by_day"].as_array().unwrap();
     assert_eq!(previous_by_day.len(), 7);
     assert_eq!(
-        previous_by_day.iter().map(|day| day["plays"].as_i64().unwrap()).sum::<i64>(),
+        previous_by_day
+            .iter()
+            .map(|day| day["plays"].as_i64().unwrap())
+            .sum::<i64>(),
         1
     );
 
     let by_hour = stats["by_hour"].as_array().unwrap();
     assert_eq!(by_hour.len(), 7);
-    assert!(by_hour.iter().all(|row| row.as_array().unwrap().len() == 24));
+    assert!(
+        by_hour
+            .iter()
+            .all(|row| row.as_array().unwrap().len() == 24)
+    );
     assert_eq!(
         by_hour
             .iter()
@@ -224,22 +285,35 @@ async fn watch_stats_dto_matches_existing_semantics() {
     let web = by_client.iter().find(|row| row["client"] == "web").unwrap();
     assert_eq!(web["plays"], 2);
     assert_eq!(web["watched_ms"], 3_000);
-    let direct = by_client.iter().find(|row| row["client"] == "直连").unwrap();
+    let direct = by_client
+        .iter()
+        .find(|row| row["client"] == "直连")
+        .unwrap();
     assert_eq!(direct["plays"], 1);
     assert_eq!(direct["watched_ms"], 4_000);
 
-    assert_eq!(stats["by_tier"], json!([{ "tier": 0, "label": "直连", "plays": 3 }]));
+    assert_eq!(
+        stats["by_tier"],
+        json!([{ "tier": 0, "label": "直连", "plays": 3 }])
+    );
 
     let top = stats["top_titles"].as_array().unwrap();
     assert_eq!(top.len(), 2);
-    assert_eq!(top[0]["media"]["media_item_id"], f.media_b.id.to_string(), "watched 降序");
+    assert_eq!(
+        top[0]["media"]["media_item_id"],
+        f.media_b.id.to_string(),
+        "watched 降序"
+    );
     assert_eq!(top[0]["watched_ms"], 4_000);
     assert_eq!(top[0]["members"], 1);
     assert_eq!(top[1]["media"]["media_item_id"], f.media_a.id.to_string());
 
     let favorites = stats["favorites"].as_array().unwrap();
     assert_eq!(favorites.len(), 2);
-    assert_eq!(favorites[0]["media"]["media_item_id"], f.media_b.id.to_string());
+    assert_eq!(
+        favorites[0]["media"]["media_item_id"],
+        f.media_b.id.to_string()
+    );
 
     let previous_favorites = stats["previous_favorites"].as_array().unwrap();
     assert_eq!(previous_favorites.len(), 1);
@@ -254,8 +328,24 @@ async fn scope_all_includes_every_media_and_hides_nothing() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, state) = app(&tmp);
     let f = seed(&state, &tmp);
-    insert_log(&tmp.path(), f.user, f.media_a.id, f.now - 60, 1_000, Some("web"), true);
-    insert_log(&tmp.path(), f.user, f.media_hidden.id, f.now - 120, 8_000, None, false);
+    insert_log(
+        tmp.path(),
+        f.user,
+        f.media_a.id,
+        f.now - 60,
+        1_000,
+        Some("web"),
+        true,
+    );
+    insert_log(
+        tmp.path(),
+        f.user,
+        f.media_hidden.id,
+        f.now - 120,
+        8_000,
+        None,
+        false,
+    );
 
     let stats = common::json_data(
         app.oneshot(common::request(

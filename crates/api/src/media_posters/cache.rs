@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use domain::MediaId;
 use super::{PosterBytes, PosterError};
+use domain::MediaId;
 
 pub const POSITIVE_TTL: Duration = Duration::from_secs(24 * 3600);
 pub const NEGATIVE_TTL: Duration = Duration::from_secs(30);
@@ -69,7 +69,12 @@ impl DiskPosterCache {
         })
     }
 
-    pub fn put(&self, media_id: MediaId, content_type: &str, img: &[u8]) -> Result<(), PosterError> {
+    pub fn put(
+        &self,
+        media_id: MediaId,
+        content_type: &str,
+        img: &[u8],
+    ) -> Result<(), PosterError> {
         if img.len() > MAX_IMAGE_BYTES {
             return Err(PosterError::InvalidImage);
         }
@@ -82,13 +87,20 @@ impl DiskPosterCache {
         }
 
         let target = self.file_path(media_id);
-        let tmp = self.root.join(format!("{media_id}.tmp.{}.{:?}", std::process::id(), std::thread::current().id()));
+        let tmp = self.root.join(format!(
+            "{media_id}.tmp.{}.{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
 
         let meta = format!("{meta_prefix}\n");
         let mut file = std::fs::File::create(&tmp).map_err(|e| PosterError::Io(e.to_string()))?;
-        file.write_all(meta.as_bytes()).map_err(|e| PosterError::Io(e.to_string()))?;
-        file.write_all(img).map_err(|e| PosterError::Io(e.to_string()))?;
-        file.sync_all().map_err(|e| PosterError::Io(e.to_string()))?;
+        file.write_all(meta.as_bytes())
+            .map_err(|e| PosterError::Io(e.to_string()))?;
+        file.write_all(img)
+            .map_err(|e| PosterError::Io(e.to_string()))?;
+        file.sync_all()
+            .map_err(|e| PosterError::Io(e.to_string()))?;
         drop(file);
 
         std::fs::rename(&tmp, &target).map_err(|e| PosterError::Io(e.to_string()))?;

@@ -44,7 +44,8 @@ export function NetflixLibraryHero() {
         const entries = await Promise.all(
           visible.map(async (lib) => {
             try {
-              return [lib.id, await listLibraryItems(lib.id, { sort: "added_at", limit: 1 })] as const;
+              const page = await listLibraryItems(lib.id, { sort: "added_at", limit: 1 });
+              return [lib.id, page.items] as const;
             } catch {
               return [lib.id, [] as LibraryItem[]] as const;
             }

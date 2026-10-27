@@ -4,13 +4,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use api::{ApiState, Store, router};
-use axum::body::{to_bytes, Body};
+use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use domain::JobDefId;
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use jobs::JobKind;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
 struct NoFetch;
@@ -97,11 +96,21 @@ async fn queued_job_payload_is_refreshed_when_new_safer_policy_saved() {
     let now = store::unix_now();
 
     // 默认维护 def (例如 jobs_retention 策略为 retention_days = 90, dry_run = false)
-    let def = state.jobs().lock().list_defs().unwrap()
-        .into_iter().find(|d| d.kind == JobKind::JobsRetention).unwrap();
+    let def = state
+        .jobs()
+        .lock()
+        .list_defs()
+        .unwrap()
+        .into_iter()
+        .find(|d| d.kind == JobKind::JobsRetention)
+        .unwrap();
 
     // 触发排队产生一个 queued child
-    state.jobs().lock().ensure_scheduled_for(now + 1000, def.id).unwrap();
+    state
+        .jobs()
+        .lock()
+        .ensure_scheduled_for(now + 1000, def.id)
+        .unwrap();
 
     let queued_before = state.jobs().lock().get_live_child(def.id).unwrap().unwrap();
     assert_eq!(queued_before.status, jobs::JobStatus::Queued);
@@ -124,7 +133,8 @@ async fn queued_job_payload_is_refreshed_when_new_safer_policy_saved() {
             "expected_payload": serde_json::from_str::<Value>(&def.payload).unwrap(),
             "interval_secs": 86400
         }),
-    ).await;
+    )
+    .await;
     assert_eq!(saved["kind"], "jobs_retention");
 
     // 校验：已经排队的 queued child 的 payload 必须被刷新为新策略！
@@ -147,8 +157,14 @@ async fn legacy_schedule_endpoint_is_rejected_for_maintenance_jobs() {
     let tmp = tempfile::tempdir().unwrap();
     let state = test_state(tmp.path());
     let app = router(state.clone());
-    let def = state.jobs().lock().list_defs().unwrap()
-        .into_iter().find(|d| d.kind == JobKind::JobsRetention).unwrap();
+    let def = state
+        .jobs()
+        .lock()
+        .list_defs()
+        .unwrap()
+        .into_iter()
+        .find(|d| d.kind == JobKind::JobsRetention)
+        .unwrap();
 
     // 旧的 PUT /api/v1/jobs/{id}/schedule 接口对维护 def 应当被拒绝，要求使用 maintenance-config
     let (status, resp) = call_err(
@@ -159,7 +175,12 @@ async fn legacy_schedule_endpoint_is_rejected_for_maintenance_jobs() {
         json!({
             "interval_secs": 7200
         }),
-    ).await;
-    assert_eq!(status, StatusCode::CONFLICT, "维护任务必须拒绝旧 schedule 端点以防并发绕过 CAS: {resp}");
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "维护任务必须拒绝旧 schedule 端点以防并发绕过 CAS: {resp}"
+    );
     assert_eq!(resp["error"]["code"], "job.use_maintenance_config");
 }

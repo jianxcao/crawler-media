@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 
-use crate::http::library::{library_for_row, library_visible, poster_path, preferred_row};
+use crate::http::library::{library_for_file, library_visible, poster_path, preferred_coverage};
 use crate::http::{err, ok, ok_list};
 use crate::management::ApiState;
 use std::str::FromStr;
@@ -34,7 +34,7 @@ fn ensure_collection_owner(
 struct VisibleCollectionItem {
     media: domain::Media,
     library_id: String,
-    rows: Vec<domain::LedgerRow>,
+    coverages: Vec<domain::FileCoverage>,
 }
 
 fn visible_collection_item(
@@ -43,23 +43,19 @@ fn visible_collection_item(
     user_id: domain::UserId,
 ) -> Option<VisibleCollectionItem> {
     let media = store.get_media(media_id).ok().flatten()?;
-    let rows = store.list_ledger().ok()?;
-    let library = rows
+    let coverages = store.file_coverage_for_media(media_id).ok()?;
+    let library = coverages
         .iter()
-        .filter(|row| row.media_id == media_id)
-        .filter_map(|row| library_for_row(store, row, &media))
+        .filter_map(|coverage| library_for_file(store, &coverage.file, &media))
         .find(|library| library_visible(store, library, Some(user_id)))?;
-    let rows = rows
+    let coverages = coverages
         .into_iter()
-        .filter(|row| {
-            row.media_id == media_id
-                && library_for_row(store, row, &media).is_some_and(|owner| owner.id == library.id)
-        })
+        .filter(|coverage| coverage.file.library_id.to_string() == library.id)
         .collect();
     Some(VisibleCollectionItem {
         media,
         library_id: library.id,
-        rows,
+        coverages,
     })
 }
 
@@ -77,10 +73,13 @@ fn visible_collection_items(
         .collect()
 }
 
-fn poster_url(rows: &[domain::LedgerRow]) -> Option<String> {
-    let row = preferred_row(rows)?;
-    poster_path(row)?;
-    Some(crate::http::library::artwork_url("posters", row.id))
+fn poster_url(coverages: &[domain::FileCoverage]) -> Option<String> {
+    let coverage = preferred_coverage(coverages)?;
+    poster_path(&coverage.file)?;
+    Some(crate::http::library::artwork_url(
+        "posters",
+        coverage.file.file_id,
+    ))
 }
 
 /// GET /collections — 我的合集（含封面与条目数）。
@@ -99,7 +98,7 @@ pub(crate) async fn list_collections(
                 "id": collection.id,
                 "name": collection.name,
                 "item_count": items.len(),
-                "cover_url": items.iter().find_map(|item| poster_url(&item.rows)),
+                "cover_url": items.iter().find_map(|item| poster_url(&item.coverages)),
             })
         })
         .collect();
@@ -201,7 +200,7 @@ pub(crate) async fn collection_items(
                 "kind": item.media.kind.as_str(),
                 "title": item.media.title,
                 "year": item.media.year,
-                "poster_url": poster_url(&item.rows),
+                "poster_url": poster_url(&item.coverages),
             })
         })
         .collect();
@@ -306,26 +305,25 @@ pub(crate) async fn collection_gallery(
         .into_iter()
         .map(|item| {
             let mut images = Vec::new();
-            if let Some(row) = preferred_row(&item.rows) {
-                if let Some(dir) = std::path::Path::new(&row.path).parent() {
+            if let Some(coverage) = preferred_coverage(&item.coverages)
+                && let Some(dir) = coverage.file.path.parent() {
                     if dir.join("poster.jpg").is_file() {
                         images.push(json!({
-                            "kind": "poster", "url": crate::http::library::artwork_url("posters", row.id),
+                            "kind": "poster", "url": crate::http::library::artwork_url("posters", coverage.file.file_id),
                             "aspect": 0.667, "label": "海报",
                             "season": null, "episode": null, "t_seconds": null,
                         }));
                     }
                     if dir.join("fanart.jpg").is_file() {
                         images.push(json!({
-                            "kind": "backdrop", "url": crate::http::library::artwork_url("fanart", row.id),
+                            "kind": "backdrop", "url": crate::http::library::artwork_url("fanart", coverage.file.file_id),
                             "aspect": 1.778, "label": "背景",
                             "season": null, "episode": null, "t_seconds": null,
                         }));
                     }
                 }
-            }
-            // 真实收藏态：whole unit；movie 沿用既有 legacy (0,0) 兜底。
-            let is_favorite = crate::http::playback::movie_compatible_state(
+            // 收藏态来自当前 whole unit。
+            let is_favorite = crate::http::playback::effective_watch_state(
                 &store,
                 user_id,
                 item.media.id,

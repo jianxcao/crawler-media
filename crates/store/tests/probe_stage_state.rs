@@ -1,10 +1,11 @@
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
+use store::test_support::FixtureFile;
 use store::{
-    retry_delay_ms, ProbeJobUnitSpec, ProbeStage, ProbeStageCompletion, ProbeStageKey,
-    ProbeStageStatus, Store,
+    ProbeJobUnitSpec, ProbeStage, ProbeStageCompletion, ProbeStageKey, ProbeStageStatus, Store,
+    retry_delay_ms,
 };
 
-fn create_test_media_and_ledger(store: &Store, path_suffix: &str) -> (Media, LedgerRow) {
+fn create_test_media_and_ledger(store: &Store, path_suffix: &str) -> (Media, FixtureFile) {
     let media = Media {
         id: MediaId::new(),
         kind: MediaKind::Tv,
@@ -19,8 +20,8 @@ fn create_test_media_and_ledger(store: &Store, path_suffix: &str) -> (Media, Led
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let row = FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id: media.id,
         path: format!("/path/to/{}", path_suffix),
         season: Some(1),
@@ -31,8 +32,26 @@ fn create_test_media_and_ledger(store: &Store, path_suffix: &str) -> (Media, Led
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     };
-    store.insert_ledger(&row).unwrap();
+    if !store
+        .list_library_roots()
+        .unwrap()
+        .iter()
+        .any(|root| root.path == std::path::Path::new("/path/to"))
+    {
+        store
+            .create_library(
+                domain::MediaKind::Tv,
+                "probe-stage",
+                &["/path/to"],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+    }
+    store::test_support::publish_fixture_file(store, &row).unwrap();
     (media, row)
 }
 
@@ -50,7 +69,7 @@ fn partial_job_is_terminal_after_reopen() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let (_media, row) = create_test_media_and_ledger(&store, "ep1.strm");
-    let ledger_id = row.id.to_string();
+    let ledger_id = row.file_id.expect("fixture file id").to_string();
 
     let job_id = "test-job-partial";
     let spec = ProbeJobUnitSpec {
@@ -61,12 +80,29 @@ fn partial_job_is_terminal_after_reopen() {
         overwrite_markers: false,
         reuse_media_info_cache: true,
     };
-    assert!(store.create_probe_job(job_id, "fingerprint_probe", &row.media_id.to_string(), Some(1), "test_scope", &[spec]).unwrap());
+    assert!(
+        store
+            .create_probe_job(
+                job_id,
+                "fingerprint_probe",
+                &row.media_id.to_string(),
+                Some(1),
+                "test_scope",
+                &[spec]
+            )
+            .unwrap()
+    );
     assert!(store.start_probe_unit(job_id, &ledger_id).unwrap());
 
     // Finish unit with partial outcome: succeeded=false, but custom status "partial"
     let (job_result, changed, all_done) = store
-        .finish_probe_unit_with_status(job_id, &ledger_id, "partial", Some("http_403"), Some("Forbidden"))
+        .finish_probe_unit_with_status(
+            job_id,
+            &ledger_id,
+            "partial",
+            Some("http_403"),
+            Some("Forbidden"),
+        )
         .unwrap();
     assert!(changed);
     assert!(all_done);
@@ -88,7 +124,7 @@ fn stale_job_cannot_finish_new_context() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let (_media, row) = create_test_media_and_ledger(&store, "ep1.strm");
-    let ledger_id = row.id.to_string();
+    let ledger_id = row.file_id.expect("fixture file id").to_string();
 
     let key_old = ProbeStageKey {
         ledger_id: ledger_id.clone(),
@@ -102,17 +138,39 @@ fn stale_job_cannot_finish_new_context() {
         stage: ProbeStage::Outro,
     };
 
-    assert!(store.claim_probe_stage(&key_old, "job_1", 1_000_000).unwrap());
+    assert!(
+        store
+            .claim_probe_stage(&key_old, "job_1", 1_000_000)
+            .unwrap()
+    );
 
     // Switch context to v2
-    assert!(store.claim_probe_stage(&key_new, "job_2", 1_000_100).unwrap());
+    assert!(
+        store
+            .claim_probe_stage(&key_new, "job_2", 1_000_100)
+            .unwrap()
+    );
 
     // Old job attempts to finish stage for key_old: succeeds for key_old, but cannot finish key_new
-    let finished_old = store.finish_probe_stage(&key_old, "job_1", &ProbeStageCompletion::Succeeded, 1_000_200).unwrap();
+    let finished_old = store
+        .finish_probe_stage(
+            &key_old,
+            "job_1",
+            &ProbeStageCompletion::Succeeded,
+            1_000_200,
+        )
+        .unwrap();
     assert!(finished_old);
 
     // Old job attempts to finish key_new with job_1: rejected because active_job_id is job_2
-    let finished_stale = store.finish_probe_stage(&key_new, "job_1", &ProbeStageCompletion::Succeeded, 1_000_300).unwrap();
+    let finished_stale = store
+        .finish_probe_stage(
+            &key_new,
+            "job_1",
+            &ProbeStageCompletion::Succeeded,
+            1_000_300,
+        )
+        .unwrap();
     assert!(!finished_stale);
 
     let state_new = store.get_probe_stage(&key_new).unwrap().unwrap();
@@ -125,7 +183,7 @@ fn two_connections_claim_due_stage_once() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let (_media, row) = create_test_media_and_ledger(&store, "ep1.strm");
-    let ledger_id = row.id.to_string();
+    let ledger_id = row.file_id.expect("fixture file id").to_string();
 
     let key = ProbeStageKey {
         ledger_id,
@@ -134,16 +192,22 @@ fn two_connections_claim_due_stage_once() {
     };
 
     // First, fail the stage once so it has a retry schedule
-    assert!(store.claim_probe_stage(&key, "job_initial", 1_000_000).unwrap());
-    store.finish_probe_stage(
-        &key,
-        "job_initial",
-        &ProbeStageCompletion::Failed {
-            error_kind: "http_403".to_string(),
-            error: "Forbidden".to_string(),
-        },
-        1_000_050,
-    ).unwrap();
+    assert!(
+        store
+            .claim_probe_stage(&key, "job_initial", 1_000_000)
+            .unwrap()
+    );
+    store
+        .finish_probe_stage(
+            &key,
+            "job_initial",
+            &ProbeStageCompletion::Failed {
+                error_kind: "http_403".to_string(),
+                error: "Forbidden".to_string(),
+            },
+            1_000_050,
+        )
+        .unwrap();
 
     let stage = store.get_probe_stage(&key).unwrap().unwrap();
     assert_eq!(stage.status, ProbeStageStatus::Failed);
@@ -152,12 +216,16 @@ fn two_connections_claim_due_stage_once() {
 
     // At time 1_000_050 + 60_000, stage is due
     let due_time = 1_000_050 + 60_000;
-    let due_list = store.list_due_probe_stages(due_time, 10).unwrap();
+    let due_list = store.claim_due_probe_stages(due_time, 60_000, 10).unwrap();
     assert_eq!(due_list.len(), 1);
 
     // Claim with two simulated concurrent workers
-    let claimed_1 = store.claim_probe_stage(&key, "job_worker_1", due_time).unwrap();
-    let claimed_2 = store.claim_probe_stage(&key, "job_worker_2", due_time).unwrap();
+    let claimed_1 = store
+        .claim_probe_stage(&key, "job_worker_1", due_time)
+        .unwrap();
+    let claimed_2 = store
+        .claim_probe_stage(&key, "job_worker_2", due_time)
+        .unwrap();
 
     assert!(claimed_1);
     assert!(!claimed_2);
@@ -175,12 +243,12 @@ fn deleting_ledger_removes_only_its_stage_state() {
     let (_m2, r2) = create_test_media_and_ledger(&store, "ep2.strm");
 
     let k1 = ProbeStageKey {
-        ledger_id: r1.id.to_string(),
+        ledger_id: r1.file_id.expect("fixture file id").to_string(),
         context_key: "ctx1".into(),
         stage: ProbeStage::Intro,
     };
     let k2 = ProbeStageKey {
-        ledger_id: r2.id.to_string(),
+        ledger_id: r2.file_id.expect("fixture file id").to_string(),
         context_key: "ctx2".into(),
         stage: ProbeStage::Intro,
     };
@@ -204,7 +272,7 @@ fn v6_database_migrates_without_losing_probe_jobs() {
     // Initialize DB up to schema 6
     let store = Store::open(tmp.path()).unwrap();
     let (_m, r) = create_test_media_and_ledger(&store, "ep1.strm");
-    let ledger_id = r.id.to_string();
+    let ledger_id = r.file_id.expect("fixture file id").to_string();
 
     let job_id = "job-pre-migration";
     let spec = ProbeJobUnitSpec {
@@ -215,7 +283,18 @@ fn v6_database_migrates_without_losing_probe_jobs() {
         overwrite_markers: false,
         reuse_media_info_cache: true,
     };
-    assert!(store.create_probe_job(job_id, "media_probe", &r.media_id.to_string(), Some(1), "scope_v6", &[spec]).unwrap());
+    assert!(
+        store
+            .create_probe_job(
+                job_id,
+                "media_probe",
+                &r.media_id.to_string(),
+                Some(1),
+                "scope_v6",
+                &[spec]
+            )
+            .unwrap()
+    );
     drop(store);
 
     // Reopen (runs migration if version bumped)

@@ -96,11 +96,10 @@ fn parse_search(kind: MediaKind, body: &str) -> Result<Vec<CatalogHit>, TmdbErro
 }
 
 fn matches_kind(kind: MediaKind, raw: Option<&str>) -> bool {
-    match (kind, raw) {
-        (MediaKind::Movie, Some("series")) => false,
-        (MediaKind::Tv, Some("movie")) => false,
-        _ => true,
-    }
+    !matches!(
+        (kind, raw),
+        (MediaKind::Movie, Some("series")) | (MediaKind::Tv, Some("movie"))
+    )
 }
 
 fn id_string(value: serde_json::Value) -> Option<String> {

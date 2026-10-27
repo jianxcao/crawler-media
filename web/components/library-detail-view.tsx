@@ -21,14 +21,13 @@ import {
 } from "@/components/library-filter-bar";
 import { PAGE_NAV_BUTTON_CLASS, PageNav } from "@/components/page-nav";
 import { usePageTitle } from "@/lib/use-page-title";
-import { useIsMobile } from "@/lib/use-media-query";
 import { LibraryFormDialog } from "@/components/library-form-dialog";
 import { LibraryRemovalNotice } from "@/components/library-removal-notice";
 import { useLibraryRemoval } from "@/lib/use-library-removal";
 import { LibraryCoverModal } from "@/components/library-cover-modal";
 import { LIBRARY_KIND_META } from "@/components/library-kind-meta";
-import { remeasureWalls, usePhotoWallDensity, type PhotoWallDensity } from "@/components/wall";
-import { WallLoadMore, WallLoadPrev, WallRecallPill } from "@/components/wall-chrome";
+import { usePhotoWallDensity, type PhotoWallDensity } from "@/components/wall";
+import { WallLoadMore, WallRecallPill } from "@/components/wall-chrome";
 import { InventoryCell, PosterWall, WALL_GRID_WIDE } from "@/components/poster-wall";
 import {
   GALLERY_LOAD_MARGIN,
@@ -47,7 +46,7 @@ import {
   type MediaLibrary,
   type MissingItem,
   type UnidentifiedGroup,
-  assignLibraryFilesToTitle,
+  claimUnidentifiedFile,
   clearMissingLibraryRecords,
   listLibraries,
   listLibraryGallery,
@@ -79,7 +78,11 @@ import { setPlaybackMarks } from "@/lib/api/playback";
 import { galleryMarkTarget } from "@/lib/gallery-mark-target";
 import { HttpError } from "@/lib/http";
 import { formatBytes } from "@/lib/format";
-import { activeWallInitialAtViewport, wallInitialAtOffset } from "@/lib/library-wall-index";
+import {
+  wallBucketAtOffset,
+  wallBucketOffsets,
+  wallInitialAtOffset,
+} from "@/lib/library-wall-index";
 import { activeInitialAt } from "@/lib/wall-window";
 import {
   firstVisibleAnchorId,
@@ -93,8 +96,6 @@ import {
   useWallSortPref,
   type WallSortPref,
 } from "@/lib/wall-sort";
-import { formatRelativeTime } from "@/lib/time";
-import { cachedImageUrl, imageUrl } from "@/lib/image-proxy";
 import { keepIfEqual, reconcileList } from "@/lib/poll-reconcile";
 import { usePermissions } from "@/lib/permissions";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
@@ -123,6 +124,17 @@ const PROVISIONAL_LIMIT = 200;
 const WALL_PAGE_SIZE = 60;
 /** 后端单次分页的硬上限；轮询已加载窗口时按此上限分块请求。 */
 const WALL_API_PAGE_SIZE = 200;
+
+/**
+ * 游标链尾还有没有下一页。
+ *
+ * 约定：`cursors[i]` 是第 i 页的起始游标（0 号恒为 null，即第一页不需要游标），
+ * 每取完一页就把它的 `next_cursor` 写进 `cursors[i + 1]`。因此最后一个元素就是
+ * 「下一页的游标」，null = 已经到底（或还没开始取，此时也当作没有更多）。
+ */
+function hasMorePages(cursors: readonly (string | null)[]): boolean {
+  return cursors.length > 1 && cursors[cursors.length - 1] !== null;
+}
 
 /**
  * 列表拉取失败折成 ``null``（而不是空数组）。
@@ -194,9 +206,7 @@ function readFilterFromUrl(): LibraryFilter {
   const rating = params.get("rating_gte");
   const hdr = params.get("hdr");
   return {
-    genres: list("g")
-      .map(Number)
-      .filter((n) => Number.isFinite(n)),
+    genres: list("g"),
     countries: list("c"),
     decades: list("d"),
     watch: watch ? (watch as WatchFilter) : null,
@@ -220,7 +230,13 @@ function writeFilterToUrl(filter: LibraryFilter): void {
   window.history.replaceState(null, "", `${window.location.pathname}${rest ? `?${rest}` : ""}`);
 }
 
-/** 库内的视图：合集端点已删，只保留作品海报墙。 */
+/**
+ * 库内的视图：合集端点已删，只保留作品海报墙。
+ *
+ * 刻意保留、当前没有任何引用：它记录的是「合集视图不会再回来」这个事实。按
+ * 「未使用」删掉，下一个人就得从端点是否存在的考古里重新得出同一个结论。
+ */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 type LibraryView = "items";
 
 /**
@@ -284,7 +300,6 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
   const wallFilter = useRef<LibraryFilter>(filter);
   wallFilter.current = filter;
   const filtering = !isFilterEmpty(filter);
-  const isMobile = useIsMobile();
   // 带筛选进来时不吃会话快照：快照是未筛选那面墙的窗口，拿它铺首帧会先闪
   // 一屏不该出现的内容，随即被 reload 的结果整片替换
   const snapshot = filtering ? undefined : initialSnapshot;
@@ -298,11 +313,14 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
   const [wallHasMore, setWallHasMore] = useState(snapshot?.wallHasMore ?? false);
   // A-Z 索引条的分档（按标题排序时才有意义）
   const [wallIndex, setWallIndex] = useState<LibraryIndexEntry[]>(snapshot?.wallIndex ?? []);
-  // 当前窗口在整份排序里的起点：0 = 从头开始；点字母跳转后是该档的 offset。
-  // 轮询要按这个起点重拉，否则每 3 秒把用户拽回墙首
-  const [wallStart, setWallStart] = useState(snapshot?.wallStart ?? 0);
-  // 与分页窗口起点分离：wallStart 只决定服务端从哪里取；活动字母要跟随
-  // 用户在已加载窗口里的真实滚动位置。
+  /**
+   * 已加载窗口第一格在整份排序里的绝对位置（前缀模型下恒为 0，跳档后是该档起点）。
+   *
+   * Task 26 起线上不再有绝对下标：它只在本组件内部用于锚点 / 活动字母 / 落点换算，
+   * 快照里仍叫 `wallStart`（原本就是「窗口起点」的意思）。
+   */
+  const [wallOrigin, setWallOrigin] = useState(snapshot?.wallStart ?? 0);
+  // 活动字母要跟随用户在已加载前缀里的真实滚动位置。
   const [activeWallInitial, setActiveWallInitial] = useState<string | null>(null);
   const [unidentified, setUnidentified] = useState<UnidentifiedGroup[]>(snapshot?.unidentified ?? []);
   const [missing, setMissing] = useState<MissingItem[]>(snapshot?.missing ?? []);
@@ -334,8 +352,10 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
   );
   const [galleryHasMore, setGalleryHasMore] = useState(snapshot?.galleryHasMore ?? false);
   // 当前图廊窗口在整份排序里的起点（0 = 墙首；「回到上次位置」跳过来后不为 0）。
-  // 与海报墙的 wallOffset 同一个意思，图廊的分页口径也是条目数
-  const galleryStart = useRef(snapshot?.galleryStart ?? 0);
+  // 图廊也走**游标链**：galleryCursors[i] 是第 i 页的起始 cursor（第 0 项 = 窗口起点）
+  const galleryCursors = useRef<(string | null)[]>([null]);
+  // 图廊窗口第一组在整份排序里的绝对位置（前缀模型下 0，跳档后是该档起点）
+  const [galleryOrigin, setGalleryOrigin] = useState(snapshot?.galleryStart ?? 0);
   // 已请求到第几个条目（绝对位置，按页长推进，不按拿到的组数——没图的条目也占一组）
   const galleryLoaded = useRef(snapshot?.galleryLoaded ?? 0);
 
@@ -355,8 +375,15 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
   const wallSort = useRef<LibraryItemSort>(snapshot?.wallSort ?? "title");
   // 排序方向（同 wallSort 放 ref）：undefined = 该档的自然方向，请求里不带 order
   const wallOrder = useRef<LibraryItemOrder | undefined>(snapshot?.wallOrder);
-  // 当前窗口起点的 ref 版：reload 每轮读它，不进依赖（同 wallSort）
-  const wallOffset = useRef(snapshot?.wallOffset ?? 0);
+  /**
+   * 光标链：`wallCursors[i]` 是第 i 页（每页 `WALL_API_PAGE_SIZE` 条）的起始游标，
+   * 0 号恒为 `null`（第一页没有游标）。
+   *
+   * 服务端只签发 forward-only 的键集游标（`after`），所以这条链只能从 0 往后走。
+   * 走过的页把游标记下来：轮询用同一批游标并行重拉同一个前缀，追加页直接取
+   * 链尾。排序 / 方向 / 筛选一变，链就作废（游标绑定的是那一份有序名单）。
+   */
+  const wallCursors = useRef<(string | null)[]>([null]);
   const snapshotRef = useRef<LibraryDetailSnapshot | null>(null);
   snapshotRef.current = libraries
     ? {
@@ -364,16 +391,17 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
         items,
         wallHasMore,
         wallIndex,
-        wallStart,
+        // 窗口起点：前缀模型下是 0，跳档后是该档在整份排序里的位置
+        wallStart: wallOrigin,
         unidentified,
         missing,
         wallLoaded: wallLoaded.current,
         wallSort: wallSort.current,
         wallOrder: wallOrder.current,
-        wallOffset: wallOffset.current,
+        wallOffset: 0,
         galleryGroups,
         galleryHasMore,
-        galleryStart: galleryStart.current,
+        galleryStart: galleryOrigin,
         galleryLoaded: galleryLoaded.current,
         stale: snapshotStale,
       }
@@ -386,6 +414,7 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
   }, [
     galleryGroups,
     galleryHasMore,
+    galleryOrigin,
     items,
     libraries,
     libraryId,
@@ -394,30 +423,56 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
     unidentified,
     wallHasMore,
     wallIndex,
-    wallStart,
+    wallOrigin,
   ]);
 
   /**
-   * 墙本身的两趟请求：当前窗口的条目页 + 跳转索引。随排序 / 方向 / 筛选 /
-   * 窗口位置变化的只有这两趟，整轮 reload 与「只换排序」（reloadWall）共用。
-   * 返回 [本窗口条目, 索引档]。
+   * 把墙的前缀走到能覆盖 `pages` 页（每页 `WALL_API_PAGE_SIZE` 条）。
+   *
+   * 游标是 forward-only 的（`BrowsePage::Cursor { after }`），链只能从 0 往后
+   * 走：已经走过的页按记住的游标并行重拉，没走过的页只能等上一页的
+   * `next_cursor`。返回整个前缀的条目。
    */
-  const fetchWall = useCallback(() => {
-    const wanted = wallLoaded.current;
-    const from = wallOffset.current;
-    const itemPages = Array.from(
-      { length: Math.ceil(wanted / WALL_API_PAGE_SIZE) },
-      (_, page) => {
-        const offset = from + page * WALL_API_PAGE_SIZE;
-        return listLibraryItems(libraryId, {
+  const loadWallPages = useCallback(
+    async (pages: number): Promise<LibraryItem[]> => {
+      const fetchAt = (page: number, cursor: string | null) =>
+        listLibraryItems(libraryId, {
           sort: wallSort.current,
           order: wallOrder.current,
           filter: wallFilter.current,
-          limit: Math.min(WALL_API_PAGE_SIZE, wanted - page * WALL_API_PAGE_SIZE),
-          offset,
+          limit: WALL_API_PAGE_SIZE,
+          cursor,
+        }).then((result) => {
+          wallCursors.current[page] = cursor;
+          wallCursors.current[page + 1] = result.next_cursor;
+          return result.items;
         });
-      },
-    );
+      const known = Math.min(pages, wallCursors.current.length - 1);
+      const prefix: LibraryItem[] = [];
+      const head = await Promise.all(
+        Array.from({ length: known }, (_, page) =>
+          fetchAt(page, wallCursors.current[page] ?? null),
+        ),
+      );
+      for (const items of head) prefix.push(...items);
+      for (let page = known; page < pages; page += 1) {
+        // 上一页已经到底（next_cursor 为 null）：没有更后面的页了
+        if (page > 0 && wallCursors.current[page] === null) break;
+        prefix.push(...(await fetchAt(page, wallCursors.current[page] ?? null)));
+      }
+      return prefix;
+    },
+    [libraryId],
+  );
+
+  /**
+   * 墙本身的两趟请求：已加载前缀的条目 + 跳转索引。随排序 / 方向 / 筛选变化的
+   * 只有这两趟，整轮 reload 与「只换排序」（reloadWall）共用。
+   * 返回 [前缀条目, 索引档]。
+   */
+  const fetchWall = useCallback(() => {
+    // 已加载到第几条 → 要走几页；前缀模型下这就是「这次要重拉的前缀有多长」
+    const pages = Math.max(1, Math.ceil(wallLoaded.current / WALL_API_PAGE_SIZE));
     // 跳转索引与当前排序、当前筛选同口径——三者读的是同一份有序名单。
     // 只有三种排序分得出有意义的档：首字母 / 月份 / 评分档。其余（最近添加、
     // 片长、体积、最近观看）轨道本来就不显示，索引这一趟请求也省了
@@ -433,19 +488,17 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
     // 索引**排在条目页之后**发、不并发：两趟都要在服务端把整库标题（或上映日）
     // 过一遍，同时飞出去会在后端互相拖慢——SQLite 逐行取数与事件循环争 GIL，
     // 9500 部的库实测两趟并发各要 250 ms 以上，串着走一共不到 100 ms
-    return Promise.all(itemPages)
-      .then((pages) => pages.flat())
+    return loadWallPages(pages)
       .catch((e) => {
         if (e instanceof HttpError && e.status === 404) return [] as LibraryItem[];
         throw e;
       })
       .then((libraryItems) => fetchIndex().then((index) => [libraryItems, index] as const));
-  }, [libraryId]);
+  }, [libraryId, loadWallPages]);
 
   const reload = useCallback(() => {
     const seq = ++reloadSeq.current;
     const lseq = ++listsSeq.current;
-    const wanted = wallLoaded.current;
     Promise.all([
       // Removal freezes inventory endpoints; the library status must still load
       // even when another request in this batch is rejected.
@@ -459,7 +512,9 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
         identity: "provisional",
         sort: "added_at",
         limit: PROVISIONAL_LIMIT,
-      }).catch(() => [] as LibraryItem[]),
+      })
+        .then((page) => page.items)
+        .catch(() => [] as LibraryItem[]),
       canManageLibraries
         ? keepOnError(listUnidentifiedLibraryFiles(libraryId))
         : Promise.resolve([]),
@@ -489,8 +544,8 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
         if (seq !== reloadSeq.current) return;
         setItems((prev) => reconcileList(prev, libraryItems, (i) => i.media_item_id));
         wallLoaded.current = Math.max(WALL_PAGE_SIZE, libraryItems.length);
-        // 拿满这一页就假定后面还有；真到底时下一次追加会拿到空数组并收尾
-        setWallHasMore(libraryItems.length >= wanted);
+        // 链尾的游标就是「还有没有下一页」：null = 已经到底
+        setWallHasMore(hasMorePages(wallCursors.current));
         setWallIndex((prev) => keepIfEqual(prev, index));
       })
       // 瞬时失败（网络抖动/后端忙）不清已有数据：failed 只决定顶部提示条，
@@ -511,13 +566,12 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
    */
   const reloadWall = useCallback(() => {
     const seq = ++reloadSeq.current;
-    const wanted = wallLoaded.current;
     fetchWall()
       .then(([libraryItems, index]) => {
         if (seq !== reloadSeq.current) return;
         setItems((prev) => reconcileList(prev, libraryItems, (i) => i.media_item_id));
         wallLoaded.current = Math.max(WALL_PAGE_SIZE, libraryItems.length);
-        setWallHasMore(libraryItems.length >= wanted);
+        setWallHasMore(hasMorePages(wallCursors.current));
         setWallIndex((prev) => keepIfEqual(prev, index));
       })
       .catch(() => {
@@ -530,7 +584,7 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
     // 出来（滚动位置有落脚点），内容必须以服务端为准。曾经有快照就跳过重拉、
     // 只等 30 秒空闲轮询——线上因此出过事：建库后马上点进去（空）、退出、
     // 导入完成再点进来，看到的还是那份空快照，停留不满 30 秒永远看不到新内容。
-    // 重拉不会缩墙：wallLoaded/wallOffset 都从快照恢复，拉的是同一个窗口，
+    // 重拉不会缩墙：wallLoaded 从快照恢复，拉的是同一个前缀，
     // reconcileList 又按 id 复用旧引用，滚动锚点不会丢
     reload();
   }, [reload]);
@@ -540,27 +594,35 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
   const loadingMore = useRef(false);
   const loadMore = useCallback(() => {
     if (loadingMore.current) return;
+    // 链尾：下一页的起始游标；null 且已经不止一页 = 已经到底
+    const next = wallCursors.current.length - 1;
+    const cursor = wallCursors.current[next] ?? null;
+    if (next > 0 && cursor === null) {
+      setWallHasMore(false);
+      return;
+    }
     loadingMore.current = true;
     // 分页请求开始后作废正在路上的轮询响应；否则旧轮询可能先/后返回，
-    // 用较短的窗口覆盖刚追加的页面，把用户滚动到的内容又截回首批。
+    // 用较短的前缀覆盖刚追加的页面，把用户滚动到的内容又截回首批。
     const requestSeq = ++reloadSeq.current;
-    const offset = wallOffset.current + wallLoaded.current;
     listLibraryItems(libraryId, {
       sort: wallSort.current,
       order: wallOrder.current,
       filter: wallFilter.current,
-      limit: WALL_PAGE_SIZE,
-      offset,
+      limit: WALL_API_PAGE_SIZE,
+      cursor,
     })
-      .then((next) => {
+      .then((result) => {
         if (requestSeq !== reloadSeq.current) return;
-        wallLoaded.current += next.length;
+        wallCursors.current[next] = cursor;
+        wallCursors.current[next + 1] = result.next_cursor;
+        wallLoaded.current += result.items.length;
         // 追加与轮询可能交叠着回来，同一条目被拿到两次——按 id 去重再拼
         setItems((current) => {
           const seen = new Set(current.map((i) => i.media_item_id));
-          return [...current, ...next.filter((i) => !seen.has(i.media_item_id))];
+          return [...current, ...result.items.filter((i) => !seen.has(i.media_item_id))];
         });
-        setWallHasMore(next.length >= WALL_PAGE_SIZE);
+        setWallHasMore(result.next_cursor !== null);
       })
       .catch(() => {
         if (requestSeq === reloadSeq.current) setWallHasMore(false);
@@ -570,70 +632,18 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
       });
   }, [libraryId]);
 
-  /* —— 向上补页 ——
-     跳字母 / 回到上次位置会把整个分页窗口换成从该处开始的一页，窗口起点
-     （wallStart）因此不为 0：上方明明还有作品，往上滑却是一堵墙，用户以为
-     "跳过去就只能往下看了"（用户反馈 2026-09-08）。这里补上反方向的分页——
-     墙顶的哨兵提前 600px 触发，把上一页接到已加载内容前面。
+  /* —— 为什么没有「向上补页」了 ——
+     墙现在是**前缀模型**：`items` 永远是从第 0 条起的连续前缀，向上滚动看到的
+     都是已经加载过的内容，不需要再向服务端取数，因此不再有 loadPrev，也不再
+     需要「墙长高了多少就把 scrollTop 加回多少」的补偿。
 
-     接上去之后墙会整体长高、已加载的内容被往下推，所以补完要按长高的量把
-     scrollTop 加回去，眼下这一屏才纹丝不动。 */
-  const loadingPrev = useRef(false);
-  // 前置加载前滚动容器的高度；null = 本次 items 变化不是前置加载，不必补偿
-  const prependFrom = useRef<number | null>(null);
-  const loadPrev = useCallback(() => {
-    if (loadingPrev.current) return;
-    const until = wallOffset.current;
-    if (until <= 0) return; // 已经到墙首，上方没有东西可补
-    loadingPrev.current = true;
-    // 同 loadMore：作废在途的轮询，否则它拿的是旧窗口的那一页，晚一步回来
-    // 会把刚补上的上文整段抹掉
-    const requestSeq = ++reloadSeq.current;
-    const from = Math.max(0, until - WALL_PAGE_SIZE);
-    listLibraryItems(libraryId, {
-      sort: wallSort.current,
-      order: wallOrder.current,
-      filter: wallFilter.current,
-      limit: until - from,
-      offset: from,
-    })
-      .then((prev) => {
-        if (requestSeq !== reloadSeq.current) return;
-        // 一部都没拿到（这一段刚好被删空）：窗口起点保持不动就此打住，
-        // 否则起点一路往前挪、哨兵每次都重新观察，会把这一段空区间反复请求
-        if (prev.length === 0) return;
-        // 起点按**实拿到的条数**回推，而不是按请求的条数：拿少了（并发删除）
-        // 时窗口起点仍与已加载内容对得上，索引条与「上次位置」才不会整体错位
-        const start = until - prev.length;
-        wallOffset.current = start;
-        wallLoaded.current += prev.length;
-        prependFrom.current = scrollElement?.scrollHeight ?? null;
-        setWallStart(start);
-        // 与轮询/追加交叠时同一条目可能拿到两次，按 id 去重再接
-        setItems((current) => {
-          const seen = new Set(current.map((i) => i.media_item_id));
-          return [...prev.filter((i) => !seen.has(i.media_item_id)), ...current];
-        });
-      })
-      // 失败就先不补：哨兵还在墙顶，用户下次滑离再滑回来会重新触发
-      .catch(() => {})
-      .finally(() => {
-        loadingPrev.current = false;
-      });
-  }, [libraryId, scrollElement]);
-
-  // 前置加载的滚动补偿：墙长高了多少就把 scrollTop 加回多少。放 layout effect
-  // 里在绘制前完成；补完立刻让虚拟化窗口重量一次——滚动事件要到下一帧才来，
-  // 不补这一下会闪一帧空墙
-  useLayoutEffect(() => {
-    const before = prependFrom.current;
-    prependFrom.current = null;
-    if (before === null || !scrollElement) return;
-    const grown = scrollElement.scrollHeight - before;
-    if (grown <= 0) return;
-    scrollElement.scrollTop += grown;
-    remeasureWalls();
-  }, [items, scrollElement]);
+     这是刻意的取舍，不是漏掉：服务端只签发 forward-only 的键集游标（`after`），
+     没有 offset、也没有 before/anchor，所以「从第 3000 条起开一个窗口」这件事
+     本身就不存在了。代价是两处——A-Z 跳转要顺序走
+     ceil(offset / WALL_API_PAGE_SIZE) 页（约 10–24 个便宜请求，见 jumpTo），
+     以及墙会一直持有 0..已加载 的全部条目（9.5k 部约 3 MB）。换来的是向上
+     滚动零请求，以及 A-Z 跳转之后上方内容天然都在。等 store 侧补了 anchor /
+     before 游标，这些能力再回来（已单独立项）。 */
 
   // 海报墙顶部的锚：跳字母后滚回墙首，否则用户停在原来的滚动位置上，
   // 看到的是新一批的中间，像是"点了没反应"
@@ -641,11 +651,6 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
   /** 筛选条的锚点：改条件之后滚到它，条件行才不会被推出视口 */
   const filterBarTop = useRef<HTMLDivElement>(null);
   const wallGrid = useRef<HTMLDivElement>(null);
-  /**
-   * 跳到某个首字母档：换掉整个窗口（而不是继续往后追加），此后向下照常滚动
-   * 加载，向上由墙顶哨兵把上文补回来（loadPrev）。
-   * offset=0 即回到墙首，索引条的「全部」走的也是这条路。
-   */
   /**
    * 改筛选条件。
    *
@@ -658,16 +663,18 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
       wallFilter.current = next;
       setFilter(next);
       writeFilterToUrl(next);
-      wallOffset.current = 0;
+      // 条件变了就是另一份名单：游标链整条作废，从头开始
+      wallCursors.current = [null];
       wallLoaded.current = WALL_PAGE_SIZE;
-      setWallStart(0);
+      setWallOrigin(0);
       setActiveWallInitial(null);
       void reload();
       // 如果当前处于图廊模式，清空重载图廊
       galleryGeneration.current += 1;
       galleryLoading.current = false;
-      galleryStart.current = 0;
+      galleryCursors.current = [null];
       galleryLoaded.current = 0;
+      setGalleryOrigin(0);
       setGalleryGroups([]);
       setGalleryHasMore(false);
       loadMoreGallery();
@@ -682,39 +689,62 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
     [reload],
   );
 
+  /**
+   * 跳到整份排序里的第 `offset` 条（A-Z 索引条与「回到上次位置」共用）。
+   *
+   * Task 26：每一档自带不透明游标，所以跳转 = **一次** `/items` 请求——拿目标档的
+   * 游标直接取页，第一格就是该档第一条。窗口起点（`wallOrigin`）从此不为 0，锚点与
+   * 「还差几格」都按它换算。只有目标落到一个超过一页的档里时才继续顺着链走一两页
+   * （9.5k 部的库实测字母跳转 1 次请求）。
+   *
+   * 向上滚动仍然没有 prepend：窗口上方就是未加载区，这与 Task 14 的取舍一致
+   * （见上面「为什么没有向上补页」）。
+   */
   const jumpTo = useCallback(
     (offset: number) => {
-      // 跳转期间两头的哨兵都挡住，别让旧窗口的追加/补页插进来
+      const target = Math.max(0, offset);
+      if (loadingMore.current) return;
+      const bucket = wallBucketAtOffset(wallIndex, target);
+      const bucketStart = bucket < 0 ? 0 : wallBucketOffsets(wallIndex)[bucket];
+      const cursor = bucket < 0 ? null : wallIndex[bucket].cursor;
       loadingMore.current = true;
-      loadingPrev.current = true;
-      // 作废在途的轮询：它拿的是旧窗口的那一页，晚一步回来就把用户刚跳到的
-      // 位置又拽回去（表现为"点了字母，一秒后自己跳回墙首"）
+      // 作废在途的轮询：它拿的是旧窗口，晚一步回来会把刚跳到的位置又拽回去
       reloadSeq.current += 1;
-      wallOffset.current = offset;
-      listLibraryItems(libraryId, {
-      sort: wallSort.current,
-      order: wallOrder.current,
-      filter: wallFilter.current,
-      limit: WALL_PAGE_SIZE,
-      offset,
-    })
-        .then((page) => {
-          wallLoaded.current = Math.max(WALL_PAGE_SIZE, page.length);
-          setWallStart(offset);
-          setItems(page);
-          setWallHasMore(page.length >= WALL_PAGE_SIZE);
-          // 瞬时而不是平滑：墙上的内容已经整段换掉，平滑滚过去的是一堆不存在
-          // 的旧内容；更要紧的是落地后墙顶哨兵会立刻补上一页，那一下的滚动
-          // 补偿会打断还在跑的平滑动画，把人停在半路上
-          wallTop.current?.scrollIntoView({ block: "start", behavior: "instant" });
-        })
+      const fetchAt = (from: string | null) =>
+        listLibraryItems(libraryId, {
+          sort: wallSort.current,
+          order: wallOrder.current,
+          filter: wallFilter.current,
+          limit: WALL_API_PAGE_SIZE,
+          cursor: from,
+        });
+      void (async () => {
+        const first = await fetchAt(cursor);
+        let itemsInWindow = first.items;
+        let next = first.next_cursor;
+        // 链的第 0 项是窗口的起始游标（前缀窗口为 null，跳档后是该档游标）
+        const chain: (string | null)[] = [cursor];
+        // 目标可能比这一页更深（一个档里超过一页作品）：顺着链补到够为止
+        while (next !== null && target - bucketStart >= itemsInWindow.length) {
+          chain.push(next);
+          const page = await fetchAt(next);
+          itemsInWindow = [...itemsInWindow, ...page.items];
+          next = page.next_cursor;
+        }
+        chain.push(next);
+        wallCursors.current = chain;
+        setWallOrigin(bucketStart);
+        wallLoaded.current = Math.max(WALL_PAGE_SIZE, itemsInWindow.length);
+        setItems(itemsInWindow);
+        setWallHasMore(next !== null);
+        pendingJump.current = target - bucketStart;
+      })()
         .catch(() => {})
         .finally(() => {
           loadingMore.current = false;
-          loadingPrev.current = false;
         });
     },
-    [libraryId],
+    [libraryId, wallIndex],
   );
 
   const library = libraries?.find((l) => l.id === libraryId) ?? null;
@@ -760,7 +790,10 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
   }, [library, pendingTab, canManageLibraries]);
 
   // 新契约的 JobDef 不再携带资源索引（resources 已删），海报格不再按后台任务点亮；
-  // 元数据刷新进度也只会是空闲态（端点已删），refreshPhaseById 随之恒空
+  // 元数据刷新进度也只会是空闲态（端点已删），refreshPhaseById 随之恒空。
+  // 刻意保留这个恒空表：它记着「按任务点亮海报格」这件事为什么不存在，别按
+  // 「未使用」删掉。
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const refreshPhaseById = useMemo(() => new Map<string, string>(), []);
 
   // 新契约无扫描补探状态，probing 恒 false
@@ -815,21 +848,28 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
   const galleryEntries = useMemo(() => flattenGallery(galleryGroups), [galleryGroups]);
   const loadMoreGallery = useCallback(() => {
     if (galleryLoading.current) return;
+    const next = galleryCursors.current.length - 1;
+    const cursor = galleryCursors.current[next] ?? null;
+    if (next > 0 && cursor === null) {
+      setGalleryHasMore(false);
+      return;
+    }
     galleryLoading.current = true;
     const gen = galleryGeneration.current;
-    const offset = galleryLoaded.current;
     listLibraryGallery(libraryId, {
       limit: GALLERY_PAGE_SIZE,
-      offset,
+      cursor,
       sort: effectiveSort,
       order: wallOrderParam,
       filter: wallFilter.current,
     })
       .then((page) => {
         if (gen !== galleryGeneration.current) return;
-        galleryLoaded.current = offset + page.length;
-        setGalleryGroups((current) => dedupeGalleryGroups([...current, ...page]));
-        setGalleryHasMore(page.length >= GALLERY_PAGE_SIZE);
+        galleryCursors.current[next] = cursor;
+        galleryCursors.current[next + 1] = page.next_cursor;
+        galleryLoaded.current += page.groups.length;
+        setGalleryGroups((current) => dedupeGalleryGroups([...current, ...page.groups]));
+        setGalleryHasMore(page.next_cursor !== null);
       })
       .catch(() => {
         if (gen === galleryGeneration.current) setGalleryHasMore(false);
@@ -840,66 +880,111 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
         }
       });
   }, [libraryId, effectiveSort, wallOrderParam]);
+
   /**
    * 按已加载的页数重拉整个图廊窗口：从快照恢复出来的窗口是离开这一屏时的旧
    * 数据（比如在详情页点了心，返回时角标要跟着变），拿到结果整体替换。
    * 不缩窗口、不动滚动位置；失败就留着旧窗口，下次返回再对账。
    */
   const refreshGallery = useCallback(() => {
-    const start = galleryStart.current;
-    const loaded = galleryLoaded.current - start;
-    if (loaded <= 0 || galleryLoading.current) return;
+    const wanted = galleryLoaded.current;
+    if (wanted <= 0 || galleryLoading.current) return;
     galleryLoading.current = true; // 对账期间别让滚动哨兵同时追加下一页
-    Promise.all(
-      Array.from({ length: Math.ceil(loaded / GALLERY_PAGE_SIZE) }, (_, page) =>
-        listLibraryGallery(libraryId, {
-          filter: wallFilter.current,
-          limit: GALLERY_PAGE_SIZE,
-          offset: start + page * GALLERY_PAGE_SIZE,
-          sort: effectiveSort,
-          order: wallOrderParam,
-        }),
-      ),
-    )
-      .then((pages) => {
-        galleryLoaded.current = start + pages.reduce((sum, page) => sum + page.length, 0);
-        setGalleryGroups(dedupeGalleryGroups(pages.flat()));
-        setGalleryHasMore((pages.at(-1)?.length ?? 0) >= GALLERY_PAGE_SIZE);
-      })
+    const fetchAt = (page: number, cursor: string | null) =>
+      listLibraryGallery(libraryId, {
+        filter: wallFilter.current,
+        limit: GALLERY_PAGE_SIZE,
+        cursor,
+        sort: effectiveSort,
+        order: wallOrderParam,
+      }).then((result) => {
+        galleryCursors.current[page] = cursor;
+        galleryCursors.current[page + 1] = result.next_cursor;
+        return result;
+      });
+    const pages = Math.max(1, Math.ceil(wanted / GALLERY_PAGE_SIZE));
+    const known = Math.min(pages, galleryCursors.current.length - 1);
+    void (async () => {
+      const head = await Promise.all(
+        Array.from({ length: known }, (_, page) =>
+          fetchAt(page, galleryCursors.current[page] ?? null),
+        ),
+      );
+      const tail: { groups: LibraryGalleryGroup[]; next_cursor: string | null }[] = [];
+      for (let page = known; page < pages; page += 1) {
+        if (page > 0 && galleryCursors.current[page] === null) break;
+        tail.push(await fetchAt(page, galleryCursors.current[page] ?? null));
+      }
+      const all = [...head, ...tail];
+      galleryLoaded.current = all.reduce((sum, page) => sum + page.groups.length, 0);
+      setGalleryGroups(dedupeGalleryGroups(all.flatMap((page) => page.groups)));
+      setGalleryHasMore((all.at(-1)?.next_cursor ?? null) !== null);
+    })()
       .catch(() => undefined)
       .finally(() => {
         galleryLoading.current = false;
       });
   }, [libraryId, effectiveSort, wallOrderParam]);
+
   /**
-   * 图廊跳到整份排序里的某个位置：与海报墙的 jumpTo 是同一件事——换掉整个
-   * 窗口（而不是从头追加到那里），此后照常向下滚动加载。图廊的分页口径也是
-   * 条目数，两面墙的 offset 通用，「回到上次位置」因此两种形态都能跳。
+   * 图廊跳到整份排序里的某个位置（「回到上次位置」在图廊形态下走这里）。
+   *
+   * 与海报墙的 jumpTo 同理：服务端只给 forward-only 游标，跳转 = 把前缀走到能
+   * 覆盖目标位置。图廊按条目数分页，游标口径与海报墙一致。
+   */
+  /**
+   * 图廊跳到整份排序里的某个位置（「回到上次位置」在图廊形态下走这里）。
+   *
+   * 与海报墙的 `jumpTo` 同一套：取目标档的不透明游标，**一次**请求就落在该档第一组；
+   * 只有目标比一页更深时才顺着链再走。窗口起点（`galleryOrigin`）随之改变，向上滚动
+   * 同样没有 prepend（与 Task 14 的取舍一致）。
    */
   const jumpGalleryTo = useCallback(
     (offset: number) => {
-      galleryLoading.current = true; // 跳转期间挡住滚动哨兵与对账，别让旧窗口的页插进来
-      galleryStart.current = offset;
-      listLibraryGallery(libraryId, {
-      limit: GALLERY_PAGE_SIZE,
-      offset,
-      sort: effectiveSort,
-      order: wallOrderParam,
-      filter: wallFilter.current,
-    })
-        .then((page) => {
-          galleryLoaded.current = offset + page.length;
-          setGalleryGroups(dedupeGalleryGroups(page));
-          setGalleryHasMore(page.length >= GALLERY_PAGE_SIZE);
-          wallTop.current?.scrollIntoView({ block: "start", behavior: "smooth" });
-        })
+      const target = Math.max(0, offset);
+      if (galleryLoading.current) return;
+      galleryLoading.current = true; // 跳转期间挡住滚动哨兵与对账
+      const gen = galleryGeneration.current;
+      const bucket = wallBucketAtOffset(wallIndex, target);
+      const bucketStart = bucket < 0 ? 0 : wallBucketOffsets(wallIndex)[bucket];
+      const cursor = bucket < 0 ? null : wallIndex[bucket].cursor;
+      const fetchAt = (from: string | null) =>
+        listLibraryGallery(libraryId, {
+          limit: GALLERY_PAGE_SIZE,
+          cursor: from,
+          sort: effectiveSort,
+          order: wallOrderParam,
+          filter: wallFilter.current,
+        });
+      void (async () => {
+        const first = await fetchAt(cursor);
+        let groups = first.groups;
+        let next = first.next_cursor;
+        const chain: (string | null)[] = [cursor];
+        while (next !== null && target - bucketStart >= groups.length) {
+          chain.push(next);
+          const page = await fetchAt(next);
+          groups = [...groups, ...page.groups];
+          next = page.next_cursor;
+        }
+        chain.push(next);
+        if (gen !== galleryGeneration.current) return;
+        galleryCursors.current = chain;
+        galleryLoaded.current = groups.length;
+        setGalleryOrigin(bucketStart);
+        setGalleryGroups(dedupeGalleryGroups(groups));
+        setGalleryHasMore(next !== null);
+        // 图廊没有虚拟化坐标：滚到墙首，目标那组就在视口下方不远处
+        wallTop.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+      })()
         .catch(() => {})
         .finally(() => {
-          galleryLoading.current = false;
+          if (gen === galleryGeneration.current) galleryLoading.current = false;
         });
     },
-    [libraryId, effectiveSort, wallOrderParam],
+    [libraryId, effectiveSort, wallOrderParam, wallIndex],
   );
+
   /**
    * 图廊里点心：收藏 / 取消收藏整部作品（与详情页那颗心同一落点）。
    *
@@ -958,8 +1043,9 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
     galleryWindowLibrary.current = libraryId;
     galleryGeneration.current += 1;
     galleryLoading.current = false;
-    galleryStart.current = 0;
+    galleryCursors.current = [null];
     galleryLoaded.current = 0;
+    setGalleryOrigin(0);
     setGalleryGroups([]);
     setGalleryHasMore(false);
     loadMoreGallery();
@@ -984,18 +1070,15 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
     (wallOrderParam ? ":rev" : "");
   // 条目 id → 它在整份排序里的绝对位置。滚动时按首个可见格反查（图廊按瓦片
   // 所属的作品），DOM 上只挂 id，不必给每一格再算一遍下标
+  // 数组下标 + 窗口起点 = 它在整份排序里的绝对位置（跳档后窗口不从 0 开始）
   const offsetById = useMemo(
-    () => new Map(items.map((item, index) => [String(item.media_item_id), wallStart + index])),
-    [items, wallStart],
+    () => new Map(items.map((item, index) => [String(item.media_item_id), wallOrigin + index])),
+    [items, wallOrigin],
   );
-  // galleryStart 只在窗口被整体换掉时变，与 galleryGroups 同一时刻，不必进依赖
   const galleryOffsetById = useMemo(
     () =>
       new Map(
-        galleryGroups.map((group, index) => [
-          String(group.media_item_id),
-          galleryStart.current + index,
-        ]),
+        galleryGroups.map((group, index) => [String(group.media_item_id), index]),
       ),
     [galleryGroups],
   );
@@ -1041,7 +1124,10 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
   // 抓帧的是横版缩略图。竖横混在一个网格里对不齐，按主图比例切成两区，各自用
   // 合适的列宽；只有一种形态时仍是普通的一面墙（docs/design/library-other-kind.md 4.3）
   // 新契约无主图宽高比（primary_aspect 已删），无法做竖横分区，统一一面墙；
-  // 其他库（video）的抓帧封面按横版列宽走，影视库用竖版海报列宽
+  // 其他库（video）的抓帧封面按横版列宽走，影视库用竖版海报列宽。
+  // 刻意保留这个恒 false 的开关：它记着「按主图比例分区」为什么不存在，别按
+  // 「未使用」删掉——删掉之后下一个人会重新提出这个方案。
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const splitWall = false;
   const wideWall = library?.kind === "video" || wideCards;
   // 这一格正被后台处理时的文案。新契约无刷新阶段/任务资源索引，恒为 undefined；
@@ -1059,22 +1145,46 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
      改成按算好的行位置求（PosterWall 把行位置交出来）。后者反而更省——每帧
      不必再查 DOM。 */
   const wallGeometry = useRef<{ rowTops: readonly number[]; columns: number } | null>(null);
+  /**
+   * 跳转请求的目标绝对下标：前缀走到位后由下面的 layout effect 落到那一格。
+   *
+   * 不能请求一回来就滚——那时 React 还没把新条目铺上墙，几何与滚动高度都还是
+   * 旧前缀的，滚到的位置一定是错的。
+   */
+  const pendingJump = useRef<number | null>(null);
   const onWallGeometry = useCallback(
     (geometry: { rowTops: readonly number[]; columns: number } | null) => {
       wallGeometry.current = geometry;
     },
     [],
   );
-  // 各字母首部条目在**本窗口内**的下标（整份排序的 offset 减去窗口起点）
-  const wallAnchors = useMemo(
-    () =>
-      wallIndex
-        .map((entry) => ({ initial: entry.initial, index: entry.offset - wallStart }))
-        .filter((anchor) => anchor.index >= 0),
-    [wallIndex, wallStart],
-  );
+  // 各字母首部条目在**已加载窗口里**的下标：档位绝对位置（count 前缀和）减窗口起点
+  const wallAnchors = useMemo(() => {
+    const offsets = wallBucketOffsets(wallIndex);
+    return wallIndex
+      .map((entry, bucket) => ({ initial: entry.initial, index: offsets[bucket] - wallOrigin }))
+      .filter((anchor) => anchor.index >= 0);
+  }, [wallIndex, wallOrigin]);
+  useLayoutEffect(() => {
+    const target = pendingJump.current;
+    if (target === null) return;
+    const geometry = wallGeometry.current;
+    const grid = wallGrid.current;
+    if (!geometry || !grid || !scrollElement) return;
+    const row = Math.floor(target / Math.max(1, geometry.columns));
+    const rowTop = geometry.rowTops[row];
+    if (rowTop === undefined) return; // 这次重排还没铺到那一行，等下一次 items 变化
+    pendingJump.current = null;
+    const offset =
+      grid.getBoundingClientRect().top -
+      scrollElement.getBoundingClientRect().top +
+      scrollElement.scrollTop;
+    // 瞬时而不是平滑：墙内容整段换了，平滑滚过去的是一堆不存在的旧内容
+    scrollElement.scrollTo({ top: Math.max(0, offset + rowTop), behavior: "instant" });
+  }, [items.length, scrollElement]);
+
   useEffect(() => {
-    const fallback = wallInitialAtOffset(wallIndex, wallStart);
+    const fallback = wallInitialAtOffset(wallIndex, wallOrigin);
     setActiveWallInitial(fallback);
     if (!scrollElement || probing) return;
 
@@ -1106,7 +1216,7 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
       scrollElement.removeEventListener("scroll", schedule);
       if (frame) cancelAnimationFrame(frame);
     };
-  }, [items.length, probing, scrollElement, wallAnchors, wallIndex, wallStart]);
+  }, [items.length, probing, scrollElement, wallAnchors, wallIndex, wallOrigin]);
 
   // 排序切换是**服务端**的事（墙是分页的，本地排只能排到已加载的那几屏）：
   // 阶段一变、或用户换了排序，就换排序键重拉第一页——只拉墙（reloadWall），
@@ -1119,9 +1229,9 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
     wallSort.current = effectiveSort;
     wallOrder.current = wallOrderParam;
     wallLoaded.current = WALL_PAGE_SIZE;
-    // 换了排序或方向，之前跳到的字母位置就没意义了，窗口回到墙首
-    wallOffset.current = 0;
-    setWallStart(0);
+    // 换了排序或方向就是另一份名单：游标链整条作废，从头开始
+    wallCursors.current = [null];
+    setWallOrigin(0);
     reloadWall();
   }, [effectiveSort, wallOrderParam, wallSortReady, reloadWall]);
 
@@ -1207,10 +1317,8 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
     <LibraryActionsMenu
       library={library}
       canManage={canManageLibraries}
-      confirm={confirm}
       toast={toast}
       reload={reload}
-      navigate={navigate}
       density={gallery ? wallDensity : undefined}
       onDensityChange={gallery ? setWallDensity : undefined}
       grouped={gallery ? galleryGrouped : undefined}
@@ -1421,21 +1529,23 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
       <>
       {/* —— 库存海报墙 —— */}
       {items.length === 0 && provisional.length === 0 && filtering ? (
-        // 筛空了不给空墙——给一条真能救回内容的出路（铁律 2）。库本身就是空的
-        // 是另一回事，走下面那个分支
-        <FilterEmptyState
-          libraryId={libraryId}
-          filter={filter}
-          onFilterChange={applyFilter}
-        />
+        failed ? null : (
+          <FilterEmptyState
+            libraryId={libraryId}
+            filter={filter}
+            onFilterChange={applyFilter}
+          />
+        )
       ) : items.length === 0 && provisional.length === 0 ? (
-        <p className="mt-16 text-center text-ui leading-7 text-[var(--text-muted)]">
-          这个库还没有内容。
-          <br />
-          {canManageLibraries
-            ? "点右上角菜单里的「扫描库」把已有影片识别入库；订阅内容下载完成后也会自动进来。"
-            : "订阅内容下载并入库后会显示在这里。"}
-        </p>
+        failed ? null : (
+          <p className="mt-16 text-center text-ui leading-7 text-[var(--text-muted)]">
+            这个库还没有内容。
+            <br />
+            {canManageLibraries
+              ? "点右上角菜单里的「扫描库」把已有影片识别入库；订阅内容下载完成后也会自动进来。"
+              : "订阅内容下载并入库后会显示在这里。"}
+          </p>
+        )
       ) : (
         <>
           {/* 筛选条：静止态只有一个「筛选」按钮，点开才有四个维度；
@@ -1479,8 +1589,6 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
                   会跟着自己补一次 scrollTop，与我们按长高量做的补偿叠加就是跳两下
                   （何况 Safari 根本没有滚动锚定）。这一段的位置全部自己算 */}
               <div className="min-w-0 flex-1 [overflow-anchor:none]">
-                {/* 墙顶还有上文时向上补页：跳字母/回到上次位置之后仍然能往上滑 */}
-                {!gallery && <WallLoadPrev start={wallStart} onReach={loadPrev} />}
                 {gallery ? (
                   <VideoGalleryWall
                     groups={galleryGroups}
@@ -1503,8 +1611,8 @@ export function LibraryDetailView({ libraryId }: { libraryId: string }) {
                 {/* 图廊与海报墙各自分页，哨兵按当前模式接线（图廊按作品数计） */}
                 <WallLoadMore
                   hasMore={gallery ? galleryHasMore : wallHasMore}
-                  loaded={gallery ? galleryLoaded.current - galleryStart.current : items.length}
-                  start={gallery ? galleryStart.current : wallStart}
+                  loaded={gallery ? galleryLoaded.current : items.length}
+                  start={gallery ? galleryOrigin : wallOrigin}
                   total={library.stats.item_count}
                   onReach={gallery ? loadMoreGallery : loadMore}
                   rootMargin={gallery ? GALLERY_LOAD_MARGIN : undefined}
@@ -1628,17 +1736,19 @@ interface LibraryActionsMenuProps {
   library: MediaLibrary;
   /** 媒体库管理权限：没有时菜单只剩图片库的相册墙密度 */
   canManage: boolean;
-  confirm: any;
   toast: any;
   reload: () => void;
-  navigate: (to: string) => void;
   onToggleScan: () => void;
   /** 待处理总件数（缺失 + 待识别）；0 也照常给入口，见下方说明 */
   pendingCount: number;
   onOpenPending: () => void;
   onToggleMetaRefresh: () => void;
   onEdit: () => void;
-  onSetDefault: () => void;
+  /**
+   * 调用方仍传着「设为默认库」的完整实现（含二次确认），但菜单里目前没有这一项。
+   * 行为留在调用处、参数留在契约里是刻意的：恢复入口时不必重写这段流程。
+   */
+  onSetDefault?: () => void;
   onDelete: () => void;
   onCoverModal?: () => void;
   /** 图片库：相册墙的密度（个人偏好，与管理权无关）；不传不渲染这一组 */
@@ -1655,16 +1765,13 @@ interface LibraryActionsMenuProps {
 function LibraryActionsMenu({
   library,
   canManage,
-  confirm,
   toast,
   reload,
-  navigate,
   onToggleScan,
   pendingCount,
   onOpenPending,
   onToggleMetaRefresh,
   onEdit,
-  onSetDefault,
   onDelete,
   onCoverModal,
   density,
@@ -1797,11 +1904,17 @@ function WallIndexBar({
   index: LibraryIndexEntry[];
   /** 当前视口所在档位；由海报墙滚动锚点实时更新。 */
   active: string | null;
+  /** 参数是该档第一格在整份排序里的绝对位置（档位位置由 count 前缀和还原） */
   onJump: (offset: number) => void;
   /** 墙是倒序（Z→A）时字母表跟着倒过来：往下滑墙与往下滑索引条是同一个方向 */
   reversed: boolean;
 }) {
   const byInitial = useMemo(() => new Map(index.map((e) => [e.initial, e])), [index]);
+  // 档位 → 它在整份排序里的绝对起点：游标只到「这一档第一格」，落点仍按位置算
+  const startsByInitial = useMemo(() => {
+    const offsets = wallBucketOffsets(index);
+    return new Map(index.map((entry, bucket) => [entry.initial, offsets[bucket]]));
+  }, [index]);
   const slots = useMemo(() => (reversed ? [...WALL_INITIALS].reverse() : WALL_INITIALS), [reversed]);
   const barRef = useRef<HTMLDivElement>(null);
   // 正在滑选的字母（气泡预览 + 高亮）；null = 没在按压
@@ -1848,8 +1961,9 @@ function WallIndexBar({
       onPointerUp={(e) => {
         if (!dragging.current) return;
         dragging.current = false;
-        const entry = byInitial.get(letterAtY(e.clientY) ?? "");
-        if (entry) onJump(entry.offset);
+        const initial = letterAtY(e.clientY) ?? "";
+        const start = startsByInitial.get(initial);
+        if (start !== undefined) onJump(start);
         setPreview(null);
       }}
       onPointerCancel={() => {
@@ -2108,7 +2222,8 @@ function MissingRow({
   const confirm = useConfirm();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [done, setDone] = useState<string | null>(null);
+  // 清理完成的回执标签：写端随旧清理流程一起删了，这里保持只读（恒 null）
+  const [done] = useState<string | null>(null);
 
   const act = (fn: () => Promise<unknown>) => {
     setBusy(true);
@@ -2277,7 +2392,6 @@ function UnidentifiedGroupRow({
   movie: boolean;
   onChanged: () => void;
 }) {
-  const confirm = useConfirm();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -2286,7 +2400,6 @@ function UnidentifiedGroupRow({
     { view: "confirm"; seed: ClaimSeed } | { view: "search" } | null
   >(null);
 
-  const fileIds = group.files.map((f) => f.id);
   const act = (fn: () => Promise<unknown>) => {
     setBusy(true);
     setError(null);
@@ -2421,12 +2534,18 @@ function UnidentifiedGroupRow({
           fileCount={group.file_count}
           busy={busy}
           onConfirm={() =>
-            act(() =>
-              assignLibraryFilesToTitle(
-                fileIds,
-                `tmdb:${movie ? "movie" : "tv"}:${panel.seed.tmdbId}`,
-              ),
-            )
+            act(async () => {
+              // 未识别文件按路径认领为新识别作品，逐个提交；任一失败即报错。
+              for (const f of group.files) {
+                await claimUnidentifiedFile({
+                  path: f.file_path,
+                  title: panel.seed.title,
+                  kind: movie ? "movie" : "tv",
+                  year: panel.seed.year ?? null,
+                  tmdb_id: String(panel.seed.tmdbId),
+                });
+              }
+            })
           }
           onCancel={() => setPanel(null)}
         />

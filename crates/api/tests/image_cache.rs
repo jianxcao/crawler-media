@@ -6,9 +6,10 @@ use std::sync::Arc;
 use api::{ApiState, Store, router};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserRole};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UserRole};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
+use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
 
 struct NoFetch;
@@ -101,9 +102,10 @@ fn seed_poster(root: &Path, state: &ApiState, poster: &[u8]) -> LedgerId {
     };
     guard.insert_media(&media).unwrap();
     let ledger_id = LedgerId::new();
-    guard
-        .insert_ledger(&LedgerRow {
-            id: ledger_id,
+    publish_fixture_file(
+        &guard,
+        &FixtureFile {
+            file_id: Some(ledger_id),
             media_id: media.id,
             path: file.display().to_string(),
             season: None,
@@ -114,8 +116,10 @@ fn seed_poster(root: &Path, state: &ApiState, poster: &[u8]) -> LedgerId {
             quality_source: QualitySource::Probe,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     ledger_id
 }
 
@@ -205,14 +209,14 @@ async fn conditional_get_requires_authorization_before_validator() {
 }
 
 // ---------------------------------------------------------------------------
-// C2a：本地元数据 IO 必须在 Store 锁之外（注入阻塞 BrowseFileRead 证明）。
+// C2a：本地元数据 IO 必须在 Store 锁之外（注入阻塞 FileStatRead 证明）。
 // ---------------------------------------------------------------------------
 
 struct BlockingBrowse {
     gate: Arc<Gate>,
 }
 
-impl api::browse_file_read::BrowseFileRead for BlockingBrowse {
+impl api::file_stat_read::FileStatRead for BlockingBrowse {
     fn read_nfo(&self, _path: &Path) -> Option<library::NfoMeta> {
         None
     }
@@ -221,10 +225,7 @@ impl api::browse_file_read::BrowseFileRead for BlockingBrowse {
         std::fs::metadata(path)
     }
 
-    fn external_subtitles(
-        &self,
-        _path: &Path,
-    ) -> Result<Vec<library::SubtitleTrack>, String> {
+    fn external_subtitles(&self, _path: &Path) -> Result<Vec<library::SubtitleTrack>, String> {
         self.gate.enter_and_wait();
         Ok(Vec::new())
     }
@@ -250,10 +251,16 @@ impl Gate {
     fn enter_and_wait(&self) {
         *self.entered.lock().unwrap() = true;
         self.entered_cv.notify_all();
-        let mut open = self.open.lock().unwrap();
-        while !*open {
-            open = self.open_cv.wait(open).unwrap();
-        }
+        let released = *self
+            .open_cv
+            .wait_timeout_while(
+                self.open.lock().unwrap(),
+                std::time::Duration::from_secs(30),
+                |open| !*open,
+            )
+            .unwrap()
+            .0;
+        assert!(released, "test must release the image gate");
     }
 
     fn entered(&self) -> bool {
@@ -280,10 +287,9 @@ async fn metadata_file_io_runs_off_the_store_lock() {
 
     let tmp = tempfile::tempdir().unwrap();
     let gate = Arc::new(Gate::new());
-    let state = make_state(tmp.path()).with_browse_file_read(Arc::new(BlockingBrowse {
-        gate: gate.clone(),
-    }));
-    let (user_id, ledger_id) = {
+    let state =
+        make_state(tmp.path()).with_file_stat_read(Arc::new(BlockingBrowse { gate: gate.clone() }));
+    let (user_id, media_id) = {
         let library_root = tmp.path().join("visible");
         std::fs::create_dir_all(&library_root).unwrap();
         let file = library_root.join("Movie.mkv");
@@ -315,9 +321,10 @@ async fn metadata_file_io_runs_off_the_store_lock() {
         };
         guard.insert_media(&media).unwrap();
         let ledger_id = LedgerId::new();
-        guard
-            .insert_ledger(&LedgerRow {
-                id: ledger_id,
+        publish_fixture_file(
+            &guard,
+            &FixtureFile {
+                file_id: Some(ledger_id),
                 media_id: media.id,
                 path: file.display().to_string(),
                 season: None,
@@ -328,19 +335,21 @@ async fn metadata_file_io_runs_off_the_store_lock() {
                 quality_source: QualitySource::Probe,
                 confidence: Confidence::High,
                 filter_score: None,
-            })
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let user_id = guard
+            .user_id_by_token("management-secret")
+            .unwrap()
             .unwrap();
-        let user_id = guard.user_id_by_token("management-secret").unwrap().unwrap();
-        (user_id, ledger_id)
+        (user_id, media.id)
     };
 
     let provider = api::media_server_provider::ApiServerProvider::new(state.clone());
-    let handle = tokio::spawn(async move {
-        provider
-            .resolve_single_item(user_id, &ledger_id.to_string())
-            .await
-    });
-    // 有界等待：基线没有走 BrowseFileRead seam，这里会干净地失败而不是挂死。
+    let item_id = domain::TypedItemId::Work(media_id).to_wire_string();
+    let handle = tokio::spawn(async move { provider.resolve_single_item(user_id, &item_id).await });
+    // 有界等待：基线没有走 FileStatRead seam，这里会干净地失败而不是挂死。
     let entered = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while !gate.entered() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -349,7 +358,7 @@ async fn metadata_file_io_runs_off_the_store_lock() {
     .await;
     assert!(
         entered.is_ok(),
-        "metadata file IO never went through BrowseFileRead"
+        "metadata file IO never went through FileStatRead"
     );
     let _release = ReleaseOnDrop(gate.clone());
     {
@@ -360,6 +369,10 @@ async fn metadata_file_io_runs_off_the_store_lock() {
         );
     }
     gate.release();
-    let snapshot = handle.await.unwrap().unwrap().expect("snapshot must resolve");
+    let snapshot = handle
+        .await
+        .unwrap()
+        .unwrap()
+        .expect("snapshot must resolve");
     assert_eq!(snapshot.media.title, "Lock Test");
 }

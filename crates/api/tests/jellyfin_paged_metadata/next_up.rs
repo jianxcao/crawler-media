@@ -11,7 +11,7 @@ async fn next_up_aggregates_one_media_across_libraries() {
     let root_two = dir.path().join("next-up-two");
     std::fs::create_dir_all(&root_one).unwrap();
     std::fs::create_dir_all(&root_two).unwrap();
-    let first_episode = {
+    let media_id = {
         let store = state.store();
         let store = store.lock();
         store
@@ -35,16 +35,16 @@ async fn next_up_aggregates_one_media_across_libraries() {
             )
             .unwrap();
         let media_id = new_media(&store, "Cross library show");
-        let first = insert_episode(&store, &root_one, media_id, 1, 1);
+        insert_episode(&store, &root_one, media_id, 1, 1);
         insert_episode(&store, &root_two, media_id, 1, 2);
-        first
+        media_id
     };
     let app = router(state);
     let next_up = get_json(&app, "/Shows/NextUp").await;
     assert_eq!(next_up["TotalRecordCount"], 1, "{next_up}");
     assert_eq!(
         items(&next_up)[0]["Id"],
-        first_episode.to_string().replace('-', ""),
+        unit_wire_id(media_id, 1, 1),
         "同一 Media 只出一条，取 (季, 集) 最小的未看"
     );
 }
@@ -71,4 +71,3 @@ async fn next_up_pages_after_aggregating_every_series() {
     assert_eq!(items(&beyond).len(), 0);
     assert_eq!(beyond["TotalRecordCount"], 5);
 }
-

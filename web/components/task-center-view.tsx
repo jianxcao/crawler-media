@@ -41,10 +41,9 @@ import {
 import { shouldOfferInlineReplacement } from "@/lib/download-task-actions";
 import {
   cancelJob,
-  dismissAllFailedJobs,
+  listJobs,
+  runJob,
   isSystemCancelled,
-  retryJob,
-  undismissJob,
   type JobStatus,
   type JobView,
 } from "@/lib/api/jobs";
@@ -167,7 +166,7 @@ export function TaskCenterView({
     if (bulkDismissing) return;
     setBulkDismissing(true);
     try {
-      const dismissed = await dismissAllFailedJobs();
+      const dismissed = (await listJobs()).filter((job) => job.last_status === "failed");
       for (const job of dismissed) {
         upsert(job);
         markJobDismissed(job.id, job.last_finished_at);
@@ -188,8 +187,8 @@ export function TaskCenterView({
     if (undismissingJobId != null) return;
     setUndismissingJobId(job.id);
     try {
-      upsert(await undismissJob(job.id));
       markJobUndismissed(job.id);
+      upsert(job);
       toast.success("已撤销忽略，任务回到「需要处理」");
     } catch (caught) {
       toast.error((caught as Error).message || "撤销忽略失败");
@@ -202,7 +201,7 @@ export function TaskCenterView({
     if (retryingJobId != null) return;
     setRetryingJobId(job.id);
     try {
-      await retryJob(job.id);
+      await runJob(job.id);
       refreshJobs();
       toast.success("任务已重新加入队列");
     } catch (caught) {

@@ -25,6 +25,7 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
+unicode-normalization = "0.1"
 domain = { path = "crates/domain" }
 store = { path = "crates/store" }
 indexer = { path = "crates/indexer" }

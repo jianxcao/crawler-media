@@ -8,9 +8,7 @@ import { toMediaSearchItem } from "@/lib/search-history";
 
 /** 后端统一响应信封（见 docs/api-contracts/self.md） */
 interface ApiEnvelope<T> {
-  success: boolean;
-  code: string;
-  message: string;
+  ok: boolean;
   data: T;
 }
 
@@ -75,14 +73,6 @@ export interface SiteSearchStatus {
   elapsed_ms: number | null;
 }
 
-/** 跨站聚合搜索结果（GET /search/torrents JSON 一次返回）。 */
-export interface SearchResponse {
-  keyword: string;
-  total: number;
-  items: TorrentHit[];
-  sites: SiteSearchStatus[];
-}
-
 // ---------------------------------------------------------------------------
 // 搜索历史与预设
 // ---------------------------------------------------------------------------
@@ -95,12 +85,8 @@ export interface SearchHistoryItem {
   created_at: string;
 }
 
-/** 获取最近的搜索历史。limit 保留签名兼容；新后端一次返回全部。 */
-export async function listSearchHistory(
-  limit = 10,
-  init?: RequestInit,
-): Promise<SearchHistoryItem[]> {
-  void limit;
+/** 获取最近的搜索历史（后端一次返回全部，按关键词组聚合）。 */
+export async function listSearchHistory(init?: RequestInit): Promise<SearchHistoryItem[]> {
   const view = await unwrap(
     request<ApiEnvelope<{ items: SearchHistoryItem[] }>>("/search/history", init),
   );
@@ -289,12 +275,12 @@ export async function searchTitles(
 
 /** 媒体库内条目命中的一行（ledger 行 + 所属媒体）。 */
 export interface LibraryHit {
+  file_id: string;
   media_item_id: string;
   title: string;
   kind: MediaType;
   path: string;
-  season: number | null;
-  episode: number | null;
+  units: Array<{ season: number; episode: number }>;
 }
 
 /** 搜索本地全部可见媒体库中的已入库条目。 */
@@ -314,22 +300,6 @@ export interface SearchParams {
   page?: number;
   /** 保存一次完整搜索的历史和结果快照；重试/分页请求应省略。 */
   saveHistory?: boolean;
-}
-
-/**
- * 跨「已启用」的站点（可由 scope.siteIds 圈定子集）并发搜索种子资源。
- * 单站失败不影响整体，其原因见 `sites[].error`。
- */
-export function searchTorrents(
-  { keyword, scope, page, saveHistory }: SearchParams,
-  init?: RequestInit,
-): Promise<SearchResponse> {
-  return unwrap(
-    request<ApiEnvelope<SearchResponse>>(
-      `/search/torrents?${searchParamsOf({ keyword, scope, page, saveHistory })}`,
-      init,
-    ),
-  );
 }
 
 function searchParamsOf({ keyword, scope, page, saveHistory }: SearchParams): URLSearchParams {

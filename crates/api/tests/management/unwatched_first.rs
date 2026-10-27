@@ -32,9 +32,13 @@ fn app(tmp: &tempfile::TempDir) -> axum::Router {
 async fn seed(tmp: &tempfile::TempDir, app: &axum::Router) -> (String, Vec<String>) {
     let movies = tmp.path().join("data/library/movies");
     std::fs::create_dir_all(&movies).unwrap();
-    for (index, name) in ["Arrival.2016.2160p.mkv", "Dune.2021.2160p.mkv", "Matrix.1999.2160p.mkv"]
-        .iter()
-        .enumerate()
+    for (index, name) in [
+        "Arrival.2016.2160p.mkv",
+        "Dune.2021.2160p.mkv",
+        "Matrix.1999.2160p.mkv",
+    ]
+    .iter()
+    .enumerate()
     {
         std::fs::write(movies.join(name), format!("m{index}")).unwrap();
     }
@@ -60,7 +64,8 @@ async fn seed(tmp: &tempfile::TempDir, app: &axum::Router) -> (String, Vec<Strin
         .unwrap()
         .to_string();
     scan_and_wait(app, &library_id).await;
-    let ids: Vec<String> = items(app, &library_id, "sort=title").await
+    let ids: Vec<String> = items(app, &library_id, "sort=title")
+        .await
         .iter()
         .map(|item| item["media_item_id"].as_str().unwrap().to_string())
         .collect();
@@ -112,13 +117,16 @@ async fn mark_played(app: &axum::Router, media_item_id: &str) {
 
 /// 标成"在看"：有进度、没看完。
 async fn mark_watching(app: &axum::Router, media_item_id: &str) {
+    // `playback_sessions` 绑定签发的 `play_session_id`：progress 之前先签发。
+    let session = super::playback::open_play_session(app, media_item_id, "web-1").await;
     let response = post(
         app,
         "/api/v1/playback/progress",
-        json!({
+        json!({ "event_sequence": crate::common::next_playback_sequence(),
             "media_item_id": media_item_id,
-            "event": "progress",
+            "event": "start",
             "device_id": "web-1",
+            "play_session_id": session,
             "position_ms": 120_000,
         }),
     )

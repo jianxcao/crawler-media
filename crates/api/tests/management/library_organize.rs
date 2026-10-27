@@ -50,7 +50,7 @@ async fn seed_movie_lib(app: &axum::Router, tmp: &tempfile::TempDir) -> (String,
         .as_str()
         .unwrap()
         .to_string();
-    scan_and_wait(&app, &movie_id).await;
+    scan_and_wait(app, &movie_id).await;
     let ledger = json_body(
         app.clone()
             .oneshot(request(
@@ -90,7 +90,7 @@ async fn organize_preview_and_apply_renames_files() {
     )
     .await;
     assert!(
-        preview["data"]["renames"].as_array().unwrap().len() >= 1,
+        !preview["data"]["renames"].as_array().unwrap().is_empty(),
         "{preview}"
     );
     let from = preview["data"]["renames"][0]["from"].as_str().unwrap();

@@ -1,8 +1,9 @@
-//! Request-local Library ownership snapshot: one config + roots read, then a
-//! pure longest-root-prefix decision per path (no IO, no stat, no canonicalize).
+//! Request-local Library ownership snapshot plus the one rule that classifies a
+//! NEW file at admission time: a pure longest-root-prefix decision per path (no
+//! IO, no stat, no canonicalize).
 //!
-//! This module owns the single implementation of the ownership rule used by
-//! both [`LibraryOwnership::owner`] and `Store::library_for_path`.
+//! A published file's owner is never decided here: it is the recorded
+//! `library_files.library_id`, which survives a root rename or removal.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -59,23 +60,24 @@ fn match_owner<'a>(libraries: &'a [Library], path: &Path, kind: MediaKind) -> Ow
 }
 
 /// The kind's default library, in the snapshot's `(sort_order, name)` order.
-fn default_for<'a>(libraries: &'a [Library], kind: MediaKind) -> Option<&'a Library> {
+fn default_for(libraries: &[Library], kind: MediaKind) -> Option<&Library> {
     libraries
         .iter()
         .find(|library| library.kind == kind && library.is_default)
 }
 
-/// Historical ownership with the default fallback: only a complete miss falls
-/// back to the kind's default; ambiguity stays unresolved.
-pub(crate) fn owner_with_default<'a>(
+/// Classify a NEW file (a scan result, a transfer destination, a claim) into the
+/// Library that owns its path. Nothing matched means "no Library": there is
+/// deliberately no default-Library fallback, because a default would hand a file
+/// that no root covers the default Library's ACL. Ambiguity stays unresolved.
+pub fn classify_new_file<'a>(
     libraries: &'a [Library],
     path: &Path,
     kind: MediaKind,
 ) -> Option<&'a Library> {
     match match_owner(libraries, path, kind) {
         OwnerMatch::Unique(library) => Some(library),
-        OwnerMatch::Ambiguous => None,
-        OwnerMatch::Unmatched => default_for(libraries, kind),
+        OwnerMatch::Ambiguous | OwnerMatch::Unmatched => None,
     }
 }
 
@@ -101,12 +103,6 @@ impl LibraryOwnership {
 
     pub fn default_for(&self, kind: MediaKind) -> Option<&Library> {
         default_for(&self.libraries, kind)
-    }
-
-    /// Longest-root owner for `path`, falling back to the kind's default only
-    /// when nothing matched at all; ambiguity yields `None`.
-    pub fn owner(&self, path: &Path, kind: MediaKind) -> Option<&Library> {
-        owner_with_default(&self.libraries, path, kind)
     }
 
     /// Same as `Store::library_accepts_work`: an existing library with no

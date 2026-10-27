@@ -1,6 +1,6 @@
 # C5b：读路径端点性能 before/after 实测（release）
 
-> **历史结果，非当前重新测量。** 当前状态由 [总复核](<../audits/2026-10-13-database-api-review.md>) 管理。原≥30%延迟下降目标未全部达到：2000行gallery电影约22.0%、TV约24.5%。5次采样的p95接近样本最大值，不是可靠生产尾延迟估计。movie与TV的NFO fixture不对称，见§9；history只有100–10000行，未测20万历史或DB8并发影响。
+> **历史结果，非当前重新测量。** 本报告与 [2026-10-13 总复核](<../audits/2026-10-13-database-api-review.md>)均是历史证据，不是当前状态表。原≥30%延迟下降目标未全部达到：2000行gallery电影约22.0%、TV约24.5%。5次采样的p95接近样本最大值，不是可靠生产尾延迟估计。movie与TV的NFO fixture不对称，见§9；history只有100–10000行，未测20万历史或DB8并发影响。正文现在时只描述当时实现，旧命令不应直接用于覆盖历史报告。
 
 目的：用 **release profile 的实测数据**验证本轮读路径优化（B1/B2 浏览快照、B4 facets、
 B5b 历史分页、B6 统计 SQL 聚合、DB5/DB6 索引）是否真的有效，而不是只看代码形状。
@@ -15,6 +15,8 @@ B5b 历史分页、B6 统计 SQL 聚合、DB5/DB6 索引）是否真的有效，
 | profile | 默认 `release`（Cargo.toml 无 `[profile.release]` 覆盖） |
 | 运行方式 | `--test-threads=1`，单进程串行；两个 worktree 分开跑，**不并发** |
 | 共享情况 | 同一台开发机，测量期间可能有其它 agent 的编译负载；无 CPU 绑核/turbo 控制 |
+
+记录来源：主 before/after 报告最初随 `1dc081e` 保存，§9 随 `df48937` 追加；before 固定为 `16867bf`。这标识文档/实现来源，不补造当时 after 运行工作树的干净 commit SHA；正文没有单独固定该 SHA。复现实验需先固定两端实际 revision 与 fixture，不能把今天主工作树的结果冒充原 after。
 
 ## 2. 数据集（fixture）
 
@@ -138,9 +140,9 @@ PERF_SIZES=2000,10000 cargo test --release -p api --test endpoint_perf -- --igno
 - **gallery**：1.26–1.43×，字节一致。
 - **search（DB6 media 身份索引）**：1.27–1.35×，字节一致。
 - **history（B5b SQL 可见范围分页）**：1.66–1.87×，字节一致。
-- **stats（B6 单次 SQL 聚合）**：1.34–1.41×，字节一致。
+- **stats（B6 SQL 聚合）**：1.34–1.41×，字节一致；不是一条全能 SELECT（历史实现每窗多条聚合，见总复核 §2）。
 - **jobs（DB5 索引）**：1.27–2.03×，但绝对值只有 0.06–0.12 ms —— **该行由噪声主导**
-  （第二轮同端点波动可达 ~29%），只能说明"没有退化"，不足以宣称倍数。
+  （第二轮同端点波动可达 ~29%），在该微型 fixture 下未观察到稳定退化；不足以证明无退化或宣称倍数。
 - **facets：不是同负载对比，且 movie 变慢。**
   - 基线 facets 只返回 `resolutions`，`genres` 恒为空 → 响应 **117–119 字节**；
     after 返回十维 facets → **444–512 字节**（B4 修正了正确性/覆盖度）。
@@ -165,11 +167,10 @@ PERF_SIZES=2000,10000 cargo test --release -p api --test endpoint_perf -- --igno
 
 1. 这是**同一台机器、同一份合成数据、release profile** 的对比，**不是生产 SLA**，也不是容量规划依据。
 2. 播放日志只有 **100–10000 行**；B5b/B6 要解决的"一次请求加载 20 万行"病态**没有在本数据集里复现**。
-   因此 history/stats 的 1.3–1.9× 是**该规模下**的实测值，真实 20 万行场景的收益预期更大，但**未经本次测量**。
+   因此 history/stats 的 1.3–1.9× 是**该规模下**的实测值；真实 20 万行场景收益未在本次测量，不能从这些数字推断。
 3. 每端点仅 **5 次采样**；机器为共享开发机（可能有其它 agent 编译负载），未做 CPU 绑核或频率控制。
 4. 延迟是"发请求到读完 body"的端到端值，包含 JSON 序列化与响应体传输，不只是 handler 内部时间。
-5. baseline 是 `16867bf` 的只读 worktree，使用**同一个测试文件**与独立 `CARGO_TARGET_DIR`；
-   除该提交本身包含的行为差异外，没有其它变量。
+5. baseline 是 `16867bf` 的只读 worktree，使用**同一个测试文件**与独立 `CARGO_TARGET_DIR`；这些是已控制的条件，不代表共享机负载、缓存/文件系统状态或未固定的 after 工作树等其余变量完全相同。
 6. `facets` 行**不是同 DTO 对比**（字节数已标注），不能与其它行一样解读。
 7. 本任务**没有修改任何 `src/` 代码**；所有数字都是既有代码的测量结果。
 
@@ -254,4 +255,4 @@ tv     10000  items   200  7796  142.833ms   (facets 138.602ms)
 
 **movie/tv 的 3.4× 差距修完仍在**——因为它不在 facets 计数里（9.2）。要消除它需要让 tv fixture 也命中 NFO（或让浏览路径缓存/跳过 NFO 解析），属于 fixture 与 `metadata::load` 的 IO 问题，不在本任务范围。
 
-单趟累积的价值不在这个 fixture（候选太少，两种实现都只有几毫秒），而在真实库：候选值数随 genres/countries/languages/ratings 增长时，旧实现是 `候选数 × Media` 次全量匹配，新实现只随维数与 Media 线性增长。
+复杂度分析：候选值数随 genres/countries/languages/ratings 增长时，旧实现是 `候选数 × Media` 次全量匹配，新实现随维数与 Media 线性增长；这是算法层面的预期，不是本文已测得的真实库收益。本 fixture 候选太少，不能代替高基数端到端测量。

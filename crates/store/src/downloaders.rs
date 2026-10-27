@@ -42,36 +42,6 @@ impl std::fmt::Debug for DownloaderRow {
     }
 }
 
-#[cfg(test)]
-mod debug_tests {
-    use super::DownloaderRow;
-    use domain::DownloaderId;
-
-    #[test]
-    fn debug_never_prints_the_password() {
-        let row = DownloaderRow {
-            id: DownloaderId::new(),
-            name: "qbit".into(),
-            kind: "qbittorrent".into(),
-            url: "http://127.0.0.1:8080".into(),
-            username: Some("admin".into()),
-            password: Some("downloader-password-secret".into()),
-            category: Some("movies".into()),
-            path_maps: Vec::new(),
-            is_default: true,
-            enabled: true,
-        };
-        let rendered = format!("{row:?}");
-        assert!(
-            !rendered.contains("downloader-password-secret"),
-            "Debug 不得输出 password: {rendered}"
-        );
-        assert!(rendered.contains("<redacted>"), "{rendered}");
-        assert!(rendered.contains("127.0.0.1:8080"), "{rendered}");
-        assert!(rendered.contains("qbit"), "{rendered}");
-    }
-}
-
 const COLS: &str =
     "id, name, kind, url, username, password, category, path_maps, is_default, enabled";
 
@@ -230,5 +200,35 @@ impl Store {
             params![id.to_string()],
         )?;
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use super::DownloaderRow;
+    use domain::DownloaderId;
+
+    #[test]
+    fn debug_never_prints_the_password() {
+        let row = DownloaderRow {
+            id: DownloaderId::new(),
+            name: "qbit".into(),
+            kind: "qbittorrent".into(),
+            url: "http://127.0.0.1:8080".into(),
+            username: Some("admin".into()),
+            password: Some("downloader-password-secret".into()),
+            category: Some("movies".into()),
+            path_maps: Vec::new(),
+            is_default: true,
+            enabled: true,
+        };
+        let rendered = format!("{row:?}");
+        assert!(
+            !rendered.contains("downloader-password-secret"),
+            "Debug 不得输出 password: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert!(rendered.contains("127.0.0.1:8080"), "{rendered}");
+        assert!(rendered.contains("qbit"), "{rendered}");
     }
 }

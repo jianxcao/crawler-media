@@ -5,13 +5,14 @@ use std::sync::Arc;
 
 use api::{Store, router};
 use axum::http::StatusCode;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::*;
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 fn app(tmp: &tempfile::TempDir) -> axum::Router {
     let fetcher = Arc::new(Fixtures {
@@ -22,8 +23,96 @@ fn app(tmp: &tempfile::TempDir) -> axum::Router {
     router(state(tmp.path(), fetcher, downloader))
 }
 
-#[tokio::test]
-async fn collections_crud_and_items() {
+/// 轮询媒体库操作到终态。
+///
+/// 带 `root_paths`/`display_locale` 的 PATCH 按异步契约受理（`202` + 操作视图，
+/// 见 `crates/api/src/http/library_config.rs:166-214`），换根本身要重写台账与 NFO
+/// 归属，不能同步完成；断言必须在操作终态之后做。
+#[allow(dead_code)]
+async fn poll_library_operation(app: &axum::Router, library_id: &str, operation_id: &str) -> Value {
+    let uri = format!("/api/v1/libraries/{library_id}/operations/{operation_id}");
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let body = json_body(
+                app.clone()
+                    .oneshot(request("GET", &uri, Some("management-secret"), Value::Null))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            let state = body["data"]["state"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            if state == "succeeded" {
+                break body;
+            }
+            assert_ne!(state, "failed", "媒体库操作失败: {body}");
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("媒体库操作必须到达终态")
+}
+
+/// 默认 movie 媒体库的 id。
+async fn movie_library_id(app: &axum::Router) -> String {
+    let libs = json_body(
+        app.clone()
+            .oneshot(request(
+                "GET",
+                "/api/v1/libraries",
+                Some("management-secret"),
+                Value::Null,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    libs["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["kind"] == "movie")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// 带 `root_paths` 的 PATCH：断言 `202` + `operation_id`，轮询到终态后返回完成的操作视图。
+#[allow(dead_code)]
+async fn patch_roots_and_wait(app: &axum::Router, library_id: &str, roots: Vec<String>) -> Value {
+    let patch = app
+        .clone()
+        .oneshot(request(
+            "PATCH",
+            &format!("/api/v1/libraries/{library_id}"),
+            Some("management-secret"),
+            json!({ "root_paths": roots }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        patch.status(),
+        StatusCode::ACCEPTED,
+        "换根要重写台账与 NFO 归属，按异步操作受理"
+    );
+    let accepted = json_body(patch).await;
+    let operation_id = accepted["data"]["operation_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("202 必须带 operation_id: {accepted}"))
+        .to_string();
+    let finished = poll_library_operation(app, library_id, &operation_id).await;
+    assert_eq!(finished["data"]["state"], "succeeded");
+    finished
+}
+
+/// 建一个 movie media + 一个台账文件的最小合集夹具。
+///
+/// 返回的 `TempDir` 必须随返回值存活：`app` 与台账文件路径都指向它。`store` 句柄在
+/// 准备阶段结束即关闭，后续断言全部走 HTTP 面。
+fn seeded_collections_fixture() -> (tempfile::TempDir, axum::Router, Media) {
     let tmp = tempfile::tempdir().unwrap();
     let app = app(&tmp);
     // 建一个 media + ledger 供加入。
@@ -42,9 +131,10 @@ async fn collections_crud_and_items() {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id: media.id,
             path: tmp
                 .path()
@@ -59,17 +149,28 @@ async fn collections_crud_and_items() {
             quality_source: QualitySource::Release,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
-    // store 层直测：collections 表是否已迁移。
-    let probe = Store::open(tmp.path().join("data")).unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    drop(store);
+    (tmp, app, media)
+}
+
+/// store 层直测：collections 表是否已迁移（同一 data 目录上另开短命句柄）。
+fn assert_collections_store_layer_available(data_dir: &std::path::Path) {
+    let probe = Store::open(data_dir).unwrap();
     let probe_user = domain::UserId::new();
     let probe_id = probe.create_collection(probe_user, "直测").unwrap();
     let probe_list = probe.list_collections(probe_user).unwrap();
     assert_eq!(probe_list.len(), 1, "store 层集合可用");
     let _ = probe.delete_collection(&probe_id);
-    drop(probe);
-    drop(store);
+}
+
+#[tokio::test]
+async fn collections_crud_and_items() {
+    let (tmp, app, media) = seeded_collections_fixture();
+    assert_collections_store_layer_available(&tmp.path().join("data"));
 
     let created = json_body(
         app.clone()
@@ -153,7 +254,7 @@ async fn collections_crud_and_items() {
 }
 
 #[tokio::test]
-async fn path_reconciliation_and_root_consolidation() {
+async fn path_reconciliation_reports_and_applies_ledger_moves() {
     let tmp = tempfile::tempdir().unwrap();
     let app = app(&tmp);
     let movie = tmp.path().join("data/library/movies");
@@ -178,9 +279,10 @@ async fn path_reconciliation_and_root_consolidation() {
     };
     store.insert_media(&media).unwrap();
     let original = movie.join("Matrix.1999.mkv");
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id: media.id,
             path: original.display().to_string(),
             season: None,
@@ -191,31 +293,13 @@ async fn path_reconciliation_and_root_consolidation() {
             quality_source: QualitySource::Release,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     drop(store);
 
-    let libs = json_body(
-        app.clone()
-            .oneshot(request(
-                "GET",
-                "/api/v1/libraries",
-                Some("management-secret"),
-                Value::Null,
-            ))
-            .await
-            .unwrap(),
-    )
-    .await;
-    let movie_id = libs["data"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|l| l["kind"] == "movie")
-        .unwrap()["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let movie_id = movie_library_id(&app).await;
 
     let preview = json_body(
         app.clone()
@@ -261,10 +345,17 @@ async fn path_reconciliation_and_root_consolidation() {
     )
     .await;
     assert_eq!(ledger["data"][0]["path"], moved.display().to_string());
+}
 
-    // 根目录归并：给库加一个指向同一物理目录的根。
+#[tokio::test]
+async fn duplicate_physical_root_is_rejected_up_front() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(&tmp);
+    let movie = tmp.path().join("data/library/movies");
+    std::fs::create_dir_all(movie.join("same")).unwrap();
+    let movie_id = movie_library_id(&app).await;
+    // `movies/same/..` is the same directory: the canonical root key collides.
     let dup_root = movie.join("same").join("..");
-    std::fs::create_dir_all(&dup_root).unwrap();
     let patch = app
         .clone()
         .oneshot(request(
@@ -275,7 +366,7 @@ async fn path_reconciliation_and_root_consolidation() {
         ))
         .await
         .unwrap();
-    assert_eq!(patch.status(), StatusCode::OK);
+    assert!(patch.status().is_client_error(), "{}", patch.status());
     let dup = json_body(
         app.clone()
             .oneshot(request(
@@ -288,7 +379,7 @@ async fn path_reconciliation_and_root_consolidation() {
             .unwrap(),
     )
     .await;
-    assert_eq!(dup["data"]["duplicates"].as_array().unwrap().len(), 1);
+    assert_eq!(dup["data"]["duplicates"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]

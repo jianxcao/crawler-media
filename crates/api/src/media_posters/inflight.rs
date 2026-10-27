@@ -110,18 +110,22 @@ impl Drop for PosterWorkerGuard {
                 elapsed_ms,
                 "海报 worker 异常终止未发布终态，发布 Io 错误并移除 inflight 条目"
             );
-            self.entry.publish(Err(PosterError::Io("poster worker terminated unexpectedly".into())));
+            self.entry.publish(Err(PosterError::Io(
+                "poster worker terminated unexpectedly".into(),
+            )));
             self.completed = true;
         }
 
         // Identity-checked retirement: older worker can never remove newer generation's entry
         // Clean up from map only if the weak entry points to our entry or is dead
         let mut map = self.in_flight.lock();
-        if let Some(weak) = map.get(&self.media_id) {
-            if weak.upgrade().is_none_or(|current| Arc::ptr_eq(&current, &self.entry)) {
+        if let Some(weak) = map.get(&self.media_id)
+            && weak
+                .upgrade()
+                .is_none_or(|current| Arc::ptr_eq(&current, &self.entry))
+            {
                 map.remove(&self.media_id);
             }
-        }
     }
 }
 

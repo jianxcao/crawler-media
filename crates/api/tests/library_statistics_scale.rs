@@ -1,66 +1,72 @@
-//! A5 Library 统计：一次归属聚合与可见刷新状态（API-03）。
+//! A5 Library 统计：库表聚合与可见刷新状态（API-03）。
 //!
-//! 断言的是**工作量**与**统计值**本身，不只比响应大小：全局账本读取不随库数重复、
-//! 热统计不逐文件 `stat`、体积只来自投影 facts（`.strm` 指针记 0）、刷新状态取自
-//! 投影 head。
+//! 统计由 [`store::Store::library_roster_stats`] 一次聚合 `library_items` /
+//! `library_files` 得出，不再依赖已删除的浏览投影：
 //!
-//! 注入的 [`FakeSizedFiles`] 把每个媒体文件的元数据固定成一个 1 MiB 填充文件：旧
-//! 实现直接 `std::fs::metadata(path)`（这些媒体文件在磁盘上并不存在 → 0 字节），
-//! 所以「体积必须来自投影 facts」在旧实现上是红的；同时统计它的调用次数，用来
-//! 证明热请求不再逐文件 `stat`。
+//! - 全局账本读取不随库数重复；
+//! - 请求从不逐文件 `stat`（体积来自发布时写入的 `library_files.size_bytes`）；
+//! - 体积只来自已发布文件事实（`.strm` 指针记 0）；
+//! - 计数按 `library_id` 归属，改根不会复用或串用别的库的行。
+//!
+//! 注入的 [`CountingFiles`] 统计浏览文件 seam 的调用次数：统计走库表，任何一次
+//! `/libraries` 请求都不得触发媒体文件 IO。
 
 #[path = "support/mod.rs"]
 mod support;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use api::browse_file_read::BrowseFileRead;
-use api::browse_projection::ProjectionService;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use api::file_stat_read::FileStatRead;
+use domain::{
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, Media, MediaId,
+    MediaKind, QualitySource, UnitKey,
+};
 use serde_json::Value;
+use store::library_write::{FilePublication as StorePublication, WriteScope};
 use support::library_presence::PresenceFixture;
 
 /// 注入 seam 里每个媒体文件的固定体积。
 const FAKE_SIZE: u64 = 1024 * 1024;
 
-/// 固定假大小 + 调用计数的文件读取 seam（详见模块注释）。
-struct FakeSizedFiles {
-    filler: PathBuf,
-    metadata_calls: AtomicUsize,
+/// 计数文件读取 seam：统计不得触发任何媒体文件 IO。
+#[derive(Default)]
+struct CountingFiles {
+    metadata: AtomicUsize,
+    read_nfo: AtomicUsize,
+    is_file: AtomicUsize,
 }
 
-impl FakeSizedFiles {
-    fn new(filler: PathBuf) -> Self {
-        Self {
-            filler,
-            metadata_calls: AtomicUsize::new(0),
-        }
-    }
-
-    fn calls(&self) -> usize {
-        self.metadata_calls.load(Ordering::SeqCst)
+impl CountingFiles {
+    fn total(&self) -> usize {
+        self.metadata.load(Ordering::SeqCst)
+            + self.read_nfo.load(Ordering::SeqCst)
+            + self.is_file.load(Ordering::SeqCst)
     }
 
     fn reset(&self) {
-        self.metadata_calls.store(0, Ordering::SeqCst);
+        self.metadata.store(0, Ordering::SeqCst);
+        self.read_nfo.store(0, Ordering::SeqCst);
+        self.is_file.store(0, Ordering::SeqCst);
     }
 }
 
-impl BrowseFileRead for FakeSizedFiles {
-    fn read_nfo(&self, _path: &Path) -> Option<library::NfoMeta> {
-        None
+impl FileStatRead for CountingFiles {
+    fn read_nfo(&self, path: &Path) -> Option<library::NfoMeta> {
+        self.read_nfo.fetch_add(1, Ordering::SeqCst);
+        library::read_nfo(path)
     }
 
-    fn metadata(&self, _path: &Path) -> std::io::Result<std::fs::Metadata> {
-        self.metadata_calls.fetch_add(1, Ordering::SeqCst);
-        std::fs::metadata(&self.filler)
+    fn metadata(&self, path: &Path) -> std::io::Result<std::fs::Metadata> {
+        self.metadata.fetch_add(1, Ordering::SeqCst);
+        std::fs::metadata(path)
     }
 
-    fn is_file(&self, _path: &Path) -> bool {
-        false
+    fn is_file(&self, path: &Path) -> bool {
+        self.is_file.fetch_add(1, Ordering::SeqCst);
+        path.is_file()
     }
 }
 
@@ -76,29 +82,22 @@ struct Expected {
 /// 一次 `/libraries` 请求观察到的文件/DB 工作量。
 #[derive(Clone, Copy, Debug)]
 struct Work {
-    /// 无 WHERE 的根账本扫描步数（`list_ledger`）。
+    /// 无 WHERE 的根账本扫描步数（`list_file_coverage`）。
     ledger_scans: usize,
-    /// 媒体文件 `stat` 次数（注入 seam）。
+    /// 媒体文件 IO 次数（注入 seam）。
     media_stats: usize,
 }
 
 struct StatsFixture {
     fixture: PresenceFixture,
-    files: Arc<FakeSizedFiles>,
+    files: Arc<CountingFiles>,
     expected: HashMap<String, Expected>,
 }
 
-/// 建库：注入假大小 seam 与启用投影服务，但只种一个空库（无台账）。
 fn empty_fixture() -> StatsFixture {
     let fixture = PresenceFixture::new();
-    let filler = fixture.dir.path().join("filler.bin");
-    std::fs::write(&filler, vec![0u8; FAKE_SIZE as usize]).unwrap();
-    let files = Arc::new(FakeSizedFiles::new(filler));
-    let state = fixture
-        .state
-        .clone()
-        .with_browse_file_read(files.clone())
-        .with_projection_service(Arc::new(ProjectionService::new()));
+    let files = Arc::new(CountingFiles::default());
+    let state = fixture.state.clone().with_file_stat_read(files.clone());
     StatsFixture {
         fixture: PresenceFixture { state, ..fixture },
         files,
@@ -106,10 +105,111 @@ fn empty_fixture() -> StatsFixture {
     }
 }
 
+/// 库的唯一根 id（fixture 的库只有一个根）。
+fn root_id_of(store: &store::Store, library_id: &str) -> String {
+    store
+        .list_library_roots()
+        .unwrap()
+        .into_iter()
+        .find(|root| root.library_id.as_str() == library_id)
+        .map(|root| root.id)
+        .expect("library must own a root")
+}
+
+/// 发布一个文件事实：体积显式写入 `library_files`，统计只读库表、不 stat 文件。
+#[allow(clippy::too_many_arguments)]
+fn publish_file(
+    store: &store::Store,
+    library: &store::Library,
+    root_id: &str,
+    media_id: MediaId,
+    file_id: LedgerId,
+    version: FileVersion,
+    path: &Path,
+    size_bytes: u64,
+) {
+    let file = LibraryFile {
+        file_id,
+        library_id: library.id.parse().unwrap(),
+        root_id: root_id.to_string(),
+        media_id,
+        kind: library.kind,
+        path: path.to_path_buf(),
+        version,
+        presence: FilePresence::Present,
+        publication: FilePublication::Published,
+        size_bytes: Some(size_bytes),
+        stat_known: true,
+        created_ns: None,
+        modified_ns: None,
+        source_digest: None,
+        source_path: None,
+        transfer_mode: None,
+        resolution: Some("1080p".into()),
+        codec: Some("H264".into()),
+        hdr: None,
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        filter_score: None,
+        release_quality: None,
+        duration_ms: None,
+        tracks_version: 0,
+        poster_path: None,
+        backdrop_path: None,
+        still_path: None,
+    };
+    let scope = WriteScope {
+        library_id: library.id.parse().unwrap(),
+        config_revision: 0,
+    };
+    store
+        .publish_files(
+            &scope,
+            &[StorePublication {
+                file: &file,
+                units: &[UnitKey::WHOLE],
+                expected_version: None,
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            1000,
+        )
+        .unwrap();
+}
+
+fn new_file_version() -> FileVersion {
+    FileVersion {
+        revision: 1,
+        source_version: format!("seed-{}", LedgerId::new()),
+    }
+}
+
+fn insert_media(store: &store::Store, kind: MediaKind, title: &str) -> MediaId {
+    let media_id = MediaId::new();
+    store
+        .insert_media(&Media {
+            id: media_id,
+            kind,
+            title: title.to_string(),
+            original_title: None,
+            aliases: Vec::new(),
+            year: Some(2000),
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+    media_id
+}
+
 /// 在 `root` 下种 `media_count` 部 Movie、每部 `files_per_media` 个文件；第
 /// `strm_every` 个（1-based）写成 `.strm` 指针（`0` = 全部写成真实文件）。
+#[allow(clippy::too_many_arguments)]
 fn seed_rows(
     store: &store::Store,
+    library: &store::Library,
     root: &Path,
     tag: &str,
     kind: MediaKind,
@@ -117,6 +217,7 @@ fn seed_rows(
     files_per_media: usize,
     strm_every: usize,
 ) -> Expected {
+    let root_id = root_id_of(store, &library.id);
     let mut expected = Expected {
         item_count: media_count as u64,
         file_count: 0,
@@ -124,51 +225,33 @@ fn seed_rows(
         strm_file_count: 0,
     };
     for index in 0..media_count {
-        let media_id = MediaId::new();
         let title = format!("{tag}-{index:05}");
-        store
-            .insert_media(&Media {
-                id: media_id,
-                kind,
-                title: title.clone(),
-                original_title: None,
-                aliases: Vec::new(),
-                year: Some(2000),
-                tmdb_id: None,
-                douban_id: None,
-                tvdb_id: None,
-                bangumi_id: None,
-                anilist_id: None,
-            })
-            .unwrap();
+        let media_id = insert_media(store, kind, &title);
         for file in 0..files_per_media {
             let ordinal = index * files_per_media + file + 1;
-            let strm = strm_every > 0 && ordinal % strm_every == 0;
+            let strm = strm_every > 0 && ordinal.is_multiple_of(strm_every);
             let name = if strm {
                 format!("{title}.{file}.strm")
             } else {
                 format!("{title}.{file}.mkv")
             };
-            store
-                .insert_ledger(&LedgerRow {
-                    id: LedgerId::new(),
-                    media_id,
-                    path: root.join(name).display().to_string(),
-                    season: None,
-                    episode: None,
-                    resolution: Some("1080p".into()),
-                    codec: Some("H264".into()),
-                    hdr: None,
-                    quality_source: QualitySource::Release,
-                    confidence: Confidence::High,
-                    filter_score: None,
-                })
-                .unwrap();
+            // `.strm` 指针文件只有几十字节 URL 文本，物理体积记 0。
+            let size_bytes = if strm { 0 } else { FAKE_SIZE };
+            publish_file(
+                store,
+                library,
+                &root_id,
+                media_id,
+                LedgerId::new(),
+                new_file_version(),
+                &root.join(name),
+                size_bytes,
+            );
             expected.file_count += 1;
             if strm {
                 expected.strm_file_count += 1;
             } else {
-                expected.total_size_bytes += FAKE_SIZE;
+                expected.total_size_bytes += size_bytes;
             }
         }
     }
@@ -188,22 +271,40 @@ fn new_library(
     std::fs::create_dir_all(&root).unwrap();
     let root_str = root.display().to_string();
     let library = store
-        .create_library(kind, name, &[root_str.as_str()], access_mode, admin_visible, &[])
+        .create_library(
+            kind,
+            name,
+            &[root_str.as_str()],
+            access_mode,
+            admin_visible,
+            &[],
+        )
         .unwrap();
     (library.id, root)
 }
 
+fn library_of(store: &store::Store, id: &str) -> store::Library {
+    store.get_library(id).unwrap().expect("library must exist")
+}
+
 /// `libraries` 个 Movie 库，每库 `media_per_library` 部作品 × `files_per_media` 个文件。
-fn seed(libraries: usize, media_per_library: usize, files_per_media: usize, strm_every: usize) -> StatsFixture {
+fn seed(
+    libraries: usize,
+    media_per_library: usize,
+    files_per_media: usize,
+    strm_every: usize,
+) -> StatsFixture {
     let mut seeded = empty_fixture();
     let mut expected = HashMap::new();
     {
         let store_arc = seeded.fixture.state.store();
         let guard = store_arc.lock();
+        let primary = library_of(&guard, &seeded.fixture.library_id);
         expected.insert(
-            seeded.fixture.library_id.clone(),
+            primary.id.clone(),
             seed_rows(
                 &guard,
+                &primary,
                 &seeded.fixture.root,
                 "A",
                 MediaKind::Movie,
@@ -221,10 +322,12 @@ fn seed(libraries: usize, media_per_library: usize, files_per_media: usize, strm
                 "everyone",
                 true,
             );
+            let library = library_of(&guard, &id);
             expected.insert(
                 id,
                 seed_rows(
                     &guard,
+                    &library,
                     &root,
                     &format!("B{index}"),
                     MediaKind::Movie,
@@ -256,7 +359,7 @@ impl StatsFixture {
         let body = self.list().await;
         let work = Work {
             ledger_scans: self.fixture.state.store().lock().root_ledger_scans(),
-            media_stats: self.files.calls(),
+            media_stats: self.files.total(),
         };
         eprintln!(
             "work: ledger_scans={} media_stats={}",
@@ -278,8 +381,16 @@ impl StatsFixture {
     fn assert_stats(&self, body: &Value) {
         for (id, expected) in &self.expected {
             let stats = Self::stats(body, id);
-            assert_eq!(stats["item_count"].as_u64(), Some(expected.item_count), "item_count {id}");
-            assert_eq!(stats["file_count"].as_u64(), Some(expected.file_count), "file_count {id}");
+            assert_eq!(
+                stats["item_count"].as_u64(),
+                Some(expected.item_count),
+                "item_count {id}"
+            );
+            assert_eq!(
+                stats["file_count"].as_u64(),
+                Some(expected.file_count),
+                "file_count {id}"
+            );
             assert_eq!(
                 stats["total_size_bytes"].as_u64(),
                 Some(expected.total_size_bytes),
@@ -290,20 +401,10 @@ impl StatsFixture {
                 Some(expected.strm_file_count),
                 "strm_file_count {id}"
             );
-            assert_eq!(stats["stale"], false, "投影已就绪且无变化时不得标 stale {id}");
-            assert!(
-                stats["refreshed_at_ms"].as_i64().is_some_and(|ms| ms > 0),
-                "refreshed_at_ms 必须是真实发布时间 {id}: {stats}"
-            );
+            // 统计每次请求都从库表现算，没有「过期投影」状态。
+            assert_eq!(stats["stale"], false, "库表聚合必须是最新值 {id}");
         }
     }
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
 }
 
 /// 一次聚合：同样的账本总量（600 行）下，20 个库不得比 1 个库多扫全局账本。
@@ -316,44 +417,31 @@ async fn library_list_does_not_repeat_global_reads_per_library() {
     one.assert_stats(&one_body);
     many.assert_stats(&many_body);
     assert_eq!(
-        many_work.ledger_scans,
-        one_work.ledger_scans,
+        many_work.ledger_scans, one_work.ledger_scans,
         "20 个库不得比 1 个库多扫全局账本：1 库 {} 步、20 库 {} 步",
-        one_work.ledger_scans,
-        many_work.ledger_scans
+        one_work.ledger_scans, many_work.ledger_scans
     );
+    assert_eq!(many_work.ledger_scans, 0, "统计不得扫描全局账本");
 }
 
-/// 热统计不逐文件 stat：冷请求一次有界构建后，第二次请求零媒体文件 stat，统计不变。
+/// 统计不逐文件 stat：冷请求（首次）与热请求都零媒体文件 IO，且统计不变。
 #[tokio::test]
 async fn hot_statistics_do_not_stat_each_media_file() {
     let seeded = seed(1, 10, 4, 4);
     let library = seeded.fixture.library_id.clone();
-    let before_ms = now_ms();
     let (cold_body, cold_work) = seeded.list_with_work().await;
-    let after_ms = now_ms();
-    assert!(
-        cold_work.media_stats >= 40,
-        "首次无 facts 必须走一次有界构建（逐文件 stat），实际 {}",
-        cold_work.media_stats
-    );
+    assert_eq!(cold_work.media_stats, 0, "冷统计不得 stat 每个媒体文件");
     let cold = StatsFixture::stats(&cold_body, &library);
     assert_eq!(cold["item_count"].as_u64(), Some(10));
     assert_eq!(cold["file_count"].as_u64(), Some(40));
     assert_eq!(
         cold["total_size_bytes"].as_u64(),
         Some(30 * FAKE_SIZE),
-        "体积必须来自投影 facts，且 .strm 指针记 0：{cold}"
+        "体积必须来自发布事实，且 .strm 指针记 0：{cold}"
     );
     assert_eq!(cold["strm_file_count"].as_u64(), Some(10));
-    assert_eq!(cold["stale"], false, "构建完成后不得标 stale：{cold}");
-    let refreshed = cold["refreshed_at_ms"].as_i64().expect("refreshed_at_ms");
-    assert!(
-        refreshed >= before_ms && refreshed <= after_ms,
-        "refreshed_at_ms 必须是本次发布的真实时间：{refreshed}"
-    );
 
-    // 两次请求之间文件没有任何变化：热请求必须零媒体文件 stat。
+    // 两次请求之间文件没有任何变化：热请求同样零媒体文件 IO。
     let (hot_body, hot_work) = seeded.list_with_work().await;
     assert_eq!(hot_work.media_stats, 0, "热统计不得 stat 每个媒体文件");
     let hot = StatsFixture::stats(&hot_body, &library);
@@ -390,47 +478,46 @@ async fn same_media_in_two_libraries_is_counted_per_library() {
             true,
         );
         second = id;
-        let media_id = MediaId::new();
-        guard
-            .insert_media(&Media {
-                id: media_id,
-                kind: MediaKind::Movie,
-                title: "Shared".into(),
-                original_title: None,
-                aliases: Vec::new(),
-                year: Some(1999),
-                tmdb_id: None,
-                douban_id: None,
-                tvdb_id: None,
-                bangumi_id: None,
-                anilist_id: None,
-            })
-            .unwrap();
-        for path in [seeded.fixture.root.join("Shared.mkv"), root.join("Shared.mkv")] {
-            guard
-                .insert_ledger(&LedgerRow {
-                    id: LedgerId::new(),
-                    media_id,
-                    path: path.display().to_string(),
-                    season: None,
-                    episode: None,
-                    resolution: Some("1080p".into()),
-                    codec: Some("H264".into()),
-                    hdr: None,
-                    quality_source: QualitySource::Release,
-                    confidence: Confidence::High,
-                    filter_score: None,
-                })
-                .unwrap();
+        let media_id = insert_media(&guard, MediaKind::Movie, "Shared");
+        let first_library = library_of(&guard, &first);
+        let second_library = library_of(&guard, &second);
+        let first_root = root_id_of(&guard, &first);
+        let second_root = root_id_of(&guard, &second);
+        for (library, root_id, root_path) in [
+            (&first_library, &first_root, &seeded.fixture.root),
+            (&second_library, &second_root, &root),
+        ] {
+            publish_file(
+                &guard,
+                library,
+                root_id,
+                media_id,
+                LedgerId::new(),
+                new_file_version(),
+                &root_path.join("Shared.mkv"),
+                FAKE_SIZE,
+            );
         }
     }
     let body = seeded.list().await;
     let first_stats = StatsFixture::stats(&body, &first);
     let second_stats = StatsFixture::stats(&body, &second);
     for (id, stats) in [(&first, &first_stats), (&second, &second_stats)] {
-        assert_eq!(stats["item_count"].as_u64(), Some(1), "每库各自计入同一部作品 {id}");
-        assert_eq!(stats["file_count"].as_u64(), Some(1), "每库文件数必须独立 {id}");
-        assert_eq!(stats["total_size_bytes"].as_u64(), Some(FAKE_SIZE), "每库体积必须独立 {id}");
+        assert_eq!(
+            stats["item_count"].as_u64(),
+            Some(1),
+            "每库各自计入同一部作品 {id}"
+        );
+        assert_eq!(
+            stats["file_count"].as_u64(),
+            Some(1),
+            "每库文件数必须独立 {id}"
+        );
+        assert_eq!(
+            stats["total_size_bytes"].as_u64(),
+            Some(FAKE_SIZE),
+            "每库体积必须独立 {id}"
+        );
     }
 }
 
@@ -445,7 +532,17 @@ async fn hidden_and_blocked_libraries_do_not_leak_into_visible_stats() {
     {
         let store_arc = seeded.fixture.state.store();
         let guard = store_arc.lock();
-        seed_rows(&guard, &seeded.fixture.root, "V", MediaKind::Movie, 2, 1, 0);
+        let primary = library_of(&guard, &visible);
+        seed_rows(
+            &guard,
+            &primary,
+            &seeded.fixture.root,
+            "V",
+            MediaKind::Movie,
+            2,
+            1,
+            0,
+        );
         let (id, root) = new_library(
             &guard,
             seeded.fixture.dir.path(),
@@ -455,7 +552,8 @@ async fn hidden_and_blocked_libraries_do_not_leak_into_visible_stats() {
             false,
         );
         hidden = id;
-        seed_rows(&guard, &root, "H", MediaKind::Movie, 3, 1, 0);
+        let library = library_of(&guard, &hidden);
+        seed_rows(&guard, &library, &root, "H", MediaKind::Movie, 3, 1, 0);
         let (id, root) = new_library(
             &guard,
             seeded.fixture.dir.path(),
@@ -465,12 +563,17 @@ async fn hidden_and_blocked_libraries_do_not_leak_into_visible_stats() {
             true,
         );
         blocked = id;
-        seed_rows(&guard, &root, "B", MediaKind::Movie, 4, 1, 0);
+        let library = library_of(&guard, &blocked);
+        seed_rows(&guard, &library, &root, "B", MediaKind::Movie, 4, 1, 0);
         guard.begin_library_removal(&blocked).unwrap();
     }
     let (status, body) = seeded
         .fixture
-        .request("GET", "/api/v1/libraries", Some(&seeded.fixture.member_token))
+        .request(
+            "GET",
+            "/api/v1/libraries",
+            Some(&seeded.fixture.member_token),
+        )
         .await;
     assert_eq!(status, 200, "{body}");
     let listed: Vec<&str> = body["data"]
@@ -479,8 +582,14 @@ async fn hidden_and_blocked_libraries_do_not_leak_into_visible_stats() {
         .iter()
         .filter_map(|library| library["id"].as_str())
         .collect();
-    assert!(!listed.contains(&hidden.as_str()), "非成员库不得出现在成员列表");
-    assert!(!listed.contains(&blocked.as_str()), "removal 中的库不得出现在成员列表");
+    assert!(
+        !listed.contains(&hidden.as_str()),
+        "非成员库不得出现在成员列表"
+    );
+    assert!(
+        !listed.contains(&blocked.as_str()),
+        "removal 中的库不得出现在成员列表"
+    );
     assert_eq!(
         StatsFixture::stats(&body["data"], &visible)["item_count"].as_u64(),
         Some(2),
@@ -502,69 +611,7 @@ async fn hidden_and_blocked_libraries_do_not_leak_into_visible_stats() {
     );
 }
 
-/// 嵌套根由最长根拥有；并列根（同一路径两个库）谁也不拥有，不串库。
-#[tokio::test]
-async fn nested_and_tied_roots_do_not_steal_each_other() {
-    let seeded = empty_fixture();
-    let parent = seeded.fixture.library_id.clone();
-    let child;
-    let tied_a;
-    let tied_b;
-    {
-        let store_arc = seeded.fixture.state.store();
-        let guard = store_arc.lock();
-        seed_rows(&guard, &seeded.fixture.root, "P", MediaKind::Movie, 1, 1, 0);
-        let nested = seeded.fixture.root.join("nested");
-        std::fs::create_dir_all(&nested).unwrap();
-        let nested_str = nested.display().to_string();
-        child = guard
-            .create_library(
-                MediaKind::Movie,
-                "Nested",
-                &[nested_str.as_str()],
-                "everyone",
-                true,
-                &[],
-            )
-            .unwrap()
-            .id;
-        seed_rows(&guard, &nested, "C", MediaKind::Movie, 1, 1, 0);
-        let tied = seeded.fixture.dir.path().join("tied");
-        std::fs::create_dir_all(&tied).unwrap();
-        let tied_str = tied.display().to_string();
-        let mut ids = Vec::new();
-        for name in ["Tied A", "Tied B"] {
-            ids.push(
-                guard
-                    .create_library(
-                        MediaKind::Movie,
-                        name,
-                        &[tied_str.as_str()],
-                        "everyone",
-                        true,
-                        &[],
-                    )
-                    .unwrap()
-                    .id,
-            );
-        }
-        tied_a = ids.remove(0);
-        tied_b = ids.remove(0);
-        seed_rows(&guard, &tied, "T", MediaKind::Movie, 2, 1, 0);
-    }
-    let body = seeded.list().await;
-    assert_eq!(StatsFixture::stats(&body, &parent)["file_count"].as_u64(), Some(1), "父库只拥有自己的行");
-    assert_eq!(StatsFixture::stats(&body, &child)["file_count"].as_u64(), Some(1), "嵌套子库拥有更深根下的行");
-    for id in [&tied_a, &tied_b] {
-        assert_eq!(
-            StatsFixture::stats(&body, id)["file_count"].as_u64(),
-            Some(0),
-            "并列根谁也不拥有 {id}"
-        );
-    }
-}
-
-/// 投影不可用时统计不得返回假 0：计数仍来自台账，只是标 stale。
+/// 首次请求（从未浏览过）也不得返回假 0：计数与体积都来自已发布库表。
 #[tokio::test]
 async fn cold_statistics_are_not_fake_zero() {
     let seeded = empty_fixture();
@@ -572,199 +619,52 @@ async fn cold_statistics_are_not_fake_zero() {
     {
         let store_arc = seeded.fixture.state.store();
         let guard = store_arc.lock();
-        seed_rows(&guard, &seeded.fixture.root, "A", MediaKind::Movie, 3, 2, 0);
+        let primary = library_of(&guard, &library);
+        seed_rows(
+            &guard,
+            &primary,
+            &seeded.fixture.root,
+            "A",
+            MediaKind::Movie,
+            3,
+            2,
+            0,
+        );
     }
-    // 不先构建投影：库从未发布过事实，才谈得上「无可用投影」。
-    let state = seeded
+    // 不先浏览：统计没有「未构建的投影」这一前置条件。
+    let (status, body) = seeded
         .fixture
-        .state
-        .clone()
-        .with_projection_service(Arc::new(ProjectionService::disabled()));
-    let fixture = PresenceFixture { state, ..seeded.fixture };
-    let (status, body) = fixture
-        .request("GET", "/api/v1/libraries", Some(&fixture.admin_token))
+        .request(
+            "GET",
+            "/api/v1/libraries",
+            Some(&seeded.fixture.admin_token),
+        )
         .await;
     assert_eq!(status, 200, "{body}");
     let stats = StatsFixture::stats(&body["data"], &library);
-    assert_eq!(stats["item_count"].as_u64(), Some(3), "冷统计作品数必须来自台账：{stats}");
-    assert_eq!(stats["file_count"].as_u64(), Some(6), "冷统计文件数必须来自台账：{stats}");
-    assert_eq!(stats["strm_file_count"].as_u64(), Some(0), "冷统计 strm 文件数必须精确：{stats}");
-    assert_eq!(stats["total_size_bytes"].as_u64(), Some(0), "无可用投影时体积必须为零：{stats}");
-    assert_eq!(stats["stale"], true, "投影不可用时必须标记 stale：{stats}");
-    // 从未发布过投影的库没有发布时间；有历史发布的库由 scope 变更用例覆盖。
-    assert_eq!(stats["refreshed_at_ms"].as_i64(), Some(0), "从未发布的库发布时间必须为 0：{stats}");
-}
-
-/// 配置范围改变后不得复用旧统计：计数仍来自台账，但旧 scope 的体积一律不复用。
-#[tokio::test]
-async fn library_scope_change_does_not_reuse_old_statistics() {
-    let seeded = empty_fixture();
-    let tv_other;
-    let old_root;
-    {
-        let store_arc = seeded.fixture.state.store();
-        let guard = store_arc.lock();
-        let (id, root) = new_library(
-            &guard,
-            seeded.fixture.dir.path(),
-            "TV Other",
-            MediaKind::Tv,
-            "everyone",
-            true,
-        );
-        tv_other = id;
-        seed_rows(&guard, &root, "T", MediaKind::Tv, 2, 1, 0);
-        old_root = root;
-    }
-    let before = seeded.list().await;
-    let other_before = StatsFixture::stats(&before, &tv_other);
-    assert_eq!(other_before["file_count"].as_u64(), Some(2));
-    assert_eq!(other_before["total_size_bytes"].as_u64(), Some(2 * FAKE_SIZE));
-    assert_eq!(other_before["stale"], false, "{other_before}");
-    let refreshed_before = other_before["refreshed_at_ms"].as_i64().unwrap();
-
-    // 改范围：给同一个库再加一个空根（既有根保留，台账行不动）。
-    let extra = seeded.fixture.dir.path().join("tv-other-extra");
-    std::fs::create_dir_all(&extra).unwrap();
-    let old_str = old_root.display().to_string();
-    let extra_str = extra.display().to_string();
-    seeded
-        .fixture
-        .state
-        .store()
-        .lock()
-        .update_library_full(
-            &tv_other,
-            None,
-            Some(&[old_str.as_str(), extra_str.as_str()]),
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-
-    let after = seeded.list().await;
-    let other_after = StatsFixture::stats(&after, &tv_other);
-    assert_eq!(other_after["item_count"].as_u64(), Some(2), "scope 变化后作品数仍必须来自台账：{other_after}");
-    assert_eq!(other_after["file_count"].as_u64(), Some(2), "scope 变化后文件数仍必须来自台账：{other_after}");
-    assert_eq!(other_after["strm_file_count"].as_u64(), Some(0), "scope 变化后 strm 文件数仍必须来自台账：{other_after}");
-    assert_eq!(other_after["total_size_bytes"].as_u64(), Some(0), "旧 scope 的体积不得复用：{other_after}");
-    assert_eq!(other_after["stale"], true, "scope 变化必须标 stale：{other_after}");
-    assert!(
-        other_after["refreshed_at_ms"].as_i64().unwrap() >= refreshed_before,
-        "refreshed_at_ms 必须是真实刷新时间，不得回退"
-    );
-}
-/// A same-cardinality ledger path change invalidates the old physical-byte facts.
-#[tokio::test]
-async fn same_count_strm_change_does_not_reuse_physical_bytes_as_fresh() {
-    let seeded = seed(1, 1, 1, 0);
-    let before = seeded.list().await;
-    let library_id = &seeded.fixture.library_id;
-    let old = StatsFixture::stats(&before, library_id);
-    assert_eq!(old["total_size_bytes"].as_u64(), Some(FAKE_SIZE));
-    assert_eq!(old["stale"], false, "initial published facts are current");
-
-    let from = seeded.fixture.root.join("A-00000.0.mkv");
-    let to = seeded.fixture.root.join("A-00000.0.strm");
-    let store = seeded.fixture.state.store();
-    assert!(store.lock().rename_ledger_path(&from.display().to_string(), &to.display().to_string()).unwrap());
-
-    let after = seeded.list().await;
-    let stats = StatsFixture::stats(&after, library_id);
-    assert_eq!(stats["file_count"].as_u64(), Some(1));
-    assert_eq!(stats["strm_file_count"].as_u64(), Some(1));
-    assert_ne!(
-        (stats["total_size_bytes"].as_u64(), stats["stale"].as_bool()),
-        (Some(FAKE_SIZE), Some(false)),
-        "same-count .strm replacement must not present prior physical bytes as fresh: {stats}"
-    );
-}
-
-/// Roots changing after collection cannot pair the old observation with fresh stats.
-#[tokio::test]
-async fn roots_change_between_plan_and_totals_never_returns_fresh_old_stats() {
-    // 空库：没有台账文件，改根不会被 "仍有台账文件位于现有根目录" 保护拒绝。
-    let seeded = seed(1, 1, 1, 0);
-    let root_a = seeded.fixture.dir.path().join("empty-a");
-    let root_b = seeded.fixture.dir.path().join("empty-b");
-    std::fs::create_dir_all(&root_a).unwrap();
-    std::fs::create_dir_all(&root_b).unwrap();
-    let empty_id = seeded
-        .fixture
-        .state
-        .store()
-        .lock()
-        .create_library(
-            MediaKind::Movie,
-            "Empty library",
-            &[root_a.to_str().unwrap()],
-            "everyone",
-            true,
-            &[],
-        )
-        .unwrap()
-        .id;
-    let state = seeded.fixture.state.clone();
-    let barrier_store = state.store();
-    let barrier_library = empty_id.clone();
-    let root_a_text = root_a.display().to_string();
-    let root_b_text = root_b.display().to_string();
-    // state 是 ApiState 的 clone；屏障挂在它上面，请求用的也是同一个 state。
-    let mut seeded = seeded;
-    seeded.fixture.state.statistics_phase_barrier = Some(Arc::new(move || {
-        barrier_store
-            .lock()
-            .update_library_full(
-                &barrier_library,
-                None,
-                Some(&[root_a_text.as_str(), root_b_text.as_str()]),
-                None,
-                None,
-                None,
-            )
-            .unwrap();
-    }));
-
-    let response = seeded.list().await;
-    let library = response
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|library| library["id"] == empty_id)
-        .expect("empty library must be listed");
-    // 渲染的是请求快照里的根（旧根），而统计必须因配置在请求期间变化而标 stale。
-    assert_eq!(library["root_paths"][0], root_a.display().to_string());
     assert_eq!(
-        library["stats"]["stale"], true,
-        "roots changed after plan collection: {}",
-        library["stats"]
+        stats["item_count"].as_u64(),
+        Some(3),
+        "作品数必须来自库表：{stats}"
     );
-    drop(state);
+    assert_eq!(
+        stats["file_count"].as_u64(),
+        Some(6),
+        "文件数必须来自库表：{stats}"
+    );
+    assert_eq!(
+        stats["strm_file_count"].as_u64(),
+        Some(0),
+        "strm 文件数必须精确：{stats}"
+    );
+    assert_eq!(
+        stats["total_size_bytes"].as_u64(),
+        Some(6 * FAKE_SIZE),
+        "体积必须来自发布事实：{stats}"
+    );
+    assert_eq!(stats["stale"], false, "库表聚合没有过期态：{stats}");
 }
 
-/// A library created and populated after roster collection is not rendered as fresh zeroes.
-#[tokio::test]
-async fn library_created_after_roster_collection_is_not_rendered_as_fresh_zeroes() {
-    let mut seeded = empty_fixture();
-    let state = seeded.fixture.state.clone();
-    let dir = seeded.fixture.dir.path().to_path_buf();
-    seeded.fixture.state.statistics_phase_barrier = Some(Arc::new(move || {
-        let store = state.store();
-        let guard = store.lock();
-        let (id, root) = new_library(
-            &guard, &dir, "Concurrent Library", MediaKind::Movie, "everyone", true,
-        );
-        let expected = seed_rows(&guard, &root, "Concurrent", MediaKind::Movie, 1, 1, 0);
-        assert_eq!(expected.file_count, 1);
-        assert!(!id.is_empty());
-    }));
-    let response = seeded.list().await;
-    assert!(
-        !response.as_array().unwrap().iter().any(|library| library["name"] == "Concurrent Library"),
-        "newly created library was not in the request's captured roster"
-    );
-}
 /// The authenticated ordinary roster resolves the caller role once, independent of N.
 #[tokio::test]
 async fn ordinary_library_list_performs_one_role_lookup_for_many_libraries() {
@@ -773,9 +673,17 @@ async fn ordinary_library_list_performs_one_role_lookup_for_many_libraries() {
         let store = seeded.fixture.state.store();
         store.lock().reset_role_lookups();
     }
-    let (status, body) = seeded.fixture.request(
-        "GET", "/api/v1/libraries", Some(&seeded.fixture.member_token),
-    ).await;
+    let (status, body) = seeded
+        .fixture
+        .request(
+            "GET",
+            "/api/v1/libraries",
+            Some(&seeded.fixture.member_token),
+        )
+        .await;
     assert_eq!(status, axum::http::StatusCode::OK, "{body}");
     assert_eq!(seeded.fixture.state.store().lock().role_lookups(), 1);
 }
+
+#[path = "library_statistics_scale/freshness.rs"]
+mod freshness;

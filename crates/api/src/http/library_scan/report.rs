@@ -1,8 +1,7 @@
 //! HTTP response serialization for detailed library scan reports.
 
-use std::path::PathBuf;
 
-use library::{ScanIssue, ScanReport, ScanRootReport, ScanRootStatus};
+use library::{ScanReport, ScanRootStatus};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -63,7 +62,11 @@ pub fn format_scan_report(report: &ScanReport) -> ScanReportResponseData {
         }
     }
 
-    let overall_status = if root_responses.iter().any(|r| r.status == "unreachable" || r.status == "partial") || total_errors > 0 {
+    let overall_status = if root_responses
+        .iter()
+        .any(|r| r.status == "unreachable" || r.status == "partial")
+        || total_errors > 0
+    {
         "partial"
     } else {
         "completed"

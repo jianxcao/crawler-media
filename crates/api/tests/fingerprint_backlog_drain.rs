@@ -3,9 +3,12 @@ use std::time::Duration;
 
 use api::probe_manager::{ProbeManager, ProbeUnit};
 use api::{ScrapeStoreExt, Store};
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{
+    Confidence, FileCoverage, LedgerId, Media, MediaId, MediaKind, QualitySource, UnitKey,
+};
 use marker::{AudioFingerprint, CommonSegment, FingerprintEngine};
 use parking_lot::Mutex;
+use store::ScannedLedger;
 
 struct FixtureFingerprint;
 
@@ -23,8 +26,60 @@ struct Fixture {
     _temp: tempfile::TempDir,
     store: Arc<Mutex<Store>>,
     manager: Arc<ProbeManager>,
-    rows: Vec<LedgerRow>,
+    rows: Vec<FileCoverage>,
     jobs: Vec<String>,
+}
+
+/// Insert one episode file through the scan commit (`insert_scanned_files`), then queue
+/// direct fingerprint work for it with fixture metadata so no ffprobe or network IO runs.
+fn insert_episode(
+    store: &Store,
+    media_id: MediaId,
+    path: &std::path::Path,
+    episode: u32,
+) -> FileCoverage {
+    std::fs::write(path, b"fixture video").unwrap();
+    let version = api::fingerprint_job::current_source_version(path);
+    let file_id = LedgerId::new();
+    store
+        .insert_scanned_files(
+            &[ScannedLedger {
+                file_id,
+                media_id,
+                path: path.display().to_string(),
+                units: vec![UnitKey::new(1, i32::try_from(episode).unwrap())],
+                resolution: None,
+                codec: None,
+                hdr: None,
+                quality_source: QualitySource::Release,
+                confidence: Confidence::High,
+                filter_score: None,
+                source_version: version.clone(),
+                source_digest: None,
+                size_bytes: None,
+                created_ns: None,
+                modified_ns: None,
+                artwork: Default::default(),
+                observations: Vec::new(),
+            }],
+            1_000,
+        )
+        .unwrap();
+    store
+        .put_file_meta_versioned(
+            &file_id.to_string(),
+            &library::Tracks {
+                video: Some(library::VideoTrack::default()),
+                ..Default::default()
+            },
+            Some(&version),
+            Some(1_200_000),
+        )
+        .unwrap();
+    store
+        .file_coverage_by_id(file_id)
+        .unwrap()
+        .expect("scanned episode row")
 }
 
 impl Fixture {
@@ -65,39 +120,8 @@ impl Fixture {
         let mut rows = Vec::new();
         let mut jobs = Vec::new();
         for episode in 1..=33 {
-            let row = LedgerRow {
-                id: LedgerId::new(),
-                media_id,
-                path: temp
-                    .path()
-                    .join(format!("episode-{episode}.mkv"))
-                    .display()
-                    .to_string(),
-                season: Some(1),
-                episode: Some(episode),
-                resolution: None,
-                codec: None,
-                hdr: None,
-                quality_source: QualitySource::Release,
-                confidence: Confidence::High,
-                filter_score: None,
-            };
-            std::fs::write(&row.path, b"fixture video").unwrap();
-            let version =
-                api::fingerprint_job::current_source_version(std::path::Path::new(&row.path));
-            store.lock().insert_ledger(&row).unwrap();
-            store
-                .lock()
-                .put_file_meta_versioned(
-                    &row.id.to_string(),
-                &library::Tracks {
-                    video: Some(library::VideoTrack::default()),
-                    ..Default::default()
-                },
-                    Some(&version),
-                    Some(1_200_000),
-                )
-                .unwrap();
+            let path = temp.path().join(format!("episode-{episode}.mkv"));
+            let row = insert_episode(&store.lock(), media_id, &path, episode);
             let job = manager
                 .enqueue_direct_fingerprint(
                     ProbeUnit {
@@ -111,7 +135,7 @@ impl Fixture {
                         job_id: None,
                     },
                     Some(1_200_000),
-                    version,
+                    row.file.version.source_version.clone(),
                     90,
                 )
                 .unwrap();
@@ -162,14 +186,14 @@ impl Fixture {
             let cache = self
                 .store
                 .lock()
-                .get_fingerprint_cache(&row.id.to_string())
+                .get_fingerprint_cache(&row.file.file_id.to_string())
                 .unwrap()
                 .unwrap();
-            assert!(!cache.intro.is_empty(), "{}", row.path);
+            assert!(!cache.intro.is_empty(), "{}", row.file.path.display());
             assert!(
                 cache.outro.is_some_and(|outro| !outro.is_empty()),
                 "{}",
-                row.path
+                row.file.path.display()
             );
             assert_eq!(cache.sample_duration_secs, 90);
             assert_eq!(cache.media_duration_ms, Some(1_200_000));
@@ -187,7 +211,7 @@ async fn fingerprint_overflow_refills_after_success_without_metadata_work() {
 async fn fingerprint_overflow_refills_after_every_initial_source_is_deleted() {
     let fixture = Fixture::new();
     for row in &fixture.rows[..16] {
-        std::fs::remove_file(&row.path).unwrap();
+        std::fs::remove_file(&row.file.path).unwrap();
     }
     fixture.drain(16).await;
     for id in &fixture.jobs[..16] {

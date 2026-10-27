@@ -3,17 +3,18 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::browse_file_read::BrowseFileRead;
-use api::{ApiState, PosterFetch, Store, router};
+use api::file_stat_read::FileStatRead;
+use api::{ApiState, Store, router};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use domain::{
-    Confidence, Coverage, FetchMode, FilterId, LedgerId, LedgerRow, Media, MediaId, MediaKind,
-    QualitySource, Subscribe, SubscribeId, UserId,
+    Confidence, Coverage, FetchMode, FilterId, Media, MediaId, MediaKind, QualitySource, Subscribe,
+    SubscribeId, UserId,
 };
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use parking_lot::{Condvar, Mutex};
+use store::test_support::{FixtureFile, publish_fixture_file};
 use store::{LibraryPathResolver, LibraryPathScope, StoreError};
 use tower::ServiceExt;
 
@@ -45,9 +46,11 @@ impl Gate {
         *self.entered.lock() = true;
         self.entered_cv.notify_all();
         let mut open = self.open.lock();
-        while !*open {
-            self.open_cv.wait(&mut open);
-        }
+        self.open_cv
+            .wait_while_for(&mut open, |open| !*open, std::time::Duration::from_secs(30));
+        let released = *open;
+        drop(open);
+        assert!(released, "test must release the subscription I/O gate");
     }
 
     fn entered(&self) -> bool {
@@ -68,11 +71,11 @@ impl Drop for ReleaseOnDrop {
     }
 }
 
-struct GatedBrowseFileRead {
+struct GatedFileStatRead {
     gate: Arc<Gate>,
 }
 
-impl BrowseFileRead for GatedBrowseFileRead {
+impl FileStatRead for GatedFileStatRead {
     fn read_nfo(&self, path: &Path) -> Option<library::NfoMeta> {
         library::read_nfo(path)
     }
@@ -87,7 +90,7 @@ impl BrowseFileRead for GatedBrowseFileRead {
     }
 }
 
-fn make_state(root: &Path, files: Arc<GatedBrowseFileRead>) -> ApiState {
+fn make_state(root: &Path, files: Arc<GatedFileStatRead>) -> ApiState {
     ApiState::new(
         Store::open(root.join("data")).unwrap(),
         "management-secret".into(),
@@ -97,7 +100,7 @@ fn make_state(root: &Path, files: Arc<GatedBrowseFileRead>) -> ApiState {
         root.join("library"),
     )
     .unwrap()
-    .with_browse_file_read(files)
+    .with_file_stat_read(files)
 }
 
 fn seed_subscription(state: &ApiState, tmp: &Path) -> (Subscribe, PathBuf) {
@@ -135,20 +138,20 @@ fn seed_subscription(state: &ApiState, tmp: &Path) -> (Subscribe, PathBuf) {
     };
     guard.insert_media(&media).unwrap();
 
-    let row = LedgerRow {
-        id: LedgerId::new(),
-        media_id,
-        path: movie_file.to_str().unwrap().into(),
-        season: None,
-        episode: None,
-        resolution: Some("1080p".into()),
-        codec: Some("h264".into()),
-        hdr: None,
-        quality_source: QualitySource::Probe,
-        confidence: Confidence::High,
-        filter_score: Some(85),
-    };
-    guard.insert_ledger(&row).unwrap();
+    publish_fixture_file(
+        &guard,
+        &FixtureFile {
+            media_id,
+            path: movie_file.to_str().unwrap().into(),
+            resolution: Some("1080p".into()),
+            codec: Some("h264".into()),
+            quality_source: QualitySource::Probe,
+            confidence: Confidence::High,
+            filter_score: Some(85),
+            ..FixtureFile::default()
+        },
+    )
+    .unwrap();
 
     let sub = Subscribe {
         id: SubscribeId::new(),
@@ -176,9 +179,7 @@ async fn slow_subscribe_fact_read_keeps_heartbeat_responsive() {
     let gate = Arc::new(Gate::new());
     let state = make_state(
         tmp.path(),
-        Arc::new(GatedBrowseFileRead {
-            gate: gate.clone(),
-        }),
+        Arc::new(GatedFileStatRead { gate: gate.clone() }),
     );
     let (subscribe, movie_file) = seed_subscription(&state, tmp.path());
     // Start the production facts read on a current-thread blocking worker
@@ -222,7 +223,10 @@ async fn slow_subscribe_fact_read_keeps_heartbeat_responsive() {
     gate.release();
     let facts_res = facts_handle.await.unwrap().expect("facts read result");
     let movie_fact = facts_res.movie().expect("movie fact should be discovered");
-    assert_eq!(movie_fact.path.as_deref(), Some(movie_file.to_str().unwrap()));
+    assert_eq!(
+        movie_fact.path.as_deref(),
+        Some(movie_file.to_str().unwrap())
+    );
     assert_eq!(movie_fact.score, 85);
 }
 
@@ -251,7 +255,7 @@ fn failing_resolver_propagates_permission_denied() {
     let deeper_root = broader_root.join("special");
     std::fs::create_dir_all(&deeper_root).unwrap();
 
-    let broader_lib = store
+    let _broader_lib = store
         .create_library(
             MediaKind::Movie,
             "Broader",

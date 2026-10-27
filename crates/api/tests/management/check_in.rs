@@ -164,7 +164,10 @@ async fn site_check_in_endpoint_runs_plugin() {
     let body = json_body(response).await;
     assert_eq!(body["ok"], false);
     assert!(
-        body["error"]["message"].as_str().unwrap_or_default().contains("Cookie"),
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Cookie"),
         "占位站点不得报告签到成功: {body}"
     );
 }
@@ -194,7 +197,10 @@ async fn site_login_endpoint_runs_plugin() {
     let body = json_body(response).await;
     assert_eq!(body["ok"], false);
     assert!(
-        body["error"]["message"].as_str().unwrap_or_default().contains("Cookie"),
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Cookie"),
         "空登录请求不得伪造会话: {body}"
     );
 }
@@ -239,7 +245,8 @@ async fn browser_maintenance_falls_back_to_http_when_browser_fails() {
                 let _ = stream.set_nonblocking(false);
                 let mut buf = [0; 1024];
                 let _ = stream.read(&mut buf);
-                let body = "<html><body><p>签到成功</p><a href=\"logout.php\">Logout</a></body></html>";
+                let body =
+                    "<html><body><p>签到成功</p><a href=\"logout.php\">Logout</a></body></html>";
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -278,7 +285,11 @@ async fn browser_maintenance_falls_back_to_http_when_browser_fails() {
         maintenance_via: domain::MaintenanceVia::Browser,
     };
     state.store().lock().insert_site(&site).unwrap();
-    state.store().lock().put_setting(api::settings_keys::CDP_ENABLED, "1").unwrap();
+    state
+        .store()
+        .lock()
+        .put_setting(api::settings_keys::CDP_ENABLED, "1")
+        .unwrap();
 
     let app = router(state);
     let response = app

@@ -10,7 +10,7 @@ use parking_lot::Mutex;
 use serde_json::json;
 use tower::ServiceExt;
 
-use super::common::{Fixtures, json_data, request, state, subscribe_payload};
+use super::common::{Fixtures, json_data, request, state, subscribe_payload_with_filter};
 
 async fn create_filter_fixture(app: &axum::Router, name: &str, res: &str) -> String {
     let resp = app
@@ -49,13 +49,7 @@ async fn patch_subscription_filter_id_updates_store_and_rejects_invalid() {
     let filter_b_id = create_filter_fixture(&app, "filter-b", "2160p").await;
 
     // 2. Create subscription with Filter A
-    let mut body = subscribe_payload("search");
-    body["filter"] = json!({
-        "name": "filter-a",
-        "atoms": [
-            { "kind": "resolution", "value": "1080p", "priority": 100 }
-        ]
-    });
+    let body = subscribe_payload_with_filter("search", Some(&_filter_a_id));
     let create_resp = app
         .clone()
         .oneshot(request(
@@ -128,8 +122,5 @@ async fn patch_subscription_filter_id_updates_store_and_rejects_invalid() {
         ))
         .await
         .unwrap();
-    assert_eq!(
-        unknown_field_patch.status(),
-        StatusCode::UNPROCESSABLE_ENTITY
-    );
+    assert_eq!(unknown_field_patch.status(), StatusCode::BAD_REQUEST);
 }

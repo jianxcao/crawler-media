@@ -1,16 +1,18 @@
 mod alias;
 mod anilist;
 mod bangumi;
-mod cache;
+pub mod cache;
 mod client;
 mod contracts;
 mod douban;
 pub mod fanart;
 mod metadata;
+pub mod normalized;
 mod parse;
+pub use normalized::normalize_metadata;
 mod person;
+pub mod response_cache;
 mod tvdb;
-
 pub use alias::{Source, attach, merge};
 pub use anilist::Anilist;
 pub use bangumi::Bangumi;

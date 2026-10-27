@@ -4,12 +4,11 @@
 //! the download lifecycle with [`MockQbit::complete`] which writes real files
 //! under the mock save path so Transfer can import them.
 
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::Read;
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::thread;
 
 use parking_lot::Mutex;
 use serde_json::json;
@@ -30,6 +29,20 @@ pub struct Task {
 
 pub struct MockQbit {
     pub url: String,
+    state: Arc<MockQbitState>,
+    // The handler owns only state, so it can never drop and join its own server.
+    _server: crate::lifecycle::FakeServer,
+}
+
+impl std::ops::Deref for MockQbit {
+    type Target = MockQbitState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+pub struct MockQbitState {
     pub save_root: PathBuf,
     pub tasks: Mutex<Vec<Task>>,
     pub adds: Mutex<Vec<String>>,
@@ -57,11 +70,15 @@ pub struct MockQbit {
 
 impl MockQbit {
     pub fn start(save_root: &Path) -> Arc<Self> {
+        Self::start_with_handler_hook(save_root, || {})
+    }
+
+    pub fn start_with_handler_hook(
+        save_root: &Path,
+        before_request: impl Fn() + Send + Sync + 'static,
+    ) -> Arc<Self> {
         std::fs::create_dir_all(save_root).unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mock = Arc::new(Self {
-            url: format!("http://{addr}"),
+        let state = Arc::new(MockQbitState {
             save_root: save_root.to_path_buf(),
             tasks: Mutex::new(Vec::new()),
             adds: Mutex::new(Vec::new()),
@@ -79,23 +96,22 @@ impl MockQbit {
             skipped: Mutex::new(Vec::new()),
             next: AtomicU64::new(1),
         });
-        let server = mock.clone();
-        thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
-                let server = server.clone();
-                thread::spawn(move || {
-                    let req = read_request(&mut stream);
-                    let (status, body, extra) = server.route(&req);
-                    let response = format!(
-                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n{extra}\r\n{body}",
-                        body.len()
-                    );
-                    let _ = stream.write_all(response.as_bytes());
-                });
-            }
+        let shared = state.clone();
+        let server = crate::lifecycle::FakeServer::start(move |request, stream| {
+            before_request();
+            let (status, body, extra) = shared.route(&request.raw);
+            crate::lifecycle::respond(
+                stream,
+                status,
+                &format!("Content-Type: text/plain\r\n{extra}"),
+                body.as_bytes(),
+            );
         });
-        mock
+        Arc::new(Self {
+            url: server.url(),
+            state,
+            _server: server,
+        })
     }
 
     pub fn config(&self) -> downloader::QbitConfig {
@@ -173,7 +189,9 @@ impl MockQbit {
         task.size = size;
         written
     }
+}
 
+impl MockQbitState {
     fn route(&self, req: &str) -> (&'static str, String, &'static str) {
         if req.starts_with("POST /api/v2/auth/login") {
             self.logins.fetch_add(1, Ordering::SeqCst);
@@ -194,11 +212,24 @@ impl MockQbit {
         }
         if self
             .forbid_next
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
             .is_ok()
         {
             return ("403 Forbidden", "Forbidden".into(), "");
         }
+        if let Some(response) = self
+            .create_torrent(req)
+            .or_else(|| self.read_torrents(req))
+            .or_else(|| self.control_torrent(req))
+        {
+            return response;
+        }
+        if req.contains("/api/v2/app/preferences") {
+            return ("200 OK", r#"{"dl_limit":0,"up_limit":0}"#.into(), "");
+        }
+        ("200 OK", "Ok.".into(), "")
+    }
+    fn create_torrent(&self, req: &str) -> Option<(&'static str, String, &'static str)> {
         if req.starts_with("POST /api/v2/torrents/add ")
             || req.starts_with("POST /api/v2/torrents/add?")
         {
@@ -228,7 +259,7 @@ impl MockQbit {
                 state: "downloading".into(),
                 source,
             });
-            return ("200 OK", "Ok.".into(), "");
+            return Some(("200 OK", "Ok.".into(), ""));
         }
         if req.contains("/api/v2/torrents/addTags") {
             self.add_tags.lock().push(req.to_string());
@@ -248,8 +279,12 @@ impl MockQbit {
                     }
                 }
             }
-            return ("200 OK", "Ok.".into(), "");
+            return Some(("200 OK", "Ok.".into(), ""));
         }
+        None
+    }
+
+    fn read_torrents(&self, req: &str) -> Option<(&'static str, String, &'static str)> {
         if req.contains("/api/v2/torrents/info") {
             self.info_calls.fetch_add(1, Ordering::SeqCst);
             let tag = query_param(req, "tag").map(|t| percent_decode(&t));
@@ -278,7 +313,7 @@ impl MockQbit {
                     })
                 })
                 .collect();
-            return ("200 OK", serde_json::to_string(&body).unwrap(), "");
+            return Some(("200 OK", serde_json::to_string(&body).unwrap(), ""));
         }
         if req.contains("/api/v2/torrents/files") {
             let hash = query_param(req, "hash").unwrap_or_default();
@@ -294,8 +329,12 @@ impl MockQbit {
                     })
                 })
                 .collect();
-            return ("200 OK", serde_json::to_string(&body).unwrap(), "");
+            return Some(("200 OK", serde_json::to_string(&body).unwrap(), ""));
         }
+        None
+    }
+
+    fn control_torrent(&self, req: &str) -> Option<(&'static str, String, &'static str)> {
         if req.contains("/api/v2/torrents/filePrio") {
             self.file_prios.lock().push(req.to_string());
             let hash = form_field(req, "hash").unwrap_or_default();
@@ -305,7 +344,7 @@ impl MockQbit {
             for id in ids.split('|').filter_map(|i| i.parse::<usize>().ok()) {
                 self.skipped.lock().push((hash.to_lowercase(), id));
             }
-            return ("200 OK", "".into(), "");
+            return Some(("200 OK", "".into(), ""));
         }
         if req.contains("/api/v2/torrents/resume") || req.contains("/api/v2/torrents/start") {
             self.resumes.lock().push(req.to_string());
@@ -319,7 +358,7 @@ impl MockQbit {
                     }
                 }
             }
-            return ("200 OK", "Ok.".into(), "");
+            return Some(("200 OK", "Ok.".into(), ""));
         }
         if req.contains("/api/v2/torrents/delete") {
             self.deletes.lock().push(req.to_string());
@@ -328,12 +367,9 @@ impl MockQbit {
                     .lock()
                     .retain(|t| !hashes.split('|').any(|h| h.eq_ignore_ascii_case(&t.hash)));
             }
-            return ("200 OK", "Ok.".into(), "");
+            return Some(("200 OK", "Ok.".into(), ""));
         }
-        if req.contains("/api/v2/app/preferences") {
-            return ("200 OK", r#"{"dl_limit":0,"up_limit":0}"#.into(), "");
-        }
-        ("200 OK", "Ok.".into(), "")
+        None
     }
 }
 
@@ -347,8 +383,8 @@ pub fn read_request(stream: &mut TcpStream) -> String {
             break;
         }
         request.extend_from_slice(&buf[..n]);
-        if expected.is_none() {
-            if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+        if expected.is_none()
+            && let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
                 let headers = String::from_utf8_lossy(&request[..end]);
                 let len = headers.lines().find_map(|line| {
                     let (k, v) = line.split_once(':')?;
@@ -358,7 +394,6 @@ pub fn read_request(stream: &mut TcpStream) -> String {
                 });
                 expected = Some(end + 4 + len.unwrap_or(0));
             }
-        }
         if expected.is_some_and(|len| request.len() >= len) {
             break;
         }
@@ -391,13 +426,12 @@ fn percent_decode(value: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(b) = u8::from_str_radix(&value[i + 1..i + 3], 16) {
+        if bytes[i] == b'%' && i + 2 < bytes.len()
+            && let Ok(b) = u8::from_str_radix(&value[i + 1..i + 3], 16) {
                 out.push(b);
                 i += 3;
                 continue;
             }
-        }
         out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
         i += 1;
     }

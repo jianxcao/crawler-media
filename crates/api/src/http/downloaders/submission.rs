@@ -251,7 +251,7 @@ fn build_submit_torrent(body: &SubmitInput) -> (Torrent, Release, Vec<Value>) {
             .site_id
             .as_deref()
             .and_then(|id| domain::SiteId::from_str(id).ok())
-            .unwrap_or_else(domain::SiteId::new),
+            .unwrap_or_default(),
         title: body.title.clone(),
         enclosure: body.download_url.clone(),
         size_bytes: body.size_bytes,
@@ -363,8 +363,8 @@ pub(crate) async fn submit(
             save_path.as_deref(),
         )
         .map_err(SubmitFailure::Downloader)?;
-        if let Some(sub) = &delivery_subscribe {
-            if let Err(response) = record_submitted_pending(
+        if let Some(sub) = &delivery_subscribe
+            && let Err(response) = record_submitted_pending(
                 state,
                 sub,
                 torrent,
@@ -378,7 +378,6 @@ pub(crate) async fn submit(
                 }
                 return Err(SubmitFailure::Response(response));
             }
-        }
         Ok(())
     })
     .await

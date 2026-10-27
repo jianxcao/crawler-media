@@ -6,7 +6,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserId};
+use domain::{Confidence, LedgerId, LibraryFile, Media, MediaId, MediaKind, QualitySource, UserId};
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -15,6 +15,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use store::test_support::{FixtureFile, publish_fixture_file};
 use store::{FingerprintCacheEntry, ProbeStage, ProbeStageKey};
 use tower::ServiceExt;
 
@@ -64,10 +65,18 @@ impl Catalog for OnlineCatalog {
         self.requests.lock().push(query.to_string());
         Ok(vec![self.hit.clone()])
     }
-    fn search_tv(&self, _: &str) -> Result<Vec<media::CatalogHit>, String> { Ok(vec![]) }
-    fn popular_movie(&self) -> Result<Vec<media::CatalogHit>, String> { Ok(vec![]) }
-    fn popular_tv(&self) -> Result<Vec<media::CatalogHit>, String> { Ok(vec![]) }
-    fn details(&self, _: MediaKind, _: &str) -> Result<Option<Media>, String> { Ok(None) }
+    fn search_tv(&self, _: &str) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(vec![])
+    }
+    fn popular_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(vec![])
+    }
+    fn popular_tv(&self) -> Result<Vec<media::CatalogHit>, String> {
+        Ok(vec![])
+    }
+    fn details(&self, _: MediaKind, _: &str) -> Result<Option<Media>, String> {
+        Ok(None)
+    }
 }
 
 struct NoFetch;
@@ -83,8 +92,8 @@ struct Fixture {
     catalog: Arc<OfflineCatalog>,
     root: PathBuf,
     library_id: String,
-    old: LedgerRow,
-    other: LedgerRow,
+    old: LibraryFile,
+    other: LibraryFile,
     other_library_id: String,
     stage: ProbeStageKey,
     users: [UserId; 2],
@@ -92,9 +101,9 @@ struct Fixture {
     kind: MediaKind,
 }
 
-fn row(media_id: MediaId, path: &Path, kind: MediaKind) -> LedgerRow {
-    LedgerRow {
-        id: LedgerId::new(),
+fn row(media_id: MediaId, path: &Path, kind: MediaKind) -> FixtureFile {
+    FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id,
         path: path.display().to_string(),
         season: (kind == MediaKind::Tv).then_some(1),
@@ -105,6 +114,7 @@ fn row(media_id: MediaId, path: &Path, kind: MediaKind) -> LedgerRow {
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     }
 }
 fn cache() -> FingerprintCacheEntry {
@@ -142,12 +152,12 @@ impl Fixture {
         let (library_id, other_library_id) = create_libraries(&store, kind, &root, &other_root);
         let media = canonical_media(kind);
         store.insert_media(&media).unwrap();
-        let old = row(media.id, &root.join(filename), kind);
-        let other = row(media.id, &other_root.join(filename), kind);
-        std::fs::write(&other.path, b"independent file").unwrap();
-        seed_caches(&store, [&old, &other]);
+        let old_spec = row(media.id, &root.join(filename), kind);
+        let other_spec = row(media.id, &other_root.join(filename), kind);
+        std::fs::write(&other_spec.path, b"independent file").unwrap();
+        let (old, other) = seed_caches(&store, [&old_spec, &other_spec]);
         let stage = ProbeStageKey {
-            ledger_id: old.id.to_string(),
+            ledger_id: old.file_id.to_string(),
             context_key: "old-context".into(),
             stage: ProbeStage::Outro,
         };
@@ -254,7 +264,8 @@ fn canonical_media(kind: MediaKind) -> Media {
         kind,
         title: "旧中文名称".into(),
         year: Some(2022),
-        original_title: None, aliases: Vec::new(),
+        original_title: None,
+        aliases: Vec::new(),
         tmdb_id: Some("207890".into()),
         douban_id: None,
         tvdb_id: None,
@@ -263,12 +274,13 @@ fn canonical_media(kind: MediaKind) -> Media {
     }
 }
 
-fn seed_caches(store: &store::Store, entries: [&LedgerRow; 2]) {
+fn seed_caches(store: &store::Store, entries: [&FixtureFile; 2]) -> (LibraryFile, LibraryFile) {
+    let mut files = Vec::new();
     for entry in entries {
-        store.insert_ledger(entry).unwrap();
+        let file = publish_fixture_file(store, entry).unwrap();
         store
             .put_file_meta(
-                &entry.id.to_string(),
+                &file.file_id.to_string(),
                 &library::Tracks {
                     video: Some(library::VideoTrack {
                         codec: Some("h264".into()),
@@ -281,16 +293,18 @@ fn seed_caches(store: &store::Store, entries: [&LedgerRow; 2]) {
             )
             .unwrap();
         store
-            .put_fingerprint_cache(&entry.id.to_string(), &cache())
+            .put_fingerprint_cache(&file.file_id.to_string(), &cache())
             .unwrap();
+        files.push(file);
     }
+    (files.remove(0), files.remove(0))
 }
 
 fn seed_progress(store: &store::Store, users: [UserId; 2], media: &Media) {
     let (season, episode) = if media.kind == MediaKind::Tv {
         (1, 3)
     } else {
-        (0, 0)
+        (-1, -1)
     };
     for (user, position, favorite, watched) in [
         (users[0], 750_000, true, false),
@@ -329,18 +343,23 @@ impl Fixture {
         let store = shared.lock();
         assert!(store.get_library(&self.other_library_id).unwrap().is_some());
         assert_eq!(
-            store.ledger_by_path(&self.other.path).unwrap().unwrap().id,
-            self.other.id
+            store
+                .file_coverage_by_path(&self.other.path.display().to_string())
+                .unwrap()
+                .unwrap()
+                .file
+                .file_id,
+            self.other.file_id
         );
         assert!(
             store
-                .get_file_meta(&self.other.id.to_string())
+                .get_file_meta(&self.other.file_id.to_string())
                 .unwrap()
                 .is_some()
         );
         assert_eq!(
             store
-                .get_fingerprint_cache(&self.other.id.to_string())
+                .get_fingerprint_cache(&self.other.file_id.to_string())
                 .unwrap()
                 .unwrap(),
             cache()
@@ -352,7 +371,7 @@ impl Fixture {
         let (season, episode) = if self.kind == MediaKind::Tv {
             (1, 3)
         } else {
-            (0, 0)
+            (-1, -1)
         };
         for (user, position, favorite, watched) in [
             (self.users[0], 750_000, true, false),
@@ -418,17 +437,22 @@ async fn remove(f: &Fixture, app: &Router) {
     let shared = f.state.store();
     let store = shared.lock();
     assert!(store.get_library(&f.library_id).unwrap().is_none());
-    assert!(store.ledger_by_path(&f.old.path).unwrap().is_none());
+    assert!(
+        store
+            .file_coverage_by_path(&f.old.path.display().to_string())
+            .unwrap()
+            .is_none()
+    );
     assert!(store.get_media(f.old.media_id).unwrap().is_some());
     assert!(
         store
-            .get_file_meta(&f.old.id.to_string())
+            .get_file_meta(&f.old.file_id.to_string())
             .unwrap()
             .is_none()
     );
     assert!(
         store
-            .get_fingerprint_cache(&f.old.id.to_string())
+            .get_fingerprint_cache(&f.old.file_id.to_string())
             .unwrap()
             .is_none()
     );
@@ -466,7 +490,7 @@ async fn scan_library_op(app: &Router, library_id: &str) {
     .unwrap();
 }
 
-async fn reimport(f: &Fixture, app: &Router) -> LedgerRow {
+async fn reimport(f: &Fixture, app: &Router) -> LibraryFile {
     let created = call(
         app,
         "POST",
@@ -474,6 +498,8 @@ async fn reimport(f: &Fixture, app: &Router) -> LedgerRow {
         json!({
             "kind": if f.kind == MediaKind::Tv { "tv" } else { "movie" },
             "name": "Recreated", "root_paths": [f.root],
+            "detect_intros": false,
+            "enable_fingerprint": false,
         }),
         StatusCode::OK,
     )
@@ -486,14 +512,23 @@ async fn reimport(f: &Fixture, app: &Router) -> LedgerRow {
     let library = store.get_library(id).unwrap().unwrap();
     assert!(!library.detect_intros);
     assert!(!library.enable_fingerprint);
-    let new = store.ledger_by_path(&f.old.path).unwrap().unwrap();
-    assert_ne!(new.id, f.old.id);
+    let new = store
+        .file_coverage_by_path(&f.old.path.display().to_string())
+        .unwrap()
+        .unwrap()
+        .file;
+    assert_ne!(new.file_id, f.old.file_id);
     // No workers are started: a cache miss proves old file_meta was not copied.
     // Actual fake-probe completion is a separate acceptance case, not covered here.
-    assert!(store.get_file_meta(&new.id.to_string()).unwrap().is_none());
     assert!(
         store
-            .get_fingerprint_cache(&new.id.to_string())
+            .get_file_meta(&new.file_id.to_string())
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get_fingerprint_cache(&new.file_id.to_string())
             .unwrap()
             .is_none()
     );
@@ -510,10 +545,18 @@ fn run_reimport(kind: MediaKind, incoming_alias: &str, same_identity: bool) {
             remove(&fixture, &app).await;
             let new = reimport(&fixture, &app).await;
             assert_eq!(new.media_id == fixture.old.media_id, same_identity);
-            assert_eq!(
-                (new.season, new.episode),
-                (fixture.old.season, fixture.old.episode)
-            );
+            let old_units = if kind == MediaKind::Tv {
+                vec![domain::UnitKey::new(1, 3)]
+            } else {
+                vec![domain::UnitKey::WHOLE]
+            };
+            let new_units = fixture
+                .state
+                .store()
+                .lock()
+                .get_file_units(new.file_id)
+                .unwrap();
+            assert_eq!(new_units, old_units);
             if !same_identity {
                 let shared = fixture.state.store();
                 let store = shared.lock();
@@ -561,11 +604,22 @@ fn online_identity_rebind_succeeds_when_reimported_library_reuses_removed_root()
             }
             let hit = media::CatalogHit {
                 media: Media {
-                    id: MediaId::new(), kind: MediaKind::Movie, title: "English Name".into(),
-                    year: Some(2025), original_title: None, aliases: Vec::new(), tmdb_id: Some("207890".into()),
-                    douban_id: None, tvdb_id: None, bangumi_id: None, anilist_id: None,
+                    id: MediaId::new(),
+                    kind: MediaKind::Movie,
+                    title: "English Name".into(),
+                    year: Some(2025),
+                    original_title: None,
+                    aliases: Vec::new(),
+                    tmdb_id: Some("207890".into()),
+                    douban_id: None,
+                    tvdb_id: None,
+                    bangumi_id: None,
+                    anilist_id: None,
                 },
-                poster_path: None, backdrop_path: None, rating: None, overview: None,
+                poster_path: None,
+                backdrop_path: None,
+                rating: None,
+                overview: None,
             };
             let online_catalog = Arc::new(OnlineCatalog {
                 hit,
@@ -579,7 +633,8 @@ fn online_identity_rebind_succeeds_when_reimported_library_reuses_removed_root()
                 "/api/v1/libraries",
                 json!({"kind":"movie", "name":"Recreated", "root_paths":[fixture.root]}),
                 StatusCode::OK,
-            ).await;
+            )
+            .await;
             let library_id = created["id"].as_str().unwrap();
             scan_library_op(&app, library_id).await;
             // 建库会自动调度首次扫描（见 library_config::create_library），它与这次
@@ -592,14 +647,30 @@ fn online_identity_rebind_succeeds_when_reimported_library_reuses_removed_root()
             )
             .await
             .expect("library reimport work did not settle");
-            assert!(!online_catalog.requests.lock().is_empty(), "必须真正走到在线搜索");
+            assert!(
+                !online_catalog.requests.lock().is_empty(),
+                "必须真正走到在线搜索"
+            );
             let shared = fixture.state.store();
             let store = shared.lock();
-            let row = store.ledger_by_path(&fixture.old.path).unwrap().unwrap();
-            assert_eq!(row.media_id, fixture.old.media_id);
+            let cov = store
+                .file_coverage_by_path(&fixture.old.path.display().to_string())
+                .unwrap()
+                .unwrap();
+            assert_eq!(cov.file.media_id, fixture.old.media_id);
             for user in fixture.users {
-                assert_eq!(store.unit_state(user, row.media_id, 0, 0).unwrap().unwrap().position_ms,
-                    if user == fixture.users[0] { 750_000 } else { 120_000 });
+                assert_eq!(
+                    store
+                        .unit_state(user, cov.file.media_id, -1, -1)
+                        .unwrap()
+                        .unwrap()
+                        .position_ms,
+                    if user == fixture.users[0] {
+                        750_000
+                    } else {
+                        120_000
+                    }
+                );
             }
         });
 }

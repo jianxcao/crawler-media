@@ -1,4 +1,4 @@
-use domain::LedgerRow;
+use domain::{LibraryFile, PhysicalSourceId, TypedItemId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaSource {
@@ -15,25 +15,25 @@ pub struct Item {
     pub path: String,
 }
 
-pub fn media_source(row: &LedgerRow) -> MediaSource {
+pub fn media_source(file: &LibraryFile) -> MediaSource {
+    let source_id = PhysicalSourceId {
+        file_id: file.file_id,
+        revision: file.version.revision,
+    };
     MediaSource {
-        id: compact_id(&row.id.to_string()),
-        path: row.path.clone(),
+        id: source_id.to_wire_string(),
+        path: file.path.display().to_string(),
         supports_direct_play: true,
         supports_transcoding: false,
     }
 }
 
 impl Item {
-    pub fn from_ledger(name: &str, row: &LedgerRow) -> Self {
+    pub fn from_target(logical_id: &TypedItemId, name: &str, file: &LibraryFile) -> Self {
         Self {
-            id: compact_id(&row.id.to_string()),
+            id: logical_id.to_wire_string(),
             name: name.to_string(),
-            path: row.path.clone(),
+            path: file.path.display().to_string(),
         }
     }
-}
-
-fn compact_id(id: &str) -> String {
-    id.chars().filter(|c| *c != '-').collect()
 }

@@ -1,0 +1,11 @@
+CREATE TABLE instance_lock(id INTEGER PRIMARY KEY CHECK(id=1),owner TEXT NOT NULL,heartbeat_at INTEGER NOT NULL);
+CREATE TABLE users(id TEXT PRIMARY KEY NOT NULL,login TEXT NOT NULL UNIQUE,enabled INTEGER NOT NULL DEFAULT 1,role TEXT NOT NULL DEFAULT 'member',password TEXT NOT NULL DEFAULT '');
+CREATE TABLE sites(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL,url TEXT NOT NULL,profile_id TEXT NOT NULL,cookie TEXT,api_key TEXT,rss_url TEXT,proxy TEXT,rate_limit_per_minute INTEGER,cdp_url TEXT,downloader_id TEXT,enabled INTEGER NOT NULL DEFAULT 1,maintenance_via TEXT NOT NULL DEFAULT 'http' CHECK(maintenance_via IN ('http','browser')));
+CREATE INDEX sites_enabled_idx ON sites(enabled);
+CREATE TABLE filters(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL,atoms_json TEXT NOT NULL,keep_old_versions INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE user_tokens(token TEXT PRIMARY KEY NOT NULL,user_id TEXT NOT NULL,created_at INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX user_tokens_user_idx ON user_tokens(user_id);
+CREATE TABLE playback_device_credentials(user_id TEXT NOT NULL,device_id TEXT NOT NULL,token TEXT NOT NULL,PRIMARY KEY(user_id,device_id,token));
+CREATE TABLE settings(key TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL);
+CREATE TABLE search_snapshots(id TEXT PRIMARY KEY NOT NULL,vertical TEXT NOT NULL,query TEXT NOT NULL,payload TEXT NOT NULL,created_at INTEGER NOT NULL);
+CREATE TABLE downloaders(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL,kind TEXT NOT NULL,url TEXT NOT NULL,username TEXT,password TEXT,category TEXT,is_default INTEGER NOT NULL DEFAULT 0,path_maps TEXT,enabled INTEGER NOT NULL DEFAULT 1);

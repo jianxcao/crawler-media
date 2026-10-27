@@ -16,16 +16,16 @@ use crate::ApiState;
 ///
 /// `MARKER_CHECKED` records that an automatic cover was published. `MARKER_RETRY`
 /// marks an attempt worth retrying, and is the only value a scan clears (see
-/// `clear_library_cover_checked`); clearing `checked-v2` on every scan would
+/// `clear_library_cover_checked`); clearing `checked` on every scan would
 /// re-render covers needlessly.
-pub const MARKER_CHECKED: &str = "checked-v2";
-pub const MARKER_MANUAL: &str = "manual-v2";
-pub const MARKER_RETRY: &str = "auto-v2";
+pub const MARKER_CHECKED: &str = "checked";
+pub const MARKER_MANUAL: &str = "manual";
+pub const MARKER_RETRY: &str = "auto";
 
 /// 锁内取到的 owned 事实快照；渲染/写盘全部在锁外进行。
 pub struct CoverSnapshot {
     pub library: crate::store::Library,
-    pub rows: Vec<domain::LedgerRow>,
+    pub files: Vec<domain::LibraryFile>,
     pub revision: i64,
     pub marker: Option<String>,
     pub target_dir: PathBuf,
@@ -35,7 +35,7 @@ pub trait CoverRenderer: Send + Sync {
     fn render(
         &self,
         library: &crate::store::Library,
-        rows: &[domain::LedgerRow],
+        rows: &[domain::LibraryFile],
         options: &CoverOptions,
     ) -> Result<Option<Vec<u8>>, String>;
 }
@@ -47,7 +47,7 @@ impl CoverRenderer for LocalCoverRenderer {
     fn render(
         &self,
         library: &crate::store::Library,
-        rows: &[domain::LedgerRow],
+        rows: &[domain::LibraryFile],
         options: &CoverOptions,
     ) -> Result<Option<Vec<u8>>, String> {
         crate::http::library::render_cover_jpeg(library, rows, options)
@@ -90,21 +90,7 @@ impl LibraryCoverService {
             return Ok(None);
         }
         if let Some(existing) = existing_cover(&snapshot) {
-            if !needs_legacy_upgrade(&snapshot, &existing) {
-                return Ok(Some(existing));
-            }
-            // 兼容路径升级（F08）：同样使用不可变的新版本文件进行渲染和 CAS 发布！
-            // 只有当 CAS 发布成功后，新版本文件才生效；如果发布失败（例如并发修改或 DB 写入失败），
-            // 原有的旧 legacy 文件（包括内容）绝对不被就地覆盖破坏。未成功引用的新文件会被清除。
-            let options = crate::http::library::default_cover_options(&snapshot.library);
-            let rendered = render_off_lock(self.renderer.clone(), &snapshot, options).await?;
-            let Some(bytes) = rendered else {
-                mark(state, &snapshot.library.id, MARKER_RETRY);
-                return Ok(Some(existing));
-            };
-            let target = publish(state, &snapshot, &bytes, MARKER_CHECKED, &lease).await?;
-            mark(state, &snapshot.library.id, MARKER_CHECKED);
-            return Ok(Some(target));
+            return Ok(Some(existing));
         }
         if snapshot.marker.as_deref() == Some(MARKER_RETRY) {
             return Ok(None);
@@ -182,16 +168,15 @@ impl LibraryCoverService {
         if !published {
             return Err("cover.stale: 封面已被更新，请重试".into());
         }
-        // 只清理我们发布的版本文件；legacy 固定路径保持只读、不 unlink。
-        if let Some(path) = previous {
-            if path
+        // 只清理我们发布的版本文件。
+        if let Some(path) = previous
+            && path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with(&format!("library-{}-", snapshot.library.id)))
             {
                 let _ = std::fs::remove_file(path);
             }
-        }
         Ok(())
     }
 }
@@ -203,7 +188,7 @@ pub fn snapshot(state: &ApiState, id: &str) -> Result<CoverSnapshot, String> {
         .get_library(id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "library.missing: 媒体库不存在".to_string())?;
-    let rows = crate::http::library::rows_in_library(&store, &library);
+    let files = crate::http::library::files_in_library(&store, &library);
     let marker = store
         .get_setting(&format!("library_cover_checked.{}", library.id))
         .ok()
@@ -213,7 +198,7 @@ pub fn snapshot(state: &ApiState, id: &str) -> Result<CoverSnapshot, String> {
         marker,
         target_dir: store.library_covers_dir(),
         library,
-        rows,
+        files,
     })
 }
 
@@ -229,21 +214,7 @@ pub fn existing_cover(snapshot: &CoverSnapshot) -> Option<PathBuf> {
         }
         None => {}
     }
-    let legacy = snapshot
-        .target_dir
-        .join(format!("library-{}.jpg", snapshot.library.id));
-    legacy.is_file().then_some(legacy)
-}
-
-/// 旧 release 把单张 fanart 复制成固定路径封面：只有这种形态才重渲染升级。
-fn needs_legacy_upgrade(snapshot: &CoverSnapshot, existing: &Path) -> bool {
-    let legacy = snapshot
-        .target_dir
-        .join(format!("library-{}.jpg", snapshot.library.id));
-    existing == legacy
-        && snapshot.marker.as_deref() != Some(MARKER_CHECKED)
-        && !snapshot.rows.is_empty()
-        && crate::http::library::is_legacy_fanart_copy(&snapshot.rows, existing)
+    None
 }
 
 /// `lease.publish` 内只做 CAS；命中返回 true。
@@ -273,8 +244,8 @@ async fn render_off_lock(
     options: CoverOptions,
 ) -> Result<Option<Vec<u8>>, String> {
     let library = snapshot.library.clone();
-    let rows = snapshot.rows.clone();
-    tokio::task::spawn_blocking(move || renderer.render(&library, &rows, &options))
+    let files = snapshot.files.clone();
+    tokio::task::spawn_blocking(move || renderer.render(&library, &files, &options))
         .await
         .map_err(|error| format!("cover.render: {error}"))?
 }
@@ -339,11 +310,8 @@ fn mark(state: &ApiState, library_id: &str, marker: &str) {
 
 /// Remove every on-disk cover artifact owned by `library_id`.
 ///
-/// Library removal is the one place where the "legacy `library-{id}.jpg` is
-/// read-only and never unlinked" rule is intentionally lifted: the Library row is
-/// gone, so nothing can read that file again. Returns the number of files removed.
+/// Returns the number of versioned cover files removed.
 pub fn remove_library_cover_files(covers_dir: &Path, library_id: &str) -> usize {
-    let legacy = format!("library-{library_id}.jpg");
     let versioned = format!("library-{library_id}-");
     let entries = match std::fs::read_dir(covers_dir) {
         Ok(entries) => entries,
@@ -357,7 +325,7 @@ pub fn remove_library_cover_files(covers_dir: &Path, library_id: &str) -> usize 
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        if name != legacy && !name.starts_with(&versioned) {
+        if !name.starts_with(&versioned) {
             continue;
         }
         match std::fs::remove_file(entry.path()) {
@@ -381,7 +349,10 @@ pub fn remove_library_cover_files(covers_dir: &Path, library_id: &str) -> usize 
 pub fn purge_removed_library_covers(state: &ApiState) {
     let (covers_dir, removals) = {
         let store = state.store.lock();
-        (store.library_covers_dir(), store.succeeded_library_removals())
+        (
+            store.library_covers_dir(),
+            store.succeeded_library_removals(),
+        )
     };
     let removals = match removals {
         Ok(removals) => removals,

@@ -55,10 +55,10 @@ pub(super) fn finish_search(
         {
             return Err("目标 Library 正在删除或已不存在".into());
         }
-        let current_revisions = store.read_revisions().map_err(|e| e.to_string())?;
-        if current_revisions.library != context.observation_revisions.library
-            || current_revisions.app != context.observation_revisions.app
-        {
+        let current = store
+            .read_fingerprint(&context.library_id, media.id)
+            .map_err(|e| e.to_string())?;
+        if current != context.observation_fingerprint {
             return Err("Library 配置或台账在观察期间已变更，放弃本轮提交".into());
         }
     }
@@ -109,7 +109,7 @@ struct SearchContext {
     transfer_mode: Option<library::TransferMode>,
     scrape: bool,
     naming: String,
-    observation_revisions: store::ReadRevisions,
+    observation_fingerprint: store::ReadFingerprint,
 }
 
 fn load_search_context(
@@ -118,13 +118,11 @@ fn load_search_context(
     media: &domain::Media,
 ) -> Result<SearchContext, String> {
     let obs = crate::subscribe_library_read::observe_subscribe_library_facts(
-        state,
-        subscribe,
-        media.kind,
+        state, subscribe, media.kind,
     )?;
     let facts = obs.facts;
     let library_id = obs.library_id;
-    let observation_revisions = obs.revisions;
+    let observation_fingerprint = obs.fingerprint;
     let wash_filter = {
         let store = state.store.lock();
         subscribe
@@ -161,7 +159,7 @@ fn load_search_context(
         transfer_mode,
         scrape,
         naming,
-        observation_revisions,
+        observation_fingerprint,
     })
 }
 
@@ -217,6 +215,9 @@ fn admit_candidates(
         facts,
         downloader: &routed,
         library_root: &context.library_root,
+        library_id: subscribe.library_id,
+        root_id: None,
+        config_revision: None,
         transfer_mode: context.transfer_mode,
         scrape: context.scrape,
         hooks: None,
@@ -231,7 +232,15 @@ fn admit_candidates(
     })?;
     let deferred = selective
         .as_ref()
-        .map(|before| crate::selective_files::apply(&routed, subscribe, &added.chosen, before, absolute.as_ref()))
+        .map(|before| {
+            crate::selective_files::apply(
+                &routed,
+                subscribe,
+                &added.chosen,
+                before,
+                absolute.as_ref(),
+            )
+        })
         .unwrap_or_default();
     notify_search_additions(state, subscribe, media, &added);
     merge_added_pending(state, subscribe, &added, &routed)?;

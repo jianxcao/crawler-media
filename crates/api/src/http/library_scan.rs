@@ -18,10 +18,10 @@ pub(crate) mod runner;
 pub(crate) mod scope;
 pub(crate) mod video;
 use super::library::{
-    facets, missing_library, preferred_row, require_visible_library, rows_in_library, selection,
+    browse_filter_from_query, browse_order_from_query, browse_store_error, coverages_in_library,
+    missing_library, preferred_coverage, require_visible_library,
 };
-#[cfg(test)]
-pub(crate) use runner::checkpoint_fresh;
+use crate::store::library_query;
 pub(crate) use runner::scan_library_leased_resumable;
 use scope::{ScanScope, walk_video_files};
 
@@ -32,24 +32,19 @@ pub(crate) async fn scan_library(
     Path(id): Path<String>,
 ) -> Response {
     match state.scan_coordinator.enqueue(&state, &id, vec![]) {
-        Ok(op) => {
-            // 扫描会写 ledger（library revision 也会递增）；这里再显式标脏，保证
-            // 不依赖 revision 的调用方（如周期刷新）也能看到失效。
-            state.projection.mark_dirty(&id);
-            (
-                StatusCode::ACCEPTED,
-                axum::Json(serde_json::json!({
-                    "ok": true,
-                    "data": {
-                        "operation_id": op.id,
-                        "status": op.status.as_str(),
-                        "queued": true,
-                        "transferred": false,
-                    }
-                })),
-            )
-                .into_response()
-        }
+        Ok(op) => (
+            StatusCode::ACCEPTED,
+            axum::Json(serde_json::json!({
+                "ok": true,
+                "data": {
+                    "operation_id": op.id,
+                    "status": op.status.as_str(),
+                    "queued": true,
+                    "transferred": false,
+                }
+            })),
+        )
+            .into_response(),
         Err(crate::scan_operations::ScanEnqueueError::NotFound(e)) => {
             err(StatusCode::NOT_FOUND, "library.missing", &e)
         }
@@ -71,8 +66,10 @@ pub(crate) fn scan_library_root(state: &ApiState, root: &std::path::Path) -> Res
     scan_library_subdir(state, root, root)
 }
 
-fn ledger_row_by_path(store: &crate::Store, path: &str) -> Option<domain::LedgerRow> {
-    store.ledger_by_path(path).unwrap_or_else(|error| {
+/// 路径 → 覆盖记录（含该文件已入库的 unit）。旧 `ledger_row_by_path` 的单值
+/// `(season, episode)` 读数在这里被 `FileCoverage.units` 取代。
+fn coverage_by_path(store: &crate::Store, path: &str) -> Option<domain::FileCoverage> {
+    store.file_coverage_by_path(path).unwrap_or_else(|error| {
         tracing::warn!(%error, path, "扫描期间读取台账行失败");
         None
     })
@@ -148,23 +145,33 @@ pub(crate) fn scan_library_subdir(
         .filter_transferred(outcome.transferred)
         .map_err(|e| format!("{:?}", e))?;
 
-    let inserted = scan_scope.publish(state, &lease, |store| {
-        crate::watch_ledger::record_paths(store, filtered_transferred.clone())
+    let plan = lease.publish(|| {
+        let store = state.store.lock();
+        scan_scope
+            .validate(&store)
+            .map_err(|e| format!("{:?}", e))?;
+        crate::watch_ledger::plan_paths(&store, filtered_transferred.clone())
+    })?;
+    let observed = plan.observe()?;
+    let inserted = lease.publish(|| {
+        let store = state.store.lock();
+        scan_scope.validate(&store).map_err(|e| format!("{e:?}"))?;
+        observed.record(&store)
     })?;
 
     let scan_media = {
         let store = state.store.lock();
         let mut map = HashMap::new();
         for file in &filtered_transferred {
-            let Some(row) = ledger_row_by_path(&store, &file.path.display().to_string()) else {
+            let Some(coverage) = coverage_by_path(&store, &file.path.display().to_string()) else {
                 continue;
             };
-            let Some(media) = media_by_id(&store, row.media_id) else {
+            let Some(media) = media_by_id(&store, coverage.file.media_id) else {
                 continue;
             };
             if media.kind != domain::MediaKind::Video {
                 map.entry(media.id)
-                    .or_insert((media, PathBuf::from(row.path)));
+                    .or_insert((media, coverage.file.path.clone()));
             }
         }
         map
@@ -185,8 +192,6 @@ pub(crate) fn scan_library_subdir(
             let _ = crate::http::library::library_cover_path(&store, &library);
         }
     }
-    // ledger 与 NFO/图片都可能已变化：显式标脏，不依赖 revision 触发。
-    state.projection.mark_dirty(&library_id);
     Ok(())
 }
 
@@ -203,8 +208,18 @@ fn scan_video_subdir(
     let filtered_files = scan_scope
         .filter_paths(files)
         .map_err(|e| format!("{:?}", e))?;
-    let inserted = scan_scope.publish(state, lease, |store| {
-        crate::watch_ledger::record_video_paths(store, filtered_files)
+    let plan = lease.publish(|| {
+        let store = state.store.lock();
+        scan_scope
+            .validate(&store)
+            .map_err(|e| format!("{:?}", e))?;
+        crate::watch_ledger::plan_video_paths(&store, filtered_files)
+    })?;
+    let observed = plan.observe()?;
+    let inserted = lease.publish(|| {
+        let store = state.store.lock();
+        scan_scope.validate(&store).map_err(|e| format!("{e:?}"))?;
+        observed.record(&store)
     })?;
     tracing::info!(root = %root.display(), target_dir = %target_dir.display(),
         inserted = inserted.len(), "实时 Video Library 扫描完成，不进行 Movie/TV 识别");
@@ -261,27 +276,28 @@ fn resolve_and_scrape_subdir(
             // None 也包含"本来就没有可写的图"，不是错误。
             let _ = crate::poster_fetch::attach_poster(state, &resolved_media, &path);
             let _ = crate::poster_fetch::attach_backdrop(state, &resolved_media, &path);
-            let (target_row, all_rows) = {
+            let (target_coverage, all_coverages) = {
                 let store = state.store.lock();
-                let rows = match store.ledger_for_media(resolved_media.id) {
-                    Ok(rows) => rows,
+                let coverages = match store.file_coverage_for_media(resolved_media.id) {
+                    Ok(coverages) => coverages,
                     Err(error) => {
                         tracing::warn!(%error, media_id = %resolved_media.id, "读取 Media 台账行失败");
                         Vec::new()
                     }
                 };
-                let path_str = path.display().to_string();
-                let row = rows.iter().find(|r| r.path == path_str).cloned();
-                (row, rows)
+                let target = coverages
+                    .iter()
+                    .find(|coverage| coverage.file.path.as_path() == path)
+                    .cloned();
+                (target, coverages)
             };
-            if let Some(row) = target_row {
-                scrape_library_metadata(state, &resolved_media, &row, &path, &all_rows);
+            if let Some(coverage) = target_coverage {
+                scrape_library_metadata(state, &resolved_media, &coverage, &path, &all_coverages);
             }
         }
     }
     Ok(())
 }
-
 
 /// POST /libraries/{id}/metadata/refresh — one cover per Media owned under the
 /// library, using the newest owned episode for TV; also writes rich NFO from
@@ -298,54 +314,69 @@ pub(crate) async fn refresh_metadata(
     let Some(library) = library_by_id(&store, &id) else {
         return missing_library();
     };
-    let owned_rows = rows_in_library(&store, &library);
-    let mut grouped: HashMap<domain::MediaId, Vec<domain::LedgerRow>> = HashMap::new();
-    for row in &owned_rows {
-        grouped.entry(row.media_id).or_default().push(row.clone());
+    // 读数口径保持 `list_file_coverage()` + library 归属过滤：这就是 Task 18/19/20
+    // 基线记录的 `root_ledger_scans` 路径，换成 `file_coverage_for_media` 会让已冻结的
+    // store 侧读数与这里的 api 侧读数不可比，并且丢掉 library 归属过滤。
+    let owned_coverages = coverages_in_library(&store, &library);
+    let mut grouped: HashMap<domain::MediaId, Vec<domain::FileCoverage>> = HashMap::new();
+    for coverage in &owned_coverages {
+        grouped
+            .entry(coverage.file.media_id)
+            .or_default()
+            .push(coverage.clone());
     }
     let mut work = Vec::new();
-    for (media_id, media_rows) in grouped {
+    for (media_id, media_coverages) in grouped {
         let Some(media) = media_by_id(&store, media_id) else {
             continue;
         };
-        let live_rows: Vec<_> = media_rows
+        let live_coverages: Vec<_> = media_coverages
             .iter()
-            .filter(|row| {
-                crate::scrape_metadata::targets::video_present(std::path::Path::new(&row.path))
-            })
+            .filter(|coverage| crate::scrape_metadata::targets::video_present(&coverage.file.path))
             .collect();
-        if let Some(row) = preferred_row(&live_rows) {
-            work.push((media, (*row).clone()));
+        if let Some(coverage) = preferred_coverage(&live_coverages) {
+            work.push((media, (*coverage).clone()));
         }
     }
     drop(store);
     let mut refreshed = 0u32;
-    for (media, row) in work {
-        let path = PathBuf::from(&row.path);
+    for (media, coverage) in work {
+        if lease.control().is_cancelled()
+            || !state
+                .store
+                .lock()
+                .library_accepts_work(&id)
+                .unwrap_or(false)
+        {
+            return err(
+                StatusCode::CONFLICT,
+                "library.deleting",
+                "Library 正在删除或已冻结",
+            );
+        }
+        let path = coverage.file.path.clone();
         if crate::poster_fetch::attach_poster(&state, &media, &path).is_some() {
             refreshed += 1;
         }
         // 真实失败由 poster_fetch 内部记录；None 表示没有可写的图。
         let _ = crate::poster_fetch::force_attach_backdrop(&state, &media, &path);
         // TMDB 详情 + 演职员写入 NFO（无 NFO 时也补一份），供条目详情页读取。
-        scrape_library_metadata(&state, &media, &row, &path, &owned_rows);
+        scrape_library_metadata(&state, &media, &coverage, &path, &owned_coverages);
         if lease.control().is_cancelled() {
             return err(StatusCode::CONFLICT, "library.deleting", "Library 正在删除");
         }
         // 章节场景图自动生成（有内嵌章节且无帧时）。
         crate::http::library_chapters::auto_generate_chapters(&state, &path);
     }
-    // NFO / 海报 / 背景已写入：文件事实变了但 revision 不会动。
-    state.projection.mark_dirty(&id);
     ok(json!({ "queued": true, "refreshed": refreshed })).into_response()
 }
 
 fn scrape_library_metadata(
     state: &ApiState,
     media: &domain::Media,
-    row: &domain::LedgerRow,
+    coverage: &domain::FileCoverage,
     path: &std::path::Path,
-    owned_rows: &[domain::LedgerRow],
+    owned_coverages: &[domain::FileCoverage],
 ) {
     let lease = match state.acquire_path_work(path, media.kind) {
         Ok(lease) => lease,
@@ -355,10 +386,12 @@ fn scrape_library_metadata(
         return;
     };
     if media.kind == domain::MediaKind::Tv {
-        let show_root = crate::scrape_metadata::show_root(path, row);
-        let episodes = owned_rows
+        // S4 目标签名（`scrape_metadata::show_root(path, coverage)` / `scrape_tv_sidecars(state, media,
+        // show_root, coverages)`）在 task-79 落地前这两行按目标形状传参，报错归属 S4。
+        let show_root = crate::scrape_metadata::show_root(path, coverage);
+        let episodes = owned_coverages
             .iter()
-            .filter(|episode| episode.media_id == media.id)
+            .filter(|owned| owned.file.media_id == media.id)
             .cloned()
             .collect::<Vec<_>>();
         crate::scrape_metadata::scrape_tv_sidecars(state, media, &show_root, &episodes);
@@ -373,16 +406,42 @@ fn scrape_library_metadata(
                 return;
             }
             let nfo = crate::scrape_metadata::nfo_from_tmdb(media, &metadata);
+            crate::scrape_metadata::adopt_tmdb_metadata(
+                state,
+                media,
+                tmdb_id,
+                domain::EntityScope::Work,
+            );
+            crate::scrape_metadata::record_scraped_display_meta(state, media.id, &metadata, &nfo);
             if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
                 let target = path.with_file_name(format!("{stem}.nfo"));
-                let write = || {
-                    crate::scrape_metadata::write_nfo(&target, media, &nfo);
-                    Ok(())
-                };
-                let _ = match &lease {
-                    Some(lease) => lease.publish(write),
-                    None => write(),
-                };
+                // 先捕获用户对上一份 NFO 的改动，再整体重写并导出：write_nfo 会原地
+                // 覆盖标量，捕获必须发生在它之前，否则改动无法进入 overrides。
+                let export = crate::scrape_metadata::export::begin_sidecar_export(
+                    state,
+                    media,
+                    path,
+                    domain::EntityScope::Work,
+                );
+                // A video is exported only through the driver (CAS + digest guard).
+                // A file that is not in the ledger has no owner and no CAS identity,
+                // so it gets no NFO: writing one in place would create an unowned
+                // sidecar that no recorded Library protects.
+                match export {
+                    Ok(crate::scrape_metadata::export::ExportPreparation::Ledgered(request)) => {
+                        crate::scrape_metadata::export::finish_sidecar_export(state, request)
+                    }
+                    // Preparation failed: already logged; this file's sidecar stays as is.
+                    Err(_) => {}
+                    Ok(crate::scrape_metadata::export::ExportPreparation::NotLedgered) => {
+                        tracing::info!(
+                            media_id = %media.id,
+                            path = %path.display(),
+                            target = %target.display(),
+                            "未入台账的文件不导出 NFO"
+                        );
+                    }
+                }
                 let movie_root = path.parent().unwrap_or(path);
                 crate::scrape_metadata::scrape_movie_fanart(state, media, movie_root);
             }
@@ -407,20 +466,26 @@ pub(crate) async fn missing(
     };
     let missing_map = store.missing_at_by_path().unwrap_or_default();
     let mut media_groups: HashMap<domain::MediaId, (domain::Media, Vec<Value>)> = HashMap::new();
-    for row in rows_in_library(&store, &library) {
-        if missing_map.contains_key(&row.path) {
-            if let Some(media) = store.get_media(row.media_id).ok().flatten() {
-                let entry = media_groups
-                    .entry(row.media_id)
-                    .or_insert_with(|| (media, Vec::new()));
-                entry.1.push(json!({
-                    "id": row.id.to_string(),
-                    "file_path": row.path,
-                    "season_number": row.season.unwrap_or(0),
-                    "episode_number": row.episode.unwrap_or(0),
-                    "size_bytes": 0,
-                }));
-            }
+    for coverage in coverages_in_library(&store, &library) {
+        if !missing_map.contains_key(coverage.file.path.to_string_lossy().as_ref()) {
+            continue;
+        }
+        let Some(media) = store.get_media(coverage.file.media_id).ok().flatten() else {
+            continue;
+        };
+        let entry = media_groups
+            .entry(coverage.file.media_id)
+            .or_insert_with(|| (media, Vec::new()));
+        // 旧读模型里每个 (file × unit) 一条 JSON：整片（旧 season/episode 皆 None）
+        // 记 (0, 0)，其余记 unit 的季/集，逐条展开保持条目集合不变。
+        for unit in &coverage.units {
+            entry.1.push(json!({
+                "id": coverage.file.file_id.to_string(),
+                "file_path": coverage.file.path,
+                "season_number": if unit.is_whole() { 0 } else { unit.season },
+                "episode_number": if unit.is_whole() { 0 } else { unit.episode },
+                "size_bytes": 0,
+            }));
         }
     }
     let items: Vec<Value> = media_groups
@@ -439,89 +504,78 @@ pub(crate) async fn missing(
 }
 
 /// GET /libraries/{id}/item-index — first-letter index buckets of owned items.
+///
+/// The buckets are a run-length encoding of the browse order, so they come from the same
+/// SQL ordering the item page uses: one query, no in-memory selection.
 pub(crate) async fn item_index(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
     Path(id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    // 授权从当前配置判定；浏览事实优先取目标 Library 的 ready 投影（零文件 IO），
-    // 投影不可用时回退到旧的全量读取（已在 helper 内 warn）。
-    let library = {
+    let lib_id = match id.parse::<domain::LibraryId>() {
+        Ok(lib_id) => lib_id,
+        Err(_) => return missing_library(),
+    };
+    {
         let store = state.store.lock();
-        match require_visible_library(&store, &id, user_id) {
-            Ok(library) => library,
-            Err(response) => return response,
+        if let Err(response) = require_visible_library(&store, &id, user_id) {
+            return response;
+        }
+    }
+    let filter = match browse_filter_from_query(&query) {
+        Ok(filter) => filter,
+        Err(message) => return err(StatusCode::BAD_REQUEST, "library.invalid", &message),
+    };
+    let (order, descending) = browse_order_from_query(&query);
+    let lib_q = library_query::LibraryQuery {
+        library_id: lib_id,
+        user_id,
+        filter,
+        order,
+        descending,
+        page: library_query::BrowsePage::Offset { start: 0, limit: 0 },
+        include_total: false,
+    };
+    // 分档与「每档起始游标」一起在 store 里算：游标语义是「严格排在它之后」，
+    // 所以每档带的是上一档最后一格的游标（见 `Store::library_item_index`）。
+    // 绝对下标不进线上格式——前端按 `count` 前缀和就能还原档位位置。
+    let buckets = {
+        let store = state.store.lock();
+        match store.library_item_index(&lib_q) {
+            Ok(buckets) => buckets,
+            Err(error) => return browse_store_error(error),
         }
     };
-    let (snapshot, _artwork) =
-        match selection::load_browse_snapshot_or_projection(&state, &library, user_id).await {
-            Ok(loaded) => loaded,
-            Err(response) => return response,
-        };
-    let files = state.browse_files.clone();
-    let work = state
-        .http_work
-        .run(selection::BROWSE_DEADLINE, move || {
-            let selected = match selection::select_snapshot(snapshot, &query, files.as_ref()) {
-                Ok(items) => items,
-                Err(response) => return response,
-            };
-            let mut buckets: Vec<Value> = Vec::new();
-            let mut current_initial = String::new();
-            let mut current_offset = 0usize;
-            let mut current_count = 0usize;
-
-            for (i, item) in selected.iter().enumerate() {
-                let initial = item
-                    .media
-                    .title
-                    .chars()
-                    .next()
-                    .map(|c| c.to_uppercase().to_string())
-                    .unwrap_or_else(|| "#".into());
-                if initial != current_initial {
-                    if current_count > 0 {
-                        buckets.push(json!({
-                            "initial": current_initial,
-                            "count": current_count,
-                            "offset": current_offset,
-                        }));
-                    }
-                    current_initial = initial;
-                    current_offset = i;
-                    current_count = 1;
-                } else {
-                    current_count += 1;
-                }
-            }
-            if current_count > 0 {
-                buckets.push(json!({
-                    "initial": current_initial,
-                    "count": current_count,
-                    "offset": current_offset,
-                }));
-            }
-            ok_list(buckets).into_response()
+    let payload: Vec<Value> = buckets
+        .into_iter()
+        .map(|bucket| {
+            json!({
+                "initial": bucket.initial,
+                "count": bucket.count,
+                "cursor": bucket.cursor,
+            })
         })
-        .await;
-    match work {
-        Ok(response) => response,
-        Err(error) => selection::browse_work_error(error),
-    }
+        .collect();
+    ok_list(payload).into_response()
 }
 
 /// GET /libraries/{id}/facets — 十维筛选候选与「排除自身维」计数。
+///
+/// Dimension keys and labels are the frontend contract; counts come from the same predicate
+/// builder the item page uses, with the dimension's own condition removed.
 pub(crate) async fn facets(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
+    axum::Extension(credential): axum::Extension<store::ReadCredential>,
     Path(id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
+    axum::Extension(timing): axum::Extension<media_server::provider::QueryTiming>,
 ) -> Response {
-    // tier：缺失/空串按 all（向后兼容旧调用方仍能拿到 resolutions）；其余非法值 400。
+    // Missing/empty tier selects all ten dimensions; unknown values are rejected.
     let tier = match query.get("tier").map(String::as_str) {
-        None | Some("") | Some("all") => "all",
-        Some("primary") => "primary",
+        None | Some("") | Some("all") => library_query::FacetTier::All,
+        Some("primary") => library_query::FacetTier::Primary,
         Some(_) => {
             return err(
                 StatusCode::BAD_REQUEST,
@@ -530,47 +584,64 @@ pub(crate) async fn facets(
             );
         }
     };
-    // 授权从当前配置判定；候选事实优先取目标 Library 的 ready 投影（零文件 IO），
-    // 投影不可用时回退到旧的全量读取（已在 helper 内 warn）。
-    let library = {
-        let store = state.store.lock();
-        match require_visible_library(&store, &id, user_id) {
-            Ok(library) => library,
-            Err(response) => return response,
-        }
+    let lib_id = match id.parse::<domain::LibraryId>() {
+        Ok(lib_id) => lib_id,
+        Err(_) => return missing_library(),
     };
-    let (snapshot, _artwork) =
-        match selection::load_browse_snapshot_or_projection(&state, &library, user_id).await {
-            Ok(loaded) => loaded,
-            Err(response) => return response,
-        };
-    let files = state.browse_files.clone();
-    let work = state
-        .http_work
-        .run(selection::BROWSE_DEADLINE, move || {
-            let items = selection::select_all_for_facets(snapshot, files.as_ref());
-            let facets = match facets::build_facets(&items, &query, tier) {
-                Ok(facets) => facets,
-                Err(message) => {
-                    tracing::error!(%message, "Library facets query rejected");
-                    return err(StatusCode::BAD_REQUEST, "library.invalid", &message);
-                }
-            };
-            match serde_json::to_value(&facets) {
-                Ok(value) => ok(value).into_response(),
-                Err(error) => {
-                    tracing::error!(%error, "failed to serialize library facets");
-                    err(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "store.error",
-                        &error.to_string(),
-                    )
-                }
+    let filter = match browse_filter_from_query(&query) {
+        Ok(filter) => filter,
+        Err(message) => return err(StatusCode::BAD_REQUEST, "library.invalid", &message),
+    };
+    let request = library_query::FacetRequest {
+        library_id: lib_id,
+        user_id,
+        filter,
+        tier,
+    };
+    let selected = crate::library_read_work::run_self_library_read(
+        &state,
+        credential,
+        lib_id,
+        store::LibraryReadRequest::Facets(request),
+        timing.deadline,
+    )
+    .await;
+    let facets = match selected {
+        Ok(store::LibraryReadResult::Facets(facets)) => facets,
+        Ok(_) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "library.read",
+                "查询类型错误",
+            );
+        }
+        Err(response) => return response,
+    };
+    let mut body = serde_json::Map::new();
+    body.insert("total".into(), json!(facets.total));
+    for key in [
+        "genres",
+        "countries",
+        "decades",
+        "watch",
+        "ratings",
+        "runtimes",
+        "languages",
+        "resolutions",
+        "hdr",
+        "stock",
+    ] {
+        let counts = facets.groups.get(key).cloned().unwrap_or_default();
+        match serde_json::to_value(counts) {
+            Ok(value) => body.insert(key.into(), value),
+            Err(error) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store.error",
+                    &error.to_string(),
+                );
             }
-        })
-        .await;
-    match work {
-        Ok(response) => response,
-        Err(error) => selection::browse_work_error(error),
+        };
     }
+    ok(Value::Object(body)).into_response()
 }

@@ -12,7 +12,7 @@ use parking_lot::Mutex;
 use serde_json::json;
 use tower::ServiceExt;
 
-use super::super::common::{Fixtures, json_data, request, state, subscribe_payload};
+use super::super::common::{Fixtures, json_data, request, state, subscribe_payload_with_filter};
 
 #[derive(Default)]
 pub(super) struct CompletedFiles(Mutex<HashMap<String, Vec<PathBuf>>>);
@@ -55,40 +55,33 @@ impl TransferFixture {
             downloader.clone(),
         );
         let app = router(state.clone());
-        // `/directory` decomposes both patterns into one shared `naming_entry_dir`,
-        // so the kind that is not under test must reuse the same entry segment or
-        // it would silently overwrite the tested pattern's directory level.
-        let entry = naming.split('/').next().unwrap_or("{title}");
-        let tv_naming = if tv {
-            naming.to_string()
+        super::super::common::set_default_root(&app, "movie", &tmp.path().join("movies")).await;
+        super::super::common::set_default_root(&app, "tv", &tmp.path().join("tv")).await;
+        let response = super::super::common::set_transfer_settings(
+            &app,
+            json!({"transfer_mode":"copy","scrape":false}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let segments: Vec<&str> = naming.split('/').collect();
+        let setting = if tv {
+            json!({"naming_entry_dir":segments[0],"naming_season_dir":segments[1],"naming_episode_file":segments[2]})
         } else {
-            format!("{entry}/{{season}}/{{episode}}{{ext}}")
-        };
-        let movie_naming = if tv {
-            format!("{entry}/{{title}} ({{year}}){{ext}}")
-        } else {
-            naming.to_string()
+            json!({"naming_entry_dir":segments[0],"naming_movie_file":segments[1]})
         };
         let response = app
             .clone()
             .oneshot(request(
                 "PUT",
-                "/api/v1/directory",
+                "/api/v1/settings/scrape",
                 Some("management-secret"),
-                json!({
-                    "movie_root": tmp.path().join("movies"), "tv_root": tmp.path().join("tv"),
-                    "transfer_mode": "copy", "movie_naming": movie_naming, "tv_naming": tv_naming,
-                    "scrape": false,
-                }),
+                json!({"setting":setting}),
             ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let mut body = subscribe_payload("search");
-        body["filter"] = json!({
-            "name": "retry-1080p",
-            "atoms": [{ "kind": "resolution", "value": "1080p", "priority": 100 }]
-        });
+        let filter_id = super::super::common::create_rule_set(&app).await;
+        let mut body = subscribe_payload_with_filter("search", Some(&filter_id));
         body["media"] = if tv {
             json!({"kind": "tv", "title": "The Long Watch"})
         } else {
@@ -172,15 +165,15 @@ impl TransferFixture {
     }
 
     pub fn assert_sources(&self, expected: &[(&Path, &Path)]) {
-        let rows = self.state.store().lock().list_ledger_with_mode().unwrap();
+        let rows = self.state.store().lock().list_file_coverage().unwrap();
         assert_eq!(rows.len(), expected.len(), "No duplicate video ledger");
         for (source, destination) in expected {
-            let row = rows
+            let coverage = rows
                 .iter()
-                .find(|(row, _, _)| Path::new(&row.path) == *destination)
+                .find(|coverage| coverage.file.path.as_path() == *destination)
                 .unwrap();
-            assert_eq!(row.0.media_id, self.media_id);
-            assert_eq!(row.2.as_deref(), source.to_str());
+            assert_eq!(coverage.file.media_id, self.media_id);
+            assert_eq!(coverage.file.source_path.as_deref(), Some(*source));
         }
     }
 

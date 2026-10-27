@@ -66,39 +66,6 @@ fn test_fixture_mode_may_reuse_token_as_password() {
         _ => panic!("fixture must seed"),
     }
 }
-
-#[test]
-fn production_insecure_legacy_requires_distinct_password() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Store::open(tmp.path()).unwrap();
-    let admin_id = UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap();
-    store
-        .insert_user(&User {
-            id: admin_id,
-            login: "admin".into(),
-            enabled: true,
-            role: UserRole::Admin,
-        })
-        .unwrap();
-    store.set_password(admin_id, "legacy-token").unwrap();
-
-    let err = prepare_admin_credentials(&store, "legacy-token", None, BootstrapMode::Production)
-        .unwrap_err();
-    assert!(matches!(
-        err,
-        BootstrapCredentialsError::InsecureLegacyNeedsPassword
-    ));
-
-    let ok_action = prepare_admin_credentials(
-        &store,
-        "legacy-token",
-        Some("new-distinct-pw"),
-        BootstrapMode::Production,
-    )
-    .unwrap();
-    assert!(matches!(ok_action, AdminBootstrapAction::Rotate { .. }));
-}
-
 #[test]
 fn production_existing_admin_with_empty_password_requires_password_setup() {
     let tmp = tempfile::tempdir().unwrap();
@@ -128,59 +95,17 @@ fn production_existing_admin_with_empty_password_requires_password_setup() {
         BootstrapMode::Production,
     )
     .unwrap();
-    assert!(matches!(
+    assert_eq!(
         action,
-        AdminBootstrapAction::Seed { .. } | AdminBootstrapAction::Rotate { .. }
-    ));
-}
-
-#[test]
-fn simultaneous_cli_and_admin_password_change() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Store::open(tmp.path()).unwrap();
-    let admin_id = UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap();
-    store
-        .insert_user(&User {
-            id: admin_id,
-            login: "admin".into(),
-            enabled: true,
-            role: UserRole::Admin,
-        })
-        .unwrap();
-    // 旧实例：密码是旧 token A，并且 user_tokens 表中存有旧 token A
-    store.set_password(admin_id, "old-cli-token-a").unwrap();
-    store.set_user_token(admin_id, "old-cli-token-a").unwrap();
-
-    // 场景 1：运维同时更换了新 token B，但未提供独立密码：必须拦截报错！
-    let err = prepare_admin_credentials(&store, "new-cli-token-b", None, BootstrapMode::Production)
-        .unwrap_err();
-    assert!(
-        matches!(err, BootstrapCredentialsError::InsecureLegacyNeedsPassword),
-        "即使同时换了新 CLI Token，仍须检测出旧密码为不安全 token 并要求独立密码"
-    );
-
-    // 场景 2：运维同时更换了新 token B，并提供了独立新密码 C：必须触发 Rotate！
-    let action = prepare_admin_credentials(
-        &store,
-        "new-cli-token-b",
-        Some("new-independent-pass-c"),
-        BootstrapMode::Production,
-    )
-    .unwrap();
-    match action {
-        AdminBootstrapAction::Rotate {
-            password,
-            cli_token,
-        } => {
-            assert_eq!(password, "new-independent-pass-c");
-            assert_eq!(cli_token, "new-cli-token-b");
+        AdminBootstrapAction::Seed {
+            password: "valid-admin-pw".into(),
+            cli_token: "my-cli-token".into(),
         }
-        _ => panic!("必须触发 Rotate 升级管理员密码"),
-    }
+    );
 }
 
 #[test]
-fn replacement_password_cannot_reuse_old_cli() {
+fn production_password_setup_rejects_known_bearers() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
     let admin_id = UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap();
@@ -192,51 +117,28 @@ fn replacement_password_cannot_reuse_old_cli() {
             role: UserRole::Admin,
         })
         .unwrap();
-    store.set_password(admin_id, "old-cli-token-a").unwrap();
-    store.set_user_token(admin_id, "old-cli-token-a").unwrap();
-
-    // 运维将 CLI 换成 B，却把 ADMIN_PASSWORD 设为了旧的 CLI 密钥 A
-    let res = prepare_admin_credentials(
-        &store,
-        "new-cli-token-b",
-        Some("old-cli-token-a"),
-        BootstrapMode::Production,
-    );
-    assert!(
-        matches!(
-            res,
-            Err(BootstrapCredentialsError::PasswordEqualsKnownBearer)
-        ),
-        "绝不可将旧系统 CLI Bearer 密钥重新设为管理员登录密码"
-    );
-}
-
-#[test]
-fn legacy_detection_survives_admin_rename() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = Store::open(tmp.path()).unwrap();
-    let admin_id = UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap();
-    // 管理员账号曾被重命名为 "root-admin"
     store
-        .insert_user(&User {
-            id: admin_id,
-            login: "root-admin".into(),
-            enabled: true,
-            role: UserRole::Admin,
-        })
+        .register_current_cli_token(admin_id, "previous-cli-token")
         .unwrap();
-    store.set_password(admin_id, "legacy-token-a").unwrap();
-    store.set_user_token(admin_id, "legacy-token-a").unwrap();
+    store.set_user_token(admin_id, "admin-session").unwrap();
 
-    // 生产启动：换了新 token B，但未提供独立密码
-    let res = prepare_admin_credentials(&store, "new-token-b", None, BootstrapMode::Production);
-    assert!(
-        matches!(
-            res,
-            Err(BootstrapCredentialsError::InsecureLegacyNeedsPassword)
-        ),
-        "重命名管理员后，必须依然能够识别其不安全的旧 token 密码并强制要求独立密码"
-    );
+    for password in ["previous-cli-token", "admin-session"] {
+        let err = prepare_admin_credentials(
+            &store,
+            "new-cli-token",
+            Some(password),
+            BootstrapMode::Production,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            BootstrapCredentialsError::PasswordEqualsKnownBearer
+        ));
+    }
+    assert!(!store.admin_password_is_set(admin_id).unwrap());
+    assert!(store.user_by_token("previous-cli-token").unwrap().is_some());
+    assert!(store.user_by_token("admin-session").unwrap().is_some());
+    assert!(store.user_by_token("new-cli-token").unwrap().is_none());
 }
 
 #[tokio::test]
@@ -422,63 +324,52 @@ async fn bootstrap_admin_password_and_cli_token_are_separated() {
     assert_eq!(login_token_as_pw.status(), StatusCode::UNAUTHORIZED);
 }
 
-#[tokio::test]
-async fn legacy_instance_with_token_as_password_upgrades_safely() {
+#[test]
+fn unsupported_admin_credentials_are_rejected_without_replacement_or_token() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().join("data");
-
-    // 模拟旧版本数据库：admin 的 password 等于 old-token
-    let old_token = "old-shared-secret-111";
-    let store_raw = Store::open(&data_dir).unwrap();
+    let store = Store::open(&data_dir).unwrap();
     let admin_id = UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap();
     let conn = Connection::open(data_dir.join("app.db")).unwrap();
-    conn.execute(
-        "INSERT INTO users (id, login, password, enabled, role) VALUES (?1, 'admin', ?2, 1, 'admin')",
-        rusqlite::params![admin_id.to_string(), old_token],
-    ).unwrap();
-    conn.execute(
-        "INSERT INTO user_tokens (token, user_id, created_at) VALUES (?1, ?2, 0)",
-        rusqlite::params![old_token, admin_id.to_string()],
-    )
-    .unwrap();
-    drop(conn);
-
-    let store = Arc::new(Mutex::new(store_raw));
-    let new_admin_pw = "new-distinct-admin-password";
-
-    // 重新启动服务并提供独立的 new_admin_pw
-    let state = ApiState::new_arc_with_admin_password(
-        store.clone(),
-        old_token.to_string(),
-        Some(new_admin_pw.to_string()),
-        ProfileSet::load(None).unwrap(),
-        Arc::new(NoopFetcher),
-        Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
-        tmp.path().join("library"),
-    )
-    .unwrap();
-    let app = router(state);
-
-    // 验证新密码能正常登录
-    let login_new = app
-        .clone()
-        .oneshot(request(
-            "POST",
-            "/api/v1/auth/login",
-            json!({ "username": "admin", "password": new_admin_pw }),
-        ))
-        .await
+    store
+        .insert_user(&User {
+            id: admin_id,
+            login: "admin".into(),
+            enabled: true,
+            role: UserRole::Admin,
+        })
         .unwrap();
-    assert_eq!(login_new.status(), StatusCode::OK);
 
-    // 验证旧 token 不能再被当作密码登录
-    let login_old = app
-        .oneshot(request(
-            "POST",
-            "/api/v1/auth/login",
-            json!({ "username": "admin", "password": old_token }),
-        ))
-        .await
+    for unsupported in ["plain-legacy-secret", "$argon2id$malformed"] {
+        conn.execute(
+            "UPDATE users SET password = ?2 WHERE id = ?1",
+            rusqlite::params![admin_id.to_string(), unsupported],
+        )
         .unwrap();
-    assert_eq!(login_old.status(), StatusCode::UNAUTHORIZED);
+        for replacement in [None, Some("new-distinct-admin-password")] {
+            let err = prepare_admin_credentials(
+                &store,
+                "plain-legacy-secret",
+                replacement,
+                BootstrapMode::Production,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    BootstrapCredentialsError::Store(store::StoreError::Invalid(_))
+                ),
+                "unsupported credentials must not be adopted or rotated: {err:?}"
+            );
+            let retained = store.login_credential("admin").unwrap().unwrap();
+            assert_eq!(retained.observed_password, unsupported);
+            assert!(store.latest_token_for_user(admin_id).unwrap().is_none());
+            assert!(
+                store
+                    .get_setting("auth.cli_token.current")
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
 }

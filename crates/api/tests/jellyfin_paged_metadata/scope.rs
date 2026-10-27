@@ -8,7 +8,7 @@ async fn library_scoped_series_id_lists_episodes_without_include_types() {
     // 第二个库：同名结构，用来验证库归属仍然生效。
     let other_root = fixture.dir.path().join("tv-other");
     std::fs::create_dir_all(&other_root).unwrap();
-    let (other_library, other_show, other_episode) = {
+    let (other_library, other_show) = {
         let store = fixture.state.store();
         let store = store.lock();
         let library = store
@@ -22,11 +22,11 @@ async fn library_scoped_series_id_lists_episodes_without_include_types() {
             )
             .unwrap();
         let media_id = new_media(&store, "Other show");
-        let episode = insert_episode(&store, &other_root, media_id, 1, 1);
-        (library.id, media_id, episode)
+        insert_episode(&store, &other_root, media_id, 1, 1);
+        (library.id, media_id)
     };
     let app = router(fixture.state.clone());
-    let show = media_id_for_title(&fixture.state, "Show000");
+    let show = series_wire_id_for_title(&fixture.state, "Show000");
 
     let by_series = get_json(&app, &format!("/Items?SeriesId={show}")).await;
     assert_eq!(by_series["TotalRecordCount"], 2, "{by_series}");
@@ -51,7 +51,7 @@ async fn library_scoped_series_id_lists_episodes_without_include_types() {
         &format!(
             "/Items?ParentId={}&SeriesId={}&Recursive=true",
             fixture.library_id,
-            other_show.to_string().replace('-', "")
+            work_wire_id(other_show)
         ),
     )
     .await;
@@ -61,15 +61,12 @@ async fn library_scoped_series_id_lists_episodes_without_include_types() {
         &format!(
             "/Items?ParentId={}&SeriesId={}&Recursive=true",
             other_library,
-            other_show.to_string().replace('-', "")
+            work_wire_id(other_show)
         ),
     )
     .await;
     assert_eq!(items(&own_scope).len(), 1);
-    assert_eq!(
-        items(&own_scope)[0]["Id"],
-        other_episode.to_string().replace('-', "")
-    );
+    assert_eq!(items(&own_scope)[0]["Id"], unit_wire_id(other_show, 1, 1));
 }
 
 /// SCOPE-6-02：`Series,Episode` + folder 作用域时，代表行在别的根下的剧也必须保留
@@ -83,7 +80,7 @@ async fn folder_series_and_episode_types_keep_the_series_of_that_folder() {
     let root_b = dir.path().join("tv-b");
     std::fs::create_dir_all(&root_a).unwrap();
     std::fs::create_dir_all(&root_b).unwrap();
-    let (library_id, episode_a, episode_b) = {
+    let (library_id, show_media) = {
         let store = state.store();
         let store = store.lock();
         let library = store
@@ -97,9 +94,9 @@ async fn folder_series_and_episode_types_keep_the_series_of_that_folder() {
             )
             .unwrap();
         let media_id = new_media(&store, "Split show");
-        let episode_a = insert_episode(&store, &root_a, media_id, 1, 1);
-        let episode_b = insert_episode(&store, &root_b, media_id, 1, 2);
-        (library.id, episode_a, episode_b)
+        insert_episode(&store, &root_a, media_id, 1, 1);
+        insert_episode(&store, &root_b, media_id, 1, 2);
+        (library.id, media_id)
     };
     let app = router(state);
     let listing = get_json(
@@ -125,7 +122,7 @@ async fn folder_series_and_episode_types_keep_the_series_of_that_folder() {
         .filter(|item| item["Type"] == "Episode")
         .collect();
     assert_eq!(episodes.len(), 1);
-    assert_eq!(episodes[0]["Id"], episode_b.to_string().replace('-', ""));
+    assert_eq!(episodes[0]["Id"], unit_wire_id(show_media, 1, 2));
 
     let listing_a = get_json(
         &app,
@@ -140,7 +137,7 @@ async fn folder_series_and_episode_types_keep_the_series_of_that_folder() {
         .iter()
         .filter(|item| item["Type"] == "Episode")
         .collect();
-    assert_eq!(episodes_a[0]["Id"], episode_a.to_string().replace('-', ""));
+    assert_eq!(episodes_a[0]["Id"], unit_wire_id(show_media, 1, 1));
 
     // 同一份候选上的缺省（无 IncludeItemTypes）列表仍然只有剧条目。
     let series_only = get_json(
@@ -180,7 +177,7 @@ async fn series_scoped_selection_reads_only_that_series_candidates() {
         fixture.files.metadata()
     );
 
-    let show = media_id_for_title(&fixture.state, "Show000");
+    let show = series_wire_id_for_title(&fixture.state, "Show000");
     fixture.files.reset();
     fixture.state.store().lock().reset_root_ledger_scans();
     let scoped = get_json(
@@ -205,7 +202,8 @@ async fn read_failure_never_becomes_a_silently_empty_page() {
     let db = fixture.dir.path().join("data/library.db");
     fixture.files.fail_store_on_first_io(Box::new(move || {
         let conn = rusqlite::Connection::open(&db).expect("open library db");
-        conn.execute_batch("DROP TABLE ledger").expect("drop ledger");
+        conn.execute_batch("DROP TABLE file_details")
+            .expect("drop file_details");
     }));
     let (status, listing) = get(
         &app,
@@ -227,15 +225,23 @@ async fn read_failure_never_becomes_a_silently_empty_page() {
     let failing = {
         let store = heavy_fixture.state.store();
         let store = store.lock();
-        store.list_ledger().unwrap().into_iter().next().expect("row").id
+        store
+            .list_file_coverage()
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("row")
+            .file
+            .file_id
     };
-    let conn = rusqlite::Connection::open(
-        heavy_fixture.dir.path().join("data/library.db"),
-    )
-    .unwrap();
+    let conn =
+        rusqlite::Connection::open(heavy_fixture.dir.path().join("data/library.db")).unwrap();
     conn.execute(
-        "INSERT INTO file_meta (ledger_id, audio_json, subtitle_json, chapters_json)
-         VALUES (?1, '[]', '[]', x'0102')",
+        "INSERT INTO file_details
+             (file_id, source_revision, source_version, tracks_version,
+              audio_json, subtitle_json, chapters_json)
+         SELECT file_id, file_revision, source_version, 0, '[]', '[]', x'5b5d'
+         FROM library_files WHERE file_id = ?1",
         [failing.to_string()],
     )
     .unwrap();
@@ -272,14 +278,10 @@ async fn jellyfin_selection_records_candidate_and_heavy_counts() {
     )
     .await;
     assert_eq!(listing["TotalRecordCount"], 1000);
-    assert_eq!(
-        candidates.load(Ordering::SeqCst),
-        1000,
-        "整库分集列表：一遍候选遍历（100 部剧 × 10 集）"
-    );
+    assert_eq!(candidates.load(Ordering::SeqCst), 1, "本页只选一条分集引用");
     assert_eq!(heavy.load(Ordering::SeqCst), 1, "只有本页条目被 enrich");
 
-    let show = media_id_for_title(&fixture.state, "Show000");
+    let show = series_wire_id_for_title(&fixture.state, "Show000");
     let before = candidates.load(Ordering::SeqCst);
     fixture.state.store().lock().reset_root_ledger_scans();
     let scoped = get_json(
@@ -292,9 +294,16 @@ async fn jellyfin_selection_records_candidate_and_heavy_counts() {
     .await;
     let scans = fixture.state.store().lock().root_ledger_scans();
     assert_eq!(scoped["TotalRecordCount"], 10);
-    assert_eq!(scans, 0, "cross-thread series selection must not root-scan ledger: {scans}");
-    assert_eq!(candidates.load(Ordering::SeqCst) - before, 10);
-    assert_eq!(heavy.load(Ordering::SeqCst), 2, "第二次请求仍然只 enrich 本页");
+    assert_eq!(
+        scans, 0,
+        "cross-thread series selection must not root-scan ledger: {scans}"
+    );
+    assert_eq!(candidates.load(Ordering::SeqCst) - before, 1);
+    assert_eq!(
+        heavy.load(Ordering::SeqCst),
+        2,
+        "第二次请求仍然只 enrich 本页"
+    );
 }
 
 /// A3-06-01：播放单元解码失败发生在台账读完之后，已读行仍要计入候选。
@@ -314,12 +323,30 @@ async fn failed_playback_unit_read_still_counts_loaded_ledger_rows() {
             .id
     };
     let stored_media = uuid::Uuid::parse_str(&show).unwrap().to_string();
-    let conn = rusqlite::Connection::open(fixture.dir.path().join("data/subscribe.db")).unwrap();
+    let resume_file = {
+        let store = fixture.state.store();
+        let store = store.lock();
+        store
+            .list_file_coverage()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.file.path.to_string_lossy().contains("Show000"))
+            .expect("Show000 row")
+            .file
+            .file_id
+    };
+    // v1 行：`playback_units` 在 library.db。`position_ms` 存文本即可让解码失败，
+    // 但 resume 包必须成套（否则 CHECK 拒绝），所以同时写入完整的 resume 包。
+    let conn = rusqlite::Connection::open(fixture.dir.path().join("data/library.db")).unwrap();
     conn.execute(
         "INSERT INTO playback_units
-            (user_id, media_id, season, episode, position_ms, played, favorite, updated_at)
-         VALUES (?1, ?2, 1, 1, 'bad', 0, 0, 1)",
-        rusqlite::params![user_id.to_string(), stored_media],
+            (user_id, media_id, season, episode,
+             played, has_played_assertion, played_changed_at_ms,
+             favorite, favorite_at, play_count, watch_activity_at,
+             position_ms, duration_ms,
+             resume_file_id, resume_file_revision, resume_source_version, timeline_mode)
+         VALUES (?1, ?2, 1, 1, 0, 0, NULL, 0, 0, 0, 0, 'bad', NULL, ?3, 1, 'test-source', 'full_file')",
+        rusqlite::params![user_id.to_string(), stored_media, resume_file.to_string()],
     )
     .unwrap();
     drop(conn);
@@ -330,8 +357,8 @@ async fn failed_playback_unit_read_still_counts_loaded_ledger_rows() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
     assert_eq!(
         candidates.load(Ordering::SeqCst),
-        2,
-        "两行台账已读完，播放单元失败不得把候选计成 0"
+        0,
+        "损坏的选中播放事实必须拒绝本页，不能报告完整候选"
     );
 }
 
@@ -372,14 +399,16 @@ async fn invisible_series_classification_keeps_its_ledger_read() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["TotalRecordCount"], 0, "admin_visible=false 的剧不得列出：{body}");
+    assert_eq!(
+        body["TotalRecordCount"], 0,
+        "admin_visible=false 的剧不得列出：{body}"
+    );
     let reads = fixture.state.store().lock().media_ledger_reads();
-    assert_eq!(reads, 1, "分类已经读过这部剧，显式目标不得再读一遍，实际 {reads}");
+    assert_eq!(reads, 0, "不可见的 Media 分类不应读取其台账，实际 {reads}");
     assert_eq!(
         candidates.load(Ordering::SeqCst),
-        2,
-        "分类读了 2 行并复用，不得丢掉这次读取：实际 {}",
+        0,
+        "不可见的 Media 不应物化事实：实际 {}",
         candidates.load(Ordering::SeqCst)
     );
 }
-

@@ -1,8 +1,34 @@
-use std::sync::Arc;
-use parking_lot::Mutex;
-use domain::{Confidence, LedgerId, MediaId, MediaKind, QualitySource};
-use api::probe_manager::{ProbeManager, ProbeUnit};
 use api::Store;
+use api::probe_manager::{ProbeManager, ProbeUnit};
+use domain::{Confidence, FileCoverage, MediaId, MediaKind, QualitySource, UnitKey};
+use parking_lot::Mutex;
+use std::sync::Arc;
+use store::test_support::{FixtureFile, publish_fixture_file};
+
+/// Publish one single-episode fixture file and read the coverage fact back: the
+/// `file_id` the pipeline keys on is assigned at publication.
+fn publish_coverage(
+    store: &Store,
+    media_id: MediaId,
+    path: &std::path::Path,
+    episode: u32,
+) -> FileCoverage {
+    let spec = FixtureFile {
+        media_id,
+        path: path.to_string_lossy().to_string(),
+        season: Some(1),
+        episode: Some(episode),
+        quality_source: QualitySource::Release,
+        confidence: Confidence::High,
+        ..FixtureFile::default()
+    };
+    let file = publish_fixture_file(store, &spec).unwrap();
+    FileCoverage {
+        path_key: String::new(),
+        file,
+        units: vec![UnitKey::new(1, episode as i32)],
+    }
+}
 
 #[test]
 fn season_refresh_does_not_overwrite_recapture_policy() {
@@ -26,20 +52,10 @@ fn season_refresh_does_not_overwrite_recapture_policy() {
         })
         .unwrap();
 
-    let row = domain::LedgerRow {
-        id: LedgerId::new(),
-        media_id,
-        path: "Test.S01E01.mkv".into(),
-        season: Some(1),
-        episode: Some(1),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
-    store.lock().insert_ledger(&row).unwrap();
+    let tv_root = tmp.path().join("tv");
+    std::fs::create_dir_all(&tv_root).unwrap();
+    store::test_support::reconfigure_default_root(&store.lock(), MediaKind::Tv, &tv_root).unwrap();
+    let row = publish_coverage(&store.lock(), media_id, &tv_root.join("Test.S01E01.mkv"), 1);
 
     let mgr = ProbeManager::new(store.clone());
     let unit = ProbeUnit {
@@ -59,7 +75,7 @@ fn season_refresh_does_not_overwrite_recapture_policy() {
     // Verify in database that reuse_fingerprint_cache is false, and reuse_media_info_cache is true
     let active_unit = store
         .lock()
-        .active_probe_unit_for_ledger(&row.id.to_string())
+        .active_probe_unit_for_ledger(&row.file.file_id.to_string())
         .unwrap()
         .expect("active probe unit should exist");
 
@@ -95,20 +111,15 @@ fn database_failure_rolls_back_markers_chapters_and_job_terminal() {
         })
         .unwrap();
 
-    let row = domain::LedgerRow {
-        id: LedgerId::new(),
+    let tv_root = tmp.path().join("tv");
+    std::fs::create_dir_all(&tv_root).unwrap();
+    store::test_support::reconfigure_default_root(&store.lock(), MediaKind::Tv, &tv_root).unwrap();
+    let row = publish_coverage(
+        &store.lock(),
         media_id,
-        path: "Test.Rollback.S01E01.mkv".into(),
-        season: Some(1),
-        episode: Some(1),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
-    store.lock().insert_ledger(&row).unwrap();
+        &tv_root.join("Test.Rollback.S01E01.mkv"),
+        1,
+    );
 
     // Initial marker
     store
@@ -129,7 +140,7 @@ fn database_failure_rolls_back_markers_chapters_and_job_terminal() {
 
     let job_id = "test-job-rollback";
     let spec = api::store::ProbeJobUnitSpec {
-        ledger_id: &row.id.to_string(),
+        ledger_id: &row.file.file_id.to_string(),
         kind: "tv",
         force_fingerprint: true,
         reuse_fingerprint_cache: false,
@@ -179,103 +190,15 @@ async fn seed_episodes_retain_markers_after_season_template_built() {
         })
         .unwrap();
 
-    let row1 = domain::LedgerRow {
-        id: LedgerId::new(),
-        media_id,
-        path: "Test.Retain.S01E01.mkv".into(),
-        season: Some(1),
-        episode: Some(1),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
-    let row2 = domain::LedgerRow {
-        id: LedgerId::new(),
-        media_id,
-        path: "Test.Retain.S01E02.mkv".into(),
-        season: Some(1),
-        episode: Some(2),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
-    std::fs::write("Test.Retain.S01E01.mkv", b"dummy").unwrap();
-    std::fs::write("Test.Retain.S01E02.mkv", b"dummy").unwrap();
-    store.lock().insert_ledger(&row1).unwrap();
-    store.lock().insert_ledger(&row2).unwrap();
-
-    struct SharedMatchEngine;
-    impl marker::fingerprint::capture_types::FingerprintCaptureEngine for SharedMatchEngine {
-        fn capture_window(
-            &self,
-            request: &marker::fingerprint::capture_types::CaptureRequest,
-        ) -> Result<marker::fingerprint::capture_types::CapturedFingerprint, marker::fingerprint::capture_types::CaptureFailure> {
-            let dur_ms = request.window.duration_ms();
-            // Generate identical fingerprint pattern so both seeds match each other
-            let num_words = (dur_ms / 128).max(1) as usize;
-            let words = (0..num_words).map(|i| (i as u32) + 42).collect();
-            Ok(marker::fingerprint::capture_types::CapturedFingerprint {
-                window: request.window.clone(),
-                words,
-                pcm_duration_ms: Some(dur_ms),
-                metrics: marker::fingerprint::capture_types::CaptureMetrics {
-                    elapsed_ms: 10,
-                    pcm_bytes: (num_words * 4) as u64,
-                    ..Default::default()
-                },
-            })
-        }
-    }
-
-    impl marker::FingerprintEngine for SharedMatchEngine {
-        fn extract_at(
-            &self,
-            _path: &std::path::Path,
-            _start_secs: u32,
-            _duration_secs: u32,
-        ) -> Result<marker::AudioFingerprint, String> {
-            Ok(vec![42; 100])
-        }
-
-        fn find_common_segment(
-            &self,
-            first: &[u32],
-            second: &[u32],
-            _min_duration_secs: f32,
-            _max_duration_secs: f32,
-        ) -> Option<marker::CommonSegment> {
-            if !first.is_empty() && !second.is_empty() {
-                Some(marker::CommonSegment {
-                    start1_sec: 10.0,
-                    end1_sec: 90.0,
-                    start2_sec: 10.0,
-                    end2_sec: 90.0,
-                    duration_sec: 80.0,
-                    score: 0.95,
-                })
-            } else {
-                None
-            }
-        }
-
-        fn find_common_segments(
-            &self,
-            first: &[u32],
-            second: &[u32],
-            min_duration_secs: f32,
-            max_duration_secs: f32,
-        ) -> Vec<marker::CommonSegment> {
-            self.find_common_segment(first, second, min_duration_secs, max_duration_secs)
-                .into_iter()
-                .collect()
-        }
-    }
+    let tv_root = tmp.path().join("tv");
+    std::fs::create_dir_all(&tv_root).unwrap();
+    store::test_support::reconfigure_default_root(&store.lock(), MediaKind::Tv, &tv_root).unwrap();
+    let ep1_path = tv_root.join("Test.Retain.S01E01.mkv");
+    let ep2_path = tv_root.join("Test.Retain.S01E02.mkv");
+    std::fs::write(&ep1_path, b"dummy").unwrap();
+    std::fs::write(&ep2_path, b"dummy").unwrap();
+    let row1 = publish_coverage(&store.lock(), media_id, &ep1_path, 1);
+    let row2 = publish_coverage(&store.lock(), media_id, &ep2_path, 2);
 
     let shared_engine = Arc::new(SharedMatchEngine);
     let mgr = ProbeManager::with_engines(store.clone(), shared_engine.clone(), shared_engine);
@@ -311,25 +234,116 @@ async fn seed_episodes_retain_markers_after_season_template_built() {
     )
     .await;
 
-    let _ = std::fs::remove_file("Test.Retain.S01E01.mkv");
-    let _ = std::fs::remove_file("Test.Retain.S01E02.mkv");
+    let _ = std::fs::remove_file(&ep1_path);
+    let _ = std::fs::remove_file(&ep2_path);
 
-    assert!(res.is_ok(), "adaptive season pipeline should succeed: {:?}", res.err());
+    assert!(
+        res.is_ok(),
+        "adaptive season pipeline should succeed: {:?}",
+        res.err()
+    );
     let replacement = res.unwrap();
 
     // Verify both episode 1 and episode 2 markers exist and intro is populated!
     let ep1_marker = replacement.markers.iter().find(|m| m.episode == 1);
     let ep2_marker = replacement.markers.iter().find(|m| m.episode == 2);
 
-    assert!(ep1_marker.is_some(), "Episode 1 (seed) marker must not be missing!");
-    assert!(ep2_marker.is_some(), "Episode 2 (seed) marker must not be missing!");
+    assert!(
+        ep1_marker.is_some(),
+        "Episode 1 (seed) marker must not be missing!"
+    );
+    assert!(
+        ep2_marker.is_some(),
+        "Episode 2 (seed) marker must not be missing!"
+    );
 
     let ep1 = ep1_marker.unwrap();
     let ep2 = ep2_marker.unwrap();
 
-    assert!(ep1.intro_start_ms.is_some(), "Episode 1 intro start must be populated!");
-    assert!(ep1.intro_end_ms.is_some(), "Episode 1 intro end must be populated!");
-    assert!(ep2.intro_start_ms.is_some(), "Episode 2 intro start must be populated!");
-    assert!(ep2.intro_end_ms.is_some(), "Episode 2 intro end must be populated!");
+    assert!(
+        ep1.intro_start_ms.is_some(),
+        "Episode 1 intro start must be populated!"
+    );
+    assert!(
+        ep1.intro_end_ms.is_some(),
+        "Episode 1 intro end must be populated!"
+    );
+    assert!(
+        ep2.intro_start_ms.is_some(),
+        "Episode 2 intro start must be populated!"
+    );
+    assert!(
+        ep2.intro_end_ms.is_some(),
+        "Episode 2 intro end must be populated!"
+    );
 }
 
+struct SharedMatchEngine;
+impl marker::fingerprint::capture_types::FingerprintCaptureEngine for SharedMatchEngine {
+    fn capture_window(
+        &self,
+        request: &marker::fingerprint::capture_types::CaptureRequest,
+    ) -> Result<
+        marker::fingerprint::capture_types::CapturedFingerprint,
+        marker::fingerprint::capture_types::CaptureFailure,
+    > {
+        let dur_ms = request.window.duration_ms();
+        // Generate identical fingerprint pattern so both seeds match each other
+        let num_words = (dur_ms / 128).max(1) as usize;
+        let words = (0..num_words).map(|i| (i as u32) + 42).collect();
+        Ok(marker::fingerprint::capture_types::CapturedFingerprint {
+            window: request.window.clone(),
+            words,
+            pcm_duration_ms: Some(dur_ms),
+            metrics: marker::fingerprint::capture_types::CaptureMetrics {
+                elapsed_ms: 10,
+                pcm_bytes: (num_words * 4) as u64,
+                ..Default::default()
+            },
+        })
+    }
+}
+
+impl marker::FingerprintEngine for SharedMatchEngine {
+    fn extract_at(
+        &self,
+        _path: &std::path::Path,
+        _start_secs: u32,
+        _duration_secs: u32,
+    ) -> Result<marker::AudioFingerprint, String> {
+        Ok(vec![42; 100])
+    }
+
+    fn find_common_segment(
+        &self,
+        first: &[u32],
+        second: &[u32],
+        _min_duration_secs: f32,
+        _max_duration_secs: f32,
+    ) -> Option<marker::CommonSegment> {
+        if !first.is_empty() && !second.is_empty() {
+            Some(marker::CommonSegment {
+                start1_sec: 10.0,
+                end1_sec: 90.0,
+                start2_sec: 10.0,
+                end2_sec: 90.0,
+                duration_sec: 80.0,
+                score: 0.95,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn find_common_segments(
+        &self,
+        first: &[u32],
+        second: &[u32],
+        min_duration_secs: f32,
+        max_duration_secs: f32,
+    ) -> Vec<marker::CommonSegment> {
+        self.find_common_segment(first, second, min_duration_secs, max_duration_secs)
+            .into_iter()
+            .collect()
+    }
+}

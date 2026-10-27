@@ -1,7 +1,5 @@
 //! Dispatch pending probe obligations bounded at 100 entries per round.
 
-use std::sync::Arc;
-
 use crate::management::ApiState;
 
 /// Attempt to dispatch up to 100 pending probe obligations.
@@ -14,8 +12,15 @@ pub async fn dispatch_once(state: ApiState) -> Result<usize, String> {
 }
 
 fn dispatch_once_sync(state: &ApiState) -> Result<usize, String> {
+    dispatch_obligations(&state.store, &state.probe)
+}
+
+fn dispatch_obligations(
+    shared: &parking_lot::Mutex<store::Store>,
+    probe: &crate::probe_manager::ProbeManager,
+) -> Result<usize, String> {
     let obligations = {
-        let store = state.store.lock();
+        let store = shared.lock();
         store
             .scan_probe_obligations(100)
             .map_err(|e| e.to_string())?
@@ -28,15 +33,15 @@ fn dispatch_once_sync(state: &ApiState) -> Result<usize, String> {
     let mut acked = 0;
     for ob in obligations {
         let row_opt = {
-            let store = state.store.lock();
+            let store = shared.lock();
             store
-                .get_ledger(&ob.ledger_id.to_string())
+                .file_coverage_by_id(ob.ledger_id)
                 .map_err(|e| e.to_string())?
         };
 
         let Some(row) = row_opt else {
             // Ledger row no longer exists (pruned/deleted), ack obligation immediately
-            let store = state.store.lock();
+            let store = shared.lock();
             match store.ack_scan_probe_obligation(ob.ledger_id) {
                 Ok(()) => acked += 1,
                 Err(error) => {
@@ -50,13 +55,31 @@ fn dispatch_once_sync(state: &ApiState) -> Result<usize, String> {
             continue;
         };
 
-        let result = state.probe.request_probe(
+        // An obligation means "this file still needs a probe". Once presence has recorded the
+        // source missing the work cannot succeed, and keeping the row would fill the head of
+        // the 100-row dispatch window with files that will never run. Restoring the source
+        // re-arms the obligation (`crates/api/src/library_presence.rs`).
+        {
+            let store = shared.lock();
+            if store
+                .ledger_is_missing(&row.file.file_id.to_string())
+                .map_err(|error| error.to_string())?
+            {
+                store
+                    .ack_scan_probe_obligation(ob.ledger_id)
+                    .map_err(|error| error.to_string())?;
+                acked += 1;
+                continue;
+            }
+        }
+
+        let result = probe.request_probe(
             &row,
             crate::probe_manager::policy::ProbeRequestOrigin::Detail,
         );
         // Keep acceptance and ACK under one Store lock so presence cannot cancel
         // accepted work and restore a new obligation between these two writes.
-        let store = state.store.lock();
+        let store = shared.lock();
         let acknowledged = match result {
             Ok(crate::probe_manager::policy::ProbeRequestResult::Queued { job_id }) => store
                 .ack_scan_probe_obligation_for_work(&ob, Some(&job_id))
@@ -68,7 +91,7 @@ fn dispatch_once_sync(state: &ApiState) -> Result<usize, String> {
                 .ack_scan_probe_obligation_if_current(&ob)
                 .map_err(|error| error.to_string())?,
             Err(error) => {
-                tracing::error!(%error, ledger_id = %row.id, "扫描探测义务派发失败，保留义务等待重试");
+                tracing::error!(%error, ledger_id = %row.file.file_id, "扫描探测义务派发失败，保留义务等待重试");
                 false
             }
             _ => false,
@@ -84,16 +107,27 @@ fn dispatch_once_sync(state: &ApiState) -> Result<usize, String> {
 
 /// Start background dispatcher task checking obligations every 5 seconds.
 pub fn start_dispatcher(state: ApiState) {
+    let shared = std::sync::Arc::downgrade(&state.store);
+    let probe = std::sync::Arc::downgrade(&state.probe);
+    let instance = std::sync::Arc::downgrade(&state.instance_writable);
     tokio::spawn(async move {
-        // Initial dispatch on startup
-        if let Err(error) = dispatch_once(state.clone()).await {
-            tracing::error!(%error, "探测义务调度器启动首轮派发失败");
-        }
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            if let Err(e) = dispatch_once(state.clone()).await {
-                tracing::error!(error = %e, "Probe obligation dispatcher failed");
+            if instance.upgrade().is_none() {
+                break;
             }
+            let (Some(shared), Some(probe)) = (shared.upgrade(), probe.upgrade()) else {
+                break;
+            };
+            let result =
+                tokio::task::spawn_blocking(move || dispatch_obligations(&shared, &probe)).await;
+            match result {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => tracing::error!(%error,"Probe obligation dispatcher failed"),
+                Err(error) => tracing::error!(%error,"Probe obligation dispatcher worker failed"),
+            }
+            // The sleep retains Weak handles only; dropping an ApiState can stop
+            // its drivers and release its per-instance blocking budgets.
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     });
 }

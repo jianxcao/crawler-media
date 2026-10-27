@@ -1,38 +1,10 @@
 use std::path::Path;
-use std::time::UNIX_EPOCH;
 
 use sha2::{Digest, Sha256};
 
+/// Content token of `path`: the one shared encoder, [`library::current_source_version`].
 pub fn media_source_version(path: &Path) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"crawler-media-source-v1\0");
-    digest.update(path.to_string_lossy().as_bytes());
-    if path
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("strm"))
-        && let Ok(contents) = std::fs::read(path)
-    {
-        // strm 没有本地媒体字节。URL 文本不变就视为同一文件，
-        // 同步或目录操作改掉 mtime/inode 不能让已有媒体信息和声纹失效。
-        digest.update(b"\0strm-target\0");
-        digest.update(contents);
-        return digest_hex(digest.finalize());
-    }
-    if let Ok(metadata) = std::fs::metadata(path) {
-        digest.update(metadata.len().to_le_bytes());
-        if let Ok(modified) = metadata.modified()
-            && let Ok(age) = modified.duration_since(UNIX_EPOCH)
-        {
-            digest.update(age.as_nanos().to_le_bytes());
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            digest.update(metadata.dev().to_le_bytes());
-            digest.update(metadata.ino().to_le_bytes());
-        }
-    }
-    digest_hex(digest.finalize())
+    library::current_source_version(path)
 }
 
 pub fn fingerprint_cache_key(

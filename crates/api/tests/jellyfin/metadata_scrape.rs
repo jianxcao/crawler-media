@@ -55,7 +55,8 @@ impl api::catalog::Catalog for RichCatalog {
     }
 }
 
-fn rich_tv_app(root: &Path) -> (axum::Router, String, MediaId, PathBuf, PathBuf) {
+/// `tvshow_nfo` 必须在写文件之前落盘：Task 8/17 只在 publish_fixture_file 时观测旁车。
+fn rich_tv_app(root: &Path, tvshow_nfo: &str) -> (axum::Router, String, MediaId, PathBuf, PathBuf) {
     let store = Store::open(root.join("data")).unwrap();
     let library_root = root.join("library/tv");
     let show_root = library_root.join("Pantheon");
@@ -86,8 +87,8 @@ fn rich_tv_app(root: &Path) -> (axum::Router, String, MediaId, PathBuf, PathBuf)
     store.insert_media(&show).unwrap();
     let episode_path = show_root.join("Pantheon S01E01.mkv");
     std::fs::write(&episode_path, b"episode").unwrap();
-    let episode = LedgerRow {
-        id: LedgerId::new(),
+    std::fs::write(show_root.join("tvshow.nfo"), tvshow_nfo).unwrap();
+    let spec = store::test_support::FixtureFile {
         media_id: show.id,
         path: episode_path.display().to_string(),
         season: Some(1),
@@ -98,8 +99,11 @@ fn rich_tv_app(root: &Path) -> (axum::Router, String, MediaId, PathBuf, PathBuf)
         quality_source: QualitySource::Probe,
         confidence: Confidence::High,
         filter_score: None,
+        transfer_mode: None,
+        source_path: None,
+        file_id: None,
     };
-    store.insert_ledger(&episode).unwrap();
+    store::test_support::publish_fixture_file(&store, &spec).unwrap();
 
     let metadata = media::ItemMeta {
         overview: Some("Uploaded intelligence changes humanity.".into()),
@@ -184,18 +188,12 @@ async fn json_get(app: &axum::Router, uri: &str) -> Value {
 #[tokio::test]
 async fn detail_fills_sparse_nfo_from_catalog_and_refresh_writes_rich_show_and_episode_nfo() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, library_id, media_id, show_root, episode_path) = rich_tv_app(tmp.path());
-    std::fs::write(
-        show_root.join("tvshow.nfo"),
+    let (app, library_id, media_id, show_root, episode_path) = rich_tv_app(
+        tmp.path(),
         "<tvshow><title>Pantheon</title><actor><name>Legacy Actor</name><order>0</order></actor><actor><name>Paul Dano</name><role>Caspian</role><tmdbid>6384</tmdbid><order>1</order></actor><actor><name>Rose McEwen</name><role>Maddie</role><order>2</order></actor></tvshow>",
-    )
-    .unwrap();
+    );
 
-    let before_refresh = json_get(
-        &app,
-        &format!("/Items/{}", media_id.to_string().replace('-', "")),
-    )
-    .await;
+    let before_refresh = json_get(&app, &format!("/Items/{}", work_id(media_id))).await;
     assert_eq!(
         before_refresh["Overview"],
         "Uploaded intelligence changes humanity."
@@ -240,12 +238,11 @@ async fn detail_fills_sparse_nfo_from_catalog_and_refresh_writes_rich_show_and_e
     assert_eq!(person_details["Id"], person_id);
     assert_eq!(person_details["ImageTags"]["Primary"], "profile");
 
-    let related_items = json_get(&app, &format!("/Items?PersonIds={person_id}")).await;
-    assert_eq!(related_items["TotalRecordCount"], 1);
-    assert_eq!(
-        related_items["Items"][0]["Id"],
-        media_id.to_string().replace('-', "")
-    );
+    // R24: PersonIds reads local observed facts only; a person known solely to the live
+    // catalog does not match (local hits are covered by
+    // jellyfin_paged_metadata::audit::person_filter_is_local_and_survives_catalog_failure).
+    let before_adoption = json_get(&app, &format!("/Items?PersonIds={person_id}")).await;
+    assert_eq!(before_adoption["TotalRecordCount"], 0);
 
     for uri in [
         "/Persons/Catalog%20Only%20Actor/Images/Primary".to_string(),

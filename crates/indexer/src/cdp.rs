@@ -61,50 +61,6 @@ impl std::fmt::Debug for DiscoveredSiteCookie {
     }
 }
 
-#[cfg(test)]
-mod debug_tests {
-    use super::{CdpCookie, DiscoveredSiteCookie};
-
-    #[test]
-    fn debug_never_prints_the_cdp_cookie_value() {
-        let cookie = CdpCookie {
-            name: "c_secure_pass".into(),
-            value: "cdp-cookie-value-secret".into(),
-            domain: ".pt.example".into(),
-            path: Some("/".into()),
-            expires: None,
-            http_only: Some(true),
-            secure: Some(true),
-        };
-        let rendered = format!("{cookie:?}");
-        assert!(
-            !rendered.contains("cdp-cookie-value-secret"),
-            "Debug 不得输出 cookie value: {rendered}"
-        );
-        assert!(rendered.contains("<redacted>"), "{rendered}");
-        assert!(rendered.contains("c_secure_pass"), "{rendered}");
-        assert!(rendered.contains("pt.example"), "{rendered}");
-    }
-
-    #[test]
-    fn debug_never_prints_the_discovered_cookie_header() {
-        let discovered = DiscoveredSiteCookie {
-            profile_id: "pterclub".into(),
-            domain: "pterclub.net".into(),
-            cookie_header: "uid=1; pass=cookie-header-secret".into(),
-            cookie_count: 2,
-        };
-        let rendered = format!("{discovered:?}");
-        assert!(
-            !rendered.contains("cookie-header-secret"),
-            "Debug 不得输出 cookie_header: {rendered}"
-        );
-        assert!(rendered.contains("<redacted>"), "{rendered}");
-        assert!(rendered.contains("pterclub"), "{rendered}");
-        assert!(rendered.contains("cookie_count: 2"), "非凭证字段保留: {rendered}");
-    }
-}
-
 fn cdp_http_agent() -> ureq::Agent {
     let config = ureq::config::Config::builder()
         .timeout_global(Some(Duration::from_secs(10)))
@@ -165,21 +121,20 @@ fn fetch_cookies_over_ws(ws_url: &str) -> Result<Vec<CdpCookie>, IndexerError> {
             .read()
             .map_err(|e| IndexerError::Fetch(format!("读取 CDP 消息失败: {e}")))?;
 
-        if let Message::Text(text) = msg {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
-                if val["id"] == 1001 {
-                    if let Some(cookies_val) = val["result"]["cookies"].as_array() {
-                        let mut cookies = Vec::new();
-                        for item in cookies_val {
-                            if let Ok(cookie) = serde_json::from_value::<CdpCookie>(item.clone()) {
-                                cookies.push(cookie);
-                            }
-                        }
-                        return Ok(cookies);
-                    } else if let Some(err) = val.get("error") {
-                        return Err(IndexerError::Fetch(format!("CDP 返回错误: {err}")));
+        if let Message::Text(text) = msg
+            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&text)
+            && val["id"] == 1001
+        {
+            if let Some(cookies_val) = val["result"]["cookies"].as_array() {
+                let mut cookies = Vec::new();
+                for item in cookies_val {
+                    if let Ok(cookie) = serde_json::from_value::<CdpCookie>(item.clone()) {
+                        cookies.push(cookie);
                     }
                 }
+                return Ok(cookies);
+            } else if let Some(err) = val.get("error") {
+                return Err(IndexerError::Fetch(format!("CDP 返回错误: {err}")));
             }
         }
     }
@@ -235,4 +190,51 @@ pub fn match_cookies_to_profiles(
     }
 
     results
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use super::{CdpCookie, DiscoveredSiteCookie};
+
+    #[test]
+    fn debug_never_prints_the_cdp_cookie_value() {
+        let cookie = CdpCookie {
+            name: "c_secure_pass".into(),
+            value: "cdp-cookie-value-secret".into(),
+            domain: ".pt.example".into(),
+            path: Some("/".into()),
+            expires: None,
+            http_only: Some(true),
+            secure: Some(true),
+        };
+        let rendered = format!("{cookie:?}");
+        assert!(
+            !rendered.contains("cdp-cookie-value-secret"),
+            "Debug 不得输出 cookie value: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert!(rendered.contains("c_secure_pass"), "{rendered}");
+        assert!(rendered.contains("pt.example"), "{rendered}");
+    }
+
+    #[test]
+    fn debug_never_prints_the_discovered_cookie_header() {
+        let discovered = DiscoveredSiteCookie {
+            profile_id: "pterclub".into(),
+            domain: "pterclub.net".into(),
+            cookie_header: "uid=1; pass=cookie-header-secret".into(),
+            cookie_count: 2,
+        };
+        let rendered = format!("{discovered:?}");
+        assert!(
+            !rendered.contains("cookie-header-secret"),
+            "Debug 不得输出 cookie_header: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert!(rendered.contains("pterclub"), "{rendered}");
+        assert!(
+            rendered.contains("cookie_count: 2"),
+            "非凭证字段保留: {rendered}"
+        );
+    }
 }

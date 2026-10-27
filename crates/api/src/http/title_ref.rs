@@ -162,7 +162,7 @@ pub(crate) async fn preview(
             .as_deref()
             .and_then(|id| {
                 store
-                    .get_media_by_alias_kind("tmdb_id", id, Some(resolved.kind))
+                    .get_media_by_alias_kind("tmdb", id, Some(resolved.kind))
                     .ok()
                     .flatten()
             })
@@ -188,16 +188,8 @@ pub(crate) async fn preview(
             })
             .map(|s| s.id.to_string());
 
-        let ledger = store.list_ledger().unwrap_or_default();
-        let mut owned_seasons: std::collections::HashMap<u32, usize> =
-            std::collections::HashMap::new();
-        let mut has_owned = false;
-        for row in ledger.iter().filter(|row| row.media_id == media_id) {
-            has_owned = true;
-            if let Some(s) = row.season {
-                *owned_seasons.entry(s).or_default() += 1;
-            }
-        }
+        let ledger = store.file_coverage_for_media(media_id).unwrap_or_default();
+        let (owned_seasons, has_owned) = owned_episode_counts(&ledger, media_id);
         let movie_owned = media.kind == MediaKind::Movie && has_owned;
         (media, existing, owned_seasons, movie_owned)
     };
@@ -244,7 +236,7 @@ pub(crate) async fn preview(
             "title": media.title,
             "original_title": media.original_title,
             "year": media.year,
-            "poster_url": media.tmdb_id.as_ref().map(|_| format!("{TMDB_POSTER}")),
+            "poster_url": media.tmdb_id.as_ref().map(|_| TMDB_POSTER.to_string()),
             "status": Value::Null,
         },
         "seasons": seasons,
@@ -254,6 +246,26 @@ pub(crate) async fn preview(
         "candidates": [],
     }))
     .into_response()
+}
+
+/// Count already-owned episodes per season for `media_id`, plus whether any file
+/// of that media is present at all (`has_owned` drives `movie_owned`).
+fn owned_episode_counts(
+    coverage: &[domain::FileCoverage],
+    media_id: domain::MediaId,
+) -> (std::collections::HashMap<u32, usize>, bool) {
+    let mut owned_seasons: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    let mut has_owned = false;
+    for row in coverage.iter().filter(|row| row.file.media_id == media_id) {
+        has_owned = true;
+        // 一个物理文件可覆盖多个 unit；这里按 unit 逐个计入，每一集都保留。
+        for unit in &row.units {
+            if let Some((season, _)) = unit.episode_coordinates() {
+                *owned_seasons.entry(season).or_default() += 1;
+            }
+        }
+    }
+    (owned_seasons, has_owned)
 }
 
 /// `YYYY-MM-DD` for today (UTC), for aired-count comparison with TMDB dates.

@@ -35,11 +35,11 @@ impl Store {
         query: &FingerprintSampleQuery,
     ) -> Result<Vec<StoredFingerprintSample>, StoreError> {
         let mut sql = String::from(
-            "SELECT sample_id, ledger_id, source_version, capture_profile_key, kind,
+            "SELECT sample_id, file_id, source_version, capture_profile_key, kind,
                     window_start_ms, window_end_ms, pcm_duration_ms, fingerprint_json,
                     captured_job_id, captured_at_ms, metrics_json
              FROM fingerprint_samples
-             WHERE ledger_id = ?1
+             WHERE file_id = ?1
                AND source_version = ?2
                AND capture_profile_key = ?3
                AND kind = ?4
@@ -111,13 +111,6 @@ impl Store {
 
         Ok(rows)
     }
-
-    pub fn delete_fingerprint_samples_for_ledger(&self, ledger_id: &str) -> Result<(), StoreError> {
-        let tx = self.library.unchecked_transaction()?;
-        delete_samples_for_ledger(&tx, ledger_id)?;
-        tx.commit()?;
-        Ok(())
-    }
 }
 
 // Also used inside the transaction that removes a ledger and its other caches.
@@ -129,12 +122,12 @@ pub(crate) fn delete_samples_for_ledger(
     tx.execute(
         "DELETE FROM fingerprint_season_models
              WHERE model_id IN (
-                 SELECT model_id FROM fingerprint_model_members WHERE ledger_id = ?1
+                 SELECT model_id FROM fingerprint_model_members WHERE file_id = ?1
              )",
         params![ledger_id],
     )?;
     tx.execute(
-        "DELETE FROM fingerprint_samples WHERE ledger_id = ?1",
+        "DELETE FROM fingerprint_samples WHERE file_id = ?1",
         params![ledger_id],
     )?;
     Ok(())

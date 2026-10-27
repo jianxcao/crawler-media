@@ -43,7 +43,7 @@ fn movie_filter() -> Filter {
             },
         ],
         keep_old_versions: false,
-}
+    }
 }
 
 fn media_movie() -> Media {
@@ -182,6 +182,10 @@ fn run_input<'a>(
         facts,
         downloader,
         library_root,
+        // Files that are published need the Library/root they land in.
+        library_id: Some(domain::LibraryId::new()),
+        root_id: Some("test-root".into()),
+        config_revision: None,
         transfer_mode: Some(TransferMode::Copy),
         scrape: false,
         hooks: None,

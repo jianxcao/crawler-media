@@ -17,6 +17,7 @@ use crate::management::ApiState;
 
 use super::super::video::attach_video_artwork;
 use super::checkpoint::{checkpoint_fresh, invalidate_changed_facts, revalidate_observed};
+use super::hold::trace_lock_section;
 #[cfg(test)]
 use super::hooks::test_metadata_hook;
 use super::metadata::{resolve_scan_metadata, scan_media_for};
@@ -184,10 +185,27 @@ impl ScanContext<'_> {
             .filter_transferred(files)
             .map_err(presence_failure)?;
         let scanned = filtered.len();
+        let plan = self
+            .lease
+            .publish(|| {
+                let store = self.state.store.lock();
+                let _hold = trace_lock_section("plan");
+                self.scan_scope
+                    .validate(&store)
+                    .map_err(|e| format!("{e:?}"))?;
+                self.plan_chunk(&store, &filtered)
+            })
+            .map_err(publish_failure)?;
+        let observed = plan.observe().map_err(publish_failure)?;
         let inserted = self
-            .scan_scope
-            .publish(self.state, self.lease, |store| {
-                self.register_chunk(store, &filtered)
+            .lease
+            .publish(|| {
+                let store = self.state.store.lock();
+                let _hold = trace_lock_section("record");
+                self.scan_scope
+                    .validate(&store)
+                    .map_err(|e| format!("{e:?}"))?;
+                observed.record(&store)
             })
             .map_err(publish_failure)?;
         // 版本变化的文件：派生探测事实必须失效，并按 durable obligation 合同重排探测。
@@ -203,7 +221,7 @@ impl ScanContext<'_> {
             .cloned()
             .collect();
         let (affected, failed_invalidations) =
-            match invalidate_changed_facts(self.state, &changed_in_scope) {
+            match invalidate_changed_facts(self.state, &changed_in_scope, false) {
                 Ok(res) => res,
                 Err(e) => {
                     let committed = ChunkTotals {
@@ -244,10 +262,8 @@ impl ScanContext<'_> {
             // operation 断点标记为变化的路径；若沿用探测候选，普通重扫就再也不会
             // 尝试封面——镜像图片后开启无法回填、上次截帧失败无法重试、用户删掉的
             // 自动海报无法重生。断点跳过的文件不在 `filtered` 里，不会被重复处理。
-            let artwork_paths: Vec<PathBuf> = filtered
-                .iter()
-                .map(|file| file.path.clone())
-                .collect();
+            let artwork_paths: Vec<PathBuf> =
+                filtered.iter().map(|file| file.path.clone()).collect();
             attach_video_artwork(self.state, &artwork_paths, self.lease.control());
         } else {
             let scan_media = scan_media_for(self.state, &filtered);
@@ -294,18 +310,19 @@ impl ScanContext<'_> {
         let mut uncheckpointed = failed_invalidations;
         if !changed_late.is_empty() {
             // 窗口内变化：派生事实可能来自已被替换的内容，必须失效并重挂处理义务。
-            match invalidate_changed_facts(self.state, &changed_late) {
+            match invalidate_changed_facts(self.state, &changed_late, true) {
                 Ok((_, failed)) => uncheckpointed.extend(failed),
                 Err(error) => {
                     tracing::error!(
                         %error,
                         "窗口内变化路径的处理义务重挂失败，fail-closed: 这些路径不得推进断点与源版本"
                     );
-                    uncheckpointed.extend(changed_late.iter().map(|path| path.display().to_string()));
+                    uncheckpointed
+                        .extend(changed_late.iter().map(|path| path.display().to_string()));
                 }
             }
         }
-        enqueue_probes_for_paths(self.state, processed_paths);
+        self.enqueue_chunk_probes(processed_paths);
         // P2-3: 排除失效/重挂失败与窗口内变化的路径，它们不得推进 durable 源版本与断点。
         let successful_files: Vec<library::TransferredFile> = stable_files
             .into_iter()
@@ -314,20 +331,30 @@ impl ScanContext<'_> {
         self.record_seen(&successful_files, stamps);
     }
 
+    /// Arm the chunk's probe obligations.
+    ///
+    /// The trace section here is a **call total**, not one hold: the helper takes the Store
+    /// lock for its coverage reads and once more per row, so the holds inside it are short.
+    /// Recorded so the per-chunk budget stays visible without pretending it is a single hold.
+    fn enqueue_chunk_probes(&self, paths: Vec<PathBuf>) {
+        let _section = trace_lock_section("enqueue_probes(total)");
+        enqueue_probes_for_paths(self.state, paths);
+    }
+
     /// 按库类型登记 chunk：Video 走「每个视频文件一个 Media」，Movie/TV 走 Release
     /// 识别 + NFO 身份。两条路径都只登记，不做识别（识别在 `process_chunk` 后半段）。
-    fn register_chunk(
+    fn plan_chunk(
         &self,
         store: &crate::Store,
         filtered: &[library::TransferredFile],
-    ) -> Result<Vec<PathBuf>, String> {
+    ) -> Result<crate::watch_ledger::ScanLedgerPlan, String> {
         if self.kind == domain::MediaKind::Video {
-            crate::watch_ledger::record_video_paths(
+            crate::watch_ledger::plan_video_paths(
                 store,
                 filtered.iter().map(|file| file.path.clone()),
             )
         } else {
-            crate::watch_ledger::record_paths(store, filtered.to_vec())
+            crate::watch_ledger::plan_paths(store, filtered.to_vec())
         }
     }
 
@@ -342,17 +369,16 @@ impl ScanContext<'_> {
             .iter()
             .filter_map(|file| {
                 let key = file.path.display().to_string();
-                stamps
-                    .get(&key)
-                    .map(|(mtime_ms, file_size, digest)| {
-                        (key, *mtime_ms, *file_size, digest.clone())
-                    })
+                stamps.get(&key).map(|(mtime_ms, file_size, digest)| {
+                    (key, *mtime_ms, *file_size, digest.clone())
+                })
             })
             .collect();
         if entries.is_empty() {
             return;
         }
         let store = self.state.store.lock();
+        let _hold = trace_lock_section("seen");
         if let Err(error) = store.record_scan_seen_stamps(op_id, &entries) {
             tracing::error!(%error, %op_id, "写入扫描断点失败");
         }

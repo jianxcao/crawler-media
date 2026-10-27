@@ -14,7 +14,7 @@ fn now_unix() -> i64 {
     super::unix_now()
 }
 
-fn map_user(row: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
+pub(crate) fn map_user(row: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
     let role: String = row.get(3)?;
     Ok(User {
         id: super::maps::parse_id(row.get(0)?, 0)?,
@@ -48,7 +48,7 @@ impl Store {
     /// 先计算哈希，并在单一事务中原子插入用户及其密码；失败则全部回滚。
     pub fn insert_user_with_password(&self, user: &User, password: &str) -> Result<(), StoreError> {
         let hashed = crate::password::hash_password(password).map_err(StoreError::PasswordHash)?;
-        let tx = self.app.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.app)?;
         tx.execute(
             "INSERT INTO users (id, login, password, enabled, role) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
@@ -66,7 +66,7 @@ impl Store {
     /// 在单一事务中原子更新用户信息、更新哈希密码并撤销历史会话 Token（系统当前配置的 CLI token 保留）。
     pub fn update_user_and_password(&self, user: &User, password: &str) -> Result<(), StoreError> {
         let hashed = crate::password::hash_password(password).map_err(StoreError::PasswordHash)?;
-        let tx = self.app.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.app)?;
         let cli_token: Option<String> = tx
             .query_row(
                 "SELECT value FROM settings WHERE key = ?1",
@@ -106,27 +106,13 @@ impl Store {
 
     /// "admin" | "member" — defaults to member for rows without a role.
     pub fn user_role(&self, id: UserId) -> Result<String, StoreError> {
-        self.role_lookups.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(self
-            .app
-            .query_row(
-                "SELECT role FROM users WHERE id = ?1",
-                params![id.to_string()],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .unwrap_or_else(|| "member".into()))
+        self.role_lookups
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        super::app_reader::user_role_on(&self.app, id)
     }
 
     pub fn get_user(&self, id: UserId) -> Result<Option<User>, StoreError> {
-        self.app
-            .query_row(
-                "SELECT id, login, enabled, COALESCE(role, 'member') FROM users WHERE id = ?1",
-                params![id.to_string()],
-                map_user,
-            )
-            .optional()
-            .map_err(Into::into)
+        super::app_reader::get_user_on(&self.app, id)
     }
 
     pub fn list_users(&self) -> Result<Vec<User>, StoreError> {
@@ -161,7 +147,7 @@ impl Store {
         admin_id: UserId,
         token: &str,
     ) -> Result<(), StoreError> {
-        let tx = self.app.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.app)?;
         apply_cli_token_tx(&tx, admin_id, token)?;
         tx.commit()?;
         Ok(())
@@ -179,7 +165,7 @@ impl Store {
             tracing::error!(%user_id, error = %e, "种子管理员密码哈希失败");
             StoreError::PasswordHash(e)
         })?;
-        let tx = self.app.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.app)?;
         tx.execute(
             "INSERT INTO users (id, login, password, enabled, role) VALUES (?1, 'admin', ?2, 1, 'admin')
              ON CONFLICT(id) DO UPDATE SET password = excluded.password, enabled = 1, role = 'admin'",
@@ -204,56 +190,14 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        Ok(stored_pw.flatten().is_some_and(|pw| !pw.trim().is_empty()))
-    }
-
-    /// 在同一个事务中原子轮换管理员密码，并确保当前的 CLI token 登记有效且旧 CLI Bearer 被撤销。
-    /// 若过程中出错则全部回滚，fail-closed，避免产生密码更新但凭据丢失的半边状态。
-    pub fn rotate_admin_password_keeping_cli_token(
-        &self,
-        user_id: UserId,
-        new_password: &str,
-        cli_token: &str,
-    ) -> Result<(), StoreError> {
-        let hashed = crate::password::hash_password(new_password).map_err(|e| {
-            tracing::error!(%user_id, error = %e, "管理员密码轮换哈希失败");
-            StoreError::PasswordHash(e)
-        })?;
-        let tx = self.app.unchecked_transaction()?;
-        tx.execute(
-            "UPDATE users SET password = ?1 WHERE id = ?2",
-            params![hashed, user_id.to_string()],
-        )?;
-        tx.execute(
-            "DELETE FROM user_tokens WHERE user_id = ?1",
-            params![user_id.to_string()],
-        )?;
-        apply_cli_token_tx(&tx, user_id, cli_token)?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// 校验密码是否匹配，但绝不写入数据库，也不签发会话 token（用于启动自检与安全迁移判定）。
-    pub fn password_matches_without_session(
-        &self,
-        login: &str,
-        password: &str,
-    ) -> Result<bool, StoreError> {
-        if password.is_empty() {
-            return Ok(false);
+        match stored_pw.flatten() {
+            None => Ok(false),
+            Some(password) if password.trim().is_empty() => Ok(false),
+            Some(password) if crate::password::is_verifiable_hash(&password) => Ok(true),
+            Some(_) => Err(StoreError::Invalid(
+                "administrator credential is not a supported password hash; rebuild the pre-cutover database using the documented storage clean-cutover procedure, or repair the credential explicitly while offline".into(),
+            )),
         }
-        let user_info = self
-            .app
-            .query_row(
-                "SELECT password FROM users WHERE login = ?1 AND enabled = 1",
-                params![login],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()?;
-        let Some(Some(stored_pw)) = user_info else {
-            return Ok(false);
-        };
-        Ok(crate::password::verify_password(password, &stored_pw))
     }
 
     /// 检查拟设置的管理员密码是否与任何已知作为系统 CLI Bearer 的密钥重合。
@@ -290,82 +234,6 @@ impl Store {
         Ok(tokens.iter().any(|tok| tok == proposed))
     }
 
-    pub fn tokens_for_user(&self, user_id: UserId) -> Result<Vec<String>, StoreError> {
-        let mut stmt = self
-            .app
-            .prepare("SELECT token FROM user_tokens WHERE user_id = ?1")?;
-        let rows = stmt.query_map(params![user_id.to_string()], |row| row.get(0))?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
-
-    /// 校验管理员当前密码是否与已知系统 CLI token（包含当前传入值、历史 marker 及现有 user_tokens）相同。
-    /// 用于升级自检：防止运维同时修改 CLI token 和密码时旧的 token 密码逃过升级迁移。
-    pub fn legacy_admin_password_matches_known_token(
-        &self,
-        admin_id: UserId,
-        current_cli: &str,
-    ) -> Result<bool, StoreError> {
-        let login: Option<String> = self
-            .app
-            .query_row(
-                "SELECT login FROM users WHERE id = ?1 AND enabled = 1",
-                params![admin_id.to_string()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(login) = login else {
-            return Ok(false);
-        };
-        if self.password_matches_without_session(&login, current_cli)? {
-            return Ok(true);
-        }
-        let old_marker: Option<String> = self
-            .app
-            .query_row(
-                "SELECT value FROM settings WHERE key = ?1",
-                params![SETTING_CLI_TOKEN],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(old) = old_marker {
-            if self.password_matches_without_session(&login, &old)? {
-                return Ok(true);
-            }
-        }
-        let mut stmt = self
-            .app
-            .prepare("SELECT token FROM user_tokens WHERE user_id = ?1")?;
-        let tokens: Vec<String> = stmt
-            .query_map(params![admin_id.to_string()], |row| row.get(0))?
-            .filter_map(Result::ok)
-            .collect();
-        for tok in tokens {
-            if self.password_matches_without_session(&login, &tok)? {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    /// 撤销一个会话 token（登出）。系统当前配置的 CLI token 不予物理删除。
-    pub fn delete_token(&self, token: &str) -> Result<bool, StoreError> {
-        let cli_token: Option<String> = self
-            .app
-            .query_row(
-                "SELECT value FROM settings WHERE key = ?1",
-                params![SETTING_CLI_TOKEN],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if cli_token.as_deref() == Some(token) {
-            return Ok(false);
-        }
-        let n = self
-            .app
-            .execute("DELETE FROM user_tokens WHERE token = ?1", params![token])?;
-        Ok(n > 0)
-    }
-
     /// 在单一事务中原子撤销传入的会话 Token 列表（系统当前配置的 CLI token 不予物理删除）。
     /// 任何一个删除失败则整体回滚，绝不残留部分撤销的不一致状态。
     pub fn delete_session_tokens(&self, tokens: &[String]) -> Result<usize, StoreError> {
@@ -380,7 +248,7 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        let tx = self.app.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.app)?;
         let mut deleted = 0;
         for token in tokens {
             if cli_token.as_deref() == Some(token) {
@@ -390,15 +258,6 @@ impl Store {
         }
         tx.commit()?;
         Ok(deleted)
-    }
-
-    /// 撤销某用户的全部会话（改密 / 删除用户时调用）。
-    pub fn delete_tokens_for_user(&self, user_id: UserId) -> Result<usize, StoreError> {
-        let n = self.app.execute(
-            "DELETE FROM user_tokens WHERE user_id = ?1",
-            params![user_id.to_string()],
-        )?;
-        Ok(n)
     }
 
     /// 设置用户密码（凭据存 users 表，与会话 token 分离；改密即旧密码失效）。
@@ -414,7 +273,7 @@ impl Store {
     }
 
     pub fn save_user(&self, user: &User) -> Result<(), StoreError> {
-        let tx = self.app.unchecked_transaction()?;
+        let tx = crate::write_tx(&self.app)?;
         tx.execute(
             "UPDATE users SET login = ?1, enabled = ?2, role = ?3 WHERE id = ?4",
             params![
@@ -447,6 +306,74 @@ impl Store {
         UserId::from_str(&raw).map_err(Into::into)
     }
 
+    pub fn revoke_user_tokens(&self, user_id: UserId) -> Result<(), StoreError> {
+        self.app.execute(
+            "DELETE FROM user_tokens WHERE user_id = ?1",
+            params![user_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    pub fn transfer_user_subscribes(&self, from: UserId, to: UserId) -> Result<(), StoreError> {
+        let tx = crate::write_tx(&self.subscribe)?;
+        tx.execute(
+            "UPDATE subscribes SET user_id = ?1 WHERE user_id = ?2",
+            params![to.to_string(), from.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn clean_user_library_data(
+        &self,
+        user_id: UserId,
+        admin_id: UserId,
+    ) -> Result<(), StoreError> {
+        let tx = crate::write_tx(&self.library)?;
+        tx.execute(
+            "UPDATE collections SET user_id = ?1 WHERE user_id = ?2",
+            params![admin_id.to_string(), user_id.to_string()],
+        )?;
+        for table in [
+            "playback_units",
+            "playback_sessions",
+            "playback_session_ids",
+            "playback_logs",
+            "playback_metrics",
+            "user_library_items",
+        ] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE user_id = ?1"),
+                params![user_id.to_string()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn finish_user_removal(&self, user_id: UserId) -> Result<bool, StoreError> {
+        let tx = crate::write_tx(&self.app)?;
+        tx.execute(
+            "DELETE FROM user_tokens WHERE user_id = ?1",
+            params![user_id.to_string()],
+        )?;
+        let n = tx.execute(
+            "DELETE FROM users WHERE id = ?1",
+            params![user_id.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(n > 0)
+    }
+
+    pub fn list_setting_keys_with_prefix(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self
+            .app
+            .prepare("SELECT key FROM settings WHERE key LIKE ?1")?;
+        let pattern = format!("{prefix}%");
+        let rows = stmt.query_map(params![pattern], |r| r.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn delete_user(&self, id: UserId) -> Result<bool, StoreError> {
         let admin_id = self.admin_user_id()?;
         if id == admin_id {
@@ -458,66 +385,15 @@ impl Store {
 
         // SQLite 文件之间无法组成一个原子事务。先做可恢复的所有权转移：任一步失败时
         // 用户仍存在，重试即可；最后才删除不可恢复的成员私有状态和用户行。
-        let subscribe_tx = self.subscribe.unchecked_transaction()?;
-        subscribe_tx.execute(
-            "UPDATE subscribes SET user_id = ?1 WHERE user_id = ?2",
-            params![admin_id.to_string(), id.to_string()],
-        )?;
-        subscribe_tx.commit()?;
-
-        let app_tx = self.app.unchecked_transaction()?;
-        app_tx.execute(
-            "UPDATE collections SET user_id = ?1 WHERE user_id = ?2",
-            params![admin_id.to_string(), id.to_string()],
-        )?;
-        app_tx.commit()?;
-
-        let playback_tx = self.subscribe.unchecked_transaction()?;
-        for table in [
-            "playback_units",
-            "playback_sessions",
-            "playback_logs",
-            "playback_metrics",
-        ] {
-            playback_tx.execute(
-                &format!("DELETE FROM {table} WHERE user_id = ?1"),
-                params![id.to_string()],
-            )?;
-        }
-        playback_tx.commit()?;
-
-        let user_tx = self.app.unchecked_transaction()?;
-        user_tx.execute(
-            "DELETE FROM user_tokens WHERE user_id = ?1",
-            params![id.to_string()],
-        )?;
-        let n = user_tx.execute("DELETE FROM users WHERE id = ?1", params![id.to_string()])?;
-        user_tx.commit()?;
-        Ok(n > 0)
+        self.transfer_user_subscribes(id, admin_id)?;
+        self.clean_user_library_data(id, admin_id)?;
+        self.finish_user_removal(id)
     }
 
     /// 只解析未过期的会话 token（签发后 Session TTL 秒内有效；管理员配置的系统 CLI token 持续有效）。
     pub fn user_by_token(&self, token: &str) -> Result<Option<User>, StoreError> {
-        let current_cli: Option<String> = self
-            .app
-            .query_row(
-                "SELECT value FROM settings WHERE key = ?1",
-                params![SETTING_CLI_TOKEN],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let is_cli = current_cli.as_deref() == Some(token);
-        let min_created = now_unix() - SESSION_TTL_SECS;
-        self.app
-            .query_row(
-                "SELECT u.id, u.login, u.enabled, COALESCE(u.role, 'member') FROM users u
-                 JOIN user_tokens t ON t.user_id = u.id
-                 WHERE t.token = ?1 AND (t.created_at >= ?2 OR (?3 = 1 AND u.role = 'admin')) AND u.enabled = 1",
-                params![token, min_created, if is_cli { 1 } else { 0 }],
-                map_user,
-            )
-            .optional()
-            .map_err(Into::into)
+        // SQL 只有一份：身份读连接（`AppReader`）与写连接读的是同一段鉴权口径。
+        super::app_reader::user_by_token_on(&self.app, token, now_unix())
     }
 
     pub fn user_id_by_token(&self, token: &str) -> Result<Option<UserId>, StoreError> {
@@ -565,17 +441,7 @@ impl Store {
             return Ok(None);
         }
 
-        let new_hash = if !crate::password::is_argon2_hash(&stored_pw) {
-            let hash = crate::password::hash_password(password).map_err(|e| {
-                tracing::error!(user_id = %uid_str, error = %e, "存量明文口令哈希生成失败");
-                StoreError::PasswordHash(e)
-            })?;
-            Some(hash)
-        } else {
-            None
-        };
-
-        self.finish_verified_login(&uid_str, &stored_pw, new_hash.as_deref())
+        self.finish_verified_login(&uid_str, &stored_pw)
     }
 
     /// 读取密码校验所需的不可变登录快照（用户 id + 当时观察到的 password 列）。
@@ -605,37 +471,31 @@ impl Store {
         }))
     }
 
-    /// 在同一个事务中完成 CAS 密码升级（若需要）并原子签发会话 token。
-    /// 若处于升级路径且并发修改导致 CAS 未击中，返回 Ok(None) 并回滚，绝不签发过期凭据。
+    /// 在同一个事务中重查登录凭据并原子签发会话 token。
+    /// 校验必须在 Store 锁之外完成；这里只接受 Argon2 PHC 观测值（明文等旧行
+    /// 一律拒绝签发），若用户口令/启用状态在校验期间变更，返回 Ok(None) 并回滚，
+    /// 绝不签发过期凭据。
     pub fn finish_verified_login(
         &self,
         user_id: &str,
         observed_password: &str,
-        new_hash: Option<&str>,
     ) -> Result<Option<String>, StoreError> {
-        let tx = self.app.unchecked_transaction()?;
-        if let Some(hash) = new_hash {
-            let changed = tx.execute(
-                "UPDATE users SET password = ?1 WHERE id = ?2 AND password = ?3 AND enabled = 1",
-                params![hash, user_id, observed_password],
-            )?;
-            if changed == 0 {
-                tracing::warn!(user_id = %user_id, "存量密码升级 CAS 冲突或用户已被禁用，放弃登录会话签发");
-                return Ok(None);
-            }
-        } else {
-            let active = tx
-                .query_row(
-                    "SELECT 1 FROM users WHERE id = ?1 AND password = ?2 AND enabled = 1",
-                    params![user_id, observed_password],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some();
-            if !active {
-                tracing::warn!(user_id = %user_id, "用户状态或口令在校验期间发生变更，取消会话签发");
-                return Ok(None);
-            }
+        if !crate::password::is_argon2_hash(observed_password) {
+            tracing::warn!(user_id = %user_id, "非 Argon2 观测凭据拒绝签发会话 token");
+            return Ok(None);
+        }
+        let tx = crate::write_tx(&self.app)?;
+        let active = tx
+            .query_row(
+                "SELECT 1 FROM users WHERE id = ?1 AND password = ?2 AND enabled = 1",
+                params![user_id, observed_password],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !active {
+            tracing::warn!(user_id = %user_id, "用户状态或口令在校验期间发生变更，取消会话签发");
+            return Ok(None);
         }
 
         let token = Uuid::new_v4().simple().to_string();
@@ -661,14 +521,13 @@ fn apply_cli_token_tx(
             |row| row.get(0),
         )
         .optional()?;
-    if let Some(owner) = existing_owner {
-        if owner != admin_id.to_string() {
+    if let Some(owner) = existing_owner
+        && owner != admin_id.to_string() {
             tracing::error!(%admin_id, "待登记的 CLI Token 与现有其他用户会话碰撞，拒绝提升权限");
             return Err(StoreError::CredentialConflict(
                 "待配置的系统 CLI Token 与现有其他用户的会话凭据碰撞".into(),
             ));
         }
-    }
     let old_token: Option<String> = tx
         .query_row(
             "SELECT value FROM settings WHERE key = ?1",

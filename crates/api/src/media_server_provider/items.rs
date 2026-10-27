@@ -2,86 +2,205 @@ use super::user_marks::{item_is_played, unit_play_count};
 use super::*;
 use std::time::SystemTime;
 
-pub(super) fn resolve_fallback_item(
+/// A public protocol id resolved to the entry it names.
+pub(super) struct ResolvedEntry {
+    pub file: domain::LibraryFile,
+    pub media: domain::Media,
+    /// 该条目覆盖的观看单元；`(-1, -1)` 表示整个作品。
+    pub unit: (i32, i32),
+    pub is_series: bool,
+}
+
+/// 整片单元：旧行模型用 `season: None, episode: None` 表达的同一件事。
+pub(super) fn is_whole_unit(unit: (i32, i32)) -> bool {
+    unit.0 < 0 || unit.1 < 0
+}
+
+/// 单元坐标按 DB 访问器要求的可空列形式给出；整片是 `(None, None)`。
+pub(crate) fn unit_columns(unit: (i32, i32)) -> (Option<u32>, Option<u32>) {
+    if is_whole_unit(unit) {
+        (None, None)
+    } else {
+        (Some(unit.0 as u32), Some(unit.1 as u32))
+    }
+}
+
+/// 单元按 media-server 快照的形状给出：整片没有坐标，是 `None`，绝不拼 `(0, 0)`。
+pub(super) fn snapshot_unit(unit: (i32, i32)) -> Option<domain::UnitKey> {
+    let coordinate = |value: i32| (value >= 0).then_some(value);
+    match (coordinate(unit.0), coordinate(unit.1)) {
+        (Some(season), Some(episode)) => Some(domain::UnitKey::new(season, episode)),
+        _ => None,
+    }
+}
+
+/// [`snapshot_unit`] 的逆向：协议快照里的 `None` 还原成整片坐标 `(-1, -1)`。
+pub(super) fn snapshot_unit_coords(unit: Option<domain::UnitKey>) -> (i32, i32) {
+    match unit {
+        Some(unit) => (unit.season, unit.episode),
+        None => (
+            domain::UnitKey::WHOLE.season,
+            domain::UnitKey::WHOLE.episode,
+        ),
+    }
+}
+
+/// 一个 coverage 显式记录的全部播放单元坐标。
+///
+/// 无兼容切换：没有任何 unit 行的文件是“未知覆盖”，不生成任何逻辑可播身份，
+/// 也不能被当成整片（work）借用人物图片等元数据。
+pub(super) fn coverage_units(coverage: &domain::FileCoverage) -> Vec<(i32, i32)> {
+    coverage
+        .units
+        .iter()
+        .map(|unit| (unit.season, unit.episode))
+        .collect()
+}
+
+/// Resolve a public item id (`w1_…` work, `s1_…` season, `u1_…` unit) inside the
+/// caller's authorized libraries. A pending, missing or unknown source never
+/// resolves, and a physical file id is not an item id.
+pub(super) fn resolve_entry(
+    store: &crate::Store,
+    user_id: Option<UserId>,
+    id: &str,
+) -> Result<Option<ResolvedEntry>, String> {
+    let Some(item) = domain::TypedItemId::from_wire_string(id) else {
+        return Ok(None);
+    };
+    let selected = match user_id {
+        Some(user_id) => store.playable_entries(user_id, &item),
+        // Public artwork routes resolve an item id before any user is known.
+        None => store.published_entries_for_item(&item),
+    }
+    .map_err(|error| error.to_string())?;
+    let Some(source) = selected.into_iter().next() else {
+        return Ok(None);
+    };
+    let Some(media) = store
+        .get_media(source.file.media_id)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    let is_series = media.kind == MediaKind::Tv && matches!(item, domain::TypedItemId::Work(_));
+    let unit = (source.unit.season, source.unit.episode);
+    Ok(Some(ResolvedEntry {
+        file: source.file,
+        media,
+        unit,
+        is_series,
+    }))
+}
+
+/// Falls back to a full snapshot for the caller-resolved entry; `None` when the
+/// entry is not a published, present source.
+pub(super) fn entry_snapshot(
     state: &ApiState,
     user_id: UserId,
     id: &str,
-    compact_id: &str,
-) -> Option<MediaItemSnapshot> {
-    let store = state.store.lock();
-    let row = crate::http::media_visibility::resolve_visible_row(&store, id, Some(user_id))?;
-    let row_id = row.id.to_string().replace('-', "");
-    if row_id != compact_id && row.id.to_string() != id {
-        return None;
-    }
-    let media = store.get_media(row.media_id).ok().flatten()?;
-    drop(store);
-    Some(fallback_snapshot(state, user_id, row, media, false))
+) -> Result<Option<MediaItemSnapshot>, String> {
+    let entry = {
+        let store = state.store.lock();
+        resolve_entry(&store, Some(user_id), id)?
+    };
+    Ok(entry.map(|entry| {
+        snapshot_from_entry(
+            state,
+            user_id,
+            entry.file,
+            entry.unit,
+            entry.media,
+            entry.is_series,
+        )
+    }))
 }
 
-pub(super) fn fallback_snapshot(
+pub(super) fn snapshot_from_entry(
     state: &ApiState,
     user_id: UserId,
-    row: domain::LedgerRow,
+    file: domain::LibraryFile,
+    unit: (i32, i32),
     media: domain::Media,
     is_series: bool,
 ) -> MediaItemSnapshot {
     // 锁内只取 owned DB 事实。
-    let (marker, chapters, ticks, played, play_count, parent_id, facts, series_counts) = {
+    let (marker, chapters, ticks, played, play_count, parent_id, facts, fields, series_counts) = {
         let store = state.store.lock();
+        let (season, episode) = unit_columns(unit);
         let marker = store
-            .get_media_marker(row.media_id, row.season, row.episode)
+            .get_media_marker(file.media_id, season, episode)
             .ok()
             .flatten();
         let chapters = store
-            .get_cached_chapters(&row.id.to_string())
+            .get_cached_chapters(&file.file_id.to_string())
             .ok()
             .flatten()
             .unwrap_or_default();
-        let ticks = playback_ticks(&store, user_id, &row, &media);
-        let is_episode = media.kind == MediaKind::Tv && row.season.is_some() && row.episode.is_some();
+        let ticks = playback_ticks(&store, user_id, &file, unit, &media);
+        let is_episode = media.kind == MediaKind::Tv && !is_whole_unit(unit);
         let parent_id = if is_episode {
-            media.id.to_string().replace('-', "")
+            domain::TypedItemId::Work(media.id).to_wire_string()
         } else {
-            crate::http::playback::library_id_for(&store, &media, &[&row])
-                .unwrap_or_else(|| media.id.to_string().replace('-', ""))
+            crate::http::playback::library_id_for(&store, &media, &[&file])
+                .unwrap_or_else(|| domain::TypedItemId::Work(media.id).to_wire_string())
         };
         let (played, play_count, series_counts) = if is_series {
             let (played, unplayed, child_counts) = direct_series_rollup(&store, user_id, media.id);
             (played, 0, Some((unplayed, child_counts)))
         } else {
-            let played = item_is_played(&store, user_id, &row);
-            let play_count = unit_play_count(
-                &store,
-                user_id,
-                row.media_id,
-                row.season.map(|value| value as i32).unwrap_or(crate::store::UNIT_WHOLE),
-                row.episode.map(|value| value as i32).unwrap_or(crate::store::UNIT_WHOLE),
-            );
+            let played = item_is_played(&store, user_id, &file, unit);
+            let play_count = unit_play_count(&store, user_id, file.media_id, unit.0, unit.1);
             (played, play_count, None)
         };
-        let (unit, whole_unit) = item_metadata::row_units(&store, user_id, &row, is_series);
-        let facts = item_metadata::item_db_facts(&store, &row, is_series, unit.as_ref(), whole_unit.as_ref());
-        (marker, chapters, ticks, played, play_count, parent_id, facts, series_counts)
+        let (own_unit, whole_unit) =
+            item_metadata::row_units(&store, user_id, &file, unit, is_series);
+        let facts = item_metadata::item_db_facts(
+            &store,
+            &file,
+            unit,
+            is_series,
+            own_unit.as_ref(),
+            whole_unit.as_ref(),
+        );
+        let fields = item_metadata::page_fields(&store, &file, unit, &media, is_series)
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, media_id = %file.media_id, "page metadata 读取失败，按空字段渲染");
+                domain::MetadataFields::default()
+            });
+        (
+            marker,
+            chapters,
+            ticks,
+            played,
+            play_count,
+            parent_id,
+            facts,
+            fields,
+            series_counts,
+        )
     };
-    // 锁外：NFO / stat / 外部字幕 IO。
+    // 锁外：stat / 外部字幕 IO。
     let metadata = with_date_created(
         item_metadata(
             facts,
-            state.browse_files.as_ref(),
-            &row,
+            &fields,
+            state.file_stats.as_ref(),
+            &file,
+            unit,
             &media,
             is_series,
             series_counts.map(|(_, counts)| counts),
         ),
-        file_date_created(state.browse_files.as_ref(), &row.path),
+        file_date_created(state.file_stats.as_ref(), &file.path),
     );
     MediaItemSnapshot {
+        file,
+        unit: snapshot_unit(unit),
         played,
         play_count,
         unplayed_item_count: series_counts.map(|(unplayed, _)| unplayed),
         metadata,
-        row,
         media,
         ticks,
         parent_id,
@@ -104,25 +223,43 @@ fn direct_series_rollup(
     };
     let mut episodes = HashSet::new();
     let mut seasons = HashSet::new();
-    for row in &snapshot.rows {
-        if row.media_id != media_id { continue; }
-        let Some(media) = snapshot.media.get(&media_id) else { continue };
-        let Some(owner) = snapshot.ownership.owner(std::path::Path::new(&row.path), media.kind) else { continue };
+    for coverage in &snapshot.coverages {
+        if coverage.file.media_id != media_id {
+            continue;
+        }
+        let Some(media) = snapshot.media.get(&media_id) else {
+            continue;
+        };
+        // Published ownership is the row's explicit Library, never a path guess.
+        let Some(owner) = snapshot.ownership.library(&coverage.file.library_id.to_string()) else {
+            continue;
+        };
         let accessible = snapshot.ownership.accepts_work(&owner.id)
-            && if snapshot.is_admin { owner.admin_visible } else { owner.access_mode == "everyone" || owner.member_ids.contains(&user_id) };
+            && if snapshot.is_admin {
+                owner.admin_visible
+            } else {
+                owner.access_mode == "everyone" || owner.member_ids.contains(&user_id)
+            };
         if accessible && media.kind == MediaKind::Tv {
-            if let (Some(season), Some(episode)) = (row.season, row.episode) {
-                episodes.insert((season, episode));
-                seasons.insert(season);
+            for unit in coverage.units.iter().filter(|unit| !unit.is_whole()) {
+                episodes.insert((unit.season as u32, unit.episode as u32));
+                seasons.insert(unit.season as u32);
             }
         }
     }
     let units = unit_index(&snapshot.units);
-    let played_count = episodes.iter().filter(|(season, episode)| {
-        effective_played(&units, media_id, *season as i32, *episode as i32)
-    }).count();
+    let played_count = episodes
+        .iter()
+        .filter(|(season, episode)| {
+            effective_played(&units, media_id, *season as i32, *episode as i32)
+        })
+        .count();
     let total = episodes.len();
-    (total == 0 || played_count == total, total.saturating_sub(played_count), (total, seasons.len()))
+    (
+        total == 0 || played_count == total,
+        total.saturating_sub(played_count),
+        (total, seasons.len()),
+    )
 }
 
 pub(super) async fn list_visible_items(
@@ -173,12 +310,12 @@ fn list_visible_items_blocking(
     let snapshot = collect_pending(&store_guard, user_id, parent_id, library_scope)?;
     drop(store_guard);
     let (pending, ingest_paths) = snapshot;
-    let browse = state.browse_files.as_ref();
+    let browse = state.file_stats.as_ref();
     let latest_ingest = latest_ingest_by_media(browse, &ingest_paths);
     let mut visible = Vec::with_capacity(pending.len());
     for item in pending {
         let date_created = match &item.stat_path {
-            Some(path) => file_date_created(browse, path),
+            Some(path) => file_date_created(browse, std::path::Path::new(path)),
             None => latest_ingest.get(&item.media.id).copied(),
         };
         visible.push(item.into_snapshot(browse, date_created));
@@ -186,14 +323,23 @@ fn list_visible_items_blocking(
     Ok(visible)
 }
 
-pub(super) type UnitIndex<'a> = HashMap<(domain::MediaId, i32, i32), &'a crate::store::PlaybackUnitSnapshot>;
+pub(super) type UnitIndex<'a> =
+    HashMap<(domain::MediaId, i32, i32), &'a crate::store::PlaybackUnitSnapshot>;
 
 /// 一次索引：`find_unit` 的线性扫描在剧集聚合里是 O(集数 × 单元数)。
 pub(super) fn unit_index(units: &[crate::store::PlaybackUnitSnapshot]) -> UnitIndex<'_> {
-    units.iter().map(|unit| ((unit.media_id, unit.season, unit.episode), unit)).collect()
+    units
+        .iter()
+        .map(|unit| ((unit.media_id, unit.season, unit.episode), unit))
+        .collect()
 }
 
-pub(super) fn find_unit<'a>(units: &UnitIndex<'a>, media_id: domain::MediaId, season: i32, episode: i32) -> Option<&'a crate::store::PlaybackUnitSnapshot> {
+pub(super) fn find_unit<'a>(
+    units: &UnitIndex<'a>,
+    media_id: domain::MediaId,
+    season: i32,
+    episode: i32,
+) -> Option<&'a crate::store::PlaybackUnitSnapshot> {
     units.get(&(media_id, season, episode)).copied()
 }
 
@@ -204,33 +350,55 @@ pub(super) fn effective_played(
     episode: i32,
 ) -> bool {
     super::user_marks::resolve_effective_played(
-        find_unit(units, media_id, season, episode).map(|unit| (&unit.state, unit.state.updated_at)),
-        find_unit(units, media_id, season, crate::store::UNIT_WHOLE).map(|unit| (&unit.state, unit.state.updated_at)),
-        find_unit(units, media_id, crate::store::UNIT_WHOLE, crate::store::UNIT_WHOLE)
+        find_unit(units, media_id, season, episode)
             .map(|unit| (&unit.state, unit.state.updated_at)),
+        find_unit(units, media_id, season, crate::store::UNIT_WHOLE)
+            .map(|unit| (&unit.state, unit.state.updated_at)),
+        find_unit(
+            units,
+            media_id,
+            crate::store::UNIT_WHOLE,
+            crate::store::UNIT_WHOLE,
+        )
+        .map(|unit| (&unit.state, unit.state.updated_at)),
     )
 }
 pub(super) fn unit_counts_from_snapshot(
-    units: &UnitIndex<'_>, row: &domain::LedgerRow, media: &domain::Media,
-    is_series: bool, show_episodes: &HashMap<domain::MediaId, HashSet<(u32, u32)>>,
+    units: &UnitIndex<'_>,
+    file: &domain::LibraryFile,
+    unit: (i32, i32),
+    media: &domain::Media,
+    is_series: bool,
+    show_episodes: &HashMap<domain::MediaId, HashSet<(u32, u32)>>,
 ) -> (bool, i64, Option<usize>) {
     if is_series {
         let episodes = show_episodes.get(&media.id);
         let total = episodes.map(HashSet::len).unwrap_or(0);
-        let played = episodes.into_iter().flat_map(|episodes| episodes.iter()).filter(|(season, episode)| {
-            effective_played(units, media.id, *season as i32, *episode as i32)
-        }).count();
-        return (total == 0 || total == played, 0, Some(total.saturating_sub(played)));
+        let played = episodes
+            .into_iter()
+            .flat_map(|episodes| episodes.iter())
+            .filter(|(season, episode)| {
+                effective_played(units, media.id, *season as i32, *episode as i32)
+            })
+            .count();
+        return (
+            total == 0 || total == played,
+            0,
+            Some(total.saturating_sub(played)),
+        );
     }
-    let season = row.season.map(|value| value as i32).unwrap_or(crate::store::UNIT_WHOLE);
-    let episode = row.episode.map(|value| value as i32).unwrap_or(crate::store::UNIT_WHOLE);
-    let unit = find_unit(units, row.media_id, season, episode);
+    let (season, episode) = unit;
+    let own_unit = find_unit(units, file.media_id, season, episode);
     let played = if media.kind == MediaKind::Tv && season >= 0 && episode >= 0 {
-        effective_played(units, row.media_id, season, episode)
+        effective_played(units, file.media_id, season, episode)
     } else {
-        unit.is_some_and(|unit| unit.state.played)
+        own_unit.is_some_and(|unit| unit.state.played)
     };
-    (played, unit.map(|unit| unit.state.play_count).unwrap_or(0), None)
+    (
+        played,
+        own_unit.map(|unit| unit.state.play_count).unwrap_or(0),
+        None,
+    )
 }
 
 fn collect_pending(
@@ -239,69 +407,233 @@ fn collect_pending(
     parent_id: Option<&str>,
     library_scope: Option<&str>,
 ) -> Result<(Vec<PendingSnapshot>, Vec<(domain::MediaId, String)>), String> {
-    let snapshot = super::read_snapshot::collect_server_read(store, user_id, parent_id, library_scope)?;
-    let ServerReadSnapshot { ownership, is_admin, media, rows: ledger_rows, units, .. } = snapshot;
+    let snapshot =
+        super::read_snapshot::collect_server_read(store, user_id, parent_id, library_scope)?;
+    let ServerReadSnapshot {
+        ownership,
+        is_admin,
+        media,
+        coverages,
+        units,
+        files,
+    } = snapshot;
     let requested_library = library_scope.or_else(|| {
-        parent_id.and_then(|id| ownership.library(id)).map(|library| library.id.as_str())
+        parent_id
+            .and_then(|id| ownership.library(id))
+            .map(|library| library.id.as_str())
     });
     let mut show_episodes: HashMap<domain::MediaId, HashSet<(u32, u32)>> = HashMap::new();
     let mut show_seasons: HashMap<domain::MediaId, HashSet<u32>> = HashMap::new();
-    let row_visible = |row: &domain::LedgerRow| -> bool {
-        let Some(item) = media.get(&row.media_id) else { return false };
-        let Some(owner) = ownership.owner(std::path::Path::new(&row.path), item.kind) else { return false };
-        ownership.accepts_work(&owner.id)
+    let coverage_visible = |coverage: &domain::FileCoverage| -> bool {
+        let Some(owner) = ownership.library(&coverage.file.library_id.to_string()) else {
+            return false;
+        };
+        media.contains_key(&coverage.file.media_id)
+            && ownership.accepts_work(&owner.id)
             && requested_library.is_none_or(|library_id| owner.id == library_id)
-            && if is_admin { owner.admin_visible } else { owner.access_mode == "everyone" || owner.member_ids.contains(&user_id) }
+            && if is_admin {
+                owner.admin_visible
+            } else {
+                owner.access_mode == "everyone" || owner.member_ids.contains(&user_id)
+            }
     };
-    for row in &ledger_rows {
-        let Some(item) = media.get(&row.media_id) else { continue };
-        if item.kind != MediaKind::Tv || !row_visible(row) { continue; }
-        if let (Some(season), Some(episode)) = (row.season, row.episode) {
-            show_episodes.entry(item.id).or_default().insert((season, episode));
-            show_seasons.entry(item.id).or_default().insert(season);
-        }
-    }
+    collect_show_units(
+        &coverages,
+        &media,
+        &coverage_visible,
+        &mut show_episodes,
+        &mut show_seasons,
+    );
     let units = unit_index(&units);
-    let ingest_paths = ledger_rows.iter().filter_map(|row| {
-        let item = media.get(&row.media_id)?;
-        row_visible(row).then(|| (item.id, row.path.clone()))
-    }).collect::<Vec<_>>();
+    let ingest_paths = coverages
+        .iter()
+        .filter_map(|coverage| {
+            let item = media.get(&coverage.file.media_id)?;
+            coverage_visible(coverage).then(|| (item.id, coverage.file.path.display().to_string()))
+        })
+        .collect::<Vec<_>>();
+    let context = PendingContext {
+        store,
+        units: &units,
+        show_episodes: &show_episodes,
+        show_seasons: &show_seasons,
+    };
     let mut seen_series = HashSet::new();
     let mut pending = Vec::new();
-    for row in ledger_rows {
-        let Some(media) = media.get(&row.media_id).cloned() else { continue };
-        let Some(owner) = ownership.owner(std::path::Path::new(&row.path), media.kind) else { continue };
-        if !row_visible(&row) { continue; }
-        let series_id = media.id.to_string().replace('-', "");
-        let requested_series = media.kind == MediaKind::Tv && parent_id.is_some_and(|id| id == series_id || id == media.id.to_string());
+    for coverage in &coverages {
+        // Published, present sources only: a pending or missing file is not
+        // library content.
+        let Some(file) = files.get(&coverage.file.file_id).cloned() else {
+            continue;
+        };
+        let Some(media) = media.get(&coverage.file.media_id).cloned() else {
+            continue;
+        };
+        let Some(owner) = ownership.library(&coverage.file.library_id.to_string()) else {
+            continue;
+        };
+        if !coverage_visible(coverage) {
+            continue;
+        }
+        let series_id = domain::TypedItemId::Work(media.id).to_wire_string();
+        let requested_series = media.kind == MediaKind::Tv
+            && parent_id.is_some_and(|id| {
+                media_server::provider::query::series_media_id(id) == Some(media.id)
+            });
         let is_series = media.kind == MediaKind::Tv && !requested_series;
-        if is_series && !seen_series.insert(media.id) { continue; }
-        let marker = store.get_media_marker(row.media_id, row.season, row.episode).map_err(|error| error.to_string())?;
-        let chapters = store.get_cached_chapters(&row.id.to_string()).map_err(|error| error.to_string())?.unwrap_or_default();
-        let (played, play_count, unplayed_item_count) = unit_counts_from_snapshot(&units, &row, &media, is_series, &show_episodes);
-        let child_counts = is_series.then(|| (show_episodes.get(&media.id).map(HashSet::len).unwrap_or(0), show_seasons.get(&media.id).map(HashSet::len).unwrap_or(0)));
-        let season = row.season.map(|value| value as i32).unwrap_or(crate::store::UNIT_WHOLE);
-        let episode = row.episode.map(|value| value as i32).unwrap_or(crate::store::UNIT_WHOLE);
-        let unit = find_unit(&units, row.media_id, season, episode);
-        let whole_unit = is_series.then(|| find_unit(&units, row.media_id, crate::store::UNIT_WHOLE, crate::store::UNIT_WHOLE)).flatten();
-        let facts = item_metadata::item_db_facts(store, &row, is_series, unit, whole_unit);
-        let ticks = unit.map(|unit| unit.state.position_ms.saturating_mul(10_000)).unwrap_or(0);
-        let stat_path = (!is_series).then(|| row.path.clone());
-        pending.push(PendingSnapshot {
-            parent_id: if requested_series { series_id } else { owner.id.clone() }, ticks,
-            intro_start_ms: marker.as_ref().and_then(|item| item.intro_start_ms), intro_end_ms: marker.as_ref().and_then(|item| item.intro_end_ms),
-            outro_start_ms: marker.as_ref().and_then(|item| item.outro_start_ms), outro_end_ms: marker.as_ref().and_then(|item| item.outro_end_ms),
-            row, media, is_series, play_count, played, unplayed_item_count, chapters, facts, child_counts, stat_path,
-        });
+        for watch_unit in &coverage.units {
+            if is_series && !seen_series.insert(media.id) {
+                continue;
+            }
+            let unit = (watch_unit.season, watch_unit.episode);
+            pending.push(pending_for_unit(
+                &context,
+                coverage,
+                &file,
+                unit,
+                &media,
+                is_series,
+                requested_series,
+                &series_id,
+                &owner.id,
+            )?);
+        }
     }
     Ok((pending, ingest_paths))
 }
 
+/// 可见剧集的「已出现季/集」索引：折叠 series 条目时用它算 child counts。
+fn collect_show_units(
+    coverages: &[domain::FileCoverage],
+    media: &HashMap<domain::MediaId, domain::Media>,
+    visible: &impl Fn(&domain::FileCoverage) -> bool,
+    show_episodes: &mut HashMap<domain::MediaId, HashSet<(u32, u32)>>,
+    show_seasons: &mut HashMap<domain::MediaId, HashSet<u32>>,
+) {
+    for coverage in coverages {
+        let Some(item) = media.get(&coverage.file.media_id) else {
+            continue;
+        };
+        if item.kind != MediaKind::Tv || !visible(coverage) {
+            continue;
+        }
+        for unit in coverage.units.iter().filter(|unit| !unit.is_whole()) {
+            show_episodes
+                .entry(item.id)
+                .or_default()
+                .insert((unit.season as u32, unit.episode as u32));
+            show_seasons
+                .entry(item.id)
+                .or_default()
+                .insert(unit.season as u32);
+        }
+    }
+}
 
+/// 单个 `(文件, 观看单元)` 条目所需的 DB 事实与渲染字段。
+#[allow(clippy::too_many_arguments)]
+fn pending_for_unit(
+    context: &PendingContext<'_>,
+    coverage: &domain::FileCoverage,
+    file: &domain::LibraryFile,
+    unit: (i32, i32),
+    media: &domain::Media,
+    is_series: bool,
+    requested_series: bool,
+    series_id: &str,
+    owner_id: &str,
+) -> Result<PendingSnapshot, String> {
+    let (season, episode) = unit_columns(unit);
+    let marker = context
+        .store
+        .get_media_marker(coverage.file.media_id, season, episode)
+        .map_err(|error| error.to_string())?;
+    let chapters = context
+        .store
+        .get_cached_chapters(&coverage.file.file_id.to_string())
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default();
+    let (played, play_count, unplayed_item_count) = unit_counts_from_snapshot(
+        context.units,
+        &coverage.file,
+        unit,
+        media,
+        is_series,
+        context.show_episodes,
+    );
+    let child_counts = is_series.then(|| {
+        (
+            context
+                .show_episodes
+                .get(&media.id)
+                .map(HashSet::len)
+                .unwrap_or(0),
+            context
+                .show_seasons
+                .get(&media.id)
+                .map(HashSet::len)
+                .unwrap_or(0),
+        )
+    });
+    let own_unit = find_unit(context.units, coverage.file.media_id, unit.0, unit.1);
+    let whole = crate::store::UNIT_WHOLE;
+    let whole_unit = is_series
+        .then(|| find_unit(context.units, coverage.file.media_id, whole, whole))
+        .flatten();
+    let facts = item_metadata::item_db_facts(
+        context.store,
+        &coverage.file,
+        unit,
+        is_series,
+        own_unit,
+        whole_unit,
+    );
+    let fields = item_metadata::page_fields(context.store, &coverage.file, unit, media, is_series)
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, media_id = %coverage.file.media_id, "page metadata 读取失败，按空字段渲染");
+            domain::MetadataFields::default()
+        });
+    Ok(PendingSnapshot {
+        parent_id: if requested_series {
+            series_id.to_string()
+        } else {
+            owner_id.to_string()
+        },
+        ticks: own_unit
+            .map(|unit| unit.state.position_ms.saturating_mul(10_000))
+            .unwrap_or(0),
+        intro_start_ms: marker.as_ref().and_then(|item| item.intro_start_ms),
+        intro_end_ms: marker.as_ref().and_then(|item| item.intro_end_ms),
+        outro_start_ms: marker.as_ref().and_then(|item| item.outro_start_ms),
+        outro_end_ms: marker.as_ref().and_then(|item| item.outro_end_ms),
+        file: file.clone(),
+        unit,
+        media: media.clone(),
+        is_series,
+        play_count,
+        played,
+        unplayed_item_count,
+        chapters,
+        facts,
+        fields,
+        child_counts,
+        stat_path: (!is_series).then(|| coverage.file.path.display().to_string()),
+    })
+}
+
+/// 逐单元构造条目时复用的只读索引。
+struct PendingContext<'a> {
+    store: &'a crate::Store,
+    units: &'a UnitIndex<'a>,
+    show_episodes: &'a HashMap<domain::MediaId, HashSet<(u32, u32)>>,
+    show_seasons: &'a HashMap<domain::MediaId, HashSet<u32>>,
+}
 
 /// 锁内收集的 owned DB 事实；文件 IO 全部留到锁外。
 struct PendingSnapshot {
-    row: domain::LedgerRow,
+    file: domain::LibraryFile,
+    /// 该条目覆盖的观看单元；`(-1, -1)` 表示整个作品。
+    unit: (i32, i32),
     media: domain::Media,
     is_series: bool,
     parent_id: String,
@@ -315,6 +647,7 @@ struct PendingSnapshot {
     outro_start_ms: Option<i64>,
     outro_end_ms: Option<i64>,
     facts: item_metadata::ItemDbFacts,
+    fields: domain::MetadataFields,
     child_counts: Option<(usize, usize)>,
     /// 非 series：DateCreated 需要 stat 这个路径；series：用 ingest 映射。
     stat_path: Option<String>,
@@ -324,11 +657,12 @@ impl PendingSnapshot {
     /// 锁外：NFO/stat/外部字幕 IO + 组装。
     fn into_snapshot(
         self,
-        browse: &dyn crate::browse_file_read::BrowseFileRead,
+        browse: &dyn crate::file_stat_read::FileStatRead,
         date_created: Option<SystemTime>,
     ) -> MediaItemSnapshot {
         let Self {
-            row,
+            file,
+            unit,
             media,
             is_series,
             parent_id,
@@ -342,15 +676,26 @@ impl PendingSnapshot {
             outro_start_ms,
             outro_end_ms,
             facts,
+            fields,
             child_counts,
             stat_path: _,
         } = self;
         let metadata = with_date_created(
-            item_metadata(facts, browse, &row, &media, is_series, child_counts),
+            item_metadata(
+                facts,
+                &fields,
+                browse,
+                &file,
+                unit,
+                &media,
+                is_series,
+                child_counts,
+            ),
             date_created,
         );
         MediaItemSnapshot {
-            row,
+            file,
+            unit: snapshot_unit(unit),
             media,
             ticks,
             play_count,
@@ -371,18 +716,20 @@ impl PendingSnapshot {
 fn playback_ticks(
     store: &crate::Store,
     user_id: UserId,
-    row: &domain::LedgerRow,
+    file: &domain::LibraryFile,
+    unit: (i32, i32),
     media: &domain::Media,
 ) -> i64 {
+    let (season, episode) = unit_columns(unit);
     store
-        .playback_unit_progress(user_id, row.media_id, row.season, row.episode)
+        .playback_unit_progress(user_id, file.media_id, season, episode)
         .ok()
         .flatten()
         .or_else(|| {
             (media.kind == MediaKind::Movie)
                 .then(|| {
                     store
-                        .playback_progress(user_id, row.media_id)
+                        .playback_progress(user_id, file.media_id)
                         .ok()
                         .flatten()
                 })
@@ -394,12 +741,12 @@ fn playback_ticks(
 
 /// 锁外：把「可见行的 ingest 时间」按 Media 取最大值。
 pub(super) fn latest_ingest_by_media(
-    browse: &dyn crate::browse_file_read::BrowseFileRead,
+    browse: &dyn crate::file_stat_read::FileStatRead,
     paths: &[(domain::MediaId, String)],
 ) -> HashMap<domain::MediaId, SystemTime> {
     let mut latest = HashMap::new();
     for (media_id, path) in paths {
-        let Some(created) = file_date_created(browse, path) else {
+        let Some(created) = file_date_created(browse, std::path::Path::new(path)) else {
             continue;
         };
         latest
@@ -411,24 +758,24 @@ pub(super) fn latest_ingest_by_media(
 }
 
 pub(super) fn file_date_created(
-    browse: &dyn crate::browse_file_read::BrowseFileRead,
-    path: &str,
+    browse: &dyn crate::file_stat_read::FileStatRead,
+    path: &std::path::Path,
 ) -> Option<SystemTime> {
-    let metadata = match browse.metadata(std::path::Path::new(path)) {
+    let metadata = match browse.metadata(path) {
         Ok(metadata) => metadata,
         Err(error) => {
-            tracing::warn!(path, %error, "Jellyfin DateCreated unavailable for media file");
+            tracing::warn!(path = %path.display(), %error, "Jellyfin DateCreated unavailable for media file");
             return None;
         }
     };
     let created = metadata.created().or_else(|error| {
-        tracing::warn!(path, %error, "Jellyfin DateCreated uses modified time because creation time is unavailable");
+            tracing::warn!(path = %path.display(), %error, "Jellyfin DateCreated uses modified time because creation time is unavailable");
         metadata.modified()
     });
     match created {
         Ok(created) => Some(created),
         Err(error) => {
-            tracing::warn!(path, %error, "Jellyfin DateCreated unavailable for media file");
+            tracing::warn!(path = %path.display(), %error, "Jellyfin DateCreated unavailable for media file");
             None
         }
     }
@@ -442,97 +789,5 @@ pub(super) fn with_date_created(
     metadata
 }
 
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn unit(
-        media_id: domain::MediaId,
-        season: i32,
-        episode: i32,
-        played: bool,
-        updated_at: i64,
-    ) -> crate::store::PlaybackUnitSnapshot {
-        crate::store::PlaybackUnitSnapshot {
-            media_id,
-            season,
-            episode,
-            state: crate::store::UnitState {
-                position_ms: 0,
-                played,
-                favorite: false,
-                favorite_at: 0,
-                duration_ms: None,
-                audio_track: None,
-                subtitle_track: None,
-                play_count: 0,
-                updated_at,
-            },
-        }
-    }
-
-    fn fixture() -> (domain::Media, domain::LedgerRow) {
-        let media = domain::Media {
-            id: domain::MediaId::new(),
-            kind: MediaKind::Tv,
-            title: "Show".into(),
-            year: None,
-            original_title: None,
-            aliases: Vec::new(),
-            tmdb_id: None,
-            douban_id: None,
-            tvdb_id: None,
-            bangumi_id: None,
-            anilist_id: None,
-        };
-        let row = domain::LedgerRow {
-            id: domain::LedgerId::new(),
-            media_id: media.id,
-            path: "/tv/Show.S01E01.mkv".into(),
-            season: Some(1),
-            episode: Some(1),
-            resolution: None,
-            codec: None,
-            hdr: None,
-            quality_source: domain::QualitySource::Release,
-            confidence: domain::Confidence::High,
-            filter_score: None,
-        };
-        (media, row)
-    }
-
-    fn two_episodes(media_id: domain::MediaId) -> HashMap<domain::MediaId, HashSet<(u32, u32)>> {
-        let mut episodes = HashMap::new();
-        episodes.insert(media_id, HashSet::from([(1_u32, 1_u32), (1, 2)]));
-        episodes
-    }
-
-    /// 整剧已看（只有 `(-1,-1)` 单元）时，没有自己单元的集也必须算已看。
-    #[test]
-    fn series_rollup_honours_the_whole_show_mark() {
-        let (media, row) = fixture();
-        let units = vec![unit(media.id, crate::store::UNIT_WHOLE, crate::store::UNIT_WHOLE, true, 10)];
-        let index = unit_index(&units);
-        let (played, _, unplayed) =
-            unit_counts_from_snapshot(&index, &row, &media, true, &two_episodes(media.id));
-        assert!(played, "whole-show mark must make every episode played");
-        assert_eq!(unplayed, Some(0));
-    }
-
-    /// 更晚的单集标记优先于整剧标记（显式取消已看不被覆盖）。
-    #[test]
-    fn series_rollup_keeps_a_newer_episode_mark() {
-        let (media, row) = fixture();
-        let units = vec![
-            unit(media.id, crate::store::UNIT_WHOLE, crate::store::UNIT_WHOLE, true, 10),
-            unit(media.id, 1, 1, false, 20),
-            unit(media.id, 1, 2, true, 5),
-        ];
-        let index = unit_index(&units);
-        let (played, _, unplayed) =
-            unit_counts_from_snapshot(&index, &row, &media, true, &two_episodes(media.id));
-        assert!(!played, "a newer episode unmark must win over the whole-show mark");
-        assert_eq!(unplayed, Some(1));
-    }
-}
+mod tests;

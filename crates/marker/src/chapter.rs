@@ -74,7 +74,6 @@ pub fn probe_chapters_controlled(
     path: &Path,
     control: &crate::WorkControl,
 ) -> Option<Vec<Chapter>> {
-    let _permit = crate::media_read::acquire_media_read(path, control).ok()?;
     let target = ProbeTarget::from_path(path);
     let mut cmd = Command::new("ffprobe");
     cmd.args(["-v", "error", "-show_chapters", "-of", "json"]);
@@ -143,10 +142,10 @@ pub fn probe_chapters_controlled(
 /// 构造完整连续的剧集时间轴章节（类似 Infuse / Apple TV）：
 /// 如果原本没有内嵌章节，或者只有单独的 Marker，
 /// 则依据片头、片尾和视频总时长，自动切分为：
-/// 1. [0 -> intro_start] (若 > 0): 序幕 / 前情提要 (Cold Open / Recap)
-/// 2. [intro_start -> intro_end]: 片头 (IntroStart)
-/// 3. [intro_end -> outro_start 或 总时长]: 正片
-/// 4. [outro_start -> 总时长]: 片尾 (CreditsStart)
+/// 1. `[0 -> intro_start]` (若 > 0): 序幕 / 前情提要 (Cold Open / Recap)
+/// 2. `[intro_start -> intro_end]`: 片头 (IntroStart)
+/// 3. `[intro_end -> outro_start 或 总时长]`: 正片
+/// 4. `[outro_start -> 总时长]`: 片尾 (CreditsStart)
 pub fn build_complete_timeline_chapters(
     existing: &[ChapterMarker],
     intro: Option<(i64, i64)>,
@@ -163,9 +162,6 @@ pub fn build_complete_timeline_chapters(
 }
 
 fn source_chapters(existing: &[ChapterMarker]) -> Vec<ChapterMarker> {
-    if is_legacy_generated_timeline(existing) {
-        return Vec::new();
-    }
     existing
         .iter()
         .filter(|chapter| {
@@ -284,24 +280,4 @@ fn synthetic_marker(
     marker_type: MarkerType,
 ) -> ChapterMarker {
     synthetic_chapter(start_ms, end_ms, title, Some(marker_type))
-}
-
-fn is_legacy_generated_timeline(chapters: &[ChapterMarker]) -> bool {
-    if chapters.len() < 2 || chapters.first().is_none_or(|chapter| chapter.start_ms != 0) {
-        return false;
-    }
-    let mut has_feature = false;
-    let mut has_marker = false;
-    for chapter in chapters {
-        match (chapter.title.as_deref(), chapter.marker_type) {
-            (Some("序幕"), None) | (Some("正片"), None) => {
-                has_feature |= chapter.title.as_deref() == Some("正片");
-            }
-            (Some("片头"), Some(MarkerType::IntroStart))
-            | (Some("片头"), Some(MarkerType::IntroEnd))
-            | (Some("片尾"), Some(MarkerType::CreditsStart)) => has_marker = true,
-            _ => return false,
-        }
-    }
-    has_feature && has_marker
 }

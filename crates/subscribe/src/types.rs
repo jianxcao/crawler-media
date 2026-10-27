@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use domain::{Filter, LedgerRow, Media, Subscribe, Torrent};
+use domain::{FileCoverage, FileSource, Filter, LibraryId, Media, Subscribe, Torrent};
 use downloader::Downloader;
 use hooks::{Bus, PluginError};
 use library::TransferMode;
@@ -17,6 +17,10 @@ pub enum SubscribeError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Hook(#[from] PluginError),
+    /// A file reached publication without the destination identity that makes a
+    /// row meaningful (the owning Library or its root).
+    #[error("publication needs a real {0}: the Transfer has no destination identity")]
+    MissingPublicationTarget(&'static str),
 }
 
 pub struct RunInput<'a, D: Downloader + ?Sized> {
@@ -33,6 +37,9 @@ pub struct RunInput<'a, D: Downloader + ?Sized> {
     pub facts: SubscribeFacts,
     pub downloader: &'a D,
     pub library_root: &'a Path,
+    pub library_id: Option<LibraryId>,
+    pub root_id: Option<String>,
+    pub config_revision: Option<i64>,
     pub transfer_mode: Option<TransferMode>,
     pub scrape: bool,
     pub hooks: Option<&'a Bus>,
@@ -48,11 +55,11 @@ pub struct RunInput<'a, D: Downloader + ?Sized> {
 
 pub struct RunOutcome {
     pub facts: SubscribeFacts,
-    pub ledger: Vec<LedgerRow>,
-    /// Original completed file for each ledger path written during this run.
-    /// The API persists it so an administrator can explicitly retransfer a
-    /// missing Library file without re-running the subscription workflow.
-    pub ledger_sources: Vec<LedgerSource>,
+    /// The files this round published into the Library: the authoritative
+    /// coverage (identity, path, facts, units) every caller persists from.
+    pub files: Vec<FileCoverage>,
+    /// Where each published file came from, keyed by `FileSource::file_id`.
+    pub file_sources: Vec<FileSource>,
     pub removed_paths: Vec<String>,
     pub completed: bool,
     /// Enclosures whose completed files were transferred into the Library.
@@ -70,9 +77,4 @@ pub struct RunOutcome {
     pub submission_errors: Vec<String>,
     /// All torrents added to downloader during this run along with their scores.
     pub torrents_added: Vec<(i32, Torrent)>,
-}
-
-pub struct LedgerSource {
-    pub ledger_path: String,
-    pub source_path: String,
 }

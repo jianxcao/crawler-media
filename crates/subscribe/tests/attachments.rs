@@ -1,5 +1,4 @@
 use std::fs;
-use std::path::Path;
 
 use domain::{
     AtomRule, Coverage, FetchMode, Filter, FilterAtom, FilterId, Media, MediaId, MediaKind, SiteId,
@@ -19,7 +18,7 @@ fn movie_filter() -> Filter {
             exclude: false,
         }],
         keep_old_versions: false,
-}
+    }
 }
 
 fn media_movie() -> Media {
@@ -102,6 +101,9 @@ fn attachments_are_not_treated_as_video() {
         facts: SubscribeFacts::default(),
         downloader: &dl,
         library_root: &library_root,
+        library_id: None,
+        root_id: None,
+        config_revision: None,
         transfer_mode: Some(TransferMode::Copy),
         scrape: false,
         hooks: None,
@@ -112,13 +114,12 @@ fn attachments_are_not_treated_as_video() {
     })
     .unwrap();
 
-    // 没有视频文件 → 什么都不入库，ledger 为空、无事实。
-    assert!(outcome.ledger.is_empty());
+    // 没有视频文件 → 什么都不入库，无已发布文件、无事实。
+    assert!(outcome.files.is_empty());
     assert!(outcome.facts.movie().is_none());
-    assert!(
-        library_root
-            .exists()
-            .then(|| fs::read_dir(&library_root).unwrap().next().is_none())
-            .unwrap_or(true)
-    );
+    assert!(if library_root.exists() {
+        fs::read_dir(&library_root).unwrap().next().is_none()
+    } else {
+        true
+    });
 }

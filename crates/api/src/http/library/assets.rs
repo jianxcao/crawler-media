@@ -1,32 +1,36 @@
 use serde_json::{Value, json};
 use std::path::{Path as FsPath, PathBuf};
 
-use super::library_for_row;
 use crate::store::{Library, LibraryRemoval};
 
-/// Ledger rows whose path falls under any root of the library.
-pub(crate) fn rows_in_library(store: &crate::Store, library: &Library) -> Vec<domain::LedgerRow> {
-    store
-        .list_ledger()
-        .unwrap_or_default()
+/// Files whose recorded path falls under any root of the library.
+pub(crate) fn files_in_library(
+    store: &crate::Store,
+    library: &Library,
+) -> Vec<domain::LibraryFile> {
+    coverages_in_library(store, library)
         .into_iter()
-        .filter(|row| {
-            let Some(media) = store.get_media(row.media_id).ok().flatten() else {
-                return false;
-            };
-            library_for_row(store, row, &media).is_some_and(|owner| owner.id == library.id)
-        })
+        .map(|coverage| coverage.file)
         .collect()
 }
 
-/// 封面决策的**路径输入**：只有 DB/内存事实，没有任何 `is_file` 观察。
+/// 同 [`files_in_library`] 的过滤，但保留每个文件的 unit 覆盖（`FileCoverage`）。
+pub(crate) fn coverages_in_library(
+    store: &crate::Store,
+    library: &Library,
+) -> Vec<domain::FileCoverage> {
+    let Ok(id) = library.id.parse() else {
+        return Vec::new();
+    };
+    store
+        .file_coverage_in_library(id, None, store::FileReadScope::AllRecorded)
+        .unwrap_or_default()
+}
+
+/// 封面决策的路径输入：只认显式配置的路径。
 struct CoverInput {
-    /// 用户显式禁用封面（`cover_path` 为 `"none"`/空串）：不回填 legacy。
     disabled: bool,
-    /// 显式配置的封面路径。
     explicit: Option<PathBuf>,
-    /// legacy 固定路径 `library-{id}.jpg`。
-    legacy: PathBuf,
 }
 
 /// 一个 Library 在**锁内**收集到的 owned DB 事实。
@@ -37,39 +41,40 @@ struct CoverInput {
 pub(crate) struct LibraryFacts {
     pub(crate) library: Library,
     removal: Option<LibraryRemoval>,
+    root_reassignments: Vec<store::RootReassignment>,
     cover: CoverInput,
 }
 
-/// 锁内读取：removal 状态、封面候选路径。全部是 DB 或内存事实。
+/// 锁内读取 removal 状态和显式封面路径；不再探测固定命名的旧封面文件。
 pub(crate) fn library_facts(store: &crate::Store, library: &Library) -> LibraryFacts {
     let cover = CoverInput {
         disabled: matches!(library.cover_path.as_deref(), Some("none") | Some("")),
-        explicit: library.cover_path.as_deref().and_then(|path| {
-            // `"none"`/空串是「显式禁用」，不是路径。
-            (!path.is_empty() && path != "none").then(|| PathBuf::from(path))
-        }),
-        legacy: store
-            .library_covers_dir()
-            .join(format!("library-{}.jpg", library.id)),
+        explicit: library
+            .cover_path
+            .as_deref()
+            .and_then(|path| (!path.is_empty() && path != "none").then(|| PathBuf::from(path))),
     };
     LibraryFacts {
         library: library.clone(),
         removal: store.removal_for_library(&library.id).ok().flatten(),
+        root_reassignments: store.root_reassignments_for_library(&library.id).unwrap_or_else(|error| {
+            tracing::error!(library_id=library.id,%error,"Failed to read root reassignment lifecycle");
+            Vec::new()
+        }),
         cover,
     }
 }
 
-/// 与 `library_cover_path` 同一套只读语义，但路径输入已经在锁内算好。
+/// Explicit configured covers only; a fixed cover filename is not a storage fact.
 fn cover_path_from_input(cover: &CoverInput) -> Option<PathBuf> {
     if cover.disabled {
         return None;
     }
-    if let Some(path) = &cover.explicit {
-        if path.is_file() {
-            return Some(path.clone());
-        }
-    }
-    cover.legacy.is_file().then(|| cover.legacy.clone())
+    cover
+        .explicit
+        .as_ref()
+        .filter(|path| path.is_file())
+        .cloned()
 }
 
 /// 锁外：在 owned 事实之上做文件观察并渲染响应 JSON。
@@ -93,6 +98,7 @@ pub(crate) fn library_json_from_facts(
     json!({
         "id": library.id,
         "removal": facts.removal,
+        "root_reassignments": facts.root_reassignments,
         "kind": library.kind.as_str(),
         "name": library.name,
         "root_paths": library.root_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
@@ -124,41 +130,53 @@ pub(crate) fn library_json_from_facts(
 
 /// 同步版本：库配置的写路径仍在锁内直接渲染（不在本次改动范围内），统计用
 /// [`crate::library_statistics::statistics_for`] 的同一套口径同步算一次，不构建。
-pub(crate) fn library_json(store: &crate::Store, library: &Library) -> Value {
-    let stats = crate::library_statistics::statistics_for(store, library);
-    library_json_from_facts(&library_facts(store, library), Some(stats))
+pub(crate) fn library_json(
+    store: &crate::Store,
+    library: &Library,
+) -> Result<Value, store::StoreError> {
+    let stats = crate::library_statistics::statistics_for(store, library)?;
+    Ok(library_json_from_facts(
+        &library_facts(store, library),
+        Some(stats),
+    ))
 }
 
 /// Emby-style current cover source: latest TV episode wins; movies use their
 /// sole file. This makes a newly imported episode refresh the series cover.
-pub(crate) fn preferred_row<'a, R>(rows: &'a [R]) -> Option<&'a domain::LedgerRow>
+///
+/// Key is `(season.unwrap_or(0), episode.unwrap_or(0), path)` over the file's units;
+/// a whole file reads as `(0, 0)` (the `(-1, -1)` sentinel clamps), so a multi-unit
+/// file picks the same file the max over its unit rows picks.
+pub(crate) fn preferred_coverage<R>(covs: &[R]) -> Option<&domain::FileCoverage>
 where
-    R: std::borrow::Borrow<domain::LedgerRow>,
+    R: std::borrow::Borrow<domain::FileCoverage>,
 {
-    rows.iter()
+    covs.iter()
         .map(std::borrow::Borrow::borrow)
-        .max_by_key(|row| {
-            (
-                row.season.unwrap_or(0),
-                row.episode.unwrap_or(0),
-                row.path.clone(),
-            )
+        .max_by_key(|coverage| {
+            let unit = coverage
+                .units
+                .iter()
+                .map(|unit| (unit.season.max(0), unit.episode.max(0)))
+                .max()
+                .unwrap_or((0, 0));
+            (unit.0, unit.1, coverage.file.path.clone())
         })
 }
 
-pub(crate) fn poster_path(row: &domain::LedgerRow) -> Option<PathBuf> {
-    poster_path_with(row, &crate::browse_file_read::LocalBrowseFileRead)
+pub(crate) fn poster_path(file: &domain::LibraryFile) -> Option<PathBuf> {
+    poster_path_with(file, &crate::file_stat_read::LocalFileStatRead)
 }
 
 /// 与 [`poster_path`] 同一套布局，存在性判断走注入的浏览文件 seam。
 pub(crate) fn poster_path_with(
-    row: &domain::LedgerRow,
-    files: &dyn crate::browse_file_read::BrowseFileRead,
+    file: &domain::LibraryFile,
+    files: &dyn crate::file_stat_read::FileStatRead,
 ) -> Option<PathBuf> {
-    if let Some(poster) = crate::poster::poster_beside(&row.path, files) {
+    if let Some(poster) = crate::poster::poster_beside(&file.path.to_string_lossy(), files) {
         return Some(poster);
     }
-    let file_dir = FsPath::new(&row.path).parent()?;
+    let file_dir = file.path.parent()?;
     // 兼容两种布局：平铺（文件旁 poster.jpg）与模板整理后
     // （<show>/Season N/file → show 根 poster.jpg，向上找一层）。
     let up = file_dir.parent()?.join("poster.jpg");

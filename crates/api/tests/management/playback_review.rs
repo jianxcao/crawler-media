@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::*;
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 pub(super) fn fixture(tmp: &tempfile::TempDir, tv: bool) -> (axum::Router, Value) {
     let state = state(
@@ -37,34 +38,43 @@ pub(super) fn fixture(tmp: &tempfile::TempDir, tv: bool) -> (axum::Router, Value
         anilist_id: None,
         tvdb_id: None,
     };
-    let row = domain::LedgerRow {
-        id: domain::LedgerId::new(),
-        media_id: media.id,
-        path: tmp
-            .path()
-            .join(if tv {
-                "data/library/tv/episode.mkv"
-            } else {
-                "data/library/movies/movie.mkv"
-            })
-            .to_string_lossy()
-            .into(),
-        season: tv.then_some(2),
-        episode: tv.then_some(3),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: domain::QualitySource::Probe,
-        confidence: domain::Confidence::High,
-        filter_score: None,
-    };
+    let file_id = domain::LedgerId::new();
     let store = api::Store::open(tmp.path().join("data")).unwrap();
     store.insert_media(&media).unwrap();
-    store.insert_ledger(&row).unwrap();
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(file_id),
+            media_id: media.id,
+            path: tmp
+                .path()
+                .join(if tv {
+                    "data/library/tv/episode.mkv"
+                } else {
+                    "data/library/movies/movie.mkv"
+                })
+                .to_string_lossy()
+                .into(),
+            season: tv.then_some(2),
+            episode: tv.then_some(3),
+            quality_source: domain::QualitySource::Probe,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     (
         router(state),
-        json!({ "media_item_id": media.id.to_string(), "file_id": row.id.to_string() }),
+        json!({ "media_item_id": media.id.to_string(), "file_id": file_id.to_string() }),
     )
+}
+
+pub(super) fn mark_body(target: &Value, played: bool) -> Value {
+    json!({
+        "media_item_id": target["media_item_id"],
+        "season_number": target.get("season_number").cloned().unwrap_or(Value::Null),
+        "episode_number": target.get("episode_number").cloned().unwrap_or(Value::Null),
+        "played": played,
+    })
 }
 
 pub(super) async fn post(app: &axum::Router, route: &str, body: Value) -> axum::response::Response {
@@ -83,7 +93,26 @@ pub(super) async fn save_position(app: &axum::Router, target: &Value) {
     let mut body = target.clone();
     body["device_id"] = json!("resume-device");
     body["position_ms"] = json!(600_000);
+    // 新模型里 `progress` 只更新已激活的会话：首次写入必须是 `start`。
+    body["event"] = json!("start");
+    // `playback_sessions` 现在绑定签发的 `play_session_id`：progress 之前必须先
+    // 走公开的 sessions 端点签发。
+    body["play_session_id"] = json!(open_session(app, &body).await);
+    body["event_sequence"] = json!(next_playback_sequence());
     assert_eq!(post(app, "progress", body).await.status(), StatusCode::OK);
+}
+
+/// 通过公开的 `POST /playback/sessions` 签发一个 play session，返回其 id。
+pub(super) async fn open_session(app: &axum::Router, target: &Value) -> String {
+    let mut body = target.clone();
+    if body.get("device_id").is_none() {
+        body["device_id"] = json!("resume-device");
+    }
+    let session = json_data(post(app, "sessions", body).await).await;
+    session["play_session_id"]
+        .as_str()
+        .expect("sessions 必须签发 play_session_id")
+        .to_string()
 }
 
 #[tokio::test]
@@ -110,9 +139,10 @@ async fn completed_movie_replays_from_zero() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, target) = fixture(&tmp, false);
     save_position(&app, &target).await;
-    let mut mark = target.clone();
-    mark["played"] = json!(true);
-    assert_eq!(post(&app, "marks", mark).await.status(), StatusCode::OK);
+    assert_eq!(
+        post(&app, "marks", mark_body(&target, true)).await.status(),
+        StatusCode::OK
+    );
     let session = json_data(post(&app, "sessions", target).await).await;
     assert_eq!(session["start_ms"], 0);
 }
@@ -130,6 +160,9 @@ async fn omitted_tv_coordinates_infer_selected_file_unit() {
     assert_eq!(session["start_ms"], 600_000);
     target["device_id"] = json!("inferred-device");
     target["position_ms"] = json!(700_000);
+    target["play_session_id"] = json!(open_session(&app, &target).await);
+    target["event"] = json!("progress");
+    target["event_sequence"] = json!(next_playback_sequence());
     assert_eq!(
         post(&app, "progress", target.clone()).await.status(),
         StatusCode::OK
@@ -142,10 +175,14 @@ async fn omitted_tv_coordinates_infer_selected_file_unit() {
 async fn missing_exact_episode_never_falls_back_to_another_file() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, mut target) = fixture(&tmp, true);
+    target["device_id"] = json!("missing-device");
+    let session = open_session(&app, &target).await;
     target.as_object_mut().unwrap().remove("file_id");
     target["season_number"] = json!(2);
     target["episode_number"] = json!(99);
-    target["device_id"] = json!("missing-device");
+    target["play_session_id"] = json!(session);
+    target["event"] = json!("progress");
+    target["event_sequence"] = json!(next_playback_sequence());
     for route in ["decide", "sessions", "progress"] {
         assert_eq!(
             post(&app, route, target.clone()).await.status(),
@@ -159,11 +196,17 @@ async fn missing_exact_episode_never_falls_back_to_another_file() {
 async fn file_id_with_inconsistent_unit_is_rejected() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, target) = fixture(&tmp, true);
+    let mut signed = target.clone();
+    signed["device_id"] = json!("mismatch-device");
+    let session = open_session(&app, &signed).await;
     for (season, episode) in [(1, 3), (2, 99)] {
         let mut body = target.clone();
         body["season_number"] = json!(season);
         body["episode_number"] = json!(episode);
         body["device_id"] = json!("mismatch-device");
+        body["play_session_id"] = json!(session);
+        body["event"] = json!("progress");
+        body["event_sequence"] = json!(next_playback_sequence());
         for route in ["decide", "sessions", "progress"] {
             assert_eq!(
                 post(&app, route, body.clone()).await.status(),
@@ -196,13 +239,93 @@ async fn invalid_start_is_rejected_instead_of_silently_starting_at_zero() {
 }
 
 #[tokio::test]
-async fn partial_coordinates_select_only_matching_season() {
+async fn partial_coordinates_are_rejected() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, mut target) = fixture(&tmp, true);
     target.as_object_mut().unwrap().remove("file_id");
-    target["season"] = json!(99);
+    target["season_number"] = json!(99);
     assert_eq!(
         post(&app, "sessions", target).await.status(),
-        StatusCode::NOT_FOUND
+        StatusCode::BAD_REQUEST,
+        "a lone season coordinate names no unit"
+    );
+}
+
+fn session_rows(tmp: &tempfile::TempDir) -> i64 {
+    rusqlite::Connection::open(tmp.path().join("data/library.db"))
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM playback_sessions", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// R08: an explicit source is honoured or refused, never swapped for another file;
+/// obsolete `season`/`episode` keys are a contract error.
+#[tokio::test]
+async fn explicit_invalid_sources_are_refused_without_a_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, target) = fixture(&tmp, false);
+    let media_id: domain::MediaId = target["media_item_id"].as_str().unwrap().parse().unwrap();
+    let b_id = domain::LedgerId::new();
+    {
+        let store = api::Store::open(tmp.path().join("data")).unwrap();
+        publish_fixture_file(
+            &store,
+            &FixtureFile {
+                file_id: Some(b_id),
+                media_id,
+                path: tmp
+                    .path()
+                    .join("data/library/movies/movie-b.mkv")
+                    .to_string_lossy()
+                    .into(),
+                quality_source: domain::QualitySource::Probe,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let before = session_rows(&tmp);
+    let with = |key: &str, value: Value| {
+        let mut body = target.clone();
+        body[key] = value;
+        body["device_id"] = json!("strict-device");
+        body
+    };
+    for (body, status) in [
+        (with("file_id", json!(7)), StatusCode::BAD_REQUEST),
+        (
+            with("file_id", json!("not-a-uuid")),
+            StatusCode::BAD_REQUEST,
+        ),
+        (with("season", json!(1)), StatusCode::BAD_REQUEST),
+        (with("season_number", json!(0)), StatusCode::BAD_REQUEST),
+        (
+            with("file_id", json!(domain::LedgerId::new().to_string())),
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        for route in ["decide", "sessions"] {
+            assert_eq!(
+                post(&app, route, body.clone()).await.status(),
+                status,
+                "{route} {body}"
+            );
+        }
+    }
+    assert_eq!(
+        session_rows(&tmp),
+        before,
+        "a refused selection opens no session"
+    );
+
+    let explicit_b =
+        json_data(post(&app, "sessions", with("file_id", json!(b_id.to_string()))).await).await;
+    assert_eq!(explicit_b["file_id"], b_id.to_string());
+    let mut automatic = target.clone();
+    automatic.as_object_mut().unwrap().remove("file_id");
+    automatic["device_id"] = json!("strict-device");
+    assert_eq!(
+        post(&app, "sessions", automatic).await.status(),
+        StatusCode::OK
     );
 }

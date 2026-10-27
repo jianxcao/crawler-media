@@ -77,40 +77,36 @@ pub(crate) async fn put_proxy(State(state): State<ApiState>, Json(body): Json<Va
         ("username", settings_keys::PROXY_USERNAME),
         ("password", settings_keys::PROXY_PASSWORD),
     ] {
-        if body[field].as_str().is_some() {
-            if let Some(message) = crate::config::env_pinned_message(key) {
+        if body[field].as_str().is_some()
+            && let Some(message) = crate::config::env_pinned_message(key) {
                 return err(StatusCode::CONFLICT, "settings.env_pinned", &message);
             }
-        }
     }
     let store = state.store.lock();
-    if let Some(proxy_url) = body["proxy_url"].as_str() {
-        if let Err(error) = store.put_setting(settings_keys::PROXY_METADATA, proxy_url.trim()) {
+    if let Some(proxy_url) = body["proxy_url"].as_str()
+        && let Err(error) = store.put_setting(settings_keys::PROXY_METADATA, proxy_url.trim()) {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "store.error",
                 &error.to_string(),
             );
         }
-    }
-    if let Some(username) = body["username"].as_str() {
-        if let Err(error) = store.put_setting(settings_keys::PROXY_USERNAME, username.trim()) {
+    if let Some(username) = body["username"].as_str()
+        && let Err(error) = store.put_setting(settings_keys::PROXY_USERNAME, username.trim()) {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "store.error",
                 &error.to_string(),
             );
         }
-    }
-    if let Some(password) = body["password"].as_str() {
-        if let Err(error) = store.put_setting(settings_keys::PROXY_PASSWORD, password.trim()) {
+    if let Some(password) = body["password"].as_str()
+        && let Err(error) = store.put_setting(settings_keys::PROXY_PASSWORD, password.trim()) {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "store.error",
                 &error.to_string(),
             );
         }
-    }
     if let Some(douban_bypass) = body["douban_bypass"].as_bool() {
         let val_str = if douban_bypass { "true" } else { "false" };
         if let Err(error) = store.put_setting(settings_keys::PROXY_DOUBAN_BYPASS, val_str) {
@@ -121,8 +117,8 @@ pub(crate) async fn put_proxy(State(state): State<ApiState>, Json(body): Json<Va
             );
         }
     }
-    if let Some(allowed_domains) = body["allowed_domains"].as_str() {
-        if let Err(error) =
+    if let Some(allowed_domains) = body["allowed_domains"].as_str()
+        && let Err(error) =
             store.put_setting(settings_keys::PROXY_ALLOWED_DOMAINS, allowed_domains.trim())
         {
             return err(
@@ -131,7 +127,6 @@ pub(crate) async fn put_proxy(State(state): State<ApiState>, Json(body): Json<Va
                 &error.to_string(),
             );
         }
-    }
     crate::http_agent::sync_from_store(&store);
 
     let proxy_url = store
@@ -265,9 +260,7 @@ pub(crate) async fn diagnose_proxy(State(state): State<ApiState>) -> Response {
             "直连 (未配置代理)".to_string()
         };
 
-        set.spawn(async move {
-            run_single_probe(target, proxy, is_proxied, route_label).await
-        });
+        set.spawn(async move { run_single_probe(target, proxy, is_proxied, route_label).await });
     }
 
     let mut results = Vec::new();
@@ -375,20 +368,22 @@ async fn run_single_probe(
     let proxy_for_block = proxy;
 
     let probe_res = tokio::task::spawn_blocking(move || {
-        crate::http_agent::call_with_proxy(proxy_for_block.as_deref(), |agent| match target.method {
-            ProbeMethod::Get { ua, referer } => {
-                let mut req = agent.get(&probe_url).header("User-Agent", ua);
-                if let Some(ref_val) = referer {
-                    req = req.header("Referer", ref_val);
+        crate::http_agent::call_with_proxy(proxy_for_block.as_deref(), |agent| {
+            match target.method {
+                ProbeMethod::Get { ua, referer } => {
+                    let mut req = agent.get(&probe_url).header("User-Agent", ua);
+                    if let Some(ref_val) = referer {
+                        req = req.header("Referer", ref_val);
+                    }
+                    req.call()
                 }
-                req.call()
+                ProbeMethod::PostJson { ua, body } => agent
+                    .post(&probe_url)
+                    .header("User-Agent", ua)
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json")
+                    .send(body),
             }
-            ProbeMethod::PostJson { ua, body } => agent
-                .post(&probe_url)
-                .header("User-Agent", ua)
-                .header("Content-Type", "application/json")
-                .header("Accept", "application/json")
-                .send(body),
         })
     })
     .await;

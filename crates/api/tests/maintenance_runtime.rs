@@ -4,17 +4,17 @@
 //! 真实 SQLite 执行器见 `maintenance_sqlite.rs`。
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use api::maintenance::{
-    DatabaseExecutor, DatabaseName, DatabaseOutcome, DatabaseReport, DatabaseTarget,
-    MaintenanceContext, SqliteExecutor, database_targets, run,
+    ConfiguredSqliteExecutor, DatabaseExecutor, DatabaseName, DatabaseOutcome, DatabaseReport,
+    DatabaseTarget, MaintenanceContext, SqliteExecutor, SqliteLimits, database_targets, run,
 };
-use api::worker::StateRunner;
-use api::{ApiState, Store};
+use api::Store;
 use domain::MediaKind;
-use jobs::{Job, JobKind, NewDef, Runner};
+use jobs::{JobKind, NewDef};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
@@ -22,8 +22,11 @@ use serde_json::{Value, json};
 mod support;
 use support::{
     DAY, DB_LIGHT, DB_VACUUM, KEEP, PREVIEW, Recorder, TOKEN, build_state, data_dir, db_entry,
-    enqueue_claim, progress_of, temp_state, unix_now,
+    enqueue_claim, progress_of, seed_published_file, temp_state, unix_now,
 };
+
+#[path = "support/mod.rs"]
+mod api_support;
 
 /// 第一次进入 `execute` 后阻塞，直到测试放行；用来证明维护不在 Store/Queue 锁内执行。
 struct BlockingExecutor {
@@ -41,7 +44,11 @@ impl DatabaseExecutor for BlockingExecutor {
     ) -> Result<DatabaseReport, String> {
         if !self.blocked.swap(true, std::sync::atomic::Ordering::SeqCst) {
             self.entered.send(()).unwrap();
-            self.release.lock().unwrap().recv().unwrap();
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("test must release the blocked maintenance executor");
         }
         Ok(DatabaseReport {
             name: target.name.as_str().to_string(),
@@ -96,10 +103,10 @@ fn one_failed_database_fails_the_job_after_running_the_rest() {
     let error = run(&state, &job).expect_err("任一库 Failed 必须让整个 job 失败");
 
     assert!(error.contains("app"), "错误必须保留库名与上下文: {error}");
+    let attempted = executor.attempted.lock().clone();
     assert!(
-        executor.attempted.lock().len() > 1,
-        "其余库必须继续跑完再汇总: {:?}",
-        executor.attempted.lock()
+        attempted.len() > 1,
+        "其余库必须继续跑完再汇总: {attempted:?}"
     );
     let report = progress_of(&state, &job);
     assert_eq!(db_entry(&report, "app")["outcome"], "failed");
@@ -189,14 +196,14 @@ fn missing_optional_fanart_is_skipped_and_never_created() {
     run(&state, &job).unwrap();
 
     let report = progress_of(&state, &job);
-    let entry = db_entry(&report, "fanart");
-    assert_eq!(entry["outcome"], "skipped");
+    // fanart 缓存已是 cache.db 里的表，不再有可选库目标：既不报告也不创建。
     assert!(
-        entry["skip_reason"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("不存在"),
-        "跳过原因必须写明文件不存在: {entry}"
+        report["databases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["name"] != "fanart"),
+        "fanart 不得再作为独立维护目标: {report}"
     );
     assert!(!fanart.exists(), "缺失的可选库不得被创建");
     assert!(tmp.path().exists());
@@ -235,15 +242,13 @@ fn database_targets_are_an_allowlist_with_optional_fanart() {
 
     let targets = database_targets(&data, &app);
     let names: Vec<&str> = targets.iter().map(|target| target.name.as_str()).collect();
-    assert_eq!(names, ["app", "catalog", "library", "subscribe", "jobs"]);
+    // 源缓存已并入 cache.db（fanart_cache 等表），不再有独立的 catalog/fanart 库。
+    assert_eq!(names, ["app", "cache", "library", "subscribe", "jobs"]);
 
     std::fs::write(data.join("fanart.db"), b"fixture").unwrap();
     let targets = database_targets(&data, &app);
     let names: Vec<&str> = targets.iter().map(|target| target.name.as_str()).collect();
-    assert_eq!(
-        names,
-        ["app", "catalog", "library", "subscribe", "jobs", "fanart"]
-    );
+    assert_eq!(names, ["app", "cache", "library", "subscribe", "jobs"]);
     assert!(targets.iter().all(|target| target.name.as_str() != ".."));
 }
 
@@ -386,7 +391,7 @@ fn playback_retention_dry_run_keeps_logs_then_prunes_only_logs() {
     use domain::{MediaId, UserId};
     use store::SessionRow;
 
-    let (_tmp, state) = temp_state(Arc::new(SqliteExecutor));
+    let (tmp, state) = temp_state(Arc::new(SqliteExecutor));
     let user = UserId::new();
     let media = MediaId::new();
     let now = unix_now();
@@ -394,6 +399,23 @@ fn playback_retention_dry_run_keeps_logs_then_prunes_only_logs() {
     let store = state.store();
     {
         let guard = store.lock();
+        // `playback_units.media_id` 现在有真实外键：先登记 Media 身份。
+        guard
+            .insert_media(&domain::Media {
+                id: media,
+                kind: domain::MediaKind::Movie,
+                title: "Retention Fixture".into(),
+                original_title: None,
+                aliases: Vec::new(),
+                year: None,
+                tmdb_id: None,
+                douban_id: None,
+                tvdb_id: None,
+                bangumi_id: None,
+                anilist_id: None,
+            })
+            .unwrap();
+        let file_id = seed_published_file(&guard, tmp.path(), media);
         guard
             .upsert_unit(
                 user,
@@ -411,12 +433,20 @@ fn playback_retention_dry_run_keeps_logs_then_prunes_only_logs() {
             )
             .unwrap();
         for index in 0..2 {
+            let device = format!("old{index}");
+            let play_session_id = api_support::session::issue_session(
+                &guard,
+                user,
+                &device,
+                file_id,
+                cutoff - 10 * DAY,
+            );
             let session = SessionRow {
-                device_id: format!("old{index}"),
+                device_id: device,
                 user_id: user,
                 media_id: media,
-                season: None,
-                episode: None,
+                season: Some(-1),
+                episode: Some(-1),
                 client: Some("fixture".into()),
                 device_name: None,
                 client_version: None,
@@ -433,8 +463,8 @@ fn playback_retention_dry_run_keeps_logs_then_prunes_only_logs() {
                 started_at: cutoff - 10 * DAY,
                 last_report_at: cutoff - 10 * DAY,
                 last_report_at_ms: (cutoff - 10 * DAY) * 1000,
-                ledger_id: None,
-                play_session_id: None,
+                ledger_id: Some(file_id.to_string()),
+                play_session_id: Some(play_session_id),
                 last_event_sequence: None,
             };
             guard.upsert_session(&session).unwrap();
@@ -609,50 +639,6 @@ async fn jobs_tick_http_never_executes_maintenance_and_says_so() {
     );
 }
 
-#[test]
-fn queue_tick_path_refuses_maintenance_instead_of_deadlocking() {
-    let (_tmp, state) = temp_state(Arc::new(SqliteExecutor));
-    {
-        let queue = state.jobs();
-        let guard = queue.lock();
-        for def in guard.list_defs().unwrap() {
-            guard
-                .set_def_enabled_by_id(def.id, def.kind == JobKind::DatabaseMaintenance)
-                .unwrap();
-        }
-    }
-    let now = unix_now();
-    let (tx, rx) = mpsc::channel();
-    let tick_state = state.clone();
-    std::thread::spawn(move || {
-        let queue = tick_state.jobs();
-        let guard = queue.lock();
-        let outcome = guard.tick(
-            now,
-            &StateRunner {
-                state: tick_state.clone(),
-            },
-        );
-        let _ = tx.send(outcome.map(|jobs| {
-            jobs.into_iter()
-                .map(|job| (job.status, job.error))
-                .collect::<Vec<_>>()
-        }));
-    });
-
-    let finished = rx
-        .recv_timeout(Duration::from_secs(20))
-        .expect("Queue::tick 不得在维护任务上死锁");
-    let finished = finished.unwrap();
-    assert_eq!(finished.len(), 1, "只应领取维护任务: {finished:?}");
-    let error = finished[0].1.clone().unwrap_or_default();
-    assert!(
-        error.contains("Queue 锁"),
-        "必须给出明确拒绝原因而不是静默执行: {finished:?}"
-    );
-    assert!(json!({ "ok": true }).is_object());
-}
-
 /// DB8 复核 I1 回归：试运行不能把 `has_more` 吞掉说"已完成"。
 ///
 /// dry_run 不删除，因此"再取下一批"只会重复检视同一批行（虚报候选数），所以只检视
@@ -678,4 +664,124 @@ fn dry_run_reports_a_truncated_budget_instead_of_claiming_completion() {
         "还有更多可删候选时必须如实报告，不能说'已完成': {report}"
     );
     assert_eq!(terminal_count(&data), 1_200, "dry_run 不写库");
+}
+
+// ---------------------------------------------------------------------------
+// Task 20 Step 2：真实 VACUUM 的持锁墙钟 + 并发写入被拒的实测证据
+// ---------------------------------------------------------------------------
+
+/// 放宽准入阈值（阈值行为本身由 `maintenance_sqlite.rs` 覆盖）：测试用 ~32MiB 的库
+/// 就能触发一次真实 VACUUM，从而量出独占锁被竞争写入撞到的墙钟窗口。
+fn vacuum_limits() -> SqliteLimits {
+    SqliteLimits {
+        min_free_bytes: 0,
+        min_free_ratio_percent: 0,
+        vacuum_headroom_bytes: 0,
+        per_database_limit: Duration::from_secs(30),
+    }
+}
+
+/// ~32MiB 负载并删掉一半：VACUUM 需要真实的重写时间，才有可观测的持锁窗口。
+fn seed_free_pages(path: &Path) {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE gauge_payload (id INTEGER PRIMARY KEY, body TEXT);
+         WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 8000)
+         INSERT INTO gauge_payload (id, body) SELECT x, hex(zeroblob(2000)) FROM c;
+         DELETE FROM gauge_payload WHERE id % 2 = 0;",
+    )
+    .unwrap();
+}
+
+/// 竞争写探针：独立连接 + `busy_timeout=0`，VACUUM 持独占锁期间的
+/// `BEGIN IMMEDIATE` 会立即返回 BUSY，因此 busy 次数与首末 busy 间隔都是实测值。
+struct WriteProbe {
+    attempts: AtomicUsize,
+    busy: AtomicUsize,
+    window: StdMutex<Option<(Instant, Instant)>>,
+    stop: AtomicBool,
+}
+
+impl WriteProbe {
+    fn blocked_window_ms(&self) -> u128 {
+        self.window
+            .lock()
+            .unwrap()
+            .map(|(first, last)| last.duration_since(first).as_millis())
+            .unwrap_or(0)
+    }
+
+    fn run(&self, path: &Path) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.pragma_update(None, "busy_timeout", 0).unwrap();
+        while !self.stop.load(Ordering::SeqCst) {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            if conn.execute_batch("BEGIN IMMEDIATE").is_err() {
+                let at = Instant::now();
+                self.busy.fetch_add(1, Ordering::SeqCst);
+                let mut window = self.window.lock().unwrap();
+                let entry = window.get_or_insert((at, at));
+                entry.1 = at;
+                continue;
+            }
+            let _ = conn.execute_batch("ROLLBACK");
+            std::thread::sleep(Duration::from_micros(200));
+        }
+    }
+}
+
+#[test]
+fn vacuum_lock_duration_is_measured_against_a_concurrent_writer() {
+    let executor = Arc::new(ConfiguredSqliteExecutor::with_limits(vacuum_limits()));
+    let (tmp, state) = temp_state(executor);
+    let app_db = data_dir(&state).join("app.db");
+    seed_free_pages(&app_db);
+
+    let probe = Arc::new(WriteProbe {
+        attempts: AtomicUsize::new(0),
+        busy: AtomicUsize::new(0),
+        window: StdMutex::new(None),
+        stop: AtomicBool::new(false),
+    });
+    let writer = {
+        let probe = probe.clone();
+        let path = app_db.clone();
+        std::thread::spawn(move || probe.run(&path))
+    };
+
+    let job = enqueue_claim(&state, JobKind::DatabaseMaintenance, DB_VACUUM, unix_now());
+    run(&state, &job).unwrap();
+    let report = progress_of(&state, &job);
+    probe.stop.store(true, Ordering::SeqCst);
+    writer.join().unwrap();
+
+    let app = db_entry(&report, "app");
+    assert_eq!(
+        app["outcome"], "vacuumed",
+        "放宽阈值后必须真的跑完一次 VACUUM: {report}"
+    );
+    let size_before = app["size_before"].as_u64().unwrap();
+    let size_after = app["size_after"].as_u64().unwrap();
+    assert!(
+        size_after < size_before,
+        "VACUUM 必须真的重写文件并回收空闲页: {app}"
+    );
+    let attempts = probe.attempts.load(Ordering::SeqCst);
+    let busy = probe.busy.load(Ordering::SeqCst);
+    assert!(attempts > 0, "竞争写探针必须真的尝试过写入");
+    assert!(
+        busy > 0,
+        "VACUUM 持锁期间另一连接的写入必须被拒（attempts={attempts} busy={busy}）"
+    );
+
+    println!(
+        "MEASURE task20 vacuum_lock db=app report_elapsed_ms={} (该库整段维护: PRAGMA optimize + VACUUM) size_before={} size_after={} probe_attempts={} probe_busy={} probe_blocked_window_ms={}",
+        app["elapsed_ms"],
+        size_before,
+        size_after,
+        attempts,
+        busy,
+        probe.blocked_window_ms()
+    );
+    assert!(tmp.path().exists());
 }

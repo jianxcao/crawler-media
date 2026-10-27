@@ -1,7 +1,7 @@
 use super::*;
 
 fn database(root: &Path) -> rusqlite::Connection {
-    rusqlite::Connection::open(root.join("data/subscribe.db")).unwrap()
+    rusqlite::Connection::open(root.join("data/library.db")).unwrap()
 }
 
 async fn web_event(
@@ -9,22 +9,37 @@ async fn web_event(
     media: MediaId,
     event: &str,
     position: i64,
+    session: Option<&str>,
 ) -> axum::response::Response {
-    send(app, "POST", "/api/v1/playback/progress", "Bearer admin-token",
-        json!({"media_item_id":media.to_string(),"device_id":"browser","event":event,"position_ms":position}),None).await
+    let mut body = json!({"event_sequence": crate::support::session::next_sequence(),"media_item_id":media.to_string(),"device_id":"browser","event":event,"position_ms":position});
+    if let Some(session) = session {
+        body["play_session_id"] = json!(session);
+    }
+    send(
+        app,
+        "POST",
+        "/api/v1/playback/progress",
+        "Bearer admin-token",
+        body,
+        None,
+    )
+    .await
 }
 
 #[tokio::test]
 async fn session_write_failure_rolls_back_unit() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, media, _) = app(tmp.path());
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let session = issue_session(&store, "browser", media);
     let db = database(tmp.path());
     db.execute_batch("CREATE TRIGGER block_session BEFORE INSERT ON playback_sessions BEGIN SELECT RAISE(ABORT,'session blocked'); END;").unwrap();
     assert_eq!(
-        web_event(&app, media, "start", 30000).await.status(),
+        web_event(&app, media, "start", 30000, Some(&session))
+            .await
+            .status(),
         StatusCode::INTERNAL_SERVER_ERROR
     );
-    let store = Store::open(tmp.path().join("data")).unwrap();
     assert!(store.unit_state(admin(), media, -1, -1).unwrap().is_none());
     assert!(store.get_session(admin(), "browser").unwrap().is_none());
 }
@@ -33,17 +48,22 @@ async fn session_write_failure_rolls_back_unit() {
 async fn stop_log_failure_retains_session_and_prior_unit() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, media, _) = app(tmp.path());
+    let store = Store::open(tmp.path().join("data")).unwrap();
+    let session = issue_session(&store, "browser", media);
     assert_eq!(
-        web_event(&app, media, "start", 1000).await.status(),
+        web_event(&app, media, "start", 1000, Some(&session))
+            .await
+            .status(),
         StatusCode::OK
     );
     let db = database(tmp.path());
     db.execute_batch("CREATE TRIGGER block_log BEFORE INSERT ON playback_logs BEGIN SELECT RAISE(ABORT,'log blocked'); END;").unwrap();
     assert_eq!(
-        web_event(&app, media, "stop", 30000).await.status(),
+        web_event(&app, media, "stop", 30000, Some(&session))
+            .await
+            .status(),
         StatusCode::INTERNAL_SERVER_ERROR
     );
-    let store = Store::open(tmp.path().join("data")).unwrap();
     assert_eq!(
         store
             .unit_state(admin(), media, -1, -1)
@@ -69,10 +89,25 @@ async fn stop_log_failure_retains_session_and_prior_unit() {
 }
 
 #[tokio::test]
-async fn legacy_migration_failure_returns_error_without_shadowing() {
+async fn playback_failure_does_not_shadow_a_different_unit() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, media, id) = app(tmp.path());
     let store = Store::open(tmp.path().join("data")).unwrap();
+    // A separate covered unit keeps its own marks when the whole-file write fails.
+    let db = database(tmp.path());
+    let (file_id, library_id): (String, String) = db
+        .query_row(
+            "SELECT file_id, library_id FROM library_files WHERE media_id = ?1 LIMIT 1",
+            rusqlite::params![media.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    db.execute(
+        "INSERT OR IGNORE INTO library_file_units (file_id, library_id, media_id, season, episode)
+         VALUES (?1, ?2, ?3, 0, 0)",
+        rusqlite::params![file_id, library_id, media.to_string()],
+    )
+    .unwrap();
     store
         .upsert_unit(
             admin(),
@@ -91,8 +126,11 @@ async fn legacy_migration_failure_returns_error_without_shadowing() {
         .unwrap();
     let db = database(tmp.path());
     db.execute_batch("CREATE TRIGGER block_copy BEFORE INSERT ON playback_units WHEN NEW.season=-1 BEGIN SELECT RAISE(ABORT,'copy blocked'); END;").unwrap();
+    let session = issue_session(&store, "browser", media);
     assert_eq!(
-        web_event(&app, media, "start", 45000).await.status(),
+        web_event(&app, media, "start", 45000, Some(&session))
+            .await
+            .status(),
         StatusCode::INTERNAL_SERVER_ERROR
     );
     assert_eq!(
@@ -123,7 +161,7 @@ async fn old_logs_without_real_identity_are_not_revocable() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, media, _) = app(tmp.path());
     let db = database(tmp.path());
-    db.execute("INSERT INTO playback_logs (id,user_id,media_id,client,device_name,play_method,started_at,ended_at) VALUES ('old',?1,?2,'Infuse','Bedroom Apple TV','DirectPlay',1,2)",rusqlite::params![admin().to_string(),media.to_string()]).unwrap();
+    db.execute("INSERT INTO playback_logs (id,user_id,media_id,client,device_id,device_name,play_method,play_session_id,generation,file_id,file_revision,source_version,timeline_mode,started_at,ended_at) VALUES ('old',?1,?2,'Infuse','unidentified:legacy','Bedroom Apple TV','DirectPlay','old-session',1,'old-file',1,'v1','full_file',1,2)",rusqlite::params![admin().to_string(),media.to_string()]).unwrap();
     let body = json(
         send(
             &app,

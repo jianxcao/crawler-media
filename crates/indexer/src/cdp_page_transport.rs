@@ -167,10 +167,9 @@ impl Transport {
                     if ours
                         && response["method"] == "Page.lifecycleEvent"
                         && response["params"]["name"] == "load"
+                        && let Some(loader) = response["params"]["loaderId"].as_str()
                     {
-                        if let Some(loader) = response["params"]["loaderId"].as_str() {
-                            self.loaded_loaders.insert(loader.to_owned());
-                        }
+                        self.loaded_loaders.insert(loader.to_owned());
                     }
                     if response["id"].as_u64() != Some(id) {
                         continue;

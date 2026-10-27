@@ -1,6 +1,5 @@
-use domain::{LedgerId, LedgerRow, Media, MediaId, Subscribe, UserId};
+use domain::{FileCoverage, LedgerId, Media, MediaId, Subscribe, UserId};
 use std::collections::HashMap;
-use std::path::Path;
 
 use crate::Store;
 
@@ -72,11 +71,17 @@ pub(crate) fn load_visible_subscription_views(
         store.list_subscribes_for_user(user_id)?
     };
 
-    // 预批量提取所有相关 ledger rows，按 media_id 分组
-    let all_ledger = store.list_ledger().unwrap_or_default();
-    let mut ledger_by_media: HashMap<MediaId, Vec<LedgerRow>> = HashMap::new();
-    for row in all_ledger {
-        ledger_by_media.entry(row.media_id).or_default().push(row);
+    // 预批量提取所有相关 ledger 覆盖，按 media_id 分组
+    let media_ids: Vec<MediaId> = subscribes.iter().map(|sub| sub.media_id).collect();
+    let all_ledger = store
+        .file_coverage_for_media_batch(&media_ids)
+        .unwrap_or_default();
+    let mut ledger_by_media: HashMap<MediaId, Vec<FileCoverage>> = HashMap::new();
+    for coverage in all_ledger {
+        ledger_by_media
+            .entry(coverage.file.media_id)
+            .or_default()
+            .push(coverage);
     }
 
     // Two batched reads, independent of the number of subscriptions.
@@ -128,11 +133,10 @@ pub(crate) fn load_single_subscription_view(
     let (created_at, updated_at) = store.subscribe_times(sub.id).unwrap_or_default();
     let (total, imported) = super::views::progress(store, sub, media, facts);
 
-    let rows: Vec<LedgerRow> = store
-        .list_ledger()
+    let rows: Vec<FileCoverage> = store
+        .file_coverage_for_media(media.id)
         .unwrap_or_default()
         .into_iter()
-        .filter(|row| row.media_id == media.id)
         .collect();
 
     let library_poster_candidate = select_preferred_library_poster(&rows);
@@ -163,20 +167,31 @@ pub(crate) fn load_single_subscription_view(
     }
 }
 
-fn select_preferred_library_poster(rows: &[LedgerRow]) -> Option<LedgerId> {
-    let selected = rows.iter().max_by_key(|row| {
-        (
-            row.season.unwrap_or(0),
-            row.episode.unwrap_or(0),
-            row.path.clone(),
-        )
-    })?;
+/// 旧键 `(season.unwrap_or(0), episode.unwrap_or(0), path)` 是在 (file × unit) 的一行一行
+/// 上取的：整片读作 `(0, 0)`（`None`），多 unit 文件每个 unit 各是一行。这里把每个
+/// coverage 展开回它的 unit 再取最大，整片用 `WHOLE = (-1, -1)` 夹到 `(0, 0)`。
+/// 平局仍按旧 `row.path: String` 的**逐字节**序（`PathBuf` 是分量序，不能直接用），
+/// 选中后返回该文件自己的 `file_id`。
+fn select_preferred_library_poster(rows: &[FileCoverage]) -> Option<LedgerId> {
+    let selected = rows
+        .iter()
+        .flat_map(|coverage| coverage.units.iter().map(move |unit| (coverage, unit)))
+        .max_by_key(|(coverage, unit)| {
+            (
+                unit.season.max(0) as u32,
+                unit.episode.max(0) as u32,
+                coverage.file.path.to_string_lossy().into_owned(),
+            )
+        })?;
 
-    let poster = Path::new(&selected.path)
+    let poster = selected
+        .0
+        .file
+        .path
         .parent()
         .map(|d| d.join("poster.jpg"))?;
     if poster.is_file() {
-        Some(selected.id)
+        Some(selected.0.file.file_id)
     } else {
         None
     }

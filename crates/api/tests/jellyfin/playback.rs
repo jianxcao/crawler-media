@@ -11,6 +11,7 @@ async fn post_session_event(
     app: &axum::Router,
     path: &str,
     item_id: &str,
+    play_session_id: &str,
     ticks: i64,
 ) -> StatusCode {
     let response = app
@@ -26,7 +27,12 @@ async fn post_session_event(
                 .header("X-Emby-Client", "Infuse")
                 .header("X-Emby-Client-Version", "8.1")
                 .body(Body::from(
-                    json!({ "ItemId": item_id, "PositionTicks": ticks }).to_string(),
+                    json!({
+                        "ItemId": item_id,
+                        "PositionTicks": ticks,
+                        "PlaySessionId": play_session_id
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )
@@ -81,6 +87,11 @@ async fn stream_supports_http_range() {
 async fn playing_progress_is_stored_per_user() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, media_id, compact) = app(tmp.path());
+    let play_session = play_session_for(&app, &compact, None).await;
+    assert_eq!(
+        post_event_without_device(&app, "/Sessions/Playing", &compact, &play_session, 0).await,
+        StatusCode::NO_CONTENT
+    );
     let response = app
         .oneshot(
             Request::builder()
@@ -89,7 +100,12 @@ async fn playing_progress_is_stored_per_user() {
                 .header("authorization", "Bearer admin-token")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    json!({ "ItemId": compact, "PositionTicks": 50_000_000 }).to_string(),
+                    json!({
+                        "ItemId": compact,
+                        "PositionTicks": 50_000_000,
+                        "PlaySessionId": play_session
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )
@@ -114,20 +130,59 @@ async fn jellyfin_session_events_create_activity_and_a_play_log() {
     let now = now_secs();
     let clock = Arc::new(FakeClock(std::sync::atomic::AtomicI64::new(now * 1000)));
     let (app, media_id, item_id) = app_with_clock(tmp.path(), clock.clone());
-
-    assert_eq!(
-        post_session_event(&app, "/Sessions/Playing", &item_id, 10_000_000).await,
-        StatusCode::NO_CONTENT
-    );
-
-    clock.0.store((now + 2) * 1000, std::sync::atomic::Ordering::SeqCst);
-    assert_eq!(
-        post_session_event(&app, "/Sessions/Playing/Progress", &item_id, 30_000_000).await,
-        StatusCode::NO_CONTENT
-    );
-
     let user_id = domain::UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap();
+    let play_session = play_session_for(&app, &item_id, Some("infuse-bedroom")).await;
+
+    assert_eq!(
+        post_session_event(
+            &app,
+            "/Sessions/Playing",
+            &item_id,
+            &play_session,
+            10_000_000
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
+    clock
+        .0
+        .store((now + 2) * 1000, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        post_session_event(
+            &app,
+            "/Sessions/Playing/Progress",
+            &item_id,
+            &play_session,
+            30_000_000
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    clock
+        .0
+        .store((now + 3) * 1000, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        post_session_event(
+            &app,
+            "/Sessions/Playing/Progress",
+            &item_id,
+            &play_session,
+            40_000_000
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+
     let store = Store::open(tmp.path().join("data")).unwrap();
+    assert_eq!(
+        store
+            .list_logs(10, None, None, None, now + 4, Some(user_id))
+            .unwrap()
+            .len(),
+        0,
+        "repeated Progress events on the same session must not close it"
+    );
     let sessions = store.active_sessions(now, 60).unwrap();
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].user_id, user_id);
@@ -135,11 +190,20 @@ async fn jellyfin_session_events_create_activity_and_a_play_log() {
     assert_eq!(sessions[0].device_id, "infuse-bedroom");
     assert_eq!(sessions[0].client.as_deref(), Some("Infuse"));
     assert_eq!(sessions[0].device_name.as_deref(), Some("Bedroom Apple TV"));
-    assert_eq!(sessions[0].position_ms, 3_000);
+    assert_eq!(sessions[0].position_ms, 4_000);
 
-    clock.0.store((now + 4) * 1000, std::sync::atomic::Ordering::SeqCst);
+    clock
+        .0
+        .store((now + 4) * 1000, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
-        post_session_event(&app, "/Sessions/Playing/Stopped", &item_id, 50_000_000).await,
+        post_session_event(
+            &app,
+            "/Sessions/Playing/Stopped",
+            &item_id,
+            &play_session,
+            50_000_000
+        )
+        .await,
         StatusCode::NO_CONTENT
     );
     assert!(store.active_sessions(now + 4, 60).unwrap().is_empty());
@@ -158,7 +222,14 @@ async fn jellyfin_session_events_create_activity_and_a_play_log() {
 async fn progress_persistence_failure_is_returned_to_the_client() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, _, item_id) = app(tmp.path());
-    let db = rusqlite::Connection::open(tmp.path().join("data/subscribe.db")).unwrap();
+    let play_session = play_session_for(&app, &item_id, None).await;
+    let library_db = Store::open(tmp.path().join("data"))
+        .unwrap()
+        .db_paths()
+        .into_iter()
+        .find(|path| path.ends_with("library.db"))
+        .expect("library.db path from Store::db_paths");
+    let db = rusqlite::Connection::open(library_db).unwrap();
     db.execute_batch("DROP TABLE playback_units;").unwrap();
     drop(db);
 
@@ -170,7 +241,12 @@ async fn progress_persistence_failure_is_returned_to_the_client() {
                 .header("authorization", "Bearer admin-token")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    json!({ "ItemId": item_id, "PositionTicks": 10_000_000 }).to_string(),
+                    json!({
+                        "ItemId": item_id,
+                        "PositionTicks": 10_000_000,
+                        "PlaySessionId": play_session
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )
@@ -188,9 +264,17 @@ async fn admin_ended_session_is_not_resurrected_by_a_late_progress_event() {
     let clock = Arc::new(FakeClock(std::sync::atomic::AtomicI64::new(now * 1000)));
     let (app, _, item_id) = app_with_clock(tmp.path(), clock.clone());
     let user_id = domain::UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap();
+    let play_session = play_session_for(&app, &item_id, Some("infuse-bedroom")).await;
 
     assert_eq!(
-        post_session_event(&app, "/Sessions/Playing", &item_id, 10_000_000).await,
+        post_session_event(
+            &app,
+            "/Sessions/Playing",
+            &item_id,
+            &play_session,
+            10_000_000
+        )
+        .await,
         StatusCode::NO_CONTENT
     );
 
@@ -213,13 +297,24 @@ async fn admin_ended_session_is_not_resurrected_by_a_late_progress_event() {
 
     // 会话随后被清理（等价于 sweep 关闭并写 admin_ended=1 的播放日志）。
     let store = Store::open(tmp.path().join("data")).unwrap();
-    store.close_session(user_id, "infuse-bedroom", now + 1).unwrap();
+    store
+        .close_session(user_id, "infuse-bedroom", now + 1)
+        .unwrap();
     assert!(store.active_sessions(now + 1, 60).unwrap().is_empty());
 
     // 迟到 progress：不得复活会话。
-    clock.0.store((now + 2) * 1000, std::sync::atomic::Ordering::SeqCst);
+    clock
+        .0
+        .store((now + 2) * 1000, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
-        post_session_event(&app, "/Sessions/Playing/Progress", &item_id, 30_000_000).await,
+        post_session_event(
+            &app,
+            "/Sessions/Playing/Progress",
+            &item_id,
+            &play_session,
+            30_000_000
+        )
+        .await,
         StatusCode::NO_CONTENT
     );
     let store = Store::open(tmp.path().join("data")).unwrap();
@@ -251,6 +346,11 @@ async fn items_include_playback_ticks_for_authenticated_user_only() {
     let (app, _, compact) = app(tmp.path());
     let none = items_for(&app, "admin-token").await;
     assert_eq!(none["Items"][0]["UserData"]["PlaybackPositionTicks"], 0);
+    let play_session = play_session_for(&app, &compact, None).await;
+    assert_eq!(
+        post_event_without_device(&app, "/Sessions/Playing", &compact, &play_session, 0).await,
+        StatusCode::NO_CONTENT
+    );
 
     let posted = app
         .clone()
@@ -261,7 +361,12 @@ async fn items_include_playback_ticks_for_authenticated_user_only() {
                 .header("authorization", "Bearer admin-token")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    json!({ "ItemId": compact, "PositionTicks": 50_000_000 }).to_string(),
+                    json!({
+                        "ItemId": compact,
+                        "PositionTicks": 50_000_000,
+                        "PlaySessionId": play_session
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )
@@ -419,14 +524,27 @@ async fn stream_serves_suffix_range_and_rejects_unsatisfiable_range() {
 #[tokio::test]
 async fn strm_playback_exposes_the_direct_source_and_redirects_to_it() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, media_id, _) = app(tmp.path());
+    let (app, _, _) = app(tmp.path());
     let store = Store::open(tmp.path().join("data")).unwrap();
+    let strm_media = Media {
+        id: MediaId::new(),
+        kind: MediaKind::Movie,
+        title: "Remote Episode".into(),
+        year: None,
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
+    store.insert_media(&strm_media).unwrap();
     let strm_path = tmp.path().join("remote.strm");
     let direct_url = "https://media.example.test/watch/episode.mp4?ticket=play-token";
     std::fs::write(&strm_path, direct_url).unwrap();
-    let row = LedgerRow {
-        id: LedgerId::new(),
-        media_id,
+    let spec = store::test_support::FixtureFile {
+        media_id: strm_media.id,
         path: strm_path.display().to_string(),
         season: None,
         episode: None,
@@ -436,9 +554,12 @@ async fn strm_playback_exposes_the_direct_source_and_redirects_to_it() {
         quality_source: QualitySource::Probe,
         confidence: Confidence::High,
         filter_score: None,
+        transfer_mode: None,
+        source_path: None,
+        file_id: None,
     };
-    store.insert_ledger(&row).unwrap();
-    let item_id = row.id.to_string().replace('-', "");
+    store::test_support::publish_fixture_file(&store, &spec).unwrap();
+    let item_id = work_id(strm_media.id);
 
     let info = app
         .clone()

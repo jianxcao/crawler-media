@@ -180,9 +180,9 @@ fn matches_atom(torrent: &Torrent, parsed: &Release, rule: &AtomRule) -> bool {
                 (Some(a), Some(b)) if a > b => (Some(*b), Some(*a)),
                 (a, b) => (*a, *b),
             };
-            min.map_or(true, |m| per_episode_mb >= m) && max.map_or(true, |m| per_episode_mb <= m)
+            min.is_none_or(|m| per_episode_mb >= m) && max.is_none_or(|m| per_episode_mb <= m)
         }
-        AtomRule::MinSeeders(n) => torrent.seeders.map_or(false, |seeders| seeders >= *n),
+        AtomRule::MinSeeders(n) => torrent.seeders.is_some_and(|seeders| seeders >= *n),
         AtomRule::SubtitleLanguage(want) => parsed
             .subtitle_language
             .as_deref()
@@ -206,8 +206,8 @@ fn lang_matches(got: &str, want: &str) -> bool {
 
 /// 片源匹配：忽略连字符和下划线，支持族匹配（rip 包含 webrip/dvdrip，tv 包含 hdtv）
 fn source_matches(got: &str, want: &str) -> bool {
-    let g = got.to_ascii_lowercase().replace('-', "").replace('_', "");
-    let w = want.to_ascii_lowercase().replace('-', "").replace('_', "");
+    let g = got.to_ascii_lowercase().replace(['-', '_'], "");
+    let w = want.to_ascii_lowercase().replace(['-', '_'], "");
     if g == w {
         return true;
     }

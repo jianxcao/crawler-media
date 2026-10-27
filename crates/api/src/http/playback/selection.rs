@@ -1,121 +1,136 @@
 //! Exact visible Library file and watch-unit identity.
+use domain::{LedgerId, PhysicalSourceId, TypedItemId, UnitKey};
 use serde_json::Value;
 
-use super::resolve_media_id;
-use crate::store::UNIT_WHOLE;
+use super::request::{PlaybackSelection, SelectionError, parse_selection};
+use crate::store::{ResolvedResume, UNIT_WHOLE};
 
-fn coordinate(body: &Value, key: &str, alias: &str) -> Option<Option<u32>> {
-    match body.get(key).or_else(|| body.get(alias)) {
-        None | Some(Value::Null) => Some(None),
-        Some(value) => value
-            .as_u64()
-            .and_then(|n| u32::try_from(n).ok())
-            .filter(|n| i32::try_from(*n).is_ok())
-            .map(Some),
+/// The watch item a selection names. A movie/video owns only its whole work, so any
+/// explicit coordinate is invalid (R13); a TV request without coordinates takes the
+/// explicit file's recorded unit.
+fn target_item(
+    store: &crate::Store,
+    media: &domain::Media,
+    selection: &PlaybackSelection,
+) -> Result<TypedItemId, SelectionError> {
+    let media_id = media.id;
+    let coordinates = (selection.season_number, selection.episode_number);
+    if media.kind != domain::MediaKind::Tv {
+        return match coordinates {
+            (None, None) => Ok(TypedItemId::Work(media_id)),
+            _ => Err(SelectionError::Invalid),
+        };
     }
+    Ok(match coordinates {
+        (Some(s), Some(e)) => TypedItemId::Unit {
+            media: media_id,
+            key: UnitKey::new(s as i32, e as i32),
+        },
+        (None, None) => match inferred_unit(store, selection.file_id) {
+            Some((s, e)) => TypedItemId::Unit {
+                media: media_id,
+                key: UnitKey::new(s, e),
+            },
+            None => TypedItemId::Work(media_id),
+        },
+        _ => return Err(SelectionError::Invalid),
+    })
 }
 
+fn selected_media(
+    store: &crate::Store,
+    selection: &PlaybackSelection,
+) -> Result<domain::Media, SelectionError> {
+    store
+        .get_media(selection.media_item_id)
+        .ok()
+        .flatten()
+        .ok_or(SelectionError::Unavailable)
+}
+
+/// Resolve a session request. An explicit source must be visible, present and cover
+/// the target, or the request is refused; only an omitted source is chosen automatically.
+pub(super) fn resolve_playback_for(
+    store: &crate::Store,
+    selection: &PlaybackSelection,
+    user_id: domain::UserId,
+) -> Result<(domain::LibraryFile, domain::Media, ResolvedResume), SelectionError> {
+    let media = selected_media(store, selection)?;
+    let item = target_item(store, &media, selection)?;
+    let preferred_source = match selection.file_id {
+        None => None,
+        Some(file_id) => {
+            let file = store
+                .visible_file(user_id, file_id)
+                .ok()
+                .flatten()
+                .ok_or(SelectionError::Unavailable)?;
+            Some(PhysicalSourceId {
+                file_id,
+                revision: file.version.revision,
+            })
+        }
+    };
+    let resolved = store
+        .resolve_playback(
+            user_id,
+            &item,
+            preferred_source.as_ref(),
+            selection.start_ms,
+        )
+        .map_err(|_| SelectionError::Unavailable)?;
+    if preferred_source.is_some_and(|pref| resolved.target.file.file_id != pref.file_id) {
+        return Err(SelectionError::Unavailable);
+    }
+    Ok((resolved.target.file.clone(), media, resolved))
+}
+
+/// Unit recorded for a selected file, used when a TV request omits coordinates.
+fn inferred_unit(store: &crate::Store, file_id: Option<LedgerId>) -> Option<(i32, i32)> {
+    let cov = store.file_coverage_by_id(file_id?).ok().flatten()?;
+    let u = cov.units.iter().find(|u| !u.is_whole())?;
+    Some((u.season, u.episode))
+}
+
+/// Resolve the source a heartbeat/decide request names, with the same contract.
 pub(super) fn row_for(
     store: &crate::Store,
     body: &Value,
     user_id: Option<domain::UserId>,
-) -> Option<(domain::LedgerRow, domain::Media, i32, i32)> {
-    let selected = select_row(store, body, user_id);
-    if selected.is_none() {
-        tracing::error!(media_item_id = ?body.get("media_item_id"), file_id = ?body.get("file_id"),
-            season = ?body.get("season_number").or_else(|| body.get("season")),
-            episode = ?body.get("episode_number").or_else(|| body.get("episode")),
-            "Playback file/unit selection rejected");
+) -> Result<(domain::LibraryFile, domain::Media, i32, i32), SelectionError> {
+    let selection = parse_selection(body)?;
+    let media = selected_media(store, &selection)?;
+    let item = target_item(store, &media, &selection)?;
+    let entries = match user_id {
+        Some(user_id) => store.playable_entries(user_id, &item),
+        None => store.published_entries_for_item(&item),
     }
-    selected
-}
-
-fn select_row(
-    store: &crate::Store,
-    body: &Value,
-    user_id: Option<domain::UserId>,
-) -> Option<(domain::LedgerRow, domain::Media, i32, i32)> {
-    let media_id = resolve_media_id(body["media_item_id"].as_str()?)?;
-    let media = store.get_media(media_id).ok().flatten()?;
-    let season = coordinate(body, "season_number", "season")?;
-    let episode = coordinate(body, "episode_number", "episode")?;
-    let whole_file = media.kind != domain::MediaKind::Tv;
-    let matches = |row: &domain::LedgerRow| {
-        let unit_matches = if whole_file {
-            season.is_none_or(|s| s == 0) && episode.is_none_or(|e| e == 0)
-        } else {
-            season.is_none_or(|s| row.season == Some(s))
-                && episode.is_none_or(|e| row.episode == Some(e))
-        };
-        row.media_id == media_id
-            && unit_matches
-            && crate::http::library::row_visible_to_user(store, row, &media, user_id)
-    };
-    let row = match body.get("file_id") {
-        None | Some(Value::Null) => store.list_ledger().ok()?.into_iter().find(matches)?,
-        Some(value) => {
-            let row = store
-                .get_ledger(&value.as_str()?.replace('-', ""))
-                .ok()
-                .flatten()?;
-            if !matches(&row) {
-                return None;
-            }
-            row
-        }
-    };
-    // Whole-file media (movies, videos) use (UNIT_WHOLE, UNIT_WHOLE) for unit coordinates
-    // in the ledger and unit_state tables. If caller requested (0, 0) or omitted coordinates,
-    // they represent the entire movie/video unit.
-    if whole_file {
-        return Some((row, media, UNIT_WHOLE, UNIT_WHOLE));
+    .map_err(|_| SelectionError::Unavailable)?;
+    let source = match selection.file_id {
+        Some(fid) => entries.into_iter().find(|s| s.file.file_id == fid),
+        None => entries.into_iter().next(),
     }
-    selected_unit(row, media)
+    .ok_or(SelectionError::Unavailable)?;
+    let unit = (source.unit.season, source.unit.episode);
+    Ok((source.file, media, unit.0, unit.1))
 }
 
-fn selected_unit(
-    row: domain::LedgerRow,
-    media: domain::Media,
-) -> Option<(domain::LedgerRow, domain::Media, i32, i32)> {
-    let season = row
-        .season
-        .map(i32::try_from)
-        .transpose()
-        .ok()?
-        .unwrap_or(UNIT_WHOLE);
-    let episode = row
-        .episode
-        .map(i32::try_from)
-        .transpose()
-        .ok()?
-        .unwrap_or(UNIT_WHOLE);
-    Some((row, media, season, episode))
-}
-
-/// Frontend movie units use (0, 0); persisted movie/whole-file units use (-1, -1).
-/// TV specials keep (0, 0) as a real season/episode pair.
+/// The stored unit a public watch-state request names. A movie owns only the
+/// whole-media unit: any other coordinate (including the historical 0/0) names
+/// nothing and is refused instead of aliased (R13).
 pub(super) fn watch_unit(
     store: &crate::Store,
     media_id: domain::MediaId,
     season: i32,
     episode: i32,
-) -> (i32, i32) {
-    if (season, episode) != (0, 0) {
-        return (season, episode);
+) -> Option<(i32, i32)> {
+    if (season, episode) == (UNIT_WHOLE, UNIT_WHOLE) {
+        return Some((UNIT_WHOLE, UNIT_WHOLE));
     }
-    match store.get_media(media_id).ok().flatten() {
-        Some(media) if media.kind != domain::MediaKind::Tv => (UNIT_WHOLE, UNIT_WHOLE),
-        _ => (season, episode),
-    }
-}
-
-pub(super) fn start_position(body: &Value, watch: &Value) -> Result<i64, &'static str> {
-    match body.get("start_ms") {
-        Some(value) => value
-            .as_i64()
-            .filter(|n| *n >= 0)
-            .ok_or("start_ms must be a nonnegative integer"),
-        None if watch["played"].as_bool().unwrap_or(false) => Ok(0),
-        None => Ok(watch["position_ms"].as_i64().unwrap_or(0).max(0)),
-    }
+    let is_movie = store
+        .get_media(media_id)
+        .ok()
+        .flatten()
+        .is_some_and(|media| media.kind != domain::MediaKind::Tv);
+    (!is_movie).then_some((season, episode))
 }

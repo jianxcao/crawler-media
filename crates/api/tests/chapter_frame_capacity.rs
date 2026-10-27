@@ -2,21 +2,21 @@
 //! renderers, never hold more than 64 claimed IDs in memory, and never lose a
 //! durable obligation. The runner is a gated fake; no ffmpeg process starts.
 
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::{Condvar, Mutex};
 
+use api::Store;
 use api::chapter_frame_service::{
-    chapter_frame_path, ChapterFrameRequest, ChapterFrameRunner, ChapterFrameService,
-    ChapterFrameStaged, DISPATCH_WINDOW, MAX_CHAPTER_PROCESSES,
+    ChapterFrameRequest, ChapterFrameRunner, ChapterFrameService, ChapterFrameStaged,
+    DISPATCH_WINDOW, MAX_CHAPTER_PROCESSES, chapter_frame_path,
 };
 use api::library_lifecycle::LibraryWorkRegistry;
-use api::Store;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, LibraryFile, Media, MediaId, MediaKind, QualitySource};
 use library::WorkControl;
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 const FILES: usize = 200;
 const TARGETS: [(i64, i64); 2] = [(0, 60_000), (60_000, 120_000)];
@@ -38,9 +38,14 @@ impl Gate {
         let mut state = self.state.lock();
         state.0 += 1;
         self.changed.notify_all();
-        while !state.1 {
-            self.changed.wait(&mut state);
-        }
+        self.changed.wait_while_for(
+            &mut state,
+            |state| !state.1,
+            std::time::Duration::from_secs(30),
+        );
+        let released = state.1;
+        drop(state);
+        assert!(released, "test must release the chapter frame gate");
     }
 
     fn entered(&self) -> usize {
@@ -85,10 +90,9 @@ impl ChapterFrameRunner for FakeRunner {
         let mut staged = Vec::new();
         for index in 0..request.targets.len() {
             let target = chapter_frame_path(&request.video, index);
-            let staged_path = request.video.with_file_name(format!(
-                ".chapter-fake-{}-{index}.jpg",
-                request.ledger_id
-            ));
+            let staged_path = request
+                .video
+                .with_file_name(format!(".chapter-fake-{}-{index}.jpg", request.file_id));
             std::fs::write(&staged_path, b"frame").unwrap();
             staged.push(ChapterFrameStaged {
                 staged: staged_path,
@@ -107,7 +111,7 @@ struct Fixture {
     runner: Arc<FakeRunner>,
     gate: Arc<Gate>,
     service: Arc<ChapterFrameService>,
-    rows: Vec<LedgerRow>,
+    rows: Vec<LibraryFile>,
 }
 
 impl Drop for Fixture {
@@ -154,8 +158,9 @@ impl Fixture {
         for index in 0..FILES {
             let path = root.join(format!("Batch.S01E{:03}.mkv", index + 1));
             std::fs::write(&path, b"fixture").unwrap();
-            let row = LedgerRow {
-                id: LedgerId::new(),
+            let file_id = LedgerId::new();
+            let spec = FixtureFile {
+                file_id: Some(file_id),
                 media_id,
                 path: path.display().to_string(),
                 season: Some(1),
@@ -166,9 +171,10 @@ impl Fixture {
                 quality_source: QualitySource::Release,
                 confidence: Confidence::High,
                 filter_score: None,
+                ..Default::default()
             };
-            store.insert_ledger(&row).unwrap();
-            rows.push(row);
+            let published = publish_fixture_file(&store, &spec).unwrap();
+            rows.push(published);
         }
 
         let store = Arc::new(Mutex::new(store));
@@ -194,9 +200,9 @@ impl Fixture {
     fn enqueue_all(&self) -> usize {
         self.rows
             .iter()
-            .filter(|row| {
+            .filter(|file| {
                 self.service
-                    .enqueue_ledger(&row.id.to_string(), TARGETS.to_vec())
+                    .enqueue_ledger(&file.file_id.to_string(), TARGETS.to_vec())
                     .unwrap()
             })
             .count()
@@ -211,10 +217,10 @@ impl Fixture {
         counts.queued + counts.running + counts.completed + counts.failed
     }
 
-    fn published_frames(&self, row: &LedgerRow) -> usize {
-        let path = PathBuf::from(&row.path);
+    fn published_frames(&self, file: &LibraryFile) -> usize {
+        let path = &file.path;
         (0..TARGETS.len())
-            .filter(|index| chapter_frame_path(&path, *index).exists())
+            .filter(|index| chapter_frame_path(path, *index).exists())
             .count()
     }
 
@@ -256,7 +262,10 @@ impl Fixture {
 async fn chapter_batch_keeps_process_and_queue_limits() {
     // The plan pins the production numbers; asserting the constants keeps a
     // later "temporary" widening from silently passing the behavioral checks.
-    assert_eq!(MAX_CHAPTER_PROCESSES, 2, "chapter process bound must stay 2");
+    assert_eq!(
+        MAX_CHAPTER_PROCESSES, 2,
+        "chapter process bound must stay 2"
+    );
     assert_eq!(DISPATCH_WINDOW, 64, "chapter dispatch window must stay 64");
     let fixture = Fixture::new();
     assert_eq!(fixture.enqueue_all(), FILES);
@@ -280,7 +289,10 @@ async fn chapter_batch_keeps_process_and_queue_limits() {
 
 #[tokio::test]
 async fn chapter_capacity_defers_without_losing_requests() {
-    assert_eq!(MAX_CHAPTER_PROCESSES, 2, "chapter process bound must stay 2");
+    assert_eq!(
+        MAX_CHAPTER_PROCESSES, 2,
+        "chapter process bound must stay 2"
+    );
     assert_eq!(DISPATCH_WINDOW, 64, "chapter dispatch window must stay 64");
     let fixture = Fixture::new();
     assert_eq!(fixture.enqueue_all(), FILES);
@@ -329,13 +341,17 @@ async fn superseded_source_publishes_no_late_frames() {
     assert_eq!(fixture.counts().completed, FILES);
     assert_eq!(fixture.durable_total(), FILES);
     assert!(
-        !std::fs::read_dir(std::path::Path::new(&fixture.rows[0].path).parent().unwrap())
-            .unwrap()
-            .any(|entry| entry
+        !std::fs::read_dir(
+            std::path::Path::new(&fixture.rows[0].path)
+                .parent()
                 .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".chapter-fake-"))
+        )
+        .unwrap()
+        .any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".chapter-fake-"))
     );
     let _ = fixture.service.shutdown().await;
 }
@@ -380,9 +396,11 @@ async fn panicking_runner_is_acked_as_failed() {
         Arc::new(PanicRunner),
     ));
     let row = &fixture.rows[0];
-    assert!(service
-        .enqueue_ledger(&row.id.to_string(), TARGETS.to_vec())
-        .unwrap());
+    assert!(
+        service
+            .enqueue_ledger(&row.file_id.to_string(), TARGETS.to_vec())
+            .unwrap()
+    );
     service.start();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {

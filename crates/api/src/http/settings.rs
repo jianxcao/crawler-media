@@ -30,12 +30,7 @@ pub(crate) async fn get_metadata(State(state): State<ApiState>) -> Response {
         .get_setting(settings_keys::TVDB_API_KEY)
         .ok()
         .flatten();
-    let language = store
-        .get_setting(settings_keys::METADATA_LANGUAGE)
-        .ok()
-        .flatten();
     ok(json!({
-        "language": language.unwrap_or_default(),
         "tmdb": {
             "configured": tmdb.as_deref().is_some_and(|k| !k.is_empty()),
             "api_key_hint": masked(tmdb.clone()),
@@ -66,45 +61,40 @@ pub(crate) async fn put_metadata(
     State(state): State<ApiState>,
     Json(body): Json<Value>,
 ) -> Response {
+    if body.get("language").is_some() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "settings.language_moved",
+            "use /settings/metadata-language",
+        );
+    }
     for (field, key) in [
         ("tmdb_api_key", settings_keys::TMDB_API_KEY),
         ("tvdb_api_key", settings_keys::TVDB_API_KEY),
     ] {
-        if body[field].as_str().is_some() {
-            if let Some(message) = crate::config::env_pinned_message(key) {
+        if body[field].as_str().is_some()
+            && let Some(message) = crate::config::env_pinned_message(key) {
                 return err(StatusCode::CONFLICT, "settings.env_pinned", &message);
             }
-        }
     }
     let (tmdb, tvdb) = {
         let store = state.store.lock();
-        if let Some(key) = body["tmdb_api_key"].as_str() {
-            if let Err(error) = store.put_setting(settings_keys::TMDB_API_KEY, key) {
+        if let Some(key) = body["tmdb_api_key"].as_str()
+            && let Err(error) = store.put_setting(settings_keys::TMDB_API_KEY, key) {
                 return err(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "store.error",
                     &error.to_string(),
                 );
             }
-        }
-        if let Some(key) = body["tvdb_api_key"].as_str() {
-            if let Err(error) = store.put_setting(settings_keys::TVDB_API_KEY, key) {
+        if let Some(key) = body["tvdb_api_key"].as_str()
+            && let Err(error) = store.put_setting(settings_keys::TVDB_API_KEY, key) {
                 return err(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "store.error",
                     &error.to_string(),
                 );
             }
-        }
-        if let Some(language) = body["language"].as_str() {
-            if let Err(error) = store.put_setting(settings_keys::METADATA_LANGUAGE, language) {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "store.error",
-                    &error.to_string(),
-                );
-            }
-        }
         (
             store
                 .get_setting(settings_keys::TMDB_API_KEY)
@@ -126,7 +116,7 @@ pub(crate) async fn put_metadata(
             "api_key_hint": masked(tvdb),
         },
         "restart_required": true,
-        "message": "元数据配置已保存，TVDB及全局语言变更将在服务重启后完整生效",
+        "message": "元数据配置已保存，TVDB配置将在服务重启后完整生效",
     }))
     .into_response()
 }
@@ -225,7 +215,9 @@ pub(crate) use super::browser_settings::{
 /// Discovers cookies from Chrome, updates existing sites, and returns discovered candidate sites.
 pub(crate) async fn sync_cdp_cookies(State(state): State<ApiState>) -> Response {
     let resolved_endpoint = {
-        let config = state.browser.effective_config()
+        let config = state
+            .browser
+            .effective_config()
             .map_err(|e| (StatusCode::BAD_REQUEST, "cdp.disabled", e.to_string()));
         match config {
             Ok(c) => match c.resolve(None) {

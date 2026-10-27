@@ -3,13 +3,14 @@ use std::sync::Arc;
 
 use api::router;
 use axum::http::StatusCode;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::*;
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 fn app(tmp: &tempfile::TempDir) -> axum::Router {
     let fetcher = Arc::new(Fixtures {
@@ -48,9 +49,10 @@ async fn tv_with_season_favorite_appears_in_library_favorites_filter() {
         })
         .unwrap();
 
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id: media.id,
             path: ep_path.display().to_string(),
             season: Some(1),
@@ -61,8 +63,10 @@ async fn tv_with_season_favorite_appears_in_library_favorites_filter() {
             quality_source: QualitySource::Release,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     // 找到 TV 库 id
     let tv_lib = store
@@ -92,11 +96,11 @@ async fn tv_with_season_favorite_appears_in_library_favorites_filter() {
         .unwrap();
     drop(store);
 
-    // 3. 查询 /libraries/{id}/items?filter=favorites
+    // 3. 查询 /libraries/{id}/items?w=favorite（`w` 是浏览接口的观看状态键）
     let res = app
         .oneshot(request(
             "GET",
-            &format!("/api/v1/libraries/{}/items?filter=favorites", tv_lib.id),
+            &format!("/api/v1/libraries/{}/items?w=favorite", tv_lib.id),
             Some("management-secret"),
             Value::Null,
         ))
@@ -139,24 +143,24 @@ async fn playback_heartbeat_at_90_percent_sets_played_true() {
     std::fs::create_dir_all(movie_file.parent().unwrap()).unwrap();
     std::fs::write(&movie_file, b"video").unwrap();
 
-    let row = LedgerRow {
-        id: LedgerId::new(),
-        media_id: media.id,
-        path: movie_file.display().to_string(),
-        season: None,
-        episode: None,
-        resolution: Some("1080p".into()),
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Release,
-        confidence: Confidence::High,
-        filter_score: None,
-    };
-    store.insert_ledger(&row).unwrap();
+    let file_id = LedgerId::new();
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(file_id),
+            media_id: media.id,
+            path: movie_file.display().to_string(),
+            resolution: Some("1080p".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     let user_id = store.admin_user_id().unwrap();
     drop(store);
 
+    let session =
+        super::playback::open_play_session(&app, &media.id.to_string(), "test-device").await;
     // 发送心跳：总时长 100,000ms，当前进度 95,000ms (95%)
     let heartbeat_res = app
         .clone()
@@ -164,11 +168,12 @@ async fn playback_heartbeat_at_90_percent_sets_played_true() {
             "POST",
             "/api/v1/playback/progress",
             Some("management-secret"),
-            json!({
+            json!({ "event_sequence": crate::common::next_playback_sequence(),
                 "media_item_id": media.id.to_string(),
-                "file_id": row.id.to_string(),
+                "file_id": file_id.to_string(),
                 "device_id": "test-device",
-                "event": "timeupdate",
+                "play_session_id": session,
+                "event": "start",
                 "position_ms": 95000,
                 "duration_ms": 100000
             }),
@@ -216,9 +221,10 @@ async fn up_next_movie_dto_reads_canonical_unit_progress() {
         })
         .unwrap();
 
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(LedgerId::new()),
             media_id: media.id,
             path: movie_file.display().to_string(),
             season: None,
@@ -229,8 +235,10 @@ async fn up_next_movie_dto_reads_canonical_unit_progress() {
             quality_source: QualitySource::Release,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     let user_id = store.admin_user_id().unwrap();
 

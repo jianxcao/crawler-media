@@ -88,14 +88,13 @@ fn find_best_catalog_match<'a>(
         return unique_catalog_match(&exact);
     }
     // Partial names are only safe when the catalog itself has a single candidate.
-    if eligible.len() == 1 {
-        if catalog_names(&eligible[0].media).any(|name| {
+    if eligible.len() == 1
+        && catalog_names(&eligible[0].media).any(|name| {
             let name = normalize_title(name);
             !name.is_empty() && (name.contains(&norm_target) || norm_target.contains(&name))
         }) {
             return Some(eligible[0]);
         }
-    }
 
     None
 }

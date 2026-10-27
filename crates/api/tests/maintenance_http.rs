@@ -12,7 +12,6 @@ use axum::http::{Request, StatusCode};
 use domain::{User, UserId, UserRole};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
-use parking_lot::Mutex;
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -547,7 +546,10 @@ async fn run_is_refused_for_disabled_defs_and_queued_defs_report_existing() {
         Value::Null,
     )
     .await;
-    assert_eq!(while_running["status"], "already_running", "{while_running}");
+    assert_eq!(
+        while_running["status"], "already_running",
+        "{while_running}"
+    );
     assert_eq!(while_running["queued"], false, "{while_running}");
     state.jobs().lock().succeed(queued.id, 1_100).unwrap();
     let follow_up = state.jobs().lock().get_live_child(id).unwrap();
@@ -720,7 +722,7 @@ async fn watcher_still_emits_when_terminal_count_drops() {
         seed_orphan_terminal(tmp.path(), 1_000 + i);
     }
 
-    let mut receiver = updates.subscribe(queue.clone()).await.unwrap();
+    let receiver = updates.subscribe(queue.clone()).await.unwrap();
     let before = receiver.borrow().count;
     assert_eq!(before, 5, "订阅即拿到真实当前计数");
 

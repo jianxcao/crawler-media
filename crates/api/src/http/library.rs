@@ -1,199 +1,117 @@
-//! Library browse: Library listing and ledger-grouped item views.
-//! Entity CRUD lives in `library_config`, scans/refresh in `library_scan`,
+//! Library browse: Library listing and item views rendered from the `library_items`
+//! summaries. Entity CRUD lives in `library_config`, scans/refresh in `library_scan`,
 //! artwork in `library_artwork`, admin views in `library_admin`.
 
 mod probe;
 pub(crate) use probe::{
-    enqueue_probes_for_paths, enqueue_probes_for_rows, ensure_probe_enqueued, file_tracks,
-    probe_item,
+    enqueue_probes_for_files, enqueue_probes_for_paths, ensure_probe_enqueued, probe_item,
 };
 
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use domain::{MediaId, MediaKind};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::path::{Path as FsPath, PathBuf};
 use std::str::FromStr;
 
-use crate::catalog::Catalog;
 use crate::http::{err, ok, ok_list};
 use crate::management::ApiState;
-use crate::store::Library;
+use crate::store::{Library, library_query};
+
+/// 列表页默认与上限的窗口大小。
+pub(crate) const MAX_PAGE_LIMIT: usize = 500;
+
+/// 浏览列表的一页请求：游标 + 已校验的 `limit`。
+///
+/// `offset` 已经删掉了：它每次都要 SQL 走 `LIMIT … OFFSET`（每页都可能带
+/// `COUNT`、按 offset 逐行跳过），越深越慢；同一张表用键集游标是常数代价。
+/// 见 `store::library_query::BrowsePage::Cursor`。这里对 `offset` 直接 400，
+/// 不留兼容分支。
+pub(crate) struct BrowseWindow {
+    pub(crate) cursor: Option<String>,
+    pub(crate) limit: usize,
+}
+
+impl BrowseWindow {
+    pub(crate) fn parse(query: &HashMap<String, String>) -> Result<Self, String> {
+        let limit = match query.get("limit") {
+            None => MAX_PAGE_LIMIT,
+            Some(raw) => {
+                let value = raw
+                    .parse::<usize>()
+                    .map_err(|_| format!("limit 必须是正整数: {raw}"))?;
+                if value == 0 || value > MAX_PAGE_LIMIT {
+                    return Err(format!("limit 必须在 1..={MAX_PAGE_LIMIT} 之间: {raw}"));
+                }
+                value
+            }
+        };
+        let cursor = match query.get("cursor") {
+            None => None,
+            Some(raw) if raw.is_empty() => return Err("cursor 不能为空".into()),
+            Some(raw) => {
+                // 游标是服务端自己签发的 JSON。截断/误编码的游标是客户端错误，
+                // 这里先挡掉，别让它落到读路径上变成 500。
+                if serde_json::from_str::<Value>(raw).is_err() {
+                    return Err("cursor 不是合法游标".into());
+                }
+                Some(raw.clone())
+            }
+        };
+        Ok(Self { cursor, limit })
+    }
+
+    /// 首页没有游标；有游标就走键集续页。
+    pub(crate) fn page(&self) -> library_query::BrowsePage {
+        library_query::BrowsePage::Cursor {
+            after: self.cursor.clone(),
+            limit: self.limit,
+        }
+    }
+
+    /// `total` 只在第一页算：往后每页都 COUNT 一次是 D5 的另一半浪费。
+    pub(crate) fn include_total(&self) -> bool {
+        self.cursor.is_none()
+    }
+}
+
+/// 列表 + 分页元数据：`data` 仍是数组，游标与总数挂在信封上。
+///
+/// 续页的 `total` 是 `null`（这一页没算 COUNT，不假装知道）。
+pub(crate) fn browse_response(
+    items: Vec<Value>,
+    next_cursor: Option<String>,
+    total: Option<u64>,
+) -> Json<Value> {
+    Json(json!({
+        "ok": true,
+        "data": Value::Array(items),
+        "next_cursor": next_cursor,
+        "total": total,
+    }))
+}
 
 mod assets;
 mod cover;
-pub(crate) mod facets;
-pub(crate) mod page;
-pub(crate) mod selection;
-pub(crate) use assets::{library_json, poster_path, poster_path_with, preferred_row, rows_in_library};
-pub(crate) use cover::{default_cover_options, is_legacy_fanart_copy, render_cover_jpeg};
+pub(crate) use assets::{
+    coverages_in_library, files_in_library, library_facts, library_json, library_json_from_facts,
+    poster_path, poster_path_with, preferred_coverage,
+};
+pub(crate) use cover::{default_cover_options, render_cover_jpeg};
 
-/// Resolve one ledger row to exactly one Library. The longest matching root
-/// wins, so a nested Library does not leak through a broader parent root. Two
-/// Libraries with equally-specific roots are ambiguous and therefore own
-/// nothing until the configuration is fixed.
-pub(crate) fn library_for_row(
-    store: &crate::Store,
-    row: &domain::LedgerRow,
-    media: &domain::Media,
-) -> Option<Library> {
-    store
-        .library_for_path(FsPath::new(&row.path), media.kind)
-        .ok()
-        .flatten()
-}
-
-/// Destructive file operations must not fall back to the default Library.
-pub(crate) fn library_for_row_strict(
-    store: &crate::Store,
-    row: &domain::LedgerRow,
-    media: &domain::Media,
-) -> Option<Library> {
-    store
-        .library_for_path_strict(FsPath::new(&row.path), media.kind)
-        .ok()
-        .flatten()
-}
-
-pub(crate) fn row_visible_to_user(
-    store: &crate::Store,
-    row: &domain::LedgerRow,
-    media: &domain::Media,
-    user_id: Option<domain::UserId>,
-) -> bool {
-    library_for_row(store, row, media)
-        .is_some_and(|library| library_visible(store, &library, user_id))
-}
-
-/// Whether a library is visible to the given user: admins see everything
-/// (subject to the library's admin_visible flag for browse scope); members see
-/// "everyone" libraries plus "selected" ones that list them.
-pub(crate) fn library_visible(
-    store: &crate::Store,
-    library: &Library,
-    user_id: Option<domain::UserId>,
-) -> bool {
-    if !store.library_accepts_work(&library.id).unwrap_or(false) {
-        return false;
-    }
-    let Some(user_id) = user_id else {
-        return true;
-    };
-    if store
-        .user_role(user_id)
-        .as_deref()
-        .map(|r| r == "admin")
-        .unwrap_or(false)
-    {
-        return library.admin_visible;
-    }
-    if library.access_mode == "everyone" {
-        return true;
-    }
-    library.member_ids.contains(&user_id)
-}
-
-pub(crate) fn library_visible_with_role(
-    store: &crate::Store,
-    library: &Library,
-    user_id: Option<domain::UserId>,
-    is_admin: bool,
-) -> bool {
-    if !store.library_accepts_work(&library.id).unwrap_or(false) {
-        return false;
-    }
-    let Some(user_id) = user_id else {
-        return true;
-    };
-    if is_admin {
-        return library.admin_visible;
-    }
-    library.access_mode == "everyone" || library.member_ids.contains(&user_id)
-}
-
-pub(crate) fn missing_library() -> Response {
-    err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在")
-}
-
-pub(crate) fn artwork_url(kind: &str, ledger_id: domain::LedgerId) -> String {
-    format!("/{kind}/{ledger_id}")
-}
-
-pub(crate) fn require_visible_library(
-    store: &crate::Store,
-    id: &str,
-    user_id: Option<domain::UserId>,
-) -> Result<Library, Response> {
-    let Some(library) = store.get_library(id).ok().flatten() else {
-        return Err(missing_library());
-    };
-    if !library_visible(store, &library, user_id) {
-        return Err(missing_library());
-    }
-    Ok(library)
-}
-
-/// 长图（fanart.jpg）向上查找：与 poster_path 同一套布局兼容。
-pub(crate) fn backdrop_path(row: &domain::LedgerRow) -> Option<PathBuf> {
-    backdrop_path_with(row, &crate::browse_file_read::LocalBrowseFileRead)
-}
-
-/// 与 [`backdrop_path`] 同一套布局，存在性判断走注入的浏览文件 seam。
-pub(crate) fn backdrop_path_with(
-    row: &domain::LedgerRow,
-    files: &dyn crate::browse_file_read::BrowseFileRead,
-) -> Option<PathBuf> {
-    let file_dir = FsPath::new(&row.path).parent()?;
-    for dir in [file_dir, file_dir.parent().unwrap_or(file_dir)] {
-        let art = dir.join("fanart.jpg");
-        if files.is_file(&art) {
-            return Some(art);
-        }
-    }
-    None
-}
-
-/// 解析媒体库封面：**只读**已存在的版本文件，不生成、不写盘、不写 DB。
-/// 自动生成统一走 `LibraryCoverService::ensure_cover`。
-pub(crate) fn library_cover_path(store: &crate::Store, library: &Library) -> Option<PathBuf> {
-    // 0. 用户显式删除（"none"/空串）时不回填
-    match library.cover_path.as_deref() {
-        Some("none") | Some("") => return None,
-        Some(path) => {
-            let path = PathBuf::from(path);
-            if path.is_file() {
-                return Some(path);
-            }
-        }
-        None => {}
-    }
-    // 1. legacy 固定路径 `library-{id}.jpg` 仅读、不 unlink
-    let legacy = store
-        .library_covers_dir()
-        .join(format!("library-{}.jpg", library.id));
-    legacy.is_file().then_some(legacy)
-}
-
-fn library_cover_checked_key(library_id: &str) -> String {
-    format!("library_cover_checked.{library_id}")
-}
-
-pub(crate) fn clear_library_cover_checked(store: &crate::Store, library_id: &str) {
-    let key = library_cover_checked_key(library_id);
-    match store.get_setting(&key) {
-        Ok(Some(value)) if value == "auto-v2" => {
-            if let Err(error) = store.delete_setting(&key) {
-                tracing::warn!(%error, library_id, "failed to clear library cover check marker");
-            }
-        }
-        Ok(_) => {}
-        Err(error) => {
-            tracing::warn!(%error, library_id, "failed to read library cover check marker");
-        }
-    }
-}
+mod query;
+mod visibility;
+pub(crate) use query::{
+    BROWSE_DEADLINE, browse_filter_from_query, browse_order_from_query, browse_store_error,
+    browse_work_error,
+};
+pub(crate) use visibility::{
+    artwork_url, backdrop_path_with, clear_library_cover_checked,
+    file_visible_to_user, library_cover_path, library_for_file, library_for_file_strict,
+    library_visible, library_visible_with_role, missing_library, require_visible_library,
+};
 
 /// GET /libraries?kind= — one entry per Library entity, defaults first;
 /// members only see libraries visible to them.
@@ -241,16 +159,19 @@ pub(crate) async fn list_libraries(
         (facts, roster, is_admin)
     };
     let stats = match crate::library_statistics::collect_statistics_for_roster(
-        state.clone(), user_id, &roster, is_admin,
+        state.clone(),
+        user_id,
+        &roster,
+        is_admin,
     )
     .await
     {
         Ok(stats) => stats,
-        Err(error) => return error.into_response(),
+        Err(res) => return res,
     };
     match state
         .http_work
-        .run(selection::BROWSE_DEADLINE, move || {
+        .run(BROWSE_DEADLINE, move || {
             facts
                 .iter()
                 .map(|facts| {
@@ -264,78 +185,106 @@ pub(crate) async fn list_libraries(
         Ok(items) => ok_list(items).into_response(),
         Err(error) => {
             tracing::error!(%error, "媒体库列表的文件观察任务失败");
-            selection::browse_work_error(error)
+            browse_work_error(error)
         }
     }
 }
 
-/// GET /libraries/{id}/items — one item per Media owned under this library's roots.
+/// GET /libraries/{id}/items — one card per Media owned under this library's roots.
+///
+/// Filters, ordering and paging are all SQL over `library_items`; the card extras (seasons,
+/// studio) are read once for the page's media ids, so a page costs a fixed number of queries
+/// and never one per card.
 pub(crate) async fn list_items(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
+    axum::Extension(credential): axum::Extension<store::ReadCredential>,
     Path(id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
+    axum::Extension(timing): axum::Extension<media_server::provider::QueryTiming>,
 ) -> Response {
-    // 显式分页参数先校验：越界直接 400，不静默 clamp；省略 limit 仍是"返回全部"。
-    if let Err(message) = page::PageWindow::parse(&query) {
-        return err(StatusCode::BAD_REQUEST, "library.invalid", &message);
-    }
-    // 授权从当前配置判定；热页只读投影 head 并按选中 Media 读本页 facts（零文件 IO），
-    // 投影未就绪/不可解析或省略 limit 时回退旧的全量读取（已在 helper 内 warn）。
-    let library = {
-        let store = state.store.lock();
-        match require_visible_library(&store, &id, user_id) {
-            Ok(library) => library,
-            Err(response) => return response,
-        }
+    let lib_id = match id.parse::<domain::LibraryId>() {
+        Ok(lib_id) => lib_id,
+        Err(_) => return missing_library(),
     };
-    let (items, artwork) = match selection::load_browse_page(&state, &library, user_id, &query).await
-    {
-        Ok(loaded) => loaded,
+    let filter = match browse_filter_from_query(&query) {
+        Ok(filter) => filter,
+        Err(message) => return err(StatusCode::BAD_REQUEST, "library.invalid", &message),
+    };
+    let (order, descending) = browse_order_from_query(&query);
+    // 游标分页：`cursor` 续页，`offset` 已删除（越深越慢，见 BrowseWindow）。
+    let window = match BrowseWindow::parse(&query) {
+        Ok(window) => window,
+        Err(message) => return err(StatusCode::BAD_REQUEST, "library.invalid", &message),
+    };
+    let include_total = window.include_total();
+    let lib_q = library_query::LibraryQuery {
+        library_id: lib_id,
+        user_id,
+        filter,
+        order,
+        descending,
+        page: window.page(),
+        include_total,
+    };
+    let selected = crate::library_read_work::run_self_library_read(
+        &state,
+        credential,
+        lib_id,
+        store::LibraryReadRequest::Browse(lib_q),
+        timing.deadline,
+    )
+    .await;
+    let (page, facts) = match selected {
+        Ok(store::LibraryReadResult::Browse { page, facts, .. }) => (page, facts),
+        Ok(_) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "library.read",
+                "查询类型错误",
+            );
+        }
         Err(response) => return response,
     };
-    let files = state.browse_files.clone();
-    let library_id = library.id.clone();
-    let work = state
-        .http_work
-        .run(selection::BROWSE_DEADLINE, move || {
-            let art = selection::BrowseArtwork::new(Some(&artwork), files.as_ref());
-            let paged: Vec<_> = items
-                .iter()
-                .map(|item| wall_item_json(&library_id, item, &art))
-                .collect();
-            ok_list(paged).into_response()
+    let items: Vec<Value> = page
+        .items
+        .iter()
+        .map(|item| {
+            let facts = facts.get(&item.media_id).cloned().unwrap_or_default();
+            // The artwork routes (`/posters/{file_id}`, `/fanart/{file_id}`) serve the image
+            // beside the file and answer 404 when it is absent. Cards historically always
+            // carried a URL built from the preferred file; keep that contract when no file
+            // recorded artwork, so a card never loses the image it had before.
+            let poster_ref = item.poster_ref.or(item.preferred_file_id);
+            let backdrop_ref = item.backdrop_ref.or(item.preferred_file_id);
+            json!({
+                "media_item_id": item.media_id.to_string(),
+                "kind": item.kind.as_str(),
+                "library_id": item.library_id.to_string(),
+                "title": item.title,
+                "year": item.year,
+                "rating": item.rating,
+                "studio": facts.studio,
+                "studio_logo": facts
+                    .studio_logo
+                    .map(|path| format!("https://image.tmdb.org/t/p/w92{path}")),
+                "poster_url": poster_ref.map(|file_id| artwork_url("posters", file_id)),
+                "backdrop_url": backdrop_ref.map(|file_id| artwork_url("fanart", file_id)),
+                "file_count": item.file_count,
+                "seasons": facts.seasons,
+                "episode_count": item.distinct_episode_count,
+                "max_resolution": item.max_resolution(),
+                "missing": item.missing,
+                "has_poster": item.has_poster(),
+                "has_backdrop": item.has_backdrop(),
+            })
         })
-        .await;
-    match work {
-        Ok(response) => response,
-        Err(error) => selection::browse_work_error(error),
-    }
+        .collect();
+    browse_response(items, page.next_cursor, page.total).into_response()
 }
 
-fn wall_item_json(
-    library_id: &str,
-    item: &selection::LibrarySelection,
-    art: &selection::BrowseArtwork<'_>,
-) -> Value {
-    let row = preferred_row(&item.rows);
-    let facts = art.media(item.media.id, &item.rows);
-    json!({
-        "media_item_id": item.media.id.to_string(),
-        "kind": item.media.kind.as_str(),
-        "library_id": library_id,
-        "title": item.media.title,
-        "year": item.media.year,
-        "poster_url": row.filter(|_| facts.has_poster).map(|r| artwork_url("posters", r.id)),
-        "backdrop_url": row.filter(|_| facts.has_backdrop).map(|r| artwork_url("fanart", r.id)),
-        "file_count": item.rows.len(),
-        "seasons": item.rows.iter().filter_map(|r| r.season).collect::<std::collections::BTreeSet<_>>(),
-        "episode_count": item.rows.iter().filter_map(|r| r.season.zip(r.episode)).collect::<std::collections::HashSet<_>>().len(),
-        "max_resolution": selection::best_resolution(&item.rows),
-        "missing": item.missing,
-    })
-}
-
+/// GET /libraries/{id}/items/{item_id} — adopted metadata plus the file list. Nothing here
+/// observes a file: art and metadata are stored facts.
 pub(crate) async fn item_detail(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
@@ -345,92 +294,222 @@ pub(crate) async fn item_detail(
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
     };
-    let (media, rows) = {
-        let store = state.store.lock();
-        match load_owned_rows(&store, &id, media_id, user_id) {
-            Ok(loaded) => loaded,
-            Err(response) => return response,
-        }
+    let lib_id = match id.parse::<domain::LibraryId>() {
+        Ok(lib_id) => lib_id,
+        Err(_) => return missing_library(),
     };
-    let files = item_files_json(&state, &rows).await;
-    let nfo = item_nfo(&media, &rows);
-    let cast = item_cast_json(nfo.as_ref());
-    let backdrop_url = item_backdrop_url(&rows);
-    ok(item_detail_json(
-        &media,
-        &rows,
-        nfo.as_ref(),
-        cast,
-        backdrop_url,
-        files,
-    ))
+    let (detail, media, details) = {
+        let store = state.store.lock();
+        if let Err(response) = require_visible_library(&store, &id, user_id) {
+            return response;
+        }
+        let detail = match store.library_item_detail(lib_id, media_id, "") {
+            Ok(Some(detail)) => detail,
+            Ok(None) => return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在"),
+            Err(error) => return browse_store_error(error),
+        };
+        let media = match store.get_media(media_id) {
+            Ok(media) => media,
+            Err(error) => return browse_store_error(error),
+        };
+        let file_ids: Vec<domain::LedgerId> =
+            detail.files.iter().map(|file| file.file_id).collect();
+        let details = match store.file_details_batch(&file_ids) {
+            Ok(details) => details,
+            Err(error) => return browse_store_error(error),
+        };
+        (detail, media, details)
+    };
+    let mut files = Vec::with_capacity(detail.files.len());
+    for file in &detail.files {
+        let units = detail
+            .file_units
+            .iter()
+            .find(|(file_id, _)| *file_id == file.file_id)
+            .map(|(_, units)| units.as_slice())
+            .unwrap_or_default();
+        let tracks = match details.get(&file.file_id) {
+            Some(details) => match tracks_from_details(details) {
+                Ok(tracks) => tracks,
+                Err(error) => return browse_store_error(error),
+            },
+            None => library::Tracks::default(),
+        };
+        files.push(item_file_json(&state, file, units, &tracks));
+    }
+    let metadata = &detail.metadata;
+    let cast: Vec<Value> = metadata
+        .cast
+        .value()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .map(|member| {
+            let avatar_url = member.thumb.as_ref().map(|thumb| {
+                if thumb.starts_with("http://") || thumb.starts_with("https://") {
+                    thumb.clone()
+                } else {
+                    format!("https://image.tmdb.org/t/p/w185{thumb}")
+                }
+            });
+            json!({
+                "name": member.name,
+                "role": member.role,
+                "tmdb_person_id": member.tmdb_id.as_deref().and_then(|id| id.parse::<i64>().ok()),
+                "avatar_url": avatar_url,
+                "order": member.order,
+            })
+        })
+        .collect();
+    let item = &detail.item;
+    let (original_title, tmdb_id) = match media {
+        Some(media) => (media.original_title.clone(), media.tmdb_id.clone()),
+        None => (None, None),
+    };
+    ok(json!({
+        "media_item_id": item.media_id.to_string(),
+        "kind": item.kind.as_str(),
+        "title": item.title,
+        "year": item.year,
+        "original_title": metadata.original_title.value().cloned().or(original_title),
+        "tmdb_id": tmdb_id,
+        "overview": metadata.overview.value(),
+        "rating": metadata.rating.value().map(f64::to_string),
+        "vote_count": metadata.vote_count.value(),
+        "runtime_minutes": metadata.runtime_minutes.value().map(u32::to_string),
+        "tagline": metadata.tagline.value(),
+        "premiered": metadata.release_date.value(),
+        "end_date": metadata.end_date.value(),
+        "content_rating": metadata.content_rating.value(),
+        "original_language": metadata.language.value(),
+        "status": metadata.status.value(),
+        "number_of_seasons": metadata.number_of_seasons.value(),
+        "number_of_episodes": metadata.number_of_episodes.value(),
+        "genres": metadata
+            .genres
+            .value()
+            .map(|genres| genres.iter().map(|genre| genre.name.clone()).collect::<Vec<_>>())
+            .unwrap_or_default(),
+        "countries": metadata.countries.value().cloned().unwrap_or_default(),
+        "studios": metadata.studios.value().cloned().unwrap_or_default(),
+        "directors": metadata.directors.value().cloned().unwrap_or_default(),
+        "creators": metadata.creators.value().cloned().unwrap_or_default(),
+        "cast": cast,
+        "poster_url": item.poster_ref.map(|file_id| artwork_url("posters", file_id)),
+        "backdrop_url": item.backdrop_ref.map(|file_id| artwork_url("fanart", file_id)),
+        "files": files,
+        "next_file_cursor": detail.next_file_cursor,
+        "seasons": detail.seasons,
+    }))
     .into_response()
 }
 
-/// Resolve the Media and its Library-owned ledger rows for the item detail view.
-fn load_owned_rows(
-    store: &crate::Store,
-    id: &str,
-    media_id: MediaId,
-    user_id: Option<domain::UserId>,
-) -> Result<(domain::Media, Vec<domain::LedgerRow>), Response> {
-    let Some(library) = store.get_library(id).ok().flatten() else {
-        return Err(missing_library());
+/// GET /libraries/{id}/items/{item_id}/files?after=&limit= — one bounded page of files.
+pub(crate) async fn item_files(
+    State(state): State<ApiState>,
+    axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
+    Path((id, item_id)): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let Ok(lib_id) = id.parse::<domain::LibraryId>() else {
+        return missing_library();
     };
-    if !library_visible(store, &library, user_id) {
-        return Err(missing_library());
-    }
-    let Some(media) = store.get_media(media_id).ok().flatten() else {
-        return Err(err(
-            StatusCode::NOT_FOUND,
-            "library.item_missing",
-            "条目不存在",
-        ));
+    let Ok(media_id) = MediaId::from_str(&item_id) else {
+        return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效");
     };
-    // 已知 MediaId 时走定向读取，不再全表扫 ledger 后过滤。
-    let rows: Vec<domain::LedgerRow> = store
-        .ledger_for_media(media_id)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|row| {
-            library_for_row(store, row, &media).is_some_and(|owner| owner.id == library.id)
-        })
-        .collect();
-    if rows.is_empty() {
-        return Err(err(
-            StatusCode::NOT_FOUND,
-            "library.item_missing",
-            "条目不存在",
-        ));
+    let limit = match query
+        .get("limit")
+        .map(String::as_str)
+        .unwrap_or("50")
+        .parse::<usize>()
+    {
+        Ok(limit @ 1..=100) => limit,
+        _ => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "library.invalid",
+                "limit 必须在 1..=100 之间",
+            );
+        }
+    };
+    let after = query.get("after").map(String::as_str);
+    let page = {
+        let store = state.store.lock();
+        if let Err(response) = require_visible_library(&store, &id, user_id) {
+            return response;
+        }
+        match store.library_file_page(lib_id, media_id, after, limit) {
+            Ok(page) => page,
+            Err(error) => return browse_store_error(error),
+        }
+    };
+    let file_ids: Vec<_> = page.files.iter().map(|file| file.file_id).collect();
+    let (file_units, details) = {
+        let store = state.store.lock();
+        let units = match store.file_units(lib_id, media_id, &page.files) {
+            Ok(units) => units,
+            Err(error) => return browse_store_error(error),
+        };
+        let details = match store.file_details_batch(&file_ids) {
+            Ok(details) => details,
+            Err(error) => return browse_store_error(error),
+        };
+        (units, details)
+    };
+    let mut files = Vec::with_capacity(page.files.len());
+    for file in &page.files {
+        let units = file_units
+            .iter()
+            .find(|(id, _)| *id == file.file_id)
+            .map(|(_, units)| units.as_slice())
+            .unwrap_or_default();
+        let tracks = match details.get(&file.file_id) {
+            Some(details) => match tracks_from_details(details) {
+                Ok(tracks) => tracks,
+                Err(error) => return browse_store_error(error),
+            },
+            None => library::Tracks::default(),
+        };
+        files.push(item_file_json(&state, file, units, &tracks));
     }
-    Ok((media, rows))
+    ok(json!({ "files": files, "next_cursor": page.next_cursor })).into_response()
 }
 
-/// file_tracks 已是异步非阻塞：缓存命中即回，未命中入队后台探测并返回空，
-/// 详情页绝不会因远程探测等待（并发/超时包装不再需要）。
-async fn item_files_json(state: &ApiState, rows: &[domain::LedgerRow]) -> Vec<Value> {
-    let mut files = Vec::with_capacity(rows.len());
-    for row in rows {
-        let tracks = file_tracks(state, row).await;
-        files.push(file_json(state, row, &tracks));
-    }
-    files
-}
+/// One file of the detail view: stored quality facts plus whatever the probe has cached.
+fn item_file_json(
+    state: &ApiState,
+    file: &domain::LibraryFile,
+    units: &[domain::UnitKey],
+    tracks: &library::Tracks,
+) -> Value {
+    let unit = units
+        .iter()
+        .find(|unit| !unit.is_whole())
+        .or_else(|| units.first());
 
-fn file_json(state: &ApiState, row: &domain::LedgerRow, tracks: &library::Tracks) -> Value {
     json!({
-        "file_id": row.id.to_string(),
-        "path": row.path,
-        "season": row.season,
-        "episode": row.episode,
-        "resolution": row.resolution,
-        "codec": row.codec,
-        "hdr": row.hdr,
-        "quality_source": row.quality_source.as_str(),
+        "file_id": file.file_id.to_string(),
+        "path": file.path.to_string_lossy(),
+        // Complete coverage: one physical file may serve several episodes, so the
+        // full unit list travels with it. `season`/`episode` stay as the first
+        // concrete coordinate for consumers that only pick a default version.
+        "units": units
+            .iter()
+            .filter(|unit| !unit.is_whole())
+            .map(|unit| json!({ "season": unit.season, "episode": unit.episode }))
+            .collect::<Vec<_>>(),
+        "presence": file.presence.as_str(),
+        "publication": file.publication.as_str(),
+        "season": unit.map(|unit| unit.season).filter(|season| *season >= 0),
+        "episode": unit.map(|unit| unit.episode).filter(|episode| *episode >= 0),
+        "resolution": file.resolution,
+        "codec": file.codec,
+        "hdr": file.hdr,
+        "quality_source": file.quality_source.as_str(),
         "probed": tracks.video.is_some()
             || !tracks.audio.is_empty()
             || !tracks.subtitles.is_empty(),
-        "probe_queued": state.probe.is_queued(&row.id.to_string()),
+        "probe_queued": state.probe.is_queued(&file.file_id.to_string()),
         "video_track": tracks.video.as_ref().map(|v| json!({
             "codec": v.codec, "width": v.width, "height": v.height,
             "frame_rate": v.frame_rate, "bit_rate": v.bit_rate,
@@ -445,94 +524,36 @@ fn file_json(state: &ApiState, row: &domain::LedgerRow, tracks: &library::Tracks
         "subtitle_tracks": tracks.subtitles.iter().map(|t| json!({
             "codec": t.codec, "language": t.language, "title": null,
             "forced": t.forced, "default": t.is_default,
-            "external": false, "file_name": null,
+            "external": t.is_external, "file_name": null,
         })).collect::<Vec<_>>(),
     })
 }
 
-/// 条目级元数据：优先读条目目录的 NFO（Emby/TMM 刮削产物），封面/背景取
-/// 本地图片；无 NFO 时字段为空（Block 2 的 TMDB 补充在 metadata/refresh 写入）。
-fn item_nfo(media: &domain::Media, rows: &[domain::LedgerRow]) -> Option<library::NfoMeta> {
-    let row = preferred_row(rows)?;
-    crate::scrape_metadata::nfo_candidates(FsPath::new(&row.path), row, media.kind)
-        .into_iter()
-        .find(|candidate| candidate.is_file())
-        .and_then(|path| library::read_nfo(&path))
-}
-
-fn item_backdrop_url(rows: &[domain::LedgerRow]) -> Option<String> {
-    let row = preferred_row(rows)?;
-    let has_fanart = FsPath::new(&row.path)
-        .parent()
-        .map(|dir| dir.join("fanart.jpg"))
-        .is_some_and(|art| art.is_file());
-    has_fanart.then(|| artwork_url("fanart", row.id))
-}
-
-fn item_cast_json(nfo: Option<&library::NfoMeta>) -> Vec<Value> {
-    nfo.map(|nfo| {
-        nfo.cast
-            .iter()
-            .map(|member| {
-                let avatar_url = member.thumb.as_ref().map(|thumb| {
-                    if thumb.starts_with("http://") || thumb.starts_with("https://") {
-                        thumb.clone()
-                    } else {
-                        format!("https://image.tmdb.org/t/p/w185{thumb}")
-                    }
-                });
-                json!({
-                    "name": member.name,
-                    "role": member.role,
-                    "tmdb_person_id": member.tmdb_id.as_deref().and_then(|id| id.parse::<i64>().ok()),
-                    "avatar_url": avatar_url,
-                    "order": member.order,
-                })
-            })
-            .collect()
-    })
-    .unwrap_or_default()
-}
-
-fn item_detail_json(
-    media: &domain::Media,
-    rows: &[domain::LedgerRow],
-    nfo: Option<&library::NfoMeta>,
-    cast: Vec<Value>,
-    backdrop_url: Option<String>,
-    files: Vec<Value>,
-) -> Value {
-    json!({
-        "media_item_id": media.id.to_string(),
-        "kind": media.kind.as_str(),
-        "title": media.title,
-        "year": media.year,
-        "original_title": media.original_title,
-        "tmdb_id": media.tmdb_id,
-        "overview": nfo.and_then(|n| n.plot.clone()),
-        "rating": nfo.and_then(|n| n.rating.clone()),
-        "vote_count": nfo.and_then(|n| n.vote_count),
-        "runtime_minutes": nfo.and_then(|n| n.runtime_minutes.clone()),
-        "tagline": nfo.and_then(|n| n.tagline.clone()),
-        "premiered": nfo.and_then(|n| n.premiered.clone()),
-        "end_date": nfo.and_then(|n| n.end_date.clone()),
-        "content_rating": nfo.and_then(|n| n.content_rating.clone()),
-        "original_language": nfo.and_then(|n| n.original_language.clone()),
-        "status": nfo.and_then(|n| n.status.clone()),
-        "number_of_seasons": nfo.and_then(|n| n.number_of_seasons),
-        "number_of_episodes": nfo.and_then(|n| n.number_of_episodes),
-        "genres": nfo.map(|n| n.genres.clone()).unwrap_or_default(),
-        "countries": nfo.map(|n| n.countries.clone()).unwrap_or_default(),
-        "studios": nfo.map(|n| n.studios.clone()).unwrap_or_default(),
-        "directors": nfo.map(|n| n.directors.clone()).unwrap_or_default(),
-        "creators": nfo.map(|n| n.creators.clone()).unwrap_or_default(),
-        "cast": cast,
-        "poster_url": preferred_row(rows).filter(|row| poster_path(row).is_some()).map(|row| artwork_url("posters", row.id)),
-        "backdrop_url": backdrop_url,
-        "files": files,
+/// Tracks of one file from the probe cache. Malformed cache JSON is an error, never a silent
+/// empty track list: the detail page must not claim "not probed" for a corrupt row.
+fn tracks_from_details(
+    details: &store::files::FileDetails,
+) -> Result<library::Tracks, store::StoreError> {
+    let video =
+        match details.video_json.as_deref() {
+            Some(raw) => Some(serde_json::from_str::<library::VideoTrack>(raw).map_err(
+                |error| store::StoreError::Invalid(format!("file details video: {error}")),
+            )?),
+            None => None,
+        };
+    let audio = serde_json::from_str::<Vec<library::AudioTrack>>(&details.audio_json)
+        .map_err(|error| store::StoreError::Invalid(format!("file details audio: {error}")))?;
+    let subtitles = serde_json::from_str::<Vec<library::SubtitleTrack>>(&details.subtitle_json)
+        .map_err(|error| store::StoreError::Invalid(format!("file details subtitles: {error}")))?;
+    Ok(library::Tracks {
+        video,
+        audio,
+        subtitles,
     })
 }
 
+/// GET /libraries/{id}/items/{item_id}/episodes?season= — the episode list from adopted
+/// catalog rows plus ownership from the published file facts, for the current viewer.
 pub(crate) async fn item_episodes(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<Option<domain::UserId>>,
@@ -543,142 +564,100 @@ pub(crate) async fn item_episodes(
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
     };
-    // 锁内只做快 DB 读；TMDB 季详情（同步网络）在锁外 spawn_blocking 跑，
-    // 否则冷缓存时 store 锁被长持，me/health 等一切要锁的请求全部超时。
-    let season_param = match query.get("season") {
-        Some(s) => match s.parse::<u32>() {
-            Ok(v) => Some(v),
+    let season = match query.get("season") {
+        Some(raw) => match raw.parse::<u32>() {
+            Ok(value) => Some(value),
             Err(error) => {
-                tracing::error!(library_id = %id, media_id = %media_id, season = %s, error = %error, "媒体库分集请求季号无效");
+                tracing::error!(library_id = %id, media_id = %media_id, season = %raw, error = %error, "媒体库分集请求季号无效");
                 return err(StatusCode::BAD_REQUEST, "library.invalid", "季号参数无效");
             }
         },
         None => None,
     };
-    let tmdb_id = {
-        let store = state.store.lock();
-        let Some(library) = store.get_library(&id).ok().flatten() else {
-            return missing_library();
-        };
-        if !library_visible(&store, &library, user_id) {
-            return missing_library();
-        }
-        let Some(media) = store.get_media(media_id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
-        };
-        let owned = store
-            .list_ledger()
-            .unwrap_or_default()
-            .into_iter()
-            .any(|row| {
-                row.media_id == media_id
-                    && library_for_row(&store, &row, &media)
-                        .is_some_and(|owner| owner.id == library.id)
-            });
-        if !owned {
-            return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
-        }
-        media.tmdb_id
+    let lib_id = match id.parse::<domain::LibraryId>() {
+        Ok(lib_id) => lib_id,
+        Err(_) => return missing_library(),
     };
-    // TMDB 整季详情（真实剧名/简介/剧照），fake 测试下为空表 → 退回文件名。
-    let mut season_meta: HashMap<u32, media::EpisodeMeta> = HashMap::new();
-    if let Some(tmdb_id) = tmdb_id {
-        let state_clone = state.clone();
-        let tmdb_clone = tmdb_id.clone();
-        let seasons: Vec<u32> = season_param.into_iter().collect();
-        let fetched = tokio::task::spawn_blocking(move || {
-            let catalog: &dyn Catalog = state_clone.catalog.as_ref();
-            let mut out: HashMap<u32, Vec<media::EpisodeMeta>> = HashMap::new();
-            for season in &seasons {
-                let episodes = catalog
-                    .season_details(&tmdb_clone, *season)
-                    .unwrap_or_default();
-                out.insert(*season, episodes);
-            }
-            out
-        })
-        .await
-        .unwrap_or_default();
-        for (_season, metas) in fetched {
-            for meta in metas {
-                season_meta.insert(meta.episode_number, meta);
-            }
+    let episodes = {
+        let store = state.store.lock();
+        if let Err(response) = require_visible_library(&store, &id, user_id) {
+            return response;
+        }
+        match store.get_library_item(lib_id, media_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在"),
+            Err(error) => return browse_store_error(error),
+        }
+        match store.library_episodes(lib_id, media_id, season, "") {
+            Ok(episodes) => episodes,
+            Err(error) => return browse_store_error(error),
+        }
+    };
+    let mut effective_states = HashMap::new();
+    if let Some(user_id) = user_id {
+        let store = state.store.lock();
+        for episode in &episodes {
+            let unit_state = match crate::http::playback::effective_watch_state(
+                &store,
+                user_id,
+                media_id,
+                episode.season as i32,
+                episode.episode as i32,
+            ) {
+                Ok(state) => state,
+                Err(error) => return browse_store_error(error),
+            };
+            effective_states.insert((episode.season, episode.episode), unit_state);
         }
     }
-    let (library_rows, unit_states) = {
-        let store = state.store.lock();
-        let Some(library) = store.get_library(&id).ok().flatten() else {
-            return missing_library();
-        };
-        let Some(media) = store.get_media(media_id).ok().flatten() else {
-            return err(StatusCode::NOT_FOUND, "library.item_missing", "条目不存在");
-        };
-        let all_rows = store.list_ledger().unwrap_or_default();
-        let library_rows: Vec<domain::LedgerRow> = all_rows
-            .into_iter()
-            .filter(|row| row.media_id == media_id)
-            .filter(|row| {
-                library_for_row(&store, row, &media).is_some_and(|owner| owner.id == library.id)
-            })
-            .collect();
-
-        let mut unit_states = HashMap::new();
-        if let Some(uid) = user_id {
-            for row in &library_rows {
-                let Some(e) = row.episode else { continue };
-                let s = row.season.unwrap_or(1);
-                if let Ok(st) = store.unit_state(uid, media.id, s as i32, e as i32) {
-                    unit_states.insert((s, e), st);
+    let rows: Vec<Value> = episodes
+        .iter()
+        .map(|episode| {
+            let unit_state = effective_states
+                .get(&(episode.season, episode.episode))
+                .and_then(Option::as_ref);
+            let (position_ms, played, progress_percent) = match unit_state {
+                Some(state) => {
+                    let percent = (!state.played)
+                        .then(|| state.duration_ms.filter(|duration| *duration > 0))
+                        .flatten()
+                        .map(|duration| ((state.position_ms * 100) / duration).clamp(0, 100));
+                    (state.position_ms, state.played, percent)
                 }
-            }
-        }
-        (library_rows, unit_states)
-    };
-
-    let mut season_metas_grouped: HashMap<u32, HashMap<u32, media::EpisodeMeta>> = HashMap::new();
-    if let Some(target_season) = season_param {
-        season_metas_grouped.insert(target_season, season_meta);
-    }
-
-    let files = state.browse_files.clone();
-    let rows_res = state
-        .http_work
-        .run(std::time::Duration::from_secs(30), move || {
-            crate::http::playback::episodes::aggregate_visible_episodes_owned(
-                &library_rows,
-                season_param,
-                &unit_states,
-                &season_metas_grouped,
-                files.as_ref(),
-            )
+                None => (0, false, None),
+            };
+            json!({
+                "episode_number": episode.episode,
+                "name": episode
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| format!("第 {} 集", episode.episode)),
+                "overview": episode.overview,
+                "air_date": episode.air_date,
+                "still_url": episode.still_url.as_deref().map(still_url),
+                "owned": episode.owned,
+                "file_ids": episode.file_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+                "position_ms": position_ms,
+                "played": played,
+                "progress_percent": progress_percent,
+                "media_item_id": item_id,
+                "season_number": episode.season,
+                "runtime_minutes": episode.runtime_minutes,
+                "rating": episode.rating,
+            })
         })
-        .await;
-
-    let episode_rows = match rows_res {
-        Ok(rows) => rows,
-        Err(crate::blocking_budget::BlockingError::Busy) => {
-            return err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "runtime.busy",
-                "服务繁忙，请重试",
-            );
-        }
-        Err(crate::blocking_budget::BlockingError::Timeout) => {
-            return err(
-                StatusCode::GATEWAY_TIMEOUT,
-                "library.timeout",
-                "加载集列表超时",
-            );
-        }
-        Err(crate::blocking_budget::BlockingError::Worker(msg)) => {
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "library.worker",
-                &msg,
-            );
-        }
-    };
-    let rows = crate::http::playback::episodes::format_episodes_json(&episode_rows, &item_id);
+        .collect();
     ok_list(rows).into_response()
 }
 
+/// A still reference is either a full URL or a TMDB path.
+fn still_url(reference: &str) -> String {
+    if reference.starts_with("http://")
+        || reference.starts_with("https://")
+        || reference.starts_with('/')
+    {
+        reference.to_string()
+    } else {
+        format!("https://image.tmdb.org/t/p/w300{reference}")
+    }
+}

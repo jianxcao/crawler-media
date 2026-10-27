@@ -1,9 +1,9 @@
 //! Jellyfin/Emby user profile, views, folders and display preferences.
 
+use axum::Json;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -23,7 +23,13 @@ pub(super) async fn user_profile(
     Extension(user): Extension<AuthUser>,
     Path(path): Path<UserPath>,
 ) -> Result<Json<Value>, StatusCode> {
-    require_user_path(state.provider.as_ref(), user.id, path.user_id.as_deref()).await?;
+    require_user_path(
+        state.provider.as_ref(),
+        user.id,
+        path.user_id.as_deref(),
+        None,
+    )
+    .await?;
     let user_row = state
         .provider
         .get_user(user.id)
@@ -42,7 +48,13 @@ pub(super) async fn user_views(
     Path(path): Path<UserPath>,
     Query(query): Query<ViewsQuery>,
 ) -> Result<Json<Value>, StatusCode> {
-    require_user_path(state.provider.as_ref(), user.id, path.user_id.as_deref()).await?;
+    require_user_path(
+        state.provider.as_ref(),
+        user.id,
+        path.user_id.as_deref(),
+        None,
+    )
+    .await?;
     let libraries = state
         .provider
         .list_visible_libraries(user.id)
@@ -120,7 +132,13 @@ pub(super) async fn item_counts(
     Extension(user): Extension<AuthUser>,
     Path(path): Path<UserPath>,
 ) -> Result<Json<Value>, StatusCode> {
-    require_user_path(state.provider.as_ref(), user.id, path.user_id.as_deref()).await?;
+    require_user_path(
+        state.provider.as_ref(),
+        user.id,
+        path.user_id.as_deref(),
+        None,
+    )
+    .await?;
     let items = state
         .provider
         .list_visible_items(user.id, None)
@@ -138,7 +156,13 @@ pub(super) async fn item_counts(
     let episode_count: usize = items
         .iter()
         .filter(|item| item.is_series)
-        .map(|series| series.metadata.child_count.or(series.metadata.number_of_episodes.map(|n| n as usize)).unwrap_or(0))
+        .map(|series| {
+            series
+                .metadata
+                .child_count
+                .or(series.metadata.number_of_episodes.map(|n| n as usize))
+                .unwrap_or(0)
+        })
         .sum();
     Ok(Json(json!({
         "MovieCount": movie_count,

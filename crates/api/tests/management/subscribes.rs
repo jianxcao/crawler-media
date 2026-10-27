@@ -244,10 +244,10 @@ async fn paused_subscribe_does_not_hit_indexer() {
     assert_eq!(patched["data"]["tracking_state"], "paused");
 
     tick_all(&app, &[1, 31, 61, 91, 121, 151, 181, 211, 1801, 1831]).await;
+    let requests = fetcher.requests.lock().clone();
     assert!(
-        fetcher.requests.lock().is_empty(),
-        "paused Subscribe must not search Sites: {:?}",
-        fetcher.requests.lock()
+        requests.is_empty(),
+        "paused Subscribe must not search Sites: {requests:?}"
     );
 }
 

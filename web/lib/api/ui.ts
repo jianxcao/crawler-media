@@ -1,6 +1,5 @@
 import { request } from "@/lib/http";
 import type { HomeUiPrefs } from "@/lib/home-rows";
-import { normalizeThemeId } from "@/lib/themes";
 
 /** 后端统一响应信封（自有 API：{ ok, data }，见 docs/api-contracts/self.md） */
 interface ApiEnvelope<T> {
@@ -66,39 +65,17 @@ export const DEFAULT_UI_PREFS: UiPreferences = {
   home: { rows: [] },
 };
 
-/** 把偏好与内置默认逐分组合并：老版本后端（不认识新分组/新字段）返回的数据会
- *  缺项，缺什么补什么的默认值，保证消费者拿到的结构永远完整。
- *  首帧缓存（lib/ui-prefs-cache.ts）读出的旧版本数据同样走这里补齐。 */
-export function normalizeUiPreferences(
-  data: Partial<UiPreferences> | null | undefined,
-): UiPreferences {
-  return {
-    // 老后端不认识 theme 字段时返回 undefined，兜底为默认主题（天然向前兼容）
-    theme: normalizeThemeId(data?.theme),
-    sidebar: { ...DEFAULT_UI_PREFS.sidebar, ...data?.sidebar },
-    scrim: { ...DEFAULT_UI_PREFS.scrim, ...data?.scrim },
-    // order 必须兜住非数组：老后端不认识这个分组时返回的是 undefined，
-    // 消费者（applyNavOrder）拿到的必须永远是可迭代的数组
-    nav: { order: Array.isArray(data?.nav?.order) ? data.nav.order : [] },
-    home: { rows: Array.isArray(data?.home?.rows) ? data.home.rows : [] },
-  };
-}
-
 /** 读取全站界面偏好（从未配置的页面返回默认值），存服务端、跨设备一致。 */
 export async function fetchUiPreferences(init?: RequestInit): Promise<UiPreferences> {
-  return normalizeUiPreferences(
-    await unwrap(request<ApiEnvelope<Partial<UiPreferences>>>("/ui/preferences", init)),
-  );
+  return unwrap(request<ApiEnvelope<UiPreferences>>("/ui/preferences", init));
 }
 
 /** 整体覆盖式保存界面偏好，返回保存后的值。 */
 export async function updateUiPreferences(prefs: UiPreferences): Promise<UiPreferences> {
-  return normalizeUiPreferences(
-    await unwrap(
-      request<ApiEnvelope<Partial<UiPreferences>>>("/ui/preferences", {
-        method: "PUT",
-        body: JSON.stringify(prefs),
-      }),
-    ),
+  return unwrap(
+    request<ApiEnvelope<UiPreferences>>("/ui/preferences", {
+      method: "PUT",
+      body: JSON.stringify(prefs),
+    }),
   );
 }

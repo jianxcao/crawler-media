@@ -6,10 +6,8 @@ use crate::management::ApiState;
 pub(crate) mod finish_search;
 use finish_search::finish_search;
 mod search;
-pub(crate) use search::{
-    report_site_failures, search_torrents_for_subscribe,
-};
 pub use search::{page_is_full_and_irrelevant, search_keywords_for};
+pub(crate) use search::{report_site_failures, search_torrents_for_subscribe};
 pub(crate) mod transfer;
 pub use transfer::transfer_one;
 
@@ -90,7 +88,7 @@ fn search(state: &ApiState, job: &Job, rss_batch: Option<&RssBatch>) -> Result<(
         }
         Err(err) => return Err(err),
     };
-    let (subscribe, media, filter, sites) = {
+    let (subscribe, media, _filter, sites) = {
         let store = state.store.lock();
         let maybe_sub = store
             .get_subscribe(subscribe_id)

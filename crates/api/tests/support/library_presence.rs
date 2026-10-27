@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports)]
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -5,10 +7,13 @@ use api::library_presence::LibraryFileRead;
 use api::management::{ApiState, router};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserId, UserRole};
+use domain::{
+    Confidence, LedgerId, LibraryFile, Media, MediaId, MediaKind, QualitySource, UserId, UserRole,
+};
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use parking_lot::Mutex;
 use serde_json::Value;
+use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
 
 struct NoFetch;
@@ -23,7 +28,10 @@ impl downloader::Downloader for MemoryDownloader {
     fn add(&self, _: &domain::Torrent) -> Result<(), downloader::DownloaderError> {
         Ok(())
     }
-    fn completed_files(&self, _: &domain::Torrent) -> Result<Vec<PathBuf>, downloader::DownloaderError> {
+    fn completed_files(
+        &self,
+        _: &domain::Torrent,
+    ) -> Result<Vec<PathBuf>, downloader::DownloaderError> {
         Ok(vec![])
     }
 }
@@ -196,7 +204,7 @@ impl PresenceFixture {
         panic!("scan operation {op_id} 未在预期时间内进入终态");
     }
 
-    pub fn insert_media_and_ledger(&self, rel_path: &str) -> (MediaId, LedgerRow) {
+    pub fn insert_media_and_ledger(&self, rel_path: &str) -> (MediaId, LibraryFile) {
         let media_id = MediaId::new();
         let media = Media {
             id: media_id,
@@ -212,8 +220,9 @@ impl PresenceFixture {
             anilist_id: None,
         };
         let file_path = self.root.join(rel_path);
-        let row = LedgerRow {
-            id: LedgerId::new(),
+        let file_id = LedgerId::new();
+        let spec = FixtureFile {
+            file_id: Some(file_id),
             media_id,
             path: file_path.to_str().unwrap().to_string(),
             season: None,
@@ -224,12 +233,13 @@ impl PresenceFixture {
             quality_source: QualitySource::Release,
             confidence: Confidence::High,
             filter_score: None,
+            ..Default::default()
         };
         let store_arc = self.state.store();
         let guard = store_arc.lock();
         guard.insert_media(&media).unwrap();
-        guard.insert_ledger(&row).unwrap();
-        (media_id, row)
+        let published = publish_fixture_file(&guard, &spec).unwrap();
+        (media_id, published)
     }
 
     pub async fn request(
@@ -238,7 +248,8 @@ impl PresenceFixture {
         uri: &str,
         token: Option<&str>,
     ) -> (StatusCode, Value) {
-        self.request_with_body(method, uri, token, Value::Null).await
+        self.request_with_body(method, uri, token, Value::Null)
+            .await
     }
 
     pub async fn request_with_body(
@@ -283,7 +294,9 @@ impl PresenceFixture {
         if status != StatusCode::ACCEPTED {
             return (status, res);
         }
-        let op_id = res["data"]["operation_id"].as_str().expect("must return operation_id");
+        let op_id = res["data"]["operation_id"]
+            .as_str()
+            .expect("must return operation_id");
         for _ in 0..100 {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let (poll_status, poll_res) = self
@@ -296,9 +309,18 @@ impl PresenceFixture {
             if poll_status == StatusCode::OK {
                 let status_str = poll_res["data"]["status"].as_str().unwrap_or("");
                 match status_str {
-                    "completed" | "partial" => return (StatusCode::OK, poll_res["data"]["report"].clone()),
-                    "cancelled" => return (StatusCode::CONFLICT, poll_res["data"]["report"].clone()),
-                    "failed" => return (StatusCode::INTERNAL_SERVER_ERROR, poll_res["data"]["report"].clone()),
+                    "completed" | "partial" => {
+                        return (StatusCode::OK, poll_res["data"]["report"].clone());
+                    }
+                    "cancelled" => {
+                        return (StatusCode::CONFLICT, poll_res["data"]["report"].clone());
+                    }
+                    "failed" => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            poll_res["data"]["report"].clone(),
+                        );
+                    }
                     _ => {}
                 }
             }

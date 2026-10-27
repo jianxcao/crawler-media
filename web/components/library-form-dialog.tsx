@@ -16,14 +16,16 @@ import { Modal } from "@/components/modal";
 import { Tooltip } from "@/components/tooltip";
 import {
   type LibraryPayload,
+  type LibraryUpdatePayload,
   type MatchRule,
   type MediaLibrary,
   type RoutingOptions,
   createLibrary,
   listLibraryRoutingOptions,
-  updateLibrary,
+  updateLibraryAndWait,
   type LibraryAccessMode,
 } from "@/lib/api/libraries";
+import { operationLabel } from "@/lib/library-operations";
 import { listMembers, type MemberView } from "@/lib/api/members";
 import { listRuleSets, type RuleSet } from "@/lib/api/subscriptions";
 import type { LibraryKind } from "@/lib/media-types";
@@ -149,6 +151,20 @@ function kindIsScraped(kind: LibraryKind): boolean {
  *  「最近添加」刷满；建好后可在编辑里打开。 */
 function kindExcludedFromHome(_kind: LibraryKind): boolean {
   return false;
+}
+
+/** 去掉尾部斜杠（保留根 `/`）：`/media/` 与 `/media` 是同一个目录，不该触发换根。 */
+function normalizeRoots(roots: string[]): string[] {
+  return roots.map((root) => {
+    const trimmed = root.trim().replace(/\/+$/, "");
+    return trimmed === "" ? "/" : trimmed;
+  });
+}
+
+/** 换根与否只比较规范化后的路径列表，顺序即优先级，顺序变了也是换根。 */
+function sameRoots(left: string[], right: string[]): boolean {
+  const normalized = normalizeRoots(right);
+  return left.length === normalized.length && left.every((root, index) => root === normalized[index]);
 }
 
 /** 根目录列表：第一项为主根；行内可原位更改、设为主根、移除。 */
@@ -1091,6 +1107,7 @@ function EditLibraryDialog({
   // 展开的分区（同时只开一个）；默认全收起——摘要行已经把现状说清
   const [open, setOpen] = useState<EditSectionId | null>(null);
   const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const routingOptions = useRoutingOptions();
 
@@ -1109,10 +1126,15 @@ function EditLibraryDialog({
     if (!ready || busy) return;
     setBusy(true);
     setError(null);
-    const payload: LibraryPayload = {
+    setPending(null);
+    // 换目录是异步操作（202 + operation_id）：只有 root_paths 真的变了才带上这个字段，
+    // 否则后端会把「改名」也冻结整库去迁移文件归属。
+    const nextRoots = normalizeRoots(roots);
+    const rootsChanged = !sameRoots(nextRoots, library.root_paths);
+    const payload: LibraryUpdatePayload = {
       name: name.trim(),
       kind: library.kind,
-      root_paths: roots,
+      ...(rootsChanged ? { root_paths: nextRoots } : {}),
       match_rules: scraped ? buildMatchRules(validGenres(library.kind, genres, routingOptions), regions) : [],
       default_filter_id: defaultFilterId ? defaultFilterId : null,
       auto_clear_missing: autoClearMissing,
@@ -1127,10 +1149,15 @@ function EditLibraryDialog({
       detect_intros: detectIntros,
       enable_fingerprint: enableFingerprint,
     };
-    void updateLibrary(library.id, payload)
+    void updateLibraryAndWait(library.id, payload, {
+      onProgress: (operation) => setPending(operationLabel(operation)),
+    })
       .then(onSaved)
       .catch((e) => setError((e as Error).message))
-      .finally(() => setBusy(false));
+      .finally(() => {
+        setBusy(false);
+        setPending(null);
+      });
   };
 
   const dot = (on: boolean, text: string) => (
@@ -1394,7 +1421,7 @@ function EditLibraryDialog({
                 disabled={!ready || busy}
                 className="btn-accent h-9 rounded-full px-5 text-ui font-semibold disabled:opacity-40"
               >
-                {busy ? "保存中…" : "保存"}
+                {busy ? (pending ?? "保存中…") : "保存"}
               </button>
             </div>
           </div>

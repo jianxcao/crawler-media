@@ -1,22 +1,22 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::http::{Request, StatusCode};
 use domain::{Media, MediaId, MediaKind, Torrent};
 use downloader::{Downloader, DownloaderError};
-use indexer::{Fetcher, FetchRequest, IndexerError, ProfileSet};
+use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use media::CatalogHit;
 use parking_lot::{Condvar, Mutex};
 use tower::ServiceExt;
 
+use api::Store;
 use api::catalog::Catalog;
 use api::management::ApiState;
 use api::media_posters::cache::{DiskPosterCache, MAX_IMAGE_BYTES};
 use api::media_posters::http::ImageFetcher;
 use api::media_posters::service::MediaPosterService;
 use api::media_posters::{MediaPosterSource, PosterClock, PosterError};
-use api::Store;
 
 struct MockCatalog;
 
@@ -40,7 +40,9 @@ impl Catalog for MockCatalog {
         if tmdb_id.starts_with("not_found") {
             Ok(None)
         } else {
-            Ok(Some(format!("https://image.tmdb.org/t/p/w500/{tmdb_id}.jpg")))
+            Ok(Some(format!(
+                "https://image.tmdb.org/t/p/w500/{tmdb_id}.jpg"
+            )))
         }
     }
 }
@@ -57,14 +59,17 @@ impl ManualClock {
     }
 
     fn advance(&self, duration: Duration) {
-        self.now_ms.fetch_add(duration.as_millis() as usize, Ordering::SeqCst);
+        self.now_ms
+            .fetch_add(duration.as_millis() as usize, Ordering::SeqCst);
     }
 
     fn rewind(&self, duration: Duration) {
         let rewind_ms = duration.as_millis() as usize;
-        let _ = self.now_ms.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |curr| {
-            Some(curr.saturating_sub(rewind_ms))
-        });
+        let _ = self
+            .now_ms
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |curr| {
+                Some(curr.saturating_sub(rewind_ms))
+            });
     }
 }
 
@@ -97,15 +102,26 @@ impl TestGate {
 
     fn wait(&self) {
         let mut rel = self.released.lock();
-        while !*rel {
-            self.cvar.wait(&mut rel);
-        }
+        self.cvar
+            .wait_while_for(&mut rel, |released| !*released, Duration::from_secs(30));
+        let released = *rel;
+        drop(rel);
+        assert!(released, "test must release the poster cache gate");
     }
 
     fn release(&self) {
         let mut rel = self.released.lock();
         *rel = true;
         self.cvar.notify_all();
+    }
+}
+
+/// Releases the gate on every exit path (assert failure, panic, early return).
+struct ReleaseOnDrop(Arc<TestGate>);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.release();
     }
 }
 
@@ -143,12 +159,8 @@ fn create_store_and_service(
     let cache_dir = tmp.path().join("cache");
     let store = Arc::new(Mutex::new(Store::open(&data_dir).unwrap()));
     let catalog = Arc::new(MockCatalog);
-    let service = MediaPosterService::with_custom_fetcher(
-        store.clone(),
-        catalog,
-        cache_dir,
-        fetcher,
-    );
+    let service =
+        MediaPosterService::with_custom_fetcher(store.clone(), catalog, cache_dir, fetcher);
     (tmp, store, service)
 }
 
@@ -183,7 +195,8 @@ async fn distinct_negative_keys_are_bounded_and_expire_without_revisit() {
     // 1. Insert 4,096 distinct media with tmdb_id that triggers NotFound
     let mut keys = Vec::with_capacity(4096);
     for i in 0..4096 {
-        let media_id = insert_media(&store.lock(), &format!("not_found_{i}"), Some("not_found"));
+        let tmdb = format!("not_found_{i}");
+        let media_id = insert_media(&store.lock(), &format!("not_found_{i}"), Some(&tmdb));
         let res = service.get(media_id).await;
         assert!(matches!(res, Err(PosterError::NotFound)));
         keys.push(media_id);
@@ -197,19 +210,28 @@ async fn distinct_negative_keys_are_bounded_and_expire_without_revisit() {
     assert!(matches!(res0, Err(PosterError::NotFound)));
 
     // Insert a new key (4,097th). LRU must evict keys[1] (least recently used) while keys[0] survives
-    let new_key = insert_media(&store.lock(), "not_found_new", Some("not_found"));
+    let new_key = insert_media(&store.lock(), "not_found_new", Some("not_found_new"));
     let res_new = service.get(new_key).await;
     assert!(matches!(res_new, Err(PosterError::NotFound)));
 
     // Assert LRU: touched keys[0] survived while keys[1] was evicted.
-    assert!(service.check_negative_cache_for_test(keys[0]), "keys[0] was touched so it must survive eviction");
-    assert!(!service.check_negative_cache_for_test(keys[1]), "keys[1] was least recently used so it must be evicted");
+    assert!(
+        service.check_negative_cache_for_test(keys[0]),
+        "keys[0] was touched so it must survive eviction"
+    );
+    assert!(
+        !service.check_negative_cache_for_test(keys[1]),
+        "keys[1] was least recently used so it must be evicted"
+    );
 
     // Move clock backward past the insertion time (e.g. from 100s to 50s)
     clock.rewind(Duration::from_secs(50));
 
     // Assert backward-clock handling: keys[0] must still be cached (not prematurely expired)
-    assert!(service.check_negative_cache_for_test(keys[0]), "entry inserted at positive clock must still be cached after backward clock move");
+    assert!(
+        service.check_negative_cache_for_test(keys[0]),
+        "entry inserted at positive clock must still be cached after backward clock move"
+    );
     let counts_rewound = service.resource_counts();
     assert_eq!(counts_rewound.negative_entries, 4_096);
     // Advance clock past expiration (30s TTL, move to 100s + 31s = 131s)
@@ -217,7 +239,7 @@ async fn distinct_negative_keys_are_bounded_and_expire_without_revisit() {
 
     // A READ must sweep on its own, without relying on a later insert: query an absent
     // key (a miss that does not insert) and assert the expired entries are already gone.
-    let absent_id = insert_media(&store.lock(), "not_found_absent", Some("not_found"));
+    let absent_id = insert_media(&store.lock(), "not_found_absent", Some("not_found_absent"));
     assert!(!service.check_negative_cache_for_test(absent_id));
     assert_eq!(
         service.resource_counts().negative_entries,
@@ -226,7 +248,7 @@ async fn distinct_negative_keys_are_bounded_and_expire_without_revisit() {
     );
 
     // Next access to any key sweeps expired entries
-    let dummy_id = insert_media(&store.lock(), "not_found_dummy", Some("not_found"));
+    let dummy_id = insert_media(&store.lock(), "not_found_dummy", Some("not_found_dummy"));
     let _ = service.get(dummy_id).await;
 
     let counts_after = service.resource_counts();
@@ -237,6 +259,7 @@ async fn distinct_negative_keys_are_bounded_and_expire_without_revisit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancelled_waiters_and_disk_double_check_leave_no_dead_gate() {
     let gate = Arc::new(TestGate::new());
+    let _release = ReleaseOnDrop(gate.clone());
     let fetcher = Arc::new(GatedFetcher::new(gate.clone()));
     let (_tmp, store, service) = create_store_and_service(fetcher.clone());
     let service = Arc::new(service.with_wait_deadline(Duration::from_millis(100)));
@@ -248,7 +271,12 @@ async fn cancelled_waiters_and_disk_double_check_leave_no_dead_gate() {
     let handle = tokio::spawn(async move { s.get(media_id).await });
 
     // Wait until worker is inside fetcher gate
+    let enter_deadline = std::time::Instant::now() + Duration::from_secs(10);
     while fetcher.active.load(Ordering::SeqCst) == 0 {
+        assert!(
+            std::time::Instant::now() < enter_deadline,
+            "the worker must enter the fetcher gate"
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
@@ -260,7 +288,12 @@ async fn cancelled_waiters_and_disk_double_check_leave_no_dead_gate() {
     gate.release();
 
     // Give worker a moment to finish disk write & complete
+    let exit_deadline = std::time::Instant::now() + Duration::from_secs(10);
     while fetcher.active.load(Ordering::SeqCst) > 0 {
+        assert!(
+            std::time::Instant::now() < exit_deadline,
+            "the worker must leave the fetcher gate after release"
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
@@ -313,7 +346,8 @@ async fn full_live_registry_returns_busy_and_same_key_still_joins() {
     // We hold strong references to keep gates alive
     let mut live_gates = Vec::new();
     for i in 0..4096 {
-        let media_id = insert_media(&store.lock(), &format!("live_gate_{i}"), Some("100"));
+        let tmdb = format!("100_{i}");
+        let media_id = insert_media(&store.lock(), &format!("live_gate_{i}"), Some(&tmdb));
         let inflight = Arc::new(api::media_posters::inflight::PosterInflight::new());
         service.insert_inflight_for_test(media_id, &inflight);
         live_gates.push((media_id, inflight));
@@ -347,7 +381,10 @@ async fn full_live_registry_returns_busy_and_same_key_still_joins() {
     // requesting a NEW key must sweep dead entries during admission and succeed.
     let admitted_id = insert_media(&store.lock(), "admitted_after_drop", Some("100"));
     let admitted_res = service.get(admitted_id).await;
-    assert!(admitted_res.is_ok(), "new key must be admitted after strong references dropped");
+    assert!(
+        admitted_res.is_ok(),
+        "new key must be admitted after strong references dropped"
+    );
 
     // The admission above is the real proof: with 4,096 dead entries unswept the new
     // key would have been rejected as Busy instead of served. Every entry (including
@@ -377,10 +414,17 @@ fn max_image_bytes_round_trips_through_disk_cache() {
     // Exactly MAX_IMAGE_BYTES (8 MiB)
     let large_image = vec![0x42u8; MAX_IMAGE_BYTES];
     let put_res = cache.put(media_id, "image/jpeg", &large_image);
-    assert!(put_res.is_ok(), "putting exactly 8 MiB image must succeed: {:?}", put_res.err());
+    assert!(
+        put_res.is_ok(),
+        "putting exactly 8 MiB image must succeed: {:?}",
+        put_res.err()
+    );
 
     let get_res = cache.get(media_id);
-    assert!(get_res.is_some(), "getting exactly 8 MiB image must succeed");
+    assert!(
+        get_res.is_some(),
+        "getting exactly 8 MiB image must succeed"
+    );
     let poster = get_res.unwrap();
     assert_eq!(poster.content_type, "image/jpeg");
     assert_eq!(poster.bytes.len(), MAX_IMAGE_BYTES);
@@ -390,14 +434,27 @@ fn max_image_bytes_round_trips_through_disk_cache() {
     // Format is: "{now_secs()}\n{content_type}\n\n{img}"
     // meta_prefix is "{now_secs()}\n{content_type}\n"
     // If content_type is sized so meta_prefix is exactly MAX_META_BYTES:
-    let now_prefix = format!("{}\n", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+    let now_prefix = format!(
+        "{}\n",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    );
     let ct_len = api::media_posters::cache::MAX_META_BYTES - now_prefix.len() - 1; // -1 for trailing newline in meta_prefix
     let max_ct = "a".repeat(ct_len);
     let boundary_id = MediaId::new();
     let put_bound = cache.put(boundary_id, &max_ct, &large_image);
-    assert!(put_bound.is_ok(), "boundary meta allowance put must succeed: {:?}", put_bound.err());
+    assert!(
+        put_bound.is_ok(),
+        "boundary meta allowance put must succeed: {:?}",
+        put_bound.err()
+    );
     let get_bound = cache.get(boundary_id);
-    assert!(get_bound.is_some(), "boundary meta allowance get must succeed");
+    assert!(
+        get_bound.is_some(),
+        "boundary meta allowance get must succeed"
+    );
     assert_eq!(get_bound.unwrap().content_type, max_ct);
 
     // Oversized metadata must be rejected
@@ -441,7 +498,8 @@ async fn public_handler_surfaces_busy_as_service_unavailable_503() {
     // Fill registry to 4096 live gates
     let mut live_gates = Vec::new();
     for i in 0..4096 {
-        let media_id = insert_media(&store.lock(), &format!("h_live_{i}"), Some("100"));
+        let tmdb = format!("100_{i}");
+        let media_id = insert_media(&store.lock(), &format!("h_live_{i}"), Some(&tmdb));
         let inflight = Arc::new(api::media_posters::inflight::PosterInflight::new());
         service.insert_inflight_for_test(media_id, &inflight);
         live_gates.push(inflight);

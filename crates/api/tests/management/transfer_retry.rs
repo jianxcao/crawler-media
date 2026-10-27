@@ -117,9 +117,9 @@ async fn disabling_nfo_mirroring_does_not_disable_transfer_artwork() {
         .await
         .unwrap()
         .unwrap();
-    let rows = api_state.store().lock().list_ledger().unwrap();
+    let rows = api_state.store().lock().list_file_coverage().unwrap();
     assert_eq!(rows.len(), 1);
-    let video = std::path::Path::new(&rows[0].path);
+    let video = rows[0].file.path.as_path();
     assert!(!video.with_extension("nfo").exists());
     assert_eq!(
         std::fs::read(video.parent().unwrap().join("poster.jpg")).unwrap(),
@@ -179,7 +179,7 @@ async fn transfer_retry_completes_pending_after_subtitle_failure_is_resolved() {
             .state
             .store()
             .lock()
-            .ledger_for_media(fixture.media_id)
+            .file_coverage_for_media(fixture.media_id)
             .unwrap()
             .len(),
         1,
@@ -200,7 +200,7 @@ async fn transfer_retry_completes_pending_after_subtitle_failure_is_resolved() {
             .state
             .store()
             .lock()
-            .ledger_for_media(fixture.media_id)
+            .file_coverage_for_media(fixture.media_id)
             .unwrap()
             .len(),
         1,

@@ -194,7 +194,10 @@ async fn member_cannot_modify_browser_settings_or_sync_cdp() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
     // 5. 普通成员不能读取 Browser 设置/Obscura 状态（含端口、路径、CDP URL）
-    for uri in ["/api/v1/settings/browser/obscura", "/api/v1/settings/browser"] {
+    for uri in [
+        "/api/v1/settings/browser/obscura",
+        "/api/v1/settings/browser",
+    ] {
         let req = Request::builder()
             .method("GET")
             .uri(uri)
@@ -257,9 +260,12 @@ async fn saving_browser_settings_reconciles_managed_obscura() {
         .uri("/api/v1/settings/browser")
         .header("Authorization", "Bearer management-secret")
         .header("Content-Type", "application/json")
-        .body(Body::from(serde_json::json!({
-            "cdp": { "enabled": true, "url": "http://127.0.0.1:9222" }
-        }).to_string()))
+        .body(Body::from(
+            serde_json::json!({
+                "cdp": { "enabled": true, "url": "http://127.0.0.1:9222" }
+            })
+            .to_string(),
+        ))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -272,7 +278,10 @@ async fn saving_browser_settings_reconciles_managed_obscura() {
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     let body = crate::common::json_body(resp).await;
-    assert_eq!(body["data"]["not_started_reason"], "instance_endpoint_configured");
+    assert_eq!(
+        body["data"]["not_started_reason"],
+        "instance_endpoint_configured"
+    );
 
     // 2. Configure CDP disabled -> Obscura stopped, reason cdp_disabled
     let req = Request::builder()
@@ -280,9 +289,12 @@ async fn saving_browser_settings_reconciles_managed_obscura() {
         .uri("/api/v1/settings/browser")
         .header("Authorization", "Bearer management-secret")
         .header("Content-Type", "application/json")
-        .body(Body::from(serde_json::json!({
-            "cdp": { "enabled": false, "url": "" }
-        }).to_string()))
+        .body(Body::from(
+            serde_json::json!({
+                "cdp": { "enabled": false, "url": "" }
+            })
+            .to_string(),
+        ))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -303,9 +315,12 @@ async fn saving_browser_settings_reconciles_managed_obscura() {
         .uri("/api/v1/settings/browser")
         .header("Authorization", "Bearer management-secret")
         .header("Content-Type", "application/json")
-        .body(Body::from(serde_json::json!({
-            "cdp": { "enabled": true, "url": "" }
-        }).to_string()))
+        .body(Body::from(
+            serde_json::json!({
+                "cdp": { "enabled": true, "url": "" }
+            })
+            .to_string(),
+        ))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -317,7 +332,10 @@ async fn saving_browser_settings_reconciles_managed_obscura() {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     let body = crate::common::json_body(resp).await;
-    assert_eq!(body["data"]["not_started_reason"], "no_managed_browser_sites");
+    assert_eq!(
+        body["data"]["not_started_reason"],
+        "no_managed_browser_sites"
+    );
 }
 
 #[tokio::test]

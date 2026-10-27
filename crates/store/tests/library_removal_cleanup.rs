@@ -1,4 +1,5 @@
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
+use store::test_support::FixtureFile;
 use store::{Store, StoredMediaMarker};
 
 fn library(store: &Store, name: &str, root: &std::path::Path) {
@@ -33,9 +34,9 @@ fn media(store: &Store, title: &str) -> Media {
     media
 }
 
-fn ledger(store: &Store, media: &Media, path: &std::path::Path) -> LedgerRow {
-    let row = LedgerRow {
-        id: LedgerId::new(),
+fn ledger(store: &Store, media: &Media, path: &std::path::Path) -> FixtureFile {
+    let row = FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id: media.id,
         path: path.display().to_string(),
         season: Some(1),
@@ -46,8 +47,9 @@ fn ledger(store: &Store, media: &Media, path: &std::path::Path) -> LedgerRow {
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     };
-    store.insert_ledger(&row).unwrap();
+    store::test_support::publish_fixture_file(store, &row).unwrap();
     row
 }
 
@@ -90,15 +92,15 @@ fn removal_deletes_library_scoped_settings_and_keeps_other_libraries() {
     };
     let key_a = format!("library_cover_checked.{a}");
     let key_b = format!("library_cover_checked.{b}");
-    store.put_setting(&key_a, "checked-v2").unwrap();
-    store.put_setting(&key_b, "checked-v2").unwrap();
+    store.put_setting(&key_a, "checked").unwrap();
+    store.put_setting(&key_b, "checked").unwrap();
 
     remove(&store, &a);
 
     assert!(store.get_setting(&key_a).unwrap().is_none());
     assert_eq!(
         store.get_setting(&key_b).unwrap().as_deref(),
-        Some("checked-v2")
+        Some("checked")
     );
 }
 
@@ -135,10 +137,12 @@ fn removal_keeps_locked_markers_and_clears_unlocked_ones() {
         .expect("locked marker is user intent and must survive");
     assert!(kept.locked);
     assert_eq!(kept.intro_start_ms, Some(10_000));
-    assert!(store
-        .get_media_marker(unlocked_media.id, Some(1), Some(1))
-        .unwrap()
-        .is_none());
+    assert!(
+        store
+            .get_media_marker(unlocked_media.id, Some(1), Some(1))
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -160,12 +164,16 @@ fn removed_root_stays_a_boundary_and_can_be_reconfigured_as_a_new_library() {
 
     remove(&store, &a);
 
-    assert!(store
-        .path_in_removal_scope(&root_a.join("E01.strm"))
-        .unwrap());
-    assert!(!store
-        .path_in_removal_scope(&root_b.join("E01.strm"))
-        .unwrap());
+    assert!(
+        store
+            .path_in_removal_scope(&root_a.join("E01.strm"))
+            .unwrap()
+    );
+    assert!(
+        !store
+            .path_in_removal_scope(&root_b.join("E01.strm"))
+            .unwrap()
+    );
 
     // Re-adding the removed directory is still allowed and owns its paths again.
     library(&store, "A2", &root_a);
@@ -197,49 +205,46 @@ fn removal_boundary_survives_reopen_without_the_per_file_snapshot() {
     drop(store);
 
     let reopened = Store::open(&data).unwrap();
-    assert!(reopened
-        .path_in_removal_scope(&root.join("E01.strm"))
-        .unwrap());
+    assert!(
+        reopened
+            .path_in_removal_scope(&root.join("E01.strm"))
+            .unwrap()
+    );
     assert_eq!(reopened.removal_roots(&done.operation_id).unwrap().len(), 1);
     assert!(reopened.get_library(&library_id).unwrap().is_none());
 }
 
-/// 真实升级边界：库已经是当前 app schema（7），`previous < APP_SCHEMA_VERSION`
-/// 不成立。b3192f1 之前删除的 Library 留下的 `library_cover_checked.{id}` 仍然
-/// 必须在重开时被清掉，而不是因为「版本已经是最新」被跳过。
 #[test]
-fn reopen_at_current_app_schema_cleans_settings_of_already_removed_library() {
-    let temp = tempfile::tempdir().unwrap();
-    let data = temp.path().join("data");
+fn removal_cannot_succeed_before_library_app_settings_are_cleaned() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("data");
     let store = Store::open(&data).unwrap();
-    library(&store, "A", &temp.path().join("tv_a"));
-    library(&store, "B", &temp.path().join("tv_b"));
-    let (a, b) = {
-        let libs = store.list_libraries().unwrap();
-        let a = libs.iter().find(|l| l.name == "A").unwrap().id.clone();
-        let b = libs.iter().find(|l| l.name == "B").unwrap().id.clone();
-        (a, b)
-    };
-    let key_a = format!("library_cover_checked.{a}");
-    let key_b = format!("library_cover_checked.{b}");
-    remove(&store, &a);
-    // Pre-fix residue: the removal succeeded, but a build that never ran the
-    // repair wrote the Library's setting back (or never deleted it).
-    store.put_setting(&key_a, "checked-v2").unwrap();
-    store.put_setting(&key_b, "checked-v2").unwrap();
-    let app_version = store
-        .schema_versions()
-        .into_iter()
-        .find(|(name, _)| *name == "app")
-        .unwrap()
-        .1;
-    assert_eq!(app_version, 8, "本测试钉住真实边界：app schema 8");
-    drop(store);
-
-    let reopened = Store::open(&data).unwrap();
-    assert!(reopened.get_setting(&key_a).unwrap().is_none());
+    let library = store
+        .create_library(MediaKind::Tv, "Target", &[], "everyone", true, &[])
+        .unwrap();
+    let key = format!("library_cover_checked.{}", library.id);
+    store.put_setting(&key, "true").unwrap();
+    let removal = store.begin_library_removal(&library.id).unwrap();
+    store
+        .set_removal_state(&removal.operation_id, "cleaning", None)
+        .unwrap();
+    let app = rusqlite::Connection::open(data.join("app.db")).unwrap();
+    app.execute_batch("CREATE TRIGGER fail_removal_settings BEFORE DELETE ON settings BEGIN SELECT RAISE(ABORT,'injected app cleanup'); END;").unwrap();
+    assert!(store.clean_library_removal(&removal.operation_id).is_err());
     assert_eq!(
-        reopened.get_setting(&key_b).unwrap().as_deref(),
-        Some("checked-v2")
+        store
+            .library_removal(&removal.operation_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        "cleaning"
     );
+    assert!(store.get_library(&library.id).unwrap().is_some());
+    assert_eq!(store.get_setting(&key).unwrap(), Some("true".into()));
+    app.execute_batch("DROP TRIGGER fail_removal_settings")
+        .unwrap();
+    let done = store.clean_library_removal(&removal.operation_id).unwrap();
+    assert_eq!(done.operation_id, removal.operation_id);
+    assert_eq!(done.state, "succeeded");
+    assert!(store.get_setting(&key).unwrap().is_none());
 }

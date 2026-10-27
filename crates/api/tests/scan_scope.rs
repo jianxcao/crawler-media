@@ -1,7 +1,6 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use std::path::PathBuf;
 use domain::MediaKind;
 use support::library_presence::PresenceFixture;
 
@@ -12,7 +11,7 @@ async fn full_movie_scan_skips_nested_independent_library() {
     // Create nested library inside parent root
     let nested_root = fix.root.join("nested");
     std::fs::create_dir_all(&nested_root).unwrap();
-    let nested_lib = {
+    let _nested_lib = {
         let store_arc = fix.state.store();
         let guard = store_arc.lock();
         guard
@@ -40,12 +39,17 @@ async fn full_movie_scan_skips_nested_independent_library() {
     // Parent ledger contains parent_file, but does NOT contain nested_file!
     let store_arc = fix.state.store();
     let guard = store_arc.lock();
-    let rows = guard.list_ledger().unwrap();
+    let rows = guard.list_file_coverage().unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].path, parent_file.display().to_string());
+    assert_eq!(rows[0].file.path, parent_file);
 
     // Nested file was NOT registered in ledger
-    assert!(guard.ledger_by_path(&nested_file.display().to_string()).unwrap().is_none());
+    assert!(
+        guard
+            .file_coverage_by_path(&nested_file.display().to_string())
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -57,7 +61,7 @@ async fn full_video_scan_skips_nested_independent_library() {
     let nested_video_root = video_root.join("sub_video");
     std::fs::create_dir_all(&nested_video_root).unwrap();
 
-    let (video_lib, nested_video_lib) = {
+    let (video_lib, _nested_video_lib) = {
         let store_arc = fix.state.store();
         let guard = store_arc.lock();
         let v1 = guard
@@ -93,9 +97,19 @@ async fn full_video_scan_skips_nested_independent_library() {
 
     let store_arc = fix.state.store();
     let guard = store_arc.lock();
-    assert!(guard.ledger_by_path(&p_file.display().to_string()).unwrap().is_some());
+    assert!(
+        guard
+            .file_coverage_by_path(&p_file.display().to_string())
+            .unwrap()
+            .is_some()
+    );
     // Nested file was NOT registered under parent video library!
-    assert!(guard.ledger_by_path(&n_file.display().to_string()).unwrap().is_none());
+    assert!(
+        guard
+            .file_coverage_by_path(&n_file.display().to_string())
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -105,12 +119,22 @@ async fn rescanning_restored_movie_clears_missing_without_overwriting_probe_qual
 
     // Mark missing
     let store_arc = fix.state.store();
-    {
+    let path_key = {
         let guard = store_arc.lock();
+        let coverage = guard
+            .file_coverage_by_id(row.file_id)
+            .unwrap()
+            .expect("fixture coverage");
+        let path_key = if coverage.path_key.is_empty() {
+            guard.recorded_path_key(&coverage.file.path.to_string_lossy())
+        } else {
+            coverage.path_key.clone()
+        };
         guard
             .apply_ledger_presence(
                 &[store::LedgerPresenceObservation {
-                    row: row.clone(),
+                    path_key: path_key.clone(),
+                    file: coverage,
                     missing_at: None,
                     presence: store::FilePresence::Missing,
                 }],
@@ -118,8 +142,9 @@ async fn rescanning_restored_movie_clears_missing_without_overwriting_probe_qual
                 1000,
             )
             .unwrap();
-        assert!(guard.missing_at_by_path().unwrap().contains_key(&row.path));
-    }
+        assert!(guard.missing_at_by_path().unwrap().contains_key(&path_key));
+        path_key
+    };
 
     // Restore file on disk
     std::fs::write(&row.path, b"restored bytes").unwrap();
@@ -130,8 +155,13 @@ async fn rescanning_restored_movie_clears_missing_without_overwriting_probe_qual
 
     // missing_at must be cleared, ledger row and media id preserved
     let guard = store_arc.lock();
-    assert!(!guard.missing_at_by_path().unwrap().contains_key(&row.path));
-    let loaded = guard.get_ledger(&row.id.to_string()).unwrap().unwrap();
-    assert_eq!(loaded.id, row.id);
-    assert_eq!(loaded.media_id, media_id);
+    assert!(
+        !guard
+            .missing_at_by_path()
+            .unwrap()
+            .contains_key(&path_key)
+    );
+    let loaded = guard.file_coverage_by_id(row.file_id).unwrap().unwrap();
+    assert_eq!(loaded.file.file_id, row.file_id);
+    assert_eq!(loaded.file.media_id, media_id);
 }

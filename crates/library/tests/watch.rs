@@ -260,9 +260,7 @@ fn high_confidence_episode_keeps_filename_title_and_inherits_ancestor_year() {
         .path()
         .join("children/动灵守护者 (2022)/Spirit.Rangers.S01");
     fs::create_dir_all(&dir).unwrap();
-    let episode = dir.join(
-        "Spirit.Rangers.S01E01.Thunder.Mountain.1080p.NF.WEB-DL.strm",
-    );
+    let episode = dir.join("Spirit.Rangers.S01E01.Thunder.Mountain.1080p.NF.WEB-DL.strm");
     fs::write(&episode, b"https://cdn.example/ep.mkv").unwrap();
     let job = WatchJob {
         kind: WatchKind::InPlace,

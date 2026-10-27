@@ -40,9 +40,10 @@ pub fn render_background(
                 .ok_or_else(|| {
                     CoverError::RenderError("Failed to create gradient shader".into())
                 })?;
-                let mut p = tiny_skia::Paint::default();
-                p.shader = shader;
-                p
+                tiny_skia::Paint {
+                    shader,
+                    ..Default::default()
+                }
             };
             let rect = tiny_skia::Rect::from_xywh(0.0, 0.0, width as f32, height as f32)
                 .ok_or_else(|| CoverError::RenderError("Invalid canvas rect".into()))?;

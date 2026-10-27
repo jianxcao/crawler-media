@@ -17,7 +17,10 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::*;
-use super::playback::{get_data, post_async, seed_movie};
+use super::playback::{get_data, open_play_session, post_async, seed_movie};
+
+mod fixtures;
+use fixtures::*;
 
 pub(super) struct FakePlaybackClock(pub(super) std::sync::atomic::AtomicI64);
 
@@ -39,53 +42,6 @@ pub(super) fn app_with_clock(
     router(state(tmp.path(), fetcher, downloader).with_playback_clock(clock))
 }
 
-/// 一次真实节奏的进度心跳：时钟与位置都按 20 秒步进，避免被判成 seek。
-pub(super) async fn beat(
-    app: &axum::Router,
-    clock: &Arc<FakePlaybackClock>,
-    media_id: &str,
-    step: u32,
-) -> axum::response::Response {
-    clock
-        .0
-        .fetch_add(20_000, std::sync::atomic::Ordering::SeqCst);
-    post_async(
-        app,
-        "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "progress", "device_id": "web-1",
-                "position_ms": step * 20_000, "paused": false }),
-    )
-    .await
-}
-
-/// 直接写一条完结播放日志（`started_at`/`ended_at` 为 unix 秒），
-/// 用来覆盖统计/历史的窗口边界。
-fn seed_playback_log(tmp: &tempfile::TempDir, media_id: &str, started_at: i64, ended_at: i64) {
-    let conn = rusqlite::Connection::open(tmp.path().join("data/subscribe.db")).unwrap();
-    conn.execute(
-        "INSERT INTO playback_logs (id, user_id, media_id, started_at, ended_at, watched_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![
-            uuid::Uuid::new_v4().to_string(),
-            "00000000-0000-0000-0000-000000000001",
-            media_id,
-            started_at,
-            ended_at,
-            30_000
-        ],
-    )
-    .unwrap();
-}
-
-/// 8 天前的完结日志：真实时钟下落在 7 天窗口外，只进 previous 窗口。
-fn seed_old_playback_log(tmp: &tempfile::TempDir, media_id: &str) {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
-    seed_playback_log(tmp, media_id, now - 8 * 86_400, now - 8 * 86_400 + 60);
-}
-
 #[tokio::test]
 async fn progress_lifecycle_writes_session_log_and_unit() {
     let tmp = tempfile::tempdir().unwrap();
@@ -95,11 +51,12 @@ async fn progress_lifecycle_writes_session_log_and_unit() {
     )));
     let app = app_with_clock(&tmp, clock.clone());
     let media_id = seed_movie(&app, &tmp).await;
+    let session = open_play_session(&app, &media_id, "web-1").await;
 
     let start = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "start", "device_id": "web-1", "position_ms": 0 }),
+        json!({ "event_sequence": crate::common::next_playback_sequence(), "media_item_id": media_id, "event": "start", "device_id": "web-1", "play_session_id": session, "position_ms": 0 }),
     )
     .await;
     assert_eq!(start.status(), StatusCode::OK);
@@ -109,7 +66,7 @@ async fn progress_lifecycle_writes_session_log_and_unit() {
 
     // 真实节奏心跳（每步 20 秒，<= 30s，不会被判成 seek）。
     for step in 1..=6 {
-        let response = beat(&app, &clock, &media_id, step).await;
+        let response = beat(&app, &clock, &media_id, &session, step).await;
         assert_eq!(response.status(), StatusCode::OK);
         if step == 6 {
             assert_eq!(json_body(response).await["data"]["position_ms"], 120_000);
@@ -129,7 +86,7 @@ async fn progress_lifecycle_writes_session_log_and_unit() {
 
     for step in 7..=14 {
         assert_eq!(
-            beat(&app, &clock, &media_id, step).await.status(),
+            beat(&app, &clock, &media_id, &session, step).await.status(),
             StatusCode::OK
         );
     }
@@ -141,7 +98,7 @@ async fn progress_lifecycle_writes_session_log_and_unit() {
     let stop = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "stop", "device_id": "web-1", "position_ms": 300_000 }),
+        json!({ "event_sequence": crate::common::next_playback_sequence(), "media_item_id": media_id, "event": "stop", "device_id": "web-1", "play_session_id": session, "position_ms": 300_000 }),
     )
     .await;
     assert_eq!(stop.status(), StatusCode::OK);
@@ -163,75 +120,6 @@ async fn progress_lifecycle_writes_session_log_and_unit() {
     )
     .await;
     assert_eq!(resume["position_ms"], 300_000);
-}
-
-/// 假时钟 + 可读 store 的播放测试环境。
-///
-/// 假时钟停在 1 小时前：`activity` / `devices` / `end_session` / `revoke_device`
-/// 任一回退到真实时钟，会话都会立刻被 300 秒超时判成不活跃。
-struct ClockEnv {
-    app: axum::Router,
-    clock: Arc<FakePlaybackClock>,
-    store: Arc<Mutex<api::Store>>,
-    user: domain::UserId,
-    media_id: String,
-    base_ms: i64,
-}
-
-impl ClockEnv {
-    async fn new(tmp: &tempfile::TempDir) -> Self {
-        Self::with_base_ms(tmp, (api::job_loop::unix_now() - 3_600) * 1000).await
-    }
-
-    /// 以显式毫秒基准构造（marks/metrics 的秒边界用亚秒偏移）。
-    async fn with_base_ms(tmp: &tempfile::TempDir, base_ms: i64) -> Self {
-        let clock = Arc::new(FakePlaybackClock(std::sync::atomic::AtomicI64::new(
-            base_ms,
-        )));
-        let fetcher = Arc::new(Fixtures {
-            requests: Mutex::new(Vec::new()),
-            bodies: HashMap::new(),
-        });
-        let downloader = Arc::new(MemoryDownloader::new(tmp.path().join("stage")));
-        let st = state(tmp.path(), fetcher, downloader);
-        let app = router(st.clone().with_playback_clock(clock.clone()));
-        let media_id = seed_movie(&app, tmp).await;
-        let store = st.store();
-        let user = {
-            let guard = store.lock();
-            guard
-                .user_by_token("management-secret")
-                .unwrap()
-                .unwrap()
-                .id
-        };
-        Self {
-            app,
-            clock,
-            store,
-            user,
-            media_id,
-            base_ms,
-        }
-    }
-
-    /// 在 `web-1` 上 start + 一次心跳，返回心跳后的假时钟毫秒值。
-    async fn start_web_session(&self) -> i64 {
-        let response = post_async(
-            &self.app,
-            "/api/v1/playback/progress",
-            json!({ "media_item_id": self.media_id, "event": "start", "device_id": "web-1", "position_ms": 0 }),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            beat(&self.app, &self.clock, &self.media_id, 1)
-                .await
-                .status(),
-            StatusCode::OK
-        );
-        self.base_ms + 20_000
-    }
 }
 
 #[tokio::test]
@@ -297,6 +185,14 @@ async fn injected_clock_drives_revoke_device() {
     }
     let beat_ms = env.start_web_session().await;
 
+    let session_id = env
+        .store
+        .lock()
+        .get_session(env.user, "web-1")
+        .unwrap()
+        .unwrap()
+        .play_session_id
+        .unwrap();
     // 注销用注入时钟关闭会话：落库日志的 ended_at 决定 devices 的 last_seen_at。
     let revoke = env
         .app
@@ -327,7 +223,8 @@ async fn injected_clock_drives_revoke_device() {
     let blocked = post_async(
         &env.app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": env.media_id, "event": "progress", "device_id": "web-1", "position_ms": 10 }),
+        json!({ "media_item_id": env.media_id, "event": "progress", "device_id": "web-1", "position_ms": 10,
+            "play_session_id":session_id,"event_sequence":crate::common::next_playback_sequence() }),
     )
     .await;
     assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
@@ -342,16 +239,17 @@ async fn stats_aggregate_and_policy_round_trip() {
     )));
     let app = app_with_clock(&tmp, clock.clone());
     let media_id = seed_movie(&app, &tmp).await;
+    let session = open_play_session(&app, &media_id, "web-1").await;
     let start = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "start", "device_id": "web-1", "position_ms": 0 }),
+        json!({ "event_sequence": crate::common::next_playback_sequence(), "media_item_id": media_id, "event": "start", "device_id": "web-1", "play_session_id": session, "position_ms": 0 }),
     )
     .await;
     assert_eq!(start.status(), StatusCode::OK);
     for step in 1..=2 {
         assert_eq!(
-            beat(&app, &clock, &media_id, step).await.status(),
+            beat(&app, &clock, &media_id, &session, step).await.status(),
             StatusCode::OK
         );
     }
@@ -361,7 +259,7 @@ async fn stats_aggregate_and_policy_round_trip() {
     let stop = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "stop", "device_id": "web-1", "position_ms": 60_000 }),
+        json!({ "event_sequence": crate::common::next_playback_sequence(), "media_item_id": media_id, "event": "stop", "device_id": "web-1", "play_session_id": session, "position_ms": 60_000 }),
     )
     .await;
     assert_eq!(stop.status(), StatusCode::OK);
@@ -523,11 +421,12 @@ async fn heartbeat_persists_sub_second_report_time() {
     let st = state(tmp.path(), fetcher, downloader);
     let app = router(st.clone().with_playback_clock(clock.clone()));
     let media_id = seed_movie(&app, &tmp).await;
+    let session = open_play_session(&app, &media_id, "web-ms").await;
 
     let start = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "start", "device_id": "web-ms", "position_ms": 0 }),
+        json!({ "event_sequence": crate::common::next_playback_sequence(), "media_item_id": media_id, "event": "start", "device_id": "web-ms", "play_session_id": session, "position_ms": 0 }),
     )
     .await;
     assert_eq!(start.status(), StatusCode::OK);
@@ -537,7 +436,7 @@ async fn heartbeat_persists_sub_second_report_time() {
     let beat = post_async(
         &app,
         "/api/v1/playback/progress",
-        json!({ "media_item_id": media_id, "event": "progress", "device_id": "web-ms", "position_ms": 0, "paused": false }),
+        json!({ "event_sequence": crate::common::next_playback_sequence(), "media_item_id": media_id, "event": "progress", "device_id": "web-ms", "play_session_id": session, "position_ms": 0, "paused": false }),
     )
     .await;
     assert_eq!(beat.status(), StatusCode::OK);
@@ -564,7 +463,7 @@ async fn heartbeat_persists_sub_second_report_time() {
 /// 假时钟 = 真实时钟 - 1 小时 + 500ms：回退到 `unix_now()` 会差 3600 秒，
 /// 直接把毫秒写进秒列会差 ~1.7e12，两者都会被下面的断言抓住。
 #[tokio::test]
-async fn web_marks_persist_injected_clock_seconds() {
+async fn web_marks_persist_injected_clock_units() {
     let tmp = tempfile::tempdir().unwrap();
     let base_ms = (api::job_loop::unix_now() - 3_600) * 1000 + 500;
     let env = ClockEnv::with_base_ms(&tmp, base_ms).await;
@@ -578,17 +477,19 @@ async fn web_marks_persist_injected_clock_seconds() {
     assert_eq!(marked.status(), StatusCode::OK);
 
     let media_id: domain::MediaId = env.media_id.parse().unwrap();
-    let rows = env.store.lock().unit_rows(env.user, media_id).unwrap();
-    let updated_at = rows
-        .iter()
-        .map(|row| row.updated_at)
-        .max()
+    let unit = env
+        .store
+        .lock()
+        .unit_state(env.user, media_id, -1, -1)
+        .unwrap()
         .expect("marks 必须写入 playback_units");
     assert_eq!(
-        updated_at,
-        base_ms / 1000,
-        "web marks 必须按注入时钟的秒值落库"
+        unit.played_assertion_at_ms,
+        Some(base_ms),
+        "played 断言时间是注入时钟的毫秒值"
     );
+    assert_eq!(unit.favorite_at, base_ms / 1000, "favorite_at 是秒");
+    assert_eq!(unit.updated_at, 0, "标记不是观看活动，不推进 activity");
 }
 
 /// `POST /playback/metrics` 落库的 `recorded_at` 必须是注入时钟的秒值。
@@ -609,7 +510,7 @@ async fn web_metrics_persist_injected_clock_seconds() {
     .await;
     assert_eq!(recorded.status(), StatusCode::OK);
 
-    let db = rusqlite::Connection::open(tmp.path().join("data/subscribe.db")).unwrap();
+    let db = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
     let recorded_at: i64 = db
         .query_row(
             "SELECT recorded_at FROM playback_metrics WHERE media_id = ?1",
@@ -622,4 +523,170 @@ async fn web_metrics_persist_injected_clock_seconds() {
         base_ms / 1000,
         "web metrics 必须按注入时钟的秒值落库"
     );
+}
+#[tokio::test]
+async fn repeated_start_increments_play_count_once() {
+    let (tmp, app, clock, media_id) = movie_app_with_fake_clock().await;
+    let session = open_play_session(&app, &media_id, "web-1").await;
+
+    // Start 幂等：同一会话重复 Start（含播放中途再来一次）后仍然只算一次播放。
+    assert_eq!(
+        post_event(&app, &media_id, "web-1", &session, "start", 0, None).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        post_event(&app, &media_id, "web-1", &session, "start", 60_000, None).await,
+        StatusCode::OK
+    );
+    for step in 1..=3 {
+        assert_eq!(
+            beat(&app, &clock, &media_id, &session, step).await.status(),
+            StatusCode::OK
+        );
+    }
+    clock
+        .0
+        .fetch_add(20_000, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        post_event(&app, &media_id, "web-1", &session, "start", 60_000, None).await,
+        StatusCode::OK
+    );
+    for step in 4..=7 {
+        assert_eq!(
+            beat(&app, &clock, &media_id, &session, step).await.status(),
+            StatusCode::OK
+        );
+    }
+    clock
+        .0
+        .fetch_add(20_000, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        post_event(
+            &app,
+            &media_id,
+            "web-1",
+            &session,
+            "stop",
+            140_000,
+            Some(150_000)
+        )
+        .await,
+        StatusCode::OK
+    );
+
+    let facts = playback_facts(&app, &tmp, &media_id).await;
+    assert_eq!(facts.play_count, 1, "重复 Start 只算一次播放");
+    assert_eq!(
+        (facts.logs, facts.entries),
+        (1, 1),
+        "一条会话日志、一条历史"
+    );
+    assert_eq!(
+        facts.watched_ms,
+        vec![120_000],
+        "重复 Start 不把观看时间翻倍"
+    );
+
+    // 重复 Stop 同样不重复计数、不追加观看时间。
+    assert_eq!(
+        post_event(
+            &app,
+            &media_id,
+            "web-1",
+            &session,
+            "stop",
+            140_000,
+            Some(150_000)
+        )
+        .await,
+        StatusCode::OK
+    );
+    let repeated = playback_facts(&app, &tmp, &media_id).await;
+    assert_eq!(
+        (repeated.play_count, repeated.logs, repeated.entries),
+        (1, 1, 1),
+        "重复 Stop 不重复计数"
+    );
+    assert_eq!(
+        repeated.watched_ms,
+        vec![120_000],
+        "重复 Stop 不追加观看时间"
+    );
+}
+
+#[tokio::test]
+async fn progress_heartbeats_do_not_increment_play_count() {
+    let (tmp, app, clock, media_id) = movie_app_with_fake_clock().await;
+    let session = open_play_session(&app, &media_id, "web-1").await;
+    assert_eq!(
+        post_event(&app, &media_id, "web-1", &session, "start", 0, None).await,
+        StatusCode::OK
+    );
+
+    let mut last = None;
+    for step in 1..=7 {
+        let response = beat(&app, &clock, &media_id, &session, step).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        last = Some(json_body(response).await);
+    }
+    assert_eq!(
+        last.unwrap()["data"]["position_ms"],
+        140_000,
+        "进度事件确实写进了会话位置（否则下面的 0 会是空断言）"
+    );
+
+    let facts = playback_facts(&app, &tmp, &media_id).await;
+    assert_eq!(facts.play_count, 0, "一串进度事件不加 play_count");
+    assert_eq!(
+        (facts.logs, facts.entries),
+        (0, 0),
+        "进度事件不产生会话日志与历史"
+    );
+
+    // 只有真实的 Stop 才 +1。
+    assert_eq!(
+        post_event(
+            &app,
+            &media_id,
+            "web-1",
+            &session,
+            "stop",
+            140_000,
+            Some(150_000)
+        )
+        .await,
+        StatusCode::OK
+    );
+    let after_stop = playback_facts(&app, &tmp, &media_id).await;
+    assert_eq!(after_stop.play_count, 1, "真实 Stop 才 +1");
+    assert_eq!((after_stop.logs, after_stop.entries), (1, 1));
+}
+
+/// A4 RED witness at the HTTP boundary: raw persisted clocks after a web mark.
+/// played_changed_at_ms is milliseconds, favorite_at seconds, and a mark never
+/// advances watch_activity_at.
+#[tokio::test]
+async fn web_mark_persists_raw_clock_columns() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base_ms = (api::job_loop::unix_now() - 3_600) * 1000 + 500;
+    let env = ClockEnv::with_base_ms(&tmp, base_ms).await;
+    let marked = post_async(
+        &env.app,
+        "/api/v1/playback/marks",
+        json!({ "media_item_id": env.media_id, "played": true, "favorite": true }),
+    )
+    .await;
+    assert_eq!(marked.status(), StatusCode::OK);
+    let db = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
+    let (changed_ms, activity, favorite_at): (Option<i64>, i64, i64) = db
+        .query_row(
+            "SELECT played_changed_at_ms, watch_activity_at, favorite_at FROM playback_units
+             WHERE media_id = ?1 AND season = -1 AND episode = -1",
+            rusqlite::params![env.media_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("mark row");
+    assert_eq!(changed_ms, Some(base_ms), "played_changed_at_ms must be ms");
+    assert_eq!(favorite_at, base_ms / 1000, "favorite_at must be seconds");
+    assert_eq!(activity, 0, "a mark is not watch activity");
 }

@@ -1,8 +1,8 @@
 #[path = "probe_retry_support.rs"]
 mod support;
 
-use support::ProbeScenario;
 use api::probe_manager::policy::{ProbeRequestOrigin, ProbeRequestResult};
+use support::ProbeScenario;
 
 #[tokio::test]
 async fn missing_outro_skips_metadata_and_preserves_intro() {

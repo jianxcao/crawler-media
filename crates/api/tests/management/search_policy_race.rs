@@ -21,11 +21,14 @@ struct PauseGateFetcher {
 
 impl Fetcher for PauseGateFetcher {
     fn fetch(&self, _request: &FetchRequest) -> Result<String, IndexerError> {
-        if let Some(resume) = self.resume.lock().take() {
+        let resume = { self.resume.lock().take() };
+        if let Some(resume) = resume {
             if let Some(started) = self.started.lock().take() {
                 let _ = started.send(());
             }
-            let _ = resume.recv();
+            resume
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("test must resume the search policy fetcher");
         }
         Ok(include_str!("../../../indexer/tests/fixtures/longwatch_s01.html").to_string())
     }
@@ -179,7 +182,7 @@ async fn season_policy_changed_during_search_is_reloaded_before_admission() {
             "PATCH",
             &format!("/api/v1/subscriptions/{sub_id}"),
             Some("management-secret"),
-            json!({ "selected_seasons": [2] }),
+            json!({ "coverage": {"kind": "tv", "season": 2, "episode_from": 1, "episode_to": null} }),
         ))
         .await
         .unwrap();

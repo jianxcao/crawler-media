@@ -13,7 +13,6 @@ pub const DEFAULT_FILTER_ID: &str = "default_filter_id";
 /// Transfer mode (hardlink / copy / move).
 pub const TRANSFER_MODE: &str = "transfer_mode";
 /// Metadata language preference (e.g. "zh-CN").
-pub const METADATA_LANGUAGE: &str = "metadata.language";
 /// Scrape configuration JSON.
 pub const METADATA_SCRAPE: &str = "metadata.scrape";
 /// Revoked playback devices JSON.

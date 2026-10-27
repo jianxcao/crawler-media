@@ -1,13 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use api::{Store, router};
-use axum::body::Body;
+use api::router;
 use axum::http::StatusCode;
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
-use tower::Service;
 use tower::ServiceExt;
 
 use super::common::*;

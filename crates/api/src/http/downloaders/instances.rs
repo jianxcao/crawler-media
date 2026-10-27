@@ -160,15 +160,14 @@ pub(crate) async fn create_downloader(
             &error.to_string(),
         );
     }
-    if row.is_default {
-        if let Err(error) = store.set_default_downloader(row.id) {
+    if row.is_default
+        && let Err(error) = store.set_default_downloader(row.id) {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "store.error",
                 &error.to_string(),
             );
         }
-    }
     (StatusCode::CREATED, ok(downloader_json(&row))).into_response()
 }
 
@@ -273,15 +272,14 @@ pub(crate) async fn patch_downloader(
     // Updating configuration invalidates previous verification state
     let _ = store.delete_setting(&format!("downloader.{}.verified", row.id));
     let _ = store.delete_setting(&format!("downloader.{}.last_error", row.id));
-    if make_default {
-        if let Err(error) = store.set_default_downloader(row.id) {
+    if make_default
+        && let Err(error) = store.set_default_downloader(row.id) {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "store.error",
                 &error.to_string(),
             );
         }
-    }
     ok(downloader_json(&row)).into_response()
 }
 
@@ -383,7 +381,7 @@ pub(crate) async fn verify_downloader(
             );
         }
     };
-    let task = tokio::task::spawn_blocking(move || runner());
+    let task = tokio::task::spawn_blocking(runner);
     let result = task.await;
     match result {
         Ok(Ok(_)) => {

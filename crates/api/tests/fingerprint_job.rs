@@ -1,19 +1,49 @@
 use api::fingerprint_job::analyze_fingerprints_with_outro;
-use domain::{Confidence, LedgerId, LedgerRow, MediaId, QualitySource};
+use domain::{
+    Confidence, FileCoverage, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile,
+    LibraryId, MediaId, MediaKind, QualitySource, UnitKey,
+};
+use std::path::PathBuf;
 
-fn row(media_id: MediaId, episode: u32) -> LedgerRow {
-    LedgerRow {
-        id: LedgerId::new(),
-        media_id,
-        path: format!("episode-{episode}.mkv"),
-        season: Some(1),
-        episode: Some(episode),
-        resolution: None,
-        codec: None,
-        hdr: None,
-        quality_source: QualitySource::Probe,
-        confidence: Confidence::High,
-        filter_score: None,
+/// One-episode coverage fact, hand-built: this test has no `Store`, so the file
+/// fact cannot come from `publish_fixture_file`.
+fn coverage(media_id: MediaId, episode: u32) -> FileCoverage {
+    FileCoverage {
+        path_key: String::new(),
+        file: LibraryFile {
+            file_id: LedgerId::new(),
+            library_id: LibraryId::new(),
+            root_id: "fixture-root".into(),
+            media_id,
+            kind: MediaKind::Tv,
+            path: PathBuf::from(format!("episode-{episode}.mkv")),
+            version: FileVersion {
+                revision: 1,
+                source_version: "fixture".into(),
+            },
+            presence: FilePresence::Present,
+            publication: FilePublication::Published,
+            size_bytes: None,
+            stat_known: false,
+            created_ns: None,
+            modified_ns: None,
+            source_digest: None,
+            source_path: None,
+            transfer_mode: None,
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: QualitySource::Probe,
+            confidence: Confidence::High,
+            filter_score: None,
+            release_quality: None,
+            duration_ms: None,
+            tracks_version: 0,
+            poster_path: None,
+            backdrop_path: None,
+            still_path: None,
+        },
+        units: vec![UnitKey::new(1, episode as i32)],
     }
 }
 
@@ -49,8 +79,8 @@ fn cached_outro_fingerprints_produce_full_credit_markers() {
         1,
         Vec::new(),
         vec![
-            (row(media_id, 1), first, 600_000),
-            (row(media_id, 2), second, 900_000),
+            (coverage(media_id, 1), first, 600_000),
+            (coverage(media_id, 2), second, 900_000),
         ],
     );
 

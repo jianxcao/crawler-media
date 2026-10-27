@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use super::controlled::{ControlledSubtitleRunner, extract_embedded_controlled};
+use super::controlled::{
+    ControlledSubtitleRunner, EmbeddedSubtitleRequest, extract_embedded_controlled,
+};
 use super::delivery::DeliveryError;
 use crate::WorkControl;
 
@@ -38,11 +40,13 @@ pub fn extract_embedded_subtitle_with_program(
     program: impl AsRef<std::ffi::OsStr>,
 ) -> Result<(PathBuf, &'static str), String> {
     extract_embedded_controlled(
-        media_path,
-        stream_index,
-        codec,
-        wants_vtt,
-        cache_dir,
+        EmbeddedSubtitleRequest {
+            media_path,
+            stream_index,
+            codec,
+            wants_vtt,
+            cache_dir,
+        },
         program.as_ref(),
         &WorkControl::default(),
         &ControlledSubtitleRunner,

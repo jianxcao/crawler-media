@@ -1,38 +1,35 @@
 //! Library-scoped work leases. Registry -> Store is the only permitted lock order.
 use crate::management::ApiState;
-
-#[derive(Debug)]
-pub(crate) enum ProjectionLeaseError {
-    Lifecycle(String),
-    Store(store::StoreError),
-}
-
+mod removal;
 
 impl ApiState {
-    pub(crate) fn acquire_path_work(&self, path: &std::path::Path, kind: domain::MediaKind)
-        -> Result<Option<LibraryWorkLease>, String>
-    {
+    pub(crate) fn acquire_path_work(
+        &self,
+        path: &std::path::Path,
+        kind: domain::MediaKind,
+    ) -> Result<Option<LibraryWorkLease>, String> {
+        let resolved = store::LibraryPathScope::resolve_path(path).map_err(|e| e.to_string())?;
         let owner = {
             let store = self.store.lock();
-            let owner = store.library_for_path_strict(path, kind).map_err(|e| e.to_string())?;
-            if owner.is_none() && store.path_in_removal_scope(path).map_err(|e| e.to_string())? {
+            let owner = store
+                .library_owning_key(&resolved, kind)
+                .map_err(|e| e.to_string())?;
+            if owner.is_none()
+                && store
+                    .path_key_in_removal_scope(&resolved)
+                    .map_err(|e| e.to_string())?
+            {
                 return Err("Library 已删除，拒绝旧目录工作".into());
             }
             owner
         };
-        owner.map(|owner| self.acquire_library_work(&owner.id)).transpose()
+        owner
+            .map(|owner| self.acquire_library_work(&owner))
+            .transpose()
     }
     pub fn acquire_library_work(&self, library_id: &str) -> Result<LibraryWorkLease, String> {
         self.library_work.acquire(&self.store, library_id)
     }
-    pub(crate) fn acquire_library_work_for_projection(
-        &self,
-        library_id: &str,
-    ) -> Result<LibraryWorkLease, ProjectionLeaseError> {
-        self.library_work
-            .acquire_for_projection(&self.store, library_id)
-    }
-
 
     /// 等该库当前在跑的后台工作全部结束（建库自动扫描、显式扫描、重导入共用同一
     /// registry；由 lease drop 的 `notify_waiters` 唤醒，不是定时轮询）。
@@ -44,23 +41,46 @@ impl ApiState {
     }
 }
 
-pub fn start_library_removal(state: &ApiState, library_id: &str)
-    -> Result<store::LibraryRemoval, String>
-{
+pub fn start_library_removal(
+    state: &ApiState,
+    library_id: &str,
+) -> Result<store::LibraryRemoval, String> {
     let handle = tokio::runtime::Handle::try_current().map_err(|e| e.to_string())?;
-    let operation = state.library_work.freeze(&state.store, library_id).map_err(|e| e.to_string())?;
+    let operation = state
+        .library_work
+        .freeze(&state.store, library_id)
+        .map_err(|e| e.to_string())?;
     launch_library_removal(state, operation, handle)
 }
 
-pub(crate) fn launch_library_removal(state: &ApiState, mut operation: store::LibraryRemoval,
-    handle: tokio::runtime::Handle) -> Result<store::LibraryRemoval, String> {
-    if operation.state == "succeeded" { return Ok(operation); }
-    if !state.library_work.removals.lock().insert(operation.operation_id.clone()) {
+pub(crate) fn launch_library_removal(
+    state: &ApiState,
+    mut operation: store::LibraryRemoval,
+    handle: tokio::runtime::Handle,
+) -> Result<store::LibraryRemoval, String> {
+    if operation.state == "succeeded" {
+        return Ok(operation);
+    }
+    if !state
+        .library_work
+        .removals
+        .lock()
+        .insert(operation.operation_id.clone())
+    {
         return Ok(operation);
     }
     if operation.state == "failed" {
-        if let Err(error) = state.store.lock().set_removal_state(&operation.operation_id, "draining", None) {
-            state.library_work.removals.lock().remove(&operation.operation_id);
+        if let Err(error) =
+            state
+                .store
+                .lock()
+                .set_removal_state(&operation.operation_id, "draining", None)
+        {
+            state
+                .library_work
+                .removals
+                .lock()
+                .remove(&operation.operation_id);
             return Err(error.to_string());
         }
         operation.state = "draining".into();
@@ -69,58 +89,29 @@ pub(crate) fn launch_library_removal(state: &ApiState, mut operation: store::Lib
     let state = state.clone();
     let operation_id = operation.operation_id.clone();
     handle.spawn(async move {
-        if let Err(error) = drain_removal(&state, &operation_id).await {
+        if let Err(error) = removal::drain(&state, &operation_id).await {
             tracing::error!(%operation_id, %error, "Library 删除失败，保持冻结");
-            if let Err(persist_error) = state.store.lock().set_removal_state(&operation_id, "failed", Some(&error)) {
+            if let Err(persist_error) =
+                state
+                    .store
+                    .lock()
+                    .set_removal_state(&operation_id, "failed", Some(&error))
+            {
                 tracing::error!(%operation_id, %persist_error, "保存 Library 删除失败状态失败");
             }
         }
         state.library_work.removals.lock().remove(&operation_id);
+        crate::root_reassign_work::notify(&state);
     });
     Ok(operation)
 }
 
-async fn drain_removal(state: &ApiState, operation_id: &str) -> Result<(), String> {
-    let (library_id, ledger_ids) = {
-        let store = state.store.lock();
-        let operation = store.library_removal(operation_id).map_err(|e| e.to_string())?
-            .ok_or("Library removal missing")?;
-        if operation.state == "succeeded" { return Ok(()); }
-        store.set_removal_state(operation_id, "draining", None).map_err(|e| e.to_string())?;
-        (operation.library_id, store.removal_ledger_ids(operation_id).map_err(|e| e.to_string())?)
-    };
-    tracing::info!(%operation_id, %library_id, total_ledgers = ledger_ids.len(), "开始排空 Library 关联任务与活跃会话");
-    state.library_work.cancel(&library_id);
-    state.probe.cancel_ledger_work(&ledger_ids, "Library removed").map_err(|e| e.to_string())?;
-
-    {
-        let store = state.store.lock();
-        store
-            .close_playback_sessions_for_removal(operation_id)
-            .map_err(|e| format!("关闭待删除媒体库播放会话失败: {e}"))?;
-    }
-
-    if let Err(_) = tokio::time::timeout(std::time::Duration::from_secs(30), state.library_work.wait_idle(&library_id)).await {
-        tracing::error!(%operation_id, %library_id, "等待 Library 工作租约释放超时 (30s)，删除操作失败并保持冻结");
-        return Err("Library work did not stop within 30 seconds".to_string());
-    }
-    tracing::info!(%operation_id, %library_id, "Library 任务已全部排空，进入清理阶段");
-    let covers_dir = {
-        let store = state.store.lock();
-        store.set_removal_state(operation_id, "cleaning", None).map_err(|e| e.to_string())?;
-        store.clean_library_removal(operation_id).map_err(|e| e.to_string())?;
-        store.library_covers_dir()
-    };
-    // 封面文件无法进 DB 事务：此时 Library 已冻结且行已删除，没有并发发布能重建它；
-    // 启动时的对账（purge_removed_library_covers）负责补做崩溃窗口内漏掉的那次删除。
-    crate::library_cover_service::remove_library_cover_files(&covers_dir, &library_id);
-    state.projection.remove_library(&library_id);
-    tracing::info!(%operation_id, %library_id, "Library 索引清理完成，删除操作成功");
-    Ok(())
-}
-
 pub fn resume_library_removals(state: &ApiState) -> Result<(), String> {
-    let operations = state.store.lock().pending_library_removals().map_err(|e| e.to_string())?;
+    let operations = state
+        .store
+        .lock()
+        .pending_library_removals()
+        .map_err(|e| e.to_string())?;
     for operation in operations {
         state.library_work.cancel(&operation.library_id);
         if operation.state == "failed" {
@@ -143,11 +134,21 @@ pub struct LibraryWorkRegistry {
     entries: Mutex<HashMap<String, Entry>>,
     changed: Notify,
     removals: Mutex<std::collections::HashSet<String>>,
+    /// Operation ids whose driver task is already running in this process. A
+    /// reconfiguration is driven once per process; startup recovery and a new 202
+    /// can both ask for the same operation.
+    drivers: Mutex<std::collections::HashSet<String>>,
+    pub(crate) root_changed: Arc<Notify>,
+    pub(crate) root_driver: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
 struct Entry {
     cancelled: bool,
+    /// Set while a persistent reconfiguration owns this Library. Unlike
+    /// `cancelled` it is scoped to one operation and cleared when that operation
+    /// ends, so a failed reconfiguration does not block the Library forever.
+    blocked_by: Option<String>,
     controls: HashMap<String, library::WorkControl>,
 }
 
@@ -159,15 +160,28 @@ pub struct LibraryWorkLease {
 }
 
 impl LibraryWorkLease {
-    pub fn library_id(&self) -> &str { &self.library_id }
+    pub fn library_id(&self) -> &str {
+        &self.library_id
+    }
     pub fn publish<T>(&self, publish: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-        let entries = self.registry.entries.lock();
-        if entries.get(&self.library_id).is_none_or(|entry| entry.cancelled) {
+        // Lock order is registry → (released) → publication gate. The registry
+        // guard is dropped before entering the gate: a freeze that marks the
+        // entry after this check still cancels `self.control` under the gate, so
+        // the gate's own cancelled check refuses or the freeze waits for us.
+        let cancelled = self
+            .registry
+            .entries
+            .lock()
+            .get(&self.library_id)
+            .is_none_or(|entry| entry.cancelled);
+        if cancelled {
             return Err("Library work cancelled".into());
         }
         self.control.publish(publish)
     }
-    pub fn control(&self) -> &library::WorkControl { &self.control }
+    pub fn control(&self) -> &library::WorkControl {
+        &self.control
+    }
 }
 
 impl Drop for LibraryWorkLease {
@@ -180,34 +194,82 @@ impl Drop for LibraryWorkLease {
 }
 
 impl LibraryWorkRegistry {
-    pub fn acquire(self: &Arc<Self>, store: &Mutex<store::Store>, library_id: &str)
-        -> Result<LibraryWorkLease, String>
-    {
+    pub fn acquire(
+        self: &Arc<Self>,
+        store: &Mutex<store::Store>,
+        library_id: &str,
+    ) -> Result<LibraryWorkLease, String> {
         let mut entries = self.entries.lock();
         let entry = entries.entry(library_id.to_string()).or_default();
-        if entry.cancelled || !store.lock().library_accepts_work(library_id).map_err(|e| e.to_string())? {
+        if entry.blocked_by.is_some() {
+            return Err("Library 正在重建索引，暂时拒绝新的工作".into());
+        }
+        if entry.cancelled
+            || !store
+                .lock()
+                .library_accepts_work(library_id)
+                .map_err(|e| e.to_string())?
+        {
             return Err("Library 正在删除或已不存在".into());
         }
         let lease_id = uuid::Uuid::new_v4().to_string();
         let control = library::WorkControl::default();
         entry.controls.insert(lease_id.clone(), control.clone());
-        Ok(LibraryWorkLease { registry: self.clone(), library_id: library_id.into(), lease_id, control })
+        Ok(LibraryWorkLease {
+            registry: self.clone(),
+            library_id: library_id.into(),
+            lease_id,
+            control,
+        })
     }
-    pub(crate) fn acquire_for_projection(
+    pub fn freeze(
+        &self,
+        store: &Mutex<store::Store>,
+        library_id: &str,
+    ) -> Result<store::LibraryRemoval, store::StoreError> {
+        let controls = {
+            let mut entries = self.entries.lock();
+            let operation = store.lock().begin_library_removal(library_id)?;
+            let entry = entries.entry(library_id.into()).or_default();
+            entry.cancelled = true;
+            let controls: Vec<_> = entry.controls.values().cloned().collect();
+            (operation, controls)
+        };
+        // Cancel outside the registry: `cancel` waits on each publication gate,
+        // and a publication may acquire or drop a lease (registry) inside it.
+        // No new lease can be added any more because `cancelled` is already set.
+        let (operation, controls) = controls;
+        for control in controls {
+            control.cancel();
+        }
+        Ok(operation)
+    }
+
+    /// Lease held by a reconfiguration driver while it applies one batch.
+    ///
+    /// The driver is the only writer allowed on the Library, so it takes a lease
+    /// through the same registry as worker writes: a Library removal that starts
+    /// mid-operation still wins, because `cancelled` refuses this lease too.
+    pub(crate) fn acquire_for_reconfiguration(
         self: &Arc<Self>,
         store: &Mutex<store::Store>,
         library_id: &str,
-    ) -> Result<LibraryWorkLease, ProjectionLeaseError> {
+        operation_id: &str,
+    ) -> Result<LibraryWorkLease, String> {
         let mut entries = self.entries.lock();
         let entry = entries.entry(library_id.to_string()).or_default();
-        let accepts_work = match store.lock().library_accepts_work(library_id) {
-            Ok(accepts_work) => accepts_work,
-            Err(error) => return Err(ProjectionLeaseError::Store(error)),
-        };
-        if entry.cancelled || !accepts_work {
-            return Err(ProjectionLeaseError::Lifecycle(
-                "Library 正在删除或已不存在".into(),
-            ));
+        if entry.cancelled {
+            return Err("Library work cancelled".into());
+        }
+        if entry.blocked_by.as_deref() != Some(operation_id) {
+            return Err(format!("Library 未被重配置操作 {operation_id} 冻结"));
+        }
+        if !store
+            .lock()
+            .library_accepts_work(library_id)
+            .map_err(|e| e.to_string())?
+        {
+            return Err("Library 正在删除或已不存在".into());
         }
         let lease_id = uuid::Uuid::new_v4().to_string();
         let control = library::WorkControl::default();
@@ -220,20 +282,49 @@ impl LibraryWorkRegistry {
         })
     }
 
+    /// Mark a Library as owned by one persistent reconfiguration until `release`.
+    ///
+    /// Infallible and Store-free on purpose: `begin_library_reconfiguration` already
+    /// committed the freeze, and this only mirrors it in the registry so that
+    /// in-process workers stop before touching a frozen generation.
+    pub(crate) fn block(&self, library_id: &str, operation_id: &str) {
+        let controls: Vec<_> = {
+            let mut entries = self.entries.lock();
+            let entry = entries.entry(library_id.into()).or_default();
+            entry.blocked_by = Some(operation_id.into());
+            entry.controls.values().cloned().collect()
+        };
+        // Same order as `freeze`: never wait on a publication gate under the registry.
+        for control in controls {
+            control.cancel();
+        }
+    }
 
-    pub fn freeze(&self, store: &Mutex<store::Store>, library_id: &str)
-        -> Result<store::LibraryRemoval, store::StoreError>
-    {
+    /// Clear the block, but only for the operation that owns it.
+    pub(crate) fn release(&self, library_id: &str, operation_id: &str) {
         let mut entries = self.entries.lock();
-        let operation = store.lock().begin_library_removal(library_id)?;
-        let entry = entries.entry(library_id.into()).or_default();
-        entry.cancelled = true;
-        for control in entry.controls.values() { control.cancel(); }
-        Ok(operation)
+        if let Some(entry) = entries.get_mut(library_id)
+            && entry.blocked_by.as_deref() == Some(operation_id)
+        {
+            entry.blocked_by = None;
+        }
+    }
+
+    /// Claim the single in-process driver slot for one operation. `false` means a
+    /// driver for the same operation is already running here.
+    pub(crate) fn claim_driver(&self, operation_id: &str) -> bool {
+        self.drivers.lock().insert(operation_id.to_string())
+    }
+
+    pub(crate) fn release_driver(&self, operation_id: &str) {
+        self.drivers.lock().remove(operation_id);
     }
 
     pub fn active_control(&self, library_id: &str) -> Option<library::WorkControl> {
-        self.entries.lock().get(library_id).and_then(|entry| entry.controls.values().next().cloned())
+        self.entries
+            .lock()
+            .get(library_id)
+            .and_then(|entry| entry.controls.values().next().cloned())
     }
 
     /// 是否有任何 Library 工作正在进行（维护任务据此跳过重型操作）。
@@ -248,10 +339,17 @@ impl LibraryWorkRegistry {
     }
 
     pub fn cancel(&self, library_id: &str) {
-        let mut entries = self.entries.lock();
-        let entry = entries.entry(library_id.into()).or_default();
-        entry.cancelled = true;
-        for control in entry.controls.values() { control.cancel(); }
+        let controls: Vec<library::WorkControl> = {
+            let mut entries = self.entries.lock();
+            let entry = entries.entry(library_id.into()).or_default();
+            entry.cancelled = true;
+            entry.controls.values().cloned().collect()
+        };
+        // Same order as `freeze`/`block`: a control may wait on its publication gate,
+        // and that publication may take the registry to acquire/drop another lease.
+        for control in controls {
+            control.cancel();
+        }
     }
 
     pub async fn wait_idle(&self, library_id: &str) {
@@ -259,8 +357,14 @@ impl LibraryWorkRegistry {
             let notified = self.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            let idle = self.entries.lock().get(library_id).is_none_or(|entry| entry.controls.is_empty());
-            if idle { return; }
+            let idle = self
+                .entries
+                .lock()
+                .get(library_id)
+                .is_none_or(|entry| entry.controls.is_empty());
+            if idle {
+                return;
+            }
             notified.await;
         }
     }

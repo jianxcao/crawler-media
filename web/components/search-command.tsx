@@ -268,7 +268,7 @@ function SearchPalette({
   // 历史存在后端（search_history 表）；limit 按关键词组计算，组内范围会完整返回。
   useEffect(() => {
     let cancelled = false;
-    listSearchHistory(8)
+    listSearchHistory()
       .then((list) => !cancelled && setItems(list))
       .catch(() => !cancelled && setItems([]));
     return () => {

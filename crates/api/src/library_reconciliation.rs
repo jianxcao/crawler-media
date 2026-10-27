@@ -61,7 +61,7 @@ pub fn index_basenames(
 
         let mut queue = std::collections::VecDeque::new();
         queue.push_back((root.clone(), canonical_root.clone(), 0usize));
-        while let Some((dir, current_canonical, depth)) = queue.pop_front() {
+        while let Some((dir, _current_canonical, depth)) = queue.pop_front() {
             if index.examined >= max_entries || start.elapsed() >= timeout {
                 index.incomplete = true;
                 return Ok(index);
@@ -72,7 +72,7 @@ pub fn index_basenames(
             }
 
             // Verify containment at the moment of traversal
-            let verified_canonical = match std::fs::canonicalize(&dir) {
+            let _verified_canonical = match std::fs::canonicalize(&dir) {
                 Ok(c) if c.starts_with(&canonical_root) => c,
                 _ => {
                     index.incomplete = true;
@@ -154,7 +154,9 @@ fn process_dir_entries(
                         continue;
                     }
                 };
-                if next_canonical.starts_with(canonical_root) && visited_dirs.insert(next_canonical.clone()) {
+                if next_canonical.starts_with(canonical_root)
+                    && visited_dirs.insert(next_canonical.clone())
+                {
                     // Traverse the raw path so discovered candidates keep the path as it
                     // exists under the root; the canonical form is only for containment
                     // verification and the visited-directory set.
@@ -163,15 +165,14 @@ fn process_dir_entries(
             }
         } else if file_type.is_file() {
             if let Ok(canon_file) = std::fs::canonicalize(&path) {
-                if canon_file.starts_with(canonical_root) {
-                    if let Some(name) = path.file_name() {
+                if canon_file.starts_with(canonical_root)
+                    && let Some(name) = path.file_name() {
                         index
                             .candidates
                             .entry(name.to_os_string())
                             .or_default()
                             .push(path);
                     }
-                }
             } else {
                 index.incomplete = true;
             }
@@ -187,15 +188,14 @@ fn process_dir_entries(
                 if depth < 5 && visited_dirs.insert(target.clone()) {
                     queue.push_back((target.clone(), target, depth + 1));
                 }
-            } else if target.is_file() {
-                if let Some(name) = path.file_name() {
+            } else if target.is_file()
+                && let Some(name) = path.file_name() {
                     index
                         .candidates
                         .entry(name.to_os_string())
                         .or_default()
                         .push(path);
                 }
-            }
         }
     }
     true

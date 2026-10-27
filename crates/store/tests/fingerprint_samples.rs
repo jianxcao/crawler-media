@@ -3,6 +3,7 @@ use store::{
     StoredFingerprintSample,
 };
 
+#[allow(clippy::too_many_arguments)]
 fn sample(
     sample_id: &str,
     ledger_id: &str,
@@ -36,14 +37,7 @@ fn samples_survive_reopen_and_preserve_absolute_windows() {
 
     let store = Store::open(&data).unwrap();
     let s = sample(
-        "sample-1",
-        "ledger-1",
-        "src-v1",
-        "prof-1",
-        "intro",
-        100_000,
-        140_000,
-        "job-1",
+        "sample-1", "ledger-1", "src-v1", "prof-1", "intro", 100_000, 140_000, "job-1",
     );
     let attempt = store::StoredFingerprintAttempt {
         attempt_id: "attempt-1".into(),
@@ -99,17 +93,10 @@ fn samples_survive_reopen_and_preserve_absolute_windows() {
 #[test]
 fn covering_sample_requires_same_source_profile_kind_and_job() {
     let temp = tempfile::tempdir().unwrap();
-    let store = Store::open(&temp.path().join("data")).unwrap();
+    let store = Store::open(temp.path().join("data")).unwrap();
 
     let s = sample(
-        "sample-1",
-        "ledger-1",
-        "src-v1",
-        "prof-1",
-        "intro",
-        0,
-        180_000,
-        "job-1",
+        "sample-1", "ledger-1", "src-v1", "prof-1", "intro", 0, 180_000, "job-1",
     );
     let attempt = store::StoredFingerprintAttempt {
         attempt_id: "attempt-1".into(),
@@ -185,7 +172,7 @@ fn covering_sample_requires_same_source_profile_kind_and_job() {
 #[test]
 fn deleting_file_metadata_invalidates_samples_and_referencing_models() {
     let temp = tempfile::tempdir().unwrap();
-    let store = Store::open(&temp.path().join("data")).unwrap();
+    let store = Store::open(temp.path().join("data")).unwrap();
 
     let s1 = sample(
         "s-1", "ledger-1", "src-1", "p-1", "intro", 0, 180_000, "job-1",

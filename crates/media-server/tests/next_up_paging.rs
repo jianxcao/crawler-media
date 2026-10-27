@@ -4,9 +4,13 @@
 //! 聚合与分页都发生在这一次读之后。调用计数正是这个 bug 的判据——旧实现为每个
 //! series 再查一次（`list_calls == 1 + series 数`）。
 //!
-//! 只返回 series 级快照的 provider 无法在一次读里拿到分集，因此默认实现会退回逐
-//! series 查询（无界，见 `provider::query::legacy_next_up`）；生产 provider 覆盖
-//! `next_up_items`，同样一次聚合。
+//! 只返回 series 级快照的 provider 无法在一次读里拿到分集，因此测试 fixture 会
+//! 退回逐 series 查询（无界，见 `tests/support/fixture_provider.rs`）；生产 provider
+//! 自行实现 `next_up_items`，同样一次聚合。
+
+#[path = "support/mod.rs"]
+mod support;
+use support::fixture_provider;
 
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -15,10 +19,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserId};
+use domain::{
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, LibraryId,
+    Media, MediaId, MediaKind, QualitySource, TypedItemId, UnitKey, UserId,
+};
 use media_server::provider::{
-    AuthenticateError, MediaItemMetadata, MediaItemSnapshot, MediaServerProvider, ServerLibrary,
-    ServerUser,
+    AuthenticateError, MediaItemMetadata, MediaItemSnapshot, MediaServerProvider,
+    PlaybackClientInfo, PlaybackEvent, PlaybackEventIdentity, ServerLibrary, ServerUser,
 };
 use serde_json::Value;
 use tower::ServiceExt;
@@ -35,6 +42,10 @@ fn series_media_id(index: usize) -> MediaId {
     MediaId::from_str(&format!("00000000-0000-0000-0000-{:012}", index + 1)).unwrap()
 }
 
+fn wire_series(index: usize) -> String {
+    TypedItemId::Work(series_media_id(index)).to_wire_string()
+}
+
 fn episode_snapshot(series: usize, episode: u32, played: bool) -> MediaItemSnapshot {
     let media = Media {
         id: series_media_id(series),
@@ -49,27 +60,49 @@ fn episode_snapshot(series: usize, episode: u32, played: bool) -> MediaItemSnaps
         bangumi_id: None,
         anilist_id: None,
     };
-    let row = LedgerRow {
-        id: LedgerId::new(),
+    let series_wire = TypedItemId::Work(media.id).to_wire_string();
+    let file = LibraryFile {
+        file_id: LedgerId::new(),
+        library_id: LibraryId::from_str("00000000-0000-0000-0000-0000000000f1").unwrap(),
+        root_id: "root-tv".to_string(),
         media_id: media.id,
-        path: format!("/media/tv/Series{series:02}/S01E{episode:02}.mkv"),
-        season: Some(1),
-        episode: Some(episode),
-        resolution: None,
-        codec: None,
+        kind: MediaKind::Tv,
+        path: PathBuf::from(format!("/media/tv/Series{series:02}/S01E{episode:02}.mkv")),
+        version: FileVersion {
+            revision: 1,
+            source_version: "v1".to_string(),
+        },
+        presence: FilePresence::Present,
+        publication: FilePublication::Published,
+        size_bytes: Some(1_000_000),
+        stat_known: true,
+        created_ns: Some(100),
+        modified_ns: Some(200),
+        source_digest: Some("hash".to_string()),
+        source_path: None,
+        transfer_mode: None,
+        resolution: Some("1080p".to_string()),
+        codec: Some("h264".to_string()),
         hdr: None,
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        release_quality: None,
+        duration_ms: Some(2_400_000),
+        tracks_version: 1,
+        poster_path: None,
+        backdrop_path: None,
+        still_path: None,
     };
     MediaItemSnapshot {
-        row,
+        file,
+        unit: Some(UnitKey::new(1, episode as i32)),
         media,
         ticks: 0,
         play_count: 0,
         played,
         unplayed_item_count: None,
-        parent_id: series_media_id(series).to_string().replace('-', ""),
+        parent_id: series_wire,
         is_series: false,
         chapters: Vec::new(),
         intro_start_ms: None,
@@ -113,7 +146,7 @@ impl EpisodeListProvider {
 
     fn is_played(&self, item: &MediaItemSnapshot) -> bool {
         let series = self.series_index(item);
-        let episode = item.row.episode.unwrap_or_default();
+        let episode = item.unit.map(|u| u.episode as u32).unwrap_or_default();
         self.fully_played.contains(&series)
             || (self.first_episode_played.contains(&series) && episode == 1)
     }
@@ -127,6 +160,42 @@ impl EpisodeListProvider {
 
 #[async_trait::async_trait]
 impl MediaServerProvider for EpisodeListProvider {
+
+    async fn next_up_items(
+        &self,
+        user_id: domain::UserId,
+        series_id: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<media_server::provider::ServerItemPage, String> {
+        fixture_provider::next_up_items(self, user_id, series_id, offset, limit).await
+    }
+    async fn query_latest_items(
+        &self,
+        _principal: media_server::provider::QueryPrincipal,
+        _query: media_server::provider::ServerItemQuery,
+    ) -> Result<Vec<MediaItemSnapshot>, media_server::provider::QueryError> {
+        Ok(Vec::new())
+    }
+
+    async fn query_visible_items(
+        &self,
+        principal: media_server::provider::QueryPrincipal,
+        query: media_server::provider::ServerItemQuery,
+    ) -> Result<media_server::provider::ServerItemPage, media_server::provider::QueryError> {
+        fixture_provider::select_items(self, principal.user_id, query)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn issue_play_session(
+        &self,
+        _user_id: UserId,
+        _device_id: &str,
+        _item_id: &str,
+    ) -> Result<String, String> {
+        Ok(uuid::Uuid::new_v4().to_string())
+    }
     fn server_id(&self) -> String {
         "next-up-server".into()
     }
@@ -139,10 +208,30 @@ impl MediaServerProvider for EpisodeListProvider {
         Ok(None)
     }
 
-    async fn user_id_by_token(&self, token: &str) -> Result<Option<UserId>, String> {
+    async fn user_id_by_token(
+        &self,
+        token: &str,
+        _deadline: Option<std::time::Instant>,
+    ) -> Result<Option<UserId>, media_server::provider::QueryError> {
         Ok((token == "token-a").then(user_id))
     }
 
+    async fn get_user_for_query(
+        &self,
+        principal: media_server::provider::QueryPrincipal,
+    ) -> Result<Option<ServerUser>, media_server::provider::QueryError> {
+        self.get_user(principal.user_id)
+            .await
+            .map_err(media_server::provider::QueryError::Internal)
+    }
+    async fn list_visible_libraries_for_query(
+        &self,
+        principal: media_server::provider::QueryPrincipal,
+    ) -> Result<Vec<ServerLibrary>, media_server::provider::QueryError> {
+        self.list_visible_libraries(principal.user_id)
+            .await
+            .map_err(media_server::provider::QueryError::Internal)
+    }
     async fn get_user(&self, requested: UserId) -> Result<Option<ServerUser>, String> {
         Ok((requested == user_id()).then(|| ServerUser {
             id: requested,
@@ -178,17 +267,17 @@ impl MediaServerProvider for EpisodeListProvider {
                     ..item.clone()
                 })
                 .collect(),
-            Some(parent) => {
-                let compact = parent.replace('-', "");
-                self.items
-                    .iter()
-                    .filter(|item| item.media.id.to_string().replace('-', "") == compact)
-                    .map(|item| MediaItemSnapshot {
-                        played: self.is_played(item),
-                        ..item.clone()
-                    })
-                    .collect()
-            }
+            Some(parent) => self
+                .items
+                .iter()
+                .filter(|item| {
+                    media_server::provider::query::series_media_id(parent) == Some(item.media.id)
+                })
+                .map(|item| MediaItemSnapshot {
+                    played: self.is_played(item),
+                    ..item.clone()
+                })
+                .collect(),
         })
     }
 
@@ -234,12 +323,15 @@ impl MediaServerProvider for EpisodeListProvider {
         Ok(true)
     }
 
-    async fn update_progress(
+    async fn report_playback_event(
         &self,
         _user_id: UserId,
         _id: &str,
         _position_ms: i64,
         _paused: bool,
+        _client: PlaybackClientInfo,
+        _event: PlaybackEvent,
+        _identity: PlaybackEventIdentity,
     ) -> Result<(), String> {
         Ok(())
     }
@@ -269,7 +361,7 @@ async fn next_up_does_not_rescan_for_each_series() {
     assert_eq!(body["Items"].as_array().map(Vec::len), Some(1));
     assert_eq!(
         body["Items"][0]["ParentId"],
-        series_media_id(0).to_string().replace('-', ""),
+        wire_series(0),
         "Limit=1 必须是聚合后的第一条，而不是任意一条"
     );
     assert_eq!(body["Items"][0]["IndexNumber"], 1);
@@ -292,11 +384,11 @@ async fn next_up_picks_the_first_unwatched_episode_per_series() {
     assert_eq!(body["TotalRecordCount"], SERIES - 1, "整部看完的剧不出条目");
     let items = body["Items"].as_array().unwrap();
     let first = &items[0];
-    assert_eq!(first["ParentId"], series_media_id(0).to_string().replace('-', ""));
+    assert_eq!(first["ParentId"], wire_series(0));
     assert_eq!(first["IndexNumber"], 2, "第 1 集已看完时取下一集");
     let seventh = items
         .iter()
-        .find(|item| item["ParentId"] == series_media_id(7).to_string().replace('-', ""))
+        .find(|item| item["ParentId"] == wire_series(7))
         .expect("series 7 entry");
     assert_eq!(seventh["IndexNumber"], 2);
     assert_eq!(provider.list_calls(), 1);
@@ -309,14 +401,8 @@ async fn next_up_pages_after_aggregating_every_series() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["TotalRecordCount"], SERIES, "total 是聚合后的完整条数");
     assert_eq!(body["Items"].as_array().map(Vec::len), Some(2));
-    assert_eq!(
-        body["Items"][0]["ParentId"],
-        series_media_id(48).to_string().replace('-', "")
-    );
-    assert_eq!(
-        body["Items"][1]["ParentId"],
-        series_media_id(49).to_string().replace('-', "")
-    );
+    assert_eq!(body["Items"][0]["ParentId"], wire_series(48));
+    assert_eq!(body["Items"][1]["ParentId"], wire_series(49));
     let (status, beyond) = get(provider.clone(), "/Shows/NextUp?StartIndex=500").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(beyond["Items"].as_array().map(Vec::len), Some(0));
@@ -327,14 +413,15 @@ async fn next_up_pages_after_aggregating_every_series() {
 #[tokio::test]
 async fn next_up_with_series_id_reads_only_that_series() {
     let provider = Arc::new(EpisodeListProvider::new());
-    let series = series_media_id(11).to_string().replace('-', "");
-    let (status, body) = get(provider.clone(), &format!("/Shows/NextUp?SeriesId={series}")).await;
+    let series = wire_series(11);
+    let (status, body) = get(
+        provider.clone(),
+        &format!("/Shows/NextUp?SeriesId={series}"),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["TotalRecordCount"], 1);
-    assert_eq!(
-        body["Items"][0]["ParentId"],
-        series_media_id(11).to_string().replace('-', "")
-    );
+    assert_eq!(body["Items"][0]["ParentId"], wire_series(11));
     assert_eq!(body["Items"][0]["IndexNumber"], 1);
     assert_eq!(provider.list_calls(), 1);
 }

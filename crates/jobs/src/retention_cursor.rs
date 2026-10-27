@@ -14,19 +14,6 @@ pub struct RetentionWindow {
     pub cycle_complete: bool,
 }
 
-pub fn migrate_retention_cursors(conn: &Connection) -> Result<(), JobError> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS retention_cursors (
-             def_id TEXT PRIMARY KEY,
-             cutoff INTEGER NOT NULL,
-             finished_at INTEGER NOT NULL,
-             last_rowid INTEGER NOT NULL,
-             cycle_started_at INTEGER NOT NULL
-         );",
-    )?;
-    Ok(())
-}
-
 struct RawRow {
     rowid: i64,
     id: String,
@@ -52,15 +39,18 @@ fn fetch_candidate_rows(
          ORDER BY finished_at ASC, rowid ASC
          LIMIT ?4",
     )?;
-    let rows_iter = stmt.query_map(params![cutoff, cur_finished_at, cur_rowid, limit + 1], |r| {
-        Ok(RawRow {
-            rowid: r.get(0)?,
-            id: r.get(1)?,
-            def_id: r.get(2)?,
-            finished_at: r.get(3)?,
-            run_after: r.get(4)?,
-        })
-    })?;
+    let rows_iter = stmt.query_map(
+        params![cutoff, cur_finished_at, cur_rowid, limit + 1],
+        |r| {
+            Ok(RawRow {
+                rowid: r.get(0)?,
+                id: r.get(1)?,
+                def_id: r.get(2)?,
+                finished_at: r.get(3)?,
+                run_after: r.get(4)?,
+            })
+        },
+    )?;
     rows_iter.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
@@ -120,7 +110,7 @@ pub fn prune_terminal_window(
     dry_run: bool,
 ) -> Result<RetentionWindow, JobError> {
     let limit = limit.clamp(1, 500);
-    let tx = conn.unchecked_transaction()?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
 
     let cursor_opt: Option<(i64, i64, i64)> = match tx.query_row(
         "SELECT finished_at, last_rowid, cutoff FROM retention_cursors WHERE def_id = ?1",

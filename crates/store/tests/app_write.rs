@@ -29,9 +29,7 @@ fn app_write_commits_when_the_callback_succeeds() {
     let store = Store::open(dir.path()).unwrap();
     store.put_setting(KEY, "old").unwrap();
 
-    store
-        .app_write(|s| s.put_setting(KEY, "new"))
-        .unwrap();
+    store.app_write(|s| s.put_setting(KEY, "new")).unwrap();
     drop(store);
 
     let reopened = Store::open(dir.path()).unwrap();

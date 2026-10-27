@@ -95,8 +95,8 @@ fn make_added<'a>(
         rejected: vec![],
         outcome: subscribe::RunOutcome {
             facts: Default::default(),
-            ledger: vec![],
-            ledger_sources: vec![],
+            files: vec![],
+            file_sources: vec![],
             removed_paths: vec![],
             completed: false,
             transferred_enclosures: vec![],

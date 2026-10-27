@@ -1,6 +1,5 @@
-//! Regression tests for the P1/P2 design work: DB-sourced path maps,
-//! filter-atom JSON storage with legacy DSL compatibility, and the legacy
-//! `playback_progress` table migration.
+//! Regression tests for the P1/P2 design work: DB-sourced path maps and
+//! filter-atom JSON storage (old DSL-shaped rows are refused, not decoded).
 
 use api::{ChosenDownloader, DownloaderEnv, Store, choose_downloader};
 use domain::{AtomRule, Filter, FilterAtom, FilterId};
@@ -133,35 +132,29 @@ fn filter_atoms_round_trip_through_storage() {
 }
 
 #[test]
-fn legacy_dsl_filter_rows_still_load() {
+fn legacy_dsl_filter_rows_are_refused() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let id = FilterId::new();
-    // Write the pre-migration DSL payload directly.
     let conn = rusqlite::Connection::open(dir.path().join("app.db")).unwrap();
     conn.execute(
         "INSERT INTO filters (id, name, atoms_json) VALUES (?1, ?2, ?3)",
-        rusqlite::params![
-            id.to_string(),
-            "旧库",
-            "100:resolution=2160p|50:!hr|30:size=1000-50000"
-        ],
+        rusqlite::params![id.to_string(), "旧库", "100:resolution=2160p|50:!hr"],
     )
     .unwrap();
     drop(conn);
 
-    let loaded = store.get_filter(id).unwrap().unwrap();
-    assert_eq!(loaded.atoms.len(), 3);
-    assert_eq!(loaded.atoms[0].rule, AtomRule::Resolution("2160p".into()));
-    assert!(!loaded.atoms[0].exclude);
-    assert_eq!(loaded.atoms[1].rule, AtomRule::Hr);
-    assert!(loaded.atoms[1].exclude);
-    assert_eq!(
-        loaded.atoms[2].rule,
-        AtomRule::Size {
-            min_mb: Some(1000),
-            max_mb: Some(50_000)
-        }
+    // 切割后旧 shape 必须被拒，且不得静默退化成空 atoms。
+    let err = store
+        .get_filter(id)
+        .expect_err("a non-JSON atoms row must be refused");
+    assert!(
+        err.to_string().contains("filter atoms are not a JSON array"),
+        "expected a non-JSON rejection, got {err}"
+    );
+    assert!(
+        store.list_filters().is_err(),
+        "listing must surface the unreadable row instead of dropping it"
     );
 }
 
@@ -181,62 +174,6 @@ fn seeded_default_filter_parses() {
             .iter()
             .all(|a| matches!(a.rule, AtomRule::Resolution(_)))
     );
-}
-
-// ---------------------------------------------------------------------------
-// Legacy playback_progress table migration
-// ---------------------------------------------------------------------------
-
-#[test]
-fn legacy_playback_progress_is_merged_and_dropped() {
-    let dir = tempfile::tempdir().unwrap();
-    let subscribe_db = dir.path().join("subscribe.db");
-    let user_id = domain::UserId::new();
-    let media_id = domain::MediaId::new();
-
-    // Simulate an old database: the legacy table with a row.
-    {
-        let conn = rusqlite::Connection::open(&subscribe_db).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE playback_progress (
-                user_id TEXT NOT NULL,
-                media_id TEXT NOT NULL,
-                position_ms INTEGER NOT NULL,
-                played INTEGER NOT NULL DEFAULT 0,
-                favorite INTEGER NOT NULL DEFAULT 0,
-                season INTEGER,
-                episode INTEGER,
-                PRIMARY KEY(user_id, media_id)
-            );",
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO playback_progress (user_id, media_id, position_ms, played, favorite)
-             VALUES (?1, ?2, 4242, 1, 0)",
-            rusqlite::params![user_id.to_string(), media_id.to_string()],
-        )
-        .unwrap();
-    }
-
-    // Opening the Store runs the migration.
-    let store = Store::open(dir.path()).unwrap();
-
-    // Data survived into playback_units as the whole-media unit (-1, -1).
-    assert_eq!(
-        store.playback_progress(user_id, media_id).unwrap(),
-        Some(4242)
-    );
-
-    // The legacy table is gone.
-    let conn = rusqlite::Connection::open(&subscribe_db).unwrap();
-    let exists: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='playback_progress')",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(!exists, "legacy playback_progress table should be dropped");
 }
 
 #[test]

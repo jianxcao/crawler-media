@@ -1,4 +1,8 @@
 //! Regression coverage for nested-library ownership and destructive cleanup authorization.
+use store::test_support::{FixtureFile, publish_fixture_file};
+
+#[path = "../support/mod.rs"]
+mod support;
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -6,7 +10,7 @@ use std::sync::Arc;
 
 use api::{Store, router};
 use axum::http::StatusCode;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -55,7 +59,11 @@ async fn create_member(app: &axum::Router, login: &str) -> (domain::UserId, Stri
     (id, token)
 }
 
-fn seed_nested_hidden_movie(store: &Store, child_root: &std::path::Path, member_id: domain::UserId) -> Media {
+fn seed_nested_hidden_movie(
+    store: &Store,
+    child_root: &std::path::Path,
+    member_id: domain::UserId,
+) -> Media {
     let media = Media {
         id: MediaId::new(),
         kind: MediaKind::Movie,
@@ -70,9 +78,11 @@ fn seed_nested_hidden_movie(store: &Store, child_root: &std::path::Path, member_
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    let file_id = LedgerId::new();
+    publish_fixture_file(
+        store,
+        &FixtureFile {
+            file_id: Some(file_id),
             media_id: media.id,
             path: child_root.join("Secret.Movie.mkv").display().to_string(),
             season: None,
@@ -83,19 +93,23 @@ fn seed_nested_hidden_movie(store: &Store, child_root: &std::path::Path, member_
             quality_source: QualitySource::Probe,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
+    let play_session_id =
+        support::session::issue_session(store, member_id, "legacy-hidden", file_id, now);
     store
         .upsert_session(&api::store::SessionRow {
             device_id: "legacy-hidden".into(),
             user_id: member_id,
             media_id: media.id,
-            season: None,
-            episode: None,
+            season: Some(-1),
+            episode: Some(-1),
             client: Some("test".into()),
             device_name: Some("test".into()),
             client_version: None,
@@ -112,8 +126,8 @@ fn seed_nested_hidden_movie(store: &Store, child_root: &std::path::Path, member_
             started_at: now,
             last_report_at: now,
             last_report_at_ms: now * 1000,
-            ledger_id: None,
-            play_session_id: None,
+            ledger_id: Some(file_id.to_string()),
+            play_session_id: Some(play_session_id),
             last_event_sequence: None,
         })
         .unwrap();
@@ -272,22 +286,22 @@ async fn hidden_tv_library_history_does_not_fall_back_to_visible_movie_library()
     store.insert_media(&tv_media).unwrap();
     let tv_file = tv_root.join("show.s01e01.mkv");
     std::fs::write(&tv_file, b"video").unwrap();
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
-            media_id: tv_media.id,
-            path: tv_file.display().to_string(),
-            season: Some(1),
-            episode: Some(1),
-            resolution: Some("1080p".into()),
-            codec: Some("H264".into()),
-            hdr: None,
-            quality_source: QualitySource::Probe,
-            confidence: Confidence::High,
-            filter_score: None,
-        })
-        .unwrap();
+    let tv_file_id = LedgerId::new();
+    let tv_spec = FixtureFile {
+        file_id: Some(tv_file_id),
+        media_id: tv_media.id,
+        path: tv_file.display().to_string(),
+        season: Some(1),
+        episode: Some(1),
+        resolution: Some("1080p".into()),
+        codec: Some("H264".into()),
+        quality_source: QualitySource::Probe,
+        ..Default::default()
+    };
+    publish_fixture_file(&store, &tv_spec).unwrap();
 
+    let play_session_id =
+        support::session::issue_session(&store, member_id, "dev-tv", tv_file_id, 1000);
     store
         .upsert_session(&api::store::SessionRow {
             device_id: "dev-tv".into(),
@@ -311,8 +325,8 @@ async fn hidden_tv_library_history_does_not_fall_back_to_visible_movie_library()
             started_at: 1000,
             last_report_at: 1000,
             last_report_at_ms: 1_000_000,
-            ledger_id: None,
-            play_session_id: None,
+            ledger_id: Some(tv_file_id.to_string()),
+            play_session_id: Some(play_session_id),
             last_event_sequence: None,
         })
         .unwrap();

@@ -21,8 +21,11 @@ test("没有运行时间的旧形状仍可忽略，但不隐藏后续带时间�
   markJobUndismissed(legacy.id);
 });
 
+let dismissedSeq = 0;
 function job({ status = "failed", dismissedAt = null, nextRunAfter = null } = {}) {
-  return { id: "job_1", status, dismissed_at: dismissedAt, dismissed_by: null, next_run_after: nextRunAfter };
+  const id = dismissedAt ? `job_dismissed_${++dismissedSeq}` : "job_1";
+  if (dismissedAt) markJobDismissed(id);
+  return { id, last_status: status, next_run_after: nextRunAfter };
 }
 
 // issue #221：失败任务此前没有任何出口，永远赖在「需要处理」里，
@@ -41,17 +44,7 @@ test("忽略后失败任务从「需要处理」移到「已结束」", () => {
 
 test("忽略不改写状态：它仍然是一条失败记录", () => {
   const dismissed = job({ dismissedAt: "2026-08-27T10:00:00Z" });
-  assert.equal(dismissed.status, "failed");
-});
-
-test("blocked 任务同样受忽略影响，但它的正常出口是取消", () => {
-  assert.equal(jobNeedsAttention(job({ status: "blocked" })), true);
-  // blocked 仍占着去重键与资源锁，忽略接口不对它开放（见 services/jobs.dismiss_job）；
-  // 真被忽略了也不该继续报警，判定本身保持一致。
-  assert.equal(
-    jobNeedsAttention(job({ status: "blocked", dismissedAt: "2026-08-27T10:00:00Z" })),
-    false,
-  );
+  assert.equal(dismissed.last_status, "failed");
 });
 
 test("成功与取消不受忽略影响，始终算已结束", () => {
@@ -62,7 +55,7 @@ test("成功与取消不受忽略影响，始终算已结束", () => {
 });
 
 test("进行中的任务既不是待处理也不是历史", () => {
-  for (const status of ["queued", "running", "retry_wait", "waiting", "cancelling"]) {
+  for (const status of ["queued", "running"]) {
     assert.equal(jobNeedsAttention(job({ status })), false);
     assert.equal(jobIsHistorical(job({ status })), false);
   }

@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 
+use crate::http::store_wait::store_read;
 use crate::http::{err, ok};
 use crate::management::ApiState;
 
@@ -81,7 +82,7 @@ fn record_history_entry(
 }
 
 /// 落盘 torrents 快照并在成功后补写历史条目；失败时不写历史（宁可不记录也不留死链）。
-pub(super) fn save_torrents_history(
+pub(super) async fn save_torrents_history(
     state: &ApiState,
     target: Option<&HistoryTarget>,
     keyword: &str,
@@ -101,27 +102,42 @@ pub(super) fn save_torrents_history(
         "sites": sites,
         "partial": partial,
     });
-    let store = state.store.lock();
-    match store.insert_search_snapshot(
-        &target.id,
-        "torrents",
-        keyword,
-        &payload.to_string(),
-        crate::job_loop::unix_now(),
-    ) {
-        Ok(()) => {
-            record_history_entry(&store, target.user_id, keyword, "torrents", &target.id);
-            true
+    // Review L2: best-effort history persistence is a Store write. It stays
+    // best-effort under contention (`false` = not recorded) rather than failing
+    // the search that already produced results.
+    let snapshot = payload.to_string();
+    let history_id = target.id.clone();
+    let user_id = target.user_id;
+    let keyword_owned = keyword.to_string();
+    match store_read(state, move |store| {
+            store
+                .insert_search_snapshot(
+                    &history_id,
+                    "torrents",
+                    &keyword_owned,
+                    &snapshot,
+                    crate::job_loop::unix_now(),
+                )
+                .map(|()| {
+                    record_history_entry(store, user_id, &keyword_owned, "torrents", &history_id);
+                })
+    })
+    .await
+    {
+        Ok(Ok(())) => true,
+        Ok(Err(error)) => {
+            tracing::error!(%error, history_id = %target.id, "保存搜索结果快照失败，不写历史条目");
+            false
         }
         Err(error) => {
-            tracing::error!(%error, history_id = %target.id, "保存搜索结果快照失败，不写历史条目");
+            tracing::warn!(?error, history_id = %target.id, "搜索历史快照未写入：Store 繁忙");
             false
         }
     }
 }
 
 /// 落盘 titles 快照并在成功后补写历史条目（与 torrents 同一不变式）。
-pub(super) fn save_titles_history(
+pub(super) async fn save_titles_history(
     state: &ApiState,
     target: Option<&HistoryTarget>,
     keyword: &str,
@@ -139,30 +155,39 @@ pub(super) fn save_titles_history(
         "providers": providers,
         "partial": false,
     });
-    let store = state.store.lock();
-    match store.insert_search_snapshot(
-        &target.id,
-        "titles",
-        keyword,
-        &payload.to_string(),
-        crate::job_loop::unix_now(),
-    ) {
-        Ok(()) => {
-            record_history_entry(&store, target.user_id, keyword, "titles", &target.id);
-            true
+    let snapshot = payload.to_string();
+    let history_id = target.id.clone();
+    let user_id = target.user_id;
+    let keyword_owned = keyword.to_string();
+    match store_read(state, move |store| {
+            store
+                .insert_search_snapshot(
+                    &history_id,
+                    "titles",
+                    &keyword_owned,
+                    &snapshot,
+                    crate::job_loop::unix_now(),
+                )
+                .map(|()| {
+                    record_history_entry(store, user_id, &keyword_owned, "titles", &history_id);
+                })
+    })
+    .await
+    {
+        Ok(Ok(())) => true,
+        Ok(Err(error)) => {
+            tracing::error!(%error, history_id = %target.id, "保存标题搜索快照失败，不写历史条目");
+            false
         }
         Err(error) => {
-            tracing::error!(%error, history_id = %target.id, "保存标题搜索快照失败，不写历史条目");
+            tracing::warn!(?error, history_id = %target.id, "标题搜索历史快照未写入：Store 繁忙");
             false
         }
     }
 }
 
 /// 单条删除的事务计划：历史里没有这个 id 就返回 `None`（不删快照、不改设置）。
-fn single_delete_plan(
-    current: Option<&str>,
-    id: &str,
-) -> Option<crate::store::HistoryDeletePlan> {
+fn single_delete_plan(current: Option<&str>, id: &str) -> Option<crate::store::HistoryDeletePlan> {
     let mut history = parse_history(current);
     let before = history.len();
     history.retain(|item| item["id"].as_str() != Some(id));
@@ -255,24 +280,33 @@ pub(crate) async fn search_history(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
 ) -> Response {
-    let store = state.store.lock();
-    let history = history_items(&store, user_id);
-    ok(json!({ "items": history })).into_response()
-}
+    // Review L2: off the executor; a contended lock answers 503 + Retry-After.
+    match store_read(&state, move |store| history_items(store, user_id)).await {
+            Ok(history) => ok(json!({ "items": history })).into_response(),
+            Err(error) => error.response(),
+        }
+    }
 
-pub(crate) async fn get_presets(
-    State(state): State<ApiState>,
-    axum::Extension(user_id): axum::Extension<domain::UserId>,
-) -> Response {
-    let store = state.store.lock();
-    let raw = store
-        .get_setting(&user_setting_key("search.presets", user_id))
-        .ok()
-        .flatten();
-    let presets = raw
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .unwrap_or_else(|| json!([]));
-    ok(json!({ "presets": presets })).into_response()
+    pub(crate) async fn get_presets(
+        State(state): State<ApiState>,
+        axum::Extension(user_id): axum::Extension<domain::UserId>,
+    ) -> Response {
+        match store_read(&state, move |store| {
+            store
+                .get_setting(&user_setting_key("search.presets", user_id))
+                .ok()
+                .flatten()
+    })
+    .await
+    {
+        Ok(raw) => {
+            let presets = raw
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .unwrap_or_else(|| json!([]));
+            ok(json!({ "presets": presets })).into_response()
+        }
+        Err(error) => error.response(),
+    }
 }
 
 pub(crate) async fn put_presets(
@@ -281,35 +315,52 @@ pub(crate) async fn put_presets(
     Json(body): Json<Value>,
 ) -> Response {
     let presets = body.get("presets").cloned().unwrap_or_else(|| json!([]));
-    if let Err(error) = state.store.lock().put_setting(
-        &user_setting_key("search.presets", user_id),
-        &presets.to_string(),
-    ) {
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        );
+    let key = user_setting_key("search.presets", user_id);
+    let value = presets.to_string();
+    match store_read(&state, move |store| store.put_setting(&key, &value)).await {
+            Ok(Ok(())) => ok(json!({ "presets": presets })).into_response(),
+            Ok(Err(error)) => err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            ),
+            Err(error) => error.response(),
+        }
     }
-    ok(json!({ "presets": presets })).into_response()
-}
 
-/// GET /search/history/{id}?vertical=torrents|titles — 回放一次历史搜索的结果快照。
-pub(crate) async fn get_history_snapshot(
-    State(state): State<ApiState>,
-    axum::Extension(user_id): axum::Extension<domain::UserId>,
-    Path(id): Path<String>,
-    Query(query): Query<HashMap<String, String>>,
-) -> Response {
-    let store = state.store.lock();
-    if !history_items(&store, user_id)
-        .iter()
-        .any(|item| item["id"].as_str() == Some(&id))
+    /// GET /search/history/{id}?vertical=torrents|titles — 回放一次历史搜索的结果快照。
+    pub(crate) async fn get_history_snapshot(
+        State(state): State<ApiState>,
+        axum::Extension(user_id): axum::Extension<domain::UserId>,
+        Path(id): Path<String>,
+        Query(query): Query<HashMap<String, String>>,
+    ) -> Response {
+        let id_for_read = id.clone();
+        let (vertical, payload) = match store_read(&state, move |store| {
+            if !history_items(store, user_id)
+                .iter()
+                .any(|item| item["id"].as_str() == Some(&id_for_read))
+            {
+                return Err(err(
+                    StatusCode::NOT_FOUND,
+                    "search.history",
+                    "历史快照不存在",
+                ));
+            }
+            match store.get_search_snapshot(&id_for_read).ok().flatten() {
+                Some((vertical, _, payload, _)) => Ok((vertical, payload)),
+                None => Err(err(
+                    StatusCode::NOT_FOUND,
+                    "search.history",
+                    "历史快照不存在",
+                )),
+            }
+    })
+    .await
     {
-        return err(StatusCode::NOT_FOUND, "search.history", "历史快照不存在");
-    }
-    let Some((vertical, _, payload, _)) = store.get_search_snapshot(&id).ok().flatten() else {
-        return err(StatusCode::NOT_FOUND, "search.history", "历史快照不存在");
+        Ok(Ok(value)) => value,
+        Ok(Err(response)) => return response,
+        Err(error) => return error.response(),
     };
     let want = query
         .get("vertical")
@@ -326,7 +377,7 @@ pub(crate) async fn get_history_snapshot(
             "total": value["total"].clone(),
             "items": value.get("items").cloned().or_else(|| value.get("titles").cloned()).unwrap_or_else(|| json!([])),
             "sites": value.get("sites").cloned().unwrap_or_else(|| json!([])),
-            "keyword": value.get("keyword").cloned().or_else(|| value.get("query").cloned()).unwrap_or_else(|| json!(null)),
+            "keyword": value.get("keyword").cloned().or_else(|| value.get("query").cloned()).unwrap_or(Value::Null),
             "elapsed_ms": value.get("elapsed_ms").cloned().unwrap_or(Value::Null),
             // 客户端中断时落盘的半截快照：可回放，但要如实告诉调用方结果不完整。
             "partial": value.get("partial").cloned().unwrap_or(json!(false)),
@@ -342,11 +393,15 @@ pub(crate) async fn delete_history_entry_route(
     axum::Extension(user_id): axum::Extension<domain::UserId>,
     Path(id): Path<String>,
 ) -> Response {
-    let store = state.store.lock();
-    match delete_history_entry(&store, user_id, &id) {
-        Ok(true) => ok(json!({ "deleted": true })).into_response(),
-        Ok(false) => err(StatusCode::NOT_FOUND, "search.history", "历史快照不存在"),
-        Err(error) => {
+    let id_for_read = id.clone();
+    match store_read(&state, move |store| {
+            delete_history_entry(store, user_id, &id_for_read)
+    })
+    .await
+    {
+        Ok(Ok(true)) => ok(json!({ "deleted": true })).into_response(),
+        Ok(Ok(false)) => err(StatusCode::NOT_FOUND, "search.history", "历史快照不存在"),
+        Ok(Err(error)) => {
             tracing::error!(%error, history_id = %id, "删除历史条目失败");
             err(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -354,6 +409,7 @@ pub(crate) async fn delete_history_entry_route(
                 "删除历史记录失败，请稍后重试",
             )
         }
+        Err(error) => error.response(),
     }
 }
 
@@ -365,11 +421,14 @@ pub(crate) async fn clear_search_history_route(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
 ) -> Response {
-    let store = state.store.lock();
     let key = user_setting_key("search.history", user_id);
-    match store.delete_search_history(&key, clear_plan) {
-        Ok(_) => ok(json!({ "cleared": true })).into_response(),
-        Err(error) => {
+    match store_read(&state, move |store| {
+            store.delete_search_history(&key, clear_plan)
+    })
+    .await
+    {
+        Ok(Ok(_)) => ok(json!({ "cleared": true })).into_response(),
+        Ok(Err(error)) => {
             tracing::error!(%error, %user_id, "清空搜索历史失败");
             err(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -377,5 +436,6 @@ pub(crate) async fn clear_search_history_route(
                 "清空搜索历史失败，请稍后重试",
             )
         }
+        Err(error) => error.response(),
     }
 }

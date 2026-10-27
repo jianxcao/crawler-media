@@ -35,20 +35,17 @@ pub(crate) fn target_id(
     torrent: &Torrent,
 ) -> Result<Option<DownloaderId>, DownloaderError> {
     let store = state.store.lock();
-    if let Some(id) = subscribe.and_then(|sub| sub.downloader_id) {
-        if let Some(id) = enabled_id(&store, id)? {
+    if let Some(id) = subscribe.and_then(|sub| sub.downloader_id)
+        && let Some(id) = enabled_id(&store, id)? {
             return Ok(Some(id));
         }
-    }
     if let Some(id) = store
         .get_site(torrent.site_id)
         .map_err(error)?
         .and_then(|site| site.downloader_id)
-    {
-        if let Some(id) = enabled_id(&store, id)? {
+        && let Some(id) = enabled_id(&store, id)? {
             return Ok(Some(id));
         }
-    }
     Ok(store.default_downloader().map_err(error)?.map(|row| row.id))
 }
 
@@ -212,54 +209,78 @@ impl<'a> RoutedDownloader<'a> {
             .map_err(error)?
             .ok_or_else(|| error("Media not found"))?;
         let library_id = subscribe.library_id.map(|id| id.to_string());
-        let (root, _, _) =
-            crate::directory::transfer_plan_for_library(&store, media.kind, library_id.as_deref())
-                .map_err(error)?;
-        let target = store.library_for_path(&root, media.kind).map_err(error)?;
+        // The transfer root still decides *where* a new file lands and guards a
+        // Library that is being deleted; the sources are the target Library's
+        // recorded files, never the files whose path happens to match. A root
+        // rename cannot retarget a delivery this way.
+        let _ = crate::directory::transfer_plan_for_library(
+            &store,
+            media.kind,
+            library_id.as_deref(),
+        )
+        .map_err(error)?;
+        let target_library = match library_id {
+            Some(id) => id.parse::<domain::LibraryId>().map_err(error)?,
+            None => store
+                .default_library(media.kind)
+                .map_err(error)?
+                .ok_or_else(|| error("target Library not found"))?
+                .id
+                .parse::<domain::LibraryId>()
+                .map_err(error)?,
+        };
         let mut sources = Vec::new();
-        for (row, _, source) in store.list_ledger_with_mode().map_err(error)? {
-            if row.media_id != subscribe.media_id {
+        for coverage in store
+            .file_coverage_in_library(
+                target_library,
+                Some(subscribe.media_id),
+                crate::store::FileReadScope::AllRecorded,
+            )
+            .map_err(error)?
+        {
+            let path = coverage.file.path.as_path();
+            let Some(source) = coverage.file.source_path.as_deref() else {
                 continue;
-            }
-            let path = std::path::Path::new(&row.path);
-            let in_target = match &target {
-                Some(target) => store
-                    .library_for_path(path, media.kind)
-                    .map_err(error)?
-                    .is_some_and(|owner| owner.id == target.id),
-                None => path.starts_with(&root),
             };
-            if in_target {
-                if let Some(source) = source {
-                    let mut file_quality = release::parse(
-                        path.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or_default(),
-                    );
-                    if row.resolution.is_some() {
-                        file_quality.resolution = row.resolution.clone();
+            let mut file_quality = release::parse(
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default(),
+            );
+            if coverage.file.resolution.is_some() {
+                file_quality.resolution = coverage.file.resolution.clone();
+            }
+            if coverage.file.codec.is_some() {
+                file_quality.codec = coverage.file.codec.clone();
+            }
+            if coverage.file.hdr.is_some() {
+                file_quality.hdr = coverage.file.hdr.clone();
+            }
+            let transfer_pending = store
+                .transfer_pending(coverage.file.path.to_string_lossy().as_ref())
+                .map_err(error)?;
+            for unit in &coverage.units {
+                let mut slots = Vec::new();
+                if let Some((from, to)) = file_quality.episode_span() {
+                    for ep in from..=to {
+                        slots.push((file_quality.season, Some(ep)));
                     }
-                    if row.codec.is_some() {
-                        file_quality.codec = row.codec.clone();
-                    }
-                    if row.hdr.is_some() {
-                        file_quality.hdr = row.hdr.clone();
-                    }
-                    let mut slots = Vec::new();
-                    if let Some((from, to)) = file_quality.episode_span() {
-                        for ep in from..=to {
-                            slots.push((file_quality.season, Some(ep)));
-                        }
-                    }
-                    if slots.is_empty() {
-                        slots.push((row.season, row.episode));
-                    }
-                    let mut mapping = subscribe::collection_destinations::DestinationMapping::with_slots_and_quality(
-                        source, path, slots, Some(file_quality),
-                    );
-                    mapping.transfer_pending = store.transfer_pending(&row.path).map_err(error)?;
-                    sources.push(mapping);
                 }
+                if slots.is_empty() {
+                    slots.push(match unit.episode_coordinates() {
+                        Some((season, episode)) => (Some(season), Some(episode)),
+                        None => (None, None),
+                    });
+                }
+                let mut mapping =
+                    subscribe::collection_destinations::DestinationMapping::with_slots_and_quality(
+                        source.to_string_lossy().into_owned(),
+                        path,
+                        slots,
+                        Some(file_quality.clone()),
+                    );
+                mapping.transfer_pending = transfer_pending;
+                sources.push(mapping);
             }
         }
         Ok(sources)

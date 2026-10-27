@@ -1,18 +1,20 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::http::{Request, StatusCode};
-use domain::{Coverage, FetchMode, Media, MediaId, MediaKind, Subscribe, SubscribeId, Torrent, UserRole};
+use domain::{
+    Coverage, FetchMode, Media, MediaId, MediaKind, Subscribe, SubscribeId, Torrent, UserRole,
+};
 use downloader::{Downloader, DownloaderError};
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use media::CatalogHit;
 use serde_json::Value;
 use tower::ServiceExt;
 
+use api::Store;
 use api::catalog::Catalog;
 use api::management::ApiState;
-use api::Store;
 
 struct ForbiddenPosterCatalog {
     poster_calls: AtomicUsize,
@@ -76,9 +78,7 @@ fn authed_get(uri: &str) -> Request<axum::body::Body> {
         .unwrap()
 }
 
-fn fixture(
-    catalog: Arc<ForbiddenPosterCatalog>,
-) -> (axum::Router, MediaId, SubscribeId) {
+fn fixture(catalog: Arc<ForbiddenPosterCatalog>) -> (axum::Router, MediaId, SubscribeId) {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().join("data");
     let store = Store::open(&data_dir).unwrap();
@@ -96,7 +96,13 @@ fn fixture(
 
     let store_arc = state.store();
     let store = store_arc.lock();
-    let user_id = store.list_users().unwrap().into_iter().find(|u| u.role == UserRole::Admin).unwrap().id;
+    let user_id = store
+        .list_users()
+        .unwrap()
+        .into_iter()
+        .find(|u| u.role == UserRole::Admin)
+        .unwrap()
+        .id;
 
     let media_id = MediaId::new();
     let media = Media {
@@ -153,7 +159,9 @@ async fn subscriptions_list_does_not_call_remote_catalog_and_returns_stable_post
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    let bytes = axum::body::to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), 64 * 1024)
+        .await
+        .unwrap();
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     let rows = body["data"].as_array().expect("data array");
     assert_eq!(rows.len(), 1);
@@ -164,7 +172,9 @@ async fn subscriptions_list_does_not_call_remote_catalog_and_returns_stable_post
         "subscriptions list must NEVER invoke catalog.poster_url synchronously!"
     );
 
-    let poster_url = rows[0]["media"]["poster_url"].as_str().expect("poster_url should be present");
+    let poster_url = rows[0]["media"]["poster_url"]
+        .as_str()
+        .expect("poster_url should be present");
     assert_eq!(
         poster_url,
         format!("/media/{media_id}/poster"),
@@ -184,11 +194,18 @@ async fn slow_poster_fetch_does_not_hold_store_lock_or_block_jobs_and_auth() {
             app.clone().oneshot(authed_get("/api/v1/jobs?limit=50")),
             app.clone().oneshot(authed_get("/api/v1/auth/me")),
         );
-        (r1.unwrap().status(), r2.unwrap().status(), r3.unwrap().status())
+        (
+            r1.unwrap().status(),
+            r2.unwrap().status(),
+            r3.unwrap().status(),
+        )
     })
     .await;
 
-    assert!(concurrent.is_ok(), "Concurrent requests must not deadlock or exceed timeout");
+    assert!(
+        concurrent.is_ok(),
+        "Concurrent requests must not deadlock or exceed timeout"
+    );
     let (s1, s2, s3) = concurrent.unwrap();
     assert_eq!(s1, StatusCode::OK);
     assert_eq!(s2, StatusCode::OK);

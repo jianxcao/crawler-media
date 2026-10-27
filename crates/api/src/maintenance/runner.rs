@@ -5,40 +5,40 @@
 //! - 按 `job.kind` 严格解析版本化策略；解析失败**直接失败**，绝不回退成更激进的策略。
 //! - 固定本轮的 `now`（取 claim 时的 `started_at`）与 `cutoff`，避免执行期间窗口漂移。
 //! - 每批只持一次短锁，批间释放；不在持 Store 锁时取 Queue 锁，反之亦然。
+//! - Queue 的访问一律走 [`QueueGuard`]：`jobs::Queue::tick` 已在调用 runner **之前**
+//!   释放 Queue 锁，因此这里再接一次短锁不会自锁（Review L6）。
 //! - 每轮结束把汇总报告写进 `job.progress`（成功与失败都写）。
 //!
 //! 数据库维护的重活跑在**独立连接**上，不在全局 Store/Queue 锁内；但检查 Library 工作
 //! 只是降低冲突，不是与扫描互斥的证明，SQLite busy 与有界执行仍然必须存在。
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use jobs::{Job, JobStatus};
+use parking_lot::Mutex;
 
+use super::data_retention::run_data_retention;
 use super::database::{
     DatabaseName, MaintenanceContext, database_targets, missing_optional_targets,
 };
-use super::data_retention::run_data_retention;
 use super::policy::{
-    BATCH_SIZE, DatabaseMaintenancePolicy, MAX_BATCHES, MAX_BATCH_BUDGET, MaintenancePolicy,
+    BATCH_SIZE, DatabaseMaintenancePolicy, MAX_BATCH_BUDGET, MAX_BATCHES, MaintenancePolicy,
 };
 use super::report::{DatabaseOutcome, DatabaseReport, MaintenanceReport};
 use crate::management::ApiState;
 
 const DAY_SECS: i64 = 86_400;
-/// 探测 Queue 锁是否已被当前路径持有：重试窗口很短，避免维护被前台读请求误伤。
-const QUEUE_PROBE_ATTEMPTS: usize = 10;
-const QUEUE_PROBE_INTERVAL: Duration = Duration::from_millis(10);
 
 /// 维护类任务的统一入口（`worker::StateRunner` 在**不持 Queue 锁**时调用）。
 pub fn run(state: &ApiState, job: &Job) -> Result<(), String> {
     let policy = MaintenancePolicy::parse(job.kind, &job.payload)?;
-    refuse_when_queue_lock_held(state)?;
     // 进程内互斥：`concurrency_key` 只防同一个 def 重叠，这里覆盖不同维护 def。
     let _exclusive = state
         .maintenance_lock
         .try_lock()
         .ok_or("已有维护任务在执行，本轮不重叠")?;
 
+    let queue = QueueGuard::new(&state.jobs);
     let now = job.started_at.unwrap_or_else(crate::job_loop::unix_now);
     let started = Instant::now();
     let check_stop = || check_maintenance_stop(state, job);
@@ -66,8 +66,8 @@ pub fn run(state: &ApiState, job: &Job) -> Result<(), String> {
                 .map(|def_id| def_id.to_string())
                 .unwrap_or_else(|| "__adhoc__".to_string());
             run_batches(&mut report, dry_run, &check_stop, || {
-                let queue = state.jobs.lock();
                 queue
+                    .lock()
                     .prune_terminal_window(&cursor_key, cutoff, BATCH_SIZE, dry_run)
                     .map(BatchCounts::from_jobs_window)
                     .map_err(|error| error.to_string())
@@ -101,7 +101,7 @@ pub fn run(state: &ApiState, job: &Job) -> Result<(), String> {
     if report.note.is_some() {
         tracing::warn!(job_id = %job.id, kind = job.kind.as_str(), note = ?report.note, "维护任务被降级或提前停止");
     }
-    let written = write_progress(state, job, &report);
+    let written = write_progress(&queue, job, &report);
     match (outcome, written) {
         (Ok(()), Ok(())) => {
             tracing::info!(
@@ -118,16 +118,25 @@ pub fn run(state: &ApiState, job: &Job) -> Result<(), String> {
     }
 }
 
-/// `Queue::tick` 会在持有 Queue 锁时调用 runner；本模块随后要取 Queue 短锁，重入
-/// `parking_lot::Mutex` 会死锁。因此持锁路径一律明确拒绝，而不是静默执行。
-fn refuse_when_queue_lock_held(state: &ApiState) -> Result<(), String> {
-    for _ in 0..QUEUE_PROBE_ATTEMPTS {
-        if state.jobs.try_lock().is_some() {
-            return Ok(());
-        }
-        std::thread::sleep(QUEUE_PROBE_INTERVAL);
+/// 维护任务访问 Queue 的唯一入口。
+///
+/// Review L6: 旧实现靠 `try_lock` 探测"调用方是否持锁"，既是竞态也表达不了约定。
+/// 现在 `jobs::Queue::tick` 在调用 runner 前就释放了 Queue 锁，所以维护任务可以
+/// 直接取短锁；把 Queue 包成这个类型，是为了让"维护代码只能通过它取锁"成为类型约定，
+/// 而不是每个调用点各自凭记忆加锁。
+pub(crate) struct QueueGuard<'a> {
+    queue: &'a Mutex<jobs::Queue>,
+}
+
+impl<'a> QueueGuard<'a> {
+    fn new(queue: &'a Mutex<jobs::Queue>) -> Self {
+        Self { queue }
     }
-    Err("维护任务不能在持有 Queue 锁的路径中执行（Queue::tick / 持锁 runner）；请由后台 job_loop 调度".into())
+
+    /// 取一次 Queue 短锁（批处理边界上释放）。
+    fn lock(&self) -> parking_lot::MutexGuard<'a, jobs::Queue> {
+        self.queue.lock()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,10 +166,15 @@ impl MaintenanceStop {
 /// 3. 本次 job 状态是否已被取消或变更 (cancelled)
 /// 4. 状态读取失败保守停止 (read failed)
 pub fn check_maintenance_stop(state: &ApiState, job: &Job) -> MaintenanceStop {
+    let queue = QueueGuard::new(&state.jobs);
+    check_stop(state, &queue, job)
+}
+
+fn check_stop(state: &ApiState, guard: &QueueGuard<'_>, job: &Job) -> MaintenanceStop {
     if state.job_loop_control().is_stopping() {
         return MaintenanceStop::ShuttingDown;
     }
-    let queue = state.jobs.lock();
+    let queue = guard.lock();
     if let Some(def_id) = job.def_id {
         match queue.def(def_id) {
             Ok(Some(def)) if !def.enabled => return MaintenanceStop::Disabled,
@@ -200,11 +214,15 @@ fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-fn write_progress(state: &ApiState, job: &Job, report: &MaintenanceReport) -> Result<(), String> {
+fn write_progress(
+    queue: &QueueGuard<'_>,
+    job: &Job,
+    report: &MaintenanceReport,
+) -> Result<(), String> {
     let json =
         serde_json::to_string(report).map_err(|error| format!("序列化维护报告失败: {error}"))?;
-    let queue = state.jobs.lock();
     queue
+        .lock()
         .set_job_progress(job.id, &json)
         .map_err(|error| format!("写入维护报告失败: {error}"))
 }
@@ -232,6 +250,17 @@ fn run_database(
     // 预检：Library 工作运行时跳过重型维护，但仍做轻量 optimize（报告里写明原因）。
     let library_busy = state.library_work.has_active_work();
     let vacuum_enabled = policy.vacuum_enabled && !library_busy;
+    // L5: 完整 VACUUM 会拿独占锁。准入期间关写门禁：前台写立刻 503 + `Retry-After`，
+    // 而不是在 SQLite busy 上耗满 `busy_timeout` 再报 500。默认策略
+    // `vacuum_enabled=false`，因此默认安装不会关闸。
+    let write_gate = vacuum_enabled.then(|| state.write_gate());
+    let _gate_guard = write_gate.as_ref().map(|gate| {
+        tracing::info!(
+            job_id = %job.id,
+            "维护关闸：VACUUM 准入期间前台写入口返回 503"
+        );
+        gate.close()
+    });
     if policy.vacuum_enabled && library_busy {
         report.note =
             Some("Library 工作运行中，本轮跳过重型 VACUUM（仍执行 PRAGMA optimize）".to_string());
@@ -449,8 +478,7 @@ fn run_batches(
         more_remains = true;
     }
     report.batches = batches;
-    report.budget_exhausted =
-        more_remains && (dry_run || batches >= MAX_BATCHES || time_exhausted);
+    report.budget_exhausted = more_remains && (dry_run || batches >= MAX_BATCHES || time_exhausted);
     if time_exhausted {
         tracing::info!(
             batches,

@@ -37,6 +37,7 @@ pub enum ArtworkOutcome {
 /// Best-effort poster for a transferred file (Emby-style):
 /// 1. catalog poster URL (TMDB etc.) if reachable;
 /// 2. else extract a video frame locally (network-independent fallback).
+///
 /// Writes `poster.jpg` beside the video. Any failure keeps sidecars intact.
 pub fn attach_poster(state: &ApiState, media: &Media, video: &Path) -> Option<Vec<u8>> {
     attach_poster_opts(state, media, video, true)
@@ -45,6 +46,7 @@ pub fn attach_poster(state: &ApiState, media: &Media, video: &Path) -> Option<Ve
 /// 扫描缺图补齐专用的海报附着：
 /// 当 `target` 已存在时，直接复用现有文件，不重复走网络下载或视频截帧；
 /// 仅当海报文件不存在时才执行下载或截帧补齐。
+#[allow(dead_code)]
 pub fn attach_poster_if_missing(state: &ApiState, media: &Media, video: &Path) -> Option<Vec<u8>> {
     match attach_poster_outcome_opts(state, media, video, false) {
         ArtworkOutcome::Written | ArtworkOutcome::AlreadyPresent => {
@@ -91,7 +93,10 @@ fn attach_poster_outcome_opts(
 ) -> ArtworkOutcome {
     attach_poster_with(state, media, video, force, |video| {
         let lease = state.acquire_path_work(video, media.kind)?;
-        let control = lease.as_ref().map(|lease| lease.control().clone()).unwrap_or_default();
+        let control = lease
+            .as_ref()
+            .map(|lease| lease.control().clone())
+            .unwrap_or_default();
         frame_poster_controlled(video, &control)
     })
 }
@@ -221,6 +226,7 @@ fn attach_poster_with(
 
     match check_existing_poster(state, media, &target, force) {
         ExistingPoster::Locked | ExistingPoster::Present => {
+            record_discovered_artwork(state, video);
             return ArtworkOutcome::AlreadyPresent;
         }
         ExistingPoster::Missing => {}
@@ -228,6 +234,7 @@ fn attach_poster_with(
 
     // Channel 1: catalog artwork.
     if attach_poster_catalog(state, media, video, &target, lease.as_ref()).is_some() {
+        record_discovered_artwork(state, video);
         return ArtworkOutcome::Written;
     }
     if !crate::scrape_metadata::targets::video_present(video) {
@@ -235,9 +242,14 @@ fn attach_poster_with(
     }
 
     // Channel 2: local video frame → 2:3 poster (no network needed).
-    match write_frame_poster(state, media, video, &target, lease.as_ref(), frame) {
-        Some(outcome) => return outcome,
-        None => {}
+    if let Some(outcome) = write_frame_poster(state, media, video, &target, lease.as_ref(), frame) {
+        if matches!(
+            outcome,
+            ArtworkOutcome::Written | ArtworkOutcome::AlreadyPresent
+        ) {
+            record_discovered_artwork(state, video);
+        }
+        return outcome;
     }
     tracing::warn!(
         media = %media.title,
@@ -296,7 +308,18 @@ fn write_frame_poster(
         .extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"));
-    if is_strm || !thumbnails_allowed(state, video) || !crate::scrape_metadata::targets::video_present(video) {
+    // The source disappearing wins over every policy question: there is nothing to
+    // frame, and that is "skipped", not "failed".
+    if !crate::scrape_metadata::targets::video_present(video) {
+        tracing::debug!(video = %video.display(), "源视频已不存在，跳过截帧海报");
+        return Some(ArtworkOutcome::Skipped);
+    }
+    // Thumbnail generation is a Library setting, so a file no Library recorded has no
+    // policy to consult: skip the channel instead of defaulting to "allowed".
+    let Some(library_id) = recorded_library_id(state, video) else {
+        return Some(ArtworkOutcome::Skipped);
+    };
+    if is_strm || !thumbnails_allowed(state, &library_id) {
         return None;
     }
     match frame_poster_with(video, frame) {
@@ -322,24 +345,39 @@ fn write_frame_poster(
     }
 }
 
-fn thumbnails_allowed(state: &ApiState, video: &Path) -> bool {
+/// The Library that recorded `video`. Ownership is the row's explicit
+/// `library_files.library_id`; the path is only the identity of the row.
+fn recorded_library_id(state: &ApiState, video: &Path) -> Option<domain::LibraryId> {
     let store = state.store.lock();
-    let Ok(libraries) = store.list_libraries() else {
-        return true;
-    };
-    libraries
-        .into_iter()
-        .filter(|lib| lib.root_paths.iter().any(|root| video.starts_with(root)))
-        .max_by_key(|lib| {
-            lib.root_paths
-                .iter()
-                .filter(|root| video.starts_with(root))
-                .map(|root| root.components().count())
-                .max()
-                .unwrap_or(0)
-        })
-        .map(|lib| lib.generate_thumbnails)
-        .unwrap_or(true)
+    match store.file_coverage_by_path(&video.to_string_lossy()) {
+        Ok(Some(coverage)) => Some(coverage.file.library_id),
+        Ok(None) => {
+            tracing::debug!(video = %video.display(), "文件没有台账归属，跳过截帧海报");
+            None
+        }
+        Err(error) => {
+            tracing::warn!(%error, video = %video.display(), "读取文件归属失败，跳过截帧海报");
+            None
+        }
+    }
+}
+
+/// Thumbnail generation is a Library setting. The Library comes from the file's
+/// recorded owner, never from which root the path starts with, and a lookup that
+/// fails refuses the work instead of silently allowing it.
+fn thumbnails_allowed(state: &ApiState, library_id: &domain::LibraryId) -> bool {
+    let store = state.store.lock();
+    match store.get_library(&library_id.to_string()) {
+        Ok(Some(library)) => library.generate_thumbnails,
+        Ok(None) => {
+            tracing::warn!(%library_id, "文件记录的 Library 已不存在，跳过截帧海报");
+            false
+        }
+        Err(error) => {
+            tracing::warn!(%error, %library_id, "读取 Library 缩略图设置失败，跳过截帧海报");
+            false
+        }
+    }
 }
 
 fn frame_poster_with(
@@ -396,7 +434,10 @@ fn publish_artwork(
     bytes: &[u8],
 ) -> Option<Vec<u8>> {
     match lease {
-        Some(lease) => lease.publish(|| Ok(write_artwork(media, target, kind, bytes))).ok().flatten(),
+        Some(lease) => lease
+            .publish(|| Ok(write_artwork(media, target, kind, bytes)))
+            .ok()
+            .flatten(),
         None => write_artwork(media, target, kind, bytes),
     }
 }
@@ -405,7 +446,33 @@ fn poster_url_at_size(url: &str, size: &str) -> String {
     url.replace("/t/p/w342/", &format!("/t/p/{size}/"))
 }
 
+/// Persist the artwork that now exists beside `video` on its file row.
+///
+/// Discovery runs after the write, so only files that really carry artwork get a
+/// reference. The version check keeps a late worker from attaching artwork to a file
+/// that was replaced while the download ran.
+pub(crate) fn record_discovered_artwork(state: &ApiState, video: &Path) {
+    let store = state.store.lock();
+    let Ok(Some((file_id, version))) = store.file_version_for_path(&video.to_string_lossy()) else {
+        return;
+    };
+    let discovered = store::files::DiscoveredArtwork::discover(video);
+    let artwork = store::library_write::FileArtwork {
+        poster: discovered.poster.as_deref(),
+        backdrop: discovered.backdrop.as_deref(),
+        still: discovered.still.as_deref(),
+    };
+    if let Err(error) = store.record_file_artwork(file_id, &version, &artwork) {
+        tracing::warn!(
+            %error,
+            video = %video.display(),
+            "记录文件封面失败：封面不会出现在卡片上"
+        );
+    }
+}
+
 /// Extract a 2:3 poster (342x513) from a video frame via ffmpeg.
+#[allow(dead_code)]
 pub fn frame_poster(video: &Path) -> Result<Vec<u8>, String> {
     frame_poster_controlled(video, &library::WorkControl::default())
 }
@@ -415,7 +482,6 @@ fn frame_poster_controlled(
     control: &library::WorkControl,
 ) -> Result<Vec<u8>, String> {
     use std::process::Command;
-    let _permit = marker::media_read::acquire_media_read(video, control.signal())?;
     let out = tempfile_posters_dir()?.join(format!(
         "frame-{}-{}.jpg",
         std::process::id(),
@@ -425,9 +491,12 @@ fn frame_poster_controlled(
             .unwrap_or(0)
     ));
     let mut command = Command::new("ffmpeg");
-    command.args(["-y", "-ss", "60"]);
-    library::ProbeTarget::from_path(video).apply_ffmpeg_input(&mut command);
     command.args([
+        "-y",
+        "-ss",
+        "60",
+        "-i",
+        &video.display().to_string(),
         "-frames:v",
         "1",
         "-vf",
@@ -451,6 +520,7 @@ fn tempfile_posters_dir() -> Result<std::path::PathBuf, String> {
     Ok(dir)
 }
 
+#[allow(dead_code)]
 pub fn poster_fetch(state: &ApiState) -> Arc<dyn PosterFetch> {
     state.poster_fetch.clone()
 }
@@ -556,6 +626,7 @@ fn attach_backdrop_outcome_opts(
     };
     if !force && target.is_file() {
         tracing::debug!(media = %media.title, path = %target.display(), "背景图已存在，跳过下载");
+        record_discovered_artwork(state, video);
         return ArtworkOutcome::AlreadyPresent;
     }
     let Some(tmdb_id) = media.tmdb_id.as_deref() else {
@@ -596,6 +667,7 @@ fn attach_backdrop_outcome_opts(
         return ArtworkOutcome::Skipped;
     }
     if publish_artwork(lease.as_ref(), media, &target, "背景图", &bytes).is_some() {
+        record_discovered_artwork(state, video);
         ArtworkOutcome::Written
     } else {
         ArtworkOutcome::Failed
@@ -620,4 +692,3 @@ fn lang_matches(candidate: &Option<String>, want: &Option<String>) -> bool {
 
 #[cfg(test)]
 mod tests;
-

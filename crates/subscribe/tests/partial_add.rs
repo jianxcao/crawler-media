@@ -66,7 +66,7 @@ fn successful_download_additions_are_returned_when_another_add_fails() {
             exclude: false,
         }],
         keep_old_versions: false,
-};
+    };
     let subscribe = Subscribe {
         id: SubscribeId::new(),
         user_id: UserId::new(),
@@ -109,6 +109,9 @@ fn successful_download_additions_are_returned_when_another_add_fails() {
         facts: SubscribeFacts::default(),
         downloader: &downloader,
         library_root: std::path::Path::new("/tmp/library"),
+        library_id: None,
+        root_id: None,
+        config_revision: None,
         transfer_mode: None,
         scrape: false,
         hooks: None,

@@ -14,6 +14,7 @@ use crate::subtitle_delivery::SubtitleServiceError;
 use library::DeliveryError;
 
 use crate::management::ApiState;
+mod query_lookups;
 mod read_snapshot;
 use store::PlaybackUnitSnapshot;
 
@@ -21,22 +22,24 @@ struct ServerReadSnapshot {
     ownership: store::LibraryOwnership,
     is_admin: bool,
     media: HashMap<domain::MediaId, domain::Media>,
-    rows: Vec<domain::LedgerRow>,
+    coverages: Vec<domain::FileCoverage>,
     units: Vec<PlaybackUnitSnapshot>,
+    /// Published + present source facts per candidate file.
+    files: HashMap<domain::LedgerId, domain::LibraryFile>,
 }
 mod item_metadata;
 mod person_images;
 mod playback;
+mod stream_binding;
 use item_metadata::{
     backdrop_path, item_metadata, local_primary_image, merge_catalog_metadata, primary_image_url,
 };
 
 mod enrichment;
-mod items;
+pub(crate) mod items;
 mod selection;
 mod user_marks;
-use items::resolve_fallback_item;
-use user_marks::{persist_unplayed_override, resolve_mark_unit, unit_played, write_favorite_mark};
+use user_marks::resolve_mark_unit;
 
 pub(crate) fn default_library_cover(kind: MediaKind) -> Result<Vec<u8>, String> {
     const DEFAULT_MOVIE_COVER: &[u8] = include_bytes!("../assets/covers/movie.jpg");
@@ -52,19 +55,18 @@ pub(crate) fn default_library_cover(kind: MediaKind) -> Result<Vec<u8>, String> 
 }
 
 fn library_cover_tag(cover_path: Option<&std::path::Path>, kind: MediaKind) -> String {
-    if let Some(path) = cover_path {
-        if let Ok(meta) = std::fs::metadata(path) {
-            let mtime = meta.modified().ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|duration| duration.as_secs()).unwrap_or(0);
+    if let Some(path) = cover_path
+        && let Ok(meta) = std::fs::metadata(path) {
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
             return format!("cover-{:x}-{:x}", meta.len(), mtime);
         }
-    }
     let bytes = default_library_cover(kind).unwrap_or_default();
     format!("cover-{:x}", Sha256::digest(bytes))
-}
-
-fn is_series_item_id(id: &str, media_id: domain::MediaId) -> bool {
-    id.parse::<domain::MediaId>()
-        .is_ok_and(|requested_media_id| requested_media_id == media_id)
 }
 
 fn catalog_episode_still_url(path: &str) -> Option<String> {
@@ -118,6 +120,10 @@ impl MediaServerProvider for ApiServerProvider {
         self.state.jellyfin_server_id().to_string()
     }
 
+    fn record_query_phase(&self, phase: &'static str, duration: std::time::Duration) {
+        self.state.record_query_phase(phase, duration);
+    }
+
     async fn authenticate_password(
         &self,
         username: &str,
@@ -151,9 +157,26 @@ impl MediaServerProvider for ApiServerProvider {
         )))
     }
 
-    async fn user_id_by_token(&self, token: &str) -> Result<Option<UserId>, String> {
-        let store = self.state.store.lock();
-        store.user_id_by_token(token).map_err(|e| e.to_string())
+    async fn user_id_by_token(
+        &self,
+        token: &str,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Option<UserId>, media_server::provider::QueryError> {
+        // Task 27：token→用户是 app.db 的一次读，走专用读连接（`AppReader`），
+        // 不再排在进程级 `Store` 锁后面——否则扫描期间 Jellyfin 协议面（Infuse/
+        // Emby 客户端）与自有 API 一样每个请求都 503。阶段名仍是 `auth`：
+        // `library_read_metrics` 按 `timeout_stage == "auth"` 观察。
+        let deadline = deadline
+            .unwrap_or_else(|| std::time::Instant::now() + crate::http::store_wait::STORE_READ_WAIT);
+        let token = token.to_owned();
+        crate::library_read_work::run_app_read_stage_named(
+            &self.state,
+            deadline,
+            "auth",
+            move |reader| reader.user_id_by_token(&token),
+        )
+        .await
+        .map_err(query_stage_error)
     }
 
     /// 先 resolve 可见行，再交给共享 single-flight 字幕服务。
@@ -172,8 +195,8 @@ impl MediaServerProvider for ApiServerProvider {
             return Ok(None);
         };
         let request = crate::subtitle_delivery::SubtitleRequest {
-            ledger_id: snapshot.row.id,
-            source_path: std::path::PathBuf::from(&snapshot.row.path),
+            ledger_id: snapshot.file.file_id,
+            source_path: snapshot.file.path.clone(),
             kind: snapshot.media.kind,
             tracks: snapshot.metadata.tracks,
             index,
@@ -206,12 +229,39 @@ impl MediaServerProvider for ApiServerProvider {
         user_id: UserId,
         device_id: &str,
         token: &str,
-    ) -> Result<(), String> {
-        self.state
-            .store
-            .lock()
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(), media_server::provider::QueryError> {
+        if !self.state.instance_writable() {
+            tracing::warn!(%user_id, "Playback credential observation skipped in read-only instance");
+            return Ok(());
+        }
+        if let Some(deadline) = deadline {
+            let state = self.state.clone();
+            let device_id = device_id.to_owned();
+            let token = token.to_owned();
+            return crate::library_read_work::run_store_query_stage_named(
+                &state.clone(),
+                deadline,
+                "credential_binding",
+                move |store| {
+                    if !state.instance_writable() {
+                        return Ok(());
+                    }
+                    store
+                        .bind_playback_credential(user_id, &device_id, &token)
+                        .map_err(Into::into)
+                },
+            )
+            .await
+            .map_err(query_stage_error);
+        }
+        let store = self.state.store.lock();
+        if !self.state.instance_writable() {
+            return Ok(());
+        }
+        store
             .bind_playback_credential(user_id, device_id, token)
-            .map_err(|error| error.to_string())
+            .map_err(|error| media_server::provider::QueryError::Internal(error.to_string()))
     }
 
     async fn get_user(&self, user_id: UserId) -> Result<Option<ServerUser>, String> {
@@ -227,25 +277,60 @@ impl MediaServerProvider for ApiServerProvider {
         }))
     }
 
+    async fn get_user_for_query(
+        &self,
+        principal: media_server::provider::QueryPrincipal,
+    ) -> Result<Option<ServerUser>, media_server::provider::QueryError> {
+        query_lookups::get_user_for_query(&self.state, principal).await
+    }
+
+    async fn list_visible_libraries_for_query(
+        &self,
+        principal: media_server::provider::QueryPrincipal,
+    ) -> Result<Vec<ServerLibrary>, media_server::provider::QueryError> {
+        query_lookups::list_visible_libraries_for_query(&self.state, principal).await
+    }
+
     async fn list_visible_libraries(&self, user_id: UserId) -> Result<Vec<ServerLibrary>, String> {
         let state = self.state.clone();
         let budget = state.http_work.clone();
-        budget.run(std::time::Duration::from_secs(30), move || {
-            let store = state.store.lock();
-            let ownership = store.library_ownership().map_err(|error| error.to_string())?;
-            let role = store.user_role(user_id).map_err(|error| error.to_string())?;
-            let libraries = store.list_libraries().map_err(|error| error.to_string())?;
-            let mut list = Vec::new();
-            for lib in libraries {
-                let visible = ownership.accepts_work(&lib.id) && if role == "admin" { lib.admin_visible } else { lib.access_mode == "everyone" || lib.member_ids.contains(&user_id) };
-                if !visible { continue; }
-                let cover_path = crate::http::library::library_cover_path(&store, &lib);
-                let cover_tag = library_cover_tag(cover_path.as_deref(), lib.kind);
-                list.push(ServerLibrary { id: lib.id, name: lib.name, kind: lib.kind, exclude_from_home: lib.exclude_from_home,
-                    root_paths: lib.root_paths, cover_path: cover_path.map(|path| path.display().to_string()), cover_tag });
-            }
-            Ok::<_, String>(list)
-        }).await.map_err(|error| error.to_string())?
+        budget
+            .run(std::time::Duration::from_secs(30), move || {
+                let store = state.store.lock();
+                let ownership = store
+                    .library_ownership()
+                    .map_err(|error| error.to_string())?;
+                let role = store
+                    .user_role(user_id)
+                    .map_err(|error| error.to_string())?;
+                let libraries = store.list_libraries().map_err(|error| error.to_string())?;
+                let mut list = Vec::new();
+                for lib in libraries {
+                    let visible = ownership.accepts_work(&lib.id)
+                        && if role == "admin" {
+                            lib.admin_visible
+                        } else {
+                            lib.access_mode == "everyone" || lib.member_ids.contains(&user_id)
+                        };
+                    if !visible {
+                        continue;
+                    }
+                    let cover_path = crate::http::library::library_cover_path(&store, &lib);
+                    let cover_tag = library_cover_tag(cover_path.as_deref(), lib.kind);
+                    list.push(ServerLibrary {
+                        id: lib.id,
+                        name: lib.name,
+                        kind: lib.kind,
+                        exclude_from_home: lib.exclude_from_home,
+                        root_paths: lib.root_paths,
+                        cover_path: cover_path.map(|path| path.display().to_string()),
+                        cover_tag,
+                    });
+                }
+                Ok::<_, String>(list)
+            })
+            .await
+            .map_err(|error| error.to_string())?
     }
 
     async fn list_visible_items(
@@ -267,10 +352,18 @@ impl MediaServerProvider for ApiServerProvider {
     /// 生产路径：轻候选 → 完整筛选/排序/计数 → 只为本页构建重元数据。
     async fn query_visible_items(
         &self,
-        user_id: UserId,
+        principal: media_server::provider::QueryPrincipal,
         query: ServerItemQuery,
-    ) -> Result<ServerItemPage, String> {
-        selection::query_visible_items(self, user_id, query).await
+    ) -> Result<ServerItemPage, media_server::provider::QueryError> {
+        selection::query_visible_items(self, principal, query).await
+    }
+
+    async fn query_latest_items(
+        &self,
+        principal: media_server::provider::QueryPrincipal,
+        query: ServerItemQuery,
+    ) -> Result<Vec<MediaItemSnapshot>, media_server::provider::QueryError> {
+        selection::query_latest_items(self, principal, query).await
     }
 
     /// 生产路径：一次候选读 + 每 Media 第一条未看 + 整体分页。
@@ -284,99 +377,24 @@ impl MediaServerProvider for ApiServerProvider {
         selection::next_up_items(self, user_id, series_id, offset, limit).await
     }
 
-    async fn list_resumable_items(
+    /// 生产路径：续播候选在锁内选完，只为返回页构建重元数据。
+    async fn resumable_items_page(
         &self,
         user_id: UserId,
+        offset: usize,
         limit: usize,
-    ) -> Result<Vec<MediaItemSnapshot>, String> {
-        let targets = {
-            let store = self.state.store.lock();
-            store.user_resumable_units(user_id).unwrap_or_default()
-        };
-        let mut results = Vec::new();
-        let mut seen_media = std::collections::HashSet::new();
-        for (media_id, season, episode, _pos, _updated) in targets {
-            if seen_media.contains(&media_id) {
-                continue;
-            }
-            if resume_effectively_played(&self.state, user_id, media_id, season, episode) {
-                tracing::debug!(
-                    %user_id,
-                    %media_id,
-                    season,
-                    episode,
-                    "skipping resume candidate overridden by a newer played mark"
-                );
-                continue;
-            }
-            let s_opt = if season < 0 { None } else { Some(season as u32) };
-            let e_opt = if episode < 0 { None } else { Some(episode as u32) };
-            // 锁内只取 owned DB 事实；锁外才做 NFO/stat/字幕 IO。
-            let found = {
-                let store = self.state.store.lock();
-                match store.get_ledger_by_unit(media_id, s_opt, e_opt) {
-                    Ok(Some(row)) => match store.get_media(media_id) {
-                        Ok(Some(media)) => crate::http::library::row_visible_to_user(
-                            &store,
-                            &row,
-                            &media,
-                            Some(user_id),
-                        )
-                        .then_some((row, media)),
-                        _ => None,
-                    },
-                    _ => None,
-                }
-            };
-            let snapshot = found
-                .map(|(row, media)| items::fallback_snapshot(&self.state, user_id, row, media, false));
-            if let Some(sn) = snapshot {
-                if sn.played {
-                    continue;
-                }
-                seen_media.insert(media_id);
-                results.push(sn);
-                if results.len() >= limit {
-                    break;
-                }
-            }
-        }
-        Ok(results)
+    ) -> Result<ServerItemPage, String> {
+        selection::resumable_items(self, user_id, offset, limit).await
     }
     async fn resolve_single_item(
         &self,
         user_id: UserId,
         id: &str,
     ) -> Result<Option<MediaItemSnapshot>, String> {
-        let compact_id = id.replace('-', "");
-        let found = {
-            let store = self.state.store.lock();
-            let row = crate::http::media_visibility::resolve_visible_row(&store, id, Some(user_id));
-            match row {
-                Some(row) => store
-                    .get_media(row.media_id)
-                    .ok()
-                    .flatten()
-                    .map(|media| (row, media)),
-                None => None,
-            }
-        };
-        let direct = found.map(|(row, media)| {
-            let is_series = media.kind == MediaKind::Tv
-                && (compact_id == media.id.to_string().replace('-', "")
-                    || id == media.id.to_string());
-            items::fallback_snapshot(&self.state, user_id, row, media, is_series)
-        });
-
-        if let Some(snapshot) = direct {
-            return Ok(Some(self.enrich_single_item(snapshot).await));
+        match items::entry_snapshot(&self.state, user_id, id)? {
+            Some(snapshot) => Ok(Some(self.enrich_single_item(snapshot).await)),
+            None => Ok(None),
         }
-
-        let fallback = resolve_fallback_item(&self.state, user_id, id, &compact_id);
-        if let Some(snapshot) = fallback {
-            return Ok(Some(self.enrich_single_item(snapshot).await));
-        }
-        Ok(None)
     }
 
     async fn resolve_user_item_data(
@@ -384,61 +402,19 @@ impl MediaServerProvider for ApiServerProvider {
         user_id: UserId,
         id: &str,
     ) -> Result<Option<media_server::provider::UserItemData>, String> {
-        let compact_id = id.replace('-', "");
-        let items = self.list_visible_items(user_id, None).await?;
-        for it in items {
-            let target = if it.is_series {
-                it.media.id.to_string().replace('-', "")
-            } else {
-                it.row.id.to_string().replace('-', "")
-            };
-            if compact_id == target || id == target || id == it.media.id.to_string() {
-                return Ok(Some(it.user_item_data()));
-            }
-        }
-        if let Some(snapshot) = resolve_fallback_item(&self.state, user_id, id, &compact_id) {
-            return Ok(Some(snapshot.user_item_data()));
-        }
-        let season_target = {
-            let store = self.state.store.lock();
-            crate::http::media_visibility::resolve_visible_season(&store, id, Some(user_id))
-        };
-        let Some((row, season)) = season_target else {
+        let Some(item) = domain::TypedItemId::from_wire_string(id) else {
             return Ok(None);
         };
-        let series_id = row.media_id.to_string().replace('-', "");
-        let episodes = self
-            .list_visible_items(user_id, Some(&series_id))
+        if let domain::TypedItemId::Season { media, season } = item {
+            return self
+                .season_user_item_data(user_id, media, season)
+                .await
+                .map(Some);
+        }
+        Ok(self
+            .resolve_single_item(user_id, id)
             .await?
-            .into_iter()
-            .filter(|episode| episode.row.season == Some(season))
-            .collect::<Vec<_>>();
-        let total = episodes.len();
-        let played = episodes.iter().filter(|episode| episode.played).count();
-        let favorite = {
-            let store = self.state.store.lock();
-            store
-                .unit_state(
-                    user_id,
-                    row.media_id,
-                    season as i32,
-                    crate::store::UNIT_WHOLE,
-                )
-                .map_err(|error| error.to_string())?
-                .is_some_and(|state| state.favorite)
-        };
-        let unplayed_item_count = total.saturating_sub(played);
-        let item_id = id.replace('-', "");
-        Ok(Some(media_server::provider::UserItemData {
-            key: item_id.clone(),
-            item_id,
-            playback_position_ticks: 0,
-            play_count: 0,
-            played: total == 0 || unplayed_item_count == 0,
-            is_favorite: favorite,
-            unplayed_item_count: Some(unplayed_item_count),
-            played_percentage: (total > 0).then(|| played as f64 / total as f64 * 100.0),
-        }))
+            .map(|snapshot| snapshot.user_item_data()))
     }
 
     async fn enrich_visible_item(&self, item: MediaItemSnapshot) -> MediaItemSnapshot {
@@ -451,8 +427,8 @@ impl MediaServerProvider for ApiServerProvider {
         id: &str,
     ) -> Result<Option<Vec<u8>>, String> {
         let store = self.state.store.lock();
-        if let Ok(Some(lib)) = store.get_library(id) {
-            if crate::http::library::library_visible(&store, &lib, user_id) {
+        if let Ok(Some(lib)) = store.get_library(id)
+            && crate::http::library::library_visible(&store, &lib, user_id) {
                 if let Some(cover) = crate::http::library::library_cover_path(&store, &lib) {
                     drop(store);
                     return std::fs::read(cover).map(Some).map_err(|e| e.to_string());
@@ -461,7 +437,6 @@ impl MediaServerProvider for ApiServerProvider {
                 drop(store);
                 return default_library_cover(kind).map(Some);
             }
-        }
         Ok(None)
     }
 
@@ -470,23 +445,23 @@ impl MediaServerProvider for ApiServerProvider {
         user_id: Option<UserId>,
         id: &str,
     ) -> Result<Option<Vec<u8>>, String> {
-        let store = self.state.store.lock();
-        if let Some(row) = crate::http::media_visibility::resolve_visible_row(&store, id, user_id) {
-            let media = store.get_media(row.media_id).ok().flatten();
-            let path = if is_series_item_id(id, row.media_id) {
-                crate::http::library::poster_path(&row)
-            } else {
-                media
-                    .as_ref()
-                    .and_then(|media| local_primary_image(&row, media))
-                    .or_else(|| crate::http::library::poster_path(&row))
-            };
-            if let Some(path) = path {
-                drop(store);
-                return std::fs::read(path).map(Some).map_err(|e| e.to_string());
-            }
+        let entry = {
+            let store = self.state.store.lock();
+            items::resolve_entry(&store, user_id, id)?
+        };
+        let Some(entry) = entry else {
+            return Ok(None);
+        };
+        let path = if entry.is_series {
+            crate::http::library::poster_path(&entry.file)
+        } else {
+            local_primary_image(&entry.file, entry.unit, &entry.media)
+                .or_else(|| crate::http::library::poster_path(&entry.file))
+        };
+        match path {
+            Some(path) => std::fs::read(path).map(Some).map_err(|e| e.to_string()),
+            None => Ok(None),
         }
-        Ok(None)
     }
 
     async fn resolve_primary_image_url(
@@ -494,34 +469,45 @@ impl MediaServerProvider for ApiServerProvider {
         user_id: Option<UserId>,
         id: &str,
     ) -> Result<Option<String>, String> {
-        let (nfo_url, local_still, tmdb_episode) = {
+        let (adopted_url, local_still, tmdb_episode) = {
             let store = self.state.store.lock();
-            let Some(row) = crate::http::media_visibility::resolve_visible_row(&store, id, user_id)
+            let entry = items::resolve_entry(&store, user_id, id)?;
+            let Some(entry) = entry else {
+                return Ok(None);
+            };
+            if entry.media.kind != MediaKind::Tv || entry.is_series {
+                return Ok(None);
+            }
+            // 旧 `(season, episode)` 的 both-or-neither：整片没有分集坐标，端点直接放弃。
+            let Some((season, episode)) =
+                items::snapshot_unit(entry.unit).and_then(|unit| unit.episode_coordinates())
             else {
                 return Ok(None);
             };
-            let Some(media) = store.get_media(row.media_id).ok().flatten() else {
-                return Ok(None);
-            };
-            if media.kind != MediaKind::Tv || is_series_item_id(id, row.media_id) {
-                return Ok(None);
-            }
-            let Some((season, episode)) = row.season.zip(row.episode) else {
-                return Ok(None);
-            };
-            let nfo_url = primary_image_url(&row, &media);
-            let local_still = crate::episode_still::existing(std::path::Path::new(&row.path)).is_some();
-            let tmdb_episode = media
+            // 与页内同一个已采纳字段入口：图片端点不再自己读现场 NFO。
+            let adopted_still = item_metadata::page_fields(
+                &store,
+                &entry.file,
+                entry.unit,
+                &entry.media,
+                entry.is_series,
+            )
+            .ok()
+            .and_then(|fields| fields.still_url.value().cloned());
+            let adopted_url = primary_image_url(entry.unit, &entry.media, adopted_still.as_deref());
+            let local_still = crate::episode_still::existing(entry.file.path.as_path()).is_some();
+            let tmdb_episode = entry
+                .media
                 .tmdb_id
-                .filter(|_| !local_still && nfo_url.is_none())
+                .filter(|_| !local_still && adopted_url.is_none())
                 .map(|tmdb_id| (tmdb_id, season, episode));
-            (nfo_url, local_still, tmdb_episode)
+            (adopted_url, local_still, tmdb_episode)
         };
         if local_still {
             return Ok(None);
         }
-        if nfo_url.is_some() {
-            return Ok(nfo_url);
+        if adopted_url.is_some() {
+            return Ok(adopted_url);
         }
         if let Some((tmdb_id, season, episode)) = tmdb_episode {
             return Ok(resolve_catalog_episode_still(
@@ -556,40 +542,99 @@ impl MediaServerProvider for ApiServerProvider {
         user_id: Option<UserId>,
         id: &str,
     ) -> Result<Option<Vec<u8>>, String> {
-        let store = self.state.store.lock();
-        let Some(row) = crate::http::media_visibility::resolve_visible_row(&store, id, user_id)
-        else {
+        let entry = {
+            let store = self.state.store.lock();
+            items::resolve_entry(&store, user_id, id)?
+        };
+        let Some(entry) = entry else {
             return Ok(None);
         };
-        let is_series = id
-            .replace('-', "")
-            .eq_ignore_ascii_case(&row.media_id.to_string().replace('-', ""));
-        let Some(path) = backdrop_path(&row, is_series) else {
+        let Some(path) = backdrop_path(&entry.file, entry.is_series) else {
             return Ok(None);
         };
-        drop(store);
         std::fs::read(path)
             .map(Some)
             .map_err(|error| error.to_string())
     }
 
+    /// Stream routing: the public item id names the logical target, and the
+    /// stream is the published, present source selected for it. A pending,
+    /// missing or unknown file is never offered.
     async fn resolve_stream_source(
         &self,
         user_id: UserId,
         id: &str,
     ) -> Result<Option<(PathBuf, bool)>, String> {
-        let store = self.state.store.lock();
-        if let Some(row) =
-            crate::http::media_visibility::resolve_visible_row(&store, id, Some(user_id))
+        self.resolve_stream_source_bound(user_id, id, None, None, None)
+            .await
+    }
+
+    async fn resolve_stream_source_bound(
+        &self,
+        user_id: UserId,
+        id: &str,
+        media_source_id: Option<&str>,
+        play_session_id: Option<&str>,
+        device_id: Option<&str>,
+    ) -> Result<Option<(PathBuf, bool)>, String> {
+        // Must not accept bare file UUID as a logical ID
+        if id.len() == 36
+            && id.chars().filter(|c| *c == '-').count() == 4
+            && uuid::Uuid::parse_str(id).is_ok()
         {
-            let path = PathBuf::from(&row.path);
-            let is_strm = path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"));
-            return Ok(Some((path, is_strm)));
+            return Ok(None);
         }
-        Ok(None)
+        let entry = {
+            let store = self.state.store.lock();
+            items::resolve_entry(&store, Some(user_id), id)?
+        };
+        let Some(entry) = entry else {
+            return Ok(None);
+        };
+
+        let file = if let Some(msid) = media_source_id {
+            // Only the versioned `f1_<file>_<revision>` shape advertised by
+            // PlaybackInfo is accepted; a bare file UUID is not a MediaSourceId.
+            let Some(physical) = domain::PhysicalSourceId::from_wire_string(msid) else {
+                return Ok(None);
+            };
+            let store = self.state.store.lock();
+            let Some(file) = store
+                .visible_file(user_id, physical.file_id)
+                .map_err(|e| e.to_string())?
+            else {
+                return Ok(None);
+            };
+            let covers = store
+                .file_covers_unit(
+                    physical.file_id,
+                    entry.media.id,
+                    domain::UnitKey::new(entry.unit.0, entry.unit.1),
+                )
+                .map_err(|e| e.to_string())?;
+            if !covers
+                || file.media_id != entry.media.id
+                || file.version.revision != physical.revision
+            {
+                return Ok(None);
+            }
+            file
+        } else {
+            entry.file.clone()
+        };
+        if let Some(session_id) = play_session_id
+            && !self.stream_matches_binding(user_id, device_id, session_id, &entry, &file)?
+        {
+            tracing::warn!(%user_id, item_id = %id, "Jellyfin 取流与签发的播放会话绑定不符，拒绝");
+            return Ok(None);
+        }
+
+        let path = file.path.clone();
+        let is_strm = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"));
+        Ok(Some((path, is_strm)))
     }
 
     async fn is_device_revoked(&self, user_id: UserId, device_id: &str) -> Result<bool, String> {
@@ -607,52 +652,19 @@ impl MediaServerProvider for ApiServerProvider {
         favorite: Option<bool>,
     ) -> Result<bool, String> {
         let store = self.state.store.lock();
-        let Some((media_id, season, episode)) = resolve_mark_unit(&store, user_id, id) else {
+        let Some((media_id, season, episode)) = resolve_mark_unit(&store, user_id, id)? else {
             return Ok(false);
         };
-        // 播放域时间走注入时钟；`playback_units.updated_at` 是**秒**。
-        let now = self.state.playback_clock.now_ms() / 1000;
-        if played.is_none() {
-            let Some(favorite) = favorite else {
-                return Ok(true);
-            };
-            write_favorite_mark(&store, user_id, media_id, season, episode, favorite, now)?;
-            if !favorite
-                && season == crate::store::UNIT_WHOLE
-                && episode == crate::store::UNIT_WHOLE
-            {
-                let _ = store.set_unit_marks(
-                    user_id,
-                    media_id,
-                    season,
-                    episode,
-                    None,
-                    Some(false),
-                    now,
-                );
-            }
-            return Ok(true);
-        }
+        let change = crate::store::playback::PlaybackMutation::marks(
+            user_id, season, episode, played, favorite,
+        );
         store
-            .set_unit_marks(user_id, media_id, season, episode, played, favorite, now)
+            .mutate_playback(media_id, &change, self.state.playback_clock.now_ms())
             .map_err(|error| {
                 tracing::error!(%error, %user_id, %media_id, season, episode, "failed to update Jellyfin user marks");
                 error.to_string()
             })?;
-        if let Some(false) = played {
-            persist_unplayed_override(&store, user_id, media_id, season, episode, favorite, now)?;
-        }
         Ok(true)
-    }
-
-    async fn update_progress(
-        &self,
-        user_id: UserId,
-        id: &str,
-        position_ms: i64,
-        _paused: bool,
-    ) -> Result<(), String> {
-        playback::update_progress(self, user_id, id, position_ms)
     }
 
     async fn issue_play_session(
@@ -669,7 +681,15 @@ impl MediaServerProvider for ApiServerProvider {
         let now = self.state.playback_clock.now_ms() / 1000;
         let store = self.state.store.lock();
         store
-            .issue_play_session(user_id, device_id, ledger_id, now)
+            .issue_play_session(
+                user_id,
+                device_id,
+                ledger_id,
+                target.media.id,
+                domain::UnitKey::new(target.season, target.episode),
+                &target.file.version,
+                now,
+            )
             .map_err(|e| e.to_string())
     }
 
@@ -683,17 +703,77 @@ impl MediaServerProvider for ApiServerProvider {
         event: PlaybackEvent,
         identity: media_server::provider::PlaybackEventIdentity,
     ) -> Result<(), String> {
-        playback::report_event(self, user_id, id, position_ms, paused, client, event, identity)
+        playback::report_event(
+            self,
+            user_id,
+            id,
+            position_ms,
+            paused,
+            client,
+            event,
+            identity,
+        )
     }
 }
 
-fn resume_effectively_played(
-    state: &ApiState,
-    user_id: UserId,
-    media_id: domain::MediaId,
-    season: i32,
-    episode: i32,
-) -> bool {
-    let store = state.store.lock();
-    unit_played(&store, user_id, media_id, season, episode)
+impl ApiServerProvider {
+    /// Season-level marks rolled up over the season's visible episodes.
+    async fn season_user_item_data(
+        &self,
+        user_id: UserId,
+        media: domain::MediaId,
+        season: u32,
+    ) -> Result<media_server::provider::UserItemData, String> {
+        let series_id = domain::TypedItemId::Work(media).to_wire_string();
+        let episodes: Vec<MediaItemSnapshot> = self
+            .list_visible_items(user_id, Some(&series_id))
+            .await?
+            .into_iter()
+            .filter(|episode| episode.unit.map(|unit| unit.season) == Some(season as i32))
+            .collect();
+        let total = episodes.len();
+        let played = episodes.iter().filter(|episode| episode.played).count();
+        let favorite = {
+            let store = self.state.store.lock();
+            store
+                .unit_state(user_id, media, season as i32, crate::store::UNIT_WHOLE)
+                .map_err(|error| error.to_string())?
+                .is_some_and(|state| state.favorite)
+        };
+        let unplayed_item_count = total.saturating_sub(played);
+        let item_id = domain::TypedItemId::Season { media, season }.to_wire_string();
+        Ok(media_server::provider::UserItemData {
+            key: item_id.clone(),
+            item_id,
+            playback_position_ticks: 0,
+            play_count: 0,
+            played: total == 0 || unplayed_item_count == 0,
+            is_favorite: favorite,
+            unplayed_item_count: Some(unplayed_item_count),
+            played_percentage: (total > 0).then(|| played as f64 / total as f64 * 100.0),
+        })
+    }
 }
+
+/// Logical identity of one stored watch unit.
+fn resume_item_id(media_id: domain::MediaId, season: i32, episode: i32) -> domain::TypedItemId {
+    if season < 0 || episode < 0 {
+        return domain::TypedItemId::Work(media_id);
+    }
+    domain::TypedItemId::Unit {
+        media: media_id,
+        key: domain::UnitKey::new(season, episode),
+    }
+}
+
+fn query_stage_error(error: store::LibraryReadError) -> media_server::provider::QueryError {
+    if crate::library_read_work::error_is_unavailable(&error) {
+        media_server::provider::QueryError::Unavailable
+    } else if matches!(error, store::LibraryReadError::Unauthorized) {
+        media_server::provider::QueryError::Unauthorized
+    } else {
+        media_server::provider::QueryError::Internal(error.to_string())
+    }
+}
+#[cfg(test)]
+mod tests;

@@ -11,6 +11,7 @@ use tower::ServiceExt;
 
 use super::common::{Fixtures, json_body, request, state as common_state};
 
+#[allow(dead_code)]
 struct NoFetch;
 impl Fetcher for NoFetch {
     fn fetch(&self, _request: &FetchRequest) -> Result<String, IndexerError> {

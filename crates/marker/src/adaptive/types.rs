@@ -11,15 +11,11 @@ pub enum SegmentKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SamplingMode {
+    #[default]
     FullWindow,
     Adaptive,
-}
-
-impl Default for SamplingMode {
-    fn default() -> Self {
-        Self::FullWindow
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

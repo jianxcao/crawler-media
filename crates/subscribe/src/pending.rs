@@ -19,12 +19,18 @@ pub fn pending_slots(subscribe: &Subscribe, release: &Release) -> Vec<(Option<u3
     if !units.is_empty() {
         return units.into_iter().map(|(s, e)| (Some(s), Some(e))).collect();
     }
-    if let Coverage::Tv { season, episode_from, episode_to } = subscribe.coverage
+    if let Coverage::Tv {
+        season,
+        episode_from,
+        episode_to,
+    } = subscribe.coverage
         && release.season == Some(season)
     {
         let capped = episode_from.saturating_add(Coverage::MAX_EPISODES.saturating_sub(1));
         let pack_to = episode_to.unwrap_or(episode_from).min(capped);
-        let mut slots: Vec<_> = (episode_from..=pack_to).map(|ep| (Some(season), Some(ep))).collect();
+        let mut slots: Vec<_> = (episode_from..=pack_to)
+            .map(|ep| (Some(season), Some(ep)))
+            .collect();
         slots.push((Some(season), None));
         return slots;
     }
@@ -47,7 +53,14 @@ pub fn facts_with_pending<'a>(
             match facts.get(season, episode) {
                 Some(fact) if fact.path.is_some() => facts.mark_in_flight(season, episode),
                 Some(_) => {}
-                None => facts.upsert(season, episode, QualityFact { score: 0, path: None }),
+                None => facts.upsert(
+                    season,
+                    episode,
+                    QualityFact {
+                        score: 0,
+                        path: None,
+                    },
+                ),
             }
         }
     }

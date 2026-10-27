@@ -163,8 +163,8 @@ fn subscribe_media_index(
         if subscribe_media.contains_key(&key) {
             continue;
         }
-        if let Ok(Some(subscribe)) = store.get_subscribe(*subscribe_id) {
-            if let Ok(Some(media)) = store.get_media(subscribe.media_id) {
+        if let Ok(Some(subscribe)) = store.get_subscribe(*subscribe_id)
+            && let Ok(Some(media)) = store.get_media(subscribe.media_id) {
                 subscribe_media.insert(
                     key,
                     (
@@ -174,7 +174,6 @@ fn subscribe_media_index(
                     ),
                 );
             }
-        }
     }
     subscribe_media
 }
@@ -304,6 +303,26 @@ mod tests {
         let other = downloader::ownership_tag("https://pt.example/download.php?id=2");
         assert!(!snapshot_matches_pending(&t, &snapshot(&[other])));
         assert!(!snapshot_matches_pending(&t, &snapshot(&[])));
+    }
+
+    #[test]
+    fn a_per_torrent_tag_spelling_never_proves_ownership() {
+        let t = torrent("https://pt.example/download.php?id=1");
+        let owned = downloader::ownership_tag(&t.enclosure);
+        // Old clients wrote `crawler-media-<hash>` per-torrent tags and some
+        // fixtures carried them in `tag`; neither spelling is our marker today.
+        let per_torrent_tagged = downloader::TaskSnapshot {
+            tag: "crawler-media-0f1e2d3c4b5a".into(),
+            owned_tags: vec![],
+            info_hash: "aaaa".into(),
+            ..Default::default()
+        };
+        assert!(!snapshot_matches_pending(&t, &per_torrent_tagged));
+        assert!(!snapshot_matches_pending(
+            &t,
+            &snapshot(std::slice::from_ref(&per_torrent_tagged.tag))
+        ));
+        assert!(snapshot_matches_pending(&t, &snapshot(&[owned])));
     }
 
     #[test]

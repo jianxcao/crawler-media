@@ -56,7 +56,7 @@ fn exclude_only_filter_admits_non_hr_and_rejects_hr() {
             exclude: true,
         }],
         keep_old_versions: false,
-};
+    };
     let outcome = filter::admit(vec![clean, hr], &filter);
     assert_eq!(outcome.admitted.len(), 1);
     assert!(!outcome.admitted[0].torrent.hr);
@@ -78,7 +78,7 @@ fn codec_alias_filter_admits_hevc_and_rejects_avc() {
             exclude: false,
         }],
         keep_old_versions: false,
-};
+    };
     let outcome = filter::admit(vec![hevc, avc], &filter);
     assert_eq!(outcome.admitted.len(), 1);
     assert_eq!(outcome.admitted[0].score, 90);
@@ -122,7 +122,7 @@ fn quality_filter() -> Filter {
             },
         ],
         keep_old_versions: false,
-}
+    }
 }
 
 #[test]

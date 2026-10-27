@@ -1,13 +1,12 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use parking_lot::Mutex;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use api::fingerprint_job::{
-    capture_episode_adaptive, capture_profile_key,
     AdaptiveCaptureContext, CaptureGate, CapturePolicy, EpisodeCaptureRequest,
-    FingerprintCaptureProfile,
+    FingerprintCaptureProfile, capture_episode_adaptive, capture_profile_key,
 };
-use domain::LedgerRow;
+use domain::{FileCoverage, UnitKey};
 use marker::adaptive::{SamplingPolicy, TemplateContext};
 use marker::fingerprint::capture_types::{
     CaptureFailure, CaptureFailureKind, CaptureMetrics, CaptureRequest, CapturedFingerprint,
@@ -15,6 +14,7 @@ use marker::fingerprint::capture_types::{
 };
 use marker::{AudioFingerprint, CommonSegment, FingerprintEngine};
 use store::Store;
+use store::test_support::{FixtureFile, publish_fixture_file};
 
 struct NoopGate;
 
@@ -48,7 +48,10 @@ impl FingerprintCaptureEngine for MockEngine {
         request: &CaptureRequest,
     ) -> Result<CapturedFingerprint, CaptureFailure> {
         let call_idx = self.capture_calls.fetch_add(1, Ordering::SeqCst);
-        self.captured_windows.lock().unwrap().push(request.window.clone());
+        self.captured_windows
+            .lock()
+            .unwrap()
+            .push(request.window.clone());
         if call_idx < self.fail_attempts {
             return Err(CaptureFailure {
                 kind: CaptureFailureKind::Io,
@@ -98,21 +101,44 @@ impl FingerprintEngine for MockEngine {
     }
 }
 
-fn dummy_row(ledger_id: &str, ep: u32) -> LedgerRow {
-    let dummy_path = std::env::temp_dir().join(format!("dummy_{ledger_id}.mkv"));
-    let _ = std::fs::write(&dummy_path, b"dummy");
-    LedgerRow {
-        id: domain::LedgerId::new(),
-        media_id: domain::MediaId::new(),
+fn dummy_row(store: &Store, ledger_id: &str, ep: u32) -> FileCoverage {
+    let media_id = domain::MediaId::new();
+    store
+        .insert_media(&domain::Media {
+            id: media_id,
+            kind: domain::MediaKind::Tv,
+            title: format!("Fixture {ledger_id}"),
+            year: None,
+            original_title: None,
+            aliases: Vec::new(),
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+    let dummy_path = store
+        .library_root(domain::MediaKind::Tv)
+        .unwrap()
+        .join(format!("dummy_{ledger_id}.mkv"));
+    std::fs::write(&dummy_path, b"dummy").unwrap();
+    let spec = FixtureFile {
+        media_id,
         path: dummy_path.to_string_lossy().to_string(),
         season: Some(1),
         episode: Some(ep),
-        resolution: None,
-        codec: None,
-        hdr: None,
         quality_source: domain::QualitySource::Probe,
         confidence: domain::Confidence::High,
-        filter_score: None,
+        ..FixtureFile::default()
+    };
+    // The published file fact — and with it the `file_id` the pipeline keys on —
+    // is only known after publication, so read it back instead of inventing one.
+    let file = publish_fixture_file(store, &spec).unwrap();
+    FileCoverage {
+        path_key: String::new(),
+        file,
+        units: vec![UnitKey::new(1, ep as i32)],
     }
 }
 
@@ -146,8 +172,7 @@ async fn reuse_valid_does_not_read_media() {
     let profile_key = capture_profile_key(&profile);
     let policy = SamplingPolicy::default();
 
-    let row = dummy_row("l-1", 1);
-    store.lock().insert_ledger(&row).unwrap();
+    let row = dummy_row(&store.lock(), "l-1", 1);
     let req = EpisodeCaptureRequest {
         job_id: "job-1".into(),
         row,
@@ -187,8 +212,7 @@ async fn recapture_requires_new_job_evidence() {
     let profile_key = capture_profile_key(&profile);
     let policy = SamplingPolicy::default();
 
-    let row = dummy_row("l-1", 1);
-    store.lock().insert_ledger(&row).unwrap();
+    let row = dummy_row(&store.lock(), "l-1", 1);
     let req1 = EpisodeCaptureRequest {
         job_id: "job-1".into(),
         row,
@@ -233,8 +257,7 @@ async fn retries_and_fallback_share_four_attempt_budget() {
     let profile_key = capture_profile_key(&profile);
     let policy = SamplingPolicy::default();
 
-    let row = dummy_row("l-exhaust", 1);
-    store.lock().insert_ledger(&row).unwrap();
+    let row = dummy_row(&store.lock(), "l-exhaust", 1);
     let req = EpisodeCaptureRequest {
         job_id: "job-exhaust".into(),
         row,

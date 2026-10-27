@@ -68,19 +68,39 @@ pub fn date_in(days: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+async fn rule_set(h: &Harness, name: &str) -> String {
+    let response = tower::ServiceExt::oneshot(
+        h.app.clone(),
+        super::common::request(
+            "POST",
+            "/api/v1/rule-sets",
+            Some(TOKEN),
+            json!({
+                "name": name,
+                "atoms": [
+                    { "kind": "resolution", "value": "1080p", "priority": 100 },
+                    { "kind": "title_match", "value": "Long", "priority": 80 }
+                ]
+            }),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+    super::common::json_data(response).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
 /// TV Subscribe for "The Long Watch" (1080p filter) with `coverage` and extra fields.
 pub async fn tv_subscribe(h: &Harness, coverage: Value, extra: Value) -> SubscribeId {
+    let filter_id = rule_set(h, "long-watch-1080p").await;
     let mut payload = json!({
         "media": { "kind": "tv", "title": "The Long Watch", "tmdb_id": "100" },
         "coverage": coverage,
         "fetch_mode": "search",
-        "filter": {
-            "name": "long-watch-1080p",
-            "atoms": [
-                { "kind": "resolution", "value": "1080p", "priority": 100 },
-                { "kind": "title_match", "value": "Long", "priority": 80 }
-            ]
-        },
+        "filter_id": filter_id,
         "wash_cut": false,
         "full_season_pack": false
     });

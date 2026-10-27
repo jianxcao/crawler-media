@@ -70,18 +70,24 @@ fn retention_cursor_window_bounds_and_cleans_older_jobs() {
 
     // Now prune with limit 2 at cutoff in the future
     let cutoff = 1_000_000;
-    let win1 = queue.prune_terminal_window("test-def", cutoff, 2, false).unwrap();
+    let win1 = queue
+        .prune_terminal_window("test-def", cutoff, 2, false)
+        .unwrap();
     assert_eq!(win1.scanned, 2);
     assert_eq!(win1.deleted, 2);
     assert!(win1.window_has_more);
 
     // Second window
-    let win2 = queue.prune_terminal_window("test-def", cutoff, 2, false).unwrap();
+    let win2 = queue
+        .prune_terminal_window("test-def", cutoff, 2, false)
+        .unwrap();
     assert_eq!(win2.scanned, 2);
     assert_eq!(win2.deleted, 2);
 
     // Third window: only 1 job left (the latest one!), which is protected by latest child rule
-    let win3 = queue.prune_terminal_window("test-def", cutoff, 2, false).unwrap();
+    let win3 = queue
+        .prune_terminal_window("test-def", cutoff, 2, false)
+        .unwrap();
     assert_eq!(win3.scanned, 1);
     assert_eq!(win3.protected, 1);
     assert_eq!(win3.deleted, 0);
@@ -123,7 +129,9 @@ fn retention_cursor_is_not_starved_by_a_protected_prefix() {
     let mut protected = 0usize;
     let mut windows = 0usize;
     loop {
-        let win = queue.prune_terminal_window("test-def", cutoff, 2, false).unwrap();
+        let win = queue
+            .prune_terminal_window("test-def", cutoff, 2, false)
+            .unwrap();
         deleted += win.deleted;
         protected += win.protected;
         windows += 1;

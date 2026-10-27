@@ -28,7 +28,7 @@ fn blank_language_keeps_chinese_default_and_avoids_legacy_english_cache() {
     let client = Tmdb::new_at(LocalizedCatalog(paths.clone()), &db, 100).unwrap();
     let conn = rusqlite::Connection::open(&db).unwrap();
     conn.execute(
-        "INSERT INTO catalog_cache (source, cache_key, body, fetched_at) VALUES ('tmdb', ?1, ?2, 100)",
+        "INSERT INTO tmdb_cache (cache_key, body, fetched_at) VALUES (?1, ?2, 100)",
         rusqlite::params![
             "/search/tv?query=wire&first_air_date_year=2002",
             r#"{"results":[{"id":1438,"name":"The Wire","first_air_date":"2002-06-02"}]}"#,

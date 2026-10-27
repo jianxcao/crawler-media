@@ -19,7 +19,7 @@ use tower::ServiceExt;
 
 use super::common::{
     Fixtures, create_member, create_site, json_body, json_error, nexusphp, request, state,
-    subscribe_payload,
+    create_rule_set, subscribe_payload_with_filter,
 };
 
 struct PauseGateFetcher {
@@ -29,11 +29,14 @@ struct PauseGateFetcher {
 
 impl Fetcher for PauseGateFetcher {
     fn fetch(&self, _request: &FetchRequest) -> Result<String, IndexerError> {
-        if let Some(resume) = self.resume.lock().take() {
+        let resume = { self.resume.lock().take() };
+        if let Some(resume) = resume {
             if let Some(started) = self.started.lock().take() {
                 let _ = started.send(());
             }
-            let _ = resume.recv();
+            resume
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("test must resume the legacy lifecycle fetcher");
         }
         Ok(nexusphp().into())
     }
@@ -62,27 +65,16 @@ impl Downloader for TrackingDownloader {
     }
 }
 
-fn movie_subscribe() -> Value {
-    let mut body = subscribe_payload("search");
-    body["filter"] = json!({
-        "name": "matrix-uhd",
-        "atoms": [
-            { "kind": "resolution", "value": "2160p", "priority": 100 },
-            { "kind": "title_match", "value": "Matrix", "priority": 80 }
-        ]
-    });
-    body
-}
-
 async fn create_movie_subscribe(app: &axum::Router) -> String {
     create_site(app).await;
+    let filter_id = create_rule_set(app).await;
     let created = app
         .clone()
         .oneshot(request(
             "POST",
             "/api/v1/subscriptions",
             Some("management-secret"),
-            movie_subscribe(),
+            subscribe_payload_with_filter("search", Some(&filter_id)),
         ))
         .await
         .unwrap();

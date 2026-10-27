@@ -1,7 +1,6 @@
 use axum::Router;
-use axum::body::Body;
 use axum::extract::{Extension, Path, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use std::sync::Arc;
@@ -41,7 +40,7 @@ pub(super) fn routes(provider: Arc<dyn MediaServerProvider>) -> Router {
 
 async fn person_primary_image(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     user_id: Option<Extension<Option<domain::UserId>>>,
     Path(name): Path<String>,
 ) -> Result<Response, StatusCode> {
@@ -86,11 +85,7 @@ async fn genre_primary_image(
                 || s.eq_ignore_ascii_case(&name)
         });
         if matches_genre {
-            let id = if it.is_series {
-                it.media.id.to_string().replace('-', "")
-            } else {
-                it.row.id.to_string().replace('-', "")
-            };
+            let id = it.protocol_id();
             if let Ok(Some(url)) = state
                 .provider
                 .resolve_primary_image_url(Some(user_id), &id)
@@ -137,11 +132,7 @@ async fn studio_primary_image(
                 || s.eq_ignore_ascii_case(&name)
         });
         if matches_studio {
-            let id = if it.is_series {
-                it.media.id.to_string().replace('-', "")
-            } else {
-                it.row.id.to_string().replace('-', "")
-            };
+            let id = it.protocol_id();
             if let Ok(Some(url)) = state
                 .provider
                 .resolve_primary_image_url(Some(user_id), &id)

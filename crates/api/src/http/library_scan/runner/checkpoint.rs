@@ -16,7 +16,7 @@ use crate::management::ApiState;
 use super::hooks::test_observe_hook;
 
 /// 断点判定结果（P2-NEW-2 / P2-3）。
-pub(super) struct CheckpointDecision {
+pub(crate) struct CheckpointDecision {
     pub(super) fresh: Vec<library::TransferredFile>,
     pub(super) skipped: usize,
     /// 命中断点行但版本已变化（或台账失效）的路径：必须失效派生事实并重排探测。
@@ -63,6 +63,7 @@ pub(crate) fn checkpoint_fresh(
     let paths: Vec<String> = files.iter().map(|f| f.path.display().to_string()).collect();
     let (checkpoints_res, source_versions_res) = {
         let store = state.store.lock();
+        let _hold = super::hold::trace_lock_section("checkpoints");
         // 两个读都在同一把 Store 锁内：断点与 durable 版本必须是同一时刻的一致视图。
         (
             store.scan_seen_checkpoints(op_id, &paths),
@@ -175,39 +176,124 @@ fn source_version_changed(
     }
 }
 
-/// 变化文件：失效派生探测事实，并重挂 durable probe 义务（P2-3）。
+/// 变化文件：推进 FileVersion（源 CAS），失效派生事实并重挂 durable probe 义务（P2-3，R01）。
 ///
-/// 返回 `Result<(Vec<PathBuf>, std::collections::HashSet<String>), (Response, String)>`：
-/// 成功时返回 `(完成失效的路径, 失效失败的路径集合)`。
-/// 当有路径失效/重挂失败时，返回给调用方，以保证失败路径不得推进源版本或写入断点。
+/// 三段式：短锁读取归属/版本/config revision → **锁外**观察源（stat + `.strm` 内容摘要）
+/// → 短锁以同一 scope/expected version 调用 `replace_file_source`。相同观察幂等（不推进）；
+/// 并发写导致的 StaleVersion 计入失败路径，不推进断点。
+///
+/// `retry_next_round = true`（窗口内变化）时在推进后再清掉 stat 事实，下一轮必须重处理。
 pub(super) fn invalidate_changed_facts(
     state: &ApiState,
     changed: &[PathBuf],
+    retry_next_round: bool,
 ) -> Result<(Vec<PathBuf>, std::collections::HashSet<String>), String> {
     if changed.is_empty() {
         return Ok((Vec::new(), std::collections::HashSet::new()));
     }
+    let targets = changed_targets(state, changed)?;
+    let observed: Vec<_> = targets
+        .into_iter()
+        .map(|target| {
+            let observation = crate::fingerprint_job::observe_source(&target.path);
+            (target, observation)
+        })
+        .collect();
     let now_ms = crate::job_loop::unix_now() * 1000;
     let store = state.store.lock();
+    let _hold = super::hold::trace_lock_section("invalidate");
     let mut affected = Vec::new();
     let mut failed_paths = std::collections::HashSet::new();
-    for path in changed {
-        let path_str = path.display().to_string();
-        let Some(row) = store.ledger_by_path(&path_str).map_err(|e| e.to_string())? else {
+    for (target, observation) in observed {
+        let path_str = target.path.display().to_string();
+        let Some(observation) = observation else {
+            tracing::warn!(%path_str, "变化文件锁外观察失败：不推进源版本，下一轮重试");
+            failed_paths.insert(path_str);
             continue;
         };
-        let ledger_id = row.id.to_string();
-        if let Err(error) = store.delete_file_meta_by_ledger_id(&ledger_id) {
-            tracing::error!(%error, %ledger_id, %path_str, "变化文件的派生探测事实失效失败");
+        if let Err(error) = advance_source(&store, &target, &observation, now_ms) {
+            tracing::error!(%error, file_id = %target.file_id, %path_str, "变化文件源版本 CAS 推进失败");
             failed_paths.insert(path_str);
             continue;
         }
-        if let Err(error) = store.arm_scan_probe_obligation(&ledger_id, now_ms, "scan_changed") {
-            tracing::error!(%error, %ledger_id, "变化文件重挂探测义务失败");
+        if let Err(error) =
+            store.arm_scan_probe_obligation(&target.file_id.to_string(), now_ms, "scan_changed")
+        {
+            tracing::error!(%error, file_id = %target.file_id, %path_str, "变化文件重挂探测义务失败");
             failed_paths.insert(path_str);
             continue;
         }
-        affected.push(path.clone());
+        if retry_next_round
+            && let Err(error) = store.clear_source_version(&target.file_id.to_string())
+        {
+            tracing::error!(%error, file_id = %target.file_id, %path_str, "窗口内变化文件的 stat 事实清除失败");
+            failed_paths.insert(path_str);
+            continue;
+        }
+        affected.push(target.path);
     }
     Ok((affected, failed_paths))
+}
+
+/// 一个变化路径在观察前捕获的归属与版本。
+struct ChangedTarget {
+    path: PathBuf,
+    file_id: domain::LedgerId,
+    scope: store::library_write::WriteScope,
+    version: domain::FileVersion,
+}
+
+fn changed_targets(state: &ApiState, changed: &[PathBuf]) -> Result<Vec<ChangedTarget>, String> {
+    let store = state.store.lock();
+    let _hold = super::hold::trace_lock_section("invalidate_targets");
+    let mut targets = Vec::new();
+    for path in changed {
+        let path_str = path.display().to_string();
+        let Some(coverage) = store
+            .file_coverage_by_path(&path_str)
+            .map_err(|e| e.to_string())?
+        else {
+            continue;
+        };
+        let file = coverage.file;
+        let Some(version) = store
+            .get_file_version(file.file_id)
+            .map_err(|e| e.to_string())?
+        else {
+            continue;
+        };
+        let config_revision = store
+            .library_config_revision(&file.library_id.to_string())
+            .map_err(|e| e.to_string())?;
+        targets.push(ChangedTarget {
+            path: path.clone(),
+            file_id: file.file_id,
+            scope: store::library_write::WriteScope {
+                library_id: file.library_id,
+                config_revision,
+            },
+            version,
+        });
+    }
+    Ok(targets)
+}
+
+fn advance_source(
+    store: &crate::Store,
+    target: &ChangedTarget,
+    observation: &library::SourceObservation,
+    now_ms: i64,
+) -> Result<(), store::StoreError> {
+    if observation.source_version == target.version.source_version {
+        return Ok(());
+    }
+    store.replace_file_source(
+        &target.scope,
+        target.file_id,
+        &target.version,
+        observation,
+        now_ms,
+    )?;
+    tracing::info!(file_id = %target.file_id, revision = target.version.revision + 1, "扫描推进文件源版本");
+    Ok(())
 }

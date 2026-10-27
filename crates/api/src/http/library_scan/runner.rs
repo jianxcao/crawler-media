@@ -26,16 +26,20 @@
 //! 与失败响应）、`hooks`（测试屏障，仅 `cfg(test)`）。
 
 mod checkpoint;
+mod hold;
 mod metadata;
 mod outcome;
 mod scope;
 mod walk;
 
+#[allow(unused_imports)]
 pub(crate) use checkpoint::checkpoint_fresh;
 
 #[cfg(test)]
 mod hooks;
 
+#[cfg(test)]
+mod hold_tests;
 #[cfg(test)]
 mod tests;
 
@@ -55,9 +59,9 @@ use outcome::{ScanRun, failed_response};
 use scope::capture_and_verify_scope;
 use walk::ScanContext;
 
-pub(crate) use outcome::{ScanRunError, ScanRunFailure};
 #[cfg(test)]
 pub(crate) use hooks::{test_metadata_hook, test_observe_hook, test_scope_hook};
+pub(crate) use outcome::{ScanRunError, ScanRunFailure};
 
 /// 把库根与增量目标映射成 (身份解析根, 起始目录) 列表。
 ///
@@ -82,7 +86,9 @@ fn scan_starts(
             .max_by_key(|root| root.components().count());
         match owner {
             Some(root) => starts.push((root.clone(), target.clone())),
-            None => tracing::warn!(target = %target.display(), "增量扫描目标不属于任何库根，已忽略"),
+            None => {
+                tracing::warn!(target = %target.display(), "增量扫描目标不属于任何库根，已忽略")
+            }
         }
     }
     starts

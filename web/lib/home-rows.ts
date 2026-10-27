@@ -45,7 +45,7 @@ export interface HomeRowPref {
   name?: string | null;
   unwatched?: boolean | null;
   hidden?: boolean | null;
-  library_id?: string | number | null;
+  library_id?: string | null;
   collection_id?: number | null;
 }
 
@@ -57,7 +57,7 @@ export type HomeLibraryKind = "movie" | "tv" | "video";
 
 /** 合并只用到库的这几个字段（真实的 MediaLibrary 还带统计、扫描状态等）。 */
 export interface HomeLibraryLike {
-  id: string | number;
+  id: string;
   name: string;
   kind: HomeLibraryKind;
   /** 当前身份能否浏览；超管「仅管理」的库为 false，不上首页 */
@@ -71,7 +71,7 @@ export interface HomeCollectionLike {
   id: number;
   name: string;
   /** 所属库；null = 跨库合集（落点走 /library/c/{id}） */
-  library_id: number | null;
+  library_id: string | null;
   /** 合集自己的默认排序（WallSort 取值），新加合集行时作为初始排序 */
   sort: string;
 }
@@ -391,11 +391,7 @@ export function buildHomeRows(
   const defaults = defaultRows(visible);
   if (saved.length === 0) return defaults;
 
-  const libById = new Map<string | number, HomeLibraryLike>();
-  for (const library of visible) {
-    libById.set(library.id, library);
-    libById.set(String(library.id), library);
-  }
+  const libById = new Map(visible.map((library) => [library.id, library]));
   const colById = new Map(
     collections.map((collection) => [collection.id, collection]),
   );
@@ -435,7 +431,7 @@ export function buildHomeRows(
 
 function resolveRow(
   pref: HomeRowPref,
-  libById: Map<string | number, HomeLibraryLike>,
+  libById: Map<string, HomeLibraryLike>,
   colById: Map<number, HomeCollectionLike>,
 ): HomeRow | null {
   const hidden = pref.hidden === true;
@@ -456,9 +452,7 @@ function resolveRow(
   }
   if (pref.id.startsWith("lib:")) {
     const rawId = pref.id.slice(4);
-    const library =
-      libById.get(rawId) ??
-      (Number.isFinite(Number(rawId)) ? libById.get(Number(rawId)) : undefined);
+    const library = libById.get(rawId);
     // 管理员勾了「从首页排除」的库：默认行和用户自加行都不出现。
     if (!library || library.exclude_from_home) return null;
     return libraryRow(pref, library, true);

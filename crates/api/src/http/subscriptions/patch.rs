@@ -1,6 +1,5 @@
 use std::str::FromStr;
 
-use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -16,7 +15,22 @@ pub(crate) async fn patch_subscription(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<UserId>,
     Path(id): Path<String>,
-    Json(body): Json<PatchSubscriptionInput>,
+    crate::http::strict_json::StrictJson(body): crate::http::strict_json::StrictJson<
+        PatchSubscriptionInput,
+    >,
+) -> Response {
+    let blocking = state.clone();
+    crate::http::subscriptions::guarded_blocking(&blocking, move || {
+        patch_blocking(state, user_id, id, body)
+    })
+    .await
+}
+
+fn patch_blocking(
+    state: ApiState,
+    user_id: UserId,
+    id: String,
+    body: PatchSubscriptionInput,
 ) -> Response {
     let sid = match parse_subscribe_id(&id) {
         Ok(id) => id,
@@ -76,9 +90,7 @@ fn load_and_patch(
             "订阅不存在",
         ));
     };
-    if let Err(response) = super::ensure_subscribe_owner(&store, &subscribe, user_id) {
-        return Err(response);
-    }
+    super::ensure_subscribe_owner(&store, &subscribe, user_id)?;
     let previous = subscribe.clone();
     apply_patch_fields(&store, &mut subscribe, body)?;
     let Some(media) = store.get_media(subscribe.media_id).ok().flatten() else {

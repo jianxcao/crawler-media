@@ -68,11 +68,12 @@ pub enum Command {
     Ledger,
     Directory,
     DirectoryAddRoot {
-        kind: String,
+        id: String,
         path: String,
     },
     DirectoryRemoveRoot {
         id: String,
+        path: String,
     },
     DirectoryWatchInplace {
         path: String,
@@ -86,10 +87,8 @@ pub enum Command {
     DirectoryScrape {
         enabled: bool,
     },
-    DirectoryMovieNaming {
-        pattern: String,
-    },
-    DirectoryTvNaming {
+    DirectoryNaming {
+        field: String,
         pattern: String,
     },
     Downloads,

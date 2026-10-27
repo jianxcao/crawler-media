@@ -201,10 +201,12 @@ pub fn render_cover(
         options.title_en.as_deref(),
         font_bytes_zh,
         font_bytes_en,
-        left_center_x,
-        left_center_y,
-        zh_size,
-        en_size,
+        crate::text::TextLayout {
+            center_x: left_center_x,
+            center_y: left_center_y,
+            zh_size,
+            en_size,
+        },
     )?;
 
     // 4. 将最终画布转回 DynamicImage (RgbImage 用于 JPEG 输出兼容性)

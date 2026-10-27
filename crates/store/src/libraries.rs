@@ -10,9 +10,10 @@ use domain::MediaKind;
 use rusqlite::OptionalExtension;
 use rusqlite::params;
 
-use super::library_ownership::{LibraryOwnership, owner_with_default};
+use super::library_ownership::{LibraryOwnership, classify_new_file};
 use super::{Store, StoreError};
-
+mod root_config;
+pub use root_config::PreparedLibraryRoots;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Library {
     pub id: String,
@@ -52,7 +53,7 @@ pub struct Library {
     pub auto_series_collections: bool,
 }
 
-const LIBRARY_COLS: &str = "id, kind, name, is_default, sort_order, access_mode,
+const LIBRARY_COLS: &str = "library_id, kind, name, is_default, sort_order, access_mode,
         admin_visible, member_ids_json,
         COALESCE(detect_intros, 0), COALESCE(enable_fingerprint, 0),
         cover_path, COALESCE(match_rules_json, '[]'), default_filter_id,
@@ -145,24 +146,33 @@ impl LibraryRow {
 }
 
 impl Store {
-    /// All libraries, sorted by manual sort_order, then name.
     pub fn list_libraries(&self) -> Result<Vec<Library>, StoreError> {
         self.load_libraries()
     }
 
-    /// Request-local ownership snapshot: one libraries read, one batch roots
-    /// read, one blocked-id read.
     pub fn library_ownership(&self) -> Result<LibraryOwnership, StoreError> {
         let libraries = self.load_libraries()?;
         let blocked = self.blocked_library_ids()?;
         Ok(LibraryOwnership::from_parts(libraries, blocked))
+    }
+    /// Determine authorized libraries for a user according to their role and library access settings.
+    pub fn authorized_library_ids(
+        &self,
+        user_id: domain::UserId,
+    ) -> Result<HashSet<String>, StoreError> {
+        let role = self.user_role(user_id)?;
+        crate::library_read::authorized_ids_on(
+            &self.library,
+            user_id,
+            role.parse().map_err(StoreError::Invalid)?,
+        )
     }
 
     /// Libraries with their roots attached, via one batch roots query instead
     /// of one query per library.
     fn load_libraries(&self) -> Result<Vec<Library>, StoreError> {
         let mut roots = self.roots_by_library()?;
-        let mut stmt = self.app.prepare(&format!(
+        let mut stmt = self.library.prepare(&format!(
             "SELECT {LIBRARY_COLS} FROM libraries ORDER BY sort_order, name"
         ))?;
         let rows = stmt.query_map([], map_library_row)?;
@@ -179,21 +189,20 @@ impl Store {
     /// `(sort_order, path)`: the global order restricted to one library is
     /// still that order.
     fn roots_by_library(&self) -> Result<HashMap<String, Vec<PathBuf>>, StoreError> {
-        let mut stmt = self.app.prepare(
-            "SELECT library_id, path FROM library_roots
-             WHERE library_id IS NOT NULL
-             ORDER BY sort_order, path",
+        let mut stmt = self.library.prepare(
+            "SELECT library_id, display_path FROM library_roots
+             ORDER BY sort_order, display_path",
         )?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                PathBuf::from(row.get::<_, String>(1)?),
+            ))
         })?;
         let mut roots: HashMap<String, Vec<PathBuf>> = HashMap::new();
         for row in rows {
             let (library_id, path) = row?;
-            roots
-                .entry(library_id)
-                .or_default()
-                .push(PathBuf::from(path));
+            roots.entry(library_id).or_default().push(path);
         }
         Ok(roots)
     }
@@ -203,7 +212,7 @@ impl Store {
     /// on state.
     fn blocked_library_ids(&self) -> Result<HashSet<String>, StoreError> {
         let mut stmt = self
-            .app
+            .library
             .prepare("SELECT library_id FROM library_removals")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut blocked = HashSet::new();
@@ -215,9 +224,9 @@ impl Store {
 
     pub fn get_library(&self, id: &str) -> Result<Option<Library>, StoreError> {
         let row = self
-            .app
+            .library
             .query_row(
-                &format!("SELECT {LIBRARY_COLS} FROM libraries WHERE id = ?1"),
+                &format!("SELECT {LIBRARY_COLS} FROM libraries WHERE library_id = ?1"),
                 params![id],
                 map_library_row,
             )
@@ -227,9 +236,23 @@ impl Store {
         Ok(Some(row.into_library(root_paths)?))
     }
 
+    /// Current configuration revision of one Library. Writers pin it in their
+    /// `WriteScope` so a reconfiguration between plan and write is refused.
+    pub fn library_config_revision(&self, id: &str) -> Result<i64, StoreError> {
+        let revision: Option<i64> = self
+            .library
+            .query_row(
+                "SELECT config_revision FROM libraries WHERE library_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        revision.ok_or_else(|| StoreError::Missing(format!("library {id}")))
+    }
+
     pub fn default_library(&self, kind: MediaKind) -> Result<Option<Library>, StoreError> {
         let row = self
-            .app
+            .library
             .query_row(
                 &format!(
                     "SELECT {LIBRARY_COLS} FROM libraries
@@ -244,64 +267,53 @@ impl Store {
         Ok(Some(row.into_library(root_paths)?))
     }
 
-    /// 把文件路径归属到唯一的媒体库：**最长根目录前缀**获胜（嵌套库不被父库
-    /// 抢走）；两条根目录前缀长度相同的候选视为歧义，返回 None（不擅自归属）。
-    /// 探测/声纹等后台链路与 `library_for_row` 使用同一套归属规则。
-    pub fn library_for_path(
-        &self,
-        path: &std::path::Path,
-        kind: MediaKind,
-    ) -> Result<Option<Library>, StoreError> {
-        let libraries = self.load_libraries()?;
-        Ok(owner_with_default(&libraries, path, kind).cloned())
-    }
-
-    /// 严格按根目录前缀匹配媒体库：不回退到默认媒体库。
-    /// 用于 organize/transfer 等文件物理移动场景的边界防护，防止库外文件被默认库越界接管。
+    /// 严格按根目录前缀匹配媒体库：匹配时把**根目录和候选路径都**解析规范化，
+    /// 再用 [`classify_new_file`] 的同一套规则判定；不回退到默认媒体库。
+    /// 只用于**新文件入库**时的归属判定，已发布文件的归属读 `library_files.library_id`。
+    ///
+    /// 返回的是**记录形态**的 `Library`：`root_paths` 保留库里存的拼写。规范化副本
+    /// 只用于这次匹配——调用方会拿自己的路径再和 `root_paths` 比一次（例如
+    /// `auto_resolve::has_local_scan_metadata` 用它选 show root），把内部副本漏出去
+    /// 会让这些比较在别名路径上全部落空（macOS `/var` 与 `/private/var`）。
     pub fn library_for_path_strict(
         &self,
         path: &std::path::Path,
         kind: MediaKind,
     ) -> Result<Option<Library>, StoreError> {
         let libraries = self.list_libraries()?;
-        let mut best: Option<(usize, Library)> = None;
-        let mut ambiguous = false;
+        let resolved = Self::with_resolved_roots(&libraries)?;
         let norm_path = crate::library_paths::resolved_path(path).map_err(|error| {
             tracing::error!(path = %path.display(), %error, "解析严格 Library 路径失败");
             error
         })?;
+        let Some(owner_id) = classify_new_file(&resolved, &norm_path, kind).map(|library| library.id.clone())
+        else {
+            return Ok(None);
+        };
+        Ok(libraries.into_iter().find(|library| library.id == owner_id))
+    }
+
+    /// Copies of `libraries` with every root path resolved and normalized
+    /// (filesystem IO). This is the admission-time form the pure classifier needs;
+    /// the copies are internal to the match, never handed to a caller.
+    fn with_resolved_roots(libraries: &[Library]) -> Result<Vec<Library>, StoreError> {
+        let mut resolved = Vec::with_capacity(libraries.len());
         for library in libraries {
-            if library.kind != kind {
-                continue;
-            }
-            let mut depth = None;
+            let mut roots = Vec::with_capacity(library.root_paths.len());
             for root in &library.root_paths {
-                let norm_root = crate::library_paths::resolved_path(root)?;
-                if norm_path.starts_with(&norm_root) {
-                    depth = Some(depth.unwrap_or(0).max(norm_root.components().count()));
-                }
+                roots.push(crate::library_paths::resolved_path(root)?);
             }
-            let Some(depth) = depth else { continue };
-            match &best {
-                Some((best_depth, _)) if *best_depth > depth => {}
-                Some((best_depth, _)) if *best_depth == depth => ambiguous = true,
-                _ => {
-                    best = Some((depth, library));
-                    ambiguous = false;
-                }
-            }
+            let mut copy = library.clone();
+            copy.root_paths = roots;
+            resolved.push(copy);
         }
-        if ambiguous {
-            Ok(None)
-        } else {
-            Ok(best.map(|(_, l)| l))
-        }
+        Ok(resolved)
     }
 
     pub(crate) fn roots_of(&self, library_id: &str) -> Result<Vec<PathBuf>, StoreError> {
-        let mut stmt = self.app.prepare(
-            "SELECT path FROM library_roots WHERE library_id = ?1
-             ORDER BY sort_order, path",
+        let mut stmt = self.library.prepare(
+            "SELECT display_path FROM library_roots WHERE library_id = ?1
+             ORDER BY sort_order, display_path",
         )?;
         let rows = stmt.query_map(params![library_id], |row| row.get::<_, String>(0))?;
         let mut paths = Vec::new();
@@ -364,11 +376,36 @@ impl Store {
         match_rules: &[serde_json::Value],
         default_filter_id: Option<&str>,
     ) -> Result<Library, StoreError> {
-        self.ensure_removal_roots_available(root_paths)?;
+        let roots = PreparedLibraryRoots::observe(root_paths)?;
+        self.create_library_full_prepared(
+            kind,
+            name,
+            &roots,
+            access_mode,
+            admin_visible,
+            member_ids,
+            match_rules,
+            default_filter_id,
+        )
+    }
+
+    /// Create from root observations made outside the caller's Store guard.
+    pub fn create_library_full_prepared(
+        &self,
+        kind: MediaKind,
+        name: &str,
+        roots: &PreparedLibraryRoots,
+        access_mode: &str,
+        admin_visible: bool,
+        member_ids: &[domain::UserId],
+        match_rules: &[serde_json::Value],
+        default_filter_id: Option<&str>,
+    ) -> Result<Library, StoreError> {
+        self.ensure_removal_keys_available(roots.entries.iter().map(|(_, key)| key.as_str()))?;
         let id = uuid::Uuid::new_v4().to_string();
         let sort_order = self.next_sort_order()?;
         let has_default: bool = self
-            .app
+            .library
             .query_row(
                 "SELECT 1 FROM libraries WHERE kind = ?1 AND is_default = 1 LIMIT 1",
                 params![kind.as_str()],
@@ -377,9 +414,19 @@ impl Store {
             .optional()?
             .is_some();
         let is_default = if has_default { 0 } else { 1 };
-        self.app.execute(
+        let member_ids_json = serde_json::to_string(
+            &member_ids
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>(),
+        )?;
+        let match_rules_json = serde_json::to_string(match_rules)?;
+        // The library row and its roots commit together: a rejected root must
+        // not leave behind a Library the caller never successfully created.
+        let tx = crate::write_tx(&self.library)?;
+        tx.execute(
             "INSERT INTO libraries
-                (id, kind, name, is_default, sort_order, access_mode, admin_visible, member_ids_json, match_rules_json, default_filter_id)
+                (library_id, kind, name, is_default, sort_order, access_mode, admin_visible, member_ids_json, match_rules_json, default_filter_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 id,
@@ -389,17 +436,23 @@ impl Store {
                 sort_order,
                 access_mode,
                 admin_visible as i64,
-                serde_json::to_string(
-                    &member_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>()
-                )?,
-                serde_json::to_string(match_rules)?,
+                member_ids_json,
+                match_rules_json,
                 default_filter_id,
             ],
         )?;
-        self.replace_roots(&id, kind, root_paths)?;
-        Ok(self
+        Self::replace_roots(&tx, &id, roots)?;
+        for (_, key) in &roots.entries {
+            Self::reassign_files_under_root(&tx, &id, kind, key)?;
+        }
+        tx.commit()?;
+        crate::path_key::reload_root_aliases(&self.library)?;
+        if let Err(error) = self.drain_one_root_batch() {
+            tracing::error!(%error,library_id=id,"Root reassignment queued after a failed initial window");
+        }
+        self
             .get_library(&id)?
-            .ok_or_else(|| StoreError::Missing(format!("library {id}")))?)
+            .ok_or_else(|| StoreError::Missing(format!("library {id}")))
     }
 
     pub fn set_library_switch_settings(
@@ -422,14 +475,14 @@ impl Store {
         let exclude_from_home = exclude_from_home.unwrap_or(current.exclude_from_home);
         let auto_series_collections =
             auto_series_collections.unwrap_or(current.auto_series_collections);
-        self.app.execute(
+        self.library.execute(
             "UPDATE libraries SET
                 realtime_watch = ?1,
                 generate_thumbnails = ?2,
                 extract_chapter_images = ?3,
                 exclude_from_home = ?4,
                 auto_series_collections = ?5
-             WHERE id = ?6",
+             WHERE library_id = ?6",
             params![
                 realtime_watch as i64,
                 generate_thumbnails as i64,
@@ -449,8 +502,8 @@ impl Store {
         enable_fingerprint: bool,
     ) -> Result<(), StoreError> {
         self.ensure_library_mutable(id)?;
-        self.app.execute(
-            "UPDATE libraries SET detect_intros = ?1, enable_fingerprint = ?2 WHERE id = ?3",
+        self.library.execute(
+            "UPDATE libraries SET detect_intros = ?1, enable_fingerprint = ?2 WHERE library_id = ?3",
             params![detect_intros as i64, enable_fingerprint as i64, id],
         )?;
         Ok(())
@@ -462,16 +515,40 @@ impl Store {
         cover_path: Option<&str>,
     ) -> Result<(), StoreError> {
         self.ensure_library_mutable(id)?;
-        self.app.execute(
+        self.library.execute(
             "UPDATE libraries SET cover_path = ?1, cover_revision = cover_revision + 1
-             WHERE id = ?2",
+             WHERE library_id = ?2",
             params![cover_path, id],
         )?;
         Ok(())
     }
 
-    /// Update name and/or root list (diff-based: kept roots keep their id and
-    /// get a new order; the first entry is the primary root).
+    /// A root rewrite may not strand a file this Library recorded. The recorded
+    /// `library_files.library_id` is the authority, so the guard selects this
+    /// Library's rows instead of asking which root the path happens to start with.
+    fn ensure_recorded_files_stay_under(
+        &self,
+        library: &Library,
+        proposed: &[PathBuf],
+    ) -> Result<(), StoreError> {
+        let mut stmt = self
+            .library
+            .prepare("SELECT display_path FROM library_files WHERE library_id = ?1")?;
+        let rows = stmt.query_map(params![library.id], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            let path = PathBuf::from(row?);
+            if !proposed.iter().any(|root| path.starts_with(root)) {
+                tracing::warn!(library_id = %library.id, path = %path.display(),
+                    "根目录改写会让已发布文件落到新的根目录之外");
+                return Err(StoreError::Protected(format!(
+                    "媒体库 {} 仍有台账文件位于现有根目录；先迁移或清理这些文件，再修改根目录",
+                    library.name
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub fn update_library(
         &self,
         id: &str,
@@ -503,50 +580,35 @@ impl Store {
         default_filter_id: Option<Option<&str>>,
     ) -> Result<Library, StoreError> {
         self.ensure_library_mutable(id)?;
+        let prepared_roots = root_paths.map(PreparedLibraryRoots::observe).transpose()?;
         let Some(library) = self.get_library(id)? else {
             return Err(StoreError::Missing(format!("library {id}")));
         };
         if let Some(root_paths) = root_paths {
             self.ensure_removal_roots_available(root_paths)?;
             let proposed: Vec<PathBuf> = root_paths.iter().map(PathBuf::from).collect();
-            for row in self.list_ledger()? {
-                let Some(media) = self.get_media(row.media_id)? else {
-                    continue;
-                };
-                if media.kind != library.kind
-                    || self
-                        .library_for_path(std::path::Path::new(&row.path), media.kind)?
-                        .map(|owner| owner.id != library.id)
-                        .unwrap_or(true)
-                {
-                    continue;
-                }
-                if !proposed
-                    .iter()
-                    .any(|root| std::path::Path::new(&row.path).starts_with(root))
-                {
-                    return Err(StoreError::Protected(format!(
-                        "媒体库 {} 仍有台账文件位于现有根目录；先迁移或清理这些文件，再修改根目录",
-                        library.name
-                    )));
-                }
-            }
+            self.ensure_recorded_files_stay_under(&library, &proposed)?;
         }
-        if let Some(name) = name {
-            if !name.trim().is_empty() {
-                self.app.execute(
-                    "UPDATE libraries SET name = ?1 WHERE id = ?2",
+        // One transaction for the row updates and the root replacement, so a
+        // rejected root cannot leave a partially updated Library behind.
+        let tx = crate::write_tx(&self.library)?;
+        if let Some(name) = name
+            && !name.trim().is_empty() {
+                tx.execute(
+                    "UPDATE libraries SET name = ?1 WHERE library_id = ?2",
                     params![name.trim(), id],
                 )?;
             }
-        }
-        if let Some(root_paths) = root_paths {
-            self.replace_roots(id, library.kind, root_paths)?;
+        if let Some(roots) = &prepared_roots {
+            Self::replace_roots(&tx, id, roots)?;
+            for (_, key) in &roots.entries {
+                Self::reassign_files_under_root(&tx, id, library.kind, key)?;
+            }
         }
         if let Some((access_mode, admin_visible, member_ids)) = access {
-            self.app.execute(
+            tx.execute(
                 "UPDATE libraries SET access_mode = ?1, admin_visible = ?2, member_ids_json = ?3
-                 WHERE id = ?4",
+                 WHERE library_id = ?4",
                 params![
                     access_mode,
                     admin_visible as i64,
@@ -561,31 +623,33 @@ impl Store {
             )?;
         }
         if let Some(match_rules) = match_rules {
-            self.app.execute(
-                "UPDATE libraries SET match_rules_json = ?1 WHERE id = ?2",
+            tx.execute(
+                "UPDATE libraries SET match_rules_json = ?1 WHERE library_id = ?2",
                 params![serde_json::to_string(match_rules)?, id],
             )?;
         }
         if let Some(filter_id) = default_filter_id {
-            self.app.execute(
-                "UPDATE libraries SET default_filter_id = ?1 WHERE id = ?2",
+            tx.execute(
+                "UPDATE libraries SET default_filter_id = ?1 WHERE library_id = ?2",
                 params![filter_id, id],
             )?;
         }
-        Ok(self
+        tx.commit()?;
+        crate::path_key::reload_root_aliases(&self.library)?;
+        if let Err(error) = self.drain_one_root_batch() {
+            tracing::error!(%error,library_id=id,"Root reassignment queued after a failed initial window");
+        }
+        self
             .get_library(id)?
-            .ok_or_else(|| StoreError::Missing(format!("library {id}")))?)
+            .ok_or_else(|| StoreError::Missing(format!("library {id}")))
     }
 
-    /// Delete a library and its roots. The last library of a kind is protected.
     pub fn delete_library(&self, id: &str) -> Result<(), StoreError> {
         Err(StoreError::Protected(format!(
             "Library {id} 必须通过持久删除协调器删除，不能绕过任务排空"
         )))
     }
 
-    /// Promote a library to default for its kind; the previous default of that
-    /// kind is demoted.
     pub fn set_default_library(&self, id: &str) -> Result<Library, StoreError> {
         self.ensure_library_mutable(id)?;
         let Some(library) = self.get_library(id)? else {
@@ -596,89 +660,90 @@ impl Store {
                 self.ensure_library_mutable(&current.id)?;
             }
         }
-        self.app.execute(
-            "UPDATE libraries SET is_default = 0 WHERE kind = ?1 AND id NOT IN
+        self.library.execute(
+            "UPDATE libraries SET is_default = 0 WHERE kind = ?1 AND library_id NOT IN
              (SELECT library_id FROM library_removals WHERE state != 'succeeded')",
             params![library.kind.as_str()],
         )?;
-        self.app.execute(
-            "UPDATE libraries SET is_default = 1 WHERE id = ?1",
+        self.library.execute(
+            "UPDATE libraries SET is_default = 1 WHERE library_id = ?1",
             params![id],
         )?;
-        Ok(self
+        self
             .get_library(id)?
-            .ok_or_else(|| StoreError::Missing(format!("library {id}")))?)
+            .ok_or_else(|| StoreError::Missing(format!("library {id}")))
     }
 
-    /// Full-order reorder: `ids` is the desired display order of every library.
     pub fn reorder_libraries(&self, ids: &[&str]) -> Result<(), StoreError> {
         for id in ids {
             self.ensure_library_mutable(id)?;
         }
         for (index, id) in ids.iter().enumerate() {
-            self.app.execute(
-                "UPDATE libraries SET sort_order = ?1 WHERE id = ?2",
+            self.library.execute(
+                "UPDATE libraries SET sort_order = ?1 WHERE library_id = ?2",
                 params![index as i32, id],
             )?;
         }
         Ok(())
     }
 
-    /// Diff-replace a library's root list: keep matching rows (preserving id),
-    /// insert new paths, drop removed ones.
-    fn replace_roots(
-        &self,
-        library_id: &str,
-        kind: MediaKind,
-        root_paths: &[&str],
-    ) -> Result<(), StoreError> {
-        let mut stmt = self
-            .app
-            .prepare("SELECT id, path FROM library_roots WHERE library_id = ?1")?;
-        let existing = stmt
-            .query_map(params![library_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        for (index, path) in root_paths.iter().enumerate() {
-            let path = path.trim();
-            if path.is_empty() {
-                continue;
-            }
-            if let Some((root_id, _)) = existing.iter().find(|(_, p)| p == path) {
-                self.app.execute(
-                    "UPDATE library_roots SET sort_order = ?1 WHERE id = ?2",
-                    params![index as i32, root_id],
-                )?;
-            } else {
-                self.app.execute(
-                    "INSERT INTO library_roots (id, kind, path, is_default, library_id, sort_order)
-                     VALUES (?1, ?2, ?3, 0, ?4, ?5)",
-                    params![
-                        uuid::Uuid::new_v4().to_string(),
-                        kind.as_str(),
-                        path,
-                        library_id,
-                        index as i32
-                    ],
-                )?;
-            }
-        }
-        for (root_id, path) in existing {
-            if !root_paths.iter().any(|p| p.trim() == path) {
-                self.app
-                    .execute("DELETE FROM library_roots WHERE id = ?1", params![root_id])?;
-            }
-        }
-        Ok(())
-    }
-
     pub(crate) fn next_sort_order(&self) -> Result<i32, StoreError> {
         let max: Option<i32> =
-            self.app
+            self.library
                 .query_row("SELECT MAX(sort_order) FROM libraries", [], |row| {
                     row.get(0)
                 })?;
         Ok(max.map(|v| v + 1).unwrap_or(0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejected_root_leaves_no_library_row() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("data")).unwrap();
+        let first_root = temp.path().join("first-root");
+        let second_root = temp.path().join("second-root");
+        store
+            .create_library_full(
+                MediaKind::Movie,
+                "First",
+                &[first_root.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+                &[],
+                None,
+            )
+            .unwrap();
+        let before = store.list_libraries().unwrap().len();
+
+        let result = store.create_library_full(
+            MediaKind::Movie,
+            "Rejected",
+            &[second_root.to_str().unwrap(), first_root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+            &[],
+            None,
+        );
+
+        assert!(
+            matches!(result, Err(StoreError::Sqlite(_))),
+            "duplicate root path_key must be rejected: {result:?}"
+        );
+        let libraries = store.list_libraries().unwrap();
+        assert_eq!(libraries.len(), before, "no orphan library row remains");
+        assert!(libraries.iter().all(|library| library.name != "Rejected"));
+        assert!(
+            libraries
+                .iter()
+                .all(|library| !library.root_paths.contains(&second_root)),
+            "the partially inserted root must be rolled back"
+        );
     }
 }

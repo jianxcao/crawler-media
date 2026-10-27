@@ -2,14 +2,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::router;
-use axum::http::StatusCode;
 use downloader::MemoryDownloader;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::common::*;
-use super::subscription_depth::{authed_app, seed_pending_torrent};
+use super::subscription_depth::authed_app;
 async fn poll_for_activity_type(app: &axum::Router, id: &str, target: &str) -> bool {
     for _ in 0..10 {
         let activities = json_body(

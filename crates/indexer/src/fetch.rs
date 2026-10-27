@@ -33,19 +33,6 @@ pub fn effective_base_url(site: &Site, profile: &Profile) -> String {
     }
 }
 
-pub fn search_request(site: &Site, profile: &Profile, keyword: &str) -> FetchRequest {
-    search_request_page(site, profile, keyword, 1)
-}
-
-pub fn search_request_page(
-    site: &Site,
-    profile: &Profile,
-    keyword: &str,
-    page: u32,
-) -> FetchRequest {
-    search_request_page_categories(site, profile, keyword, page, &[])
-}
-
 pub fn search_request_page_categories(
     site: &Site,
     profile: &Profile,
@@ -123,7 +110,7 @@ pub fn search_request_page_categories(
     }
 }
 
-pub fn rss_request(site: &Site, profile: &Profile) -> FetchRequest {
+pub fn rss_request(site: &Site, _profile: &Profile) -> FetchRequest {
     FetchRequest {
         key: format!("rss:{}", site.id),
         url: site.rss_url.clone().unwrap_or_else(|| site.url.clone()),

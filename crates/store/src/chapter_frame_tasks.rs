@@ -1,11 +1,11 @@
 //! Durable chapter scene-frame obligations.
 //!
-//! One row is one (ledger, source version, chapter target set) obligation. The
+//! One row is one (file, source version, chapter target set) obligation. The
 //! request is persisted before any worker starts, so a crash leaves `queued`
 //! work recoverable instead of losing it with the in-memory queue.
 
 use domain::LedgerId;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 use std::str::FromStr;
 
 use super::{Store, StoreError};
@@ -13,7 +13,7 @@ use super::{Store, StoreError};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChapterFrameTask {
     pub id: String,
-    pub ledger_id: LedgerId,
+    pub file_id: LedgerId,
     pub source_version: String,
     pub targets: Vec<(i64, i64)>,
     pub targets_hash: String,
@@ -36,22 +36,19 @@ impl ChapterFrameTaskCounts {
 
 impl Store {
     /// Persist one obligation. `false` means the same
-    /// `(ledger_id, source_version, targets_hash)` already exists, so the
+    /// `(file_id, source_version, targets_hash)` already exists, so the
     /// caller must not start the work twice.
-    pub fn enqueue_chapter_frame_task(
-        &self,
-        task: &ChapterFrameTask,
-    ) -> Result<bool, StoreError> {
+    pub fn enqueue_chapter_frame_task(&self, task: &ChapterFrameTask) -> Result<bool, StoreError> {
         let targets_json = serde_json::to_string(&task.targets)?;
         let changed = self.library.execute(
             "INSERT INTO chapter_frame_tasks (
-                 id, ledger_id, source_version, targets_json, targets_hash,
+                 id, file_id, source_version, targets_json, targets_hash,
                  status, created_at_ms
              ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6)
-             ON CONFLICT(ledger_id, source_version, targets_hash) DO NOTHING",
+             ON CONFLICT(file_id, source_version, targets_hash) DO NOTHING",
             params![
                 task.id,
-                compact_ledger_id(task.ledger_id),
+                compact_file_id(task.file_id),
                 task.source_version,
                 targets_json,
                 task.targets_hash,
@@ -69,7 +66,7 @@ impl Store {
     ) -> Result<Vec<ChapterFrameTask>, StoreError> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let mut statement = self.library.prepare(
-            "SELECT id, ledger_id, source_version, targets_json, targets_hash
+            "SELECT id, file_id, source_version, targets_json, targets_hash
              FROM chapter_frame_tasks
              WHERE status = 'queued'
              ORDER BY created_at_ms, id
@@ -147,7 +144,7 @@ impl Store {
         let task = self
             .library
             .query_row(
-                "SELECT id, ledger_id, source_version, targets_json, targets_hash
+                "SELECT id, file_id, source_version, targets_json, targets_hash
                  FROM chapter_frame_tasks WHERE id = ?1",
                 [id],
                 map_task,
@@ -158,7 +155,7 @@ impl Store {
 }
 
 fn map_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChapterFrameTask> {
-    let ledger: String = row.get(1)?;
+    let file: String = row.get(1)?;
     let targets_json: String = row.get(3)?;
     let targets = serde_json::from_str::<Vec<(i64, i64)>>(&targets_json).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
@@ -167,22 +164,22 @@ fn map_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChapterFrameTask> {
             Box::new(error),
         )
     })?;
-    let ledger_id = LedgerId::from_str(&ledger).map_err(|error| {
+    let file_id = LedgerId::from_str(&file).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
-            ledger.len(),
+            file.len(),
             rusqlite::types::Type::Text,
             Box::new(error),
         )
     })?;
     Ok(ChapterFrameTask {
         id: row.get(0)?,
-        ledger_id,
+        file_id,
         source_version: row.get(2)?,
         targets,
         targets_hash: row.get(4)?,
     })
 }
 
-fn compact_ledger_id(ledger_id: LedgerId) -> String {
-    ledger_id.to_string().replace('-', "")
+fn compact_file_id(file_id: LedgerId) -> String {
+    file_id.to_string().replace('-', "")
 }

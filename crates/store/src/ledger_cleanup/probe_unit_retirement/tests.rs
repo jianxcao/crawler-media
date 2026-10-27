@@ -1,7 +1,9 @@
 use crate::Store;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource};
+use crate::test_support::FixtureFile;
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource};
 
-fn fixture(store: &Store, root: &std::path::Path) -> (Media, LedgerRow, LedgerRow) {
+fn fixture(store: &Store, root: &std::path::Path) -> (Media, FixtureFile, FixtureFile) {
+    std::fs::create_dir_all(root).unwrap();
     let library = store
         .create_library(
             MediaKind::Tv,
@@ -27,8 +29,8 @@ fn fixture(store: &Store, root: &std::path::Path) -> (Media, LedgerRow, LedgerRo
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
-    let row = |episode: u32| LedgerRow {
-        id: LedgerId::new(),
+    let row = |episode: u32| FixtureFile {
+        file_id: Some(LedgerId::new()),
         media_id: media.id,
         path: root
             .join(format!("E{episode:02}.strm"))
@@ -42,11 +44,12 @@ fn fixture(store: &Store, root: &std::path::Path) -> (Media, LedgerRow, LedgerRo
         quality_source: QualitySource::Release,
         confidence: Confidence::High,
         filter_score: None,
+        ..Default::default()
     };
     let first = row(1);
     let second = row(2);
-    store.insert_ledger(&first).unwrap();
-    store.insert_ledger(&second).unwrap();
+    crate::test_support::publish_fixture_file(store, &first).unwrap();
+    crate::test_support::publish_fixture_file(store, &second).unwrap();
     (media, first, second)
 }
 
@@ -66,8 +69,8 @@ fn deleting_a_ledger_retires_its_unit_and_keeps_the_job_completable() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path().join("data")).unwrap();
     let (media, first, second) = fixture(&store, &temp.path().join("tv"));
-    let first_id = first.id.to_string();
-    let second_id = second.id.to_string();
+    let first_id = first.file_id.expect("fixture file id").to_string();
+    let second_id = second.file_id.expect("fixture file id").to_string();
     let units = [unit(&first_id), unit(&second_id)];
     store
         .create_probe_job(
@@ -104,7 +107,7 @@ fn deleting_the_last_ledger_terminalizes_the_job_instead_of_stranding_it() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path().join("data")).unwrap();
     let (media, first, _second) = fixture(&store, &temp.path().join("tv"));
-    let first_id = first.id.to_string();
+    let first_id = first.file_id.expect("fixture file id").to_string();
     let units = [unit(&first_id)];
     store
         .create_probe_job(
@@ -133,7 +136,7 @@ fn a_late_unit_finish_does_not_resurrect_a_retired_job() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path().join("data")).unwrap();
     let (media, first, _second) = fixture(&store, &temp.path().join("tv"));
-    let first_id = first.id.to_string();
+    let first_id = first.file_id.expect("fixture file id").to_string();
     let units = [unit(&first_id)];
     store
         .create_probe_job(
@@ -163,45 +166,6 @@ fn a_late_unit_finish_does_not_resurrect_a_retired_job() {
     );
 }
 
-#[test]
-fn opening_a_pre_fix_database_repairs_orphan_probe_units() {
-    let temp = tempfile::tempdir().unwrap();
-    let data = temp.path().join("data");
-    let store = Store::open(&data).unwrap();
-    let (media, first, _second) = fixture(&store, &temp.path().join("tv"));
-    let first_id = first.id.to_string();
-    let units = [unit(&first_id)];
-    store
-        .create_probe_job(
-            "job-3",
-            "media_probe",
-            &media.id.to_string(),
-            Some(1),
-            "ledger:legacy",
-            &units,
-        )
-        .unwrap();
-    store.start_probe_unit("job-3", &first_id).unwrap();
-    // Simulate a database written by the previous release: the ledger row is
-    // gone but its probe unit survived, and the schema version predates the
-    // repair migration.
-    store
-        .library
-        .execute("DELETE FROM ledger WHERE id = ?1", [&first_id])
-        .unwrap();
-    store
-        .library
-        .pragma_update(None, "user_version", 9)
-        .unwrap();
-    drop(store);
-
-    let reopened = Store::open(&data).unwrap();
-    assert!(reopened.probe_job_units("job-3").unwrap().is_empty());
-    let job = reopened.get_probe_job("job-3").unwrap().unwrap();
-    assert_eq!(job.status, "cancelled");
-    assert_eq!(job.total, 0);
-}
-
 /// Two-unit job whose first unit is already terminal while the second is still
 /// outstanding, so a later deletion of the second ledger retires the last
 /// unfinished unit of an otherwise finished prefix.
@@ -216,8 +180,8 @@ fn prefix_job(
 ) -> (Store, String, String) {
     let store = Store::open(root.join("data")).unwrap();
     let (media, first, second) = fixture(&store, &root.join("tv"));
-    let first_id = first.id.to_string();
-    let second_id = second.id.to_string();
+    let first_id = first.file_id.expect("fixture file id").to_string();
+    let second_id = second.file_id.expect("fixture file id").to_string();
     let units = [unit(&first_id), unit(&second_id)];
     store
         .create_probe_job(

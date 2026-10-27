@@ -1,8 +1,8 @@
 use std::str::FromStr;
 
 use api::{page_is_full_and_irrelevant, search_keywords_for};
-use domain::{SiteId, Torrent};
 use domain::{Coverage, Media, MediaId, MediaKind};
+use domain::{SiteId, Torrent};
 
 fn media(aliases: &[&str]) -> Media {
     Media {
@@ -75,7 +75,10 @@ fn ongoing_tv_does_not_add_a_season_keyword() {
             episode_to: None,
         },
     );
-    assert_eq!(keywords, vec!["醉梦".to_string(), "Chinese Dream".to_string()]);
+    assert_eq!(
+        keywords,
+        vec!["醉梦".to_string(), "Chinese Dream".to_string()]
+    );
 }
 
 fn torrent(title: &str) -> Torrent {

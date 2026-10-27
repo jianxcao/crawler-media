@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use domain::JobId;
 use jobs::{JobKind, JobStatus, NewDef, Queue, Runner, Schedule};
+use parking_lot::Mutex;
 
 fn queue() -> (tempfile::TempDir, Queue) {
     let dir = tempfile::tempdir().unwrap();
@@ -437,26 +438,33 @@ fn tick_runs_at_most_two_and_uses_injected_clock() {
     q.enqueue(JobKind::Transfer, "1", 50).unwrap();
     q.enqueue(JobKind::Transfer, "2", 50).unwrap();
     q.enqueue(JobKind::Transfer, "3", 50).unwrap();
+    // `Queue::tick` 现在是对 Mutex 的自由函数：runner 在锁外执行（Review L6）。
+    let q = Mutex::new(q);
     let hits = Arc::new(AtomicUsize::new(0));
-    let finished = q.tick(50, &CountingRunner(hits.clone())).unwrap();
-    assert_eq!(finished.len(), 2);
+    let report = Queue::tick(&q, &CountingRunner(hits.clone()), 50);
+    assert!(report.error.is_none(), "{:?}", report.error);
+    assert_eq!(report.finished.len(), 2);
     assert_eq!(hits.load(Ordering::SeqCst), 2);
     assert!(
-        finished
+        report
+            .finished
             .iter()
             .all(|job| job.status == JobStatus::Succeeded)
     );
 
-    let rest = q.tick(50, &OkRunner).unwrap();
-    assert_eq!(rest.len(), 1);
+    let rest = Queue::tick(&q, &OkRunner, 50);
+    assert!(rest.error.is_none(), "{:?}", rest.error);
+    assert_eq!(rest.finished.len(), 1);
 }
 
 #[test]
 fn tick_records_runner_error_without_sleeping() {
     let (_dir, q) = queue();
     let job = q.enqueue(JobKind::Scrape, "{}", 0).unwrap();
-    q.tick(0, &FailRunner).unwrap();
-    let stored = q.get(job.id).unwrap().unwrap();
+    let q = Mutex::new(q);
+    let report = Queue::tick(&q, &FailRunner, 0);
+    assert!(report.error.is_none(), "{:?}", report.error);
+    let stored = q.lock().get(job.id).unwrap().unwrap();
     assert_eq!(stored.status, JobStatus::Queued);
     assert_eq!(stored.attempt, 1);
     assert_eq!(stored.error.as_deref(), Some("boom"));

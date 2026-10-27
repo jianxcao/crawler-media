@@ -2,6 +2,10 @@
 //!
 //! characterization：entries/hidden_count/has_more/复合游标/days/scope=all 语义不变；
 //! 另有一条真实回归：hidden_count 必须覆盖整个 scope，而不是旧的「前 20 万行」窗口。
+use store::test_support::{FixtureFile, publish_fixture_file};
+
+#[path = "support/mod.rs"]
+mod support;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -10,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use api::{ApiState, Store, router};
 use axum::body::{Body, to_bytes};
 use axum::http::Request;
-use domain::{Confidence, LedgerId, LedgerRow, Media, MediaId, MediaKind, QualitySource, UserRole};
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UserRole};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use serde_json::Value;
@@ -100,7 +104,7 @@ fn seed_visible_library(store: &Store, root: &Path) -> PathBuf {
     library_root
 }
 
-fn seed_media_with_ledger(store: &Store, library_root: &Path, title: &str) -> MediaId {
+fn seed_media_with_ledger(store: &Store, library_root: &Path, title: &str) -> (MediaId, LedgerId) {
     let media = Media {
         id: MediaId::new(),
         kind: MediaKind::Movie,
@@ -117,9 +121,11 @@ fn seed_media_with_ledger(store: &Store, library_root: &Path, title: &str) -> Me
     store.insert_media(&media).unwrap();
     let path = library_root.join(format!("{title}.mkv"));
     std::fs::write(&path, b"x").unwrap();
-    store
-        .insert_ledger(&LedgerRow {
-            id: LedgerId::new(),
+    let file_id = LedgerId::new();
+    publish_fixture_file(
+        store,
+        &FixtureFile {
+            file_id: Some(file_id),
             media_id: media.id,
             path: path.display().to_string(),
             season: None,
@@ -130,9 +136,11 @@ fn seed_media_with_ledger(store: &Store, library_root: &Path, title: &str) -> Me
             quality_source: QualitySource::Probe,
             confidence: Confidence::High,
             filter_score: None,
-        })
-        .unwrap();
-    media.id
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    (media.id, file_id)
 }
 
 /// 没有 ledger 行的媒体不会出现在成员可见集合里（= hidden）。
@@ -154,20 +162,40 @@ fn seed_hidden_media(store: &Store, title: &str) -> MediaId {
     media.id
 }
 
+/// 成员不可见 Library 中的媒体：有真实发布文件可签发 session，但对成员 hidden。
+fn seed_hidden_playable_media(store: &Store, root: &Path, title: &str) -> (MediaId, LedgerId) {
+    let library_root = root.join("hidden-library");
+    std::fs::create_dir_all(&library_root).unwrap();
+    store
+        .create_library(
+            MediaKind::Movie,
+            "Hidden",
+            &[library_root.to_str().unwrap()],
+            "selected",
+            true,
+            &[],
+        )
+        .unwrap();
+    seed_media_with_ledger(store, &library_root, title)
+}
+
 fn log_play(
     store: &Store,
     user_id: domain::UserId,
     media_id: MediaId,
+    file_id: LedgerId,
     started_at: i64,
     device: &str,
 ) {
+    let play_session_id =
+        support::session::issue_session(store, user_id, device, file_id, started_at);
     store
         .upsert_session(&api::store::SessionRow {
             device_id: device.into(),
             user_id,
             media_id,
-            season: None,
-            episode: None,
+            season: Some(-1),
+            episode: Some(-1),
             client: Some("test".into()),
             device_name: Some("test".into()),
             client_version: None,
@@ -184,8 +212,8 @@ fn log_play(
             started_at,
             last_report_at: started_at,
             last_report_at_ms: started_at * 1000,
-            ledger_id: None,
-            play_session_id: None,
+            ledger_id: Some(file_id.to_string()),
+            play_session_id: Some(play_session_id),
             last_event_sequence: None,
         })
         .unwrap();
@@ -202,18 +230,17 @@ async fn entries_skip_hidden_rows_and_hidden_count_covers_scope() {
     let store = state.store();
     let library_root = seed_visible_library(&store.lock(), tmp.path());
     let (member, token) = seed_member(&store.lock(), "alice");
-    let (visible, hidden) = {
+    let (visible, visible_file, hidden, hidden_file) = {
         let guard = store.lock();
-        (
-            seed_media_with_ledger(&guard, &library_root, "Visible"),
-            seed_hidden_media(&guard, "Hidden"),
-        )
+        let (visible, visible_file) = seed_media_with_ledger(&guard, &library_root, "Visible");
+        let (hidden, hidden_file) = seed_hidden_playable_media(&guard, tmp.path(), "Hidden");
+        (visible, visible_file, hidden, hidden_file)
     };
     {
         let guard = store.lock();
-        log_play(&guard, member, visible, 3000, "dev-visible");
-        log_play(&guard, member, hidden, 2000, "dev-hidden");
-        log_play(&guard, member, visible, 1000, "dev-visible-2");
+        log_play(&guard, member, visible, visible_file, 3000, "dev-visible");
+        log_play(&guard, member, hidden, hidden_file, 2000, "dev-hidden");
+        log_play(&guard, member, visible, visible_file, 1000, "dev-visible-2");
     }
 
     let data = history(&app, &token, "").await;
@@ -233,7 +260,7 @@ async fn same_second_rows_page_without_gaps_or_duplicates() {
     let store = state.store();
     let library_root = seed_visible_library(&store.lock(), tmp.path());
     let (member, token) = seed_member(&store.lock(), "bob");
-    let visible = {
+    let (visible, visible_file) = {
         let guard = store.lock();
         seed_media_with_ledger(&guard, &library_root, "SameSecond")
     };
@@ -241,7 +268,7 @@ async fn same_second_rows_page_without_gaps_or_duplicates() {
     {
         let guard = store.lock();
         for device in ["dev-a", "dev-b", "dev-c"] {
-            log_play(&guard, member, visible, same_second, device);
+            log_play(&guard, member, visible, visible_file, same_second, device);
         }
     }
 
@@ -284,20 +311,47 @@ async fn days_filter_applies_to_page_and_hidden_count() {
     let store = state.store();
     let library_root = seed_visible_library(&store.lock(), tmp.path());
     let (member, token) = seed_member(&store.lock(), "carol");
-    let (visible, hidden) = {
+    let (visible, visible_file, hidden, hidden_file) = {
         let guard = store.lock();
-        (
-            seed_media_with_ledger(&guard, &library_root, "Recent"),
-            seed_hidden_media(&guard, "HiddenRecent"),
-        )
+        let (visible, visible_file) = seed_media_with_ledger(&guard, &library_root, "Recent");
+        let (hidden, hidden_file) = seed_hidden_playable_media(&guard, tmp.path(), "HiddenRecent");
+        (visible, visible_file, hidden, hidden_file)
     };
     let now = now_secs();
     {
         let guard = store.lock();
-        log_play(&guard, member, visible, now - 3600, "dev-recent");
-        log_play(&guard, member, hidden, now - 7200, "dev-hidden-recent");
-        log_play(&guard, member, visible, now - 10 * 86_400, "dev-old");
-        log_play(&guard, member, hidden, now - 11 * 86_400, "dev-hidden-old");
+        log_play(
+            &guard,
+            member,
+            visible,
+            visible_file,
+            now - 3600,
+            "dev-recent",
+        );
+        log_play(
+            &guard,
+            member,
+            hidden,
+            hidden_file,
+            now - 7200,
+            "dev-hidden-recent",
+        );
+        log_play(
+            &guard,
+            member,
+            visible,
+            visible_file,
+            now - 10 * 86_400,
+            "dev-old",
+        );
+        log_play(
+            &guard,
+            member,
+            hidden,
+            hidden_file,
+            now - 11 * 86_400,
+            "dev-hidden-old",
+        );
     }
 
     let data = history(&app, &token, "days=5").await;
@@ -318,17 +372,16 @@ async fn admin_scope_all_ignores_visibility() {
     let store = state.store();
     let library_root = seed_visible_library(&store.lock(), tmp.path());
     let (member, _token) = seed_member(&store.lock(), "dave");
-    let (visible, hidden) = {
+    let (visible, visible_file, hidden, hidden_file) = {
         let guard = store.lock();
-        (
-            seed_media_with_ledger(&guard, &library_root, "AdminVisible"),
-            seed_hidden_media(&guard, "AdminHidden"),
-        )
+        let (visible, visible_file) = seed_media_with_ledger(&guard, &library_root, "AdminVisible");
+        let (hidden, hidden_file) = seed_hidden_playable_media(&guard, tmp.path(), "AdminHidden");
+        (visible, visible_file, hidden, hidden_file)
     };
     {
         let guard = store.lock();
-        log_play(&guard, member, visible, 2000, "dev-visible");
-        log_play(&guard, member, hidden, 1000, "dev-hidden");
+        log_play(&guard, member, visible, visible_file, 2000, "dev-visible");
+        log_play(&guard, member, hidden, hidden_file, 1000, "dev-hidden");
     }
 
     let data = history(&app, "management-secret", "scope=all").await;
@@ -344,8 +397,15 @@ async fn member_without_visible_library_gets_empty_page() {
     let app = router(state.clone());
     let store = state.store();
     let (member, token) = seed_member(&store.lock(), "erin");
-    let hidden = seed_hidden_media(&store.lock(), "NoLibrary");
-    log_play(&store.lock(), member, hidden, 1000, "dev-hidden");
+    let (hidden, hidden_file) = seed_hidden_playable_media(&store.lock(), tmp.path(), "NoLibrary");
+    log_play(
+        &store.lock(),
+        member,
+        hidden,
+        hidden_file,
+        1000,
+        "dev-hidden",
+    );
 
     let data = history(&app, &token, "").await;
     assert_eq!(data["entries"].as_array().unwrap().len(), 0, "{data}");
@@ -373,21 +433,25 @@ async fn hidden_count_counts_rows_beyond_the_legacy_cap() {
     let (visible, hidden) = {
         let guard = store.lock();
         (
-            seed_media_with_ledger(&guard, &library_root, "CapVisible"),
+            seed_media_with_ledger(&guard, &library_root, "CapVisible").0,
             seed_hidden_media(&guard, "CapHidden"),
         )
     };
 
     let base = now_secs();
-    let connection = rusqlite::Connection::open(tmp.path().join("data/subscribe.db")).unwrap();
+    let connection = rusqlite::Connection::open(tmp.path().join("data/library.db")).unwrap();
     let transaction = connection.unchecked_transaction().unwrap();
     {
         let mut insert = transaction
             .prepare(
                 "INSERT INTO playback_logs
-                    (id, user_id, media_id, play_method, started_at, ended_at,
+                    (id, user_id, media_id, device_id, play_session_id, generation,
+                     file_id, file_revision, source_version, timeline_mode,
+                     play_method, started_at, ended_at,
                      watched_ms, start_position_ms, end_position_ms, completed)
-                 VALUES (?1, ?2, ?3, 'local', ?4, ?5, 0, 0, 0, 1)",
+                 VALUES (?1, ?2, ?3, 'cap-device', ?4, 1,
+                         'cap-file', 1, 'v1', 'full_file',
+                         'local', ?5, ?6, 0, 0, 0, 1)",
             )
             .unwrap();
         for index in 0..VISIBLE_ROWS {
@@ -396,6 +460,7 @@ async fn hidden_count_counts_rows_beyond_the_legacy_cap() {
                     format!("{index:032x}"),
                     member.to_string(),
                     visible.to_string(),
+                    format!("cap-session-{index}"),
                     base - index,
                     base - index + 1
                 ])
@@ -407,6 +472,7 @@ async fn hidden_count_counts_rows_beyond_the_legacy_cap() {
                 format!("{:032x}", 1_000_000u64),
                 member.to_string(),
                 hidden.to_string(),
+                "cap-session-hidden",
                 base - 20_000_000,
                 base - 20_000_000 + 1
             ])

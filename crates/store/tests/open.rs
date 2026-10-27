@@ -4,28 +4,32 @@ use store::Store;
 fn open_creates_four_sqlite_files() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();
-    for name in ["app.db", "catalog.db", "library.db", "subscribe.db"] {
+    for name in ["app.db", "cache.db", "library.db", "subscribe.db"] {
         assert!(tmp.path().join(name).is_file(), "{name} should exist");
     }
+    assert!(
+        !tmp.path().join("catalog.db").exists(),
+        "catalog.db should not exist"
+    );
     let versions = store.schema_versions();
     assert_eq!(
         versions.iter().find(|(n, _)| *n == "app").unwrap().1,
-        8,
-        "app schema version should be 8"
+        1,
+        "app schema version should be 1"
     );
     assert_eq!(
-        versions.iter().find(|(n, _)| *n == "catalog").unwrap().1,
-        3,
-        "catalog schema version should be 3"
+        versions.iter().find(|(n, _)| *n == "cache").unwrap().1,
+        1,
+        "cache schema version should be 1"
     );
     assert_eq!(
         versions.iter().find(|(n, _)| *n == "library").unwrap().1,
-        18,
-        "library schema version should be 18"
+        5,
+        "library schema version should be 5"
     );
     assert_eq!(
         versions.iter().find(|(n, _)| *n == "subscribe").unwrap().1,
-        8,
-        "subscribe schema version should be 8"
+        2,
+        "subscribe schema version should be 2"
     );
 }

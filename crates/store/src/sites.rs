@@ -139,35 +139,47 @@ impl Store {
     }
 
     pub fn get_filter(&self, id: FilterId) -> Result<Option<Filter>, StoreError> {
-        self.app
+        let row = self
+            .app
             .query_row(
                 "SELECT id, name, atoms_json, keep_old_versions FROM filters WHERE id = ?1",
                 params![id.to_string()],
-                |row| {
-                    Ok(Filter {
-                        id: super::maps::parse_id(row.get(0)?, 0)?,
-                        name: row.get(1)?,
-                        atoms: parse_atoms(&row.get::<_, String>(2)?),
-                        keep_old_versions: row.get::<_, i64>(3).unwrap_or(0) != 0,
-                    })
-                },
+                raw_filter_row,
             )
-            .optional()
-            .map_err(Into::into)
+            .optional()?;
+        row.map(build_filter).transpose()
     }
 
     pub fn list_filters(&self) -> Result<Vec<Filter>, StoreError> {
         let mut stmt = self
             .app
             .prepare("SELECT id, name, atoms_json, keep_old_versions FROM filters")?;
-        let rows = stmt.query_map([], |row| {
-            Ok(Filter {
-                id: super::maps::parse_id(row.get(0)?, 0)?,
-                name: row.get(1)?,
-                atoms: parse_atoms(&row.get::<_, String>(2)?),
-                keep_old_versions: row.get::<_, i64>(3).unwrap_or(0) != 0,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let rows = stmt.query_map([], raw_filter_row)?;
+        let raw = rows.collect::<Result<Vec<_>, _>>()?;
+        raw.into_iter().map(build_filter).collect()
     }
+}
+
+/// Raw `filters` columns; atom decoding happens outside the row closure so a
+/// stale shape can surface as `StoreError::Invalid` instead of a SQL error.
+type RawFilterRow = (String, String, String, i64);
+
+fn raw_filter_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawFilterRow> {
+    Ok((
+        row.get::<_, String>(0)?,
+        row.get::<_, String>(1)?,
+        row.get::<_, String>(2)?,
+        row.get::<_, i64>(3).unwrap_or(0),
+    ))
+}
+
+fn build_filter(
+    (raw_id, name, atoms_json, keep_old_versions): RawFilterRow,
+) -> Result<Filter, StoreError> {
+    Ok(Filter {
+        id: super::maps::parse_id(raw_id, 0)?,
+        name,
+        atoms: parse_atoms(&atoms_json)?,
+        keep_old_versions: keep_old_versions != 0,
+    })
 }

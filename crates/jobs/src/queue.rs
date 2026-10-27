@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use domain::{JobDefId, JobId};
+use parking_lot::Mutex;
 use rusqlite::Connection;
 
 use crate::kinds::{JobKind, Schedule};
@@ -29,12 +30,22 @@ pub struct Queue {
 impl Queue {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, JobError> {
         let path = path.as_ref();
+        crate::schema::preflight(path).inspect_err(|error| {
+            tracing::error!(path = %path.display(), %error, "Jobs layout preflight rejected");
+        })?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path)?;
+        // Create path only：`auto_vacuum` 写在库头里，SQLite 只在“没有表且不是 WAL”
+        // 时改写（否则静默 no-op），所以必须早于下面切 WAL 与任何 DDL。维护任务据此
+        // 才能用 `PRAGMA incremental_vacuum` 归还空闲页（`maintenance/database.rs`
+        // 会先读这个 pragma，不支持就如实报“非 incremental”）。
+        apply_auto_vacuum_on_create(&conn)?;
         apply_connection_policy(&conn)?;
-        store::migrate(&conn)?;
+        crate::schema::initialize_or_validate(&conn).inspect_err(|error| {
+            tracing::error!(path = %path.display(), %error, "Jobs initialization rejected");
+        })?;
         Ok(Self { conn })
     }
 
@@ -87,6 +98,10 @@ impl Queue {
             tracing::info!(count = jobs.len(), "已领取待执行任务");
         }
         Ok(jobs)
+    }
+
+    pub fn rewrite_media_refs(&self, from: &str, to: &str) -> Result<usize, JobError> {
+        crate::media_refs::rewrite_media_refs(&self.conn, from, to)
     }
 
     pub fn succeed(&self, id: JobId, now: i64) -> Result<Job, JobError> {
@@ -224,7 +239,9 @@ impl Queue {
         limit: usize,
         dry_run: bool,
     ) -> Result<crate::retention_cursor::RetentionWindow, JobError> {
-        crate::retention_cursor::prune_terminal_window(&self.conn, cursor_key, cutoff, limit, dry_run)
+        crate::retention_cursor::prune_terminal_window(
+            &self.conn, cursor_key, cutoff, limit, dry_run,
+        )
     }
 
     pub fn change_state(&self) -> Result<crate::change_state::JobChangeState, JobError> {
@@ -309,33 +326,135 @@ impl Queue {
         Ok(())
     }
 
-    pub fn tick(&self, now: i64, runner: &dyn Runner) -> Result<Vec<Job>, JobError> {
-        self.recover(now)?;
-        self.ensure_scheduled(now)?;
-        let claimed = self.claim(now, 2)?;
+    /// 一轮调度：持锁恢复/排期/认领 → **释放锁**执行 runner → 再持锁落库。
+    ///
+    /// Review L6: 旧实现在持有 Queue 锁时调用 runner，runner 只要再碰一次队列
+    /// （维护 runner 取短锁做批处理）就会在同一把不可重入的锁上自锁。现在锁只在
+    /// 「取任务」和「落库」两小段里持有，执行期间队列对任何线程都是空闲的。
+    ///
+    /// 执行阶段出错不会中断整轮：每个任务都按自己的结果落库，`error` 只承载
+    /// 持锁阶段（恢复/排期/认领/落库）的失败。
+    pub fn tick(queue: &Mutex<Queue>, runner: &dyn Runner, now: i64) -> TickReport {
+        let claimed = {
+            let guard = queue.lock();
+            match guard.claim_round(now) {
+                Ok(claimed) => claimed,
+                Err(error) => {
+                    return TickReport {
+                        finished: Vec::new(),
+                        error: Some(error),
+                    };
+                }
+            }
+        };
         let mut finished = Vec::new();
         for job in claimed {
-            let persisted = match runner.run(&job) {
-                Ok(()) => self.succeed_claimed(&job, now)?,
-                Err(error) => self.fail_claimed(&job, now, &error)?,
+            let outcome = runner.run(&job);
+            let persisted = {
+                let guard = queue.lock();
+                match outcome {
+                    Ok(()) => guard.succeed_claimed(&job, now),
+                    Err(error) => guard.fail_claimed(&job, now, &error),
+                }
             };
-            if let Some(job) = persisted {
-                finished.push(job);
+            match persisted {
+                Ok(Some(job)) => finished.push(job),
+                Ok(None) => {}
+                Err(error) => {
+                    return TickReport {
+                        finished,
+                        error: Some(error),
+                    };
+                }
             }
         }
-        Ok(finished)
+        TickReport {
+            finished,
+            error: None,
+        }
+    }
+
+    /// 一轮的持锁部分：恢复超时执行、补排期、认领至多两条（`claim` 的上限）。
+    fn claim_round(&self, now: i64) -> Result<Vec<Job>, JobError> {
+        self.recover(now)?;
+        self.ensure_scheduled(now)?;
+        self.claim(now, 2)
     }
 }
+
+/// 一次 [`Queue::tick`] 的结果。
+///
+/// 任务执行发生在 Queue 锁之外，因此这里只回传落库后的终态任务与持锁阶段的错误。
+pub struct TickReport {
+    /// 本轮已落库的终态任务（成功或失败）。
+    pub finished: Vec<Job>,
+    /// 持锁阶段（恢复/排期/认领/落库）的错误；`None` 表示整轮完整走完。
+    pub error: Option<JobError>,
+}
+
+/// 页缓存 16 MiB / 连接（负值 = KiB）。与 `store::open::CACHE_SIZE_KIB` 同值：
+/// jobs.db 与四个 Store 库同目录、同机器、同用户，调优不该分家。
+const CACHE_SIZE_KIB: i64 = -16_384;
+/// WAL 上限 64 MiB（checkpoint 后截断）。
+const JOURNAL_SIZE_LIMIT_BYTES: i64 = 67_108_864;
+/// mmap 上限 256 MiB / 连接（地址空间上限，不是常驻内存；见
+/// `store::open::apply_connection_policy` 的说明）。
+const MMAP_SIZE_BYTES: i64 = 268_435_456;
+/// `temp_store = MEMORY`：临时表/排序走内存。
+const TEMP_STORE_MEMORY: i64 = 2;
+/// 打开时带 hint 的 `PRAGMA optimize`（0x10000 = 有益时才 ANALYZE）。
+const OPTIMIZE_ON_OPEN: i64 = 0x10002;
 
 /// jobs 队列连接的**连接级**策略，与 Store 的四个库保持一致。
 ///
 /// `busy_timeout`/`foreign_keys` 是连接级设置（bundled 构建默认 5000ms/ON），
-/// 显式设置是为了不依赖构建默认值；`journal_mode=WAL` 是持久属性。
+/// 显式设置是为了不依赖构建默认值；`journal_mode=WAL` 与 `auto_vacuum` 是持久属性。
+/// 数值必须与 `crates/store/src/open.rs` 的同名常量保持一致（两个 crate 没有共享
+/// 依赖：jobs 不依赖 store，store 的 dev-dependencies 才依赖 jobs）。
 fn apply_connection_policy(conn: &Connection) -> Result<(), JobError> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "busy_timeout", "5000")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    // FULL is durability, not a tuning choice: WAL + NORMAL drops the last commit
+    // on power loss, so the queue must not depend on the bundled default.
+    conn.pragma_update(None, "synchronous", "FULL")?;
+    conn.pragma_update(None, "cache_size", CACHE_SIZE_KIB)?;
+    conn.pragma_update(None, "temp_store", TEMP_STORE_MEMORY)?;
+    conn.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT_BYTES)?;
+    conn.pragma_update(None, "mmap_size", MMAP_SIZE_BYTES)?;
+    conn.execute_batch(&format!("PRAGMA optimize={OPTIMIZE_ON_OPEN};"))?;
     Ok(())
+}
+
+/// Create path 的 `auto_vacuum=INCREMENTAL`：只在**未初始化**的文件上执行。
+///
+/// 判定与 `crate::schema::is_empty` 同一口径（两个头都为 0 且没有业务对象），
+/// 但必须在 `initialize_or_validate` 之前、在切 WAL 之前跑。
+fn apply_auto_vacuum_on_create(conn: &Connection) -> Result<(), JobError> {
+    let application_id: i64 = conn.pragma_query_value(None, "application_id", |row| row.get(0))?;
+    let user_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if application_id != 0 || user_version != 0 {
+        return Ok(());
+    }
+    let empty: bool = conn.query_row(
+        "SELECT count(*)=0 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
+        [],
+        |row| row.get(0),
+    )?;
+    if !empty {
+        return Ok(());
+    }
+    conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+    Ok(())
+}
+
+/// 关闭连接前跑一次 `PRAGMA optimize`（SQLite 推荐的「关闭时」用法）。
+impl Drop for Queue {
+    fn drop(&mut self) {
+        if let Err(error) = self.conn.execute_batch("PRAGMA optimize;") {
+            tracing::warn!(%error, "关闭 jobs 连接前的 PRAGMA optimize 失败");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -355,5 +474,57 @@ mod policy_tests {
             .unwrap();
         assert_eq!(timeout, 5000);
         assert_eq!(foreign_keys, 1);
+    }
+
+    /// Durability must not ride the bundled default: a connection lowered to OFF
+    /// is pulled back to FULL by the queue policy.
+    #[test]
+    fn queue_connection_policy_forces_synchronous_full() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "synchronous", "OFF").unwrap();
+        apply_connection_policy(&conn).unwrap();
+        let sync: i64 = conn
+            .pragma_query_value(None, "synchronous", |row| row.get(0))
+            .unwrap();
+        assert_eq!(sync, 2, "SQLite FULL");
+    }
+
+    /// jobs.db 与 Store 四个库同一套连接调优（同目录、同机器、同用户）。
+    ///
+    /// 用文件库：`journal_size_limit` 只对真实 WAL 文件有意义，`:memory:` 上读不到行。
+    #[test]
+    fn queue_connection_policy_matches_store_tuning() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("policy.db")).unwrap();
+        apply_connection_policy(&conn).unwrap();
+        for (name, expected) in [
+            ("cache_size", super::CACHE_SIZE_KIB),
+            ("temp_store", super::TEMP_STORE_MEMORY),
+            ("journal_size_limit", super::JOURNAL_SIZE_LIMIT_BYTES),
+            ("mmap_size", super::MMAP_SIZE_BYTES),
+        ] {
+            let value: i64 = conn
+                .pragma_query_value(None, name, |row| row.get(0))
+                .unwrap();
+            assert_eq!(value, expected, "{name} 必须与 Store 的连接策略一致");
+        }
+    }
+
+    /// 建库路径把 auto_vacuum 写成 INCREMENTAL(2)，且重开不得翻转。
+    #[test]
+    fn create_path_sets_incremental_auto_vacuum() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.db");
+        drop(super::Queue::open(&path).unwrap());
+        for _ in 0..2 {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            let mode: i64 = conn
+                .pragma_query_value(None, "auto_vacuum", |row| row.get(0))
+                .unwrap();
+            assert_eq!(mode, 2, "jobs.db 建库时必须设 incremental auto_vacuum");
+            drop(conn);
+            // 重开一次，确认 create-path 判定不会把已有库当成新库改回去。
+            drop(super::Queue::open(&path).unwrap());
+        }
     }
 }

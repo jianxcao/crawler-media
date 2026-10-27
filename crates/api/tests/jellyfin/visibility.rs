@@ -8,15 +8,70 @@ async fn parent_library_scope_excludes_nested_library_items() {
     let parent_root = tmp.path().join("movies");
     let child_root = parent_root.join("child");
     std::fs::create_dir_all(&child_root).unwrap();
-    let parent = store.create_library(MediaKind::Movie, "Parent movies", &[parent_root.to_str().unwrap()], "everyone", true, &[]).unwrap();
-    store.create_library(MediaKind::Movie, "Nested movies", &[child_root.to_str().unwrap()], "everyone", true, &[]).unwrap();
+    let parent = store
+        .create_library(
+            MediaKind::Movie,
+            "Parent movies",
+            &[parent_root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    store
+        .create_library(
+            MediaKind::Movie,
+            "Nested movies",
+            &[child_root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
     let path = child_root.join("nested.mkv");
     std::fs::write(&path, b"nested").unwrap();
-    let movie = Media { id: MediaId::new(), kind: MediaKind::Movie, title: "Nested movie".into(), year: None, original_title: None, aliases: Vec::new(), tmdb_id: None, douban_id: None, tvdb_id: None, bangumi_id: None, anilist_id: None };
+    let movie = Media {
+        id: MediaId::new(),
+        kind: MediaKind::Movie,
+        title: "Nested movie".into(),
+        year: None,
+        original_title: None,
+        aliases: Vec::new(),
+        tmdb_id: None,
+        douban_id: None,
+        tvdb_id: None,
+        bangumi_id: None,
+        anilist_id: None,
+    };
     store.insert_media(&movie).unwrap();
-    store.insert_ledger(&LedgerRow { id: LedgerId::new(), media_id: movie.id, path: path.display().to_string(), season: None, episode: None, resolution: None, codec: None, hdr: None, quality_source: QualitySource::Probe, confidence: Confidence::High, filter_score: None }).unwrap();
+    let spec = store::test_support::FixtureFile {
+        media_id: movie.id,
+        path: path.display().to_string(),
+        season: None,
+        episode: None,
+        resolution: None,
+        codec: None,
+        hdr: None,
+        quality_source: QualitySource::Probe,
+        confidence: Confidence::High,
+        filter_score: None,
+        transfer_mode: None,
+        source_path: None,
+        file_id: None,
+    };
+    store::test_support::publish_fixture_file(&store, &spec).unwrap();
     drop(store);
-    let response = app.oneshot(Request::builder().method("GET").uri(format!("/Items?ParentId={}&Recursive=true", parent.id)).header("authorization", "Bearer admin-token").body(Body::empty()).unwrap()).await.unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/Items?ParentId={}&Recursive=true", parent.id))
+                .header("authorization", "Bearer admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let items = json(response).await;
     assert!(items["Items"].as_array().unwrap().is_empty());
@@ -48,7 +103,8 @@ async fn selected_library_bytes_require_auth_and_visibility() {
         kind: MediaKind::Movie,
         title: "Hidden Movie".into(),
         year: None,
-        original_title: None, aliases: Vec::new(),
+        original_title: None,
+        aliases: Vec::new(),
         tmdb_id: None,
         douban_id: None,
         tvdb_id: None,
@@ -56,8 +112,7 @@ async fn selected_library_bytes_require_auth_and_visibility() {
         anilist_id: None,
     };
     store.insert_media(&hidden_media).unwrap();
-    let hidden_row = LedgerRow {
-        id: LedgerId::new(),
+    let hidden_spec = store::test_support::FixtureFile {
         media_id: hidden_media.id,
         path: hidden_file.display().to_string(),
         season: None,
@@ -68,8 +123,11 @@ async fn selected_library_bytes_require_auth_and_visibility() {
         quality_source: QualitySource::Probe,
         confidence: Confidence::High,
         filter_score: None,
+        transfer_mode: None,
+        source_path: None,
+        file_id: None,
     };
-    store.insert_ledger(&hidden_row).unwrap();
+    store::test_support::publish_fixture_file(&store, &hidden_spec).unwrap();
     drop(store);
     let created = app
         .clone()
@@ -111,8 +169,8 @@ async fn selected_library_bytes_require_auth_and_visibility() {
         .unwrap()
         .unwrap()
         .id;
-    let hidden_id = hidden_row.id.to_string().replace('-', "");
-    let hidden_media_id = hidden_media.id.to_string().replace('-', "");
+    let hidden_id = work_id(hidden_media.id);
+    let hidden_media_id = work_id(hidden_media.id);
     let items = super::playback::items_for(&app, &token).await;
     assert!(
         items["Items"]
@@ -267,7 +325,8 @@ async fn items_series_counts_only_episodes_from_visible_libraries() {
         kind: MediaKind::Tv,
         title: "Shared series".into(),
         year: None,
-        original_title: None, aliases: Vec::new(),
+        original_title: None,
+        aliases: Vec::new(),
         tmdb_id: None,
         douban_id: None,
         tvdb_id: None,
@@ -278,21 +337,22 @@ async fn items_series_counts_only_episodes_from_visible_libraries() {
     for (root, episode) in [(&visible_root, 1), (&hidden_root, 2)] {
         let path = root.join(format!("episode-{episode}.mkv"));
         std::fs::write(&path, b"episode").unwrap();
-        store
-            .insert_ledger(&LedgerRow {
-                id: LedgerId::new(),
-                media_id: show.id,
-                path: path.display().to_string(),
-                season: Some(1),
-                episode: Some(episode),
-                resolution: None,
-                codec: None,
-                hdr: None,
-                quality_source: QualitySource::Probe,
-                confidence: Confidence::High,
-                filter_score: None,
-            })
-            .unwrap();
+        let spec = store::test_support::FixtureFile {
+            media_id: show.id,
+            path: path.display().to_string(),
+            season: Some(1),
+            episode: Some(episode),
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: QualitySource::Probe,
+            confidence: Confidence::High,
+            filter_score: None,
+            transfer_mode: None,
+            source_path: None,
+            file_id: None,
+        };
+        store::test_support::publish_fixture_file(&store, &spec).unwrap();
     }
     drop(store);
 
@@ -326,9 +386,12 @@ async fn items_series_counts_only_episodes_from_visible_libraries() {
         )
         .await
         .unwrap();
-    let token = json(login).await["AccessToken"].as_str().unwrap().to_string();
+    let token = json(login).await["AccessToken"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let store = Store::open(tmp.path().join("data")).unwrap();
-    let member = store.user_by_token(&token).unwrap().unwrap();
+    let _member = store.user_by_token(&token).unwrap().unwrap();
     store
         .update_library(
             &store
@@ -365,7 +428,6 @@ async fn items_series_counts_only_episodes_from_visible_libraries() {
         .unwrap();
     assert_eq!(series["RecursiveItemCount"], 1);
 }
-
 
 #[test]
 fn debug_store_open_creates_subscribes() {

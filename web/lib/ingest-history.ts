@@ -76,13 +76,6 @@ function episodeLabel(files: string[]): string | null {
     .join(" · ");
 }
 
-function copiedCount(message: string): number | null {
-  const match = message.match(/复制\s*(\d+)\s*个文件/);
-  if (!match) return null;
-  const count = Number.parseInt(match[1], 10);
-  return Number.isFinite(count) ? count : null;
-}
-
 function targetLibraryContext(message: string): string | null {
   const match = message.match(/入库到(?:订阅指定的)?[「“"]([^」”"]+)[」”"]/);
   return match ? `已入库到「${match[1]}」` : null;
@@ -131,19 +124,6 @@ export function buildIngestHistoryDetail(job: JobView): IngestHistoryDetail | nu
       context,
       fileGroups:
         existingFiles.length > 0 ? [{ label: "已在库", files: existingFiles }] : [],
-    };
-  }
-
-  const legacyCopiedCount = copiedCount(message);
-  if (legacyCopiedCount != null && readyFiles.length > 0) {
-    const inspectedEpisodes = episodeLabel(readyFiles);
-    const inspected = inspectedEpisodes
-      ? `检查 ${inspectedEpisodes}`
-      : `检查 ${readyFiles.length} 个文件`;
-    return {
-      summary: `${inspected} · 复制 ${legacyCopiedCount} 个文件（旧记录未保存具体文件名）`,
-      context,
-      fileGroups: [{ label: "本次检查", files: readyFiles }],
     };
   }
 

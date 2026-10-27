@@ -46,8 +46,12 @@ pub fn user_profile_json(user: &ServerUser, server_id: &str) -> Value {
 }
 
 pub fn item_dto_json(snapshot: MediaItemSnapshot) -> Value {
-    let item = Item::from_ledger(&snapshot.media.title, &snapshot.row);
-    let series_id = snapshot.media.id.to_string().replace('-', "");
+    let item = Item::from_target(
+        &snapshot.item_identity(),
+        &snapshot.media.title,
+        &snapshot.file,
+    );
+    let series_id = domain::TypedItemId::Work(snapshot.media.id).to_wire_string();
     let item_id = if snapshot.is_series {
         series_id.clone()
     } else {
@@ -62,7 +66,7 @@ pub fn item_dto_json(snapshot: MediaItemSnapshot) -> Value {
     };
     let item_path = std::path::Path::new(&item.path);
     let series_path = item_path.parent().map(|directory| {
-        let show_directory = if snapshot.row.season.is_some() {
+        let show_directory = if snapshot.unit.is_some() {
             directory.parent().unwrap_or(directory)
         } else {
             directory
@@ -74,7 +78,7 @@ pub fn item_dto_json(snapshot: MediaItemSnapshot) -> Value {
     let mut value = json!({
         "Id": item_id,
         "Name": if snapshot.media.kind == domain::MediaKind::Tv && !snapshot.is_series {
-            format!("S{:02}E{:02}", snapshot.row.season.unwrap_or(0), snapshot.row.episode.unwrap_or(0))
+            format!("S{:02}E{:02}", snapshot.unit.map(|u| u.season as u32).unwrap_or(0), snapshot.unit.map(|u| u.episode as u32).unwrap_or(0))
         } else { item.name },
         "Path": if snapshot.is_series {
             series_path.unwrap_or(item.path)
@@ -109,12 +113,18 @@ pub fn item_dto_json(snapshot: MediaItemSnapshot) -> Value {
     });
 
     if snapshot.media.kind == domain::MediaKind::Tv && !snapshot.is_series {
-        let season_num = snapshot.row.season.unwrap_or(1);
+        let season_num = snapshot.unit.map(|u| u.season as u32).unwrap_or(1);
         value["SeriesId"] = json!(series_id);
         value["SeriesName"] = json!(snapshot.media.title);
-        value["SeasonId"] = json!(format!("{series_id}{season_num:02}"));
-        value["IndexNumber"] = json!(snapshot.row.episode);
-        value["ParentIndexNumber"] = json!(snapshot.row.season);
+        value["SeasonId"] = json!(
+            domain::TypedItemId::Season {
+                media: snapshot.media.id,
+                season: season_num,
+            }
+            .to_wire_string()
+        );
+        value["IndexNumber"] = json!(snapshot.unit.map(|u| u.episode as u32));
+        value["ParentIndexNumber"] = json!(snapshot.unit.map(|u| u.season as u32));
         value["SeasonName"] = json!(format!("第 {} 季", season_num));
         value["ParentBackdropImageTags"] = json!(
             snapshot
@@ -124,33 +134,46 @@ pub fn item_dto_json(snapshot: MediaItemSnapshot) -> Value {
                 .into_iter()
                 .collect::<Vec<_>>()
         );
-        value["SeriesPrimaryImageTag"] = json!(snapshot.metadata.primary_image_tag.as_deref().unwrap_or("poster"));
+        value["SeriesPrimaryImageTag"] = json!(
+            snapshot
+                .metadata
+                .primary_image_tag
+                .as_deref()
+                .unwrap_or("poster")
+        );
         value["PrimaryImageAspectRatio"] = json!(1.7777777777777777);
     } else if snapshot.is_series {
         let season_count = snapshot
             .metadata
             .season_count
-            .or_else(|| snapshot.metadata.season_count)
+            .or(snapshot.metadata.season_count)
             .unwrap_or(1);
         value["ChildCount"] = json!(season_count);
         value["RecursiveItemCount"] = json!(snapshot.metadata.child_count.unwrap_or(0));
         value["NumberOfSeasons"] = json!(snapshot.metadata.season_count.unwrap_or(season_count));
-        value["NumberOfEpisodes"] = json!(snapshot.metadata.number_of_episodes.map(|n| n as usize).or(snapshot.metadata.child_count).unwrap_or(0));
+        value["NumberOfEpisodes"] = json!(
+            snapshot
+                .metadata
+                .number_of_episodes
+                .map(|n| n as usize)
+                .or(snapshot.metadata.child_count)
+                .unwrap_or(0)
+        );
     }
 
     if let Some(date_created) = snapshot.metadata.date_created.as_ref() {
         value["DateCreated"] = json!(date_created);
     }
 
-    if !snapshot.is_series {
-        if let Some(name) = snapshot.metadata.episode_name.as_ref() {
-            value["Name"] = json!(name);
-        }
+    if !snapshot.is_series
+        && let Some(name) = snapshot.metadata.episode_name.as_ref()
+    {
+        value["Name"] = json!(name);
     }
     if snapshot.metadata.has_primary_image {
         let fallback_tag = if (snapshot.media.kind == domain::MediaKind::Tv
             && !snapshot.is_series
-            && snapshot.row.episode.is_some())
+            && snapshot.unit.is_some())
             || snapshot.metadata.primary_image_url.is_some()
         {
             "episode"

@@ -5,7 +5,9 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use domain::{Site, SiteId};
 use downloader::MemoryDownloader;
-use indexer::{Browser, BrowserConfig, FetchRequest, Fetcher, IndexerError, PageSession, ProfileSet};
+use indexer::{
+    Browser, BrowserConfig, FetchRequest, Fetcher, IndexerError, PageSession, ProfileSet,
+};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -76,7 +78,7 @@ fn routed_app(root: &std::path::Path, store: Arc<Mutex<Store>>) -> (axum::Router
         log.lock().push(endpoint.unwrap().to_owned());
         Ok(Arc::new(FixturePage))
     });
-    let browser = api::runtime_browser::configure(browser, store.clone(), false).unwrap();
+    let browser = api::runtime_browser::configure(browser, store.clone()).unwrap();
     let state = ApiState::new_arc(
         store,
         "browser-secret".into(),
@@ -237,6 +239,6 @@ fn startup_loads_saved_cdp_settings() {
         .lock()
         .put_setting(api::settings_keys::CDP_URL, "http://127.0.0.1:9222")
         .unwrap();
-    let browser = api::runtime_browser::production_browser(store, false).unwrap();
+    let browser = api::runtime_browser::production_browser(store).unwrap();
     assert!(browser.cdp_enabled().unwrap());
 }

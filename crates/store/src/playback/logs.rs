@@ -1,5 +1,5 @@
 use domain::{MediaId, UserId};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 
 use super::{PlayLogRow, media_id_from, user_id_from};
 use super::{Store, StoreError};
@@ -42,39 +42,9 @@ impl Store {
         }
         sql.push_str(" ORDER BY started_at DESC, id DESC LIMIT ?");
         args.push(rusqlite::types::Value::Integer(limit as i64));
-        let mut stmt = self.subscribe.prepare(&sql)?;
+        let mut stmt = self.library.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(args), map_log)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
-
-    /// True when more logs exist before `before` (for cursor pagination).
-    pub fn logs_have_more(
-        &self,
-        before: Option<i64>,
-        days: Option<i64>,
-        now: i64,
-        user_id: Option<UserId>,
-    ) -> Result<bool, StoreError> {
-        let mut sql = String::from("SELECT 1 FROM playback_logs WHERE 1=1");
-        let mut args: Vec<rusqlite::types::Value> = Vec::new();
-        if let Some(before) = before {
-            sql.push_str(" AND started_at < ?");
-            args.push(rusqlite::types::Value::Integer(before));
-        }
-        if let Some(days) = days {
-            sql.push_str(" AND started_at >= ?");
-            args.push(rusqlite::types::Value::Integer(now - days * 86_400));
-        }
-        if let Some(user_id) = user_id {
-            sql.push_str(" AND user_id = ?");
-            args.push(rusqlite::types::Value::Text(user_id.to_string()));
-        }
-        sql.push_str(" LIMIT 1");
-        let mut stmt = self.subscribe.prepare(&sql)?;
-        Ok(stmt
-            .query_row(rusqlite::params_from_iter(args), |_| Ok(()))
-            .optional()?
-            .is_some())
     }
 
     pub fn delete_logs(
@@ -102,7 +72,7 @@ impl Store {
             );
         }
         let changed = self
-            .subscribe
+            .library
             .execute(&sql, rusqlite::params_from_iter(values))?;
         Ok(changed)
     }
@@ -132,7 +102,7 @@ impl Store {
             );
         }
         let changed = self
-            .subscribe
+            .library
             .execute(&sql, rusqlite::params_from_iter(values))?;
         Ok(changed)
     }
@@ -153,7 +123,7 @@ impl Store {
         watched_ms: i64,
         now: i64,
     ) -> Result<(), StoreError> {
-        self.subscribe.execute(
+        self.library.execute(
             "INSERT INTO playback_metrics
                 (id, user_id, media_id, tier, engine, ttff_ms, rebuffer_ms,
                  rebuffer_count, seek_count, dropped_frames, total_frames,

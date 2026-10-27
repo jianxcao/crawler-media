@@ -1,4 +1,4 @@
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::Transport;
 
@@ -178,14 +178,11 @@ pub async fn claim_unidentified(
     kind: &str,
     year: Option<u16>,
 ) -> Result<String, String> {
-    let mut body = json!({
-        "path": path,
-        "title": title,
-        "kind": kind,
-    });
+    let mut action = json!({ "type": "identify_and_transfer", "title": title, "kind": kind });
     if let Some(year) = year {
-        body["year"] = json!(year);
+        action["year"] = json!(year);
     }
+    let body = json!({ "path": path, "action": action });
     let (status, body) = transport
         .send("POST", "/api/v1/unidentified/claim", Some(body))
         .await?;
@@ -194,104 +191,6 @@ pub async fn claim_unidentified(
     }
     let title = body["title"].as_str().unwrap_or("-");
     Ok(format!("claimed={title}\n"))
-}
-
-pub async fn add_library_root(
-    transport: &impl Transport,
-    kind: &str,
-    path: &str,
-) -> Result<String, String> {
-    if kind != "movie" && kind != "tv" {
-        return Err("kind must be movie or tv".into());
-    }
-    if path.trim().is_empty() {
-        return Err("path is required".into());
-    }
-    let body = json!({ "kind": kind, "path": path });
-    let (status, body) = transport
-        .send("POST", "/api/v1/directory/roots", Some(body))
-        .await?;
-    if !(200..300).contains(&status) {
-        return Err(format!("add-root failed: {status} {body}"));
-    }
-    let listed = body["path"].as_str().unwrap_or(path);
-    Ok(format!("extra\t{kind}\t{listed}\n"))
-}
-
-pub async fn remove_library_root(transport: &impl Transport, id: &str) -> Result<String, String> {
-    if id.trim().is_empty() {
-        return Err("id is required".into());
-    }
-    let (status, body) = transport
-        .send("DELETE", &format!("/api/v1/directory/roots/{id}"), None)
-        .await?;
-    if status != 200 {
-        return Err(format!("remove-root failed: {status} {body}"));
-    }
-    Ok(format!("deleted={id}\n"))
-}
-
-pub async fn set_watch_inplace(transport: &impl Transport, path: &str) -> Result<String, String> {
-    put_directory_field(transport, "watch_inplace", json!(path)).await
-}
-
-pub async fn set_watch_intake(transport: &impl Transport, path: &str) -> Result<String, String> {
-    put_directory_field(transport, "watch_intake", json!(path)).await
-}
-
-pub async fn set_transfer_mode(transport: &impl Transport, mode: &str) -> Result<String, String> {
-    put_directory_field(transport, "transfer_mode", json!(mode)).await
-}
-
-pub async fn set_scrape(transport: &impl Transport, enabled: bool) -> Result<String, String> {
-    put_directory_field(transport, "scrape", json!(enabled)).await
-}
-
-pub async fn set_movie_naming(transport: &impl Transport, pattern: &str) -> Result<String, String> {
-    if pattern.trim().is_empty() {
-        return Err("movie-naming is required".into());
-    }
-    put_directory_field(transport, "movie_naming", json!(pattern)).await
-}
-
-pub async fn set_tv_naming(transport: &impl Transport, pattern: &str) -> Result<String, String> {
-    if pattern.trim().is_empty() {
-        return Err("tv-naming is required".into());
-    }
-    put_directory_field(transport, "tv_naming", json!(pattern)).await
-}
-
-async fn put_directory_field(
-    transport: &impl Transport,
-    field: &str,
-    value: Value,
-) -> Result<String, String> {
-    let (status, current) = transport.send("GET", "/api/v1/directory", None).await?;
-    if status != 200 {
-        return Err(format!("directory failed: {status} {current}"));
-    }
-    let mut body = json!({
-        "movie_root": current["movie_root"],
-        "tv_root": current["tv_root"],
-        "transfer_mode": current["transfer_mode"],
-        "movie_naming": current["movie_naming"],
-        "tv_naming": current["tv_naming"],
-        "scrape": current["scrape"],
-        "watch_intake": current["watch_intake"],
-        "watch_inplace": current["watch_inplace"],
-    });
-    body[field] = value;
-    let (status, body) = transport
-        .send("PUT", "/api/v1/directory", Some(body))
-        .await?;
-    if status != 200 {
-        return Err(format!("{field} failed: {status} {body}"));
-    }
-    let printed = match &body[field] {
-        Value::String(text) => text.clone(),
-        other => other.to_string(),
-    };
-    Ok(format!("{field}={printed}\n"))
 }
 
 fn encode_query(value: &str) -> String {

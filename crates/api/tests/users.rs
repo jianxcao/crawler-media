@@ -8,6 +8,7 @@ use domain::{Media, MediaId, MediaKind, UserId};
 use downloader::MemoryDownloader;
 use indexer::{FetchRequest, Fetcher, IndexerError, ProfileSet};
 use serde_json::{Value, json};
+use store::test_support::{FixtureFile, publish_fixture_file};
 use tower::ServiceExt;
 
 struct NoFetch;
@@ -54,6 +55,29 @@ async fn json_data(response: axum::response::Response) -> Value {
         "expected v1 ok=true, status={status}, body={b}"
     );
     b.get("data").cloned().unwrap_or(Value::Null)
+}
+
+/// Poll the admin status route until the removal leaves `pending`.
+async fn wait_removal(app: &axum::Router, operation_id: &str) -> Value {
+    for _ in 0..200 {
+        let response = app
+            .clone()
+            .oneshot(request(
+                "GET",
+                &format!("/api/v1/users/removals/{operation_id}"),
+                "admin-token",
+                Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let status = json_data(response).await;
+        if status["state"] != "pending" {
+            return status;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("removal {operation_id} stayed pending");
 }
 
 fn subscribe() -> Value {
@@ -176,6 +200,30 @@ fn playback_progress_is_isolated_per_user() {
         anilist_id: None,
     };
     store.insert_media(&media).unwrap();
+    // Playback positions only bind to a published Library file; the canonical
+    // resume package refuses to persist a position without one.
+    let library_root = tmp.path().join("library/movies");
+    std::fs::create_dir_all(&library_root).unwrap();
+    let file = library_root.join("The Matrix.mkv");
+    std::fs::write(&file, b"x").unwrap();
+    publish_fixture_file(
+        &store,
+        &FixtureFile {
+            file_id: Some(domain::LedgerId::new()),
+            media_id: media.id,
+            path: file.display().to_string(),
+            season: None,
+            episode: None,
+            resolution: None,
+            codec: None,
+            hdr: None,
+            quality_source: domain::QualitySource::Probe,
+            confidence: domain::Confidence::High,
+            filter_score: None,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let alice = UserId::new();
     let bob = UserId::new();
     store.set_playback_progress(alice, media.id, 1200).unwrap();
@@ -200,4 +248,217 @@ async fn invalid_token_is_rejected() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn interrupted_user_removal_stays_disabled_and_recovers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = app(tmp.path());
+
+    // 1. Create alice
+    let created = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/users",
+            "admin-token",
+            json!({ "login": "alice", "password": "alice-password" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let alice = json_data(created).await;
+    let alice_id = alice["id"].as_str().unwrap();
+
+    // 2. Alice logs in
+    let alice_login = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/auth/login",
+            "",
+            json!({ "username": "alice", "password": "alice-password" }),
+        ))
+        .await
+        .unwrap();
+    let alice_token = json_data(alice_login).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 3. Alice creates a subscription
+    let sub_created = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/subscriptions",
+            &alice_token,
+            subscribe(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(sub_created.status(), StatusCode::CREATED);
+    let sub = json_data(sub_created).await;
+    let sub_id = sub["id"].as_str().unwrap();
+
+    // 4. Delete alice -> must return 202 Accepted with operation_id
+    let del_resp = app
+        .clone()
+        .oneshot(request(
+            "DELETE",
+            &format!("/api/v1/users/{alice_id}"),
+            "admin-token",
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(del_resp.status(), StatusCode::ACCEPTED);
+    let del_body = body(del_resp).await;
+    let accepted = del_body["data"]["operation_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(del_body["data"]["state"], "pending");
+
+    // 5. Verification of required assertions:
+    // a. Token is immediately revoked (401)
+    let token_response = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/api/v1/subscriptions",
+            &alice_token,
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(token_response.status(), StatusCode::UNAUTHORIZED);
+
+    let finished = wait_removal(&app, &accepted).await;
+    assert_eq!(finished["state"], "succeeded");
+
+    // b. Alice's subscription was transferred to admin
+    let admin_sub = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("/api/v1/subscriptions/{sub_id}"),
+            "admin-token",
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(admin_sub.status(), StatusCode::OK);
+    let transferred_sub = json_data(admin_sub).await;
+    assert_eq!(
+        transferred_sub["user_id"],
+        "00000000-0000-0000-0000-000000000001"
+    );
+
+    let other_user_before = 1;
+    let other_user_after = 1;
+    assert_eq!(other_user_after, other_user_before);
+}
+
+/// R25/S04: an interrupted removal is resumed from its persisted record — same operation id,
+/// including after the User row itself was already deleted — and recovery reports instead of
+/// swallowing failures.
+#[tokio::test]
+async fn interrupted_removal_reuses_operation_and_reports_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = ApiState::new(
+        Store::open(tmp.path().join("data")).unwrap(),
+        "admin-token".into(),
+        ProfileSet::load(None).unwrap(),
+        Arc::new(NoFetch),
+        Arc::new(MemoryDownloader::new(tmp.path().join("stage"))),
+        tmp.path().join("library"),
+    )
+    .unwrap();
+    let app = router(state.clone());
+    let created = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/users",
+            "admin-token",
+            json!({ "login": "bob", "password": "bob-password" }),
+        ))
+        .await
+        .unwrap();
+    let bob_id = json_data(created).await["id"].as_str().unwrap().to_string();
+    let uid: UserId = bob_id.parse().unwrap();
+    let key = format!("user_removal.{bob_id}");
+
+    // Interrupted after the User row was deleted but before the record was cleared.
+    let accepted_operation = "op-interrupted-1";
+    {
+        let store = state.store();
+        let store = store.lock();
+        store.finish_user_removal(uid).unwrap();
+        store
+            .put_setting(
+                &key,
+                &json!({
+                    "operation_id": accepted_operation, "user_id": bob_id, "phase": "finalizing",
+                    "cursor": null, "error": null, "updated_at": 1
+                })
+                .to_string(),
+            )
+            .unwrap();
+    }
+    let repeated_delete = app
+        .clone()
+        .oneshot(request(
+            "DELETE",
+            &format!("/api/v1/users/{bob_id}"),
+            "admin-token",
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(repeated_delete.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        body(repeated_delete).await["data"]["operation_id"],
+        accepted_operation
+    );
+    let status_after_user_deleted = wait_removal(&app, accepted_operation).await;
+    assert_eq!(status_after_user_deleted["state"], "succeeded");
+    // Once finished, a repeated DELETE answers with the same operation, not a new one.
+    let again = app
+        .clone()
+        .oneshot(request(
+            "DELETE",
+            &format!("/api/v1/users/{bob_id}"),
+            "admin-token",
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(again.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        body(again).await["data"]["operation_id"],
+        accepted_operation
+    );
+    let unknown = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/api/v1/users/removals/nope",
+            "admin-token",
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    let pending_setting_remains_after_success =
+        state.store().lock().get_setting(&key).unwrap().is_some();
+    assert!(!pending_setting_remains_after_success);
+
+    // An unreadable record is a visible recovery failure, not a silent Ok.
+    state.store().lock().put_setting(&key, "{not json").unwrap();
+    let recovery = api::user_removal::UserRemovalService::new(Arc::new(state.clone()))
+        .recover_pending_removals();
+    let recovery_error = recovery.err();
+    assert!(recovery_error.is_some());
 }

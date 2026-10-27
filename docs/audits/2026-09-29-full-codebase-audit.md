@@ -2,7 +2,7 @@
 
 > **历史状态（2026-10-13 整理）：** 广域审计状态 **UNRECONCILED**；D/A/W/L/P/U/C 原发现及静态/执行证据保留，尚未逐 ID 重核当前实现、回归证据和残余风险。后续数据库/API review 不是这些发现全部关闭的证明。
 >
-> 原设计/ID/测试记录保留；旧执行、清理和提交命令不是当前执行授权，不应直接重跑。当前依据：[数据库/API review](<2026-10-13-database-api-review.md>) 与 [剩余计划](<../superpowers/plans/2026-10-13-database-api-followup.md>)；未覆盖的历史发现仍须独立对账。
+> 原设计/ID/测试记录保留；旧执行、清理和提交命令不是当前执行授权，不应直接重跑。[2026-10-13 数据库/API review](<2026-10-13-database-api-review.md>) 与[当时的剩余计划](<../superpowers/plans/2026-10-13-database-api-followup.md>)只是后续历史线索，不是当前状态表；未覆盖的历史发现仍须独立对账。正文“当前”均指第 1 节固定审计基线，源码行号也以该版本为准。
 
 ## 1. 基线与验证边界
 
@@ -76,7 +76,7 @@
 
 ### W03 · P1 · Torrent 身份验证通过后，文件级 Media 身份没有继续验证
 
-位置：[pick_release](<../../crates/subscribe/src/collect.rs#L233-L249>)；[目标 Media ledger](<../../crates/subscribe/src/collect.rs#L217-L229>)。
+位置：pick_release（历史源码 `git show aec73cc:crates/subscribe/src/collect.rs`，原定位`L233-L249`）；目标 Media ledger（历史源码 `git show aec73cc:crates/subscribe/src/collect.rs`，原定位`L217-L229`）。
 
 触发：正确 Torrent 内含另一个电影、sample.mkv，或者 TV 包里含另一个 Media 的同季集号视频。
 
@@ -84,7 +84,7 @@
 
 ### W04 · P1 · 多集 Wash-cut 用 any 批准，却对所有槽位覆盖和删除
 
-位置：[任一槽位通过即批准](<../../crates/subscribe/src/choose.rs#L97-L128>)；[覆盖全部槽位并删旧路径](<../../crates/subscribe/src/collect.rs#L175-L208>)。
+位置：[任一槽位通过即批准](<../../crates/subscribe/src/choose.rs#L97-L128>)；覆盖全部槽位并删旧路径（历史源码 `git show aec73cc:crates/subscribe/src/collect.rs`，原定位`L175-L208`）。
 
 触发：E01 已有 score=100，E02 缺失；低分 score=10 的单文件 `S01E01-E02.mkv` 因 E02 获准。
 

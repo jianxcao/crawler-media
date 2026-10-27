@@ -80,7 +80,12 @@ async fn get_filter(app: &axum::Router, id: &str) -> Value {
     json_data(response).await
 }
 
-async fn patch_filter(app: &axum::Router, id: &str, name: &str, keep_old_versions: Option<bool>) -> Value {
+async fn patch_filter(
+    app: &axum::Router,
+    id: &str,
+    name: &str,
+    keep_old_versions: Option<bool>,
+) -> Value {
     let response = app
         .clone()
         .oneshot(request(

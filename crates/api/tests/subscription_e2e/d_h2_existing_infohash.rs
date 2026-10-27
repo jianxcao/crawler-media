@@ -27,12 +27,20 @@ async fn existing_same_infohash_task_is_claimed_and_imported() {
     });
 
     h.run_subscribe(id).await;
-    assert_eq!(h.qb.add_count(), 0, "no duplicate add (qB would answer Fails.)");
+    assert_eq!(
+        h.qb.add_count(),
+        0,
+        "no duplicate add (qB would answer Fails.)"
+    );
     assert_eq!(h.qb.add_tags.lock().len(), 1, "claimed via addTags");
     let task = h.qb.tasks.lock()[0].clone();
     assert!(task.tags.iter().any(|t| t == "mine"), "user tags kept");
     let enclosure = h.pending(id)[0].1.torrent.enclosure.clone();
-    assert!(task.tags.iter().any(|t| t == &downloader::ownership_tag(&enclosure)));
+    assert!(
+        task.tags
+            .iter()
+            .any(|t| t == &downloader::ownership_tag(&enclosure))
+    );
     assert_eq!(h.pending_state(id, "active"), 1);
 
     let video = probed_video(2160, "hevc", false);

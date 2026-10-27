@@ -6,73 +6,190 @@ use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::resolve_media_id;
+use crate::http::store_wait::store_read;
 use crate::http::{err, ok};
 use crate::management::ApiState;
 use crate::store::{UNIT_WHOLE, UnitRow};
 
-/// GET /playback/resume — per-unit resume state.
+/// GET /playback/resume — source-aware resume preview. Interprets the same optional
+/// source preference as `POST /playback/sessions` through `Store::resolve_playback`,
+/// without opening a session.
 pub(crate) async fn resume(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    let Some(media_id) = query.get("media_item_id").and_then(|v| resolve_media_id(v)) else {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "playback.invalid",
-            "media_item_id 无效",
-        );
+    let mut body = serde_json::Map::new();
+    for key in ["media_item_id", "file_id", "season", "episode"] {
+        if let Some(value) = query.get(key) {
+            body.insert(key.into(), Value::String(value.clone()));
+        }
+    }
+    for key in ["season_number", "episode_number"] {
+        if let Some(value) = query.get(key) {
+            let Ok(number) = value.parse::<u64>() else {
+                return super::request::SelectionError::Invalid.response();
+            };
+            body.insert(key.into(), json!(number));
+        }
+    }
+    let selection = match super::request::parse_selection(&Value::Object(body)) {
+        Ok(selection) => selection,
+        Err(error) => return error.response(),
     };
-    let season = query
-        .get("season_number")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(UNIT_WHOLE);
-    let episode = query
-        .get("episode_number")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(UNIT_WHOLE);
-    let store = state.store.lock();
-    let (season, episode) = super::selection::watch_unit(&store, media_id, season, episode);
-    ok(super::movie_compatible_unit(
-        &store, user_id, media_id, season, episode,
-    ))
-    .into_response()
+    // Review L2: resume resolution reads the ledger and watch rows.
+    match store_read(&state, move |store| -> Response {
+        let (file, _media, resolved) =
+            match super::selection::resolve_playback_for(store, &selection, user_id) {
+                Ok(resolved) => resolved,
+                // 无显式源时，没有可播文件的单元（含 TV whole 单元）仍返回已记录的进度
+                Err(super::request::SelectionError::Unavailable) if selection.file_id.is_none() => {
+                    let season = selection.season_number.map_or(UNIT_WHOLE, |v| v as i32);
+                    let episode = selection.episode_number.map_or(UNIT_WHOLE, |v| v as i32);
+                    return ok(super::effective_watch_json(
+                        store,
+                        user_id,
+                        selection.media_item_id,
+                        season,
+                        episode,
+                    ))
+                    .into_response();
+                }
+                Err(error) => return error.response(),
+            };
+        let unit = resolved.target.unit;
+        let mut watch = super::effective_watch_json(
+            store,
+            user_id,
+            selection.media_item_id,
+            unit.season,
+            unit.episode,
+        );
+        watch["file_id"] = json!(file.file_id.to_string());
+        watch["start_ms"] = json!(resolved.start_ms);
+        watch["duration_ms"] = json!(resolved.duration_ms);
+        watch["resume_status"] = json!(super::session::resume_status_name(resolved.status));
+        ok(watch).into_response()
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => error.response(),
+    }
 }
 
 /// GET /playback/marks — played/favorite + unplayed_count for a target.
 pub(crate) async fn marks(
     State(state): State<ApiState>,
     axum::Extension(user_id): axum::Extension<domain::UserId>,
-    Query(query): Query<HashMap<String, String>>,
+    Query(query): Query<MarkQuery>,
 ) -> Response {
-    let Some(media_id) = query.get("media_item_id").and_then(|v| resolve_media_id(v)) else {
+    let Some(media_id) = query.media_item_id.as_deref().and_then(resolve_media_id) else {
         return err(
             StatusCode::BAD_REQUEST,
             "playback.invalid",
             "media_item_id 无效",
         );
     };
-    let season = query
-        .get("season_number")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(UNIT_WHOLE);
-    let episode = query
-        .get("episode_number")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(UNIT_WHOLE);
-    let store = state.store.lock();
-    let (season, episode) = super::selection::watch_unit(&store, media_id, season, episode);
-    let rows = store.unit_rows(user_id, media_id).unwrap_or_default();
-    let watch = super::movie_compatible_unit(&store, user_id, media_id, season, episode);
-    ok(json!({
-        "played": watch["played"].as_bool().unwrap_or(false),
-        "is_favorite": favorite_for(&store, user_id, media_id, season, episode, &rows),
-        "unplayed_count": unplayed_count(&rows, season, episode),
-    }))
-    .into_response()
+    let (season, episode) = match mark_target(
+        query.season_number.as_deref().map(query_coordinate),
+        query.episode_number.as_deref().map(query_coordinate),
+    ) {
+        Ok(target) => target,
+        Err(response) => return response,
+    };
+    match store_read(&state, move |store| -> Response {
+        let Some((season, episode)) = super::selection::watch_unit(store, media_id, season, episode)
+        else {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "playback.invalid",
+                "电影只有整部单元，不接受季/集坐标",
+            );
+        };
+        let rows = store.unit_rows(user_id, media_id).unwrap_or_default();
+        let watch = super::effective_watch_json(store, user_id, media_id, season, episode);
+        ok(json!({
+            "played": watch["played"].as_bool().unwrap_or(false),
+            "is_favorite": favorite_for(store, user_id, media_id, season, episode, &rows),
+            "unplayed_count": unplayed_count(&rows, season, episode),
+        }))
+        .into_response()
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => error.response(),
+    }
+}
+
+/// A mark names one of three targets: the whole item, one season, or one episode.
+/// A missing coordinate is whole (`-1`); a present one must fit a nonnegative i32,
+/// including the legal TV special `0`. Strings, negatives and overflow are refused.
+fn mark_target(
+    season: Option<Result<u64, ()>>,
+    episode: Option<Result<u64, ()>>,
+) -> Result<(i32, i32), Response> {
+    let season = coordinate("season_number", season)?;
+    let episode = coordinate("episode_number", episode)?;
+    match (season, episode) {
+        (None, Some(_)) => Err(err(
+            StatusCode::BAD_REQUEST,
+            "playback.invalid",
+            "episode_number 不能单独出现",
+        )),
+        (season, episode) => Ok((season.unwrap_or(UNIT_WHOLE), episode.unwrap_or(UNIT_WHOLE))),
+    }
+}
+
+fn query_coordinate(raw: &str) -> Result<u64, ()> {
+    raw.parse::<u64>().map_err(|_| ())
+}
+
+fn coordinate(name: &str, raw: Option<Result<u64, ()>>) -> Result<Option<i32>, Response> {
+    let Some(raw) = raw else { return Ok(None) };
+    let Ok(value) = raw.and_then(|value| i32::try_from(value).map_err(|_| ())) else {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "playback.invalid",
+            &format!("{name} 必须是 0 到 2147483647 的整数"),
+        ));
+    };
+    Ok(Some(value))
+}
+
+fn json_coordinate(value: Option<&Value>) -> Option<Result<u64, ()>> {
+    match value {
+        None | Some(Value::Null) => None,
+        Some(Value::Number(number)) => Some(number.as_u64().ok_or(())),
+        Some(_) => Some(Err(())),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MarkQuery {
+    media_item_id: Option<String>,
+    season_number: Option<String>,
+    episode_number: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MarkInput {
+    media_item_id: Option<String>,
+    #[serde(default)]
+    season_number: Option<Value>,
+    #[serde(default)]
+    episode_number: Option<Value>,
+    #[serde(default)]
+    played: Option<bool>,
+    #[serde(default)]
+    favorite: Option<bool>,
 }
 
 fn favorite_for(
@@ -143,9 +260,31 @@ pub(crate) async fn set_marks(
     axum::Extension(user_id): axum::Extension<domain::UserId>,
     Json(body): Json<Value>,
 ) -> Response {
-    let Some(media_id) = body["media_item_id"]
-        .as_str()
-        .and_then(|v| resolve_media_id(v))
+    if body.as_object().is_some_and(|object| {
+        object
+            .keys()
+            .any(|key| matches!(key.as_str(), "season" | "episode"))
+    }) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "playback.invalid",
+            "marks 不接受旧坐标字段",
+        );
+    }
+    let body: MarkInput = match serde_json::from_value(body) {
+        Ok(body) => body,
+        Err(error) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "playback.invalid",
+                &error.to_string(),
+            );
+        }
+    };
+    let Some(media_id) = body
+        .media_item_id
+        .as_deref()
+        .and_then(resolve_media_id)
     else {
         return err(
             StatusCode::BAD_REQUEST,
@@ -153,28 +292,47 @@ pub(crate) async fn set_marks(
             "media_item_id 无效",
         );
     };
-    let season = body["season_number"].as_i64().unwrap_or(-1) as i32;
-    let episode = body["episode_number"].as_i64().unwrap_or(-1) as i32;
-    let store = state.store.lock();
-    let (season, episode) = super::selection::watch_unit(&store, media_id, season, episode);
-    let played = body["played"].as_bool();
-    let favorite = body["favorite"].as_bool();
-    // `playback_clock` 是毫秒时钟；`playback_units.updated_at` 存 unix 秒。
-    let now = state.playback_clock.now_ms() / 1000;
-    if let Err(error) =
-        store.set_unit_marks(user_id, media_id, season, episode, played, favorite, now)
+    let (season, episode) = match mark_target(
+        json_coordinate(body.season_number.as_ref()),
+        json_coordinate(body.episode_number.as_ref()),
+    ) {
+        Ok(target) => target,
+        Err(response) => return response,
+    };
+    // Review L2: a mark is a Store mutation; the executor must not wait on the
+    // global lock for it.
+    let now_ms = state.playback_clock.now_ms();
+    match store_read(&state, move |store| -> Response {
+        let Some((season, episode)) = super::selection::watch_unit(store, media_id, season, episode)
+        else {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "playback.invalid",
+                "电影只有整部单元，不接受季/集坐标",
+            );
+        };
+        let played = body.played;
+        let favorite = body.favorite;
+        let change =
+            crate::store::playback::PlaybackMutation::marks(user_id, season, episode, played, favorite);
+        if let Err(error) = store.mutate_playback(media_id, &change, now_ms) {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
+        let unit = super::effective_watch_json(store, user_id, media_id, season, episode);
+        ok(json!({
+            "played": unit["played"].as_bool().unwrap_or(false),
+            "is_favorite": unit["is_favorite"].as_bool().unwrap_or(false),
+            "unplayed_count": null,
+        }))
+        .into_response()
+    })
+    .await
     {
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        );
+        Ok(response) => response,
+        Err(error) => error.response(),
     }
-    let unit = super::movie_compatible_unit(&store, user_id, media_id, season, episode);
-    ok(json!({
-        "played": unit["played"].as_bool().unwrap_or(false),
-        "is_favorite": unit["is_favorite"].as_bool().unwrap_or(false),
-        "unplayed_count": null,
-    }))
-    .into_response()
 }

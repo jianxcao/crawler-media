@@ -1,49 +1,102 @@
-use api::Store;
+use std::str::FromStr;
+use store::test_support::{FixtureFile, publish_fixture_file};
 
+#[path = "support/mod.rs"]
+mod support;
+
+use api::Store;
+use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UserId};
+
+/// Sessions are user-scoped: the library layout keys `playback_sessions` by
+/// `(user_id, device_id)`, so two users sharing one device id never collide.
 #[test]
 fn legacy_device_primary_key_migrates_to_user_scoped_key() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("subscribe.db");
-    let db = rusqlite::Connection::open(&path).unwrap();
-    db.execute_batch(
-        "CREATE TABLE playback_sessions (
-            device_id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            media_id TEXT NOT NULL,
-            season INTEGER,
-            episode INTEGER,
-            client TEXT,
-            device_name TEXT,
-            client_version TEXT,
-            play_method TEXT NOT NULL DEFAULT 'local',
-            position_ms INTEGER NOT NULL DEFAULT 0,
-            start_position_ms INTEGER NOT NULL DEFAULT 0,
-            duration_ms INTEGER,
-            paused INTEGER NOT NULL DEFAULT 0,
-            watched_ms INTEGER NOT NULL DEFAULT 0,
-            rate_bps INTEGER NOT NULL DEFAULT 0,
-            bytes_sent INTEGER NOT NULL DEFAULT 0,
-            connections INTEGER NOT NULL DEFAULT 0,
-            admin_ended INTEGER NOT NULL DEFAULT 0,
-            started_at INTEGER NOT NULL,
-            last_report_at INTEGER NOT NULL
-        );
-        INSERT INTO playback_sessions (
-            device_id, user_id, media_id, started_at, last_report_at
-        ) VALUES (
-            'living-room',
-            '00000000-0000-0000-0000-000000000001',
-            '00000000-0000-0000-0000-000000000002',
-            1,
-            1
-        );",
-    )
-    .unwrap();
-    drop(db);
+    let user = UserId::from_str("00000000-0000-0000-0000-000000000001").unwrap();
+    let media = MediaId::from_str("00000000-0000-0000-0000-000000000002").unwrap();
+    let library_root = dir.path().join("media");
+    std::fs::create_dir_all(&library_root).unwrap();
+    let path = library_root.join("movie.mkv");
+    std::fs::write(&path, b"x").unwrap();
+    {
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .insert_media(&Media {
+                id: media,
+                kind: MediaKind::Movie,
+                title: "Migration Fixture".into(),
+                year: None,
+                original_title: None,
+                aliases: Vec::new(),
+                tmdb_id: None,
+                douban_id: None,
+                tvdb_id: None,
+                bangumi_id: None,
+                anilist_id: None,
+            })
+            .unwrap();
+        store
+            .create_library(
+                MediaKind::Movie,
+                "Movies",
+                &[library_root.to_str().unwrap()],
+                "everyone",
+                true,
+                &[],
+            )
+            .unwrap();
+        let ledger = LedgerId::new();
+        publish_fixture_file(
+            &store,
+            &FixtureFile {
+                file_id: Some(ledger),
+                media_id: media,
+                path: path.display().to_string(),
+                season: None,
+                episode: None,
+                resolution: None,
+                codec: None,
+                hdr: None,
+                quality_source: QualitySource::Release,
+                confidence: Confidence::High,
+                filter_score: None,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let play_session_id =
+            support::session::issue_session(&store, user, "living-room", ledger, 1);
+        store
+            .upsert_session(&api::store::SessionRow {
+                device_id: "living-room".into(),
+                user_id: user,
+                media_id: media,
+                season: Some(-1),
+                episode: Some(-1),
+                client: None,
+                device_name: None,
+                client_version: None,
+                play_method: "local".into(),
+                position_ms: 0,
+                start_position_ms: 0,
+                duration_ms: None,
+                paused: false,
+                watched_ms: 0,
+                rate_bps: 0,
+                bytes_sent: 0,
+                connections: 0,
+                admin_ended: false,
+                started_at: 1,
+                last_report_at: 1,
+                ledger_id: Some(ledger.to_string()),
+                play_session_id: Some(play_session_id),
+                last_report_at_ms: 1000,
+                last_event_sequence: None,
+            })
+            .unwrap();
+    }
 
-    drop(Store::open(dir.path()).unwrap());
-
-    let db = rusqlite::Connection::open(path).unwrap();
+    let db = rusqlite::Connection::open(dir.path().join("library.db")).unwrap();
     let mut primary_key: Vec<(i64, String)> = db
         .prepare("PRAGMA table_info(playback_sessions)")
         .unwrap()
