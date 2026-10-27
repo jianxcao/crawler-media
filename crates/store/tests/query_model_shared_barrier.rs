@@ -2,7 +2,8 @@ mod query_model_support;
 use domain::{FilePresence, LedgerId, UnitKey};
 use query_model_support::setup;
 use store::library_write::probe::ProbePublication;
-use store::library_write::{FilePublication, PresenceMode, PresenceObservation, WriteScope};
+use store::library_write::{FilePublication, WriteScope};
+use store::{LedgerPresenceMode as PresenceMode, LedgerPresenceObservation};
 
 #[test]
 fn shared_media_presence_verify_is_frozen() {
@@ -92,12 +93,15 @@ fn rejects_shared_write(action: &str) {
     let before = snapshot(&db);
     let result = match action {
         "verify" | "prune" => store
-            .apply_presence(
-                &scope,
-                &[PresenceObservation {
-                    file_id: file.file_id,
-                    observed_version: file.version.clone(),
-                    observed_path: "movie.mkv".into(),
+            .apply_ledger_presence(
+                &[LedgerPresenceObservation {
+                    file: store.file_coverage_by_id(file.file_id).unwrap().unwrap(),
+                    path_key: store
+                        .file_coverage_by_id(file.file_id)
+                        .unwrap()
+                        .unwrap()
+                        .path_key,
+                    missing_at: store.missing_at_by_path().unwrap().values().next().copied(),
                     presence: FilePresence::Missing,
                 }],
                 if action == "verify" {
@@ -116,7 +120,7 @@ fn rejects_shared_write(action: &str) {
                     tracks_version: 1,
                     resolution: Some("2160p"),
                     codec: Some("HEVC"),
-                    hdr: None,
+                    hdr: store::library_write::probe::Observed::NotObserved,
                     duration_ms: Some(100),
                     details: None,
                 },

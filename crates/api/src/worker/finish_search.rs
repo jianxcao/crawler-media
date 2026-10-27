@@ -46,23 +46,6 @@ pub(super) fn finish_search(
     let library_lease = state.acquire_library_work(&context.library_id)?;
     library_lease.control().check().map_err(|e| e.to_string())?;
 
-    // Re-validate observation against current DB state before side effect
-    {
-        let store = state.store.lock();
-        if !store
-            .library_accepts_work(&context.library_id)
-            .map_err(|e| e.to_string())?
-        {
-            return Err("目标 Library 正在删除或已不存在".into());
-        }
-        let current = store
-            .read_fingerprint(&context.library_id, media.id)
-            .map_err(|e| e.to_string())?;
-        if current != context.observation_fingerprint {
-            return Err("Library 配置或台账在观察期间已变更，放弃本轮提交".into());
-        }
-    }
-
     tracing::info!(
         subscribe_id = %subscribe.id,
         media = %media.title,
@@ -78,6 +61,19 @@ pub(super) fn finish_search(
         .map_err(|e| e.to_string())?;
     if !rejected.is_empty() {
         torrents.retain(|torrent| !rejected.contains(&torrent.enclosure));
+    }
+
+    {
+        let store = state.store.lock();
+        if !store
+            .library_accepts_work(&context.library_id)
+            .map_err(|e| e.to_string())?
+            || !store
+                .subscribe_snapshot_is_current(&context.snapshot, &Default::default())
+                .map_err(|e| e.to_string())?
+        {
+            return Err("Library 配置或订阅事实在观察期间已变更，放弃本轮提交".into());
+        }
     }
 
     let add_errors = admit_candidates(
@@ -109,7 +105,7 @@ struct SearchContext {
     transfer_mode: Option<library::TransferMode>,
     scrape: bool,
     naming: String,
-    observation_fingerprint: store::ReadFingerprint,
+    snapshot: store::SubscribeLibrarySnapshot,
 }
 
 fn load_search_context(
@@ -122,7 +118,7 @@ fn load_search_context(
     )?;
     let facts = obs.facts;
     let library_id = obs.library_id;
-    let observation_fingerprint = obs.fingerprint;
+    let snapshot = obs.snapshot;
     let wash_filter = {
         let store = state.store.lock();
         subscribe
@@ -159,7 +155,7 @@ fn load_search_context(
         transfer_mode,
         scrape,
         naming,
-        observation_fingerprint,
+        snapshot,
     })
 }
 

@@ -11,10 +11,9 @@ use domain::{
 };
 use store::Store;
 use store::library_write::probe::ProbePublication;
-use store::library_write::{
-    FilePublication as StorePublication, PresenceMode, PresenceObservation, WriteScope,
-};
+use store::library_write::{FilePublication as StorePublication, WriteScope};
 use store::playback::{BoundPlaybackEvent, EventOutcome, PlaybackEventType, ResumeStatus};
+use store::{LedgerPresenceMode as PresenceMode, LedgerPresenceObservation};
 
 const USER: &str = "00000000-0000-0000-0000-000000000099";
 const MEDIA: &str = "00000000-0000-0000-0000-000000000001";
@@ -363,7 +362,7 @@ fn tracks_version_bump_resets_track_selection() {
                 tracks_version: 2,
                 resolution: None,
                 codec: None,
-                hdr: None,
+                hdr: store::library_write::probe::Observed::NotObserved,
                 duration_ms: None,
                 details: None,
             },
@@ -463,12 +462,26 @@ fn pending_and_missing_files_are_never_playable() {
     assert!(f.store.resolve_playback(user(), &e02, None, None).is_ok());
 
     f.store
-        .apply_presence(
-            &f.scope,
-            &[PresenceObservation {
-                file_id: missing.file_id,
-                observed_version: missing.version.clone(),
-                observed_path: missing.path.clone(),
+        .apply_ledger_presence(
+            &[LedgerPresenceObservation {
+                file: f
+                    .store
+                    .file_coverage_by_id(missing.file_id)
+                    .unwrap()
+                    .unwrap(),
+                path_key: f
+                    .store
+                    .file_coverage_by_id(missing.file_id)
+                    .unwrap()
+                    .unwrap()
+                    .path_key,
+                missing_at: f
+                    .store
+                    .missing_at_by_path()
+                    .unwrap()
+                    .values()
+                    .next()
+                    .copied(),
                 presence: FilePresence::Missing,
             }],
             PresenceMode::Verify,

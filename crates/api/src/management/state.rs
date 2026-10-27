@@ -43,6 +43,7 @@ pub struct ApiState {
     pub(crate) file_stats: Arc<dyn crate::file_stat_read::FileStatRead>,
     /// 文件系统观察 seam（verify / prune / watcher）；生产默认真实实现，测试可注入。
     pub(crate) library_files: Arc<dyn crate::library_presence::LibraryFileRead>,
+    pub(crate) chapter_probe: Arc<dyn crate::marker_resolver::ChapterProbe>,
     /// 播放时钟 seam（生产为真实系统毫秒时钟；测试可注入假时钟）。
     pub(crate) playback_clock: Arc<dyn crate::playback_events::PlaybackClock>,
     /// 进程内共享的任务计数 watcher（所有 SSE 连接共用一个 poller）。
@@ -150,6 +151,14 @@ fn apply_admin_bootstrap(
 }
 
 impl ApiState {
+    pub fn with_chapter_probe(
+        mut self,
+        probe: Arc<dyn crate::marker_resolver::ChapterProbe>,
+    ) -> Self {
+        self.chapter_probe = probe;
+        self
+    }
+
     /// Shared Fanart cache: schema validation/initialization runs on first use only.
     pub(crate) fn fanart_cache(&self) -> Result<Arc<media::cache::CatalogCache>, media::TmdbError> {
         if let Some(cache) = self.fanart_cache.get() {
@@ -298,6 +307,7 @@ impl ApiState {
             )),
             file_stats: Arc::new(crate::file_stat_read::LocalFileStatRead),
             library_files: Arc::new(crate::library_presence::SystemLibraryFileRead),
+            chapter_probe: Arc::new(crate::marker_resolver::FfprobeChapters),
             playback_clock: Arc::new(crate::playback_events::SystemPlaybackClock),
             job_updates: Arc::new(crate::job_updates::JobUpdates::new()),
             cover_service: Arc::new(crate::library_cover_service::LibraryCoverService::local()),

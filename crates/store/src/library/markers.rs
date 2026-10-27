@@ -1,4 +1,5 @@
 mod merge;
+mod refresh_scope;
 mod source_guard;
 
 pub use source_guard::{SourceObservation, SourceSnapshot, observe_sources, observe_sources_with};
@@ -46,7 +47,7 @@ impl Store {
         Ok(())
     }
 
-    /// Replace a season's marker rows and chapter caches in one transaction.
+    /// Replace a season's marker rows in one transaction.
     /// Existing results remain readable until this transaction commits.
     pub fn replace_marker_results(
         &self,
@@ -63,7 +64,7 @@ impl Store {
         }])
     }
 
-    /// Atomically replace marker rows and chapter caches across one or more seasons.
+    /// Atomically replace marker rows across one or more seasons.
     pub fn replace_marker_results_batch(
         &self,
         replacements: &[MarkerResultReplacement],
@@ -87,7 +88,6 @@ impl Store {
         observed: Option<&[source_guard::SourceObservation]>,
     ) -> Result<(), StoreError> {
         let check_sources = observed.is_some();
-        let serialized = serialize_chapter_updates(replacements)?;
         let tx = crate::write_tx(&self.library)?;
         if let Some(members) = observed {
             match completed_job_id {
@@ -102,38 +102,14 @@ impl Store {
             }
         }
 
-        // A job-scoped refresh must not mutate marker facts for episodes outside the rows it leased and published.
-        // Only the source-checked job path is job-scoped: the unchecked entry point keeps its season-wide
-        // replacement semantics and may be driven with file ids that are not persisted rows.
-        let covered_episodes = match completed_job_id {
-            Some(_) if check_sources => {
-                let mut episodes = BTreeSet::new();
-                let mut stmt = tx.prepare(
-                    "SELECT COALESCE(NULLIF(u.episode, -1), 1)
-                     FROM library_file_units u
-                     WHERE u.file_id = ?1
-                     ORDER BY u.season, u.episode LIMIT 1",
-                )?;
-                for replacement in replacements {
-                    for (id, _) in &replacement.chapter_updates {
-                        // 无覆盖行（整片文件）与旧台账的 NULL 集号一样落到 1。
-                        let episode: i64 = stmt
-                            .query_row(params![id], |row| row.get(0))
-                            .optional()?
-                            .unwrap_or(1);
-                        episodes.insert(episode);
-                    }
-                }
-                Some(episodes)
-            }
-            _ => None,
-        };
-
         for replacement in replacements {
+            refresh_scope::ensure_supported(&tx, replacement)?;
+            let covered_episodes = if completed_job_id.is_some() && check_sources {
+                Some(refresh_scope::covered_episodes(&tx, replacement)?)
+            } else {
+                None
+            };
             write_replacement_markers(&tx, replacement, covered_episodes.as_ref())?;
-        }
-        for (file_id, chapters_json) in serialized {
-            upsert_chapter_cache(&tx, &file_id, chapters_json)?;
         }
         if let Some(job_id) = completed_job_id {
             complete_refresh_job(&tx, job_id)?;
@@ -211,21 +187,6 @@ impl Store {
     }
 }
 
-/// `(file_id, chapters_json)` pairs detected by a marker refresh, ready to be published.
-fn serialize_chapter_updates(
-    replacements: &[MarkerResultReplacement],
-) -> Result<Vec<(String, String)>, StoreError> {
-    replacements
-        .iter()
-        .flat_map(|replacement| {
-            replacement
-                .chapter_updates
-                .iter()
-                .map(|(file_id, chapters)| Ok((file_id.clone(), serde_json::to_string(chapters)?)))
-        })
-        .collect()
-}
-
 /// Replace unlocked marker rows for one season; locked rows are preserved as-is.
 /// When `covered_episodes` is `Some`, only episodes in that set are deleted and re-inserted;
 /// other episodes keep their marker rows untouched. When `None`, the whole season is replaced.
@@ -237,9 +198,10 @@ fn write_replacement_markers(
     delete_replacement_markers(tx, replacement, covered_episodes)?;
     for marker in &replacement.markers {
         if let Some(episodes) = covered_episodes
-            && !episodes.contains(&(marker.episode as i64)) {
-                continue;
-            }
+            && !episodes.contains(&(marker.episode as i64))
+        {
+            continue;
+        }
         let is_locked: bool = tx
             .query_row(
                 "SELECT locked FROM media_markers WHERE media_id = ?1 AND season = ?2 AND episode = ?3",
@@ -316,98 +278,6 @@ fn insert_marker_row(
         ],
     )?;
     Ok(())
-}
-
-/// Publish the chapter cache for one file.
-///
-/// When a locked marker exists the timeline is rebuilt from the locked ranges so that
-/// detection results cannot drift it; the media duration already known for that file is
-/// passed through so the feature chapter never runs past the end of the media.
-///
-/// The cache is written through the shared `file_details` writer, so a result that no longer
-/// matches the file's source version is ignored instead of published.
-fn upsert_chapter_cache(
-    tx: &rusqlite::Transaction<'_>,
-    file_id: &str,
-    detected_chapters_json: String,
-) -> Result<(), StoreError> {
-    let chapters_json = match locked_marker_ranges(tx, file_id)? {
-        Some((intro, outro)) => {
-            let (existing_chapters, duration_ms) = cached_chapters_and_duration(tx, file_id)?;
-            let timeline = library::build_complete_timeline_chapters(
-                &existing_chapters,
-                intro,
-                outro,
-                duration_ms,
-            );
-            serde_json::to_string(&timeline)?
-        }
-        None => detected_chapters_json,
-    };
-
-    if !super::upsert_chapter_cache_tx(tx, file_id, &chapters_json)? {
-        tracing::warn!(file_id, "章节缓存写入被忽略：文件行不存在或源版本已变化");
-    }
-    Ok(())
-}
-
-/// Valid intro/outro ranges of the locked marker attached to `file_id`, if any.
-fn locked_marker_ranges(
-    tx: &rusqlite::Transaction<'_>,
-    file_id: &str,
-) -> Result<Option<(Option<(i64, i64)>, Option<(i64, i64)>)>, StoreError> {
-    let locked: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> = tx
-        .query_row(
-            "SELECT m.intro_start_ms, m.intro_end_ms, m.outro_start_ms, m.outro_end_ms
-             FROM library_files f
-             LEFT JOIN library_file_units u ON u.file_id = f.file_id
-             JOIN media_markers m ON m.media_id = f.media_id
-                AND m.season = COALESCE(NULLIF(u.season, -1), 1)
-                AND m.episode = COALESCE(NULLIF(u.episode, -1), 1)
-             WHERE f.file_id = ?1 AND m.locked = 1
-             LIMIT 1",
-            params![file_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .optional()?;
-
-    Ok(locked.map(|(intro_s, intro_e, outro_s, outro_e)| {
-        (valid_range(intro_s, intro_e), valid_range(outro_s, outro_e))
-    }))
-}
-
-fn valid_range(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<(i64, i64)> {
-    match (start_ms, end_ms) {
-        (Some(start), Some(end)) if start < end => Some((start, end)),
-        _ => None,
-    }
-}
-
-/// Cached chapters plus the format duration already stored for one file, for the source
-/// version the file currently carries (a cache from an earlier generation is not the file).
-fn cached_chapters_and_duration(
-    tx: &rusqlite::Transaction<'_>,
-    file_id: &str,
-) -> Result<(Vec<library::ChapterMarker>, Option<i64>), StoreError> {
-    let cached: Option<(Option<String>, Option<i64>)> = tx
-        .query_row(
-            "SELECT d.chapters_json, d.format_duration_ms
-             FROM file_details d
-             JOIN library_files f ON f.file_id = d.file_id
-             WHERE d.file_id = ?1 AND d.source_version = f.source_version",
-            params![file_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-
-    Ok(match cached {
-        Some((json, duration_ms)) => (
-            json.and_then(|json| serde_json::from_str(&json).ok())
-                .unwrap_or_default(),
-            duration_ms,
-        ),
-        None => (Vec::new(), None),
-    })
 }
 
 /// Terminal transition for a marker refresh job; fails when the job is no longer active.

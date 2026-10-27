@@ -34,6 +34,16 @@ pub(super) fn channels() -> DispatchChannels {
 }
 
 impl ProbeManager {
+    pub(super) fn dispatch_store(&self) -> Option<parking_lot::MutexGuard<'_, store::Store>> {
+        let guard = self
+            .store
+            .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT);
+        if guard.is_none() {
+            tracing::warn!("探测 Store 等待预算耗尽，保留持久任务等待重试");
+        }
+        guard
+    }
+
     /// How many ledger ids are queued or running in this process.
     pub fn queued_ledger_count(&self) -> usize {
         self.seen.lock().len()
@@ -44,21 +54,65 @@ impl ProbeManager {
     }
 
     pub(super) async fn shutdown_dispatch(&self) -> Result<(), String> {
-        if !self.workers_started.swap(false, Ordering::SeqCst) {
-            self.workers.lock().clear();
-            return Ok(());
+        let _shutdown = self.shutdown_lock.lock().await;
+        if self.shutdown_drain.lock().is_none() {
+            let handles = {
+                let mut workers = self.workers.lock();
+                if !self.workers_started.swap(false, Ordering::SeqCst) {
+                    return Ok(());
+                }
+                self.shutting_down.store(true, Ordering::SeqCst);
+                self.shutdown_signal.send_replace(true);
+                std::mem::take(&mut *workers)
+            };
+            self.wake.notify_waiters();
+            self.metadata_idle.notify_waiters();
+            drop(self.metadata_rx.lock().take());
+            drop(self.fingerprint_rx.lock().take());
+            let (finished, receiver) = tokio::sync::watch::channel(false);
+            *self.shutdown_drain.lock() = Some(receiver);
+            let lease = self.store_lease.lock().take();
+            let (drained, wait_for_drain) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                if wait_for_drain.recv().is_err() {
+                    // The runtime disappeared while work might still be blocking.
+                    // Keep ownership rather than let a new manager overlap it.
+                    tracing::error!("探测 runtime 在排空前停止，保留数据库探测租约直到进程退出");
+                    std::mem::forget(lease);
+                    return;
+                }
+                drop(lease);
+                finished.send_replace(true);
+            });
+            tokio::spawn(async move {
+                for handle in handles {
+                    if let Err(error) = handle.await {
+                        tracing::error!(%error, "探测 worker 关闭时异常退出");
+                    }
+                }
+                let _ = drained.send(());
+            });
         }
-        self.shutting_down.store(true, Ordering::SeqCst);
-        self.wake.notify_waiters();
-        drop(self.metadata_rx.lock().take());
-        drop(self.fingerprint_rx.lock().take());
-        let handles = std::mem::take(&mut *self.workers.lock());
-        for handle in handles {
-            handle.abort();
-            let _ = handle.await;
+        let mut receiver = self.shutdown_drain.lock().as_ref().unwrap().clone();
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !*receiver.borrow_and_update() {
+                if receiver.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .await;
+        if finished.is_err() || !*receiver.borrow() {
+            tracing::warn!("探测 worker 关闭超时，后台继续排空并保留数据库探测租约");
+            return Err("探测 worker 关闭超时，旧任务仍在排空".into());
         }
+        self.shutdown_drain.lock().take();
         self.seen.lock().clear();
-        self.metadata_pending.store(0, Ordering::SeqCst);
+        if self.metadata_pending.swap(0, Ordering::SeqCst) > 0 {
+            self.metadata_idle_generation.fetch_add(1, Ordering::AcqRel);
+            self.metadata_idle.notify_waiters();
+        }
+        let _workers = self.workers.lock();
         self.shutting_down.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -90,7 +144,11 @@ impl ProbeManager {
             self.seen.lock().remove(&ledger_id);
             return false;
         };
-        let current_job = self.store.lock().get_probe_job(&current_job_id);
+        let Some(store) = self.dispatch_store() else {
+            return false;
+        };
+        let current_job = store.get_probe_job(&current_job_id);
+        drop(store);
         let current_job = match current_job {
             Ok(Some(job)) => job,
             Ok(None) => {
@@ -106,33 +164,33 @@ impl ProbeManager {
         };
 
         if current_job.kind == "media_probe" {
-            self.finish_persisted_unit(&work.unit, true);
-            let metadata_succeeded = match self.store.lock().get_probe_job(&current_job_id) {
-                Ok(Some(job)) => job.succeeded > 0 || job.status == "succeeded",
-                Ok(None) => false,
+            let fingerprint_job_id = uuid::Uuid::new_v4().to_string();
+            let Some(store) = self.dispatch_store() else {
+                return false;
+            };
+            let transitioned = match store.complete_media_probe_and_enqueue_fingerprint(
+                &current_job_id,
+                &ledger_id,
+                &fingerprint_job_id,
+            ) {
+                Ok(changed) => changed,
                 Err(error) => {
-                    tracing::error!(%error, ledger_id, "确认媒体信息任务结果失败");
+                    tracing::error!(%error, ledger_id, "持久化媒体信息到声纹的交接失败");
                     false
                 }
             };
-            if !metadata_succeeded {
-                self.seen.lock().remove(&ledger_id);
+            drop(store);
+            if !transitioned {
                 return false;
             }
-            let Some(fingerprint_job_id) =
-                self.persist_single_unit(&work.unit, "fingerprint_probe")
-            else {
-                tracing::error!(ledger_id, "创建声纹任务失败，工作保持可恢复");
-                self.seen.lock().remove(&ledger_id);
-                self.wake.notify_waiters();
-                return false;
-            };
             work.unit.job_id = Some(fingerprint_job_id);
             work.start_job = true;
         } else if !self.advance_running_unit(&current_job_id, &ledger_id) {
             tracing::warn!(ledger_id, job_id = %current_job_id, "声纹阶段未持久化，保持原任务可恢复");
             self.wake.notify_waiters();
             return false;
+        } else {
+            work.start_job = true;
         }
 
         let Some(job_id) = work.unit.job_id.clone() else {
@@ -163,11 +221,10 @@ impl ProbeManager {
     }
 
     fn advance_running_unit(&self, job_id: &str, ledger_id: &str) -> bool {
-        match self
-            .store
-            .lock()
-            .advance_probe_unit_to_fingerprint(job_id, ledger_id)
-        {
+        let Some(store) = self.dispatch_store() else {
+            return false;
+        };
+        match store.advance_probe_unit_to_fingerprint(job_id, ledger_id) {
             Ok(true) => true,
             Ok(false) => false,
             Err(error) => {
@@ -177,17 +234,30 @@ impl ProbeManager {
         }
     }
 
+    fn publish_metadata_observed(
+        &self,
+        tx: &mpsc::Sender<ProbeDispatchId>,
+        id: ProbeDispatchId,
+        observed: impl FnOnce(),
+    ) -> Result<(), mpsc::error::TrySendError<()>> {
+        let permit = tx.try_reserve().map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => mpsc::error::TrySendError::Full(()),
+            mpsc::error::TrySendError::Closed(_) => mpsc::error::TrySendError::Closed(()),
+        })?;
+        self.metadata_pending.fetch_add(1, Ordering::AcqRel);
+        permit.send(id);
+        observed();
+        Ok(())
+    }
+
     fn offer(
         &self,
         tx: mpsc::Sender<ProbeDispatchId>,
         id: ProbeDispatchId,
         unit: ProbeUnit,
     ) -> Result<(), ProbeUnit> {
-        match tx.try_send(id) {
-            Ok(()) => {
-                self.metadata_pending.fetch_add(1, Ordering::AcqRel);
-                Ok(())
-            }
+        match self.publish_metadata_observed(&tx, id, || {}) {
+            Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => {
                 tracing::info!(
                     ledger_id = %unit.row.file.file_id,
@@ -232,27 +302,29 @@ impl ProbeManager {
         if free == 0 {
             return;
         }
-        let ids = match self
-            .store
-            .lock()
-            .pending_probe_dispatch_ids(ProbeDispatchStage::Metadata, free)
-        {
+        let Some(store) = self.dispatch_store() else {
+            return;
+        };
+        let ids = match store.pending_probe_dispatch_ids(ProbeDispatchStage::Metadata, free) {
             Ok(ids) => ids,
             Err(error) => {
                 tracing::error!(%error, "读取媒体信息派发窗口失败");
                 return;
             }
         };
+        drop(store);
         let mut seen = self.seen.lock();
         for id in ids {
             if !seen.insert(id.ledger_id.clone()) {
                 continue;
             }
-            if tx.try_send(id.clone()).is_err() {
+            if self
+                .publish_metadata_observed(tx, id.clone(), || {})
+                .is_err()
+            {
                 seen.remove(&id.ledger_id);
                 break;
             }
-            self.metadata_pending.fetch_add(1, Ordering::AcqRel);
         }
     }
 
@@ -262,18 +334,17 @@ impl ProbeManager {
         if free == 0 {
             return;
         }
-        let ids = match self
-            .store
-            .lock()
-            .pending_probe_dispatch_ids(ProbeDispatchStage::Fingerprint, free)
-        {
+        let Some(store) = self.dispatch_store() else {
+            return;
+        };
+        let ids = match store.pending_probe_dispatch_ids(ProbeDispatchStage::Fingerprint, free) {
             Ok(ids) => ids,
             Err(error) => {
                 tracing::error!(%error, "读取声纹派发窗口失败");
                 return;
             }
         };
-        drop(self.seen.lock());
+        drop(store);
         let mut ready = Vec::new();
         for id in ids {
             if self.seen.lock().contains(&id.ledger_id) {
@@ -316,7 +387,13 @@ impl ProbeManager {
         id: &ProbeDispatchId,
         queued_only: bool,
     ) -> Option<(ProbeUnit, probe::FingerprintWork)> {
-        let snapshot = self.store.lock().load_probe_dispatch_snapshot(id);
+        let Some(store) = self.dispatch_store() else {
+            self.seen.lock().remove(&id.ledger_id);
+            self.wake.notify_one();
+            return None;
+        };
+        let snapshot = store.load_probe_dispatch_snapshot(id);
+        drop(store);
         let snapshot = match snapshot {
             Ok(Some(snapshot)) => snapshot,
             Ok(None) => {
@@ -343,7 +420,7 @@ impl ProbeManager {
             Ok(kind) => kind,
             Err(_) => {
                 tracing::error!(ledger_id = %id.ledger_id, kind = %snapshot.unit.kind, "派发单元媒体类型无效");
-                let _ = self.store.lock().finish_probe_unit(
+                let _ = self.dispatch_store()?.finish_probe_unit(
                     &id.job_id,
                     &id.ledger_id,
                     false,
@@ -366,15 +443,16 @@ impl ProbeManager {
             }),
             job_id: Some(snapshot.job.id),
         };
-        let (media_duration_ms, sample_duration_secs) =
-            match self.dispatch_timings(&id.ledger_id, &snapshot.source_version) {
-                Ok(settings) => settings,
-                Err(error) => {
-                    tracing::error!(%error, ledger_id = %id.ledger_id, "恢复派发单元的时长或声纹配置失败，保留持久任务");
-                    self.seen.lock().remove(&id.ledger_id);
-                    return None;
-                }
-            };
+        let (media_duration_ms, sample_duration_secs) = match self
+            .dispatch_timings(&id.ledger_id, &snapshot.source_version)
+        {
+            Ok(settings) => settings,
+            Err(error) => {
+                tracing::error!(%error, ledger_id = %id.ledger_id, "恢复派发单元的时长或声纹配置失败，保留持久任务");
+                self.seen.lock().remove(&id.ledger_id);
+                return None;
+            }
+        };
         let work = probe::FingerprintWork {
             unit: unit.clone(),
             media_duration_ms,
@@ -396,7 +474,12 @@ impl ProbeManager {
         ledger_id: &str,
         source_version: &str,
     ) -> Result<(Option<i64>, u32), store::StoreError> {
-        let store = self.store.lock();
+        let store = self.dispatch_store().ok_or_else(|| {
+            store::StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "probe Store busy",
+            ))
+        })?;
         let media_duration_ms = store
             .get_media_info_cache_version(ledger_id)?
             .filter(|version| version.source_version == source_version)
@@ -408,3 +491,7 @@ impl ProbeManager {
         Ok((media_duration_ms, sample_duration_secs))
     }
 }
+
+#[cfg(test)]
+#[path = "dispatch_tests.rs"]
+mod tests;

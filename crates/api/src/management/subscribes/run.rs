@@ -22,10 +22,7 @@ struct RunContext {
 
 struct RunFactsObservation {
     facts: subscribe::SubscribeFacts,
-    saved: subscribe::SubscribeFacts,
-    rows: Vec<domain::FileCoverage>,
-    qualities: std::collections::HashMap<domain::LedgerId, Result<domain::Release, String>>,
-    ownership_libraries: Vec<store::Library>,
+    snapshot: store::SubscribeLibrarySnapshot,
 }
 
 pub(crate) async fn run_subscribe(
@@ -304,6 +301,7 @@ fn execute(
             subscribe: &context.subscribe,
             lease: &library_lease,
             fingerprint: plan.fingerprint.clone(),
+            snapshot: facts.snapshot.clone(),
         },
         &plan,
     );
@@ -391,13 +389,7 @@ fn load_run_facts(
     // H4: same placeholder rule as the scheduled path (shared in subscribe).
     let releases = crate::worker::finish_search::pending_releases(&existing);
     let facts = subscribe::facts_with_pending(facts, &releases, &context.subscribe, &context.media);
-    Ok(RunFactsObservation {
-        facts,
-        saved: snapshot.saved,
-        rows: snapshot.rows,
-        qualities: snapshot.qualities,
-        ownership_libraries: snapshot.ownership.libraries().to_vec(),
-    })
+    Ok(RunFactsObservation { facts, snapshot })
 }
 
 fn validate_facts_observation(
@@ -406,13 +398,9 @@ fn validate_facts_observation(
     observed: &RunFactsObservation,
 ) -> Result<(), ApiError> {
     let current = store
-        .subscribe_library_snapshot(&context.subscribe, context.media.kind)
+        .subscribe_snapshot_is_current(&observed.snapshot, &Default::default())
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    if current.saved != observed.saved
-        || current.rows != observed.rows
-        || current.qualities != observed.qualities
-        || current.ownership.libraries() != observed.ownership_libraries
-    {
+    if !current {
         tracing::warn!(subscribe_id = %context.subscribe.id,
             "Subscribe facts source rows or ownership changed after filesystem observation");
         return Err(ApiError::internal(

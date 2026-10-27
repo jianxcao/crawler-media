@@ -313,6 +313,60 @@ impl Store {
         Ok(changed > 0)
     }
 
+    /// Requeue only the interrupted unit while its job is still active.
+    pub fn retry_probe_unit(&self, job_id: &str, ledger_id: &str) -> Result<bool, StoreError> {
+        let changed = self.library.execute(
+            "UPDATE probe_job_units SET status = 'queued'
+             WHERE job_id = ?1 AND file_id = ?2 AND status = 'running'
+             AND EXISTS (SELECT 1 FROM probe_jobs WHERE id = ?1 AND status IN ('queued', 'running'))",
+            params![job_id, ledger_id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Complete metadata and persist its successor as one durable transition.
+    pub fn complete_media_probe_and_enqueue_fingerprint(
+        &self,
+        job_id: &str,
+        ledger_id: &str,
+        fingerprint_job_id: &str,
+    ) -> Result<bool, StoreError> {
+        let tx = crate::write_tx(&self.library)?;
+        let changed = tx.execute(
+            "UPDATE probe_job_units SET status = 'succeeded'
+             WHERE job_id = ?1 AND file_id = ?2 AND status = 'running' AND stage = 'metadata'
+               AND EXISTS (SELECT 1 FROM probe_jobs WHERE id = ?1 AND kind = 'media_probe'
+                   AND total = 1 AND status IN ('queued', 'running'))
+               AND EXISTS (SELECT 1 FROM library_files WHERE file_id = ?2 AND missing_at IS NULL)",
+            params![job_id, ledger_id],
+        )?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        let now = now_ms();
+        tx.execute(
+            "UPDATE probe_jobs SET status = 'succeeded', completed = 1, succeeded = 1,
+                    finished_at_ms = ?2 WHERE id = ?1",
+            params![job_id, now],
+        )?;
+        tx.execute(
+            "INSERT INTO probe_jobs (id, kind, media_id, season, scope_key, status, total, created_at_ms)
+             SELECT ?2, 'fingerprint_probe', media_id, season, scope_key, 'queued', 1, ?3
+             FROM probe_jobs WHERE id = ?1",
+            params![job_id, fingerprint_job_id, now],
+        )?;
+        tx.execute(
+            "INSERT INTO probe_job_units (job_id, file_id, kind, force_fingerprint,
+                 reuse_fingerprint_cache, overwrite_markers, status, reuse_media_info_cache, stage)
+             SELECT ?3, file_id, kind, 1, reuse_fingerprint_cache, overwrite_markers,
+                    'queued', reuse_media_info_cache, 'fingerprint'
+             FROM probe_job_units WHERE job_id = ?1 AND file_id = ?2",
+            params![job_id, ledger_id, fingerprint_job_id],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn put_probe_sampling_plan(
         &self,
         job_id: &str,
@@ -513,6 +567,22 @@ impl Store {
             |row| row.get(0),
         )?;
         Ok(active)
+    }
+
+    /// Whether this exact unit still belongs to an active job.
+    pub fn is_probe_unit_active(&self, job_id: &str, ledger_id: &str) -> Result<bool, StoreError> {
+        self.library
+            .query_row(
+                "SELECT EXISTS(
+                SELECT 1 FROM probe_job_units u JOIN probe_jobs j ON j.id = u.job_id
+                WHERE u.job_id = ?1 AND u.file_id = ?2
+                  AND u.status IN ('queued', 'running')
+                  AND j.status IN ('queued', 'running')
+            )",
+                params![job_id, ledger_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     /// 这个台账行是否**曾经**被排入 probe（不区分当前状态）。

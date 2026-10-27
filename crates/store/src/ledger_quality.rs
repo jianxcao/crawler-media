@@ -62,15 +62,15 @@ impl Store {
     pub(crate) fn owned_quality(&self, coverage: &FileCoverage) -> Result<Release, StoreError> {
         let (season, episode) = coverage_coordinates(coverage);
         let path = coverage.file.path.to_string_lossy().into_owned();
-        let json: Option<String> = self
+        let stored: Option<(Option<String>, bool)> = self
             .library
             .query_row(
-                "SELECT release_quality FROM library_files WHERE path_key = norm_path_key(?1)",
+                "SELECT release_quality, hdr_observed FROM library_files WHERE path_key = norm_path_key(?1)",
                 [path.as_str()],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
-            .optional()?
-            .flatten();
+            .optional()?;
+        let (json, hdr_observed) = stored.unwrap_or((None, false));
         let mut quality = match json {
             Some(json) => {
                 let stored: StoredQuality = serde_json::from_str(&json)?;
@@ -112,7 +112,11 @@ impl Store {
         quality.episode = episode;
         quality.resolution = coverage.file.resolution.clone().or(quality.resolution);
         quality.codec = coverage.file.codec.clone().or(quality.codec);
-        quality.hdr = coverage.file.hdr.clone().or(quality.hdr);
+        quality.hdr = if hdr_observed {
+            coverage.file.hdr.clone()
+        } else {
+            coverage.file.hdr.clone().or(quality.hdr)
+        };
         quality.confidence = coverage.file.confidence;
         Ok(quality)
     }

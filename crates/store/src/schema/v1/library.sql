@@ -1,4 +1,4 @@
--- library.db layout v3 (one-shot DDL optimization).
+-- library.db layout v6 (measured file cleanup and operation-retention indexes).
 --
 -- A DDL change *is* a layout change: this file and `LIBRARY_USER_VERSION` in
 -- `schema/layout.rs` move together, and an older file is refused and rebuilt
@@ -101,7 +101,8 @@ CREATE TABLE library_files (
  size_bytes INTEGER CHECK(size_bytes IS NULL OR size_bytes>=0), stat_known INTEGER NOT NULL DEFAULT 0,
  mtime_ns INTEGER, created_ns INTEGER, source_digest TEXT, missing_at INTEGER,
  source_path TEXT, transfer_mode TEXT CHECK(transfer_mode IS NULL OR transfer_mode IN ('hardlink','copy','move')),
- resolution TEXT, codec TEXT, hdr TEXT, quality_source TEXT NOT NULL CHECK(quality_source IN ('probe','release')),
+ resolution TEXT, codec TEXT, hdr TEXT, hdr_observed INTEGER NOT NULL DEFAULT 0 CHECK(hdr_observed IN (0,1)),
+ quality_source TEXT NOT NULL CHECK(quality_source IN ('probe','release')),
  confidence TEXT NOT NULL CHECK(confidence IN ('high','low')), filter_score INTEGER, release_quality TEXT,
  duration_ms INTEGER CHECK(duration_ms IS NULL OR duration_ms>=0), tracks_version INTEGER NOT NULL DEFAULT 0,
  poster_path TEXT, backdrop_path TEXT, still_path TEXT,
@@ -481,3 +482,14 @@ CREATE TABLE fingerprint_model_members (model_id TEXT NOT NULL REFERENCES finger
 CREATE INDEX model_file ON fingerprint_model_members(file_id);
 CREATE TABLE fingerprint_attempts (attempt_id TEXT PRIMARY KEY NOT NULL,job_id TEXT NOT NULL,file_id TEXT NOT NULL,kind TEXT NOT NULL,window_start_ms INTEGER NOT NULL,window_end_ms INTEGER NOT NULL,phase TEXT NOT NULL,started_at_ms INTEGER NOT NULL,finished_at_ms INTEGER,status TEXT NOT NULL,error_kind TEXT,metrics_json TEXT NOT NULL);
 CREATE INDEX attempt_job_file ON fingerprint_attempts(job_id,file_id);
+
+-- File cleanup and reassignment must seek one file instead of scanning all history.
+CREATE INDEX attempts_file ON fingerprint_attempts(file_id);
+CREATE INDEX session_ids_live_file ON playback_session_ids(file_id) WHERE state <> 'closed';
+-- Terminal predicates match the owning state machines; live/retryable work stays outside.
+CREATE INDEX media_operations_terminal_age ON media_operations(updated_at_ms,operation_id)
+ WHERE state = 'succeeded';
+CREATE INDEX library_operations_terminal_age ON library_operations(updated_at_ms,operation_id)
+ WHERE state = 'succeeded' OR (state = 'failed' AND kind NOT IN ('roots','locale','integrity','default_locale'));
+CREATE INDEX scan_operations_terminal_age ON scan_operations(created_at_ms,id)
+ WHERE status IN ('completed','partial','cancelled','failed');

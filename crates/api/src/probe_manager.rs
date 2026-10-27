@@ -18,16 +18,18 @@ use marker::{ChromaprintEngine, FingerprintEngine};
 use crate::Store;
 
 pub(crate) use projection::{
-    coverage_for_ledger_id, ledger_id, projected_episode, projected_season, projected_season_opt,
+    coverage_for_ledger_id, covers_season, ledger_id, require_episode_coordinates,
+    require_single_unit, single_episode, single_season, single_season_opt,
 };
 #[cfg(test)]
-pub(crate) use projection::{projected_episode_opt, synthetic_coverage};
+pub(crate) use projection::{single_episode_opt, synthetic_coverage};
 
 pub mod clock;
 mod dispatch;
 mod marker_jobs;
 mod markers;
 pub mod policy;
+mod presence;
 mod probe;
 pub mod progress;
 mod projection;
@@ -41,6 +43,7 @@ pub mod stages;
 pub(crate) mod timings;
 mod tracks;
 mod worker;
+mod store_lease;
 pub use tracks::TracksProbe;
 
 #[cfg(test)]
@@ -73,6 +76,9 @@ pub(crate) enum ProbeEnqueueError {
 
 pub struct ProbeManager {
     store: Arc<Mutex<Store>>,
+    store_key: std::path::PathBuf,
+    store_lease: Mutex<Option<store_lease::Lease>>,
+    recovery_deferred: AtomicBool,
     library_work: Mutex<Option<Arc<crate::library_lifecycle::LibraryWorkRegistry>>>,
     chapter_frames: Mutex<Option<Arc<crate::chapter_frame_service::ChapterFrameService>>>,
     fingerprint_engine: Arc<dyn FingerprintEngine>,
@@ -89,6 +95,8 @@ pub struct ProbeManager {
     pub(crate) metadata_idle_generation: AtomicUsize,
     pub(crate) timings: timings::ProbeTimingLedger,
     metadata_rx: Mutex<Option<mpsc::Receiver<store::ProbeDispatchId>>>,
+    metadata_receiver: tokio::sync::Mutex<()>,
+    dispatch_work: crate::blocking_budget::BlockingBudget,
     fingerprint_rx: Mutex<Option<mpsc::Receiver<(store::ProbeDispatchId, probe::FingerprintWork)>>>,
     pub(crate) recovered_marker_refreshes: Mutex<Vec<(crate::store::ProbeJob, ProbeUnit)>>,
     clock: Mutex<Arc<dyn clock::ProbeClock>>,
@@ -97,7 +105,10 @@ pub struct ProbeManager {
     /// that are not on the selected page.
     pub assessments: AtomicUsize,
     workers_started: AtomicBool,
-    shutting_down: AtomicBool,
+    shutting_down: Arc<AtomicBool>,
+    shutdown_signal: tokio::sync::watch::Sender<bool>,
+    shutdown_lock: tokio::sync::Mutex<()>,
+    shutdown_drain: Mutex<Option<tokio::sync::watch::Receiver<bool>>>,
     workers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     wake: Notify,
 }
@@ -124,8 +135,16 @@ impl ProbeManager {
         capture_engine: Arc<dyn FingerprintCaptureEngine>,
     ) -> Self {
         let channels = dispatch::channels();
+        let (shutdown_signal, _) = tokio::sync::watch::channel(false);
+        let store_key = {
+            let store = store.lock();
+            std::fs::canonicalize(store.data_dir()).unwrap_or_else(|_| store.data_dir().to_path_buf())
+        };
         let manager = Self {
             store,
+            store_key,
+            store_lease: Mutex::new(None),
+            recovery_deferred: AtomicBool::new(false),
             library_work: Mutex::new(None),
             chapter_frames: Mutex::new(None),
             fingerprint_engine,
@@ -141,17 +160,24 @@ impl ProbeManager {
             metadata_idle_generation: AtomicUsize::new(0),
             timings: timings::ProbeTimingLedger::default(),
             metadata_rx: Mutex::new(Some(channels.metadata_rx)),
+            metadata_receiver: tokio::sync::Mutex::new(()),
+            dispatch_work: crate::blocking_budget::BlockingBudget::new(12),
             fingerprint_rx: Mutex::new(Some(channels.fingerprint_rx)),
             recovered_marker_refreshes: Mutex::new(Vec::new()),
             clock: Mutex::new(Arc::new(clock::SystemClock)),
             comparison_runs: std::sync::atomic::AtomicUsize::new(0),
             assessments: AtomicUsize::new(0),
             workers_started: AtomicBool::new(false),
-            shutting_down: AtomicBool::new(false),
+            shutting_down: Arc::new(AtomicBool::new(false)),
+            shutdown_signal,
+            shutdown_lock: tokio::sync::Mutex::new(()),
+            shutdown_drain: Mutex::new(None),
             workers: Mutex::new(Vec::new()),
             wake: Notify::new(),
         };
-        manager.recover_pending_jobs();
+        if !store_lease::recover_if_idle(&manager) {
+            manager.recovery_deferred.store(true, Ordering::SeqCst);
+        }
         manager
     }
 
@@ -521,16 +547,6 @@ impl ProbeManager {
         }
     }
 
-    fn finish_persisted_unit(&self, unit: &ProbeUnit, succeeded: bool) {
-        let status = if succeeded { "succeeded" } else { "failed" };
-        self.finish_persisted_unit_with_status(
-            unit,
-            status,
-            None,
-            (!succeeded).then_some("探测单元执行失败"),
-        );
-    }
-
     pub(crate) fn finish_persisted_unit_with_status(
         &self,
         unit: &ProbeUnit,
@@ -562,7 +578,7 @@ impl ProbeManager {
             job_id = %job.id,
             media_id = %job.media_id,
             season = job.season.unwrap_or(1),
-            episode = projected_episode(&unit.row),
+            episode = ?single_episode(&unit.row),
             completed = job.completed,
             total = job.total,
             status,
@@ -647,7 +663,7 @@ impl ProbeManager {
             &job_id,
             kind,
             &unit.row.file.media_id.to_string(),
-            projected_season_opt(&unit.row),
+            single_season_opt(&unit.row),
             &scope,
             &[spec],
         ) {
@@ -692,7 +708,6 @@ mod tests {
     use super::probe::fingerprint_duration;
     use super::*;
     use domain::{LedgerId, MediaId};
-    
 
     mod queue {
         use super::*;
@@ -707,6 +722,7 @@ mod tests {
     mod marker_refresh_lifecycle {
         use super::*;
         include!("probe_manager/marker_refresh_lifecycle_tests.rs");
+        include!("probe_manager/marker_refresh_cross_library_tests.rs");
         include!("probe_manager/marker_refresh_lifecycle_worker_tests.rs");
     }
 

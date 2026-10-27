@@ -85,7 +85,7 @@ fn subscribe_v2_fresh_open_and_reopen_are_idempotent() {
         assert_eq!(actual["subscribe"], 2);
         assert_eq!(actual["app"], 1);
         assert_eq!(actual["cache"], 1);
-        assert_eq!(actual["library"], 5);
+        assert_eq!(actual["library"], 6);
     }
 }
 
@@ -317,7 +317,7 @@ fn opening_library_v1_is_rejected_before_other_files_change() {
     let message = error.to_string();
     for required in [
         "library",
-        "user_version 5",
+        "user_version 6",
         "preserve",
         "CRAWLER_MEDIA_DATA",
         "docs/deploy.md",
@@ -374,7 +374,7 @@ fn index_layout_is_strict_in_both_directions() {
         let message = error.to_string();
         for required in [
             named,
-            "user_version 5",
+            "user_version 6",
             "scripts/storage-cutover-rebuild.sh",
         ] {
             assert!(

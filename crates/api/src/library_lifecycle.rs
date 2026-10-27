@@ -222,6 +222,38 @@ impl LibraryWorkRegistry {
             control,
         })
     }
+    pub(crate) fn acquire_bounded(
+        self: &Arc<Self>,
+        store: &Mutex<store::Store>,
+        library_id: &str,
+    ) -> Result<LibraryWorkLease, String> {
+        let mut entries = self
+            .entries
+            .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
+            .ok_or_else(|| "Library Registry busy".to_string())?;
+        let entry = entries.entry(library_id.to_string()).or_default();
+        if entry.blocked_by.is_some() {
+            return Err("Library 正在重建索引，暂时拒绝新的工作".into());
+        }
+        if entry.cancelled
+            || !store
+                .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
+                .ok_or_else(|| "Library Store busy".to_string())?
+                .library_accepts_work(library_id)
+                .map_err(|e| e.to_string())?
+        {
+            return Err("Library 正在删除或已不存在".into());
+        }
+        let lease_id = uuid::Uuid::new_v4().to_string();
+        let control = library::WorkControl::default();
+        entry.controls.insert(lease_id.clone(), control.clone());
+        Ok(LibraryWorkLease {
+            registry: self.clone(),
+            library_id: library_id.into(),
+            lease_id,
+            control,
+        })
+    }
     pub fn freeze(
         &self,
         store: &Mutex<store::Store>,
@@ -256,7 +288,10 @@ impl LibraryWorkRegistry {
         library_id: &str,
         operation_id: &str,
     ) -> Result<LibraryWorkLease, String> {
-        let mut entries = self.entries.lock();
+        let mut entries = self
+            .entries
+            .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
+            .ok_or_else(|| "Registry busy while acquiring reconfiguration work".to_string())?;
         let entry = entries.entry(library_id.to_string()).or_default();
         if entry.cancelled {
             return Err("Library work cancelled".into());
@@ -265,7 +300,8 @@ impl LibraryWorkRegistry {
             return Err(format!("Library 未被重配置操作 {operation_id} 冻结"));
         }
         if !store
-            .lock()
+            .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
+            .ok_or_else(|| "Store busy while acquiring reconfiguration work".to_string())?
             .library_accepts_work(library_id)
             .map_err(|e| e.to_string())?
         {
@@ -357,15 +393,18 @@ impl LibraryWorkRegistry {
             let notified = self.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            let idle = self
-                .entries
-                .lock()
-                .get(library_id)
-                .is_none_or(|entry| entry.controls.is_empty());
-            if idle {
-                return;
+            // A Registry writer may be waiting for Store in Registry -> Store
+            // order. Do not queue an executor thread behind that writer.
+            let idle = self.entries.try_lock().map(|entries| {
+                entries
+                    .get(library_id)
+                    .is_none_or(|entry| entry.controls.is_empty())
+            });
+            match idle {
+                Some(true) => return,
+                Some(false) => notified.await,
+                None => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
             }
-            notified.await;
         }
     }
 }

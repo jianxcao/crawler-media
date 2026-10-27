@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use domain::{
-    Confidence, FilePresence, FilePublication, FileVersion, LibraryFile,
-    LibraryId, MediaId, MediaKind, QualitySource, UnitKey,
+    Confidence, FilePresence, FilePublication, FileVersion, LibraryFile, LibraryId, MediaId,
+    MediaKind, QualitySource, UnitKey,
 };
 use store::Store;
 use store::library_write::{FilePublication as StorePublication, WriteScope};
@@ -165,7 +165,8 @@ fn unnumbered_tv_file_does_not_create_subscription_coverage() {
     };
 
     let facts = store
-        .load_library_subscribe_facts(&subscribe, MediaKind::Tv)
+        .subscribe_library_snapshot(&subscribe, MediaKind::Tv)
+        .and_then(|snapshot| store::resolve_subscribe_facts(&snapshot)?.evaluate(&|_| true))
         .unwrap();
     assert!(facts.entries().next().is_none());
     assert!(store.get_file_units(file.file_id).unwrap().is_empty());

@@ -10,6 +10,38 @@ use super::harness::*;
 const E01: &str = "The.Long.Watch.S01E01.1080p.WEB-DL.x264-GRP";
 const E01_ALT: &str = "The.Long.Watch.S01E01.1080p.WEB-DL.x264-ALT";
 
+#[tokio::test]
+async fn manual_submit_does_not_deliver_when_library_facts_cannot_be_read() {
+    let h = Harness::new();
+    let window = json!({ "kind": "tv", "season": 1, "episode_from": 1, "episode_to": 2 });
+    let id = tv_subscribe(&h, window, json!({})).await;
+    let library_db = h
+        .state
+        .store()
+        .lock()
+        .db_paths()
+        .into_iter()
+        .find(|path| path.ends_with("library.db"))
+        .unwrap();
+    rusqlite::Connection::open(library_db)
+        .unwrap()
+        .execute_batch("DROP TABLE library_roots")
+        .unwrap();
+
+    let (status, _) = submit(
+        &h,
+        json!({
+            "title": E01_ALT,
+            "download_url": "https://pt.example/alt.torrent",
+            "subscribe_id": id.to_string()
+        }),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(h.qb.add_count(), 0);
+    assert!(h.pending(id).is_empty());
+}
+
 async fn submit(h: &Harness, body: Value) -> (axum::http::StatusCode, ()) {
     let response = tower::ServiceExt::oneshot(
         h.app.clone(),

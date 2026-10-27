@@ -74,7 +74,8 @@ fn full_samples_from_nonseeds_discover_the_common_intro() {
         1,
         known_intro,
         Vec::new(),
-    );
+    )
+    .unwrap();
     let replacement = run(&f);
     let intro_count = replacement
         .markers
@@ -123,12 +124,14 @@ fn unlocked_timeline_uses_the_known_media_duration() {
         .lock()
         .complete_marker_refresh("review9-job", &[replacement])
         .unwrap();
-    let chapters = f
-        .store
-        .lock()
-        .get_cached_chapters(&f.units[0].row.file.file_id.to_string())
-        .unwrap()
-        .unwrap();
+    let chapters =
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(marker_timeline::resolved_chapters(
+                f.store.clone(),
+                f._tmp.path(),
+                &f.units[0].row,
+            ));
     let feature = chapters
         .iter()
         .find(|chapter| chapter.title.as_deref() == Some("正片"))
@@ -139,7 +142,7 @@ fn unlocked_timeline_uses_the_known_media_duration() {
     );
     assert_eq!(
         feature.end_ms, 1_000_000,
-        "unlocked chapter cache must end at known media duration"
+        "resolved chapter timeline must end at known media duration"
     );
 }
 
@@ -226,7 +229,8 @@ fn another_common_variant_is_discovered_after_full_fallbacks() {
         1,
         known_intro,
         Vec::new(),
-    );
+    )
+    .unwrap();
     let replacement = run(&f);
     let intro_episodes: Vec<_> = replacement
         .markers

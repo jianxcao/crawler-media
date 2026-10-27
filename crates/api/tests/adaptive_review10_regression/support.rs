@@ -391,7 +391,7 @@ fn seed_probe(store: &Store, row: &FileCoverage, duration_ms: Option<i64>) {
         tracks_version: api::store::library_write::probe::CURRENT_TRACKS_VERSION,
         resolution: resolution.as_deref(),
         codec: codec.as_deref(),
-        hdr: hdr.as_deref(),
+        hdr: store::library_write::probe::Observed::Value(hdr.as_deref()),
         duration_ms,
         details: Some(&details),
     };

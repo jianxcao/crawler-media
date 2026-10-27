@@ -356,7 +356,6 @@ export type LibraryAccessMode = "everyone" | "selected";
 export interface LibraryPayload {
   name: string;
   kind: LibraryKind;
-  source?: "tmdb" | "local";
   root_paths: string[];
   generate_thumbnails?: boolean;
   extract_chapter_images?: boolean;
@@ -369,9 +368,7 @@ export interface LibraryPayload {
   enable_fingerprint?: boolean;
   match_rules?: MatchRule[];
   default_filter_id?: string | null;
-  auto_clear_missing?: boolean;
   realtime_watch?: boolean;
-  scrape_overrides?: Record<string, unknown>;
 }
 
 /**

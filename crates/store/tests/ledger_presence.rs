@@ -575,3 +575,79 @@ fn prune_rolls_back_whole_batch_on_derived_error() {
     assert!(store.file_coverage_by_id(first.file_id).unwrap().is_some());
     assert!(store.file_coverage_by_id(second.file_id).unwrap().is_some());
 }
+
+#[test]
+fn old_generation_never_marks_or_prunes_republished_file() {
+    for mode in [LedgerPresenceMode::Verify, LedgerPresenceMode::Prune] {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("data")).unwrap();
+        let media_id = MediaId::new();
+        store.insert_media(&sample_media(media_id)).unwrap();
+        let (library, root_id) = create_library(&store, tmp.path());
+        let path = tmp.path().join("generation.mkv").display().to_string();
+        let file = publish_file(
+            &store,
+            &library,
+            &root_id,
+            media_id,
+            &path,
+            FilePublication::Published,
+            LedgerId::new(),
+        );
+        let old = store.file_coverage_by_id(file.file_id).unwrap().unwrap();
+        if mode == LedgerPresenceMode::Prune {
+            store
+                .apply_ledger_presence(
+                    &[observation(
+                        &store,
+                        old.clone(),
+                        None,
+                        ObservedPresence::Missing,
+                    )],
+                    LedgerPresenceMode::Verify,
+                    1000,
+                )
+                .unwrap();
+        }
+        let mut replacement = old.file.clone();
+        replacement.version.source_version = "v2".into();
+        store
+            .publish_files(
+                &WriteScope {
+                    library_id: replacement.library_id,
+                    config_revision: 0,
+                },
+                &[StorePublication {
+                    file: &replacement,
+                    units: &[UnitKey::WHOLE],
+                    expected_version: Some(&old.file.version),
+                    nfo_observation: None,
+                    probe_required: false,
+                }],
+                2000,
+            )
+            .unwrap();
+        let result = store
+            .apply_ledger_presence(
+                &[observation(
+                    &store,
+                    old,
+                    if mode == LedgerPresenceMode::Prune {
+                        Some(1000)
+                    } else {
+                        None
+                    },
+                    ObservedPresence::Missing,
+                )],
+                mode,
+                3000,
+            )
+            .unwrap();
+        assert_eq!(result.skipped, 1);
+        assert!(result.applied.is_empty());
+        let current = store.file_coverage_by_id(file.file_id).unwrap().unwrap();
+        assert_eq!(current.file.version.source_version, "v2");
+        assert_eq!(current.file.presence, ObservedPresence::Present);
+        assert!(store.missing_at_by_path().unwrap().is_empty());
+    }
+}

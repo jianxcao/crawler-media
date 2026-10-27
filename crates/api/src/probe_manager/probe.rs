@@ -5,7 +5,7 @@ use std::time::Instant;
 use domain::MediaKind;
 use marker::FingerprintEngine;
 
-use super::{ProbeManager, ProbeUnit, projected_episode, projected_season};
+use super::{ProbeManager, ProbeUnit, single_episode, single_season};
 use crate::scrape_store::ScrapeStoreExt;
 
 fn now_ms() -> i64 {
@@ -28,17 +28,18 @@ pub(super) enum MetadataOutcome {
     Complete,
     Fingerprint(FingerprintWork),
     Failed,
+    Retry,
 }
 
 /// Finish mandatory media information before scheduling optional fingerprint work.
 pub(super) async fn probe_metadata(mgr: &ProbeManager, unit: &ProbeUnit) -> MetadataOutcome {
     let started_at = Instant::now();
-    let job_id = mgr.active_probe_job_id(&unit.row.file.file_id.to_string());
+    let job_id = unit.job_id.clone();
     tracing::info!(
         job_id = ?job_id,
         media_id = %unit.row.file.media_id,
-        season = projected_season(&unit.row),
-        episode = projected_episode(&unit.row),
+        season = ?single_season(&unit.row),
+        episode = ?single_episode(&unit.row),
         ledger_id = %unit.row.file.file_id,
         path = %unit.row.file.path.display(),
         "【媒体信息】高优先级探测开始"
@@ -47,14 +48,15 @@ pub(super) async fn probe_metadata(mgr: &ProbeManager, unit: &ProbeUnit) -> Meta
     tracing::info!(
         job_id = ?job_id,
         media_id = %unit.row.file.media_id,
-        season = projected_season(&unit.row),
-        episode = projected_episode(&unit.row),
+        season = ?single_season(&unit.row),
+        episode = ?single_episode(&unit.row),
         ledger_id = %unit.row.file.file_id,
         path = %unit.row.file.path.display(),
         result = match &outcome {
             MetadataOutcome::Complete => "complete",
             MetadataOutcome::Fingerprint(_) => "fingerprint_ready",
             MetadataOutcome::Failed => "failed",
+            MetadataOutcome::Retry => "retry",
         },
         elapsed_ms = started_at.elapsed().as_millis() as u64,
         "【媒体信息】高优先级探测结束"
@@ -64,21 +66,43 @@ pub(super) async fn probe_metadata(mgr: &ProbeManager, unit: &ProbeUnit) -> Meta
 
 async fn probe_metadata_inner(mgr: &ProbeManager, unit: &ProbeUnit) -> MetadataOutcome {
     let path = PathBuf::from(&unit.row.file.path);
-    let source_version = crate::fingerprint_job::current_source_version(&path);
+    let source_path = path.clone();
+    let source_version = match mgr
+        .dispatch_work
+        .run_to_completion(move || crate::fingerprint_job::current_source_version(&source_path))
+        .await
+    {
+        Ok(version) => version,
+        Err(error) => {
+            tracing::error!(%error, "媒体信息源版本读取失败");
+            return MetadataOutcome::Retry;
+        }
+    };
     let media_duration_ms =
         match super::tracks::probe_tracks_and_store(mgr, unit, &source_version).await {
             Ok(duration_ms) => duration_ms,
-            Err(()) => return MetadataOutcome::Failed,
+            Err(super::tracks::TrackProbeError::Failed) => return MetadataOutcome::Failed,
+            Err(super::tracks::TrackProbeError::Retry) => return MetadataOutcome::Retry,
         };
     if unit.kind != MediaKind::Tv {
         return MetadataOutcome::Complete;
     }
-    let Some(duration_secs) = fingerprint_duration(
-        mgr,
-        &unit.row.file.library_id.to_string(),
-        unit.kind,
-        unit.force_fingerprint,
-    ) else {
+    let library_id = unit.row.file.library_id.to_string();
+    let force = unit.force_fingerprint;
+    let duration = crate::http::store_wait::store_read_handle(
+        mgr.store.clone(),
+        crate::http::store_wait::STORE_READ_WAIT,
+        move |store| fingerprint_duration_for_store(store, &library_id, MediaKind::Tv, force),
+    )
+    .await;
+    let duration = match duration {
+        Ok(duration) => duration,
+        Err(error) => {
+            tracing::warn!(?error, "声纹配置读取繁忙，保留探测失败结果供重试");
+            return MetadataOutcome::Retry;
+        }
+    };
+    let Some(duration_secs) = duration else {
         tracing::info!(
             media_id = %unit.row.file.media_id,
             path = %path.display(),
@@ -113,8 +137,8 @@ pub(super) async fn probe_fingerprint_detailed(
     tracing::info!(
         job_id = ?job_id,
         media_id = %unit.row.file.media_id,
-        season = projected_season(&unit.row),
-        episode = projected_episode(&unit.row),
+        season = ?single_season(&unit.row),
+        episode = ?single_episode(&unit.row),
         ledger_id = %unit.row.file.file_id,
         path = %unit.row.file.path.display(),
         marker_refresh = unit.marker_refresh_id.is_some(),
@@ -122,6 +146,12 @@ pub(super) async fn probe_fingerprint_detailed(
         "【声纹】媒体信息已写库，进入低优先级声纹队列"
     );
     // Check if adaptive sampling mode is enabled for TV episodes
+    if let Err(error) = super::require_single_unit(&unit.row) {
+        return super::stages::FingerprintRunOutcome::Failed {
+            error_kind: "unit_time_mapping_unsupported".into(),
+            error: error.to_string(),
+        };
+    }
     let sampling_mode = {
         let store = mgr.store.lock();
         crate::scrape_store::ScrapeStoreExt::get_scrape_config(&*store)
@@ -130,17 +160,19 @@ pub(super) async fn probe_fingerprint_detailed(
             .unwrap_or_else(|| "full_window".to_string())
     };
 
-    if sampling_mode == "adaptive" && unit.kind == MediaKind::Tv
-        && let Some(result) = probe_adaptive_season(mgr, unit, started_at).await {
-            return if result {
-                super::stages::FingerprintRunOutcome::Complete
-            } else {
-                super::stages::FingerprintRunOutcome::Failed {
-                    error_kind: "adaptive_failure".into(),
-                    error: "Adaptive season failed".into(),
-                }
-            };
-        }
+    if sampling_mode == "adaptive"
+        && unit.kind == MediaKind::Tv
+        && let Some(result) = probe_adaptive_season(mgr, unit, started_at).await
+    {
+        return if result {
+            super::stages::FingerprintRunOutcome::Complete
+        } else {
+            super::stages::FingerprintRunOutcome::Failed {
+                error_kind: "adaptive_failure".into(),
+                error: "Adaptive season failed".into(),
+            }
+        };
+    }
 
     let path = PathBuf::from(&unit.row.file.path);
     let mut outcome = probe_fingerprint_and_store_detailed(
@@ -230,20 +262,22 @@ async fn probe_adaptive_season(
         tracing::info!(
             job_id = ?job_id,
             media_id = %unit.row.file.media_id,
-            season = projected_season(&unit.row),
-            episode = projected_episode(&unit.row),
+            season = ?single_season(&unit.row),
+            episode = ?single_episode(&unit.row),
             ledger_id = %unit.row.file.file_id,
             "【自适应声纹】刷新任务由整季管道统一执行，单集单元跳过重复的旧全量采集"
         );
         return Some(true);
     }
 
-    let season = projected_season(&unit.row);
+    let season = super::require_episode_coordinates(&unit.row).ok()?.0;
     let season_units: Vec<ProbeUnit> = {
         let store = mgr.store.lock();
         let rows = store.list_file_coverage().unwrap_or_default();
         rows.into_iter()
-            .filter(|r| r.file.media_id == unit.row.file.media_id && projected_season(r) == season)
+            .filter(|r| {
+                r.file.media_id == unit.row.file.media_id && super::covers_season(r, season)
+            })
             .map(|r| {
                 let mut u = unit.clone();
                 u.row = r;
@@ -282,6 +316,7 @@ async fn probe_adaptive_season(
                 let members = super::markers::source_observations(&rows);
                 let publication = members.and_then(|members| {
                     let store = mgr.store.lock();
+                    super::markers::validate_active_unit(&store, unit)?;
                     super::markers::validate_season_rows(&store, &rows).and_then(|()| {
                         store.replace_marker_results_batch_checked(&[replacement], &members)
                     })
@@ -323,13 +358,23 @@ async fn probe_adaptive_season(
     None
 }
 
+#[cfg(test)]
 pub(super) fn fingerprint_duration(
     mgr: &ProbeManager,
     library_id: &str,
     kind: MediaKind,
     force_fingerprint: bool,
 ) -> Option<u32> {
-    let store = mgr.store.lock();
+    let store = mgr.dispatch_store()?;
+    fingerprint_duration_for_store(&store, library_id, kind, force_fingerprint)
+}
+
+fn fingerprint_duration_for_store(
+    store: &crate::Store,
+    library_id: &str,
+    kind: MediaKind,
+    force_fingerprint: bool,
+) -> Option<u32> {
     let configured = store
         .get_library(library_id)
         .ok()
@@ -382,8 +427,8 @@ pub(super) async fn probe_fingerprint_and_store_detailed(
                 %error,
                 ledger_id,
                 media_id = %unit.row.file.media_id,
-                season = projected_season(&unit.row),
-                episode = projected_episode(&unit.row),
+                season = ?single_season(&unit.row),
+                episode = ?single_episode(&unit.row),
                 path = %fp_path.display(),
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "【声纹】音频指纹采集失败"
@@ -397,6 +442,7 @@ pub(super) async fn probe_fingerprint_and_store_detailed(
     let publication =
         super::markers::observe_rows(std::slice::from_ref(&unit.row)).and_then(|()| {
             let store = mgr.store.lock();
+            super::markers::validate_active_unit(&store, unit)?;
             super::markers::validate_publication_rows(&store, std::slice::from_ref(&unit.row))
                 .and_then(|()| {
                     store.put_fingerprint_cache_checked(
@@ -490,7 +536,11 @@ pub(super) fn publish_probe_tracks(
         tracks_version: store::library_write::probe::CURRENT_TRACKS_VERSION,
         resolution: resolution.as_deref(),
         codec: codec.as_deref(),
-        hdr: hdr.as_deref(),
+        hdr: if tracks.video.is_some() {
+            store::library_write::probe::Observed::Value(hdr.as_deref())
+        } else {
+            store::library_write::probe::Observed::NotObserved
+        },
         duration_ms,
         details: Some(&details),
     };

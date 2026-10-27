@@ -9,7 +9,7 @@ use marker::adaptive::{
 };
 use marker::fingerprint::capture_types::SampleWindow;
 
-use crate::fingerprint_job::episode_or_one;
+use crate::fingerprint_job::episode_number;
 pub use analysis::analyze_and_verify_segment;
 pub use cache::{find_reusable_sample, stored_sample_to_evidence};
 pub use capture::capture_or_reuse_segment_sample;
@@ -36,7 +36,7 @@ pub async fn capture_episode_adaptive(
 
     let descriptor = EpisodeDescriptor {
         ledger_id: request.row.file.file_id.to_string(),
-        episode: episode_or_one(&request.row),
+        episode: episode_number(&request.row)?,
         source_version: request.source_version.clone(),
         duration_ms: request.media_duration_ms.unwrap_or(0),
     };
@@ -67,7 +67,7 @@ pub async fn capture_episode_adaptive(
 
     Ok(EpisodeDetection {
         ledger_id: request.row.file.file_id.to_string(),
-        episode: episode_or_one(&request.row),
+        episode: episode_number(&request.row)?,
         intro_evidence,
         outro_evidence,
         intro_match,

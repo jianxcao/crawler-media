@@ -4,8 +4,7 @@
 //! Media identity state before writing, then reduces the affected summaries in the same
 //! transaction. Callers never refresh a card themselves.
 
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::collections::HashMap;
 
 use domain::{FileVersion, LedgerId, LibraryId, MediaId, MediaKind};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -13,7 +12,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use super::super::files::LibraryItemSummary;
 use super::super::{Store, StoreError};
 use super::publish_batch::{PendingChange, item_card_exists, reduce_publication_batch};
-use super::reduce::{reduce_library_media, reduce_media_everywhere};
+use super::reduce::reduce_media_everywhere;
 use super::reduce_incremental::{read_file_summary_facts, read_file_units};
 use super::{FilePublication, PublishReport, WriteScope};
 
@@ -44,7 +43,13 @@ impl Store {
         now_ms: i64,
         validate: impl FnOnce(&Connection) -> Result<(), StoreError>,
     ) -> Result<PublishReport, StoreError> {
-        self.publish_files_counted(scope, files, now_ms, validate, &mut PublicationCounters::default())
+        self.publish_files_counted(
+            scope,
+            files,
+            now_ms,
+            validate,
+            &mut PublicationCounters::default(),
+        )
     }
 
     /// Measured publication: the same path, plus deterministic work counters.
@@ -164,110 +169,6 @@ impl Store {
                     r.get(0)
                 })?;
         Ok(count as usize)
-    }
-
-    /// Apply presence observations (verify or prune) and reduce the affected summaries.
-    pub fn apply_presence(
-        &self,
-        scope: &WriteScope,
-        observations: &[super::PresenceObservation],
-        mode: super::PresenceMode,
-        now_ms: i64,
-    ) -> Result<super::PresenceReport, StoreError> {
-        let tx = crate::write_tx(&self.library)?;
-        ensure_library_writable(&tx, &scope.library_id.to_string())?;
-        ensure_config_revision(&tx, scope)?;
-        let mut report = super::PresenceReport::default();
-        let mut affected: HashSet<MediaId> = HashSet::new();
-
-        for obs in observations {
-            let file_id_str = obs.file_id.to_string();
-            let existing: Option<(String, String, i64, String, String, String)> = tx
-                .query_row(
-                    "SELECT f.media_id, f.presence_state, f.file_revision, f.source_version,
-                            f.path_key, r.path_key
-                     FROM library_files f JOIN library_roots r ON r.root_id = f.root_id
-                     WHERE f.file_id = ?1 AND f.library_id = ?2",
-                    params![file_id_str, scope.library_id.to_string()],
-                    |r| {
-                        Ok((
-                            r.get(0)?,
-                            r.get(1)?,
-                            r.get(2)?,
-                            r.get(3)?,
-                            r.get(4)?,
-                            r.get(5)?,
-                        ))
-                    },
-                )
-                .optional()?;
-
-            let Some((media_id_str, current_state, cur_rev, cur_src_ver, cur_path, root_key)) =
-                existing
-            else {
-                report.skipped += 1;
-                continue;
-            };
-
-            if obs.observed_version.revision != cur_rev
-                || obs.observed_version.source_version != cur_src_ver
-                || crate::path_key::normalize_path_key(
-                    &Path::new(&root_key)
-                        .join(&obs.observed_path)
-                        .to_string_lossy(),
-                ) != cur_path
-            {
-                report.skipped += 1;
-                continue;
-            }
-            let media_id = media_id_str.parse::<MediaId>()?;
-            crate::library_operations::integrity_guard::ensure_media_integrity_writable(
-                &tx, media_id,
-            )?;
-            match mode {
-                super::PresenceMode::Verify => {
-                    if current_state != obs.presence.as_str() {
-                        let missing_at = if obs.presence == domain::FilePresence::Missing {
-                            Some(now_ms)
-                        } else {
-                            None
-                        };
-                        tx.execute(
-                            "UPDATE library_files
-                             SET presence_state = ?1, missing_at = ?2
-                             WHERE file_id = ?3",
-                            params![obs.presence.as_str(), missing_at, file_id_str],
-                        )?;
-                        if obs.presence == domain::FilePresence::Missing {
-                            report.missing += 1;
-                        } else if obs.presence == domain::FilePresence::Present {
-                            report.restored += 1;
-                        }
-                        affected.insert(media_id);
-                    } else {
-                        report.skipped += 1;
-                    }
-                }
-                super::PresenceMode::Prune => {
-                    if obs.presence == domain::FilePresence::Missing {
-                        tx.execute(
-                            "DELETE FROM library_files WHERE file_id = ?1",
-                            params![file_id_str],
-                        )?;
-                        report.deleted += 1;
-                        affected.insert(media_id);
-                    } else {
-                        report.skipped += 1;
-                    }
-                }
-            }
-        }
-
-        for media_id in affected {
-            reduce_library_media(&tx, scope.library_id, media_id)?;
-        }
-        tx.commit()?;
-        Ok(report)
     }
 
     /// Store cold file details (tracks/chapters/fingerprints) after a source-version check.

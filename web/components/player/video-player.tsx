@@ -788,15 +788,16 @@ export function VideoPlayer(props: VideoPlayerProps) {
   /** 冷缓存起播时，后台章节解析完成后更新进度条，不阻塞首帧。 */
   useEffect(() => {
     const session = state.session;
-    if (!session?.chapters_pending || !session.file_id || apiRef.current.progress !== "server") return;
+    if (!session?.chapters_pending || !session.file_id || !session.play_session_id || apiRef.current.progress !== "server") return;
     let active = true;
     let attempts = 0;
     let timer: number | null = null;
     const fileId = session.file_id;
+    const playSessionId = session.play_session_id;
     const poll = async () => {
       attempts += 1;
       try {
-        const result = await fetchPlaybackChapters(fileId, apiRef.current);
+        const result = await fetchPlaybackChapters(playSessionId, apiRef.current);
         if (!active) return;
         if (result.ready) {
           setChapterCache({ unitKey, fileId, chapters: result.chapters });

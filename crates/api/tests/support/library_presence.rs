@@ -47,6 +47,7 @@ pub struct MockLibraryFiles {
     /// 存在的理由：verify/prune 在「捕获 scope」与「发布屏障」之间会读一次根目录，
     /// 测试需要在那个窗口里注入 Library 生命周期变化，才能确定性地触发发布竞争。
     pub on_readable_root: Mutex<Option<RootReadHook>>,
+    pub on_presence: Mutex<Option<RootReadHook>>,
 }
 
 impl LibraryFileRead for MockLibraryFiles {
@@ -67,6 +68,9 @@ impl LibraryFileRead for MockLibraryFiles {
     }
 
     fn presence(&self, path: &Path) -> std::io::Result<bool> {
+        if let Some(hook) = self.on_presence.lock().as_ref() {
+            hook(path);
+        }
         let files = self.files.lock();
         if let Some(res) = files.get(path) {
             match res {

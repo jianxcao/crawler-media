@@ -13,8 +13,7 @@ impl ProbeManager {
                 self.metadata_idle_generation.fetch_add(1, Ordering::AcqRel);
                 self.metadata_idle.notify_waiters();
                 if !self.shutting_down.load(Ordering::SeqCst) {
-                    self.fill_dispatch_windows();
-                    self.wake.notify_waiters();
+                    self.wake.notify_one();
                 }
             }
             Ok(_) => {}

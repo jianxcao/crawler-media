@@ -3,7 +3,7 @@ use marker::fingerprint::capture_types::{CaptureMetrics, CapturedFingerprint, Sa
 use store::{FingerprintSampleQuery, Store, StoredFingerprintSample};
 
 use super::types::{CapturePolicy, EpisodeCaptureRequest};
-use crate::fingerprint_job::episode_or_one;
+use crate::fingerprint_job::episode_number;
 
 pub fn find_reusable_sample(
     store: &Store,
@@ -37,7 +37,7 @@ pub fn find_reusable_sample(
 
     Some(stored_sample_to_evidence(
         &matched,
-        episode_or_one(&request.row),
+        episode_number(&request.row).ok()?,
         kind,
         request.media_duration_ms,
     ))

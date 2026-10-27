@@ -279,22 +279,17 @@ fn multi_season_refresh_keeps_old_results_on_failure_and_completes_atomically() 
 }
 
 #[test]
-fn locked_marker_preserves_and_syncs_chapters_across_file_versions() {
+fn locked_marker_preserves_physical_chapters_across_file_versions() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let (media_id, file_ids) = seed_locked_versions(&store, dir.path());
 
-    let intro_from_cache = |id: &str| -> Option<Vec<(i64, i64)>> {
-        store.get_cached_chapters(id).unwrap().map(|c| {
-            c.into_iter()
-                .filter(|c| c.marker_type == Some(library::MarkerType::IntroStart))
-                .map(|c| (c.start_ms, c.end_ms))
-                .collect()
-        })
-    };
+    let original_chapters: Vec<_> = file_ids
+        .iter()
+        .map(|id| store.get_cached_chapters(&id.to_string()).unwrap())
+        .collect();
 
-    // When detected replacement arrives with 40s..100s, locked marker is preserved
-    // and all versions are synchronized to locked marker (10s..70s).
+    // A detected replacement must preserve both the locked marker and physical chapters.
     let detected_marker = StoredMediaMarker {
         media_id,
         season: 1,
@@ -326,14 +321,14 @@ fn locked_marker_preserves_and_syncs_chapters_across_file_versions() {
         .unwrap();
     assert_eq!(cur_marker.intro_start_ms, Some(10_000));
     assert_eq!(cur_marker.intro_end_ms, Some(70_000));
-    for id in &file_ids {
+    for (id, original) in file_ids.iter().zip(&original_chapters) {
         assert_eq!(
-            intro_from_cache(&id.to_string()),
-            Some(vec![(10_000, 70_000)])
+            store.get_cached_chapters(&id.to_string()).unwrap(),
+            *original
         );
     }
 
-    // When empty replacements arrive, locked marker and chapters still remain 10s..70s.
+    // An empty replacement likewise leaves the locked marker and physical chapters intact.
     let empty_updates: Vec<_> = file_ids
         .iter()
         .map(|id| (id.to_string(), Vec::new()))
@@ -348,10 +343,10 @@ fn locked_marker_preserves_and_syncs_chapters_across_file_versions() {
         .unwrap();
     assert_eq!(cur_marker.intro_start_ms, Some(10_000));
     assert_eq!(cur_marker.intro_end_ms, Some(70_000));
-    for id in &file_ids {
+    for (id, original) in file_ids.iter().zip(&original_chapters) {
         assert_eq!(
-            intro_from_cache(&id.to_string()),
-            Some(vec![(10_000, 70_000)])
+            store.get_cached_chapters(&id.to_string()).unwrap(),
+            *original
         );
     }
 }
@@ -476,21 +471,18 @@ fn seed_locked_versions(store: &Store, root: &std::path::Path) -> (MediaId, Vec<
         updated_at: 1,
     };
     store.put_media_marker(&locked_marker).unwrap();
-    store
-        .put_cached_chapters(
-            &file_ids[0].to_string(),
-            &library::build_complete_timeline_chapters(&[], Some((10_000, 70_000)), None, None),
-        )
-        .unwrap();
-    store
-        .put_cached_chapters(
-            &file_ids[1].to_string(),
-            &library::build_complete_timeline_chapters(&[], Some((20_000, 80_000)), None, None),
-        )
-        .unwrap();
-    store
-        .put_cached_chapters(&file_ids[2].to_string(), &[])
-        .unwrap();
+    for (index, file_id) in file_ids.iter().enumerate() {
+        let chapters = vec![library::ChapterMarker {
+            start_ms: (index as i64 + 1) * 100_000,
+            end_ms: (index as i64 + 1) * 100_000 + 30_000,
+            title: Some("Scene".into()),
+            marker_type: None,
+            synthetic: false,
+        }];
+        store
+            .put_cached_chapters(&file_id.to_string(), &chapters)
+            .unwrap();
+    }
 
     (fixture.media_id, file_ids)
 }

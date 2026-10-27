@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use domain::MediaKind;
 
-use super::{ProbeEnqueueError, ProbeManager, ProbeUnit, marker_refresh_scope, projected_season};
+use super::{ProbeEnqueueError, ProbeManager, ProbeUnit, marker_refresh_scope, single_season};
 
 impl ProbeManager {
     /// Force a complete season refresh while leaving its current markers and
@@ -19,11 +19,14 @@ impl ProbeManager {
             return 0;
         };
         let media_id = first.row.file.media_id;
-        let season = projected_season(&first.row);
-        if units
-            .iter()
-            .any(|unit| unit.row.file.media_id != media_id || projected_season(&unit.row) != season)
-        {
+        let Ok((season, _)) = super::require_episode_coordinates(&first.row) else {
+            return 0;
+        };
+        if units.iter().any(|unit| {
+            unit.row.file.media_id != media_id
+                || super::require_single_unit(&unit.row).is_err()
+                || single_season(&unit.row) != Some(season)
+        }) {
             tracing::error!(%media_id, season, "拒绝创建跨媒体或跨季的片头片尾刷新批次");
             return 0;
         }
@@ -110,6 +113,13 @@ impl ProbeManager {
         }
 
         let is_tv = kind == MediaKind::Tv;
+        if is_tv
+            && units
+                .iter()
+                .any(|unit| super::require_single_unit(&unit.row).is_err())
+        {
+            return Err(ProbeEnqueueError::Persistence);
+        }
         let job_kind = if is_tv {
             "marker_refresh"
         } else {
@@ -122,9 +132,11 @@ impl ProbeManager {
         };
         let seasons = units
             .iter()
-            .map(|unit| projected_season(&unit.row))
+            .filter_map(|unit| single_season(&unit.row))
             .collect::<HashSet<_>>();
-        let season = (seasons.len() == 1).then(|| *seasons.iter().next().unwrap_or(&1));
+        let season = (seasons.len() == 1)
+            .then(|| seasons.iter().next().copied())
+            .flatten();
         let job_id = uuid::Uuid::new_v4().to_string();
         let ledger_ids = units
             .iter()

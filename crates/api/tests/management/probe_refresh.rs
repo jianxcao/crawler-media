@@ -183,7 +183,9 @@ async fn playback_session_returns_cached_chapters_without_reprobing_file() {
     assert_eq!(body["data"]["chapters_pending"], false);
     assert_eq!(body["data"]["file_id"], file_id.to_string());
 
-    let cache_url = format!("/api/v1/playback/chapters?file_id={}", file_id);
+    let session_id = body["data"]["play_session_id"].as_str().unwrap();
+    let cache_url =
+        format!("/api/v1/playback/chapters?play_session_id={session_id}&device_id=web-player");
     let response = app
         .clone()
         .oneshot(request(

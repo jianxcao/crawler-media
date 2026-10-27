@@ -27,6 +27,13 @@ impl Store {
             let file = &row.file;
             source_guard::check_observed(&tx, &file.file_id.to_string(), members)?;
             crate::library_write::publish_checked::validate_context(&tx, file, Some(file))?;
+            let mut expected_units = row.units.clone();
+            expected_units.sort_by_key(|unit| (unit.season, unit.episode));
+            if self.get_file_units(file.file_id)? != expected_units {
+                return Err(StoreError::Protected(
+                    "marker target coverage changed".into(),
+                ));
+            }
             ensure_library_writable(&tx, &file.library_id.to_string())?;
             ensure_media_writable(&tx, file.media_id)?;
             let owner = crate::library_key_owner::owning_root_key(&tx, &file.path, file.kind)?;
@@ -62,6 +69,11 @@ impl Store {
         self.put_media_marker(&marker)?;
         let mut updates = Vec::with_capacity(targets.len());
         for row in targets.iter().filter(|row| matches_target(row, &marker)) {
+            // File chapter caches contain physical chapters only for multiunit files.
+            // Unit marker overlays are composed at read time with explicit identity.
+            if row.units.len() != 1 {
+                continue;
+            }
             let id = row.file.file_id.to_string();
             let existing = self.get_cached_chapters(&id)?.unwrap_or_default();
             let intro = match (marker.intro_start_ms, marker.intro_end_ms) {
@@ -74,7 +86,6 @@ impl Store {
                 _ => None,
             };
             let chapters = library::build_complete_timeline_chapters(&existing, intro, outro, None);
-            self.put_cached_chapters(&id, &chapters)?;
             updates.push((id, chapters));
         }
         Ok(updates)
@@ -109,9 +120,13 @@ impl Store {
 }
 
 fn matches_target(row: &FileCoverage, marker: &StoredMediaMarker) -> bool {
-    // Comparison uses the first unit, with whole-work coordinates defaulting to 1.
-    let unit = row.units.first();
-    let season = unit.map_or(1, |unit| u32::try_from(unit.season).unwrap_or(1));
-    let episode = unit.map_or(1, |unit| u32::try_from(unit.episode).unwrap_or(1));
-    row.file.media_id == marker.media_id && season == marker.season && episode == marker.episode
+    row.file.media_id == marker.media_id
+        && row.units.iter().any(|unit| {
+            unit.episode_coordinates() == Some((marker.season, marker.episode))
+                || (row.file.kind == domain::MediaKind::Movie
+                    && row.units.len() == 1
+                    && unit.is_whole()
+                    && marker.season == 1
+                    && marker.episode == 1)
+        })
 }

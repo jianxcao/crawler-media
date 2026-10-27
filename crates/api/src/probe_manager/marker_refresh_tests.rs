@@ -96,8 +96,7 @@ fn season_refresh_keeps_old_markers_until_success_then_clears_empty_result() {
         .get_cached_chapters(&rows[0].file.file_id.to_string())
         .unwrap()
         .unwrap();
-    assert_eq!(chapters.len(), 2);
-    assert!(chapters.iter().all(|chapter| chapter.marker_type.is_none()));
+    assert_eq!(chapters, cached);
     assert_eq!(
         store
             .lock()
@@ -141,20 +140,6 @@ fn seed_old_refresh_result(
             end_ms: 600_000,
             title: Some("第二章".into()),
             marker_type: None,
-            synthetic: false,
-        },
-        marker::ChapterMarker {
-            start_ms: 111_000,
-            end_ms: 222_000,
-            title: Some("片头".into()),
-            marker_type: Some(marker::MarkerType::IntroStart),
-            synthetic: false,
-        },
-        marker::ChapterMarker {
-            start_ms: 1_000_000,
-            end_ms: 1_050_000,
-            title: Some("片尾".into()),
-            marker_type: Some(marker::MarkerType::CreditsStart),
             synthetic: false,
         },
     ];

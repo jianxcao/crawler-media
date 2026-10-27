@@ -176,3 +176,57 @@ async fn assert_read_response(uri: &str, response: axum::response::Response, exp
         );
     }
 }
+
+#[test]
+fn metadata_language_requests_leave_the_executor_responsive() {
+    for method in ["GET", "PATCH"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (state, _) = runtime.block_on(async { state_with_admin(tmp.path()) });
+        let app = router(state.clone());
+        let (locked, acquired) = std::sync::mpsc::channel();
+        let held = state.store();
+        let holder = std::thread::spawn(move || {
+            let _guard = held.lock();
+            locked.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(800));
+        });
+        acquired.recv_timeout(Duration::from_secs(2)).unwrap();
+        let mut req = request(
+            method,
+            "/api/v1/settings/metadata-language",
+            Some("executor-secret"),
+        );
+        if method == "PATCH" {
+            req.headers_mut()
+                .insert("content-type", "application/json".parse().unwrap());
+            *req.body_mut() = Body::from(r#"{"expected_revision":0,"language":"ja"}"#);
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let measured = std::thread::spawn(move || {
+            let elapsed = runtime.block_on(async {
+                let timer = async {
+                    let start = Instant::now();
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    start.elapsed()
+                };
+                let (elapsed, response) = tokio::join!(timer, app.oneshot(req));
+                assert!(response.unwrap().status().is_success());
+                elapsed
+            });
+            tx.send(elapsed).unwrap();
+        });
+        let elapsed = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("executor watchdog");
+        holder.join().unwrap();
+        measured.join().unwrap();
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "{method} parked timer for {elapsed:?}"
+        );
+    }
+}

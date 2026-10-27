@@ -42,6 +42,15 @@ impl Gate {
         self.state.lock().1 = true;
         self.changed.notify_all();
     }
+
+    fn wait(&self) {
+        let mut state = self.state.lock();
+        state.0 += 1;
+        self.changed.notify_all();
+        self.changed
+            .wait_while_for(&mut state, |state| !state.1, Duration::from_secs(30));
+        assert!(state.1, "test must release the probe capture gate");
+    }
 }
 
 struct GatedCapture {
@@ -71,6 +80,10 @@ impl FingerprintEngine for GatedCapture {
         _start_secs: u32,
         _duration_secs: u32,
     ) -> Result<AudioFingerprint, String> {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(active, Ordering::SeqCst);
+        self.gate.wait();
+        self.active.fetch_sub(1, Ordering::SeqCst);
         Ok(vec![1, 2, 3, 4])
     }
 
@@ -92,19 +105,7 @@ impl FingerprintCaptureEngine for GatedCapture {
     ) -> Result<CapturedFingerprint, CaptureFailure> {
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_active.fetch_max(active, Ordering::SeqCst);
-        {
-            let mut state = self.gate.state.lock();
-            state.0 += 1;
-            self.gate.changed.notify_all();
-            self.gate.changed.wait_while_for(
-                &mut state,
-                |state| !state.1,
-                std::time::Duration::from_secs(30),
-            );
-            let released = state.1;
-            drop(state);
-            assert!(released, "test must release the probe capture gate");
-        }
+        self.gate.wait();
         self.active.fetch_sub(1, Ordering::SeqCst);
         let duration_ms = request.window.duration_ms();
         Ok(CapturedFingerprint {
@@ -202,7 +203,7 @@ fn seed_backlog(store: &Store, real_ledger: &str) {
 }
 
 #[tokio::test]
-async fn full_fingerprint_window_does_not_lose_metadata_completion() {
+async fn bounded_windows_preserve_a_large_durable_backlog() {
     let temp = tempfile::tempdir().unwrap();
     let media_id = MediaId::new();
     let ledger_id = LedgerId::new();
@@ -264,6 +265,7 @@ async fn full_fingerprint_window_does_not_lose_metadata_completion() {
     let original = (METADATA_PENDING + FINGERPRINT_PENDING) as i64;
     let store = Arc::new(Mutex::new(Store::open(temp.path()).unwrap()));
     let gate = Gate::new();
+    gate.release();
     let capture = Arc::new(GatedCapture::new(gate.clone()));
     let manager = Arc::new(ProbeManager::with_engines(
         store.clone(),
@@ -294,6 +296,13 @@ async fn full_fingerprint_window_does_not_lose_metadata_completion() {
     );
 
     assert!(manager.try_start_workers());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while manager.worker_count() < 4 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("metadata and fingerprint workers must start");
     let workers_after_first = manager.worker_count();
     assert!(manager.try_start_workers());
     assert_eq!(
@@ -301,19 +310,6 @@ async fn full_fingerprint_window_does_not_lose_metadata_completion() {
         workers_after_first,
         "a second start in the same runtime must not add workers"
     );
-    assert!(
-        workers_after_first >= 2,
-        "metadata and fingerprint workers start"
-    );
-
-    // Fill the fingerprint window, then release it. A completed metadata unit
-    // must stay durable (queued for fingerprint, or terminal) — never dropped
-    // because the fingerprint channel was full.
-    let started = Instant::now();
-    while gate.entered() == 0 && started.elapsed() < Duration::from_secs(20) {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    gate.release();
     let drained = Instant::now();
     loop {
         let (pending, terminal) = durable_counts(&store.lock());
@@ -344,3 +340,6 @@ async fn full_fingerprint_window_does_not_lose_metadata_completion() {
         "shutdown drains the in-memory window"
     );
 }
+
+#[path = "probe_backlog_capacity/real_window.rs"]
+mod real_window;

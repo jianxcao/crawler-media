@@ -131,7 +131,7 @@ async fn late_worker_and_restart_cannot_revive_a_retired_context() {
         !late.unwrap(),
         "late worker of a retired context must not write"
     );
-    s.reopen();
+    s.reopen().await;
     s.set_time_ms(i64::MAX / 4);
     s.dispatch_due();
     assert!(

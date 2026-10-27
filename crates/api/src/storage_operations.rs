@@ -12,17 +12,11 @@
 //! held, and `block` / `release` never touch the Store.
 
 use std::str::FromStr;
-use std::time::Duration;
 
 use serde_json::Value;
 
 use crate::management::ApiState;
 use crate::store::{LibraryReconfiguration, StoreError, library_operations::LibraryOperationView};
-
-/// Media rows migrated per applied batch; the Store rejects anything outside 1..=100.
-const BATCH_MEDIA: usize = 100;
-/// How long in-flight Library work may take to stop before the driver stands aside.
-const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The Library fields a caller wants migrated. At least one must be set.
 #[derive(Debug, Clone, Default)]
@@ -38,6 +32,7 @@ pub struct ReconfigurationRequest {
 pub enum StorageOperationError {
     /// No such Library.
     MissingLibrary,
+    Busy,
     /// A persistent operation already owns this Library. `operation_id` is absent when
     /// only the Store barrier explains the freeze (the row outlived its operation).
     Reindexing {
@@ -52,6 +47,7 @@ impl std::fmt::Display for StorageOperationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::MissingLibrary => f.write_str("library not found"),
+            Self::Busy => f.write_str("Store busy; retry later"),
             Self::Reindexing { operation_id } => match operation_id {
                 Some(operation_id) => write!(f, "library is reindexing ({operation_id})"),
                 None => f.write_str("library is reindexing"),
@@ -79,7 +75,7 @@ pub fn begin_library_reconfiguration(
         ));
     }
     let (expected_revision, operation_id) = {
-        let store = state.store.lock();
+        let store = operation_store(state)?;
         if store
             .get_library(library_id)
             .map_err(StorageOperationError::Store)?
@@ -101,7 +97,7 @@ pub fn begin_library_reconfiguration(
             .map_err(StorageOperationError::Store)?;
         (revision, uuid::Uuid::new_v4().to_string())
     };
-    let now_ms = crate::job_loop::unix_now();
+    let now_ms = state.playback_clock.now_ms();
     // 上面的 `get_library` 已经确认该 id 存在，因此解析失败只可能来自畸形输入，
     // 一律按“不存在”回答，绝不 panic。
     let library_ref = domain::LibraryId::from_str(library_id)
@@ -117,18 +113,13 @@ pub fn begin_library_reconfiguration(
     }
     .prepare()
     .map_err(StorageOperationError::Store)?;
-    let started = state
-        .store
-        .lock()
-        .begin_library_reconfiguration_prepared(&prepared, now_ms);
+    let started = operation_store(state)?.begin_library_reconfiguration_prepared(&prepared, now_ms);
     let status = match started {
         Ok(status) => status,
         // Another request began between the check above and the CAS (or the revision moved
         // under us): report the operation that won instead of pretending we started one.
         Err(StoreError::Protected(_)) => {
-            let operation_id = state
-                .store
-                .lock()
+            let operation_id = operation_store(state)?
                 .active_library_operation(library_id)
                 .unwrap_or_else(|error| {
                     tracing::warn!(%library_id, %error, "重配置冲突后读取活动操作失败");
@@ -215,6 +206,10 @@ pub enum WriteVerdict {
 /// line of defence either way.
 pub fn write_verdict(state: &ApiState, library_id: &str) -> WriteVerdict {
     let store = state.store.lock();
+    write_verdict_for_store(&store, library_id)
+}
+
+pub(crate) fn write_verdict_for_store(store: &crate::Store, library_id: &str) -> WriteVerdict {
     match store.library_lifecycle_state(library_id) {
         Ok(lifecycle) if lifecycle == "reindexing" => {}
         Ok(_) => return WriteVerdict::Proceed,
@@ -261,7 +256,7 @@ pub fn resume_library_reconfigurations(state: &ApiState) -> Result<(), String> {
             // 恢复直接在调用线程上把每个未完成的导出推到终态（重入安全）。
             crate::scrape_metadata::export::resume_sidecar_exports(
                 state,
-                crate::job_loop::unix_now(),
+                state.playback_clock.now_ms(),
             );
             continue;
         }
@@ -364,20 +359,15 @@ pub fn begin_library_integrity(
     let operation_id = uuid::Uuid::new_v4().to_string();
     let library_ref = domain::LibraryId::from_str(library_id)
         .map_err(|_| StorageOperationError::MissingLibrary)?;
-    let now_ms = crate::job_loop::unix_now();
+    let now_ms = state.playback_clock.now_ms();
 
     let started =
-        state
-            .store
-            .lock()
-            .begin_library_integrity(library_ref, repair, &operation_id, now_ms);
+        operation_store(state)?.begin_library_integrity(library_ref, repair, &operation_id, now_ms);
     let status = match started {
         Ok(status) => status,
         Err(StoreError::Missing(_)) => return Err(StorageOperationError::MissingLibrary),
         Err(StoreError::Protected(_)) => {
-            let active = state
-                .store
-                .lock()
+            let active = operation_store(state)?
                 .active_library_operation(library_id)
                 .unwrap_or(None);
             return Err(StorageOperationError::Reindexing {
@@ -406,108 +396,18 @@ pub fn begin_library_integrity(
     }))
 }
 
-/// Start the in-process driver unless one is already running for this operation.
-pub(crate) fn spawn_driver(state: &ApiState, operation_id: &str, library_id: &str) {
-    let Ok(handle) = tokio::runtime::Handle::try_current() else {
-        tracing::warn!(%operation_id, %library_id, "无 tokio 运行时承载驱动，等待下次启动恢复");
-        return;
-    };
-    if !state.library_work.claim_driver(operation_id) {
-        return;
-    }
-    let state = state.clone();
-    let operation_id = operation_id.to_string();
-    let library_id = library_id.to_string();
-    handle.spawn(async move {
-        if let Err(error) = drive(&state, &operation_id, &library_id).await {
-            // The Store keeps the row resumable; startup recovery (or the next 202) retries.
-            tracing::error!(%operation_id, %library_id, %error, "Library 重配置驱动中断");
-        }
-        state.library_work.release(&library_id, &operation_id);
-        state.library_work.release_driver(&operation_id);
-        crate::root_reassign_work::notify(&state);
-    });
-}
+mod driver;
+use driver::current_view;
+pub(crate) use driver::spawn_driver;
 
-/// Freeze, drain, then apply batches until the operation is terminal.
-async fn drive(state: &ApiState, operation_id: &str, library_id: &str) -> Result<(), String> {
-    state.library_work.block(library_id, operation_id);
-    if tokio::time::timeout(DRAIN_TIMEOUT, state.library_work.wait_idle(library_id))
-        .await
-        .is_err()
-    {
-        return Err(format!(
-            "Library 工作在 {} 秒内未停止，等待下次恢复",
-            DRAIN_TIMEOUT.as_secs()
-        ));
-    }
-    let Some(mut current) = current_view(state, operation_id)? else {
-        tracing::warn!(%operation_id, "重配置操作不存在，驱动退出");
-        return Ok(());
-    };
-    if terminal(&current.state)
-        && !(current.state == "failed"
-            && matches!(
-                current.kind.as_str(),
-                "roots" | "locale" | "integrity" | "default_locale"
-            ))
-    {
-        tracing::info!(%operation_id, %library_id, state = %current.state, "重配置操作已是终态");
-        return Ok(());
-    }
-    tracing::info!(
-        %operation_id,
-        %library_id,
-        kind = %current.kind,
-        "开始应用 Library 重配置批次"
-    );
-    let mut batch: u32 = 0;
-    loop {
-        batch += 1;
-        let lease = state.library_work.acquire_for_reconfiguration(
-            &state.store,
-            library_id,
-            operation_id,
-        )?;
-        let status = state
-            .store
-            .lock()
-            .advance_library_operation(operation_id, crate::job_loop::unix_now(), BATCH_MEDIA)
-            .map_err(|error| error.to_string())?;
-        drop(lease);
-        if terminal(&status.state) {
-            tracing::info!(
-                %operation_id,
-                %library_id,
-                batches = batch,
-                state = %status.state,
-                "Library 重配置结束"
-            );
-            return Ok(());
-        }
-        // The cursor is the only proof a batch moved something; without it the driver
-        // would spin forever on a stuck operation.
-        let cursor = current_view(state, operation_id)?.and_then(|view| view.cursor);
-        if cursor == current.cursor {
-            return Err(format!("第 {batch} 批未推进游标，停止驱动等待下次恢复"));
-        }
-        current.cursor = cursor;
-        tracing::debug!(%operation_id, %library_id, batches = batch, cursor = ?current.cursor, "Library 重配置批次已应用");
-        tokio::task::yield_now().await;
-    }
-}
-
-fn current_view(
+fn operation_store(
     state: &ApiState,
-    operation_id: &str,
-) -> Result<Option<LibraryOperationView>, String> {
+) -> Result<parking_lot::MutexGuard<'_, crate::Store>, StorageOperationError> {
     state
         .store
-        .lock()
-        .library_operation_view(operation_id)
-        .map_err(|error| error.to_string())
-}
-
-fn terminal(state: &str) -> bool {
-    matches!(state, "succeeded" | "failed")
+        .try_lock_for(crate::http::store_wait::STORE_WRITE_WAIT)
+        .ok_or_else(|| {
+            tracing::warn!("Store 等待预算耗尽，操作尚未受理");
+            StorageOperationError::Busy
+        })
 }

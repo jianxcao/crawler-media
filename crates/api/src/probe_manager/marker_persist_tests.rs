@@ -201,8 +201,13 @@ async fn fingerprint_marker_extracts_scene_frames_when_library_enables_them() {
         .unwrap();
 
     let (ffmpeg, args) = recording_ffmpeg(tmp.path());
-    let updates =
-        persist_marker(&store, std::slice::from_ref(&row), fingerprint_marker(media_id), false).unwrap();
+    let updates = persist_marker(
+        &store,
+        std::slice::from_ref(&row),
+        fingerprint_marker(media_id),
+        false,
+    )
+    .unwrap();
     let store = std::sync::Arc::new(parking_lot::Mutex::new(store));
     let registry = std::sync::Arc::new(crate::library_lifecycle::LibraryWorkRegistry::default());
     let service = chapter_service(&store, &registry, &ffmpeg);
@@ -238,8 +243,13 @@ fn fingerprint_marker_skips_scene_frames_when_library_disables_them() {
         .unwrap();
 
     let (ffmpeg, args) = recording_ffmpeg(tmp.path());
-    let updates =
-        persist_marker(&store, std::slice::from_ref(&row), fingerprint_marker(media_id), false).unwrap();
+    let updates = persist_marker(
+        &store,
+        std::slice::from_ref(&row),
+        fingerprint_marker(media_id),
+        false,
+    )
+    .unwrap();
     let store = std::sync::Arc::new(parking_lot::Mutex::new(store));
     let registry = std::sync::Arc::new(crate::library_lifecycle::LibraryWorkRegistry::default());
     let service = chapter_service(&store, &registry, &ffmpeg);
@@ -279,8 +289,13 @@ async fn cancelling_detached_chapter_frames_reaps_child_and_preserves_sidecars()
         std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o755)).unwrap();
         seal_executable(&ffmpeg);
     }
-    let updates =
-        persist_marker(&store, std::slice::from_ref(&row), fingerprint_marker(media_id), false).unwrap();
+    let updates = persist_marker(
+        &store,
+        std::slice::from_ref(&row),
+        fingerprint_marker(media_id),
+        false,
+    )
+    .unwrap();
     let store = std::sync::Arc::new(parking_lot::Mutex::new(store));
     let registry = std::sync::Arc::new(crate::library_lifecycle::LibraryWorkRegistry::default());
     let service = chapter_service(&store, &registry, &ffmpeg);
@@ -321,8 +336,13 @@ fn stale_marker_snapshot_does_not_resurrect_deleted_episode() {
     store
         .delete_ledger_path(&row.file.path.display().to_string())
         .unwrap();
-    let updates =
-        persist_marker(&store, std::slice::from_ref(&row), fingerprint_marker(media_id), false).unwrap();
+    let updates = persist_marker(
+        &store,
+        std::slice::from_ref(&row),
+        fingerprint_marker(media_id),
+        false,
+    )
+    .unwrap();
     assert!(updates.is_empty());
     assert!(
         store
@@ -348,8 +368,13 @@ fn marker_snapshot_cannot_follow_reimported_path_to_a_new_ledger_id() {
     let mut reimported = row.clone();
     reimported.file.file_id = LedgerId::new();
     super::super::test_support::publish_into(&store, &mut reimported);
-    let updates =
-        persist_marker(&store, std::slice::from_ref(&row), fingerprint_marker(media_id), false).unwrap();
+    let updates = persist_marker(
+        &store,
+        std::slice::from_ref(&row),
+        fingerprint_marker(media_id),
+        false,
+    )
+    .unwrap();
     assert!(updates.is_empty());
     assert!(
         store
@@ -370,8 +395,13 @@ fn frozen_marker_snapshot_does_not_publish_any_result() {
     let tmp = tempfile::tempdir().unwrap();
     let (store, media_id, row, owner) = tv_episode(&tmp);
     store.begin_library_removal(&owner.id).unwrap();
-    let updates =
-        persist_marker(&store, std::slice::from_ref(&row), fingerprint_marker(media_id), false).unwrap();
+    let updates = persist_marker(
+        &store,
+        std::slice::from_ref(&row),
+        fingerprint_marker(media_id),
+        false,
+    )
+    .unwrap();
     assert!(updates.is_empty());
     assert!(
         store
@@ -428,6 +458,12 @@ fn marker_publication_skips_frozen_library_but_updates_live_copy() {
         store
             .get_cached_chapters(&live.file.file_id.to_string())
             .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get_media_marker(media_id, Some(1), Some(1))
+            .unwrap()
             .is_some()
     );
 }
@@ -452,21 +488,53 @@ fn seal_executable(path: &std::path::Path) {
 }
 
 #[test]
-fn automatic_marker_and_chapters_rollback_as_one_publication() {
+fn automatic_marker_batch_rolls_back_when_second_marker_fails() {
     let tmp = tempfile::tempdir().unwrap();
     let (store, media_id, row, _) = tv_episode(&tmp);
+    let mut second = super::super::test_support::coverage(
+        media_id,
+        &tmp.path().join("episode2.strm").display().to_string(),
+        Some(1),
+        Some(2),
+    );
+    std::fs::write(&second.file.path, "https://fixture.invalid/episode2.mkv").unwrap();
+    super::super::test_support::publish_into(&store, &mut second);
+    let members = store::observe_sources(
+        &store
+            .source_snapshots(&[row.file.file_id, second.file.file_id])
+            .unwrap(),
+    );
+    let first_marker = fingerprint_marker(media_id);
+    let mut second_marker = first_marker.clone();
+    second_marker.episode = 2;
     let conn = rusqlite::Connection::open(tmp.path().join("library.db")).unwrap();
     conn.execute_batch(
-        "CREATE TRIGGER reject_chapters BEFORE INSERT ON file_details
-        BEGIN SELECT RAISE(ABORT, 'chapter write rejected'); END",
+        "CREATE TRIGGER reject_second_marker BEFORE INSERT ON media_markers
+        WHEN NEW.episode = 2
+        BEGIN SELECT RAISE(ABORT, 'second marker rejected'); END",
     )
     .unwrap();
-    assert!(persist_marker(&store, &[row], fingerprint_marker(media_id), false).is_err());
+    assert!(
+        store
+            .merge_marker_results_checked(
+                &[row, second],
+                &members,
+                &[first_marker, second_marker],
+                false,
+            )
+            .is_err()
+    );
     assert!(
         store
             .get_media_marker(media_id, Some(1), Some(1))
             .unwrap()
             .is_none(),
-        "chapter failure must roll back the automatic marker too"
+        "failure on the second marker must roll back the first"
+    );
+    assert!(
+        store
+            .get_media_marker(media_id, Some(1), Some(2))
+            .unwrap()
+            .is_none()
     );
 }

@@ -15,6 +15,44 @@ struct Fixture {
     subscribe: Subscribe,
 }
 
+#[test]
+fn snapshot_freshness_detects_saved_facts_and_other_library_changes() {
+    let mut fixture = Fixture::new();
+    let root = fixture.root("target");
+    let target = fixture.library("Target", &root);
+    fixture.select(&target);
+    let snapshot = fixture
+        .store
+        .subscribe_library_snapshot(&fixture.subscribe, MediaKind::Movie)
+        .unwrap();
+    assert!(
+        fixture
+            .store
+            .subscribe_snapshot_is_current(&snapshot, &Default::default())
+            .unwrap()
+    );
+
+    fixture.save(&root.join("movie.mkv"), 20);
+    assert!(
+        !fixture
+            .store
+            .subscribe_snapshot_is_current(&snapshot, &Default::default())
+            .unwrap()
+    );
+
+    let snapshot = fixture
+        .store
+        .subscribe_library_snapshot(&fixture.subscribe, MediaKind::Movie)
+        .unwrap();
+    fixture.library("Nested", &root.join("nested"));
+    assert!(
+        !fixture
+            .store
+            .subscribe_snapshot_is_current(&snapshot, &Default::default())
+            .unwrap()
+    );
+}
+
 impl Fixture {
     fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
@@ -114,7 +152,7 @@ impl Fixture {
         store::test_support::publish_fixture_file(&self.store, &row).unwrap();
     }
 
-    fn publish_probed_movie(&self, target: &Library, file_path: &Path) {
+    fn publish_probed_movie(&self, target: &Library, file_path: &Path) -> LedgerId {
         let roots = self.store.list_library_roots().unwrap();
         let root_id = roots
             .into_iter()
@@ -174,13 +212,211 @@ impl Fixture {
                 1000,
             )
             .unwrap();
+        file_id
     }
 
     fn load(&self) -> SubscribeFacts {
         self.store
-            .load_library_subscribe_facts(&self.subscribe, MediaKind::Movie)
+            .subscribe_library_snapshot(&self.subscribe, MediaKind::Movie)
+            .and_then(|snapshot| store::resolve_subscribe_facts(&snapshot)?.evaluate(&|_| true))
             .unwrap()
     }
+}
+
+#[test]
+fn subscribe_quality_retains_observed_sdr_until_file_content_changes() {
+    use store::library_write::probe::{Observed, ProbePublication};
+    use store::library_write::{FilePublication, WriteScope};
+
+    let mut f = Fixture::new();
+    let root = f.root("target");
+    let target = f.library("Target", &root);
+    f.select(&target);
+    let path = root.join("Movie.mkv");
+    std::fs::write(&path, b"content").unwrap();
+    let file_id = f.publish_probed_movie(&target, &path);
+    let mut file = f.store.file_coverage_by_id(file_id).unwrap().unwrap().file;
+    let path_str = path.to_str().unwrap().to_string();
+    let mut facts = SubscribeFacts::default();
+    facts.replace(
+        None,
+        None,
+        QualityFact {
+            score: 95,
+            path: Some(path_str.clone()),
+        },
+    );
+    facts.set_quality(
+        path_str.clone(),
+        domain::Release {
+            title: "Movie".into(),
+            year: None,
+            season: None,
+            episode: None,
+            episode_to: None,
+            resolution: None,
+            source: None,
+            codec: None,
+            hdr: Some("HDR10".into()),
+            subtitle_language: None,
+            audio_language: None,
+            group: None,
+            confidence: Confidence::High,
+            season_inferred: false,
+        },
+    );
+    f.store
+        .save_subscribe_facts(f.subscribe.id, &facts)
+        .unwrap();
+    let version = file.version.clone();
+    let probe = |hdr| ProbePublication {
+        expected: &version,
+        tracks_version: 1,
+        resolution: None,
+        codec: None,
+        hdr,
+        duration_ms: None,
+        details: None,
+    };
+    f.store
+        .publish_probe_result(file_id, &probe(Observed::NotObserved), 1)
+        .unwrap();
+    assert_eq!(
+        f.load().quality(&path_str).unwrap().hdr.as_deref(),
+        Some("HDR10")
+    );
+    f.store
+        .publish_probe_result(file_id, &probe(Observed::Value(None)), 2)
+        .unwrap();
+    assert_eq!(f.load().quality(&path_str).unwrap().hdr, None);
+    f.store
+        .save_subscribe_facts(f.subscribe.id, &facts)
+        .unwrap();
+    assert_eq!(f.load().quality(&path_str).unwrap().hdr, None);
+
+    let scope = WriteScope {
+        library_id: file.library_id,
+        config_revision: 0,
+    };
+    f.store
+        .publish_files(
+            &scope,
+            &[FilePublication {
+                file: &file,
+                units: &[domain::UnitKey::WHOLE],
+                expected_version: Some(&version),
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            3,
+        )
+        .unwrap();
+    assert_eq!(f.load().quality(&path_str).unwrap().hdr, None);
+
+    file.version.source_version = "v2".into();
+    file.hdr = None;
+    f.store
+        .publish_files(
+            &scope,
+            &[FilePublication {
+                file: &file,
+                units: &[domain::UnitKey::WHOLE],
+                expected_version: Some(&version),
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            4,
+        )
+        .unwrap();
+    assert_eq!(
+        f.load().quality(&path_str).unwrap().hdr.as_deref(),
+        Some("HDR10")
+    );
+}
+
+#[test]
+fn replacing_file_source_discards_previous_hdr_observation() {
+    use store::library_write::WriteScope;
+    use store::library_write::probe::{Observed, ProbePublication};
+
+    let mut f = Fixture::new();
+    let root = f.root("target");
+    let target = f.library("Target", &root);
+    f.select(&target);
+    let path = root.join("Movie.mkv");
+    std::fs::write(&path, b"content").unwrap();
+    let file_id = f.publish_probed_movie(&target, &path);
+    let file = f.store.file_coverage_by_id(file_id).unwrap().unwrap().file;
+    let path_str = path.to_str().unwrap().to_string();
+    let mut facts = SubscribeFacts::default();
+    facts.replace(
+        None,
+        None,
+        QualityFact {
+            score: 95,
+            path: Some(path_str.clone()),
+        },
+    );
+    facts.set_quality(
+        path_str.clone(),
+        domain::Release {
+            title: "Movie".into(),
+            year: None,
+            season: None,
+            episode: None,
+            episode_to: None,
+            resolution: None,
+            source: None,
+            codec: None,
+            hdr: Some("HDR10".into()),
+            subtitle_language: None,
+            audio_language: None,
+            group: None,
+            confidence: Confidence::High,
+            season_inferred: false,
+        },
+    );
+    f.store
+        .save_subscribe_facts(f.subscribe.id, &facts)
+        .unwrap();
+    f.store
+        .publish_probe_result(
+            file_id,
+            &ProbePublication {
+                expected: &file.version,
+                tracks_version: 1,
+                resolution: None,
+                codec: None,
+                hdr: Observed::Value(None),
+                duration_ms: None,
+                details: None,
+            },
+            1,
+        )
+        .unwrap();
+    assert_eq!(f.load().quality(&path_str).unwrap().hdr, None);
+    f.store
+        .replace_file_source(
+            &WriteScope {
+                library_id: file.library_id,
+                config_revision: 0,
+            },
+            file_id,
+            &file.version,
+            &library::SourceObservation {
+                source_version: "v2".into(),
+                size_bytes: None,
+                modified_ns: None,
+                created_ns: None,
+                content_digest: None,
+            },
+            2,
+        )
+        .unwrap();
+    assert_eq!(
+        f.load().quality(&path_str).unwrap().hdr.as_deref(),
+        Some("HDR10")
+    );
 }
 
 #[test]
@@ -339,7 +575,8 @@ fn root_resolution_failure_is_returned_not_treated_as_ownership() {
 
     assert!(
         f.store
-            .load_library_subscribe_facts(&f.subscribe, MediaKind::Movie)
+            .subscribe_library_snapshot(&f.subscribe, MediaKind::Movie)
+            .and_then(|snapshot| store::resolve_subscribe_facts(&snapshot)?.evaluate(&|_| true))
             .is_err(),
         "strict root lookup failure must propagate, not retain the saved fact"
     );
@@ -378,7 +615,8 @@ fn library_database_lookup_failure_is_returned() {
 
     assert!(
         f.store
-            .load_library_subscribe_facts(&f.subscribe, MediaKind::Movie)
+            .subscribe_library_snapshot(&f.subscribe, MediaKind::Movie)
+            .and_then(|snapshot| store::resolve_subscribe_facts(&snapshot)?.evaluate(&|_| true))
             .is_err()
     );
 }
@@ -502,4 +740,45 @@ fn removing_explicit_library_binding_does_not_jump_to_default_library_facts() {
         facts_after.movie().is_none(),
         "Saved facts of another library must not jump to default library"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn recorded_facts_do_not_resolve_unrelated_library_roots() {
+    let mut f = Fixture::new();
+    let root = f.root("recorded");
+    let target = f.library("Recorded", &root);
+    f.select(&target);
+    let path = root.join("Scoped.mkv");
+    f.ledger(&path, 100);
+    let broken = f.root("broken-unrelated");
+    f.library("Unrelated", &broken);
+    let snapshot = f
+        .store
+        .subscribe_library_snapshot(&f.subscribe, MediaKind::Movie)
+        .unwrap();
+    std::fs::remove_dir(&broken).unwrap();
+    std::os::unix::fs::symlink(f.root("absent"), &broken).unwrap();
+    let facts = store::resolve_subscribe_facts(&snapshot)
+        .and_then(|resolved| resolved.evaluate(&|_| true))
+        .unwrap();
+    assert!(facts.movie().is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn resolved_saved_facts_evaluate_without_reopening_the_root() {
+    let mut f = Fixture::new();
+    let root = f.root("saved-root");
+    let target = f.library("Saved", &root);
+    f.select(&target);
+    f.save(&root.join("missing.mkv"), 100);
+    let snapshot = f
+        .store
+        .subscribe_library_snapshot(&f.subscribe, MediaKind::Movie)
+        .unwrap();
+    let resolved = store::resolve_subscribe_facts(&snapshot).unwrap();
+    std::fs::remove_dir(&root).unwrap();
+    std::os::unix::fs::symlink(f.root("absent"), &root).unwrap();
+    assert!(resolved.evaluate(&|_| true).unwrap().movie().is_some());
 }

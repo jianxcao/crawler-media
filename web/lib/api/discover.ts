@@ -526,18 +526,16 @@ export async function fetchDiscoveredTitleDetails(
   reference: string,
   init?: RequestInit,
 ): Promise<MediaDetailData> {
-  // reference 形如 tmdb:movie:603、douban:1291843 或纯数字 TMDB id。
-  const parts = reference.split(":");
-  // douban: 前缀 → 豆瓣详情端点（豆瓣 id 不带 movie/tv，后端探测 kind）。
-  if (parts[0] === "douban") {
-    const id = parts[parts.length - 1];
-    const envelope = await request<MediaDetailEnvelope>(`/media/douban/${id}`, init);
+  const tmdb = /^tmdb:(movie|tv):([1-9]\d*)$/.exec(reference);
+  const douban = /^douban:([1-9]\d*)$/.exec(reference);
+  if (douban) {
+    const envelope = await request<MediaDetailEnvelope>(`/media/douban/${douban[1]}`, init);
     const kind = (envelope.data.item.kind === "tv" ? "tv" : "movie") as MediaType;
     return toMediaDetailData(kind, envelope.data, "douban");
   }
-  const kind = (parts[1] === "tv" ? "tv" : "movie") as MediaType;
-  const id = parts[parts.length - 1];
-  const envelope = await request<MediaDetailEnvelope>(`/media/${kind}/${id}`, init);
+  if (!tmdb) throw new Error(`Unsupported media reference: ${reference}`);
+  const kind = tmdb[1] as MediaType;
+  const envelope = await request<MediaDetailEnvelope>(`/media/${kind}/${tmdb[2]}`, init);
   return toMediaDetailData(kind, envelope.data, "tmdb");
 }
 

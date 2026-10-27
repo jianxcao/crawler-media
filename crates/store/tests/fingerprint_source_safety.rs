@@ -120,7 +120,7 @@ fn checked_publication_rejects_file_only_deletion_and_keeps_previous_result() {
             .unwrap()
             .is_none()
     );
-    // A valid source still commits markers and chapters together.
+    // A valid source commits markers without creating a physical chapter cache.
     std::fs::write(&row.path, b"restored").unwrap();
     store
         .replace_marker_results_batch_checked(
@@ -140,7 +140,7 @@ fn checked_publication_rejects_file_only_deletion_and_keeps_previous_result() {
         store
             .get_cached_chapters(&row.file_id.expect("fixture file id").to_string())
             .unwrap(),
-        Some(vec![])
+        None
     );
 }
 
@@ -365,11 +365,14 @@ fn job_scoped_publication_publishes_rows_the_job_covers() {
         marker_type: None,
         synthetic: false,
     }];
+    store
+        .put_cached_chapters(&id_a, &expected_chapters_a)
+        .unwrap();
     let replacement = MarkerResultReplacement {
         media_id,
         season: 1,
         markers: vec![marker(&row_a, "job_covered")],
-        chapter_updates: vec![(id_a.clone(), expected_chapters_a.clone())],
+        chapter_updates: vec![(id_a.clone(), vec![])],
     };
 
     let result = store.complete_marker_refresh_checked(
@@ -378,6 +381,14 @@ fn job_scoped_publication_publishes_rows_the_job_covers() {
         &observed(&store, std::slice::from_ref(&replacement)),
     );
     assert!(result.is_ok());
+    assert_eq!(
+        store
+            .get_media_marker(media_id, Some(1), Some(1))
+            .unwrap()
+            .unwrap()
+            .source,
+        "job_covered"
+    );
     assert_eq!(
         store.get_cached_chapters(&id_a).unwrap(),
         Some(expected_chapters_a)
@@ -700,7 +711,7 @@ fn automatic_marker_merge_rejects_a_second_connections_new_source() {
 }
 
 #[test]
-fn automatic_marker_merge_keeps_the_comparisons_first_unit_coordinates() {
+fn automatic_marker_merge_does_not_publish_an_uncovered_unit() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(temp.path()).unwrap();
     let fixture = row(&store, temp.path(), MediaId::new());
@@ -730,23 +741,20 @@ fn automatic_marker_merge_keeps_the_comparisons_first_unit_coordinates() {
     let updates = store
         .merge_marker_results_checked(&[coverage], &members, &[marker(&fixture, "fresh")], false)
         .unwrap();
-    assert_eq!(
-        updates.len(),
-        1,
-        "publish the compared unit's chapter timeline"
+    assert!(
+        updates.is_empty(),
+        "uncovered E1 must not become a physical chapter timeline"
     );
     assert!(
         store
             .get_cached_chapters(&file.file_id.to_string())
             .unwrap()
-            .is_some()
+            .is_none()
     );
-    assert_eq!(
+    assert!(
         store
             .get_media_marker(file.media_id, Some(1), Some(1))
             .unwrap()
-            .unwrap()
-            .source,
-        "fresh"
+            .is_none()
     );
 }

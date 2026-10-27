@@ -113,7 +113,10 @@ pub(super) fn plan_file_row(
 fn file_row_params(tx: &Connection, file: &LibraryFile) -> Vec<rusqlite::types::Value> {
     use rusqlite::types::Value;
     vec![
-        Value::Text(crate::path_key::canonical_recorded_key(tx, &file.path.to_string_lossy())),
+        Value::Text(crate::path_key::canonical_recorded_key(
+            tx,
+            &file.path.to_string_lossy(),
+        )),
         Value::Text(file.path.to_string_lossy().to_string()),
         Value::Text(file.presence.as_str().to_string()),
         Value::Text(file.publication.as_str().to_string()),
@@ -124,7 +127,11 @@ fn file_row_params(tx: &Connection, file: &LibraryFile) -> Vec<rusqlite::types::
         Value::from(file.modified_ns),
         Value::from(file.created_ns),
         Value::from(file.source_digest.clone()),
-        Value::from(file.source_path.as_ref().map(|p| p.to_string_lossy().to_string())),
+        Value::from(
+            file.source_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+        ),
         Value::from(file.transfer_mode.clone()),
         Value::from(file.resolution.clone()),
         Value::from(file.codec.clone()),
@@ -135,9 +142,21 @@ fn file_row_params(tx: &Connection, file: &LibraryFile) -> Vec<rusqlite::types::
         Value::from(file.release_quality.clone()),
         Value::from(file.duration_ms),
         Value::Integer(file.tracks_version),
-        Value::from(file.poster_path.as_ref().map(|p| p.to_string_lossy().to_string())),
-        Value::from(file.backdrop_path.as_ref().map(|p| p.to_string_lossy().to_string())),
-        Value::from(file.still_path.as_ref().map(|p| p.to_string_lossy().to_string())),
+        Value::from(
+            file.poster_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+        ),
+        Value::from(
+            file.backdrop_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+        ),
+        Value::from(
+            file.still_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+        ),
         Value::Integer(i64::from(file.poster_path.is_some())),
         Value::Integer(i64::from(file.backdrop_path.is_some())),
         Value::Integer(i64::from(file.still_path.is_some())),
@@ -158,7 +177,7 @@ const PLAN_FILE_ROW_SQL: &str = "SELECT file_revision, source_version, presence_
         filter_score,
         COALESCE(
             path_key IS norm_path_key(?1) AND display_path IS ?2 AND presence_state IS ?3
-            AND publication_state IS ?4 AND file_revision IS ?5 AND source_version IS ?6
+            AND (?3 <> 'present' OR missing_at IS NULL) AND publication_state IS ?4 AND file_revision IS ?5 AND source_version IS ?6
             AND size_bytes IS COALESCE(?7, size_bytes)
             AND stat_known IS MAX(stat_known, ?8)
             AND mtime_ns IS COALESCE(?9, mtime_ns) AND created_ns IS COALESCE(?10, created_ns)
@@ -166,7 +185,10 @@ const PLAN_FILE_ROW_SQL: &str = "SELECT file_revision, source_version, presence_
             AND source_path IS COALESCE(?12, source_path)
             AND transfer_mode IS COALESCE(?13, transfer_mode)
             AND resolution IS COALESCE(?14, resolution) AND codec IS COALESCE(?15, codec)
-            AND hdr IS COALESCE(?16, hdr) AND quality_source IS ?17 AND confidence IS ?18
+            AND hdr IS CASE WHEN source_version <> ?6 THEN ?16
+                            WHEN hdr_observed THEN hdr ELSE COALESCE(?16, hdr) END
+            AND hdr_observed IS CASE WHEN source_version <> ?6 THEN 0 ELSE hdr_observed END
+            AND quality_source IS ?17 AND confidence IS ?18
             AND filter_score IS COALESCE(?19, filter_score)
             AND release_quality IS COALESCE(?20, release_quality)
             AND duration_ms IS COALESCE(?21, duration_ms) AND tracks_version IS ?22
@@ -177,8 +199,6 @@ const PLAN_FILE_ROW_SQL: &str = "SELECT file_revision, source_version, presence_
             AND has_still IS MAX(has_still, ?28),
         0)
      FROM library_files WHERE file_id = ?29";
-
-
 
 pub(crate) fn insert_file_row(tx: &Connection, file: &LibraryFile) -> Result<(), StoreError> {
     tx.execute(
@@ -243,7 +263,11 @@ pub(crate) fn insert_file_row(tx: &Connection, file: &LibraryFile) -> Result<(),
     Ok(())
 }
 
-pub(super) fn update_file_row(tx: &Connection, file: &LibraryFile, revision: i64) -> Result<(), StoreError> {
+pub(super) fn update_file_row(
+    tx: &Connection,
+    file: &LibraryFile,
+    revision: i64,
+) -> Result<(), StoreError> {
     // Artwork paths are never cleared by a later publication that does not carry them,
     // and a stat observation never overwrites a known value with NULL. `PLAN_FILE_ROW_SQL`
     // evaluates the same expressions as a predicate, so the two cannot disagree.
@@ -256,14 +280,17 @@ pub(super) fn update_file_row(tx: &Connection, file: &LibraryFile, revision: i64
 
 const UPDATE_FILE_ROW_SQL: &str = "UPDATE library_files SET
             path_key = norm_path_key(?1), display_path = ?2,
-            presence_state = ?3, publication_state = ?4, file_revision = ?5, source_version = ?6,
+            presence_state = ?3, missing_at = CASE WHEN ?3 = 'present' THEN NULL ELSE missing_at END, publication_state = ?4, file_revision = ?5, source_version = ?6,
             size_bytes = COALESCE(?7, size_bytes), stat_known = MAX(stat_known, ?8),
             mtime_ns = COALESCE(?9, mtime_ns), created_ns = COALESCE(?10, created_ns),
             source_digest = COALESCE(?11, source_digest),
             source_path = COALESCE(?12, source_path),
             transfer_mode = COALESCE(?13, transfer_mode),
             resolution = COALESCE(?14, resolution), codec = COALESCE(?15, codec),
-            hdr = COALESCE(?16, hdr), quality_source = ?17, confidence = ?18,
+            hdr = CASE WHEN source_version <> ?6 THEN ?16
+                       WHEN hdr_observed THEN hdr ELSE COALESCE(?16, hdr) END,
+            hdr_observed = CASE WHEN source_version <> ?6 THEN 0 ELSE hdr_observed END,
+            quality_source = ?17, confidence = ?18,
             filter_score = COALESCE(?19, filter_score),
             release_quality = COALESCE(?20, release_quality),
             duration_ms = COALESCE(?21, duration_ms), tracks_version = ?22,
@@ -320,4 +347,3 @@ pub(crate) fn enqueue_probe(
     )?;
     Ok(())
 }
-

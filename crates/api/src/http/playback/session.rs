@@ -28,12 +28,15 @@ pub(crate) async fn start_session(
     // Review L2: session selection resolves the ledger row; a contended lock must
     // not park the worker that serves every other request on this runtime.
     let (file, media, resolved, tracks) = match store_read(&state, move |store| {
-            let (file, media, resolved) = match resolve_playback_for(store, &selection, user_id) {
-                Ok(resolved) => resolved,
-                Err(error) => return Err(error.response()),
-            };
-            let tracks = store.get_file_meta(&file.file_id.to_string()).ok().flatten();
-            Ok((file, media, resolved, tracks))
+        let (file, media, resolved) = match resolve_playback_for(store, &selection, user_id) {
+            Ok(resolved) => resolved,
+            Err(error) => return Err(error.response()),
+        };
+        let tracks = store
+            .get_file_meta(&file.file_id.to_string())
+            .ok()
+            .flatten();
+        Ok((file, media, resolved, tracks))
     })
     .await
     {
@@ -50,14 +53,13 @@ pub(crate) async fn start_session(
         );
     }
     let start_ms = resolved.start_ms;
-    let coverage = domain::FileCoverage {
-        path_key: String::new(),
-        file: file.clone(),
-        units: vec![domain::UnitKey::new(
-            resolved.target.unit.season,
-            resolved.target.unit.episode,
-        )],
-    };
+    let file_id = file.file_id;
+    let coverage = store_read(&state, move |store| {
+        store.file_coverage_by_id(file_id).ok().flatten()
+    })
+    .await
+    .ok()
+    .flatten();
     let device_id = body
         .get("device_id")
         .and_then(|v| v.as_str())
@@ -66,7 +68,9 @@ pub(crate) async fn start_session(
         Ok(id) => id,
         Err(response) => return response,
     };
-    let _ = crate::http::library::ensure_probe_enqueued(&state, &coverage);
+    if let Some(coverage) = coverage {
+        let _ = crate::http::library::ensure_probe_enqueued(&state, &coverage);
+    }
     tracing::info!(media_id = %media.id, file_id = %file.file_id, %user_id, start_ms, ?play_session_id, "Playback session selected");
     let is_strm = file
         .path
@@ -74,7 +78,8 @@ pub(crate) async fn start_session(
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("strm"));
     let stream_url = session_stream_url(&file, &play_session_id, device_id, &token, is_strm);
-    let (chapters, chapters_pending) = session_chapters(&state, &file, &media).await;
+    let (chapters, chapters_pending) =
+        session_chapters(&state, &file, resolved.target.unit, &media).await;
     let source = session_source(&file, is_strm);
     let subtitle_urls: Vec<String> = decision
         .get("subtitles")
@@ -180,10 +185,9 @@ fn session_stream_url(
     is_strm: bool,
 ) -> String {
     // STRM 优先给客户端直链；没有有效直链时回退本地流中转。
-    if is_strm
-        && let Some(direct_url) = library::read_strm_url(&file.path) {
-            return direct_url;
-        }
+    if is_strm && let Some(direct_url) = library::read_strm_url(&file.path) {
+        return direct_url;
+    }
     format!(
         "/api/v1/playback/sessions/{play_session_id}/stream?device_id={device_id}&api_key={token}"
     )
@@ -192,18 +196,45 @@ fn session_stream_url(
 async fn session_chapters(
     state: &ApiState,
     file: &domain::LibraryFile,
+    unit: domain::UnitKey,
     media: &domain::Media,
 ) -> (Vec<Value>, bool) {
     // Chapters decorate the session grant; a contended Store must not fail it.
-    let key = file.file_id.to_string();
+    let file_id = file.file_id;
+    let expected = file.version.clone();
+    let cached_media = media.clone();
     let cached_chapters = match store_read(state, move |store| {
-            store.get_cached_chapters(&key).ok().flatten()
+        let coverage = store.file_coverage_by_id(file_id).ok().flatten()?;
+        if coverage.file.version != expected || !coverage.units.contains(&unit) {
+            return None;
+        }
+        let mut cached = store
+            .get_cached_chapters(&file_id.to_string())
+            .ok()
+            .flatten();
+        if let Some(ref mut chapters) = cached {
+            let marker = crate::marker_resolver::unit_marker(
+                store,
+                &cached_media,
+                unit,
+                coverage.units.len(),
+            );
+            crate::marker_resolver::append_marker_chapters(
+                chapters,
+                marker.as_ref(),
+                coverage.file.duration_ms,
+            );
+        }
+        cached
     })
     .await
     {
         Ok(cached) => cached,
         Err(error) => {
-            tracing::warn!(?error, "读取章节缓存失败，本次按待生成返回；章节仍在后台生成");
+            tracing::warn!(
+                ?error,
+                "读取章节缓存失败，本次按待生成返回；章节仍在后台生成"
+            );
             None
         }
     };
@@ -213,13 +244,17 @@ async fn session_chapters(
         let file = file.clone();
         let media = media.clone();
         tokio::spawn(async move {
-            let coverage = domain::FileCoverage {
-                path_key: String::new(),
-                file,
-                units: Vec::new(),
-            };
-            let _ = crate::marker_resolver::resolve_item_chapters(&state, &coverage, &media, None)
+            let file_id = file.file_id;
+            let coverage = store_read(&state, move |store| {
+                store.file_coverage_by_id(file_id).ok().flatten()
+            })
+            .await;
+            if let Ok(Some(coverage)) = coverage {
+                let _ = crate::marker_resolver::resolve_item_chapters(
+                    &state, &coverage, unit, &media, None,
+                )
                 .await;
+            }
         });
     }
     let chapters = cached_chapters
@@ -298,7 +333,7 @@ pub(crate) async fn session_stream(
     // Review L2: binding validation is a Store read on the streaming hot path.
     let device_id = query.device_id.clone();
     let (path, is_strm) = match store_read(&state, move |store| {
-            session_source_path(store, user_id, &device_id, &play_session_id)
+        session_source_path(store, user_id, &device_id, &play_session_id)
     })
     .await
     {

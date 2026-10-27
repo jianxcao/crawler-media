@@ -220,3 +220,103 @@ async fn force_refresh_item_chapters_keeps_old_result_until_background_replaceme
         assert_eq!(bytes.as_ref(), expected);
     }
 }
+
+async fn multiunit_fixture(
+    tmp: &tempfile::TempDir,
+) -> (axum::Router, api::Store, domain::MediaId, String) {
+    let (app, store) = app(tmp);
+    let root = tmp.path().join("data/library/tv/Combined");
+    std::fs::create_dir_all(&root).unwrap();
+    let media = store
+        .ensure_media(domain::Media {
+            id: domain::MediaId::new(),
+            kind: domain::MediaKind::Tv,
+            title: "Combined".into(),
+            year: None,
+            original_title: None,
+            aliases: vec![],
+            tmdb_id: None,
+            douban_id: None,
+            tvdb_id: None,
+            bangumi_id: None,
+            anilist_id: None,
+        })
+        .unwrap();
+    let path = root.join("S01E01E02.strm");
+    std::fs::write(&path, "https://example.invalid/combined.mkv\n").unwrap();
+    let file = store::test_support::publish_fixture_file_units(
+        &store,
+        &FixtureFile {
+            media_id: media.id,
+            path: path.display().to_string(),
+            ..Default::default()
+        },
+        &[
+            domain::UnitKey::new(1, 1),
+            domain::UnitKey::new(1, 2),
+            domain::UnitKey::new(2, 1),
+        ],
+    )
+    .unwrap();
+    for (season, episode, start) in [(1, 1, 10_000), (1, 2, 120_000), (2, 1, 220_000)] {
+        store
+            .put_media_marker(&api::store::StoredMediaMarker {
+                media_id: media.id,
+                season,
+                episode,
+                intro_start_ms: Some(start),
+                intro_end_ms: Some(start + 50_000),
+                outro_start_ms: None,
+                outro_end_ms: None,
+                source: "review".into(),
+                locked: false,
+                updated_at: 0,
+            })
+            .unwrap();
+    }
+    (app, store, media.id, file.library_id.to_string())
+}
+
+#[tokio::test]
+async fn chapter_query_uses_explicit_unit_without_first_episode_cache_leak() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, _store, media_id, library_id) = multiunit_fixture(&tmp).await;
+    for (season, episode, start) in [
+        (1, 1, 10_000),
+        (1, 2, 120_000),
+        (2, 1, 220_000),
+        (1, 2, 120_000),
+    ] {
+        let response = app.clone().oneshot(request("GET", &format!("/api/v1/libraries/{library_id}/items/{media_id}/chapters?season={season}&episode={episode}"), Some("management-secret"), Value::Null)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        let intro = body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|chapter| chapter["marker_type"] == "IntroStart")
+            .unwrap();
+        assert_eq!(intro["start_ms"], start);
+    }
+}
+
+#[tokio::test]
+async fn multiunit_refresh_reports_unsupported_without_clearing_any_markers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, store, media_id, library_id) = multiunit_fixture(&tmp).await;
+    let response = app.oneshot(request("POST", &format!("/api/v1/libraries/{library_id}/items/{media_id}/chapters/refresh?season=1&episode=2"), Some("management-secret"), Value::Null)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json_body(response).await;
+    assert_eq!(
+        body["error"]["code"],
+        "chapters.unit_time_mapping_unsupported"
+    );
+    for (season, episode) in [(1, 1), (1, 2), (2, 1)] {
+        assert!(
+            store
+                .get_media_marker(media_id, Some(season), Some(episode))
+                .unwrap()
+                .is_some()
+        );
+    }
+}

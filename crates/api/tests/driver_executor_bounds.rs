@@ -171,9 +171,8 @@ fn health_answers_while_a_driver_polls_the_store_behind_a_write() {
     // Bounded: a parked executor must fail the test, never hang it.
     let outcome = rx.recv_timeout(Duration::from_secs(8));
     holder.join().unwrap();
-    let outcome = outcome.expect(
-        "a driver held the executor: the runtime never reached the end of the window",
-    );
+    let outcome = outcome
+        .expect("a driver held the executor: the runtime never reached the end of the window");
     measured.join().unwrap();
     let (status, elapsed) = outcome.expect("/health task failed");
     assert_eq!(status, StatusCode::OK, "/health must stay healthy");
@@ -197,6 +196,55 @@ fn health_answers_while_a_driver_polls_the_store_behind_a_write() {
         status.as_deref().is_some_and(|status| status != "queued"),
         "the probe worker never ran the unit (job status {status:?}): the /health \
          measurement above proved nothing about the driver"
+    );
+}
+
+#[test]
+fn probe_resumes_after_store_contention_without_cancelling_the_job() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (runtime, state) = boot_inside_runtime(tmp.path());
+    let coverage = seed_probe_candidate(&state);
+    let result = state
+        .probe
+        .request_probe(&coverage, ProbeRequestOrigin::Detail)
+        .unwrap();
+    let job_id = match result {
+        api::probe_manager::policy::ProbeRequestResult::Queued { job_id } => job_id,
+        other => panic!("expected a queued probe, got {other:?}"),
+    };
+    let held = state.store();
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _guard = held.lock();
+        locked_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(2500));
+    });
+    locked_rx.recv().unwrap();
+    let store = state.store();
+    let status = runtime.block_on(async {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let store = store.clone();
+            let job_id = job_id.clone();
+            let status = tokio::task::spawn_blocking(move || {
+                store.lock().get_probe_job(&job_id).unwrap().unwrap().status
+            })
+            .await
+            .unwrap();
+            if !matches!(status.as_str(), "queued" | "running") {
+                break status;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break status;
+            }
+        }
+    });
+    holder.join().unwrap();
+    assert_ne!(status, "cancelled", "Store contention is not a cancellation");
+    assert!(
+        !matches!(status.as_str(), "queued" | "running"),
+        "probe did not resume after Store contention: {status}"
     );
 }
 
@@ -230,11 +278,13 @@ fn chapter_frame_worker_does_not_park_the_executor() {
             Store::open(tmp.path().join("data")).unwrap(),
         ));
         let registry = Arc::new(api::library_lifecycle::LibraryWorkRegistry::default());
-        let service = Arc::new(api::chapter_frame_service::ChapterFrameService::with_runner(
-            store.clone(),
-            registry,
-            Arc::new(NeverRuns),
-        ));
+        let service = Arc::new(
+            api::chapter_frame_service::ChapterFrameService::with_runner(
+                store.clone(),
+                registry,
+                Arc::new(NeverRuns),
+            ),
+        );
         service.start();
         (service, store)
     });
@@ -335,7 +385,7 @@ fn chapter_frame_worker_does_not_park_the_executor() {
 /// purpose — the park gives up after `PARK_BUDGET` and fails the stage, so a broken
 /// test fails instead of hanging.
 struct GatedTracksProbe {
-    entered: Arc<std::sync::atomic::AtomicBool>,
+    entered: Arc<std::sync::atomic::AtomicUsize>,
     released: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
 }
 
@@ -344,13 +394,13 @@ const PARK_BUDGET: Duration = Duration::from_secs(10);
 impl GatedTracksProbe {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            entered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            entered: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             released: Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
         })
     }
 
     fn entered(&self) -> bool {
-        self.entered.load(std::sync::atomic::Ordering::SeqCst)
+        self.entered.load(std::sync::atomic::Ordering::SeqCst) > 0
     }
 
     fn release(&self) {
@@ -367,7 +417,7 @@ impl api::probe_manager::TracksProbe for GatedTracksProbe {
         _control: &library::WorkControl,
     ) -> Result<(library::Tracks, Option<i64>), library::LibraryError> {
         self.entered
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let (lock, cv) = &*self.released;
         let released = lock.lock().unwrap();
         let (released, _) = cv
@@ -441,9 +491,10 @@ fn probe_metadata_publish_window_is_unmeasurable_with_a_hold_longer_than_the_wri
     ));
     let coverage = seed_probe_candidate_in(&store);
     let probe = GatedTracksProbe::new();
-    let manager = Arc::new(api::probe_manager::ProbeManager::new(store.clone()).with_tracks_probe(
-        probe.clone() as Arc<dyn api::probe_manager::TracksProbe>,
-    ));
+    let manager = Arc::new(
+        api::probe_manager::ProbeManager::new(store.clone())
+            .with_tracks_probe(probe.clone() as Arc<dyn api::probe_manager::TracksProbe>),
+    );
     assert!(
         runtime.block_on(async { manager.try_start_workers() }),
         "probe workers must start on this runtime"
@@ -551,7 +602,7 @@ fn seed_probe_candidate_in(store: &Arc<parking_lot::Mutex<Store>>) -> domain::Fi
         anilist_id: None,
     };
     guard.insert_media(&media).unwrap();
-    let path = root.join("stage.mkv");
+    let path = root.join(format!("stage-{}.mkv", media.id));
     std::fs::write(&path, b"video-bytes").unwrap();
     let file = publish_fixture_file(
         &guard,
@@ -577,3 +628,6 @@ fn seed_probe_candidate_in(store: &Arc<parking_lot::Mutex<Store>>) -> domain::Fi
         units: vec![domain::UnitKey::WHOLE],
     }
 }
+
+#[path = "driver_executor_bounds/storage_review.rs"]
+mod storage_review;

@@ -291,3 +291,63 @@ async fn language_freeze_is_unavailable_for_library_and_root_reads() {
         );
     }
 }
+
+struct OperationClock(std::sync::atomic::AtomicI64);
+impl api::playback_events::clock::PlaybackClock for OperationClock {
+    fn now_ms(&self) -> i64 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[tokio::test]
+async fn completed_language_operations_obey_thirty_day_retention() {
+    const NOW: i64 = 1_800_000_000_000;
+    const WINDOW: i64 = 30 * 86_400_000;
+    let temp = tempfile::tempdir().unwrap();
+    let clock = Arc::new(OperationClock(std::sync::atomic::AtomicI64::new(
+        NOW - WINDOW - 1,
+    )));
+    let state = stage(&temp).with_playback_clock(clock.clone());
+    let app = router(state.clone());
+    let mut old_ids = Vec::new();
+    let mut new_ids = Vec::new();
+    for (revision, language, ids) in [(0, "en-US", &mut old_ids), (1, "ja", &mut new_ids)] {
+        let response = app
+            .clone()
+            .oneshot(json_request(
+                "PATCH",
+                "/api/v1/settings/metadata-language",
+                serde_json::json!({"expected_revision":revision,"language":language}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = body_json(response).await;
+        for operation in body["data"]["operations"].as_array().unwrap() {
+            let id = operation["operation_id"].as_str().unwrap().to_string();
+            let library = operation["library_id"].as_str().unwrap();
+            wait_for_operation(
+                &app,
+                &format!("/api/v1/libraries/{library}/operations/{id}"),
+            )
+            .await;
+            ids.push(id);
+        }
+        clock.0.store(NOW, std::sync::atomic::Ordering::SeqCst);
+    }
+    let handle = state.store();
+    let store = handle.lock();
+    store
+        .prune_terminal_operations(NOW - WINDOW, 100, false)
+        .unwrap();
+    for id in old_ids {
+        assert!(store.library_operation_view(&id).unwrap().is_none());
+    }
+    for id in new_ids {
+        let view = store
+            .library_operation_view(&id)
+            .unwrap()
+            .expect("today's operation must survive retention");
+        assert_eq!(view.updated_at_ms, NOW);
+    }
+}

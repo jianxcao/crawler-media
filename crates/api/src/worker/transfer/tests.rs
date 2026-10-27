@@ -6,6 +6,8 @@ use crate::management::ApiState;
 
 use super::*;
 
+mod snapshot;
+
 struct EmptyFetcher;
 
 impl indexer::Fetcher for EmptyFetcher {
@@ -124,16 +126,24 @@ fn recorder<'a>(
     lease: &'a crate::library_lifecycle::LibraryWorkLease,
     plan: &'a TransferPlan,
 ) -> PlannedPublicationRecorder<'a> {
+    let (fingerprint, snapshot) = {
+        let store = state.store.lock();
+        (
+            store
+                .read_fingerprint(&plan.library_id, subscribe.media_id)
+                .unwrap(),
+            store
+                .subscribe_library_snapshot(subscribe, domain::MediaKind::Movie)
+                .unwrap(),
+        )
+    };
     PlannedPublicationRecorder::new(
         PublicationRecorder {
             state,
             subscribe,
             lease,
-            fingerprint: state
-                .store
-                .lock()
-                .read_fingerprint(&plan.library_id, subscribe.media_id)
-                .unwrap(),
+            fingerprint,
+            snapshot,
         },
         plan,
     )
@@ -170,6 +180,11 @@ fn changed_root_is_rejected_before_reservation_even_with_a_new_facts_snapshot() 
             subscribe: &subscribe,
             lease: &lease,
             fingerprint,
+            snapshot: state
+                .store
+                .lock()
+                .subscribe_library_snapshot(&subscribe, media.kind)
+                .unwrap(),
         },
         &plan,
     );
@@ -184,47 +199,6 @@ fn changed_root_is_rejected_before_reservation_even_with_a_new_facts_snapshot() 
     assert!(
         result.is_err(),
         "obsolete root must not be reserved: {result:?}"
-    );
-    assert!(state.store.lock().list_file_coverage().unwrap().is_empty());
-    assert!(!candidate_cov.file.path.exists());
-}
-
-#[test]
-fn changed_transfer_setting_is_rejected_before_reservation() {
-    let (tmp, state, media, subscribe) = fixture();
-    state.store.lock().set_transfer_mode("copy").unwrap();
-    let plan = resolve_transfer_plan(&state, &media, &subscribe).unwrap();
-    let lease = state.acquire_library_work(&plan.library_id).unwrap();
-    state.store.lock().set_transfer_mode("move").unwrap();
-    let fingerprint = state
-        .store
-        .lock()
-        .read_fingerprint(&plan.library_id, media.id)
-        .unwrap();
-    assert_eq!(
-        fingerprint, plan.fingerprint,
-        "settings evade the scoped fingerprint"
-    );
-    let recorder = PlannedPublicationRecorder::new(
-        PublicationRecorder {
-            state: &state,
-            subscribe: &subscribe,
-            lease: &lease,
-            fingerprint,
-        },
-        &plan,
-    );
-    let source = tmp.path().join("source.mkv");
-    let candidate_cov = candidate(&media, &plan, &source, library::TransferMode::Copy);
-    let result = subscribe::TransferRecorder::prepare(
-        &recorder,
-        &candidate_cov,
-        &source,
-        library::TransferMode::Copy,
-    );
-    assert!(
-        result.is_err(),
-        "obsolete mode must not be reserved: {result:?}"
     );
     assert!(state.store.lock().list_file_coverage().unwrap().is_empty());
     assert!(!candidate_cov.file.path.exists());

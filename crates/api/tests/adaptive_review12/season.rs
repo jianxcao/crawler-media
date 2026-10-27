@@ -6,6 +6,150 @@ struct ChangedCapture {
     target: String,
     mode: &'static str,
 }
+
+struct RestoreCancelledCapture {
+    inner: Arc<FixtureEngine>,
+    store: Arc<Mutex<Store>>,
+    anchor: domain::LedgerId,
+    triggered: std::sync::atomic::AtomicBool,
+}
+
+impl FingerprintCaptureEngine for RestoreCancelledCapture {
+    fn capture_window(
+        &self,
+        request: &CaptureRequest,
+    ) -> Result<CapturedFingerprint, CaptureFailure> {
+        let result = self.inner.capture_window(request)?;
+        if !self.triggered.swap(true, Ordering::SeqCst) {
+            let store = self.store.lock();
+            for (presence, missing_at, at) in [
+                (domain::FilePresence::Missing, None, 1_000),
+                (domain::FilePresence::Present, Some(1_000), 1_001),
+            ] {
+                let file = store.file_coverage_by_id(self.anchor).unwrap().unwrap();
+                let observation = store::LedgerPresenceObservation {
+                    path_key: file.path_key.clone(),
+                    file,
+                    missing_at,
+                    presence,
+                };
+                store
+                    .apply_ledger_presence(&[observation], store::LedgerPresenceMode::Verify, at)
+                    .unwrap();
+            }
+        }
+        Ok(result)
+    }
+}
+
+#[test]
+fn restored_anchor_does_not_publish_adaptive_samples_after_cancellation() {
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        run_restored_anchor_capture_test();
+        done_tx.send(()).unwrap();
+    });
+    done_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("adaptive sampling must complete without deadlock");
+}
+
+fn run_restored_anchor_capture_test() {
+    let mut f = setup("uniform", &[1, 2, 3]);
+    let ids: Vec<_> = f
+        .units
+        .iter()
+        .map(|u| u.row.file.file_id.to_string())
+        .collect();
+    let capture = Arc::new(RestoreCancelledCapture {
+        inner: f.engine.clone(),
+        store: f.store.clone(),
+        anchor: f.units[0].row.file.file_id,
+        triggered: std::sync::atomic::AtomicBool::new(false),
+    });
+    f.manager = ProbeManager::with_engines(f.store.clone(), f.engine.clone(), capture);
+    {
+        let store = f.store.lock();
+        let specs: Vec<_> = ids
+            .iter()
+            .map(|id| store::ProbeJobUnitSpec {
+                ledger_id: id,
+                kind: "tv",
+                force_fingerprint: true,
+                reuse_fingerprint_cache: false,
+                overwrite_markers: false,
+                reuse_media_info_cache: true,
+            })
+            .collect();
+        assert!(
+            store
+                .create_probe_job(
+                    "adaptive-cancel",
+                    "media_probe",
+                    &f.media_id.to_string(),
+                    Some(1),
+                    "adaptive-cancel",
+                    &specs
+                )
+                .unwrap()
+        );
+        for id in &ids {
+            assert!(store.start_probe_unit("adaptive-cancel", id).unwrap());
+        }
+    }
+    for unit in &mut f.units {
+        unit.job_id = Some("adaptive-cancel".into());
+        unit.overwrite_markers = false;
+    }
+    let result = tokio::runtime::Runtime::new().unwrap().block_on(
+        api::probe_manager::season::run_adaptive_season_pipeline(
+            &f.manager,
+            "adaptive-cancel",
+            f.media_id,
+            1,
+            &f.units,
+        ),
+    );
+    let store = f.store.lock();
+    let attempts = store
+        .list_fingerprint_attempts_for_job("adaptive-cancel")
+        .unwrap();
+    assert!(
+        result
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.starts_with("file_deleted")),
+        "pipeline result: {result:?}; attempts: {attempts:?}"
+    );
+    assert!(!attempts.is_empty());
+    assert!(attempts.iter().all(|attempt| attempt.status == "cancelled"));
+    let profile = api::fingerprint_job::capture_profile_key(
+        &api::fingerprint_job::FingerprintCaptureProfile::default(),
+    );
+    for attempt in &attempts {
+        let row = f
+            .units
+            .iter()
+            .find(|unit| unit.row.file.file_id.to_string() == attempt.ledger_id)
+            .unwrap();
+        let samples = store
+            .find_covering_fingerprint_samples(&store::FingerprintSampleQuery {
+                ledger_id: attempt.ledger_id.clone(),
+                source_version: api::fingerprint_job::current_source_version(&row.row.file.path),
+                capture_profile_key: profile.clone(),
+                kind: attempt.kind.clone(),
+                window_start_ms: attempt.window_start_ms,
+                window_end_ms: attempt.window_end_ms,
+                captured_job_id: Some("adaptive-cancel".into()),
+            })
+            .unwrap();
+        assert!(
+            samples.is_empty(),
+            "cancelled attempt persisted samples: {samples:?}"
+        );
+    }
+}
+
 impl FingerprintCaptureEngine for ChangedCapture {
     fn capture_window(&self, r: &CaptureRequest) -> Result<CapturedFingerprint, CaptureFailure> {
         let mut result = self.inner.capture_window(r)?;

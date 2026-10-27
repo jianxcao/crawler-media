@@ -2,8 +2,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use super::{ProbeManager, ProbeUnit, single_episode, single_season};
 use crate::http::store_wait::{STORE_READ_WAIT, STORE_WRITE_WAIT, store_read_handle};
-use super::{ProbeManager, ProbeUnit, projected_episode, projected_season};
 
 /// Stream facts reader; tests inject a deterministic source replacement here.
 pub trait TracksProbe: Send + Sync {
@@ -15,6 +15,12 @@ pub trait TracksProbe: Send + Sync {
 }
 
 pub(super) struct FfprobeTracks;
+
+#[derive(Debug)]
+pub(super) enum TrackProbeError {
+    Failed,
+    Retry,
+}
 
 impl TracksProbe for FfprobeTracks {
     fn probe(
@@ -74,8 +80,8 @@ async fn reused_media_duration(
         .record_media_info(unit.job_id.as_deref(), 0, true);
     tracing::info!(
         media_id = %unit.row.file.media_id,
-        season = projected_season(&unit.row),
-        episode = projected_episode(&unit.row),
+        season = ?single_season(&unit.row),
+        episode = ?single_episode(&unit.row),
         ledger_id,
         source_version,
         format_duration_ms = ?duration_ms,
@@ -89,14 +95,14 @@ pub(super) async fn probe_tracks_and_store(
     mgr: &ProbeManager,
     unit: &ProbeUnit,
     source_version: &str,
-) -> Result<Option<i64>, ()> {
+) -> Result<Option<i64>, TrackProbeError> {
     let ledger_id = unit.row.file.file_id.to_string();
     let path = PathBuf::from(&unit.row.file.path);
     let started_at = Instant::now();
     tracing::info!(
         media_id = %unit.row.file.media_id,
-        season = projected_season(&unit.row),
-        episode = projected_episode(&unit.row),
+        season = ?single_season(&unit.row),
+        episode = ?single_episode(&unit.row),
         ledger_id,
         path = %path.display(),
         refresh_id = ?unit.marker_refresh_id,
@@ -107,38 +113,54 @@ pub(super) async fn probe_tracks_and_store(
     {
         return Ok(Some(cached));
     }
-    let tracks = read_tracks(mgr, unit, started_at).await?;
+    let tracks = read_tracks(mgr, unit, started_at)
+        .await
+        .map_err(|()| TrackProbeError::Failed)?;
     let (tracks, duration_ms) = tracks;
     let published = {
         if crate::fingerprint_job::source::observe_source(&unit.row).is_err() {
-            return Err(());
+            return Err(TrackProbeError::Failed);
         }
         let unit_for_write = unit.clone();
         let tracks_for_write = tracks.clone();
         let version = source_version.to_string();
-        match store_read_handle(mgr.store.clone(), STORE_WRITE_WAIT, move |store| {
-            if crate::fingerprint_job::source::ensure_source_recorded(store, &unit_for_write.row)
+        let store = mgr.store.clone();
+        match tokio::task::spawn_blocking(move || {
+            let store = store.try_lock_for(STORE_WRITE_WAIT)?;
+            if !super::worker::unit_is_active(&store, &unit_for_write)
+                || crate::fingerprint_job::source::ensure_source_recorded(
+                    &store,
+                    &unit_for_write.row,
+                )
                 .is_err()
             {
-                return None;
+                return Some(None);
             }
-            Some(super::probe::publish_probe_tracks(
-                store,
+            Some(Some(super::probe::publish_probe_tracks(
+                &store,
                 &unit_for_write,
                 &version,
                 &tracks_for_write,
                 duration_ms,
-            ))
+            )))
         })
         .await
         {
-            Ok(Some(published)) => published,
+            Ok(Some(Some(published))) => published,
             // The lock stayed contended for the write budget: keep the durable row
             // and let the job's retry re-run the stage rather than publishing half.
-            Ok(None) => return Err(()),
+            Ok(Some(None)) => return Err(TrackProbeError::Retry),
+            Ok(None) => {
+                tracing::warn!(ledger_id, "流信息发布未拿到 Store 锁，稍后重试");
+                return Err(TrackProbeError::Retry);
+            }
             Err(error) => {
-                tracing::warn!(?error, ledger_id, "流信息发布未拿到 Store 锁，单元留在持久队列");
-                return Err(());
+                tracing::warn!(
+                    ?error,
+                    ledger_id,
+                    "流信息发布未拿到 Store 锁，单元留在持久队列"
+                );
+                return Err(TrackProbeError::Retry);
             }
         }
     };
@@ -147,31 +169,31 @@ pub(super) async fn probe_tracks_and_store(
         Ok(false) => {
             tracing::warn!(
                 media_id = %unit.row.file.media_id,
-                season = projected_season(&unit.row),
-                episode = projected_episode(&unit.row),
+                season = ?single_season(&unit.row),
+                episode = ?single_episode(&unit.row),
                 ledger_id,
                 source_version,
                 "【媒体信息】探测结果属于已被替换的文件版本，丢弃不发布"
             );
-            return Err(());
+            return Err(TrackProbeError::Failed);
         }
         Err(error) => {
             tracing::error!(
                 %error,
                 media_id = %unit.row.file.media_id,
-                season = projected_season(&unit.row),
-                episode = projected_episode(&unit.row),
+                season = ?single_season(&unit.row),
+                episode = ?single_episode(&unit.row),
                 ledger_id,
                 elapsed_ms = started_at.elapsed().as_millis() as u64,
                 "【媒体信息】流信息缓存写入失败"
             );
-            return Err(());
+            return Err(TrackProbeError::Retry);
         }
     }
     tracing::info!(
         media_id = %unit.row.file.media_id,
-        season = projected_season(&unit.row),
-        episode = projected_episode(&unit.row),
+        season = ?single_season(&unit.row),
+        episode = ?single_episode(&unit.row),
         ledger_id,
         path = %path.display(),
         video = tracks.video.is_some(),
@@ -218,8 +240,8 @@ async fn read_tracks(
             tracing::error!(
                 %error,
                 media_id = %unit.row.file.media_id,
-                season = projected_season(&unit.row),
-                episode = projected_episode(&unit.row),
+                season = ?single_season(&unit.row),
+                episode = ?single_episode(&unit.row),
                 ledger_id,
                 path = %path.display(),
                 elapsed_ms = started_at.elapsed().as_millis() as u64,
@@ -256,8 +278,8 @@ fn read_tracks_with_nfo(
     let tracks_path = PathBuf::from(&unit.row.file.path);
     let nfo_path = tracks_path.with_extension("nfo");
     let media_id = unit.row.file.media_id;
-    let season = projected_season(&unit.row);
-    let episode = projected_episode(&unit.row);
+    let season = single_season(&unit.row);
+    let episode = single_episode(&unit.row);
     let probe_ledger_id = unit.row.file.file_id.to_string();
     match engine.probe(&tracks_path, control) {
         Ok((tracks, duration_ms)) => {
@@ -281,8 +303,8 @@ fn read_tracks_with_nfo(
                 }) {
                     tracing::warn!(
                         media_id = %media_id,
-                        season,
-                        episode,
+                        ?season,
+                        ?episode,
                         ledger_id = %probe_ledger_id,
                         path = %tracks_path.display(),
                         nfo_path = %nfo_path.display(),
@@ -293,8 +315,8 @@ fn read_tracks_with_nfo(
                 } else {
                     tracing::debug!(
                         media_id = %media_id,
-                        season,
-                        episode,
+                        ?season,
+                        ?episode,
                         ledger_id = %probe_ledger_id,
                         nfo_path = %nfo_path.display(),
                         elapsed_ms = probe_started_at.elapsed().as_millis() as u64,
@@ -304,8 +326,8 @@ fn read_tracks_with_nfo(
             } else {
                 tracing::warn!(
                     media_id = %media_id,
-                    season,
-                    episode,
+                    ?season,
+                    ?episode,
                     ledger_id = %probe_ledger_id,
                     path = %tracks_path.display(),
                     elapsed_ms = probe_started_at.elapsed().as_millis() as u64,
@@ -317,8 +339,8 @@ fn read_tracks_with_nfo(
         Err(error) => {
             tracing::warn!(
                 media_id = %media_id,
-                season,
-                episode,
+                ?season,
+                ?episode,
                 ledger_id = %probe_ledger_id,
                 path = %tracks_path.display(),
                 error = %error,

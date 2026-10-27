@@ -11,7 +11,7 @@ mod support;
 async fn pinned_snapshot(cancel: bool) {
     let mut fixture = support::Fixture::new(100);
     let pool = fixture.state.library_read_pool_weak().upgrade().unwrap();
-    assert_eq!(support::checkpoint(&fixture.database(), "TRUNCATE").0, 0);
+    wait_for_initial_checkpoint(&fixture.database()).await;
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let release = Mutex::new(release_rx);
@@ -116,6 +116,24 @@ async fn pinned_snapshot(cancel: bool) {
     }
     fixture.files.clear();
 }
+
+async fn wait_for_initial_checkpoint(path: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let path = path.to_path_buf();
+        let result = tokio::task::spawn_blocking(move || support::checkpoint(&path, "TRUNCATE"))
+            .await
+            .unwrap();
+        if result == (0, 0, 0) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "initial checkpoint remained busy: {result:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
 async fn wait_for_worker(state: &api::ApiState, pool: &store::LibraryReadPool) {
     let deadline = Instant::now() + Duration::from_secs(3);
     while pool.available() != 2 || state.http_work.available_permits() != 8 {
@@ -133,4 +151,30 @@ async fn active_snapshot_allows_100_file_writer_commit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelled_snapshot_returns_only_after_worker_cleanup_then_checkpoint_recovers() {
     pinned_snapshot(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initial_checkpoint_waits_for_a_transient_snapshot() {
+    let mut fixture = support::Fixture::new(1);
+    let path = fixture.database();
+    let snapshot = rusqlite::Connection::open(&path).unwrap();
+    snapshot.execute_batch("BEGIN").unwrap();
+    let _: i64 = snapshot
+        .query_row("SELECT COUNT(*) FROM library_files", [], |row| row.get(0))
+        .unwrap();
+    support::write_batch(&fixture.state, &mut fixture.files, 1);
+    assert_eq!(support::checkpoint(&path, "TRUNCATE").0, 1);
+    let wait_path = path.clone();
+    let waiter = tokio::spawn(async move { wait_for_initial_checkpoint(&wait_path).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let waited = !waiter.is_finished();
+    snapshot.execute_batch("ROLLBACK").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), waiter)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        waited,
+        "initial checkpoint must wait until the snapshot is released"
+    );
 }

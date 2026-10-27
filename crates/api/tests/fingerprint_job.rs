@@ -82,7 +82,8 @@ fn cached_outro_fingerprints_produce_full_credit_markers() {
             (coverage(media_id, 1), first, 600_000),
             (coverage(media_id, 2), second, 900_000),
         ],
-    );
+    )
+    .unwrap();
 
     assert_eq!(markers.len(), 2);
     for (episode, expected_start) in [(1, 600_000), (2, 900_000)] {
@@ -97,4 +98,28 @@ fn cached_outro_fingerprints_produce_full_credit_markers() {
         );
         assert_eq!(marker.intro_start_ms, None);
     }
+}
+
+#[test]
+fn automatic_fingerprint_comparison_rejects_unmapped_multiunit_files() {
+    let media_id = MediaId::new();
+    let mut combined = coverage(media_id, 1);
+    combined.units.push(UnitKey::new(1, 2));
+    let result =
+        analyze_fingerprints_with_outro(media_id, 1, vec![(combined, vec![1, 2, 3])], vec![]);
+    assert!(
+        result
+            .unwrap_err()
+            .contains("unit_time_mapping_unsupported")
+    );
+}
+
+#[test]
+fn automatic_fingerprint_comparison_rejects_cross_season_identity() {
+    let media_id = MediaId::new();
+    let mut second_season = coverage(media_id, 1);
+    second_season.units = vec![UnitKey::new(2, 1)];
+    let result =
+        analyze_fingerprints_with_outro(media_id, 1, vec![(second_season, vec![1, 2, 3])], vec![]);
+    assert!(result.unwrap_err().contains("fingerprint_unit_mismatch"));
 }

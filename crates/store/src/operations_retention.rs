@@ -52,6 +52,8 @@ impl PruneCounts {
 struct Journal {
     table: &'static str,
     id_column: &'static str,
+    /// The measured terminal-age access path; the current layout validates its name.
+    age_index: &'static str,
     /// Column the retention window compares against: when the operation last moved.
     at_column: &'static str,
     /// Child tables and the column that points at the parent id, deleted first in the same
@@ -68,6 +70,7 @@ impl Journal {
             "library_operations" => Self {
                 table,
                 id_column: "operation_id",
+                age_index: "library_operations_terminal_age",
                 at_column: "updated_at_ms",
                 // `library_query_count_rebuild` has ON DELETE CASCADE, but deleting it
                 // explicitly keeps the batch identical on a connection without the pragma.
@@ -77,6 +80,7 @@ impl Journal {
             "scan_operations" => Self {
                 table,
                 id_column: "id",
+                age_index: "scan_operations_terminal_age",
                 // A scan never updates its own row timestamp, so the enqueue time is the
                 // only durable one. A scan older than the window is pruned even if it ran
                 // long; the window is 30 days by default.
@@ -87,6 +91,7 @@ impl Journal {
             "media_operations" => Self {
                 table,
                 id_column: "operation_id",
+                age_index: "media_operations_terminal_age",
                 at_column: "updated_at_ms",
                 children: &[],
                 terminal: crate::media_operations::terminal_operation_predicate(),
@@ -101,11 +106,7 @@ impl Journal {
 /// Note: `library_removals` is intentionally excluded from pruning: `library_removal_roots`
 /// serves as the permanent security boundary (crates/store/src/library_deletion/mod.rs)
 /// preventing re-ingestion of deleted library roots by watchers or auto_resolve.
-const JOURNALS: [&str; 3] = [
-    "library_operations",
-    "scan_operations",
-    "media_operations",
-];
+const JOURNALS: [&str; 3] = ["library_operations", "scan_operations", "media_operations"];
 
 /// One row the window selected, before it is deleted.
 struct Candidate {
@@ -190,11 +191,12 @@ fn select_candidates(
     for (index, table) in JOURNALS.iter().enumerate() {
         let journal = Journal::owning_terminal(table);
         let sql = format!(
-            "SELECT {}, {} FROM {} WHERE ({}) AND {} < ?1
+            "SELECT {}, {} FROM {} INDEXED BY {} WHERE ({}) AND {} < ?1
              ORDER BY {}, {} LIMIT ?2",
             journal.id_column,
             journal.at_column,
             journal.table,
+            journal.age_index,
             journal.terminal,
             journal.at_column,
             journal.at_column,

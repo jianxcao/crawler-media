@@ -40,9 +40,10 @@ pub(crate) fn auto_generate_chapters(state: &ApiState, path: &std::path::Path) {
         .map(|lease| lease.control().clone())
         .unwrap_or_default();
     if let Some(targets) = probe_chapter_targets(path, &control)
-        && let Err(error) = state.chapter_frames.enqueue_path(path, targets) {
-            tracing::debug!(%error, path = %path.display(), "章节帧任务入队失败");
-        }
+        && let Err(error) = state.chapter_frames.enqueue_path(path, targets)
+    {
+        tracing::debug!(%error, path = %path.display(), "章节帧任务入队失败");
+    }
 }
 
 /// 文件持久化归属库（`library_id`）的「生成章节」开关。未入账文件默认开启，
@@ -148,22 +149,54 @@ pub(crate) struct ChapterQuery {
     episode: Option<u32>,
 }
 
-fn selected_row(
+fn selected_target(
     rows: &[domain::FileCoverage],
     query: ChapterQuery,
-) -> Option<domain::FileCoverage> {
+) -> Option<(domain::FileCoverage, domain::UnitKey)> {
     match (query.season, query.episode) {
-        (Some(season), Some(episode)) => rows
-            .iter()
-            .find(|row| {
-                row.units.iter().any(|unit| {
-                    u32::try_from(unit.season).ok() == Some(season)
-                        && u32::try_from(unit.episode).ok() == Some(episode)
+        (Some(season), Some(episode)) => {
+            let unit =
+                domain::UnitKey::new(i32::try_from(season).ok()?, i32::try_from(episode).ok()?);
+            rows.iter()
+                .find(|row| row.units.contains(&unit))
+                .map(|row| (row.clone(), unit))
+        }
+        _ => {
+            let candidates = rows
+                .iter()
+                .filter(|row| query.season.is_none_or(|season| covers_season(row, season)))
+                .cloned()
+                .collect::<Vec<_>>();
+            let row = preferred_coverage(&candidates)?;
+            let unit = row
+                .units
+                .iter()
+                .copied()
+                .filter(|unit| {
+                    query.season.is_none_or(|season| {
+                        unit.episode_coordinates()
+                            .is_some_and(|coordinates| coordinates.0 == season)
+                    })
                 })
-            })
-            .cloned(),
-        _ => preferred_coverage(rows).cloned(),
+                .max_by_key(|unit| (unit.season, unit.episode))?;
+            Some((row.clone(), unit))
+        }
     }
+}
+
+fn covers_season(row: &domain::FileCoverage, season: u32) -> bool {
+    row.units.iter().any(|unit| {
+        unit.episode_coordinates()
+            .is_some_and(|coordinates| coordinates.0 == season)
+    })
+}
+
+fn theintrodb_client(state: &ApiState) -> Option<crate::theintrodb::TheIntroDbClient> {
+    let store = state.store.lock();
+    let config = store.get_scrape_config().ok()?;
+    let effective = &config.effective;
+    (effective.theintrodb_enabled && effective.theintrodb_api_key.is_some())
+        .then(|| crate::theintrodb::TheIntroDbClient::new(effective.theintrodb_api_key.clone()))
 }
 
 /// GET /libraries/{id}/items/{item_id}/chapters — probe chapters, with
@@ -178,7 +211,7 @@ pub(crate) async fn chapters(
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
     };
-    let (row, media) = {
+    let (row, unit, media) = {
         let store = state.store.lock();
         let library = match require_visible_library(&store, &id, user_id) {
             Ok(library) => library,
@@ -193,37 +226,40 @@ pub(crate) async fn chapters(
             .into_iter()
             .filter(|row| row.file.library_id.to_string() == library.id)
             .collect();
-        let Some(row) = selected_row(&rows, query) else {
+        let Some((row, unit)) = selected_target(&rows, query) else {
             return err(
                 StatusCode::NOT_FOUND,
                 "library.item_missing",
                 "条目没有在位文件",
             );
         };
-        (row, media)
+        (row, unit, media)
     };
-    let theintrodb_client = {
-        let store = state.store.lock();
-        let cfg = store.get_scrape_config().ok();
-        let eff = cfg.as_ref().map(|config| &config.effective);
-        let enabled = eff.map(|config| config.theintrodb_enabled).unwrap_or(false);
-        let key = eff.and_then(|config| config.theintrodb_api_key.clone());
-        (enabled && key.is_some()).then(|| crate::theintrodb::TheIntroDbClient::new(key))
-    };
-    let resolved =
-        crate::marker_resolver::resolve_item_chapters(&state, &row, &media, theintrodb_client)
-            .await;
+    let theintrodb_client = theintrodb_client(&state);
+    let resolved = crate::marker_resolver::resolve_item_chapters(
+        &state,
+        &row,
+        unit,
+        &media,
+        theintrodb_client,
+    )
+    .await;
 
     if resolved.is_empty() {
         return ok_list(Vec::new()).into_response();
     }
-    let items: Vec<Value> = resolved
+    let items = chapter_items(&row, &resolved);
+    ok_list(items).into_response()
+}
+
+fn chapter_items(row: &domain::FileCoverage, chapters: &[library::ChapterMarker]) -> Vec<Value> {
+    chapters
         .iter()
         .enumerate()
         .map(|(index, chapter)| {
-            let image_url = chapter_image_path(&row.file.path, index)
-                .is_file()
-                .then(|| format!("/chapters/{}/{index}", row.file.file_id));
+            let image_url = (row.units.len() == 1
+                && chapter_image_path(&row.file.path, index).is_file())
+            .then(|| format!("/chapters/{}/{index}", row.file.file_id));
             let mut obj = json!({
                 "start_ms": chapter.start_ms,
                 "end_ms": chapter.end_ms,
@@ -240,8 +276,7 @@ pub(crate) async fn chapters(
             }
             obj
         })
-        .collect();
-    ok_list(items).into_response()
+        .collect()
 }
 
 /// POST /libraries/{id}/items/{item_id}/chapters/refresh — force clear cached
@@ -256,7 +291,7 @@ pub(crate) async fn refresh_item_chapters(
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
     };
-    let (row, media, rows) = {
+    let (row, unit, media, rows) = {
         let store = state.store.lock();
         let library = match require_visible_library(&store, &id, user_id) {
             Ok(library) => library,
@@ -271,37 +306,105 @@ pub(crate) async fn refresh_item_chapters(
             .into_iter()
             .filter(|row| row.file.library_id.to_string() == library.id)
             .collect();
-        let Some(row) = selected_row(&rows, query) else {
+        let Some((row, unit)) = selected_target(&rows, query) else {
             return err(
                 StatusCode::NOT_FOUND,
                 "library.item_missing",
                 "条目没有在位文件",
             );
         };
-        (row, media, rows)
+        (row, unit, media, rows)
     };
 
-    let theintrodb_client = {
-        let store = state.store.lock();
-        let cfg = store.get_scrape_config().ok();
-        let eff = cfg.as_ref().map(|config| &config.effective);
-        let enabled = eff.map(|config| config.theintrodb_enabled).unwrap_or(false);
-        let key = eff.and_then(|config| config.theintrodb_api_key.clone());
-        (enabled && key.is_some()).then(|| crate::theintrodb::TheIntroDbClient::new(key))
-    };
+    let requested_season = unit
+        .episode_coordinates()
+        .map_or(1, |coordinates| coordinates.0);
+    if row.units.len() != 1
+        || rows.iter().any(|candidate| {
+            covers_season(candidate, requested_season) && candidate.units.len() != 1
+        })
+    {
+        tracing::error!(%media_id, season = requested_season, error_kind = "unit_time_mapping_unsupported",
+            "chapter refresh rejected: multiunit file needs unit time mapping");
+        return err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "chapters.unit_time_mapping_unsupported",
+            "多单元文件缺少分集时间映射，保留现有片头片尾标记",
+        );
+    }
+
+    let theintrodb_client = theintrodb_client(&state);
     let refreshed = if media.kind == domain::MediaKind::Tv {
-        crate::marker_resolver::resolve_item_chapters(&state, &row, &media, theintrodb_client).await
-    } else {
-        crate::marker_resolver::force_refresh_item_chapters(&state, &row, &media, theintrodb_client)
+        crate::marker_resolver::resolve_item_chapters(&state, &row, unit, &media, theintrodb_client)
             .await
+    } else {
+        match crate::marker_resolver::force_refresh_item_chapters(
+            &state,
+            &row,
+            unit,
+            &media,
+            theintrodb_client,
+        )
+        .await
+        {
+            Ok(chapters) => chapters,
+            Err(error) => {
+                return err(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "chapters.unit_time_mapping_unsupported",
+                    &error.to_string(),
+                );
+            }
+        }
     };
 
-    let season = row.season_or_one();
+    let season = unit
+        .episode_coordinates()
+        .map_or(1, |coordinates| coordinates.0);
     let fingerprint_rows: Vec<_> = rows
         .iter()
-        .filter(|candidate| candidate.season_or_one() == season)
+        .filter(|candidate| covers_season(candidate, season))
         .cloned()
         .collect();
+    let (probe_queued, season_probe_was_active) =
+        enqueue_season_refresh(&state, &media, &fingerprint_rows, season);
+    let items = chapter_items(&row, &refreshed);
+    let marker_job = match state.probe.marker_refresh_job(media_id, season) {
+        Ok(job) => job,
+        Err(error) => {
+            tracing::error!(%error, %media_id, season, "读取片头片尾刷新任务状态失败");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "library.probe_status_failed",
+                "读取片头片尾任务状态失败，请稍后重试",
+            )
+            .into_response();
+        }
+    };
+    let marker_job_active = marker_job.as_ref().is_some_and(|job| job.is_active());
+    let active_after_enqueue = fingerprint_rows
+        .iter()
+        .any(|candidate| state.probe.is_queued(&candidate.file.file_id.to_string()));
+    let already_running =
+        probe_queued == 0 && (marker_job_active || season_probe_was_active || active_after_enqueue);
+    let enqueue_failed =
+        should_queue_voiceprint_refresh(media.kind) && probe_queued == 0 && !already_running;
+    ok(json!({
+        "chapters": items,
+        "fingerprint_refresh_queued": probe_queued > 0 || marker_job_active,
+        "fingerprint_refresh_already_running": already_running,
+        "fingerprint_refresh_error": enqueue_failed.then_some("声纹刷新任务未能入队"),
+        "fingerprint_refresh_job": marker_job.as_ref().map(probe_job_json),
+    }))
+    .into_response()
+}
+
+fn enqueue_season_refresh(
+    state: &ApiState,
+    media: &domain::Media,
+    fingerprint_rows: &[domain::FileCoverage],
+    season: u32,
+) -> (usize, bool) {
     let season_probe_was_active = fingerprint_rows
         .iter()
         .any(|candidate| state.probe.is_queued(&candidate.file.file_id.to_string()));
@@ -337,58 +440,7 @@ pub(crate) async fn refresh_item_chapters(
         );
     }
 
-    let items: Vec<Value> = refreshed
-        .iter()
-        .enumerate()
-        .map(|(index, chapter)| {
-            let image_url = chapter_image_path(&row.file.path, index)
-                .is_file()
-                .then(|| format!("/chapters/{}/{index}", row.file.file_id));
-            let mut obj = json!({
-                "start_ms": chapter.start_ms,
-                "end_ms": chapter.end_ms,
-                "title": chapter.title,
-                "image_url": image_url,
-            });
-            if let Some(mt) = chapter.marker_type {
-                let tag = match mt {
-                    library::MarkerType::IntroStart => "IntroStart",
-                    library::MarkerType::IntroEnd => "IntroEnd",
-                    library::MarkerType::CreditsStart => "CreditsStart",
-                };
-                obj["marker_type"] = json!(tag);
-            }
-            obj
-        })
-        .collect();
-    let marker_job = match state.probe.marker_refresh_job(media_id, season) {
-        Ok(job) => job,
-        Err(error) => {
-            tracing::error!(%error, %media_id, season, "读取片头片尾刷新任务状态失败");
-            return err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "library.probe_status_failed",
-                "读取片头片尾任务状态失败，请稍后重试",
-            )
-            .into_response();
-        }
-    };
-    let marker_job_active = marker_job.as_ref().is_some_and(|job| job.is_active());
-    let active_after_enqueue = fingerprint_rows
-        .iter()
-        .any(|candidate| state.probe.is_queued(&candidate.file.file_id.to_string()));
-    let already_running =
-        probe_queued == 0 && (marker_job_active || season_probe_was_active || active_after_enqueue);
-    let enqueue_failed =
-        should_queue_voiceprint_refresh(media.kind) && probe_queued == 0 && !already_running;
-    ok(json!({
-        "chapters": items,
-        "fingerprint_refresh_queued": probe_queued > 0 || marker_job_active,
-        "fingerprint_refresh_already_running": already_running,
-        "fingerprint_refresh_error": enqueue_failed.then_some("声纹刷新任务未能入队"),
-        "fingerprint_refresh_job": marker_job.as_ref().map(probe_job_json),
-    }))
-    .into_response()
+    (probe_queued, season_probe_was_active)
 }
 
 /// GET /libraries/{id}/items/{item_id}/probe-status?season=N — persistent
@@ -417,9 +469,7 @@ pub(crate) async fn probe_status(
             .file_coverage_for_media(media_id)
             .unwrap_or_default()
             .iter()
-            .any(|row| {
-                row.season_or_one() == season && row.file.library_id.to_string() == library.id
-            });
+            .any(|row| covers_season(row, season) && row.file.library_id.to_string() == library.id);
         if !visible {
             return err(
                 StatusCode::NOT_FOUND,
@@ -490,7 +540,7 @@ pub(crate) async fn generate_chapters(
         Ok(id) => id,
         Err(_) => return err(StatusCode::BAD_REQUEST, "library.invalid", "条目 id 无效"),
     };
-    let (row, media) = {
+    let (row, unit, media) = {
         let store = state.store.lock();
         let Some(library) = store.get_library(&id).ok().flatten() else {
             return err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在");
@@ -504,15 +554,22 @@ pub(crate) async fn generate_chapters(
             .into_iter()
             .filter(|row| row.file.library_id.to_string() == library.id)
             .collect();
-        let Some(row) = selected_row(&rows, query) else {
+        let Some((row, unit)) = selected_target(&rows, query) else {
             return err(
                 StatusCode::NOT_FOUND,
                 "library.item_missing",
                 "条目没有在位文件",
             );
         };
-        (row, media)
+        (row, unit, media)
     };
+    if row.units.len() != 1 {
+        return err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "chapters.unit_time_mapping_unsupported",
+            "多单元文件缺少分集时间映射",
+        );
+    }
     let path = row.file.path.clone();
     let probe_lease = match state.acquire_library_work(&id) {
         Ok(lease) => lease,
@@ -528,17 +585,15 @@ pub(crate) async fn generate_chapters(
     .unwrap_or_default();
 
     if targets.is_empty() {
-        let theintrodb_client = {
-            let store = state.store.lock();
-            let cfg = store.get_scrape_config().ok();
-            let eff = cfg.as_ref().map(|config| &config.effective);
-            let enabled = eff.map(|config| config.theintrodb_enabled).unwrap_or(false);
-            let key = eff.and_then(|config| config.theintrodb_api_key.clone());
-            (enabled && key.is_some()).then(|| crate::theintrodb::TheIntroDbClient::new(key))
-        };
-        let resolved =
-            crate::marker_resolver::resolve_item_chapters(&state, &row, &media, theintrodb_client)
-                .await;
+        let theintrodb_client = theintrodb_client(&state);
+        let resolved = crate::marker_resolver::resolve_item_chapters(
+            &state,
+            &row,
+            unit,
+            &media,
+            theintrodb_client,
+        )
+        .await;
         targets = resolved.iter().map(|c| (c.start_ms, c.end_ms)).collect();
     }
 

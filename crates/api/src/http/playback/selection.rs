@@ -26,7 +26,7 @@ fn target_item(
             media: media_id,
             key: UnitKey::new(s as i32, e as i32),
         },
-        (None, None) => match inferred_unit(store, selection.file_id) {
+        (None, None) => match inferred_unit(store, selection.file_id)? {
             Some((s, e)) => TypedItemId::Unit {
                 media: media_id,
                 key: UnitKey::new(s, e),
@@ -86,10 +86,22 @@ pub(super) fn resolve_playback_for(
 }
 
 /// Unit recorded for a selected file, used when a TV request omits coordinates.
-fn inferred_unit(store: &crate::Store, file_id: Option<LedgerId>) -> Option<(i32, i32)> {
-    let cov = store.file_coverage_by_id(file_id?).ok().flatten()?;
-    let u = cov.units.iter().find(|u| !u.is_whole())?;
-    Some((u.season, u.episode))
+fn inferred_unit(
+    store: &crate::Store,
+    file_id: Option<LedgerId>,
+) -> Result<Option<(i32, i32)>, SelectionError> {
+    let Some(file_id) = file_id else {
+        return Ok(None);
+    };
+    let coverage = store
+        .file_coverage_by_id(file_id)
+        .ok()
+        .flatten()
+        .ok_or(SelectionError::Unavailable)?;
+    let [unit] = coverage.units.as_slice() else {
+        return Err(SelectionError::Invalid);
+    };
+    Ok((!unit.is_whole()).then_some((unit.season, unit.episode)))
 }
 
 /// Resolve the source a heartbeat/decide request names, with the same contract.

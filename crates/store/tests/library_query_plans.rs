@@ -136,8 +136,9 @@ fn protocol_default_and_explicit_indexes_each_avoid_a_sort() {
     // convergence tie-breaks (library_id is fixed by the single-library scope).
     let default_order = "ORDER BY i.added_at_sort DESC, i.protocol_title_key DESC, \
                          i.library_id ASC, i.media_id ASC LIMIT 50";
-    let default_sql =
-        format!("SELECT i.library_id, i.media_id FROM library_items i WHERE i.library_id = 'lib' {default_order}");
+    let default_sql = format!(
+        "SELECT i.library_id, i.media_id FROM library_items i WHERE i.library_id = 'lib' {default_order}"
+    );
     let default_text = plan_text(&conn, &default_sql);
     println!("default work order: {default_text}");
     assert!(
@@ -315,7 +316,7 @@ fn v4_library_db_is_rejected() {
     };
     for required in [
         "library",
-        "user_version 5",
+        "user_version 6",
         "scripts/storage-cutover-rebuild.sh",
     ] {
         assert!(message.contains(required), "missing {required}: {message}");
@@ -331,7 +332,10 @@ fn fresh_store_uses_incremental_auto_vacuum() {
     let mode: i64 = conn
         .pragma_query_value(None, "auto_vacuum", |r| r.get(0))
         .unwrap();
-    assert_eq!(mode, 2, "expected INCREMENTAL auto_vacuum on a fresh library.db");
+    assert_eq!(
+        mode, 2,
+        "expected INCREMENTAL auto_vacuum on a fresh library.db"
+    );
 }
 
 /// Playback source selection (`playback/source.rs::source_rows`, the only read on

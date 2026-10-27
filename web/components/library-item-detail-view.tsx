@@ -333,7 +333,7 @@ export function LibraryItemDetailView({
   // The click handler also reports immediate progress, while this effect owns
   // the longer-lived page state and reloads chapter results at a terminal state.
   const probeSeasonsKey = detail?.kind === "tv"
-    ? [...new Set(detail.files.map((file) => file.season ?? 1))].sort((a, b) => a - b).join(",")
+    ? [...new Set(detail.seasons)].sort((a, b) => a - b).join(",")
     : "";
   useEffect(() => {
     if (!detail || detail.kind !== "tv" || !probeSeasonsKey) return;
@@ -981,7 +981,7 @@ export function LibraryItemDetailView({
 
       {/* —— 剧集分集区：季选择 + 分集横滚卡 + 选中集的简介/规格/文件 ——
           分集置于简介之后，确保追剧用户首屏滑下即可立即选集 */}
-      {!isMovie && detail.files.some((f) => f.season != null) && (
+      {!isMovie && detail.seasons.length > 0 && (
         <div className="mt-6 px-12 max-md:px-4">
           <SeasonEpisodesSection
             libraryId={libraryId}

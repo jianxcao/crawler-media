@@ -11,6 +11,7 @@ use crate::fingerprint_job::CaptureGate;
 pub struct MetadataPriorityGate {
     metadata_pending: Arc<AtomicUsize>,
     metadata_idle: Arc<Notify>,
+    shutting_down: Arc<std::sync::atomic::AtomicBool>,
     store: Arc<parking_lot::Mutex<store::Store>>,
     registry: Option<Arc<crate::library_lifecycle::LibraryWorkRegistry>>,
     owners: Option<Arc<std::collections::HashMap<String, (String, marker::WorkControl)>>>,
@@ -21,6 +22,7 @@ impl MetadataPriorityGate {
         Self {
             metadata_pending: manager.metadata_pending.clone(),
             metadata_idle: manager.metadata_idle.clone(),
+            shutting_down: manager.shutting_down.clone(),
             store: manager.store.clone(),
             registry: manager.library_work.lock().clone(),
             owners: None,
@@ -31,6 +33,7 @@ impl MetadataPriorityGate {
         Self {
             metadata_pending: manager.metadata_pending.clone(),
             metadata_idle: manager.metadata_idle.clone(),
+            shutting_down: manager.shutting_down.clone(),
             store: manager.store.clone(),
             registry: manager.library_work.lock().clone(),
             owners: None,
@@ -47,7 +50,9 @@ impl MetadataPriorityGate {
             return Ok((gate, Vec::new()));
         };
         let owners = {
-            let store = manager.store.lock();
+            let store = manager
+                .dispatch_store()
+                .ok_or_else(|| "probe Store busy".to_string())?;
             units
                 .iter()
                 .map(|unit| {
@@ -63,7 +68,7 @@ impl MetadataPriorityGate {
         let mut controls = std::collections::HashMap::new();
         for (_, owner) in &owners {
             if !controls.contains_key(owner) {
-                let lease = registry.acquire(&manager.store, owner)?;
+                let lease = registry.acquire_bounded(&manager.store, owner)?;
                 controls.insert(owner.clone(), lease.control().signal().clone());
                 leases.push(lease);
             }
@@ -170,6 +175,9 @@ mod tests {
 
 impl CaptureGate for MetadataPriorityGate {
     fn work_control(&self, row: &domain::FileCoverage) -> marker::WorkControl {
+        if self.registry.is_none() {
+            return marker::WorkControl::default();
+        }
         let owner = {
             let store = self.store.lock();
             crate::fingerprint_job::source::ensure_source_recorded(&store, row)
@@ -178,14 +186,12 @@ impl CaptureGate for MetadataPriorityGate {
         };
         // A registry-backed capture without an active original lease fails closed.
         // Never switch an old pipeline to a new Library at the same path.
-        if self.registry.is_none() {
-            return marker::WorkControl::default();
-        }
         if let Some(owners) = &self.owners {
             if let Some((original, control)) = owners.get(&row.file.file_id.to_string())
-                && owner.as_ref().is_some_and(|owner| owner == original) {
-                    return control.clone();
-                }
+                && owner.as_ref().is_some_and(|owner| owner == original)
+            {
+                return control.clone();
+            }
         } else if let Some(control) = owner.and_then(|owner| {
             self.registry
                 .as_ref()
@@ -203,7 +209,9 @@ impl CaptureGate for MetadataPriorityGate {
                 let notified = self.metadata_idle.notified();
                 tokio::pin!(notified);
                 notified.as_mut().enable();
-                if self.metadata_pending.load(Ordering::Acquire) == 0 {
+                if self.metadata_pending.load(Ordering::Acquire) == 0
+                    || self.shutting_down.load(Ordering::Acquire)
+                {
                     return;
                 }
                 notified.await;

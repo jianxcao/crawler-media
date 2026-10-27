@@ -33,26 +33,11 @@ fn seed_episode_old_refresh_result(
             marker_type: None,
             synthetic: false,
         },
-        marker::ChapterMarker {
-            start_ms: 111_000,
-            end_ms: 222_000,
-            title: Some("片头".into()),
-            marker_type: Some(marker::MarkerType::IntroStart),
-            synthetic: false,
-        },
-        marker::ChapterMarker {
-            start_ms: 1_000_000,
-            end_ms: 1_050_000,
-            title: Some("片尾".into()),
-            marker_type: Some(marker::MarkerType::CreditsStart),
-            synthetic: false,
-        },
     ];
     store.put_cached_chapters(ledger_id, &cached).unwrap();
 
     cached
 }
-
 struct RefreshHarness {
     _tmp: tempfile::TempDir,
     store: Arc<Mutex<Store>>,
@@ -173,8 +158,8 @@ impl RefreshHarness {
             let marker = store
                 .get_media_marker(
                     self.media_id,
-                    super::super::projected_season_opt(row),
-                    super::super::projected_episode_opt(row),
+                    super::super::single_season_opt(row),
+                    super::super::single_episode_opt(row),
                 )
                 .unwrap()
                 .expect("旧标记事实必须保持可见");
@@ -188,9 +173,216 @@ impl RefreshHarness {
                 .unwrap()
                 .expect("旧章节缓存必须存在");
             assert_eq!(chapters, self.expected_chapters[idx]);
-            assert!(chapters.iter().any(|c| c.marker_type.is_some()));
+            assert!(chapters.iter().all(|c| c.marker_type.is_none()));
         }
     }
+}
+
+struct PresenceRaceTracks;
+
+struct PresenceRaceFingerprint;
+
+impl marker::FingerprintEngine for PresenceRaceFingerprint {
+    fn extract_at(
+        &self,
+        _path: &std::path::Path,
+        _start_secs: u32,
+        _duration_secs: u32,
+    ) -> Result<marker::AudioFingerprint, String> {
+        Ok(vec![1, 2, 3])
+    }
+
+    fn find_common_segment(
+        &self,
+        _first: &[u32],
+        _second: &[u32],
+        _min_duration_secs: f32,
+        _max_duration_secs: f32,
+    ) -> Option<marker::CommonSegment> {
+        None
+    }
+}
+
+impl super::super::TracksProbe for PresenceRaceTracks {
+    fn probe(
+        &self,
+        _path: &std::path::Path,
+        _control: &library::WorkControl,
+    ) -> Result<(library::Tracks, Option<i64>), library::LibraryError> {
+        Ok((library::Tracks::default(), Some(1_000)))
+    }
+}
+
+#[test]
+fn restored_presence_does_not_revive_cancelled_probe_unit() {
+    let (done, completion) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = std::panic::catch_unwind(|| runtime.block_on(check_restored_presence()));
+        done.send(result).unwrap();
+    });
+    completion
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("presence regression timed out")
+        .unwrap();
+    worker.join().unwrap();
+}
+
+async fn check_restored_presence() {
+    let harness = RefreshHarness::new();
+    let manager =
+        ProbeManager::new(harness.store.clone()).with_tracks_probe(Arc::new(PresenceRaceTracks));
+    let ids: Vec<String> = harness
+        .rows
+        .iter()
+        .map(|row| row.file.file_id.to_string())
+        .collect();
+    let specs: Vec<_> = ids
+        .iter()
+        .map(|id| store::ProbeJobUnitSpec {
+            ledger_id: id,
+            kind: "tv",
+            force_fingerprint: false,
+            reuse_fingerprint_cache: false,
+            overwrite_markers: false,
+            reuse_media_info_cache: false,
+        })
+        .collect();
+    let mut units = harness.make_units();
+    for unit in &mut units {
+        unit.job_id = Some("presence-race".into());
+        unit.reuse_media_info_cache = false;
+    }
+    {
+        let store = harness.store.lock();
+        assert!(
+            store
+                .create_probe_job(
+                    "presence-race",
+                    "media_probe",
+                    &harness.media_id.to_string(),
+                    None,
+                    "presence-race",
+                    &specs,
+                )
+                .unwrap()
+        );
+        for id in &ids {
+            assert!(store.start_probe_unit("presence-race", id).unwrap());
+        }
+        let current = store
+            .file_coverage_by_id(harness.rows[0].file.file_id)
+            .unwrap()
+            .unwrap();
+        let observation = store::LedgerPresenceObservation {
+            path_key: current.path_key.clone(),
+            file: current,
+            missing_at: None,
+            presence: domain::FilePresence::Missing,
+        };
+        assert_eq!(
+            store
+                .apply_ledger_presence(&[observation], store::LedgerPresenceMode::Verify, 1000,)
+                .unwrap()
+                .missing,
+            1
+        );
+        let current = store
+            .file_coverage_by_id(harness.rows[0].file.file_id)
+            .unwrap()
+            .unwrap();
+        let observation = store::LedgerPresenceObservation {
+            path_key: current.path_key.clone(),
+            file: current,
+            missing_at: Some(1000),
+            presence: domain::FilePresence::Present,
+        };
+        assert_eq!(
+            store
+                .apply_ledger_presence(&[observation], store::LedgerPresenceMode::Verify, 1001,)
+                .unwrap()
+                .restored,
+            1
+        );
+        assert!(
+            store
+                .get_probe_job("presence-race")
+                .unwrap()
+                .unwrap()
+                .is_active()
+        );
+    }
+    assert!(!worker::source_ready(&harness.manager, &units[0]));
+    assert!(worker::source_ready(&harness.manager, &units[1]));
+    assert!(
+        super::super::tracks::probe_tracks_and_store(
+            &manager,
+            &units[0],
+            &units[0].row.file.version.source_version,
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        harness
+            .store
+            .lock()
+            .file_coverage_by_id(units[0].row.file.file_id)
+            .unwrap()
+            .unwrap()
+            .file
+            .duration_ms,
+        None
+    );
+    assert!(
+        super::super::tracks::probe_tracks_and_store(
+            &manager,
+            &units[1],
+            &units[1].row.file.version.source_version,
+        )
+        .await
+        .is_ok()
+    );
+    assert_eq!(
+        harness
+            .store
+            .lock()
+            .file_coverage_by_id(units[1].row.file.file_id)
+            .unwrap()
+            .unwrap()
+            .file
+            .duration_ms,
+        Some(1_000)
+    );
+    let outcome = super::super::probe::probe_fingerprint_and_store_detailed(
+        &manager,
+        &units[0],
+        units[0].row.file.path.clone(),
+        60,
+        None,
+        units[0].row.file.version.source_version.clone(),
+        Arc::new(PresenceRaceFingerprint),
+        false,
+        false,
+    )
+    .await;
+    assert!(matches!(
+        outcome,
+        super::super::stages::FingerprintRunOutcome::Cancelled { .. }
+    ));
+    assert!(
+        harness
+            .store
+            .lock()
+            .get_fingerprint_cache(&ids[0])
+            .unwrap()
+            .is_none()
+    );
+    assert!(super::super::markers::compare_and_store_markers(&manager, &units[0]).is_err());
+    harness.assert_old_markers_intact();
 }
 
 #[test]
@@ -482,115 +674,4 @@ fn window4_recovery_completed_units_with_deleted_source_cancels_job() {
     for deleted_index in [0, 1] {
         assert_recovery_cancels_after_member_deletion(deleted_index);
     }
-}
-
-// Season split across two libraries, refresh requested from library A only.
-#[test]
-fn window6_cross_library_season_refresh_publishes_only_job_members() {
-    let harness = RefreshHarness::new();
-    let lib_b_dir = harness._tmp.path().join("tv_lib_b");
-    std::fs::create_dir_all(&lib_b_dir).unwrap();
-    {
-        let store = harness.store.lock();
-        store
-            .create_library(
-                MediaKind::Tv,
-                "TV B",
-                &[lib_b_dir.to_str().unwrap()],
-                "everyone",
-                true,
-                &[],
-            )
-            .unwrap();
-    }
-    let mut row_b = super::super::test_support::coverage(
-        harness.media_id,
-        &lib_b_dir
-            .join("Pantheon.S01E03.mkv")
-            .to_string_lossy()
-            .into_owned(),
-        Some(1),
-        Some(3),
-    );
-    std::fs::write(&row_b.file.path, b"dummy").unwrap();
-    let expected_chapters_b = {
-        let store = harness.store.lock();
-        super::super::test_support::publish_into(&store, &mut row_b);
-        seed_episode_old_refresh_result(
-            &store,
-            harness.media_id,
-            &row_b.file.file_id.to_string(),
-            3,
-        )
-    };
-
-    let units: Vec<ProbeUnit> = harness
-        .rows
-        .iter()
-        .map(|row| ProbeUnit {
-            row: row.clone(),
-            kind: MediaKind::Tv,
-            force_fingerprint: true,
-            reuse_fingerprint_cache: false,
-            overwrite_markers: true,
-            reuse_media_info_cache: true,
-            marker_refresh_id: None,
-            job_id: None,
-        })
-        .collect();
-    assert_eq!(harness.manager.enqueue_marker_refresh(units), 2);
-    let job_id = {
-        let store = harness.store.lock();
-        store
-            .active_probe_unit_for_ledger(&harness.rows[0].file.file_id.to_string())
-            .unwrap()
-            .unwrap()
-            .job_id
-    };
-
-    let first = harness.manager.take_queued_for_test().unwrap();
-    let second = harness.manager.take_queued_for_test().unwrap();
-    harness.manager.finish(&first, true);
-    harness.manager.finish(&second, true);
-
-    let (job, chapters_b, chapters_a0, chapters_a1, marker_b, active_job) = {
-        let store = harness.store.lock();
-        (
-            store.get_probe_job(&job_id).unwrap().unwrap(),
-            store
-                .get_cached_chapters(&row_b.file.file_id.to_string())
-                .unwrap(),
-            store
-                .get_cached_chapters(&harness.rows[0].file.file_id.to_string())
-                .unwrap(),
-            store
-                .get_cached_chapters(&harness.rows[1].file.file_id.to_string())
-                .unwrap(),
-            store
-                .get_media_marker(
-                    harness.media_id,
-                    super::super::projected_season_opt(&row_b),
-                    super::super::projected_episode_opt(&row_b),
-                )
-                .unwrap(),
-            store.active_probe_job_for_scope(&harness.scope).unwrap(),
-        )
-    };
-    assert_eq!(job.status, "succeeded");
-    assert_eq!(chapters_b, Some(expected_chapters_b));
-    assert!(chapters_a0.is_some());
-    assert!(chapters_a1.is_some());
-    let chapters_a0 = chapters_a0.unwrap();
-    let chapters_a1 = chapters_a1.unwrap();
-    assert_ne!(chapters_a0, harness.expected_chapters[0]);
-    assert_ne!(chapters_a1, harness.expected_chapters[1]);
-    assert!(!chapters_a0.iter().any(|c| c.marker_type.is_some()));
-    assert!(!chapters_a1.iter().any(|c| c.marker_type.is_some()));
-    let marker_b = marker_b.expect("library B marker must still exist");
-    assert_eq!(marker_b.source, "old-result");
-    assert_eq!(marker_b.intro_start_ms, Some(111_000));
-    assert_eq!(marker_b.intro_end_ms, Some(222_000));
-    assert_eq!(marker_b.outro_start_ms, Some(1_000_000));
-    assert_eq!(marker_b.outro_end_ms, Some(1_050_000));
-    assert!(active_job.is_none());
 }

@@ -62,6 +62,110 @@ fn capture_request(row: FileCoverage) -> api::fingerprint_job::EpisodeCaptureReq
         cost_summary: Default::default(),
     }
 }
+
+#[test]
+fn cancelled_unit_cannot_reuse_a_cached_fingerprint() {
+    let f = setup("uniform", &[1, 2, 3]);
+    let row = f.units[0].row.clone();
+    let mut request = capture_request(row.clone());
+    request.capture_policy = api::fingerprint_job::CapturePolicy::ReuseValid;
+    let window = marker::fingerprint::SampleWindow {
+        start_ms: 0,
+        end_ms: 60_000,
+    };
+    let ledger_id = row.file.file_id.to_string();
+    let other_id = f.units[1].row.file.file_id.to_string();
+    let sample = api::store::StoredFingerprintSample {
+        sample_id: "cached".into(),
+        ledger_id: ledger_id.clone(),
+        source_version: "source".into(),
+        capture_profile_key: "profile".into(),
+        kind: "intro".into(),
+        window_start_ms: 0,
+        window_end_ms: 60_000,
+        pcm_duration_ms: Some(60_000),
+        fingerprint: vec![1, 2, 3],
+        captured_job_id: "previous".into(),
+        captured_at_ms: 1,
+        metrics_json: "{}".into(),
+    };
+    let attempt = api::store::StoredFingerprintAttempt {
+        attempt_id: "cached-attempt".into(),
+        job_id: "previous".into(),
+        ledger_id: ledger_id.clone(),
+        kind: "intro".into(),
+        window_start_ms: 0,
+        window_end_ms: 60_000,
+        phase: "test".into(),
+        started_at_ms: 1,
+        finished_at_ms: Some(2),
+        status: "succeeded".into(),
+        error_kind: None,
+        metrics_json: "{}".into(),
+    };
+    {
+        let store = f.store.lock();
+        store
+            .complete_fingerprint_attempt(&attempt, Some(&sample))
+            .unwrap();
+        let specs: Vec<_> = [&ledger_id, &other_id]
+            .into_iter()
+            .map(|id| store::ProbeJobUnitSpec {
+                ledger_id: id,
+                kind: "tv",
+                force_fingerprint: true,
+                reuse_fingerprint_cache: true,
+                overwrite_markers: false,
+                reuse_media_info_cache: true,
+            })
+            .collect();
+        assert!(
+            store
+                .create_probe_job(
+                    "delete-job",
+                    "media_probe",
+                    &f.media_id.to_string(),
+                    Some(1),
+                    "cache-cancel",
+                    &specs
+                )
+                .unwrap()
+        );
+        for id in [&ledger_id, &other_id] {
+            assert!(store.start_probe_unit("delete-job", id).unwrap());
+        }
+        store
+            .cancel_probe_unit("delete-job", &ledger_id, "source missing")
+            .unwrap();
+    }
+    let ctx = api::fingerprint_job::AdaptiveCaptureContext {
+        store: f.store.clone(),
+        matcher: f.engine.clone(),
+        capture: f.engine.clone(),
+        gate: Arc::new(api::fingerprint_job::adaptive::NoopGate),
+        timings: None,
+    };
+    let mut attempts = 0;
+    let result = tokio::runtime::Runtime::new().unwrap().block_on(
+        api::fingerprint_job::adaptive::capture_or_reuse_segment_sample(
+            &ctx,
+            &request,
+            marker::SegmentKind::Intro,
+            &window,
+            "test",
+            &mut attempts,
+            1,
+        ),
+    );
+    assert!(
+        result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.starts_with("file_deleted")),
+        "{result:?}"
+    );
+    assert_eq!(attempts, 0);
+}
 #[test]
 fn deleting_strm_while_ledger_is_still_present_must_cancel_before_capture() {
     let f = setup("uniform", &[1, 2, 3]);

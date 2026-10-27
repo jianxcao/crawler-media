@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use domain::{FileCoverage, LedgerId, MediaKind, Release, Subscribe};
 use subscribe::SubscribeFacts;
@@ -22,6 +22,39 @@ pub struct SubscribeLibrarySnapshot {
 }
 
 impl Store {
+    /// Revalidate an observation before admitting work. Files created by the
+    /// current transfer may be ignored while its other inputs remain unchanged.
+    pub fn subscribe_snapshot_is_current(
+        &self,
+        observed: &SubscribeLibrarySnapshot,
+        ignored_files: &HashSet<String>,
+    ) -> Result<bool, StoreError> {
+        let mut current = self.subscribe_library_snapshot(&observed.subscribe, observed.kind)?;
+        let mut expected = observed.clone();
+        for snapshot in [&mut current, &mut expected] {
+            snapshot
+                .rows
+                .retain(|row| !ignored_files.contains(&row.file.file_id.to_string()));
+            snapshot
+                .qualities
+                .retain(|id, _| !ignored_files.contains(&id.to_string()));
+            snapshot
+                .fingerprint
+                .files
+                .retain(|file| !ignored_files.contains(&file.file_id));
+        }
+        let same_ownership = expected.ownership.libraries() == current.ownership.libraries()
+            && expected.ownership.libraries().iter().all(|library| {
+                expected.ownership.accepts_work(&library.id)
+                    == current.ownership.accepts_work(&library.id)
+            });
+        Ok(same_ownership
+            && expected.fingerprint == current.fingerprint
+            && expected.saved == current.saved
+            && expected.rows == current.rows
+            && expected.qualities == current.qualities)
+    }
+
     /// Collect the owned database facts needed to resolve Subscribe facts
     /// without holding the Store lock during filesystem resolution.
     pub fn subscribe_library_snapshot(

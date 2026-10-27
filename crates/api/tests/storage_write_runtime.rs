@@ -266,7 +266,7 @@ async fn replacement_scan_advances_version_and_rejects_old_probe() {
             tracks_version: store::library_write::probe::CURRENT_TRACKS_VERSION,
             resolution: Some("1080p"),
             codec: Some("h264"),
-            hdr: None,
+            hdr: store::library_write::probe::Observed::NotObserved,
             duration_ms: Some(10000),
             details: None,
         };
@@ -280,7 +280,7 @@ async fn replacement_scan_advances_version_and_rejects_old_probe() {
             tracks_version: store::library_write::probe::CURRENT_TRACKS_VERSION,
             resolution: Some("2160p"),
             codec: Some("hevc"),
-            hdr: None,
+            hdr: store::library_write::probe::Observed::NotObserved,
             duration_ms: Some(20000),
             details: None,
         };
@@ -321,16 +321,11 @@ async fn strm_same_stat_changed_url_invalidates_resume() {
 async fn unknown_root_does_not_publish_missing() {
     let fix = PresenceFixture::new();
     let store_arc = fix.state.store();
-    let lib_id: LibraryId = fix.library_id.parse().unwrap();
-    let scope = WriteScope {
-        library_id: lib_id,
-        config_revision: 0,
-    };
     // Non-existent file/root should not prune on unknown/IO failure
     let report = {
         let store = store_arc.lock();
         store
-            .apply_presence(&scope, &[], store::library_write::PresenceMode::Prune, 1000)
+            .apply_ledger_presence(&[], store::LedgerPresenceMode::Prune, 1000)
             .unwrap()
     };
     assert_eq!(report.deleted, 0);
@@ -380,7 +375,7 @@ async fn actual_rescan_replaces_physical_source() {
         tracks_version: store::library_write::probe::CURRENT_TRACKS_VERSION,
         resolution: Some("1080p"),
         codec: None,
-        hdr: None,
+        hdr: store::library_write::probe::Observed::NotObserved,
         duration_ms: Some(1),
         details: None,
     };

@@ -2,7 +2,7 @@ use domain::{FileVersion, LibraryFile, LibraryId, UnitKey};
 
 pub mod artwork;
 pub mod delete;
-pub mod presence;
+pub(crate) mod presence;
 pub mod probe;
 pub mod publish;
 mod publish_batch;
@@ -24,7 +24,7 @@ pub mod source;
 pub mod transfer;
 
 pub use artwork::*;
-pub use presence::*;
+
 pub use publish::*;
 pub use reassign::*;
 pub(crate) use reduce::*;

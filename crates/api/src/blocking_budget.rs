@@ -96,6 +96,20 @@ pub struct Reservation {
 }
 
 impl Reservation {
+    /// Wait for side-effecting blocking work to actually finish.
+    pub async fn run_to_completion<T: Send + 'static>(
+        self,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, BlockingError> {
+        let permit = self.permit;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            work()
+        })
+        .await
+        .map_err(|error| BlockingError::Worker(error.to_string()))
+    }
+
     /// 在 blocking 线程上执行 `work`，最多等待 `deadline`。
     ///
     /// Review L4 约定：`deadline` 到期**不会**中止已经在跑的闭包，所以闭包必须

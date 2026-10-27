@@ -137,7 +137,13 @@ fn watcher_preserves_media_still_targeted_by_subscribe() {
         s.missing_at_by_path()
             .unwrap()
             .keys()
-            .any(|key| key.ends_with(std::path::Path::new(&row.path).file_name().unwrap().to_str().unwrap())),
+            .any(|key| key.ends_with(
+                std::path::Path::new(&row.path)
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            )),
         "file deletion marks missing rather than deleting ledger row"
     );
     assert!(
@@ -213,12 +219,14 @@ fn repeated_empty_chapter_read_does_not_borrow_neighbor_intro() {
     let first = runtime.block_on(api::marker_resolver::resolve_item_chapters(
         &state,
         &special_coverage,
+        domain::UnitKey::new(1, 2),
         &media,
         None,
     ));
     let second = runtime.block_on(api::marker_resolver::resolve_item_chapters(
         &state,
         &special_coverage,
+        domain::UnitKey::new(1, 2),
         &media,
         None,
     ));

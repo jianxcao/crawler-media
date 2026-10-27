@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use super::cache::{find_reusable_sample, stored_sample_to_evidence};
 use super::types::{AdaptiveCaptureContext, EpisodeCaptureRequest};
-use crate::fingerprint_job::episode_or_one;
+use crate::fingerprint_job::episode_number;
 use crate::fingerprint_job::source::{
     ensure_source_available, ensure_source_recorded, is_file_deleted, observe_source,
 };
@@ -27,6 +27,12 @@ pub async fn capture_or_reuse_segment_sample(
     {
         let store = ctx.store.lock();
         ensure_source_recorded(&store, &request.row)?;
+        if !store
+            .fingerprint_source_active(&request.job_id, &request.row.file.file_id.to_string())
+            .map_err(|error| format!("source_check_failed: {error}"))?
+        {
+            return Err("file_deleted: probe source cancelled".into());
+        }
         if let Some(cached) = find_reusable_sample(&store, request, kind, window) {
             if let Some(timings) = &ctx.timings {
                 match kind {
@@ -204,7 +210,7 @@ fn finish_capture(
         "声纹采集成功并已写入数据库");
     Ok(stored_sample_to_evidence(
         &sample,
-        episode_or_one(&request.row),
+        episode_number(&request.row)?,
         kind,
         request.media_duration_ms,
     ))

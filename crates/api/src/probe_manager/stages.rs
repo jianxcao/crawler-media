@@ -13,8 +13,8 @@ pub(super) fn log_fingerprint_publication(
     tracing::info!(
         ledger_id,
         media_id = %unit.row.file.media_id,
-        season = super::projected_season(&unit.row),
-        episode = super::projected_episode(&unit.row),
+        season = ?super::single_season(&unit.row),
+        episode = ?super::single_episode(&unit.row),
         path = %fp_path.display(),
         source_version,
         cache_key = outcome.cache.cache_key,
@@ -161,8 +161,8 @@ pub(super) fn capture_outcome(
                 %error,
                 ledger_id = %unit.row.file.file_id,
                 media_id = %unit.row.file.media_id,
-                season = super::projected_season(&unit.row),
-                episode = super::projected_episode(&unit.row),
+                season = ?super::single_season(&unit.row),
+                episode = ?super::single_episode(&unit.row),
                 require_complete_markers,
                 "【声纹】片尾指纹暂不可用，保留片头缓存并允许下次只重试片尾"
             );

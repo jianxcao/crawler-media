@@ -19,6 +19,16 @@ pub struct StoredFingerprintAttempt {
 }
 
 impl Store {
+    /// A persisted task must remain active and its matching unit must not be cancelled.
+    /// Standalone captures and season members outside the task's scope have no unit row.
+    pub fn fingerprint_source_active(
+        &self,
+        job_id: &str,
+        file_id: &str,
+    ) -> Result<bool, StoreError> {
+        fingerprint_source_active(&self.library, job_id, file_id)
+    }
+
     pub fn begin_fingerprint_attempt(
         &self,
         attempt: &StoredFingerprintAttempt,
@@ -94,11 +104,12 @@ impl Store {
                 "SELECT EXISTS(
                      SELECT 1 FROM library_files
                      WHERE file_id = ?1 AND path_key = norm_path_key(?2)
+                       AND presence_state = 'present' AND publication_state = 'published'
                  )",
                 params![attempt.ledger_id, path],
                 |row| row.get(0),
             )?;
-            if !exists {
+            if !exists || !fingerprint_source_active(&tx, &attempt.job_id, &attempt.ledger_id)? {
                 return Ok(false);
             }
         }
@@ -250,4 +261,18 @@ impl Store {
         )?;
         Ok(changed)
     }
+}
+
+fn fingerprint_source_active(
+    conn: &rusqlite::Connection,
+    job_id: &str,
+    file_id: &str,
+) -> Result<bool, StoreError> {
+    conn.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM probe_jobs WHERE id=?1 AND status NOT IN ('queued','running'))
+            AND NOT EXISTS(SELECT 1 FROM probe_job_units WHERE job_id=?1 AND file_id=?2
+                           AND status IN ('cancelled','failed'))",
+        params![job_id, file_id],
+        |row| row.get(0),
+    ).map_err(Into::into)
 }

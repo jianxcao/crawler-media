@@ -46,3 +46,56 @@ async fn library_creation_honors_explicit_detection_switches() {
         assert_eq!(library.enable_fingerprint, enabled);
     }
 }
+
+#[tokio::test]
+async fn omitted_detection_switches_are_disabled_and_invalid_input_is_atomic() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = common::state(
+        tmp.path(),
+        Arc::new(common::Fixtures {
+            requests: Mutex::new(Vec::new()),
+            bodies: HashMap::new(),
+        }),
+        Arc::new(downloader::MemoryDownloader::new(tmp.path().join("stage"))),
+    );
+    let app = api::router(state.clone());
+    let root = tmp.path().join("quiet-tv");
+    std::fs::create_dir_all(&root).unwrap();
+    let response = app
+        .clone()
+        .oneshot(common::request(
+            "POST",
+            "/api/v1/libraries",
+            Some("management-secret"),
+            json!({"name":"Quiet", "kind":"tv", "root_paths":[root]}),
+        ))
+        .await
+        .unwrap();
+    let data = common::json_data(response).await;
+    assert_eq!(data["detect_intros"], false);
+    assert_eq!(data["enable_fingerprint"], false);
+    let count = state.store().lock().list_libraries().unwrap().len();
+    for extra in [
+        json!({"detect_intros":"false"}),
+        json!({"enable_fingerprint":null}),
+        json!({"legacy_root":"/old"}),
+    ] {
+        let mut body =
+            json!({"name":"Invalid", "kind":"tv", "root_paths":[tmp.path().join("invalid")]});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let response = app
+            .clone()
+            .oneshot(common::request(
+                "POST",
+                "/api/v1/libraries",
+                Some("management-secret"),
+                body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(state.store().lock().list_libraries().unwrap().len(), count);
+    }
+}

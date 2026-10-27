@@ -1,11 +1,10 @@
 use domain::{
-    Confidence, FilePresence, FilePublication, FileVersion, LibraryFile,
-    Media, MediaKind, QualitySource, UnitKey,
+    Confidence, FilePresence, FilePublication, FileVersion, LibraryFile, Media, MediaKind,
+    QualitySource, UnitKey,
 };
 use store::files::FileDetails;
-use store::library_write::{
-    FilePublication as StorePublication, PresenceMode, PresenceObservation, WriteScope,
-};
+use store::library_write::{FilePublication as StorePublication, WriteScope};
+use store::{LedgerPresenceMode as PresenceMode, LedgerPresenceObservation};
 use store::{Store, StoreError};
 
 fn create_media(store: &Store, id: &str, title: &str, kind: MediaKind) -> Media {
@@ -412,15 +411,19 @@ fn presence_verify_marks_missing_and_restores() {
         .unwrap();
 
     // Observe Missing
-    let obs_missing = PresenceObservation {
-        file_id: file.file_id,
-        observed_version: file.version.clone(),
-        observed_path: file.path.clone(),
+    let obs_missing = LedgerPresenceObservation {
+        file: store.file_coverage_by_id(file.file_id).unwrap().unwrap(),
+        path_key: store
+            .file_coverage_by_id(file.file_id)
+            .unwrap()
+            .unwrap()
+            .path_key,
+        missing_at: store.missing_at_by_path().unwrap().values().next().copied(),
         presence: FilePresence::Missing,
     };
 
     let rep = store
-        .apply_presence(&scope, &[obs_missing], PresenceMode::Verify, 1500)
+        .apply_ledger_presence(&[obs_missing], PresenceMode::Verify, 1500)
         .unwrap();
     assert_eq!(rep.missing, 1);
 
@@ -432,15 +435,19 @@ fn presence_verify_marks_missing_and_restores() {
     assert_eq!(item.missing_file_count, 1);
 
     // Observe Present (restored)
-    let obs_present = PresenceObservation {
-        file_id: file.file_id,
-        observed_version: file.version.clone(),
-        observed_path: file.path.clone(),
+    let obs_present = LedgerPresenceObservation {
+        file: store.file_coverage_by_id(file.file_id).unwrap().unwrap(),
+        path_key: store
+            .file_coverage_by_id(file.file_id)
+            .unwrap()
+            .unwrap()
+            .path_key,
+        missing_at: store.missing_at_by_path().unwrap().values().next().copied(),
         presence: FilePresence::Present,
     };
 
     let rep2 = store
-        .apply_presence(&scope, &[obs_present], PresenceMode::Verify, 2000)
+        .apply_ledger_presence(&[obs_present], PresenceMode::Verify, 2000)
         .unwrap();
     assert_eq!(rep2.restored, 1);
 
@@ -561,14 +568,23 @@ fn deleting_all_files_cleans_item_but_preserves_media() {
     );
 
     // Prune the file
-    let obs = PresenceObservation {
-        file_id: file.file_id,
-        observed_version: file.version.clone(),
-        observed_path: file.path.clone(),
+    let obs = LedgerPresenceObservation {
+        file: store.file_coverage_by_id(file.file_id).unwrap().unwrap(),
+        path_key: store
+            .file_coverage_by_id(file.file_id)
+            .unwrap()
+            .unwrap()
+            .path_key,
+        missing_at: store.missing_at_by_path().unwrap().values().next().copied(),
         presence: FilePresence::Missing,
     };
     store
-        .apply_presence(&scope, &[obs], PresenceMode::Prune, 2000)
+        .apply_ledger_presence(&[obs.clone()], PresenceMode::Verify, 1500)
+        .unwrap();
+    let mut obs = obs;
+    obs.missing_at = Some(1500);
+    store
+        .apply_ledger_presence(&[obs], PresenceMode::Prune, 2000)
         .unwrap();
 
     // Item must be cleaned up because 0 files remain

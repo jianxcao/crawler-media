@@ -9,6 +9,7 @@ pub(crate) struct PublicationRecorder<'a> {
     pub subscribe: &'a Subscribe,
     pub lease: &'a crate::library_lifecycle::LibraryWorkLease,
     pub fingerprint: store::ReadFingerprint,
+    pub snapshot: store::SubscribeLibrarySnapshot,
 }
 
 impl PublicationRecorder<'_> {
@@ -23,6 +24,12 @@ impl PublicationRecorder<'_> {
         let result = (|| -> Result<domain::FileCoverage, String> {
             let store = self.state.store.lock();
             // This lock spans validation and reservation, never filesystem work.
+            if !store
+                .subscribe_snapshot_is_current(&self.snapshot, ignored_files)
+                .map_err(|error| error.to_string())?
+            {
+                return Err("Transfer Subscribe facts or Library ownership changed".into());
+            }
             if let Some(plan) = plan {
                 validate_transfer_plan_at(
                     &store,

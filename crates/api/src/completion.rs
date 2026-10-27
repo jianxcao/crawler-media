@@ -33,10 +33,8 @@ pub(crate) fn units_on_disk(state: &ApiState, subscribe: &Subscribe) -> bool {
         Coverage::Movie => domain::MediaKind::Movie,
         Coverage::Tv { .. } => domain::MediaKind::Tv,
     };
-    let Ok(facts) = state
-        .store
-        .lock()
-        .load_library_subscribe_facts(subscribe, kind)
+    let Ok(facts) =
+        crate::subscribe_library_read::read_subscribe_library_facts(state, subscribe, kind)
     else {
         return false;
     };

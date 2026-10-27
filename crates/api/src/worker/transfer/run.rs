@@ -209,9 +209,10 @@ fn commit_transfer_outcome(
             let existing = store
                 .file_coverage_by_path(&path)
                 .map_err(|e| e.to_string())?;
-            let identity_ok = existing.as_ref().map(|existing| {
-                (existing.file.file_id, existing.file.media_id)
-            }) == Some((coverage.file.file_id, coverage.file.media_id));
+            let identity_ok = existing
+                .as_ref()
+                .map(|existing| (existing.file.file_id, existing.file.media_id))
+                == Some((coverage.file.file_id, coverage.file.media_id));
             let source_ok = store
                 .ledger_source_path_matches(&path, source_path.as_deref())
                 .map_err(|e| e.to_string())?;
@@ -301,6 +302,7 @@ fn load_transfer_context(
         SubscribeFacts,
         Option<domain::Filter>,
         store::ReadFingerprint,
+        store::SubscribeLibrarySnapshot,
     ),
     String,
 > {
@@ -326,7 +328,14 @@ fn load_transfer_context(
     let obs = crate::subscribe_library_read::observe_subscribe_library_facts(
         state, subscribe, media.kind,
     )?;
-    Ok((media, filter, obs.facts, wash_filter, obs.fingerprint))
+    Ok((
+        media,
+        filter,
+        obs.facts,
+        wash_filter,
+        obs.fingerprint,
+        obs.snapshot,
+    ))
 }
 
 /// D-M3: hand persisted info hashes back to the (possibly fresh) clients so
@@ -542,7 +551,7 @@ fn transfer_after_idle(
     if plan.library_id != waited_library {
         return Ok(Attempt::Retarget);
     }
-    let (media, filter, facts, wash_filter, observation_fingerprint) =
+    let (media, filter, facts, wash_filter, observation_fingerprint, snapshot) =
         load_transfer_context(state, &subscribe)?;
     let routed = crate::delivery::RoutedDownloader::with_pending(state, &subscribe, &pending);
     restore_identities(state, &subscribe, &routed, &pending);
@@ -606,6 +615,7 @@ fn transfer_after_idle(
             subscribe: &subscribe,
             lease: &library_lease,
             fingerprint: observation_fingerprint.clone(),
+            snapshot,
         },
         &plan,
     );

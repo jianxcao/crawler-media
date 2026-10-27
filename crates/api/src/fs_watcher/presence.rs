@@ -16,13 +16,12 @@ fn collect_event_observations(
     state: &ApiState,
     path: &Path,
     scope: &LibraryPathScope,
-    candidate_coverages: Vec<domain::FileCoverage>,
-    missing_map: &HashMap<String, i64>,
+    candidates: Vec<LedgerPresenceObservation>,
 ) -> HashMap<String, Vec<LedgerPresenceObservation>> {
     let mut observations_by_lib: HashMap<String, Vec<LedgerPresenceObservation>> = HashMap::new();
 
-    for coverage in candidate_coverages {
-        let file_path = coverage.file.path.as_path();
+    for mut observation in candidates {
+        let file_path = observation.file.file.path.as_path();
         let matches_event = file_path == path || file_path.starts_with(path);
         if !matches_event {
             continue;
@@ -32,7 +31,7 @@ fn collect_event_observations(
         // decides which rows moved, never who owns them.
         let Some(owner_lib) = scope
             .libraries()
-            .find(|library| library.id == coverage.file.library_id.to_string())
+            .find(|library| library.id == observation.file.file.library_id.to_string())
         else {
             continue;
         };
@@ -57,17 +56,11 @@ fn collect_event_observations(
             continue;
         }
 
-        let path_key = if coverage.path_key.is_empty() {
-            let store = state.store.lock();
-            store.recorded_path_key(&coverage.file.path.to_string_lossy())
-        } else {
-            coverage.path_key.clone()
-        };
-        let presence = match state.library_files.presence(file_path) {
+        observation.presence = match state.library_files.presence(file_path) {
             Ok(true) => FilePresence::Present,
             Ok(false) => FilePresence::Missing,
             Err(e) => {
-                tracing::warn!(path = %coverage.file.path.display(), error = %e, "Watcher file presence failed");
+                tracing::warn!(path = %file_path.display(), error = %e, "Watcher file presence failed");
                 FilePresence::Unknown
             }
         };
@@ -75,12 +68,7 @@ fn collect_event_observations(
         observations_by_lib
             .entry(owner_lib.id.clone())
             .or_default()
-            .push(LedgerPresenceObservation {
-                path_key: path_key.clone(),
-                file: coverage,
-                missing_at: missing_map.get(&path_key).copied(),
-                presence,
-            });
+            .push(observation);
     }
 
     observations_by_lib
@@ -120,6 +108,7 @@ fn publish_event_observations(
 
         match sub_res {
             Ok(res) => {
+                state.probe.presence_committed(&res.applied);
                 total_result.missing += res.missing;
                 total_result.restored += res.restored;
                 total_result.deleted += res.deleted;
@@ -151,28 +140,33 @@ pub(crate) fn observe_event(
     state: &ApiState,
     path: &Path,
 ) -> Result<LedgerPresenceResult, PresenceError> {
-    let (snapshot, candidate_coverages, missing_map) = {
+    let snapshot = {
         let store_arc = state.store();
         let guard = store_arc.lock();
-        let snapshot = guard.library_ownership()?;
-        let rows = guard.list_file_coverage()?;
-        let missing_map = guard.missing_at_by_path()?;
-        (snapshot, rows, missing_map)
+        guard.library_ownership()?
     };
 
     let scope = LibraryPathScope::resolve(snapshot)?;
-    let observations_by_lib =
-        collect_event_observations(state, path, &scope, candidate_coverages, &missing_map);
-
-    if observations_by_lib.is_empty() {
-        return Ok(LedgerPresenceResult::default());
+    let mut total = LedgerPresenceResult::default();
+    let mut cursor = None;
+    loop {
+        let candidates = {
+            let store = state.store();
+            let guard = store.lock();
+            guard.watcher_presence_page(&path.to_string_lossy(), cursor.as_deref(), 100)?
+        };
+        let Some(last) = candidates.last() else {
+            break;
+        };
+        cursor = Some(last.path_key.clone());
+        let observations = collect_event_observations(state, path, &scope, candidates);
+        let result = publish_event_observations(state, &scope, observations);
+        total.missing += result.missing;
+        total.restored += result.restored;
+        total.deleted += result.deleted;
+        total.skipped += result.skipped;
     }
-
-    Ok(publish_event_observations(
-        state,
-        &scope,
-        observations_by_lib,
-    ))
+    Ok(total)
 }
 
 #[cfg(test)]

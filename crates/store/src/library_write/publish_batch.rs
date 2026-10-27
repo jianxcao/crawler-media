@@ -88,11 +88,20 @@ pub(super) fn reduce_publication_batch(
                 &mut settled,
             )?;
         }
-        if settled.user_summaries_dirty && !settled.media {
-            super::reduce::refresh_affected_user_summaries(tx, library_id, media_id)?;
-        }
-        if settled.protocol_index_dirty && !settled.media {
-            crate::protocol_index::sync_card(tx, &library_id.to_string(), &media_id.to_string())?;
+        // The last deletion can remove the card after earlier deltas deferred its
+        // finalization. Its dependent rows disappeared with it; no card remains
+        // for protocol/user summary writes to publish.
+        if !settled.media && item_card_exists(tx, library_id, media_id)? {
+            if settled.user_summaries_dirty {
+                super::reduce::refresh_affected_user_summaries(tx, library_id, media_id)?;
+            }
+            if settled.protocol_index_dirty {
+                crate::protocol_index::sync_card(
+                    tx,
+                    &library_id.to_string(),
+                    &media_id.to_string(),
+                )?;
+            }
         }
         crate::query_projection::settle(tx, key, captured)?;
     }

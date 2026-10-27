@@ -14,6 +14,50 @@ fn event(path: PathBuf) -> DebouncedEvent {
 }
 
 #[tokio::test]
+async fn directory_event_reconciles_all_pages_without_touching_sibling() {
+    let fix = PresenceFixture::new();
+    let mut rows = Vec::new();
+    for n in 0..101 {
+        rows.push(fix.insert_media_and_ledger(&format!("film/{n:03}.mkv")).1);
+    }
+    let sibling = fix.insert_media_and_ledger("film-extra/other.mkv").1;
+    let tracker = Arc::new(api::fs_watcher::StrmGraceTracker::default());
+    let directory = fix.root.join("film");
+
+    api::fs_watcher::handle_fs_events(&fix.state, &tracker, vec![event(directory.clone())]);
+    {
+        let store = fix.state.store();
+        let guard = store.lock();
+        let missing = guard.missing_at_by_path().unwrap();
+        for row in &rows {
+            let key = guard.recorded_path_key(&row.path.to_string_lossy());
+            assert!(missing.contains_key(&key), "missing {}", row.path.display());
+        }
+        let sibling_key = guard.recorded_path_key(&sibling.path.to_string_lossy());
+        assert!(!missing.contains_key(&sibling_key));
+    }
+
+    {
+        let mut files = fix.mock_files.files.lock();
+        for row in &rows {
+            files.insert(row.path.clone(), Ok(true));
+        }
+    }
+    api::fs_watcher::handle_fs_events(&fix.state, &tracker, vec![event(directory)]);
+    let store = fix.state.store();
+    let guard = store.lock();
+    let missing = guard.missing_at_by_path().unwrap();
+    for row in &rows {
+        let key = guard.recorded_path_key(&row.path.to_string_lossy());
+        assert!(
+            !missing.contains_key(&key),
+            "not restored: {}",
+            row.path.display()
+        );
+    }
+}
+
+#[tokio::test]
 async fn last_local_file_missing_keeps_media_and_all_user_facts() {
     let fix = PresenceFixture::new();
     let (media_id, row) = fix.insert_media_and_ledger("movie.mkv");

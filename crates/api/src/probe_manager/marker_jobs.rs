@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use domain::{MediaId, MediaKind};
 
-use super::projected_season;
+use super::single_season;
 use super::{ProbeManager, ProbeUnit, markers};
 
 pub(super) fn apply_marker_refresh(
@@ -62,7 +62,10 @@ pub(super) fn apply_marker_refresh(
     };
     let rows = all_rows
         .into_iter()
-        .filter(|row| row.file.media_id == media_id && seasons.contains(&projected_season(row)))
+        .filter(|row| {
+            row.file.media_id == media_id
+                && single_season(row).is_some_and(|season| seasons.contains(&season))
+        })
         .collect::<Vec<_>>();
     let members = markers::source_observations(&rows);
     let publication = members.and_then(|members| {
@@ -129,11 +132,12 @@ fn marker_refresh_seasons(
             let row = super::coverage_for_ledger_id(&store, &unit.ledger_id)?;
             crate::fingerprint_job::source::ensure_source_recorded(&store, &row)
                 .map_err(crate::store::StoreError::Missing)?;
+            super::require_single_unit(&row)?;
             rows.push(row);
         }
     }
     markers::observe_rows(&rows)?;
-    let seasons: HashSet<u32> = rows.iter().map(projected_season).collect();
+    let seasons: HashSet<u32> = rows.iter().filter_map(single_season).collect();
     let mut seasons = seasons.into_iter().collect::<Vec<_>>();
     seasons.sort_unstable();
     Ok(seasons)
@@ -159,7 +163,7 @@ fn prepare_season_replacements(
     for season in seasons {
         let row = all_rows
             .iter()
-            .find(|row| row.file.media_id == media_id && projected_season(row) == *season)
+            .find(|row| row.file.media_id == media_id && single_season(row) == Some(*season))
             .cloned()
             .ok_or_else(|| {
                 (
@@ -172,7 +176,7 @@ fn prepare_season_replacements(
             if sampling_mode == "adaptive" && tokio::runtime::Handle::try_current().is_ok() {
                 let season_units: Vec<ProbeUnit> = all_rows
                     .iter()
-                    .filter(|r| r.file.media_id == media_id && projected_season(r) == *season)
+                    .filter(|r| r.file.media_id == media_id && single_season(r) == Some(*season))
                     .map(|r| {
                         let mut u = unit.clone();
                         u.row = r.clone();

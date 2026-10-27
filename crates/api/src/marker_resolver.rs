@@ -1,8 +1,6 @@
 //! Resolver for episode/movie markers without holding the global Store lock
 //! across ffprobe, HTTP, or audio fingerprint work.
 
-use std::collections::HashSet;
-
 use domain::{FileCoverage, Media, MediaKind, UnitKey};
 use marker::{ChapterMarker, MarkerType, annotate_chapters, probe_chapters};
 
@@ -10,77 +8,95 @@ use crate::management::ApiState;
 use crate::store::StoredMediaMarker;
 use crate::theintrodb::TheIntroDbClient;
 
+pub trait ChapterProbe: Send + Sync {
+    fn probe(&self, path: &std::path::Path) -> Option<Vec<marker::Chapter>>;
+}
+
+pub(crate) struct FfprobeChapters;
+
+impl ChapterProbe for FfprobeChapters {
+    fn probe(&self, path: &std::path::Path) -> Option<Vec<marker::Chapter>> {
+        probe_chapters(path)
+    }
+}
+
 #[derive(Clone)]
 struct ResolveSnapshot {
     row: FileCoverage,
+    unit: UnitKey,
     media: Media,
     /// 章节解析缓存：None = 从未探测；Some(任意) = 已有结果（含空结果），
     /// 命中后直接返回，避免无章节媒体每次播放都重跑 ffprobe / 声纹 / 云端。
     cached: Option<Vec<ChapterMarker>>,
     existing_marker: Option<StoredMediaMarker>,
+    duration_ms: Option<i64>,
     detect_intros: bool,
-    #[allow(dead_code)]
-    season_rows: Vec<FileCoverage>,
-    #[allow(dead_code)]
-    rows_with_markers: HashSet<(u32, u32)>,
     theintrodb: Option<TheIntroDbClient>,
+    probe: std::sync::Arc<dyn ChapterProbe>,
 }
 
 struct ResolveOutput {
     chapters: Vec<ChapterMarker>,
     markers: Vec<StoredMediaMarker>,
+    cacheable: bool,
 }
 
-/// 单集载体约定：一次播放/一次刷新只针对一个单元，多单元的覆盖事实取首个单元
-/// 并留下告警（不静默丢事实）。整文件单元的覆盖事实在这里读作「无单元」。
-fn selected_unit(coverage: &FileCoverage) -> Option<UnitKey> {
-    if coverage.units.len() > 1 {
-        tracing::warn!(
-            file_id = %coverage.file.file_id,
-            units = coverage.units.len(),
-            "章节解析收到多单元覆盖事实，只按首个单元处理"
-        );
-    }
-    coverage.units.first().copied()
+pub(crate) fn marker_coordinates(
+    kind: MediaKind,
+    unit: UnitKey,
+    unit_count: usize,
+) -> Option<(u32, u32)> {
+    unit.episode_coordinates().or_else(|| {
+        (kind == MediaKind::Movie && unit.is_whole() && unit_count == 1).then_some((1, 1))
+    })
 }
 
-/// 选中单元的坐标；整文件单元 → `(None, None)`（旧 `row.season`/`row.episode` 同为 `None`）。
-fn unit_coordinates(coverage: &FileCoverage) -> (Option<u32>, Option<u32>) {
-    match selected_unit(coverage).and_then(|unit| unit.episode_coordinates()) {
-        Some((season, episode)) => (Some(season), Some(episode)),
-        None => (None, None),
-    }
+pub(crate) fn unit_marker(
+    store: &crate::Store,
+    media: &Media,
+    unit: UnitKey,
+    unit_count: usize,
+) -> Option<StoredMediaMarker> {
+    let (season, episode) = marker_coordinates(media.kind, unit, unit_count)?;
+    store
+        .get_media_marker(media.id, Some(season), Some(episode))
+        .ok()
+        .flatten()
 }
 
-/// 旧代码把缺失坐标读作 1（`unwrap_or(1)`）：整文件事实取 `season_or_one()` 即 `(1, 1)`。
-fn season_episode_or_one(coverage: &FileCoverage) -> (u32, u32) {
-    match unit_coordinates(coverage) {
-        (Some(season), Some(episode)) => (season, episode),
-        _ => (coverage.season_or_one(), 1),
-    }
+#[derive(Debug, thiserror::Error)]
+pub enum ChapterRefreshError {
+    #[error(
+        "unit_time_mapping_unsupported: automatic multiunit chapter refresh requires unit time mapping"
+    )]
+    UnitTimeMappingUnsupported,
 }
 
-/// Clear persisted results for this unit, then resolve it again.
+/// Clear persisted results for one mapped unit, then resolve it again.
 pub async fn force_refresh_item_chapters(
     state: &ApiState,
     row: &FileCoverage,
+    unit: UnitKey,
     media: &Media,
     theintrodb: Option<TheIntroDbClient>,
-) -> Vec<ChapterMarker> {
+) -> Result<Vec<ChapterMarker>, ChapterRefreshError> {
+    if row.units.len() != 1 || !row.units.contains(&unit) {
+        tracing::error!(file_id = %row.file.file_id, ?unit,
+            error_kind = "unit_time_mapping_unsupported", "chapter refresh requires unit time mapping");
+        return Err(ChapterRefreshError::UnitTimeMappingUnsupported);
+    }
     {
         let store = state.store.lock();
         let _ = store.clear_cached_chapters(&row.file.file_id.to_string());
-        let (season, episode) = unit_coordinates(row);
-        let locked = store
-            .get_media_marker(media.id, season, episode)
-            .ok()
-            .flatten()
-            .is_some_and(|marker| marker.locked);
-        if !locked {
-            let _ = store.delete_media_marker(media.id, season, episode);
+        if let Some((season, episode)) = marker_coordinates(media.kind, unit, row.units.len()) {
+            let locked = unit_marker(&store, media, unit, row.units.len())
+                .is_some_and(|marker| marker.locked);
+            if !locked {
+                let _ = store.delete_media_marker(media.id, Some(season), Some(episode));
+            }
         }
     }
-    resolve_item_chapters(state, row, media, theintrodb).await
+    Ok(resolve_item_chapters(state, row, unit, media, theintrodb).await)
 }
 
 /// Return persisted markers when source detection is disabled, but do not run
@@ -89,6 +105,7 @@ pub async fn force_refresh_item_chapters(
 pub async fn resolve_item_chapters(
     state: &ApiState,
     row: &FileCoverage,
+    unit: UnitKey,
     media: &Media,
     theintrodb: Option<TheIntroDbClient>,
 ) -> Vec<ChapterMarker> {
@@ -96,42 +113,18 @@ pub async fn resolve_item_chapters(
         Ok(lease) => lease,
         Err(_) => return Vec::new(),
     };
-    let snapshot = snapshot(state, row, media, theintrodb);
-    let (season, episode) = unit_coordinates(row);
-    // 存在缓存时：若缓存仅包含 1 个孤立的片头卡片，或为空，但已有/同季有 marker，
-    // 则动态构造分段章节更新缓存并返回，确保前端展示 [0:00 片头] 和 [1:44 正片] 两个完整段落！
-    if let Some(cached) = snapshot.cached.clone() {
-        let is_only_intro =
-            cached.len() == 1 && cached[0].marker_type == Some(MarkerType::IntroStart);
-        if !cached.is_empty() && !is_only_intro {
-            return cached;
-        }
-        if crate::fingerprint_job::source::observe_source(row).is_err() {
-            return Vec::new();
-        }
-        let store = state.store.lock();
-        if crate::fingerprint_job::source::ensure_source_recorded(&store, row).is_err() {
-            return Vec::new();
-        }
-        // A read may reconstruct chapters from this episode's verified marker,
-        // but cannot promote a neighboring episode's candidate into target facts.
-        let marker_candidate = store
-            .get_media_marker(media.id, season, episode)
-            .ok()
-            .flatten();
-
-        if let Some(latest) = marker_candidate {
-            let mut chapters = Vec::new();
-            append_marker_chapters(&mut chapters, Some(&latest));
-            if !chapters.is_empty() {
-                chapters.sort_by_key(|c| c.start_ms);
-                let _ = store.put_cached_chapters(&row.file.file_id.to_string(), &chapters);
-                return chapters;
-            }
-        }
-        if !is_only_intro {
-            return cached;
-        }
+    if !row.units.contains(&unit) {
+        tracing::error!(file_id = %row.file.file_id, ?unit, "requested chapter unit is not covered by file");
+        return Vec::new();
+    }
+    let snapshot = snapshot(state, row, unit, media, theintrodb);
+    if let Some(mut cached) = snapshot.cached.clone() {
+        append_marker_chapters(
+            &mut cached,
+            snapshot.existing_marker.as_ref(),
+            snapshot.duration_ms,
+        );
+        return cached;
     }
     let cache_key = row.file.file_id.to_string();
     let output = tokio::task::spawn_blocking(move || resolve_without_store(snapshot))
@@ -141,6 +134,7 @@ pub async fn resolve_item_chapters(
             ResolveOutput {
                 chapters: Vec::new(),
                 markers: Vec::new(),
+                cacheable: false,
             }
         });
     let mut chapters = output.chapters;
@@ -155,19 +149,19 @@ pub async fn resolve_item_chapters(
         for marker in &output.markers {
             let _ = store.put_media_marker(marker);
         }
-        // 竞态防护：解析开始后后台探测任务可能已写入片头标记；写缓存前
-        // 重新读最新 marker 并进章节，避免把解析开始时快照里的旧空结果
-        // 重新落盘覆盖掉新标记（否则章节缓存会永久停留在旧结果）。
-        if let Some(latest) = store
-            .get_media_marker(media.id, season, episode)
-            .ok()
-            .flatten()
-        {
-            append_marker_chapters(&mut chapters, Some(&latest));
+        if output.cacheable {
+            let _ = store.put_cached_chapters(&cache_key, &chapters);
+        }
+        if let Some(latest) = unit_marker(&store, media, unit, row.units.len()) {
+            let duration_ms = store
+                .file_coverage_by_id(row.file.file_id)
+                .ok()
+                .flatten()
+                .filter(|current| current.file.version == row.file.version)
+                .and_then(|current| current.file.duration_ms);
+            append_marker_chapters(&mut chapters, Some(&latest), duration_ms);
             chapters.sort_by_key(|chapter| chapter.start_ms);
         }
-        // 无条件缓存章节结果（含空），让"已检测但无章节"也能命中缓存。
-        let _ = store.put_cached_chapters(&cache_key, &chapters);
     }
     chapters
 }
@@ -175,6 +169,7 @@ pub async fn resolve_item_chapters(
 fn snapshot(
     state: &ApiState,
     row: &FileCoverage,
+    unit: UnitKey,
     media: &Media,
     theintrodb: Option<TheIntroDbClient>,
 ) -> ResolveSnapshot {
@@ -183,45 +178,15 @@ fn snapshot(
         .get_cached_chapters(&row.file.file_id.to_string())
         .ok()
         .flatten();
-    let (season, episode) = unit_coordinates(row);
-    let existing_marker = store
-        .get_media_marker(media.id, season, episode)
+    let existing_marker = unit_marker(&store, media, unit, row.units.len());
+    let duration_ms = store
+        .file_coverage_by_id(row.file.file_id)
         .ok()
-        .flatten();
+        .flatten()
+        .filter(|current| current.file.version == row.file.version)
+        .and_then(|current| current.file.duration_ms);
     let library = crate::http::playback::library_id_for(&store, media, &[&row.file])
         .and_then(|id| store.get_library(&id).ok().flatten());
-    let season_number = season.unwrap_or(1);
-    let season_rows: Vec<_> = store
-        .list_file_coverage()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|candidate| {
-            candidate.file.media_id == media.id
-                && unit_coordinates(candidate).0.unwrap_or(1) == season_number
-        })
-        .collect();
-    let rows_with_markers = season_rows
-        .iter()
-        .filter(|candidate| {
-            let (candidate_season, candidate_episode) = unit_coordinates(candidate);
-            store
-                .get_media_marker(media.id, candidate_season, candidate_episode)
-                .ok()
-                .flatten()
-                // 只要有任意标记（片头或片尾）就算「已处理」：声纹回填只产出
-                // 片头字段，若某集仅存片尾标记也放进来，会把它整行覆盖掉。
-                .is_some_and(|marker| {
-                    marker.intro_start_ms.is_some() || marker.outro_start_ms.is_some()
-                })
-        })
-        .map(|candidate| {
-            let (candidate_season, candidate_episode) = unit_coordinates(candidate);
-            (
-                candidate_season.unwrap_or(1),
-                candidate_episode.unwrap_or(1),
-            )
-        })
-        .collect();
     let detect_intros = library.as_ref().is_none_or(|library| library.detect_intros);
     // 同步解析链路不做声纹比对（无论 STRM 还是本地文件）：远程/本地音频
     // 提取都是重操作，不能阻塞详情页/播放器请求。声纹统一由**后台异步探测
@@ -230,13 +195,14 @@ fn snapshot(
     // 仅构造快照，杜绝在每次查询缓存时都刷屏输出「开始解析」日志。
     ResolveSnapshot {
         row: row.clone(),
+        unit,
         media: media.clone(),
         cached,
         existing_marker,
+        duration_ms,
         detect_intros,
-        season_rows,
-        rows_with_markers,
         theintrodb,
+        probe: state.chapter_probe.clone(),
     }
 }
 
@@ -244,24 +210,14 @@ fn resolve_without_store(snapshot: ResolveSnapshot) -> ResolveOutput {
     let mut markers = Vec::new();
     let mut chapters = Vec::new();
     let mut marker = snapshot.existing_marker.clone();
-    let (season, episode) = season_episode_or_one(&snapshot.row);
+    let coordinates =
+        marker_coordinates(snapshot.media.kind, snapshot.unit, snapshot.row.units.len());
     tracing::info!(
         media = %snapshot.media.title,
-        season,
-        episode,
+        ?coordinates,
         path = %snapshot.row.file.path.display(),
         "【片头片尾】缓存未命中，后台异步执行单集章节探测"
     );
-    if !snapshot.detect_intros {
-        tracing::warn!(
-            media = %snapshot.media.title,
-            path = %snapshot.row.file.path.display(),
-            "【片头片尾】跳过检测：该媒体库未开启「识别片头片尾」，仅返回已存标记"
-        );
-        append_marker_chapters(&mut chapters, marker.as_ref());
-        return ResolveOutput { chapters, markers };
-    }
-
     // STRM 同步解析不做内嵌章节探测：ffprobe 对远程 URL 每次最多等 30s，
     // 会拖慢 PlaybackInfo/详情页请求。STRM 的片头片尾走 TheIntroDB 云端
     // 与后台探测任务的声纹（不阻塞请求）。
@@ -278,17 +234,24 @@ fn resolve_without_store(snapshot: ResolveSnapshot) -> ResolveOutput {
             path = %snapshot.row.file.path.display(),
             "【片头片尾】STRM 同步解析跳过 ffprobe 章节探测（避免阻塞请求），走 TheIntroDB / 后台声纹"
         );
-        if marker.is_none() && snapshot.media.kind == MediaKind::Tv {
+        if snapshot.detect_intros
+            && snapshot.row.units.len() == 1
+            && marker.is_none()
+            && snapshot.media.kind == MediaKind::Tv
+        {
             marker = marker_from_theintrodb(&snapshot);
             if let Some(value) = marker.clone() {
                 markers.push(value);
             }
         }
-        append_marker_chapters(&mut chapters, marker.as_ref());
-        return ResolveOutput { chapters, markers };
+        return ResolveOutput {
+            chapters,
+            markers,
+            cacheable: true,
+        };
     }
 
-    let probed = probe_chapters(&snapshot.row.file.path);
+    let probed = snapshot.probe.probe(&snapshot.row.file.path);
     if let Some(ref probed) = probed {
         chapters = annotate_chapters(probed);
         tracing::info!(
@@ -301,13 +264,18 @@ fn resolve_without_store(snapshot: ResolveSnapshot) -> ResolveOutput {
         tracing::warn!(
             media = %snapshot.media.title,
             path = %snapshot.row.file.path.display(),
-            "【片头片尾】内嵌章节探测失败（文件不可达 / 无章节 / 远程超时）"
+            "【片头片尾】内嵌章节探测失败（文件不可达 / 远程超时）"
         );
     }
     let has_intro = chapters
         .iter()
         .any(|chapter| chapter.marker_type == Some(MarkerType::IntroStart));
-    if marker.is_none() && !has_intro && snapshot.media.kind == MediaKind::Tv {
+    if snapshot.detect_intros
+        && snapshot.row.units.len() == 1
+        && marker.is_none()
+        && !has_intro
+        && snapshot.media.kind == MediaKind::Tv
+    {
         marker = marker_from_theintrodb(&snapshot);
         if let Some(value) = marker.clone() {
             markers.push(value);
@@ -315,13 +283,12 @@ fn resolve_without_store(snapshot: ResolveSnapshot) -> ResolveOutput {
     }
     // 声纹比对不在此同步链路执行（避免阻塞请求）：由后台异步探测任务
     // （ProbeManager）采集单集指纹、同季 ≥2 集后自动比对识别片头。
-    if marker.is_none() {
+    if snapshot.detect_intros && snapshot.row.units.len() == 1 && marker.is_none() {
         marker = marker_from_chapters(&snapshot, &chapters);
         if let Some(value) = marker.clone() {
             markers.push(value);
         }
     }
-    append_marker_chapters(&mut chapters, marker.as_ref());
     chapters.sort_by_key(|chapter| chapter.start_ms);
     tracing::info!(
         media = %snapshot.media.title,
@@ -332,13 +299,17 @@ fn resolve_without_store(snapshot: ResolveSnapshot) -> ResolveOutput {
         chapters.len(),
         markers.len()
     );
-    ResolveOutput { chapters, markers }
+    ResolveOutput {
+        chapters,
+        markers,
+        cacheable: probed.is_some(),
+    }
 }
 
 fn marker_from_theintrodb(snapshot: &ResolveSnapshot) -> Option<StoredMediaMarker> {
     let client = snapshot.theintrodb.as_ref()?;
     let tmdb_id = snapshot.media.tmdb_id.as_deref()?;
-    let (season, episode) = season_episode_or_one(&snapshot.row);
+    let (season, episode) = snapshot.unit.episode_coordinates()?;
     match client.get_episode_markers(tmdb_id, season, episode) {
         Ok(Some(result)) => Some(StoredMediaMarker {
             media_id: snapshot.media.id,
@@ -370,7 +341,8 @@ fn marker_from_chapters(
     let outro = chapters
         .iter()
         .find(|chapter| chapter.marker_type == Some(MarkerType::CreditsStart));
-    let (season, episode) = season_episode_or_one(&snapshot.row);
+    let (season, episode) =
+        marker_coordinates(snapshot.media.kind, snapshot.unit, snapshot.row.units.len())?;
     (intro.is_some() || outro.is_some()).then(|| StoredMediaMarker {
         media_id: snapshot.media.id,
         season,
@@ -385,7 +357,11 @@ fn marker_from_chapters(
     })
 }
 
-fn append_marker_chapters(chapters: &mut Vec<ChapterMarker>, marker: Option<&StoredMediaMarker>) {
+pub(crate) fn append_marker_chapters(
+    chapters: &mut Vec<ChapterMarker>,
+    marker: Option<&StoredMediaMarker>,
+    duration_ms: Option<i64>,
+) {
     let Some(marker) = marker else { return };
     let intro = match (marker.intro_start_ms, marker.intro_end_ms) {
         (Some(s), Some(e)) if e > s => Some((s, e)),
@@ -397,5 +373,5 @@ fn append_marker_chapters(chapters: &mut Vec<ChapterMarker>, marker: Option<&Sto
         _ => None,
     };
     // 自动为无章节视频构造完整时间轴分段（[序幕 ->] 片头 -> 正片 [-> 片尾]）
-    *chapters = marker::build_complete_timeline_chapters(chapters, intro, outro, None);
+    *chapters = marker::build_complete_timeline_chapters(chapters, intro, outro, duration_ms);
 }

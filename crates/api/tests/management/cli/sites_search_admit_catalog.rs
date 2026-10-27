@@ -83,21 +83,8 @@ async fn cli_admit_prints_torrent_title() {
 }
 
 #[tokio::test]
-async fn cli_sites_add_prints_name_and_lists() {
+async fn cli_catalog_search_prints_matching_media() {
     let tmp = tempfile::tempdir().unwrap();
-    let t = transport(&tmp);
-    let _out = run(
-        Command::SitesAdd {
-            name: "demo".into(),
-            url: "https://pt.example/".into(),
-            profile_id: "demo".into(),
-            cookie: Some("uid=1; pass=abc".into()),
-            api_key: None,
-        },
-        &t,
-    )
-    .await
-    .unwrap();
     let app = router(
         state(
             tmp.path(),

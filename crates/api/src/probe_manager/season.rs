@@ -8,7 +8,7 @@ use marker::adaptive::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::projected_episode;
+use super::single_episode;
 use super::{ProbeManager, ProbeUnit};
 use crate::fingerprint_job::{
     AdaptiveCaptureContext, CapturePolicy, EpisodeCaptureRequest, EpisodeDetection,
@@ -57,6 +57,9 @@ pub async fn run_adaptive_season_pipeline(
     season: u32,
     units: &[ProbeUnit],
 ) -> Result<MarkerResultReplacement, String> {
+    for unit in units {
+        super::require_single_unit(&unit.row).map_err(|error| error.to_string())?;
+    }
     let sampling_mode = effective_sampling_mode(mgr);
     let profile_key = capture_profile_key(&FingerprintCaptureProfile::default());
     let policy = SamplingPolicy::default();
@@ -141,6 +144,15 @@ pub async fn run_adaptive_season_pipeline(
 
 fn ensure_season_sources(pipeline: &SeasonPipeline<'_>, units: &[ProbeUnit]) -> Result<(), String> {
     for unit in units {
+        let active = pipeline
+            .mgr
+            .store
+            .lock()
+            .fingerprint_source_active(pipeline.job_id, &unit.row.file.file_id.to_string())
+            .map_err(|error| format!("source_check_failed: {error}"))?;
+        if !active {
+            return Err("file_deleted: probe source cancelled".into());
+        }
         if pipeline.ctx.gate.work_control(&unit.row).is_cancelled() {
             return Err("Library probe source cancelled or changed".into());
         }
@@ -169,15 +181,15 @@ fn collect_episode_descriptors(mgr: &ProbeManager, units: &[ProbeUnit]) -> Vec<E
     let store = mgr.store.lock();
     units
         .iter()
-        .map(|unit| {
+        .filter_map(|unit| {
             let ledger_id = unit.row.file.file_id.to_string();
             let path = std::path::Path::new(&unit.row.file.path);
-            EpisodeDescriptor {
+            Some(EpisodeDescriptor {
                 ledger_id: ledger_id.clone(),
-                episode: projected_episode(&unit.row),
+                episode: single_episode(&unit.row)?,
                 source_version: crate::fingerprint_job::current_source_version(path),
                 duration_ms: known_media_duration(&store, &ledger_id).unwrap_or(0),
-            }
+            })
         })
         .collect()
 }
@@ -426,7 +438,9 @@ fn build_marker_replacement(
 
     for unit in units {
         let ledger_id = unit.row.file.file_id.to_string();
-        let episode = projected_episode(&unit.row);
+        let episode = super::require_episode_coordinates(&unit.row)
+            .map_err(|error| error.to_string())?
+            .1;
         let detection = find_detection(detections, &ledger_id, episode);
         let previous = store
             .get_media_marker(pipeline.media_id, Some(pipeline.season), Some(episode))
@@ -594,7 +608,9 @@ fn has_truncated_unmatched(
     kind: SegmentKind,
 ) -> bool {
     units.iter().any(|unit| {
-        let episode = projected_episode(&unit.row);
+        let Some(episode) = single_episode(&unit.row) else {
+            return true;
+        };
         let ledger_id = unit.row.file.file_id.to_string();
         let detection = find_detection(detections, &ledger_id, episode);
         let has_detection = match kind {

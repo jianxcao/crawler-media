@@ -1,6 +1,6 @@
 # SQLite 是系统记录，按生命周期拆分
 
-状态：接受；五文件边界保留，`library.db` 当前布局为 version 2。原问题版本 `cf7fb70`，实施与验证见[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)，字段/索引见[数据库字典](../database/README.md)。
+状态：接受；五文件边界保留，`library.db` 当前布局为 version 6。原问题版本 `cf7fb70`，实施与验证见[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)，字段/索引见[数据库字典](../database/README.md)。
 
 ## 决策
 

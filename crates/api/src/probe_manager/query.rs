@@ -112,7 +112,7 @@ impl ProbeManager {
                     &job_id,
                     kind,
                     &unit.row.file.media_id.to_string(),
-                    super::projected_season_opt(&unit.row),
+                    super::single_season_opt(&unit.row),
                     &scope,
                     &[spec],
                 )
@@ -129,14 +129,21 @@ impl ProbeManager {
 
     fn query_metadata(
         &self,
-        mut unit: ProbeUnit,
+        unit: ProbeUnit,
         budget: &QueryBudget,
         writable: &Arc<AtomicBool>,
     ) -> Result<policy::ProbeRequestResult, LibraryReadError> {
+        self.query_metadata_observed(unit, budget, writable, || {})
+    }
+
+    fn query_metadata_observed(
+        &self,
+        mut unit: ProbeUnit,
+        budget: &QueryBudget,
+        writable: &Arc<AtomicBool>,
+        published: impl FnOnce(),
+    ) -> Result<policy::ProbeRequestResult, LibraryReadError> {
         let ledger_id = unit.row.file.file_id.to_string();
-        if self.seen.lock().contains(&ledger_id) {
-            return Ok(policy::ProbeRequestResult::AlreadyRunning);
-        }
         if self
             .last_failure
             .lock()
@@ -146,15 +153,32 @@ impl ProbeManager {
             return Ok(policy::ProbeRequestResult::AlreadyRunning);
         }
         self.last_failure.lock().remove(&ledger_id);
-        let job_id = match self.query_persist(&unit, "media_probe", budget, writable)? {
-            PersistOutcome::Created(job_id) => job_id,
-            PersistOutcome::Duplicate => return Ok(policy::ProbeRequestResult::AlreadyRunning),
-            PersistOutcome::ReadOnly => return Ok(policy::ProbeRequestResult::Disabled),
+        if !self.seen.lock().insert(ledger_id.clone()) {
+            return Ok(policy::ProbeRequestResult::AlreadyRunning);
+        }
+        let job_id = match self.query_persist(&unit, "media_probe", budget, writable) {
+            Ok(PersistOutcome::Created(job_id)) => job_id,
+            Ok(PersistOutcome::Duplicate) => {
+                self.forget_seen(&ledger_id);
+                return Ok(policy::ProbeRequestResult::AlreadyRunning);
+            }
+            Ok(PersistOutcome::ReadOnly) => {
+                self.forget_seen(&ledger_id);
+                return Ok(policy::ProbeRequestResult::Disabled);
+            }
+            Err(error) => {
+                self.forget_seen(&ledger_id);
+                return Err(error);
+            }
         };
         unit.job_id = Some(job_id.clone());
-        budget.check()?;
+        if let Err(error) = budget.check() {
+            self.forget_seen(&ledger_id);
+            return Err(error);
+        }
         tracing::info!(job_id, "Page auto-probe durably queued");
         if self.queue_metadata(unit).is_err() {
+            self.forget_seen(&ledger_id);
             tracing::info!(
                 ledger_id,
                 job_id,
@@ -176,7 +200,7 @@ impl ProbeManager {
             })?;
             return Ok(policy::ProbeRequestResult::AlreadyRunning);
         }
-        self.seen.lock().insert(ledger_id);
+        published();
         Ok(policy::ProbeRequestResult::Queued { job_id })
     }
 
@@ -252,6 +276,51 @@ mod tests {
     use domain::{Media, MediaId, MediaKind};
     use parking_lot::Mutex;
     use std::time::Instant;
+
+    #[test]
+    fn page_metadata_completion_before_sender_returns_releases_seen() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, row) = published_row(dir.path());
+        let manager = ProbeManager::new(Arc::new(Mutex::new(store)));
+        let ledger_id = row.file.file_id.to_string();
+        let unit = ProbeUnit {
+            row,
+            kind: MediaKind::Movie,
+            force_fingerprint: false,
+            reuse_fingerprint_cache: true,
+            overwrite_markers: false,
+            reuse_media_info_cache: true,
+            marker_refresh_id: None,
+            job_id: None,
+        };
+        let result = manager.query_metadata_observed(
+            unit,
+            &QueryBudget {
+                deadline: Instant::now() + Duration::from_secs(2),
+                cancelled: Arc::new(AtomicBool::new(false)),
+            },
+            &Arc::new(AtomicBool::new(true)),
+            || {
+                let id = manager
+                    .metadata_rx
+                    .lock()
+                    .as_mut()
+                    .unwrap()
+                    .try_recv()
+                    .unwrap();
+                assert!(
+                    manager.seen.lock().remove(&id.ledger_id),
+                    "the consumer must observe the admission before receiving it"
+                );
+                manager.metadata_stage_finished();
+            },
+        );
+        assert!(matches!(
+            result,
+            Ok(policy::ProbeRequestResult::Queued { .. })
+        ));
+        assert!(!manager.seen.lock().contains(&ledger_id));
+    }
 
     #[test]
     fn writer_lease_loss_while_page_probe_waits_leaves_no_ledger_job() {
@@ -446,9 +515,6 @@ mod tests {
 
         drop(guard);
         let result = worker.join().unwrap().unwrap();
-        assert!(matches!(
-            result,
-            policy::ProbeRequestResult::Queued { .. }
-        ));
+        assert!(matches!(result, policy::ProbeRequestResult::Queued { .. }));
     }
 }

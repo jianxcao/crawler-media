@@ -9,7 +9,7 @@ use domain::{
     MediaId, MediaKind, QualitySource, UnitKey,
 };
 use store::Store;
-use store::test_support::{FixtureFile, publish_fixture_file};
+use store::test_support::{FixtureFile, publish_fixture_file_units};
 
 /// 构造一个未落库的覆盖事实：`season`/`episode` 同有同无，否则是整文件单元。
 pub(super) fn coverage(
@@ -50,11 +50,11 @@ pub(super) fn synthetic(ledger_id: &str) -> FileCoverage {
 /// 把夹具落库，并返回库里那份文件事实（保留原单元）。
 pub(super) fn publish(store: &Store, cov: &FileCoverage) -> FileCoverage {
     let spec = fixture_spec(cov);
-    let file = publish_fixture_file(store, &spec).expect("publish fixture file");
+    let file = publish_fixture_file_units(store, &spec, &cov.units).expect("publish fixture file");
     FileCoverage {
         path_key: String::new(),
         file,
-        units: units_for(spec.season, spec.episode),
+        units: cov.units.clone(),
     }
 }
 
@@ -67,13 +67,14 @@ pub(super) fn publish_into(store: &Store, cov: &mut FileCoverage) {
 
 /// 覆盖事实 → 发布规格；只映射旧行 fixture 携带过的那几个字段。
 pub(super) fn fixture_spec(cov: &FileCoverage) -> FixtureFile {
-    let (season, episode) = cov
-        .units
-        .first()
-        .filter(|unit| !unit.is_whole())
-        .map_or((None, None), |unit| {
-            (Some(unit.season as u32), Some(unit.episode as u32))
-        });
+    let (season, episode) = match cov.units.as_slice() {
+        [unit] => unit
+            .episode_coordinates()
+            .map_or((None, None), |(season, episode)| {
+                (Some(season), Some(episode))
+            }),
+        _ => (None, None),
+    };
     FixtureFile {
         media_id: cov.file.media_id,
         path: cov.file.path.to_string_lossy().into_owned(),

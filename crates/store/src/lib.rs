@@ -37,7 +37,8 @@ mod ledger_cleanup;
 mod ledger_presence;
 mod ledger_quality;
 pub use ledger_presence::{
-    FilePresence, LedgerPresenceMode, LedgerPresenceObservation, LedgerPresenceResult,
+    AppliedLedgerPresence, FilePresence, LedgerPresenceMode, LedgerPresenceObservation,
+    LedgerPresenceOutcome, LedgerPresenceResult,
 };
 mod libraries;
 mod library_stats;
@@ -66,7 +67,9 @@ mod subscribe_library_snapshot;
 pub use pending_file_deletions::{MAX_FILE_DELETION_ATTEMPTS, QueuedFileDeletion, file_identity};
 pub use subscribe_library_snapshot::SubscribeLibrarySnapshot;
 mod subscribe_library;
-pub use subscribe_library::{evaluate_subscribe_facts, evaluate_subscribe_facts_pure};
+pub use subscribe_library::{
+    ResolvedSubscribeFacts, resolve_subscribe_facts, resolve_subscribe_facts_with,
+};
 mod maps;
 mod media;
 mod media_operations;

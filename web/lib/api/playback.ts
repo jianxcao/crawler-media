@@ -645,7 +645,7 @@ export interface PlaybackSession {
   hw_backend: string | null;
   /** 进度条上的章节刻度；冷缓存时暂为空，解析完成后可从章节缓存接口读取。 */
   chapters?: PlaybackChapterMark[];
-  /** 冷缓存时章节在后台解析；播放器可按 file_id 读取缓存。 */
+  /** 冷缓存时章节在后台解析；播放器可按播放会话读取缓存。 */
   chapters_pending?: boolean;
   file_id?: string;
   /** 本单元的观看状态快照（§6.10）。续播点已由服务端并入 start_ms，这里
@@ -701,10 +701,10 @@ export async function startPlaybackSession(
 
 /** 仅读取章节缓存，不触发新的媒体探测。 */
 export async function fetchPlaybackChapters(
-  fileId: string,
+  playSessionId: string,
   scope: PlaybackApiScope = DEFAULT_PLAYBACK_SCOPE,
 ): Promise<{ ready: boolean; chapters: PlaybackChapterMark[] }> {
-  const query = new URLSearchParams({ file_id: fileId });
+  const query = new URLSearchParams({ play_session_id: playSessionId, device_id: getPlayerDeviceId() });
   const response = await request<ApiEnvelope<{ ready: boolean; chapters: PlaybackChapterMark[] }>>(
     `${scope.base}/chapters?${query}`,
   );

@@ -348,7 +348,8 @@ fn retargeted_subscribe_does_not_treat_previous_library_as_owned() {
     subscribe.library_id = Some(domain::LibraryId::from_str(&b.id).unwrap());
     store.update_subscribe(&subscribe).unwrap();
     let loaded = store
-        .load_library_subscribe_facts(&subscribe, MediaKind::Movie)
+        .subscribe_library_snapshot(&subscribe, MediaKind::Movie)
+        .and_then(|snapshot| store::resolve_subscribe_facts(&snapshot)?.evaluate(&|_| true))
         .unwrap();
     assert!(
         loaded.movie().is_none(),

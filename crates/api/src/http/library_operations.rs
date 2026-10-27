@@ -24,12 +24,28 @@ pub(crate) async fn integrity_checks(
     State(state): State<ApiState>,
     Path(library_id): Path<String>,
 ) -> Response {
-    match storage_operations::begin_library_integrity(&state, &library_id, false) {
+    begin_integrity(state, library_id, false).await
+}
+
+async fn begin_integrity(state: ApiState, library_id: String, repair: bool) -> Response {
+    let worker = state.clone();
+    let result = state
+        .http_work
+        .run_to_completion(move || {
+            storage_operations::begin_library_integrity(&worker, &library_id, repair)
+        })
+        .await;
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => return super::library::browse_work_error(error),
+    };
+    match result {
         Ok(operation) => (
             StatusCode::ACCEPTED,
             Json(serde_json::json!({ "ok": true, "data": operation })),
         )
             .into_response(),
+        Err(storage_operations::StorageOperationError::Busy) => super::store_wait::busy_response(),
         Err(storage_operations::StorageOperationError::MissingLibrary) => {
             err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在")
         }
@@ -52,27 +68,7 @@ pub(crate) async fn integrity_repairs(
     State(state): State<ApiState>,
     Path(library_id): Path<String>,
 ) -> Response {
-    match storage_operations::begin_library_integrity(&state, &library_id, true) {
-        Ok(operation) => (
-            StatusCode::ACCEPTED,
-            Json(serde_json::json!({ "ok": true, "data": operation })),
-        )
-            .into_response(),
-        Err(storage_operations::StorageOperationError::MissingLibrary) => {
-            err(StatusCode::NOT_FOUND, "library.missing", "媒体库不存在")
-        }
-        Err(storage_operations::StorageOperationError::Reindexing { operation_id }) => {
-            reindexing_conflict(operation_id.as_deref())
-        }
-        Err(storage_operations::StorageOperationError::Invalid(message)) => {
-            err(StatusCode::BAD_REQUEST, "library.invalid", &message)
-        }
-        Err(storage_operations::StorageOperationError::Store(error)) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &error.to_string(),
-        ),
-    }
+    begin_integrity(state, library_id, true).await
 }
 
 /// `GET /libraries/{id}/operations/{operation_id}`
@@ -80,14 +76,29 @@ pub(crate) async fn get_operation(
     State(state): State<ApiState>,
     Path((library_id, operation_id)): Path<(String, String)>,
 ) -> Response {
-    match storage_operations::library_operation(&state, &library_id, &operation_id) {
+    let read = super::store_wait::store_read(&state, move |store| {
+        store.library_operation_view(&operation_id).map(|view| {
+            view.filter(|view| view.library_id == library_id)
+                .map(|view| storage_operations::operation_json(&view))
+        })
+    })
+    .await;
+    let result = match read {
+        Ok(result) => result,
+        Err(error) => return error.response(),
+    };
+    match result {
         Ok(Some(operation)) => ok(operation).into_response(),
         Ok(None) => err(
             StatusCode::NOT_FOUND,
             "library.operation_not_found",
             "媒体库操作不存在",
         ),
-        Err(error) => err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", &error),
+        Err(error) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store.error",
+            &error.to_string(),
+        ),
     }
 }
 
@@ -118,10 +129,20 @@ pub(crate) async fn reject_conflicting_writes(
         let (mut parts, body) = request.into_parts();
         let library_id = library_path_param(&mut parts).await;
         let request = Request::from_parts(parts, body);
-        if let Some(library_id) = library_id
-            && let WriteVerdict::Reindexing { operation_id } =
-                storage_operations::write_verdict(&state, &library_id)
-        {
+        let verdict = if let Some(library) = library_id.clone() {
+            match super::store_wait::store_read(&state, move |store| {
+                storage_operations::write_verdict_for_store(store, &library)
+            })
+            .await
+            {
+                Ok(verdict) => verdict,
+                Err(error) => return error.response(),
+            }
+        } else {
+            WriteVerdict::Proceed
+        };
+        if let WriteVerdict::Reindexing { operation_id } = verdict {
+            let library_id = library_id.unwrap_or_default();
             tracing::info!(
                 %library_id,
                 operation_id = ?operation_id,
@@ -171,8 +192,25 @@ pub(crate) async fn retry_operation(
     State(state): State<ApiState>,
     Path((library, operation)): Path<(String, String)>,
 ) -> Response {
+    let worker = state.clone();
+    match state
+        .http_work
+        .run_to_completion(move || retry_blocking(worker, library, operation))
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => super::library::browse_work_error(error),
+    }
+}
+
+fn retry_blocking(state: ApiState, library: String, operation: String) -> Response {
     let view = {
-        let store = state.store.lock();
+        let Some(store) = state
+            .store
+            .try_lock_for(super::store_wait::STORE_WRITE_WAIT)
+        else {
+            return super::store_wait::busy_response();
+        };
         match store.library_operation_view(&operation) {
             Ok(Some(view)) if view.library_id == library => {
                 if view.state != "failed"

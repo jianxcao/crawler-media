@@ -527,14 +527,12 @@ function CreateLibraryDialog({
       match_rules: hasScope ? buildMatchRules(validGenres(kind, genres, routingOptions), regions) : [],
       default_filter_id: defaultFilterId ? defaultFilterId : null,
       // 开关全按推荐值：监控开、自动清理关、封面开、场景图开、首页展示；建好后在编辑里调
-      auto_clear_missing: false,
       realtime_watch: true,
       generate_thumbnails: true,
       extract_chapter_images: true,
       exclude_from_home: kindExcludedFromHome(kind),
       detect_intros: false,
       enable_fingerprint: false,
-      scrape_overrides: {},
       access_mode: accessMode,
       admin_visible: adminVisible,
       member_ids: accessMode === "selected" ? memberIds : [],
@@ -1089,7 +1087,6 @@ function EditLibraryDialog({
   const [roots, setRoots] = useState<string[]>(library.root_paths);
   const [pickerTarget, setPickerTarget] = useState<"add" | number | null>(null);
   const [realtimeWatch, setRealtimeWatch] = useState(library.realtime_watch ?? true);
-  const [autoClearMissing, setAutoClearMissing] = useState(false);
   const [generateThumbnails, setGenerateThumbnails] = useState(library.generate_thumbnails ?? true);
   const [extractChapterImages, setExtractChapterImages] = useState(library.extract_chapter_images ?? true);
   const [excludeFromHome, setExcludeFromHome] = useState(library.exclude_from_home ?? kindExcludedFromHome(library.kind));
@@ -1137,7 +1134,6 @@ function EditLibraryDialog({
       ...(rootsChanged ? { root_paths: nextRoots } : {}),
       match_rules: scraped ? buildMatchRules(validGenres(library.kind, genres, routingOptions), regions) : [],
       default_filter_id: defaultFilterId ? defaultFilterId : null,
-      auto_clear_missing: autoClearMissing,
       realtime_watch: realtimeWatch,
       generate_thumbnails: generateThumbnails,
       extract_chapter_images: extractChapterImages,
@@ -1204,7 +1200,6 @@ function EditLibraryDialog({
       summary: (
         <>
           {dot(realtimeWatch, "实时监控")}
-          {dot(autoClearMissing, "自动清理丢失")}
           {dot(
             generateThumbnails,
             scraped ? "抓帧补图" : playable ? "抓帧封面" : "缩略图",
@@ -1224,12 +1219,7 @@ function EditLibraryDialog({
               "新文件落盘后自动增量扫描入库。SMB/NFS 等网络挂载收不到远端变化通知、建立监听还很慢，建议关闭；关闭后由定期对账和手动扫描发现新文件，不实时但不会缺失。"
             }
           />
-          <SwitchRow
-            title="扫描后自动清理丢失记录"
-            checked={autoClearMissing}
-            onChange={setAutoClearMissing}
-            detail="自己在磁盘上删了片子后，扫描结束即把这些记录清出台账。只删记录、不动磁盘，但记录删了不可恢复——「缺失」清单里的「重新下载」也会随之消失。关闭时记录保留，文件回归自动恢复；目录读不动的那一轮不会清理。"
-          />
+
           <SwitchRow
             title={
               scraped

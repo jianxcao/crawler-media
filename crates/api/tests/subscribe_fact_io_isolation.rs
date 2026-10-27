@@ -299,3 +299,37 @@ fn failing_resolver_propagates_permission_denied() {
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subscribe_read_rejects_facts_changed_during_unlocked_io() {
+    let tmp = tempfile::tempdir().unwrap();
+    let gate = Arc::new(Gate::new());
+    let state = make_state(
+        tmp.path(),
+        Arc::new(GatedFileStatRead { gate: gate.clone() }),
+    );
+    let (subscribe, path) = seed_subscription(&state, tmp.path());
+    let owned = state.clone();
+    let work = tokio::task::spawn_blocking(move || {
+        api::read_subscribe_library_facts(&owned, &subscribe, MediaKind::Movie)
+    });
+    let _release = ReleaseOnDrop(gate.clone());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !gate.entered() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let handle = state.store();
+    let store = handle
+        .try_lock_for(Duration::from_secs(1))
+        .expect("IO must not hold Store");
+    store.delete_ledger_path(path.to_str().unwrap()).unwrap();
+    drop(store);
+    gate.release();
+    assert!(
+        work.await.unwrap().is_err(),
+        "a deleted generation must not count as owned"
+    );
+}

@@ -189,7 +189,9 @@ impl ProbeScenario {
             engine.clone(),
         ));
         manager.set_clock(clock.clone());
-        manager.try_start_workers();
+        if tokio::runtime::Handle::try_current().is_ok() {
+            assert!(manager.try_start_workers(), "fixture workers must start");
+        }
 
         let media_id = MediaId::new();
         let root = tmp.path().join("tv_root");
@@ -308,16 +310,20 @@ impl ProbeScenario {
         self.manager.dispatch_due(self.clock.now_ms(), 32).unwrap()
     }
 
-    pub fn reopen(&mut self) {
-        drop(std::mem::replace(
-            &mut self.manager,
-            Arc::new(ProbeManager::with_fingerprint_engine(
-                self.store.clone(),
-                self.engine.clone(),
-            )),
+    pub async fn reopen(&mut self) {
+        self.manager
+            .shutdown_workers()
+            .await
+            .expect("stop fixture workers");
+        self.manager = Arc::new(ProbeManager::with_fingerprint_engine(
+            self.store.clone(),
+            self.engine.clone(),
         ));
         self.manager.set_clock(self.clock.clone());
-        self.manager.try_start_workers();
+        assert!(
+            self.manager.try_start_workers(),
+            "replacement workers must start"
+        );
     }
 
     /// The published coverage of one season-1 episode of the fixture library.
@@ -362,9 +368,13 @@ impl ProbeScenario {
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
             let active = self.store.lock().recover_probe_jobs().unwrap();
-            if active.is_empty() || std::time::Instant::now() >= deadline {
+            if active.is_empty() {
                 break;
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "probe jobs did not finish: {active:?}"
+            );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }

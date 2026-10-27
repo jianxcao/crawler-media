@@ -137,12 +137,12 @@ fn wanted_units(
     {
         return None;
     }
-    let facts = store
-        .load_library_subscribe_facts(subscribe, media.kind)
-        .ok()?;
     let pending = store.load_pending(subscribe.id).ok()?;
     let history = store.load_wanted_history(subscribe.id).ok()?;
     drop(store);
+    let facts =
+        crate::subscribe_library_read::read_subscribe_library_facts(state, subscribe, media.kind)
+            .ok()?;
     let releases = crate::worker::finish_search::pending_releases(&pending);
     let facts = subscribe::facts_with_pending(facts, &releases, subscribe, media);
     let units = crate::open_coverage::units(

@@ -203,7 +203,7 @@ fn probe_publication_refreshes_quality_and_card_summary() {
         tracks_version: CURRENT_TRACKS_VERSION,
         resolution: Some("2160p"),
         codec: Some("hevc"),
-        hdr: Some("HDR10"),
+        hdr: store::library_write::probe::Observed::Value(Some("HDR10")),
         duration_ms: Some(7_200_000),
         details: Some(&details),
     };
@@ -289,7 +289,7 @@ fn stale_probe_result_is_rejected_and_changes_nothing() {
         tracks_version: CURRENT_TRACKS_VERSION,
         resolution: Some("2160p"),
         codec: Some("hevc"),
-        hdr: Some("HDR10"),
+        hdr: store::library_write::probe::Observed::Value(Some("HDR10")),
         duration_ms: Some(7_200_000),
         details: Some(&details),
     };
@@ -422,4 +422,125 @@ fn cached_chapters_round_trip_and_ignore_a_replaced_file_version() {
 
     store.clear_cached_chapters(FILE_ID).unwrap();
     assert_eq!(store.get_cached_chapters(FILE_ID).unwrap(), None);
+}
+
+#[test]
+fn complete_sdr_probe_clears_release_hdr_and_card_filter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = seed(tmp.path());
+    let store = &fixture.store;
+    let file = &fixture.file;
+    // A release-name guess can claim HDR before the actual stream is probed.
+    let mut guessed = file.clone();
+    guessed.hdr = Some("HDR10".into());
+    store
+        .publish_files(
+            &WriteScope {
+                library_id: file.library_id,
+                config_revision: 0,
+            },
+            &[StorePublication {
+                file: &guessed,
+                units: &[UnitKey::WHOLE],
+                expected_version: Some(&file.version),
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            1500,
+        )
+        .unwrap();
+    let expected = store.get_file_version(file.file_id).unwrap().unwrap();
+    let details = video_details(
+        &expected,
+        r#"{"codec":"h264","height":1080,"width":1920,"color_transfer":"bt709"}"#,
+        Some(7_200_000),
+    );
+    store
+        .publish_probe_result(
+            file.file_id,
+            &ProbePublication {
+                expected: &expected,
+                tracks_version: CURRENT_TRACKS_VERSION,
+                resolution: Some("1080p"),
+                codec: Some("h264"),
+                hdr: store::library_write::probe::Observed::Value(None),
+                duration_ms: Some(7_200_000),
+                details: Some(&details),
+            },
+            2000,
+        )
+        .unwrap();
+    let coverage = store.file_coverage_by_id(file.file_id).unwrap().unwrap();
+    assert_eq!(
+        coverage.file.hdr, None,
+        "SDR replaces the HDR release guess"
+    );
+    assert_eq!(coverage.file.quality_source, QualitySource::Probe);
+    let query = store::library_query::LibraryQuery {
+        library_id: file.library_id,
+        user_id: None,
+        filter: store::library_query::BrowseFilter {
+            hdr: Some(true),
+            ..Default::default()
+        },
+        order: store::library_query::BrowseOrder::Title,
+        descending: false,
+        page: store::library_query::BrowsePage::Offset {
+            start: 0,
+            limit: 20,
+        },
+        include_total: true,
+    };
+    assert!(store.library_item_page(&query).unwrap().items.is_empty());
+}
+
+#[test]
+fn partial_probe_preserves_hdr_when_video_was_not_observed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = seed(tmp.path());
+    let store = &fixture.store;
+    let mut file = fixture.file.clone();
+    file.hdr = Some("HDR10".into());
+    store
+        .publish_files(
+            &WriteScope {
+                library_id: file.library_id,
+                config_revision: 0,
+            },
+            &[StorePublication {
+                file: &file,
+                units: &[UnitKey::WHOLE],
+                expected_version: Some(&file.version),
+                nfo_observation: None,
+                probe_required: false,
+            }],
+            1000,
+        )
+        .unwrap();
+    let version = store.get_file_version(file.file_id).unwrap().unwrap();
+    store
+        .publish_probe_result(
+            file.file_id,
+            &ProbePublication {
+                expected: &version,
+                tracks_version: CURRENT_TRACKS_VERSION,
+                resolution: None,
+                codec: None,
+                hdr: store::library_write::probe::Observed::NotObserved,
+                duration_ms: Some(5000),
+                details: None,
+            },
+            2000,
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .file_coverage_by_id(file.file_id)
+            .unwrap()
+            .unwrap()
+            .file
+            .hdr
+            .as_deref(),
+        Some("HDR10")
+    );
 }

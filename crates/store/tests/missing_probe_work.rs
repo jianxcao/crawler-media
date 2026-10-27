@@ -1,15 +1,4 @@
-//! Presence verdicts against durable probe work.
-//!
-//! A presence verdict is a file fact, not a lifecycle event: `Verify` marks
-//! `missing_at` and changes nothing else, so the file row, its Media, its cold
-//! details and its durable probe backlog all survive a missing source. Work is
-//! retired only when the file row itself is deleted (`Prune` of an already
-//! missing file), which drops that file's queued/running units and resyncs the
-//! owning job.
-//!
-//! Re-arming a restored source is the scan's write
-//! ([`Store::arm_scan_probe_obligation`]), never the presence writer's: arming
-//! and retirement are one seam each, not two competing writers.
+//! Presence and durable probe lifecycle commit together; stale observations preserve new work.
 
 use domain::{Confidence, LedgerId, Media, MediaId, MediaKind, QualitySource, UnitKey};
 use store::{
@@ -156,7 +145,7 @@ fn observe(
 }
 
 #[test]
-fn missing_verdict_retires_no_work_and_keeps_every_fact() {
+fn missing_verdict_cancels_work_and_keeps_every_file_fact() {
     for running in [false, true] {
         let fixture = fixture();
         let store = &fixture.store;
@@ -192,12 +181,15 @@ fn missing_verdict_retires_no_work_and_keeps_every_fact() {
         assert!(store.get_media(fixture.media_id).unwrap().is_some());
         assert!(store.get_file_meta(&ledger_id).unwrap().is_some());
 
-        // Work is untouched: queue state and the durable backlog survive.
+        // Work for the committed missing generation is cancelled atomically.
         let units = store.probe_job_units("probe").unwrap();
         assert_eq!(units.len(), 1);
-        assert_eq!(units[0].status, if running { "running" } else { "queued" });
-        assert!(store.get_probe_job("probe").unwrap().unwrap().is_active());
-        assert_eq!(store.count_probe_obligations().unwrap(), 1);
+        assert_eq!(units[0].status, "cancelled");
+        assert_eq!(
+            store.get_probe_job("probe").unwrap().unwrap().status,
+            "cancelled"
+        );
+        assert_eq!(store.count_probe_obligations().unwrap(), 0);
     }
 }
 
@@ -247,7 +239,7 @@ fn pruning_a_missing_file_cancels_queued_and_running_units() {
         );
         let probe = store.get_probe_job("probe").unwrap().unwrap();
         assert_eq!(probe.status, "cancelled");
-        assert_eq!(probe.error.as_deref(), Some("file_deleted"));
+        assert_eq!(probe.error.as_deref(), Some("source missing"));
         assert_eq!((probe.total, probe.completed, probe.failed), (0, 0, 0));
 
         // The file row, its obligation and its cold details go with the delete;
@@ -301,6 +293,9 @@ fn restored_file_rearms_one_obligation_and_retains_prior_probe_history() {
         200,
     );
     assert_eq!((restored.restored, restored.missing), (1, 0));
+    let restored_obligations = store.scan_probe_obligations(100).unwrap();
+    assert_eq!(restored_obligations.len(), 1);
+    assert_eq!(restored_obligations[0].created_at_ms, 200_000);
 
     // The scan re-observes a restored source and arms work for it; repeated
     // observations of the same restore still leave exactly one obligation.
@@ -401,4 +396,135 @@ fn unknown_or_stale_presence_does_not_cancel_probe_work() {
 
     assert_eq!(store.probe_job_units("probe").unwrap()[0].status, "queued");
     assert_eq!(store.count_probe_obligations().unwrap(), 1);
+}
+
+#[test]
+fn failed_presence_settlement_rolls_back_probe_lifecycle_too() {
+    let fixture = fixture();
+    let store = &fixture.store;
+    job(
+        store,
+        "probe",
+        "media_probe",
+        fixture.file_id,
+        fixture.media_id,
+    );
+    let db = rusqlite::Connection::open(store.data_dir().join("library.db")).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_presence_settle BEFORE UPDATE OF query_projection_revision ON library_items
+        BEGIN SELECT RAISE(ABORT,'presence settlement failed'); END;").unwrap();
+    let file = store.file_coverage_by_id(fixture.file_id).unwrap().unwrap();
+    let result = store.apply_ledger_presence(
+        &[LedgerPresenceObservation {
+            path_key: file.path_key.clone(),
+            file,
+            missing_at: None,
+            presence: FilePresence::Missing,
+        }],
+        LedgerPresenceMode::Verify,
+        100,
+    );
+    assert!(result.is_err());
+    assert_eq!(store.probe_job_units("probe").unwrap()[0].status, "queued");
+    assert_eq!(
+        store.get_probe_job("probe").unwrap().unwrap().status,
+        "queued"
+    );
+    assert_eq!(store.count_probe_obligations().unwrap(), 1);
+    assert_eq!(
+        store
+            .file_coverage_by_id(fixture.file_id)
+            .unwrap()
+            .unwrap()
+            .file
+            .presence,
+        FilePresence::Present
+    );
+    assert!(store.missing_at_by_path().unwrap().is_empty());
+}
+
+#[test]
+fn retrying_one_probe_unit_preserves_other_running_work() {
+    let fixture = fixture();
+    let store = &fixture.store;
+    let first = fixture.file_id.to_string();
+    let second_id = LedgerId::new();
+    let second = second_id.to_string();
+    store
+        .insert_scanned_files(
+            &[scanned(
+                second_id,
+                fixture.media_id,
+                &format!("{}.second", fixture.path),
+            )],
+            1_001,
+        )
+        .unwrap();
+    job(
+        store,
+        "first",
+        "media_probe",
+        fixture.file_id,
+        fixture.media_id,
+    );
+    job(store, "second", "media_probe", second_id, fixture.media_id);
+    assert!(store.start_probe_unit("first", &first).unwrap());
+    assert!(store.start_probe_unit("second", &second).unwrap());
+
+    assert!(store.retry_probe_unit("first", &first).unwrap());
+    assert_eq!(store.probe_job_units("first").unwrap()[0].status, "queued");
+    assert_eq!(
+        store.probe_job_units("second").unwrap()[0].status,
+        "running"
+    );
+    assert!(store.start_probe_unit("first", &first).unwrap());
+    store.cancel_probe_job("first", "deleted").unwrap();
+    assert!(!store.retry_probe_unit("first", &first).unwrap());
+    assert_eq!(
+        store.probe_job_units("first").unwrap()[0].status,
+        "cancelled"
+    );
+}
+
+#[test]
+fn fingerprint_handoff_rolls_back_metadata_completion_when_enqueue_fails() {
+    let fixture = fixture();
+    let store = &fixture.store;
+    let file = fixture.file_id.to_string();
+    job(
+        store,
+        "metadata",
+        "media_probe",
+        fixture.file_id,
+        fixture.media_id,
+    );
+    assert!(store.start_probe_unit("metadata", &file).unwrap());
+    let db = rusqlite::Connection::open(store.data_dir().join("library.db")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER fail_fingerprint BEFORE INSERT ON probe_jobs
+        WHEN NEW.kind = 'fingerprint_probe' BEGIN SELECT RAISE(ABORT, 'failed'); END;",
+    )
+    .unwrap();
+    assert!(
+        store
+            .complete_media_probe_and_enqueue_fingerprint("metadata", &file, "fingerprint")
+            .is_err()
+    );
+    assert_eq!(
+        store.probe_job_units("metadata").unwrap()[0].status,
+        "running"
+    );
+    assert!(store.get_probe_job("fingerprint").unwrap().is_none());
+    db.execute_batch("DROP TRIGGER fail_fingerprint").unwrap();
+    assert!(
+        store
+            .complete_media_probe_and_enqueue_fingerprint("metadata", &file, "fingerprint")
+            .unwrap()
+    );
+    assert_eq!(
+        store.get_probe_job("metadata").unwrap().unwrap().status,
+        "succeeded"
+    );
+    let next = store.probe_job_units("fingerprint").unwrap();
+    assert_eq!(next[0].status, "queued");
+    assert_eq!(next[0].stage, store::ProbeDispatchStage::Fingerprint);
 }

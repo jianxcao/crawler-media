@@ -76,6 +76,7 @@ mod obscura_install;
 mod obscura_lifecycle;
 mod playback;
 mod playback_admin_ended_and_markers;
+mod playback_whole_markers;
 mod playback_clock;
 mod playback_history_scope;
 mod playback_movie_units;

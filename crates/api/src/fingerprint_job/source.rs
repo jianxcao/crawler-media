@@ -1,4 +1,4 @@
-use domain::{FileCoverage, UnitKey};
+use domain::FileCoverage;
 use store::Store;
 
 /// Ledger-side source check (no IO); safe to run under the store lock.
@@ -9,16 +9,15 @@ pub(crate) fn ensure_source_recorded(store: &Store, row: &FileCoverage) -> Resul
             tracing::error!(%error, file_id = %row.file.file_id, "读取声纹源文件台账失败");
             format!("source_check_failed: {error}")
         })?;
-    // 单集载体约定：比对目标是**一个**单元，多单元覆盖事实取首个单元（整文件单元为
-    // `WHOLE`）。台账里同一路径/媒体且仍带该单元，才算源文件还在。
-    let target = super::selected_unit(row).unwrap_or(UnitKey::WHOLE);
     let carried = current.as_ref().is_some_and(|current| {
         current.file.path == row.file.path
             && current.file.media_id == row.file.media_id
             && current.file.library_id == row.file.library_id
             && current.file.root_id == row.file.root_id
             && current.file.version == row.file.version
-            && (current.units.contains(&target) || (target.is_whole() && !current.is_episodic()))
+            && current.file.presence == domain::FilePresence::Present
+            && current.file.publication == domain::FilePublication::Published
+            && current.units == row.units
     });
     if !carried {
         return Err(format!(

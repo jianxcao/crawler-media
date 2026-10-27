@@ -24,6 +24,13 @@ use crate::{Store, StoreError};
 /// value for the cached tracks to be served, so every writer tags its row with it.
 pub const CURRENT_TRACKS_VERSION: i64 = crate::library::CURRENT_TRACKS_VERSION;
 
+/// Distinguish an unobserved field from an observed empty value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Observed<T> {
+    NotObserved,
+    Value(T),
+}
+
 /// One probe outcome for one file.
 pub struct ProbePublication<'a> {
     /// Version the worker probed. The publication is refused when the row moved on.
@@ -31,7 +38,7 @@ pub struct ProbePublication<'a> {
     pub tracks_version: i64,
     pub resolution: Option<&'a str>,
     pub codec: Option<&'a str>,
-    pub hdr: Option<&'a str>,
+    pub hdr: Observed<Option<&'a str>>,
     pub duration_ms: Option<i64>,
     /// Cold stream facts. `None` publishes the hot quality columns only.
     pub details: Option<&'a FileDetails>,
@@ -125,12 +132,17 @@ fn write_quality_tx(
     file_id: &str,
     p: &ProbePublication<'_>,
 ) -> Result<(), StoreError> {
-    let probed = p.resolution.is_some() || p.codec.is_some() || p.hdr.is_some();
+    let (hdr_observed, hdr) = match p.hdr {
+        Observed::NotObserved => (false, None),
+        Observed::Value(value) => (true, value),
+    };
+    let probed = p.resolution.is_some() || p.codec.is_some() || hdr_observed;
     let changed = tx.execute(
         "UPDATE library_files SET
              resolution = COALESCE(?2, resolution),
              codec = COALESCE(?3, codec),
-             hdr = COALESCE(?4, hdr),
+             hdr = CASE WHEN ?8 THEN ?4 ELSE hdr END,
+             hdr_observed = MAX(hdr_observed, ?8),
              duration_ms = COALESCE(?5, duration_ms),
              tracks_version = MAX(tracks_version, ?6),
              quality_source = CASE WHEN ?7 = 1 THEN 'probe' ELSE quality_source END
@@ -139,10 +151,11 @@ fn write_quality_tx(
             file_id,
             p.resolution,
             p.codec,
-            p.hdr,
+            hdr,
             p.duration_ms,
             p.tracks_version,
             i64::from(probed),
+            hdr_observed,
         ],
     )?;
     if changed == 0 {

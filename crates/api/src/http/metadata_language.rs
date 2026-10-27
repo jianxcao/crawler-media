@@ -17,7 +17,12 @@ pub(crate) struct Change {
     language: String,
 }
 pub(crate) async fn get(State(state): State<ApiState>) -> Response {
-    match state.store.lock().metadata_language() {
+    let result =
+        match super::store_wait::store_read(&state, |store| store.metadata_language()).await {
+            Ok(result) => result,
+            Err(error) => return error.response(),
+        };
+    match result {
         Ok(value) => ok(serde_json::json!(value)).into_response(),
         Err(error) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -37,26 +42,44 @@ pub(crate) async fn patch(
             "expected_revision and language are required; unknown fields are refused",
         );
     };
-    let result = state.store.lock().change_metadata_language(
-        body.expected_revision,
-        &body.language,
-        &uuid::Uuid::new_v4().to_string(),
-        crate::job_loop::unix_now(),
-    );
-    match result {
-        Ok(value) => {
-            let changed = value.revision != body.expected_revision;
-            if changed {
+    let work_state = state.clone();
+    let expected_revision = body.expected_revision;
+    let result = state
+        .http_work
+        .run_to_completion(move || {
+            let result = super::store_wait::with_bounded_store(work_state.store(), |store| {
+                store.change_metadata_language(
+                    expected_revision,
+                    &body.language,
+                    &uuid::Uuid::new_v4().to_string(),
+                    work_state.playback_clock.now_ms(),
+                )
+            })
+            .ok_or(())?;
+            if let Ok(value) = &result {
                 for operation in &value.operations {
                     let library = operation.library_id.to_string();
-                    state.library_work.block(&library, &operation.operation_id);
+                    work_state
+                        .library_work
+                        .block(&library, &operation.operation_id);
                     crate::storage_operations::spawn_driver(
-                        &state,
+                        &work_state,
                         &operation.operation_id,
                         &library,
                     );
                 }
             }
+            Ok::<_, ()>(result)
+        })
+        .await;
+    let result = match result {
+        Ok(Ok(result)) => result,
+        Ok(Err(())) => return super::store_wait::busy_response(),
+        Err(error) => return super::library::browse_work_error(error),
+    };
+    match result {
+        Ok(value) => {
+            let changed = value.revision != expected_revision;
             let status = if changed && !value.operations.is_empty() {
                 StatusCode::ACCEPTED
             } else {

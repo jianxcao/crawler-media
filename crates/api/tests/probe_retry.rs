@@ -36,7 +36,7 @@ async fn queries_cannot_bypass_outro_retry_deadline() {
             }
         );
     }
-    s.reopen();
+    s.reopen().await;
     s.set_time_ms(1_059_999);
     assert_eq!(s.dispatch_due(), 0);
     s.set_time_ms(1_060_000);
@@ -121,7 +121,7 @@ async fn delete_restore_retries_only_missing_episode_stage() {
             ProbeRequestResult::Waiting { .. }
         ));
     }
-    s.reopen();
+    s.reopen().await;
     s.set_time_ms(1_060_000);
     *s.engine.outro_error.lock() = None;
     assert_eq!(s.dispatch_due(), 1);

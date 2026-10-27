@@ -6,7 +6,7 @@ use crate::management::ApiState;
 
 /// Evaluate SubscribeFacts out-of-lock using an owned DB snapshot.
 ///
-/// The ownership rule itself lives in `store::evaluate_subscribe_facts`; this
+/// The ownership rule itself lives in `store::resolve_subscribe_facts`; this
 /// module only supplies the presence seam so filesystem IO stays outside the
 /// Store lock.
 pub fn evaluate_subscribe_facts_out_of_lock(
@@ -20,7 +20,7 @@ pub fn evaluate_subscribe_facts_out_of_lock_with(
     snapshot: &SubscribeLibrarySnapshot,
     files: &dyn crate::file_stat_read::FileStatRead,
 ) -> Result<SubscribeFacts, StoreError> {
-    store::evaluate_subscribe_facts(snapshot, &|path| files.is_file(path))
+    store::resolve_subscribe_facts(snapshot)?.evaluate(&|path| files.is_file(path))
 }
 
 /// An observed Subscribe facts result alongside the scoped read fingerprint
@@ -29,6 +29,7 @@ pub fn evaluate_subscribe_facts_out_of_lock_with(
 pub struct SubscribeLibraryObservation {
     pub facts: SubscribeFacts,
     pub fingerprint: store::ReadFingerprint,
+    pub snapshot: SubscribeLibrarySnapshot,
     pub library_id: String,
     pub library_root: std::path::PathBuf,
     pub ownership: store::LibraryOwnership,
@@ -70,12 +71,23 @@ pub fn observe_subscribe_library_facts(
     let facts = evaluate_subscribe_facts_out_of_lock_with(&snapshot, state.file_stats.as_ref())
         .map_err(|e| e.to_string())?;
 
+    {
+        let store = state.store.lock();
+        if !store
+            .subscribe_snapshot_is_current(&snapshot, &Default::default())
+            .map_err(|e| e.to_string())?
+        {
+            return Err("Library 配置或台账在观察期间已变更，放弃本次读取".into());
+        }
+    }
+
     Ok(SubscribeLibraryObservation {
         facts,
-        fingerprint: snapshot.fingerprint,
+        fingerprint: snapshot.fingerprint.clone(),
         library_id: target_library_id,
         library_root,
-        ownership: snapshot.ownership,
+        ownership: snapshot.ownership.clone(),
+        snapshot,
     })
 }
 

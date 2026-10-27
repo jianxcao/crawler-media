@@ -121,3 +121,35 @@ fn discarded_dispatch_releases_store_before_waiting_for_seen() {
         "discarding a dispatch held Store while waiting for seen"
     );
 }
+
+#[test]
+fn cancelled_source_releases_store_before_waiting_for_seen() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(Mutex::new(Store::open(tmp.path()).unwrap()));
+    let manager = Arc::new(ProbeManager::new(store.clone()));
+    let seen = manager.seen.lock();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let worker_manager = manager.clone();
+    let worker = std::thread::spawn(move || {
+        let mut request = unit();
+        request.job_id = Some("removed-job".into());
+        entered_tx.send(()).unwrap();
+        worker::source_ready(&worker_manager, &request)
+    });
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let deadline = Instant::now() + Duration::from_millis(200);
+    let mut responsive = true;
+    while Instant::now() < deadline {
+        if store.try_lock_for(Duration::from_millis(20)).is_none() {
+            responsive = false;
+            break;
+        }
+        std::thread::yield_now();
+    }
+    drop(seen);
+    assert!(!worker.join().unwrap());
+    assert!(
+        responsive,
+        "cancelled source held Store while waiting for seen"
+    );
+}

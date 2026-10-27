@@ -168,7 +168,8 @@ pub(crate) fn advance_to_new_content(
             tracks_version = 0,
             duration_ms = NULL,
             codec = NULL,
-            hdr = NULL
+            hdr = NULL,
+            hdr_observed = 0
          WHERE file_id = ?7",
         params![
             new_revision,

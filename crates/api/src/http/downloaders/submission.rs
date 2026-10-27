@@ -215,23 +215,31 @@ enum SubmitFailure {
 }
 
 /// D-M5: any slot of `parsed` already owned or in flight for `subscribe`.
-fn slot_taken(state: &ApiState, subscribe: &domain::Subscribe, parsed: &Release) -> bool {
-    let store = state.store.lock();
-    let Ok(Some(media)) = store.get_media(subscribe.media_id) else {
-        return false;
+fn slot_taken(
+    state: &ApiState,
+    subscribe: &domain::Subscribe,
+    parsed: &Release,
+) -> Result<(bool, store::SubscribeLibrarySnapshot), String> {
+    let (media, pending) = {
+        let store = state.store.lock();
+        let media = store
+            .get_media(subscribe.media_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("Media not found")?;
+        let pending = store
+            .load_pending(subscribe.id)
+            .map_err(|error| error.to_string())?;
+        (media, pending)
     };
-    let (Ok(facts), Ok(pending)) = (
-        store.load_library_subscribe_facts(subscribe, media.kind),
-        store.load_pending(subscribe.id),
-    ) else {
-        return false;
-    };
-    drop(store);
+    let observation = crate::subscribe_library_read::observe_subscribe_library_facts(
+        state, subscribe, media.kind,
+    )?;
     let releases = crate::worker::finish_search::pending_releases(&pending);
-    let facts = subscribe::facts_with_pending(facts, &releases, subscribe, &media);
-    subscribe::pending_slots(subscribe, parsed)
+    let facts = subscribe::facts_with_pending(observation.facts, &releases, subscribe, &media);
+    let taken = subscribe::pending_slots(subscribe, parsed)
         .iter()
-        .any(|(s, e)| facts.get(*s, *e).is_some())
+        .any(|(s, e)| facts.get(*s, *e).is_some());
+    Ok((taken, observation.snapshot))
 }
 
 /// D-M5: score the manual torrent with the subscription's filter (0 if rejected).
@@ -334,58 +342,22 @@ pub(crate) async fn submit(
         Ok(res) => res,
         Err(r) => return r,
     };
-    let delivery_state = state.clone();
-    let delivery_torrent = torrent.clone();
-    let delivery_subscribe = subscribe.clone();
-    let delivery_parsed = parsed.clone();
-    let force = body.force;
-    let add_result = tokio::task::spawn_blocking(move || -> Result<(), SubmitFailure> {
-        let state = &delivery_state;
-        let torrent = &delivery_torrent;
-        // D-M5: serialize with the subscription's own search/Transfer.
-        let guard = delivery_subscribe
-            .as_ref()
-            .map(|sub| state.subscribe_guard(sub.id));
-        let _held = guard.as_ref().map(|g| g.lock());
-        let score = match &delivery_subscribe {
-            Some(sub) => {
-                if !force && slot_taken(state, sub, &delivery_parsed) {
-                    return Err(SubmitFailure::Conflict);
-                }
-                filter_score(state, sub, torrent)
-            }
-            None => 0,
-        };
-        crate::delivery::submit_torrent_with_options(
-            state,
-            torrent,
-            downloader_id,
-            save_path.as_deref(),
-        )
-        .map_err(SubmitFailure::Downloader)?;
-        if let Some(sub) = &delivery_subscribe
-            && let Err(response) = record_submitted_pending(
-                state,
-                sub,
-                torrent,
-                downloader_id,
-                &delivery_parsed,
-                score,
-            ) {
-                // D-M5: undo the submission so no untracked task lingers.
-                if let Ok(client) = crate::delivery::client_for_id(state, downloader_id) {
-                    let _ = client.remove_owned(torrent, false);
-                }
-                return Err(SubmitFailure::Response(response));
-            }
-        Ok(())
-    })
-    .await
-    .unwrap_or_else(|e| {
-        Err(SubmitFailure::Downloader(
-            downloader::DownloaderError::Message(e.to_string()),
-        ))
-    });
+    let delivery = SubmissionDelivery {
+        state: state.clone(),
+        torrent: torrent.clone(),
+        subscribe,
+        parsed,
+        downloader_id,
+        save_path,
+        force: body.force,
+    };
+    let add_result = tokio::task::spawn_blocking(move || delivery.run())
+        .await
+        .unwrap_or_else(|error| {
+            Err(SubmitFailure::Downloader(
+                downloader::DownloaderError::Message(error.to_string()),
+            ))
+        });
 
     let add_result = match add_result {
         Err(SubmitFailure::Conflict) => {
@@ -429,5 +401,87 @@ pub(crate) async fn submit(
                 &e.to_string(),
             )
         }
+    }
+}
+
+/// One manual delivery serialized with the Subscribe's search and Transfer.
+struct SubmissionDelivery {
+    state: ApiState,
+    torrent: Torrent,
+    subscribe: Option<domain::Subscribe>,
+    parsed: Release,
+    downloader_id: Option<DownloaderId>,
+    save_path: Option<String>,
+    force: bool,
+}
+
+impl SubmissionDelivery {
+    fn run(self) -> Result<(), SubmitFailure> {
+        let guard = self
+            .subscribe
+            .as_ref()
+            .map(|sub| self.state.subscribe_guard(sub.id));
+        let _held = guard.as_ref().map(|guard| guard.lock());
+        let mut snapshot = None;
+        let score = match &self.subscribe {
+            Some(sub) => {
+                if !self.force {
+                    let (taken, observed) =
+                        slot_taken(&self.state, sub, &self.parsed).map_err(|error| {
+                            SubmitFailure::Response(err(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "subscribe.observation_failed",
+                                &error,
+                            ))
+                        })?;
+                    if taken {
+                        return Err(SubmitFailure::Conflict);
+                    }
+                    snapshot = Some(observed);
+                }
+                filter_score(&self.state, sub, &self.torrent)
+            }
+            None => 0,
+        };
+        if let Some(snapshot) = snapshot {
+            let store = self.state.store.lock();
+            let current = store
+                .subscribe_snapshot_is_current(&snapshot, &Default::default())
+                .map_err(|error| {
+                    SubmitFailure::Response(err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "subscribe.observation_failed",
+                        &error.to_string(),
+                    ))
+                })?;
+            if !current {
+                return Err(SubmitFailure::Conflict);
+            }
+        }
+        crate::delivery::submit_torrent_with_options(
+            &self.state,
+            &self.torrent,
+            self.downloader_id,
+            self.save_path.as_deref(),
+        )
+        .map_err(SubmitFailure::Downloader)?;
+        if let Some(sub) = &self.subscribe
+            && let Err(response) = record_submitted_pending(
+                &self.state,
+                sub,
+                &self.torrent,
+                self.downloader_id,
+                &self.parsed,
+                score,
+            )
+        {
+            if let Ok(client) = crate::delivery::client_for_id(&self.state, self.downloader_id) {
+                if let Err(error) = client.remove_owned(&self.torrent, false) {
+                    tracing::error!(%error, torrent=%self.torrent.title, "Failed to roll back untracked manual delivery");
+                }
+            }
+            return Err(SubmitFailure::Response(response));
+        }
+        Ok(())
     }
 }

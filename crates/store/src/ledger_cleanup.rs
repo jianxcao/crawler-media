@@ -14,7 +14,7 @@ use rusqlite::Connection;
 
 use crate::StoreError;
 
-mod probe_unit_retirement;
+pub(crate) mod probe_unit_retirement;
 
 /// Delete every file-derived row and the file row itself for `file_id` within `conn`.
 ///

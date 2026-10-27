@@ -1,7 +1,7 @@
 //! Library entity CRUD: create / rename / re-root / delete / default / reorder.
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, State, rejection::JsonRejection};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use domain::MediaKind;
@@ -14,6 +14,8 @@ use crate::storage_operations::StorageOperationError;
 use crate::store::StoreError;
 
 use super::library::{library_json, missing_library};
+
+pub(crate) mod create_input;
 
 fn parse_member_ids(body: &Value) -> Vec<domain::UserId> {
     body["member_ids"]
@@ -39,11 +41,30 @@ fn paths_from(body: &Value) -> Vec<String> {
 }
 
 /// POST /libraries — create a library with one or more ordered roots
-/// (first = primary). Payload fields beyond name/kind/root_paths are ignored.
+/// (first = primary). Unknown or retired fields are rejected before writing.
 pub(crate) async fn create_library(
     State(state): State<ApiState>,
-    Json(body): Json<Value>,
+    body: Result<Json<create_input::CreateLibrary>, JsonRejection>,
 ) -> Response {
+    let body = match body {
+        Ok(Json(body)) => match serde_json::to_value(body) {
+            Ok(body) => body,
+            Err(error) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "library.serialize",
+                    &error.to_string(),
+                );
+            }
+        },
+        Err(error) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "library.invalid",
+                &error.body_text(),
+            );
+        }
+    };
     let kind = match MediaKind::from_str(body["kind"].as_str().unwrap_or_default()) {
         Ok(kind) => kind,
         Err(_) => {
@@ -129,8 +150,8 @@ fn create_library_record(
     )?;
     store.set_library_intro_settings(
         &library.id,
-        body["detect_intros"].as_bool().unwrap_or(true),
-        body["enable_fingerprint"].as_bool().unwrap_or(true),
+        body["detect_intros"].as_bool().unwrap_or(false),
+        body["enable_fingerprint"].as_bool().unwrap_or(false),
     )?;
     store.set_library_switch_settings(
         &library.id,
@@ -146,19 +167,26 @@ fn create_library_record(
 }
 
 async fn render_library(state: &ApiState, library: &crate::store::Library) -> Response {
-    let (facts, stats) = {
-        let store = state.store.lock();
+    let library_snapshot = library.clone();
+    let loaded = super::store_wait::store_read(state, move |store| {
+        let library = &library_snapshot;
         let stats = match crate::library_statistics::statistics_for(&store, library) {
             Ok(stats) => stats,
             Err(error) => {
-                return err(
+                return Err(err(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "store.error",
                     &error.to_string(),
-                );
+                ));
             }
         };
-        (super::library::library_facts(&store, library), stats)
+        Ok((super::library::library_facts(store, library), stats))
+    })
+    .await;
+    let (facts, stats) = match loaded {
+        Ok(Ok(value)) => value,
+        Ok(Err(response)) => return response,
+        Err(error) => return error.response(),
     };
     match state
         .http_work
@@ -198,9 +226,19 @@ pub(crate) async fn patch_library(
         .filter(|locale| !locale.is_empty())
         .map(str::to_string);
     // 非批量字段先同步落库：失败时不启动任何操作，语义与旧版一致。
-    let library = match apply_library_settings(&state, &id, &body) {
-        Ok(library) => library,
-        Err(response) => return response,
+    let settings_state = state.clone();
+    let settings_id = id.clone();
+    let settings_body = body.clone();
+    let library = match state
+        .http_work
+        .run_to_completion(move || {
+            apply_library_settings(&settings_state, &settings_id, &settings_body)
+        })
+        .await
+    {
+        Ok(Ok(library)) => library,
+        Ok(Err(response)) => return response,
+        Err(error) => return super::library::browse_work_error(error),
     };
     let request = crate::storage_operations::ReconfigurationRequest {
         root_paths,
@@ -224,6 +262,7 @@ pub(crate) async fn patch_library(
     };
     match begun {
         Ok(operation) => (StatusCode::ACCEPTED, ok(operation)).into_response(),
+        Err(StorageOperationError::Busy) => super::store_wait::busy_response(),
         Err(StorageOperationError::MissingLibrary) => missing_library(),
         Err(StorageOperationError::Invalid(message)) => err(
             StatusCode::BAD_REQUEST,
