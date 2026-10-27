@@ -12,24 +12,38 @@ pub(crate) async fn get_scan_operation(
     State(state): State<ApiState>,
     Path((lib_id, op_id)): Path<(String, String)>,
 ) -> Response {
-    let store = state.store.lock();
-    match store.scan_operation(&op_id) {
-        Ok(Some(op)) if op.library_id == lib_id => ok(json!({
+    // Polling is the hot path of every scan waiter. Taking the process-wide
+    // Store lock on the async worker parks that worker for the whole wait, and
+    // a scan that holds the lock (metadata, NFO) then stalls every other poll
+    // on the same runtime — the waiter reports a timeout for a scan that
+    // already finished. The read belongs on the blocking pool.
+    let read = super::super::store_wait::store_read(&state, move |store| {
+        store.scan_operation(&op_id).map(|found| (found, lib_id))
+    })
+    .await;
+    let (found, lib_id) = match read {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store.error",
+                &error.to_string(),
+            );
+        }
+        Err(error) => return error.response(),
+    };
+    match found {
+        Some(op) if op.library_id == lib_id => ok(json!({
             "operation_id": op.id,
             "status": op.status.as_str(),
             "generation": op.generation,
             "report": op.report,
         }))
         .into_response(),
-        Ok(Some(_)) | Ok(None) => err(
+        Some(_) | None => err(
             StatusCode::NOT_FOUND,
             "scan_operation.missing",
             "扫描操作不存在",
-        ),
-        Err(e) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store.error",
-            &e.to_string(),
         ),
     }
 }

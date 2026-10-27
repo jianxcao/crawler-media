@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use parking_lot::Mutex;
 use store::{ScanOperation, ScanOperationStatus};
 
+use crate::http::store_wait::store_blocking;
 use crate::management::ApiState;
 
 #[derive(Debug)]
@@ -75,6 +76,16 @@ impl ScanCoordinator {
     }
 
     pub fn trigger_next(&self, state: &ApiState) {
+        // The claim itself is a short lock, and it runs from plain threads as well
+        // as from the runtime. It must stay on the caller: the worker it starts
+        // already occupies one blocking thread for the whole walk, and that walk
+        // records its terminal state through `spawn_blocking`. Moving the claim
+        // onto the same pool deadlocks the walk against its own bookkeeping once
+        // the pool is full (current-thread tests, a saturated runtime).
+        self.trigger_next_blocking(state);
+    }
+
+    fn trigger_next_blocking(&self, state: &ApiState) {
         let mut running = self.running_ops.lock();
         if running.len() >= 2 {
             return;
@@ -236,8 +247,7 @@ fn stale_scope_reason(persisted: &str, current: &str) -> String {
 ///
 /// 读失败（库不存在/查询出错）不在这里取消：让后续的 `acquire_library_work` 与
 /// `ScanScope::validate` 按既有语义处理，避免把瞬时读错误当成配置变化。
-fn scan_admission(state: &ApiState, op_id: &str, library_id: &str) -> Option<ScanAdmission> {
-    let store = state.store.lock();
+fn scan_admission(store: &crate::Store, op_id: &str, library_id: &str) -> Option<ScanAdmission> {
     let op = match store.scan_operation(op_id) {
         Ok(Some(op)) => op,
         Ok(None) => return None,
@@ -286,13 +296,28 @@ async fn run_operation(
     expected_dirty_rev: i64,
 ) {
     // B3 design:99：入队时写下的 scope 与当前 scope 不一致，就取消而不是照旧执行。
-    let Some(admission) = scan_admission(state, op_id, library_id) else {
+    // 准入读与终态写都走 blocking pool：扫描轮是后台驱动，等待 Store 锁不能占用
+    // runtime worker（那些 worker 同时服务不碰 Store 的请求）。
+    let admitted_op = op_id.to_owned();
+    let admitted_library = library_id.to_owned();
+    let Some(admission) = store_blocking(state.store(), move |store| {
+        scan_admission(store, &admitted_op, &admitted_library)
+    })
+    .await
+    .ok()
+    .flatten() else {
         return;
     };
     if let Some(reason) = admission.stale_reason {
         tracing::warn!(%op_id, %library_id, %reason, "扫描 scope 已变化，取消过期 operation");
-        let store = state.store.lock();
-        cancel_stale_operation(&store, op_id, &reason);
+        let stale_op = op_id.to_owned();
+        if let Err(error) = store_blocking(state.store(), move |store| {
+            cancel_stale_operation(store, &stale_op, &reason)
+        })
+        .await
+        {
+            tracing::error!(%op_id, error = %error, "取消过期扫描 operation 失败");
+        }
         return;
     }
     let base_report = admission.base_report;
@@ -300,19 +325,25 @@ async fn run_operation(
     let lease = match state.acquire_library_work(library_id) {
         Ok(lease) => lease,
         Err(e) => {
-            let store = state.store.lock();
             let report = with_error(
                 merge_scan_reports(&base_report, &serde_json::json!({})),
                 &e,
                 None,
             );
-            finalize_scan(
-                &store,
-                op_id,
-                expected_dirty_rev,
-                ScanOperationStatus::Failed,
-                &report,
-            );
+            let failed_op = op_id.to_owned();
+            if let Err(error) = store_blocking(state.store(), move |store| {
+                finalize_scan(
+                    store,
+                    &failed_op,
+                    expected_dirty_rev,
+                    ScanOperationStatus::Failed,
+                    &report,
+                )
+            })
+            .await
+            {
+                tracing::error!(%op_id, error = %error, "写入扫描失败终态失败");
+            }
             return;
         }
     };
@@ -322,10 +353,16 @@ async fn run_operation(
         .register_control(op_id, lease.control().clone());
 
     {
-        let store = state.store.lock();
+        let running_op = op_id.to_owned();
         // 只改状态：requeue 事务刚写入的跨轮累计报告必须保留（P3-NEW-1）。
-        if let Err(error) = store.set_scan_operation_status(op_id, ScanOperationStatus::Running) {
-            tracing::error!(%error, %op_id, "标记扫描为 running 失败");
+        let running = store_blocking(state.store(), move |store| {
+            store.set_scan_operation_status(&running_op, ScanOperationStatus::Running)
+        })
+        .await;
+        match running {
+            Ok(Ok(_changed)) => {}
+            Ok(Err(error)) => tracing::error!(%error, %op_id, "标记扫描为 running 失败"),
+            Err(error) => tracing::error!(error = %error, %op_id, "标记扫描为 running 失败"),
         }
     }
 
@@ -333,26 +370,129 @@ async fn run_operation(
     let lib_id = library_id.to_string();
     let scan_targets = targets.to_vec();
     let op_id_owned = op_id.to_string();
-    let scan_res = tokio::task::spawn_blocking(move || {
-        // op_id 同时是 scan_seen 断点的归属：中断重排后同一 operation 从断点续扫。
-        crate::http::library_scan::scan_library_leased_resumable(
-            &state_clone,
-            &lib_id,
-            &lease,
-            &scan_targets,
-            full_scope,
-            Some(&op_id_owned),
-        )
-    })
-    .await;
+    // The walk is synchronous and takes the Store lock in short sections, but it
+    // must not occupy a blocking-pool thread. Several scans in one runtime fill
+    // that pool; a walk waiting for another pool thread — its own bookkeeping,
+    // or a sibling driver — then never gets one. A dedicated thread waits on
+    // nothing the pool owns, and records the terminal state itself.
+    let base_for_walk = base_report.clone();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let recorded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let scan_res = crate::http::library_scan::scan_library_leased_resumable(
+                &state_clone,
+                &lib_id,
+                &lease,
+                &scan_targets,
+                full_scope,
+                Some(&op_id_owned),
+            );
+            let outcome = scan_outcome(&base_for_walk, scan_res);
+            let store = state_clone.store.lock();
+            record_scan_outcome(&store, &op_id_owned, expected_dirty_rev, outcome)
+        }));
+        let _ = done_tx.send(recorded);
+    });
+    let walked = done_rx.await;
 
     state.scan_coordinator.unregister_control(op_id);
 
-    let store = state.store.lock();
-    match scan_res {
-        Ok(Ok((_scan_report, report_data))) => {
+    match walked {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => tracing::error!(%op_id, "写入扫描终态失败"),
+        Ok(Err(_)) => {
+            tracing::error!(%op_id, "扫描 worker panic");
+            let report = with_error(
+                merge_scan_reports(&base_report, &serde_json::json!({})),
+                "scan worker panicked",
+                None,
+            );
+            let failed_op = op_id.to_owned();
+            if let Err(error) = store_blocking(state.store(), move |store| {
+                finalize_scan(
+                    store,
+                    &failed_op,
+                    expected_dirty_rev,
+                    ScanOperationStatus::Failed,
+                    &report,
+                )
+            })
+            .await
+            {
+                tracing::error!(%op_id, error = %error, "写入扫描失败终态失败");
+            }
+        }
+        Err(error) => {
+            // The walk itself panicked: record the failure here, on the async
+            // task, which is not holding a blocking-pool thread.
+            tracing::error!(%op_id, error = %error, "扫描 worker 异常退出");
+            let report = with_error(
+                merge_scan_reports(&base_report, &serde_json::json!({})),
+                &error.to_string(),
+                None,
+            );
+            let failed_op = op_id.to_owned();
+            if let Err(error) = store_blocking(state.store(), move |store| {
+                finalize_scan(
+                    store,
+                    &failed_op,
+                    expected_dirty_rev,
+                    ScanOperationStatus::Failed,
+                    &report,
+                )
+            })
+            .await
+            {
+                tracing::error!(%op_id, error = %error, "写入扫描失败终态失败");
+            }
+        }
+    }
+}
+
+/// Apply one walk's verdict. Runs on the walk's own thread, never on a second
+/// blocking-pool thread that the walk would have to wait for.
+fn record_scan_outcome(
+    store: &crate::Store,
+    op_id: &str,
+    expected_dirty_rev: i64,
+    outcome: ScanOutcome,
+) -> bool {
+    match outcome {
+        ScanOutcome::Finished { status, report } => {
+            finalize_scan(store, op_id, expected_dirty_rev, status, &report)
+        }
+        ScanOutcome::Cancelled { reason } => {
+            cancel_stale_operation(store, op_id, &reason);
+            false
+        }
+    }
+}
+
+/// What a finished scan round asks the store to record.
+enum ScanOutcome {
+    /// A terminal state for the operation, unless a newer round was merged meanwhile.
+    Finished {
+        status: ScanOperationStatus,
+        report: serde_json::Value,
+    },
+    /// The scope moved under the round: cancel instead of publishing registrations.
+    Cancelled { reason: String },
+}
+
+/// Turn one round's result into the single store verdict it implies.
+///
+/// Kept separate from the store write so the report arithmetic stays testable without
+/// a database and the write itself needs only one lock acquisition.
+type ScanRound = Result<
+    (library::ScanReport, serde_json::Value),
+    crate::http::library_scan::runner::ScanRunError,
+>;
+
+fn scan_outcome(base_report: &serde_json::Value, result: ScanRound) -> ScanOutcome {
+    match result {
+        Ok((_scan_report, report_data)) => {
             // 累计本轮报告：补扫轮不能丢掉第一轮已提交的计数（P3-3）。
-            let report = merge_scan_reports(&base_report, &report_data);
+            let report = merge_scan_reports(base_report, &report_data);
             // 终态取累计报告的 status：前几轮的 partial/unreachable 不能被后续干净轮洗掉。
             let status =
                 if report.get("status").and_then(serde_json::Value::as_str) == Some("partial") {
@@ -360,42 +500,25 @@ async fn run_operation(
                 } else {
                     ScanOperationStatus::Completed
                 };
-            finalize_scan(&store, op_id, expected_dirty_rev, status, &report);
+            ScanOutcome::Finished { status, report }
         }
-        Ok(Err(crate::http::library_scan::runner::ScanRunError::ScopeChanged { reason })) => {
+        Err(crate::http::library_scan::runner::ScanRunError::ScopeChanged { reason }) => {
             // 捕获 scope 复核失败发生在发布任何 chunk 之前：零登记。
-            tracing::warn!(%op_id, %library_id, %reason, "捕获 scope 已变化，取消过期 operation");
-            cancel_stale_operation(&store, op_id, &reason);
+            tracing::warn!(%reason, "捕获 scope 已变化，取消过期 operation");
+            ScanOutcome::Cancelled { reason }
         }
-        Ok(Err(crate::http::library_scan::runner::ScanRunError::Failed(failure))) => {
+        Err(crate::http::library_scan::runner::ScanRunError::Failed(failure)) => {
             // 失败终态：已提交计数 + 有界失败历史 + 错误摘要（P3-NEW-2）。
             let http_status = failure.response.status().as_u16();
             let report = with_error(
-                merge_scan_reports(&base_report, &failure.report),
+                merge_scan_reports(base_report, &failure.report),
                 &failure.error,
                 Some(http_status),
             );
-            finalize_scan(
-                &store,
-                op_id,
-                expected_dirty_rev,
-                ScanOperationStatus::Failed,
-                &report,
-            );
-        }
-        Err(e) => {
-            let report = with_error(
-                merge_scan_reports(&base_report, &serde_json::json!({})),
-                &e.to_string(),
-                None,
-            );
-            finalize_scan(
-                &store,
-                op_id,
-                expected_dirty_rev,
-                ScanOperationStatus::Failed,
-                &report,
-            );
+            ScanOutcome::Finished {
+                status: ScanOperationStatus::Failed,
+                report,
+            }
         }
     }
 }

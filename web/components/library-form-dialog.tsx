@@ -1130,7 +1130,6 @@ function EditLibraryDialog({
     const rootsChanged = !sameRoots(nextRoots, library.root_paths);
     const payload: LibraryUpdatePayload = {
       name: name.trim(),
-      kind: library.kind,
       ...(rootsChanged ? { root_paths: nextRoots } : {}),
       match_rules: scraped ? buildMatchRules(validGenres(library.kind, genres, routingOptions), regions) : [],
       default_filter_id: defaultFilterId ? defaultFilterId : null,

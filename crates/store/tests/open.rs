@@ -24,8 +24,8 @@ fn open_creates_four_sqlite_files() {
     );
     assert_eq!(
         versions.iter().find(|(n, _)| *n == "library").unwrap().1,
-        6,
-        "library schema version should be 6"
+        store::schema::layout::LIBRARY_USER_VERSION,
+        "library schema version should match the current layout"
     );
     assert_eq!(
         versions.iter().find(|(n, _)| *n == "subscribe").unwrap().1,

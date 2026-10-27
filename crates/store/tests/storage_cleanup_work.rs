@@ -150,7 +150,7 @@ fn retention_window_does_not_scan_live_operations_or_sort_all_terminal_history()
         f.db.execute("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<?1)
             INSERT INTO media_operations SELECT 'live-'||i,'merge','frozen','s','l','{}',NULL,NULL,0,0 FROM n", [history]).unwrap();
         f.db.execute("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<?1)
-            INSERT INTO library_operations SELECT 'done-'||i,'library','roots','succeeded',0,'{}',NULL,NULL,0,i FROM n", [history]).unwrap();
+            INSERT INTO library_operations(operation_id,library_id,kind,state,expected_revision,plan_json,cursor_json,error,created_at_ms,updated_at_ms) SELECT 'done-'||i,'library','roots','succeeded',0,'{}',NULL,NULL,0,i FROM n", [history]).unwrap();
         let (result, stats) = f.store.with_stats(StatsScope::Library, || {
             f.store.prune_terminal_operations(20_000, 10, false)
         });

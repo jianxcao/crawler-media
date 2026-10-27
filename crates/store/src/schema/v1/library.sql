@@ -361,8 +361,13 @@ CREATE TABLE media_operations (
 CREATE TABLE library_operations (
  operation_id TEXT PRIMARY KEY NOT NULL, library_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('roots','locale','default_locale','integrity','scrape')),
  state TEXT NOT NULL CHECK(state IN ('planned','frozen','draining','applying','checking','succeeded','failed')), expected_revision INTEGER NOT NULL, plan_json TEXT NOT NULL CHECK(json_valid(plan_json)),
- cursor_json TEXT, error TEXT, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL
+ cursor_json TEXT, error TEXT, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL,
+ resource_key TEXT CHECK(kind<>'scrape' OR (resource_key IS NOT NULL AND length(resource_key)>0))
 );
+CREATE UNIQUE INDEX nfo_export_active_path ON library_operations(resource_key)
+ WHERE kind='scrape' AND state NOT IN ('succeeded','failed');
+CREATE INDEX nfo_export_pending_age ON library_operations(updated_at_ms,operation_id)
+ WHERE kind='scrape' AND state NOT IN ('succeeded','failed');
 CREATE INDEX library_operation_dispatch ON library_operations(state,updated_at_ms,operation_id);
 -- Browse paging (library_query/items/page.rs) and item detail
 -- (library_query/details/mod.rs) resolve the latest integrity operation of one

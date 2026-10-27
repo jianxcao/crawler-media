@@ -10,7 +10,7 @@ pub const APP_APPLICATION_ID: u32 = 1129139248;
 pub const LIBRARY_APPLICATION_ID: u32 = 1129139249;
 pub const SUBSCRIBE_APPLICATION_ID: u32 = 1129139250;
 pub const V1_USER_VERSION: i64 = 1;
-pub const LIBRARY_USER_VERSION: i64 = 6;
+pub const LIBRARY_USER_VERSION: i64 = 7;
 pub const SUBSCRIBE_USER_VERSION: i64 = 2;
 
 pub const APP_DDL: &str = include_str!("v1/app.sql");

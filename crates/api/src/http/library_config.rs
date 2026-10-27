@@ -16,6 +16,7 @@ use crate::store::StoreError;
 use super::library::{library_json, missing_library};
 
 pub(crate) mod create_input;
+mod patch_input;
 
 fn parse_member_ids(body: &Value) -> Vec<domain::UserId> {
     body["member_ids"]
@@ -210,6 +211,9 @@ pub(crate) async fn patch_library(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> Response {
+    if let Err(error) = serde_json::from_value::<patch_input::PatchLibrary>(body.clone()) {
+        return err(StatusCode::BAD_REQUEST, "library.invalid", &error.to_string());
+    }
     let root_paths = body["root_paths"].is_array().then(|| paths_from(&body));
     if let Some(paths) = &root_paths
         && paths.is_empty()

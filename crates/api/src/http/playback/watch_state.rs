@@ -50,25 +50,31 @@ pub(crate) async fn resume(
                 Err(super::request::SelectionError::Unavailable) if selection.file_id.is_none() => {
                     let season = selection.season_number.map_or(UNIT_WHOLE, |v| v as i32);
                     let episode = selection.episode_number.map_or(UNIT_WHOLE, |v| v as i32);
-                    return ok(super::effective_watch_json(
+                    let watch = match watch_json(
                         store,
                         user_id,
                         selection.media_item_id,
                         season,
                         episode,
-                    ))
-                    .into_response();
+                    ) {
+                        Ok(watch) => watch,
+                        Err(response) => return response,
+                    };
+                    return ok(watch).into_response();
                 }
                 Err(error) => return error.response(),
             };
         let unit = resolved.target.unit;
-        let mut watch = super::effective_watch_json(
+        let mut watch = match watch_json(
             store,
             user_id,
             selection.media_item_id,
             unit.season,
             unit.episode,
-        );
+        ) {
+            Ok(watch) => watch,
+            Err(response) => return response,
+        };
         watch["file_id"] = json!(file.file_id.to_string());
         watch["start_ms"] = json!(resolved.start_ms);
         watch["duration_ms"] = json!(resolved.duration_ms);
@@ -111,12 +117,27 @@ pub(crate) async fn marks(
                 "电影只有整部单元，不接受季/集坐标",
             );
         };
-        let rows = store.unit_rows(user_id, media_id).unwrap_or_default();
-        let watch = super::effective_watch_json(store, user_id, media_id, season, episode);
+        let rows = match store.unit_rows(user_id, media_id) {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::error!(%error, %media_id, "读取播放记录失败");
+                return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", "读取播放状态失败");
+            }
+        };
+        let watch = match watch_json(store, user_id, media_id, season, episode) {
+            Ok(watch) => watch,
+            Err(response) => return response,
+        };
         ok(json!({
             "played": watch["played"].as_bool().unwrap_or(false),
             "is_favorite": favorite_for(store, user_id, media_id, season, episode, &rows),
-            "unplayed_count": unplayed_count(&rows, season, episode),
+            "unplayed_count": match unplayed_count(store, user_id, media_id, season, episode) {
+                Ok(count) => count,
+                Err(error) => {
+                    tracing::error!(%error, %media_id, "读取未看分集失败");
+                    return err(StatusCode::INTERNAL_SERVER_ERROR, "store.error", "读取播放状态失败");
+                }
+            },
         }))
         .into_response()
     })
@@ -125,6 +146,27 @@ pub(crate) async fn marks(
         Ok(response) => response,
         Err(error) => error.response(),
     }
+}
+
+/// The effective watch state of one target, or the failure response to send back.
+///
+/// A store read that failed must not be flattened into `played: false`: the client
+/// would then show the opposite of what the user marked.
+fn watch_json(
+    store: &crate::Store,
+    user_id: domain::UserId,
+    media_id: domain::MediaId,
+    season: i32,
+    episode: i32,
+) -> Result<Value, Response> {
+    super::effective_watch_json(store, user_id, media_id, season, episode).map_err(|error| {
+        tracing::error!(%error, %media_id, season, episode, "读取播放进度失败");
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store.error",
+            "读取播放状态失败",
+        )
+    })
 }
 
 /// A mark names one of three targets: the whole item, one season, or one episode.
@@ -241,17 +283,36 @@ fn inherited_favorite(
         && explicit_favorite(store, user_id, media_id, season, UNIT_WHOLE) == Some(true)
 }
 
-fn unplayed_count(rows: &[UnitRow], season: i32, episode: i32) -> Option<i64> {
+fn unplayed_count(
+    store: &crate::Store,
+    user: domain::UserId,
+    media: domain::MediaId,
+    season: i32,
+    episode: i32,
+) -> Result<Option<i64>, crate::store::StoreError> {
     if episode != UNIT_WHOLE {
-        return None;
+        return Ok(None);
     }
-    let count = rows
+    let visible = crate::visible_scope::VisibleLibraries::load(store, Some(user))?;
+    let coverage = visible.media_coverage(store, media, |_| true)?;
+    let units: std::collections::HashSet<_> = coverage
         .iter()
-        .filter(|row| {
-            row.episode >= 0 && (season == UNIT_WHOLE || row.season == season) && !row.played
+        .flat_map(|row| &row.units)
+        .filter(|unit| {
+            unit.season >= 0 && unit.episode >= 0 && (season == UNIT_WHOLE || unit.season == season)
         })
+        .copied()
+        .collect();
+    // The count is over owned episodes, not over the user's sparse rows: a season
+    // mark writes one assertion and leaves every episode row absent. Both reads are
+    // batched per Media, so a long season costs the same as a short one.
+    let units: Vec<domain::UnitKey> = units.into_iter().collect();
+    let states = store.effective_unit_states(user, media, &units)?;
+    let count = states
+        .iter()
+        .filter(|state| !state.as_ref().is_some_and(|state| state.played))
         .count();
-    (count > 0).then_some(count as i64)
+    Ok((count > 0).then_some(count as i64))
 }
 
 /// POST /playback/marks — set played (cascade) / favorite (target level).
@@ -281,11 +342,7 @@ pub(crate) async fn set_marks(
             );
         }
     };
-    let Some(media_id) = body
-        .media_item_id
-        .as_deref()
-        .and_then(resolve_media_id)
-    else {
+    let Some(media_id) = body.media_item_id.as_deref().and_then(resolve_media_id) else {
         return err(
             StatusCode::BAD_REQUEST,
             "playback.invalid",
@@ -303,7 +360,8 @@ pub(crate) async fn set_marks(
     // global lock for it.
     let now_ms = state.playback_clock.now_ms();
     match store_read(&state, move |store| -> Response {
-        let Some((season, episode)) = super::selection::watch_unit(store, media_id, season, episode)
+        let Some((season, episode)) =
+            super::selection::watch_unit(store, media_id, season, episode)
         else {
             return err(
                 StatusCode::BAD_REQUEST,
@@ -313,8 +371,9 @@ pub(crate) async fn set_marks(
         };
         let played = body.played;
         let favorite = body.favorite;
-        let change =
-            crate::store::playback::PlaybackMutation::marks(user_id, season, episode, played, favorite);
+        let change = crate::store::playback::PlaybackMutation::marks(
+            user_id, season, episode, played, favorite,
+        );
         if let Err(error) = store.mutate_playback(media_id, &change, now_ms) {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -322,7 +381,10 @@ pub(crate) async fn set_marks(
                 &error.to_string(),
             );
         }
-        let unit = super::effective_watch_json(store, user_id, media_id, season, episode);
+        let unit = match watch_json(store, user_id, media_id, season, episode) {
+            Ok(unit) => unit,
+            Err(response) => return response,
+        };
         ok(json!({
             "played": unit["played"].as_bool().unwrap_or(false),
             "is_favorite": unit["is_favorite"].as_bool().unwrap_or(false),

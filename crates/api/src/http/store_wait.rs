@@ -68,6 +68,16 @@ pub(crate) enum StoreCallError {
     Worker(String),
 }
 
+impl std::fmt::Display for StoreCallError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy => formatter.write_str("store lock busy"),
+            Self::Deadline => formatter.write_str("store call deadline"),
+            Self::Worker(message) => write!(formatter, "store worker failed: {message}"),
+        }
+    }
+}
+
 impl StoreCallError {
     /// Contended lock → 503 + `Retry-After` (same code as identity reads and the
     /// write gate). A worker failure is a real server error, not backpressure.
@@ -148,6 +158,27 @@ where
             Err(StoreCallError::Deadline)
         }
     }
+}
+
+/// Run `work(&Store)` on the blocking pool, waiting for the lock as long as it takes.
+///
+/// Background drivers (scan rounds, Library removal) have no client waiting on their
+/// latency, so they may wait; what they must not do is park a runtime worker on the
+/// process-wide mutex. A worker failure is reported, the lock wait is not a `Busy`.
+pub(crate) async fn store_blocking<T, F>(
+    store: std::sync::Arc<parking_lot::Mutex<crate::Store>>,
+    work: F,
+) -> Result<T, StoreCallError>
+where
+    F: FnOnce(&crate::Store) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let guard = store.lock();
+        work(&guard)
+    })
+    .await
+    .map_err(|error| StoreCallError::Worker(error.to_string()))
 }
 
 /// Bounded `Store` lock for code that is already off the executor.

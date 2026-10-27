@@ -377,7 +377,7 @@ export interface LibraryPayload {
  * 改目录会冻结整库并异步迁移文件归属（202 + operation），只改其它字段仍是同步
  * 200；因此更新体必须允许省略 `root_paths`，否则「改名」会被后端当成换根。
  */
-export type LibraryUpdatePayload = Omit<LibraryPayload, "root_paths"> & {
+export type LibraryUpdatePayload = Omit<LibraryPayload, "root_paths" | "kind"> & {
   root_paths?: string[];
 };
 
@@ -385,9 +385,8 @@ export type LibraryUpdatePayload = Omit<LibraryPayload, "root_paths"> & {
 export interface LibraryOperation {
   operation_id: string;
   kind: "roots" | "locale" | string;
-  /** 后端把持久 state 当 phase 返回：`planned → applying → succeeded|failed`（冻结由 `reindexing` 生命周期表达，不是独立 state）。 */
+  /** 持久操作状态。 */
   state: "planned" | "frozen" | "applying" | "succeeded" | "failed" | string;
-  phase?: string;
   cursor?: string | null;
   error: string | null;
 }
@@ -761,12 +760,12 @@ function libraryOperationFrom(raw: unknown): LibraryOperation | null {
   const r = (raw ?? {}) as Record<string, unknown>;
   const operationId = typeof r.operation_id === "string" && r.operation_id ? r.operation_id : null;
   if (!operationId) return null;
-  const state = typeof r.state === "string" && r.state ? r.state : typeof r.phase === "string" ? r.phase : "planned";
+  if (typeof r.state !== "string" || !r.state) throw new Error("Library operation response is missing state");
+  const state = r.state;
   return {
     operation_id: operationId,
     kind: typeof r.kind === "string" ? r.kind : "roots",
     state,
-    phase: typeof r.phase === "string" ? r.phase : undefined,
     cursor: typeof r.cursor === "string" ? r.cursor : null,
     error: typeof r.error === "string" ? r.error : null,
   };

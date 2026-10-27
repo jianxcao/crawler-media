@@ -55,7 +55,7 @@ impl Store {
         };
         Ok(operation_status(
             operation_id,
-            cursor.as_deref().unwrap_or(PHASE_INIT),
+            valid_merge_phase(operation_id, cursor.as_deref())?,
             &state,
             error,
         ))
@@ -94,6 +94,7 @@ impl Store {
             )));
         };
 
+        let mut phase = valid_merge_phase(operation_id, phase_cursor.as_deref())?.to_owned();
         let survivor: MediaId = survivor_str.parse()?;
         self.ensure_survivor_accepts_merge(operation_id, survivor, &survivor_str)?;
 
@@ -115,13 +116,12 @@ impl Store {
         }
         let request: MediaMergeRequest = serde_json::from_str(&plan_json)?;
         let frozen = crate::media_operations::frozen_of_plan(&plan_json)?;
-        let mut phase = phase_cursor.unwrap_or_else(|| PHASE_INIT.to_string());
 
         // Each phase persists its successor before returning, so a crash at any
         // point resumes at the same boundary. Drive them to completion here.
         let result = loop {
             let step = match phase.as_str() {
-                PHASE_INIT | "planned" | "frozen" | "draining" | "applying" => {
+                PHASE_INIT => {
                     self.merge_library_phase(operation_id, survivor, loser, &request, now_ms)
                 }
                 PHASE_SUBSCRIBES => {
@@ -140,7 +140,7 @@ impl Store {
             if let Err(err) = step {
                 break Err(err);
             }
-            phase = self
+            let next: Option<String> = self
                 .library
                 .query_row(
                     "SELECT phase_cursor FROM media_operations WHERE operation_id = ?1",
@@ -148,8 +148,11 @@ impl Store {
                     |r| r.get::<_, Option<String>>(0),
                 )
                 .optional()?
-                .flatten()
-                .unwrap_or_else(|| PHASE_COMPLETE.to_string());
+                .flatten();
+            match valid_merge_phase(operation_id, next.as_deref()) {
+                Ok(next) => phase = next.to_owned(),
+                Err(err) => break Err(err),
+            }
         };
 
         match result {
@@ -344,6 +347,36 @@ impl Store {
         tx.commit()?;
         tracing::info!(operation_id, %survivor, %loser, "Media merge: loser retired");
         Ok(())
+    }
+}
+
+/// The phases this writer persists, in order. A merge row may only carry one of
+/// them: `init` is written by the preflight that freezes both identities, and each
+/// phase persists its successor before returning.
+const MERGE_PHASES: [&str; 4] = [PHASE_INIT, PHASE_SUBSCRIBES, PHASE_RETIRE, PHASE_COMPLETE];
+
+/// Validate the persisted phase cursor before any fact moves.
+///
+/// The cursor decides which facts may still move, so a missing or unknown value is
+/// damage, not a starting point: state-value aliases (`planned`, `frozen`,
+/// `draining`, `applying`) never belong here, and treating them as `init` would
+/// re-run the library phase against a half-merged pair. Refused without touching
+/// facts so recovery stays at the last real boundary.
+fn valid_merge_phase<'a>(
+    operation_id: &str,
+    cursor: Option<&'a str>,
+) -> Result<&'a str, StoreError> {
+    let Some(cursor) = cursor else {
+        return Err(StoreError::Invalid(format!(
+            "merge operation {operation_id} has no phase cursor"
+        )));
+    };
+    if MERGE_PHASES.contains(&cursor) {
+        Ok(cursor)
+    } else {
+        Err(StoreError::Invalid(format!(
+            "merge operation {operation_id} has unknown phase {cursor}"
+        )))
     }
 }
 

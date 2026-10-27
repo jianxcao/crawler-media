@@ -146,29 +146,31 @@ impl Store {
 
         ensure_export_binding(&tx, request)?;
         let plan_json = encode_plan(request)?;
-        for (operation_id, stale_json) in scrape_operations(&tx)? {
-            let stale = decode_plan(&stale_json)?;
-            if stale.media_id == request.media_id && stale.path == request.path {
-                tx.execute(
-                    "DELETE FROM library_operations WHERE operation_id = ?1",
-                    params![operation_id],
-                )?;
+        let key = crate::path_key::canonical_recorded_key(&tx, &request.path.to_string_lossy());
+        let existing: Option<(String, String)> = tx.query_row(
+            "SELECT state, plan_json FROM library_operations WHERE operation_id=?1",
+            [&request.operation_id], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        if let Some((state, existing_plan)) = existing {
+            if state != "succeeded" && state != "failed" && existing_plan == plan_json {
+                return Ok(OperationStatus { operation_id: request.operation_id.clone(), phase: state.clone(), state, error: None });
             }
+            return Err(StoreError::Conflict(format!("nfo export {} already has a different or terminal intent", request.operation_id)));
         }
-
+        let owner: Option<String> = tx.query_row(
+            "SELECT operation_id FROM library_operations WHERE resource_key=?1 AND kind='scrape' AND state NOT IN ('succeeded','failed')",
+            [&key], |row| row.get(0),
+        ).optional()?;
+        if let Some(owner) = owner {
+            tracing::warn!(path=%key, owner=%owner, requested=%request.operation_id, "NFO export path already owned");
+            return Err(StoreError::Conflict(format!("nfo path {key} owned by {owner}")));
+        }
         tx.execute(
             "INSERT INTO library_operations
                 (operation_id, library_id, kind, state, expected_revision, plan_json,
-                 cursor_json, error, created_at_ms, updated_at_ms)
-             VALUES (?1, ?2, ?3, 'planned', ?4, ?5, NULL, NULL, ?6, ?6)",
-            params![
-                request.operation_id,
-                library,
-                NFO_EXPORT_KIND,
-                request.config_revision,
-                plan_json,
-                now_ms
-            ],
+                 cursor_json, error, created_at_ms, updated_at_ms, resource_key)
+             VALUES (?1, ?2, ?3, 'planned', ?4, ?5, NULL, NULL, ?6, ?6, ?7)",
+            params![request.operation_id, library, NFO_EXPORT_KIND, request.config_revision, plan_json, now_ms, key],
         )?;
         tx.commit()?;
         Ok(OperationStatus {
@@ -177,6 +179,70 @@ impl Store {
             state: "planned".into(),
             error: None,
         })
+    }
+
+    /// Adopt a re-rendered body for the same persisted export intent.
+    ///
+    /// Crash recovery escalates an external sidecar edit into user overrides and must
+    /// then re-derive the body, so this is the one legitimate "same operation, new
+    /// plan" transition. Ownership does not move: the operation must already exist,
+    /// must still be unfinished, and must own the same canonical path. A different
+    /// operation still cannot claim the path (the begin-time uniqueness holds), and a
+    /// caller cannot use this to hand the intent to another sidecar.
+    pub fn replan_nfo_export(
+        &self,
+        request: &NfoExportRequest,
+        now_ms: i64,
+    ) -> Result<NfoExportRequest, StoreError> {
+        let tx = crate::write_tx(&self.library)?;
+        ensure_export_binding(&tx, request)?;
+        let key = crate::path_key::canonical_recorded_key(&tx, &request.path.to_string_lossy());
+        let current: Option<(String, Option<String>)> = tx
+            .query_row(
+                "SELECT state, resource_key FROM library_operations
+                 WHERE operation_id = ?1 AND kind = ?2",
+                params![request.operation_id, NFO_EXPORT_KIND],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((state, owner_key)) = current else {
+            return Err(StoreError::Missing(format!(
+                "nfo export operation {}",
+                request.operation_id
+            )));
+        };
+        if state == "succeeded" || state == "failed" {
+            return Err(StoreError::Conflict(format!(
+                "nfo export {} is {state} and cannot be re-planned",
+                request.operation_id
+            )));
+        }
+        if owner_key.as_deref() != Some(key.as_str()) {
+            return Err(StoreError::Conflict(format!(
+                "nfo export {} owns {:?}, not {key}",
+                request.operation_id, owner_key
+            )));
+        }
+        let plan_json = encode_plan(request)?;
+        tx.execute(
+            "UPDATE library_operations
+             SET plan_json = ?2, expected_revision = ?3, updated_at_ms = ?4
+             WHERE operation_id = ?1",
+            params![
+                request.operation_id,
+                plan_json,
+                request.config_revision,
+                now_ms
+            ],
+        )?;
+        tx.commit()?;
+        tracing::info!(
+            operation_id = %request.operation_id,
+            export_id = %request.export_id,
+            path = %key,
+            "NFO 导出意图已按新的有效元数据重写"
+        );
+        Ok(request.clone())
     }
 
     /// Register the digest the sidecar holds now, completing the export.

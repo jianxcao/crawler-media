@@ -595,73 +595,8 @@ fn cancelled_refresh_unit_cannot_be_published_as_success() {
     assert!(store.get_cached_chapters(&id).unwrap().is_none());
 }
 
-#[test]
-fn independent_store_handles_cannot_reinsert_samples_while_ledger_is_deleted() {
-    use std::sync::{Arc, Barrier};
-    let temp = tempfile::tempdir().unwrap();
-    let deleting = Store::open(temp.path()).unwrap();
-    let capturing = Store::open(temp.path()).unwrap();
-    let rows: Vec<_> = (0..32)
-        .map(|index| {
-            let mut row = row(&deleting, temp.path(), MediaId::new());
-            row.path = temp
-                .path()
-                .join(format!("episode-{index}.mkv"))
-                .to_string_lossy()
-                .into_owned();
-            std::fs::write(&row.path, b"fixture").unwrap();
-            store::test_support::publish_fixture_file(&deleting, &row).unwrap();
-            row
-        })
-        .collect();
-    let gate = Arc::new(Barrier::new(2));
-    std::thread::scope(|scope| {
-        let capture_gate = gate.clone();
-        let rows = &rows;
-        scope.spawn(move || {
-            for row in rows {
-                let (attempt, sample) = capture_result(row);
-                capture_gate.wait();
-                // A concurrent deletion may reject the write or invalidate a SQLite read
-                // snapshot. Either result must leave no sample once deletion commits.
-                let _ =
-                    capturing.complete_fingerprint_attempt_for_source(&attempt, &sample, &row.path);
-                capture_gate.wait();
-            }
-        });
-        for row in rows {
-            gate.wait();
-            // The capture thread holds the library write lock, so the delete can
-            // observe SQLITE_BUSY. Retry without yielding the barrier: the
-            // authoritative delete must still commit, and the barrier must be
-            // released on every path so a failure cannot deadlock the scope.
-            let mut attempts = 0;
-            loop {
-                match deleting.delete_ledger_path(&row.path) {
-                    Ok(()) => break,
-                    Err(store::StoreError::Sqlite(rusqlite::Error::SqliteFailure(failure, _)))
-                        if failure.code == rusqlite::ErrorCode::DatabaseBusy && attempts < 1000 =>
-                    {
-                        attempts += 1;
-                        std::thread::yield_now();
-                    }
-                    Err(error) => panic!("delete failed: {error}"),
-                }
-            }
-            gate.wait();
-        }
-    });
-    for row in rows {
-        let (_, sample) = capture_result(&row);
-        assert!(deleting.file_coverage_by_path(&row.path).unwrap().is_none());
-        assert!(
-            deleting
-                .find_covering_fingerprint_samples(&sample_query(&sample))
-                .unwrap()
-                .is_empty()
-        );
-    }
-}
+#[path = "fingerprint_source_safety/rendezvous.rs"]
+mod rendezvous;
 
 fn observed(
     store: &store::Store,

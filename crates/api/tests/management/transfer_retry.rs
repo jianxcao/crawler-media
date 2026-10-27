@@ -56,13 +56,15 @@ async fn disabling_nfo_mirroring_does_not_disable_transfer_artwork() {
     )
     .await;
     let lib = libs[0]["id"].as_str().unwrap();
+    // A plain settings write on the Library: the retired library-level `scrape`
+    // switch no longer exists, and the NFO mirroring decision comes from settings.
     let response = app
         .clone()
         .oneshot(request(
             "PATCH",
             &format!("/api/v1/libraries/{lib}"),
             Some("management-secret"),
-            json!({"scrape": true}),
+            json!({"detect_intros": false}),
         ))
         .await
         .unwrap();

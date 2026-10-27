@@ -126,6 +126,8 @@ pub const LIBRARY_INDEXES: &[&str] = &[
     "logs_started",
     "logs_ended",
     "metrics_recorded",
+    "nfo_export_active_path",
+    "nfo_export_pending_age",
     "library_operation_dispatch",
     "operations_library_kind",
     "playback_session_file",

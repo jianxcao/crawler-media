@@ -65,8 +65,8 @@ impl Fixture {
         self.db()
             .execute(
                 "INSERT INTO library_operations(operation_id, library_id, kind, state,
-                     expected_revision, plan_json, created_at_ms, updated_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, 0, '{}', ?5, ?5)",
+                     expected_revision, plan_json, created_at_ms, updated_at_ms, resource_key)
+                 VALUES (?1, ?2, ?3, ?4, 0, '{}', ?5, ?5, ?1)",
                 params![id, self.library_id.to_string(), kind, state, at_ms],
             )
             .unwrap();

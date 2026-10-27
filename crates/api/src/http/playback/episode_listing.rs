@@ -23,45 +23,55 @@ pub(crate) async fn episodes(
     // Review L2: episode snapshots are a ledger read; take the lock off-executor.
     let id_for_read = id.clone();
     let (media, visible_cloned, unit_states) = match store_read(&state, move |store| {
-            let Some(media_id) = resolve_media_id(&id_for_read) else {
-                return Err(err(
-                    StatusCode::NOT_FOUND,
-                    "playback.item_missing",
-                    "条目不存在",
-                ));
-            };
-            let Some(media) = store.get_media(media_id).ok().flatten() else {
-                return Err(err(
-                    StatusCode::NOT_FOUND,
-                    "playback.item_missing",
-                    "条目不存在",
-                ));
-            };
-            let all_coverages = store.file_coverage_for_media(media.id).unwrap_or_default();
-            let visible_covs = visible_coverages_for_media(store, &media, &all_coverages, user_id);
-            if visible_covs.is_empty() {
-                return Err(err(
-                    StatusCode::NOT_FOUND,
-                    "playback.item_missing",
-                    "条目不存在",
-                ));
-            }
-            let visible_cloned: Vec<domain::FileCoverage> = visible_covs.into_iter().cloned().collect();
-            let mut unit_states = std::collections::HashMap::new();
-            if let Some(uid) = user_id {
-                for cov in &visible_cloned {
-                    for unit in &cov.units {
-                        if unit.is_whole() {
-                            continue;
-                        }
-                        let (s, e) = (unit.season.max(0) as u32, unit.episode.max(0) as u32);
-                        if let Ok(st) = store.unit_state(uid, media.id, unit.season, unit.episode) {
-                            unit_states.insert((s, e), st);
-                        }
-                    }
+        let Some(media_id) = resolve_media_id(&id_for_read) else {
+            return Err(err(
+                StatusCode::NOT_FOUND,
+                "playback.item_missing",
+                "条目不存在",
+            ));
+        };
+        let Some(media) = store.get_media(media_id).ok().flatten() else {
+            return Err(err(
+                StatusCode::NOT_FOUND,
+                "playback.item_missing",
+                "条目不存在",
+            ));
+        };
+        let all_coverages = store.file_coverage_for_media(media.id).unwrap_or_default();
+        let visible_covs = visible_coverages_for_media(store, &media, &all_coverages, user_id);
+        if visible_covs.is_empty() {
+            return Err(err(
+                StatusCode::NOT_FOUND,
+                "playback.item_missing",
+                "条目不存在",
+            ));
+        }
+        let visible_cloned: Vec<domain::FileCoverage> = visible_covs.into_iter().cloned().collect();
+        // One assertion snapshot and one unit-row read serve every episode of the
+        // requested season; per-episode effective-state lookups would repeat the
+        // three-layer assertion query for each one.
+        let units = season_units(&visible_cloned, season_number);
+        let unit_states = match user_id {
+            Some(uid) => match store.effective_unit_states(uid, media.id, &units) {
+                Ok(states) => units
+                    .iter()
+                    .zip(states)
+                    .map(|(unit, state)| {
+                        ((unit.season.max(0) as u32, unit.episode.max(0) as u32), state)
+                    })
+                    .collect(),
+                Err(error) => {
+                    tracing::error!(%error, media_id = %media.id, "读取分集播放状态失败");
+                    return Err(err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "store.error",
+                        "读取播放状态失败",
+                    ));
                 }
-            }
-            Ok((media, visible_cloned, unit_states))
+            },
+            None => std::collections::HashMap::new(),
+        };
+        Ok((media, visible_cloned, unit_states))
     })
     .await
     {
@@ -113,6 +123,33 @@ pub(crate) async fn episodes(
     ok(json!({ "season_number": season_number, "episodes": rows })).into_response()
 }
 
+/// Deduped episode units in the order they are rendered.
+///
+/// The requested season bounds the work: a season view must not pay for every
+/// episode the Media owns, and a whole-item unit carries no episode coordinates to
+/// resolve.
+fn season_units(
+    coverages: &[domain::FileCoverage],
+    season_number: Option<u32>,
+) -> Vec<domain::UnitKey> {
+    let mut seen = std::collections::HashSet::new();
+    let mut units = Vec::new();
+    for cov in coverages {
+        for unit in &cov.units {
+            if unit.is_whole() {
+                continue;
+            }
+            if season_number.is_some_and(|target| unit.season.max(0) as u32 != target) {
+                continue;
+            }
+            if seen.insert(*unit) {
+                units.push(*unit);
+            }
+        }
+    }
+    units
+}
+
 fn render_rows(
     id: &str,
     visible_cloned: &[domain::FileCoverage],
@@ -133,9 +170,10 @@ fn render_rows(
             let season_num = unit.season.max(0) as u32;
             let ep_num = unit.episode.max(0) as u32;
             if let Some(target) = season_number
-                && season_num != target {
-                    continue;
-                }
+                && season_num != target
+            {
+                continue;
+            }
 
             let file_path = &cov.file.path;
             let file_name = file_path

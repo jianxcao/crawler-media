@@ -103,7 +103,7 @@ pub(crate) fn begin_sidecar_export(
 /// Disk reads/writes run with the Store mutex released; the final phase
 /// revalidates the operation and the file/config binding before registering.
 pub(crate) fn finish_sidecar_export(state: &ApiState, request: NfoExportRequest) {
-    let now_ms = crate::job_loop::unix_now();
+    let now_ms = state.playback_clock.now_ms();
     let lock = || state.store.lock();
     match store::metadata::export_driver::export_nfo_sidecar_phased(lock, &request, now_ms) {
         Ok(outcome) => tracing::info!(
@@ -156,6 +156,9 @@ pub(crate) fn resume_sidecar_exports(state: &ApiState, now_ms: i64) -> usize {
     }
     driven
 }
+
+#[cfg(test)]
+mod tests;
 
 fn next_ids() -> (String, String) {
     let tick = crate::job_loop::unix_now();

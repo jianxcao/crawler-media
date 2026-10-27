@@ -39,9 +39,10 @@ fn nullable_path<'de, D: serde::Deserializer<'de>>(
 }
 
 pub(crate) async fn get(State(state): State<ApiState>) -> Response {
-    match state.store.lock().transfer_settings() {
-        Ok(settings) => ok(serde_json::json!(settings)).into_response(),
-        Err(error) => failure(error),
+    match super::store_wait::store_read(&state, |store| store.transfer_settings()).await {
+        Ok(Ok(settings)) => ok(serde_json::json!(settings)).into_response(),
+        Ok(Err(error)) => failure(error),
+        Err(error) => error.response(),
     }
 }
 
@@ -55,15 +56,21 @@ pub(crate) async fn patch(
         watch_intake: body.watch_intake,
         watch_inplace: body.watch_inplace,
     };
-    match state
-        .store
-        .lock()
-        .patch_transfer_settings(body.expected_revision, patch)
-    {
-        Ok(settings) => ok(serde_json::json!(settings)).into_response(),
-        Err(error) => failure(error),
+    let handle = state.store();
+    match state.http_work.run_to_completion(move || {
+        super::store_wait::with_bounded_store(handle, |store| {
+            store.patch_transfer_settings(body.expected_revision, patch)
+        })
+    }).await {
+        Ok(Some(Ok(settings))) => ok(serde_json::json!(settings)).into_response(),
+        Ok(Some(Err(error))) => failure(error),
+        Ok(None) => super::store_wait::busy_response(),
+        Err(error) => super::library::browse_work_error(error),
     }
 }
+
+#[cfg(test)]
+mod tests;
 
 fn failure(error: store::StoreError) -> Response {
     tracing::error!(%error, "Transfer settings operation rejected");

@@ -255,9 +255,9 @@ pub(crate) async fn scan_and_wait(app: &axum::Router, lib_id: &str) -> Value {
     assert_eq!(scan.status(), StatusCode::ACCEPTED);
     let body = json_body(scan).await;
     let op_id = body["data"]["operation_id"].as_str().unwrap();
-    // 扫描是异步 coordinator 作业；全量并行跑测试时（workspace 一次拉起上百个二进制）
-    // 5 秒预算会被别的测试抢占 CPU 而误判超时，这里放宽到 30 秒。
-    for _ in 0..600 {
+    // 扫描是异步 coordinator 作业，同时最多跑两轮。同一进程里多个测试各自
+    // 排队时，固定 30 秒会把还在队列里的轮次误判成超时；预算按排队深度放宽。
+    for _ in 0..2400 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let poll = app
             .clone()

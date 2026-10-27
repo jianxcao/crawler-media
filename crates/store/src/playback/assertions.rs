@@ -7,8 +7,11 @@
 //!
 //! Marking a season (or the whole item) writes one assertion on that scope; readers must
 //! therefore resolve the *effective* state instead of looking at one row. The precedence is
-//! the most specific assertion: episode > season > whole item. Favourites are independent of
-//! all of this and never move with a played assertion or a history clear.
+//! the newest assertion, and on an equal change time the more specific scope: episode >
+//! season > whole item. Favourites are independent of all of this and never move with a
+//! played assertion or a history clear.
+
+use std::collections::HashMap;
 
 use domain::{MediaId, UnitKey, UserId};
 use rusqlite::{OptionalExtension, params};
@@ -43,6 +46,35 @@ pub struct EffectiveAssertion {
     pub played: bool,
 }
 
+/// One user's `played` assertions on one Media, loaded in a single read.
+///
+/// A season or item mark stores one row on that scope, so a reader resolving many
+/// units of the same Media (an episode list, an up-next decision, a per-season
+/// count) would otherwise repeat the three-layer lookup per unit. The snapshot
+/// answers the same precedence rule from memory. It is a point-in-time copy:
+/// resolve every unit of a request from the same instance, then drop it.
+#[derive(Default)]
+pub struct PlayedAssertionSnapshot {
+    rows: HashMap<(i32, i32), (bool, i64)>,
+}
+
+impl PlayedAssertionSnapshot {
+    /// Which assertion (and value) decides this unit's `played` fact.
+    pub fn effective_played_assertion(&self, unit: UnitKey) -> Option<EffectiveAssertion> {
+        pick_assertion(unit, |season, episode| self.rows.get(&(season, episode)).copied())
+    }
+
+    /// `unit`'s state with `played` resolved, taking the caller's own row (progress,
+    /// favourite) as the base. `None` means this user carries no fact at all.
+    pub fn effective_unit_state(
+        &self,
+        unit: UnitKey,
+        own: Option<UnitState>,
+    ) -> Option<UnitState> {
+        resolve_played(own, self.effective_played_assertion(unit))
+    }
+}
+
 impl Store {
     /// A unit's state with `played` resolved through the assertion hierarchy.
     ///
@@ -55,26 +87,8 @@ impl Store {
         unit: UnitKey,
     ) -> Result<Option<UnitState>, StoreError> {
         let own = self.unit_state(user, media, unit.season, unit.episode)?;
-        let Some(assertion) = self.effective_played_assertion(user, media, unit)? else {
-            // A favourite-only or progress-only row is still a fact of this user.
-            return Ok(own);
-        };
-        match own {
-            Some(mut state) => {
-                // The row exists for progress/favourite; `played` comes from the assertion,
-                // never from the row's own flag alone.
-                state.played = assertion.played;
-                Ok(Some(state))
-            }
-            None => {
-                // A season/item mark with no per-episode row: the unit reads as marked,
-                // carrying no progress of its own.
-                Ok(Some(UnitState {
-                    played: assertion.played,
-                    ..UnitState::default()
-                }))
-            }
-        }
+        let assertion = self.effective_played_assertion(user, media, unit)?;
+        Ok(resolve_played(own, assertion))
     }
 
     /// Which assertion (and value) decides this unit's `played` fact.
@@ -84,18 +98,7 @@ impl Store {
         media: MediaId,
         unit: UnitKey,
     ) -> Result<Option<EffectiveAssertion>, StoreError> {
-        let candidates = [
-            (PlayedAssertionScope::Episode, unit.season, unit.episode),
-            (PlayedAssertionScope::Season, unit.season, UNIT_WHOLE),
-            (PlayedAssertionScope::WholeItem, UNIT_WHOLE, UNIT_WHOLE),
-        ];
-        // The newest assertion wins; on an equal change time the more specific scope wins.
-        // `played_clause` in the protocol SQL orders identically.
-        let mut best: Option<((i64, u8), EffectiveAssertion)> = None;
-        for (specificity, (scope, season, episode)) in candidates.into_iter().rev().enumerate() {
-            if scope == PlayedAssertionScope::Episode && unit.is_whole() {
-                continue;
-            }
+        let mut lookup = |season: i32, episode: i32| -> Result<Option<(bool, i64)>, StoreError> {
             let row: Option<(bool, i64, Option<i64>)> = self
                 .library
                 .query_row(
@@ -105,14 +108,310 @@ impl Store {
                     |r| Ok((r.get::<_, i64>(0)? != 0, r.get(1)?, r.get(2)?)),
                 )
                 .optional()?;
-            let Some((played, 1, changed_at)) = row else {
-                continue;
-            };
-            let key = (changed_at.unwrap_or(0), specificity as u8);
-            if best.as_ref().is_none_or(|(current, _)| key > *current) {
-                best = Some((key, EffectiveAssertion { scope, played }));
-            }
+            Ok(row
+                .filter(|(_, asserted, _)| *asserted == 1)
+                .map(|(played, _, changed_at)| (played, changed_at.unwrap_or(0))))
+        };
+        lookup_assertion(unit, &mut lookup)
+    }
+
+    /// Every `played` assertion this user holds on `media`, as one read.
+    ///
+    /// Use this when a request resolves more than one unit of the same Media; a
+    /// single unit is cheaper through [`Store::effective_unit_state`].
+    pub fn played_assertion_snapshot(
+        &self,
+        user: UserId,
+        media: MediaId,
+    ) -> Result<PlayedAssertionSnapshot, StoreError> {
+        let mut stmt = self.library.prepare(
+            "SELECT season, episode, played, played_changed_at_ms FROM playback_units
+             WHERE user_id = ?1 AND media_id = ?2 AND has_played_assertion = 1",
+        )?;
+        let rows = stmt.query_map(params![user.to_string(), media.to_string()], |row| {
+            Ok((
+                (row.get::<_, i32>(0)?, row.get::<_, i32>(1)?),
+                (
+                    row.get::<_, i64>(2)? != 0,
+                    row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                ),
+            ))
+        })?;
+        Ok(PlayedAssertionSnapshot {
+            rows: rows.collect::<Result<_, _>>()?,
+        })
+    }
+
+    /// Effective states for many units of one Media, in declaration order.
+    ///
+    /// Two reads regardless of how many units are asked for: this user's unit rows
+    /// for the Media, and the assertion rows the precedence rule needs.
+    pub fn effective_unit_states(
+        &self,
+        user: UserId,
+        media: MediaId,
+        units: &[UnitKey],
+    ) -> Result<Vec<Option<UnitState>>, StoreError> {
+        if units.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(best.map(|(_, assertion)| assertion))
+        let snapshot = self.played_assertion_snapshot(user, media)?;
+        let own = self.unit_states_for_media(user, media)?;
+        Ok(units
+            .iter()
+            .map(|unit| {
+                snapshot.effective_unit_state(*unit, own.get(&(unit.season, unit.episode)).cloned())
+            })
+            .collect())
+    }
+
+    /// This user's own rows on `media`, keyed by `(season, episode)`, in one read.
+    fn unit_states_for_media(
+        &self,
+        user: UserId,
+        media: MediaId,
+    ) -> Result<HashMap<(i32, i32), UnitState>, StoreError> {
+        let mut stmt = self.library.prepare(
+            "SELECT season, episode, position_ms, played, favorite, duration_ms, audio_track,
+                    subtitle_track, play_count, watch_activity_at, favorite_at,
+                    CASE WHEN has_played_assertion = 1 THEN COALESCE(played_changed_at_ms, 0) END
+             FROM playback_units WHERE user_id = ?1 AND media_id = ?2",
+        )?;
+        let rows = stmt.query_map(params![user.to_string(), media.to_string()], |row| {
+            Ok((
+                (row.get::<_, i32>(0)?, row.get::<_, i32>(1)?),
+                UnitState {
+                    position_ms: row.get(2)?,
+                    played: row.get::<_, i64>(3)? != 0,
+                    favorite: row.get::<_, i64>(4)? != 0,
+                    duration_ms: row.get(5)?,
+                    audio_track: row.get(6)?,
+                    subtitle_track: row.get(7)?,
+                    play_count: row.get(8)?,
+                    updated_at: row.get(9)?,
+                    favorite_at: row.get(10)?,
+                    played_assertion_at_ms: row.get(11)?,
+                },
+            ))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+}
+
+/// The assertion scopes that can decide `unit`, least specific first.
+fn candidates(unit: UnitKey) -> Vec<(PlayedAssertionScope, i32, i32)> {
+    let mut scopes = vec![
+        (PlayedAssertionScope::WholeItem, UNIT_WHOLE, UNIT_WHOLE),
+        (PlayedAssertionScope::Season, unit.season, UNIT_WHOLE),
+    ];
+    // A whole-item unit has no episode row of its own: `(unit.season, unit.episode)`
+    // would be `(-1, -1)`, the item scope again.
+    if !unit.is_whole() {
+        scopes.push((
+            PlayedAssertionScope::Episode,
+            unit.season,
+            unit.episode,
+        ));
+    }
+    scopes
+}
+
+/// Newest assertion wins; on an equal change time the more specific scope wins.
+///
+/// `played_clause` in the protocol SQL orders identically, so a Jellyfin view and
+/// this reader never disagree about a unit.
+fn pick_assertion(
+    unit: UnitKey,
+    lookup: impl Fn(i32, i32) -> Option<(bool, i64)>,
+) -> Option<EffectiveAssertion> {
+    let mut best: Option<((i64, u8), EffectiveAssertion)> = None;
+    for (specificity, (scope, season, episode)) in candidates(unit).into_iter().enumerate() {
+        let Some((played, changed_at)) = lookup(season, episode) else {
+            continue;
+        };
+        let key = (changed_at, specificity as u8);
+        if best.as_ref().is_none_or(|(current, _)| key > *current) {
+            best = Some((key, EffectiveAssertion { scope, played }));
+        }
+    }
+    best.map(|(_, assertion)| assertion)
+}
+
+fn lookup_assertion(
+    unit: UnitKey,
+    lookup: &mut impl FnMut(i32, i32) -> Result<Option<(bool, i64)>, StoreError>,
+) -> Result<Option<EffectiveAssertion>, StoreError> {
+    let mut best: Option<((i64, u8), EffectiveAssertion)> = None;
+    for (specificity, (scope, season, episode)) in candidates(unit).into_iter().enumerate() {
+        let Some((played, changed_at)) = lookup(season, episode)? else {
+            continue;
+        };
+        let key = (changed_at, specificity as u8);
+        if best.as_ref().is_none_or(|(current, _)| key > *current) {
+            best = Some((key, EffectiveAssertion { scope, played }));
+        }
+    }
+    Ok(best.map(|(_, assertion)| assertion))
+}
+
+/// Apply a resolved assertion to the caller's own row.
+fn resolve_played(
+    own: Option<UnitState>,
+    assertion: Option<EffectiveAssertion>,
+) -> Option<UnitState> {
+    let Some(assertion) = assertion else {
+        // A favourite-only or progress-only row is still a fact of this user.
+        return own;
+    };
+    match own {
+        Some(mut state) => {
+            // The row exists for progress/favourite; `played` comes from the assertion,
+            // never from the row's own flag alone.
+            state.played = assertion.played;
+            Some(state)
+        }
+        None => {
+            // A season/item mark with no per-episode row: the unit reads as marked,
+            // carrying no progress of its own.
+            Some(UnitState {
+                played: assertion.played,
+                ..UnitState::default()
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::playback::PlaybackMutation;
+
+    fn mark(store: &Store, user: UserId, media: MediaId, season: i32, episode: i32, played: bool, at: i64) {
+        let change = PlaybackMutation::marks(user, season, episode, Some(played), None);
+        store.mutate_playback(media, &change, at).unwrap();
+    }
+
+    fn fixture() -> (tempfile::TempDir, Store, UserId, MediaId) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let user = UserId::new();
+        let media = MediaId::new();
+        store
+            .insert_media(&domain::Media {
+                id: media,
+                kind: domain::MediaKind::Tv,
+                title: "Snapshot".into(),
+                year: None,
+                original_title: None,
+                aliases: vec![],
+                tmdb_id: None,
+                douban_id: None,
+                tvdb_id: None,
+                bangumi_id: None,
+                anilist_id: None,
+            })
+            .unwrap();
+        (dir, store, user, media)
+    }
+
+    #[test]
+    fn snapshot_resolves_the_same_units_as_single_lookups() {
+        let (_dir, store, user, media) = fixture();
+        mark(&store, user, media, UNIT_WHOLE, UNIT_WHOLE, true, 10);
+        mark(&store, user, media, 1, UNIT_WHOLE, false, 20);
+        mark(&store, user, media, 1, 1, true, 20);
+        mark(&store, user, media, 2, 1, false, 5);
+        let snapshot = store.played_assertion_snapshot(user, media).unwrap();
+        let units = [
+            UnitKey::WHOLE,
+            UnitKey::new(1, UNIT_WHOLE),
+            UnitKey::new(1, 1),
+            UnitKey::new(1, 2),
+            UnitKey::new(2, 1),
+            UnitKey::new(3, 1),
+        ];
+        for unit in units {
+            assert_eq!(
+                snapshot.effective_played_assertion(unit),
+                store.effective_played_assertion(user, media, unit).unwrap(),
+                "{unit:?}"
+            );
+        }
+        assert_eq!(
+            snapshot.effective_played_assertion(UnitKey::new(1, 1)),
+            Some(EffectiveAssertion {
+                scope: PlayedAssertionScope::Episode,
+                played: true,
+            })
+        );
+        // Season 2's newest assertion is the whole-item mark at 10.
+        assert_eq!(
+            snapshot.effective_played_assertion(UnitKey::new(2, 1)),
+            Some(EffectiveAssertion {
+                scope: PlayedAssertionScope::WholeItem,
+                played: true,
+            })
+        );
+    }
+
+    #[test]
+    fn snapshot_keeps_its_own_point_in_time_copy() {
+        let (_dir, store, user, media) = fixture();
+        mark(&store, user, media, UNIT_WHOLE, UNIT_WHOLE, true, 10);
+        let snapshot = store.played_assertion_snapshot(user, media).unwrap();
+        mark(&store, user, media, UNIT_WHOLE, UNIT_WHOLE, false, 30);
+        assert!(
+            snapshot
+                .effective_played_assertion(UnitKey::new(2, 1))
+                .unwrap()
+                .played
+        );
+        assert!(
+            !store
+                .effective_unit_state(user, media, UnitKey::new(2, 1))
+                .unwrap()
+                .unwrap()
+                .played
+        );
+    }
+
+    #[test]
+    fn other_users_and_untouched_units_carry_no_fact() {
+        let (_dir, store, user, media) = fixture();
+        mark(&store, user, media, 1, 1, true, 10);
+        let other = UserId::new();
+        assert!(
+            store
+                .played_assertion_snapshot(other, media)
+                .unwrap()
+                .effective_played_assertion(UnitKey::new(1, 1))
+                .is_none()
+        );
+        let snapshot = store.played_assertion_snapshot(user, media).unwrap();
+        assert!(snapshot.effective_played_assertion(UnitKey::new(1, 2)).is_none());
+        assert!(
+            snapshot
+                .effective_unit_state(UnitKey::new(1, 2), None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn batch_states_match_single_unit_reads_in_order() {
+        let (_dir, store, user, media) = fixture();
+        mark(&store, user, media, UNIT_WHOLE, UNIT_WHOLE, true, 10);
+        mark(&store, user, media, 1, 2, false, 20);
+        let units = [UnitKey::new(1, 1), UnitKey::new(1, 2), UnitKey::new(1, 3)];
+        let batch = store.effective_unit_states(user, media, &units).unwrap();
+        assert_eq!(batch.len(), units.len());
+        for (index, unit) in units.into_iter().enumerate() {
+            assert_eq!(
+                batch[index],
+                store.effective_unit_state(user, media, unit).unwrap(),
+                "{unit:?}"
+            );
+        }
+        assert_eq!(batch[0].as_ref().unwrap().played, true);
+        assert_eq!(batch[1].as_ref().unwrap().played, false);
     }
 }

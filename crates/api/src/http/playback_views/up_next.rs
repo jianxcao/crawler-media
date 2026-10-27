@@ -194,30 +194,43 @@ fn plan_from_activity(
                 .filter(|u| !u.is_whole())
                 .map(|u| (u.season.max(0) as u32, u.episode.max(0) as u32))
                 .collect();
-            let units = store.unit_rows(user_id, media.id).unwrap_or_default();
-            let Some(unit) = units.iter().max_by_key(|u| u.updated_at) else {
-                return Ok(None);
-            };
-            let s = if unit.season >= 0 {
-                unit.season as u32
-            } else {
-                1
-            };
-            let e = if unit.episode >= 0 {
-                unit.episode as u32
-            } else {
-                1
-            };
-            let (target_s, target_e, advanced) = if !unit.played {
-                (s, e, false)
-            } else if !owned.contains(&(s, e + 1)) && owned.contains(&(s + 1, 1)) {
-                (s + 1, 1, true)
-            } else {
-                (s, e + 1, true)
-            };
-            Ok(owned
-                .contains(&(target_s, target_e))
-                .then(|| plan(target_s, target_e as i32, advanced)))
+            let units = store.unit_rows(user_id, media.id).map_err(|error| {
+                tracing::error!(%error, %media_id, "读取播放记录失败");
+                StoreFailed
+            })?;
+            let latest = units
+                .iter()
+                .filter(|u| u.season >= 0 && u.episode >= 0)
+                .max_by_key(|u| u.updated_at);
+            // A season or item mark is an assertion, not a coordinate: it excludes
+            // episodes from the recommendation instead of naming the next one.
+            let start = latest
+                .map(|u| (u.season as u32, u.episode as u32))
+                .unwrap_or((0, 0));
+            let mut candidates: Vec<_> = owned.into_iter().filter(|unit| *unit >= start).collect();
+            candidates.sort_unstable();
+            let keys: Vec<domain::UnitKey> = candidates
+                .iter()
+                .map(|(season, episode)| {
+                    domain::UnitKey::new(*season as i32, *episode as i32)
+                })
+                .collect();
+            let states = store
+                .effective_unit_states(user_id, media.id, &keys)
+                .map_err(|error| {
+                    tracing::error!(%error, %media_id, "读取有效播放状态失败");
+                    StoreFailed
+                })?;
+            for ((season, episode), state) in candidates.into_iter().zip(states) {
+                if !state.is_some_and(|state| state.played) {
+                    return Ok(Some(plan(
+                        season,
+                        episode as i32,
+                        latest.is_some_and(|u| (season, episode) != (u.season as u32, u.episode as u32)),
+                    )));
+                }
+            }
+            Ok(None)
         }
     }
 }
@@ -246,7 +259,7 @@ fn plan_from_subscribe(
         .map(|u| u.episode)
         .max();
     let last_activity = units.iter().map(|u| u.updated_at).max().unwrap_or(0);
-    let start_from = last_played.map(|e| e + 1).unwrap_or(episode_from as i32);
+    let start_from = episode_from as i32;
     let home_rows = visible
         .media_coverage(store, media.id, |lib| !lib.exclude_from_home)
         .map_err(|_| StoreFailed)?;
@@ -265,17 +278,32 @@ fn plan_from_subscribe(
         .unwrap_or_else(|| episode_to.map(|t| t as i32).unwrap_or(start_from))
         .min(cap)
         .max(start_from);
-    Ok((start_from..=window_to)
-        .find(|ep| owned.contains(&(*ep as u32)))
-        .map(|next_episode| UpNextPlan {
-            media_id: media.id,
-            kind: media.kind,
-            tmdb_id: media.tmdb_id.clone(),
-            season,
-            next_episode,
-            advanced: last_played.is_some(),
-            last_activity,
-        }))
+    // The window is a range of owned episodes, not a per-episode probe: mark the
+    // whole season and every candidate is already effectively played.
+    let keys: Vec<domain::UnitKey> = (start_from..=window_to)
+        .filter(|ep| owned.contains(&(*ep as u32)))
+        .map(|ep| domain::UnitKey::new(season as i32, ep))
+        .collect();
+    let states = store
+        .effective_unit_states(user_id, media.id, &keys)
+        .map_err(|error| {
+            tracing::error!(%error, media_id = %media.id, "读取有效播放状态失败");
+            StoreFailed
+        })?;
+    let next_episode = keys
+        .iter()
+        .zip(states)
+        .find(|(_, state)| !state.as_ref().is_some_and(|state| state.played))
+        .map(|(unit, _)| unit.episode);
+    Ok(next_episode.map(|next_episode| UpNextPlan {
+        media_id: media.id,
+        kind: media.kind,
+        tmdb_id: media.tmdb_id.clone(),
+        season,
+        next_episode,
+        advanced: last_played.is_some(),
+        last_activity,
+    }))
 }
 
 /// A local cache hit may supply the episode name; misses are refreshed asynchronously.
@@ -434,15 +462,15 @@ fn render_item(
         .filter(|row| crate::http::library::backdrop_path_with(&row.file, files).is_some())
         .map(|row| artwork_url("fanart", row.file.file_id));
     if observed_backdrop.is_none()
-        && let Some(preferred) = preferred {
-            let state_clone = state.clone();
-            let media_clone = cand.media.clone();
-            let pref_path = preferred.file.path.clone();
-            tokio::spawn(async move {
-                let _ =
-                    crate::poster_fetch::attach_backdrop(&state_clone, &media_clone, &pref_path);
-            });
-        }
+        && let Some(preferred) = preferred
+    {
+        let state_clone = state.clone();
+        let media_clone = cand.media.clone();
+        let pref_path = preferred.file.path.clone();
+        tokio::spawn(async move {
+            let _ = crate::poster_fetch::attach_backdrop(&state_clone, &media_clone, &pref_path);
+        });
+    }
     let fanart_fallback = preferred.map(|row| artwork_url("fanart", row.file.file_id));
     let still = cand
         .next_row

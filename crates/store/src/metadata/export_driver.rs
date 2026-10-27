@@ -186,6 +186,40 @@ impl Store {
         Ok(plan)
     }
 
+    /// Re-render one persisted export without claiming a new path.
+    ///
+    /// Crash recovery calls this after an external edit has been escalated: the
+    /// body, output digest and baseline fields must follow the edit, while the
+    /// operation id and canonical path stay the ones already owned.
+    pub fn plan_nfo_export_rerender(
+        &self,
+        request: &NfoExportRequest,
+    ) -> Result<NfoExportRequest, StoreError> {
+        let locale = if request.locale.is_empty() {
+            self.nfo_export_locale(request)?
+        } else {
+            request.locale.clone()
+        };
+        let effective = self.effective_metadata_fields(
+            request.library_id,
+            request.media_id,
+            request.scope,
+            &locale,
+        )?;
+        let mut rendered = effective.fields.clone();
+        overlay_fields(&mut rendered, &request.local_edits);
+        let body = library::nfo::render_nfo(request.scope, &rendered);
+        let output_digest = library::nfo::nfo_body_digest(&body);
+        Ok(NfoExportRequest {
+            locale,
+            body,
+            output_digest,
+            fields: effective.fields,
+            field_origins: effective.field_origins,
+            ..request.clone()
+        })
+    }
+
     /// Locked phase 2 of registering a written sidecar: the video's input keys.
     pub fn plan_nfo_export_registration(
         &self,
@@ -476,12 +510,18 @@ where
             export_id = %request.export_id,
             "崩溃恢复：sidecar 在导出期间被外部修改，保留为本库局部编辑后重新导出"
         );
-        let fresh = NfoExportRequest {
+        let adopted = NfoExportRequest {
             expected_digest: observation.digest,
             local_edits,
             ..request.clone()
         };
-        return export_nfo_sidecar_phased(lock, &fresh, now_ms);
+        // Same operation, same path, still unfinished. Re-render before persisting:
+        // the adopted body and its digest must describe the escalated edit, otherwise
+        // the write still expects the pre-edit snapshot and refuses it.
+        let fresh = lock().plan_nfo_export_rerender(&adopted)?;
+        lock().replan_nfo_export(&fresh, now_ms)?;
+        let action = write_planned_nfo(&fresh)?;
+        return finish_nfo_export_phased(&lock, &fresh, action, now_ms);
     }
     tracing::warn!(
         path = %request.path.display(),

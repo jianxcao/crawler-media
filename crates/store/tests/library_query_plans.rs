@@ -314,12 +314,16 @@ fn v4_library_db_is_rejected() {
     let StoreError::LayoutMismatch(message) = &error else {
         panic!("expected LayoutMismatch, got {error:?}");
     };
+    let expected = format!(
+        "user_version {}",
+        store::schema::layout::LIBRARY_USER_VERSION
+    );
     for required in [
-        "library",
-        "user_version 6",
-        "scripts/storage-cutover-rebuild.sh",
+        "library".to_string(),
+        expected,
+        "scripts/storage-cutover-rebuild.sh".to_string(),
     ] {
-        assert!(message.contains(required), "missing {required}: {message}");
+        assert!(message.contains(&required), "missing {required}: {message}");
     }
 }
 

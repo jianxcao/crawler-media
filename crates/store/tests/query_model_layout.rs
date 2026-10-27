@@ -133,7 +133,10 @@ fn query_layout_fresh_open_and_reopen_preserve_rows() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let versions = store.schema_versions();
-    assert_eq!(versions.iter().find(|v| v.0 == "library").unwrap().1, 6);
+    assert_eq!(
+        versions.iter().find(|v| v.0 == "library").unwrap().1,
+        store::schema::layout::LIBRARY_USER_VERSION
+    );
     assert_eq!(versions.iter().find(|v| v.0 == "subscribe").unwrap().1, 2);
     assert!(
         versions

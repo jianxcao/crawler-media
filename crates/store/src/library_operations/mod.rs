@@ -113,9 +113,6 @@ pub struct LibraryOperationView {
     pub library_id: String,
     /// `"roots"` or `"locale"`; see [`LibraryReconfiguration`].
     pub kind: String,
-    /// Same value as [`LibraryOperationView::state`]; kept because the HTTP contract
-    /// publishes both names.
-    pub phase: String,
     pub state: String,
     /// Last applied batch position, or `None` before the first batch.
     pub cursor: Option<serde_json::Value>,
@@ -535,7 +532,6 @@ impl Store {
             operation_id: operation_id.to_string(),
             library_id,
             kind,
-            phase: state.clone(),
             state,
             cursor: decode_operation_cursor(cursor)?,
             error,
