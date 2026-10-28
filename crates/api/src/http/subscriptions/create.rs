@@ -88,14 +88,9 @@ fn media_from_title_ref(
     state: &ApiState,
     raw: &str,
 ) -> Result<(MediaInput, Option<MediaKind>), Response> {
-    if raw.trim().is_empty() {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            "subscription.invalid",
-            "title_ref 为空",
-        ));
-    }
-    match crate::http::title_ref::resolve_title(state, raw) {
+    let title = crate::http::title_ref::parse_title_ref(raw)
+        .map_err(|reason| crate::http::title_ref::invalid_title_ref(&reason))?;
+    match crate::http::title_ref::resolve_title(state, &title) {
         Ok(Some(media)) => {
             let kind = media.kind;
             let identity = crate::http::title_ref::media_identity(&media);

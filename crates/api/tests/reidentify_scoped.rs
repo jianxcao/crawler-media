@@ -702,3 +702,41 @@ async fn reidentify_contract_is_pinned_by_the_preview() {
         );
     }
 }
+
+/// Review L6: a legacy or bare `title_ref` is 400 and moves nothing.
+#[tokio::test]
+async fn reidentify_rejects_non_strict_title_ref_without_writes() {
+    let (_tmp, state, app, token, _lib_id, media, [f1, _f2, _f3], _catalog) = setup_fixture();
+    for bad in [
+        "tmdb:2002",
+        "Target Title",
+        "douban:movie:1",
+        "tmdb:show:2002",
+    ] {
+        let req_body = pinned(&state, &media, &[f1], bad);
+        let res = app
+            .clone()
+            .oneshot(common::request(
+                "POST",
+                "/api/v1/reidentify",
+                Some(&token),
+                req_body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{bad}");
+        let error = common::json_error(res).await;
+        assert_eq!(error["code"], "title_ref.invalid", "{bad}");
+    }
+    let shared = state.store();
+    let store = shared.lock();
+    assert_eq!(
+        store
+            .file_coverage_by_id(f1)
+            .unwrap()
+            .unwrap()
+            .file
+            .media_id,
+        media.id
+    );
+}

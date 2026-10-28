@@ -367,7 +367,7 @@ fn reads_and_readonly_post_computations_remain_available() {
                 (
                     "POST",
                     "/api/v1/subscriptions/title-preview".into(),
-                    json!({"title_ref": "Gate fixture"}),
+                    json!({"title_ref": "tmdb:movie:1"}),
                 ),
                 (
                     "POST",

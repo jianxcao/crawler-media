@@ -1,10 +1,10 @@
 //! Subscription title resolution + preview (`POST /subscriptions/title-preview`).
 //!
-//! Revives the subscribe dialog: a stable `title_ref` (`tmdb:movie:603`,
-//! `tmdb:603`, or a bare title) is resolved against the catalog into a Media,
-//! with existing-subscription / owned / season-overview facts. Douban refs
-//! (`douban:<id>`) cannot be resolved without a provider fanout (U3); they
-//! return `not_found`.
+//! A `title_ref` is a stable reference issued by Discover: exactly
+//! `tmdb:movie:<digits>`, `tmdb:tv:<digits>` or `douban:<digits>`. Anything else
+//! (legacy `tmdb:<id>`, three-segment douban, bare names, unknown sources/kinds,
+//! empty IDs) is rejected with 400 `title_ref.invalid` before any catalog request
+//! or persistent write. There is no bare-name search fallback.
 
 use axum::Json;
 use axum::extract::State;
@@ -21,57 +21,47 @@ use crate::management::ApiState;
 const TMDB_POSTER: &str = "https://image.tmdb.org/t/p/w342";
 
 /// Parsed stable reference to a media work.
-#[allow(dead_code)] // Douban's payload is only ever parsed, never read (no fanout yet, U3).
 pub(crate) enum TitleRef {
     Tmdb { kind: MediaKind, id: String },
     Douban(String),
-    Bare(String),
 }
 
-pub(crate) fn parse_title_ref(raw: &str) -> TitleRef {
-    let parts: Vec<&str> = raw.split(':').collect();
-    match parts.as_slice() {
-        ["tmdb", kind, id] => {
+/// Strict parse; `Err` carries the user-facing reason.
+pub(crate) fn parse_title_ref(raw: &str) -> Result<TitleRef, String> {
+    let numeric = |id: &str| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit());
+    match raw.split(':').collect::<Vec<_>>().as_slice() {
+        ["tmdb", kind, id] if numeric(id) => {
             let kind = match *kind {
                 "movie" => MediaKind::Movie,
                 "tv" => MediaKind::Tv,
-                _ => return TitleRef::Bare(raw.to_string()),
+                _ => return Err(format!("title_ref 类型无效: {raw}")),
             };
-            TitleRef::Tmdb {
+            Ok(TitleRef::Tmdb {
                 kind,
                 id: (*id).to_string(),
-            }
+            })
         }
-        ["tmdb", id] => TitleRef::Tmdb {
-            kind: MediaKind::Movie,
-            id: (*id).to_string(),
-        },
-        // 前端 titleRef() 生成 `douban:movie:1292052`（三/两段皆可）。
-        ["douban", _, id] | ["douban", id] => TitleRef::Douban((*id).to_string()),
-        _ => TitleRef::Bare(raw.to_string()),
+        ["douban", id] if numeric(id) => Ok(TitleRef::Douban((*id).to_string())),
+        _ => Err(format!(
+            "title_ref 必须是 tmdb:movie:<id>、tmdb:tv:<id> 或 douban:<id>: {raw}"
+        )),
     }
 }
 
-/// Resolve a title_ref to a Media via the catalog. `None` = not found.
-pub(crate) fn resolve_title(state: &ApiState, raw: &str) -> Result<Option<Media>, String> {
+/// 400 response for a rejected reference.
+pub(crate) fn invalid_title_ref(reason: &str) -> Response {
+    err(StatusCode::BAD_REQUEST, "title_ref.invalid", reason)
+}
+
+/// Resolve a parsed reference via the catalog. `None` = not found.
+pub(crate) fn resolve_title(state: &ApiState, title: &TitleRef) -> Result<Option<Media>, String> {
     let catalog: &dyn Catalog = state.catalog.as_ref();
-    match parse_title_ref(raw) {
-        TitleRef::Tmdb { kind, id } => catalog.details(kind, &id),
+    match title {
+        TitleRef::Tmdb { kind, id } => catalog.details(*kind, id),
         TitleRef::Douban(id) => match catalog.source("douban") {
-            Some(douban) => douban.details(MediaKind::Movie, &id),
+            Some(douban) => douban.details(MediaKind::Movie, id),
             None => Ok(None),
         },
-        TitleRef::Bare(title) => {
-            // One clear hit → take it; several → the caller shows candidates.
-            let movies = catalog.search_movie(&title).unwrap_or_default();
-            let shows = catalog.search_tv(&title).unwrap_or_default();
-            let mut hits: Vec<&media::CatalogHit> = movies.iter().chain(shows.iter()).collect();
-            hits.retain(|hit| hit.media.tmdb_id.is_some());
-            Ok(match hits.len() {
-                1 => Some(hits[0].media.clone()),
-                _ => None,
-            })
-        }
     }
 }
 
@@ -105,16 +95,13 @@ fn preview_blocking(
     user_id: Option<axum::Extension<Option<domain::UserId>>>,
     body: TitlePreviewInput,
 ) -> Response {
-    if body.title_ref.trim().is_empty() {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "subscribe.preview",
-            "title_ref 必填",
-        );
-    }
-    let resolved = match resolve_preview(state, &body.title_ref) {
-        Ok(Some(media)) => media,
-        Ok(None) => {
+    let title = match parse_title_ref(&body.title_ref) {
+        Ok(title) => title,
+        Err(reason) => return invalid_title_ref(&reason),
+    };
+    let resolved = match resolve_title(state, &title).unwrap_or(None) {
+        Some(media) => media,
+        None => {
             return ok(json!({
                 "status": "not_found", "media": Value::Null, "seasons": [],
                 "existing_subscription_id": Value::Null, "movie_owned": false,
@@ -122,7 +109,6 @@ fn preview_blocking(
             }))
             .into_response();
         }
-        Err(response) => return response,
     };
     let Some((media, existing, owned_seasons, movie_owned)) =
         preview_facts(state, resolved, user_id.and_then(|u| u.0), body.season)
@@ -150,56 +136,6 @@ fn preview_blocking(
         "candidates": [],
     }))
     .into_response()
-}
-
-fn resolve_preview(state: &ApiState, raw: &str) -> Result<Option<Media>, Response> {
-    // 裸标题多命中 → ambiguous（候选墙）；单命中/精确引用 → ready。
-    let catalog: &dyn Catalog = state.catalog.as_ref();
-    let resolved = match parse_title_ref(raw) {
-        TitleRef::Tmdb { kind, id } => catalog.details(kind, &id).unwrap_or(None),
-        TitleRef::Douban(id) => catalog
-            .source("douban")
-            .and_then(|douban| douban.details(MediaKind::Movie, &id).ok().flatten()),
-        TitleRef::Bare(title) => {
-            let movies = catalog.search_movie(&title).unwrap_or_default();
-            let shows = catalog.search_tv(&title).unwrap_or_default();
-            let mut hits: Vec<&media::CatalogHit> = movies.iter().chain(shows.iter()).collect();
-            hits.retain(|hit| hit.media.tmdb_id.is_some());
-            if hits.len() > 1 {
-                let candidates: Vec<Value> = hits
-                    .iter()
-                    .map(|hit| {
-                        let kind = hit.media.kind;
-                        let tmdb_id = hit.media.tmdb_id.clone().unwrap_or_default();
-                        let poster = hit
-                            .poster_path
-                            .as_deref()
-                            .map(|p| format!("{TMDB_POSTER}{p}"));
-                        json!({
-                            "tmdb_id": tmdb_id,
-                            "title_ref": format!("tmdb:{}:{tmdb_id}", kind.as_str()),
-                            "title": hit.media.title,
-                            "original_title": hit.media.original_title,
-                            "year": hit.media.year,
-                            "poster_url": poster,
-                        })
-                    })
-                    .collect();
-                return Err(ok(json!({
-                    "status": "ambiguous",
-                    "media": Value::Null,
-                    "seasons": [],
-                    "existing_subscription_id": Value::Null,
-                    "movie_owned": false,
-                    "suggested_seasons": [],
-                    "candidates": candidates,
-                }))
-                .into_response());
-            }
-            hits.first().map(|hit| hit.media.clone())
-        }
-    };
-    Ok(resolved)
 }
 
 type PreviewFacts = (

@@ -491,8 +491,8 @@ export function checkSubscriptionAutomationReadiness(
 }
 
 /**
- * 订阅预检：按 title_ref（tmdb:movie:603 / 裸标题）解析媒体、季集、已有订阅。
- * 后端真实实现（POST /subscriptions/title-preview）；douban 引用暂无法解析。
+ * 订阅预检：按严格 title_ref（tmdb:movie|tv:<id> / douban:<id>）解析媒体、季集、已有订阅。
+ * 后端真实实现（POST /subscriptions/title-preview）；其他形状返回 400 title_ref.invalid。
  */
 export function previewSubscriptionTitle(
   payload: SubscriptionTargetPreviewPayload,

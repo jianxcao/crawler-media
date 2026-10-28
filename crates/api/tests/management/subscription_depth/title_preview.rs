@@ -25,33 +25,62 @@ async fn title_preview_resolves_tmdb_ref_to_ready() {
     assert_eq!(body["data"]["existing_subscription_id"], Value::Null);
 }
 
+/// Review L6: only `tmdb:movie|tv:<digits>` and `douban:<digits>` are references.
+/// Legacy shapes, bare names, empty IDs, unknown kinds/sources are 400 with no
+/// catalog request and no persisted Subscription.
 #[tokio::test]
-async fn title_preview_bare_title_returns_ambiguous_candidates() {
+async fn title_ref_rejects_legacy_bare_and_unknown_shapes_without_catalog_calls() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, _downloader) = fake_state(&tmp);
-    let response = app
+    let (app, _downloader, calls) = fake_state_counting(&tmp);
+    for bad in [
+        "matrix",
+        "tmdb:603",
+        "tmdb:movie:",
+        "tmdb:anime:603",
+        "tmdb:movie:60a",
+        "tmdb:movie:603:extra",
+        "douban:movie:1292052",
+        "douban:",
+        "imdb:movie:603",
+        "bangumi:tv:1",
+    ] {
+        for (uri, body) in [
+            (
+                "/api/v1/subscriptions/title-preview",
+                json!({ "title_ref": bad }),
+            ),
+            (
+                "/api/v1/subscriptions",
+                json!({ "title_ref": bad, "coverage": { "kind": "movie" } }),
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(request("POST", uri, Some("management-secret"), body))
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = json_body(response).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} {bad}: {body}");
+            assert_eq!(
+                body["error"]["code"], "title_ref.invalid",
+                "{uri} {bad}: {body}"
+            );
+        }
+    }
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let listed = app
         .clone()
         .oneshot(request(
-            "POST",
-            "/api/v1/subscriptions/title-preview",
+            "GET",
+            "/api/v1/subscriptions",
             Some("management-secret"),
-            json!({ "title_ref": "matrix" }),
+            Value::Null,
         ))
         .await
         .unwrap();
-    let body = json_body(response).await;
-    assert_eq!(body["data"]["status"], "ambiguous");
-    let candidates = body["data"]["candidates"].as_array().unwrap();
-    assert!(
-        candidates.len() >= 2,
-        "裸标题多命中应给候选墙: {candidates:?}"
-    );
-    let refs: Vec<&str> = candidates
-        .iter()
-        .filter_map(|c| c["title_ref"].as_str())
-        .collect();
-    assert!(refs.contains(&"tmdb:movie:603"), "候选应含电影: {refs:?}");
-    assert!(refs.contains(&"tmdb:tv:624860"), "候选应含剧集: {refs:?}");
+    let listed = json_body(listed).await;
+    assert_eq!(listed["data"].as_array().map(Vec::len), Some(0), "{listed}");
 }
 
 #[tokio::test]
@@ -102,7 +131,7 @@ async fn title_preview_resolves_douban_ref() {
             "POST",
             "/api/v1/subscriptions/title-preview",
             Some("management-secret"),
-            json!({ "title_ref": "douban:movie:1292052" }),
+            json!({ "title_ref": "douban:1292052" }),
         ))
         .await
         .unwrap();
@@ -125,7 +154,7 @@ async fn create_subscription_accepts_douban_ref() {
             "/api/v1/subscriptions",
             Some("management-secret"),
             json!({
-                "title_ref": "douban:movie:1292052",
+                "title_ref": "douban:1292052",
                 "coverage": { "kind": "movie" },
             }),
         ))
@@ -181,4 +210,3 @@ async fn title_preview_does_not_leak_other_user_subscription_or_block_different_
         "用户 B 的预检结果绝不可被用户 A 已有订阅占领"
     );
 }
-

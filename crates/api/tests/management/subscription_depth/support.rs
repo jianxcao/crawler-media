@@ -29,10 +29,19 @@ pub(crate) fn authed_app(tmp: &tempfile::TempDir) -> axum::Router {
 pub(crate) struct FakeCatalog {
     pub(super) movie: domain::Media,
     pub(super) shows: Vec<domain::Media>,
+    /// Every catalog call; strict title_ref rejection must leave it at zero.
+    pub(super) calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl FakeCatalog {
+    fn hit(&self) {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl Catalog for FakeCatalog {
     fn search_movie(&self, _query: &str) -> Result<Vec<media::CatalogHit>, String> {
+        self.hit();
         Ok(vec![media::CatalogHit {
             media: self.movie.clone(),
             poster_path: None,
@@ -42,6 +51,7 @@ impl Catalog for FakeCatalog {
         }])
     }
     fn search_tv(&self, _query: &str) -> Result<Vec<media::CatalogHit>, String> {
+        self.hit();
         Ok(self
             .shows
             .iter()
@@ -55,9 +65,11 @@ impl Catalog for FakeCatalog {
             .collect())
     }
     fn popular_movie(&self) -> Result<Vec<media::CatalogHit>, String> {
+        self.hit();
         Ok(Vec::new())
     }
     fn popular_tv(&self) -> Result<Vec<media::CatalogHit>, String> {
+        self.hit();
         Ok(Vec::new())
     }
     fn details(
@@ -65,6 +77,7 @@ impl Catalog for FakeCatalog {
         kind: domain::MediaKind,
         tmdb_id: &str,
     ) -> Result<Option<domain::Media>, String> {
+        self.hit();
         if kind == domain::MediaKind::Movie && self.movie.tmdb_id.as_deref() == Some(tmdb_id) {
             Ok(Some(self.movie.clone()))
         } else {
@@ -76,6 +89,7 @@ impl Catalog for FakeCatalog {
         }
     }
     fn tv_seasons(&self, _tmdb_id: &str) -> Result<Vec<media::TvSeason>, String> {
+        self.hit();
         Ok(vec![media::TvSeason {
             season_number: 1,
             name: "Season 1".into(),
@@ -90,6 +104,7 @@ impl Catalog for FakeCatalog {
         _tmdb_id: &str,
         _season: u32,
     ) -> Result<Vec<media::SeasonEpisode>, String> {
+        self.hit();
         Ok((1..=4)
             .map(|episode_number| media::SeasonEpisode {
                 episode_number,
@@ -116,8 +131,22 @@ pub(crate) fn fake_movie() -> domain::Media {
 }
 
 pub(crate) fn fake_state(tmp: &tempfile::TempDir) -> (axum::Router, Arc<MemoryDownloader>) {
+    let (app, downloader, _calls) = fake_state_counting(tmp);
+    (app, downloader)
+}
+
+/// [`fake_state`] plus the catalog call counter.
+pub(crate) fn fake_state_counting(
+    tmp: &tempfile::TempDir,
+) -> (
+    axum::Router,
+    Arc<MemoryDownloader>,
+    Arc<std::sync::atomic::AtomicUsize>,
+) {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let downloader = Arc::new(MemoryDownloader::new(tmp.path().join("stage")));
     let catalog = Arc::new(FakeCatalog {
+        calls: calls.clone(),
         movie: fake_movie(),
         shows: vec![
             domain::Media {
@@ -157,7 +186,7 @@ pub(crate) fn fake_state(tmp: &tempfile::TempDir) -> (axum::Router, Arc<MemoryDo
         downloader.clone(),
     )
     .with_catalog(catalog);
-    (router(state), downloader)
+    (router(state), downloader, calls)
 }
 
 pub(crate) fn seed_pending_torrent(

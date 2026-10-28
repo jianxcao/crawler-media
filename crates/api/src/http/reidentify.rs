@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use store::library_write::ReassignFiles;
 
 use crate::blocking_budget::BlockingError;
-use crate::http::title_ref::resolve_title;
+use crate::http::title_ref::{invalid_title_ref, parse_title_ref, resolve_title};
 use crate::http::{err, ok};
 use crate::library_lifecycle::LibraryWorkLease;
 use crate::management::ApiState;
@@ -222,6 +222,11 @@ fn reidentify_inner(state: &ApiState, body: &Value) -> Response {
             );
         }
     };
+    // Strict reference first: a rejected title_ref takes no lease and no Store work.
+    let title = match parse_title_ref(&request.title_ref) {
+        Ok(title) => title,
+        Err(reason) => return invalid_title_ref(&reason),
+    };
     let parsed = {
         let store = state.store.lock();
         match parse_file_targets(&store, &request) {
@@ -237,9 +242,7 @@ fn reidentify_inner(state: &ApiState, body: &Value) -> Response {
         Err(response) => return response,
     };
 
-    let title_ref = request.title_ref.as_str();
-
-    let target_media = match resolve_title(state, title_ref) {
+    let target_media = match resolve_title(state, &title) {
         Ok(Some(t)) => t,
         Ok(None) => {
             return err(
