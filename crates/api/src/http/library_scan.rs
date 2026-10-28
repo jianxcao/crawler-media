@@ -328,7 +328,7 @@ fn scrape_library_metadata(
     media: &domain::Media,
     coverage: &domain::FileCoverage,
     path: &std::path::Path,
-    owned_coverages: &[domain::FileCoverage],
+    episodes: &[domain::FileCoverage],
 ) {
     let lease = match state.acquire_path_work(path, media.kind) {
         Ok(lease) => lease,
@@ -341,12 +341,7 @@ fn scrape_library_metadata(
         // S4 目标签名（`scrape_metadata::show_root(path, coverage)` / `scrape_tv_sidecars(state, media,
         // show_root, coverages)`）在 task-79 落地前这两行按目标形状传参，报错归属 S4。
         let show_root = crate::scrape_metadata::show_root(path, coverage);
-        let episodes = owned_coverages
-            .iter()
-            .filter(|owned| owned.file.media_id == media.id)
-            .cloned()
-            .collect::<Vec<_>>();
-        crate::scrape_metadata::scrape_tv_sidecars(state, media, &show_root, &episodes);
+        crate::scrape_metadata::scrape_tv_sidecars(state, media, &show_root, episodes);
         return;
     }
     match crate::scrape_metadata::fetch_tmdb_metadata(state, media.kind, tmdb_id) {
