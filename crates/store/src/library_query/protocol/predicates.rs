@@ -247,15 +247,32 @@ fn played_clause(branch: Branch, user: &str, value: i64, bindings: &mut Bindings
 }
 
 /// 一个单元（`unit` 别名给出季/集，`None` 是整个作品）的有效已看值，0/1。
+///
+/// 每个可继承坐标（集 / 季 / 整个作品）各按完整主键 seek 一次，最多合并三条候选再决议，
+/// 不扫描同 User/Media 的全部断言：最新 `played_changed_at_ms` 胜，同一时刻 集 > 季 > 整个作品。
+/// 三条候选的 season 只能是 `{unit}.season` 或 -1，episode 只能是 `{unit}.episode` 或 -1，
+/// 所以按 (season, episode) 降序即是该优先级。
 fn effective_played_sql(user: &str, unit: Option<&str>) -> String {
+    let seek = |season: &str, episode: &str| {
+        format!(
+            "SELECT pu.played, pu.played_changed_at_ms AS at, pu.season AS se, pu.episode AS ep \
+               FROM playback_units pu \
+              WHERE pu.user_id = {user} AND pu.media_id = s.media_id \
+                AND pu.season = {season} AND pu.episode = {episode} AND pu.has_played_assertion = 1"
+        )
+    };
+    let candidates = match unit {
+        Some(u) => format!(
+            "{} UNION ALL {} UNION ALL {}",
+            seek(&format!("{u}.season"), &format!("{u}.episode")),
+            seek(&format!("{u}.season"), "-1"),
+            seek("-1", "-1")
+        ),
+        None => seek("-1", "-1"),
+    };
     format!(
-        "COALESCE((SELECT pu.played FROM playback_units pu \
-           WHERE pu.user_id = {user} AND pu.media_id = s.media_id AND pu.has_played_assertion = 1 \
-             AND ({}) \
-           ORDER BY COALESCE(pu.played_changed_at_ms, 0) DESC, \
-             CASE WHEN pu.episode >= 0 THEN 2 WHEN pu.season >= 0 THEN 1 ELSE 0 END DESC \
-           LIMIT 1), 0)",
-        assertion_scopes(unit)
+        "COALESCE((SELECT c.played FROM ({candidates}) c \
+           ORDER BY COALESCE(c.at, 0) DESC, c.se DESC, c.ep DESC LIMIT 1), 0)"
     )
 }
 
@@ -274,18 +291,6 @@ fn favorite_clause(branch: Branch, user: &str, value: i64) -> String {
         exists
     } else {
         format!("NOT {exists}")
-    }
-}
-
-/// 一个单元能继承到的断言坐标，从最具体到整个作品。
-fn assertion_scopes(unit: Option<&str>) -> String {
-    match unit {
-        Some(u) => format!(
-            "(pu.season = {u}.season AND pu.episode = {u}.episode) \
-             OR (pu.season = {u}.season AND pu.episode = -1) \
-             OR (pu.season = -1 AND pu.episode = -1)"
-        ),
-        None => "pu.season = -1 AND pu.episode = -1".to_string(),
     }
 }
 
