@@ -1,6 +1,6 @@
 # SQLite 是系统记录，按生命周期拆分
 
-> 当前审查与剩余方案见[f569c3c7 再复审](../audits/2026-10-28-storage-final-review.md)：本轮补修执行器同步锁、文件分页覆盖及性能门禁；修复范围与验证以该报告为准。
+> 当前只读审查见[7030c1dd 对 main](../audits/2026-10-28-storage-head-review.md)，待实施任务见[H1–H6 方案](../superpowers/plans/2026-10-28-storage-head-remediation.md)：仍有恢复屏障、执行器、超线性工作量与旧输入残留，暂不建议合并。前轮修复结果仅对其当时范围负责。
 
 状态：接受；五文件边界保留，`library.db` 当前布局为 version 8。复审代码 `9f6126d3` 的发现及后续 R6–R9 修复验收见[再次复审](../audits/2026-10-28-storage-main-rereview.md)：写门禁、身份冻结屏障与当时点名的异步执行分支已补齐；字段/索引见[数据库字典](../database/README.md)。
 

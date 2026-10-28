@@ -1,6 +1,6 @@
 # 当前数据库设计与数据字典
 
-> 当前审查与剩余方案见[f569c3c7 再复审](../audits/2026-10-28-storage-final-review.md)：本轮补修执行器同步锁、文件分页覆盖及性能门禁；修复范围与验证以该报告为准。
+> 当前只读审查见[7030c1dd 对 main](../audits/2026-10-28-storage-head-review.md)，待实施任务见[H1–H6 方案](../superpowers/plans/2026-10-28-storage-head-remediation.md)：仍有恢复屏障、执行器、超线性工作量与旧输入残留，暂不建议合并。前轮修复结果仅对其当时范围负责。
 
 结构核对：2026-10-28，代码 `9f6126d3` 的生产 DDL（library v8，v4/v5 历史见[结构审计](../audits/2026-10-26-library-schema-audit.md)）。写门禁、Media 身份屏障与执行器的修复、前轮关闭项和验收边界见[再次复审](../audits/2026-10-28-storage-main-rereview.md)；较早执行记录不代表本版完整验收。
 
@@ -53,6 +53,8 @@ flowchart TD
 嵌套根迁移使用≤100文件事务和持久游标；NFO按批迁移，源/目标冻结暂停且公平轮转，API driver 在解冻后继续并批间放锁。root_reassignment_state 保留可查询状态、稳定 operation_id、配置版本与错误。Unidentified 登记 path_key/library/root/revision，独立索引 seek 窗口≤100候选，游标前错归属来源会重置相应游标，正确新事实保持向前进度。删除先冻结目标库，indexed snapshot/cleanup 每窗口≤100文件，无关库路径不会触发磁盘观察。
 
 ## 运维与性能边界
+
+当前H1迟到指纹模型可使合并恢复停在retire/failed；H3的Series断言查询在无统计时二次增长，H4/H6另有重复读取/复制代价。它们是待修实现问题，不需要先更改五文件DDL；旧报告中的局部修复不代表所有后台发布和接口均已验收。
 
 - 当前无 ledger/file_meta/browse journal 持久表、旧布局导入器或兼容视图。旧 `/directory` 聚合/roots 写、旧 Naming 表和反拆、自有无签发 session Playback、Downloader settings JSON 回读均删除；Web/CLI 使用当前合同。
 - kind 先收窄授权 Library，查询使用同库精确成员、边际计数和页内选源；QueryWorkStats 纳入 exact count/辅助 SQL。新模型的实测与未运行范围见[2026-10-25 验收记录](../benchmarks/2026-10-25-large-hit-query-read-model.md)；[2026-10-24 历史测量](../benchmarks/2026-10-24-storage-query-rereview.md)保留原版本。

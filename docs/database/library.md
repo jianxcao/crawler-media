@@ -1,5 +1,7 @@
 # library.db：Media、Library、Playback 与持久文件工作
 
+> 当前运行风险见[7030c1dd审查](../audits/2026-10-28-storage-head-review.md)：指纹模型迟到发布、Series断言查询与多单元候选复制仍待修；结构字典不等于这些路径已通过验收。
+
 [返回数据库总览](README.md)
 
 结构核对：2026-10-28，当前生产 DDL（library v8）；旧版本测量保留在历史报告。`application_id=1129139249`，`user_version=8`。不可按缓存清空。v4/v5 轮次删除了什么、为什么，见[结构与写放大审计](../audits/2026-10-26-library-schema-audit.md)。

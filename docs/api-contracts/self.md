@@ -11,6 +11,8 @@
 
 本实例的管理面是**自有 REST**。不做上游 MoviePilot / MovieClaw 的信封、DTO 字段名或数字哈希 ID。Jellyfin/Emby 播放协议（Infuse 直连）是另一套表面，见 ADR-0005，不是「上游兼容层」。
 
+当前实现的存储/锁/性能与旧输入缺口见[7030c1dd审查](../audits/2026-10-28-storage-head-review.md)及[待实施方案](../superpowers/plans/2026-10-28-storage-head-remediation.md)。其中Filter仍接受三个旧kind是待删除缺陷，不是当前应保留的兼容合同。
+
 ## 通用约定
 
 - 前缀：自有 REST 挂 `/api/v1`。
@@ -212,7 +214,7 @@ Playback history/watch stats 的 `member_id` 只接受 User UUID；显式传入�
 - 未知 def → 404 `job.missing`；def 存在但非维护 kind → 400 `job.not_maintenance`；非法配置 → 400 `job.invalid_config`（且不落库）。
 - `interval_secs` 只对维护任务加范围 `3600..=31536000`，越界 → 400 `job.invalid_interval`；其他任务契约不变。
 - 返回 `{id, kind, payload, payload_token, schedule?}`。当前 `jobs::update_def_config_cas` 在**同一事务**比较 payload、更新 payload/可选周期并刷新 queued 子任务的 payload；running 保留执行快照。省略周期时 handler 回读实际 schedule。并发令牌仍仅覆盖 payload，**不能检测仅改周期的冲突**，不能称为完整配置 revision。
-- 原 F02 与 F04 的实现现状须区分：queued 刷新与配置同事务路径已经存在，但仅周期冲突检测仍缺少令牌覆盖。历史复核与执行计划不等于本次重新验收；当前存储切换任务见 [复审与剩余方案](<../audits/2026-10-28-storage-main-rereview.md>)。
+- 原 F02 与 F04 的实现现状须区分：queued 刷新与配置同事务路径已经存在，但仅周期冲突检测仍缺少令牌覆盖。历史复核与执行计划不等于本次重新验收；当前存储切换任务见 [复审与剩余方案](../audits/2026-10-28-storage-head-review.md)。
 
 `POST /api/v1/jobs/{id}/maintenance-preview`（**仅管理员**，会员 403）：
 

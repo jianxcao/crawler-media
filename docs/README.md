@@ -1,11 +1,11 @@
 # 文档入口、权威层级与清理记录
 
-更新：2026-10-28。当前复审基线 `feat/storage-redesign@f569c3c7` 对本地 `main/origin/main@756444f7`。本轮复审后用户授权修复执行器同步锁、文件分页覆盖工作量及新夹具性能门禁；最终 workspace 3198 passed / 0 failed / 24 ignored；上一轮 R1–R9 修复及其测试数字保留为历史验收，不覆盖新发现。
+更新：2026-10-28。当前复审对象 `feat/storage-redesign@7030c1dd`，fetch 后 main/origin/main 均为 `756444f7`。本轮只审查与整理文档：确认迟到模型恢复、剩余执行器阻塞、Series 查询与覆盖复制二次增长、重复文件重读、旧 Filter 输入残留；暂不建议合并。验证结果与边界见当前审查，不沿用历史绿灯。
 
 ## 当前先读
 
 1. 术语：[CONTEXT](../CONTEXT.md)；工程约束：[AGENTS](../AGENTS.md)。当前用户请求是工作单元，不主动创建/关闭 issue。
-2. **当前复审与技术方案：** [f569c3c7 对 main 再复审](audits/2026-10-28-storage-final-review.md)；记录复审发现、授权修复与最终验证。上一轮修复验收： [2026-10-28 再次复审](audits/2026-10-28-storage-main-rereview.md)。含 R6–R9 修复、原 R1–R5 对账、历史查询实测及验证边界。旧计划 unchecked 不代表当前待办。
+2. **当前复审与技术方案：** [7030c1dd 对 main 审查](audits/2026-10-28-storage-head-review.md)、[H1–H6 待实施方案](superpowers/plans/2026-10-28-storage-head-remediation.md)、[复现证据](audits/2026-10-28-storage-head-review-evidence.md)。[前次修复验收](audits/2026-10-28-storage-final-review.md)与[更早修复](audits/2026-10-28-storage-main-rereview.md)只对各自版本负责；旧计划 unchecked 不代表当前待办。
 3. **目标合同：** [存储设计](superpowers/specs/2026-10-18-library-storage-redesign.md)、[接口/字段合同](superpowers/plans/2026-10-18-library-storage-contracts.md)、[来源缓存合同](superpowers/specs/2026-10-18-source-separated-cache.md)。目标合同与源码现状分别核对，不添加旧布局/旧自有 API 兼容。
 4. **现行结构：** [五文件数据库字典](database/README.md)，library v8。唯一可执行 DDL 在生产源码，docs 不保留另一份建表草案。
 5. **历史证据：** [大命中查询](benchmarks/2026-10-25-large-hit-query-read-model.md)、[读取隔离](benchmarks/2026-10-25-library-read-isolation.md)、[结构审计](audits/2026-10-26-library-schema-audit.md)、[性能基线](audits/2026-10-26-perf-baseline.md)。结果只对各自版本/规模负责。
@@ -127,3 +127,7 @@ Agent导航：[domain](agents/domain.md)；[issue tracker](agents/issue-tracker.
 ## 2026-10-28 R6–R9 实施
 
 用户授权后，将四项确认缺陷落实为公开 Store/Router 回归和代码修复，并同步当前合同。原只读报告保留在 `b7992d7d`；最终验证结果和未运行边界集中在[复审验收](audits/2026-10-28-storage-main-rereview.md#本轮验证与边界)，不再用旧反例描述当前代码。
+
+## 2026-10-28 当前 HEAD 只读审查
+
+本次当前入口收敛至7030c1dd审查及其未执行方案。删除过时的10-27 Codex概括报告，其有效永久删除根结论、提交来源和Git取回路径迁入当前报告；保留历史审计和benchmark的独有证据。更新ADR/主Spec/数据库/API导航，未改业务源码、测试或DDL。

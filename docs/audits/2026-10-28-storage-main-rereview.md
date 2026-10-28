@@ -1,6 +1,6 @@
 # 存储重构再次复审与修复验收
 
-> 历史验收：后续对 `f569c3c7` 的发现与合并建议见[当前复审](2026-10-28-storage-final-review.md)。本文关闭结论仅限当时已确认的问题。
+> 历史阶段验收：当前 HEAD 的新发现与合并建议见[7030c1dd 审查](2026-10-28-storage-head-review.md)。本文关闭结论仅限当时已确认的问题。
 
 日期：2026-10-28。审查代码：`feat/storage-redesign@9f6126d358c18afc532f6b551dadccdfa8ed0558`；比较基线 `main/origin/main@756444f76bef53f5fabed6d0ef53e9f280e005e9`，merge base 相同。开始时工作区干净。原始发现位置固定于该 HEAD；用户随后授权修复。完整只读报告可用 `git show b7992d7d:docs/audits/2026-10-28-storage-main-rereview.md` 读取。
 
