@@ -1,6 +1,6 @@
 # 外部来源响应缓存：统一文件、按来源拆表
 
-状态（2026-10-20，`bd6c3c8`）：**六表与共享DDL已实现，跨应用离线/清缓存验收尚未完成。** Store与media共同使用 `media::response_cache::CACHE_SCHEMA_SQL`，实际索引名称见[现行cache字典](../../database/cache.md)，下方SQL只说明索引形状，不是第二份生产DDL。本设计与[Media / Library存储重设计](2026-10-18-library-storage-redesign.md)配套；无旧数据导入、兼容层、双读双写或旧游标转换。
+状态（2026-10-20，`bd6c3c8`）：**六表与共享DDL当时已实现，跨应用离线/清缓存验收当时尚未完成。** Store与media共同使用 `media::response_cache::CACHE_SCHEMA_SQL`，实际索引名称见[现行cache字典](../../database/cache.md)，下方表结构仅作示意，不是第二份生产DDL。本设计与[Media / Library存储重设计](2026-10-18-library-storage-redesign.md)配套；无旧数据导入、兼容层、双读双写或旧游标转换。
 
 ## 1. 职责边界
 

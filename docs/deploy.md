@@ -45,7 +45,7 @@ docker compose up --build
 
 回退规则：登录与签到只在**导航之前**失败（端点不可达、排队超时、target/WebSocket 建立失败、cookie 注入失败）时回退 HTTP 并 warn；导航之后失败直接报错，不会再发一次 HTTP 签到。回退不等于成功。浏览器全局并发默认 3，同一可注册域按公共后缀表串行。每个会话创建独立 BrowserContext，结束时 dispose；不发送 cookie 删除/清空命令，也不修改第三方浏览器的默认上下文。Site cookie 以当前 URL 经 `Network.setCookies` 做 host-only 注入，并经 `Network.getCookies{urls}` 定向回读；当前 Obscura 的回读另限制 path=`/`。不支持 BrowserContext 的端点在导航前失败并回退 HTTP。公共后缀 cookie 拒收能力的实测仍未完成，不能宣称该项已验证。浏览器会话不使用 Site 代理，`maintenance_via = browser` 与 Site 代理在保存时互斥。实现见 `crates/indexer/src/cdp_page.rs`，历史实测见 ADR-0007。
 
-**数据库启动边界（不迁移旧布局）**：当前 Store 只初始化空数据库或重开当前布局，不能将旧版本数据目录原地升级。启动先只读检查已存在的四个 Store 文件的 `application_id` / `user_version` 和必需表/索引（cache 另校验自己的结构），不匹配时报 layout mismatch；错误不等于应用已重置目录。当前 `library.db` 的 `application_id=1129139249`、`user_version=2`，包含查询投影列、协议成员、边际计数、Integrity 计数暂存和查询语言配置单例；其他四文件的版本保持不变。旧 `library.db` version=1 在创建或改写其他 Store 文件之前拒绝，不能只删一张表、重建一个索引或移动 cache 来绕过。不要删除现有实例数据来试错：先停机、一致备份并保留原目录，使用独立的新目录评估；实际生产切换须另行批准。应用不会自动删除旧数据，也没有旧库导入器或迁移阶梯。当前布局可正常重启，并非每次启动都要求空目录。新 Site 默认 `maintenance_via = http`，CDP 默认关闭；旧 `cdp.sync.enabled`、`obscura.enabled/url` 不作为新开关使用，Profile `render` 不再控制搜索。依据：`crates/store/src/open.rs`、`schema/layout.rs`、`schema.rs`。
+**数据库启动边界（不迁移旧布局）**：当前 Store 只初始化空数据库或重开当前布局，不能将旧版本数据目录原地升级。启动先只读检查已存在的四个 Store 文件的 `application_id` / `user_version` 和必需表/索引（cache 另校验自己的结构），不匹配时报 layout mismatch；错误不等于应用已重置目录。当前 `library.db` 的 `application_id=1129139249`、`user_version=7`，包含查询投影列、协议成员、边际计数、Integrity 计数暂存和查询语言配置单例；各文件版本见[数据库字典](database/README.md)。非当前版本的 `library.db` 在创建或改写其他 Store 文件之前拒绝，不能只删一张表、重建一个索引或移动 cache 来绕过。不要删除现有实例数据来试错：先停机、一致备份并保留原目录，使用独立的新目录评估；实际生产切换须另行批准。应用不会自动删除旧数据，也没有旧库导入器或迁移阶梯。当前布局可正常重启，并非每次启动都要求空目录。新 Site 默认 `maintenance_via = http`，CDP 默认关闭；旧 `cdp.sync.enabled`、`obscura.enabled/url` 不作为新开关使用，Profile `render` 不再控制搜索。依据：`crates/store/src/open.rs`、`schema/layout.rs`、`schema.rs`。
 
 新布局仅在独立新目录验证。停写并一致备份后保留原目录，在仓库根目录指定一个尚未用于实例的路径启动，例如：
 
@@ -59,7 +59,7 @@ CRAWLER_MEDIA_DATA=/absolute/path/to/new-data cargo run -p api --bin crawler-med
 
 干净切换还包括持久工作与凭据：已存在且无布局标记的 Jobs 数据库不会被认领为当前布局；旧扫描 scope 签名不会自动升级，旧 operation 会取消且不登记文件。非空明文/损坏管理员凭据使启动失败，即使设置新的启动密码也不隐式导入或轮换；保留原库并使用上述停机备份/干净切换流程。当前合法哈希凭据与 CLI Bearer 的安全分离检查仍保留。
 
-`cf7fb70` 还有新库初始化的实现缺口：Jobs 身份头与 DDL 分开提交，中断后下一次启动可报缺 job_defs；这不表示队列是可删缓存。后续统一原子初始化方案见[当前复审 S01](audits/2026-10-24-storage-rereview.md)。本轮没有修代码、操作现有队列或提供自动认领旧布局的路径。
+`cf7fb70` 曾有 Jobs 身份头与 DDL 分开提交的初始化缺口；后续改为同事务初始化，历史修复记录见[执行记录 S01](superpowers/plans/2026-10-23-storage-review-remediation.md)。Jobs 是持久队列，不能当作可删缓存；也没有自动认领旧布局的路径。
 
 **受管 Obscura 启动条件**：开关开启、未配置 `cdp.url`、至少有一个启用的 Site 选择浏览器登录/签到且没有自己的 `cdp_url`、二进制可用。不满足时设置页显示未启动原因（`no_managed_browser_sites`、`not_installed` 等）。受管 daemon 每次启动使用随机空闲端口并只绑定 `127.0.0.1`；只管理本进程拉起的 daemon，关闭开关或应用退出会停止它，外部服务不受影响。
 
@@ -154,7 +154,7 @@ bash scripts/storage-cutover-rebuild.sh --data-dir data/live
 
 脚本把 `cache.db`（含 `-wal`/`-shm`）整体移到 `<data>/backups/cache-cutover-<时间戳>/`，**不删除**；重启后 Store 以当前 DDL 新建 `cache.db`。回滚即把备份目录里的文件移回原位。
 
-有 `sqlite3` 时脚本先用它探测布局：这是读写打开，若 `cache.db` 旁有已提交的 `-wal`，SQLite 会先做 WAL 恢复、把已提交帧折叠进 `cache.db`（实测 `1429504 + 16512` 字节的库折叠成单个 `1433600` 字节文件），因此备份自包含、回滚只需 `cache.db` 一个文件；`-wal`/`-shm` 的移动分支只在没有 `sqlite3` 时才会走到（实测该分支三个文件一并移入备份，事实库 sha256/mtime 前后不变）。
+有 `sqlite3` 时脚本先通过读写打开探测布局，打开可能触发 WAL 恢复，探测也可能失败；不能保证 WAL 已折叠。脚本随后移动当时存在的 `cache.db`、`cache.db-wal` 和 `cache.db-shm`，回滚时应保持备份组完整并恢复其中所有文件。历史样本曾观察到 `1429504 + 16512` 字节折叠为单个 `1433600` 字节文件；没有 `sqlite3` 的样本三个文件一并移入备份、事实库 sha256/mtime 不变。这些观察不保证其他实例具有相同文件状态。
 
 **为什么无损**：`cache.db` 只有外部响应体，清空/重建后 Library 列表、筛选、采用图片、播放与观看进度仍离线可用（见 [cache 规范](<superpowers/specs/2026-10-18-source-separated-cache.md>)）。事实库 `library.db` / `app.db` / `subscribe.db` / `jobs.db` **不要**重建，脚本也不触碰它们；它们的布局失配属于存储迁移问题，须按执行计划另行处理并先备份。
 

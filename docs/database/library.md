@@ -53,7 +53,7 @@ v6 增加 `hdr_observed` 以区分未观察与已确认 SDR，并增加按文件
 - [library_operations](#library_operations) — 11 字段；roots/locale/default_locale/integrity/scrape 持久操作载体。
 - [library_removal_roots](#library_removal_roots) — 2 字段；删除操作冻结的根路径范围；与持久文件归属需要一致。
 - [library_removals](#library_removals) — 11 个字段
-- [library_roots](#library_roots) — 6字段；path_key 唯一；根替换已有持久重配置，新增嵌套根队列仍缺冻结解除后的持续恢复驱动。
+- [library_roots](#library_roots) — 6字段；path_key 唯一；根替换使用持久重配置，新增嵌套根队列有恢复驱动；当轮实现见[执行记录 S02](../superpowers/plans/2026-10-23-storage-review-remediation.md)。
 - [library_units](#library_units) — 9 字段；Library/Media/单元级去重摘要和首选文件。whole=(-1,-1)，TV S00E00 合法。
 - [media](#media) — 9 字段；规范 Media 身份；可无文件存在。retired 墓碑不是可继续写的兼容实体。
 - [media_aliases](#media_aliases) — 5 字段；来源别名归属及每来源唯一刷新目标；不把来源 ID 当内部身份。
@@ -68,7 +68,7 @@ v6 增加 `hdr_observed` 以区分未观察与已确认 SDR，并增加按文件
 - [playback_metrics](#playback_metrics) — 13 字段；Playback QoE 指标；仅按明确保留策略清理，不作为用户播放次数来源。
 - [playback_session_ids](#playback_session_ids) — 16 字段；签发会话的逻辑目标、物理源、生命周期与 generation。`Store::commit_playback_event` 写入前校验 `(user, device, session)` 的 generation/目标单元/文件版本/source_version 与库 `lifecycle_state`+`config_revision`+ACL，不匹配一律 `IgnoredStale` 不落事实；`pending` 会话的首个 progress 视为 Start 原子激活；`Stop` 只关闭上报会话并归档一条 play log，重复 Stop 因会话已 `closed` 而幂等。
 - [playback_sessions](#playback_sessions) — 31 字段；每用户/设备活动会话及源绑定、事件顺序、传输/观看统计。
-- [playback_units](#playback_units) — 20字段；用户逻辑观看/收藏事实及源绑定恢复包，不FK到物理文件。未完成Progress保留既有played断言；达到已知源时长90%阈值会写true及毫秒断言时钟，人工mark/unmark写显式true/false。目标按最新时钟、同时间episode>season>whole决议；effective assertion 与协议 SQL 已按该规则决议；无 session 的旧 progress 入口另有换源污染缺口（当前复审 S04），不能混为旧 R12。清历史清完整resume与断言、favorite保留。
+- [playback_units](#playback_units) — 20字段；用户逻辑观看/收藏事实及源绑定恢复包，不FK到物理文件。未完成Progress保留既有played断言；达到已知源时长90%阈值会写true及毫秒断言时钟，人工mark/unmark写显式true/false。目标按最新时钟、同时间episode>season>whole决议；effective assertion 与协议 SQL 已按该规则决议。旧无绑定 progress 换源反例的后续修复见[执行记录 S04](../superpowers/plans/2026-10-23-storage-review-remediation.md)，分集读取的当前性能缺口见[复审 R4](../audits/2026-10-28-storage-main-rereview.md#r4分集状态读取未按请求范围收敛)。清历史清完整resume与断言、favorite保留。
 - [probe_job_units](#probe_job_units) — 12 字段；Probe 文件单元、阶段与输出；活动单元/派发索引控制工作窗口。
 - [probe_jobs](#probe_jobs) — 17 字段；专用 Probe 作业与单元计数、阶段策略和历史；不同于 jobs.db 的通用 Job。
 - [probe_season_comparison_history](#probe_season_comparison_history) — 4 字段；每 Media/季最近比较摘要与发布时间，不是完整历史集合。
@@ -240,6 +240,7 @@ CREATE INDEX probe_obligation_dispatch ON file_probe_obligations(created_at_ms,f
 
 ```sql
 CREATE INDEX attempt_job_file ON fingerprint_attempts(job_id,file_id);
+CREATE INDEX attempts_file ON fingerprint_attempts(file_id);
 ```
 
 ## fingerprint_cache
@@ -451,7 +452,7 @@ CREATE INDEX coverage_media ON library_file_units(media_id,season,episode,librar
 | `resolution` | `TEXT` | — | 否 | 无 |
 | `codec` | `TEXT` | — | 否 | 无 |
 | `hdr` | `TEXT` | — | 否 | 无 |
-| `hdr_observed` | `INTEGER` | `0` 或 `1` | 是 | `0` |
+| `hdr_observed` | `INTEGER` | — | 是 | `0` |
 | `quality_source` | `TEXT` | — | 是 | 无 |
 | `confidence` | `TEXT` | — | 是 | 无 |
 | `filter_score` | `INTEGER` | — | 否 | 无 |
@@ -628,8 +629,7 @@ CREATE TABLE library_protocol_people (
 **显式命名索引**
 
 ```sql
-CREATE INDEX protocol_people_name ON library_protocol_people(role,name_key,library_id,media_id);
-CREATE INDEX protocol_people_tmdb ON library_protocol_people(role,tmdb_id,library_id,media_id);
+CREATE INDEX protocol_people_tmdb ON library_protocol_people(tmdb_id,role,library_id,media_id);
 CREATE INDEX protocol_people_wire ON library_protocol_people(wire_id,library_id,media_id,role,name_key,tmdb_id);
 ```
 
@@ -661,7 +661,6 @@ CREATE TABLE library_protocol_terms (
 
 ```sql
 CREATE INDEX protocol_terms_media ON library_protocol_terms(library_id,media_id,term_kind,term_value);
-CREATE INDEX protocol_terms_value ON library_protocol_terms(term_kind,term_value,library_id,media_id);
 ```
 
 ## library_query_config
@@ -816,6 +815,7 @@ roots/locale/integrity/scrape 操作载体。当前已有运行驱动与恢复�
 ```sql
 CREATE UNIQUE INDEX nfo_export_active_path ON library_operations(resource_key) WHERE kind='scrape' AND state NOT IN ('succeeded','failed');
 CREATE INDEX nfo_export_pending_age ON library_operations(updated_at_ms,operation_id) WHERE kind='scrape' AND state NOT IN ('succeeded','failed');
+CREATE INDEX library_operations_terminal_age ON library_operations(updated_at_ms,operation_id) WHERE state = 'succeeded' OR (state = 'failed' AND kind NOT IN ('roots','locale','integrity','default_locale'));
 CREATE INDEX library_operation_dispatch ON library_operations(state,updated_at_ms,operation_id);
 CREATE INDEX operations_library_kind ON library_operations(library_id,kind,updated_at_ms DESC);
 ```
@@ -1183,7 +1183,9 @@ Media 合并/改挂持久计划与阶段。冲突/冻结在 Store 内落库，HT
 
 **显式命名索引**
 
-无；主键/UNIQUE 自动索引不重复列出。
+```sql
+CREATE INDEX media_operations_terminal_age ON media_operations(updated_at_ms,operation_id) WHERE state = 'succeeded';
+```
 
 ## pending_file_deletions
 
@@ -1329,6 +1331,7 @@ v3 曾为 `playback_sessions`/`playback_logs`/`playback_metrics` 各建一个 `m
 ```sql
 CREATE INDEX session_generation ON playback_session_ids(user_id,device_id,generation DESC);
 CREATE INDEX session_id_expiry ON playback_session_ids(issued_at);
+CREATE INDEX session_ids_live_file ON playback_session_ids(file_id) WHERE state <> 'closed';
 ```
 
 ## playback_sessions
@@ -1592,6 +1595,7 @@ CREATE INDEX probe_stage_active_job ON probe_stage_state(active_job_id) WHERE ac
 
 ```sql
 CREATE INDEX scan_library_status ON scan_operations(library_id,status);
+CREATE INDEX scan_operations_terminal_age ON scan_operations(created_at_ms,id) WHERE status IN ('completed','partial','cancelled','failed');
 ```
 
 ## scan_seen

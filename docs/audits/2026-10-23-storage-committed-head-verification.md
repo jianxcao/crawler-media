@@ -2,7 +2,7 @@
 
 日期：2026-10-23。状态：**仅核验与技术方案，未实施代码修复。**
 
-> 历史文件：证据仅对固定572d4fa负责。当前入口为[再次复审](2026-10-23-storage-followup-review.md)；下面的“当前”均指该历史版本，旧任务不得直接重演。
+> 历史文件：证据仅对固定572d4fa负责。后续历史核对见[8fbf81b 复审](2026-10-23-storage-followup-review.md)，现行剩余问题见[2026-10-28 复审](2026-10-28-storage-main-rereview.md)；下面的“当前”均指该历史版本，旧任务不得直接重演。已拆分或删除的文件可用 `git show 572d4fa:<路径>` 查看。
 
 ## 1. 固定范围、方法与证据等级
 
@@ -58,7 +58,7 @@
 | terms/user items 无复合 FK，最后文件删除留孤儿 | **错误。** [library.sql:170–175、203–209](<../../crates/store/src/schema/v1/library.sql#L170-L209>) 有 ON DELETE CASCADE。原始观看事实不应级联删。 |
 | reassign/rename 不为目的库生成用户摘要 | **已覆盖。** [reduce/card.rs:56–94](<../../crates/store/src/library_write/reduce/card.rs#L56-L94>) 已 UNION raw users；[reassign.rs:58–61](<../../crates/store/src/library_write/reassign.rs#L58-L61>) 调两侧归约。不重复添加刷新循环。 |
 | roots.rs 仍全同 kind 扫描且比较 display/canonical | **部分已修复。** 当前 [roots.rs:137–181](<../../crates/store/src/roots.rs#L137-L181>) 已 canonical 范围读；范围有界不等于事务≤100。另一路 operations/roots 尚有 C08。 |
-| merge 失败解冻、丢 loser 会话历史引用 | **撤回概括。** [apply.rs:214–226](<../../crates/store/src/media_operations/apply.rs#L214-L226>) 只记录失败；[references.rs:640–715](<../../crates/store/src/media_operations/references.rs#L640-L715>) 已 merge watch facts。历史原 ID 可按规范保留，不能机械加禁止原 ID 的 FK。 |
+| merge 失败解冻、丢 loser 会话历史引用 | **撤回概括。** [apply.rs:214–226](<../../crates/store/src/media_operations/apply.rs#L214-L226>) 只记录失败；当时 `crates/store/src/media_operations/references.rs:640–715` 已 merge watch facts。历史原 ID 可按规范保留，不能机械加禁止原 ID 的 FK。 |
 | merge true@10 + false@30 应得 false | **违背主规范 §4.6。** 明确归并 true@30；不同于普通 mark 最新断言规则。 |
 | full_file 完成 E01 不完成 E02 是 bug | **违背主规范 §4.5。** 必须只作用所选逻辑分集。 |
 | 成功 merge 后重启 jobs 永不收敛 | **启动窗口已覆盖。** [job_loop.rs:146–149](<../../crates/api/src/job_loop.rs#L146-L149>) 获取实例租约后无条件 converge；不能只看 if advanced。 |
@@ -85,7 +85,7 @@
 | O01 | [incremental:194–214](<../../crates/store/src/library_write/reduce_incremental/mod.rs#L194-L214>) 每文件可能重复同 Media 用户摘要；BatchSettled 已避免新 unit 重复 delta。before.units 相同也不能跳公共摘要：presence/publication/首选源/图片等仍会变。 | Q2 |
 | O02 | [hydration:69–150](<../../crates/store/src/library_query/items/hydration.rs#L69-L150>) 页内冷 JSON 取 studio；favorite 仅轻量摘要查询，分页后批量补读本身被规范允许。 | Q3 |
 | O03 | [facets:95–143、231–335](<../../crates/store/src/library_query/facets.rs#L95-L335>) 结构上 All26条、Primary12条 SQL，桶可用条件索引，不说26次全表扫。保留 exclude-own-dimension、零桶、精确 total。 | Q3 |
-| O04 | [protocol/sql:150–201](<../../crates/store/src/library_query/protocol/sql.rs#L150-L201>) 有 source 子查询/窗口，[facts:105–200](<../../crates/store/src/library_query/protocol/facts.rs#L105-L200>) 有冷字段过滤；CTE 可 inline/延迟求值，真实 VM/EQP 才能判执行次数。 | Q4 |
+| O04 | [protocol/sql:150–201](<../../crates/store/src/library_query/protocol/sql.rs#L150-L201>) 有 source 子查询/窗口，当时 `crates/store/src/library_query/protocol/facts.rs:105–200` 有冷字段过滤；CTE 可 inline/延迟求值，真实 VM/EQP 才能判执行次数。 | Q4 |
 | O05 | [library.sql](<../../crates/store/src/schema/v1/library.sql>) 中 fingerprint_attempts/file_id、probe_stage_state/active_job_id、metadata inputs/media_id 等缺前缀索引。用 [objects.rs](<../../crates/store/src/schema/v1/objects.rs>) 真实清单，不照抄旧 mod.rs 常量。 | Q1 |
 | O06 | [roots:161–215](<../../crates/store/src/roots.rs#L161-L215>) collect 影响范围后一个事务；[library_deletion](<../../crates/store/src/library_deletion/mod.rs>) 大删除事务仍可长持锁。分批必须有持久 cursor/freeze。 | A6/Q5 |
 | O07 | [open:251–265](<../../crates/store/src/open.rs#L251-L265>) PRAGMA、固定热点语句缓存、WITHOUT ROWID 可评估但非 P0；多连接内存预算不能每连接任意32MB。 | Q5 |
@@ -107,7 +107,7 @@ deferred_snapshot_write_error: SQLITE_BUSY_SNAPSHOT
 
 ## 7. 规模治理与文档验收
 
-快照 wc 确认8个 `.rs` 超800行：[references](<../../crates/store/src/media_operations/references.rs>)879、[http/playback](<../../crates/api/src/http/playback.rs>)837、[units](<../../crates/store/src/playback/units.rs>)810、[event binding tests](<../../crates/store/tests/playback_event_binding.rs>)1105、[reconfiguration tests](<../../crates/store/tests/library_reconfiguration.rs>)917、[seek scale](<../../crates/store/tests/storage_work_bounds/seek_scale.rs>)860、[identity tests](<../../crates/api/tests/playback_event_identity.rs>)857、[statistics tests](<../../crates/api/tests/library_statistics_scale.rs>)826。[store/lib.rs](<../../crates/store/src/lib.rs>)261行超150软限制但未超800硬限制，其 Store/构造器定义不符合仅模块/导出形状。触及即按职责拆分，测试逻辑也受800/120硬限制；不做无意义转发层。
+快照 wc 确认8个 `.rs` 超800行：当时 `crates/store/src/media_operations/references.rs` 879、[http/playback](<../../crates/api/src/http/playback.rs>)837、[units](<../../crates/store/src/playback/units.rs>)810、[event binding tests](<../../crates/store/tests/playback_event_binding.rs>)1105、[reconfiguration tests](<../../crates/store/tests/library_reconfiguration.rs>)917、[seek scale](<../../crates/store/tests/storage_work_bounds/seek_scale.rs>)860、[identity tests](<../../crates/api/tests/playback_event_identity.rs>)857、[statistics tests](<../../crates/api/tests/library_statistics_scale.rs>)826。[store/lib.rs](<../../crates/store/src/lib.rs>)261行超150软限制但未超800硬限制，其 Store/构造器定义不符合仅模块/导出形状。触及即按职责拆分，测试逻辑也受800/120硬限制；不做无意义转发层。
 
 本次验收仅为 Markdown 链接、基线/范围、任务覆盖、签名一致性、风险措辞与文档专属暂存/提交 diff。审查期间工作区代码仍有外部并行变更，整体代码差异指纹不稳定；这些变更不读取为修复证据、不覆盖、不回滚、不暂存。以本次提交相对审查 HEAD 的代码树完全相同证明没有夹带代码，而非声称外部工作区在时间上静止。未来实现需逐任务 RED→GREEN、触及 crate 独立测试、最终稳定树 workspace 测试，不把文档完成等同生产验收。
 

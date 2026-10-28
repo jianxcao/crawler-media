@@ -2,7 +2,7 @@
 
 后续当前模型及验收状态见[2026-10-25 查询读模型测量](2026-10-25-large-hit-query-read-model.md)；本页原始版本数据保留。
 
-本页性能数字为历史阶段测量，本轮未重跑。当前实现/正确性及门禁见[本轮复审](../audits/2026-10-24-storage-rereview.md)，新增隔离测量见[10-24 查询复测](2026-10-24-storage-query-rereview.md)。只收录日志与基准文档里的真实数字；未测项单独标出。在线页面：https://cursor.com/canvas/store-d2860fd7-7b74-430e-9855-1a3525523fbe/e3dea255-fc03-4210-9944-cbc78ac2e26b
+本页性能数字为历史阶段测量。后续历史记录见[10-24 复审](../audits/2026-10-24-storage-rereview.md)及[10-24 查询复测](2026-10-24-storage-query-rereview.md)，现行问题见[2026-10-28 复审](../audits/2026-10-28-storage-main-rereview.md)。只收录日志与基准文档里的真实数字；未测项单独标出。在线页面：https://cursor.com/canvas/store-d2860fd7-7b74-430e-9855-1a3525523fbe/e3dea255-fc03-4210-9944-cbc78ac2e26b
 
 ## 结论
 - Jellyfin 协议首页（50k 电影）从 >20 分钟未完成降到 148.8 ms；根因是选源子查询走错索引。

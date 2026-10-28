@@ -103,7 +103,7 @@ jobs/playback_logs 已有 retention，不能报“完全没有清理”。QoE、
 
 ### DB-07 · 默认 Library 补集候选（已知设计限制）
 
-**证据：** [现行披露](<../../crates/store/src/browse_reads.rs#L208-L215>)。
+**证据：** 当时 `crates/store/src/browse_reads.rs:208–215` 的披露；该文件已从当前工作树移除。提交基线可用 `git show 2c649ed:crates/store/src/browse_reads.rs` 查阅，审查还包含未提交修改。
 
 默认库包含没有匹配任何同 kind 根的历史回退集合，NOT 补集不可像非默认库范围 seek。需派生归属索引/规范事实、backfill、配置改变/恢复设计，不是普通补索引。先 D5 设计门，不把未填充 root_id 当权威事实。
 
@@ -139,7 +139,7 @@ jobs/playback_logs 已有 retention，不能报“完全没有清理”。QoE、
 
 每页全部 files/media JSON、groups、相关用户 units，过滤排序后分页，约 O(F+M logM+U)、内存 O(F+M+U)。limit 只限响应；省略 limit 仍全返回。
 
-[browse_title_page](<../../crates/store/src/browse_reads.rs#L135-L169>) 仅定义未接入。先常用简单排序 SQL 分页，再高级过滤轻量候选；不得分页后过滤。Gallery 已仅展开本页图片 JSON，不等于上游只读本页。
+当时 `crates/store/src/browse_reads.rs:135–169` 的 `browse_title_page` 仅定义未接入。先常用简单排序 SQL 分页，再高级过滤轻量候选；不得分页后过滤。Gallery 已仅展开本页图片 JSON，不等于上游只读本页。
 
 ### API-05 · up-next 电影错调 TV + 串行外部等待
 

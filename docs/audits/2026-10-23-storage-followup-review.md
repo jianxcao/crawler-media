@@ -1,6 +1,6 @@
 # 数据库存储重构再次复审：8fbf81b（历史）
 
-本页保留该 SHA 的反例与验证，不是当前待办。2026-10-24 修复后的逐项关闭/残留结论见[5bd696e 修复复核](2026-10-24-storage-fix-review.md)，剩余实施步骤见[唯一当前方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)。
+本页保留该 SHA 的反例与验证，不是当前待办。2026-10-24 的逐项对账见[5bd696e 修复复核](2026-10-24-storage-fix-review.md)和[历史执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)；现行问题及剩余方案见[2026-10-28 复审](2026-10-28-storage-main-rereview.md)。
 
 日期：2026-10-23开始，2026-10-24收口。结论：**Request changes**。架构方向合理，尚有应优先修复的数据一致性和API切换问题。本轮只审查、清理文档并提出方案，不修改Rust/TS/DDL/测试，不操作真实实例。
 

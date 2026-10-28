@@ -4,9 +4,9 @@
 
 日期：2026-10-24。原问题基线为 `cf7fb70`，本次实施基线为 `96f7445`；以下新结果与本文件同提交发布。历史反例见[复审](../audits/2026-10-24-storage-rereview.md)，实施与验收见[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)。
 
-2026-10-25 设计阶段记录：[大命中查询读模型与读取隔离设计](../superpowers/specs/2026-10-25-large-hit-query-read-model.md)当时待 review、尚未实施；其中目标不能当成本页新增实测结果。当前 A 已实施并实测、B 待完成，状态见本页开头的后续测量链接。
+2026-10-25 设计阶段记录：[大命中查询读模型与读取隔离设计](../superpowers/specs/2026-10-25-large-hit-query-read-model.md)当时待 review、尚未实施；其中目标不能当成本页新增实测结果。后续 A/B 的结果分别见[查询验收](2026-10-25-large-hit-query-read-model.md)和[读取隔离](2026-10-25-library-read-isolation.md)；新的问题见[2026-10-28 复审](../audits/2026-10-28-storage-main-rereview.md)。
 
-## 当前实施结果
+## 当轮实施结果
 
 同一卡片批末同步协议 terms/search：公开 `publish_files` 的 100 文件/100 演员回归中，person terms INSERT 从 10000 变为 100，DELETE 从 9900 变为 0；最终人物集合相同，更新仍在文件事务内。补齐最后可用文件转为 pending 的整卡摘要边界，避免 preferred_file 与 available_file_count 失配。
 

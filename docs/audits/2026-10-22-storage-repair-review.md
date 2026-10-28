@@ -1,6 +1,6 @@
 # 存储修复复审：1845dab
 
-> 历史审查：仅对正文固定SHA负责；其问题/完成状态不能当作8fbf81b现状。当前问题、撤回与剩余方案见[再次复审](2026-10-23-storage-followup-review.md)。
+> 历史审查：仅对正文固定 SHA 负责；后续历史对账见[8fbf81b 复审](2026-10-23-storage-followup-review.md)，现行问题和剩余方案见[2026-10-28 复审](2026-10-28-storage-main-rereview.md)。
 
 日期：2026-10-22。结论：**Request changes**。只复审/文档，不修业务、不操作真实实例。
 

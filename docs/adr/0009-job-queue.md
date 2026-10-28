@@ -1,6 +1,6 @@
 # 搜索、订阅、转移与维护共用一个 Job 队列
 
-实例能排队、运行、重试或检查的每个工作单元都是 **Job** 行。搜索、**Subscribe** 填充、**Transfer**、**Scrape**、**Check-in**、catalog 刷新，以及以后的 Watch-directory 扫描都进同一张表。不存在带私有内存映射的第二个“scheduler 模块”。
+实例能排队、运行、重试或检查的每个工作单元都是 **Job** 行。搜索、**Subscribe** 填充、**Transfer**、**Scrape**、**Check-in**、catalog 刷新和 Watch-directory 扫描都进同一张表。不存在带私有内存映射的第二个“scheduler 模块”。
 
 MoviePilot 拆分：APScheduler 进程内任务（`subscribe_search`、`transfer`、`sitedata_refresh`、…）外加独立的 `JobManager` 管理单个媒体的 transfer 任务。重启会丢失运行中的 APScheduler 状态；transfer 任务又是另一个 dict。那是两套 UI 和两套重试故事。我们只有一个 NAS 进程和 SQLite——一个队列就够了。
 
@@ -59,10 +59,10 @@ WAL。进程内通过Queue mutex串行访问该连接，**不是专用单写线�
 | `subscribe_search` | `subscribe_id` | Indexer.search + Filter + subscribe::run |
 | `subscribe_rss` | （无 / site 列表） | Indexer.rss，然后对每个匹配 **Subscribe** 跑同一 run |
 | `transfer` | `downloader_id` 可选 | 轮询已完成文件、**Naming template**、ledger |
-| `scrape` | `ledger_id` 或 path | scrape_beside |
+| `scrape` | runner 不使用 Job payload | `watch_scrape::run(&state)` |
 | `check_in` | `site_id` | Check-in **Plugin** |
 | `catalog_refresh` | `media_id` | TMDB（等）经 `cache.db` 的来源表缓存，更新 Media/采用元数据 |
-| `watch_intake` | `root_id` | 以后 |
+| `watch_intake` | runner 不使用 Job payload | `watch_intake::run(&state)` |
 
 **历史拆分动机**：早期 `subscribe::run` 一次性做 search-admit-add-poll-transfer；当时 live harness 出现 `ledger=0`。Job 边界的目标是 `subscribe_search` 加到 Downloader 后结束，`transfer` Job 稍后读取完成文件。此段保留原因，不应将早期轮询实现描述成今天所有路径的现状。
 

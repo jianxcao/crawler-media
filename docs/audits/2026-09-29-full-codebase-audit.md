@@ -248,7 +248,7 @@
 
 ### U06 · P2 / 未实现可见入口 · 片源标注弹层接的是假空 API
 
-位置：[候选恒空/假回执](<../../web/lib/api/libraries.ts#L1637-L1651>)；[弹层调用和拦截](<../../web/components/media-source-annotation-dialog.tsx#L51-L73>)。
+位置：[候选恒空/假回执](<../../web/lib/api/libraries.ts#L1637-L1651>)；当时的弹层调用和拦截为 `web/components/media-source-annotation-dialog.tsx:51–73`，该路径已从当前工作树移除。
 
 触发：Subscribe inspector / upgrade-run 弹层打开片源标注。
 

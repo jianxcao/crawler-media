@@ -65,7 +65,7 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 
 ### Library
 
-`{id, kind, name, root_paths, is_default, item_count, file_count, total_size_bytes, …}`
+`{id, kind, name, root_paths, is_default, stats: {item_count, file_count, total_size_bytes, …}, …}`
 
 每种 `kind` 可以有多个库（多根、可见性、刮削开关等）。完整字段见 [Store Library](<../../crates/store/src/libraries.rs>) 与 `GET /libraries`。
 
@@ -73,7 +73,7 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 
 `GET /settings/metadata-language` 返回 `{language, revision, operations:[{library_id, operation_id, state, error}]}`；`PATCH /settings/metadata-language` 只接受 `{expected_revision, language}`，拒绝未知字段或缺失字段（400 `settings.invalid`）。revision 过期、已有互斥 Library 操作或非 ready 库返回 409 `settings.conflict`。语言实际改变时，在一个 `library.db` 事务内更新默认语言及 revision，并为每个 Library 登记可恢复的 `default_locale` 操作；有操作时返回 202，无变化或无库时返回 200。`PUT /settings/metadata` 的旧 `language` 字段明确返回 400 `settings.language_moved`，不作别名。单库 `display_locale` 优先于实例默认语言；二者切换都重建唯一的查询投影，不读取旧语言投影作兜底。
 
-`PATCH /libraries/{id}`：带 `root_paths`（或 `display_locale`）时是一段可恢复、可观测的重配置，返回 **202** 操作对象（与下面 GET 同字段，`state` 此时为 `planned`）；只改名称/可见性等同步字段仍返回 **200** Library 本体，不带 `operation_id`。重配置期间该库处于 `reindexing`：`POST /libraries/{id}/scan` 等写请求返回 **409** `library.reindexing`，body 顶层额外带 `operation_id`；操作轮询仍可用，查询投影未就绪的读返回下述 typed 503。`GET /libraries/{id}/operations/{operation_id}` 返回 `{operation_id, library_id, kind, phase, state, cursor, error}`（`kind` 为 `roots|locale|default_locale|integrity|scrape`，`phase` 与持久 `state` 同值，`cursor` 是批处理游标）；不存在的 operation、以及属于其他 Library 的 operation 一律 **404**。「冻结」不是独立阶段，而是受理时与 `planned` 行同事务提交的 `libraries.lifecycle_state='reindexing'` + `config_revision` 自增，外加首批之前的排空等待。依据 `crates/api/src/http/library_config.rs`、`http/library_operations.rs`、`crates/api/tests/storage_operations_runtime.rs`。
+`PATCH /libraries/{id}`：带 `root_paths`（或 `display_locale`）时是一段可恢复、可观测的重配置，返回 **202** 操作对象（与下面 GET 同字段，`state` 此时为 `planned`）；只改名称/可见性等同步字段仍返回 **200** Library 本体，不带 `operation_id`。重配置期间该库处于 `reindexing`：`POST /libraries/{id}/scan` 等写请求返回 **409** `library.reindexing`，`error.operation_id` 提供可供轮询的操作 ID；操作轮询仍可用，查询投影未就绪的读返回下述 typed 503。`GET /libraries/{id}/operations/{operation_id}` 返回 `{operation_id, library_id, kind, state, cursor, error}`（`kind` 为 `roots|locale|default_locale|integrity|scrape`，`cursor` 是批处理游标）；不存在的 operation、以及属于其他 Library 的 operation 一律 **404**。「冻结」不是独立阶段，而是受理时与 `planned` 行同事务提交的 `libraries.lifecycle_state='reindexing'` + `config_revision` 自增，外加首批之前的排空等待。依据 `crates/api/src/http/library_config.rs`、`http/library_operations.rs`、`crates/api/tests/storage_operations_runtime.rs`。
 
 读取唯一投影尚未就绪的 Library 查询返回 typed **503** `library.reindexing`；客户端应轮询操作，不能将空页或旧语言结果视为成功。`POST /libraries/{id}/operations/{operation_id}/retry` 仅接受同库、持有当前 durable owner 且处于 failed 的 `roots|locale|default_locale|integrity` 操作，保留原 operation ID 与游标并返回 **202** `{operation_id,state}`；缺失或其他库的 ID 为 404，错误状态/owner 为 409。此 retry 是冻结写门的唯一精确路径例外。
 
@@ -150,7 +150,7 @@ HTTP 路径是 `/rule-sets`；表名仍是 `filters`。这是有意的 API 别�
 - `publication: "published" | "pending"`：browse/详情/播放版本只读 `published`；`pending` 只出现在管理工作状态。
 - 同文件的质量/轨道字段保持既有形状，不随 `units` 改变。
 
-分页语义：实现用 `limit + 1` 探测，返回恰好 `limit` 行时才给 `next_cursor`，**末页 `next_cursor` 必为 `null`**
+分页语义：实现用 `limit + 1` 探测，只有发现超过 `limit` 行时才给 `next_cursor`，**末页 `next_cursor` 必为 `null`**
 （不允许「刚好整页」时伪造下一页）。前端 `web/lib/library-file-pages.ts` 是唯一遍历实现，
 遇到重复 `file_id` 必须显式失败，不得静默去重。0/49/50/51/100/101 文件边界由
 `crates/api/tests/library_browse_rows.rs` 与 `web/test/library-file-pagination.test.mjs` 覆盖。
@@ -166,7 +166,7 @@ Playback history/watch stats 的 `member_id` 只接受 User UUID；显式传入�
 `{total, genres, countries, decades, watch, ratings, runtimes, languages, resolutions, hdr, stock}`，每项 `{value, label, count}`。
 
 - **计数**：维度 D 的值 v 的 `count` = 满足「**除 D 以外**全部已选条件」且 D 取 v 的 **distinct Media** 数；`total` = 满足全部条件的 distinct Media 数（不是 ledger 行数）。候选全集来自该库全部可见 Media，含 `count: 0`（前端置灰）。
-- **查询键**：items/facets 共用 `browse_filter_from_query`。多值维度用逗号分隔，只接受短键 `g`、`c`、`d`（`2020s|2010s|2000s|1990s|earlier`）、`rt`（`lte60|60to90|90to120|gt120`）、`lang`、`res`、`stock`（`missing|unscraped`），维内 OR、维间 AND。`w` 是单值 `unwatched|watching|played|favorite`；`rating_gte` 接受有限 `0..=10` 数值（6/7/8/9 是 UI 档位），`hdr` 为 `true|false`，另有 `identity`。旧长键（genres/countries/decades/runtimes/languages/resolutions/watch）返回 400。不能把 UI 预设档位当作 handler 全部接受范围（`http/library.rs`、`store/src/library_query/items.rs`）。
+- **查询键**：items/facets 共用 `browse_filter_from_query`。多值维度用逗号分隔，只接受短键 `g`、`c`、`d`（`2020s|2010s|2000s|1990s|earlier`）、`rt`（`lte60|60to90|90to120|gt120`）、`lang`、`res`、`stock`（`missing|unscraped`），维内 OR、维间 AND。`w` 是单值 `unwatched|watching|played|favorite`；`rating_gte` 接受有限 `0..=10` 数值（6/7/8/9 是 UI 档位），`hdr` 为 `true|false`，另有 `identity`。旧长键（genres/countries/decades/runtimes/languages/resolutions/watch）返回 400。不能把 UI 预设档位当作 handler 全部接受范围（`crates/api/src/http/library/query.rs`）。
 - **`tier`**：`primary` 只填 `genres/countries/decades/watch`，其余空数组；`all` 十维全填；**缺失或空串按 `all`**；其他非空值 → 400 `library.invalid`。
 - 未知年份与 `>=2030` 不归入任何 `decades` 档。
 

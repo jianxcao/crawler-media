@@ -2,7 +2,7 @@
 
 归档日期：2026-10-22。来源：`1845dab:docs/superpowers/plans/2026-10-20-storage-clean-cutover.md` 第475–886行，以下正文原样保留；其中“当前”“本轮”“已完成”仅属于原执行者当时记录，不是本轮复审结论。原完整20任务/接口/100步骤可用 `git show 1845dab:docs/superpowers/plans/2026-10-20-storage-clean-cutover.md` 取回。
 
-原步骤已撤下，禁止按历史unchecked重做已完成修复。目标约束仍见[规范](../superpowers/specs/2026-10-18-library-storage-redesign.md)及[合同](../superpowers/plans/2026-10-18-library-storage-contracts.md)。当前缺陷见[复审](2026-10-22-storage-repair-review.md)，当前执行入口见[技术解决方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)。本文的`:行号`、Task编号及`/tmp`路径均指原文件与当时环境，不是本页行号或可用附件；未重新确认原临时日志是否仍存在。
+原步骤已撤下，禁止按历史unchecked重做已完成修复。目标约束仍见[规范](../superpowers/specs/2026-10-18-library-storage-redesign.md)及[合同](../superpowers/plans/2026-10-18-library-storage-contracts.md)。后续历史记录见[复审](2026-10-22-storage-repair-review.md)及[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)，现行问题见[2026-10-28 复审](2026-10-28-storage-main-rereview.md)。本文的`:行号`、Task编号及`/tmp`路径均指原文件与当时环境，不是本页行号或可用附件；未重新确认原临时日志是否仍存在。
 
 ## 归档前的独有接口与换型决策
 

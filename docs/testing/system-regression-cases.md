@@ -4,7 +4,7 @@
 
 从用户可见的入口和工作流检查 Web 工作台，以及 VidHub 通过 Jellyfin-compatible API 访问本系统时的页面呈现、图片加载、播放和进度同步。本文覆盖当前 Web 路由、设置分区和关键跨页流程；用例以可观察结果为准。
 
-“预期结果”是待验收合同，不是已实现/已通过的功能声明。2026-10-24本次补修的归属/版本/marks/共享图片与测试退出反例及门禁结果见[再次复核](../audits/2026-10-24-storage-fix-followup.md)；历史测试与本文件列出的自动化源代码不能替代本构建实测。当前 DDL/布局见 `crates/store/src/schema/layout.rs` 与 `schema/v1/*.sql`，执行顺序见 [存储切换计划](<../superpowers/plans/2026-10-23-storage-review-remediation.md>)。
+“预期结果”是待验收合同，不是已实现/已通过的功能声明。2026-10-24 补修的归属/版本/marks/共享图片与测试退出反例及门禁结果见[历史复核](../audits/2026-10-24-storage-fix-followup.md)；历史测试与本文件列出的自动化源代码不能替代本构建实测。当前 DDL/布局见 `crates/store/src/schema/layout.rs` 与 `schema/v1/*.sql`，存储剩余问题及验收见[2026-10-28 复审](../audits/2026-10-28-storage-main-rereview.md)。
 
 测试环境必须是隔离实例，数据写入临时目录和测试数据库。不得用生产 Site、真实 Downloader、真实 Library 文件目录或真实 User 的观看记录执行有写入的流程。
 
@@ -130,7 +130,7 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 
 | ID | 优先级 | 用例与步骤 | 预期结果 |
 |---|---|---|---|
-| LIB-01 | P0 | 创建电影与 TV Library；编辑名称、kind、root paths、访问范围和收藏范围；运行扫描；刷新页面。 | 字段和 User 可见范围持久化；扫描结果正确建立 Library ledger；访问未授权的 Library 不返回条目。 |
+| LIB-01 | P0 | 创建电影与 TV Library 时选择 kind；编辑名称、root paths、访问范围和收藏范围；运行扫描；刷新页面。 | 字段和 User 可见范围持久化；编辑不能更改 kind；扫描结果正确建立 Library ledger；访问未授权的 Library 不返回条目。 |
 | LIB-02 | P0 | 浏览 Library；组合类型、年代、地区、观看状态、评分、片长、语言、resolution、HDR 和库存筛选；切换排序/布局。 | 筛选组合与计数一致；已观看/未观看和库存状态正确；图片加载失败有 fallback；翻页/虚拟列表无重复或跳项。 |
 | LIB-03 | P0 | 打开电影和 TV Library detail；查看 Media、Season、episode、缺集、文件版本；从详情进入 Media item 和播放。 | 详情数据与 Library ledger 一致；Season/episode 层级正确；打开的 item 与播放 URL 对应；静态 artwork 不要求浏览器携带自定义 Authorization header。 |
 | LIB-04 | P1 | 打开 library/manage；扫描、重识别 Unidentified 文件、手动 claim、查看重复文件；删除测试文件并按产品恢复路径还原。 | 识别建议可复核；低置信度不会自动 Transfer；受影响路径与文件名可见；可恢复删除能恢复记录和文件。 |
@@ -250,7 +250,7 @@ VidHub 用例通过已安装的 VidHub app 连接隔离实例执行。第一次�
 | STORAGE-07 | 同来源多个别名的 Media 更新后，全部历史别名保留，refresh target 唯一且卡片立即同步 | 已观察别名丢失/卡片陈旧；本轮 store 部分实测：`media_alias_updates` 在本轮 store 套件内通过；按 target 的实际刷新请求与卡片同步仍 Not run |
 | STORAGE-08 | 管理完整性检查与 Media 合并公开路径可用并有最终状态，失败不改身份；协议浏览与事件提交生产接线真实覆盖 | 已观察管理端点 404 与 protocol_item_page / commit_playback_event 未统一接线；本轮更正：浏览入口已统一（`485e36f`，`jellyfin_paged_metadata` 25、`jellyfin_sql_page` 9 全绿，冒烟 Recursive 分页返回规范 `w1_…` Series+Movie），`Store::commit_playback_event` 的生产写入统一仍未验证；管理侧仍缺 scrape 类 `library_operations`（`crates/store/src/library_operations/mod.rs:226-228` 对非 reconfiguration 的 kind 返回 `Invalid`） |
 
-movie持久whole=(-1,-1)，TV S00E00合法；movie00旧alias已移除。marks已严格拒旧/未知键、重复坐标、i32越界和错误类型；storage_http_cutover保存真实Router及原始playback_units零写回归。真实浏览器/客户端/NAS尚未在本轮运行；上轮1M只测无关Library文件增长，不等于100k Media/1M Playback完整验收。按[当前方案](../superpowers/plans/2026-10-23-storage-review-remediation.md)新增真实consumer回归，历史数值见benchmark。
+movie持久whole=(-1,-1)，TV S00E00合法；movie00旧alias已移除。marks已严格拒旧/未知键、重复坐标、i32越界和错误类型；storage_http_cutover保存真实Router及原始playback_units零写回归。该轮真实浏览器/客户端/NAS未运行；当时1M只测无关Library文件增长，不等于100k Media/1M Playback完整验收。后续发现及验收目标见[2026-10-28 复审](../audits/2026-10-28-storage-main-rereview.md)，历史数值见benchmark。
 
 ## 当前限制
 
@@ -267,4 +267,4 @@ movie持久whole=(-1,-1)，TV S00E00合法；movie00旧alias已移除。marks已
 
 ## cf7fb70 只读复审后的验收目标
 
-当前自动化结果及反例见[本轮复审](../audits/2026-10-24-storage-rereview.md)，新增目标尚未实施：Jobs 各初始化阶段中断可重试；根冻结解除后自动迁移且公平调度；旧 directory 写拒绝、新设置 null 可清空；r1 无 session 迟到事件不得写 r2；TV Unidentified 按登记归属列表/过滤；只留旧 Downloader key 时拒绝；无关库坏路径不阻止目标删除；协议索引按批去重、kind 隔离及已筛选 facets 规模门。禁止继续把“无会话旧请求应成功”的测试当作本轮验收要求。
+当时自动化结果及反例见[固定版本复审](../audits/2026-10-24-storage-rereview.md)；Jobs 初始化、根队列、旧字段拒绝及其他目标后续的实现和回归见[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)。新的存储缺口及验收目标见[2026-10-28 复审](../audits/2026-10-28-storage-main-rereview.md)。禁止把“无会话旧请求应成功”作为验收要求。

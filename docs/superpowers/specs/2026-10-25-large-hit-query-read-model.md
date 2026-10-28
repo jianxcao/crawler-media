@@ -2,6 +2,8 @@
 
 状态：**子项目 A/B 已实现并通过最终本地验证；§9.1 本机 release 目标已实测通过，独立容量/现场项未跑**。设计日期：2026-10-25；最终验证：2026-10-26。原设计代码基线：`feat/storage-redesign@1085a9a`。A 的范围与证据见[读模型记录](../../benchmarks/2026-10-25-large-hit-query-read-model.md)，B 的并发/WAL/指标和最终门见[隔离记录](../../benchmarks/2026-10-25-library-read-isolation.md)。未修改现有实例数据。
 
+本文保留设计阶段的建议、旧布局版本和当轮验收证据，它们不构成当前版本的完整状态；当前布局见[数据库字典](../../database/README.md)，剩余问题见[2026-10-28 复审](../../audits/2026-10-28-storage-main-rereview.md)。
+
 实施拆为两个可分别验收的子项目，推荐 A → B：
 
 - [A：事务读模型、精确统计与分页](../plans/2026-10-25-large-hit-query-read-model.md)。降低查询本身的工作量，交付后现有 Store 调用者可以直接受益。

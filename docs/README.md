@@ -115,3 +115,7 @@ Agent导航：[domain](agents/domain.md)；[issue tracker](agents/issue-tracker.
 本次删除 10-26 修复执行稿、旧 Codex 审查 brief，以及两份 10-27 修复计划。已实现项、残留问题和历史测量集中在[当前复审的对账与清理记录](audits/2026-10-28-storage-main-rereview.md#文档收敛记录)；原文可用 `git show 5730b032:docs/superpowers/plans/<文件名>` 读取。独有 schema/benchmark/审计证据保留，旧独立报告标为历史；不再维护多份互相冲突的“唯一当前方案”。
 
 [10-23 执行记录](superpowers/plans/2026-10-23-storage-review-remediation.md) 和 10-25 A/B 计划只记录各自阶段。同步修正数据库总览 v5/旧统计、ADR 的 cache 耐久设置、主 Spec/API 的当前指针，以及数据库字典里已修复入口仍被描述为未接线的段落。本轮没有执行新的修复步骤。
+
+## 2026-10-28 文档核对
+
+对照当前 DDL、API、备份脚本及历史证据，修正 Library v7、索引清单、Library DTO、操作错误字段、文件续页和 Jobs 初始化说明；备份回滚要求保留实际存在的数据库、WAL 和 SHM 文件。更新过时的当前复审导航及回归场景，并将失效的历史源码链接改为固定版本路径线索。历史审计和 benchmark 保留其反例、数据及版本边界；未删除新的文档，也未修改代码或重跑代码测试。当前仍按[复审](audits/2026-10-28-storage-main-rereview.md)处理 R1–R5，不能因文档整理将问题标为关闭。

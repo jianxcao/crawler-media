@@ -1,6 +1,6 @@
 # 数据库重构复审：cf7fb70
 
-> 本文固定审查 `cf7fb70` 的修复前证据。2026-10-24 后续实施已落入同分支，当前状态见[执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)及[新测量](../benchmarks/2026-10-24-storage-query-rereview.md)。下文“当前/尚未”只指所审查版本。已删除代码的历史原文可用 `git show cf7fb70:<路径>` 读取。
+> 本文固定审查 `cf7fb70` 的修复前证据。2026-10-24 后续实施见[历史执行记录](../superpowers/plans/2026-10-23-storage-review-remediation.md)及[当轮测量](../benchmarks/2026-10-24-storage-query-rereview.md)，现行问题见[2026-10-28 复审](2026-10-28-storage-main-rereview.md)。下文“当前/尚未”只指所审查版本。已删除代码的历史原文可用 `git show cf7fb70:<路径>` 读取。
 
 
 日期：2026-10-24。结论：**Request changes**。五文件及同库事实/摘要的方向合理，但优先修复尚未闭环，旧自有接口和配置回退也没有全部清除。本轮仅 review、隔离验证及维护文档，未修改 Rust、TS、DDL、测试或实例数据。

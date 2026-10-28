@@ -1,13 +1,13 @@
 # Media / Library 开发合同附录
 
-状态：规范性目标合同，**不是当前已实现API**。与[当前实施计划](../../audits/2026-10-28-storage-main-rereview.md)、[主设计](../specs/2026-10-18-library-storage-redesign.md)一起阅读；旧T编号只保留需求溯源，执行任务按当前计划。新增/替换接口由当前计划的Interfaces明确收敛；当前源码仍有缺口，不能将下列签名当作已可调用。改公开符号前用LSP references枚举调用方；服务不可用时记录错误后核对代码/SQL/路由/JSON全调用链。
+状态：规范性目标合同，**不是当前已实现API**。与[当前复审及剩余方案](../../audits/2026-10-28-storage-main-rereview.md)、[主设计](../specs/2026-10-18-library-storage-redesign.md)一起阅读；旧T编号只保留需求溯源。当前源码仍有缺口，不能将下列签名当作已可调用。改公开符号前用LSP references枚举调用方；服务不可用时记录错误后核对代码/SQL/路由/JSON全调用链。
 
 ## 1. DDL、布局与保留范围
 
 - 唯一现行Store DDL为 [`schema/v1/app.sql`](../../../crates/store/src/schema/v1/app.sql)、[`library.sql`](../../../crates/store/src/schema/v1/library.sql)、[`subscribe.sql`](../../../crates/store/src/schema/v1/subscribe.sql)；cache为 [`media::response_cache::CACHE_SCHEMA_SQL`](../../../crates/media/src/response_cache/mod.rs)，Store直接复用。Jobs沿Queue自己的初始化模块。
 - 10-18两份SQL草案已被生产DDL取代并删除，历史可用 `git show bd6c3c8:docs/superpowers/plans/2026-10-18-library-storage-schema.sql` 与同目录 `2026-10-18-storage-partitions.sql` 取回；不再维护docs内的第二份可执行schema。
 - 生产schema变更同步字典、布局版本和全部消费者；初始化器负责事务与身份。字段/索引的当前事实见[数据库字典](../../database/README.md)，下述规则是目标约束而非额外迁移脚本。
-- 新布局application_id：app=1129139248、library=1129139249、subscribe=1129139250、cache=1129139251；四者user_version=1。jobs继续现有Queue schema/JobKind/change_state/retention_cursors；当前Store启动预检已有application_id=1129139252、user_version=1，独立Queue入口的差异见[Jobs字典](../../database/jobs.md)。
+- 当前布局 application_id：app=1129139248、library=1129139249、subscribe=1129139250、cache=1129139251；user_version 分别为 1、7、2、1。Jobs 为 application_id=1129139252、user_version=1，初始化及校验见[Jobs字典](../../database/jobs.md)。
 - 仅sqlite_schema无任何用户对象且application_id/user_version均0的文件可初始化。所有已存在文件先READ_ONLY预检，任一旧布局、编号不匹配、未来版本或损坏时拒绝且不改文件/WAL模式。已存在目标布局只校验，不重复执行CREATE/seed修复损坏表。第一次初始化各文件独立事务、无跨库原子承诺；启动中断可以重启补齐尚为空的新文件，所有文件通过后才seed默认配置并启动worker。
 - WAL/5000ms busy_timeout/FK ON显式设置；维护独立连接仍短超时/no CREATE，不借初始化修改现有维护策略。Store::open_at继续仅自定义app路径；db_paths返回真实app/cache/library/subscribe路径，Queue目标从现有真实jobs.db取得。
 - app保留用户密码/角色/token TTL/Site Browser/凭证/Downloader映射/Filter/Naming模板/settings/search snapshots。删除Media/Library/Collection/浏览revision建表和legacy password/recycle/旧进度数据迁移代码；**只删除数据兼容，不删token头格式或Jellyfin协议兼容**。
@@ -222,7 +222,7 @@ page/count/facets同一短读事务；权限在分页/计数前用当前Library�
 
 SearchTerm保持trim后Unicode lowercase包含匹配title/original_title/overview；分集/季按其已采用字段及允许的work共享回退，不只搜卡片名。PersonIds支持既有People公开ID（忽略UUID连字符）或TMDB person ID，actor/director/creator均按现有role身份生成规则；StudioIds保留既有大小写不敏感名称及已发出的studio父ID解析。Genres/GenreIds同时支持来源展示名、既有名称生成UUID/prefixed ID和规范genre筛选键（见F03），不能把这三种ID混成一类。所有现行ServerItemQuery输入必须有映射；未知sort key沿原实现无比较权重，已知多键按请求顺序和各方向，缺方向沿最后方向/既有缺省，稳定尾键MediaId再逻辑坐标，保证分集不因同Media平手乱序。
 
-SQL实现：普通库墙仍items单表；协议复杂条件允许关联同Library/Media及locale的本地采用metadata、NFO有效输入和季/集行，用SQL谓词及JSON成员EXISTS在LIMIT/count前完成。T3的字段合成纯函数可注册为确定性SQLite scalar函数（rusqlite启用functions特性，domain/library纯函数无IO）来保持local NFO/locale优先级；Unicode lowercase/person及studio名称ID也用统一纯函数，不以SQLite ASCII lower/NOCASE偷换语义。禁止先把整库JSON解码到Rust集合过滤；SQL内部按当前授权范围扫描/解析冷字段是明确允许的必要关联成本，需计量，不承诺person/包含搜索索引seek。首版不新增people/studio倒排表、不将长简介复制进items；后续索引优化要有测量证据。
+SQL实现：普通库墙仍items单表；协议复杂条件允许关联同Library/Media及locale的本地采用metadata、NFO有效输入和季/集行，用SQL谓词及JSON成员EXISTS在LIMIT/count前完成。T3的字段合成纯函数可注册为确定性SQLite scalar函数（rusqlite启用functions特性，domain/library纯函数无IO）来保持local NFO/locale优先级；Unicode lowercase/person及studio名称ID也用统一纯函数，不以SQLite ASCII lower/NOCASE偷换语义。禁止先把整库JSON解码到Rust集合过滤；SQL内部按当前授权范围扫描/解析冷字段需计量，不承诺person/包含搜索索引seek。10-18 首版曾不新增 people/studio 倒排表；后续协议读模型及测量见[10-25 读模型验收](../../benchmarks/2026-10-25-large-hit-query-read-model.md)，新的索引优化仍需测量证据。
 
 SortName/Name保持协议Unicode lowercase排序，与Web title字节排序分开；DateCreated沿当前文件created/mtime归约，SeasonNumber/IndexNumber用逻辑坐标。选择、去重、排序、filtered total在同一读快照，协议默认限制/clamp保持；冷字段关联失败返回错误，不能当人物未出现。T7负责SQL和全部字段语义，T8负责Parent/ID/协议解析和快照水合。验收：人物/studio/仅简介命中的项目排在未筛选第51位时，Limit=1仍正确返回且TotalRecordCount=1；同时覆盖Series/Season/Folder/IsFolder、复合排序、局部root计数、Unicode和Unknown parent。
 
