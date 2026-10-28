@@ -10,6 +10,7 @@ import { Link } from "react-router-dom";
 import { useNavigate } from "react-router-dom";
 
 import { isPlayableFile } from "@/lib/library-file-pages";
+import { startSingleFlightPoll } from "@/lib/single-flight-poll";
 import { ArtworkPickerDialog } from "@/components/artwork-picker-dialog";
 import { BrandLoader } from "@/components/brand-loader";
 import { CastRow, type CastRowPerson } from "@/components/cast-row";
@@ -288,26 +289,41 @@ export function LibraryItemDetailView({
     }
   }, [marking, playUnit, toast, watched]);
 
-  const reload = useCallback(() => {
-    setFailed(false);
-    Promise.all([
-      getLibraryItemDetail(libraryId, mediaItemId),
-      getLibrary(libraryId).catch(() => null),
-    ])
-      .then(([data, lib]) => {
+  // Only the latest reload may publish; an older one that settles late is ignored.
+  const reloadSeq = useRef(0);
+  const fetchDetail = useCallback(
+    async (signal?: AbortSignal): Promise<LibraryItemDetail | null> => {
+      const seq = ++reloadSeq.current;
+      setFailed(false);
+      try {
+        const [data, lib] = await Promise.all([
+          getLibraryItemDetail(libraryId, mediaItemId, { signal }),
+          getLibrary(libraryId).catch(() => null),
+        ]);
+        if (signal?.aborted || seq !== reloadSeq.current) return null;
         setDetail(data);
         setLibrary(lib);
-      })
-      .catch(() => setFailed(true));
-  }, [libraryId, mediaItemId]);
+        return data;
+      } catch (error) {
+        if (!signal?.aborted && seq === reloadSeq.current) setFailed(true);
+        throw error;
+      }
+    },
+    [libraryId, mediaItemId],
+  );
+  const reload = useCallback(() => {
+    fetchDetail().catch(() => undefined);
+  }, [fetchDetail]);
 
   useEffect(() => {
     setDetail(null);
     setRefreshError(null);
     setSelectedSeriesEpisode(null);
     setSelectedTrackFileId(null);
-    reload();
-  }, [reload]);
+    const controller = new AbortController();
+    fetchDetail(controller.signal).catch(() => undefined);
+    return () => controller.abort();
+  }, [fetchDetail]);
 
   useEffect(() => () => {
     chapterRefreshToken.current += 1;
@@ -319,15 +335,15 @@ export function LibraryItemDetailView({
 
   // 后台任务状态存储在数据库。即使已有章节，也持续刷新详情直到探测任务终态，
   // 这样媒体流信息和声纹结果会在任务完成后及时显示。
+  // 单在途（review L5）：上一轮结束后才排下一轮，切页/卸载会取消在途请求并忽略过期结果。
+  const probeQueued = !!detail?.files.some((file) => file.probe_queued);
   useEffect(() => {
-    if (!detail || detail.files.length === 0) return;
-    // 探测还在排队/进行中（流信息 + 声纹两段都算）就继续轮询，终态即停。
-    if (!detail.files.some((file) => file.probe_queued)) return;
-    const timer = window.setInterval(() => {
-      reload();
+    if (!probeQueued) return;
+    return startSingleFlightPoll(async (signal) => {
+      const latest = await fetchDetail(signal);
+      return latest == null || latest.files.some((file) => file.probe_queued);
     }, 5000);
-    return () => window.clearInterval(timer);
-  }, [detail, reload]);
+  }, [probeQueued, fetchDetail]);
 
   // Reattach to a persisted season refresh after navigation or browser reload.
   // The click handler also reports immediate progress, while this effect owns

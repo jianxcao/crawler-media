@@ -1319,16 +1319,17 @@ function videoTrackFrom(raw: unknown): VideoTrackInfo {
 export async function getLibraryItemDetail(
   libraryId: string,
   mediaItemId: string,
+  init?: RequestInit,
 ): Promise<LibraryItemDetail> {
   const raw = await unwrap(
-    request<ApiEnvelope<unknown>>(`/libraries/${libraryId}/items/${mediaItemId}`),
+    request<ApiEnvelope<unknown>>(`/libraries/${libraryId}/items/${mediaItemId}`, init),
   );
   const r = (raw ?? {}) as Record<string, unknown>;
   const firstPage = {
     files: Array.isArray(r.files) ? r.files.map(fileFrom) : [],
     next_cursor: r.next_file_cursor == null ? null : str(r.next_file_cursor),
   };
-  const files = await getAllLibraryItemFiles(libraryId, mediaItemId, firstPage);
+  const files = await getAllLibraryItemFiles(libraryId, mediaItemId, firstPage, init);
   return {
     media_item_id: str(r.media_item_id),
     kind: r.kind as LibraryKind,
@@ -1396,10 +1397,12 @@ export async function getLibraryItemFiles(
   libraryId: string,
   mediaItemId: string,
   after: string,
+  init?: RequestInit,
 ): Promise<LibraryItemFilePage> {
   const raw = await unwrap(
     request<ApiEnvelope<unknown>>(
       `/libraries/${libraryId}/items/${mediaItemId}/files?after=${encodeURIComponent(after)}`,
+      init,
     ),
   );
   const r = (raw ?? {}) as Record<string, unknown>;
@@ -1414,11 +1417,12 @@ export async function getAllLibraryItemFiles(
   libraryId: string,
   mediaItemId: string,
   firstPage: LibraryItemFilePage,
+  init?: RequestInit,
 ): Promise<LibraryItemFile[]> {
   // 分页遍历只有一处实现：`lib/library-file-pages.ts` 负责不重不漏与末页判定，
   // 这里只注入「按 cursor 取下一页」。
   return collectAllFilePages(firstPage, async (after) => {
-    const page = await getLibraryItemFiles(libraryId, mediaItemId, after);
+    const page = await getLibraryItemFiles(libraryId, mediaItemId, after, init);
     if (page.files.length === 0) throw new Error("文件分页 cursor 未推进");
     return page;
   });
