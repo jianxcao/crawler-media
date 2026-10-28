@@ -204,3 +204,33 @@ fn explicit_s00e00_is_a_real_special_unit() {
     let r = release::parse("Show.S01E00.mkv");
     assert_eq!(r.episode, None);
 }
+
+/// 2026-10-29 E2E (仙逆): `S01E90 - 2160p` was read as the range E90–E2160 (the
+/// resolution digits taken as the range end), so every file mapped 1000 units.
+#[test]
+fn resolution_after_dash_is_not_an_episode_range_end() {
+    for (raw, ep) in [
+        ("仙逆 S01E90 - 2160p", 90),
+        ("仙逆 S01E100 - 2160p.strm", 100),
+        ("Show S01E05 - 1080p", 5),
+        ("Show S01E05-720p WEB-DL", 5),
+        ("Show E07 - 1080i", 7),
+        ("Show S02E03 - 4K HDR", 3),
+    ] {
+        let r = release::parse(raw);
+        assert_eq!((r.episode, r.episode_to), (Some(ep), None), "{raw}");
+    }
+}
+
+#[test]
+fn genuine_episode_ranges_still_parse() {
+    for (raw, from, to) in [
+        ("Show S01E01-E04 1080p", 1, 4),
+        ("Show S01E01-04 1080p", 1, 4),
+        ("Show S01E01 - E02 2160p", 1, 2),
+        ("Show E05-E06 720p", 5, 6),
+    ] {
+        let r = release::parse(raw);
+        assert_eq!((r.episode, r.episode_to), (Some(from), Some(to)), "{raw}");
+    }
+}

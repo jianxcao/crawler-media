@@ -221,6 +221,12 @@ fn parse_episode_range(after: &str) -> (Option<u32>, usize) {
     while k < bytes.len() && bytes[k].is_ascii_digit() {
         k += 1;
     }
+    // Digits running into letters are an attribute, not a range end:
+    // `S01E90 - 2160p`, `E05-720p`, `- 1080i`, `- 4K` (2026-10-29 仙逆 mapped
+    // every file to E90–E2160, capped at 1000 units).
+    if k < bytes.len() && bytes[k].is_ascii_alphabetic() {
+        return (None, 0);
+    }
     if k > digit_start
         && let Ok(to) = after[digit_start..k].parse::<u32>()
     {
