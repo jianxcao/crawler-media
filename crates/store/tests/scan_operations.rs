@@ -233,7 +233,9 @@ fn scan_seen_requires_current_ledger_and_file_version() {
     );
 
     // 文件存在但没有台账行：断点无效，必须重新入账。
-    store.record_scan_seen(&op.id, std::slice::from_ref(&file)).unwrap();
+    store
+        .record_scan_seen(&op.id, std::slice::from_ref(&file))
+        .unwrap();
     assert!(
         !store.scan_seen_is_current(&op.id, &path).unwrap(),
         "台账行不存在时必须重新处理"
@@ -251,7 +253,9 @@ fn scan_seen_requires_current_ledger_and_file_version() {
     );
 
     // 恢复场景：文件被删除并标记 missing，再恢复后即使版本相同也必须重新处理。
-    store.record_scan_seen(&op.id, std::slice::from_ref(&file)).unwrap();
+    store
+        .record_scan_seen(&op.id, std::slice::from_ref(&file))
+        .unwrap();
     std::fs::remove_file(&file).unwrap();
     let (missing, _restored) = store
         .verify_library_files(std::slice::from_ref(&root), 1)
@@ -277,7 +281,9 @@ fn strm_url_change_with_same_size_and_mtime_is_not_current() {
 
     let op = store.enqueue_scan("lib1", "sig1", &[], 1000).unwrap();
     publish_fixture_row(&store, &file);
-    store.record_scan_seen(&op.id, std::slice::from_ref(&file)).unwrap();
+    store
+        .record_scan_seen(&op.id, std::slice::from_ref(&file))
+        .unwrap();
     assert!(
         store.scan_seen_is_current(&op.id, &path).unwrap(),
         "URL 未变化时断点应命中"
@@ -457,7 +463,9 @@ fn ledger_source_version_survives_operation_checkpoint_clear() {
 
     // 首次处理：断点与 durable 版本一起写下。
     let op1 = store.enqueue_scan("lib1", "sig1", &[], 1000).unwrap();
-    store.record_scan_seen(&op1.id, std::slice::from_ref(&file)).unwrap();
+    store
+        .record_scan_seen(&op1.id, std::slice::from_ref(&file))
+        .unwrap();
     let recorded = store
         .ledger_source_versions(std::slice::from_ref(&path))
         .unwrap()
@@ -484,7 +492,9 @@ fn ledger_source_version_survives_operation_checkpoint_clear() {
         None
     );
     assert!(!store.is_scan_seen(&op1.id, &path).unwrap());
-    let surviving = store.ledger_source_versions(std::slice::from_ref(&path)).unwrap();
+    let surviving = store
+        .ledger_source_versions(std::slice::from_ref(&path))
+        .unwrap();
     assert_eq!(
         surviving.get(&path),
         Some(&recorded),
@@ -511,7 +521,9 @@ fn ledger_source_version_survives_operation_checkpoint_clear() {
 
     let op2 = store.enqueue_scan("lib1", "sig1", &[], 2000).unwrap();
     assert_ne!(op1.id, op2.id, "上一个 operation 已终态");
-    store.record_scan_seen(&op2.id, std::slice::from_ref(&file)).unwrap();
+    store
+        .record_scan_seen(&op2.id, std::slice::from_ref(&file))
+        .unwrap();
     let advanced = store
         .ledger_source_versions(std::slice::from_ref(&path))
         .unwrap()

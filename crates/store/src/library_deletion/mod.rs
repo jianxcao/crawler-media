@@ -81,11 +81,12 @@ impl Store {
     }
     pub(crate) fn ensure_library_mutable(&self, id: &str) -> Result<(), StoreError> {
         if let Some(removal) = self.removal_for_library(id)?
-            && removal.state != SUCCEEDED_STATE {
-                tracing::error!(library_id = id, operation_id = %removal.operation_id,
+            && removal.state != SUCCEEDED_STATE
+        {
+            tracing::error!(library_id = id, operation_id = %removal.operation_id,
                     "拒绝修改冻结的 Library");
-                return Err(StoreError::Protected(format!("Library {id} 已冻结")));
-            }
+            return Err(StoreError::Protected(format!("Library {id} 已冻结")));
+        }
         Ok(())
     }
 

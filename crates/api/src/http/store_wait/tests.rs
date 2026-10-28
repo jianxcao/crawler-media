@@ -58,7 +58,10 @@ async fn busy_maps_to_503_with_retry_after() {
         Some("1"),
         "a contended lock must tell the client to retry"
     );
-    assert_eq!(StoreCallError::Deadline.response().status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        StoreCallError::Deadline.response().status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -81,7 +84,9 @@ async fn a_real_read_failure_keeps_the_handlers_own_error() {
         _ => panic!("a handler error must pass through, not become busy"),
     }
     assert_eq!(
-        crate::http::err(StatusCode::INTERNAL_SERVER_ERROR, "x", "y").into_response().status(),
+        crate::http::err(StatusCode::INTERNAL_SERVER_ERROR, "x", "y")
+            .into_response()
+            .status(),
         StatusCode::INTERNAL_SERVER_ERROR
     );
 }

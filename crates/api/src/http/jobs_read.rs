@@ -274,10 +274,11 @@ fn list_jobs_blocking(state: &ApiState, user_id: UserId, query: &ListJobsQuery) 
         }
     };
     // 2) Store 快照：可见性与 scope 过滤（都在 limit 之前）。
-    let visible_defs = match with_bounded_store(state, |store| visible_defs(store, defs, user_id, query)) {
-        Some(visible_defs) => visible_defs,
-        None => return jobs_budget_response(BlockingError::Busy),
-    };
+    let visible_defs =
+        match with_bounded_store(state, |store| visible_defs(store, defs, user_id, query)) {
+            Some(visible_defs) => visible_defs,
+            None => return jobs_budget_response(BlockingError::Busy),
+        };
     // 3) Queue 快照：一次批量取所有 live/last child（不再逐 def 查询）。
     let children = {
         let queue = state.jobs.lock();

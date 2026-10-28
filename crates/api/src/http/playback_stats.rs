@@ -63,7 +63,8 @@ pub(crate) async fn watch_stats(
         } else {
             "visible"
         };
-        let visible: Option<Vec<domain::MediaId>> = match visible_media_ids(&store, user_id, scope) {
+        let visible: Option<Vec<domain::MediaId>> = match visible_media_ids(&store, user_id, scope)
+        {
             Ok(v) => v.map(|ids| ids.into_iter().collect()),
             Err(error) => {
                 tracing::error!(%error, "加载观看统计可见范围失败");

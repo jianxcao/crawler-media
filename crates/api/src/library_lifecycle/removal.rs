@@ -13,7 +13,10 @@ pub(super) async fn drain(state: &ApiState, id: &str) -> Result<(), String> {
     }
     let library = operation.library_id;
     let owned = id.to_owned();
-    window(state, move |store| store.set_removal_state(&owned, "draining", None)).await?;
+    window(state, move |store| {
+        store.set_removal_state(&owned, "draining", None)
+    })
+    .await?;
     tracing::info!(
         operation_id = id,
         library_id = library,
@@ -22,7 +25,8 @@ pub(super) async fn drain(state: &ApiState, id: &str) -> Result<(), String> {
     let work = state.library_work.clone();
     let library_for_cancel = library.clone();
     tokio::task::spawn_blocking(move || work.cancel(&library_for_cancel))
-        .await.map_err(|e| e.to_string())?;
+        .await
+        .map_err(|e| e.to_string())?;
     loop {
         let owned = id.to_owned();
         if window(state, move |store| {
@@ -46,7 +50,10 @@ pub(super) async fn drain(state: &ApiState, id: &str) -> Result<(), String> {
     // Finish the filesystem side effect before a DB worker can publish succeeded.
     remove_covers(state, &library).await?;
     let owned = id.to_owned();
-    window(state, move |store| store.set_removal_state(&owned, "cleaning", None)).await?;
+    window(state, move |store| {
+        store.set_removal_state(&owned, "cleaning", None)
+    })
+    .await?;
     loop {
         let owned = id.to_owned();
         let result = window(state, move |store| {
@@ -117,7 +124,8 @@ async fn cancel_probes(state: &ApiState, id: &str) -> Result<(), String> {
         after = files.last().cloned().unwrap_or(after);
         let probe = state.probe.clone();
         tokio::task::spawn_blocking(move || probe.cancel_ledger_work(&files, "Library removed"))
-            .await.map_err(|e| e.to_string())?
+            .await
+            .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
         tokio::task::yield_now().await;
     }

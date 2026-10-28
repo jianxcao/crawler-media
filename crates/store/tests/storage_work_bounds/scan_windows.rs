@@ -98,21 +98,20 @@ pub(crate) fn media_rows(data_dir: &Path, library_id: &str) -> BTreeMap<String, 
              FROM library_items WHERE library_id = ?1",
         )
         .unwrap();
-    
-    stmt
-        .query_map([library_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                MediaRow {
-                    item_revision: row.get(1)?,
-                    file_count: row.get(2)?,
-                    episodes: row.get(3)?,
-                },
-            ))
-        })
-        .unwrap()
-        .collect::<Result<BTreeMap<_, _>, _>>()
-        .unwrap()
+
+    stmt.query_map([library_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            MediaRow {
+                item_revision: row.get(1)?,
+                file_count: row.get(2)?,
+                episodes: row.get(3)?,
+            },
+        ))
+    })
+    .unwrap()
+    .collect::<Result<BTreeMap<_, _>, _>>()
+    .unwrap()
 }
 
 pub(crate) fn count_in(data_dir: &Path, table: &str, library_id: &str) -> i64 {

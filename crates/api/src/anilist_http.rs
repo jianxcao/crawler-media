@@ -53,9 +53,10 @@ fn url_decode(s: &str) -> String {
             if let (Some(h1), Some(h2)) = (h1, h2) {
                 let hex_str = [h1, h2];
                 if let Ok(s) = std::str::from_utf8(&hex_str)
-                    && let Ok(val) = u8::from_str_radix(s, 16) {
-                        bytes.push(val);
-                    }
+                    && let Ok(val) = u8::from_str_radix(s, 16)
+                {
+                    bytes.push(val);
+                }
             }
         } else {
             bytes.push(b);

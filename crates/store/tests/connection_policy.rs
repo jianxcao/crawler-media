@@ -89,6 +89,9 @@ fn connection_policy_per_kind() {
         assert_eq!(pragmas.auto_vacuum, 2, "{name}: 重开后 auto_vacuum 变了");
         assert_eq!(pragmas.cache_size, -16_384, "{name}: 重开后缓存设置丢了");
         let expected = if name == "cache" { 1 } else { 2 };
-        assert_eq!(pragmas.synchronous, expected, "{name}: 重开后 synchronous 变了");
+        assert_eq!(
+            pragmas.synchronous, expected,
+            "{name}: 重开后 synchronous 变了"
+        );
     }
 }

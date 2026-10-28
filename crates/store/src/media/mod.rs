@@ -131,7 +131,12 @@ fn write_media_is_noop(conn: &rusqlite::Connection, media: &Media) -> Result<boo
         let present: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM media_aliases
                            WHERE media_id = ?1 AND source = ?2 AND kind = ?3 AND external_id = ?4)",
-            params![media.id.to_string(), source, media.kind.as_str(), external_id],
+            params![
+                media.id.to_string(),
+                source,
+                media.kind.as_str(),
+                external_id
+            ],
             |row| row.get(0),
         )?;
         if !present {
@@ -207,11 +212,12 @@ impl Store {
                     )
                     .optional()?;
                 if let Some(existing_id) = existing
-                    && existing_id != media.id.to_string() {
-                        return Err(StoreError::Protected(format!(
-                            "Alias {source}:{id} already registered to media {existing_id}"
-                        )));
-                    }
+                    && existing_id != media.id.to_string()
+                {
+                    return Err(StoreError::Protected(format!(
+                        "Alias {source}:{id} already registered to media {existing_id}"
+                    )));
+                }
             }
         }
 
@@ -476,9 +482,10 @@ impl Store {
             ("anilist", incoming.anilist_id.as_deref()),
         ] {
             if let Some(id) = ext_id
-                && let Some(m) = self.get_media_by_alias_kind(source, id, Some(incoming.kind))? {
-                    matched_media_ids.insert(m.id);
-                }
+                && let Some(m) = self.get_media_by_alias_kind(source, id, Some(incoming.kind))?
+            {
+                matched_media_ids.insert(m.id);
+            }
         }
 
         if matched_media_ids.len() > 1 {

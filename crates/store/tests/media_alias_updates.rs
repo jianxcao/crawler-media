@@ -307,7 +307,10 @@ fn identity_edit_preserves_multiple_aliases_and_selected_refresh_target() {
     // *different* fact — catalogue title aliases — so it must simply stay untouched by an
     // identity edit, which is what the next assertion pins.)
     assert_eq!(read_alias_ids(&db, fx.media.id), vec!["100", "999"]);
-    assert_eq!(read_media_aliases(&db, fx.media.id), fx.media_aliases_before);
+    assert_eq!(
+        read_media_aliases(&db, fx.media.id),
+        fx.media_aliases_before
+    );
 }
 
 #[test]

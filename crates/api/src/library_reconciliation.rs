@@ -166,13 +166,14 @@ fn process_dir_entries(
         } else if file_type.is_file() {
             if let Ok(canon_file) = std::fs::canonicalize(&path) {
                 if canon_file.starts_with(canonical_root)
-                    && let Some(name) = path.file_name() {
-                        index
-                            .candidates
-                            .entry(name.to_os_string())
-                            .or_default()
-                            .push(path);
-                    }
+                    && let Some(name) = path.file_name()
+                {
+                    index
+                        .candidates
+                        .entry(name.to_os_string())
+                        .or_default()
+                        .push(path);
+                }
             } else {
                 index.incomplete = true;
             }
@@ -189,13 +190,14 @@ fn process_dir_entries(
                     queue.push_back((target.clone(), target, depth + 1));
                 }
             } else if target.is_file()
-                && let Some(name) = path.file_name() {
-                    index
-                        .candidates
-                        .entry(name.to_os_string())
-                        .or_default()
-                        .push(path);
-                }
+                && let Some(name) = path.file_name()
+            {
+                index
+                    .candidates
+                    .entry(name.to_os_string())
+                    .or_default()
+                    .push(path);
+            }
         }
     }
     true

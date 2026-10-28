@@ -20,15 +20,15 @@
 //! public store API costs minutes in a debug build, which is why the realistic run sits
 //! behind `--ignored`/`--release`.
 
+#[path = "perf_baseline/ddl_write_cost.rs"]
+mod ddl_write_cost;
 #[path = "perf_baseline/fixture.rs"]
 mod fixture;
 #[path = "perf_baseline/fixture_cache.rs"]
 mod fixture_cache;
+#[path = "perf_baseline/gate.rs"]
+mod gate;
 #[path = "perf_baseline/measure.rs"]
 mod measure;
 #[path = "perf_baseline/ops.rs"]
 mod ops;
-#[path = "perf_baseline/gate.rs"]
-mod gate;
-#[path = "perf_baseline/ddl_write_cost.rs"]
-mod ddl_write_cost;

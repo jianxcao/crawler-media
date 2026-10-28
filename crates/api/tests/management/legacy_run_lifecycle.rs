@@ -18,8 +18,8 @@ use std::str::FromStr;
 use tower::ServiceExt;
 
 use super::common::{
-    Fixtures, create_member, create_site, json_body, json_error, nexusphp, request, state,
-    create_rule_set, subscribe_payload_with_filter,
+    Fixtures, create_member, create_rule_set, create_site, json_body, json_error, nexusphp,
+    request, state, subscribe_payload_with_filter,
 };
 
 struct PauseGateFetcher {

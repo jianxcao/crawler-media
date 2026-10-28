@@ -146,15 +146,15 @@ fn resolve_media(
     if let Some(tmdb_id) = &updated.tmdb_id
         && let Ok(Some(meta)) =
             crate::scrape_metadata::fetch_tmdb_metadata(state, updated.kind, tmdb_id)
-        {
-            crate::scrape_metadata::adopt_tmdb_metadata(
-                state,
-                &updated,
-                tmdb_id,
-                domain::EntityScope::Work,
-            );
-            crate::scrape_metadata::record_scraped_display(state, updated.id, &meta);
-        }
+    {
+        crate::scrape_metadata::adopt_tmdb_metadata(
+            state,
+            &updated,
+            tmdb_id,
+            domain::EntityScope::Work,
+        );
+        crate::scrape_metadata::record_scraped_display(state, updated.id, &meta);
+    }
     Some(updated)
 }
 
@@ -227,20 +227,20 @@ pub(crate) fn write_resolved_nfo(state: &ApiState, media: &Media, sample_path: &
         if nfo_enabled
             && let Ok(Some(metadata)) =
                 crate::scrape_metadata::fetch_tmdb_metadata(state, media.kind, tmdb_id)
-            {
-                let nfo = crate::scrape_metadata::nfo_from_tmdb(media, &metadata);
-                if let Some(stem) = sample_path.file_stem().and_then(|value| value.to_str()) {
-                    let target = sample_path.with_file_name(format!("{stem}.nfo"));
-                    let write = || {
-                        crate::scrape_metadata::write_nfo(&target, media, &nfo);
-                        Ok(())
-                    };
-                    let _ = match &lease {
-                        Some(lease) => lease.publish(write),
-                        None => write(),
-                    };
-                }
+        {
+            let nfo = crate::scrape_metadata::nfo_from_tmdb(media, &metadata);
+            if let Some(stem) = sample_path.file_stem().and_then(|value| value.to_str()) {
+                let target = sample_path.with_file_name(format!("{stem}.nfo"));
+                let write = || {
+                    crate::scrape_metadata::write_nfo(&target, media, &nfo);
+                    Ok(())
+                };
+                let _ = match &lease {
+                    Some(lease) => lease.publish(write),
+                    None => write(),
+                };
             }
+        }
         let movie_root = sample_path.parent().unwrap_or(sample_path);
         crate::scrape_metadata::scrape_movie_fanart(state, media, movie_root);
     }

@@ -202,7 +202,8 @@ async fn reconciliation_bounds_budget_and_depth() {
     let control = library::WorkControl::default();
     // Index with max_entries = 5 to verify incomplete flag
     let idx_small =
-        api::library_reconciliation::index_basenames(std::slice::from_ref(&root), &control, 5).unwrap();
+        api::library_reconciliation::index_basenames(std::slice::from_ref(&root), &control, 5)
+            .unwrap();
 
     assert!(idx_small.examined >= 5);
     assert!(idx_small.incomplete);

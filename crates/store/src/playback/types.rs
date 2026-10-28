@@ -1,6 +1,5 @@
 use domain::{
-    LibraryFile, MediaId, PhysicalSourceId, TimelineMode, TypedItemId, UnitKey,
-    UnitScope, UserId,
+    LibraryFile, MediaId, PhysicalSourceId, TimelineMode, TypedItemId, UnitKey, UnitScope, UserId,
 };
 use serde::{Deserialize, Serialize};
 

@@ -24,7 +24,9 @@ async fn scan_seen_checkpoints_and_avoids_reprocessing() {
     // Checkpoint f1 as seen
     {
         let guard = store_arc.lock();
-        guard.record_scan_seen(&op.id, std::slice::from_ref(&f1)).unwrap();
+        guard
+            .record_scan_seen(&op.id, std::slice::from_ref(&f1))
+            .unwrap();
         assert!(
             guard
                 .is_scan_seen(&op.id, &f1.display().to_string())
@@ -114,7 +116,9 @@ async fn resumed_scan_skips_checkpointed_files() {
             .enqueue_scan(&fix.library_id, &sig, &[], 2000)
             .unwrap();
         assert_ne!(op.id, op_id, "上一个 operation 已终态，应新建 operation");
-        guard.record_scan_seen(&op.id, std::slice::from_ref(&f1)).unwrap();
+        guard
+            .record_scan_seen(&op.id, std::slice::from_ref(&f1))
+            .unwrap();
         guard
             .claim_next_queued_scan(&[])
             .unwrap()
@@ -194,7 +198,9 @@ async fn restored_file_is_reprocessed_and_missing_cleared() {
             .enqueue_scan(&fix.library_id, &sig, &[], 1000)
             .unwrap();
         // 预置断点：路径「已经扫过」，但台账仍是 missing。
-        guard.record_scan_seen(&op.id, std::slice::from_ref(&file)).unwrap();
+        guard
+            .record_scan_seen(&op.id, std::slice::from_ref(&file))
+            .unwrap();
         op
     };
     fix.state.scan_coordinator.trigger_next(&fix.state);
@@ -235,7 +241,9 @@ async fn changed_file_is_reprocessed_despite_checkpoint() {
         let op = guard
             .enqueue_scan(&fix.library_id, &sig, &[], 1000)
             .unwrap();
-        guard.record_scan_seen(&op.id, std::slice::from_ref(&file)).unwrap();
+        guard
+            .record_scan_seen(&op.id, std::slice::from_ref(&file))
+            .unwrap();
         op
     };
     // 内容变化（size 变）：断点必须失效。
@@ -298,7 +306,9 @@ async fn changed_strm_url_with_same_size_and_mtime_is_reprocessed_and_reprobed()
         let op = guard
             .enqueue_scan(&fix.library_id, &sig, &[], 1000)
             .unwrap();
-        guard.record_scan_seen(&op.id, std::slice::from_ref(&file)).unwrap();
+        guard
+            .record_scan_seen(&op.id, std::slice::from_ref(&file))
+            .unwrap();
         op
     };
     // 同长度 URL 替换 + 恢复原 mtime：size/mtime 完全一致。

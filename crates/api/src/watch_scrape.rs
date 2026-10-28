@@ -183,9 +183,11 @@ fn resolve_scanned_files(
         for dest in transferred {
             if let Ok(Some(row)) = store.file_coverage_by_path(&dest.path.display().to_string())
                 && let Ok(Some(m)) = store.get_media(row.file.media_id)
-                    && m.tmdb_id.is_none() && m.kind != domain::MediaKind::Video {
-                        map.entry(m.id).or_insert((m, dest.path.clone()));
-                    }
+                && m.tmdb_id.is_none()
+                && m.kind != domain::MediaKind::Video
+            {
+                map.entry(m.id).or_insert((m, dest.path.clone()));
+            }
         }
         map
     };

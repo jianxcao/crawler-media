@@ -12,12 +12,22 @@ fn adoption(media: domain::MediaId, source: &str, overview: &str) -> MetadataAdo
     fields.title = domain::FieldValue::Value("Priority Title".into());
     fields.overview = domain::FieldValue::Value(overview.into());
     MetadataAdoption {
-        media_id: media, scope: EntityScope::Work, locale: "zh-CN".into(), source: source.into(),
-        provider_entity_id: provider_id(source).into(), provider_work_id: provider_id(source).into(),
+        media_id: media,
+        scope: EntityScope::Work,
+        locale: "zh-CN".into(),
+        source: source.into(),
+        provider_entity_id: provider_id(source).into(),
+        provider_work_id: provider_id(source).into(),
         fetched_at: 1000,
-        normalized: domain::NormalizedMetadata { fields, field_origins: Default::default() },
+        normalized: domain::NormalizedMetadata {
+            fields,
+            field_origins: Default::default(),
+        },
         expected_revision: Some(0),
-        preferences: MetadataPreferences { language_priority: vec!["zh-CN".into()], cert_country_priority: vec!["CN".into()] },
+        preferences: MetadataPreferences {
+            language_priority: vec!["zh-CN".into()],
+            cert_country_priority: vec!["CN".into()],
+        },
     }
 }
 

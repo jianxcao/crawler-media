@@ -21,13 +21,14 @@ pub(crate) fn resolve_device_target(
         .unwrap_or(false);
     if !admin {
         if let Some(raw) = &query.user_id
-            && domain::UserId::from_str(raw).ok() != Some(acting_user) {
-                return Err(err(
-                    StatusCode::FORBIDDEN,
-                    "auth.forbidden",
-                    "不能操作其他成员的播放设备",
-                ));
-            }
+            && domain::UserId::from_str(raw).ok() != Some(acting_user)
+        {
+            return Err(err(
+                StatusCode::FORBIDDEN,
+                "auth.forbidden",
+                "不能操作其他成员的播放设备",
+            ));
+        }
         return Ok(acting_user);
     }
     if let Some(raw) = &query.user_id {

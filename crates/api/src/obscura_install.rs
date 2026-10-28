@@ -195,13 +195,13 @@ impl crate::obscura_manager::ObscuraInstaller for ReleaseInstaller {
 
                 if let Some(len_header) = response.headers().get("content-length")
                     && let Ok(len_str) = len_header.to_str()
-                        && let Ok(content_len) = len_str.parse::<u64>()
-                            && (content_len > self.max_archive_bytes || content_len != expected_size)
-                            {
-                                return Err(InstallError::InvalidArchive(format!(
-                                    "Content-Length mismatch: expected {expected_size}, got {content_len}"
-                                )));
-                            }
+                    && let Ok(content_len) = len_str.parse::<u64>()
+                    && (content_len > self.max_archive_bytes || content_len != expected_size)
+                {
+                    return Err(InstallError::InvalidArchive(format!(
+                        "Content-Length mismatch: expected {expected_size}, got {content_len}"
+                    )));
+                }
 
                 let nonce = uuid::Uuid::new_v4().simple().to_string();
                 let part_path = bin_dir.join(format!(".obscura-{nonce}.tar.gz.part"));

@@ -280,9 +280,10 @@ pub(super) fn merge_catalog_metadata(
     let catalog_people = people_from_nfo(Some(&tmdb_nfo));
     merge_people(&mut item.people, catalog_people);
     if let Some(episode) = episode
-        && item.episode_name.as_deref().is_none_or(str::is_empty) {
-            item.episode_name = episode.name.clone();
-        }
+        && item.episode_name.as_deref().is_none_or(str::is_empty)
+    {
+        item.episode_name = episode.name.clone();
+    }
     item
 }
 

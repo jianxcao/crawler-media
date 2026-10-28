@@ -8,11 +8,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, mpsc};
 use std::time::{Duration, Instant};
 
+use api::Store;
 use api::maintenance::{
     ConfiguredSqliteExecutor, DatabaseExecutor, DatabaseName, DatabaseOutcome, DatabaseReport,
     DatabaseTarget, MaintenanceContext, SqliteExecutor, SqliteLimits, database_targets, run,
 };
-use api::Store;
 use domain::MediaKind;
 use jobs::{JobKind, NewDef};
 use parking_lot::Mutex;

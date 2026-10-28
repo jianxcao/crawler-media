@@ -311,11 +311,7 @@ async fn orphaned_row_presence_is_attributed_to_its_recorded_library() {
         let store = fix.state.store();
         let guard = store.lock();
         let loaded = guard.file_coverage_by_id(row.file_id).unwrap().unwrap();
-        let default_id = guard
-            .default_library(MediaKind::Movie)
-            .unwrap()
-            .unwrap()
-            .id;
+        let default_id = guard.default_library(MediaKind::Movie).unwrap().unwrap().id;
         (loaded.file.library_id.to_string(), default_id)
     };
     assert_eq!(recorded.0, fix.library_id);

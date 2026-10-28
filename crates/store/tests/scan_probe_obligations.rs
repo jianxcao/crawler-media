@@ -86,7 +86,9 @@ fn ledger_cleanup_removes_obligation_not_user_facts() {
     let (store, lib, media_id) = setup(&tmp.path().join("data"));
 
     let row = sample_row(media_id, "/movies/clean.mkv");
-    store.insert_scanned_files(std::slice::from_ref(&row), 1000).unwrap();
+    store
+        .insert_scanned_files(std::slice::from_ref(&row), 1000)
+        .unwrap();
 
     // Verify obligation exists
     let obs = store.scan_probe_obligations(10).unwrap();
@@ -114,7 +116,9 @@ fn ack_removes_obligation() {
     let (store, _lib, media_id) = setup(&tmp.path().join("data"));
 
     let row = sample_row(media_id, "/movies/ack.mkv");
-    store.insert_scanned_files(std::slice::from_ref(&row), 1000).unwrap();
+    store
+        .insert_scanned_files(std::slice::from_ref(&row), 1000)
+        .unwrap();
 
     assert_eq!(store.scan_probe_obligations(10).unwrap().len(), 1);
     store.ack_scan_probe_obligation(row.file_id).unwrap();

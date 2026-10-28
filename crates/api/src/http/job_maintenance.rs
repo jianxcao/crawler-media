@@ -100,9 +100,10 @@ pub(crate) async fn update_maintenance_config(
         return message;
     }
     if let Some(secs) = body.interval_secs
-        && let Err(message) = validate_maintenance_interval(secs) {
-            return err(StatusCode::BAD_REQUEST, "job.invalid_interval", &message);
-        }
+        && let Err(message) = validate_maintenance_interval(secs)
+    {
+        return err(StatusCode::BAD_REQUEST, "job.invalid_interval", &message);
+    }
 
     let Some(expected) = body.expected_payload.as_ref() else {
         return err(

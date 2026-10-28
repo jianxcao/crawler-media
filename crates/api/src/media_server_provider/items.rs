@@ -231,7 +231,10 @@ fn direct_series_rollup(
             continue;
         };
         // Published ownership is the row's explicit Library, never a path guess.
-        let Some(owner) = snapshot.ownership.library(&coverage.file.library_id.to_string()) else {
+        let Some(owner) = snapshot
+            .ownership
+            .library(&coverage.file.library_id.to_string())
+        else {
             continue;
         };
         let accessible = snapshot.ownership.accepts_work(&owner.id)

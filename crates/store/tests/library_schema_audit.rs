@@ -27,10 +27,10 @@ fn open_library_db() -> (tempfile::TempDir, Connection) {
 }
 
 fn plan_text(conn: &Connection, sql: &str) -> String {
-    let mut stmt = conn
-        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
-        .unwrap();
-    let args: Vec<String> = (0..stmt.parameter_count()).map(|_| "x".to_string()).collect();
+    let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+    let args: Vec<String> = (0..stmt.parameter_count())
+        .map(|_| "x".to_string())
+        .collect();
     let rows: Vec<String> = stmt
         .query_map(rusqlite::params_from_iter(args.iter()), |r| r.get(3))
         .unwrap()
@@ -266,9 +266,7 @@ fn facet_dimensions_keep_their_work_after_the_terms_pk_reorder() {
         ("stock", 6, 1, 399),
         ("watch", 5, 1, 1995),
     ];
-    for ((name, filter), (want, statements, sorts, fullscan)) in
-        cases.into_iter().zip(budget)
-    {
+    for ((name, filter), (want, statements, sorts, fullscan)) in cases.into_iter().zip(budget) {
         assert_eq!(name, want);
         let request = FacetRequest {
             library_id: lib,

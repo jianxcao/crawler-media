@@ -1,5 +1,6 @@
 use domain::{
-    Confidence, EntityScope, FilePresence, FilePublication, FileVersion, LibraryFile, Media, MediaKind, QualitySource, UnitKey, UserId,
+    Confidence, EntityScope, FilePresence, FilePublication, FileVersion, LibraryFile, Media,
+    MediaKind, QualitySource, UnitKey, UserId,
 };
 use store::Store;
 use store::library_query::{BrowseFilter, BrowseOrder, BrowsePage, LibraryQuery};

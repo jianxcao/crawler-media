@@ -86,7 +86,11 @@ async fn imported_ledger_row_can_restore_a_missing_library_file() {
     let store = Store::open(tmp.path().join("data")).unwrap();
     let root = Path::new(destination).parent().unwrap().to_path_buf();
     store.verify_library_files(&[root], 123).unwrap();
-    let name = Path::new(destination).file_name().unwrap().to_str().unwrap();
+    let name = Path::new(destination)
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(
         store
             .missing_at_by_path()

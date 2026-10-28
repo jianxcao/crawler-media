@@ -149,7 +149,8 @@ fn legacy_dsl_filter_rows_are_refused() {
         .get_filter(id)
         .expect_err("a non-JSON atoms row must be refused");
     assert!(
-        err.to_string().contains("filter atoms are not a JSON array"),
+        err.to_string()
+            .contains("filter atoms are not a JSON array"),
         "expected a non-JSON rejection, got {err}"
     );
     assert!(

@@ -1,6 +1,5 @@
 //! HTTP response serialization for detailed library scan reports.
 
-
 use library::{ScanReport, ScanRootStatus};
 use serde::Serialize;
 

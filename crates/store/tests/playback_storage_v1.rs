@@ -1,12 +1,11 @@
 use domain::{
-    Confidence, FilePresence, FilePublication, FileVersion, LibraryFile, Media, MediaKind, PhysicalSourceId, QualitySource,
-    TypedItemId, UnitKey, UnitScope, UserId,
+    Confidence, FilePresence, FilePublication, FileVersion, LibraryFile, Media, MediaKind,
+    PhysicalSourceId, QualitySource, TypedItemId, UnitKey, UnitScope, UserId,
 };
 use store::Store;
 use store::library_write::{FilePublication as StorePublication, WriteScope};
 use store::playback::{
-    BoundPlaybackEvent, EventOutcome, PlaybackEventType, PlaybackMutation,
-    ResumeStatus,
+    BoundPlaybackEvent, EventOutcome, PlaybackEventType, PlaybackMutation, ResumeStatus,
 };
 
 fn create_media(store: &Store, id: &str, title: &str, kind: MediaKind) -> Media {

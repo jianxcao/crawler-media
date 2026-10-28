@@ -164,12 +164,7 @@ async fn rejected_persistence_does_not_ack_scan_obligation() {
         0
     );
     assert_eq!(
-        fix.state
-            .store()
-            .lock()
-            .scan_probe_obligations(10)
-            .unwrap()[0]
-            .ledger_id,
+        fix.state.store().lock().scan_probe_obligations(10).unwrap()[0].ledger_id,
         row.file.file_id
     );
     connection

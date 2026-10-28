@@ -406,19 +406,20 @@ fn serve_fake_qbit(deletes: Arc<Mutex<Vec<String>>>) -> String {
                     }
                     bytes.extend_from_slice(&chunk[..n]);
                     if expected.is_none()
-                        && let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
-                            let headers = String::from_utf8_lossy(&bytes[..end]);
-                            let length = headers
-                                .lines()
-                                .find_map(|line| {
-                                    let (name, value) = line.split_once(':')?;
-                                    name.eq_ignore_ascii_case("content-length")
-                                        .then(|| value.trim().parse::<usize>().ok())
-                                        .flatten()
-                                })
-                                .unwrap_or(0);
-                            expected = Some(end + 4 + length);
-                        }
+                        && let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n")
+                    {
+                        let headers = String::from_utf8_lossy(&bytes[..end]);
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        expected = Some(end + 4 + length);
+                    }
                     if expected.is_some_and(|len| bytes.len() >= len) {
                         break;
                     }

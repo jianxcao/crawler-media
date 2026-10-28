@@ -367,9 +367,10 @@ pub(crate) fn claim_probe_stage_tx(
             }
             if status == "failed"
                 && let Some(due) = next_retry
-                    && due > now_ms {
-                        return Ok(false);
-                    }
+                && due > now_ms
+            {
+                return Ok(false);
+            }
             let updated = tx.execute(
                 "UPDATE probe_stage_state
                  SET status = 'running', active_job_id = ?4, updated_at_ms = ?5

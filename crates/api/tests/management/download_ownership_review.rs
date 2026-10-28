@@ -26,10 +26,9 @@ struct OwnedDownloads {
 impl OwnedDownloads {
     fn record_removal(&self, enclosure: &str, delete_files: bool) -> Result<(), DownloaderError> {
         self.removed.lock().push(enclosure.to_string());
-        if delete_files
-            && let Some(path) = self.files.lock().get(enclosure) {
-                std::fs::remove_file(path)?;
-            }
+        if delete_files && let Some(path) = self.files.lock().get(enclosure) {
+            std::fs::remove_file(path)?;
+        }
         Ok(())
     }
 }

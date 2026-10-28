@@ -1,5 +1,5 @@
-use super::fixture::*;
 use super::super::*;
+use super::fixture::*;
 
 /// P3-3：chunk 已提交 ledger 后失败，失败报告必须带上该 chunk 的已提交前缀。
 #[tokio::test]

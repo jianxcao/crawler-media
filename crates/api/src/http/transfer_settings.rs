@@ -57,11 +57,15 @@ pub(crate) async fn patch(
         watch_inplace: body.watch_inplace,
     };
     let handle = state.store();
-    match state.http_work.run_to_completion(move || {
-        super::store_wait::with_bounded_store(handle, |store| {
-            store.patch_transfer_settings(body.expected_revision, patch)
+    match state
+        .http_work
+        .run_to_completion(move || {
+            super::store_wait::with_bounded_store(handle, |store| {
+                store.patch_transfer_settings(body.expected_revision, patch)
+            })
         })
-    }).await {
+        .await
+    {
         Ok(Some(Ok(settings))) => ok(serde_json::json!(settings)).into_response(),
         Ok(Some(Err(error))) => failure(error),
         Ok(None) => super::store_wait::busy_response(),

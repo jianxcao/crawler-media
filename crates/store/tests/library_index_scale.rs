@@ -93,7 +93,9 @@ fn seed(store: &Store, count: usize) -> LibraryId {
     }
     tx.commit().unwrap();
     let op = format!("index-scale-{}", uuid_like("op"));
-    store.begin_library_integrity(library_id, true, &op, 1_000).unwrap();
+    store
+        .begin_library_integrity(library_id, true, &op, 1_000)
+        .unwrap();
     loop {
         let status = store.advance_library_operation(&op, 1_001, 100).unwrap();
         if status.state != "applying" {

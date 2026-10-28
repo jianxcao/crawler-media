@@ -384,16 +384,17 @@ pub fn read_request(stream: &mut TcpStream) -> String {
         }
         request.extend_from_slice(&buf[..n]);
         if expected.is_none()
-            && let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
-                let headers = String::from_utf8_lossy(&request[..end]);
-                let len = headers.lines().find_map(|line| {
-                    let (k, v) = line.split_once(':')?;
-                    k.eq_ignore_ascii_case("content-length")
-                        .then(|| v.trim().parse::<usize>().ok())
-                        .flatten()
-                });
-                expected = Some(end + 4 + len.unwrap_or(0));
-            }
+            && let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n")
+        {
+            let headers = String::from_utf8_lossy(&request[..end]);
+            let len = headers.lines().find_map(|line| {
+                let (k, v) = line.split_once(':')?;
+                k.eq_ignore_ascii_case("content-length")
+                    .then(|| v.trim().parse::<usize>().ok())
+                    .flatten()
+            });
+            expected = Some(end + 4 + len.unwrap_or(0));
+        }
         if expected.is_some_and(|len| request.len() >= len) {
             break;
         }
@@ -426,12 +427,14 @@ fn percent_decode(value: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len()
-            && let Ok(b) = u8::from_str_radix(&value[i + 1..i + 3], 16) {
-                out.push(b);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(b) = u8::from_str_radix(&value[i + 1..i + 3], 16)
+        {
+            out.push(b);
+            i += 3;
+            continue;
+        }
         out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
         i += 1;
     }

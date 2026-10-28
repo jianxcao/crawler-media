@@ -121,7 +121,15 @@ async fn source_quality_survives_persistence_for_wash_cut() {
         torrent,
         score: 100,
     };
-    assert!(subscribe::choose(&sub, Some(&filter), std::slice::from_ref(&candidate), &facts).is_empty());
+    assert!(
+        subscribe::choose(
+            &sub,
+            Some(&filter),
+            std::slice::from_ref(&candidate),
+            &facts
+        )
+        .is_empty()
+    );
     {
         let handle = state.store();
         let store = handle.lock();

@@ -17,8 +17,7 @@ use jobs::JobKind;
 #[path = "maintenance_support/mod.rs"]
 mod support;
 use support::{
-    DB_LIGHT, DB_VACUUM, data_dir, db_entry, enqueue_claim, progress_of, temp_state,
-    unix_now,
+    DB_LIGHT, DB_VACUUM, data_dir, db_entry, enqueue_claim, progress_of, temp_state, unix_now,
 };
 
 // ---------------------------------------------------------------------------

@@ -79,7 +79,13 @@ fn fixture() -> Fixture {
     let nfo = fixture.video.with_extension("nfo");
     let request = fixture
         .store
-        .nfo_export_target(&fixture.video, &nfo, EntityScope::Work, "scrape-op", "export-a")
+        .nfo_export_target(
+            &fixture.video,
+            &nfo,
+            EntityScope::Work,
+            "scrape-op",
+            "export-a",
+        )
         .unwrap()
         .unwrap();
     fixture.store.plan_nfo_export(&request, 1_000).unwrap();

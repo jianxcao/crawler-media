@@ -435,10 +435,12 @@ pub(crate) async fn hammer_while_scanning(
             // 才能区分 auth / handler 读 / handler 写 / 门禁 哪一段判的繁忙。
             let body = crate::common::json_body(response).await;
             let elapsed = latencies.last().copied().unwrap_or_default();
-            *failure_codes.entry(format!(
-                "{status} {} {} @{elapsed:?}",
-                body["error"]["code"], body["error"]["message"]
-            )).or_default() += 1;
+            *failure_codes
+                .entry(format!(
+                    "{status} {} {} @{elapsed:?}",
+                    body["error"]["code"], body["error"]["message"]
+                ))
+                .or_default() += 1;
         }
     }
     if !failure_codes.is_empty() {

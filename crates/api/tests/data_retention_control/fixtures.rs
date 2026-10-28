@@ -119,7 +119,10 @@ pub(crate) const RETENTION_DAYS: i64 = 90;
 
 /// 夹具：真实登记 Media、经公开 `publish_files` 落一个已发布文件、写一条播放进度。
 /// 返回的 (user, media) 之后一律用公开 seam 复核，不读私有 SQL。
-pub(crate) fn seed_local_facts(state: &ApiState, root: &std::path::Path) -> (domain::UserId, domain::MediaId) {
+pub(crate) fn seed_local_facts(
+    state: &ApiState,
+    root: &std::path::Path,
+) -> (domain::UserId, domain::MediaId) {
     let user = domain::UserId::new();
     let media = domain::MediaId::new();
     let store = state.store();
@@ -180,7 +183,11 @@ pub(crate) fn library_stats(state: &ApiState) -> store::LibraryRosterStats {
         .unwrap()
 }
 
-pub(crate) fn playback_count(state: &ApiState, user: domain::UserId, media: domain::MediaId) -> usize {
+pub(crate) fn playback_count(
+    state: &ApiState,
+    user: domain::UserId,
+    media: domain::MediaId,
+) -> usize {
     state
         .store()
         .lock()

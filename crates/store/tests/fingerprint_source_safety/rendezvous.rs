@@ -22,7 +22,10 @@ fn rows(store: &Store, root: &std::path::Path, count: usize) -> Vec<FixtureFile>
     (0..count)
         .map(|index| {
             let mut row = row(store, root, domain::MediaId::new());
-            row.path = root.join(format!("episode-{index}.mkv")).to_string_lossy().into_owned();
+            row.path = root
+                .join(format!("episode-{index}.mkv"))
+                .to_string_lossy()
+                .into_owned();
             std::fs::write(&row.path, b"fixture").unwrap();
             store::test_support::publish_fixture_file(store, &row).unwrap();
             row
@@ -44,7 +47,8 @@ fn delete_with_busy_retry(deleting: &Store, path: &str) -> Result<(), store::Sto
     loop {
         match deleting.delete_ledger_path(path) {
             Err(store::StoreError::Sqlite(rusqlite::Error::SqliteFailure(failure, _)))
-                if failure.code == rusqlite::ErrorCode::DatabaseBusy && Instant::now() < deadline =>
+                if failure.code == rusqlite::ErrorCode::DatabaseBusy
+                    && Instant::now() < deadline =>
             {
                 std::thread::yield_now();
             }
@@ -91,11 +95,8 @@ fn independent_store_handles_cannot_reinsert_samples_while_ledger_is_deleted() {
                 }
                 // A concurrent deletion may reject the write or invalidate a SQLite read
                 // snapshot. Either result must leave no sample once deletion commits.
-                let _ = capturing.complete_fingerprint_attempt_for_source(
-                    &attempt,
-                    &sample,
-                    &row.path,
-                );
+                let _ =
+                    capturing.complete_fingerprint_attempt_for_source(&attempt, &sample, &row.path);
                 if release_rx.recv_timeout(ROUND_DEADLINE).is_err() {
                     return;
                 }
@@ -105,9 +106,9 @@ fn independent_store_handles_cannot_reinsert_samples_while_ledger_is_deleted() {
         let mut failure = None;
         for row in rows {
             let path = row.path.as_str();
-            if let Err(error) =
-                round(&ready_rx, &release_tx, || delete_with_busy_retry(&deleting, path))
-            {
+            if let Err(error) = round(&ready_rx, &release_tx, || {
+                delete_with_busy_retry(&deleting, path)
+            }) {
                 failure = Some(error);
                 break;
             }
@@ -171,7 +172,10 @@ fn a_delete_error_releases_the_capture_and_reports_itself() {
             "capture must be released before the error is reported"
         );
     });
-    assert!(started.elapsed() < ROUND_DEADLINE, "the round must be bounded");
+    assert!(
+        started.elapsed() < ROUND_DEADLINE,
+        "the round must be bounded"
+    );
     // Nothing was deleted, so the row is still the authoritative record.
     assert!(deleting.file_coverage_by_path(&row.path).unwrap().is_some());
 }

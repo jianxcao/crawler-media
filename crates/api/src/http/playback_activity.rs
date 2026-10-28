@@ -89,8 +89,10 @@ pub(crate) async fn activity(
             .filter(|session| !session.admin_ended)
             .filter(|session| admin || user_id == Some(session.user_id))
             .collect();
-        let media_ids: Vec<domain::MediaId> = sessions.iter().map(|session| session.media_id).collect();
-        let user_ids: Vec<domain::UserId> = sessions.iter().map(|session| session.user_id).collect();
+        let media_ids: Vec<domain::MediaId> =
+            sessions.iter().map(|session| session.media_id).collect();
+        let user_ids: Vec<domain::UserId> =
+            sessions.iter().map(|session| session.user_id).collect();
         let read = load_read(store, &media_ids, &user_ids);
         let mut hidden = 0usize;
         let items: Vec<Value> = sessions

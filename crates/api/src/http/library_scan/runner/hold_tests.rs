@@ -114,7 +114,11 @@ fn summarise(samples: &[super::hold::ScanHoldSample]) -> Vec<SectionStats> {
 }
 
 /// Runs one full scan over the fixture and returns the recorded lock sections.
-fn scan_once(state: &ApiState, library_id: &str, root: &std::path::Path) -> Vec<super::hold::ScanHoldSample> {
+fn scan_once(
+    state: &ApiState,
+    library_id: &str,
+    root: &std::path::Path,
+) -> Vec<super::hold::ScanHoldSample> {
     // A real operation row: the chunk loop then exercises the checkpoint and scan_seen paths.
     let op_id = {
         let store = state.store();
@@ -125,7 +129,8 @@ fn scan_once(state: &ApiState, library_id: &str, root: &std::path::Path) -> Vec<
             .id
     };
     let lease = state.acquire_library_work(library_id).unwrap();
-    let scan_scope = crate::http::library_scan::scope::ScanScope::capture(state, library_id).unwrap();
+    let scan_scope =
+        crate::http::library_scan::scope::ScanScope::capture(state, library_id).unwrap();
     let ctx = super::walk::ScanContext {
         state,
         id: library_id,
@@ -177,9 +182,16 @@ fn measure_scan_lock_sections() {
     let (_dir, state, library_id, root) = tv_fixture();
     write_episodes(&root, episodes);
     let samples = scan_once(&state, &library_id, &root);
-    assert!(!samples.is_empty(), "the trace must record the scan's sections");
+    assert!(
+        !samples.is_empty(),
+        "the trace must record the scan's sections"
+    );
     let total: u64 = samples.iter().map(|sample| sample.micros).sum();
-    let longest = samples.iter().map(|sample| sample.micros).max().unwrap_or(0);
+    let longest = samples
+        .iter()
+        .map(|sample| sample.micros)
+        .max()
+        .unwrap_or(0);
     println!(
         "TOTAL_HOLD_MS={} LONGEST_HOLD_MS={}",
         total / 1_000,

@@ -49,14 +49,10 @@ pub(super) fn classify(request: &NormalizedProtocolRequest, scope: &Scope) -> Pr
     } else {
         None
     };
-    let raw_genre = q
-        .genres
-        .first()
-        .map(String::as_str)
-        .or(match &q.parent {
-            domain::ProtocolParent::Genre(value) => Some(value.as_str()),
-            _ => None,
-        });
+    let raw_genre = q.genres.first().map(String::as_str).or(match &q.parent {
+        domain::ProtocolParent::Genre(value) => Some(value.as_str()),
+        _ => None,
+    });
     let plain_genre = raw_genre.is_some_and(|v| {
         !v.to_ascii_lowercase().starts_with("genre_")
             && uuid::Uuid::parse_str(v).is_err()

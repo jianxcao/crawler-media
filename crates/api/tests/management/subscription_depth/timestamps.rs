@@ -160,4 +160,3 @@ async fn progress_and_removal_preview_count_pending_torrents() {
 
     assert_progress_and_preview(&app, &id).await;
 }
-

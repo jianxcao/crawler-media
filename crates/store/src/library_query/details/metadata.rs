@@ -119,9 +119,9 @@ impl Store {
                 pick_locale_row(&rows, preferred_locale)
                 && let Some(facts) =
                     adopted_facts_from_json(genres_json, countries_json, details_json, media_id)
-                {
-                    out.insert(media_id, facts);
-                }
+            {
+                out.insert(media_id, facts);
+            }
         }
         Ok(out)
     }
@@ -209,9 +209,10 @@ pub(crate) fn fill_from_adopted(base: &mut MetadataFields, adopted: &EffectiveMe
 
 fn fill<T>(field: &mut FieldValue<T>, value: Option<T>) {
     if field.is_missing()
-        && let Some(value) = value {
-            *field = FieldValue::Value(value);
-        }
+        && let Some(value) = value
+    {
+        *field = FieldValue::Value(value);
+    }
 }
 
 fn adopted_facts_from_json(

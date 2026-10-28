@@ -14,7 +14,6 @@ struct FileCursor {
 
 const FILE_CURSOR_ORDER: &str = "file_id_asc";
 
-
 use super::super::{Store, StoreError};
 use super::types::FilePage;
 

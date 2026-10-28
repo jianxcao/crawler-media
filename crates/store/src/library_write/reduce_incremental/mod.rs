@@ -12,9 +12,7 @@ use domain::{LibraryId, MediaId};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::super::StoreError;
-use super::reduce::{
-    Counts, clear_summaries, facts_for, resolution_rank, upsert_item,
-};
+use super::reduce::{Counts, clear_summaries, facts_for, resolution_rank, upsert_item};
 
 mod terms;
 mod units;

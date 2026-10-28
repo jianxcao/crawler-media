@@ -221,9 +221,10 @@ pub(crate) fn write_series_nfos(
                 let path = row.file.path.with_extension("nfo");
                 let mut still_path = episode.still_path.clone();
                 if still_path.is_none()
-                    && let Ok(stills) = catalog.episode_stills(tmdb_id, season, episode_number) {
-                        still_path = stills.into_iter().next();
-                    }
+                    && let Ok(stills) = catalog.episode_stills(tmdb_id, season, episode_number)
+                {
+                    still_path = stills.into_iter().next();
+                }
                 adopt_tmdb_episode(
                     state,
                     media,
@@ -235,7 +236,7 @@ pub(crate) fn write_series_nfos(
                     captured,
                 );
                 let episode_coverage = domain::FileCoverage {
-        path_key: String::new(),
+                    path_key: String::new(),
                     file: row.file.clone(),
                     units: vec![*unit],
                 };
@@ -356,17 +357,16 @@ pub(crate) fn scrape_tv_sidecars(
             scrape_tv_stills(state, matched_episodes, &still_size);
         }
 
-        if mirror_images
-            && let Some(ref api_key) = fanart_api_key {
-                scrape_tv_fanart(
-                    state,
-                    media,
-                    &effective_root,
-                    &group_rows,
-                    api_key,
-                    &fanart_lang,
-                );
-            }
+        if mirror_images && let Some(ref api_key) = fanart_api_key {
+            scrape_tv_fanart(
+                state,
+                media,
+                &effective_root,
+                &group_rows,
+                api_key,
+                &fanart_lang,
+            );
+        }
     }
     tracing::info!(media = %media.title, "完成电视剧刮削与附属文件处理");
 }
@@ -409,16 +409,17 @@ fn scrape_tv_episodes_and_nfos(
         .collect();
     for season_meta in &tv_seasons {
         if owned_seasons.contains(&season_meta.season_number)
-            && let Some(captured) = captured {
-                adopt_tmdb_season(
-                    state,
-                    media,
-                    tmdb_id,
-                    season_meta,
-                    &preferred_lang,
-                    captured,
-                );
-            }
+            && let Some(captured) = captured
+        {
+            adopt_tmdb_season(
+                state,
+                media,
+                tmdb_id,
+                season_meta,
+                &preferred_lang,
+                captured,
+            );
+        }
     }
     let season_artworks: Vec<crate::fanart_artwork::SeasonArtwork> = tv_seasons
         .into_iter()
@@ -494,9 +495,10 @@ fn scrape_tv_episodes_and_nfos(
                         .find(|e| e.episode_number == ep_num)
                         .and_then(|ep| ep.still_path.clone());
                     if still_path.is_none()
-                        && let Ok(stills) = state.catalog.episode_stills(tmdb_id, *season, ep_num) {
-                            still_path = stills.into_iter().next();
-                        }
+                        && let Ok(stills) = state.catalog.episode_stills(tmdb_id, *season, ep_num)
+                    {
+                        still_path = stills.into_iter().next();
+                    }
                     ep_matches.push((row.file.path.clone(), still_path));
                 }
             }
@@ -571,13 +573,16 @@ fn scrape_tv_stills_with(
         {
             continue;
         }
-        if !ok && targets::video_present(&ep_path) && is_allowed(&ep_path)
-            && crate::episode_still::existing(&ep_path).is_none() {
-                let still_dest = crate::episode_still::path(&ep_path);
-                if let Err(err) = extract(&ep_path, 60_000, &still_dest) {
-                    tracing::warn!(error = %err, path = %ep_path.display(), "ffmpeg 抽取剧照失败");
-                }
+        if !ok
+            && targets::video_present(&ep_path)
+            && is_allowed(&ep_path)
+            && crate::episode_still::existing(&ep_path).is_none()
+        {
+            let still_dest = crate::episode_still::path(&ep_path);
+            if let Err(err) = extract(&ep_path, 60_000, &still_dest) {
+                tracing::warn!(error = %err, path = %ep_path.display(), "ffmpeg 抽取剧照失败");
             }
+        }
         crate::poster_fetch::record_discovered_artwork(state, &ep_path);
     }
 }

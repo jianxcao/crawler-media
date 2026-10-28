@@ -272,13 +272,15 @@ pub(super) fn unit_for_unit(
     season: i32,
     episode: i32,
 ) -> Result<Value, crate::store::StoreError> {
-    Ok(match store.unit_state(user_id, media_id, season, episode)? {
-        Some(unit) => unit_json(&unit),
-        None => json!({
-            "position_ms": 0, "played": false, "play_count": 0, "duration_ms": null,
-            "audio_track": null, "subtitle_track": null, "is_favorite": false,
-        }),
-    })
+    Ok(
+        match store.unit_state(user_id, media_id, season, episode)? {
+            Some(unit) => unit_json(&unit),
+            None => json!({
+                "position_ms": 0, "played": false, "play_count": 0, "duration_ms": null,
+                "audio_track": null, "subtitle_track": null, "is_favorite": false,
+            }),
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------

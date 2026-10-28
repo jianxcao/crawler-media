@@ -289,12 +289,13 @@ impl ObscuraManager {
 
         let version = self.launcher.version(&bin);
         if let Some(v) = &version
-            && !version_matches(v) {
-                tracing::warn!(reported = %v, expected = OBSCURA_VERSION, "Obscura binary version mismatch");
-                *self.last_error.lock() = Some(format!(
-                    "Obscura 版本不符：期望 {OBSCURA_VERSION}，实际 {v}"
-                ));
-            }
+            && !version_matches(v)
+        {
+            tracing::warn!(reported = %v, expected = OBSCURA_VERSION, "Obscura binary version mismatch");
+            *self.last_error.lock() = Some(format!(
+                "Obscura 版本不符：期望 {OBSCURA_VERSION}，实际 {v}"
+            ));
+        }
         *self.reported_version.lock() = version;
 
         for attempt in 0..=2 {
@@ -329,26 +330,24 @@ impl ObscuraManager {
                 }
                 if let Ok(resp) = agent.get(&check_url).call()
                     && let Ok(val) = resp.into_body().read_json::<Value>()
-                        && let Some(browser_str) = val.get("Browser").and_then(Value::as_str) {
-                            // The port was chosen before spawn: make sure the
-                            // answering listener is really our child, not a
-                            // local process that grabbed the port meanwhile.
-                            if child.owns_port(port) == Some(false) {
-                                tracing::error!(
-                                    port,
-                                    "CDP port is served by a foreign process; refusing it"
-                                );
-                                break;
-                            }
-                            // /json/version reports a Chrome UA (Chrome/145), not
-                            // the Obscura release; the version comes from --version.
-                            tracing::debug!(
-                                browser = browser_str,
-                                "Obscura /json/version answered"
-                            );
-                            verified = true;
-                            break;
-                        }
+                    && let Some(browser_str) = val.get("Browser").and_then(Value::as_str)
+                {
+                    // The port was chosen before spawn: make sure the
+                    // answering listener is really our child, not a
+                    // local process that grabbed the port meanwhile.
+                    if child.owns_port(port) == Some(false) {
+                        tracing::error!(
+                            port,
+                            "CDP port is served by a foreign process; refusing it"
+                        );
+                        break;
+                    }
+                    // /json/version reports a Chrome UA (Chrome/145), not
+                    // the Obscura release; the version comes from --version.
+                    tracing::debug!(browser = browser_str, "Obscura /json/version answered");
+                    verified = true;
+                    break;
+                }
                 std::thread::sleep(Duration::from_millis(50));
             }
 
@@ -408,52 +407,52 @@ impl ObscuraManager {
         let path = self.pidfile_path();
         if let Ok(content) = fs::read_to_string(&path) {
             if let Some(pid_str) = content.split_whitespace().next()
-                && let Ok(pid) = pid_str.parse::<u32>() {
-                    #[cfg(unix)]
-                    {
-                        // Check if pid is alive and belongs to obscura
-                        let proc_exe = format!("/proc/{pid}/exe");
-                        let is_obscura = if Path::new(&proc_exe).exists() {
-                            fs::read_link(&proc_exe)
-                                .map(|l| {
-                                    // A reinstalled binary shows up as "<path> (deleted)".
-                                    let raw = l.to_string_lossy();
-                                    let live = raw.strip_suffix(" (deleted)").unwrap_or(&raw);
-                                    Path::new(live) == self.binary_path()
-                                })
-                                .unwrap_or(false)
-                        } else {
-                            // On macOS or if /proc doesn't exist, check ps
-                            let output = Command::new("ps")
-                                .arg("-p")
-                                .arg(pid.to_string())
-                                .arg("-o")
-                                .arg("comm=")
-                                .output();
-                            match output {
-                                Ok(out) => {
-                                    let comm =
-                                        String::from_utf8_lossy(&out.stdout).trim().to_string();
-                                    comm.contains("obscura")
-                                }
-                                Err(_) => false,
+                && let Ok(pid) = pid_str.parse::<u32>()
+            {
+                #[cfg(unix)]
+                {
+                    // Check if pid is alive and belongs to obscura
+                    let proc_exe = format!("/proc/{pid}/exe");
+                    let is_obscura = if Path::new(&proc_exe).exists() {
+                        fs::read_link(&proc_exe)
+                            .map(|l| {
+                                // A reinstalled binary shows up as "<path> (deleted)".
+                                let raw = l.to_string_lossy();
+                                let live = raw.strip_suffix(" (deleted)").unwrap_or(&raw);
+                                Path::new(live) == self.binary_path()
+                            })
+                            .unwrap_or(false)
+                    } else {
+                        // On macOS or if /proc doesn't exist, check ps
+                        let output = Command::new("ps")
+                            .arg("-p")
+                            .arg(pid.to_string())
+                            .arg("-o")
+                            .arg("comm=")
+                            .output();
+                        match output {
+                            Ok(out) => {
+                                let comm = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                                comm.contains("obscura")
                             }
-                        };
-                        if is_obscura {
-                            tracing::info!(pid, "Reaping orphaned managed Obscura daemon");
-                            // Signal the whole group (obscura + obscura-worker).
-                            let _ = Command::new("kill")
-                                .arg("-TERM")
-                                .arg("--")
-                                .arg(format!("-{pid}"))
-                                .output();
-                            let _ = Command::new("kill")
-                                .arg("-TERM")
-                                .arg(pid.to_string())
-                                .output();
+                            Err(_) => false,
                         }
+                    };
+                    if is_obscura {
+                        tracing::info!(pid, "Reaping orphaned managed Obscura daemon");
+                        // Signal the whole group (obscura + obscura-worker).
+                        let _ = Command::new("kill")
+                            .arg("-TERM")
+                            .arg("--")
+                            .arg(format!("-{pid}"))
+                            .output();
+                        let _ = Command::new("kill")
+                            .arg("-TERM")
+                            .arg(pid.to_string())
+                            .output();
                     }
                 }
+            }
             let _ = fs::remove_file(path);
         }
     }

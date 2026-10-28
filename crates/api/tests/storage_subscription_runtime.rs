@@ -1,6 +1,4 @@
-use domain::{
-    Coverage, FetchMode, FilterId, MediaId, MediaKind, Subscribe, SubscribeId, UserId,
-};
+use domain::{Coverage, FetchMode, FilterId, MediaId, MediaKind, Subscribe, SubscribeId, UserId};
 use store::Store;
 
 #[test]

@@ -33,7 +33,8 @@ fn blank_language_keeps_chinese_default_and_avoids_legacy_english_cache() {
             "/search/tv?query=wire&first_air_date_year=2002",
             r#"{"results":[{"id":1438,"name":"The Wire","first_air_date":"2002-06-02"}]}"#,
         ],
-    ).unwrap();
+    )
+    .unwrap();
 
     for language in ["", "   "] {
         let client = Tmdb::new_at(LocalizedCatalog(paths.clone()), &db, 100)

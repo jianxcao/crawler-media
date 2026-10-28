@@ -46,10 +46,11 @@ impl Store {
             return Ok(fields);
         };
         if matches!(scope, EntityScope::Work)
-            && let Some(adopted) = self.get_effective_metadata(media_id, &resolved)? {
-                overlay_adopted_details(&mut fields, &adopted.details_json, media_id);
-                fill_from_adopted(&mut fields, &adopted);
-            }
+            && let Some(adopted) = self.get_effective_metadata(media_id, &resolved)?
+        {
+            overlay_adopted_details(&mut fields, &adopted.details_json, media_id);
+            fill_from_adopted(&mut fields, &adopted);
+        }
         let composed = self.effective_metadata_fields(library_id, media_id, scope, &resolved)?;
         overlay_missing(&mut fields, &composed.fields);
         Ok(fields)

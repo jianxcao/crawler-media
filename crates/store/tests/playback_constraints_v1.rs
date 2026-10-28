@@ -1,6 +1,4 @@
-use domain::{
-    Media, MediaId, MediaKind, UserId,
-};
+use domain::{Media, MediaId, MediaKind, UserId};
 use store::Store;
 
 #[test]

@@ -118,11 +118,7 @@ fn fixture() -> (tempfile::TempDir, axum::Router, String) {
     let (library_id, root) = movie_library(&api_state);
     for (letter, word) in [("A", "Alpha"), ("B", "Bravo"), ("C", "Charlie")] {
         for index in 0..10 {
-            seed_movie(
-                &api_state,
-                &format!("{word} {index:02}"),
-                &root,
-            );
+            seed_movie(&api_state, &format!("{word} {index:02}"), &root);
             let _ = letter;
         }
     }
@@ -170,11 +166,7 @@ async fn item_index_returns_opaque_cursors_and_no_absolute_index() {
         .collect();
     assert_eq!(initials, ["A", "B", "C"], "{body}");
     for bucket in buckets {
-        assert_eq!(
-            bucket["count"].as_u64(),
-            Some(10),
-            "每档 10 部: {bucket}"
-        );
+        assert_eq!(bucket["count"].as_u64(), Some(10), "每档 10 部: {bucket}");
         assert!(
             bucket.get("offset").is_none(),
             "绝对下标不得上线（Task 26）: {bucket}"

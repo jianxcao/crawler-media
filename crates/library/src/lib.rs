@@ -151,17 +151,16 @@ impl MediaProbe for Ffprobe {
         let _permit = marker::media_read::acquire_media_read(path, control.signal())
             .map_err(|_| LibraryError::Cancelled)?;
         let mut command = Command::new(&self.program);
-        command
-            .args([
-                "-v",
-                "error",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=codec_name,width,height,color_transfer:stream_side_data",
-                "-of",
-                "json",
-            ]);
+        command.args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name,width,height,color_transfer:stream_side_data",
+            "-of",
+            "json",
+        ]);
         ProbeTarget::from_path(path).apply_input(&mut command);
         let output = control.output(&mut command)?;
         if !output.status.success() {

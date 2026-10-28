@@ -156,20 +156,21 @@ pub(crate) async fn run_lease_stage(
     // T4: wait for a free reader on the async side, bounded and deadline-aware,
     // before taking a blocking worker; the permit travels into the worker and is
     // released only when that worker exits.
-    let reader_permit = state
-        .library_read_gate
-        .acquire(deadline)
-        .await
-        .map_err(|error| match error {
-            gate::GateError::Saturated => {
-                phase.rejected();
-                LibraryReadError::Busy
-            }
-            gate::GateError::Deadline => {
-                phase.timeout();
-                LibraryReadError::Deadline
-            }
-        })?;
+    let reader_permit =
+        state
+            .library_read_gate
+            .acquire(deadline)
+            .await
+            .map_err(|error| match error {
+                gate::GateError::Saturated => {
+                    phase.rejected();
+                    LibraryReadError::Busy
+                }
+                gate::GateError::Deadline => {
+                    phase.timeout();
+                    LibraryReadError::Deadline
+                }
+            })?;
     let reservation = state.http_work.try_reserve().map_err(|_| {
         phase.rejected();
         LibraryReadError::Busy

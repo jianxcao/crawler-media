@@ -162,9 +162,10 @@ pub(crate) fn page_inputs_on(
             .coverage
             .iter_mut()
             .find(|c| c.file.file_id == file.file_id)
-            && !coverage.units.contains(&unit) {
-                coverage.units.push(unit);
-            }
+            && !coverage.units.contains(&unit)
+        {
+            coverage.units.push(unit);
+        }
         let (season, episode) = match &reference.item {
             TypedItemId::Unit { key, .. } => (key.season, key.episode),
             _ => (-1, -1),

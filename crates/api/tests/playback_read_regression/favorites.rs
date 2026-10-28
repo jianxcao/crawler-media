@@ -2,9 +2,7 @@ use api::router;
 use domain::MediaId;
 use store::Store;
 
-use super::common::{
-    add_ledger, favorite, get, make_state, seed_library, seed_media, seed_member,
-};
+use super::common::{add_ledger, favorite, get, make_state, seed_library, seed_media, seed_member};
 
 #[tokio::test]
 async fn collection_gallery_reports_real_favorite_state() {

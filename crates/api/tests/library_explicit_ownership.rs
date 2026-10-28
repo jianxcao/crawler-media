@@ -150,7 +150,10 @@ async fn orphaned_published_file_keeps_its_recorded_library() {
 
     let provider = api::media_server_provider::ApiServerProvider::new(state);
 
-    let visible_to_member = provider.list_visible_items(member_user, None).await.unwrap();
+    let visible_to_member = provider
+        .list_visible_items(member_user, None)
+        .await
+        .unwrap();
     let member_item = visible_to_member
         .iter()
         .find(|item| item.media.id == media.id)
@@ -203,7 +206,11 @@ fn delivery_targets_files_by_library_id() {
     let in_b = publish(&store, &media, &default_root.join("twice.mkv"));
     assert_ne!(in_a.library_id, in_b.library_id);
     // A's file is orphaned: its path no longer lies under any root.
-    let orphaned = orphan(&store, &in_a, &tmp.path().join("elsewhere").join("twice.mkv"));
+    let orphaned = orphan(
+        &store,
+        &in_a,
+        &tmp.path().join("elsewhere").join("twice.mkv"),
+    );
 
     // Delivery resolves its sources from the target Library's recorded files.
     let a_sources = store
@@ -265,7 +272,8 @@ fn new_file_outside_roots_is_unclassified() {
 
     let inside = root.join("new.mkv");
     assert_eq!(
-        store::classify_new_file(&libraries, &inside, MediaKind::Movie).map(|owner| owner.id.clone()),
+        store::classify_new_file(&libraries, &inside, MediaKind::Movie)
+            .map(|owner| owner.id.clone()),
         Some(library.id),
         "a new file under a single root classifies to that Library"
     );

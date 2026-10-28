@@ -130,10 +130,9 @@ fn seed_jobs(state: &ApiState, media: &Media, subscribe: &Subscribe) -> Result<(
         if let Err(error) = jobs.delete_defs_for_payload(&search_payload) {
             tracing::error!(subscribe_id = %subscribe.id, error = %error, "回滚搜索任务失败");
         }
-        if !catalog_existed
-            && let Err(error) = jobs.delete_defs_for_payload(&catalog_payload) {
-                tracing::error!(media_id = %media.id, error = %error, "回滚目录刷新任务失败");
-            }
+        if !catalog_existed && let Err(error) = jobs.delete_defs_for_payload(&catalog_payload) {
+            tracing::error!(media_id = %media.id, error = %error, "回滚目录刷新任务失败");
+        }
     }
     result
 }
@@ -149,9 +148,10 @@ fn rollback_store(
         tracing::error!(subscribe_id = %subscribe.id, error = %error, "回滚订阅失败");
     }
     if let Some(filter) = filter
-        && let Err(error) = store.delete_filter(filter.id) {
-            tracing::error!(filter_id = %filter.id, error = %error, "回滚规则组失败");
-        }
+        && let Err(error) = store.delete_filter(filter.id)
+    {
+        tracing::error!(filter_id = %filter.id, error = %error, "回滚规则组失败");
+    }
     match store.undo_ensured_media(media, previous) {
         Ok(true) => {}
         Ok(false) => {

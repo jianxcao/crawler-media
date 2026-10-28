@@ -129,7 +129,6 @@ fn member_sql(
     bindings: &mut Bindings,
     empty_language: bool,
 ) -> Vec<String> {
-    
     terms.iter().filter(|(kind,_)| !(kind == "language" && empty_language)).map(|(kind,values)| {
         let kind = bindings.push(kind.clone().into());
         let values = bindings.placeholders(values.len(), |i| values[i].clone().into());

@@ -543,9 +543,10 @@ fn transmission_pause_and_resume_task_sends_torrent_stop_and_start() {
         let req = request.raw.clone();
         if let Some(body) = req.split("\r\n\r\n").nth(1)
             && let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
-                && let Some(m) = v["method"].as_str() {
-                    cap.methods.lock().push(m.to_string());
-                }
+            && let Some(m) = v["method"].as_str()
+        {
+            cap.methods.lock().push(m.to_string());
+        }
         let res = "HTTP/1.1 200 OK\r\nX-Transmission-Session-Id: test\r\nContent-Type: application/json\r\nContent-Length: 20\r\n\r\n{\"result\":\"success\"}";
         stream.write_all(res.as_bytes()).ok();
     });

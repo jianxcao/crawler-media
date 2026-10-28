@@ -15,12 +15,12 @@ use store::library_query::{
     BrowseFilter, BrowseOrder, BrowsePage, FacetRequest, FacetTier, LibraryQuery,
 };
 use store::library_write::{FilePublication as StorePublication, WriteScope};
-use store::stats::StatsScope;
 use store::playback::{BoundPlaybackEvent, PlaybackEventType, PlaybackSource};
+use store::stats::StatsScope;
 use store::{LibraryReadRequest, QueryBudget, ReadCredential};
 
 use super::fixture::Fixture;
-use super::measure::{measure, Report, Work};
+use super::measure::{Report, Work, measure};
 
 /// Browse page size, matching what the gallery asks for.
 const PAGE: usize = 60;
@@ -166,7 +166,14 @@ fn browse_deep_cursor(fx: &Fixture) -> Report {
     // reached by draining cursor pages the way the client will, so the measured page is
     // the same depth as the offset one.
     let after = deep_cursor_anchor(fx);
-    let query = library_query(fx, BrowsePage::Cursor { after: Some(after), limit: PAGE }, false);
+    let query = library_query(
+        fx,
+        BrowsePage::Cursor {
+            after: Some(after),
+            limit: PAGE,
+        },
+        false,
+    );
     measure(&fx.store, BROWSE_DEEP_CURSOR, 3, 20, || {
         let (page, stats) = fx.store.library_item_page_with_stats(&query).unwrap();
         assert_eq!(page.items.len(), PAGE);
@@ -208,10 +215,16 @@ fn browse_read_lease(fx: &Fixture) -> Report {
     let credential = ReadCredential::new(fx.user, fx.token.clone());
     let request = LibraryReadRequest::Browse(library_query(
         fx,
-        BrowsePage::Offset { start: 0, limit: PAGE },
+        BrowsePage::Offset {
+            start: 0,
+            limit: PAGE,
+        },
         true,
     ));
-    let context = fx.store.prepare_library_read(&credential, &request).unwrap();
+    let context = fx
+        .store
+        .prepare_library_read(&credential, &request)
+        .unwrap();
     let report = measure(&fx.store, BROWSE_READ_LEASE, 1, 10, || {
         let budget = QueryBudget {
             deadline: Instant::now() + Duration::from_secs(30),
@@ -324,9 +337,9 @@ pub fn facet_report(fx: &Fixture, dimension: &str) -> Report {
 fn playback_roster(fx: &Fixture) -> Report {
     let user = fx.user;
     measure(&fx.store, PLAYBACK_ROSTER, 3, 20, || {
-        let (allowed, stats) = fx
-            .store
-            .with_stats(StatsScope::Both, || fx.store.authorized_library_ids(user).unwrap());
+        let (allowed, stats) = fx.store.with_stats(StatsScope::Both, || {
+            fx.store.authorized_library_ids(user).unwrap()
+        });
         assert!(allowed.contains(&fx.movies.library_id.to_string()));
         Work::from_stats(&stats)
     })
@@ -336,9 +349,9 @@ fn playback_roster(fx: &Fixture) -> Report {
 fn playback_sources_unscoped(fx: &Fixture) -> Report {
     let item = TypedItemId::Work(fx.movie_media(7));
     measure(&fx.store, PLAYBACK_UNSCOPED, 3, 20, || {
-        let (sources, stats) = fx
-            .store
-            .with_stats(StatsScope::Library, || fx.store.published_entries_for_item(&item).unwrap());
+        let (sources, stats) = fx.store.with_stats(StatsScope::Library, || {
+            fx.store.published_entries_for_item(&item).unwrap()
+        });
         assert_eq!(sources.len(), 2);
         Work::from_stats(&stats)
     })
@@ -348,10 +361,14 @@ fn playback_sources(fx: &Fixture) -> Report {
     let item = TypedItemId::Work(fx.movie_media(7));
     let user = fx.user;
     measure(&fx.store, PLAYBACK_SOURCES, 3, 20, || {
-        let (sources, stats) = fx
-            .store
-            .with_stats(StatsScope::Both, || fx.store.playable_entries(user, &item).unwrap());
-        assert_eq!(sources.len(), 2, "both published versions must be selectable");
+        let (sources, stats) = fx.store.with_stats(StatsScope::Both, || {
+            fx.store.playable_entries(user, &item).unwrap()
+        });
+        assert_eq!(
+            sources.len(),
+            2,
+            "both published versions must be selectable"
+        );
         assert_eq!(sources[0].unit, UnitKey::WHOLE);
         Work::from_stats(&stats)
     })
@@ -361,8 +378,12 @@ fn playback_sources(fx: &Fixture) -> Report {
 /// many rows were inserted, how many were already current) are asserted by `gate`.
 pub fn publication(fx: &Fixture) -> Vec<Report> {
     let slots = fx.scale.publish_slots;
-    let insert = measure(&fx.store, PUBLISH_INSERT, 1, 1, || publish_slots(fx, 0, slots));
-    let republish = measure(&fx.store, PUBLISH_REPUBLISH, 0, 3, || publish_slots(fx, 0, slots));
+    let insert = measure(&fx.store, PUBLISH_INSERT, 1, 1, || {
+        publish_slots(fx, 0, slots)
+    });
+    let republish = measure(&fx.store, PUBLISH_REPUBLISH, 0, 3, || {
+        publish_slots(fx, 0, slots)
+    });
     vec![insert, republish]
 }
 
@@ -402,7 +423,10 @@ fn publish_slots(fx: &Fixture, start: usize, count: usize) -> Work {
                     probe_required: false,
                 })
                 .collect();
-            let report = fx.store.publish_files(&scope, &publications, 1_000).unwrap();
+            let report = fx
+                .store
+                .publish_files(&scope, &publications, 1_000)
+                .unwrap();
             inserted += report.inserted;
             updated += report.updated;
             unchanged += report.unchanged;
@@ -545,9 +569,9 @@ fn control_full_scan(fx: &Fixture) -> Report {
     let expected = fx.scale.files() + fx.scale.publish_slots;
     let mut rows = 0;
     let report = measure(&fx.store, CONTROL_FULL_SCAN, 0, 1, || {
-        let (coverage, stats) = fx
-            .store
-            .with_stats(StatsScope::Library, || fx.store.list_file_coverage().unwrap());
+        let (coverage, stats) = fx.store.with_stats(StatsScope::Library, || {
+            fx.store.list_file_coverage().unwrap()
+        });
         rows = coverage.len();
         Work::from_stats(&stats)
     });
@@ -561,9 +585,9 @@ fn control_full_scan(fx: &Fixture) -> Report {
 pub fn ledger_scan_report(fx: &Fixture, label: &str) -> Report {
     let mut rows = 0;
     let report = measure(&fx.store, label, 0, 1, || {
-        let (coverage, stats) = fx
-            .store
-            .with_stats(StatsScope::Library, || fx.store.list_file_coverage().unwrap());
+        let (coverage, stats) = fx.store.with_stats(StatsScope::Library, || {
+            fx.store.list_file_coverage().unwrap()
+        });
         rows = coverage.len();
         Work::from_stats(&stats)
     });

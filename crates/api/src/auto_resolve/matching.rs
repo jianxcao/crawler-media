@@ -92,9 +92,10 @@ fn find_best_catalog_match<'a>(
         && catalog_names(&eligible[0].media).any(|name| {
             let name = normalize_title(name);
             !name.is_empty() && (name.contains(&norm_target) || norm_target.contains(&name))
-        }) {
-            return Some(eligible[0]);
-        }
+        })
+    {
+        return Some(eligible[0]);
+    }
 
     None
 }

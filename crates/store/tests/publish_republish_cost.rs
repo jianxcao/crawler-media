@@ -13,11 +13,13 @@
 //! unchanged file contributes nothing to the reduction.
 
 use domain::{
-    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryId, LibraryFile,
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, LibraryId,
     Media, MediaId, MediaKind, QualitySource, UnitKey,
 };
-use store::library_write::{FilePublication as StorePublication, PublishReport, PublishStats, WriteScope};
 use store::Store;
+use store::library_write::{
+    FilePublication as StorePublication, PublishReport, PublishStats, WriteScope,
+};
 
 const SLOTS: usize = 1_000;
 /// The publication batch bound; 1,000 files cost 10 transactions, as production does.
@@ -73,7 +75,13 @@ impl Fixture {
                         anilist_id: None,
                     })
                     .unwrap();
-                file_row(index, library_id, &root_id, media_id, root.to_str().unwrap())
+                file_row(
+                    index,
+                    library_id,
+                    &root_id,
+                    media_id,
+                    root.to_str().unwrap(),
+                )
             })
             .collect();
         Self {
@@ -155,7 +163,14 @@ fn file_row(
         transfer_mode: None,
         resolution: Some(["1080p", "2160p", "720p"][index % 3].to_string()),
         codec: Some("h264".into()),
-        hdr: Some(if index.is_multiple_of(4) { "HDR10" } else { "SDR" }.to_string()),
+        hdr: Some(
+            if index.is_multiple_of(4) {
+                "HDR10"
+            } else {
+                "SDR"
+            }
+            .to_string(),
+        ),
         quality_source: QualitySource::Probe,
         confidence: Confidence::High,
         filter_score: Some(100),
@@ -175,14 +190,23 @@ fn unchanged_republish_writes_nothing() {
     let (insert_report, insert) = fix.publish_all();
     assert_eq!(insert_report.inserted, SLOTS);
     assert!(insert.written_rows > 0, "the insert pass writes rows");
-    assert_eq!(insert.reduced_media, SLOTS as u64, "each new Media is reduced once");
-    assert_eq!(insert.coverage_syncs, SLOTS as u64, "each new file records coverage");
+    assert_eq!(
+        insert.reduced_media, SLOTS as u64,
+        "each new Media is reduced once"
+    );
+    assert_eq!(
+        insert.coverage_syncs, SLOTS as u64,
+        "each new file records coverage"
+    );
 
     let before = (0..SLOTS).map(|index| fix.item(index)).collect::<Vec<_>>();
     assert!(before.iter().all(Option::is_some), "every slot has a card");
 
     let (report, stats) = fix.publish_all();
-    assert_eq!(report.unchanged, SLOTS, "the report already knew: {report:?}");
+    assert_eq!(
+        report.unchanged, SLOTS,
+        "the report already knew: {report:?}"
+    );
     assert_eq!(report.inserted, 0);
     assert_eq!(report.updated, 0);
     assert_eq!(

@@ -91,17 +91,23 @@ impl LogBuffer {
 
         let iter = lock.entries.iter().rev().filter(|entry| {
             if let Some(ref l) = level_norm
-                && !l.is_empty() && &entry.level != l {
-                    return false;
-                }
+                && !l.is_empty()
+                && &entry.level != l
+            {
+                return false;
+            }
             if let Some(ref t) = target_norm
-                && !t.is_empty() && !entry.target.to_ascii_lowercase().contains(t) {
-                    return false;
-                }
+                && !t.is_empty()
+                && !entry.target.to_ascii_lowercase().contains(t)
+            {
+                return false;
+            }
             if let Some(ref k) = keyword_norm
-                && !k.is_empty() && !entry.message.to_ascii_lowercase().contains(k) {
-                    return false;
-                }
+                && !k.is_empty()
+                && !entry.message.to_ascii_lowercase().contains(k)
+            {
+                return false;
+            }
             true
         });
 

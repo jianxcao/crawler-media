@@ -198,7 +198,14 @@ async fn symlinked_nested_library_prevents_stale_publication() {
         "{}",
         done.report
     );
-    assert!(fix.state.store().lock().list_file_coverage().unwrap().is_empty());
+    assert!(
+        fix.state
+            .store()
+            .lock()
+            .list_file_coverage()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -234,7 +241,14 @@ async fn frozen_library_prevents_scan_publication() {
         "{}",
         done.report
     );
-    assert!(fix.state.store().lock().list_file_coverage().unwrap().is_empty());
+    assert!(
+        fix.state
+            .store()
+            .lock()
+            .list_file_coverage()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// Same-kind ownership changes still invalidate the original publication scope.
@@ -279,5 +293,12 @@ async fn nested_library_created_during_scan_prevents_stale_publication() {
         "{}",
         done.report
     );
-    assert!(fix.state.store().lock().list_file_coverage().unwrap().is_empty());
+    assert!(
+        fix.state
+            .store()
+            .lock()
+            .list_file_coverage()
+            .unwrap()
+            .is_empty()
+    );
 }

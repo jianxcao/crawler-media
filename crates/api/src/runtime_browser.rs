@@ -74,15 +74,16 @@ impl BrowserSettings {
     fn apply(&mut self, body: &Value) -> Result<(), BrowserSettingsError> {
         apply_route(body.get("cdp"), &mut self.cdp_enabled, &mut self.cdp_url)?;
         if let Some(obs) = body.get("obscura")
-            && let Some(install) = obs.get("install").and_then(Value::as_str) {
-                let inst = install.trim();
-                if inst != "preinstalled" && inst != "download" {
-                    return Err(invalid(
-                        "obscura.install must be 'preinstalled' or 'download'",
-                    ));
-                }
-                self.obscura_install = inst.to_string();
+            && let Some(install) = obs.get("install").and_then(Value::as_str)
+        {
+            let inst = install.trim();
+            if inst != "preinstalled" && inst != "download" {
+                return Err(invalid(
+                    "obscura.install must be 'preinstalled' or 'download'",
+                ));
             }
+            self.obscura_install = inst.to_string();
+        }
         if let Some(ua) = body.get("user_agent") {
             self.user_agent = ua
                 .as_str()

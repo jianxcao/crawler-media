@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 
 use domain::{LibraryId, MediaKind};
 use rusqlite::params;
-use store::library_query::LibraryQuery;
 use store::ScanOperationStatus;
 use store::Store;
+use store::library_query::LibraryQuery;
 
 const OLD_MS: i64 = 1_000;
 const NEW_MS: i64 = 9_000;
@@ -244,9 +244,17 @@ fn assert_library_operations(fix: &Fixture) {
 }
 
 fn assert_scan_operations(fix: &Fixture, seeded: &Seeded) {
-    assert!(fix.store.scan_operation(&seeded.scan_old).unwrap().is_none());
     assert!(
-        fix.store.scan_operation(&seeded.scan_new).unwrap().is_some(),
+        fix.store
+            .scan_operation(&seeded.scan_old)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        fix.store
+            .scan_operation(&seeded.scan_new)
+            .unwrap()
+            .is_some(),
         "a terminal scan inside the window stays"
     );
     assert!(
@@ -336,15 +344,29 @@ fn assert_removals(fix: &Fixture, seeded: &Seeded) {
 fn batch_budget_bounds_one_call() {
     let fix = Fixture::new();
     for index in 0..5 {
-        fix.seed_library_operation(&format!("lib-old-{index}"), "roots", "succeeded", OLD_MS + index);
+        fix.seed_library_operation(
+            &format!("lib-old-{index}"),
+            "roots",
+            "succeeded",
+            OLD_MS + index,
+        );
     }
-    let first = fix.store.prune_terminal_operations(CUTOFF_MS, 2, false).unwrap();
-    assert_eq!(first.deleted, 2, "the batch budget caps one call: {first:?}");
+    let first = fix
+        .store
+        .prune_terminal_operations(CUTOFF_MS, 2, false)
+        .unwrap();
+    assert_eq!(
+        first.deleted, 2,
+        "the batch budget caps one call: {first:?}"
+    );
     assert!(first.window_full(2), "a full window means more rows remain");
 
     let mut deleted = first.deleted;
     loop {
-        let next = fix.store.prune_terminal_operations(CUTOFF_MS, 2, false).unwrap();
+        let next = fix
+            .store
+            .prune_terminal_operations(CUTOFF_MS, 2, false)
+            .unwrap();
         deleted += next.deleted;
         if !next.window_full(2) {
             break;
@@ -367,7 +389,10 @@ fn dry_run_reports_without_deleting() {
         .store
         .prune_terminal_operations(CUTOFF_MS, 500, true)
         .unwrap();
-    assert_eq!(counts.examined, 3, "one candidate per prunable journal: {counts:?}");
+    assert_eq!(
+        counts.examined, 3,
+        "one candidate per prunable journal: {counts:?}"
+    );
     assert_eq!(counts.deleted, 0, "a dry run writes nothing");
 
     assert_eq!(
@@ -375,14 +400,8 @@ fn dry_run_reports_without_deleting() {
         before
     );
     assert!(fix.store.scan_operation(&scan_old).unwrap().is_some());
-    assert_eq!(
-        count(&fix.db(), "SELECT COUNT(*) FROM media_operations"),
-        1
-    );
-    assert_eq!(
-        count(&fix.db(), "SELECT COUNT(*) FROM library_removals"),
-        1
-    );
+    assert_eq!(count(&fix.db(), "SELECT COUNT(*) FROM media_operations"), 1);
+    assert_eq!(count(&fix.db(), "SELECT COUNT(*) FROM library_removals"), 1);
 }
 
 /// The browse/detail integrity verdict is a subquery over the *latest* surviving

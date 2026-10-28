@@ -1,5 +1,5 @@
-use super::fixture::*;
 use super::super::*;
+use super::fixture::*;
 
 /// P3-1 + P3-3：轮内并入的事件必须让本轮补扫，且终态报告是跨轮累计。
 #[tokio::test]
@@ -17,7 +17,9 @@ async fn dirty_event_during_round_requeues_with_cumulative_report() {
         let op = guard
             .enqueue_scan(&fix.library_id, &sig, std::slice::from_ref(&dir), 1000)
             .unwrap();
-        guard.record_scan_seen(&op.id, std::slice::from_ref(&f1)).unwrap();
+        guard
+            .record_scan_seen(&op.id, std::slice::from_ref(&f1))
+            .unwrap();
         op
     };
     let f2 = dir.join("Movie2 (2024).mkv");
@@ -80,7 +82,9 @@ async fn running_transition_keeps_requeued_cumulative_report() {
         let op = guard
             .enqueue_scan(&fix.library_id, &sig, std::slice::from_ref(&dir), 1000)
             .unwrap();
-        guard.record_scan_seen(&op.id, std::slice::from_ref(&f1)).unwrap();
+        guard
+            .record_scan_seen(&op.id, std::slice::from_ref(&f1))
+            .unwrap();
         op
     };
     let f2 = dir.join("Movie2 (2024).mkv");

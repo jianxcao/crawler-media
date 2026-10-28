@@ -489,7 +489,6 @@ fn playback_units_for_user_is_scoped_to_one_user() {
 #[test]
 fn default_candidate_growth_and_ownership_parity() {
     use domain::{Confidence, LedgerId, QualitySource};
-    
 
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path().join("data")).unwrap();

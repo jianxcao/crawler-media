@@ -28,7 +28,10 @@ fn under_prefix(key: &str, directory: &str) -> bool {
     if directory == "/" {
         return key.starts_with('/');
     }
-    key == directory || key.strip_prefix(directory).is_some_and(|rest| rest.starts_with('/'))
+    key == directory
+        || key
+            .strip_prefix(directory)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// 新的范围谓词。
@@ -53,7 +56,17 @@ fn keys() -> Vec<String> {
     let mut keys: Vec<String> = Vec::new();
     for directory in DIRECTORIES {
         for leaf in [
-            "", "x.mkv", "Sub/y.nfo", "%", "_", "0", "zz", "100%", "媒体.nfo", "a.b", "tail",
+            "",
+            "x.mkv",
+            "Sub/y.nfo",
+            "%",
+            "_",
+            "0",
+            "zz",
+            "100%",
+            "媒体.nfo",
+            "a.b",
+            "tail",
         ] {
             let base = directory.trim_end_matches('/');
             keys.push(if leaf.is_empty() {

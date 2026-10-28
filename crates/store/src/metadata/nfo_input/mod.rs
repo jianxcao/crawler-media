@@ -17,8 +17,8 @@ use std::path::PathBuf;
 
 use domain::{EntityScope, FileVersion, MetadataFields};
 
-pub use observe::{NfoInputObserver, observe_nfo_inputs};
 pub(crate) use observe::observe_nfo_inputs_with_key;
+pub use observe::{NfoInputObserver, observe_nfo_inputs};
 pub use reconcile::{NfoInputReconcileObserved, NfoInputReconcilePlan};
 pub use record::{NfoInputTarget, record_nfo_observations};
 

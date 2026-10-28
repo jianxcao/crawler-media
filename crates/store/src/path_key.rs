@@ -129,16 +129,17 @@ pub(crate) fn canonical_recorded_key(conn: &Connection, raw: &str) -> String {
         .clone();
     if aliases.is_empty()
         && let Ok(mut stmt) = conn.prepare("SELECT display_path, path_key FROM library_roots")
-            && let Ok(rows) = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            }) {
-                for row in rows.flatten() {
-                    let display = normalize_path_key(&row.0);
-                    if display != row.1 {
-                        aliases.push((display, row.1));
-                    }
-                }
+        && let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+    {
+        for row in rows.flatten() {
+            let display = normalize_path_key(&row.0);
+            if display != row.1 {
+                aliases.push((display, row.1));
             }
+        }
+    }
     aliases.sort_by_key(|a| std::cmp::Reverse(a.0.len()));
     canonical_key(raw, &Arc::new(RwLock::new(aliases)))
 }

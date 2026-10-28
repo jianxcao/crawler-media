@@ -52,7 +52,6 @@ const EVENTS: usize = 50;
 /// `with index` / `without index` rounds per index.
 const ROUNDS: usize = 2;
 
-
 #[test]
 #[ignore = "write-cost attribution; run in --release with CARGO_TARGET_DIR=target/perf"]
 fn write_cost_of_the_v3_indexes() {

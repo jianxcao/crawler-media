@@ -121,11 +121,14 @@ impl ImageCache {
             .read_to_end(&mut payload)
             .map_err(|e| e.to_string())?;
         if let Some(split) = payload.iter().position(|b| *b == b'\n')
-            && split <= 1024 && payload.len() - split - 1 <= self.response_limit as usize
-                && let Ok(kind) = std::str::from_utf8(&payload[..split])
-                    && kind.starts_with("image/") && !kind.contains('\r') {
-                        return Ok(Some((kind.into(), payload[split + 1..].to_vec())));
-                    }
+            && split <= 1024
+            && payload.len() - split - 1 <= self.response_limit as usize
+            && let Ok(kind) = std::str::from_utf8(&payload[..split])
+            && kind.starts_with("image/")
+            && !kind.contains('\r')
+        {
+            return Ok(Some((kind.into(), payload[split + 1..].to_vec())));
+        }
         tracing::warn!(path = %path.display(), "Removing invalid or oversized image cache entry");
         self.remove_checked(path)?;
         Ok(None)

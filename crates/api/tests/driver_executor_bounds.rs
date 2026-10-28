@@ -241,7 +241,10 @@ fn probe_resumes_after_store_contention_without_cancelling_the_job() {
         }
     });
     holder.join().unwrap();
-    assert_ne!(status, "cancelled", "Store contention is not a cancellation");
+    assert_ne!(
+        status, "cancelled",
+        "Store contention is not a cancellation"
+    );
     assert!(
         !matches!(status.as_str(), "queued" | "running"),
         "probe did not resume after Store contention: {status}"

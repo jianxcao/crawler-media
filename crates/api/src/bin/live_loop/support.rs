@@ -1,4 +1,3 @@
-
 use domain::{
     AtomRule, Coverage, FetchMode, Filter, FilterAtom, FilterId, Media, MediaId, MediaKind, Site,
     SiteId, Subscribe, SubscribeId, Torrent, UserId,

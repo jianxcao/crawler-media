@@ -12,7 +12,10 @@ type MetadataKey = (String, i64, i64, String);
 
 /// The entity/locale keys the loser holds source snapshots or overrides for: only these can
 /// change the survivor's composition, so only these are recomposed.
-pub(super) fn loser_metadata_keys(tx: &Connection, loser: &str) -> Result<Vec<MetadataKey>, StoreError> {
+pub(super) fn loser_metadata_keys(
+    tx: &Connection,
+    loser: &str,
+) -> Result<Vec<MetadataKey>, StoreError> {
     let mut stmt = tx.prepare(
         "SELECT entity_scope, season, episode, locale FROM media_metadata_sources WHERE media_id = ?1
          UNION
@@ -177,7 +180,11 @@ fn write_pending(
 /// Afterwards any surviving snapshot of a source with a refresh target that does
 /// not describe that target is marked whole as pending fallback, so compose serves
 /// it with `pending_target_fallback` until the target is adopted for that key.
-pub(super) fn merge_source_snapshots(tx: &Connection, survivor: &str, loser: &str) -> Result<(), StoreError> {
+pub(super) fn merge_source_snapshots(
+    tx: &Connection,
+    survivor: &str,
+    loser: &str,
+) -> Result<(), StoreError> {
     let targets = survivor_refresh_targets(tx, survivor)?;
     let survivor_rows = load_snapshot_rows(tx, survivor)?;
     for l in load_snapshot_rows(tx, loser)? {

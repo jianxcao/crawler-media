@@ -218,9 +218,10 @@ pub(super) fn request_scope(
     }
     if let Some(media_id) = media_scope
         && !scope.media.contains_key(&media_id)
-            && let Some(media) = store.get_media(media_id)? {
-                scope.media.insert(media.id, media);
-            }
+        && let Some(media) = store.get_media(media_id)?
+    {
+        scope.media.insert(media.id, media);
+    }
     Ok(scope)
 }
 

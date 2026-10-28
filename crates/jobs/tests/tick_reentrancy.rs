@@ -34,13 +34,8 @@ impl Runner for ReentrantRunner {
 #[test]
 fn tick_runner_can_lock_queue() {
     let dir = tempfile::tempdir().unwrap();
-    let queue = Arc::new(Mutex::new(
-        Queue::open(dir.path().join("jobs.db")).unwrap(),
-    ));
-    queue
-        .lock()
-        .enqueue(JobKind::Transfer, "{}", 0)
-        .unwrap();
+    let queue = Arc::new(Mutex::new(Queue::open(dir.path().join("jobs.db")).unwrap()));
+    queue.lock().enqueue(JobKind::Transfer, "{}", 0).unwrap();
     let (done_tx, done_rx) = mpsc::channel();
     let runner = ReentrantRunner {
         queue: Arc::clone(&queue),
@@ -55,7 +50,11 @@ fn tick_runner_can_lock_queue() {
             .expect("runner 必须在 tick 内被调用；超时说明 tick 仍持锁调用 runner"),
         JobKind::Transfer
     );
-    assert!(report.error.is_none(), "整轮 tick 必须完整走完: {:?}", report.error);
+    assert!(
+        report.error.is_none(),
+        "整轮 tick 必须完整走完: {:?}",
+        report.error
+    );
     assert_eq!(report.finished.len(), 1, "成功执行的任务必须落成终态");
     assert_eq!(report.finished[0].status, JobStatus::Succeeded);
 }
@@ -64,18 +63,9 @@ fn tick_runner_can_lock_queue() {
 #[test]
 fn tick_persists_outcome_after_releasing_the_lock() {
     let dir = tempfile::tempdir().unwrap();
-    let queue = Arc::new(Mutex::new(
-        Queue::open(dir.path().join("jobs.db")).unwrap(),
-    ));
-    let job = queue
-        .lock()
-        .enqueue(JobKind::Scrape, "{}", 0)
-        .unwrap();
-    let report = Queue::tick(
-        &queue,
-        &Failing,
-        0,
-    );
+    let queue = Arc::new(Mutex::new(Queue::open(dir.path().join("jobs.db")).unwrap()));
+    let job = queue.lock().enqueue(JobKind::Scrape, "{}", 0).unwrap();
+    let report = Queue::tick(&queue, &Failing, 0);
     assert!(report.error.is_none(), "{:?}", report.error);
     let stored = queue.lock().get(job.id).unwrap().unwrap();
     assert_eq!(stored.status, JobStatus::Queued);

@@ -107,7 +107,10 @@ fn restricted_root_cannot_move_while_owned_ledger_rows_remain() {
     );
     assert!(matches!(update, Err(api::store::StoreError::Protected(_))));
 
-    let recorded = store.file_coverage_by_id(published.file_id).unwrap().unwrap();
+    let recorded = store
+        .file_coverage_by_id(published.file_id)
+        .unwrap()
+        .unwrap();
     assert_eq!(
         recorded.file.library_id.to_string(),
         restricted.id,

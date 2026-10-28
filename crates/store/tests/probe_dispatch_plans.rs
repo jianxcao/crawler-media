@@ -55,7 +55,9 @@ fn seed_queued_jobs(conn: &Connection, first: usize, count: usize) {
 
 fn plan_text(conn: &Connection, sql: &str) -> String {
     let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
-    let args: Vec<String> = (0..stmt.parameter_count()).map(|_| "x".to_string()).collect();
+    let args: Vec<String> = (0..stmt.parameter_count())
+        .map(|_| "x".to_string())
+        .collect();
     stmt.query_map(rusqlite::params_from_iter(args.iter()), |row| {
         row.get::<_, String>(3)
     })

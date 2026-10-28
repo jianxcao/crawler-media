@@ -41,8 +41,8 @@ pub fn take_scan_hold_trace() -> Vec<ScanHoldSample> {
 
 /// Measure one lock section; the lock must already be held when this is created.
 pub(super) fn trace_lock_section(section: &'static str) -> LockSection {
-    let started = SAMPLES
-        .with(|samples| samples.borrow().as_ref().map(|_| std::time::Instant::now()));
+    let started =
+        SAMPLES.with(|samples| samples.borrow().as_ref().map(|_| std::time::Instant::now()));
     LockSection { section, started }
 }
 
@@ -75,7 +75,10 @@ mod tests {
     #[test]
     fn sections_are_recorded_only_while_tracing() {
         drop(trace_lock_section("off"));
-        assert!(take_scan_hold_trace().is_empty(), "tracing is off by default");
+        assert!(
+            take_scan_hold_trace().is_empty(),
+            "tracing is off by default"
+        );
 
         start_scan_hold_trace();
         {
@@ -84,6 +87,9 @@ mod tests {
         let samples = take_scan_hold_trace();
         assert_eq!(samples.len(), 1, "{samples:?}");
         assert_eq!(samples[0].section, "record");
-        assert!(take_scan_hold_trace().is_empty(), "taking the trace drains it");
+        assert!(
+            take_scan_hold_trace().is_empty(),
+            "taking the trace drains it"
+        );
     }
 }

@@ -23,7 +23,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use super::fixture::{Fixture, SeededLibrary, Scale, FIXTURE_VERSION};
+use super::fixture::{FIXTURE_VERSION, Fixture, Scale, SeededLibrary};
 
 const ENV: &str = "PERF_FIXTURE_CACHE";
 const DATABASES: [&str; 4] = ["app.db", "cache.db", "library.db", "subscribe.db"];

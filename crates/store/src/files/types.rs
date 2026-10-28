@@ -1,7 +1,4 @@
-use domain::{
-    LedgerId, LibraryId, MediaId,
-    MediaKind,
-};
+use domain::{LedgerId, LibraryId, MediaId, MediaKind};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileDetails {

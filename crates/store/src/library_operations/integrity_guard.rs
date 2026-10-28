@@ -73,7 +73,9 @@ pub(crate) fn ensure_media_integrity_writable(
 }
 pub(crate) fn ensure_no_operation(tx: &Connection, library: LibraryId) -> Result<(), StoreError> {
     let active = super::unfinished_operation_predicate();
-    let sql = format!("SELECT EXISTS(SELECT 1 FROM library_operations WHERE library_id=?1 AND ({active})) OR EXISTS(SELECT 1 FROM library_removals WHERE library_id=?1 AND state<>'succeeded') OR EXISTS(SELECT 1 FROM media_operations o JOIN library_files f ON f.media_id IN (o.survivor_id,o.loser_id) WHERE f.library_id=?1 AND o.state<>'succeeded')");
+    let sql = format!(
+        "SELECT EXISTS(SELECT 1 FROM library_operations WHERE library_id=?1 AND ({active})) OR EXISTS(SELECT 1 FROM library_removals WHERE library_id=?1 AND state<>'succeeded') OR EXISTS(SELECT 1 FROM media_operations o JOIN library_files f ON f.media_id IN (o.survivor_id,o.loser_id) WHERE f.library_id=?1 AND o.state<>'succeeded')"
+    );
     let blocked: bool = tx.query_row(&sql, [library.to_string()], |r| r.get(0))?;
     if blocked {
         return Err(StoreError::Protected(format!(

@@ -355,14 +355,8 @@ async fn assert_user_routes(app: &axum::Router, movie_id: &str) {
     // 默认库 2 个 + 上面创建的 2 个 = 4 个库
     assert_eq!(user_views["Items"].as_array().unwrap().len(), 4);
 
-    let user_items = json(
-        get(
-            app,
-            format!("/Users/{user_id}/Items?ParentId={}", movie_id),
-        )
-        .await,
-    )
-    .await;
+    let user_items =
+        json(get(app, format!("/Users/{user_id}/Items?ParentId={}", movie_id)).await).await;
     assert_eq!(user_items["Items"].as_array().unwrap().len(), 1);
     assert_eq!(user_items["Items"][0]["Name"], "A Film");
 

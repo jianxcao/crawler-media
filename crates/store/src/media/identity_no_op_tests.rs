@@ -31,8 +31,6 @@ impl Store {
     }
 }
 
-
-
 fn temp_store() -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("data")).unwrap();
@@ -177,10 +175,7 @@ fn changed_identity_still_writes_and_republishes() {
         "a real identity change must still rewrite the row and republish: {} statements",
         stats.statements
     );
-    assert_eq!(
-        store.get_media(media.id).unwrap().unwrap().title,
-        "Renamed"
-    );
+    assert_eq!(store.get_media(media.id).unwrap().unwrap().title, "Renamed");
     // The summaries follow the identity in the same commit, and they are still reachable.
     let card = store
         .get_library_item(library_id, media.id)
@@ -200,7 +195,10 @@ fn a_missing_alias_row_is_not_a_no_op() {
     // The row still carries the id, but the alias row is gone: the writer would restore it,
     // so this must not be treated as identical.
     store
-        .test_execute("DELETE FROM media_aliases WHERE media_id = ?1", &media.id.to_string())
+        .test_execute(
+            "DELETE FROM media_aliases WHERE media_id = ?1",
+            &media.id.to_string(),
+        )
         .unwrap();
     store.update_media(&stored).unwrap();
     let aliases: i64 = store.test_scalar(

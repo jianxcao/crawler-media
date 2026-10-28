@@ -48,12 +48,11 @@ fn move_scoped_rows(
     let rows: Vec<Vec<SqlValue>> = {
         let sql = format!("SELECT {} FROM {table} WHERE media_id = ?1", key.join(", "));
         let mut stmt = tx.prepare(&sql)?;
-        
-        stmt
-            .query_map(params![loser.to_string()], |r| {
-                (0..key.len()).map(|i| r.get::<_, SqlValue>(i)).collect()
-            })?
-            .collect::<Result<Vec<_>, _>>()?
+
+        stmt.query_map(params![loser.to_string()], |r| {
+            (0..key.len()).map(|i| r.get::<_, SqlValue>(i)).collect()
+        })?
+        .collect::<Result<Vec<_>, _>>()?
     };
     let predicate = |offset: usize| {
         key.iter()
@@ -157,4 +156,3 @@ pub(in crate::media_operations) fn merge_collection_items(
     }
     Ok(())
 }
-

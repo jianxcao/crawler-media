@@ -155,12 +155,7 @@ async fn rescanning_restored_movie_clears_missing_without_overwriting_probe_qual
 
     // missing_at must be cleared, ledger row and media id preserved
     let guard = store_arc.lock();
-    assert!(
-        !guard
-            .missing_at_by_path()
-            .unwrap()
-            .contains_key(&path_key)
-    );
+    assert!(!guard.missing_at_by_path().unwrap().contains_key(&path_key));
     let loaded = guard.file_coverage_by_id(row.file_id).unwrap().unwrap();
     assert_eq!(loaded.file.file_id, row.file_id);
     assert_eq!(loaded.file.media_id, media_id);

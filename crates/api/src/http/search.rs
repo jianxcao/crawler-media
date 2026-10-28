@@ -107,150 +107,150 @@ pub(crate) async fn search_torrents(
         .then(|| history::next_history_target(user_id));
     // Review L2: the scoped Site list is a Store read on the search hot path.
     let sites = match store_read(&state, move |store| scoped_sites(store, &sites_requested)).await {
-            Ok(sites) => sites,
-            Err(error) => return error.response(),
-        };
-        // Site fetches are blocking HTTP; run them under the shared search budget in a
-        // window of the currently available permits, mirroring the SSE path. Spawning
-        // every Site at once used to make Sites beyond the 4 permits fail with
-        // "capacity exhausted" inside the very same request.
-        let state = Arc::new(state);
-        let (total, items, statuses) =
-            fanout::collect_site_results(&state, sites, &keyword, page, &categories, None).await;
-        history::save_torrents_history(
-            &state,
-            history.as_ref(),
-            &keyword,
-            total,
-            None,
-            &items,
-            &statuses,
-            false,
-        )
-        .await;
-        ok(json!({
-            "keyword": keyword,
-            "total": total,
-            "items": items,
-            "sites": statuses,
-        }))
+        Ok(sites) => sites,
+        Err(error) => return error.response(),
+    };
+    // Site fetches are blocking HTTP; run them under the shared search budget in a
+    // window of the currently available permits, mirroring the SSE path. Spawning
+    // every Site at once used to make Sites beyond the 4 permits fail with
+    // "capacity exhausted" inside the very same request.
+    let state = Arc::new(state);
+    let (total, items, statuses) =
+        fanout::collect_site_results(&state, sites, &keyword, page, &categories, None).await;
+    history::save_torrents_history(
+        &state,
+        history.as_ref(),
+        &keyword,
+        total,
+        None,
+        &items,
+        &statuses,
+        false,
+    )
+    .await;
+    ok(json!({
+        "keyword": keyword,
+        "total": total,
+        "items": items,
+        "sites": statuses,
+    }))
+    .into_response()
+}
+
+pub(crate) async fn search_stream(
+    State(state): State<ApiState>,
+    axum::Extension(user_id): axum::Extension<domain::UserId>,
+    Query(query): Query<TorrentSearchParams>,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    let sites_requested = query_values(raw_query.as_deref(), "sites");
+    let categories = query_values(raw_query.as_deref(), "categories");
+    let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(16);
+    let keyword = query.keyword.clone().unwrap_or_default().trim().to_string();
+    let page = query.page.unwrap_or(1).clamp(1, 100);
+    let history = (!keyword.is_empty() && query.save_history && !query.skip_history && page == 1)
+        .then(|| history::next_history_target(user_id));
+    let sites = match store_read(&state, move |store| scoped_sites(store, &sites_requested)).await {
+        Ok(sites) => sites,
+        Err(error) => return error.response(),
+    };
+    tokio::spawn(stream_search_events(
+        Arc::new(state),
+        tx,
+        keyword,
+        page,
+        history,
+        sites,
+        categories,
+    ));
+    Sse::new(ReceiverStream::new(rx))
+        .keep_alive(KeepAlive::default())
         .into_response()
-    }
+}
 
-    pub(crate) async fn search_stream(
-        State(state): State<ApiState>,
-        axum::Extension(user_id): axum::Extension<domain::UserId>,
-        Query(query): Query<TorrentSearchParams>,
-        RawQuery(raw_query): RawQuery,
-    ) -> Response {
-        let sites_requested = query_values(raw_query.as_deref(), "sites");
-        let categories = query_values(raw_query.as_deref(), "categories");
-        let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(16);
-        let keyword = query.keyword.clone().unwrap_or_default().trim().to_string();
-        let page = query.page.unwrap_or(1).clamp(1, 100);
-        let history = (!keyword.is_empty() && query.save_history && !query.skip_history && page == 1)
-            .then(|| history::next_history_target(user_id));
-        let sites = match store_read(&state, move |store| scoped_sites(store, &sites_requested)).await {
-            Ok(sites) => sites,
-            Err(error) => return error.response(),
-        };
-        tokio::spawn(stream_search_events(
-            Arc::new(state),
-            tx,
-            keyword,
-            page,
-            history,
-            sites,
-            categories,
-        ));
-        Sse::new(ReceiverStream::new(rx))
-            .keep_alive(KeepAlive::default())
-            .into_response()
+async fn stream_search_events(
+    state: Arc<ApiState>,
+    tx: mpsc::Sender<Result<Event, Infallible>>,
+    keyword: String,
+    page: u32,
+    history: Option<history::HistoryTarget>,
+    sites: Vec<domain::Site>,
+    categories: Vec<String>,
+) {
+    send_search_start(&tx, &keyword, &sites).await;
+    let started = Instant::now();
+    let (total, items, statuses) =
+        fanout::collect_site_results(&state, sites, &keyword, page, &categories, Some(&tx)).await;
+    let elapsed_ms = started.elapsed().as_millis() as i64;
+    // 客户端断开也要落盘已收集结果：历史条目与快照必须成对，否则回放只能拿到
+    // 404 死链（历史里有条目 ⇒ 快照一定可取）。
+    let partial = tx.is_closed();
+    history::save_torrents_history(
+        &state,
+        history.as_ref(),
+        &keyword,
+        total,
+        Some(elapsed_ms),
+        &items,
+        &statuses,
+        partial,
+    )
+    .await;
+    if partial {
+        return;
     }
+    send_search_done(&tx, total, elapsed_ms, statuses).await;
+}
 
-    async fn stream_search_events(
-        state: Arc<ApiState>,
-        tx: mpsc::Sender<Result<Event, Infallible>>,
-        keyword: String,
-        page: u32,
-        history: Option<history::HistoryTarget>,
-        sites: Vec<domain::Site>,
-        categories: Vec<String>,
-    ) {
-        send_search_start(&tx, &keyword, &sites).await;
-        let started = Instant::now();
-        let (total, items, statuses) =
-            fanout::collect_site_results(&state, sites, &keyword, page, &categories, Some(&tx)).await;
-        let elapsed_ms = started.elapsed().as_millis() as i64;
-        // 客户端断开也要落盘已收集结果：历史条目与快照必须成对，否则回放只能拿到
-        // 404 死链（历史里有条目 ⇒ 快照一定可取）。
-        let partial = tx.is_closed();
-        history::save_torrents_history(
-            &state,
-            history.as_ref(),
-            &keyword,
-            total,
-            Some(elapsed_ms),
-            &items,
-            &statuses,
-            partial,
-        )
+async fn send_search_start(
+    tx: &mpsc::Sender<Result<Event, Infallible>>,
+    keyword: &str,
+    sites: &[domain::Site],
+) {
+    let site_list: Vec<Value> = sites
+        .iter()
+        .map(|site| json!({"site_id": site.id.to_string(), "site_name": site.name}))
+        .collect();
+    let _ = tx
+        .send(Ok(Event::default().event("start").data(
+            json!({"keyword": keyword, "sites": site_list}).to_string(),
+        )))
         .await;
-        if partial {
-            return;
+}
+
+async fn send_search_done(
+    tx: &mpsc::Sender<Result<Event, Infallible>>,
+    total: i64,
+    elapsed_ms: i64,
+    statuses: Vec<Value>,
+) {
+    let _ = tx
+        .send(Ok(Event::default().event("done").data(
+            json!({"total": total, "elapsed_ms": elapsed_ms, "sites": statuses}).to_string(),
+        )))
+        .await;
+}
+
+use media::CatalogHit;
+
+fn title_hit_json(hit: &CatalogHit, provider: &str) -> Value {
+    let media = &hit.media;
+    let external_id = media
+        .tmdb_id
+        .clone()
+        .or_else(|| media.douban_id.clone())
+        .or_else(|| media.tvdb_id.clone())
+        .or_else(|| media.bangumi_id.clone())
+        .or_else(|| media.anilist_id.clone())
+        .unwrap_or_default();
+    let poster = hit.poster_path.as_ref().map(|p: &String| {
+        if p.starts_with("http://") || p.starts_with("https://") {
+            p.clone()
+        } else {
+            format!("https://image.tmdb.org/t/p/w342{p}")
         }
-        send_search_done(&tx, total, elapsed_ms, statuses).await;
-    }
-
-    async fn send_search_start(
-        tx: &mpsc::Sender<Result<Event, Infallible>>,
-        keyword: &str,
-        sites: &[domain::Site],
-    ) {
-        let site_list: Vec<Value> = sites
-            .iter()
-            .map(|site| json!({"site_id": site.id.to_string(), "site_name": site.name}))
-            .collect();
-        let _ = tx
-            .send(Ok(Event::default().event("start").data(
-                json!({"keyword": keyword, "sites": site_list}).to_string(),
-            )))
-            .await;
-    }
-
-    async fn send_search_done(
-        tx: &mpsc::Sender<Result<Event, Infallible>>,
-        total: i64,
-        elapsed_ms: i64,
-        statuses: Vec<Value>,
-    ) {
-        let _ = tx
-            .send(Ok(Event::default().event("done").data(
-                json!({"total": total, "elapsed_ms": elapsed_ms, "sites": statuses}).to_string(),
-            )))
-            .await;
-    }
-
-    use media::CatalogHit;
-
-    fn title_hit_json(hit: &CatalogHit, provider: &str) -> Value {
-        let media = &hit.media;
-        let external_id = media
-            .tmdb_id
-            .clone()
-            .or_else(|| media.douban_id.clone())
-            .or_else(|| media.tvdb_id.clone())
-            .or_else(|| media.bangumi_id.clone())
-            .or_else(|| media.anilist_id.clone())
-            .unwrap_or_default();
-        let poster = hit.poster_path.as_ref().map(|p: &String| {
-            if p.starts_with("http://") || p.starts_with("https://") {
-                p.clone()
-            } else {
-                format!("https://image.tmdb.org/t/p/w342{p}")
-            }
-        });
-        json!({
+    });
+    json!({
             "provider": provider,
             "external_id": external_id,
             "kind": media.kind.as_str(),
@@ -359,36 +359,38 @@ pub(crate) async fn search_library_items(
         .search_work
         .run(fanout::SEARCH_DEADLINE, move || {
             store_wait::with_bounded_store(store_handle, |store| {
-            let visible =
-                crate::visible_scope::VisibleLibraries::load(&store, user_id).unwrap_or_default();
-            let mut items = Vec::new();
-            let rows = visible.ids().into_iter().flat_map(|lib| {
-                store
-                    .file_coverage_in_library(lib, None, store::FileReadScope::Published)
-                    .unwrap_or_default()
-            });
-            for row in rows {
-                let Some(media) = store.get_media(row.file.media_id).ok().flatten() else {
-                    continue;
-                };
-                if !crate::http::library::file_visible_to_user(&store, &row.file, &media, user_id) {
-                    continue;
+                let visible = crate::visible_scope::VisibleLibraries::load(&store, user_id)
+                    .unwrap_or_default();
+                let mut items = Vec::new();
+                let rows = visible.ids().into_iter().flat_map(|lib| {
+                    store
+                        .file_coverage_in_library(lib, None, store::FileReadScope::Published)
+                        .unwrap_or_default()
+                });
+                for row in rows {
+                    let Some(media) = store.get_media(row.file.media_id).ok().flatten() else {
+                        continue;
+                    };
+                    if !crate::http::library::file_visible_to_user(
+                        &store, &row.file, &media, user_id,
+                    ) {
+                        continue;
+                    }
+                    if !keyword.is_empty()
+                        && !media.title.to_lowercase().contains(&keyword.to_lowercase())
+                    {
+                        continue;
+                    }
+                    items.push(json!({
+                        "file_id": row.file.file_id.to_string(),
+                        "media_item_id": media.id.to_string(),
+                        "title": media.title,
+                        "kind": media.kind.as_str(),
+                        "path": row.file.path,
+                        "units": row.units,
+                    }));
                 }
-                if !keyword.is_empty()
-                    && !media.title.to_lowercase().contains(&keyword.to_lowercase())
-                {
-                    continue;
-                }
-                items.push(json!({
-                    "file_id": row.file.file_id.to_string(),
-                    "media_item_id": media.id.to_string(),
-                    "title": media.title,
-                    "kind": media.kind.as_str(),
-                    "path": row.file.path,
-                    "units": row.units,
-                }));
-            }
-            items
+                items
             })
         })
         .await;

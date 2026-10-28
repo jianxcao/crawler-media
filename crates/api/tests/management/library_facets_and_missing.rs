@@ -84,9 +84,7 @@ async fn item_index_and_facets_return_structured_dtos() {
     // "Blade" 首字母 B，count 1，并且带一个能直达这一档第一格的游标。
     let b_bucket = buckets.iter().find(|b| b["initial"] == "B").unwrap();
     assert_eq!(b_bucket["count"], 1);
-    let cursor = b_bucket["cursor"]
-        .as_str()
-        .expect("后续档必须给出直达游标");
+    let cursor = b_bucket["cursor"].as_str().expect("后续档必须给出直达游标");
     // 断言真正重要的那件事：用这一档的游标跳过去，返回的就是这一档的第一条。
     let jump = json_data(
         app.clone()

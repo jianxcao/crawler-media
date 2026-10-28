@@ -123,9 +123,9 @@ impl Drop for PosterWorkerGuard {
             && weak
                 .upgrade()
                 .is_none_or(|current| Arc::ptr_eq(&current, &self.entry))
-            {
-                map.remove(&self.media_id);
-            }
+        {
+            map.remove(&self.media_id);
+        }
     }
 }
 

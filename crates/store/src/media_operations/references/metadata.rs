@@ -67,7 +67,6 @@ fn load_adopted(
     .map_err(Into::into)
 }
 
-
 /// Survivor wins; the loser only fills fields the survivor is missing. Explicit
 /// empty values are values and stay untouched. Never merges across locales.
 fn merge_adopted(survivor: AdoptedRow, loser: AdoptedRow) -> Result<AdoptedRow, StoreError> {

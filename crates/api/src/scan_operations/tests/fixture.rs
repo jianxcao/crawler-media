@@ -14,8 +14,6 @@ pub(crate) use store::{ScanOperation, ScanOperationStatus};
 
 pub(crate) use crate::management::ApiState;
 
-
-
 pub(crate) struct NoFetch;
 
 impl indexer::Fetcher for NoFetch {
@@ -24,16 +22,12 @@ impl indexer::Fetcher for NoFetch {
     }
 }
 
-
-
 pub(crate) struct Fixture {
     pub(crate) _dir: tempfile::TempDir,
     pub(crate) state: ApiState,
     pub(crate) library_id: String,
     pub(crate) root: PathBuf,
 }
-
-
 
 impl Fixture {
     pub(crate) fn new() -> Self {

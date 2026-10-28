@@ -286,7 +286,8 @@ impl Store {
             tracing::error!(path = %path.display(), %error, "解析严格 Library 路径失败");
             error
         })?;
-        let Some(owner_id) = classify_new_file(&resolved, &norm_path, kind).map(|library| library.id.clone())
+        let Some(owner_id) =
+            classify_new_file(&resolved, &norm_path, kind).map(|library| library.id.clone())
         else {
             return Ok(None);
         };
@@ -450,8 +451,7 @@ impl Store {
         if let Err(error) = self.drain_one_root_batch() {
             tracing::error!(%error,library_id=id,"Root reassignment queued after a failed initial window");
         }
-        self
-            .get_library(&id)?
+        self.get_library(&id)?
             .ok_or_else(|| StoreError::Missing(format!("library {id}")))
     }
 
@@ -593,12 +593,13 @@ impl Store {
         // rejected root cannot leave a partially updated Library behind.
         let tx = crate::write_tx(&self.library)?;
         if let Some(name) = name
-            && !name.trim().is_empty() {
-                tx.execute(
-                    "UPDATE libraries SET name = ?1 WHERE library_id = ?2",
-                    params![name.trim(), id],
-                )?;
-            }
+            && !name.trim().is_empty()
+        {
+            tx.execute(
+                "UPDATE libraries SET name = ?1 WHERE library_id = ?2",
+                params![name.trim(), id],
+            )?;
+        }
         if let Some(roots) = &prepared_roots {
             Self::replace_roots(&tx, id, roots)?;
             for (_, key) in &roots.entries {
@@ -639,8 +640,7 @@ impl Store {
         if let Err(error) = self.drain_one_root_batch() {
             tracing::error!(%error,library_id=id,"Root reassignment queued after a failed initial window");
         }
-        self
-            .get_library(id)?
+        self.get_library(id)?
             .ok_or_else(|| StoreError::Missing(format!("library {id}")))
     }
 
@@ -669,8 +669,7 @@ impl Store {
             "UPDATE libraries SET is_default = 1 WHERE library_id = ?1",
             params![id],
         )?;
-        self
-            .get_library(id)?
+        self.get_library(id)?
             .ok_or_else(|| StoreError::Missing(format!("library {id}")))
     }
 

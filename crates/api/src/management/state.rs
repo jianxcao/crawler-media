@@ -312,7 +312,9 @@ impl ApiState {
         let state = Self {
             store: store.clone(),
             library_read_shutdown: Arc::new(LibraryReadShutdown(library_reads.clone())),
-            library_read_gate: Arc::new(crate::library_read_work::LibraryReadGate::new(LIBRARY_READERS)),
+            library_read_gate: Arc::new(crate::library_read_work::LibraryReadGate::new(
+                LIBRARY_READERS,
+            )),
             library_reads,
             app_reader,
             password_login: Arc::new(crate::password_login::PasswordLogin::new(

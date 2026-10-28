@@ -1,15 +1,12 @@
 use domain::{
-    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile,
-    LibraryId, Media, MediaId, MediaKind, PhysicalSourceId, QualitySource,
-    TypedItemId, UnitKey, UserId,
+    Confidence, FilePresence, FilePublication, FileVersion, LedgerId, LibraryFile, LibraryId,
+    Media, MediaId, MediaKind, PhysicalSourceId, QualitySource, TypedItemId, UnitKey, UserId,
 };
 use std::path::Path;
 use store::Store;
 use store::library_query::{BrowseFilter, BrowseOrder, BrowsePage, LibraryQuery};
 use store::library_write::{FilePublication as StorePublication, WriteScope};
-use store::playback::{
-    BoundPlaybackEvent, PlaybackEventType, ResumeStatus,
-};
+use store::playback::{BoundPlaybackEvent, PlaybackEventType, ResumeStatus};
 
 #[path = "storage_work_bounds/scan_windows.rs"]
 mod scan_windows;
