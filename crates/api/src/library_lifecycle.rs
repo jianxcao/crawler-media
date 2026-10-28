@@ -89,8 +89,8 @@ pub(crate) fn launch_library_removal(
     let state = state.clone();
     let operation_id = operation.operation_id.clone();
     handle.spawn(async move {
-        if let Err(error) = removal::drain(&state, &operation_id).await {
-            tracing::error!(%operation_id, %error, "Library 删除失败，保持冻结");
+        if let Err(error) = drain_with_retry(&state, &operation_id).await {
+            tracing::error!(%operation_id, %error, "Library 删除多次重试后仍失败，保持冻结");
             let failed_id = operation_id.clone();
             match crate::http::store_wait::store_blocking(state.store(), move |store| {
                 store.set_removal_state(&failed_id, "failed", Some(&error))
@@ -112,6 +112,37 @@ pub(crate) fn launch_library_removal(
     Ok(operation)
 }
 
+/// Backoff between automatic drain attempts. A transient failure (busy disk,
+/// slow mount, a racing writer) must not leave a Library hidden but uncleaned
+/// until someone clicks delete again.
+const DRAIN_RETRY_BACKOFF: [std::time::Duration; 3] = [
+    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(30),
+    std::time::Duration::from_secs(120),
+];
+
+async fn drain_with_retry(state: &ApiState, operation_id: &str) -> Result<(), String> {
+    let mut attempt = 0;
+    loop {
+        let error = match removal::drain(state, operation_id).await {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        let Some(delay) = DRAIN_RETRY_BACKOFF.get(attempt).copied() else {
+            return Err(error);
+        };
+        attempt += 1;
+        tracing::warn!(%operation_id, %error, attempt, ?delay, "Library 删除失败，稍后自动重试");
+        let owned = operation_id.to_owned();
+        let note = format!("retry {attempt} after error: {error}");
+        let _ = crate::http::store_wait::store_blocking(state.store(), move |store| {
+            store.set_removal_state(&owned, "draining", Some(&note))
+        })
+        .await;
+        tokio::time::sleep(delay).await;
+    }
+}
+
 pub fn resume_library_removals(state: &ApiState) -> Result<(), String> {
     let operations = state
         .store
@@ -122,8 +153,7 @@ pub fn resume_library_removals(state: &ApiState) -> Result<(), String> {
         state.library_work.cancel(&operation.library_id);
         if operation.state == "failed" {
             tracing::warn!(operation_id = %operation.operation_id, library_id = %operation.library_id,
-                "Library 删除此前已失败，重启后保持冻结状态，等待手动重试");
-            continue;
+                "Library 删除此前已失败，启动时自动重试");
         }
         start_library_removal(state, &operation.library_id)?;
     }

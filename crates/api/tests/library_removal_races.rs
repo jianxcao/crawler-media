@@ -68,112 +68,6 @@ async fn removal_waits_for_lease_before_cleaning_and_preserves_source() {
     assert!(root.is_dir());
 }
 
-#[tokio::test]
-async fn failed_removal_stays_frozen_on_resume_and_is_not_auto_succeeded() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_dir = temp.path().join("data");
-    let state = ApiState::new(
-        store::Store::open(&data_dir).unwrap(),
-        "test-token".into(),
-        ProfileSet::load(None).unwrap(),
-        Arc::new(NoFetch),
-        Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
-    )
-    .unwrap();
-    let root = temp.path().join("extra");
-    std::fs::create_dir_all(&root).unwrap();
-    let library = state
-        .store()
-        .lock()
-        .create_library(
-            domain::MediaKind::Tv,
-            "Extra",
-            &[root.to_str().unwrap()],
-            "everyone",
-            true,
-            &[],
-        )
-        .unwrap();
-
-    let removal = state
-        .store()
-        .lock()
-        .begin_library_removal(&library.id)
-        .unwrap();
-    state
-        .store()
-        .lock()
-        .set_removal_state(&removal.operation_id, "failed", Some("timeout"))
-        .unwrap();
-
-    drop(state);
-
-    // 重新启动服务并恢复 removal
-    let resumed_state = ApiState::new(
-        store::Store::open(&data_dir).unwrap(),
-        "test-token".into(),
-        ProfileSet::load(None).unwrap(),
-        Arc::new(NoFetch),
-        Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
-        temp.path().join("library"),
-    )
-    .unwrap();
-
-    let current = resumed_state
-        .store()
-        .lock()
-        .library_removal(&removal.operation_id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(current.state, "failed");
-    assert!(
-        !resumed_state
-            .store()
-            .lock()
-            .library_accepts_work(&library.id)
-            .unwrap()
-    );
-    assert!(
-        resumed_state
-            .store()
-            .lock()
-            .get_library(&library.id)
-            .unwrap()
-            .is_some()
-    );
-
-    // 显式重试删除：应当同步返回 draining 并最终完成清理
-    let retried = start_library_removal(&resumed_state, &library.id).unwrap();
-    assert_eq!(retried.state, "draining");
-    assert!(retried.error.is_none());
-
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            let op = resumed_state
-                .store()
-                .lock()
-                .library_removal(&retried.operation_id)
-                .unwrap()
-                .unwrap();
-            if op.state == "succeeded" {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    assert!(
-        resumed_state
-            .store()
-            .lock()
-            .get_library(&library.id)
-            .unwrap()
-            .is_none()
-    );
-}
-
 /// 2026-10-29 E2E: a heavy Library whose in-flight work takes longer than the old
 /// fixed 30 s drain window must not flip the removal to `failed` (hidden but never
 /// cleaned). The drain keeps waiting, re-cancelling, and completes once work stops.
@@ -231,6 +125,71 @@ async fn slow_work_keeps_removal_draining_past_the_old_timeout() {
     })
     .await
     .unwrap();
+    assert!(
+        state
+            .store()
+            .lock()
+            .get_library(&library.id)
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// A removal that failed earlier (e.g. before this build's drain fix) is not left
+/// frozen forever: startup recovery retries it to completion.
+#[tokio::test]
+async fn startup_recovery_retries_failed_removal_to_completion() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = ApiState::new(
+        store::Store::open(temp.path().join("data")).unwrap(),
+        "test-token".into(),
+        ProfileSet::load(None).unwrap(),
+        Arc::new(NoFetch),
+        Arc::new(MemoryDownloader::new(temp.path().join("stage"))),
+        temp.path().join("library"),
+    )
+    .unwrap();
+    let root = temp.path().join("stuck");
+    std::fs::create_dir_all(&root).unwrap();
+    let library = state
+        .store()
+        .lock()
+        .create_library(
+            domain::MediaKind::Tv,
+            "Stuck",
+            &[root.to_str().unwrap()],
+            "everyone",
+            true,
+            &[],
+        )
+        .unwrap();
+    let removal = state
+        .store()
+        .lock()
+        .begin_library_removal(&library.id)
+        .unwrap();
+    state
+        .store()
+        .lock()
+        .set_removal_state(&removal.operation_id, "failed", Some("timeout"))
+        .unwrap();
+    api::library_lifecycle::resume_library_removals(&state).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let op = state
+                .store()
+                .lock()
+                .library_removal(&removal.operation_id)
+                .unwrap()
+                .unwrap();
+            if op.state == "succeeded" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("failed removal must be retried on startup");
     assert!(
         state
             .store()
